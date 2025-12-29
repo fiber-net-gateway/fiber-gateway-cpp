@@ -4,7 +4,9 @@
 
 #ifndef FIBER_JSONENCODE_H
 #define FIBER_JSONENCODE_H
+#include <cstddef>
 #include <cstdint>
+#include <string>
 
 
 #include "../mem/Buffer.h"
@@ -12,8 +14,10 @@
 namespace fiber::json {
 
 
-    class JsonGenerator {
+    class Generator {
     public:
+        using PrintCallback = int (*)(void *ctx, const char *str, size_t len);
+
         enum class State { Start, MapStart, MapKey, MapValue, ArrayStart, InArray, Complete, Error };
         enum class Result {
             /** no error */
@@ -75,13 +79,53 @@ namespace fiber::json {
             EscapeSolidus = 0x10
         };
 
+        Generator();
+
+        void clear();
+        void set_option(Option opt, bool enabled = true);
+        void set_indent_string(const std::string &indent);
+        void set_print_callback(PrintCallback cb, void *ctx);
+
         [[nodiscard]] State get_state() const;
+        [[nodiscard]] Result get_buf(const unsigned char **buf, size_t *len) const;
+
+        Result map_open();
+        Result map_close();
+        Result array_open();
+        Result array_close();
+
+        Result string(const char *str, size_t len);
+        Result string(const std::string &str);
+        Result integer(int64_t value);
+        Result double_value(double value);
+        Result bool_value(bool value);
+        Result null_value();
 
 
     private:
         static constexpr size_t MAX_STACK = 128;
+
+        [[nodiscard]] bool has_option(Option opt) const;
+        [[nodiscard]] Result append(const char *data, size_t len);
+        [[nodiscard]] Result append(char ch);
+        [[nodiscard]] Result append_indent(size_t level);
+        [[nodiscard]] Result prefix_for_value();
+        [[nodiscard]] Result prefix_for_key();
+        [[nodiscard]] Result write_string(const char *str, size_t len);
+        [[nodiscard]] Result finish_value();
+        [[nodiscard]] Result push(State state);
+        [[nodiscard]] Result pop();
+        [[nodiscard]] Result set_error(Result result);
+        [[nodiscard]] State &current_state();
+        [[nodiscard]] const State &current_state() const;
+
         mem::Buffer buffer_;
         State state_stack_[MAX_STACK] = {};
+        size_t depth_ = 1;
+        uint32_t options_ = 0;
+        std::string indent_string_ = "    ";
+        PrintCallback print_callback_ = nullptr;
+        void *print_callback_ctx_ = nullptr;
     };
 
 } // namespace fiber::json
