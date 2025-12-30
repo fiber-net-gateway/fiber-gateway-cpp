@@ -74,10 +74,23 @@ namespace fiber::json {
 
     } // namespace
 
-    Generator::Generator() { clear(); }
+    CallbackSink::CallbackSink(PrintCallback cb, void *ctx)
+        : callback_(cb), ctx_(ctx) {}
+
+    bool CallbackSink::write(const char *data, size_t len) {
+        if (!callback_) {
+            return false;
+        }
+        return callback_(ctx_, data, len) == 0;
+    }
+
+    Generator::Generator(OutputSink &sink)
+        : sink_(sink) {
+        clear();
+    }
 
     void Generator::clear() {
-        buffer_.clear();
+        sink_.reset();
         depth_ = 1;
         state_stack_[0] = State::Start;
     }
@@ -89,10 +102,6 @@ namespace fiber::json {
         } else {
             options_ &= ~bit;
         }
-        if (opt == Option::PrintCallback && !enabled) {
-            print_callback_ = nullptr;
-            print_callback_ctx_ = nullptr;
-        }
     }
 
     void Generator::set_indent_string(const std::string &indent) {
@@ -100,26 +109,7 @@ namespace fiber::json {
         set_option(Option::IndentString, true);
     }
 
-    void Generator::set_print_callback(PrintCallback cb, void *ctx) {
-        print_callback_ = cb;
-        print_callback_ctx_ = ctx;
-        set_option(Option::PrintCallback, cb != nullptr);
-    }
-
     Generator::State Generator::get_state() const { return current_state(); }
-
-    Generator::Result Generator::get_buf(const unsigned char **buf, size_t *len) const {
-        if (print_callback_ != nullptr) {
-            return Result::NoBuf;
-        }
-        if (buf) {
-            *buf = reinterpret_cast<const unsigned char *>(buffer_.data());
-        }
-        if (len) {
-            *len = buffer_.size();
-        }
-        return Result::OK;
-    }
 
     Generator::Result Generator::map_open() {
         Result result = prefix_for_value();
@@ -307,14 +297,7 @@ namespace fiber::json {
         if (!data) {
             return set_error(Result::ErrorState);
         }
-        if (print_callback_ != nullptr) {
-            int rc = print_callback_(print_callback_ctx_, data, len);
-            if (rc != 0) {
-                return set_error(Result::ErrorState);
-            }
-            return Result::OK;
-        }
-        if (!buffer_.append(data, len)) {
+        if (!sink_.write(data, len)) {
             return set_error(Result::ErrorState);
         }
         return Result::OK;

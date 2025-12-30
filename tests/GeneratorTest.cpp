@@ -5,40 +5,58 @@
 
 #include "common/json/JsonEncode.h"
 
+using fiber::json::CallbackSink;
 using fiber::json::Generator;
+using fiber::json::OutputSink;
+
+namespace {
+class StringSink final : public OutputSink {
+public:
+    [[nodiscard]] bool write(const char *data, size_t len) override {
+        if (len == 0) {
+            return true;
+        }
+        if (!data) {
+            return false;
+        }
+        output.append(data, len);
+        return true;
+    }
+
+    void reset() override {
+        output.clear();
+    }
+
+    std::string output;
+};
+} // namespace
 
 TEST(GeneratorTest, MapWithValues) {
-    Generator gen;
+    StringSink sink;
+    Generator gen(sink);
     EXPECT_EQ(gen.map_open(), Generator::Result::OK);
     EXPECT_EQ(gen.string("name", 4), Generator::Result::OK);
     EXPECT_EQ(gen.string("fiber", 5), Generator::Result::OK);
     EXPECT_EQ(gen.map_close(), Generator::Result::OK);
 
-    const unsigned char *buf = nullptr;
-    size_t len = 0;
-    EXPECT_EQ(gen.get_buf(&buf, &len), Generator::Result::OK);
-    ASSERT_NE(buf, nullptr);
-    std::string output(reinterpret_cast<const char *>(buf), len);
-    EXPECT_EQ(output, "{\"name\":\"fiber\"}");
+    EXPECT_EQ(sink.output, "{\"name\":\"fiber\"}");
 }
 
 TEST(GeneratorTest, ArrayValues) {
-    Generator gen;
+    StringSink sink;
+    Generator gen(sink);
     EXPECT_EQ(gen.array_open(), Generator::Result::OK);
     EXPECT_EQ(gen.integer(1), Generator::Result::OK);
     EXPECT_EQ(gen.bool_value(true), Generator::Result::OK);
     EXPECT_EQ(gen.null_value(), Generator::Result::OK);
     EXPECT_EQ(gen.array_close(), Generator::Result::OK);
 
-    const unsigned char *buf = nullptr;
-    size_t len = 0;
-    EXPECT_EQ(gen.get_buf(&buf, &len), Generator::Result::OK);
-    std::string output(reinterpret_cast<const char *>(buf), len);
-    EXPECT_EQ(output, "[1,true,null]");
+    EXPECT_EQ(sink.output, "[1,true,null]");
 }
 
 TEST(GeneratorTest, BeautifyIndent) {
-    Generator gen;
+    StringSink sink;
+    Generator gen(sink);
     gen.set_option(Generator::Option::Beauty, true);
     gen.set_indent_string("  ");
 
@@ -51,33 +69,31 @@ TEST(GeneratorTest, BeautifyIndent) {
     EXPECT_EQ(gen.array_close(), Generator::Result::OK);
     EXPECT_EQ(gen.map_close(), Generator::Result::OK);
 
-    const unsigned char *buf = nullptr;
-    size_t len = 0;
-    EXPECT_EQ(gen.get_buf(&buf, &len), Generator::Result::OK);
-    std::string output(reinterpret_cast<const char *>(buf), len);
-    EXPECT_EQ(output, "{\n  \"a\": 1,\n  \"b\": [\n    \"x\"\n  ]\n}");
+    EXPECT_EQ(sink.output, "{\n  \"a\": 1,\n  \"b\": [\n    \"x\"\n  ]\n}");
 }
 
 TEST(GeneratorTest, KeysMustBeString) {
-    Generator gen;
+    StringSink sink;
+    Generator gen(sink);
     EXPECT_EQ(gen.map_open(), Generator::Result::OK);
     EXPECT_EQ(gen.integer(1), Generator::Result::KeysMustBeString);
 }
 
 TEST(GeneratorTest, ValidateUtf8) {
-    Generator gen;
+    StringSink sink;
+    Generator gen(sink);
     gen.set_option(Generator::Option::ValidateUtf8, true);
     const char bad[] = {static_cast<char>(0xC3), static_cast<char>(0x28)};
     EXPECT_EQ(gen.string(bad, sizeof(bad)), Generator::Result::InvalidString);
 }
 
 TEST(GeneratorTest, InvalidDouble) {
-    Generator gen;
+    StringSink sink;
+    Generator gen(sink);
     EXPECT_EQ(gen.double_value(std::nan("")), Generator::Result::InvalidValue);
 }
 
 TEST(GeneratorTest, PrintCallbackOutput) {
-    Generator gen;
     std::string output;
     auto callback = [](void *ctx, const char *data, size_t len) -> int {
         auto *out = static_cast<std::string *>(ctx);
@@ -85,13 +101,11 @@ TEST(GeneratorTest, PrintCallbackOutput) {
         return 0;
     };
 
-    gen.set_print_callback(callback, &output);
+    CallbackSink sink(callback, &output);
+    Generator gen(sink);
     EXPECT_EQ(gen.array_open(), Generator::Result::OK);
     EXPECT_EQ(gen.string("x", 1), Generator::Result::OK);
     EXPECT_EQ(gen.array_close(), Generator::Result::OK);
 
-    const unsigned char *buf = nullptr;
-    size_t len = 0;
-    EXPECT_EQ(gen.get_buf(&buf, &len), Generator::Result::NoBuf);
     EXPECT_EQ(output, "[\"x\"]");
 }
