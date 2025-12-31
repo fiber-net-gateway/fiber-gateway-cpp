@@ -717,6 +717,7 @@ private:
             }
             arr->elems[arr->size] = std::move(value);
             arr->size += 1;
+            arr->version += 1;
             skip_ws();
             if (pos_ >= len_) {
                 return set_error("unexpected end of input", pos_);
@@ -1071,6 +1072,7 @@ StreamParser::Status StreamParser::parse_internal(bool final) {
             }
             frame.array->elems[frame.array->size] = std::move(value);
             frame.array->size += 1;
+            frame.array->version += 1;
             return true;
         }
         if (frame.type == JsNodeType::Object) {

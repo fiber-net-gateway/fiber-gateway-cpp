@@ -320,6 +320,67 @@ int32_t allocate_entry(GcObject *obj) {
     return idx;
 }
 
+JsValue make_heap_string_value(GcString *str) {
+    JsValue value;
+    if (!str) {
+        return value;
+    }
+    value.type_ = JsNodeType::HeapString;
+    value.gc = &str->hdr;
+    return value;
+}
+
+bool build_entry_array(GcHeap *heap, const JsValue &key, const JsValue &value, JsValue &out) {
+    if (!heap) {
+        return false;
+    }
+    JsValue result = JsValue::make_array(*heap, 2);
+    if (result.type_ != JsNodeType::Array) {
+        return false;
+    }
+    auto *arr = reinterpret_cast<GcArray *>(result.gc);
+    arr->elems[0] = key;
+    arr->elems[1] = value;
+    arr->size = 2;
+    arr->version += 1;
+    out = std::move(result);
+    return true;
+}
+
+bool build_object_snapshot(GcHeap *heap, GcIterator *iter, const GcObject *obj) {
+    if (!heap || !iter || !obj) {
+        return false;
+    }
+    iter->using_snapshot = true;
+    iter->snapshot_index = 0;
+    iter->snapshot_size = 0;
+    iter->snapshot_keys = nullptr;
+    std::size_t count = 0;
+    for (int32_t cursor = iter->cursor; cursor != -1; cursor = obj->entries[cursor].next_order) {
+        const GcObjectEntry &entry = obj->entries[cursor];
+        if (entry.occupied && entry.key) {
+            count += 1;
+        }
+    }
+    if (count == 0) {
+        return true;
+    }
+    auto **keys = static_cast<GcString **>(heap->alloc.alloc(sizeof(GcString *) * count));
+    if (!keys) {
+        return false;
+    }
+    std::size_t idx = 0;
+    for (int32_t cursor = iter->cursor; cursor != -1; cursor = obj->entries[cursor].next_order) {
+        const GcObjectEntry &entry = obj->entries[cursor];
+        if (entry.occupied && entry.key) {
+            keys[idx++] = entry.key;
+        }
+    }
+    iter->snapshot_keys = keys;
+    iter->snapshot_size = idx;
+    return true;
+}
+
 GcHeader *gc_alloc_raw(GcHeap *heap, std::size_t size, GcKind kind) {
     void *mem = heap->alloc.alloc(size);
     if (!mem) {
@@ -399,8 +460,21 @@ void gc_mark_obj(GcHeap *heap, GcHeader *obj) {
             gc_mark_value(heap, exc->meta);
             break;
         }
-        case GcKind::Iterator:
+        case GcKind::Iterator: {
+            auto *iter = reinterpret_cast<GcIterator *>(obj);
+            if (iter->array) {
+                gc_mark_obj(heap, &iter->array->hdr);
+            }
+            if (iter->object) {
+                gc_mark_obj(heap, &iter->object->hdr);
+            }
+            for (std::size_t i = 0; i < iter->snapshot_size; ++i) {
+                if (iter->snapshot_keys && iter->snapshot_keys[i]) {
+                    gc_mark_obj(heap, &iter->snapshot_keys[i]->hdr);
+                }
+            }
             break;
+        }
     }
 }
 
@@ -452,8 +526,13 @@ void gc_free_obj(GcHeap *heap, GcHeader *obj) {
             std::destroy_at(&exc->meta);
             break;
         }
-        case GcKind::Iterator:
+        case GcKind::Iterator: {
+            auto *iter = reinterpret_cast<GcIterator *>(obj);
+            if (iter->snapshot_keys) {
+                heap->alloc.free(iter->snapshot_keys);
+            }
             break;
+        }
     }
     heap->bytes -= obj->size_;
     heap->alloc.free(obj);
@@ -661,6 +740,7 @@ GcArray *gc_new_array(GcHeap *heap, std::size_t capacity) {
     auto *arr = reinterpret_cast<GcArray *>(hdr);
     arr->size = 0;
     arr->capacity = capacity;
+    arr->version = 0;
     arr->elems = nullptr;
     if (capacity > 0) {
         arr->elems = static_cast<JsValue *>(heap->alloc.alloc(sizeof(JsValue) * capacity));
@@ -676,6 +756,129 @@ GcArray *gc_new_array(GcHeap *heap, std::size_t capacity) {
     return arr;
 }
 
+bool gc_array_reserve(GcHeap *heap, GcArray *arr, std::size_t expected) {
+    if (!heap || !arr) {
+        return false;
+    }
+    if (expected <= arr->capacity) {
+        return true;
+    }
+    std::size_t new_capacity = arr->capacity ? arr->capacity * 2 : 1;
+    while (new_capacity < expected) {
+        new_capacity *= 2;
+    }
+    auto *new_elems = static_cast<JsValue *>(heap->alloc.alloc(sizeof(JsValue) * new_capacity));
+    if (!new_elems) {
+        return false;
+    }
+    for (std::size_t i = 0; i < new_capacity; ++i) {
+        std::construct_at(&new_elems[i]);
+    }
+    for (std::size_t i = 0; i < arr->size; ++i) {
+        new_elems[i] = std::move(arr->elems[i]);
+    }
+    if (arr->elems) {
+        for (std::size_t i = 0; i < arr->capacity; ++i) {
+            std::destroy_at(&arr->elems[i]);
+        }
+        heap->alloc.free(arr->elems);
+    }
+    arr->elems = new_elems;
+    arr->capacity = new_capacity;
+    return true;
+}
+
+const JsValue *gc_array_get(const GcArray *arr, std::size_t index) {
+    if (!arr || index >= arr->size) {
+        return nullptr;
+    }
+    return &arr->elems[index];
+}
+
+bool gc_array_set(GcHeap *heap, GcArray *arr, std::size_t index, JsValue value) {
+    if (!heap || !arr) {
+        return false;
+    }
+    if (index < arr->size) {
+        arr->elems[index] = std::move(value);
+        return true;
+    }
+    if (!gc_array_reserve(heap, arr, index + 1)) {
+        return false;
+    }
+    while (arr->size < index) {
+        arr->elems[arr->size] = JsValue::make_undefined();
+        arr->size += 1;
+    }
+    arr->elems[arr->size] = std::move(value);
+    arr->size += 1;
+    arr->version += 1;
+    return true;
+}
+
+bool gc_array_push(GcHeap *heap, GcArray *arr, JsValue value) {
+    if (!heap || !arr) {
+        return false;
+    }
+    if (!gc_array_reserve(heap, arr, arr->size + 1)) {
+        return false;
+    }
+    arr->elems[arr->size] = std::move(value);
+    arr->size += 1;
+    arr->version += 1;
+    return true;
+}
+
+bool gc_array_pop(GcArray *arr, JsValue *out) {
+    if (!arr || arr->size == 0) {
+        return false;
+    }
+    std::size_t idx = arr->size - 1;
+    JsValue removed = std::move(arr->elems[idx]);
+    arr->elems[idx] = JsValue::make_undefined();
+    arr->size -= 1;
+    arr->version += 1;
+    if (out) {
+        *out = std::move(removed);
+    }
+    return true;
+}
+
+bool gc_array_insert(GcHeap *heap, GcArray *arr, std::size_t index, JsValue value) {
+    if (!heap || !arr) {
+        return false;
+    }
+    if (index > arr->size) {
+        index = arr->size;
+    }
+    if (!gc_array_reserve(heap, arr, arr->size + 1)) {
+        return false;
+    }
+    for (std::size_t i = arr->size; i > index; --i) {
+        arr->elems[i] = std::move(arr->elems[i - 1]);
+    }
+    arr->elems[index] = std::move(value);
+    arr->size += 1;
+    arr->version += 1;
+    return true;
+}
+
+bool gc_array_remove(GcArray *arr, std::size_t index, JsValue *out) {
+    if (!arr || index >= arr->size) {
+        return false;
+    }
+    if (out) {
+        *out = std::move(arr->elems[index]);
+    }
+    for (std::size_t i = index + 1; i < arr->size; ++i) {
+        arr->elems[i - 1] = std::move(arr->elems[i]);
+    }
+    arr->elems[arr->size - 1] = JsValue::make_undefined();
+    arr->size -= 1;
+    arr->version += 1;
+    return true;
+}
+
 GcObject *gc_new_object(GcHeap *heap, std::size_t capacity) {
     auto *hdr = gc_alloc_raw(heap, sizeof(GcObject), GcKind::Object);
     if (!hdr) {
@@ -683,6 +886,7 @@ GcObject *gc_new_object(GcHeap *heap, std::size_t capacity) {
     }
     auto *obj = reinterpret_cast<GcObject *>(hdr);
     obj->size = 0;
+    obj->version = 0;
     obj->entry_count = 0;
     obj->entry_capacity = capacity;
     obj->bucket_count = 0;
@@ -788,6 +992,138 @@ GcException *gc_new_exception(GcHeap *heap, std::int64_t position,
     return gc_new_exception(heap, position, name, name_len, message, message_len, JsValue::make_undefined());
 }
 
+GcIterator *gc_new_array_iterator(GcHeap *heap, GcArray *array, GcIteratorMode mode) {
+    auto *hdr = gc_alloc_raw(heap, sizeof(GcIterator), GcKind::Iterator);
+    if (!hdr) {
+        return nullptr;
+    }
+    auto *iter = reinterpret_cast<GcIterator *>(hdr);
+    iter->kind = GcIteratorKind::Array;
+    iter->mode = mode;
+    iter->expected_version = array ? array->version : 0;
+    iter->using_snapshot = false;
+    iter->array = array;
+    iter->object = nullptr;
+    iter->index = 0;
+    iter->cursor = -1;
+    iter->snapshot_keys = nullptr;
+    iter->snapshot_size = 0;
+    iter->snapshot_index = 0;
+    gc_link(heap, hdr);
+    return iter;
+}
+
+GcIterator *gc_new_object_iterator(GcHeap *heap, GcObject *object, GcIteratorMode mode) {
+    auto *hdr = gc_alloc_raw(heap, sizeof(GcIterator), GcKind::Iterator);
+    if (!hdr) {
+        return nullptr;
+    }
+    auto *iter = reinterpret_cast<GcIterator *>(hdr);
+    iter->kind = GcIteratorKind::Object;
+    iter->mode = mode;
+    iter->expected_version = object ? object->version : 0;
+    iter->using_snapshot = false;
+    iter->array = nullptr;
+    iter->object = object;
+    iter->index = 0;
+    iter->cursor = object ? object->head : -1;
+    iter->snapshot_keys = nullptr;
+    iter->snapshot_size = 0;
+    iter->snapshot_index = 0;
+    gc_link(heap, hdr);
+    return iter;
+}
+
+bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done) {
+    out = JsValue::make_undefined();
+    done = true;
+    if (!iter) {
+        return false;
+    }
+    if (iter->kind == GcIteratorKind::Array) {
+        if (!iter->array) {
+            return true;
+        }
+        GcArray *arr = iter->array;
+        if (arr->version != iter->expected_version) {
+            iter->expected_version = arr->version;
+        }
+        if (iter->index >= arr->size) {
+            return true;
+        }
+        std::size_t idx = iter->index++;
+        done = false;
+        switch (iter->mode) {
+            case GcIteratorMode::Keys:
+                out = JsValue::make_integer(static_cast<int64_t>(idx));
+                return true;
+            case GcIteratorMode::Values:
+                out = arr->elems[idx];
+                return true;
+            case GcIteratorMode::Entries: {
+                JsValue key = JsValue::make_integer(static_cast<int64_t>(idx));
+                return build_entry_array(heap, key, arr->elems[idx], out);
+            }
+        }
+        return true;
+    }
+    if (!iter->object) {
+        return true;
+    }
+    GcObject *obj = iter->object;
+    if (!iter->using_snapshot && iter->expected_version != obj->version) {
+        if (!build_object_snapshot(heap, iter, obj)) {
+            return false;
+        }
+    }
+    if (iter->using_snapshot) {
+        if (iter->snapshot_index >= iter->snapshot_size) {
+            return true;
+        }
+        GcString *key = iter->snapshot_keys[iter->snapshot_index++];
+        if (!key) {
+            return true;
+        }
+        JsValue key_value = make_heap_string_value(key);
+        const JsValue *found = gc_object_get(obj, key);
+        JsValue value = found ? *found : JsValue::make_undefined();
+        done = false;
+        switch (iter->mode) {
+            case GcIteratorMode::Keys:
+                out = key_value;
+                return true;
+            case GcIteratorMode::Values:
+                out = value;
+                return true;
+            case GcIteratorMode::Entries:
+                return build_entry_array(heap, key_value, value, out);
+        }
+        return true;
+    }
+    while (iter->cursor != -1) {
+        int32_t cursor = iter->cursor;
+        GcObjectEntry &entry = obj->entries[cursor];
+        iter->cursor = entry.next_order;
+        if (!entry.occupied || !entry.key) {
+            continue;
+        }
+        JsValue key_value = make_heap_string_value(entry.key);
+        done = false;
+        switch (iter->mode) {
+            case GcIteratorMode::Keys:
+                out = key_value;
+                return true;
+            case GcIteratorMode::Values:
+                out = entry.value;
+                return true;
+            case GcIteratorMode::Entries:
+                return build_entry_array(heap, key_value, entry.value, out);
+        }
+        return true;
+    }
+    return true;
+}
+
 bool gc_object_reserve(GcHeap *heap, GcObject *obj, std::size_t expected) {
     if (!heap || !obj) {
         return false;
@@ -857,6 +1193,7 @@ bool gc_object_set(GcHeap *heap, GcObject *obj, GcString *key, JsValue value) {
     }
     obj->tail = idx;
     obj->size += 1;
+    obj->version += 1;
     return true;
 }
 
@@ -908,6 +1245,7 @@ bool gc_object_remove(GcObject *obj, const GcString *key) {
             entry.next_free = obj->free_head;
             obj->free_head = idx;
             obj->size -= 1;
+            obj->version += 1;
             return true;
         }
         prev = idx;
