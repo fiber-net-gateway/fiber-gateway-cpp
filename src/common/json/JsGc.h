@@ -58,6 +58,7 @@ struct GcArray {
     GcHeader hdr;
     std::size_t size = 0;
     std::size_t capacity = 0;
+    std::uint64_t version = 0;
     JsValue *elems = nullptr;
 };
 
@@ -75,6 +76,7 @@ struct GcObjectEntry {
 struct GcObject {
     GcHeader hdr;
     std::size_t size = 0;
+    std::uint64_t version = 0;
     std::size_t entry_count = 0;
     std::size_t entry_capacity = 0;
     std::size_t bucket_count = 0;
@@ -94,6 +96,32 @@ struct GcException {
     JsValue meta;
 };
 
+enum class GcIteratorKind : std::uint8_t {
+    Array,
+    Object,
+};
+
+enum class GcIteratorMode : std::uint8_t {
+    Keys,
+    Values,
+    Entries,
+};
+
+struct GcIterator {
+    GcHeader hdr;
+    GcIteratorKind kind = GcIteratorKind::Array;
+    GcIteratorMode mode = GcIteratorMode::Values;
+    std::uint64_t expected_version = 0;
+    bool using_snapshot = false;
+    GcArray *array = nullptr;
+    GcObject *object = nullptr;
+    std::size_t index = 0;
+    std::int32_t cursor = -1;
+    GcString **snapshot_keys = nullptr;
+    std::size_t snapshot_size = 0;
+    std::size_t snapshot_index = 0;
+};
+
 struct GcHeap {
     GcHeader *head = nullptr;
     std::size_t bytes = 0;
@@ -108,16 +136,23 @@ GcString *gc_new_string_utf16(GcHeap *heap, const char16_t *data, std::size_t le
 bool gc_string_to_utf8(const GcString *str, std::string &out);
 GcBinary *gc_new_binary(GcHeap *heap, const std::uint8_t *data, std::size_t len);
 GcArray *gc_new_array(GcHeap *heap, std::size_t capacity);
+bool gc_array_reserve(GcHeap *heap, GcArray *arr, std::size_t expected);
+const JsValue *gc_array_get(const GcArray *arr, std::size_t index);
+bool gc_array_set(GcHeap *heap, GcArray *arr, std::size_t index, JsValue value);
+bool gc_array_push(GcHeap *heap, GcArray *arr, JsValue value);
+bool gc_array_pop(GcArray *arr, JsValue *out);
+bool gc_array_insert(GcHeap *heap, GcArray *arr, std::size_t index, JsValue value);
+bool gc_array_remove(GcArray *arr, std::size_t index, JsValue *out);
 GcObject *gc_new_object(GcHeap *heap, std::size_t capacity);
 GcException *gc_new_exception(GcHeap *heap, std::int64_t position, GcString *name, GcString *message, JsValue meta);
 GcException *gc_new_exception(GcHeap *heap, std::int64_t position, GcString *name, GcString *message);
-GcException *gc_new_exception(GcHeap *heap, std::int64_t position,
-                              const char *name, std::size_t name_len,
-                              const char *message, std::size_t message_len,
-                              JsValue meta);
-GcException *gc_new_exception(GcHeap *heap, std::int64_t position,
-                              const char *name, std::size_t name_len,
+GcException *gc_new_exception(GcHeap *heap, std::int64_t position, const char *name, std::size_t name_len,
+                              const char *message, std::size_t message_len, JsValue meta);
+GcException *gc_new_exception(GcHeap *heap, std::int64_t position, const char *name, std::size_t name_len,
                               const char *message, std::size_t message_len);
+GcIterator *gc_new_array_iterator(GcHeap *heap, GcArray *array, GcIteratorMode mode);
+GcIterator *gc_new_object_iterator(GcHeap *heap, GcObject *object, GcIteratorMode mode);
+bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done);
 bool gc_object_reserve(GcHeap *heap, GcObject *obj, std::size_t expected);
 bool gc_object_set(GcHeap *heap, GcObject *obj, GcString *key, JsValue value);
 const JsValue *gc_object_get(const GcObject *obj, const GcString *key);

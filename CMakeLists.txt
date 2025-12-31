@@ -57,8 +57,10 @@ if(FIBER_BUILD_TESTS)
 
     enable_testing()
     add_executable(fiber_tests
+        tests/ArrayTest.cpp
         tests/SanityTest.cpp
         tests/GeneratorTest.cpp
+        tests/IteratorTest.cpp
         tests/JsValueEncodeTest.cpp
         tests/ParserTest.cpp
     )
