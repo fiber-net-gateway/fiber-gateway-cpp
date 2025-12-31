@@ -3,6 +3,7 @@
 #include <charconv>
 #include <cmath>
 #include <limits>
+#include <string>
 #include <system_error>
 
 namespace fiber::json {
@@ -70,6 +71,39 @@ namespace fiber::json {
                 return false;
             }
             return true;
+        }
+
+        std::string base64_encode(const std::uint8_t *data, size_t len) {
+            static constexpr char kTable[] =
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            std::string out;
+            out.reserve(((len + 2) / 3) * 4);
+            size_t i = 0;
+            while (i + 2 < len) {
+                uint32_t triple = (static_cast<uint32_t>(data[i]) << 16) |
+                                  (static_cast<uint32_t>(data[i + 1]) << 8) |
+                                  static_cast<uint32_t>(data[i + 2]);
+                out.push_back(kTable[(triple >> 18) & 0x3F]);
+                out.push_back(kTable[(triple >> 12) & 0x3F]);
+                out.push_back(kTable[(triple >> 6) & 0x3F]);
+                out.push_back(kTable[triple & 0x3F]);
+                i += 3;
+            }
+            if (i < len) {
+                uint32_t triple = static_cast<uint32_t>(data[i]) << 16;
+                out.push_back(kTable[(triple >> 18) & 0x3F]);
+                if (i + 1 < len) {
+                    triple |= static_cast<uint32_t>(data[i + 1]) << 8;
+                    out.push_back(kTable[(triple >> 12) & 0x3F]);
+                    out.push_back(kTable[(triple >> 6) & 0x3F]);
+                    out.push_back('=');
+                } else {
+                    out.push_back(kTable[(triple >> 12) & 0x3F]);
+                    out.push_back('=');
+                    out.push_back('=');
+                }
+            }
+            return out;
         }
 
     } // namespace
@@ -221,6 +255,22 @@ namespace fiber::json {
     }
 
     Generator::Result Generator::string(const std::string &str) { return string(str.data(), str.size()); }
+
+    Generator::Result Generator::binary(const std::uint8_t *data, size_t len) {
+        if (!data && len > 0) {
+            return set_error(Result::InvalidString);
+        }
+        Result result = prefix_for_value();
+        if (result != Result::OK) {
+            return result;
+        }
+        std::string encoded = base64_encode(data, len);
+        result = write_string(encoded.data(), encoded.size());
+        if (result != Result::OK) {
+            return result;
+        }
+        return finish_value();
+    }
 
     Generator::Result Generator::integer(int64_t value) {
         Result result = prefix_for_value();

@@ -29,6 +29,8 @@ enum class JsNodeType : std::uint8_t {
     Object,
     Interator,
     Exception,
+    NativeBinary,
+    HeapBinary,
 };
 
 struct NativeStr {
@@ -37,13 +39,21 @@ public:
     char *data = nullptr;
 };
 
+struct NativeBin {
+public:
+    std::size_t len = 0;
+    std::uint8_t *data = nullptr;
+};
+
 struct JsValue {
     static JsValue make_undefined();
     static JsValue make_null();
     static JsValue make_integer(int64_t value);
     static JsValue make_float(double value);
     static JsValue make_native_string(char *data, std::size_t len);
+    static JsValue make_native_binary(std::uint8_t *data, std::size_t len);
     static JsValue make_string(GcHeap &heap, const char *data, std::size_t len);
+    static JsValue make_binary(GcHeap &heap, const std::uint8_t *data, std::size_t len);
     static JsValue make_array(GcHeap &heap, std::size_t capacity);
     static JsValue make_object(GcHeap &heap, std::size_t capacity);
 
@@ -60,6 +70,7 @@ struct JsValue {
         double f;
         GcHeader *gc;
         NativeStr ns;
+        NativeBin nb;
     };
 
 private:

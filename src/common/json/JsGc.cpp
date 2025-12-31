@@ -39,6 +39,7 @@ void gc_mark_obj(GcHeap *heap, GcHeader *obj);
 void gc_mark_value(GcHeap *heap, const JsValue &value) {
     switch (value.type_) {
         case JsNodeType::HeapString:
+        case JsNodeType::HeapBinary:
         case JsNodeType::Array:
         case JsNodeType::Object:
         case JsNodeType::Exception:
@@ -59,6 +60,8 @@ void gc_mark_obj(GcHeap *heap, GcHeader *obj) {
     obj->mark_ = heap->live_mark;
     switch (obj->kind) {
         case GcKind::String:
+            break;
+        case GcKind::Binary:
             break;
         case GcKind::Array: {
             auto *arr = reinterpret_cast<GcArray *>(obj);
@@ -89,6 +92,13 @@ void gc_free_obj(GcHeap *heap, GcHeader *obj) {
             auto *str = reinterpret_cast<GcString *>(obj);
             if (str->data) {
                 heap->alloc.free(str->data);
+            }
+            break;
+        }
+        case GcKind::Binary: {
+            auto *bin = reinterpret_cast<GcBinary *>(obj);
+            if (bin->data) {
+                heap->alloc.free(bin->data);
             }
             break;
         }
@@ -145,6 +155,30 @@ GcString *gc_new_string(GcHeap *heap, const char *data, std::size_t len) {
     }
     gc_link(heap, hdr);
     return str;
+}
+
+GcBinary *gc_new_binary(GcHeap *heap, const std::uint8_t *data, std::size_t len) {
+    auto *hdr = gc_alloc_raw(heap, sizeof(GcBinary), GcKind::Binary);
+    if (!hdr) {
+        return nullptr;
+    }
+    auto *bin = reinterpret_cast<GcBinary *>(hdr);
+    bin->len = len;
+    bin->data = nullptr;
+    if (len > 0 && !data) {
+        heap->alloc.free(bin);
+        return nullptr;
+    }
+    if (len > 0) {
+        bin->data = static_cast<std::uint8_t *>(heap->alloc.alloc(len));
+        if (!bin->data) {
+            heap->alloc.free(bin);
+            return nullptr;
+        }
+        std::memcpy(bin->data, data, len);
+    }
+    gc_link(heap, hdr);
+    return bin;
 }
 
 GcArray *gc_new_array(GcHeap *heap, std::size_t capacity) {

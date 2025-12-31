@@ -16,6 +16,7 @@ namespace fiber::json {
 
 enum class GcKind : std::uint8_t {
     String,
+    Binary,
     Array,
     Object,
     Exception,
@@ -33,6 +34,12 @@ struct GcString {
     GcHeader hdr;
     std::size_t len = 0;
     char *data = nullptr;
+};
+
+struct GcBinary {
+    GcHeader hdr;
+    std::size_t len = 0;
+    std::uint8_t *data = nullptr;
 };
 
 struct GcArray {
@@ -63,6 +70,7 @@ struct GcHeap {
 };
 
 GcString *gc_new_string(GcHeap *heap, const char *data, std::size_t len);
+GcBinary *gc_new_binary(GcHeap *heap, const std::uint8_t *data, std::size_t len);
 GcArray *gc_new_array(GcHeap *heap, std::size_t capacity);
 GcObject *gc_new_object(GcHeap *heap, std::size_t capacity);
 void gc_collect(GcHeap *heap, JsValue **roots, std::size_t root_count);
