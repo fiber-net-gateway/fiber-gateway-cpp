@@ -32,22 +32,105 @@ int hex_value(char ch) {
     return -1;
 }
 
-void append_utf8(std::string &out, uint32_t codepoint) {
-    if (codepoint <= 0x7F) {
-        out.push_back(static_cast<char>(codepoint));
-    } else if (codepoint <= 0x7FF) {
-        out.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
-        out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
-    } else if (codepoint <= 0xFFFF) {
-        out.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
-        out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
-    } else {
-        out.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
-        out.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+bool set_parse_error(ParseError &error, const char *message, std::size_t offset);
+
+void append_code_unit(DecodedString &out, char16_t unit) {
+    if (out.is_byte && unit <= 0xFF) {
+        out.bytes.push_back(static_cast<std::uint8_t>(unit));
+        return;
     }
+    if (out.is_byte) {
+        out.is_byte = false;
+        out.u16.reserve(out.bytes.size() + 1);
+        for (std::uint8_t byte : out.bytes) {
+            out.u16.push_back(static_cast<char16_t>(byte));
+        }
+        out.bytes.clear();
+    }
+    out.u16.push_back(unit);
+}
+
+void append_codepoint(DecodedString &out, std::uint32_t codepoint) {
+    if (codepoint <= 0xFFFF) {
+        append_code_unit(out, static_cast<char16_t>(codepoint));
+        return;
+    }
+    std::uint32_t value = codepoint - 0x10000;
+    char16_t high = static_cast<char16_t>(0xD800 + (value >> 10));
+    char16_t low = static_cast<char16_t>(0xDC00 + (value & 0x3FF));
+    append_code_unit(out, high);
+    append_code_unit(out, low);
+}
+
+enum class Utf8DecodeResult {
+    Ok,
+    NeedMore,
+    Error,
+};
+
+Utf8DecodeResult decode_utf8_codepoint(const char *data, std::size_t len, std::size_t &pos, bool final,
+                                       std::uint32_t &codepoint, ParseError &error, std::size_t offset_base) {
+    if (pos >= len) {
+        if (!final) {
+            return Utf8DecodeResult::NeedMore;
+        }
+        set_parse_error(error, "invalid utf-8 sequence", offset_base + pos);
+        return Utf8DecodeResult::Error;
+    }
+    unsigned char ch = static_cast<unsigned char>(data[pos]);
+    if (ch < 0x80) {
+        codepoint = ch;
+        pos += 1;
+        return Utf8DecodeResult::Ok;
+    }
+    int needed = 0;
+    std::uint32_t code = 0;
+    std::uint32_t min_value = 0;
+    if ((ch & 0xE0) == 0xC0) {
+        needed = 1;
+        code = ch & 0x1F;
+        min_value = 0x80;
+    } else if ((ch & 0xF0) == 0xE0) {
+        needed = 2;
+        code = ch & 0x0F;
+        min_value = 0x800;
+    } else if ((ch & 0xF8) == 0xF0) {
+        needed = 3;
+        code = ch & 0x07;
+        min_value = 0x10000;
+    } else {
+        set_parse_error(error, "invalid utf-8 sequence", offset_base + pos);
+        return Utf8DecodeResult::Error;
+    }
+    if (pos + static_cast<std::size_t>(needed) >= len) {
+        if (!final) {
+            return Utf8DecodeResult::NeedMore;
+        }
+        set_parse_error(error, "invalid utf-8 sequence", offset_base + pos);
+        return Utf8DecodeResult::Error;
+    }
+    for (int idx = 1; idx <= needed; ++idx) {
+        unsigned char next = static_cast<unsigned char>(data[pos + idx]);
+        if ((next & 0xC0) != 0x80) {
+            set_parse_error(error, "invalid utf-8 sequence", offset_base + pos + idx);
+            return Utf8DecodeResult::Error;
+        }
+        code = (code << 6) | (next & 0x3F);
+    }
+    if (code < min_value || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) {
+        set_parse_error(error, "invalid utf-8 sequence", offset_base + pos);
+        return Utf8DecodeResult::Error;
+    }
+    codepoint = code;
+    pos += static_cast<std::size_t>(needed) + 1;
+    return Utf8DecodeResult::Ok;
+}
+
+GcString *make_gc_string(GcHeap &heap, const DecodedString &decoded) {
+    if (decoded.is_byte) {
+        return gc_new_string_bytes(&heap, decoded.bytes.data(), decoded.bytes.size());
+    }
+    return gc_new_string_utf16(&heap, decoded.u16.data(), decoded.u16.size());
 }
 
 bool ensure_array_capacity(GcHeap &heap, GcArray *arr, std::size_t needed) {
@@ -145,7 +228,7 @@ enum class LexResult {
 
 struct LexToken {
     TokenType type = TokenType::End;
-    std::string text;
+    DecodedString text;
     JsValue value;
     std::size_t offset = 0;
     std::size_t end = 0;
@@ -158,51 +241,50 @@ bool is_delimiter(char ch) {
 LexResult lex_string(const std::string &buffer, std::size_t start, bool final, LexToken &out, ParseError &error,
                      std::size_t total_offset) {
     std::size_t i = start + 1;
-    std::string decoded;
+    DecodedString decoded;
     while (i < buffer.size()) {
         unsigned char ch = static_cast<unsigned char>(buffer[i]);
-        i += 1;
         if (ch == '\"') {
             out.type = TokenType::String;
             out.text = std::move(decoded);
             out.offset = total_offset + start;
-            out.end = i;
+            out.end = i + 1;
             return LexResult::Ok;
         }
         if (ch == '\\') {
-            if (i >= buffer.size()) {
+            if (i + 1 >= buffer.size()) {
                 if (!final) {
                     return LexResult::NeedMore;
                 }
                 set_parse_error(error, "unterminated escape sequence", total_offset + i);
                 return LexResult::Error;
             }
-            char esc = buffer[i];
-            i += 1;
+            char esc = buffer[i + 1];
+            i += 2;
             switch (esc) {
                 case '\"':
-                    decoded.push_back('\"');
+                    append_code_unit(decoded, '\"');
                     break;
                 case '\\':
-                    decoded.push_back('\\');
+                    append_code_unit(decoded, '\\');
                     break;
                 case '/':
-                    decoded.push_back('/');
+                    append_code_unit(decoded, '/');
                     break;
                 case 'b':
-                    decoded.push_back('\b');
+                    append_code_unit(decoded, '\b');
                     break;
                 case 'f':
-                    decoded.push_back('\f');
+                    append_code_unit(decoded, '\f');
                     break;
                 case 'n':
-                    decoded.push_back('\n');
+                    append_code_unit(decoded, '\n');
                     break;
                 case 'r':
-                    decoded.push_back('\r');
+                    append_code_unit(decoded, '\r');
                     break;
                 case 't':
-                    decoded.push_back('\t');
+                    append_code_unit(decoded, '\t');
                     break;
                 case 'u': {
                     if (i + 4 > buffer.size()) {
@@ -258,20 +340,36 @@ LexResult lex_string(const std::string &buffer, std::size_t start, bool final, L
                         set_parse_error(error, "invalid unicode codepoint", total_offset + i);
                         return LexResult::Error;
                     }
-                    append_utf8(decoded, code);
+                    append_codepoint(decoded, code);
                     break;
                 }
                 default:
-                    set_parse_error(error, "invalid escape sequence", total_offset + i - 1);
+                    set_parse_error(error, "invalid escape sequence", total_offset + i - 2);
                     return LexResult::Error;
             }
             continue;
         }
         if (ch < 0x20) {
-            set_parse_error(error, "invalid control character in string", total_offset + i - 1);
+            set_parse_error(error, "invalid control character in string", total_offset + i);
             return LexResult::Error;
         }
-        decoded.push_back(static_cast<char>(ch));
+        std::size_t cursor = i;
+        std::uint32_t codepoint = 0;
+        Utf8DecodeResult result = decode_utf8_codepoint(buffer.data(), buffer.size(), cursor, final, codepoint,
+                                                        error, total_offset);
+        if (result == Utf8DecodeResult::NeedMore) {
+            return LexResult::NeedMore;
+        }
+        if (result == Utf8DecodeResult::Error) {
+            return LexResult::Error;
+        }
+        if (codepoint < 0x20) {
+            set_parse_error(error, "invalid control character in string", total_offset + i);
+            return LexResult::Error;
+        }
+        append_codepoint(decoded, codepoint);
+        i = cursor;
+        continue;
     }
     if (!final) {
         return LexResult::NeedMore;
@@ -531,15 +629,16 @@ private:
         }
         char ch = data_[pos_];
         if (ch == '\"') {
-            std::string value;
+            DecodedString value;
             if (!parse_string(value)) {
                 return false;
             }
-            JsValue str_value = JsValue::make_string(heap_, value.data(), value.size());
-            if (str_value.type_ == JsNodeType::Undefined) {
+            GcString *str = make_gc_string(heap_, value);
+            if (!str) {
                 return set_error("out of memory", pos_);
             }
-            out = std::move(str_value);
+            out.type_ = JsNodeType::HeapString;
+            out.gc = &str->hdr;
             return true;
         }
         if (ch == '{') {
@@ -549,10 +648,10 @@ private:
             return parse_array(out);
         }
         if (ch == 't') {
-            return parse_literal("true", out, JsValue::make_integer(1));
+            return parse_literal("true", out, JsValue::make_boolean(true));
         }
         if (ch == 'f') {
-            return parse_literal("false", out, JsValue::make_integer(0));
+            return parse_literal("false", out, JsValue::make_boolean(false));
         }
         if (ch == 'n') {
             return parse_literal("null", out, JsValue::make_null());
@@ -587,7 +686,7 @@ private:
             if (data_[pos_] != '\"') {
                 return set_error("object key must be a string", pos_);
             }
-            std::string key;
+            DecodedString key;
             if (!parse_string(key)) {
                 return false;
             }
@@ -603,7 +702,7 @@ private:
             if (!ensure_object_capacity(heap_, obj, obj->size + 1)) {
                 return set_error("out of memory", pos_);
             }
-            GcString *key_str = gc_new_string(&heap_, key.data(), key.size());
+            GcString *key_str = make_gc_string(heap_, key);
             if (!key_str) {
                 return set_error("out of memory", pos_);
             }
@@ -668,7 +767,7 @@ private:
         }
     }
 
-    bool parse_string(std::string &out) {
+    bool parse_string(DecodedString &out) {
         if (data_[pos_] != '\"') {
             return set_error("expected string", pos_);
         }
@@ -676,11 +775,12 @@ private:
         out.clear();
         while (pos_ < len_) {
             unsigned char ch = static_cast<unsigned char>(data_[pos_]);
-            pos_ += 1;
             if (ch == '\"') {
+                pos_ += 1;
                 return true;
             }
             if (ch == '\\') {
+                pos_ += 1;
                 if (pos_ >= len_) {
                     return set_error("unterminated escape sequence", pos_);
                 }
@@ -688,28 +788,28 @@ private:
                 pos_ += 1;
                 switch (esc) {
                     case '\"':
-                        out.push_back('\"');
+                        append_code_unit(out, '\"');
                         break;
                     case '\\':
-                        out.push_back('\\');
+                        append_code_unit(out, '\\');
                         break;
                     case '/':
-                        out.push_back('/');
+                        append_code_unit(out, '/');
                         break;
                     case 'b':
-                        out.push_back('\b');
+                        append_code_unit(out, '\b');
                         break;
                     case 'f':
-                        out.push_back('\f');
+                        append_code_unit(out, '\f');
                         break;
                     case 'n':
-                        out.push_back('\n');
+                        append_code_unit(out, '\n');
                         break;
                     case 'r':
-                        out.push_back('\r');
+                        append_code_unit(out, '\r');
                         break;
                     case 't':
-                        out.push_back('\t');
+                        append_code_unit(out, '\t');
                         break;
                     case 'u': {
                         uint32_t code = 0;
@@ -735,7 +835,7 @@ private:
                         if (code > 0x10FFFF) {
                             return set_error("invalid unicode codepoint", pos_);
                         }
-                        append_utf8(out, code);
+                        append_codepoint(out, code);
                         break;
                     }
                     default:
@@ -744,9 +844,19 @@ private:
                 continue;
             }
             if (ch < 0x20) {
-                return set_error("invalid control character in string", pos_ - 1);
+                return set_error("invalid control character in string", pos_);
             }
-            out.push_back(static_cast<char>(ch));
+            std::size_t cursor = pos_;
+            std::uint32_t codepoint = 0;
+            Utf8DecodeResult result = decode_utf8_codepoint(data_, len_, cursor, true, codepoint, error_, 0);
+            if (result == Utf8DecodeResult::Error) {
+                return false;
+            }
+            if (codepoint < 0x20) {
+                return set_error("invalid control character in string", pos_);
+            }
+            append_codepoint(out, codepoint);
+            pos_ = cursor;
         }
         return set_error("unterminated string", pos_);
     }
@@ -1004,7 +1114,7 @@ StreamParser::Status StreamParser::parse_internal(bool final) {
             if (!ensure_object_capacity(heap_, frame.object, frame.object->size + 1)) {
                 return set_error("out of memory", offset);
             }
-            GcString *key = gc_new_string(&heap_, frame.key.data(), frame.key.size());
+            GcString *key = make_gc_string(heap_, frame.key);
             if (!key) {
                 return set_error("out of memory", offset);
             }
@@ -1077,21 +1187,22 @@ StreamParser::Status StreamParser::parse_internal(bool final) {
     auto value_from_token = [&](const LexToken &tok, JsValue &value) -> bool {
         switch (tok.type) {
             case TokenType::String: {
-                JsValue str = JsValue::make_string(heap_, tok.text.data(), tok.text.size());
-                if (str.type_ == JsNodeType::Undefined) {
+                GcString *str = make_gc_string(heap_, tok.text);
+                if (!str) {
                     return set_error("out of memory", tok.offset);
                 }
-                value = std::move(str);
+                value.type_ = JsNodeType::HeapString;
+                value.gc = &str->hdr;
                 return true;
             }
             case TokenType::Number:
                 value = tok.value;
                 return true;
             case TokenType::True:
-                value = JsValue::make_integer(1);
+                value = JsValue::make_boolean(true);
                 return true;
             case TokenType::False:
-                value = JsValue::make_integer(0);
+                value = JsValue::make_boolean(false);
                 return true;
             case TokenType::Null:
                 value = JsValue::make_null();

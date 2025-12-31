@@ -6,6 +6,7 @@
 #define FIBER_JSONDECODE_H
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,22 @@ struct ParseError {
     std::size_t offset = 0;
 };
 
+struct DecodedString {
+    bool is_byte = true;
+    std::vector<std::uint8_t> bytes;
+    std::vector<char16_t> u16;
+
+    void clear() {
+        is_byte = true;
+        bytes.clear();
+        u16.clear();
+    }
+
+    [[nodiscard]] std::size_t size() const {
+        return is_byte ? bytes.size() : u16.size();
+    }
+};
+
 class Parser {
 public:
     explicit Parser(GcHeap &heap);
@@ -26,7 +43,6 @@ public:
     Parser(Parser &&) = delete;
     Parser &operator=(Parser &&) = delete;
 
-    // JSON true/false are represented as Integer 1/0.
     [[nodiscard]] bool parse(const char *data, std::size_t len, JsValue &out);
     [[nodiscard]] bool parse(const std::string &data, JsValue &out);
     [[nodiscard]] const ParseError &error() const;
@@ -77,7 +93,7 @@ private:
         JsNodeType type = JsNodeType::Undefined;
         GcArray *array = nullptr;
         GcObject *object = nullptr;
-        std::string key;
+        DecodedString key;
         bool has_key = false;
     };
 

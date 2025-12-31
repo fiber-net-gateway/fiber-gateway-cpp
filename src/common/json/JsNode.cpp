@@ -22,6 +22,13 @@ JsValue JsValue::make_null() {
     return value;
 }
 
+JsValue JsValue::make_boolean(bool value) {
+    JsValue result;
+    result.type_ = JsNodeType::Boolean;
+    result.b = value;
+    return result;
+}
+
 JsValue JsValue::make_integer(int64_t value) {
     JsValue result;
     result.type_ = JsNodeType::Integer;
@@ -131,6 +138,9 @@ JsValue::~JsValue() {
 
 void JsValue::destroy() {
     switch (type_) {
+        case JsNodeType::Boolean:
+            std::destroy_at(&b);
+            break;
         case JsNodeType::Integer:
             std::destroy_at(&i);
             break;
@@ -162,6 +172,9 @@ void JsValue::destroy() {
 void JsValue::copy_from(const JsValue &other) {
     type_ = other.type_;
     switch (other.type_) {
+        case JsNodeType::Boolean:
+            std::construct_at(&b, other.b);
+            break;
         case JsNodeType::Integer:
             std::construct_at(&i, other.i);
             break;
@@ -192,6 +205,9 @@ void JsValue::copy_from(const JsValue &other) {
 void JsValue::move_from(JsValue &&other) {
     type_ = other.type_;
     switch (other.type_) {
+        case JsNodeType::Boolean:
+            std::construct_at(&b, other.b);
+            break;
         case JsNodeType::Integer:
             std::construct_at(&i, other.i);
             break;

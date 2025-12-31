@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "JsNode.h"
@@ -30,10 +31,19 @@ struct GcHeader {
     std::uint32_t size_ = 0;
 };
 
+enum class GcStringEncoding : std::uint8_t {
+    Byte,
+    Utf16,
+};
+
 struct GcString {
     GcHeader hdr;
     std::size_t len = 0;
-    char *data = nullptr;
+    GcStringEncoding encoding = GcStringEncoding::Byte;
+    union {
+        std::uint8_t *data8;
+        char16_t *data16;
+    };
 };
 
 struct GcBinary {
@@ -70,6 +80,9 @@ struct GcHeap {
 };
 
 GcString *gc_new_string(GcHeap *heap, const char *data, std::size_t len);
+GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len);
+GcString *gc_new_string_utf16(GcHeap *heap, const char16_t *data, std::size_t len);
+bool gc_string_to_utf8(const GcString *str, std::string &out);
 GcBinary *gc_new_binary(GcHeap *heap, const std::uint8_t *data, std::size_t len);
 GcArray *gc_new_array(GcHeap *heap, std::size_t capacity);
 GcObject *gc_new_object(GcHeap *heap, std::size_t capacity);

@@ -21,7 +21,11 @@ std::string to_string(const GcString *str) {
     if (!str) {
         return {};
     }
-    return std::string(str->data, str->len);
+    std::string out;
+    if (!fiber::json::gc_string_to_utf8(str, out)) {
+        return {};
+    }
+    return out;
 }
 
 const GcObject *as_object(const JsValue &value) {
@@ -60,8 +64,8 @@ TEST(ParserTest, ParseObjectAndArray) {
     EXPECT_EQ(arr->elems[0].i, 1);
     EXPECT_EQ(arr->elems[1].type_, JsNodeType::Float);
     EXPECT_NEAR(arr->elems[1].f, 2.5, 1e-9);
-    EXPECT_EQ(arr->elems[2].type_, JsNodeType::Integer);
-    EXPECT_EQ(arr->elems[2].i, 1);
+    EXPECT_EQ(arr->elems[2].type_, JsNodeType::Boolean);
+    EXPECT_TRUE(arr->elems[2].b);
     EXPECT_EQ(arr->elems[3].type_, JsNodeType::Null);
 }
 
@@ -110,4 +114,38 @@ TEST(ParserTest, StreamFinishPrematureEof) {
     const char *chunk = "{\"a\":1";
     EXPECT_NE(parser.parse(chunk, std::strlen(chunk)), StreamParser::Status::Error);
     EXPECT_EQ(parser.finish(), StreamParser::Status::Error);
+}
+
+TEST(ParserTest, RejectInvalidUtf8) {
+    GcHeap heap;
+    Parser parser(heap);
+    JsValue root;
+    const char json[] = "{\"s\":\"\xC3\x28\"}";
+    EXPECT_FALSE(parser.parse(json, sizeof(json) - 1, root));
+    EXPECT_FALSE(parser.error().message.empty());
+}
+
+TEST(ParserTest, RejectInvalidSurrogatePairs) {
+    GcHeap heap;
+    Parser parser(heap);
+    JsValue root;
+    const char *bad_high = "{\"s\":\"\\uD83D\"}";
+    EXPECT_FALSE(parser.parse(bad_high, std::strlen(bad_high), root));
+    EXPECT_FALSE(parser.error().message.empty());
+
+    const char *bad_low = "{\"s\":\"\\uDC00\"}";
+    EXPECT_FALSE(parser.parse(bad_low, std::strlen(bad_low), root));
+    EXPECT_FALSE(parser.error().message.empty());
+}
+
+TEST(ParserTest, ParseSurrogatePair) {
+    GcHeap heap;
+    Parser parser(heap);
+    JsValue root;
+    const char *json = "{\"s\":\"\\uD83D\\uDE00\"}";
+    ASSERT_TRUE(parser.parse(json, std::strlen(json), root)) << parser.error().message;
+    const GcObject *obj = as_object(root);
+    ASSERT_EQ(obj->size, 1u);
+    const std::string expected = std::string("\xF0\x9F\x98\x80", 4);
+    EXPECT_EQ(to_string(as_string(obj->entries[0].value)), expected);
 }

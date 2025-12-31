@@ -21,6 +21,7 @@ struct GcHeap;
 enum class JsNodeType : std::uint8_t {
     Undefined = 0,
     Null,
+    Boolean,
     Integer,
     Float,
     HeapString,
@@ -48,6 +49,7 @@ public:
 struct JsValue {
     static JsValue make_undefined();
     static JsValue make_null();
+    static JsValue make_boolean(bool value);
     static JsValue make_integer(int64_t value);
     static JsValue make_float(double value);
     static JsValue make_native_string(char *data, std::size_t len);
@@ -66,6 +68,7 @@ struct JsValue {
 
     JsNodeType type_;
     union {
+        bool b;
         int64_t i;
         double f;
         GcHeader *gc;
