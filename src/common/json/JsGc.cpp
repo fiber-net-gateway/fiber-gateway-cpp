@@ -388,7 +388,17 @@ void gc_mark_obj(GcHeap *heap, GcHeader *obj) {
             }
             break;
         }
-        case GcKind::Exception:
+        case GcKind::Exception: {
+            auto *exc = reinterpret_cast<GcException *>(obj);
+            if (exc->name) {
+                gc_mark_obj(heap, &exc->name->hdr);
+            }
+            if (exc->message) {
+                gc_mark_obj(heap, &exc->message->hdr);
+            }
+            gc_mark_value(heap, exc->meta);
+            break;
+        }
         case GcKind::Iterator:
             break;
     }
@@ -437,7 +447,11 @@ void gc_free_obj(GcHeap *heap, GcHeader *obj) {
             }
             break;
         }
-        case GcKind::Exception:
+        case GcKind::Exception: {
+            auto *exc = reinterpret_cast<GcException *>(obj);
+            std::destroy_at(&exc->meta);
+            break;
+        }
         case GcKind::Iterator:
             break;
     }
@@ -720,6 +734,58 @@ GcObject *gc_new_object(GcHeap *heap, std::size_t capacity) {
     }
     gc_link(heap, hdr);
     return obj;
+}
+
+GcException *gc_new_exception(GcHeap *heap, std::int64_t position, GcString *name, GcString *message, JsValue meta) {
+    auto *hdr = gc_alloc_raw(heap, sizeof(GcException), GcKind::Exception);
+    if (!hdr) {
+        return nullptr;
+    }
+    auto *exc = reinterpret_cast<GcException *>(hdr);
+    exc->position = position;
+    exc->name = name;
+    exc->message = message;
+    std::construct_at(&exc->meta);
+    exc->meta = std::move(meta);
+    gc_link(heap, hdr);
+    return exc;
+}
+
+GcException *gc_new_exception(GcHeap *heap, std::int64_t position, GcString *name, GcString *message) {
+    return gc_new_exception(heap, position, name, message, JsValue::make_undefined());
+}
+
+GcException *gc_new_exception(GcHeap *heap, std::int64_t position,
+                              const char *name, std::size_t name_len,
+                              const char *message, std::size_t message_len,
+                              JsValue meta) {
+    GcString *name_str = nullptr;
+    GcString *message_str = nullptr;
+    if (name || name_len > 0) {
+        if (!name && name_len > 0) {
+            return nullptr;
+        }
+        name_str = gc_new_string(heap, name ? name : "", name_len);
+        if (!name_str) {
+            return nullptr;
+        }
+    }
+    if (message || message_len > 0) {
+        if (!message && message_len > 0) {
+            return nullptr;
+        }
+        message_str = gc_new_string(heap, message ? message : "", message_len);
+        if (!message_str) {
+            return nullptr;
+        }
+    }
+    return gc_new_exception(heap, position, name_str, message_str, std::move(meta));
+}
+
+GcException *gc_new_exception(GcHeap *heap, std::int64_t position,
+                              const char *name, std::size_t name_len,
+                              const char *message, std::size_t message_len) {
+    return gc_new_exception(heap, position, name, name_len, message, message_len, JsValue::make_undefined());
 }
 
 bool gc_object_reserve(GcHeap *heap, GcObject *obj, std::size_t expected) {

@@ -9,6 +9,7 @@
 #include "common/json/JsValueEncode.h"
 
 using fiber::json::GcArray;
+using fiber::json::GcException;
 using fiber::json::GcHeap;
 using fiber::json::GcObject;
 using fiber::json::GcString;
@@ -91,4 +92,51 @@ TEST(JsValueEncodeTest, EncodeArrayWithStrings) {
     Generator gen(sink);
     EXPECT_EQ(fiber::json::encode_js_value(gen, root), Generator::Result::OK);
     EXPECT_EQ(sink.output, "[1,false,\"hi\"]");
+}
+
+TEST(JsValueEncodeTest, EncodeExceptionObject) {
+    GcHeap heap;
+    GcObject *meta_obj = fiber::json::gc_new_object(&heap, 2);
+    ASSERT_NE(meta_obj, nullptr);
+    GcString *code_key = make_key(heap, "code");
+    ASSERT_NE(code_key, nullptr);
+    ASSERT_TRUE(fiber::json::gc_object_set(&heap, meta_obj, code_key, JsValue::make_integer(7)));
+    JsValue meta;
+    meta.type_ = JsNodeType::Object;
+    meta.gc = &meta_obj->hdr;
+
+    const char *name = "TypeError";
+    const char *message = "boom";
+    GcException *exc = fiber::json::gc_new_exception(&heap, 42,
+                                                     name, std::strlen(name),
+                                                     message, std::strlen(message),
+                                                     meta);
+    ASSERT_NE(exc, nullptr);
+
+    JsValue root;
+    root.type_ = JsNodeType::Exception;
+    root.gc = &exc->hdr;
+
+    StringSink sink;
+    Generator gen(sink);
+    EXPECT_EQ(fiber::json::encode_js_value(gen, root), Generator::Result::OK);
+    EXPECT_EQ(sink.output, "{\"position\":42,\"name\":\"TypeError\",\"message\":\"boom\",\"meta\":{\"code\":7}}");
+}
+
+TEST(JsValueEncodeTest, EncodeExceptionDefaultMeta) {
+    GcHeap heap;
+    const char *name = "RangeError";
+    GcException *exc = fiber::json::gc_new_exception(&heap, -1,
+                                                     name, std::strlen(name),
+                                                     nullptr, 0);
+    ASSERT_NE(exc, nullptr);
+
+    JsValue root;
+    root.type_ = JsNodeType::Exception;
+    root.gc = &exc->hdr;
+
+    StringSink sink;
+    Generator gen(sink);
+    EXPECT_EQ(fiber::json::encode_js_value(gen, root), Generator::Result::OK);
+    EXPECT_EQ(sink.output, "{\"position\":-1,\"name\":\"RangeError\",\"message\":null,\"meta\":null}");
 }
