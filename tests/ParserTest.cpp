@@ -8,6 +8,7 @@
 
 using fiber::json::GcArray;
 using fiber::json::GcObject;
+using fiber::json::GcObjectEntry;
 using fiber::json::GcString;
 using fiber::json::GcHeap;
 using fiber::json::JsNodeType;
@@ -32,12 +33,24 @@ const GcObject *as_object(const JsValue &value) {
     return reinterpret_cast<const GcObject *>(value.gc);
 }
 
+GcObject *as_object_mutable(const JsValue &value) {
+    return reinterpret_cast<GcObject *>(value.gc);
+}
+
 const GcArray *as_array(const JsValue &value) {
     return reinterpret_cast<const GcArray *>(value.gc);
 }
 
 const GcString *as_string(const JsValue &value) {
     return reinterpret_cast<const GcString *>(value.gc);
+}
+
+const GcObjectEntry *entry_at(const GcObject *obj, std::size_t index) {
+    return fiber::json::gc_object_entry_at(obj, index);
+}
+
+GcString *make_key(GcHeap &heap, const char *data) {
+    return fiber::json::gc_new_string(&heap, data, std::strlen(data));
 }
 
 } // namespace
@@ -52,13 +65,17 @@ TEST(ParserTest, ParseObjectAndArray) {
 
     const GcObject *obj = as_object(root);
     ASSERT_EQ(obj->size, 2u);
-    EXPECT_EQ(to_string(obj->entries[0].key), "name");
-    ASSERT_EQ(obj->entries[0].value.type_, JsNodeType::HeapString);
-    EXPECT_EQ(to_string(as_string(obj->entries[0].value)), "fiber");
+    const GcObjectEntry *name_entry = entry_at(obj, 0);
+    ASSERT_NE(name_entry, nullptr);
+    EXPECT_EQ(to_string(name_entry->key), "name");
+    ASSERT_EQ(name_entry->value.type_, JsNodeType::HeapString);
+    EXPECT_EQ(to_string(as_string(name_entry->value)), "fiber");
 
-    EXPECT_EQ(to_string(obj->entries[1].key), "nums");
-    ASSERT_EQ(obj->entries[1].value.type_, JsNodeType::Array);
-    const GcArray *arr = as_array(obj->entries[1].value);
+    const GcObjectEntry *nums_entry = entry_at(obj, 1);
+    ASSERT_NE(nums_entry, nullptr);
+    EXPECT_EQ(to_string(nums_entry->key), "nums");
+    ASSERT_EQ(nums_entry->value.type_, JsNodeType::Array);
+    const GcArray *arr = as_array(nums_entry->value);
     ASSERT_EQ(arr->size, 4u);
     EXPECT_EQ(arr->elems[0].type_, JsNodeType::Integer);
     EXPECT_EQ(arr->elems[0].i, 1);
@@ -73,16 +90,20 @@ TEST(ParserTest, ParseStringEscapes) {
     GcHeap heap;
     Parser parser(heap);
     JsValue root;
-    const char *json = "{\"s\":\"line\\n\",\"u\":\"\\u4F60\\u597D\"}";
+    const char *json = R"({"s":"line\n","u":"\u4F60\u597D"})";
     ASSERT_TRUE(parser.parse(json, std::strlen(json), root)) << parser.error().message;
 
     const GcObject *obj = as_object(root);
     ASSERT_EQ(obj->size, 2u);
-    EXPECT_EQ(to_string(obj->entries[0].key), "s");
-    EXPECT_EQ(to_string(as_string(obj->entries[0].value)), "line\n");
-    EXPECT_EQ(to_string(obj->entries[1].key), "u");
+    const GcObjectEntry *s_entry = entry_at(obj, 0);
+    ASSERT_NE(s_entry, nullptr);
+    EXPECT_EQ(to_string(s_entry->key), "s");
+    EXPECT_EQ(to_string(as_string(s_entry->value)), "line\n");
+    const GcObjectEntry *u_entry = entry_at(obj, 1);
+    ASSERT_NE(u_entry, nullptr);
+    EXPECT_EQ(to_string(u_entry->key), "u");
     const std::string expected = std::string("\xE4\xBD\xA0\xE5\xA5\xBD", 6);
-    EXPECT_EQ(to_string(as_string(obj->entries[1].value)), expected);
+    EXPECT_EQ(to_string(as_string(u_entry->value)), expected);
 }
 
 TEST(ParserTest, RejectLeadingZero) {
@@ -147,5 +168,58 @@ TEST(ParserTest, ParseSurrogatePair) {
     const GcObject *obj = as_object(root);
     ASSERT_EQ(obj->size, 1u);
     const std::string expected = std::string("\xF0\x9F\x98\x80", 4);
-    EXPECT_EQ(to_string(as_string(obj->entries[0].value)), expected);
+    const GcObjectEntry *entry = entry_at(obj, 0);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(to_string(as_string(entry->value)), expected);
+}
+
+TEST(ParserTest, DuplicateKeysOverwrite) {
+    GcHeap heap;
+    Parser parser(heap);
+    JsValue root;
+    const char *json = "{\"a\":1,\"a\":2,\"b\":3}";
+    ASSERT_TRUE(parser.parse(json, std::strlen(json), root)) << parser.error().message;
+    const GcObject *obj = as_object(root);
+    ASSERT_EQ(obj->size, 2u);
+    const GcObjectEntry *a_entry = entry_at(obj, 0);
+    ASSERT_NE(a_entry, nullptr);
+    EXPECT_EQ(to_string(a_entry->key), "a");
+    ASSERT_EQ(a_entry->value.type_, JsNodeType::Integer);
+    EXPECT_EQ(a_entry->value.i, 2);
+    const GcObjectEntry *b_entry = entry_at(obj, 1);
+    ASSERT_NE(b_entry, nullptr);
+    EXPECT_EQ(to_string(b_entry->key), "b");
+    ASSERT_EQ(b_entry->value.type_, JsNodeType::Integer);
+    EXPECT_EQ(b_entry->value.i, 3);
+
+    GcString *key_a = make_key(heap, "a");
+    ASSERT_NE(key_a, nullptr);
+    const JsValue *value = fiber::json::gc_object_get(obj, key_a);
+    ASSERT_NE(value, nullptr);
+    EXPECT_EQ(value->type_, JsNodeType::Integer);
+    EXPECT_EQ(value->i, 2);
+}
+
+TEST(ParserTest, RemoveKeysKeepsOrder) {
+    GcHeap heap;
+    Parser parser(heap);
+    JsValue root;
+    const char *json = "{\"a\":1,\"b\":2,\"c\":3}";
+    ASSERT_TRUE(parser.parse(json, std::strlen(json), root)) << parser.error().message;
+    GcObject *obj = as_object_mutable(root);
+    ASSERT_EQ(obj->size, 3u);
+    GcString *key_b = make_key(heap, "b");
+    ASSERT_NE(key_b, nullptr);
+    EXPECT_TRUE(fiber::json::gc_object_remove(obj, key_b));
+    EXPECT_EQ(obj->size, 2u);
+
+    const GcObjectEntry *first = entry_at(obj, 0);
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(to_string(first->key), "a");
+    const GcObjectEntry *second = entry_at(obj, 1);
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(to_string(second->key), "c");
+
+    const JsValue *missing = fiber::json::gc_object_get(obj, key_b);
+    EXPECT_EQ(missing, nullptr);
 }
