@@ -44,6 +44,14 @@ JsValue JsValue::make_native_string(char *data, std::size_t len) {
     return result;
 }
 
+JsValue JsValue::make_native_binary(std::uint8_t *data, std::size_t len) {
+    JsValue result;
+    result.type_ = JsNodeType::NativeBinary;
+    result.nb.len = len;
+    result.nb.data = data;
+    return result;
+}
+
 JsValue JsValue::make_string(GcHeap &heap, const char *data, std::size_t len) {
     JsValue result;
     GcString *str = gc_new_string(&heap, data, len);
@@ -52,6 +60,17 @@ JsValue JsValue::make_string(GcHeap &heap, const char *data, std::size_t len) {
     }
     result.type_ = JsNodeType::HeapString;
     result.gc = &str->hdr;
+    return result;
+}
+
+JsValue JsValue::make_binary(GcHeap &heap, const std::uint8_t *data, std::size_t len) {
+    JsValue result;
+    GcBinary *bin = gc_new_binary(&heap, data, len);
+    if (!bin) {
+        return result;
+    }
+    result.type_ = JsNodeType::HeapBinary;
+    result.gc = &bin->hdr;
     return result;
 }
 
@@ -121,7 +140,11 @@ void JsValue::destroy() {
         case JsNodeType::NativeString:
             std::destroy_at(&ns);
             break;
+        case JsNodeType::NativeBinary:
+            std::destroy_at(&nb);
+            break;
         case JsNodeType::HeapString:
+        case JsNodeType::HeapBinary:
         case JsNodeType::Array:
         case JsNodeType::Object:
         case JsNodeType::Interator:
@@ -148,7 +171,11 @@ void JsValue::copy_from(const JsValue &other) {
         case JsNodeType::NativeString:
             std::construct_at(&ns, other.ns);
             break;
+        case JsNodeType::NativeBinary:
+            std::construct_at(&nb, other.nb);
+            break;
         case JsNodeType::HeapString:
+        case JsNodeType::HeapBinary:
         case JsNodeType::Array:
         case JsNodeType::Object:
         case JsNodeType::Interator:
@@ -174,7 +201,11 @@ void JsValue::move_from(JsValue &&other) {
         case JsNodeType::NativeString:
             std::construct_at(&ns, std::move(other.ns));
             break;
+        case JsNodeType::NativeBinary:
+            std::construct_at(&nb, std::move(other.nb));
+            break;
         case JsNodeType::HeapString:
+        case JsNodeType::HeapBinary:
         case JsNodeType::Array:
         case JsNodeType::Object:
         case JsNodeType::Interator:

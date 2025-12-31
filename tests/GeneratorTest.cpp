@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdint>
 #include <string>
 
 #include "common/json/JsonEncode.h"
@@ -108,4 +109,12 @@ TEST(GeneratorTest, PrintCallbackOutput) {
     EXPECT_EQ(gen.array_close(), Generator::Result::OK);
 
     EXPECT_EQ(output, "[\"x\"]");
+}
+
+TEST(GeneratorTest, BinaryBase64) {
+    StringSink sink;
+    Generator gen(sink);
+    const std::uint8_t data[] = {'M', 'a', 'n'};
+    EXPECT_EQ(gen.binary(data, sizeof(data)), Generator::Result::OK);
+    EXPECT_EQ(sink.output, "\"TWFu\"");
 }

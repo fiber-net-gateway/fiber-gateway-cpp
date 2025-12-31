@@ -97,6 +97,8 @@ public:
 
     Result string(const char *str, size_t len);
     Result string(const std::string &str);
+    // Binary values are encoded as base64 JSON strings.
+    Result binary(const std::uint8_t *data, size_t len);
     Result integer(int64_t value);
     Result double_value(double value);
     Result bool_value(bool value);
