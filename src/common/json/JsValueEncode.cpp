@@ -81,6 +81,61 @@ Generator::Result encode_js_value(Generator &gen, const JsValue &value) {
             return encode_array(gen, reinterpret_cast<const GcArray *>(value.gc));
         case JsNodeType::Object:
             return encode_object(gen, reinterpret_cast<const GcObject *>(value.gc));
+        case JsNodeType::Exception: {
+            auto *exc = reinterpret_cast<const GcException *>(value.gc);
+            if (!exc) {
+                return Generator::Result::InvalidValue;
+            }
+            Generator::Result result = gen.map_open();
+            if (result != Generator::Result::OK) {
+                return result;
+            }
+            result = gen.string("position", 8);
+            if (result != Generator::Result::OK) {
+                return result;
+            }
+            result = gen.integer(exc->position);
+            if (result != Generator::Result::OK) {
+                return result;
+            }
+            result = gen.string("name", 4);
+            if (result != Generator::Result::OK) {
+                return result;
+            }
+            if (exc->name) {
+                result = gen.string(exc->name);
+            } else {
+                result = gen.null_value();
+            }
+            if (result != Generator::Result::OK) {
+                return result;
+            }
+            result = gen.string("message", 7);
+            if (result != Generator::Result::OK) {
+                return result;
+            }
+            if (exc->message) {
+                result = gen.string(exc->message);
+            } else {
+                result = gen.null_value();
+            }
+            if (result != Generator::Result::OK) {
+                return result;
+            }
+            result = gen.string("meta", 4);
+            if (result != Generator::Result::OK) {
+                return result;
+            }
+            if (exc->meta.type_ == JsNodeType::Undefined) {
+                result = gen.null_value();
+            } else {
+                result = encode_js_value(gen, exc->meta);
+            }
+            if (result != Generator::Result::OK) {
+                return result;
+            }
+            return gen.map_close();
+        }
         case JsNodeType::NativeBinary:
             return gen.binary(value.nb.data, value.nb.len);
         case JsNodeType::HeapBinary: {
@@ -92,7 +147,6 @@ Generator::Result encode_js_value(Generator &gen, const JsValue &value) {
         }
         case JsNodeType::Undefined:
         case JsNodeType::Interator:
-        case JsNodeType::Exception:
             return Generator::Result::InvalidValue;
     }
     return Generator::Result::InvalidValue;

@@ -86,6 +86,14 @@ struct GcObject {
     GcObjectEntry *entries = nullptr;
 };
 
+struct GcException {
+    GcHeader hdr;
+    std::int64_t position = -1;
+    GcString *name = nullptr;
+    GcString *message = nullptr;
+    JsValue meta;
+};
+
 struct GcHeap {
     GcHeader *head = nullptr;
     std::size_t bytes = 0;
@@ -101,6 +109,15 @@ bool gc_string_to_utf8(const GcString *str, std::string &out);
 GcBinary *gc_new_binary(GcHeap *heap, const std::uint8_t *data, std::size_t len);
 GcArray *gc_new_array(GcHeap *heap, std::size_t capacity);
 GcObject *gc_new_object(GcHeap *heap, std::size_t capacity);
+GcException *gc_new_exception(GcHeap *heap, std::int64_t position, GcString *name, GcString *message, JsValue meta);
+GcException *gc_new_exception(GcHeap *heap, std::int64_t position, GcString *name, GcString *message);
+GcException *gc_new_exception(GcHeap *heap, std::int64_t position,
+                              const char *name, std::size_t name_len,
+                              const char *message, std::size_t message_len,
+                              JsValue meta);
+GcException *gc_new_exception(GcHeap *heap, std::int64_t position,
+                              const char *name, std::size_t name_len,
+                              const char *message, std::size_t message_len);
 bool gc_object_reserve(GcHeap *heap, GcObject *obj, std::size_t expected);
 bool gc_object_set(GcHeap *heap, GcObject *obj, GcString *key, JsValue value);
 const JsValue *gc_object_get(const GcObject *obj, const GcString *key);
