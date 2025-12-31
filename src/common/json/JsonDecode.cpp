@@ -162,37 +162,6 @@ bool ensure_array_capacity(GcHeap &heap, GcArray *arr, std::size_t needed) {
     return true;
 }
 
-bool ensure_object_capacity(GcHeap &heap, GcObject *obj, std::size_t needed) {
-    if (needed <= obj->capacity) {
-        return true;
-    }
-    std::size_t new_capacity = obj->capacity ? obj->capacity * 2 : kInitialContainerCapacity;
-    while (new_capacity < needed) {
-        new_capacity *= 2;
-    }
-    auto *new_entries = static_cast<GcObjectEntry *>(heap.alloc.alloc(sizeof(GcObjectEntry) * new_capacity));
-    if (!new_entries) {
-        return false;
-    }
-    for (std::size_t i = 0; i < new_capacity; ++i) {
-        new_entries[i].key = nullptr;
-        std::construct_at(&new_entries[i].value);
-    }
-    for (std::size_t i = 0; i < obj->size; ++i) {
-        new_entries[i].key = obj->entries[i].key;
-        new_entries[i].value = std::move(obj->entries[i].value);
-    }
-    if (obj->entries) {
-        for (std::size_t i = 0; i < obj->capacity; ++i) {
-            std::destroy_at(&obj->entries[i].value);
-        }
-        heap.alloc.free(obj->entries);
-    }
-    obj->entries = new_entries;
-    obj->capacity = new_capacity;
-    return true;
-}
-
 bool set_parse_error(ParseError &error, const char *message, std::size_t offset) {
     if (error.message.empty()) {
         error.message = message;
@@ -699,16 +668,13 @@ private:
             if (!parse_value(value)) {
                 return false;
             }
-            if (!ensure_object_capacity(heap_, obj, obj->size + 1)) {
-                return set_error("out of memory", pos_);
-            }
             GcString *key_str = make_gc_string(heap_, key);
             if (!key_str) {
                 return set_error("out of memory", pos_);
             }
-            obj->entries[obj->size].key = key_str;
-            obj->entries[obj->size].value = std::move(value);
-            obj->size += 1;
+            if (!gc_object_set(&heap_, obj, key_str, std::move(value))) {
+                return set_error("out of memory", pos_);
+            }
             skip_ws();
             if (pos_ >= len_) {
                 return set_error("unexpected end of input", pos_);
@@ -1111,16 +1077,13 @@ StreamParser::Status StreamParser::parse_internal(bool final) {
             if (!frame.has_key) {
                 return set_error("object value missing key", offset);
             }
-            if (!ensure_object_capacity(heap_, frame.object, frame.object->size + 1)) {
-                return set_error("out of memory", offset);
-            }
             GcString *key = make_gc_string(heap_, frame.key);
             if (!key) {
                 return set_error("out of memory", offset);
             }
-            frame.object->entries[frame.object->size].key = key;
-            frame.object->entries[frame.object->size].value = std::move(value);
-            frame.object->size += 1;
+            if (!gc_object_set(&heap_, frame.object, key, std::move(value))) {
+                return set_error("out of memory", offset);
+            }
             frame.key.clear();
             frame.has_key = false;
             return true;

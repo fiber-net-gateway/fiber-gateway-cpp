@@ -4,6 +4,7 @@
 
 #include "JsGc.h"
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -13,8 +14,104 @@
 namespace fiber::json {
 namespace {
 
+constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
+constexpr std::uint64_t kFnvPrime = 1099511628211ull;
+constexpr std::size_t kMinBucketCount = 8;
+constexpr std::size_t kMaxLoadNumerator = 3;
+constexpr std::size_t kMaxLoadDenominator = 4;
+
 GcMark flip_mark(GcMark mark) {
     return (mark == GcMark::GcMark_0) ? GcMark::GcMark_1 : GcMark::GcMark_0;
+}
+
+std::uint64_t hash_code_units(const GcString *str) {
+    std::uint64_t hash = kFnvOffsetBasis;
+    if (!str || str->len == 0) {
+        return hash;
+    }
+    if (str->encoding == GcStringEncoding::Byte) {
+        for (std::size_t i = 0; i < str->len; ++i) {
+            hash ^= static_cast<std::uint16_t>(str->data8[i]);
+            hash *= kFnvPrime;
+        }
+        return hash;
+    }
+    for (std::size_t i = 0; i < str->len; ++i) {
+        hash ^= static_cast<std::uint16_t>(str->data16[i]);
+        hash *= kFnvPrime;
+    }
+    return hash;
+}
+
+std::uint64_t string_hash(const GcString *str) {
+    if (!str) {
+        return 0;
+    }
+    if (str->hash_valid) {
+        return str->hash;
+    }
+    auto *mutable_str = const_cast<GcString *>(str);
+    mutable_str->hash = hash_code_units(str);
+    mutable_str->hash_valid = true;
+    return mutable_str->hash;
+}
+
+bool string_equals(const GcString *lhs, const GcString *rhs) {
+    if (lhs == rhs) {
+        return true;
+    }
+    if (!lhs || !rhs) {
+        return false;
+    }
+    if (lhs->len != rhs->len) {
+        return false;
+    }
+    if (lhs->len == 0) {
+        return true;
+    }
+    if (lhs->encoding == rhs->encoding) {
+        if (lhs->encoding == GcStringEncoding::Byte) {
+            return std::memcmp(lhs->data8, rhs->data8, lhs->len) == 0;
+        }
+        return std::memcmp(lhs->data16, rhs->data16, lhs->len * sizeof(char16_t)) == 0;
+    }
+    if (lhs->encoding == GcStringEncoding::Byte) {
+        for (std::size_t i = 0; i < lhs->len; ++i) {
+            if (rhs->data16[i] != static_cast<char16_t>(lhs->data8[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+    for (std::size_t i = 0; i < lhs->len; ++i) {
+        if (lhs->data16[i] != static_cast<char16_t>(rhs->data8[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::size_t next_pow2(std::size_t value) {
+    if (value <= 1) {
+        return 1;
+    }
+    std::size_t result = 1;
+    while (result < value) {
+        result <<= 1;
+    }
+    return result;
+}
+
+std::size_t bucket_count_for_entries(std::size_t entry_capacity) {
+    if (entry_capacity == 0) {
+        return 0;
+    }
+    std::size_t needed =
+        (entry_capacity * kMaxLoadDenominator + kMaxLoadNumerator - 1) / kMaxLoadNumerator;
+    if (needed < kMinBucketCount) {
+        needed = kMinBucketCount;
+    }
+    return next_pow2(needed);
 }
 
 struct DecodedString {
@@ -115,6 +212,114 @@ void append_utf8(std::string &out, std::uint32_t codepoint) {
     }
 }
 
+int32_t find_entry_index(const GcObject *obj, const GcString *key, std::uint64_t hash) {
+    if (!obj || obj->bucket_count == 0 || !obj->buckets) {
+        return -1;
+    }
+    std::size_t bucket = static_cast<std::size_t>(hash) & obj->bucket_mask;
+    int32_t idx = obj->buckets[bucket];
+    while (idx != -1) {
+        const GcObjectEntry &entry = obj->entries[idx];
+        if (entry.occupied && entry.hash == hash && string_equals(entry.key, key)) {
+            return idx;
+        }
+        idx = entry.next_bucket;
+    }
+    return -1;
+}
+
+bool rehash_buckets(GcHeap *heap, GcObject *obj, std::size_t new_bucket_count) {
+    if (!heap || !obj) {
+        return false;
+    }
+    if (new_bucket_count == 0) {
+        return false;
+    }
+    auto *new_buckets =
+        static_cast<std::int32_t *>(heap->alloc.alloc(sizeof(std::int32_t) * new_bucket_count));
+    if (!new_buckets) {
+        return false;
+    }
+    for (std::size_t i = 0; i < new_bucket_count; ++i) {
+        new_buckets[i] = -1;
+    }
+    for (std::size_t i = 0; i < obj->entry_count; ++i) {
+        GcObjectEntry &entry = obj->entries[i];
+        if (!entry.occupied) {
+            entry.next_bucket = -1;
+            continue;
+        }
+        std::size_t bucket = static_cast<std::size_t>(entry.hash) & (new_bucket_count - 1);
+        entry.next_bucket = new_buckets[bucket];
+        new_buckets[bucket] = static_cast<std::int32_t>(i);
+    }
+    if (obj->buckets) {
+        heap->alloc.free(obj->buckets);
+    }
+    obj->buckets = new_buckets;
+    obj->bucket_count = new_bucket_count;
+    obj->bucket_mask = new_bucket_count - 1;
+    return true;
+}
+
+bool grow_entries(GcHeap *heap, GcObject *obj, std::size_t new_capacity) {
+    if (!heap || !obj || new_capacity == 0) {
+        return false;
+    }
+    auto *new_entries =
+        static_cast<GcObjectEntry *>(heap->alloc.alloc(sizeof(GcObjectEntry) * new_capacity));
+    if (!new_entries) {
+        return false;
+    }
+    for (std::size_t i = 0; i < new_capacity; ++i) {
+        new_entries[i].key = nullptr;
+        new_entries[i].hash = 0;
+        new_entries[i].next_bucket = -1;
+        new_entries[i].prev_order = -1;
+        new_entries[i].next_order = -1;
+        new_entries[i].next_free = -1;
+        new_entries[i].occupied = false;
+        std::construct_at(&new_entries[i].value);
+    }
+    for (std::size_t i = 0; i < obj->entry_count; ++i) {
+        new_entries[i].key = obj->entries[i].key;
+        new_entries[i].hash = obj->entries[i].hash;
+        new_entries[i].next_bucket = obj->entries[i].next_bucket;
+        new_entries[i].prev_order = obj->entries[i].prev_order;
+        new_entries[i].next_order = obj->entries[i].next_order;
+        new_entries[i].next_free = obj->entries[i].next_free;
+        new_entries[i].occupied = obj->entries[i].occupied;
+        new_entries[i].value = std::move(obj->entries[i].value);
+    }
+    if (obj->entries) {
+        for (std::size_t i = 0; i < obj->entry_capacity; ++i) {
+            std::destroy_at(&obj->entries[i].value);
+        }
+        heap->alloc.free(obj->entries);
+    }
+    obj->entries = new_entries;
+    obj->entry_capacity = new_capacity;
+    return true;
+}
+
+int32_t allocate_entry(GcObject *obj) {
+    if (!obj) {
+        return -1;
+    }
+    if (obj->free_head != -1) {
+        int32_t idx = obj->free_head;
+        obj->free_head = obj->entries[idx].next_free;
+        obj->entries[idx].next_free = -1;
+        return idx;
+    }
+    if (obj->entry_count >= obj->entry_capacity) {
+        return -1;
+    }
+    int32_t idx = static_cast<int32_t>(obj->entry_count);
+    obj->entry_count += 1;
+    return idx;
+}
+
 GcHeader *gc_alloc_raw(GcHeap *heap, std::size_t size, GcKind kind) {
     void *mem = heap->alloc.alloc(size);
     if (!mem) {
@@ -172,11 +377,14 @@ void gc_mark_obj(GcHeap *heap, GcHeader *obj) {
         }
         case GcKind::Object: {
             auto *objv = reinterpret_cast<GcObject *>(obj);
-            for (std::size_t i = 0; i < objv->size; ++i) {
-                if (objv->entries[i].key) {
-                    gc_mark_obj(heap, &objv->entries[i].key->hdr);
+            int32_t cursor = objv->head;
+            while (cursor != -1) {
+                const GcObjectEntry &entry = objv->entries[cursor];
+                if (entry.key) {
+                    gc_mark_obj(heap, &entry.key->hdr);
                 }
-                gc_mark_value(heap, objv->entries[i].value);
+                gc_mark_value(heap, entry.value);
+                cursor = entry.next_order;
             }
             break;
         }
@@ -219,10 +427,13 @@ void gc_free_obj(GcHeap *heap, GcHeader *obj) {
         case GcKind::Object: {
             auto *objv = reinterpret_cast<GcObject *>(obj);
             if (objv->entries) {
-                for (std::size_t i = 0; i < objv->capacity; ++i) {
+                for (std::size_t i = 0; i < objv->entry_capacity; ++i) {
                     std::destroy_at(&objv->entries[i].value);
                 }
                 heap->alloc.free(objv->entries);
+            }
+            if (objv->buckets) {
+                heap->alloc.free(objv->buckets);
             }
             break;
         }
@@ -244,6 +455,8 @@ GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_
     auto *str = reinterpret_cast<GcString *>(hdr);
     str->len = len;
     str->encoding = GcStringEncoding::Byte;
+    str->hash = 0;
+    str->hash_valid = false;
     str->data8 = nullptr;
     if (len > 0 && !data) {
         heap->alloc.free(str);
@@ -270,6 +483,8 @@ GcString *gc_new_string_utf16(GcHeap *heap, const char16_t *data, std::size_t le
     auto *str = reinterpret_cast<GcString *>(hdr);
     str->len = len;
     str->encoding = GcStringEncoding::Utf16;
+    str->hash = 0;
+    str->hash_valid = false;
     str->data16 = nullptr;
     if (len > 0 && !data) {
         heap->alloc.free(str);
@@ -454,7 +669,14 @@ GcObject *gc_new_object(GcHeap *heap, std::size_t capacity) {
     }
     auto *obj = reinterpret_cast<GcObject *>(hdr);
     obj->size = 0;
-    obj->capacity = capacity;
+    obj->entry_count = 0;
+    obj->entry_capacity = capacity;
+    obj->bucket_count = 0;
+    obj->bucket_mask = 0;
+    obj->head = -1;
+    obj->tail = -1;
+    obj->free_head = -1;
+    obj->buckets = nullptr;
     obj->entries = nullptr;
     if (capacity > 0) {
         obj->entries = static_cast<GcObjectEntry *>(heap->alloc.alloc(sizeof(GcObjectEntry) * capacity));
@@ -464,11 +686,184 @@ GcObject *gc_new_object(GcHeap *heap, std::size_t capacity) {
         }
         for (std::size_t i = 0; i < capacity; ++i) {
             obj->entries[i].key = nullptr;
+            obj->entries[i].hash = 0;
+            obj->entries[i].next_bucket = -1;
+            obj->entries[i].prev_order = -1;
+            obj->entries[i].next_order = -1;
+            obj->entries[i].next_free = -1;
+            obj->entries[i].occupied = false;
             std::construct_at(&obj->entries[i].value);
         }
+        obj->bucket_count = bucket_count_for_entries(capacity);
+        if (obj->bucket_count == 0) {
+            for (std::size_t i = 0; i < capacity; ++i) {
+                std::destroy_at(&obj->entries[i].value);
+            }
+            heap->alloc.free(obj->entries);
+            heap->alloc.free(obj);
+            return nullptr;
+        }
+        obj->buckets =
+            static_cast<std::int32_t *>(heap->alloc.alloc(sizeof(std::int32_t) * obj->bucket_count));
+        if (!obj->buckets) {
+            for (std::size_t i = 0; i < capacity; ++i) {
+                std::destroy_at(&obj->entries[i].value);
+            }
+            heap->alloc.free(obj->entries);
+            heap->alloc.free(obj);
+            return nullptr;
+        }
+        for (std::size_t i = 0; i < obj->bucket_count; ++i) {
+            obj->buckets[i] = -1;
+        }
+        obj->bucket_mask = obj->bucket_count - 1;
     }
     gc_link(heap, hdr);
     return obj;
+}
+
+bool gc_object_reserve(GcHeap *heap, GcObject *obj, std::size_t expected) {
+    if (!heap || !obj) {
+        return false;
+    }
+    std::size_t new_capacity = obj->entry_capacity ? obj->entry_capacity : 1;
+    if (expected > new_capacity) {
+        while (new_capacity < expected) {
+            new_capacity *= 2;
+        }
+        if (!grow_entries(heap, obj, new_capacity)) {
+            return false;
+        }
+    } else if (obj->entry_capacity == 0 && expected > 0) {
+        if (!grow_entries(heap, obj, expected)) {
+            return false;
+        }
+    }
+    std::size_t desired_bucket_count =
+        bucket_count_for_entries(std::max(expected, obj->size));
+    if (desired_bucket_count > obj->bucket_count) {
+        if (!rehash_buckets(heap, obj, desired_bucket_count)) {
+            return false;
+        }
+    } else if (obj->bucket_count == 0 && desired_bucket_count > 0) {
+        if (!rehash_buckets(heap, obj, desired_bucket_count)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool gc_object_set(GcHeap *heap, GcObject *obj, GcString *key, JsValue value) {
+    if (!obj || !key) {
+        return false;
+    }
+    std::uint64_t hash = string_hash(key);
+    int32_t existing = find_entry_index(obj, key, hash);
+    if (existing != -1) {
+        obj->entries[existing].value = std::move(value);
+        return true;
+    }
+    if (!gc_object_reserve(heap, obj, obj->size + 1)) {
+        return false;
+    }
+    if (obj->bucket_count == 0 || !obj->buckets || !obj->entries) {
+        return false;
+    }
+    int32_t idx = allocate_entry(obj);
+    if (idx == -1) {
+        return false;
+    }
+    GcObjectEntry &entry = obj->entries[idx];
+    entry.key = key;
+    entry.value = std::move(value);
+    entry.hash = hash;
+    entry.occupied = true;
+    entry.next_free = -1;
+    std::size_t bucket = static_cast<std::size_t>(hash) & obj->bucket_mask;
+    entry.next_bucket = obj->buckets[bucket];
+    obj->buckets[bucket] = idx;
+    entry.prev_order = obj->tail;
+    entry.next_order = -1;
+    if (obj->tail != -1) {
+        obj->entries[obj->tail].next_order = idx;
+    } else {
+        obj->head = idx;
+    }
+    obj->tail = idx;
+    obj->size += 1;
+    return true;
+}
+
+const JsValue *gc_object_get(const GcObject *obj, const GcString *key) {
+    if (!obj || !key) {
+        return nullptr;
+    }
+    std::uint64_t hash = string_hash(key);
+    int32_t idx = find_entry_index(obj, key, hash);
+    if (idx == -1) {
+        return nullptr;
+    }
+    return &obj->entries[idx].value;
+}
+
+bool gc_object_remove(GcObject *obj, const GcString *key) {
+    if (!obj || !key || obj->bucket_count == 0 || !obj->buckets) {
+        return false;
+    }
+    std::uint64_t hash = string_hash(key);
+    std::size_t bucket = static_cast<std::size_t>(hash) & obj->bucket_mask;
+    int32_t prev = -1;
+    int32_t idx = obj->buckets[bucket];
+    while (idx != -1) {
+        GcObjectEntry &entry = obj->entries[idx];
+        if (entry.occupied && entry.hash == hash && string_equals(entry.key, key)) {
+            if (prev == -1) {
+                obj->buckets[bucket] = entry.next_bucket;
+            } else {
+                obj->entries[prev].next_bucket = entry.next_bucket;
+            }
+            if (entry.prev_order != -1) {
+                obj->entries[entry.prev_order].next_order = entry.next_order;
+            } else {
+                obj->head = entry.next_order;
+            }
+            if (entry.next_order != -1) {
+                obj->entries[entry.next_order].prev_order = entry.prev_order;
+            } else {
+                obj->tail = entry.prev_order;
+            }
+            entry.occupied = false;
+            entry.key = nullptr;
+            entry.hash = 0;
+            entry.next_bucket = -1;
+            entry.prev_order = -1;
+            entry.next_order = -1;
+            entry.value = JsValue();
+            entry.next_free = obj->free_head;
+            obj->free_head = idx;
+            obj->size -= 1;
+            return true;
+        }
+        prev = idx;
+        idx = entry.next_bucket;
+    }
+    return false;
+}
+
+const GcObjectEntry *gc_object_entry_at(const GcObject *obj, std::size_t index) {
+    if (!obj || index >= obj->size) {
+        return nullptr;
+    }
+    std::size_t current = 0;
+    int32_t cursor = obj->head;
+    while (cursor != -1) {
+        if (current == index) {
+            return &obj->entries[cursor];
+        }
+        cursor = obj->entries[cursor].next_order;
+        current += 1;
+    }
+    return nullptr;
 }
 
 void gc_collect(GcHeap *heap, JsValue **roots, std::size_t root_count) {

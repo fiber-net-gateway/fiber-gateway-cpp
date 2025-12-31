@@ -59,6 +59,7 @@ if(FIBER_BUILD_TESTS)
     add_executable(fiber_tests
         tests/SanityTest.cpp
         tests/GeneratorTest.cpp
+        tests/JsValueEncodeTest.cpp
         tests/ParserTest.cpp
     )
     target_link_libraries(fiber_tests PRIVATE fiber_lib GTest::gtest_main)

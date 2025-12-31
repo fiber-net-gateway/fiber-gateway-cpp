@@ -39,6 +39,8 @@ enum class GcStringEncoding : std::uint8_t {
 struct GcString {
     GcHeader hdr;
     std::size_t len = 0;
+    std::uint64_t hash = 0;
+    bool hash_valid = false;
     GcStringEncoding encoding = GcStringEncoding::Byte;
     union {
         std::uint8_t *data8;
@@ -62,12 +64,25 @@ struct GcArray {
 struct GcObjectEntry {
     GcString *key = nullptr;
     JsValue value;
+    std::uint64_t hash = 0;
+    std::int32_t next_bucket = -1;
+    std::int32_t prev_order = -1;
+    std::int32_t next_order = -1;
+    std::int32_t next_free = -1;
+    bool occupied = false;
 };
 
 struct GcObject {
     GcHeader hdr;
     std::size_t size = 0;
-    std::size_t capacity = 0;
+    std::size_t entry_count = 0;
+    std::size_t entry_capacity = 0;
+    std::size_t bucket_count = 0;
+    std::size_t bucket_mask = 0;
+    std::int32_t head = -1;
+    std::int32_t tail = -1;
+    std::int32_t free_head = -1;
+    std::int32_t *buckets = nullptr;
     GcObjectEntry *entries = nullptr;
 };
 
@@ -86,6 +101,11 @@ bool gc_string_to_utf8(const GcString *str, std::string &out);
 GcBinary *gc_new_binary(GcHeap *heap, const std::uint8_t *data, std::size_t len);
 GcArray *gc_new_array(GcHeap *heap, std::size_t capacity);
 GcObject *gc_new_object(GcHeap *heap, std::size_t capacity);
+bool gc_object_reserve(GcHeap *heap, GcObject *obj, std::size_t expected);
+bool gc_object_set(GcHeap *heap, GcObject *obj, GcString *key, JsValue value);
+const JsValue *gc_object_get(const GcObject *obj, const GcString *key);
+bool gc_object_remove(GcObject *obj, const GcString *key);
+const GcObjectEntry *gc_object_entry_at(const GcObject *obj, std::size_t index);
 void gc_collect(GcHeap *heap, JsValue **roots, std::size_t root_count);
 
 class GcRootSet {
