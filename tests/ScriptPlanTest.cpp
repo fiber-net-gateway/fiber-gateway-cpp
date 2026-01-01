@@ -25,7 +25,7 @@ using fiber::json::JsNodeType;
 using fiber::json::JsValue;
 using FunctionResult = fiber::script::Library::FunctionResult;
 
-using ScriptResult = fiber::script::ScriptRun::Result;
+using ScriptResult = fiber::script::ScriptSyncRun::Result;
 
 std::string value_to_string(const JsValue &value) {
     if (value.type_ == JsNodeType::NativeString) {

@@ -7,7 +7,6 @@
 #include <optional>
 
 #include "../common/json/JsNode.h"
-#include "async/AsyncExecutionContext.h"
 #include "async/Task.h"
 #include "ir/Compiled.h"
 #include "run/VmError.h"
@@ -67,31 +66,66 @@ private:
     async::IScheduler *scheduler_ = nullptr;
 };
 
-class ScriptRun::Awaiter final : public AsyncExecutionContext {
+class ScriptRun::Awaiter final {
 public:
     explicit Awaiter(ScriptRun &&run);
+    ~Awaiter();
     bool await_ready();
     bool await_suspend(std::coroutine_handle<> handle);
     Result await_resume();
 
 private:
-    ScriptRuntime &runtime() override;
-    const fiber::json::JsValue &root() const override;
-    void *attach() const override;
-    const fiber::json::JsValue &arg_value(std::size_t index) const override;
-    std::size_t arg_count() const override;
-    async::IScheduler *scheduler() const override;
-    void return_value(const fiber::json::JsValue &value) override;
-    void throw_value(const fiber::json::JsValue &value) override;
-
+    static void resume_callback(void *context);
     bool pump();
     void resume_if_complete();
 
     ScriptRun run_;
     std::optional<Result> result_;
     std::coroutine_handle<> continuation_ = nullptr;
-    bool in_exec_ = false;
     bool resuming_ = false;
+};
+
+class ScriptSyncRun {
+public:
+    using Result = ScriptRun::Result;
+
+    ScriptSyncRun() = default;
+    ScriptSyncRun(const ScriptSyncRun &) = delete;
+    ScriptSyncRun &operator=(const ScriptSyncRun &) = delete;
+    ScriptSyncRun(ScriptSyncRun &&) noexcept = default;
+    ScriptSyncRun &operator=(ScriptSyncRun &&) noexcept = default;
+    ~ScriptSyncRun() = default;
+
+    Result operator()();
+    ScriptRun::Awaiter operator co_await() &&;
+    bool valid() const;
+
+private:
+    friend class Script;
+    explicit ScriptSyncRun(ScriptRun run);
+
+    ScriptRun run_;
+};
+
+class ScriptAsyncRun {
+public:
+    using Result = ScriptRun::Result;
+
+    ScriptAsyncRun() = default;
+    ScriptAsyncRun(const ScriptAsyncRun &) = delete;
+    ScriptAsyncRun &operator=(const ScriptAsyncRun &) = delete;
+    ScriptAsyncRun(ScriptAsyncRun &&) noexcept = default;
+    ScriptAsyncRun &operator=(ScriptAsyncRun &&) noexcept = default;
+    ~ScriptAsyncRun() = default;
+
+    ScriptRun::Awaiter operator co_await() &&;
+    bool valid() const;
+
+private:
+    friend class Script;
+    explicit ScriptAsyncRun(ScriptRun run);
+
+    ScriptRun run_;
 };
 
 class Script {
@@ -99,38 +133,38 @@ public:
     Script() = default;
     explicit Script(std::shared_ptr<ir::Compiled> compiled);
 
-    ScriptRun exec_async(const fiber::json::JsValue &root,
-                         void *attach,
-                         async::IScheduler *scheduler,
-                         ScriptRuntime &runtime);
+    ScriptAsyncRun exec_async(const fiber::json::JsValue &root,
+                              void *attach,
+                              async::IScheduler *scheduler,
+                              ScriptRuntime &runtime);
 
-    ScriptRun exec_async(const fiber::json::JsValue &root,
-                         void *attach,
-                         ScriptRuntime &runtime) {
+    ScriptAsyncRun exec_async(const fiber::json::JsValue &root,
+                              void *attach,
+                              ScriptRuntime &runtime) {
         return exec_async(root, attach, nullptr, runtime);
     }
 
-    ScriptRun exec_async(const fiber::json::JsValue &root,
-                         void *attach,
-                         async::IScheduler *scheduler,
-                         fiber::json::GcHeap &heap,
-                         fiber::json::GcRootSet &roots);
+    ScriptAsyncRun exec_async(const fiber::json::JsValue &root,
+                              void *attach,
+                              async::IScheduler *scheduler,
+                              fiber::json::GcHeap &heap,
+                              fiber::json::GcRootSet &roots);
 
-    ScriptRun exec_async(const fiber::json::JsValue &root,
-                         void *attach,
-                         fiber::json::GcHeap &heap,
-                         fiber::json::GcRootSet &roots) {
+    ScriptAsyncRun exec_async(const fiber::json::JsValue &root,
+                              void *attach,
+                              fiber::json::GcHeap &heap,
+                              fiber::json::GcRootSet &roots) {
         return exec_async(root, attach, nullptr, heap, roots);
     }
 
-    ScriptRun exec_sync(const fiber::json::JsValue &root,
-                        void *attach,
-                        ScriptRuntime &runtime);
+    ScriptSyncRun exec_sync(const fiber::json::JsValue &root,
+                            void *attach,
+                            ScriptRuntime &runtime);
 
-    ScriptRun exec_sync(const fiber::json::JsValue &root,
-                        void *attach,
-                        fiber::json::GcHeap &heap,
-                        fiber::json::GcRootSet &roots);
+    ScriptSyncRun exec_sync(const fiber::json::JsValue &root,
+                            void *attach,
+                            fiber::json::GcHeap &heap,
+                            fiber::json::GcRootSet &roots);
 
     bool contains_async() const;
 
