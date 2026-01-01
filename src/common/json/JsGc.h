@@ -132,7 +132,9 @@ struct GcHeap {
 
 GcString *gc_new_string(GcHeap *heap, const char *data, std::size_t len);
 GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len);
+GcString *gc_new_string_bytes_uninit(GcHeap *heap, std::size_t len);
 GcString *gc_new_string_utf16(GcHeap *heap, const char16_t *data, std::size_t len);
+GcString *gc_new_string_utf16_uninit(GcHeap *heap, std::size_t len);
 bool gc_string_to_utf8(const GcString *str, std::string &out);
 GcBinary *gc_new_binary(GcHeap *heap, const std::uint8_t *data, std::size_t len);
 GcArray *gc_new_array(GcHeap *heap, std::size_t capacity);

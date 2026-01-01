@@ -61,6 +61,7 @@ if(FIBER_BUILD_TESTS)
         tests/SanityTest.cpp
         tests/GeneratorTest.cpp
         tests/IteratorTest.cpp
+        tests/JsValueOpsTest.cpp
         tests/JsValueEncodeTest.cpp
         tests/ParserTest.cpp
     )
