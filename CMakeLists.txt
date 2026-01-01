@@ -64,6 +64,7 @@ if(FIBER_BUILD_TESTS)
         tests/JsValueOpsTest.cpp
         tests/JsValueEncodeTest.cpp
         tests/ParserTest.cpp
+        tests/ScriptParserTest.cpp
     )
     target_link_libraries(fiber_tests PRIVATE fiber_lib GTest::gtest_main)
     include(GoogleTest)
