@@ -468,6 +468,10 @@ void gc_mark_obj(GcHeap *heap, GcHeader *obj) {
             if (iter->object) {
                 gc_mark_obj(heap, &iter->object->hdr);
             }
+            if (iter->has_current) {
+                gc_mark_value(heap, iter->current_key);
+                gc_mark_value(heap, iter->current_value);
+            }
             for (std::size_t i = 0; i < iter->snapshot_size; ++i) {
                 if (iter->snapshot_keys && iter->snapshot_keys[i]) {
                     gc_mark_obj(heap, &iter->snapshot_keys[i]->hdr);
@@ -531,6 +535,8 @@ void gc_free_obj(GcHeap *heap, GcHeader *obj) {
             if (iter->snapshot_keys) {
                 heap->alloc.free(iter->snapshot_keys);
             }
+            std::destroy_at(&iter->current_key);
+            std::destroy_at(&iter->current_value);
             break;
         }
     }
@@ -1055,6 +1061,9 @@ GcIterator *gc_new_array_iterator(GcHeap *heap, GcArray *array, GcIteratorMode m
     iter->snapshot_keys = nullptr;
     iter->snapshot_size = 0;
     iter->snapshot_index = 0;
+    std::construct_at(&iter->current_key, JsValue::make_undefined());
+    std::construct_at(&iter->current_value, JsValue::make_undefined());
+    iter->has_current = false;
     gc_link(heap, hdr);
     return iter;
 }
@@ -1076,6 +1085,9 @@ GcIterator *gc_new_object_iterator(GcHeap *heap, GcObject *object, GcIteratorMod
     iter->snapshot_keys = nullptr;
     iter->snapshot_size = 0;
     iter->snapshot_index = 0;
+    std::construct_at(&iter->current_key, JsValue::make_undefined());
+    std::construct_at(&iter->current_value, JsValue::make_undefined());
+    iter->has_current = false;
     gc_link(heap, hdr);
     return iter;
 }
@@ -1086,6 +1098,9 @@ bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done) 
     if (!iter) {
         return false;
     }
+    iter->has_current = false;
+    iter->current_key = JsValue::make_undefined();
+    iter->current_value = JsValue::make_undefined();
     if (iter->kind == GcIteratorKind::Array) {
         if (!iter->array) {
             return true;
@@ -1102,13 +1117,23 @@ bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done) 
         switch (iter->mode) {
             case GcIteratorMode::Keys:
                 out = JsValue::make_integer(static_cast<int64_t>(idx));
+                iter->current_key = out;
+                iter->has_current = true;
                 return true;
             case GcIteratorMode::Values:
                 out = arr->elems[idx];
+                iter->current_value = out;
+                iter->has_current = true;
                 return true;
             case GcIteratorMode::Entries: {
                 JsValue key = JsValue::make_integer(static_cast<int64_t>(idx));
-                return build_entry_array(heap, key, arr->elems[idx], out);
+                if (!build_entry_array(heap, key, arr->elems[idx], out)) {
+                    return false;
+                }
+                iter->current_key = key;
+                iter->current_value = arr->elems[idx];
+                iter->has_current = true;
+                return true;
             }
         }
         return true;
@@ -1137,12 +1162,22 @@ bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done) 
         switch (iter->mode) {
             case GcIteratorMode::Keys:
                 out = key_value;
+                iter->current_key = out;
+                iter->has_current = true;
                 return true;
             case GcIteratorMode::Values:
                 out = value;
+                iter->current_value = out;
+                iter->has_current = true;
                 return true;
             case GcIteratorMode::Entries:
-                return build_entry_array(heap, key_value, value, out);
+                if (!build_entry_array(heap, key_value, value, out)) {
+                    return false;
+                }
+                iter->current_key = key_value;
+                iter->current_value = value;
+                iter->has_current = true;
+                return true;
         }
         return true;
     }
@@ -1158,12 +1193,22 @@ bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done) 
         switch (iter->mode) {
             case GcIteratorMode::Keys:
                 out = key_value;
+                iter->current_key = out;
+                iter->has_current = true;
                 return true;
             case GcIteratorMode::Values:
                 out = entry.value;
+                iter->current_value = out;
+                iter->has_current = true;
                 return true;
             case GcIteratorMode::Entries:
-                return build_entry_array(heap, key_value, entry.value, out);
+                if (!build_entry_array(heap, key_value, entry.value, out)) {
+                    return false;
+                }
+                iter->current_key = key_value;
+                iter->current_value = entry.value;
+                iter->has_current = true;
+                return true;
         }
         return true;
     }
@@ -1386,12 +1431,34 @@ void GcRootSet::remove_temp_root(JsValue *value) {
     }
 }
 
+void GcRootSet::add_provider(RootProvider *provider) {
+    if (provider) {
+        providers_.push_back(provider);
+    }
+}
+
+void GcRootSet::remove_provider(RootProvider *provider) {
+    for (std::size_t i = 0; i < providers_.size(); ++i) {
+        if (providers_[i] == provider) {
+            providers_[i] = providers_.back();
+            providers_.pop_back();
+            return;
+        }
+    }
+}
+
 void GcRootSet::collect(GcHeap &heap) {
     std::vector<JsValue *> roots;
     roots.reserve(globals_.size() + stack_.size() + temps_.size());
     roots.insert(roots.end(), globals_.begin(), globals_.end());
     roots.insert(roots.end(), stack_.begin(), stack_.end());
     roots.insert(roots.end(), temps_.begin(), temps_.end());
+    RootVisitor visitor(roots);
+    for (auto *provider : providers_) {
+        if (provider) {
+            provider->visit_roots(visitor);
+        }
+    }
     gc_collect(&heap, roots.data(), roots.size());
 }
 

@@ -73,7 +73,7 @@
 ## Coroutine Task and Scheduler Design (C++20)
 ### Task Model
 - Use a small `Task<T>` coroutine type (lazy by default).
-- `Task<T>` holds result or `std::exception_ptr` and resumes a stored continuation.
+- `Task<T>` holds `std::expected<T, TaskError>` and resumes a stored continuation.
 - `Task<T>::operator co_await()` returns an awaiter that:
   - if ready, returns immediately.
   - otherwise stores the awaiting coroutine handle as continuation.
@@ -100,11 +100,11 @@ class TaskCompletionSource {
 public:
     Task<T> task();
     void set_value(T value);
-    void set_exception(std::exception_ptr error);
+    void set_error(TaskError error);
 };
 ```
 - Allows integration with existing async APIs without coroutines.
-- `task()` returns a `Task<T>` that completes when `set_value` or `set_exception` is called.
+- `task()` returns a `Task<T>` that completes when `set_value` or `set_error` is called.
 
 ### ExecutionContext and Library Async APIs
 - `ExecutionContext` exposes `root()`, `attach()`, args, and `scheduler()` access.
@@ -124,6 +124,150 @@ public:
 - `InterpreterVm` is created on heap and owned by the coroutine frame.
 - `Script::exec_async()` creates the VM and returns a `Task<JsValue>` that keeps it alive.
 - Sync execution uses a stack VM instance with no coroutine suspension.
+
+## InterpreterVm Design (Detailed)
+### Responsibilities
+- Execute bytecode from `ir::Compiled` with Java-aligned opcodes.
+- Provide `ExecutionContext` for library calls.
+- Handle errors via `std::expected` and propagate positions.
+- Integrate with GC by exposing VM roots at collection time (single-coroutine execution).
+
+### Core State
+- `const ir::Compiled &compiled_`
+- `fiber::json::GcHeap *heap_` (provided by execution entry)
+- `fiber::json::JsValue root_`, `void *attach_`, `async::IScheduler *scheduler_`
+- `std::vector<fiber::json::JsValue> stack_`, `std::vector<fiber::json::JsValue> vars_`
+- `std::size_t sp_`, `std::size_t pc_`
+- Argument view: `std::size_t arg_off_`, `std::size_t arg_cnt_`, optional `GcArray *spread_args_`
+- Const cache: `std::vector<fiber::json::JsValue> const_cache_` (same size as operands)
+- Error state: `VmError pending_error_`, `bool has_error_`
+
+### Execution APIs
+- `exec_sync()` returns `std::expected<JsValue, VmError>`
+  - Rejects async opcodes if present.
+- `exec_async()` returns `async::Task<std::expected<JsValue, VmError>>`
+  - Suspends only at `CALL_ASYNC_*`.
+
+### Opcode Execution
+- Stack machine, 32-bit instruction with low 8-bit opcode and upper bits as operands.
+- `LOAD_CONST` uses heap-safe constants:
+  - Numeric/bool/null/undefined -> direct value.
+  - String/binary -> allocate via `GcHeap` and cache in `const_cache_`.
+  - No `GcHeap` stored inside `Compiled`.
+- `CALL_FUNC`/`CALL_CONST` use `arg_off_/arg_cnt_` to expose args in `ExecutionContext`.
+- `CALL_ASYNC_*` does `co_await` and resumes with same `pc_/sp_`.
+- `JUMP_IF_*` uses `Compares::logic`.
+- `END_RETURN` produces final value (or `Undefined` if empty stack).
+
+### Error Model (No Exceptions)
+- Ops return `std::expected<JsValue, VmError>` or `bool` + error out param.
+- VM converts error to `pending_error_` and enters `catch_for_exception`.
+- `THROW_EXP` converts value -> `VmError` (or `GcException`) then routes through catch.
+- All error paths attach position from `compiled_.positions[pc - 1]`.
+
+### Try/Catch Table
+- `compiled_.exception_table` is converted to `exp_ins` (same layout as Java).
+- `search_catch(pc)` uses linear/binary search for catch target.
+- `INTO_CATCH` writes error object to a variable slot for catch block.
+
+### GC Integration (Scan VM Directly)
+- Single-coroutine execution allows GC at safe points (allocation sites or between opcodes).
+- `GcRootSet` owns globals/temps and a list of `RootProvider` instances.
+- `InterpreterVm` implements `RootProvider::visit_roots` and is registered for the VM lifetime.
+- Roots exposed by VM:
+  - `root_`
+  - `stack_[0..sp_)`
+  - `vars_`
+  - `args_`/`spread_args_`
+  - `const_cache_`
+  - `pending_error_` and any pending return value
+- GC does not require per-push updates; it scans VM state only when collecting.
+- Temporary values not on the VM stack can use `GcRootHandle` sparingly.
+
+## GcRootSet + RootProvider Design
+### Interfaces
+```
+struct RootVisitor {
+    void visit(fiber::json::JsValue *value);
+    void visit_range(fiber::json::JsValue *base, std::size_t count);
+};
+
+class RootProvider {
+public:
+    virtual ~RootProvider() = default;
+    virtual void visit_roots(RootVisitor &visitor) = 0;
+};
+
+class GcRootSet {
+public:
+    void add_global(fiber::json::JsValue *value);
+    void remove_global(fiber::json::JsValue *value);
+    void add_temp_root(fiber::json::JsValue *value);
+    void remove_temp_root(fiber::json::JsValue *value);
+    void add_provider(RootProvider *provider);
+    void remove_provider(RootProvider *provider);
+    void collect(fiber::json::GcHeap &heap);
+};
+```
+
+### Root Scanning Order
+- `globals_` -> `temps_` -> `providers_` (VMs and other runtime scopes).
+- `RootVisitor` internally stores a temporary root vector or calls `gc_mark_value` directly.
+
+### InterpreterVm RootProvider
+- `visit_roots` should include:
+  - `root_`
+  - `stack_[0..sp_)` using `visit_range`
+  - `vars_` using `visit_range`
+  - `args_` if stored separately (or `stack_` slice if args are a view)
+  - `spread_args_` (if not null)
+  - `const_cache_` (non-undefined entries)
+  - `pending_error_` and `pending_return_` (if present)
+
+### GC Trigger Points
+- Triggered only at safe points:
+  - inside allocation helpers (string/array/object/binary)
+  - between opcode dispatch iterations
+  - before/after async suspension
+- No per-push/per-pop root registration.
+- The VM must be in a consistent state (no partially updated stack) at collection.
+
+## VmError and Error Object Conversion
+### VmError Shape
+```
+struct VmError {
+    std::string name;
+    std::string message;
+    int status = 500;
+    std::int64_t position = -1;
+    fiber::json::JsValue meta; // optional, may be Undefined
+};
+```
+
+### From Runtime Error to VmError
+- Arithmetic/type errors from ops produce `VmError` with:
+  - `name = "EXEC_COMPUTE_ERROR"` or specific operator name
+  - `message` matching Java `SpelMessage` text
+  - `status = 500`
+  - `position = compiled_.positions[pc - 1]`
+- Unsupported operator/type combinations set `name = "EXEC_UNSUPPORTED_OP"`.
+
+### From `throw` Value to VmError
+- If value is `GcException`: extract `name/message/status/meta/position`.
+- If value is object:
+  - read `"name"`, `"message"`, `"status"`, `"meta"` (if present)
+  - fall back to defaults if missing
+- Otherwise:
+  - `name = "EXEC_THROW_ERROR"`, `message = "execute script throw error"`, `status = 500`
+
+### VmError to Error Object (for `catch`)
+- Convert to `GcException` via `gc_new_exception` using `name/message/position/meta`.
+- `INTO_CATCH` stores this exception object (or object form if required by API).
+
+### Error Propagation
+- Any op returning `std::unexpected(VmError)` sets `pending_error_` and triggers `catch_for_exception`.
+- `THROW_EXP` directly builds `VmError` from the thrown value then goes through the same path.
+- If no catch is found, `exec_*` returns `std::unexpected(VmError)`.
 
 ## Standard Library Plan
 Phase 1:
