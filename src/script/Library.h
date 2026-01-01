@@ -1,38 +1,41 @@
 #ifndef FIBER_SCRIPT_LIBRARY_H
 #define FIBER_SCRIPT_LIBRARY_H
 
+#include <expected>
 #include <string_view>
 #include <vector>
 
 #include "ExecutionContext.h"
-#include "async/Task.h"
+#include "async/AsyncExecutionContext.h"
 
 namespace fiber::script {
 
 class Library {
 public:
+    using FunctionResult = std::expected<fiber::json::JsValue, fiber::json::JsValue>;
+
     class Constant {
     public:
         virtual ~Constant() = default;
-        virtual fiber::json::JsValue get(ExecutionContext &context) = 0;
+        virtual FunctionResult get(ExecutionContext &context) = 0;
     };
 
     class Function {
     public:
         virtual ~Function() = default;
-        virtual fiber::json::JsValue call(ExecutionContext &context) = 0;
+        virtual FunctionResult call(ExecutionContext &context) = 0;
     };
 
     class AsyncConstant {
     public:
         virtual ~AsyncConstant() = default;
-        virtual async::Task<fiber::json::JsValue> get(ExecutionContext &context) = 0;
+        virtual void get(AsyncExecutionContext &context) = 0;
     };
 
     class AsyncFunction {
     public:
         virtual ~AsyncFunction() = default;
-        virtual async::Task<fiber::json::JsValue> call(ExecutionContext &context) = 0;
+        virtual void call(AsyncExecutionContext &context) = 0;
     };
 
     class DirectiveDef {

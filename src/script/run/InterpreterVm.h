@@ -7,6 +7,7 @@
 
 #include "../../common/json/JsGc.h"
 #include "../ExecutionContext.h"
+#include "../async/AsyncExecutionContext.h"
 #include "../ir/Compiled.h"
 #include "VmError.h"
 
@@ -18,6 +19,11 @@ namespace fiber::script::run {
 
 class InterpreterVm final : public ExecutionContext, public fiber::json::GcRootSet::RootProvider {
 public:
+    enum class AsyncExecState {
+        Done,
+        Pending
+    };
+
     InterpreterVm(const ir::Compiled &compiled,
                   const fiber::json::JsValue &root,
                   void *attach,
@@ -25,7 +31,7 @@ public:
                   ScriptRuntime &runtime);
     ~InterpreterVm() override;
 
-    async::Task<VmResult> exec_async();
+    AsyncExecState exec_async(AsyncExecutionContext &context, VmResult &out);
     VmResult exec_sync();
 
     const fiber::json::JsValue &root() const override;
@@ -34,6 +40,9 @@ public:
     std::size_t arg_count() const override;
     async::IScheduler *scheduler() const override;
     void visit_roots(fiber::json::GcRootSet::RootVisitor &visitor) override;
+    bool has_thrown() const;
+    const fiber::json::JsValue &thrown() const;
+    void set_async_result(const fiber::json::JsValue &value, bool is_throw);
 
 private:
     static constexpr int kInstrumentLen = 8;
@@ -60,6 +69,26 @@ private:
     fiber::json::JsValue spread_args_ = fiber::json::JsValue::make_undefined();
     VmError pending_error_{};
     bool has_error_ = false;
+    fiber::json::JsValue thrown_ = fiber::json::JsValue::make_undefined();
+    bool has_thrown_ = false;
+    bool async_started_ = false;
+    bool async_pending_ = false;
+    bool async_ready_ = false;
+    bool async_is_throw_ = false;
+    fiber::json::JsValue async_value_ = fiber::json::JsValue::make_undefined();
+    struct AsyncResumePoint {
+        enum class Kind {
+            None,
+            PushResult,
+            ReplaceTop
+        };
+        Kind kind = Kind::None;
+        std::size_t slot = 0;
+        std::size_t sp_after = 0;
+        std::size_t epc = 0;
+        bool clear_args = false;
+    };
+    AsyncResumePoint async_resume_{};
     fiber::json::JsValue return_value_ = fiber::json::JsValue::make_undefined();
     bool has_return_ = false;
     fiber::json::JsValue undefined_ = fiber::json::JsValue::make_undefined();
@@ -75,8 +104,8 @@ private:
     bool handle_error(VmError error, std::size_t epc);
     VmResult load_const(std::size_t operand_index);
     VmResult make_exception_value(const VmError &error);
-    VmError make_error_from_value(const fiber::json::JsValue &value);
     bool maybe_collect();
+    bool apply_async_ready(VmResult &out);
 };
 
 } // namespace fiber::script::run
