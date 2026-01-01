@@ -1,6 +1,7 @@
 #include "Access.h"
 
 #include "../../common/json/Utf.h"
+#include "../Runtime.h"
 
 #include <string>
 
@@ -127,14 +128,13 @@ VmResult string_char_at(fiber::json::GcHeap *heap,
 
 VmResult Access::expand_object(const fiber::json::JsValue &target,
                                const fiber::json::JsValue &addition,
-                               fiber::json::GcHeap *heap) {
+                               ScriptRuntime &runtime) {
     if (target.type_ != fiber::json::JsNodeType::Object ||
         addition.type_ != fiber::json::JsNodeType::Object) {
         return target;
     }
-    if (!heap) {
-        return std::unexpected(heap_required_error());
-    }
+    runtime.maybe_collect();
+    fiber::json::GcHeap *heap = &runtime.heap();
     auto *target_obj = reinterpret_cast<fiber::json::GcObject *>(target.gc);
     auto *add_obj = reinterpret_cast<const fiber::json::GcObject *>(addition.gc);
     if (!target_obj || !add_obj) {
@@ -154,7 +154,7 @@ VmResult Access::expand_object(const fiber::json::JsValue &target,
 
 VmResult Access::expand_array(const fiber::json::JsValue &target,
                               const fiber::json::JsValue &addition,
-                              fiber::json::GcHeap *heap) {
+                              ScriptRuntime &runtime) {
     if (target.type_ != fiber::json::JsNodeType::Array) {
         return target;
     }
@@ -162,9 +162,8 @@ VmResult Access::expand_array(const fiber::json::JsValue &target,
         addition.type_ != fiber::json::JsNodeType::Object) {
         return target;
     }
-    if (!heap) {
-        return std::unexpected(heap_required_error());
-    }
+    runtime.maybe_collect();
+    fiber::json::GcHeap *heap = &runtime.heap();
     auto *target_arr = reinterpret_cast<fiber::json::GcArray *>(target.gc);
     if (!target_arr) {
         return target;
@@ -200,13 +199,12 @@ VmResult Access::expand_array(const fiber::json::JsValue &target,
 
 VmResult Access::push_array(const fiber::json::JsValue &target,
                             const fiber::json::JsValue &addition,
-                            fiber::json::GcHeap *heap) {
+                            ScriptRuntime &runtime) {
     if (target.type_ != fiber::json::JsNodeType::Array) {
         return target;
     }
-    if (!heap) {
-        return std::unexpected(heap_required_error());
-    }
+    runtime.maybe_collect();
+    fiber::json::GcHeap *heap = &runtime.heap();
     auto *arr = reinterpret_cast<fiber::json::GcArray *>(target.gc);
     if (!arr) {
         return target;
@@ -219,7 +217,7 @@ VmResult Access::push_array(const fiber::json::JsValue &target,
 
 VmResult Access::index_get(const fiber::json::JsValue &parent,
                            const fiber::json::JsValue &key,
-                           fiber::json::GcHeap *heap) {
+                           ScriptRuntime &runtime) {
     if (parent.type_ == fiber::json::JsNodeType::Array) {
         std::int64_t idx = 0;
         if (!get_index(key, idx)) {
@@ -233,6 +231,8 @@ VmResult Access::index_get(const fiber::json::JsValue &parent,
         return found ? *found : fiber::json::JsValue::make_undefined();
     }
     if (parent.type_ == fiber::json::JsNodeType::Object) {
+        runtime.maybe_collect();
+        fiber::json::GcHeap *heap = &runtime.heap();
         VmError error;
         fiber::json::GcString *key_str = ensure_heap_string(heap, key, error);
         if (!key_str && error.name.size()) {
@@ -247,6 +247,8 @@ VmResult Access::index_get(const fiber::json::JsValue &parent,
     }
     if (parent.type_ == fiber::json::JsNodeType::HeapString ||
         parent.type_ == fiber::json::JsNodeType::NativeString) {
+        runtime.maybe_collect();
+        fiber::json::GcHeap *heap = &runtime.heap();
         std::int64_t idx = 0;
         if (!get_index(key, idx)) {
             return fiber::json::JsValue::make_undefined();
@@ -259,7 +261,7 @@ VmResult Access::index_get(const fiber::json::JsValue &parent,
 VmResult Access::index_set(const fiber::json::JsValue &parent,
                            const fiber::json::JsValue &key,
                            const fiber::json::JsValue &value,
-                           fiber::json::GcHeap *heap) {
+                           ScriptRuntime &runtime) {
     if (parent.type_ == fiber::json::JsNodeType::Array) {
         std::int64_t idx = 0;
         if (!get_index(key, idx)) {
@@ -269,15 +271,16 @@ VmResult Access::index_set(const fiber::json::JsValue &parent,
         if (!arr || idx < 0 || idx >= static_cast<std::int64_t>(arr->size)) {
             return std::unexpected(index_error("array index out of bounds"));
         }
-        if (!heap) {
-            return std::unexpected(heap_required_error());
-        }
+        runtime.maybe_collect();
+        fiber::json::GcHeap *heap = &runtime.heap();
         if (!fiber::json::gc_array_set(heap, arr, static_cast<std::size_t>(idx), value)) {
             return std::unexpected(oom_error());
         }
         return value;
     }
     if (parent.type_ == fiber::json::JsNodeType::Object) {
+        runtime.maybe_collect();
+        fiber::json::GcHeap *heap = &runtime.heap();
         VmError error;
         fiber::json::GcString *key_str = ensure_heap_string(heap, key, error);
         if (!key_str && error.name.size()) {
@@ -287,9 +290,6 @@ VmResult Access::index_set(const fiber::json::JsValue &parent,
             return std::unexpected(index_error("object key must be string"));
         }
         auto *obj = reinterpret_cast<fiber::json::GcObject *>(parent.gc);
-        if (!heap) {
-            return std::unexpected(heap_required_error());
-        }
         if (!fiber::json::gc_object_set(heap, obj, key_str, value)) {
             return std::unexpected(oom_error());
         }
@@ -301,8 +301,8 @@ VmResult Access::index_set(const fiber::json::JsValue &parent,
 VmResult Access::index_set1(const fiber::json::JsValue &parent,
                             const fiber::json::JsValue &key,
                             const fiber::json::JsValue &value,
-                            fiber::json::GcHeap *heap) {
-    VmResult result = index_set(parent, key, value, heap);
+                            ScriptRuntime &runtime) {
+    VmResult result = index_set(parent, key, value, runtime);
     if (!result) {
         return result;
     }
@@ -311,8 +311,10 @@ VmResult Access::index_set1(const fiber::json::JsValue &parent,
 
 VmResult Access::prop_get(const fiber::json::JsValue &parent,
                           const fiber::json::JsValue &key,
-                          fiber::json::GcHeap *heap) {
+                          ScriptRuntime &runtime) {
     if (parent.type_ == fiber::json::JsNodeType::Object) {
+        runtime.maybe_collect();
+        fiber::json::GcHeap *heap = &runtime.heap();
         VmError error;
         fiber::json::GcString *key_str = ensure_heap_string(heap, key, error);
         if (!key_str && error.name.size()) {
@@ -345,10 +347,12 @@ VmResult Access::prop_get(const fiber::json::JsValue &parent,
 VmResult Access::prop_set(const fiber::json::JsValue &parent,
                           const fiber::json::JsValue &value,
                           const fiber::json::JsValue &key,
-                          fiber::json::GcHeap *heap) {
+                          ScriptRuntime &runtime) {
     if (parent.type_ != fiber::json::JsNodeType::Object) {
         return std::unexpected(index_error("property set not supported"));
     }
+    runtime.maybe_collect();
+    fiber::json::GcHeap *heap = &runtime.heap();
     VmError error;
     fiber::json::GcString *key_str = ensure_heap_string(heap, key, error);
     if (!key_str && error.name.size()) {
@@ -358,9 +362,6 @@ VmResult Access::prop_set(const fiber::json::JsValue &parent,
         return std::unexpected(index_error("property key must be string"));
     }
     auto *obj = reinterpret_cast<fiber::json::GcObject *>(parent.gc);
-    if (!heap) {
-        return std::unexpected(heap_required_error());
-    }
     if (!fiber::json::gc_object_set(heap, obj, key_str, value)) {
         return std::unexpected(oom_error());
     }
@@ -370,8 +371,8 @@ VmResult Access::prop_set(const fiber::json::JsValue &parent,
 VmResult Access::prop_set1(const fiber::json::JsValue &parent,
                            const fiber::json::JsValue &value,
                            const fiber::json::JsValue &key,
-                           fiber::json::GcHeap *heap) {
-    VmResult result = prop_set(parent, value, key, heap);
+                           ScriptRuntime &runtime) {
+    VmResult result = prop_set(parent, value, key, runtime);
     if (!result) {
         return result;
     }

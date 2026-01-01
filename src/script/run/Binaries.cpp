@@ -4,6 +4,7 @@
 #include <string_view>
 
 #include "../../common/json/JsValueOps.h"
+#include "../Runtime.h"
 #include "Compares.h"
 
 namespace fiber::script::run {
@@ -70,95 +71,109 @@ VmResult make_bool(bool value) {
 
 VmResult Binaries::plus(const fiber::json::JsValue &a,
                         const fiber::json::JsValue &b,
-                        fiber::json::GcHeap *heap) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Add, a, b, heap), "+");
+                        ScriptRuntime &runtime) {
+    runtime.maybe_collect();
+    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Add, a, b, &runtime.heap()), "+");
 }
 
 VmResult Binaries::minus(const fiber::json::JsValue &a,
                          const fiber::json::JsValue &b,
-                         fiber::json::GcHeap *heap) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Sub, a, b, heap), "-");
+                         ScriptRuntime &runtime) {
+    runtime.maybe_collect();
+    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Sub, a, b, &runtime.heap()), "-");
 }
 
 VmResult Binaries::multiply(const fiber::json::JsValue &a,
                             const fiber::json::JsValue &b,
-                            fiber::json::GcHeap *heap) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Mul, a, b, heap), "*");
+                            ScriptRuntime &runtime) {
+    runtime.maybe_collect();
+    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Mul, a, b, &runtime.heap()), "*");
 }
 
 VmResult Binaries::divide(const fiber::json::JsValue &a,
                           const fiber::json::JsValue &b,
-                          fiber::json::GcHeap *heap) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Div, a, b, heap), "/");
+                          ScriptRuntime &runtime) {
+    runtime.maybe_collect();
+    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Div, a, b, &runtime.heap()), "/");
 }
 
 VmResult Binaries::modulo(const fiber::json::JsValue &a,
                           const fiber::json::JsValue &b,
-                          fiber::json::GcHeap *heap) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Mod, a, b, heap), "%");
+                          ScriptRuntime &runtime) {
+    runtime.maybe_collect();
+    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Mod, a, b, &runtime.heap()), "%");
 }
 
 VmResult Binaries::matches(const fiber::json::JsValue &a,
                            const fiber::json::JsValue &b,
-                           fiber::json::GcHeap *heap) {
+                           ScriptRuntime &runtime) {
+    runtime.maybe_collect();
     (void)a;
     (void)b;
-    (void)heap;
+    (void)runtime;
     return make_bool(false);
 }
 
 VmResult Binaries::lt(const fiber::json::JsValue &a,
                       const fiber::json::JsValue &b,
-                      fiber::json::GcHeap *heap) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Lt, a, b, heap), "<");
+                      ScriptRuntime &runtime) {
+    runtime.maybe_collect();
+    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Lt, a, b, &runtime.heap()), "<");
 }
 
 VmResult Binaries::lte(const fiber::json::JsValue &a,
                        const fiber::json::JsValue &b,
-                       fiber::json::GcHeap *heap) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Le, a, b, heap), "<=");
+                       ScriptRuntime &runtime) {
+    runtime.maybe_collect();
+    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Le, a, b, &runtime.heap()), "<=");
 }
 
 VmResult Binaries::gt(const fiber::json::JsValue &a,
                       const fiber::json::JsValue &b,
-                      fiber::json::GcHeap *heap) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Gt, a, b, heap), ">");
+                      ScriptRuntime &runtime) {
+    runtime.maybe_collect();
+    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Gt, a, b, &runtime.heap()), ">");
 }
 
 VmResult Binaries::gte(const fiber::json::JsValue &a,
                        const fiber::json::JsValue &b,
-                       fiber::json::GcHeap *heap) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Ge, a, b, heap), ">=");
+                       ScriptRuntime &runtime) {
+    runtime.maybe_collect();
+    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Ge, a, b, &runtime.heap()), ">=");
 }
 
 VmResult Binaries::eq(const fiber::json::JsValue &a,
                       const fiber::json::JsValue &b,
-                      fiber::json::GcHeap *heap) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Eq, a, b, heap), "==");
+                      ScriptRuntime &runtime) {
+    runtime.maybe_collect();
+    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Eq, a, b, &runtime.heap()), "==");
 }
 
 VmResult Binaries::seq(const fiber::json::JsValue &a,
                        const fiber::json::JsValue &b,
-                       fiber::json::GcHeap *heap) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::StrictEq, a, b, heap), "===");
+                       ScriptRuntime &runtime) {
+    runtime.maybe_collect();
+    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::StrictEq, a, b, &runtime.heap()), "===");
 }
 
 VmResult Binaries::ne(const fiber::json::JsValue &a,
                       const fiber::json::JsValue &b,
-                      fiber::json::GcHeap *heap) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Ne, a, b, heap), "!=");
+                      ScriptRuntime &runtime) {
+    runtime.maybe_collect();
+    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Ne, a, b, &runtime.heap()), "!=");
 }
 
 VmResult Binaries::sne(const fiber::json::JsValue &a,
                        const fiber::json::JsValue &b,
-                       fiber::json::GcHeap *heap) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::StrictNe, a, b, heap), "!==");
+                       ScriptRuntime &runtime) {
+    runtime.maybe_collect();
+    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::StrictNe, a, b, &runtime.heap()), "!==");
 }
 
 VmResult Binaries::in(const fiber::json::JsValue &a,
                       const fiber::json::JsValue &b,
-                      fiber::json::GcHeap *heap) {
-    (void)heap;
+                      ScriptRuntime &runtime) {
+    runtime.maybe_collect();
     return Compares::in(a, b);
 }
 

@@ -133,6 +133,10 @@ struct GcHeap {
     mem::Allocator alloc;
 };
 
+std::size_t gc_bytes_used(const GcHeap &heap);
+std::size_t gc_threshold(const GcHeap &heap);
+void gc_set_threshold(GcHeap &heap, std::size_t value);
+
 GcString *gc_new_string(GcHeap *heap, const char *data, std::size_t len);
 GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len);
 GcString *gc_new_string_bytes_uninit(GcHeap *heap, std::size_t len);
@@ -209,7 +213,7 @@ public:
     void add_provider(RootProvider *provider);
     void remove_provider(RootProvider *provider);
 
-    void collect(GcHeap &heap);
+    void visit_all(RootVisitor &visitor);
 
 private:
     std::vector<JsValue *> globals_;
@@ -218,6 +222,8 @@ private:
     std::vector<JsValue *> temps_;
     std::vector<RootProvider *> providers_;
 };
+
+void gc_collect(GcHeap &heap, GcRootSet &roots);
 
 class GcRootHandle {
 public:

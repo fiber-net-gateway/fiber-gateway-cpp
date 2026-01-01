@@ -11,6 +11,7 @@
 #include "Compares.h"
 #include "../../common/json/JsGc.h"
 #include "Unaries.h"
+#include "../Runtime.h"
 
 namespace fiber::script::run {
 
@@ -22,10 +23,6 @@ VmError make_error(std::string name, std::string message, std::int64_t position)
     error.message = std::move(message);
     error.position = position;
     return error;
-}
-
-VmError make_heap_required(std::int64_t position) {
-    return make_error("EXEC_HEAP_REQUIRED", "heap is required for this operation", position);
 }
 
 VmError make_oom(std::int64_t position) {
@@ -69,28 +66,22 @@ InterpreterVm::InterpreterVm(const ir::Compiled &compiled,
                              const fiber::json::JsValue &root,
                              void *attach,
                              async::IScheduler *scheduler,
-                             fiber::json::GcHeap *heap,
-                             fiber::json::GcRootSet *roots)
+                             ScriptRuntime &runtime)
     : compiled_(compiled),
       root_(root),
       attach_(attach),
       scheduler_(scheduler),
-      heap_(heap),
-      roots_(roots) {
+      runtime_(runtime) {
     stack_.resize(compiled_.stack_size);
     vars_.resize(compiled_.var_table_size);
     const_cache_.resize(compiled_.operands.size());
     const_cache_valid_.resize(compiled_.operands.size(), false);
     build_exception_index();
-    if (roots_) {
-        roots_->add_provider(this);
-    }
+    runtime_.roots().add_provider(this);
 }
 
 InterpreterVm::~InterpreterVm() {
-    if (roots_) {
-        roots_->remove_provider(this);
-    }
+    runtime_.roots().remove_provider(this);
 }
 
 async::Task<VmResult> InterpreterVm::exec_async() {
@@ -135,7 +126,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::BOP_PLUS:
                 --sp_;
                 {
-                    VmResult result = Binaries::plus(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::plus(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -148,7 +139,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::BOP_MINUS:
                 --sp_;
                 {
-                    VmResult result = Binaries::minus(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::minus(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -161,7 +152,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::BOP_MULTIPLY:
                 --sp_;
                 {
-                    VmResult result = Binaries::multiply(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::multiply(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -174,7 +165,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::BOP_DIVIDE:
                 --sp_;
                 {
-                    VmResult result = Binaries::divide(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::divide(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -187,7 +178,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::BOP_MOD:
                 --sp_;
                 {
-                    VmResult result = Binaries::modulo(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::modulo(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -200,7 +191,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::BOP_MATCH:
                 --sp_;
                 {
-                    VmResult result = Binaries::matches(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::matches(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -213,7 +204,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::BOP_LT:
                 --sp_;
                 {
-                    VmResult result = Binaries::lt(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::lt(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -226,7 +217,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::BOP_LTE:
                 --sp_;
                 {
-                    VmResult result = Binaries::lte(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::lte(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -239,7 +230,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::BOP_GT:
                 --sp_;
                 {
-                    VmResult result = Binaries::gt(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::gt(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -252,7 +243,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::BOP_GTE:
                 --sp_;
                 {
-                    VmResult result = Binaries::gte(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::gte(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -265,7 +256,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::BOP_EQ:
                 --sp_;
                 {
-                    VmResult result = Binaries::eq(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::eq(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -278,7 +269,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::BOP_SEQ:
                 --sp_;
                 {
-                    VmResult result = Binaries::seq(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::seq(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -291,7 +282,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::BOP_NE:
                 --sp_;
                 {
-                    VmResult result = Binaries::ne(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::ne(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -304,7 +295,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::BOP_SNE:
                 --sp_;
                 {
-                    VmResult result = Binaries::sne(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::sne(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -317,7 +308,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::BOP_IN:
                 --sp_;
                 {
-                    VmResult result = Binaries::in(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::in(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -365,7 +356,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                 break;
             case ir::Code::UNARY_TYPEOF:
                 {
-                    VmResult result = Unaries::typeof_op(stack_[sp_ - 1], heap_);
+                    VmResult result = Unaries::typeof_op(stack_[sp_ - 1], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -376,15 +367,8 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                 }
                 break;
             case ir::Code::NEW_OBJECT: {
-                if (!heap_) {
-                    VmError error = make_heap_required(compiled_.positions[pc_ - 1]);
-                    if (!handle_error(error, pc_ - 1)) {
-                        co_return std::unexpected(error);
-                    }
-                    continue;
-                }
                 maybe_collect();
-                fiber::json::JsValue obj = fiber::json::JsValue::make_object(*heap_, 0);
+                fiber::json::JsValue obj = fiber::json::JsValue::make_object(runtime_.heap(), 0);
                 if (obj.type_ != fiber::json::JsNodeType::Object) {
                     VmError error = make_oom(compiled_.positions[pc_ - 1]);
                     if (!handle_error(error, pc_ - 1)) {
@@ -396,15 +380,8 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                 break;
             }
             case ir::Code::NEW_ARRAY: {
-                if (!heap_) {
-                    VmError error = make_heap_required(compiled_.positions[pc_ - 1]);
-                    if (!handle_error(error, pc_ - 1)) {
-                        co_return std::unexpected(error);
-                    }
-                    continue;
-                }
                 maybe_collect();
-                fiber::json::JsValue arr = fiber::json::JsValue::make_array(*heap_, 0);
+                fiber::json::JsValue arr = fiber::json::JsValue::make_array(runtime_.heap(), 0);
                 if (arr.type_ != fiber::json::JsNodeType::Array) {
                     VmError error = make_oom(compiled_.positions[pc_ - 1]);
                     if (!handle_error(error, pc_ - 1)) {
@@ -418,7 +395,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::EXP_OBJECT:
                 --sp_;
                 {
-                    VmResult result = Access::expand_object(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Access::expand_object(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -431,7 +408,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::EXP_ARRAY:
                 --sp_;
                 {
-                    VmResult result = Access::expand_array(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Access::expand_array(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -444,7 +421,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::PUSH_ARRAY:
                 --sp_;
                 {
-                    VmResult result = Access::push_array(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Access::push_array(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -457,7 +434,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::IDX_GET:
                 --sp_;
                 {
-                    VmResult result = Access::index_get(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Access::index_get(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -470,7 +447,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::IDX_SET:
                 sp_ -= 2;
                 {
-                    VmResult result = Access::index_set(stack_[sp_ - 1], stack_[sp_], stack_[sp_ + 1], heap_);
+                    VmResult result = Access::index_set(stack_[sp_ - 1], stack_[sp_], stack_[sp_ + 1], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -483,7 +460,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             case ir::Code::IDX_SET_1:
                 sp_ -= 2;
                 {
-                    VmResult result = Access::index_set1(stack_[sp_ - 1], stack_[sp_], stack_[sp_ + 1], heap_);
+                    VmResult result = Access::index_set1(stack_[sp_ - 1], stack_[sp_], stack_[sp_ + 1], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             co_return std::unexpected(result.error());
@@ -498,7 +475,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                 fiber::json::JsValue key = fiber::json::JsValue::make_native_string(
                     const_cast<char *>(name ? name->data() : ""),
                     name ? name->size() : 0);
-                VmResult result = Access::prop_get(stack_[sp_ - 1], key, heap_);
+                VmResult result = Access::prop_get(stack_[sp_ - 1], key, runtime_);
                 if (!result) {
                     if (!handle_error(result.error(), pc_ - 1)) {
                         co_return std::unexpected(result.error());
@@ -515,7 +492,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     const_cast<char *>(name ? name->data() : ""),
                     name ? name->size() : 0);
                 --sp_;
-                VmResult result = Access::prop_set(stack_[sp_ - 1], stack_[sp_], key, heap_);
+                VmResult result = Access::prop_set(stack_[sp_ - 1], stack_[sp_], key, runtime_);
                 if (!result) {
                     if (!handle_error(result.error(), pc_ - 1)) {
                         co_return std::unexpected(result.error());
@@ -532,7 +509,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     const_cast<char *>(name ? name->data() : ""),
                     name ? name->size() : 0);
                 --sp_;
-                VmResult result = Access::prop_set1(stack_[sp_ - 1], stack_[sp_], key, heap_);
+                VmResult result = Access::prop_set1(stack_[sp_ - 1], stack_[sp_], key, runtime_);
                 if (!result) {
                     if (!handle_error(result.error(), pc_ - 1)) {
                         co_return std::unexpected(result.error());
@@ -667,7 +644,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             }
             case ir::Code::ITERATE_INTO: {
                 std::size_t idx = static_cast<std::size_t>(instr >> kInstrumentLen);
-                VmResult result = Unaries::iterate(stack_[--sp_], heap_);
+                VmResult result = Unaries::iterate(stack_[--sp_], runtime_);
                 if (!result) {
                     if (!handle_error(result.error(), pc_ - 1)) {
                         co_return std::unexpected(result.error());
@@ -682,7 +659,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                 auto *iter = reinterpret_cast<fiber::json::GcIterator *>(vars_[idx].gc);
                 fiber::json::JsValue out;
                 bool done = true;
-                bool ok = fiber::json::gc_iterator_next(heap_, iter, out, done);
+                bool ok = fiber::json::gc_iterator_next(&runtime_.heap(), iter, out, done);
                 stack_[sp_++] = fiber::json::JsValue::make_boolean(ok && !done);
                 break;
             }
@@ -799,7 +776,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::BOP_PLUS:
                 --sp_;
                 {
-                    VmResult result = Binaries::plus(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::plus(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -812,7 +789,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::BOP_MINUS:
                 --sp_;
                 {
-                    VmResult result = Binaries::minus(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::minus(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -825,7 +802,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::BOP_MULTIPLY:
                 --sp_;
                 {
-                    VmResult result = Binaries::multiply(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::multiply(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -838,7 +815,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::BOP_DIVIDE:
                 --sp_;
                 {
-                    VmResult result = Binaries::divide(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::divide(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -851,7 +828,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::BOP_MOD:
                 --sp_;
                 {
-                    VmResult result = Binaries::modulo(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::modulo(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -864,7 +841,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::BOP_MATCH:
                 --sp_;
                 {
-                    VmResult result = Binaries::matches(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::matches(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -877,7 +854,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::BOP_LT:
                 --sp_;
                 {
-                    VmResult result = Binaries::lt(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::lt(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -890,7 +867,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::BOP_LTE:
                 --sp_;
                 {
-                    VmResult result = Binaries::lte(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::lte(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -903,7 +880,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::BOP_GT:
                 --sp_;
                 {
-                    VmResult result = Binaries::gt(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::gt(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -916,7 +893,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::BOP_GTE:
                 --sp_;
                 {
-                    VmResult result = Binaries::gte(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::gte(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -929,7 +906,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::BOP_EQ:
                 --sp_;
                 {
-                    VmResult result = Binaries::eq(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::eq(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -942,7 +919,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::BOP_SEQ:
                 --sp_;
                 {
-                    VmResult result = Binaries::seq(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::seq(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -955,7 +932,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::BOP_NE:
                 --sp_;
                 {
-                    VmResult result = Binaries::ne(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::ne(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -968,7 +945,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::BOP_SNE:
                 --sp_;
                 {
-                    VmResult result = Binaries::sne(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::sne(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -981,7 +958,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::BOP_IN:
                 --sp_;
                 {
-                    VmResult result = Binaries::in(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Binaries::in(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -1029,7 +1006,7 @@ VmResult InterpreterVm::exec_sync() {
                 break;
             case ir::Code::UNARY_TYPEOF:
                 {
-                    VmResult result = Unaries::typeof_op(stack_[sp_ - 1], heap_);
+                    VmResult result = Unaries::typeof_op(stack_[sp_ - 1], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -1040,15 +1017,8 @@ VmResult InterpreterVm::exec_sync() {
                 }
                 break;
             case ir::Code::NEW_OBJECT: {
-                if (!heap_) {
-                    VmError error = make_heap_required(compiled_.positions[pc_ - 1]);
-                    if (!handle_error(error, pc_ - 1)) {
-                        return std::unexpected(error);
-                    }
-                    continue;
-                }
                 maybe_collect();
-                fiber::json::JsValue obj = fiber::json::JsValue::make_object(*heap_, 0);
+                fiber::json::JsValue obj = fiber::json::JsValue::make_object(runtime_.heap(), 0);
                 if (obj.type_ != fiber::json::JsNodeType::Object) {
                     VmError error = make_oom(compiled_.positions[pc_ - 1]);
                     if (!handle_error(error, pc_ - 1)) {
@@ -1060,15 +1030,8 @@ VmResult InterpreterVm::exec_sync() {
                 break;
             }
             case ir::Code::NEW_ARRAY: {
-                if (!heap_) {
-                    VmError error = make_heap_required(compiled_.positions[pc_ - 1]);
-                    if (!handle_error(error, pc_ - 1)) {
-                        return std::unexpected(error);
-                    }
-                    continue;
-                }
                 maybe_collect();
-                fiber::json::JsValue arr = fiber::json::JsValue::make_array(*heap_, 0);
+                fiber::json::JsValue arr = fiber::json::JsValue::make_array(runtime_.heap(), 0);
                 if (arr.type_ != fiber::json::JsNodeType::Array) {
                     VmError error = make_oom(compiled_.positions[pc_ - 1]);
                     if (!handle_error(error, pc_ - 1)) {
@@ -1082,7 +1045,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::EXP_OBJECT:
                 --sp_;
                 {
-                    VmResult result = Access::expand_object(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Access::expand_object(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -1095,7 +1058,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::EXP_ARRAY:
                 --sp_;
                 {
-                    VmResult result = Access::expand_array(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Access::expand_array(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -1108,7 +1071,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::PUSH_ARRAY:
                 --sp_;
                 {
-                    VmResult result = Access::push_array(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Access::push_array(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -1121,7 +1084,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::IDX_GET:
                 --sp_;
                 {
-                    VmResult result = Access::index_get(stack_[sp_ - 1], stack_[sp_], heap_);
+                    VmResult result = Access::index_get(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -1134,7 +1097,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::IDX_SET:
                 sp_ -= 2;
                 {
-                    VmResult result = Access::index_set(stack_[sp_ - 1], stack_[sp_], stack_[sp_ + 1], heap_);
+                    VmResult result = Access::index_set(stack_[sp_ - 1], stack_[sp_], stack_[sp_ + 1], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -1147,7 +1110,7 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::IDX_SET_1:
                 sp_ -= 2;
                 {
-                    VmResult result = Access::index_set1(stack_[sp_ - 1], stack_[sp_], stack_[sp_ + 1], heap_);
+                    VmResult result = Access::index_set1(stack_[sp_ - 1], stack_[sp_], stack_[sp_ + 1], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
                             return std::unexpected(result.error());
@@ -1162,7 +1125,7 @@ VmResult InterpreterVm::exec_sync() {
                 fiber::json::JsValue key = fiber::json::JsValue::make_native_string(
                     const_cast<char *>(name ? name->data() : ""),
                     name ? name->size() : 0);
-                VmResult result = Access::prop_get(stack_[sp_ - 1], key, heap_);
+                VmResult result = Access::prop_get(stack_[sp_ - 1], key, runtime_);
                 if (!result) {
                     if (!handle_error(result.error(), pc_ - 1)) {
                         return std::unexpected(result.error());
@@ -1179,7 +1142,7 @@ VmResult InterpreterVm::exec_sync() {
                     const_cast<char *>(name ? name->data() : ""),
                     name ? name->size() : 0);
                 --sp_;
-                VmResult result = Access::prop_set(stack_[sp_ - 1], stack_[sp_], key, heap_);
+                VmResult result = Access::prop_set(stack_[sp_ - 1], stack_[sp_], key, runtime_);
                 if (!result) {
                     if (!handle_error(result.error(), pc_ - 1)) {
                         return std::unexpected(result.error());
@@ -1196,7 +1159,7 @@ VmResult InterpreterVm::exec_sync() {
                     const_cast<char *>(name ? name->data() : ""),
                     name ? name->size() : 0);
                 --sp_;
-                VmResult result = Access::prop_set1(stack_[sp_ - 1], stack_[sp_], key, heap_);
+                VmResult result = Access::prop_set1(stack_[sp_ - 1], stack_[sp_], key, runtime_);
                 if (!result) {
                     if (!handle_error(result.error(), pc_ - 1)) {
                         return std::unexpected(result.error());
@@ -1256,7 +1219,7 @@ VmResult InterpreterVm::exec_sync() {
             }
             case ir::Code::ITERATE_INTO: {
                 std::size_t idx = static_cast<std::size_t>(instr >> kInstrumentLen);
-                VmResult result = Unaries::iterate(stack_[--sp_], heap_);
+                VmResult result = Unaries::iterate(stack_[--sp_], runtime_);
                 if (!result) {
                     if (!handle_error(result.error(), pc_ - 1)) {
                         return std::unexpected(result.error());
@@ -1271,7 +1234,7 @@ VmResult InterpreterVm::exec_sync() {
                 auto *iter = reinterpret_cast<fiber::json::GcIterator *>(vars_[idx].gc);
                 fiber::json::JsValue out;
                 bool done = true;
-                bool ok = fiber::json::gc_iterator_next(heap_, iter, out, done);
+                bool ok = fiber::json::gc_iterator_next(&runtime_.heap(), iter, out, done);
                 stack_[sp_++] = fiber::json::JsValue::make_boolean(ok && !done);
                 break;
             }
@@ -1548,22 +1511,16 @@ VmResult InterpreterVm::load_const(std::size_t operand_index) {
             value = fiber::json::JsValue::make_float(cv->float_value);
             break;
         case ir::Compiled::ConstValue::Kind::String: {
-            if (!heap_) {
-                return std::unexpected(make_heap_required(-1));
-            }
             maybe_collect();
-            value = fiber::json::JsValue::make_string(*heap_, cv->text.data(), cv->text.size());
+            value = fiber::json::JsValue::make_string(runtime_.heap(), cv->text.data(), cv->text.size());
             if (value.type_ != fiber::json::JsNodeType::HeapString) {
                 return std::unexpected(make_oom(-1));
             }
             break;
         }
         case ir::Compiled::ConstValue::Kind::Binary: {
-            if (!heap_) {
-                return std::unexpected(make_heap_required(-1));
-            }
             maybe_collect();
-            value = fiber::json::JsValue::make_binary(*heap_, cv->bytes.data(), cv->bytes.size());
+            value = fiber::json::JsValue::make_binary(runtime_.heap(), cv->bytes.data(), cv->bytes.size());
             if (value.type_ != fiber::json::JsNodeType::HeapBinary) {
                 return std::unexpected(make_oom(-1));
             }
@@ -1576,22 +1533,19 @@ VmResult InterpreterVm::load_const(std::size_t operand_index) {
 }
 
 VmResult InterpreterVm::make_exception_value(const VmError &error) {
-    if (!heap_) {
-        return std::unexpected(make_heap_required(error.position));
-    }
     maybe_collect();
     std::string name = error.name.empty() ? "EXEC_ERROR" : error.name;
     std::string message = error.message.empty() ? "script error" : error.message;
-    fiber::json::GcString *name_str = fiber::json::gc_new_string(heap_, name.c_str(), name.size());
+    fiber::json::GcString *name_str = fiber::json::gc_new_string(&runtime_.heap(), name.c_str(), name.size());
     if (!name_str) {
         return std::unexpected(make_oom(error.position));
     }
-    fiber::json::GcString *message_str = fiber::json::gc_new_string(heap_, message.c_str(), message.size());
+    fiber::json::GcString *message_str = fiber::json::gc_new_string(&runtime_.heap(), message.c_str(), message.size());
     if (!message_str) {
         return std::unexpected(make_oom(error.position));
     }
     fiber::json::GcException *exc =
-        fiber::json::gc_new_exception(heap_, error.position, name_str, message_str, error.meta);
+        fiber::json::gc_new_exception(&runtime_.heap(), error.position, name_str, message_str, error.meta);
     if (!exc) {
         return std::unexpected(make_oom(error.position));
     }
@@ -1623,13 +1577,14 @@ VmError InterpreterVm::make_error_from_value(const fiber::json::JsValue &value) 
         }
         return error;
     }
-    if (value.type_ == fiber::json::JsNodeType::Object && value.gc && heap_) {
+    if (value.type_ == fiber::json::JsNodeType::Object && value.gc) {
+        maybe_collect();
         auto *obj = reinterpret_cast<const fiber::json::GcObject *>(value.gc);
         const char *keys[] = {"name", "message", "status", "meta"};
-        fiber::json::GcString *name_key = fiber::json::gc_new_string(heap_, keys[0], 4);
-        fiber::json::GcString *msg_key = fiber::json::gc_new_string(heap_, keys[1], 7);
-        fiber::json::GcString *status_key = fiber::json::gc_new_string(heap_, keys[2], 6);
-        fiber::json::GcString *meta_key = fiber::json::gc_new_string(heap_, keys[3], 4);
+        fiber::json::GcString *name_key = fiber::json::gc_new_string(&runtime_.heap(), keys[0], 4);
+        fiber::json::GcString *msg_key = fiber::json::gc_new_string(&runtime_.heap(), keys[1], 7);
+        fiber::json::GcString *status_key = fiber::json::gc_new_string(&runtime_.heap(), keys[2], 6);
+        fiber::json::GcString *meta_key = fiber::json::gc_new_string(&runtime_.heap(), keys[3], 4);
         const fiber::json::JsValue *name_val = name_key ? fiber::json::gc_object_get(obj, name_key) : nullptr;
         const fiber::json::JsValue *msg_val = msg_key ? fiber::json::gc_object_get(obj, msg_key) : nullptr;
         const fiber::json::JsValue *status_val = status_key ? fiber::json::gc_object_get(obj, status_key) : nullptr;
@@ -1660,13 +1615,7 @@ VmError InterpreterVm::make_error_from_value(const fiber::json::JsValue &value) 
 }
 
 bool InterpreterVm::maybe_collect() {
-    if (!heap_ || !roots_) {
-        return true;
-    }
-    if (heap_->bytes < heap_->threshold) {
-        return true;
-    }
-    roots_->collect(*heap_);
+    runtime_.maybe_collect();
     return true;
 }
 
