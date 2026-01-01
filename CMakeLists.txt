@@ -68,6 +68,7 @@ if(FIBER_BUILD_TESTS)
         tests/ScriptCompilerTest.cpp
         tests/ScriptRuntimeOpsTest.cpp
         tests/ScriptExecutionTest.cpp
+        tests/ScriptPlanTest.cpp
     )
     target_link_libraries(fiber_tests PRIVATE fiber_lib GTest::gtest_main)
     include(GoogleTest)

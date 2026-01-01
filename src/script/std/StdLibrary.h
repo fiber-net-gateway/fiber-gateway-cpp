@@ -26,7 +26,7 @@ public:
     void register_async_constant(std::string name, AsyncConstant *constant);
 
 private:
-    StdLibrary() = default;
+    StdLibrary();
 
     std::unordered_map<std::string, Function *> functions_;
     std::unordered_map<std::string, AsyncFunction *> async_functions_;

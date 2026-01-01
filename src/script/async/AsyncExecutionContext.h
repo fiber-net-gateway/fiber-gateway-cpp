@@ -11,7 +11,7 @@ class AsyncExecutionContext : public ExecutionContext {
 public:
     ~AsyncExecutionContext() override = default;
 
-    virtual ScriptRuntime &runtime() = 0;
+    ScriptRuntime &runtime() override = 0;
     virtual void return_value(const fiber::json::JsValue &value) = 0;
     virtual void throw_value(const fiber::json::JsValue &value) = 0;
 };

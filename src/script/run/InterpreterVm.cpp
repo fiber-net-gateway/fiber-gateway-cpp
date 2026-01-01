@@ -1444,6 +1444,10 @@ VmResult InterpreterVm::exec_sync() {
     return std::unexpected(make_error("EXEC_NO_RETURN", "no return instruction", -1));
 }
 
+ScriptRuntime &InterpreterVm::runtime() {
+    return runtime_;
+}
+
 const fiber::json::JsValue &InterpreterVm::root() const {
     return root_;
 }
