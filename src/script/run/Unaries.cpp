@@ -85,6 +85,7 @@ VmResult Unaries::typeof_op(const fiber::json::JsValue &value, ScriptRuntime &ru
         case fiber::json::JsNodeType::NativeString:
             return make_typeof_value("string");
         case fiber::json::JsNodeType::Array:
+            return make_typeof_value("array");
         case fiber::json::JsNodeType::Object:
             return make_typeof_value("object");
         case fiber::json::JsNodeType::Interator:

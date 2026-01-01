@@ -8,10 +8,13 @@
 
 namespace fiber::script {
 
+class ScriptRuntime;
+
 class ExecutionContext {
 public:
     virtual ~ExecutionContext() = default;
 
+    virtual ScriptRuntime &runtime() = 0;
     virtual const fiber::json::JsValue &root() const = 0;
     virtual void *attach() const = 0;
     virtual const fiber::json::JsValue &arg_value(std::size_t index) const = 0;

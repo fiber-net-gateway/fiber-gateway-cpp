@@ -2,6 +2,8 @@
 
 namespace fiber::script::std_lib {
 
+void register_std_library(StdLibrary &library);
+
 namespace {
 std::string make_constant_key(std::string_view ns, std::string_view key) {
     std::string name;
@@ -16,6 +18,10 @@ std::string make_constant_key(std::string_view ns, std::string_view key) {
 StdLibrary &StdLibrary::instance() {
     static StdLibrary inst;
     return inst;
+}
+
+StdLibrary::StdLibrary() {
+    register_std_library(*this);
 }
 
 Library::Function *StdLibrary::find_func(std::string_view name) {

@@ -238,6 +238,270 @@ public:
 - If an op must allocate multiple objects and may need GC mid-op, it must protect all temporary `JsValue` with temp-root guards.
 - Never do "allocate -> collect -> retry" inside ops unless every intermediate value is already rooted.
 
+## Test Plan (Java Parity)
+### Harness Assumptions
+Tests execute via Script (parse → compile → VM). Standard library packages (`array`, `Object`, `strings`, `binary`, `hash`, `JSON`, `math`, `rand`, `time`, `url`) are registered in the runtime. Host objects used by examples (e.g. `req`, directive packages) are stubbed in tests with deterministic behavior.
+
+### Core Language Coverage
+- Literals + typeof: verify number/string/boolean/null/missing/object/array/binary typing.
+```javascript
+let num = 1;
+let txt = "this is string";
+let bin = req.readBinary();
+let boo = true;
+let nul = null;
+let obj = {n:num};
+let mis = obj.cc;
+let arr = [1,2,num];
+let result = {num, txt, bin, nul, obj, boo, mis, arr};
+let types = {};
+for (let k, v of result) { types[k] = typeof v; }
+return {types, result};
+```
+Expect: types map matches `number/string/binary/boolean/null/object/missing/array`.
+
+- Arithmetic + precedence: numeric operators and precedence.
+```javascript
+return 1 + 2 * 3 - 4 / 2 + (5 % 2);
+```
+Expect: result is `1 + 6 - 2 + 1 = 6`.
+
+- String concat and coercion (number + string).
+```javascript
+return 1 + "a" + 2;
+```
+Expect: `"1a2"`.
+
+- Logical && and || short-circuit.
+```javascript
+let v = 0;
+let a = v && (v = 2);
+let b = v || (v = 3);
+return {a, b, v};
+```
+Expect: `{a:0, b:3, v:3}` (right side of `&&` not evaluated).
+
+- Comparisons + equality (`==` vs `===`, `!=` vs `!==`).
+```javascript
+return {
+  a: 1 == "1",
+  b: 1 === "1",
+  c: 1 != "1",
+  d: 1 !== "1"
+};
+```
+Expect: `{a:true, b:false, c:false, d:true}`.
+
+- `in` operator with object.
+```javascript
+let obj = {n:1};
+return {t: "n" in obj, f: "x" in obj};
+```
+Expect: `{t:true, f:false}`.
+
+- Unary ops: `+`, `-`, `!`, `typeof`.
+```javascript
+return {a:+("3"), b:-(2), c:!0, d:typeof null};
+```
+Expect: `{a:3, b:-2, c:true, d:"null"}`.
+
+- Ternary.
+```javascript
+return (1 > 2) ? "no" : "yes";
+```
+Expect: `"yes"`.
+
+- Array/object literals + access + assignment.
+```javascript
+let o = {a:1};
+let a = [o.a, 2];
+o.a = 3;
+a[1] = 4;
+return {o, a};
+```
+Expect: `{o:{a:3}, a:[1,4]}`.
+
+- Spread in array/object and call.
+```javascript
+let a = [1,2];
+let b = [0, ...a, 3];
+let o = {a:1};
+let p = {z:0, ...o, b:2};
+return {b, p, sum: add(...b)};
+```
+Expect: `b` = `[0,1,2,3]`, `p` has keys `z,a,b`, `sum` equals `6` (host `add` stub).
+
+- if/else + return.
+```javascript
+let v = 2;
+if (v > 1) { return "big"; }
+return "small";
+```
+Expect: `"big"`.
+
+- for-of over array with break/continue.
+```javascript
+let arr = [10, 20, 30];
+let out = [];
+for (let i, v of arr) {
+  if (i == 0) { continue; }
+  out.push(v);
+  break;
+}
+return out;
+```
+Expect: `[20]`.
+
+- for-of over object keys/values.
+```javascript
+let obj = {a:1, b:2};
+let out = {};
+for (let k, v of obj) { out[k] = v + 1; }
+return out;
+```
+Expect: `{a:2, b:3}` (iteration order aligned with Java impl).
+
+- try/catch + throw (string and object).
+```javascript
+try { throw "err"; } catch (e) { return e; }
+```
+Expect: `"err"`.
+
+```javascript
+let obj = {a:1};
+try { throw obj; } catch (e) { return e === obj; }
+```
+Expect: `true`.
+
+- Directive statement + package call (stubbed package).
+```javascript
+directive demoService from dubbo "com.test.dubbo.DemoService";
+return demoService.createUser("name");
+```
+Expect: matches stubbed package return.
+
+### Standard Library Coverage
+- length/includes.
+```javascript
+return {
+  a: length("abc") === 3,
+  b: length({a:1,b:2}) === 2,
+  c: length([1,2,3]) === 3,
+  d: length(1) === 0,
+  e: includes("abcabc", "cab") === true,
+  f: includes(["aa","bb","cc"], "aa") === true,
+  g: includes({a:1}, "a") === false
+};
+```
+Expect: all fields true.
+
+- array.push/pop/join.
+```javascript
+let a = [1,2];
+let b = array.push(a, 3, 4);
+let c = array.pop(a);
+return {same: a === b, c, join: array.join(a, "-"), len: length(a)};
+```
+Expect: `{same:true, c:4, join:"1-2-3", len:3}`.
+
+- Object.assign/keys/values/deleteProperties.
+```javascript
+let a = {a:1,b:2};
+Object.assign(a, {c:3});
+let keys = Object.keys(a);
+let values = Object.values(a);
+Object.deleteProperties(a, "a", "x");
+return {len:length(a), a:a.a, keys, values};
+```
+Expect: `len` is 2, `a` is missing, `keys` and `values` include `b,c`.
+
+- strings.* core set.
+```javascript
+return {
+  prefix: strings.hasPrefix("abcdedf", "abc"),
+  suffix: strings.hasSuffix("abcdedf", "edf"),
+  lower: strings.toLower("AbC") === "abc",
+  upper: strings.toUpper("AbC") === "ABC",
+  trim: strings.trim("  \tabc\t ") === "abc",
+  split: strings.split("abcecdf", "c")[1] === "e",
+  contains: strings.contains("abcd-effe-ssf-fd", "e-ssf"),
+  index: strings.index("aabbcc", "bcc") === 3,
+  last: strings.lastIndex("cabcd", "c") === 3,
+  repeat: strings.repeat("acd", 3) === "acdacdacd",
+  match: strings.match("aaabbbbccc", "a+b+c+"),
+  substring: strings.substring("0123456789", 3, 6) === "345"
+};
+```
+Expect: all fields true.
+
+- binary.* + hash.* (stable vectors).
+```javascript
+let bin = binary.base64Decode("AQID");
+return {
+  b64: binary.base64Encode(bin) === "AQID",
+  hex: binary.hex(bin) === "010203",
+  crc: hash.crc32("abc") === 891568578,
+  md5: hash.md5("abc") === "900150983cd24fb0d6963f7d28e17f72",
+  sha1: hash.sha1("abc") === "a9993e364706816aba3e25717850c26c9cd0d89d",
+  sha256: hash.sha256("abc") === "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+};
+```
+Expect: all fields true.
+
+- JSON.parse/stringify.
+```javascript
+let obj = JSON.parse("{\"a\":1,\"b\":[2,3]}");
+return JSON.stringify(obj) === "{\"a\":1,\"b\":[2,3]}";
+```
+Expect: `true`.
+
+- math.*.
+```javascript
+return {a: math.floor(3.9) === 3, b: math.abs(-4) === 4};
+```
+Expect: all fields true.
+
+- rand.* (deterministic stub for tests).
+```javascript
+return {a: rand.canary("42") === 42, b: rand.random() >= 0};
+```
+Expect: `a` true, `b` true (random stubbed).
+
+- time.* (fixed clock stub).
+```javascript
+return time.format(1700000000, "yyyy-MM-dd") === "2023-11-14";
+```
+Expect: `true` for fixed clock.
+
+- url.*.
+```javascript
+let q = url.parseQuery("a=1&b=2");
+return url.buildQuery(q) === "a=1&b=2"
+  && url.encodeComponent("a b") === "a%20b"
+  && url.decodeComponent("a%20b") === "a b";
+```
+Expect: `true`.
+
+### Error and Edge Coverage
+- Missing property yields `missing` type.
+```javascript
+let o = {};
+return typeof o.miss;
+```
+Expect: `"missing"`.
+
+- Invalid operand or builtin type mismatch throws (positioned error).
+```javascript
+array.push(1, 2);
+```
+Expect: throws error with accurate position.
+
+- Syntax errors include position.
+```javascript
+let a = [1, 2;
+```
+Expect: parse error with line/column.
+
 ## GcHeap / GcRootSet / Runtime Interfaces
 ### GcHeap (memory only, no root ownership)
 ```

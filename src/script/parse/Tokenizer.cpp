@@ -275,6 +275,17 @@ std::expected<std::size_t, ParseError> Tokenizer::scan_escape(char quote) {
     int length = 0;
     int base = 0;
     switch (chr) {
+        case 'a':
+        case '\'':
+        case '\"':
+        case 'b':
+        case 'f':
+        case 'n':
+        case 'r':
+        case 't':
+        case 'v':
+        case '\\':
+            return 1;
         case '0':
         case '1':
         case '2':
@@ -286,16 +297,6 @@ std::expected<std::size_t, ParseError> Tokenizer::scan_escape(char quote) {
             length = 3;
             base = 8;
             break;
-        case 'a':
-        case '\'':
-        case '\"':
-        case 'b':
-        case 'f':
-        case 'n':
-        case 'r':
-        case 't':
-        case 'v':
-        case '\\':
         case 'x':
             p = pos_ + 1;
             length = 2;

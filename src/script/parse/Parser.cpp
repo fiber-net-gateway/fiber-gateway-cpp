@@ -390,7 +390,11 @@ std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_directi
         return std::unexpected(name_result.error());
     }
     if (!peek(TokenKind::Assign, true)) {
-        return std::unexpected(make_error("directive missing '='", peek()));
+        const Token *token = peek();
+        if (!token || token->kind != TokenKind::Identifier || token->text != "from") {
+            return std::unexpected(make_error("directive missing '='", peek()));
+        }
+        next();
     }
     auto type_result = parse_identifier_token();
     if (!type_result) {

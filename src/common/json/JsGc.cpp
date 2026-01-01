@@ -1123,6 +1123,7 @@ bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done) 
             case GcIteratorMode::Values:
                 out = arr->elems[idx];
                 iter->current_value = out;
+                iter->current_key = JsValue::make_integer(static_cast<int64_t>(idx));
                 iter->has_current = true;
                 return true;
             case GcIteratorMode::Entries: {
@@ -1168,6 +1169,7 @@ bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done) 
             case GcIteratorMode::Values:
                 out = value;
                 iter->current_value = out;
+                iter->current_key = key_value;
                 iter->has_current = true;
                 return true;
             case GcIteratorMode::Entries:
@@ -1199,6 +1201,7 @@ bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done) 
             case GcIteratorMode::Values:
                 out = entry.value;
                 iter->current_value = out;
+                iter->current_key = key_value;
                 iter->has_current = true;
                 return true;
             case GcIteratorMode::Entries:

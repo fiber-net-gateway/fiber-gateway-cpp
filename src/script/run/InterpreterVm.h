@@ -34,6 +34,7 @@ public:
     AsyncExecState exec_async(AsyncExecutionContext &context, VmResult &out);
     VmResult exec_sync();
 
+    ScriptRuntime &runtime() override;
     const fiber::json::JsValue &root() const override;
     void *attach() const override;
     const fiber::json::JsValue &arg_value(std::size_t index) const override;
