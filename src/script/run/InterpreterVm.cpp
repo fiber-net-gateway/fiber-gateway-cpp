@@ -29,35 +29,12 @@ VmError make_oom(std::int64_t position) {
     return make_error("EXEC_OUT_OF_MEMORY", "out of memory", position);
 }
 
-bool value_to_string(const fiber::json::JsValue &value, std::string &out) {
-    if (value.type_ == fiber::json::JsNodeType::NativeString) {
-        out.assign(value.ns.data, value.ns.len);
-        return true;
-    }
-    if (value.type_ == fiber::json::JsNodeType::HeapString) {
-        auto *str = reinterpret_cast<const fiber::json::GcString *>(value.gc);
-        return fiber::json::gc_string_to_utf8(str, out);
-    }
-    return false;
-}
-
-bool value_to_status(const fiber::json::JsValue &value, int &out) {
-    switch (value.type_) {
-        case fiber::json::JsNodeType::Integer:
-            out = static_cast<int>(value.i);
-            return true;
-        case fiber::json::JsNodeType::Float:
-            out = static_cast<int>(value.f);
-            return true;
-        case fiber::json::JsNodeType::Boolean:
-            out = value.b ? 1 : 0;
-            return true;
-        case fiber::json::JsNodeType::Null:
-            out = 0;
-            return true;
-        default:
-            return false;
-    }
+VmError make_throw_error() {
+    VmError error;
+    error.kind = VmErrorKind::Thrown;
+    error.name = "EXEC_THROW";
+    error.message = "script throw";
+    return error;
 }
 
 } // namespace
@@ -84,10 +61,33 @@ InterpreterVm::~InterpreterVm() {
     runtime_.roots().remove_provider(this);
 }
 
-async::Task<VmResult> InterpreterVm::exec_async() {
-    reset_state();
+InterpreterVm::AsyncExecState InterpreterVm::exec_async(AsyncExecutionContext &context, VmResult &out) {
+    if (!async_started_) {
+        reset_state();
+        async_started_ = true;
+    }
+    if (async_pending_ && !async_ready_) {
+        return AsyncExecState::Pending;
+    }
+    if (async_pending_ && async_ready_) {
+        if (!apply_async_ready(out)) {
+            async_started_ = false;
+            return AsyncExecState::Done;
+        }
+    }
+    auto finish_error = [&](VmError error) {
+        out = std::unexpected(std::move(error));
+        async_started_ = false;
+        return AsyncExecState::Done;
+    };
     const auto &codes = compiled_.codes;
     while (pc_ < codes.size()) {
+        if (async_pending_ && async_ready_) {
+            if (!apply_async_ready(out)) {
+                async_started_ = false;
+                return AsyncExecState::Done;
+            }
+        }
         std::int32_t instr = codes[pc_++];
         std::uint8_t op = static_cast<std::uint8_t>(instr & 0xFF);
         switch (op) {
@@ -98,7 +98,9 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                 VmResult loaded = load_const(idx);
                 if (!loaded) {
                     if (!handle_error(loaded.error(), pc_ - 1)) {
-                        co_return std::unexpected(loaded.error());
+                        out = std::unexpected(loaded.error());
+                        async_started_ = false;
+                        return AsyncExecState::Done;
                     }
                     continue;
                 }
@@ -129,7 +131,9 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Binaries::plus(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            out = std::unexpected(result.error());
+                            async_started_ = false;
+                            return AsyncExecState::Done;
                         }
                         continue;
                     }
@@ -142,7 +146,9 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Binaries::minus(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            out = std::unexpected(result.error());
+                            async_started_ = false;
+                            return AsyncExecState::Done;
                         }
                         continue;
                     }
@@ -155,7 +161,9 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Binaries::multiply(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            out = std::unexpected(result.error());
+                            async_started_ = false;
+                            return AsyncExecState::Done;
                         }
                         continue;
                     }
@@ -168,7 +176,9 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Binaries::divide(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            out = std::unexpected(result.error());
+                            async_started_ = false;
+                            return AsyncExecState::Done;
                         }
                         continue;
                     }
@@ -181,7 +191,9 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Binaries::modulo(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            out = std::unexpected(result.error());
+                            async_started_ = false;
+                            return AsyncExecState::Done;
                         }
                         continue;
                     }
@@ -194,7 +206,9 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Binaries::matches(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            out = std::unexpected(result.error());
+                            async_started_ = false;
+                            return AsyncExecState::Done;
                         }
                         continue;
                     }
@@ -207,7 +221,9 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Binaries::lt(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            out = std::unexpected(result.error());
+                            async_started_ = false;
+                            return AsyncExecState::Done;
                         }
                         continue;
                     }
@@ -220,7 +236,9 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Binaries::lte(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            out = std::unexpected(result.error());
+                            async_started_ = false;
+                            return AsyncExecState::Done;
                         }
                         continue;
                     }
@@ -233,7 +251,9 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Binaries::gt(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            out = std::unexpected(result.error());
+                            async_started_ = false;
+                            return AsyncExecState::Done;
                         }
                         continue;
                     }
@@ -246,7 +266,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Binaries::gte(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            return finish_error(result.error());
                         }
                         continue;
                     }
@@ -259,7 +279,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Binaries::eq(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            return finish_error(result.error());
                         }
                         continue;
                     }
@@ -272,7 +292,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Binaries::seq(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            return finish_error(result.error());
                         }
                         continue;
                     }
@@ -285,7 +305,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Binaries::ne(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            return finish_error(result.error());
                         }
                         continue;
                     }
@@ -298,7 +318,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Binaries::sne(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            return finish_error(result.error());
                         }
                         continue;
                     }
@@ -311,7 +331,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Binaries::in(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            return finish_error(result.error());
                         }
                         continue;
                     }
@@ -323,7 +343,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Unaries::plus(stack_[sp_ - 1]);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            return finish_error(result.error());
                         }
                         continue;
                     }
@@ -335,7 +355,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Unaries::minus(stack_[sp_ - 1]);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            return finish_error(result.error());
                         }
                         continue;
                     }
@@ -347,7 +367,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Unaries::neg(stack_[sp_ - 1]);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            return finish_error(result.error());
                         }
                         continue;
                     }
@@ -359,7 +379,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Unaries::typeof_op(stack_[sp_ - 1], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            return finish_error(result.error());
                         }
                         continue;
                     }
@@ -372,7 +392,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                 if (obj.type_ != fiber::json::JsNodeType::Object) {
                     VmError error = make_oom(compiled_.positions[pc_ - 1]);
                     if (!handle_error(error, pc_ - 1)) {
-                        co_return std::unexpected(error);
+                        return finish_error(error);
                     }
                     continue;
                 }
@@ -385,7 +405,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                 if (arr.type_ != fiber::json::JsNodeType::Array) {
                     VmError error = make_oom(compiled_.positions[pc_ - 1]);
                     if (!handle_error(error, pc_ - 1)) {
-                        co_return std::unexpected(error);
+                        return finish_error(error);
                     }
                     continue;
                 }
@@ -398,7 +418,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Access::expand_object(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            return finish_error(result.error());
                         }
                         continue;
                     }
@@ -411,7 +431,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Access::expand_array(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            return finish_error(result.error());
                         }
                         continue;
                     }
@@ -424,7 +444,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Access::push_array(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            return finish_error(result.error());
                         }
                         continue;
                     }
@@ -437,7 +457,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Access::index_get(stack_[sp_ - 1], stack_[sp_], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            return finish_error(result.error());
                         }
                         continue;
                     }
@@ -450,7 +470,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Access::index_set(stack_[sp_ - 1], stack_[sp_], stack_[sp_ + 1], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            return finish_error(result.error());
                         }
                         continue;
                     }
@@ -463,7 +483,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmResult result = Access::index_set1(stack_[sp_ - 1], stack_[sp_], stack_[sp_ + 1], runtime_);
                     if (!result) {
                         if (!handle_error(result.error(), pc_ - 1)) {
-                            co_return std::unexpected(result.error());
+                            return finish_error(result.error());
                         }
                         continue;
                     }
@@ -478,7 +498,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                 VmResult result = Access::prop_get(stack_[sp_ - 1], key, runtime_);
                 if (!result) {
                     if (!handle_error(result.error(), pc_ - 1)) {
-                        co_return std::unexpected(result.error());
+                        return finish_error(result.error());
                     }
                     continue;
                 }
@@ -495,7 +515,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                 VmResult result = Access::prop_set(stack_[sp_ - 1], stack_[sp_], key, runtime_);
                 if (!result) {
                     if (!handle_error(result.error(), pc_ - 1)) {
-                        co_return std::unexpected(result.error());
+                        return finish_error(result.error());
                     }
                     continue;
                 }
@@ -512,7 +532,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                 VmResult result = Access::prop_set1(stack_[sp_ - 1], stack_[sp_], key, runtime_);
                 if (!result) {
                     if (!handle_error(result.error(), pc_ - 1)) {
-                        co_return std::unexpected(result.error());
+                        return finish_error(result.error());
                     }
                     continue;
                 }
@@ -524,15 +544,44 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                 auto *function = static_cast<Library::Function *>(compiled_.operands[func_index]);
                 sp_ -= arg_count;
                 set_args_for_ctx(sp_, arg_count);
-                stack_[sp_++] = function ? function->call(*this) : fiber::json::JsValue::make_undefined();
+                if (!function) {
+                    stack_[sp_++] = fiber::json::JsValue::make_undefined();
+                    break;
+                }
+                auto result = function->call(*this);
+                if (!result) {
+                    thrown_ = result.error();
+                    has_thrown_ = true;
+                    VmError error = make_throw_error();
+                    if (!handle_error(error, pc_ - 1)) {
+                        return finish_error(error);
+                    }
+                    continue;
+                }
+                stack_[sp_++] = result.value();
                 break;
             }
             case ir::Code::CALL_FUNC_SPREAD: {
                 std::size_t func_index = static_cast<std::size_t>(instr >> 8);
                 auto *function = static_cast<Library::Function *>(compiled_.operands[func_index]);
                 set_args_for_ctx(stack_[sp_ - 1]);
-                stack_[sp_ - 1] = function ? function->call(*this) : fiber::json::JsValue::make_undefined();
+                if (!function) {
+                    stack_[sp_ - 1] = fiber::json::JsValue::make_undefined();
+                    clear_args();
+                    break;
+                }
+                auto result = function->call(*this);
                 clear_args();
+                if (!result) {
+                    thrown_ = result.error();
+                    has_thrown_ = true;
+                    VmError error = make_throw_error();
+                    if (!handle_error(error, pc_ - 1)) {
+                        return finish_error(error);
+                    }
+                    continue;
+                }
+                stack_[sp_ - 1] = result.value();
                 break;
             }
             case ir::Code::CALL_ASYNC_FUNC: {
@@ -545,23 +594,26 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmError error = make_error("EXEC_FUNC_NOT_FOUND", "async function not found",
                                                compiled_.positions[pc_ - 1]);
                     if (!handle_error(error, pc_ - 1)) {
-                        co_return std::unexpected(error);
+                        return finish_error(error);
                     }
                     continue;
                 }
-                async::Task<fiber::json::JsValue> task = function->call(*this);
-                if (scheduler_) {
-                    task.set_scheduler(scheduler_);
+                async_pending_ = true;
+                async_ready_ = false;
+                async_is_throw_ = false;
+                async_resume_.kind = AsyncResumePoint::Kind::PushResult;
+                async_resume_.slot = sp_;
+                async_resume_.sp_after = sp_ + 1;
+                async_resume_.epc = pc_ - 1;
+                async_resume_.clear_args = false;
+                function->call(context);
+                if (!async_ready_) {
+                    return AsyncExecState::Pending;
                 }
-                auto result = co_await task;
-                if (!result) {
-                    VmError error = make_error("EXEC_ASYNC_ERROR", result.error().message, compiled_.positions[pc_ - 1]);
-                    if (!handle_error(error, pc_ - 1)) {
-                        co_return std::unexpected(error);
-                    }
-                    continue;
+                if (!apply_async_ready(out)) {
+                    async_started_ = false;
+                    return AsyncExecState::Done;
                 }
-                stack_[sp_++] = result.value();
                 break;
             }
             case ir::Code::CALL_ASYNC_FUNC_SPREAD: {
@@ -573,30 +625,46 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                                                compiled_.positions[pc_ - 1]);
                     clear_args();
                     if (!handle_error(error, pc_ - 1)) {
-                        co_return std::unexpected(error);
+                        return finish_error(error);
                     }
                     continue;
                 }
-                async::Task<fiber::json::JsValue> task = function->call(*this);
-                if (scheduler_) {
-                    task.set_scheduler(scheduler_);
+                async_pending_ = true;
+                async_ready_ = false;
+                async_is_throw_ = false;
+                async_resume_.kind = AsyncResumePoint::Kind::ReplaceTop;
+                async_resume_.slot = sp_ - 1;
+                async_resume_.sp_after = sp_;
+                async_resume_.epc = pc_ - 1;
+                async_resume_.clear_args = true;
+                function->call(context);
+                if (!async_ready_) {
+                    return AsyncExecState::Pending;
                 }
-                auto result = co_await task;
-                clear_args();
-                if (!result) {
-                    VmError error = make_error("EXEC_ASYNC_ERROR", result.error().message, compiled_.positions[pc_ - 1]);
-                    if (!handle_error(error, pc_ - 1)) {
-                        co_return std::unexpected(error);
-                    }
-                    continue;
+                if (!apply_async_ready(out)) {
+                    async_started_ = false;
+                    return AsyncExecState::Done;
                 }
-                stack_[sp_ - 1] = result.value();
                 break;
             }
             case ir::Code::CALL_CONST: {
                 std::size_t const_index = static_cast<std::size_t>(instr >> 8);
                 auto *constant = static_cast<Library::Constant *>(compiled_.operands[const_index]);
-                stack_[sp_++] = constant ? constant->get(*this) : fiber::json::JsValue::make_undefined();
+                if (!constant) {
+                    stack_[sp_++] = fiber::json::JsValue::make_undefined();
+                    break;
+                }
+                auto result = constant->get(*this);
+                if (!result) {
+                    thrown_ = result.error();
+                    has_thrown_ = true;
+                    VmError error = make_throw_error();
+                    if (!handle_error(error, pc_ - 1)) {
+                        return finish_error(error);
+                    }
+                    continue;
+                }
+                stack_[sp_++] = result.value();
                 break;
             }
             case ir::Code::CALL_ASYNC_CONST: {
@@ -606,23 +674,26 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     VmError error = make_error("EXEC_CONST_NOT_FOUND", "async constant not found",
                                                compiled_.positions[pc_ - 1]);
                     if (!handle_error(error, pc_ - 1)) {
-                        co_return std::unexpected(error);
+                        return finish_error(error);
                     }
                     continue;
                 }
-                async::Task<fiber::json::JsValue> task = constant->get(*this);
-                if (scheduler_) {
-                    task.set_scheduler(scheduler_);
+                async_pending_ = true;
+                async_ready_ = false;
+                async_is_throw_ = false;
+                async_resume_.kind = AsyncResumePoint::Kind::PushResult;
+                async_resume_.slot = sp_;
+                async_resume_.sp_after = sp_ + 1;
+                async_resume_.epc = pc_ - 1;
+                async_resume_.clear_args = false;
+                constant->get(context);
+                if (!async_ready_) {
+                    return AsyncExecState::Pending;
                 }
-                auto result = co_await task;
-                if (!result) {
-                    VmError error = make_error("EXEC_ASYNC_ERROR", result.error().message, compiled_.positions[pc_ - 1]);
-                    if (!handle_error(error, pc_ - 1)) {
-                        co_return std::unexpected(error);
-                    }
-                    continue;
+                if (!apply_async_ready(out)) {
+                    async_started_ = false;
+                    return AsyncExecState::Done;
                 }
-                stack_[sp_++] = result.value();
                 break;
             }
             case ir::Code::JUMP:
@@ -647,7 +718,7 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                 VmResult result = Unaries::iterate(stack_[--sp_], runtime_);
                 if (!result) {
                     if (!handle_error(result.error(), pc_ - 1)) {
-                        co_return std::unexpected(result.error());
+                        return finish_error(result.error());
                     }
                     continue;
                 }
@@ -687,10 +758,18 @@ async::Task<VmResult> InterpreterVm::exec_async() {
             }
             case ir::Code::INTO_CATCH: {
                 std::size_t idx = static_cast<std::size_t>(instr >> kInstrumentLen);
+                if (pending_error_.kind == VmErrorKind::Thrown) {
+                    vars_[idx] = thrown_;
+                    has_error_ = false;
+                    pending_error_ = VmError{};
+                    has_thrown_ = false;
+                    thrown_ = fiber::json::JsValue::make_undefined();
+                    break;
+                }
                 VmResult exc = make_exception_value(pending_error_);
                 if (!exc) {
                     if (!handle_error(exc.error(), pc_ - 1)) {
-                        co_return std::unexpected(exc.error());
+                        return finish_error(exc.error());
                     }
                     continue;
                 }
@@ -706,29 +785,35 @@ async::Task<VmResult> InterpreterVm::exec_async() {
                     return_value_ = fiber::json::JsValue::make_undefined();
                 }
                 has_return_ = true;
-                co_return return_value_;
+                out = return_value_;
+                async_started_ = false;
+                return AsyncExecState::Done;
             }
             case ir::Code::THROW_EXP: {
                 fiber::json::JsValue thrown = stack_[--sp_];
-                VmError error = make_error_from_value(thrown);
+                thrown_ = thrown;
+                has_thrown_ = true;
+                VmError error = make_throw_error();
                 if (!handle_error(error, pc_ - 1)) {
-                    co_return std::unexpected(error);
+                    return finish_error(error);
                 }
                 break;
             }
             default: {
                 VmError error = make_error("EXEC_UNKNOWN_OPCODE", "unknown opcode", compiled_.positions[pc_ - 1]);
                 if (!handle_error(error, pc_ - 1)) {
-                    co_return std::unexpected(error);
+                    return finish_error(error);
                 }
                 break;
             }
         }
     }
     if (has_return_) {
-        co_return return_value_;
+        out = return_value_;
+        async_started_ = false;
+        return AsyncExecState::Done;
     }
-    co_return std::unexpected(make_error("EXEC_NO_RETURN", "no return instruction", -1));
+    return finish_error(make_error("EXEC_NO_RETURN", "no return instruction", -1));
 }
 
 VmResult InterpreterVm::exec_sync() {
@@ -1174,15 +1259,44 @@ VmResult InterpreterVm::exec_sync() {
                 auto *function = static_cast<Library::Function *>(compiled_.operands[func_index]);
                 sp_ -= arg_count;
                 set_args_for_ctx(sp_, arg_count);
-                stack_[sp_++] = function ? function->call(*this) : fiber::json::JsValue::make_undefined();
+                if (!function) {
+                    stack_[sp_++] = fiber::json::JsValue::make_undefined();
+                    break;
+                }
+                auto result = function->call(*this);
+                if (!result) {
+                    thrown_ = result.error();
+                    has_thrown_ = true;
+                    VmError error = make_throw_error();
+                    if (!handle_error(error, pc_ - 1)) {
+                        return std::unexpected(error);
+                    }
+                    continue;
+                }
+                stack_[sp_++] = result.value();
                 break;
             }
             case ir::Code::CALL_FUNC_SPREAD: {
                 std::size_t func_index = static_cast<std::size_t>(instr >> 8);
                 auto *function = static_cast<Library::Function *>(compiled_.operands[func_index]);
                 set_args_for_ctx(stack_[sp_ - 1]);
-                stack_[sp_ - 1] = function ? function->call(*this) : fiber::json::JsValue::make_undefined();
+                if (!function) {
+                    stack_[sp_ - 1] = fiber::json::JsValue::make_undefined();
+                    clear_args();
+                    break;
+                }
+                auto result = function->call(*this);
                 clear_args();
+                if (!result) {
+                    thrown_ = result.error();
+                    has_thrown_ = true;
+                    VmError error = make_throw_error();
+                    if (!handle_error(error, pc_ - 1)) {
+                        return std::unexpected(error);
+                    }
+                    continue;
+                }
+                stack_[sp_ - 1] = result.value();
                 break;
             }
             case ir::Code::CALL_ASYNC_FUNC:
@@ -1197,7 +1311,21 @@ VmResult InterpreterVm::exec_sync() {
             case ir::Code::CALL_CONST: {
                 std::size_t const_index = static_cast<std::size_t>(instr >> 8);
                 auto *constant = static_cast<Library::Constant *>(compiled_.operands[const_index]);
-                stack_[sp_++] = constant ? constant->get(*this) : fiber::json::JsValue::make_undefined();
+                if (!constant) {
+                    stack_[sp_++] = fiber::json::JsValue::make_undefined();
+                    break;
+                }
+                auto result = constant->get(*this);
+                if (!result) {
+                    thrown_ = result.error();
+                    has_thrown_ = true;
+                    VmError error = make_throw_error();
+                    if (!handle_error(error, pc_ - 1)) {
+                        return std::unexpected(error);
+                    }
+                    continue;
+                }
+                stack_[sp_++] = result.value();
                 break;
             }
             case ir::Code::JUMP:
@@ -1262,6 +1390,14 @@ VmResult InterpreterVm::exec_sync() {
             }
             case ir::Code::INTO_CATCH: {
                 std::size_t idx = static_cast<std::size_t>(instr >> kInstrumentLen);
+                if (pending_error_.kind == VmErrorKind::Thrown) {
+                    vars_[idx] = thrown_;
+                    has_error_ = false;
+                    pending_error_ = VmError{};
+                    has_thrown_ = false;
+                    thrown_ = fiber::json::JsValue::make_undefined();
+                    break;
+                }
                 VmResult exc = make_exception_value(pending_error_);
                 if (!exc) {
                     if (!handle_error(exc.error(), pc_ - 1)) {
@@ -1285,7 +1421,9 @@ VmResult InterpreterVm::exec_sync() {
             }
             case ir::Code::THROW_EXP: {
                 fiber::json::JsValue thrown = stack_[--sp_];
-                VmError error = make_error_from_value(thrown);
+                thrown_ = thrown;
+                has_thrown_ = true;
+                VmError error = make_throw_error();
                 if (!handle_error(error, pc_ - 1)) {
                     return std::unexpected(error);
                 }
@@ -1348,6 +1486,23 @@ async::IScheduler *InterpreterVm::scheduler() const {
     return scheduler_;
 }
 
+bool InterpreterVm::has_thrown() const {
+    return has_thrown_;
+}
+
+const fiber::json::JsValue &InterpreterVm::thrown() const {
+    return thrown_;
+}
+
+void InterpreterVm::set_async_result(const fiber::json::JsValue &value, bool is_throw) {
+    async_value_ = value;
+    async_is_throw_ = is_throw;
+    async_ready_ = true;
+    if (!async_pending_) {
+        async_pending_ = true;
+    }
+}
+
 void InterpreterVm::visit_roots(fiber::json::GcRootSet::RootVisitor &visitor) {
     visitor.visit(&root_);
     visitor.visit_range(stack_.data(), sp_);
@@ -1361,7 +1516,14 @@ void InterpreterVm::visit_roots(fiber::json::GcRootSet::RootVisitor &visitor) {
         }
     }
     if (has_error_) {
-        visitor.visit(&pending_error_.meta);
+        if (has_thrown_) {
+            visitor.visit(&thrown_);
+        } else {
+            visitor.visit(&pending_error_.meta);
+        }
+    }
+    if (async_pending_ && async_ready_) {
+        visitor.visit(&async_value_);
     }
     if (has_return_) {
         visitor.visit(&return_value_);
@@ -1377,6 +1539,14 @@ void InterpreterVm::reset_state() {
     spread_args_ = fiber::json::JsValue::make_undefined();
     pending_error_ = VmError{};
     has_error_ = false;
+    thrown_ = fiber::json::JsValue::make_undefined();
+    has_thrown_ = false;
+    async_started_ = false;
+    async_pending_ = false;
+    async_ready_ = false;
+    async_is_throw_ = false;
+    async_value_ = fiber::json::JsValue::make_undefined();
+    async_resume_ = AsyncResumePoint{};
     return_value_ = fiber::json::JsValue::make_undefined();
     has_return_ = false;
 }
@@ -1555,63 +1725,49 @@ VmResult InterpreterVm::make_exception_value(const VmError &error) {
     return result;
 }
 
-VmError InterpreterVm::make_error_from_value(const fiber::json::JsValue &value) {
-    VmError error;
-    error.name = "EXEC_THROW_ERROR";
-    error.message = "execute script throw error";
-    error.status = 500;
-    error.meta = value;
-    if (value.type_ == fiber::json::JsNodeType::Exception) {
-        auto *exc = reinterpret_cast<const fiber::json::GcException *>(value.gc);
-        if (exc) {
-            error.position = exc->position;
-            std::string name;
-            if (exc->name && fiber::json::gc_string_to_utf8(exc->name, name)) {
-                error.name = name;
-            }
-            std::string message;
-            if (exc->message && fiber::json::gc_string_to_utf8(exc->message, message)) {
-                error.message = message;
-            }
-            error.meta = exc->meta;
-        }
-        return error;
+bool InterpreterVm::apply_async_ready(VmResult &out) {
+    if (!async_pending_ || !async_ready_) {
+        return true;
     }
-    if (value.type_ == fiber::json::JsNodeType::Object && value.gc) {
-        maybe_collect();
-        auto *obj = reinterpret_cast<const fiber::json::GcObject *>(value.gc);
-        const char *keys[] = {"name", "message", "status", "meta"};
-        fiber::json::GcString *name_key = fiber::json::gc_new_string(&runtime_.heap(), keys[0], 4);
-        fiber::json::GcString *msg_key = fiber::json::gc_new_string(&runtime_.heap(), keys[1], 7);
-        fiber::json::GcString *status_key = fiber::json::gc_new_string(&runtime_.heap(), keys[2], 6);
-        fiber::json::GcString *meta_key = fiber::json::gc_new_string(&runtime_.heap(), keys[3], 4);
-        const fiber::json::JsValue *name_val = name_key ? fiber::json::gc_object_get(obj, name_key) : nullptr;
-        const fiber::json::JsValue *msg_val = msg_key ? fiber::json::gc_object_get(obj, msg_key) : nullptr;
-        const fiber::json::JsValue *status_val = status_key ? fiber::json::gc_object_get(obj, status_key) : nullptr;
-        const fiber::json::JsValue *meta_val = meta_key ? fiber::json::gc_object_get(obj, meta_key) : nullptr;
-        if (name_val) {
-            std::string text;
-            if (value_to_string(*name_val, text)) {
-                error.name = text;
-            }
-        }
-        if (msg_val) {
-            std::string text;
-            if (value_to_string(*msg_val, text)) {
-                error.message = text;
-            }
-        }
-        if (status_val) {
-            int status = 0;
-            if (value_to_status(*status_val, status)) {
-                error.status = status;
-            }
-        }
-        if (meta_val) {
-            error.meta = *meta_val;
-        }
+    fiber::json::JsValue value = async_value_;
+    bool is_throw = async_is_throw_;
+    AsyncResumePoint resume = async_resume_;
+    async_pending_ = false;
+    async_ready_ = false;
+    async_is_throw_ = false;
+    async_value_ = fiber::json::JsValue::make_undefined();
+    async_resume_ = AsyncResumePoint{};
+    if (resume.clear_args) {
+        clear_args();
     }
-    return error;
+    if (is_throw) {
+        thrown_ = value;
+        has_thrown_ = true;
+        VmError error = make_throw_error();
+        if (!handle_error(error, resume.epc)) {
+            out = std::unexpected(error);
+            async_started_ = false;
+            return false;
+        }
+        return true;
+    }
+    switch (resume.kind) {
+        case AsyncResumePoint::Kind::PushResult:
+            if (resume.slot < stack_.size()) {
+                stack_[resume.slot] = value;
+            }
+            sp_ = resume.sp_after;
+            break;
+        case AsyncResumePoint::Kind::ReplaceTop:
+            if (resume.slot < stack_.size()) {
+                stack_[resume.slot] = value;
+            }
+            sp_ = resume.sp_after;
+            break;
+        case AsyncResumePoint::Kind::None:
+            break;
+    }
+    return true;
 }
 
 bool InterpreterVm::maybe_collect() {
