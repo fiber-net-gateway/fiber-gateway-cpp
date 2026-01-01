@@ -1,10 +1,10 @@
 #include "Script.h"
 
-#include <cstdlib>
 #include <string>
 #include <string_view>
 #include <utility>
 
+#include "../common/Assert.h"
 #include "../common/json/JsGc.h"
 #include "Runtime.h"
 #include "run/InterpreterVm.h"
@@ -16,10 +16,6 @@ namespace {
 
 constexpr const char kExecError[] = "EXEC_ERROR";
 constexpr const char kOutOfMemory[] = "EXEC_OUT_OF_MEMORY";
-
-[[noreturn]] void panic_async_in_sync() {
-    std::abort();
-}
 
 fiber::json::JsValue make_fallback_error(std::string_view message) {
     return fiber::json::JsValue::make_native_string(const_cast<char *>(message.data()), message.size());
@@ -80,12 +76,25 @@ ScriptRun::Result ScriptRun::operator()() {
     if (!vm_ || !runtime_) {
         return fiber::json::JsValue::make_undefined();
     }
-    auto result = vm_->exec_sync();
-    return to_result(std::move(result));
+    run::VmResult vm_out = fiber::json::JsValue::make_undefined();
+    auto state = vm_->iterate(vm_out);
+    if (state == run::InterpreterVm::VmState::Suspend) {
+        FIBER_PANIC("async opcode encountered in exec_sync");
+    }
+    return to_result(std::move(vm_out));
 }
 
 ScriptRun::Awaiter::Awaiter(ScriptRun &&run)
     : run_(std::move(run)) {
+    if (run_.vm_) {
+        run_.vm_->set_resume_callback(&ScriptRun::Awaiter::resume_callback, this);
+    }
+}
+
+ScriptRun::Awaiter::~Awaiter() {
+    if (run_.vm_) {
+        run_.vm_->set_resume_callback(nullptr, nullptr);
+    }
 }
 
 bool ScriptRun::Awaiter::await_ready() {
@@ -111,50 +120,12 @@ ScriptRun::Result ScriptRun::Awaiter::await_resume() {
     return std::move(*result_);
 }
 
-ScriptRuntime &ScriptRun::Awaiter::runtime() {
-    return *run_.runtime_;
-}
-
-const fiber::json::JsValue &ScriptRun::Awaiter::root() const {
-    return run_.vm_->root();
-}
-
-void *ScriptRun::Awaiter::attach() const {
-    return run_.vm_->attach();
-}
-
-const fiber::json::JsValue &ScriptRun::Awaiter::arg_value(std::size_t index) const {
-    return run_.vm_->arg_value(index);
-}
-
-std::size_t ScriptRun::Awaiter::arg_count() const {
-    return run_.vm_->arg_count();
-}
-
-async::IScheduler *ScriptRun::Awaiter::scheduler() const {
-    return run_.scheduler_;
-}
-
-void ScriptRun::Awaiter::return_value(const fiber::json::JsValue &value) {
-    if (!run_.vm_) {
+void ScriptRun::Awaiter::resume_callback(void *context) {
+    auto *self = static_cast<Awaiter *>(context);
+    if (!self) {
         return;
     }
-    run_.vm_->set_async_result(value, false);
-    if (in_exec_) {
-        return;
-    }
-    resume_if_complete();
-}
-
-void ScriptRun::Awaiter::throw_value(const fiber::json::JsValue &value) {
-    if (!run_.vm_) {
-        return;
-    }
-    run_.vm_->set_async_result(value, true);
-    if (in_exec_) {
-        return;
-    }
-    resume_if_complete();
+    self->resume_if_complete();
 }
 
 bool ScriptRun::Awaiter::pump() {
@@ -162,12 +133,11 @@ bool ScriptRun::Awaiter::pump() {
         result_ = fiber::json::JsValue::make_undefined();
         return true;
     }
-    in_exec_ = true;
     run::VmResult vm_out = fiber::json::JsValue::make_undefined();
-    auto state = run_.vm_->exec_async(*this, vm_out);
-    in_exec_ = false;
-    if (state == run::InterpreterVm::AsyncExecState::Done) {
+    auto state = run_.vm_->iterate(vm_out);
+    if (state == run::InterpreterVm::VmState::Success || state == run::InterpreterVm::VmState::Error) {
         result_ = run_.to_result(std::move(vm_out));
+        run_.vm_->set_resume_callback(nullptr, nullptr);
         return true;
     }
     return false;
@@ -215,54 +185,82 @@ ScriptRun::Result ScriptRun::to_result(run::VmResult result) {
     return std::unexpected(make_error_value(runtime_->heap(), result.error()));
 }
 
+ScriptSyncRun::ScriptSyncRun(ScriptRun run)
+    : run_(std::move(run)) {
+}
+
+ScriptSyncRun::Result ScriptSyncRun::operator()() {
+    return run_();
+}
+
+ScriptRun::Awaiter ScriptSyncRun::operator co_await() && {
+    return std::move(run_).operator co_await();
+}
+
+bool ScriptSyncRun::valid() const {
+    return run_.valid();
+}
+
+ScriptAsyncRun::ScriptAsyncRun(ScriptRun run)
+    : run_(std::move(run)) {
+}
+
+ScriptRun::Awaiter ScriptAsyncRun::operator co_await() && {
+    return std::move(run_).operator co_await();
+}
+
+bool ScriptAsyncRun::valid() const {
+    return run_.valid();
+}
+
 Script::Script(std::shared_ptr<ir::Compiled> compiled)
     : compiled_(std::move(compiled)) {
 }
 
-ScriptRun Script::exec_async(const fiber::json::JsValue &root,
-                             void *attach,
-                             async::IScheduler *scheduler,
-                             ScriptRuntime &runtime) {
+ScriptAsyncRun Script::exec_async(const fiber::json::JsValue &root,
+                                  void *attach,
+                                  async::IScheduler *scheduler,
+                                  ScriptRuntime &runtime) {
     if (!compiled_) {
         return {};
     }
-    return ScriptRun(*compiled_, root, attach, scheduler, runtime);
+    return ScriptAsyncRun(ScriptRun(*compiled_, root, attach, scheduler, runtime));
 }
 
-ScriptRun Script::exec_async(const fiber::json::JsValue &root,
-                             void *attach,
-                             async::IScheduler *scheduler,
-                             fiber::json::GcHeap &heap,
-                             fiber::json::GcRootSet &roots) {
+ScriptAsyncRun Script::exec_async(const fiber::json::JsValue &root,
+                                  void *attach,
+                                  async::IScheduler *scheduler,
+                                  fiber::json::GcHeap &heap,
+                                  fiber::json::GcRootSet &roots) {
     if (!compiled_) {
         return {};
     }
-    return ScriptRun(*compiled_, root, attach, scheduler, heap, roots);
+    return ScriptAsyncRun(ScriptRun(*compiled_, root, attach, scheduler, heap, roots));
 }
 
-ScriptRun Script::exec_sync(const fiber::json::JsValue &root,
-                            void *attach,
-                            ScriptRuntime &runtime) {
+ScriptSyncRun Script::exec_sync(const fiber::json::JsValue &root,
+                                void *attach,
+                                ScriptRuntime &runtime) {
     if (!compiled_) {
         return {};
     }
     if (compiled_->contains_async()) {
-        panic_async_in_sync();
+        FIBER_PANIC("async opcode encountered in exec_sync");
     }
-    return ScriptRun(*compiled_, root, attach, nullptr, runtime);
+    return ScriptSyncRun(ScriptRun(*compiled_, root, attach, nullptr, runtime));
 }
 
-ScriptRun Script::exec_sync(const fiber::json::JsValue &root,
-                            void *attach,
-                            fiber::json::GcHeap &heap,
-                            fiber::json::GcRootSet &roots) {
+ScriptSyncRun Script::exec_sync(const fiber::json::JsValue &root,
+                                void *attach,
+                                fiber::json::GcHeap &heap,
+                                fiber::json::GcRootSet &roots) {
     if (!compiled_) {
         return {};
     }
     if (compiled_->contains_async()) {
-        panic_async_in_sync();
+        FIBER_PANIC("async opcode encountered in exec_sync");
     }
-    return ScriptRun(*compiled_, root, attach, nullptr, heap, roots);
+    return ScriptSyncRun(ScriptRun(*compiled_, root, attach, nullptr, heap, roots));
 }
 
 bool Script::contains_async() const {

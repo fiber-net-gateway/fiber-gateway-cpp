@@ -148,6 +148,15 @@ public:
 - `exec_async()` returns `async::Task<std::expected<JsValue, VmError>>`
   - Suspends only at `CALL_ASYNC_*`.
 
+### Async Return/Throw Reentrancy
+- `InterpreterVm` implements `AsyncExecutionContext` and exposes an `iterate(out)` entry.
+- `iterate` sets an `in_iterate_` guard while executing opcodes.
+- `CALL_ASYNC_*` records a resume point, then calls `async_func->call(*this)` or `async_const->get(*this)`.
+- If `return_value()`/`throw_value()` is invoked on the call stack of `call/get`, it only marks
+  `async_ready_` and returns; `iterate` continues after the call without reentrancy.
+- If `return_value()`/`throw_value()` is invoked later (async callback), it should trigger a host
+  resume path (e.g., `ScriptRun::Awaiter` schedules another `iterate`), avoiding nested execution.
+
 ### Opcode Execution
 - Stack machine, 32-bit instruction with low 8-bit opcode and upper bits as operands.
 - `LOAD_CONST` uses heap-safe constants:

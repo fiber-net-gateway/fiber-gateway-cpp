@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "../../common/Assert.h"
 #include "../ast/Assign.h"
 #include "../ast/Block.h"
 #include "../ast/BinaryOperator.h"
@@ -164,10 +165,7 @@ private:
     }
 
     std::size_t add_operand(void *ptr) {
-        if (!ptr) {
-            compiled_.operands.push_back(nullptr);
-            return compiled_.operands.size() - 1;
-        }
+        FIBER_ASSERT(ptr);
         auto it = operand_cache_.find(ptr);
         if (it != operand_cache_.end()) {
             return it->second;
