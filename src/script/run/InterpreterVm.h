@@ -10,6 +10,10 @@
 #include "../ir/Compiled.h"
 #include "VmError.h"
 
+namespace fiber::script {
+class ScriptRuntime;
+}
+
 namespace fiber::script::run {
 
 class InterpreterVm final : public ExecutionContext, public fiber::json::GcRootSet::RootProvider {
@@ -18,8 +22,7 @@ public:
                   const fiber::json::JsValue &root,
                   void *attach,
                   async::IScheduler *scheduler,
-                  fiber::json::GcHeap *heap,
-                  fiber::json::GcRootSet *roots);
+                  ScriptRuntime &runtime);
     ~InterpreterVm() override;
 
     async::Task<VmResult> exec_async();
@@ -42,8 +45,7 @@ private:
     fiber::json::JsValue root_;
     void *attach_ = nullptr;
     async::IScheduler *scheduler_ = nullptr;
-    fiber::json::GcHeap *heap_ = nullptr;
-    fiber::json::GcRootSet *roots_ = nullptr;
+    ScriptRuntime &runtime_;
 
     std::vector<fiber::json::JsValue> stack_;
     std::vector<fiber::json::JsValue> vars_;

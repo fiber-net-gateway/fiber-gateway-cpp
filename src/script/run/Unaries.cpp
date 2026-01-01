@@ -1,6 +1,7 @@
 #include "Unaries.h"
 
 #include "../../common/json/JsValueOps.h"
+#include "../Runtime.h"
 
 #include <cstring>
 #include <string_view>
@@ -68,8 +69,8 @@ VmResult Unaries::minus(const fiber::json::JsValue &value) {
     return from_js_result(fiber::json::js_unary_op(fiber::json::JsUnaryOp::Negate, value), "-");
 }
 
-VmResult Unaries::typeof_op(const fiber::json::JsValue &value, fiber::json::GcHeap *heap) {
-    (void)heap;
+VmResult Unaries::typeof_op(const fiber::json::JsValue &value, ScriptRuntime &runtime) {
+    (void)runtime;
     switch (value.type_) {
         case fiber::json::JsNodeType::Undefined:
             return make_typeof_value("undefined");
@@ -97,13 +98,9 @@ VmResult Unaries::typeof_op(const fiber::json::JsValue &value, fiber::json::GcHe
     return make_typeof_value("undefined");
 }
 
-VmResult Unaries::iterate(const fiber::json::JsValue &value, fiber::json::GcHeap *heap) {
-    if (!heap) {
-        VmError error;
-        error.name = "EXEC_HEAP_REQUIRED";
-        error.message = "heap required for iterate";
-        return std::unexpected(error);
-    }
+VmResult Unaries::iterate(const fiber::json::JsValue &value, ScriptRuntime &runtime) {
+    fiber::json::GcHeap *heap = &runtime.heap();
+    runtime.maybe_collect();
     fiber::json::GcIterator *iter = nullptr;
     if (value.type_ == fiber::json::JsNodeType::Array) {
         iter = fiber::json::gc_new_array_iterator(heap, reinterpret_cast<fiber::json::GcArray *>(value.gc),

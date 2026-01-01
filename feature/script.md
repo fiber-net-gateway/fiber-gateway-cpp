@@ -206,7 +206,7 @@ public:
     void remove_temp_root(fiber::json::JsValue *value);
     void add_provider(RootProvider *provider);
     void remove_provider(RootProvider *provider);
-    void collect(fiber::json::GcHeap &heap);
+    void visit_all(RootVisitor &visitor);
 };
 ```
 
@@ -225,12 +225,91 @@ public:
   - `pending_error_` and `pending_return_` (if present)
 
 ### GC Trigger Points
-- Triggered only at safe points:
-  - inside allocation helpers (string/array/object/binary)
+- Triggered only at safe points and by the runtime that owns both heap + roots:
+  - allocation wrappers check `heap.bytes` vs `threshold` and call `gc_collect(heap, rootset)`
   - between opcode dispatch iterations
   - before/after async suspension
+- `GcHeap` does not hold a rootset and does not auto-collect; collection is always requested by runtime.
 - No per-push/per-pop root registration.
 - The VM must be in a consistent state (no partially updated stack) at collection.
+
+### Ops GC Safety Rules
+- Default rule: ops (`Access`/`Unaries`/`Binaries`/`Compares`) may call `runtime->maybe_collect()` only at entry.
+- If an op must allocate multiple objects and may need GC mid-op, it must protect all temporary `JsValue` with temp-root guards.
+- Never do "allocate -> collect -> retry" inside ops unless every intermediate value is already rooted.
+
+## GcHeap / GcRootSet / Runtime Interfaces
+### GcHeap (memory only, no root ownership)
+```
+struct GcHeap {
+    std::size_t bytes = 0;
+    std::size_t threshold = 1 << 20;
+};
+
+std::size_t gc_bytes_used(const GcHeap &heap);
+std::size_t gc_threshold(const GcHeap &heap);
+void gc_set_threshold(GcHeap &heap, std::size_t value);
+void gc_collect(GcHeap &heap, GcRootSet &roots);
+```
+- `gc_collect` is invoked by runtime when a threshold is exceeded or after an allocation failure.
+
+### GcRootSet (root aggregation only)
+```
+class GcRootSet {
+public:
+    void add_global(fiber::json::JsValue *value);
+    void remove_global(fiber::json::JsValue *value);
+    void add_temp_root(fiber::json::JsValue *value);
+    void remove_temp_root(fiber::json::JsValue *value);
+    void add_provider(RootProvider *provider);
+    void remove_provider(RootProvider *provider);
+    void visit_all(RootVisitor &visitor);
+};
+```
+- `GcRootSet` does not own `GcHeap`; it only aggregates roots and providers.
+
+### Runtime (heap + roots owner, GC trigger)
+```
+class ScriptRuntime {
+public:
+    ScriptRuntime(fiber::json::GcHeap &heap, fiber::json::GcRootSet &roots);
+
+    fiber::json::GcHeap &heap();
+    fiber::json::GcRootSet &roots();
+
+    bool should_collect(std::size_t next_bytes = 0) const;
+    void maybe_collect(std::size_t next_bytes = 0);
+
+    template <typename AllocFn>
+    auto alloc_with_gc(std::size_t next_bytes, AllocFn &&fn) -> decltype(fn());
+};
+```
+- `alloc_with_gc` performs: `if (should_collect(next_bytes)) gc_collect(heap_, roots_);` then runs `fn()`.
+- If `fn()` fails due to memory pressure, runtime may collect once and retry.
+
+### ScriptRuntime Temp Root Guards
+```
+class GcRootGuard {
+public:
+    GcRootGuard(ScriptRuntime &runtime, fiber::json::JsValue *value);
+    GcRootGuard(const GcRootGuard &) = delete;
+    GcRootGuard &operator=(const GcRootGuard &) = delete;
+    ~GcRootGuard();
+private:
+    fiber::json::GcRootSet *roots_ = nullptr;
+    fiber::json::JsValue *value_ = nullptr;
+};
+
+class TempRootScope {
+public:
+    explicit TempRootScope(ScriptRuntime &runtime);
+    void add(fiber::json::JsValue *value);
+private:
+    fiber::json::GcRootSet *roots_ = nullptr;
+};
+```
+- Use `GcRootGuard` for single temporary values in ops.
+- Use `TempRootScope` when multiple temporaries are created before they reach VM stack/vars.
 
 ## VmError and Error Object Conversion
 ### VmError Shape

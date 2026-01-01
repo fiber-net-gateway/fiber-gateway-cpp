@@ -1378,6 +1378,18 @@ void gc_collect(GcHeap *heap, JsValue **roots, std::size_t root_count) {
     }
 }
 
+std::size_t gc_bytes_used(const GcHeap &heap) {
+    return heap.bytes;
+}
+
+std::size_t gc_threshold(const GcHeap &heap) {
+    return heap.threshold;
+}
+
+void gc_set_threshold(GcHeap &heap, std::size_t value) {
+    heap.threshold = value;
+}
+
 void GcRootSet::add_global(JsValue *value) {
     if (value) {
         globals_.push_back(value);
@@ -1447,19 +1459,28 @@ void GcRootSet::remove_provider(RootProvider *provider) {
     }
 }
 
-void GcRootSet::collect(GcHeap &heap) {
-    std::vector<JsValue *> roots;
-    roots.reserve(globals_.size() + stack_.size() + temps_.size());
-    roots.insert(roots.end(), globals_.begin(), globals_.end());
-    roots.insert(roots.end(), stack_.begin(), stack_.end());
-    roots.insert(roots.end(), temps_.begin(), temps_.end());
-    RootVisitor visitor(roots);
+void GcRootSet::visit_all(RootVisitor &visitor) {
+    for (auto *value : globals_) {
+        visitor.visit(value);
+    }
+    for (auto *value : stack_) {
+        visitor.visit(value);
+    }
+    for (auto *value : temps_) {
+        visitor.visit(value);
+    }
     for (auto *provider : providers_) {
         if (provider) {
             provider->visit_roots(visitor);
         }
     }
-    gc_collect(&heap, roots.data(), roots.size());
+}
+
+void gc_collect(GcHeap &heap, GcRootSet &roots) {
+    std::vector<JsValue *> root_values;
+    GcRootSet::RootVisitor visitor(root_values);
+    roots.visit_all(visitor);
+    gc_collect(&heap, root_values.data(), root_values.size());
 }
 
 GcRootHandle::GcRootHandle(GcRootSet &roots, JsValue *value)

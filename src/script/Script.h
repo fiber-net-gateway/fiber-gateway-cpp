@@ -1,25 +1,63 @@
 #ifndef FIBER_SCRIPT_SCRIPT_H
 #define FIBER_SCRIPT_SCRIPT_H
 
-#include "Library.h"
+#include <memory>
+
+#include "../common/json/JsNode.h"
+#include "async/Task.h"
+#include "ir/Compiled.h"
+
+namespace fiber::json {
+class GcHeap;
+class GcRootSet;
+} // namespace fiber::json
 
 namespace fiber::script {
 
+class ScriptRuntime;
+
 class Script {
 public:
-    virtual ~Script() = default;
+    Script() = default;
+    explicit Script(std::shared_ptr<ir::Compiled> compiled);
 
-    virtual async::Task<fiber::json::JsValue> exec_async(const fiber::json::JsValue &root,
+    async::Task<fiber::json::JsValue> exec_async(const fiber::json::JsValue &root,
                                                  void *attach,
-                                                 async::IScheduler *scheduler) = 0;
+                                                 async::IScheduler *scheduler,
+                                                 ScriptRuntime &runtime);
 
-    async::Task<fiber::json::JsValue> exec_async(const fiber::json::JsValue &root, void *attach) {
-        return exec_async(root, attach, nullptr);
+    async::Task<fiber::json::JsValue> exec_async(const fiber::json::JsValue &root,
+                                                 void *attach,
+                                                 ScriptRuntime &runtime) {
+        return exec_async(root, attach, nullptr, runtime);
     }
 
-    virtual fiber::json::JsValue exec_sync(const fiber::json::JsValue &root, void *attach) = 0;
+    async::Task<fiber::json::JsValue> exec_async(const fiber::json::JsValue &root,
+                                                 void *attach,
+                                                 async::IScheduler *scheduler,
+                                                 fiber::json::GcHeap &heap,
+                                                 fiber::json::GcRootSet &roots);
 
-    virtual bool contains_async() const = 0;
+    async::Task<fiber::json::JsValue> exec_async(const fiber::json::JsValue &root,
+                                                 void *attach,
+                                                 fiber::json::GcHeap &heap,
+                                                 fiber::json::GcRootSet &roots) {
+        return exec_async(root, attach, nullptr, heap, roots);
+    }
+
+    fiber::json::JsValue exec_sync(const fiber::json::JsValue &root,
+                                   void *attach,
+                                   ScriptRuntime &runtime);
+
+    fiber::json::JsValue exec_sync(const fiber::json::JsValue &root,
+                                   void *attach,
+                                   fiber::json::GcHeap &heap,
+                                   fiber::json::GcRootSet &roots);
+
+    bool contains_async() const;
+
+private:
+    std::shared_ptr<ir::Compiled> compiled_;
 };
 
 } // namespace fiber::script
