@@ -120,6 +120,9 @@ struct GcIterator {
     GcString **snapshot_keys = nullptr;
     std::size_t snapshot_size = 0;
     std::size_t snapshot_index = 0;
+    JsValue current_key;
+    JsValue current_value;
+    bool has_current = false;
 };
 
 struct GcHeap {
@@ -174,6 +177,38 @@ public:
     void add_temp_root(JsValue *value);
     void remove_temp_root(JsValue *value);
 
+    class RootVisitor {
+    public:
+        explicit RootVisitor(std::vector<JsValue *> &roots) : roots_(&roots) {}
+
+        void visit(JsValue *value) {
+            if (value) {
+                roots_->push_back(value);
+            }
+        }
+
+        void visit_range(JsValue *base, std::size_t count) {
+            if (!base || count == 0) {
+                return;
+            }
+            for (std::size_t i = 0; i < count; ++i) {
+                roots_->push_back(base + i);
+            }
+        }
+
+    private:
+        std::vector<JsValue *> *roots_ = nullptr;
+    };
+
+    class RootProvider {
+    public:
+        virtual ~RootProvider() = default;
+        virtual void visit_roots(RootVisitor &visitor) = 0;
+    };
+
+    void add_provider(RootProvider *provider);
+    void remove_provider(RootProvider *provider);
+
     void collect(GcHeap &heap);
 
 private:
@@ -181,6 +216,7 @@ private:
     std::vector<JsValue *> stack_;
     std::vector<std::size_t> frames_;
     std::vector<JsValue *> temps_;
+    std::vector<RootProvider *> providers_;
 };
 
 class GcRootHandle {

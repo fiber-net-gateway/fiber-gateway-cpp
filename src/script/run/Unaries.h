@@ -1,17 +1,18 @@
 #ifndef FIBER_SCRIPT_RUN_UNARIES_H
 #define FIBER_SCRIPT_RUN_UNARIES_H
 
-#include "../../common/json/JsNode.h"
+#include "../../common/json/JsGc.h"
+#include "VmError.h"
 
 namespace fiber::script::run {
 
 class Unaries {
 public:
-    static fiber::json::JsValue neg(const fiber::json::JsValue &value);
-    static fiber::json::JsValue plus(const fiber::json::JsValue &value);
-    static fiber::json::JsValue minus(const fiber::json::JsValue &value);
-    static fiber::json::JsValue typeof_op(const fiber::json::JsValue &value);
-    static fiber::json::JsValue iterate(const fiber::json::JsValue &value);
+    static VmResult neg(const fiber::json::JsValue &value);
+    static VmResult plus(const fiber::json::JsValue &value);
+    static VmResult minus(const fiber::json::JsValue &value);
+    static VmResult typeof_op(const fiber::json::JsValue &value, fiber::json::GcHeap *heap);
+    static VmResult iterate(const fiber::json::JsValue &value, fiber::json::GcHeap *heap);
 };
 
 } // namespace fiber::script::run
