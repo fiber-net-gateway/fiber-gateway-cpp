@@ -568,6 +568,29 @@ GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_
     return str;
 }
 
+GcString *gc_new_string_bytes_uninit(GcHeap *heap, std::size_t len) {
+    auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcKind::String);
+    if (!hdr) {
+        return nullptr;
+    }
+    auto *str = reinterpret_cast<GcString *>(hdr);
+    str->len = len;
+    str->encoding = GcStringEncoding::Byte;
+    str->hash = 0;
+    str->hash_valid = false;
+    str->data8 = nullptr;
+    if (len > 0) {
+        str->data8 = static_cast<std::uint8_t *>(heap->alloc.alloc(len + 1));
+        if (!str->data8) {
+            heap->alloc.free(str);
+            return nullptr;
+        }
+        str->data8[len] = 0;
+    }
+    gc_link(heap, hdr);
+    return str;
+}
+
 GcString *gc_new_string_utf16(GcHeap *heap, const char16_t *data, std::size_t len) {
     auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcKind::String);
     if (!hdr) {
@@ -590,6 +613,29 @@ GcString *gc_new_string_utf16(GcHeap *heap, const char16_t *data, std::size_t le
             return nullptr;
         }
         std::memcpy(str->data16, data, sizeof(char16_t) * len);
+        str->data16[len] = 0;
+    }
+    gc_link(heap, hdr);
+    return str;
+}
+
+GcString *gc_new_string_utf16_uninit(GcHeap *heap, std::size_t len) {
+    auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcKind::String);
+    if (!hdr) {
+        return nullptr;
+    }
+    auto *str = reinterpret_cast<GcString *>(hdr);
+    str->len = len;
+    str->encoding = GcStringEncoding::Utf16;
+    str->hash = 0;
+    str->hash_valid = false;
+    str->data16 = nullptr;
+    if (len > 0) {
+        str->data16 = static_cast<char16_t *>(heap->alloc.alloc(sizeof(char16_t) * (len + 1)));
+        if (!str->data16) {
+            heap->alloc.free(str);
+            return nullptr;
+        }
         str->data16[len] = 0;
     }
     gc_link(heap, hdr);
