@@ -82,6 +82,7 @@ if(FIBER_BUILD_TESTS)
         tests/ScriptRuntimeOpsTest.cpp
         tests/ScriptExecutionTest.cpp
         tests/ScriptPlanTest.cpp
+        tests/ThreadGroupTest.cpp
     )
     target_link_libraries(fiber_tests PRIVATE fiber_lib GTest::gtest_main)
     if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)

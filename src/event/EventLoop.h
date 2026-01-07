@@ -8,17 +8,13 @@
 #include <functional>
 
 #include "../async/Scheduler.h"
-#include "EpollPoller.h"
 #include "MpscQueue.h"
+#include "Poller.h"
 #include "TimerQueue.h"
 
 namespace fiber::event {
 
-enum class IoEvent : std::uint8_t {
-    Read = 1 << 0,
-    Write = 1 << 1,
-    Error = 1 << 2
-};
+using IoEvent = Poller::Event;
 
 class EventLoop : public fiber::async::IScheduler {
 private:
@@ -91,15 +87,26 @@ private:
         std::uint64_t id = 0;
         bool cancelled = false;
         bool in_heap = false;
+
+        bool operator<(const TimerEntry &other) const noexcept {
+            if (deadline != other.deadline) {
+                return deadline < other.deadline;
+            }
+            return id < other.id;
+        }
     };
 
-    struct WatchEntry {
-        int fd = -1;
+    struct WatchEntry : Poller::Item {
+        int watched_fd = -1;
         IoEvent events = IoEvent::Read;
-        IoCallback callback{};
+        IoCallback io_callback{};
         WatchReady on_ready{};
         std::uint64_t id = 0;
         bool registered = false;
+    };
+
+    struct WakeupEntry : Poller::Item {
+        EventLoop *loop = nullptr;
     };
 
     struct Command {
@@ -113,8 +120,11 @@ private:
 
     using CommandNode = MpscQueue<Command>::Node;
 
-    static bool timer_less(const TimerQueue::Node *a, const TimerQueue::Node *b) noexcept;
     static TimerEntry *timer_from_node(TimerQueue::Node *node) noexcept;
+    friend bool operator<(const TimerQueue::Node &a, const TimerQueue::Node &b) noexcept;
+
+    static void on_wakeup(Poller::Item *item, int fd, IoEvent events);
+    static void on_watch_event(Poller::Item *item, int fd, IoEvent events);
 
     void enqueue(CommandNode *node);
     void drain_commands();
@@ -127,8 +137,9 @@ private:
     TimerQueue timers_;
     std::atomic<std::uint64_t> next_timer_id_{1};
     std::atomic<std::uint64_t> next_watch_id_{1};
-    EpollPoller poller_;
+    Poller poller_;
     int event_fd_ = -1;
+    WakeupEntry wakeup_entry_{};
     std::atomic<bool> wakeup_pending_{false};
     std::atomic<bool> stop_requested_{false};
 };

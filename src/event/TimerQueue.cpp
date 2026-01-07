@@ -57,7 +57,7 @@ void TimerQueue::swap_nodes(TimerQueue *heap, Node *parent, Node *child) {
     }
 }
 
-void TimerQueue::insert(Node *node, Compare less_than) {
+void TimerQueue::insert(Node *node) {
     Node **parent;
     Node **child;
     std::size_t path;
@@ -89,12 +89,12 @@ void TimerQueue::insert(Node *node, Compare less_than) {
     *child = node;
     count_ += 1;
 
-    while (node->parent && less_than(node, node->parent)) {
+    while (node->parent && *node < *node->parent) {
         swap_nodes(this, node->parent, node);
     }
 }
 
-void TimerQueue::remove(Node *node, Compare less_than) {
+void TimerQueue::remove(Node *node) {
     Node *smallest;
     Node **max;
     Node *child;
@@ -156,10 +156,10 @@ void TimerQueue::remove(Node *node, Compare less_than) {
 
     for (;;) {
         smallest = child;
-        if (child->left && less_than(child->left, smallest)) {
+        if (child->left && *child->left < *smallest) {
             smallest = child->left;
         }
-        if (child->right && less_than(child->right, smallest)) {
+        if (child->right && *child->right < *smallest) {
             smallest = child->right;
         }
         if (smallest == child) {
@@ -168,13 +168,13 @@ void TimerQueue::remove(Node *node, Compare less_than) {
         swap_nodes(this, child, smallest);
     }
 
-    while (child->parent && less_than(child, child->parent)) {
+    while (child->parent && *child < *child->parent) {
         swap_nodes(this, child->parent, child);
     }
 }
 
-void TimerQueue::dequeue(Compare less_than) {
-    remove(min_, less_than);
+void TimerQueue::dequeue() {
+    remove(min_);
 }
 
 } // namespace fiber::event

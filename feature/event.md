@@ -11,6 +11,11 @@
 - Any thread may call `post`, `watch_fd`, `update_fd`, `unwatch_fd`, `cancel`, or `stop`.
 - Cross-thread calls enqueue a command into MPSC and signal `eventfd` to wake the loop.
 
+## Loop Group
+`EventLoopGroup` owns a fixed set of loops and a `ThreadGroup`. `start()` runs one
+loop per thread, and `post()` schedules to the current loop when called from a
+loop thread (otherwise it uses round-robin selection).
+
 ## Wakeup Strategy
 - `eventfd(EFD_NONBLOCK | EFD_CLOEXEC)` is registered in `epoll`.
 - Producers write `uint64_t(1)` to `eventfd` to wake the loop.
@@ -39,16 +44,14 @@ public:
         Node *parent;
     };
 
-    using Compare = bool (*)(const Node *a, const Node *b);
-
     void init();
     Node *min() const;
     std::size_t size() const;
     bool empty() const;
 
-    void insert(Node *node, Compare less_than);
-    void remove(Node *node, Compare less_than);
-    void dequeue(Compare less_than);
+    void insert(Node *node);
+    void remove(Node *node);
+    void dequeue();
 };
 ```
 
@@ -78,6 +81,21 @@ public:
     void unwatch_fd(WatchHandle handle);
 };
 
+class EventLoopGroup : public fiber::async::IScheduler {
+public:
+    explicit EventLoopGroup(std::size_t size);
+
+    void start();
+    void stop();
+    void join();
+
+    EventLoop &at(std::size_t index);
+    static EventLoop &current();
+
+    void post(TaskFn fn);
+    void post(std::coroutine_handle<> handle) override;
+};
+
 } // namespace fiber::event
 ```
 
@@ -89,7 +107,7 @@ public:
 
 ## File Layout
 - `src/event/EventLoop.h|.cpp`
-- `src/event/EpollPoller.h|.cpp`
+- `src/event/Poller.h|.cpp`
 - `src/event/TimerQueue.h|.cpp` (libuv heap translation)
 - `src/event/MpscQueue.h` (header-only)
 - `src/async/Scheduler.h`

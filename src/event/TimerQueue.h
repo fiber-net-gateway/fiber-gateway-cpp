@@ -13,8 +13,6 @@ public:
         Node *parent = nullptr;
     };
 
-    using Compare = bool (*)(const Node *a, const Node *b);
-
     TimerQueue();
 
     void init();
@@ -22,9 +20,9 @@ public:
     std::size_t size() const;
     bool empty() const;
 
-    void insert(Node *node, Compare less_than);
-    void remove(Node *node, Compare less_than);
-    void dequeue(Compare less_than);
+    void insert(Node *node);
+    void remove(Node *node);
+    void dequeue();
 
 private:
     static void swap_nodes(TimerQueue *heap, Node *parent, Node *child);
@@ -32,6 +30,8 @@ private:
     Node *min_ = nullptr;
     std::size_t count_ = 0;
 };
+
+bool operator<(const TimerQueue::Node &a, const TimerQueue::Node &b) noexcept;
 
 } // namespace fiber::event
 
