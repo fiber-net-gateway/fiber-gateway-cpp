@@ -12,25 +12,12 @@ namespace fiber::event {
 
 namespace {
 
-constexpr std::uint8_t to_mask(IoEvent events) {
-    return static_cast<std::uint8_t>(events);
-}
-
-std::uint32_t to_epoll_events(IoEvent events) {
-    std::uint32_t mask = 0;
-    auto bits = to_mask(events);
-    if (bits & to_mask(IoEvent::Read)) {
-        mask |= EPOLLIN;
-    }
-    if (bits & to_mask(IoEvent::Write)) {
-        mask |= EPOLLOUT;
-    }
-    mask |= EPOLLERR | EPOLLHUP;
-    return mask;
+constexpr std::uint32_t to_mask(IoEvent events) {
+    return static_cast<std::uint32_t>(events);
 }
 
 IoEvent to_io_event(std::uint32_t events) {
-    std::uint8_t mask = 0;
+    std::uint32_t mask = 0;
     if (events & (EPOLLIN | EPOLLPRI)) {
         mask |= to_mask(IoEvent::Read);
     }
@@ -38,7 +25,7 @@ IoEvent to_io_event(std::uint32_t events) {
         mask |= to_mask(IoEvent::Write);
     }
     if (events & (EPOLLERR | EPOLLHUP)) {
-        mask |= to_mask(IoEvent::Error);
+        mask |= to_mask(IoEvent::Read) | to_mask(IoEvent::Write);
     }
     return static_cast<IoEvent>(mask);
 }
@@ -47,6 +34,8 @@ IoEvent to_io_event(std::uint32_t events) {
 
 EventLoop::EventLoop() {
     timers_.init();
+    wakeup_entry_.loop = this;
+    wakeup_entry_.callback = &EventLoop::on_wakeup;
     event_fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (event_fd_ < 0) {
         return;
@@ -56,7 +45,7 @@ EventLoop::EventLoop() {
         event_fd_ = -1;
         return;
     }
-    if (poller_.add(event_fd_, EPOLLIN, this) != 0) {
+    if (poller_.add(event_fd_, IoEvent::Read, &wakeup_entry_) != 0) {
         ::close(event_fd_);
         event_fd_ = -1;
     }
@@ -68,20 +57,17 @@ EventLoop::~EventLoop() {
     }
 }
 
-bool EventLoop::timer_less(const TimerQueue::Node *a, const TimerQueue::Node *b) noexcept {
-    const auto *left = timer_from_node(const_cast<TimerQueue::Node *>(a));
-    const auto *right = timer_from_node(const_cast<TimerQueue::Node *>(b));
-    if (left->deadline != right->deadline) {
-        return left->deadline < right->deadline;
-    }
-    return left->id < right->id;
-}
-
 EventLoop::TimerEntry *EventLoop::timer_from_node(TimerQueue::Node *node) noexcept {
     if (!node) {
         return nullptr;
     }
     return reinterpret_cast<TimerEntry *>(reinterpret_cast<char *>(node) - offsetof(TimerEntry, node));
+}
+
+bool operator<(const TimerQueue::Node &a, const TimerQueue::Node &b) noexcept {
+    const auto *left = EventLoop::timer_from_node(const_cast<TimerQueue::Node *>(&a));
+    const auto *right = EventLoop::timer_from_node(const_cast<TimerQueue::Node *>(&b));
+    return *left < *right;
 }
 
 void EventLoop::enqueue(CommandNode *node) {
@@ -94,6 +80,25 @@ void EventLoop::enqueue(CommandNode *node) {
         ssize_t written = ::write(event_fd_, &one, sizeof(one));
         (void)written;
     }
+}
+
+void EventLoop::on_wakeup(Poller::Item *item, int fd, IoEvent events) {
+    (void)fd;
+    (void)events;
+    auto *entry = static_cast<WakeupEntry *>(item);
+    if (!entry || !entry->loop) {
+        return;
+    }
+    entry->loop->drain_wakeup();
+}
+
+void EventLoop::on_watch_event(Poller::Item *item, int fd, IoEvent events) {
+    (void)fd;
+    auto *watch = static_cast<WatchEntry *>(item);
+    if (!watch || !watch->registered || !watch->io_callback) {
+        return;
+    }
+    watch->io_callback(events);
 }
 
 void EventLoop::drain_commands() {
@@ -117,7 +122,7 @@ void EventLoop::drain_commands() {
                 if (cmd.timer->cancelled) {
                     delete cmd.timer;
                 } else if (!cmd.timer->in_heap) {
-                    timers_.insert(&cmd.timer->node, &EventLoop::timer_less);
+                    timers_.insert(&cmd.timer->node);
                     cmd.timer->in_heap = true;
                 }
             }
@@ -126,7 +131,7 @@ void EventLoop::drain_commands() {
             if (cmd.timer) {
                 cmd.timer->cancelled = true;
                 if (cmd.timer->in_heap) {
-                    timers_.remove(&cmd.timer->node, &EventLoop::timer_less);
+                    timers_.remove(&cmd.timer->node);
                     cmd.timer->in_heap = false;
                 }
                 delete cmd.timer;
@@ -134,7 +139,7 @@ void EventLoop::drain_commands() {
             break;
         case CommandType::WatchFd:
             if (cmd.watch) {
-                int rc = poller_.add(cmd.watch->fd, to_epoll_events(cmd.watch->events), cmd.watch);
+                int rc = poller_.add(cmd.watch->watched_fd, cmd.watch->events, cmd.watch);
                 cmd.watch->registered = (rc == 0);
                 if (cmd.watch->on_ready) {
                     cmd.watch->on_ready(rc == 0 ? 0 : errno);
@@ -145,14 +150,14 @@ void EventLoop::drain_commands() {
             if (cmd.watch) {
                 cmd.watch->events = cmd.events;
                 if (cmd.watch->registered) {
-                    poller_.mod(cmd.watch->fd, to_epoll_events(cmd.watch->events), cmd.watch);
+                    poller_.mod(cmd.watch->watched_fd, cmd.watch->events, cmd.watch);
                 }
             }
             break;
         case CommandType::UnwatchFd:
             if (cmd.watch) {
                 if (cmd.watch->registered) {
-                    poller_.del(cmd.watch->fd);
+                    poller_.del(cmd.watch->watched_fd);
                     cmd.watch->registered = false;
                 }
                 delete cmd.watch;
@@ -195,7 +200,7 @@ void EventLoop::run_due_timers(std::chrono::steady_clock::time_point now) {
         if (!entry || entry->deadline > now) {
             break;
         }
-        timers_.dequeue(&EventLoop::timer_less);
+        timers_.remove(&entry->node);
         entry->in_heap = false;
         if (!entry->cancelled && entry->callback) {
             entry->callback();
@@ -262,20 +267,12 @@ void EventLoop::run_once() {
     }
 
     for (int i = 0; i < count; ++i) {
-        void *data = events[i].data.ptr;
-        if (data == this) {
-            drain_wakeup();
-            continue;
-        }
-        auto *watch = static_cast<WatchEntry *>(data);
-        if (!watch || !watch->registered || !watch->callback) {
-            continue;
-        }
+        auto *item = static_cast<Poller::Item *>(events[i].data.ptr);
         IoEvent io = to_io_event(events[i].events);
         if (to_mask(io) == 0) {
             continue;
         }
-        watch->callback(io);
+        item->callback(item, item->fd(), io);
     }
 }
 
@@ -332,9 +329,10 @@ void EventLoop::cancel(TimerHandle handle) {
 
 EventLoop::WatchHandle EventLoop::watch_fd(int fd, IoEvent events, IoCallback cb, WatchReady on_ready) {
     auto *entry = new WatchEntry();
-    entry->fd = fd;
+    entry->watched_fd = fd;
     entry->events = events;
-    entry->callback = std::move(cb);
+    entry->callback = &EventLoop::on_watch_event;
+    entry->io_callback = std::move(cb);
     entry->on_ready = std::move(on_ready);
     entry->id = next_watch_id_.fetch_add(1, std::memory_order_relaxed);
 
