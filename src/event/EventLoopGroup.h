@@ -2,11 +2,11 @@
 #define FIBER_EVENT_EVENT_LOOP_GROUP_H
 
 #include <atomic>
+#include <coroutine>
 #include <cstddef>
 #include <memory>
 #include <vector>
 
-#include "../async/Scheduler.h"
 #include "../async/ThreadGroup.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
@@ -14,14 +14,13 @@
 
 namespace fiber::event {
 
-class EventLoopGroup : public fiber::async::IScheduler,
-                       public common::NonCopyable,
+class EventLoopGroup : public common::NonCopyable,
                        public common::NonMovable {
 public:
     using TaskFn = EventLoop::TaskFn;
 
     explicit EventLoopGroup(std::size_t size);
-    ~EventLoopGroup() override;
+    ~EventLoopGroup();
 
     void start();
     void stop();
@@ -37,7 +36,7 @@ public:
     static EventLoop &current();
 
     void post(TaskFn fn);
-    void post(std::coroutine_handle<> handle) override;
+    void post(std::coroutine_handle<> handle);
 
 private:
     EventLoop &select_loop();

@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <functional>
 
-#include "../async/Scheduler.h"
+#include "../async/CoroutineFramePool.h"
 #include "MpscQueue.h"
 #include "Poller.h"
 #include "TimerQueue.h"
@@ -16,7 +16,9 @@ namespace fiber::event {
 
 using IoEvent = Poller::Event;
 
-class EventLoop : public fiber::async::IScheduler {
+class EventLoopGroup;
+
+class EventLoop {
 private:
     struct TimerEntry;
     struct WatchEntry;
@@ -50,15 +52,15 @@ public:
         std::uint64_t id_ = 0;
     };
 
-    EventLoop();
-    ~EventLoop() override;
+    explicit EventLoop(EventLoopGroup *group = nullptr);
+    ~EventLoop();
 
     void run();
     void run_once();
     void stop();
 
     void post(TaskFn fn);
-    void post(std::coroutine_handle<> handle) override;
+    void post(std::coroutine_handle<> handle);
 
     TimerHandle post_after(std::chrono::steady_clock::duration delay, TaskFn fn);
     TimerHandle post_at(std::chrono::steady_clock::time_point when, TaskFn fn);
@@ -67,6 +69,22 @@ public:
     WatchHandle watch_fd(int fd, IoEvent events, IoCallback cb, WatchReady on_ready = {});
     void update_fd(WatchHandle handle, IoEvent events);
     void unwatch_fd(WatchHandle handle);
+
+    fiber::async::CoroutineFramePool &frame_pool() noexcept {
+        return frame_pool_;
+    }
+
+    const fiber::async::CoroutineFramePool &frame_pool() const noexcept {
+        return frame_pool_;
+    }
+
+    EventLoopGroup *group() noexcept {
+        return group_;
+    }
+
+    const EventLoopGroup *group() const noexcept {
+        return group_;
+    }
 
 private:
     enum class CommandType : std::uint8_t {
@@ -142,6 +160,8 @@ private:
     WakeupEntry wakeup_entry_{};
     std::atomic<bool> wakeup_pending_{false};
     std::atomic<bool> stop_requested_{false};
+    fiber::async::CoroutineFramePool frame_pool_{};
+    EventLoopGroup *group_ = nullptr;
 };
 
 } // namespace fiber::event

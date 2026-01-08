@@ -4,7 +4,6 @@
 #include <cstddef>
 
 #include "../common/json/JsNode.h"
-#include "async/Task.h"
 
 namespace fiber::script {
 
@@ -19,7 +18,6 @@ public:
     virtual void *attach() const = 0;
     virtual const fiber::json::JsValue &arg_value(std::size_t index) const = 0;
     virtual std::size_t arg_count() const = 0;
-    virtual async::IScheduler *scheduler() const = 0;
 };
 
 } // namespace fiber::script
