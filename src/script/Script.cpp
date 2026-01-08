@@ -53,23 +53,19 @@ ScriptRun::~ScriptRun() = default;
 ScriptRun::ScriptRun(const ir::Compiled &compiled,
                      const fiber::json::JsValue &root,
                      void *attach,
-                     async::IScheduler *scheduler,
                      ScriptRuntime &runtime)
     : runtime_(&runtime),
-      vm_(std::make_unique<run::InterpreterVm>(compiled, root, attach, scheduler, runtime)),
-      scheduler_(scheduler) {
+      vm_(std::make_unique<run::InterpreterVm>(compiled, root, attach, runtime)) {
 }
 
 ScriptRun::ScriptRun(const ir::Compiled &compiled,
                      const fiber::json::JsValue &root,
                      void *attach,
-                     async::IScheduler *scheduler,
                      fiber::json::GcHeap &heap,
                      fiber::json::GcRootSet &roots)
     : owned_runtime_(std::make_unique<ScriptRuntime>(heap, roots)),
       runtime_(owned_runtime_.get()),
-      vm_(std::make_unique<run::InterpreterVm>(compiled, root, attach, scheduler, *runtime_)),
-      scheduler_(scheduler) {
+      vm_(std::make_unique<run::InterpreterVm>(compiled, root, attach, *runtime_)) {
 }
 
 ScriptRun::Result ScriptRun::operator()() {
@@ -154,11 +150,7 @@ void ScriptRun::Awaiter::resume_if_complete() {
         if (!handle) {
             return;
         }
-        if (run_.scheduler_) {
-            run_.scheduler_->post(handle);
-        } else {
-            handle.resume();
-        }
+        handle.resume();
         return;
     }
     resuming_ = false;
@@ -219,23 +211,21 @@ Script::Script(std::shared_ptr<ir::Compiled> compiled)
 
 ScriptAsyncRun Script::exec_async(const fiber::json::JsValue &root,
                                   void *attach,
-                                  async::IScheduler *scheduler,
                                   ScriptRuntime &runtime) {
     if (!compiled_) {
         return {};
     }
-    return ScriptAsyncRun(ScriptRun(*compiled_, root, attach, scheduler, runtime));
+    return ScriptAsyncRun(ScriptRun(*compiled_, root, attach, runtime));
 }
 
 ScriptAsyncRun Script::exec_async(const fiber::json::JsValue &root,
                                   void *attach,
-                                  async::IScheduler *scheduler,
                                   fiber::json::GcHeap &heap,
                                   fiber::json::GcRootSet &roots) {
     if (!compiled_) {
         return {};
     }
-    return ScriptAsyncRun(ScriptRun(*compiled_, root, attach, scheduler, heap, roots));
+    return ScriptAsyncRun(ScriptRun(*compiled_, root, attach, heap, roots));
 }
 
 ScriptSyncRun Script::exec_sync(const fiber::json::JsValue &root,
@@ -247,7 +237,7 @@ ScriptSyncRun Script::exec_sync(const fiber::json::JsValue &root,
     if (compiled_->contains_async()) {
         FIBER_PANIC("async opcode encountered in exec_sync");
     }
-    return ScriptSyncRun(ScriptRun(*compiled_, root, attach, nullptr, runtime));
+    return ScriptSyncRun(ScriptRun(*compiled_, root, attach, runtime));
 }
 
 ScriptSyncRun Script::exec_sync(const fiber::json::JsValue &root,
@@ -260,7 +250,7 @@ ScriptSyncRun Script::exec_sync(const fiber::json::JsValue &root,
     if (compiled_->contains_async()) {
         FIBER_PANIC("async opcode encountered in exec_sync");
     }
-    return ScriptSyncRun(ScriptRun(*compiled_, root, attach, nullptr, heap, roots));
+    return ScriptSyncRun(ScriptRun(*compiled_, root, attach, heap, roots));
 }
 
 bool Script::contains_async() const {

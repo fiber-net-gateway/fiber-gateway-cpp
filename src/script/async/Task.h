@@ -8,20 +8,11 @@
 #include <string>
 #include <utility>
 
+#include "../../async/CoroutinePromiseBase.h"
+
 namespace fiber::script::async {
 
-struct IScheduler {
-    virtual void post(std::coroutine_handle<> handle) = 0;
-    virtual ~IScheduler() = default;
-};
-
-struct InlineScheduler final : IScheduler {
-    void post(std::coroutine_handle<> handle) override {
-        handle.resume();
-    }
-};
-
-class TaskPromiseBase {
+class TaskPromiseBase : public fiber::async::CoroutinePromiseBase {
 public:
     std::suspend_always initial_suspend() noexcept {
         return {};
@@ -39,12 +30,7 @@ public:
             if (!cont) {
                 return;
             }
-            IScheduler *scheduler = promise.scheduler();
-            if (scheduler) {
-                scheduler->post(cont);
-            } else {
-                cont.resume();
-            }
+            cont.resume();
         }
 
         void await_resume() noexcept {
@@ -53,14 +39,6 @@ public:
 
     FinalAwaiter final_suspend() noexcept {
         return {};
-    }
-
-    void set_scheduler(IScheduler *scheduler) {
-        scheduler_ = scheduler;
-    }
-
-    IScheduler *scheduler() const {
-        return scheduler_;
     }
 
     void set_continuation(std::coroutine_handle<> handle) {
@@ -72,7 +50,6 @@ public:
     }
 
 private:
-    IScheduler *scheduler_ = nullptr;
     std::coroutine_handle<> continuation_ = nullptr;
 };
 
@@ -147,12 +124,6 @@ public:
         return static_cast<bool>(handle_);
     }
 
-    void set_scheduler(IScheduler *scheduler) {
-        if (handle_) {
-            handle_.promise().set_scheduler(scheduler);
-        }
-    }
-
     struct Awaiter {
         handle_type handle;
 
@@ -162,12 +133,7 @@ public:
 
         void await_suspend(std::coroutine_handle<> cont) {
             handle.promise().set_continuation(cont);
-            IScheduler *scheduler = handle.promise().scheduler();
-            if (scheduler) {
-                scheduler->post(handle);
-            } else {
-                handle.resume();
-            }
+            handle.resume();
         }
 
         std::expected<T, TaskError> await_resume() {
@@ -244,12 +210,6 @@ public:
         return static_cast<bool>(handle_);
     }
 
-    void set_scheduler(IScheduler *scheduler) {
-        if (handle_) {
-            handle_.promise().set_scheduler(scheduler);
-        }
-    }
-
     struct Awaiter {
         handle_type handle;
 
@@ -259,12 +219,7 @@ public:
 
         void await_suspend(std::coroutine_handle<> cont) {
             handle.promise().set_continuation(cont);
-            IScheduler *scheduler = handle.promise().scheduler();
-            if (scheduler) {
-                scheduler->post(handle);
-            } else {
-                handle.resume();
-            }
+            handle.resume();
         }
 
         std::expected<void, TaskError> await_resume() {
@@ -278,156 +233,6 @@ public:
 
 private:
     handle_type handle_ = nullptr;
-};
-
-template <typename T>
-class TaskCompletionSource {
-public:
-    TaskCompletionSource() = default;
-
-    Task<T> task() {
-        return wait();
-    }
-
-    void set_value(T value) {
-        state_.set_result(std::expected<T, TaskError>(std::in_place, std::move(value)));
-    }
-
-    void set_error(TaskError error) {
-        state_.set_result(std::unexpected(std::move(error)));
-    }
-
-    void set_scheduler(IScheduler *scheduler) {
-        state_.scheduler = scheduler;
-    }
-
-private:
-    struct State {
-        std::optional<std::expected<T, TaskError>> result;
-        bool ready = false;
-        std::coroutine_handle<> continuation = nullptr;
-        IScheduler *scheduler = nullptr;
-
-        void set_result(std::expected<T, TaskError> value) {
-            if (ready) {
-                return;
-            }
-            result = std::move(value);
-            ready = true;
-            resume();
-        }
-
-        void resume() {
-            if (!continuation) {
-                return;
-            }
-            if (scheduler) {
-                scheduler->post(continuation);
-            } else {
-                continuation.resume();
-            }
-        }
-    };
-
-    struct Awaiter {
-        State *state;
-
-        bool await_ready() const noexcept {
-            return state->ready;
-        }
-
-        void await_suspend(std::coroutine_handle<> handle) {
-            state->continuation = handle;
-        }
-
-        std::expected<T, TaskError> await_resume() {
-            if (!state->result) {
-                return std::unexpected(TaskError{"no result"});
-            }
-            return std::move(*state->result);
-        }
-    };
-
-    Task<T> wait() {
-        co_return co_await Awaiter{&state_};
-    }
-
-    State state_;
-};
-
-template <>
-class TaskCompletionSource<void> {
-public:
-    TaskCompletionSource() = default;
-
-    Task<void> task() {
-        return wait();
-    }
-
-    void set_value() {
-        state_.set_result(std::expected<void, TaskError>());
-    }
-
-    void set_error(TaskError error) {
-        state_.set_result(std::unexpected(std::move(error)));
-    }
-
-    void set_scheduler(IScheduler *scheduler) {
-        state_.scheduler = scheduler;
-    }
-
-private:
-    struct State {
-        std::optional<std::expected<void, TaskError>> result;
-        bool ready = false;
-        std::coroutine_handle<> continuation = nullptr;
-        IScheduler *scheduler = nullptr;
-
-        void set_result(std::expected<void, TaskError> value) {
-            if (ready) {
-                return;
-            }
-            ready = true;
-            result = std::move(value);
-            resume();
-        }
-
-        void resume() {
-            if (!continuation) {
-                return;
-            }
-            if (scheduler) {
-                scheduler->post(continuation);
-            } else {
-                continuation.resume();
-            }
-        }
-    };
-
-    struct Awaiter {
-        State *state;
-
-        bool await_ready() const noexcept {
-            return state->ready;
-        }
-
-        void await_suspend(std::coroutine_handle<> handle) {
-            state->continuation = handle;
-        }
-
-        std::expected<void, TaskError> await_resume() {
-            if (!state->result) {
-                return std::unexpected(TaskError{"no result"});
-            }
-            return std::move(*state->result);
-        }
-    };
-
-    Task<void> wait() {
-        co_return co_await Awaiter{&state_};
-    }
-
-    State state_;
 };
 
 } // namespace fiber::script::async

@@ -13,7 +13,7 @@ EventLoopGroup::EventLoopGroup(std::size_t size)
     FIBER_ASSERT(size > 0);
     loops_.reserve(size);
     for (std::size_t i = 0; i < size; ++i) {
-        loops_.push_back(std::make_unique<EventLoop>());
+        loops_.push_back(std::make_unique<EventLoop>(this));
     }
 }
 
@@ -26,6 +26,7 @@ void EventLoopGroup::start() {
     threads_.start([this](fiber::async::ThreadGroup::Thread &thread) {
         const auto index = thread.index();
         EventLoop &loop = *loops_[index];
+        fiber::async::CoroutineFrameAllocScope alloc_scope(&loop.frame_pool());
         current_loop_ = &loop;
         loop.run();
         current_loop_ = nullptr;

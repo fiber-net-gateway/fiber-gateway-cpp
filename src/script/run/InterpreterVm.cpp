@@ -43,12 +43,10 @@ VmError make_throw_error() {
 InterpreterVm::InterpreterVm(const ir::Compiled &compiled,
                              const fiber::json::JsValue &root,
                              void *attach,
-                             async::IScheduler *scheduler,
                              ScriptRuntime &runtime)
     : compiled_(compiled),
       root_(root),
       attach_(attach),
-      scheduler_(scheduler),
       runtime_(runtime) {
     stack_size_ = compiled_.stack_size;
     var_count_ = compiled_.var_table_size;
@@ -871,10 +869,6 @@ std::size_t InterpreterVm::arg_count() const {
         return arr ? arr->size : 0;
     }
     return arg_cnt_;
-}
-
-async::IScheduler *InterpreterVm::scheduler() const {
-    return scheduler_;
 }
 
 void InterpreterVm::return_value(const fiber::json::JsValue &value) {

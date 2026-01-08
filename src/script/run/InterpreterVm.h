@@ -31,7 +31,6 @@ public:
     InterpreterVm(const ir::Compiled &compiled,
                   const fiber::json::JsValue &root,
                   void *attach,
-                  async::IScheduler *scheduler,
                   ScriptRuntime &runtime);
     ~InterpreterVm() override;
 
@@ -43,7 +42,6 @@ public:
     void *attach() const override;
     const fiber::json::JsValue &arg_value(std::size_t index) const override;
     std::size_t arg_count() const override;
-    async::IScheduler *scheduler() const override;
     void return_value(const fiber::json::JsValue &value) override;
     void throw_value(const fiber::json::JsValue &value) override;
     void visit_roots(fiber::json::GcRootSet::RootVisitor &visitor) override;
@@ -59,7 +57,6 @@ private:
     const ir::Compiled &compiled_;
     fiber::json::JsValue root_;
     void *attach_ = nullptr;
-    async::IScheduler *scheduler_ = nullptr;
     ScriptRuntime &runtime_;
 
     std::vector<fiber::json::JsValue> slots_;

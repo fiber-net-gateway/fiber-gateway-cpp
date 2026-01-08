@@ -48,13 +48,11 @@ private:
     ScriptRun(const ir::Compiled &compiled,
               const fiber::json::JsValue &root,
               void *attach,
-              async::IScheduler *scheduler,
               ScriptRuntime &runtime);
 
     ScriptRun(const ir::Compiled &compiled,
               const fiber::json::JsValue &root,
               void *attach,
-              async::IScheduler *scheduler,
               fiber::json::GcHeap &heap,
               fiber::json::GcRootSet &roots);
 
@@ -63,7 +61,6 @@ private:
     std::unique_ptr<ScriptRuntime> owned_runtime_;
     ScriptRuntime *runtime_ = nullptr;
     std::unique_ptr<run::InterpreterVm> vm_;
-    async::IScheduler *scheduler_ = nullptr;
 };
 
 class ScriptRun::Awaiter final {
@@ -135,27 +132,12 @@ public:
 
     ScriptAsyncRun exec_async(const fiber::json::JsValue &root,
                               void *attach,
-                              async::IScheduler *scheduler,
                               ScriptRuntime &runtime);
 
     ScriptAsyncRun exec_async(const fiber::json::JsValue &root,
                               void *attach,
-                              ScriptRuntime &runtime) {
-        return exec_async(root, attach, nullptr, runtime);
-    }
-
-    ScriptAsyncRun exec_async(const fiber::json::JsValue &root,
-                              void *attach,
-                              async::IScheduler *scheduler,
                               fiber::json::GcHeap &heap,
                               fiber::json::GcRootSet &roots);
-
-    ScriptAsyncRun exec_async(const fiber::json::JsValue &root,
-                              void *attach,
-                              fiber::json::GcHeap &heap,
-                              fiber::json::GcRootSet &roots) {
-        return exec_async(root, attach, nullptr, heap, roots);
-    }
 
     ScriptSyncRun exec_sync(const fiber::json::JsValue &root,
                             void *attach,

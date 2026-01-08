@@ -32,7 +32,8 @@ IoEvent to_io_event(std::uint32_t events) {
 
 } // namespace
 
-EventLoop::EventLoop() {
+EventLoop::EventLoop(EventLoopGroup *group)
+    : group_(group) {
     timers_.init();
     wakeup_entry_.loop = this;
     wakeup_entry_.callback = &EventLoop::on_wakeup;
