@@ -6,8 +6,6 @@
 
 namespace fiber::event {
 
-thread_local EventLoop *EventLoopGroup::current_loop_ = nullptr;
-
 EventLoopGroup::EventLoopGroup(std::size_t size)
     : threads_(size) {
     FIBER_ASSERT(size > 0);
@@ -27,9 +25,7 @@ void EventLoopGroup::start() {
         const auto index = thread.index();
         EventLoop &loop = *loops_[index];
         fiber::async::CoroutineFrameAllocScope alloc_scope(&loop.frame_pool());
-        current_loop_ = &loop;
         loop.run();
-        current_loop_ = nullptr;
     });
 }
 
@@ -53,11 +49,6 @@ const EventLoop &EventLoopGroup::at(std::size_t index) const {
     return *loops_[index];
 }
 
-EventLoop &EventLoopGroup::current() {
-    FIBER_ASSERT(current_loop_ != nullptr);
-    return *current_loop_;
-}
-
 void EventLoopGroup::post(TaskFn fn) {
     select_loop().post(std::move(fn));
 }
@@ -67,8 +58,8 @@ void EventLoopGroup::post(std::coroutine_handle<> handle) {
 }
 
 EventLoop &EventLoopGroup::select_loop() {
-    if (current_loop_) {
-        return *current_loop_;
+    if (auto *current = EventLoop::current_or_null()) {
+        return *current;
     }
     FIBER_ASSERT(!loops_.empty());
     auto index = next_.fetch_add(1, std::memory_order_relaxed);

@@ -72,9 +72,8 @@ public:
     void post(TaskFn fn);
     void post(std::coroutine_handle<> handle) override;
 
-    TimerHandle post_after(std::chrono::steady_clock::duration delay, TaskFn fn);
-    TimerHandle post_at(std::chrono::steady_clock::time_point when, TaskFn fn);
-    void cancel(TimerHandle handle);
+    void post_at(std::chrono::steady_clock::time_point when, TimerEntry &entry);
+    void cancel(TimerEntry &entry);
 
     WatchHandle watch_fd(int fd, IoEvent events, IoCallback cb, WatchReady on_ready = {});
     void update_fd(WatchHandle handle, IoEvent events);
@@ -90,7 +89,6 @@ public:
     void join();
 
     EventLoop &at(std::size_t index);
-    static EventLoop &current();
 
     void post(TaskFn fn);
     void post(std::coroutine_handle<> handle) override;

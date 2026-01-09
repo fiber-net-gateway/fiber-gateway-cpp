@@ -33,8 +33,6 @@ public:
     EventLoop &at(std::size_t index);
     const EventLoop &at(std::size_t index) const;
 
-    static EventLoop &current();
-
     void post(TaskFn fn);
     void post(std::coroutine_handle<> handle);
 
@@ -44,7 +42,6 @@ private:
     std::vector<std::unique_ptr<EventLoop>> loops_;
     fiber::async::ThreadGroup threads_;
     std::atomic<std::size_t> next_{0};
-    static thread_local EventLoop *current_loop_;
 };
 
 } // namespace fiber::event
