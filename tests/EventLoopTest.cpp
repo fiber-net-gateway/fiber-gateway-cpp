@@ -13,7 +13,7 @@ TEST(EventLoopTest, FramePoolInstalledOnLoopThread) {
 
     group.start();
     group.post([&promise]() {
-        auto &loop = fiber::event::EventLoopGroup::current();
+        auto &loop = fiber::event::EventLoop::current();
         auto *pool = fiber::async::CoroutineFramePool::current();
         bool ok = pool != nullptr && pool == &loop.frame_pool();
         promise.set_value(ok);

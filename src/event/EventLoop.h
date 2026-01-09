@@ -20,7 +20,6 @@ class EventLoopGroup;
 
 class EventLoop {
 private:
-    struct TimerEntry;
     struct WatchEntry;
 
 public:
@@ -28,16 +27,23 @@ public:
     using IoCallback = std::function<void(IoEvent)>;
     using WatchReady = std::function<void(int error)>;
 
-    struct TimerHandle {
-        bool valid() const {
-            return entry_ != nullptr && id_ != 0;
+    struct TimerEntry {
+        using Callback = void (*)(TimerEntry *);
+
+        Callback callback = nullptr;
+        std::chrono::steady_clock::time_point deadline{};
+        TimerQueue::Node node{};
+        bool in_heap_ = false;
+
+        TimerEntry() = default;
+        TimerEntry(const TimerEntry &) = delete;
+        TimerEntry &operator=(const TimerEntry &) = delete;
+        TimerEntry(TimerEntry &&) = delete;
+        TimerEntry &operator=(TimerEntry &&) = delete;
+
+        bool operator<(const TimerEntry &other) const noexcept {
+            return deadline < other.deadline;
         }
-
-    private:
-        friend class EventLoop;
-
-        TimerEntry *entry_ = nullptr;
-        std::uint64_t id_ = 0;
     };
 
     struct WatchHandle {
@@ -59,12 +65,21 @@ public:
     void run_once();
     void stop();
 
+    [[nodiscard]] static EventLoop &current();
+    [[nodiscard]] static EventLoop *current_or_null() noexcept;
+    [[nodiscard]] bool in_loop() const noexcept {
+        return current_or_null() == this;
+    }
+    [[nodiscard]] std::chrono::steady_clock::time_point now() const noexcept {
+        return now_;
+    }
+
     void post(TaskFn fn);
     void post(std::coroutine_handle<> handle);
 
-    TimerHandle post_after(std::chrono::steady_clock::duration delay, TaskFn fn);
-    TimerHandle post_at(std::chrono::steady_clock::time_point when, TaskFn fn);
-    void cancel(TimerHandle handle);
+    void post_at(std::chrono::steady_clock::time_point when, TimerEntry &entry);
+    void cancel(TimerEntry &entry);
+
 
     WatchHandle watch_fd(int fd, IoEvent events, IoCallback cb, WatchReady on_ready = {});
     void update_fd(WatchHandle handle, IoEvent events);
@@ -87,31 +102,15 @@ public:
     }
 
 private:
+    static thread_local EventLoop *current_;
+
     enum class CommandType : std::uint8_t {
         Task,
         Resume,
-        AddTimer,
-        CancelTimer,
         WatchFd,
         UpdateFd,
         UnwatchFd,
         Stop
-    };
-
-    struct TimerEntry {
-        TimerQueue::Node node;
-        std::chrono::steady_clock::time_point deadline{};
-        TaskFn callback{};
-        std::uint64_t id = 0;
-        bool cancelled = false;
-        bool in_heap = false;
-
-        bool operator<(const TimerEntry &other) const noexcept {
-            if (deadline != other.deadline) {
-                return deadline < other.deadline;
-            }
-            return id < other.id;
-        }
     };
 
     struct WatchEntry : Poller::Item {
@@ -131,7 +130,6 @@ private:
         CommandType type = CommandType::Task;
         TaskFn task{};
         std::coroutine_handle<> handle{};
-        TimerEntry *timer = nullptr;
         WatchEntry *watch = nullptr;
         IoEvent events = IoEvent::Read;
     };
@@ -153,13 +151,13 @@ private:
     MpscQueue<Command> command_queue_;
     // Loop-thread only: timer heap operations.
     TimerQueue timers_;
-    std::atomic<std::uint64_t> next_timer_id_{1};
     std::atomic<std::uint64_t> next_watch_id_{1};
     Poller poller_;
     int event_fd_ = -1;
     WakeupEntry wakeup_entry_{};
     std::atomic<bool> wakeup_pending_{false};
     std::atomic<bool> stop_requested_{false};
+    std::chrono::steady_clock::time_point now_{};
     fiber::async::CoroutineFramePool frame_pool_{};
     EventLoopGroup *group_ = nullptr;
 };
