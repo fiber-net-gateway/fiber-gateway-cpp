@@ -146,6 +146,9 @@ public:
 
     const fiber::async::CoroutineFramePool &frame_pool() const noexcept { return frame_pool_; }
 
+    Poller &poller() noexcept { return poller_; }
+    const Poller &poller() const noexcept { return poller_; }
+
     EventLoopGroup *group() noexcept { return group_; }
 
     const EventLoopGroup *group() const noexcept { return group_; }

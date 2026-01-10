@@ -3,7 +3,8 @@
 #include <cerrno>
 #include <pthread.h>
 #include <signal.h>
-#include <time.h>
+#include <sys/signalfd.h>
+#include <unistd.h>
 
 #include "../common/Assert.h"
 
@@ -13,30 +14,32 @@ thread_local SignalService *SignalService::current_ = nullptr;
 
 namespace {
 
-fiber::async::SignalInfo to_signal_info(const siginfo_t &info) {
+fiber::async::SignalInfo to_signal_info(const signalfd_siginfo &info) {
     fiber::async::SignalInfo out{};
-    out.signum = info.si_signo;
-    out.code = info.si_code;
-    out.pid = info.si_pid;
-    out.uid = info.si_uid;
-    out.status = info.si_status;
-    out.errno_ = info.si_errno;
-    out.value = reinterpret_cast<std::intptr_t>(info.si_value.sival_ptr);
+    out.signum = static_cast<int>(info.ssi_signo);
+    out.code = static_cast<int>(info.ssi_code);
+    out.pid = static_cast<pid_t>(info.ssi_pid);
+    out.uid = static_cast<uid_t>(info.ssi_uid);
+    out.status = static_cast<int>(info.ssi_status);
+    out.errno_ = static_cast<int>(info.ssi_errno);
+    out.value = static_cast<std::intptr_t>(info.ssi_ptr);
     return out;
 }
 
 } // namespace
 
 SignalService::SignalService(EventLoop &loop) : loop_(loop) {
+    item_.service = this;
+    item_.callback = &SignalService::on_signalfd;
 }
 
 SignalService::~SignalService() {
-    if (attached_.load(std::memory_order_acquire) && loop_.in_loop()) {
-        detach();
-    }
-    if (dispatcher_.joinable()) {
-        dispatcher_.request_stop();
-        dispatcher_.join();
+    if (attached_.load(std::memory_order_acquire)) {
+        if (loop_.in_loop()) {
+            detach();
+        } else {
+            FIBER_ASSERT_MSG(false, "SignalService must be detached on loop thread before destruction");
+        }
     }
     if (current_ == this) {
         current_ = nullptr;
@@ -51,11 +54,17 @@ bool SignalService::attach(const fiber::async::SignalSet &mask) {
     FIBER_ASSERT(current_ == nullptr);
     mask_ = mask;
     pthread_sigmask(SIG_BLOCK, &mask_.native(), nullptr);
+    signalfd_ = ::signalfd(-1, &mask_.native(), SFD_NONBLOCK | SFD_CLOEXEC);
+    if (signalfd_ < 0) {
+        return false;
+    }
+    if (loop_.poller().add(signalfd_, IoEvent::Read, &item_) != 0) {
+        ::close(signalfd_);
+        signalfd_ = -1;
+        return false;
+    }
     attached_.store(true, std::memory_order_release);
     current_ = this;
-    dispatcher_ = std::jthread([this](std::stop_token stop_token) {
-        run_dispatcher(stop_token);
-    });
     return true;
 }
 
@@ -65,9 +74,10 @@ void SignalService::detach() {
         return;
     }
     attached_.store(false, std::memory_order_release);
-    if (dispatcher_.joinable()) {
-        dispatcher_.request_stop();
-        dispatcher_.join();
+    if (signalfd_ >= 0) {
+        loop_.poller().del(signalfd_);
+        ::close(signalfd_);
+        signalfd_ = -1;
     }
     for (int signum = 0; signum < NSIG; ++signum) {
         auto &queue = waiters_[signum];
@@ -205,49 +215,34 @@ void SignalService::on_delivery(const fiber::async::SignalInfo &info) {
                &fiber::async::detail::SignalWaiter::on_cancel>(*waiter);
 }
 
-void SignalService::Delivery::on_run(Delivery *self) {
-    if (!self) {
+void SignalService::on_signalfd(Poller::Item *item, int fd, IoEvent events) {
+    (void) fd;
+    if (!item || !any(events)) {
         return;
     }
-    if (self->service) {
-        self->service->on_delivery(self->info);
+    auto *signal_item = static_cast<SignalItem *>(item);
+    if (!signal_item->service) {
+        return;
     }
-    delete self;
+    signal_item->service->drain_signalfd();
 }
 
-void SignalService::Delivery::on_cancel(Delivery *self) {
-    delete self;
-}
-
-void SignalService::run_dispatcher(std::stop_token stop_token) {
-    pthread_sigmask(SIG_BLOCK, &mask_.native(), nullptr);
-    sigset_t wait_mask = mask_.native();
-
-    while (!stop_token.stop_requested()) {
-        siginfo_t info{};
-        timespec timeout{};
-        timeout.tv_sec = 0;
-        timeout.tv_nsec = 100 * 1000 * 1000;
-        int rc = sigtimedwait(&wait_mask, &info, &timeout);
-        if (stop_token.stop_requested()) {
-            break;
-        }
-        if (rc < 0) {
-            if (errno == EAGAIN || errno == EINTR) {
-                continue;
-            }
-            if (errno == EINVAL) {
-                break;
-            }
+void SignalService::drain_signalfd() {
+    FIBER_ASSERT(loop_.in_loop());
+    if (!attached_.load(std::memory_order_acquire) || signalfd_ < 0) {
+        return;
+    }
+    for (;;) {
+        signalfd_siginfo info{};
+        ssize_t rc = ::read(signalfd_, &info, sizeof(info));
+        if (rc == static_cast<ssize_t>(sizeof(info))) {
+            on_delivery(to_signal_info(info));
             continue;
         }
-        if (!attached_.load(std::memory_order_acquire)) {
+        if (rc < 0 && (errno == EINTR)) {
             continue;
         }
-        auto *delivery = new Delivery{};
-        delivery->service = this;
-        delivery->info = to_signal_info(info);
-        loop_.post<Delivery, &Delivery::entry, &Delivery::on_run, &Delivery::on_cancel>(*delivery);
+        break;
     }
 }
 

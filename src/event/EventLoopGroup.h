@@ -10,6 +10,12 @@
 #include "../common/NonMovable.h"
 #include "EventLoop.h"
 
+namespace fiber::async {
+
+class SignalSet;
+
+} // namespace fiber::async
+
 namespace fiber::event {
 
 class EventLoopGroup : public common::NonCopyable,
@@ -19,6 +25,7 @@ public:
     ~EventLoopGroup();
 
     void start();
+    void start(const fiber::async::SignalSet &mask);
     void stop();
     void join();
 
@@ -31,6 +38,9 @@ public:
 
     std::vector<std::unique_ptr<EventLoop>> loops_;
     fiber::async::ThreadGroup threads_;
+
+private:
+    void start_with_mask(const fiber::async::SignalSet *mask);
 };
 
 } // namespace fiber::event

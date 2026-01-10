@@ -177,7 +177,7 @@ TEST(SignalTest, SingleWaiterReceivesSignal) {
     std::promise<fiber::async::SignalInfo> promise;
     auto future = promise.get_future();
 
-    group.start();
+    group.start(mask);
     fiber::async::spawn(group.at(0), [&]() {
         bool ok = service.attach(mask);
         attached.set_value();
@@ -218,7 +218,7 @@ TEST(SignalTest, PendingBeforeAwait) {
     std::promise<fiber::async::SignalInfo> promise;
     auto future = promise.get_future();
 
-    group.start();
+    group.start(mask);
     fiber::async::spawn(group.at(0), [&]() {
         bool ok = service.attach(mask);
         attached.set_value();
@@ -266,7 +266,7 @@ TEST(SignalTest, FifoFairness) {
     std::atomic<int> order{0};
     std::array<int, 2> seen{0, 0};
 
-    group.start();
+    group.start(mask);
     fiber::async::spawn(group.at(0), [&]() {
         bool ok = service.attach(mask);
         attached.set_value();
@@ -317,7 +317,7 @@ TEST(SignalTest, CancelOnDestroy) {
     auto stopped_future = stopped.get_future();
     std::atomic<int> hits{0};
 
-    group.start();
+    group.start(mask);
     fiber::async::spawn(group.at(0), [&]() {
         bool ok = service.attach(mask);
         if (!ok) {

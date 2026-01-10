@@ -4,8 +4,6 @@
 #include <array>
 #include <atomic>
 #include <deque>
-#include <stop_token>
-#include <thread>
 
 #include "../async/Signal.h"
 #include "../common/NonCopyable.h"
@@ -30,13 +28,8 @@ public:
     bool try_pop_pending(int signum, fiber::async::SignalInfo &out);
 
 private:
-    struct Delivery {
-        EventLoop::DeferEntry entry{};
+    struct SignalItem : Poller::Item {
         SignalService *service = nullptr;
-        fiber::async::SignalInfo info{};
-
-        static void on_run(Delivery *self);
-        static void on_cancel(Delivery *self);
     };
 
     struct WaiterQueue {
@@ -47,11 +40,13 @@ private:
     static bool valid_signum(int signum) noexcept;
     fiber::async::detail::SignalWaiter *pop_next_waiter(int signum);
     void on_delivery(const fiber::async::SignalInfo &info);
-    void run_dispatcher(std::stop_token stop_token);
+    void drain_signalfd();
+    static void on_signalfd(Poller::Item *item, int fd, IoEvent events);
 
     EventLoop &loop_;
     fiber::async::SignalSet mask_{};
-    std::jthread dispatcher_{};
+    int signalfd_ = -1;
+    SignalItem item_{};
     std::atomic<bool> attached_{false};
 
     std::array<WaiterQueue, NSIG> waiters_{};

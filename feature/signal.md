@@ -1,32 +1,32 @@
-# Signal Await Design (POSIX)
+# Signal Await Design (Linux signalfd)
 
 ## Goals
-- Provide coroutine-friendly signal waiting on Unix-like systems.
-- Use portable POSIX primitives (`pthread_sigmask`, `sigwaitinfo`).
+- Provide coroutine-friendly signal waiting on Linux.
+- Use `signalfd` + `epoll` to integrate with the event loop.
 - Resume waiting coroutines on the owning `EventLoop` thread.
 - Best-effort FIFO fairness per signal.
 - Cancellation-safe: waiter destruction cancels pending waits.
 
 ## Non-Goals
-- No Linux-only `signalfd` or BSD-only `kqueue` in the baseline design.
+- No POSIX `sigwaitinfo` dispatcher thread in the baseline design.
 - No strict fairness guarantees across signals.
 - No timed wait yet (future generic timeout semantics can be layered).
 
 ## Threading Model
 - All handled signals are **blocked** in all threads via `pthread_sigmask`.
-- A dedicated `SignalDispatcher` thread calls `sigwaitinfo` and forwards
-  deliveries into the target `EventLoop` (via defer queue).
+- `signalfd` is registered in the loop `epoll` set; signal delivery happens on
+  the loop thread via the poller callback.
 - All waiter queues and pending queues are owned and mutated by the loop thread.
 
 ## Core Components
 
 ### SignalService (event layer)
-Owns dispatcher thread, pending queues, and waiter queues. Binds to a single
+Owns `signalfd`, pending queues, and waiter queues. Binds to a single
 `EventLoop` instance.
 
 Responsibilities:
 - Install signal mask (outside or at attach).
-- Spawn dispatcher thread.
+- Create/register `signalfd` with the loop poller.
 - Receive deliveries on loop thread and notify waiters.
 - Manage cancellation and shutdown.
 
@@ -42,8 +42,8 @@ Coroutine awaiter for a single signal.
 - `Waiter` state machine: `Waiting -> Notified -> Resumed`, or `Waiting -> Canceled`.
 
 ## Delivery Flow
-1) Dispatcher thread waits for signals using `sigwaitinfo(mask, &info)`.
-2) For each signal, it posts a delivery item into the loop defer queue.
+1) `signalfd` becomes readable on the loop `epoll` callback.
+2) Loop thread drains `signalfd` into `signalfd_siginfo` records.
 3) Loop thread dispatches:
    - If there is a waiter: pop FIFO waiter, mark `Notified`, store info,
      then post waiter resume via defer.
@@ -105,7 +105,7 @@ public:
     explicit SignalService(EventLoop &loop);
     ~SignalService();
 
-    // Attach installs the dispatcher and must run on the loop thread.
+    // Attach installs signalfd and must run on the loop thread.
     bool attach(const fiber::async::SignalSet &mask);
     void detach();
 
@@ -123,11 +123,11 @@ private:
     };
 
     void on_delivery(const fiber::async::SignalInfo &info);
-    void run_dispatcher();
+    void drain_signalfd();
 
     EventLoop &loop_;
     fiber::async::SignalSet mask_{};
-    std::jthread dispatcher_{};
+    int signalfd_ = -1;
 
     // loop-thread only state:
     // WaiterQueue waiters_[NSIG];
@@ -162,7 +162,7 @@ loop->post<SignalWaiter, &SignalWaiter::defer,
 
 ## Suggested File Layout
 - `src/async/Signal.h|.cpp` (awaiter + public API)
-- `src/event/SignalService.h|.cpp` (dispatcher + queues)
+- `src/event/SignalService.h|.cpp` (signalfd + queues)
 - `feature/signal.md` (this doc)
 
 ## Test Notes (GoogleTest + CTest)
@@ -194,15 +194,16 @@ Notes:
 - Avoid `SIGALRM`/`SIGCHLD` to reduce interference with the test runner.
 
 ## Signal Masking Strategy
-- `EventLoopGroup::start` should call `pthread_sigmask(SIG_BLOCK, &mask, nullptr)`
-  on each worker thread before `EventLoop::run()`.
-- The dispatcher thread uses the same mask and waits via `sigwaitinfo`.
+- `EventLoopGroup::start(mask)` blocks the mask on each worker thread before
+  `EventLoop::run()` (so callers don't need to do it manually).
+- The test/main thread should also block the same mask if it raises signals.
+- The loop thread uses the same mask and receives signals via `signalfd`.
 
 ## Shutdown Semantics
-- `detach()` requests dispatcher stop; call it when no active waiters remain.
+- `detach()` closes `signalfd`; call it when no active waiters remain.
 - Pending signals are dropped on shutdown.
 
 ## Extensions (Future)
 - Support "wait any" (multi-signal wait) using a shared token to avoid
   double-resume across multiple queues.
-- Add Linux `signalfd` backend as an optional optimization with the same API.
+- Add POSIX `sigwaitinfo` backend for non-Linux targets with the same API.
