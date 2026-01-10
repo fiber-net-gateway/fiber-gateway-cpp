@@ -1,5 +1,9 @@
 #include "EventLoopGroup.h"
 
+#include <pthread.h>
+#include <signal.h>
+
+#include "../async/Signal.h"
 #include "../common/Assert.h"
 
 namespace fiber::event {
@@ -19,6 +23,25 @@ EventLoopGroup::~EventLoopGroup() {
 }
 
 void EventLoopGroup::start() {
+    start_with_mask(nullptr);
+}
+
+void EventLoopGroup::start(const fiber::async::SignalSet &mask) {
+    start_with_mask(&mask);
+}
+
+void EventLoopGroup::start_with_mask(const fiber::async::SignalSet *mask) {
+    if (mask) {
+        fiber::async::SignalSet copy = *mask;
+        threads_.start([this, copy](fiber::async::ThreadGroup::Thread &thread) {
+            pthread_sigmask(SIG_BLOCK, &copy.native(), nullptr);
+            const auto index = thread.index();
+            EventLoop &loop = *loops_[index];
+            fiber::async::CoroutineFrameAllocScope alloc_scope(&loop.frame_pool());
+            loop.run();
+        });
+        return;
+    }
     threads_.start([this](fiber::async::ThreadGroup::Thread &thread) {
         const auto index = thread.index();
         EventLoop &loop = *loops_[index];
