@@ -8,7 +8,6 @@ namespace fiber::async {
 
 SleepAwaiter::SleepAwaiter(std::chrono::steady_clock::duration delay)
     : delay_(delay) {
-    timer_.callback = &SleepAwaiter::on_timer;
     timer_.owner = this;
 }
 
@@ -16,7 +15,7 @@ SleepAwaiter::~SleepAwaiter() {
     if (!armed_ || !loop_) {
         return;
     }
-    loop_->cancel(timer_);
+    loop_->cancel<SleepTimer, &SleepTimer::entry>(timer_);
 }
 
 bool SleepAwaiter::await_ready() const noexcept {
@@ -27,11 +26,11 @@ void SleepAwaiter::await_suspend(std::coroutine_handle<> handle) {
     handle_ = handle;
     armed_ = true;
     loop_ = &event::EventLoop::current();
-    loop_->post_at(std::chrono::steady_clock::now() + delay_, timer_);
+    loop_->post_at<SleepTimer, &SleepTimer::entry, &SleepTimer::on_timer>(
+        std::chrono::steady_clock::now() + delay_, timer_);
 }
 
-void SleepAwaiter::on_timer(fiber::event::EventLoop::TimerEntry *entry) {
-    auto *timer = static_cast<SleepTimer *>(entry);
+void SleepAwaiter::SleepTimer::on_timer(SleepTimer *timer) {
     if (!timer || !timer->owner) {
         return;
     }

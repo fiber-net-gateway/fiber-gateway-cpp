@@ -5,6 +5,7 @@
 
 #include "async/CoroutineFramePool.h"
 #include "event/EventLoopGroup.h"
+#include "TestHelpers.h"
 
 TEST(EventLoopTest, FramePoolInstalledOnLoopThread) {
     fiber::event::EventLoopGroup group(1);
@@ -12,7 +13,7 @@ TEST(EventLoopTest, FramePoolInstalledOnLoopThread) {
     auto future = promise.get_future();
 
     group.start();
-    group.post([&promise]() {
+    fiber::test::post_task(group.at(0), [&promise]() {
         auto &loop = fiber::event::EventLoop::current();
         auto *pool = fiber::async::CoroutineFramePool::current();
         bool ok = pool != nullptr && pool == &loop.frame_pool();
