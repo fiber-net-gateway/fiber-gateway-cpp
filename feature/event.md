@@ -4,12 +4,13 @@
 - Linux-only implementation based on `epoll` + `eventfd`.
 - Multi-producer, single-consumer task queue (MPSC) for cross-thread scheduling.
 - Strictly asynchronous execution on the loop thread (no inline execution during `post`).
-- Timers and FD watching integrated into a single event loop.
+- Timers integrated into a single event loop.
+- Defer entries use fixed callbacks with optional cancel handling.
 
 ## Threading Model
 - One event loop thread owns the poller and internal state.
-- Any thread may call `post`, `watch_fd`, `update_fd`, `unwatch_fd`, `cancel`, or `stop`.
-- Cross-thread calls enqueue a command into MPSC and signal `eventfd` to wake the loop.
+- Any thread may call `post(DeferEntry&)`, `cancel(DeferEntry&)`, `post_at`, `cancel`, or `stop`.
+- Cross-thread calls enqueue into the defer MPSC and signal `eventfd` to wake the loop.
 
 ## Loop Group
 `EventLoopGroup` owns a fixed set of loops and a `ThreadGroup`. `start()` runs one
@@ -22,14 +23,12 @@ loop thread (otherwise it uses round-robin selection).
 - The loop drains `eventfd` before processing queued commands.
 - An atomic flag (`wakeup_pending_`) prevents redundant wakeups.
 
-## Command Queue
-Commands are enqueued to the MPSC queue and consumed on the loop thread:
-- `Task`: run a user-provided function.
-- `WatchAdd`: add a file descriptor to `epoll`.
-- `WatchMod`: modify interest mask.
-- `WatchDel`: remove a file descriptor.
-- `TimerAdd` / `TimerCancel`: update the timer heap.
-- `Stop`: break the loop.
+## Defer Queue
+`DeferEntry` provides an intrusive, fixed-callback scheduling primitive:
+- `post(DeferEntry&)` enqueues the entry for execution on the loop thread.
+- `cancel(DeferEntry&)` marks the entry canceled; the loop executes `on_cancel` when drained.
+- Each entry has two callbacks: `on_run` and `on_cancel` (either may be null).
+- Cancellation is best-effort if it races with draining.
 
 ## TimerQueue (Heap)
 `TimerQueue` is a C++ translation of `libuv`'s `heap-inl.h`, used as an intrusive
@@ -61,23 +60,15 @@ namespace fiber::event {
 
 class EventLoop : public fiber::async::IScheduler {
 public:
-    using TaskFn = std::function<void()>;
-    using IoCallback = std::function<void(IoEvent)>;
-    using WatchReady = std::function<void(int error)>;
-
     void run();
     void run_once();
     void stop();
 
-    void post(TaskFn fn);
-    void post(std::coroutine_handle<> handle) override;
+    void post(DeferEntry &entry);
+    void cancel(DeferEntry &entry);
 
     void post_at(std::chrono::steady_clock::time_point when, TimerEntry &entry);
     void cancel(TimerEntry &entry);
-
-    WatchHandle watch_fd(int fd, IoEvent events, IoCallback cb, WatchReady on_ready = {});
-    void update_fd(WatchHandle handle, IoEvent events);
-    void unwatch_fd(WatchHandle handle);
 };
 
 class EventLoopGroup : public fiber::async::IScheduler {
@@ -90,15 +81,13 @@ public:
 
     EventLoop &at(std::size_t index);
 
-    void post(TaskFn fn);
-    void post(std::coroutine_handle<> handle) override;
 };
 
 } // namespace fiber::event
 ```
 
 ## Loop Cycle
-1) Drain command queue and apply changes (task run, watch registration, timer updates).
+1) Drain defer queue and execute due callbacks.
 2) Execute due timers.
 3) `epoll_wait` with timeout from the next deadline.
 4) Dispatch IO callbacks.
@@ -112,6 +101,5 @@ public:
 - `src/async/Coroutine.h|.cpp`
 
 ## Implementation Notes
-- `watch_fd` returns immediately. Actual registration occurs asynchronously on the loop thread.
 - All loop-side execution is strictly async (no inline execution in `post`).
 - The poller and timer queue are loop-thread only.

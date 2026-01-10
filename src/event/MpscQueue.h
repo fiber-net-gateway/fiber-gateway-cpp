@@ -65,6 +65,13 @@ public:
         return node->value_;
     }
 
+    static void reset(Node *node) noexcept {
+        if (!node) {
+            return;
+        }
+        node->next_ = nullptr;
+    }
+
     static Node *next(Node *node) noexcept {
         return node ? node->next_ : nullptr;
     }

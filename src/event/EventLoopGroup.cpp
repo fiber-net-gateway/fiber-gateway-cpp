@@ -1,7 +1,5 @@
 #include "EventLoopGroup.h"
 
-#include <utility>
-
 #include "../common/Assert.h"
 
 namespace fiber::event {
@@ -47,23 +45,6 @@ EventLoop &EventLoopGroup::at(std::size_t index) {
 const EventLoop &EventLoopGroup::at(std::size_t index) const {
     FIBER_ASSERT(index < loops_.size());
     return *loops_[index];
-}
-
-void EventLoopGroup::post(TaskFn fn) {
-    select_loop().post(std::move(fn));
-}
-
-void EventLoopGroup::post(std::coroutine_handle<> handle) {
-    select_loop().post(handle);
-}
-
-EventLoop &EventLoopGroup::select_loop() {
-    if (auto *current = EventLoop::current_or_null()) {
-        return *current;
-    }
-    FIBER_ASSERT(!loops_.empty());
-    auto index = next_.fetch_add(1, std::memory_order_relaxed);
-    return *loops_[index % loops_.size()];
 }
 
 } // namespace fiber::event

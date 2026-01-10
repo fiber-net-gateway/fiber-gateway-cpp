@@ -23,11 +23,13 @@ public:
     }
 
 private:
-    struct SleepTimer final : fiber::event::EventLoop::TimerEntry {
+    struct SleepTimer final {
+        fiber::event::EventLoop::TimerEntry entry{};
         SleepAwaiter *owner = nullptr;
+
+        static void on_timer(SleepTimer *timer);
     };
 
-    static void on_timer(fiber::event::EventLoop::TimerEntry *entry);
     void fire();
 
     std::chrono::steady_clock::duration delay_{};

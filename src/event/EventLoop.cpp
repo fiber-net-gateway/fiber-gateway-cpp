@@ -3,8 +3,6 @@
 #include <cerrno>
 #include <cstddef>
 #include <limits>
-#include <utility>
-
 #include <sys/eventfd.h>
 #include <unistd.h>
 
@@ -33,6 +31,8 @@ IoEvent to_io_event(std::uint32_t events) {
 }
 
 } // namespace
+
+EventLoop::DeferEntry::DeferEntry() : node(this) {}
 
 EventLoop::EventLoop(EventLoopGroup *group) : group_(group) {
     timers_.init();
@@ -72,8 +72,7 @@ bool operator<(const TimerQueue::Node &a, const TimerQueue::Node &b) noexcept {
     return *left < *right;
 }
 
-void EventLoop::enqueue(CommandNode *node) {
-    command_queue_.push(node);
+void EventLoop::notify_wakeup() {
     if (event_fd_ < 0) {
         return;
     }
@@ -81,6 +80,13 @@ void EventLoop::enqueue(CommandNode *node) {
         std::uint64_t one = 1;
         ssize_t written = ::write(event_fd_, &one, sizeof(one));
         (void) written;
+    }
+}
+
+void EventLoop::enqueue_defer(DeferNode *node) {
+    defer_queue_.push(node);
+    if (!in_loop()) {
+        notify_wakeup();
     }
 }
 
@@ -92,66 +98,6 @@ void EventLoop::on_wakeup(Poller::Item *item, int fd, IoEvent events) {
         return;
     }
     entry->loop->drain_wakeup();
-}
-
-void EventLoop::on_watch_event(Poller::Item *item, int fd, IoEvent events) {
-    (void) fd;
-    auto *watch = static_cast<WatchEntry *>(item);
-    if (!watch || !watch->registered || !watch->io_callback) {
-        return;
-    }
-    watch->io_callback(events);
-}
-
-void EventLoop::drain_commands() {
-    CommandNode *node = command_queue_.try_pop_all();
-    while (node) {
-        CommandNode *next = MpscQueue<Command>::next(node);
-        Command &cmd = MpscQueue<Command>::unwrap(node);
-        switch (cmd.type) {
-            case CommandType::Task:
-                if (cmd.task) {
-                    cmd.task();
-                }
-                break;
-            case CommandType::Resume:
-                if (cmd.handle) {
-                    cmd.handle.resume();
-                }
-                break;
-            case CommandType::WatchFd:
-                if (cmd.watch) {
-                    int rc = poller_.add(cmd.watch->watched_fd, cmd.watch->events, cmd.watch);
-                    cmd.watch->registered = (rc == 0);
-                    if (cmd.watch->on_ready) {
-                        cmd.watch->on_ready(rc == 0 ? 0 : errno);
-                    }
-                }
-                break;
-            case CommandType::UpdateFd:
-                if (cmd.watch) {
-                    cmd.watch->events = cmd.events;
-                    if (cmd.watch->registered) {
-                        poller_.mod(cmd.watch->watched_fd, cmd.watch->events, cmd.watch);
-                    }
-                }
-                break;
-            case CommandType::UnwatchFd:
-                if (cmd.watch) {
-                    if (cmd.watch->registered) {
-                        poller_.del(cmd.watch->watched_fd);
-                        cmd.watch->registered = false;
-                    }
-                    delete cmd.watch;
-                }
-                break;
-            case CommandType::Stop:
-                stop_requested_.store(true, std::memory_order_release);
-                break;
-        }
-        delete node;
-        node = next;
-    }
 }
 
 void EventLoop::drain_wakeup() {
@@ -220,9 +166,10 @@ void EventLoop::run() {
     EventLoop *prev = current_;
     current_ = this;
     stop_requested_.store(false, std::memory_order_release);
-    while (!stop_requested_.load(std::memory_order_acquire)) {
+    drain_defers<false>();
+    do {
         run_once();
-    }
+    } while (!stop_requested_.load(std::memory_order_acquire));
     current_ = prev;
 }
 
@@ -230,14 +177,10 @@ void EventLoop::run_once() {
     if (event_fd_ < 0 || !poller_.valid()) {
         return;
     }
-    drain_commands();
-    if (stop_requested_.load(std::memory_order_acquire)) {
-        return;
-    }
-
     now_ = std::chrono::steady_clock::now();
     run_due_timers(now_);
 
+    drain_defers<true>();
     int timeout_ms = next_timeout_ms(now_);
     constexpr int kMaxEvents = 64;
     epoll_event events[kMaxEvents];
@@ -259,33 +202,41 @@ void EventLoop::run_once() {
         }
         item->callback(item, item->fd(), io);
     }
+    drain_defers<false>();
 }
 
 void EventLoop::stop() {
-    auto *node = new CommandNode(Command{CommandType::Stop});
-    enqueue(node);
+    stop_requested_.store(true, std::memory_order_release);
+    notify_wakeup();
 }
 
-EventLoop &EventLoop::current() {
-    FIBER_ASSERT(current_ != nullptr);
-    return *current_;
+void EventLoop::post(DeferEntry &entry) {
+    FIBER_ASSERT(entry.on_run != nullptr || entry.on_cancel != nullptr);
+
+    std::uint8_t state = entry.state.load(std::memory_order_acquire);
+    for (;;) {
+        if (state & kDeferQueued) {
+            return;
+        }
+        std::uint8_t desired = (state & static_cast<std::uint8_t>(~kDeferCanceled)) | kDeferQueued;
+        if (entry.state.compare_exchange_weak(state, desired, std::memory_order_acq_rel, std::memory_order_acquire)) {
+            break;
+        }
+    }
+    enqueue_defer(&entry.node);
 }
 
-EventLoop *EventLoop::current_or_null() noexcept {
-    return current_;
-}
-
-void EventLoop::post(TaskFn fn) {
-    auto *node = new CommandNode(Command{CommandType::Task, std::move(fn)});
-    enqueue(node);
-}
-
-void EventLoop::post(std::coroutine_handle<> handle) {
-    Command cmd{};
-    cmd.type = CommandType::Resume;
-    cmd.handle = handle;
-    auto *node = new CommandNode(std::move(cmd));
-    enqueue(node);
+void EventLoop::cancel(DeferEntry &entry) {
+    std::uint8_t state = entry.state.load(std::memory_order_acquire);
+    for (;;) {
+        if ((state & kDeferQueued) == 0) {
+            return;
+        }
+        std::uint8_t desired = state | kDeferCanceled;
+        if (entry.state.compare_exchange_weak(state, desired, std::memory_order_acq_rel, std::memory_order_acquire)) {
+            return;
+        }
+    }
 }
 
 void EventLoop::post_at(std::chrono::steady_clock::time_point when, TimerEntry &entry) {
@@ -305,50 +256,6 @@ void EventLoop::cancel(TimerEntry &entry) {
     }
     timers_.remove(&entry.node);
     entry.in_heap_ = false;
-}
-
-EventLoop::WatchHandle EventLoop::watch_fd(int fd, IoEvent events, IoCallback cb, WatchReady on_ready) {
-    auto *entry = new WatchEntry();
-    entry->watched_fd = fd;
-    entry->events = events;
-    entry->callback = &EventLoop::on_watch_event;
-    entry->io_callback = std::move(cb);
-    entry->on_ready = std::move(on_ready);
-    entry->id = next_watch_id_.fetch_add(1, std::memory_order_relaxed);
-
-    Command cmd{};
-    cmd.type = CommandType::WatchFd;
-    cmd.watch = entry;
-    auto *node = new CommandNode(std::move(cmd));
-    enqueue(node);
-
-    WatchHandle handle{};
-    handle.entry_ = entry;
-    handle.id_ = entry->id;
-    return handle;
-}
-
-void EventLoop::update_fd(WatchHandle handle, IoEvent events) {
-    if (!handle.valid()) {
-        return;
-    }
-    Command cmd{};
-    cmd.type = CommandType::UpdateFd;
-    cmd.watch = handle.entry_;
-    cmd.events = events;
-    auto *node = new CommandNode(std::move(cmd));
-    enqueue(node);
-}
-
-void EventLoop::unwatch_fd(WatchHandle handle) {
-    if (!handle.valid()) {
-        return;
-    }
-    Command cmd{};
-    cmd.type = CommandType::UnwatchFd;
-    cmd.watch = handle.entry_;
-    auto *node = new CommandNode(std::move(cmd));
-    enqueue(node);
 }
 
 } // namespace fiber::event

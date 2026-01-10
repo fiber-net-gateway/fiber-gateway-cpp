@@ -1,8 +1,6 @@
 #ifndef FIBER_EVENT_EVENT_LOOP_GROUP_H
 #define FIBER_EVENT_EVENT_LOOP_GROUP_H
 
-#include <atomic>
-#include <coroutine>
 #include <cstddef>
 #include <memory>
 #include <vector>
@@ -17,8 +15,6 @@ namespace fiber::event {
 class EventLoopGroup : public common::NonCopyable,
                        public common::NonMovable {
 public:
-    using TaskFn = EventLoop::TaskFn;
-
     explicit EventLoopGroup(std::size_t size);
     ~EventLoopGroup();
 
@@ -33,15 +29,8 @@ public:
     EventLoop &at(std::size_t index);
     const EventLoop &at(std::size_t index) const;
 
-    void post(TaskFn fn);
-    void post(std::coroutine_handle<> handle);
-
-private:
-    EventLoop &select_loop();
-
     std::vector<std::unique_ptr<EventLoop>> loops_;
     fiber::async::ThreadGroup threads_;
-    std::atomic<std::size_t> next_{0};
 };
 
 } // namespace fiber::event
