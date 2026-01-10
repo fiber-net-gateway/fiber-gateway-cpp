@@ -9,9 +9,9 @@
 
 #include "async/CoroutinePromiseBase.h"
 #include "async/Mutex.h"
+#include "async/Spawn.h"
 #include "async/Sleep.h"
 #include "event/EventLoopGroup.h"
-#include "TestHelpers.h"
 
 namespace {
 
@@ -177,7 +177,7 @@ TEST(MutexTest, ResumesWaiterAfterUnlock) {
     auto future = promise.get_future();
 
     group.start();
-    fiber::test::post_task(group.at(0), [&mutex, &state, &promise]() {
+    fiber::async::spawn(group.at(0), [&mutex, &state, &promise]() {
         hold_lock(&mutex, &state);
         wait_lock(&mutex, &state, &promise);
     });
@@ -201,7 +201,7 @@ TEST(MutexTest, CancelWaiterDoesNotResume) {
     auto future = done.get_future();
 
     group.start();
-    fiber::test::post_task(group.at(0), [&mutex, &hits, &done]() {
+    fiber::async::spawn(group.at(0), [&mutex, &hits, &done]() {
         hold_and_finish(&mutex, &done);
 
         auto waiter = wait_then_hit(&mutex, &hits);
@@ -234,10 +234,10 @@ TEST(MutexTest, ResumesOnWaiterLoopThread) {
     auto resumed_future = resumed.get_future();
 
     group.start();
-    fiber::test::post_task(group.at(0), [&loop0_id]() {
+    fiber::async::spawn(group.at(0), [&loop0_id]() {
         loop0_id.set_value(std::this_thread::get_id());
     });
-    fiber::test::post_task(group.at(1), [&loop1_id]() {
+    fiber::async::spawn(group.at(1), [&loop1_id]() {
         loop1_id.set_value(std::this_thread::get_id());
     });
 
@@ -249,7 +249,7 @@ TEST(MutexTest, ResumesOnWaiterLoopThread) {
         return;
     }
 
-    fiber::test::post_task(group.at(0), [&mutex, &locked]() {
+    fiber::async::spawn(group.at(0), [&mutex, &locked]() {
         hold_lock_with_signal(&mutex, &locked, std::chrono::milliseconds(50));
     });
 
@@ -260,7 +260,7 @@ TEST(MutexTest, ResumesOnWaiterLoopThread) {
         return;
     }
 
-    fiber::test::post_task(group.at(1), [&mutex, &resumed]() {
+    fiber::async::spawn(group.at(1), [&mutex, &resumed]() {
         wait_lock_thread(&mutex, &resumed);
     });
 

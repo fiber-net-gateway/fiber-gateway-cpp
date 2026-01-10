@@ -8,9 +8,9 @@
 #include <thread>
 
 #include "async/CoroutinePromiseBase.h"
+#include "async/Spawn.h"
 #include "async/Sleep.h"
 #include "event/EventLoopGroup.h"
-#include "TestHelpers.h"
 
 namespace {
 
@@ -139,7 +139,7 @@ TEST(SleepTest, ResumesAfterDelay) {
     auto future = promise.get_future();
 
     group.start();
-    fiber::test::post_task(group.at(0), [&promise]() {
+    fiber::async::spawn(group.at(0), [&promise]() {
         run_sleep(&promise, std::chrono::milliseconds(30));
     });
 
@@ -162,7 +162,7 @@ TEST(SleepTest, CancelOnDestroy) {
     std::atomic<int> hits{0};
 
     group.start();
-    fiber::test::post_task(group.at(0), [&ready, &hits]() {
+    fiber::async::spawn(group.at(0), [&ready, &hits]() {
         auto task = run_sleep_cancel(&hits, std::chrono::milliseconds(50));
         auto handle = task.release();
         handle.resume();
