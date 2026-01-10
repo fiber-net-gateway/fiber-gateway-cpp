@@ -87,6 +87,8 @@ if(FIBER_BUILD_TESTS)
         tests/SleepTest.cpp
         tests/MutexTest.cpp
         tests/SignalTest.cpp
+        tests/TcpListenerTest.cpp
+        tests/IpAddressTest.cpp
     )
     target_link_libraries(fiber_tests PRIVATE fiber_lib GTest::gtest_main)
     if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
