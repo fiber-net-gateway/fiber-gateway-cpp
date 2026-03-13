@@ -115,6 +115,7 @@ private:
     Http2PendingEntry *pending_head_ = nullptr;
     Http2PendingEntry *pending_tail_ = nullptr;
     Http2PendingEntry *active_pending_head_ = nullptr;
+    bool closing_pending_ = false;
     bool connection_owned_ = false;
     Http2Stream *owned_next_ = nullptr;
 
