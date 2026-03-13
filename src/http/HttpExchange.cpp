@@ -1,14 +1,22 @@
 #include "HttpExchange.h"
 
+#include <cstring>
 #include <utility>
 
+#include "../common/Assert.h"
 #include "HttpExchangeIo.h"
 
 namespace fiber::http {
 
-HttpExchange::HttpExchange(const HttpServerOptions &options) : request_headers_(pool_), response_headers_(pool_) {
+HttpExchange::HttpExchange(const HttpServerOptions &options) :
+    request_headers_(pool_),
+    request_trailers_(pool_),
+    response_headers_(pool_),
+    response_trailers_(pool_) {
     request_headers_.reserve_bytes(options.header_init_size);
+    request_trailers_.reserve_bytes(options.header_init_size);
     response_headers_.reserve_bytes(options.header_init_size);
+    response_trailers_.reserve_bytes(options.header_init_size);
 }
 
 HttpExchange::~HttpExchange() = default;
@@ -17,7 +25,7 @@ std::string_view HttpExchange::header(std::string_view name) const noexcept { re
 
 void HttpExchange::set_io(HttpExchangeIo *io) noexcept { io_ = io; }
 
-fiber::async::Task<common::IoResult<ReadBodyChunk>> HttpExchange::read_body(std::size_t max_bytes) noexcept {
+fiber::async::Task<common::IoResult<BodyChunk>> HttpExchange::read_body(std::size_t max_bytes) noexcept {
     if (!io_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -41,24 +49,52 @@ void HttpExchange::set_response_header(std::string_view name, std::string_view v
     response_headers_.set(name, value);
 }
 
+void HttpExchange::set_response_status(int status, std::string_view reason) {
+    FIBER_ASSERT(status >= 100 && status <= 999);
+    response_status_code_ = status;
+    if (reason.empty()) {
+        response_reason_ = {};
+        return;
+    }
+
+    auto *reason_copy = static_cast<char *>(pool_.alloc(reason.size()));
+    FIBER_ASSERT(reason_copy != nullptr);
+    std::memcpy(reason_copy, reason.data(), reason.size());
+    response_reason_ = std::string_view(reason_copy, reason.size());
+}
+
 void HttpExchange::set_response_content_length(size_t len) {
-    response_content_length_set_ = true;
+    response_body_mode_ = ResponseBodyMode::ContentLength;
     response_content_length_ = len;
-    response_chunked_ = false;
 }
 
-void HttpExchange::set_response_chunked() {
-    response_chunked_ = true;
-    response_content_length_set_ = false;
+void HttpExchange::set_response_chunked() { response_body_mode_ = ResponseBodyMode::Chunked; }
+
+void HttpExchange::set_response_close() { response_connection_mode_ = ResponseConnectionMode::Close; }
+
+void HttpExchange::set_response_trailer(std::string_view name, std::string_view value) {
+    response_trailers_.set(name, value);
 }
 
-void HttpExchange::set_response_close() { response_close_ = true; }
-
-fiber::async::Task<common::IoResult<void>> HttpExchange::send_response_header(int status, std::string_view reason) {
+fiber::async::Task<common::IoResult<void>> HttpExchange::send_response_header() {
     if (!io_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    co_return co_await io_->send_response_header(*this, status, reason);
+    co_return co_await io_->send_response_header(*this);
+}
+
+fiber::async::Task<common::IoResult<void>> HttpExchange::finish_response() noexcept {
+    if (!io_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    co_return co_await io_->finish_response(*this);
+}
+
+fiber::async::Task<common::IoResult<size_t>> HttpExchange::write_body(BodyChunk chunk) noexcept {
+    if (!io_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    co_return co_await io_->write_body(*this, std::move(chunk));
 }
 
 fiber::async::Task<common::IoResult<size_t>> HttpExchange::write_body(const uint8_t *buf, size_t len,
