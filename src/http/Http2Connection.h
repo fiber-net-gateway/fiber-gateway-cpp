@@ -10,6 +10,7 @@
 #include <memory>
 
 #include "../async/Task.h"
+#include "../async/Spawn.h"
 #include "../async/WaitGroup.h"
 #include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
@@ -153,6 +154,7 @@ private:
     [[nodiscard]] std::size_t configured_max_active_streams() const noexcept;
     fiber::async::Task<RunResult> finish_run(RunResult result) noexcept;
     fiber::async::Task<void> run_send_loop() noexcept;
+    static fiber::async::DetachedTask run_send_loop_task(Http2Connection *connection) noexcept;
     void start_send_loop() noexcept;
     [[nodiscard]] std::chrono::milliseconds send_loop_poll_timeout() const noexcept;
     void handle_send_loop_timeout() noexcept;

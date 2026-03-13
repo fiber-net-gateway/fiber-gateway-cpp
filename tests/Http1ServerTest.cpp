@@ -95,6 +95,49 @@ std::string recv_http_response(int fd) {
     }
 }
 
+struct HttpResponseReadResult {
+    std::string response;
+    std::string extra;
+};
+
+HttpResponseReadResult recv_http_response_with_extra(int fd) {
+    std::string out;
+    std::array<char, 4096> buf{};
+    size_t header_end = std::string::npos;
+    size_t content_length = 0;
+    for (;;) {
+        if (header_end != std::string::npos && out.size() >= header_end + content_length) {
+            HttpResponseReadResult result;
+            result.response = out.substr(0, header_end + content_length);
+            result.extra = out.substr(header_end + content_length);
+            return result;
+        }
+        ssize_t rc = ::recv(fd, buf.data(), buf.size(), 0);
+        if (rc <= 0) {
+            return {out, {}};
+        }
+        out.append(buf.data(), static_cast<size_t>(rc));
+        if (header_end == std::string::npos) {
+            size_t pos = out.find("\r\n\r\n");
+            if (pos == std::string::npos) {
+                continue;
+            }
+            header_end = pos + 4;
+            size_t cl_pos = out.find("Content-Length:");
+            if (cl_pos != std::string::npos) {
+                cl_pos += sizeof("Content-Length:") - 1;
+                while (cl_pos < pos && out[cl_pos] == ' ') {
+                    ++cl_pos;
+                }
+                size_t cl_end = out.find("\r\n", cl_pos);
+                if (cl_end != std::string::npos) {
+                    content_length = static_cast<size_t>(std::stoul(out.substr(cl_pos, cl_end - cl_pos)));
+                }
+            }
+        }
+    }
+}
+
 int connect_client(uint16_t port) {
     int client = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (client < 0) {
@@ -130,20 +173,30 @@ fiber::common::IoResult<uint16_t> resolve_port(int fd) {
 DetachedTask start_server(fiber::event::EventLoop *loop, fiber::http::HttpHandler handler,
                           fiber::event::EventLoopGroup *worker_group, std::promise<uint16_t> *port_promise,
                           std::promise<fiber::http::Http1Server *> *server_promise) {
-    auto *server = new fiber::http::Http1Server(*loop, std::move(handler), {}, worker_group);
     fiber::net::ListenOptions options{};
-    fiber::net::SocketAddress addr(fiber::net::IpAddress::loopback_v4(), 8080);
-    auto bind_result = server->bind(addr, options);
-    if (!bind_result) {
-        port_promise->set_value(0);
-        server_promise->set_value(nullptr);
-        delete server;
+    constexpr std::uint16_t kFirstTestPort = 20000;
+    constexpr std::uint16_t kPortSpan = 20000;
+    static std::atomic<std::uint32_t> next_test_port{kFirstTestPort};
+
+    for (std::size_t i = 0; i < kPortSpan; ++i) {
+        std::uint32_t next = next_test_port.fetch_add(1, std::memory_order_relaxed);
+        std::uint16_t port = static_cast<std::uint16_t>(kFirstTestPort + ((next - kFirstTestPort) % kPortSpan));
+        auto *server = new fiber::http::Http1Server(*loop, handler, {}, worker_group);
+        fiber::net::SocketAddress addr(fiber::net::IpAddress::loopback_v4(), port);
+        auto bind_result = server->bind(addr, options);
+        if (!bind_result) {
+            delete server;
+            continue;
+        }
+
+        port_promise->set_value(port);
+        server_promise->set_value(server);
+        fiber::async::spawn(*loop, [server]() { return server->serve(); });
         co_return;
     }
-    auto port = resolve_port(server->fd());
-    port_promise->set_value(port ? *port : 0);
-    server_promise->set_value(server);
-    fiber::async::spawn(*loop, [server]() { return server->serve(); });
+
+    port_promise->set_value(0);
+    server_promise->set_value(nullptr);
     co_return;
 }
 
@@ -176,10 +229,15 @@ TEST(Http1ServerTest, BasicGet) {
         return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
     });
 
-    uint16_t port = port_future.get();
-    ASSERT_NE(port, 0);
     auto *server = server_future.get();
     ASSERT_NE(server, nullptr);
+    uint16_t port = port_future.get();
+    if (port == 0) {
+        auto retry_port = resolve_port(server->fd());
+        ASSERT_TRUE(retry_port.has_value());
+        port = *retry_port;
+    }
+    ASSERT_NE(port, 0);
 
     int client = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     ASSERT_GE(client, 0);
@@ -850,8 +908,10 @@ TEST(Http1ServerTest, ChunkedKeepAlivePipelinedNextRequest) {
                           "\r\n";
     ASSERT_EQ(::send(client, request, std::strlen(request), 0), static_cast<ssize_t>(std::strlen(request)));
 
-    std::string response1 = recv_http_response(client);
-    std::string response2 = recv_all(client);
+    HttpResponseReadResult first_read = recv_http_response_with_extra(client);
+    std::string response1 = std::move(first_read.response);
+    std::string response2 = std::move(first_read.extra);
+    response2.append(recv_all(client));
     ::close(client);
 
     EXPECT_NE(response1.find("\r\n\r\n1:Wikipedia|sha-256=xyz"), std::string::npos);

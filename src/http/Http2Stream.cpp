@@ -380,7 +380,9 @@ void Http2Stream::close(common::IoErr result) noexcept {
     remove_from_conn_window_wait_list();
     pending_head_ = nullptr;
     pending_tail_ = nullptr;
+    closing_pending_ = true;
     drain_pending(result);
+    closing_pending_ = false;
 }
 
 void Http2Stream::append_active_pending(Http2PendingEntry &entry) noexcept {
@@ -436,7 +438,6 @@ void Http2Stream::finish_pending(Http2PendingEntry &entry, common::IoErr result)
     if (entry.terminal_notified || !conn_) {
         return;
     }
-
     entry.result = result;
     entry.terminal_notified = true;
     entry.notify_change(result == common::IoErr::None
@@ -446,7 +447,9 @@ void Http2Stream::finish_pending(Http2PendingEntry &entry, common::IoErr result)
                         0, result);
     remove_active_pending(entry);
     conn_->pending_pool_.destroy(&entry);
-    conn_->maybe_destroy_stream(*this);
+    if (!closing_pending_) {
+        conn_->maybe_destroy_stream(*this);
+    }
 }
 
 void Http2Stream::sync_conn_window_wait_membership() noexcept {
@@ -494,10 +497,13 @@ void Http2Stream::handle_send_done(void *user_data, std::size_t, std::size_t wri
     }
     FIBER_ASSERT(pending->inflight_sends > 0);
     --pending->inflight_sends;
-    stream.maybe_finish_pending(*pending);
-    if (stream.state_ != State::Closed) {
+
+    // maybe_finish_pending() can destroy both the pending entry and the stream.
+    // Schedule follow-up work first while the objects are still known-alive.
+    if (pending->result == common::IoErr::None && stream.state_ != State::Closed) {
         stream.try_schedule_pending();
     }
+    stream.maybe_finish_pending(*pending);
 }
 
 } // namespace fiber::http

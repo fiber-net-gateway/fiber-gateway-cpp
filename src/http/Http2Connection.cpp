@@ -1159,15 +1159,20 @@ fiber::async::Task<void> Http2Connection::run_send_loop() noexcept {
     lifetime_wg_.done();
 }
 
+fiber::async::DetachedTask Http2Connection::run_send_loop_task(Http2Connection *connection) noexcept {
+    if (!connection) {
+        co_return;
+    }
+    co_await connection->run_send_loop();
+}
+
 void Http2Connection::start_send_loop() noexcept {
     if (send_loop_running_ || stop_sending_requested_) {
         return;
     }
     lifetime_wg_.add(1);
     send_loop_running_ = true;
-    fiber::async::spawn([this]() -> fiber::async::DetachedTask {
-        co_await run_send_loop();
-    });
+    fiber::async::spawn([connection = this]() { return Http2Connection::run_send_loop_task(connection); });
 }
 
 Http2Connection::SendEntry *Http2Connection::acquire_send_entry() noexcept {

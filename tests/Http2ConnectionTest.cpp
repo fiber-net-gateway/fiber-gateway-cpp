@@ -505,6 +505,9 @@ public:
             std::memcpy(buf.writable_data(), data.data(), data.size());
             buf.commit(data.size());
         }
+        if (stream.state() == fiber::http::Http2Stream::State::Idle) {
+            stream.set_state(fiber::http::Http2Stream::State::Open);
+        }
         payload.set_buf(std::move(buf));
         return stream.enqueue_pending(PendingKind::Data, std::move(payload), 0, last_flags,
                                       &PendingHttp2Connection::handle_change, this);
@@ -571,6 +574,9 @@ public:
             std::memcpy(buf.writable_data(), data.data(), data.size());
             buf.commit(data.size());
         }
+        if (stream.state() == fiber::http::Http2Stream::State::Idle) {
+            stream.set_state(fiber::http::Http2Stream::State::Open);
+        }
         payload.set_buf(std::move(buf));
         return stream.enqueue_pending(PendingKind::Data, std::move(payload), 0, last_flags, nullptr, nullptr);
     }
@@ -604,6 +610,114 @@ using PendingScript = std::function<fiber::common::IoErr(PendingHttp2Connection 
                                                          fiber::http::Http2Stream &)>;
 using ControlScript = std::function<void(ControlHttp2Connection &, fiber::http::Http2Stream &, fiber::http::Http2Stream &)>;
 
+DetachedTask run_http2_connection_task(fiber::http::Http2Connection *connection) {
+    if (!connection) {
+        co_return;
+    }
+    (void)co_await connection->run();
+}
+
+DetachedTask add_connection_credit_after_delay(PendingHttp2Connection *connection, std::int32_t delta,
+                                               std::chrono::milliseconds delay) {
+    if (!connection) {
+        co_return;
+    }
+    co_await fiber::async::sleep(delay);
+    connection->add_connection_credit(delta);
+}
+
+struct ControlSetupContext {
+    ControlHttp2Connection *connection = nullptr;
+    FakeHttpTransport *fake_transport = nullptr;
+    ControlScript setup;
+    bool open_streams_for_setup = true;
+    bool block_reads_for_setup = false;
+    bool snapshot_before_shutdown = false;
+    ControlRunOutcome *outcome = nullptr;
+    fiber::http::Http2Stream **stream1 = nullptr;
+    fiber::http::Http2Stream **stream3 = nullptr;
+    std::uint32_t *stream1_id = nullptr;
+    std::uint32_t *stream3_id = nullptr;
+    fiber::http::Http2Stream *local_stream1 = nullptr;
+    fiber::http::Http2Stream *local_stream3 = nullptr;
+};
+
+void set_control_stream_slot(fiber::http::Http2Stream **slot, std::uint32_t *stream_id_slot,
+                             fiber::http::Http2Stream *stream) noexcept {
+    if (slot) {
+        *slot = stream;
+    }
+    if (stream_id_slot) {
+        *stream_id_slot = stream ? stream->stream_id() : 0;
+    }
+}
+
+void capture_control_outcome(const ControlSetupContext &ctx) {
+    ControlRunOutcome &outcome = *ctx.outcome;
+    outcome.written = ctx.block_reads_for_setup ? strip_local_client_preface(ctx.connection->written())
+                                                : ctx.connection->written();
+    outcome.close_state = ctx.connection->current_close_state();
+    outcome.transport_close_count = ctx.fake_transport->close_count();
+    outcome.conn_send_window = ctx.connection->current_connection_send_window();
+    outcome.peer_max_frame_size = ctx.connection->current_peer_max_frame_size();
+    outcome.peer_max_concurrent_streams = ctx.connection->current_peer_max_concurrent_streams();
+    outcome.peer_enable_push = ctx.connection->current_peer_enable_push();
+    if (*ctx.stream1_id != 0) {
+        outcome.stream1_send_window = ctx.connection->current_stream_send_window(*ctx.stream1_id);
+        outcome.stream1_state = ctx.connection->current_stream_state(*ctx.stream1_id);
+        outcome.stream1_registered = ctx.connection->current_has_stream(*ctx.stream1_id);
+        outcome.stream1_table_state = ctx.connection->current_stream_state(*ctx.stream1_id);
+    }
+    outcome.stream2_registered = ctx.connection->current_has_stream(2);
+    outcome.stream2_table_state = ctx.connection->current_stream_state(2);
+    if (*ctx.stream3_id != 0) {
+        outcome.stream3_state = ctx.connection->current_stream_state(*ctx.stream3_id);
+        outcome.stream3_registered = ctx.connection->current_has_stream(*ctx.stream3_id);
+    }
+}
+
+DetachedTask run_control_setup_task(ControlSetupContext ctx) {
+    if (!ctx.connection) {
+        co_return;
+    }
+
+    if (ctx.block_reads_for_setup) {
+        if (ctx.open_streams_for_setup) {
+            for (int i = 0; i < 20 && (!*ctx.stream1 || !*ctx.stream3); ++i) {
+                if (!*ctx.stream1) {
+                    set_control_stream_slot(ctx.stream1, ctx.stream1_id, ctx.connection->open_stream(1));
+                }
+                if (!*ctx.stream3) {
+                    set_control_stream_slot(ctx.stream3, ctx.stream3_id, ctx.connection->open_stream(3));
+                }
+                if (!*ctx.stream1 || !*ctx.stream3) {
+                    co_await fiber::async::sleep(std::chrono::milliseconds(1));
+                }
+            }
+            if (!*ctx.stream1 || !*ctx.stream3) {
+                ctx.connection->request_stop(fiber::common::IoErr::Invalid);
+                ctx.fake_transport->release_reads();
+                co_return;
+            }
+        } else {
+            set_control_stream_slot(ctx.stream1, ctx.stream1_id, ctx.local_stream1);
+            set_control_stream_slot(ctx.stream3, ctx.stream3_id, ctx.local_stream3);
+        }
+        ctx.setup(*ctx.connection, **ctx.stream1, **ctx.stream3);
+        ctx.fake_transport->release_reads();
+    } else if (ctx.setup) {
+        ctx.setup(*ctx.connection, *ctx.local_stream1, *ctx.local_stream3);
+        set_control_stream_slot(ctx.stream1, ctx.stream1_id, ctx.local_stream1);
+        set_control_stream_slot(ctx.stream3, ctx.stream3_id, ctx.local_stream3);
+    }
+
+    if (ctx.snapshot_before_shutdown) {
+        co_await fiber::async::sleep(std::chrono::milliseconds(5));
+        capture_control_outcome(ctx);
+        ctx.connection->request_stop();
+    }
+}
+
 DetachedTask run_send_connection(std::shared_ptr<std::promise<SendOutcome>> promise, std::vector<size_t> write_steps,
                                  std::size_t expected_done, SendScript submit,
                                  fiber::http::Http2Connection::Options options = {}) {
@@ -613,9 +727,7 @@ DetachedTask run_send_connection(std::shared_ptr<std::promise<SendOutcome>> prom
     auto transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{}, std::move(write_steps), true);
     auto *fake_transport = transport.get();
     SendingHttp2Connection connection(std::move(transport), fake_transport, expected_done, options);
-    fiber::async::spawn([&connection]() -> DetachedTask {
-        (void)co_await connection.run();
-    });
+    fiber::async::spawn([connection = &connection]() { return run_http2_connection_task(connection); });
     co_await fiber::async::sleep(std::chrono::milliseconds(1));
 
     SendOutcome outcome;
@@ -672,9 +784,7 @@ DetachedTask run_pending_connection(std::shared_ptr<std::promise<PendingOutcome>
     auto transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{}, std::move(write_steps), true);
     auto *fake_transport = transport.get();
     PendingHttp2Connection connection(std::move(transport), fake_transport, expected_terminal_events, options);
-    fiber::async::spawn([&connection]() -> DetachedTask {
-        (void)co_await connection.run();
-    });
+    fiber::async::spawn([connection = &connection]() { return run_http2_connection_task(connection); });
 
     fiber::http::Http2Stream *stream1 = nullptr;
     fiber::http::Http2Stream *stream3 = nullptr;
@@ -764,124 +874,35 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
 
     ControlRunOutcome outcome;
     auto capture_outcome = [&]() {
-        outcome.written = block_reads_for_setup ? strip_local_client_preface(connection.written()) : connection.written();
-        outcome.close_state = connection.current_close_state();
-        outcome.transport_close_count = fake_transport->close_count();
-        outcome.conn_send_window = connection.current_connection_send_window();
-        outcome.peer_max_frame_size = connection.current_peer_max_frame_size();
-        outcome.peer_max_concurrent_streams = connection.current_peer_max_concurrent_streams();
-        outcome.peer_enable_push = connection.current_peer_enable_push();
-        if (stream1_id != 0) {
-            outcome.stream1_send_window = connection.current_stream_send_window(stream1_id);
-            outcome.stream1_state = connection.current_stream_state(stream1_id);
-            outcome.stream1_registered = connection.current_has_stream(stream1_id);
-            outcome.stream1_table_state = connection.current_stream_state(stream1_id);
-        }
-        outcome.stream2_registered = connection.current_has_stream(2);
-        outcome.stream2_table_state = connection.current_stream_state(2);
-        if (stream3_id != 0) {
-            outcome.stream3_state = connection.current_stream_state(stream3_id);
-            outcome.stream3_registered = connection.current_has_stream(stream3_id);
-        }
+        ControlSetupContext ctx;
+        ctx.connection = &connection;
+        ctx.fake_transport = fake_transport;
+        ctx.block_reads_for_setup = block_reads_for_setup;
+        ctx.outcome = &outcome;
+        ctx.stream1 = &stream1;
+        ctx.stream3 = &stream3;
+        ctx.stream1_id = &stream1_id;
+        ctx.stream3_id = &stream3_id;
+        capture_control_outcome(ctx);
     };
 
     if (snapshot_before_shutdown) {
-        auto run_done = std::make_shared<bool>(false);
-        auto run_result = std::make_shared<fiber::common::IoResult<void>>();
-        fiber::async::spawn([&connection, run_done, run_result]() -> DetachedTask {
-            *run_result = co_await connection.run();
-            *run_done = true;
-        });
-        if (block_reads_for_setup) {
-            fiber::async::spawn([&connection, &stream1, &stream3, &stream1_id, &stream3_id, &local_stream1, &local_stream3,
-                                 fake_transport, setup, open_streams_for_setup]() -> DetachedTask {
-                        if (open_streams_for_setup) {
-                            for (int i = 0; i < 20 && (!stream1 || !stream3); ++i) {
-                                if (!stream1) {
-                                    stream1 = connection.open_stream(1);
-                                    if (stream1) {
-                                        stream1_id = stream1->stream_id();
-                                    }
-                                }
-                                if (!stream3) {
-                                    stream3 = connection.open_stream(3);
-                                    if (stream3) {
-                                        stream3_id = stream3->stream_id();
-                                    }
-                                }
-                                if (!stream1 || !stream3) {
-                                    co_await fiber::async::sleep(std::chrono::milliseconds(1));
-                                }
-                            }
-                            if (!stream1 || !stream3) {
-                                connection.request_stop(fiber::common::IoErr::Invalid);
-                                fake_transport->release_reads();
-                                co_return;
-                            }
-                        } else {
-                            stream1 = &local_stream1;
-                            stream3 = &local_stream3;
-                            stream1_id = local_stream1.stream_id();
-                            stream3_id = local_stream3.stream_id();
-                        }
-                        setup(connection, *stream1, *stream3);
-                        fake_transport->release_reads();
-                    });
-        } else if (setup) {
-            setup(connection, local_stream1, local_stream3);
-            stream1 = &local_stream1;
-            stream3 = &local_stream3;
-            stream1_id = local_stream1.stream_id();
-            stream3_id = local_stream3.stream_id();
-        }
+        ControlSetupContext setup_ctx{&connection, fake_transport, setup, open_streams_for_setup, block_reads_for_setup,
+                                      true, &outcome, &stream1, &stream3, &stream1_id, &stream3_id, &local_stream1,
+                                      &local_stream3};
+        fiber::async::spawn([setup_ctx]() mutable { return run_control_setup_task(std::move(setup_ctx)); });
 
-        co_await fiber::async::sleep(std::chrono::milliseconds(5));
-        capture_outcome();
-        connection.request_stop();
-        while (!*run_done) {
-            co_await fiber::async::sleep(std::chrono::milliseconds(1));
-        }
-        outcome.result = *run_result;
+        outcome.result = co_await connection.run();
         promise->set_value(std::move(outcome));
         fiber::event::EventLoop::current().stop();
         co_return;
     }
 
     if (block_reads_for_setup) {
-        fiber::async::spawn([&connection, &stream1, &stream3, &stream1_id, &stream3_id, &local_stream1, &local_stream3,
-                             fake_transport, setup, open_streams_for_setup]() -> DetachedTask {
-                    if (open_streams_for_setup) {
-                        for (int i = 0; i < 20 && (!stream1 || !stream3); ++i) {
-                            if (!stream1) {
-                                stream1 = connection.open_stream(1);
-                                if (stream1) {
-                                    stream1_id = stream1->stream_id();
-                                }
-                            }
-                            if (!stream3) {
-                                stream3 = connection.open_stream(3);
-                                if (stream3) {
-                                    stream3_id = stream3->stream_id();
-                                }
-                            }
-                            if (!stream1 || !stream3) {
-                                co_await fiber::async::sleep(std::chrono::milliseconds(1));
-                            }
-                        }
-                        if (!stream1 || !stream3) {
-                            connection.request_stop(fiber::common::IoErr::Invalid);
-                            fake_transport->release_reads();
-                            co_return;
-                        }
-                    } else {
-                        stream1 = &local_stream1;
-                        stream3 = &local_stream3;
-                        stream1_id = local_stream1.stream_id();
-                        stream3_id = local_stream3.stream_id();
-                    }
-                    setup(connection, *stream1, *stream3);
-                    fake_transport->release_reads();
-                });
+        ControlSetupContext setup_ctx{&connection, fake_transport, setup, open_streams_for_setup, block_reads_for_setup,
+                                      false, &outcome, &stream1, &stream3, &stream1_id, &stream3_id, &local_stream1,
+                                      &local_stream3};
+        fiber::async::spawn([setup_ctx]() mutable { return run_control_setup_task(std::move(setup_ctx)); });
         outcome.result = co_await connection.run();
     } else {
         if (setup) {
@@ -1491,10 +1512,8 @@ TEST(Http2ConnectionTest, PendingHeaderOnAnotherStreamCanBypassConnWindowBlocked
                 if (err != fiber::common::IoErr::None) {
                     return err;
                 }
-                fiber::async::spawn([&connection]() -> DetachedTask {
-                    co_await fiber::async::sleep(std::chrono::milliseconds(1));
-                    connection.add_connection_credit(4);
-                    co_return;
+                fiber::async::spawn([connection = &connection]() {
+                    return add_connection_credit_after_delay(connection, 4, std::chrono::milliseconds(1));
                 });
                 return fiber::common::IoErr::None;
             },
