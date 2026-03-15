@@ -16,6 +16,50 @@ class Http2Connection;
 
 class Http2Stream {
 public:
+    class Lease {
+    public:
+        Lease() noexcept = default;
+        explicit Lease(Http2Stream *stream) noexcept : stream_(stream) {
+            if (stream_) {
+                stream_->retain();
+            }
+        }
+
+        Lease(const Lease &) = delete;
+        Lease &operator=(const Lease &) = delete;
+
+        Lease(Lease &&other) noexcept : stream_(other.stream_) { other.stream_ = nullptr; }
+
+        Lease &operator=(Lease &&other) noexcept {
+            if (this == &other) {
+                return *this;
+            }
+            reset();
+            stream_ = other.stream_;
+            other.stream_ = nullptr;
+            return *this;
+        }
+
+        ~Lease() { reset(); }
+
+        void reset() noexcept {
+            if (!stream_) {
+                return;
+            }
+            Http2Stream *stream = stream_;
+            stream_ = nullptr;
+            stream->release();
+        }
+
+        [[nodiscard]] Http2Stream *get() const noexcept { return stream_; }
+        [[nodiscard]] Http2Stream &operator*() const noexcept { return *stream_; }
+        [[nodiscard]] Http2Stream *operator->() const noexcept { return stream_; }
+        [[nodiscard]] explicit operator bool() const noexcept { return stream_ != nullptr; }
+
+    private:
+        Http2Stream *stream_ = nullptr;
+    };
+
     Http2Stream(const Http2Stream &) = delete;
     Http2Stream &operator=(const Http2Stream &) = delete;
     Http2Stream(Http2Stream &&) = delete;
@@ -55,6 +99,9 @@ public:
     [[nodiscard]] State state() const noexcept { return state_; }
     void set_state(State state) noexcept { state_ = state; }
     [[nodiscard]] std::int32_t send_window() const noexcept { return send_window_; }
+    [[nodiscard]] bool attached_to_connection() const noexcept { return attached_to_connection_; }
+    [[nodiscard]] common::IoErr close_reason() const noexcept { return close_reason_; }
+    [[nodiscard]] Lease lease() noexcept { return Lease(this); }
 
     [[nodiscard]] bool active() const noexcept { return active_; }
     void set_active(bool active) noexcept { active_ = active; }
@@ -98,6 +145,10 @@ private:
     void sync_conn_window_wait_membership() noexcept;
     void remove_from_conn_window_wait_list() noexcept;
     void try_schedule_pending() noexcept;
+    [[nodiscard]] bool ready_for_connection_release() const noexcept;
+    [[nodiscard]] bool ready_for_destruction() const noexcept;
+    void retain() noexcept;
+    void release() noexcept;
     static void handle_send_done(void *user_data, std::size_t total_bytes, std::size_t written_bytes,
                                  std::size_t frame_header_size, std::size_t logical_bytes,
                                  common::IoErr result) noexcept;
@@ -116,7 +167,9 @@ private:
     Http2PendingEntry *pending_tail_ = nullptr;
     Http2PendingEntry *active_pending_head_ = nullptr;
     bool closing_pending_ = false;
-    bool connection_owned_ = false;
+    std::uint32_t ref_count_ = 1;
+    bool attached_to_connection_ = false;
+    common::IoErr close_reason_ = common::IoErr::None;
     Http2Stream *owned_next_ = nullptr;
 
     friend class Http2Connection;
