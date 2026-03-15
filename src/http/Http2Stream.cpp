@@ -39,7 +39,10 @@ constexpr std::array<std::uint16_t, 7> kValidOpBits = {
 common::IoErr Http2Stream::enqueue_pending(Http2PendingKind kind, Http2SendPayload &&payload, std::uint8_t first_frame_flags,
                                            std::uint8_t last_frame_flags, Http2PendingEntry::ChangeFn on_change,
                                            void *user_ctx) noexcept {
-    if (!conn_ || !active_ || state_ == State::Closed) {
+    if (!conn_) {
+        return close_reason_ != common::IoErr::None ? close_reason_ : common::IoErr::Canceled;
+    }
+    if (!active_ || state_ == State::Closed) {
         return common::IoErr::Invalid;
     }
 
@@ -93,7 +96,7 @@ void Http2Stream::on_remote_rst(Http2ErrorCode, common::IoErr result) noexcept {
 
 common::IoErr Http2Stream::send_header(Http2SendPayload &&payload, bool end_stream) noexcept {
     if (!conn_) {
-        return common::IoErr::Invalid;
+        return close_reason_ != common::IoErr::None ? close_reason_ : common::IoErr::Canceled;
     }
 
     common::IoErr err = transition_on_send_headers(end_stream);
@@ -111,7 +114,7 @@ common::IoErr Http2Stream::send_header(Http2SendPayload &&payload, bool end_stre
 
 common::IoErr Http2Stream::send_data(Http2SendPayload &&payload, bool end_stream) noexcept {
     if (!conn_) {
-        return common::IoErr::Invalid;
+        return close_reason_ != common::IoErr::None ? close_reason_ : common::IoErr::Canceled;
     }
 
     common::IoErr err = transition_on_send_data(end_stream);
@@ -125,7 +128,7 @@ common::IoErr Http2Stream::send_data(Http2SendPayload &&payload, bool end_stream
 
 common::IoErr Http2Stream::close_rst(Http2ErrorCode code, common::IoErr result) noexcept {
     if (!conn_) {
-        return common::IoErr::Invalid;
+        return close_reason_ != common::IoErr::None ? close_reason_ : common::IoErr::Canceled;
     }
 
     common::IoErr err = conn_->send_rst_stream(stream_id_, code);
@@ -134,7 +137,7 @@ common::IoErr Http2Stream::close_rst(Http2ErrorCode code, common::IoErr result) 
     }
 
     close(result);
-    conn_->maybe_destroy_stream(*this);
+    conn_->try_release_stream(*this);
     return common::IoErr::None;
 }
 
@@ -375,6 +378,9 @@ void Http2Stream::drain_pending(common::IoErr result) noexcept {
 }
 
 void Http2Stream::close(common::IoErr result) noexcept {
+    if (close_reason_ == common::IoErr::None) {
+        close_reason_ = result;
+    }
     state_ = State::Closed;
     active_ = false;
     remove_from_conn_window_wait_list();
@@ -448,7 +454,25 @@ void Http2Stream::finish_pending(Http2PendingEntry &entry, common::IoErr result)
     remove_active_pending(entry);
     conn_->pending_pool_.destroy(&entry);
     if (!closing_pending_) {
-        conn_->maybe_destroy_stream(*this);
+        conn_->try_release_stream(*this);
+    }
+}
+
+bool Http2Stream::ready_for_connection_release() const noexcept {
+    return state_ == State::Closed && pending_head_ == nullptr && active_pending_head_ == nullptr;
+}
+
+bool Http2Stream::ready_for_destruction() const noexcept {
+    return !attached_to_connection_ && ready_for_connection_release() && ref_count_ == 0;
+}
+
+void Http2Stream::retain() noexcept { ++ref_count_; }
+
+void Http2Stream::release() noexcept {
+    FIBER_ASSERT(ref_count_ != 0);
+    --ref_count_;
+    if (ready_for_destruction()) {
+        delete this;
     }
 }
 

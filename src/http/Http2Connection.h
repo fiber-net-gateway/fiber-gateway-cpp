@@ -34,12 +34,12 @@ public:
         Server,
     };
 
-    enum class CloseState : std::uint8_t {
-        Open,
-        PeerDraining,
-        LocalDraining,
-        BothDraining,
-        AbortClosing,
+    enum class State : std::uint8_t {
+        Init,
+        Start,
+        Running,
+        Draining,
+        Closing,
         Closed,
     };
 
@@ -68,8 +68,6 @@ public:
         std::uint32_t initial_connection_recv_window = 0x7fffffffU;
         std::int32_t initial_connection_send_window = 65535;
         std::int32_t initial_stream_send_window = 65535;
-        bool expect_peer_preface = true;
-        bool auto_start_connection_preface = true;
     };
 
     virtual ~Http2Connection();
@@ -81,7 +79,7 @@ public:
     Http2Stream *create_local_stream(std::uint32_t stream_id) noexcept;
     void shutdown(common::IoErr reason = common::IoErr::Canceled) noexcept;
     void graceful_shutdown() noexcept;
-    [[nodiscard]] CloseState close_state() const noexcept { return close_state_; }
+    [[nodiscard]] State state() const noexcept { return state_; }
 
 protected:
     // `offset` is the number of payload bytes already delivered for the current
@@ -131,7 +129,7 @@ private:
     common::IoErr apply_peer_initial_stream_window(std::uint32_t value) noexcept;
     common::IoErr send_control_frame(Http2FrameType type, std::uint8_t flags, std::uint32_t stream_id,
                                      const std::uint8_t *payload, std::size_t length) noexcept;
-    common::IoErr send_connection_preface() noexcept;
+    common::IoErr send_initial_flight() noexcept;
     common::IoErr send_settings_ack() noexcept;
     common::IoErr send_ping_ack(const std::uint8_t *opaque_data) noexcept;
     common::IoErr send_window_update(std::uint32_t stream_id, std::uint32_t increment) noexcept;
@@ -140,28 +138,31 @@ private:
     void handle_stream_error(std::uint32_t stream_id, Http2ErrorCode error_code,
                              common::IoErr pending_result = common::IoErr::Canceled) noexcept;
     Http2Stream *create_peer_stream(std::uint32_t stream_id) noexcept;
-    void erase_stream(Http2Stream &stream) noexcept;
-    void maybe_destroy_stream(Http2Stream &stream) noexcept;
+    void detach_stream(Http2Stream &stream) noexcept;
+    void try_release_stream(Http2Stream &stream) noexcept;
     bool can_accept_peer_stream(std::uint32_t stream_id) const noexcept;
     bool can_create_local_stream(std::uint32_t stream_id) const noexcept;
     bool is_next_peer_stream_id(std::uint32_t stream_id) const noexcept;
     bool is_next_local_stream_id(std::uint32_t stream_id) const noexcept;
-    void on_peer_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept;
+    void handle_peer_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept;
     void close_streams_after_goaway(std::uint32_t last_stream_id) noexcept;
     [[nodiscard]] bool is_idle_stream(std::uint32_t stream_id) const noexcept;
     [[nodiscard]] bool is_local_stream_id(std::uint32_t stream_id) const noexcept;
     [[nodiscard]] bool is_peer_stream_id(std::uint32_t stream_id) const noexcept;
     [[nodiscard]] std::size_t configured_max_active_streams() const noexcept;
-    fiber::async::Task<RunResult> finish_run(RunResult result) noexcept;
+    fiber::async::Task<RunResult> finalize_run(RunResult result) noexcept;
+    fiber::async::Task<void> wait_for_send_loop_exit() noexcept;
+    fiber::async::Task<void> close_transport_after_send_loop() noexcept;
     fiber::async::Task<void> run_send_loop() noexcept;
+    static fiber::async::DetachedTask close_transport_after_send_loop_task(Http2Connection *connection) noexcept;
     static fiber::async::DetachedTask run_send_loop_task(Http2Connection *connection) noexcept;
     void start_send_loop() noexcept;
     [[nodiscard]] std::chrono::milliseconds send_loop_poll_timeout() const noexcept;
     void handle_send_loop_timeout() noexcept;
     void drain_conn_blocked_streams() noexcept;
-    common::IoErr begin_graceful_shutdown() noexcept;
-    void maybe_finish_graceful_shutdown() noexcept;
-    void abort_connection(common::IoErr reason) noexcept;
+    common::IoErr start_draining() noexcept;
+    void maybe_enter_closing_from_draining() noexcept;
+    void enter_closing(common::IoErr reason, bool abortive = true) noexcept;
     void finish_send_entry(SendEntry *entry, common::IoErr result) noexcept;
     void drain_send_queue(common::IoErr result) noexcept;
     void notify_send_done(SendEntry *entry) noexcept;
@@ -181,11 +182,9 @@ private:
     std::uint32_t peer_max_outbound_frame_size_ = 16384;
     std::uint32_t peer_max_header_list_size_ = 0xffffffffU;
     bool peer_enable_push_ = true;
-    bool local_connection_preface_sent_ = false;
-    bool local_settings_acknowledged_ = false;
     bool local_goaway_sent_ = false;
     std::uint32_t local_goaway_last_stream_id_ = 0;
-    bool peer_sent_goaway_ = false;
+    bool peer_goaway_received_ = false;
     std::uint32_t peer_last_stream_id_ = 0;
     Http2ErrorCode peer_goaway_error_code_ = Http2ErrorCode::NoError;
     bool expecting_continuation_ = false;
@@ -202,11 +201,8 @@ private:
     fiber::async::WaitGroup lifetime_wg_{};
     Http2Stream *owned_stream_head_ = nullptr;
     common::IntrusiveList<Http2Stream, offsetof(Http2Stream, conn_wait_hook_)> conn_wait_streams_;
-    CloseState close_state_ = CloseState::Open;
-    bool run_started_ = false;
+    State state_ = State::Init;
     bool send_loop_running_ = false;
-    bool graceful_send_queue_close_requested_ = false;
-    bool stop_keepalive_ = false;
     bool stop_sending_requested_ = false;
     common::IoErr stop_sending_reason_ = common::IoErr::Canceled;
 

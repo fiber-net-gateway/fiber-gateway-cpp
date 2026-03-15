@@ -122,7 +122,6 @@ Http2Connection::Http2Connection(std::unique_ptr<HttpTransport> transport, Optio
     options_(std::move(options)),
     pending_pool_(options_.max_free_pending_entries),
     send_queue_(options_.max_free_send_entries) {
-    options_.expect_peer_preface = options_.role == ConnectionRole::Server;
     peer_advertised_max_concurrent_streams_ = options_.max_peer_concurrent_streams;
     conn_send_window_ = options_.initial_connection_send_window;
     peer_initial_stream_send_window_ = options_.initial_stream_send_window;
@@ -132,7 +131,7 @@ Http2Connection::Http2Connection(std::unique_ptr<HttpTransport> transport, Optio
 }
 
 Http2Connection::~Http2Connection() {
-    close_state_ = CloseState::Closed;
+    state_ = State::Closed;
     stop_sending_requested_ = true;
     send_queue_.close();
     drain_send_queue(common::IoErr::Canceled);
@@ -140,56 +139,64 @@ Http2Connection::~Http2Connection() {
     while (owned_stream_head_) {
         Http2Stream *stream = owned_stream_head_;
         owned_stream_head_ = stream->owned_next_;
-        delete stream;
+        stream->owned_next_ = nullptr;
+        stream->remove_from_conn_window_wait_list();
+        stream->attached_to_connection_ = false;
+        stream->conn_ = nullptr;
+        stream->active_ = false;
+        stream->release();
     }
 }
 
 fiber::async::Task<Http2Connection::RunResult> Http2Connection::run() noexcept {
     if (!transport_ || !transport_->valid()) {
-        co_return co_await finish_run(std::unexpected(common::IoErr::Invalid));
+        co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (run_started_) {
-        co_return co_await finish_run(std::unexpected(common::IoErr::Busy));
+    if (state_ != State::Init) {
+        co_return std::unexpected(common::IoErr::Busy);
     }
 
-    run_started_ = true;
+    state_ = State::Start;
     start_send_loop();
 
-    if (options_.role == ConnectionRole::Client && options_.auto_start_connection_preface &&
-        !local_connection_preface_sent_) {
-        common::IoErr err = send_connection_preface();
+    if (options_.role == ConnectionRole::Client) {
+        common::IoErr err = send_initial_flight();
         if (err != common::IoErr::None) {
-            co_return co_await finish_run(std::unexpected(err));
+            co_return co_await finalize_run(std::unexpected(err));
         }
+        state_ = State::Running;
     }
 
     std::size_t read_buffer_capacity = std::max(options_.read_buffer_size, kClientPreface.size());
     mem::IoBuf read_buf = mem::IoBuf::allocate(read_buffer_capacity);
     if (!read_buf) {
-        co_return co_await finish_run(std::unexpected(common::IoErr::NoMem));
+        co_return co_await finalize_run(std::unexpected(common::IoErr::NoMem));
     }
 
-    ParsePhase phase = options_.expect_peer_preface ? ParsePhase::Preface : ParsePhase::FrameHeader;
+    ParsePhase phase = options_.role == ConnectionRole::Server ? ParsePhase::Preface : ParsePhase::FrameHeader;
     FrameHeader current_header{};
     std::uint32_t payload_remaining = 0;
     std::size_t payload_offset = 0;
 
     for (;;) {
+        if (state_ == State::Closing) {
+            co_return co_await finalize_run(RunResult{});
+        }
+
         for (;;) {
             if (phase == ParsePhase::Preface) {
                 if (read_buf.readable() < kClientPreface.size()) {
                     break;
                 }
                 if (std::memcmp(read_buf.readable_data(), kClientPreface.data(), kClientPreface.size()) != 0) {
-                    co_return co_await finish_run(std::unexpected(common::IoErr::Invalid));
+                    co_return co_await finalize_run(std::unexpected(common::IoErr::Invalid));
                 }
                 read_buf.consume(kClientPreface.size());
-                if (options_.auto_start_connection_preface && !local_connection_preface_sent_) {
-                    common::IoErr err = send_connection_preface();
-                    if (err != common::IoErr::None) {
-                        co_return co_await finish_run(std::unexpected(err));
-                    }
+                common::IoErr err = send_initial_flight();
+                if (err != common::IoErr::None) {
+                    co_return co_await finalize_run(std::unexpected(err));
                 }
+                state_ = State::Running;
                 phase = ParsePhase::FrameHeader;
                 continue;
             }
@@ -206,7 +213,7 @@ fiber::async::Task<Http2Connection::RunResult> Http2Connection::run() noexcept {
                 current_header.stream_id = parse_stream_id(header + 5);
 
                 if (current_header.length > options_.max_frame_size) {
-                    co_return co_await finish_run(std::unexpected(common::IoErr::Invalid));
+                    co_return co_await finalize_run(std::unexpected(common::IoErr::Invalid));
                 }
 
                 read_buf.consume(kFrameHeaderSize);
@@ -216,7 +223,10 @@ fiber::async::Task<Http2Connection::RunResult> Http2Connection::run() noexcept {
                 if (payload_remaining == 0) {
                     common::IoErr err = consume_incoming_frame_payload(current_header, read_buf, 0, 0);
                     if (err != common::IoErr::None) {
-                        co_return co_await finish_run(std::unexpected(err));
+                        co_return co_await finalize_run(std::unexpected(err));
+                    }
+                    if (state_ == State::Closing) {
+                        co_return co_await finalize_run(RunResult{});
                     }
                     continue;
                 }
@@ -232,7 +242,7 @@ fiber::async::Task<Http2Connection::RunResult> Http2Connection::run() noexcept {
             std::size_t chunk_len = std::min<std::size_t>(read_buf.readable(), payload_remaining);
             common::IoErr err = consume_incoming_frame_payload(current_header, read_buf, payload_offset, chunk_len);
             if (err != common::IoErr::None) {
-                co_return co_await finish_run(std::unexpected(err));
+                co_return co_await finalize_run(std::unexpected(err));
             }
 
             read_buf.consume(chunk_len);
@@ -242,45 +252,76 @@ fiber::async::Task<Http2Connection::RunResult> Http2Connection::run() noexcept {
             if (payload_remaining == 0) {
                 phase = ParsePhase::FrameHeader;
             }
+            if (state_ == State::Closing) {
+                co_return co_await finalize_run(RunResult{});
+            }
         }
 
         common::IoErr prepare_err = prepare_read_buffer(read_buf, read_buffer_capacity);
         if (prepare_err != common::IoErr::None) {
-            co_return co_await finish_run(std::unexpected(prepare_err));
+            co_return co_await finalize_run(std::unexpected(prepare_err));
         }
 
         auto read_result = co_await transport_->read_into(read_buf, options_.read_timeout);
         if (!read_result) {
-            co_return co_await finish_run(std::unexpected(read_result.error()));
+            if (state_ == State::Closing && !stop_sending_requested_) {
+                co_return co_await finalize_run(RunResult{});
+            }
+            co_return co_await finalize_run(std::unexpected(read_result.error()));
         }
 
         if (*read_result == 0) {
-            if (phase == ParsePhase::FrameHeader && read_buf.readable() == 0) {
-                co_return co_await finish_run(RunResult{});
+            if (state_ == State::Closing && !stop_sending_requested_) {
+                co_return co_await finalize_run(RunResult{});
             }
-            co_return co_await finish_run(std::unexpected(common::IoErr::ConnReset));
+            if (phase == ParsePhase::FrameHeader && read_buf.readable() == 0) {
+                co_return co_await finalize_run(RunResult{});
+            }
+            co_return co_await finalize_run(std::unexpected(common::IoErr::ConnReset));
         }
     }
 }
 
-fiber::async::Task<Http2Connection::RunResult> Http2Connection::finish_run(RunResult result) noexcept {
-    if (!result.has_value() && !stop_sending_requested_ && close_state_ != CloseState::AbortClosing &&
-        close_state_ != CloseState::Closed) {
-        abort_connection(result.error());
+fiber::async::Task<Http2Connection::RunResult> Http2Connection::finalize_run(RunResult result) noexcept {
+    if (!result.has_value() && state_ != State::Closed) {
+        enter_closing(result.error());
     }
 
-    if (result.has_value() && !stop_sending_requested_) {
-        stop_keepalive_ = true;
+    if (result.has_value() && state_ != State::Closed) {
+        if (state_ != State::Closing) {
+            state_ = State::Closing;
+        }
         send_queue_.close();
-        close_all_streams(common::IoErr::Canceled);
     }
 
+    co_await wait_for_send_loop_exit();
+    close_all_streams(stop_sending_requested_ ? stop_sending_reason_ : common::IoErr::Canceled);
     co_await lifetime_wg_.join();
     if (transport_ && transport_->valid()) {
         transport_->close();
     }
-    close_state_ = CloseState::Closed;
+    state_ = State::Closed;
     co_return result;
+}
+
+fiber::async::Task<void> Http2Connection::wait_for_send_loop_exit() noexcept {
+    while (send_loop_running_) {
+        co_await fiber::async::sleep(std::chrono::milliseconds(1));
+    }
+}
+
+fiber::async::Task<void> Http2Connection::close_transport_after_send_loop() noexcept {
+    co_await wait_for_send_loop_exit();
+    if (transport_ && transport_->valid()) {
+        transport_->close();
+    }
+}
+
+fiber::async::DetachedTask Http2Connection::close_transport_after_send_loop_task(Http2Connection *connection) noexcept {
+    if (!connection) {
+        co_return;
+    }
+    co_await connection->close_transport_after_send_loop();
 }
 
 fiber::async::Task<void> Http2Connection::stop_and_join_send_loop(common::IoErr reason) noexcept {
@@ -293,13 +334,13 @@ fiber::async::Task<void> Http2Connection::stop_and_join_send_loop(common::IoErr 
 }
 
 void Http2Connection::shutdown(common::IoErr reason) noexcept {
-    abort_connection(reason);
+    enter_closing(reason);
 }
 
 void Http2Connection::graceful_shutdown() noexcept {
-    common::IoErr err = begin_graceful_shutdown();
+    common::IoErr err = start_draining();
     if (err != common::IoErr::None && err != common::IoErr::Canceled) {
-        abort_connection(err);
+        enter_closing(err);
     }
 }
 
@@ -382,7 +423,7 @@ common::IoErr Http2Connection::handle_data_payload(const FrameHeader &fhr, const
             handle_stream_error(fhr.stream_id, Http2ErrorCode::StreamClosed, err);
             return common::IoErr::None;
         }
-        maybe_destroy_stream(*stream);
+        try_release_stream(*stream);
     }
 
     return common::IoErr::None;
@@ -448,7 +489,7 @@ common::IoErr Http2Connection::handle_headers_payload(const FrameHeader &fhr, co
             handle_stream_error(fhr.stream_id, Http2ErrorCode::ProtocolError, err);
             return common::IoErr::None;
         }
-        maybe_destroy_stream(*stream);
+        try_release_stream(*stream);
     }
 
     if (frame_end >= fragment_end) {
@@ -492,7 +533,7 @@ common::IoErr Http2Connection::handle_continuation_payload(const FrameHeader &fh
             handle_stream_error(fhr.stream_id, Http2ErrorCode::ProtocolError, err);
             return common::IoErr::None;
         }
-        maybe_destroy_stream(*stream);
+        try_release_stream(*stream);
     }
 
     if (frame_end >= fhr.length) {
@@ -519,7 +560,6 @@ common::IoErr Http2Connection::handle_settings_payload(const FrameHeader &fhr, c
             if (fhr.length != 0) {
                 return common::IoErr::Invalid;
             }
-            local_settings_acknowledged_ = true;
             return common::IoErr::None;
         }
         if ((fhr.length % kSettingsParameterSize) != 0) {
@@ -661,7 +701,7 @@ common::IoErr Http2Connection::handle_rst_stream_payload(const FrameHeader &fhr,
     }
 
     stream->on_remote_rst(static_cast<Http2ErrorCode>(parse_u32(control_payload_scratch_.data())));
-    maybe_destroy_stream(*stream);
+    try_release_stream(*stream);
     return common::IoErr::None;
 }
 
@@ -686,7 +726,7 @@ common::IoErr Http2Connection::handle_goaway_payload(const FrameHeader &fhr, con
 
     std::uint32_t last_stream_id = parse_stream_id(control_payload_scratch_.data());
     Http2ErrorCode error_code = static_cast<Http2ErrorCode>(parse_u32(control_payload_scratch_.data() + 4));
-    on_peer_goaway(last_stream_id, error_code);
+    handle_peer_goaway(last_stream_id, error_code);
     return common::IoErr::None;
 }
 
@@ -778,7 +818,7 @@ common::IoErr Http2Connection::send_control_frame(Http2FrameType type, std::uint
     return result;
 }
 
-common::IoErr Http2Connection::send_connection_preface() noexcept {
+common::IoErr Http2Connection::send_initial_flight() noexcept {
     constexpr std::size_t kSettingsCount = 3;
     constexpr std::size_t kSettingsPayloadSize = kSettingsCount * kSettingsParameterSize;
     bool send_client_preface = options_.role == ConnectionRole::Client;
@@ -829,10 +869,6 @@ common::IoErr Http2Connection::send_connection_preface() noexcept {
     common::IoErr err = enqueue_send_entry(entry);
     if (err != common::IoErr::None) {
         release_send_entry(entry);
-    }
-    if (err == common::IoErr::None) {
-        local_connection_preface_sent_ = true;
-        local_settings_acknowledged_ = false;
     }
     return err;
 }
@@ -893,7 +929,7 @@ void Http2Connection::handle_stream_error(std::uint32_t stream_id, Http2ErrorCod
     }
 
     stream->close(pending_result);
-    maybe_destroy_stream(*stream);
+    try_release_stream(*stream);
 }
 
 Http2Stream *Http2Connection::find_stream(std::uint32_t stream_id) noexcept { return streams_.find(stream_id); }
@@ -910,7 +946,7 @@ Http2Stream *Http2Connection::create_peer_stream(std::uint32_t stream_id) noexce
     if (!stream) {
         return nullptr;
     }
-    stream->connection_owned_ = true;
+    stream->attached_to_connection_ = true;
     stream->owned_next_ = owned_stream_head_;
     owned_stream_head_ = stream;
     stream->conn_ = this;
@@ -940,7 +976,7 @@ Http2Stream *Http2Connection::create_local_stream(std::uint32_t stream_id) noexc
     if (!stream) {
         return nullptr;
     }
-    stream->connection_owned_ = true;
+    stream->attached_to_connection_ = true;
     stream->owned_next_ = owned_stream_head_;
     owned_stream_head_ = stream;
     stream->conn_ = this;
@@ -959,24 +995,16 @@ Http2Stream *Http2Connection::create_local_stream(std::uint32_t stream_id) noexc
     return stream;
 }
 
-void Http2Connection::erase_stream(Http2Stream &stream) noexcept {
-    stream.remove_from_conn_window_wait_list();
-    (void)streams_.erase(stream.stream_id_);
-    stream.conn_ = nullptr;
-    stream.active_ = false;
-    if (is_peer_stream_id(stream.stream_id_) && peer_active_stream_count_ != 0) {
-        --peer_active_stream_count_;
-    }
-    bool stream_set_empty = streams_.size() == 0;
-
-    if (!stream.connection_owned_) {
-        if (stream_set_empty) {
-            lifetime_wg_.done();
-        }
-        maybe_finish_graceful_shutdown();
+void Http2Connection::detach_stream(Http2Stream &stream) noexcept {
+    if (!stream.attached_to_connection_) {
         return;
     }
 
+    stream.remove_from_conn_window_wait_list();
+    (void)streams_.erase(stream.stream_id_);
+    if (is_peer_stream_id(stream.stream_id_) && peer_active_stream_count_ != 0) {
+        --peer_active_stream_count_;
+    }
     Http2Stream **link = &owned_stream_head_;
     while (*link && *link != &stream) {
         link = &((*link)->owned_next_);
@@ -984,33 +1012,35 @@ void Http2Connection::erase_stream(Http2Stream &stream) noexcept {
     if (*link == &stream) {
         *link = stream.owned_next_;
     }
+    stream.attached_to_connection_ = false;
+    stream.conn_ = nullptr;
+    stream.active_ = false;
     stream.owned_next_ = nullptr;
-    delete &stream;
-    if (stream_set_empty) {
+    if (streams_.size() == 0) {
         lifetime_wg_.done();
     }
-    maybe_finish_graceful_shutdown();
+    maybe_enter_closing_from_draining();
 }
 
-void Http2Connection::maybe_destroy_stream(Http2Stream &stream) noexcept {
-    if (stream.state_ != Http2Stream::State::Closed) {
+void Http2Connection::try_release_stream(Http2Stream &stream) noexcept {
+    if (!stream.ready_for_connection_release()) {
         return;
     }
-    if (stream.pending_head_ || stream.active_pending_head_) {
+    if (!stream.attached_to_connection_) {
         return;
     }
-    erase_stream(stream);
+    detach_stream(stream);
+    stream.release();
 }
 
 bool Http2Connection::can_accept_peer_stream(std::uint32_t stream_id) const noexcept {
-    return close_state_ == CloseState::Open && stream_id != 0 && is_peer_stream_id(stream_id) &&
+    return state_ == State::Running && stream_id != 0 && is_peer_stream_id(stream_id) &&
            is_next_peer_stream_id(stream_id) &&
            peer_active_stream_count_ < options_.max_peer_concurrent_streams;
 }
 
 bool Http2Connection::can_create_local_stream(std::uint32_t stream_id) const noexcept {
-    return close_state_ == CloseState::Open && run_started_ && local_connection_preface_sent_ && stream_id != 0 &&
-           !peer_sent_goaway_ &&
+    return state_ == State::Running && stream_id != 0 && !peer_goaway_received_ &&
            is_local_stream_id(stream_id) && is_next_local_stream_id(stream_id) &&
            local_push_stream_count_ < peer_advertised_max_concurrent_streams_;
 }
@@ -1023,34 +1053,30 @@ bool Http2Connection::is_next_local_stream_id(std::uint32_t stream_id) const noe
     return is_local_stream_id(stream_id) && stream_id > last_local_stream_id_;
 }
 
-void Http2Connection::on_peer_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept {
-    peer_sent_goaway_ = true;
+void Http2Connection::handle_peer_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept {
+    peer_goaway_received_ = true;
     peer_last_stream_id_ = last_stream_id;
     peer_goaway_error_code_ = error_code;
-    if (close_state_ == CloseState::Open) {
-        close_state_ = CloseState::PeerDraining;
-    } else if (close_state_ == CloseState::LocalDraining) {
-        close_state_ = CloseState::BothDraining;
+    if (state_ == State::Running) {
+        state_ = State::Draining;
     }
     close_streams_after_goaway(last_stream_id);
-    if (!local_goaway_sent_ && close_state_ != CloseState::AbortClosing && close_state_ != CloseState::Closed) {
+    if (!local_goaway_sent_ && state_ != State::Closing && state_ != State::Closed) {
         local_goaway_last_stream_id_ = last_peer_stream_id_;
         common::IoErr err = send_goaway(local_goaway_last_stream_id_, Http2ErrorCode::NoError);
         if (err != common::IoErr::None) {
-            abort_connection(err);
+            enter_closing(err);
             return;
         }
         local_goaway_sent_ = true;
-        close_state_ = CloseState::BothDraining;
-        stop_keepalive_ = true;
     }
-    maybe_finish_graceful_shutdown();
+    maybe_enter_closing_from_draining();
 }
 
 void Http2Connection::close_streams_after_goaway(std::uint32_t last_stream_id) noexcept {
     std::unique_ptr<Http2Stream *[]> to_close(new (std::nothrow) Http2Stream *[streams_.size()]);
     if (!to_close) {
-        abort_connection(common::IoErr::NoMem);
+        enter_closing(common::IoErr::NoMem);
         return;
     }
 
@@ -1063,7 +1089,7 @@ void Http2Connection::close_streams_after_goaway(std::uint32_t last_stream_id) n
 
     for (std::size_t i = 0; i < count; ++i) {
         to_close[i]->close(common::IoErr::Canceled);
-        maybe_destroy_stream(*to_close[i]);
+        try_release_stream(*to_close[i]);
     }
 }
 
@@ -1133,14 +1159,14 @@ fiber::async::Task<void> Http2Connection::run_send_loop() noexcept {
             common::IoErr err = stop_sending_requested_ ? stop_sending_reason_ : write_result.error();
             finish_send_entry(entry, err);
             entry = nullptr;
-            abort_connection(err);
+            enter_closing(err);
             break;
         }
         if (*write_result == 0) {
             common::IoErr err = stop_sending_requested_ ? stop_sending_reason_ : common::IoErr::ConnReset;
             finish_send_entry(entry, err);
             entry = nullptr;
-            abort_connection(err);
+            enter_closing(err);
             break;
         }
 
@@ -1196,66 +1222,66 @@ std::chrono::milliseconds Http2Connection::send_loop_poll_timeout() const noexce
 }
 
 void Http2Connection::handle_send_loop_timeout() noexcept {
-    if (stop_sending_requested_ || stop_keepalive_ || close_state_ != CloseState::Open ||
-        options_.keepalive_ping_interval.count() <= 0) {
+    if (stop_sending_requested_ || state_ != State::Running || options_.keepalive_ping_interval.count() <= 0) {
         return;
     }
 
     static constexpr std::array<std::uint8_t, kPingPayloadSize> kIdlePingPayload{};
     common::IoErr err = send_control_frame(Http2FrameType::Ping, 0, 0, kIdlePingPayload.data(), kIdlePingPayload.size());
     if (err != common::IoErr::None) {
-        abort_connection(err);
+        enter_closing(err);
     }
 }
 
 void Http2Connection::stop_sending(common::IoErr reason) noexcept {
-    abort_connection(reason);
+    enter_closing(reason);
 }
 
-common::IoErr Http2Connection::begin_graceful_shutdown() noexcept {
+common::IoErr Http2Connection::start_draining() noexcept {
     if (stop_sending_requested_) {
         return stop_sending_reason_;
     }
-    if (close_state_ == CloseState::Closed || close_state_ == CloseState::AbortClosing) {
+    if (state_ == State::Closed || state_ == State::Closing) {
         return common::IoErr::Canceled;
     }
-    if (!run_started_ || !local_connection_preface_sent_) {
+    if (state_ == State::Init || state_ == State::Start) {
         return common::IoErr::Invalid;
     }
-    if (close_state_ == CloseState::LocalDraining || close_state_ == CloseState::BothDraining) {
+    if (state_ == State::Draining) {
         return common::IoErr::None;
     }
 
     local_goaway_last_stream_id_ = last_peer_stream_id_;
     common::IoErr err = send_goaway(local_goaway_last_stream_id_, Http2ErrorCode::NoError);
     if (err != common::IoErr::None) {
-        abort_connection(err);
+        enter_closing(err);
         return err;
     }
 
     local_goaway_sent_ = true;
-    stop_keepalive_ = true;
-    if (close_state_ == CloseState::PeerDraining) {
-        close_state_ = CloseState::BothDraining;
-    } else {
-        close_state_ = CloseState::LocalDraining;
-    }
-    maybe_finish_graceful_shutdown();
+    state_ = State::Draining;
+    maybe_enter_closing_from_draining();
     return common::IoErr::None;
 }
 
-void Http2Connection::abort_connection(common::IoErr reason) noexcept {
+void Http2Connection::enter_closing(common::IoErr reason, bool abortive) noexcept {
+    if (state_ == State::Closed) {
+        return;
+    }
     if (stop_sending_requested_) {
+        if (transport_ && transport_->valid()) {
+            transport_->close();
+        }
+        state_ = State::Closing;
         return;
     }
 
-    close_state_ = CloseState::AbortClosing;
+    state_ = State::Closing;
     stop_sending_requested_ = true;
     stop_sending_reason_ = reason;
-    stop_keepalive_ = true;
     send_queue_.close();
 
-    if (transport_) {
+    if (abortive && transport_) {
         transport_->close();
     }
 }
@@ -1266,7 +1292,7 @@ std::size_t Http2Connection::configured_max_active_streams() const noexcept {
 }
 
 common::IoErr Http2Connection::enqueue_send_entry(SendEntry *entry) noexcept {
-    if (!entry || !run_started_ || !transport_ || !transport_->valid()) {
+    if (!entry || state_ == State::Init || state_ == State::Closed || !transport_ || !transport_->valid()) {
         return common::IoErr::Invalid;
     }
     if (stop_sending_requested_) {
@@ -1319,7 +1345,7 @@ void Http2Connection::close_all_streams(common::IoErr result) noexcept {
     streams_.for_each([&](Http2Stream &stream) { to_close[count++] = &stream; });
     for (std::size_t i = 0; i < count; ++i) {
         to_close[i]->close(result);
-        maybe_destroy_stream(*to_close[i]);
+        try_release_stream(*to_close[i]);
     }
 }
 
@@ -1346,12 +1372,8 @@ void Http2Connection::drain_conn_blocked_streams() noexcept {
     } while (progress && conn_send_window_ > 0 && !conn_wait_streams_.empty());
 }
 
-void Http2Connection::maybe_finish_graceful_shutdown() noexcept {
-    if (stop_sending_requested_ || graceful_send_queue_close_requested_) {
-        return;
-    }
-    if (close_state_ != CloseState::PeerDraining && close_state_ != CloseState::LocalDraining &&
-        close_state_ != CloseState::BothDraining) {
+void Http2Connection::maybe_enter_closing_from_draining() noexcept {
+    if (stop_sending_requested_ || state_ != State::Draining) {
         return;
     }
     if (streams_.size() != 0) {
@@ -1361,8 +1383,9 @@ void Http2Connection::maybe_finish_graceful_shutdown() noexcept {
         return;
     }
 
-    graceful_send_queue_close_requested_ = true;
+    state_ = State::Closing;
     send_queue_.close();
+    fiber::async::spawn([connection = this]() { return Http2Connection::close_transport_after_send_loop_task(connection); });
 }
 
 } // namespace fiber::http
