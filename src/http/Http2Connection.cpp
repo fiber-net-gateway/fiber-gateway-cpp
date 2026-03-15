@@ -136,10 +136,8 @@ Http2Connection::~Http2Connection() {
     send_queue_.close();
     drain_send_queue(common::IoErr::Canceled);
     close_all_streams(common::IoErr::Canceled);
-    while (owned_stream_head_) {
-        Http2Stream *stream = owned_stream_head_;
-        owned_stream_head_ = stream->owned_next_;
-        stream->owned_next_ = nullptr;
+    while (Http2Stream *stream = owned_stream_list_.front()) {
+        owned_stream_list_.erase(*stream);
         stream->remove_from_conn_window_wait_list();
         stream->attached_to_connection_ = false;
         stream->conn_ = nullptr;
@@ -947,13 +945,12 @@ Http2Stream *Http2Connection::create_peer_stream(std::uint32_t stream_id) noexce
         return nullptr;
     }
     stream->attached_to_connection_ = true;
-    stream->owned_next_ = owned_stream_head_;
-    owned_stream_head_ = stream;
+    owned_stream_list_.push_back(*stream);
     stream->conn_ = this;
     stream->active_ = true;
     stream->send_window_ = peer_initial_stream_send_window_;
     if (!streams_.insert(*stream)) {
-        owned_stream_head_ = stream->owned_next_;
+        owned_stream_list_.erase(*stream);
         delete stream;
         return nullptr;
     }
@@ -977,13 +974,12 @@ Http2Stream *Http2Connection::create_local_stream(std::uint32_t stream_id) noexc
         return nullptr;
     }
     stream->attached_to_connection_ = true;
-    stream->owned_next_ = owned_stream_head_;
-    owned_stream_head_ = stream;
+    owned_stream_list_.push_back(*stream);
     stream->conn_ = this;
     stream->active_ = true;
     stream->send_window_ = peer_initial_stream_send_window_;
     if (!streams_.insert(*stream)) {
-        owned_stream_head_ = stream->owned_next_;
+        owned_stream_list_.erase(*stream);
         delete stream;
         return nullptr;
     }
@@ -1005,17 +1001,10 @@ void Http2Connection::detach_stream(Http2Stream &stream) noexcept {
     if (is_peer_stream_id(stream.stream_id_) && peer_active_stream_count_ != 0) {
         --peer_active_stream_count_;
     }
-    Http2Stream **link = &owned_stream_head_;
-    while (*link && *link != &stream) {
-        link = &((*link)->owned_next_);
-    }
-    if (*link == &stream) {
-        *link = stream.owned_next_;
-    }
+    owned_stream_list_.erase(stream);
     stream.attached_to_connection_ = false;
     stream.conn_ = nullptr;
     stream.active_ = false;
-    stream.owned_next_ = nullptr;
     if (streams_.size() == 0) {
         lifetime_wg_.done();
     }
@@ -1357,9 +1346,9 @@ void Http2Connection::drain_conn_blocked_streams() noexcept {
     bool progress = false;
     do {
         progress = false;
-        Http2Stream *stream = conn_wait_streams_.front();
+        Http2Stream *stream = conn_wait_stream_list_.front();
         while (stream) {
-            Http2Stream *next = conn_wait_streams_.next_of(*stream);
+            Http2Stream *next = conn_wait_stream_list_.next_of(*stream);
             Http2Stream::ScheduleResult result = stream->schedule_pending();
             if (result == Http2Stream::ScheduleResult::Scheduled) {
                 progress = true;
@@ -1369,7 +1358,7 @@ void Http2Connection::drain_conn_blocked_streams() noexcept {
                 break;
             }
         }
-    } while (progress && conn_send_window_ > 0 && !conn_wait_streams_.empty());
+    } while (progress && conn_send_window_ > 0 && !conn_wait_stream_list_.empty());
 }
 
 void Http2Connection::maybe_enter_closing_from_draining() noexcept {

@@ -161,6 +161,7 @@ private:
     // smaller SETTINGS_INITIAL_WINDOW_SIZE is applied to in-flight streams.
     std::int32_t send_window_ = 65535;
     common::IntrusiveListHook conn_wait_hook_{};
+    common::IntrusiveListHook owned_hook_{};
     Http2Stream *active_prev_ = nullptr;
     Http2Stream *active_next_ = nullptr;
     Http2PendingEntry *pending_head_ = nullptr;
@@ -170,7 +171,6 @@ private:
     std::uint32_t ref_count_ = 1;
     bool attached_to_connection_ = false;
     common::IoErr close_reason_ = common::IoErr::None;
-    Http2Stream *owned_next_ = nullptr;
 
     friend class Http2Connection;
 };
