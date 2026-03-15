@@ -481,17 +481,17 @@ void Http2Stream::sync_conn_window_wait_membership() noexcept {
         return;
     }
     if (blocked_by_conn_window()) {
-        conn_->conn_wait_streams_.push_back(*this);
+        conn_->conn_wait_stream_list_.push_back(*this);
         return;
     }
-    conn_->conn_wait_streams_.erase(*this);
+    conn_->conn_wait_stream_list_.erase(*this);
 }
 
 void Http2Stream::remove_from_conn_window_wait_list() noexcept {
     if (!conn_) {
         return;
     }
-    conn_->conn_wait_streams_.erase(*this);
+    conn_->conn_wait_stream_list_.erase(*this);
 }
 
 void Http2Stream::try_schedule_pending() noexcept {

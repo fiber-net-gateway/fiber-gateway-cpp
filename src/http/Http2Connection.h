@@ -199,8 +199,8 @@ private:
     Http2PendingPool pending_pool_;
     Http2SendingEntryQueue send_queue_;
     fiber::async::WaitGroup lifetime_wg_{};
-    Http2Stream *owned_stream_head_ = nullptr;
-    common::IntrusiveList<Http2Stream, offsetof(Http2Stream, conn_wait_hook_)> conn_wait_streams_;
+    common::IntrusiveList<Http2Stream, offsetof(Http2Stream, owned_hook_)> owned_stream_list_;
+    common::IntrusiveList<Http2Stream, offsetof(Http2Stream, conn_wait_hook_)> conn_wait_stream_list_;
     State state_ = State::Init;
     bool send_loop_running_ = false;
     bool stop_sending_requested_ = false;
