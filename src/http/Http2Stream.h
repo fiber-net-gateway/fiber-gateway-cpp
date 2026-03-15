@@ -126,7 +126,6 @@ public:
     // reserved/sent DATA on this stream, so the per-stream send window is
     // allowed to become negative until future WINDOW_UPDATE frames restore it.
     void update_send_window(std::int32_t delta) noexcept;
-    void drain_pending(common::IoErr result) noexcept;
     void close(common::IoErr result = common::IoErr::Canceled) noexcept;
 
 private:
@@ -140,6 +139,7 @@ private:
     void append_active_pending(Http2PendingEntry &entry) noexcept;
     void remove_active_pending(Http2PendingEntry &entry) noexcept;
     void pop_pending_head() noexcept;
+    void drain_pending(common::IoErr result) noexcept;
     void maybe_finish_pending(Http2PendingEntry &entry) noexcept;
     void finish_pending(Http2PendingEntry &entry, common::IoErr result) noexcept;
     void sync_conn_window_wait_membership() noexcept;
@@ -162,8 +162,6 @@ private:
     std::int32_t send_window_ = 65535;
     common::IntrusiveListHook conn_wait_hook_{};
     common::IntrusiveListHook owned_hook_{};
-    Http2Stream *active_prev_ = nullptr;
-    Http2Stream *active_next_ = nullptr;
     Http2PendingEntry *pending_head_ = nullptr;
     Http2PendingEntry *pending_tail_ = nullptr;
     Http2PendingEntry *active_pending_head_ = nullptr;
