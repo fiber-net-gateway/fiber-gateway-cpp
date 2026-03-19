@@ -723,10 +723,17 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
     fiber::http::Http2Stream *stream3 = nullptr;
     std::uint32_t stream1_id = 0;
     std::uint32_t stream3_id = 0;
-    fiber::http::Http2Stream local_stream1(1);
-    fiber::http::Http2Stream local_stream3(3);
-
     ControlRunOutcome outcome;
+    fiber::http::Http2Stream::Lease local_stream1 = fiber::http::Http2Stream::alloc(1);
+    fiber::http::Http2Stream::Lease local_stream3 = fiber::http::Http2Stream::alloc(3);
+
+    if (!local_stream1 || !local_stream3) {
+        outcome.result = std::unexpected(fiber::common::IoErr::NoMem);
+        promise->set_value(std::move(outcome));
+        fiber::event::EventLoop::current().stop();
+        co_return;
+    }
+
     auto capture_outcome = [&]() {
         ControlSetupContext ctx;
         ctx.connection = &connection;
@@ -756,8 +763,8 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
                                       &stream3,
                                       &stream1_id,
                                       &stream3_id,
-                                      &local_stream1,
-                                      &local_stream3};
+                                      local_stream1.get(),
+                                      local_stream3.get()};
         fiber::async::spawn([setup_ctx]() mutable { return run_control_setup_task(std::move(setup_ctx)); });
 
         outcome.result = co_await connection.run();
@@ -780,17 +787,17 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
                                       &stream3,
                                       &stream1_id,
                                       &stream3_id,
-                                      &local_stream1,
-                                      &local_stream3};
+                                      local_stream1.get(),
+                                      local_stream3.get()};
         fiber::async::spawn([setup_ctx]() mutable { return run_control_setup_task(std::move(setup_ctx)); });
         outcome.result = co_await connection.run();
     } else {
         if (setup) {
-            setup(connection, local_stream1, local_stream3);
-            stream1 = &local_stream1;
-            stream3 = &local_stream3;
-            stream1_id = local_stream1.stream_id();
-            stream3_id = local_stream3.stream_id();
+            setup(connection, *local_stream1, *local_stream3);
+            stream1 = local_stream1.get();
+            stream3 = local_stream3.get();
+            stream1_id = local_stream1->stream_id();
+            stream3_id = local_stream3->stream_id();
         }
         outcome.result = co_await connection.run();
     }

@@ -50,10 +50,22 @@ public:
             stream->release();
         }
 
+        [[nodiscard]] Http2Stream *release_raw() noexcept {
+            Http2Stream *stream = stream_;
+            stream_ = nullptr;
+            return stream;
+        }
+
         [[nodiscard]] Http2Stream *get() const noexcept { return stream_; }
         [[nodiscard]] Http2Stream &operator*() const noexcept { return *stream_; }
         [[nodiscard]] Http2Stream *operator->() const noexcept { return stream_; }
         [[nodiscard]] explicit operator bool() const noexcept { return stream_ != nullptr; }
+
+        [[nodiscard]] static Lease adopt(Http2Stream *stream) noexcept {
+            Lease lease;
+            lease.stream_ = stream;
+            return lease;
+        }
 
     private:
         Http2Stream *stream_ = nullptr;
@@ -64,7 +76,7 @@ public:
     Http2Stream(Http2Stream &&) = delete;
     Http2Stream &operator=(Http2Stream &&) = delete;
 
-    explicit Http2Stream(std::uint32_t stream_id) noexcept : stream_id_(stream_id) {}
+    [[nodiscard]] static Lease alloc(std::uint32_t stream_id) noexcept;
 
     [[nodiscard]] std::uint32_t stream_id() const noexcept { return stream_id_; }
     [[nodiscard]] std::int32_t send_window() const noexcept { return send_window_; }
@@ -94,6 +106,7 @@ public:
     void close(common::IoErr result = common::IoErr::Canceled) noexcept;
 
 private:
+    explicit Http2Stream(std::uint32_t stream_id) noexcept : stream_id_(stream_id) {}
     [[nodiscard]] bool ready_for_connection_release() const noexcept;
     [[nodiscard]] bool ready_for_destruction() const noexcept;
     void retain() noexcept;
