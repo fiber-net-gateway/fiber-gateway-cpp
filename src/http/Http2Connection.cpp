@@ -406,15 +406,17 @@ common::IoErr Http2Connection::handle_data_payload(const FrameHeader &fhr, const
     std::size_t deliver_end = std::min(frame_end, data_end);
     std::size_t chunk_begin = deliver_begin > frame_start ? deliver_begin - frame_start : 0;
     std::size_t deliver_len = deliver_end > deliver_begin ? deliver_end - deliver_begin : 0;
-    std::size_t data_offset = deliver_begin > data_begin ? deliver_begin - data_begin : 0;
-    bool end_stream = ((fhr.flags & kFlagEndStream) != 0) && (frame_end >= data_end);
+    std::size_t data_pos = std::min(std::max(frame_start, data_begin), data_end);
+    std::size_t data_offset = data_pos > data_begin ? data_pos - data_begin : 0;
+    bool end_stream = ((fhr.flags & kFlagEndStream) != 0) && (frame_end >= fhr.length);
 
     if (deliver_len != 0 || end_stream) {
         mem::IoBuf payload = buf.retain_slice(chunk_begin, deliver_len);
         if (!payload && deliver_len != 0) {
             return common::IoErr::NoMem;
         }
-        common::IoErr err = stream->on_data_recv(deliver_len != 0 ? payload : buf, data_offset, deliver_len, end_stream);
+        common::IoErr err =
+                stream->on_data_payload_recv(deliver_len != 0 ? payload : buf, data_offset, logical_total, end_stream);
         if (err != common::IoErr::None) {
             handle_stream_error(fhr.stream_id, Http2ErrorCode::StreamClosed, err);
             return common::IoErr::None;
@@ -465,22 +467,23 @@ common::IoErr Http2Connection::handle_headers_payload(const FrameHeader &fhr, co
     std::size_t deliver_end = std::min(frame_end, fragment_end);
     std::size_t chunk_begin = deliver_begin > frame_start ? deliver_begin - frame_start : 0;
     std::size_t deliver_len = deliver_end > deliver_begin ? deliver_end - deliver_begin : 0;
-    std::size_t block_offset = inbound_header_block_bytes_ + (deliver_begin > fragment_begin ? deliver_begin - fragment_begin : 0);
-    bool end_headers = ((fhr.flags & kFlagEndHeaders) != 0) && (frame_end >= fragment_end);
-    bool end_stream = ((fhr.flags & kFlagEndStream) != 0) && end_headers;
+    std::size_t block_pos = std::min(std::max(frame_start, fragment_begin), fragment_end);
+    std::size_t block_offset = block_pos > fragment_begin ? block_pos - fragment_begin : 0;
+    bool end_headers = ((fhr.flags & kFlagEndHeaders) != 0) && (frame_end >= fhr.length);
+    bool end_stream = ((fhr.flags & kFlagEndStream) != 0) && (frame_end >= fhr.length);
 
     if (offset == 0) {
         inbound_header_stream_id_ = fhr.stream_id;
-        inbound_header_end_stream_ = (fhr.flags & kFlagEndStream) != 0;
     }
 
-    if (deliver_len != 0 || end_headers) {
+    if (deliver_len != 0 || end_headers || end_stream) {
         mem::IoBuf payload = buf.retain_slice(chunk_begin, deliver_len);
         if (!payload && deliver_len != 0) {
             return common::IoErr::NoMem;
         }
-        common::IoErr err = stream->on_header_recv(deliver_len != 0 ? payload : buf, block_offset, deliver_len, end_headers,
-                                                   end_stream);
+        common::IoErr err =
+                stream->on_headers_payload_recv(deliver_len != 0 ? payload : buf, block_offset, logical_total,
+                                                end_headers, end_stream);
         if (err != common::IoErr::None) {
             handle_stream_error(fhr.stream_id, Http2ErrorCode::ProtocolError, err);
             return common::IoErr::None;
@@ -488,13 +491,10 @@ common::IoErr Http2Connection::handle_headers_payload(const FrameHeader &fhr, co
         try_release_stream(*stream);
     }
 
-    if (frame_end >= fragment_end) {
-        inbound_header_block_bytes_ += logical_total;
+    if (frame_end >= fhr.length) {
         expecting_continuation_ = (fhr.flags & kFlagEndHeaders) == 0;
         if (!expecting_continuation_) {
             inbound_header_stream_id_ = 0;
-            inbound_header_block_bytes_ = 0;
-            inbound_header_end_stream_ = false;
         }
     }
 
@@ -522,9 +522,8 @@ common::IoErr Http2Connection::handle_continuation_payload(const FrameHeader &fh
         if (!payload && length != 0) {
             return common::IoErr::NoMem;
         }
-        common::IoErr err =
-                stream->on_header_recv(length != 0 ? payload : buf, inbound_header_block_bytes_ + offset, length,
-                                       end_headers, end_headers && inbound_header_end_stream_);
+        common::IoErr err = stream->on_headers_payload_recv(length != 0 ? payload : buf, offset, fhr.length,
+                                                            end_headers, false);
         if (err != common::IoErr::None) {
             handle_stream_error(fhr.stream_id, Http2ErrorCode::ProtocolError, err);
             return common::IoErr::None;
@@ -533,12 +532,9 @@ common::IoErr Http2Connection::handle_continuation_payload(const FrameHeader &fh
     }
 
     if (frame_end >= fhr.length) {
-        inbound_header_block_bytes_ += fhr.length;
         if ((fhr.flags & kFlagEndHeaders) != 0) {
             expecting_continuation_ = false;
             inbound_header_stream_id_ = 0;
-            inbound_header_block_bytes_ = 0;
-            inbound_header_end_stream_ = false;
         }
     }
 
@@ -696,7 +692,7 @@ common::IoErr Http2Connection::handle_rst_stream_payload(const FrameHeader &fhr,
         return is_idle_stream(fhr.stream_id) ? common::IoErr::Invalid : common::IoErr::None;
     }
 
-    stream->on_remote_rst(static_cast<Http2ErrorCode>(parse_u32(control_payload_scratch_.data())));
+    stream->on_rst_recv(static_cast<Http2ErrorCode>(parse_u32(control_payload_scratch_.data())));
     try_release_stream(*stream);
     return common::IoErr::None;
 }
