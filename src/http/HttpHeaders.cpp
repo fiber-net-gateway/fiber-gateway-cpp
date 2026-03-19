@@ -5,41 +5,11 @@
 #include <limits>
 #include <string>
 
+#include "HttpHeaderHash.h"
+
 namespace fiber::http {
 
 namespace {
-
-uint64_t hash_name(std::string_view name) {
-    std::uint32_t hash = 0;
-    for (char ch : name) {
-        unsigned char lower = static_cast<unsigned char>(ch);
-        if (lower >= 'A' && lower <= 'Z') {
-            lower = static_cast<unsigned char>(lower - 'A' + 'a');
-        }
-        hash = hash * 31 + lower;
-    }
-    return static_cast<uint64_t>(hash);
-}
-
-bool equals_ascii_ci(std::string_view a, std::string_view b) {
-    if (a.size() != b.size()) {
-        return false;
-    }
-    for (size_t i = 0; i < a.size(); ++i) {
-        unsigned char left = static_cast<unsigned char>(a[i]);
-        unsigned char right = static_cast<unsigned char>(b[i]);
-        if (left >= 'A' && left <= 'Z') {
-            left = static_cast<unsigned char>(left - 'A' + 'a');
-        }
-        if (right >= 'A' && right <= 'Z') {
-            right = static_cast<unsigned char>(right - 'A' + 'a');
-        }
-        if (left != right) {
-            return false;
-        }
-    }
-    return true;
-}
 
 size_t next_pow2(size_t value) {
     if (value <= 1) {
@@ -59,16 +29,7 @@ size_t next_pow2(size_t value) {
 
 void to_lowcase_and_hash(std::string_view name, std::string &out, uint64_t &hash_out) {
     out.resize(name.size());
-    std::uint32_t hash = 0;
-    for (size_t i = 0; i < name.size(); ++i) {
-        unsigned char lower = static_cast<unsigned char>(name[i]);
-        if (lower >= 'A' && lower <= 'Z') {
-            lower = static_cast<unsigned char>(lower - 'A' + 'a');
-        }
-        out[i] = static_cast<char>(lower);
-        hash = hash * 31 + lower;
-    }
-    hash_out = static_cast<uint64_t>(hash);
+    hash_out = http_header_name_to_lowercase_and_hash(name, out.data());
 }
 
 void init_field(HttpHeaders::HeaderField *field,
@@ -192,7 +153,7 @@ HttpHeaders::HeaderField *HttpHeaders::add_view(std::string_view name, std::stri
         value.size() > std::numeric_limits<uint32_t>::max()) {
         return nullptr;
     }
-    uint64_t hash = hash_name(name);
+    uint64_t hash = http_header_name_hash(name);
     HeaderField *field = alloc_field();
     if (!field) {
         return nullptr;
@@ -271,7 +232,7 @@ size_t HttpHeaders::remove(std::string_view name) noexcept {
     if (!all_head_ || bucket_head_.empty()) {
         return 0;
     }
-    uint64_t name_hash = hash_name(name);
+    uint64_t name_hash = http_header_name_hash(name);
     std::uint32_t bucket = static_cast<std::uint32_t>(name_hash & (bucket_head_.size() - 1));
 
     size_t removed = 0;
@@ -279,7 +240,7 @@ size_t HttpHeaders::remove(std::string_view name) noexcept {
     HeaderField *node = bucket_head_[bucket];
     while (node) {
         HeaderField *next = node->next_bucket;
-        if (node->name_hash == name_hash && equals_ascii_ci(node->name_view(), name)) {
+        if (node->name_hash == name_hash && http_header_name_equals_ci(node->name_view(), name)) {
             if (prev_bucket) {
                 prev_bucket->next_bucket = next;
             } else {
@@ -318,7 +279,7 @@ size_t HttpHeaders::remove_lowcase(std::string_view lowcase_key, uint64_t hash) 
     HeaderField *node = bucket_head_[bucket];
     while (node) {
         HeaderField *next = node->next_bucket;
-        if (node->name_hash == hash && equals_ascii_ci(node->lowcase_view(), lowcase_key)) {
+        if (node->name_hash == hash && http_header_name_equals_ci(node->lowcase_view(), lowcase_key)) {
             if (prev_bucket) {
                 prev_bucket->next_bucket = next;
             } else {
@@ -418,11 +379,11 @@ HttpHeaders::HeaderField *HttpHeaders::find_first_node(std::string_view name) co
     if (bucket_head_.empty()) {
         return nullptr;
     }
-    uint64_t name_hash = hash_name(name);
+    uint64_t name_hash = http_header_name_hash(name);
     std::uint32_t bucket = static_cast<std::uint32_t>(name_hash & (bucket_head_.size() - 1));
     HeaderField *node = bucket_head_[bucket];
     while (node) {
-        if (node->name_hash == name_hash && equals_ascii_ci(node->name_view(), name)) {
+        if (node->name_hash == name_hash && http_header_name_equals_ci(node->name_view(), name)) {
             return node;
         }
         node = node->next_bucket;
@@ -438,7 +399,7 @@ const HttpHeaders::HeaderField *HttpHeaders::find_first_node_lowcase(std::string
     std::uint32_t bucket = static_cast<std::uint32_t>(hash & (bucket_head_.size() - 1));
     HeaderField *node = bucket_head_[bucket];
     while (node) {
-        if (node->name_hash == hash && equals_ascii_ci(node->lowcase_view(), lowcase_key)) {
+        if (node->name_hash == hash && http_header_name_equals_ci(node->lowcase_view(), lowcase_key)) {
             return node;
         }
         node = node->next_bucket;
@@ -454,7 +415,7 @@ const HttpHeaders::HeaderField *HttpHeaders::next_match_node(const HeaderField *
     }
     const HeaderField *node = start->next_bucket;
     while (node) {
-        if (node->name_hash == hash && equals_ascii_ci(node->lowcase_view(), lowcase_key)) {
+        if (node->name_hash == hash && http_header_name_equals_ci(node->lowcase_view(), lowcase_key)) {
             return node;
         }
         node = node->next_bucket;
