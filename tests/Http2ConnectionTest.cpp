@@ -229,12 +229,13 @@ struct ControlRunOutcome {
     std::uint32_t peer_max_concurrent_streams = 0;
     bool peer_enable_push = true;
     std::int32_t stream1_send_window = 0;
-    fiber::http::Http2Stream::State stream1_state = fiber::http::Http2Stream::State::Idle;
     bool stream1_registered = false;
-    fiber::http::Http2Stream::State stream1_table_state = fiber::http::Http2Stream::State::Idle;
-    fiber::http::Http2Stream::State stream2_table_state = fiber::http::Http2Stream::State::Idle;
+    bool stream1_remote_end_headers = false;
+    bool stream1_remote_end_stream = false;
+    bool stream1_remote_rst = false;
+    bool stream2_remote_end_headers = false;
+    bool stream2_remote_end_stream = false;
     bool stream2_registered = false;
-    fiber::http::Http2Stream::State stream3_state = fiber::http::Http2Stream::State::Idle;
     bool stream3_registered = false;
 };
 
@@ -244,7 +245,6 @@ struct RetainedStreamOutcome {
     bool stream_registered_after_run = false;
     bool lease_valid_after_run = false;
     bool attached_after_run = true;
-    fiber::http::Http2Stream::State state_after_run = fiber::http::Http2Stream::State::Idle;
     fiber::common::IoErr close_reason = fiber::common::IoErr::None;
 };
 
@@ -520,9 +520,17 @@ public:
         const fiber::http::Http2Stream *stream = find_stream(stream_id);
         return stream ? stream->send_window() : 0;
     }
-    [[nodiscard]] fiber::http::Http2Stream::State current_stream_state(std::uint32_t stream_id) const noexcept {
+    [[nodiscard]] bool current_stream_remote_end_headers(std::uint32_t stream_id) const noexcept {
         const fiber::http::Http2Stream *stream = find_stream(stream_id);
-        return stream ? stream->state() : fiber::http::Http2Stream::State::Idle;
+        return stream ? stream->remote_end_headers() : false;
+    }
+    [[nodiscard]] bool current_stream_remote_end_stream(std::uint32_t stream_id) const noexcept {
+        const fiber::http::Http2Stream *stream = find_stream(stream_id);
+        return stream ? stream->remote_end_stream() : false;
+    }
+    [[nodiscard]] bool current_stream_remote_rst(std::uint32_t stream_id) const noexcept {
+        const fiber::http::Http2Stream *stream = find_stream(stream_id);
+        return stream ? stream->remote_rst() : false;
     }
     void request_stop(fiber::common::IoErr reason = fiber::common::IoErr::Canceled) noexcept { shutdown(reason); }
     [[nodiscard]] bool send_loop_stopped() const noexcept { return send_loop_exited(); }
@@ -588,14 +596,15 @@ void capture_control_outcome(const ControlSetupContext &ctx) {
     outcome.peer_enable_push = ctx.connection->current_peer_enable_push();
     if (*ctx.stream1_id != 0) {
         outcome.stream1_send_window = ctx.connection->current_stream_send_window(*ctx.stream1_id);
-        outcome.stream1_state = ctx.connection->current_stream_state(*ctx.stream1_id);
         outcome.stream1_registered = ctx.connection->current_has_stream(*ctx.stream1_id);
-        outcome.stream1_table_state = ctx.connection->current_stream_state(*ctx.stream1_id);
+        outcome.stream1_remote_end_headers = ctx.connection->current_stream_remote_end_headers(*ctx.stream1_id);
+        outcome.stream1_remote_end_stream = ctx.connection->current_stream_remote_end_stream(*ctx.stream1_id);
+        outcome.stream1_remote_rst = ctx.connection->current_stream_remote_rst(*ctx.stream1_id);
     }
     outcome.stream2_registered = ctx.connection->current_has_stream(2);
-    outcome.stream2_table_state = ctx.connection->current_stream_state(2);
+    outcome.stream2_remote_end_headers = ctx.connection->current_stream_remote_end_headers(2);
+    outcome.stream2_remote_end_stream = ctx.connection->current_stream_remote_end_stream(2);
     if (*ctx.stream3_id != 0) {
-        outcome.stream3_state = ctx.connection->current_stream_state(*ctx.stream3_id);
         outcome.stream3_registered = ctx.connection->current_has_stream(*ctx.stream3_id);
     }
 }
@@ -857,7 +866,6 @@ DetachedTask run_retained_stream_connection(std::shared_ptr<std::promise<Retaine
     if (retained_stream) {
         outcome.lease_valid_after_run = static_cast<bool>(*retained_stream);
         outcome.attached_after_run = retained_stream->get()->attached_to_connection();
-        outcome.state_after_run = retained_stream->get()->state();
         outcome.close_reason = retained_stream->get()->close_reason();
     }
 
@@ -1110,7 +1118,6 @@ TEST(Http2ConnectionTest, RstStreamClosesActiveStream) {
 
     ASSERT_TRUE(outcome.result.has_value());
     EXPECT_FALSE(outcome.stream1_registered);
-    EXPECT_EQ(outcome.stream1_table_state, fiber::http::Http2Stream::State::Idle);
 }
 
 TEST(Http2ConnectionTest, HeadersCreatePeerStreamAndOpenIt) {
@@ -1121,7 +1128,8 @@ TEST(Http2ConnectionTest, HeadersCreatePeerStreamAndOpenIt) {
 
     ASSERT_TRUE(outcome.result.has_value());
     EXPECT_TRUE(outcome.stream2_registered);
-    EXPECT_EQ(outcome.stream2_table_state, fiber::http::Http2Stream::State::Open);
+    EXPECT_TRUE(outcome.stream2_remote_end_headers);
+    EXPECT_FALSE(outcome.stream2_remote_end_stream);
 }
 
 TEST(Http2ConnectionTest, HeadersWithEndStreamCreateHalfClosedRemoteStream) {
@@ -1132,7 +1140,8 @@ TEST(Http2ConnectionTest, HeadersWithEndStreamCreateHalfClosedRemoteStream) {
 
     ASSERT_TRUE(outcome.result.has_value());
     EXPECT_TRUE(outcome.stream2_registered);
-    EXPECT_EQ(outcome.stream2_table_state, fiber::http::Http2Stream::State::HalfClosedRemote);
+    EXPECT_TRUE(outcome.stream2_remote_end_headers);
+    EXPECT_TRUE(outcome.stream2_remote_end_stream);
 }
 
 TEST(Http2ConnectionTest, GoawayClosesOnlyLocalStreamsAfterLastStreamId) {
@@ -1149,7 +1158,9 @@ TEST(Http2ConnectionTest, GoawayClosesOnlyLocalStreamsAfterLastStreamId) {
 
     ASSERT_TRUE(outcome.result.has_value());
     EXPECT_TRUE(outcome.stream1_registered);
-    EXPECT_EQ(outcome.stream1_state, fiber::http::Http2Stream::State::Idle);
+    EXPECT_FALSE(outcome.stream1_remote_end_headers);
+    EXPECT_FALSE(outcome.stream1_remote_end_stream);
+    EXPECT_FALSE(outcome.stream1_remote_rst);
     EXPECT_FALSE(outcome.stream3_registered);
 
     std::vector<EncodedFrame> frames = parse_frames(outcome.written);
@@ -1272,7 +1283,6 @@ TEST(Http2ConnectionTest, RetainedClosedStreamDetachesFromConnectionBeforeLeaseR
     EXPECT_FALSE(outcome.stream_registered_after_run);
     EXPECT_TRUE(outcome.lease_valid_after_run);
     EXPECT_FALSE(outcome.attached_after_run);
-    EXPECT_EQ(outcome.state_after_run, fiber::http::Http2Stream::State::Closed);
     EXPECT_EQ(outcome.close_reason, fiber::common::IoErr::Canceled);
 }
 

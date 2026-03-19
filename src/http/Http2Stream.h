@@ -64,45 +64,28 @@ public:
     Http2Stream(Http2Stream &&) = delete;
     Http2Stream &operator=(Http2Stream &&) = delete;
 
-    enum class State : std::uint8_t {
-        Idle,
-        ReservedLocal,
-        ReservedRemote,
-        Open,
-        HalfClosedLocal,
-        HalfClosedRemote,
-        Closed,
-    };
-
-    enum class StreamOp : std::uint8_t {
-        RecvHeaders = 0,
-        RecvHeadersEndStream,
-        RecvData,
-        RecvDataEndStream,
-        SendHeaders,
-        SendHeadersEndStream,
-        SendData,
-        SendDataEndStream,
-    };
-
     explicit Http2Stream(std::uint32_t stream_id) noexcept : stream_id_(stream_id) {}
 
     [[nodiscard]] std::uint32_t stream_id() const noexcept { return stream_id_; }
-    [[nodiscard]] State state() const noexcept { return state_; }
-    void set_state(State state) noexcept { state_ = state; }
     [[nodiscard]] std::int32_t send_window() const noexcept { return send_window_; }
     [[nodiscard]] bool attached_to_connection() const noexcept { return attached_to_connection_; }
     [[nodiscard]] common::IoErr close_reason() const noexcept { return close_reason_; }
+    [[nodiscard]] bool remote_end_headers() const noexcept { return remote_end_headers_; }
+    [[nodiscard]] bool remote_end_stream() const noexcept { return remote_end_stream_; }
+    [[nodiscard]] bool remote_rst() const noexcept { return remote_rst_; }
+    [[nodiscard]] bool local_headers_sent() const noexcept { return local_headers_sent_; }
+    [[nodiscard]] bool local_end_stream() const noexcept { return local_end_stream_; }
+    [[nodiscard]] bool local_rst() const noexcept { return local_rst_; }
     [[nodiscard]] Lease lease() noexcept { return Lease(this); }
 
     [[nodiscard]] bool active() const noexcept { return active_; }
     void set_active(bool active) noexcept { active_ = active; }
 
-    common::IoErr on_header_recv(const mem::IoBuf &payload, std::size_t block_offset, std::size_t length,
-                                 bool end_headers, bool end_stream) noexcept;
-    common::IoErr on_data_recv(const mem::IoBuf &payload, std::size_t data_offset, std::size_t length,
-                               bool end_stream) noexcept;
-    void on_remote_rst(Http2ErrorCode code, common::IoErr result = common::IoErr::Canceled) noexcept;
+    common::IoErr on_headers_payload_recv(const mem::IoBuf &payload, std::size_t offset, std::size_t length,
+                                          bool end_headers, bool end_stream) noexcept;
+    common::IoErr on_data_payload_recv(const mem::IoBuf &payload, std::size_t offset, std::size_t length,
+                                       bool end_stream) noexcept;
+    void on_rst_recv(Http2ErrorCode code, common::IoErr result = common::IoErr::Canceled) noexcept;
     common::IoErr close_rst(Http2ErrorCode code, common::IoErr result = common::IoErr::Canceled) noexcept;
     // Peer SETTINGS_INITIAL_WINDOW_SIZE can shrink after we have already
     // reserved/sent DATA on this stream, so the per-stream send window is
@@ -111,18 +94,18 @@ public:
     void close(common::IoErr result = common::IoErr::Canceled) noexcept;
 
 private:
-    common::IoErr transition_on_recv_headers(bool end_stream) noexcept;
-    common::IoErr transition_on_recv_data(bool end_stream) noexcept;
-    [[nodiscard]] static bool is_valid_transition(State state, StreamOp op) noexcept;
-    void transition_on_remote_end_stream() noexcept;
-    void transition_on_local_end_stream() noexcept;
     [[nodiscard]] bool ready_for_connection_release() const noexcept;
     [[nodiscard]] bool ready_for_destruction() const noexcept;
     void retain() noexcept;
     void release() noexcept;
 
     std::uint32_t stream_id_ = 0;
-    State state_ = State::Idle;
+    bool remote_end_headers_ = false;
+    bool remote_end_stream_ = false;
+    bool remote_rst_ = false;
+    bool local_headers_sent_ = false;
+    bool local_end_stream_ = false;
+    bool local_rst_ = false;
     bool active_ = false;
     Http2Connection *conn_ = nullptr;
     // RFC 7540 allows the stream-level send window to become negative after a

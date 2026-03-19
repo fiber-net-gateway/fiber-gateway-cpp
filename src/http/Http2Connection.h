@@ -182,8 +182,6 @@ private:
     Http2ErrorCode peer_goaway_error_code_ = Http2ErrorCode::NoError;
     bool expecting_continuation_ = false;
     std::uint32_t inbound_header_stream_id_ = 0;
-    std::size_t inbound_header_block_bytes_ = 0;
-    bool inbound_header_end_stream_ = false;
     std::uint8_t incoming_pad_length_ = 0;
     std::array<std::uint8_t, 8> control_payload_scratch_{};
     std::size_t control_payload_used_ = 0;
