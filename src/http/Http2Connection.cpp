@@ -120,7 +120,6 @@ Http2Connection::Http2Connection(std::unique_ptr<HttpTransport> transport) :
 Http2Connection::Http2Connection(std::unique_ptr<HttpTransport> transport, Options options) :
     transport_(std::move(transport)),
     options_(std::move(options)),
-    pending_pool_(options_.max_free_pending_entries),
     send_queue_(options_.max_free_send_entries) {
     peer_advertised_max_concurrent_streams_ = options_.max_peer_concurrent_streams;
     conn_send_window_ = options_.initial_connection_send_window;
@@ -138,7 +137,6 @@ Http2Connection::~Http2Connection() {
     close_all_streams(common::IoErr::Canceled);
     while (Http2Stream *stream = owned_stream_list_.front()) {
         owned_stream_list_.erase(*stream);
-        stream->remove_from_conn_window_wait_list();
         stream->attached_to_connection_ = false;
         stream->conn_ = nullptr;
         stream->active_ = false;
@@ -996,7 +994,6 @@ void Http2Connection::detach_stream(Http2Stream &stream) noexcept {
         return;
     }
 
-    stream.remove_from_conn_window_wait_list();
     (void)streams_.erase(stream.stream_id_);
     if (is_peer_stream_id(stream.stream_id_) && peer_active_stream_count_ != 0) {
         --peer_active_stream_count_;
@@ -1200,7 +1197,6 @@ void Http2Connection::release_send_entry(SendEntry *entry) noexcept {
 
 void Http2Connection::update_connection_send_window(std::int32_t delta) noexcept {
     conn_send_window_ += delta;
-    drain_conn_blocked_streams();
 }
 
 std::chrono::milliseconds Http2Connection::send_loop_poll_timeout() const noexcept {
@@ -1336,29 +1332,6 @@ void Http2Connection::close_all_streams(common::IoErr result) noexcept {
         to_close[i]->close(result);
         try_release_stream(*to_close[i]);
     }
-}
-
-void Http2Connection::drain_conn_blocked_streams() noexcept {
-    if (stop_sending_requested_) {
-        return;
-    }
-
-    bool progress = false;
-    do {
-        progress = false;
-        Http2Stream *stream = conn_wait_stream_list_.front();
-        while (stream) {
-            Http2Stream *next = conn_wait_stream_list_.next_of(*stream);
-            Http2Stream::ScheduleResult result = stream->schedule_pending();
-            if (result == Http2Stream::ScheduleResult::Scheduled) {
-                progress = true;
-            }
-            stream = next;
-            if (stop_sending_requested_ || conn_send_window_ <= 0) {
-                break;
-            }
-        }
-    } while (progress && conn_send_window_ > 0 && !conn_wait_stream_list_.empty());
 }
 
 void Http2Connection::maybe_enter_closing_from_draining() noexcept {

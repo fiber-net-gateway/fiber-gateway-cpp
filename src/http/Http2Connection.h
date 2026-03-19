@@ -17,8 +17,6 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../common/mem/IoBuf.h"
-#include "Http2Pending.h"
-#include "Http2PendingPool.h"
 #include "Http2Protocol.h"
 #include "Http2SendingEntryQueue.h"
 #include "Http2Stream.h"
@@ -49,9 +47,6 @@ public:
     using StableSpan = Http2StableSpan;
     using SendPayload = Http2SendPayload;
     using SendEntry = Http2SendingEntry;
-    using PendingEntry = Http2PendingEntry;
-    using PendingChange = Http2PendingChange;
-    using PendingKind = Http2PendingKind;
 
     struct Options {
         ConnectionRole role = ConnectionRole::Server;
@@ -61,7 +56,6 @@ public:
         std::chrono::milliseconds keepalive_ping_interval = std::chrono::milliseconds::zero();
         std::uint32_t max_frame_size = 16384;
         std::size_t max_free_send_entries = 64;
-        std::size_t max_free_pending_entries = 64;
         std::uint32_t max_peer_concurrent_streams = 100;
         std::uint32_t local_max_concurrent_streams = 128;
         std::uint32_t max_local_push_streams = 0;
@@ -159,7 +153,6 @@ private:
     void start_send_loop() noexcept;
     [[nodiscard]] std::chrono::milliseconds send_loop_poll_timeout() const noexcept;
     void handle_send_loop_timeout() noexcept;
-    void drain_conn_blocked_streams() noexcept;
     common::IoErr start_draining() noexcept;
     void maybe_enter_closing_from_draining() noexcept;
     void enter_closing(common::IoErr reason, bool abortive = true) noexcept;
@@ -196,11 +189,9 @@ private:
     std::size_t control_payload_used_ = 0;
     std::array<std::uint8_t, 6> settings_scratch_{};
     std::size_t settings_scratch_used_ = 0;
-    Http2PendingPool pending_pool_;
     Http2SendingEntryQueue send_queue_;
     fiber::async::WaitGroup lifetime_wg_{};
     common::IntrusiveList<Http2Stream, offsetof(Http2Stream, owned_hook_)> owned_stream_list_;
-    common::IntrusiveList<Http2Stream, offsetof(Http2Stream, conn_wait_hook_)> conn_wait_stream_list_;
     State state_ = State::Init;
     bool send_loop_running_ = false;
     bool stop_sending_requested_ = false;
