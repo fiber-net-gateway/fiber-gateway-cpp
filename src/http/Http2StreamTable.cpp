@@ -3,9 +3,9 @@
 #include <limits>
 #include <new>
 
-#include "Http2Stream.h"
-
 namespace fiber::http {
+
+Http2StreamTable::~Http2StreamTable() { clear(); }
 
 bool Http2StreamTable::init(std::size_t max_active_streams) noexcept {
     clear();
@@ -31,6 +31,14 @@ bool Http2StreamTable::init(std::size_t max_active_streams) noexcept {
 }
 
 void Http2StreamTable::clear() noexcept {
+    if (buckets_) {
+        for (std::size_t i = 0; i < bucket_count_; ++i) {
+            if (buckets_[i].stream) {
+                Http2Stream::Lease::adopt(buckets_[i].stream).reset();
+                buckets_[i] = Bucket{};
+            }
+        }
+    }
     buckets_.reset();
     bucket_count_ = 0;
     size_ = 0;
@@ -53,18 +61,22 @@ const Http2Stream *Http2StreamTable::find(std::uint32_t stream_id) const noexcep
     return buckets_[slot].stream;
 }
 
-bool Http2StreamTable::insert(Http2Stream &stream) noexcept {
+bool Http2StreamTable::insert(Http2Stream::Lease &&lease) noexcept {
     if (!buckets_ || bucket_count_ == 0 || size_ >= max_active_streams_) {
         return false;
     }
+    Http2Stream *stream = lease.get();
+    if (!stream) {
+        return false;
+    }
 
-    std::uint32_t stream_id = stream.stream_id();
+    std::uint32_t stream_id = stream->stream_id();
     std::size_t idx = hash_stream_id(stream_id) & mask();
     for (std::size_t probed = 0; probed < bucket_count_; ++probed) {
         Bucket &bucket = buckets_[idx];
         if (!bucket.stream) {
             bucket.stream_id = stream_id;
-            bucket.stream = &stream;
+            bucket.stream = lease.release_raw();
             ++size_;
             return true;
         }
@@ -77,15 +89,15 @@ bool Http2StreamTable::insert(Http2Stream &stream) noexcept {
     return false;
 }
 
-Http2Stream *Http2StreamTable::erase(std::uint32_t stream_id) noexcept {
+Http2Stream::Lease Http2StreamTable::erase(std::uint32_t stream_id) noexcept {
     std::size_t slot = find_slot(stream_id);
     if (slot == bucket_count_) {
-        return nullptr;
+        return {};
     }
 
     Http2Stream *stream = buckets_[slot].stream;
     erase_at(slot);
-    return stream;
+    return Http2Stream::Lease::adopt(stream);
 }
 
 std::size_t Http2StreamTable::next_pow2(std::size_t value) noexcept {

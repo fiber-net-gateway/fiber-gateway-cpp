@@ -5,6 +5,11 @@
 
 namespace fiber::http {
 
+Http2Stream::Lease Http2Stream::alloc(std::uint32_t stream_id) noexcept {
+    Http2Stream *stream = new (std::nothrow) Http2Stream(stream_id);
+    return Lease::adopt(stream);
+}
+
 common::IoErr Http2Stream::on_headers_payload_recv(const mem::IoBuf &payload, std::size_t offset, std::size_t length,
                                                    bool end_headers, bool end_stream) noexcept {
     if (remote_rst_ || local_rst_ || (remote_end_stream_ && remote_end_headers_)) {

@@ -136,11 +136,12 @@ Http2Connection::~Http2Connection() {
     drain_send_queue(common::IoErr::Canceled);
     close_all_streams(common::IoErr::Canceled);
     while (Http2Stream *stream = owned_stream_list_.front()) {
+        std::uint32_t stream_id = stream->stream_id_;
         owned_stream_list_.erase(*stream);
         stream->attached_to_connection_ = false;
         stream->conn_ = nullptr;
         stream->active_ = false;
-        stream->release();
+        (void)streams_.erase(stream_id);
     }
 }
 
@@ -934,27 +935,29 @@ Http2Stream *Http2Connection::create_peer_stream(std::uint32_t stream_id) noexce
     }
 
     bool track_stream_lifetime = streams_.size() == 0;
-    auto *stream = new (std::nothrow) Http2Stream(stream_id);
+    Http2Stream::Lease stream = Http2Stream::alloc(stream_id);
     if (!stream) {
         return nullptr;
     }
-    stream->attached_to_connection_ = true;
-    owned_stream_list_.push_back(*stream);
-    stream->conn_ = this;
-    stream->active_ = true;
-    stream->send_window_ = peer_initial_stream_send_window_;
-    if (!streams_.insert(*stream)) {
-        owned_stream_list_.erase(*stream);
-        delete stream;
+    Http2Stream *stream_ptr = stream.get();
+    stream_ptr->attached_to_connection_ = true;
+    stream_ptr->conn_ = this;
+    stream_ptr->active_ = true;
+    stream_ptr->send_window_ = peer_initial_stream_send_window_;
+    if (!streams_.insert(std::move(stream))) {
+        stream_ptr->attached_to_connection_ = false;
+        stream_ptr->conn_ = nullptr;
+        stream_ptr->active_ = false;
         return nullptr;
     }
+    owned_stream_list_.push_back(*stream_ptr);
     if (track_stream_lifetime) {
         lifetime_wg_.add(1);
     }
 
     last_peer_stream_id_ = stream_id;
     ++peer_active_stream_count_;
-    return stream;
+    return stream_ptr;
 }
 
 Http2Stream *Http2Connection::create_local_stream(std::uint32_t stream_id) noexcept {
@@ -963,26 +966,28 @@ Http2Stream *Http2Connection::create_local_stream(std::uint32_t stream_id) noexc
     }
 
     bool track_stream_lifetime = streams_.size() == 0;
-    auto *stream = new (std::nothrow) Http2Stream(stream_id);
+    Http2Stream::Lease stream = Http2Stream::alloc(stream_id);
     if (!stream) {
         return nullptr;
     }
-    stream->attached_to_connection_ = true;
-    owned_stream_list_.push_back(*stream);
-    stream->conn_ = this;
-    stream->active_ = true;
-    stream->send_window_ = peer_initial_stream_send_window_;
-    if (!streams_.insert(*stream)) {
-        owned_stream_list_.erase(*stream);
-        delete stream;
+    Http2Stream *stream_ptr = stream.get();
+    stream_ptr->attached_to_connection_ = true;
+    stream_ptr->conn_ = this;
+    stream_ptr->active_ = true;
+    stream_ptr->send_window_ = peer_initial_stream_send_window_;
+    if (!streams_.insert(std::move(stream))) {
+        stream_ptr->attached_to_connection_ = false;
+        stream_ptr->conn_ = nullptr;
+        stream_ptr->active_ = false;
         return nullptr;
     }
+    owned_stream_list_.push_back(*stream_ptr);
     if (track_stream_lifetime) {
         lifetime_wg_.add(1);
     }
 
     last_local_stream_id_ = stream_id;
-    return stream;
+    return stream_ptr;
 }
 
 void Http2Connection::detach_stream(Http2Stream &stream) noexcept {
@@ -990,7 +995,7 @@ void Http2Connection::detach_stream(Http2Stream &stream) noexcept {
         return;
     }
 
-    (void)streams_.erase(stream.stream_id_);
+    Http2Stream::Lease held = streams_.erase(stream.stream_id_);
     if (is_peer_stream_id(stream.stream_id_) && peer_active_stream_count_ != 0) {
         --peer_active_stream_count_;
     }
@@ -1012,7 +1017,6 @@ void Http2Connection::try_release_stream(Http2Stream &stream) noexcept {
         return;
     }
     detach_stream(stream);
-    stream.release();
 }
 
 bool Http2Connection::can_accept_peer_stream(std::uint32_t stream_id) const noexcept {

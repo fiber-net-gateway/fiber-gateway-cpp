@@ -7,15 +7,14 @@
 
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
+#include "Http2Stream.h"
 
 namespace fiber::http {
-
-class Http2Stream;
 
 class Http2StreamTable : public common::NonCopyable, public common::NonMovable {
 public:
     Http2StreamTable() noexcept = default;
-    ~Http2StreamTable() = default;
+    ~Http2StreamTable();
 
     [[nodiscard]] bool init(std::size_t max_active_streams) noexcept;
     void clear() noexcept;
@@ -23,8 +22,8 @@ public:
     [[nodiscard]] Http2Stream *find(std::uint32_t stream_id) noexcept;
     [[nodiscard]] const Http2Stream *find(std::uint32_t stream_id) const noexcept;
 
-    [[nodiscard]] bool insert(Http2Stream &stream) noexcept;
-    [[nodiscard]] Http2Stream *erase(std::uint32_t stream_id) noexcept;
+    [[nodiscard]] bool insert(Http2Stream::Lease &&stream) noexcept;
+    [[nodiscard]] Http2Stream::Lease erase(std::uint32_t stream_id) noexcept;
 
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
     [[nodiscard]] std::size_t bucket_count() const noexcept { return bucket_count_; }
