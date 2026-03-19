@@ -7,7 +7,6 @@
 #include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
 #include "../common/mem/IoBuf.h"
-#include "Http2Pending.h"
 #include "Http2Protocol.h"
 
 namespace fiber::http {
@@ -51,10 +50,22 @@ public:
             stream->release();
         }
 
+        [[nodiscard]] Http2Stream *release_raw() noexcept {
+            Http2Stream *stream = stream_;
+            stream_ = nullptr;
+            return stream;
+        }
+
         [[nodiscard]] Http2Stream *get() const noexcept { return stream_; }
         [[nodiscard]] Http2Stream &operator*() const noexcept { return *stream_; }
         [[nodiscard]] Http2Stream *operator->() const noexcept { return stream_; }
         [[nodiscard]] explicit operator bool() const noexcept { return stream_ != nullptr; }
+
+        [[nodiscard]] static Lease adopt(Http2Stream *stream) noexcept {
+            Lease lease;
+            lease.stream_ = stream;
+            return lease;
+        }
 
     private:
         Http2Stream *stream_ = nullptr;
@@ -65,62 +76,28 @@ public:
     Http2Stream(Http2Stream &&) = delete;
     Http2Stream &operator=(Http2Stream &&) = delete;
 
-    enum class State : std::uint8_t {
-        Idle,
-        ReservedLocal,
-        ReservedRemote,
-        Open,
-        HalfClosedLocal,
-        HalfClosedRemote,
-        Closed,
-    };
-
-    enum class StreamOp : std::uint8_t {
-        RecvHeaders = 0,
-        RecvHeadersEndStream,
-        RecvData,
-        RecvDataEndStream,
-        SendHeaders,
-        SendHeadersEndStream,
-        SendData,
-        SendDataEndStream,
-    };
-
-    explicit Http2Stream(std::uint32_t stream_id) noexcept : stream_id_(stream_id) {}
-
-    enum class ScheduleResult : std::uint8_t {
-        NoPending,
-        BlockedByStreamWindow,
-        BlockedByConnWindow,
-        Scheduled,
-    };
+    [[nodiscard]] static Lease alloc(std::uint32_t stream_id) noexcept;
 
     [[nodiscard]] std::uint32_t stream_id() const noexcept { return stream_id_; }
-    [[nodiscard]] State state() const noexcept { return state_; }
-    void set_state(State state) noexcept { state_ = state; }
     [[nodiscard]] std::int32_t send_window() const noexcept { return send_window_; }
     [[nodiscard]] bool attached_to_connection() const noexcept { return attached_to_connection_; }
     [[nodiscard]] common::IoErr close_reason() const noexcept { return close_reason_; }
+    [[nodiscard]] bool remote_end_headers() const noexcept { return remote_end_headers_; }
+    [[nodiscard]] bool remote_end_stream() const noexcept { return remote_end_stream_; }
+    [[nodiscard]] bool remote_rst() const noexcept { return remote_rst_; }
+    [[nodiscard]] bool local_headers_sent() const noexcept { return local_headers_sent_; }
+    [[nodiscard]] bool local_end_stream() const noexcept { return local_end_stream_; }
+    [[nodiscard]] bool local_rst() const noexcept { return local_rst_; }
     [[nodiscard]] Lease lease() noexcept { return Lease(this); }
 
     [[nodiscard]] bool active() const noexcept { return active_; }
     void set_active(bool active) noexcept { active_ = active; }
 
-    common::IoErr enqueue_pending(Http2PendingKind kind, Http2SendPayload &&payload, std::uint8_t first_frame_flags = 0,
-                                  std::uint8_t last_frame_flags = 0, Http2PendingEntry::ChangeFn on_change = nullptr,
-                                  void *user_ctx = nullptr) noexcept;
-    [[nodiscard]] bool has_pending() const noexcept { return pending_head_ != nullptr; }
-    [[nodiscard]] Http2PendingKind pending_kind() const noexcept;
-    [[nodiscard]] bool blocked_by_stream_window() const noexcept;
-    [[nodiscard]] bool blocked_by_conn_window() const noexcept;
-    [[nodiscard]] ScheduleResult schedule_pending() noexcept;
-    common::IoErr on_header_recv(const mem::IoBuf &payload, std::size_t block_offset, std::size_t length,
-                                 bool end_headers, bool end_stream) noexcept;
-    common::IoErr on_data_recv(const mem::IoBuf &payload, std::size_t data_offset, std::size_t length,
-                               bool end_stream) noexcept;
-    void on_remote_rst(Http2ErrorCode code, common::IoErr result = common::IoErr::Canceled) noexcept;
-    common::IoErr send_header(Http2SendPayload &&payload, bool end_stream) noexcept;
-    common::IoErr send_data(Http2SendPayload &&payload, bool end_stream) noexcept;
+    common::IoErr on_headers_payload_recv(const mem::IoBuf &payload, std::size_t offset, std::size_t length,
+                                          bool end_headers, bool end_stream) noexcept;
+    common::IoErr on_data_payload_recv(const mem::IoBuf &payload, std::size_t offset, std::size_t length,
+                                       bool end_stream) noexcept;
+    void on_rst_recv(Http2ErrorCode code, common::IoErr result = common::IoErr::Canceled) noexcept;
     common::IoErr close_rst(Http2ErrorCode code, common::IoErr result = common::IoErr::Canceled) noexcept;
     // Peer SETTINGS_INITIAL_WINDOW_SIZE can shrink after we have already
     // reserved/sent DATA on this stream, so the per-stream send window is
@@ -129,43 +106,25 @@ public:
     void close(common::IoErr result = common::IoErr::Canceled) noexcept;
 
 private:
-    common::IoErr transition_on_recv_headers(bool end_stream) noexcept;
-    common::IoErr transition_on_recv_data(bool end_stream) noexcept;
-    common::IoErr transition_on_send_headers(bool end_stream) noexcept;
-    common::IoErr transition_on_send_data(bool end_stream) noexcept;
-    [[nodiscard]] static bool is_valid_transition(State state, StreamOp op) noexcept;
-    void transition_on_remote_end_stream() noexcept;
-    void transition_on_local_end_stream() noexcept;
-    void append_active_pending(Http2PendingEntry &entry) noexcept;
-    void remove_active_pending(Http2PendingEntry &entry) noexcept;
-    void pop_pending_head() noexcept;
-    void drain_pending(common::IoErr result) noexcept;
-    void maybe_finish_pending(Http2PendingEntry &entry) noexcept;
-    void finish_pending(Http2PendingEntry &entry, common::IoErr result) noexcept;
-    void sync_conn_window_wait_membership() noexcept;
-    void remove_from_conn_window_wait_list() noexcept;
-    void try_schedule_pending() noexcept;
+    explicit Http2Stream(std::uint32_t stream_id) noexcept : stream_id_(stream_id) {}
     [[nodiscard]] bool ready_for_connection_release() const noexcept;
     [[nodiscard]] bool ready_for_destruction() const noexcept;
     void retain() noexcept;
     void release() noexcept;
-    static void handle_send_done(void *user_data, std::size_t total_bytes, std::size_t written_bytes,
-                                 std::size_t frame_header_size, std::size_t logical_bytes,
-                                 common::IoErr result) noexcept;
 
     std::uint32_t stream_id_ = 0;
-    State state_ = State::Idle;
+    bool remote_end_headers_ = false;
+    bool remote_end_stream_ = false;
+    bool remote_rst_ = false;
+    bool local_headers_sent_ = false;
+    bool local_end_stream_ = false;
+    bool local_rst_ = false;
     bool active_ = false;
     Http2Connection *conn_ = nullptr;
     // RFC 7540 allows the stream-level send window to become negative after a
     // smaller SETTINGS_INITIAL_WINDOW_SIZE is applied to in-flight streams.
     std::int32_t send_window_ = 65535;
-    common::IntrusiveListHook conn_wait_hook_{};
     common::IntrusiveListHook owned_hook_{};
-    Http2PendingEntry *pending_head_ = nullptr;
-    Http2PendingEntry *pending_tail_ = nullptr;
-    Http2PendingEntry *active_pending_head_ = nullptr;
-    bool closing_pending_ = false;
     std::uint32_t ref_count_ = 1;
     bool attached_to_connection_ = false;
     common::IoErr close_reason_ = common::IoErr::None;

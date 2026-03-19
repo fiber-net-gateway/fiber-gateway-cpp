@@ -45,16 +45,21 @@ TEST(Http2StreamTableTest, InsertsFindsAndRejectsDuplicateStreamIds) {
     fiber::http::Http2StreamTable table;
     ASSERT_TRUE(table.init(4));
 
-    fiber::http::Http2Stream stream1(1);
-    fiber::http::Http2Stream stream3(3);
-    fiber::http::Http2Stream duplicate1(1);
+    fiber::http::Http2Stream::Lease stream1 = fiber::http::Http2Stream::alloc(1);
+    fiber::http::Http2Stream::Lease stream3 = fiber::http::Http2Stream::alloc(3);
+    fiber::http::Http2Stream::Lease duplicate1 = fiber::http::Http2Stream::alloc(1);
+    ASSERT_TRUE(stream1);
+    ASSERT_TRUE(stream3);
+    ASSERT_TRUE(duplicate1);
+    fiber::http::Http2Stream *stream1_ptr = stream1.get();
+    fiber::http::Http2Stream *stream3_ptr = stream3.get();
 
-    EXPECT_TRUE(table.insert(stream1));
-    EXPECT_TRUE(table.insert(stream3));
-    EXPECT_FALSE(table.insert(duplicate1));
+    EXPECT_TRUE(table.insert(std::move(stream1)));
+    EXPECT_TRUE(table.insert(std::move(stream3)));
+    EXPECT_FALSE(table.insert(std::move(duplicate1)));
     EXPECT_EQ(table.size(), 2u);
-    EXPECT_EQ(table.find(1), &stream1);
-    EXPECT_EQ(table.find(3), &stream3);
+    EXPECT_EQ(table.find(1), stream1_ptr);
+    EXPECT_EQ(table.find(3), stream3_ptr);
     EXPECT_EQ(table.find(5), nullptr);
 }
 
@@ -62,13 +67,16 @@ TEST(Http2StreamTableTest, RejectsInsertPastConfiguredMaxActiveStreams) {
     fiber::http::Http2StreamTable table;
     ASSERT_TRUE(table.init(2));
 
-    fiber::http::Http2Stream stream1(1);
-    fiber::http::Http2Stream stream3(3);
-    fiber::http::Http2Stream stream5(5);
+    fiber::http::Http2Stream::Lease stream1 = fiber::http::Http2Stream::alloc(1);
+    fiber::http::Http2Stream::Lease stream3 = fiber::http::Http2Stream::alloc(3);
+    fiber::http::Http2Stream::Lease stream5 = fiber::http::Http2Stream::alloc(5);
+    ASSERT_TRUE(stream1);
+    ASSERT_TRUE(stream3);
+    ASSERT_TRUE(stream5);
 
-    EXPECT_TRUE(table.insert(stream1));
-    EXPECT_TRUE(table.insert(stream3));
-    EXPECT_FALSE(table.insert(stream5));
+    EXPECT_TRUE(table.insert(std::move(stream1)));
+    EXPECT_TRUE(table.insert(std::move(stream3)));
+    EXPECT_FALSE(table.insert(std::move(stream5)));
     EXPECT_EQ(table.size(), 2u);
 }
 
@@ -77,19 +85,27 @@ TEST(Http2StreamTableTest, EraseKeepsLaterCollisionsReachable) {
     ASSERT_TRUE(table.init(4));
 
     auto ids = find_colliding_stream_ids(table.bucket_count());
-    fiber::http::Http2Stream stream_a(ids[0]);
-    fiber::http::Http2Stream stream_b(ids[1]);
-    fiber::http::Http2Stream stream_c(ids[2]);
+    fiber::http::Http2Stream::Lease stream_a = fiber::http::Http2Stream::alloc(ids[0]);
+    fiber::http::Http2Stream::Lease stream_b = fiber::http::Http2Stream::alloc(ids[1]);
+    fiber::http::Http2Stream::Lease stream_c = fiber::http::Http2Stream::alloc(ids[2]);
+    ASSERT_TRUE(stream_a);
+    ASSERT_TRUE(stream_b);
+    ASSERT_TRUE(stream_c);
+    fiber::http::Http2Stream *stream_a_ptr = stream_a.get();
+    fiber::http::Http2Stream *stream_b_ptr = stream_b.get();
+    fiber::http::Http2Stream *stream_c_ptr = stream_c.get();
 
-    ASSERT_TRUE(table.insert(stream_a));
-    ASSERT_TRUE(table.insert(stream_b));
-    ASSERT_TRUE(table.insert(stream_c));
+    ASSERT_TRUE(table.insert(std::move(stream_a)));
+    ASSERT_TRUE(table.insert(std::move(stream_b)));
+    ASSERT_TRUE(table.insert(std::move(stream_c)));
 
-    EXPECT_EQ(table.erase(stream_a.stream_id()), &stream_a);
-    EXPECT_EQ(table.find(stream_b.stream_id()), &stream_b);
-    EXPECT_EQ(table.find(stream_c.stream_id()), &stream_c);
+    fiber::http::Http2Stream::Lease erased_a = table.erase(stream_a_ptr->stream_id());
+    EXPECT_EQ(erased_a.get(), stream_a_ptr);
+    EXPECT_EQ(table.find(stream_b_ptr->stream_id()), stream_b_ptr);
+    EXPECT_EQ(table.find(stream_c_ptr->stream_id()), stream_c_ptr);
 
-    EXPECT_EQ(table.erase(stream_b.stream_id()), &stream_b);
-    EXPECT_EQ(table.find(stream_c.stream_id()), &stream_c);
+    fiber::http::Http2Stream::Lease erased_b = table.erase(stream_b_ptr->stream_id());
+    EXPECT_EQ(erased_b.get(), stream_b_ptr);
+    EXPECT_EQ(table.find(stream_c_ptr->stream_id()), stream_c_ptr);
     EXPECT_EQ(table.size(), 1u);
 }
