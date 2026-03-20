@@ -18,8 +18,10 @@
 #include "../common/NonMovable.h"
 #include "../common/mem/IoBuf.h"
 #include "Http2Protocol.h"
+#include "Http2HpackDynamicTable.h"
 #include "Http2SendingEntryQueue.h"
 #include "Http2Stream.h"
+#include "Http2StreamFactory.h"
 #include "Http2StreamTable.h"
 #include "HttpTransport.h"
 
@@ -66,8 +68,8 @@ public:
 
     virtual ~Http2Connection();
 
-    Http2Connection(std::unique_ptr<HttpTransport> transport);
-    Http2Connection(std::unique_ptr<HttpTransport> transport, Options options);
+    Http2Connection(std::unique_ptr<HttpTransport> transport, Options options,
+                    void *stream_factory_ctx, const Http2StreamFactoryOps &stream_factory_ops);
 
     fiber::async::Task<RunResult> run() noexcept;
     Http2Stream *create_local_stream(std::uint32_t stream_id) noexcept;
@@ -98,6 +100,8 @@ protected:
     [[nodiscard]] bool peer_enable_push() const noexcept { return peer_enable_push_; }
     [[nodiscard]] bool has_stream(std::uint32_t stream_id) const noexcept { return streams_.find(stream_id) != nullptr; }
     [[nodiscard]] bool send_loop_exited() const noexcept { return !send_loop_running_; }
+    [[nodiscard]] Http2HpackDynamicTable &dynamic_table() noexcept { return dynamic_table_; }
+    [[nodiscard]] const Http2HpackDynamicTable &dynamic_table() const noexcept { return dynamic_table_; }
     fiber::async::Task<void> stop_and_join_send_loop(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
 private:
@@ -171,10 +175,15 @@ private:
     void notify_send_done(SendEntry *entry) noexcept;
     void close_all_streams(common::IoErr result) noexcept;
     void clear_inbound_stream() noexcept;
+    [[nodiscard]] Http2Stream::Lease alloc_local_stream(std::uint32_t stream_id) noexcept;
+    [[nodiscard]] Http2Stream::Lease alloc_peer_stream(std::uint32_t stream_id) noexcept;
 
     std::unique_ptr<HttpTransport> transport_;
     Options options_;
+    void *stream_factory_ctx_ = nullptr;
+    const Http2StreamFactoryOps stream_factory_ops_{};
     Http2StreamTable streams_;
+    Http2HpackDynamicTable dynamic_table_;
     std::uint32_t peer_advertised_max_concurrent_streams_ = 100;
     std::uint32_t last_peer_stream_id_ = 0;
     std::uint32_t last_local_stream_id_ = 0;

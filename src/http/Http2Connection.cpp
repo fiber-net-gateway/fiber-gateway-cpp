@@ -114,19 +114,23 @@ common::IoErr prepare_read_buffer(mem::IoBuf &read_buf, std::size_t capacity) no
 
 } // namespace
 
-Http2Connection::Http2Connection(std::unique_ptr<HttpTransport> transport) :
-    Http2Connection(std::move(transport), Options{}) {}
-
-Http2Connection::Http2Connection(std::unique_ptr<HttpTransport> transport, Options options) :
+Http2Connection::Http2Connection(std::unique_ptr<HttpTransport> transport, Options options,
+                                 void *stream_factory_ctx, const Http2StreamFactoryOps &stream_factory_ops) :
     transport_(std::move(transport)),
     options_(std::move(options)),
+    stream_factory_ctx_(stream_factory_ctx),
+    stream_factory_ops_(stream_factory_ops),
     send_queue_(options_.max_free_send_entries) {
+    FIBER_ASSERT(stream_factory_ctx_ != nullptr);
+    FIBER_ASSERT(stream_factory_ops_.create_local_stream != nullptr);
+    FIBER_ASSERT(stream_factory_ops_.create_peer_stream != nullptr);
     peer_advertised_max_concurrent_streams_ = options_.max_peer_concurrent_streams;
     conn_send_window_ = options_.initial_connection_send_window;
     peer_initial_stream_send_window_ = options_.initial_stream_send_window;
     peer_header_table_size_ = kDefaultHeaderTableSize;
     peer_max_outbound_frame_size_ = options_.max_frame_size;
     FIBER_ASSERT(streams_.init(configured_max_active_streams()));
+    FIBER_ASSERT(dynamic_table_.init(peer_header_table_size_));
 }
 
 Http2Connection::~Http2Connection() {
@@ -981,7 +985,7 @@ Http2Stream *Http2Connection::create_peer_stream(std::uint32_t stream_id) noexce
     }
 
     bool track_stream_lifetime = streams_.size() == 0;
-    Http2Stream::Lease stream = Http2Stream::alloc(stream_id);
+    Http2Stream::Lease stream = alloc_peer_stream(stream_id);
     if (!stream) {
         return nullptr;
     }
@@ -1012,7 +1016,7 @@ Http2Stream *Http2Connection::create_local_stream(std::uint32_t stream_id) noexc
     }
 
     bool track_stream_lifetime = streams_.size() == 0;
-    Http2Stream::Lease stream = Http2Stream::alloc(stream_id);
+    Http2Stream::Lease stream = alloc_local_stream(stream_id);
     if (!stream) {
         return nullptr;
     }
@@ -1377,6 +1381,14 @@ void Http2Connection::clear_inbound_stream() noexcept {
     inbound_stream_.header_block_open = false;
     inbound_stream_.trailer_block = false;
     inbound_stream_.end_stream_pending = false;
+}
+
+Http2Stream::Lease Http2Connection::alloc_local_stream(std::uint32_t stream_id) noexcept {
+    return stream_factory_ops_.create_local_stream(stream_factory_ctx_, stream_id, *this);
+}
+
+Http2Stream::Lease Http2Connection::alloc_peer_stream(std::uint32_t stream_id) noexcept {
+    return stream_factory_ops_.create_peer_stream(stream_factory_ctx_, stream_id, *this);
 }
 
 void Http2Connection::close_all_streams(common::IoErr result) noexcept {
