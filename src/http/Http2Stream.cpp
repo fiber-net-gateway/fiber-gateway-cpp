@@ -5,14 +5,15 @@
 
 namespace fiber::http {
 
-Http2Stream::Lease Http2Stream::alloc(std::uint32_t stream_id) noexcept {
-    Http2Stream *stream = new (std::nothrow) Http2Stream(stream_id);
-    return Lease::adopt(stream);
+Http2Stream::Http2Stream(std::uint32_t stream_id, void *owner, DestroyOwnerFn destroy_owner) noexcept :
+    stream_id_(stream_id), owner_(owner), destroy_owner_(destroy_owner) {
+    FIBER_ASSERT(owner_ != nullptr);
+    FIBER_ASSERT(destroy_owner_ != nullptr);
 }
 
 common::IoErr Http2Stream::on_headers_payload_recv(const mem::IoBuf &payload, std::size_t offset, std::size_t length,
-                                                   bool end_headers, bool end_stream) noexcept {
-    if (remote_rst_ || local_rst_ || (remote_end_stream_ && remote_end_headers_)) {
+                                                   bool end_headers, bool end_stream, bool trailer_block) noexcept {
+    if (remote_rst_ || local_rst_ || remote_end_stream_ || (remote_trailer_ && !trailer_block)) {
         return common::IoErr::Invalid;
     }
     if (offset > length) {
@@ -25,6 +26,9 @@ common::IoErr Http2Stream::on_headers_payload_recv(const mem::IoBuf &payload, st
     (void)payload;
     // TODO: decode/process received header block fragments.
 
+    if (trailer_block) {
+        remote_trailer_ = true;
+    }
     if (end_headers && !remote_end_headers_) {
         remote_end_headers_ = true;
     }
@@ -36,7 +40,7 @@ common::IoErr Http2Stream::on_headers_payload_recv(const mem::IoBuf &payload, st
 
 common::IoErr Http2Stream::on_data_payload_recv(const mem::IoBuf &payload, std::size_t offset, std::size_t length,
                                                 bool end_stream) noexcept {
-    if (remote_rst_ || local_rst_ || remote_end_stream_ || !remote_end_headers_) {
+    if (remote_rst_ || local_rst_ || remote_end_stream_ || remote_trailer_ || !remote_end_headers_) {
         return common::IoErr::Invalid;
     }
     if (offset > length) {
@@ -100,7 +104,13 @@ void Http2Stream::release() noexcept {
     FIBER_ASSERT(ref_count_ != 0);
     --ref_count_;
     if (ready_for_destruction()) {
-        delete this;
+        void *owner = owner_;
+        DestroyOwnerFn destroy_owner = destroy_owner_;
+        owner_ = nullptr;
+        destroy_owner_ = nullptr;
+        FIBER_ASSERT(owner != nullptr);
+        FIBER_ASSERT(destroy_owner != nullptr);
+        destroy_owner(owner);
     }
 }
 
