@@ -4,8 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "http/Http2Stream.h"
 #include "http/Http2StreamTable.h"
+#include "Http2TestSupport.h"
 
 namespace {
 
@@ -45,9 +45,9 @@ TEST(Http2StreamTableTest, InsertsFindsAndRejectsDuplicateStreamIds) {
     fiber::http::Http2StreamTable table;
     ASSERT_TRUE(table.init(4));
 
-    fiber::http::Http2Stream::Lease stream1 = fiber::http::Http2Stream::alloc(1);
-    fiber::http::Http2Stream::Lease stream3 = fiber::http::Http2Stream::alloc(3);
-    fiber::http::Http2Stream::Lease duplicate1 = fiber::http::Http2Stream::alloc(1);
+    fiber::http::Http2Stream::Lease stream1 = TestHttp2StreamOwner::create(1);
+    fiber::http::Http2Stream::Lease stream3 = TestHttp2StreamOwner::create(3);
+    fiber::http::Http2Stream::Lease duplicate1 = TestHttp2StreamOwner::create(1);
     ASSERT_TRUE(stream1);
     ASSERT_TRUE(stream3);
     ASSERT_TRUE(duplicate1);
@@ -67,9 +67,9 @@ TEST(Http2StreamTableTest, RejectsInsertPastConfiguredMaxActiveStreams) {
     fiber::http::Http2StreamTable table;
     ASSERT_TRUE(table.init(2));
 
-    fiber::http::Http2Stream::Lease stream1 = fiber::http::Http2Stream::alloc(1);
-    fiber::http::Http2Stream::Lease stream3 = fiber::http::Http2Stream::alloc(3);
-    fiber::http::Http2Stream::Lease stream5 = fiber::http::Http2Stream::alloc(5);
+    fiber::http::Http2Stream::Lease stream1 = TestHttp2StreamOwner::create(1);
+    fiber::http::Http2Stream::Lease stream3 = TestHttp2StreamOwner::create(3);
+    fiber::http::Http2Stream::Lease stream5 = TestHttp2StreamOwner::create(5);
     ASSERT_TRUE(stream1);
     ASSERT_TRUE(stream3);
     ASSERT_TRUE(stream5);
@@ -85,9 +85,9 @@ TEST(Http2StreamTableTest, EraseKeepsLaterCollisionsReachable) {
     ASSERT_TRUE(table.init(4));
 
     auto ids = find_colliding_stream_ids(table.bucket_count());
-    fiber::http::Http2Stream::Lease stream_a = fiber::http::Http2Stream::alloc(ids[0]);
-    fiber::http::Http2Stream::Lease stream_b = fiber::http::Http2Stream::alloc(ids[1]);
-    fiber::http::Http2Stream::Lease stream_c = fiber::http::Http2Stream::alloc(ids[2]);
+    fiber::http::Http2Stream::Lease stream_a = TestHttp2StreamOwner::create(ids[0]);
+    fiber::http::Http2Stream::Lease stream_b = TestHttp2StreamOwner::create(ids[1]);
+    fiber::http::Http2Stream::Lease stream_c = TestHttp2StreamOwner::create(ids[2]);
     ASSERT_TRUE(stream_a);
     ASSERT_TRUE(stream_b);
     ASSERT_TRUE(stream_c);

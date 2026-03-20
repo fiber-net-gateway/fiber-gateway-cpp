@@ -18,8 +18,10 @@
 #include "../common/NonMovable.h"
 #include "../common/mem/IoBuf.h"
 #include "Http2Protocol.h"
+#include "Http2HpackDynamicTable.h"
 #include "Http2SendingEntryQueue.h"
 #include "Http2Stream.h"
+#include "Http2StreamFactory.h"
 #include "Http2StreamTable.h"
 #include "HttpTransport.h"
 
@@ -66,8 +68,8 @@ public:
 
     virtual ~Http2Connection();
 
-    Http2Connection(std::unique_ptr<HttpTransport> transport);
-    Http2Connection(std::unique_ptr<HttpTransport> transport, Options options);
+    Http2Connection(std::unique_ptr<HttpTransport> transport, Options options,
+                    void *stream_factory_ctx, const Http2StreamFactoryOps &stream_factory_ops);
 
     fiber::async::Task<RunResult> run() noexcept;
     Http2Stream *create_local_stream(std::uint32_t stream_id) noexcept;
@@ -98,9 +100,21 @@ protected:
     [[nodiscard]] bool peer_enable_push() const noexcept { return peer_enable_push_; }
     [[nodiscard]] bool has_stream(std::uint32_t stream_id) const noexcept { return streams_.find(stream_id) != nullptr; }
     [[nodiscard]] bool send_loop_exited() const noexcept { return !send_loop_running_; }
+    [[nodiscard]] Http2HpackDynamicTable &dynamic_table() noexcept { return dynamic_table_; }
+    [[nodiscard]] const Http2HpackDynamicTable &dynamic_table() const noexcept { return dynamic_table_; }
     fiber::async::Task<void> stop_and_join_send_loop(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
 private:
+    struct InboundStream {
+        Http2Stream::Lease lease{};
+        std::uint32_t stream_id = 0;
+        std::size_t payload_begin = 0;
+        std::size_t payload_end = 0;
+        bool header_block_open = false;
+        bool trailer_block = false;
+        bool end_stream_pending = false;
+    };
+
     common::IoErr consume_incoming_frame_payload(const FrameHeader &fhr, const mem::IoBuf &buf, std::size_t offset,
                                                  std::size_t length) noexcept;
     common::IoErr handle_data_payload(const FrameHeader &fhr, const mem::IoBuf &buf, std::size_t offset,
@@ -160,10 +174,16 @@ private:
     void drain_send_queue(common::IoErr result) noexcept;
     void notify_send_done(SendEntry *entry) noexcept;
     void close_all_streams(common::IoErr result) noexcept;
+    void clear_inbound_stream() noexcept;
+    [[nodiscard]] Http2Stream::Lease alloc_local_stream(std::uint32_t stream_id) noexcept;
+    [[nodiscard]] Http2Stream::Lease alloc_peer_stream(std::uint32_t stream_id) noexcept;
 
     std::unique_ptr<HttpTransport> transport_;
     Options options_;
+    void *stream_factory_ctx_ = nullptr;
+    const Http2StreamFactoryOps stream_factory_ops_{};
     Http2StreamTable streams_;
+    Http2HpackDynamicTable dynamic_table_;
     std::uint32_t peer_advertised_max_concurrent_streams_ = 100;
     std::uint32_t last_peer_stream_id_ = 0;
     std::uint32_t last_local_stream_id_ = 0;
@@ -180,9 +200,7 @@ private:
     bool peer_goaway_received_ = false;
     std::uint32_t peer_last_stream_id_ = 0;
     Http2ErrorCode peer_goaway_error_code_ = Http2ErrorCode::NoError;
-    bool expecting_continuation_ = false;
-    std::uint32_t inbound_header_stream_id_ = 0;
-    std::uint8_t incoming_pad_length_ = 0;
+    InboundStream inbound_stream_{};
     std::array<std::uint8_t, 8> control_payload_scratch_{};
     std::size_t control_payload_used_ = 0;
     std::array<std::uint8_t, 6> settings_scratch_{};

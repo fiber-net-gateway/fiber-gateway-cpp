@@ -22,6 +22,7 @@
 #include "event/EventLoopGroup.h"
 #include "http/Http2Connection.h"
 #include "http/Http2Stream.h"
+#include "Http2TestSupport.h"
 
 namespace {
 
@@ -173,7 +174,8 @@ struct ObservedChunk {
 class RecordingHttp2Connection final : public fiber::http::Http2Connection {
 public:
     RecordingHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport, Options options) :
-        fiber::http::Http2Connection(std::move(transport), options) {}
+        fiber::http::Http2Connection(std::move(transport), options, &test_http2_stream_factory(),
+                                     TestHttp2StreamFactory::ops()) {}
 
     const std::vector<ObservedChunk> &chunks() const noexcept { return chunks_; }
     fiber::async::Task<void> stop_and_join() noexcept { co_await stop_and_join_send_loop(); }
@@ -413,7 +415,9 @@ class SendingHttp2Connection final : public fiber::http::Http2Connection {
 public:
     SendingHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport, FakeHttpTransport *fake_transport,
                            std::size_t expected_done, Options options = {}) :
-        fiber::http::Http2Connection(std::move(transport), options), fake_transport_(fake_transport),
+        fiber::http::Http2Connection(std::move(transport), options, &test_http2_stream_factory(),
+                                     TestHttp2StreamFactory::ops()),
+        fake_transport_(fake_transport),
         expected_done_(expected_done) {}
 
     fiber::common::IoErr submit_stable_span(std::string_view data) noexcept {
@@ -503,7 +507,9 @@ class ControlHttp2Connection final : public fiber::http::Http2Connection {
 public:
     ControlHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport, FakeHttpTransport *fake_transport,
                            Options options = {}) :
-        fiber::http::Http2Connection(std::move(transport), options), fake_transport_(fake_transport) {}
+        fiber::http::Http2Connection(std::move(transport), options, &test_http2_stream_factory(),
+                                     TestHttp2StreamFactory::ops()),
+        fake_transport_(fake_transport) {}
 
     fiber::http::Http2Stream *open_stream(std::uint32_t stream_id) noexcept { return create_local_stream(stream_id); }
     void request_graceful_close() noexcept { graceful_shutdown(); }
@@ -724,8 +730,8 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
     std::uint32_t stream1_id = 0;
     std::uint32_t stream3_id = 0;
     ControlRunOutcome outcome;
-    fiber::http::Http2Stream::Lease local_stream1 = fiber::http::Http2Stream::alloc(1);
-    fiber::http::Http2Stream::Lease local_stream3 = fiber::http::Http2Stream::alloc(3);
+    fiber::http::Http2Stream::Lease local_stream1 = TestHttp2StreamOwner::create(1);
+    fiber::http::Http2Stream::Lease local_stream3 = TestHttp2StreamOwner::create(3);
 
     if (!local_stream1 || !local_stream3) {
         outcome.result = std::unexpected(fiber::common::IoErr::NoMem);
@@ -1139,11 +1145,64 @@ TEST(Http2ConnectionTest, HeadersCreatePeerStreamAndOpenIt) {
     EXPECT_FALSE(outcome.stream2_remote_end_stream);
 }
 
+TEST(Http2ConnectionTest, HeadersWithContinuationCompleteExistingLocalStreamHeaders) {
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+
+    ControlRunOutcome outcome = execute_control_connection(
+            {make_frame(3, 0x1, 0x0, 1, "abc"), make_frame(2, 0x9, 0x4, 1, "de")},
+            [](ControlHttp2Connection &, fiber::http::Http2Stream &, fiber::http::Http2Stream &) {}, options, false,
+            true, true);
+
+    ASSERT_TRUE(outcome.result.has_value());
+    EXPECT_TRUE(outcome.stream1_registered);
+    EXPECT_TRUE(outcome.stream1_remote_end_headers);
+    EXPECT_FALSE(outcome.stream1_remote_end_stream);
+}
+
 TEST(Http2ConnectionTest, HeadersWithEndStreamCreateHalfClosedRemoteStream) {
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
 
     ControlRunOutcome outcome = execute_control_connection({make_frame(0, 0x1, 0x5, 2, "")}, {}, options, false, true, true);
+
+    ASSERT_TRUE(outcome.result.has_value());
+    EXPECT_TRUE(outcome.stream2_registered);
+    EXPECT_TRUE(outcome.stream2_remote_end_headers);
+    EXPECT_TRUE(outcome.stream2_remote_end_stream);
+}
+
+TEST(Http2ConnectionTest, HeadersWithEndStreamContinuationCloseRemoteStreamAfterBlockComplete) {
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+
+    ControlRunOutcome outcome = execute_control_connection(
+            {make_frame(3, 0x1, 0x1, 2, "abc"), make_frame(2, 0x9, 0x4, 2, "de")}, {}, options, false, true, true);
+
+    ASSERT_TRUE(outcome.result.has_value());
+    EXPECT_TRUE(outcome.stream2_registered);
+    EXPECT_TRUE(outcome.stream2_remote_end_headers);
+    EXPECT_TRUE(outcome.stream2_remote_end_stream);
+}
+
+TEST(Http2ConnectionTest, TrailerHeadersRequireEndStream) {
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+
+    ControlRunOutcome outcome = execute_control_connection(
+            {make_frame(3, 0x1, 0x4, 2, "abc"), make_frame(2, 0x1, 0x4, 2, "tr")}, {}, options);
+
+    ASSERT_FALSE(outcome.result.has_value());
+    EXPECT_EQ(outcome.result.error(), fiber::common::IoErr::Invalid);
+}
+
+TEST(Http2ConnectionTest, TrailerHeadersWithContinuationCloseRemoteStream) {
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+
+    ControlRunOutcome outcome = execute_control_connection(
+            {make_frame(3, 0x1, 0x4, 2, "abc"), make_frame(2, 0x1, 0x1, 2, "tr"), make_frame(2, 0x9, 0x4, 2, "ai")},
+            {}, options, false, true, true);
 
     ASSERT_TRUE(outcome.result.has_value());
     EXPECT_TRUE(outcome.stream2_registered);
