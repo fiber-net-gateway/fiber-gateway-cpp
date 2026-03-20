@@ -130,6 +130,7 @@ Http2Connection::Http2Connection(std::unique_ptr<HttpTransport> transport, Optio
 }
 
 Http2Connection::~Http2Connection() {
+    clear_inbound_stream();
     state_ = State::Closed;
     stop_sending_requested_ = true;
     send_queue_.close();
@@ -348,10 +349,10 @@ common::IoErr Http2Connection::on_frame_payload(const FrameHeader &, const mem::
 
 common::IoErr Http2Connection::consume_incoming_frame_payload(const FrameHeader &fhr, const mem::IoBuf &buf,
                                                               std::size_t offset, std::size_t length) noexcept {
-    if (expecting_continuation_ && fhr.type != Http2FrameType::Continuation) {
+    if (inbound_stream_.header_block_open && fhr.type != Http2FrameType::Continuation) {
         return common::IoErr::Invalid;
     }
-    if (!expecting_continuation_ && fhr.type == Http2FrameType::Continuation) {
+    if (!inbound_stream_.header_block_open && fhr.type == Http2FrameType::Continuation) {
         return common::IoErr::Invalid;
     }
 
@@ -380,29 +381,41 @@ common::IoErr Http2Connection::consume_incoming_frame_payload(const FrameHeader 
 common::IoErr Http2Connection::handle_data_payload(const FrameHeader &fhr, const mem::IoBuf &buf, std::size_t offset,
                                                    std::size_t length) noexcept {
     if (offset == 0) {
-        incoming_pad_length_ = 0;
         if (fhr.stream_id == 0) {
             return common::IoErr::Invalid;
         }
+        Http2Stream *stream = find_stream(fhr.stream_id);
+        if (!stream) {
+            return common::IoErr::Invalid;
+        }
+
+        std::uint8_t pad_length = 0;
         if ((fhr.flags & kFlagPadded) != 0) {
-            incoming_pad_length_ = buf.readable_data()[0];
-            if (fhr.length < static_cast<std::uint32_t>(1 + incoming_pad_length_)) {
+            pad_length = buf.readable_data()[0];
+            if (fhr.length < static_cast<std::uint32_t>(1 + pad_length)) {
                 return common::IoErr::Invalid;
             }
         }
+
+        inbound_stream_.lease = stream->lease();
+        inbound_stream_.stream_id = fhr.stream_id;
+        inbound_stream_.payload_begin = (fhr.flags & kFlagPadded) != 0 ? 1U : 0U;
+        inbound_stream_.payload_end = fhr.length - pad_length;
+        inbound_stream_.header_block_open = false;
+        inbound_stream_.trailer_block = false;
+        inbound_stream_.end_stream_pending = false;
     }
 
-    Http2Stream *stream = find_stream(fhr.stream_id);
-    if (!stream) {
+    Http2Stream *stream = inbound_stream_.lease.get();
+    if (!stream || inbound_stream_.stream_id != fhr.stream_id) {
         return common::IoErr::Invalid;
     }
 
-    std::size_t frame_prefix = (fhr.flags & kFlagPadded) != 0 ? 1U : 0U;
-    std::size_t logical_total = fhr.length - frame_prefix - incoming_pad_length_;
+    std::size_t logical_total = inbound_stream_.payload_end - inbound_stream_.payload_begin;
     std::size_t frame_start = offset;
     std::size_t frame_end = offset + length;
-    std::size_t data_begin = frame_prefix;
-    std::size_t data_end = frame_prefix + logical_total;
+    std::size_t data_begin = inbound_stream_.payload_begin;
+    std::size_t data_end = inbound_stream_.payload_end;
     std::size_t deliver_begin = std::max(frame_start, data_begin);
     std::size_t deliver_end = std::min(frame_end, data_end);
     std::size_t chunk_begin = deliver_begin > frame_start ? deliver_begin - frame_start : 0;
@@ -420,9 +433,14 @@ common::IoErr Http2Connection::handle_data_payload(const FrameHeader &fhr, const
                 stream->on_data_payload_recv(deliver_len != 0 ? payload : buf, data_offset, logical_total, end_stream);
         if (err != common::IoErr::None) {
             handle_stream_error(fhr.stream_id, Http2ErrorCode::StreamClosed, err);
+            clear_inbound_stream();
             return common::IoErr::None;
         }
         try_release_stream(*stream);
+    }
+
+    if (frame_end >= fhr.length) {
+        clear_inbound_stream();
     }
 
     return common::IoErr::None;
@@ -431,39 +449,61 @@ common::IoErr Http2Connection::handle_data_payload(const FrameHeader &fhr, const
 common::IoErr Http2Connection::handle_headers_payload(const FrameHeader &fhr, const mem::IoBuf &buf, std::size_t offset,
                                                       std::size_t length) noexcept {
     if (offset == 0) {
-        incoming_pad_length_ = 0;
         if (fhr.stream_id == 0) {
             return common::IoErr::Invalid;
         }
+        std::uint8_t pad_length = 0;
         if ((fhr.flags & kFlagPadded) != 0) {
-            incoming_pad_length_ = buf.readable_data()[0];
+            pad_length = buf.readable_data()[0];
         }
-        std::size_t frame_prefix = ((fhr.flags & kFlagPadded) != 0 ? 1U : 0U) + ((fhr.flags & kFlagPriority) != 0 ? 5U : 0U);
-        if (fhr.length < frame_prefix + incoming_pad_length_) {
+        std::size_t frame_prefix =
+                ((fhr.flags & kFlagPadded) != 0 ? 1U : 0U) + ((fhr.flags & kFlagPriority) != 0 ? 5U : 0U);
+        if (fhr.length < frame_prefix + pad_length) {
             return common::IoErr::Invalid;
         }
-        if (expecting_continuation_) {
-            return common::IoErr::Invalid;
-        }
-        if (is_idle_stream(fhr.stream_id)) {
-            Http2Stream *created = create_peer_stream(fhr.stream_id);
-            if (!created) {
+
+        Http2Stream *stream = find_stream(fhr.stream_id);
+        bool trailer_block = false;
+        if (!stream) {
+            if (!is_idle_stream(fhr.stream_id)) {
+                return common::IoErr::Invalid;
+            }
+            stream = create_peer_stream(fhr.stream_id);
+            if (!stream) {
+                return common::IoErr::Invalid;
+            }
+        } else {
+            if (!stream->remote_end_headers_ && !stream->remote_end_stream_ && !stream->remote_trailer_) {
+                trailer_block = false;
+            } else if (stream->remote_end_headers_ && !stream->remote_end_stream_ && !stream->remote_trailer_) {
+                trailer_block = true;
+            } else {
+                return common::IoErr::Invalid;
+            }
+            if (trailer_block && (fhr.flags & kFlagEndStream) == 0) {
                 return common::IoErr::Invalid;
             }
         }
+
+        inbound_stream_.lease = stream->lease();
+        inbound_stream_.stream_id = fhr.stream_id;
+        inbound_stream_.payload_begin = frame_prefix;
+        inbound_stream_.payload_end = fhr.length - pad_length;
+        inbound_stream_.header_block_open = (fhr.flags & kFlagEndHeaders) == 0;
+        inbound_stream_.trailer_block = trailer_block;
+        inbound_stream_.end_stream_pending = (fhr.flags & kFlagEndStream) != 0;
     }
 
-    Http2Stream *stream = find_stream(fhr.stream_id);
-    if (!stream) {
+    Http2Stream *stream = inbound_stream_.lease.get();
+    if (!stream || inbound_stream_.stream_id != fhr.stream_id) {
         return common::IoErr::Invalid;
     }
 
-    std::size_t frame_prefix = ((fhr.flags & kFlagPadded) != 0 ? 1U : 0U) + ((fhr.flags & kFlagPriority) != 0 ? 5U : 0U);
-    std::size_t logical_total = fhr.length - frame_prefix - incoming_pad_length_;
+    std::size_t logical_total = inbound_stream_.payload_end - inbound_stream_.payload_begin;
     std::size_t frame_start = offset;
     std::size_t frame_end = offset + length;
-    std::size_t fragment_begin = frame_prefix;
-    std::size_t fragment_end = frame_prefix + logical_total;
+    std::size_t fragment_begin = inbound_stream_.payload_begin;
+    std::size_t fragment_end = inbound_stream_.payload_end;
     std::size_t deliver_begin = std::max(frame_start, fragment_begin);
     std::size_t deliver_end = std::min(frame_end, fragment_end);
     std::size_t chunk_begin = deliver_begin > frame_start ? deliver_begin - frame_start : 0;
@@ -471,11 +511,7 @@ common::IoErr Http2Connection::handle_headers_payload(const FrameHeader &fhr, co
     std::size_t block_pos = std::min(std::max(frame_start, fragment_begin), fragment_end);
     std::size_t block_offset = block_pos > fragment_begin ? block_pos - fragment_begin : 0;
     bool end_headers = ((fhr.flags & kFlagEndHeaders) != 0) && (frame_end >= fhr.length);
-    bool end_stream = ((fhr.flags & kFlagEndStream) != 0) && (frame_end >= fhr.length);
-
-    if (offset == 0) {
-        inbound_header_stream_id_ = fhr.stream_id;
-    }
+    bool end_stream = end_headers && inbound_stream_.end_stream_pending;
 
     if (deliver_len != 0 || end_headers || end_stream) {
         mem::IoBuf payload = buf.retain_slice(chunk_begin, deliver_len);
@@ -484,18 +520,21 @@ common::IoErr Http2Connection::handle_headers_payload(const FrameHeader &fhr, co
         }
         common::IoErr err =
                 stream->on_headers_payload_recv(deliver_len != 0 ? payload : buf, block_offset, logical_total,
-                                                end_headers, end_stream);
+                                                end_headers, end_stream, inbound_stream_.trailer_block);
         if (err != common::IoErr::None) {
             handle_stream_error(fhr.stream_id, Http2ErrorCode::ProtocolError, err);
+            clear_inbound_stream();
             return common::IoErr::None;
         }
         try_release_stream(*stream);
     }
 
     if (frame_end >= fhr.length) {
-        expecting_continuation_ = (fhr.flags & kFlagEndHeaders) == 0;
-        if (!expecting_continuation_) {
-            inbound_header_stream_id_ = 0;
+        if (end_headers) {
+            clear_inbound_stream();
+        } else {
+            inbound_stream_.payload_begin = 0;
+            inbound_stream_.payload_end = 0;
         }
     }
 
@@ -505,12 +544,15 @@ common::IoErr Http2Connection::handle_headers_payload(const FrameHeader &fhr, co
 common::IoErr Http2Connection::handle_continuation_payload(const FrameHeader &fhr, const mem::IoBuf &buf,
                                                            std::size_t offset, std::size_t length) noexcept {
     if (offset == 0) {
-        if (!expecting_continuation_ || fhr.stream_id != inbound_header_stream_id_) {
+        if (!inbound_stream_.header_block_open || fhr.stream_id != inbound_stream_.stream_id ||
+            !inbound_stream_.lease) {
             return common::IoErr::Invalid;
         }
+        inbound_stream_.payload_begin = 0;
+        inbound_stream_.payload_end = fhr.length;
     }
 
-    Http2Stream *stream = find_stream(fhr.stream_id);
+    Http2Stream *stream = inbound_stream_.lease.get();
     if (!stream) {
         return common::IoErr::Invalid;
     }
@@ -518,24 +560,28 @@ common::IoErr Http2Connection::handle_continuation_payload(const FrameHeader &fh
     std::size_t frame_start = offset;
     std::size_t frame_end = offset + length;
     bool end_headers = ((fhr.flags & kFlagEndHeaders) != 0) && (frame_end >= fhr.length);
-    if (length != 0 || end_headers) {
+    bool end_stream = end_headers && inbound_stream_.end_stream_pending;
+    if (length != 0 || end_headers || end_stream) {
         mem::IoBuf payload = buf.retain_slice(0, length);
         if (!payload && length != 0) {
             return common::IoErr::NoMem;
         }
         common::IoErr err = stream->on_headers_payload_recv(length != 0 ? payload : buf, offset, fhr.length,
-                                                            end_headers, false);
+                                                            end_headers, end_stream, inbound_stream_.trailer_block);
         if (err != common::IoErr::None) {
             handle_stream_error(fhr.stream_id, Http2ErrorCode::ProtocolError, err);
+            clear_inbound_stream();
             return common::IoErr::None;
         }
         try_release_stream(*stream);
     }
 
     if (frame_end >= fhr.length) {
-        if ((fhr.flags & kFlagEndHeaders) != 0) {
-            expecting_continuation_ = false;
-            inbound_header_stream_id_ = 0;
+        if (end_headers) {
+            clear_inbound_stream();
+        } else {
+            inbound_stream_.payload_begin = 0;
+            inbound_stream_.payload_end = 0;
         }
     }
 
@@ -1016,6 +1062,9 @@ void Http2Connection::try_release_stream(Http2Stream &stream) noexcept {
     if (!stream.attached_to_connection_) {
         return;
     }
+    if (inbound_stream_.header_block_open && inbound_stream_.lease.get() == &stream) {
+        return;
+    }
     detach_stream(stream);
 }
 
@@ -1318,6 +1367,16 @@ void Http2Connection::notify_send_done(SendEntry *entry) noexcept {
         entry->on_done(entry->user_data, entry->total_bytes, entry->written_bytes, entry->frame_header_size,
                        entry->logical_bytes, entry->result);
     }
+}
+
+void Http2Connection::clear_inbound_stream() noexcept {
+    inbound_stream_.lease.reset();
+    inbound_stream_.stream_id = 0;
+    inbound_stream_.payload_begin = 0;
+    inbound_stream_.payload_end = 0;
+    inbound_stream_.header_block_open = false;
+    inbound_stream_.trailer_block = false;
+    inbound_stream_.end_stream_pending = false;
 }
 
 void Http2Connection::close_all_streams(common::IoErr result) noexcept {

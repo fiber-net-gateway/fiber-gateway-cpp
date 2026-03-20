@@ -1139,11 +1139,64 @@ TEST(Http2ConnectionTest, HeadersCreatePeerStreamAndOpenIt) {
     EXPECT_FALSE(outcome.stream2_remote_end_stream);
 }
 
+TEST(Http2ConnectionTest, HeadersWithContinuationCompleteExistingLocalStreamHeaders) {
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+
+    ControlRunOutcome outcome = execute_control_connection(
+            {make_frame(3, 0x1, 0x0, 1, "abc"), make_frame(2, 0x9, 0x4, 1, "de")},
+            [](ControlHttp2Connection &, fiber::http::Http2Stream &, fiber::http::Http2Stream &) {}, options, false,
+            true, true);
+
+    ASSERT_TRUE(outcome.result.has_value());
+    EXPECT_TRUE(outcome.stream1_registered);
+    EXPECT_TRUE(outcome.stream1_remote_end_headers);
+    EXPECT_FALSE(outcome.stream1_remote_end_stream);
+}
+
 TEST(Http2ConnectionTest, HeadersWithEndStreamCreateHalfClosedRemoteStream) {
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
 
     ControlRunOutcome outcome = execute_control_connection({make_frame(0, 0x1, 0x5, 2, "")}, {}, options, false, true, true);
+
+    ASSERT_TRUE(outcome.result.has_value());
+    EXPECT_TRUE(outcome.stream2_registered);
+    EXPECT_TRUE(outcome.stream2_remote_end_headers);
+    EXPECT_TRUE(outcome.stream2_remote_end_stream);
+}
+
+TEST(Http2ConnectionTest, HeadersWithEndStreamContinuationCloseRemoteStreamAfterBlockComplete) {
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+
+    ControlRunOutcome outcome = execute_control_connection(
+            {make_frame(3, 0x1, 0x1, 2, "abc"), make_frame(2, 0x9, 0x4, 2, "de")}, {}, options, false, true, true);
+
+    ASSERT_TRUE(outcome.result.has_value());
+    EXPECT_TRUE(outcome.stream2_registered);
+    EXPECT_TRUE(outcome.stream2_remote_end_headers);
+    EXPECT_TRUE(outcome.stream2_remote_end_stream);
+}
+
+TEST(Http2ConnectionTest, TrailerHeadersRequireEndStream) {
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+
+    ControlRunOutcome outcome = execute_control_connection(
+            {make_frame(3, 0x1, 0x4, 2, "abc"), make_frame(2, 0x1, 0x4, 2, "tr")}, {}, options);
+
+    ASSERT_FALSE(outcome.result.has_value());
+    EXPECT_EQ(outcome.result.error(), fiber::common::IoErr::Invalid);
+}
+
+TEST(Http2ConnectionTest, TrailerHeadersWithContinuationCloseRemoteStream) {
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+
+    ControlRunOutcome outcome = execute_control_connection(
+            {make_frame(3, 0x1, 0x4, 2, "abc"), make_frame(2, 0x1, 0x1, 2, "tr"), make_frame(2, 0x9, 0x4, 2, "ai")},
+            {}, options, false, true, true);
 
     ASSERT_TRUE(outcome.result.has_value());
     EXPECT_TRUE(outcome.stream2_registered);
