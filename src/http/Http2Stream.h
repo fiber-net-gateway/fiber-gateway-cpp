@@ -15,6 +15,8 @@ class Http2Connection;
 
 class Http2Stream {
 public:
+    using DestroyOwnerFn = void (*)(void *) noexcept;
+
     class Lease {
     public:
         Lease() noexcept = default;
@@ -61,6 +63,10 @@ public:
         [[nodiscard]] Http2Stream *operator->() const noexcept { return stream_; }
         [[nodiscard]] explicit operator bool() const noexcept { return stream_ != nullptr; }
 
+        // `adopt` transfers an existing initial reference into the lease
+        // without incrementing the stream ref-count. This is the right entry
+        // point for newly allocated self-owned streams and embedded streams
+        // whose owner has just been heap-allocated.
         [[nodiscard]] static Lease adopt(Http2Stream *stream) noexcept {
             Lease lease;
             lease.stream_ = stream;
@@ -76,9 +82,11 @@ public:
     Http2Stream(Http2Stream &&) = delete;
     Http2Stream &operator=(Http2Stream &&) = delete;
 
-    [[nodiscard]] static Lease alloc(std::uint32_t stream_id) noexcept;
+    Http2Stream(std::uint32_t stream_id, void *owner, DestroyOwnerFn destroy_owner) noexcept;
 
     [[nodiscard]] std::uint32_t stream_id() const noexcept { return stream_id_; }
+    [[nodiscard]] void *owner() noexcept { return owner_; }
+    [[nodiscard]] const void *owner() const noexcept { return owner_; }
     [[nodiscard]] std::int32_t send_window() const noexcept { return send_window_; }
     [[nodiscard]] bool attached_to_connection() const noexcept { return attached_to_connection_; }
     [[nodiscard]] common::IoErr close_reason() const noexcept { return close_reason_; }
@@ -107,7 +115,6 @@ public:
     void close(common::IoErr result = common::IoErr::Canceled) noexcept;
 
 private:
-    explicit Http2Stream(std::uint32_t stream_id) noexcept : stream_id_(stream_id) {}
     [[nodiscard]] bool ready_for_connection_release() const noexcept;
     [[nodiscard]] bool ready_for_destruction() const noexcept;
     void retain() noexcept;
@@ -127,6 +134,8 @@ private:
     // smaller SETTINGS_INITIAL_WINDOW_SIZE is applied to in-flight streams.
     std::int32_t send_window_ = 65535;
     common::IntrusiveListHook owned_hook_{};
+    void *owner_ = nullptr;
+    DestroyOwnerFn destroy_owner_ = nullptr;
     std::uint32_t ref_count_ = 1;
     bool attached_to_connection_ = false;
     common::IoErr close_reason_ = common::IoErr::None;

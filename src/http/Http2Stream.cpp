@@ -5,9 +5,10 @@
 
 namespace fiber::http {
 
-Http2Stream::Lease Http2Stream::alloc(std::uint32_t stream_id) noexcept {
-    Http2Stream *stream = new (std::nothrow) Http2Stream(stream_id);
-    return Lease::adopt(stream);
+Http2Stream::Http2Stream(std::uint32_t stream_id, void *owner, DestroyOwnerFn destroy_owner) noexcept :
+    stream_id_(stream_id), owner_(owner), destroy_owner_(destroy_owner) {
+    FIBER_ASSERT(owner_ != nullptr);
+    FIBER_ASSERT(destroy_owner_ != nullptr);
 }
 
 common::IoErr Http2Stream::on_headers_payload_recv(const mem::IoBuf &payload, std::size_t offset, std::size_t length,
@@ -103,7 +104,13 @@ void Http2Stream::release() noexcept {
     FIBER_ASSERT(ref_count_ != 0);
     --ref_count_;
     if (ready_for_destruction()) {
-        delete this;
+        void *owner = owner_;
+        DestroyOwnerFn destroy_owner = destroy_owner_;
+        owner_ = nullptr;
+        destroy_owner_ = nullptr;
+        FIBER_ASSERT(owner != nullptr);
+        FIBER_ASSERT(destroy_owner != nullptr);
+        destroy_owner(owner);
     }
 }
 
