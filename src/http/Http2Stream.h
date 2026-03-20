@@ -84,6 +84,7 @@ public:
     [[nodiscard]] common::IoErr close_reason() const noexcept { return close_reason_; }
     [[nodiscard]] bool remote_end_headers() const noexcept { return remote_end_headers_; }
     [[nodiscard]] bool remote_end_stream() const noexcept { return remote_end_stream_; }
+    [[nodiscard]] bool remote_trailer() const noexcept { return remote_trailer_; }
     [[nodiscard]] bool remote_rst() const noexcept { return remote_rst_; }
     [[nodiscard]] bool local_headers_sent() const noexcept { return local_headers_sent_; }
     [[nodiscard]] bool local_end_stream() const noexcept { return local_end_stream_; }
@@ -94,7 +95,7 @@ public:
     void set_active(bool active) noexcept { active_ = active; }
 
     common::IoErr on_headers_payload_recv(const mem::IoBuf &payload, std::size_t offset, std::size_t length,
-                                          bool end_headers, bool end_stream) noexcept;
+                                          bool end_headers, bool end_stream, bool trailer_block) noexcept;
     common::IoErr on_data_payload_recv(const mem::IoBuf &payload, std::size_t offset, std::size_t length,
                                        bool end_stream) noexcept;
     void on_rst_recv(Http2ErrorCode code, common::IoErr result = common::IoErr::Canceled) noexcept;
@@ -115,6 +116,7 @@ private:
     std::uint32_t stream_id_ = 0;
     bool remote_end_headers_ = false;
     bool remote_end_stream_ = false;
+    bool remote_trailer_ = false;
     bool remote_rst_ = false;
     bool local_headers_sent_ = false;
     bool local_end_stream_ = false;
