@@ -57,6 +57,7 @@ public:
         std::chrono::milliseconds write_timeout = std::chrono::seconds(30);
         std::chrono::milliseconds keepalive_ping_interval = std::chrono::milliseconds::zero();
         std::uint32_t max_frame_size = 16384;
+        std::uint32_t max_hpack_string_size = 64 * 1024;
         std::size_t max_free_send_entries = 64;
         std::uint32_t max_peer_concurrent_streams = 100;
         std::uint32_t local_max_concurrent_streams = 128;

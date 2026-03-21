@@ -3,6 +3,8 @@
 #include <cstring>
 #include <limits>
 
+#include "../common/Assert.h"
+
 namespace fiber::http {
 
 namespace {
@@ -11,9 +13,10 @@ constexpr std::uint32_t kStaticTableEntryCount = Http2HpackStaticTable::kEntryCo
 
 } // namespace
 
-bool Http2HpackDecoder::init(std::uint32_t max_dynamic_table_size) noexcept {
+bool Http2HpackDecoder::init(std::uint32_t max_dynamic_table_size, std::uint32_t max_string_size) noexcept {
     release();
     max_dynamic_table_size_ = max_dynamic_table_size;
+    max_string_size_ = max_string_size;
     return dynamic_table_.init(max_dynamic_table_size_);
 }
 
@@ -23,12 +26,25 @@ void Http2HpackDecoder::release() noexcept {
     name_storage_.reset();
     scratch_cap_ = 0;
     name_storage_cap_ = 0;
-    begin_block(nullptr, nullptr);
+    ctx_ = nullptr;
+    ops_ = nullptr;
+    reset_block_state();
 }
 
 void Http2HpackDecoder::begin_block(void *ctx, const Ops *ops) noexcept {
+    FIBER_ASSERT(ops != nullptr);
+    FIBER_ASSERT(ops->on_indexed_field != nullptr);
+    FIBER_ASSERT(ops->on_indexed_name != nullptr);
+    FIBER_ASSERT(ops->on_name_raw != nullptr);
+    FIBER_ASSERT(ops->on_name_huffman != nullptr);
+    FIBER_ASSERT(ops->on_value_raw != nullptr);
+    FIBER_ASSERT(ops->on_value_huffman != nullptr);
     ctx_ = ctx;
     ops_ = ops;
+    reset_block_state();
+}
+
+void Http2HpackDecoder::reset_block_state() noexcept {
     state_ = State::Ready;
     literal_mode_ = LiteralMode::WithoutIndexing;
     string_huffman_ = false;
@@ -70,10 +86,8 @@ common::IoErr Http2HpackDecoder::decode(const std::uint8_t *data, std::size_t le
                 integer_prefix_max_ = 0x7fU;
                 integer_value_ = byte & integer_prefix_max_;
                 if (integer_value_ != integer_prefix_max_) {
-                    string_length_ = integer_value_;
-                    string_received_ = 0;
-                    state_ = state_ == State::LiteralNameLenFirst ? State::LiteralNameData : State::LiteralValueData;
-                    err = handle_string_complete();
+                    err = prepare_string_accumulator(
+                        integer_value_, state_ == State::LiteralNameLenFirst ? State::LiteralNameData : State::LiteralValueData);
                 } else {
                     integer_shift_ = 0;
                     state_ = state_ == State::LiteralNameLenFirst ? State::LiteralNameLenCont : State::LiteralValueLenCont;
@@ -183,15 +197,9 @@ common::IoErr Http2HpackDecoder::parse_integer_cont(const std::uint8_t *&pos, co
                     }
                     return common::IoErr::None;
                 case State::LiteralNameLenCont:
-                    string_length_ = integer_value_;
-                    string_received_ = 0;
-                    state_ = State::LiteralNameData;
-                    return handle_string_complete();
+                    return prepare_string_accumulator(integer_value_, State::LiteralNameData);
                 case State::LiteralValueLenCont:
-                    string_length_ = integer_value_;
-                    string_received_ = 0;
-                    state_ = State::LiteralValueData;
-                    return handle_string_complete();
+                    return prepare_string_accumulator(integer_value_, State::LiteralValueData);
                 case State::TableSizeUpdateCont:
                     state_ = State::Ready;
                     return apply_table_size_update(integer_value_);
@@ -222,9 +230,6 @@ common::IoErr Http2HpackDecoder::parse_string_data(const std::uint8_t *&pos, con
 }
 
 common::IoErr Http2HpackDecoder::handle_indexed_field(std::uint32_t index) noexcept {
-    if (!ops_ || !ops_->on_indexed_field) {
-        return common::IoErr::Invalid;
-    }
     TableEntryView entry;
     if (!resolve_index(index, entry)) {
         return common::IoErr::Invalid;
@@ -233,11 +238,11 @@ common::IoErr Http2HpackDecoder::handle_indexed_field(std::uint32_t index) noexc
 }
 
 common::IoErr Http2HpackDecoder::handle_indexed_name(std::uint32_t index) noexcept {
-    if (!ops_ || !ops_->on_indexed_name) {
-        return common::IoErr::Invalid;
-    }
     TableEntryView entry;
     if (!resolve_index(index, entry)) {
+        return common::IoErr::Invalid;
+    }
+    if (entry.name.size() > max_string_size_) {
         return common::IoErr::Invalid;
     }
     if (!ensure_name_storage_capacity(entry.name.size())) {
@@ -262,22 +267,9 @@ common::IoErr Http2HpackDecoder::handle_string_complete() noexcept {
     }
 
     if (state_ == State::LiteralNameData) {
-        if (!ops_) {
-            return common::IoErr::Invalid;
-        }
         NameView out;
-        common::IoErr err = common::IoErr::Invalid;
-        if (string_huffman_) {
-            if (!ops_->on_name_huffman) {
-                return common::IoErr::Invalid;
-            }
-            err = ops_->on_name_huffman(ctx_, scratch_.get(), string_length_, out);
-        } else {
-            if (!ops_->on_name_raw) {
-                return common::IoErr::Invalid;
-            }
-            err = ops_->on_name_raw(ctx_, scratch_.get(), string_length_, out);
-        }
+        common::IoErr err = string_huffman_ ? ops_->on_name_huffman(ctx_, scratch_.get(), string_length_, out)
+                                            : ops_->on_name_raw(ctx_, scratch_.get(), string_length_, out);
         if (err != common::IoErr::None) {
             return err;
         }
@@ -290,22 +282,9 @@ common::IoErr Http2HpackDecoder::handle_string_complete() noexcept {
         return handle_literal_value_start();
     }
 
-    if (!ops_) {
-        return common::IoErr::Invalid;
-    }
     std::string_view value;
-    common::IoErr err = common::IoErr::Invalid;
-    if (string_huffman_) {
-        if (!ops_->on_value_huffman) {
-            return common::IoErr::Invalid;
-        }
-        err = ops_->on_value_huffman(ctx_, scratch_.get(), string_length_, value);
-    } else {
-        if (!ops_->on_value_raw) {
-            return common::IoErr::Invalid;
-        }
-        err = ops_->on_value_raw(ctx_, scratch_.get(), string_length_, value);
-    }
+    common::IoErr err = string_huffman_ ? ops_->on_value_huffman(ctx_, scratch_.get(), string_length_, value)
+                                        : ops_->on_value_raw(ctx_, scratch_.get(), string_length_, value);
     if (err != common::IoErr::None) {
         return err;
     }
@@ -334,6 +313,16 @@ common::IoErr Http2HpackDecoder::apply_table_size_update(std::uint32_t size) noe
     }
     dynamic_table_.set_max_size(size);
     return common::IoErr::None;
+}
+
+common::IoErr Http2HpackDecoder::prepare_string_accumulator(std::uint32_t string_length, State data_state) noexcept {
+    if (string_length > max_string_size_) {
+        return common::IoErr::Invalid;
+    }
+    string_length_ = string_length;
+    string_received_ = 0;
+    state_ = data_state;
+    return handle_string_complete();
 }
 
 bool Http2HpackDecoder::resolve_index(std::uint32_t index, TableEntryView &entry) const noexcept {
