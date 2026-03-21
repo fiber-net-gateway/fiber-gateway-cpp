@@ -96,11 +96,8 @@ public:
     [[nodiscard]] std::int32_t send_window() const noexcept { return send_window_; }
     [[nodiscard]] bool attached_to_connection() const noexcept { return attached_to_connection_; }
     [[nodiscard]] common::IoErr close_reason() const noexcept { return close_reason_; }
-    [[nodiscard]] bool remote_end_headers() const noexcept { return remote_end_headers_; }
     [[nodiscard]] bool remote_end_stream() const noexcept { return remote_end_stream_; }
-    [[nodiscard]] bool remote_trailer() const noexcept { return remote_trailer_; }
     [[nodiscard]] bool remote_rst() const noexcept { return remote_rst_; }
-    [[nodiscard]] bool local_headers_sent() const noexcept { return local_headers_sent_; }
     [[nodiscard]] bool local_end_stream() const noexcept { return local_end_stream_; }
     [[nodiscard]] bool local_rst() const noexcept { return local_rst_; }
     [[nodiscard]] Lease lease() noexcept { return Lease(this); }
@@ -108,8 +105,8 @@ public:
     [[nodiscard]] bool active() const noexcept { return active_; }
     void set_active(bool active) noexcept { active_ = active; }
 
-    common::IoErr on_headers_payload_recv(const mem::IoBuf &payload, std::size_t offset, std::size_t length,
-                                          bool end_headers, bool end_stream, bool trailer_block) noexcept;
+    common::IoErr on_headers_payload_recv(const mem::IoBuf &payload, bool block_start, bool end_headers,
+                                          bool end_stream) noexcept;
     common::IoErr on_data_payload_recv(mem::IoBuf payload, std::size_t offset, std::size_t length,
                                        bool end_stream) noexcept;
     void on_rst_recv(Http2ErrorCode code, common::IoErr result = common::IoErr::Canceled) noexcept;
@@ -127,11 +124,8 @@ private:
     void release() noexcept;
 
     std::uint32_t stream_id_ = 0;
-    bool remote_end_headers_ = false;
     bool remote_end_stream_ = false;
-    bool remote_trailer_ = false;
     bool remote_rst_ = false;
-    bool local_headers_sent_ = false;
     bool local_end_stream_ = false;
     bool local_rst_ = false;
     bool active_ = false;
@@ -145,7 +139,6 @@ private:
     std::uint32_t ref_count_ = 1;
     bool attached_to_connection_ = false;
     common::IoErr close_reason_ = common::IoErr::None;
-    bool remote_header_block_open_ = false;
 
     friend class Http2Connection;
 };

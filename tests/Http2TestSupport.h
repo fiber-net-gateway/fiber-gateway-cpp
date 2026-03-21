@@ -44,14 +44,40 @@ struct TestHttp2StreamOwner {
 
     static void destroy_owner(void *owner) noexcept { delete static_cast<TestHttp2StreamOwner *>(owner); }
     static fiber::common::IoErr on_header_block_start(void *owner, fiber::http::Http2HpackDecoder::Sink &sink) noexcept {
+        auto *self = static_cast<TestHttp2StreamOwner *>(owner);
+        if (self->reading_trailers || self->trailers_complete) {
+            return fiber::common::IoErr::Invalid;
+        }
+        if (self->headers_received) {
+            self->reading_trailers = true;
+        }
         sink.ctx = owner;
         sink.ops = &decoder_ops();
         return fiber::common::IoErr::None;
     }
-    static fiber::common::IoErr on_header_block_complete(void *, bool) noexcept {
+    static fiber::common::IoErr on_header_block_complete(void *owner, bool end_stream) noexcept {
+        auto *self = static_cast<TestHttp2StreamOwner *>(owner);
+        if (!self->headers_received) {
+            self->headers_received = true;
+            if (end_stream) {
+                self->trailers_complete = true;
+            }
+            return fiber::common::IoErr::None;
+        }
+        if (!self->reading_trailers || !end_stream) {
+            return fiber::common::IoErr::Invalid;
+        }
+        self->trailers_complete = true;
         return fiber::common::IoErr::None;
     }
-    static fiber::common::IoErr on_body(void *, fiber::mem::IoBuf &&, bool) noexcept {
+    static fiber::common::IoErr on_body(void *owner, fiber::mem::IoBuf &&, bool end_stream) noexcept {
+        auto *self = static_cast<TestHttp2StreamOwner *>(owner);
+        if (!self->headers_received || self->reading_trailers || self->trailers_complete) {
+            return fiber::common::IoErr::Invalid;
+        }
+        if (end_stream) {
+            self->trailers_complete = true;
+        }
         return fiber::common::IoErr::None;
     }
     static fiber::common::IoErr on_indexed_field(void *, fiber::http::Http2HpackDecoder::TableEntryView) noexcept {
@@ -135,6 +161,9 @@ struct TestHttp2StreamOwner {
     std::string pending_name_storage;
     std::string pending_value_storage;
     std::uint64_t pending_name_hash = 0;
+    bool headers_received = false;
+    bool reading_trailers = false;
+    bool trailers_complete = false;
 };
 
 class TestHttp2StreamFactory {

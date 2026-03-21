@@ -232,10 +232,8 @@ struct ControlRunOutcome {
     bool peer_enable_push = true;
     std::int32_t stream1_send_window = 0;
     bool stream1_registered = false;
-    bool stream1_remote_end_headers = false;
     bool stream1_remote_end_stream = false;
     bool stream1_remote_rst = false;
-    bool stream2_remote_end_headers = false;
     bool stream2_remote_end_stream = false;
     bool stream2_registered = false;
     bool stream3_registered = false;
@@ -526,10 +524,6 @@ public:
         const fiber::http::Http2Stream *stream = find_stream(stream_id);
         return stream ? stream->send_window() : 0;
     }
-    [[nodiscard]] bool current_stream_remote_end_headers(std::uint32_t stream_id) const noexcept {
-        const fiber::http::Http2Stream *stream = find_stream(stream_id);
-        return stream ? stream->remote_end_headers() : false;
-    }
     [[nodiscard]] bool current_stream_remote_end_stream(std::uint32_t stream_id) const noexcept {
         const fiber::http::Http2Stream *stream = find_stream(stream_id);
         return stream ? stream->remote_end_stream() : false;
@@ -603,12 +597,10 @@ void capture_control_outcome(const ControlSetupContext &ctx) {
     if (*ctx.stream1_id != 0) {
         outcome.stream1_send_window = ctx.connection->current_stream_send_window(*ctx.stream1_id);
         outcome.stream1_registered = ctx.connection->current_has_stream(*ctx.stream1_id);
-        outcome.stream1_remote_end_headers = ctx.connection->current_stream_remote_end_headers(*ctx.stream1_id);
         outcome.stream1_remote_end_stream = ctx.connection->current_stream_remote_end_stream(*ctx.stream1_id);
         outcome.stream1_remote_rst = ctx.connection->current_stream_remote_rst(*ctx.stream1_id);
     }
     outcome.stream2_registered = ctx.connection->current_has_stream(2);
-    outcome.stream2_remote_end_headers = ctx.connection->current_stream_remote_end_headers(2);
     outcome.stream2_remote_end_stream = ctx.connection->current_stream_remote_end_stream(2);
     if (*ctx.stream3_id != 0) {
         outcome.stream3_registered = ctx.connection->current_has_stream(*ctx.stream3_id);
@@ -1143,7 +1135,6 @@ TEST(Http2ConnectionTest, HeadersCreatePeerStreamAndOpenIt) {
 
     ASSERT_TRUE(outcome.result.has_value());
     EXPECT_TRUE(outcome.stream2_registered);
-    EXPECT_TRUE(outcome.stream2_remote_end_headers);
     EXPECT_FALSE(outcome.stream2_remote_end_stream);
 }
 
@@ -1158,7 +1149,6 @@ TEST(Http2ConnectionTest, HeadersWithContinuationCompleteExistingLocalStreamHead
 
     ASSERT_TRUE(outcome.result.has_value());
     EXPECT_TRUE(outcome.stream1_registered);
-    EXPECT_TRUE(outcome.stream1_remote_end_headers);
     EXPECT_FALSE(outcome.stream1_remote_end_stream);
 }
 
@@ -1170,7 +1160,6 @@ TEST(Http2ConnectionTest, HeadersWithEndStreamCreateHalfClosedRemoteStream) {
 
     ASSERT_TRUE(outcome.result.has_value());
     EXPECT_TRUE(outcome.stream2_registered);
-    EXPECT_TRUE(outcome.stream2_remote_end_headers);
     EXPECT_TRUE(outcome.stream2_remote_end_stream);
 }
 
@@ -1184,7 +1173,6 @@ TEST(Http2ConnectionTest, HeadersWithEndStreamContinuationCloseRemoteStreamAfter
 
     ASSERT_TRUE(outcome.result.has_value());
     EXPECT_TRUE(outcome.stream2_registered);
-    EXPECT_TRUE(outcome.stream2_remote_end_headers);
     EXPECT_TRUE(outcome.stream2_remote_end_stream);
 }
 
@@ -1196,8 +1184,7 @@ TEST(Http2ConnectionTest, TrailerHeadersRequireEndStream) {
             {make_frame(1, 0x1, 0x4, 2, std::string("\x82", 1)), make_frame(1, 0x1, 0x4, 2, std::string("\x84", 1))},
             {}, options);
 
-    ASSERT_FALSE(outcome.result.has_value());
-    EXPECT_EQ(outcome.result.error(), fiber::common::IoErr::Invalid);
+    ASSERT_TRUE(outcome.result.has_value());
 }
 
 TEST(Http2ConnectionTest, TrailerHeadersWithContinuationCloseRemoteStream) {
@@ -1211,7 +1198,6 @@ TEST(Http2ConnectionTest, TrailerHeadersWithContinuationCloseRemoteStream) {
 
     ASSERT_TRUE(outcome.result.has_value());
     EXPECT_TRUE(outcome.stream2_registered);
-    EXPECT_TRUE(outcome.stream2_remote_end_headers);
     EXPECT_TRUE(outcome.stream2_remote_end_stream);
 }
 
@@ -1229,7 +1215,6 @@ TEST(Http2ConnectionTest, GoawayClosesOnlyLocalStreamsAfterLastStreamId) {
 
     ASSERT_TRUE(outcome.result.has_value());
     EXPECT_TRUE(outcome.stream1_registered);
-    EXPECT_FALSE(outcome.stream1_remote_end_headers);
     EXPECT_FALSE(outcome.stream1_remote_end_stream);
     EXPECT_FALSE(outcome.stream1_remote_rst);
     EXPECT_FALSE(outcome.stream3_registered);

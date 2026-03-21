@@ -15,22 +15,15 @@ Http2Stream::Http2Stream(std::uint32_t stream_id, void *owner, const Ops &ops) n
     FIBER_ASSERT(ops_->on_body != nullptr);
 }
 
-common::IoErr Http2Stream::on_headers_payload_recv(const mem::IoBuf &payload, std::size_t offset, std::size_t length,
-                                                   bool end_headers, bool end_stream, bool trailer_block) noexcept {
-    if (remote_rst_ || local_rst_ || remote_end_stream_ || (remote_trailer_ && !trailer_block)) {
+common::IoErr Http2Stream::on_headers_payload_recv(const mem::IoBuf &payload, bool block_start, bool end_headers,
+                                                   bool end_stream) noexcept {
+    if (remote_rst_ || local_rst_ || remote_end_stream_) {
         return common::IoErr::Invalid;
     }
-    if (offset > length) {
+    if (!conn_) {
         return common::IoErr::Invalid;
     }
-    if (payload.readable() > length - offset) {
-        return common::IoErr::Invalid;
-    }
-
-    if (!remote_header_block_open_) {
-        if (!conn_) {
-            return common::IoErr::Invalid;
-        }
+    if (block_start) {
         Http2HpackDecoder::Sink sink;
         common::IoErr err = ops_->on_header_block_start(owner_, sink);
         if (err != common::IoErr::None) {
@@ -40,36 +33,26 @@ common::IoErr Http2Stream::on_headers_payload_recv(const mem::IoBuf &payload, st
             return common::IoErr::Invalid;
         }
         conn_->inbound_hpack_decoder().begin_block(sink.ctx, sink.ops);
-        remote_header_block_open_ = true;
     }
 
     if (payload.readable() != 0) {
         common::IoErr err = conn_->inbound_hpack_decoder().decode(payload.readable_data(), payload.readable(), end_headers);
         if (err != common::IoErr::None) {
-            remote_header_block_open_ = false;
             return err;
         }
     } else if (end_headers) {
         common::IoErr err = conn_->inbound_hpack_decoder().decode(nullptr, 0, true);
         if (err != common::IoErr::None) {
-            remote_header_block_open_ = false;
             return err;
         }
     }
-
-    if (trailer_block) {
-        remote_trailer_ = true;
-    }
-    if (end_headers && !remote_end_headers_) {
-        remote_end_headers_ = true;
-    }
     if (end_headers) {
-        remote_header_block_open_ = false;
         common::IoErr err = ops_->on_header_block_complete(owner_, end_stream);
         if (err != common::IoErr::None) {
             return err;
         }
     }
+
     if (end_stream) {
         remote_end_stream_ = true;
     }
@@ -78,7 +61,7 @@ common::IoErr Http2Stream::on_headers_payload_recv(const mem::IoBuf &payload, st
 
 common::IoErr Http2Stream::on_data_payload_recv(mem::IoBuf payload, std::size_t offset, std::size_t length,
                                                 bool end_stream) noexcept {
-    if (remote_rst_ || local_rst_ || remote_end_stream_ || remote_trailer_ || !remote_end_headers_) {
+    if (remote_rst_ || local_rst_ || remote_end_stream_) {
         return common::IoErr::Invalid;
     }
     if (offset > length) {
