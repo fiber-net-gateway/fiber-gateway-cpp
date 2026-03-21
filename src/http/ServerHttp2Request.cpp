@@ -96,6 +96,9 @@ Http2Stream::Lease ServerHttp2Request::create(std::uint32_t stream_id, Http2Conn
 
 common::IoErr ServerHttp2Request::on_header_block_start(void *owner, Http2HpackDecoder::Sink &sink) noexcept {
     auto *request = static_cast<ServerHttp2Request *>(owner);
+    if (request->reading_trailers_ || request->exchange_.request_trailers_complete_) {
+        return common::IoErr::Invalid;
+    }
     request->pending_name_ = {};
     request->pending_name_hash_ = 0;
     request->pending_name_owned_ = false;
@@ -112,17 +115,31 @@ common::IoErr ServerHttp2Request::on_header_block_complete(void *owner, bool end
     auto *request = static_cast<ServerHttp2Request *>(owner);
     if (!request->request_head_received_) {
         request->request_head_received_ = true;
-    } else {
-        request->reading_trailers_ = true;
-        request->exchange_.request_trailers_complete_ = true;
+        if (end_stream) {
+            request->exchange_.request_trailers_complete_ = true;
+        }
+        return common::IoErr::None;
     }
-    if (end_stream && !request->reading_trailers_) {
+
+    if (!request->reading_trailers_ || !end_stream) {
+        return common::IoErr::Invalid;
+    }
+
+    request->reading_trailers_ = true;
+    request->exchange_.request_trailers_complete_ = true;
+    return common::IoErr::None;
+}
+
+common::IoErr ServerHttp2Request::on_body(void *owner, mem::IoBuf &&, bool end_stream) noexcept {
+    auto *request = static_cast<ServerHttp2Request *>(owner);
+    if (!request->request_head_received_ || request->reading_trailers_ || request->exchange_.request_trailers_complete_) {
+        return common::IoErr::Invalid;
+    }
+    if (end_stream) {
         request->exchange_.request_trailers_complete_ = true;
     }
     return common::IoErr::None;
 }
-
-common::IoErr ServerHttp2Request::on_body(void *, mem::IoBuf &&, bool) noexcept { return common::IoErr::None; }
 
 void ServerHttp2Request::destroy_owner(void *owner) noexcept { delete static_cast<ServerHttp2Request *>(owner); }
 

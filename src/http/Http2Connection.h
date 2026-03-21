@@ -112,7 +112,6 @@ private:
         std::size_t payload_begin = 0;
         std::size_t payload_end = 0;
         bool header_block_open = false;
-        bool trailer_block = false;
         bool end_stream_pending = false;
     };
 
