@@ -31,6 +31,21 @@ std::vector<std::uint8_t> encode_text(std::string_view text,
     return encoded;
 }
 
+std::vector<std::uint8_t> encode_text_exact(std::string_view text,
+                                            fiber::http::Http2HuffmanLowerMode lower_mode =
+                                                fiber::http::Http2HuffmanLowerMode::None) {
+    std::vector<std::uint8_t> input = as_bytes(text);
+    const std::size_t encoded_len =
+        fiber::http::http2_huffman_encoded_length(input.data(), input.size(), lower_mode);
+    std::vector<std::uint8_t> encoded(encoded_len);
+
+    const std::size_t written =
+        fiber::http::http2_huffman_encode_exact(input.data(), input.size(), encoded.data(), lower_mode);
+    EXPECT_EQ(written, encoded.size());
+
+    return encoded;
+}
+
 std::vector<std::uint8_t> decode_bytes(const std::vector<std::uint8_t> &encoded) {
     fiber::http::Http2HuffmanDecodeState state;
     std::vector<std::uint8_t> decoded(encoded.size() * 8U);
@@ -39,6 +54,20 @@ std::vector<std::uint8_t> decode_bytes(const std::vector<std::uint8_t> &encoded)
         fiber::http::http2_huffman_decode(state, encoded.data(), encoded.size(), decoded.data(), decoded.size(), true);
     EXPECT_EQ(result.code, fiber::http::Http2HuffmanCode::Ok);
     decoded.resize(result.written);
+    return decoded;
+}
+
+std::vector<std::uint8_t> decode_bytes_exact(const std::vector<std::uint8_t> &encoded) {
+    bool ok = false;
+    const std::size_t decoded_len = fiber::http::http2_huffman_decoded_length(encoded.data(), encoded.size(), &ok);
+    EXPECT_TRUE(ok);
+    std::vector<std::uint8_t> decoded(decoded_len);
+    fiber::http::Http2HuffmanDecodeState state;
+
+    const auto result =
+        fiber::http::http2_huffman_decode_exact(state, encoded.data(), encoded.size(), decoded.data(), true);
+    EXPECT_EQ(result.code, fiber::http::Http2HuffmanCode::Ok);
+    EXPECT_EQ(result.written, decoded.size());
     return decoded;
 }
 
@@ -72,6 +101,26 @@ TEST(Http2HpackHuffmanTest, LowercaseModeMatchesLowercaseInput) {
     const std::vector<std::uint8_t> encoded_lower = encode_text(lower);
 
     EXPECT_EQ(encoded_mixed, encoded_lower);
+}
+
+TEST(Http2HpackHuffmanTest, ExactEncodeMatchesCheckedEncode) {
+    constexpr std::string_view text = "Content-Type";
+
+    const std::vector<std::uint8_t> encoded_checked =
+        encode_text(text, fiber::http::Http2HuffmanLowerMode::Ascii);
+    const std::vector<std::uint8_t> encoded_exact =
+        encode_text_exact(text, fiber::http::Http2HuffmanLowerMode::Ascii);
+
+    EXPECT_EQ(encoded_exact, encoded_checked);
+}
+
+TEST(Http2HpackHuffmanTest, ExactDecodeMatchesCheckedDecode) {
+    const std::vector<std::uint8_t> encoded = encode_text("www.example.com");
+
+    const std::vector<std::uint8_t> decoded_checked = decode_bytes(encoded);
+    const std::vector<std::uint8_t> decoded_exact = decode_bytes_exact(encoded);
+
+    EXPECT_EQ(decoded_exact, decoded_checked);
 }
 
 TEST(Http2HpackHuffmanTest, RoundTripsAllByteValues) {

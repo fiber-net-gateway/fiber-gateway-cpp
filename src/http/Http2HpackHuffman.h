@@ -56,12 +56,25 @@ struct Http2HuffmanDecodeState {
     std::size_t dst_cap,
     Http2HuffmanLowerMode lower_mode = Http2HuffmanLowerMode::None) noexcept;
 
+[[nodiscard]] std::size_t http2_huffman_encode_exact(
+    const std::uint8_t *src,
+    std::size_t len,
+    std::uint8_t *dst,
+    Http2HuffmanLowerMode lower_mode = Http2HuffmanLowerMode::None) noexcept;
+
 [[nodiscard]] Http2HuffmanDecodeResult http2_huffman_decode(
     Http2HuffmanDecodeState &state,
     const std::uint8_t *src,
     std::size_t len,
     std::uint8_t *dst,
     std::size_t dst_cap,
+    bool last) noexcept;
+
+[[nodiscard]] Http2HuffmanDecodeResult http2_huffman_decode_exact(
+    Http2HuffmanDecodeState &state,
+    const std::uint8_t *src,
+    std::size_t len,
+    std::uint8_t *dst,
     bool last) noexcept;
 
 } // namespace fiber::http

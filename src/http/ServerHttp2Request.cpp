@@ -281,7 +281,7 @@ common::IoErr ServerHttp2Request::materialize_name_huffman(const std::uint8_t *d
 
         Http2HuffmanDecodeState state;
         Http2HuffmanDecodeResult result =
-            http2_huffman_decode(state, data, len, reinterpret_cast<std::uint8_t *>(mem), decoded_len, true);
+            http2_huffman_decode_exact(state, data, len, reinterpret_cast<std::uint8_t *>(mem), true);
         if (result.code != Http2HuffmanCode::Ok || result.written != decoded_len) {
             return common::IoErr::Invalid;
         }
@@ -320,7 +320,7 @@ common::IoErr ServerHttp2Request::materialize_value_huffman(const std::uint8_t *
 
     Http2HuffmanDecodeState state;
     Http2HuffmanDecodeResult result =
-        http2_huffman_decode(state, data, len, reinterpret_cast<std::uint8_t *>(mem), decoded_len, true);
+        http2_huffman_decode_exact(state, data, len, reinterpret_cast<std::uint8_t *>(mem), true);
     if (result.code != Http2HuffmanCode::Ok || result.written != decoded_len) {
         return common::IoErr::Invalid;
     }
