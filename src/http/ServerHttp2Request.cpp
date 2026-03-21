@@ -3,6 +3,8 @@
 #include <cstring>
 #include <new>
 
+#include "../common/Assert.h"
+#include "../common/IoError.h"
 #include "Http2Connection.h"
 #include "Http2HpackHuffman.h"
 
@@ -82,12 +84,16 @@ const HeaderMap<ServerHttp2Request::PseudoHeaderHandler> &ServerHttp2Request::ps
 }
 
 ServerHttp2Request::ServerHttp2Request(std::uint32_t stream_id, Http2Connection &conn,
-                                       const HttpServerOptions &http_options) noexcept :
-    conn_(&conn), stream_(stream_id, this, stream_ops()), exchange_(http_options) {}
+                                       const HttpServerOptions &http_options,
+                                       const HttpHandler &handler) noexcept :
+    conn_(&conn), handler_(&handler), stream_(stream_id, this, stream_ops()), exchange_(http_options) {
+    FIBER_ASSERT(handler_ != nullptr);
+}
 
 Http2Stream::Lease ServerHttp2Request::create(std::uint32_t stream_id, Http2Connection &conn,
-                                              const HttpServerOptions &http_options) noexcept {
-    auto *owner = new (std::nothrow) ServerHttp2Request(stream_id, conn, http_options);
+                                              const HttpServerOptions &http_options,
+                                              const HttpHandler &handler) noexcept {
+    auto *owner = new (std::nothrow) ServerHttp2Request(stream_id, conn, http_options, handler);
     if (!owner) {
         return {};
     }
@@ -115,6 +121,13 @@ common::IoErr ServerHttp2Request::on_header_block_complete(void *owner, bool end
     auto *request = static_cast<ServerHttp2Request *>(owner);
     if (!request->request_head_received_) {
         request->request_head_received_ = true;
+        if (!request->handler_started_) {
+            request->exchange_.set_io(request);
+            request->handler_started_ = true;
+            fiber::async::spawn([request, lease = request->stream_.lease()]() mutable {
+                return run_handler_task(request, std::move(lease));
+            });
+        }
         if (end_stream) {
             request->exchange_.request_trailers_complete_ = true;
         }
@@ -142,6 +155,46 @@ common::IoErr ServerHttp2Request::on_body(void *owner, mem::IoBuf &&, bool end_s
 }
 
 void ServerHttp2Request::destroy_owner(void *owner) noexcept { delete static_cast<ServerHttp2Request *>(owner); }
+
+fiber::async::DetachedTask ServerHttp2Request::run_handler_task(ServerHttp2Request *request,
+                                                                Http2Stream::Lease lease) noexcept {
+    if (!request || !request->handler_) {
+        co_return;
+    }
+
+    co_await (*request->handler_)(request->exchange_);
+    request->handler_done_ = true;
+    request->exchange_.set_io(nullptr);
+
+    if (!request->stream_.local_rst() && !request->stream_.remote_rst() &&
+        request->stream_.close_reason() == common::IoErr::None) {
+        (void) request->stream_.close_rst(Http2ErrorCode::Cancel, common::IoErr::NotSupported);
+    }
+
+    (void) lease;
+    co_return;
+}
+
+fiber::async::Task<common::IoResult<BodyChunk>> ServerHttp2Request::read_body(HttpExchange &, std::size_t) noexcept {
+    co_return std::unexpected(common::IoErr::NotSupported);
+}
+
+fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_response_header(HttpExchange &) {
+    co_return std::unexpected(common::IoErr::NotSupported);
+}
+
+fiber::async::Task<common::IoResult<void>> ServerHttp2Request::finish_response(HttpExchange &) noexcept {
+    co_return std::unexpected(common::IoErr::NotSupported);
+}
+
+fiber::async::Task<common::IoResult<size_t>> ServerHttp2Request::write_body(HttpExchange &, BodyChunk) noexcept {
+    co_return std::unexpected(common::IoErr::NotSupported);
+}
+
+fiber::async::Task<common::IoResult<size_t>> ServerHttp2Request::write_body(HttpExchange &, const std::uint8_t *,
+                                                                            std::size_t, bool) noexcept {
+    co_return std::unexpected(common::IoErr::NotSupported);
+}
 
 common::IoErr ServerHttp2Request::on_indexed_field(void *owner, Http2HpackDecoder::TableEntryView entry) noexcept {
     auto *request = static_cast<ServerHttp2Request *>(owner);
