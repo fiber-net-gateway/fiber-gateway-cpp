@@ -43,11 +43,6 @@ private:
                                       std::string_view &out) noexcept;
     static common::IoErr on_value_huffman(void *owner, const std::uint8_t *data, std::size_t len,
                                           std::string_view &out) noexcept;
-    [[nodiscard]] common::IoErr handle_header_field(std::string_view name, std::uint64_t name_hash,
-                                                    std::string_view value) noexcept;
-    [[nodiscard]] common::IoErr handle_pseudo_header(std::string_view name, std::string_view value) noexcept;
-    [[nodiscard]] common::IoErr insert_regular_header(std::string_view name, std::uint64_t name_hash,
-                                                      std::string_view value) noexcept;
     [[nodiscard]] common::IoErr materialize_name_raw(const std::uint8_t *data, std::size_t len,
                                                      Http2HpackDecoder::NameView &out) noexcept;
     [[nodiscard]] common::IoErr materialize_name_huffman(const std::uint8_t *data, std::size_t len,
@@ -56,12 +51,8 @@ private:
                                                       std::string_view &out) noexcept;
     [[nodiscard]] common::IoErr materialize_value_huffman(const std::uint8_t *data, std::size_t len,
                                                           std::string_view &out) noexcept;
-    [[nodiscard]] common::IoErr decode_huffman_to_pool(const std::uint8_t *data, std::size_t len,
-                                                       std::string_view &out) noexcept;
     [[nodiscard]] std::string_view copy_to_pool(const std::uint8_t *data, std::size_t len) noexcept;
     [[nodiscard]] std::string_view copy_to_pool(std::string_view value) noexcept;
-    void begin_header_block() noexcept;
-    void complete_header_block(bool end_stream) noexcept;
 
     [[maybe_unused]] Http2Connection *conn_ = nullptr;
     Http2Stream stream_;

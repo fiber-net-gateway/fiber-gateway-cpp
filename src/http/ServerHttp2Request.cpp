@@ -84,7 +84,12 @@ Http2Stream::Lease ServerHttp2Request::create(std::uint32_t stream_id, Http2Conn
 
 common::IoErr ServerHttp2Request::on_header_block_start(void *owner, Http2HpackDecoder::Sink &sink) noexcept {
     auto *request = static_cast<ServerHttp2Request *>(owner);
-    request->begin_header_block();
+    request->pending_name_ = {};
+    request->pending_name_hash_ = 0;
+    request->saw_regular_header_in_block_ = false;
+    if (request->request_head_received_) {
+        request->reading_trailers_ = true;
+    }
     sink.ctx = request;
     sink.ops = &decoder_ops();
     return common::IoErr::None;
@@ -92,7 +97,15 @@ common::IoErr ServerHttp2Request::on_header_block_start(void *owner, Http2HpackD
 
 common::IoErr ServerHttp2Request::on_header_block_complete(void *owner, bool end_stream) noexcept {
     auto *request = static_cast<ServerHttp2Request *>(owner);
-    request->complete_header_block(end_stream);
+    if (!request->request_head_received_) {
+        request->request_head_received_ = true;
+    } else {
+        request->reading_trailers_ = true;
+        request->exchange_.request_trailers_complete_ = true;
+    }
+    if (end_stream && !request->reading_trailers_) {
+        request->exchange_.request_trailers_complete_ = true;
+    }
     return common::IoErr::None;
 }
 
@@ -101,7 +114,85 @@ common::IoErr ServerHttp2Request::on_body(void *, mem::IoBuf &&, bool) noexcept 
 void ServerHttp2Request::destroy_owner(void *owner) noexcept { delete static_cast<ServerHttp2Request *>(owner); }
 
 common::IoErr ServerHttp2Request::on_indexed_field(void *owner, Http2HpackDecoder::TableEntryView entry) noexcept {
-    return static_cast<ServerHttp2Request *>(owner)->handle_header_field(entry.name, entry.name_hash, entry.value);
+    auto *request = static_cast<ServerHttp2Request *>(owner);
+    if (is_pseudo_header(entry.name)) {
+        if (request->reading_trailers_ || request->saw_regular_header_in_block_) {
+            return common::IoErr::Invalid;
+        }
+
+        if (entry.name == ":method") {
+            std::string_view method = request->copy_to_pool(entry.value);
+            if (method.data() == nullptr && !method.empty()) {
+                return common::IoErr::NoMem;
+            }
+            request->exchange_.method_view_ = method;
+            request->exchange_.method_ = parse_method(method);
+            request->exchange_.version_ = HttpVersion::HTTP_2_0;
+            return common::IoErr::None;
+        }
+
+        if (entry.name == ":path") {
+            std::string_view path = request->copy_to_pool(entry.value);
+            if (path.data() == nullptr && !path.empty()) {
+                return common::IoErr::NoMem;
+            }
+            request->exchange_.uri_.unparsed_uri = path;
+            request->exchange_.uri_.path = path;
+            request->exchange_.uri_.query = {};
+            request->exchange_.uri_.exten = {};
+            for (std::size_t i = 0; i < path.size(); ++i) {
+                if (path[i] == '?') {
+                    request->exchange_.uri_.path = path.substr(0, i);
+                    request->exchange_.uri_.query = path.substr(i + 1);
+                    break;
+                }
+            }
+            std::size_t slash = request->exchange_.uri_.path.find_last_of('/');
+            std::size_t dot = request->exchange_.uri_.path.find_last_of('.');
+            if (dot != std::string_view::npos && (slash == std::string_view::npos || dot > slash + 1)) {
+                request->exchange_.uri_.exten = request->exchange_.uri_.path.substr(dot + 1);
+            }
+            request->exchange_.version_ = HttpVersion::HTTP_2_0;
+            return common::IoErr::None;
+        }
+
+        if (entry.name == ":authority") {
+            std::string_view name_copy = request->copy_to_pool("host");
+            std::string_view value_copy = request->copy_to_pool(entry.value);
+            if ((!name_copy.data()) || (!value_copy.data() && !entry.value.empty())) {
+                return common::IoErr::NoMem;
+            }
+
+            HttpHeaders &target =
+                request->reading_trailers_ ? request->exchange_.request_trailers_ : request->exchange_.request_headers_;
+            char *lowcase_name = const_cast<char *>(name_copy.data());
+            if (!target.add_view(name_copy, value_copy, lowcase_name, http_header_name_hash("host"))) {
+                return common::IoErr::NoMem;
+            }
+            return common::IoErr::None;
+        }
+
+        if (entry.name == ":scheme") {
+            request->exchange_.version_ = HttpVersion::HTTP_2_0;
+            return common::IoErr::None;
+        }
+
+        return common::IoErr::Invalid;
+    }
+
+    request->saw_regular_header_in_block_ = true;
+    std::string_view name_copy = request->copy_to_pool(entry.name);
+    std::string_view value_copy = request->copy_to_pool(entry.value);
+    if ((!name_copy.data() && !entry.name.empty()) || (!value_copy.data() && !entry.value.empty())) {
+        return common::IoErr::NoMem;
+    }
+
+    HttpHeaders &target = request->reading_trailers_ ? request->exchange_.request_trailers_ : request->exchange_.request_headers_;
+    char *lowcase_name = name_copy.empty() ? nullptr : const_cast<char *>(name_copy.data());
+    if (!target.add_view(name_copy, value_copy, lowcase_name, entry.name_hash)) {
+        return common::IoErr::NoMem;
+    }
+    return common::IoErr::None;
 }
 
 common::IoErr ServerHttp2Request::on_indexed_name(void *owner, std::string_view name,
@@ -146,10 +237,104 @@ common::IoErr ServerHttp2Request::on_value_raw(void *owner, const std::uint8_t *
     if (request->pending_name_.data() == nullptr) {
         return common::IoErr::Invalid;
     }
-    err = request->handle_header_field(request->pending_name_, request->pending_name_hash_, out);
+    if (is_pseudo_header(request->pending_name_)) {
+        if (request->reading_trailers_ || request->saw_regular_header_in_block_) {
+            request->pending_name_ = {};
+            request->pending_name_hash_ = 0;
+            return common::IoErr::Invalid;
+        }
+
+        if (request->pending_name_ == ":method") {
+            std::string_view method = request->copy_to_pool(out);
+            if (method.data() == nullptr && !method.empty()) {
+                request->pending_name_ = {};
+                request->pending_name_hash_ = 0;
+                return common::IoErr::NoMem;
+            }
+            request->exchange_.method_view_ = method;
+            request->exchange_.method_ = parse_method(method);
+            request->exchange_.version_ = HttpVersion::HTTP_2_0;
+            request->pending_name_ = {};
+            request->pending_name_hash_ = 0;
+            return common::IoErr::None;
+        }
+
+        if (request->pending_name_ == ":path") {
+            std::string_view path = request->copy_to_pool(out);
+            if (path.data() == nullptr && !path.empty()) {
+                request->pending_name_ = {};
+                request->pending_name_hash_ = 0;
+                return common::IoErr::NoMem;
+            }
+            request->exchange_.uri_.unparsed_uri = path;
+            request->exchange_.uri_.path = path;
+            request->exchange_.uri_.query = {};
+            request->exchange_.uri_.exten = {};
+            for (std::size_t i = 0; i < path.size(); ++i) {
+                if (path[i] == '?') {
+                    request->exchange_.uri_.path = path.substr(0, i);
+                    request->exchange_.uri_.query = path.substr(i + 1);
+                    break;
+                }
+            }
+            std::size_t slash = request->exchange_.uri_.path.find_last_of('/');
+            std::size_t dot = request->exchange_.uri_.path.find_last_of('.');
+            if (dot != std::string_view::npos && (slash == std::string_view::npos || dot > slash + 1)) {
+                request->exchange_.uri_.exten = request->exchange_.uri_.path.substr(dot + 1);
+            }
+            request->exchange_.version_ = HttpVersion::HTTP_2_0;
+            request->pending_name_ = {};
+            request->pending_name_hash_ = 0;
+            return common::IoErr::None;
+        }
+
+        if (request->pending_name_ == ":authority") {
+            std::string_view name_copy = request->copy_to_pool("host");
+            std::string_view value_copy = request->copy_to_pool(out);
+            request->pending_name_ = {};
+            request->pending_name_hash_ = 0;
+            if ((!name_copy.data()) || (!value_copy.data() && !out.empty())) {
+                return common::IoErr::NoMem;
+            }
+
+            HttpHeaders &target =
+                request->reading_trailers_ ? request->exchange_.request_trailers_ : request->exchange_.request_headers_;
+            char *lowcase_name = const_cast<char *>(name_copy.data());
+            if (!target.add_view(name_copy, value_copy, lowcase_name, http_header_name_hash("host"))) {
+                return common::IoErr::NoMem;
+            }
+            return common::IoErr::None;
+        }
+
+        if (request->pending_name_ == ":scheme") {
+            request->exchange_.version_ = HttpVersion::HTTP_2_0;
+            request->pending_name_ = {};
+            request->pending_name_hash_ = 0;
+            return common::IoErr::None;
+        }
+
+        request->pending_name_ = {};
+        request->pending_name_hash_ = 0;
+        return common::IoErr::Invalid;
+    }
+
+    request->saw_regular_header_in_block_ = true;
+    std::uint64_t pending_name_hash = request->pending_name_hash_;
+    std::string_view pending_name = request->pending_name_;
+    std::string_view name_copy = request->copy_to_pool(pending_name);
+    std::string_view value_copy = request->copy_to_pool(out);
     request->pending_name_ = {};
     request->pending_name_hash_ = 0;
-    return err;
+    if ((!name_copy.data() && !pending_name.empty()) || (!value_copy.data() && !out.empty())) {
+        return common::IoErr::NoMem;
+    }
+
+    HttpHeaders &target = request->reading_trailers_ ? request->exchange_.request_trailers_ : request->exchange_.request_headers_;
+    char *lowcase_name = name_copy.empty() ? nullptr : const_cast<char *>(name_copy.data());
+    if (!target.add_view(name_copy, value_copy, lowcase_name, pending_name_hash)) {
+        return common::IoErr::NoMem;
+    }
+    return common::IoErr::None;
 }
 
 common::IoErr ServerHttp2Request::on_value_huffman(void *owner, const std::uint8_t *data, std::size_t len,
@@ -162,85 +347,101 @@ common::IoErr ServerHttp2Request::on_value_huffman(void *owner, const std::uint8
     if (request->pending_name_.data() == nullptr) {
         return common::IoErr::Invalid;
     }
-    err = request->handle_header_field(request->pending_name_, request->pending_name_hash_, out);
-    request->pending_name_ = {};
-    request->pending_name_hash_ = 0;
-    return err;
-}
-
-common::IoErr ServerHttp2Request::handle_header_field(std::string_view name, std::uint64_t name_hash,
-                                                      std::string_view value) noexcept {
-    if (is_pseudo_header(name)) {
-        if (reading_trailers_ || saw_regular_header_in_block_) {
+    if (is_pseudo_header(request->pending_name_)) {
+        if (request->reading_trailers_ || request->saw_regular_header_in_block_) {
+            request->pending_name_ = {};
+            request->pending_name_hash_ = 0;
             return common::IoErr::Invalid;
         }
-        return handle_pseudo_header(name, value);
-    }
 
-    saw_regular_header_in_block_ = true;
-    return insert_regular_header(name, name_hash, value);
-}
-
-common::IoErr ServerHttp2Request::handle_pseudo_header(std::string_view name, std::string_view value) noexcept {
-    if (name == ":method") {
-        std::string_view method = copy_to_pool(value);
-        if (method.data() == nullptr && !method.empty()) {
-            return common::IoErr::NoMem;
-        }
-        exchange_.method_view_ = method;
-        exchange_.method_ = parse_method(method);
-        exchange_.version_ = HttpVersion::HTTP_2_0;
-        return common::IoErr::None;
-    }
-
-    if (name == ":path") {
-        std::string_view path = copy_to_pool(value);
-        if (path.data() == nullptr && !path.empty()) {
-            return common::IoErr::NoMem;
-        }
-        exchange_.uri_.unparsed_uri = path;
-        exchange_.uri_.path = path;
-        exchange_.uri_.query = {};
-        exchange_.uri_.exten = {};
-        for (std::size_t i = 0; i < path.size(); ++i) {
-            if (path[i] == '?') {
-                exchange_.uri_.path = path.substr(0, i);
-                exchange_.uri_.query = path.substr(i + 1);
-                break;
+        if (request->pending_name_ == ":method") {
+            std::string_view method = request->copy_to_pool(out);
+            if (method.data() == nullptr && !method.empty()) {
+                request->pending_name_ = {};
+                request->pending_name_hash_ = 0;
+                return common::IoErr::NoMem;
             }
+            request->exchange_.method_view_ = method;
+            request->exchange_.method_ = parse_method(method);
+            request->exchange_.version_ = HttpVersion::HTTP_2_0;
+            request->pending_name_ = {};
+            request->pending_name_hash_ = 0;
+            return common::IoErr::None;
         }
-        std::size_t slash = exchange_.uri_.path.find_last_of('/');
-        std::size_t dot = exchange_.uri_.path.find_last_of('.');
-        if (dot != std::string_view::npos && (slash == std::string_view::npos || dot > slash + 1)) {
-            exchange_.uri_.exten = exchange_.uri_.path.substr(dot + 1);
+
+        if (request->pending_name_ == ":path") {
+            std::string_view path = request->copy_to_pool(out);
+            if (path.data() == nullptr && !path.empty()) {
+                request->pending_name_ = {};
+                request->pending_name_hash_ = 0;
+                return common::IoErr::NoMem;
+            }
+            request->exchange_.uri_.unparsed_uri = path;
+            request->exchange_.uri_.path = path;
+            request->exchange_.uri_.query = {};
+            request->exchange_.uri_.exten = {};
+            for (std::size_t i = 0; i < path.size(); ++i) {
+                if (path[i] == '?') {
+                    request->exchange_.uri_.path = path.substr(0, i);
+                    request->exchange_.uri_.query = path.substr(i + 1);
+                    break;
+                }
+            }
+            std::size_t slash = request->exchange_.uri_.path.find_last_of('/');
+            std::size_t dot = request->exchange_.uri_.path.find_last_of('.');
+            if (dot != std::string_view::npos && (slash == std::string_view::npos || dot > slash + 1)) {
+                request->exchange_.uri_.exten = request->exchange_.uri_.path.substr(dot + 1);
+            }
+            request->exchange_.version_ = HttpVersion::HTTP_2_0;
+            request->pending_name_ = {};
+            request->pending_name_hash_ = 0;
+            return common::IoErr::None;
         }
-        exchange_.version_ = HttpVersion::HTTP_2_0;
-        return common::IoErr::None;
+
+        if (request->pending_name_ == ":authority") {
+            std::string_view name_copy = request->copy_to_pool("host");
+            std::string_view value_copy = request->copy_to_pool(out);
+            request->pending_name_ = {};
+            request->pending_name_hash_ = 0;
+            if ((!name_copy.data()) || (!value_copy.data() && !out.empty())) {
+                return common::IoErr::NoMem;
+            }
+
+            HttpHeaders &target =
+                request->reading_trailers_ ? request->exchange_.request_trailers_ : request->exchange_.request_headers_;
+            char *lowcase_name = const_cast<char *>(name_copy.data());
+            if (!target.add_view(name_copy, value_copy, lowcase_name, http_header_name_hash("host"))) {
+                return common::IoErr::NoMem;
+            }
+            return common::IoErr::None;
+        }
+
+        if (request->pending_name_ == ":scheme") {
+            request->exchange_.version_ = HttpVersion::HTTP_2_0;
+            request->pending_name_ = {};
+            request->pending_name_hash_ = 0;
+            return common::IoErr::None;
+        }
+
+        request->pending_name_ = {};
+        request->pending_name_hash_ = 0;
+        return common::IoErr::Invalid;
     }
 
-    if (name == ":authority") {
-        return insert_regular_header("host", http_header_name_hash("host"), value);
-    }
-
-    if (name == ":scheme") {
-        exchange_.version_ = HttpVersion::HTTP_2_0;
-        return common::IoErr::None;
-    }
-
-    return common::IoErr::Invalid;
-}
-
-common::IoErr ServerHttp2Request::insert_regular_header(std::string_view name, std::uint64_t name_hash,
-                                                        std::string_view value) noexcept {
-    std::string_view name_copy = copy_to_pool(name);
-    std::string_view value_copy = copy_to_pool(value);
-    if ((!name_copy.data() && !name.empty()) || (!value_copy.data() && !value.empty())) {
+    request->saw_regular_header_in_block_ = true;
+    std::string_view name_copy = request->copy_to_pool(request->pending_name_);
+    std::string_view value_copy = request->copy_to_pool(out);
+    std::uint64_t pending_name_hash = request->pending_name_hash_;
+    std::string_view pending_name = request->pending_name_;
+    request->pending_name_ = {};
+    request->pending_name_hash_ = 0;
+    if ((!name_copy.data() && !pending_name.empty()) || (!value_copy.data() && !out.empty())) {
         return common::IoErr::NoMem;
     }
 
-    HttpHeaders &target = reading_trailers_ ? exchange_.request_trailers_ : exchange_.request_headers_;
+    HttpHeaders &target = request->reading_trailers_ ? request->exchange_.request_trailers_ : request->exchange_.request_headers_;
     char *lowcase_name = name_copy.empty() ? nullptr : const_cast<char *>(name_copy.data());
-    if (!target.add_view(name_copy, value_copy, lowcase_name, name_hash)) {
+    if (!target.add_view(name_copy, value_copy, lowcase_name, pending_name_hash)) {
         return common::IoErr::NoMem;
     }
     return common::IoErr::None;
@@ -259,13 +460,28 @@ common::IoErr ServerHttp2Request::materialize_name_raw(const std::uint8_t *data,
 
 common::IoErr ServerHttp2Request::materialize_name_huffman(const std::uint8_t *data, std::size_t len,
                                                            Http2HpackDecoder::NameView &out) noexcept {
-    std::string_view name;
-    common::IoErr err = decode_huffman_to_pool(data, len, name);
-    if (err != common::IoErr::None) {
-        return err;
+    out.name = {};
+    bool ok = false;
+    std::size_t decoded_len = http2_huffman_decoded_length(data, len, &ok);
+    if (!ok) {
+        return common::IoErr::Invalid;
     }
-    out.name = name;
-    out.name_hash = http_header_name_hash(name);
+    if (decoded_len != 0) {
+        auto *mem = static_cast<char *>(exchange_.pool_.alloc(decoded_len));
+        if (!mem) {
+            return common::IoErr::NoMem;
+        }
+
+        Http2HuffmanDecodeState state;
+        Http2HuffmanDecodeResult result =
+            http2_huffman_decode(state, data, len, reinterpret_cast<std::uint8_t *>(mem), decoded_len, true);
+        if (result.code != Http2HuffmanCode::Ok || result.written != decoded_len) {
+            return common::IoErr::Invalid;
+        }
+
+        out.name = std::string_view(mem, decoded_len);
+    }
+    out.name_hash = http_header_name_hash(out.name);
     return common::IoErr::None;
 }
 
@@ -280,11 +496,6 @@ common::IoErr ServerHttp2Request::materialize_value_raw(const std::uint8_t *data
 
 common::IoErr ServerHttp2Request::materialize_value_huffman(const std::uint8_t *data, std::size_t len,
                                                             std::string_view &out) noexcept {
-    return decode_huffman_to_pool(data, len, out);
-}
-
-common::IoErr ServerHttp2Request::decode_huffman_to_pool(const std::uint8_t *data, std::size_t len,
-                                                         std::string_view &out) noexcept {
     out = {};
     bool ok = false;
     std::size_t decoded_len = http2_huffman_decoded_length(data, len, &ok);
@@ -325,27 +536,6 @@ std::string_view ServerHttp2Request::copy_to_pool(const std::uint8_t *data, std:
 
 std::string_view ServerHttp2Request::copy_to_pool(std::string_view value) noexcept {
     return copy_to_pool(reinterpret_cast<const std::uint8_t *>(value.data()), value.size());
-}
-
-void ServerHttp2Request::begin_header_block() noexcept {
-    pending_name_ = {};
-    pending_name_hash_ = 0;
-    saw_regular_header_in_block_ = false;
-    if (request_head_received_) {
-        reading_trailers_ = true;
-    }
-}
-
-void ServerHttp2Request::complete_header_block(bool end_stream) noexcept {
-    if (!request_head_received_) {
-        request_head_received_ = true;
-    } else {
-        reading_trailers_ = true;
-        exchange_.request_trailers_complete_ = true;
-    }
-    if (end_stream && !reading_trailers_) {
-        exchange_.request_trailers_complete_ = true;
-    }
 }
 
 } // namespace fiber::http
