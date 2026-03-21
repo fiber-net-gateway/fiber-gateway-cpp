@@ -247,6 +247,115 @@ static_assert(kDecodeTables.state_count == DecodeTables::kStateCount,
 static_assert(!kDecodeTables.has_valid_self_loops,
               "HPACK Huffman decode DFA uses self-loops as invalid transition sentinels");
 
+template <bool CheckDstCap>
+Http2HuffmanEncodeResult http2_huffman_encode_impl(const std::uint8_t *src, std::size_t len, std::uint8_t *dst,
+                                                   std::size_t dst_cap,
+                                                   Http2HuffmanLowerMode lower_mode) noexcept {
+    std::uint64_t bit_buffer = 0;
+    std::uint8_t pending_bits = 0;
+    std::size_t written = 0;
+
+    for (std::size_t i = 0; i < len; ++i) {
+        std::uint8_t ch = src[i];
+        if (lower_mode == Http2HuffmanLowerMode::Ascii) {
+            ch = to_lower_ascii(ch);
+        }
+
+        const EncodeCode code = kCodeTable[ch];
+        bit_buffer = (bit_buffer << code.bit_length) | code.bits;
+        pending_bits = static_cast<std::uint8_t>(pending_bits + code.bit_length);
+
+        while (pending_bits >= 8) {
+            if constexpr (CheckDstCap) {
+                if (written == dst_cap) {
+                    return {Http2HuffmanCode::OutputFull, written};
+                }
+            }
+            pending_bits = static_cast<std::uint8_t>(pending_bits - 8);
+            dst[written++] = static_cast<std::uint8_t>((bit_buffer >> pending_bits) & 0xffU);
+        }
+    }
+
+    if (pending_bits != 0) {
+        const std::uint8_t pad_bits = static_cast<std::uint8_t>(8 - pending_bits);
+        bit_buffer = (bit_buffer << pad_bits) | ((std::uint64_t{1} << pad_bits) - 1U);
+        pending_bits = static_cast<std::uint8_t>(pending_bits + pad_bits);
+        if constexpr (CheckDstCap) {
+            if (written == dst_cap) {
+                return {Http2HuffmanCode::OutputFull, written};
+            }
+        }
+        dst[written++] = static_cast<std::uint8_t>(bit_buffer & 0xffU);
+    }
+
+    return {Http2HuffmanCode::Ok, written};
+}
+
+template <bool CheckDstCap>
+Http2HuffmanDecodeResult http2_huffman_decode_impl(Http2HuffmanDecodeState &state, const std::uint8_t *src,
+                                                   std::size_t len, std::uint8_t *dst, std::size_t dst_cap,
+                                                   bool last) noexcept {
+    std::size_t written = 0;
+    std::size_t consumed = 0;
+
+    for (std::size_t i = 0; i < len; ++i) {
+        std::uint8_t next_state = state.state;
+        std::uint8_t emitted[2]{};
+        std::size_t emit_count = 0;
+        const std::uint8_t ch = src[i];
+        bool ending = state.ending;
+
+        const DecodeCell hi = kDecodeTables.table[next_state][ch >> 4];
+        if (hi.next == next_state) {
+            return {Http2HuffmanCode::InvalidEncoding, consumed, written};
+        }
+        next_state = hi.next;
+        ending = hi.ending != 0;
+        if (hi.emit != 0) {
+            emitted[emit_count++] = hi.sym;
+        }
+
+        const DecodeCell lo = kDecodeTables.table[next_state][ch & 0x0fU];
+        if (lo.next == next_state) {
+            return {Http2HuffmanCode::InvalidEncoding, consumed, written};
+        }
+        next_state = lo.next;
+        ending = lo.ending != 0;
+        if (lo.emit != 0) {
+            emitted[emit_count++] = lo.sym;
+        }
+
+        if constexpr (CheckDstCap) {
+            if (written + emit_count > dst_cap) {
+                return {Http2HuffmanCode::OutputFull, consumed, written};
+            }
+        }
+
+        if (emit_count != 0) {
+            std::memcpy(dst + written, emitted, emit_count);
+            written += emit_count;
+        }
+
+        state.state = next_state;
+        state.ending = ending;
+        ++consumed;
+    }
+
+    if (!last) {
+        if (state.state != 0) {
+            return {Http2HuffmanCode::NeedMore, consumed, written};
+        }
+        return {Http2HuffmanCode::Ok, consumed, written};
+    }
+
+    if (!state.ending) {
+        return {Http2HuffmanCode::InvalidEncoding, consumed, written};
+    }
+
+    state.reset();
+    return {Http2HuffmanCode::Ok, consumed, written};
+}
+
 } // namespace
 
 std::size_t http2_huffman_encoded_length(const std::uint8_t *src, std::size_t len,
@@ -294,101 +403,22 @@ std::size_t http2_huffman_decoded_length(const std::uint8_t *src, std::size_t le
 
 Http2HuffmanEncodeResult http2_huffman_encode(const std::uint8_t *src, std::size_t len, std::uint8_t *dst,
                                               std::size_t dst_cap, Http2HuffmanLowerMode lower_mode) noexcept {
-    std::uint64_t bit_buffer = 0;
-    std::uint8_t pending_bits = 0;
-    std::size_t written = 0;
+    return http2_huffman_encode_impl<true>(src, len, dst, dst_cap, lower_mode);
+}
 
-    for (std::size_t i = 0; i < len; ++i) {
-        std::uint8_t ch = src[i];
-        if (lower_mode == Http2HuffmanLowerMode::Ascii) {
-            ch = to_lower_ascii(ch);
-        }
-
-        const EncodeCode code = kCodeTable[ch];
-        bit_buffer = (bit_buffer << code.bit_length) | code.bits;
-        pending_bits = static_cast<std::uint8_t>(pending_bits + code.bit_length);
-
-        while (pending_bits >= 8) {
-            if (written == dst_cap) {
-                return {Http2HuffmanCode::OutputFull, written};
-            }
-            pending_bits = static_cast<std::uint8_t>(pending_bits - 8);
-            dst[written++] = static_cast<std::uint8_t>((bit_buffer >> pending_bits) & 0xffU);
-        }
-    }
-
-    if (pending_bits != 0) {
-        const std::uint8_t pad_bits = static_cast<std::uint8_t>(8 - pending_bits);
-        bit_buffer = (bit_buffer << pad_bits) | ((std::uint64_t{1} << pad_bits) - 1U);
-        pending_bits = static_cast<std::uint8_t>(pending_bits + pad_bits);
-        if (written == dst_cap) {
-            return {Http2HuffmanCode::OutputFull, written};
-        }
-        dst[written++] = static_cast<std::uint8_t>(bit_buffer & 0xffU);
-    }
-
-    return {Http2HuffmanCode::Ok, written};
+std::size_t http2_huffman_encode_exact(const std::uint8_t *src, std::size_t len, std::uint8_t *dst,
+                                       Http2HuffmanLowerMode lower_mode) noexcept {
+    return http2_huffman_encode_impl<false>(src, len, dst, 0, lower_mode).written;
 }
 
 Http2HuffmanDecodeResult http2_huffman_decode(Http2HuffmanDecodeState &state, const std::uint8_t *src, std::size_t len,
                                               std::uint8_t *dst, std::size_t dst_cap, bool last) noexcept {
-    std::size_t written = 0;
-    std::size_t consumed = 0;
+    return http2_huffman_decode_impl<true>(state, src, len, dst, dst_cap, last);
+}
 
-    for (std::size_t i = 0; i < len; ++i) {
-        std::uint8_t next_state = state.state;
-        std::uint8_t emitted[2]{};
-        std::size_t emit_count = 0;
-        const std::uint8_t ch = src[i];
-        bool ending = state.ending;
-
-        const DecodeCell hi = kDecodeTables.table[next_state][ch >> 4];
-        if (hi.next == next_state) {
-            return {Http2HuffmanCode::InvalidEncoding, consumed, written};
-        }
-        next_state = hi.next;
-        ending = hi.ending != 0;
-        if (hi.emit != 0) {
-            emitted[emit_count++] = hi.sym;
-        }
-
-        const DecodeCell lo = kDecodeTables.table[next_state][ch & 0x0fU];
-        if (lo.next == next_state) {
-            return {Http2HuffmanCode::InvalidEncoding, consumed, written};
-        }
-        next_state = lo.next;
-        ending = lo.ending != 0;
-        if (lo.emit != 0) {
-            emitted[emit_count++] = lo.sym;
-        }
-
-        if (written + emit_count > dst_cap) {
-            return {Http2HuffmanCode::OutputFull, consumed, written};
-        }
-
-        if (emit_count != 0) {
-            std::memcpy(dst + written, emitted, emit_count);
-            written += emit_count;
-        }
-
-        state.state = next_state;
-        state.ending = ending;
-        ++consumed;
-    }
-
-    if (!last) {
-        if (state.state != 0) {
-            return {Http2HuffmanCode::NeedMore, consumed, written};
-        }
-        return {Http2HuffmanCode::Ok, consumed, written};
-    }
-
-    if (!state.ending) {
-        return {Http2HuffmanCode::InvalidEncoding, consumed, written};
-    }
-
-    state.reset();
-    return {Http2HuffmanCode::Ok, consumed, written};
+Http2HuffmanDecodeResult http2_huffman_decode_exact(Http2HuffmanDecodeState &state, const std::uint8_t *src,
+                                                    std::size_t len, std::uint8_t *dst, bool last) noexcept {
+    return http2_huffman_decode_impl<false>(state, src, len, dst, 0, last);
 }
 
 } // namespace fiber::http
