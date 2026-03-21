@@ -1,7 +1,10 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <string>
 
+#include "http/Http2HpackHuffman.h"
+#include "http/HttpHeaderHash.h"
 #include "http/Http2Stream.h"
 #include "Http2TestSupport.h"
 
@@ -21,8 +24,8 @@ struct OwnedStreamHolder {
         return kOps;
     }
     static void destroy_owner(void *owner) noexcept { delete static_cast<OwnedStreamHolder *>(owner); }
-    static fiber::common::IoErr on_header_block_start(void *, fiber::http::Http2HpackDecoder::Sink &sink) noexcept {
-        sink.ctx = nullptr;
+    static fiber::common::IoErr on_header_block_start(void *owner, fiber::http::Http2HpackDecoder::Sink &sink) noexcept {
+        sink.ctx = owner;
         sink.ops = &decoder_ops();
         return fiber::common::IoErr::None;
     }
@@ -35,27 +38,66 @@ struct OwnedStreamHolder {
     static fiber::common::IoErr on_indexed_field(void *, fiber::http::Http2HpackDecoder::TableEntryView) noexcept {
         return fiber::common::IoErr::None;
     }
-    static fiber::common::IoErr on_indexed_name(void *, std::string_view, std::uint64_t) noexcept {
+    static fiber::common::IoErr on_indexed_name(void *owner, std::string_view name, std::uint64_t name_hash) noexcept {
+        auto *self = static_cast<OwnedStreamHolder *>(owner);
+        self->pending_name_storage.assign(name.data(), name.size());
+        self->pending_name_hash = name_hash;
         return fiber::common::IoErr::None;
     }
-    static fiber::common::IoErr on_name_raw(void *, const std::uint8_t *, std::size_t,
-                                            fiber::http::Http2HpackDecoder::NameView &out) noexcept {
-        out = {};
+    static fiber::common::IoErr on_name_raw(void *owner, const std::uint8_t *data, std::size_t len) noexcept {
+        auto *self = static_cast<OwnedStreamHolder *>(owner);
+        self->pending_name_storage.assign(reinterpret_cast<const char *>(data), len);
+        self->pending_name_hash = fiber::http::http_header_name_hash(self->pending_name_storage);
         return fiber::common::IoErr::None;
     }
-    static fiber::common::IoErr on_name_huffman(void *, const std::uint8_t *, std::size_t,
-                                                fiber::http::Http2HpackDecoder::NameView &out) noexcept {
-        out = {};
+    static fiber::common::IoErr on_name_huffman(void *owner, const std::uint8_t *data, std::size_t len) noexcept {
+        auto *self = static_cast<OwnedStreamHolder *>(owner);
+        bool ok = false;
+        const std::size_t decoded_len = fiber::http::http2_huffman_decoded_length(data, len, &ok);
+        if (!ok) {
+            return fiber::common::IoErr::Invalid;
+        }
+        self->pending_name_storage.assign(decoded_len, '\0');
+        fiber::http::Http2HuffmanDecodeState state;
+        fiber::http::Http2HuffmanDecodeResult result = fiber::http::http2_huffman_decode(
+            state, data, len, reinterpret_cast<std::uint8_t *>(self->pending_name_storage.data()), decoded_len, true);
+        if (result.code != fiber::http::Http2HuffmanCode::Ok || result.written != decoded_len) {
+            return fiber::common::IoErr::Invalid;
+        }
+        self->pending_name_hash = fiber::http::http_header_name_hash(self->pending_name_storage);
         return fiber::common::IoErr::None;
     }
-    static fiber::common::IoErr on_value_raw(void *, const std::uint8_t *, std::size_t,
-                                             std::string_view &out) noexcept {
-        out = {};
+    static fiber::common::IoErr on_value_raw(void *owner, const std::uint8_t *data, std::size_t len,
+                                             fiber::http::Http2HpackDecoder::FieldView *out) noexcept {
+        auto *self = static_cast<OwnedStreamHolder *>(owner);
+        self->pending_value_storage.assign(reinterpret_cast<const char *>(data), len);
+        if (out != nullptr) {
+            out->name = self->pending_name_storage;
+            out->name_hash = self->pending_name_hash;
+            out->value = self->pending_value_storage;
+        }
         return fiber::common::IoErr::None;
     }
-    static fiber::common::IoErr on_value_huffman(void *, const std::uint8_t *, std::size_t,
-                                                 std::string_view &out) noexcept {
-        out = {};
+    static fiber::common::IoErr on_value_huffman(void *owner, const std::uint8_t *data, std::size_t len,
+                                                 fiber::http::Http2HpackDecoder::FieldView *out) noexcept {
+        auto *self = static_cast<OwnedStreamHolder *>(owner);
+        bool ok = false;
+        const std::size_t decoded_len = fiber::http::http2_huffman_decoded_length(data, len, &ok);
+        if (!ok) {
+            return fiber::common::IoErr::Invalid;
+        }
+        self->pending_value_storage.assign(decoded_len, '\0');
+        fiber::http::Http2HuffmanDecodeState state;
+        fiber::http::Http2HuffmanDecodeResult result = fiber::http::http2_huffman_decode(
+            state, data, len, reinterpret_cast<std::uint8_t *>(self->pending_value_storage.data()), decoded_len, true);
+        if (result.code != fiber::http::Http2HuffmanCode::Ok || result.written != decoded_len) {
+            return fiber::common::IoErr::Invalid;
+        }
+        if (out != nullptr) {
+            out->name = self->pending_name_storage;
+            out->name_hash = self->pending_name_hash;
+            out->value = self->pending_value_storage;
+        }
         return fiber::common::IoErr::None;
     }
     static const fiber::http::Http2HpackDecoder::Ops &decoder_ops() noexcept {
@@ -78,6 +120,9 @@ struct OwnedStreamHolder {
 
     bool *destroyed_flag = nullptr;
     fiber::http::Http2Stream stream;
+    std::string pending_name_storage;
+    std::string pending_value_storage;
+    std::uint64_t pending_name_hash = 0;
 };
 
 } // namespace

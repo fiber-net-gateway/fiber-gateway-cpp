@@ -8,9 +8,32 @@ namespace fiber::http {
 
 namespace {
 
+common::IoErr noop_indexed_field(void *, Http2HpackDecoder::TableEntryView) noexcept { return common::IoErr::None; }
+
+common::IoErr noop_indexed_name(void *, std::string_view, std::uint64_t) noexcept { return common::IoErr::None; }
+
+common::IoErr noop_name_raw(void *, const std::uint8_t *, std::size_t) noexcept { return common::IoErr::None; }
+
+common::IoErr noop_name_huffman(void *, const std::uint8_t *, std::size_t) noexcept { return common::IoErr::None; }
+
+common::IoErr noop_value_raw(void *, const std::uint8_t *, std::size_t, Http2HpackDecoder::FieldView *) noexcept {
+    return common::IoErr::None;
+}
+
+common::IoErr noop_value_huffman(void *, const std::uint8_t *, std::size_t, Http2HpackDecoder::FieldView *) noexcept {
+    return common::IoErr::None;
+}
+
 common::IoErr noop_header_block_start(void *, Http2HpackDecoder::Sink &sink) noexcept {
+    static const Http2HpackDecoder::Ops kDecoderOps{
+        &noop_indexed_field,
+        &noop_indexed_name,
+        &noop_name_raw,
+        &noop_name_huffman,
+        &noop_value_raw,
+        &noop_value_huffman,
+    };
     sink.ctx = nullptr;
-    static const Http2HpackDecoder::Ops kDecoderOps{};
     sink.ops = &kDecoderOps;
     return common::IoErr::None;
 }

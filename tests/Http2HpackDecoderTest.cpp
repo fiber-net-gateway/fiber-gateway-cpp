@@ -39,22 +39,24 @@ struct DecoderRecorder {
 
     static fiber::common::IoErr on_indexed_name(void *ctx, std::string_view name, std::uint64_t name_hash) noexcept {
         auto *self = static_cast<DecoderRecorder *>(ctx);
+        self->names.emplace_back(name);
+        self->pending_name = self->names.back();
+        self->pending_name_hash = name_hash;
         self->events.push_back({DecodedEvent::Kind::IndexedName, std::string(name), {}, name_hash});
         return fiber::common::IoErr::None;
     }
 
-    static fiber::common::IoErr on_name_raw(void *ctx, const std::uint8_t *data, std::size_t len,
-                                            fiber::http::Http2HpackDecoder::NameView &out) noexcept {
+    static fiber::common::IoErr on_name_raw(void *ctx, const std::uint8_t *data, std::size_t len) noexcept {
         auto *self = static_cast<DecoderRecorder *>(ctx);
         self->names.emplace_back(reinterpret_cast<const char *>(data), len);
-        out.name = self->names.back();
-        out.name_hash = fiber::http::http_header_name_hash(out.name);
-        self->events.push_back({DecodedEvent::Kind::NameRaw, std::string(out.name), {}, out.name_hash});
+        self->pending_name = self->names.back();
+        self->pending_name_hash = fiber::http::http_header_name_hash(self->pending_name);
+        self->events.push_back(
+            {DecodedEvent::Kind::NameRaw, std::string(self->pending_name), {}, self->pending_name_hash});
         return fiber::common::IoErr::None;
     }
 
-    static fiber::common::IoErr on_name_huffman(void *ctx, const std::uint8_t *data, std::size_t len,
-                                                fiber::http::Http2HpackDecoder::NameView &out) noexcept {
+    static fiber::common::IoErr on_name_huffman(void *ctx, const std::uint8_t *data, std::size_t len) noexcept {
         auto *self = static_cast<DecoderRecorder *>(ctx);
         bool ok = false;
         const std::size_t decoded_len = fiber::http::http2_huffman_decoded_length(data, len, &ok);
@@ -70,23 +72,29 @@ struct DecoderRecorder {
             return fiber::common::IoErr::Invalid;
         }
 
-        out.name = self->names.back();
-        out.name_hash = fiber::http::http_header_name_hash(out.name);
-        self->events.push_back({DecodedEvent::Kind::NameHuffman, std::string(out.name), {}, out.name_hash});
+        self->pending_name = self->names.back();
+        self->pending_name_hash = fiber::http::http_header_name_hash(self->pending_name);
+        self->events.push_back(
+            {DecodedEvent::Kind::NameHuffman, std::string(self->pending_name), {}, self->pending_name_hash});
         return fiber::common::IoErr::None;
     }
 
     static fiber::common::IoErr on_value_raw(void *ctx, const std::uint8_t *data, std::size_t len,
-                                             std::string_view &out) noexcept {
+                                             fiber::http::Http2HpackDecoder::FieldView *out) noexcept {
         auto *self = static_cast<DecoderRecorder *>(ctx);
         self->values.emplace_back(reinterpret_cast<const char *>(data), len);
-        out = self->values.back();
-        self->events.push_back({DecodedEvent::Kind::ValueRaw, {}, std::string(out), 0});
+        std::string_view value = self->values.back();
+        if (out != nullptr) {
+            out->name = self->pending_name;
+            out->name_hash = self->pending_name_hash;
+            out->value = value;
+        }
+        self->events.push_back({DecodedEvent::Kind::ValueRaw, {}, std::string(value), 0});
         return fiber::common::IoErr::None;
     }
 
     static fiber::common::IoErr on_value_huffman(void *ctx, const std::uint8_t *data, std::size_t len,
-                                                 std::string_view &out) noexcept {
+                                                 fiber::http::Http2HpackDecoder::FieldView *out) noexcept {
         auto *self = static_cast<DecoderRecorder *>(ctx);
         bool ok = false;
         const std::size_t decoded_len = fiber::http::http2_huffman_decoded_length(data, len, &ok);
@@ -102,8 +110,13 @@ struct DecoderRecorder {
             return fiber::common::IoErr::Invalid;
         }
 
-        out = self->values.back();
-        self->events.push_back({DecodedEvent::Kind::ValueHuffman, {}, std::string(out), 0});
+        std::string_view value = self->values.back();
+        if (out != nullptr) {
+            out->name = self->pending_name;
+            out->name_hash = self->pending_name_hash;
+            out->value = value;
+        }
+        self->events.push_back({DecodedEvent::Kind::ValueHuffman, {}, std::string(value), 0});
         return fiber::common::IoErr::None;
     }
 
@@ -122,6 +135,8 @@ struct DecoderRecorder {
     std::vector<DecodedEvent> events;
     std::deque<std::string> names;
     std::deque<std::string> values;
+    std::string_view pending_name;
+    std::uint64_t pending_name_hash = 0;
 };
 
 } // namespace

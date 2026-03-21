@@ -23,9 +23,7 @@ bool Http2HpackDecoder::init(std::uint32_t max_dynamic_table_size, std::uint32_t
 void Http2HpackDecoder::release() noexcept {
     dynamic_table_.release();
     scratch_.reset();
-    name_storage_.reset();
     scratch_cap_ = 0;
-    name_storage_cap_ = 0;
     ctx_ = nullptr;
     ops_ = nullptr;
     reset_block_state();
@@ -50,8 +48,6 @@ void Http2HpackDecoder::reset_block_state() noexcept {
     string_huffman_ = false;
     allow_table_size_update_ = true;
     have_literal_name_ = false;
-    current_name_hash_ = 0;
-    current_name_ = {};
     integer_value_ = 0;
     integer_prefix_max_ = 0;
     integer_shift_ = 0;
@@ -245,16 +241,8 @@ common::IoErr Http2HpackDecoder::handle_indexed_name(std::uint32_t index) noexce
     if (entry.name.size() > max_string_size_) {
         return common::IoErr::Invalid;
     }
-    if (!ensure_name_storage_capacity(entry.name.size())) {
-        return common::IoErr::NoMem;
-    }
-    if (!entry.name.empty()) {
-        std::memcpy(name_storage_.get(), entry.name.data(), entry.name.size());
-    }
-    current_name_ = std::string_view(name_storage_.get(), entry.name.size());
-    current_name_hash_ = entry.name_hash;
     have_literal_name_ = true;
-    common::IoErr err = ops_->on_indexed_name(ctx_, current_name_, current_name_hash_);
+    common::IoErr err = ops_->on_indexed_name(ctx_, entry.name, entry.name_hash);
     if (err != common::IoErr::None) {
         return err;
     }
@@ -267,32 +255,29 @@ common::IoErr Http2HpackDecoder::handle_string_complete() noexcept {
     }
 
     if (state_ == State::LiteralNameData) {
-        NameView out;
-        common::IoErr err = string_huffman_ ? ops_->on_name_huffman(ctx_, scratch_.get(), string_length_, out)
-                                            : ops_->on_name_raw(ctx_, scratch_.get(), string_length_, out);
+        common::IoErr err =
+            string_huffman_ ? ops_->on_name_huffman(ctx_, scratch_.get(), string_length_)
+                            : ops_->on_name_raw(ctx_, scratch_.get(), string_length_);
         if (err != common::IoErr::None) {
             return err;
         }
-        if (!out.name.data() && !out.name.empty()) {
-            return common::IoErr::Invalid;
-        }
-        current_name_ = out.name;
-        current_name_hash_ = out.name_hash;
         have_literal_name_ = true;
         return handle_literal_value_start();
     }
 
-    std::string_view value;
-    common::IoErr err = string_huffman_ ? ops_->on_value_huffman(ctx_, scratch_.get(), string_length_, value)
-                                        : ops_->on_value_raw(ctx_, scratch_.get(), string_length_, value);
+    FieldView field;
+    FieldView *field_out = literal_mode_ == LiteralMode::IncrementalIndexing ? &field : nullptr;
+    common::IoErr err = string_huffman_ ? ops_->on_value_huffman(ctx_, scratch_.get(), string_length_, field_out)
+                                        : ops_->on_value_raw(ctx_, scratch_.get(), string_length_, field_out);
     if (err != common::IoErr::None) {
         return err;
     }
-    if (!value.data() && !value.empty()) {
+    if (field_out != nullptr &&
+        ((!field.name.data() && !field.name.empty()) || (!field.value.data() && !field.value.empty()))) {
         return common::IoErr::Invalid;
     }
-    if (literal_mode_ == LiteralMode::IncrementalIndexing) {
-        (void)dynamic_table_.insert(current_name_, value);
+    if (field_out != nullptr) {
+        (void)dynamic_table_.insert(field.name, field.value);
     }
     finish_literal_field();
     return common::IoErr::None;
@@ -370,22 +355,6 @@ bool Http2HpackDecoder::ensure_scratch_capacity(std::size_t size) noexcept {
     return true;
 }
 
-bool Http2HpackDecoder::ensure_name_storage_capacity(std::size_t size) noexcept {
-    if (size <= name_storage_cap_) {
-        return true;
-    }
-    if (size > std::numeric_limits<std::uint32_t>::max()) {
-        return false;
-    }
-    auto next = std::make_unique<char[]>(size == 0 ? 1 : size);
-    if (!next) {
-        return false;
-    }
-    name_storage_ = std::move(next);
-    name_storage_cap_ = static_cast<std::uint32_t>(size);
-    return true;
-}
-
 void Http2HpackDecoder::reset_string_accumulator() noexcept {
     string_length_ = 0;
     string_received_ = 0;
@@ -393,8 +362,6 @@ void Http2HpackDecoder::reset_string_accumulator() noexcept {
 }
 
 void Http2HpackDecoder::finish_literal_field() noexcept {
-    current_name_ = {};
-    current_name_hash_ = 0;
     have_literal_name_ = false;
     reset_string_accumulator();
     state_ = State::Ready;

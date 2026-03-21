@@ -19,22 +19,21 @@ class Http2HpackDecoder : public common::NonCopyable, public common::NonMovable 
 public:
     using TableEntryView = Http2HpackTableEntryView;
 
-    struct NameView {
+    struct FieldView {
         std::string_view name;
         std::uint64_t name_hash = 0;
+        std::string_view value;
     };
 
     struct Ops {
         common::IoErr (*on_indexed_field)(void *ctx, TableEntryView entry) noexcept = nullptr;
         common::IoErr (*on_indexed_name)(void *ctx, std::string_view name, std::uint64_t name_hash) noexcept = nullptr;
-        common::IoErr (*on_name_raw)(void *ctx, const std::uint8_t *data, std::size_t len,
-                                     NameView &out) noexcept = nullptr;
-        common::IoErr (*on_name_huffman)(void *ctx, const std::uint8_t *data, std::size_t len,
-                                         NameView &out) noexcept = nullptr;
+        common::IoErr (*on_name_raw)(void *ctx, const std::uint8_t *data, std::size_t len) noexcept = nullptr;
+        common::IoErr (*on_name_huffman)(void *ctx, const std::uint8_t *data, std::size_t len) noexcept = nullptr;
         common::IoErr (*on_value_raw)(void *ctx, const std::uint8_t *data, std::size_t len,
-                                      std::string_view &out) noexcept = nullptr;
+                                      FieldView *out) noexcept = nullptr;
         common::IoErr (*on_value_huffman)(void *ctx, const std::uint8_t *data, std::size_t len,
-                                          std::string_view &out) noexcept = nullptr;
+                                          FieldView *out) noexcept = nullptr;
     };
 
     struct Sink {
@@ -81,16 +80,13 @@ private:
     [[nodiscard]] common::IoErr prepare_string_accumulator(std::uint32_t string_length, State data_state) noexcept;
     [[nodiscard]] bool resolve_index(std::uint32_t index, TableEntryView &entry) const noexcept;
     [[nodiscard]] bool ensure_scratch_capacity(std::size_t size) noexcept;
-    [[nodiscard]] bool ensure_name_storage_capacity(std::size_t size) noexcept;
     void reset_block_state() noexcept;
     void reset_string_accumulator() noexcept;
     void finish_literal_field() noexcept;
 
     Http2HpackDynamicTable dynamic_table_;
     std::unique_ptr<std::uint8_t[]> scratch_;
-    std::unique_ptr<char[]> name_storage_;
     std::uint32_t scratch_cap_ = 0;
-    std::uint32_t name_storage_cap_ = 0;
     std::uint32_t max_dynamic_table_size_ = 4096U;
     std::uint32_t max_string_size_ = 64 * 1024U;
     void *ctx_ = nullptr;
@@ -100,8 +96,6 @@ private:
     bool string_huffman_ = false;
     bool allow_table_size_update_ = true;
     bool have_literal_name_ = false;
-    std::uint64_t current_name_hash_ = 0;
-    std::string_view current_name_;
     std::uint32_t integer_value_ = 0;
     std::uint32_t integer_prefix_max_ = 0;
     std::uint32_t integer_shift_ = 0;
