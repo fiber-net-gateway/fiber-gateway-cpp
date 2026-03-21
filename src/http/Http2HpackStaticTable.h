@@ -4,19 +4,17 @@
 #include <cstdint>
 #include <string_view>
 
+#include "Http2HpackTableEntryView.h"
+
 namespace fiber::http {
 
 class Http2HpackStaticTable {
 public:
     static constexpr std::uint32_t kEntryCount = 61;
 
-    struct StaticEntryView {
-        std::string_view name;
-        std::string_view value;
-        std::uint64_t name_hash = 0;
-    };
+    using TableEntryView = Http2HpackTableEntryView;
 
-    [[nodiscard]] static bool get_by_index(std::uint32_t index, StaticEntryView &view) noexcept;
+    [[nodiscard]] static bool get_by_index(std::uint32_t index, TableEntryView &view) noexcept;
 
     [[nodiscard]] static bool find_name(std::string_view name, std::uint32_t &index) noexcept;
     [[nodiscard]] static bool find_name(std::string_view lowcase_name, std::uint64_t name_hash,

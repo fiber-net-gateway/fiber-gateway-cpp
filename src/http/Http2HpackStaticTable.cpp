@@ -85,8 +85,8 @@ const Http2HpackStaticTable::StaticEntry Http2HpackStaticTable::kEntries_[kEntry
     FIBER_HTTP2_STATIC_ENTRY("www-authenticate", ""),
 };
 
-bool Http2HpackStaticTable::get_by_index(std::uint32_t index, StaticEntryView &view) noexcept {
-    view = StaticEntryView{};
+bool Http2HpackStaticTable::get_by_index(std::uint32_t index, TableEntryView &view) noexcept {
+    view = TableEntryView{};
     if (index == 0 || index > kEntryCount) {
         return false;
     }

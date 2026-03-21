@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "http/Http2HpackStaticTable.h"
+#include "http/Http2HpackTableEntryView.h"
 #include "http/HttpHeaderHash.h"
 
 namespace {
@@ -10,7 +11,7 @@ namespace {
 using fiber::http::Http2HpackStaticTable;
 
 TEST(Http2HpackStaticTableTest, GetByIndexReturnsKnownEntriesAndNameHash) {
-    Http2HpackStaticTable::StaticEntryView view;
+    fiber::http::Http2HpackTableEntryView view;
 
     ASSERT_TRUE(Http2HpackStaticTable::get_by_index(2, view));
     EXPECT_EQ(view.name, ":method");

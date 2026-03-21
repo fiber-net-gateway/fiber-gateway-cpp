@@ -8,16 +8,13 @@
 
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
+#include "Http2HpackTableEntryView.h"
 
 namespace fiber::http {
 
 class Http2HpackDynamicTable : public common::NonCopyable, public common::NonMovable {
 public:
-    struct DynamicEntryView {
-        std::string_view name;
-        std::string_view value;
-        std::uint64_t name_hash = 0;
-    };
+    using TableEntryView = Http2HpackTableEntryView;
 
     Http2HpackDynamicTable() noexcept = default;
     ~Http2HpackDynamicTable() = default;
@@ -31,7 +28,7 @@ public:
     [[nodiscard]] bool find_exact(std::string_view name, std::string_view value,
                                   std::uint32_t &dynamic_index) const noexcept;
     // The returned views remain valid until the next mutating table operation.
-    [[nodiscard]] bool get_by_index(std::uint32_t dynamic_index, DynamicEntryView &view) const noexcept;
+    [[nodiscard]] bool get_by_index(std::uint32_t dynamic_index, TableEntryView &view) const noexcept;
 
     [[nodiscard]] std::uint32_t entry_count() const noexcept { return count_; }
     [[nodiscard]] std::uint32_t current_size() const noexcept { return current_size_; }

@@ -4,6 +4,7 @@
 #include <string_view>
 
 #include "http/Http2HpackDynamicTable.h"
+#include "http/Http2HpackTableEntryView.h"
 #include "http/HttpHeaderHash.h"
 
 namespace {
@@ -23,7 +24,7 @@ TEST(Http2HpackDynamicTableTest, InsertsAndGetsNewestFirstWithNameHash) {
     ASSERT_TRUE(table.insert("content-type", "text/plain"));
     ASSERT_TRUE(table.insert("accept", "*/*"));
 
-    Http2HpackDynamicTable::DynamicEntryView view;
+    fiber::http::Http2HpackTableEntryView view;
     ASSERT_TRUE(table.get_by_index(1, view));
     EXPECT_EQ(view.name, "accept");
     EXPECT_EQ(view.value, "*/*");
@@ -83,7 +84,7 @@ TEST(Http2HpackDynamicTableTest, CompactsBytesWhenTailSpaceIsInsufficient) {
 
     EXPECT_EQ(table.entry_count(), 2u);
 
-    Http2HpackDynamicTable::DynamicEntryView view;
+    fiber::http::Http2HpackTableEntryView view;
     ASSERT_TRUE(table.get_by_index(1, view));
     EXPECT_EQ(view.name, name_c);
     EXPECT_EQ(view.value, value_c);
