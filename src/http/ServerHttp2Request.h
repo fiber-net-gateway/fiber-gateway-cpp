@@ -5,10 +5,12 @@
 #include <cstdint>
 #include <string_view>
 
+#include "../async/Spawn.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "HeaderMap.h"
 #include "HttpExchange.h"
+#include "HttpExchangeIo.h"
 #include "HttpHeaderHash.h"
 #include "Http2Stream.h"
 
@@ -16,15 +18,24 @@ namespace fiber::http {
 
 class Http2Connection;
 
-class ServerHttp2Request : public common::NonCopyable, public common::NonMovable {
+class ServerHttp2Request final : public HttpExchangeIo, public common::NonCopyable, public common::NonMovable {
 public:
     [[nodiscard]] static Http2Stream::Lease create(std::uint32_t stream_id, Http2Connection &conn,
-                                                   const HttpServerOptions &http_options) noexcept;
+                                                   const HttpServerOptions &http_options,
+                                                   const HttpHandler &handler) noexcept;
 
     [[nodiscard]] Http2Stream &stream() noexcept { return stream_; }
     [[nodiscard]] const Http2Stream &stream() const noexcept { return stream_; }
     [[nodiscard]] HttpExchange &exchange() noexcept { return exchange_; }
     [[nodiscard]] const HttpExchange &exchange() const noexcept { return exchange_; }
+
+    fiber::async::Task<common::IoResult<BodyChunk>> read_body(HttpExchange &exchange,
+                                                              std::size_t max_bytes) noexcept override;
+    fiber::async::Task<common::IoResult<void>> send_response_header(HttpExchange &exchange) override;
+    fiber::async::Task<common::IoResult<void>> finish_response(HttpExchange &exchange) noexcept override;
+    fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, BodyChunk chunk) noexcept override;
+    fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, const std::uint8_t *buf,
+                                                            std::size_t len, bool end) noexcept override;
 
 private:
     using PseudoHeaderHandler = common::IoErr (*)(ServerHttp2Request &, std::string_view value) noexcept;
@@ -32,11 +43,13 @@ private:
     static const Http2Stream::Ops &stream_ops() noexcept;
     static const Http2HpackDecoder::Ops &decoder_ops() noexcept;
     static const HeaderMap<PseudoHeaderHandler> &pseudo_header_handler_map() noexcept;
-    ServerHttp2Request(std::uint32_t stream_id, Http2Connection &conn, const HttpServerOptions &http_options) noexcept;
+    ServerHttp2Request(std::uint32_t stream_id, Http2Connection &conn, const HttpServerOptions &http_options,
+                       const HttpHandler &handler) noexcept;
     static common::IoErr on_header_block_start(void *owner, Http2HpackDecoder::Sink &sink) noexcept;
     static common::IoErr on_header_block_complete(void *owner, bool end_stream) noexcept;
     static common::IoErr on_body(void *owner, mem::IoBuf &&buf, bool end_stream) noexcept;
     static void destroy_owner(void *owner) noexcept;
+    static fiber::async::DetachedTask run_handler_task(ServerHttp2Request *request, Http2Stream::Lease lease) noexcept;
     static common::IoErr on_indexed_field(void *owner, Http2HpackDecoder::TableEntryView entry) noexcept;
     static common::IoErr on_indexed_name(void *owner, std::string_view name, std::uint64_t name_hash) noexcept;
     static common::IoErr on_name_raw(void *owner, const std::uint8_t *data, std::size_t len) noexcept;
@@ -65,11 +78,14 @@ private:
     [[nodiscard]] std::string_view copy_to_pool(std::string_view value) noexcept;
 
     [[maybe_unused]] Http2Connection *conn_ = nullptr;
+    const HttpHandler *handler_ = nullptr;
     Http2Stream stream_;
     HttpExchange exchange_;
     bool reading_trailers_ = false;
     bool saw_regular_header_in_block_ = false;
     bool request_head_received_ = false;
+    bool handler_started_ = false;
+    bool handler_done_ = false;
     std::string_view pending_name_;
     std::uint64_t pending_name_hash_ = 0;
     bool pending_name_owned_ = false;

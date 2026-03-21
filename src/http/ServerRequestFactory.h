@@ -12,7 +12,8 @@ class Http2Connection;
 
 class ServerRequestFactory {
 public:
-    explicit ServerRequestFactory(const HttpServerOptions &http_options) noexcept : http_options_(&http_options) {}
+    ServerRequestFactory(const HttpServerOptions &http_options, const HttpHandler &handler) noexcept :
+        http_options_(&http_options), handler_(&handler) {}
 
     [[nodiscard]] static const Http2StreamFactoryOps &ops() noexcept;
 
@@ -26,6 +27,7 @@ private:
                                                     Http2Connection &conn) noexcept;
 
     const HttpServerOptions *http_options_ = nullptr;
+    const HttpHandler *handler_ = nullptr;
 };
 
 } // namespace fiber::http
