@@ -7,6 +7,7 @@
 
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
+#include "HeaderMap.h"
 #include "HttpExchange.h"
 #include "HttpHeaderHash.h"
 #include "Http2Stream.h"
@@ -26,8 +27,11 @@ public:
     [[nodiscard]] const HttpExchange &exchange() const noexcept { return exchange_; }
 
 private:
+    using PseudoHeaderHandler = common::IoErr (*)(ServerHttp2Request &, std::string_view value) noexcept;
+
     static const Http2Stream::Ops &stream_ops() noexcept;
     static const Http2HpackDecoder::Ops &decoder_ops() noexcept;
+    static const HeaderMap<PseudoHeaderHandler> &pseudo_header_handler_map() noexcept;
     ServerHttp2Request(std::uint32_t stream_id, Http2Connection &conn, const HttpServerOptions &http_options) noexcept;
     static common::IoErr on_header_block_start(void *owner, Http2HpackDecoder::Sink &sink) noexcept;
     static common::IoErr on_header_block_complete(void *owner, bool end_stream) noexcept;
@@ -43,6 +47,10 @@ private:
                                       std::string_view &out) noexcept;
     static common::IoErr on_value_huffman(void *owner, const std::uint8_t *data, std::size_t len,
                                           std::string_view &out) noexcept;
+    static common::IoErr handle_method(ServerHttp2Request &request, std::string_view value) noexcept;
+    static common::IoErr handle_path(ServerHttp2Request &request, std::string_view value) noexcept;
+    static common::IoErr handle_scheme(ServerHttp2Request &request, std::string_view value) noexcept;
+    static common::IoErr handle_authority(ServerHttp2Request &request, std::string_view value) noexcept;
     [[nodiscard]] common::IoErr materialize_name_raw(const std::uint8_t *data, std::size_t len,
                                                      Http2HpackDecoder::NameView &out) noexcept;
     [[nodiscard]] common::IoErr materialize_name_huffman(const std::uint8_t *data, std::size_t len,
@@ -51,6 +59,10 @@ private:
                                                       std::string_view &out) noexcept;
     [[nodiscard]] common::IoErr materialize_value_huffman(const std::uint8_t *data, std::size_t len,
                                                           std::string_view &out) noexcept;
+    [[nodiscard]] common::IoErr commit_field(std::string_view name, std::uint64_t name_hash,
+                                             std::string_view value) noexcept;
+    [[nodiscard]] common::IoErr commit_regular_header(std::string_view name, std::uint64_t name_hash,
+                                                      std::string_view value) noexcept;
     [[nodiscard]] std::string_view copy_to_pool(const std::uint8_t *data, std::size_t len) noexcept;
     [[nodiscard]] std::string_view copy_to_pool(std::string_view value) noexcept;
 
