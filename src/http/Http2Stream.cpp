@@ -5,10 +5,14 @@
 
 namespace fiber::http {
 
-Http2Stream::Http2Stream(std::uint32_t stream_id, void *owner, DestroyOwnerFn destroy_owner) noexcept :
-    stream_id_(stream_id), owner_(owner), destroy_owner_(destroy_owner) {
+Http2Stream::Http2Stream(std::uint32_t stream_id, void *owner, const Ops &ops) noexcept :
+    stream_id_(stream_id), owner_(owner), ops_(&ops) {
     FIBER_ASSERT(owner_ != nullptr);
-    FIBER_ASSERT(destroy_owner_ != nullptr);
+    FIBER_ASSERT(ops_ != nullptr);
+    FIBER_ASSERT(ops_->on_destroy != nullptr);
+    FIBER_ASSERT(ops_->on_header_block_start != nullptr);
+    FIBER_ASSERT(ops_->on_header_block_complete != nullptr);
+    FIBER_ASSERT(ops_->on_body != nullptr);
 }
 
 common::IoErr Http2Stream::on_headers_payload_recv(const mem::IoBuf &payload, std::size_t offset, std::size_t length,
@@ -23,8 +27,35 @@ common::IoErr Http2Stream::on_headers_payload_recv(const mem::IoBuf &payload, st
         return common::IoErr::Invalid;
     }
 
-    (void)payload;
-    // TODO: decode/process received header block fragments.
+    if (!remote_header_block_open_) {
+        if (!conn_) {
+            return common::IoErr::Invalid;
+        }
+        Http2HpackDecoder::Sink sink;
+        common::IoErr err = ops_->on_header_block_start(owner_, sink);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+        if (!sink.ops) {
+            return common::IoErr::Invalid;
+        }
+        conn_->inbound_hpack_decoder().begin_block(sink.ctx, sink.ops);
+        remote_header_block_open_ = true;
+    }
+
+    if (payload.readable() != 0) {
+        common::IoErr err = conn_->inbound_hpack_decoder().decode(payload.readable_data(), payload.readable(), end_headers);
+        if (err != common::IoErr::None) {
+            remote_header_block_open_ = false;
+            return err;
+        }
+    } else if (end_headers) {
+        common::IoErr err = conn_->inbound_hpack_decoder().decode(nullptr, 0, true);
+        if (err != common::IoErr::None) {
+            remote_header_block_open_ = false;
+            return err;
+        }
+    }
 
     if (trailer_block) {
         remote_trailer_ = true;
@@ -32,13 +63,20 @@ common::IoErr Http2Stream::on_headers_payload_recv(const mem::IoBuf &payload, st
     if (end_headers && !remote_end_headers_) {
         remote_end_headers_ = true;
     }
+    if (end_headers) {
+        remote_header_block_open_ = false;
+        common::IoErr err = ops_->on_header_block_complete(owner_, end_stream);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+    }
     if (end_stream) {
         remote_end_stream_ = true;
     }
     return common::IoErr::None;
 }
 
-common::IoErr Http2Stream::on_data_payload_recv(const mem::IoBuf &payload, std::size_t offset, std::size_t length,
+common::IoErr Http2Stream::on_data_payload_recv(mem::IoBuf payload, std::size_t offset, std::size_t length,
                                                 bool end_stream) noexcept {
     if (remote_rst_ || local_rst_ || remote_end_stream_ || remote_trailer_ || !remote_end_headers_) {
         return common::IoErr::Invalid;
@@ -50,8 +88,10 @@ common::IoErr Http2Stream::on_data_payload_recv(const mem::IoBuf &payload, std::
         return common::IoErr::Invalid;
     }
 
-    (void)payload;
-    // TODO: consume/process received DATA payload.
+    common::IoErr err = ops_->on_body(owner_, std::move(payload), end_stream);
+    if (err != common::IoErr::None) {
+        return err;
+    }
 
     if (end_stream) {
         remote_end_stream_ = true;
@@ -105,12 +145,12 @@ void Http2Stream::release() noexcept {
     --ref_count_;
     if (ready_for_destruction()) {
         void *owner = owner_;
-        DestroyOwnerFn destroy_owner = destroy_owner_;
+        const Ops *ops = ops_;
         owner_ = nullptr;
-        destroy_owner_ = nullptr;
+        ops_ = nullptr;
         FIBER_ASSERT(owner != nullptr);
-        FIBER_ASSERT(destroy_owner != nullptr);
-        destroy_owner(owner);
+        FIBER_ASSERT(ops != nullptr);
+        ops->on_destroy(owner);
     }
 }
 

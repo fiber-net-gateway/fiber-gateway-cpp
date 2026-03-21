@@ -7,6 +7,7 @@
 #include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
 #include "../common/mem/IoBuf.h"
+#include "Http2HpackDecoder.h"
 #include "Http2Protocol.h"
 
 namespace fiber::http {
@@ -15,7 +16,12 @@ class Http2Connection;
 
 class Http2Stream {
 public:
-    using DestroyOwnerFn = void (*)(void *) noexcept;
+    struct Ops {
+        void (*on_destroy)(void *owner) noexcept = nullptr;
+        common::IoErr (*on_header_block_start)(void *owner, Http2HpackDecoder::Sink &sink) noexcept = nullptr;
+        common::IoErr (*on_header_block_complete)(void *owner, bool end_stream) noexcept = nullptr;
+        common::IoErr (*on_body)(void *owner, mem::IoBuf &&buf, bool end_stream) noexcept = nullptr;
+    };
 
     class Lease {
     public:
@@ -82,7 +88,7 @@ public:
     Http2Stream(Http2Stream &&) = delete;
     Http2Stream &operator=(Http2Stream &&) = delete;
 
-    Http2Stream(std::uint32_t stream_id, void *owner, DestroyOwnerFn destroy_owner) noexcept;
+    Http2Stream(std::uint32_t stream_id, void *owner, const Ops &ops) noexcept;
 
     [[nodiscard]] std::uint32_t stream_id() const noexcept { return stream_id_; }
     [[nodiscard]] void *owner() noexcept { return owner_; }
@@ -104,7 +110,7 @@ public:
 
     common::IoErr on_headers_payload_recv(const mem::IoBuf &payload, std::size_t offset, std::size_t length,
                                           bool end_headers, bool end_stream, bool trailer_block) noexcept;
-    common::IoErr on_data_payload_recv(const mem::IoBuf &payload, std::size_t offset, std::size_t length,
+    common::IoErr on_data_payload_recv(mem::IoBuf payload, std::size_t offset, std::size_t length,
                                        bool end_stream) noexcept;
     void on_rst_recv(Http2ErrorCode code, common::IoErr result = common::IoErr::Canceled) noexcept;
     common::IoErr close_rst(Http2ErrorCode code, common::IoErr result = common::IoErr::Canceled) noexcept;
@@ -135,10 +141,11 @@ private:
     std::int32_t send_window_ = 65535;
     common::IntrusiveListHook owned_hook_{};
     void *owner_ = nullptr;
-    DestroyOwnerFn destroy_owner_ = nullptr;
+    const Ops *ops_ = nullptr;
     std::uint32_t ref_count_ = 1;
     bool attached_to_connection_ = false;
     common::IoErr close_reason_ = common::IoErr::None;
+    bool remote_header_block_open_ = false;
 
     friend class Http2Connection;
 };

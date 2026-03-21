@@ -20,6 +20,7 @@ public:
 
 private:
     explicit ClientHttp2Push(std::uint32_t stream_id, Http2Connection &conn) noexcept;
+    static const Http2Stream::Ops &stream_ops() noexcept;
     static void destroy_owner(void *owner) noexcept;
 
     [[maybe_unused]] Http2Connection *conn_ = nullptr;

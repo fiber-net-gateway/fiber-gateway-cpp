@@ -44,6 +44,11 @@ struct Http2HuffmanDecodeState {
     std::size_t len,
     Http2HuffmanLowerMode lower_mode = Http2HuffmanLowerMode::None) noexcept;
 
+[[nodiscard]] std::size_t http2_huffman_decoded_length(
+    const std::uint8_t *src,
+    std::size_t len,
+    bool *ok = nullptr) noexcept;
+
 [[nodiscard]] Http2HuffmanEncodeResult http2_huffman_encode(
     const std::uint8_t *src,
     std::size_t len,

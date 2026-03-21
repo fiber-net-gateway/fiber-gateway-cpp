@@ -264,6 +264,34 @@ std::size_t http2_huffman_encoded_length(const std::uint8_t *src, std::size_t le
     return (bit_length + 7U) >> 3U;
 }
 
+std::size_t http2_huffman_decoded_length(const std::uint8_t *src, std::size_t len, bool *ok) noexcept {
+    Http2HuffmanDecodeState state;
+    std::array<std::uint8_t, 64> scratch{};
+    std::size_t total = 0;
+    std::size_t offset = 0;
+    bool valid = true;
+
+    while (offset < len) {
+        Http2HuffmanDecodeResult result =
+            http2_huffman_decode(state, src + offset, len - offset, scratch.data(), scratch.size(), true);
+        total += result.written;
+        offset += result.consumed;
+        if (result.code == Http2HuffmanCode::Ok) {
+            break;
+        }
+        if (result.code == Http2HuffmanCode::OutputFull) {
+            continue;
+        }
+        valid = false;
+        break;
+    }
+
+    if (ok) {
+        *ok = valid;
+    }
+    return valid ? total : 0;
+}
+
 Http2HuffmanEncodeResult http2_huffman_encode(const std::uint8_t *src, std::size_t len, std::uint8_t *dst,
                                               std::size_t dst_cap, Http2HuffmanLowerMode lower_mode) noexcept {
     std::uint64_t bit_buffer = 0;

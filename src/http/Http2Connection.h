@@ -18,7 +18,7 @@
 #include "../common/NonMovable.h"
 #include "../common/mem/IoBuf.h"
 #include "Http2Protocol.h"
-#include "Http2HpackDynamicTable.h"
+#include "Http2HpackDecoder.h"
 #include "Http2SendingEntryQueue.h"
 #include "Http2Stream.h"
 #include "Http2StreamFactory.h"
@@ -100,8 +100,8 @@ protected:
     [[nodiscard]] bool peer_enable_push() const noexcept { return peer_enable_push_; }
     [[nodiscard]] bool has_stream(std::uint32_t stream_id) const noexcept { return streams_.find(stream_id) != nullptr; }
     [[nodiscard]] bool send_loop_exited() const noexcept { return !send_loop_running_; }
-    [[nodiscard]] Http2HpackDynamicTable &dynamic_table() noexcept { return dynamic_table_; }
-    [[nodiscard]] const Http2HpackDynamicTable &dynamic_table() const noexcept { return dynamic_table_; }
+    [[nodiscard]] Http2HpackDecoder &inbound_hpack_decoder() noexcept { return inbound_hpack_decoder_; }
+    [[nodiscard]] const Http2HpackDecoder &inbound_hpack_decoder() const noexcept { return inbound_hpack_decoder_; }
     fiber::async::Task<void> stop_and_join_send_loop(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
 private:
@@ -183,7 +183,7 @@ private:
     void *stream_factory_ctx_ = nullptr;
     const Http2StreamFactoryOps stream_factory_ops_{};
     Http2StreamTable streams_;
-    Http2HpackDynamicTable dynamic_table_;
+    Http2HpackDecoder inbound_hpack_decoder_;
     std::uint32_t peer_advertised_max_concurrent_streams_ = 100;
     std::uint32_t last_peer_stream_id_ = 0;
     std::uint32_t last_local_stream_id_ = 0;

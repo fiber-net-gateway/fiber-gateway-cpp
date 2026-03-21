@@ -209,8 +209,8 @@ bool Http2HpackDynamicTable::find_exact(std::string_view name, std::string_view 
     return false;
 }
 
-bool Http2HpackDynamicTable::get_by_index(std::uint32_t dynamic_index, DynamicEntryView &view) const noexcept {
-    view = DynamicEntryView{};
+bool Http2HpackDynamicTable::get_by_index(std::uint32_t dynamic_index, TableEntryView &view) const noexcept {
+    view = TableEntryView{};
     if (dynamic_index == 0 || dynamic_index > count_ || !entries_ || !bytes_) {
         return false;
     }

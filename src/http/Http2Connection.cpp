@@ -130,7 +130,7 @@ Http2Connection::Http2Connection(std::unique_ptr<HttpTransport> transport, Optio
     peer_header_table_size_ = kDefaultHeaderTableSize;
     peer_max_outbound_frame_size_ = options_.max_frame_size;
     FIBER_ASSERT(streams_.init(configured_max_active_streams()));
-    FIBER_ASSERT(dynamic_table_.init(peer_header_table_size_));
+    FIBER_ASSERT(inbound_hpack_decoder_.init());
 }
 
 Http2Connection::~Http2Connection() {
@@ -433,8 +433,7 @@ common::IoErr Http2Connection::handle_data_payload(const FrameHeader &fhr, const
         if (!payload && deliver_len != 0) {
             return common::IoErr::NoMem;
         }
-        common::IoErr err =
-                stream->on_data_payload_recv(deliver_len != 0 ? payload : buf, data_offset, logical_total, end_stream);
+        common::IoErr err = stream->on_data_payload_recv(std::move(payload), data_offset, logical_total, end_stream);
         if (err != common::IoErr::None) {
             handle_stream_error(fhr.stream_id, Http2ErrorCode::StreamClosed, err);
             clear_inbound_stream();
