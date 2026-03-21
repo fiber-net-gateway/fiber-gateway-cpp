@@ -130,7 +130,7 @@ Http2Connection::Http2Connection(std::unique_ptr<HttpTransport> transport, Optio
     peer_header_table_size_ = kDefaultHeaderTableSize;
     peer_max_outbound_frame_size_ = options_.max_frame_size;
     FIBER_ASSERT(streams_.init(configured_max_active_streams()));
-    FIBER_ASSERT(inbound_hpack_decoder_.init());
+    FIBER_ASSERT(inbound_hpack_decoder_.init(kDefaultHeaderTableSize, options_.max_hpack_string_size));
 }
 
 Http2Connection::~Http2Connection() {

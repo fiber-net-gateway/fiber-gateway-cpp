@@ -207,3 +207,25 @@ TEST(Http2HpackDecoderTest, DecodesHuffmanLiteralFieldViaOwnerCallbacks) {
     EXPECT_EQ(recorder.events[1].kind, DecodedEvent::Kind::ValueHuffman);
     EXPECT_EQ(recorder.events[1].value, "bar");
 }
+
+TEST(Http2HpackDecoderTest, RejectsLiteralStringLongerThanConfiguredLimit) {
+    fiber::http::Http2HpackDecoder decoder;
+    ASSERT_TRUE(decoder.init(4096U, 2U));
+
+    DecoderRecorder recorder;
+    decoder.begin_block(&recorder, &DecoderRecorder::ops());
+
+    const std::uint8_t block[] = {0x40, 0x03, 'f', 'o', 'o', 0x01, 'x'};
+    EXPECT_EQ(decoder.decode(block, sizeof(block), true), fiber::common::IoErr::Invalid);
+}
+
+TEST(Http2HpackDecoderTest, RejectsIndexedNameLongerThanConfiguredLimit) {
+    fiber::http::Http2HpackDecoder decoder;
+    ASSERT_TRUE(decoder.init(4096U, 2U));
+
+    DecoderRecorder recorder;
+    decoder.begin_block(&recorder, &DecoderRecorder::ops());
+
+    const std::uint8_t block[] = {0x01, 0x01, 'x'};
+    EXPECT_EQ(decoder.decode(block, sizeof(block), true), fiber::common::IoErr::Invalid);
+}

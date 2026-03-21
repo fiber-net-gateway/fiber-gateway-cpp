@@ -12,21 +12,18 @@ struct OwnedStreamHolder {
         destroyed_flag(destroyed), stream(stream_id, this, ops()) {}
 
     static const fiber::http::Http2Stream::Ops &ops() noexcept {
-        static const fiber::http::Http2HpackDecoder::Ops kDecoderOps{};
         static const fiber::http::Http2Stream::Ops kOps{
             &OwnedStreamHolder::destroy_owner,
             &OwnedStreamHolder::on_header_block_start,
             &OwnedStreamHolder::on_header_block_complete,
             &OwnedStreamHolder::on_body,
         };
-        (void)kDecoderOps;
         return kOps;
     }
     static void destroy_owner(void *owner) noexcept { delete static_cast<OwnedStreamHolder *>(owner); }
     static fiber::common::IoErr on_header_block_start(void *, fiber::http::Http2HpackDecoder::Sink &sink) noexcept {
-        static const fiber::http::Http2HpackDecoder::Ops kDecoderOps{};
         sink.ctx = nullptr;
-        sink.ops = &kDecoderOps;
+        sink.ops = &decoder_ops();
         return fiber::common::IoErr::None;
     }
     static fiber::common::IoErr on_header_block_complete(void *, bool) noexcept {
@@ -34,6 +31,43 @@ struct OwnedStreamHolder {
     }
     static fiber::common::IoErr on_body(void *, fiber::mem::IoBuf &&, bool) noexcept {
         return fiber::common::IoErr::None;
+    }
+    static fiber::common::IoErr on_indexed_field(void *, fiber::http::Http2HpackDecoder::TableEntryView) noexcept {
+        return fiber::common::IoErr::None;
+    }
+    static fiber::common::IoErr on_indexed_name(void *, std::string_view, std::uint64_t) noexcept {
+        return fiber::common::IoErr::None;
+    }
+    static fiber::common::IoErr on_name_raw(void *, const std::uint8_t *, std::size_t,
+                                            fiber::http::Http2HpackDecoder::NameView &out) noexcept {
+        out = {};
+        return fiber::common::IoErr::None;
+    }
+    static fiber::common::IoErr on_name_huffman(void *, const std::uint8_t *, std::size_t,
+                                                fiber::http::Http2HpackDecoder::NameView &out) noexcept {
+        out = {};
+        return fiber::common::IoErr::None;
+    }
+    static fiber::common::IoErr on_value_raw(void *, const std::uint8_t *, std::size_t,
+                                             std::string_view &out) noexcept {
+        out = {};
+        return fiber::common::IoErr::None;
+    }
+    static fiber::common::IoErr on_value_huffman(void *, const std::uint8_t *, std::size_t,
+                                                 std::string_view &out) noexcept {
+        out = {};
+        return fiber::common::IoErr::None;
+    }
+    static const fiber::http::Http2HpackDecoder::Ops &decoder_ops() noexcept {
+        static const fiber::http::Http2HpackDecoder::Ops kOps{
+            &OwnedStreamHolder::on_indexed_field,
+            &OwnedStreamHolder::on_indexed_name,
+            &OwnedStreamHolder::on_name_raw,
+            &OwnedStreamHolder::on_name_huffman,
+            &OwnedStreamHolder::on_value_raw,
+            &OwnedStreamHolder::on_value_huffman,
+        };
+        return kOps;
     }
 
     ~OwnedStreamHolder() {

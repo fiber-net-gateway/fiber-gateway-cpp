@@ -44,7 +44,8 @@ public:
 
     Http2HpackDecoder() noexcept = default;
 
-    [[nodiscard]] bool init(std::uint32_t max_dynamic_table_size = 4096U) noexcept;
+    [[nodiscard]] bool init(std::uint32_t max_dynamic_table_size = 4096U,
+                            std::uint32_t max_string_size = 64 * 1024U) noexcept;
     void release() noexcept;
     void begin_block(void *ctx, const Ops *ops) noexcept;
     [[nodiscard]] common::IoErr decode(const std::uint8_t *data, std::size_t len, bool end_block) noexcept;
@@ -77,9 +78,11 @@ private:
     [[nodiscard]] common::IoErr handle_string_complete() noexcept;
     [[nodiscard]] common::IoErr handle_literal_value_start() noexcept;
     [[nodiscard]] common::IoErr apply_table_size_update(std::uint32_t size) noexcept;
+    [[nodiscard]] common::IoErr prepare_string_accumulator(std::uint32_t string_length, State data_state) noexcept;
     [[nodiscard]] bool resolve_index(std::uint32_t index, TableEntryView &entry) const noexcept;
     [[nodiscard]] bool ensure_scratch_capacity(std::size_t size) noexcept;
     [[nodiscard]] bool ensure_name_storage_capacity(std::size_t size) noexcept;
+    void reset_block_state() noexcept;
     void reset_string_accumulator() noexcept;
     void finish_literal_field() noexcept;
 
@@ -89,6 +92,7 @@ private:
     std::uint32_t scratch_cap_ = 0;
     std::uint32_t name_storage_cap_ = 0;
     std::uint32_t max_dynamic_table_size_ = 4096U;
+    std::uint32_t max_string_size_ = 64 * 1024U;
     void *ctx_ = nullptr;
     const Ops *ops_ = nullptr;
     State state_ = State::Ready;
