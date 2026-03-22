@@ -86,6 +86,8 @@ private:
     bool request_head_received_ = false;
     bool handler_started_ = false;
     bool handler_done_ = false;
+    bool response_headers_sent_ = false;
+    bool response_finished_ = false;
     std::string_view pending_name_;
     std::uint64_t pending_name_hash_ = 0;
     bool pending_name_owned_ = false;

@@ -120,8 +120,14 @@ Http2Connection::Http2Connection(std::unique_ptr<HttpTransport> transport, Optio
     options_(std::move(options)),
     stream_factory_ctx_(stream_factory_ctx),
     stream_factory_ops_(stream_factory_ops),
+    outbound_hpack_encoder_({
+        .catalog = options_.outbound_hpack_catalog,
+        .max_dynamic_table_size = kDefaultHeaderTableSize,
+        .max_string_size = options_.max_hpack_string_size,
+    }),
     send_queue_(options_.max_free_send_entries) {
     FIBER_ASSERT(stream_factory_ctx_ != nullptr);
+    FIBER_ASSERT(options_.outbound_hpack_catalog != nullptr);
     FIBER_ASSERT(stream_factory_ops_.create_local_stream != nullptr);
     FIBER_ASSERT(stream_factory_ops_.create_peer_stream != nullptr);
     peer_advertised_max_concurrent_streams_ = options_.max_peer_concurrent_streams;
@@ -131,6 +137,7 @@ Http2Connection::Http2Connection(std::unique_ptr<HttpTransport> transport, Optio
     peer_max_outbound_frame_size_ = options_.max_frame_size;
     FIBER_ASSERT(streams_.init(configured_max_active_streams()));
     FIBER_ASSERT(inbound_hpack_decoder_.init(kDefaultHeaderTableSize, options_.max_hpack_string_size));
+    FIBER_ASSERT(outbound_hpack_encoder_.init());
 }
 
 Http2Connection::~Http2Connection() {
@@ -762,6 +769,7 @@ common::IoErr Http2Connection::apply_settings_parameter(std::uint16_t id, std::u
     switch (id) {
         case kSettingsHeaderTableSize:
             peer_header_table_size_ = value;
+            outbound_hpack_encoder_.update_max_dynamic_table_size(value);
             return common::IoErr::None;
         case kSettingsEnablePush:
             if (value > 1) {
@@ -1327,6 +1335,34 @@ common::IoErr Http2Connection::enqueue_send_entry(SendEntry *entry) noexcept {
         return stop_sending_requested_ ? stop_sending_reason_ : common::IoErr::Canceled;
     }
     return result;
+}
+
+common::IoErr Http2Connection::submit_framed_chain(Http2Stream &stream, mem::IoBufChain &&chain,
+                                                   bool end_stream) noexcept {
+    if (chain.readable_bytes() == 0) {
+        return common::IoErr::Invalid;
+    }
+
+    SendEntry *entry = acquire_send_entry();
+    if (!entry) {
+        return common::IoErr::NoMem;
+    }
+
+    entry->payload_ptr()->set_chain(std::move(chain));
+    entry->total_bytes = entry->payload_ptr()->readable_bytes();
+    entry->logical_bytes = entry->total_bytes;
+
+    common::IoErr err = enqueue_send_entry(entry);
+    if (err != common::IoErr::None) {
+        release_send_entry(entry);
+        return err;
+    }
+
+    if (end_stream) {
+        stream.local_end_stream_ = true;
+        try_release_stream(stream);
+    }
+    return common::IoErr::None;
 }
 
 void Http2Connection::finish_send_entry(SendEntry *entry, common::IoErr result) noexcept {

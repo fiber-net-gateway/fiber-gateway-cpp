@@ -21,7 +21,13 @@
 #include "common/IoError.h"
 #include "event/EventLoopGroup.h"
 #include "http/Http2Connection.h"
+#include "http/Http2HeadersFrameEncoder.h"
+#include "http/Http2HpackDecoder.h"
+#include "http/Http2HpackEncodeCatalog.h"
+#include "http/Http2HpackEncoder.h"
+#include "http/Http2HpackHuffman.h"
 #include "http/Http2Stream.h"
+#include "http/ServerRequestFactory.h"
 #include "Http2TestSupport.h"
 
 namespace {
@@ -29,6 +35,22 @@ namespace {
 using fiber::async::DetachedTask;
 
 constexpr std::string_view kClientConnectionPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+const fiber::http::Http2HpackEncodeCatalog &test_http2_encode_catalog() {
+    static fiber::http::Http2HpackEncodeCatalog catalog;
+    static const bool initialized = [] {
+        EXPECT_TRUE(catalog.init({}));
+        return true;
+    }();
+    (void)initialized;
+    return catalog;
+}
+
+fiber::http::Http2Connection::Options
+with_test_hpack_catalog(fiber::http::Http2Connection::Options options) {
+    options.outbound_hpack_catalog = &test_http2_encode_catalog();
+    return options;
+}
 
 class FakeHttpTransport final : public fiber::http::HttpTransport {
 public:
@@ -131,6 +153,7 @@ public:
         ++close_count_;
     }
     void release_reads() noexcept { reads_blocked_ = false; }
+    void release_eof() noexcept { hold_eof_ = false; }
 
     [[nodiscard]] bool valid() const noexcept override { return !closed_; }
     [[nodiscard]] int fd() const noexcept override { return -1; }
@@ -174,7 +197,7 @@ struct ObservedChunk {
 class RecordingHttp2Connection final : public fiber::http::Http2Connection {
 public:
     RecordingHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport, Options options) :
-        fiber::http::Http2Connection(std::move(transport), options, &test_http2_stream_factory(),
+        fiber::http::Http2Connection(std::move(transport), with_test_hpack_catalog(options), &test_http2_stream_factory(),
                                      TestHttp2StreamFactory::ops()) {}
 
     const std::vector<ObservedChunk> &chunks() const noexcept { return chunks_; }
@@ -221,6 +244,12 @@ struct SendOutcome {
     std::string written;
 };
 
+struct ServerHeaderRunOutcome {
+    fiber::common::IoResult<void> result;
+    fiber::common::IoResult<void> header_result{};
+    std::string written;
+};
+
 struct ControlRunOutcome {
     fiber::common::IoResult<void> result;
     std::string written;
@@ -250,6 +279,196 @@ struct RetainedStreamOutcome {
 
 std::string iobuf_to_string(const fiber::mem::IoBuf &buf) {
     return std::string(reinterpret_cast<const char *>(buf.readable_data()), buf.readable());
+}
+
+std::vector<std::uint8_t> chain_to_bytes(fiber::mem::IoBufChain chain) {
+    std::vector<std::uint8_t> out;
+    out.reserve(chain.readable_bytes());
+    while (auto *front = chain.front()) {
+        if (front->readable() == 0) {
+            chain.drop_empty_front();
+            continue;
+        }
+        const std::uint8_t *data = front->readable_data();
+        out.insert(out.end(), data, data + front->readable());
+        chain.consume_and_compact(front->readable());
+    }
+    return out;
+}
+
+std::string build_headers_frame_bytes(std::uint32_t stream_id,
+                                      std::initializer_list<std::pair<std::string_view, std::string_view>> headers,
+                                      bool end_stream = false) {
+    fiber::http::Http2HpackEncodeCatalog catalog;
+    EXPECT_TRUE(catalog.init({}));
+
+    fiber::http::Http2HpackEncoder encoder({.catalog = &catalog, .huffman_threshold = 1024});
+    EXPECT_TRUE(encoder.init());
+
+    fiber::http::Http2HeadersFrameEncoder frame_encoder(encoder, {
+        .stream_id = stream_id,
+        .max_frame_size = 16384,
+        .first_frame_payload_cap = 1024,
+        .end_stream = end_stream,
+    });
+    EXPECT_EQ(frame_encoder.begin(), fiber::common::IoErr::None);
+    for (const auto &[name, value] : headers) {
+        EXPECT_EQ(frame_encoder.encode_field(name, fiber::http::http_header_name_hash(name), value),
+                  fiber::common::IoErr::None);
+    }
+
+    fiber::mem::IoBufChain out;
+    EXPECT_EQ(frame_encoder.finish(out), fiber::common::IoErr::None);
+    const auto bytes = chain_to_bytes(std::move(out));
+    return std::string(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+}
+
+struct DecodedHeaderBlock {
+    std::vector<std::pair<std::string, std::string>> fields;
+    std::string pending_name;
+    std::uint64_t pending_name_hash = 0;
+
+    static fiber::common::IoErr on_indexed_field(void *ctx, fiber::http::Http2HpackDecoder::TableEntryView entry) noexcept {
+        auto *self = static_cast<DecodedHeaderBlock *>(ctx);
+        self->fields.emplace_back(std::string(entry.name), std::string(entry.value));
+        return fiber::common::IoErr::None;
+    }
+
+    static fiber::common::IoErr on_indexed_name(void *ctx, std::string_view name, std::uint64_t name_hash) noexcept {
+        auto *self = static_cast<DecodedHeaderBlock *>(ctx);
+        self->pending_name.assign(name.data(), name.size());
+        self->pending_name_hash = name_hash;
+        return fiber::common::IoErr::None;
+    }
+
+    static fiber::common::IoErr on_name_raw(void *ctx, const std::uint8_t *data, std::size_t len) noexcept {
+        auto *self = static_cast<DecodedHeaderBlock *>(ctx);
+        self->pending_name.assign(reinterpret_cast<const char *>(data), len);
+        self->pending_name_hash = fiber::http::http_header_name_hash(self->pending_name);
+        return fiber::common::IoErr::None;
+    }
+
+    static fiber::common::IoErr on_name_huffman(void *ctx, const std::uint8_t *data, std::size_t len) noexcept {
+        auto *self = static_cast<DecodedHeaderBlock *>(ctx);
+        bool ok = false;
+        const std::size_t decoded_len = fiber::http::http2_huffman_decoded_length(data, len, &ok);
+        if (!ok) {
+            return fiber::common::IoErr::Invalid;
+        }
+        self->pending_name.assign(decoded_len, '\0');
+        fiber::http::Http2HuffmanDecodeState state;
+        auto result = fiber::http::http2_huffman_decode(
+            state, data, len, reinterpret_cast<std::uint8_t *>(self->pending_name.data()), decoded_len, true);
+        if (result.code != fiber::http::Http2HuffmanCode::Ok || result.written != decoded_len) {
+            return fiber::common::IoErr::Invalid;
+        }
+        self->pending_name_hash = fiber::http::http_header_name_hash(self->pending_name);
+        return fiber::common::IoErr::None;
+    }
+
+    static fiber::common::IoErr on_value_raw(void *ctx, const std::uint8_t *data, std::size_t len,
+                                             fiber::http::Http2HpackDecoder::FieldView *out) noexcept {
+        auto *self = static_cast<DecodedHeaderBlock *>(ctx);
+        std::string value(reinterpret_cast<const char *>(data), len);
+        self->fields.emplace_back(self->pending_name, std::move(value));
+        if (out) {
+            out->name = self->fields.back().first;
+            out->name_hash = self->pending_name_hash;
+            out->value = self->fields.back().second;
+        }
+        self->pending_name.clear();
+        self->pending_name_hash = 0;
+        return fiber::common::IoErr::None;
+    }
+
+    static fiber::common::IoErr on_value_huffman(void *ctx, const std::uint8_t *data, std::size_t len,
+                                                 fiber::http::Http2HpackDecoder::FieldView *out) noexcept {
+        auto *self = static_cast<DecodedHeaderBlock *>(ctx);
+        bool ok = false;
+        const std::size_t decoded_len = fiber::http::http2_huffman_decoded_length(data, len, &ok);
+        if (!ok) {
+            return fiber::common::IoErr::Invalid;
+        }
+        std::string value(decoded_len, '\0');
+        fiber::http::Http2HuffmanDecodeState state;
+        auto result = fiber::http::http2_huffman_decode(
+            state, data, len, reinterpret_cast<std::uint8_t *>(value.data()), decoded_len, true);
+        if (result.code != fiber::http::Http2HuffmanCode::Ok || result.written != decoded_len) {
+            return fiber::common::IoErr::Invalid;
+        }
+        self->fields.emplace_back(self->pending_name, std::move(value));
+        if (out) {
+            out->name = self->fields.back().first;
+            out->name_hash = self->pending_name_hash;
+            out->value = self->fields.back().second;
+        }
+        self->pending_name.clear();
+        self->pending_name_hash = 0;
+        return fiber::common::IoErr::None;
+    }
+
+    static const fiber::http::Http2HpackDecoder::Ops &ops() noexcept {
+        static const fiber::http::Http2HpackDecoder::Ops kOps{
+            &DecodedHeaderBlock::on_indexed_field,
+            &DecodedHeaderBlock::on_indexed_name,
+            &DecodedHeaderBlock::on_name_raw,
+            &DecodedHeaderBlock::on_name_huffman,
+            &DecodedHeaderBlock::on_value_raw,
+            &DecodedHeaderBlock::on_value_huffman,
+        };
+        return kOps;
+    }
+};
+
+struct ParsedHeadersFrames {
+    std::uint8_t first_flags = 0;
+    std::vector<std::uint8_t> header_block;
+};
+
+ParsedHeadersFrames collect_stream_headers_frames(std::string_view bytes, std::uint32_t stream_id) {
+    ParsedHeadersFrames parsed;
+    for (std::size_t pos = 0; pos + 9 <= bytes.size();) {
+        const auto *frame = reinterpret_cast<const std::uint8_t *>(bytes.data() + pos);
+        const std::uint32_t length = (static_cast<std::uint32_t>(frame[0]) << 16) |
+                                     (static_cast<std::uint32_t>(frame[1]) << 8) |
+                                     static_cast<std::uint32_t>(frame[2]);
+        if (pos + 9 + length > bytes.size()) {
+            break;
+        }
+        const std::uint8_t type = frame[3];
+        const std::uint8_t flags = frame[4];
+        const std::uint32_t frame_stream_id =
+            ((static_cast<std::uint32_t>(frame[5]) & 0x7fU) << 24) |
+            (static_cast<std::uint32_t>(frame[6]) << 16) |
+            (static_cast<std::uint32_t>(frame[7]) << 8) |
+            static_cast<std::uint32_t>(frame[8]);
+        if (frame_stream_id == stream_id &&
+            (type == static_cast<std::uint8_t>(fiber::http::Http2FrameType::Headers) ||
+             type == static_cast<std::uint8_t>(fiber::http::Http2FrameType::Continuation))) {
+            if (parsed.header_block.empty() &&
+                type == static_cast<std::uint8_t>(fiber::http::Http2FrameType::Headers)) {
+                parsed.first_flags = flags;
+            }
+            const auto *payload = frame + 9;
+            parsed.header_block.insert(parsed.header_block.end(), payload, payload + length);
+            if ((flags & 0x4U) != 0) {
+                break;
+            }
+        }
+        pos += 9 + length;
+    }
+    return parsed;
+}
+
+std::vector<std::pair<std::string, std::string>>
+decode_header_block(const std::vector<std::uint8_t> &header_block) {
+    fiber::http::Http2HpackDecoder decoder;
+    EXPECT_TRUE(decoder.init(4096, 64 * 1024));
+
+    DecodedHeaderBlock decoded;
+    decoder.begin_block(&decoded, &DecodedHeaderBlock::ops());
+    EXPECT_EQ(decoder.decode(header_block.data(), header_block.size(), true), fiber::common::IoErr::None);
+    return decoded.fields;
 }
 
 std::string make_frame(std::uint32_t length, std::uint8_t type, std::uint8_t flags, std::uint32_t stream_id,
@@ -409,11 +628,64 @@ RunOutcome execute_connection(std::vector<std::string> chunks, fiber::http::Http
     return outcome;
 }
 
+DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderRunOutcome>> promise,
+                                      std::vector<std::string> chunks,
+                                      fiber::http::Http2Connection::Options options) {
+    options = with_test_hpack_catalog(options);
+    auto transport = std::make_unique<FakeHttpTransport>(std::move(chunks), std::vector<size_t>{}, false, true);
+    FakeHttpTransport *fake_transport = transport.get();
+    fiber::http::HttpServerOptions http_options;
+    auto header_result = std::make_shared<fiber::common::IoResult<void>>();
+    fiber::http::HttpHandler handler =
+        [header_result, fake_transport](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        exchange.set_response_status(204);
+        exchange.set_response_header("server", "fiber");
+        *header_result = co_await exchange.send_response_header();
+        fake_transport->release_eof();
+        co_return;
+    };
+    fiber::http::ServerRequestFactory factory(http_options, handler);
+    fiber::http::Http2Connection connection(std::move(transport), options, &factory, fiber::http::ServerRequestFactory::ops());
+
+    ServerHeaderRunOutcome outcome;
+    outcome.result = co_await connection.run();
+    outcome.header_result = *header_result;
+    outcome.written = fake_transport->written();
+    promise->set_value(std::move(outcome));
+
+    fiber::event::EventLoop::current().stop();
+    co_return;
+}
+
+ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks,
+                                              fiber::http::Http2Connection::Options options = {}) {
+    fiber::event::EventLoopGroup group(1);
+    auto promise = std::make_shared<std::promise<ServerHeaderRunOutcome>>();
+    auto future = promise->get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [promise = std::move(promise), chunks = std::move(chunks), options]() mutable {
+        return run_http2_server_request(std::move(promise), std::move(chunks), options);
+    });
+
+    auto status = future.wait_for(std::chrono::seconds(2));
+    if (status != std::future_status::ready) {
+        group.stop();
+        group.join();
+        ADD_FAILURE() << "Timed out waiting for http2 server request task";
+        return {};
+    }
+
+    ServerHeaderRunOutcome outcome = future.get();
+    group.join();
+    return outcome;
+}
+
 class SendingHttp2Connection final : public fiber::http::Http2Connection {
 public:
     SendingHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport, FakeHttpTransport *fake_transport,
                            std::size_t expected_done, Options options = {}) :
-        fiber::http::Http2Connection(std::move(transport), options, &test_http2_stream_factory(),
+        fiber::http::Http2Connection(std::move(transport), with_test_hpack_catalog(options), &test_http2_stream_factory(),
                                      TestHttp2StreamFactory::ops()),
         fake_transport_(fake_transport),
         expected_done_(expected_done) {}
@@ -505,7 +777,7 @@ class ControlHttp2Connection final : public fiber::http::Http2Connection {
 public:
     ControlHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport, FakeHttpTransport *fake_transport,
                            Options options = {}) :
-        fiber::http::Http2Connection(std::move(transport), options, &test_http2_stream_factory(),
+        fiber::http::Http2Connection(std::move(transport), with_test_hpack_catalog(options), &test_http2_stream_factory(),
                                      TestHttp2StreamFactory::ops()),
         fake_transport_(fake_transport) {}
 
@@ -1391,6 +1663,44 @@ TEST(Http2ConnectionTest, SendsIoBufChainUsingWritev) {
     EXPECT_EQ(outcome.completions[0].written_bytes, 6U);
     EXPECT_EQ(outcome.completions[0].result, fiber::common::IoErr::None);
     EXPECT_EQ(outcome.written, "abcdef");
+}
+
+TEST(Http2ConnectionTest, ServerHandlerCanSendHeaderOnlyResponseHeaders) {
+    std::string request = std::string(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0x0, 0, {});
+    request += build_headers_frame_bytes(
+        1,
+        {
+            {":method", "GET"},
+            {":scheme", "https"},
+            {":path", "/"},
+            {":authority", "example.com"},
+        },
+        true);
+
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)});
+
+    ASSERT_TRUE(outcome.result.has_value());
+    ASSERT_TRUE(outcome.header_result.has_value());
+
+    ParsedHeadersFrames parsed = collect_stream_headers_frames(outcome.written, 1);
+    ASSERT_FALSE(parsed.header_block.empty());
+    EXPECT_EQ(parsed.first_flags & 0x1U, 0x1U);
+    EXPECT_EQ(parsed.first_flags & 0x4U, 0x4U);
+
+    const auto fields = decode_header_block(parsed.header_block);
+    ASSERT_FALSE(fields.empty());
+    EXPECT_EQ(fields[0].first, ":status");
+    EXPECT_EQ(fields[0].second, "204");
+
+    bool found_server = false;
+    for (const auto &field : fields) {
+        if (field.first == "server" && field.second == "fiber") {
+            found_server = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found_server);
 }
 
 TEST(Http2ConnectionTest, ClosingSendingNotifiesQueuedEntries) {
