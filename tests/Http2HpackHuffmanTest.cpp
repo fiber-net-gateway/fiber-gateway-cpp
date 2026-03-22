@@ -26,6 +26,7 @@ std::vector<std::uint8_t> encode_text(std::string_view text,
     const auto result = fiber::http::http2_huffman_encode(input.data(), input.size(), encoded.data(), encoded.size(),
                                                           lower_mode);
     EXPECT_EQ(result.code, fiber::http::Http2HuffmanCode::Ok);
+    EXPECT_EQ(result.consumed, input.size());
     EXPECT_EQ(result.written, encoded.size());
 
     return encoded;
@@ -114,6 +115,65 @@ TEST(Http2HpackHuffmanTest, ExactEncodeMatchesCheckedEncode) {
     EXPECT_EQ(encoded_exact, encoded_checked);
 }
 
+TEST(Http2HpackHuffmanTest, IncrementalEncodeMatchesExactEncode) {
+    constexpr std::string_view text = "server: nginx-1.25.1";
+    std::vector<std::uint8_t> input = as_bytes(text);
+    const std::vector<std::uint8_t> encoded_exact = encode_text_exact(text);
+    std::vector<std::uint8_t> encoded(encoded_exact.size());
+    fiber::http::Http2HuffmanEncodeState state;
+
+    std::size_t src_offset = 0;
+    std::size_t dst_offset = 0;
+    while (true) {
+        const std::size_t dst_cap = std::min<std::size_t>(5, encoded.size() - dst_offset);
+        const auto result = fiber::http::http2_huffman_encode_incremental(
+            state,
+            input.data() + src_offset,
+            input.size() - src_offset,
+            encoded.data() + dst_offset,
+            dst_cap,
+            true);
+
+        src_offset += result.consumed;
+        dst_offset += result.written;
+
+        if (result.code == fiber::http::Http2HuffmanCode::OutputFull) {
+            continue;
+        }
+
+        EXPECT_EQ(result.code, fiber::http::Http2HuffmanCode::Ok);
+        break;
+    }
+
+    EXPECT_EQ(src_offset, input.size());
+    EXPECT_EQ(dst_offset, encoded.size());
+    EXPECT_EQ(encoded, encoded_exact);
+}
+
+TEST(Http2HpackHuffmanTest, IncrementalEncodeCanPauseBeforeFinalFlush) {
+    constexpr std::string_view text = "www.example.com";
+    std::vector<std::uint8_t> input = as_bytes(text);
+    const std::size_t encoded_len = fiber::http::http2_huffman_encoded_length(input.data(), input.size());
+    std::vector<std::uint8_t> encoded(encoded_len);
+    fiber::http::Http2HuffmanEncodeState state;
+
+    const auto first = fiber::http::http2_huffman_encode_incremental(
+        state, input.data(), input.size(), encoded.data(), encoded_len - 1, true);
+    EXPECT_EQ(first.code, fiber::http::Http2HuffmanCode::OutputFull);
+    EXPECT_EQ(first.consumed, input.size());
+    EXPECT_EQ(first.written, encoded_len - 1);
+
+    const auto second = fiber::http::http2_huffman_encode_incremental(
+        state, input.data() + first.consumed, input.size() - first.consumed,
+        encoded.data() + first.written, encoded.size() - first.written, true);
+    EXPECT_EQ(second.code, fiber::http::Http2HuffmanCode::Ok);
+    EXPECT_EQ(second.consumed, 0u);
+    EXPECT_EQ(second.written, 1u);
+
+    const std::vector<std::uint8_t> encoded_exact = encode_text_exact(text);
+    EXPECT_EQ(encoded, encoded_exact);
+}
+
 TEST(Http2HpackHuffmanTest, ExactDecodeMatchesCheckedDecode) {
     const std::vector<std::uint8_t> encoded = encode_text("www.example.com");
 
@@ -176,6 +236,7 @@ TEST(Http2HpackHuffmanTest, EncodeFailsWhenOutputBufferIsTooSmall) {
     const auto result =
         fiber::http::http2_huffman_encode(input.data(), input.size(), encoded.data(), encoded.size());
     EXPECT_EQ(result.code, fiber::http::Http2HuffmanCode::OutputFull);
+    EXPECT_EQ(result.consumed, input.size());
     EXPECT_EQ(result.written, encoded.size());
 }
 

@@ -4,6 +4,7 @@
 #include <array>
 #include <cstring>
 
+#include "HttpHeaderHash.h"
 #include "Http2HpackHuffman.h"
 #include "Http2HpackStaticTable.h"
 
@@ -12,6 +13,77 @@ namespace fiber::http {
 namespace {
 
 constexpr std::size_t kIntegerScratchCap = 8;
+constexpr std::string_view kStatusName = ":status";
+constexpr std::uint64_t kStatusNameHash = http_header_name_hash(kStatusName);
+
+[[nodiscard]] std::string_view common_status_value(int status_code) noexcept {
+    switch (status_code) {
+        case 100:
+            return "100";
+        case 101:
+            return "101";
+        case 103:
+            return "103";
+        case 200:
+            return "200";
+        case 201:
+            return "201";
+        case 202:
+            return "202";
+        case 204:
+            return "204";
+        case 206:
+            return "206";
+        case 301:
+            return "301";
+        case 302:
+            return "302";
+        case 304:
+            return "304";
+        case 307:
+            return "307";
+        case 308:
+            return "308";
+        case 400:
+            return "400";
+        case 401:
+            return "401";
+        case 403:
+            return "403";
+        case 404:
+            return "404";
+        case 409:
+            return "409";
+        case 410:
+            return "410";
+        case 412:
+            return "412";
+        case 429:
+            return "429";
+        case 500:
+            return "500";
+        case 501:
+            return "501";
+        case 502:
+            return "502";
+        case 503:
+            return "503";
+        case 504:
+            return "504";
+        default:
+            return {};
+    }
+}
+
+[[nodiscard]] std::string_view format_status_value(int status_code, std::array<char, 3> &scratch) noexcept {
+    if (status_code < 100 || status_code > 999) {
+        return {};
+    }
+    scratch[0] = static_cast<char>('0' + ((status_code / 100) % 10));
+    scratch[1] = static_cast<char>('0' + ((status_code / 10) % 10));
+    scratch[2] = static_cast<char>('0' + (status_code % 10));
+    return {scratch.data(), scratch.size()};
+}
 
 } // namespace
 
@@ -59,6 +131,18 @@ common::IoErr Http2HpackEncoder::begin_block() noexcept {
         table_.acknowledge_table_size_update();
     }
     return common::IoErr::None;
+}
+
+common::IoErr Http2HpackEncoder::encode_status(int status_code) noexcept {
+    std::string_view value = common_status_value(status_code);
+    std::array<char, 3> scratch{};
+    if (value.empty()) {
+        value = format_status_value(status_code, scratch);
+    }
+    if (value.empty()) {
+        return common::IoErr::Invalid;
+    }
+    return encode_field(kStatusName, kStatusNameHash, value);
 }
 
 common::IoErr Http2HpackEncoder::encode_field(std::string_view name, std::uint64_t name_hash,

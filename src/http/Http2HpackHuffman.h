@@ -20,6 +20,7 @@ enum class Http2HuffmanCode : std::uint8_t {
 
 struct Http2HuffmanEncodeResult {
     Http2HuffmanCode code = Http2HuffmanCode::Ok;
+    std::size_t consumed = 0;
     std::size_t written = 0;
 };
 
@@ -39,6 +40,18 @@ struct Http2HuffmanDecodeState {
     }
 };
 
+struct Http2HuffmanEncodeState {
+    std::uint64_t bit_buffer = 0;
+    std::uint8_t pending_bits = 0;
+    bool finalizing = false;
+
+    void reset() noexcept {
+        bit_buffer = 0;
+        pending_bits = 0;
+        finalizing = false;
+    }
+};
+
 [[nodiscard]] std::size_t http2_huffman_encoded_length(
     const std::uint8_t *src,
     std::size_t len,
@@ -54,6 +67,15 @@ struct Http2HuffmanDecodeState {
     std::size_t len,
     std::uint8_t *dst,
     std::size_t dst_cap,
+    Http2HuffmanLowerMode lower_mode = Http2HuffmanLowerMode::None) noexcept;
+
+[[nodiscard]] Http2HuffmanEncodeResult http2_huffman_encode_incremental(
+    Http2HuffmanEncodeState &state,
+    const std::uint8_t *src,
+    std::size_t len,
+    std::uint8_t *dst,
+    std::size_t dst_cap,
+    bool last,
     Http2HuffmanLowerMode lower_mode = Http2HuffmanLowerMode::None) noexcept;
 
 [[nodiscard]] std::size_t http2_huffman_encode_exact(

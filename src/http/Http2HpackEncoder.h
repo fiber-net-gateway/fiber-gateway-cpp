@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
@@ -31,6 +32,7 @@ public:
     void update_max_dynamic_table_size(std::uint32_t size) noexcept;
 
     [[nodiscard]] common::IoErr begin_block() noexcept;
+    [[nodiscard]] common::IoErr encode_status(int status_code) noexcept;
     [[nodiscard]] common::IoErr encode_field(std::string_view name, std::uint64_t name_hash,
                                              std::string_view value) noexcept;
     [[nodiscard]] common::IoErr finish_block(mem::IoBufChain &out) noexcept;
