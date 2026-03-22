@@ -28,6 +28,35 @@ namespace {
 using fiber::async::DetachedTask;
 using namespace std::chrono_literals;
 
+fiber::async::Task<fiber::common::IoResult<void>> send_final_header(
+    fiber::http::HttpExchange &exchange,
+    int status_code,
+    const fiber::http::HttpHeaders *headers = nullptr,
+    fiber::http::ResponseBodyMode body_mode = fiber::http::ResponseBodyMode::Auto,
+    std::size_t content_length = 0,
+    fiber::http::ResponseConnectionMode connection_mode = fiber::http::ResponseConnectionMode::Auto,
+    bool end_stream = false) {
+    co_return co_await exchange.send_header({
+        .kind = fiber::http::OutgoingHeaderKind::Final,
+        .status_code = status_code,
+        .headers = headers,
+        .body_mode = body_mode,
+        .connection_mode = connection_mode,
+        .content_length = content_length,
+        .end_stream = end_stream,
+    });
+}
+
+fiber::async::Task<fiber::common::IoResult<void>> send_trailer_header(
+    fiber::http::HttpExchange &exchange,
+    const fiber::http::HttpHeaders *headers) {
+    co_return co_await exchange.send_header({
+        .kind = fiber::http::OutgoingHeaderKind::Trailer,
+        .headers = headers,
+        .end_stream = true,
+    });
+}
+
 std::string chain_to_string(fiber::mem::IoBufChain chain) {
     std::string out;
     while (auto *front = chain.front()) {
@@ -221,8 +250,14 @@ TEST(Http1ServerTest, BasicGet) {
 
     fiber::async::spawn(group.at(0), [&]() {
         auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-            exchange.set_response_header("Content-Type", "text/plain");
-            exchange.set_response_status(200);
+            fiber::http::HttpHeaders headers(exchange.pool());
+            headers.set("Content-Type", "text/plain");
+            auto header_result = co_await send_final_header(exchange, 200, &headers,
+                                                            fiber::http::ResponseBodyMode::ContentLength, 2, {},
+                                                            false);
+            if (!header_result) {
+                co_return;
+            }
             co_await exchange.write_body(reinterpret_cast<const uint8_t *>("ok"), 2, true);
             co_return;
         };
@@ -281,7 +316,12 @@ TEST(Http1ServerTest, CachesImportantRequestHeaderPointers) {
                             content_type->value_view() == "text/plain" && range &&
                             range->value_view() == "bytes=0-9" && if_range && if_range->value_view() == "\"etag\"" &&
                             expect && expect->value_view() == "100-continue";
-            exchange.set_response_status(ok ? 200 : 500);
+            auto header_result = co_await send_final_header(exchange, ok ? 200 : 500, nullptr,
+                                                            fiber::http::ResponseBodyMode::ContentLength,
+                                                            ok ? 2 : 3, {}, false);
+            if (!header_result) {
+                co_return;
+            }
             co_await exchange.write_body(reinterpret_cast<const uint8_t *>(ok ? "ok" : "bad"), ok ? 2 : 3, true);
             co_return;
         };
@@ -343,9 +383,8 @@ TEST(Http1ServerTest, CanSendContinueHeaderBeforeFinalResponse) {
             if (!continue_result) {
                 co_return;
             }
-            exchange.set_response_status(204);
-            exchange.set_response_content_length(0);
-            co_await exchange.send_response_header();
+            co_await send_final_header(exchange, 204, nullptr, fiber::http::ResponseBodyMode::ContentLength, 0, {},
+                                       true);
             co_return;
         };
         return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
@@ -397,7 +436,12 @@ TEST(Http1ServerTest, WriteBodyWithoutExplicitHeaderAutoUsesChunkedForStreaming)
 
     fiber::async::spawn(group.at(0), [&]() {
         auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-            exchange.set_response_status(200);
+            auto header_result =
+                co_await send_final_header(exchange, 200, nullptr, fiber::http::ResponseBodyMode::Chunked, 0, {},
+                                           false);
+            if (!header_result) {
+                co_return;
+            }
             auto first = co_await exchange.write_body(reinterpret_cast<const uint8_t *>("he"), 2, false);
             if (!first) {
                 co_return;
@@ -442,7 +486,12 @@ TEST(Http1ServerTest, WriteBodyWithoutExplicitHeaderAutoUsesContentLengthForLarg
     fiber::async::spawn(group.at(0), [&]() {
         auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
             std::string body(256, 'x');
-            exchange.set_response_status(200);
+            auto header_result = co_await send_final_header(exchange, 200, nullptr,
+                                                            fiber::http::ResponseBodyMode::ContentLength, body.size(),
+                                                            {}, false);
+            if (!header_result) {
+                co_return;
+            }
             auto write_result =
                     co_await exchange.write_body(reinterpret_cast<const uint8_t *>(body.data()), body.size(), true);
             if (!write_result) {
@@ -491,10 +540,8 @@ TEST(Http1ServerTest, ChunkedPost) {
             for (;;) {
                 auto read_result = co_await exchange.read_body(64);
                 if (!read_result) {
-                    exchange.set_response_close();
-                    exchange.set_response_status(400);
-                    exchange.set_response_content_length(0);
-                    co_await exchange.send_response_header();
+                    co_await send_final_header(exchange, 400, nullptr, fiber::http::ResponseBodyMode::ContentLength, 0,
+                                               fiber::http::ResponseConnectionMode::Close, true);
                     co_return;
                 }
                 if (read_result->data_chain.readable_bytes() > 0) {
@@ -504,10 +551,11 @@ TEST(Http1ServerTest, ChunkedPost) {
                     break;
                 }
             }
-            exchange.set_response_header("Content-Type", "text/plain");
-            exchange.set_response_status(200);
-            exchange.set_response_content_length(body.size());
-            auto header_result = co_await exchange.send_response_header();
+            fiber::http::HttpHeaders headers(exchange.pool());
+            headers.set("Content-Type", "text/plain");
+            auto header_result = co_await send_final_header(exchange, 200, &headers,
+                                                            fiber::http::ResponseBodyMode::ContentLength, body.size(),
+                                                            {}, false);
             if (!header_result) {
                 co_return;
             }
@@ -581,9 +629,9 @@ TEST(Http1ServerTest, WriteBodyAcceptsBodyChunk) {
                 }
             }
 
-            exchange.set_response_status(200);
-            exchange.set_response_content_length(9);
-            auto header_result = co_await exchange.send_response_header();
+            auto header_result = co_await send_final_header(exchange, 200, nullptr,
+                                                            fiber::http::ResponseBodyMode::ContentLength, 9, {},
+                                                            false);
             if (!header_result) {
                 co_return;
             }
@@ -642,10 +690,8 @@ TEST(Http1ServerTest, ChunkedPostTrailersAreAvailableAfterBody) {
             for (;;) {
                 auto read_result = co_await exchange.read_body(64);
                 if (!read_result) {
-                    exchange.set_response_close();
-                    exchange.set_response_status(400);
-                    exchange.set_response_content_length(0);
-                    co_await exchange.send_response_header();
+                    co_await send_final_header(exchange, 400, nullptr, fiber::http::ResponseBodyMode::ContentLength, 0,
+                                               fiber::http::ResponseConnectionMode::Close, true);
                     co_return;
                 }
                 if (read_result->data_chain.readable_bytes() > 0) {
@@ -660,9 +706,9 @@ TEST(Http1ServerTest, ChunkedPostTrailersAreAvailableAfterBody) {
             response.push_back('|');
             response.append(exchange.request_trailers().get("digest"));
 
-            exchange.set_response_status(200);
-            exchange.set_response_content_length(response.size());
-            auto header_result = co_await exchange.send_response_header();
+            auto header_result = co_await send_final_header(exchange, 200, nullptr,
+                                                            fiber::http::ResponseBodyMode::ContentLength,
+                                                            response.size(), {}, false);
             if (!header_result) {
                 co_return;
             }
@@ -718,10 +764,8 @@ TEST(Http1ServerTest, ChunkedPostWaitsForCompleteTrailersBeforeLastChunk) {
             for (;;) {
                 auto read_result = co_await exchange.read_body(64);
                 if (!read_result) {
-                    exchange.set_response_close();
-                    exchange.set_response_status(400);
-                    exchange.set_response_content_length(0);
-                    co_await exchange.send_response_header();
+                    co_await send_final_header(exchange, 400, nullptr, fiber::http::ResponseBodyMode::ContentLength, 0,
+                                               fiber::http::ResponseConnectionMode::Close, true);
                     co_return;
                 }
                 if (read_result->data_chain.readable_bytes() > 0) {
@@ -736,9 +780,9 @@ TEST(Http1ServerTest, ChunkedPostWaitsForCompleteTrailersBeforeLastChunk) {
             response.push_back('|');
             response.append(exchange.request_trailers().get("digest"));
 
-            exchange.set_response_status(200);
-            exchange.set_response_content_length(response.size());
-            auto header_result = co_await exchange.send_response_header();
+            auto header_result = co_await send_final_header(exchange, 200, nullptr,
+                                                            fiber::http::ResponseBodyMode::ContentLength,
+                                                            response.size(), {}, false);
             if (!header_result) {
                 co_return;
             }
@@ -799,19 +843,16 @@ TEST(Http1ServerTest, InvalidChunkedPostReturnsBadRequest) {
             for (;;) {
                 auto read_result = co_await exchange.read_body(64);
                 if (!read_result) {
-                    exchange.set_response_close();
-                    exchange.set_response_status(400);
-                    exchange.set_response_content_length(0);
-                    co_await exchange.send_response_header();
+                    co_await send_final_header(exchange, 400, nullptr, fiber::http::ResponseBodyMode::ContentLength, 0,
+                                               fiber::http::ResponseConnectionMode::Close, true);
                     co_return;
                 }
                 if (read_result->last) {
                     break;
                 }
             }
-            exchange.set_response_status(204);
-            exchange.set_response_content_length(0);
-            co_await exchange.send_response_header();
+            co_await send_final_header(exchange, 204, nullptr, fiber::http::ResponseBodyMode::ContentLength, 0, {},
+                                       true);
             co_await exchange.write_body(nullptr, 0, true);
             co_return;
         };
@@ -856,10 +897,10 @@ TEST(Http1ServerTest, ChunkedResponseCanSendTrailers) {
 
     fiber::async::spawn(group.at(0), [&]() {
         auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-            exchange.set_response_status(200);
-            exchange.set_response_chunked();
-            exchange.set_response_header("Trailer", "digest, x-md5");
-            auto header_result = co_await exchange.send_response_header();
+            fiber::http::HttpHeaders headers(exchange.pool());
+            headers.set("Trailer", "digest, x-md5");
+            auto header_result = co_await send_final_header(exchange, 200, &headers,
+                                                            fiber::http::ResponseBodyMode::Chunked, 0, {}, false);
             if (!header_result) {
                 co_return;
             }
@@ -869,9 +910,10 @@ TEST(Http1ServerTest, ChunkedResponseCanSendTrailers) {
                 co_return;
             }
 
-            exchange.set_response_trailer("digest", "sha-256=xyz");
-            exchange.set_response_trailer("x-md5", "abc123");
-            co_await exchange.finish_response();
+            fiber::http::HttpHeaders trailers(exchange.pool());
+            trailers.set("digest", "sha-256=xyz");
+            trailers.set("x-md5", "abc123");
+            co_await send_trailer_header(exchange, &trailers);
             co_return;
         };
         return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
@@ -919,9 +961,9 @@ TEST(Http1ServerTest, KeepAliveReuse) {
         auto handler = [&](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
             int count = request_count.fetch_add(1, std::memory_order_relaxed) + 1;
             std::string body = std::to_string(count);
-            exchange.set_response_status(200);
-            exchange.set_response_content_length(body.size());
-            auto header_result = co_await exchange.send_response_header();
+            auto header_result = co_await send_final_header(exchange, 200, nullptr,
+                                                            fiber::http::ResponseBodyMode::ContentLength, body.size(),
+                                                            {}, false);
             if (!header_result) {
                 co_return;
             }
@@ -974,10 +1016,8 @@ TEST(Http1ServerTest, ChunkedKeepAlivePipelinedNextRequest) {
             for (;;) {
                 auto read_result = co_await exchange.read_body(64);
                 if (!read_result) {
-                    exchange.set_response_close();
-                    exchange.set_response_status(400);
-                    exchange.set_response_content_length(0);
-                    co_await exchange.send_response_header();
+                    co_await send_final_header(exchange, 400, nullptr, fiber::http::ResponseBodyMode::ContentLength, 0,
+                                               fiber::http::ResponseConnectionMode::Close, true);
                     co_return;
                 }
                 if (read_result->data_chain.readable_bytes() > 0) {
@@ -994,13 +1034,12 @@ TEST(Http1ServerTest, ChunkedKeepAlivePipelinedNextRequest) {
             if (count == 1) {
                 response.push_back('|');
                 response.append(exchange.request_trailers().get("digest"));
-            } else {
-                exchange.set_response_close();
             }
 
-            exchange.set_response_status(200);
-            exchange.set_response_content_length(response.size());
-            auto header_result = co_await exchange.send_response_header();
+            auto header_result = co_await send_final_header(
+                exchange, 200, nullptr, fiber::http::ResponseBodyMode::ContentLength, response.size(),
+                count == 1 ? fiber::http::ResponseConnectionMode::Auto : fiber::http::ResponseConnectionMode::Close,
+                false);
             if (!header_result) {
                 co_return;
             }
@@ -1063,9 +1102,9 @@ TEST(Http1ServerTest, EventLoopGroupDispatch) {
             if (&fiber::event::EventLoop::current() == &group.at(1)) {
                 saw_worker_loop.store(true, std::memory_order_release);
             }
-            exchange.set_response_status(200);
-            exchange.set_response_content_length(2);
-            auto header_result = co_await exchange.send_response_header();
+            auto header_result = co_await send_final_header(exchange, 200, nullptr,
+                                                            fiber::http::ResponseBodyMode::ContentLength, 2, {},
+                                                            false);
             if (!header_result) {
                 co_return;
             }
@@ -1139,9 +1178,9 @@ TEST(Http1ServerTest, ShutdownAndWait) {
             while (!release_handler.load(std::memory_order_acquire)) {
                 co_await fiber::async::sleep(10ms);
             }
-            exchange.set_response_status(200);
-            exchange.set_response_content_length(2);
-            auto header_result = co_await exchange.send_response_header();
+            auto header_result = co_await send_final_header(exchange, 200, nullptr,
+                                                            fiber::http::ResponseBodyMode::ContentLength, 2, {},
+                                                            false);
             if (!header_result) {
                 co_return;
             }

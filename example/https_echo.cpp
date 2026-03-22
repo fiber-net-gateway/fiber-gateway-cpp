@@ -137,12 +137,30 @@ fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     return local.port();
 }
 
+fiber::async::Task<fiber::common::IoResult<void>> send_final_header(
+    fiber::http::HttpExchange &exchange,
+    int status_code,
+    const fiber::http::HttpHeaders *headers,
+    fiber::http::ResponseBodyMode body_mode,
+    std::size_t content_length,
+    bool end_stream) {
+    co_return co_await exchange.send_header({
+        .kind = fiber::http::OutgoingHeaderKind::Final,
+        .status_code = status_code,
+        .headers = headers,
+        .body_mode = body_mode,
+        .content_length = content_length,
+        .end_stream = end_stream,
+    });
+}
+
 fiber::async::Task<void> handle_plain(fiber::http::HttpExchange &exchange) {
     const char *body = "hello https\n";
-    exchange.set_response_header("Content-Type", "text/plain");
-    exchange.set_response_status(200);
-    exchange.set_response_content_length(std::strlen(body));
-    auto header_result = co_await exchange.send_response_header();
+    fiber::http::HttpHeaders headers(exchange.pool());
+    headers.set("Content-Type", "text/plain");
+    auto header_result = co_await send_final_header(exchange, 200, &headers,
+                                                    fiber::http::ResponseBodyMode::ContentLength,
+                                                    std::strlen(body), false);
     if (!header_result) {
         co_return;
     }

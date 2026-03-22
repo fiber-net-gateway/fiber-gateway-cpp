@@ -43,6 +43,9 @@ private:
     fiber::async::Task<common::IoResult<void>> write_chunked_trailer_block(const HttpHeaders *headers) noexcept;
     fiber::async::Task<common::IoResult<void>> write_informational_header(HttpExchange &exchange, int status_code,
                                                                           const HttpHeaders *headers) noexcept;
+    common::IoErr prepare_final_header(const HttpExchange &exchange, const OutgoingHeaderBlockView &header) noexcept;
+    common::IoErr normalize_response_plan(bool body_end, std::size_t first_body_len, bool infer_body_mode) noexcept;
+    [[nodiscard]] bool compute_close_conn(const HttpExchange &exchange) const noexcept;
     common::IoResult<mem::IoBuf> build_response_header(HttpExchange &exchange, bool body_end,
                                                        std::size_t first_body_len, bool infer_body_mode,
                                                        bool &close_conn) noexcept;
@@ -64,6 +67,12 @@ private:
     ResponsePhase response_phase_ = ResponsePhase::Init;
     size_t response_body_sent_ = 0;
     bool close_after_response_ = false;
+    int response_status_code_ = 0;
+    std::string_view response_reason_;
+    const HttpHeaders *response_headers_ = nullptr;
+    ResponseBodyMode response_body_mode_ = ResponseBodyMode::Auto;
+    ResponseConnectionMode response_connection_mode_ = ResponseConnectionMode::Auto;
+    size_t response_content_length_ = 0;
 };
 
 } // namespace fiber::http
