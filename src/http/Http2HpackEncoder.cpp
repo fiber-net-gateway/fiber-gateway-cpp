@@ -98,8 +98,11 @@ bool Http2HpackEncoder::init() noexcept {
 }
 
 void Http2HpackEncoder::release() noexcept {
-    block_.clear();
-    tail_ = nullptr;
+    output_ctx_ = nullptr;
+    output_ops_ = nullptr;
+    output_dst_ = nullptr;
+    output_len_ = 0;
+    emitted_table_size_update_ = false;
     block_open_ = false;
     table_.release();
 }
@@ -108,27 +111,34 @@ void Http2HpackEncoder::update_max_dynamic_table_size(std::uint32_t size) noexce
     table_.update_max_dynamic_table_size(size);
 }
 
-common::IoErr Http2HpackEncoder::begin_block() noexcept {
+common::IoErr Http2HpackEncoder::begin_block(void *output_ctx, const OutputOps *output_ops) noexcept {
     if (block_open_) {
         return common::IoErr::Invalid;
     }
-    if (options_.catalog == nullptr || table_.catalog() == nullptr) {
+    if (options_.catalog == nullptr || table_.catalog() == nullptr || output_ctx == nullptr || output_ops == nullptr ||
+        output_ops->acquire == nullptr || output_ops->commit == nullptr) {
         return common::IoErr::Invalid;
     }
 
-    block_.clear();
-    tail_ = nullptr;
+    output_ctx_ = output_ctx;
+    output_ops_ = output_ops;
+    output_dst_ = nullptr;
+    output_len_ = 0;
+    emitted_table_size_update_ = false;
     block_open_ = true;
 
     if (table_.has_pending_table_size_update()) {
         common::IoErr err = append_table_size_update(table_.pending_dynamic_table_size());
         if (err != common::IoErr::None) {
             block_open_ = false;
-            block_.clear();
-            tail_ = nullptr;
+            output_ctx_ = nullptr;
+            output_ops_ = nullptr;
+            output_dst_ = nullptr;
+            output_len_ = 0;
+            emitted_table_size_update_ = false;
             return err;
         }
-        table_.acknowledge_table_size_update();
+        emitted_table_size_update_ = true;
     }
     return common::IoErr::None;
 }
@@ -184,14 +194,32 @@ common::IoErr Http2HpackEncoder::encode_field(std::string_view name, std::uint64
     return append_literal(0, name, value, LiteralMode::WithoutIndexing);
 }
 
-common::IoErr Http2HpackEncoder::finish_block(mem::IoBufChain &out) noexcept {
+common::IoErr Http2HpackEncoder::finish_block() noexcept {
     if (!block_open_) {
         return common::IoErr::Invalid;
     }
-    out = std::move(block_);
-    tail_ = nullptr;
+    if (emitted_table_size_update_) {
+        table_.acknowledge_table_size_update();
+    }
     block_open_ = false;
+    output_ctx_ = nullptr;
+    output_ops_ = nullptr;
+    output_dst_ = nullptr;
+    output_len_ = 0;
+    emitted_table_size_update_ = false;
     return common::IoErr::None;
+}
+
+void Http2HpackEncoder::cancel_block() noexcept {
+    if (!block_open_) {
+        return;
+    }
+    block_open_ = false;
+    output_ctx_ = nullptr;
+    output_ops_ = nullptr;
+    output_dst_ = nullptr;
+    output_len_ = 0;
+    emitted_table_size_update_ = false;
 }
 
 common::IoErr Http2HpackEncoder::append_indexed(std::uint32_t index) noexcept {
@@ -243,19 +271,52 @@ common::IoErr Http2HpackEncoder::append_string(std::string_view value) noexcept 
     if (err != common::IoErr::None) {
         return err;
     }
-    err = ensure_tailroom(encoded_len);
-    if (err != common::IoErr::None) {
-        return err;
+
+    if (output_len_ < encoded_len) {
+        err = ensure_output(encoded_len);
+        if (err != common::IoErr::None) {
+            return err;
+        }
     }
-    std::uint8_t *dst = tail_->writable_data();
-    const std::size_t written =
-        http2_huffman_encode_exact(reinterpret_cast<const std::uint8_t *>(value.data()), value.size(), dst);
-    if (written != encoded_len) {
-        return common::IoErr::Invalid;
+    if (output_len_ >= encoded_len) {
+        const std::size_t written =
+            http2_huffman_encode_exact(reinterpret_cast<const std::uint8_t *>(value.data()), value.size(), output_dst_);
+        if (written != encoded_len) {
+            return common::IoErr::Invalid;
+        }
+        output_dst_ += written;
+        output_len_ -= written;
+        output_ops_->commit(output_ctx_, written);
+        return common::IoErr::None;
     }
-    block_.commit(written);
-    tail_ = block_.first_writable();
-    return common::IoErr::None;
+
+    Http2HuffmanEncodeState state;
+    std::size_t consumed = 0;
+    while (true) {
+        if (output_len_ == 0) {
+            err = ensure_output(1);
+            if (err != common::IoErr::None) {
+                return err;
+            }
+        }
+        const auto result = http2_huffman_encode_incremental(
+            state,
+            reinterpret_cast<const std::uint8_t *>(value.data()) + consumed,
+            value.size() - consumed,
+            output_dst_,
+            output_len_,
+            true);
+        consumed += result.consumed;
+        output_dst_ += result.written;
+        output_len_ -= result.written;
+        output_ops_->commit(output_ctx_, result.written);
+        if (result.code == Http2HuffmanCode::Ok) {
+            return consumed == value.size() ? common::IoErr::None : common::IoErr::Invalid;
+        }
+        if (result.code != Http2HuffmanCode::OutputFull) {
+            return common::IoErr::Invalid;
+        }
+    }
 }
 
 common::IoErr Http2HpackEncoder::append_integer(std::uint8_t first_byte_mask, std::uint8_t prefix_bits,
@@ -279,16 +340,22 @@ common::IoErr Http2HpackEncoder::append_integer(std::uint8_t first_byte_mask, st
 }
 
 common::IoErr Http2HpackEncoder::append_bytes(const std::uint8_t *data, std::size_t len) noexcept {
-    if (len == 0) {
+    if (len == 0 || data == nullptr) {
         return common::IoErr::None;
     }
-    common::IoErr err = ensure_tailroom(len);
-    if (err != common::IoErr::None) {
-        return err;
+    std::size_t offset = 0;
+    while (offset < len) {
+        common::IoErr err = ensure_output(1);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+        const std::size_t writable = std::min(output_len_, len - offset);
+        std::memcpy(output_dst_, data + offset, writable);
+        output_dst_ += writable;
+        output_len_ -= writable;
+        output_ops_->commit(output_ctx_, writable);
+        offset += writable;
     }
-    std::memcpy(tail_->writable_data(), data, len);
-    block_.commit(len);
-    tail_ = block_.first_writable();
     return common::IoErr::None;
 }
 
@@ -296,21 +363,20 @@ common::IoErr Http2HpackEncoder::append_byte(std::uint8_t byte) noexcept {
     return append_bytes(&byte, 1);
 }
 
-common::IoErr Http2HpackEncoder::ensure_tailroom(std::size_t min_bytes) noexcept {
-    if (tail_ != nullptr && tail_->writable() >= min_bytes) {
+common::IoErr Http2HpackEncoder::ensure_output(std::size_t min_bytes) noexcept {
+    if (output_len_ >= min_bytes) {
         return common::IoErr::None;
     }
-
-    const std::size_t cap = std::max(options_.buffer_chunk_size, min_bytes);
-    mem::IoBuf buf = mem::IoBuf::allocate(cap);
-    if (!buf.valid()) {
-        return common::IoErr::NoMem;
+    if (output_ops_ == nullptr || output_ctx_ == nullptr) {
+        return common::IoErr::Invalid;
     }
-    if (!block_.append(std::move(buf))) {
-        return common::IoErr::NoMem;
+    output_dst_ = nullptr;
+    output_len_ = 0;
+    common::IoErr err = output_ops_->acquire(output_ctx_, min_bytes, output_dst_, output_len_);
+    if (err != common::IoErr::None) {
+        return err;
     }
-    tail_ = block_.first_writable();
-    return tail_ != nullptr ? common::IoErr::None : common::IoErr::NoMem;
+    return (output_dst_ != nullptr && output_len_ > 0) ? common::IoErr::None : common::IoErr::Invalid;
 }
 
 bool Http2HpackEncoder::should_huffman_encode(std::string_view value) const noexcept {
