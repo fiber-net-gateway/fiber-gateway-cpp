@@ -127,6 +127,13 @@ constexpr std::uint8_t to_lower_ascii(std::uint8_t ch) noexcept {
     return ch;
 }
 
+constexpr std::uint64_t keep_low_bits(std::uint64_t bits, std::uint8_t bit_count) noexcept {
+    if (bit_count == 0) {
+        return 0;
+    }
+    return bits & ((std::uint64_t{1} << bit_count) - 1U);
+}
+
 constexpr RawNibbleTransition advance_nibble(const DecodeTables &tables, std::uint16_t trie_node,
                                              std::uint8_t nibble) noexcept {
     std::uint16_t node = trie_node;
@@ -254,9 +261,10 @@ Http2HuffmanEncodeResult http2_huffman_encode_impl(const std::uint8_t *src, std:
     std::uint64_t bit_buffer = 0;
     std::uint8_t pending_bits = 0;
     std::size_t written = 0;
+    std::size_t consumed = 0;
 
-    for (std::size_t i = 0; i < len; ++i) {
-        std::uint8_t ch = src[i];
+    for (; consumed < len; ++consumed) {
+        std::uint8_t ch = src[consumed];
         if (lower_mode == Http2HuffmanLowerMode::Ascii) {
             ch = to_lower_ascii(ch);
         }
@@ -268,12 +276,13 @@ Http2HuffmanEncodeResult http2_huffman_encode_impl(const std::uint8_t *src, std:
         while (pending_bits >= 8) {
             if constexpr (CheckDstCap) {
                 if (written == dst_cap) {
-                    return {Http2HuffmanCode::OutputFull, written};
+                    return {Http2HuffmanCode::OutputFull, consumed, written};
                 }
             }
             pending_bits = static_cast<std::uint8_t>(pending_bits - 8);
             dst[written++] = static_cast<std::uint8_t>((bit_buffer >> pending_bits) & 0xffU);
         }
+        bit_buffer = keep_low_bits(bit_buffer, pending_bits);
     }
 
     if (pending_bits != 0) {
@@ -282,13 +291,13 @@ Http2HuffmanEncodeResult http2_huffman_encode_impl(const std::uint8_t *src, std:
         pending_bits = static_cast<std::uint8_t>(pending_bits + pad_bits);
         if constexpr (CheckDstCap) {
             if (written == dst_cap) {
-                return {Http2HuffmanCode::OutputFull, written};
+                return {Http2HuffmanCode::OutputFull, consumed, written};
             }
         }
         dst[written++] = static_cast<std::uint8_t>(bit_buffer & 0xffU);
     }
 
-    return {Http2HuffmanCode::Ok, written};
+    return {Http2HuffmanCode::Ok, consumed, written};
 }
 
 template <bool CheckDstCap>
@@ -404,6 +413,66 @@ std::size_t http2_huffman_decoded_length(const std::uint8_t *src, std::size_t le
 Http2HuffmanEncodeResult http2_huffman_encode(const std::uint8_t *src, std::size_t len, std::uint8_t *dst,
                                               std::size_t dst_cap, Http2HuffmanLowerMode lower_mode) noexcept {
     return http2_huffman_encode_impl<true>(src, len, dst, dst_cap, lower_mode);
+}
+
+Http2HuffmanEncodeResult http2_huffman_encode_incremental(Http2HuffmanEncodeState &state, const std::uint8_t *src,
+                                                          std::size_t len, std::uint8_t *dst,
+                                                          std::size_t dst_cap, bool last,
+                                                          Http2HuffmanLowerMode lower_mode) noexcept {
+    std::size_t consumed = 0;
+    std::size_t written = 0;
+
+    auto flush_pending = [&]() -> bool {
+        while (state.pending_bits >= 8) {
+            if (written == dst_cap) {
+                return false;
+            }
+            state.pending_bits = static_cast<std::uint8_t>(state.pending_bits - 8);
+            dst[written++] = static_cast<std::uint8_t>((state.bit_buffer >> state.pending_bits) & 0xffU);
+            state.bit_buffer = keep_low_bits(state.bit_buffer, state.pending_bits);
+        }
+        return true;
+    };
+
+    if (!state.finalizing) {
+        while (consumed < len) {
+            std::uint8_t ch = src[consumed];
+            if (lower_mode == Http2HuffmanLowerMode::Ascii) {
+                ch = to_lower_ascii(ch);
+            }
+
+            const EncodeCode code = kCodeTable[ch];
+            state.bit_buffer = (state.bit_buffer << code.bit_length) | code.bits;
+            state.pending_bits = static_cast<std::uint8_t>(state.pending_bits + code.bit_length);
+            ++consumed;
+
+            if (!flush_pending()) {
+                return {Http2HuffmanCode::OutputFull, consumed, written};
+            }
+        }
+    }
+
+    if (!last && !state.finalizing) {
+        return {Http2HuffmanCode::Ok, consumed, written};
+    }
+
+    if (!state.finalizing) {
+        if (state.pending_bits == 0) {
+            state.reset();
+            return {Http2HuffmanCode::Ok, consumed, written};
+        }
+        const std::uint8_t pad_bits = static_cast<std::uint8_t>(8 - state.pending_bits);
+        state.bit_buffer = (state.bit_buffer << pad_bits) | ((std::uint64_t{1} << pad_bits) - 1U);
+        state.pending_bits = static_cast<std::uint8_t>(state.pending_bits + pad_bits);
+        state.finalizing = true;
+    }
+
+    if (!flush_pending()) {
+        return {Http2HuffmanCode::OutputFull, consumed, written};
+    }
+
+    state.reset();
+    return {Http2HuffmanCode::Ok, consumed, written};
 }
 
 std::size_t http2_huffman_encode_exact(const std::uint8_t *src, std::size_t len, std::uint8_t *dst,

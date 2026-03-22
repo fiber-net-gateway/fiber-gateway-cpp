@@ -129,11 +129,34 @@ TEST(Http2HpackEncoderTest, EncodesStaticExactAsIndexedField) {
     Http2HpackEncoder encoder({.catalog = &catalog});
     ASSERT_TRUE(encoder.init());
     ASSERT_EQ(encoder.begin_block(), IoErr::None);
-    ASSERT_EQ(encoder.encode_field(":status", fiber::http::http_header_name_hash(":status"), "200"), IoErr::None);
+    ASSERT_EQ(encoder.encode_status(200), IoErr::None);
 
     IoBufChain block;
     ASSERT_EQ(encoder.finish_block(block), IoErr::None);
     EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x88}));
+}
+
+TEST(Http2HpackEncoderTest, EncodesNonStaticStatusUsingIndexedName) {
+    Http2HpackEncodeCatalog catalog;
+    ASSERT_TRUE(catalog.init({}));
+
+    Http2HpackEncoder encoder({.catalog = &catalog, .huffman_threshold = 1024});
+    ASSERT_TRUE(encoder.init());
+    ASSERT_EQ(encoder.begin_block(), IoErr::None);
+    ASSERT_EQ(encoder.encode_status(418), IoErr::None);
+
+    IoBufChain block;
+    ASSERT_EQ(encoder.finish_block(block), IoErr::None);
+    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+    EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x08, 0x03, '4', '1', '8'}));
+
+    Http2HpackDecoder decoder;
+    ASSERT_TRUE(decoder.init());
+    DecodeRecorder recorder;
+    decoder.begin_block(&recorder, &DecodeRecorder::ops());
+    ASSERT_EQ(decoder.decode(bytes.data(), bytes.size(), true), IoErr::None);
+    ASSERT_EQ(recorder.fields.size(), 1U);
+    EXPECT_EQ(recorder.fields[0], ":status=418");
 }
 
 TEST(Http2HpackEncoderTest, EncodesStaticNameMatchWithoutIndexingAndDecodesBack) {
