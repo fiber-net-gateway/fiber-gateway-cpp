@@ -70,6 +70,7 @@ private:
                                                       std::string_view &out) noexcept;
     [[nodiscard]] common::IoErr materialize_value_huffman(const std::uint8_t *data, std::size_t len,
                                                           std::string_view &out) noexcept;
+    [[nodiscard]] common::IoErr prepare_final_header(const OutgoingHeaderBlockView &header) noexcept;
     fiber::async::Task<common::IoResult<void>> send_response_header_block(const HttpHeaders *headers, int status_code,
                                                                           bool end_stream, bool informational);
     [[nodiscard]] common::IoErr commit_field(std::string_view name, std::uint64_t name_hash,
@@ -90,6 +91,12 @@ private:
     bool handler_done_ = false;
     bool response_headers_sent_ = false;
     bool response_finished_ = false;
+    int response_status_code_ = 0;
+    std::string_view response_reason_;
+    const HttpHeaders *response_headers_ = nullptr;
+    ResponseBodyMode response_body_mode_ = ResponseBodyMode::Auto;
+    ResponseConnectionMode response_connection_mode_ = ResponseConnectionMode::Auto;
+    std::size_t response_content_length_ = 0;
     std::string_view pending_name_;
     std::uint64_t pending_name_hash_ = 0;
     bool pending_name_owned_ = false;

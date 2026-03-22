@@ -16,6 +16,25 @@
 
 namespace {
 
+fiber::async::Task<fiber::common::IoResult<void>> send_final_header(
+    fiber::http::HttpExchange &exchange,
+    int status_code,
+    const fiber::http::HttpHeaders *headers,
+    fiber::http::ResponseBodyMode body_mode,
+    std::size_t content_length,
+    fiber::http::ResponseConnectionMode connection_mode,
+    bool end_stream) {
+    co_return co_await exchange.send_header({
+        .kind = fiber::http::OutgoingHeaderKind::Final,
+        .status_code = status_code,
+        .headers = headers,
+        .body_mode = body_mode,
+        .connection_mode = connection_mode,
+        .content_length = content_length,
+        .end_stream = end_stream,
+    });
+}
+
 std::optional<std::uint16_t> parse_port(const char *text) {
     if (!text) {
         return std::nullopt;
@@ -46,10 +65,8 @@ fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange) {
     for (;;) {
         auto read_result = co_await exchange.read_body(4096);
         if (!read_result) {
-            exchange.set_response_close();
-            exchange.set_response_status(400);
-            exchange.set_response_content_length(0);
-            co_await exchange.send_response_header();
+            co_await send_final_header(exchange, 400, nullptr, fiber::http::ResponseBodyMode::ContentLength, 0,
+                                       fiber::http::ResponseConnectionMode::Close, true);
             co_return;
         }
         while (auto *chunk = read_result->data_chain.front()) {
@@ -66,10 +83,11 @@ fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange) {
         }
     }
 
-    exchange.set_response_header("Content-Type", "text/plain");
-    exchange.set_response_status(200);
-    exchange.set_response_content_length(body.size());
-    auto header_result = co_await exchange.send_response_header();
+    fiber::http::HttpHeaders headers(exchange.pool());
+    headers.set("Content-Type", "text/plain");
+    auto header_result = co_await send_final_header(exchange, 200, &headers,
+                                                    fiber::http::ResponseBodyMode::ContentLength, body.size(),
+                                                    fiber::http::ResponseConnectionMode::Auto, false);
     if (!header_result) {
         co_return;
     }

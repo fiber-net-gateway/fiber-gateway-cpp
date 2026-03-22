@@ -702,11 +702,16 @@ ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks,
     auto header_result = std::make_shared<fiber::common::IoResult<void>>();
     fiber::http::HttpHandler handler =
         [header_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-        exchange.set_response_status(204);
-        exchange.set_response_header("server", "fiber");
-        *header_result = co_await exchange.send_response_header();
-        co_return;
-    };
+            fiber::http::HttpHeaders headers(exchange.pool());
+            headers.set("server", "fiber");
+            *header_result = co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = 204,
+                .headers = &headers,
+                .end_stream = true,
+            });
+            co_return;
+        };
     ServerHeaderRunOutcome outcome = execute_server_request(std::move(chunks), std::move(handler), options);
     outcome.header_result = *header_result;
     return outcome;
@@ -1755,9 +1760,14 @@ TEST(Http2ConnectionTest, ServerHandlerCanSendInformationalHeadersBeforeFinalRes
         if (!*continue_result) {
             co_return;
         }
-        exchange.set_response_status(204);
-        exchange.set_response_header("server", "fiber");
-        *final_result = co_await exchange.send_response_header();
+        fiber::http::HttpHeaders headers(exchange.pool());
+        headers.set("server", "fiber");
+        *final_result = co_await exchange.send_header({
+            .kind = fiber::http::OutgoingHeaderKind::Final,
+            .status_code = 204,
+            .headers = &headers,
+            .end_stream = true,
+        });
         co_return;
     };
 
