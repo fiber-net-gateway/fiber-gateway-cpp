@@ -517,8 +517,12 @@ common::IoErr ServerHttp2Request::commit_regular_header(std::string_view name, s
 
     HttpHeaders &target = reading_trailers_ ? exchange_.request_trailers_ : exchange_.request_headers_;
     char *lowcase_name = name_copy.empty() ? nullptr : const_cast<char *>(name_copy.data());
-    if (!target.add_view(name_copy, value_copy, lowcase_name, name_hash)) {
+    auto *field = target.add_view(name_copy, value_copy, lowcase_name, name_hash);
+    if (!field) {
         return common::IoErr::NoMem;
+    }
+    if (!reading_trailers_) {
+        exchange_.cache_request_header_field(*field);
     }
     return common::IoErr::None;
 }

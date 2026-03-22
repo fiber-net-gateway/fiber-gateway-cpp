@@ -352,6 +352,7 @@ fiber::async::Task<fiber::common::IoResult<ParseCode>> Http1Connection::parse_re
                 if (!field) {
                     co_return std::unexpected(common::IoErr::NoMem);
                 }
+                exchange.cache_request_header_field(*field);
                 if (auto *handler = header_handler_map().get(std::string_view(lowercase, name_len), hash)) {
                     if (!(*handler)(exchange, *field)) {
                         co_return ParseCode::InvalidHeader;

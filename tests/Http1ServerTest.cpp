@@ -261,6 +261,73 @@ TEST(Http1ServerTest, BasicGet) {
     delete server;
 }
 
+TEST(Http1ServerTest, CachesImportantRequestHeaderPointers) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<uint16_t> port_promise;
+    std::promise<fiber::http::Http1Server *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            const auto *host = exchange.host_header();
+            const auto *content_type = exchange.content_type_header();
+            const auto *range = exchange.range_header();
+            const auto *if_range = exchange.if_range_header();
+            const auto *expect = exchange.expect_header();
+            const bool ok = host && host->value_view() == "localhost" && content_type &&
+                            content_type->value_view() == "text/plain" && range &&
+                            range->value_view() == "bytes=0-9" && if_range && if_range->value_view() == "\"etag\"" &&
+                            expect && expect->value_view() == "100-continue";
+            exchange.set_response_status(ok ? 200 : 500);
+            co_await exchange.write_body(reinterpret_cast<const uint8_t *>(ok ? "ok" : "bad"), ok ? 2 : 3, true);
+            co_return;
+        };
+        return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
+    });
+
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+    uint16_t port = port_future.get();
+    if (port == 0) {
+        auto retry_port = resolve_port(server->fd());
+        ASSERT_TRUE(retry_port.has_value());
+        port = *retry_port;
+    }
+    ASSERT_NE(port, 0);
+
+    int client = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    ASSERT_GE(client, 0);
+    fiber::net::SocketAddress target(fiber::net::IpAddress::loopback_v4(), port);
+    sockaddr_storage storage{};
+    socklen_t len = 0;
+    ASSERT_TRUE(target.to_sockaddr(storage, len));
+    ASSERT_EQ(::connect(client, reinterpret_cast<sockaddr *>(&storage), len), 0);
+
+    const char *request =
+        "GET / HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Type: text/plain\r\n"
+        "Range: bytes=0-9\r\n"
+        "If-Range: \"etag\"\r\n"
+        "Expect: 100-continue\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    ASSERT_EQ(::send(client, request, std::strlen(request), 0), static_cast<ssize_t>(std::strlen(request)));
+
+    std::string response = recv_all(client);
+    ::close(client);
+
+    EXPECT_NE(response.find("200"), std::string::npos);
+    EXPECT_NE(response.find("ok"), std::string::npos);
+
+    fiber::async::spawn(group.at(0), [&]() { return stop_server(&group.at(0), server); });
+    group.join();
+    delete server;
+}
+
 TEST(Http1ServerTest, WriteBodyWithoutExplicitHeaderAutoUsesChunkedForStreaming) {
     fiber::event::EventLoopGroup group(1);
     group.start();
