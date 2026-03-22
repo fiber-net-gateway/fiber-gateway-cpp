@@ -62,6 +62,14 @@ class ServerHttp2Request;
 
 class HttpExchange : public common::NonCopyable, public common::NonMovable {
 public:
+    struct RequestHeaderRefs {
+        const HttpHeaders::HeaderField *host = nullptr;
+        const HttpHeaders::HeaderField *content_type = nullptr;
+        const HttpHeaders::HeaderField *range = nullptr;
+        const HttpHeaders::HeaderField *if_range = nullptr;
+        const HttpHeaders::HeaderField *expect = nullptr;
+    };
+
     explicit HttpExchange(const HttpServerOptions &options);
     ~HttpExchange();
 
@@ -71,6 +79,12 @@ public:
     std::string_view version_view() const noexcept { return version_view_; }
     std::string_view method_view() const noexcept { return method_view_; }
     std::string_view header(std::string_view name) const noexcept;
+    const RequestHeaderRefs &request_header_refs() const noexcept { return request_header_refs_; }
+    const HttpHeaders::HeaderField *host_header() const noexcept { return request_header_refs_.host; }
+    const HttpHeaders::HeaderField *content_type_header() const noexcept { return request_header_refs_.content_type; }
+    const HttpHeaders::HeaderField *range_header() const noexcept { return request_header_refs_.range; }
+    const HttpHeaders::HeaderField *if_range_header() const noexcept { return request_header_refs_.if_range; }
+    const HttpHeaders::HeaderField *expect_header() const noexcept { return request_header_refs_.expect; }
     const HttpHeaders &request_headers() const noexcept { return request_headers_; };
     const HttpHeaders &request_trailers() const noexcept { return request_trailers_; };
     bool request_trailers_complete() const noexcept { return request_trailers_complete_; }
@@ -96,6 +110,7 @@ public:
 
 private:
     void set_io(HttpExchangeIo *io) noexcept;
+    void cache_request_header_field(const HttpHeaders::HeaderField &field) noexcept;
 
     friend class RequestLineParser;
     friend class HeaderLineParser;
@@ -114,6 +129,7 @@ private:
     HttpHeaders request_headers_;
     HttpHeaders request_trailers_;
     bool request_trailers_complete_ = false;
+    RequestHeaderRefs request_header_refs_;
 
     HttpHeaders response_headers_;
     HttpHeaders response_trailers_;
