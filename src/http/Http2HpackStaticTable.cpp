@@ -128,43 +128,6 @@ bool Http2HpackStaticTable::find_name(std::string_view lowcase_name, std::uint64
     return false;
 }
 
-bool Http2HpackStaticTable::find_exact(std::string_view name, std::string_view value,
-                                       std::uint32_t &index) noexcept {
-    const std::uint64_t name_hash = http_header_name_hash(name);
-    for (std::uint32_t i = 0; i < kEntryCount; ++i) {
-        const StaticEntry &entry = kEntries_[i];
-        if (entry.name_hash != name_hash || entry.name_len != name.size() || entry.value_len != value.size()) {
-            continue;
-        }
-        if (!http_header_name_equals_ci(name, std::string_view(entry.name, entry.name_len))) {
-            continue;
-        }
-        if (same_bytes(value, entry.value, entry.value_len)) {
-            index = i + 1;
-            return true;
-        }
-    }
-    return false;
-}
-
-bool Http2HpackStaticTable::find_exact(std::string_view lowcase_name, std::uint64_t name_hash,
-                                       std::string_view value, std::uint32_t &index) noexcept {
-    for (std::uint32_t i = 0; i < kEntryCount; ++i) {
-        const StaticEntry &entry = kEntries_[i];
-        if (entry.name_hash != name_hash || entry.name_len != lowcase_name.size() || entry.value_len != value.size()) {
-            continue;
-        }
-        if (!same_bytes(lowcase_name, entry.name, entry.name_len)) {
-            continue;
-        }
-        if (same_bytes(value, entry.value, entry.value_len)) {
-            index = i + 1;
-            return true;
-        }
-    }
-    return false;
-}
-
 #undef FIBER_HTTP2_STATIC_ENTRY
 
 } // namespace fiber::http

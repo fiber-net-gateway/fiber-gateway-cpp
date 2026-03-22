@@ -17,11 +17,11 @@ bool Http2HpackDecoder::init(std::uint32_t max_dynamic_table_size, std::uint32_t
     release();
     max_dynamic_table_size_ = max_dynamic_table_size;
     max_string_size_ = max_string_size;
-    return dynamic_table_.init(max_dynamic_table_size_);
+    return decode_table_.init(max_dynamic_table_size_);
 }
 
 void Http2HpackDecoder::release() noexcept {
-    dynamic_table_.release();
+    decode_table_.release();
     scratch_.reset();
     scratch_cap_ = 0;
     ctx_ = nullptr;
@@ -277,7 +277,7 @@ common::IoErr Http2HpackDecoder::handle_string_complete() noexcept {
         return common::IoErr::Invalid;
     }
     if (field_out != nullptr) {
-        (void)dynamic_table_.insert(field.name, field.value);
+        (void)decode_table_.insert(field.name, field.value);
     }
     finish_literal_field();
     return common::IoErr::None;
@@ -296,7 +296,7 @@ common::IoErr Http2HpackDecoder::apply_table_size_update(std::uint32_t size) noe
     if (size > max_dynamic_table_size_) {
         return common::IoErr::Invalid;
     }
-    dynamic_table_.set_max_size(size);
+    decode_table_.set_max_size(size);
     return common::IoErr::None;
 }
 
@@ -326,8 +326,8 @@ bool Http2HpackDecoder::resolve_index(std::uint32_t index, TableEntryView &entry
         return true;
     }
 
-    Http2HpackDynamicTable::TableEntryView dynamic_entry;
-    if (!dynamic_table_.get_by_index(index - kStaticTableEntryCount, dynamic_entry)) {
+    Http2HpackDecodeTable::TableEntryView dynamic_entry;
+    if (!decode_table_.get_by_index(index - kStaticTableEntryCount, dynamic_entry)) {
         return false;
     }
     entry.name = dynamic_entry.name;

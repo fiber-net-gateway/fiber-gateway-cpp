@@ -40,17 +40,4 @@ TEST(Http2HpackStaticTableTest, FindNameReturnsSmallestMatchingIndex) {
     EXPECT_FALSE(Http2HpackStaticTable::find_name("x-not-found", index));
 }
 
-TEST(Http2HpackStaticTableTest, FindExactMatchesKnownStaticEntries) {
-    std::uint32_t index = 0;
-
-    ASSERT_TRUE(Http2HpackStaticTable::find_exact(":method", "POST", index));
-    EXPECT_EQ(index, 3u);
-
-    const std::uint64_t name_hash = fiber::http::http_header_name_hash("accept-encoding");
-    ASSERT_TRUE(Http2HpackStaticTable::find_exact("accept-encoding", name_hash, "gzip, deflate", index));
-    EXPECT_EQ(index, 16u);
-
-    EXPECT_FALSE(Http2HpackStaticTable::find_exact("accept-encoding", name_hash, "br", index));
-}
-
 } // namespace

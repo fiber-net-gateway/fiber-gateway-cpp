@@ -20,11 +20,6 @@ public:
     [[nodiscard]] static bool find_name(std::string_view lowcase_name, std::uint64_t name_hash,
                                         std::uint32_t &index) noexcept;
 
-    [[nodiscard]] static bool find_exact(std::string_view name, std::string_view value,
-                                         std::uint32_t &index) noexcept;
-    [[nodiscard]] static bool find_exact(std::string_view lowcase_name, std::uint64_t name_hash,
-                                         std::string_view value, std::uint32_t &index) noexcept;
-
 private:
     struct StaticEntry {
         const char *name = nullptr;

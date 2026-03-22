@@ -9,7 +9,7 @@
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
-#include "Http2HpackDynamicTable.h"
+#include "Http2HpackDecodeTable.h"
 #include "Http2HpackStaticTable.h"
 #include "Http2HpackTableEntryView.h"
 
@@ -84,7 +84,7 @@ private:
     void reset_string_accumulator() noexcept;
     void finish_literal_field() noexcept;
 
-    Http2HpackDynamicTable dynamic_table_;
+    Http2HpackDecodeTable decode_table_;
     std::unique_ptr<std::uint8_t[]> scratch_;
     std::uint32_t scratch_cap_ = 0;
     std::uint32_t max_dynamic_table_size_ = 4096U;
