@@ -10,6 +10,7 @@
 #include "../event/EventLoop.h"
 #include "../net/TcpListener.h"
 #include "HttpExchange.h"
+#include "Http2HpackEncodeCatalog.h"
 #include "HttpTransport.h"
 #include "TlsContext.h"
 
@@ -32,6 +33,7 @@ private:
     event::EventLoop &loop_;
     HttpHandler handler_;
     HttpServerOptions options_;
+    Http2HpackEncodeCatalog http2_hpack_encode_catalog_;
     net::TcpListener listener_;
     std::unique_ptr<TlsContext> tls_ctx_;
 };

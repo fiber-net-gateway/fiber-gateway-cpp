@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "../async/Spawn.h"
+#include "../common/Assert.h"
 #include "../common/IoError.h"
 #include "../net/TcpStream.h"
 #include "Http1Connection.h"
@@ -14,7 +15,9 @@
 namespace fiber::http {
 
 HttpServer::HttpServer(event::EventLoop &loop, HttpHandler handler, HttpServerOptions options) :
-    loop_(loop), handler_(std::move(handler)), options_(std::move(options)), listener_(loop) {}
+    loop_(loop), handler_(std::move(handler)), options_(std::move(options)), listener_(loop) {
+    FIBER_ASSERT(http2_hpack_encode_catalog_.init({}));
+}
 
 fiber::common::IoResult<void> HttpServer::bind(const net::SocketAddress &addr, const net::ListenOptions &options) {
     auto result = listener_.bind(addr, options);

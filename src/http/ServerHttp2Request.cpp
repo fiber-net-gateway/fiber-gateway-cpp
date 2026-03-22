@@ -1,16 +1,26 @@
 #include "ServerHttp2Request.h"
 
+#include <algorithm>
+#include <array>
 #include <cstring>
 #include <new>
 
 #include "../common/Assert.h"
 #include "../common/IoError.h"
 #include "Http2Connection.h"
+#include "Http2HeadersFrameEncoder.h"
 #include "Http2HpackHuffman.h"
 
 namespace fiber::http {
 
 namespace {
+
+constexpr std::string_view kConnectionHeader = "connection";
+constexpr std::string_view kKeepAliveHeader = "keep-alive";
+constexpr std::string_view kProxyConnectionHeader = "proxy-connection";
+constexpr std::string_view kTransferEncodingHeader = "transfer-encoding";
+constexpr std::string_view kUpgradeHeader = "upgrade";
+constexpr std::string_view kContentLengthHeader = "content-length";
 
 HttpMethod parse_method(std::string_view method) noexcept {
     if (method == "GET") {
@@ -45,6 +55,21 @@ HttpMethod parse_method(std::string_view method) noexcept {
 
 bool is_pseudo_header(std::string_view name) noexcept {
     return !name.empty() && name.front() == ':';
+}
+
+bool is_forbidden_http2_response_header(std::string_view lowcase_name) noexcept {
+    return lowcase_name == kConnectionHeader || lowcase_name == kKeepAliveHeader ||
+           lowcase_name == kProxyConnectionHeader || lowcase_name == kTransferEncodingHeader ||
+           lowcase_name == kUpgradeHeader;
+}
+
+std::string_view format_content_length(std::uint64_t value, std::array<char, 20> &scratch) noexcept {
+    char *out = scratch.data() + scratch.size();
+    do {
+        *--out = static_cast<char>('0' + (value % 10));
+        value /= 10;
+    } while (value != 0);
+    return {out, static_cast<std::size_t>(scratch.data() + scratch.size() - out)};
 }
 
 } // namespace
@@ -166,7 +191,7 @@ fiber::async::DetachedTask ServerHttp2Request::run_handler_task(ServerHttp2Reque
     request->handler_done_ = true;
     request->exchange_.set_io(nullptr);
 
-    if (!request->stream_.local_rst() && !request->stream_.remote_rst() &&
+    if (!request->stream_.local_end_stream() && !request->stream_.local_rst() && !request->stream_.remote_rst() &&
         request->stream_.close_reason() == common::IoErr::None) {
         (void) request->stream_.close_rst(Http2ErrorCode::Cancel, common::IoErr::NotSupported);
     }
@@ -179,8 +204,90 @@ fiber::async::Task<common::IoResult<BodyChunk>> ServerHttp2Request::read_body(Ht
     co_return std::unexpected(common::IoErr::NotSupported);
 }
 
-fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_response_header(HttpExchange &) {
-    co_return std::unexpected(common::IoErr::NotSupported);
+fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_response_header(HttpExchange &exchange) {
+    if (conn_ == nullptr || !handler_started_ || stream_.local_rst() || stream_.remote_rst()) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (response_headers_sent_ || response_finished_ || stream_.local_end_stream()) {
+        co_return std::unexpected(common::IoErr::Already);
+    }
+    if (exchange.response_trailers_.size() != 0) {
+        co_return std::unexpected(common::IoErr::NotSupported);
+    }
+    if (exchange.response_status_code_ >= 100 && exchange.response_status_code_ < 200) {
+        co_return std::unexpected(common::IoErr::NotSupported);
+    }
+    if (exchange.response_body_mode_ == ResponseBodyMode::Chunked) {
+        co_return std::unexpected(common::IoErr::NotSupported);
+    }
+    if (exchange.response_body_mode_ == ResponseBodyMode::ContentLength && exchange.response_content_length_ != 0) {
+        co_return std::unexpected(common::IoErr::NotSupported);
+    }
+
+    Http2HeadersFrameEncoder frame_encoder(conn_->outbound_hpack_encoder(), {
+        .stream_id = stream_.stream_id(),
+        .max_frame_size = conn_->peer_max_outbound_frame_size(),
+        .first_frame_payload_cap = static_cast<std::uint16_t>(
+            std::min<std::uint32_t>(conn_->peer_max_outbound_frame_size(), 1024)),
+        .end_stream = true,
+    });
+    common::IoErr err = frame_encoder.begin();
+    if (err != common::IoErr::None) {
+        co_return std::unexpected(err);
+    }
+
+    err = frame_encoder.encode_status(exchange.response_status_code_);
+    if (err != common::IoErr::None) {
+        co_return std::unexpected(err);
+    }
+
+    bool has_content_length_header = false;
+    for (auto it = exchange.response_headers_.begin(); it != exchange.response_headers_.end(); ++it) {
+        const auto &field = *it;
+        if (field.name_len == 0) {
+            continue;
+        }
+        std::string_view lowcase_name = field.lowcase_view();
+        if (lowcase_name.empty()) {
+            lowcase_name = field.name_view();
+        }
+        if (is_forbidden_http2_response_header(lowcase_name)) {
+            continue;
+        }
+        if (lowcase_name == kContentLengthHeader) {
+            has_content_length_header = true;
+        }
+
+        err = frame_encoder.encode_field(lowcase_name, field.name_hash, field.value_view());
+        if (err != common::IoErr::None) {
+            co_return std::unexpected(err);
+        }
+    }
+
+    if (exchange.response_body_mode_ == ResponseBodyMode::ContentLength && !has_content_length_header) {
+        std::array<char, 20> content_length_buf{};
+        std::string_view content_length = format_content_length(exchange.response_content_length_, content_length_buf);
+        err = frame_encoder.encode_field(kContentLengthHeader, http_header_name_hash(kContentLengthHeader),
+                                         content_length);
+        if (err != common::IoErr::None) {
+            co_return std::unexpected(err);
+        }
+    }
+
+    mem::IoBufChain frames;
+    err = frame_encoder.finish(frames);
+    if (err != common::IoErr::None) {
+        co_return std::unexpected(err);
+    }
+
+    err = conn_->submit_framed_chain(stream_, std::move(frames), true);
+    if (err != common::IoErr::None) {
+        co_return std::unexpected(err);
+    }
+
+    response_headers_sent_ = true;
+    response_finished_ = true;
+    co_return common::IoResult<void>{};
 }
 
 fiber::async::Task<common::IoResult<void>> ServerHttp2Request::finish_response(HttpExchange &) noexcept {
