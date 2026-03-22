@@ -3,13 +3,13 @@
 #include <string>
 #include <string_view>
 
-#include "http/Http2HpackDynamicTable.h"
+#include "http/Http2HpackDecodeTable.h"
 #include "http/Http2HpackTableEntryView.h"
 #include "http/HttpHeaderHash.h"
 
 namespace {
 
-using fiber::http::Http2HpackDynamicTable;
+using fiber::http::Http2HpackDecodeTable;
 
 std::string repeated(char ch, std::size_t count) {
     return std::string(count, ch);
@@ -17,8 +17,8 @@ std::string repeated(char ch, std::size_t count) {
 
 } // namespace
 
-TEST(Http2HpackDynamicTableTest, InsertsAndGetsNewestFirstWithNameHash) {
-    Http2HpackDynamicTable table;
+TEST(Http2HpackDecodeTableTest, InsertsAndGetsNewestFirstWithNameHash) {
+    Http2HpackDecodeTable table;
     ASSERT_TRUE(table.init(4096));
 
     ASSERT_TRUE(table.insert("content-type", "text/plain"));
@@ -36,21 +36,8 @@ TEST(Http2HpackDynamicTableTest, InsertsAndGetsNewestFirstWithNameHash) {
     EXPECT_EQ(view.name_hash, fiber::http::http_header_name_hash("content-type"));
 }
 
-TEST(Http2HpackDynamicTableTest, FindExactReturnsNewestMatchingIndex) {
-    Http2HpackDynamicTable table;
-    ASSERT_TRUE(table.init(4096));
-
-    ASSERT_TRUE(table.insert("x-key", "v1"));
-    ASSERT_TRUE(table.insert("x-other", "v2"));
-    ASSERT_TRUE(table.insert("x-key", "v1"));
-
-    std::uint32_t dynamic_index = 0;
-    ASSERT_TRUE(table.find_exact("X-Key", "v1", dynamic_index));
-    EXPECT_EQ(dynamic_index, 1u);
-}
-
-TEST(Http2HpackDynamicTableTest, EvictsOldestEntryWhenCapacityWouldBeExceeded) {
-    Http2HpackDynamicTable table;
+TEST(Http2HpackDecodeTableTest, EvictsOldestEntryWhenCapacityWouldBeExceeded) {
+    Http2HpackDecodeTable table;
     ASSERT_TRUE(table.init(70));
 
     ASSERT_TRUE(table.insert("a", "1"));
@@ -59,16 +46,18 @@ TEST(Http2HpackDynamicTableTest, EvictsOldestEntryWhenCapacityWouldBeExceeded) {
 
     EXPECT_EQ(table.entry_count(), 2u);
 
-    std::uint32_t dynamic_index = 0;
-    EXPECT_FALSE(table.find_exact("a", "1", dynamic_index));
-    ASSERT_TRUE(table.find_exact("b", "2", dynamic_index));
-    EXPECT_EQ(dynamic_index, 2u);
-    ASSERT_TRUE(table.find_exact("c", "3", dynamic_index));
-    EXPECT_EQ(dynamic_index, 1u);
+    fiber::http::Http2HpackTableEntryView view;
+    ASSERT_TRUE(table.get_by_index(1, view));
+    EXPECT_EQ(view.name, "c");
+    EXPECT_EQ(view.value, "3");
+    ASSERT_TRUE(table.get_by_index(2, view));
+    EXPECT_EQ(view.name, "b");
+    EXPECT_EQ(view.value, "2");
+    EXPECT_FALSE(table.get_by_index(3, view));
 }
 
-TEST(Http2HpackDynamicTableTest, CompactsBytesWhenTailSpaceIsInsufficient) {
-    Http2HpackDynamicTable table;
+TEST(Http2HpackDecodeTableTest, CompactsBytesWhenTailSpaceIsInsufficient) {
+    Http2HpackDecodeTable table;
     ASSERT_TRUE(table.init(205));
 
     const std::string name_a = repeated('a', 10);
@@ -94,8 +83,8 @@ TEST(Http2HpackDynamicTableTest, CompactsBytesWhenTailSpaceIsInsufficient) {
     EXPECT_EQ(view.value, value_b);
 }
 
-TEST(Http2HpackDynamicTableTest, SetMaxSizeShrinksAndOversizedInsertClearsTable) {
-    Http2HpackDynamicTable table;
+TEST(Http2HpackDecodeTableTest, SetMaxSizeShrinksAndOversizedInsertClearsTable) {
+    Http2HpackDecodeTable table;
     ASSERT_TRUE(table.init(128));
 
     ASSERT_TRUE(table.insert("alpha", "1"));
