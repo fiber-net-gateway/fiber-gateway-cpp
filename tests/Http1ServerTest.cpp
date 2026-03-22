@@ -328,6 +328,64 @@ TEST(Http1ServerTest, CachesImportantRequestHeaderPointers) {
     delete server;
 }
 
+TEST(Http1ServerTest, CanSendContinueHeaderBeforeFinalResponse) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<uint16_t> port_promise;
+    std::promise<fiber::http::Http1Server *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            auto continue_result = co_await exchange.send_continue_header();
+            if (!continue_result) {
+                co_return;
+            }
+            exchange.set_response_status(204);
+            exchange.set_response_content_length(0);
+            co_await exchange.send_response_header();
+            co_return;
+        };
+        return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
+    });
+
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+    uint16_t port = port_future.get();
+    if (port == 0) {
+        auto retry_port = resolve_port(server->fd());
+        ASSERT_TRUE(retry_port.has_value());
+        port = *retry_port;
+    }
+    ASSERT_NE(port, 0);
+
+    int client = connect_client(port);
+    ASSERT_GE(client, 0);
+
+    const char *request = "POST /continue HTTP/1.1\r\n"
+                          "Host: localhost\r\n"
+                          "Expect: 100-continue\r\n"
+                          "Connection: close\r\n"
+                          "Content-Length: 0\r\n"
+                          "\r\n";
+    ASSERT_EQ(::send(client, request, std::strlen(request), 0), static_cast<ssize_t>(std::strlen(request)));
+
+    std::string response = recv_all(client);
+    ::close(client);
+
+    const auto first_pos = response.find("HTTP/1.1 100 Continue\r\n\r\n");
+    const auto final_pos = response.find("HTTP/1.1 204 No Content\r\n");
+    EXPECT_NE(first_pos, std::string::npos);
+    EXPECT_NE(final_pos, std::string::npos);
+    EXPECT_LT(first_pos, final_pos);
+
+    fiber::async::spawn(group.at(0), [&]() { return stop_server(&group.at(0), server); });
+    group.join();
+    delete server;
+}
+
 TEST(Http1ServerTest, WriteBodyWithoutExplicitHeaderAutoUsesChunkedForStreaming) {
     fiber::event::EventLoopGroup group(1);
     group.start();

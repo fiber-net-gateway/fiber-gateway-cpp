@@ -425,8 +425,10 @@ struct ParsedHeadersFrames {
     std::vector<std::uint8_t> header_block;
 };
 
-ParsedHeadersFrames collect_stream_headers_frames(std::string_view bytes, std::uint32_t stream_id) {
-    ParsedHeadersFrames parsed;
+std::vector<ParsedHeadersFrames> collect_stream_header_blocks(std::string_view bytes, std::uint32_t stream_id) {
+    std::vector<ParsedHeadersFrames> blocks;
+    ParsedHeadersFrames current;
+    bool collecting = false;
     for (std::size_t pos = 0; pos + 9 <= bytes.size();) {
         const auto *frame = reinterpret_cast<const std::uint8_t *>(bytes.data() + pos);
         const std::uint32_t length = (static_cast<std::uint32_t>(frame[0]) << 16) |
@@ -445,17 +447,31 @@ ParsedHeadersFrames collect_stream_headers_frames(std::string_view bytes, std::u
         if (frame_stream_id == stream_id &&
             (type == static_cast<std::uint8_t>(fiber::http::Http2FrameType::Headers) ||
              type == static_cast<std::uint8_t>(fiber::http::Http2FrameType::Continuation))) {
-            if (parsed.header_block.empty() &&
-                type == static_cast<std::uint8_t>(fiber::http::Http2FrameType::Headers)) {
-                parsed.first_flags = flags;
+            if (!collecting && type == static_cast<std::uint8_t>(fiber::http::Http2FrameType::Headers)) {
+                current = {};
+                current.first_flags = flags;
+                collecting = true;
             }
-            const auto *payload = frame + 9;
-            parsed.header_block.insert(parsed.header_block.end(), payload, payload + length);
-            if ((flags & 0x4U) != 0) {
-                break;
+            if (collecting) {
+                const auto *payload = frame + 9;
+                current.header_block.insert(current.header_block.end(), payload, payload + length);
+                if ((flags & 0x4U) != 0) {
+                    blocks.push_back(std::move(current));
+                    current = {};
+                    collecting = false;
+                }
             }
         }
         pos += 9 + length;
+    }
+    return blocks;
+}
+
+ParsedHeadersFrames collect_stream_headers_frames(std::string_view bytes, std::uint32_t stream_id) {
+    ParsedHeadersFrames parsed;
+    const auto blocks = collect_stream_header_blocks(bytes, stream_id);
+    if (!blocks.empty()) {
+        parsed = blocks.front();
     }
     return parsed;
 }
@@ -630,26 +646,24 @@ RunOutcome execute_connection(std::vector<std::string> chunks, fiber::http::Http
 
 DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderRunOutcome>> promise,
                                       std::vector<std::string> chunks,
+                                      fiber::http::HttpHandler handler,
                                       fiber::http::Http2Connection::Options options) {
     options = with_test_hpack_catalog(options);
     auto transport = std::make_unique<FakeHttpTransport>(std::move(chunks), std::vector<size_t>{}, false, true);
     FakeHttpTransport *fake_transport = transport.get();
     fiber::http::HttpServerOptions http_options;
-    auto header_result = std::make_shared<fiber::common::IoResult<void>>();
-    fiber::http::HttpHandler handler =
-        [header_result, fake_transport](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-        exchange.set_response_status(204);
-        exchange.set_response_header("server", "fiber");
-        *header_result = co_await exchange.send_response_header();
+    fiber::http::HttpHandler wrapped_handler =
+        [handler = std::move(handler), fake_transport](fiber::http::HttpExchange &exchange)
+        -> fiber::async::Task<void> {
+        co_await handler(exchange);
         fake_transport->release_eof();
         co_return;
     };
-    fiber::http::ServerRequestFactory factory(http_options, handler);
+    fiber::http::ServerRequestFactory factory(http_options, wrapped_handler);
     fiber::http::Http2Connection connection(std::move(transport), options, &factory, fiber::http::ServerRequestFactory::ops());
 
     ServerHeaderRunOutcome outcome;
     outcome.result = co_await connection.run();
-    outcome.header_result = *header_result;
     outcome.written = fake_transport->written();
     promise->set_value(std::move(outcome));
 
@@ -658,14 +672,16 @@ DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderR
 }
 
 ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks,
+                                              fiber::http::HttpHandler handler,
                                               fiber::http::Http2Connection::Options options = {}) {
     fiber::event::EventLoopGroup group(1);
     auto promise = std::make_shared<std::promise<ServerHeaderRunOutcome>>();
     auto future = promise->get_future();
 
     group.start();
-    fiber::async::spawn(group.at(0), [promise = std::move(promise), chunks = std::move(chunks), options]() mutable {
-        return run_http2_server_request(std::move(promise), std::move(chunks), options);
+    fiber::async::spawn(group.at(0), [promise = std::move(promise), chunks = std::move(chunks),
+                                      handler = std::move(handler), options]() mutable {
+        return run_http2_server_request(std::move(promise), std::move(chunks), std::move(handler), options);
     });
 
     auto status = future.wait_for(std::chrono::seconds(2));
@@ -678,6 +694,21 @@ ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks,
 
     ServerHeaderRunOutcome outcome = future.get();
     group.join();
+    return outcome;
+}
+
+ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks,
+                                              fiber::http::Http2Connection::Options options = {}) {
+    auto header_result = std::make_shared<fiber::common::IoResult<void>>();
+    fiber::http::HttpHandler handler =
+        [header_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        exchange.set_response_status(204);
+        exchange.set_response_header("server", "fiber");
+        *header_result = co_await exchange.send_response_header();
+        co_return;
+    };
+    ServerHeaderRunOutcome outcome = execute_server_request(std::move(chunks), std::move(handler), options);
+    outcome.header_result = *header_result;
     return outcome;
 }
 
@@ -1695,6 +1726,66 @@ TEST(Http2ConnectionTest, ServerHandlerCanSendHeaderOnlyResponseHeaders) {
 
     bool found_server = false;
     for (const auto &field : fields) {
+        if (field.first == "server" && field.second == "fiber") {
+            found_server = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found_server);
+}
+
+TEST(Http2ConnectionTest, ServerHandlerCanSendInformationalHeadersBeforeFinalResponse) {
+    std::string request = std::string(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0x0, 0, {});
+    request += build_headers_frame_bytes(
+        1,
+        {
+            {":method", "GET"},
+            {":scheme", "https"},
+            {":path", "/"},
+            {":authority", "example.com"},
+        },
+        true);
+
+    auto continue_result = std::make_shared<fiber::common::IoResult<void>>();
+    auto final_result = std::make_shared<fiber::common::IoResult<void>>();
+    fiber::http::HttpHandler handler =
+        [continue_result, final_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        *continue_result = co_await exchange.send_continue_header();
+        if (!*continue_result) {
+            co_return;
+        }
+        exchange.set_response_status(204);
+        exchange.set_response_header("server", "fiber");
+        *final_result = co_await exchange.send_response_header();
+        co_return;
+    };
+
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, std::move(handler));
+
+    ASSERT_TRUE(outcome.result.has_value());
+    ASSERT_TRUE(continue_result->has_value());
+    ASSERT_TRUE(final_result->has_value());
+
+    const auto blocks = collect_stream_header_blocks(outcome.written, 1);
+    ASSERT_EQ(blocks.size(), 2U);
+
+    EXPECT_EQ(blocks[0].first_flags & 0x1U, 0x0U);
+    EXPECT_EQ(blocks[0].first_flags & 0x4U, 0x4U);
+    const auto informational_fields = decode_header_block(blocks[0].header_block);
+    ASSERT_EQ(informational_fields.size(), 1U);
+    EXPECT_EQ(informational_fields[0].first, ":status");
+    EXPECT_EQ(informational_fields[0].second, "100");
+
+    EXPECT_EQ(blocks[1].first_flags & 0x1U, 0x1U);
+    EXPECT_EQ(blocks[1].first_flags & 0x4U, 0x4U);
+    const auto final_fields = decode_header_block(blocks[1].header_block);
+    ASSERT_FALSE(final_fields.empty());
+    EXPECT_EQ(final_fields[0].first, ":status");
+    EXPECT_EQ(final_fields[0].second, "204");
+
+    bool found_server = false;
+    for (const auto &field : final_fields) {
         if (field.first == "server" && field.second == "fiber") {
             found_server = true;
             break;

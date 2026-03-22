@@ -25,8 +25,8 @@ public:
 
     fiber::async::Task<common::IoResult<BodyChunk>> read_body(HttpExchange &exchange,
                                                               size_t max_bytes) noexcept override;
-    fiber::async::Task<common::IoResult<void>> send_response_header(HttpExchange &exchange) override;
-    fiber::async::Task<common::IoResult<void>> finish_response(HttpExchange &exchange) noexcept override;
+    fiber::async::Task<common::IoResult<void>> send_header(HttpExchange &exchange,
+                                                           const OutgoingHeaderBlockView &header) override;
     fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, BodyChunk chunk) noexcept override;
     fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, const uint8_t *buf, size_t len,
                                                             bool end) noexcept override;
@@ -40,7 +40,9 @@ private:
     fiber::async::Task<common::IoResult<ParseCode>> advance_chunked_body(std::size_t max_bytes,
                                                                          bool allow_read) noexcept;
     fiber::async::Task<common::IoResult<void>> read_request_trailers(HttpExchange &exchange) noexcept;
-    fiber::async::Task<common::IoResult<void>> write_chunked_trailer_block(HttpExchange &exchange) noexcept;
+    fiber::async::Task<common::IoResult<void>> write_chunked_trailer_block(const HttpHeaders *headers) noexcept;
+    fiber::async::Task<common::IoResult<void>> write_informational_header(HttpExchange &exchange, int status_code,
+                                                                          const HttpHeaders *headers) noexcept;
     common::IoResult<mem::IoBuf> build_response_header(HttpExchange &exchange, bool body_end,
                                                        std::size_t first_body_len, bool infer_body_mode,
                                                        bool &close_conn) noexcept;

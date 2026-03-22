@@ -31,8 +31,8 @@ public:
 
     fiber::async::Task<common::IoResult<BodyChunk>> read_body(HttpExchange &exchange,
                                                               std::size_t max_bytes) noexcept override;
-    fiber::async::Task<common::IoResult<void>> send_response_header(HttpExchange &exchange) override;
-    fiber::async::Task<common::IoResult<void>> finish_response(HttpExchange &exchange) noexcept override;
+    fiber::async::Task<common::IoResult<void>> send_header(HttpExchange &exchange,
+                                                           const OutgoingHeaderBlockView &header) override;
     fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, BodyChunk chunk) noexcept override;
     fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, const std::uint8_t *buf,
                                                             std::size_t len, bool end) noexcept override;
@@ -70,6 +70,8 @@ private:
                                                       std::string_view &out) noexcept;
     [[nodiscard]] common::IoErr materialize_value_huffman(const std::uint8_t *data, std::size_t len,
                                                           std::string_view &out) noexcept;
+    fiber::async::Task<common::IoResult<void>> send_response_header_block(const HttpHeaders *headers, int status_code,
+                                                                          bool end_stream, bool informational);
     [[nodiscard]] common::IoErr commit_field(std::string_view name, std::uint64_t name_hash,
                                              std::string_view value, bool name_owned = false) noexcept;
     [[nodiscard]] common::IoErr commit_regular_header(std::string_view name, std::uint64_t name_hash,
