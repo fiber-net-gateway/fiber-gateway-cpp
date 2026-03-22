@@ -204,23 +204,36 @@ fiber::async::Task<common::IoResult<BodyChunk>> ServerHttp2Request::read_body(Ht
     co_return std::unexpected(common::IoErr::NotSupported);
 }
 
-fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_response_header(HttpExchange &exchange) {
+fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_response_header_block(const HttpHeaders *headers,
+                                                                                           int status_code,
+                                                                                           bool end_stream,
+                                                                                           bool informational) {
     if (conn_ == nullptr || !handler_started_ || stream_.local_rst() || stream_.remote_rst()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (response_headers_sent_ || response_finished_ || stream_.local_end_stream()) {
+    if (stream_.local_end_stream()) {
         co_return std::unexpected(common::IoErr::Already);
     }
-    if (exchange.response_trailers_.size() != 0) {
+    if (!informational && (response_headers_sent_ || response_finished_)) {
+        co_return std::unexpected(common::IoErr::Already);
+    }
+    if (status_code < 100 || status_code > 999) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (informational && (status_code < 100 || status_code >= 200)) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (!informational && status_code >= 100 && status_code < 200) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (!informational && headers == &exchange_.response_headers_ && exchange_.response_trailers_.size() != 0) {
         co_return std::unexpected(common::IoErr::NotSupported);
     }
-    if (exchange.response_status_code_ >= 100 && exchange.response_status_code_ < 200) {
+    if (!informational && exchange_.response_body_mode_ == ResponseBodyMode::Chunked) {
         co_return std::unexpected(common::IoErr::NotSupported);
     }
-    if (exchange.response_body_mode_ == ResponseBodyMode::Chunked) {
-        co_return std::unexpected(common::IoErr::NotSupported);
-    }
-    if (exchange.response_body_mode_ == ResponseBodyMode::ContentLength && exchange.response_content_length_ != 0) {
+    if (!informational && exchange_.response_body_mode_ == ResponseBodyMode::ContentLength &&
+        exchange_.response_content_length_ != 0) {
         co_return std::unexpected(common::IoErr::NotSupported);
     }
 
@@ -229,44 +242,46 @@ fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_response_hea
         .max_frame_size = conn_->peer_max_outbound_frame_size(),
         .first_frame_payload_cap = static_cast<std::uint16_t>(
             std::min<std::uint32_t>(conn_->peer_max_outbound_frame_size(), 1024)),
-        .end_stream = true,
+        .end_stream = end_stream,
     });
     common::IoErr err = frame_encoder.begin();
     if (err != common::IoErr::None) {
         co_return std::unexpected(err);
     }
 
-    err = frame_encoder.encode_status(exchange.response_status_code_);
+    err = frame_encoder.encode_status(status_code);
     if (err != common::IoErr::None) {
         co_return std::unexpected(err);
     }
 
     bool has_content_length_header = false;
-    for (auto it = exchange.response_headers_.begin(); it != exchange.response_headers_.end(); ++it) {
-        const auto &field = *it;
-        if (field.name_len == 0) {
-            continue;
-        }
-        std::string_view lowcase_name = field.lowcase_view();
-        if (lowcase_name.empty()) {
-            lowcase_name = field.name_view();
-        }
-        if (is_forbidden_http2_response_header(lowcase_name)) {
-            continue;
-        }
-        if (lowcase_name == kContentLengthHeader) {
-            has_content_length_header = true;
-        }
+    if (headers != nullptr) {
+        for (auto it = headers->begin(); it != headers->end(); ++it) {
+            const auto &field = *it;
+            if (field.name_len == 0) {
+                continue;
+            }
+            std::string_view lowcase_name = field.lowcase_view();
+            if (lowcase_name.empty()) {
+                lowcase_name = field.name_view();
+            }
+            if (is_forbidden_http2_response_header(lowcase_name)) {
+                continue;
+            }
+            if (!informational && lowcase_name == kContentLengthHeader) {
+                has_content_length_header = true;
+            }
 
-        err = frame_encoder.encode_field(lowcase_name, field.name_hash, field.value_view());
-        if (err != common::IoErr::None) {
-            co_return std::unexpected(err);
+            err = frame_encoder.encode_field(lowcase_name, field.name_hash, field.value_view());
+            if (err != common::IoErr::None) {
+                co_return std::unexpected(err);
+            }
         }
     }
 
-    if (exchange.response_body_mode_ == ResponseBodyMode::ContentLength && !has_content_length_header) {
+    if (!informational && exchange_.response_body_mode_ == ResponseBodyMode::ContentLength && !has_content_length_header) {
         std::array<char, 20> content_length_buf{};
-        std::string_view content_length = format_content_length(exchange.response_content_length_, content_length_buf);
+        std::string_view content_length = format_content_length(exchange_.response_content_length_, content_length_buf);
         err = frame_encoder.encode_field(kContentLengthHeader, http_header_name_hash(kContentLengthHeader),
                                          content_length);
         if (err != common::IoErr::None) {
@@ -280,14 +295,47 @@ fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_response_hea
         co_return std::unexpected(err);
     }
 
-    err = conn_->submit_framed_chain(stream_, std::move(frames), true);
+    err = conn_->submit_framed_chain(stream_, std::move(frames), end_stream);
     if (err != common::IoErr::None) {
         co_return std::unexpected(err);
     }
 
-    response_headers_sent_ = true;
-    response_finished_ = true;
+    if (!informational) {
+        response_headers_sent_ = true;
+        response_finished_ = end_stream;
+    }
     co_return common::IoResult<void>{};
+}
+
+fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_header(HttpExchange &exchange,
+                                                                            const OutgoingHeaderBlockView &header) {
+    if (conn_ == nullptr || &exchange != &exchange_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+
+    switch (header.kind) {
+        case OutgoingHeaderKind::Informational:
+            co_return co_await send_response_header_block(header.headers, header.status_code, false, true);
+        case OutgoingHeaderKind::Final:
+            if (header.status_code != exchange.response_status_code_ || header.headers != &exchange.response_headers_) {
+                co_return std::unexpected(common::IoErr::Invalid);
+            }
+            {
+                bool end_stream = header.end_stream;
+                if (!end_stream && exchange.response_trailers_.size() == 0 &&
+                    exchange.response_body_mode_ != ResponseBodyMode::Chunked &&
+                    (exchange.response_body_mode_ == ResponseBodyMode::Auto ||
+                     (exchange.response_body_mode_ == ResponseBodyMode::ContentLength &&
+                      exchange.response_content_length_ == 0))) {
+                    end_stream = true;
+                }
+                co_return co_await send_response_header_block(header.headers, header.status_code, end_stream, false);
+            }
+        case OutgoingHeaderKind::Trailer:
+            co_return std::unexpected(common::IoErr::NotSupported);
+    }
+
+    co_return std::unexpected(common::IoErr::Invalid);
 }
 
 fiber::async::Task<common::IoResult<void>> ServerHttp2Request::finish_response(HttpExchange &) noexcept {

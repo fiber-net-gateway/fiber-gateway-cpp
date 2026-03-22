@@ -16,6 +16,7 @@
 #include "../common/mem/BufPool.h"
 #include "../common/mem/IoBuf.h"
 #include "HttpCommon.h"
+#include "HttpExchangeIo.h"
 #include "HttpHeaders.h"
 #include "TlsOptions.h"
 
@@ -40,20 +41,8 @@ struct BodyChunk {
 
 using ReadBodyChunk = BodyChunk;
 
-enum class ResponseBodyMode : std::uint8_t {
-    Auto,
-    ContentLength,
-    Chunked,
-};
-
-enum class ResponseConnectionMode : std::uint8_t {
-    Auto,
-    Close,
-};
-
 class Http1Connection;
 class Http1ExchangeIo;
-class HttpExchangeIo;
 class HttpTransport;
 class RequestLineParser;
 class HeaderLineParser;
@@ -88,22 +77,15 @@ public:
     const HttpHeaders &request_headers() const noexcept { return request_headers_; };
     const HttpHeaders &request_trailers() const noexcept { return request_trailers_; };
     bool request_trailers_complete() const noexcept { return request_trailers_complete_; }
-    HttpHeaders &response_headers() noexcept { return response_headers_; };
-    HttpHeaders &response_trailers() noexcept { return response_trailers_; }
     mem::BufPool &pool() noexcept { return pool_; }
 
     fiber::async::Task<common::IoResult<BodyChunk>> read_body(std::size_t max_bytes) noexcept;
     fiber::async::Task<common::IoResult<void>> discard_body() noexcept;
 
-    void set_response_header(std::string_view name, std::string_view value);
-    void set_response_status(int status, std::string_view reason = {});
-    void set_response_content_length(size_t len);
-    void set_response_chunked();
-    void set_response_close();
-    void set_response_trailer(std::string_view name, std::string_view value);
-
-    fiber::async::Task<common::IoResult<void>> send_response_header();
-    fiber::async::Task<common::IoResult<void>> finish_response() noexcept;
+    fiber::async::Task<common::IoResult<void>> send_header(const OutgoingHeaderBlockView &header);
+    fiber::async::Task<common::IoResult<void>> send_continue_header();
+    fiber::async::Task<common::IoResult<void>> send_informational_header(int status_code,
+                                                                         const HttpHeaders *headers = nullptr);
     fiber::async::Task<common::IoResult<size_t>> write_body(BodyChunk chunk) noexcept;
     fiber::async::Task<common::IoResult<size_t>> write_body(const uint8_t *buf, size_t len, bool end) noexcept;
 
@@ -130,14 +112,6 @@ private:
     HttpHeaders request_trailers_;
     bool request_trailers_complete_ = false;
     RequestHeaderRefs request_header_refs_;
-
-    HttpHeaders response_headers_;
-    HttpHeaders response_trailers_;
-    int response_status_code_ = 200;
-    std::string_view response_reason_;
-    ResponseBodyMode response_body_mode_ = ResponseBodyMode::Auto;
-    ResponseConnectionMode response_connection_mode_ = ResponseConnectionMode::Auto;
-    size_t response_content_length_ = 0;
     bool request_chunked_ = false;
     bool request_content_length_set_ = false;
     size_t request_content_length_ = 0;
