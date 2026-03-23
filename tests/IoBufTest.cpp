@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstring>
+#include <string>
 #include <string_view>
 #include <type_traits>
 
@@ -14,6 +15,16 @@ using fiber::mem::IoBufChain;
 
 std::string_view readable_view(const IoBuf &buf) {
     return {reinterpret_cast<const char *>(buf.readable_data()), buf.readable()};
+}
+
+std::string readable_string(const IoBufChain &chain) {
+    std::array<iovec, 16> iov{};
+    int count = chain.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
+    std::string out;
+    for (int i = 0; i < count; ++i) {
+        out.append(static_cast<const char *>(iov[i].iov_base), iov[i].iov_len);
+    }
+    return out;
 }
 
 static_assert(std::is_copy_constructible_v<IoBuf>);
@@ -221,6 +232,102 @@ TEST(IoBufTest, ChainCommitBuildsWritableIovecs) {
     ASSERT_EQ(count, 2);
     EXPECT_EQ(std::string_view(static_cast<const char *>(iov[0].iov_base), iov[0].iov_len), "wxyz");
     EXPECT_EQ(std::string_view(static_cast<const char *>(iov[1].iov_base), iov[1].iov_len), "12");
+}
+
+TEST(IoBufTest, TakePrefixMovesWholeNodesAndAppendsToExistingDestination) {
+    IoBuf a = IoBuf::allocate(4);
+    IoBuf b = IoBuf::allocate(5);
+    IoBuf c = IoBuf::allocate(4);
+    IoBuf dst_buf = IoBuf::allocate(4);
+    ASSERT_TRUE(a);
+    ASSERT_TRUE(b);
+    ASSERT_TRUE(c);
+    ASSERT_TRUE(dst_buf);
+
+    std::memcpy(a.writable_data(), "ab", 2);
+    a.commit(2);
+    std::memcpy(b.writable_data(), "cd", 2);
+    b.commit(2);
+    std::memcpy(c.writable_data(), "efg", 3);
+    c.commit(3);
+    std::memcpy(dst_buf.writable_data(), "xy", 2);
+    dst_buf.commit(2);
+
+    IoBufChain src;
+    IoBufChain dst;
+    ASSERT_TRUE(src.append(std::move(a)));
+    ASSERT_TRUE(src.append(std::move(b)));
+    ASSERT_TRUE(src.append(std::move(c)));
+    ASSERT_TRUE(dst.append(std::move(dst_buf)));
+
+    ASSERT_TRUE(src.take_prefix(4, dst));
+
+    EXPECT_EQ(readable_string(src), "efg");
+    EXPECT_EQ(readable_string(dst), "xyabcd");
+    EXPECT_EQ(src.size(), 1u);
+    EXPECT_EQ(dst.size(), 3u);
+    EXPECT_EQ(src.readable_bytes(), 3u);
+    EXPECT_EQ(dst.readable_bytes(), 6u);
+    EXPECT_EQ(src.writable_bytes(), 1u);
+    EXPECT_EQ(dst.writable_bytes(), 7u);
+}
+
+TEST(IoBufTest, TakePrefixSplitsBoundaryNodeUsingRetainedSlice) {
+    IoBuf buf = IoBuf::allocate(8);
+    ASSERT_TRUE(buf);
+
+    std::memcpy(buf.writable_data(), "abcdef", 6);
+    buf.commit(6);
+
+    IoBufChain src;
+    IoBufChain dst;
+    ASSERT_TRUE(src.append(std::move(buf)));
+
+    ASSERT_TRUE(src.take_prefix(3, dst));
+
+    ASSERT_NE(src.front(), nullptr);
+    ASSERT_NE(dst.front(), nullptr);
+    EXPECT_EQ(readable_string(src), "def");
+    EXPECT_EQ(readable_string(dst), "abc");
+    EXPECT_EQ(src.size(), 1u);
+    EXPECT_EQ(dst.size(), 1u);
+    EXPECT_EQ(src.readable_bytes(), 3u);
+    EXPECT_EQ(dst.readable_bytes(), 3u);
+    EXPECT_EQ(src.writable_bytes(), 2u);
+    EXPECT_EQ(dst.writable_bytes(), 0u);
+    EXPECT_EQ(src.front()->use_count(), 2u);
+    EXPECT_EQ(dst.front()->use_count(), 2u);
+}
+
+TEST(IoBufTest, TakePrefixSkipsEmptyReadableNodes) {
+    IoBuf empty = IoBuf::allocate(4);
+    IoBuf full = IoBuf::allocate(4);
+    IoBuf tail = IoBuf::allocate(4);
+    ASSERT_TRUE(empty);
+    ASSERT_TRUE(full);
+    ASSERT_TRUE(tail);
+
+    std::memcpy(full.writable_data(), "ab", 2);
+    full.commit(2);
+    std::memcpy(tail.writable_data(), "cd", 2);
+    tail.commit(2);
+
+    IoBufChain src;
+    IoBufChain dst;
+    ASSERT_TRUE(src.append(std::move(empty)));
+    ASSERT_TRUE(src.append(std::move(full)));
+    ASSERT_TRUE(src.append(std::move(tail)));
+
+    ASSERT_TRUE(src.take_prefix(3, dst));
+
+    EXPECT_EQ(readable_string(src), "d");
+    EXPECT_EQ(readable_string(dst), "abc");
+    EXPECT_EQ(src.size(), 2u);
+    EXPECT_EQ(dst.size(), 2u);
+    EXPECT_EQ(src.readable_bytes(), 1u);
+    EXPECT_EQ(dst.readable_bytes(), 3u);
+    EXPECT_EQ(src.writable_bytes(), 6u);
+    EXPECT_EQ(dst.writable_bytes(), 2u);
 }
 
 } // namespace
