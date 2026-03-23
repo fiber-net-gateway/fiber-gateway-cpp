@@ -94,6 +94,7 @@ public:
     [[nodiscard]] void *owner() noexcept { return owner_; }
     [[nodiscard]] const void *owner() const noexcept { return owner_; }
     [[nodiscard]] std::int32_t send_window() const noexcept { return send_window_; }
+    [[nodiscard]] std::int32_t recv_window_remaining() const noexcept { return recv_window_remaining_; }
     [[nodiscard]] bool attached_to_connection() const noexcept { return attached_to_connection_; }
     [[nodiscard]] common::IoErr close_reason() const noexcept { return close_reason_; }
     [[nodiscard]] bool remote_end_stream() const noexcept { return remote_end_stream_; }
@@ -115,6 +116,7 @@ public:
     // reserved/sent DATA on this stream, so the per-stream send window is
     // allowed to become negative until future WINDOW_UPDATE frames restore it.
     void update_send_window(std::int32_t delta) noexcept;
+    void update_recv_window(std::int32_t delta) noexcept;
     void close(common::IoErr result = common::IoErr::Canceled) noexcept;
 
 private:
@@ -133,6 +135,7 @@ private:
     // RFC 7540 allows the stream-level send window to become negative after a
     // smaller SETTINGS_INITIAL_WINDOW_SIZE is applied to in-flight streams.
     std::int32_t send_window_ = 65535;
+    std::int32_t recv_window_remaining_ = 65535;
     common::IntrusiveListHook owned_hook_{};
     void *owner_ = nullptr;
     const Ops *ops_ = nullptr;
