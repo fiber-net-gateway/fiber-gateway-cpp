@@ -1820,6 +1820,36 @@ TEST(Http2ConnectionTest, ServerHandlerCanSendInformationalHeadersBeforeFinalRes
     EXPECT_TRUE(found_server);
 }
 
+TEST(Http2ConnectionTest, ServerIgnoresPriorityUpdateFrame) {
+    std::string request = std::string(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0x0, 0, {});
+    request += make_frame(8, 0x10, 0x0, 0, std::string("\0\0\0\1u=1", 8));
+    request += build_headers_frame_bytes(
+        1,
+        {
+            {":method", "GET"},
+            {":scheme", "https"},
+            {":path", "/"},
+            {":authority", "example.com"},
+        },
+        true);
+
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)});
+
+    ASSERT_TRUE(outcome.result.has_value());
+    ASSERT_TRUE(outcome.header_result.has_value());
+
+    ParsedHeadersFrames parsed = collect_stream_headers_frames(outcome.written, 1);
+    ASSERT_FALSE(parsed.header_block.empty());
+    EXPECT_EQ(parsed.first_flags & 0x1U, 0x1U);
+    EXPECT_EQ(parsed.first_flags & 0x4U, 0x4U);
+
+    const auto fields = decode_header_block(parsed.header_block);
+    ASSERT_FALSE(fields.empty());
+    EXPECT_EQ(fields[0].first, ":status");
+    EXPECT_EQ(fields[0].second, "204");
+}
+
 TEST(Http2ConnectionTest, ServerHandlerCanReadBufferedRequestBodyAcrossMultipleDataFrames) {
     std::string request = std::string(kClientConnectionPreface);
     request += make_frame(0, 0x4, 0x0, 0, {});
