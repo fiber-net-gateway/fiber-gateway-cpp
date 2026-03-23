@@ -16,6 +16,7 @@ enum class Http2FrameType : std::uint8_t {
     Goaway = 0x7,
     WindowUpdate = 0x8,
     Continuation = 0x9,
+    PriorityUpdate = 0x10,
 };
 
 enum class Http2ErrorCode : std::uint32_t {

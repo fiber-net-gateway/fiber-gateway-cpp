@@ -387,6 +387,11 @@ common::IoErr Http2Connection::consume_incoming_frame_payload(const FrameHeader 
             return handle_rst_stream_payload(fhr, buf, offset, length);
         case Http2FrameType::Goaway:
             return handle_goaway_payload(fhr, buf, offset, length);
+        case Http2FrameType::PriorityUpdate:
+            // RFC 9218 PRIORITY_UPDATE is an optional extension frame. We do
+            // not implement reprioritization yet, so ignore it like any other
+            // unsupported extension frame.
+            return common::IoErr::None;
         default:
             return on_frame_payload(fhr, buf, offset, length);
     }
