@@ -31,6 +31,7 @@ struct OwnedStreamHolder {
             &OwnedStreamHolder::on_header_block_start,
             &OwnedStreamHolder::on_header_block_complete,
             &OwnedStreamHolder::on_body,
+            &OwnedStreamHolder::on_abort,
         };
         return kOps;
     }
@@ -50,6 +51,8 @@ struct OwnedStreamHolder {
     static fiber::common::IoErr on_body(void *, fiber::mem::IoBuf &&, bool) noexcept {
         return fiber::common::IoErr::None;
     }
+
+    static void on_abort(void *, fiber::common::IoErr) noexcept {}
 
     static fiber::common::IoErr on_indexed_field(void *, fiber::http::Http2HpackDecoder::TableEntryView) noexcept {
         return fiber::common::IoErr::None;
