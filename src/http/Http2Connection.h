@@ -68,6 +68,9 @@ public:
         std::uint32_t local_max_concurrent_streams = 128;
         std::uint32_t max_local_push_streams = 0;
         std::uint32_t initial_connection_recv_window = 0x7fffffffU;
+        std::uint32_t connection_recv_window_low_watermark = 16 * 1024 * 1024;
+        std::uint32_t initial_stream_recv_window = 64 * 1024;
+        std::uint32_t stream_recv_window_low_watermark = 16 * 1024;
         std::int32_t initial_connection_send_window = 65535;
         std::int32_t initial_stream_send_window = 65535;
     };
@@ -148,6 +151,8 @@ private:
     common::IoErr send_window_update(std::uint32_t stream_id, std::uint32_t increment) noexcept;
     common::IoErr send_rst_stream(std::uint32_t stream_id, Http2ErrorCode error_code) noexcept;
     common::IoErr send_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept;
+    [[nodiscard]] common::IoErr maybe_replenish_connection_recv_window() noexcept;
+    [[nodiscard]] std::uint32_t configured_initial_stream_recv_window() const noexcept;
     void handle_stream_error(std::uint32_t stream_id, Http2ErrorCode error_code,
                              common::IoErr pending_result = common::IoErr::Canceled) noexcept;
     Http2Stream *create_peer_stream(std::uint32_t stream_id) noexcept;
@@ -200,6 +205,8 @@ private:
     std::size_t peer_active_stream_count_ = 0;
     std::size_t local_push_stream_count_ = 0;
     std::int32_t conn_send_window_ = 0;
+    std::int32_t conn_recv_window_remaining_ = 65535;
+    std::uint32_t conn_recv_window_target_ = 65535;
     std::int32_t peer_initial_stream_send_window_ = 65535;
     std::uint32_t peer_header_table_size_ = 4096;
     std::uint32_t peer_max_outbound_frame_size_ = 16384;

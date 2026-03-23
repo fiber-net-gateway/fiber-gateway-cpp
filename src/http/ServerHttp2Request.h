@@ -84,6 +84,8 @@ private:
     const HttpHandler *handler_ = nullptr;
     Http2Stream stream_;
     HttpExchange exchange_;
+    mem::IoBufChain request_body_queue_;
+    std::size_t request_body_queued_bytes_ = 0;
     bool reading_trailers_ = false;
     bool saw_regular_header_in_block_ = false;
     bool request_head_received_ = false;

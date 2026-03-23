@@ -105,6 +105,8 @@ common::IoErr Http2Stream::close_rst(Http2ErrorCode code, common::IoErr result) 
 
 void Http2Stream::update_send_window(std::int32_t delta) noexcept { send_window_ += delta; }
 
+void Http2Stream::update_recv_window(std::int32_t delta) noexcept { recv_window_remaining_ += delta; }
+
 void Http2Stream::close(common::IoErr result) noexcept {
     if (close_reason_ == common::IoErr::None) {
         close_reason_ = result;

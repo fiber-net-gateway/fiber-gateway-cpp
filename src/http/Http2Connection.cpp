@@ -133,6 +133,9 @@ Http2Connection::Http2Connection(std::unique_ptr<HttpTransport> transport, Optio
     peer_advertised_max_concurrent_streams_ = options_.max_peer_concurrent_streams;
     conn_send_window_ = options_.initial_connection_send_window;
     peer_initial_stream_send_window_ = options_.initial_stream_send_window;
+    conn_recv_window_target_ = std::max(options_.initial_connection_recv_window,
+                                        static_cast<std::uint32_t>(kInitialFlowControlWindow));
+    conn_recv_window_remaining_ = static_cast<std::int32_t>(conn_recv_window_target_);
     peer_header_table_size_ = kDefaultHeaderTableSize;
     peer_max_outbound_frame_size_ = options_.max_frame_size;
     FIBER_ASSERT(streams_.init(configured_max_active_streams()));
@@ -408,12 +411,28 @@ common::IoErr Http2Connection::handle_data_payload(const FrameHeader &fhr, const
             }
         }
 
+        if (conn_recv_window_remaining_ < static_cast<std::int32_t>(fhr.length)) {
+            return common::IoErr::Invalid;
+        }
+        conn_recv_window_remaining_ -= static_cast<std::int32_t>(fhr.length);
+
+        if (stream->recv_window_remaining() < static_cast<std::int32_t>(fhr.length)) {
+            handle_stream_error(fhr.stream_id, Http2ErrorCode::FlowControlError, common::IoErr::Invalid);
+            return common::IoErr::None;
+        }
+        stream->update_recv_window(-static_cast<std::int32_t>(fhr.length));
+
         inbound_stream_.lease = stream->lease();
         inbound_stream_.stream_id = fhr.stream_id;
         inbound_stream_.payload_begin = (fhr.flags & kFlagPadded) != 0 ? 1U : 0U;
         inbound_stream_.payload_end = fhr.length - pad_length;
         inbound_stream_.header_block_open = false;
         inbound_stream_.end_stream_pending = false;
+
+        common::IoErr conn_err = maybe_replenish_connection_recv_window();
+        if (conn_err != common::IoErr::None) {
+            return conn_err;
+        }
     }
 
     Http2Stream *stream = inbound_stream_.lease.get();
@@ -883,7 +902,7 @@ common::IoErr Http2Connection::send_initial_flight() noexcept {
     out = append_u16(out, kSettingsMaxConcurrentStreams);
     out = append_u32(out, options_.local_max_concurrent_streams);
     out = append_u16(out, kSettingsInitialWindowSize);
-    out = append_u32(out, static_cast<std::uint32_t>(options_.initial_stream_send_window));
+    out = append_u32(out, configured_initial_stream_recv_window());
     out = append_u16(out, kSettingsMaxFrameSize);
     out = append_u32(out, options_.max_frame_size);
 
@@ -955,6 +974,31 @@ common::IoErr Http2Connection::send_goaway(std::uint32_t last_stream_id, Http2Er
     return send_control_frame(Http2FrameType::Goaway, 0, 0, payload, sizeof(payload));
 }
 
+common::IoErr Http2Connection::maybe_replenish_connection_recv_window() noexcept {
+    if (conn_recv_window_remaining_ > static_cast<std::int32_t>(options_.connection_recv_window_low_watermark)) {
+        return common::IoErr::None;
+    }
+
+    if (conn_recv_window_remaining_ >= static_cast<std::int32_t>(conn_recv_window_target_)) {
+        return common::IoErr::None;
+    }
+
+    std::uint32_t increment = conn_recv_window_target_ - static_cast<std::uint32_t>(conn_recv_window_remaining_);
+    common::IoErr err = send_window_update(0, increment);
+    if (err != common::IoErr::None) {
+        return err;
+    }
+    conn_recv_window_remaining_ = static_cast<std::int32_t>(conn_recv_window_target_);
+    return common::IoErr::None;
+}
+
+std::uint32_t Http2Connection::configured_initial_stream_recv_window() const noexcept {
+    if (options_.initial_stream_recv_window != 0) {
+        return options_.initial_stream_recv_window;
+    }
+    return static_cast<std::uint32_t>(options_.initial_stream_send_window);
+}
+
 void Http2Connection::handle_stream_error(std::uint32_t stream_id, Http2ErrorCode error_code,
                                           common::IoErr pending_result) noexcept {
     (void)send_rst_stream(stream_id, error_code);
@@ -987,6 +1031,7 @@ Http2Stream *Http2Connection::create_peer_stream(std::uint32_t stream_id) noexce
     stream_ptr->conn_ = this;
     stream_ptr->active_ = true;
     stream_ptr->send_window_ = peer_initial_stream_send_window_;
+    stream_ptr->recv_window_remaining_ = static_cast<std::int32_t>(configured_initial_stream_recv_window());
     if (!streams_.insert(std::move(stream))) {
         stream_ptr->attached_to_connection_ = false;
         stream_ptr->conn_ = nullptr;
@@ -1018,6 +1063,7 @@ Http2Stream *Http2Connection::create_local_stream(std::uint32_t stream_id) noexc
     stream_ptr->conn_ = this;
     stream_ptr->active_ = true;
     stream_ptr->send_window_ = peer_initial_stream_send_window_;
+    stream_ptr->recv_window_remaining_ = static_cast<std::int32_t>(configured_initial_stream_recv_window());
     if (!streams_.insert(std::move(stream))) {
         stream_ptr->attached_to_connection_ = false;
         stream_ptr->conn_ = nullptr;
