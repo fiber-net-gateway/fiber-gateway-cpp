@@ -3,12 +3,13 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <coroutine>
 #include <cstring>
 #include <new>
 
-#include "../async/Sleep.h"
 #include "../common/Assert.h"
 #include "../common/IoError.h"
+#include "../event/EventLoop.h"
 #include "Http2Connection.h"
 #include "Http2HeadersFrameEncoder.h"
 #include "Http2HpackHuffman.h"
@@ -76,12 +77,152 @@ std::string_view format_content_length(std::uint64_t value, std::array<char, 20>
 
 } // namespace
 
+struct ServerHttp2Request::BodyReadPollResult {
+    enum class Kind : std::uint8_t {
+        Wait,
+        Readable,
+        End,
+        TimedOut,
+        Closed,
+    };
+
+    Kind kind = Kind::Wait;
+    common::IoErr error = common::IoErr::None;
+};
+
+class ServerHttp2Request::BodyReadAwaiter {
+public:
+    BodyReadAwaiter(ServerHttp2Request &request, std::chrono::milliseconds timeout) noexcept :
+        request_(&request), timeout_(timeout) {}
+
+    BodyReadAwaiter(const BodyReadAwaiter &) = delete;
+    BodyReadAwaiter &operator=(const BodyReadAwaiter &) = delete;
+    BodyReadAwaiter(BodyReadAwaiter &&) = delete;
+    BodyReadAwaiter &operator=(BodyReadAwaiter &&) = delete;
+
+    ~BodyReadAwaiter() {
+        if (!request_) {
+            return;
+        }
+        request_->cancel_body_waiter(this);
+        if (loop_ && timer_entry_.is_in_heap()) {
+            loop_->cancel<BodyReadAwaiter, &BodyReadAwaiter::timer_entry_>(*this);
+        }
+    }
+
+    bool await_ready() noexcept {
+        if (!request_) {
+            return true;
+        }
+        BodyReadPollResult state = request_->poll_body_read_state();
+        if (state.kind != BodyReadPollResult::Kind::Wait) {
+            return true;
+        }
+        if (timeout_.count() == 0) {
+            timed_out_ = true;
+            return true;
+        }
+        return false;
+    }
+
+    bool await_suspend(std::coroutine_handle<> handle) {
+        if (!request_) {
+            return false;
+        }
+
+        loop_ = &fiber::event::EventLoop::current();
+        handle_ = handle;
+        if (!request_->arm_body_waiter(this)) {
+            return false;
+        }
+        if (has_timer()) {
+            loop_->post_at<BodyReadAwaiter, &BodyReadAwaiter::timer_entry_, &BodyReadAwaiter::on_timeout>(
+                loop_->now() + timeout_, *this);
+        }
+        return true;
+    }
+
+    BodyReadPollResult await_resume() noexcept {
+        BodyReadPollResult result{};
+        if (!request_) {
+            result.kind = BodyReadPollResult::Kind::Closed;
+            result.error = common::IoErr::Canceled;
+            return result;
+        }
+
+        if (loop_ && timer_entry_.is_in_heap()) {
+            loop_->cancel<BodyReadAwaiter, &BodyReadAwaiter::timer_entry_>(*this);
+        }
+        if (request_->body_waiter_ == this) {
+            request_->body_waiter_ = nullptr;
+        }
+
+        if (timed_out_) {
+            result.kind = BodyReadPollResult::Kind::TimedOut;
+        } else {
+            result = request_->poll_body_read_state();
+            FIBER_ASSERT(result.kind != BodyReadPollResult::Kind::Wait);
+        }
+
+        request_ = nullptr;
+        handle_ = {};
+        loop_ = nullptr;
+        timed_out_ = false;
+        resume_posted_ = false;
+        return result;
+    }
+
+private:
+    static void on_notify(BodyReadAwaiter *awaiter) {
+        if (!awaiter) {
+            return;
+        }
+        awaiter->resume_posted_ = false;
+        awaiter->resume();
+    }
+
+    static void on_timeout(BodyReadAwaiter *awaiter) {
+        if (!awaiter) {
+            return;
+        }
+        awaiter->timed_out_ = true;
+        if (awaiter->request_ && awaiter->request_->body_waiter_ == awaiter) {
+            awaiter->request_->body_waiter_ = nullptr;
+        }
+        awaiter->resume();
+    }
+
+    void resume() noexcept {
+        auto handle = handle_;
+        handle_ = {};
+        if (handle) {
+            handle.resume();
+        }
+    }
+
+    bool has_timer() const noexcept {
+        return timeout_.count() > 0 && timeout_ != std::chrono::milliseconds::max();
+    }
+
+    ServerHttp2Request *request_ = nullptr;
+    std::chrono::milliseconds timeout_{};
+    fiber::event::EventLoop *loop_ = nullptr;
+    std::coroutine_handle<> handle_{};
+    fiber::event::EventLoop::NotifyEntry notify_entry_{};
+    fiber::event::EventLoop::TimerEntry timer_entry_{};
+    bool timed_out_ = false;
+    bool resume_posted_ = false;
+
+    friend class ServerHttp2Request;
+};
+
 const Http2Stream::Ops &ServerHttp2Request::stream_ops() noexcept {
     static const Http2Stream::Ops kOps{
         &ServerHttp2Request::destroy_owner,
         &ServerHttp2Request::on_header_block_start,
         &ServerHttp2Request::on_header_block_complete,
         &ServerHttp2Request::on_body,
+        &ServerHttp2Request::on_stream_abort,
     };
     return kOps;
 }
@@ -113,7 +254,8 @@ const HeaderMap<ServerHttp2Request::PseudoHeaderHandler> &ServerHttp2Request::ps
 ServerHttp2Request::ServerHttp2Request(std::uint32_t stream_id, Http2Connection &conn,
                                        const HttpServerOptions &http_options,
                                        const HttpHandler &handler) noexcept :
-    conn_(&conn), handler_(&handler), stream_(stream_id, this, stream_ops()), exchange_(http_options) {
+    conn_(&conn), handler_(&handler), stream_(stream_id, this, stream_ops()), exchange_(http_options),
+    body_timeout_(http_options.body_timeout) {
     FIBER_ASSERT(handler_ != nullptr);
 }
 
@@ -157,6 +299,7 @@ common::IoErr ServerHttp2Request::on_header_block_complete(void *owner, bool end
         }
         if (end_stream) {
             request->exchange_.request_trailers_complete_ = true;
+            request->notify_body_waiter();
         }
         return common::IoErr::None;
     }
@@ -167,6 +310,7 @@ common::IoErr ServerHttp2Request::on_header_block_complete(void *owner, bool end
 
     request->reading_trailers_ = true;
     request->exchange_.request_trailers_complete_ = true;
+    request->notify_body_waiter();
     return common::IoErr::None;
 }
 
@@ -175,13 +319,22 @@ common::IoErr ServerHttp2Request::on_body(void *owner, mem::IoBuf &&buf, bool en
     if (!request->request_head_received_ || request->reading_trailers_ || request->exchange_.request_trailers_complete_) {
         return common::IoErr::Invalid;
     }
-    if (buf.readable() != 0 && !request->request_body_queue_.append(std::move(buf))) {
+    const bool queued_data = buf.readable() != 0;
+    if (queued_data && !request->request_body_queue_.append(std::move(buf))) {
         return common::IoErr::NoMem;
     }
     if (end_stream) {
         request->exchange_.request_trailers_complete_ = true;
     }
+    if (queued_data || end_stream) {
+        request->notify_body_waiter();
+    }
     return common::IoErr::None;
+}
+
+void ServerHttp2Request::on_stream_abort(void *owner, common::IoErr reason) noexcept {
+    auto *request = static_cast<ServerHttp2Request *>(owner);
+    request->on_stream_aborted(reason);
 }
 
 void ServerHttp2Request::destroy_owner(void *owner) noexcept { delete static_cast<ServerHttp2Request *>(owner); }
@@ -205,42 +358,90 @@ fiber::async::DetachedTask ServerHttp2Request::run_handler_task(ServerHttp2Reque
     co_return;
 }
 
+ServerHttp2Request::BodyReadPollResult ServerHttp2Request::poll_body_read_state() const noexcept {
+    BodyReadPollResult result{};
+    if (request_body_queue_.readable_bytes() != 0) {
+        result.kind = BodyReadPollResult::Kind::Readable;
+        return result;
+    }
+    if (exchange_.request_trailers_complete_) {
+        result.kind = BodyReadPollResult::Kind::End;
+        return result;
+    }
+    if (abort_reason_ != common::IoErr::None) {
+        result.kind = BodyReadPollResult::Kind::Closed;
+        result.error = abort_reason_;
+        return result;
+    }
+    return result;
+}
+
+bool ServerHttp2Request::arm_body_waiter(BodyReadAwaiter *awaiter) noexcept {
+    if (!awaiter || poll_body_read_state().kind != BodyReadPollResult::Kind::Wait) {
+        return false;
+    }
+    FIBER_ASSERT(body_waiter_ == nullptr);
+    body_waiter_ = awaiter;
+    return true;
+}
+
+void ServerHttp2Request::cancel_body_waiter(BodyReadAwaiter *awaiter) noexcept {
+    if (body_waiter_ == awaiter) {
+        body_waiter_ = nullptr;
+    }
+}
+
+void ServerHttp2Request::notify_body_waiter() noexcept {
+    if (!body_waiter_ || body_waiter_->resume_posted_ || body_waiter_->loop_ == nullptr) {
+        return;
+    }
+    body_waiter_->resume_posted_ = true;
+    body_waiter_->loop_->post<BodyReadAwaiter, &BodyReadAwaiter::notify_entry_, &BodyReadAwaiter::on_notify>(*body_waiter_);
+}
+
+void ServerHttp2Request::on_stream_aborted(common::IoErr reason) noexcept {
+    if (abort_reason_ == common::IoErr::None) {
+        abort_reason_ = reason;
+    }
+    notify_body_waiter();
+}
+
 fiber::async::Task<common::IoResult<BodyChunk>> ServerHttp2Request::read_body(HttpExchange &, std::size_t max_bytes) noexcept {
     BodyChunk out{};
-    const auto queued_bytes = [this]() noexcept { return request_body_queue_.readable_bytes(); };
     if (max_bytes == 0) {
-        if (queued_bytes() == 0 && exchange_.request_trailers_complete_) {
+        if (request_body_queue_.readable_bytes() == 0 && exchange_.request_trailers_complete_) {
             out.last = true;
         }
         co_return out;
     }
 
-    for (;;) {
-        if (queued_bytes() != 0) {
+    BodyReadPollResult state = co_await BodyReadAwaiter(*this, body_timeout_);
+    switch (state.kind) {
+        case BodyReadPollResult::Kind::Readable:
             break;
-        }
-        if (exchange_.request_trailers_complete_) {
+        case BodyReadPollResult::Kind::End:
             out.last = true;
             co_return out;
-        }
-        if (stream_.remote_rst() || stream_.local_rst()) {
-            co_return std::unexpected(common::IoErr::Canceled);
-        }
-        if (stream_.close_reason() != common::IoErr::None) {
-            co_return std::unexpected(stream_.close_reason());
-        }
-        co_await fiber::async::sleep(std::chrono::milliseconds(1));
+        case BodyReadPollResult::Kind::TimedOut:
+            co_return std::unexpected(common::IoErr::TimedOut);
+        case BodyReadPollResult::Kind::Closed:
+            co_return std::unexpected(state.error);
+        case BodyReadPollResult::Kind::Wait:
+            FIBER_ASSERT(false);
+            co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    const std::size_t take = std::min(max_bytes, queued_bytes());
+    const std::size_t queued_bytes = request_body_queue_.readable_bytes();
+    const std::size_t take = std::min(max_bytes, queued_bytes);
     if (!request_body_queue_.take_prefix(take, out.data_chain)) {
         co_return std::unexpected(common::IoErr::NoMem);
     }
-    if (common::IoErr err = stream_.maybe_replenish_recv_window(queued_bytes()); err != common::IoErr::None) {
+    if (common::IoErr err = stream_.maybe_replenish_recv_window(request_body_queue_.readable_bytes());
+        err != common::IoErr::None) {
         co_return std::unexpected(err);
     }
 
-    if (queued_bytes() == 0 && exchange_.request_trailers_complete_) {
+    if (request_body_queue_.readable_bytes() == 0 && exchange_.request_trailers_complete_) {
         out.last = true;
     }
     co_return out;

@@ -37,6 +37,7 @@ struct TestHttp2StreamOwner {
             &TestHttp2StreamOwner::on_header_block_start,
             &TestHttp2StreamOwner::on_header_block_complete,
             &TestHttp2StreamOwner::on_body,
+            &TestHttp2StreamOwner::on_abort,
         };
         (void)kDecoderOps;
         return kOps;
@@ -80,6 +81,7 @@ struct TestHttp2StreamOwner {
         }
         return fiber::common::IoErr::None;
     }
+    static void on_abort(void *, fiber::common::IoErr) noexcept {}
     static fiber::common::IoErr on_indexed_field(void *, fiber::http::Http2HpackDecoder::TableEntryView) noexcept {
         return fiber::common::IoErr::None;
     }

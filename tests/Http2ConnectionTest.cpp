@@ -656,11 +656,11 @@ RunOutcome execute_connection(std::vector<std::string> chunks, fiber::http::Http
 DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderRunOutcome>> promise,
                                       std::vector<std::string> chunks,
                                       fiber::http::HttpHandler handler,
+                                      fiber::http::HttpServerOptions http_options,
                                       fiber::http::Http2Connection::Options options) {
     options = with_test_hpack_catalog(options);
     auto transport = std::make_unique<FakeHttpTransport>(std::move(chunks), std::vector<size_t>{}, false, true);
     FakeHttpTransport *fake_transport = transport.get();
-    fiber::http::HttpServerOptions http_options;
     fiber::http::HttpHandler wrapped_handler =
         [handler = std::move(handler), fake_transport](fiber::http::HttpExchange &exchange)
         -> fiber::async::Task<void> {
@@ -682,6 +682,7 @@ DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderR
 
 ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks,
                                               fiber::http::HttpHandler handler,
+                                              fiber::http::HttpServerOptions http_options,
                                               fiber::http::Http2Connection::Options options = {}) {
     fiber::event::EventLoopGroup group(1);
     auto promise = std::make_shared<std::promise<ServerHeaderRunOutcome>>();
@@ -689,8 +690,8 @@ ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks,
 
     group.start();
     fiber::async::spawn(group.at(0), [promise = std::move(promise), chunks = std::move(chunks),
-                                      handler = std::move(handler), options]() mutable {
-        return run_http2_server_request(std::move(promise), std::move(chunks), std::move(handler), options);
+                                      handler = std::move(handler), http_options, options]() mutable {
+        return run_http2_server_request(std::move(promise), std::move(chunks), std::move(handler), http_options, options);
     });
 
     auto status = future.wait_for(std::chrono::seconds(2));
@@ -704,6 +705,12 @@ ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks,
     ServerHeaderRunOutcome outcome = future.get();
     group.join();
     return outcome;
+}
+
+ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks,
+                                              fiber::http::HttpHandler handler,
+                                              fiber::http::Http2Connection::Options options = {}) {
+    return execute_server_request(std::move(chunks), std::move(handler), fiber::http::HttpServerOptions{}, options);
 }
 
 ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks,
@@ -1879,6 +1886,141 @@ TEST(Http2ConnectionTest, ServerHandlerCanReadBufferedRequestBodyAcrossMultipleD
     ASSERT_FALSE(parsed.header_block.empty());
     EXPECT_EQ(parsed.first_flags & 0x1U, 0x1U);
     EXPECT_EQ(parsed.first_flags & 0x4U, 0x4U);
+}
+
+TEST(Http2ConnectionTest, ServerHandlerCanAwaitLaterRequestBodyFrame) {
+    std::string first = std::string(kClientConnectionPreface);
+    first += make_frame(0, 0x4, 0x0, 0, {});
+    first += build_headers_frame_bytes(
+        1,
+        {
+            {":method", "POST"},
+            {":scheme", "https"},
+            {":path", "/delayed"},
+            {":authority", "example.com"},
+        },
+        false);
+    std::string second = make_frame(12, 0x0, 0x1, 1, "delayed body");
+
+    auto observed_body = std::make_shared<std::string>();
+    auto read_result = std::make_shared<fiber::common::IoResult<fiber::http::BodyChunk>>();
+    auto header_result = std::make_shared<fiber::common::IoResult<void>>();
+    fiber::http::HttpHandler handler =
+        [observed_body, read_result, header_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        *read_result = co_await exchange.read_body(64);
+        if (!*read_result) {
+            co_return;
+        }
+
+        const auto bytes = chain_to_bytes(std::move(read_result->value().data_chain));
+        observed_body->assign(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+
+        fiber::http::HttpHeaders headers(exchange.pool());
+        headers.set("server", "fiber");
+        *header_result = co_await exchange.send_header({
+            .kind = fiber::http::OutgoingHeaderKind::Final,
+            .status_code = 204,
+            .headers = &headers,
+            .end_stream = true,
+        });
+        co_return;
+    };
+
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(first), std::move(second)}, std::move(handler));
+
+    ASSERT_TRUE(outcome.result.has_value());
+    ASSERT_TRUE(read_result->has_value());
+    ASSERT_TRUE(header_result->has_value());
+    EXPECT_EQ(*observed_body, "delayed body");
+    EXPECT_TRUE(read_result->value().last);
+}
+
+TEST(Http2ConnectionTest, ServerReadBodyReturnsLastWhenRequestEndsAtHeaders) {
+    std::string request = std::string(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0x0, 0, {});
+    request += build_headers_frame_bytes(
+        1,
+        {
+            {":method", "POST"},
+            {":scheme", "https"},
+            {":path", "/empty"},
+            {":authority", "example.com"},
+        },
+        true);
+
+    auto read_result = std::make_shared<fiber::common::IoResult<fiber::http::BodyChunk>>();
+    fiber::http::HttpHandler handler =
+        [read_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        *read_result = co_await exchange.read_body(64);
+        co_return;
+    };
+
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, std::move(handler));
+
+    ASSERT_TRUE(outcome.result.has_value());
+    ASSERT_TRUE(read_result->has_value());
+    EXPECT_EQ(read_result->value().data_chain.readable_bytes(), 0u);
+    EXPECT_TRUE(read_result->value().last);
+}
+
+TEST(Http2ConnectionTest, ServerReadBodyTimesOutWhileWaitingForMoreBody) {
+    std::string request = std::string(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0x0, 0, {});
+    request += build_headers_frame_bytes(
+        1,
+        {
+            {":method", "POST"},
+            {":scheme", "https"},
+            {":path", "/timeout"},
+            {":authority", "example.com"},
+        },
+        false);
+
+    fiber::http::HttpServerOptions http_options;
+    http_options.body_timeout = std::chrono::seconds(0);
+
+    auto read_result = std::make_shared<fiber::common::IoResult<fiber::http::BodyChunk>>();
+    fiber::http::HttpHandler handler =
+        [read_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        *read_result = co_await exchange.read_body(64);
+        co_return;
+    };
+
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, std::move(handler), http_options);
+
+    ASSERT_TRUE(outcome.result.has_value());
+    ASSERT_FALSE(read_result->has_value());
+    EXPECT_EQ(read_result->error(), fiber::common::IoErr::TimedOut);
+}
+
+TEST(Http2ConnectionTest, ServerReadBodyReturnsCanceledWhenPeerResetsStreamWhileWaiting) {
+    std::string first = std::string(kClientConnectionPreface);
+    first += make_frame(0, 0x4, 0x0, 0, {});
+    first += build_headers_frame_bytes(
+        1,
+        {
+            {":method", "POST"},
+            {":scheme", "https"},
+            {":path", "/rst"},
+            {":authority", "example.com"},
+        },
+        false);
+
+    std::string rst_payload(4, '\0');
+    std::string second = make_frame(4, 0x3, 0x0, 1, rst_payload);
+
+    auto read_result = std::make_shared<fiber::common::IoResult<fiber::http::BodyChunk>>();
+    fiber::http::HttpHandler handler =
+        [read_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        *read_result = co_await exchange.read_body(64);
+        co_return;
+    };
+
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(first), std::move(second)}, std::move(handler));
+
+    ASSERT_TRUE(outcome.result.has_value());
+    ASSERT_FALSE(read_result->has_value());
+    EXPECT_EQ(read_result->error(), fiber::common::IoErr::Canceled);
 }
 
 TEST(Http2ConnectionTest, ServerReadBodyReplenishesStreamWindowAfterCrossingLowWatermark) {
