@@ -116,7 +116,8 @@ public:
     // reserved/sent DATA on this stream, so the per-stream send window is
     // allowed to become negative until future WINDOW_UPDATE frames restore it.
     void update_send_window(std::int32_t delta) noexcept;
-    void update_recv_window(std::int32_t delta) noexcept;
+    void consume_recv_window(std::uint32_t bytes) noexcept;
+    common::IoErr maybe_replenish_recv_window(std::size_t buffered_bytes) noexcept;
     void close(common::IoErr result = common::IoErr::Canceled) noexcept;
 
 private:
@@ -136,6 +137,8 @@ private:
     // smaller SETTINGS_INITIAL_WINDOW_SIZE is applied to in-flight streams.
     std::int32_t send_window_ = 65535;
     std::int32_t recv_window_remaining_ = 65535;
+    std::uint32_t recv_window_target_ = 65535;
+    std::uint32_t recv_window_low_watermark_ = 0;
     common::IntrusiveListHook owned_hook_{};
     void *owner_ = nullptr;
     const Ops *ops_ = nullptr;

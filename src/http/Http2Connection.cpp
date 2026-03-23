@@ -420,7 +420,7 @@ common::IoErr Http2Connection::handle_data_payload(const FrameHeader &fhr, const
             handle_stream_error(fhr.stream_id, Http2ErrorCode::FlowControlError, common::IoErr::Invalid);
             return common::IoErr::None;
         }
-        stream->update_recv_window(-static_cast<std::int32_t>(fhr.length));
+        stream->consume_recv_window(fhr.length);
 
         inbound_stream_.lease = stream->lease();
         inbound_stream_.stream_id = fhr.stream_id;
@@ -1031,7 +1031,9 @@ Http2Stream *Http2Connection::create_peer_stream(std::uint32_t stream_id) noexce
     stream_ptr->conn_ = this;
     stream_ptr->active_ = true;
     stream_ptr->send_window_ = peer_initial_stream_send_window_;
-    stream_ptr->recv_window_remaining_ = static_cast<std::int32_t>(configured_initial_stream_recv_window());
+    stream_ptr->recv_window_target_ = configured_initial_stream_recv_window();
+    stream_ptr->recv_window_low_watermark_ = options_.stream_recv_window_low_watermark;
+    stream_ptr->recv_window_remaining_ = static_cast<std::int32_t>(stream_ptr->recv_window_target_);
     if (!streams_.insert(std::move(stream))) {
         stream_ptr->attached_to_connection_ = false;
         stream_ptr->conn_ = nullptr;
@@ -1063,7 +1065,9 @@ Http2Stream *Http2Connection::create_local_stream(std::uint32_t stream_id) noexc
     stream_ptr->conn_ = this;
     stream_ptr->active_ = true;
     stream_ptr->send_window_ = peer_initial_stream_send_window_;
-    stream_ptr->recv_window_remaining_ = static_cast<std::int32_t>(configured_initial_stream_recv_window());
+    stream_ptr->recv_window_target_ = configured_initial_stream_recv_window();
+    stream_ptr->recv_window_low_watermark_ = options_.stream_recv_window_low_watermark;
+    stream_ptr->recv_window_remaining_ = static_cast<std::int32_t>(stream_ptr->recv_window_target_);
     if (!streams_.insert(std::move(stream))) {
         stream_ptr->attached_to_connection_ = false;
         stream_ptr->conn_ = nullptr;

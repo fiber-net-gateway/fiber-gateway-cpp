@@ -175,13 +175,8 @@ common::IoErr ServerHttp2Request::on_body(void *owner, mem::IoBuf &&buf, bool en
     if (!request->request_head_received_ || request->reading_trailers_ || request->exchange_.request_trailers_complete_) {
         return common::IoErr::Invalid;
     }
-    if (buf.readable() != 0) {
-        const std::size_t readable = buf.readable();
-        request->request_body_queued_bytes_ += readable;
-        if (!request->request_body_queue_.append(std::move(buf))) {
-            request->request_body_queued_bytes_ -= readable;
-            return common::IoErr::NoMem;
-        }
+    if (buf.readable() != 0 && !request->request_body_queue_.append(std::move(buf))) {
+        return common::IoErr::NoMem;
     }
     if (end_stream) {
         request->exchange_.request_trailers_complete_ = true;
@@ -212,15 +207,16 @@ fiber::async::DetachedTask ServerHttp2Request::run_handler_task(ServerHttp2Reque
 
 fiber::async::Task<common::IoResult<BodyChunk>> ServerHttp2Request::read_body(HttpExchange &, std::size_t max_bytes) noexcept {
     BodyChunk out{};
+    const auto queued_bytes = [this]() noexcept { return request_body_queue_.readable_bytes(); };
     if (max_bytes == 0) {
-        if (request_body_queued_bytes_ == 0 && exchange_.request_trailers_complete_) {
+        if (queued_bytes() == 0 && exchange_.request_trailers_complete_) {
             out.last = true;
         }
         co_return out;
     }
 
     for (;;) {
-        if (request_body_queued_bytes_ != 0) {
+        if (queued_bytes() != 0) {
             break;
         }
         if (exchange_.request_trailers_complete_) {
@@ -236,28 +232,15 @@ fiber::async::Task<common::IoResult<BodyChunk>> ServerHttp2Request::read_body(Ht
         co_await fiber::async::sleep(std::chrono::milliseconds(1));
     }
 
-    const std::size_t take = std::min(max_bytes, request_body_queued_bytes_);
-    if (!request_body_queue_.retain_prefix(take, out.data_chain)) {
+    const std::size_t take = std::min(max_bytes, queued_bytes());
+    if (!request_body_queue_.take_prefix(take, out.data_chain)) {
         co_return std::unexpected(common::IoErr::NoMem);
     }
-    request_body_queue_.consume_and_compact(take);
-    request_body_queued_bytes_ -= take;
-
-    if (conn_ != nullptr && stream_.recv_window_remaining() <= static_cast<std::int32_t>(conn_->options_.stream_recv_window_low_watermark) &&
-        request_body_queued_bytes_ <= conn_->options_.stream_recv_window_low_watermark) {
-        std::uint32_t target_window = conn_->configured_initial_stream_recv_window() -
-                                      static_cast<std::uint32_t>(request_body_queued_bytes_);
-        if (target_window > static_cast<std::uint32_t>(stream_.recv_window_remaining())) {
-            std::uint32_t increment = target_window - static_cast<std::uint32_t>(stream_.recv_window_remaining());
-            common::IoErr err = conn_->send_window_update(stream_.stream_id(), increment);
-            if (err != common::IoErr::None) {
-                co_return std::unexpected(err);
-            }
-            stream_.update_recv_window(static_cast<std::int32_t>(increment));
-        }
+    if (common::IoErr err = stream_.maybe_replenish_recv_window(queued_bytes()); err != common::IoErr::None) {
+        co_return std::unexpected(err);
     }
 
-    if (request_body_queued_bytes_ == 0 && exchange_.request_trailers_complete_) {
+    if (queued_bytes() == 0 && exchange_.request_trailers_complete_) {
         out.last = true;
     }
     co_return out;

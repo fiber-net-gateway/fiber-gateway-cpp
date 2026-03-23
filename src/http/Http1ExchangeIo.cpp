@@ -351,11 +351,9 @@ common::IoResult<void> Http1ExchangeIo::take_prefix(mem::IoBufChain &out, std::s
         mem::IoBuf *front = connection_->inbound_bufs().front();
         if (front && front->readable() > 0) {
             std::size_t take = std::min(len, front->readable());
-            mem::IoBuf piece = front->retain_slice(0, take);
-            if (!out.append(std::move(piece))) {
+            if (!connection_->inbound_bufs().take_prefix(take, out)) {
                 return std::unexpected(common::IoErr::NoMem);
             }
-            connection_->inbound_bufs().consume_and_compact(take);
             len -= take;
             continue;
         }
