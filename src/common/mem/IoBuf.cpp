@@ -377,6 +377,106 @@ bool IoBufChain::retain_prefix(std::size_t bytes, IoBufChain &out) const noexcep
     return true;
 }
 
+bool IoBufChain::take_prefix(std::size_t bytes, IoBufChain &dst) noexcept {
+    FIBER_ASSERT(this != &dst);
+    FIBER_ASSERT(bytes <= readable_bytes_);
+
+    if (bytes == 0) {
+        return true;
+    }
+
+    Node *boundary = nullptr;
+    std::size_t boundary_bytes = 0;
+    std::size_t remaining = bytes;
+    for (Node *node = head_; node && remaining > 0; node = node->next) {
+        std::size_t readable = node->buf.readable();
+        if (readable == 0) {
+            continue;
+        }
+        if (remaining < readable) {
+            boundary = node;
+            boundary_bytes = remaining;
+            break;
+        }
+        remaining -= readable;
+    }
+
+    Node *partial = nullptr;
+    if (boundary_bytes > 0) {
+        IoBuf slice = boundary->buf.retain_slice(0, boundary_bytes);
+        if (!slice) {
+            return false;
+        }
+        partial = new (std::nothrow) Node{};
+        if (!partial) {
+            return false;
+        }
+        partial->buf = std::move(slice);
+    }
+
+    remaining = bytes;
+    Node *prev = nullptr;
+    Node *node = head_;
+    while (node && remaining > 0) {
+        Node *next = node->next;
+        std::size_t readable = node->buf.readable();
+        if (readable == 0) {
+            prev = node;
+            node = next;
+            continue;
+        }
+
+        if (remaining < readable) {
+            break;
+        }
+
+        std::size_t writable = node->buf.writable();
+        if (prev) {
+            prev->next = next;
+        } else {
+            head_ = next;
+        }
+        if (tail_ == node) {
+            tail_ = prev;
+        }
+        node->next = nullptr;
+
+        --size_;
+        readable_bytes_ -= readable;
+        writable_bytes_ -= writable;
+
+        if (dst.tail_) {
+            dst.tail_->next = node;
+        } else {
+            dst.head_ = node;
+        }
+        dst.tail_ = node;
+        ++dst.size_;
+        dst.readable_bytes_ += readable;
+        dst.writable_bytes_ += writable;
+
+        remaining -= readable;
+        node = next;
+    }
+
+    if (boundary_bytes > 0) {
+        FIBER_ASSERT(node == boundary);
+        boundary->buf.consume(boundary_bytes);
+        readable_bytes_ -= boundary_bytes;
+
+        if (dst.tail_) {
+            dst.tail_->next = partial;
+        } else {
+            dst.head_ = partial;
+        }
+        dst.tail_ = partial;
+        ++dst.size_;
+        dst.readable_bytes_ += boundary_bytes;
+    }
+
+    return true;
+}
+
 void IoBufChain::clear() noexcept {
     delete_nodes(head_);
     head_ = nullptr;

@@ -101,10 +101,9 @@ bool Http2SendPayload::split_prefix_to(std::size_t bytes, Http2SendPayload &out)
                 return false;
             }
             mem::IoBufChain prefix;
-            if (!chain().retain_prefix(bytes, prefix)) {
+            if (!chain().take_prefix(bytes, prefix)) {
                 return false;
             }
-            chain().consume_and_compact(bytes);
             out.set_chain(std::move(prefix));
             return true;
         }

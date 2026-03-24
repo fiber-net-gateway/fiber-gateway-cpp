@@ -17,11 +17,12 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../common/mem/IoBuf.h"
+#include "Http2OutboundHook.h"
+#include "Http2OutboundScheduler.h"
 #include "Http2Protocol.h"
 #include "Http2HpackEncodeCatalog.h"
 #include "Http2HpackDecoder.h"
 #include "Http2HpackEncoder.h"
-#include "Http2SendingEntryQueue.h"
 #include "Http2Stream.h"
 #include "Http2StreamFactory.h"
 #include "Http2StreamTable.h"
@@ -49,10 +50,6 @@ public:
 
     using FrameHeader = Http2FrameHeader;
     using RunResult = common::IoResult<void>;
-    using SendResult = common::IoResult<void>;
-    using StableSpan = Http2StableSpan;
-    using SendPayload = Http2SendPayload;
-    using SendEntry = Http2SendingEntry;
 
     struct Options {
         ConnectionRole role = ConnectionRole::Server;
@@ -68,6 +65,9 @@ public:
         std::uint32_t local_max_concurrent_streams = 128;
         std::uint32_t max_local_push_streams = 0;
         std::uint32_t initial_connection_recv_window = 0x7fffffffU;
+        std::uint32_t connection_recv_window_low_watermark = 16 * 1024 * 1024;
+        std::uint32_t initial_stream_recv_window = 64 * 1024;
+        std::uint32_t stream_recv_window_low_watermark = 16 * 1024;
         std::int32_t initial_connection_send_window = 65535;
         std::int32_t initial_stream_send_window = 65535;
     };
@@ -92,9 +92,6 @@ protected:
 
     Http2Stream *find_stream(std::uint32_t stream_id) noexcept;
     const Http2Stream *find_stream(std::uint32_t stream_id) const noexcept;
-    [[nodiscard]] SendEntry *acquire_send_entry() noexcept;
-    void release_send_entry(SendEntry *entry) noexcept;
-    [[nodiscard]] common::IoErr enqueue_send_entry(SendEntry *entry) noexcept;
     void update_connection_send_window(std::int32_t delta) noexcept;
     void stop_sending(common::IoErr reason = common::IoErr::Canceled) noexcept;
     [[nodiscard]] std::int32_t connection_send_window() const noexcept { return conn_send_window_; }
@@ -140,14 +137,14 @@ private:
                                         std::size_t length) noexcept;
     common::IoErr apply_settings_parameter(std::uint16_t id, std::uint32_t value) noexcept;
     common::IoErr apply_peer_initial_stream_window(std::uint32_t value) noexcept;
-    common::IoErr send_control_frame(Http2FrameType type, std::uint8_t flags, std::uint32_t stream_id,
-                                     const std::uint8_t *payload, std::size_t length) noexcept;
     common::IoErr send_initial_flight() noexcept;
     common::IoErr send_settings_ack() noexcept;
     common::IoErr send_ping_ack(const std::uint8_t *opaque_data) noexcept;
     common::IoErr send_window_update(std::uint32_t stream_id, std::uint32_t increment) noexcept;
     common::IoErr send_rst_stream(std::uint32_t stream_id, Http2ErrorCode error_code) noexcept;
     common::IoErr send_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept;
+    [[nodiscard]] common::IoErr maybe_replenish_connection_recv_window() noexcept;
+    [[nodiscard]] std::uint32_t configured_initial_stream_recv_window() const noexcept;
     void handle_stream_error(std::uint32_t stream_id, Http2ErrorCode error_code,
                              common::IoErr pending_result = common::IoErr::Canceled) noexcept;
     Http2Stream *create_peer_stream(std::uint32_t stream_id) noexcept;
@@ -163,6 +160,11 @@ private:
     [[nodiscard]] bool is_local_stream_id(std::uint32_t stream_id) const noexcept;
     [[nodiscard]] bool is_peer_stream_id(std::uint32_t stream_id) const noexcept;
     [[nodiscard]] std::size_t configured_max_active_streams() const noexcept;
+    [[nodiscard]] common::IoErr request_stream_send(Http2Stream &stream, Http2OutboundNextKind next_kind,
+                                                    Http2OutboundEncodeFn encode, void *ctx) noexcept;
+    [[nodiscard]] bool cancel_queued_stream_send(Http2Stream &stream) noexcept;
+    void cancel_stream_send(Http2Stream &stream) noexcept;
+    void on_stream_outbound_idle(Http2Stream &stream) noexcept;
     fiber::async::Task<RunResult> finalize_run(RunResult result) noexcept;
     fiber::async::Task<void> wait_for_send_loop_exit() noexcept;
     fiber::async::Task<void> close_transport_after_send_loop() noexcept;
@@ -175,15 +177,10 @@ private:
     common::IoErr start_draining() noexcept;
     void maybe_enter_closing_from_draining() noexcept;
     void enter_closing(common::IoErr reason, bool abortive = true) noexcept;
-    void finish_send_entry(SendEntry *entry, common::IoErr result) noexcept;
-    void drain_send_queue(common::IoErr result) noexcept;
-    void notify_send_done(SendEntry *entry) noexcept;
     void close_all_streams(common::IoErr result) noexcept;
     void clear_inbound_stream() noexcept;
     [[nodiscard]] Http2Stream::Lease alloc_local_stream(std::uint32_t stream_id) noexcept;
     [[nodiscard]] Http2Stream::Lease alloc_peer_stream(std::uint32_t stream_id) noexcept;
-    [[nodiscard]] common::IoErr submit_framed_chain(Http2Stream &stream, mem::IoBufChain &&chain,
-                                                    bool end_stream) noexcept;
     [[nodiscard]] Http2HpackEncoder &outbound_hpack_encoder() noexcept { return outbound_hpack_encoder_; }
     [[nodiscard]] const Http2HpackEncoder &outbound_hpack_encoder() const noexcept { return outbound_hpack_encoder_; }
 
@@ -200,6 +197,8 @@ private:
     std::size_t peer_active_stream_count_ = 0;
     std::size_t local_push_stream_count_ = 0;
     std::int32_t conn_send_window_ = 0;
+    std::int32_t conn_recv_window_remaining_ = 65535;
+    std::uint32_t conn_recv_window_target_ = 65535;
     std::int32_t peer_initial_stream_send_window_ = 65535;
     std::uint32_t peer_header_table_size_ = 4096;
     std::uint32_t peer_max_outbound_frame_size_ = 16384;
@@ -215,7 +214,7 @@ private:
     std::size_t control_payload_used_ = 0;
     std::array<std::uint8_t, 6> settings_scratch_{};
     std::size_t settings_scratch_used_ = 0;
-    Http2SendingEntryQueue send_queue_;
+    Http2OutboundScheduler outbound_scheduler_;
     fiber::async::WaitGroup lifetime_wg_{};
     common::IntrusiveList<Http2Stream, offsetof(Http2Stream, owned_hook_)> owned_stream_list_;
     State state_ = State::Init;
@@ -224,6 +223,7 @@ private:
     common::IoErr stop_sending_reason_ = common::IoErr::Canceled;
 
     friend class Http2Stream;
+    friend class Http2OutboundScheduler;
     friend class ServerHttp2Request;
 };
 

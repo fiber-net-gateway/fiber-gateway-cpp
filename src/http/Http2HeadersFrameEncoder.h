@@ -13,6 +13,8 @@
 
 namespace fiber::http {
 
+class Http2OutboundEncodeTarget;
+
 class Http2HeadersFrameEncoder : public common::NonCopyable, public common::NonMovable {
 public:
     struct Options {
@@ -30,11 +32,11 @@ public:
     Http2HeadersFrameEncoder(Http2HpackEncoder &encoder, Options options) noexcept;
     ~Http2HeadersFrameEncoder();
 
-    [[nodiscard]] common::IoErr begin() noexcept;
+    [[nodiscard]] common::IoErr begin(Http2OutboundEncodeTarget &target) noexcept;
     [[nodiscard]] common::IoErr encode_status(int status_code) noexcept;
     [[nodiscard]] common::IoErr encode_field(std::string_view name, std::uint64_t name_hash,
                                              std::string_view value) noexcept;
-    [[nodiscard]] common::IoErr finish(mem::IoBufChain &out) noexcept;
+    [[nodiscard]] common::IoErr finish() noexcept;
     void abort() noexcept;
 
 private:
@@ -49,8 +51,9 @@ private:
     [[nodiscard]] std::size_t current_frame_hpack_remaining() const noexcept;
     [[nodiscard]] std::uint32_t first_frame_buf_payload_cap() const noexcept;
     [[nodiscard]] std::uint32_t next_buf_payload_cap() const noexcept;
+    [[nodiscard]] common::IoErr flush_current_buf() noexcept;
     void reset_state() noexcept;
-    void commit_to_frames(std::size_t bytes) noexcept;
+    void commit_to_output(std::size_t bytes) noexcept;
 
     static common::IoErr acquire_output(void *ctx, std::size_t min_bytes,
                                         std::uint8_t *&dst, std::size_t &len) noexcept;
@@ -59,8 +62,8 @@ private:
     Http2HpackEncoder &encoder_;
     Options options_{};
 
-    mem::IoBufChain frames_;
-    mem::IoBuf *current_buf_ = nullptr;
+    Http2OutboundEncodeTarget *target_ = nullptr;
+    mem::IoBuf current_buf_storage_{};
     std::uint8_t *current_frame_header_ = nullptr;
     std::uint32_t current_frame_payload_limit_ = 0;
     std::uint32_t current_payload_written_ = 0;

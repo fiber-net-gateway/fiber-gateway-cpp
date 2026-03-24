@@ -105,11 +105,69 @@ common::IoErr Http2Stream::close_rst(Http2ErrorCode code, common::IoErr result) 
 
 void Http2Stream::update_send_window(std::int32_t delta) noexcept { send_window_ += delta; }
 
+void Http2Stream::consume_recv_window(std::uint32_t bytes) noexcept {
+    FIBER_ASSERT(recv_window_remaining_ >= 0);
+    FIBER_ASSERT(bytes <= static_cast<std::uint32_t>(recv_window_remaining_));
+    recv_window_remaining_ -= static_cast<std::int32_t>(bytes);
+}
+
+common::IoErr Http2Stream::maybe_replenish_recv_window(std::size_t buffered_bytes) noexcept {
+    if (!conn_) {
+        return common::IoErr::None;
+    }
+
+    if (buffered_bytes > recv_window_target_) {
+        return common::IoErr::Invalid;
+    }
+
+    if (recv_window_remaining_ > static_cast<std::int32_t>(recv_window_low_watermark_)) {
+        return common::IoErr::None;
+    }
+
+    if (buffered_bytes > recv_window_low_watermark_) {
+        return common::IoErr::None;
+    }
+
+    FIBER_ASSERT(recv_window_remaining_ >= 0);
+    std::uint32_t current_window = static_cast<std::uint32_t>(recv_window_remaining_);
+    std::uint32_t target_window = recv_window_target_ - static_cast<std::uint32_t>(buffered_bytes);
+    if (target_window <= current_window) {
+        return common::IoErr::None;
+    }
+
+    std::uint32_t increment = target_window - current_window;
+    common::IoErr err = conn_->send_window_update(stream_id_, increment);
+    if (err != common::IoErr::None) {
+        return err;
+    }
+
+    recv_window_remaining_ += static_cast<std::int32_t>(increment);
+    return common::IoErr::None;
+}
+
 void Http2Stream::close(common::IoErr result) noexcept {
-    if (close_reason_ == common::IoErr::None) {
+    if (conn_) {
+        conn_->cancel_stream_send(*this);
+    }
+    const bool first_abort = close_reason_ == common::IoErr::None;
+    if (first_abort) {
         close_reason_ = result;
     }
+    outbound_hook_.closed_ = true;
+    outbound_hook_.next_kind_ = static_cast<Http2OutboundNextKind>(0);
+    outbound_hook_.encode_ = nullptr;
+    outbound_hook_.encode_ctx_ = nullptr;
     active_ = false;
+    if (first_abort && ops_ && ops_->on_abort) {
+        ops_->on_abort(owner_, close_reason_);
+    }
+}
+
+void Http2Stream::on_outbound_send_complete() noexcept {
+    if (!conn_) {
+        return;
+    }
+    conn_->on_stream_outbound_idle(*this);
 }
 
 bool Http2Stream::ready_for_connection_release() const noexcept {
