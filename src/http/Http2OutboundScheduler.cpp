@@ -72,45 +72,94 @@ Http2OutboundScheduler::~Http2OutboundScheduler() {
     }
 }
 
-common::IoErr Http2OutboundPayloadStorage::append_uninitialized(std::size_t bytes, std::uint8_t *&dst) noexcept {
+bool Http2OutboundEncodeTarget::empty() const noexcept {
+    return slot_used_ == 0 && tail_chain_.readable_bytes() == 0;
+}
+
+std::size_t Http2OutboundEncodeTarget::total_bytes() const noexcept {
+    return slot_used_ + tail_chain_.readable_bytes();
+}
+
+void Http2OutboundEncodeTarget::reset(std::uint8_t *slot, std::size_t capacity) noexcept {
+    slot_ = slot;
+    slot_capacity_ = capacity;
+    slot_used_ = 0;
+    slot_reserved_ = 0;
+    tail_chain_.clear();
+}
+
+common::IoErr Http2OutboundEncodeTarget::reserve_slot(std::size_t bytes, std::uint8_t *&dst) noexcept {
     dst = nullptr;
-    if (bytes == 0) {
+    if (slot_reserved_ != 0 || bytes == 0) {
         return common::IoErr::Invalid;
+    }
+    if (tail_chain_.readable_bytes() != 0) {
+        return common::IoErr::Invalid;
+    }
+    if (!slot_ || bytes > slot_available()) {
+        return common::IoErr::NoMem;
+    }
+    dst = slot_ + slot_used_;
+    slot_reserved_ = bytes;
+    return common::IoErr::None;
+}
+
+void Http2OutboundEncodeTarget::commit_slot(std::size_t bytes) noexcept {
+    FIBER_ASSERT(slot_reserved_ != 0);
+    FIBER_ASSERT(bytes <= slot_reserved_);
+    slot_used_ += bytes;
+    slot_reserved_ = 0;
+}
+
+void Http2OutboundEncodeTarget::rollback_slot() noexcept {
+    slot_reserved_ = 0;
+}
+
+common::IoErr Http2OutboundEncodeTarget::append_copy(const void *src, std::size_t bytes) noexcept {
+    if (!src || bytes == 0 || slot_reserved_ != 0) {
+        return common::IoErr::Invalid;
+    }
+
+    if (tail_chain_.readable_bytes() == 0 && bytes <= slot_available()) {
+        std::uint8_t *dst = nullptr;
+        common::IoErr err = reserve_slot(bytes, dst);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+        std::memcpy(dst, src, bytes);
+        commit_slot(bytes);
+        return common::IoErr::None;
     }
 
     mem::IoBuf buf = mem::IoBuf::allocate(bytes);
     if (!buf) {
         return common::IoErr::NoMem;
     }
-
-    dst = buf.writable_data();
-    if (!chain_.append(std::move(buf))) {
-        dst = nullptr;
-        return common::IoErr::NoMem;
-    }
-    chain_.commit(bytes);
-    return common::IoErr::None;
+    std::memcpy(buf.writable_data(), src, bytes);
+    buf.commit(bytes);
+    return tail_chain_.append(std::move(buf)) ? common::IoErr::None : common::IoErr::NoMem;
 }
 
-common::IoErr Http2OutboundPayloadStorage::append_copy(const void *src, std::size_t bytes) noexcept {
-    if (!src || bytes == 0) {
+common::IoErr Http2OutboundEncodeTarget::append_buffer(mem::IoBuf &&buf) noexcept {
+    if (!buf || buf.readable() == 0 || slot_reserved_ != 0) {
+        return common::IoErr::Invalid;
+    }
+    return tail_chain_.append(std::move(buf)) ? common::IoErr::None : common::IoErr::NoMem;
+}
+
+common::IoErr Http2OutboundEncodeTarget::append_chain(mem::IoBufChain &&chain) noexcept {
+    if (chain.empty() || chain.readable_bytes() == 0 || slot_reserved_ != 0) {
         return common::IoErr::Invalid;
     }
 
-    std::uint8_t *dst = nullptr;
-    common::IoErr err = append_uninitialized(bytes, dst);
-    if (err != common::IoErr::None) {
-        return err;
-    }
-    std::memcpy(dst, src, bytes);
-    return common::IoErr::None;
+    const std::size_t bytes = chain.readable_bytes();
+    return chain.take_prefix(bytes, tail_chain_) ? common::IoErr::None : common::IoErr::NoMem;
 }
 
-common::IoErr Http2OutboundPayloadStorage::append_buffer(mem::IoBuf &&buf) noexcept {
-    if (!buf || buf.readable() == 0) {
-        return common::IoErr::Invalid;
-    }
-    return chain_.append(std::move(buf)) ? common::IoErr::None : common::IoErr::NoMem;
+void Http2OutboundEncodeTarget::clear() noexcept {
+    slot_used_ = 0;
+    slot_reserved_ = 0;
+    tail_chain_.clear();
 }
 
 Http2OutboundScheduler::WaitForWorkAwaiter::~WaitForWorkAwaiter() {
@@ -559,17 +608,23 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
         req.max_frame_size = peer_max_frame_size_;
         req.conn_window_budget = conn_send_window_ > 0 ? conn_send_window_ : 0;
 
-        Http2OutboundPayloadStorage storage;
+        inflight_stream_write_.clear();
+        Http2OutboundEncodeTarget target;
+        target.reset(inflight_stream_write_.slot, sizeof(inflight_stream_write_.slot));
         Http2OutboundEncodeResult result;
-        common::IoErr err = hook.encode_(*stream, hook.encode_ctx_, req, storage, result);
+        common::IoErr err = hook.encode_(*stream, hook.encode_ctx_, req, target, result);
         if (err != common::IoErr::None) {
             fail(err);
+            return false;
+        }
+        if (target.slot_reserved_ != 0) {
+            fail(common::IoErr::Invalid);
             return false;
         }
 
         switch (result.status) {
             case Http2OutboundEncodeResult::Status::Encoded:
-                if (storage.empty()) {
+                if (target.empty()) {
                     fail(common::IoErr::Invalid);
                     return false;
                 }
@@ -580,14 +635,16 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
 
                 inflight_stream_ = stream;
                 inflight_stream_write_.stream = stream;
-                inflight_stream_write_.bytes = storage.take_chain();
+                inflight_stream_write_.slot_size = target.slot_used_;
+                inflight_stream_write_.slot_written = 0;
+                inflight_stream_write_.tail_chain = target.take_tail_chain();
                 hook.queue_state_ = static_cast<std::uint8_t>(QueueState::Inflight);
                 hook.next_kind_ = result.next_kind;
                 conn_send_window_ -= static_cast<std::int32_t>(result.consumed_conn_window);
                 stream->update_send_window(-static_cast<std::int32_t>(result.consumed_conn_window));
                 return true;
             case Http2OutboundEncodeResult::Status::BlockedConnWindow:
-                if (!storage.empty() || result.consumed_conn_window != 0) {
+                if (!target.empty() || result.consumed_conn_window != 0) {
                     fail(common::IoErr::Invalid);
                     return false;
                 }
@@ -597,7 +654,7 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
                 enqueue_waiting_conn_window(*stream);
                 return false;
             case Http2OutboundEncodeResult::Status::BlockedStreamWindow:
-                if (!storage.empty() || result.consumed_conn_window != 0) {
+                if (!target.empty() || result.consumed_conn_window != 0) {
                     fail(common::IoErr::Invalid);
                     return false;
                 }
@@ -605,7 +662,7 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
                 hook.queue_state_ = static_cast<std::uint8_t>(QueueState::None);
                 return false;
             case Http2OutboundEncodeResult::Status::NoWork:
-                if (!storage.empty() || result.consumed_conn_window != 0) {
+                if (!target.empty() || result.consumed_conn_window != 0) {
                     fail(common::IoErr::Invalid);
                     return false;
                 }
@@ -617,7 +674,7 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
                 }
                 return false;
             case Http2OutboundEncodeResult::Status::Closed:
-                if (!storage.empty() || result.consumed_conn_window != 0) {
+                if (!target.empty() || result.consumed_conn_window != 0) {
                     fail(common::IoErr::Invalid);
                     return false;
                 }
@@ -650,7 +707,18 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
                 fail(common::IoErr::Invalid);
                 break;
             }
-            common::IoResult<size_t> result = co_await transport_->writev(inflight_stream_write_.bytes, write_timeout_);
+            common::IoResult<size_t> result;
+            if (!inflight_stream_write_.slot_done()) {
+                const std::size_t remaining =
+                    inflight_stream_write_.slot_size - inflight_stream_write_.slot_written;
+                result = co_await transport_->write(inflight_stream_write_.slot + inflight_stream_write_.slot_written,
+                                                    remaining, write_timeout_);
+                if (result) {
+                    inflight_stream_write_.slot_written += *result;
+                }
+            } else {
+                result = co_await transport_->writev(inflight_stream_write_.tail_chain, write_timeout_);
+            }
             if (!result) {
                 fail(result.error());
                 break;

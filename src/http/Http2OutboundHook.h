@@ -10,7 +10,7 @@ namespace fiber::http {
 
 class Http2Stream;
 class Http2OutboundScheduler;
-class Http2OutboundPayloadStorage;
+class Http2OutboundEncodeTarget;
 struct Http2OutboundEncodeRequest;
 struct Http2OutboundEncodeResult;
 
@@ -22,7 +22,7 @@ enum class Http2OutboundNextKind : std::uint8_t {
 
 using Http2OutboundEncodeFn = common::IoErr (*)(Http2Stream &stream, void *ctx,
                                                 const Http2OutboundEncodeRequest &req,
-                                                Http2OutboundPayloadStorage &storage,
+                                                Http2OutboundEncodeTarget &target,
                                                 Http2OutboundEncodeResult &result) noexcept;
 
 class Http2OutboundHook {

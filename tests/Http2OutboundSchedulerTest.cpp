@@ -130,7 +130,7 @@ const fiber::http::Http2Stream::Ops kStreamOps{
 
 fiber::common::IoErr encode_stream_batch(fiber::http::Http2Stream &, void *ctx,
                                          const fiber::http::Http2OutboundEncodeRequest &req,
-                                         fiber::http::Http2OutboundPayloadStorage &storage,
+                                         fiber::http::Http2OutboundEncodeTarget &target,
                                          fiber::http::Http2OutboundEncodeResult &result) noexcept {
     auto *owner = static_cast<DummyStreamOwner *>(ctx);
     if (!owner) {
@@ -145,9 +145,19 @@ fiber::common::IoErr encode_stream_batch(fiber::http::Http2Stream &, void *ctx,
             return fiber::common::IoErr::None;
         }
         if (!owner->first_batch.empty()) {
-            fiber::common::IoErr err = storage.append_copy(owner->first_batch.data(), owner->first_batch.size());
-            if (err != fiber::common::IoErr::None) {
-                return err;
+            std::uint8_t *dst = nullptr;
+            if (owner->first_batch.size() <= target.slot_available()) {
+                fiber::common::IoErr err = target.reserve_slot(owner->first_batch.size(), dst);
+                if (err != fiber::common::IoErr::None) {
+                    return err;
+                }
+                std::memcpy(dst, owner->first_batch.data(), owner->first_batch.size());
+                target.commit_slot(owner->first_batch.size());
+            } else {
+                fiber::common::IoErr err = target.append_copy(owner->first_batch.data(), owner->first_batch.size());
+                if (err != fiber::common::IoErr::None) {
+                    return err;
+                }
             }
         }
         result.status = owner->close_after_first_batch ? fiber::http::Http2OutboundEncodeResult::Status::Closed
@@ -159,7 +169,7 @@ fiber::common::IoErr encode_stream_batch(fiber::http::Http2Stream &, void *ctx,
     }
 
     if (owner->encode_calls == 2 && !owner->second_batch.empty()) {
-        fiber::common::IoErr err = storage.append_copy(owner->second_batch.data(), owner->second_batch.size());
+        fiber::common::IoErr err = target.append_copy(owner->second_batch.data(), owner->second_batch.size());
         if (err != fiber::common::IoErr::None) {
             return err;
         }
