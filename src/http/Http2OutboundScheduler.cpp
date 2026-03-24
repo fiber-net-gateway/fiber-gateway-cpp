@@ -86,6 +86,7 @@ void Http2OutboundEncodeTarget::reset(std::uint8_t *slot, std::size_t capacity) 
     slot_used_ = 0;
     slot_reserved_ = 0;
     tail_chain_.clear();
+    clear_done();
 }
 
 common::IoErr Http2OutboundEncodeTarget::reserve_slot(std::size_t bytes, std::uint8_t *&dst) noexcept {
@@ -156,10 +157,21 @@ common::IoErr Http2OutboundEncodeTarget::append_chain(mem::IoBufChain &&chain) n
     return chain.take_prefix(bytes, tail_chain_) ? common::IoErr::None : common::IoErr::NoMem;
 }
 
+void Http2OutboundEncodeTarget::set_on_done(Http2OutboundDoneFn fn, void *ctx) noexcept {
+    done_fn_ = fn;
+    done_ctx_ = fn ? ctx : nullptr;
+}
+
+void Http2OutboundEncodeTarget::clear_done() noexcept {
+    done_fn_ = nullptr;
+    done_ctx_ = nullptr;
+}
+
 void Http2OutboundEncodeTarget::clear() noexcept {
     slot_used_ = 0;
     slot_reserved_ = 0;
     tail_chain_.clear();
+    clear_done();
 }
 
 Http2OutboundScheduler::WaitForWorkAwaiter::~WaitForWorkAwaiter() {
@@ -424,6 +436,7 @@ void Http2OutboundScheduler::clear_all_stream_state() noexcept {
         inflight_stream_->outbound_hook_.encode_ctx_ = nullptr;
         inflight_stream_ = nullptr;
     }
+    notify_inflight_done(stop_reason_ != common::IoErr::None ? stop_reason_ : common::IoErr::Canceled);
     inflight_stream_write_.clear();
 }
 
@@ -539,6 +552,21 @@ common::IoErr Http2OutboundScheduler::request_send(Http2Stream &stream, Http2Out
     return common::IoErr::None;
 }
 
+bool Http2OutboundScheduler::cancel_queued_send(Http2Stream &stream) noexcept {
+    bind_owner_loop_if_needed();
+
+    QueueState state = static_cast<QueueState>(stream.outbound_hook_.queue_state_);
+    if (state != QueueState::Ready && state != QueueState::WaitingConnWindow) {
+        return false;
+    }
+
+    unlink_stream(stream);
+    stream.outbound_hook_.next_kind_ = Http2OutboundNextKind::None;
+    stream.outbound_hook_.encode_ = nullptr;
+    stream.outbound_hook_.encode_ctx_ = nullptr;
+    return true;
+}
+
 void Http2OutboundScheduler::cancel_stream(Http2Stream &stream) noexcept {
     bind_owner_loop_if_needed();
 
@@ -561,12 +589,21 @@ void Http2OutboundScheduler::on_connection_window_available() noexcept {
     }
 }
 
+void Http2OutboundScheduler::notify_inflight_done(common::IoErr result) noexcept {
+    Http2OutboundDoneFn done = inflight_stream_write_.done;
+    void *done_ctx = inflight_stream_write_.done_ctx;
+    inflight_stream_write_.done = nullptr;
+    inflight_stream_write_.done_ctx = nullptr;
+    if (done) {
+        done(done_ctx, result);
+    }
+}
+
 void Http2OutboundScheduler::finish_inflight_stream_write() noexcept {
     FIBER_ASSERT(inflight_stream_ != nullptr);
 
     Http2Stream *stream = inflight_stream_;
     inflight_stream_ = nullptr;
-    inflight_stream_write_.clear();
 
     auto &hook = stream->outbound_hook_;
     hook.queue_state_ = static_cast<std::uint8_t>(QueueState::None);
@@ -574,11 +611,15 @@ void Http2OutboundScheduler::finish_inflight_stream_write() noexcept {
         hook.next_kind_ = Http2OutboundNextKind::None;
         hook.encode_ = nullptr;
         hook.encode_ctx_ = nullptr;
+        notify_inflight_done(common::IoErr::None);
+        inflight_stream_write_.clear();
         stream->on_outbound_send_complete();
         return;
     }
 
     classify_stream(*stream, false);
+    notify_inflight_done(common::IoErr::None);
+    inflight_stream_write_.clear();
     stream->on_outbound_send_complete();
 }
 
@@ -640,13 +681,15 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
                 inflight_stream_write_.slot_size = target.slot_used_;
                 inflight_stream_write_.slot_written = 0;
                 inflight_stream_write_.tail_chain = target.take_tail_chain();
+                inflight_stream_write_.done = target.done_fn();
+                inflight_stream_write_.done_ctx = target.done_ctx();
                 hook.queue_state_ = static_cast<std::uint8_t>(QueueState::Inflight);
                 hook.next_kind_ = result.next_kind;
                 conn_send_window_ -= static_cast<std::int32_t>(result.consumed_conn_window);
                 stream->update_send_window(-static_cast<std::int32_t>(result.consumed_conn_window));
                 return true;
             case Http2OutboundEncodeResult::Status::BlockedConnWindow:
-                if (!target.empty() || result.consumed_conn_window != 0) {
+                if (!target.empty() || target.done_fn() != nullptr || result.consumed_conn_window != 0) {
                     fail(common::IoErr::Invalid);
                     return false;
                 }
@@ -656,7 +699,7 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
                 enqueue_waiting_conn_window(*stream);
                 return false;
             case Http2OutboundEncodeResult::Status::BlockedStreamWindow:
-                if (!target.empty() || result.consumed_conn_window != 0) {
+                if (!target.empty() || target.done_fn() != nullptr || result.consumed_conn_window != 0) {
                     fail(common::IoErr::Invalid);
                     return false;
                 }
@@ -664,7 +707,7 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
                 hook.queue_state_ = static_cast<std::uint8_t>(QueueState::None);
                 return false;
             case Http2OutboundEncodeResult::Status::NoWork:
-                if (!target.empty() || result.consumed_conn_window != 0) {
+                if (!target.empty() || target.done_fn() != nullptr || result.consumed_conn_window != 0) {
                     fail(common::IoErr::Invalid);
                     return false;
                 }
@@ -676,7 +719,7 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
                 }
                 return false;
             case Http2OutboundEncodeResult::Status::Closed:
-                if (!target.empty() || result.consumed_conn_window != 0) {
+                if (!target.empty() || target.done_fn() != nullptr || result.consumed_conn_window != 0) {
                     fail(common::IoErr::Invalid);
                     return false;
                 }

@@ -27,6 +27,8 @@ struct Http2OutboundEncodeRequest {
     std::int32_t conn_window_budget = 0;
 };
 
+using Http2OutboundDoneFn = void (*)(void *ctx, common::IoErr result) noexcept;
+
 struct Http2OutboundEncodeResult {
     enum class Status : std::uint8_t {
         Encoded = 0,
@@ -55,17 +57,23 @@ public:
     [[nodiscard]] common::IoErr append_copy(const void *src, std::size_t bytes) noexcept;
     [[nodiscard]] common::IoErr append_buffer(mem::IoBuf &&buf) noexcept;
     [[nodiscard]] common::IoErr append_chain(mem::IoBufChain &&chain) noexcept;
+    void set_on_done(Http2OutboundDoneFn fn, void *ctx) noexcept;
     void clear() noexcept;
 
 private:
     void reset(std::uint8_t *slot, std::size_t capacity) noexcept;
     [[nodiscard]] mem::IoBufChain take_tail_chain() noexcept { return std::move(tail_chain_); }
+    [[nodiscard]] Http2OutboundDoneFn done_fn() const noexcept { return done_fn_; }
+    [[nodiscard]] void *done_ctx() const noexcept { return done_ctx_; }
+    void clear_done() noexcept;
 
     std::uint8_t *slot_ = nullptr;
     std::size_t slot_capacity_ = 0;
     std::size_t slot_used_ = 0;
     std::size_t slot_reserved_ = 0;
     mem::IoBufChain tail_chain_{};
+    Http2OutboundDoneFn done_fn_ = nullptr;
+    void *done_ctx_ = nullptr;
 
     friend class Http2OutboundScheduler;
 };
@@ -115,6 +123,7 @@ public:
 
     [[nodiscard]] common::IoErr request_send(Http2Stream &stream, Http2OutboundNextKind next_kind,
                                              Http2OutboundEncodeFn encode, void *ctx) noexcept;
+    [[nodiscard]] bool cancel_queued_send(Http2Stream &stream) noexcept;
     void cancel_stream(Http2Stream &stream) noexcept;
     void on_connection_window_available() noexcept;
 
@@ -194,6 +203,8 @@ private:
         std::size_t slot_size = 0;
         std::size_t slot_written = 0;
         mem::IoBufChain tail_chain{};
+        Http2OutboundDoneFn done = nullptr;
+        void *done_ctx = nullptr;
 
         [[nodiscard]] bool empty() const noexcept { return slot_done() && tail_chain.readable_bytes() == 0; }
         [[nodiscard]] bool slot_done() const noexcept { return slot_written == slot_size; }
@@ -203,6 +214,8 @@ private:
             slot_size = 0;
             slot_written = 0;
             tail_chain.clear();
+            done = nullptr;
+            done_ctx = nullptr;
         }
     };
 
@@ -270,6 +283,7 @@ private:
     void classify_stream(Http2Stream &stream, bool notify) noexcept;
     [[nodiscard]] Http2Stream *pop_ready_stream() noexcept;
     [[nodiscard]] Http2Stream *pop_waiting_conn_window_stream() noexcept;
+    void notify_inflight_done(common::IoErr result) noexcept;
     void finish_inflight_stream_write() noexcept;
 
     HttpTransport *transport_ = nullptr;
