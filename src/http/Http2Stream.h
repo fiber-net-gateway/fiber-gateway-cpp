@@ -7,6 +7,7 @@
 #include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
 #include "../common/mem/IoBuf.h"
+#include "Http2OutboundHook.h"
 #include "Http2HpackDecoder.h"
 #include "Http2Protocol.h"
 
@@ -140,6 +141,7 @@ private:
     std::int32_t recv_window_remaining_ = 65535;
     std::uint32_t recv_window_target_ = 65535;
     std::uint32_t recv_window_low_watermark_ = 0;
+    Http2OutboundHook outbound_hook_{};
     common::IntrusiveListHook owned_hook_{};
     void *owner_ = nullptr;
     const Ops *ops_ = nullptr;
@@ -148,6 +150,7 @@ private:
     common::IoErr close_reason_ = common::IoErr::None;
 
     friend class Http2Connection;
+    friend class Http2OutboundScheduler;
 };
 
 } // namespace fiber::http
