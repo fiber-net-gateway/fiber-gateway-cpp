@@ -574,10 +574,12 @@ void Http2OutboundScheduler::finish_inflight_stream_write() noexcept {
         hook.next_kind_ = Http2OutboundNextKind::None;
         hook.encode_ = nullptr;
         hook.encode_ctx_ = nullptr;
+        stream->on_outbound_send_complete();
         return;
     }
 
     classify_stream(*stream, false);
+    stream->on_outbound_send_complete();
 }
 
 fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {

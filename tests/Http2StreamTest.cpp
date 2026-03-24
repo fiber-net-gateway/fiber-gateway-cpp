@@ -218,8 +218,7 @@ fiber::http::Http2Connection::Options make_options() {
     return options;
 }
 
-std::uint32_t parse_window_update_increment(const fiber::mem::IoBuf &frame) {
-    const std::uint8_t *data = frame.readable_data();
+std::uint32_t parse_window_update_increment(const std::uint8_t *data) {
     return ((static_cast<std::uint32_t>(data[9]) & 0x7fU) << 24) | (static_cast<std::uint32_t>(data[10]) << 16) |
            (static_cast<std::uint32_t>(data[11]) << 8) | static_cast<std::uint32_t>(data[12]);
 }
@@ -277,17 +276,12 @@ TEST(Http2StreamTest, MaybeReplenishRecvWindowEnqueuesWindowUpdateAndTracksRemai
 
     EXPECT_EQ(stream->maybe_replenish_recv_window(15), fiber::common::IoErr::None);
     EXPECT_EQ(stream->recv_window_remaining(), 49);
-    EXPECT_FALSE(connection.send_queue_.idle());
+    EXPECT_EQ(connection.outbound_scheduler_.pending_control_bytes(), 13u);
 
-    fiber::http::Http2SendingEntry *entry = connection.send_queue_.pop_ready();
-    ASSERT_NE(entry, nullptr);
-    ASSERT_EQ(entry->payload_ptr()->kind(), fiber::http::Http2SendPayload::Kind::IoBuf);
-
-    const fiber::mem::IoBuf &frame = entry->payload_ptr()->buf();
-    ASSERT_EQ(frame.readable(), 13u);
-    EXPECT_EQ(static_cast<std::uint8_t>(frame.readable_data()[3]),
+    fiber::http::Http2OutboundScheduler::SendSpan span = connection.outbound_scheduler_.current_send_span();
+    ASSERT_NE(span.data, nullptr);
+    ASSERT_EQ(span.length, 13u);
+    EXPECT_EQ(static_cast<std::uint8_t>(span.data[3]),
               static_cast<std::uint8_t>(fiber::http::Http2FrameType::WindowUpdate));
-    EXPECT_EQ(parse_window_update_increment(frame), 34u);
-
-    connection.send_queue_.release(entry);
+    EXPECT_EQ(parse_window_update_increment(span.data), 34u);
 }

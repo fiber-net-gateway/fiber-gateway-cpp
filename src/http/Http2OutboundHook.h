@@ -11,6 +11,7 @@ namespace fiber::http {
 class Http2Stream;
 class Http2OutboundScheduler;
 class Http2OutboundEncodeTarget;
+class Http2Connection;
 struct Http2OutboundEncodeRequest;
 struct Http2OutboundEncodeResult;
 
@@ -34,6 +35,7 @@ private:
     std::uint8_t queue_state_ = 0;
     bool closed_ = false;
 
+    friend class Http2Connection;
     friend class Http2OutboundScheduler;
     friend class Http2Stream;
 };

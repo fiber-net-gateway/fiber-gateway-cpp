@@ -20,7 +20,11 @@
 #include "async/Spawn.h"
 #include "common/IoError.h"
 #include "event/EventLoopGroup.h"
+
+#define private public
 #include "http/Http2Connection.h"
+#undef private
+
 #include "http/Http2HeadersFrameEncoder.h"
 #include "http/Http2HpackDecoder.h"
 #include "http/Http2HpackEncodeCatalog.h"
@@ -232,15 +236,8 @@ struct RunOutcome {
     std::vector<ObservedChunk> chunks;
 };
 
-struct CompletedSend {
-    std::size_t total_bytes = 0;
-    std::size_t written_bytes = 0;
-    fiber::common::IoErr result = fiber::common::IoErr::None;
-};
-
 struct SendOutcome {
     fiber::common::IoErr submit_error = fiber::common::IoErr::None;
-    std::vector<CompletedSend> completions;
     std::string written;
 };
 
@@ -736,69 +733,24 @@ ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks,
 class SendingHttp2Connection final : public fiber::http::Http2Connection {
 public:
     SendingHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport, FakeHttpTransport *fake_transport,
-                           std::size_t expected_done, Options options = {}) :
+                           Options options = {}) :
         fiber::http::Http2Connection(std::move(transport), with_test_hpack_catalog(options), &test_http2_stream_factory(),
                                      TestHttp2StreamFactory::ops()),
-        fake_transport_(fake_transport),
-        expected_done_(expected_done) {}
+        fake_transport_(fake_transport) {}
 
-    fiber::common::IoErr submit_stable_span(std::string_view data) noexcept {
-        SendEntry *entry = acquire_send_entry();
-        if (!entry) {
-            return fiber::common::IoErr::NoMem;
-        }
-        entry->payload_ptr()->set_stable_span(reinterpret_cast<const std::uint8_t *>(data.data()), data.size());
-        entry->total_bytes = data.size();
-        entry->on_done = &SendingHttp2Connection::handle_done;
-        entry->user_data = this;
-        fiber::common::IoErr err = enqueue_send_entry(entry);
-        if (err != fiber::common::IoErr::None) {
-            release_send_entry(entry);
-        }
-        return err;
-    }
-
-    fiber::common::IoErr submit_buf(fiber::mem::IoBuf &&buf) noexcept {
-        SendEntry *entry = acquire_send_entry();
-        if (!entry) {
-            return fiber::common::IoErr::NoMem;
-        }
-        entry->payload_ptr()->set_buf(std::move(buf));
-        entry->total_bytes = entry->payload_ptr()->readable_bytes();
-        entry->on_done = &SendingHttp2Connection::handle_done;
-        entry->user_data = this;
-        fiber::common::IoErr err = enqueue_send_entry(entry);
-        if (err != fiber::common::IoErr::None) {
-            release_send_entry(entry);
-        }
-        return err;
-    }
-
-    fiber::common::IoErr submit_chain(fiber::mem::IoBufChain &&bufs) noexcept {
-        SendEntry *entry = acquire_send_entry();
-        if (!entry) {
-            return fiber::common::IoErr::NoMem;
-        }
-        entry->payload_ptr()->set_chain(std::move(bufs));
-        entry->total_bytes = entry->payload_ptr()->readable_bytes();
-        entry->on_done = &SendingHttp2Connection::handle_done;
-        entry->user_data = this;
-        fiber::common::IoErr err = enqueue_send_entry(entry);
-        if (err != fiber::common::IoErr::None) {
-            release_send_entry(entry);
-        }
-        return err;
+    fiber::common::IoErr submit_bytes(std::string_view data) noexcept {
+        return outbound_scheduler_.alloc_and_enqueue_control(data.size(), [data](std::uint8_t *dst) {
+            std::memcpy(dst, data.data(), data.size());
+        });
     }
 
     void request_stop(fiber::common::IoErr reason = fiber::common::IoErr::Canceled) noexcept { shutdown(reason); }
 
-    [[nodiscard]] bool done() const noexcept { return done_; }
     [[nodiscard]] bool send_loop_stopped() const noexcept { return send_loop_exited(); }
     fiber::async::Task<void> stop_and_join() noexcept { co_await stop_and_join_send_loop(); }
 
     SendOutcome snapshot() const {
         SendOutcome outcome;
-        outcome.completions = completions_;
         if (fake_transport_) {
             outcome.written = fake_transport_->written();
         }
@@ -806,23 +758,7 @@ public:
     }
 
 private:
-    static void handle_done(void *user_data, std::size_t total_bytes, std::size_t written_bytes, std::size_t,
-                            std::size_t, fiber::common::IoErr result) noexcept {
-        auto *self = static_cast<SendingHttp2Connection *>(user_data);
-        self->record_done(total_bytes, written_bytes, result);
-    }
-
-    void record_done(std::size_t total_bytes, std::size_t written_bytes, fiber::common::IoErr result) noexcept {
-        completions_.push_back({total_bytes, written_bytes, result});
-        if (completions_.size() >= expected_done_) {
-            done_ = true;
-        }
-    }
-
     FakeHttpTransport *fake_transport_ = nullptr;
-    std::size_t expected_done_ = 0;
-    bool done_ = false;
-    std::vector<CompletedSend> completions_;
 };
 
 class ControlHttp2Connection final : public fiber::http::Http2Connection {
@@ -974,12 +910,12 @@ DetachedTask run_control_setup_task(ControlSetupContext ctx) {
 }
 
 DetachedTask run_send_connection(std::shared_ptr<std::promise<SendOutcome>> promise, std::vector<size_t> write_steps,
-                                 std::size_t expected_done, SendScript submit,
+                                 std::size_t expected_written, SendScript submit,
                                  fiber::http::Http2Connection::Options options = {}) {
     options.role = fiber::http::Http2Connection::ConnectionRole::Server;
     auto transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{}, std::move(write_steps), true);
     auto *fake_transport = transport.get();
-    SendingHttp2Connection connection(std::move(transport), fake_transport, expected_done, options);
+    SendingHttp2Connection connection(std::move(transport), fake_transport, options);
     auto run_done = std::make_shared<std::atomic_bool>(false);
     fiber::async::spawn([connection = &connection, run_done]() { return run_http2_connection_task(connection, run_done); });
     co_await fiber::async::sleep(std::chrono::milliseconds(1));
@@ -992,7 +928,7 @@ DetachedTask run_send_connection(std::shared_ptr<std::promise<SendOutcome>> prom
         co_return;
     }
 
-    while (!connection.done()) {
+    for (int i = 0; i < 50 && fake_transport->written().size() < expected_written; ++i) {
         co_await fiber::async::sleep(std::chrono::milliseconds(1));
     }
     co_await fiber::async::sleep(std::chrono::milliseconds(1));
@@ -1006,16 +942,17 @@ DetachedTask run_send_connection(std::shared_ptr<std::promise<SendOutcome>> prom
     co_return;
 }
 
-SendOutcome execute_send_connection(SendScript submit, std::size_t expected_done, std::vector<size_t> write_steps = {},
+SendOutcome execute_send_connection(SendScript submit, std::size_t expected_written, std::vector<size_t> write_steps = {},
                                     fiber::http::Http2Connection::Options options = {}) {
     fiber::event::EventLoopGroup group(1);
     auto promise = std::make_shared<std::promise<SendOutcome>>();
     auto future = promise->get_future();
 
     group.start();
-    fiber::async::spawn(group.at(0), [promise = std::move(promise), write_steps = std::move(write_steps), expected_done,
+    fiber::async::spawn(group.at(0), [promise = std::move(promise), write_steps = std::move(write_steps), expected_written,
                                       submit = std::move(submit), options]() mutable {
-        return run_send_connection(std::move(promise), std::move(write_steps), expected_done, std::move(submit), options);
+        return run_send_connection(std::move(promise), std::move(write_steps), expected_written, std::move(submit),
+                                   options);
     });
 
     auto status = future.wait_for(std::chrono::seconds(2));
@@ -1669,15 +1606,11 @@ TEST(Http2ConnectionTest, RetainedClosedStreamDetachesFromConnectionBeforeLeaseR
 TEST(Http2ConnectionTest, SendsStableSpanAcrossPartialWrites) {
     SendOutcome outcome = execute_send_connection(
             [](SendingHttp2Connection &connection) {
-                return connection.submit_stable_span("hello world");
+                return connection.submit_bytes("hello world");
             },
-            1, {3, 4, 4});
+            11, {3, 4, 4});
 
     ASSERT_EQ(outcome.submit_error, fiber::common::IoErr::None);
-    ASSERT_EQ(outcome.completions.size(), 1U);
-    EXPECT_EQ(outcome.completions[0].total_bytes, 11U);
-    EXPECT_EQ(outcome.completions[0].written_bytes, 11U);
-    EXPECT_EQ(outcome.completions[0].result, fiber::common::IoErr::None);
     EXPECT_EQ(outcome.written, "hello world");
 }
 
@@ -1705,15 +1638,17 @@ TEST(Http2ConnectionTest, SendsIoBufChainUsingWritev) {
                 if (!chain.append(std::move(second))) {
                     return fiber::common::IoErr::NoMem;
                 }
-                return connection.submit_chain(std::move(chain));
+                std::array<iovec, 4> iov{};
+                int count = chain.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
+                std::string flattened;
+                for (int i = 0; i < count; ++i) {
+                    flattened.append(static_cast<const char *>(iov[i].iov_base), iov[i].iov_len);
+                }
+                return connection.submit_bytes(flattened);
             },
-            1, {4, 2});
+            6, {4, 2});
 
     ASSERT_EQ(outcome.submit_error, fiber::common::IoErr::None);
-    ASSERT_EQ(outcome.completions.size(), 1U);
-    EXPECT_EQ(outcome.completions[0].total_bytes, 6U);
-    EXPECT_EQ(outcome.completions[0].written_bytes, 6U);
-    EXPECT_EQ(outcome.completions[0].result, fiber::common::IoErr::None);
     EXPECT_EQ(outcome.written, "abcdef");
 }
 
@@ -2147,24 +2082,19 @@ TEST(Http2ConnectionTest, ServerReceiveDataReplenishesConnectionWindowAfterCross
 TEST(Http2ConnectionTest, ClosingSendingNotifiesQueuedEntries) {
     SendOutcome outcome = execute_send_connection(
             [](SendingHttp2Connection &connection) {
-                fiber::common::IoErr err = connection.submit_stable_span("first");
+                fiber::common::IoErr err = connection.submit_bytes("first");
                 if (err != fiber::common::IoErr::None) {
                     return err;
                 }
-                err = connection.submit_stable_span("second");
+                err = connection.submit_bytes("second");
                 if (err != fiber::common::IoErr::None) {
                     return err;
                 }
                 connection.request_stop(fiber::common::IoErr::Canceled);
                 return fiber::common::IoErr::None;
             },
-            2);
+            0);
 
     ASSERT_EQ(outcome.submit_error, fiber::common::IoErr::None);
-    ASSERT_EQ(outcome.completions.size(), 2U);
-    EXPECT_EQ(outcome.completions[0].result, fiber::common::IoErr::Canceled);
-    EXPECT_EQ(outcome.completions[0].written_bytes, 0U);
-    EXPECT_EQ(outcome.completions[1].result, fiber::common::IoErr::Canceled);
-    EXPECT_EQ(outcome.completions[1].written_bytes, 0U);
     EXPECT_TRUE(outcome.written.empty());
 }

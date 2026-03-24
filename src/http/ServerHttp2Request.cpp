@@ -358,6 +358,40 @@ fiber::async::DetachedTask ServerHttp2Request::run_handler_task(ServerHttp2Reque
     co_return;
 }
 
+common::IoErr ServerHttp2Request::encode_response_frames(Http2Stream &stream, void *ctx,
+                                                         const Http2OutboundEncodeRequest &req,
+                                                         Http2OutboundEncodeTarget &target,
+                                                         Http2OutboundEncodeResult &result) noexcept {
+    (void)stream;
+    (void)req;
+
+    auto *request = static_cast<ServerHttp2Request *>(ctx);
+    if (!request) {
+        return common::IoErr::Invalid;
+    }
+    if (request->abort_reason_ != common::IoErr::None || request->stream_.local_rst() || request->stream_.remote_rst()) {
+        request->pending_response_frames_.clear();
+        result.status = Http2OutboundEncodeResult::Status::Closed;
+        result.next_kind = Http2OutboundNextKind::None;
+        return common::IoErr::None;
+    }
+    if (request->pending_response_frames_.readable_bytes() == 0) {
+        result.status = Http2OutboundEncodeResult::Status::NoWork;
+        result.next_kind = Http2OutboundNextKind::None;
+        return common::IoErr::None;
+    }
+
+    common::IoErr err = target.append_chain(std::move(request->pending_response_frames_));
+    if (err != common::IoErr::None) {
+        return err;
+    }
+
+    result.status = Http2OutboundEncodeResult::Status::Encoded;
+    result.next_kind = Http2OutboundNextKind::None;
+    result.consumed_conn_window = 0;
+    return common::IoErr::None;
+}
+
 ServerHttp2Request::BodyReadPollResult ServerHttp2Request::poll_body_read_state() const noexcept {
     BodyReadPollResult result{};
     if (request_body_queue_.readable_bytes() != 0) {
@@ -403,6 +437,7 @@ void ServerHttp2Request::on_stream_aborted(common::IoErr reason) noexcept {
     if (abort_reason_ == common::IoErr::None) {
         abort_reason_ = reason;
     }
+    pending_response_frames_.clear();
     notify_body_waiter();
 }
 
@@ -566,9 +601,20 @@ fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_response_hea
         co_return std::unexpected(err);
     }
 
-    err = conn_->submit_framed_chain(stream_, std::move(frames), end_stream);
+    if (!frames.take_prefix(frames.readable_bytes(), pending_response_frames_)) {
+        co_return std::unexpected(common::IoErr::NoMem);
+    }
+
+    err = conn_->request_stream_send(stream_, Http2OutboundNextKind::Headers, &ServerHttp2Request::encode_response_frames,
+                                     this);
     if (err != common::IoErr::None) {
+        pending_response_frames_.clear();
         co_return std::unexpected(err);
+    }
+
+    if (end_stream) {
+        stream_.local_end_stream_ = true;
+        conn_->try_release_stream(stream_);
     }
 
     if (!informational) {
