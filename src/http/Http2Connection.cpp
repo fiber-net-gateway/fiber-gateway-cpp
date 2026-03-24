@@ -1326,6 +1326,10 @@ common::IoErr Http2Connection::request_stream_send(Http2Stream &stream, Http2Out
     return outbound_scheduler_.request_send(stream, next_kind, encode, ctx);
 }
 
+bool Http2Connection::cancel_queued_stream_send(Http2Stream &stream) noexcept {
+    return outbound_scheduler_.cancel_queued_send(stream);
+}
+
 void Http2Connection::cancel_stream_send(Http2Stream &stream) noexcept { outbound_scheduler_.cancel_stream(stream); }
 
 void Http2Connection::on_stream_outbound_idle(Http2Stream &stream) noexcept { try_release_stream(stream); }
