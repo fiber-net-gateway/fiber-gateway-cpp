@@ -41,19 +41,31 @@ struct Http2OutboundEncodeResult {
     std::uint32_t consumed_conn_window = 0;
 };
 
-class Http2OutboundPayloadStorage {
+class Http2OutboundEncodeTarget {
 public:
-    [[nodiscard]] common::IoErr append_uninitialized(std::size_t bytes, std::uint8_t *&dst) noexcept;
+    [[nodiscard]] bool empty() const noexcept;
+    [[nodiscard]] std::size_t total_bytes() const noexcept;
+    [[nodiscard]] std::size_t slot_capacity() const noexcept { return slot_capacity_; }
+    [[nodiscard]] std::size_t slot_used() const noexcept { return slot_used_; }
+    [[nodiscard]] std::size_t slot_available() const noexcept { return slot_capacity_ - slot_used_; }
+
+    [[nodiscard]] common::IoErr reserve_slot(std::size_t bytes, std::uint8_t *&dst) noexcept;
+    void commit_slot(std::size_t bytes) noexcept;
+    void rollback_slot() noexcept;
     [[nodiscard]] common::IoErr append_copy(const void *src, std::size_t bytes) noexcept;
     [[nodiscard]] common::IoErr append_buffer(mem::IoBuf &&buf) noexcept;
-    [[nodiscard]] bool empty() const noexcept { return chain_.empty(); }
-    [[nodiscard]] std::size_t readable_bytes() const noexcept { return chain_.readable_bytes(); }
-    void clear() noexcept { chain_.clear(); }
+    [[nodiscard]] common::IoErr append_chain(mem::IoBufChain &&chain) noexcept;
+    void clear() noexcept;
 
 private:
-    [[nodiscard]] mem::IoBufChain take_chain() noexcept { return std::move(chain_); }
+    void reset(std::uint8_t *slot, std::size_t capacity) noexcept;
+    [[nodiscard]] mem::IoBufChain take_tail_chain() noexcept { return std::move(tail_chain_); }
 
-    mem::IoBufChain chain_{};
+    std::uint8_t *slot_ = nullptr;
+    std::size_t slot_capacity_ = 0;
+    std::size_t slot_used_ = 0;
+    std::size_t slot_reserved_ = 0;
+    mem::IoBufChain tail_chain_{};
 
     friend class Http2OutboundScheduler;
 };
@@ -175,14 +187,22 @@ private:
     };
 
     struct InflightStreamWrite {
-        Http2Stream *stream = nullptr;
-        mem::IoBufChain bytes{};
+        static constexpr std::size_t kSlotCapacity = 1024;
 
-        [[nodiscard]] bool empty() const noexcept { return bytes.readable_bytes() == 0; }
+        Http2Stream *stream = nullptr;
+        std::uint8_t slot[kSlotCapacity]{};
+        std::size_t slot_size = 0;
+        std::size_t slot_written = 0;
+        mem::IoBufChain tail_chain{};
+
+        [[nodiscard]] bool empty() const noexcept { return slot_done() && tail_chain.readable_bytes() == 0; }
+        [[nodiscard]] bool slot_done() const noexcept { return slot_written == slot_size; }
 
         void clear() noexcept {
             stream = nullptr;
-            bytes.clear();
+            slot_size = 0;
+            slot_written = 0;
+            tail_chain.clear();
         }
     };
 
