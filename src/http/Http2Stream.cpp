@@ -150,6 +150,10 @@ void Http2Stream::close(common::IoErr result) noexcept {
     if (first_abort) {
         close_reason_ = result;
     }
+    outbound_hook_.closed_ = true;
+    outbound_hook_.next_kind_ = static_cast<Http2OutboundNextKind>(0);
+    outbound_hook_.encode_ = nullptr;
+    outbound_hook_.encode_ctx_ = nullptr;
     active_ = false;
     if (first_abort && ops_ && ops_->on_abort) {
         ops_->on_abort(owner_, close_reason_);
