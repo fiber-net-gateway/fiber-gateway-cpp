@@ -14,6 +14,7 @@
 namespace fiber::http {
 
 class Http2Connection;
+class ServerHttp2Request;
 
 class Http2Stream {
 public:
@@ -123,6 +124,7 @@ public:
     void close(common::IoErr result = common::IoErr::Canceled) noexcept;
 
 private:
+    void on_outbound_send_complete() noexcept;
     [[nodiscard]] bool ready_for_connection_release() const noexcept;
     [[nodiscard]] bool ready_for_destruction() const noexcept;
     void retain() noexcept;
@@ -151,6 +153,7 @@ private:
 
     friend class Http2Connection;
     friend class Http2OutboundScheduler;
+    friend class ServerHttp2Request;
 };
 
 } // namespace fiber::http

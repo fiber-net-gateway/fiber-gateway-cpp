@@ -54,6 +54,9 @@ private:
     static void on_stream_abort(void *owner, common::IoErr reason) noexcept;
     static void destroy_owner(void *owner) noexcept;
     static fiber::async::DetachedTask run_handler_task(ServerHttp2Request *request, Http2Stream::Lease lease) noexcept;
+    static common::IoErr encode_response_frames(Http2Stream &stream, void *ctx, const Http2OutboundEncodeRequest &req,
+                                                Http2OutboundEncodeTarget &target,
+                                                Http2OutboundEncodeResult &result) noexcept;
     static common::IoErr on_indexed_field(void *owner, Http2HpackDecoder::TableEntryView entry) noexcept;
     static common::IoErr on_indexed_name(void *owner, std::string_view name, std::uint64_t name_hash) noexcept;
     static common::IoErr on_name_raw(void *owner, const std::uint8_t *data, std::size_t len) noexcept;
@@ -94,6 +97,7 @@ private:
     Http2Stream stream_;
     HttpExchange exchange_;
     mem::IoBufChain request_body_queue_;
+    mem::IoBufChain pending_response_frames_;
     std::chrono::milliseconds body_timeout_{};
     BodyReadAwaiter *body_waiter_ = nullptr;
     common::IoErr abort_reason_ = common::IoErr::None;

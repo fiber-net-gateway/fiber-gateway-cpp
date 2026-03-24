@@ -146,6 +146,9 @@ common::IoErr Http2Stream::maybe_replenish_recv_window(std::size_t buffered_byte
 }
 
 void Http2Stream::close(common::IoErr result) noexcept {
+    if (conn_) {
+        conn_->cancel_stream_send(*this);
+    }
     const bool first_abort = close_reason_ == common::IoErr::None;
     if (first_abort) {
         close_reason_ = result;
@@ -158,6 +161,13 @@ void Http2Stream::close(common::IoErr result) noexcept {
     if (first_abort && ops_ && ops_->on_abort) {
         ops_->on_abort(owner_, close_reason_);
     }
+}
+
+void Http2Stream::on_outbound_send_complete() noexcept {
+    if (!conn_) {
+        return;
+    }
+    conn_->on_stream_outbound_idle(*this);
 }
 
 bool Http2Stream::ready_for_connection_release() const noexcept {
