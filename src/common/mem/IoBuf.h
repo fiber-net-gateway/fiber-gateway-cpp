@@ -94,6 +94,7 @@ public:
     bool append(IoBuf &&buf) noexcept;
     bool prepend(IoBuf &&buf) noexcept;
     [[nodiscard]] bool retain_prefix(std::size_t bytes, IoBufChain &out) const noexcept;
+    bool take_prefix(std::size_t bytes, IoBufChain &dst) noexcept;
     void clear() noexcept;
     void consume(std::size_t bytes) noexcept;
     void drop_empty_front() noexcept;

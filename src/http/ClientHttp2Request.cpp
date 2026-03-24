@@ -42,6 +42,8 @@ common::IoErr noop_header_block_complete(void *, bool) noexcept { return common:
 
 common::IoErr noop_body(void *, mem::IoBuf &&, bool) noexcept { return common::IoErr::None; }
 
+void noop_abort(void *, common::IoErr) noexcept {}
+
 } // namespace
 
 const Http2Stream::Ops &ClientHttp2Request::stream_ops() noexcept {
@@ -50,6 +52,7 @@ const Http2Stream::Ops &ClientHttp2Request::stream_ops() noexcept {
         &noop_header_block_start,
         &noop_header_block_complete,
         &noop_body,
+        &noop_abort,
     };
     return kOps;
 }
