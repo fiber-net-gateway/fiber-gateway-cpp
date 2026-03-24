@@ -162,6 +162,7 @@ private:
     [[nodiscard]] std::size_t configured_max_active_streams() const noexcept;
     [[nodiscard]] common::IoErr request_stream_send(Http2Stream &stream, Http2OutboundNextKind next_kind,
                                                     Http2OutboundEncodeFn encode, void *ctx) noexcept;
+    [[nodiscard]] bool cancel_queued_stream_send(Http2Stream &stream) noexcept;
     void cancel_stream_send(Http2Stream &stream) noexcept;
     void on_stream_outbound_idle(Http2Stream &stream) noexcept;
     fiber::async::Task<RunResult> finalize_run(RunResult result) noexcept;

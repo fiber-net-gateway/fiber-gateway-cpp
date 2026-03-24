@@ -42,6 +42,7 @@ private:
     using PseudoHeaderHandler = common::IoErr (*)(ServerHttp2Request &, std::string_view value) noexcept;
     struct BodyReadPollResult;
     class BodyReadAwaiter;
+    class HeaderSendAwaiter;
 
     static const Http2Stream::Ops &stream_ops() noexcept;
     static const Http2HpackDecoder::Ops &decoder_ops() noexcept;
@@ -78,8 +79,7 @@ private:
     [[nodiscard]] common::IoErr materialize_value_huffman(const std::uint8_t *data, std::size_t len,
                                                           std::string_view &out) noexcept;
     [[nodiscard]] common::IoErr prepare_final_header(const OutgoingHeaderBlockView &header) noexcept;
-    fiber::async::Task<common::IoResult<void>> send_response_header_block(const HttpHeaders *headers, int status_code,
-                                                                          bool end_stream, bool informational);
+    fiber::async::Task<common::IoResult<void>> send_response_header_block(const OutgoingHeaderBlockView &header);
     [[nodiscard]] common::IoErr commit_field(std::string_view name, std::uint64_t name_hash,
                                              std::string_view value, bool name_owned = false) noexcept;
     [[nodiscard]] common::IoErr commit_regular_header(std::string_view name, std::uint64_t name_hash,
@@ -90,6 +90,8 @@ private:
     [[nodiscard]] bool arm_body_waiter(BodyReadAwaiter *awaiter) noexcept;
     void cancel_body_waiter(BodyReadAwaiter *awaiter) noexcept;
     void notify_body_waiter() noexcept;
+    [[nodiscard]] bool cancel_queued_header_send() noexcept;
+    void on_header_send_complete(HeaderSendAwaiter *awaiter, common::IoErr result) noexcept;
     void on_stream_aborted(common::IoErr reason) noexcept;
 
     [[maybe_unused]] Http2Connection *conn_ = nullptr;
@@ -97,9 +99,10 @@ private:
     Http2Stream stream_;
     HttpExchange exchange_;
     mem::IoBufChain request_body_queue_;
-    mem::IoBufChain pending_response_frames_;
     std::chrono::milliseconds body_timeout_{};
+    std::chrono::milliseconds write_timeout_{};
     BodyReadAwaiter *body_waiter_ = nullptr;
+    HeaderSendAwaiter *send_awaiter_ = nullptr;
     common::IoErr abort_reason_ = common::IoErr::None;
     bool reading_trailers_ = false;
     bool saw_regular_header_in_block_ = false;

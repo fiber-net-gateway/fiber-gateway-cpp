@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "../common/Assert.h"
+#include "Http2OutboundScheduler.h"
 #include "Http2Protocol.h"
 
 namespace fiber::http {
@@ -34,12 +35,14 @@ Http2HeadersFrameEncoder::~Http2HeadersFrameEncoder() {
     }
 }
 
-common::IoErr Http2HeadersFrameEncoder::begin() noexcept {
+common::IoErr Http2HeadersFrameEncoder::begin(Http2OutboundEncodeTarget &target) noexcept {
     if (begun_ || finished_) {
         return common::IoErr::Invalid;
     }
+    target_ = &target;
     common::IoErr err = validate_options();
     if (err != common::IoErr::None) {
+        target_ = nullptr;
         return err;
     }
     err = open_frame(true);
@@ -71,7 +74,7 @@ common::IoErr Http2HeadersFrameEncoder::encode_field(std::string_view name, std:
     return encoder_.encode_field(name, name_hash, value);
 }
 
-common::IoErr Http2HeadersFrameEncoder::finish(mem::IoBufChain &out) noexcept {
+common::IoErr Http2HeadersFrameEncoder::finish() noexcept {
     if (!begun_ || finished_) {
         return common::IoErr::Invalid;
     }
@@ -88,7 +91,6 @@ common::IoErr Http2HeadersFrameEncoder::finish(mem::IoBufChain &out) noexcept {
         return err;
     }
 
-    out = std::move(frames_);
     reset_state();
     finished_ = true;
     return common::IoErr::None;
@@ -105,7 +107,7 @@ common::IoErr Http2HeadersFrameEncoder::open_frame(bool first_frame) noexcept {
     current_payload_written_ = 0;
     current_prefix_len_ = 0;
     current_suffix_len_ = 0;
-    current_buf_ = nullptr;
+    current_buf_storage_ = {};
     current_frame_header_ = nullptr;
 
     common::IoErr err = append_payload_buf(first_frame ? first_frame_buf_payload_cap() : next_buf_payload_cap(), true);
@@ -114,12 +116,12 @@ common::IoErr Http2HeadersFrameEncoder::open_frame(bool first_frame) noexcept {
     }
 
     if (first_frame && options_.pad_length != 0) {
-        *current_buf_->writable_data() = options_.pad_length;
-        commit_to_frames(1);
+        *current_buf_storage_.writable_data() = options_.pad_length;
+        commit_to_output(1);
         current_prefix_len_ += 1;
     }
     if (first_frame && options_.has_priority) {
-        std::uint8_t *priority = current_buf_->writable_data();
+        std::uint8_t *priority = current_buf_storage_.writable_data();
         std::uint32_t dependency = options_.stream_dependency & 0x7fffffffU;
         if (options_.exclusive) {
             dependency |= 0x80000000U;
@@ -129,7 +131,7 @@ common::IoErr Http2HeadersFrameEncoder::open_frame(bool first_frame) noexcept {
         priority[2] = static_cast<std::uint8_t>((dependency >> 8) & 0xffU);
         priority[3] = static_cast<std::uint8_t>(dependency & 0xffU);
         priority[4] = options_.weight;
-        commit_to_frames(5);
+        commit_to_output(5);
         current_prefix_len_ += 5;
     }
 
@@ -139,24 +141,22 @@ common::IoErr Http2HeadersFrameEncoder::open_frame(bool first_frame) noexcept {
 
 common::IoErr Http2HeadersFrameEncoder::append_payload_buf(std::uint32_t payload_cap,
                                                            bool reserve_frame_header) noexcept {
+    common::IoErr err = flush_current_buf();
+    if (err != common::IoErr::None) {
+        return err;
+    }
+
     const std::size_t capacity = static_cast<std::size_t>(payload_cap) +
                                  (reserve_frame_header ? kFrameHeaderSize : 0U);
     mem::IoBuf buf = mem::IoBuf::allocate(capacity);
     if (!buf.valid()) {
         return common::IoErr::NoMem;
     }
-    if (!frames_.append(std::move(buf))) {
-        return common::IoErr::NoMem;
-    }
-
-    current_buf_ = frames_.first_writable();
-    FIBER_ASSERT(current_buf_ != nullptr);
     if (reserve_frame_header) {
-        current_frame_header_ = current_buf_->writable_data();
-        frames_.commit(kFrameHeaderSize);
-        current_buf_ = frames_.first_writable();
-        FIBER_ASSERT(current_buf_ != nullptr);
+        current_frame_header_ = buf.writable_data();
+        buf.commit(kFrameHeaderSize);
     }
+    current_buf_storage_ = std::move(buf);
     return common::IoErr::None;
 }
 
@@ -166,11 +166,11 @@ common::IoErr Http2HeadersFrameEncoder::seal_current_frame(bool end_headers) noe
     }
 
     if (current_suffix_len_ != 0) {
-        if (current_buf_ == nullptr) {
+        if (!current_buf_storage_) {
             return common::IoErr::Invalid;
         }
-        std::memset(current_buf_->writable_data(), 0, current_suffix_len_);
-        commit_to_frames(current_suffix_len_);
+        std::memset(current_buf_storage_.writable_data(), 0, current_suffix_len_);
+        commit_to_output(current_suffix_len_);
     }
 
     std::uint8_t flags = 0;
@@ -191,7 +191,10 @@ common::IoErr Http2HeadersFrameEncoder::seal_current_frame(bool end_headers) noe
     }
 
     encode_http2_frame_header(current_frame_header_, current_payload_written_, type, flags, options_.stream_id);
-    current_buf_ = nullptr;
+    common::IoErr err = flush_current_buf();
+    if (err != common::IoErr::None) {
+        return err;
+    }
     current_frame_header_ = nullptr;
     current_frame_payload_limit_ = 0;
     current_payload_written_ = 0;
@@ -215,11 +218,11 @@ common::IoErr Http2HeadersFrameEncoder::validate_options() const noexcept {
 }
 
 std::size_t Http2HeadersFrameEncoder::current_hpack_writable() const noexcept {
-    if (current_buf_ == nullptr) {
+    if (!current_buf_storage_) {
         return 0;
     }
     const std::size_t frame_remaining = current_frame_hpack_remaining();
-    return std::min<std::size_t>(frame_remaining, current_buf_->writable());
+    return std::min<std::size_t>(frame_remaining, current_buf_storage_.writable());
 }
 
 std::size_t Http2HeadersFrameEncoder::current_frame_hpack_remaining() const noexcept {
@@ -241,8 +244,8 @@ std::uint32_t Http2HeadersFrameEncoder::next_buf_payload_cap() const noexcept {
 }
 
 void Http2HeadersFrameEncoder::reset_state() noexcept {
-    frames_.clear();
-    current_buf_ = nullptr;
+    target_ = nullptr;
+    current_buf_storage_ = {};
     current_frame_header_ = nullptr;
     current_frame_payload_limit_ = 0;
     current_payload_written_ = 0;
@@ -252,10 +255,19 @@ void Http2HeadersFrameEncoder::reset_state() noexcept {
     begun_ = false;
 }
 
-void Http2HeadersFrameEncoder::commit_to_frames(std::size_t bytes) noexcept {
-    frames_.commit(bytes);
+common::IoErr Http2HeadersFrameEncoder::flush_current_buf() noexcept {
+    if (!current_buf_storage_ || current_buf_storage_.readable() == 0) {
+        current_buf_storage_ = {};
+        return common::IoErr::None;
+    }
+
+    FIBER_ASSERT(target_ != nullptr);
+    return target_->append_buffer(std::move(current_buf_storage_));
+}
+
+void Http2HeadersFrameEncoder::commit_to_output(std::size_t bytes) noexcept {
+    current_buf_storage_.commit(bytes);
     current_payload_written_ += static_cast<std::uint32_t>(bytes);
-    current_buf_ = frames_.first_writable();
 }
 
 common::IoErr Http2HeadersFrameEncoder::acquire_output(void *ctx, std::size_t min_bytes,
@@ -274,7 +286,7 @@ common::IoErr Http2HeadersFrameEncoder::acquire_output(void *ctx, std::size_t mi
             if (err != common::IoErr::None) {
                 return err;
             }
-        } else if (self->current_buf_ == nullptr || self->current_buf_->writable() == 0) {
+        } else if (!self->current_buf_storage_ || self->current_buf_storage_.writable() == 0) {
             const std::uint32_t next_payload_cap =
                 static_cast<std::uint32_t>(std::min<std::size_t>(frame_remaining, self->next_buf_payload_cap()));
             common::IoErr err = self->append_payload_buf(next_payload_cap, false);
@@ -284,11 +296,11 @@ common::IoErr Http2HeadersFrameEncoder::acquire_output(void *ctx, std::size_t mi
         }
         writable = self->current_hpack_writable();
     }
-    if (self->current_buf_ == nullptr || writable == 0) {
+    if (!self->current_buf_storage_ || writable == 0) {
         return common::IoErr::Invalid;
     }
 
-    dst = self->current_buf_->writable_data();
+    dst = self->current_buf_storage_.writable_data();
     len = writable;
     return len != 0 ? common::IoErr::None : common::IoErr::Invalid;
 }
@@ -296,9 +308,9 @@ common::IoErr Http2HeadersFrameEncoder::acquire_output(void *ctx, std::size_t mi
 void Http2HeadersFrameEncoder::commit_output(void *ctx, std::size_t written) noexcept {
     auto *self = static_cast<Http2HeadersFrameEncoder *>(ctx);
     FIBER_ASSERT(self != nullptr);
-    FIBER_ASSERT(self->current_buf_ != nullptr);
+    FIBER_ASSERT(self->current_buf_storage_);
     FIBER_ASSERT(written <= self->current_hpack_writable());
-    self->commit_to_frames(written);
+    self->commit_to_output(written);
 }
 
 } // namespace fiber::http

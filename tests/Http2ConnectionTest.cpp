@@ -293,31 +293,123 @@ std::vector<std::uint8_t> chain_to_bytes(fiber::mem::IoBufChain chain) {
     return out;
 }
 
+fiber::common::IoErr noop_test_header_block_start(void *, fiber::http::Http2HpackDecoder::Sink &) noexcept {
+    return fiber::common::IoErr::None;
+}
+
+fiber::common::IoErr noop_test_header_block_complete(void *, bool) noexcept {
+    return fiber::common::IoErr::None;
+}
+
+fiber::common::IoErr noop_test_body(void *, fiber::mem::IoBuf &&, bool) noexcept {
+    return fiber::common::IoErr::None;
+}
+
+void noop_test_abort(void *, fiber::common::IoErr) noexcept {}
+void noop_test_destroy(void *) noexcept {}
+
+const fiber::http::Http2Stream::Ops kHeaderEncodeStreamOps{
+    &noop_test_destroy,
+    &noop_test_header_block_start,
+    &noop_test_header_block_complete,
+    &noop_test_body,
+    &noop_test_abort,
+};
+
+struct HeaderEncodeCase {
+    std::uint32_t stream_id = 0;
+    bool end_stream = false;
+    std::vector<std::pair<std::string_view, std::string_view>> headers;
+};
+
+fiber::common::IoErr encode_headers_frame_for_test(fiber::http::Http2Stream &, void *ctx,
+                                                   const fiber::http::Http2OutboundEncodeRequest &req,
+                                                   fiber::http::Http2OutboundEncodeTarget &target,
+                                                   fiber::http::Http2OutboundEncodeResult &result) noexcept {
+    auto *test_case = static_cast<HeaderEncodeCase *>(ctx);
+    if (!test_case) {
+        return fiber::common::IoErr::Invalid;
+    }
+
+    fiber::http::Http2HpackEncodeCatalog catalog;
+    if (!catalog.init({})) {
+        return fiber::common::IoErr::Invalid;
+    }
+
+    fiber::http::Http2HpackEncoder encoder({.catalog = &catalog, .huffman_threshold = 1024});
+    if (!encoder.init()) {
+        return fiber::common::IoErr::Invalid;
+    }
+
+    fiber::http::Http2HeadersFrameEncoder frame_encoder(encoder, {
+        .stream_id = test_case->stream_id,
+        .max_frame_size = req.max_frame_size,
+        .first_frame_payload_cap = 1024,
+        .end_stream = test_case->end_stream,
+    });
+    fiber::common::IoErr err = frame_encoder.begin(target);
+    if (err != fiber::common::IoErr::None) {
+        return err;
+    }
+    for (const auto &[name, value] : test_case->headers) {
+        err = frame_encoder.encode_field(name, fiber::http::http_header_name_hash(name), value);
+        if (err != fiber::common::IoErr::None) {
+            frame_encoder.abort();
+            return err;
+        }
+    }
+    err = frame_encoder.finish();
+    if (err != fiber::common::IoErr::None) {
+        return err;
+    }
+
+    result.status = fiber::http::Http2OutboundEncodeResult::Status::Encoded;
+    result.next_kind = fiber::http::Http2OutboundNextKind::None;
+    result.consumed_conn_window = 0;
+    return fiber::common::IoErr::None;
+}
+
 std::string build_headers_frame_bytes(std::uint32_t stream_id,
                                       std::initializer_list<std::pair<std::string_view, std::string_view>> headers,
                                       bool end_stream = false) {
-    fiber::http::Http2HpackEncodeCatalog catalog;
-    EXPECT_TRUE(catalog.init({}));
+    fiber::event::EventLoopGroup group(1);
+    auto promise = std::make_shared<std::promise<std::string>>();
+    auto future = promise->get_future();
 
-    fiber::http::Http2HpackEncoder encoder({.catalog = &catalog, .huffman_threshold = 1024});
-    EXPECT_TRUE(encoder.init());
+    HeaderEncodeCase test_case;
+    test_case.stream_id = stream_id;
+    test_case.end_stream = end_stream;
+    test_case.headers.assign(headers.begin(), headers.end());
 
-    fiber::http::Http2HeadersFrameEncoder frame_encoder(encoder, {
-        .stream_id = stream_id,
-        .max_frame_size = 16384,
-        .first_frame_payload_cap = 1024,
-        .end_stream = end_stream,
+    group.start();
+    fiber::async::spawn(group.at(0), [promise, test_case = std::move(test_case), &group]() mutable
+        -> fiber::async::DetachedTask {
+        FakeHttpTransport transport({}, {});
+        fiber::http::Http2OutboundScheduler scheduler(&transport, 1024, std::chrono::seconds(30), 16384);
+        int owner = 0;
+        fiber::http::Http2Stream stream(test_case.stream_id, &owner, kHeaderEncodeStreamOps);
+
+        fiber::common::IoErr err = scheduler.request_send(stream, fiber::http::Http2OutboundNextKind::Headers,
+                                                          &encode_headers_frame_for_test, &test_case);
+        if (err == fiber::common::IoErr::None) {
+            scheduler.close();
+            co_await scheduler.send_loop();
+            err = scheduler.stop_reason();
+        }
+
+        if (err != fiber::common::IoErr::None) {
+            promise->set_value({});
+        } else {
+            promise->set_value(transport.written());
+        }
+        group.stop();
+        co_return;
     });
-    EXPECT_EQ(frame_encoder.begin(), fiber::common::IoErr::None);
-    for (const auto &[name, value] : headers) {
-        EXPECT_EQ(frame_encoder.encode_field(name, fiber::http::http_header_name_hash(name), value),
-                  fiber::common::IoErr::None);
-    }
 
-    fiber::mem::IoBufChain out;
-    EXPECT_EQ(frame_encoder.finish(out), fiber::common::IoErr::None);
-    const auto bytes = chain_to_bytes(std::move(out));
-    return std::string(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+    EXPECT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    std::string result = future.get();
+    group.join();
+    return result;
 }
 
 struct DecodedHeaderBlock {
