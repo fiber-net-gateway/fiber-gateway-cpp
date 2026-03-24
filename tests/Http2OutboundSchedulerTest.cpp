@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstring>
 #include <future>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -19,7 +20,10 @@ using fiber::async::DetachedTask;
 
 class RecordingTransport final : public fiber::http::HttpTransport {
 public:
-    explicit RecordingTransport(std::vector<std::size_t> write_steps = {}) : write_steps_(std::move(write_steps)) {}
+    explicit RecordingTransport(std::vector<std::size_t> write_steps = {},
+                                fiber::common::IoErr write_error = fiber::common::IoErr::None) :
+        write_steps_(std::move(write_steps)),
+        write_error_(write_error) {}
 
     fiber::async::Task<fiber::common::IoResult<void>> handshake(std::chrono::milliseconds) override {
         co_return fiber::common::IoResult<void>{};
@@ -47,6 +51,9 @@ public:
                                                               std::chrono::milliseconds) override {
         if (closed_) {
             co_return std::unexpected(fiber::common::IoErr::ConnReset);
+        }
+        if (write_error_ != fiber::common::IoErr::None) {
+            co_return std::unexpected(write_error_);
         }
 
         std::size_t take = len;
@@ -93,6 +100,7 @@ private:
     std::size_t write_call_count_ = 0;
     bool closed_ = false;
     std::string written_;
+    fiber::common::IoErr write_error_ = fiber::common::IoErr::None;
     fiber::net::SocketAddress remote_addr_{};
 };
 
@@ -101,7 +109,10 @@ struct DummyStreamOwner {
     std::string second_batch;
     bool block_on_zero_conn_window = false;
     bool close_after_first_batch = false;
+    bool notify_done = false;
     std::size_t encode_calls = 0;
+    std::size_t done_calls = 0;
+    std::optional<fiber::common::IoErr> done_result;
 };
 
 void on_destroy(void *) noexcept {}
@@ -127,6 +138,15 @@ const fiber::http::Http2Stream::Ops kStreamOps{
     &on_body,
     &on_abort,
 };
+
+void on_stream_batch_done(void *ctx, fiber::common::IoErr result) noexcept {
+    auto *owner = static_cast<DummyStreamOwner *>(ctx);
+    if (!owner) {
+        return;
+    }
+    ++owner->done_calls;
+    owner->done_result = result;
+}
 
 fiber::common::IoErr encode_stream_batch(fiber::http::Http2Stream &, void *ctx,
                                          const fiber::http::Http2OutboundEncodeRequest &req,
@@ -159,6 +179,9 @@ fiber::common::IoErr encode_stream_batch(fiber::http::Http2Stream &, void *ctx,
                     return err;
                 }
             }
+        }
+        if (owner->notify_done) {
+            target.set_on_done(&on_stream_batch_done, owner);
         }
         result.status = owner->close_after_first_batch ? fiber::http::Http2OutboundEncodeResult::Status::Closed
                                                        : fiber::http::Http2OutboundEncodeResult::Status::Encoded;
@@ -384,4 +407,120 @@ TEST(Http2OutboundSchedulerTest, RequestSendUpdatesQueuedStreamEncoder) {
     EXPECT_EQ(transport.written(), "NEW");
     EXPECT_EQ(first.encode_calls, 0U);
     EXPECT_EQ(second.encode_calls, 1U);
+}
+
+TEST(Http2OutboundSchedulerTest, CancelQueuedReadySendRemovesStreamFromQueue) {
+    RecordingTransport transport;
+    fiber::http::Http2OutboundScheduler scheduler(&transport, 8, std::chrono::milliseconds(50));
+    scheduler.set_connection_send_window(16);
+
+    DummyStreamOwner owner{
+        .first_batch = "HEADERS",
+    };
+    fiber::http::Http2Stream stream(1, &owner, kStreamOps);
+
+    EXPECT_EQ(scheduler.request_send(stream, fiber::http::Http2OutboundNextKind::Headers, &encode_stream_batch, &owner),
+              fiber::common::IoErr::None);
+    EXPECT_EQ(scheduler.ready_stream_count(), 1U);
+
+    EXPECT_TRUE(scheduler.cancel_queued_send(stream));
+    EXPECT_EQ(scheduler.ready_stream_count(), 0U);
+    EXPECT_FALSE(scheduler.cancel_queued_send(stream));
+    EXPECT_EQ(owner.encode_calls, 0U);
+}
+
+TEST(Http2OutboundSchedulerTest, CancelQueuedWaitingConnWindowSendRemovesStreamFromQueue) {
+    RecordingTransport transport;
+    fiber::http::Http2OutboundScheduler scheduler(&transport, 8, std::chrono::milliseconds(50));
+    scheduler.set_connection_send_window(0);
+
+    DummyStreamOwner owner{
+        .first_batch = "DATA",
+    };
+    fiber::http::Http2Stream stream(1, &owner, kStreamOps);
+
+    EXPECT_EQ(scheduler.request_send(stream, fiber::http::Http2OutboundNextKind::Data, &encode_stream_batch, &owner),
+              fiber::common::IoErr::None);
+    EXPECT_EQ(scheduler.waiting_conn_window_stream_count(), 1U);
+
+    EXPECT_TRUE(scheduler.cancel_queued_send(stream));
+    EXPECT_EQ(scheduler.waiting_conn_window_stream_count(), 0U);
+    EXPECT_FALSE(scheduler.cancel_queued_send(stream));
+    EXPECT_EQ(owner.encode_calls, 0U);
+}
+
+TEST(Http2OutboundSchedulerTest, OnDoneFiresAfterInflightBatchCompletes) {
+    fiber::event::EventLoopGroup group(1);
+    RecordingTransport transport({2, 8});
+    fiber::http::Http2OutboundScheduler scheduler(&transport, 8, std::chrono::milliseconds(50));
+    scheduler.set_connection_send_window(16);
+
+    DummyStreamOwner owner{
+        .first_batch = "HEADERS",
+        .notify_done = true,
+    };
+    fiber::http::Http2Stream stream(1, &owner, kStreamOps);
+
+    std::promise<fiber::common::IoErr> done_promise;
+    auto done_future = done_promise.get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_scheduler_and_stop(&scheduler, &done_promise, &group);
+    });
+    fiber::async::spawn(group.at(0), [&]() {
+        return request_stream_send_and_close(&scheduler, &stream, fiber::http::Http2OutboundNextKind::Headers, &owner);
+    });
+
+    if (done_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "scheduler send_loop did not finish in time";
+        return;
+    }
+
+    EXPECT_EQ(done_future.get(), fiber::common::IoErr::None);
+    group.join();
+
+    ASSERT_TRUE(owner.done_result.has_value());
+    EXPECT_EQ(*owner.done_result, fiber::common::IoErr::None);
+    EXPECT_EQ(owner.done_calls, 1U);
+}
+
+TEST(Http2OutboundSchedulerTest, OnDoneFiresWithFailureWhenWriteFails) {
+    fiber::event::EventLoopGroup group(1);
+    RecordingTransport transport({}, fiber::common::IoErr::ConnReset);
+    fiber::http::Http2OutboundScheduler scheduler(&transport, 8, std::chrono::milliseconds(50));
+    scheduler.set_connection_send_window(16);
+
+    DummyStreamOwner owner{
+        .first_batch = "HEADERS",
+        .notify_done = true,
+    };
+    fiber::http::Http2Stream stream(1, &owner, kStreamOps);
+
+    std::promise<fiber::common::IoErr> done_promise;
+    auto done_future = done_promise.get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_scheduler_and_stop(&scheduler, &done_promise, &group);
+    });
+    fiber::async::spawn(group.at(0), [&]() {
+        return request_stream_send_and_close(&scheduler, &stream, fiber::http::Http2OutboundNextKind::Headers, &owner);
+    });
+
+    if (done_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "scheduler send_loop did not finish in time";
+        return;
+    }
+
+    EXPECT_EQ(done_future.get(), fiber::common::IoErr::ConnReset);
+    group.join();
+
+    ASSERT_TRUE(owner.done_result.has_value());
+    EXPECT_EQ(*owner.done_result, fiber::common::IoErr::ConnReset);
+    EXPECT_EQ(owner.done_calls, 1U);
 }
