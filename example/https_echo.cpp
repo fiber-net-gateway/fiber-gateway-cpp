@@ -166,14 +166,18 @@ fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange) {
     for (;;) {
         auto read_result = co_await exchange.read_body(4096);
         if (!read_result) {
+            std::cout << "1111 end....." << std::endl;
             co_return;
         }
         bool last = read_result->last;
         auto write_result = co_await exchange.write_body(std::move(*read_result));
         if (!write_result) {
+
+            std::cout << "2222 end....." << std::endl;
             co_return;
         }
         if (last) {
+            std::cout << "33333 end....." << std::endl;
             co_return;
         }
     }

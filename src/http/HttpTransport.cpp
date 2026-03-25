@@ -335,12 +335,54 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::write(mem::IoBuf &buf
 
 fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChain &buf,
                                                                   std::chrono::milliseconds timeout) {
-    buf.drop_empty_front();
-    mem::IoBuf *target = buf.first_readable();
-    if (!target) {
-        co_return static_cast<size_t>(0);
+    auto hs_result = co_await handshake(context_->options().handshake_timeout);
+    if (!hs_result) {
+        co_return std::unexpected(hs_result.error());
     }
-    co_return co_await write(*target, timeout);
+
+    auto deadline = stream_.loop().now() + timeout;
+    std::size_t total_written = 0;
+    bool waited = false;
+    for (;;) {
+        buf.drop_empty_front();
+        mem::IoBuf *target = buf.first_readable();
+        if (!target) {
+            co_return total_written;
+        }
+
+        std::size_t out = 0;
+        event::IoEvent wait_event = event::IoEvent::None;
+        common::IoErr err = stream_.poll_write(target->readable_data(), target->readable(), out, wait_event);
+        if (err == common::IoErr::None) {
+            if (out == 0) {
+                co_return total_written;
+            }
+            buf.consume_and_compact(out);
+            total_written += out;
+            continue;
+        }
+        if (err != common::IoErr::WouldBlock) {
+            if (total_written != 0) {
+                co_return total_written;
+            }
+            co_return std::unexpected(err);
+        }
+        if (total_written != 0) {
+            co_return total_written;
+        }
+        if (waited) {
+            co_return std::unexpected(common::IoErr::WouldBlock);
+        }
+
+        auto wait_result = co_await wait_tls_event(stream_, wait_event, deadline);
+        if (!wait_result) {
+            if (total_written != 0) {
+                co_return total_written;
+            }
+            co_return std::unexpected(wait_result.error());
+        }
+        waited = true;
+    }
 }
 
 void TlsTransport::close() { stream_.close(); }
