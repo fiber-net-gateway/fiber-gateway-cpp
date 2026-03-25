@@ -5,18 +5,39 @@
 
 namespace fiber::http {
 
-void normalize_http1_alpn(TlsOptions &options) {
-    std::vector<std::string> normalized;
-    normalized.reserve(options.alpn.size() + 1);
+namespace {
 
+std::vector<std::string> normalize_base(const TlsOptions &options) {
+    std::vector<std::string> normalized;
+    normalized.reserve(options.alpn.size() + 2);
     for (const auto &proto : options.alpn) {
-        if (proto.empty() || proto == "h2" || proto == "http/1.1") {
+        if (proto.empty()) {
+            continue;
+        }
+        if (std::find(normalized.begin(), normalized.end(), proto) != normalized.end()) {
             continue;
         }
         normalized.push_back(proto);
     }
+    return normalized;
+}
 
+} // namespace
+
+void normalize_http1_alpn(TlsOptions &options) {
+    std::vector<std::string> normalized = normalize_base(options);
+    normalized.erase(std::remove(normalized.begin(), normalized.end(), "h2"), normalized.end());
+    normalized.erase(std::remove(normalized.begin(), normalized.end(), "http/1.1"), normalized.end());
     normalized.insert(normalized.begin(), "http/1.1");
+    options.alpn = std::move(normalized);
+}
+
+void normalize_http_server_alpn(TlsOptions &options) {
+    std::vector<std::string> normalized = normalize_base(options);
+    normalized.erase(std::remove(normalized.begin(), normalized.end(), "h2"), normalized.end());
+    normalized.erase(std::remove(normalized.begin(), normalized.end(), "http/1.1"), normalized.end());
+    normalized.insert(normalized.begin(), "http/1.1");
+    normalized.insert(normalized.begin(), "h2");
     options.alpn = std::move(normalized);
 }
 
