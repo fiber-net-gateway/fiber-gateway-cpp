@@ -1,7 +1,6 @@
 #include "ServerHttp2Request.h"
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <coroutine>
 #include <cstring>
@@ -18,13 +17,6 @@
 namespace fiber::http {
 
 namespace {
-
-constexpr std::string_view kConnectionHeader = "connection";
-constexpr std::string_view kKeepAliveHeader = "keep-alive";
-constexpr std::string_view kProxyConnectionHeader = "proxy-connection";
-constexpr std::string_view kTransferEncodingHeader = "transfer-encoding";
-constexpr std::string_view kUpgradeHeader = "upgrade";
-constexpr std::string_view kContentLengthHeader = "content-length";
 
 HttpMethod parse_method(std::string_view method) noexcept {
     if (method == "GET") {
@@ -59,21 +51,6 @@ HttpMethod parse_method(std::string_view method) noexcept {
 
 bool is_pseudo_header(std::string_view name) noexcept {
     return !name.empty() && name.front() == ':';
-}
-
-bool is_forbidden_http2_response_header(std::string_view lowcase_name) noexcept {
-    return lowcase_name == kConnectionHeader || lowcase_name == kKeepAliveHeader ||
-           lowcase_name == kProxyConnectionHeader || lowcase_name == kTransferEncodingHeader ||
-           lowcase_name == kUpgradeHeader;
-}
-
-std::string_view format_content_length(std::uint64_t value, std::array<char, 20> &scratch) noexcept {
-    char *out = scratch.data() + scratch.size();
-    do {
-        *--out = static_cast<char>('0' + (value % 10));
-        value /= 10;
-    } while (value != 0);
-    return {out, static_cast<std::size_t>(scratch.data() + scratch.size() - out)};
 }
 
 } // namespace
@@ -351,12 +328,10 @@ public:
     HeaderSendAwaiter(ServerHttp2Request &request, const OutgoingHeaderBlockView &header,
                       std::chrono::milliseconds timeout) noexcept :
         SendAwaiter(request, timeout),
+        kind_(header.kind),
         headers_(header.headers),
         status_code_(header.status_code),
         reason_(header.reason),
-        body_mode_(header.body_mode),
-        connection_mode_(header.connection_mode),
-        content_length_(header.content_length),
         end_stream_(header.end_stream),
         informational_(header.kind == OutgoingHeaderKind::Informational) {}
 
@@ -396,12 +371,10 @@ private:
         complete(common::IoErr::TimedOut);
     }
 
+    OutgoingHeaderKind kind_ = OutgoingHeaderKind::Final;
     const HttpHeaders *headers_ = nullptr;
     int status_code_ = 0;
     std::string_view reason_;
-    ResponseBodyMode body_mode_ = ResponseBodyMode::Auto;
-    ResponseConnectionMode connection_mode_ = ResponseConnectionMode::Auto;
-    std::size_t content_length_ = 0;
     bool end_stream_ = false;
     bool informational_ = false;
 
@@ -718,14 +691,15 @@ common::IoErr ServerHttp2Request::encode_response_frames(Http2Stream &stream, vo
         return err;
     }
 
-    err = frame_encoder.encode_status(awaiter->status_code_);
-    if (err != common::IoErr::None) {
-        frame_encoder.abort();
-        request->on_header_send_complete(awaiter, err);
-        return err;
+    if (awaiter->kind_ != OutgoingHeaderKind::Trailer) {
+        err = frame_encoder.encode_status(awaiter->status_code_);
+        if (err != common::IoErr::None) {
+            frame_encoder.abort();
+            request->on_header_send_complete(awaiter, err);
+            return err;
+        }
     }
 
-    bool has_content_length_header = false;
     if (awaiter->headers_ != nullptr) {
         for (auto it = awaiter->headers_->begin(); it != awaiter->headers_->end(); ++it) {
             const auto &field = *it;
@@ -736,31 +710,12 @@ common::IoErr ServerHttp2Request::encode_response_frames(Http2Stream &stream, vo
             if (lowcase_name.empty()) {
                 lowcase_name = field.name_view();
             }
-            if (is_forbidden_http2_response_header(lowcase_name)) {
-                continue;
-            }
-            if (!awaiter->informational_ && lowcase_name == kContentLengthHeader) {
-                has_content_length_header = true;
-            }
-
             err = frame_encoder.encode_field(lowcase_name, field.name_hash, field.value_view());
             if (err != common::IoErr::None) {
                 frame_encoder.abort();
                 request->on_header_send_complete(awaiter, err);
                 return err;
             }
-        }
-    }
-
-    if (!awaiter->informational_ && awaiter->body_mode_ == ResponseBodyMode::ContentLength && !has_content_length_header) {
-        std::array<char, 20> content_length_buf{};
-        std::string_view content_length = format_content_length(awaiter->content_length_, content_length_buf);
-        err = frame_encoder.encode_field(kContentLengthHeader, http_header_name_hash(kContentLengthHeader),
-                                         content_length);
-        if (err != common::IoErr::None) {
-            frame_encoder.abort();
-            request->on_header_send_complete(awaiter, err);
-            return err;
         }
     }
 
@@ -772,18 +727,16 @@ common::IoErr ServerHttp2Request::encode_response_frames(Http2Stream &stream, vo
 
     if (awaiter->end_stream_) {
         request->stream_.local_end_stream_ = true;
+        request->response_finished_ = true;
         request->conn_->try_release_stream(request->stream_);
     }
 
-    if (!awaiter->informational_) {
+    if (awaiter->kind_ == OutgoingHeaderKind::Final) {
         request->response_headers_sent_ = true;
         request->response_finished_ = awaiter->end_stream_;
         request->response_status_code_ = awaiter->status_code_;
         request->response_reason_ = awaiter->reason_;
         request->response_headers_ = awaiter->headers_;
-        request->response_body_mode_ = awaiter->body_mode_;
-        request->response_connection_mode_ = awaiter->connection_mode_;
-        request->response_content_length_ = awaiter->content_length_;
     }
 
     request->on_header_send_complete(awaiter, common::IoErr::None);
@@ -1003,22 +956,12 @@ fiber::async::Task<common::IoResult<BodyChunk>> ServerHttp2Request::read_body(Ht
     co_return out;
 }
 
-common::IoErr ServerHttp2Request::prepare_final_header(const OutgoingHeaderBlockView &header) noexcept {
-    if (header.status_code < 200 || header.status_code > 999) {
-        return common::IoErr::Invalid;
+fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_header(HttpExchange &exchange,
+                                                                            const OutgoingHeaderBlockView &header) {
+    if (conn_ == nullptr || &exchange != &exchange_) {
+        co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (header.kind != OutgoingHeaderKind::Final) {
-        return common::IoErr::Invalid;
-    }
-    if (header.connection_mode == ResponseConnectionMode::Close) {
-        return common::IoErr::NotSupported;
-    }
-    return common::IoErr::None;
-}
-
-fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_response_header_block(
-    const OutgoingHeaderBlockView &header) {
-    if (conn_ == nullptr || !handler_started_ || stream_.local_rst() || stream_.remote_rst()) {
+    if (!handler_started_ || stream_.local_rst() || stream_.remote_rst()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
     if (send_awaiter_ != nullptr) {
@@ -1027,15 +970,17 @@ fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_response_hea
     if (stream_.local_end_stream()) {
         co_return std::unexpected(common::IoErr::Already);
     }
-    const bool informational = header.kind == OutgoingHeaderKind::Informational;
-    if (header.status_code < 100 || header.status_code > 999) {
-        co_return std::unexpected(common::IoErr::Invalid);
-    }
-    if (informational && (header.status_code < 100 || header.status_code >= 200)) {
-        co_return std::unexpected(common::IoErr::Invalid);
-    }
-    if (!informational && header.status_code >= 100 && header.status_code < 200) {
-        co_return std::unexpected(common::IoErr::Invalid);
+    if (header.kind != OutgoingHeaderKind::Trailer) {
+        const bool informational = header.kind == OutgoingHeaderKind::Informational;
+        if (header.status_code < 100 || header.status_code > 999) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        if (informational && (header.status_code < 100 || header.status_code >= 200)) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        if (!informational && header.status_code >= 100 && header.status_code < 200) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
     }
 
     HeaderSendAwaiter awaiter(*this, header, write_timeout_);
@@ -1049,30 +994,6 @@ fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_response_hea
     }
 
     co_return co_await awaiter;
-}
-
-fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_header(HttpExchange &exchange,
-                                                                            const OutgoingHeaderBlockView &header) {
-    if (conn_ == nullptr || &exchange != &exchange_) {
-        co_return std::unexpected(common::IoErr::Invalid);
-    }
-
-    switch (header.kind) {
-        case OutgoingHeaderKind::Informational:
-            co_return co_await send_response_header_block(header);
-        case OutgoingHeaderKind::Final:
-            {
-                common::IoErr err = prepare_final_header(header);
-                if (err != common::IoErr::None) {
-                    co_return std::unexpected(err);
-                }
-                co_return co_await send_response_header_block(header);
-            }
-        case OutgoingHeaderKind::Trailer:
-            co_return std::unexpected(common::IoErr::NotSupported);
-    }
-
-    co_return std::unexpected(common::IoErr::Invalid);
 }
 
 fiber::async::Task<common::IoResult<size_t>> ServerHttp2Request::write_body(HttpExchange &exchange,
