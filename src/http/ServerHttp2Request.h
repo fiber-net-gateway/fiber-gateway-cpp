@@ -84,8 +84,6 @@ private:
                                                       std::string_view &out) noexcept;
     [[nodiscard]] common::IoErr materialize_value_huffman(const std::uint8_t *data, std::size_t len,
                                                           std::string_view &out) noexcept;
-    [[nodiscard]] common::IoErr prepare_final_header(const OutgoingHeaderBlockView &header) noexcept;
-    fiber::async::Task<common::IoResult<void>> send_response_header_block(const OutgoingHeaderBlockView &header);
     [[nodiscard]] common::IoErr commit_field(std::string_view name, std::uint64_t name_hash,
                                              std::string_view value, bool name_owned = false) noexcept;
     [[nodiscard]] common::IoErr commit_regular_header(std::string_view name, std::uint64_t name_hash,
