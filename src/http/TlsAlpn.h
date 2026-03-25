@@ -6,6 +6,7 @@
 namespace fiber::http {
 
 void normalize_http1_alpn(TlsOptions &options);
+void normalize_http_server_alpn(TlsOptions &options);
 
 } // namespace fiber::http
 
