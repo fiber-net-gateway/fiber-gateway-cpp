@@ -11,6 +11,7 @@
 #include "../common/IoError.h"
 #include "../event/EventLoop.h"
 #include "Http2Connection.h"
+#include "Http2DataFrameEncoder.h"
 #include "Http2HeadersFrameEncoder.h"
 #include "Http2HpackHuffman.h"
 
@@ -216,53 +217,36 @@ private:
     friend class ServerHttp2Request;
 };
 
-class ServerHttp2Request::HeaderSendAwaiter {
+class ServerHttp2Request::SendAwaiter {
 public:
-    HeaderSendAwaiter(ServerHttp2Request &request, const OutgoingHeaderBlockView &header,
-                      std::chrono::milliseconds timeout) noexcept :
-        request_(&request),
-        headers_(header.headers),
-        status_code_(header.status_code),
-        reason_(header.reason),
-        body_mode_(header.body_mode),
-        connection_mode_(header.connection_mode),
-        content_length_(header.content_length),
-        end_stream_(header.end_stream),
-        informational_(header.kind == OutgoingHeaderKind::Informational),
-        timeout_(timeout) {}
+    SendAwaiter(ServerHttp2Request &request, std::chrono::milliseconds timeout) noexcept :
+        request_(&request), timeout_(timeout) {}
 
-    HeaderSendAwaiter(const HeaderSendAwaiter &) = delete;
-    HeaderSendAwaiter &operator=(const HeaderSendAwaiter &) = delete;
-    HeaderSendAwaiter(HeaderSendAwaiter &&) = delete;
-    HeaderSendAwaiter &operator=(HeaderSendAwaiter &&) = delete;
+    SendAwaiter(const SendAwaiter &) = delete;
+    SendAwaiter &operator=(const SendAwaiter &) = delete;
+    SendAwaiter(SendAwaiter &&) = delete;
+    SendAwaiter &operator=(SendAwaiter &&) = delete;
 
-    ~HeaderSendAwaiter() {
+    virtual ~SendAwaiter() {
         if (!request_) {
             return;
         }
         if (loop_ && timer_entry_.is_in_heap()) {
-            loop_->cancel<HeaderSendAwaiter, &HeaderSendAwaiter::timer_entry_>(*this);
+            loop_->cancel<SendAwaiter, &SendAwaiter::timer_entry_>(*this);
         }
         if (request_->send_awaiter_ == this) {
             request_->send_awaiter_ = nullptr;
         }
-        (void) request_->cancel_queued_header_send();
         request_ = nullptr;
     }
 
     bool await_ready() noexcept {
-        if (!request_) {
-            return true;
-        }
-        if (completed_) {
+        if (!request_ || completed_) {
             return true;
         }
         if (timeout_.count() == 0) {
-            if (request_->cancel_queued_header_send()) {
-                completed_ = true;
-                result_ = common::IoErr::TimedOut;
-                return true;
-            }
+            on_timeout_ready();
+            return true;
         }
         return false;
     }
@@ -275,36 +259,35 @@ public:
         loop_ = &fiber::event::EventLoop::current();
         handle_ = handle;
         if (has_timer()) {
-            loop_->post_at<HeaderSendAwaiter, &HeaderSendAwaiter::timer_entry_, &HeaderSendAwaiter::on_timeout>(
-                loop_->now() + timeout_, *this);
+            loop_->post_at<SendAwaiter, &SendAwaiter::timer_entry_, &SendAwaiter::on_timeout>(loop_->now() + timeout_,
+                                                                                               *this);
         }
         return true;
     }
 
-    common::IoResult<void> await_resume() noexcept {
+    [[nodiscard]] common::IoErr take_result() noexcept {
+        common::IoErr result = result_;
         if (loop_ && timer_entry_.is_in_heap()) {
-            loop_->cancel<HeaderSendAwaiter, &HeaderSendAwaiter::timer_entry_>(*this);
+            loop_->cancel<SendAwaiter, &SendAwaiter::timer_entry_>(*this);
         }
         if (request_ && request_->send_awaiter_ == this) {
             request_->send_awaiter_ = nullptr;
         }
 
-        common::IoErr result = result_;
         request_ = nullptr;
         loop_ = nullptr;
         handle_ = {};
+        result_ = common::IoErr::None;
         completed_ = false;
         resume_posted_ = false;
-        result_ = common::IoErr::None;
-
-        if (result != common::IoErr::None) {
-            return std::unexpected(result);
-        }
-        return common::IoResult<void>{};
+        return result;
     }
 
-private:
-    static void on_notify(HeaderSendAwaiter *awaiter) {
+    virtual void on_abort(common::IoErr result) noexcept { complete(result); }
+    virtual void on_stream_send_window_available() noexcept {}
+
+protected:
+    static void on_notify(SendAwaiter *awaiter) {
         if (!awaiter) {
             return;
         }
@@ -312,16 +295,11 @@ private:
         awaiter->resume();
     }
 
-    static void on_timeout(HeaderSendAwaiter *awaiter) {
-        if (!awaiter || !awaiter->request_ || awaiter->completed_) {
+    static void on_timeout(SendAwaiter *awaiter) {
+        if (!awaiter || awaiter->completed_) {
             return;
         }
-        if (!awaiter->request_->cancel_queued_header_send()) {
-            return;
-        }
-        awaiter->completed_ = true;
-        awaiter->result_ = common::IoErr::TimedOut;
-        awaiter->post_resume();
+        awaiter->on_timeout_fired();
     }
 
     void complete(common::IoErr result) noexcept {
@@ -338,7 +316,7 @@ private:
             return;
         }
         resume_posted_ = true;
-        loop_->post<HeaderSendAwaiter, &HeaderSendAwaiter::notify_entry_, &HeaderSendAwaiter::on_notify>(*this);
+        loop_->post<SendAwaiter, &SendAwaiter::notify_entry_, &SendAwaiter::on_notify>(*this);
     }
 
     void resume() noexcept {
@@ -353,15 +331,11 @@ private:
         return timeout_.count() > 0 && timeout_ != std::chrono::milliseconds::max();
     }
 
+    virtual void on_destroy_cleanup() noexcept {}
+    virtual void on_timeout_ready() noexcept = 0;
+    virtual void on_timeout_fired() noexcept = 0;
+
     ServerHttp2Request *request_ = nullptr;
-    const HttpHeaders *headers_ = nullptr;
-    int status_code_ = 0;
-    std::string_view reason_;
-    ResponseBodyMode body_mode_ = ResponseBodyMode::Auto;
-    ResponseConnectionMode connection_mode_ = ResponseConnectionMode::Auto;
-    std::size_t content_length_ = 0;
-    bool end_stream_ = false;
-    bool informational_ = false;
     std::chrono::milliseconds timeout_{};
     fiber::event::EventLoop *loop_ = nullptr;
     std::coroutine_handle<> handle_{};
@@ -370,6 +344,198 @@ private:
     common::IoErr result_ = common::IoErr::None;
     bool completed_ = false;
     bool resume_posted_ = false;
+};
+
+class ServerHttp2Request::HeaderSendAwaiter final : public SendAwaiter {
+public:
+    HeaderSendAwaiter(ServerHttp2Request &request, const OutgoingHeaderBlockView &header,
+                      std::chrono::milliseconds timeout) noexcept :
+        SendAwaiter(request, timeout),
+        headers_(header.headers),
+        status_code_(header.status_code),
+        reason_(header.reason),
+        body_mode_(header.body_mode),
+        connection_mode_(header.connection_mode),
+        content_length_(header.content_length),
+        end_stream_(header.end_stream),
+        informational_(header.kind == OutgoingHeaderKind::Informational) {}
+
+    HeaderSendAwaiter(const HeaderSendAwaiter &) = delete;
+    HeaderSendAwaiter &operator=(const HeaderSendAwaiter &) = delete;
+    HeaderSendAwaiter(HeaderSendAwaiter &&) = delete;
+    HeaderSendAwaiter &operator=(HeaderSendAwaiter &&) = delete;
+
+    ~HeaderSendAwaiter() override { on_destroy_cleanup(); }
+
+    common::IoResult<void> await_resume() noexcept {
+        common::IoErr result = take_result();
+        if (result != common::IoErr::None) {
+            return std::unexpected(result);
+        }
+        return common::IoResult<void>{};
+    }
+
+private:
+    void on_destroy_cleanup() noexcept override {
+        if (request_) {
+            (void) request_->cancel_queued_send();
+        }
+    }
+
+    void on_timeout_ready() noexcept override {
+        if (request_ && request_->cancel_queued_send()) {
+            completed_ = true;
+            result_ = common::IoErr::TimedOut;
+        }
+    }
+
+    void on_timeout_fired() noexcept override {
+        if (!request_ || !request_->cancel_queued_send()) {
+            return;
+        }
+        complete(common::IoErr::TimedOut);
+    }
+
+    const HttpHeaders *headers_ = nullptr;
+    int status_code_ = 0;
+    std::string_view reason_;
+    ResponseBodyMode body_mode_ = ResponseBodyMode::Auto;
+    ResponseConnectionMode connection_mode_ = ResponseConnectionMode::Auto;
+    std::size_t content_length_ = 0;
+    bool end_stream_ = false;
+    bool informational_ = false;
+
+    friend class ServerHttp2Request;
+};
+
+class ServerHttp2Request::BodySendAwaiter final : public SendAwaiter {
+public:
+    BodySendAwaiter(ServerHttp2Request &request, BodyChunk &&chunk, std::chrono::milliseconds timeout) noexcept :
+        SendAwaiter(request, timeout), chunk_(std::move(chunk)), total_bytes_(chunk_.data_chain.readable_bytes()) {}
+
+    BodySendAwaiter(const BodySendAwaiter &) = delete;
+    BodySendAwaiter &operator=(const BodySendAwaiter &) = delete;
+    BodySendAwaiter(BodySendAwaiter &&) = delete;
+    BodySendAwaiter &operator=(BodySendAwaiter &&) = delete;
+
+    ~BodySendAwaiter() override { on_destroy_cleanup(); }
+
+    [[nodiscard]] common::IoErr start() noexcept {
+        if (!request_) {
+            return common::IoErr::Invalid;
+        }
+        if (chunk_.data_chain.readable_bytes() == 0 && !chunk_.last) {
+            complete(common::IoErr::None);
+            return common::IoErr::None;
+        }
+        if (need_stream_window() && request_->stream_.send_window() <= 0) {
+            waiting_stream_window_ = true;
+            return common::IoErr::None;
+        }
+        return request_submit();
+    }
+
+    common::IoResult<std::size_t> await_resume() noexcept {
+        common::IoErr result = take_result();
+        if (result != common::IoErr::None) {
+            return std::unexpected(result);
+        }
+        return total_bytes_;
+    }
+
+    void on_abort(common::IoErr result) noexcept override {
+        if (request_) {
+            (void) request_->cancel_queued_send();
+        }
+        waiting_stream_window_ = false;
+        complete(result);
+    }
+
+    void on_stream_send_window_available() noexcept override {
+        if (completed_ || !request_ || !waiting_stream_window_) {
+            return;
+        }
+        if (resume_submit_posted_ || loop_ == nullptr) {
+            return;
+        }
+        resume_submit_posted_ = true;
+        loop_->post<BodySendAwaiter, &BodySendAwaiter::submit_notify_entry_, &BodySendAwaiter::on_submit_notify>(*this);
+    }
+
+private:
+    static void on_submit_notify(BodySendAwaiter *awaiter) {
+        if (!awaiter) {
+            return;
+        }
+        awaiter->resume_submit_posted_ = false;
+        awaiter->try_submit_from_window_signal();
+    }
+
+    void on_destroy_cleanup() noexcept override {
+        if (request_) {
+            (void) request_->cancel_queued_send();
+        }
+        waiting_stream_window_ = false;
+        resume_submit_posted_ = false;
+    }
+
+    void on_timeout_ready() noexcept override {
+        if (!request_) {
+            return;
+        }
+        if (waiting_stream_window_) {
+            complete(common::IoErr::TimedOut);
+            return;
+        }
+        if (request_->cancel_queued_send()) {
+            complete(common::IoErr::TimedOut);
+        }
+    }
+
+    void on_timeout_fired() noexcept override {
+        if (!request_) {
+            return;
+        }
+        if (request_->cancel_queued_send()) {
+            waiting_stream_window_ = false;
+            complete(common::IoErr::TimedOut);
+            return;
+        }
+        if (waiting_stream_window_) {
+            complete(common::IoErr::TimedOut);
+        }
+    }
+
+    [[nodiscard]] bool need_stream_window() const noexcept { return chunk_.data_chain.readable_bytes() != 0; }
+
+    [[nodiscard]] common::IoErr request_submit() noexcept {
+        if (!request_) {
+            return common::IoErr::Invalid;
+        }
+        waiting_stream_window_ = false;
+        common::IoErr err = request_->conn_->request_stream_send(request_->stream_, Http2OutboundNextKind::Data,
+                                                                 &ServerHttp2Request::encode_body_frames, this);
+        return err;
+    }
+
+    void try_submit_from_window_signal() noexcept {
+        if (completed_ || !request_ || !waiting_stream_window_) {
+            return;
+        }
+        if (request_->stream_.send_window() <= 0) {
+            return;
+        }
+        common::IoErr err = request_submit();
+        if (err != common::IoErr::None) {
+            complete(err);
+        }
+    }
+
+    BodyChunk chunk_{};
+    std::size_t total_bytes_ = 0;
+    bool waiting_stream_window_ = false;
+    bool resume_submit_posted_ = false;
+    fiber::event::EventLoop::NotifyEntry submit_notify_entry_{};
 
     friend class ServerHttp2Request;
 };
@@ -381,6 +547,7 @@ const Http2Stream::Ops &ServerHttp2Request::stream_ops() noexcept {
         &ServerHttp2Request::on_header_block_complete,
         &ServerHttp2Request::on_body,
         &ServerHttp2Request::on_stream_abort,
+        &ServerHttp2Request::on_stream_send_window_available,
     };
     return kOps;
 }
@@ -493,6 +660,11 @@ common::IoErr ServerHttp2Request::on_body(void *owner, mem::IoBuf &&buf, bool en
 void ServerHttp2Request::on_stream_abort(void *owner, common::IoErr reason) noexcept {
     auto *request = static_cast<ServerHttp2Request *>(owner);
     request->on_stream_aborted(reason);
+}
+
+void ServerHttp2Request::on_stream_send_window_available(void *owner) noexcept {
+    auto *request = static_cast<ServerHttp2Request *>(owner);
+    request->on_stream_send_window_available();
 }
 
 void ServerHttp2Request::destroy_owner(void *owner) noexcept { delete static_cast<ServerHttp2Request *>(owner); }
@@ -621,6 +793,111 @@ common::IoErr ServerHttp2Request::encode_response_frames(Http2Stream &stream, vo
     return common::IoErr::None;
 }
 
+common::IoErr ServerHttp2Request::encode_body_frames(Http2Stream &stream, void *ctx,
+                                                     const Http2OutboundEncodeRequest &req,
+                                                     Http2OutboundEncodeTarget &target,
+                                                     Http2OutboundEncodeResult &result) noexcept {
+    auto *awaiter = static_cast<BodySendAwaiter *>(ctx);
+    if (!awaiter || !awaiter->request_) {
+        return common::IoErr::Invalid;
+    }
+
+    auto *request = awaiter->request_;
+    if (request->abort_reason_ != common::IoErr::None || request->stream_.local_rst() || request->stream_.remote_rst()) {
+        request->on_body_send_complete(awaiter, request->abort_reason_ != common::IoErr::None ? request->abort_reason_
+                                                                                               : common::IoErr::Canceled);
+        result.status = Http2OutboundEncodeResult::Status::Closed;
+        result.next_kind = Http2OutboundNextKind::None;
+        return common::IoErr::None;
+    }
+
+    awaiter->waiting_stream_window_ = false;
+
+    const std::size_t remaining = awaiter->chunk_.data_chain.readable_bytes();
+    const std::int32_t stream_window = stream.send_window();
+    const std::uint32_t stream_budget = stream_window > 0 ? static_cast<std::uint32_t>(stream_window) : 0U;
+    const std::uint32_t conn_budget = req.conn_window_budget > 0 ? static_cast<std::uint32_t>(req.conn_window_budget) : 0U;
+
+    if (remaining == 0) {
+        if (!awaiter->chunk_.last) {
+            request->on_body_send_complete(awaiter, common::IoErr::None);
+            result.status = Http2OutboundEncodeResult::Status::NoWork;
+            result.next_kind = Http2OutboundNextKind::None;
+            return common::IoErr::None;
+        }
+
+        Http2DataFrameEncoder frame_encoder({
+            .stream_id = stream.stream_id(),
+            .max_frame_size = req.max_frame_size,
+            .end_stream = true,
+        });
+        common::IoErr err = frame_encoder.encode(target, awaiter->chunk_.data_chain, 0);
+        if (err != common::IoErr::None) {
+            request->on_body_send_complete(awaiter, err);
+            return err;
+        }
+
+        request->stream_.local_end_stream_ = true;
+        request->response_finished_ = true;
+        request->conn_->try_release_stream(request->stream_);
+        request->on_body_send_complete(awaiter, common::IoErr::None);
+        result.status = Http2OutboundEncodeResult::Status::Encoded;
+        result.next_kind = Http2OutboundNextKind::None;
+        result.consumed_conn_window = 0;
+        return common::IoErr::None;
+    }
+
+    if (stream_budget == 0) {
+        awaiter->waiting_stream_window_ = true;
+        result.status = Http2OutboundEncodeResult::Status::NoWork;
+        result.next_kind = Http2OutboundNextKind::None;
+        return common::IoErr::None;
+    }
+
+    if (conn_budget == 0) {
+        result.status = Http2OutboundEncodeResult::Status::BlockedConnWindow;
+        result.next_kind = Http2OutboundNextKind::Data;
+        return common::IoErr::None;
+    }
+
+    const std::size_t payload_budget = std::min<std::size_t>(remaining, std::min<std::uint32_t>(conn_budget, stream_budget));
+    Http2DataFrameEncoder frame_encoder({
+        .stream_id = stream.stream_id(),
+        .max_frame_size = req.max_frame_size,
+        .end_stream = awaiter->chunk_.last && payload_budget == remaining,
+    });
+    common::IoErr err = frame_encoder.encode(target, awaiter->chunk_.data_chain, payload_budget);
+    if (err != common::IoErr::None) {
+        request->on_body_send_complete(awaiter, err);
+        return err;
+    }
+
+    request->response_body_sent_ += payload_budget;
+    const std::size_t after_remaining = awaiter->chunk_.data_chain.readable_bytes();
+    result.status = Http2OutboundEncodeResult::Status::Encoded;
+    result.consumed_conn_window = static_cast<std::uint32_t>(payload_budget);
+
+    if (after_remaining == 0) {
+        if (awaiter->chunk_.last) {
+            request->stream_.local_end_stream_ = true;
+            request->response_finished_ = true;
+            request->conn_->try_release_stream(request->stream_);
+        }
+        result.next_kind = Http2OutboundNextKind::None;
+        request->on_body_send_complete(awaiter, common::IoErr::None);
+        return common::IoErr::None;
+    }
+
+    if (payload_budget == conn_budget) {
+        result.next_kind = Http2OutboundNextKind::Data;
+        return common::IoErr::None;
+    }
+
+    awaiter->waiting_stream_window_ = true;
+    result.next_kind = Http2OutboundNextKind::None;
+    return common::IoErr::None;
+}
+
 ServerHttp2Request::BodyReadPollResult ServerHttp2Request::poll_body_read_state() const noexcept {
     BodyReadPollResult result{};
     if (request_body_queue_.readable_bytes() != 0) {
@@ -662,11 +939,17 @@ void ServerHttp2Request::notify_body_waiter() noexcept {
     body_waiter_->loop_->post<BodyReadAwaiter, &BodyReadAwaiter::notify_entry_, &BodyReadAwaiter::on_notify>(*body_waiter_);
 }
 
-bool ServerHttp2Request::cancel_queued_header_send() noexcept {
+bool ServerHttp2Request::cancel_queued_send() noexcept {
     if (conn_ == nullptr) {
         return false;
     }
     return conn_->cancel_queued_stream_send(stream_);
+}
+
+void ServerHttp2Request::on_stream_send_window_available() noexcept {
+    if (send_awaiter_ != nullptr) {
+        send_awaiter_->on_stream_send_window_available();
+    }
 }
 
 void ServerHttp2Request::on_stream_aborted(common::IoErr reason) noexcept {
@@ -674,8 +957,7 @@ void ServerHttp2Request::on_stream_aborted(common::IoErr reason) noexcept {
         abort_reason_ = reason;
     }
     if (send_awaiter_ != nullptr) {
-        (void) cancel_queued_header_send();
-        on_header_send_complete(send_awaiter_, abort_reason_);
+        send_awaiter_->on_abort(abort_reason_);
     }
     notify_body_waiter();
 }
@@ -722,9 +1004,6 @@ fiber::async::Task<common::IoResult<BodyChunk>> ServerHttp2Request::read_body(Ht
 }
 
 common::IoErr ServerHttp2Request::prepare_final_header(const OutgoingHeaderBlockView &header) noexcept {
-    if (response_headers_sent_ || response_finished_) {
-        return common::IoErr::Already;
-    }
     if (header.status_code < 200 || header.status_code > 999) {
         return common::IoErr::Invalid;
     }
@@ -732,15 +1011,6 @@ common::IoErr ServerHttp2Request::prepare_final_header(const OutgoingHeaderBlock
         return common::IoErr::Invalid;
     }
     if (header.connection_mode == ResponseConnectionMode::Close) {
-        return common::IoErr::NotSupported;
-    }
-    if (!header.end_stream) {
-        return common::IoErr::NotSupported;
-    }
-    if (header.body_mode == ResponseBodyMode::Chunked) {
-        return common::IoErr::NotSupported;
-    }
-    if (header.body_mode == ResponseBodyMode::ContentLength && header.content_length != 0) {
         return common::IoErr::NotSupported;
     }
     return common::IoErr::None;
@@ -758,9 +1028,6 @@ fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_response_hea
         co_return std::unexpected(common::IoErr::Already);
     }
     const bool informational = header.kind == OutgoingHeaderKind::Informational;
-    if (!informational && (response_headers_sent_ || response_finished_)) {
-        co_return std::unexpected(common::IoErr::Already);
-    }
     if (header.status_code < 100 || header.status_code > 999) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -769,12 +1036,6 @@ fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_response_hea
     }
     if (!informational && header.status_code >= 100 && header.status_code < 200) {
         co_return std::unexpected(common::IoErr::Invalid);
-    }
-    if (!informational && header.body_mode == ResponseBodyMode::Chunked) {
-        co_return std::unexpected(common::IoErr::NotSupported);
-    }
-    if (!informational && header.body_mode == ResponseBodyMode::ContentLength && header.content_length != 0) {
-        co_return std::unexpected(common::IoErr::NotSupported);
     }
 
     HeaderSendAwaiter awaiter(*this, header, write_timeout_);
@@ -814,16 +1075,67 @@ fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_header(HttpE
     co_return std::unexpected(common::IoErr::Invalid);
 }
 
-fiber::async::Task<common::IoResult<size_t>> ServerHttp2Request::write_body(HttpExchange &, BodyChunk) noexcept {
-    co_return std::unexpected(common::IoErr::NotSupported);
+fiber::async::Task<common::IoResult<size_t>> ServerHttp2Request::write_body(HttpExchange &exchange,
+                                                                            BodyChunk chunk) noexcept {
+    if (conn_ == nullptr || &exchange != &exchange_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (send_awaiter_ != nullptr) {
+        co_return std::unexpected(common::IoErr::Already);
+    }
+    if (stream_.local_end_stream()) {
+        co_return std::unexpected(common::IoErr::Already);
+    }
+    if (abort_reason_ != common::IoErr::None) {
+        co_return std::unexpected(abort_reason_);
+    }
+    if (stream_.local_rst() || stream_.remote_rst()) {
+        co_return std::unexpected(common::IoErr::Canceled);
+    }
+
+    BodySendAwaiter awaiter(*this, std::move(chunk), write_timeout_);
+    send_awaiter_ = &awaiter;
+    common::IoErr err = awaiter.start();
+    if (err != common::IoErr::None) {
+        send_awaiter_ = nullptr;
+        co_return std::unexpected(err);
+    }
+
+    co_return co_await awaiter;
 }
 
-fiber::async::Task<common::IoResult<size_t>> ServerHttp2Request::write_body(HttpExchange &, const std::uint8_t *,
-                                                                            std::size_t, bool) noexcept {
-    co_return std::unexpected(common::IoErr::NotSupported);
+fiber::async::Task<common::IoResult<size_t>> ServerHttp2Request::write_body(HttpExchange &exchange,
+                                                                            const std::uint8_t *buf, std::size_t len,
+                                                                            bool end) noexcept {
+    if (len != 0 && buf == nullptr) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+
+    BodyChunk chunk;
+    chunk.last = end;
+    if (len != 0) {
+        mem::IoBuf owned = mem::IoBuf::allocate(len);
+        if (!owned) {
+            co_return std::unexpected(common::IoErr::NoMem);
+        }
+        std::memcpy(owned.writable_data(), buf, len);
+        owned.commit(len);
+        if (!chunk.data_chain.append(std::move(owned))) {
+            co_return std::unexpected(common::IoErr::NoMem);
+        }
+    }
+
+    co_return co_await write_body(exchange, std::move(chunk));
 }
 
 void ServerHttp2Request::on_header_send_complete(HeaderSendAwaiter *awaiter, common::IoErr result) noexcept {
+    if (!awaiter || send_awaiter_ != awaiter) {
+        return;
+    }
+    awaiter->complete(result);
+}
+
+void ServerHttp2Request::on_body_send_complete(BodySendAwaiter *awaiter, common::IoErr result) noexcept {
     if (!awaiter || send_awaiter_ != awaiter) {
         return;
     }

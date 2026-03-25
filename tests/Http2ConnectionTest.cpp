@@ -1847,6 +1847,132 @@ TEST(Http2ConnectionTest, ServerHandlerCanSendInformationalHeadersBeforeFinalRes
     EXPECT_TRUE(found_server);
 }
 
+TEST(Http2ConnectionTest, ServerHandlerCanSendResponseBodyDataFrames) {
+    std::string request = std::string(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0x0, 0, {});
+    request += build_headers_frame_bytes(
+        1,
+        {
+            {":method", "GET"},
+            {":scheme", "https"},
+            {":path", "/body"},
+            {":authority", "example.com"},
+        },
+        true);
+
+    auto header_result = std::make_shared<fiber::common::IoResult<void>>();
+    auto body_result = std::make_shared<fiber::common::IoResult<size_t>>();
+    fiber::http::HttpHandler handler =
+        [header_result, body_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        fiber::http::HttpHeaders headers(exchange.pool());
+        headers.set("server", "fiber");
+        *header_result = co_await exchange.send_header({
+            .kind = fiber::http::OutgoingHeaderKind::Final,
+            .status_code = 200,
+            .headers = &headers,
+            .end_stream = false,
+        });
+        if (!*header_result) {
+            co_return;
+        }
+        *body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
+        co_return;
+    };
+
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, std::move(handler));
+
+    ASSERT_TRUE(outcome.result.has_value());
+    ASSERT_TRUE(header_result->has_value());
+    ASSERT_TRUE(body_result->has_value());
+    EXPECT_EQ(body_result->value(), 5U);
+
+    ParsedHeadersFrames parsed = collect_stream_headers_frames(outcome.written, 1);
+    ASSERT_FALSE(parsed.header_block.empty());
+    EXPECT_EQ(parsed.first_flags & 0x1U, 0x0U);
+    EXPECT_EQ(parsed.first_flags & 0x4U, 0x4U);
+
+    const auto fields = decode_header_block(parsed.header_block);
+    ASSERT_FALSE(fields.empty());
+    EXPECT_EQ(fields[0].first, ":status");
+    EXPECT_EQ(fields[0].second, "200");
+
+    std::vector<EncodedFrame> frames = parse_frames(outcome.written);
+    std::size_t data_frame_count = 0;
+    for (const auto &frame : frames) {
+        if (frame.type != 0x0 || frame.stream_id != 1U) {
+            continue;
+        }
+        ++data_frame_count;
+        EXPECT_EQ(frame.flags & 0x1U, 0x1U);
+        EXPECT_EQ(frame.payload, "hello");
+    }
+    EXPECT_EQ(data_frame_count, 1U) << describe_frames(frames);
+}
+
+TEST(Http2ConnectionTest, ServerHandlerResumesBodySendAfterStreamWindowUpdate) {
+    fiber::http::Http2Connection::Options options;
+    options.initial_stream_send_window = 0;
+
+    std::string first = std::string(kClientConnectionPreface);
+    first += make_frame(0, 0x4, 0x0, 0, {});
+    first += build_headers_frame_bytes(
+        1,
+        {
+            {":method", "GET"},
+            {":scheme", "https"},
+            {":path", "/body-window"},
+            {":authority", "example.com"},
+        },
+        true);
+    std::string stream_update_payload(4, '\0');
+    stream_update_payload[3] = 5;
+    std::string second = make_frame(4, 0x8, 0x0, 1, stream_update_payload);
+
+    auto header_result = std::make_shared<fiber::common::IoResult<void>>();
+    auto body_result = std::make_shared<fiber::common::IoResult<size_t>>();
+    fiber::http::HttpHandler handler =
+        [header_result, body_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        *header_result = co_await exchange.send_header({
+            .kind = fiber::http::OutgoingHeaderKind::Final,
+            .status_code = 200,
+            .end_stream = false,
+        });
+        if (!*header_result) {
+            co_return;
+        }
+        *body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
+        co_return;
+    };
+
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(first), std::move(second)}, std::move(handler),
+                                                            fiber::http::HttpServerOptions{}, options);
+
+    ASSERT_TRUE(outcome.result.has_value());
+    ASSERT_TRUE(header_result->has_value());
+    ASSERT_TRUE(body_result->has_value());
+    EXPECT_EQ(body_result->value(), 5U);
+
+    std::vector<EncodedFrame> frames = parse_frames(outcome.written);
+    bool saw_headers = false;
+    bool saw_data = false;
+    for (const auto &frame : frames) {
+        if (frame.stream_id != 1U) {
+            continue;
+        }
+        if (frame.type == 0x1) {
+            saw_headers = true;
+            continue;
+        }
+        if (frame.type == 0x0) {
+            saw_data = true;
+            EXPECT_EQ(frame.payload, "hello");
+            EXPECT_EQ(frame.flags & 0x1U, 0x1U);
+        }
+    }
+    EXPECT_TRUE(saw_headers) << describe_frames(frames);
+    EXPECT_TRUE(saw_data) << describe_frames(frames);
+}
+
 TEST(Http2ConnectionTest, ServerIgnoresPriorityUpdateFrame) {
     std::string request = std::string(kClientConnectionPreface);
     request += make_frame(0, 0x4, 0x0, 0, {});
