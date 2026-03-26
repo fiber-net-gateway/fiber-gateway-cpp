@@ -80,6 +80,8 @@ private:
 
 class Http2OutboundScheduler {
 public:
+    static constexpr std::size_t kPrimarySlabCapacity = 16 * 1024;
+
     explicit Http2OutboundScheduler(HttpTransport *transport = nullptr,
                                     std::size_t slab_capacity = 1024,
                                     std::chrono::milliseconds write_timeout = std::chrono::seconds(30),
@@ -139,7 +141,9 @@ public:
     [[nodiscard]] std::size_t pending_control_bytes() const noexcept { return pending_control_bytes_; }
     [[nodiscard]] std::size_t slab_capacity() const noexcept { return slab_capacity_; }
     [[nodiscard]] std::size_t active_slab_count() const noexcept;
-    [[nodiscard]] bool has_cached_slab() const noexcept { return cached_empty_slab_ != nullptr; }
+    [[nodiscard]] bool has_cached_slab() const noexcept {
+        return primary_slab_ != nullptr && !primary_slab_attached_ && !primary_slab_borrowed_;
+    }
     [[nodiscard]] std::size_t ready_stream_count() const noexcept { return ready_stream_count_; }
     [[nodiscard]] std::size_t waiting_conn_window_stream_count() const noexcept {
         return waiting_conn_window_stream_count_;
@@ -196,10 +200,10 @@ private:
     };
 
     struct InflightStreamWrite {
-        static constexpr std::size_t kSlotCapacity = 1024;
-
         Http2Stream *stream = nullptr;
-        std::uint8_t slot[kSlotCapacity]{};
+        Slab *slot_slab = nullptr;
+        std::uint8_t *slot = nullptr;
+        std::size_t slot_capacity = 0;
         std::size_t slot_size = 0;
         std::size_t slot_written = 0;
         mem::IoBufChain tail_chain{};
@@ -211,6 +215,9 @@ private:
 
         void clear() noexcept {
             stream = nullptr;
+            slot_slab = nullptr;
+            slot = nullptr;
+            slot_capacity = 0;
             slot_size = 0;
             slot_written = 0;
             tail_chain.clear();
@@ -268,6 +275,8 @@ private:
     [[nodiscard]] bool should_wake_waiter() const noexcept;
     [[nodiscard]] Slab *acquire_slab() noexcept;
     void recycle_slab(Slab *slab) noexcept;
+    [[nodiscard]] Slab *borrow_primary_slab() noexcept;
+    void release_primary_slab() noexcept;
     void append_tail_slab(Slab *slab) noexcept;
     void discard_empty_head_slabs() noexcept;
     [[nodiscard]] SendSpan current_send_span() noexcept;
@@ -295,7 +304,7 @@ private:
     std::size_t sending_end_ = 0;
     Slab *head_slab_ = nullptr;
     Slab *tail_slab_ = nullptr;
-    Slab *cached_empty_slab_ = nullptr;
+    Slab *primary_slab_ = nullptr;
     StreamList ready_streams_{};
     StreamList waiting_conn_window_streams_{};
     std::size_t ready_stream_count_ = 0;
@@ -306,6 +315,8 @@ private:
     bool closed_ = false;
     bool aborting_ = false;
     bool send_loop_running_ = false;
+    bool primary_slab_attached_ = false;
+    bool primary_slab_borrowed_ = false;
     common::IoErr stop_reason_ = common::IoErr::None;
     Http2Stream *inflight_stream_ = nullptr;
 };
