@@ -47,4 +47,18 @@ TEST(TlsAlpnTest, NormalizeHttpServerAlpnAddsSupportedDefaultsWhenMissing) {
     EXPECT_EQ(options.alpn, expected);
 }
 
+TEST(TlsAlpnTest, AlpnProtocolsViewContainsOfferedProtocols) {
+    const std::uint8_t encoded[] = {
+            0x00, 0x0c,
+            0x02, 'h', '2',
+            0x08, 'h', 't', 't', 'p', '/', '1', '.', '1',
+    };
+
+    fiber::http::TlsAlpnProtocolsView offered(encoded, sizeof(encoded));
+
+    EXPECT_TRUE(offered.contains("h2"));
+    EXPECT_TRUE(offered.contains("http/1.1"));
+    EXPECT_FALSE(offered.contains("acme/1"));
+}
+
 } // namespace

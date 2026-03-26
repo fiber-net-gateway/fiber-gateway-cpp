@@ -70,6 +70,11 @@ fiber::async::DetachedTask Http1Server::serve() {
                             co_return;
                         }
                         transport = std::move(*tls_result);
+                        auto hs_result = co_await transport->handshake(options_.tls.handshake_timeout);
+                        if (!hs_result) {
+                            transport->close();
+                            co_return;
+                        }
                     } else {
                         auto tcp_result = TcpTransport::create(event::EventLoop::current(), std::move(accept));
                         if (!tcp_result) {
