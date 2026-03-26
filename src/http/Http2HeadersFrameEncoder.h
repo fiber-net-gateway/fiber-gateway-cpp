@@ -52,6 +52,9 @@ private:
     [[nodiscard]] std::uint32_t first_frame_buf_payload_cap() const noexcept;
     [[nodiscard]] std::uint32_t next_buf_payload_cap() const noexcept;
     [[nodiscard]] common::IoErr flush_current_buf() noexcept;
+    [[nodiscard]] bool using_target_slot() const noexcept { return current_slot_data_ != nullptr; }
+    [[nodiscard]] std::uint8_t *current_writable_data() noexcept;
+    [[nodiscard]] std::size_t current_writable_bytes() const noexcept;
     void reset_state() noexcept;
     void commit_to_output(std::size_t bytes) noexcept;
 
@@ -64,6 +67,9 @@ private:
 
     Http2OutboundEncodeTarget *target_ = nullptr;
     mem::IoBuf current_buf_storage_{};
+    std::uint8_t *current_slot_data_ = nullptr;
+    std::size_t current_slot_capacity_ = 0;
+    std::size_t current_slot_used_ = 0;
     std::uint8_t *current_frame_header_ = nullptr;
     std::uint32_t current_frame_payload_limit_ = 0;
     std::uint32_t current_payload_written_ = 0;

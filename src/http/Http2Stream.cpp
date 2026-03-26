@@ -103,7 +103,13 @@ common::IoErr Http2Stream::close_rst(Http2ErrorCode code, common::IoErr result) 
     return common::IoErr::None;
 }
 
-void Http2Stream::update_send_window(std::int32_t delta) noexcept { send_window_ += delta; }
+void Http2Stream::update_send_window(std::int32_t delta) noexcept {
+    const std::int32_t before = send_window_;
+    send_window_ += delta;
+    if (before <= 0 && send_window_ > 0 && ops_ && ops_->on_send_window_available) {
+        ops_->on_send_window_available(owner_);
+    }
+}
 
 void Http2Stream::consume_recv_window(std::uint32_t bytes) noexcept {
     FIBER_ASSERT(recv_window_remaining_ >= 0);

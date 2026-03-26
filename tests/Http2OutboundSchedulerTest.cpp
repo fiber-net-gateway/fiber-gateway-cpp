@@ -110,6 +110,7 @@ struct DummyStreamOwner {
     bool block_on_zero_conn_window = false;
     bool close_after_first_batch = false;
     bool notify_done = false;
+    std::size_t first_slot_available = 0;
     std::size_t encode_calls = 0;
     std::size_t done_calls = 0;
     std::optional<fiber::common::IoErr> done_result;
@@ -137,6 +138,7 @@ const fiber::http::Http2Stream::Ops kStreamOps{
     &on_header_block_complete,
     &on_body,
     &on_abort,
+    nullptr,
 };
 
 void on_stream_batch_done(void *ctx, fiber::common::IoErr result) noexcept {
@@ -159,6 +161,7 @@ fiber::common::IoErr encode_stream_batch(fiber::http::Http2Stream &, void *ctx,
 
     ++owner->encode_calls;
     if (owner->encode_calls == 1) {
+        owner->first_slot_available = target.slot_available();
         if (owner->block_on_zero_conn_window && req.conn_window_budget <= 0) {
             result.status = fiber::http::Http2OutboundEncodeResult::Status::BlockedConnWindow;
             result.next_kind = fiber::http::Http2OutboundNextKind::Data;
@@ -322,6 +325,7 @@ TEST(Http2OutboundSchedulerTest, EncodesAndSendsStreamBatchBeforeClosing) {
 
     EXPECT_EQ(transport.written(), "HEADERS");
     EXPECT_EQ(owner.encode_calls, 1U);
+    EXPECT_EQ(owner.first_slot_available, fiber::http::Http2OutboundScheduler::kPrimarySlabCapacity);
     EXPECT_EQ(scheduler.connection_send_window(), 9);
 }
 

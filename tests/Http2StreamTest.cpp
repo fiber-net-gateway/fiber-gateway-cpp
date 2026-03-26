@@ -150,6 +150,44 @@ struct OwnedStreamHolder {
     std::uint64_t pending_name_hash = 0;
 };
 
+struct SendWindowNotifyOwner {
+    explicit SendWindowNotifyOwner(std::uint32_t stream_id, int *notify_count) :
+        notify_count_ptr(notify_count), stream(stream_id, this, ops()) {}
+
+    static const fiber::http::Http2Stream::Ops &ops() noexcept {
+        static const fiber::http::Http2Stream::Ops kOps{
+            &SendWindowNotifyOwner::destroy_owner,
+            &SendWindowNotifyOwner::on_header_block_start,
+            &SendWindowNotifyOwner::on_header_block_complete,
+            &SendWindowNotifyOwner::on_body,
+            &SendWindowNotifyOwner::on_abort,
+            &SendWindowNotifyOwner::on_send_window_available,
+        };
+        return kOps;
+    }
+
+    static void destroy_owner(void *owner) noexcept { delete static_cast<SendWindowNotifyOwner *>(owner); }
+    static fiber::common::IoErr on_header_block_start(void *, fiber::http::Http2HpackDecoder::Sink &) noexcept {
+        return fiber::common::IoErr::None;
+    }
+    static fiber::common::IoErr on_header_block_complete(void *, bool) noexcept {
+        return fiber::common::IoErr::None;
+    }
+    static fiber::common::IoErr on_body(void *, fiber::mem::IoBuf &&, bool) noexcept {
+        return fiber::common::IoErr::None;
+    }
+    static void on_abort(void *, fiber::common::IoErr) noexcept {}
+    static void on_send_window_available(void *owner) noexcept {
+        auto *self = static_cast<SendWindowNotifyOwner *>(owner);
+        if (self->notify_count_ptr) {
+            ++(*self->notify_count_ptr);
+        }
+    }
+
+    int *notify_count_ptr = nullptr;
+    fiber::http::Http2Stream stream;
+};
+
 class DummyHttpTransport final : public fiber::http::HttpTransport {
 public:
     fiber::async::Task<fiber::common::IoResult<void>> handshake(std::chrono::milliseconds) override {
@@ -228,6 +266,30 @@ std::uint32_t parse_window_update_increment(const std::uint8_t *data) {
 TEST(Http2StreamTest, OwnerBackedCreateReturnsUsableLease) {
     fiber::http::Http2Stream::Lease stream = TestHttp2StreamOwner::create(1);
     ASSERT_TRUE(stream);
+
+    stream->close(fiber::common::IoErr::Canceled);
+    stream.reset();
+}
+
+TEST(Http2StreamTest, UpdateSendWindowNotifiesWhenCrossingIntoPositiveRange) {
+    int notify_count = 0;
+    auto *owner = new SendWindowNotifyOwner(7, &notify_count);
+    fiber::http::Http2Stream::Lease stream = fiber::http::Http2Stream::Lease::adopt(&owner->stream);
+    ASSERT_TRUE(stream);
+
+    stream->send_window_ = 0;
+    stream->update_send_window(3);
+    EXPECT_EQ(notify_count, 1);
+
+    stream->update_send_window(2);
+    EXPECT_EQ(notify_count, 1);
+
+    stream->send_window_ = -5;
+    stream->update_send_window(4);
+    EXPECT_EQ(notify_count, 1);
+
+    stream->update_send_window(2);
+    EXPECT_EQ(notify_count, 2);
 
     stream->close(fiber::common::IoErr::Canceled);
     stream.reset();

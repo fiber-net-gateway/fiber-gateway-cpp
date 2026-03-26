@@ -164,6 +164,9 @@ private:
                                                     Http2OutboundEncodeFn encode, void *ctx) noexcept;
     [[nodiscard]] bool cancel_queued_stream_send(Http2Stream &stream) noexcept;
     void cancel_stream_send(Http2Stream &stream) noexcept;
+    [[nodiscard]] std::chrono::milliseconds current_read_timeout() const noexcept;
+    common::IoErr handle_read_timeout() noexcept;
+    common::IoErr send_keepalive_ping() noexcept;
     void on_stream_outbound_idle(Http2Stream &stream) noexcept;
     fiber::async::Task<RunResult> finalize_run(RunResult result) noexcept;
     fiber::async::Task<void> wait_for_send_loop_exit() noexcept;
@@ -172,8 +175,6 @@ private:
     static fiber::async::DetachedTask close_transport_after_send_loop_task(Http2Connection *connection) noexcept;
     static fiber::async::DetachedTask run_send_loop_task(Http2Connection *connection) noexcept;
     void start_send_loop() noexcept;
-    [[nodiscard]] std::chrono::milliseconds send_loop_poll_timeout() const noexcept;
-    void handle_send_loop_timeout() noexcept;
     common::IoErr start_draining() noexcept;
     void maybe_enter_closing_from_draining() noexcept;
     void enter_closing(common::IoErr reason, bool abortive = true) noexcept;
@@ -214,6 +215,9 @@ private:
     std::size_t control_payload_used_ = 0;
     std::array<std::uint8_t, 6> settings_scratch_{};
     std::size_t settings_scratch_used_ = 0;
+    std::array<std::uint8_t, 8> keepalive_ping_payload_{};
+    std::uint64_t keepalive_ping_sequence_ = 0;
+    bool keepalive_ping_outstanding_ = false;
     Http2OutboundScheduler outbound_scheduler_;
     fiber::async::WaitGroup lifetime_wg_{};
     common::IntrusiveList<Http2Stream, offsetof(Http2Stream, owned_hook_)> owned_stream_list_;

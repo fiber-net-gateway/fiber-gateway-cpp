@@ -46,7 +46,8 @@ TlsStreamFd::~TlsStreamFd() {
     FIBER_ASSERT(false);
 }
 
-common::IoResult<void> TlsStreamFd::init(SSL_CTX *ctx, bool is_server) {
+common::IoResult<void> TlsStreamFd::init(SSL_CTX *ctx, bool is_server, ConfigureSslFn configure_ssl,
+                                         void *configure_ssl_ctx) {
     if (!ctx) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -71,6 +72,9 @@ common::IoResult<void> TlsStreamFd::init(SSL_CTX *ctx, bool is_server) {
     } else {
         SSL_set_connect_state(ssl_);
     }
+    if (configure_ssl) {
+        configure_ssl(ssl_, configure_ssl_ctx);
+    }
     handshake_done_ = false;
     return {};
 }
@@ -93,6 +97,8 @@ std::string TlsStreamFd::selected_alpn() const noexcept {
     }
     return std::string(reinterpret_cast<const char *>(proto), proto_len);
 }
+
+bool TlsStreamFd::handshake_done() const noexcept { return handshake_done_; }
 
 void TlsStreamFd::close() {
     FIBER_ASSERT(loop().in_loop());

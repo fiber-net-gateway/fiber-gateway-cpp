@@ -99,6 +99,8 @@ struct EncodeCase {
     int status_code = 0;
     Http2HeadersFrameEncoder::Options options{};
     std::vector<std::pair<std::string_view, std::string_view>> headers;
+    std::size_t slot_used = 0;
+    std::size_t total_bytes = 0;
 };
 
 fiber::common::IoErr on_header_block_start(void *, fiber::http::Http2HpackDecoder::Sink &) noexcept {
@@ -122,6 +124,7 @@ const fiber::http::Http2Stream::Ops kStreamOps{
     &on_header_block_complete,
     &on_body,
     &on_abort,
+    nullptr,
 };
 
 fiber::common::IoErr encode_headers_to_target(fiber::http::Http2Stream &, void *ctx,
@@ -165,19 +168,22 @@ fiber::common::IoErr encode_headers_to_target(fiber::http::Http2Stream &, void *
         return err;
     }
 
+    test_case->slot_used = target.slot_used();
+    test_case->total_bytes = target.total_bytes();
+
     result.status = fiber::http::Http2OutboundEncodeResult::Status::Encoded;
     result.next_kind = fiber::http::Http2OutboundNextKind::None;
     result.consumed_conn_window = 0;
     return fiber::common::IoErr::None;
 }
 
-std::vector<std::uint8_t> encode_headers_bytes(EncodeCase test_case) {
+std::vector<std::uint8_t> encode_headers_bytes_in_place(EncodeCase &test_case) {
     fiber::event::EventLoopGroup group(1);
     auto promise = std::make_shared<std::promise<std::vector<std::uint8_t>>>();
     auto future = promise->get_future();
 
     group.start();
-    fiber::async::spawn(group.at(0), [promise, test_case = std::move(test_case), &group]() mutable
+    fiber::async::spawn(group.at(0), [promise, &test_case, &group]() mutable
         -> fiber::async::DetachedTask {
         RecordingTransport transport;
         fiber::http::Http2OutboundScheduler scheduler(&transport, 1024, std::chrono::seconds(30),
@@ -206,6 +212,10 @@ std::vector<std::uint8_t> encode_headers_bytes(EncodeCase test_case) {
     std::vector<std::uint8_t> result = future.get();
     group.join();
     return result;
+}
+
+std::vector<std::uint8_t> encode_headers_bytes(EncodeCase test_case) {
+    return encode_headers_bytes_in_place(test_case);
 }
 
 TEST(Http2HeadersFrameEncoderTest, EncodesSingleHeadersFrame) {
@@ -274,6 +284,23 @@ TEST(Http2HeadersFrameEncoderTest, EncodesHeadersFrameWithPaddingAndPriority) {
                   0x00, 0x00, 0x09, 0x01, 0x2d, 0x00, 0x00, 0x00, 0x05,
                   0x02, 0x80, 0x00, 0x00, 0x03, 0x0a, 0x88, 0x00, 0x00,
               }));
+}
+
+TEST(Http2HeadersFrameEncoderTest, SmallHeaderBlockStaysInTargetSlot) {
+    EncodeCase test_case{
+        .status_code = 200,
+        .options =
+            {
+                .stream_id = 9,
+                .max_frame_size = 16384,
+                .first_frame_payload_cap = 16384,
+            },
+    };
+
+    EXPECT_EQ(encode_headers_bytes_in_place(test_case),
+              (std::vector<std::uint8_t>{0x00, 0x00, 0x01, 0x01, 0x04, 0x00, 0x00, 0x00, 0x09, 0x88}));
+    EXPECT_NE(test_case.slot_used, 0U);
+    EXPECT_EQ(test_case.slot_used, test_case.total_bytes);
 }
 
 } // namespace

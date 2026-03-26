@@ -17,7 +17,7 @@
 #include "async/Task.h"
 #include "common/IoError.h"
 #include "event/EventLoop.h"
-#include "http/Http1Server.h"
+#include "http/HttpServer.h"
 #include "http/HttpTransport.h"
 #include "http/TlsContext.h"
 #include "net/SocketAddress.h"
@@ -154,21 +154,38 @@ fiber::async::Task<fiber::common::IoResult<void>> send_final_header(
     });
 }
 
-fiber::async::Task<void> handle_plain(fiber::http::HttpExchange &exchange) {
-    const char *body = "hello https\n";
+fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange) {
     fiber::http::HttpHeaders headers(exchange.pool());
-    headers.set("Content-Type", "text/plain");
+    headers.set("Content-Type", "application/octet-stream");
     auto header_result = co_await send_final_header(exchange, 200, &headers,
-                                                    fiber::http::ResponseBodyMode::ContentLength,
-                                                    std::strlen(body), false);
+                                                    fiber::http::ResponseBodyMode::Chunked, 0, false);
     if (!header_result) {
         co_return;
     }
-    co_await exchange.write_body(reinterpret_cast<const uint8_t *>(body), std::strlen(body), true);
+
+    for (;;) {
+        auto read_result = co_await exchange.read_body(4096);
+        if (!read_result) {
+            std::cout << "1111 end....." << std::endl;
+            co_return;
+        }
+        bool last = read_result->last;
+        auto write_result = co_await exchange.write_body(std::move(*read_result));
+        if (!write_result) {
+
+            std::cout << "2222 end....." << std::endl;
+            co_return;
+        }
+        if (last) {
+            std::cout << "33333 end....." << std::endl;
+            co_return;
+        }
+    }
+
     co_return;
 }
 
-fiber::async::DetachedTask run_demo_client(fiber::event::EventLoop *loop, fiber::http::Http1Server *server,
+fiber::async::DetachedTask run_demo_client(fiber::event::EventLoop *loop, fiber::http::HttpServer *server,
                                            std::uint16_t port, bool *ok) {
     auto fail = [&](std::string_view message, fiber::common::IoErr err) {
         std::cerr << message << ": " << fiber::common::io_err_name(err) << '\n';
@@ -296,7 +313,7 @@ int main(int argc, char **argv) {
     server_options.tls.cert_file = cert_file.path;
     server_options.tls.key_file = key_file.path;
 
-    fiber::http::Http1Server server(loop, handle_plain, server_options);
+    fiber::http::HttpServer server(loop, handle_echo, server_options);
     fiber::net::ListenOptions options{};
     fiber::net::SocketAddress addr(fiber::net::IpAddress::loopback_v4(), port);
     auto bind_result = server.bind(addr, options);
@@ -322,7 +339,8 @@ int main(int argc, char **argv) {
         return ok ? 0 : 1;
     }
 
-    std::cout << "try: curl -k https://127.0.0.1:" << effective_port << "/\n";
+    std::cout << "try: curl -k --http1.1 https://127.0.0.1:" << effective_port << "/ -d 'hello'\n";
+    std::cout << "try: curl -k --http2 https://127.0.0.1:" << effective_port << "/ -d 'hello'\n";
     loop.run();
     return 0;
 }
