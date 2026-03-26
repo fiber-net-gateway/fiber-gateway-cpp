@@ -40,7 +40,7 @@ private:
     Http2HpackEncodeCatalog http2_hpack_encode_catalog_;
     ServerRequestFactory http2_request_factory_;
     net::TcpListener listener_;
-    std::unique_ptr<TlsContext> tls_ctx_;
+    std::unique_ptr<TlsServerContext> tls_ctx_;
 };
 
 } // namespace fiber::http

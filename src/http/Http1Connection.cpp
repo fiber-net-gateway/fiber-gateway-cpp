@@ -397,11 +397,6 @@ fiber::async::Task<void> Http1Connection::run() {
         co_return;
     }
 
-    auto handshake_result = co_await transport_->handshake(options_.tls.handshake_timeout);
-    if (!handshake_result) {
-        co_return;
-    }
-
     for (;;) {
         if (server_ && server_->shutting_down()) {
             break;

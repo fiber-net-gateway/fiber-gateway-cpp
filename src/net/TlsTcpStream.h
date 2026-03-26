@@ -15,6 +15,8 @@
 
 struct ssl_ctx_st;
 typedef struct ssl_ctx_st SSL_CTX;
+struct ssl_st;
+typedef struct ssl_st SSL;
 
 namespace fiber::net {
 
@@ -28,13 +30,15 @@ public:
     TlsTcpStream(fiber::event::EventLoop &loop, int fd, SocketAddress remote_addr);
     ~TlsTcpStream();
 
-    common::IoResult<void> init(SSL_CTX *ctx, bool is_server);
+    common::IoResult<void> init(SSL_CTX *ctx, bool is_server, detail::TlsStreamFd::ConfigureSslFn configure_ssl = nullptr,
+                                void *configure_ssl_ctx = nullptr);
 
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] int fd() const noexcept;
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept;
     [[nodiscard]] const SocketAddress &remote_addr() const noexcept;
     [[nodiscard]] std::string selected_alpn() const noexcept;
+    [[nodiscard]] bool handshake_done() const noexcept;
     void close();
 
     [[nodiscard]] ReadAwaiter read(void *buf, size_t len) noexcept;

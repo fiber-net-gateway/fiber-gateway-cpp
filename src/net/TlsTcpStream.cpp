@@ -7,7 +7,10 @@ TlsTcpStream::TlsTcpStream(fiber::event::EventLoop &loop, int fd, SocketAddress 
 
 TlsTcpStream::~TlsTcpStream() {}
 
-common::IoResult<void> TlsTcpStream::init(SSL_CTX *ctx, bool is_server) { return stream_.init(ctx, is_server); }
+common::IoResult<void> TlsTcpStream::init(SSL_CTX *ctx, bool is_server, detail::TlsStreamFd::ConfigureSslFn configure_ssl,
+                                          void *configure_ssl_ctx) {
+    return stream_.init(ctx, is_server, configure_ssl, configure_ssl_ctx);
+}
 
 bool TlsTcpStream::valid() const noexcept { return stream_.valid(); }
 
@@ -18,6 +21,8 @@ fiber::event::EventLoop &TlsTcpStream::loop() const noexcept { return stream_.lo
 const SocketAddress &TlsTcpStream::remote_addr() const noexcept { return remote_addr_; }
 
 std::string TlsTcpStream::selected_alpn() const noexcept { return stream_.selected_alpn(); }
+
+bool TlsTcpStream::handshake_done() const noexcept { return stream_.handshake_done(); }
 
 void TlsTcpStream::close() { stream_.close(); }
 
