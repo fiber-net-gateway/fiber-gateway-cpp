@@ -4,7 +4,11 @@
 #include <array>
 #include <sys/uio.h>
 
+#include <openssl/ssl.h>
+#include <openssl/tls1.h>
+
 #include "../async/Timeout.h"
+#include "../common/Assert.h"
 
 namespace fiber::http {
 
@@ -167,21 +171,66 @@ common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::Even
     return transport;
 }
 
+common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::EventLoop &loop, net::AcceptResult &&accept,
+                                                                     TlsServerContext &context) {
+    if (!accept.valid()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    auto transport =
+            std::unique_ptr<TlsTransport>(new TlsTransport(loop, accept.release_fd(), accept.take_peer(), context));
+    auto init_result = transport->init();
+    if (!init_result) {
+        return std::unexpected(init_result.error());
+    }
+    return transport;
+}
+
 TlsTransport::TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, TlsContext &context) :
     stream_(loop, fd, std::move(remote_addr)), context_(&context) {}
+
+TlsTransport::TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, TlsServerContext &context) :
+    stream_(loop, fd, std::move(remote_addr)), server_context_(&context) {}
 
 TlsTransport::~TlsTransport() = default;
 
 common::IoResult<void> TlsTransport::init() {
-    if (!context_ || !context_->raw()) {
+    SSL_CTX *ctx = nullptr;
+    bool is_server = false;
+    if (server_context_) {
+        ctx = server_context_->raw();
+        is_server = true;
+    } else if (context_) {
+        ctx = context_->raw();
+        is_server = context_->is_server();
+    }
+    if (!ctx) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    auto init_result = stream_.init(context_->raw(), context_->is_server());
+    auto init_result = stream_.init(ctx, is_server, &TlsTransport::configure_ssl, this);
     if (!init_result) {
         return std::unexpected(init_result.error());
     }
     return {};
 }
+
+void TlsTransport::configure_ssl(SSL *ssl, void *ctx) noexcept {
+    auto *self = static_cast<TlsTransport *>(ctx);
+    if (!self || !ssl) {
+        return;
+    }
+    if (self->server_context_) {
+        (void)self->server_context_->bind_ssl(ssl, &self->stream_.remote_addr());
+        return;
+    }
+    if (!self->context_ || self->context_->is_server()) {
+        return;
+    }
+    if (!self->context_->options().server_name.empty()) {
+        (void)SSL_set_tlsext_host_name(ssl, self->context_->options().server_name.c_str());
+    }
+}
+
+bool TlsTransport::handshake_done() const noexcept { return stream_.handshake_done(); }
 
 fiber::async::Task<common::IoResult<void>> TlsTransport::handshake(std::chrono::milliseconds timeout) {
     auto deadline = stream_.loop().now() + timeout;
@@ -221,10 +270,7 @@ fiber::async::Task<common::IoResult<void>> TlsTransport::shutdown(std::chrono::m
 
 fiber::async::Task<common::IoResult<size_t>> TlsTransport::read(void *buf, size_t len,
                                                                 std::chrono::milliseconds timeout) {
-    auto hs_result = co_await handshake(context_->options().handshake_timeout);
-    if (!hs_result) {
-        co_return std::unexpected(hs_result.error());
-    }
+    FIBER_ASSERT(handshake_done());
     auto deadline = stream_.loop().now() + timeout;
     for (;;) {
         size_t out = 0;
@@ -249,10 +295,7 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::read_into(mem::IoBuf 
     if (writable == 0) {
         co_return static_cast<size_t>(0);
     }
-    auto hs_result = co_await handshake(context_->options().handshake_timeout);
-    if (!hs_result) {
-        co_return std::unexpected(hs_result.error());
-    }
+    FIBER_ASSERT(handshake_done());
     auto deadline = stream_.loop().now() + timeout;
     for (;;) {
         size_t out = 0;
@@ -283,10 +326,7 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::readv_into(mem::IoBuf
 
 fiber::async::Task<common::IoResult<size_t>> TlsTransport::write(const void *buf, size_t len,
                                                                  std::chrono::milliseconds timeout) {
-    auto hs_result = co_await handshake(context_->options().handshake_timeout);
-    if (!hs_result) {
-        co_return std::unexpected(hs_result.error());
-    }
+    FIBER_ASSERT(handshake_done());
     auto deadline = stream_.loop().now() + timeout;
     for (;;) {
         size_t out = 0;
@@ -310,10 +350,7 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::write(mem::IoBuf &buf
     if (readable == 0) {
         co_return static_cast<size_t>(0);
     }
-    auto hs_result = co_await handshake(context_->options().handshake_timeout);
-    if (!hs_result) {
-        co_return std::unexpected(hs_result.error());
-    }
+    FIBER_ASSERT(handshake_done());
     auto deadline = stream_.loop().now() + timeout;
     for (;;) {
         size_t out = 0;
@@ -335,12 +372,51 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::write(mem::IoBuf &buf
 
 fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChain &buf,
                                                                   std::chrono::milliseconds timeout) {
-    buf.drop_empty_front();
-    mem::IoBuf *target = buf.first_readable();
-    if (!target) {
-        co_return static_cast<size_t>(0);
+    FIBER_ASSERT(handshake_done());
+
+    auto deadline = stream_.loop().now() + timeout;
+    std::size_t total_written = 0;
+    bool waited = false;
+    for (;;) {
+        buf.drop_empty_front();
+        mem::IoBuf *target = buf.first_readable();
+        if (!target) {
+            co_return total_written;
+        }
+
+        std::size_t out = 0;
+        event::IoEvent wait_event = event::IoEvent::None;
+        common::IoErr err = stream_.poll_write(target->readable_data(), target->readable(), out, wait_event);
+        if (err == common::IoErr::None) {
+            if (out == 0) {
+                co_return total_written;
+            }
+            buf.consume_and_compact(out);
+            total_written += out;
+            continue;
+        }
+        if (err != common::IoErr::WouldBlock) {
+            if (total_written != 0) {
+                co_return total_written;
+            }
+            co_return std::unexpected(err);
+        }
+        if (total_written != 0) {
+            co_return total_written;
+        }
+        if (waited) {
+            co_return std::unexpected(common::IoErr::WouldBlock);
+        }
+
+        auto wait_result = co_await wait_tls_event(stream_, wait_event, deadline);
+        if (!wait_result) {
+            if (total_written != 0) {
+                co_return total_written;
+            }
+            co_return std::unexpected(wait_result.error());
+        }
+        waited = true;
     }
-    co_return co_await write(*target, timeout);
 }
 
 void TlsTransport::close() { stream_.close(); }

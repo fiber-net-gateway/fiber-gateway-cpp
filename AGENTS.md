@@ -22,7 +22,7 @@ ctest --test-dir build
 Follow existing C++23 style: 4-space indentation, braces on the same line, and namespaces under `fiber::...`. Class and type names use PascalCase (e.g., `Buffer`, `Generator`). Header guards follow `FIBER_<NAME>_H`. Keep includes local and explicit (e.g., `#include "../mem/Buffer.h"`). Prefer small, focused headers and keep implementations in `.cpp` files.
 
 ## Performance & Memory Requirements
-Code in this project is performance-first. Pay close attention to memory allocation and release efficiency, and reduce dynamic allocation churn in latency-sensitive paths. In hot code paths, do not use allocation-heavy standard containers such as `std::string` and `std::vector`; prefer reusable buffers, fixed-size structures, or custom memory-managed types.
+Code in this project is performance-first. Pay close attention to memory allocation and release efficiency, and reduce dynamic allocation churn in latency-sensitive paths. In hot code paths, do not use allocation-heavy standard library types such as `std::string`, `std::vector`, and `std::function` by default; only use them when there is a clear non-hot-path justification. Prefer reusable buffers, fixed-size structures, intrusive or custom memory-managed types, and compile-time or lightweight callable abstractions.
 
 ## Testing Guidelines
 Tests use GoogleTest and CTest. Add new files under `tests/`, name them `*Test.cpp`, and register them by adding sources to the `fiber_tests` target in `CMakeLists.txt`. Run `ctest --test-dir build` after building. Keep tests small and focused on one behavior.

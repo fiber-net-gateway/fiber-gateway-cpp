@@ -24,6 +24,7 @@ public:
         common::IoErr (*on_header_block_complete)(void *owner, bool end_stream) noexcept = nullptr;
         common::IoErr (*on_body)(void *owner, mem::IoBuf &&buf, bool end_stream) noexcept = nullptr;
         void (*on_abort)(void *owner, common::IoErr reason) noexcept = nullptr;
+        void (*on_send_window_available)(void *owner) noexcept = nullptr;
     };
 
     class Lease {

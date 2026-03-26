@@ -10,8 +10,10 @@
 #include "../event/EventLoop.h"
 #include "../net/TcpListener.h"
 #include "HttpExchange.h"
+#include "Http2Connection.h"
 #include "Http2HpackEncodeCatalog.h"
 #include "HttpTransport.h"
+#include "ServerRequestFactory.h"
 #include "TlsContext.h"
 
 namespace fiber::http {
@@ -29,13 +31,16 @@ public:
 private:
     fiber::async::DetachedTask handle_connection(net::AcceptResult accept);
     fiber::async::Task<void> serve_http1(std::unique_ptr<HttpTransport> transport);
+    fiber::async::Task<void> serve_http2(std::unique_ptr<HttpTransport> transport);
+    [[nodiscard]] Http2Connection::Options make_http2_options() const noexcept;
 
     event::EventLoop &loop_;
     HttpHandler handler_;
     HttpServerOptions options_;
     Http2HpackEncodeCatalog http2_hpack_encode_catalog_;
+    ServerRequestFactory http2_request_factory_;
     net::TcpListener listener_;
-    std::unique_ptr<TlsContext> tls_ctx_;
+    std::unique_ptr<TlsServerContext> tls_ctx_;
 };
 
 } // namespace fiber::http

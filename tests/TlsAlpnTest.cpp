@@ -27,4 +27,38 @@ TEST(TlsAlpnTest, NormalizeHttp1AlpnAddsHttp11WhenMissing) {
     EXPECT_EQ(options.alpn, expected);
 }
 
+TEST(TlsAlpnTest, NormalizeHttpServerAlpnPrefersH2ThenHttp11) {
+    fiber::http::TlsOptions options;
+    options.alpn = {"custom", "http/1.1", "h2", "", "custom"};
+
+    fiber::http::normalize_http_server_alpn(options);
+
+    const std::vector<std::string> expected = {"h2", "http/1.1", "custom"};
+    EXPECT_EQ(options.alpn, expected);
+}
+
+TEST(TlsAlpnTest, NormalizeHttpServerAlpnAddsSupportedDefaultsWhenMissing) {
+    fiber::http::TlsOptions options;
+    options.alpn = {"acme/1"};
+
+    fiber::http::normalize_http_server_alpn(options);
+
+    const std::vector<std::string> expected = {"h2", "http/1.1", "acme/1"};
+    EXPECT_EQ(options.alpn, expected);
+}
+
+TEST(TlsAlpnTest, AlpnProtocolsViewContainsOfferedProtocols) {
+    const std::uint8_t encoded[] = {
+            0x00, 0x0c,
+            0x02, 'h', '2',
+            0x08, 'h', 't', 't', 'p', '/', '1', '.', '1',
+    };
+
+    fiber::http::TlsAlpnProtocolsView offered(encoded, sizeof(encoded));
+
+    EXPECT_TRUE(offered.contains("h2"));
+    EXPECT_TRUE(offered.contains("http/1.1"));
+    EXPECT_FALSE(offered.contains("acme/1"));
+}
+
 } // namespace

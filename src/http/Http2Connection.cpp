@@ -77,6 +77,18 @@ std::uint8_t *append_u32(std::uint8_t *out, std::uint32_t value) noexcept {
     return out + 4;
 }
 
+std::uint8_t *append_u64(std::uint8_t *out, std::uint64_t value) noexcept {
+    out[0] = static_cast<std::uint8_t>((value >> 56) & 0xffU);
+    out[1] = static_cast<std::uint8_t>((value >> 48) & 0xffU);
+    out[2] = static_cast<std::uint8_t>((value >> 40) & 0xffU);
+    out[3] = static_cast<std::uint8_t>((value >> 32) & 0xffU);
+    out[4] = static_cast<std::uint8_t>((value >> 24) & 0xffU);
+    out[5] = static_cast<std::uint8_t>((value >> 16) & 0xffU);
+    out[6] = static_cast<std::uint8_t>((value >> 8) & 0xffU);
+    out[7] = static_cast<std::uint8_t>(value & 0xffU);
+    return out + 8;
+}
+
 common::IoErr prepare_read_buffer(mem::IoBuf &read_buf, std::size_t capacity) noexcept {
     if (!read_buf) {
         read_buf = mem::IoBuf::allocate(capacity);
@@ -274,8 +286,15 @@ fiber::async::Task<Http2Connection::RunResult> Http2Connection::run() noexcept {
             co_return co_await finalize_run(std::unexpected(prepare_err));
         }
 
-        auto read_result = co_await transport_->read_into(read_buf, options_.read_timeout);
+        auto read_result = co_await transport_->read_into(read_buf, current_read_timeout());
         if (!read_result) {
+            if (read_result.error() == common::IoErr::TimedOut) {
+                common::IoErr timeout_err = handle_read_timeout();
+                if (timeout_err == common::IoErr::None) {
+                    continue;
+                }
+                co_return co_await finalize_run(std::unexpected(timeout_err));
+            }
             if (state_ == State::Closing && !stop_sending_requested_) {
                 co_return co_await finalize_run(RunResult{});
             }
@@ -679,6 +698,10 @@ common::IoErr Http2Connection::handle_ping_payload(const FrameHeader &fhr, const
     }
 
     if ((fhr.flags & kFlagAck) != 0) {
+        if (keepalive_ping_outstanding_ &&
+            std::memcmp(control_payload_scratch_.data(), keepalive_ping_payload_.data(), keepalive_ping_payload_.size()) == 0) {
+            keepalive_ping_outstanding_ = false;
+        }
         return common::IoErr::None;
     }
 
@@ -1217,6 +1240,16 @@ void Http2Connection::start_send_loop() noexcept {
     fiber::async::spawn([connection = this]() { return Http2Connection::run_send_loop_task(connection); });
 }
 
+std::chrono::milliseconds Http2Connection::current_read_timeout() const noexcept {
+    if (keepalive_ping_outstanding_) {
+        return options_.read_timeout;
+    }
+    if (state_ == State::Running && options_.keepalive_ping_interval.count() > 0) {
+        return options_.keepalive_ping_interval;
+    }
+    return options_.read_timeout;
+}
+
 void Http2Connection::update_connection_send_window(std::int32_t delta) noexcept {
     const std::int32_t before = conn_send_window_;
     conn_send_window_ += delta;
@@ -1226,31 +1259,32 @@ void Http2Connection::update_connection_send_window(std::int32_t delta) noexcept
     }
 }
 
-std::chrono::milliseconds Http2Connection::send_loop_poll_timeout() const noexcept {
-    if (options_.keepalive_ping_interval.count() <= 0) {
-        return std::chrono::milliseconds::max();
+common::IoErr Http2Connection::handle_read_timeout() noexcept {
+    if (stop_sending_requested_ || state_ != State::Running || options_.keepalive_ping_interval.count() <= 0) {
+        return common::IoErr::TimedOut;
     }
-    return options_.keepalive_ping_interval;
+    if (keepalive_ping_outstanding_) {
+        return common::IoErr::TimedOut;
+    }
+    return send_keepalive_ping();
 }
 
-void Http2Connection::handle_send_loop_timeout() noexcept {
-    if (stop_sending_requested_ || state_ != State::Running || options_.keepalive_ping_interval.count() <= 0) {
-        return;
-    }
-
-    static constexpr std::array<std::uint8_t, kPingPayloadSize> kIdlePingPayload{};
-    common::IoErr err = outbound_scheduler_.alloc_and_enqueue_control(kFrameHeaderSize + kIdlePingPayload.size(),
+common::IoErr Http2Connection::send_keepalive_ping() noexcept {
+    ++keepalive_ping_sequence_;
+    append_u64(keepalive_ping_payload_.data(), keepalive_ping_sequence_);
+    common::IoErr err = outbound_scheduler_.alloc_and_enqueue_control(kFrameHeaderSize + keepalive_ping_payload_.size(),
                                                                       [&](std::uint8_t *dst) noexcept {
                                                                           encode_http2_frame_header(
-                                                                              dst, static_cast<std::uint32_t>(kIdlePingPayload.size()),
+                                                                              dst, static_cast<std::uint32_t>(keepalive_ping_payload_.size()),
                                                                               Http2FrameType::Ping, 0, 0);
                                                                           std::memcpy(dst + kFrameHeaderSize,
-                                                                                      kIdlePingPayload.data(),
-                                                                                      kIdlePingPayload.size());
+                                                                                      keepalive_ping_payload_.data(),
+                                                                                      keepalive_ping_payload_.size());
                                                                       });
-    if (err != common::IoErr::None) {
-        enter_closing(err);
+    if (err == common::IoErr::None) {
+        keepalive_ping_outstanding_ = true;
     }
+    return err;
 }
 
 void Http2Connection::stop_sending(common::IoErr reason) noexcept {

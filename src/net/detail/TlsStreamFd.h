@@ -21,6 +21,7 @@ namespace fiber::net::detail {
 
 class TlsStreamFd : public common::NonCopyable, public common::NonMovable {
 public:
+    using ConfigureSslFn = void (*)(SSL *ssl, void *ctx) noexcept;
     class ReadAwaiter;
     class WriteAwaiter;
     class HandshakeAwaiter;
@@ -29,12 +30,14 @@ public:
     TlsStreamFd(fiber::event::EventLoop &loop, int fd);
     ~TlsStreamFd();
 
-    common::IoResult<void> init(SSL_CTX *ctx, bool is_server);
+    common::IoResult<void> init(SSL_CTX *ctx, bool is_server, ConfigureSslFn configure_ssl = nullptr,
+                                void *configure_ssl_ctx = nullptr);
 
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] int fd() const noexcept;
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept;
     [[nodiscard]] std::string selected_alpn() const noexcept;
+    [[nodiscard]] bool handshake_done() const noexcept;
     void close();
 
     [[nodiscard]] ReadAwaiter read(void *buf, size_t len) noexcept;

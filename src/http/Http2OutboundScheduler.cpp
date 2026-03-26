@@ -61,14 +61,18 @@ Http2OutboundScheduler::~Http2OutboundScheduler() {
 
     while (head_slab_) {
         Slab *next = head_slab_->next;
+        if (head_slab_ == primary_slab_) {
+            primary_slab_ = nullptr;
+            primary_slab_attached_ = false;
+        }
         Slab::destroy(head_slab_);
         head_slab_ = next;
     }
     tail_slab_ = nullptr;
 
-    if (cached_empty_slab_) {
-        Slab::destroy(cached_empty_slab_);
-        cached_empty_slab_ = nullptr;
+    if (primary_slab_) {
+        Slab::destroy(primary_slab_);
+        primary_slab_ = nullptr;
     }
 }
 
@@ -319,13 +323,18 @@ bool Http2OutboundScheduler::should_wake_waiter() const noexcept {
 }
 
 Http2OutboundScheduler::Slab *Http2OutboundScheduler::acquire_slab() noexcept {
-    if (cached_empty_slab_) {
-        Slab *slab = cached_empty_slab_;
-        cached_empty_slab_ = nullptr;
-        slab->next = nullptr;
-        slab->read_pos = 0;
-        slab->commit_pos = 0;
-        return slab;
+    if (primary_slab_ == nullptr) {
+        primary_slab_ = Slab::allocate(kPrimarySlabCapacity);
+        if (!primary_slab_) {
+            return nullptr;
+        }
+    }
+
+    if (!primary_slab_attached_ && !primary_slab_borrowed_) {
+        primary_slab_->next = nullptr;
+        primary_slab_->read_pos = 0;
+        primary_slab_->commit_pos = 0;
+        return primary_slab_;
     }
 
     return Slab::allocate(slab_capacity_);
@@ -339,17 +348,49 @@ void Http2OutboundScheduler::recycle_slab(Slab *slab) noexcept {
     slab->next = nullptr;
     slab->read_pos = 0;
     slab->commit_pos = 0;
-    if (!cached_empty_slab_) {
-        cached_empty_slab_ = slab;
+    if (slab == primary_slab_) {
+        primary_slab_attached_ = false;
         return;
     }
 
     Slab::destroy(slab);
 }
 
+Http2OutboundScheduler::Slab *Http2OutboundScheduler::borrow_primary_slab() noexcept {
+    if (primary_slab_ == nullptr) {
+        primary_slab_ = Slab::allocate(kPrimarySlabCapacity);
+        if (!primary_slab_) {
+            return nullptr;
+        }
+    }
+    if (primary_slab_attached_ || primary_slab_borrowed_) {
+        return nullptr;
+    }
+
+    primary_slab_->next = nullptr;
+    primary_slab_->read_pos = 0;
+    primary_slab_->commit_pos = 0;
+    primary_slab_borrowed_ = true;
+    return primary_slab_;
+}
+
+void Http2OutboundScheduler::release_primary_slab() noexcept {
+    if (!primary_slab_borrowed_ || !primary_slab_) {
+        return;
+    }
+
+    primary_slab_->next = nullptr;
+    primary_slab_->read_pos = 0;
+    primary_slab_->commit_pos = 0;
+    primary_slab_borrowed_ = false;
+}
+
 void Http2OutboundScheduler::append_tail_slab(Slab *slab) noexcept {
     FIBER_ASSERT(slab != nullptr);
     slab->next = nullptr;
+    if (slab == primary_slab_) {
+        primary_slab_attached_ = true;
+    }
     if (tail_slab_) {
         tail_slab_->next = slab;
     } else {
@@ -436,6 +477,7 @@ void Http2OutboundScheduler::clear_all_stream_state() noexcept {
         inflight_stream_->outbound_hook_.encode_ctx_ = nullptr;
         inflight_stream_ = nullptr;
     }
+    release_primary_slab();
     notify_inflight_done(stop_reason_ != common::IoErr::None ? stop_reason_ : common::IoErr::Canceled);
     inflight_stream_write_.clear();
 }
@@ -611,6 +653,7 @@ void Http2OutboundScheduler::finish_inflight_stream_write() noexcept {
         hook.next_kind_ = Http2OutboundNextKind::None;
         hook.encode_ = nullptr;
         hook.encode_ctx_ = nullptr;
+        release_primary_slab();
         notify_inflight_done(common::IoErr::None);
         inflight_stream_write_.clear();
         stream->on_outbound_send_complete();
@@ -618,6 +661,7 @@ void Http2OutboundScheduler::finish_inflight_stream_write() noexcept {
     }
 
     classify_stream(*stream, false);
+    release_primary_slab();
     notify_inflight_done(common::IoErr::None);
     inflight_stream_write_.clear();
     stream->on_outbound_send_complete();
@@ -651,16 +695,27 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
         req.max_frame_size = peer_max_frame_size_;
         req.conn_window_budget = conn_send_window_ > 0 ? conn_send_window_ : 0;
 
+        Slab *slot_slab = borrow_primary_slab();
+        if (!slot_slab) {
+            fail(common::IoErr::NoMem);
+            return false;
+        }
+
         inflight_stream_write_.clear();
+        inflight_stream_write_.slot_slab = slot_slab;
+        inflight_stream_write_.slot = slot_slab->data();
+        inflight_stream_write_.slot_capacity = slot_slab->capacity;
         Http2OutboundEncodeTarget target;
-        target.reset(inflight_stream_write_.slot, sizeof(inflight_stream_write_.slot));
+        target.reset(inflight_stream_write_.slot, inflight_stream_write_.slot_capacity);
         Http2OutboundEncodeResult result;
         common::IoErr err = hook.encode_(*stream, hook.encode_ctx_, req, target, result);
         if (err != common::IoErr::None) {
+            release_primary_slab();
             fail(err);
             return false;
         }
         if (target.slot_reserved_ != 0) {
+            release_primary_slab();
             fail(common::IoErr::Invalid);
             return false;
         }
@@ -689,6 +744,7 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
                 stream->update_send_window(-static_cast<std::int32_t>(result.consumed_conn_window));
                 return true;
             case Http2OutboundEncodeResult::Status::BlockedConnWindow:
+                release_primary_slab();
                 if (!target.empty() || target.done_fn() != nullptr || result.consumed_conn_window != 0) {
                     fail(common::IoErr::Invalid);
                     return false;
@@ -699,6 +755,7 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
                 enqueue_waiting_conn_window(*stream);
                 return false;
             case Http2OutboundEncodeResult::Status::BlockedStreamWindow:
+                release_primary_slab();
                 if (!target.empty() || target.done_fn() != nullptr || result.consumed_conn_window != 0) {
                     fail(common::IoErr::Invalid);
                     return false;
@@ -707,6 +764,7 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
                 hook.queue_state_ = static_cast<std::uint8_t>(QueueState::None);
                 return false;
             case Http2OutboundEncodeResult::Status::NoWork:
+                release_primary_slab();
                 if (!target.empty() || target.done_fn() != nullptr || result.consumed_conn_window != 0) {
                     fail(common::IoErr::Invalid);
                     return false;
@@ -719,6 +777,7 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
                 }
                 return false;
             case Http2OutboundEncodeResult::Status::Closed:
+                release_primary_slab();
                 if (!target.empty() || target.done_fn() != nullptr || result.consumed_conn_window != 0) {
                     fail(common::IoErr::Invalid);
                     return false;
