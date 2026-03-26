@@ -4,6 +4,7 @@
 #include <chrono>
 #include <coroutine>
 #include <cstring>
+#include <limits>
 #include <new>
 
 #include "../common/Assert.h"
@@ -682,7 +683,11 @@ common::IoErr ServerHttp2Request::encode_response_frames(Http2Stream &stream, vo
     Http2HeadersFrameEncoder frame_encoder(request->conn_->outbound_hpack_encoder(), {
         .stream_id = stream.stream_id(),
         .max_frame_size = req.max_frame_size,
-        .first_frame_payload_cap = static_cast<std::uint16_t>(std::min<std::uint32_t>(req.max_frame_size, 1024)),
+        .first_frame_payload_cap = static_cast<std::uint16_t>(std::min<std::uint32_t>(
+            req.max_frame_size,
+            static_cast<std::uint32_t>(std::min<std::size_t>(
+                target.slot_available() > 9 ? target.slot_available() - 9 : 0,
+                static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()))))),
         .end_stream = awaiter->end_stream_,
     });
     common::IoErr err = frame_encoder.begin(target);
