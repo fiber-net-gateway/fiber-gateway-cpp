@@ -21,6 +21,8 @@ ctest --test-dir build
 ## Coding Style & Naming Conventions
 Follow existing C++23 style: 4-space indentation, braces on the same line, and namespaces under `fiber::...`. Class and type names use PascalCase (e.g., `Buffer`, `Generator`). Header guards follow `FIBER_<NAME>_H`. Keep includes local and explicit (e.g., `#include "../mem/Buffer.h"`). Prefer small, focused headers and keep implementations in `.cpp` files.
 
+Design state and member variables to be minimal and explicit. Prefer establishing required invariants at construction or initialization boundaries and assert there, instead of carrying nullable members and repeatedly checking `!= nullptr` at every use site. Push nullability checks to the edges when possible, and keep steady-state execution paths simple.
+
 ## Performance & Memory Requirements
 Code in this project is performance-first. Pay close attention to memory allocation and release efficiency, and reduce dynamic allocation churn in latency-sensitive paths. In hot code paths, do not use allocation-heavy standard library types such as `std::string`, `std::vector`, and `std::function` by default; only use them when there is a clear non-hot-path justification. Prefer reusable buffers, fixed-size structures, intrusive or custom memory-managed types, and compile-time or lightweight callable abstractions.
 
