@@ -126,9 +126,7 @@ common::IoErr prepare_read_buffer(mem::IoBuf &read_buf, std::size_t capacity) no
 
 } // namespace
 
-Http2Connection::Http2Connection(std::unique_ptr<HttpTransport> transport, Options options,
-                                 void *stream_factory_ctx, const Http2StreamFactoryOps &stream_factory_ops) :
-    transport_(std::move(transport)),
+Http2Connection::Http2Connection(Options options, void *stream_factory_ctx, const Http2StreamFactoryOps &stream_factory_ops) :
     options_(std::move(options)),
     stream_factory_ctx_(stream_factory_ctx),
     stream_factory_ops_(stream_factory_ops),
@@ -137,7 +135,7 @@ Http2Connection::Http2Connection(std::unique_ptr<HttpTransport> transport, Optio
         .max_dynamic_table_size = kDefaultHeaderTableSize,
         .max_string_size = options_.max_hpack_string_size,
     }),
-    outbound_scheduler_(transport_.get(), 1024, options_.write_timeout, options_.max_frame_size) {
+    outbound_scheduler_(nullptr, 1024, options_.write_timeout, options_.max_frame_size) {
     FIBER_ASSERT(stream_factory_ctx_ != nullptr);
     FIBER_ASSERT(options_.outbound_hpack_catalog != nullptr);
     FIBER_ASSERT(stream_factory_ops_.create_local_stream != nullptr);
@@ -154,6 +152,17 @@ Http2Connection::Http2Connection(std::unique_ptr<HttpTransport> transport, Optio
     FIBER_ASSERT(streams_.init(configured_max_active_streams()));
     FIBER_ASSERT(inbound_hpack_decoder_.init(kDefaultHeaderTableSize, options_.max_hpack_string_size));
     FIBER_ASSERT(outbound_hpack_encoder_.init());
+}
+
+void Http2Connection::bind_transport(std::unique_ptr<HttpTransport> transport) noexcept {
+    FIBER_ASSERT(state_ == State::Init);
+    FIBER_ASSERT(transport_ == nullptr);
+    FIBER_ASSERT(transport != nullptr);
+    transport_ = std::move(transport);
+    outbound_scheduler_.set_transport(transport_.get());
+    outbound_scheduler_.set_write_timeout(options_.write_timeout);
+    outbound_scheduler_.set_peer_max_frame_size(peer_max_outbound_frame_size_);
+    outbound_scheduler_.set_connection_send_window(conn_send_window_);
 }
 
 Http2Connection::~Http2Connection() {

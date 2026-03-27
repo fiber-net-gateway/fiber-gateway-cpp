@@ -12,6 +12,7 @@
 #include "../async/Task.h"
 #include "../async/Spawn.h"
 #include "../async/WaitGroup.h"
+#include "../common/Assert.h"
 #include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
@@ -74,14 +75,23 @@ public:
 
     virtual ~Http2Connection();
 
-    Http2Connection(std::unique_ptr<HttpTransport> transport, Options options,
-                    void *stream_factory_ctx, const Http2StreamFactoryOps &stream_factory_ops);
+    Http2Connection(Options options, void *stream_factory_ctx, const Http2StreamFactoryOps &stream_factory_ops);
+
+    void bind_transport(std::unique_ptr<HttpTransport> transport) noexcept;
 
     fiber::async::Task<RunResult> run() noexcept;
     Http2Stream *create_local_stream(std::uint32_t stream_id) noexcept;
     void shutdown(common::IoErr reason = common::IoErr::Canceled) noexcept;
     void graceful_shutdown() noexcept;
     [[nodiscard]] State state() const noexcept { return state_; }
+    [[nodiscard]] HttpTransport &transport() noexcept {
+        FIBER_ASSERT(transport_ != nullptr);
+        return *transport_;
+    }
+    [[nodiscard]] const HttpTransport &transport() const noexcept {
+        FIBER_ASSERT(transport_ != nullptr);
+        return *transport_;
+    }
 
 protected:
     // `offset` is the number of payload bytes already delivered for the current

@@ -321,8 +321,10 @@ struct ObservedChunk {
 class RecordingHttp2Connection final : public fiber::http::Http2Connection {
 public:
     RecordingHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport, Options options) :
-        fiber::http::Http2Connection(std::move(transport), with_test_hpack_catalog(options), &test_http2_stream_factory(),
-                                     TestHttp2StreamFactory::ops()) {}
+        fiber::http::Http2Connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
+                                     TestHttp2StreamFactory::ops()) {
+        bind_transport(std::move(transport));
+    }
 
     const std::vector<ObservedChunk> &chunks() const noexcept { return chunks_; }
     fiber::async::Task<void> stop_and_join() noexcept { co_await stop_and_join_send_loop(); }
@@ -885,7 +887,8 @@ DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderR
         co_return;
     };
     fiber::http::ServerRequestFactory factory(http_options, wrapped_handler);
-    fiber::http::Http2Connection connection(std::move(transport), options, &factory, fiber::http::ServerRequestFactory::ops());
+    fiber::http::Http2Connection connection(options, &factory, fiber::http::ServerRequestFactory::ops());
+    connection.bind_transport(std::move(transport));
 
     ServerHeaderRunOutcome outcome;
     outcome.result = co_await connection.run();
@@ -953,9 +956,11 @@ class SendingHttp2Connection final : public fiber::http::Http2Connection {
 public:
     SendingHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport, FakeHttpTransport *fake_transport,
                            Options options = {}) :
-        fiber::http::Http2Connection(std::move(transport), with_test_hpack_catalog(options), &test_http2_stream_factory(),
+        fiber::http::Http2Connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
                                      TestHttp2StreamFactory::ops()),
-        fake_transport_(fake_transport) {}
+        fake_transport_(fake_transport) {
+        bind_transport(std::move(transport));
+    }
 
     fiber::common::IoErr submit_bytes(std::string_view data) noexcept {
         return outbound_scheduler_.alloc_and_enqueue_control(data.size(), [data](std::uint8_t *dst) {
@@ -984,9 +989,11 @@ class ControlHttp2Connection final : public fiber::http::Http2Connection {
 public:
     ControlHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport, FakeHttpTransport *fake_transport,
                            Options options = {}) :
-        fiber::http::Http2Connection(std::move(transport), with_test_hpack_catalog(options), &test_http2_stream_factory(),
+        fiber::http::Http2Connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
                                      TestHttp2StreamFactory::ops()),
-        fake_transport_(fake_transport) {}
+        fake_transport_(fake_transport) {
+        bind_transport(std::move(transport));
+    }
 
     fiber::http::Http2Stream *open_stream(std::uint32_t stream_id) noexcept { return create_local_stream(stream_id); }
     void request_graceful_close() noexcept { graceful_shutdown(); }
@@ -1024,9 +1031,11 @@ class KeepaliveHttp2Connection final : public fiber::http::Http2Connection {
 public:
     KeepaliveHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport, ScriptedReadTransport *transport_impl,
                              Options options = {}) :
-        fiber::http::Http2Connection(std::move(transport), with_test_hpack_catalog(options), &test_http2_stream_factory(),
+        fiber::http::Http2Connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
                                      TestHttp2StreamFactory::ops()),
-        transport_impl_(transport_impl) {}
+        transport_impl_(transport_impl) {
+        bind_transport(std::move(transport));
+    }
 
     [[nodiscard]] const std::string &written() const noexcept { return transport_impl_->written(); }
     [[nodiscard]] std::size_t transport_close_count() const noexcept { return transport_impl_->close_count(); }
