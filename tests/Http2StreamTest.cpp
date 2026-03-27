@@ -327,8 +327,8 @@ TEST(Http2StreamTest, AdditionalLeaseRetainsEmbeddedOwnerUntilLastReferenceDrops
 
 TEST(Http2StreamTest, MaybeReplenishRecvWindowEnqueuesWindowUpdateAndTracksRemainingWindow) {
     auto transport = std::make_unique<DummyHttpTransport>();
-    fiber::http::Http2Connection connection(std::move(transport), make_options(), &test_http2_stream_factory(),
-                                            TestHttp2StreamFactory::ops());
+    fiber::http::Http2Connection connection(make_options(), &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
+    connection.bind_transport(std::move(transport));
     connection.state_ = fiber::http::Http2Connection::State::Running;
 
     fiber::http::Http2Stream *stream = connection.create_peer_stream(1);

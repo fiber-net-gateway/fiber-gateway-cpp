@@ -2,6 +2,7 @@
 
 #include <new>
 
+#include "ClientHttp2Push.h"
 #include "Http2Connection.h"
 
 namespace fiber::http {
@@ -45,6 +46,32 @@ common::IoErr noop_body(void *, mem::IoBuf &&, bool) noexcept { return common::I
 void noop_abort(void *, common::IoErr) noexcept {}
 
 } // namespace
+
+const Http2StreamFactoryOps &ClientHttp2Request::factory_ops() noexcept {
+    static const Http2StreamFactoryOps kOps{
+        &ClientHttp2Request::create_local_stream_op,
+        &ClientHttp2Request::create_peer_stream_op,
+    };
+    return kOps;
+}
+
+Http2Stream::Lease ClientHttp2Request::create_local_stream(std::uint32_t stream_id, Http2Connection &conn) noexcept {
+    return create(stream_id, conn);
+}
+
+Http2Stream::Lease ClientHttp2Request::create_peer_stream(std::uint32_t stream_id, Http2Connection &conn) noexcept {
+    return ClientHttp2Push::create(stream_id, conn);
+}
+
+Http2Stream::Lease ClientHttp2Request::create_local_stream_op(void *, std::uint32_t stream_id,
+                                                              Http2Connection &conn) noexcept {
+    return create_local_stream(stream_id, conn);
+}
+
+Http2Stream::Lease ClientHttp2Request::create_peer_stream_op(void *, std::uint32_t stream_id,
+                                                             Http2Connection &conn) noexcept {
+    return create_peer_stream(stream_id, conn);
+}
 
 const Http2Stream::Ops &ClientHttp2Request::stream_ops() noexcept {
     static const Http2Stream::Ops kOps{

@@ -118,8 +118,8 @@ fiber::async::Task<void> HttpServer::serve_http2(std::unique_ptr<HttpTransport> 
     if (!transport) {
         co_return;
     }
-    Http2Connection connection(std::move(transport), make_http2_options(), &http2_request_factory_,
-                               ServerRequestFactory::ops());
+    Http2Connection connection(make_http2_options(), &http2_request_factory_, ServerRequestFactory::ops());
+    connection.bind_transport(std::move(transport));
     (void)co_await connection.run();
     co_return;
 }
