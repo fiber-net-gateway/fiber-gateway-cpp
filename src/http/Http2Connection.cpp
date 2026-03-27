@@ -136,7 +136,6 @@ Http2Connection::Http2Connection(Options options, void *stream_factory_ctx, cons
         .max_string_size = options_.max_hpack_string_size,
     }),
     outbound_scheduler_(nullptr, 1024, options_.write_timeout, options_.max_frame_size) {
-    FIBER_ASSERT(stream_factory_ctx_ != nullptr);
     FIBER_ASSERT(options_.outbound_hpack_catalog != nullptr);
     FIBER_ASSERT(stream_factory_ops_.create_local_stream != nullptr);
     FIBER_ASSERT(stream_factory_ops_.create_peer_stream != nullptr);
@@ -154,15 +153,22 @@ Http2Connection::Http2Connection(Options options, void *stream_factory_ctx, cons
     FIBER_ASSERT(outbound_hpack_encoder_.init());
 }
 
-void Http2Connection::bind_transport(std::unique_ptr<HttpTransport> transport) noexcept {
+common::IoErr Http2Connection::start(std::unique_ptr<HttpTransport> transport) noexcept {
     FIBER_ASSERT(state_ == State::Init);
     FIBER_ASSERT(transport_ == nullptr);
-    FIBER_ASSERT(transport != nullptr);
+    if (!transport || !transport->valid()) {
+        return common::IoErr::Invalid;
+    }
     transport_ = std::move(transport);
     outbound_scheduler_.set_transport(transport_.get());
     outbound_scheduler_.set_write_timeout(options_.write_timeout);
     outbound_scheduler_.set_peer_max_frame_size(peer_max_outbound_frame_size_);
     outbound_scheduler_.set_connection_send_window(conn_send_window_);
+    start_send_loop();
+    if (options_.role == ConnectionRole::Client) {
+        return start_client_session();
+    }
+    return start_server_session();
 }
 
 Http2Connection::~Http2Connection() {
@@ -185,18 +191,11 @@ fiber::async::Task<Http2Connection::RunResult> Http2Connection::run() noexcept {
     if (!transport_ || !transport_->valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (state_ != State::Init) {
+    if (state_ != State::Start) {
         co_return std::unexpected(common::IoErr::Busy);
     }
 
-    state_ = State::Start;
-    start_send_loop();
-
     if (options_.role == ConnectionRole::Client) {
-        common::IoErr err = send_initial_flight();
-        if (err != common::IoErr::None) {
-            co_return co_await finalize_run(std::unexpected(err));
-        }
         state_ = State::Running;
     }
 
@@ -1136,7 +1135,9 @@ bool Http2Connection::can_accept_peer_stream(std::uint32_t stream_id) const noex
 }
 
 bool Http2Connection::can_create_local_stream(std::uint32_t stream_id) const noexcept {
-    return state_ == State::Running && stream_id != 0 && !peer_goaway_received_ &&
+    const bool local_session_ready =
+        state_ == State::Running || (options_.role == ConnectionRole::Client && state_ == State::Start);
+    return local_session_ready && stream_id != 0 && !peer_goaway_received_ &&
            is_local_stream_id(stream_id) && is_next_local_stream_id(stream_id) &&
            local_push_stream_count_ < peer_advertised_max_concurrent_streams_;
 }
@@ -1244,9 +1245,10 @@ void Http2Connection::start_send_loop() noexcept {
     if (send_loop_running_ || stop_sending_requested_) {
         return;
     }
+    FIBER_ASSERT(transport_ != nullptr);
     lifetime_wg_.add(1);
     send_loop_running_ = true;
-    fiber::async::spawn([connection = this]() { return Http2Connection::run_send_loop_task(connection); });
+    fiber::async::spawn(transport_->loop(), [connection = this]() { return Http2Connection::run_send_loop_task(connection); });
 }
 
 std::chrono::milliseconds Http2Connection::current_read_timeout() const noexcept {
@@ -1294,6 +1296,24 @@ common::IoErr Http2Connection::send_keepalive_ping() noexcept {
         keepalive_ping_outstanding_ = true;
     }
     return err;
+}
+
+common::IoErr Http2Connection::start_client_session() noexcept {
+    common::IoErr err = send_initial_flight();
+    if (err != common::IoErr::None) {
+        stop_sending_requested_ = true;
+        stop_sending_reason_ = err;
+        outbound_scheduler_.abort(err);
+        state_ = State::Closing;
+        return err;
+    }
+    state_ = State::Start;
+    return common::IoErr::None;
+}
+
+common::IoErr Http2Connection::start_server_session() noexcept {
+    state_ = State::Start;
+    return common::IoErr::None;
 }
 
 void Http2Connection::stop_sending(common::IoErr reason) noexcept {
@@ -1421,7 +1441,8 @@ void Http2Connection::maybe_enter_closing_from_draining() noexcept {
 
     state_ = State::Closing;
     outbound_scheduler_.close();
-    fiber::async::spawn([connection = this]() { return Http2Connection::close_transport_after_send_loop_task(connection); });
+    fiber::async::spawn(transport_->loop(),
+                        [connection = this]() { return Http2Connection::close_transport_after_send_loop_task(connection); });
 }
 
 } // namespace fiber::http

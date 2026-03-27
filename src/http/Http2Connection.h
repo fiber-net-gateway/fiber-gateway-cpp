@@ -77,7 +77,7 @@ public:
 
     Http2Connection(Options options, void *stream_factory_ctx, const Http2StreamFactoryOps &stream_factory_ops);
 
-    void bind_transport(std::unique_ptr<HttpTransport> transport) noexcept;
+    common::IoErr start(std::unique_ptr<HttpTransport> transport) noexcept;
 
     fiber::async::Task<RunResult> run() noexcept;
     Http2Stream *create_local_stream(std::uint32_t stream_id) noexcept;
@@ -177,6 +177,8 @@ private:
     [[nodiscard]] std::chrono::milliseconds current_read_timeout() const noexcept;
     common::IoErr handle_read_timeout() noexcept;
     common::IoErr send_keepalive_ping() noexcept;
+    common::IoErr start_client_session() noexcept;
+    common::IoErr start_server_session() noexcept;
     void on_stream_outbound_idle(Http2Stream &stream) noexcept;
     fiber::async::Task<RunResult> finalize_run(RunResult result) noexcept;
     fiber::async::Task<void> wait_for_send_loop_exit() noexcept;
