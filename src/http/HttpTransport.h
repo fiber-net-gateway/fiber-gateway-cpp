@@ -11,6 +11,7 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../common/mem/IoBuf.h"
+#include "../event/EventLoop.h"
 #include "../net/TcpListener.h"
 #include "../net/TcpStream.h"
 #include "../net/TlsTcpStream.h"
@@ -40,6 +41,7 @@ public:
     [[nodiscard]] virtual int fd() const noexcept = 0;
     [[nodiscard]] virtual std::string negotiated_alpn() const noexcept = 0;
     [[nodiscard]] virtual const net::SocketAddress &remote_addr() const noexcept = 0;
+    [[nodiscard]] virtual event::EventLoop &loop() const noexcept = 0;
 };
 
 class TcpTransport final : public HttpTransport {
@@ -63,6 +65,7 @@ public:
     [[nodiscard]] int fd() const noexcept override;
     [[nodiscard]] std::string negotiated_alpn() const noexcept override;
     [[nodiscard]] const net::SocketAddress &remote_addr() const noexcept override;
+    [[nodiscard]] event::EventLoop &loop() const noexcept override;
 
 private:
     TcpTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr);
@@ -95,6 +98,7 @@ public:
     [[nodiscard]] int fd() const noexcept override;
     [[nodiscard]] std::string negotiated_alpn() const noexcept override;
     [[nodiscard]] const net::SocketAddress &remote_addr() const noexcept override;
+    [[nodiscard]] event::EventLoop &loop() const noexcept override;
 
 private:
     TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, TlsContext &context);

@@ -93,6 +93,7 @@ public:
     [[nodiscard]] int fd() const noexcept override { return -1; }
     [[nodiscard]] std::string negotiated_alpn() const noexcept override { return "h2"; }
     [[nodiscard]] const fiber::net::SocketAddress &remote_addr() const noexcept override { return remote_addr_; }
+    [[nodiscard]] fiber::event::EventLoop &loop() const noexcept override { return loop_ ? *loop_ : fallback_loop_; }
     [[nodiscard]] const std::string &written() const noexcept { return written_; }
 
 private:
@@ -102,6 +103,8 @@ private:
     std::string written_;
     fiber::common::IoErr write_error_ = fiber::common::IoErr::None;
     fiber::net::SocketAddress remote_addr_{};
+    fiber::event::EventLoop *loop_ = fiber::event::EventLoop::current_or_null();
+    mutable fiber::event::EventLoop fallback_loop_{};
 };
 
 struct DummyStreamOwner {

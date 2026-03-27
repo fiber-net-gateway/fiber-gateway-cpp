@@ -163,6 +163,7 @@ public:
     [[nodiscard]] int fd() const noexcept override { return -1; }
     [[nodiscard]] std::string negotiated_alpn() const noexcept override { return "h2"; }
     [[nodiscard]] const fiber::net::SocketAddress &remote_addr() const noexcept override { return remote_addr_; }
+    [[nodiscard]] fiber::event::EventLoop &loop() const noexcept override { return loop_ ? *loop_ : fallback_loop_; }
     [[nodiscard]] const std::string &written() const noexcept { return written_; }
     [[nodiscard]] std::size_t close_count() const noexcept { return close_count_; }
     [[nodiscard]] std::size_t shutdown_count() const noexcept { return shutdown_count_; }
@@ -189,6 +190,8 @@ private:
     std::size_t shutdown_count_ = 0;
     std::string written_;
     fiber::net::SocketAddress remote_addr_{};
+    fiber::event::EventLoop *loop_ = fiber::event::EventLoop::current_or_null();
+    mutable fiber::event::EventLoop fallback_loop_{};
 };
 
 class ScriptedReadTransport final : public fiber::http::HttpTransport {
@@ -298,6 +301,7 @@ public:
     [[nodiscard]] int fd() const noexcept override { return -1; }
     [[nodiscard]] std::string negotiated_alpn() const noexcept override { return "h2"; }
     [[nodiscard]] const fiber::net::SocketAddress &remote_addr() const noexcept override { return remote_addr_; }
+    [[nodiscard]] fiber::event::EventLoop &loop() const noexcept override { return loop_ ? *loop_ : fallback_loop_; }
     [[nodiscard]] const std::string &written() const noexcept { return written_; }
     [[nodiscard]] std::size_t close_count() const noexcept { return close_count_; }
 
@@ -309,6 +313,8 @@ private:
     std::size_t shutdown_count_ = 0;
     std::string written_;
     fiber::net::SocketAddress remote_addr_{};
+    fiber::event::EventLoop *loop_ = fiber::event::EventLoop::current_or_null();
+    mutable fiber::event::EventLoop fallback_loop_{};
 };
 
 struct ObservedChunk {
@@ -323,7 +329,7 @@ public:
     RecordingHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport, Options options) :
         fiber::http::Http2Connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
                                      TestHttp2StreamFactory::ops()) {
-        bind_transport(std::move(transport));
+        FIBER_ASSERT(start(std::move(transport)) == fiber::common::IoErr::None);
     }
 
     const std::vector<ObservedChunk> &chunks() const noexcept { return chunks_; }
@@ -888,9 +894,15 @@ DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderR
     };
     fiber::http::ServerRequestFactory factory(http_options, wrapped_handler);
     fiber::http::Http2Connection connection(options, &factory, fiber::http::ServerRequestFactory::ops());
-    connection.bind_transport(std::move(transport));
-
     ServerHeaderRunOutcome outcome;
+    fiber::common::IoErr start_err = connection.start(std::move(transport));
+    if (start_err != fiber::common::IoErr::None) {
+        outcome.result = std::unexpected(start_err);
+        promise->set_value(std::move(outcome));
+        fiber::event::EventLoop::current().stop();
+        co_return;
+    }
+
     outcome.result = co_await connection.run();
     outcome.written = fake_transport->written();
     promise->set_value(std::move(outcome));
@@ -959,7 +971,7 @@ public:
         fiber::http::Http2Connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
                                      TestHttp2StreamFactory::ops()),
         fake_transport_(fake_transport) {
-        bind_transport(std::move(transport));
+        FIBER_ASSERT(start(std::move(transport)) == fiber::common::IoErr::None);
     }
 
     fiber::common::IoErr submit_bytes(std::string_view data) noexcept {
@@ -992,7 +1004,7 @@ public:
         fiber::http::Http2Connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
                                      TestHttp2StreamFactory::ops()),
         fake_transport_(fake_transport) {
-        bind_transport(std::move(transport));
+        FIBER_ASSERT(start(std::move(transport)) == fiber::common::IoErr::None);
     }
 
     fiber::http::Http2Stream *open_stream(std::uint32_t stream_id) noexcept { return create_local_stream(stream_id); }
@@ -1034,7 +1046,7 @@ public:
         fiber::http::Http2Connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
                                      TestHttp2StreamFactory::ops()),
         transport_impl_(transport_impl) {
-        bind_transport(std::move(transport));
+        FIBER_ASSERT(start(std::move(transport)) == fiber::common::IoErr::None);
     }
 
     [[nodiscard]] const std::string &written() const noexcept { return transport_impl_->written(); }
@@ -1883,15 +1895,33 @@ TEST(Http2ConnectionTest, ServerConnectionPrefaceSendsSettingsAndWindowUpdateAft
     EXPECT_EQ(frames[1].length, 4U);
 }
 
-TEST(Http2ConnectionTest, LocalStreamCreationRequiresRun) {
+TEST(Http2ConnectionTest, LocalStreamCreationRequiresStart) {
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
 
-    auto transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{});
-    auto *fake_transport = transport.get();
-    ControlHttp2Connection connection(std::move(transport), fake_transport, options);
+    fiber::http::Http2Connection connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
+                                            TestHttp2StreamFactory::ops());
+    EXPECT_EQ(connection.create_local_stream(1), nullptr);
+    fiber::event::EventLoopGroup group(1);
+    auto promise = std::make_shared<std::promise<bool>>();
+    auto future = promise->get_future();
 
-    EXPECT_EQ(connection.open_stream(1), nullptr);
+    group.start();
+    fiber::async::spawn(group.at(0), [promise, options]() mutable -> fiber::async::DetachedTask {
+        auto transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{});
+        auto *fake_transport = transport.get();
+        ControlHttp2Connection started(std::move(transport), fake_transport, options);
+        bool opened = started.open_stream(1) != nullptr;
+        started.request_stop();
+        co_await started.stop_and_join();
+        promise->set_value(opened);
+        fiber::event::EventLoop::current().stop();
+        co_return;
+    });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_TRUE(future.get());
+    group.join();
 }
 
 TEST(Http2ConnectionTest, GracefulShutdownSendsGoawayAndClosesTransportAfterQueueDrains) {

@@ -232,9 +232,12 @@ public:
     [[nodiscard]] int fd() const noexcept override { return -1; }
     [[nodiscard]] std::string negotiated_alpn() const noexcept override { return "h2"; }
     [[nodiscard]] const fiber::net::SocketAddress &remote_addr() const noexcept override { return remote_addr_; }
+    [[nodiscard]] fiber::event::EventLoop &loop() const noexcept override { return loop_ ? *loop_ : fallback_loop_; }
 
 private:
     fiber::net::SocketAddress remote_addr_{};
+    fiber::event::EventLoop *loop_ = fiber::event::EventLoop::current_or_null();
+    mutable fiber::event::EventLoop fallback_loop_{};
 };
 
 const fiber::http::Http2HpackEncodeCatalog &test_http2_encode_catalog() {
@@ -326,9 +329,7 @@ TEST(Http2StreamTest, AdditionalLeaseRetainsEmbeddedOwnerUntilLastReferenceDrops
 }
 
 TEST(Http2StreamTest, MaybeReplenishRecvWindowEnqueuesWindowUpdateAndTracksRemainingWindow) {
-    auto transport = std::make_unique<DummyHttpTransport>();
     fiber::http::Http2Connection connection(make_options(), &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
-    connection.bind_transport(std::move(transport));
     connection.state_ = fiber::http::Http2Connection::State::Running;
 
     fiber::http::Http2Stream *stream = connection.create_peer_stream(1);
