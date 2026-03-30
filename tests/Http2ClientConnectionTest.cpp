@@ -8,9 +8,9 @@
 #include "async/Spawn.h"
 #include "common/IoError.h"
 #include "event/EventLoopGroup.h"
+#include "http/ClientHttp2Exchange.h"
 #include "http/Http2ClientConnection.h"
 #include "http/Http2HpackEncodeCatalog.h"
-#include "http/ClientHttp2Request.h"
 #include "net/TcpListener.h"
 
 namespace {
@@ -85,16 +85,14 @@ DetachedTask run_client_connect_and_shutdown(fiber::event::EventLoop *loop,
     }
 
     fiber::mem::BufPool pool;
-    fiber::http::ClientHttp2Request *request = fiber::http::ClientHttp2Request::create(connection.http2(), pool);
-    bool opened = false;
-    if (request != nullptr) {
-        auto attach_result = connection.http2().attach_local_stream(request->stream());
-        if (attach_result) {
-            opened = true;
-        } else {
-            delete request;
-        }
-    }
+    fiber::http::ClientHttp2Exchange exchange = connection.open_exchange(pool);
+    auto send_result = co_await exchange.send_request_header({
+        .method = fiber::http::HttpMethod::Get,
+        .scheme = "http",
+        .authority = "127.0.0.1",
+        .path = "/",
+    }, true);
+    bool opened = send_result.has_value() && exchange.stream_id() != 0;
     opened_promise->set_value(opened);
     stop_flag->store(true, std::memory_order_release);
 

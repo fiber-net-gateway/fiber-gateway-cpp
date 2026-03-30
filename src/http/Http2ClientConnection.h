@@ -15,6 +15,8 @@
 
 namespace fiber::http {
 
+class ClientHttp2Exchange;
+
 class Http2ClientConnection : public common::NonCopyable, public common::NonMovable {
 public:
     struct Options {
@@ -27,6 +29,8 @@ public:
 
     fiber::async::Task<common::IoResult<void>> connect() noexcept;
     fiber::async::Task<Http2Connection::RunResult> run() noexcept;
+
+    [[nodiscard]] ClientHttp2Exchange open_exchange(mem::BufPool &pool) noexcept;
 
     void shutdown(common::IoErr reason = common::IoErr::Canceled) noexcept;
     void graceful_shutdown() noexcept;
