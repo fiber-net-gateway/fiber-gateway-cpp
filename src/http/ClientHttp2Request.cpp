@@ -49,8 +49,6 @@ common::IoErr noop_header_block_start(void *, Http2HpackDecoder::Sink &sink) noe
 
 common::IoErr noop_header_block_complete(void *, bool) noexcept { return common::IoErr::None; }
 
-common::IoErr noop_body(void *, mem::IoBuf &&, bool) noexcept { return common::IoErr::None; }
-
 } // namespace
 
 struct ClientHttp2Request::SendRequestHeaderOp {
@@ -133,16 +131,17 @@ Http2Stream::Lease ClientHttp2Request::create_peer_stream_op(void *, std::uint32
 const Http2Stream::Ops &ClientHttp2Request::stream_ops() noexcept {
     static const Http2Stream::Ops kOps{
         &ClientHttp2Request::destroy_owner,
-        &noop_header_block_start,
-        &noop_header_block_complete,
-        &noop_body,
+        &ClientHttp2Request::on_header_block_start,
+        &ClientHttp2Request::on_header_block_complete,
+        &ClientHttp2Request::on_body,
         &ClientHttp2Request::on_stream_abort,
         &ClientHttp2Request::on_stream_send_window_available,
     };
     return kOps;
 }
 
-ClientHttp2Request::ClientHttp2Request(Http2Connection &conn) noexcept : conn_(&conn), stream_(this, stream_ops()), pool_() {}
+ClientHttp2Request::ClientHttp2Request(Http2Connection &conn) noexcept :
+    conn_(&conn), stream_(this, stream_ops()), pool_(), response_body_recv_(conn.options_.read_timeout) {}
 
 ClientHttp2Request *ClientHttp2Request::create(Http2Connection &conn) noexcept {
     return new (std::nothrow) ClientHttp2Request(conn);
@@ -228,6 +227,36 @@ fiber::async::Task<common::IoResult<void>> ClientHttp2Request::write_trailer(con
         co_return std::unexpected(err);
     }
     co_return co_await awaiter;
+}
+
+fiber::async::Task<common::IoResult<BodyChunk>> ClientHttp2Request::read_body(std::size_t max_bytes) noexcept {
+    if (conn_ == nullptr) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    co_return co_await response_body_recv_.read_body(stream_, max_bytes);
+}
+
+common::IoErr ClientHttp2Request::on_header_block_start(void *owner, Http2HpackDecoder::Sink &sink) noexcept {
+    return noop_header_block_start(owner, sink);
+}
+
+common::IoErr ClientHttp2Request::on_header_block_complete(void *owner, bool end_stream) noexcept {
+    if (!owner) {
+        return common::IoErr::Invalid;
+    }
+    auto *request = static_cast<ClientHttp2Request *>(owner);
+    if (end_stream) {
+        request->response_body_recv_.close_input();
+    }
+    return noop_header_block_complete(owner, end_stream);
+}
+
+common::IoErr ClientHttp2Request::on_body(void *owner, mem::IoBuf &&buf, bool end_stream) noexcept {
+    if (!owner) {
+        return common::IoErr::Invalid;
+    }
+    auto *request = static_cast<ClientHttp2Request *>(owner);
+    return request->response_body_recv_.push_body(std::move(buf), end_stream);
 }
 
 common::IoErr ClientHttp2Request::encode_request_frames(Http2Stream &stream, void *ctx,
@@ -530,6 +559,7 @@ void ClientHttp2Request::on_stream_aborted(common::IoErr reason) noexcept {
     if (send_awaiter_ != nullptr) {
         send_awaiter_->on_abort(abort_reason_);
     }
+    response_body_recv_.abort(abort_reason_);
 }
 
 void ClientHttp2Request::on_body_send_complete(BodySendAwaiter *awaiter, common::IoErr result) noexcept {

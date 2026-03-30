@@ -9,6 +9,7 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../common/mem/BufPool.h"
+#include "detail/Http2BodyRecvState.h"
 #include "detail/Http2SendAwaiter.h"
 #include "Http2StreamFactory.h"
 #include "Http2Stream.h"
@@ -34,6 +35,7 @@ public:
                                                                    bool end_stream) noexcept;
     fiber::async::Task<common::IoResult<std::size_t>> write_body(BodyChunk chunk) noexcept;
     fiber::async::Task<common::IoResult<void>> write_trailer(const HttpHeaders &headers) noexcept;
+    fiber::async::Task<common::IoResult<BodyChunk>> read_body(std::size_t max_bytes) noexcept;
 
     [[nodiscard]] Http2Stream &stream() noexcept { return stream_; }
     [[nodiscard]] const Http2Stream &stream() const noexcept { return stream_; }
@@ -52,6 +54,9 @@ private:
                                                     Http2Connection &conn) noexcept;
     explicit ClientHttp2Request(Http2Connection &conn) noexcept;
     static const Http2Stream::Ops &stream_ops() noexcept;
+    static common::IoErr on_header_block_start(void *owner, Http2HpackDecoder::Sink &sink) noexcept;
+    static common::IoErr on_header_block_complete(void *owner, bool end_stream) noexcept;
+    static common::IoErr on_body(void *owner, mem::IoBuf &&buf, bool end_stream) noexcept;
     static common::IoErr encode_request_frames(Http2Stream &stream, void *ctx, const Http2OutboundEncodeRequest &req,
                                                Http2OutboundEncodeTarget &target,
                                                Http2OutboundEncodeResult &result) noexcept;
@@ -75,6 +80,7 @@ private:
     Http2Connection *conn_ = nullptr;
     Http2Stream stream_;
     mem::BufPool pool_;
+    detail::Http2BodyRecvState response_body_recv_;
     SendAwaiter *send_awaiter_ = nullptr;
     common::IoErr abort_reason_ = common::IoErr::None;
     bool request_headers_sent_ = false;
