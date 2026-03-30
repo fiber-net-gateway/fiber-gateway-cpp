@@ -1,5 +1,6 @@
 #include "ClientHttp2Exchange.h"
 
+#include <cstring>
 #include <new>
 #include <utility>
 
@@ -42,26 +43,49 @@ fiber::async::Task<common::IoResult<void>> ClientHttp2Exchange::send_request_hea
     co_return co_await req->send_request_header(head, end_stream);
 }
 
-fiber::async::Task<common::IoResult<size_t>> ClientHttp2Exchange::write_body(BodyChunk) noexcept {
-    if (!valid()) {
+fiber::async::Task<common::IoResult<size_t>> ClientHttp2Exchange::write_body(BodyChunk chunk) noexcept {
+    if (!stream_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    co_return std::unexpected(common::IoErr::NotSupported);
+    ClientHttp2Request *req = request();
+    if (!req) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    co_return co_await req->write_body(std::move(chunk));
 }
 
-fiber::async::Task<common::IoResult<size_t>> ClientHttp2Exchange::write_body(const std::uint8_t *, std::size_t,
-                                                                              bool) noexcept {
-    if (!valid()) {
+fiber::async::Task<common::IoResult<size_t>> ClientHttp2Exchange::write_body(const std::uint8_t *buf, std::size_t len,
+                                                                              bool end_stream) noexcept {
+    if (len != 0 && buf == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    co_return std::unexpected(common::IoErr::NotSupported);
+
+    BodyChunk chunk;
+    chunk.last = end_stream;
+    if (len != 0) {
+        mem::IoBuf owned = mem::IoBuf::allocate(len);
+        if (!owned) {
+            co_return std::unexpected(common::IoErr::NoMem);
+        }
+        std::memcpy(owned.writable_data(), buf, len);
+        owned.commit(len);
+        if (!chunk.data_chain.append(std::move(owned))) {
+            co_return std::unexpected(common::IoErr::NoMem);
+        }
+    }
+
+    co_return co_await write_body(std::move(chunk));
 }
 
-fiber::async::Task<common::IoResult<void>> ClientHttp2Exchange::write_trailer(const HttpHeaders &) noexcept {
-    if (!valid()) {
+fiber::async::Task<common::IoResult<void>> ClientHttp2Exchange::write_trailer(const HttpHeaders &headers) noexcept {
+    if (!stream_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    co_return std::unexpected(common::IoErr::NotSupported);
+    ClientHttp2Request *req = request();
+    if (!req) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    co_return co_await req->write_trailer(headers);
 }
 
 fiber::async::Task<common::IoResult<Http2ResponseHead>> ClientHttp2Exchange::read_header(mem::BufPool &pool) noexcept {
