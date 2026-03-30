@@ -9,6 +9,7 @@
 #include "../async/Spawn.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
+#include "detail/Http2SendAwaiter.h"
 #include "HeaderMap.h"
 #include "HttpExchange.h"
 #include "HttpExchangeIo.h"
@@ -42,9 +43,11 @@ private:
     using PseudoHeaderHandler = common::IoErr (*)(ServerHttp2Request &, std::string_view value) noexcept;
     struct BodyReadPollResult;
     class BodyReadAwaiter;
-    class SendAwaiter;
-    class HeaderSendAwaiter;
-    class BodySendAwaiter;
+    struct SendResponseHeaderOp;
+    struct SendResponseBodyOp;
+    using SendAwaiter = detail::SendAwaiterBase<ServerHttp2Request>;
+    using HeaderSendAwaiter = detail::HeaderSendAwaiter<ServerHttp2Request, SendResponseHeaderOp>;
+    using BodySendAwaiter = detail::BodySendAwaiter<ServerHttp2Request, SendResponseBodyOp>;
 
     static const Http2Stream::Ops &stream_ops() noexcept;
     static const Http2HpackDecoder::Ops &decoder_ops() noexcept;
@@ -95,6 +98,7 @@ private:
     void cancel_body_waiter(BodyReadAwaiter *awaiter) noexcept;
     void notify_body_waiter() noexcept;
     [[nodiscard]] bool cancel_queued_send() noexcept;
+    void on_send_complete(SendAwaiter *awaiter, common::IoErr result) noexcept;
     void on_header_send_complete(HeaderSendAwaiter *awaiter, common::IoErr result) noexcept;
     void on_body_send_complete(BodySendAwaiter *awaiter, common::IoErr result) noexcept;
     void on_stream_send_window_available() noexcept;
@@ -127,6 +131,13 @@ private:
     std::string_view pending_name_;
     std::uint64_t pending_name_hash_ = 0;
     bool pending_name_owned_ = false;
+
+    template<class>
+    friend class detail::SendAwaiterBase;
+    template<class, class>
+    friend class detail::HeaderSendAwaiter;
+    template<class, class>
+    friend class detail::BodySendAwaiter;
 };
 
 } // namespace fiber::http
