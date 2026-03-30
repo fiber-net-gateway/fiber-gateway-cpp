@@ -96,11 +96,15 @@ fiber::async::Task<common::IoResult<Http2ResponseHead>> ClientHttp2Exchange::rea
     co_return std::unexpected(common::IoErr::NotSupported);
 }
 
-fiber::async::Task<common::IoResult<BodyChunk>> ClientHttp2Exchange::read_body(std::size_t) noexcept {
-    if (!valid()) {
+fiber::async::Task<common::IoResult<BodyChunk>> ClientHttp2Exchange::read_body(std::size_t max_bytes) noexcept {
+    if (!stream_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    co_return std::unexpected(common::IoErr::NotSupported);
+    ClientHttp2Request *req = request();
+    if (!req) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    co_return co_await req->read_body(max_bytes);
 }
 
 void ClientHttp2Exchange::cancel(common::IoErr reason) noexcept {
