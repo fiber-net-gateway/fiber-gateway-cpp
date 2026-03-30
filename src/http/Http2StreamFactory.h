@@ -10,7 +10,6 @@ namespace fiber::http {
 class Http2Connection;
 
 struct Http2StreamFactoryOps {
-    Http2Stream::Lease (*create_local_stream)(void *ctx, std::uint32_t stream_id, Http2Connection &conn) noexcept;
     Http2Stream::Lease (*create_peer_stream)(void *ctx, std::uint32_t stream_id, Http2Connection &conn) noexcept;
 };
 

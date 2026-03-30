@@ -92,7 +92,7 @@ public:
     Http2Stream(Http2Stream &&) = delete;
     Http2Stream &operator=(Http2Stream &&) = delete;
 
-    Http2Stream(std::uint32_t stream_id, void *owner, const Ops &ops) noexcept;
+    Http2Stream(void *owner, const Ops &ops) noexcept;
 
     [[nodiscard]] std::uint32_t stream_id() const noexcept { return stream_id_; }
     [[nodiscard]] void *owner() noexcept { return owner_; }
@@ -128,6 +128,7 @@ private:
     void on_outbound_send_complete() noexcept;
     [[nodiscard]] bool ready_for_connection_release() const noexcept;
     [[nodiscard]] bool ready_for_destruction() const noexcept;
+    void attach_to_connection(Http2Connection &conn, std::uint32_t stream_id) noexcept;
     void retain() noexcept;
     void release() noexcept;
 

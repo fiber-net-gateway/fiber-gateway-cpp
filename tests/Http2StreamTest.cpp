@@ -22,8 +22,7 @@
 namespace {
 
 struct OwnedStreamHolder {
-    explicit OwnedStreamHolder(std::uint32_t stream_id, bool *destroyed) :
-        destroyed_flag(destroyed), stream(stream_id, this, ops()) {}
+    explicit OwnedStreamHolder(bool *destroyed) : destroyed_flag(destroyed), stream(this, ops()) {}
 
     static const fiber::http::Http2Stream::Ops &ops() noexcept {
         static const fiber::http::Http2Stream::Ops kOps{
@@ -151,8 +150,7 @@ struct OwnedStreamHolder {
 };
 
 struct SendWindowNotifyOwner {
-    explicit SendWindowNotifyOwner(std::uint32_t stream_id, int *notify_count) :
-        notify_count_ptr(notify_count), stream(stream_id, this, ops()) {}
+    explicit SendWindowNotifyOwner(int *notify_count) : notify_count_ptr(notify_count), stream(this, ops()) {}
 
     static const fiber::http::Http2Stream::Ops &ops() noexcept {
         static const fiber::http::Http2Stream::Ops kOps{
@@ -267,7 +265,7 @@ std::uint32_t parse_window_update_increment(const std::uint8_t *data) {
 } // namespace
 
 TEST(Http2StreamTest, OwnerBackedCreateReturnsUsableLease) {
-    fiber::http::Http2Stream::Lease stream = TestHttp2StreamOwner::create(1);
+    fiber::http::Http2Stream::Lease stream = TestHttp2StreamOwner::create();
     ASSERT_TRUE(stream);
 
     stream->close(fiber::common::IoErr::Canceled);
@@ -276,7 +274,7 @@ TEST(Http2StreamTest, OwnerBackedCreateReturnsUsableLease) {
 
 TEST(Http2StreamTest, UpdateSendWindowNotifiesWhenCrossingIntoPositiveRange) {
     int notify_count = 0;
-    auto *owner = new SendWindowNotifyOwner(7, &notify_count);
+    auto *owner = new SendWindowNotifyOwner(&notify_count);
     fiber::http::Http2Stream::Lease stream = fiber::http::Http2Stream::Lease::adopt(&owner->stream);
     ASSERT_TRUE(stream);
 
@@ -300,7 +298,7 @@ TEST(Http2StreamTest, UpdateSendWindowNotifiesWhenCrossingIntoPositiveRange) {
 
 TEST(Http2StreamTest, EmbeddedOwnerIsDestroyedWhenAdoptedLeaseReleasesClosedStream) {
     bool destroyed = false;
-    auto *owner = new OwnedStreamHolder(3, &destroyed);
+    auto *owner = new OwnedStreamHolder(&destroyed);
     fiber::http::Http2Stream::Lease stream = fiber::http::Http2Stream::Lease::adopt(&owner->stream);
     ASSERT_TRUE(stream);
 
@@ -313,7 +311,7 @@ TEST(Http2StreamTest, EmbeddedOwnerIsDestroyedWhenAdoptedLeaseReleasesClosedStre
 
 TEST(Http2StreamTest, AdditionalLeaseRetainsEmbeddedOwnerUntilLastReferenceDrops) {
     bool destroyed = false;
-    auto *owner = new OwnedStreamHolder(5, &destroyed);
+    auto *owner = new OwnedStreamHolder(&destroyed);
     fiber::http::Http2Stream::Lease initial = fiber::http::Http2Stream::Lease::adopt(&owner->stream);
     fiber::http::Http2Stream::Lease extra = owner->stream.lease();
     ASSERT_TRUE(initial);

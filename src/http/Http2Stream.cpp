@@ -5,8 +5,7 @@
 
 namespace fiber::http {
 
-Http2Stream::Http2Stream(std::uint32_t stream_id, void *owner, const Ops &ops) noexcept :
-    stream_id_(stream_id), owner_(owner), ops_(&ops) {
+Http2Stream::Http2Stream(void *owner, const Ops &ops) noexcept : owner_(owner), ops_(&ops) {
     FIBER_ASSERT(owner_ != nullptr);
     FIBER_ASSERT(ops_ != nullptr);
     FIBER_ASSERT(ops_->on_destroy != nullptr);
@@ -183,6 +182,16 @@ bool Http2Stream::ready_for_connection_release() const noexcept {
 
 bool Http2Stream::ready_for_destruction() const noexcept {
     return !attached_to_connection_ && ready_for_connection_release() && ref_count_ == 0;
+}
+
+void Http2Stream::attach_to_connection(Http2Connection &conn, std::uint32_t stream_id) noexcept {
+    FIBER_ASSERT(!attached_to_connection_);
+    FIBER_ASSERT(conn_ == nullptr);
+    FIBER_ASSERT(stream_id_ == 0);
+    FIBER_ASSERT(stream_id != 0);
+    stream_id_ = stream_id;
+    conn_ = &conn;
+    attached_to_connection_ = true;
 }
 
 void Http2Stream::retain() noexcept { ++ref_count_; }

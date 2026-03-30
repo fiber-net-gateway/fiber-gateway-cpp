@@ -57,11 +57,11 @@ const Http2Stream::Ops &ClientHttp2Push::stream_ops() noexcept {
     return kOps;
 }
 
-ClientHttp2Push::ClientHttp2Push(std::uint32_t stream_id, Http2Connection &conn) noexcept :
-    conn_(&conn), stream_(stream_id, this, stream_ops()) {}
+ClientHttp2Push::ClientHttp2Push(Http2Connection &conn) noexcept : conn_(&conn), stream_(this, stream_ops()) {}
 
 Http2Stream::Lease ClientHttp2Push::create(std::uint32_t stream_id, Http2Connection &conn) noexcept {
-    auto *owner = new (std::nothrow) ClientHttp2Push(stream_id, conn);
+    (void) stream_id;
+    auto *owner = new (std::nothrow) ClientHttp2Push(conn);
     if (!owner) {
         return {};
     }

@@ -522,7 +522,8 @@ std::string build_headers_frame_bytes(std::uint32_t stream_id,
         FakeHttpTransport transport({}, {});
         fiber::http::Http2OutboundScheduler scheduler(&transport, 1024, std::chrono::seconds(30), 16384);
         int owner = 0;
-        fiber::http::Http2Stream stream(test_case.stream_id, &owner, kHeaderEncodeStreamOps);
+        fiber::http::Http2Stream stream(&owner, kHeaderEncodeStreamOps);
+        stream.stream_id_ = test_case.stream_id;
 
         fiber::common::IoErr err = scheduler.request_send(stream, fiber::http::Http2OutboundNextKind::Headers,
                                                           &encode_headers_frame_for_test, &test_case);
@@ -1007,7 +1008,19 @@ public:
         FIBER_ASSERT(start(std::move(transport)) == fiber::common::IoErr::None);
     }
 
-    fiber::http::Http2Stream *open_stream(std::uint32_t stream_id) noexcept { return create_local_stream(stream_id); }
+    fiber::http::Http2Stream *open_stream() noexcept {
+        auto *owner = TestHttp2StreamOwner::create_owner();
+        if (!owner) {
+            return nullptr;
+        }
+        auto lease = attach_local_stream(owner->stream);
+        if (!lease) {
+            delete owner;
+            return nullptr;
+        }
+        return lease->get();
+    }
+    fiber::http::Http2Stream *open_stream(std::uint32_t) noexcept { return open_stream(); }
     void request_graceful_close() noexcept { graceful_shutdown(); }
     [[nodiscard]] std::int32_t current_connection_send_window() const noexcept { return connection_send_window(); }
     [[nodiscard]] std::uint32_t current_peer_max_frame_size() const noexcept { return peer_max_outbound_frame_size(); }
@@ -1239,15 +1252,35 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
     std::uint32_t stream1_id = 0;
     std::uint32_t stream3_id = 0;
     ControlRunOutcome outcome;
-    fiber::http::Http2Stream::Lease local_stream1 = TestHttp2StreamOwner::create(1);
-    fiber::http::Http2Stream::Lease local_stream3 = TestHttp2StreamOwner::create(3);
-
-    if (!local_stream1 || !local_stream3) {
+    auto *local_owner1 = TestHttp2StreamOwner::create_owner();
+    auto *local_owner3 = TestHttp2StreamOwner::create_owner();
+    if (!local_owner1 || !local_owner3) {
+        delete local_owner1;
+        delete local_owner3;
         outcome.result = std::unexpected(fiber::common::IoErr::NoMem);
         promise->set_value(std::move(outcome));
         fiber::event::EventLoop::current().stop();
         co_return;
     }
+    fiber::http::Http2Stream::Lease local_stream1;
+    fiber::http::Http2Stream::Lease local_stream3;
+    auto local_stream1_result = connection.attach_local_stream(local_owner1->stream);
+    auto local_stream3_result = connection.attach_local_stream(local_owner3->stream);
+    if (!local_stream1_result || !local_stream3_result) {
+        if (!local_stream1_result) {
+            delete local_owner1;
+        }
+        if (!local_stream3_result) {
+            delete local_owner3;
+        }
+        outcome.result = std::unexpected(!local_stream1_result ? local_stream1_result.error()
+                                                               : local_stream3_result.error());
+        promise->set_value(std::move(outcome));
+        fiber::event::EventLoop::current().stop();
+        co_return;
+    }
+    local_stream1 = std::move(*local_stream1_result);
+    local_stream3 = std::move(*local_stream3_result);
 
     auto capture_outcome = [&]() {
         ControlSetupContext ctx;
@@ -1901,7 +1934,11 @@ TEST(Http2ConnectionTest, LocalStreamCreationRequiresStart) {
 
     fiber::http::Http2Connection connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
                                             TestHttp2StreamFactory::ops());
-    EXPECT_EQ(connection.create_local_stream(1), nullptr);
+    auto *owner = TestHttp2StreamOwner::create_owner();
+    ASSERT_NE(owner, nullptr);
+    auto lease = connection.attach_local_stream(owner->stream);
+    EXPECT_FALSE(lease.has_value());
+    delete owner;
     fiber::event::EventLoopGroup group(1);
     auto promise = std::make_shared<std::promise<bool>>();
     auto future = promise->get_future();
@@ -1911,7 +1948,7 @@ TEST(Http2ConnectionTest, LocalStreamCreationRequiresStart) {
         auto transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{});
         auto *fake_transport = transport.get();
         ControlHttp2Connection started(std::move(transport), fake_transport, options);
-        bool opened = started.open_stream(1) != nullptr;
+        bool opened = started.open_stream() != nullptr;
         started.request_stop();
         co_await started.stop_and_join();
         promise->set_value(opened);
