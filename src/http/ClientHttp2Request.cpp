@@ -11,43 +11,16 @@
 #include "ClientHttp2Push.h"
 #include "Http2Connection.h"
 #include "Http2DataFrameEncoder.h"
+#include "detail/Http2HeaderDecodeUtil.h"
 #include "Http2HeadersFrameEncoder.h"
 
 namespace fiber::http {
 
 namespace {
 
-common::IoErr noop_indexed_field(void *, Http2HpackDecoder::TableEntryView) noexcept { return common::IoErr::None; }
+bool is_status_informational(int status_code) noexcept { return status_code >= 100 && status_code < 200; }
 
-common::IoErr noop_indexed_name(void *, std::string_view, std::uint64_t) noexcept { return common::IoErr::None; }
-
-common::IoErr noop_name_raw(void *, const std::uint8_t *, std::size_t) noexcept { return common::IoErr::None; }
-
-common::IoErr noop_name_huffman(void *, const std::uint8_t *, std::size_t) noexcept { return common::IoErr::None; }
-
-common::IoErr noop_value_raw(void *, const std::uint8_t *, std::size_t, Http2HpackDecoder::FieldView *) noexcept {
-    return common::IoErr::None;
-}
-
-common::IoErr noop_value_huffman(void *, const std::uint8_t *, std::size_t, Http2HpackDecoder::FieldView *) noexcept {
-    return common::IoErr::None;
-}
-
-common::IoErr noop_header_block_start(void *, Http2HpackDecoder::Sink &sink) noexcept {
-    static const Http2HpackDecoder::Ops kDecoderOps{
-        &noop_indexed_field,
-        &noop_indexed_name,
-        &noop_name_raw,
-        &noop_name_huffman,
-        &noop_value_raw,
-        &noop_value_huffman,
-    };
-    sink.ctx = nullptr;
-    sink.ops = &kDecoderOps;
-    return common::IoErr::None;
-}
-
-common::IoErr noop_header_block_complete(void *, bool) noexcept { return common::IoErr::None; }
+bool is_valid_status_code(int status_code) noexcept { return status_code >= 100 && status_code <= 999; }
 
 } // namespace
 
@@ -140,11 +113,27 @@ const Http2Stream::Ops &ClientHttp2Request::stream_ops() noexcept {
     return kOps;
 }
 
-ClientHttp2Request::ClientHttp2Request(Http2Connection &conn) noexcept :
-    conn_(&conn), stream_(this, stream_ops()), pool_(), response_body_recv_(conn.options_.read_timeout) {}
+const Http2HpackDecoder::Ops &ClientHttp2Request::decoder_ops() noexcept {
+    static const Http2HpackDecoder::Ops kOps{
+        &ClientHttp2Request::on_indexed_field,
+        &ClientHttp2Request::on_indexed_name,
+        &ClientHttp2Request::on_name_raw,
+        &ClientHttp2Request::on_name_huffman,
+        &ClientHttp2Request::on_value_raw,
+        &ClientHttp2Request::on_value_huffman,
+    };
+    return kOps;
+}
 
-ClientHttp2Request *ClientHttp2Request::create(Http2Connection &conn) noexcept {
-    return new (std::nothrow) ClientHttp2Request(conn);
+ClientHttp2Request::ClientHttp2Request(Http2Connection &conn, mem::BufPool &pool) noexcept
+    : conn_(&conn),
+      stream_(this, stream_ops()),
+      pool_(&pool),
+      response_body_recv_(conn.options_.read_timeout),
+      response_header_recv_(pool, conn.options_.read_timeout) {}
+
+ClientHttp2Request *ClientHttp2Request::create(Http2Connection &conn, mem::BufPool &pool) noexcept {
+    return new (std::nothrow) ClientHttp2Request(conn, pool);
 }
 
 fiber::async::Task<common::IoResult<void>> ClientHttp2Request::send_request_header(const Http2RequestHead &head,
@@ -236,8 +225,41 @@ fiber::async::Task<common::IoResult<BodyChunk>> ClientHttp2Request::read_body(st
     co_return co_await response_body_recv_.read_body(stream_, max_bytes);
 }
 
+fiber::async::Task<common::IoResult<const Http2ResponseHead *>> ClientHttp2Request::read_header() noexcept {
+    if (conn_ == nullptr) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    co_return co_await response_header_recv_.read_header();
+}
+
 common::IoErr ClientHttp2Request::on_header_block_start(void *owner, Http2HpackDecoder::Sink &sink) noexcept {
-    return noop_header_block_start(owner, sink);
+    if (!owner) {
+        return common::IoErr::Invalid;
+    }
+    auto *request = static_cast<ClientHttp2Request *>(owner);
+    if (request->current_header_node_ != nullptr) {
+        return common::IoErr::Invalid;
+    }
+    if (request->response_head_received_) {
+        if (request->stream_.remote_end_stream() || request->stream_.remote_rst()) {
+            return common::IoErr::Invalid;
+        }
+        request->reading_trailers_ = true;
+    } else {
+        request->reading_trailers_ = false;
+    }
+    request->current_header_node_ = request->response_header_recv_.allocate_node();
+    if (!request->current_header_node_) {
+        return common::IoErr::NoMem;
+    }
+    request->pending_name_ = {};
+    request->pending_name_hash_ = 0;
+    request->pending_name_owned_ = false;
+    request->current_block_has_status_ = false;
+    request->saw_regular_header_in_block_ = false;
+    sink.ctx = request;
+    sink.ops = &decoder_ops();
+    return common::IoErr::None;
 }
 
 common::IoErr ClientHttp2Request::on_header_block_complete(void *owner, bool end_stream) noexcept {
@@ -245,10 +267,57 @@ common::IoErr ClientHttp2Request::on_header_block_complete(void *owner, bool end
         return common::IoErr::Invalid;
     }
     auto *request = static_cast<ClientHttp2Request *>(owner);
+    auto *node = request->current_header_node_;
+    if (!node) {
+        return common::IoErr::Invalid;
+    }
+
+    if (request->reading_trailers_) {
+        if (request->current_block_has_status_ || !end_stream) {
+            return common::IoErr::Invalid;
+        }
+        node->head.kind = OutgoingHeaderKind::Trailer;
+        node->head.end_stream = end_stream;
+        common::IoErr err = request->response_header_recv_.push_header_block(node);
+        request->current_header_node_ = nullptr;
+        request->pending_name_ = {};
+        request->pending_name_hash_ = 0;
+        request->pending_name_owned_ = false;
+        if (err != common::IoErr::None) {
+            return err;
+        }
+        if (end_stream) {
+            request->response_body_recv_.close_input();
+            request->response_header_recv_.close_input();
+        }
+        return common::IoErr::None;
+    }
+
+    if (!request->current_block_has_status_ || !is_valid_status_code(node->head.status_code)) {
+        return common::IoErr::Invalid;
+    }
+    node->head.kind = is_status_informational(node->head.status_code) ? OutgoingHeaderKind::Informational
+                                                                      : OutgoingHeaderKind::Final;
+    if (end_stream && node->head.kind == OutgoingHeaderKind::Informational) {
+        return common::IoErr::Invalid;
+    }
+    node->head.end_stream = end_stream;
+    common::IoErr err = request->response_header_recv_.push_header_block(node);
+    request->current_header_node_ = nullptr;
+    request->pending_name_ = {};
+    request->pending_name_hash_ = 0;
+    request->pending_name_owned_ = false;
+    if (err != common::IoErr::None) {
+        return err;
+    }
+    if (node->head.kind == OutgoingHeaderKind::Final) {
+        request->response_head_received_ = true;
+    }
     if (end_stream) {
         request->response_body_recv_.close_input();
+        request->response_header_recv_.close_input();
     }
-    return noop_header_block_complete(owner, end_stream);
+    return common::IoErr::None;
 }
 
 common::IoErr ClientHttp2Request::on_body(void *owner, mem::IoBuf &&buf, bool end_stream) noexcept {
@@ -256,7 +325,145 @@ common::IoErr ClientHttp2Request::on_body(void *owner, mem::IoBuf &&buf, bool en
         return common::IoErr::Invalid;
     }
     auto *request = static_cast<ClientHttp2Request *>(owner);
-    return request->response_body_recv_.push_body(std::move(buf), end_stream);
+    if (!request->response_head_received_ || request->reading_trailers_) {
+        return common::IoErr::Invalid;
+    }
+    common::IoErr err = request->response_body_recv_.push_body(std::move(buf), end_stream);
+    if (err != common::IoErr::None) {
+        return err;
+    }
+    if (end_stream) {
+        request->response_header_recv_.close_input();
+    }
+    return common::IoErr::None;
+}
+
+common::IoErr ClientHttp2Request::on_indexed_field(void *owner, Http2HpackDecoder::TableEntryView entry) noexcept {
+    if (!owner) {
+        return common::IoErr::Invalid;
+    }
+    auto *request = static_cast<ClientHttp2Request *>(owner);
+    return request->commit_field(entry.name, entry.name_hash, entry.value);
+}
+
+common::IoErr ClientHttp2Request::on_indexed_name(void *owner, std::string_view name,
+                                                  std::uint64_t name_hash) noexcept {
+    if (!owner) {
+        return common::IoErr::Invalid;
+    }
+    auto *request = static_cast<ClientHttp2Request *>(owner);
+    request->pending_name_ = name;
+    request->pending_name_hash_ = name_hash;
+    request->pending_name_owned_ = false;
+    return common::IoErr::None;
+}
+
+common::IoErr ClientHttp2Request::on_name_raw(void *owner, const std::uint8_t *data, std::size_t len) noexcept {
+    if (!owner) {
+        return common::IoErr::Invalid;
+    }
+    auto *request = static_cast<ClientHttp2Request *>(owner);
+    std::string_view name;
+    std::uint64_t name_hash = 0;
+    common::IoErr err = request->materialize_name_raw(data, len, name, name_hash);
+    if (err != common::IoErr::None) {
+        return err;
+    }
+    request->pending_name_ = name;
+    request->pending_name_hash_ = name_hash;
+    request->pending_name_owned_ = true;
+    return common::IoErr::None;
+}
+
+common::IoErr ClientHttp2Request::on_name_huffman(void *owner, const std::uint8_t *data, std::size_t len) noexcept {
+    if (!owner) {
+        return common::IoErr::Invalid;
+    }
+    auto *request = static_cast<ClientHttp2Request *>(owner);
+    std::string_view name;
+    std::uint64_t name_hash = 0;
+    common::IoErr err = request->materialize_name_huffman(data, len, name, name_hash);
+    if (err != common::IoErr::None) {
+        return err;
+    }
+    request->pending_name_ = name;
+    request->pending_name_hash_ = name_hash;
+    request->pending_name_owned_ = true;
+    return common::IoErr::None;
+}
+
+common::IoErr ClientHttp2Request::on_value_raw(void *owner, const std::uint8_t *data, std::size_t len,
+                                               Http2HpackDecoder::FieldView *out) noexcept {
+    if (!owner) {
+        return common::IoErr::Invalid;
+    }
+    auto *request = static_cast<ClientHttp2Request *>(owner);
+    std::string_view value;
+    common::IoErr err = request->materialize_value_raw(data, len, value);
+    if (err != common::IoErr::None) {
+        return err;
+    }
+    if (request->pending_name_.data() == nullptr) {
+        return common::IoErr::Invalid;
+    }
+    std::uint64_t pending_name_hash = request->pending_name_hash_;
+    std::string_view pending_name = request->pending_name_;
+    bool pending_name_owned = request->pending_name_owned_;
+    if (out != nullptr && !pending_name_owned) {
+        pending_name = request->copy_to_pool(pending_name);
+        if (!pending_name.data() && !request->pending_name_.empty()) {
+            return common::IoErr::NoMem;
+        }
+        pending_name_owned = true;
+        out->name = pending_name;
+        out->name_hash = pending_name_hash;
+        out->value = value;
+    } else if (out != nullptr) {
+        out->name = pending_name;
+        out->name_hash = pending_name_hash;
+        out->value = value;
+    }
+    request->pending_name_ = {};
+    request->pending_name_hash_ = 0;
+    request->pending_name_owned_ = false;
+    return request->commit_field(pending_name, pending_name_hash, value, pending_name_owned);
+}
+
+common::IoErr ClientHttp2Request::on_value_huffman(void *owner, const std::uint8_t *data, std::size_t len,
+                                                   Http2HpackDecoder::FieldView *out) noexcept {
+    if (!owner) {
+        return common::IoErr::Invalid;
+    }
+    auto *request = static_cast<ClientHttp2Request *>(owner);
+    std::string_view value;
+    common::IoErr err = request->materialize_value_huffman(data, len, value);
+    if (err != common::IoErr::None) {
+        return err;
+    }
+    if (request->pending_name_.data() == nullptr) {
+        return common::IoErr::Invalid;
+    }
+    std::uint64_t pending_name_hash = request->pending_name_hash_;
+    std::string_view pending_name = request->pending_name_;
+    bool pending_name_owned = request->pending_name_owned_;
+    if (out != nullptr && !pending_name_owned) {
+        pending_name = request->copy_to_pool(pending_name);
+        if (!pending_name.data() && !request->pending_name_.empty()) {
+            return common::IoErr::NoMem;
+        }
+        pending_name_owned = true;
+        out->name = pending_name;
+        out->name_hash = pending_name_hash;
+        out->value = value;
+    } else if (out != nullptr) {
+        out->name = pending_name;
+        out->name_hash = pending_name_hash;
+        out->value = value;
+    }
+    request->pending_name_ = {};
+    request->pending_name_hash_ = 0;
+    request->pending_name_owned_ = false;
+    return request->commit_field(pending_name, pending_name_hash, value, pending_name_owned);
 }
 
 common::IoErr ClientHttp2Request::encode_request_frames(Http2Stream &stream, void *ctx,
@@ -541,6 +748,86 @@ bool ClientHttp2Request::cancel_queued_send() noexcept {
     return conn_ != nullptr && conn_->cancel_queued_stream_send(stream_);
 }
 
+common::IoErr ClientHttp2Request::handle_status(std::string_view value) noexcept {
+    if (reading_trailers_ || current_block_has_status_ || value.size() != 3) {
+        return common::IoErr::Invalid;
+    }
+    int status_code = 0;
+    for (char ch : value) {
+        if (ch < '0' || ch > '9') {
+            return common::IoErr::Invalid;
+        }
+        status_code = status_code * 10 + (ch - '0');
+    }
+    current_header_node_->head.status_code = status_code;
+    current_block_has_status_ = true;
+    return common::IoErr::None;
+}
+
+common::IoErr ClientHttp2Request::commit_field(std::string_view name, std::uint64_t name_hash, std::string_view value,
+                                               bool name_owned) noexcept {
+    if (current_header_node_ == nullptr) {
+        return common::IoErr::Invalid;
+    }
+    if (!name.empty() && name.front() == ':') {
+        if (name == ":status") {
+            return handle_status(value);
+        }
+        return common::IoErr::Invalid;
+    }
+    return commit_regular_header(name, name_hash, value, name_owned);
+}
+
+common::IoErr ClientHttp2Request::commit_regular_header(std::string_view name, std::uint64_t name_hash,
+                                                        std::string_view value, bool name_owned) noexcept {
+    if (!current_header_node_) {
+        return common::IoErr::Invalid;
+    }
+    std::string_view name_copy = name_owned ? name : copy_to_pool(name);
+    if (!name_copy.data() && !name.empty()) {
+        return common::IoErr::NoMem;
+    }
+    std::string_view value_copy = copy_to_pool(value);
+    if (!value_copy.data() && !value.empty()) {
+        return common::IoErr::NoMem;
+    }
+    if (current_header_node_->head.headers.add_view(name_copy, value_copy, const_cast<char *>(name_copy.data()),
+                                                    name_hash) == nullptr) {
+        return common::IoErr::NoMem;
+    }
+    saw_regular_header_in_block_ = true;
+    return common::IoErr::None;
+}
+
+common::IoErr ClientHttp2Request::materialize_name_raw(const std::uint8_t *data, std::size_t len,
+                                                       std::string_view &out, std::uint64_t &name_hash) noexcept {
+    FIBER_ASSERT(pool_ != nullptr);
+    return detail::materialize_name_raw(*pool_, data, len, out, name_hash);
+}
+
+common::IoErr ClientHttp2Request::materialize_name_huffman(const std::uint8_t *data, std::size_t len,
+                                                           std::string_view &out, std::uint64_t &name_hash) noexcept {
+    FIBER_ASSERT(pool_ != nullptr);
+    return detail::materialize_name_huffman(*pool_, data, len, out, name_hash);
+}
+
+common::IoErr ClientHttp2Request::materialize_value_raw(const std::uint8_t *data, std::size_t len,
+                                                        std::string_view &out) noexcept {
+    FIBER_ASSERT(pool_ != nullptr);
+    return detail::materialize_value_raw(*pool_, data, len, out);
+}
+
+common::IoErr ClientHttp2Request::materialize_value_huffman(const std::uint8_t *data, std::size_t len,
+                                                            std::string_view &out) noexcept {
+    FIBER_ASSERT(pool_ != nullptr);
+    return detail::materialize_value_huffman(*pool_, data, len, out);
+}
+
+std::string_view ClientHttp2Request::copy_to_pool(std::string_view value) noexcept {
+    FIBER_ASSERT(pool_ != nullptr);
+    return detail::copy_to_pool(*pool_, value);
+}
+
 void ClientHttp2Request::on_send_complete(SendAwaiter *awaiter, common::IoErr result) noexcept {
     if (!awaiter || send_awaiter_ != awaiter) {
         return;
@@ -560,6 +847,7 @@ void ClientHttp2Request::on_stream_aborted(common::IoErr reason) noexcept {
         send_awaiter_->on_abort(abort_reason_);
     }
     response_body_recv_.abort(abort_reason_);
+    response_header_recv_.abort(abort_reason_);
 }
 
 void ClientHttp2Request::on_body_send_complete(BodySendAwaiter *awaiter, common::IoErr result) noexcept {
