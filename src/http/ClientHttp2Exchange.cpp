@@ -11,15 +11,19 @@
 
 namespace fiber::http {
 
-ClientHttp2Exchange::ClientHttp2Exchange(Http2Connection &conn) noexcept : conn_(&conn) {}
+ClientHttp2Exchange::ClientHttp2Exchange(Http2Connection &conn, mem::BufPool &pool) noexcept
+    : conn_(&conn), pool_(&pool) {}
 
-ClientHttp2Exchange::ClientHttp2Exchange(Http2ClientConnection &conn) noexcept : ClientHttp2Exchange(conn.http2()) {}
+ClientHttp2Exchange::ClientHttp2Exchange(Http2ClientConnection &conn, mem::BufPool &pool) noexcept
+    : ClientHttp2Exchange(conn.http2(), pool) {}
 
-ClientHttp2Exchange::ClientHttp2Exchange(Http2Stream::Lease stream) noexcept : stream_(std::move(stream)) {}
+ClientHttp2Exchange::ClientHttp2Exchange(Http2Stream::Lease stream, mem::BufPool &pool) noexcept
+    : pool_(&pool), stream_(std::move(stream)) {}
 
 ClientHttp2Exchange::ClientHttp2Exchange(ClientHttp2Exchange &&other) noexcept :
-    conn_(other.conn_), stream_(std::move(other.stream_)) {
+    conn_(other.conn_), pool_(other.pool_), stream_(std::move(other.stream_)) {
     other.conn_ = nullptr;
+    other.pool_ = nullptr;
 }
 
 ClientHttp2Exchange &ClientHttp2Exchange::operator=(ClientHttp2Exchange &&other) noexcept {
@@ -27,8 +31,10 @@ ClientHttp2Exchange &ClientHttp2Exchange::operator=(ClientHttp2Exchange &&other)
         return *this;
     }
     conn_ = other.conn_;
+    pool_ = other.pool_;
     stream_ = std::move(other.stream_);
     other.conn_ = nullptr;
+    other.pool_ = nullptr;
     return *this;
 }
 
@@ -88,12 +94,15 @@ fiber::async::Task<common::IoResult<void>> ClientHttp2Exchange::write_trailer(co
     co_return co_await req->write_trailer(headers);
 }
 
-fiber::async::Task<common::IoResult<Http2ResponseHead>> ClientHttp2Exchange::read_header(mem::BufPool &pool) noexcept {
-    if (!valid()) {
+fiber::async::Task<common::IoResult<const Http2ResponseHead *>> ClientHttp2Exchange::read_header() noexcept {
+    if (!stream_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    Http2ResponseHead head(pool);
-    co_return std::unexpected(common::IoErr::NotSupported);
+    ClientHttp2Request *req = request();
+    if (!req) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    co_return co_await req->read_header();
 }
 
 fiber::async::Task<common::IoResult<BodyChunk>> ClientHttp2Exchange::read_body(std::size_t max_bytes) noexcept {
@@ -126,8 +135,11 @@ common::IoResult<ClientHttp2Request *> ClientHttp2Exchange::ensure_request_opene
     if (!conn_) {
         return std::unexpected(common::IoErr::Invalid);
     }
+    if (!pool_) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
 
-    ClientHttp2Request *req = ClientHttp2Request::create(*conn_);
+    ClientHttp2Request *req = ClientHttp2Request::create(*conn_, *pool_);
     if (!req) {
         return std::unexpected(common::IoErr::NoMem);
     }

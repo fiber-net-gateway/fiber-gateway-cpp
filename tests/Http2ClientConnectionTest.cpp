@@ -84,7 +84,8 @@ DetachedTask run_client_connect_and_shutdown(fiber::event::EventLoop *loop,
         co_return;
     }
 
-    fiber::http::ClientHttp2Request *request = fiber::http::ClientHttp2Request::create(connection.http2());
+    fiber::mem::BufPool pool;
+    fiber::http::ClientHttp2Request *request = fiber::http::ClientHttp2Request::create(connection.http2(), pool);
     bool opened = false;
     if (request != nullptr) {
         auto attach_result = connection.http2().attach_local_stream(request->stream());
