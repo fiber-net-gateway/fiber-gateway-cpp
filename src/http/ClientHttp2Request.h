@@ -9,6 +9,7 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../common/mem/BufPool.h"
+#include "detail/Http2SendAwaiter.h"
 #include "Http2StreamFactory.h"
 #include "Http2Stream.h"
 
@@ -38,10 +39,13 @@ public:
     [[nodiscard]] const Http2Stream &stream() const noexcept { return stream_; }
 
 private:
-    class SendAwaiter;
-    class HeaderSendAwaiter;
-    class BodySendAwaiter;
-    class TrailerSendAwaiter;
+    struct SendRequestHeaderOp;
+    struct SendRequestBodyOp;
+    struct SendRequestTrailerOp;
+    using SendAwaiter = detail::SendAwaiterBase<ClientHttp2Request>;
+    using HeaderSendAwaiter = detail::HeaderSendAwaiter<ClientHttp2Request, SendRequestHeaderOp>;
+    using BodySendAwaiter = detail::BodySendAwaiter<ClientHttp2Request, SendRequestBodyOp>;
+    using TrailerSendAwaiter = detail::HeaderSendAwaiter<ClientHttp2Request, SendRequestTrailerOp>;
 
     static Http2Stream::Lease create_peer_stream(std::uint32_t stream_id, Http2Connection &conn) noexcept;
     static Http2Stream::Lease create_peer_stream_op(void *ctx, std::uint32_t stream_id,
@@ -61,6 +65,7 @@ private:
     static void on_stream_send_window_available(void *owner) noexcept;
     static void destroy_owner(void *owner) noexcept;
     [[nodiscard]] bool cancel_queued_send() noexcept;
+    void on_send_complete(SendAwaiter *awaiter, common::IoErr result) noexcept;
     void on_header_send_complete(HeaderSendAwaiter *awaiter, common::IoErr result) noexcept;
     void on_body_send_complete(BodySendAwaiter *awaiter, common::IoErr result) noexcept;
     void on_trailer_send_complete(TrailerSendAwaiter *awaiter, common::IoErr result) noexcept;
@@ -74,6 +79,13 @@ private:
     common::IoErr abort_reason_ = common::IoErr::None;
     bool request_headers_sent_ = false;
     bool request_finished_ = false;
+
+    template<class>
+    friend class detail::SendAwaiterBase;
+    template<class, class>
+    friend class detail::HeaderSendAwaiter;
+    template<class, class>
+    friend class detail::BodySendAwaiter;
 };
 
 } // namespace fiber::http
