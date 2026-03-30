@@ -240,6 +240,7 @@ private:
     friend class Http2Stream;
     friend class Http2OutboundScheduler;
     friend class ServerHttp2Request;
+    friend class ClientHttp2Request;
 };
 
 } // namespace fiber::http

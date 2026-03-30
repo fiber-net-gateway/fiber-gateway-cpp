@@ -30,6 +30,7 @@
 #include "http/Http2HpackEncodeCatalog.h"
 #include "http/Http2HpackEncoder.h"
 #include "http/Http2HpackHuffman.h"
+#include "http/ClientHttp2Exchange.h"
 #include "http/Http2Stream.h"
 #include "http/ServerRequestFactory.h"
 #include "Http2TestSupport.h"
@@ -373,6 +374,12 @@ struct ServerHeaderRunOutcome {
     fiber::common::IoResult<void> result;
     fiber::common::IoResult<void> header_result{};
     std::string written;
+};
+
+struct ClientRequestHeaderRunOutcome {
+    fiber::common::IoResult<void> result;
+    std::string written;
+    std::uint32_t stream_id = 0;
 };
 
 struct ControlRunOutcome {
@@ -998,6 +1005,44 @@ private:
     FakeHttpTransport *fake_transport_ = nullptr;
 };
 
+DetachedTask run_client_request_header_send(std::shared_ptr<std::promise<ClientRequestHeaderRunOutcome>> promise) {
+    ClientRequestHeaderRunOutcome outcome;
+    auto fake_transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{});
+    auto *fake_transport_ptr = fake_transport.get();
+
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+    SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
+
+    fiber::http::ClientHttp2Exchange exchange(connection);
+    fiber::mem::BufPool pool;
+    fiber::http::HttpHeaders headers(pool);
+    if (headers.set("user-agent", "fiber-test") == nullptr) {
+        outcome.result = std::unexpected(fiber::common::IoErr::NoMem);
+        connection.request_stop();
+        co_await connection.stop_and_join();
+        promise->set_value(std::move(outcome));
+        fiber::event::EventLoop::current().stop();
+        co_return;
+    }
+
+    outcome.result = co_await exchange.send_request_header({
+        .method = fiber::http::HttpMethod::Post,
+        .scheme = "https",
+        .authority = "example.com",
+        .path = "/submit",
+        .headers = &headers,
+    }, true);
+    outcome.stream_id = exchange.stream_id();
+
+    connection.request_stop();
+    co_await connection.stop_and_join();
+    outcome.written = fake_transport_ptr->written();
+    promise->set_value(std::move(outcome));
+    fiber::event::EventLoop::current().stop();
+    co_return;
+}
+
 class ControlHttp2Connection final : public fiber::http::Http2Connection {
 public:
     ControlHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport, FakeHttpTransport *fake_transport,
@@ -1143,22 +1188,8 @@ DetachedTask run_control_setup_task(ControlSetupContext ctx) {
 
     if (ctx.block_reads_for_setup) {
         if (ctx.open_streams_for_setup) {
-            for (int i = 0; i < 20 && (!*ctx.stream1 || !*ctx.stream3); ++i) {
-                if (!*ctx.stream1) {
-                    set_control_stream_slot(ctx.stream1, ctx.stream1_id, ctx.connection->open_stream(1));
-                }
-                if (!*ctx.stream3) {
-                    set_control_stream_slot(ctx.stream3, ctx.stream3_id, ctx.connection->open_stream(3));
-                }
-                if (!*ctx.stream1 || !*ctx.stream3) {
-                    co_await fiber::async::sleep(std::chrono::milliseconds(1));
-                }
-            }
-            if (!*ctx.stream1 || !*ctx.stream3) {
-                ctx.connection->request_stop(fiber::common::IoErr::Invalid);
-                ctx.fake_transport->release_reads();
-                co_return;
-            }
+            set_control_stream_slot(ctx.stream1, ctx.stream1_id, ctx.local_stream1);
+            set_control_stream_slot(ctx.stream3, ctx.stream3_id, ctx.local_stream3);
         } else {
             set_control_stream_slot(ctx.stream1, ctx.stream1_id, ctx.local_stream1);
             set_control_stream_slot(ctx.stream3, ctx.stream3_id, ctx.local_stream3);
@@ -1252,35 +1283,37 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
     std::uint32_t stream1_id = 0;
     std::uint32_t stream3_id = 0;
     ControlRunOutcome outcome;
-    auto *local_owner1 = TestHttp2StreamOwner::create_owner();
-    auto *local_owner3 = TestHttp2StreamOwner::create_owner();
-    if (!local_owner1 || !local_owner3) {
-        delete local_owner1;
-        delete local_owner3;
-        outcome.result = std::unexpected(fiber::common::IoErr::NoMem);
-        promise->set_value(std::move(outcome));
-        fiber::event::EventLoop::current().stop();
-        co_return;
-    }
     fiber::http::Http2Stream::Lease local_stream1;
     fiber::http::Http2Stream::Lease local_stream3;
-    auto local_stream1_result = connection.attach_local_stream(local_owner1->stream);
-    auto local_stream3_result = connection.attach_local_stream(local_owner3->stream);
-    if (!local_stream1_result || !local_stream3_result) {
-        if (!local_stream1_result) {
+    if (options.role == fiber::http::Http2Connection::ConnectionRole::Client) {
+        auto *local_owner1 = TestHttp2StreamOwner::create_owner();
+        auto *local_owner3 = TestHttp2StreamOwner::create_owner();
+        if (!local_owner1 || !local_owner3) {
             delete local_owner1;
-        }
-        if (!local_stream3_result) {
             delete local_owner3;
+            outcome.result = std::unexpected(fiber::common::IoErr::NoMem);
+            promise->set_value(std::move(outcome));
+            fiber::event::EventLoop::current().stop();
+            co_return;
         }
-        outcome.result = std::unexpected(!local_stream1_result ? local_stream1_result.error()
-                                                               : local_stream3_result.error());
-        promise->set_value(std::move(outcome));
-        fiber::event::EventLoop::current().stop();
-        co_return;
+        auto local_stream1_result = connection.attach_local_stream(local_owner1->stream);
+        auto local_stream3_result = connection.attach_local_stream(local_owner3->stream);
+        if (!local_stream1_result || !local_stream3_result) {
+            if (!local_stream1_result) {
+                delete local_owner1;
+            }
+            if (!local_stream3_result) {
+                delete local_owner3;
+            }
+            outcome.result = std::unexpected(!local_stream1_result ? local_stream1_result.error()
+                                                                   : local_stream3_result.error());
+            promise->set_value(std::move(outcome));
+            fiber::event::EventLoop::current().stop();
+            co_return;
+        }
+        local_stream1 = std::move(*local_stream1_result);
+        local_stream3 = std::move(*local_stream3_result);
     }
-    local_stream1 = std::move(*local_stream1_result);
-    local_stream3 = std::move(*local_stream3_result);
 
     auto capture_outcome = [&]() {
         ControlSetupContext ctx;
@@ -1959,6 +1992,50 @@ TEST(Http2ConnectionTest, LocalStreamCreationRequiresStart) {
     ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     EXPECT_TRUE(future.get());
     group.join();
+}
+
+TEST(Http2ConnectionTest, ClientExchangeSendRequestHeaderEncodesRequestHeaders) {
+    fiber::event::EventLoopGroup group(1);
+    auto promise = std::make_shared<std::promise<ClientRequestHeaderRunOutcome>>();
+    auto future = promise->get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [promise]() mutable { return run_client_request_header_send(std::move(promise)); });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ClientRequestHeaderRunOutcome outcome = future.get();
+    group.join();
+
+    ASSERT_TRUE(outcome.result.has_value());
+    EXPECT_EQ(outcome.stream_id, 1U);
+    ASSERT_GE(outcome.written.size(), kClientConnectionPreface.size());
+    EXPECT_EQ(outcome.written.substr(0, kClientConnectionPreface.size()), kClientConnectionPreface);
+
+    ParsedHeadersFrames parsed =
+        collect_stream_headers_frames(std::string_view(outcome.written).substr(kClientConnectionPreface.size()), 1);
+    ASSERT_FALSE(parsed.header_block.empty());
+    EXPECT_EQ(parsed.first_flags & 0x1U, 0x1U);
+    EXPECT_EQ(parsed.first_flags & 0x4U, 0x4U);
+
+    const auto fields = decode_header_block(parsed.header_block);
+    ASSERT_GE(fields.size(), 5U);
+    EXPECT_EQ(fields[0].first, ":method");
+    EXPECT_EQ(fields[0].second, "POST");
+    EXPECT_EQ(fields[1].first, ":scheme");
+    EXPECT_EQ(fields[1].second, "https");
+    EXPECT_EQ(fields[2].first, ":authority");
+    EXPECT_EQ(fields[2].second, "example.com");
+    EXPECT_EQ(fields[3].first, ":path");
+    EXPECT_EQ(fields[3].second, "/submit");
+
+    bool found_user_agent = false;
+    for (const auto &field : fields) {
+        if (field.first == "user-agent" && field.second == "fiber-test") {
+            found_user_agent = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found_user_agent);
 }
 
 TEST(Http2ConnectionTest, GracefulShutdownSendsGoawayAndClosesTransportAfterQueueDrains) {

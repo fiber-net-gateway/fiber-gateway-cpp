@@ -66,6 +66,34 @@ common::IoErr Http2HeadersFrameEncoder::encode_status(int status_code) noexcept 
     return encoder_.encode_status(status_code);
 }
 
+common::IoErr Http2HeadersFrameEncoder::encode_method(HttpMethod method) noexcept {
+    if (!begun_ || finished_) {
+        return common::IoErr::Invalid;
+    }
+    return encoder_.encode_method(method);
+}
+
+common::IoErr Http2HeadersFrameEncoder::encode_scheme(std::string_view scheme) noexcept {
+    if (!begun_ || finished_) {
+        return common::IoErr::Invalid;
+    }
+    return encoder_.encode_scheme(scheme);
+}
+
+common::IoErr Http2HeadersFrameEncoder::encode_authority(std::string_view authority) noexcept {
+    if (!begun_ || finished_) {
+        return common::IoErr::Invalid;
+    }
+    return encoder_.encode_authority(authority);
+}
+
+common::IoErr Http2HeadersFrameEncoder::encode_path(std::string_view path) noexcept {
+    if (!begun_ || finished_) {
+        return common::IoErr::Invalid;
+    }
+    return encoder_.encode_path(path);
+}
+
 common::IoErr Http2HeadersFrameEncoder::encode_field(std::string_view name, std::uint64_t name_hash,
                                                      std::string_view value) noexcept {
     if (!begun_ || finished_) {

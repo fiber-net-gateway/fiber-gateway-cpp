@@ -9,6 +9,7 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../common/mem/IoBuf.h"
+#include "HttpCommon.h"
 #include "Http2HpackEncoder.h"
 
 namespace fiber::http {
@@ -34,6 +35,10 @@ public:
 
     [[nodiscard]] common::IoErr begin(Http2OutboundEncodeTarget &target) noexcept;
     [[nodiscard]] common::IoErr encode_status(int status_code) noexcept;
+    [[nodiscard]] common::IoErr encode_method(HttpMethod method) noexcept;
+    [[nodiscard]] common::IoErr encode_scheme(std::string_view scheme) noexcept;
+    [[nodiscard]] common::IoErr encode_authority(std::string_view authority) noexcept;
+    [[nodiscard]] common::IoErr encode_path(std::string_view path) noexcept;
     [[nodiscard]] common::IoErr encode_field(std::string_view name, std::uint64_t name_hash,
                                              std::string_view value) noexcept;
     [[nodiscard]] common::IoErr finish() noexcept;
