@@ -10,6 +10,7 @@
 #include "event/EventLoopGroup.h"
 #include "http/Http2ClientConnection.h"
 #include "http/Http2HpackEncodeCatalog.h"
+#include "http/ClientHttp2Request.h"
 #include "net/TcpListener.h"
 
 namespace {
@@ -83,7 +84,16 @@ DetachedTask run_client_connect_and_shutdown(fiber::event::EventLoop *loop,
         co_return;
     }
 
-    bool opened = connection.http2().create_local_stream(1) != nullptr;
+    fiber::http::ClientHttp2Request *request = fiber::http::ClientHttp2Request::create(connection.http2());
+    bool opened = false;
+    if (request != nullptr) {
+        auto attach_result = connection.http2().attach_local_stream(request->stream());
+        if (attach_result) {
+            opened = true;
+        } else {
+            delete request;
+        }
+    }
     opened_promise->set_value(opened);
     stop_flag->store(true, std::memory_order_release);
 

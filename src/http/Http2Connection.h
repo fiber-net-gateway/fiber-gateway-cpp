@@ -75,12 +75,12 @@ public:
 
     virtual ~Http2Connection();
 
-    Http2Connection(Options options, void *stream_factory_ctx, const Http2StreamFactoryOps &stream_factory_ops);
+    Http2Connection(Options options, void *peer_stream_factory_ctx, const Http2StreamFactoryOps &peer_stream_factory_ops);
 
     common::IoErr start(std::unique_ptr<HttpTransport> transport) noexcept;
 
     fiber::async::Task<RunResult> run() noexcept;
-    Http2Stream *create_local_stream(std::uint32_t stream_id) noexcept;
+    [[nodiscard]] common::IoResult<Http2Stream::Lease> attach_local_stream(Http2Stream &stream) noexcept;
     void shutdown(common::IoErr reason = common::IoErr::Canceled) noexcept;
     void graceful_shutdown() noexcept;
     [[nodiscard]] State state() const noexcept { return state_; }
@@ -161,9 +161,8 @@ private:
     void detach_stream(Http2Stream &stream) noexcept;
     void try_release_stream(Http2Stream &stream) noexcept;
     bool can_accept_peer_stream(std::uint32_t stream_id) const noexcept;
-    bool can_create_local_stream(std::uint32_t stream_id) const noexcept;
+    bool can_attach_local_stream() const noexcept;
     bool is_next_peer_stream_id(std::uint32_t stream_id) const noexcept;
-    bool is_next_local_stream_id(std::uint32_t stream_id) const noexcept;
     void handle_peer_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept;
     void close_streams_after_goaway(std::uint32_t last_stream_id) noexcept;
     [[nodiscard]] bool is_idle_stream(std::uint32_t stream_id) const noexcept;
@@ -192,21 +191,21 @@ private:
     void enter_closing(common::IoErr reason, bool abortive = true) noexcept;
     void close_all_streams(common::IoErr result) noexcept;
     void clear_inbound_stream() noexcept;
-    [[nodiscard]] Http2Stream::Lease alloc_local_stream(std::uint32_t stream_id) noexcept;
     [[nodiscard]] Http2Stream::Lease alloc_peer_stream(std::uint32_t stream_id) noexcept;
     [[nodiscard]] Http2HpackEncoder &outbound_hpack_encoder() noexcept { return outbound_hpack_encoder_; }
     [[nodiscard]] const Http2HpackEncoder &outbound_hpack_encoder() const noexcept { return outbound_hpack_encoder_; }
 
     std::unique_ptr<HttpTransport> transport_;
     Options options_;
-    void *stream_factory_ctx_ = nullptr;
-    const Http2StreamFactoryOps stream_factory_ops_{};
+    void *peer_stream_factory_ctx_ = nullptr;
+    const Http2StreamFactoryOps peer_stream_factory_ops_{};
     Http2StreamTable streams_;
     Http2HpackDecoder inbound_hpack_decoder_;
     Http2HpackEncoder outbound_hpack_encoder_;
     std::uint32_t peer_advertised_max_concurrent_streams_ = 100;
     std::uint32_t last_peer_stream_id_ = 0;
     std::uint32_t last_local_stream_id_ = 0;
+    std::uint32_t next_local_stream_id_ = 0;
     std::size_t peer_active_stream_count_ = 0;
     std::size_t local_push_stream_count_ = 0;
     std::int32_t conn_send_window_ = 0;

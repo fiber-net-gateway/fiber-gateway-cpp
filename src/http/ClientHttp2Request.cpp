@@ -49,23 +49,14 @@ void noop_abort(void *, common::IoErr) noexcept {}
 
 const Http2StreamFactoryOps &ClientHttp2Request::factory_ops() noexcept {
     static const Http2StreamFactoryOps kOps{
-        &ClientHttp2Request::create_local_stream_op,
         &ClientHttp2Request::create_peer_stream_op,
     };
     return kOps;
 }
 
-Http2Stream::Lease ClientHttp2Request::create_local_stream(std::uint32_t stream_id, Http2Connection &conn) noexcept {
-    return create(stream_id, conn);
-}
-
 Http2Stream::Lease ClientHttp2Request::create_peer_stream(std::uint32_t stream_id, Http2Connection &conn) noexcept {
+    (void) stream_id;
     return ClientHttp2Push::create(stream_id, conn);
-}
-
-Http2Stream::Lease ClientHttp2Request::create_local_stream_op(void *, std::uint32_t stream_id,
-                                                              Http2Connection &conn) noexcept {
-    return create_local_stream(stream_id, conn);
 }
 
 Http2Stream::Lease ClientHttp2Request::create_peer_stream_op(void *, std::uint32_t stream_id,
@@ -84,15 +75,10 @@ const Http2Stream::Ops &ClientHttp2Request::stream_ops() noexcept {
     return kOps;
 }
 
-ClientHttp2Request::ClientHttp2Request(std::uint32_t stream_id, Http2Connection &conn) noexcept :
-    conn_(&conn), stream_(stream_id, this, stream_ops()) {}
+ClientHttp2Request::ClientHttp2Request(Http2Connection &conn) noexcept : conn_(&conn), stream_(this, stream_ops()) {}
 
-Http2Stream::Lease ClientHttp2Request::create(std::uint32_t stream_id, Http2Connection &conn) noexcept {
-    auto *owner = new (std::nothrow) ClientHttp2Request(stream_id, conn);
-    if (!owner) {
-        return {};
-    }
-    return Http2Stream::Lease::adopt(&owner->stream_);
+ClientHttp2Request *ClientHttp2Request::create(Http2Connection &conn) noexcept {
+    return new (std::nothrow) ClientHttp2Request(conn);
 }
 
 void ClientHttp2Request::destroy_owner(void *owner) noexcept { delete static_cast<ClientHttp2Request *>(owner); }

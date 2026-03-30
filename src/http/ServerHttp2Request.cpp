@@ -553,8 +553,9 @@ const HeaderMap<ServerHttp2Request::PseudoHeaderHandler> &ServerHttp2Request::ps
 ServerHttp2Request::ServerHttp2Request(std::uint32_t stream_id, Http2Connection &conn,
                                        const HttpServerOptions &http_options,
                                        const HttpHandler &handler) noexcept :
-    conn_(&conn), handler_(&handler), stream_(stream_id, this, stream_ops()), exchange_(http_options),
+    conn_(&conn), handler_(&handler), stream_(this, stream_ops()), exchange_(http_options),
     body_timeout_(http_options.body_timeout), write_timeout_(http_options.write_timeout) {
+    (void) stream_id;
     FIBER_ASSERT(handler_ != nullptr);
 }
 

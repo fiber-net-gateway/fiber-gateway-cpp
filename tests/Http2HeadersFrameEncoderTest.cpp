@@ -15,9 +15,11 @@
 #include "http/Http2HpackEncodeCatalog.h"
 #include "http/Http2HpackDecoder.h"
 #include "http/Http2HpackEncoder.h"
+#define private public
 #include "http/Http2OutboundScheduler.h"
 #include "http/HttpTransport.h"
 #include "http/Http2Stream.h"
+#undef private
 
 namespace {
 
@@ -192,7 +194,8 @@ std::vector<std::uint8_t> encode_headers_bytes_in_place(EncodeCase &test_case) {
         fiber::http::Http2OutboundScheduler scheduler(&transport, 1024, std::chrono::seconds(30),
                                                       test_case.options.max_frame_size);
         int owner = 0;
-        fiber::http::Http2Stream stream(test_case.options.stream_id, &owner, kStreamOps);
+        fiber::http::Http2Stream stream(&owner, kStreamOps);
+        stream.stream_id_ = test_case.options.stream_id;
 
         fiber::common::IoErr err = scheduler.request_send(stream, fiber::http::Http2OutboundNextKind::Headers,
                                                           &encode_headers_to_target, &test_case);
