@@ -5,6 +5,7 @@
 
 #include "../net/TcpListener.h"
 #include "../net/TcpStream.h"
+#include "ClientHttp2Exchange.h"
 #include "HttpTransport.h"
 
 namespace fiber::http {
@@ -88,6 +89,10 @@ fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect() noex
 }
 
 fiber::async::Task<Http2Connection::RunResult> Http2ClientConnection::run() noexcept { co_return co_await conn_.run(); }
+
+ClientHttp2Exchange Http2ClientConnection::open_exchange(mem::BufPool &pool) noexcept {
+    return ClientHttp2Exchange(*this, pool);
+}
 
 void Http2ClientConnection::shutdown(common::IoErr reason) noexcept { conn_.shutdown(reason); }
 
