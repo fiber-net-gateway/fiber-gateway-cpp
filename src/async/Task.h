@@ -23,12 +23,9 @@ public:
         }
 
         template <typename Promise>
-        void await_suspend(std::coroutine_handle<Promise> handle) noexcept {
+        auto await_suspend(std::coroutine_handle<Promise> handle) noexcept {
             Promise &promise = handle.promise();
-            std::coroutine_handle<> cont = promise.continuation();
-            if (cont) {
-                cont.resume();
-            }
+            return promise.continuation();
         }
 
         void await_resume() noexcept {
@@ -121,9 +118,9 @@ public:
             return !handle || handle.done();
         }
 
-        void await_suspend(std::coroutine_handle<> cont) {
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<> cont) {
             handle.promise().set_continuation(cont);
-            handle.resume();
+            return handle;
         }
 
         T await_resume() {

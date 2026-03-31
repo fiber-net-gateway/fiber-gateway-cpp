@@ -6,6 +6,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -154,7 +155,76 @@ fiber::async::Task<fiber::common::IoResult<void>> send_final_header(
     });
 }
 
+std::optional<std::size_t> parse_query_len(std::string_view query) {
+    while (!query.empty()) {
+        std::size_t next = query.find('&');
+        std::string_view part = next == std::string_view::npos ? query : query.substr(0, next);
+        if (part.substr(0, 4) == "len=") {
+            std::string_view value_text = part.substr(4);
+            if (value_text.empty()) {
+                return std::nullopt;
+            }
+            std::size_t value = 0;
+            for (char ch : value_text) {
+                if (ch < '0' || ch > '9') {
+                    return std::nullopt;
+                }
+                std::size_t digit = static_cast<std::size_t>(ch - '0');
+                if (value > (std::numeric_limits<std::size_t>::max() - digit) / 10) {
+                    return std::nullopt;
+                }
+                value = value * 10 + digit;
+            }
+            return value;
+        }
+        if (next == std::string_view::npos) {
+            break;
+        }
+        query.remove_prefix(next + 1);
+    }
+    return std::nullopt;
+}
+
+fiber::async::Task<void> handle_generate(fiber::http::HttpExchange &exchange, std::size_t total_len) {
+    fiber::http::HttpHeaders headers(exchange.pool());
+    headers.set("Content-Type", "application/octet-stream");
+    auto header_result = co_await send_final_header(exchange, 200, &headers,
+                                                    fiber::http::ResponseBodyMode::ContentLength, total_len, false);
+    if (!header_result) {
+        co_return;
+    }
+
+    std::array<std::uint8_t, 4096> chunk{};
+    std::size_t remaining = total_len;
+    while (remaining > 0) {
+        std::size_t write_len = remaining < chunk.size() ? remaining : chunk.size();
+        auto write_result = co_await exchange.write_body(chunk.data(), write_len, write_len == remaining);
+        if (!write_result) {
+            co_return;
+        }
+        remaining -= write_len;
+    }
+    if (total_len == 0) {
+        co_await exchange.write_body(nullptr, 0, true);
+    }
+    co_return;
+}
+
 fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange) {
+    if (exchange.uri().path == "/gen") {
+        std::optional<std::size_t> body_len = parse_query_len(exchange.uri().query);
+        if (!body_len) {
+            fiber::http::HttpHeaders headers(exchange.pool());
+            headers.set("Content-Type", "text/plain");
+            auto header_result = co_await send_final_header(exchange, 400, &headers,
+                                                            fiber::http::ResponseBodyMode::ContentLength, 0, true);
+            (void) header_result;
+            co_return;
+        }
+        co_await handle_generate(exchange, *body_len);
+        co_return;
+    }
+
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("Content-Type", "application/octet-stream");
     auto header_result = co_await send_final_header(exchange, 200, &headers,
