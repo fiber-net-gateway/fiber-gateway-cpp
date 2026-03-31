@@ -378,7 +378,6 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChai
 
     auto deadline = stream_.loop().now() + timeout;
     std::size_t total_written = 0;
-    bool waited = false;
     for (;;) {
         buf.drop_empty_front();
         mem::IoBuf *target = buf.first_readable();
@@ -403,12 +402,6 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChai
             }
             co_return std::unexpected(err);
         }
-        if (total_written != 0) {
-            co_return total_written;
-        }
-        if (waited) {
-            co_return std::unexpected(common::IoErr::WouldBlock);
-        }
 
         auto wait_result = co_await wait_tls_event(stream_, wait_event, deadline);
         if (!wait_result) {
@@ -417,7 +410,6 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChai
             }
             co_return std::unexpected(wait_result.error());
         }
-        waited = true;
     }
 }
 

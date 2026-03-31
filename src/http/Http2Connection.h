@@ -104,7 +104,9 @@ protected:
     const Http2Stream *find_stream(std::uint32_t stream_id) const noexcept;
     void update_connection_send_window(std::int32_t delta) noexcept;
     void stop_sending(common::IoErr reason = common::IoErr::Canceled) noexcept;
-    [[nodiscard]] std::int32_t connection_send_window() const noexcept { return conn_send_window_; }
+    [[nodiscard]] std::int32_t connection_send_window() const noexcept {
+        return outbound_scheduler_.connection_send_window();
+    }
     [[nodiscard]] std::uint32_t peer_max_outbound_frame_size() const noexcept { return peer_max_outbound_frame_size_; }
     [[nodiscard]] std::uint32_t peer_max_concurrent_streams() const noexcept {
         return peer_advertised_max_concurrent_streams_;
@@ -208,7 +210,6 @@ private:
     std::uint32_t next_local_stream_id_ = 0;
     std::size_t peer_active_stream_count_ = 0;
     std::size_t local_push_stream_count_ = 0;
-    std::int32_t conn_send_window_ = 0;
     std::int32_t conn_recv_window_remaining_ = 65535;
     std::uint32_t conn_recv_window_target_ = 65535;
     std::int32_t peer_initial_stream_send_window_ = 65535;

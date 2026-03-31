@@ -99,32 +99,44 @@ void RWFd::handle_events(fiber::event::IoEvent events) {
     if (fiber::event::any(events & fiber::event::IoEvent::Read)) {
         if (local_read_waiting_) {
             auto *waiter = local_read_waiter_;
-            FIBER_ASSERT(waiter);
-            local_read_waiter_ = nullptr;
-            local_read_waiting_ = false;
-            waiter->coro_.resume();
+            if (!waiter) {
+                local_read_waiting_ = false;
+            } else {
+                local_read_waiter_ = nullptr;
+                local_read_waiting_ = false;
+                waiter->coro_.resume();
+            }
         } else {
             auto *waiter = cross_read_waiter_;
-            FIBER_ASSERT(waiter);
-            cross_read_waiter_ = nullptr;
-            local_read_waiting_ = false;
-            RWFdCrossThreadWaiter::do_notify_resume(waiter);
+            if (!waiter) {
+                local_read_waiting_ = false;
+            } else {
+                cross_read_waiter_ = nullptr;
+                local_read_waiting_ = false;
+                RWFdCrossThreadWaiter::do_notify_resume(waiter);
+            }
         }
     }
 
     if (fiber::event::any(events & fiber::event::IoEvent::Write)) {
         if (local_write_waiting_) {
             auto *waiter = local_write_waiter_;
-            FIBER_ASSERT(waiter);
-            local_write_waiter_ = nullptr;
-            local_write_waiting_ = false;
-            waiter->coro_.resume();
+            if (!waiter) {
+                local_write_waiting_ = false;
+            } else {
+                local_write_waiter_ = nullptr;
+                local_write_waiting_ = false;
+                waiter->coro_.resume();
+            }
         } else {
             auto *waiter = cross_write_waiter_;
-            FIBER_ASSERT(waiter);
-            cross_write_waiter_ = nullptr;
-            local_write_waiting_ = false;
-            RWFdCrossThreadWaiter::do_notify_resume(waiter);
+            if (!waiter) {
+                local_write_waiting_ = false;
+            } else {
+                cross_write_waiter_ = nullptr;
+                local_write_waiting_ = false;
+                RWFdCrossThreadWaiter::do_notify_resume(waiter);
+            }
         }
     }
 }
