@@ -387,6 +387,7 @@ struct ClientRequestBodyRunOutcome {
     fiber::common::IoResult<std::size_t> body_result;
     std::string written;
     std::uint32_t stream_id = 0;
+    std::int32_t conn_send_window = 0;
 };
 
 struct ClientRequestTrailerRunOutcome {
@@ -1068,6 +1069,7 @@ public:
     void request_stop(fiber::common::IoErr reason = fiber::common::IoErr::Canceled) noexcept { shutdown(reason); }
 
     [[nodiscard]] bool send_loop_stopped() const noexcept { return send_loop_exited(); }
+    [[nodiscard]] std::int32_t current_connection_send_window() const noexcept { return connection_send_window(); }
     fiber::async::Task<void> stop_and_join() noexcept { co_await stop_and_join_send_loop(); }
 
     SendOutcome snapshot() const {
@@ -1141,6 +1143,7 @@ DetachedTask run_client_request_body_send(std::shared_ptr<std::promise<ClientReq
         outcome.body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
     }
     outcome.stream_id = exchange.stream_id();
+    outcome.conn_send_window = connection.current_connection_send_window();
 
     connection.request_stop();
     co_await connection.stop_and_join();
@@ -2473,6 +2476,7 @@ TEST(Http2ConnectionTest, ClientExchangeWriteBodyEncodesDataFrames) {
     ASSERT_TRUE(outcome.body_result.has_value());
     EXPECT_EQ(outcome.stream_id, 1U);
     EXPECT_EQ(outcome.body_result.value(), 5U);
+    EXPECT_EQ(outcome.conn_send_window, 65530);
 
     std::string payload = strip_client_initial_flight(outcome.written);
     ParsedHeadersFrames parsed = collect_stream_headers_frames(payload, 1);

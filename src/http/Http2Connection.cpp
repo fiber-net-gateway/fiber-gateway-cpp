@@ -140,7 +140,6 @@ Http2Connection::Http2Connection(Options options, void *peer_stream_factory_ctx,
     FIBER_ASSERT(options_.outbound_hpack_catalog != nullptr);
     FIBER_ASSERT(peer_stream_factory_ops_.create_peer_stream != nullptr);
     peer_advertised_max_concurrent_streams_ = options_.max_peer_concurrent_streams;
-    conn_send_window_ = options_.initial_connection_send_window;
     peer_initial_stream_send_window_ = options_.initial_stream_send_window;
     conn_recv_window_target_ = std::max(options_.initial_connection_recv_window,
                                         static_cast<std::uint32_t>(kInitialFlowControlWindow));
@@ -148,7 +147,7 @@ Http2Connection::Http2Connection(Options options, void *peer_stream_factory_ctx,
     next_local_stream_id_ = options_.role == ConnectionRole::Client ? 1U : 2U;
     peer_header_table_size_ = kDefaultHeaderTableSize;
     peer_max_outbound_frame_size_ = options_.max_frame_size;
-    outbound_scheduler_.set_connection_send_window(conn_send_window_);
+    outbound_scheduler_.set_connection_send_window(static_cast<std::int32_t>(options_.initial_connection_send_window));
     FIBER_ASSERT(streams_.init(configured_max_active_streams()));
     FIBER_ASSERT(inbound_hpack_decoder_.init(kDefaultHeaderTableSize, options_.max_hpack_string_size));
     FIBER_ASSERT(outbound_hpack_encoder_.init());
@@ -164,7 +163,6 @@ common::IoErr Http2Connection::start(std::unique_ptr<HttpTransport> transport) n
     outbound_scheduler_.set_transport(transport_.get());
     outbound_scheduler_.set_write_timeout(options_.write_timeout);
     outbound_scheduler_.set_peer_max_frame_size(peer_max_outbound_frame_size_);
-    outbound_scheduler_.set_connection_send_window(conn_send_window_);
     start_send_loop();
     if (options_.role == ConnectionRole::Client) {
         return start_client_session();
@@ -745,7 +743,8 @@ common::IoErr Http2Connection::handle_window_update_payload(const FrameHeader &f
     }
 
     if (fhr.stream_id == 0) {
-        std::int64_t next_window = static_cast<std::int64_t>(conn_send_window_) + static_cast<std::int64_t>(increment);
+        const std::int32_t current_window = outbound_scheduler_.connection_send_window();
+        std::int64_t next_window = static_cast<std::int64_t>(current_window) + static_cast<std::int64_t>(increment);
         if (next_window > kMaxFlowControlWindow) {
             return common::IoErr::Invalid;
         }
@@ -1267,10 +1266,10 @@ std::chrono::milliseconds Http2Connection::current_read_timeout() const noexcept
 }
 
 void Http2Connection::update_connection_send_window(std::int32_t delta) noexcept {
-    const std::int32_t before = conn_send_window_;
-    conn_send_window_ += delta;
-    outbound_scheduler_.set_connection_send_window(conn_send_window_);
-    if (before <= 0 && conn_send_window_ > 0) {
+    const std::int32_t before = outbound_scheduler_.connection_send_window();
+    const std::int32_t after = before + delta;
+    outbound_scheduler_.set_connection_send_window(after);
+    if (before <= 0 && after > 0) {
         outbound_scheduler_.on_connection_window_available();
     }
 }

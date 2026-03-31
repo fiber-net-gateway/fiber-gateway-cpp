@@ -200,6 +200,8 @@ fiber::async::Task<void> handle_generate(fiber::http::HttpExchange &exchange, st
         std::size_t write_len = remaining < chunk.size() ? remaining : chunk.size();
         auto write_result = co_await exchange.write_body(chunk.data(), write_len, write_len == remaining);
         if (!write_result) {
+            std::cout << "write error: " << fiber::common::io_err_name(write_result.error())
+                      << ", remaining=" << remaining << ", write_len=" << write_len << std::endl;
             co_return;
         }
         remaining -= write_len;
