@@ -72,6 +72,116 @@ TEST(Http1ParserTest, ChunkedBodyParserSpansBuffersAndTrailers) {
     EXPECT_EQ(parser.execute(&third), fiber::http::ParseCode::Done);
 }
 
+TEST(Http1ParserTest, ResponseLineParserParsesCompleteStatusLine) {
+    fiber::http::ResponseLineParser parser;
+
+    fiber::mem::IoBuf buf = make_buf("HTTP/1.1 200 OK\r\n");
+    ASSERT_TRUE(buf);
+
+    EXPECT_EQ(parser.execute(&buf), fiber::http::ParseCode::Ok);
+
+    const auto &state = parser.state();
+    EXPECT_EQ(state.http_major, 1);
+    EXPECT_EQ(state.http_minor, 1);
+    EXPECT_EQ(state.http_version, static_cast<int>(fiber::http::HttpVersion::HTTP_1_1));
+    EXPECT_EQ(state.status_code, 200);
+    ASSERT_NE(state.status_start, nullptr);
+    ASSERT_NE(state.status_end, nullptr);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(state.status_start),
+                               static_cast<std::size_t>(state.status_end - state.status_start)),
+              "200");
+    ASSERT_NE(state.reason_start, nullptr);
+    ASSERT_NE(state.reason_end, nullptr);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(state.reason_start),
+                               static_cast<std::size_t>(state.reason_end - state.reason_start)),
+              "OK");
+    EXPECT_EQ(buf.readable(), 0u);
+}
+
+TEST(Http1ParserTest, ResponseLineParserSpansBuffersAndSupportsReplace) {
+    fiber::http::ResponseLineParser parser;
+
+    fiber::mem::IoBuf first = make_buf("HTTP/1.1 20");
+    ASSERT_TRUE(first);
+    EXPECT_EQ(parser.execute(&first), fiber::http::ParseCode::Again);
+
+    fiber::mem::IoBuf grown = fiber::mem::IoBuf::allocate(64);
+    ASSERT_TRUE(grown);
+    EXPECT_EQ(parser.replace_buf_ptr(&first, &grown), fiber::http::ParseCode::Ok);
+
+    constexpr std::string_view rest = "0 Not Found\r\n";
+    std::memcpy(grown.writable_data(), rest.data(), rest.size());
+    grown.commit(rest.size());
+
+    EXPECT_EQ(parser.execute(&grown), fiber::http::ParseCode::Ok);
+
+    const auto &state = parser.state();
+    EXPECT_EQ(state.http_version, static_cast<int>(fiber::http::HttpVersion::HTTP_1_1));
+    EXPECT_EQ(state.status_code, 200);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(state.reason_start),
+                               static_cast<std::size_t>(state.reason_end - state.reason_start)),
+              "Not Found");
+    EXPECT_EQ(grown.readable(), 0u);
+}
+
+TEST(Http1ParserTest, ResponseLineParserReplaceDuringReasonParsing) {
+    fiber::http::ResponseLineParser parser;
+
+    fiber::mem::IoBuf first = make_buf("HTTP/1.1 200 Not");
+    ASSERT_TRUE(first);
+    EXPECT_EQ(parser.execute(&first), fiber::http::ParseCode::Again);
+
+    const auto &partial = parser.state();
+    ASSERT_NE(partial.reason_start, nullptr);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(partial.reason_start),
+                               static_cast<std::size_t>(first.readable_data() - partial.reason_start)),
+              "Not");
+    EXPECT_EQ(partial.reason_end, nullptr);
+
+    fiber::mem::IoBuf grown = fiber::mem::IoBuf::allocate(64);
+    ASSERT_TRUE(grown);
+    EXPECT_EQ(parser.replace_buf_ptr(&first, &grown), fiber::http::ParseCode::Ok);
+
+    constexpr std::string_view rest = " Found Yet\r\n";
+    std::memcpy(grown.writable_data(), rest.data(), rest.size());
+    grown.commit(rest.size());
+
+    EXPECT_EQ(parser.execute(&grown), fiber::http::ParseCode::Ok);
+
+    const auto &state = parser.state();
+    EXPECT_EQ(state.status_code, 200);
+    ASSERT_NE(state.reason_start, nullptr);
+    ASSERT_NE(state.reason_end, nullptr);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(state.reason_start),
+                               static_cast<std::size_t>(state.reason_end - state.reason_start)),
+              "Not Found Yet");
+    EXPECT_EQ(grown.readable(), 0u);
+}
+
+TEST(Http1ParserTest, ResponseLineParserAcceptsIisStyleStatusExtension) {
+    fiber::http::ResponseLineParser parser;
+
+    fiber::mem::IoBuf buf = make_buf("HTTP/1.1 403.1 Forbidden\r\n");
+    ASSERT_TRUE(buf);
+
+    EXPECT_EQ(parser.execute(&buf), fiber::http::ParseCode::Ok);
+
+    const auto &state = parser.state();
+    EXPECT_EQ(state.status_code, 403);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(state.reason_start),
+                               static_cast<std::size_t>(state.reason_end - state.reason_start)),
+              ".1 Forbidden");
+}
+
+TEST(Http1ParserTest, ResponseLineParserRejectsInvalidPrefix) {
+    fiber::http::ResponseLineParser parser;
+
+    fiber::mem::IoBuf buf = make_buf("HTTX/1.1 200 OK\r\n");
+    ASSERT_TRUE(buf);
+
+    EXPECT_EQ(parser.execute(&buf), fiber::http::ParseCode::Error);
+}
+
 TEST(Http1ParserTest, ChunkedBodyParserRejectsInvalidSizeLine) {
     fiber::http::ChunkedBodyParser parser;
     parser.reset();
