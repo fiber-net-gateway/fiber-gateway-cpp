@@ -9,8 +9,11 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../common/mem/BufPool.h"
+#include "../common/mem/IoBuf.h"
 #include "ClientHttp1Types.h"
 #include "HttpExchange.h"
+#include "Http1HeaderParseBuffer.h"
+#include "Http1Parser.h"
 
 namespace fiber::http {
 
@@ -18,8 +21,9 @@ class Http1ClientConnection;
 
 class ClientHttp1Exchange : public common::NonCopyable, public common::NonMovable {
 public:
-    explicit ClientHttp1Exchange(Http1ClientConnection &conn,
-                                 Http1ClientExchangeOptions options = {}) noexcept;
+    ClientHttp1Exchange(Http1ClientConnection &conn,
+                        mem::BufPool &pool,
+                        Http1ClientExchangeOptions options = {}) noexcept;
     ~ClientHttp1Exchange();
 
     fiber::async::Task<common::IoResult<void>> send_header(const Http1RequestHead &head, bool end_stream) noexcept;
@@ -48,13 +52,26 @@ private:
     };
 
     Http1ClientConnection *conn_ = nullptr;
+    mem::BufPool *pool_ = nullptr;
     Http1ClientExchangeOptions options_{};
-    mem::BufPool pool_{};
     Http1ResponseHead response_head_;
     HttpHeaders response_trailers_;
+    Http1HeaderParseBuffer response_header_buffer_;
+    mem::IoBuf header_owner_buf_;
+    mem::IoBuf pending_header_buf_;
+    mem::IoBuf pending_body_buf_;
+    ResponseLineParser response_line_parser_{};
+    HeaderLineParser response_header_parser_{};
+    BodyParser response_body_parser_{};
     bool active_ = false;
     bool response_complete_ = false;
+    bool final_response_received_ = false;
+    bool keepalive_on_release_ = false;
+    bool saw_connection_close_ = false;
+    bool saw_connection_keep_alive_ = false;
+    bool response_eof_delimited_ = false;
     RequestState request_state_ = RequestState::Init;
+    HttpMethod request_method_ = HttpMethod::Unknown;
     Http1RequestBodyMode body_mode_ = Http1RequestBodyMode::None;
     std::size_t content_length_ = 0;
     std::size_t body_sent_ = 0;
