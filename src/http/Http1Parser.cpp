@@ -167,7 +167,6 @@ void RequestLineParser::reset() {
     line_ = RequestLineState{};
 }
 
-
 ParseCode RequestLineParser::replace_buf_ptr(mem::IoBuf *old_chain, mem::IoBuf *new_chain) noexcept {
     FIBER_ASSERT(state_ != State::Start);
     FIBER_ASSERT(old_chain->readable_data() > line_.request_start && old_chain->data() <= line_.request_start);
@@ -701,6 +700,210 @@ done:
         return ParseCode::InvalidRequest;
     }
 
+    return ParseCode::Ok;
+}
+
+void ResponseLineParser::reset() noexcept {
+    state_ = State::Start;
+    line_ = ResponseLineState{};
+}
+
+ParseCode ResponseLineParser::replace_buf_ptr(mem::IoBuf *old_buf, mem::IoBuf *new_buf) noexcept {
+    FIBER_ASSERT(state_ != State::Start);
+    FIBER_ASSERT(old_buf != nullptr);
+    FIBER_ASSERT(new_buf != nullptr);
+    FIBER_ASSERT(line_.line_start != nullptr);
+    FIBER_ASSERT(old_buf->readable_data() > line_.line_start && old_buf->data() <= line_.line_start);
+    std::uint8_t *new_buf_start = new_buf->writable_data();
+    std::uint8_t *old = line_.line_start;
+    auto length = static_cast<std::size_t>(old_buf->readable_data() - old);
+    if (new_buf->writable() < length) {
+        return ParseCode::HeaderTooLarge;
+    }
+    FIBER_ASSERT(length > 0);
+    ::memcpy(new_buf_start, old, length);
+    new_buf->commit(length);
+    new_buf->consume(length);
+    auto delta = new_buf_start - old;
+    auto shift = [=](std::uint8_t *&ptr) {
+        if (ptr) {
+            ptr += delta;
+        }
+    };
+    shift(line_.line_start);
+    shift(line_.status_start);
+    shift(line_.status_end);
+    shift(line_.reason_start);
+    shift(line_.reason_end);
+    return ParseCode::Ok;
+}
+
+ParseCode ResponseLineParser::execute(mem::IoBuf *buffer) noexcept {
+    if (!buffer || buffer->readable() == 0) {
+        return ParseCode::Again;
+    }
+
+    auto *begin = buffer->readable_data();
+    auto *p = begin;
+    auto *end = buffer->writable_data();
+    State state = state_;
+
+    for (; p < end; ++p) {
+        unsigned char ch = *p;
+        switch (state) {
+            case State::Start:
+                line_.line_start = p;
+                if (ch != 'H') {
+                    return ParseCode::Error;
+                }
+                state = State::H;
+                break;
+
+            case State::H:
+                if (ch != 'T') {
+                    return ParseCode::Error;
+                }
+                state = State::HT;
+                break;
+
+            case State::HT:
+                if (ch != 'T') {
+                    return ParseCode::Error;
+                }
+                state = State::HTT;
+                break;
+
+            case State::HTT:
+                if (ch != 'P') {
+                    return ParseCode::Error;
+                }
+                state = State::HTTP;
+                break;
+
+            case State::HTTP:
+                if (ch != '/') {
+                    return ParseCode::Error;
+                }
+                state = State::FirstMajorDigit;
+                break;
+
+            case State::FirstMajorDigit:
+                if (ch < '1' || ch > '9') {
+                    return ParseCode::Error;
+                }
+                line_.http_major = ch - '0';
+                state = State::MajorDigit;
+                break;
+
+            case State::MajorDigit:
+                if (ch == '.') {
+                    state = State::FirstMinorDigit;
+                    break;
+                }
+                if (ch < '0' || ch > '9' || line_.http_major > 99) {
+                    return ParseCode::Error;
+                }
+                line_.http_major = line_.http_major * 10 + (ch - '0');
+                break;
+
+            case State::FirstMinorDigit:
+                if (ch < '0' || ch > '9') {
+                    return ParseCode::Error;
+                }
+                line_.http_minor = ch - '0';
+                state = State::MinorDigit;
+                break;
+
+            case State::MinorDigit:
+                if (ch == ' ') {
+                    state = State::Status;
+                    break;
+                }
+                if (ch < '0' || ch > '9' || line_.http_minor > 99) {
+                    return ParseCode::Error;
+                }
+                line_.http_minor = line_.http_minor * 10 + (ch - '0');
+                break;
+
+            case State::Status:
+                if (ch == ' ') {
+                    break;
+                }
+                if (ch < '0' || ch > '9') {
+                    return ParseCode::Error;
+                }
+                if (line_.status_count == 0) {
+                    line_.status_start = p;
+                }
+                line_.status_code = line_.status_code * 10 + (ch - '0');
+                line_.status_end = p + 1;
+                ++line_.status_count;
+                if (line_.status_count == 3) {
+                    state = State::SpaceAfterStatus;
+                }
+                break;
+
+            case State::SpaceAfterStatus:
+                switch (ch) {
+                    case ' ':
+                        line_.reason_start = p + 1;
+                        line_.reason_end = nullptr;
+                        state = State::StatusText;
+                        break;
+                    case '.':
+                        line_.reason_start = p;
+                        line_.reason_end = nullptr;
+                        state = State::StatusText;
+                        break;
+                    case '\r':
+                        line_.reason_start = nullptr;
+                        line_.reason_end = nullptr;
+                        state = State::AlmostDone;
+                        break;
+                    case '\n':
+                        line_.reason_start = nullptr;
+                        line_.reason_end = nullptr;
+                        goto done;
+                    default:
+                        return ParseCode::Error;
+                }
+                break;
+
+            case State::StatusText:
+                switch (ch) {
+                    case '\r':
+                        line_.reason_end = p;
+                        state = State::AlmostDone;
+                        break;
+                    case '\n':
+                        line_.reason_end = p;
+                        goto done;
+                    default:
+                        break;
+                }
+                break;
+
+            case State::AlmostDone:
+                if (ch != '\n') {
+                    return ParseCode::Error;
+                }
+                goto done;
+        }
+    }
+
+    buffer->consume(static_cast<std::size_t>(p - begin));
+    state_ = state;
+    return ParseCode::Again;
+
+done:
+    buffer->consume(static_cast<std::size_t>((p + 1) - begin));
+    line_.http_version = line_.http_major * 1000 + line_.http_minor;
+    if (line_.reason_start == nullptr) {
+        line_.reason_end = nullptr;
+    } else if (line_.reason_end == nullptr) {
+        line_.reason_end = p;
+    }
+    state_ = State::Start;
     return ParseCode::Ok;
 }
 
