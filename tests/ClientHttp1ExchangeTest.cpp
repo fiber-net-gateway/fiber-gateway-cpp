@@ -529,6 +529,50 @@ DetachedTask run_chunked_client(fiber::event::EventLoop *loop,
     request_done_promise->set_value(request_done);
 }
 
+DetachedTask run_empty_chunked_client(fiber::event::EventLoop *loop,
+                                      std::uint16_t port,
+                                      std::promise<fiber::common::IoErr> *result_promise,
+                                      std::promise<bool> *request_done_promise) {
+    fiber::http::Http1ClientConnectionOptions conn_options;
+    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+
+    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
+    auto connect_result = co_await connection.connect();
+    if (!connect_result) {
+        result_promise->set_value(connect_result.error());
+        request_done_promise->set_value(false);
+        co_return;
+    }
+
+    fiber::common::IoErr result = fiber::common::IoErr::Unknown;
+    bool request_done = false;
+    {
+        fiber::mem::BufPool pool;
+        fiber::http::HttpHeaders headers(pool);
+        headers.add_view("host", "example.com");
+        headers.add_view("x-test", "1");
+
+        fiber::http::ClientHttp1Exchange exchange(connection, pool);
+        fiber::http::Http1RequestHead head;
+        head.method = fiber::http::HttpMethod::Post;
+        head.target = "/empty";
+        head.headers = &headers;
+        head.body_mode = fiber::http::Http1RequestBodyMode::Chunked;
+
+        auto header_result = co_await exchange.send_header(head, true);
+        if (!header_result) {
+            result = header_result.error();
+        } else {
+            result = fiber::common::IoErr::None;
+            request_done = exchange.request_complete();
+        }
+    }
+
+    connection.close();
+    result_promise->set_value(result);
+    request_done_promise->set_value(request_done);
+}
+
 DetachedTask run_read_header_client(fiber::event::EventLoop *loop,
                                     std::uint16_t port,
                                     std::promise<ReadHeaderOutcome> *result_promise) {
@@ -970,6 +1014,49 @@ TEST(ClientHttp1ExchangeTest, SendChunkedBodyAndTrailerWriteRawHttp1Request) {
     auto request_done_future = request_done_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() {
         return run_chunked_client(&group.at(0), port, &result_promise, &request_done_promise);
+    });
+
+    EXPECT_EQ(result_future.get(), fiber::common::IoErr::None);
+    EXPECT_TRUE(request_done_future.get());
+
+    CaptureOutcome capture = capture_future.get();
+    EXPECT_EQ(capture.err, fiber::common::IoErr::None);
+    EXPECT_EQ(capture.bytes, expected);
+
+    group.stop();
+    group.join();
+}
+
+TEST(ClientHttp1ExchangeTest, SendEmptyChunkedRequestFromHeaderWriteRawHttp1Request) {
+    const std::string expected =
+        "POST /empty HTTP/1.1\r\n"
+        "Transfer-Encoding: chunked\r\n"
+        "host: example.com\r\n"
+        "x-test: 1\r\n"
+        "\r\n"
+        "0\r\n"
+        "\r\n";
+
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<std::uint16_t> port_promise;
+    auto port_future = port_promise.get_future();
+    std::promise<CaptureOutcome> capture_promise;
+    auto capture_future = capture_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_capture_server(&group.at(0), &port_promise, expected.size(), &capture_promise);
+    });
+
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    std::promise<fiber::common::IoErr> result_promise;
+    auto result_future = result_promise.get_future();
+    std::promise<bool> request_done_promise;
+    auto request_done_future = request_done_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_empty_chunked_client(&group.at(0), port, &result_promise, &request_done_promise);
     });
 
     EXPECT_EQ(result_future.get(), fiber::common::IoErr::None);
