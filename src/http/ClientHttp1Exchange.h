@@ -67,6 +67,16 @@ private:
     };
 
     void clear_response_header_nodes() noexcept;
+    void fail_active_exchange() noexcept;
+    common::IoResult<void> ensure_body_read_buf_writable(mem::IoBuf &read_buf, std::size_t min_writable) noexcept;
+    common::IoResult<void> take_prefix(mem::IoBuf &read_buf, mem::IoBufChain &out, std::size_t len) noexcept;
+    common::IoResult<void> stash_pending_buf(mem::IoBuf &read_buf) noexcept;
+    fiber::async::Task<common::IoResult<std::size_t>> read_more(mem::IoBuf &read_buf, std::size_t max_bytes,
+                                                                bool &read_call_used_io) noexcept;
+    fiber::async::Task<common::IoResult<ParseCode>> advance_chunked_body(mem::IoBuf &read_buf, std::size_t max_bytes,
+                                                                         bool allow_read,
+                                                                         bool &read_call_used_io) noexcept;
+    fiber::async::Task<common::IoResult<void>> read_response_trailers(mem::IoBuf &read_buf) noexcept;
 
     Http1ClientConnection *conn_ = nullptr;
     mem::BufPool *pool_ = nullptr;

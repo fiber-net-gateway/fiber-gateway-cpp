@@ -26,6 +26,7 @@ constexpr std::string_view kChunkedFinal = "0\r\n\r\n";
 constexpr std::string_view kChunkedLastPrefix = "0\r\n";
 constexpr std::size_t kMaxContentLengthDigits = 20;
 constexpr std::size_t kMaxChunkSizeHexDigits = sizeof(std::size_t) * 2;
+constexpr std::size_t kMaxDirectBodyRead = 64 * 1024;
 struct ResponseHeaderParseState {
     bool content_length_set = false;
     std::size_t content_length = 0;
@@ -426,6 +427,249 @@ void ClientHttp1Exchange::clear_response_header_nodes() noexcept {
         node = next;
     }
     response_headers_head_ = nullptr;
+}
+
+void ClientHttp1Exchange::fail_active_exchange() noexcept {
+    request_state_ = RequestState::Failed;
+    active_ = false;
+    if (conn_) {
+        conn_->fail_exchange(this);
+        conn_ = nullptr;
+    }
+}
+
+common::IoResult<void> ClientHttp1Exchange::ensure_body_read_buf_writable(mem::IoBuf &read_buf,
+                                                                          std::size_t min_writable) noexcept {
+    if (min_writable == 0) {
+        return {};
+    }
+
+    if (!read_buf) {
+        read_buf = mem::IoBuf::allocate(min_writable);
+        if (!read_buf) {
+            return std::unexpected(common::IoErr::NoMem);
+        }
+        return {};
+    }
+
+    if (read_buf.readable() == 0) {
+        if (read_buf.unique() && read_buf.capacity() >= min_writable) {
+            read_buf.reset();
+            return {};
+        }
+
+        mem::IoBuf next = mem::IoBuf::allocate(min_writable);
+        if (!next) {
+            return std::unexpected(common::IoErr::NoMem);
+        }
+        read_buf = std::move(next);
+        return {};
+    }
+
+    if (read_buf.writable() >= min_writable) {
+        return {};
+    }
+
+    std::size_t unread = read_buf.readable();
+    mem::IoBuf next = mem::IoBuf::allocate(unread + min_writable);
+    if (!next) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    std::memcpy(next.writable_data(), read_buf.readable_data(), unread);
+    next.commit(unread);
+    read_buf = std::move(next);
+    return {};
+}
+
+common::IoResult<void> ClientHttp1Exchange::take_prefix(mem::IoBuf &read_buf, mem::IoBufChain &out,
+                                                        std::size_t len) noexcept {
+    if (len > read_buf.readable()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    mem::IoBuf piece = read_buf.retain_slice(0, len);
+    if (!piece) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    if (!out.append(std::move(piece))) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    read_buf.consume(len);
+    return {};
+}
+
+common::IoResult<void> ClientHttp1Exchange::stash_pending_buf(mem::IoBuf &read_buf) noexcept {
+    if (read_buf.readable() == 0) {
+        pending_buf_ = {};
+        return {};
+    }
+
+    mem::IoBuf pending = read_buf.retain_slice(0, read_buf.readable());
+    if (!pending) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    pending_buf_ = std::move(pending);
+    return {};
+}
+
+fiber::async::Task<common::IoResult<std::size_t>> ClientHttp1Exchange::read_more(mem::IoBuf &read_buf,
+                                                                                  std::size_t max_bytes,
+                                                                                  bool &read_call_used_io) noexcept {
+    if (!conn_ || !conn_->transport_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+
+    std::size_t read_size = std::min(max_bytes, kMaxDirectBodyRead);
+    if (read_size == 0) {
+        co_return static_cast<std::size_t>(0);
+    }
+
+    auto ensure_result = ensure_body_read_buf_writable(read_buf, read_size);
+    if (!ensure_result) {
+        co_return std::unexpected(ensure_result.error());
+    }
+
+    auto read_result =
+        co_await conn_->transport_->read(read_buf.writable_data(), read_size, options_.response_body_timeout);
+    if (!read_result) {
+        co_return std::unexpected(read_result.error());
+    }
+    read_call_used_io = true;
+    read_buf.commit(*read_result);
+    co_return *read_result;
+}
+
+fiber::async::Task<common::IoResult<ParseCode>> ClientHttp1Exchange::advance_chunked_body(mem::IoBuf &read_buf,
+                                                                                           std::size_t max_bytes,
+                                                                                           bool allow_read,
+                                                                                           bool &read_call_used_io) noexcept {
+    for (;;) {
+        if (read_buf.readable() == 0) {
+            if (!allow_read) {
+                co_return ParseCode::Again;
+            }
+            auto more = co_await read_more(read_buf, max_bytes, read_call_used_io);
+            if (!more) {
+                co_return std::unexpected(more.error());
+            }
+            if (*more == 0) {
+                co_return std::unexpected(common::IoErr::ConnReset);
+            }
+            allow_read = false;
+            continue;
+        }
+
+        mem::IoBuf cursor(read_buf);
+        ParseCode code = response_body_parser_.execute(&cursor);
+        std::size_t consumed = read_buf.readable() - cursor.readable();
+        if (consumed > 0) {
+            read_buf.consume(consumed);
+        }
+
+        if (code == ParseCode::Again) {
+            if (consumed == 0) {
+                co_return std::unexpected(common::IoErr::Invalid);
+            }
+            continue;
+        }
+        if (code != ParseCode::Ok && code != ParseCode::Done && code != ParseCode::BodyDone) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        co_return code;
+    }
+}
+
+fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::read_response_trailers(mem::IoBuf &read_buf) noexcept {
+    if (!conn_ || !conn_->transport_ || pool_ == nullptr) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+
+    Http1HeaderParseBuffer header_buffer(response_header_buffer_options(options_));
+    auto init_result = header_buffer.ensure_init();
+    if (!init_result) {
+        co_return std::unexpected(init_result.error());
+    }
+
+    auto drain_read_buf = [&]() -> common::IoResult<void> {
+        while (read_buf.readable() > 0 && header_buffer.buf().writable() > 0) {
+            std::size_t take = std::min(read_buf.readable(), header_buffer.buf().writable());
+            std::memcpy(header_buffer.buf().writable_data(), read_buf.readable_data(), take);
+            header_buffer.buf().commit(take);
+            read_buf.consume(take);
+        }
+        return {};
+    };
+
+    auto seed_result = drain_read_buf();
+    if (!seed_result) {
+        co_return std::unexpected(seed_result.error());
+    }
+
+    HeaderLineParser parser;
+    for (;;) {
+        ParseCode code = parser.execute(&header_buffer.buf());
+        if (code == ParseCode::Again) {
+            if (header_buffer.buf().writable() == 0) {
+                if (!header_buffer.can_grow()) {
+                    co_return std::unexpected(common::IoErr::Invalid);
+                }
+                auto grow_result = header_buffer.grow_and_replace(parser);
+                if (!grow_result) {
+                    co_return std::unexpected(grow_result.error());
+                }
+            }
+
+            auto copied_result = drain_read_buf();
+            if (!copied_result) {
+                co_return std::unexpected(copied_result.error());
+            }
+            if (read_buf.readable() == 0) {
+                auto read_result =
+                    co_await conn_->transport_->read_into(header_buffer.buf(), options_.response_body_timeout);
+                if (!read_result) {
+                    co_return std::unexpected(read_result.error());
+                }
+                if (*read_result == 0) {
+                    co_return std::unexpected(common::IoErr::ConnReset);
+                }
+            }
+            continue;
+        }
+
+        if (code == ParseCode::Ok) {
+            const auto &line = parser.state();
+            if (!line.header_name_start || !line.header_name_end || line.header_name_end < line.header_name_start) {
+                co_return std::unexpected(common::IoErr::Invalid);
+            }
+
+            std::size_t name_len = static_cast<std::size_t>(line.header_name_end - line.header_name_start);
+            std::string_view name(reinterpret_cast<const char *>(line.header_name_start), name_len);
+            std::string_view value;
+            if (line.header_start && line.header_end && line.header_end >= line.header_start) {
+                value = std::string_view(reinterpret_cast<const char *>(line.header_start),
+                                         static_cast<std::size_t>(line.header_end - line.header_start));
+            }
+
+            if (!response_trailers_.add(name, value)) {
+                co_return std::unexpected(common::IoErr::NoMem);
+            }
+            continue;
+        }
+
+        if (code == ParseCode::HeaderDone) {
+            if (header_buffer.buf().readable() > 0) {
+                auto trailing_result = header_buffer.retain_suffix();
+                if (!trailing_result) {
+                    co_return std::unexpected(trailing_result.error());
+                }
+                pending_buf_ = std::move(*trailing_result);
+            }
+            response_body_parser_.finish_chunked_trailers();
+            response_complete_ = true;
+            co_return common::IoResult<void>{};
+        }
+
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
 }
 
 fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::send_header(const Http1RequestHead &head,
@@ -932,18 +1176,175 @@ fiber::async::Task<common::IoResult<const Http1ResponseHead *>> ClientHttp1Excha
     }
 }
 
-fiber::async::Task<common::IoResult<BodyChunk>> ClientHttp1Exchange::read_body(std::size_t) noexcept {
+fiber::async::Task<common::IoResult<BodyChunk>> ClientHttp1Exchange::read_body(std::size_t max_bytes) noexcept {
+    BodyChunk out{};
     if (!active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    co_return std::unexpected(common::IoErr::NotSupported);
+    if (!conn_ || !conn_->transport_ || !conn_->valid()) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (!final_response_received_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (response_complete_) {
+        out.last = true;
+        co_return out;
+    }
+    if (response_body_parser_.type() == BodyParser::Type::None && !response_eof_delimited_) {
+        response_complete_ = true;
+        out.last = true;
+        co_return out;
+    }
+
+    mem::IoBuf read_buf = std::move(pending_buf_);
+    pending_buf_ = {};
+    bool read_call_used_io = false;
+    auto fail_exchange = [&](common::IoErr err) -> common::IoResult<BodyChunk> {
+        fail_active_exchange();
+        return std::unexpected(err);
+    };
+
+    if (response_eof_delimited_) {
+        if (max_bytes == 0) {
+            co_return out;
+        }
+        if (read_buf.readable() == 0) {
+            auto more = co_await read_more(read_buf, max_bytes, read_call_used_io);
+            if (!more) {
+                co_return fail_exchange(more.error());
+            }
+            if (*more == 0) {
+                response_complete_ = true;
+                out.last = true;
+                co_return out;
+            }
+        }
+
+        std::size_t take = std::min(max_bytes, read_buf.readable());
+        auto take_result = take_prefix(read_buf, out.data_chain, take);
+        if (!take_result) {
+            co_return fail_exchange(take_result.error());
+        }
+        auto stash_result = stash_pending_buf(read_buf);
+        if (!stash_result) {
+            co_return fail_exchange(stash_result.error());
+        }
+        co_return out;
+    }
+
+    if (response_body_parser_.type() == BodyParser::Type::ContentLength) {
+        if (max_bytes == 0) {
+            co_return out;
+        }
+        if (read_buf.readable() == 0) {
+            auto more = co_await read_more(read_buf, std::min(max_bytes, response_body_parser_.remaining()), read_call_used_io);
+            if (!more) {
+                co_return fail_exchange(more.error());
+            }
+            if (*more == 0) {
+                co_return fail_exchange(common::IoErr::ConnReset);
+            }
+        }
+
+        std::size_t take = std::min({max_bytes, response_body_parser_.remaining(), read_buf.readable()});
+        auto take_result = take_prefix(read_buf, out.data_chain, take);
+        if (!take_result) {
+            co_return fail_exchange(take_result.error());
+        }
+        response_body_parser_.consume(take);
+        if (response_body_parser_.done()) {
+            response_complete_ = true;
+            out.last = true;
+        }
+
+        auto stash_result = stash_pending_buf(read_buf);
+        if (!stash_result) {
+            co_return fail_exchange(stash_result.error());
+        }
+        co_return out;
+    }
+
+    if (response_body_parser_.type() != BodyParser::Type::Chunked) {
+        co_return fail_exchange(common::IoErr::Invalid);
+    }
+    if (max_bytes == 0) {
+        co_return out;
+    }
+
+    std::size_t remaining_budget = max_bytes;
+    for (;;) {
+        if (response_body_parser_.remaining() == 0) {
+            auto parse_result = co_await advance_chunked_body(read_buf, remaining_budget, !read_call_used_io, read_call_used_io);
+            if (!parse_result) {
+                co_return fail_exchange(parse_result.error());
+            }
+            if (*parse_result == ParseCode::BodyDone) {
+                auto trailer_result = co_await read_response_trailers(read_buf);
+                if (!trailer_result) {
+                    co_return fail_exchange(trailer_result.error());
+                }
+                out.last = true;
+                co_return out;
+            }
+            if (*parse_result == ParseCode::Again) {
+                auto stash_result = stash_pending_buf(read_buf);
+                if (!stash_result) {
+                    co_return fail_exchange(stash_result.error());
+                }
+                co_return out;
+            }
+        }
+
+        if (read_buf.readable() == 0) {
+            if (read_call_used_io) {
+                auto stash_result = stash_pending_buf(read_buf);
+                if (!stash_result) {
+                    co_return fail_exchange(stash_result.error());
+                }
+                co_return out;
+            }
+            auto more = co_await read_more(read_buf, std::min(remaining_budget, response_body_parser_.remaining()), read_call_used_io);
+            if (!more) {
+                co_return fail_exchange(more.error());
+            }
+            if (*more == 0) {
+                co_return fail_exchange(common::IoErr::ConnReset);
+            }
+        }
+
+        std::size_t take = std::min({remaining_budget, response_body_parser_.remaining(), read_buf.readable()});
+        auto take_result = take_prefix(read_buf, out.data_chain, take);
+        if (!take_result) {
+            co_return fail_exchange(take_result.error());
+        }
+        response_body_parser_.consume(take);
+        remaining_budget -= take;
+
+        if (remaining_budget == 0 || response_body_parser_.remaining() > 0) {
+            auto stash_result = stash_pending_buf(read_buf);
+            if (!stash_result) {
+                co_return fail_exchange(stash_result.error());
+            }
+            co_return out;
+        }
+    }
 }
 
 fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::discard_response_body() noexcept {
     if (!active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    co_return std::unexpected(common::IoErr::NotSupported);
+    for (;;) {
+        auto result = co_await read_body(4096);
+        if (!result) {
+            co_return std::unexpected(result.error());
+        }
+        if (result->last) {
+            break;
+        }
+    }
+    co_return common::IoResult<void>{};
 }
 
 } // namespace fiber::http

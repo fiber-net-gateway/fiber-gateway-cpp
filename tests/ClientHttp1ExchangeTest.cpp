@@ -37,6 +37,17 @@ struct ReadHeaderOutcome {
     bool reusable_after_scope = false;
 };
 
+struct ReadBodyOutcome {
+    fiber::common::IoErr err = fiber::common::IoErr::Unknown;
+    std::string first_body;
+    std::string second_body;
+    bool first_last = false;
+    bool second_last = false;
+    std::string trailer_value;
+    bool response_complete = false;
+    bool reusable_after_scope = false;
+};
+
 fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     sockaddr_storage bound{};
     socklen_t len = sizeof(bound);
@@ -156,6 +167,19 @@ fiber::async::Task<fiber::common::IoResult<void>> write_all(fiber::net::TcpStrea
         remaining -= *write_result;
     }
     co_return fiber::common::IoResult<void>{};
+}
+
+std::string flatten_body_chunk(fiber::http::BodyChunk &chunk) {
+    std::string out;
+    while (chunk.data_chain.readable_bytes() > 0) {
+        fiber::mem::IoBuf *front = chunk.data_chain.first_readable();
+        if (!front) {
+            break;
+        }
+        out.append(reinterpret_cast<const char *>(front->readable_data()), front->readable());
+        chunk.data_chain.consume_and_compact(front->readable());
+    }
+    return out;
 }
 
 DetachedTask run_response_header_server(fiber::event::EventLoop *loop,
@@ -300,6 +324,101 @@ DetachedTask run_large_response_header_server(fiber::event::EventLoop *loop,
     auto write_result = co_await write_all(stream, response);
     stream.close();
     result_promise->set_value(write_result ? fiber::common::IoErr::None : write_result.error());
+}
+
+DetachedTask run_content_length_response_server(fiber::event::EventLoop *loop,
+                                                std::promise<std::uint16_t> *port_promise,
+                                                std::promise<fiber::common::IoErr> *result_promise) {
+    fiber::net::TcpListener listener(*loop);
+    fiber::net::ListenOptions listen_options{};
+    auto bind_result = listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
+    if (!bind_result) {
+        port_promise->set_value(0);
+        result_promise->set_value(bind_result.error());
+        co_return;
+    }
+
+    auto port_result = resolve_port(listener.fd());
+    port_promise->set_value(port_result ? *port_result : 0);
+    if (!port_result) {
+        result_promise->set_value(port_result.error());
+        co_return;
+    }
+
+    auto accept_result = co_await listener.accept();
+    listener.close();
+    if (!accept_result) {
+        result_promise->set_value(accept_result.error());
+        co_return;
+    }
+
+    fiber::net::TcpStream stream(*loop, accept_result->release_fd(), accept_result->take_peer());
+    std::string request;
+    auto header_result = co_await read_until_header_end(stream, request);
+    if (!header_result) {
+        result_promise->set_value(header_result.error());
+        co_return;
+    }
+
+    auto write_result = co_await write_all(stream,
+                                           "HTTP/1.1 200 OK\r\n"
+                                           "Content-Length: 5\r\n"
+                                           "\r\n"
+                                           "hello");
+    stream.close();
+    result_promise->set_value(write_result ? fiber::common::IoErr::None : write_result.error());
+}
+
+DetachedTask run_chunked_response_with_trailer_server(fiber::event::EventLoop *loop,
+                                                      std::promise<std::uint16_t> *port_promise,
+                                                      std::promise<fiber::common::IoErr> *result_promise) {
+    fiber::net::TcpListener listener(*loop);
+    fiber::net::ListenOptions listen_options{};
+    auto bind_result = listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
+    if (!bind_result) {
+        port_promise->set_value(0);
+        result_promise->set_value(bind_result.error());
+        co_return;
+    }
+
+    auto port_result = resolve_port(listener.fd());
+    port_promise->set_value(port_result ? *port_result : 0);
+    if (!port_result) {
+        result_promise->set_value(port_result.error());
+        co_return;
+    }
+
+    auto accept_result = co_await listener.accept();
+    listener.close();
+    if (!accept_result) {
+        result_promise->set_value(accept_result.error());
+        co_return;
+    }
+
+    fiber::net::TcpStream stream(*loop, accept_result->release_fd(), accept_result->take_peer());
+    std::string request;
+    auto header_result = co_await read_until_header_end(stream, request);
+    if (!header_result) {
+        result_promise->set_value(header_result.error());
+        co_return;
+    }
+
+    auto first_write = co_await write_all(stream,
+                                          "HTTP/1.1 200 OK\r\n"
+                                          "Transfer-Encoding: chunked\r\n"
+                                          "\r\n"
+                                          "5\r\n"
+                                          "hello\r\n"
+                                          "0\r\n");
+    if (!first_write) {
+        stream.close();
+        result_promise->set_value(first_write.error());
+        co_return;
+    }
+
+    auto second_write = co_await write_all(stream, "x-checksum: 123\r\n\r\n");
+    stream.close();
+    result_promise->set_value(second_write ? fiber::common::IoErr::None : second_write.error());
 }
 
 DetachedTask run_content_length_client(fiber::event::EventLoop *loop,
@@ -592,6 +711,190 @@ DetachedTask run_read_header_small_buffer_client(fiber::event::EventLoop *loop,
     result_promise->set_value(std::move(outcome));
 }
 
+DetachedTask run_read_content_length_body_client(fiber::event::EventLoop *loop,
+                                                 std::uint16_t port,
+                                                 std::promise<ReadBodyOutcome> *result_promise) {
+    ReadBodyOutcome outcome;
+
+    fiber::http::Http1ClientConnectionOptions conn_options;
+    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+
+    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
+    auto connect_result = co_await connection.connect();
+    if (!connect_result) {
+        outcome.err = connect_result.error();
+        result_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    fiber::mem::BufPool pool;
+    fiber::http::HttpHeaders headers(pool);
+    headers.add_view("host", "example.com");
+
+    {
+        fiber::http::ClientHttp1Exchange exchange(connection, pool);
+        fiber::http::Http1RequestHead head;
+        head.method = fiber::http::HttpMethod::Get;
+        head.target = "/body";
+        head.headers = &headers;
+
+        auto send_result = co_await exchange.send_header(head, true);
+        if (!send_result) {
+            outcome.err = send_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+
+        auto header_result = co_await exchange.read_header();
+        if (!header_result) {
+            outcome.err = header_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+
+        auto first_body_result = co_await exchange.read_body(3);
+        if (!first_body_result) {
+            outcome.err = first_body_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+        outcome.first_body = flatten_body_chunk(*first_body_result);
+        outcome.first_last = first_body_result->last;
+
+        auto second_body_result = co_await exchange.read_body(3);
+        if (!second_body_result) {
+            outcome.err = second_body_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+        outcome.second_body = flatten_body_chunk(*second_body_result);
+        outcome.second_last = second_body_result->last;
+        outcome.response_complete = exchange.response_complete();
+        outcome.err = fiber::common::IoErr::None;
+    }
+
+    outcome.reusable_after_scope = connection.reusable();
+    connection.close();
+    result_promise->set_value(std::move(outcome));
+}
+
+DetachedTask run_read_chunked_body_with_trailer_client(fiber::event::EventLoop *loop,
+                                                       std::uint16_t port,
+                                                       std::promise<ReadBodyOutcome> *result_promise) {
+    ReadBodyOutcome outcome;
+
+    fiber::http::Http1ClientConnectionOptions conn_options;
+    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+
+    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
+    auto connect_result = co_await connection.connect();
+    if (!connect_result) {
+        outcome.err = connect_result.error();
+        result_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    fiber::mem::BufPool pool;
+    fiber::http::HttpHeaders headers(pool);
+    headers.add_view("host", "example.com");
+
+    {
+        fiber::http::ClientHttp1Exchange exchange(connection, pool);
+        fiber::http::Http1RequestHead head;
+        head.method = fiber::http::HttpMethod::Get;
+        head.target = "/chunked";
+        head.headers = &headers;
+
+        auto send_result = co_await exchange.send_header(head, true);
+        if (!send_result) {
+            outcome.err = send_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+
+        auto header_result = co_await exchange.read_header();
+        if (!header_result) {
+            outcome.err = header_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+
+        auto body_result = co_await exchange.read_body(64);
+        if (!body_result) {
+            outcome.err = body_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+        outcome.first_body = flatten_body_chunk(*body_result);
+        outcome.first_last = body_result->last;
+        outcome.trailer_value = std::string(exchange.response_trailers().get("x-checksum"));
+        outcome.response_complete = exchange.response_complete();
+        outcome.err = fiber::common::IoErr::None;
+    }
+
+    outcome.reusable_after_scope = connection.reusable();
+    connection.close();
+    result_promise->set_value(std::move(outcome));
+}
+
+DetachedTask run_discard_chunked_body_with_trailer_client(fiber::event::EventLoop *loop,
+                                                          std::uint16_t port,
+                                                          std::promise<ReadBodyOutcome> *result_promise) {
+    ReadBodyOutcome outcome;
+
+    fiber::http::Http1ClientConnectionOptions conn_options;
+    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+
+    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
+    auto connect_result = co_await connection.connect();
+    if (!connect_result) {
+        outcome.err = connect_result.error();
+        result_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    fiber::mem::BufPool pool;
+    fiber::http::HttpHeaders headers(pool);
+    headers.add_view("host", "example.com");
+
+    {
+        fiber::http::ClientHttp1Exchange exchange(connection, pool);
+        fiber::http::Http1RequestHead head;
+        head.method = fiber::http::HttpMethod::Get;
+        head.target = "/discard";
+        head.headers = &headers;
+
+        auto send_result = co_await exchange.send_header(head, true);
+        if (!send_result) {
+            outcome.err = send_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+
+        auto header_result = co_await exchange.read_header();
+        if (!header_result) {
+            outcome.err = header_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+
+        auto discard_result = co_await exchange.discard_response_body();
+        if (!discard_result) {
+            outcome.err = discard_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+
+        outcome.trailer_value = std::string(exchange.response_trailers().get("x-checksum"));
+        outcome.response_complete = exchange.response_complete();
+        outcome.err = fiber::common::IoErr::None;
+    }
+
+    outcome.reusable_after_scope = connection.reusable();
+    connection.close();
+    result_promise->set_value(std::move(outcome));
+}
+
 TEST(ClientHttp1ExchangeTest, SendHeaderAndContentLengthBodyWriteRawHttp1Request) {
     const std::string expected =
         "POST /submit HTTP/1.1\r\n"
@@ -779,6 +1082,110 @@ TEST(ClientHttp1ExchangeTest, ReadHeaderGrowsResponseHeaderParseBufferWhenNeeded
     EXPECT_EQ(outcome.first_status, 200);
     EXPECT_EQ(outcome.header_value.size(), 180);
     EXPECT_TRUE(std::all_of(outcome.header_value.begin(), outcome.header_value.end(), [](char ch) { return ch == 'a'; }));
+    EXPECT_TRUE(outcome.response_complete);
+    EXPECT_TRUE(outcome.reusable_after_scope);
+
+    EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);
+
+    group.stop();
+    group.join();
+}
+
+TEST(ClientHttp1ExchangeTest, ReadContentLengthBodyReturnsLastOnFinalChunk) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<std::uint16_t> port_promise;
+    auto port_future = port_promise.get_future();
+    std::promise<fiber::common::IoErr> server_result_promise;
+    auto server_result_future = server_result_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_content_length_response_server(&group.at(0), &port_promise, &server_result_promise);
+    });
+
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    std::promise<ReadBodyOutcome> client_result_promise;
+    auto client_result_future = client_result_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_read_content_length_body_client(&group.at(0), port, &client_result_promise);
+    });
+
+    ReadBodyOutcome outcome = client_result_future.get();
+    EXPECT_EQ(outcome.err, fiber::common::IoErr::None);
+    EXPECT_EQ(outcome.first_body, "hel");
+    EXPECT_FALSE(outcome.first_last);
+    EXPECT_EQ(outcome.second_body, "lo");
+    EXPECT_TRUE(outcome.second_last);
+    EXPECT_TRUE(outcome.response_complete);
+    EXPECT_TRUE(outcome.reusable_after_scope);
+
+    EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);
+
+    group.stop();
+    group.join();
+}
+
+TEST(ClientHttp1ExchangeTest, ReadChunkedBodyWaitsForTrailersBeforeLastChunk) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<std::uint16_t> port_promise;
+    auto port_future = port_promise.get_future();
+    std::promise<fiber::common::IoErr> server_result_promise;
+    auto server_result_future = server_result_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_chunked_response_with_trailer_server(&group.at(0), &port_promise, &server_result_promise);
+    });
+
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    std::promise<ReadBodyOutcome> client_result_promise;
+    auto client_result_future = client_result_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_read_chunked_body_with_trailer_client(&group.at(0), port, &client_result_promise);
+    });
+
+    ReadBodyOutcome outcome = client_result_future.get();
+    EXPECT_EQ(outcome.err, fiber::common::IoErr::None);
+    EXPECT_EQ(outcome.first_body, "hello");
+    EXPECT_TRUE(outcome.first_last);
+    EXPECT_EQ(outcome.trailer_value, "123");
+    EXPECT_TRUE(outcome.response_complete);
+    EXPECT_TRUE(outcome.reusable_after_scope);
+
+    EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);
+
+    group.stop();
+    group.join();
+}
+
+TEST(ClientHttp1ExchangeTest, DiscardResponseBodyConsumesChunkedTrailers) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<std::uint16_t> port_promise;
+    auto port_future = port_promise.get_future();
+    std::promise<fiber::common::IoErr> server_result_promise;
+    auto server_result_future = server_result_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_chunked_response_with_trailer_server(&group.at(0), &port_promise, &server_result_promise);
+    });
+
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    std::promise<ReadBodyOutcome> client_result_promise;
+    auto client_result_future = client_result_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_discard_chunked_body_with_trailer_client(&group.at(0), port, &client_result_promise);
+    });
+
+    ReadBodyOutcome outcome = client_result_future.get();
+    EXPECT_EQ(outcome.err, fiber::common::IoErr::None);
+    EXPECT_EQ(outcome.trailer_value, "123");
     EXPECT_TRUE(outcome.response_complete);
     EXPECT_TRUE(outcome.reusable_after_scope);
 
