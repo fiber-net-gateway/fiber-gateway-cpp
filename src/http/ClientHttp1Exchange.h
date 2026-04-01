@@ -35,19 +35,29 @@ public:
     [[nodiscard]] const HttpHeaders &response_trailers() const noexcept { return response_trailers_; }
     [[nodiscard]] const Http1ClientExchangeOptions &options() const noexcept { return options_; }
     [[nodiscard]] bool valid() const noexcept { return active_; }
-    [[nodiscard]] bool request_complete() const noexcept { return request_complete_; }
+    [[nodiscard]] bool request_complete() const noexcept { return request_state_ == RequestState::RequestDone; }
     [[nodiscard]] bool response_complete() const noexcept { return response_complete_; }
-    [[nodiscard]] bool done() const noexcept { return request_complete_ && response_complete_; }
+    [[nodiscard]] bool done() const noexcept { return request_complete() && response_complete_; }
 
 private:
+    enum class RequestState : std::uint8_t {
+        Init,
+        SendingBody,
+        RequestDone,
+        Failed,
+    };
+
     Http1ClientConnection *conn_ = nullptr;
     Http1ClientExchangeOptions options_{};
     mem::BufPool pool_{};
     Http1ResponseHead response_head_;
     HttpHeaders response_trailers_;
     bool active_ = false;
-    bool request_complete_ = false;
     bool response_complete_ = false;
+    RequestState request_state_ = RequestState::Init;
+    Http1RequestBodyMode body_mode_ = Http1RequestBodyMode::None;
+    std::size_t content_length_ = 0;
+    std::size_t body_sent_ = 0;
 };
 
 } // namespace fiber::http

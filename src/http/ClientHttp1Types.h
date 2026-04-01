@@ -26,7 +26,6 @@ struct Http1ClientExchangeOptions {
 struct Http1RequestHead {
     HttpMethod method = HttpMethod::Unknown;
     std::string_view target{};
-    std::string_view authority{};
     const HttpHeaders *headers = nullptr;
     Http1RequestBodyMode body_mode = Http1RequestBodyMode::None;
     std::size_t content_length = 0;
