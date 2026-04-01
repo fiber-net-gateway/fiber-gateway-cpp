@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <new>
 
 #include "../async/Task.h"
 #include "../common/IoError.h"
@@ -51,17 +52,28 @@ private:
         Failed,
     };
 
+    struct ResponseHeaderNode {
+        explicit ResponseHeaderNode(mem::BufPool &pool) : head(pool) {}
+
+        static void *operator new(std::size_t size, mem::BufPool &pool) noexcept {
+            return pool.alloc(size, alignof(ResponseHeaderNode));
+        }
+        static void operator delete(void *ptr, mem::BufPool &) noexcept {}
+        static void operator delete(void *ptr) noexcept {}
+
+        Http1ResponseHead head;
+        mem::IoBufChain owner_bufs;
+        ResponseHeaderNode *next = nullptr;
+    };
+
+    void clear_response_header_nodes() noexcept;
+
     Http1ClientConnection *conn_ = nullptr;
     mem::BufPool *pool_ = nullptr;
     Http1ClientExchangeOptions options_{};
-    Http1ResponseHead response_head_;
     HttpHeaders response_trailers_;
-    Http1HeaderParseBuffer response_header_buffer_;
-    mem::IoBuf header_owner_buf_;
-    mem::IoBuf pending_header_buf_;
-    mem::IoBuf pending_body_buf_;
-    ResponseLineParser response_line_parser_{};
-    HeaderLineParser response_header_parser_{};
+    mem::IoBuf pending_buf_;
+    ResponseHeaderNode *response_headers_head_ = nullptr;
     BodyParser response_body_parser_{};
     bool active_ = false;
     bool response_complete_ = false;

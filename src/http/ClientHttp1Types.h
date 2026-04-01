@@ -41,6 +41,8 @@ struct Http1ResponseHead {
     HttpHeaders headers;
 
     explicit Http1ResponseHead(mem::BufPool &pool) : headers(pool) {}
+
+    [[nodiscard]] bool is_informational() const noexcept { return status_code >= 100 && status_code < 200; }
 };
 
 } // namespace fiber::http

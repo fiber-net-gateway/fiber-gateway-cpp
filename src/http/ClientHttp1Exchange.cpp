@@ -147,10 +147,8 @@ HttpVersion to_http_version(int version) noexcept {
     }
 }
 
-bool is_informational_status(int status_code) noexcept { return status_code >= 100 && status_code < 200; }
-
 bool response_has_no_body(HttpMethod request_method, int status_code) noexcept {
-    return request_method == HttpMethod::Head || is_informational_status(status_code) || status_code == 204 ||
+    return request_method == HttpMethod::Head || (status_code >= 100 && status_code < 200) || status_code == 204 ||
            status_code == 304;
 }
 
@@ -402,14 +400,13 @@ ClientHttp1Exchange::ClientHttp1Exchange(Http1ClientConnection &conn,
     : conn_(&conn),
       pool_(&pool),
       options_(std::move(options)),
-      response_head_(pool),
-      response_trailers_(pool),
-      response_header_buffer_(response_header_buffer_options(options_)) {
+      response_trailers_(pool) {
     active_ = conn.acquire_exchange(this);
 }
 
 ClientHttp1Exchange::~ClientHttp1Exchange() {
     if (!conn_ || !active_) {
+        clear_response_header_nodes();
         return;
     }
     if (done()) {
@@ -417,6 +414,18 @@ ClientHttp1Exchange::~ClientHttp1Exchange() {
     } else {
         conn_->fail_exchange(this);
     }
+    clear_response_header_nodes();
+}
+
+void ClientHttp1Exchange::clear_response_header_nodes() noexcept {
+    ResponseHeaderNode *node = response_headers_head_;
+    while (node) {
+        ResponseHeaderNode *next = node->next;
+        node->~ResponseHeaderNode();
+        ResponseHeaderNode::operator delete(node);
+        node = next;
+    }
+    response_headers_head_ = nullptr;
 }
 
 fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::send_header(const Http1RequestHead &head,
@@ -476,15 +485,9 @@ fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::send_header(cons
     saw_connection_close_ = false;
     saw_connection_keep_alive_ = false;
     response_eof_delimited_ = false;
-    response_header_buffer_.reset();
-    header_owner_buf_ = {};
-    pending_header_buf_ = {};
-    pending_body_buf_ = {};
-    response_head_.headers.clear();
+    pending_buf_ = {};
+    clear_response_header_nodes();
     response_trailers_.clear();
-    response_head_.version = HttpVersion::HTTP_1_1;
-    response_head_.status_code = 0;
-    response_head_.reason = {};
     response_body_parser_.reset();
     request_state_ = end_stream || head.body_mode == Http1RequestBodyMode::None ? RequestState::RequestDone
                                                                                  : RequestState::SendingBody;
@@ -688,25 +691,32 @@ fiber::async::Task<common::IoResult<const Http1ResponseHead *>> ClientHttp1Excha
         co_return std::unexpected(common::IoErr::Invalid);
     }
     if (final_response_received_) {
-        co_return &response_head_;
+        if (!response_headers_head_) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        co_return &response_headers_head_->head;
     }
 
-    response_head_.headers.clear();
     response_trailers_.clear();
-    response_head_.reason = {};
-    response_line_parser_.reset();
-    response_header_parser_.reset();
     response_body_parser_.reset();
-    header_owner_buf_ = {};
-    pending_body_buf_ = {};
     saw_connection_close_ = false;
     saw_connection_keep_alive_ = false;
     response_eof_delimited_ = false;
 
+    auto *header_node = new (*pool_) ResponseHeaderNode(*pool_);
+    if (!header_node) {
+        co_return std::unexpected(common::IoErr::NoMem);
+    }
+
+    Http1HeaderParseBuffer response_header_buffer(response_header_buffer_options(options_));
+    ResponseLineParser response_line_parser;
+    HeaderLineParser response_header_parser;
     bool have_status_line = false;
     ResponseHeaderParseState header_parse_state{};
 
     auto fail_exchange = [&](common::IoErr err) -> common::IoResult<const Http1ResponseHead *> {
+        header_node->~ResponseHeaderNode();
+        ResponseHeaderNode::operator delete(header_node);
         request_state_ = RequestState::Failed;
         active_ = false;
         conn_->fail_exchange(this);
@@ -714,36 +724,51 @@ fiber::async::Task<common::IoResult<const Http1ResponseHead *>> ClientHttp1Excha
         return std::unexpected(err);
     };
 
-    response_header_buffer_.reset();
-    if (pending_header_buf_) {
-        auto init_result = response_header_buffer_.ensure_init();
+    auto append_parsed_prefix = [&](Http1HeaderParseBuffer &buffer,
+                                    mem::IoBufChain &owner_bufs) -> common::IoResult<void> {
+        std::size_t consumed = static_cast<std::size_t>(buffer.buf().readable_data() - buffer.buf().data());
+        if (consumed == 0) {
+            return {};
+        }
+        auto retained = buffer.retain_prefix(consumed);
+        if (!retained) {
+            return std::unexpected(retained.error());
+        }
+        if (!owner_bufs.append(std::move(*retained))) {
+            return std::unexpected(common::IoErr::NoMem);
+        }
+        return {};
+    };
+
+    if (pending_buf_) {
+        auto init_result = response_header_buffer.ensure_init();
         if (!init_result) {
             co_return fail_exchange(init_result.error());
         }
-        while (response_header_buffer_.buf().writable() < pending_header_buf_.readable()) {
-            if (!response_header_buffer_.can_grow()) {
+        while (response_header_buffer.buf().writable() < pending_buf_.readable()) {
+            if (!response_header_buffer.can_grow()) {
                 co_return fail_exchange(common::IoErr::Invalid);
             }
-            auto grow_result = response_header_buffer_.grow();
+            auto grow_result = response_header_buffer.grow();
             if (!grow_result) {
                 co_return fail_exchange(grow_result.error());
             }
         }
-        std::memcpy(response_header_buffer_.buf().writable_data(),
-                    pending_header_buf_.readable_data(),
-                    pending_header_buf_.readable());
-        response_header_buffer_.buf().commit(pending_header_buf_.readable());
-        pending_header_buf_ = {};
+        std::memcpy(response_header_buffer.buf().writable_data(),
+                    pending_buf_.readable_data(),
+                    pending_buf_.readable());
+        response_header_buffer.buf().commit(pending_buf_.readable());
+        pending_buf_ = {};
     } else {
-        auto init_result = response_header_buffer_.ensure_init();
+        auto init_result = response_header_buffer.ensure_init();
         if (!init_result) {
             co_return fail_exchange(init_result.error());
         }
     }
 
     auto read_more = [&]() -> fiber::async::Task<common::IoResult<void>> {
-        auto read_result =
-            co_await conn_->transport_->read_into(response_header_buffer_.buf(), options_.response_header_timeout);
+        auto read_result = co_await conn_->transport_->read_into(response_header_buffer.buf(),
+                                                                 options_.response_header_timeout);
         if (!read_result) {
             co_return std::unexpected(read_result.error());
         }
@@ -754,16 +779,17 @@ fiber::async::Task<common::IoResult<const Http1ResponseHead *>> ClientHttp1Excha
     };
 
     while (!have_status_line) {
-        ParseCode code = response_line_parser_.execute(&response_header_buffer_.buf());
+        ParseCode code = response_line_parser.execute(&response_header_buffer.buf());
         if (code == ParseCode::Ok) {
-            const auto &line = response_line_parser_.state();
-            response_head_.version = to_http_version(line.http_version);
-            response_head_.status_code = line.status_code;
+            const auto &line = response_line_parser.state();
+            header_node->head.version = to_http_version(line.http_version);
+            header_node->head.status_code = line.status_code;
             if (line.reason_start && line.reason_end && line.reason_end >= line.reason_start) {
-                response_head_.reason = std::string_view(reinterpret_cast<const char *>(line.reason_start),
-                                                        static_cast<std::size_t>(line.reason_end - line.reason_start));
+                header_node->head.reason =
+                    std::string_view(reinterpret_cast<const char *>(line.reason_start),
+                                     static_cast<std::size_t>(line.reason_end - line.reason_start));
             } else {
-                response_head_.reason = {};
+                header_node->head.reason = {};
             }
             have_status_line = true;
             break;
@@ -771,11 +797,15 @@ fiber::async::Task<common::IoResult<const Http1ResponseHead *>> ClientHttp1Excha
         if (code != ParseCode::Again) {
             co_return fail_exchange(common::IoErr::Invalid);
         }
-        if (response_header_buffer_.buf().writable() == 0) {
-            if (!response_header_buffer_.can_grow()) {
+        if (response_header_buffer.buf().writable() == 0) {
+            auto retain_result = append_parsed_prefix(response_header_buffer, header_node->owner_bufs);
+            if (!retain_result) {
+                co_return fail_exchange(retain_result.error());
+            }
+            if (!response_header_buffer.can_grow()) {
                 co_return fail_exchange(common::IoErr::Invalid);
             }
-            auto grow_result = response_header_buffer_.grow_and_replace(response_line_parser_);
+            auto grow_result = response_header_buffer.grow_and_replace(response_line_parser);
             if (!grow_result) {
                 co_return fail_exchange(grow_result.error());
             }
@@ -787,9 +817,9 @@ fiber::async::Task<common::IoResult<const Http1ResponseHead *>> ClientHttp1Excha
     }
 
     for (;;) {
-        ParseCode code = response_header_parser_.execute(&response_header_buffer_.buf());
+        ParseCode code = response_header_parser.execute(&response_header_buffer.buf());
         if (code == ParseCode::Ok) {
-            const auto &line = response_header_parser_.state();
+            const auto &line = response_header_parser.state();
             if (!line.header_name_start || !line.header_name_end || line.header_name_end < line.header_name_start) {
                 co_return fail_exchange(common::IoErr::Invalid);
             }
@@ -806,7 +836,7 @@ fiber::async::Task<common::IoResult<const Http1ResponseHead *>> ClientHttp1Excha
                 co_return fail_exchange(common::IoErr::NoMem);
             }
             uint64_t hash = http_header_name_to_lowercase_and_hash(name, lowercase);
-            HttpHeaders::HeaderField *field = response_head_.headers.add_view(name, value, lowercase, hash);
+            HttpHeaders::HeaderField *field = header_node->head.headers.add_view(name, value, lowercase, hash);
             if (!field) {
                 co_return fail_exchange(common::IoErr::NoMem);
             }
@@ -820,11 +850,15 @@ fiber::async::Task<common::IoResult<const Http1ResponseHead *>> ClientHttp1Excha
         }
 
         if (code == ParseCode::Again) {
-            if (response_header_buffer_.buf().writable() == 0) {
-                if (!response_header_buffer_.can_grow()) {
+            if (response_header_buffer.buf().writable() == 0) {
+                auto retain_result = append_parsed_prefix(response_header_buffer, header_node->owner_bufs);
+                if (!retain_result) {
+                    co_return fail_exchange(retain_result.error());
+                }
+                if (!response_header_buffer.can_grow()) {
                     co_return fail_exchange(common::IoErr::Invalid);
                 }
-                auto grow_result = response_header_buffer_.grow_and_replace(response_header_parser_);
+                auto grow_result = response_header_buffer.grow_and_replace(response_header_parser);
                 if (!grow_result) {
                     co_return fail_exchange(grow_result.error());
                 }
@@ -840,35 +874,33 @@ fiber::async::Task<common::IoResult<const Http1ResponseHead *>> ClientHttp1Excha
             co_return fail_exchange(common::IoErr::Invalid);
         }
 
-        std::size_t header_bytes =
-            static_cast<std::size_t>(response_header_buffer_.buf().readable_data() - response_header_buffer_.buf().data());
-        auto header_owner_result = response_header_buffer_.retain_prefix(header_bytes);
-        if (!header_owner_result) {
-            co_return fail_exchange(header_owner_result.error());
+        auto retain_result = append_parsed_prefix(response_header_buffer, header_node->owner_bufs);
+        if (!retain_result) {
+            co_return fail_exchange(retain_result.error());
         }
-        header_owner_buf_ = std::move(*header_owner_result);
 
-        if (is_informational_status(response_head_.status_code)) {
-            if (response_header_buffer_.buf().readable() > 0) {
-                auto pending_header_result = response_header_buffer_.retain_suffix();
+        if (header_node->head.is_informational()) {
+            if (response_header_buffer.buf().readable() > 0) {
+                auto pending_header_result = response_header_buffer.retain_suffix();
                 if (!pending_header_result) {
                     co_return fail_exchange(pending_header_result.error());
                 }
-                pending_header_buf_ = std::move(*pending_header_result);
+                pending_buf_ = std::move(*pending_header_result);
             }
-            response_header_buffer_.reset();
-            co_return &response_head_;
+            header_node->next = response_headers_head_;
+            response_headers_head_ = header_node;
+            co_return &header_node->head;
         }
 
         final_response_received_ = true;
         saw_connection_close_ = header_parse_state.connection_close;
         saw_connection_keep_alive_ = header_parse_state.connection_keep_alive;
         bool allow_keepalive = !saw_connection_close_;
-        if (!default_keepalive(response_head_.version)) {
+        if (!default_keepalive(header_node->head.version)) {
             allow_keepalive = allow_keepalive && saw_connection_keep_alive_;
         }
 
-        if (response_has_no_body(request_method_, response_head_.status_code)) {
+        if (response_has_no_body(request_method_, header_node->head.status_code)) {
             response_body_parser_.set_none();
             response_complete_ = true;
             keepalive_on_release_ = allow_keepalive;
@@ -887,15 +919,16 @@ fiber::async::Task<common::IoResult<const Http1ResponseHead *>> ClientHttp1Excha
             keepalive_on_release_ = false;
         }
 
-        if (response_header_buffer_.buf().readable() > 0) {
-            auto pending_body_result = response_header_buffer_.retain_suffix();
+        if (response_header_buffer.buf().readable() > 0) {
+            auto pending_body_result = response_header_buffer.retain_suffix();
             if (!pending_body_result) {
                 co_return fail_exchange(pending_body_result.error());
             }
-            pending_body_buf_ = std::move(*pending_body_result);
+            pending_buf_ = std::move(*pending_body_result);
         }
-        response_header_buffer_.reset();
-        co_return &response_head_;
+        header_node->next = response_headers_head_;
+        response_headers_head_ = header_node;
+        co_return &header_node->head;
     }
 }
 
