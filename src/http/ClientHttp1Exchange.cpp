@@ -689,10 +689,6 @@ fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::send_header(cons
     if (head.body_mode == Http1RequestBodyMode::ContentLength && end_stream && head.content_length != 0) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (head.body_mode == Http1RequestBodyMode::Chunked && end_stream) {
-        co_return std::unexpected(common::IoErr::Invalid);
-    }
-
     auto estimated_size = estimate_header_bytes(head);
     if (!estimated_size) {
         co_return std::unexpected(estimated_size.error());
@@ -719,6 +715,20 @@ fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::send_header(cons
         co_return std::unexpected(write_result.error());
     }
 
+    if (head.body_mode == Http1RequestBodyMode::Chunked && end_stream) {
+        auto final_result = co_await write_all(conn_->transport_.get(),
+                                               kChunkedFinal.data(),
+                                               kChunkedFinal.size(),
+                                               options_.write_timeout);
+        if (!final_result) {
+            request_state_ = RequestState::Failed;
+            active_ = false;
+            conn_->fail_exchange(this);
+            conn_ = nullptr;
+            co_return std::unexpected(final_result.error());
+        }
+    }
+
     body_mode_ = head.body_mode;
     content_length_ = head.content_length;
     body_sent_ = 0;
@@ -733,8 +743,7 @@ fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::send_header(cons
     clear_response_header_nodes();
     response_trailers_.clear();
     response_body_parser_.reset();
-    request_state_ = end_stream || head.body_mode == Http1RequestBodyMode::None ? RequestState::RequestDone
-                                                                                 : RequestState::SendingBody;
+    request_state_ = end_stream ? RequestState::RequestDone : RequestState::SendingBody;
     co_return common::IoResult<void>{};
 }
 
@@ -859,20 +868,112 @@ fiber::async::Task<common::IoResult<std::size_t>> ClientHttp1Exchange::write_bod
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    BodyChunk chunk;
-    chunk.last = end_stream;
-    if (len != 0) {
-        mem::IoBuf owned = mem::IoBuf::allocate(len);
-        if (!owned) {
-            co_return std::unexpected(common::IoErr::NoMem);
+    if (!conn_ || !conn_->transport_ || !conn_->valid()) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (request_state_ == RequestState::Init) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (request_state_ == RequestState::RequestDone) {
+        co_return std::unexpected(common::IoErr::Already);
+    }
+    if (request_state_ == RequestState::Failed) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (final_response_received_) {
+        co_return std::unexpected(common::IoErr::Already);
+    }
+
+    switch (body_mode_) {
+        case Http1RequestBodyMode::None:
+            co_return std::unexpected(common::IoErr::Invalid);
+        case Http1RequestBodyMode::ContentLength: {
+            if (len > content_length_ - body_sent_) {
+                co_return std::unexpected(common::IoErr::Invalid);
+            }
+            if (end_stream && body_sent_ + len != content_length_) {
+                co_return std::unexpected(common::IoErr::Invalid);
+            }
+            if (len != 0) {
+                auto write_result = co_await write_all(conn_->transport_.get(), buf, len, options_.write_timeout);
+                if (!write_result) {
+                    request_state_ = RequestState::Failed;
+                    active_ = false;
+                    conn_->fail_exchange(this);
+                    conn_ = nullptr;
+                    co_return std::unexpected(write_result.error());
+                }
+                body_sent_ += len;
+            }
+            if (body_sent_ == content_length_) {
+                request_state_ = RequestState::RequestDone;
+            }
+            co_return len;
         }
-        std::memcpy(owned.writable_data(), buf, len);
-        owned.commit(len);
-        if (!chunk.data_chain.append(std::move(owned))) {
-            co_return std::unexpected(common::IoErr::NoMem);
+        case Http1RequestBodyMode::Chunked: {
+            if (len == 0 && !end_stream) {
+                co_return static_cast<std::size_t>(0);
+            }
+
+            if (len != 0) {
+                std::array<char, kMaxChunkSizeHexDigits + 2> prefix{};
+                char *prefix_ptr = prefix.data();
+                prefix_ptr += append_hex(prefix_ptr, len);
+                *prefix_ptr++ = '\r';
+                *prefix_ptr++ = '\n';
+
+                auto prefix_result = co_await write_all(conn_->transport_.get(),
+                                                        prefix.data(),
+                                                        static_cast<std::size_t>(prefix_ptr - prefix.data()),
+                                                        options_.write_timeout);
+                if (!prefix_result) {
+                    request_state_ = RequestState::Failed;
+                    active_ = false;
+                    conn_->fail_exchange(this);
+                    conn_ = nullptr;
+                    co_return std::unexpected(prefix_result.error());
+                }
+                auto body_result = co_await write_all(conn_->transport_.get(), buf, len, options_.write_timeout);
+                if (!body_result) {
+                    request_state_ = RequestState::Failed;
+                    active_ = false;
+                    conn_->fail_exchange(this);
+                    conn_ = nullptr;
+                    co_return std::unexpected(body_result.error());
+                }
+                auto suffix_result = co_await write_all(conn_->transport_.get(),
+                                                        kLineTerminator.data(),
+                                                        kLineTerminator.size(),
+                                                        options_.write_timeout);
+                if (!suffix_result) {
+                    request_state_ = RequestState::Failed;
+                    active_ = false;
+                    conn_->fail_exchange(this);
+                    conn_ = nullptr;
+                    co_return std::unexpected(suffix_result.error());
+                }
+                body_sent_ += len;
+            }
+
+            if (end_stream) {
+                auto final_result = co_await write_all(conn_->transport_.get(),
+                                                       kChunkedFinal.data(),
+                                                       kChunkedFinal.size(),
+                                                       options_.write_timeout);
+                if (!final_result) {
+                    request_state_ = RequestState::Failed;
+                    active_ = false;
+                    conn_->fail_exchange(this);
+                    conn_ = nullptr;
+                    co_return std::unexpected(final_result.error());
+                }
+                request_state_ = RequestState::RequestDone;
+            }
+            co_return len;
         }
     }
-    co_return co_await write_body(std::move(chunk));
+
+    co_return std::unexpected(common::IoErr::Invalid);
 }
 
 fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::send_trailer(const HttpHeaders &trailers) noexcept {
