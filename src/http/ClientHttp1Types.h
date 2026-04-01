@@ -21,6 +21,9 @@ struct Http1ClientExchangeOptions {
     std::chrono::milliseconds write_timeout{30000};
     std::chrono::milliseconds response_header_timeout{10000};
     std::chrono::milliseconds response_body_timeout{30000};
+    std::size_t response_header_init_size = 8 * 1024;
+    std::size_t response_header_large_size = 32 * 1024;
+    std::size_t response_header_large_num = 4;
 };
 
 struct Http1RequestHead {

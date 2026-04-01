@@ -203,9 +203,9 @@ public:
             return !handle || handle.done();
         }
 
-        void await_suspend(std::coroutine_handle<> cont) {
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<> cont) {
             handle.promise().set_continuation(cont);
-            handle.resume();
+            return handle;
         }
 
         void await_resume() {

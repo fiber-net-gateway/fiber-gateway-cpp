@@ -9,6 +9,7 @@
 #include <system_error>
 
 #include "Http1Connection.h"
+#include "Http1HeaderParseBuffer.h"
 #include "HttpExchange.h"
 #include "HttpTransport.h"
 
@@ -129,40 +130,12 @@ fiber::async::Task<common::IoResult<void>> write_all(HttpTransport *transport, m
     co_return common::IoResult<void>{};
 }
 
-std::size_t next_header_capacity(const HttpServerOptions &options, std::size_t current_capacity,
-                                 std::size_t growth_count) noexcept {
-    if (current_capacity == 0) {
-        return options.header_init_size;
-    }
-    if (growth_count >= options.header_large_num) {
-        return 0;
-    }
-    if (options.header_large_size > std::numeric_limits<std::size_t>::max() - current_capacity) {
-        return 0;
-    }
-    return current_capacity + options.header_large_size;
-}
-
-common::IoResult<void> grow_header_buffer(const HttpServerOptions &options, mem::IoBuf &buffer,
-                                          std::size_t &growth_count, HeaderLineParser &header_parser) noexcept {
-    std::size_t next_capacity = next_header_capacity(options, buffer.capacity(), growth_count);
-    if (next_capacity == 0) {
-        return std::unexpected(common::IoErr::NoMem);
-    }
-
-    mem::IoBuf next = mem::IoBuf::allocate(next_capacity);
-    if (!next) {
-        return std::unexpected(common::IoErr::NoMem);
-    }
-
-    ParseCode code = header_parser.replace_buf_ptr(&buffer, &next);
-    if (code != ParseCode::Ok) {
-        return std::unexpected(code == ParseCode::HeaderTooLarge ? common::IoErr::Invalid : common::IoErr::NoMem);
-    }
-
-    buffer = std::move(next);
-    ++growth_count;
-    return {};
+Http1HeaderParseBufferOptions header_parse_buffer_options(const HttpServerOptions &options) noexcept {
+    return Http1HeaderParseBufferOptions{
+        .init_size = options.header_init_size,
+        .large_size = options.header_large_size,
+        .large_num = options.header_large_num,
+    };
 }
 
 } // namespace
@@ -471,25 +444,29 @@ fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::read_request_trailer
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    std::size_t growth_count = 0;
-    mem::IoBuf parse_buf = mem::IoBuf::allocate(connection_->options().header_init_size);
-    if (!parse_buf) {
-        co_return std::unexpected(common::IoErr::NoMem);
+    Http1HeaderParseBuffer header_buffer(header_parse_buffer_options(connection_->options()));
+    auto init_result = header_buffer.ensure_init();
+    if (!init_result) {
+        co_return std::unexpected(init_result.error());
     }
 
     HeaderLineParser parser(connection_->options());
     for (;;) {
-        ParseCode code = parser.execute(&parse_buf);
+        ParseCode code = parser.execute(&header_buffer.buf());
         if (code == ParseCode::Again) {
-            if (parse_buf.writable() == 0) {
-                auto grow_result = grow_header_buffer(connection_->options(), parse_buf, growth_count, parser);
+            if (header_buffer.buf().writable() == 0) {
+                if (!header_buffer.can_grow()) {
+                    co_return std::unexpected(common::IoErr::Invalid);
+                }
+                auto grow_result = header_buffer.grow_and_replace(parser);
                 if (!grow_result) {
                     co_return std::unexpected(grow_result.error());
                 }
             }
-            std::size_t copied = drain_body_input(parse_buf);
+            std::size_t copied = drain_body_input(header_buffer.buf());
             if (copied == 0) {
-                auto more = co_await connection_->transport().read_into(parse_buf, connection_->options().body_timeout);
+                auto more =
+                    co_await connection_->transport().read_into(header_buffer.buf(), connection_->options().body_timeout);
                 if (!more) {
                     co_return std::unexpected(more.error());
                 }
@@ -521,8 +498,12 @@ fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::read_request_trailer
         }
 
         if (code == ParseCode::HeaderDone) {
-            if (parse_buf.readable() > 0) {
-                mem::IoBuf trailing = parse_buf.retain_slice(0, parse_buf.readable());
+            if (header_buffer.buf().readable() > 0) {
+                auto trailing_result = header_buffer.retain_suffix();
+                if (!trailing_result) {
+                    co_return std::unexpected(trailing_result.error());
+                }
+                mem::IoBuf trailing = std::move(*trailing_result);
                 if (!connection_->inbound_bufs().append(std::move(trailing))) {
                     co_return std::unexpected(common::IoErr::NoMem);
                 }

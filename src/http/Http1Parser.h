@@ -163,6 +163,7 @@ public:
         uint32_t lowcase_index = 0;
     };
 
+    HeaderLineParser() = default;
     HeaderLineParser(const HttpServerOptions &options);
 
     void reset();
