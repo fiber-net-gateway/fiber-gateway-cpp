@@ -1,0 +1,46 @@
+#ifndef FIBER_HTTP_CLIENT_HTTP1_TYPES_H
+#define FIBER_HTTP_CLIENT_HTTP1_TYPES_H
+
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <string_view>
+
+#include "HttpCommon.h"
+#include "HttpHeaders.h"
+
+namespace fiber::http {
+
+enum class Http1RequestBodyMode : std::uint8_t {
+    None,
+    ContentLength,
+    Chunked,
+};
+
+struct Http1ClientExchangeOptions {
+    std::chrono::milliseconds write_timeout{30000};
+    std::chrono::milliseconds response_header_timeout{10000};
+    std::chrono::milliseconds response_body_timeout{30000};
+};
+
+struct Http1RequestHead {
+    HttpMethod method = HttpMethod::Unknown;
+    std::string_view target{};
+    std::string_view authority{};
+    const HttpHeaders *headers = nullptr;
+    Http1RequestBodyMode body_mode = Http1RequestBodyMode::None;
+    std::size_t content_length = 0;
+};
+
+struct Http1ResponseHead {
+    HttpVersion version = HttpVersion::HTTP_1_1;
+    int status_code = 0;
+    std::string_view reason{};
+    HttpHeaders headers;
+
+    explicit Http1ResponseHead(mem::BufPool &pool) : headers(pool) {}
+};
+
+} // namespace fiber::http
+
+#endif // FIBER_HTTP_CLIENT_HTTP1_TYPES_H
