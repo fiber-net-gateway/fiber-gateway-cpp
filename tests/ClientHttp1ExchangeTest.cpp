@@ -29,6 +29,8 @@ struct ReadHeaderOutcome {
     fiber::common::IoErr err = fiber::common::IoErr::Unknown;
     int first_status = 0;
     int second_status = 0;
+    int first_status_after_second = 0;
+    std::string first_reason_after_second;
     std::string reason;
     std::string header_value;
     bool response_complete = false;
@@ -522,6 +524,8 @@ DetachedTask run_expect_continue_client(fiber::event::EventLoop *loop,
         outcome.second_status = (*final_result)->status_code;
         outcome.reason = std::string((*final_result)->reason);
         outcome.header_value = std::string((*final_result)->headers.get("x-test"));
+        outcome.first_status_after_second = (*informational_result)->status_code;
+        outcome.first_reason_after_second = std::string((*informational_result)->reason);
         outcome.response_complete = exchange.response_complete();
         outcome.err = fiber::common::IoErr::None;
     }
@@ -736,6 +740,8 @@ TEST(ClientHttp1ExchangeTest, ReadHeaderSupportsInformationalResponseBeforeReque
     EXPECT_EQ(outcome.err, fiber::common::IoErr::None);
     EXPECT_EQ(outcome.first_status, 100);
     EXPECT_EQ(outcome.second_status, 204);
+    EXPECT_EQ(outcome.first_status_after_second, 100);
+    EXPECT_EQ(outcome.first_reason_after_second, "Continue");
     EXPECT_EQ(outcome.reason, "No Content");
     EXPECT_EQ(outcome.header_value, "done");
     EXPECT_TRUE(outcome.response_complete);
