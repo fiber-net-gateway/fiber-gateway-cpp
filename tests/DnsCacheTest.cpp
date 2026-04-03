@@ -128,6 +128,30 @@ TEST(DnsCacheTest, ExpiredSlotsAreDroppedDuringLookup) {
     EXPECT_TRUE(same_ip(snapshot.aaaa().records[0], aaaa));
 }
 
+TEST(DnsCacheTest, PeekNameDoesNotReclaimExpiredEntries) {
+    DnsCache cache;
+    ASSERT_TRUE(cache.init());
+
+    NameSnapshot snapshot;
+    ASSERT_TRUE(snapshot.init());
+
+    auto now = std::chrono::steady_clock::now();
+    IpAddress a = IpAddress::v4({10, 0, 0, 2});
+
+    ASSERT_EQ(cache.upsert_a("stale.example", static_cast<std::uint16_t>(RecordClass::IN), &a, 1,
+                             now - std::chrono::seconds(1)),
+              IoErr::None);
+    ASSERT_EQ(cache.entry_count(), 1u);
+
+    ASSERT_EQ(cache.peek_name("stale.example", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot), IoErr::None);
+    EXPECT_FALSE(snapshot.found());
+    EXPECT_EQ(cache.entry_count(), 1u);
+
+    ASSERT_EQ(cache.lookup_name("stale.example", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot), IoErr::None);
+    EXPECT_FALSE(snapshot.found());
+    EXPECT_EQ(cache.entry_count(), 0u);
+}
+
 TEST(DnsCacheTest, EvictsApproxLeastRecentlyUsedEntry) {
     DnsCache cache;
     DnsCache::Options options;

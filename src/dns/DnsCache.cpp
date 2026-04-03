@@ -595,6 +595,71 @@ common::IoErr DnsCache::store_entry_state(std::uint32_t index,
     return common::IoErr::None;
 }
 
+common::IoErr DnsCache::fill_snapshot(const NameEntry &entry,
+                                      std::chrono::steady_clock::time_point now,
+                                      NameSnapshot &out) const noexcept {
+    common::IoErr err = common::IoErr::None;
+    if (entry.a.state == SlotState::Positive && !expired_at(entry.a.expire_at, now)) {
+        err = out.assign_a(address_records(entry, entry.a), entry.a.count, false, entry.a.expire_at);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+    } else if (entry.a.state == SlotState::NegativeNoData && !expired_at(entry.a.expire_at, now)) {
+        err = out.assign_a(nullptr, 0, true, entry.a.expire_at);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+    }
+
+    if (entry.aaaa.state == SlotState::Positive && !expired_at(entry.aaaa.expire_at, now)) {
+        err = out.assign_aaaa(address_records(entry, entry.aaaa), entry.aaaa.count, false, entry.aaaa.expire_at);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+    } else if (entry.aaaa.state == SlotState::NegativeNoData && !expired_at(entry.aaaa.expire_at, now)) {
+        err = out.assign_aaaa(nullptr, 0, true, entry.aaaa.expire_at);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+    }
+
+    if (entry.cname.present && !expired_at(entry.cname.expire_at, now)) {
+        err = out.assign_cname(cname_target(entry), entry.cname.expire_at);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+    }
+    if (has_deadline(entry.nxdomain_expire_at) && !expired_at(entry.nxdomain_expire_at, now)) {
+        out.assign_nxdomain(entry.nxdomain_expire_at);
+    }
+    return common::IoErr::None;
+}
+
+common::IoErr DnsCache::peek_name(std::string_view qname,
+                                  std::uint16_t qclass,
+                                  std::chrono::steady_clock::time_point now,
+                                  NameSnapshot &out) const noexcept {
+    out.clear();
+    if (!out.valid() || qclass == 0) {
+        return common::IoErr::Invalid;
+    }
+
+    char normalized_buf[kMaxDnsNameLen + 1];
+    std::string_view normalized;
+    common::IoErr err = normalize_name(qname, normalized_buf, sizeof(normalized_buf), normalized);
+    if (err != common::IoErr::None) {
+        return err;
+    }
+
+    std::uint64_t hash = hash_key(normalized, qclass);
+    std::uint32_t index = find_entry_index(normalized, qclass, hash);
+    if (index == kInvalidIndex) {
+        return common::IoErr::None;
+    }
+
+    return fill_snapshot(entries_[index], now, out);
+}
+
 common::IoErr DnsCache::lookup_name(std::string_view qname,
                                     std::uint16_t qclass,
                                     std::chrono::steady_clock::time_point now,
@@ -624,41 +689,30 @@ common::IoErr DnsCache::lookup_name(std::string_view qname,
         return common::IoErr::None;
     }
 
-    if (entry.a.state == SlotState::Positive) {
-        err = out.assign_a(address_records(entry, entry.a), entry.a.count, false, entry.a.expire_at);
-        if (err != common::IoErr::None) {
-            return err;
-        }
-    } else if (entry.a.state == SlotState::NegativeNoData) {
-        err = out.assign_a(nullptr, 0, true, entry.a.expire_at);
-        if (err != common::IoErr::None) {
-            return err;
-        }
+    err = fill_snapshot(entry, now, out);
+    if (err != common::IoErr::None) {
+        return err;
     }
-
-    if (entry.aaaa.state == SlotState::Positive) {
-        err = out.assign_aaaa(address_records(entry, entry.aaaa), entry.aaaa.count, false, entry.aaaa.expire_at);
-        if (err != common::IoErr::None) {
-            return err;
-        }
-    } else if (entry.aaaa.state == SlotState::NegativeNoData) {
-        err = out.assign_aaaa(nullptr, 0, true, entry.aaaa.expire_at);
-        if (err != common::IoErr::None) {
-            return err;
-        }
-    }
-
-    if (entry.cname.present) {
-        err = out.assign_cname(cname_target(entry), entry.cname.expire_at);
-        if (err != common::IoErr::None) {
-            return err;
-        }
-    }
-    if (has_deadline(entry.nxdomain_expire_at)) {
-        out.assign_nxdomain(entry.nxdomain_expire_at);
-    }
-
     touch_entry(entry);
+    return common::IoErr::None;
+}
+
+common::IoErr DnsCache::note_name_access(std::string_view qname, std::uint16_t qclass) noexcept {
+    if (qclass == 0) {
+        return common::IoErr::Invalid;
+    }
+    char normalized_buf[kMaxDnsNameLen + 1];
+    std::string_view normalized;
+    common::IoErr err = normalize_name(qname, normalized_buf, sizeof(normalized_buf), normalized);
+    if (err != common::IoErr::None) {
+        return err;
+    }
+
+    std::uint64_t hash = hash_key(normalized, qclass);
+    std::uint32_t index = find_entry_index(normalized, qclass, hash);
+    if (index != kInvalidIndex) {
+        touch_entry(entries_[index]);
+    }
     return common::IoErr::None;
 }
 
@@ -1000,6 +1054,92 @@ std::size_t DnsCache::sweep_expired(std::chrono::steady_clock::time_point now, s
         }
     }
     return removed;
+}
+
+async::Task<std::size_t> SharedDnsCache::entry_count() noexcept {
+    auto guard = co_await mutex_.lock_shared();
+    co_return cache_.entry_count();
+}
+
+async::Task<std::size_t> SharedDnsCache::bytes_used() noexcept {
+    auto guard = co_await mutex_.lock_shared();
+    co_return cache_.bytes_used();
+}
+
+async::Task<common::IoErr> SharedDnsCache::lookup_name(std::string_view qname,
+                                                       std::uint16_t qclass,
+                                                       std::chrono::steady_clock::time_point now,
+                                                       NameSnapshot &out) noexcept {
+    common::IoErr err = common::IoErr::None;
+    bool found = false;
+    {
+        auto guard = co_await mutex_.lock_shared();
+        err = cache_.peek_name(qname, qclass, now, out);
+        found = err == common::IoErr::None && out.found();
+    }
+
+    if (found && mutex_.try_lock()) {
+        auto guard = async::RWMutex::WriteLockGuard(&mutex_);
+        common::IoErr touch_err = cache_.note_name_access(qname, qclass);
+        if (touch_err != common::IoErr::None) {
+            err = touch_err;
+        }
+    }
+    co_return err;
+}
+
+async::Task<common::IoErr> SharedDnsCache::upsert_a(std::string_view qname,
+                                                    std::uint16_t qclass,
+                                                    const net::IpAddress *records,
+                                                    std::uint16_t count,
+                                                    std::chrono::steady_clock::time_point expire_at) noexcept {
+    auto guard = co_await mutex_.lock();
+    co_return cache_.upsert_a(qname, qclass, records, count, expire_at);
+}
+
+async::Task<common::IoErr> SharedDnsCache::upsert_aaaa(std::string_view qname,
+                                                       std::uint16_t qclass,
+                                                       const net::IpAddress *records,
+                                                       std::uint16_t count,
+                                                       std::chrono::steady_clock::time_point expire_at) noexcept {
+    auto guard = co_await mutex_.lock();
+    co_return cache_.upsert_aaaa(qname, qclass, records, count, expire_at);
+}
+
+async::Task<common::IoErr> SharedDnsCache::upsert_cname(std::string_view qname,
+                                                        std::uint16_t qclass,
+                                                        std::string_view target,
+                                                        std::chrono::steady_clock::time_point expire_at) noexcept {
+    auto guard = co_await mutex_.lock();
+    co_return cache_.upsert_cname(qname, qclass, target, expire_at);
+}
+
+async::Task<common::IoErr> SharedDnsCache::upsert_negative_nxdomain(
+    std::string_view qname,
+    std::uint16_t qclass,
+    std::chrono::steady_clock::time_point expire_at) noexcept {
+    auto guard = co_await mutex_.lock();
+    co_return cache_.upsert_negative_nxdomain(qname, qclass, expire_at);
+}
+
+async::Task<common::IoErr> SharedDnsCache::upsert_negative_nodata(
+    std::string_view qname,
+    std::uint16_t qclass,
+    std::uint16_t qtype,
+    std::chrono::steady_clock::time_point expire_at) noexcept {
+    auto guard = co_await mutex_.lock();
+    co_return cache_.upsert_negative_nodata(qname, qclass, qtype, expire_at);
+}
+
+async::Task<common::IoErr> SharedDnsCache::erase(std::string_view qname, std::uint16_t qclass) noexcept {
+    auto guard = co_await mutex_.lock();
+    co_return cache_.erase(qname, qclass);
+}
+
+async::Task<std::size_t> SharedDnsCache::sweep_expired(std::chrono::steady_clock::time_point now,
+                                                       std::size_t budget) noexcept {
+    auto guard = co_await mutex_.lock();
+    co_return cache_.sweep_expired(now, budget);
 }
 
 } // namespace fiber::dns
