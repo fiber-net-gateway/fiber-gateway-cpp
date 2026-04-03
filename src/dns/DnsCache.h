@@ -7,6 +7,8 @@
 #include <memory>
 #include <string_view>
 
+#include "../async/RWMutex.h"
+#include "../async/Task.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
@@ -99,10 +101,15 @@ public:
     [[nodiscard]] std::size_t entry_count() const noexcept;
     [[nodiscard]] std::size_t bytes_used() const noexcept;
 
+    [[nodiscard]] common::IoErr peek_name(std::string_view qname,
+                                          std::uint16_t qclass,
+                                          std::chrono::steady_clock::time_point now,
+                                          NameSnapshot &out) const noexcept;
     [[nodiscard]] common::IoErr lookup_name(std::string_view qname,
                                             std::uint16_t qclass,
                                             std::chrono::steady_clock::time_point now,
                                             NameSnapshot &out) noexcept;
+    [[nodiscard]] common::IoErr note_name_access(std::string_view qname, std::uint16_t qclass) noexcept;
 
     [[nodiscard]] common::IoErr upsert_a(std::string_view qname,
                                          std::uint16_t qclass,
@@ -211,6 +218,9 @@ private:
     [[nodiscard]] std::string_view owner_name(const NameEntry &entry) const noexcept;
     [[nodiscard]] const net::IpAddress *address_records(const NameEntry &entry, const AddressSlot &slot) const noexcept;
     [[nodiscard]] std::string_view cname_target(const NameEntry &entry) const noexcept;
+    [[nodiscard]] common::IoErr fill_snapshot(const NameEntry &entry,
+                                              std::chrono::steady_clock::time_point now,
+                                              NameSnapshot &out) const noexcept;
 
     void clear_address_slot(AddressSlot &slot) noexcept;
     void clear_cname_slot(CnameSlot &slot) noexcept;
@@ -240,6 +250,56 @@ private:
     std::uint32_t eviction_cursor_ = 0;
     std::uint32_t sweep_cursor_ = 0;
     std::uint64_t access_clock_ = 0;
+};
+
+class SharedDnsCache : public common::NonCopyable, public common::NonMovable {
+public:
+    using Options = DnsCache::Options;
+
+    SharedDnsCache() noexcept = default;
+
+    [[nodiscard]] bool init() noexcept { return cache_.init(); }
+    [[nodiscard]] bool init(Options options) noexcept { return cache_.init(options); }
+    void release() noexcept { cache_.release(); }
+
+    [[nodiscard]] async::Task<std::size_t> entry_count() noexcept;
+    [[nodiscard]] async::Task<std::size_t> bytes_used() noexcept;
+
+    [[nodiscard]] async::Task<common::IoErr> lookup_name(std::string_view qname,
+                                                         std::uint16_t qclass,
+                                                         std::chrono::steady_clock::time_point now,
+                                                         NameSnapshot &out) noexcept;
+
+    [[nodiscard]] async::Task<common::IoErr> upsert_a(std::string_view qname,
+                                                      std::uint16_t qclass,
+                                                      const net::IpAddress *records,
+                                                      std::uint16_t count,
+                                                      std::chrono::steady_clock::time_point expire_at) noexcept;
+    [[nodiscard]] async::Task<common::IoErr> upsert_aaaa(std::string_view qname,
+                                                         std::uint16_t qclass,
+                                                         const net::IpAddress *records,
+                                                         std::uint16_t count,
+                                                         std::chrono::steady_clock::time_point expire_at) noexcept;
+    [[nodiscard]] async::Task<common::IoErr> upsert_cname(std::string_view qname,
+                                                          std::uint16_t qclass,
+                                                          std::string_view target,
+                                                          std::chrono::steady_clock::time_point expire_at) noexcept;
+    [[nodiscard]] async::Task<common::IoErr> upsert_negative_nxdomain(
+        std::string_view qname,
+        std::uint16_t qclass,
+        std::chrono::steady_clock::time_point expire_at) noexcept;
+    [[nodiscard]] async::Task<common::IoErr> upsert_negative_nodata(
+        std::string_view qname,
+        std::uint16_t qclass,
+        std::uint16_t qtype,
+        std::chrono::steady_clock::time_point expire_at) noexcept;
+    [[nodiscard]] async::Task<common::IoErr> erase(std::string_view qname, std::uint16_t qclass) noexcept;
+    [[nodiscard]] async::Task<std::size_t> sweep_expired(std::chrono::steady_clock::time_point now,
+                                                         std::size_t budget) noexcept;
+
+private:
+    DnsCache cache_{};
+    async::RWMutex mutex_{};
 };
 
 } // namespace fiber::dns
