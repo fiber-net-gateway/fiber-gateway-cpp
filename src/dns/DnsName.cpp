@@ -1,5 +1,6 @@
 #include "DnsName.h"
 
+#include <cctype>
 #include <cstring>
 
 namespace fiber::dns {
@@ -58,6 +59,41 @@ common::IoResult<std::size_t> encode_name(std::string_view name,
     }
     dst[write_pos++] = 0;
     return write_pos;
+}
+
+common::IoErr normalize_name(std::string_view input,
+                             char *dst,
+                             std::size_t cap,
+                             std::string_view &out) noexcept {
+    if (dst == nullptr || cap == 0 || input.empty()) {
+        return common::IoErr::Invalid;
+    }
+
+    std::size_t len = input.size();
+    while (len != 0 && input[len - 1] == '.') {
+        --len;
+    }
+    if (len == 0) {
+        if (cap < 1) {
+            return common::IoErr::NoMem;
+        }
+        dst[0] = '.';
+        out = std::string_view(dst, 1);
+        return common::IoErr::None;
+    }
+    if (len > kMaxWireNameLen || len > cap) {
+        return common::IoErr::NoMem;
+    }
+
+    for (std::size_t i = 0; i < len; ++i) {
+        unsigned char ch = static_cast<unsigned char>(input[i]);
+        if (ch == '\0') {
+            return common::IoErr::Invalid;
+        }
+        dst[i] = static_cast<char>(std::tolower(ch));
+    }
+    out = std::string_view(dst, len);
+    return common::IoErr::None;
 }
 
 common::IoResult<DecodedName> decode_name(const std::uint8_t *packet,
