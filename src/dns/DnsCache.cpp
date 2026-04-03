@@ -1,7 +1,7 @@
 #include "DnsCache.h"
+#include "DnsName.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -230,35 +230,7 @@ common::IoErr DnsCache::normalize_name(std::string_view input,
                                        char *dst,
                                        std::size_t cap,
                                        std::string_view &out) const noexcept {
-    if (dst == nullptr || cap == 0 || input.empty()) {
-        return common::IoErr::Invalid;
-    }
-
-    std::size_t len = input.size();
-    while (len != 0 && input[len - 1] == '.') {
-        --len;
-    }
-    if (len == 0) {
-        if (cap < 1) {
-            return common::IoErr::NoMem;
-        }
-        dst[0] = '.';
-        out = std::string_view(dst, 1);
-        return common::IoErr::None;
-    }
-    if (len > kMaxDnsNameLen || len > cap) {
-        return common::IoErr::NoMem;
-    }
-
-    for (std::size_t i = 0; i < len; ++i) {
-        unsigned char ch = static_cast<unsigned char>(input[i]);
-        if (ch == '\0') {
-            return common::IoErr::Invalid;
-        }
-        dst[i] = static_cast<char>(std::tolower(ch));
-    }
-    out = std::string_view(dst, len);
-    return common::IoErr::None;
+    return dns::normalize_name(input, dst, cap, out);
 }
 
 std::uint64_t DnsCache::hash_key(std::string_view name, std::uint16_t qclass) const noexcept {
