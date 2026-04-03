@@ -108,7 +108,7 @@ if (FIBER_ENABLE_LTO)
     endif()
 endif()
 
-file(GLOB EXAMPLE_SRC_LIST ${CMAKE_CURRENT_LIST_DIR}/example/*.cpp)
+file(GLOB EXAMPLE_SRC_LIST CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/example/*.cpp)
 foreach(EXAMPLE_SRC IN LISTS EXAMPLE_SRC_LIST)
     get_filename_component(EXAMPLE_NAME ${EXAMPLE_SRC} NAME_WE)
     if (EXAMPLE_NAME STREQUAL "http3_demo_lsquic" AND NOT TARGET lsquic::lsquic)
