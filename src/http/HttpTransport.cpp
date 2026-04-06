@@ -157,6 +157,8 @@ std::string TcpTransport::negotiated_alpn() const noexcept { return {}; }
 
 const net::SocketAddress &TcpTransport::remote_addr() const noexcept { return stream_.remote_addr(); }
 
+event::EventLoop &TcpTransport::loop() const noexcept { return stream_.loop(); }
+
 common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::EventLoop &loop, net::AcceptResult &&accept,
                                                                      TlsContext &context) {
     if (!accept.valid()) {
@@ -376,7 +378,6 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChai
 
     auto deadline = stream_.loop().now() + timeout;
     std::size_t total_written = 0;
-    bool waited = false;
     for (;;) {
         buf.drop_empty_front();
         mem::IoBuf *target = buf.first_readable();
@@ -401,12 +402,6 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChai
             }
             co_return std::unexpected(err);
         }
-        if (total_written != 0) {
-            co_return total_written;
-        }
-        if (waited) {
-            co_return std::unexpected(common::IoErr::WouldBlock);
-        }
 
         auto wait_result = co_await wait_tls_event(stream_, wait_event, deadline);
         if (!wait_result) {
@@ -415,7 +410,6 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChai
             }
             co_return std::unexpected(wait_result.error());
         }
-        waited = true;
     }
 }
 
@@ -428,5 +422,7 @@ int TlsTransport::fd() const noexcept { return stream_.fd(); }
 std::string TlsTransport::negotiated_alpn() const noexcept { return stream_.selected_alpn(); }
 
 const net::SocketAddress &TlsTransport::remote_addr() const noexcept { return stream_.remote_addr(); }
+
+event::EventLoop &TlsTransport::loop() const noexcept { return stream_.loop(); }
 
 } // namespace fiber::http

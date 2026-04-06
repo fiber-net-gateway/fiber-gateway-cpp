@@ -4,7 +4,9 @@
 #include <cstddef>
 #include <cstdint>
 
+#define private public
 #include "http/Http2StreamTable.h"
+#undef private
 #include "Http2TestSupport.h"
 
 namespace {
@@ -30,6 +32,14 @@ std::array<std::uint32_t, 3> find_colliding_stream_ids(std::size_t bucket_count)
     return out;
 }
 
+fiber::http::Http2Stream::Lease make_stream(std::uint32_t stream_id) {
+    fiber::http::Http2Stream::Lease stream = TestHttp2StreamOwner::create();
+    if (stream) {
+        stream->stream_id_ = stream_id;
+    }
+    return stream;
+}
+
 } // namespace
 
 TEST(Http2StreamTableTest, InitializesFixedCapacityFromMaxActiveStreams) {
@@ -45,9 +55,9 @@ TEST(Http2StreamTableTest, InsertsFindsAndRejectsDuplicateStreamIds) {
     fiber::http::Http2StreamTable table;
     ASSERT_TRUE(table.init(4));
 
-    fiber::http::Http2Stream::Lease stream1 = TestHttp2StreamOwner::create(1);
-    fiber::http::Http2Stream::Lease stream3 = TestHttp2StreamOwner::create(3);
-    fiber::http::Http2Stream::Lease duplicate1 = TestHttp2StreamOwner::create(1);
+    fiber::http::Http2Stream::Lease stream1 = make_stream(1);
+    fiber::http::Http2Stream::Lease stream3 = make_stream(3);
+    fiber::http::Http2Stream::Lease duplicate1 = make_stream(1);
     ASSERT_TRUE(stream1);
     ASSERT_TRUE(stream3);
     ASSERT_TRUE(duplicate1);
@@ -67,9 +77,9 @@ TEST(Http2StreamTableTest, RejectsInsertPastConfiguredMaxActiveStreams) {
     fiber::http::Http2StreamTable table;
     ASSERT_TRUE(table.init(2));
 
-    fiber::http::Http2Stream::Lease stream1 = TestHttp2StreamOwner::create(1);
-    fiber::http::Http2Stream::Lease stream3 = TestHttp2StreamOwner::create(3);
-    fiber::http::Http2Stream::Lease stream5 = TestHttp2StreamOwner::create(5);
+    fiber::http::Http2Stream::Lease stream1 = make_stream(1);
+    fiber::http::Http2Stream::Lease stream3 = make_stream(3);
+    fiber::http::Http2Stream::Lease stream5 = make_stream(5);
     ASSERT_TRUE(stream1);
     ASSERT_TRUE(stream3);
     ASSERT_TRUE(stream5);
@@ -85,9 +95,9 @@ TEST(Http2StreamTableTest, EraseKeepsLaterCollisionsReachable) {
     ASSERT_TRUE(table.init(4));
 
     auto ids = find_colliding_stream_ids(table.bucket_count());
-    fiber::http::Http2Stream::Lease stream_a = TestHttp2StreamOwner::create(ids[0]);
-    fiber::http::Http2Stream::Lease stream_b = TestHttp2StreamOwner::create(ids[1]);
-    fiber::http::Http2Stream::Lease stream_c = TestHttp2StreamOwner::create(ids[2]);
+    fiber::http::Http2Stream::Lease stream_a = make_stream(ids[0]);
+    fiber::http::Http2Stream::Lease stream_b = make_stream(ids[1]);
+    fiber::http::Http2Stream::Lease stream_c = make_stream(ids[2]);
     ASSERT_TRUE(stream_a);
     ASSERT_TRUE(stream_b);
     ASSERT_TRUE(stream_c);

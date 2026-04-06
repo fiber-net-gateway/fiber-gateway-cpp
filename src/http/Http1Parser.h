@@ -105,6 +105,50 @@ private:
     RequestLineState line_{};
 };
 
+class ResponseLineParser : public common::NonCopyable, public common::NonMovable {
+public:
+    struct ResponseLineState {
+        std::uint8_t *line_start{};
+        std::uint8_t *status_start{};
+        std::uint8_t *status_end{};
+        std::uint8_t *reason_start{};
+        std::uint8_t *reason_end{};
+        int http_major = 0;
+        int http_minor = 0;
+        int http_version = 0;
+        int status_code = 0;
+        std::uint8_t status_count = 0;
+    };
+
+    ResponseLineParser() = default;
+
+    void reset() noexcept;
+
+    ParseCode execute(mem::IoBuf *buffer) noexcept;
+    ParseCode replace_buf_ptr(mem::IoBuf *old_buf, mem::IoBuf *new_buf) noexcept;
+    const ResponseLineState &state() const noexcept { return line_; }
+
+    enum class State {
+        Start,
+        H,
+        HT,
+        HTT,
+        HTTP,
+        FirstMajorDigit,
+        MajorDigit,
+        FirstMinorDigit,
+        MinorDigit,
+        Status,
+        SpaceAfterStatus,
+        StatusText,
+        AlmostDone
+    };
+
+private:
+    State state_ = State::Start;
+    ResponseLineState line_{};
+};
+
 class HeaderLineParser : public common::NonCopyable, public common::NonMovable {
 public:
     static constexpr size_t kLowcaseHeaderLen = 32;
@@ -119,6 +163,7 @@ public:
         uint32_t lowcase_index = 0;
     };
 
+    HeaderLineParser() = default;
     HeaderLineParser(const HttpServerOptions &options);
 
     void reset();

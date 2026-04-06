@@ -8,6 +8,7 @@
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
+#include "HttpCommon.h"
 #include "Http2HpackEncodeCatalog.h"
 #include "Http2HpackEncodeTable.h"
 
@@ -37,6 +38,10 @@ public:
 
     [[nodiscard]] common::IoErr begin_block(void *output_ctx, const OutputOps *output_ops) noexcept;
     [[nodiscard]] common::IoErr encode_status(int status_code) noexcept;
+    [[nodiscard]] common::IoErr encode_method(HttpMethod method) noexcept;
+    [[nodiscard]] common::IoErr encode_scheme(std::string_view scheme) noexcept;
+    [[nodiscard]] common::IoErr encode_authority(std::string_view authority) noexcept;
+    [[nodiscard]] common::IoErr encode_path(std::string_view path) noexcept;
     [[nodiscard]] common::IoErr encode_field(std::string_view name, std::uint64_t name_hash,
                                              std::string_view value) noexcept;
     void cancel_block() noexcept;

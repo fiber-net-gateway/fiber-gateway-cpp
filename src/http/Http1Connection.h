@@ -49,9 +49,6 @@ private:
 
     fiber::async::Task<common::IoResult<ParseCode>> parse_request(HttpExchange &exchange);
     std::size_t drain_inbound(mem::IoBuf &buffer) noexcept;
-    common::IoResult<void> grow_header_buffer(mem::IoBuf &buffer, std::size_t &growth_count,
-                                              RequestLineParser *request_parser,
-                                              HeaderLineParser *header_parser) noexcept;
     void finish() noexcept;
 
     Http1Server *server_ = nullptr;

@@ -12,6 +12,7 @@
 #include "../async/Task.h"
 #include "../async/Spawn.h"
 #include "../async/WaitGroup.h"
+#include "../common/Assert.h"
 #include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
@@ -74,14 +75,23 @@ public:
 
     virtual ~Http2Connection();
 
-    Http2Connection(std::unique_ptr<HttpTransport> transport, Options options,
-                    void *stream_factory_ctx, const Http2StreamFactoryOps &stream_factory_ops);
+    Http2Connection(Options options, void *peer_stream_factory_ctx, const Http2StreamFactoryOps &peer_stream_factory_ops);
+
+    common::IoErr start(std::unique_ptr<HttpTransport> transport) noexcept;
 
     fiber::async::Task<RunResult> run() noexcept;
-    Http2Stream *create_local_stream(std::uint32_t stream_id) noexcept;
+    [[nodiscard]] common::IoResult<Http2Stream::Lease> attach_local_stream(Http2Stream &stream) noexcept;
     void shutdown(common::IoErr reason = common::IoErr::Canceled) noexcept;
     void graceful_shutdown() noexcept;
     [[nodiscard]] State state() const noexcept { return state_; }
+    [[nodiscard]] HttpTransport &transport() noexcept {
+        FIBER_ASSERT(transport_ != nullptr);
+        return *transport_;
+    }
+    [[nodiscard]] const HttpTransport &transport() const noexcept {
+        FIBER_ASSERT(transport_ != nullptr);
+        return *transport_;
+    }
 
 protected:
     // `offset` is the number of payload bytes already delivered for the current
@@ -94,7 +104,9 @@ protected:
     const Http2Stream *find_stream(std::uint32_t stream_id) const noexcept;
     void update_connection_send_window(std::int32_t delta) noexcept;
     void stop_sending(common::IoErr reason = common::IoErr::Canceled) noexcept;
-    [[nodiscard]] std::int32_t connection_send_window() const noexcept { return conn_send_window_; }
+    [[nodiscard]] std::int32_t connection_send_window() const noexcept {
+        return outbound_scheduler_.connection_send_window();
+    }
     [[nodiscard]] std::uint32_t peer_max_outbound_frame_size() const noexcept { return peer_max_outbound_frame_size_; }
     [[nodiscard]] std::uint32_t peer_max_concurrent_streams() const noexcept {
         return peer_advertised_max_concurrent_streams_;
@@ -151,9 +163,8 @@ private:
     void detach_stream(Http2Stream &stream) noexcept;
     void try_release_stream(Http2Stream &stream) noexcept;
     bool can_accept_peer_stream(std::uint32_t stream_id) const noexcept;
-    bool can_create_local_stream(std::uint32_t stream_id) const noexcept;
+    bool can_attach_local_stream() const noexcept;
     bool is_next_peer_stream_id(std::uint32_t stream_id) const noexcept;
-    bool is_next_local_stream_id(std::uint32_t stream_id) const noexcept;
     void handle_peer_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept;
     void close_streams_after_goaway(std::uint32_t last_stream_id) noexcept;
     [[nodiscard]] bool is_idle_stream(std::uint32_t stream_id) const noexcept;
@@ -167,6 +178,8 @@ private:
     [[nodiscard]] std::chrono::milliseconds current_read_timeout() const noexcept;
     common::IoErr handle_read_timeout() noexcept;
     common::IoErr send_keepalive_ping() noexcept;
+    common::IoErr start_client_session() noexcept;
+    common::IoErr start_server_session() noexcept;
     void on_stream_outbound_idle(Http2Stream &stream) noexcept;
     fiber::async::Task<RunResult> finalize_run(RunResult result) noexcept;
     fiber::async::Task<void> wait_for_send_loop_exit() noexcept;
@@ -180,24 +193,23 @@ private:
     void enter_closing(common::IoErr reason, bool abortive = true) noexcept;
     void close_all_streams(common::IoErr result) noexcept;
     void clear_inbound_stream() noexcept;
-    [[nodiscard]] Http2Stream::Lease alloc_local_stream(std::uint32_t stream_id) noexcept;
     [[nodiscard]] Http2Stream::Lease alloc_peer_stream(std::uint32_t stream_id) noexcept;
     [[nodiscard]] Http2HpackEncoder &outbound_hpack_encoder() noexcept { return outbound_hpack_encoder_; }
     [[nodiscard]] const Http2HpackEncoder &outbound_hpack_encoder() const noexcept { return outbound_hpack_encoder_; }
 
     std::unique_ptr<HttpTransport> transport_;
     Options options_;
-    void *stream_factory_ctx_ = nullptr;
-    const Http2StreamFactoryOps stream_factory_ops_{};
+    void *peer_stream_factory_ctx_ = nullptr;
+    const Http2StreamFactoryOps peer_stream_factory_ops_{};
     Http2StreamTable streams_;
     Http2HpackDecoder inbound_hpack_decoder_;
     Http2HpackEncoder outbound_hpack_encoder_;
     std::uint32_t peer_advertised_max_concurrent_streams_ = 100;
     std::uint32_t last_peer_stream_id_ = 0;
     std::uint32_t last_local_stream_id_ = 0;
+    std::uint32_t next_local_stream_id_ = 0;
     std::size_t peer_active_stream_count_ = 0;
     std::size_t local_push_stream_count_ = 0;
-    std::int32_t conn_send_window_ = 0;
     std::int32_t conn_recv_window_remaining_ = 65535;
     std::uint32_t conn_recv_window_target_ = 65535;
     std::int32_t peer_initial_stream_send_window_ = 65535;
@@ -229,6 +241,7 @@ private:
     friend class Http2Stream;
     friend class Http2OutboundScheduler;
     friend class ServerHttp2Request;
+    friend class ClientHttp2Request;
 };
 
 } // namespace fiber::http

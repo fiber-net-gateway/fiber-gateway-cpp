@@ -14,7 +14,15 @@ namespace {
 
 constexpr std::size_t kIntegerScratchCap = 8;
 constexpr std::string_view kStatusName = ":status";
+constexpr std::string_view kMethodName = ":method";
+constexpr std::string_view kSchemeName = ":scheme";
+constexpr std::string_view kAuthorityName = ":authority";
+constexpr std::string_view kPathName = ":path";
 constexpr std::uint64_t kStatusNameHash = http_header_name_hash(kStatusName);
+constexpr std::uint64_t kMethodNameHash = http_header_name_hash(kMethodName);
+constexpr std::uint64_t kSchemeNameHash = http_header_name_hash(kSchemeName);
+constexpr std::uint64_t kAuthorityNameHash = http_header_name_hash(kAuthorityName);
+constexpr std::uint64_t kPathNameHash = http_header_name_hash(kPathName);
 
 [[nodiscard]] std::string_view common_status_value(int status_code) noexcept {
     switch (status_code) {
@@ -85,6 +93,46 @@ constexpr std::uint64_t kStatusNameHash = http_header_name_hash(kStatusName);
     return {scratch.data(), scratch.size()};
 }
 
+[[nodiscard]] std::string_view common_method_value(HttpMethod method) noexcept {
+    switch (method) {
+        case HttpMethod::Get:
+            return "GET";
+        case HttpMethod::Head:
+            return "HEAD";
+        case HttpMethod::Post:
+            return "POST";
+        case HttpMethod::Put:
+            return "PUT";
+        case HttpMethod::Delete:
+            return "DELETE";
+        case HttpMethod::MKCOL:
+            return "MKCOL";
+        case HttpMethod::Copy:
+            return "COPY";
+        case HttpMethod::Move:
+            return "MOVE";
+        case HttpMethod::Options:
+            return "OPTIONS";
+        case HttpMethod::PropFind:
+            return "PROPFIND";
+        case HttpMethod::PropPatch:
+            return "PROPPATCH";
+        case HttpMethod::Lock:
+            return "LOCK";
+        case HttpMethod::Unlock:
+            return "UNLOCK";
+        case HttpMethod::Patch:
+            return "PATCH";
+        case HttpMethod::Trace:
+            return "TRACE";
+        case HttpMethod::Connect:
+            return "CONNECT";
+        case HttpMethod::Unknown:
+        default:
+            return {};
+    }
+}
+
 } // namespace
 
 Http2HpackEncoder::Http2HpackEncoder(Options options) noexcept : options_(options) {}
@@ -153,6 +201,26 @@ common::IoErr Http2HpackEncoder::encode_status(int status_code) noexcept {
         return common::IoErr::Invalid;
     }
     return encode_field(kStatusName, kStatusNameHash, value);
+}
+
+common::IoErr Http2HpackEncoder::encode_method(HttpMethod method) noexcept {
+    const std::string_view value = common_method_value(method);
+    if (value.empty()) {
+        return common::IoErr::Invalid;
+    }
+    return encode_field(kMethodName, kMethodNameHash, value);
+}
+
+common::IoErr Http2HpackEncoder::encode_scheme(std::string_view scheme) noexcept {
+    return encode_field(kSchemeName, kSchemeNameHash, scheme);
+}
+
+common::IoErr Http2HpackEncoder::encode_authority(std::string_view authority) noexcept {
+    return encode_field(kAuthorityName, kAuthorityNameHash, authority);
+}
+
+common::IoErr Http2HpackEncoder::encode_path(std::string_view path) noexcept {
+    return encode_field(kPathName, kPathNameHash, path);
 }
 
 common::IoErr Http2HpackEncoder::encode_field(std::string_view name, std::uint64_t name_hash,
