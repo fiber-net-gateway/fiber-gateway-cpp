@@ -22,8 +22,7 @@
 namespace {
 
 struct OwnedStreamHolder {
-    explicit OwnedStreamHolder(std::uint32_t stream_id, bool *destroyed) :
-        destroyed_flag(destroyed), stream(stream_id, this, ops()) {}
+    explicit OwnedStreamHolder(bool *destroyed) : destroyed_flag(destroyed), stream(this, ops()) {}
 
     static const fiber::http::Http2Stream::Ops &ops() noexcept {
         static const fiber::http::Http2Stream::Ops kOps{
@@ -151,8 +150,7 @@ struct OwnedStreamHolder {
 };
 
 struct SendWindowNotifyOwner {
-    explicit SendWindowNotifyOwner(std::uint32_t stream_id, int *notify_count) :
-        notify_count_ptr(notify_count), stream(stream_id, this, ops()) {}
+    explicit SendWindowNotifyOwner(int *notify_count) : notify_count_ptr(notify_count), stream(this, ops()) {}
 
     static const fiber::http::Http2Stream::Ops &ops() noexcept {
         static const fiber::http::Http2Stream::Ops kOps{
@@ -232,9 +230,12 @@ public:
     [[nodiscard]] int fd() const noexcept override { return -1; }
     [[nodiscard]] std::string negotiated_alpn() const noexcept override { return "h2"; }
     [[nodiscard]] const fiber::net::SocketAddress &remote_addr() const noexcept override { return remote_addr_; }
+    [[nodiscard]] fiber::event::EventLoop &loop() const noexcept override { return loop_ ? *loop_ : fallback_loop_; }
 
 private:
     fiber::net::SocketAddress remote_addr_{};
+    fiber::event::EventLoop *loop_ = fiber::event::EventLoop::current_or_null();
+    mutable fiber::event::EventLoop fallback_loop_{};
 };
 
 const fiber::http::Http2HpackEncodeCatalog &test_http2_encode_catalog() {
@@ -264,7 +265,7 @@ std::uint32_t parse_window_update_increment(const std::uint8_t *data) {
 } // namespace
 
 TEST(Http2StreamTest, OwnerBackedCreateReturnsUsableLease) {
-    fiber::http::Http2Stream::Lease stream = TestHttp2StreamOwner::create(1);
+    fiber::http::Http2Stream::Lease stream = TestHttp2StreamOwner::create();
     ASSERT_TRUE(stream);
 
     stream->close(fiber::common::IoErr::Canceled);
@@ -273,7 +274,7 @@ TEST(Http2StreamTest, OwnerBackedCreateReturnsUsableLease) {
 
 TEST(Http2StreamTest, UpdateSendWindowNotifiesWhenCrossingIntoPositiveRange) {
     int notify_count = 0;
-    auto *owner = new SendWindowNotifyOwner(7, &notify_count);
+    auto *owner = new SendWindowNotifyOwner(&notify_count);
     fiber::http::Http2Stream::Lease stream = fiber::http::Http2Stream::Lease::adopt(&owner->stream);
     ASSERT_TRUE(stream);
 
@@ -297,7 +298,7 @@ TEST(Http2StreamTest, UpdateSendWindowNotifiesWhenCrossingIntoPositiveRange) {
 
 TEST(Http2StreamTest, EmbeddedOwnerIsDestroyedWhenAdoptedLeaseReleasesClosedStream) {
     bool destroyed = false;
-    auto *owner = new OwnedStreamHolder(3, &destroyed);
+    auto *owner = new OwnedStreamHolder(&destroyed);
     fiber::http::Http2Stream::Lease stream = fiber::http::Http2Stream::Lease::adopt(&owner->stream);
     ASSERT_TRUE(stream);
 
@@ -310,7 +311,7 @@ TEST(Http2StreamTest, EmbeddedOwnerIsDestroyedWhenAdoptedLeaseReleasesClosedStre
 
 TEST(Http2StreamTest, AdditionalLeaseRetainsEmbeddedOwnerUntilLastReferenceDrops) {
     bool destroyed = false;
-    auto *owner = new OwnedStreamHolder(5, &destroyed);
+    auto *owner = new OwnedStreamHolder(&destroyed);
     fiber::http::Http2Stream::Lease initial = fiber::http::Http2Stream::Lease::adopt(&owner->stream);
     fiber::http::Http2Stream::Lease extra = owner->stream.lease();
     ASSERT_TRUE(initial);
@@ -326,9 +327,7 @@ TEST(Http2StreamTest, AdditionalLeaseRetainsEmbeddedOwnerUntilLastReferenceDrops
 }
 
 TEST(Http2StreamTest, MaybeReplenishRecvWindowEnqueuesWindowUpdateAndTracksRemainingWindow) {
-    auto transport = std::make_unique<DummyHttpTransport>();
-    fiber::http::Http2Connection connection(std::move(transport), make_options(), &test_http2_stream_factory(),
-                                            TestHttp2StreamFactory::ops());
+    fiber::http::Http2Connection connection(make_options(), &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
     connection.state_ = fiber::http::Http2Connection::State::Running;
 
     fiber::http::Http2Stream *stream = connection.create_peer_stream(1);

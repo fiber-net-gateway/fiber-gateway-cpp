@@ -9,6 +9,8 @@
 #include "../async/Spawn.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
+#include "detail/Http2BodyRecvState.h"
+#include "detail/Http2SendAwaiter.h"
 #include "HeaderMap.h"
 #include "HttpExchange.h"
 #include "HttpExchangeIo.h"
@@ -40,11 +42,11 @@ public:
 
 private:
     using PseudoHeaderHandler = common::IoErr (*)(ServerHttp2Request &, std::string_view value) noexcept;
-    struct BodyReadPollResult;
-    class BodyReadAwaiter;
-    class SendAwaiter;
-    class HeaderSendAwaiter;
-    class BodySendAwaiter;
+    struct SendResponseHeaderOp;
+    struct SendResponseBodyOp;
+    using SendAwaiter = detail::SendAwaiterBase<ServerHttp2Request>;
+    using HeaderSendAwaiter = detail::HeaderSendAwaiter<ServerHttp2Request, SendResponseHeaderOp>;
+    using BodySendAwaiter = detail::BodySendAwaiter<ServerHttp2Request, SendResponseBodyOp>;
 
     static const Http2Stream::Ops &stream_ops() noexcept;
     static const Http2HpackDecoder::Ops &decoder_ops() noexcept;
@@ -90,11 +92,8 @@ private:
                                                       std::string_view value, bool name_owned = false) noexcept;
     [[nodiscard]] std::string_view copy_to_pool(const std::uint8_t *data, std::size_t len) noexcept;
     [[nodiscard]] std::string_view copy_to_pool(std::string_view value) noexcept;
-    [[nodiscard]] BodyReadPollResult poll_body_read_state() const noexcept;
-    [[nodiscard]] bool arm_body_waiter(BodyReadAwaiter *awaiter) noexcept;
-    void cancel_body_waiter(BodyReadAwaiter *awaiter) noexcept;
-    void notify_body_waiter() noexcept;
     [[nodiscard]] bool cancel_queued_send() noexcept;
+    void on_send_complete(SendAwaiter *awaiter, common::IoErr result) noexcept;
     void on_header_send_complete(HeaderSendAwaiter *awaiter, common::IoErr result) noexcept;
     void on_body_send_complete(BodySendAwaiter *awaiter, common::IoErr result) noexcept;
     void on_stream_send_window_available() noexcept;
@@ -104,10 +103,8 @@ private:
     const HttpHandler *handler_ = nullptr;
     Http2Stream stream_;
     HttpExchange exchange_;
-    mem::IoBufChain request_body_queue_;
-    std::chrono::milliseconds body_timeout_{};
+    detail::Http2BodyRecvState request_body_recv_;
     std::chrono::milliseconds write_timeout_{};
-    BodyReadAwaiter *body_waiter_ = nullptr;
     SendAwaiter *send_awaiter_ = nullptr;
     common::IoErr abort_reason_ = common::IoErr::None;
     bool reading_trailers_ = false;
@@ -127,6 +124,13 @@ private:
     std::string_view pending_name_;
     std::uint64_t pending_name_hash_ = 0;
     bool pending_name_owned_ = false;
+
+    template<class>
+    friend class detail::SendAwaiterBase;
+    template<class, class>
+    friend class detail::HeaderSendAwaiter;
+    template<class, class>
+    friend class detail::BodySendAwaiter;
 };
 
 } // namespace fiber::http

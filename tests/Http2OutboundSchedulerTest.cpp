@@ -11,8 +11,10 @@
 #include "async/Spawn.h"
 #include "async/Sleep.h"
 #include "event/EventLoopGroup.h"
+#define private public
 #include "http/Http2OutboundScheduler.h"
 #include "http/HttpTransport.h"
+#undef private
 
 namespace {
 
@@ -93,6 +95,7 @@ public:
     [[nodiscard]] int fd() const noexcept override { return -1; }
     [[nodiscard]] std::string negotiated_alpn() const noexcept override { return "h2"; }
     [[nodiscard]] const fiber::net::SocketAddress &remote_addr() const noexcept override { return remote_addr_; }
+    [[nodiscard]] fiber::event::EventLoop &loop() const noexcept override { return loop_ ? *loop_ : fallback_loop_; }
     [[nodiscard]] const std::string &written() const noexcept { return written_; }
 
 private:
@@ -102,6 +105,8 @@ private:
     std::string written_;
     fiber::common::IoErr write_error_ = fiber::common::IoErr::None;
     fiber::net::SocketAddress remote_addr_{};
+    fiber::event::EventLoop *loop_ = fiber::event::EventLoop::current_or_null();
+    mutable fiber::event::EventLoop fallback_loop_{};
 };
 
 struct DummyStreamOwner {
@@ -300,7 +305,8 @@ TEST(Http2OutboundSchedulerTest, EncodesAndSendsStreamBatchBeforeClosing) {
         .first_batch = "HEADERS",
         .second_batch = "",
     };
-    fiber::http::Http2Stream stream(1, &owner, kStreamOps);
+    fiber::http::Http2Stream stream(&owner, kStreamOps);
+    stream.stream_id_ = 1;
 
     std::promise<fiber::common::IoErr> done_promise;
     auto done_future = done_promise.get_future();
@@ -340,7 +346,8 @@ TEST(Http2OutboundSchedulerTest, MovesBlockedDataStreamBackToReadyAfterConnectio
         .second_batch = "",
         .block_on_zero_conn_window = true,
     };
-    fiber::http::Http2Stream stream(1, &owner, kStreamOps);
+    fiber::http::Http2Stream stream(&owner, kStreamOps);
+    stream.stream_id_ = 1;
 
     std::promise<fiber::common::IoErr> done_promise;
     auto done_future = done_promise.get_future();
@@ -380,7 +387,8 @@ TEST(Http2OutboundSchedulerTest, RequestSendUpdatesQueuedStreamEncoder) {
     DummyStreamOwner second{
         .first_batch = "NEW",
     };
-    fiber::http::Http2Stream stream(1, &first, kStreamOps);
+    fiber::http::Http2Stream stream(&first, kStreamOps);
+    stream.stream_id_ = 1;
 
     std::promise<fiber::common::IoErr> done_promise;
     auto done_future = done_promise.get_future();
@@ -421,7 +429,8 @@ TEST(Http2OutboundSchedulerTest, CancelQueuedReadySendRemovesStreamFromQueue) {
     DummyStreamOwner owner{
         .first_batch = "HEADERS",
     };
-    fiber::http::Http2Stream stream(1, &owner, kStreamOps);
+    fiber::http::Http2Stream stream(&owner, kStreamOps);
+    stream.stream_id_ = 1;
 
     EXPECT_EQ(scheduler.request_send(stream, fiber::http::Http2OutboundNextKind::Headers, &encode_stream_batch, &owner),
               fiber::common::IoErr::None);
@@ -441,7 +450,8 @@ TEST(Http2OutboundSchedulerTest, CancelQueuedWaitingConnWindowSendRemovesStreamF
     DummyStreamOwner owner{
         .first_batch = "DATA",
     };
-    fiber::http::Http2Stream stream(1, &owner, kStreamOps);
+    fiber::http::Http2Stream stream(&owner, kStreamOps);
+    stream.stream_id_ = 1;
 
     EXPECT_EQ(scheduler.request_send(stream, fiber::http::Http2OutboundNextKind::Data, &encode_stream_batch, &owner),
               fiber::common::IoErr::None);
@@ -463,7 +473,8 @@ TEST(Http2OutboundSchedulerTest, OnDoneFiresAfterInflightBatchCompletes) {
         .first_batch = "HEADERS",
         .notify_done = true,
     };
-    fiber::http::Http2Stream stream(1, &owner, kStreamOps);
+    fiber::http::Http2Stream stream(&owner, kStreamOps);
+    stream.stream_id_ = 1;
 
     std::promise<fiber::common::IoErr> done_promise;
     auto done_future = done_promise.get_future();
@@ -501,7 +512,8 @@ TEST(Http2OutboundSchedulerTest, OnDoneFiresWithFailureWhenWriteFails) {
         .first_batch = "HEADERS",
         .notify_done = true,
     };
-    fiber::http::Http2Stream stream(1, &owner, kStreamOps);
+    fiber::http::Http2Stream stream(&owner, kStreamOps);
+    stream.stream_id_ = 1;
 
     std::promise<fiber::common::IoErr> done_promise;
     auto done_future = done_promise.get_future();

@@ -13,10 +13,14 @@
 namespace {
 
 struct TestHttp2StreamOwner {
-    explicit TestHttp2StreamOwner(std::uint32_t stream_id) : stream(stream_id, this, ops()) {}
+    TestHttp2StreamOwner() : stream(this, ops()) {}
 
-    static fiber::http::Http2Stream::Lease create(std::uint32_t stream_id) noexcept {
-        auto *owner = new (std::nothrow) TestHttp2StreamOwner(stream_id);
+    static TestHttp2StreamOwner *create_owner() noexcept {
+        return new (std::nothrow) TestHttp2StreamOwner();
+    }
+
+    static fiber::http::Http2Stream::Lease create() noexcept {
+        auto *owner = create_owner();
         if (!owner) {
             return {};
         }
@@ -172,28 +176,18 @@ class TestHttp2StreamFactory {
 public:
     [[nodiscard]] static const fiber::http::Http2StreamFactoryOps &ops() noexcept {
         static const fiber::http::Http2StreamFactoryOps kOps{
-                &TestHttp2StreamFactory::create_local_stream_op,
                 &TestHttp2StreamFactory::create_peer_stream_op,
         };
         return kOps;
     }
 
-    [[nodiscard]] fiber::http::Http2Stream::Lease create_local_stream(std::uint32_t stream_id,
-                                                                      fiber::http::Http2Connection &) noexcept {
-        return TestHttp2StreamOwner::create(stream_id);
-    }
-
     [[nodiscard]] fiber::http::Http2Stream::Lease create_peer_stream(std::uint32_t stream_id,
                                                                      fiber::http::Http2Connection &) noexcept {
-        return TestHttp2StreamOwner::create(stream_id);
+        (void) stream_id;
+        return TestHttp2StreamOwner::create();
     }
 
 private:
-    static fiber::http::Http2Stream::Lease create_local_stream_op(void *ctx, std::uint32_t stream_id,
-                                                                  fiber::http::Http2Connection &conn) noexcept {
-        return static_cast<TestHttp2StreamFactory *>(ctx)->create_local_stream(stream_id, conn);
-    }
-
     static fiber::http::Http2Stream::Lease create_peer_stream_op(void *ctx, std::uint32_t stream_id,
                                                                  fiber::http::Http2Connection &conn) noexcept {
         return static_cast<TestHttp2StreamFactory *>(ctx)->create_peer_stream(stream_id, conn);

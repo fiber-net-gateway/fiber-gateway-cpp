@@ -19,7 +19,7 @@ public:
     [[nodiscard]] const Http2Stream &stream() const noexcept { return stream_; }
 
 private:
-    explicit ClientHttp2Push(std::uint32_t stream_id, Http2Connection &conn) noexcept;
+    explicit ClientHttp2Push(Http2Connection &conn) noexcept;
     static const Http2Stream::Ops &stream_ops() noexcept;
     static void destroy_owner(void *owner) noexcept;
 
