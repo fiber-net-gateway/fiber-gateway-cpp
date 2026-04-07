@@ -9,20 +9,9 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "Http1ConnectionGroupKey.h"
+#include "Http1ConnectionPoolEntry.h"
 
 namespace fiber::http {
-
-class Http1ConnectionPoolGroupBucket {
-public:
-    static constexpr std::uint32_t kInvalidSlotIndex = 0xffffffffU;
-
-    [[nodiscard]] std::uint32_t slot_index() const noexcept { return slot_index_; }
-
-private:
-    friend class Http1ConnectionBucketIndex;
-
-    std::uint32_t slot_index_ = kInvalidSlotIndex;
-};
 
 class Http1ConnectionBucketIndex : public common::NonCopyable, public common::NonMovable {
 public:
