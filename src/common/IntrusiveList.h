@@ -21,9 +21,13 @@ public:
 
     [[nodiscard]] T *front() noexcept { return owner_from_hook(head_); }
     [[nodiscard]] const T *front() const noexcept { return owner_from_hook(head_); }
+    [[nodiscard]] T *back() noexcept { return owner_from_hook(tail_); }
+    [[nodiscard]] const T *back() const noexcept { return owner_from_hook(tail_); }
 
     [[nodiscard]] T *next_of(T &owner) noexcept { return owner_from_hook(hook_of(owner).next); }
     [[nodiscard]] const T *next_of(const T &owner) const noexcept { return owner_from_hook(hook_of(owner).next); }
+    [[nodiscard]] T *prev_of(T &owner) noexcept { return owner_from_hook(hook_of(owner).prev); }
+    [[nodiscard]] const T *prev_of(const T &owner) const noexcept { return owner_from_hook(hook_of(owner).prev); }
 
     void push_back(T &owner) noexcept {
         IntrusiveListHook &hook = hook_of(owner);

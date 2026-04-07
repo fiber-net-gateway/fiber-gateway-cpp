@@ -1,0 +1,171 @@
+#ifndef FIBER_HTTP_STEALABLE_HTTP1_CONNECTION_POOL_SET_H
+#define FIBER_HTTP_STEALABLE_HTTP1_CONNECTION_POOL_SET_H
+
+#include <cstddef>
+#include <coroutine>
+#include <cstdint>
+#include <memory>
+#include <new>
+#include <optional>
+
+#include "../common/IoError.h"
+#include "../common/NonCopyable.h"
+#include "../common/NonMovable.h"
+#include "../event/EventLoopGroup.h"
+#include "Http1ConnectionGroupHintTable.h"
+#include "Http1ConnectionPoolCore.h"
+
+namespace fiber::http {
+
+class StealableHttp1ConnectionPoolSet : public common::NonCopyable, public common::NonMovable {
+public:
+    using Options = Http1ConnectionPoolCore::Options;
+
+    class AcquireAwaiter;
+
+    class Lease : public common::NonCopyable {
+    public:
+        Lease() noexcept = default;
+        Lease(Lease &&other) noexcept;
+        Lease &operator=(Lease &&other) noexcept;
+        ~Lease();
+
+        [[nodiscard]] bool valid() const noexcept;
+        [[nodiscard]] bool has_connection() const noexcept;
+        [[nodiscard]] bool hit() const noexcept;
+
+        [[nodiscard]] Http1ClientConnection *get() noexcept;
+        [[nodiscard]] const Http1ClientConnection *get() const noexcept;
+
+        [[nodiscard]] Http1ClientConnection &connection() noexcept;
+        [[nodiscard]] const Http1ConnectionGroupKey &key() const noexcept;
+        [[nodiscard]] common::IoResult<Http1ClientConnection *> emplace_connection(Http1ClientConnectionOptions options) noexcept;
+        void reset() noexcept;
+
+    private:
+        friend class StealableHttp1ConnectionPoolSet;
+
+        enum class Kind : std::uint8_t {
+            Empty,
+            Local,
+            Remote
+        };
+
+        explicit Lease(Http1ConnectionPoolCore::Lease &&local) noexcept;
+        Lease(Http1ConnectionPoolCore &home_core,
+              Http1ConnectionPoolEntry &entry,
+              const Http1ConnectionGroupKey &key) noexcept;
+
+        Kind kind_ = Kind::Empty;
+        Http1ConnectionPoolCore::Lease local_{};
+        Http1ConnectionPoolEntry *entry_ = nullptr;
+        Http1ConnectionPoolCore *home_core_ = nullptr;
+        std::optional<Http1ConnectionGroupKey> key_{};
+    };
+
+    explicit StealableHttp1ConnectionPoolSet(event::EventLoopGroup &group) noexcept;
+    StealableHttp1ConnectionPoolSet(event::EventLoopGroup &group, Options pool_options) noexcept;
+    ~StealableHttp1ConnectionPoolSet();
+
+    [[nodiscard]] bool init() noexcept;
+    void clear() noexcept;
+    void shutdown() noexcept;
+    [[nodiscard]] AcquireAwaiter acquire(const Http1ConnectionGroupKey &key) noexcept;
+
+    [[nodiscard]] std::size_t size() const noexcept { return group_->size(); }
+    [[nodiscard]] event::EventLoopGroup &group() noexcept { return *group_; }
+    [[nodiscard]] const event::EventLoopGroup &group() const noexcept { return *group_; }
+    [[nodiscard]] const Options &options() const noexcept { return pool_options_; }
+
+private:
+    struct Shard {
+        Shard(event::EventLoop &loop, Options pool_options) noexcept
+            : core(loop, pool_options),
+              hint() {
+            core.set_idle_count_changed_callback(&Shard::on_idle_count_changed, this);
+        }
+
+        ~Shard() { core.clear_idle_count_changed_callback(); }
+
+        static void on_idle_count_changed(void *ctx,
+                                          const Http1ConnectionGroupKey &key,
+                                          std::size_t idle_count) noexcept {
+            auto *self = static_cast<Shard *>(ctx);
+            FIBER_ASSERT(self != nullptr);
+            auto current = self->hint.probe(key).approx_count;
+            while (current < idle_count) {
+                self->hint.note_idle_add(key);
+                ++current;
+            }
+            while (current > idle_count) {
+                self->hint.note_idle_remove(key);
+                --current;
+            }
+        }
+
+        Http1ConnectionPoolCore core;
+        Http1ConnectionGroupHintTable hint;
+    };
+
+    struct alignas(Shard) ShardSlot {
+        std::byte storage[sizeof(Shard)];
+        ShardSlot *next = nullptr;
+    };
+
+    [[nodiscard]] Shard &current_shard() noexcept;
+    [[nodiscard]] const Shard &current_shard() const noexcept;
+    [[nodiscard]] ShardSlot &current_slot() noexcept;
+    [[nodiscard]] const ShardSlot &current_slot() const noexcept;
+    [[nodiscard]] Shard &shard_at(std::size_t index) noexcept;
+    [[nodiscard]] const Shard &shard_at(std::size_t index) const noexcept;
+    [[nodiscard]] ShardSlot &slot_at(std::size_t index) noexcept;
+    [[nodiscard]] const ShardSlot &slot_at(std::size_t index) const noexcept;
+
+    event::EventLoopGroup *group_ = nullptr;
+    Options pool_options_{};
+    std::unique_ptr<ShardSlot[]> storage_{};
+};
+
+class StealableHttp1ConnectionPoolSet::AcquireAwaiter : public common::NonCopyable {
+public:
+    AcquireAwaiter(StealableHttp1ConnectionPoolSet &set, const Http1ConnectionGroupKey &key) noexcept;
+    AcquireAwaiter(AcquireAwaiter &&) = delete;
+    AcquireAwaiter &operator=(AcquireAwaiter &&) = delete;
+    ~AcquireAwaiter() = default;
+
+    bool await_ready() noexcept;
+    bool await_suspend(std::coroutine_handle<> handle) noexcept;
+    Lease await_resume() noexcept;
+
+private:
+    friend class StealableHttp1ConnectionPoolSet;
+
+    enum class Phase : std::uint8_t {
+        SubmitSteal,
+        ResumeCaller
+    };
+
+    [[nodiscard]] Shard &target_shard() const noexcept;
+    [[nodiscard]] bool prepare() noexcept;
+    [[nodiscard]] bool advance_to_candidate() noexcept;
+    void post_target() noexcept;
+    static void run_notify(AcquireAwaiter *awaiter);
+
+    StealableHttp1ConnectionPoolSet *set_ = nullptr;
+    std::optional<Http1ConnectionGroupKey> key_{};
+    Http1ConnectionPoolCore::Lease local_fallback_{};
+    Lease result_{};
+    ShardSlot *home_slot_ = nullptr;
+    ShardSlot *cursor_ = nullptr;
+    event::EventLoop *caller_loop_ = nullptr;
+    std::coroutine_handle<> handle_{};
+    event::EventLoop::NotifyEntry notify_entry_{};
+    Http1ConnectionPoolEntry *result_entry_ = nullptr;
+    Http1ConnectionPoolCore *result_home_core_ = nullptr;
+    Phase phase_ = Phase::SubmitSteal;
+    bool prepared_ = false;
+};
+
+} // namespace fiber::http
+
+#endif // FIBER_HTTP_STEALABLE_HTTP1_CONNECTION_POOL_SET_H

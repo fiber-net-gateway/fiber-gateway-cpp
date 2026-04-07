@@ -77,7 +77,9 @@ public:
         std::chrono::seconds max_positive_ttl{300};
         std::chrono::seconds min_negative_ttl{1};
         std::chrono::seconds max_negative_ttl{60};
-        NameSnapshot::Options snapshot_options{};
+        NameSnapshot::Options snapshot_options{MessageParser::Options{}.max_records,
+                                               MessageParser::Options{}.max_records,
+                                               ResolveResult::Options{}.max_name_storage};
         MessageParser::Options parser_options{};
     };
 

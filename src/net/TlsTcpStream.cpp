@@ -38,9 +38,9 @@ fiber::common::IoResult<size_t> TlsTcpStream::try_write(const void *buf, size_t 
     return stream_.try_write(buf, len);
 }
 
-TlsTcpStream::HandshakeAwaiter TlsTcpStream::handshake() noexcept { return stream_.handshake(); }
+TlsTcpStream::HandshakeTask TlsTcpStream::handshake() { return stream_.handshake(); }
 
-TlsTcpStream::ShutdownAwaiter TlsTcpStream::shutdown() noexcept { return stream_.shutdown(); }
+TlsTcpStream::ShutdownTask TlsTcpStream::shutdown() { return stream_.shutdown(); }
 
 detail::StreamFd::WaitReadableAwaiter TlsTcpStream::wait_readable() noexcept { return stream_.wait_readable(); }
 
