@@ -1,6 +1,10 @@
 # Fiber Gateway Framework
 a gateway framework written by c++23
 
+## Documentation
+
+- [HTTP/1 Connection Pool](docs/http1-connection-pool.md)
+
 ## Build with jemalloc
 
 Enable jemalloc for all final executables with:

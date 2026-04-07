@@ -56,6 +56,7 @@ public:
     void start(RunFn fn);
     void request_stop();
     void join();
+    [[nodiscard]] bool started() const noexcept { return started_.load(std::memory_order_acquire); }
 
     std::size_t size() const noexcept {
         return threads_.size();

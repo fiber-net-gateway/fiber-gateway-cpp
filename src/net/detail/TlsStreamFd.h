@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 
+#include "../../async/Task.h"
 #include "../../common/IoError.h"
 #include "../../common/NonCopyable.h"
 #include "../../common/NonMovable.h"
@@ -22,10 +23,10 @@ namespace fiber::net::detail {
 class TlsStreamFd : public common::NonCopyable, public common::NonMovable {
 public:
     using ConfigureSslFn = void (*)(SSL *ssl, void *ctx) noexcept;
+    using HandshakeTask = fiber::async::Task<fiber::common::IoResult<void>>;
+    using ShutdownTask = fiber::async::Task<fiber::common::IoResult<void>>;
     class ReadAwaiter;
     class WriteAwaiter;
-    class HandshakeAwaiter;
-    class ShutdownAwaiter;
 
     TlsStreamFd(fiber::event::EventLoop &loop, int fd);
     ~TlsStreamFd();
@@ -44,8 +45,8 @@ public:
     [[nodiscard]] WriteAwaiter write(const void *buf, size_t len) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_read(void *buf, size_t len) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_write(const void *buf, size_t len) noexcept;
-    [[nodiscard]] HandshakeAwaiter handshake() noexcept;
-    [[nodiscard]] ShutdownAwaiter shutdown() noexcept;
+    [[nodiscard]] HandshakeTask handshake();
+    [[nodiscard]] ShutdownTask shutdown();
     [[nodiscard]] StreamFd::WaitReadableAwaiter wait_readable() noexcept;
     [[nodiscard]] StreamFd::WaitWritableAwaiter wait_writable() noexcept;
     fiber::common::IoErr poll_handshake(fiber::event::IoEvent &event) noexcept;
@@ -56,8 +57,6 @@ public:
 private:
     friend class ReadAwaiter;
     friend class WriteAwaiter;
-    friend class HandshakeAwaiter;
-    friend class ShutdownAwaiter;
 
     fiber::common::IoErr handshake_once(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr shutdown_once(fiber::event::IoEvent &event) noexcept;
@@ -115,52 +114,6 @@ private:
     const void *buf_ = nullptr;
     size_t len_ = 0;
     size_t result_ = 0;
-    fiber::common::IoErr err_ = fiber::common::IoErr::None;
-    std::optional<StreamFd::WaitReadableAwaiter> read_waiter_{};
-    std::optional<StreamFd::WaitWritableAwaiter> write_waiter_{};
-    bool waiting_ = false;
-    bool completed_ = false;
-};
-
-class TlsStreamFd::HandshakeAwaiter {
-public:
-    explicit HandshakeAwaiter(TlsStreamFd &stream) noexcept;
-
-    HandshakeAwaiter(const HandshakeAwaiter &) = delete;
-    HandshakeAwaiter &operator=(const HandshakeAwaiter &) = delete;
-    HandshakeAwaiter(HandshakeAwaiter &&) = delete;
-    HandshakeAwaiter &operator=(HandshakeAwaiter &&) = delete;
-    ~HandshakeAwaiter();
-
-    bool await_ready() noexcept { return false; }
-    bool await_suspend(std::coroutine_handle<> handle);
-    fiber::common::IoResult<void> await_resume() noexcept;
-
-private:
-    TlsStreamFd *stream_ = nullptr;
-    fiber::common::IoErr err_ = fiber::common::IoErr::None;
-    std::optional<StreamFd::WaitReadableAwaiter> read_waiter_{};
-    std::optional<StreamFd::WaitWritableAwaiter> write_waiter_{};
-    bool waiting_ = false;
-    bool completed_ = false;
-};
-
-class TlsStreamFd::ShutdownAwaiter {
-public:
-    explicit ShutdownAwaiter(TlsStreamFd &stream) noexcept;
-
-    ShutdownAwaiter(const ShutdownAwaiter &) = delete;
-    ShutdownAwaiter &operator=(const ShutdownAwaiter &) = delete;
-    ShutdownAwaiter(ShutdownAwaiter &&) = delete;
-    ShutdownAwaiter &operator=(ShutdownAwaiter &&) = delete;
-    ~ShutdownAwaiter();
-
-    bool await_ready() noexcept { return false; }
-    bool await_suspend(std::coroutine_handle<> handle);
-    fiber::common::IoResult<void> await_resume() noexcept;
-
-private:
-    TlsStreamFd *stream_ = nullptr;
     fiber::common::IoErr err_ = fiber::common::IoErr::None;
     std::optional<StreamFd::WaitReadableAwaiter> read_waiter_{};
     std::optional<StreamFd::WaitWritableAwaiter> write_waiter_{};

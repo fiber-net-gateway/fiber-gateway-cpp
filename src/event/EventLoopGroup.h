@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <atomic>
 #include <vector>
 
 #include "../async/ThreadGroup.h"
@@ -28,6 +29,7 @@ public:
     void start(const fiber::async::SignalSet &mask);
     void stop();
     void join();
+    [[nodiscard]] bool running() const noexcept;
 
     std::size_t size() const noexcept {
         return loops_.size();
@@ -41,6 +43,7 @@ public:
 
 private:
     void start_with_mask(const fiber::async::SignalSet *mask);
+    std::atomic<bool> running_{false};
 };
 
 } // namespace fiber::event
