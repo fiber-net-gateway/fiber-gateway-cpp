@@ -12,7 +12,8 @@ LocalHttp1ConnectionPoolSet::LocalHttp1ConnectionPoolSet(event::EventLoopGroup &
       pool_options_(pool_options),
       storage_(std::make_unique<Slot[]>(group.size())) {
     for (std::size_t i = 0; i < group.size(); ++i) {
-        std::construct_at(&core_at(i), group.at(i), pool_options_);
+        auto *core = reinterpret_cast<Http1ConnectionPoolCore *>(storage_[i].storage);
+        std::construct_at(core, group.at(i), pool_options_);
     }
 }
 
@@ -21,7 +22,8 @@ LocalHttp1ConnectionPoolSet::LocalHttp1ConnectionPoolSet(event::EventLoopGroup &
 
 LocalHttp1ConnectionPoolSet::~LocalHttp1ConnectionPoolSet() {
     for (std::size_t i = 0; i < group_->size(); ++i) {
-        std::destroy_at(&core_at(i));
+        auto *core = reinterpret_cast<Http1ConnectionPoolCore *>(storage_[i].storage);
+        std::destroy_at(core);
     }
 }
 
@@ -42,22 +44,20 @@ void LocalHttp1ConnectionPoolSet::clear() noexcept {
 
 Http1ConnectionPoolCore &LocalHttp1ConnectionPoolSet::core_for(const event::EventLoop &loop) noexcept {
     FIBER_ASSERT(loop.group() == group_);
-    for (std::size_t i = 0; i < group_->size(); ++i) {
-        if (&group_->at(i) == &loop) {
-            return core_at(i);
-        }
-    }
-    FIBER_PANIC("event loop not found in LocalHttp1ConnectionPoolSet");
+    FIBER_ASSERT(loop.has_group_index());
+    const std::size_t index = loop.group_index();
+    FIBER_ASSERT(index < group_->size());
+    FIBER_ASSERT(&group_->at(index) == &loop);
+    return core_at(index);
 }
 
 const Http1ConnectionPoolCore &LocalHttp1ConnectionPoolSet::core_for(const event::EventLoop &loop) const noexcept {
     FIBER_ASSERT(loop.group() == group_);
-    for (std::size_t i = 0; i < group_->size(); ++i) {
-        if (&group_->at(i) == &loop) {
-            return core_at(i);
-        }
-    }
-    FIBER_PANIC("event loop not found in LocalHttp1ConnectionPoolSet");
+    FIBER_ASSERT(loop.has_group_index());
+    const std::size_t index = loop.group_index();
+    FIBER_ASSERT(index < group_->size());
+    FIBER_ASSERT(&group_->at(index) == &loop);
+    return core_at(index);
 }
 
 } // namespace fiber::http
