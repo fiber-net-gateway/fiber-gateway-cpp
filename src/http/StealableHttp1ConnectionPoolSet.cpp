@@ -1,38 +1,11 @@
 #include "StealableHttp1ConnectionPoolSet.h"
 
 #include <coroutine>
-#include <new>
 #include <utility>
 
 #include "../common/Assert.h"
 
 namespace fiber::http {
-
-namespace {
-
-struct ReturnTask {
-    event::EventLoop::NotifyEntry entry{};
-    Http1ConnectionPoolCore *home_core = nullptr;
-    Http1ConnectionPoolEntry *entry_ptr = nullptr;
-    Http1ConnectionGroupKey key;
-
-    ReturnTask(Http1ConnectionPoolCore &core,
-               Http1ConnectionPoolEntry &pooled_entry,
-               const Http1ConnectionGroupKey &group_key) noexcept
-        : home_core(&core),
-          entry_ptr(&pooled_entry),
-          key(group_key) {}
-
-    static void run(ReturnTask *task) {
-        FIBER_ASSERT(task != nullptr);
-        FIBER_ASSERT(task->home_core != nullptr);
-        FIBER_ASSERT(task->entry_ptr != nullptr);
-        task->home_core->accept_returned_entry(*task->entry_ptr, task->key);
-        delete task;
-    }
-};
-
-} // namespace
 
 StealableHttp1ConnectionPoolSet::Lease::Lease(Http1ConnectionPoolCore::Lease &&local) noexcept
     : kind_(Kind::Local),
@@ -177,9 +150,7 @@ void StealableHttp1ConnectionPoolSet::Lease::reset() noexcept {
         if (current_loop == &home_core_->loop()) {
             home_core_->accept_returned_entry(*entry_, *key_);
         } else {
-            auto *task = new (std::nothrow) ReturnTask(*home_core_, *entry_, *key_);
-            FIBER_ASSERT(task != nullptr);
-            home_core_->loop().post<ReturnTask, &ReturnTask::entry, &ReturnTask::run>(*task);
+            entry_->post_remote_return(*home_core_, *key_);
         }
     }
 
