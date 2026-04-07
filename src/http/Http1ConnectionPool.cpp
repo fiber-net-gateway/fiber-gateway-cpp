@@ -170,6 +170,7 @@ void Http1ConnectionPool::clear() noexcept {
         evict_entry(*entry);
     }
     bucket_index_.clear();
+    hint_table_.clear();
     idle_total_ = 0;
 }
 
@@ -285,6 +286,7 @@ void Http1ConnectionPool::park_entry(Http1ConnectionPoolEntry &entry, const Http
     global_idle_entries_.push_back(entry);
     ++bucket->idle_count_;
     ++idle_total_;
+    hint_table_.note_idle_add(key);
 
     while (bucket->idle_count_ > options_.max_idle_per_group) {
         evict_group_oldest(*bucket);
@@ -315,6 +317,12 @@ void Http1ConnectionPool::detach_idle_entry(Http1ConnectionPoolEntry &entry) noe
     --bucket->idle_count_;
     FIBER_ASSERT(idle_total_ > 0);
     --idle_total_;
+    if (bucket->slot_index_ != Http1ConnectionPoolGroupBucket::kInvalidSlotIndex) {
+        const Http1ConnectionGroupKey *key = bucket_index_.key_at(bucket->slot_index_);
+        if (key) {
+            hint_table_.note_idle_remove(*key);
+        }
+    }
 
     if (bucket->idle_count_ == 0 && bucket->slot_index_ != Http1ConnectionPoolGroupBucket::kInvalidSlotIndex) {
         bucket_index_.erase(bucket->slot_index_);
