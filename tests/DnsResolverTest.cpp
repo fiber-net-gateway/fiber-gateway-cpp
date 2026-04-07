@@ -125,17 +125,18 @@ fiber::common::IoResult<std::uint16_t> parse_question_type(const std::uint8_t *p
     return read_be16(packet + offset);
 }
 
-std::vector<std::uint8_t> make_address_response(std::uint16_t id,
-                                                std::string_view qname,
-                                                std::uint16_t qtype,
-                                                const std::uint8_t *rdata,
-                                                std::uint16_t rdata_len,
-                                                std::uint32_t ttl) {
+std::vector<std::uint8_t> make_multi_address_response(std::uint16_t id,
+                                                      std::string_view qname,
+                                                      std::uint16_t qtype,
+                                                      const std::uint8_t *const *rdata_records,
+                                                      const std::uint16_t *rdata_lengths,
+                                                      std::size_t record_count,
+                                                      std::uint32_t ttl) {
     std::vector<std::uint8_t> packet;
     push_be16(packet, id);
     push_be16(packet, 0x8180U);
     push_be16(packet, 1);
-    push_be16(packet, 1);
+    push_be16(packet, static_cast<std::uint16_t>(record_count));
     push_be16(packet, 0);
     push_be16(packet, 0);
 
@@ -144,13 +145,24 @@ std::vector<std::uint8_t> make_address_response(std::uint16_t id,
     push_be16(packet, qtype);
     push_be16(packet, static_cast<std::uint16_t>(RecordClass::IN));
 
-    push_be16(packet, 0xc00cU);
-    push_be16(packet, qtype);
-    push_be16(packet, static_cast<std::uint16_t>(RecordClass::IN));
-    push_be32(packet, ttl);
-    push_be16(packet, rdata_len);
-    packet.insert(packet.end(), rdata, rdata + rdata_len);
+    for (std::size_t i = 0; i < record_count; ++i) {
+        push_be16(packet, 0xc00cU);
+        push_be16(packet, qtype);
+        push_be16(packet, static_cast<std::uint16_t>(RecordClass::IN));
+        push_be32(packet, ttl);
+        push_be16(packet, rdata_lengths[i]);
+        packet.insert(packet.end(), rdata_records[i], rdata_records[i] + rdata_lengths[i]);
+    }
     return packet;
+}
+
+std::vector<std::uint8_t> make_address_response(std::uint16_t id,
+                                                std::string_view qname,
+                                                std::uint16_t qtype,
+                                                const std::uint8_t *rdata,
+                                                std::uint16_t rdata_len,
+                                                std::uint32_t ttl) {
+    return make_multi_address_response(id, qname, qtype, &rdata, &rdata_len, 1, ttl);
 }
 
 std::vector<std::uint8_t> make_empty_response(std::uint16_t id, std::string_view qname, std::uint16_t qtype) {
@@ -242,6 +254,7 @@ DetachedTask run_policy_resolve(fiber::event::EventLoop *loop,
                                 fiber::dns::SharedDnsCache *cache,
                                 std::uint16_t port,
                                 AddressPolicy policy,
+                                std::string_view host,
                                 std::promise<AddressOutcome> *promise) {
     AddressOutcome outcome;
     DnsResolverLocal local;
@@ -271,7 +284,7 @@ DetachedTask run_policy_resolve(fiber::event::EventLoop *loop,
         co_return;
     }
 
-    auto resolved = co_await dns_resolver.resolve_host("dual.example", policy, result);
+    auto resolved = co_await dns_resolver.resolve_host(host, policy, result);
     outcome.err = resolved ? IoErr::None : resolved.error();
     if (resolved) {
         outcome.status = *resolved;
@@ -288,6 +301,7 @@ DetachedTask run_policy_resolve(fiber::event::EventLoop *loop,
 DetachedTask run_dual_policy_resolve(fiber::event::EventLoop *loop,
                                      fiber::dns::SharedDnsCache *cache,
                                      std::uint16_t port,
+                                     std::string_view host,
                                      std::promise<DualAddressOutcome> *promise) {
     DualAddressOutcome dual_outcome;
     DnsResolverLocal local;
@@ -321,7 +335,7 @@ DetachedTask run_dual_policy_resolve(fiber::event::EventLoop *loop,
         co_return;
     }
 
-    auto first = co_await dns_resolver.resolve_host("dual.example", AddressPolicy::V6First, first_result);
+    auto first = co_await dns_resolver.resolve_host(host, AddressPolicy::V6First, first_result);
     dual_outcome.first.err = first ? IoErr::None : first.error();
     if (first) {
         dual_outcome.first.status = *first;
@@ -331,7 +345,7 @@ DetachedTask run_dual_policy_resolve(fiber::event::EventLoop *loop,
         }
     }
 
-    auto second = co_await dns_resolver.resolve_host("dual.example", AddressPolicy::V4First, second_result);
+    auto second = co_await dns_resolver.resolve_host(host, AddressPolicy::V4First, second_result);
     dual_outcome.second.err = second ? IoErr::None : second.error();
     if (second) {
         dual_outcome.second.status = *second;
@@ -400,6 +414,75 @@ DetachedTask run_literal_endpoint_resolve(fiber::event::EventLoop *loop,
     promise->set_value(std::move(outcome));
 }
 
+DetachedTask run_multi_v4_server(fiber::event::EventLoop *loop,
+                                 std::promise<std::uint16_t> *port_promise,
+                                 std::promise<ServerOutcome> *outcome_promise,
+                                 std::string qname,
+                                 std::vector<std::array<std::uint8_t, 4>> v4_addrs) {
+    ServerOutcome outcome;
+    fiber::net::UdpSocket socket(*loop);
+    auto bind_result = socket.bind(fiber::net::SocketAddress::any_v4(), {});
+    if (!bind_result) {
+        port_promise->set_value(0);
+        outcome.err = bind_result.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    auto port_result = resolve_port(socket.fd());
+    port_promise->set_value(port_result ? *port_result : 0);
+    if (!port_result) {
+        outcome.err = port_result.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    std::array<std::uint8_t, 512> buf{};
+    auto recv_result =
+        co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
+    if (!recv_result) {
+        outcome.err = recv_result.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+    ++outcome.recv_count;
+
+    auto type_result = parse_question_type(buf.data(), recv_result->size);
+    if (!type_result) {
+        outcome.err = type_result.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    std::vector<std::uint8_t> response;
+    if (*type_result == static_cast<std::uint16_t>(RecordType::A)) {
+        std::vector<const std::uint8_t *> record_ptrs;
+        std::vector<std::uint16_t> record_lengths;
+        record_ptrs.reserve(v4_addrs.size());
+        record_lengths.reserve(v4_addrs.size());
+        for (const auto &addr : v4_addrs) {
+            record_ptrs.push_back(addr.data());
+            record_lengths.push_back(static_cast<std::uint16_t>(addr.size()));
+        }
+        response = make_multi_address_response(read_be16(buf.data()), qname, *type_result, record_ptrs.data(),
+                                               record_lengths.data(), record_ptrs.size(), 60);
+    } else {
+        response = make_empty_response(read_be16(buf.data()), qname, *type_result);
+    }
+
+    auto send_result = co_await fiber::async::timeout_for(
+        [&]() { return socket.send_to(response.data(), response.size(), recv_result->peer); }, 2s);
+    if (!send_result) {
+        outcome.err = send_result.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    outcome.err = IoErr::None;
+    socket.close();
+    outcome_promise->set_value(std::move(outcome));
+}
+
 } // namespace
 
 TEST(DnsResolverTest, ResolvesDualStackInPreferredOrder) {
@@ -426,7 +509,7 @@ TEST(DnsResolverTest, ResolvesDualStackInPreferredOrder) {
     std::promise<DualAddressOutcome> promise;
     auto future = promise.get_future();
     fiber::async::spawn(group.at(0),
-                        [&]() { return run_dual_policy_resolve(&group.at(0), &cache, port, &promise); });
+                        [&]() { return run_dual_policy_resolve(&group.at(0), &cache, port, "dual.example", &promise); });
 
     const DualAddressOutcome outcomes = future.get();
     const ServerOutcome server_outcome = server_future.get();
@@ -474,7 +557,7 @@ TEST(DnsResolverTest, ReturnsSuccessWhenOneFamilyHasNoData) {
     std::promise<AddressOutcome> promise;
     auto future = promise.get_future();
     fiber::async::spawn(group.at(0), [&]() {
-        return run_policy_resolve(&group.at(0), &cache, port, AddressPolicy::V6First, &promise);
+        return run_policy_resolve(&group.at(0), &cache, port, AddressPolicy::V6First, "dual.example", &promise);
     });
 
     const AddressOutcome outcome = future.get();
@@ -486,6 +569,50 @@ TEST(DnsResolverTest, ReturnsSuccessWhenOneFamilyHasNoData) {
     EXPECT_EQ(outcome.records[0], "9.9.9.9");
     EXPECT_EQ(server_outcome.err, IoErr::None);
     EXPECT_EQ(server_outcome.recv_count, 2u);
+
+    cache.release();
+    group.stop();
+}
+
+TEST(DnsResolverTest, ResolvesMoreThanEightRecordsInSingleFamily) {
+    fiber::event::EventLoopGroup group(2);
+    group.start();
+
+    fiber::dns::SharedDnsCache cache;
+    ASSERT_TRUE(cache.init());
+
+    std::promise<std::uint16_t> port_promise;
+    std::promise<ServerOutcome> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+
+    std::vector<std::array<std::uint8_t, 4>> v4_addrs;
+    for (std::uint8_t i = 1; i <= 9; ++i) {
+        v4_addrs.push_back({192, 0, 2, i});
+    }
+    fiber::async::spawn(group.at(1), [&]() {
+        return run_multi_v4_server(&group.at(1), &port_promise, &server_promise, "many.example", std::move(v4_addrs));
+    });
+
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    std::promise<AddressOutcome> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_policy_resolve(&group.at(0), &cache, port, AddressPolicy::V4Only, "many.example", &promise);
+    });
+
+    const AddressOutcome outcome = future.get();
+    const ServerOutcome server_outcome = server_future.get();
+
+    EXPECT_EQ(outcome.err, IoErr::None);
+    EXPECT_EQ(outcome.status, ResolveStatus::Success);
+    ASSERT_EQ(outcome.records.size(), 9u);
+    EXPECT_EQ(outcome.records.front(), "192.0.2.1");
+    EXPECT_EQ(outcome.records.back(), "192.0.2.9");
+    EXPECT_EQ(server_outcome.err, IoErr::None);
+    EXPECT_EQ(server_outcome.recv_count, 1u);
 
     cache.release();
     group.stop();
