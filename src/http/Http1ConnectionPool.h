@@ -11,6 +11,7 @@
 #include "../event/EventLoop.h"
 #include "Http1ConnectionBucketIndex.h"
 #include "Http1ConnectionGroupKey.h"
+#include "Http1ConnectionGroupHintTable.h"
 #include "Http1ConnectionPoolEntry.h"
 
 namespace fiber::http {
@@ -68,6 +69,10 @@ public:
     [[nodiscard]] const Options &options() const noexcept { return options_; }
     [[nodiscard]] std::size_t idle_total() const noexcept { return idle_total_; }
     [[nodiscard]] std::size_t group_count() const noexcept { return bucket_index_.size(); }
+    [[nodiscard]] Http1ConnectionGroupHintTable::ProbeResult
+    probe_group_hint(const Http1ConnectionGroupKey &key) const noexcept {
+        return hint_table_.probe(key);
+    }
 
 private:
     friend class Lease;
@@ -93,6 +98,7 @@ private:
     event::EventLoop *loop_ = nullptr;
     Options options_{};
     Http1ConnectionBucketIndex bucket_index_{};
+    Http1ConnectionGroupHintTable hint_table_{};
     Http1ConnectionPoolGlobalList global_idle_entries_{};
     Http1ConnectionPoolGroupBucket *free_bucket_head_ = nullptr;
     Http1ConnectionPoolEntry *free_entry_head_ = nullptr;
