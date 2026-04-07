@@ -13,7 +13,7 @@ EventLoopGroup::EventLoopGroup(std::size_t size)
     FIBER_ASSERT(size > 0);
     loops_.reserve(size);
     for (std::size_t i = 0; i < size; ++i) {
-        loops_.push_back(std::make_unique<EventLoop>(this));
+        loops_.push_back(std::make_unique<EventLoop>(this, i));
     }
 }
 

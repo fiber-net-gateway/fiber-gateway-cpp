@@ -112,6 +112,8 @@ static inline void queue_remove(Queue *q) {
 
 class EventLoop {
 public:
+    static constexpr std::size_t kInvalidGroupIndex = static_cast<std::size_t>(-1);
+
     struct NotifyEntry {
         friend class EventLoop;
 
@@ -167,7 +169,7 @@ public:
         std::ptrdiff_t handle_offset_ = 0;
     };
 
-    explicit EventLoop(EventLoopGroup *group = nullptr);
+    explicit EventLoop(EventLoopGroup *group = nullptr, std::size_t group_index = kInvalidGroupIndex);
     ~EventLoop();
 
     void run();
@@ -240,6 +242,13 @@ public:
     EventLoopGroup *group() noexcept { return group_; }
 
     const EventLoopGroup *group() const noexcept { return group_; }
+
+    [[nodiscard]] bool has_group_index() const noexcept { return group_index_ != kInvalidGroupIndex; }
+
+    [[nodiscard]] std::size_t group_index() const noexcept {
+        FIBER_ASSERT(group_index_ != kInvalidGroupIndex);
+        return group_index_;
+    }
 
 private:
     static thread_local EventLoop *current_;
@@ -336,6 +345,7 @@ private:
     std::chrono::steady_clock::time_point now_{};
     fiber::async::CoroutineFramePool frame_pool_{};
     EventLoopGroup *group_ = nullptr;
+    std::size_t group_index_ = kInvalidGroupIndex;
 };
 
 } // namespace fiber::event
