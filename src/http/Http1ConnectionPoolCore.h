@@ -1,5 +1,5 @@
-#ifndef FIBER_HTTP_HTTP1_CONNECTION_POOL_H
-#define FIBER_HTTP_HTTP1_CONNECTION_POOL_H
+#ifndef FIBER_HTTP_HTTP1_CONNECTION_POOL_CORE_H
+#define FIBER_HTTP_HTTP1_CONNECTION_POOL_CORE_H
 
 #include <chrono>
 #include <cstddef>
@@ -11,12 +11,11 @@
 #include "../event/EventLoop.h"
 #include "Http1ConnectionBucketIndex.h"
 #include "Http1ConnectionGroupKey.h"
-#include "Http1ConnectionGroupHintTable.h"
 #include "Http1ConnectionPoolEntry.h"
 
 namespace fiber::http {
 
-class Http1ConnectionPool : public common::NonCopyable, public common::NonMovable {
+class Http1ConnectionPoolCore : public common::NonCopyable, public common::NonMovable {
 public:
     class Lease : public common::NonCopyable {
     public:
@@ -38,12 +37,12 @@ public:
         void reset() noexcept;
 
     private:
-        friend class Http1ConnectionPool;
+        friend class Http1ConnectionPoolCore;
 
-        Lease(Http1ConnectionPool &pool, Http1ConnectionPoolEntry *entry, const Http1ConnectionGroupKey &key,
+        Lease(Http1ConnectionPoolCore &pool, Http1ConnectionPoolEntry *entry, const Http1ConnectionGroupKey &key,
               bool hit) noexcept;
 
-        Http1ConnectionPool *pool_ = nullptr;
+        Http1ConnectionPoolCore *pool_ = nullptr;
         Http1ConnectionPoolEntry *entry_ = nullptr;
         std::optional<Http1ConnectionGroupKey> key_{};
         bool hit_ = false;
@@ -56,9 +55,9 @@ public:
         std::size_t initial_group_capacity = 0;
     };
 
-    explicit Http1ConnectionPool(event::EventLoop &loop) noexcept;
-    Http1ConnectionPool(event::EventLoop &loop, Options options) noexcept;
-    ~Http1ConnectionPool();
+    explicit Http1ConnectionPoolCore(event::EventLoop &loop) noexcept;
+    Http1ConnectionPoolCore(event::EventLoop &loop, Options options) noexcept;
+    ~Http1ConnectionPoolCore();
 
     [[nodiscard]] bool init() noexcept;
     [[nodiscard]] Lease acquire(const Http1ConnectionGroupKey &key) noexcept;
@@ -69,11 +68,6 @@ public:
     [[nodiscard]] const Options &options() const noexcept { return options_; }
     [[nodiscard]] std::size_t idle_total() const noexcept { return idle_total_; }
     [[nodiscard]] std::size_t group_count() const noexcept { return bucket_index_.size(); }
-    [[nodiscard]] Http1ConnectionGroupHintTable::ProbeResult
-    probe_group_hint(const Http1ConnectionGroupKey &key) const noexcept {
-        return hint_table_.probe(key);
-    }
-
 private:
     friend class Lease;
 
@@ -98,7 +92,6 @@ private:
     event::EventLoop *loop_ = nullptr;
     Options options_{};
     Http1ConnectionBucketIndex bucket_index_{};
-    Http1ConnectionGroupHintTable hint_table_{};
     Http1ConnectionPoolGlobalList global_idle_entries_{};
     Http1ConnectionPoolGroupBucket *free_bucket_head_ = nullptr;
     Http1ConnectionPoolEntry *free_entry_head_ = nullptr;
@@ -107,4 +100,4 @@ private:
 
 } // namespace fiber::http
 
-#endif // FIBER_HTTP_HTTP1_CONNECTION_POOL_H
+#endif // FIBER_HTTP_HTTP1_CONNECTION_POOL_CORE_H
