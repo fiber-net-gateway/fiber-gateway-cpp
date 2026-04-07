@@ -25,6 +25,7 @@ public:
 
     [[nodiscard]] bool init() noexcept;
     void clear() noexcept;
+    void shutdown() noexcept;
     [[nodiscard]] Lease acquire(const Http1ConnectionGroupKey &key) noexcept { return current_core().acquire(key); }
     void sweep_expired(std::chrono::steady_clock::time_point now) noexcept { current_core().sweep_expired(now); }
 

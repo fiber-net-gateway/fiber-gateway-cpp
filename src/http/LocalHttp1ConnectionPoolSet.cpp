@@ -1,5 +1,6 @@
 #include "LocalHttp1ConnectionPoolSet.h"
 
+#include <future>
 #include <new>
 
 #include "../common/Assert.h"
@@ -37,8 +38,86 @@ bool LocalHttp1ConnectionPoolSet::init() noexcept {
 }
 
 void LocalHttp1ConnectionPoolSet::clear() noexcept {
+    struct ClearOp {
+        Http1ConnectionPoolCore *core = nullptr;
+        std::promise<void> *done = nullptr;
+        event::EventLoop::NotifyEntry notify{};
+
+        static void run(ClearOp *op) {
+            FIBER_ASSERT(op != nullptr);
+            op->core->clear();
+            op->done->set_value();
+        }
+    };
+
+    if (!group_->running()) {
+        for (std::size_t i = 0; i < group_->size(); ++i) {
+            core_at(i).clear();
+        }
+        return;
+    }
+
+    auto *current = event::EventLoop::current_or_null();
+    const bool in_group = current && current->group() == group_;
+    std::unique_ptr<ClearOp[]> ops = std::make_unique<ClearOp[]>(group_->size());
+    std::unique_ptr<std::promise<void>[]> promises = std::make_unique<std::promise<void>[]>(group_->size());
+    std::unique_ptr<std::future<void>[]> futures = std::make_unique<std::future<void>[]>(group_->size());
     for (std::size_t i = 0; i < group_->size(); ++i) {
-        core_at(i).clear();
+        futures[i] = promises[i].get_future();
+        Http1ConnectionPoolCore &core = core_at(i);
+        if (in_group && current == &core.loop()) {
+            core.clear();
+            promises[i].set_value();
+            continue;
+        }
+        ops[i].core = &core;
+        ops[i].done = &promises[i];
+        core.loop().post<ClearOp, &ClearOp::notify, &ClearOp::run>(ops[i]);
+    }
+    for (std::size_t i = 0; i < group_->size(); ++i) {
+        futures[i].wait();
+    }
+}
+
+void LocalHttp1ConnectionPoolSet::shutdown() noexcept {
+    struct ShutdownOp {
+        Http1ConnectionPoolCore *core = nullptr;
+        std::promise<void> *done = nullptr;
+        event::EventLoop::NotifyEntry notify{};
+
+        static void run(ShutdownOp *op) {
+            FIBER_ASSERT(op != nullptr);
+            op->core->shutdown();
+            op->done->set_value();
+        }
+    };
+
+    if (!group_->running()) {
+        for (std::size_t i = 0; i < group_->size(); ++i) {
+            core_at(i).shutdown();
+        }
+        return;
+    }
+
+    auto *current = event::EventLoop::current_or_null();
+    const bool in_group = current && current->group() == group_;
+    std::unique_ptr<ShutdownOp[]> ops = std::make_unique<ShutdownOp[]>(group_->size());
+    std::unique_ptr<std::promise<void>[]> promises = std::make_unique<std::promise<void>[]>(group_->size());
+    std::unique_ptr<std::future<void>[]> futures = std::make_unique<std::future<void>[]>(group_->size());
+    for (std::size_t i = 0; i < group_->size(); ++i) {
+        futures[i] = promises[i].get_future();
+        Http1ConnectionPoolCore &core = core_at(i);
+        if (in_group && current == &core.loop()) {
+            core.shutdown();
+            promises[i].set_value();
+            continue;
+        }
+        ops[i].core = &core;
+        ops[i].done = &promises[i];
+        core.loop().post<ShutdownOp, &ShutdownOp::notify, &ShutdownOp::run>(ops[i]);
+    }
+    for (std::size_t i = 0; i < group_->size(); ++i) {
+        futures[i].wait();
     }
 }
 

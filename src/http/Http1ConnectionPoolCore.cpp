@@ -62,6 +62,9 @@ common::IoResult<Http1ClientConnection *> Http1ConnectionPoolCore::Lease::emplac
     if (!pool_ || !key_.has_value()) {
         return std::unexpected(common::IoErr::Invalid);
     }
+    if (pool_->shutdown_) {
+        return std::unexpected(common::IoErr::Canceled);
+    }
     if (!entry_) {
         entry_ = pool_->allocate_entry();
         if (!entry_) {
@@ -116,6 +119,9 @@ Http1ConnectionPoolCore::~Http1ConnectionPoolCore() {
 bool Http1ConnectionPoolCore::init() noexcept { return bucket_index_.init(options_.initial_group_capacity); }
 
 Http1ConnectionPoolCore::Lease Http1ConnectionPoolCore::acquire(const Http1ConnectionGroupKey &key) noexcept {
+    if (shutdown_) {
+        return {};
+    }
     Http1ConnectionPoolEntry *entry = try_steal_idle_entry(key);
     if (entry) {
         return Lease(*this, entry, key, true);
@@ -126,6 +132,9 @@ Http1ConnectionPoolCore::Lease Http1ConnectionPoolCore::acquire(const Http1Conne
 Http1ConnectionPoolEntry *Http1ConnectionPoolCore::try_steal_idle_entry(const Http1ConnectionGroupKey &key) noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     FIBER_ASSERT(loop_->in_loop());
+    if (shutdown_) {
+        return nullptr;
+    }
 
     const auto now = loop_->now();
     sweep_expired(now);
@@ -161,7 +170,16 @@ void Http1ConnectionPoolCore::accept_returned_entry(Http1ConnectionPoolEntry &en
                                                     const Http1ConnectionGroupKey &key) noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     FIBER_ASSERT(loop_->in_loop());
+    if (shutdown_) {
+        recycle_entry(&entry);
+        return;
+    }
     park_entry(entry, key);
+}
+
+void Http1ConnectionPoolCore::shutdown() noexcept {
+    shutdown_ = true;
+    clear();
 }
 
 void Http1ConnectionPoolCore::sweep_expired(std::chrono::steady_clock::time_point now) noexcept {
@@ -264,6 +282,10 @@ void Http1ConnectionPoolCore::destroy_free_lists() noexcept {
 void Http1ConnectionPoolCore::park_entry(Http1ConnectionPoolEntry &entry,
                                          const Http1ConnectionGroupKey &key) noexcept {
     if (!entry.has_connection()) {
+        recycle_entry(&entry);
+        return;
+    }
+    if (shutdown_) {
         recycle_entry(&entry);
         return;
     }

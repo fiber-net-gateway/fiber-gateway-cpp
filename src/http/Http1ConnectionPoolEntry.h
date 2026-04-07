@@ -99,6 +99,7 @@ private:
         return std::launder(reinterpret_cast<const Http1ConnectionGroupKey *>(return_key_storage_));
     }
 
+public:
     common::IntrusiveListHook group_hook_{};
     common::IntrusiveListHook global_hook_{};
     Http1ConnectionPoolGroupBucket *bucket_ = nullptr;
@@ -110,16 +111,15 @@ private:
     Http1ConnectionPoolCore *return_home_core_ = nullptr;
     bool has_return_key_ = false;
     alignas(Http1ConnectionGroupKey) std::byte return_key_storage_[sizeof(Http1ConnectionGroupKey)]{};
-
-public:
-    static constexpr std::size_t kGroupHookOffset = offsetof(Http1ConnectionPoolEntry, group_hook_);
-    static constexpr std::size_t kGlobalHookOffset = offsetof(Http1ConnectionPoolEntry, global_hook_);
 };
 
+inline constexpr std::size_t kHttp1ConnectionPoolEntryGroupHookOffset = offsetof(Http1ConnectionPoolEntry, group_hook_);
+inline constexpr std::size_t kHttp1ConnectionPoolEntryGlobalHookOffset = offsetof(Http1ConnectionPoolEntry, global_hook_);
+
 using Http1ConnectionPoolGroupList =
-    common::IntrusiveList<Http1ConnectionPoolEntry, Http1ConnectionPoolEntry::kGroupHookOffset>;
+    common::IntrusiveList<Http1ConnectionPoolEntry, kHttp1ConnectionPoolEntryGroupHookOffset>;
 using Http1ConnectionPoolGlobalList =
-    common::IntrusiveList<Http1ConnectionPoolEntry, Http1ConnectionPoolEntry::kGlobalHookOffset>;
+    common::IntrusiveList<Http1ConnectionPoolEntry, kHttp1ConnectionPoolEntryGlobalHookOffset>;
 
 class Http1ConnectionPoolGroupBucket {
 public:

@@ -66,6 +66,7 @@ public:
     [[nodiscard]] Lease acquire(const Http1ConnectionGroupKey &key) noexcept;
     [[nodiscard]] Http1ConnectionPoolEntry *try_steal_idle_entry(const Http1ConnectionGroupKey &key) noexcept;
     void accept_returned_entry(Http1ConnectionPoolEntry &entry, const Http1ConnectionGroupKey &key) noexcept;
+    void shutdown() noexcept;
     void sweep_expired(std::chrono::steady_clock::time_point now) noexcept;
     void clear() noexcept;
     void set_idle_count_changed_callback(IdleCountChangedCallback cb, void *ctx) noexcept {
@@ -81,6 +82,7 @@ public:
     [[nodiscard]] const Options &options() const noexcept { return options_; }
     [[nodiscard]] std::size_t idle_total() const noexcept { return idle_total_; }
     [[nodiscard]] std::size_t group_count() const noexcept { return bucket_index_.size(); }
+    [[nodiscard]] bool shutdown_requested() const noexcept { return shutdown_; }
 private:
     friend class Lease;
 
@@ -111,6 +113,7 @@ private:
     std::size_t idle_total_ = 0;
     IdleCountChangedCallback idle_count_changed_cb_ = nullptr;
     void *idle_count_changed_ctx_ = nullptr;
+    bool shutdown_ = false;
 };
 
 } // namespace fiber::http

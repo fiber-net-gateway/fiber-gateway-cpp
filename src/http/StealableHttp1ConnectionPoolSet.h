@@ -69,6 +69,7 @@ public:
 
     [[nodiscard]] bool init() noexcept;
     void clear() noexcept;
+    void shutdown() noexcept;
     [[nodiscard]] AcquireAwaiter acquire(const Http1ConnectionGroupKey &key) noexcept;
 
     [[nodiscard]] std::size_t size() const noexcept { return group_->size(); }

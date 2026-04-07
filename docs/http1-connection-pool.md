@@ -261,6 +261,7 @@ auto &conn = lease.connection();
 - `accept_returned_entry()`
 - `sweep_expired()`
 - `clear()`
+- `shutdown()`
 
 ### 5.7 `clear()`
 
@@ -269,6 +270,16 @@ auto &conn = lease.connection();
 因此要保证：
 
 - pool 对象生命周期长于所有未释放 lease
+
+如果某条连接在 `clear()` 时已经被别的 loop 借走，那么它之后归还时仍然会重新回到 home core。
+
+### 5.8 `shutdown()`
+
+`shutdown()` 比 `clear()` 更强：
+
+- 会先清当前 pool 中的 idle 连接
+- 之后不再允许新的 `acquire()` / `emplace_connection()`
+- 已经借出的 remote borrowed lease 在归还时不会再回池，而是直接销毁
 
 ## 6. `LocalHttp1ConnectionPoolSet`
 
@@ -333,6 +344,15 @@ fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
 `LocalHttp1ConnectionPoolSet::sweep_expired(now)` 只清理当前 loop shard。
 
 如果你需要每个 loop 主动清理超时连接，应当在每个 loop 上各自调用。
+
+### 6.6 `clear()` 与 `shutdown()`
+
+`LocalHttp1ConnectionPoolSet::clear()` 和 `shutdown()` 都会把操作分发到每个 shard 的 owner loop 执行。
+
+区别是：
+
+- `clear()` 只清当前 idle 连接
+- `shutdown()` 会让整个 set 进入不可再复用、不可再建连的状态
 
 ## 7. `StealableHttp1ConnectionPoolSet`
 
@@ -480,6 +500,17 @@ remote borrowed 连接释放时：
 
 - pool set 生命周期长于所有 lease
 
+如果某条连接在 `clear()` 时正处于 borrowed 状态，那么它归还时仍然会回到 home loop。
+
+### 7.10 `shutdown()`
+
+`StealableHttp1ConnectionPoolSet::shutdown()` 会：
+
+- 在每个 shard 的 owner loop 上清空当前 idle 连接
+- 清空所有 hint 表
+- 禁止后续新的 `acquire()` / `emplace_connection()`
+- 让 borrowed 连接在归还时直接销毁，而不是重新回池
+
 ## 8. local 和 steal 怎么选
 
 ### 8.1 选择 `LocalHttp1ConnectionPoolSet`
@@ -597,4 +628,3 @@ fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
 - `tests/StealableHttp1ConnectionPoolSetTest.cpp`
 - `tests/Http1ConnectionGroupKeyTest.cpp`
 - `tests/Http1ConnectionGroupHintTableTest.cpp`
-
