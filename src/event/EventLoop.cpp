@@ -34,7 +34,7 @@ IoEvent to_io_event(std::uint32_t events, IoEvent interested) {
 
 EventLoop::NotifyEntry::NotifyEntry() : node(this) {}
 
-EventLoop::EventLoop(EventLoopGroup *group) : group_(group) {
+EventLoop::EventLoop(EventLoopGroup *group, std::size_t group_index) : group_(group), group_index_(group_index) {
     detail::queue_init(&local_queue_);
     timers_.init();
     wakeup_entry_.loop = this;
