@@ -5,6 +5,7 @@
 #include <string>
 #include <utility>
 
+#include "../async/Task.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
@@ -24,8 +25,8 @@ class TlsTcpStream : public common::NonCopyable, public common::NonMovable {
 public:
     using ReadAwaiter = detail::TlsStreamFd::ReadAwaiter;
     using WriteAwaiter = detail::TlsStreamFd::WriteAwaiter;
-    using HandshakeAwaiter = detail::TlsStreamFd::HandshakeAwaiter;
-    using ShutdownAwaiter = detail::TlsStreamFd::ShutdownAwaiter;
+    using HandshakeTask = detail::TlsStreamFd::HandshakeTask;
+    using ShutdownTask = detail::TlsStreamFd::ShutdownTask;
 
     TlsTcpStream(fiber::event::EventLoop &loop, int fd, SocketAddress remote_addr);
     ~TlsTcpStream();
@@ -45,8 +46,8 @@ public:
     [[nodiscard]] WriteAwaiter write(const void *buf, size_t len) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_read(void *buf, size_t len) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_write(const void *buf, size_t len) noexcept;
-    [[nodiscard]] HandshakeAwaiter handshake() noexcept;
-    [[nodiscard]] ShutdownAwaiter shutdown() noexcept;
+    [[nodiscard]] HandshakeTask handshake();
+    [[nodiscard]] ShutdownTask shutdown();
     [[nodiscard]] detail::StreamFd::WaitReadableAwaiter wait_readable() noexcept;
     [[nodiscard]] detail::StreamFd::WaitWritableAwaiter wait_writable() noexcept;
     fiber::common::IoErr poll_handshake(fiber::event::IoEvent &event) noexcept;
