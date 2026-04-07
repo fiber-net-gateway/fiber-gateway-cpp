@@ -1,6 +1,8 @@
 #include "StealableHttp1ConnectionPoolSet.h"
 
 #include <coroutine>
+#include <future>
+#include <memory>
 #include <utility>
 
 #include "../common/Assert.h"
@@ -197,10 +199,94 @@ bool StealableHttp1ConnectionPoolSet::init() noexcept {
 }
 
 void StealableHttp1ConnectionPoolSet::clear() noexcept {
+    struct ClearOp {
+        Shard *shard = nullptr;
+        std::promise<void> *done = nullptr;
+        event::EventLoop::NotifyEntry notify{};
+
+        static void run(ClearOp *op) {
+            FIBER_ASSERT(op != nullptr);
+            op->shard->core.clear();
+            op->shard->hint.clear();
+            op->done->set_value();
+        }
+    };
+
+    if (!group_->running()) {
+        for (std::size_t i = 0; i < group_->size(); ++i) {
+            Shard &shard = shard_at(i);
+            shard.core.clear();
+            shard.hint.clear();
+        }
+        return;
+    }
+
+    auto *current = event::EventLoop::current_or_null();
+    const bool in_group = current && current->group() == group_;
+    std::unique_ptr<ClearOp[]> ops = std::make_unique<ClearOp[]>(group_->size());
+    std::unique_ptr<std::promise<void>[]> promises = std::make_unique<std::promise<void>[]>(group_->size());
+    std::unique_ptr<std::future<void>[]> futures = std::make_unique<std::future<void>[]>(group_->size());
     for (std::size_t i = 0; i < group_->size(); ++i) {
+        futures[i] = promises[i].get_future();
         Shard &shard = shard_at(i);
-        shard.core.clear();
-        shard.hint.clear();
+        if (in_group && current == &shard.core.loop()) {
+            shard.core.clear();
+            shard.hint.clear();
+            promises[i].set_value();
+            continue;
+        }
+        ops[i].shard = &shard;
+        ops[i].done = &promises[i];
+        shard.core.loop().post<ClearOp, &ClearOp::notify, &ClearOp::run>(ops[i]);
+    }
+    for (std::size_t i = 0; i < group_->size(); ++i) {
+        futures[i].wait();
+    }
+}
+
+void StealableHttp1ConnectionPoolSet::shutdown() noexcept {
+    struct ShutdownOp {
+        Shard *shard = nullptr;
+        std::promise<void> *done = nullptr;
+        event::EventLoop::NotifyEntry notify{};
+
+        static void run(ShutdownOp *op) {
+            FIBER_ASSERT(op != nullptr);
+            op->shard->core.shutdown();
+            op->shard->hint.clear();
+            op->done->set_value();
+        }
+    };
+
+    if (!group_->running()) {
+        for (std::size_t i = 0; i < group_->size(); ++i) {
+            Shard &shard = shard_at(i);
+            shard.core.shutdown();
+            shard.hint.clear();
+        }
+        return;
+    }
+
+    auto *current = event::EventLoop::current_or_null();
+    const bool in_group = current && current->group() == group_;
+    std::unique_ptr<ShutdownOp[]> ops = std::make_unique<ShutdownOp[]>(group_->size());
+    std::unique_ptr<std::promise<void>[]> promises = std::make_unique<std::promise<void>[]>(group_->size());
+    std::unique_ptr<std::future<void>[]> futures = std::make_unique<std::future<void>[]>(group_->size());
+    for (std::size_t i = 0; i < group_->size(); ++i) {
+        futures[i] = promises[i].get_future();
+        Shard &shard = shard_at(i);
+        if (in_group && current == &shard.core.loop()) {
+            shard.core.shutdown();
+            shard.hint.clear();
+            promises[i].set_value();
+            continue;
+        }
+        ops[i].shard = &shard;
+        ops[i].done = &promises[i];
+        shard.core.loop().post<ShutdownOp, &ShutdownOp::notify, &ShutdownOp::run>(ops[i]);
+    }
+    for (std::size_t i = 0; i < group_->size(); ++i) {
+        futures[i].wait();
     }
 }
 
@@ -244,6 +330,11 @@ bool StealableHttp1ConnectionPoolSet::AcquireAwaiter::prepare() noexcept {
 
     home_slot_ = &set_->slot_at(caller_loop_->group_index());
     local_fallback_ = set_->current_shard().core.acquire(*key_);
+    if (!local_fallback_.valid()) {
+        prepared_ = true;
+        cursor_ = nullptr;
+        return true;
+    }
     if (local_fallback_.hit()) {
         result_ = Lease(std::move(local_fallback_));
         prepared_ = true;
