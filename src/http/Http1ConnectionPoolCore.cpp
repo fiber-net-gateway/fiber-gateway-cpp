@@ -220,6 +220,7 @@ Http1ConnectionPoolEntry *Http1ConnectionPoolCore::allocate_entry() noexcept {
         entry->bucket_ = nullptr;
         entry->idle_since_ = {};
         entry->next_free_ = nullptr;
+        entry->clear_remote_return_state();
         return entry;
     }
     return new (std::nothrow) Http1ConnectionPoolEntry();
@@ -240,6 +241,7 @@ void Http1ConnectionPoolCore::recycle_entry(Http1ConnectionPoolEntry *entry) noe
         return;
     }
     entry->destroy_connection();
+    entry->clear_remote_return_state();
     entry->bucket_ = nullptr;
     entry->idle_since_ = {};
     entry->next_free_ = free_entry_head_;

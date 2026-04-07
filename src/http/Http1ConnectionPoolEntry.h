@@ -4,24 +4,29 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <new>
 #include <utility>
 
 #include "../common/Assert.h"
 #include "../common/IntrusiveList.h"
+#include "../event/EventLoop.h"
 #include "Http1ClientConnection.h"
+#include "Http1ConnectionGroupKey.h"
 
 namespace fiber::http {
 
 class Http1ConnectionPoolCore;
 class Http1ConnectionPoolGroupBucket;
 class Http1ConnectionBucketIndex;
+class StealableHttp1ConnectionPoolSet;
 
 class Http1ConnectionPoolEntry {
 public:
     Http1ConnectionPoolEntry() = default;
-    ~Http1ConnectionPoolEntry() { destroy_connection(); }
+    ~Http1ConnectionPoolEntry() {
+        destroy_connection();
+        clear_remote_return_state();
+    }
 
     [[nodiscard]] bool has_connection() const noexcept { return has_connection_; }
     [[nodiscard]] Http1ClientConnection *connection() noexcept {
@@ -31,17 +36,9 @@ public:
         return has_connection_ ? std::launder(reinterpret_cast<const Http1ClientConnection *>(conn_storage_)) : nullptr;
     }
 
-    // Exposed for intrusive-list offset calculation; pool logic still treats these as internal hooks.
-    common::IntrusiveListHook group_hook_{};
-    common::IntrusiveListHook global_hook_{};
-    Http1ConnectionPoolGroupBucket *bucket_ = nullptr;
-    std::chrono::steady_clock::time_point idle_since_{};
-    Http1ConnectionPoolEntry *next_free_ = nullptr;
-    bool has_connection_ = false;
-    alignas(Http1ClientConnection) std::byte conn_storage_[sizeof(Http1ClientConnection)]{};
-
 private:
     friend class Http1ConnectionPoolCore;
+    friend class StealableHttp1ConnectionPoolSet;
 
     void construct_connection(event::EventLoop &loop, Http1ClientConnectionOptions options) noexcept {
         FIBER_ASSERT(!has_connection_);
@@ -57,6 +54,35 @@ private:
         has_connection_ = false;
     }
 
+    void arm_remote_return(Http1ConnectionPoolCore &home_core, const Http1ConnectionGroupKey &key) noexcept {
+        FIBER_ASSERT(return_home_core_ == nullptr);
+        FIBER_ASSERT(!has_return_key_);
+        return_home_core_ = &home_core;
+        std::construct_at(return_key_storage(), key);
+        has_return_key_ = true;
+    }
+
+    void post_remote_return(Http1ConnectionPoolCore &home_core, const Http1ConnectionGroupKey &key) noexcept;
+    static void run_remote_return(Http1ConnectionPoolEntry *entry);
+
+    void clear_remote_return_state() noexcept {
+        if (has_return_key_) {
+            std::destroy_at(return_key_storage());
+            has_return_key_ = false;
+        }
+        return_home_core_ = nullptr;
+    }
+
+    [[nodiscard]] Http1ConnectionPoolCore &remote_return_home_core() noexcept {
+        FIBER_ASSERT(return_home_core_ != nullptr);
+        return *return_home_core_;
+    }
+
+    [[nodiscard]] const Http1ConnectionGroupKey &remote_return_key() const noexcept {
+        FIBER_ASSERT(has_return_key_);
+        return *return_key_storage();
+    }
+
     [[nodiscard]] Http1ClientConnection *connection_storage() noexcept {
         return std::launder(reinterpret_cast<Http1ClientConnection *>(conn_storage_));
     }
@@ -65,15 +91,35 @@ private:
         return std::launder(reinterpret_cast<const Http1ClientConnection *>(conn_storage_));
     }
 
+    [[nodiscard]] Http1ConnectionGroupKey *return_key_storage() noexcept {
+        return std::launder(reinterpret_cast<Http1ConnectionGroupKey *>(return_key_storage_));
+    }
+
+    [[nodiscard]] const Http1ConnectionGroupKey *return_key_storage() const noexcept {
+        return std::launder(reinterpret_cast<const Http1ConnectionGroupKey *>(return_key_storage_));
+    }
+
+    common::IntrusiveListHook group_hook_{};
+    common::IntrusiveListHook global_hook_{};
+    Http1ConnectionPoolGroupBucket *bucket_ = nullptr;
+    std::chrono::steady_clock::time_point idle_since_{};
+    Http1ConnectionPoolEntry *next_free_ = nullptr;
+    bool has_connection_ = false;
+    alignas(Http1ClientConnection) std::byte conn_storage_[sizeof(Http1ClientConnection)]{};
+    event::EventLoop::NotifyEntry return_notify_{};
+    Http1ConnectionPoolCore *return_home_core_ = nullptr;
+    bool has_return_key_ = false;
+    alignas(Http1ConnectionGroupKey) std::byte return_key_storage_[sizeof(Http1ConnectionGroupKey)]{};
+
+public:
+    static constexpr std::size_t kGroupHookOffset = offsetof(Http1ConnectionPoolEntry, group_hook_);
+    static constexpr std::size_t kGlobalHookOffset = offsetof(Http1ConnectionPoolEntry, global_hook_);
 };
 
-inline constexpr std::size_t kHttp1ConnectionPoolEntryGroupHookOffset = offsetof(Http1ConnectionPoolEntry, group_hook_);
-inline constexpr std::size_t kHttp1ConnectionPoolEntryGlobalHookOffset = offsetof(Http1ConnectionPoolEntry, global_hook_);
-
 using Http1ConnectionPoolGroupList =
-    common::IntrusiveList<Http1ConnectionPoolEntry, kHttp1ConnectionPoolEntryGroupHookOffset>;
+    common::IntrusiveList<Http1ConnectionPoolEntry, Http1ConnectionPoolEntry::kGroupHookOffset>;
 using Http1ConnectionPoolGlobalList =
-    common::IntrusiveList<Http1ConnectionPoolEntry, kHttp1ConnectionPoolEntryGlobalHookOffset>;
+    common::IntrusiveList<Http1ConnectionPoolEntry, Http1ConnectionPoolEntry::kGlobalHookOffset>;
 
 class Http1ConnectionPoolGroupBucket {
 public:
