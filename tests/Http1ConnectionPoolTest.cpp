@@ -13,7 +13,7 @@
 #include "common/IoError.h"
 #include "event/EventLoopGroup.h"
 #include "http/Http1ConnectionGroupKey.h"
-#include "http/Http1ConnectionPool.h"
+#include "http/Http1ConnectionPoolCore.h"
 #include "net/TcpListener.h"
 
 namespace {
@@ -94,7 +94,7 @@ DetachedTask run_hold_server(fiber::event::EventLoop *loop,
 }
 
 fiber::async::Task<fiber::common::IoResult<fiber::http::Http1ClientConnection *>>
-ensure_connected(fiber::http::Http1ConnectionPool::Lease &lease, std::uint16_t port) {
+ensure_connected(fiber::http::Http1ConnectionPoolCore::Lease &lease, std::uint16_t port) {
     if (!lease.valid()) {
         co_return std::unexpected(fiber::common::IoErr::NoMem);
     }
@@ -129,7 +129,7 @@ DetachedTask run_lifo_scenario(fiber::event::EventLoop *loop,
                                std::uint16_t port,
                                std::promise<LifoScenarioResult> *promise) {
     LifoScenarioResult out;
-    fiber::http::Http1ConnectionPool pool(*loop, {
+    fiber::http::Http1ConnectionPoolCore pool(*loop, {
         .max_idle_per_group = 2,
         .max_idle_total = 4,
         .idle_timeout = 30s,
@@ -192,7 +192,7 @@ DetachedTask run_per_group_eviction_scenario(fiber::event::EventLoop *loop,
                                              std::uint16_t port,
                                              std::promise<PerGroupEvictionResult> *promise) {
     PerGroupEvictionResult out;
-    fiber::http::Http1ConnectionPool pool(*loop, {
+    fiber::http::Http1ConnectionPoolCore pool(*loop, {
         .max_idle_per_group = 1,
         .max_idle_total = 4,
         .idle_timeout = 30s,
@@ -250,7 +250,7 @@ DetachedTask run_global_eviction_scenario(fiber::event::EventLoop *loop,
                                           std::uint16_t port2,
                                           std::promise<GlobalEvictionResult> *promise) {
     GlobalEvictionResult out;
-    fiber::http::Http1ConnectionPool pool(*loop, {
+    fiber::http::Http1ConnectionPoolCore pool(*loop, {
         .max_idle_per_group = 2,
         .max_idle_total = 2,
         .idle_timeout = 30s,
@@ -319,7 +319,7 @@ DetachedTask run_expire_scenario(fiber::event::EventLoop *loop,
                                  std::uint16_t port,
                                  std::promise<ExpireScenarioResult> *promise) {
     ExpireScenarioResult out;
-    fiber::http::Http1ConnectionPool pool(*loop, {
+    fiber::http::Http1ConnectionPoolCore pool(*loop, {
         .max_idle_per_group = 1,
         .max_idle_total = 1,
         .idle_timeout = 10ms,
@@ -363,7 +363,7 @@ DetachedTask run_closed_scenario(fiber::event::EventLoop *loop,
                                  std::uint16_t port,
                                  std::promise<ClosedScenarioResult> *promise) {
     ClosedScenarioResult out;
-    fiber::http::Http1ConnectionPool pool(*loop, {
+    fiber::http::Http1ConnectionPoolCore pool(*loop, {
         .max_idle_per_group = 1,
         .max_idle_total = 1,
         .idle_timeout = 30s,

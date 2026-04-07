@@ -14,7 +14,7 @@
 
 namespace fiber::http {
 
-class Http1ConnectionPool;
+class Http1ConnectionPoolCore;
 class Http1ConnectionPoolGroupBucket;
 class Http1ConnectionBucketIndex;
 
@@ -41,7 +41,7 @@ public:
     alignas(Http1ClientConnection) std::byte conn_storage_[sizeof(Http1ClientConnection)]{};
 
 private:
-    friend class Http1ConnectionPool;
+    friend class Http1ConnectionPoolCore;
 
     void construct_connection(event::EventLoop &loop, Http1ClientConnectionOptions options) noexcept {
         FIBER_ASSERT(!has_connection_);
@@ -83,7 +83,7 @@ public:
 
 private:
     friend class Http1ConnectionBucketIndex;
-    friend class Http1ConnectionPool;
+    friend class Http1ConnectionPoolCore;
 
     std::uint32_t slot_index_ = kInvalidSlotIndex;
     std::size_t idle_count_ = 0;
