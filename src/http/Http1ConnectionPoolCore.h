@@ -17,6 +17,9 @@ namespace fiber::http {
 
 class Http1ConnectionPoolCore : public common::NonCopyable, public common::NonMovable {
 public:
+    using IdleCountChangedCallback =
+        void (*)(void *ctx, const Http1ConnectionGroupKey &key, std::size_t idle_count) noexcept;
+
     class Lease : public common::NonCopyable {
     public:
         Lease() noexcept = default;
@@ -61,8 +64,18 @@ public:
 
     [[nodiscard]] bool init() noexcept;
     [[nodiscard]] Lease acquire(const Http1ConnectionGroupKey &key) noexcept;
+    [[nodiscard]] Http1ConnectionPoolEntry *try_steal_idle_entry(const Http1ConnectionGroupKey &key) noexcept;
+    void accept_returned_entry(Http1ConnectionPoolEntry &entry, const Http1ConnectionGroupKey &key) noexcept;
     void sweep_expired(std::chrono::steady_clock::time_point now) noexcept;
     void clear() noexcept;
+    void set_idle_count_changed_callback(IdleCountChangedCallback cb, void *ctx) noexcept {
+        idle_count_changed_cb_ = cb;
+        idle_count_changed_ctx_ = ctx;
+    }
+    void clear_idle_count_changed_callback() noexcept {
+        idle_count_changed_cb_ = nullptr;
+        idle_count_changed_ctx_ = nullptr;
+    }
 
     [[nodiscard]] event::EventLoop &loop() const noexcept { return *loop_; }
     [[nodiscard]] const Options &options() const noexcept { return options_; }
@@ -96,6 +109,8 @@ private:
     Http1ConnectionPoolGroupBucket *free_bucket_head_ = nullptr;
     Http1ConnectionPoolEntry *free_entry_head_ = nullptr;
     std::size_t idle_total_ = 0;
+    IdleCountChangedCallback idle_count_changed_cb_ = nullptr;
+    void *idle_count_changed_ctx_ = nullptr;
 };
 
 } // namespace fiber::http

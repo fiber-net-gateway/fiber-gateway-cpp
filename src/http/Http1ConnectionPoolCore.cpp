@@ -116,6 +116,14 @@ Http1ConnectionPoolCore::~Http1ConnectionPoolCore() {
 bool Http1ConnectionPoolCore::init() noexcept { return bucket_index_.init(options_.initial_group_capacity); }
 
 Http1ConnectionPoolCore::Lease Http1ConnectionPoolCore::acquire(const Http1ConnectionGroupKey &key) noexcept {
+    Http1ConnectionPoolEntry *entry = try_steal_idle_entry(key);
+    if (entry) {
+        return Lease(*this, entry, key, true);
+    }
+    return Lease(*this, nullptr, key, false);
+}
+
+Http1ConnectionPoolEntry *Http1ConnectionPoolCore::try_steal_idle_entry(const Http1ConnectionGroupKey &key) noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     FIBER_ASSERT(loop_->in_loop());
 
@@ -144,9 +152,16 @@ Http1ConnectionPoolCore::Lease Http1ConnectionPoolCore::acquire(const Http1Conne
             continue;
         }
         detach_idle_entry(*entry);
-        return Lease(*this, entry, key, true);
+        return entry;
     }
-    return Lease(*this, nullptr, key, false);
+    return nullptr;
+}
+
+void Http1ConnectionPoolCore::accept_returned_entry(Http1ConnectionPoolEntry &entry,
+                                                    const Http1ConnectionGroupKey &key) noexcept {
+    FIBER_ASSERT(loop_ != nullptr);
+    FIBER_ASSERT(loop_->in_loop());
+    park_entry(entry, key);
 }
 
 void Http1ConnectionPoolCore::sweep_expired(std::chrono::steady_clock::time_point now) noexcept {
@@ -286,6 +301,9 @@ void Http1ConnectionPoolCore::park_entry(Http1ConnectionPoolEntry &entry,
     global_idle_entries_.push_back(entry);
     ++bucket->idle_count_;
     ++idle_total_;
+    if (idle_count_changed_cb_) {
+        idle_count_changed_cb_(idle_count_changed_ctx_, key, bucket->idle_count_);
+    }
     while (bucket->idle_count_ > options_.max_idle_per_group) {
         evict_group_oldest(*bucket);
     }
@@ -306,6 +324,9 @@ void Http1ConnectionPoolCore::detach_idle_entry(Http1ConnectionPoolEntry &entry)
     Http1ConnectionPoolGroupBucket *bucket = entry.bucket_;
     FIBER_ASSERT(bucket != nullptr);
     FIBER_ASSERT(bucket->idle_entries_.back() != nullptr);
+    const Http1ConnectionGroupKey *key =
+        bucket->slot_index_ != Http1ConnectionPoolGroupBucket::kInvalidSlotIndex ? bucket_index_.key_at(bucket->slot_index_)
+                                                                                  : nullptr;
 
     bucket->idle_entries_.erase(entry);
     global_idle_entries_.erase(entry);
@@ -315,6 +336,9 @@ void Http1ConnectionPoolCore::detach_idle_entry(Http1ConnectionPoolEntry &entry)
     --bucket->idle_count_;
     FIBER_ASSERT(idle_total_ > 0);
     --idle_total_;
+    if (idle_count_changed_cb_ && key) {
+        idle_count_changed_cb_(idle_count_changed_ctx_, *key, bucket->idle_count_);
+    }
     if (bucket->idle_count_ == 0 && bucket->slot_index_ != Http1ConnectionPoolGroupBucket::kInvalidSlotIndex) {
         bucket_index_.erase(bucket->slot_index_);
         recycle_bucket(bucket);
