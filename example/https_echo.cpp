@@ -387,7 +387,7 @@ int main(int argc, char **argv) {
 
     fiber::http::HttpServer server(loop, handle_echo, server_options);
     fiber::net::ListenOptions options{};
-    fiber::net::SocketAddress addr(fiber::net::IpAddress::loopback_v4(), port);
+    fiber::net::SocketAddress addr(fiber::net::IpAddress::any_v4(), port);
     auto bind_result = server.bind(addr, options);
     if (!bind_result) {
         std::cerr << "bind failed: " << fiber::common::io_err_name(bind_result.error()) << '\n';
