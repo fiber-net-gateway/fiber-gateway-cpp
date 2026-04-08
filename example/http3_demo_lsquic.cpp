@@ -25,6 +25,7 @@ namespace {
 constexpr size_t kMaxDatagram = 65535;
 constexpr size_t kMaxEvents = 8;
 constexpr std::string_view kBody = "hello h3 via lsquic\n";
+constexpr unsigned char kH3AlpnWire[] = {2, 'h', '3'};
 
 struct ServerCtx;
 
@@ -86,6 +87,23 @@ bool parse_port(const char *text, uint16_t &out) {
     }
     out = static_cast<uint16_t>(v);
     return true;
+}
+
+int select_alpn_cb(SSL *ssl,
+                   const unsigned char **out,
+                   unsigned char *outlen,
+                   const unsigned char *in,
+                   unsigned int inlen,
+                   void *arg) {
+    (void) ssl;
+    (void) arg;
+    int rc = SSL_select_next_proto(const_cast<unsigned char **>(out),
+                                   outlen,
+                                   in,
+                                   inlen,
+                                   kH3AlpnWire,
+                                   sizeof(kH3AlpnWire));
+    return rc == OPENSSL_NPN_NEGOTIATED ? SSL_TLSEXT_ERR_OK : SSL_TLSEXT_ERR_ALERT_FATAL;
 }
 
 int open_udp_socket(uint16_t port) {
@@ -301,6 +319,7 @@ lsquic_conn_ctx_t *on_new_conn(void *stream_if_ctx, lsquic_conn_t *conn) {
 
 void on_conn_closed(lsquic_conn_t *conn) {
     auto *ctx = reinterpret_cast<ConnCtx *>(lsquic_conn_get_ctx(conn));
+    lsquic_conn_set_ctx(conn, nullptr);
     delete ctx;
 }
 
@@ -566,6 +585,8 @@ SSL_CTX *create_server_ssl_ctx(const char *cert_file, const char *key_file) {
     }
 
     SSL_CTX_set_min_proto_version(ssl, TLS1_3_VERSION);
+    SSL_CTX_set_max_proto_version(ssl, TLS1_3_VERSION);
+    SSL_CTX_set_alpn_select_cb(ssl, select_alpn_cb, nullptr);
     if (SSL_CTX_use_certificate_chain_file(ssl, cert_file) != 1) {
         SSL_CTX_free(ssl);
         return nullptr;
