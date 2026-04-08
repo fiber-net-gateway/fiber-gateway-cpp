@@ -117,12 +117,11 @@ foreach(EXAMPLE_SRC IN LISTS EXAMPLE_SRC_LIST)
     endif()
     add_executable(${EXAMPLE_NAME} ${EXAMPLE_SRC})
     if (EXAMPLE_NAME STREQUAL "http3_demo_lsquic")
-        target_link_libraries(${EXAMPLE_NAME} PRIVATE lsquic::lsquic boringssl::ssl boringssl::crypto)
-        if (TARGET ZLIB::ZLIB)
-            target_link_libraries(${EXAMPLE_NAME} PRIVATE ZLIB::ZLIB)
-        else()
-            target_link_libraries(${EXAMPLE_NAME} PRIVATE z)
-        endif()
+        target_link_libraries(${EXAMPLE_NAME} PRIVATE
+            lsquic::lsquic
+            boringssl::ssl
+            boringssl::crypto
+            ${FIBER_ZLIB_TARGET})
         if (DEFINED lsquic_SOURCE_DIR)
             target_include_directories(${EXAMPLE_NAME} PRIVATE ${lsquic_SOURCE_DIR}/include)
         else()
