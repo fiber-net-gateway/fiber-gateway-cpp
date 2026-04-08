@@ -1,13 +1,17 @@
 #ifndef FIBER_HTTP_STEALABLE_HTTP1_CONNECTION_POOL_SET_H
 #define FIBER_HTTP_STEALABLE_HTTP1_CONNECTION_POOL_SET_H
 
+#include <atomic>
 #include <cstddef>
 #include <coroutine>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <optional>
 
+#include "../async/Task.h"
+#include "../async/WaitGroup.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
@@ -68,8 +72,8 @@ public:
     ~StealableHttp1ConnectionPoolSet();
 
     [[nodiscard]] bool init() noexcept;
-    void clear() noexcept;
-    void shutdown() noexcept;
+    [[nodiscard]] async::Task<void> clear_async() noexcept;
+    [[nodiscard]] async::Task<void> shutdown_async() noexcept;
     [[nodiscard]] AcquireAwaiter acquire(const Http1ConnectionGroupKey &key) noexcept;
 
     [[nodiscard]] std::size_t size() const noexcept { return group_->size(); }
@@ -78,6 +82,8 @@ public:
     [[nodiscard]] const Options &options() const noexcept { return pool_options_; }
 
 private:
+    class AdminAwaiter;
+
     struct Shard {
         Shard(event::EventLoop &loop, Options pool_options) noexcept
             : core(loop, pool_options),
@@ -124,6 +130,9 @@ private:
     event::EventLoopGroup *group_ = nullptr;
     Options pool_options_{};
     std::unique_ptr<ShardSlot[]> storage_{};
+    std::atomic<bool> shutdown_requested_{false};
+    std::mutex shutdown_mu_{};
+    async::WaitGroup shutdown_wg_{};
 };
 
 class StealableHttp1ConnectionPoolSet::AcquireAwaiter : public common::NonCopyable {

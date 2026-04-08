@@ -1,6 +1,7 @@
 #ifndef FIBER_HTTP_HTTP1_CONNECTION_POOL_CORE_H
 #define FIBER_HTTP_HTTP1_CONNECTION_POOL_CORE_H
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <optional>
@@ -77,16 +78,19 @@ public:
         idle_count_changed_cb_ = nullptr;
         idle_count_changed_ctx_ = nullptr;
     }
+    void set_external_shutdown_flag(const std::atomic<bool> *flag) noexcept { external_shutdown_flag_ = flag; }
+    void clear_external_shutdown_flag() noexcept { external_shutdown_flag_ = nullptr; }
 
     [[nodiscard]] event::EventLoop &loop() const noexcept { return *loop_; }
     [[nodiscard]] const Options &options() const noexcept { return options_; }
     [[nodiscard]] std::size_t idle_total() const noexcept { return idle_total_; }
     [[nodiscard]] std::size_t group_count() const noexcept { return bucket_index_.size(); }
-    [[nodiscard]] bool shutdown_requested() const noexcept { return shutdown_; }
+    [[nodiscard]] bool shutdown_requested() const noexcept;
 private:
     friend class Lease;
 
     static Options normalize_options(Options options) noexcept;
+    [[nodiscard]] bool shutdown_effective() const noexcept;
 
     [[nodiscard]] bool entry_expired(const Http1ConnectionPoolEntry &entry,
                                      std::chrono::steady_clock::time_point now) const noexcept;
@@ -113,6 +117,7 @@ private:
     std::size_t idle_total_ = 0;
     IdleCountChangedCallback idle_count_changed_cb_ = nullptr;
     void *idle_count_changed_ctx_ = nullptr;
+    const std::atomic<bool> *external_shutdown_flag_ = nullptr;
     bool shutdown_ = false;
 };
 

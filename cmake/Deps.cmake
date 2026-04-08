@@ -106,10 +106,65 @@ set(LIBSSL_DIR "${boringssl_SOURCE_DIR}" CACHE PATH "" FORCE)
 set(LIBSSL_LIB "${boringssl_BINARY_DIR}" CACHE PATH "" FORCE)
 set(LIBSSL_LIB_ssl ssl CACHE STRING "" FORCE)
 set(LIBSSL_LIB_crypto crypto CACHE STRING "" FORCE)
-find_path(FIBER_ZLIB_INCLUDE_DIR NAMES zlib.h)
-find_library(FIBER_ZLIB_LIBRARY NAMES z)
+
+set(FIBER_ZLIB_TARGET "")
+find_package(ZLIB QUIET)
+if (TARGET ZLIB::ZLIB)
+    set(FIBER_ZLIB_TARGET ZLIB::ZLIB)
+endif()
+
+if (NOT FIBER_ZLIB_TARGET AND FIBER_FETCH_DEPS)
+    fiber_use_cached_content(zlib)
+    set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+    set(SKIP_INSTALL_FILES ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        zlib
+        URL https://github.com/madler/zlib/archive/refs/tags/v1.3.2.tar.gz
+    )
+    FetchContent_MakeAvailable(zlib)
+
+    if (TARGET zlibstatic)
+        if (NOT TARGET fiber_zlib)
+            add_library(fiber_zlib INTERFACE)
+            target_link_libraries(fiber_zlib INTERFACE zlibstatic)
+            target_include_directories(fiber_zlib INTERFACE
+                "${zlib_SOURCE_DIR}"
+                "${zlib_BINARY_DIR}")
+        endif()
+        if (NOT TARGET ZLIB::ZLIB)
+            add_library(ZLIB::ZLIB ALIAS fiber_zlib)
+        endif()
+        set(FIBER_ZLIB_TARGET ZLIB::ZLIB)
+
+        # lsquic's build only accepts one include directory variable. Stage the
+        # generated zconf.h and the source zlib.h into a single directory first.
+        set(FIBER_ZLIB_INCLUDE_DIR "${zlib_BINARY_DIR}/fiber-zlib-include")
+        file(MAKE_DIRECTORY "${FIBER_ZLIB_INCLUDE_DIR}")
+        file(COPY_FILE "${zlib_SOURCE_DIR}/zlib.h" "${FIBER_ZLIB_INCLUDE_DIR}/zlib.h" ONLY_IF_DIFFERENT)
+        file(COPY_FILE "${zlib_BINARY_DIR}/zconf.h" "${FIBER_ZLIB_INCLUDE_DIR}/zconf.h" ONLY_IF_DIFFERENT)
+        set(ZLIB_INCLUDE_DIR "${FIBER_ZLIB_INCLUDE_DIR}" CACHE PATH "" FORCE)
+        set(ZLIB_LIB zlibstatic CACHE STRING "" FORCE)
+    endif()
+endif()
+
+if (FIBER_ZLIB_TARGET AND NOT DEFINED ZLIB_INCLUDE_DIR)
+    if (DEFINED ZLIB_INCLUDE_DIRS)
+        list(GET ZLIB_INCLUDE_DIRS 0 ZLIB_INCLUDE_DIR)
+        set(ZLIB_INCLUDE_DIR "${ZLIB_INCLUDE_DIR}" CACHE PATH "" FORCE)
+    endif()
+endif()
+
+if (FIBER_ZLIB_TARGET AND NOT DEFINED ZLIB_LIB)
+    if (DEFINED ZLIB_LIBRARY)
+        set(ZLIB_LIB "${ZLIB_LIBRARY}" CACHE FILEPATH "" FORCE)
+    elseif (DEFINED ZLIB_LIBRARIES)
+        list(GET ZLIB_LIBRARIES 0 ZLIB_LIB)
+        set(ZLIB_LIB "${ZLIB_LIB}" CACHE FILEPATH "" FORCE)
+    endif()
+endif()
+
 set(FIBER_HAVE_LSQUIC OFF)
-if (FIBER_ZLIB_INCLUDE_DIR AND FIBER_ZLIB_LIBRARY)
+if (FIBER_ZLIB_TARGET AND DEFINED ZLIB_INCLUDE_DIR AND DEFINED ZLIB_LIB)
     fiber_use_cached_content(lsquic)
     FetchContent_Declare(
         lsquic
@@ -136,5 +191,7 @@ if (FIBER_ZLIB_INCLUDE_DIR AND FIBER_ZLIB_LIBRARY)
         set(FIBER_HAVE_LSQUIC ON)
     endif()
 else()
-    message(STATUS "Skipping lsquic dependency because zlib development files were not found")
+    message(STATUS
+        "Skipping lsquic dependency because zlib was not found. "
+        "Install zlib development files or enable FIBER_FETCH_DEPS=ON to download it automatically.")
 endif()

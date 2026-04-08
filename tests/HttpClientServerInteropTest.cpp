@@ -263,9 +263,10 @@ fiber::async::Task<void> handle_body_request(fiber::http::HttpExchange &exchange
 DetachedTask start_http_server(fiber::event::EventLoop *loop,
                                fiber::http::HttpHandler handler,
                                fiber::http::HttpServerOptions options,
+                               fiber::event::EventLoopGroup *worker_group,
                                std::promise<std::uint16_t> *port_promise,
                                std::promise<fiber::http::HttpServer *> *server_promise) {
-    auto *server = new fiber::http::HttpServer(*loop, std::move(handler), std::move(options));
+    auto *server = new fiber::http::HttpServer(*loop, std::move(handler), std::move(options), worker_group);
     fiber::net::ListenOptions listen_options{};
     fiber::net::SocketAddress addr(fiber::net::IpAddress::loopback_v4(), 0);
     auto bind_result = server->bind(addr, listen_options);
@@ -574,7 +575,7 @@ TEST(HttpClientServerInteropTest, Http1ClientAndServerRoundTripWithoutBody) {
         fiber::http::HttpHandler handler = [observed_promise](fiber::http::HttpExchange &exchange) {
             return handle_no_body_request(exchange, observed_promise);
         };
-        return start_http_server(&group.at(0), std::move(handler), {}, &port_promise, &server_promise);
+        return start_http_server(&group.at(0), std::move(handler), {}, nullptr, &port_promise, &server_promise);
     });
 
     auto *server = server_future.get();
@@ -626,7 +627,7 @@ TEST(HttpClientServerInteropTest, Http1ClientAndServerRoundTripWithBody) {
         fiber::http::HttpHandler handler = [observed_promise](fiber::http::HttpExchange &exchange) {
             return handle_body_request(exchange, observed_promise);
         };
-        return start_http_server(&group.at(0), std::move(handler), {}, &port_promise, &server_promise);
+        return start_http_server(&group.at(0), std::move(handler), {}, nullptr, &port_promise, &server_promise);
     });
 
     auto *server = server_future.get();
@@ -687,7 +688,8 @@ TEST(HttpClientServerInteropTest, Http2ClientAndServerRoundTripWithoutBody) {
         fiber::http::HttpHandler handler = [observed_promise](fiber::http::HttpExchange &exchange) {
             return handle_no_body_request(exchange, observed_promise);
         };
-        return start_http_server(&group.at(0), std::move(handler), std::move(server_options), &port_promise, &server_promise);
+        return start_http_server(&group.at(0), std::move(handler), std::move(server_options), nullptr, &port_promise,
+                                 &server_promise);
     });
 
     auto *server = server_future.get();
@@ -750,7 +752,8 @@ TEST(HttpClientServerInteropTest, Http2ClientAndServerRoundTripWithBody) {
         fiber::http::HttpHandler handler = [observed_promise](fiber::http::HttpExchange &exchange) {
             return handle_body_request(exchange, observed_promise);
         };
-        return start_http_server(&group.at(0), std::move(handler), std::move(server_options), &port_promise, &server_promise);
+        return start_http_server(&group.at(0), std::move(handler), std::move(server_options), nullptr, &port_promise,
+                                 &server_promise);
     });
 
     auto *server = server_future.get();
@@ -775,6 +778,68 @@ TEST(HttpClientServerInteropTest, Http2ClientAndServerRoundTripWithBody) {
     EXPECT_EQ(observed.path, "/interop/http2/with-body");
     EXPECT_EQ(observed.host, "localhost");
     EXPECT_EQ(observed.body, "http2-client-body");
+
+    std::promise<void> close_promise;
+    auto close_future = close_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return close_server_on_loop(server, &close_promise); });
+    close_future.get();
+    group.stop();
+    group.join();
+    delete server;
+}
+
+TEST(HttpClientServerInteropTest, Http2ServerEventLoopGroupDispatch) {
+    TempFile cert("cert", kSelfSignedCertPem);
+    TempFile key("key", kSelfSignedKeyPem);
+    ASSERT_TRUE(cert.ok);
+    ASSERT_TRUE(key.ok);
+
+    fiber::event::EventLoopGroup group(2);
+    group.start();
+
+    fiber::http::HttpServerOptions server_options;
+    server_options.tls.enabled = true;
+    server_options.tls.cert_file = cert.path;
+    server_options.tls.key_file = key.path;
+    server_options.tls.alpn = {"h2"};
+
+    std::promise<std::uint16_t> port_promise;
+    std::promise<fiber::http::HttpServer *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    std::atomic<bool> saw_worker_loop{false};
+
+    fiber::async::spawn(group.at(0), [&]() {
+        fiber::http::HttpHandler handler = [&](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            if (&fiber::event::EventLoop::current() == &group.at(1)) {
+                saw_worker_loop.store(true, std::memory_order_release);
+            }
+            (void)co_await send_final_header(exchange, 204, nullptr, fiber::http::ResponseBodyMode::Auto, 0, true);
+        };
+        return start_http_server(&group.at(0), std::move(handler), std::move(server_options), &group, &port_promise,
+                                 &server_promise);
+    });
+
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    for (int i = 0; i < 2; ++i) {
+        std::promise<ClientRoundTripResult> client_promise;
+        auto client_future = client_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() {
+            return run_http2_client_no_body(&group.at(0), port, &client_promise);
+        });
+
+        ClientRoundTripResult client = client_future.get();
+        EXPECT_EQ(client.err, fiber::common::IoErr::None);
+        EXPECT_EQ(client.status_code, 204);
+        EXPECT_TRUE(client.response_body.empty());
+        EXPECT_TRUE(client.body_last);
+    }
+
+    EXPECT_TRUE(saw_worker_loop.load(std::memory_order_acquire));
 
     std::promise<void> close_promise;
     auto close_future = close_promise.get_future();
