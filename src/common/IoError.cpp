@@ -46,6 +46,8 @@ IoErr io_err_from_errno(int err) noexcept {
         return IoErr::BrokenPipe;
     case ENOMEM:
         return IoErr::NoMem;
+    case EMSGSIZE:
+        return IoErr::MessageTooLarge;
 #ifdef ENOTSUP
     case ENOTSUP:
         return IoErr::NotSupported;
@@ -99,6 +101,8 @@ int io_err_to_errno(IoErr err) noexcept {
         return EPIPE;
     case IoErr::NoMem:
         return ENOMEM;
+    case IoErr::MessageTooLarge:
+        return EMSGSIZE;
     case IoErr::NotSupported:
 #ifdef ENOTSUP
         return ENOTSUP;
@@ -151,6 +155,8 @@ std::string_view io_err_name(IoErr err) noexcept {
         return "broken_pipe";
     case IoErr::NoMem:
         return "no_mem";
+    case IoErr::MessageTooLarge:
+        return "message_too_large";
     case IoErr::NotSupported:
         return "not_supported";
     case IoErr::Canceled:

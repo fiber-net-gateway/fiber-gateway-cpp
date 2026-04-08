@@ -118,14 +118,20 @@ foreach(EXAMPLE_SRC IN LISTS EXAMPLE_SRC_LIST)
     add_executable(${EXAMPLE_NAME} ${EXAMPLE_SRC})
     if (EXAMPLE_NAME STREQUAL "http3_demo_lsquic")
         target_link_libraries(${EXAMPLE_NAME} PRIVATE
+            fiber_lib
             lsquic::lsquic
             boringssl::ssl
             boringssl::crypto
             ${FIBER_ZLIB_TARGET})
+        if (NOT FIBER_USE_LIBCXX)
+            target_link_libraries(${EXAMPLE_NAME} PRIVATE stdc++exp)
+        endif()
         if (DEFINED lsquic_SOURCE_DIR)
             target_include_directories(${EXAMPLE_NAME} PRIVATE ${lsquic_SOURCE_DIR}/include)
+            target_include_directories(${EXAMPLE_NAME} PRIVATE ${lsquic_SOURCE_DIR}/src/liblsquic)
         else()
             target_include_directories(${EXAMPLE_NAME} PRIVATE ${CMAKE_CURRENT_LIST_DIR}/temp/_deps/lsquic-src/include)
+            target_include_directories(${EXAMPLE_NAME} PRIVATE ${CMAKE_CURRENT_LIST_DIR}/temp/_deps/lsquic-src/src/liblsquic)
         endif()
         if (FIBER_USE_LIBCXX)
             target_link_options(${EXAMPLE_NAME} PRIVATE ${FIBER_STDLIB_LINK_FLAGS})
