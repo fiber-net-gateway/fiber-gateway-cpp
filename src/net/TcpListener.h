@@ -92,6 +92,7 @@ public:
                                        const ListenOptions &options);
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] int fd() const noexcept;
+    [[nodiscard]] fiber::event::EventLoop &loop() const noexcept;
     void close();
 
     [[nodiscard]] AcceptAwaiter accept() noexcept;

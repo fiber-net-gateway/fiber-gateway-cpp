@@ -25,6 +25,10 @@ int TcpListener::fd() const noexcept {
     return acceptor_.fd();
 }
 
+fiber::event::EventLoop &TcpListener::loop() const noexcept {
+    return acceptor_.loop();
+}
+
 void TcpListener::close() {
     acceptor_.close();
 }
