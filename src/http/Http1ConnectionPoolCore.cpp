@@ -62,7 +62,7 @@ common::IoResult<Http1ClientConnection *> Http1ConnectionPoolCore::Lease::emplac
     if (!pool_ || !key_.has_value()) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    if (pool_->shutdown_) {
+    if (pool_->shutdown_effective()) {
         return std::unexpected(common::IoErr::Canceled);
     }
     if (!entry_) {
@@ -116,10 +116,22 @@ Http1ConnectionPoolCore::~Http1ConnectionPoolCore() {
     destroy_free_lists();
 }
 
+bool Http1ConnectionPoolCore::shutdown_requested() const noexcept {
+    return shutdown_effective();
+}
+
+bool Http1ConnectionPoolCore::shutdown_effective() const noexcept {
+    if (shutdown_) {
+        return true;
+    }
+    return external_shutdown_flag_ != nullptr &&
+           external_shutdown_flag_->load(std::memory_order_acquire);
+}
+
 bool Http1ConnectionPoolCore::init() noexcept { return bucket_index_.init(options_.initial_group_capacity); }
 
 Http1ConnectionPoolCore::Lease Http1ConnectionPoolCore::acquire(const Http1ConnectionGroupKey &key) noexcept {
-    if (shutdown_) {
+    if (shutdown_effective()) {
         return {};
     }
     Http1ConnectionPoolEntry *entry = try_steal_idle_entry(key);
@@ -132,7 +144,7 @@ Http1ConnectionPoolCore::Lease Http1ConnectionPoolCore::acquire(const Http1Conne
 Http1ConnectionPoolEntry *Http1ConnectionPoolCore::try_steal_idle_entry(const Http1ConnectionGroupKey &key) noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     FIBER_ASSERT(loop_->in_loop());
-    if (shutdown_) {
+    if (shutdown_effective()) {
         return nullptr;
     }
 
@@ -170,7 +182,7 @@ void Http1ConnectionPoolCore::accept_returned_entry(Http1ConnectionPoolEntry &en
                                                     const Http1ConnectionGroupKey &key) noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     FIBER_ASSERT(loop_->in_loop());
-    if (shutdown_) {
+    if (shutdown_effective()) {
         recycle_entry(&entry);
         return;
     }
@@ -285,7 +297,7 @@ void Http1ConnectionPoolCore::park_entry(Http1ConnectionPoolEntry &entry,
         recycle_entry(&entry);
         return;
     }
-    if (shutdown_) {
+    if (shutdown_effective()) {
         recycle_entry(&entry);
         return;
     }

@@ -347,12 +347,17 @@ fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
 
 ### 6.6 `clear()` 与 `shutdown()`
 
-`LocalHttp1ConnectionPoolSet::clear()` 和 `shutdown()` 都会把操作分发到每个 shard 的 owner loop 执行。
+`LocalHttp1ConnectionPoolSet` 只提供异步管理接口：
+
+- `clear_async()`
+- `shutdown_async()`
+
+它们都会把操作分发到每个 shard 的 owner loop 执行，因此需要在协程里 `co_await`。
 
 区别是：
 
-- `clear()` 只清当前 idle 连接
-- `shutdown()` 会让整个 set 进入不可再复用、不可再建连的状态
+- `clear_async()` 只清当前 idle 连接
+- `shutdown_async()` 会让整个 set 进入不可再复用、不可再建连的状态
 
 ## 7. `StealableHttp1ConnectionPoolSet`
 
@@ -490,9 +495,9 @@ remote borrowed 连接释放时：
 - 允许 false positive
 - 不作为正确性依据
 
-### 7.9 `clear()`
+### 7.9 `clear_async()`
 
-`StealableHttp1ConnectionPoolSet::clear()` 会清所有 shard 当前 idle 连接，并清空所有 hint 表。
+`StealableHttp1ConnectionPoolSet::clear_async()` 会清所有 shard 当前 idle 连接，并清空所有 hint 表。
 
 它不会主动取消当前已经借出的 lease。
 
@@ -500,11 +505,11 @@ remote borrowed 连接释放时：
 
 - pool set 生命周期长于所有 lease
 
-如果某条连接在 `clear()` 时正处于 borrowed 状态，那么它归还时仍然会回到 home loop。
+如果某条连接在 `clear_async()` 时正处于 borrowed 状态，那么它归还时仍然会回到 home loop。
 
-### 7.10 `shutdown()`
+### 7.10 `shutdown_async()`
 
-`StealableHttp1ConnectionPoolSet::shutdown()` 会：
+`StealableHttp1ConnectionPoolSet::shutdown_async()` 会：
 
 - 在每个 shard 的 owner loop 上清空当前 idle 连接
 - 清空所有 hint 表

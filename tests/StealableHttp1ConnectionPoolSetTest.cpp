@@ -531,7 +531,13 @@ TEST(StealableHttp1ConnectionPoolSetTest, ClearAllowsBorrowedConnectionToReturnH
     });
 
     borrowed_ready_future.get();
-    set.clear();
+    std::promise<void> clear_done_promise;
+    auto clear_done_future = clear_done_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
+        co_await set.clear_async();
+        clear_done_promise.set_value();
+    });
+    clear_done_future.get();
     allow_reset->store(true, std::memory_order_release);
     EXPECT_TRUE(final_future.get());
 
@@ -604,7 +610,13 @@ TEST(StealableHttp1ConnectionPoolSetTest, ShutdownDropsBorrowedConnectionOnRetur
     });
 
     borrowed_ready_future.get();
-    set.shutdown();
+    std::promise<void> shutdown_done_promise;
+    auto shutdown_done_future = shutdown_done_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
+        co_await set.shutdown_async();
+        shutdown_done_promise.set_value();
+    });
+    shutdown_done_future.get();
     allow_reset->store(true, std::memory_order_release);
     EXPECT_TRUE(final_future.get());
 
