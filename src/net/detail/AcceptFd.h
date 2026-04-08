@@ -56,6 +56,7 @@ public:
     [[nodiscard]] bool valid() const noexcept { return efd_.valid(); }
 
     [[nodiscard]] int fd() const noexcept { return efd_.fd(); }
+    [[nodiscard]] fiber::event::EventLoop &loop() const noexcept { return efd_.loop(); }
 
     void close() {
         FIBER_ASSERT(efd_.loop().in_loop());

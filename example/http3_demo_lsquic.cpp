@@ -6,43 +6,74 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <netinet/ip.h>
-#include <sys/epoll.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include <lsquic.h>
 #include <lsxpack_header.h>
 #include <openssl/ssl.h>
+#include <lsquic_logger.h>
+
+#include "async/Spawn.h"
+#include "common/IoError.h"
+#include "event/EventLoop.h"
+#include "net/SocketAddress.h"
+#include "net/UdpPacket.h"
+#include "net/UdpSocket.h"
 
 namespace {
 
+using fiber::async::DetachedTask;
+using fiber::common::IoErr;
+using fiber::event::IoEvent;
+
 constexpr size_t kMaxDatagram = 65535;
-constexpr size_t kMaxEvents = 8;
 constexpr std::string_view kBody = "hello h3 via lsquic\n";
+constexpr unsigned char kH3AlpnWire[] = {2, 'h', '3'};
+constexpr auto kStopPollInterval = std::chrono::milliseconds(200);
 
 struct ServerCtx;
 
 struct ConnCtx {
 };
 
+struct HeaderField {
+    std::string name;
+    std::string value;
+};
+
+struct RequestHeaders {
+    lsxpack_header xhdr{};
+    std::array<char, 4096> decode_buf{};
+    std::vector<HeaderField> fields;
+    std::string method;
+    std::string path;
+    std::string authority;
+    size_t decode_off = 0;
+    bool have_xhdr = false;
+};
+
 struct StreamCtx {
-    std::string request;
+    std::vector<HeaderField> headers;
+    std::string method;
+    std::string path;
+    std::string authority;
+    std::string request_body;
     size_t body_offset = 0;
+    bool request_headers_loaded = false;
     bool ready_to_respond = false;
     bool headers_sent = false;
 };
 
 struct ServerCtx {
-    int udp_fd = -1;
-    int epoll_fd = -1;
+    fiber::event::EventLoop *loop = nullptr;
+    fiber::net::UdpSocket *udp = nullptr;
     uint16_t port = 8443;
-    uint32_t epoll_events = EPOLLIN;
     lsquic_engine_t *engine = nullptr;
     lsquic_engine_settings settings{};
     SSL_CTX *ssl_ctx = nullptr;
@@ -57,22 +88,26 @@ struct HeaderBuf {
     std::array<char, 1024> buf{};
 };
 
-socklen_t sockaddr_length(const sockaddr *sa) {
-    if (!sa) {
-        return 0;
+bool is_v4_mapped_ipv6(const std::array<std::uint8_t, 16> &bytes) {
+    for (std::size_t i = 0; i < 10; ++i) {
+        if (bytes[i] != 0) {
+            return false;
+        }
     }
-    switch (sa->sa_family) {
-        case AF_INET:
-            return sizeof(sockaddr_in);
-        case AF_INET6:
-            return sizeof(sockaddr_in6);
-        default:
-            return sizeof(sockaddr_storage);
-    }
+    return bytes[10] == 0xFF && bytes[11] == 0xFF;
 }
 
-bool set_sockopt_int(int fd, int level, int optname, int value) {
-    return ::setsockopt(fd, level, optname, &value, sizeof(value)) == 0;
+fiber::net::SocketAddress normalize_socket_address(const fiber::net::SocketAddress &addr) {
+    if (!addr.ip().is_v6()) {
+        return addr;
+    }
+    const auto &bytes = addr.ip().v6_bytes();
+    if (!is_v4_mapped_ipv6(bytes)) {
+        return addr;
+    }
+    std::array<std::uint8_t, 4> v4{};
+    std::memcpy(v4.data(), bytes.data() + 12, v4.size());
+    return {fiber::net::IpAddress::v4(v4), addr.port()};
 }
 
 bool parse_port(const char *text, uint16_t &out) {
@@ -88,56 +123,43 @@ bool parse_port(const char *text, uint16_t &out) {
     return true;
 }
 
-int open_udp_socket(uint16_t port) {
-    int fd = ::socket(AF_INET6, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    if (fd < 0) {
-        return -1;
+void configure_lsquic_logging() {
+    const char *spec = std::getenv("H3_DEMO_LSQUIC_LOG");
+    if (!spec || *spec == '\0') {
+        return;
     }
-
-    set_sockopt_int(fd, SOL_SOCKET, SO_REUSEADDR, 1);
-#ifdef SO_REUSEPORT
-    set_sockopt_int(fd, SOL_SOCKET, SO_REUSEPORT, 1);
-#endif
-    set_sockopt_int(fd, IPPROTO_IPV6, IPV6_V6ONLY, 0);
-    set_sockopt_int(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, 1);
-    set_sockopt_int(fd, IPPROTO_IPV6, IPV6_RECVTCLASS, 1);
-    set_sockopt_int(fd, IPPROTO_IP, IP_PKTINFO, 1);
-    set_sockopt_int(fd, IPPROTO_IP, IP_RECVTOS, 1);
-
-    sockaddr_in6 addr{};
-    addr.sin6_family = AF_INET6;
-    addr.sin6_addr = in6addr_any;
-    addr.sin6_port = htons(port);
-    if (::bind(fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(addr)) != 0) {
-        ::close(fd);
-        return -1;
+    lsquic_log_to_fstream(stderr, LLTS_HHMMSSUS);
+    if (0 != lsquic_logger_lopt(spec)) {
+        std::cerr << "invalid lsquic log spec: " << spec << '\n';
     }
-    return fd;
 }
 
-bool setup_epoll(ServerCtx &server) {
-    server.epoll_fd = ::epoll_create1(EPOLL_CLOEXEC);
-    if (server.epoll_fd < 0) {
-        return false;
-    }
-    epoll_event ev{};
-    ev.events = server.epoll_events;
-    ev.data.fd = server.udp_fd;
-    return ::epoll_ctl(server.epoll_fd, EPOLL_CTL_ADD, server.udp_fd, &ev) == 0;
+int select_alpn_cb(SSL *ssl,
+                   const unsigned char **out,
+                   unsigned char *outlen,
+                   const unsigned char *in,
+                   unsigned int inlen,
+                   void *arg) {
+    (void) ssl;
+    (void) arg;
+    int rc = SSL_select_next_proto(const_cast<unsigned char **>(out),
+                                   outlen,
+                                   in,
+                                   inlen,
+                                   kH3AlpnWire,
+                                   sizeof(kH3AlpnWire));
+    return rc == OPENSSL_NPN_NEGOTIATED ? SSL_TLSEXT_ERR_OK : SSL_TLSEXT_ERR_ALERT_FATAL;
 }
 
-bool update_epoll_interest(ServerCtx &server, uint32_t wanted_events) {
-    if (wanted_events == server.epoll_events) {
-        return true;
-    }
-    epoll_event ev{};
-    ev.events = wanted_events;
-    ev.data.fd = server.udp_fd;
-    if (::epoll_ctl(server.epoll_fd, EPOLL_CTL_MOD, server.udp_fd, &ev) != 0) {
-        return false;
-    }
-    server.epoll_events = wanted_events;
-    return true;
+bool bind_udp_socket(fiber::net::UdpSocket &socket, uint16_t port) {
+    fiber::net::UdpBindOptions options{};
+    options.reuse_addr = true;
+    options.reuse_port = true;
+    options.v6_only = false;
+    options.recv_packet_info = true;
+    options.recv_ecn = true;
+    auto bind_result = socket.bind(fiber::net::SocketAddress::any_v6(port), options);
+    return static_cast<bool>(bind_result);
 }
 
 int header_set_ptr(lsxpack_header *hdr,
@@ -160,128 +182,98 @@ int header_set_ptr(lsxpack_header *hdr,
     return 0;
 }
 
-size_t fill_tx_control(const lsquic_out_spec &spec, std::array<unsigned char, 128> &control, msghdr &msg) {
-    msg.msg_control = nullptr;
-    msg.msg_controllen = 0;
-    if (!spec.local_sa && spec.ecn <= 0) {
+fiber::net::UdpEcn to_udp_ecn(int ecn) {
+    switch (ecn & 0x03) {
+        case 0:
+            return fiber::net::UdpEcn::NonEct;
+        case 1:
+            return fiber::net::UdpEcn::Ect1;
+        case 2:
+            return fiber::net::UdpEcn::Ect0;
+        case 3:
+            return fiber::net::UdpEcn::Ce;
+        default:
+            return fiber::net::UdpEcn::Unspecified;
+    }
+}
+
+int to_lsquic_ecn(fiber::net::UdpEcn ecn) {
+    if (ecn == fiber::net::UdpEcn::Unspecified) {
         return 0;
     }
+    return static_cast<int>(ecn) & 0x03;
+}
 
-    control.fill(0);
-    msg.msg_control = control.data();
-    msg.msg_controllen = control.size();
-    cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-    if (!cmsg) {
-        msg.msg_control = nullptr;
-        msg.msg_controllen = 0;
-        return 0;
+bool to_socket_address(const sockaddr *sa, fiber::net::SocketAddress &out) {
+    if (!sa) {
+        return false;
     }
-
-    auto advance = [&](cmsghdr *cur) -> cmsghdr * {
-        auto *next = CMSG_NXTHDR(&msg, cur);
-        if (!next) {
-            msg.msg_control = nullptr;
-            msg.msg_controllen = 0;
-        }
-        return next;
-    };
-
-    if (spec.local_sa) {
-        if (spec.local_sa->sa_family == AF_INET) {
-            const auto *sa = reinterpret_cast<const sockaddr_in *>(spec.local_sa);
-            cmsg->cmsg_level = IPPROTO_IP;
-            cmsg->cmsg_type = IP_PKTINFO;
-            cmsg->cmsg_len = CMSG_LEN(sizeof(in_pktinfo));
-            auto *pkt = reinterpret_cast<in_pktinfo *>(CMSG_DATA(cmsg));
-            std::memset(pkt, 0, sizeof(*pkt));
-            pkt->ipi_spec_dst = sa->sin_addr;
-            cmsg = advance(cmsg);
-            if (!cmsg) {
-                return 0;
-            }
-        } else if (spec.local_sa->sa_family == AF_INET6) {
-            const auto *sa6 = reinterpret_cast<const sockaddr_in6 *>(spec.local_sa);
-            cmsg->cmsg_level = IPPROTO_IPV6;
-            cmsg->cmsg_type = IPV6_PKTINFO;
-            cmsg->cmsg_len = CMSG_LEN(sizeof(in6_pktinfo));
-            auto *pkt6 = reinterpret_cast<in6_pktinfo *>(CMSG_DATA(cmsg));
-            std::memset(pkt6, 0, sizeof(*pkt6));
-            pkt6->ipi6_addr = sa6->sin6_addr;
-            pkt6->ipi6_ifindex = sa6->sin6_scope_id;
-            cmsg = advance(cmsg);
-            if (!cmsg) {
-                return 0;
-            }
-        }
+    socklen_t len = 0;
+    switch (sa->sa_family) {
+        case AF_INET:
+            len = sizeof(sockaddr_in);
+            break;
+        case AF_INET6:
+            len = sizeof(sockaddr_in6);
+            break;
+        default:
+            return false;
     }
-
-    if (spec.ecn >= 0) {
-        int ecn = spec.ecn & 0x03;
-        int family = spec.dest_sa ? spec.dest_sa->sa_family : AF_UNSPEC;
-        if (family == AF_INET) {
-            cmsg->cmsg_level = IPPROTO_IP;
-            cmsg->cmsg_type = IP_TOS;
-            cmsg->cmsg_len = CMSG_LEN(sizeof(ecn));
-            std::memcpy(CMSG_DATA(cmsg), &ecn, sizeof(ecn));
-            cmsg = advance(cmsg);
-            if (!cmsg) {
-                return 0;
-            }
-        } else if (family == AF_INET6) {
-            cmsg->cmsg_level = IPPROTO_IPV6;
-            cmsg->cmsg_type = IPV6_TCLASS;
-            cmsg->cmsg_len = CMSG_LEN(sizeof(ecn));
-            std::memcpy(CMSG_DATA(cmsg), &ecn, sizeof(ecn));
-            cmsg = advance(cmsg);
-            if (!cmsg) {
-                return 0;
-            }
-        }
+    fiber::net::SocketAddress parsed;
+    if (!fiber::net::SocketAddress::from_sockaddr(sa, len, parsed)) {
+        return false;
     }
+    out = normalize_socket_address(parsed);
+    return true;
+}
 
-    size_t used = reinterpret_cast<unsigned char *>(cmsg) - control.data();
-    msg.msg_controllen = used;
-    return used;
+bool fill_send_spec(const lsquic_out_spec &src, fiber::net::UdpPacketSendSpec &dst) {
+    if (!to_socket_address(src.dest_sa, dst.peer)) {
+        return false;
+    }
+    dst.iov = src.iov;
+    if (src.iovlen > static_cast<unsigned>(std::numeric_limits<int>::max())) {
+        return false;
+    }
+    dst.iov_count = static_cast<int>(src.iovlen);
+    dst.ecn = src.ecn >= 0 ? to_udp_ecn(src.ecn) : fiber::net::UdpEcn::Unspecified;
+    if (!src.local_sa) {
+        return true;
+    }
+    if (!to_socket_address(src.local_sa, dst.local)) {
+        return false;
+    }
+    dst.has_local = true;
+    return true;
 }
 
 int packets_out_cb(void *ctx, const struct lsquic_out_spec *specs, unsigned n_specs) {
     auto *server = static_cast<ServerCtx *>(ctx);
-    if (!server || server->udp_fd < 0) {
+    if (!server || !server->udp) {
         return -1;
     }
 
     unsigned sent = 0;
     for (unsigned i = 0; i < n_specs; ++i) {
-        const auto &spec = specs[i];
-        msghdr msg{};
-        std::array<unsigned char, 128> control{};
-        msg.msg_name = const_cast<sockaddr *>(spec.dest_sa);
-        msg.msg_namelen = sockaddr_length(spec.dest_sa);
-        msg.msg_iov = spec.iov;
-        msg.msg_iovlen = spec.iovlen;
-        fill_tx_control(spec, control, msg);
-
-        ssize_t rc = ::sendmsg(server->udp_fd, &msg, MSG_DONTWAIT);
-        if (rc < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                server->tx_blocked = true;
-                break;
-            }
-            if (errno == EMSGSIZE) {
-                continue;
-            }
+        fiber::net::UdpPacketSendSpec spec{};
+        if (!fill_send_spec(specs[i], spec)) {
             break;
         }
-        ++sent;
+
+        auto result = server->udp->try_send_packet(spec);
+        if (result) {
+            ++sent;
+            continue;
+        }
+        if (result.error() == IoErr::MessageTooLarge) {
+            continue;
+        }
+        if (result.error() == IoErr::WouldBlock) {
+            server->tx_blocked = true;
+        }
+        break;
     }
     return static_cast<int>(sent);
-}
-
-SSL_CTX *lookup_cert_cb(void *ctx, const sockaddr *local, const char *sni) {
-    (void) local;
-    (void) sni;
-    auto *server = static_cast<ServerCtx *>(ctx);
-    return server ? server->ssl_ctx : nullptr;
 }
 
 SSL_CTX *get_ssl_ctx_cb(void *peer_ctx, const sockaddr *local) {
@@ -293,6 +285,65 @@ SSL_CTX *get_ssl_ctx_cb(void *peer_ctx, const sockaddr *local) {
     return g_server ? g_server->ssl_ctx : nullptr;
 }
 
+void *create_header_set(void *hsi_ctx, lsquic_stream_t *stream, int is_push_promise) {
+    (void) hsi_ctx;
+    (void) stream;
+    (void) is_push_promise;
+    return new RequestHeaders();
+}
+
+lsxpack_header *prepare_decode_header(void *header_set, lsxpack_header *hdr, size_t space) {
+    auto *headers = static_cast<RequestHeaders *>(header_set);
+    if (!headers) {
+        return nullptr;
+    }
+
+    if (headers->have_xhdr) {
+        headers->decode_off += lsxpack_header_get_dec_size(&headers->xhdr);
+    } else {
+        headers->have_xhdr = true;
+    }
+
+    if (headers->decode_off + space > headers->decode_buf.size()) {
+        return nullptr;
+    }
+
+    lsxpack_header_prepare_decode(hdr ? hdr : &headers->xhdr,
+                                  headers->decode_buf.data(),
+                                  headers->decode_off,
+                                  headers->decode_buf.size() - headers->decode_off);
+    return hdr ? hdr : &headers->xhdr;
+}
+
+int process_decoded_header(void *header_set, lsxpack_header *hdr) {
+    auto *headers = static_cast<RequestHeaders *>(header_set);
+    if (!headers) {
+        return -1;
+    }
+    if (!hdr) {
+        return 0;
+    }
+
+    const char *name_ptr = lsxpack_header_get_name(hdr);
+    const char *value_ptr = lsxpack_header_get_value(hdr);
+    std::string_view name{name_ptr ? name_ptr : "", hdr->name_len};
+    std::string_view value{value_ptr ? value_ptr : "", hdr->val_len};
+    headers->fields.push_back({std::string(name), std::string(value)});
+
+    if (name == ":method") {
+        headers->method.assign(value);
+    } else if (name == ":path") {
+        headers->path.assign(value);
+    } else if (name == ":authority") {
+        headers->authority.assign(value);
+    }
+    return 0;
+}
+
+void discard_header_set(void *header_set) {
+    delete static_cast<RequestHeaders *>(header_set);
+}
+
 lsquic_conn_ctx_t *on_new_conn(void *stream_if_ctx, lsquic_conn_t *conn) {
     (void) stream_if_ctx;
     (void) conn;
@@ -301,6 +352,7 @@ lsquic_conn_ctx_t *on_new_conn(void *stream_if_ctx, lsquic_conn_t *conn) {
 
 void on_conn_closed(lsquic_conn_t *conn) {
     auto *ctx = reinterpret_cast<ConnCtx *>(lsquic_conn_get_ctx(conn));
+    lsquic_conn_set_ctx(conn, nullptr);
     delete ctx;
 }
 
@@ -318,17 +370,26 @@ void on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
         return;
     }
 
+    if (!ctx->request_headers_loaded) {
+        auto *headers = static_cast<RequestHeaders *>(lsquic_stream_get_hset(stream));
+        if (!headers) {
+            lsquic_stream_close(stream);
+            return;
+        }
+
+        ctx->headers = std::move(headers->fields);
+        ctx->method = std::move(headers->method);
+        ctx->path = std::move(headers->path);
+        ctx->authority = std::move(headers->authority);
+        ctx->request_headers_loaded = true;
+        delete headers;
+    }
+
     std::array<char, 4096> buf{};
     for (;;) {
         ssize_t nr = lsquic_stream_read(stream, buf.data(), buf.size());
         if (nr > 0) {
-            ctx->request.append(buf.data(), static_cast<size_t>(nr));
-            if (ctx->request.find("\r\n\r\n") != std::string::npos) {
-                ctx->ready_to_respond = true;
-                lsquic_stream_wantread(stream, 0);
-                lsquic_stream_wantwrite(stream, 1);
-                return;
-            }
+            ctx->request_body.append(buf.data(), static_cast<size_t>(nr));
             continue;
         }
         if (nr == 0) {
@@ -410,119 +471,50 @@ lsquic_stream_if make_stream_if() {
 
 const lsquic_stream_if kStreamIf = make_stream_if();
 
-sockaddr_storage default_local_for_peer(int family, uint16_t port) {
-    sockaddr_storage local{};
-    if (family == AF_INET) {
-        auto *sa = reinterpret_cast<sockaddr_in *>(&local);
-        sa->sin_family = AF_INET;
-        sa->sin_port = htons(port);
-        sa->sin_addr.s_addr = htonl(INADDR_ANY);
-    } else {
-        auto *sa = reinterpret_cast<sockaddr_in6 *>(&local);
-        sa->sin6_family = AF_INET6;
-        sa->sin6_port = htons(port);
-        sa->sin6_addr = in6addr_any;
-    }
-    return local;
-}
-
-void fill_local_and_ecn(const msghdr &msg,
-                        sockaddr_storage &local,
-                        int &ecn,
-                        uint16_t bound_port,
-                        int peer_family) {
-    local = default_local_for_peer(peer_family, bound_port);
-    ecn = 0;
-
-    for (cmsghdr *cmsg = CMSG_FIRSTHDR(const_cast<msghdr *>(&msg));
-         cmsg;
-         cmsg = CMSG_NXTHDR(const_cast<msghdr *>(&msg), cmsg)) {
-        if (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_PKTINFO &&
-            cmsg->cmsg_len >= CMSG_LEN(sizeof(in6_pktinfo))) {
-            auto *pkt = reinterpret_cast<in6_pktinfo *>(CMSG_DATA(cmsg));
-            auto *sa = reinterpret_cast<sockaddr_in6 *>(&local);
-            sa->sin6_family = AF_INET6;
-            sa->sin6_port = htons(bound_port);
-            sa->sin6_addr = pkt->ipi6_addr;
-            continue;
-        }
-        if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_PKTINFO &&
-            cmsg->cmsg_len >= CMSG_LEN(sizeof(in_pktinfo))) {
-            auto *pkt = reinterpret_cast<in_pktinfo *>(CMSG_DATA(cmsg));
-            auto *sa = reinterpret_cast<sockaddr_in *>(&local);
-            sa->sin_family = AF_INET;
-            sa->sin_port = htons(bound_port);
-            sa->sin_addr = pkt->ipi_addr;
-            continue;
-        }
-        if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_TOS &&
-            cmsg->cmsg_len >= CMSG_LEN(sizeof(unsigned char))) {
-            int tos = *reinterpret_cast<unsigned char *>(CMSG_DATA(cmsg));
-            ecn = tos & 0x03;
-            continue;
-        }
-        if (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_TCLASS &&
-            cmsg->cmsg_len >= CMSG_LEN(sizeof(int))) {
-            int tclass = *reinterpret_cast<int *>(CMSG_DATA(cmsg));
-            ecn = tclass & 0x03;
-            continue;
-        }
-    }
-}
+const lsquic_hset_if kHeaderSetIf{
+    .hsi_create_header_set = create_header_set,
+    .hsi_prepare_decode = prepare_decode_header,
+    .hsi_process_header = process_decoded_header,
+    .hsi_discard_header_set = discard_header_set,
+    .hsi_flags = static_cast<lsquic_hsi_flag>(0),
+};
 
 void drain_udp_and_feed_engine(ServerCtx &server) {
     std::array<unsigned char, kMaxDatagram> packet{};
-    std::array<unsigned char, CMSG_SPACE(sizeof(in6_pktinfo)) +
-                              CMSG_SPACE(sizeof(in_pktinfo)) +
-                              CMSG_SPACE(sizeof(int))> control{};
 
     for (;;) {
-        sockaddr_storage peer{};
-        iovec iov{};
-        iov.iov_base = packet.data();
-        iov.iov_len = packet.size();
-
-        msghdr msg{};
-        msg.msg_name = &peer;
-        msg.msg_namelen = sizeof(peer);
-        msg.msg_iov = &iov;
-        msg.msg_iovlen = 1;
-        msg.msg_control = control.data();
-        msg.msg_controllen = control.size();
-
-        ssize_t nr = ::recvmsg(server.udp_fd, &msg, MSG_DONTWAIT);
-        if (nr < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        auto recv_result = server.udp->try_recv_packet(packet.data(), packet.size());
+        if (!recv_result) {
+            if (recv_result.error() == IoErr::WouldBlock) {
                 break;
             }
-            if (errno == EINTR) {
+            if (recv_result.error() == IoErr::Interrupted) {
                 continue;
             }
             break;
         }
-        if (nr == 0) {
-            continue;
-        }
-        if (msg.msg_namelen == 0) {
+        if (recv_result->size == 0) {
             continue;
         }
 
-        int peer_family = reinterpret_cast<sockaddr *>(&peer)->sa_family;
-        if (peer_family != AF_INET && peer_family != AF_INET6) {
-            continue;
-        }
+        recv_result->peer = normalize_socket_address(recv_result->peer);
+        recv_result->local = normalize_socket_address(recv_result->local);
 
         sockaddr_storage local{};
-        int ecn = 0;
-        fill_local_and_ecn(msg, local, ecn, server.port, peer_family);
+        sockaddr_storage peer{};
+        socklen_t local_len = 0;
+        socklen_t peer_len = 0;
+        if (!recv_result->local.to_sockaddr(local, local_len) || !recv_result->peer.to_sockaddr(peer, peer_len)) {
+            continue;
+        }
 
         lsquic_engine_packet_in(server.engine,
                                 packet.data(),
-                                static_cast<size_t>(nr),
+                                recv_result->size,
                                 reinterpret_cast<const sockaddr *>(&local),
                                 reinterpret_cast<const sockaddr *>(&peer),
                                 &server,
-                                ecn);
+                                to_lsquic_ecn(recv_result->ecn));
     }
 }
 
@@ -535,7 +527,54 @@ int compute_wait_timeout_ms(lsquic_engine_t *engine, bool tx_blocked) {
     if (tx_blocked && (timeout_ms < 0 || timeout_ms > 5)) {
         timeout_ms = 5;
     }
+    if (timeout_ms < 0 || timeout_ms > static_cast<int>(kStopPollInterval.count())) {
+        timeout_ms = static_cast<int>(kStopPollInterval.count());
+    }
     return timeout_ms;
+}
+
+fiber::async::Task<fiber::common::IoResult<IoEvent>> wait_for_udp_events(ServerCtx &server) {
+    IoEvent interested = IoEvent::Read;
+    if (server.tx_blocked) {
+        interested |= IoEvent::Write;
+    }
+    int timeout_ms = compute_wait_timeout_ms(server.engine, server.tx_blocked);
+    co_return co_await server.udp->wait_event(interested, std::chrono::milliseconds(timeout_ms));
+}
+
+DetachedTask run_server(ServerCtx *server) {
+    if (!server || !server->loop || !server->udp || !server->engine) {
+        co_return;
+    }
+
+    while (!server->stop.load(std::memory_order_acquire)) {
+        auto wait_result = co_await wait_for_udp_events(*server);
+        if (wait_result) {
+            if (fiber::event::any(*wait_result & IoEvent::Read)) {
+                drain_udp_and_feed_engine(*server);
+            }
+            if (fiber::event::any(*wait_result & IoEvent::Write)) {
+                server->tx_blocked = false;
+                lsquic_engine_send_unsent_packets(server->engine);
+            }
+        } else if (wait_result.error() != IoErr::TimedOut) {
+            break;
+        }
+
+        lsquic_engine_process_conns(server->engine);
+        if (!server->tx_blocked && lsquic_engine_has_unsent_packets(server->engine)) {
+            lsquic_engine_send_unsent_packets(server->engine);
+        }
+        if (lsquic_engine_has_unsent_packets(server->engine)) {
+            server->tx_blocked = true;
+        }
+    }
+
+    if (server->udp && server->udp->valid()) {
+        server->udp->close();
+    }
+    server->loop->stop();
+    co_return;
 }
 
 void on_signal(int signo) {
@@ -566,6 +605,8 @@ SSL_CTX *create_server_ssl_ctx(const char *cert_file, const char *key_file) {
     }
 
     SSL_CTX_set_min_proto_version(ssl, TLS1_3_VERSION);
+    SSL_CTX_set_max_proto_version(ssl, TLS1_3_VERSION);
+    SSL_CTX_set_alpn_select_cb(ssl, select_alpn_cb, nullptr);
     if (SSL_CTX_use_certificate_chain_file(ssl, cert_file) != 1) {
         SSL_CTX_free(ssl);
         return nullptr;
@@ -583,6 +624,7 @@ SSL_CTX *create_server_ssl_ctx(const char *cert_file, const char *key_file) {
 
 lsquic_engine_t *create_engine(ServerCtx &server) {
     lsquic_engine_init_settings(&server.settings, LSENG_SERVER | LSENG_HTTP);
+    server.settings.es_support_srej = 0;
 
     lsquic_engine_api api{};
     api.ea_packets_out = packets_out_cb;
@@ -590,18 +632,10 @@ lsquic_engine_t *create_engine(ServerCtx &server) {
     api.ea_stream_if = &kStreamIf;
     api.ea_stream_if_ctx = &server;
     api.ea_settings = &server.settings;
-    api.ea_lookup_cert = lookup_cert_cb;
-    api.ea_cert_lu_ctx = &server;
     api.ea_get_ssl_ctx = get_ssl_ctx_cb;
+    api.ea_hsi_if = &kHeaderSetIf;
 
     return lsquic_engine_new(LSENG_SERVER | LSENG_HTTP, &api);
-}
-
-void close_fd(int &fd) {
-    if (fd >= 0) {
-        ::close(fd);
-        fd = -1;
-    }
 }
 
 } // namespace
@@ -625,40 +659,39 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    fiber::event::EventLoop loop;
+    fiber::net::UdpSocket udp(loop);
     ServerCtx server{};
+    server.loop = &loop;
+    server.udp = &udp;
     server.port = port;
     g_server = &server;
 
     if (!install_signal_handlers()) {
         std::cerr << "failed to install signal handlers\n";
+        g_server = nullptr;
         return 1;
     }
+    configure_lsquic_logging();
 
-    server.udp_fd = open_udp_socket(server.port);
-    if (server.udp_fd < 0) {
-        std::cerr << "udp bind failed: " << std::strerror(errno) << '\n';
+    if (!bind_udp_socket(udp, server.port)) {
+        std::cerr << "udp bind failed\n";
+        g_server = nullptr;
         return 1;
     }
-
-    if (!setup_epoll(server)) {
-        std::cerr << "epoll setup failed: " << std::strerror(errno) << '\n';
-        close_fd(server.udp_fd);
-        return 1;
-    }
+    server.port = udp.local_addr().port();
 
     if (lsquic_global_init(LSQUIC_GLOBAL_SERVER) != 0) {
         std::cerr << "lsquic_global_init failed\n";
-        close_fd(server.epoll_fd);
-        close_fd(server.udp_fd);
+        g_server = nullptr;
         return 1;
     }
 
     server.ssl_ctx = create_server_ssl_ctx(cert_file, key_file);
     if (!server.ssl_ctx) {
         std::cerr << "SSL_CTX init failed\n";
-        close_fd(server.epoll_fd);
-        close_fd(server.udp_fd);
         lsquic_global_cleanup();
+        g_server = nullptr;
         return 1;
     }
 
@@ -666,64 +699,20 @@ int main(int argc, char **argv) {
     if (!server.engine) {
         std::cerr << "lsquic_engine_new failed\n";
         SSL_CTX_free(server.ssl_ctx);
-        close_fd(server.epoll_fd);
-        close_fd(server.udp_fd);
         lsquic_global_cleanup();
+        g_server = nullptr;
         return 1;
     }
 
     std::cout << "listening on udp://[::]:" << server.port << '\n';
     std::cout << "try: curl --http3 -k https://127.0.0.1:" << server.port << "/\n";
 
-    std::array<epoll_event, kMaxEvents> events{};
-    while (!server.stop.load(std::memory_order_acquire)) {
-        int timeout_ms = compute_wait_timeout_ms(server.engine, server.tx_blocked);
-        int n = ::epoll_wait(server.epoll_fd, events.data(), static_cast<int>(events.size()), timeout_ms);
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            std::cerr << "epoll_wait failed: " << std::strerror(errno) << '\n';
-            break;
-        }
-
-        for (int i = 0; i < n; ++i) {
-            if (events[i].data.fd != server.udp_fd) {
-                continue;
-            }
-            uint32_t re = events[i].events;
-            if (re & EPOLLIN) {
-                drain_udp_and_feed_engine(server);
-            }
-            if (re & EPOLLOUT) {
-                server.tx_blocked = false;
-                lsquic_engine_send_unsent_packets(server.engine);
-            }
-            if (re & (EPOLLERR | EPOLLHUP)) {
-                server.stop.store(true, std::memory_order_release);
-            }
-        }
-
-        lsquic_engine_process_conns(server.engine);
-        if (!server.tx_blocked && lsquic_engine_has_unsent_packets(server.engine)) {
-            lsquic_engine_send_unsent_packets(server.engine);
-        }
-        if (lsquic_engine_has_unsent_packets(server.engine)) {
-            server.tx_blocked = true;
-        }
-
-        uint32_t wanted = EPOLLIN | (server.tx_blocked ? EPOLLOUT : 0U);
-        if (!update_epoll_interest(server, wanted)) {
-            std::cerr << "failed to update epoll events: " << std::strerror(errno) << '\n';
-            break;
-        }
-    }
+    fiber::async::spawn(loop, [&]() { return run_server(&server); });
+    loop.run();
 
     lsquic_engine_destroy(server.engine);
     SSL_CTX_free(server.ssl_ctx);
     lsquic_global_cleanup();
-    close_fd(server.epoll_fd);
-    close_fd(server.udp_fd);
     g_server = nullptr;
     return 0;
 }

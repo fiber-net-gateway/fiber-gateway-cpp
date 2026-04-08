@@ -4,8 +4,12 @@
 #include <chrono>
 #include <cstddef>
 #include <memory>
+#include <mutex>
 #include <new>
+#include <atomic>
 
+#include "../async/Task.h"
+#include "../async/WaitGroup.h"
 #include "../common/Assert.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
@@ -24,8 +28,8 @@ public:
     ~LocalHttp1ConnectionPoolSet();
 
     [[nodiscard]] bool init() noexcept;
-    void clear() noexcept;
-    void shutdown() noexcept;
+    [[nodiscard]] async::Task<void> clear_async() noexcept;
+    [[nodiscard]] async::Task<void> shutdown_async() noexcept;
     [[nodiscard]] Lease acquire(const Http1ConnectionGroupKey &key) noexcept { return current_core().acquire(key); }
     void sweep_expired(std::chrono::steady_clock::time_point now) noexcept { current_core().sweep_expired(now); }
 
@@ -39,6 +43,8 @@ public:
     [[nodiscard]] std::size_t group_count() const noexcept { return current_core().group_count(); }
 
 private:
+    class AdminAwaiter;
+
     struct alignas(Http1ConnectionPoolCore) Slot {
         std::byte storage[sizeof(Http1ConnectionPoolCore)];
     };
@@ -67,6 +73,9 @@ private:
     event::EventLoopGroup *group_ = nullptr;
     Options pool_options_{};
     std::unique_ptr<Slot[]> storage_{};
+    std::atomic<bool> shutdown_requested_{false};
+    std::mutex shutdown_mu_{};
+    async::WaitGroup shutdown_wg_{};
 };
 
 } // namespace fiber::http

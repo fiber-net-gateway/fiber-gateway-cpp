@@ -26,6 +26,7 @@ enum class IoErr : std::uint16_t {
     Permission,
     BrokenPipe,
     NoMem,
+    MessageTooLarge,
     NotSupported,
     Canceled,
     Unknown,

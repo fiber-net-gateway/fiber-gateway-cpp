@@ -21,7 +21,8 @@ class RWFd;
 
 struct RWFdWaiterBase {
     RWFd *rwfd_ = nullptr;
-    fiber::event::IoEvent event_{};
+    fiber::event::IoEvent interested_{fiber::event::IoEvent::None};
+    fiber::event::IoEvent ready_{fiber::event::IoEvent::None};
     fiber::common::IoErr err_{fiber::common::IoErr::None};
     std::coroutine_handle<> coro_ = nullptr;
 };
@@ -32,9 +33,6 @@ struct RWFdCrossThreadWaiter;
 template<typename T>
 concept RWFdWaiter = std::same_as<std::remove_cvref_t<T>, RWFdLocalThreadWaiter> ||
                      std::same_as<std::remove_cvref_t<T>, RWFdCrossThreadWaiter>;
-
-template<fiber::event::IoEvent Event>
-concept RWFdWaitEvent = (Event == fiber::event::IoEvent::Read || Event == fiber::event::IoEvent::Write);
 
 enum class RWFdWaiterState : std::uint8_t {
     Notify_Watch,
@@ -47,8 +45,9 @@ enum class RWFdWaiterState : std::uint8_t {
 
 class RWFd : public common::NonCopyable, public common::NonMovable {
 public:
+    class WaitEventAwaiter;
+
     template<fiber::event::IoEvent Event>
-        requires(RWFdWaitEvent<Event>)
     class WaitAwaiter;
 
     using WaitReadableAwaiter = WaitAwaiter<fiber::event::IoEvent::Read>;
@@ -66,113 +65,64 @@ public:
     int release_fd() noexcept;
     void close();
 
+    [[nodiscard]] WaitEventAwaiter wait_event(fiber::event::IoEvent interested) noexcept;
     [[nodiscard]] WaitReadableAwaiter wait_readable() noexcept;
     [[nodiscard]] WaitWritableAwaiter wait_writable() noexcept;
 
 private:
     friend struct RWFdCrossThreadWaiter;
+    friend class WaitEventAwaiter;
 
-    template<fiber::event::IoEvent Event>
-        requires(RWFdWaitEvent<Event>)
-    RWFdLocalThreadWaiter *&local_waiter_slot() noexcept {
-        if constexpr (Event == fiber::event::IoEvent::Read) {
-            return local_read_waiter_;
-        }
-        return local_write_waiter_;
-    }
-
-    template<fiber::event::IoEvent Event>
-        requires(RWFdWaitEvent<Event>)
-    RWFdCrossThreadWaiter *&cross_waiter_slot() noexcept {
-        if constexpr (Event == fiber::event::IoEvent::Read) {
-            return cross_read_waiter_;
-        }
-        return cross_write_waiter_;
-    }
-
-    template<fiber::event::IoEvent Event>
-        requires(RWFdWaitEvent<Event>)
-    bool &local_waiting_slot() noexcept {
-        if constexpr (Event == fiber::event::IoEvent::Read) {
-            return local_read_waiting_;
-        }
-        return local_write_waiting_;
-    }
-
-    template<fiber::event::IoEvent Event>
-        requires(RWFdWaitEvent<Event>)
-    [[nodiscard]] bool event_has_waiter() const noexcept {
-        if constexpr (Event == fiber::event::IoEvent::Read) {
-            return local_read_waiter_ != nullptr;
-        }
-        return local_write_waiter_ != nullptr;
-    }
-
-    template<fiber::event::IoEvent Event, typename Waiter>
-        requires(RWFdWaitEvent<Event> && RWFdWaiter<Waiter>)
+    template<typename Waiter>
+        requires(RWFdWaiter<Waiter>)
     fiber::common::IoErr begin_wait(Waiter *waiter) noexcept {
         FIBER_ASSERT(loop().in_loop());
-        FIBER_ASSERT(waiter);
+        FIBER_ASSERT(waiter != nullptr);
+        FIBER_ASSERT(fiber::event::any(waiter->interested_));
         if (!valid()) {
             return fiber::common::IoErr::BadFd;
         }
-        if (event_has_waiter<Event>()) {
+        if (waiter_ != nullptr) {
             return fiber::common::IoErr::Busy;
         }
-        fiber::common::IoErr err = efd_.watch_add(Event);
+        fiber::common::IoErr err = efd_.watch_add(waiter->interested_);
         if (err != fiber::common::IoErr::None) {
             return err;
         }
-
-        if constexpr (std::is_same_v<std::remove_cvref_t<Waiter>, RWFdLocalThreadWaiter>) {
-            local_waiter_slot<Event>() = waiter;
-            local_waiting_slot<Event>() = true;
+        if constexpr (std::same_as<std::remove_cvref_t<Waiter>, RWFdLocalThreadWaiter>) {
+            waiter_ = waiter;
+            local_waiting_ = true;
         } else {
-            cross_waiter_slot<Event>() = waiter;
-            local_waiting_slot<Event>() = false;
+            waiter_ = waiter;
+            local_waiting_ = false;
         }
         return fiber::common::IoErr::None;
     }
 
-    template<fiber::event::IoEvent Event, typename Waiter>
-        requires(RWFdWaitEvent<Event> && RWFdWaiter<Waiter>)
+    template<typename Waiter>
+        requires(RWFdWaiter<Waiter>)
     fiber::common::IoErr cancel_wait(Waiter *waiter) noexcept {
         FIBER_ASSERT(loop().in_loop());
-        FIBER_ASSERT(waiter);
-        if constexpr (std::is_same_v<std::remove_cvref_t<Waiter>, RWFdLocalThreadWaiter>) {
-            auto *&slot = local_waiter_slot<Event>();
-            if (slot != waiter) {
-                return fiber::common::IoErr::None;
-            }
-            slot = nullptr;
-        } else {
-            auto *&slot = cross_waiter_slot<Event>();
-            if (slot != waiter) {
-                return fiber::common::IoErr::None;
-            }
-            slot = nullptr;
+        FIBER_ASSERT(waiter != nullptr);
+        if (waiter_ != waiter) {
+            return fiber::common::IoErr::None;
         }
-        local_waiting_slot<Event>() = false;
-        return efd_.watch_del(Event);
+        waiter_ = nullptr;
+        local_waiting_ = false;
+        return efd_.watch_del(waiter->interested_);
     }
 
     static void on_efd_events(void *owner, fiber::event::IoEvent events);
     void handle_events(fiber::event::IoEvent events);
-
     [[nodiscard]] bool has_waiters() const noexcept;
 
     Efd efd_;
-
-    bool local_read_waiting_ = false;
+    bool local_waiting_ = false;
     union {
-        RWFdLocalThreadWaiter *local_read_waiter_ = nullptr;
-        RWFdCrossThreadWaiter *cross_read_waiter_;
-    };
-
-    bool local_write_waiting_ = false;
-    union {
-        RWFdLocalThreadWaiter *local_write_waiter_ = nullptr;
-        RWFdCrossThreadWaiter *cross_write_waiter_;
+        RWFdLocalThreadWaiter *local_waiter_ = nullptr;
+        RWFdCrossThreadWaiter *cross_waiter_;
+        RWFdWaiterBase *waiter_base_;
+        void *waiter_;
     };
 };
 
@@ -190,20 +140,19 @@ struct RWFdCrossThreadWaiter : RWFdWaiterBase {
     static void on_notify_resume(RWFdCrossThreadWaiter *waiter);
 };
 
-template<fiber::event::IoEvent Event>
-    requires(RWFdWaitEvent<Event>)
-class RWFd::WaitAwaiter : public RWFdLocalThreadWaiter {
+class RWFd::WaitEventAwaiter : public RWFdLocalThreadWaiter {
 public:
-    explicit WaitAwaiter(RWFd &rwfd) noexcept {
+    WaitEventAwaiter(RWFd &rwfd, fiber::event::IoEvent interested) noexcept {
         rwfd_ = &rwfd;
-        event_ = Event;
+        interested_ = interested;
     }
 
-    WaitAwaiter(const WaitAwaiter &) = delete;
-    WaitAwaiter &operator=(const WaitAwaiter &) = delete;
-    WaitAwaiter(WaitAwaiter &&) = delete;
-    WaitAwaiter &operator=(WaitAwaiter &&) = delete;
-    ~WaitAwaiter() {
+    WaitEventAwaiter(const WaitEventAwaiter &) = delete;
+    WaitEventAwaiter &operator=(const WaitEventAwaiter &) = delete;
+    WaitEventAwaiter(WaitEventAwaiter &&) = delete;
+    WaitEventAwaiter &operator=(WaitEventAwaiter &&) = delete;
+
+    ~WaitEventAwaiter() {
         if (!waiting_) {
             FIBER_ASSERT(waiter_ == nullptr);
             return;
@@ -216,19 +165,27 @@ public:
             return;
         }
         FIBER_ASSERT(rwfd_->loop().in_loop());
-        rwfd_->cancel_wait<Event, RWFdLocalThreadWaiter>(this);
+        (void)rwfd_->cancel_wait<RWFdLocalThreadWaiter>(this);
     }
 
-    bool await_ready() noexcept { return false; }
+    bool await_ready() noexcept {
+        if (!fiber::event::any(interested_)) {
+            err_ = fiber::common::IoErr::Invalid;
+            completed_ = true;
+            return true;
+        }
+        return false;
+    }
 
     bool await_suspend(std::coroutine_handle<> handle) {
         coro_ = handle;
+        ready_ = fiber::event::IoEvent::None;
         err_ = fiber::common::IoErr::None;
         completed_ = false;
         waiting_ = true;
 
         if (rwfd_->loop().in_loop()) {
-            fiber::common::IoErr err = rwfd_->begin_wait<Event, RWFdLocalThreadWaiter>(this);
+            fiber::common::IoErr err = rwfd_->begin_wait<RWFdLocalThreadWaiter>(this);
             if (err != fiber::common::IoErr::None) {
                 err_ = err;
                 completed_ = true;
@@ -248,7 +205,8 @@ public:
             return false;
         }
         waiter->rwfd_ = rwfd_;
-        waiter->event_ = Event;
+        waiter->interested_ = interested_;
+        waiter->ready_ = fiber::event::IoEvent::None;
         waiter->coro_ = handle;
         waiter->loop_ = current;
         waiter_ = waiter;
@@ -258,25 +216,27 @@ public:
         return true;
     }
 
-    fiber::common::IoResult<void> await_resume() noexcept {
+    fiber::common::IoResult<fiber::event::IoEvent> await_resume() noexcept {
         waiting_ = false;
         if (completed_) {
             completed_ = false;
             if (err_ == fiber::common::IoErr::None) {
-                return {};
+                return ready_;
             }
             return std::unexpected(err_);
         }
 
         fiber::common::IoErr err = err_;
+        fiber::event::IoEvent ready = ready_;
         RWFdCrossThreadWaiter *waiter = waiter_;
         if (waiter) {
             err = waiter->err_;
+            ready = waiter->ready_;
             waiter_ = nullptr;
             delete waiter;
         }
         if (err == fiber::common::IoErr::None) {
-            return {};
+            return ready;
         }
         return std::unexpected(err);
     }
@@ -285,6 +245,30 @@ private:
     bool waiting_ = false;
     bool completed_ = false;
     RWFdCrossThreadWaiter *waiter_ = nullptr;
+};
+
+template<fiber::event::IoEvent Event>
+class RWFd::WaitAwaiter {
+public:
+    explicit WaitAwaiter(RWFd &rwfd) noexcept : inner_(rwfd, Event) {}
+
+    WaitAwaiter(const WaitAwaiter &) = delete;
+    WaitAwaiter &operator=(const WaitAwaiter &) = delete;
+    WaitAwaiter(WaitAwaiter &&) = delete;
+    WaitAwaiter &operator=(WaitAwaiter &&) = delete;
+
+    bool await_ready() noexcept { return inner_.await_ready(); }
+    bool await_suspend(std::coroutine_handle<> handle) { return inner_.await_suspend(handle); }
+    fiber::common::IoResult<void> await_resume() noexcept {
+        auto result = inner_.await_resume();
+        if (!result) {
+            return std::unexpected(result.error());
+        }
+        return {};
+    }
+
+private:
+    WaitEventAwaiter inner_;
 };
 
 } // namespace fiber::net::detail

@@ -28,9 +28,13 @@ option(FIBER_FETCH_DEPS "Allow CMake to download third-party dependencies" ON)
 option(FIBER_USE_JEMALLOC "Link final executables against jemalloc" OFF)
 
 include(cmake/Deps.cmake)
+include(cmake/CompilerChecks.cmake)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+fiber_validate_cxx_toolchain()
+
 file(GLOB_RECURSE CPP_SRC_LIST ${CMAKE_CURRENT_LIST_DIR}/src/*.cpp)
 
 add_library(fiber_lib STATIC ${CPP_SRC_LIST})
@@ -97,14 +101,22 @@ function(fiber_link_runtime_allocator target_name)
 endfunction()
 
 option(FIBER_ENABLE_LTO "Enable LTO/IPO for fiber targets" ON)
+option(FIBER_ALLOW_GCC_LTO "Allow LTO/IPO when building with GCC" OFF)
 set(FIBER_IPO_SUPPORTED FALSE)
 if (FIBER_ENABLE_LTO)
-    include(CheckIPOSupported)
-    check_ipo_supported(RESULT FIBER_IPO_SUPPORTED OUTPUT FIBER_IPO_ERROR)
-    if (FIBER_IPO_SUPPORTED)
-        set_property(TARGET fiber_lib PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT FIBER_ALLOW_GCC_LTO)
+        message(STATUS
+            "Disabling IPO/LTO for GCC builds by default to avoid unstable "
+            "lto-wrapper failures when linking fiber_lib. "
+            "Set FIBER_ALLOW_GCC_LTO=ON to override.")
     else()
-        message(STATUS "IPO/LTO not supported: ${FIBER_IPO_ERROR}")
+        include(CheckIPOSupported)
+        check_ipo_supported(RESULT FIBER_IPO_SUPPORTED OUTPUT FIBER_IPO_ERROR)
+        if (FIBER_IPO_SUPPORTED)
+            set_property(TARGET fiber_lib PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+        else()
+            message(STATUS "IPO/LTO not supported: ${FIBER_IPO_ERROR}")
+        endif()
     endif()
 endif()
 
@@ -117,16 +129,21 @@ foreach(EXAMPLE_SRC IN LISTS EXAMPLE_SRC_LIST)
     endif()
     add_executable(${EXAMPLE_NAME} ${EXAMPLE_SRC})
     if (EXAMPLE_NAME STREQUAL "http3_demo_lsquic")
-        target_link_libraries(${EXAMPLE_NAME} PRIVATE lsquic::lsquic boringssl::ssl boringssl::crypto)
-        if (TARGET ZLIB::ZLIB)
-            target_link_libraries(${EXAMPLE_NAME} PRIVATE ZLIB::ZLIB)
-        else()
-            target_link_libraries(${EXAMPLE_NAME} PRIVATE z)
+        target_link_libraries(${EXAMPLE_NAME} PRIVATE
+            fiber_lib
+            lsquic::lsquic
+            boringssl::ssl
+            boringssl::crypto
+            ${FIBER_ZLIB_TARGET})
+        if (NOT FIBER_USE_LIBCXX)
+            target_link_libraries(${EXAMPLE_NAME} PRIVATE stdc++exp)
         endif()
         if (DEFINED lsquic_SOURCE_DIR)
             target_include_directories(${EXAMPLE_NAME} PRIVATE ${lsquic_SOURCE_DIR}/include)
+            target_include_directories(${EXAMPLE_NAME} PRIVATE ${lsquic_SOURCE_DIR}/src/liblsquic)
         else()
             target_include_directories(${EXAMPLE_NAME} PRIVATE ${CMAKE_CURRENT_LIST_DIR}/temp/_deps/lsquic-src/include)
+            target_include_directories(${EXAMPLE_NAME} PRIVATE ${CMAKE_CURRENT_LIST_DIR}/temp/_deps/lsquic-src/src/liblsquic)
         endif()
         if (FIBER_USE_LIBCXX)
             target_link_options(${EXAMPLE_NAME} PRIVATE ${FIBER_STDLIB_LINK_FLAGS})
