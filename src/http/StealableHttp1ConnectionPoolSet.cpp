@@ -1,13 +1,128 @@
 #include "StealableHttp1ConnectionPoolSet.h"
 
+#include <atomic>
 #include <coroutine>
-#include <future>
 #include <memory>
 #include <utility>
 
 #include "../common/Assert.h"
 
 namespace fiber::http {
+
+class StealableHttp1ConnectionPoolSet::AdminAwaiter : public common::NonCopyable, public common::NonMovable {
+public:
+    enum class Operation : std::uint8_t {
+        Clear,
+        Shutdown
+    };
+
+    AdminAwaiter(StealableHttp1ConnectionPoolSet &set, Operation operation) noexcept
+        : set_(&set),
+          operation_(operation) {
+    }
+
+    bool await_ready() noexcept {
+        if (!set_) {
+            return true;
+        }
+        if (operation_ == Operation::Clear &&
+            set_->shutdown_requested_.load(std::memory_order_acquire)) {
+            return true;
+        }
+        if (set_->group().running()) {
+            return false;
+        }
+        for (std::size_t i = 0; i < set_->size(); ++i) {
+            run_shard(set_->shard_at(i));
+        }
+        return true;
+    }
+
+    bool await_suspend(std::coroutine_handle<> handle) noexcept {
+        FIBER_ASSERT(set_ != nullptr);
+        handle_ = handle;
+        caller_loop_ = event::EventLoop::current_or_null();
+        FIBER_ASSERT(caller_loop_ != nullptr);
+
+        const std::size_t shard_count = set_->size();
+        if (shard_count == 0) {
+            caller_loop_->post<AdminAwaiter,
+                               &AdminAwaiter::resume_notify_,
+                               &AdminAwaiter::resume_caller>(*this);
+            return true;
+        }
+
+        remaining_.store(shard_count, std::memory_order_release);
+        ops_ = std::make_unique<ShardOp[]>(shard_count);
+        auto *current = event::EventLoop::current_or_null();
+        for (std::size_t i = 0; i < shard_count; ++i) {
+            Shard &shard = set_->shard_at(i);
+            if (current == &shard.core.loop()) {
+                run_shard(shard);
+                on_shard_done();
+                continue;
+            }
+            ops_[i].awaiter = this;
+            ops_[i].shard = &shard;
+            shard.core.loop().post<ShardOp, &ShardOp::notify, &ShardOp::run>(ops_[i]);
+        }
+        return true;
+    }
+
+    void await_resume() noexcept {}
+
+private:
+    struct ShardOp {
+        AdminAwaiter *awaiter = nullptr;
+        Shard *shard = nullptr;
+        event::EventLoop::NotifyEntry notify{};
+
+        static void run(ShardOp *op) {
+            FIBER_ASSERT(op != nullptr);
+            FIBER_ASSERT(op->awaiter != nullptr);
+            FIBER_ASSERT(op->shard != nullptr);
+            op->awaiter->run_shard(*op->shard);
+            op->awaiter->on_shard_done();
+        }
+    };
+
+    void run_shard(Shard &shard) noexcept {
+        if (operation_ == Operation::Clear) {
+            shard.core.clear();
+        } else {
+            shard.core.shutdown();
+        }
+        shard.hint.clear();
+    }
+
+    void on_shard_done() noexcept {
+        if (remaining_.fetch_sub(1, std::memory_order_acq_rel) != 1) {
+            return;
+        }
+        FIBER_ASSERT(caller_loop_ != nullptr);
+        caller_loop_->post<AdminAwaiter,
+                           &AdminAwaiter::resume_notify_,
+                           &AdminAwaiter::resume_caller>(*this);
+    }
+
+    static void resume_caller(AdminAwaiter *awaiter) {
+        FIBER_ASSERT(awaiter != nullptr);
+        if (!awaiter->handle_) {
+            return;
+        }
+        auto handle = awaiter->handle_;
+        awaiter->handle_ = {};
+        handle.resume();
+    }
+
+    StealableHttp1ConnectionPoolSet *set_ = nullptr;
+    Operation operation_ = Operation::Clear;
+    event::EventLoop *caller_loop_ = nullptr;
+    std::coroutine_handle<> handle_{};
+    std::unique_ptr<ShardOp[]> ops_{};
+    std::atomic<std::size_t> remaining_{0};
+    event::EventLoop::NotifyEntry resume_notify_{};
+};
 
 StealableHttp1ConnectionPoolSet::Lease::Lease(Http1ConnectionPoolCore::Lease &&local) noexcept
     : kind_(Kind::Local),
@@ -170,6 +285,7 @@ StealableHttp1ConnectionPoolSet::StealableHttp1ConnectionPoolSet(event::EventLoo
     for (std::size_t i = 0; i < group.size(); ++i) {
         auto *shard = reinterpret_cast<Shard *>(storage_[i].storage);
         std::construct_at(shard, group.at(i), pool_options_);
+        shard->core.set_external_shutdown_flag(&shutdown_requested_);
     }
     if (group.size() == 0) {
         return;
@@ -198,96 +314,31 @@ bool StealableHttp1ConnectionPoolSet::init() noexcept {
     return true;
 }
 
-void StealableHttp1ConnectionPoolSet::clear() noexcept {
-    struct ClearOp {
-        Shard *shard = nullptr;
-        std::promise<void> *done = nullptr;
-        event::EventLoop::NotifyEntry notify{};
-
-        static void run(ClearOp *op) {
-            FIBER_ASSERT(op != nullptr);
-            op->shard->core.clear();
-            op->shard->hint.clear();
-            op->done->set_value();
-        }
-    };
-
-    if (!group_->running()) {
-        for (std::size_t i = 0; i < group_->size(); ++i) {
-            Shard &shard = shard_at(i);
-            shard.core.clear();
-            shard.hint.clear();
-        }
-        return;
+async::Task<void> StealableHttp1ConnectionPoolSet::clear_async() noexcept {
+    if (shutdown_requested_.load(std::memory_order_acquire)) {
+        co_return;
     }
-
-    auto *current = event::EventLoop::current_or_null();
-    const bool in_group = current && current->group() == group_;
-    std::unique_ptr<ClearOp[]> ops = std::make_unique<ClearOp[]>(group_->size());
-    std::unique_ptr<std::promise<void>[]> promises = std::make_unique<std::promise<void>[]>(group_->size());
-    std::unique_ptr<std::future<void>[]> futures = std::make_unique<std::future<void>[]>(group_->size());
-    for (std::size_t i = 0; i < group_->size(); ++i) {
-        futures[i] = promises[i].get_future();
-        Shard &shard = shard_at(i);
-        if (in_group && current == &shard.core.loop()) {
-            shard.core.clear();
-            shard.hint.clear();
-            promises[i].set_value();
-            continue;
-        }
-        ops[i].shard = &shard;
-        ops[i].done = &promises[i];
-        shard.core.loop().post<ClearOp, &ClearOp::notify, &ClearOp::run>(ops[i]);
-    }
-    for (std::size_t i = 0; i < group_->size(); ++i) {
-        futures[i].wait();
-    }
+    co_await AdminAwaiter(*this, AdminAwaiter::Operation::Clear);
 }
 
-void StealableHttp1ConnectionPoolSet::shutdown() noexcept {
-    struct ShutdownOp {
-        Shard *shard = nullptr;
-        std::promise<void> *done = nullptr;
-        event::EventLoop::NotifyEntry notify{};
-
-        static void run(ShutdownOp *op) {
-            FIBER_ASSERT(op != nullptr);
-            op->shard->core.shutdown();
-            op->shard->hint.clear();
-            op->done->set_value();
+async::Task<void> StealableHttp1ConnectionPoolSet::shutdown_async() noexcept {
+    bool leader = false;
+    {
+        std::lock_guard guard(shutdown_mu_);
+        if (!shutdown_requested_.load(std::memory_order_relaxed)) {
+            shutdown_wg_.add();
+            shutdown_requested_.store(true, std::memory_order_release);
+            leader = true;
         }
-    };
-
-    if (!group_->running()) {
-        for (std::size_t i = 0; i < group_->size(); ++i) {
-            Shard &shard = shard_at(i);
-            shard.core.shutdown();
-            shard.hint.clear();
-        }
-        return;
     }
 
-    auto *current = event::EventLoop::current_or_null();
-    const bool in_group = current && current->group() == group_;
-    std::unique_ptr<ShutdownOp[]> ops = std::make_unique<ShutdownOp[]>(group_->size());
-    std::unique_ptr<std::promise<void>[]> promises = std::make_unique<std::promise<void>[]>(group_->size());
-    std::unique_ptr<std::future<void>[]> futures = std::make_unique<std::future<void>[]>(group_->size());
-    for (std::size_t i = 0; i < group_->size(); ++i) {
-        futures[i] = promises[i].get_future();
-        Shard &shard = shard_at(i);
-        if (in_group && current == &shard.core.loop()) {
-            shard.core.shutdown();
-            shard.hint.clear();
-            promises[i].set_value();
-            continue;
-        }
-        ops[i].shard = &shard;
-        ops[i].done = &promises[i];
-        shard.core.loop().post<ShutdownOp, &ShutdownOp::notify, &ShutdownOp::run>(ops[i]);
+    if (!leader) {
+        co_await shutdown_wg_.join();
+        co_return;
     }
-    for (std::size_t i = 0; i < group_->size(); ++i) {
-        futures[i].wait();
-    }
+
+    co_await AdminAwaiter(*this, AdminAwaiter::Operation::Shutdown);
+    shutdown_wg_.done();
 }
 
 StealableHttp1ConnectionPoolSet::AcquireAwaiter::AcquireAwaiter(StealableHttp1ConnectionPoolSet &set,
