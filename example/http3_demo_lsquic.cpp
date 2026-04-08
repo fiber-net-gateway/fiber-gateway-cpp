@@ -9,6 +9,7 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -41,9 +42,30 @@ struct ServerCtx;
 struct ConnCtx {
 };
 
+struct HeaderField {
+    std::string name;
+    std::string value;
+};
+
+struct RequestHeaders {
+    lsxpack_header xhdr{};
+    std::array<char, 4096> decode_buf{};
+    std::vector<HeaderField> fields;
+    std::string method;
+    std::string path;
+    std::string authority;
+    size_t decode_off = 0;
+    bool have_xhdr = false;
+};
+
 struct StreamCtx {
-    std::string request;
+    std::vector<HeaderField> headers;
+    std::string method;
+    std::string path;
+    std::string authority;
+    std::string request_body;
     size_t body_offset = 0;
+    bool request_headers_loaded = false;
     bool ready_to_respond = false;
     bool headers_sent = false;
 };
@@ -263,6 +285,65 @@ SSL_CTX *get_ssl_ctx_cb(void *peer_ctx, const sockaddr *local) {
     return g_server ? g_server->ssl_ctx : nullptr;
 }
 
+void *create_header_set(void *hsi_ctx, lsquic_stream_t *stream, int is_push_promise) {
+    (void) hsi_ctx;
+    (void) stream;
+    (void) is_push_promise;
+    return new RequestHeaders();
+}
+
+lsxpack_header *prepare_decode_header(void *header_set, lsxpack_header *hdr, size_t space) {
+    auto *headers = static_cast<RequestHeaders *>(header_set);
+    if (!headers) {
+        return nullptr;
+    }
+
+    if (headers->have_xhdr) {
+        headers->decode_off += lsxpack_header_get_dec_size(&headers->xhdr);
+    } else {
+        headers->have_xhdr = true;
+    }
+
+    if (headers->decode_off + space > headers->decode_buf.size()) {
+        return nullptr;
+    }
+
+    lsxpack_header_prepare_decode(hdr ? hdr : &headers->xhdr,
+                                  headers->decode_buf.data(),
+                                  headers->decode_off,
+                                  headers->decode_buf.size() - headers->decode_off);
+    return hdr ? hdr : &headers->xhdr;
+}
+
+int process_decoded_header(void *header_set, lsxpack_header *hdr) {
+    auto *headers = static_cast<RequestHeaders *>(header_set);
+    if (!headers) {
+        return -1;
+    }
+    if (!hdr) {
+        return 0;
+    }
+
+    const char *name_ptr = lsxpack_header_get_name(hdr);
+    const char *value_ptr = lsxpack_header_get_value(hdr);
+    std::string_view name{name_ptr ? name_ptr : "", hdr->name_len};
+    std::string_view value{value_ptr ? value_ptr : "", hdr->val_len};
+    headers->fields.push_back({std::string(name), std::string(value)});
+
+    if (name == ":method") {
+        headers->method.assign(value);
+    } else if (name == ":path") {
+        headers->path.assign(value);
+    } else if (name == ":authority") {
+        headers->authority.assign(value);
+    }
+    return 0;
+}
+
+void discard_header_set(void *header_set) {
+    delete static_cast<RequestHeaders *>(header_set);
+}
+
 lsquic_conn_ctx_t *on_new_conn(void *stream_if_ctx, lsquic_conn_t *conn) {
     (void) stream_if_ctx;
     (void) conn;
@@ -289,17 +370,26 @@ void on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
         return;
     }
 
+    if (!ctx->request_headers_loaded) {
+        auto *headers = static_cast<RequestHeaders *>(lsquic_stream_get_hset(stream));
+        if (!headers) {
+            lsquic_stream_close(stream);
+            return;
+        }
+
+        ctx->headers = std::move(headers->fields);
+        ctx->method = std::move(headers->method);
+        ctx->path = std::move(headers->path);
+        ctx->authority = std::move(headers->authority);
+        ctx->request_headers_loaded = true;
+        delete headers;
+    }
+
     std::array<char, 4096> buf{};
     for (;;) {
         ssize_t nr = lsquic_stream_read(stream, buf.data(), buf.size());
         if (nr > 0) {
-            ctx->request.append(buf.data(), static_cast<size_t>(nr));
-            if (ctx->request.find("\r\n\r\n") != std::string::npos) {
-                ctx->ready_to_respond = true;
-                lsquic_stream_wantread(stream, 0);
-                lsquic_stream_wantwrite(stream, 1);
-                return;
-            }
+            ctx->request_body.append(buf.data(), static_cast<size_t>(nr));
             continue;
         }
         if (nr == 0) {
@@ -380,6 +470,14 @@ lsquic_stream_if make_stream_if() {
 }
 
 const lsquic_stream_if kStreamIf = make_stream_if();
+
+const lsquic_hset_if kHeaderSetIf{
+    .hsi_create_header_set = create_header_set,
+    .hsi_prepare_decode = prepare_decode_header,
+    .hsi_process_header = process_decoded_header,
+    .hsi_discard_header_set = discard_header_set,
+    .hsi_flags = static_cast<lsquic_hsi_flag>(0),
+};
 
 void drain_udp_and_feed_engine(ServerCtx &server) {
     std::array<unsigned char, kMaxDatagram> packet{};
@@ -535,6 +633,7 @@ lsquic_engine_t *create_engine(ServerCtx &server) {
     api.ea_stream_if_ctx = &server;
     api.ea_settings = &server.settings;
     api.ea_get_ssl_ctx = get_ssl_ctx_cb;
+    api.ea_hsi_if = &kHeaderSetIf;
 
     return lsquic_engine_new(LSENG_SERVER | LSENG_HTTP, &api);
 }
