@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
 #include <cerrno>
 #include <coroutine>
@@ -8,6 +9,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "async/Sleep.h"
 #include "async/Spawn.h"
 #include "common/IoError.h"
 #include "event/EventLoopGroup.h"
@@ -17,6 +19,13 @@
 namespace {
 
 using DetachedTask = fiber::async::DetachedTask;
+
+struct PacketMetadataOutcome {
+    fiber::common::IoErr err = fiber::common::IoErr::Unknown;
+    fiber::net::SocketAddress peer{};
+    fiber::net::SocketAddress local{};
+    fiber::net::UdpEcn ecn = fiber::net::UdpEcn::Unspecified;
+};
 
 fiber::common::IoResult<fiber::net::SocketAddress> get_bound_address(int fd) {
     sockaddr_storage bound{};
@@ -163,6 +172,195 @@ DetachedTask bind_reuse_port(fiber::event::EventLoop *loop,
 }
 #endif
 
+DetachedTask server_recv_packet(fiber::event::EventLoop *loop,
+                                std::promise<uint16_t> *port_promise,
+                                std::promise<PacketMetadataOutcome> *done_promise) {
+    auto *server = new fiber::net::UdpSocket(*loop);
+    fiber::net::UdpBindOptions options{};
+    options.recv_packet_info = true;
+    options.recv_ecn = true;
+
+    auto bind_result = server->bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), options);
+    if (!bind_result) {
+        port_promise->set_value(0);
+        done_promise->set_value(PacketMetadataOutcome{.err = bind_result.error()});
+        delete server;
+        co_return;
+    }
+
+    port_promise->set_value(server->local_addr().port());
+
+    std::array<char, 32> buf{};
+    auto recv_result = co_await server->recv_packet(buf.data(), buf.size());
+    PacketMetadataOutcome outcome;
+    if (!recv_result) {
+        outcome.err = recv_result.error();
+    } else {
+        outcome.err = fiber::common::IoErr::None;
+        outcome.peer = recv_result->peer;
+        outcome.local = recv_result->local;
+        outcome.ecn = recv_result->ecn;
+    }
+
+    server->close();
+    delete server;
+    done_promise->set_value(outcome);
+}
+
+DetachedTask client_send_packet_with_ecn(fiber::event::EventLoop *loop,
+                                         uint16_t port,
+                                         std::promise<fiber::common::IoErr> *done_promise) {
+    auto *client = new fiber::net::UdpSocket(*loop);
+    auto bind_result = client->bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
+    if (!bind_result) {
+        done_promise->set_value(bind_result.error());
+        delete client;
+        co_return;
+    }
+
+    constexpr std::string_view message = "ecn";
+    fiber::net::UdpPacketSendSpec spec;
+    spec.buf = message.data();
+    spec.len = message.size();
+    spec.peer = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    spec.ecn = fiber::net::UdpEcn::Ect0;
+
+    auto send_result = co_await client->send_packet(spec);
+    done_promise->set_value(send_result ? fiber::common::IoErr::None : send_result.error());
+    client->close();
+    delete client;
+}
+
+DetachedTask server_recv_two_packets(fiber::event::EventLoop *loop,
+                                     std::promise<uint16_t> *port_promise,
+                                     std::promise<fiber::common::IoErr> *done_promise) {
+    auto *server = new fiber::net::UdpSocket(*loop);
+    auto bind_result = server->bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
+    if (!bind_result) {
+        port_promise->set_value(0);
+        done_promise->set_value(bind_result.error());
+        delete server;
+        co_return;
+    }
+
+    port_promise->set_value(server->local_addr().port());
+
+    std::array<char, 32> buf{};
+    for (int i = 0; i < 2; ++i) {
+        auto recv_result = co_await server->recv_from(buf.data(), buf.size());
+        if (!recv_result) {
+            done_promise->set_value(recv_result.error());
+            server->close();
+            delete server;
+            co_return;
+        }
+    }
+
+    server->close();
+    delete server;
+    done_promise->set_value(fiber::common::IoErr::None);
+}
+
+DetachedTask client_batch_send_packets(fiber::event::EventLoop *loop,
+                                       uint16_t port,
+                                       std::promise<fiber::common::IoResult<size_t>> *done_promise) {
+    auto *client = new fiber::net::UdpSocket(*loop);
+    auto bind_result = client->bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
+    if (!bind_result) {
+        done_promise->set_value(std::unexpected(bind_result.error()));
+        delete client;
+        co_return;
+    }
+
+    constexpr std::string_view first = "one";
+    constexpr std::string_view second = "two";
+    fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), port);
+    fiber::net::UdpPacketSendSpec specs[2]{};
+    specs[0].buf = first.data();
+    specs[0].len = first.size();
+    specs[0].peer = peer;
+    specs[1].buf = second.data();
+    specs[1].len = second.size();
+    specs[1].peer = peer;
+
+    done_promise->set_value(client->try_send_packets(specs, 2));
+    client->close();
+    delete client;
+}
+
+DetachedTask server_wait_readable_then_recv(fiber::event::EventLoop *loop,
+                                            std::promise<uint16_t> *port_promise,
+                                            std::promise<fiber::common::IoErr> *done_promise) {
+    auto *server = new fiber::net::UdpSocket(*loop);
+    auto bind_result = server->bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
+    if (!bind_result) {
+        port_promise->set_value(0);
+        done_promise->set_value(bind_result.error());
+        delete server;
+        co_return;
+    }
+
+    port_promise->set_value(server->local_addr().port());
+
+    auto wait_result = co_await server->wait_event(fiber::event::IoEvent::Read, std::chrono::seconds(2));
+    if (!wait_result) {
+        done_promise->set_value(wait_result.error());
+        server->close();
+        delete server;
+        co_return;
+    }
+    if (!fiber::event::any(*wait_result & fiber::event::IoEvent::Read)) {
+        done_promise->set_value(fiber::common::IoErr::Unknown);
+        server->close();
+        delete server;
+        co_return;
+    }
+
+    std::array<char, 16> buf{};
+    auto recv_result = co_await server->recv_from(buf.data(), buf.size());
+    done_promise->set_value(recv_result ? fiber::common::IoErr::None : recv_result.error());
+    server->close();
+    delete server;
+}
+
+DetachedTask client_sleep_then_send(fiber::event::EventLoop *loop,
+                                    uint16_t port,
+                                    std::promise<fiber::common::IoErr> *done_promise) {
+    auto *client = new fiber::net::UdpSocket(*loop);
+    auto bind_result = client->bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
+    if (!bind_result) {
+        done_promise->set_value(bind_result.error());
+        delete client;
+        co_return;
+    }
+
+    co_await fiber::async::sleep(std::chrono::milliseconds(20));
+
+    constexpr std::string_view message = "wake";
+    auto send_result = co_await client->send_to(message.data(), message.size(),
+                                                fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port));
+    done_promise->set_value(send_result ? fiber::common::IoErr::None : send_result.error());
+    client->close();
+    delete client;
+}
+
+DetachedTask wait_read_or_write_reports_writable(fiber::event::EventLoop *loop,
+                                                 std::promise<fiber::common::IoResult<fiber::event::IoEvent>> *done_promise) {
+    auto *socket = new fiber::net::UdpSocket(*loop);
+    auto bind_result = socket->bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
+    if (!bind_result) {
+        done_promise->set_value(std::unexpected(bind_result.error()));
+        delete socket;
+        co_return;
+    }
+
+    auto result =
+        co_await socket->wait_event(fiber::event::IoEvent::Read | fiber::event::IoEvent::Write, std::chrono::seconds(1));
+    socket->close();
+    delete socket;
+    done_promise->set_value(result);
+}
+
 } // namespace
 
 TEST(UdpSocketTest, RecvFromSendToRoundTrip) {
@@ -243,3 +441,125 @@ TEST(UdpSocketTest, ReusePortAllowsSecondBind) {
     group.join();
 }
 #endif
+
+TEST(UdpSocketTest, RecvPacketReportsLocalAddressAndEcn) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<uint16_t> port_promise;
+    std::promise<PacketMetadataOutcome> server_promise;
+    std::promise<fiber::common::IoErr> client_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    auto client_future = client_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        return server_recv_packet(&group.at(0), &port_promise, &server_promise);
+    });
+
+    uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    fiber::async::spawn(group.at(0), [&]() {
+        return client_send_packet_with_ecn(&group.at(0), port, &client_promise);
+    });
+
+    ASSERT_EQ(server_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(client_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+    PacketMetadataOutcome server_result = server_future.get();
+    EXPECT_EQ(client_future.get(), fiber::common::IoErr::None);
+    EXPECT_EQ(server_result.err, fiber::common::IoErr::None);
+    EXPECT_EQ(server_result.local.port(), port);
+    EXPECT_EQ(server_result.local.to_string(), fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port).to_string());
+    EXPECT_EQ(server_result.ecn, fiber::net::UdpEcn::Ect0);
+
+    group.stop();
+    group.join();
+}
+
+TEST(UdpSocketTest, TrySendPacketsSendsWholeBatch) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<uint16_t> port_promise;
+    std::promise<fiber::common::IoErr> server_promise;
+    std::promise<fiber::common::IoResult<size_t>> client_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    auto client_future = client_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        return server_recv_two_packets(&group.at(0), &port_promise, &server_promise);
+    });
+
+    uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    fiber::async::spawn(group.at(0), [&]() {
+        return client_batch_send_packets(&group.at(0), port, &client_promise);
+    });
+
+    ASSERT_EQ(server_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(client_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+    auto client_result = client_future.get();
+    ASSERT_TRUE(client_result.has_value()) << static_cast<int>(client_result.error());
+    EXPECT_EQ(*client_result, 2U);
+    EXPECT_EQ(server_future.get(), fiber::common::IoErr::None);
+
+    group.stop();
+    group.join();
+}
+
+TEST(UdpSocketTest, WaitEventReadWakesOnIncomingPacket) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<uint16_t> port_promise;
+    std::promise<fiber::common::IoErr> server_promise;
+    std::promise<fiber::common::IoErr> client_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    auto client_future = client_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        return server_wait_readable_then_recv(&group.at(0), &port_promise, &server_promise);
+    });
+
+    uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    fiber::async::spawn(group.at(0), [&]() {
+        return client_sleep_then_send(&group.at(0), port, &client_promise);
+    });
+
+    ASSERT_EQ(server_future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    ASSERT_EQ(client_future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+
+    EXPECT_EQ(server_future.get(), fiber::common::IoErr::None);
+    EXPECT_EQ(client_future.get(), fiber::common::IoErr::None);
+
+    group.stop();
+    group.join();
+}
+
+TEST(UdpSocketTest, WaitEventMaskReportsWritable) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<fiber::common::IoResult<fiber::event::IoEvent>> result_promise;
+    auto result_future = result_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        return wait_read_or_write_reports_writable(&group.at(0), &result_promise);
+    });
+
+    ASSERT_EQ(result_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto result = result_future.get();
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_TRUE(fiber::event::any(*result & fiber::event::IoEvent::Write));
+
+    group.stop();
+    group.join();
+}
