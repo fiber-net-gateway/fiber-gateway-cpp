@@ -14,6 +14,7 @@ using fiber::json::GcHeap;
 using fiber::json::GcObject;
 using fiber::json::GcString;
 using fiber::json::Generator;
+using fiber::json::JsHeapKind;
 using fiber::json::JsNodeType;
 using fiber::json::JsValue;
 using fiber::json::OutputSink;
@@ -61,9 +62,7 @@ TEST(JsValueEncodeTest, EncodeObjectOrderAndOverwrite) {
     ASSERT_TRUE(fiber::json::gc_object_set(&heap, obj, key_b, JsValue::make_integer(2)));
     ASSERT_TRUE(fiber::json::gc_object_set(&heap, obj, key_a2, JsValue::make_integer(3)));
 
-    JsValue root;
-    root.type_ = JsNodeType::Object;
-    root.gc = &obj->hdr;
+    JsValue root = js_make_heap_ref(&obj->hdr, JsHeapKind::Object);
 
     StringSink sink;
     Generator gen(sink);
@@ -77,16 +76,14 @@ TEST(JsValueEncodeTest, EncodeArrayWithStrings) {
     ASSERT_NE(arr, nullptr);
 
     JsValue str = JsValue::make_string(heap, "hi", 2);
-    ASSERT_EQ(str.type_, JsNodeType::HeapString);
+    ASSERT_EQ(js_value_type(str), JsNodeType::HeapString);
 
     arr->elems[0] = JsValue::make_integer(1);
     arr->elems[1] = JsValue::make_boolean(false);
     arr->elems[2] = std::move(str);
     arr->size = 3;
 
-    JsValue root;
-    root.type_ = JsNodeType::Array;
-    root.gc = &arr->hdr;
+    JsValue root = js_make_heap_ref(&arr->hdr, JsHeapKind::Array);
 
     StringSink sink;
     Generator gen(sink);
@@ -101,9 +98,7 @@ TEST(JsValueEncodeTest, EncodeExceptionObject) {
     GcString *code_key = make_key(heap, "code");
     ASSERT_NE(code_key, nullptr);
     ASSERT_TRUE(fiber::json::gc_object_set(&heap, meta_obj, code_key, JsValue::make_integer(7)));
-    JsValue meta;
-    meta.type_ = JsNodeType::Object;
-    meta.gc = &meta_obj->hdr;
+    JsValue meta = js_make_heap_ref(&meta_obj->hdr, JsHeapKind::Object);
 
     const char *name = "TypeError";
     const char *message = "boom";
@@ -113,9 +108,7 @@ TEST(JsValueEncodeTest, EncodeExceptionObject) {
                                                      meta);
     ASSERT_NE(exc, nullptr);
 
-    JsValue root;
-    root.type_ = JsNodeType::Exception;
-    root.gc = &exc->hdr;
+    JsValue root = js_make_heap_ref(&exc->hdr, JsHeapKind::Exception);
 
     StringSink sink;
     Generator gen(sink);
@@ -131,9 +124,7 @@ TEST(JsValueEncodeTest, EncodeExceptionDefaultMeta) {
                                                      nullptr, 0);
     ASSERT_NE(exc, nullptr);
 
-    JsValue root;
-    root.type_ = JsNodeType::Exception;
-    root.gc = &exc->hdr;
+    JsValue root = js_make_heap_ref(&exc->hdr, JsHeapKind::Exception);
 
     StringSink sink;
     Generator gen(sink);

@@ -21,6 +21,7 @@ using fiber::json::GcBinary;
 using fiber::json::GcObject;
 using fiber::json::GcObjectEntry;
 using fiber::json::GcString;
+using fiber::json::JsHeapKind;
 using fiber::json::JsNodeType;
 using fiber::json::JsValue;
 using FunctionResult = fiber::script::Library::FunctionResult;
@@ -28,12 +29,12 @@ using FunctionResult = fiber::script::Library::FunctionResult;
 using ScriptResult = fiber::script::ScriptSyncRun::Result;
 
 std::string value_to_string(const JsValue &value) {
-    if (value.type_ == JsNodeType::NativeString) {
-        return std::string(value.ns.data, value.ns.len);
+    if (js_value_type(value) == JsNodeType::NativeString) {
+        return std::string(js_value_native_string(value).data, js_value_native_string(value).len);
     }
-    if (value.type_ == JsNodeType::HeapString) {
+    if (js_value_type(value) == JsNodeType::HeapString) {
         std::string out;
-        auto *str = reinterpret_cast<const GcString *>(value.gc);
+        auto *str = js_value_heap_ptr<const GcString>(value);
         if (fiber::json::gc_string_to_utf8(str, out)) {
             return out;
         }
@@ -42,30 +43,30 @@ std::string value_to_string(const JsValue &value) {
 }
 
 bool value_to_number(const JsValue &value, double &out) {
-    if (value.type_ == JsNodeType::Integer) {
-        out = static_cast<double>(value.i);
+    if (js_value_type(value) == JsNodeType::Integer) {
+        out = static_cast<double>(js_value_int64(value));
         return true;
     }
-    if (value.type_ == JsNodeType::Float) {
-        out = value.f;
+    if (js_value_type(value) == JsNodeType::Float) {
+        out = js_value_double(value);
         return true;
     }
     return false;
 }
 
 bool is_string_type(const JsValue &value) {
-    return value.type_ == JsNodeType::NativeString || value.type_ == JsNodeType::HeapString;
+    return js_value_type(value) == JsNodeType::NativeString || js_value_type(value) == JsNodeType::HeapString;
 }
 
 bool is_binary_type(const JsValue &value) {
-    return value.type_ == JsNodeType::NativeBinary || value.type_ == JsNodeType::HeapBinary;
+    return js_value_type(value) == JsNodeType::NativeBinary || js_value_type(value) == JsNodeType::HeapBinary;
 }
 
 const JsValue *object_value(const JsValue &obj, std::string_view key) {
-    if (obj.type_ != JsNodeType::Object) {
+    if (js_value_type(obj) != JsNodeType::Object) {
         return nullptr;
     }
-    auto *obj_ptr = reinterpret_cast<const GcObject *>(obj.gc);
+    auto *obj_ptr = js_value_heap_ptr<const GcObject>(obj);
     if (!obj_ptr) {
         return nullptr;
     }
@@ -96,10 +97,10 @@ const JsValue &object_value_or_default(const JsValue &obj, std::string_view key)
 }
 
 const JsValue *array_value(const JsValue &arr, std::size_t index) {
-    if (arr.type_ != JsNodeType::Array) {
+    if (js_value_type(arr) != JsNodeType::Array) {
         return nullptr;
     }
-    auto *arr_ptr = reinterpret_cast<const GcArray *>(arr.gc);
+    auto *arr_ptr = js_value_heap_ptr<const GcArray>(arr);
     if (!arr_ptr) {
         return nullptr;
     }
@@ -123,10 +124,7 @@ JsValue make_heap_string(fiber::script::ScriptRuntime &runtime, std::string_view
     if (!str) {
         return JsValue::make_undefined();
     }
-    JsValue value;
-    value.type_ = JsNodeType::HeapString;
-    value.gc = &str->hdr;
-    return value;
+    return js_make_heap_ref(&str->hdr, JsHeapKind::String);
 }
 
 class AddFunc final : public fiber::script::Library::Function {
@@ -136,12 +134,12 @@ public:
         bool any_float = false;
         for (std::size_t i = 0; i < context.arg_count(); ++i) {
             const JsValue &arg = context.arg_value(i);
-            if (arg.type_ == JsNodeType::Integer) {
-                sum += static_cast<double>(arg.i);
+            if (js_value_type(arg) == JsNodeType::Integer) {
+                sum += static_cast<double>(js_value_int64(arg));
                 continue;
             }
-            if (arg.type_ == JsNodeType::Float) {
-                sum += arg.f;
+            if (js_value_type(arg) == JsNodeType::Float) {
+                sum += js_value_double(arg);
                 any_float = true;
                 continue;
             }
@@ -174,7 +172,7 @@ public:
         std::string out = "user:";
         out += arg;
         JsValue value = make_heap_string(context.runtime(), out);
-        if (value.type_ == JsNodeType::Undefined) {
+        if (js_value_type(value) == JsNodeType::Undefined) {
             static char msg[] = "out of memory";
             return std::unexpected(JsValue::make_native_string(msg, sizeof(msg) - 1));
         }
@@ -203,7 +201,7 @@ public:
     FunctionResult call(fiber::script::ExecutionContext &context) override {
         (void)context;
         JsValue value = make_heap_string(context.runtime(), "2023-11-14");
-        if (value.type_ == JsNodeType::Undefined) {
+        if (js_value_type(value) == JsNodeType::Undefined) {
             static char msg[] = "out of memory";
             return std::unexpected(JsValue::make_native_string(msg, sizeof(msg) - 1));
         }
@@ -404,14 +402,14 @@ TEST(ScriptPlanTest, LiteralsAndTypeof) {
         env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
-    ASSERT_EQ(value.type_, JsNodeType::Object);
+    ASSERT_EQ(js_value_type(value), JsNodeType::Object);
 
     const JsValue *types = object_value(value, "types");
     ASSERT_NE(types, nullptr);
-    ASSERT_EQ(types->type_, JsNodeType::Object);
+    ASSERT_EQ(js_value_type(*types), JsNodeType::Object);
     const JsValue *res = object_value(value, "result");
     ASSERT_NE(res, nullptr);
-    ASSERT_EQ(res->type_, JsNodeType::Object);
+    ASSERT_EQ(js_value_type(*res), JsNodeType::Object);
 
     EXPECT_EQ(value_to_string(object_value_or_default(*types, "num")), "number");
     EXPECT_EQ(value_to_string(object_value_or_default(*types, "txt")), "string");
@@ -428,7 +426,7 @@ TEST(ScriptPlanTest, LiteralsAndTypeof) {
 
     const JsValue *mis = object_value(*res, "mis");
     ASSERT_NE(mis, nullptr);
-    EXPECT_EQ(mis->type_, JsNodeType::Undefined);
+    EXPECT_EQ(js_value_type(*mis), JsNodeType::Undefined);
 }
 
 TEST(ScriptPlanTest, ArithmeticPrecedence) {
@@ -460,19 +458,19 @@ TEST(ScriptPlanTest, LogicalShortCircuit) {
         env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
-    ASSERT_EQ(value.type_, JsNodeType::Object);
+    ASSERT_EQ(js_value_type(value), JsNodeType::Object);
     const JsValue *a = object_value(value, "a");
     const JsValue *b = object_value(value, "b");
     const JsValue *v = object_value(value, "v");
     ASSERT_NE(a, nullptr);
     ASSERT_NE(b, nullptr);
     ASSERT_NE(v, nullptr);
-    EXPECT_EQ(a->type_, JsNodeType::Integer);
-    EXPECT_EQ(a->i, 0);
-    EXPECT_EQ(b->type_, JsNodeType::Integer);
-    EXPECT_EQ(b->i, 3);
-    EXPECT_EQ(v->type_, JsNodeType::Integer);
-    EXPECT_EQ(v->i, 3);
+    EXPECT_EQ(js_value_type(*a), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(*a), 0);
+    EXPECT_EQ(js_value_type(*b), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(*b), 3);
+    EXPECT_EQ(js_value_type(*v), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(*v), 3);
 }
 
 TEST(ScriptPlanTest, ComparisonsAndEquality) {
@@ -488,11 +486,11 @@ TEST(ScriptPlanTest, ComparisonsAndEquality) {
         env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
-    ASSERT_EQ(value.type_, JsNodeType::Object);
-    EXPECT_TRUE(object_value_or_default(value, "a").b);
-    EXPECT_FALSE(object_value_or_default(value, "b").b);
-    EXPECT_FALSE(object_value_or_default(value, "c").b);
-    EXPECT_TRUE(object_value_or_default(value, "d").b);
+    ASSERT_EQ(js_value_type(value), JsNodeType::Object);
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "a")));
+    EXPECT_FALSE(js_value_bool(object_value_or_default(value, "b")));
+    EXPECT_FALSE(js_value_bool(object_value_or_default(value, "c")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "d")));
 }
 
 TEST(ScriptPlanTest, InOperator) {
@@ -504,9 +502,9 @@ TEST(ScriptPlanTest, InOperator) {
         env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
-    ASSERT_EQ(value.type_, JsNodeType::Object);
-    EXPECT_TRUE(object_value_or_default(value, "t").b);
-    EXPECT_FALSE(object_value_or_default(value, "f").b);
+    ASSERT_EQ(js_value_type(value), JsNodeType::Object);
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "t")));
+    EXPECT_FALSE(js_value_bool(object_value_or_default(value, "f")));
 }
 
 TEST(ScriptPlanTest, UnaryOps) {
@@ -516,14 +514,14 @@ TEST(ScriptPlanTest, UnaryOps) {
                              env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
-    ASSERT_EQ(value.type_, JsNodeType::Object);
+    ASSERT_EQ(js_value_type(value), JsNodeType::Object);
     double a_num = 0.0;
     double b_num = 0.0;
     ASSERT_TRUE(value_to_number(object_value_or_default(value, "a"), a_num));
     ASSERT_TRUE(value_to_number(object_value_or_default(value, "b"), b_num));
     EXPECT_EQ(a_num, 3.0);
     EXPECT_EQ(b_num, -2.0);
-    EXPECT_TRUE(object_value_or_default(value, "c").b);
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "c")));
     EXPECT_EQ(value_to_string(object_value_or_default(value, "d")), "null");
 }
 
@@ -546,15 +544,15 @@ TEST(ScriptPlanTest, AccessAndAssignment) {
         env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
-    ASSERT_EQ(value.type_, JsNodeType::Object);
+    ASSERT_EQ(js_value_type(value), JsNodeType::Object);
     const JsValue *o = object_value(value, "o");
     const JsValue *a = object_value(value, "a");
     ASSERT_NE(o, nullptr);
     ASSERT_NE(a, nullptr);
-    EXPECT_EQ(object_value_or_default(*o, "a").i, 3);
-    ASSERT_EQ(a->type_, JsNodeType::Array);
-    EXPECT_EQ(array_value_or_default(*a, 0).i, 1);
-    EXPECT_EQ(array_value_or_default(*a, 1).i, 4);
+    EXPECT_EQ(js_value_int64(object_value_or_default(*o, "a")), 3);
+    ASSERT_EQ(js_value_type(*a), JsNodeType::Array);
+    EXPECT_EQ(js_value_int64(array_value_or_default(*a, 0)), 1);
+    EXPECT_EQ(js_value_int64(array_value_or_default(*a, 1)), 4);
 }
 
 TEST(ScriptPlanTest, SpreadInArrayObjectAndCall) {
@@ -569,22 +567,22 @@ TEST(ScriptPlanTest, SpreadInArrayObjectAndCall) {
         env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
-    ASSERT_EQ(value.type_, JsNodeType::Object);
+    ASSERT_EQ(js_value_type(value), JsNodeType::Object);
     const JsValue *b = object_value(value, "b");
     const JsValue *p = object_value(value, "p");
     const JsValue *sum = object_value(value, "sum");
     ASSERT_NE(b, nullptr);
     ASSERT_NE(p, nullptr);
     ASSERT_NE(sum, nullptr);
-    ASSERT_EQ(b->type_, JsNodeType::Array);
-    EXPECT_EQ(array_value_or_default(*b, 0).i, 0);
-    EXPECT_EQ(array_value_or_default(*b, 1).i, 1);
-    EXPECT_EQ(array_value_or_default(*b, 2).i, 2);
-    EXPECT_EQ(array_value_or_default(*b, 3).i, 3);
-    EXPECT_EQ(object_value_or_default(*p, "z").i, 0);
-    EXPECT_EQ(object_value_or_default(*p, "a").i, 1);
-    EXPECT_EQ(object_value_or_default(*p, "b").i, 2);
-    EXPECT_EQ(sum->i, 6);
+    ASSERT_EQ(js_value_type(*b), JsNodeType::Array);
+    EXPECT_EQ(js_value_int64(array_value_or_default(*b, 0)), 0);
+    EXPECT_EQ(js_value_int64(array_value_or_default(*b, 1)), 1);
+    EXPECT_EQ(js_value_int64(array_value_or_default(*b, 2)), 2);
+    EXPECT_EQ(js_value_int64(array_value_or_default(*b, 3)), 3);
+    EXPECT_EQ(js_value_int64(object_value_or_default(*p, "z")), 0);
+    EXPECT_EQ(js_value_int64(object_value_or_default(*p, "a")), 1);
+    EXPECT_EQ(js_value_int64(object_value_or_default(*p, "b")), 2);
+    EXPECT_EQ(js_value_int64(*sum), 6);
 }
 
 TEST(ScriptPlanTest, IfElseReturn) {
@@ -614,8 +612,8 @@ TEST(ScriptPlanTest, ForOfArrayWithBreakContinue) {
         env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
-    ASSERT_EQ(value.type_, JsNodeType::Array);
-    EXPECT_EQ(array_value_or_default(value, 0).i, 20);
+    ASSERT_EQ(js_value_type(value), JsNodeType::Array);
+    EXPECT_EQ(js_value_int64(array_value_or_default(value, 0)), 20);
 }
 
 TEST(ScriptPlanTest, ForOfObjectKeysValues) {
@@ -629,9 +627,9 @@ TEST(ScriptPlanTest, ForOfObjectKeysValues) {
         env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
-    ASSERT_EQ(value.type_, JsNodeType::Object);
-    EXPECT_EQ(object_value_or_default(value, "a").i, 2);
-    EXPECT_EQ(object_value_or_default(value, "b").i, 3);
+    ASSERT_EQ(js_value_type(value), JsNodeType::Object);
+    EXPECT_EQ(js_value_int64(object_value_or_default(value, "a")), 2);
+    EXPECT_EQ(js_value_int64(object_value_or_default(value, "b")), 3);
 }
 
 TEST(ScriptPlanTest, TryCatchThrowString) {
@@ -651,8 +649,8 @@ TEST(ScriptPlanTest, TryCatchThrowObject) {
         env.library,
         env.runtime);
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result.value().type_, JsNodeType::Boolean);
-    EXPECT_TRUE(result.value().b);
+    EXPECT_EQ(js_value_type(result.value()), JsNodeType::Boolean);
+    EXPECT_TRUE(js_value_bool(result.value()));
 }
 
 TEST(ScriptPlanTest, DirectiveCall) {
@@ -682,14 +680,14 @@ TEST(ScriptPlanTest, LengthAndIncludes) {
         env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
-    ASSERT_EQ(value.type_, JsNodeType::Object);
-    EXPECT_TRUE(object_value_or_default(value, "a").b);
-    EXPECT_TRUE(object_value_or_default(value, "b").b);
-    EXPECT_TRUE(object_value_or_default(value, "c").b);
-    EXPECT_TRUE(object_value_or_default(value, "d").b);
-    EXPECT_TRUE(object_value_or_default(value, "e").b);
-    EXPECT_TRUE(object_value_or_default(value, "f").b);
-    EXPECT_TRUE(object_value_or_default(value, "g").b);
+    ASSERT_EQ(js_value_type(value), JsNodeType::Object);
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "a")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "b")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "c")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "d")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "e")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "f")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "g")));
 }
 
 TEST(ScriptPlanTest, ArrayPushPopJoin) {
@@ -703,11 +701,11 @@ TEST(ScriptPlanTest, ArrayPushPopJoin) {
         env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
-    ASSERT_EQ(value.type_, JsNodeType::Object);
-    EXPECT_TRUE(object_value_or_default(value, "same").b);
-    EXPECT_EQ(object_value_or_default(value, "c").i, 4);
+    ASSERT_EQ(js_value_type(value), JsNodeType::Object);
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "same")));
+    EXPECT_EQ(js_value_int64(object_value_or_default(value, "c")), 4);
     EXPECT_EQ(value_to_string(object_value_or_default(value, "join")), "1-2-3");
-    EXPECT_EQ(object_value_or_default(value, "len").i, 3);
+    EXPECT_EQ(js_value_int64(object_value_or_default(value, "len")), 3);
 }
 
 TEST(ScriptPlanTest, ObjectAssignKeysValuesDelete) {
@@ -723,20 +721,20 @@ TEST(ScriptPlanTest, ObjectAssignKeysValuesDelete) {
         env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
-    ASSERT_EQ(value.type_, JsNodeType::Object);
-    EXPECT_EQ(object_value_or_default(value, "len").i, 2);
+    ASSERT_EQ(js_value_type(value), JsNodeType::Object);
+    EXPECT_EQ(js_value_int64(object_value_or_default(value, "len")), 2);
     const JsValue *a_prop = object_value(value, "a");
     ASSERT_NE(a_prop, nullptr);
-    EXPECT_EQ(a_prop->type_, JsNodeType::Undefined);
+    EXPECT_EQ(js_value_type(*a_prop), JsNodeType::Undefined);
 
     const JsValue *keys = object_value(value, "keys");
     const JsValue *values = object_value(value, "values");
     ASSERT_NE(keys, nullptr);
     ASSERT_NE(values, nullptr);
-    ASSERT_EQ(keys->type_, JsNodeType::Array);
-    ASSERT_EQ(values->type_, JsNodeType::Array);
-    auto *keys_arr = reinterpret_cast<const GcArray *>(keys->gc);
-    auto *values_arr = reinterpret_cast<const GcArray *>(values->gc);
+    ASSERT_EQ(js_value_type(*keys), JsNodeType::Array);
+    ASSERT_EQ(js_value_type(*values), JsNodeType::Array);
+    auto *keys_arr = js_value_heap_ptr<const GcArray>(*keys);
+    auto *values_arr = js_value_heap_ptr<const GcArray>(*values);
     ASSERT_NE(keys_arr, nullptr);
     ASSERT_NE(values_arr, nullptr);
     EXPECT_EQ(keys_arr->size, 3u);
@@ -752,9 +750,9 @@ TEST(ScriptPlanTest, ObjectAssignKeysValuesDelete) {
     EXPECT_TRUE(has_b);
     EXPECT_TRUE(has_c);
 
-    std::int64_t val0 = array_value_or_default(*values, 0).i;
-    std::int64_t val1 = array_value_or_default(*values, 1).i;
-    std::int64_t val2 = array_value_or_default(*values, 2).i;
+    std::int64_t val0 = js_value_int64(array_value_or_default(*values, 0));
+    std::int64_t val1 = js_value_int64(array_value_or_default(*values, 1));
+    std::int64_t val2 = js_value_int64(array_value_or_default(*values, 2));
     bool has_1 = (val0 == 1 || val1 == 1 || val2 == 1);
     bool has_2 = (val0 == 2 || val1 == 2 || val2 == 2);
     bool has_3 = (val0 == 3 || val1 == 3 || val2 == 3);
@@ -784,19 +782,19 @@ TEST(ScriptPlanTest, StringsCoreSet) {
         env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
-    ASSERT_EQ(value.type_, JsNodeType::Object);
-    EXPECT_TRUE(object_value_or_default(value, "prefix").b);
-    EXPECT_TRUE(object_value_or_default(value, "suffix").b);
-    EXPECT_TRUE(object_value_or_default(value, "lower").b);
-    EXPECT_TRUE(object_value_or_default(value, "upper").b);
-    EXPECT_TRUE(object_value_or_default(value, "trim").b);
-    EXPECT_TRUE(object_value_or_default(value, "split").b);
-    EXPECT_TRUE(object_value_or_default(value, "contains").b);
-    EXPECT_TRUE(object_value_or_default(value, "index").b);
-    EXPECT_TRUE(object_value_or_default(value, "last").b);
-    EXPECT_TRUE(object_value_or_default(value, "repeat").b);
-    EXPECT_TRUE(object_value_or_default(value, "match").b);
-    EXPECT_TRUE(object_value_or_default(value, "substring").b);
+    ASSERT_EQ(js_value_type(value), JsNodeType::Object);
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "prefix")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "suffix")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "lower")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "upper")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "trim")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "split")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "contains")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "index")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "last")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "repeat")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "match")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "substring")));
 }
 
 TEST(ScriptPlanTest, BinaryAndHash) {
@@ -816,13 +814,13 @@ TEST(ScriptPlanTest, BinaryAndHash) {
         env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
-    ASSERT_EQ(value.type_, JsNodeType::Object);
-    EXPECT_TRUE(object_value_or_default(value, "b64").b);
-    EXPECT_TRUE(object_value_or_default(value, "hex").b);
-    EXPECT_TRUE(object_value_or_default(value, "crc").b);
-    EXPECT_TRUE(object_value_or_default(value, "md5").b);
-    EXPECT_TRUE(object_value_or_default(value, "sha1").b);
-    EXPECT_TRUE(object_value_or_default(value, "sha256").b);
+    ASSERT_EQ(js_value_type(value), JsNodeType::Object);
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "b64")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "hex")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "crc")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "md5")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "sha1")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "sha256")));
 }
 
 TEST(ScriptPlanTest, JsonParseStringify) {
@@ -833,8 +831,8 @@ TEST(ScriptPlanTest, JsonParseStringify) {
         env.library,
         env.runtime);
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result.value().type_, JsNodeType::Boolean);
-    EXPECT_TRUE(result.value().b);
+    EXPECT_EQ(js_value_type(result.value()), JsNodeType::Boolean);
+    EXPECT_TRUE(js_value_bool(result.value()));
 }
 
 TEST(ScriptPlanTest, MathHelpers) {
@@ -845,9 +843,9 @@ TEST(ScriptPlanTest, MathHelpers) {
         env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
-    ASSERT_EQ(value.type_, JsNodeType::Object);
-    EXPECT_TRUE(object_value_or_default(value, "a").b);
-    EXPECT_TRUE(object_value_or_default(value, "b").b);
+    ASSERT_EQ(js_value_type(value), JsNodeType::Object);
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "a")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "b")));
 }
 
 TEST(ScriptPlanTest, RandStubbed) {
@@ -858,9 +856,9 @@ TEST(ScriptPlanTest, RandStubbed) {
         env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
-    ASSERT_EQ(value.type_, JsNodeType::Object);
-    EXPECT_TRUE(object_value_or_default(value, "a").b);
-    EXPECT_TRUE(object_value_or_default(value, "b").b);
+    ASSERT_EQ(js_value_type(value), JsNodeType::Object);
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "a")));
+    EXPECT_TRUE(js_value_bool(object_value_or_default(value, "b")));
 }
 
 TEST(ScriptPlanTest, TimeStubbed) {
@@ -870,8 +868,8 @@ TEST(ScriptPlanTest, TimeStubbed) {
         env.library,
         env.runtime);
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result.value().type_, JsNodeType::Boolean);
-    EXPECT_TRUE(result.value().b);
+    EXPECT_EQ(js_value_type(result.value()), JsNodeType::Boolean);
+    EXPECT_TRUE(js_value_bool(result.value()));
 }
 
 TEST(ScriptPlanTest, UrlHelpers) {
@@ -884,8 +882,8 @@ TEST(ScriptPlanTest, UrlHelpers) {
         env.library,
         env.runtime);
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result.value().type_, JsNodeType::Boolean);
-    EXPECT_TRUE(result.value().b);
+    EXPECT_EQ(js_value_type(result.value()), JsNodeType::Boolean);
+    EXPECT_TRUE(js_value_bool(result.value()));
 }
 
 TEST(ScriptPlanTest, MissingTypeof) {

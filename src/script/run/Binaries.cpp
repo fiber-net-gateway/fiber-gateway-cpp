@@ -52,12 +52,13 @@ VmResult from_js_result(const fiber::json::JsOpResult &result, std::string_view 
 }
 
 bool value_to_string(const fiber::json::JsValue &value, std::string &out) {
-    if (value.type_ == fiber::json::JsNodeType::NativeString) {
-        out.assign(value.ns.data, value.ns.len);
+    if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::NativeString) {
+        fiber::json::NativeStr native = fiber::json::js_value_native_string(value);
+        out.assign(native.data, native.len);
         return true;
     }
-    if (value.type_ == fiber::json::JsNodeType::HeapString) {
-        auto *str = reinterpret_cast<const fiber::json::GcString *>(value.gc);
+    if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::HeapString) {
+        auto *str = fiber::json::js_value_heap_ptr<const fiber::json::GcString>(value);
         return fiber::json::gc_string_to_utf8(str, out);
     }
     return false;
@@ -68,17 +69,18 @@ VmResult make_bool(bool value) {
 }
 
 bool is_string_like(const fiber::json::JsValue &value) {
-    return value.type_ == fiber::json::JsNodeType::HeapString || value.type_ == fiber::json::JsNodeType::NativeString;
+    fiber::json::JsNodeType type = fiber::json::js_value_type(value);
+    return type == fiber::json::JsNodeType::HeapString || type == fiber::json::JsNodeType::NativeString;
 }
 
 std::size_t string_code_unit_upper_bound(const fiber::json::JsValue &value) {
-    if (value.type_ == fiber::json::JsNodeType::NativeString) {
-        return value.ns.len;
+    if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::NativeString) {
+        return fiber::json::js_value_native_string(value).len;
     }
-    if (value.type_ != fiber::json::JsNodeType::HeapString || !value.gc) {
+    if (fiber::json::js_value_type(value) != fiber::json::JsNodeType::HeapString) {
         return 0;
     }
-    auto *str = reinterpret_cast<const fiber::json::GcString *>(value.gc);
+    auto *str = fiber::json::js_value_heap_ptr<const fiber::json::GcString>(value);
     return str ? str->len : 0;
 }
 
@@ -87,10 +89,11 @@ std::size_t estimate_plus_alloc_bytes(const fiber::json::JsValue &lhs, const fib
         return 0;
     }
     std::size_t total_units = string_code_unit_upper_bound(lhs) + string_code_unit_upper_bound(rhs);
-    bool all_byte = lhs.type_ == fiber::json::JsNodeType::HeapString && rhs.type_ == fiber::json::JsNodeType::HeapString;
+    bool all_byte = fiber::json::js_value_type(lhs) == fiber::json::JsNodeType::HeapString &&
+                    fiber::json::js_value_type(rhs) == fiber::json::JsNodeType::HeapString;
     if (all_byte) {
-        auto *lhs_str = reinterpret_cast<const fiber::json::GcString *>(lhs.gc);
-        auto *rhs_str = reinterpret_cast<const fiber::json::GcString *>(rhs.gc);
+        auto *lhs_str = fiber::json::js_value_heap_ptr<const fiber::json::GcString>(lhs);
+        auto *rhs_str = fiber::json::js_value_heap_ptr<const fiber::json::GcString>(rhs);
         all_byte = lhs_str && rhs_str &&
                    lhs_str->encoding == fiber::json::GcStringEncoding::Byte &&
                    rhs_str->encoding == fiber::json::GcStringEncoding::Byte;

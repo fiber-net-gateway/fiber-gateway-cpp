@@ -408,13 +408,7 @@ int32_t allocate_entry(GcObject *obj) {
 }
 
 JsValue make_heap_string_value(GcString *str) {
-    JsValue value;
-    if (!str) {
-        return value;
-    }
-    value.type_ = JsNodeType::HeapString;
-    value.gc = &str->hdr;
-    return value;
+    return str ? js_make_heap_ref(&str->hdr, JsHeapKind::String) : JsValue::make_undefined();
 }
 
 bool build_entry_array(GcHeap *heap, const JsValue &key, const JsValue &value, JsValue &out) {
@@ -422,10 +416,10 @@ bool build_entry_array(GcHeap *heap, const JsValue &key, const JsValue &value, J
         return false;
     }
     JsValue result = JsValue::make_array(*heap, 2);
-    if (result.type_ != JsNodeType::Array) {
+    if (js_value_type(result) != JsNodeType::Array) {
         return false;
     }
-    auto *arr = reinterpret_cast<GcArray *>(result.gc);
+    auto *arr = js_value_heap_ptr<GcArray>(result);
     arr->elems[0] = key;
     arr->elems[1] = value;
     arr->size = 2;
@@ -490,19 +484,9 @@ void gc_link(GcHeap *heap, GcHeader *hdr) {
 void gc_mark_obj(GcHeap *heap, GcHeader *obj);
 
 void gc_mark_value(GcHeap *heap, const JsValue &value) {
-    switch (value.type_) {
-        case JsNodeType::HeapString:
-        case JsNodeType::HeapBinary:
-        case JsNodeType::Array:
-        case JsNodeType::Object:
-        case JsNodeType::Exception:
-        case JsNodeType::Interator:
-            if (value.gc) {
-                gc_mark_obj(heap, value.gc);
-            }
-            break;
-        default:
-            break;
+    const GcHeader *hdr = js_value_heap_header(value);
+    if (hdr) {
+        gc_mark_obj(heap, const_cast<GcHeader *>(hdr));
     }
 }
 

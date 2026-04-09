@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <type_traits>
+
 #include "common/json/JsValueOps.h"
 
 using fiber::json::GcHeap;
@@ -14,7 +16,7 @@ using fiber::json::JsValue;
 namespace {
 
 const GcString *as_string(const JsValue &value) {
-    return reinterpret_cast<const GcString *>(value.gc);
+    return js_value_heap_ptr<const GcString>(value);
 }
 
 std::string string_to_utf8(const JsValue &value) {
@@ -28,6 +30,10 @@ std::string string_to_utf8(const JsValue &value) {
 
 } // namespace
 
+TEST(JsValueOpsTest, JsValueIsTriviallyCopyable) {
+    EXPECT_TRUE(std::is_trivially_copyable_v<JsValue>);
+}
+
 TEST(JsValueOpsTest, ConcatKeepsByteForNativeUtf8) {
     GcHeap heap;
     char left_bytes[] = {static_cast<char>(0xC3), static_cast<char>(0xA9)};
@@ -37,7 +43,7 @@ TEST(JsValueOpsTest, ConcatKeepsByteForNativeUtf8) {
 
     auto result = fiber::json::js_binary_op(JsBinaryOp::Add, lhs, rhs, &heap);
     ASSERT_EQ(result.error, JsOpError::None);
-    ASSERT_EQ(result.value.type_, JsNodeType::HeapString);
+    ASSERT_EQ(js_value_type(result.value), JsNodeType::HeapString);
     auto *str = as_string(result.value);
     ASSERT_NE(str, nullptr);
     EXPECT_EQ(str->encoding, GcStringEncoding::Byte);
@@ -60,7 +66,7 @@ TEST(JsValueOpsTest, ConcatUpgradesToUtf16ForWide) {
 
     auto result = fiber::json::js_binary_op(JsBinaryOp::Add, lhs, rhs, &heap);
     ASSERT_EQ(result.error, JsOpError::None);
-    ASSERT_EQ(result.value.type_, JsNodeType::HeapString);
+    ASSERT_EQ(js_value_type(result.value), JsNodeType::HeapString);
     auto *str = as_string(result.value);
     ASSERT_NE(str, nullptr);
     EXPECT_EQ(str->encoding, GcStringEncoding::Utf16);
@@ -81,7 +87,7 @@ TEST(JsValueOpsTest, ConcatHeapAndNative) {
 
     auto result = fiber::json::js_binary_op(JsBinaryOp::Add, lhs, rhs, &heap);
     ASSERT_EQ(result.error, JsOpError::None);
-    ASSERT_EQ(result.value.type_, JsNodeType::HeapString);
+    ASSERT_EQ(js_value_type(result.value), JsNodeType::HeapString);
     auto *str = as_string(result.value);
     ASSERT_NE(str, nullptr);
     EXPECT_EQ(str->encoding, GcStringEncoding::Byte);
@@ -97,8 +103,8 @@ TEST(JsValueOpsTest, AddInteger) {
     JsValue rhs = JsValue::make_integer(4);
     auto result = fiber::json::js_binary_op(JsBinaryOp::Add, lhs, rhs, nullptr);
     ASSERT_EQ(result.error, JsOpError::None);
-    EXPECT_EQ(result.value.type_, JsNodeType::Integer);
-    EXPECT_EQ(result.value.i, 7);
+    EXPECT_EQ(js_value_type(result.value), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(result.value), 7);
 }
 
 TEST(JsValueOpsTest, AddStringAndNumberTypeError) {
@@ -113,8 +119,8 @@ TEST(JsValueOpsTest, UnaryLogicalNot) {
     JsValue value = JsValue::make_integer(0);
     auto result = fiber::json::js_unary_op(JsUnaryOp::LogicalNot, value);
     ASSERT_EQ(result.error, JsOpError::None);
-    EXPECT_EQ(result.value.type_, JsNodeType::Boolean);
-    EXPECT_TRUE(result.value.b);
+    EXPECT_EQ(js_value_type(result.value), JsNodeType::Boolean);
+    EXPECT_TRUE(js_value_bool(result.value));
 }
 
 TEST(JsValueOpsTest, LooseAndStrictEquality) {
@@ -125,22 +131,22 @@ TEST(JsValueOpsTest, LooseAndStrictEquality) {
 
     auto loose = fiber::json::js_binary_op(JsBinaryOp::Eq, str, num, &heap);
     ASSERT_EQ(loose.error, JsOpError::None);
-    EXPECT_EQ(loose.value.type_, JsNodeType::Boolean);
-    EXPECT_TRUE(loose.value.b);
+    EXPECT_EQ(js_value_type(loose.value), JsNodeType::Boolean);
+    EXPECT_TRUE(js_value_bool(loose.value));
 
     auto strict = fiber::json::js_binary_op(JsBinaryOp::StrictEq, str, num, &heap);
     ASSERT_EQ(strict.error, JsOpError::None);
-    EXPECT_EQ(strict.value.type_, JsNodeType::Boolean);
-    EXPECT_FALSE(strict.value.b);
+    EXPECT_EQ(js_value_type(strict.value), JsNodeType::Boolean);
+    EXPECT_FALSE(js_value_bool(strict.value));
 
     JsValue null_value = JsValue::make_null();
     JsValue undef_value = JsValue::make_undefined();
     auto loose_null = fiber::json::js_binary_op(JsBinaryOp::Eq, null_value, undef_value, &heap);
     ASSERT_EQ(loose_null.error, JsOpError::None);
-    EXPECT_TRUE(loose_null.value.b);
+    EXPECT_TRUE(js_value_bool(loose_null.value));
     auto strict_null = fiber::json::js_binary_op(JsBinaryOp::StrictEq, null_value, undef_value, &heap);
     ASSERT_EQ(strict_null.error, JsOpError::None);
-    EXPECT_FALSE(strict_null.value.b);
+    EXPECT_FALSE(js_value_bool(strict_null.value));
 }
 
 TEST(JsValueOpsTest, CompareHeapByteStrings) {
@@ -150,11 +156,11 @@ TEST(JsValueOpsTest, CompareHeapByteStrings) {
 
     auto lt = fiber::json::js_binary_op(JsBinaryOp::Lt, lhs, rhs, nullptr);
     ASSERT_EQ(lt.error, JsOpError::None);
-    EXPECT_TRUE(lt.value.b);
+    EXPECT_TRUE(js_value_bool(lt.value));
 
     auto gt = fiber::json::js_binary_op(JsBinaryOp::Gt, lhs, rhs, nullptr);
     ASSERT_EQ(gt.error, JsOpError::None);
-    EXPECT_FALSE(gt.value.b);
+    EXPECT_FALSE(js_value_bool(gt.value));
 }
 
 TEST(JsValueOpsTest, CompareHeapUtf16Strings) {
@@ -166,11 +172,11 @@ TEST(JsValueOpsTest, CompareHeapUtf16Strings) {
 
     auto lt = fiber::json::js_binary_op(JsBinaryOp::Lt, omega, euro, nullptr);
     ASSERT_EQ(lt.error, JsOpError::None);
-    EXPECT_TRUE(lt.value.b);
+    EXPECT_TRUE(js_value_bool(lt.value));
 
     auto eq = fiber::json::js_binary_op(JsBinaryOp::Eq, euro, euro, nullptr);
     ASSERT_EQ(eq.error, JsOpError::None);
-    EXPECT_TRUE(eq.value.b);
+    EXPECT_TRUE(js_value_bool(eq.value));
 }
 
 TEST(JsValueOpsTest, CompareHeapByteAndHeapUtf16) {
@@ -181,7 +187,7 @@ TEST(JsValueOpsTest, CompareHeapByteAndHeapUtf16) {
 
     auto lt = fiber::json::js_binary_op(JsBinaryOp::Lt, ascii, euro, nullptr);
     ASSERT_EQ(lt.error, JsOpError::None);
-    EXPECT_TRUE(lt.value.b);
+    EXPECT_TRUE(js_value_bool(lt.value));
 }
 
 TEST(JsValueOpsTest, CompareHeapAndNativeByte) {
@@ -192,7 +198,7 @@ TEST(JsValueOpsTest, CompareHeapAndNativeByte) {
 
     auto eq = fiber::json::js_binary_op(JsBinaryOp::StrictEq, heap_value, native_value, nullptr);
     ASSERT_EQ(eq.error, JsOpError::None);
-    EXPECT_TRUE(eq.value.b);
+    EXPECT_TRUE(js_value_bool(eq.value));
 }
 
 TEST(JsValueOpsTest, CompareNativeWithSurrogatePair) {
@@ -204,12 +210,12 @@ TEST(JsValueOpsTest, CompareNativeWithSurrogatePair) {
 
     auto eq = fiber::json::js_binary_op(JsBinaryOp::Eq, heap_smile, native_smile, nullptr);
     ASSERT_EQ(eq.error, JsOpError::None);
-    EXPECT_TRUE(eq.value.b);
+    EXPECT_TRUE(js_value_bool(eq.value));
 
     JsValue bang = JsValue::make_string(heap, "!", 1);
     auto gt = fiber::json::js_binary_op(JsBinaryOp::Gt, heap_smile, bang, nullptr);
     ASSERT_EQ(gt.error, JsOpError::None);
-    EXPECT_TRUE(gt.value.b);
+    EXPECT_TRUE(js_value_bool(gt.value));
 }
 
 TEST(JsValueOpsTest, CompareInvalidUtf8) {
