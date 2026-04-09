@@ -4,6 +4,9 @@ endif()
 if (NOT DEFINED FIBER_MIN_CLANG_VERSION)
     set(FIBER_MIN_CLANG_VERSION 17.0)
 endif()
+if (NOT DEFINED FIBER_USE_LIBCXX)
+    set(FIBER_USE_LIBCXX OFF CACHE BOOL "Use libc++ with Clang toolchains")
+endif()
 
 function(_fiber_compiler_get_version compiler_path output_var)
     execute_process(
@@ -17,6 +20,38 @@ function(_fiber_compiler_get_version compiler_path output_var)
     else()
         set(${output_var} "" PARENT_SCOPE)
     endif()
+endfunction()
+
+function(_fiber_compiler_is_clang compiler_path output_var)
+    execute_process(
+        COMMAND "${compiler_path}" --version
+        RESULT_VARIABLE fiber_compiler_id_result
+        OUTPUT_VARIABLE fiber_compiler_id_output
+        ERROR_QUIET
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if (fiber_compiler_id_result EQUAL 0
+        AND fiber_compiler_id_output MATCHES "(^|[[:space:]])clang([[:space:]]|$)")
+        set(${output_var} TRUE PARENT_SCOPE)
+    else()
+        set(${output_var} FALSE PARENT_SCOPE)
+    endif()
+endfunction()
+
+function(_fiber_find_clang_libcxx_include_dir clang_compiler_path output_var)
+    set(fiber_clang_include_dir "")
+    _fiber_compiler_get_version("${clang_compiler_path}" fiber_clang_version)
+    if (NOT fiber_clang_version STREQUAL "")
+        string(REGEX MATCH "^[0-9]+" fiber_clang_major "${fiber_clang_version}")
+        foreach(fiber_include_candidate
+            "/usr/lib/llvm-${fiber_clang_major}/include/c++/v1"
+            "/usr/include/c++/v1")
+            if (EXISTS "${fiber_include_candidate}")
+                set(fiber_clang_include_dir "${fiber_include_candidate}")
+                break()
+            endif()
+        endforeach()
+    endif()
+    set(${output_var} "${fiber_clang_include_dir}" PARENT_SCOPE)
 endfunction()
 
 function(_fiber_compiler_supports_cxx23 compiler_path output_var)
@@ -34,11 +69,32 @@ int main() {
 }
 ]=])
 
-    execute_process(
-        COMMAND "${compiler_path}" -std=c++23 -x c++ -c "${fiber_probe_src}" -o "${fiber_probe_obj}"
-        RESULT_VARIABLE fiber_probe_result
-        OUTPUT_QUIET
-        ERROR_QUIET)
+    _fiber_compiler_is_clang("${compiler_path}" fiber_probe_is_clang)
+    if (FIBER_USE_LIBCXX AND fiber_probe_is_clang)
+        _fiber_find_clang_libcxx_include_dir("${compiler_path}" fiber_probe_libcxx_include_dir)
+        if (fiber_probe_libcxx_include_dir STREQUAL "")
+            set(${output_var} FALSE PARENT_SCOPE)
+            return()
+        endif()
+        execute_process(
+            COMMAND
+                "${compiler_path}"
+                -std=c++23
+                -stdlib=libc++
+                -isystem "${fiber_probe_libcxx_include_dir}"
+                -x c++
+                -c "${fiber_probe_src}"
+                -o "${fiber_probe_obj}"
+            RESULT_VARIABLE fiber_probe_result
+            OUTPUT_QUIET
+            ERROR_QUIET)
+    else()
+        execute_process(
+            COMMAND "${compiler_path}" -std=c++23 -x c++ -c "${fiber_probe_src}" -o "${fiber_probe_obj}"
+            RESULT_VARIABLE fiber_probe_result
+            OUTPUT_QUIET
+            ERROR_QUIET)
+    endif()
 
     if (fiber_probe_result EQUAL 0)
         set(${output_var} TRUE PARENT_SCOPE)
@@ -135,12 +191,18 @@ macro(_fiber_select_default_toolchain)
             OR (DEFINED ENV{CC} AND NOT "$ENV{CC}" STREQUAL "")
             OR DEFINED CMAKE_TOOLCHAIN_FILE))
         _fiber_find_best_cxx_compiler("clang" fiber_selected_cxx_compiler fiber_selected_cxx_version)
-        if (fiber_selected_cxx_compiler STREQUAL "")
+        if (fiber_selected_cxx_compiler STREQUAL "" AND NOT FIBER_USE_LIBCXX)
             _fiber_find_best_cxx_compiler("gcc" fiber_selected_cxx_compiler fiber_selected_cxx_version)
         endif()
 
         if (fiber_selected_cxx_compiler STREQUAL "")
-            message(STATUS "No supported Clang/GCC C++23 compiler auto-detected; letting CMake resolve the toolchain.")
+            if (FIBER_USE_LIBCXX)
+                message(FATAL_ERROR
+                    "FIBER_USE_LIBCXX=ON requires a Clang toolchain with libc++ headers available, "
+                    "but no supported Clang C++23 compiler was auto-detected.")
+            else()
+                message(STATUS "No supported Clang/GCC C++23 compiler auto-detected; letting CMake resolve the toolchain.")
+            endif()
         else()
             set(CMAKE_CXX_COMPILER "${fiber_selected_cxx_compiler}")
             set(CMAKE_CXX_COMPILER "${fiber_selected_cxx_compiler}" CACHE FILEPATH "Default detected C++ compiler")
@@ -158,8 +220,30 @@ macro(_fiber_select_default_toolchain)
 endmacro()
 
 macro(_fiber_configure_clang_stdlib)
-    set(FIBER_USE_LIBCXX OFF)
     set(FIBER_STDLIB_LINK_FLAGS "")
+    if (FIBER_USE_LIBCXX)
+        if (NOT DEFINED CMAKE_CXX_COMPILER)
+            message(FATAL_ERROR "FIBER_USE_LIBCXX=ON requires a configured C++ compiler.")
+        endif()
+
+        _fiber_compiler_is_clang("${CMAKE_CXX_COMPILER}" fiber_cxx_compiler_is_clang)
+        if (NOT fiber_cxx_compiler_is_clang)
+            message(FATAL_ERROR "FIBER_USE_LIBCXX=ON requires Clang, but selected compiler is ${CMAKE_CXX_COMPILER}.")
+        endif()
+
+        _fiber_find_clang_libcxx_include_dir("${CMAKE_CXX_COMPILER}" fiber_selected_clang_includedir)
+        if (fiber_selected_clang_includedir STREQUAL "")
+            message(FATAL_ERROR
+                "FIBER_USE_LIBCXX=ON was requested, but libc++ headers were not found. "
+                "Install libc++ development headers such as /usr/include/c++/v1.")
+        endif()
+
+        set(FIBER_CLANG_INCLUDEDIR "${fiber_selected_clang_includedir}")
+        set(CMAKE_CXX_FLAGS_INIT
+            "${CMAKE_CXX_FLAGS_INIT} -stdlib=libc++ -isystem ${fiber_selected_clang_includedir}"
+        )
+        set(FIBER_STDLIB_LINK_FLAGS -stdlib=libc++)
+    endif()
 endmacro()
 
 _fiber_select_default_toolchain()
