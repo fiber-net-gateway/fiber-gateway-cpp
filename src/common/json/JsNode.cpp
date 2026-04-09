@@ -151,15 +151,15 @@ JsNodeType js_value_type(const JsValue &value) {
         case JsTag::Double:
             return JsNodeType::Float;
         case JsTag::BorrowedString:
-            return JsNodeType::NativeString;
+            return JsNodeType::String;
         case JsTag::BorrowedBinary:
-            return JsNodeType::NativeBinary;
+            return JsNodeType::Binary;
         case JsTag::HeapRef:
             switch (static_cast<JsHeapKind>(value.subtag)) {
                 case JsHeapKind::String:
-                    return JsNodeType::HeapString;
+                    return JsNodeType::String;
                 case JsHeapKind::Binary:
-                    return JsNodeType::HeapBinary;
+                    return JsNodeType::Binary;
                 case JsHeapKind::Array:
                     return JsNodeType::Array;
                 case JsHeapKind::Object:
@@ -172,6 +172,14 @@ JsNodeType js_value_type(const JsValue &value) {
             break;
     }
     return JsNodeType::Undefined;
+}
+
+bool js_value_is_string(const JsValue &value) {
+    return js_value_type(value) == JsNodeType::String;
+}
+
+bool js_value_is_binary(const JsValue &value) {
+    return js_value_type(value) == JsNodeType::Binary;
 }
 
 bool js_value_is_heap_ref(const JsValue &value) {

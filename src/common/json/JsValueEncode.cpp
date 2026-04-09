@@ -68,17 +68,17 @@ Generator::Result encode_js_value(Generator &gen, const JsValue &value) {
             return gen.integer(js_value_int64(value));
         case JsNodeType::Float:
             return gen.double_value(js_value_double(value));
-        case JsNodeType::HeapString: {
-            auto *str = js_value_heap_ptr<const GcString>(value);
-            if (!str) {
-                return Generator::Result::InvalidString;
+        case JsNodeType::String:
+            if (js_value_is_borrowed_string(value)) {
+                NativeStr native = js_value_native_string(value);
+                return gen.string(native.data, native.len);
+            } else {
+                auto *str = js_value_heap_ptr<const GcString>(value);
+                if (!str) {
+                    return Generator::Result::InvalidString;
+                }
+                return gen.string(str);
             }
-            return gen.string(str);
-        }
-        case JsNodeType::NativeString: {
-            NativeStr native = js_value_native_string(value);
-            return gen.string(native.data, native.len);
-        }
         case JsNodeType::Array:
             return encode_array(gen, js_value_heap_ptr<const GcArray>(value));
         case JsNodeType::Object:
@@ -138,17 +138,17 @@ Generator::Result encode_js_value(Generator &gen, const JsValue &value) {
             }
             return gen.map_close();
         }
-        case JsNodeType::NativeBinary: {
-            NativeBin native = js_value_native_binary(value);
-            return gen.binary(native.data, native.len);
-        }
-        case JsNodeType::HeapBinary: {
-            auto *bin = js_value_heap_ptr<const GcBinary>(value);
-            if (!bin) {
-                return Generator::Result::InvalidString;
+        case JsNodeType::Binary:
+            if (js_value_is_borrowed_binary(value)) {
+                NativeBin native = js_value_native_binary(value);
+                return gen.binary(native.data, native.len);
+            } else {
+                auto *bin = js_value_heap_ptr<const GcBinary>(value);
+                if (!bin) {
+                    return Generator::Result::InvalidString;
+                }
+                return gen.binary(bin->data, bin->len);
             }
-            return gen.binary(bin->data, bin->len);
-        }
         case JsNodeType::Undefined:
         case JsNodeType::Interator:
             return Generator::Result::InvalidValue;

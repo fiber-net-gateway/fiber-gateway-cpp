@@ -122,12 +122,14 @@ VmResult Compares::in(const fiber::json::JsValue &a, const fiber::json::JsValue 
         if (!obj) {
             return make_bool(false);
         }
-        if (fiber::json::js_value_type(a) == fiber::json::JsNodeType::HeapString) {
+        if (fiber::json::js_value_type(a) == fiber::json::JsNodeType::String &&
+            !fiber::json::js_value_is_borrowed_string(a)) {
             auto *key_str = fiber::json::js_value_heap_ptr<const fiber::json::GcString>(a);
             const fiber::json::JsValue *found = fiber::json::gc_object_get(obj, key_str);
             return make_bool(found != nullptr);
         }
-        if (fiber::json::js_value_type(a) == fiber::json::JsNodeType::NativeString) {
+        if (fiber::json::js_value_type(a) == fiber::json::JsNodeType::String &&
+            fiber::json::js_value_is_borrowed_string(a)) {
             fiber::json::NativeStr native = fiber::json::js_value_native_string(a);
             std::string key(native.data, native.len);
             for (std::size_t i = 0; i < obj->size; ++i) {

@@ -68,7 +68,7 @@ TEST(ParserTest, ParseObjectAndArray) {
     const GcObjectEntry *name_entry = entry_at(obj, 0);
     ASSERT_NE(name_entry, nullptr);
     EXPECT_EQ(to_string(name_entry->key), "name");
-    ASSERT_EQ(js_value_type(name_entry->value), JsNodeType::HeapString);
+    ASSERT_EQ(js_value_type(name_entry->value), JsNodeType::String);
     EXPECT_EQ(to_string(as_string(name_entry->value)), "fiber");
 
     const GcObjectEntry *nums_entry = entry_at(obj, 1);

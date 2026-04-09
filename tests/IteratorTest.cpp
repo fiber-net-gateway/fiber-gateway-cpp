@@ -104,21 +104,21 @@ TEST(IteratorTest, ObjectIteratorSnapshotOnMutation) {
     bool done = false;
     ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
     EXPECT_FALSE(done);
-    EXPECT_EQ(js_value_type(out), JsNodeType::HeapString);
+    EXPECT_EQ(js_value_type(out), JsNodeType::String);
     EXPECT_EQ(to_string(as_string(out)), "a");
 
     ASSERT_TRUE(fiber::json::gc_object_set(&heap, obj, key_c, JsValue::make_integer(3)));
 
     ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
     EXPECT_FALSE(done);
-    EXPECT_EQ(js_value_type(out), JsNodeType::HeapString);
+    EXPECT_EQ(js_value_type(out), JsNodeType::String);
     EXPECT_EQ(to_string(as_string(out)), "b");
 
     ASSERT_TRUE(fiber::json::gc_object_set(&heap, obj, key_d, JsValue::make_integer(4)));
 
     ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
     EXPECT_FALSE(done);
-    EXPECT_EQ(js_value_type(out), JsNodeType::HeapString);
+    EXPECT_EQ(js_value_type(out), JsNodeType::String);
     EXPECT_EQ(to_string(as_string(out)), "c");
 
     ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
@@ -144,7 +144,7 @@ TEST(IteratorTest, ObjectIteratorEntries) {
     const GcArray *arr = as_array(out);
     ASSERT_NE(arr, nullptr);
     ASSERT_EQ(arr->size, 2u);
-    EXPECT_EQ(js_value_type(arr->elems[0]), JsNodeType::HeapString);
+    EXPECT_EQ(js_value_type(arr->elems[0]), JsNodeType::String);
     EXPECT_EQ(to_string(as_string(arr->elems[0])), "k");
     EXPECT_EQ(js_value_type(arr->elems[1]), JsNodeType::Integer);
     EXPECT_EQ(js_value_int64(arr->elems[1]), 9);

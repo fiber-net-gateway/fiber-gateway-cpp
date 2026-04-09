@@ -81,8 +81,7 @@ VmResult Unaries::typeof_op(const fiber::json::JsValue &value, ScriptRuntime &ru
         case fiber::json::JsNodeType::Integer:
         case fiber::json::JsNodeType::Float:
             return make_typeof_value("number");
-        case fiber::json::JsNodeType::HeapString:
-        case fiber::json::JsNodeType::NativeString:
+        case fiber::json::JsNodeType::String:
             return make_typeof_value("string");
         case fiber::json::JsNodeType::Array:
             return make_typeof_value("array");
@@ -92,8 +91,7 @@ VmResult Unaries::typeof_op(const fiber::json::JsValue &value, ScriptRuntime &ru
             return make_typeof_value("iterator");
         case fiber::json::JsNodeType::Exception:
             return make_typeof_value("exception");
-        case fiber::json::JsNodeType::NativeBinary:
-        case fiber::json::JsNodeType::HeapBinary:
+        case fiber::json::JsNodeType::Binary:
             return make_typeof_value("binary");
     }
     return make_typeof_value("undefined");

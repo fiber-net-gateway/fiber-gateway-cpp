@@ -25,14 +25,12 @@ enum class JsNodeType : std::uint8_t {
     Boolean,
     Integer,
     Float,
-    HeapString,
-    NativeString,
+    String,
     Array,
     Object,
     Interator,
     Exception,
-    NativeBinary,
-    HeapBinary,
+    Binary,
 };
 
 enum class JsTag : std::uint8_t {
@@ -105,6 +103,8 @@ JsValue js_make_borrowed_binary(const std::uint8_t *data, std::size_t len);
 
 JsTag js_value_tag(const JsValue &value);
 JsNodeType js_value_type(const JsValue &value);
+bool js_value_is_string(const JsValue &value);
+bool js_value_is_binary(const JsValue &value);
 bool js_value_is_heap_ref(const JsValue &value);
 bool js_value_is_borrowed_string(const JsValue &value);
 bool js_value_is_borrowed_binary(const JsValue &value);

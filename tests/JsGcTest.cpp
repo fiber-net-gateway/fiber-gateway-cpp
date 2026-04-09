@@ -98,7 +98,7 @@ TEST(JsGcTest, RootProvidersMarkValuesWithoutTemporaryRootVector) {
     fiber::json::gc_collect(heap, roots);
     std::size_t after_collect = fiber::json::gc_bytes_used(heap);
 
-    EXPECT_EQ(js_value_type(rooted), JsNodeType::HeapString);
+    EXPECT_EQ(js_value_type(rooted), JsNodeType::String);
     EXPECT_EQ(js_value_heap_header(rooted), &live->hdr);
     EXPECT_LT(after_collect, before_collect);
     EXPECT_EQ(after_collect, fiber::json::gc_estimate_string_bytes(4, GcStringEncoding::Byte));

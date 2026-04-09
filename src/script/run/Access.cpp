@@ -39,10 +39,12 @@ bool get_index(const fiber::json::JsValue &key, std::int64_t &out) {
 fiber::json::GcString *ensure_heap_string(ScriptRuntime &runtime,
                                           const fiber::json::JsValue &value,
                                           VmError &error) {
-    if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::HeapString) {
+    if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::String &&
+        !fiber::json::js_value_is_borrowed_string(value)) {
         return fiber::json::js_value_heap_ptr<fiber::json::GcString>(const_cast<fiber::json::JsValue &>(value));
     }
-    if (fiber::json::js_value_type(value) != fiber::json::JsNodeType::NativeString) {
+    if (fiber::json::js_value_type(value) != fiber::json::JsNodeType::String ||
+        !fiber::json::js_value_is_borrowed_string(value)) {
         return nullptr;
     }
     fiber::json::NativeStr native = fiber::json::js_value_native_string(value);
@@ -63,12 +65,14 @@ VmResult make_heap_string_value(fiber::json::GcString *str) {
 }
 
 bool string_length(const fiber::json::JsValue &value, std::size_t &out, VmError &error) {
-    if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::HeapString) {
+    if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::String &&
+        !fiber::json::js_value_is_borrowed_string(value)) {
         auto *str = fiber::json::js_value_heap_ptr<const fiber::json::GcString>(value);
         out = str ? str->len : 0;
         return true;
     }
-    if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::NativeString) {
+    if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::String &&
+        fiber::json::js_value_is_borrowed_string(value)) {
         fiber::json::NativeStr native = fiber::json::js_value_native_string(value);
         fiber::json::Utf8ScanResult scan;
         if (!fiber::json::utf8_scan(native.data, native.len, scan)) {
@@ -91,9 +95,11 @@ VmResult string_char_at(ScriptRuntime &runtime,
     fiber::json::JsValue rooted_str = fiber::json::JsValue::make_undefined();
     TempRootScope temp_roots(runtime);
     temp_roots.add(&rooted_str);
-    if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::HeapString) {
+    if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::String &&
+        !fiber::json::js_value_is_borrowed_string(value)) {
         str = fiber::json::js_value_heap_ptr<fiber::json::GcString>(const_cast<fiber::json::JsValue &>(value));
-    } else if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::NativeString) {
+    } else if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::String &&
+               fiber::json::js_value_is_borrowed_string(value)) {
         fiber::json::NativeStr native = fiber::json::js_value_native_string(value);
         str = runtime.alloc_with_gc(fiber::json::gc_estimate_utf8_string_bytes(native.len), [&]() {
             return fiber::json::gc_new_string(&runtime.heap(), native.data, native.len);
@@ -262,8 +268,7 @@ VmResult Access::index_get(const fiber::json::JsValue &parent,
         const fiber::json::JsValue *found = obj ? fiber::json::gc_object_get(obj, key_str) : nullptr;
         return found ? *found : fiber::json::JsValue::make_undefined();
     }
-    if (fiber::json::js_value_type(parent) == fiber::json::JsNodeType::HeapString ||
-        fiber::json::js_value_type(parent) == fiber::json::JsNodeType::NativeString) {
+    if (fiber::json::js_value_type(parent) == fiber::json::JsNodeType::String) {
         std::int64_t idx = 0;
         if (!get_index(key, idx)) {
             return fiber::json::JsValue::make_undefined();
@@ -347,8 +352,7 @@ VmResult Access::prop_get(const fiber::json::JsValue &parent,
         return found ? *found : fiber::json::JsValue::make_undefined();
     }
     if (fiber::json::js_value_type(parent) == fiber::json::JsNodeType::Array ||
-        fiber::json::js_value_type(parent) == fiber::json::JsNodeType::HeapString ||
-        fiber::json::js_value_type(parent) == fiber::json::JsNodeType::NativeString) {
+        fiber::json::js_value_type(parent) == fiber::json::JsNodeType::String) {
         std::size_t len = 0;
         VmError error;
         if (fiber::json::js_value_type(parent) == fiber::json::JsNodeType::Array) {
