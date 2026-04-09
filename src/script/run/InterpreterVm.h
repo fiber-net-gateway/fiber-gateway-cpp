@@ -6,7 +6,6 @@
 #include <vector>
 
 #include "../../common/json/JsGc.h"
-#include "../async/AsyncExecutionContext.h"
 #include "../ir/Compiled.h"
 #include "VmError.h"
 
@@ -16,7 +15,7 @@ class ScriptRuntime;
 
 namespace fiber::script::run {
 
-class InterpreterVm final : public AsyncExecutionContext, public fiber::json::GcRootSet::RootProvider {
+class InterpreterVm final : public fiber::json::GcRootSet::RootProvider {
 public:
     enum class VmState {
         Init,
@@ -36,14 +35,6 @@ public:
 
     VmState iterate(VmResult &out);
     void set_resume_callback(ResumeCallback callback, void *context);
-
-    ScriptRuntime &runtime() override;
-    const fiber::json::JsValue &root() const override;
-    void *attach() const override;
-    const fiber::json::JsValue &arg_value(std::size_t index) const override;
-    std::size_t arg_count() const override;
-    void return_value(const fiber::json::JsValue &value) override;
-    void throw_value(const fiber::json::JsValue &value) override;
     void visit_roots(fiber::json::GcRootSet::RootVisitor &visitor) override;
     bool has_thrown() const;
     const fiber::json::JsValue &thrown() const;
@@ -69,20 +60,17 @@ private:
     std::vector<std::int32_t> exp_ins_;
     std::size_t sp_ = 0;
     std::size_t pc_ = 0;
-    fiber::json::JsValue *arg_ptr_ = nullptr;
-    std::size_t arg_cnt_ = 0;
-    std::size_t arg_spread_slot_ = 0;
+    std::vector<fiber::json::JsValue> call_args_;
     VmError pending_error_{};
     bool has_error_ = false;
     enum class PendingValueKind {
         None,
         Thrown,
-        AsyncReturn,
-        AsyncThrow,
         Return
     };
     PendingValueKind pending_value_kind_ = PendingValueKind::None;
     fiber::json::JsValue pending_value_ = fiber::json::JsValue::make_undefined();
+    Library::HostCallResult async_result_{};
     bool async_pending_ = false;
     bool async_ready_ = false;
     enum class AsyncResumeKind {
@@ -99,11 +87,21 @@ private:
     ResumeCallback resume_callback_ = nullptr;
     void *resume_context_ = nullptr;
 
+    static void async_complete(void *context, Library::HostCallResult result) noexcept;
     void finalize_error(const VmError &error, VmResult &out);
     void notify_resume();
-    void set_args_for_ctx(std::size_t off, std::size_t count);
-    void set_args_for_spread(std::size_t slot);
-    void clear_args();
+    const fiber::json::JsValue *prepare_call_args(std::size_t off, std::size_t count);
+    const fiber::json::JsValue *prepare_spread_call_args(std::size_t slot, std::uint32_t &argc);
+    Library::HostCallFrame make_call_frame(const fiber::json::JsValue *args, std::uint32_t argc) const;
+    VmError make_host_fault_error(const Library::HostFault &fault, std::size_t epc) const;
+    bool dispatch_call_site(const ir::Compiled::CallSite &site,
+                            AsyncResumeKind resume_kind,
+                            VmResult &out);
+    bool apply_call_result(const Library::HostCallResult &result,
+                           AsyncResumeKind resume_kind,
+                           std::size_t resume_epc,
+                           VmResult &out,
+                           bool from_async_completion);
 
     bool catch_for_exception(std::size_t epc);
     int search_catch(std::size_t epc) const;

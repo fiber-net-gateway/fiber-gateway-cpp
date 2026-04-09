@@ -13,8 +13,8 @@ public:
     ConstantVal(std::int32_t start,
                 std::int32_t end,
                 std::string name,
-                Library::Constant *constant,
-                Library::AsyncConstant *async_constant)
+                const Library::HostCallable *constant,
+                const Library::HostCallable *async_constant)
         : Expression(start, end),
           name_(std::move(name)),
           constant_(constant),
@@ -29,18 +29,18 @@ public:
         return async_constant_ != nullptr;
     }
 
-    Library::Constant *constant() const {
+    const Library::HostCallable *constant() const {
         return constant_;
     }
 
-    Library::AsyncConstant *async_constant() const {
+    const Library::HostCallable *async_constant() const {
         return async_constant_;
     }
 
 private:
     std::string name_;
-    Library::Constant *constant_ = nullptr;
-    Library::AsyncConstant *async_constant_ = nullptr;
+    const Library::HostCallable *constant_ = nullptr;
+    const Library::HostCallable *async_constant_ = nullptr;
 };
 
 } // namespace fiber::script::ast
