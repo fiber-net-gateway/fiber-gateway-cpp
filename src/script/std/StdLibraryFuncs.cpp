@@ -292,7 +292,7 @@ std::string jsonutil_to_string(const JsValue &value) {
 }
 
 JsValue make_heap_string_value(ScriptRuntime &runtime, std::string_view text) {
-    auto *str = runtime.alloc_with_gc(text.size(), [&]() {
+    auto *str = runtime.alloc_with_gc(fiber::json::gc_estimate_utf8_string_bytes(text.size()), [&]() {
         return fiber::json::gc_new_string(&runtime.heap(), text.data(), text.size());
     });
     if (!str) {
@@ -318,7 +318,8 @@ JsValue make_heap_string_value_u16(ScriptRuntime &runtime, const std::u16string 
         for (char16_t ch : text) {
             bytes.push_back(static_cast<std::uint8_t>(ch));
         }
-        auto *str = runtime.alloc_with_gc(bytes.size(), [&]() {
+        auto *str = runtime.alloc_with_gc(
+            fiber::json::gc_estimate_string_bytes(bytes.size(), fiber::json::GcStringEncoding::Byte), [&]() {
             return fiber::json::gc_new_string_bytes(&runtime.heap(), bytes.data(), bytes.size());
         });
         if (!str) {
@@ -329,7 +330,8 @@ JsValue make_heap_string_value_u16(ScriptRuntime &runtime, const std::u16string 
         value.gc = &str->hdr;
         return value;
     }
-    auto *str = runtime.alloc_with_gc(text.size() * sizeof(char16_t), [&]() {
+    auto *str = runtime.alloc_with_gc(
+        fiber::json::gc_estimate_string_bytes(text.size(), fiber::json::GcStringEncoding::Utf16), [&]() {
         return fiber::json::gc_new_string_utf16(&runtime.heap(), text.data(), text.size());
     });
     if (!str) {
@@ -342,7 +344,7 @@ JsValue make_heap_string_value_u16(ScriptRuntime &runtime, const std::u16string 
 }
 
 JsValue make_heap_binary_value(ScriptRuntime &runtime, const std::uint8_t *data, std::size_t len) {
-    auto *bin = runtime.alloc_with_gc(len, [&]() {
+    auto *bin = runtime.alloc_with_gc(fiber::json::gc_estimate_binary_bytes(len), [&]() {
         return fiber::json::gc_new_binary(&runtime.heap(), data, len);
     });
     if (!bin) {
@@ -352,6 +354,70 @@ JsValue make_heap_binary_value(ScriptRuntime &runtime, const std::uint8_t *data,
     value.type_ = JsNodeType::HeapBinary;
     value.gc = &bin->hdr;
     return value;
+}
+
+JsValue make_heap_array_value(ScriptRuntime &runtime, std::size_t capacity) {
+    JsValue value = JsValue::make_undefined();
+    runtime.run_with_gc_retry(fiber::json::gc_estimate_array_bytes(capacity), [&]() {
+        value = JsValue::make_array(runtime.heap(), capacity);
+        return value.type_ == JsNodeType::Array;
+    });
+    return value;
+}
+
+JsValue make_heap_object_value(ScriptRuntime &runtime, std::size_t capacity) {
+    JsValue value = JsValue::make_undefined();
+    runtime.run_with_gc_retry(fiber::json::gc_estimate_object_bytes(capacity), [&]() {
+        value = JsValue::make_object(runtime.heap(), capacity);
+        return value.type_ == JsNodeType::Object;
+    });
+    return value;
+}
+
+bool reserve_array_values(ScriptRuntime &runtime, GcArray *arr, std::size_t expected) {
+    if (!arr) {
+        return false;
+    }
+    return runtime.run_with_gc_retry(fiber::json::gc_estimate_array_growth_bytes(arr, expected), [&]() {
+        return fiber::json::gc_array_reserve(&runtime.heap(), arr, expected);
+    });
+}
+
+bool push_array_value(ScriptRuntime &runtime, GcArray *arr, const JsValue &value) {
+    if (!arr) {
+        return false;
+    }
+    JsValue rooted = value;
+    TempRootScope temp_roots(runtime);
+    temp_roots.add(&rooted);
+    return runtime.run_with_gc_retry(fiber::json::gc_estimate_array_growth_bytes(arr, arr->size + 1), [&]() {
+        return fiber::json::gc_array_push(&runtime.heap(), arr, rooted);
+    });
+}
+
+bool reserve_object_entries(ScriptRuntime &runtime, GcObject *obj, std::size_t expected) {
+    if (!obj) {
+        return false;
+    }
+    return runtime.run_with_gc_retry(fiber::json::gc_estimate_object_growth_bytes(obj, expected), [&]() {
+        return fiber::json::gc_object_reserve(&runtime.heap(), obj, expected);
+    });
+}
+
+bool object_set_value(ScriptRuntime &runtime, GcObject *obj, GcString *key, const JsValue &value) {
+    if (!obj || !key) {
+        return false;
+    }
+    JsValue rooted_key = JsValue::make_undefined();
+    JsValue rooted_value = value;
+    TempRootScope temp_roots(runtime);
+    temp_roots.add(&rooted_key);
+    temp_roots.add(&rooted_value);
+    rooted_key.type_ = JsNodeType::HeapString;
+    rooted_key.gc = &key->hdr;
+    return runtime.run_with_gc_retry(fiber::json::gc_estimate_object_growth_bytes(obj, obj->size + 1), [&]() {
+        return fiber::json::gc_object_set(&runtime.heap(), obj, key, rooted_value);
+    });
 }
 
 Library::FunctionResult make_error(ExecutionContext &context, std::string_view message) {
@@ -1211,6 +1277,10 @@ public:
             return arg;
         }
         ScriptRuntime &runtime = context.runtime();
+        std::size_t expected = arr->size + (context.arg_count() > 0 ? context.arg_count() - 1 : 0);
+        if (!reserve_array_values(runtime, arr, expected)) {
+            return make_oom_error(context);
+        }
         for (std::size_t i = 1; i < context.arg_count(); ++i) {
             if (!fiber::json::gc_array_push(&runtime.heap(), arr, context.arg_value(i))) {
                 return make_oom_error(context);
@@ -1225,7 +1295,7 @@ GcString *ensure_heap_string(ScriptRuntime &runtime, const JsValue &value) {
         return reinterpret_cast<GcString *>(value.gc);
     }
     if (value.type_ == JsNodeType::NativeString) {
-        auto *str = runtime.alloc_with_gc(value.ns.len, [&]() {
+        auto *str = runtime.alloc_with_gc(fiber::json::gc_estimate_utf8_string_bytes(value.ns.len), [&]() {
             return fiber::json::gc_new_string(&runtime.heap(), value.ns.data, value.ns.len);
         });
         return str;
@@ -1252,6 +1322,21 @@ public:
         }
         ScriptRuntime &runtime = context.runtime();
         fiber::json::GcHeap *heap = &runtime.heap();
+        std::size_t expected = target->size;
+        for (std::size_t i = 1; i < context.arg_count(); ++i) {
+            const JsValue &src = context.arg_value(i);
+            if (src.type_ != JsNodeType::Object) {
+                continue;
+            }
+            auto *obj = reinterpret_cast<const GcObject *>(src.gc);
+            if (!obj) {
+                continue;
+            }
+            expected += obj->size;
+        }
+        if (!reserve_object_entries(runtime, target, expected)) {
+            return make_oom_error(context);
+        }
         for (std::size_t i = 1; i < context.arg_count(); ++i) {
             const JsValue &src = context.arg_value(i);
             if (src.type_ != JsNodeType::Object) {
@@ -1288,7 +1373,7 @@ public:
         ScriptRuntime &runtime = context.runtime();
         auto *obj = reinterpret_cast<const GcObject *>(arg.gc);
         std::size_t capacity = obj ? obj->size : 0;
-        JsValue array = JsValue::make_array(runtime.heap(), capacity);
+        JsValue array = make_heap_array_value(runtime, capacity);
         if (array.type_ != JsNodeType::Array) {
             return make_oom_error(context);
         }
@@ -1303,7 +1388,7 @@ public:
                 JsValue key;
                 key.type_ = JsNodeType::HeapString;
                 key.gc = &entry->key->hdr;
-                if (!fiber::json::gc_array_push(&runtime.heap(), arr, key)) {
+                if (!push_array_value(runtime, arr, key)) {
                     return make_oom_error(context);
                 }
             }
@@ -1325,7 +1410,7 @@ public:
         ScriptRuntime &runtime = context.runtime();
         auto *obj = reinterpret_cast<const GcObject *>(arg.gc);
         std::size_t capacity = obj ? obj->size : 0;
-        JsValue array = JsValue::make_array(runtime.heap(), capacity);
+        JsValue array = make_heap_array_value(runtime, capacity);
         if (array.type_ != JsNodeType::Array) {
             return make_oom_error(context);
         }
@@ -1337,7 +1422,7 @@ public:
                 if (!entry || !entry->occupied) {
                     continue;
                 }
-                if (!fiber::json::gc_array_push(&runtime.heap(), arr, entry->value)) {
+                if (!push_array_value(runtime, arr, entry->value)) {
                     return make_oom_error(context);
                 }
             }
@@ -1569,7 +1654,31 @@ public:
             return JsValue::make_null();
         }
         ScriptRuntime &runtime = context.runtime();
-        JsValue array = JsValue::make_array(runtime.heap(), 0);
+        std::size_t capacity = 1;
+        if (context.arg_count() >= 2 && is_string_type(context.arg_value(1))) {
+            std::u16string sep;
+            if (!get_u16_string(context.arg_value(1), sep)) {
+                return JsValue::make_null();
+            }
+            auto parts = split_any(src, sep);
+            JsValue array = make_heap_array_value(runtime, parts.size());
+            if (array.type_ != JsNodeType::Array) {
+                return make_oom_error(context);
+            }
+            GcRootGuard guard(runtime, &array);
+            auto *arr = reinterpret_cast<GcArray *>(array.gc);
+            for (const auto &part : parts) {
+                JsValue item = make_heap_string_value_u16(runtime, part);
+                if (item.type_ == JsNodeType::Undefined) {
+                    return make_oom_error(context);
+                }
+                if (!push_array_value(runtime, arr, item)) {
+                    return make_oom_error(context);
+                }
+            }
+            return array;
+        }
+        JsValue array = make_heap_array_value(runtime, capacity);
         if (array.type_ != JsNodeType::Array) {
             return make_oom_error(context);
         }
@@ -1580,24 +1689,10 @@ public:
             if (item.type_ == JsNodeType::Undefined) {
                 return make_oom_error(context);
             }
-            if (!fiber::json::gc_array_push(&runtime.heap(), arr, item)) {
+            if (!push_array_value(runtime, arr, item)) {
                 return make_oom_error(context);
             }
             return array;
-        }
-        std::u16string sep;
-        if (!get_u16_string(context.arg_value(1), sep)) {
-            return JsValue::make_null();
-        }
-        auto parts = split_any(src, sep);
-        for (const auto &part : parts) {
-            JsValue item = make_heap_string_value_u16(runtime, part);
-            if (item.type_ == JsNodeType::Undefined) {
-                return make_oom_error(context);
-            }
-            if (!fiber::json::gc_array_push(&runtime.heap(), arr, item)) {
-                return make_oom_error(context);
-            }
         }
         return array;
     }
@@ -1624,7 +1719,7 @@ public:
             return make_error(context, "invalid regex");
         }
         ScriptRuntime &runtime = context.runtime();
-        JsValue array = JsValue::make_array(runtime.heap(), 0);
+        JsValue array = make_heap_array_value(runtime, 0);
         if (array.type_ != JsNodeType::Array) {
             return make_oom_error(context);
         }
@@ -1638,7 +1733,7 @@ public:
             if (item.type_ == JsNodeType::Undefined) {
                 return make_oom_error(context);
             }
-            if (!fiber::json::gc_array_push(&runtime.heap(), arr, item)) {
+            if (!push_array_value(runtime, arr, item)) {
                 return make_oom_error(context);
             }
             search_start = match.suffix().first;
@@ -2432,7 +2527,7 @@ public:
             return make_error(context, "parse query require text value");
         }
         ScriptRuntime &runtime = context.runtime();
-        JsValue obj_val = JsValue::make_object(runtime.heap(), 0);
+        JsValue obj_val = make_heap_object_value(runtime, 0);
         if (obj_val.type_ != JsNodeType::Object) {
             return make_oom_error(context);
         }
@@ -2461,7 +2556,7 @@ public:
                     return make_error(context, "parse query invalid encoding");
                 }
                 if (!key.empty()) {
-                    auto *key_str = runtime.alloc_with_gc(key.size(), [&]() {
+                    auto *key_str = runtime.alloc_with_gc(fiber::json::gc_estimate_utf8_string_bytes(key.size()), [&]() {
                         return fiber::json::gc_new_string(&runtime.heap(), key.data(), key.size());
                     });
                     if (!key_str) {
@@ -2473,25 +2568,25 @@ public:
                     }
                     const JsValue *existing = fiber::json::gc_object_get(obj, key_str);
                     if (!existing) {
-                        if (!fiber::json::gc_object_set(&runtime.heap(), obj, key_str, value_val)) {
+                        if (!object_set_value(runtime, obj, key_str, value_val)) {
                             return make_oom_error(context);
                         }
                     } else if (existing->type_ == JsNodeType::Array) {
                         auto *arr = reinterpret_cast<GcArray *>(existing->gc);
-                        if (!arr || !fiber::json::gc_array_push(&runtime.heap(), arr, value_val)) {
+                        if (!arr || !push_array_value(runtime, arr, value_val)) {
                             return make_oom_error(context);
                         }
                     } else {
-                        JsValue array = JsValue::make_array(runtime.heap(), 0);
+                        JsValue array = make_heap_array_value(runtime, 2);
                         if (array.type_ != JsNodeType::Array) {
                             return make_oom_error(context);
                         }
                         auto *arr = reinterpret_cast<GcArray *>(array.gc);
-                        if (!fiber::json::gc_array_push(&runtime.heap(), arr, *existing) ||
-                            !fiber::json::gc_array_push(&runtime.heap(), arr, value_val)) {
+                        if (!push_array_value(runtime, arr, *existing) ||
+                            !push_array_value(runtime, arr, value_val)) {
                             return make_oom_error(context);
                         }
-                        if (!fiber::json::gc_object_set(&runtime.heap(), obj, key_str, array)) {
+                        if (!object_set_value(runtime, obj, key_str, array)) {
                             return make_oom_error(context);
                         }
                     }

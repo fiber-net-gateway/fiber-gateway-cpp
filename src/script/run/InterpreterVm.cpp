@@ -38,6 +38,32 @@ VmError make_throw_error() {
     return error;
 }
 
+std::size_t estimate_exception_bytes(std::string_view name, std::string_view message) {
+    return sizeof(fiber::json::GcException) +
+           fiber::json::gc_estimate_utf8_string_bytes(name.size()) +
+           fiber::json::gc_estimate_utf8_string_bytes(message.size());
+}
+
+std::size_t estimate_iterator_next_bytes(const fiber::json::GcIterator *iter) {
+    if (!iter) {
+        return 0;
+    }
+    std::size_t bytes = 0;
+    if (iter->kind == fiber::json::GcIteratorKind::Array) {
+        if (iter->mode == fiber::json::GcIteratorMode::Entries) {
+            bytes += fiber::json::gc_estimate_array_bytes(2);
+        }
+        return bytes;
+    }
+    if (iter->mode == fiber::json::GcIteratorMode::Entries) {
+        bytes += fiber::json::gc_estimate_array_bytes(2);
+    }
+    if (!iter->using_snapshot && iter->object && iter->expected_version != iter->object->version) {
+        bytes += fiber::json::gc_estimate_object_snapshot_bytes(iter->object->size);
+    }
+    return bytes;
+}
+
 } // namespace
 
 InterpreterVm::InterpreterVm(const ir::Compiled &compiled,
@@ -414,8 +440,11 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
                 }
                 break;
             case ir::Code::NEW_OBJECT: {
-                maybe_collect();
-                fiber::json::JsValue obj = fiber::json::JsValue::make_object(runtime_.heap(), 0);
+                fiber::json::JsValue obj = fiber::json::JsValue::make_undefined();
+                runtime_.run_with_gc_retry(fiber::json::gc_estimate_object_bytes(0), [&]() {
+                    obj = fiber::json::JsValue::make_object(runtime_.heap(), 0);
+                    return obj.type_ == fiber::json::JsNodeType::Object;
+                });
                 if (obj.type_ != fiber::json::JsNodeType::Object) {
                     VmError error = make_oom(compiled_.positions[pc_ - 1]);
                     if (!handle_error(error, pc_ - 1)) {
@@ -427,8 +456,11 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
                 break;
             }
             case ir::Code::NEW_ARRAY: {
-                maybe_collect();
-                fiber::json::JsValue arr = fiber::json::JsValue::make_array(runtime_.heap(), 0);
+                fiber::json::JsValue arr = fiber::json::JsValue::make_undefined();
+                runtime_.run_with_gc_retry(fiber::json::gc_estimate_array_bytes(0), [&]() {
+                    arr = fiber::json::JsValue::make_array(runtime_.heap(), 0);
+                    return arr.type_ == fiber::json::JsNodeType::Array;
+                });
                 if (arr.type_ != fiber::json::JsNodeType::Array) {
                     VmError error = make_oom(compiled_.positions[pc_ - 1]);
                     if (!handle_error(error, pc_ - 1)) {
@@ -734,7 +766,9 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
                 auto *iter = reinterpret_cast<fiber::json::GcIterator *>(vars_[idx].gc);
                 fiber::json::JsValue out;
                 bool done = true;
-                bool ok = fiber::json::gc_iterator_next(&runtime_.heap(), iter, out, done);
+                bool ok = runtime_.run_with_gc_retry(estimate_iterator_next_bytes(iter), [&]() {
+                    return fiber::json::gc_iterator_next(&runtime_.heap(), iter, out, done);
+                });
                 stack_[sp_++] = fiber::json::JsValue::make_boolean(ok && !done);
                 break;
             }
@@ -1087,16 +1121,20 @@ VmResult InterpreterVm::load_const(std::size_t operand_index) {
             value = fiber::json::JsValue::make_float(cv->float_value);
             break;
         case ir::Compiled::ConstValue::Kind::String: {
-            maybe_collect();
-            value = fiber::json::JsValue::make_string(runtime_.heap(), cv->text.data(), cv->text.size());
+            runtime_.run_with_gc_retry(fiber::json::gc_estimate_utf8_string_bytes(cv->text.size()), [&]() {
+                value = fiber::json::JsValue::make_string(runtime_.heap(), cv->text.data(), cv->text.size());
+                return value.type_ == fiber::json::JsNodeType::HeapString;
+            });
             if (value.type_ != fiber::json::JsNodeType::HeapString) {
                 return std::unexpected(make_oom(-1));
             }
             break;
         }
         case ir::Compiled::ConstValue::Kind::Binary: {
-            maybe_collect();
-            value = fiber::json::JsValue::make_binary(runtime_.heap(), cv->bytes.data(), cv->bytes.size());
+            runtime_.run_with_gc_retry(fiber::json::gc_estimate_binary_bytes(cv->bytes.size()), [&]() {
+                value = fiber::json::JsValue::make_binary(runtime_.heap(), cv->bytes.data(), cv->bytes.size());
+                return value.type_ == fiber::json::JsNodeType::HeapBinary;
+            });
             if (value.type_ != fiber::json::JsNodeType::HeapBinary) {
                 return std::unexpected(make_oom(-1));
             }
@@ -1109,19 +1147,37 @@ VmResult InterpreterVm::load_const(std::size_t operand_index) {
 }
 
 VmResult InterpreterVm::make_exception_value(const VmError &error) {
-    maybe_collect();
     std::string name = error.name.empty() ? "EXEC_ERROR" : error.name;
     std::string message = error.message.empty() ? "script error" : error.message;
-    fiber::json::GcString *name_str = fiber::json::gc_new_string(&runtime_.heap(), name.c_str(), name.size());
+    fiber::json::JsValue rooted_name = fiber::json::JsValue::make_undefined();
+    fiber::json::JsValue rooted_message = fiber::json::JsValue::make_undefined();
+    fiber::json::JsValue rooted_meta = error.meta;
+    TempRootScope temp_roots(runtime_);
+    temp_roots.add(&rooted_name);
+    temp_roots.add(&rooted_message);
+    temp_roots.add(&rooted_meta);
+
+    fiber::json::GcString *name_str =
+        runtime_.alloc_with_gc(fiber::json::gc_estimate_utf8_string_bytes(name.size()), [&]() {
+            return fiber::json::gc_new_string(&runtime_.heap(), name.c_str(), name.size());
+        });
     if (!name_str) {
         return std::unexpected(make_oom(error.position));
     }
-    fiber::json::GcString *message_str = fiber::json::gc_new_string(&runtime_.heap(), message.c_str(), message.size());
+    rooted_name.type_ = fiber::json::JsNodeType::HeapString;
+    rooted_name.gc = &name_str->hdr;
+    fiber::json::GcString *message_str =
+        runtime_.alloc_with_gc(fiber::json::gc_estimate_utf8_string_bytes(message.size()), [&]() {
+            return fiber::json::gc_new_string(&runtime_.heap(), message.c_str(), message.size());
+        });
     if (!message_str) {
         return std::unexpected(make_oom(error.position));
     }
-    fiber::json::GcException *exc =
-        fiber::json::gc_new_exception(&runtime_.heap(), error.position, name_str, message_str, error.meta);
+    rooted_message.type_ = fiber::json::JsNodeType::HeapString;
+    rooted_message.gc = &message_str->hdr;
+    fiber::json::GcException *exc = runtime_.alloc_with_gc(estimate_exception_bytes(name, message), [&]() {
+        return fiber::json::gc_new_exception(&runtime_.heap(), error.position, name_str, message_str, rooted_meta);
+    });
     if (!exc) {
         return std::unexpected(make_oom(error.position));
     }
@@ -1173,11 +1229,6 @@ bool InterpreterVm::apply_async_ready(VmResult &out) {
         case AsyncResumeKind::None:
             break;
     }
-    return true;
-}
-
-bool InterpreterVm::maybe_collect() {
-    runtime_.maybe_collect();
     return true;
 }
 

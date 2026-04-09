@@ -101,17 +101,18 @@ VmResult Unaries::typeof_op(const fiber::json::JsValue &value, ScriptRuntime &ru
 
 VmResult Unaries::iterate(const fiber::json::JsValue &value, ScriptRuntime &runtime) {
     fiber::json::GcHeap *heap = &runtime.heap();
-    runtime.maybe_collect();
     fiber::json::GcIterator *iter = nullptr;
-    if (value.type_ == fiber::json::JsNodeType::Array) {
-        iter = fiber::json::gc_new_array_iterator(heap, reinterpret_cast<fiber::json::GcArray *>(value.gc),
-                                                  fiber::json::GcIteratorMode::Values);
-    } else if (value.type_ == fiber::json::JsNodeType::Object) {
-        iter = fiber::json::gc_new_object_iterator(heap, reinterpret_cast<fiber::json::GcObject *>(value.gc),
-                                                   fiber::json::GcIteratorMode::Values);
-    } else {
-        iter = fiber::json::gc_new_array_iterator(heap, nullptr, fiber::json::GcIteratorMode::Values);
-    }
+    iter = runtime.alloc_with_gc(fiber::json::gc_estimate_iterator_bytes(), [&]() {
+        if (value.type_ == fiber::json::JsNodeType::Array) {
+            return fiber::json::gc_new_array_iterator(heap, reinterpret_cast<fiber::json::GcArray *>(value.gc),
+                                                      fiber::json::GcIteratorMode::Values);
+        }
+        if (value.type_ == fiber::json::JsNodeType::Object) {
+            return fiber::json::gc_new_object_iterator(heap, reinterpret_cast<fiber::json::GcObject *>(value.gc),
+                                                       fiber::json::GcIteratorMode::Values);
+        }
+        return fiber::json::gc_new_array_iterator(heap, nullptr, fiber::json::GcIteratorMode::Values);
+    });
     if (!iter) {
         VmError error;
         error.name = "EXEC_OUT_OF_MEMORY";

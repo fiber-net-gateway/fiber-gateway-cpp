@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -19,6 +20,13 @@ constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 constexpr std::size_t kMinBucketCount = 8;
 constexpr std::size_t kMaxLoadNumerator = 3;
 constexpr std::size_t kMaxLoadDenominator = 4;
+
+std::size_t saturating_add(std::size_t lhs, std::size_t rhs) {
+    if (rhs > std::numeric_limits<std::size_t>::max() - lhs) {
+        return std::numeric_limits<std::size_t>::max();
+    }
+    return lhs + rhs;
+}
 
 GcMark flip_mark(GcMark mark) {
     return (mark == GcMark::GcMark_0) ? GcMark::GcMark_1 : GcMark::GcMark_0;
@@ -112,6 +120,87 @@ std::size_t bucket_count_for_entries(std::size_t entry_capacity) {
         needed = kMinBucketCount;
     }
     return next_pow2(needed);
+}
+
+std::size_t string_storage_bytes(std::size_t len, GcStringEncoding encoding) {
+    if (encoding == GcStringEncoding::Utf16) {
+        return sizeof(char16_t) * (len + 1);
+    }
+    return len + 1;
+}
+
+std::size_t array_storage_bytes(std::size_t capacity) {
+    return sizeof(JsValue) * capacity;
+}
+
+std::size_t entry_storage_bytes(std::size_t capacity) {
+    return sizeof(GcObjectEntry) * capacity;
+}
+
+std::size_t bucket_storage_bytes(std::size_t bucket_count) {
+    return sizeof(std::int32_t) * bucket_count;
+}
+
+std::size_t next_array_capacity(const GcArray *arr, std::size_t expected) {
+    if (!arr || expected <= arr->capacity) {
+        return arr ? arr->capacity : 0;
+    }
+    std::size_t new_capacity = arr->capacity ? arr->capacity * 2 : 1;
+    while (new_capacity < expected) {
+        new_capacity *= 2;
+    }
+    return new_capacity;
+}
+
+std::size_t next_object_entry_capacity(const GcObject *obj, std::size_t expected) {
+    if (!obj) {
+        return 0;
+    }
+    std::size_t new_capacity = obj->entry_capacity ? obj->entry_capacity : 1;
+    if (expected > new_capacity) {
+        while (new_capacity < expected) {
+            new_capacity *= 2;
+        }
+        return new_capacity;
+    }
+    if (obj->entry_capacity == 0 && expected > 0) {
+        return expected;
+    }
+    return obj->entry_capacity;
+}
+
+void gc_account_add(GcHeap *heap, std::size_t bytes) {
+    if (!heap || bytes == 0) {
+        return;
+    }
+    heap->bytes = saturating_add(heap->bytes, bytes);
+}
+
+void gc_account_sub(GcHeap *heap, std::size_t bytes) {
+    if (!heap || bytes == 0) {
+        return;
+    }
+    heap->bytes = (bytes >= heap->bytes) ? 0 : (heap->bytes - bytes);
+}
+
+void *gc_alloc_extra(GcHeap *heap, std::size_t bytes) {
+    if (!heap || bytes == 0) {
+        return nullptr;
+    }
+    void *mem = heap->alloc.alloc(bytes);
+    if (!mem) {
+        return nullptr;
+    }
+    gc_account_add(heap, bytes);
+    return mem;
+}
+
+void gc_free_extra(GcHeap *heap, void *ptr, std::size_t bytes) {
+    if (!heap || !ptr) {
+        return;
+    }
+    heap->alloc.free(ptr);
+    gc_account_sub(heap, bytes);
 }
 
 struct DecodedString {
@@ -235,8 +324,7 @@ bool rehash_buckets(GcHeap *heap, GcObject *obj, std::size_t new_bucket_count) {
     if (new_bucket_count == 0) {
         return false;
     }
-    auto *new_buckets =
-        static_cast<std::int32_t *>(heap->alloc.alloc(sizeof(std::int32_t) * new_bucket_count));
+    auto *new_buckets = static_cast<std::int32_t *>(gc_alloc_extra(heap, bucket_storage_bytes(new_bucket_count)));
     if (!new_buckets) {
         return false;
     }
@@ -254,7 +342,7 @@ bool rehash_buckets(GcHeap *heap, GcObject *obj, std::size_t new_bucket_count) {
         new_buckets[bucket] = static_cast<std::int32_t>(i);
     }
     if (obj->buckets) {
-        heap->alloc.free(obj->buckets);
+        gc_free_extra(heap, obj->buckets, bucket_storage_bytes(obj->bucket_count));
     }
     obj->buckets = new_buckets;
     obj->bucket_count = new_bucket_count;
@@ -266,8 +354,7 @@ bool grow_entries(GcHeap *heap, GcObject *obj, std::size_t new_capacity) {
     if (!heap || !obj || new_capacity == 0) {
         return false;
     }
-    auto *new_entries =
-        static_cast<GcObjectEntry *>(heap->alloc.alloc(sizeof(GcObjectEntry) * new_capacity));
+    auto *new_entries = static_cast<GcObjectEntry *>(gc_alloc_extra(heap, entry_storage_bytes(new_capacity)));
     if (!new_entries) {
         return false;
     }
@@ -295,7 +382,7 @@ bool grow_entries(GcHeap *heap, GcObject *obj, std::size_t new_capacity) {
         for (std::size_t i = 0; i < obj->entry_capacity; ++i) {
             std::destroy_at(&obj->entries[i].value);
         }
-        heap->alloc.free(obj->entries);
+        gc_free_extra(heap, obj->entries, entry_storage_bytes(obj->entry_capacity));
     }
     obj->entries = new_entries;
     obj->entry_capacity = new_capacity;
@@ -351,7 +438,6 @@ bool build_object_snapshot(GcHeap *heap, GcIterator *iter, const GcObject *obj) 
     if (!heap || !iter || !obj) {
         return false;
     }
-    iter->using_snapshot = true;
     iter->snapshot_index = 0;
     iter->snapshot_size = 0;
     iter->snapshot_keys = nullptr;
@@ -365,7 +451,7 @@ bool build_object_snapshot(GcHeap *heap, GcIterator *iter, const GcObject *obj) 
     if (count == 0) {
         return true;
     }
-    auto **keys = static_cast<GcString **>(heap->alloc.alloc(sizeof(GcString *) * count));
+    auto **keys = static_cast<GcString **>(gc_alloc_extra(heap, sizeof(GcString *) * count));
     if (!keys) {
         return false;
     }
@@ -376,6 +462,7 @@ bool build_object_snapshot(GcHeap *heap, GcIterator *iter, const GcObject *obj) 
             keys[idx++] = entry.key;
         }
     }
+    iter->using_snapshot = true;
     iter->snapshot_keys = keys;
     iter->snapshot_size = idx;
     return true;
@@ -397,7 +484,7 @@ GcHeader *gc_alloc_raw(GcHeap *heap, std::size_t size, GcKind kind) {
 void gc_link(GcHeap *heap, GcHeader *hdr) {
     hdr->next = heap->head;
     heap->head = hdr;
-    heap->bytes += hdr->size_;
+    gc_account_add(heap, hdr->size_);
 }
 
 void gc_mark_obj(GcHeap *heap, GcHeader *obj);
@@ -488,17 +575,17 @@ void gc_free_obj(GcHeap *heap, GcHeader *obj) {
             auto *str = reinterpret_cast<GcString *>(obj);
             if (str->encoding == GcStringEncoding::Utf16) {
                 if (str->data16) {
-                    heap->alloc.free(str->data16);
+                    gc_free_extra(heap, str->data16, string_storage_bytes(str->len, GcStringEncoding::Utf16));
                 }
             } else if (str->data8) {
-                heap->alloc.free(str->data8);
+                gc_free_extra(heap, str->data8, string_storage_bytes(str->len, GcStringEncoding::Byte));
             }
             break;
         }
         case GcKind::Binary: {
             auto *bin = reinterpret_cast<GcBinary *>(obj);
             if (bin->data) {
-                heap->alloc.free(bin->data);
+                gc_free_extra(heap, bin->data, bin->len);
             }
             break;
         }
@@ -508,7 +595,7 @@ void gc_free_obj(GcHeap *heap, GcHeader *obj) {
                 for (std::size_t i = 0; i < arr->capacity; ++i) {
                     std::destroy_at(&arr->elems[i]);
                 }
-                heap->alloc.free(arr->elems);
+                gc_free_extra(heap, arr->elems, array_storage_bytes(arr->capacity));
             }
             break;
         }
@@ -518,10 +605,10 @@ void gc_free_obj(GcHeap *heap, GcHeader *obj) {
                 for (std::size_t i = 0; i < objv->entry_capacity; ++i) {
                     std::destroy_at(&objv->entries[i].value);
                 }
-                heap->alloc.free(objv->entries);
+                gc_free_extra(heap, objv->entries, entry_storage_bytes(objv->entry_capacity));
             }
             if (objv->buckets) {
-                heap->alloc.free(objv->buckets);
+                gc_free_extra(heap, objv->buckets, bucket_storage_bytes(objv->bucket_count));
             }
             break;
         }
@@ -533,18 +620,78 @@ void gc_free_obj(GcHeap *heap, GcHeader *obj) {
         case GcKind::Iterator: {
             auto *iter = reinterpret_cast<GcIterator *>(obj);
             if (iter->snapshot_keys) {
-                heap->alloc.free(iter->snapshot_keys);
+                gc_free_extra(heap, iter->snapshot_keys, sizeof(GcString *) * iter->snapshot_size);
             }
             std::destroy_at(&iter->current_key);
             std::destroy_at(&iter->current_value);
             break;
         }
     }
-    heap->bytes -= obj->size_;
+    gc_account_sub(heap, obj->size_);
     heap->alloc.free(obj);
 }
 
 } // namespace
+
+std::size_t gc_estimate_utf8_string_bytes(std::size_t utf8_len) {
+    return sizeof(GcString) + string_storage_bytes(utf8_len, GcStringEncoding::Utf16);
+}
+
+std::size_t gc_estimate_string_bytes(std::size_t len, GcStringEncoding encoding) {
+    return sizeof(GcString) + string_storage_bytes(len, encoding);
+}
+
+std::size_t gc_estimate_binary_bytes(std::size_t len) {
+    return sizeof(GcBinary) + len;
+}
+
+std::size_t gc_estimate_array_bytes(std::size_t capacity) {
+    return sizeof(GcArray) + array_storage_bytes(capacity);
+}
+
+std::size_t gc_estimate_array_growth_bytes(const GcArray *arr, std::size_t expected) {
+    if (!arr) {
+        return 0;
+    }
+    std::size_t new_capacity = next_array_capacity(arr, expected);
+    if (new_capacity <= arr->capacity) {
+        return 0;
+    }
+    return array_storage_bytes(new_capacity) - array_storage_bytes(arr->capacity);
+}
+
+std::size_t gc_estimate_object_bytes(std::size_t capacity) {
+    std::size_t bucket_count = bucket_count_for_entries(capacity);
+    return sizeof(GcObject) + entry_storage_bytes(capacity) + bucket_storage_bytes(bucket_count);
+}
+
+std::size_t gc_estimate_object_growth_bytes(const GcObject *obj, std::size_t expected) {
+    if (!obj) {
+        return 0;
+    }
+    std::size_t next_entries = next_object_entry_capacity(obj, expected);
+    std::size_t next_buckets = bucket_count_for_entries(std::max(expected, obj->size));
+    std::size_t current_entries = entry_storage_bytes(obj->entry_capacity);
+    std::size_t current_buckets = bucket_storage_bytes(obj->bucket_count);
+    std::size_t target_entries = entry_storage_bytes(next_entries);
+    std::size_t target_buckets = bucket_storage_bytes(next_buckets);
+    std::size_t delta = 0;
+    if (target_entries > current_entries) {
+        delta += target_entries - current_entries;
+    }
+    if (target_buckets > current_buckets) {
+        delta += target_buckets - current_buckets;
+    }
+    return delta;
+}
+
+std::size_t gc_estimate_iterator_bytes() {
+    return sizeof(GcIterator);
+}
+
+std::size_t gc_estimate_object_snapshot_bytes(std::size_t entry_count) {
+    return sizeof(GcString *) * entry_count;
+}
 
 GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len) {
     auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcKind::String);
@@ -562,7 +709,7 @@ GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_
         return nullptr;
     }
     if (len > 0) {
-        str->data8 = static_cast<std::uint8_t *>(heap->alloc.alloc(len + 1));
+        str->data8 = static_cast<std::uint8_t *>(gc_alloc_extra(heap, string_storage_bytes(len, GcStringEncoding::Byte)));
         if (!str->data8) {
             heap->alloc.free(str);
             return nullptr;
@@ -586,7 +733,7 @@ GcString *gc_new_string_bytes_uninit(GcHeap *heap, std::size_t len) {
     str->hash_valid = false;
     str->data8 = nullptr;
     if (len > 0) {
-        str->data8 = static_cast<std::uint8_t *>(heap->alloc.alloc(len + 1));
+        str->data8 = static_cast<std::uint8_t *>(gc_alloc_extra(heap, string_storage_bytes(len, GcStringEncoding::Byte)));
         if (!str->data8) {
             heap->alloc.free(str);
             return nullptr;
@@ -613,7 +760,8 @@ GcString *gc_new_string_utf16(GcHeap *heap, const char16_t *data, std::size_t le
         return nullptr;
     }
     if (len > 0) {
-        str->data16 = static_cast<char16_t *>(heap->alloc.alloc(sizeof(char16_t) * (len + 1)));
+        str->data16 =
+            static_cast<char16_t *>(gc_alloc_extra(heap, string_storage_bytes(len, GcStringEncoding::Utf16)));
         if (!str->data16) {
             heap->alloc.free(str);
             return nullptr;
@@ -637,7 +785,8 @@ GcString *gc_new_string_utf16_uninit(GcHeap *heap, std::size_t len) {
     str->hash_valid = false;
     str->data16 = nullptr;
     if (len > 0) {
-        str->data16 = static_cast<char16_t *>(heap->alloc.alloc(sizeof(char16_t) * (len + 1)));
+        str->data16 =
+            static_cast<char16_t *>(gc_alloc_extra(heap, string_storage_bytes(len, GcStringEncoding::Utf16)));
         if (!str->data16) {
             heap->alloc.free(str);
             return nullptr;
@@ -773,7 +922,7 @@ GcBinary *gc_new_binary(GcHeap *heap, const std::uint8_t *data, std::size_t len)
         return nullptr;
     }
     if (len > 0) {
-        bin->data = static_cast<std::uint8_t *>(heap->alloc.alloc(len));
+        bin->data = static_cast<std::uint8_t *>(gc_alloc_extra(heap, len));
         if (!bin->data) {
             heap->alloc.free(bin);
             return nullptr;
@@ -795,7 +944,7 @@ GcArray *gc_new_array(GcHeap *heap, std::size_t capacity) {
     arr->version = 0;
     arr->elems = nullptr;
     if (capacity > 0) {
-        arr->elems = static_cast<JsValue *>(heap->alloc.alloc(sizeof(JsValue) * capacity));
+        arr->elems = static_cast<JsValue *>(gc_alloc_extra(heap, array_storage_bytes(capacity)));
         if (!arr->elems) {
             heap->alloc.free(arr);
             return nullptr;
@@ -819,7 +968,7 @@ bool gc_array_reserve(GcHeap *heap, GcArray *arr, std::size_t expected) {
     while (new_capacity < expected) {
         new_capacity *= 2;
     }
-    auto *new_elems = static_cast<JsValue *>(heap->alloc.alloc(sizeof(JsValue) * new_capacity));
+    auto *new_elems = static_cast<JsValue *>(gc_alloc_extra(heap, array_storage_bytes(new_capacity)));
     if (!new_elems) {
         return false;
     }
@@ -833,7 +982,7 @@ bool gc_array_reserve(GcHeap *heap, GcArray *arr, std::size_t expected) {
         for (std::size_t i = 0; i < arr->capacity; ++i) {
             std::destroy_at(&arr->elems[i]);
         }
-        heap->alloc.free(arr->elems);
+        gc_free_extra(heap, arr->elems, array_storage_bytes(arr->capacity));
     }
     arr->elems = new_elems;
     arr->capacity = new_capacity;
@@ -949,7 +1098,7 @@ GcObject *gc_new_object(GcHeap *heap, std::size_t capacity) {
     obj->buckets = nullptr;
     obj->entries = nullptr;
     if (capacity > 0) {
-        obj->entries = static_cast<GcObjectEntry *>(heap->alloc.alloc(sizeof(GcObjectEntry) * capacity));
+        obj->entries = static_cast<GcObjectEntry *>(gc_alloc_extra(heap, entry_storage_bytes(capacity)));
         if (!obj->entries) {
             heap->alloc.free(obj);
             return nullptr;
@@ -969,17 +1118,16 @@ GcObject *gc_new_object(GcHeap *heap, std::size_t capacity) {
             for (std::size_t i = 0; i < capacity; ++i) {
                 std::destroy_at(&obj->entries[i].value);
             }
-            heap->alloc.free(obj->entries);
+            gc_free_extra(heap, obj->entries, entry_storage_bytes(capacity));
             heap->alloc.free(obj);
             return nullptr;
         }
-        obj->buckets =
-            static_cast<std::int32_t *>(heap->alloc.alloc(sizeof(std::int32_t) * obj->bucket_count));
+        obj->buckets = static_cast<std::int32_t *>(gc_alloc_extra(heap, bucket_storage_bytes(obj->bucket_count)));
         if (!obj->buckets) {
             for (std::size_t i = 0; i < capacity; ++i) {
                 std::destroy_at(&obj->entries[i].value);
             }
-            heap->alloc.free(obj->entries);
+            gc_free_extra(heap, obj->entries, entry_storage_bytes(capacity));
             heap->alloc.free(obj);
             return nullptr;
         }
@@ -1112,19 +1260,21 @@ bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done) 
         if (iter->index >= arr->size) {
             return true;
         }
-        std::size_t idx = iter->index++;
+        std::size_t idx = iter->index;
         done = false;
         switch (iter->mode) {
             case GcIteratorMode::Keys:
                 out = JsValue::make_integer(static_cast<int64_t>(idx));
                 iter->current_key = out;
                 iter->has_current = true;
+                iter->index = idx + 1;
                 return true;
             case GcIteratorMode::Values:
                 out = arr->elems[idx];
                 iter->current_value = out;
                 iter->current_key = JsValue::make_integer(static_cast<int64_t>(idx));
                 iter->has_current = true;
+                iter->index = idx + 1;
                 return true;
             case GcIteratorMode::Entries: {
                 JsValue key = JsValue::make_integer(static_cast<int64_t>(idx));
@@ -1134,6 +1284,7 @@ bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done) 
                 iter->current_key = key;
                 iter->current_value = arr->elems[idx];
                 iter->has_current = true;
+                iter->index = idx + 1;
                 return true;
             }
         }
@@ -1152,8 +1303,10 @@ bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done) 
         if (iter->snapshot_index >= iter->snapshot_size) {
             return true;
         }
-        GcString *key = iter->snapshot_keys[iter->snapshot_index++];
+        std::size_t snapshot_index = iter->snapshot_index;
+        GcString *key = iter->snapshot_keys[snapshot_index];
         if (!key) {
+            iter->snapshot_index = snapshot_index + 1;
             return true;
         }
         JsValue key_value = make_heap_string_value(key);
@@ -1165,12 +1318,14 @@ bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done) 
                 out = key_value;
                 iter->current_key = out;
                 iter->has_current = true;
+                iter->snapshot_index = snapshot_index + 1;
                 return true;
             case GcIteratorMode::Values:
                 out = value;
                 iter->current_value = out;
                 iter->current_key = key_value;
                 iter->has_current = true;
+                iter->snapshot_index = snapshot_index + 1;
                 return true;
             case GcIteratorMode::Entries:
                 if (!build_entry_array(heap, key_value, value, out)) {
@@ -1179,6 +1334,7 @@ bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done) 
                 iter->current_key = key_value;
                 iter->current_value = value;
                 iter->has_current = true;
+                iter->snapshot_index = snapshot_index + 1;
                 return true;
         }
         return true;
@@ -1186,8 +1342,9 @@ bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done) 
     while (iter->cursor != -1) {
         int32_t cursor = iter->cursor;
         GcObjectEntry &entry = obj->entries[cursor];
-        iter->cursor = entry.next_order;
+        int32_t next_cursor = entry.next_order;
         if (!entry.occupied || !entry.key) {
+            iter->cursor = next_cursor;
             continue;
         }
         JsValue key_value = make_heap_string_value(entry.key);
@@ -1197,12 +1354,14 @@ bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done) 
                 out = key_value;
                 iter->current_key = out;
                 iter->has_current = true;
+                iter->cursor = next_cursor;
                 return true;
             case GcIteratorMode::Values:
                 out = entry.value;
                 iter->current_value = out;
                 iter->current_key = key_value;
                 iter->has_current = true;
+                iter->cursor = next_cursor;
                 return true;
             case GcIteratorMode::Entries:
                 if (!build_entry_array(heap, key_value, entry.value, out)) {
@@ -1211,6 +1370,7 @@ bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done) 
                 iter->current_key = key_value;
                 iter->current_value = entry.value;
                 iter->has_current = true;
+                iter->cursor = next_cursor;
                 return true;
         }
         return true;
@@ -1364,11 +1524,7 @@ const GcObjectEntry *gc_object_entry_at(const GcObject *obj, std::size_t index) 
     return nullptr;
 }
 
-void gc_collect(GcHeap *heap, JsValue **roots, std::size_t root_count) {
-    heap->live_mark = flip_mark(heap->live_mark);
-    for (std::size_t i = 0; i < root_count; ++i) {
-        gc_mark_value(heap, *roots[i]);
-    }
+void gc_sweep_unmarked(GcHeap *heap) {
     GcHeader **cursor = &heap->head;
     while (*cursor) {
         GcHeader *obj = *cursor;
@@ -1379,6 +1535,14 @@ void gc_collect(GcHeap *heap, JsValue **roots, std::size_t root_count) {
             cursor = &obj->next;
         }
     }
+}
+
+void gc_collect(GcHeap *heap, JsValue **roots, std::size_t root_count) {
+    heap->live_mark = flip_mark(heap->live_mark);
+    for (std::size_t i = 0; i < root_count; ++i) {
+        gc_mark_value(heap, *roots[i]);
+    }
+    gc_sweep_unmarked(heap);
 }
 
 std::size_t gc_bytes_used(const GcHeap &heap) {
@@ -1480,10 +1644,24 @@ void GcRootSet::visit_all(RootVisitor &visitor) {
 }
 
 void gc_collect(GcHeap &heap, GcRootSet &roots) {
-    std::vector<JsValue *> root_values;
-    GcRootSet::RootVisitor visitor(root_values);
+    class MarkingVisitor final : public GcRootSet::RootVisitor {
+    public:
+        explicit MarkingVisitor(GcHeap &heap) : heap_(&heap) {}
+
+        void visit(JsValue *value) override {
+            if (value) {
+                gc_mark_value(heap_, *value);
+            }
+        }
+
+    private:
+        GcHeap *heap_ = nullptr;
+    };
+
+    heap.live_mark = flip_mark(heap.live_mark);
+    MarkingVisitor visitor(heap);
     roots.visit_all(visitor);
-    gc_collect(&heap, root_values.data(), root_values.size());
+    gc_sweep_unmarked(&heap);
 }
 
 GcRootHandle::GcRootHandle(GcRootSet &roots, JsValue *value)
