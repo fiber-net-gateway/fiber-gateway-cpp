@@ -1,18 +1,95 @@
 #ifndef FIBER_SCRIPT_LIBRARY_H
 #define FIBER_SCRIPT_LIBRARY_H
 
+#include <cstdint>
 #include <expected>
+#include <string>
 #include <string_view>
 #include <vector>
 
+#include "../common/json/JsNode.h"
 #include "ExecutionContext.h"
 #include "async/AsyncExecutionContext.h"
 
 namespace fiber::script {
 
+class ScriptRuntime;
+
 class Library {
 public:
     using FunctionResult = std::expected<fiber::json::JsValue, fiber::json::JsValue>;
+
+    struct HostCallFrame {
+        ScriptRuntime *runtime = nullptr;
+        const fiber::json::JsValue *root = nullptr;
+        void *attach = nullptr;
+        const fiber::json::JsValue *args = nullptr;
+        std::uint32_t argc = 0;
+        std::uint32_t flags = 0;
+    };
+
+    enum class HostFaultCode : std::uint16_t {
+        None = 0,
+        OutOfMemory,
+        InvalidArgument,
+        InvalidState,
+        ServiceUnavailable,
+        Timeout,
+        Cancelled,
+        Internal,
+    };
+
+    struct HostFault {
+        HostFaultCode code = HostFaultCode::None;
+        std::string_view name{};
+        std::string_view message{};
+        int status = 500;
+        fiber::json::JsValue meta = fiber::json::JsValue::make_undefined();
+    };
+
+    enum class HostCallResultKind : std::uint8_t {
+        Return = 0,
+        Throw,
+        Fault,
+        Pending,
+    };
+
+    struct HostCallResult {
+        HostCallResultKind kind = HostCallResultKind::Fault;
+        fiber::json::JsValue value = fiber::json::JsValue::make_undefined();
+        HostFault fault{};
+
+        static HostCallResult returned(const fiber::json::JsValue &value);
+        static HostCallResult thrown(const fiber::json::JsValue &value);
+        static HostCallResult faulted(HostFault fault);
+        static HostCallResult pending();
+    };
+
+    struct HostAsyncCompletion {
+        void (*complete)(void *ctx, HostCallResult result) noexcept = nullptr;
+        void *ctx = nullptr;
+    };
+
+    using HostSyncThunk = HostCallResult (*)(void *userdata, const HostCallFrame &frame) noexcept;
+    using HostAsyncThunk = HostCallResult (*)(void *userdata,
+                                              const HostCallFrame &frame,
+                                              const HostAsyncCompletion &completion) noexcept;
+
+    struct HostCallable {
+        enum class Kind : std::uint8_t {
+            SyncFunction = 0,
+            AsyncFunction,
+            SyncConstant,
+            AsyncConstant,
+        };
+
+        Kind kind = Kind::SyncFunction;
+        std::uint32_t flags = 0;
+        void *userdata = nullptr;
+        HostSyncThunk sync = nullptr;
+        HostAsyncThunk async = nullptr;
+        const char *debug_name = nullptr;
+    };
 
     class Constant {
     public:
@@ -58,6 +135,16 @@ public:
     virtual DirectiveDef *find_directive_def(std::string_view type,
                                              std::string_view name,
                                              const std::vector<fiber::json::JsValue> &literals) = 0;
+
+    const HostCallable *resolve_func(std::string_view name) const;
+    const HostCallable *resolve_async_func(std::string_view name) const;
+    const HostCallable *resolve_constant(std::string_view namespace_name, std::string_view key) const;
+    const HostCallable *resolve_async_constant(std::string_view namespace_name, std::string_view key) const;
+
+    const HostCallable *host_callable_for(Function *func) const;
+    const HostCallable *host_callable_for(AsyncFunction *func) const;
+    const HostCallable *host_callable_for(Constant *constant) const;
+    const HostCallable *host_callable_for(AsyncConstant *constant) const;
 };
 
 } // namespace fiber::script

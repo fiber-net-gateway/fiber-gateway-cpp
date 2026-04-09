@@ -64,6 +64,31 @@ std::size_t estimate_iterator_next_bytes(const fiber::json::GcIterator *iter) {
     return bytes;
 }
 
+std::size_t decode_call_site_index(std::int32_t instr) {
+    return static_cast<std::size_t>(static_cast<std::uint32_t>(instr) >> 8);
+}
+
+bool opcode_uses_spread(std::uint8_t op) {
+    return op == ir::Code::CALL_FUNC_SPREAD || op == ir::Code::CALL_ASYNC_FUNC_SPREAD;
+}
+
+Library::HostCallable::Kind expected_host_kind(std::uint8_t op) {
+    switch (op) {
+        case ir::Code::CALL_FUNC:
+        case ir::Code::CALL_FUNC_SPREAD:
+            return Library::HostCallable::Kind::SyncFunction;
+        case ir::Code::CALL_ASYNC_FUNC:
+        case ir::Code::CALL_ASYNC_FUNC_SPREAD:
+            return Library::HostCallable::Kind::AsyncFunction;
+        case ir::Code::CALL_CONST:
+            return Library::HostCallable::Kind::SyncConstant;
+        case ir::Code::CALL_ASYNC_CONST:
+            return Library::HostCallable::Kind::AsyncConstant;
+        default:
+            FIBER_PANIC("invalid host call opcode");
+    }
+}
+
 } // namespace
 
 InterpreterVm::InterpreterVm(const ir::Compiled &compiled,
@@ -83,8 +108,6 @@ InterpreterVm::InterpreterVm(const ir::Compiled &compiled,
         stack_ = slots_.data();
         vars_ = stack_ + stack_size_;
     }
-    arg_ptr_ = stack_ ? stack_ : &undefined_;
-    arg_cnt_ = 0;
     const_cache_.resize(compiled_.operands.size());
     const_cache_valid_.resize(compiled_.operands.size(), false);
     build_exception_index();
@@ -601,125 +624,24 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
                 }
                 break;
             }
-            case ir::Code::CALL_FUNC: {
-                std::size_t func_index = static_cast<std::size_t>(instr >> 16);
-                std::size_t arg_count = static_cast<std::size_t>((instr >> 8) & 0xFF);
-                auto *function = compiled_.operand_function(func_index);
-                FIBER_ASSERT(function);
-                sp_ -= arg_count;
-                set_args_for_ctx(sp_, arg_count);
-                auto result = function->call(*this);
-                if (!result) {
-                    pending_value_ = result.error();
-                    pending_value_kind_ = PendingValueKind::Thrown;
-                    VmError error = make_throw_error();
-                    if (!handle_error(error, pc_ - 1)) {
-                        return finish_error(error);
-                    }
-                    continue;
-                }
-                stack_[sp_++] = result.value();
-                break;
-            }
-            case ir::Code::CALL_FUNC_SPREAD: {
-                std::size_t func_index = static_cast<std::size_t>(instr >> 8);
-                auto *function = compiled_.operand_function(func_index);
-                FIBER_ASSERT(function);
-                set_args_for_spread(sp_ - 1);
-                auto result = function->call(*this);
-                clear_args();
-                if (!result) {
-                    pending_value_ = result.error();
-                    pending_value_kind_ = PendingValueKind::Thrown;
-                    VmError error = make_throw_error();
-                    if (!handle_error(error, pc_ - 1)) {
-                        return finish_error(error);
-                    }
-                    continue;
-                }
-                stack_[sp_ - 1] = result.value();
-                break;
-            }
-            case ir::Code::CALL_ASYNC_FUNC: {
-                std::size_t func_index = static_cast<std::size_t>(instr >> 16);
-                std::size_t arg_count = static_cast<std::size_t>((instr >> 8) & 0xFF);
-                auto *function = compiled_.operand_async_function(func_index);
-                FIBER_ASSERT(function);
-                sp_ -= arg_count;
-                set_args_for_ctx(sp_, arg_count);
-                async_pending_ = true;
-                async_ready_ = false;
-                async_resume_kind_ = AsyncResumeKind::PushResult;
-                async_resume_epc_ = pc_ - 1;
-                function->call(*this);
-                if (!async_ready_) {
-                    in_iterate_ = false;
-                    state_ = VmState::Suspend;
-                    return state_;
-                }
-                if (!apply_async_ready(out)) {
-                    in_iterate_ = false;
-                    state_ = VmState::Error;
-                    return state_;
-                }
-                break;
-            }
-            case ir::Code::CALL_ASYNC_FUNC_SPREAD: {
-                std::size_t func_index = static_cast<std::size_t>(instr >> 8);
-                auto *function = compiled_.operand_async_function(func_index);
-                FIBER_ASSERT(function);
-                set_args_for_spread(sp_ - 1);
-                async_pending_ = true;
-                async_ready_ = false;
-                async_resume_kind_ = AsyncResumeKind::ReplaceTop;
-                async_resume_epc_ = pc_ - 1;
-                function->call(*this);
-                if (!async_ready_) {
-                    in_iterate_ = false;
-                    state_ = VmState::Suspend;
-                    return state_;
-                }
-                if (!apply_async_ready(out)) {
-                    in_iterate_ = false;
-                    state_ = VmState::Error;
-                    return state_;
-                }
-                break;
-            }
-            case ir::Code::CALL_CONST: {
-                std::size_t const_index = static_cast<std::size_t>(instr >> 8);
-                auto *constant = compiled_.operand_constant(const_index);
-                FIBER_ASSERT(constant);
-                auto result = constant->get(*this);
-                if (!result) {
-                    pending_value_ = result.error();
-                    pending_value_kind_ = PendingValueKind::Thrown;
-                    VmError error = make_throw_error();
-                    if (!handle_error(error, pc_ - 1)) {
-                        return finish_error(error);
-                    }
-                    continue;
-                }
-                stack_[sp_++] = result.value();
-                break;
-            }
+            case ir::Code::CALL_FUNC:
+            case ir::Code::CALL_FUNC_SPREAD:
+            case ir::Code::CALL_ASYNC_FUNC:
+            case ir::Code::CALL_ASYNC_FUNC_SPREAD:
+            case ir::Code::CALL_CONST:
             case ir::Code::CALL_ASYNC_CONST: {
-                std::size_t const_index = static_cast<std::size_t>(instr >> 8);
-                auto *constant = compiled_.operand_async_constant(const_index);
-                FIBER_ASSERT(constant);
-                async_pending_ = true;
-                async_ready_ = false;
-                async_resume_kind_ = AsyncResumeKind::PushResult;
-                async_resume_epc_ = pc_ - 1;
-                constant->get(*this);
-                if (!async_ready_) {
-                    in_iterate_ = false;
-                    state_ = VmState::Suspend;
-                    return state_;
+                const auto &site = compiled_.call_site_at(decode_call_site_index(instr));
+                const bool is_spread = opcode_uses_spread(op);
+                const AsyncResumeKind resume_kind = is_spread ? AsyncResumeKind::ReplaceTop
+                                                              : AsyncResumeKind::PushResult;
+                const auto &symbol = compiled_.host_symbol_at(site.host_symbol_index);
+                FIBER_ASSERT(symbol.kind == expected_host_kind(op));
+                FIBER_ASSERT(is_spread == ((site.flags & ir::Compiled::CallSiteSpreadArgs) != 0));
+                if ((op == ir::Code::CALL_FUNC || op == ir::Code::CALL_ASYNC_FUNC) && !is_spread) {
+                    sp_ -= site.argc;
                 }
-                if (!apply_async_ready(out)) {
+                if (!dispatch_call_site(site, resume_kind, out)) {
                     in_iterate_ = false;
-                    state_ = VmState::Error;
                     return state_;
                 }
                 break;
@@ -851,79 +773,18 @@ void InterpreterVm::set_resume_callback(ResumeCallback callback, void *context) 
     }
 }
 
-ScriptRuntime &InterpreterVm::runtime() {
-    return runtime_;
-}
-
-const fiber::json::JsValue &InterpreterVm::root() const {
-    return root_;
-}
-
-void *InterpreterVm::attach() const {
-    return attach_;
-}
-
-const fiber::json::JsValue &InterpreterVm::arg_value(std::size_t index) const {
-    if (!arg_ptr_) {
-        if (arg_spread_slot_ >= stack_size_) {
-            return undefined_;
-        }
-        const fiber::json::JsValue &args = stack_[arg_spread_slot_];
-        if (fiber::json::js_value_type(args) != fiber::json::JsNodeType::Array) {
-            return undefined_;
-        }
-        auto *arr = fiber::json::js_value_heap_ptr<const fiber::json::GcArray>(args);
-        const fiber::json::JsValue *found = fiber::json::gc_array_get(arr, index);
-        return found ? *found : undefined_;
-    }
-    if (index >= arg_cnt_) {
-        return undefined_;
-    }
-    return arg_ptr_[index];
-}
-
-std::size_t InterpreterVm::arg_count() const {
-    if (!arg_ptr_) {
-        if (arg_spread_slot_ >= stack_size_) {
-            return 0;
-        }
-        const fiber::json::JsValue &args = stack_[arg_spread_slot_];
-        if (fiber::json::js_value_type(args) != fiber::json::JsNodeType::Array) {
-            return 0;
-        }
-        auto *arr = fiber::json::js_value_heap_ptr<const fiber::json::GcArray>(args);
-        return arr ? arr->size : 0;
-    }
-    return arg_cnt_;
-}
-
-void InterpreterVm::return_value(const fiber::json::JsValue &value) {
-    if (state_ == VmState::Success || state_ == VmState::Error) {
+void InterpreterVm::async_complete(void *context, Library::HostCallResult result) noexcept {
+    auto *vm = static_cast<InterpreterVm *>(context);
+    if (!vm || vm->state_ == VmState::Success || vm->state_ == VmState::Error) {
         return;
     }
-    if (!async_pending_ || async_ready_) {
+    if (!vm->async_pending_ || vm->async_ready_) {
         return;
     }
-    pending_value_ = value;
-    pending_value_kind_ = PendingValueKind::AsyncReturn;
-    async_ready_ = true;
-    if (!in_iterate_) {
-        notify_resume();
-    }
-}
-
-void InterpreterVm::throw_value(const fiber::json::JsValue &value) {
-    if (state_ == VmState::Success || state_ == VmState::Error) {
-        return;
-    }
-    if (!async_pending_ || async_ready_) {
-        return;
-    }
-    pending_value_ = value;
-    pending_value_kind_ = PendingValueKind::AsyncThrow;
-    async_ready_ = true;
-    if (!in_iterate_) {
-        notify_resume();
+    vm->async_result_ = result;
+    vm->async_ready_ = true;
+    if (!vm->in_iterate_) {
+        vm->notify_resume();
     }
 }
 
@@ -954,13 +815,19 @@ void InterpreterVm::visit_roots(fiber::json::GcRootSet::RootVisitor &visitor) {
             visitor.visit(&pending_error_.meta);
         }
     }
-    if (async_pending_ && async_ready_ &&
-        (pending_value_kind_ == PendingValueKind::AsyncReturn ||
-         pending_value_kind_ == PendingValueKind::AsyncThrow)) {
-        visitor.visit(&pending_value_);
+    if (async_pending_ && async_ready_) {
+        if (async_result_.kind == Library::HostCallResultKind::Return ||
+            async_result_.kind == Library::HostCallResultKind::Throw) {
+            visitor.visit(&async_result_.value);
+        } else if (async_result_.kind == Library::HostCallResultKind::Fault) {
+            visitor.visit(&async_result_.fault.meta);
+        }
     }
     if (pending_value_kind_ == PendingValueKind::Return) {
         visitor.visit(&pending_value_);
+    }
+    if (!call_args_.empty()) {
+        visitor.visit_range(call_args_.data(), call_args_.size());
     }
 }
 
@@ -983,24 +850,177 @@ void InterpreterVm::notify_resume() {
     resume_callback_(resume_context_);
 }
 
-void InterpreterVm::set_args_for_ctx(std::size_t off, std::size_t count) {
-    if (stack_ && off < stack_size_) {
-        arg_ptr_ = stack_ + off;
-    } else {
-        arg_ptr_ = &undefined_;
+const fiber::json::JsValue *InterpreterVm::prepare_call_args(std::size_t off, std::size_t count) {
+    if (!stack_ || off >= stack_size_) {
+        return &undefined_;
     }
-    arg_cnt_ = count;
+    return stack_ + off;
 }
 
-void InterpreterVm::set_args_for_spread(std::size_t slot) {
-    arg_ptr_ = nullptr;
-    arg_spread_slot_ = slot;
+const fiber::json::JsValue *InterpreterVm::prepare_spread_call_args(std::size_t slot, std::uint32_t &argc) {
+    call_args_.clear();
+    argc = 0;
+    if (!stack_ || slot >= stack_size_) {
+        return nullptr;
+    }
+    const fiber::json::JsValue &args = stack_[slot];
+    if (fiber::json::js_value_type(args) != fiber::json::JsNodeType::Array) {
+        return nullptr;
+    }
+    auto *arr = fiber::json::js_value_heap_ptr<const fiber::json::GcArray>(args);
+    if (!arr || arr->size == 0) {
+        return nullptr;
+    }
+    call_args_.reserve(arr->size);
+    for (std::size_t i = 0; i < arr->size; ++i) {
+        const fiber::json::JsValue *value = fiber::json::gc_array_get(arr, i);
+        call_args_.push_back(value ? *value : fiber::json::JsValue::make_undefined());
+    }
+    argc = static_cast<std::uint32_t>(call_args_.size());
+    return call_args_.data();
 }
 
-void InterpreterVm::clear_args() {
-    arg_ptr_ = stack_ ? stack_ : &undefined_;
-    arg_cnt_ = 0;
-    arg_spread_slot_ = 0;
+Library::HostCallFrame InterpreterVm::make_call_frame(const fiber::json::JsValue *args, std::uint32_t argc) const {
+    Library::HostCallFrame frame;
+    frame.runtime = const_cast<ScriptRuntime *>(&runtime_);
+    frame.root = &root_;
+    frame.attach = attach_;
+    frame.args = args;
+    frame.argc = argc;
+    return frame;
+}
+
+VmError InterpreterVm::make_host_fault_error(const Library::HostFault &fault, std::size_t epc) const {
+    VmError error;
+    error.name = fault.name.empty() ? "HOST_FAULT" : std::string(fault.name);
+    error.message = fault.message.empty() ? "host call failed" : std::string(fault.message);
+    error.status = fault.status;
+    error.meta = fault.meta;
+    error.position = epc < compiled_.positions.size() ? compiled_.positions[epc] : -1;
+    return error;
+}
+
+bool InterpreterVm::dispatch_call_site(const ir::Compiled::CallSite &site,
+                                       AsyncResumeKind resume_kind,
+                                       VmResult &out) {
+    const auto &symbol = compiled_.host_symbol_at(site.host_symbol_index);
+    const bool is_spread = (site.flags & ir::Compiled::CallSiteSpreadArgs) != 0;
+    if (!is_spread) {
+        call_args_.clear();
+    }
+    std::uint32_t argc = site.argc;
+    const fiber::json::JsValue *args = nullptr;
+    if (is_spread) {
+        args = prepare_spread_call_args(sp_ - 1, argc);
+    } else if (argc > 0) {
+        args = prepare_call_args(sp_, argc);
+    }
+    const Library::HostCallFrame frame = make_call_frame(args, argc);
+    const std::size_t epc = pc_ - 1;
+    switch (symbol.kind) {
+        case Library::HostCallable::Kind::SyncFunction:
+        case Library::HostCallable::Kind::SyncConstant: {
+            FIBER_ASSERT(symbol.callable->sync);
+            Library::HostCallResult result = symbol.callable->sync(symbol.callable->userdata, frame);
+            if (is_spread) {
+                call_args_.clear();
+            }
+            if (result.kind == Library::HostCallResultKind::Pending) {
+                result = Library::HostCallResult::faulted({
+                    Library::HostFaultCode::InvalidState,
+                    "HOST_INVALID_STATE",
+                    "sync host callable returned pending",
+                    500,
+                    fiber::json::JsValue::make_undefined()
+                });
+            }
+            if (!apply_call_result(result, resume_kind, epc, out, false)) {
+                state_ = VmState::Error;
+                return false;
+            }
+            return true;
+        }
+        case Library::HostCallable::Kind::AsyncFunction:
+        case Library::HostCallable::Kind::AsyncConstant: {
+            FIBER_ASSERT(symbol.callable->async);
+            async_pending_ = true;
+            async_ready_ = false;
+            async_resume_kind_ = resume_kind;
+            async_resume_epc_ = epc;
+            async_result_ = Library::HostCallResult::pending();
+            const Library::HostAsyncCompletion completion{&InterpreterVm::async_complete, this};
+            Library::HostCallResult result =
+                symbol.callable->async(symbol.callable->userdata, frame, completion);
+            if (is_spread) {
+                call_args_.clear();
+            }
+            if (result.kind != Library::HostCallResultKind::Pending) {
+                async_result_ = result;
+                async_ready_ = true;
+            }
+            if (!async_ready_) {
+                state_ = VmState::Suspend;
+                return false;
+            }
+            if (!apply_async_ready(out)) {
+                state_ = VmState::Error;
+                return false;
+            }
+            return true;
+        }
+    }
+    return true;
+}
+
+bool InterpreterVm::apply_call_result(const Library::HostCallResult &result,
+                                      AsyncResumeKind resume_kind,
+                                      std::size_t resume_epc,
+                                      VmResult &out,
+                                      bool from_async_completion) {
+    switch (result.kind) {
+        case Library::HostCallResultKind::Return:
+            if (from_async_completion) {
+                pending_value_kind_ = PendingValueKind::None;
+                pending_value_ = fiber::json::JsValue::make_undefined();
+            }
+            switch (resume_kind) {
+                case AsyncResumeKind::PushResult:
+                    if (sp_ < stack_size_) {
+                        stack_[sp_] = result.value;
+                    }
+                    ++sp_;
+                    break;
+                case AsyncResumeKind::ReplaceTop:
+                    if (sp_ > 0 && sp_ - 1 < stack_size_) {
+                        stack_[sp_ - 1] = result.value;
+                    }
+                    break;
+                case AsyncResumeKind::None:
+                    break;
+            }
+            return true;
+        case Library::HostCallResultKind::Throw: {
+            pending_value_ = result.value;
+            pending_value_kind_ = PendingValueKind::Thrown;
+            VmError error = make_throw_error();
+            if (!handle_error(error, resume_epc)) {
+                out = std::unexpected(pending_error_);
+                return false;
+            }
+            return true;
+        }
+        case Library::HostCallResultKind::Fault: {
+            VmError error = make_host_fault_error(result.fault, resume_epc);
+            if (!handle_error(error, resume_epc)) {
+                out = std::unexpected(pending_error_);
+                return false;
+            }
+            return true;
+        }
+        case Library::HostCallResultKind::Pending:
+            return false;
+    }
+    return false;
 }
 
 bool InterpreterVm::catch_for_exception(std::size_t epc) {
@@ -1181,45 +1201,15 @@ bool InterpreterVm::apply_async_ready(VmResult &out) {
     if (!async_pending_ || !async_ready_) {
         return true;
     }
-    fiber::json::JsValue value = pending_value_;
-    bool is_throw = pending_value_kind_ == PendingValueKind::AsyncThrow;
+    Library::HostCallResult result = async_result_;
     AsyncResumeKind resume_kind = async_resume_kind_;
     std::size_t resume_epc = async_resume_epc_;
     async_pending_ = false;
     async_ready_ = false;
     async_resume_kind_ = AsyncResumeKind::None;
     async_resume_epc_ = 0;
-    if (resume_kind == AsyncResumeKind::ReplaceTop) {
-        clear_args();
-    }
-    if (is_throw) {
-        pending_value_ = value;
-        pending_value_kind_ = PendingValueKind::Thrown;
-        VmError error = make_throw_error();
-        if (!handle_error(error, resume_epc)) {
-            out = std::unexpected(pending_error_);
-            return false;
-        }
-        return true;
-    }
-    pending_value_kind_ = PendingValueKind::None;
-    pending_value_ = fiber::json::JsValue::make_undefined();
-    switch (resume_kind) {
-        case AsyncResumeKind::PushResult:
-            if (sp_ < stack_size_) {
-                stack_[sp_] = value;
-            }
-            sp_ = sp_ + 1;
-            break;
-        case AsyncResumeKind::ReplaceTop:
-            if (sp_ > 0 && sp_ - 1 < stack_size_) {
-                stack_[sp_ - 1] = value;
-            }
-            break;
-        case AsyncResumeKind::None:
-            break;
-    }
-    return true;
+    async_result_ = Library::HostCallResult::pending();
+    return apply_call_result(result, resume_kind, resume_epc, out, true);
 }
 
 } // namespace fiber::script::run

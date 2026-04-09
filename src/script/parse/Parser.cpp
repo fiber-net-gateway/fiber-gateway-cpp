@@ -1024,8 +1024,8 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_functi
             return std::unexpected(args_result.error());
         }
         std::string name = identifier.name();
-        Library::Function *func = library_.find_func(name);
-        Library::AsyncFunction *async_func = library_.find_async_func(name);
+        const Library::HostCallable *func = library_.resolve_func(name);
+        const Library::HostCallable *async_func = library_.resolve_async_func(name);
         if (!func && !async_func) {
             ParseError error;
             error.message = "function not defined";
@@ -1056,8 +1056,8 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_functi
                     pos_ = saved;
                 } else {
                     next();
-                    auto *constant = library_.find_constant(identifier.name(), key);
-                    auto *async_constant = library_.find_async_constant(identifier.name(), key);
+                    const auto *constant = library_.resolve_constant(identifier.name(), key);
+                    const auto *async_constant = library_.resolve_async_constant(identifier.name(), key);
                     if (!constant && !async_constant) {
                         return std::unexpected(make_error("constant not found", token));
                     }
@@ -1151,15 +1151,15 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_functi
             if (!args_result) {
                 return std::unexpected(args_result.error());
             }
-            Library::Function *func = library_.find_func(name);
-            Library::AsyncFunction *async_func = library_.find_async_func(name);
+            const Library::HostCallable *func = library_.resolve_func(name);
+            const Library::HostCallable *async_func = library_.resolve_async_func(name);
             if (!func && !async_func && dot_size == 1) {
                 auto it = directive_map_.find(prefix.name());
                 if (it != directive_map_.end()) {
                     Library::DirectiveDef *def = it->second->directive_def();
                     if (def) {
-                        func = def->find_func(prefix.name(), token.text);
-                        async_func = def->find_async_func(prefix.name(), token.text);
+                        func = library_.host_callable_for(def->find_func(prefix.name(), token.text));
+                        async_func = library_.host_callable_for(def->find_async_func(prefix.name(), token.text));
                     }
                 }
             }

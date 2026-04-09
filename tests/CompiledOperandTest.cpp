@@ -104,23 +104,7 @@ Compiled compile_script(std::string_view script, Library &library) {
 
 std::size_t operand_index_for_code(std::int32_t code) {
     const auto raw = static_cast<std::uint32_t>(code);
-    const auto op = static_cast<std::uint8_t>(raw & 0xFF);
-    switch (op) {
-        case Code::CALL_FUNC:
-        case Code::CALL_ASYNC_FUNC:
-            return static_cast<std::size_t>(raw >> 16);
-        case Code::LOAD_CONST:
-        case Code::PROP_GET:
-        case Code::PROP_SET:
-        case Code::PROP_SET_1:
-        case Code::CALL_FUNC_SPREAD:
-        case Code::CALL_ASYNC_FUNC_SPREAD:
-        case Code::CALL_CONST:
-        case Code::CALL_ASYNC_CONST:
-            return static_cast<std::size_t>(raw >> 8);
-        default:
-            return 0;
-    }
+    return static_cast<std::size_t>(raw >> 8);
 }
 
 std::size_t find_first_opcode(const Compiled &compiled, std::uint8_t opcode) {
@@ -152,14 +136,14 @@ TEST(CompiledOperandTest, CompilerEmitsTypedOperands) {
 
     EXPECT_EQ(compiled.operand_at(operand_index_for_code(compiled.codes[prop_get])).kind,
               Compiled::OperandKind::InternedString);
-    EXPECT_EQ(compiled.operand_at(operand_index_for_code(compiled.codes[call_func])).kind,
-              Compiled::OperandKind::Function);
-    EXPECT_EQ(compiled.operand_at(operand_index_for_code(compiled.codes[call_async_func])).kind,
-              Compiled::OperandKind::AsyncFunction);
-    EXPECT_EQ(compiled.operand_at(operand_index_for_code(compiled.codes[call_const])).kind,
-              Compiled::OperandKind::Constant);
-    EXPECT_EQ(compiled.operand_at(operand_index_for_code(compiled.codes[call_async_const])).kind,
-              Compiled::OperandKind::AsyncConstant);
+    EXPECT_EQ(compiled.host_symbol_at(compiled.call_site_at(operand_index_for_code(compiled.codes[call_func])).host_symbol_index).kind,
+              Library::HostCallable::Kind::SyncFunction);
+    EXPECT_EQ(compiled.host_symbol_at(compiled.call_site_at(operand_index_for_code(compiled.codes[call_async_func])).host_symbol_index).kind,
+              Library::HostCallable::Kind::AsyncFunction);
+    EXPECT_EQ(compiled.host_symbol_at(compiled.call_site_at(operand_index_for_code(compiled.codes[call_const])).host_symbol_index).kind,
+              Library::HostCallable::Kind::SyncConstant);
+    EXPECT_EQ(compiled.host_symbol_at(compiled.call_site_at(operand_index_for_code(compiled.codes[call_async_const])).host_symbol_index).kind,
+              Library::HostCallable::Kind::AsyncConstant);
     EXPECT_TRUE(compiled.validate_operands());
 }
 
@@ -172,7 +156,7 @@ TEST(CompiledOperandTest, ValidateOperandsRejectsKindMismatch) {
 
     const std::size_t operand_index = operand_index_for_code(compiled.codes[prop_get]);
     ASSERT_LT(operand_index, compiled.operands.size());
-    compiled.operands[operand_index].kind = Compiled::OperandKind::Function;
+    compiled.operands[operand_index].kind = Compiled::OperandKind::ConstValue;
 
     EXPECT_FALSE(compiled.validate_operands());
 }

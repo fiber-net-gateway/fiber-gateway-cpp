@@ -36,10 +36,6 @@ struct Compiled {
     enum class OperandKind : std::uint8_t {
         ConstValue = 0,
         InternedString,
-        Function,
-        AsyncFunction,
-        Constant,
-        AsyncConstant,
     };
 
     struct Operand {
@@ -50,11 +46,31 @@ struct Compiled {
         std::uintptr_t payload = 0;
     };
 
+    struct HostSymbol {
+        Library::HostCallable::Kind kind = Library::HostCallable::Kind::SyncFunction;
+        std::uint32_t flags = 0;
+        const Library::HostCallable *callable = nullptr;
+    };
+
+    enum CallSiteFlags : std::uint16_t {
+        CallSiteNone = 0,
+        CallSiteSpreadArgs = 1u << 0,
+    };
+
+    struct CallSite {
+        std::uint32_t host_symbol_index = 0;
+        std::uint16_t argc = 0;
+        std::uint16_t flags = CallSiteNone;
+        std::int64_t position = -1;
+    };
+
     std::size_t stack_size = 0;
     std::size_t var_table_size = 0;
     std::vector<std::int64_t> positions;
     std::vector<std::int32_t> codes;
     std::vector<Operand> operands;
+    std::vector<HostSymbol> host_symbols;
+    std::vector<CallSite> call_sites;
     std::vector<std::unique_ptr<ConstValue>> const_pool;
     std::vector<std::unique_ptr<std::string>> string_pool;
     std::vector<std::int32_t> exception_table;
@@ -62,10 +78,8 @@ struct Compiled {
     const Operand &operand_at(std::size_t index) const;
     const ConstValue *operand_const(std::size_t index) const;
     const std::string *operand_string(std::size_t index) const;
-    Library::Function *operand_function(std::size_t index) const;
-    Library::AsyncFunction *operand_async_function(std::size_t index) const;
-    Library::Constant *operand_constant(std::size_t index) const;
-    Library::AsyncConstant *operand_async_constant(std::size_t index) const;
+    const HostSymbol &host_symbol_at(std::size_t index) const;
+    const CallSite &call_site_at(std::size_t index) const;
     bool validate_operands() const;
 
     bool contains_async() const {
