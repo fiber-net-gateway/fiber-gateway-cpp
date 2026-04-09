@@ -36,16 +36,24 @@ bool is_numeric_like(JsNodeType type) {
            type == JsNodeType::Null;
 }
 
+const GcString *as_heap_string(const JsValue &value) {
+    return js_value_type(value) == JsNodeType::HeapString ? js_value_heap_ptr<const GcString>(value) : nullptr;
+}
+
+const GcBinary *as_heap_binary(const JsValue &value) {
+    return js_value_type(value) == JsNodeType::HeapBinary ? js_value_heap_ptr<const GcBinary>(value) : nullptr;
+}
+
 bool to_number(const JsValue &value, double &out) {
-    switch (value.type_) {
+    switch (js_value_type(value)) {
         case JsNodeType::Integer:
-            out = static_cast<double>(value.i);
+            out = static_cast<double>(js_value_int64(value));
             return true;
         case JsNodeType::Float:
-            out = value.f;
+            out = js_value_double(value);
             return true;
         case JsNodeType::Boolean:
-            out = value.b ? 1.0 : 0.0;
+            out = js_value_bool(value) ? 1.0 : 0.0;
             return true;
         case JsNodeType::Null:
             out = 0.0;
@@ -56,15 +64,15 @@ bool to_number(const JsValue &value, double &out) {
 }
 
 bool to_int64(const JsValue &value, std::int64_t &out) {
-    switch (value.type_) {
+    switch (js_value_type(value)) {
         case JsNodeType::Integer:
-            out = value.i;
+            out = js_value_int64(value);
             return true;
         case JsNodeType::Float:
-            out = static_cast<std::int64_t>(value.f);
+            out = static_cast<std::int64_t>(js_value_double(value));
             return true;
         case JsNodeType::Boolean:
-            out = value.b ? 1 : 0;
+            out = js_value_bool(value) ? 1 : 0;
             return true;
         case JsNodeType::Null:
             out = 0;
@@ -75,24 +83,24 @@ bool to_int64(const JsValue &value, std::int64_t &out) {
 }
 
 bool is_truthy(const JsValue &value) {
-    switch (value.type_) {
+    switch (js_value_type(value)) {
         case JsNodeType::Undefined:
         case JsNodeType::Null:
             return false;
         case JsNodeType::Boolean:
-            return value.b;
+            return js_value_bool(value);
         case JsNodeType::Integer:
-            return value.i != 0;
+            return js_value_int64(value) != 0;
         case JsNodeType::Float:
-            return value.f != 0.0 && !std::isnan(value.f);
+            return js_value_double(value) != 0.0 && !std::isnan(js_value_double(value));
         case JsNodeType::HeapString: {
-            auto *str = reinterpret_cast<const GcString *>(value.gc);
+            auto *str = as_heap_string(value);
             return str && str->len > 0;
         }
         case JsNodeType::NativeString:
-            return value.ns.len > 0;
+            return js_value_native_string(value).len > 0;
         case JsNodeType::NativeBinary:
-            return value.nb.len > 0;
+            return js_value_native_binary(value).len > 0;
         case JsNodeType::HeapBinary:
         case JsNodeType::Array:
         case JsNodeType::Object:
@@ -119,8 +127,8 @@ struct StringSource {
 };
 
 bool build_string_source(const JsValue &value, StringSource &out, JsOpError &error) {
-    if (value.type_ == JsNodeType::HeapString) {
-        auto *str = reinterpret_cast<const GcString *>(value.gc);
+    if (js_value_type(value) == JsNodeType::HeapString) {
+        auto *str = as_heap_string(value);
         if (!str) {
             error = JsOpError::TypeError;
             return false;
@@ -136,10 +144,10 @@ bool build_string_source(const JsValue &value, StringSource &out, JsOpError &err
         }
         return true;
     }
-    if (value.type_ == JsNodeType::NativeString) {
+    if (js_value_type(value) == JsNodeType::NativeString) {
         out.kind = StringKind::NativeUtf8;
-        out.utf8 = value.ns.data;
-        out.len = value.ns.len;
+        out.utf8 = js_value_native_string(value).data;
+        out.len = js_value_native_string(value).len;
         if (!utf8_scan(out.utf8, out.len, out.scan)) {
             error = JsOpError::InvalidUtf8;
             return false;
@@ -179,7 +187,7 @@ bool concat_strings(GcHeap *heap, const StringSource &lhs, const StringSource &r
 
     if (total_len == 0) {
         out = JsValue::make_string(*heap, "", 0);
-        if (out.type_ != JsNodeType::HeapString) {
+        if (js_value_type(out) != JsNodeType::HeapString) {
             error = JsOpError::OutOfMemory;
             return false;
         }
@@ -217,8 +225,7 @@ bool concat_strings(GcHeap *heap, const StringSource &lhs, const StringSource &r
             error = JsOpError::InvalidUtf8;
             return false;
         }
-        out.type_ = JsNodeType::HeapString;
-        out.gc = &result->hdr;
+        out = js_make_heap_ref(&result->hdr, JsHeapKind::String);
         return true;
     }
 
@@ -255,26 +262,25 @@ bool concat_strings(GcHeap *heap, const StringSource &lhs, const StringSource &r
         error = JsOpError::InvalidUtf8;
         return false;
     }
-    out.type_ = JsNodeType::HeapString;
-    out.gc = &result->hdr;
+    out = js_make_heap_ref(&result->hdr, JsHeapKind::String);
     return true;
 }
 
 bool string_to_utf8_copy(const JsValue &value, std::string &out, JsOpError &error) {
     out.clear();
-    if (value.type_ == JsNodeType::NativeString) {
-        if (!utf8_validate(value.ns.data, value.ns.len)) {
+    if (js_value_type(value) == JsNodeType::NativeString) {
+        if (!utf8_validate(js_value_native_string(value).data, js_value_native_string(value).len)) {
             error = JsOpError::InvalidUtf8;
             return false;
         }
-        if (value.ns.len == 0) {
+        if (js_value_native_string(value).len == 0) {
             return true;
         }
-        out.assign(value.ns.data, value.ns.len);
+        out.assign(js_value_native_string(value).data, js_value_native_string(value).len);
         return true;
     }
-    if (value.type_ == JsNodeType::HeapString) {
-        auto *str = reinterpret_cast<const GcString *>(value.gc);
+    if (js_value_type(value) == JsNodeType::HeapString) {
+        auto *str = as_heap_string(value);
         if (!gc_string_to_utf8(str, out)) {
             error = JsOpError::InvalidUtf8;
             return false;
@@ -328,8 +334,8 @@ struct StringCursor {
 };
 
 bool init_string_cursor(const JsValue &value, StringCursor &out, JsOpError &error) {
-    if (value.type_ == JsNodeType::HeapString) {
-        auto *str = reinterpret_cast<const GcString *>(value.gc);
+    if (js_value_type(value) == JsNodeType::HeapString) {
+        auto *str = as_heap_string(value);
         if (!str) {
             error = JsOpError::TypeError;
             return false;
@@ -348,10 +354,10 @@ bool init_string_cursor(const JsValue &value, StringCursor &out, JsOpError &erro
         }
         return true;
     }
-    if (value.type_ == JsNodeType::NativeString) {
+    if (js_value_type(value) == JsNodeType::NativeString) {
         out.kind = StringKind::NativeUtf8;
-        out.utf8 = value.ns.data;
-        out.len = value.ns.len;
+        out.utf8 = js_value_native_string(value).data;
+        out.len = js_value_native_string(value).len;
         if (out.len > 0 && !out.utf8) {
             error = JsOpError::InvalidUtf8;
             return false;
@@ -406,9 +412,9 @@ bool cursor_next(StringCursor &cursor, char16_t &unit, JsOpError &error) {
 }
 
 bool compare_strings(const JsValue &lhs, const JsValue &rhs, int &result, JsOpError &error) {
-    if (lhs.type_ == JsNodeType::HeapString && rhs.type_ == JsNodeType::HeapString) {
-        auto *lhs_str = reinterpret_cast<const GcString *>(lhs.gc);
-        auto *rhs_str = reinterpret_cast<const GcString *>(rhs.gc);
+    if (js_value_type(lhs) == JsNodeType::HeapString && js_value_type(rhs) == JsNodeType::HeapString) {
+        auto *lhs_str = as_heap_string(lhs);
+        auto *rhs_str = as_heap_string(rhs);
         if (!lhs_str || !rhs_str) {
             error = JsOpError::TypeError;
             return false;
@@ -495,7 +501,7 @@ bool compare_strings(const JsValue &lhs, const JsValue &rhs, int &result, JsOpEr
 }
 
 double number_value(const JsValue &value) {
-    return value.type_ == JsNodeType::Integer ? static_cast<double>(value.i) : value.f;
+    return js_value_type(value) == JsNodeType::Integer ? static_cast<double>(js_value_int64(value)) : js_value_double(value);
 }
 
 bool numbers_equal(double lhs, double rhs) {
@@ -506,37 +512,40 @@ bool numbers_equal(double lhs, double rhs) {
 }
 
 bool strict_equal(const JsValue &lhs, const JsValue &rhs, JsOpError &error) {
-    if (is_string_type(lhs.type_) && is_string_type(rhs.type_)) {
+    if (is_string_type(js_value_type(lhs)) && is_string_type(js_value_type(rhs))) {
         int cmp = 0;
         if (!compare_strings(lhs, rhs, cmp, error)) {
             return false;
         }
         return cmp == 0;
     }
-    if (is_number_type(lhs.type_) && is_number_type(rhs.type_)) {
+    if (is_number_type(js_value_type(lhs)) && is_number_type(js_value_type(rhs))) {
         return numbers_equal(number_value(lhs), number_value(rhs));
     }
-    if (lhs.type_ != rhs.type_) {
+    if (js_value_type(lhs) != js_value_type(rhs)) {
         return false;
     }
-    switch (lhs.type_) {
+    switch (js_value_type(lhs)) {
         case JsNodeType::Undefined:
         case JsNodeType::Null:
             return true;
         case JsNodeType::Boolean:
-            return lhs.b == rhs.b;
+            return js_value_bool(lhs) == js_value_bool(rhs);
         case JsNodeType::Integer:
-            return lhs.i == rhs.i;
+            return js_value_int64(lhs) == js_value_int64(rhs);
         case JsNodeType::Float:
-            return lhs.f == rhs.f;
-        case JsNodeType::NativeBinary:
-            return lhs.nb.data == rhs.nb.data && lhs.nb.len == rhs.nb.len;
+            return js_value_double(lhs) == js_value_double(rhs);
+        case JsNodeType::NativeBinary: {
+            NativeBin lhs_bin = js_value_native_binary(lhs);
+            NativeBin rhs_bin = js_value_native_binary(rhs);
+            return lhs_bin.data == rhs_bin.data && lhs_bin.len == rhs_bin.len;
+        }
         case JsNodeType::HeapBinary:
         case JsNodeType::Array:
         case JsNodeType::Object:
         case JsNodeType::Interator:
         case JsNodeType::Exception:
-            return lhs.gc == rhs.gc;
+            return js_value_heap_header(lhs) == js_value_heap_header(rhs);
         case JsNodeType::HeapString:
         case JsNodeType::NativeString:
             break;
@@ -545,10 +554,10 @@ bool strict_equal(const JsValue &lhs, const JsValue &rhs, JsOpError &error) {
 }
 
 bool loose_equal_number(double number, const JsValue &other, JsOpError &error) {
-    if (is_number_type(other.type_)) {
+    if (is_number_type(js_value_type(other))) {
         return numbers_equal(number, number_value(other));
     }
-    if (is_string_type(other.type_)) {
+    if (is_string_type(js_value_type(other))) {
         double other_number = 0.0;
         if (!string_to_number(other, other_number, error)) {
             return false;
@@ -559,39 +568,39 @@ bool loose_equal_number(double number, const JsValue &other, JsOpError &error) {
 }
 
 bool loose_equal(const JsValue &lhs, const JsValue &rhs, JsOpError &error) {
-    if (is_string_type(lhs.type_) && is_string_type(rhs.type_)) {
+    if (is_string_type(js_value_type(lhs)) && is_string_type(js_value_type(rhs))) {
         int cmp = 0;
         if (!compare_strings(lhs, rhs, cmp, error)) {
             return false;
         }
         return cmp == 0;
     }
-    if (is_number_type(lhs.type_) && is_number_type(rhs.type_)) {
+    if (is_number_type(js_value_type(lhs)) && is_number_type(js_value_type(rhs))) {
         return numbers_equal(number_value(lhs), number_value(rhs));
     }
-    if (lhs.type_ == rhs.type_) {
+    if (js_value_type(lhs) == js_value_type(rhs)) {
         return strict_equal(lhs, rhs, error);
     }
-    if ((lhs.type_ == JsNodeType::Null && rhs.type_ == JsNodeType::Undefined) ||
-        (lhs.type_ == JsNodeType::Undefined && rhs.type_ == JsNodeType::Null)) {
+    if ((js_value_type(lhs) == JsNodeType::Null && js_value_type(rhs) == JsNodeType::Undefined) ||
+        (js_value_type(lhs) == JsNodeType::Undefined && js_value_type(rhs) == JsNodeType::Null)) {
         return true;
     }
-    if (lhs.type_ == JsNodeType::Boolean) {
-        double lhs_number = lhs.b ? 1.0 : 0.0;
+    if (js_value_type(lhs) == JsNodeType::Boolean) {
+        double lhs_number = js_value_bool(lhs) ? 1.0 : 0.0;
         return loose_equal_number(lhs_number, rhs, error);
     }
-    if (rhs.type_ == JsNodeType::Boolean) {
-        double rhs_number = rhs.b ? 1.0 : 0.0;
+    if (js_value_type(rhs) == JsNodeType::Boolean) {
+        double rhs_number = js_value_bool(rhs) ? 1.0 : 0.0;
         return loose_equal_number(rhs_number, lhs, error);
     }
-    if (is_number_type(lhs.type_) && is_string_type(rhs.type_)) {
+    if (is_number_type(js_value_type(lhs)) && is_string_type(js_value_type(rhs))) {
         double rhs_number = 0.0;
         if (!string_to_number(rhs, rhs_number, error)) {
             return false;
         }
         return numbers_equal(number_value(lhs), rhs_number);
     }
-    if (is_string_type(lhs.type_) && is_number_type(rhs.type_)) {
+    if (is_string_type(js_value_type(lhs)) && is_number_type(js_value_type(rhs))) {
         double lhs_number = 0.0;
         if (!string_to_number(lhs, lhs_number, error)) {
             return false;
@@ -602,10 +611,10 @@ bool loose_equal(const JsValue &lhs, const JsValue &rhs, JsOpError &error) {
 }
 
 JsOpResult add_numeric(const JsValue &lhs, const JsValue &rhs) {
-    if (!is_numeric_like(lhs.type_) || !is_numeric_like(rhs.type_)) {
+    if (!is_numeric_like(js_value_type(lhs)) || !is_numeric_like(js_value_type(rhs))) {
         return make_error(JsOpError::TypeError);
     }
-    if (lhs.type_ == JsNodeType::Float || rhs.type_ == JsNodeType::Float) {
+    if (js_value_type(lhs) == JsNodeType::Float || js_value_type(rhs) == JsNodeType::Float) {
         double a = 0.0;
         double b = 0.0;
         if (!to_number(lhs, a) || !to_number(rhs, b)) {
@@ -632,10 +641,10 @@ JsOpResult add_numeric(const JsValue &lhs, const JsValue &rhs) {
 }
 
 JsOpResult sub_numeric(const JsValue &lhs, const JsValue &rhs) {
-    if (!is_numeric_like(lhs.type_) || !is_numeric_like(rhs.type_)) {
+    if (!is_numeric_like(js_value_type(lhs)) || !is_numeric_like(js_value_type(rhs))) {
         return make_error(JsOpError::TypeError);
     }
-    if (lhs.type_ == JsNodeType::Float || rhs.type_ == JsNodeType::Float) {
+    if (js_value_type(lhs) == JsNodeType::Float || js_value_type(rhs) == JsNodeType::Float) {
         double a = 0.0;
         double b = 0.0;
         if (!to_number(lhs, a) || !to_number(rhs, b)) {
@@ -662,10 +671,10 @@ JsOpResult sub_numeric(const JsValue &lhs, const JsValue &rhs) {
 }
 
 JsOpResult mul_numeric(const JsValue &lhs, const JsValue &rhs) {
-    if (!is_numeric_like(lhs.type_) || !is_numeric_like(rhs.type_)) {
+    if (!is_numeric_like(js_value_type(lhs)) || !is_numeric_like(js_value_type(rhs))) {
         return make_error(JsOpError::TypeError);
     }
-    if (lhs.type_ == JsNodeType::Float || rhs.type_ == JsNodeType::Float) {
+    if (js_value_type(lhs) == JsNodeType::Float || js_value_type(rhs) == JsNodeType::Float) {
         double a = 0.0;
         double b = 0.0;
         if (!to_number(lhs, a) || !to_number(rhs, b)) {
@@ -696,12 +705,12 @@ JsOpResult mul_numeric(const JsValue &lhs, const JsValue &rhs) {
 JsOpResult js_unary_op(JsUnaryOp op, const JsValue &value) {
     switch (op) {
         case JsUnaryOp::Plus: {
-            if (!is_numeric_like(value.type_)) {
+            if (!is_numeric_like(js_value_type(value))) {
                 return make_error(JsOpError::TypeError);
             }
-            if (value.type_ == JsNodeType::Float) {
+            if (js_value_type(value) == JsNodeType::Float) {
                 JsOpResult result;
-                result.value = JsValue::make_float(value.f);
+                result.value = JsValue::make_float(js_value_double(value));
                 return result;
             }
             std::int64_t int_value = 0;
@@ -713,12 +722,12 @@ JsOpResult js_unary_op(JsUnaryOp op, const JsValue &value) {
             return result;
         }
         case JsUnaryOp::Negate: {
-            if (!is_numeric_like(value.type_)) {
+            if (!is_numeric_like(js_value_type(value))) {
                 return make_error(JsOpError::TypeError);
             }
-            if (value.type_ == JsNodeType::Float) {
+            if (js_value_type(value) == JsNodeType::Float) {
                 JsOpResult result;
-                result.value = JsValue::make_float(-value.f);
+                result.value = JsValue::make_float(-js_value_double(value));
                 return result;
             }
             std::int64_t int_value = 0;
@@ -756,8 +765,8 @@ JsOpResult js_binary_op(JsBinaryOp op, const JsValue &lhs, const JsValue &rhs, G
             return result;
         }
         case JsBinaryOp::Add: {
-            if (is_string_type(lhs.type_) || is_string_type(rhs.type_)) {
-                if (!is_string_type(lhs.type_) || !is_string_type(rhs.type_)) {
+            if (is_string_type(js_value_type(lhs)) || is_string_type(js_value_type(rhs))) {
+                if (!is_string_type(js_value_type(lhs)) || !is_string_type(js_value_type(rhs))) {
                     return make_error(JsOpError::TypeError);
                 }
                 StringSource lhs_src;
@@ -784,7 +793,7 @@ JsOpResult js_binary_op(JsBinaryOp op, const JsValue &lhs, const JsValue &rhs, G
         case JsBinaryOp::Mul:
             return mul_numeric(lhs, rhs);
         case JsBinaryOp::Div: {
-            if (!is_numeric_like(lhs.type_) || !is_numeric_like(rhs.type_)) {
+            if (!is_numeric_like(js_value_type(lhs)) || !is_numeric_like(js_value_type(rhs))) {
                 return make_error(JsOpError::TypeError);
             }
             double a = 0.0;
@@ -800,10 +809,10 @@ JsOpResult js_binary_op(JsBinaryOp op, const JsValue &lhs, const JsValue &rhs, G
             return result;
         }
         case JsBinaryOp::Mod: {
-            if (!is_numeric_like(lhs.type_) || !is_numeric_like(rhs.type_)) {
+            if (!is_numeric_like(js_value_type(lhs)) || !is_numeric_like(js_value_type(rhs))) {
                 return make_error(JsOpError::TypeError);
             }
-            if (lhs.type_ == JsNodeType::Float || rhs.type_ == JsNodeType::Float) {
+            if (js_value_type(lhs) == JsNodeType::Float || js_value_type(rhs) == JsNodeType::Float) {
                 double a = 0.0;
                 double b = 0.0;
                 if (!to_number(lhs, a) || !to_number(rhs, b)) {
@@ -854,7 +863,7 @@ JsOpResult js_binary_op(JsBinaryOp op, const JsValue &lhs, const JsValue &rhs, G
         case JsBinaryOp::Le:
         case JsBinaryOp::Gt:
         case JsBinaryOp::Ge: {
-            if (is_string_type(lhs.type_) && is_string_type(rhs.type_)) {
+            if (is_string_type(js_value_type(lhs)) && is_string_type(js_value_type(rhs))) {
                 int cmp = 0;
                 JsOpError error = JsOpError::None;
                 if (!compare_strings(lhs, rhs, cmp, error)) {
@@ -874,7 +883,7 @@ JsOpResult js_binary_op(JsBinaryOp op, const JsValue &lhs, const JsValue &rhs, G
                 result.value = JsValue::make_boolean(result_value);
                 return result;
             }
-            if (!is_numeric_like(lhs.type_) || !is_numeric_like(rhs.type_)) {
+            if (!is_numeric_like(js_value_type(lhs)) || !is_numeric_like(js_value_type(rhs))) {
                 return make_error(JsOpError::TypeError);
             }
             double a = 0.0;

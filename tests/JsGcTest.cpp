@@ -12,6 +12,7 @@ using fiber::json::GcObject;
 using fiber::json::GcRootSet;
 using fiber::json::GcString;
 using fiber::json::GcStringEncoding;
+using fiber::json::JsHeapKind;
 using fiber::json::JsNodeType;
 using fiber::json::JsValue;
 
@@ -87,8 +88,7 @@ TEST(JsGcTest, RootProvidersMarkValuesWithoutTemporaryRootVector) {
     GcString *garbage = fiber::json::gc_new_string(&heap, "dead", 4);
     ASSERT_NE(live, nullptr);
     ASSERT_NE(garbage, nullptr);
-    rooted.type_ = JsNodeType::HeapString;
-    rooted.gc = &live->hdr;
+    rooted = js_make_heap_ref(&live->hdr, JsHeapKind::String);
 
     SingleValueProvider provider(rooted);
     roots.add_provider(&provider);
@@ -98,8 +98,8 @@ TEST(JsGcTest, RootProvidersMarkValuesWithoutTemporaryRootVector) {
     fiber::json::gc_collect(heap, roots);
     std::size_t after_collect = fiber::json::gc_bytes_used(heap);
 
-    EXPECT_EQ(rooted.type_, JsNodeType::HeapString);
-    EXPECT_EQ(rooted.gc, &live->hdr);
+    EXPECT_EQ(js_value_type(rooted), JsNodeType::HeapString);
+    EXPECT_EQ(js_value_heap_header(rooted), &live->hdr);
     EXPECT_LT(after_collect, before_collect);
     EXPECT_EQ(after_collect, fiber::json::gc_estimate_string_bytes(4, GcStringEncoding::Byte));
 }

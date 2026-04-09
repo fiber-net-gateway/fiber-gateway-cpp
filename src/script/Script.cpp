@@ -34,10 +34,7 @@ fiber::json::JsValue make_error_value(fiber::json::GcHeap &heap, const run::VmEr
     if (!exc) {
         return make_fallback_error(kOutOfMemory);
     }
-    fiber::json::JsValue value;
-    value.type_ = fiber::json::JsNodeType::Exception;
-    value.gc = &exc->hdr;
-    return value;
+    return fiber::json::js_make_heap_ref(&exc->hdr, fiber::json::JsHeapKind::Exception);
 }
 
 } // namespace

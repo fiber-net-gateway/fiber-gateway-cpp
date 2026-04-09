@@ -606,8 +606,7 @@ private:
             if (!str) {
                 return set_error("out of memory", pos_);
             }
-            out.type_ = JsNodeType::HeapString;
-            out.gc = &str->hdr;
+            out = js_make_heap_ref(&str->hdr, JsHeapKind::String);
             return true;
         }
         if (ch == '{') {
@@ -641,8 +640,7 @@ private:
         if (!obj) {
             return set_error("out of memory", pos_);
         }
-        out.type_ = JsNodeType::Object;
-        out.gc = &obj->hdr;
+        out = js_make_heap_ref(&obj->hdr, JsHeapKind::Object);
         if (pos_ < len_ && data_[pos_] == '}') {
             pos_ += 1;
             return true;
@@ -701,8 +699,7 @@ private:
         if (!arr) {
             return set_error("out of memory", pos_);
         }
-        out.type_ = JsNodeType::Array;
-        out.gc = &arr->hdr;
+        out = js_make_heap_ref(&arr->hdr, JsHeapKind::Array);
         if (pos_ < len_ && data_[pos_] == ']') {
             pos_ += 1;
             return true;
@@ -1102,8 +1099,7 @@ StreamParser::Status StreamParser::parse_internal(bool final) {
             return set_error("out of memory", offset);
         }
         JsValue value;
-        value.type_ = JsNodeType::Object;
-        value.gc = &obj->hdr;
+        value = js_make_heap_ref(&obj->hdr, JsHeapKind::Object);
         if (!add_value(std::move(value), offset)) {
             return false;
         }
@@ -1124,8 +1120,7 @@ StreamParser::Status StreamParser::parse_internal(bool final) {
             return set_error("out of memory", offset);
         }
         JsValue value;
-        value.type_ = JsNodeType::Array;
-        value.gc = &arr->hdr;
+        value = js_make_heap_ref(&arr->hdr, JsHeapKind::Array);
         if (!add_value(std::move(value), offset)) {
             return false;
         }
@@ -1156,8 +1151,7 @@ StreamParser::Status StreamParser::parse_internal(bool final) {
                 if (!str) {
                     return set_error("out of memory", tok.offset);
                 }
-                value.type_ = JsNodeType::HeapString;
-                value.gc = &str->hdr;
+                value = js_make_heap_ref(&str->hdr, JsHeapKind::String);
                 return true;
             }
             case TokenType::Number:

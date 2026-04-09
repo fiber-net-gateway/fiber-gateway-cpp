@@ -443,9 +443,9 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
                 fiber::json::JsValue obj = fiber::json::JsValue::make_undefined();
                 runtime_.run_with_gc_retry(fiber::json::gc_estimate_object_bytes(0), [&]() {
                     obj = fiber::json::JsValue::make_object(runtime_.heap(), 0);
-                    return obj.type_ == fiber::json::JsNodeType::Object;
+                    return fiber::json::js_value_type(obj) == fiber::json::JsNodeType::Object;
                 });
-                if (obj.type_ != fiber::json::JsNodeType::Object) {
+                if (fiber::json::js_value_type(obj) != fiber::json::JsNodeType::Object) {
                     VmError error = make_oom(compiled_.positions[pc_ - 1]);
                     if (!handle_error(error, pc_ - 1)) {
                         return finish_error(error);
@@ -459,9 +459,9 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
                 fiber::json::JsValue arr = fiber::json::JsValue::make_undefined();
                 runtime_.run_with_gc_retry(fiber::json::gc_estimate_array_bytes(0), [&]() {
                     arr = fiber::json::JsValue::make_array(runtime_.heap(), 0);
-                    return arr.type_ == fiber::json::JsNodeType::Array;
+                    return fiber::json::js_value_type(arr) == fiber::json::JsNodeType::Array;
                 });
-                if (arr.type_ != fiber::json::JsNodeType::Array) {
+                if (fiber::json::js_value_type(arr) != fiber::json::JsNodeType::Array) {
                     VmError error = make_oom(compiled_.positions[pc_ - 1]);
                     if (!handle_error(error, pc_ - 1)) {
                         return finish_error(error);
@@ -763,7 +763,7 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
             }
             case ir::Code::ITERATE_NEXT: {
                 std::size_t idx = static_cast<std::size_t>(instr >> kInstrumentLen);
-                auto *iter = reinterpret_cast<fiber::json::GcIterator *>(vars_[idx].gc);
+                auto *iter = fiber::json::js_value_heap_ptr<fiber::json::GcIterator>(vars_[idx]);
                 fiber::json::JsValue out;
                 bool done = true;
                 bool ok = runtime_.run_with_gc_retry(estimate_iterator_next_bytes(iter), [&]() {
@@ -775,7 +775,7 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
             case ir::Code::ITERATE_KEY: {
                 std::size_t var_idx = static_cast<std::size_t>((instr >> kInstrumentLen) & kMaxIteratorVar);
                 std::size_t iter_idx = static_cast<std::size_t>(instr >> kIteratorOff);
-                auto *iter = reinterpret_cast<fiber::json::GcIterator *>(vars_[iter_idx].gc);
+                auto *iter = fiber::json::js_value_heap_ptr<fiber::json::GcIterator>(vars_[iter_idx]);
                 if (iter && iter->has_current) {
                     vars_[var_idx] = iter->current_key;
                 } else {
@@ -786,7 +786,7 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
             case ir::Code::ITERATE_VALUE: {
                 std::size_t var_idx = static_cast<std::size_t>((instr >> kInstrumentLen) & kMaxIteratorVar);
                 std::size_t iter_idx = static_cast<std::size_t>(instr >> kIteratorOff);
-                auto *iter = reinterpret_cast<fiber::json::GcIterator *>(vars_[iter_idx].gc);
+                auto *iter = fiber::json::js_value_heap_ptr<fiber::json::GcIterator>(vars_[iter_idx]);
                 if (iter && iter->has_current) {
                     vars_[var_idx] = iter->current_value;
                 } else {
@@ -877,10 +877,10 @@ const fiber::json::JsValue &InterpreterVm::arg_value(std::size_t index) const {
             return undefined_;
         }
         const fiber::json::JsValue &args = stack_[arg_spread_slot_];
-        if (args.type_ != fiber::json::JsNodeType::Array || !args.gc) {
+        if (fiber::json::js_value_type(args) != fiber::json::JsNodeType::Array) {
             return undefined_;
         }
-        auto *arr = reinterpret_cast<const fiber::json::GcArray *>(args.gc);
+        auto *arr = fiber::json::js_value_heap_ptr<const fiber::json::GcArray>(args);
         const fiber::json::JsValue *found = fiber::json::gc_array_get(arr, index);
         return found ? *found : undefined_;
     }
@@ -896,10 +896,10 @@ std::size_t InterpreterVm::arg_count() const {
             return 0;
         }
         const fiber::json::JsValue &args = stack_[arg_spread_slot_];
-        if (args.type_ != fiber::json::JsNodeType::Array || !args.gc) {
+        if (fiber::json::js_value_type(args) != fiber::json::JsNodeType::Array) {
             return 0;
         }
-        auto *arr = reinterpret_cast<const fiber::json::GcArray *>(args.gc);
+        auto *arr = fiber::json::js_value_heap_ptr<const fiber::json::GcArray>(args);
         return arr ? arr->size : 0;
     }
     return arg_cnt_;
@@ -1123,9 +1123,9 @@ VmResult InterpreterVm::load_const(std::size_t operand_index) {
         case ir::Compiled::ConstValue::Kind::String: {
             runtime_.run_with_gc_retry(fiber::json::gc_estimate_utf8_string_bytes(cv->text.size()), [&]() {
                 value = fiber::json::JsValue::make_string(runtime_.heap(), cv->text.data(), cv->text.size());
-                return value.type_ == fiber::json::JsNodeType::HeapString;
+                return fiber::json::js_value_type(value) == fiber::json::JsNodeType::HeapString;
             });
-            if (value.type_ != fiber::json::JsNodeType::HeapString) {
+            if (fiber::json::js_value_type(value) != fiber::json::JsNodeType::HeapString) {
                 return std::unexpected(make_oom(-1));
             }
             break;
@@ -1133,9 +1133,9 @@ VmResult InterpreterVm::load_const(std::size_t operand_index) {
         case ir::Compiled::ConstValue::Kind::Binary: {
             runtime_.run_with_gc_retry(fiber::json::gc_estimate_binary_bytes(cv->bytes.size()), [&]() {
                 value = fiber::json::JsValue::make_binary(runtime_.heap(), cv->bytes.data(), cv->bytes.size());
-                return value.type_ == fiber::json::JsNodeType::HeapBinary;
+                return fiber::json::js_value_type(value) == fiber::json::JsNodeType::HeapBinary;
             });
-            if (value.type_ != fiber::json::JsNodeType::HeapBinary) {
+            if (fiber::json::js_value_type(value) != fiber::json::JsNodeType::HeapBinary) {
                 return std::unexpected(make_oom(-1));
             }
             break;
@@ -1164,8 +1164,7 @@ VmResult InterpreterVm::make_exception_value(const VmError &error) {
     if (!name_str) {
         return std::unexpected(make_oom(error.position));
     }
-    rooted_name.type_ = fiber::json::JsNodeType::HeapString;
-    rooted_name.gc = &name_str->hdr;
+    rooted_name = fiber::json::js_make_heap_ref(&name_str->hdr, fiber::json::JsHeapKind::String);
     fiber::json::GcString *message_str =
         runtime_.alloc_with_gc(fiber::json::gc_estimate_utf8_string_bytes(message.size()), [&]() {
             return fiber::json::gc_new_string(&runtime_.heap(), message.c_str(), message.size());
@@ -1173,18 +1172,14 @@ VmResult InterpreterVm::make_exception_value(const VmError &error) {
     if (!message_str) {
         return std::unexpected(make_oom(error.position));
     }
-    rooted_message.type_ = fiber::json::JsNodeType::HeapString;
-    rooted_message.gc = &message_str->hdr;
+    rooted_message = fiber::json::js_make_heap_ref(&message_str->hdr, fiber::json::JsHeapKind::String);
     fiber::json::GcException *exc = runtime_.alloc_with_gc(estimate_exception_bytes(name, message), [&]() {
         return fiber::json::gc_new_exception(&runtime_.heap(), error.position, name_str, message_str, rooted_meta);
     });
     if (!exc) {
         return std::unexpected(make_oom(error.position));
     }
-    fiber::json::JsValue result;
-    result.type_ = fiber::json::JsNodeType::Exception;
-    result.gc = &exc->hdr;
-    return result;
+    return fiber::json::js_make_heap_ref(&exc->hdr, fiber::json::JsHeapKind::Exception);
 }
 
 bool InterpreterVm::apply_async_ready(VmResult &out) {

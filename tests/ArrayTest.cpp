@@ -18,25 +18,25 @@ TEST(ArrayTest, PushPopSetGet) {
 
     const JsValue *v0 = fiber::json::gc_array_get(arr, 0);
     ASSERT_NE(v0, nullptr);
-    EXPECT_EQ(v0->type_, JsNodeType::Integer);
-    EXPECT_EQ(v0->i, 1);
+    EXPECT_EQ(js_value_type(*v0), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(*v0), 1);
 
     EXPECT_TRUE(fiber::json::gc_array_set(&heap, arr, 1, JsValue::make_integer(5)));
     const JsValue *v1 = fiber::json::gc_array_get(arr, 1);
     ASSERT_NE(v1, nullptr);
-    EXPECT_EQ(v1->type_, JsNodeType::Integer);
-    EXPECT_EQ(v1->i, 5);
+    EXPECT_EQ(js_value_type(*v1), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(*v1), 5);
 
     EXPECT_TRUE(fiber::json::gc_array_set(&heap, arr, 3, JsValue::make_integer(7)));
     EXPECT_EQ(arr->size, 4u);
     const JsValue *v2 = fiber::json::gc_array_get(arr, 2);
     ASSERT_NE(v2, nullptr);
-    EXPECT_EQ(v2->type_, JsNodeType::Undefined);
+    EXPECT_EQ(js_value_type(*v2), JsNodeType::Undefined);
 
     JsValue popped;
     EXPECT_TRUE(fiber::json::gc_array_pop(arr, &popped));
-    EXPECT_EQ(popped.type_, JsNodeType::Integer);
-    EXPECT_EQ(popped.i, 7);
+    EXPECT_EQ(js_value_type(popped), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(popped), 7);
     EXPECT_EQ(arr->size, 3u);
 
     EXPECT_EQ(fiber::json::gc_array_get(arr, 9), nullptr);
@@ -57,21 +57,21 @@ TEST(ArrayTest, InsertRemove) {
     ASSERT_NE(v0, nullptr);
     ASSERT_NE(v1, nullptr);
     ASSERT_NE(v2, nullptr);
-    EXPECT_EQ(v0->i, 1);
-    EXPECT_EQ(v1->i, 2);
-    EXPECT_EQ(v2->i, 3);
+    EXPECT_EQ(js_value_int64(*v0), 1);
+    EXPECT_EQ(js_value_int64(*v1), 2);
+    EXPECT_EQ(js_value_int64(*v2), 3);
 
     JsValue removed;
     EXPECT_TRUE(fiber::json::gc_array_remove(arr, 1, &removed));
-    EXPECT_EQ(removed.type_, JsNodeType::Integer);
-    EXPECT_EQ(removed.i, 2);
+    EXPECT_EQ(js_value_type(removed), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(removed), 2);
     EXPECT_EQ(arr->size, 2u);
 
     EXPECT_TRUE(fiber::json::gc_array_insert(&heap, arr, 10, JsValue::make_integer(4)));
     EXPECT_EQ(arr->size, 3u);
     const JsValue *v3 = fiber::json::gc_array_get(arr, 2);
     ASSERT_NE(v3, nullptr);
-    EXPECT_EQ(v3->i, 4);
+    EXPECT_EQ(js_value_int64(*v3), 4);
 
     EXPECT_FALSE(fiber::json::gc_array_remove(arr, 9, nullptr));
 }

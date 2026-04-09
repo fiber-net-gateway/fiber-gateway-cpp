@@ -59,30 +59,32 @@ Generator::Result encode_object(Generator &gen, const GcObject *obj) {
 } // namespace
 
 Generator::Result encode_js_value(Generator &gen, const JsValue &value) {
-    switch (value.type_) {
+    switch (js_value_type(value)) {
         case JsNodeType::Null:
             return gen.null_value();
         case JsNodeType::Boolean:
-            return gen.bool_value(value.b);
+            return gen.bool_value(js_value_bool(value));
         case JsNodeType::Integer:
-            return gen.integer(value.i);
+            return gen.integer(js_value_int64(value));
         case JsNodeType::Float:
-            return gen.double_value(value.f);
+            return gen.double_value(js_value_double(value));
         case JsNodeType::HeapString: {
-            auto *str = reinterpret_cast<const GcString *>(value.gc);
+            auto *str = js_value_heap_ptr<const GcString>(value);
             if (!str) {
                 return Generator::Result::InvalidString;
             }
             return gen.string(str);
         }
-        case JsNodeType::NativeString:
-            return gen.string(value.ns.data, value.ns.len);
+        case JsNodeType::NativeString: {
+            NativeStr native = js_value_native_string(value);
+            return gen.string(native.data, native.len);
+        }
         case JsNodeType::Array:
-            return encode_array(gen, reinterpret_cast<const GcArray *>(value.gc));
+            return encode_array(gen, js_value_heap_ptr<const GcArray>(value));
         case JsNodeType::Object:
-            return encode_object(gen, reinterpret_cast<const GcObject *>(value.gc));
+            return encode_object(gen, js_value_heap_ptr<const GcObject>(value));
         case JsNodeType::Exception: {
-            auto *exc = reinterpret_cast<const GcException *>(value.gc);
+            auto *exc = js_value_heap_ptr<const GcException>(value);
             if (!exc) {
                 return Generator::Result::InvalidValue;
             }
@@ -126,7 +128,7 @@ Generator::Result encode_js_value(Generator &gen, const JsValue &value) {
             if (result != Generator::Result::OK) {
                 return result;
             }
-            if (exc->meta.type_ == JsNodeType::Undefined) {
+            if (js_value_is_undefined(exc->meta)) {
                 result = gen.null_value();
             } else {
                 result = encode_js_value(gen, exc->meta);
@@ -136,10 +138,12 @@ Generator::Result encode_js_value(Generator &gen, const JsValue &value) {
             }
             return gen.map_close();
         }
-        case JsNodeType::NativeBinary:
-            return gen.binary(value.nb.data, value.nb.len);
+        case JsNodeType::NativeBinary: {
+            NativeBin native = js_value_native_binary(value);
+            return gen.binary(native.data, native.len);
+        }
         case JsNodeType::HeapBinary: {
-            auto *bin = reinterpret_cast<const GcBinary *>(value.gc);
+            auto *bin = js_value_heap_ptr<const GcBinary>(value);
             if (!bin) {
                 return Generator::Result::InvalidString;
             }

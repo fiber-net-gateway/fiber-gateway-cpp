@@ -94,12 +94,12 @@ fiber::script::ir::Compiled compile_script(std::string_view script, fiber::scrip
 }
 
 std::string value_to_string(const fiber::json::JsValue &value) {
-    if (value.type_ == fiber::json::JsNodeType::NativeString) {
-        return std::string(value.ns.data, value.ns.len);
+    if (js_value_type(value) == fiber::json::JsNodeType::NativeString) {
+        return std::string(js_value_native_string(value).data, js_value_native_string(value).len);
     }
-    if (value.type_ == fiber::json::JsNodeType::HeapString) {
+    if (js_value_type(value) == fiber::json::JsNodeType::HeapString) {
         std::string out;
-        auto *str = reinterpret_cast<const fiber::json::GcString *>(value.gc);
+        auto *str = js_value_heap_ptr<const fiber::json::GcString>(value);
         if (fiber::json::gc_string_to_utf8(str, out)) {
             return out;
         }
@@ -125,8 +125,8 @@ TEST(ScriptExecutionTest, RunSimpleReturn) {
     auto run = script.exec_sync(fiber::json::JsValue::make_undefined(), nullptr, runtime);
     auto result = run();
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result.value().type_, fiber::json::JsNodeType::Integer);
-    EXPECT_EQ(result.value().i, 7);
+    EXPECT_EQ(js_value_type(result.value()), fiber::json::JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(result.value()), 7);
 }
 
 TEST(ScriptExecutionTest, RunThrowLiteral) {
