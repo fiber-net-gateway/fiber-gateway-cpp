@@ -111,7 +111,6 @@ private:
     bool handle_error(VmError error, std::size_t epc);
     VmResult load_const(std::size_t operand_index);
     VmResult make_exception_value(const VmError &error);
-    bool maybe_collect();
     bool apply_async_ready(VmResult &out);
 };
 
