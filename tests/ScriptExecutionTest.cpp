@@ -94,15 +94,16 @@ fiber::script::ir::Compiled compile_script(std::string_view script, fiber::scrip
 }
 
 std::string value_to_string(const fiber::json::JsValue &value) {
-    if (js_value_type(value) == fiber::json::JsNodeType::NativeString) {
+    if (js_value_type(value) != fiber::json::JsNodeType::String) {
+        return {};
+    }
+    if (js_value_is_borrowed_string(value)) {
         return std::string(js_value_native_string(value).data, js_value_native_string(value).len);
     }
-    if (js_value_type(value) == fiber::json::JsNodeType::HeapString) {
-        std::string out;
-        auto *str = js_value_heap_ptr<const fiber::json::GcString>(value);
-        if (fiber::json::gc_string_to_utf8(str, out)) {
-            return out;
-        }
+    std::string out;
+    auto *str = js_value_heap_ptr<const fiber::json::GcString>(value);
+    if (fiber::json::gc_string_to_utf8(str, out)) {
+        return out;
     }
     return {};
 }

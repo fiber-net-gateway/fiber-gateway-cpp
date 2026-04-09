@@ -57,8 +57,7 @@ std::string_view type_name(JsNodeType type) {
             return "Integer";
         case JsNodeType::Float:
             return "Float";
-        case JsNodeType::HeapString:
-        case JsNodeType::NativeString:
+        case JsNodeType::String:
             return "String";
         case JsNodeType::Array:
             return "Array";
@@ -68,19 +67,18 @@ std::string_view type_name(JsNodeType type) {
             return "Iterator";
         case JsNodeType::Exception:
             return "Exception";
-        case JsNodeType::NativeBinary:
-        case JsNodeType::HeapBinary:
+        case JsNodeType::Binary:
             return "Binary";
     }
     return "Unknown";
 }
 
 bool is_string_type(const JsValue &value) {
-    return js_value_type(value) == JsNodeType::HeapString || js_value_type(value) == JsNodeType::NativeString;
+    return js_value_type(value) == JsNodeType::String;
 }
 
 bool is_binary_type(const JsValue &value) {
-    return js_value_type(value) == JsNodeType::HeapBinary || js_value_type(value) == JsNodeType::NativeBinary;
+    return js_value_type(value) == JsNodeType::Binary;
 }
 
 bool is_number_type(const JsValue &value) {
@@ -89,7 +87,10 @@ bool is_number_type(const JsValue &value) {
 
 bool get_utf8_string(const JsValue &value, std::string &out) {
     out.clear();
-    if (js_value_type(value) == JsNodeType::NativeString) {
+    if (js_value_type(value) != JsNodeType::String) {
+        return false;
+    }
+    if (js_value_is_borrowed_string(value)) {
         if (js_value_native_string(value).len == 0) {
             return true;
         }
@@ -102,16 +103,16 @@ bool get_utf8_string(const JsValue &value, std::string &out) {
         out.assign(js_value_native_string(value).data, js_value_native_string(value).len);
         return true;
     }
-    if (js_value_type(value) == JsNodeType::HeapString) {
-        auto *str = js_value_heap_ptr<const GcString>(value);
-        return fiber::json::gc_string_to_utf8(str, out);
-    }
-    return false;
+    auto *str = js_value_heap_ptr<const GcString>(value);
+    return fiber::json::gc_string_to_utf8(str, out);
 }
 
 bool get_u16_string(const JsValue &value, std::u16string &out) {
     out.clear();
-    if (js_value_type(value) == JsNodeType::HeapString) {
+    if (js_value_type(value) != JsNodeType::String) {
+        return false;
+    }
+    if (!js_value_is_borrowed_string(value)) {
         auto *str = js_value_heap_ptr<const GcString>(value);
         if (!str) {
             return false;
@@ -126,26 +127,26 @@ bool get_u16_string(const JsValue &value, std::u16string &out) {
         }
         return true;
     }
-    if (js_value_type(value) == JsNodeType::NativeString) {
-        if (js_value_native_string(value).len == 0) {
-            return true;
-        }
-        fiber::json::Utf8ScanResult scan;
-        if (!fiber::json::utf8_scan(js_value_native_string(value).data, js_value_native_string(value).len, scan)) {
-            return false;
-        }
-        out.resize(scan.utf16_len);
-        if (!fiber::json::utf8_write_utf16(js_value_native_string(value).data, js_value_native_string(value).len, out.data(), scan.utf16_len)) {
-            return false;
-        }
+    if (js_value_native_string(value).len == 0) {
         return true;
     }
-    return false;
+    fiber::json::Utf8ScanResult scan;
+    if (!fiber::json::utf8_scan(js_value_native_string(value).data, js_value_native_string(value).len, scan)) {
+        return false;
+    }
+    out.resize(scan.utf16_len);
+    if (!fiber::json::utf8_write_utf16(js_value_native_string(value).data, js_value_native_string(value).len, out.data(), scan.utf16_len)) {
+        return false;
+    }
+    return true;
 }
 
 bool string_length(const JsValue &value, std::size_t &out) {
     out = 0;
-    if (js_value_type(value) == JsNodeType::HeapString) {
+    if (js_value_type(value) != JsNodeType::String) {
+        return false;
+    }
+    if (!js_value_is_borrowed_string(value)) {
         auto *str = js_value_heap_ptr<const GcString>(value);
         if (!str) {
             return false;
@@ -153,35 +154,32 @@ bool string_length(const JsValue &value, std::size_t &out) {
         out = str->len;
         return true;
     }
-    if (js_value_type(value) == JsNodeType::NativeString) {
-        fiber::json::Utf8ScanResult scan;
-        if (!fiber::json::utf8_scan(js_value_native_string(value).data, js_value_native_string(value).len, scan)) {
-            return false;
-        }
-        out = scan.utf16_len;
-        return true;
+    fiber::json::Utf8ScanResult scan;
+    if (!fiber::json::utf8_scan(js_value_native_string(value).data, js_value_native_string(value).len, scan)) {
+        return false;
     }
-    return false;
+    out = scan.utf16_len;
+    return true;
 }
 
 bool get_binary_data(const JsValue &value, const std::uint8_t *&data, std::size_t &len) {
     data = nullptr;
     len = 0;
-    if (js_value_type(value) == JsNodeType::NativeBinary) {
+    if (js_value_type(value) != JsNodeType::Binary) {
+        return false;
+    }
+    if (js_value_is_borrowed_binary(value)) {
         data = js_value_native_binary(value).data;
         len = js_value_native_binary(value).len;
         return true;
     }
-    if (js_value_type(value) == JsNodeType::HeapBinary) {
-        auto *bin = js_value_heap_ptr<const GcBinary>(value);
-        if (!bin) {
-            return false;
-        }
-        data = bin->data;
-        len = bin->len;
-        return true;
+    auto *bin = js_value_heap_ptr<const GcBinary>(value);
+    if (!bin) {
+        return false;
     }
-    return false;
+    data = bin->data;
+    len = bin->len;
+    return true;
 }
 
 bool to_double(const JsValue &value, double &out) {
@@ -225,8 +223,7 @@ std::string double_to_string(double value) {
 
 std::string as_text(const JsValue &value, std::string_view default_value) {
     switch (js_value_type(value)) {
-        case JsNodeType::HeapString:
-        case JsNodeType::NativeString: {
+        case JsNodeType::String: {
             std::string out;
             if (get_utf8_string(value, out)) {
                 return out;
@@ -245,8 +242,7 @@ std::string as_text(const JsValue &value, std::string_view default_value) {
         case JsNodeType::Object:
         case JsNodeType::Interator:
         case JsNodeType::Exception:
-        case JsNodeType::NativeBinary:
-        case JsNodeType::HeapBinary:
+        case JsNodeType::Binary:
             return std::string(default_value);
     }
     return std::string(default_value);
@@ -264,8 +260,7 @@ std::string jsonutil_to_string(const JsValue &value) {
             return std::to_string(js_value_int64(value));
         case JsNodeType::Float:
             return double_to_string(js_value_double(value));
-        case JsNodeType::HeapString:
-        case JsNodeType::NativeString: {
+        case JsNodeType::String: {
             std::string out;
             if (get_utf8_string(value, out)) {
                 return out;
@@ -279,15 +274,16 @@ std::string jsonutil_to_string(const JsValue &value) {
             return std::string(kObjectText);
         case JsNodeType::Interator:
             return std::string(kArrayText);
-        case JsNodeType::NativeBinary:
-            return std::string(reinterpret_cast<const char *>(js_value_native_binary(value).data), js_value_native_binary(value).len);
-        case JsNodeType::HeapBinary: {
-            auto *bin = js_value_heap_ptr<const GcBinary>(value);
-            if (!bin) {
-                return std::string(kNilText);
+        case JsNodeType::Binary:
+            if (js_value_is_borrowed_binary(value)) {
+                return std::string(reinterpret_cast<const char *>(js_value_native_binary(value).data), js_value_native_binary(value).len);
+            } else {
+                auto *bin = js_value_heap_ptr<const GcBinary>(value);
+                if (!bin) {
+                    return std::string(kNilText);
+                }
+                return std::string(reinterpret_cast<const char *>(bin->data), bin->len);
             }
-            return std::string(reinterpret_cast<const char *>(bin->data), bin->len);
-        }
     }
     return std::string(kNilText);
 }
@@ -1146,7 +1142,7 @@ public:
             return JsValue::make_boolean(false);
         }
         const JsValue &container = context.arg_value(0);
-        if (js_value_type(container) == JsNodeType::HeapString || js_value_type(container) == JsNodeType::NativeString) {
+        if (js_value_type(container) == JsNodeType::String) {
             std::string text;
             if (!get_utf8_string(container, text)) {
                 return JsValue::make_boolean(false);
@@ -1279,10 +1275,10 @@ public:
 };
 
 GcString *ensure_heap_string(ScriptRuntime &runtime, const JsValue &value) {
-    if (js_value_type(value) == JsNodeType::HeapString) {
+    if (js_value_type(value) == JsNodeType::String && !js_value_is_borrowed_string(value)) {
         return js_value_heap_ptr<GcString>(const_cast<JsValue &>(value));
     }
-    if (js_value_type(value) == JsNodeType::NativeString) {
+    if (js_value_type(value) == JsNodeType::String && js_value_is_borrowed_string(value)) {
         auto *str = runtime.alloc_with_gc(fiber::json::gc_estimate_utf8_string_bytes(js_value_native_string(value).len), [&]() {
             return fiber::json::gc_new_string(&runtime.heap(), js_value_native_string(value).data, js_value_native_string(value).len);
         });

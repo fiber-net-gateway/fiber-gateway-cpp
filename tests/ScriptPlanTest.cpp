@@ -29,15 +29,16 @@ using FunctionResult = fiber::script::Library::FunctionResult;
 using ScriptResult = fiber::script::ScriptSyncRun::Result;
 
 std::string value_to_string(const JsValue &value) {
-    if (js_value_type(value) == JsNodeType::NativeString) {
+    if (js_value_type(value) != JsNodeType::String) {
+        return {};
+    }
+    if (js_value_is_borrowed_string(value)) {
         return std::string(js_value_native_string(value).data, js_value_native_string(value).len);
     }
-    if (js_value_type(value) == JsNodeType::HeapString) {
-        std::string out;
-        auto *str = js_value_heap_ptr<const GcString>(value);
-        if (fiber::json::gc_string_to_utf8(str, out)) {
-            return out;
-        }
+    std::string out;
+    auto *str = js_value_heap_ptr<const GcString>(value);
+    if (fiber::json::gc_string_to_utf8(str, out)) {
+        return out;
     }
     return {};
 }
@@ -55,11 +56,11 @@ bool value_to_number(const JsValue &value, double &out) {
 }
 
 bool is_string_type(const JsValue &value) {
-    return js_value_type(value) == JsNodeType::NativeString || js_value_type(value) == JsNodeType::HeapString;
+    return js_value_type(value) == JsNodeType::String;
 }
 
 bool is_binary_type(const JsValue &value) {
-    return js_value_type(value) == JsNodeType::NativeBinary || js_value_type(value) == JsNodeType::HeapBinary;
+    return js_value_type(value) == JsNodeType::Binary;
 }
 
 const JsValue *object_value(const JsValue &obj, std::string_view key) {

@@ -76,7 +76,7 @@ TEST(JsValueEncodeTest, EncodeArrayWithStrings) {
     ASSERT_NE(arr, nullptr);
 
     JsValue str = JsValue::make_string(heap, "hi", 2);
-    ASSERT_EQ(js_value_type(str), JsNodeType::HeapString);
+    ASSERT_EQ(js_value_type(str), JsNodeType::String);
 
     arr->elems[0] = JsValue::make_integer(1);
     arr->elems[1] = JsValue::make_boolean(false);

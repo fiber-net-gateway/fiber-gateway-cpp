@@ -43,7 +43,7 @@ TEST(JsValueOpsTest, ConcatKeepsByteForNativeUtf8) {
 
     auto result = fiber::json::js_binary_op(JsBinaryOp::Add, lhs, rhs, &heap);
     ASSERT_EQ(result.error, JsOpError::None);
-    ASSERT_EQ(js_value_type(result.value), JsNodeType::HeapString);
+    ASSERT_EQ(js_value_type(result.value), JsNodeType::String);
     auto *str = as_string(result.value);
     ASSERT_NE(str, nullptr);
     EXPECT_EQ(str->encoding, GcStringEncoding::Byte);
@@ -66,7 +66,7 @@ TEST(JsValueOpsTest, ConcatUpgradesToUtf16ForWide) {
 
     auto result = fiber::json::js_binary_op(JsBinaryOp::Add, lhs, rhs, &heap);
     ASSERT_EQ(result.error, JsOpError::None);
-    ASSERT_EQ(js_value_type(result.value), JsNodeType::HeapString);
+    ASSERT_EQ(js_value_type(result.value), JsNodeType::String);
     auto *str = as_string(result.value);
     ASSERT_NE(str, nullptr);
     EXPECT_EQ(str->encoding, GcStringEncoding::Utf16);
@@ -87,7 +87,7 @@ TEST(JsValueOpsTest, ConcatHeapAndNative) {
 
     auto result = fiber::json::js_binary_op(JsBinaryOp::Add, lhs, rhs, &heap);
     ASSERT_EQ(result.error, JsOpError::None);
-    ASSERT_EQ(js_value_type(result.value), JsNodeType::HeapString);
+    ASSERT_EQ(js_value_type(result.value), JsNodeType::String);
     auto *str = as_string(result.value);
     ASSERT_NE(str, nullptr);
     EXPECT_EQ(str->encoding, GcStringEncoding::Byte);

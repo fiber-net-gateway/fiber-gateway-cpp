@@ -1123,9 +1123,11 @@ VmResult InterpreterVm::load_const(std::size_t operand_index) {
         case ir::Compiled::ConstValue::Kind::String: {
             runtime_.run_with_gc_retry(fiber::json::gc_estimate_utf8_string_bytes(cv->text.size()), [&]() {
                 value = fiber::json::JsValue::make_string(runtime_.heap(), cv->text.data(), cv->text.size());
-                return fiber::json::js_value_type(value) == fiber::json::JsNodeType::HeapString;
+                return fiber::json::js_value_type(value) == fiber::json::JsNodeType::String &&
+                       !fiber::json::js_value_is_borrowed_string(value);
             });
-            if (fiber::json::js_value_type(value) != fiber::json::JsNodeType::HeapString) {
+            if (fiber::json::js_value_type(value) != fiber::json::JsNodeType::String ||
+                fiber::json::js_value_is_borrowed_string(value)) {
                 return std::unexpected(make_oom(-1));
             }
             break;
@@ -1133,9 +1135,11 @@ VmResult InterpreterVm::load_const(std::size_t operand_index) {
         case ir::Compiled::ConstValue::Kind::Binary: {
             runtime_.run_with_gc_retry(fiber::json::gc_estimate_binary_bytes(cv->bytes.size()), [&]() {
                 value = fiber::json::JsValue::make_binary(runtime_.heap(), cv->bytes.data(), cv->bytes.size());
-                return fiber::json::js_value_type(value) == fiber::json::JsNodeType::HeapBinary;
+                return fiber::json::js_value_type(value) == fiber::json::JsNodeType::Binary &&
+                       !fiber::json::js_value_is_borrowed_binary(value);
             });
-            if (fiber::json::js_value_type(value) != fiber::json::JsNodeType::HeapBinary) {
+            if (fiber::json::js_value_type(value) != fiber::json::JsNodeType::Binary ||
+                fiber::json::js_value_is_borrowed_binary(value)) {
                 return std::unexpected(make_oom(-1));
             }
             break;

@@ -70,7 +70,7 @@ This phase is intentionally conservative. It creates a stable base for the next 
 
 Goals:
 
-- treat current `NativeString`/`NativeBinary` as borrowed data views
+- treat borrowed string/binary values as data views at the `JsTag` layer
 - keep heap string/binary as GC-managed objects
 - move all materialization through explicit helpers such as `ensure_heap_string`
 
@@ -150,4 +150,3 @@ With this model:
 - no standalone AOT binary generation
 - no collector rewrite
 - no immediate async semantic changes
-

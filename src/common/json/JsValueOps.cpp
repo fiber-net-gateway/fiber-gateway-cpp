@@ -24,7 +24,7 @@ JsOpResult make_error(JsOpError error) {
 }
 
 bool is_string_type(JsNodeType type) {
-    return type == JsNodeType::HeapString || type == JsNodeType::NativeString;
+    return type == JsNodeType::String;
 }
 
 bool is_number_type(JsNodeType type) {
@@ -37,11 +37,11 @@ bool is_numeric_like(JsNodeType type) {
 }
 
 const GcString *as_heap_string(const JsValue &value) {
-    return js_value_type(value) == JsNodeType::HeapString ? js_value_heap_ptr<const GcString>(value) : nullptr;
+    return js_value_type(value) == JsNodeType::String ? js_value_heap_ptr<const GcString>(value) : nullptr;
 }
 
 const GcBinary *as_heap_binary(const JsValue &value) {
-    return js_value_type(value) == JsNodeType::HeapBinary ? js_value_heap_ptr<const GcBinary>(value) : nullptr;
+    return js_value_type(value) == JsNodeType::Binary ? js_value_heap_ptr<const GcBinary>(value) : nullptr;
 }
 
 bool to_number(const JsValue &value, double &out) {
@@ -93,15 +93,12 @@ bool is_truthy(const JsValue &value) {
             return js_value_int64(value) != 0;
         case JsNodeType::Float:
             return js_value_double(value) != 0.0 && !std::isnan(js_value_double(value));
-        case JsNodeType::HeapString: {
-            auto *str = as_heap_string(value);
-            return str && str->len > 0;
-        }
-        case JsNodeType::NativeString:
-            return js_value_native_string(value).len > 0;
-        case JsNodeType::NativeBinary:
-            return js_value_native_binary(value).len > 0;
-        case JsNodeType::HeapBinary:
+        case JsNodeType::String:
+            if (js_value_is_borrowed_string(value)) {
+                return js_value_native_string(value).len > 0;
+            }
+            return as_heap_string(value) != nullptr && as_heap_string(value)->len > 0;
+        case JsNodeType::Binary:
         case JsNodeType::Array:
         case JsNodeType::Object:
         case JsNodeType::Interator:
@@ -127,7 +124,11 @@ struct StringSource {
 };
 
 bool build_string_source(const JsValue &value, StringSource &out, JsOpError &error) {
-    if (js_value_type(value) == JsNodeType::HeapString) {
+    if (js_value_type(value) != JsNodeType::String) {
+        error = JsOpError::TypeError;
+        return false;
+    }
+    if (!js_value_is_borrowed_string(value)) {
         auto *str = as_heap_string(value);
         if (!str) {
             error = JsOpError::TypeError;
@@ -144,18 +145,14 @@ bool build_string_source(const JsValue &value, StringSource &out, JsOpError &err
         }
         return true;
     }
-    if (js_value_type(value) == JsNodeType::NativeString) {
-        out.kind = StringKind::NativeUtf8;
-        out.utf8 = js_value_native_string(value).data;
-        out.len = js_value_native_string(value).len;
-        if (!utf8_scan(out.utf8, out.len, out.scan)) {
-            error = JsOpError::InvalidUtf8;
-            return false;
-        }
-        return true;
+    out.kind = StringKind::NativeUtf8;
+    out.utf8 = js_value_native_string(value).data;
+    out.len = js_value_native_string(value).len;
+    if (!utf8_scan(out.utf8, out.len, out.scan)) {
+        error = JsOpError::InvalidUtf8;
+        return false;
     }
-    error = JsOpError::TypeError;
-    return false;
+    return true;
 }
 
 bool concat_strings(GcHeap *heap, const StringSource &lhs, const StringSource &rhs, JsValue &out, JsOpError &error) {
@@ -187,7 +184,7 @@ bool concat_strings(GcHeap *heap, const StringSource &lhs, const StringSource &r
 
     if (total_len == 0) {
         out = JsValue::make_string(*heap, "", 0);
-        if (js_value_type(out) != JsNodeType::HeapString) {
+        if (js_value_type(out) != JsNodeType::String || js_value_is_borrowed_string(out)) {
             error = JsOpError::OutOfMemory;
             return false;
         }
@@ -268,7 +265,11 @@ bool concat_strings(GcHeap *heap, const StringSource &lhs, const StringSource &r
 
 bool string_to_utf8_copy(const JsValue &value, std::string &out, JsOpError &error) {
     out.clear();
-    if (js_value_type(value) == JsNodeType::NativeString) {
+    if (js_value_type(value) != JsNodeType::String) {
+        error = JsOpError::TypeError;
+        return false;
+    }
+    if (js_value_is_borrowed_string(value)) {
         if (!utf8_validate(js_value_native_string(value).data, js_value_native_string(value).len)) {
             error = JsOpError::InvalidUtf8;
             return false;
@@ -279,16 +280,12 @@ bool string_to_utf8_copy(const JsValue &value, std::string &out, JsOpError &erro
         out.assign(js_value_native_string(value).data, js_value_native_string(value).len);
         return true;
     }
-    if (js_value_type(value) == JsNodeType::HeapString) {
-        auto *str = as_heap_string(value);
-        if (!gc_string_to_utf8(str, out)) {
-            error = JsOpError::InvalidUtf8;
-            return false;
-        }
-        return true;
+    auto *str = as_heap_string(value);
+    if (!gc_string_to_utf8(str, out)) {
+        error = JsOpError::InvalidUtf8;
+        return false;
     }
-    error = JsOpError::TypeError;
-    return false;
+    return true;
 }
 
 bool ascii_is_space(char ch) {
@@ -334,7 +331,11 @@ struct StringCursor {
 };
 
 bool init_string_cursor(const JsValue &value, StringCursor &out, JsOpError &error) {
-    if (js_value_type(value) == JsNodeType::HeapString) {
+    if (js_value_type(value) != JsNodeType::String) {
+        error = JsOpError::TypeError;
+        return false;
+    }
+    if (!js_value_is_borrowed_string(value)) {
         auto *str = as_heap_string(value);
         if (!str) {
             error = JsOpError::TypeError;
@@ -354,18 +355,14 @@ bool init_string_cursor(const JsValue &value, StringCursor &out, JsOpError &erro
         }
         return true;
     }
-    if (js_value_type(value) == JsNodeType::NativeString) {
-        out.kind = StringKind::NativeUtf8;
-        out.utf8 = js_value_native_string(value).data;
-        out.len = js_value_native_string(value).len;
-        if (out.len > 0 && !out.utf8) {
-            error = JsOpError::InvalidUtf8;
-            return false;
-        }
-        return true;
+    out.kind = StringKind::NativeUtf8;
+    out.utf8 = js_value_native_string(value).data;
+    out.len = js_value_native_string(value).len;
+    if (out.len > 0 && !out.utf8) {
+        error = JsOpError::InvalidUtf8;
+        return false;
     }
-    error = JsOpError::TypeError;
-    return false;
+    return true;
 }
 
 bool cursor_next(StringCursor &cursor, char16_t &unit, JsOpError &error) {
@@ -412,7 +409,8 @@ bool cursor_next(StringCursor &cursor, char16_t &unit, JsOpError &error) {
 }
 
 bool compare_strings(const JsValue &lhs, const JsValue &rhs, int &result, JsOpError &error) {
-    if (js_value_type(lhs) == JsNodeType::HeapString && js_value_type(rhs) == JsNodeType::HeapString) {
+    if (!js_value_is_borrowed_string(lhs) && !js_value_is_borrowed_string(rhs) &&
+        js_value_type(lhs) == JsNodeType::String && js_value_type(rhs) == JsNodeType::String) {
         auto *lhs_str = as_heap_string(lhs);
         auto *rhs_str = as_heap_string(rhs);
         if (!lhs_str || !rhs_str) {
@@ -535,19 +533,19 @@ bool strict_equal(const JsValue &lhs, const JsValue &rhs, JsOpError &error) {
             return js_value_int64(lhs) == js_value_int64(rhs);
         case JsNodeType::Float:
             return js_value_double(lhs) == js_value_double(rhs);
-        case JsNodeType::NativeBinary: {
-            NativeBin lhs_bin = js_value_native_binary(lhs);
-            NativeBin rhs_bin = js_value_native_binary(rhs);
-            return lhs_bin.data == rhs_bin.data && lhs_bin.len == rhs_bin.len;
-        }
-        case JsNodeType::HeapBinary:
+        case JsNodeType::Binary:
+            if (js_value_is_borrowed_binary(lhs) || js_value_is_borrowed_binary(rhs)) {
+                NativeBin lhs_bin = js_value_native_binary(lhs);
+                NativeBin rhs_bin = js_value_native_binary(rhs);
+                return lhs_bin.data == rhs_bin.data && lhs_bin.len == rhs_bin.len;
+            }
+            return js_value_heap_header(lhs) == js_value_heap_header(rhs);
         case JsNodeType::Array:
         case JsNodeType::Object:
         case JsNodeType::Interator:
         case JsNodeType::Exception:
             return js_value_heap_header(lhs) == js_value_heap_header(rhs);
-        case JsNodeType::HeapString:
-        case JsNodeType::NativeString:
+        case JsNodeType::String:
             break;
     }
     return false;
