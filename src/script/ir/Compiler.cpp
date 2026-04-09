@@ -41,6 +41,21 @@ namespace fiber::script::ir {
 
 namespace {
 
+struct OperandKey {
+    Compiled::OperandKind kind = Compiled::OperandKind::ConstValue;
+    std::uintptr_t payload = 0;
+
+    bool operator==(const OperandKey &other) const = default;
+};
+
+struct OperandKeyHash {
+    std::size_t operator()(const OperandKey &key) const noexcept {
+        std::size_t lhs = static_cast<std::size_t>(key.kind);
+        std::size_t rhs = static_cast<std::size_t>(key.payload);
+        return lhs ^ (rhs + 0x9e3779b9u + (lhs << 6) + (lhs >> 2));
+    }
+};
+
 class CompilerImpl {
 public:
     Compiled compile(const ast::Node &node) {
@@ -80,7 +95,7 @@ private:
     Compiled compiled_;
     std::vector<Scope> scopes_;
     std::vector<LoopContext> loops_;
-    std::unordered_map<void *, std::size_t> operand_cache_;
+    std::unordered_map<OperandKey, std::size_t, OperandKeyHash> operand_cache_;
     std::unordered_map<std::string, std::size_t> string_operands_;
     std::optional<std::size_t> undef_const_;
     std::optional<std::size_t> null_const_;
@@ -164,15 +179,23 @@ private:
         compiled_.codes[index] = static_cast<std::int32_t>(op) | (static_cast<std::int32_t>(target) << 8);
     }
 
-    std::size_t add_operand(void *ptr) {
+    std::size_t add_host_operand(Compiled::OperandKind kind, const void *ptr) {
         FIBER_ASSERT(ptr);
-        auto it = operand_cache_.find(ptr);
+        FIBER_ASSERT(kind == Compiled::OperandKind::Function ||
+                     kind == Compiled::OperandKind::AsyncFunction ||
+                     kind == Compiled::OperandKind::Constant ||
+                     kind == Compiled::OperandKind::AsyncConstant);
+        OperandKey key{kind, reinterpret_cast<std::uintptr_t>(ptr)};
+        auto it = operand_cache_.find(key);
         if (it != operand_cache_.end()) {
             return it->second;
         }
-        compiled_.operands.push_back(ptr);
+        Compiled::Operand operand;
+        operand.kind = kind;
+        operand.payload = key.payload;
+        compiled_.operands.push_back(operand);
         std::size_t index = compiled_.operands.size() - 1;
-        operand_cache_.emplace(ptr, index);
+        operand_cache_.emplace(key, index);
         return index;
     }
 
@@ -182,19 +205,22 @@ private:
             return it->second;
         }
         auto stored = std::make_unique<std::string>(value);
-        auto *ptr = stored.get();
         compiled_.string_pool.push_back(std::move(stored));
-        compiled_.operands.push_back(ptr);
+        Compiled::Operand operand;
+        operand.kind = Compiled::OperandKind::InternedString;
+        operand.payload = compiled_.string_pool.size() - 1;
+        compiled_.operands.push_back(operand);
         std::size_t index = compiled_.operands.size() - 1;
         string_operands_.emplace(value, index);
         return index;
     }
 
     std::size_t add_const_value(Compiled::ConstValue value) {
-        auto stored = std::make_unique<Compiled::ConstValue>(std::move(value));
-        auto *ptr = stored.get();
-        compiled_.const_pool.push_back(std::move(stored));
-        compiled_.operands.push_back(ptr);
+        compiled_.const_pool.push_back(std::make_unique<Compiled::ConstValue>(std::move(value)));
+        Compiled::Operand operand;
+        operand.kind = Compiled::OperandKind::ConstValue;
+        operand.payload = compiled_.const_pool.size() - 1;
+        compiled_.operands.push_back(operand);
         return compiled_.operands.size() - 1;
     }
 
@@ -462,10 +488,10 @@ private:
         }
         if (auto *constant = dynamic_cast<const ast::ConstantVal *>(&expr)) {
             if (constant->is_async()) {
-                std::size_t idx = add_operand(reinterpret_cast<void *>(constant->async_constant()));
+                std::size_t idx = add_host_operand(Compiled::OperandKind::AsyncConstant, constant->async_constant());
                 emit_op(Code::CALL_ASYNC_CONST, idx, expr.start_pos(), 1);
             } else {
-                std::size_t idx = add_operand(reinterpret_cast<void *>(constant->constant()));
+                std::size_t idx = add_host_operand(Compiled::OperandKind::Constant, constant->constant());
                 emit_op(Code::CALL_CONST, idx, expr.start_pos(), 1);
             }
             return;
@@ -487,7 +513,10 @@ private:
                 void *func_ptr = call->is_async()
                     ? reinterpret_cast<void *>(call->async_func())
                     : reinterpret_cast<void *>(call->func());
-                std::size_t idx = add_operand(func_ptr);
+                std::size_t idx = add_host_operand(call->is_async()
+                                                       ? Compiled::OperandKind::AsyncFunction
+                                                       : Compiled::OperandKind::Function,
+                                                   func_ptr);
                 std::size_t arg_count = call->args().size();
                 std::int32_t code = static_cast<std::int32_t>(call->is_async() ? Code::CALL_ASYNC_FUNC : Code::CALL_FUNC) |
                                     (static_cast<std::int32_t>(arg_count & 0xFF) << 8) |
@@ -514,7 +543,10 @@ private:
             void *func_ptr = call->is_async()
                 ? reinterpret_cast<void *>(call->async_func())
                 : reinterpret_cast<void *>(call->func());
-            std::size_t idx = add_operand(func_ptr);
+            std::size_t idx = add_host_operand(call->is_async()
+                                                   ? Compiled::OperandKind::AsyncFunction
+                                                   : Compiled::OperandKind::Function,
+                                               func_ptr);
             emit_op(call->is_async() ? Code::CALL_ASYNC_FUNC_SPREAD : Code::CALL_FUNC_SPREAD, idx, expr.start_pos(), 0);
             return;
         }
@@ -749,7 +781,9 @@ private:
 
 Compiled Compiler::compile(const ast::Node &node) {
     CompilerImpl compiler;
-    return compiler.compile(node);
+    Compiled compiled = compiler.compile(node);
+    FIBER_ASSERT(compiled.validate_operands());
+    return compiled;
 }
 
 } // namespace fiber::script::ir
