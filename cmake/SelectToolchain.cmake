@@ -229,55 +229,52 @@ function(_fiber_select_default_toolchain)
     endif()
 
     set(CMAKE_CXX_COMPILER "${fiber_selected_cxx_compiler}" CACHE FILEPATH "Default detected C++ compiler")
+    set(CMAKE_CXX_COMPILER "${fiber_selected_cxx_compiler}" PARENT_SCOPE)
     message(STATUS "Selected default C++ compiler: ${fiber_selected_cxx_compiler} (${fiber_selected_cxx_version})")
 
     if (NOT DEFINED CMAKE_C_COMPILER)
         _fiber_find_matching_c_compiler("${fiber_selected_cxx_compiler}" fiber_selected_c_compiler)
         if (NOT fiber_selected_c_compiler STREQUAL "")
             set(CMAKE_C_COMPILER "${fiber_selected_c_compiler}" CACHE FILEPATH "Matching C compiler for selected C++ compiler")
+            set(CMAKE_C_COMPILER "${fiber_selected_c_compiler}" PARENT_SCOPE)
         endif()
     endif()
 endfunction()
 
-function(_fiber_configure_clang_stdlib)
-    set(FIBER_USE_LIBCXX OFF PARENT_SCOPE)
-    set(FIBER_STDLIB_LINK_FLAGS "" PARENT_SCOPE)
+macro(_fiber_configure_clang_stdlib)
+    set(FIBER_USE_LIBCXX OFF)
+    set(FIBER_STDLIB_LINK_FLAGS "")
 
-    if (NOT DEFINED CMAKE_CXX_COMPILER)
-        return()
+    if (DEFINED CMAKE_CXX_COMPILER)
+        _fiber_compiler_is_clang("${CMAKE_CXX_COMPILER}" fiber_cxx_compiler_is_clang)
+        if (fiber_cxx_compiler_is_clang)
+            _fiber_compiler_get_version("${CMAKE_CXX_COMPILER}" fiber_selected_clang_version)
+            if (NOT fiber_selected_clang_version STREQUAL "")
+                string(REGEX MATCH "^[0-9]+" fiber_selected_clang_major "${fiber_selected_clang_version}")
+                set(fiber_selected_llvm_root "/usr/lib/llvm-${fiber_selected_clang_major}")
+                _fiber_find_clang_libcxx_paths("${CMAKE_CXX_COMPILER}" fiber_selected_clang_includedir fiber_selected_clang_libdir)
+
+                set(FIBER_LLVM_ROOT "${fiber_selected_llvm_root}")
+                set(FIBER_CLANG_LIBDIR "${fiber_selected_clang_libdir}")
+                set(FIBER_CLANG_INCLUDEDIR "${fiber_selected_clang_includedir}")
+
+                if (EXISTS "${fiber_selected_clang_libdir}"
+                    AND NOT fiber_selected_clang_includedir STREQUAL "")
+                    set(FIBER_USE_LIBCXX ON)
+                    set(FIBER_STDLIB_LINK_FLAGS
+                        -stdlib=libc++
+                        -L${fiber_selected_clang_libdir}
+                        -lc++abi
+                        -Wl,-rpath,${fiber_selected_clang_libdir}
+                    )
+                    set(CMAKE_CXX_FLAGS_INIT
+                        "${CMAKE_CXX_FLAGS_INIT} -stdlib=libc++ -isystem ${fiber_selected_clang_includedir}"
+                    )
+                endif()
+            endif()
+        endif()
     endif()
-
-    _fiber_compiler_is_clang("${CMAKE_CXX_COMPILER}" fiber_cxx_compiler_is_clang)
-    if (NOT fiber_cxx_compiler_is_clang)
-        return()
-    endif()
-
-    _fiber_compiler_get_version("${CMAKE_CXX_COMPILER}" fiber_selected_clang_version)
-    if (fiber_selected_clang_version STREQUAL "")
-        return()
-    endif()
-    string(REGEX MATCH "^[0-9]+" fiber_selected_clang_major "${fiber_selected_clang_version}")
-    set(fiber_selected_llvm_root "/usr/lib/llvm-${fiber_selected_clang_major}")
-    _fiber_find_clang_libcxx_paths("${CMAKE_CXX_COMPILER}" fiber_selected_clang_includedir fiber_selected_clang_libdir)
-
-    set(FIBER_LLVM_ROOT "${fiber_selected_llvm_root}" PARENT_SCOPE)
-    set(FIBER_CLANG_LIBDIR "${fiber_selected_clang_libdir}" PARENT_SCOPE)
-    set(FIBER_CLANG_INCLUDEDIR "${fiber_selected_clang_includedir}" PARENT_SCOPE)
-
-    if (EXISTS "${fiber_selected_clang_libdir}"
-        AND NOT fiber_selected_clang_includedir STREQUAL "")
-        set(FIBER_USE_LIBCXX ON PARENT_SCOPE)
-        set(FIBER_STDLIB_LINK_FLAGS
-            -stdlib=libc++
-            -L${fiber_selected_clang_libdir}
-            -lc++abi
-            -Wl,-rpath,${fiber_selected_clang_libdir}
-            PARENT_SCOPE)
-        set(CMAKE_CXX_FLAGS_INIT
-            "${CMAKE_CXX_FLAGS_INIT} -stdlib=libc++ -isystem ${fiber_selected_clang_includedir}"
-            PARENT_SCOPE)
-    endif()
-endfunction()
+endmacro()
 
 _fiber_select_default_toolchain()
 _fiber_configure_clang_stdlib()
