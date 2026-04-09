@@ -1,24 +1,6 @@
 cmake_minimum_required(VERSION 4.1)
 
-set(FIBER_CLANG_BIN "/usr/bin")
-set(FIBER_LLVM_ROOT "/usr/lib/llvm-21")
-if (NOT DEFINED CMAKE_C_COMPILER AND EXISTS "${FIBER_CLANG_BIN}/clang-21")
-    set(CMAKE_C_COMPILER "${FIBER_CLANG_BIN}/clang-21" CACHE FILEPATH "Default clang C compiler")
-endif()
-if (NOT DEFINED CMAKE_CXX_COMPILER AND EXISTS "${FIBER_CLANG_BIN}/clang++-21")
-    set(CMAKE_CXX_COMPILER "${FIBER_CLANG_BIN}/clang++-21" CACHE FILEPATH "Default clang C++ compiler")
-endif()
-set(FIBER_CLANG_LIBDIR "${FIBER_LLVM_ROOT}/lib")
-set(FIBER_CLANG_INCLUDEDIR "${FIBER_LLVM_ROOT}/include/c++/v1")
-set(FIBER_USE_LIBCXX OFF)
-if (CMAKE_CXX_COMPILER STREQUAL "${FIBER_CLANG_BIN}/clang++-21"
-    AND EXISTS "${FIBER_CLANG_LIBDIR}"
-    AND EXISTS "${FIBER_CLANG_INCLUDEDIR}")
-    set(FIBER_USE_LIBCXX ON)
-    set(CMAKE_CXX_FLAGS_INIT
-        "${CMAKE_CXX_FLAGS_INIT} -stdlib=libc++ -isystem ${FIBER_CLANG_INCLUDEDIR}")
-    set(FIBER_STDLIB_LINK_FLAGS -stdlib=libc++ -L${FIBER_CLANG_LIBDIR} -lc++abi -Wl,-rpath,${FIBER_CLANG_LIBDIR})
-endif()
+include(cmake/SelectToolchain.cmake)
 
 project(fiber)
 

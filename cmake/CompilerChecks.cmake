@@ -1,8 +1,12 @@
 include(CheckCXXSourceCompiles)
 
 function(fiber_validate_cxx_toolchain)
-    set(FIBER_MIN_GCC_VERSION 13.0)
-    set(FIBER_MIN_CLANG_VERSION 17.0)
+    if (NOT DEFINED FIBER_MIN_GCC_VERSION)
+        set(FIBER_MIN_GCC_VERSION 13.0)
+    endif()
+    if (NOT DEFINED FIBER_MIN_CLANG_VERSION)
+        set(FIBER_MIN_CLANG_VERSION 17.0)
+    endif()
 
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         if (CMAKE_CXX_COMPILER_VERSION VERSION_LESS FIBER_MIN_GCC_VERSION)
