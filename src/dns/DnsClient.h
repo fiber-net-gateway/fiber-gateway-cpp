@@ -35,7 +35,7 @@ public:
         QueryOptions query_options{};
     };
 
-    DnsClient() noexcept = default;
+    DnsClient() noexcept;
     ~DnsClient();
 
     [[nodiscard]] bool init(event::EventLoop &loop, Options options) noexcept;

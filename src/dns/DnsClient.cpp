@@ -60,6 +60,8 @@ common::IoResult<std::size_t> consume_stream_read(fiber::common::IoResult<std::s
 
 } // namespace
 
+DnsClient::DnsClient() noexcept = default;
+
 DnsClient::ResponseAwaiter::ResponseAwaiter(DnsClient &client, std::uint16_t slot_index) noexcept :
     client_(&client), slot_index_(slot_index) {
 }
