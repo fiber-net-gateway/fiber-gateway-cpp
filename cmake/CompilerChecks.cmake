@@ -22,9 +22,13 @@ function(fiber_validate_cxx_toolchain)
         endif()
     endif()
 
+    set(FIBER_CXX23_CHECK_OLD_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS}")
+    set(FIBER_CXX23_CHECK_OLD_REQUIRED_LINK_OPTIONS "${CMAKE_REQUIRED_LINK_OPTIONS}")
     unset(FIBER_HAS_CXX23_EXPECTED CACHE)
-    set(FIBER_USE_LIBCXX OFF PARENT_SCOPE)
-    set(FIBER_STDLIB_LINK_FLAGS "" PARENT_SCOPE)
+    if (FIBER_USE_LIBCXX)
+        string(APPEND CMAKE_REQUIRED_FLAGS " -stdlib=libc++ -isystem ${FIBER_CLANG_INCLUDEDIR}")
+        list(APPEND CMAKE_REQUIRED_LINK_OPTIONS -stdlib=libc++)
+    endif()
 
     check_cxx_source_compiles([=[
         #include <expected>
@@ -34,9 +38,17 @@ function(fiber_validate_cxx_toolchain)
         }
     ]=] FIBER_HAS_CXX23_EXPECTED)
 
+    set(CMAKE_REQUIRED_FLAGS "${FIBER_CXX23_CHECK_OLD_REQUIRED_FLAGS}")
+    set(CMAKE_REQUIRED_LINK_OPTIONS "${FIBER_CXX23_CHECK_OLD_REQUIRED_LINK_OPTIONS}")
+
     if (NOT FIBER_HAS_CXX23_EXPECTED)
         message(FATAL_ERROR
             "The selected C++ toolchain does not provide the C++23 standard library "
-            "support required by this project (std::expected).")
+            "support required by this project (std::expected).\n"
+            "Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} "
+            "(${CMAKE_CXX_COMPILER}).\n"
+            "On Linux, Clang usually uses the system libstdc++ by default. "
+            "If that standard library is too old, install a newer GCC/libstdc++ "
+            "(GCC 13+ recommended) or explicitly configure a Clang+libc++ toolchain.")
     endif()
 endfunction()
