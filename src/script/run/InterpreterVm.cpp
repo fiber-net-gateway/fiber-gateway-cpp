@@ -74,6 +74,7 @@ InterpreterVm::InterpreterVm(const ir::Compiled &compiled,
       root_(root),
       attach_(attach),
       runtime_(runtime) {
+    FIBER_ASSERT(compiled_.validate_operands());
     stack_size_ = compiled_.stack_size;
     var_count_ = compiled_.var_table_size;
     std::size_t total = stack_size_ + var_count_;
@@ -550,8 +551,7 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
                 break;
             case ir::Code::PROP_GET: {
                 std::size_t idx = static_cast<std::size_t>(instr >> 8);
-                FIBER_ASSERT(idx < compiled_.operands.size());
-                const auto *name = static_cast<const std::string *>(compiled_.operands[idx]);
+                const auto *name = compiled_.operand_string(idx);
                 FIBER_ASSERT(name);
                 fiber::json::JsValue key = fiber::json::JsValue::make_native_string(
                     const_cast<char *>(name->data()),
@@ -568,8 +568,7 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
             }
             case ir::Code::PROP_SET: {
                 std::size_t idx = static_cast<std::size_t>(instr >> 8);
-                FIBER_ASSERT(idx < compiled_.operands.size());
-                const auto *name = static_cast<const std::string *>(compiled_.operands[idx]);
+                const auto *name = compiled_.operand_string(idx);
                 FIBER_ASSERT(name);
                 fiber::json::JsValue key = fiber::json::JsValue::make_native_string(
                     const_cast<char *>(name->data()),
@@ -587,8 +586,7 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
             }
             case ir::Code::PROP_SET_1: {
                 std::size_t idx = static_cast<std::size_t>(instr >> 8);
-                FIBER_ASSERT(idx < compiled_.operands.size());
-                const auto *name = static_cast<const std::string *>(compiled_.operands[idx]);
+                const auto *name = compiled_.operand_string(idx);
                 FIBER_ASSERT(name);
                 fiber::json::JsValue key = fiber::json::JsValue::make_native_string(
                     const_cast<char *>(name->data()),
@@ -606,8 +604,7 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
             case ir::Code::CALL_FUNC: {
                 std::size_t func_index = static_cast<std::size_t>(instr >> 16);
                 std::size_t arg_count = static_cast<std::size_t>((instr >> 8) & 0xFF);
-                FIBER_ASSERT(func_index < compiled_.operands.size());
-                auto *function = static_cast<Library::Function *>(compiled_.operands[func_index]);
+                auto *function = compiled_.operand_function(func_index);
                 FIBER_ASSERT(function);
                 sp_ -= arg_count;
                 set_args_for_ctx(sp_, arg_count);
@@ -626,8 +623,7 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
             }
             case ir::Code::CALL_FUNC_SPREAD: {
                 std::size_t func_index = static_cast<std::size_t>(instr >> 8);
-                FIBER_ASSERT(func_index < compiled_.operands.size());
-                auto *function = static_cast<Library::Function *>(compiled_.operands[func_index]);
+                auto *function = compiled_.operand_function(func_index);
                 FIBER_ASSERT(function);
                 set_args_for_spread(sp_ - 1);
                 auto result = function->call(*this);
@@ -647,8 +643,7 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
             case ir::Code::CALL_ASYNC_FUNC: {
                 std::size_t func_index = static_cast<std::size_t>(instr >> 16);
                 std::size_t arg_count = static_cast<std::size_t>((instr >> 8) & 0xFF);
-                FIBER_ASSERT(func_index < compiled_.operands.size());
-                auto *function = static_cast<Library::AsyncFunction *>(compiled_.operands[func_index]);
+                auto *function = compiled_.operand_async_function(func_index);
                 FIBER_ASSERT(function);
                 sp_ -= arg_count;
                 set_args_for_ctx(sp_, arg_count);
@@ -671,8 +666,7 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
             }
             case ir::Code::CALL_ASYNC_FUNC_SPREAD: {
                 std::size_t func_index = static_cast<std::size_t>(instr >> 8);
-                FIBER_ASSERT(func_index < compiled_.operands.size());
-                auto *function = static_cast<Library::AsyncFunction *>(compiled_.operands[func_index]);
+                auto *function = compiled_.operand_async_function(func_index);
                 FIBER_ASSERT(function);
                 set_args_for_spread(sp_ - 1);
                 async_pending_ = true;
@@ -694,8 +688,7 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
             }
             case ir::Code::CALL_CONST: {
                 std::size_t const_index = static_cast<std::size_t>(instr >> 8);
-                FIBER_ASSERT(const_index < compiled_.operands.size());
-                auto *constant = static_cast<Library::Constant *>(compiled_.operands[const_index]);
+                auto *constant = compiled_.operand_constant(const_index);
                 FIBER_ASSERT(constant);
                 auto result = constant->get(*this);
                 if (!result) {
@@ -712,8 +705,7 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
             }
             case ir::Code::CALL_ASYNC_CONST: {
                 std::size_t const_index = static_cast<std::size_t>(instr >> 8);
-                FIBER_ASSERT(const_index < compiled_.operands.size());
-                auto *constant = static_cast<Library::AsyncConstant *>(compiled_.operands[const_index]);
+                auto *constant = compiled_.operand_async_constant(const_index);
                 FIBER_ASSERT(constant);
                 async_pending_ = true;
                 async_ready_ = false;
@@ -1097,11 +1089,10 @@ bool InterpreterVm::handle_error(VmError error, std::size_t epc) {
 }
 
 VmResult InterpreterVm::load_const(std::size_t operand_index) {
-    FIBER_ASSERT(operand_index < compiled_.operands.size());
     if (const_cache_valid_[operand_index]) {
         return const_cache_[operand_index];
     }
-    const auto *cv = static_cast<const ir::Compiled::ConstValue *>(compiled_.operands[operand_index]);
+    const auto *cv = compiled_.operand_const(operand_index);
     FIBER_ASSERT(cv);
     fiber::json::JsValue value = fiber::json::JsValue::make_undefined();
     switch (cv->kind) {
