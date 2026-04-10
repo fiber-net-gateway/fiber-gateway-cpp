@@ -19,6 +19,8 @@ apps/
     src/
       main.cpp
       ...
+    tests/
+      ...
     config/
       ...
     scripts/
@@ -32,6 +34,7 @@ Rules:
 - Each app directory should have its own `CMakeLists.txt` and call `fiber_add_app(...)`.
 - Directories starting with `_` are ignored by the top-level `apps/CMakeLists.txt`. Use that for templates or private notes.
 - Prefer `src/main.cpp` as the entry point for each app.
+- Keep app-specific tests under that app directory, usually `tests/`.
 - Keep app-specific config, helper scripts, and docs inside that app directory instead of the repo root.
 
 Build behavior:

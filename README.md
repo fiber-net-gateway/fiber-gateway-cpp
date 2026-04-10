@@ -4,6 +4,7 @@ a gateway framework written by c++23
 ## Documentation
 
 - [HTTP/1 Connection Pool](docs/http1-connection-pool.md)
+- [lite-nginx Requirements](apps/lite_nginx/README.md)
 
 ## Layout
 
