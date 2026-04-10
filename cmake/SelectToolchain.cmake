@@ -7,6 +7,9 @@ endif()
 if (NOT DEFINED FIBER_USE_LIBCXX)
     set(FIBER_USE_LIBCXX OFF CACHE BOOL "Use libc++ with Clang toolchains")
 endif()
+if (NOT DEFINED FIBER_STATIC_LIBCXX)
+    set(FIBER_STATIC_LIBCXX ON CACHE BOOL "Statically link libc++ runtime libraries when FIBER_USE_LIBCXX=ON")
+endif()
 
 function(_fiber_compiler_get_version compiler_path output_var)
     execute_process(
@@ -30,10 +33,27 @@ function(_fiber_compiler_is_clang compiler_path output_var)
         ERROR_QUIET
         OUTPUT_STRIP_TRAILING_WHITESPACE)
     if (fiber_compiler_id_result EQUAL 0
-        AND fiber_compiler_id_output MATCHES "(^|[[:space:]])clang([[:space:]]|$)")
+        AND (fiber_compiler_id_output MATCHES "(^|.*[[:space:]])clang version[[:space:]].*"
+            OR fiber_compiler_id_output MATCHES "(^|.*[[:space:]])Apple clang version[[:space:]].*"
+            OR fiber_compiler_id_output MATCHES "(^|.*[[:space:]])Ubuntu clang version[[:space:]].*"))
         set(${output_var} TRUE PARENT_SCOPE)
     else()
-        set(${output_var} FALSE PARENT_SCOPE)
+        set(fiber_clang_macro_probe_dir "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/fiber-toolchain-probe")
+        set(fiber_clang_macro_probe_src "${fiber_clang_macro_probe_dir}/clang-probe.cpp")
+        file(MAKE_DIRECTORY "${fiber_clang_macro_probe_dir}")
+        file(WRITE "${fiber_clang_macro_probe_src}" "int main() { return 0; }\n")
+        execute_process(
+            COMMAND "${compiler_path}" -dM -E -x c++ "${fiber_clang_macro_probe_src}"
+            RESULT_VARIABLE fiber_clang_macro_result
+            OUTPUT_VARIABLE fiber_clang_macro_output
+            ERROR_QUIET
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+        if (fiber_clang_macro_result EQUAL 0
+            AND fiber_clang_macro_output MATCHES "(^|[\r\n])#define __clang__ 1([\r\n]|$)")
+            set(${output_var} TRUE PARENT_SCOPE)
+        else()
+            set(${output_var} FALSE PARENT_SCOPE)
+        endif()
     endif()
 endfunction()
 
@@ -52,6 +72,71 @@ function(_fiber_find_clang_libcxx_include_dir clang_compiler_path output_var)
         endforeach()
     endif()
     set(${output_var} "${fiber_clang_include_dir}" PARENT_SCOPE)
+endfunction()
+
+function(_fiber_find_clang_library_dirs clang_compiler_path libcxx_include_dir output_var)
+    set(fiber_library_dirs "")
+
+    _fiber_compiler_get_version("${clang_compiler_path}" fiber_clang_version)
+    if (NOT fiber_clang_version STREQUAL "")
+        string(REGEX MATCH "^[0-9]+" fiber_clang_major "${fiber_clang_version}")
+        foreach(fiber_library_candidate
+            "/usr/lib/llvm-${fiber_clang_major}/lib"
+            "/usr/lib/llvm-${fiber_clang_major}/lib/${CMAKE_LIBRARY_ARCHITECTURE}"
+            "/usr/local/lib/llvm-${fiber_clang_major}/lib")
+            if (EXISTS "${fiber_library_candidate}")
+                list(APPEND fiber_library_dirs "${fiber_library_candidate}")
+            endif()
+        endforeach()
+    endif()
+
+    if (NOT libcxx_include_dir STREQUAL "")
+        get_filename_component(fiber_libcxx_include_parent "${libcxx_include_dir}" DIRECTORY)
+        get_filename_component(fiber_libcxx_root "${fiber_libcxx_include_parent}" DIRECTORY)
+        get_filename_component(fiber_libcxx_root "${fiber_libcxx_root}" DIRECTORY)
+        foreach(fiber_library_candidate
+            "${fiber_libcxx_root}/lib"
+            "${fiber_libcxx_root}/lib/${CMAKE_LIBRARY_ARCHITECTURE}"
+            "${fiber_libcxx_root}/lib64")
+            if (EXISTS "${fiber_library_candidate}")
+                list(APPEND fiber_library_dirs "${fiber_library_candidate}")
+            endif()
+        endforeach()
+    endif()
+
+    foreach(fiber_library_candidate
+        "/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}"
+        "/usr/local/lib/${CMAKE_LIBRARY_ARCHITECTURE}"
+        "/usr/lib/x86_64-linux-gnu"
+        "/usr/local/lib/x86_64-linux-gnu"
+        "/usr/lib64"
+        "/usr/local/lib64"
+        "/usr/lib"
+        "/usr/local/lib")
+        if (EXISTS "${fiber_library_candidate}")
+            list(APPEND fiber_library_dirs "${fiber_library_candidate}")
+        endif()
+    endforeach()
+
+    list(REMOVE_DUPLICATES fiber_library_dirs)
+    set(${output_var} "${fiber_library_dirs}" PARENT_SCOPE)
+endfunction()
+
+function(_fiber_find_static_library output_var library_name)
+    set(options)
+    set(one_value_args)
+    set(multi_value_args HINTS)
+    cmake_parse_arguments(FIBER_STATIC_LIB "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
+
+    set(fiber_saved_library_suffixes "${CMAKE_FIND_LIBRARY_SUFFIXES}")
+    set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+    find_library(fiber_static_library
+        NAMES "${library_name}"
+        HINTS ${FIBER_STATIC_LIB_HINTS}
+        NO_CACHE)
+    set(CMAKE_FIND_LIBRARY_SUFFIXES "${fiber_saved_library_suffixes}")
+
+    set(${output_var} "${fiber_static_library}" PARENT_SCOPE)
 endfunction()
 
 function(_fiber_compiler_supports_cxx23 compiler_path output_var)
@@ -220,7 +305,8 @@ macro(_fiber_select_default_toolchain)
 endmacro()
 
 macro(_fiber_configure_clang_stdlib)
-    set(FIBER_STDLIB_LINK_FLAGS "")
+    set(FIBER_STDLIB_LINK_OPTIONS "")
+    set(FIBER_STDLIB_LINK_LIBRARIES "")
     if (FIBER_USE_LIBCXX)
         if (NOT DEFINED CMAKE_CXX_COMPILER)
             message(FATAL_ERROR "FIBER_USE_LIBCXX=ON requires a configured C++ compiler.")
@@ -242,7 +328,38 @@ macro(_fiber_configure_clang_stdlib)
         set(CMAKE_CXX_FLAGS_INIT
             "${CMAKE_CXX_FLAGS_INIT} -stdlib=libc++ -isystem ${fiber_selected_clang_includedir}"
         )
-        set(FIBER_STDLIB_LINK_FLAGS -stdlib=libc++)
+        list(APPEND FIBER_STDLIB_LINK_OPTIONS -stdlib=libc++)
+
+        if (FIBER_STATIC_LIBCXX)
+            if (APPLE)
+                message(FATAL_ERROR
+                    "FIBER_STATIC_LIBCXX=ON is not supported on Apple toolchains. "
+                    "Set FIBER_STATIC_LIBCXX=OFF to use the system libc++ dylib.")
+            endif()
+
+            _fiber_find_clang_library_dirs("${CMAKE_CXX_COMPILER}" "${fiber_selected_clang_includedir}" fiber_clang_library_dirs)
+            _fiber_find_static_library(fiber_libcxx_static c++ HINTS ${fiber_clang_library_dirs})
+            _fiber_find_static_library(fiber_libcxxabi_static c++abi HINTS ${fiber_clang_library_dirs})
+            _fiber_find_static_library(fiber_libunwind_static unwind HINTS ${fiber_clang_library_dirs})
+
+            if (fiber_libcxx_static STREQUAL "" OR fiber_libcxxabi_static STREQUAL "")
+                message(FATAL_ERROR
+                    "FIBER_USE_LIBCXX=ON defaults to static libc++ linking, but required static archives were not found.\n"
+                    "Missing libc++ archive: ${fiber_libcxx_static}\n"
+                    "Missing libc++abi archive: ${fiber_libcxxabi_static}\n"
+                    "Searched library directories: ${fiber_clang_library_dirs}\n"
+                    "Install static libc++/libc++abi packages or set FIBER_STATIC_LIBCXX=OFF to use shared libc++.")
+            endif()
+
+            list(APPEND FIBER_STDLIB_LINK_LIBRARIES
+                -Wl,-Bstatic
+                "${fiber_libcxx_static}"
+                "${fiber_libcxxabi_static}")
+            if (NOT fiber_libunwind_static STREQUAL "")
+                list(APPEND FIBER_STDLIB_LINK_LIBRARIES "${fiber_libunwind_static}")
+            endif()
+            list(APPEND FIBER_STDLIB_LINK_LIBRARIES -Wl,-Bdynamic)
+        endif()
     endif()
 endmacro()
 
