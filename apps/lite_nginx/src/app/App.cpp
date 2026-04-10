@@ -6,6 +6,9 @@
 
 #include "config/Config.h"
 #include "config/ConfigLoader.h"
+#include "event/EventLoop.h"
+#include "runtime/RuntimeBuilder.h"
+#include "runtime/ServerLauncher.h"
 
 namespace fiber::lite_nginx::app {
 namespace {
@@ -31,6 +34,20 @@ std::string format_config_error(const config::ConfigError &error) {
     formatted.push_back(':');
     formatted.append(std::to_string(error.location.column));
     formatted.append(": ");
+    formatted.append(error.message);
+    return formatted;
+}
+
+std::string format_runtime_error(const runtime::RuntimeError &error) {
+    std::string formatted;
+    if (!error.location.source_name.empty()) {
+        formatted.append(error.location.source_name);
+        formatted.push_back(':');
+        formatted.append(std::to_string(error.location.line));
+        formatted.push_back(':');
+        formatted.append(std::to_string(error.location.column));
+        formatted.append(": ");
+    }
     formatted.append(error.message);
     return formatted;
 }
@@ -95,7 +112,27 @@ int LiteNginxApp::run(int argc, char **argv) {
         return 0;
     }
 
-    std::cout << "proxy runtime is not implemented yet; config parsing layer is ready.\n";
+    auto runtime_result = runtime::RuntimeBuilder::build(*config_result);
+    if (!runtime_result) {
+        std::cerr << format_runtime_error(runtime_result.error()) << '\n';
+        return 1;
+    }
+
+    fiber::event::EventLoop loop;
+    runtime::ServerLauncher launcher(loop);
+    auto start_result = launcher.start(*runtime_result);
+    if (!start_result) {
+        std::cerr << format_runtime_error(start_result.error()) << '\n';
+        return 1;
+    }
+
+    for (const auto &listener : launcher.bound_listeners()) {
+        std::cout << "listening on " << (listener.tls ? "https://" : "http://")
+                  << listener.address.to_string() << '\n';
+    }
+
+    std::cout << "every request currently returns: hello lite nginx\n";
+    loop.run();
     return 0;
 }
 
