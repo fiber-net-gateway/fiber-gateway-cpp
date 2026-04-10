@@ -9,8 +9,9 @@ implemented.
 ## Status
 
 - The app skeleton and config parsing layer are implemented.
-- The current executable validates nginx-style config files and prints a short summary.
-- Reverse-proxy request handling is still pending.
+- The current executable can bind configured `http.listen` entries and serve a
+  fixed `hello lite nginx` response over HTTP or HTTPS.
+- Reverse-proxy routing and upstream forwarding are still pending.
 
 ## Build
 
@@ -25,6 +26,12 @@ Validate the bundled sample config:
 
 ```bash
 ./build/apps/lite_nginx --check-config
+```
+
+Run the bundled sample config:
+
+```bash
+./build/apps/lite_nginx
 ```
 
 Validate a custom config file:

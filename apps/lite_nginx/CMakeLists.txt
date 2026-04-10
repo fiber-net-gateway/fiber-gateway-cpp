@@ -10,9 +10,11 @@ if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
 endif()
 
 add_library(lite_nginx_core STATIC
-    "${CMAKE_CURRENT_LIST_DIR}/src/app/App.cpp")
+    "${CMAKE_CURRENT_LIST_DIR}/src/app/App.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/RuntimeBuilder.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/ServerLauncher.cpp")
 target_include_directories(lite_nginx_core PUBLIC "${CMAKE_CURRENT_LIST_DIR}/src")
-target_link_libraries(lite_nginx_core PUBLIC lite_nginx_config)
+target_link_libraries(lite_nginx_core PUBLIC fiber_lib lite_nginx_config)
 target_compile_definitions(lite_nginx_core PRIVATE
     FIBER_LITE_NGINX_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}")
 set_target_properties(lite_nginx_core PROPERTIES FOLDER "apps/lite_nginx")
@@ -30,8 +32,9 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
     include(GoogleTest)
 
     add_executable(lite_nginx_tests
-        "${CMAKE_CURRENT_LIST_DIR}/tests/LiteNginxConfigTest.cpp")
-    target_link_libraries(lite_nginx_tests PRIVATE lite_nginx_config GTest::gtest_main)
+        "${CMAKE_CURRENT_LIST_DIR}/tests/LiteNginxConfigTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/LiteNginxRuntimeTest.cpp")
+    target_link_libraries(lite_nginx_tests PRIVATE lite_nginx_core GTest::gtest_main)
     target_include_directories(lite_nginx_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src")
     set_target_properties(lite_nginx_tests PROPERTIES FOLDER "apps/lite_nginx")
     fiber_link_runtime_allocator(lite_nginx_tests)

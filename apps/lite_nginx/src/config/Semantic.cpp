@@ -158,6 +158,7 @@ std::expected<ListenAddress, ConfigError> parse_listen_address(const DirectiveNo
     }
 
     ListenAddress listen;
+    listen.location = directive.location;
     if (directive.args.size() == 2) {
         if (directive.args[1] != "ssl") {
             return std::unexpected(make_error(directive, "listen only supports the optional 'ssl' flag"));

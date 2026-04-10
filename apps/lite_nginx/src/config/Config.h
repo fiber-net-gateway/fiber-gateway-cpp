@@ -26,6 +26,7 @@ struct ProxySettings {
 };
 
 struct ListenAddress {
+    SourceLocation location;
     std::string host;
     std::uint16_t port = 0;
     bool has_host = false;
