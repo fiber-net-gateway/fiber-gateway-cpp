@@ -12,6 +12,10 @@
 
 #include "RuntimeConfig.h"
 
+namespace fiber::lite_nginx::upstream {
+class UpstreamRegistry;
+}
+
 namespace fiber::lite_nginx::runtime {
 
 class ServerLauncher {
@@ -31,6 +35,8 @@ public:
 
 private:
     fiber::event::EventLoop &accept_loop_;
+    std::shared_ptr<const RuntimeConfig> runtime_{};
+    std::shared_ptr<upstream::UpstreamRegistry> upstreams_{};
     std::unique_ptr<fiber::event::EventLoopGroup> worker_group_;
     std::vector<std::unique_ptr<fiber::http::HttpServer>> servers_;
     std::vector<BoundListener> bound_listeners_;
