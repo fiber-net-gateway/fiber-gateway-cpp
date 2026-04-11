@@ -1,17 +1,21 @@
 # lite-nginx
 
-`lite-nginx` is a planned app under `apps/` that provides a lightweight
-reverse proxy with nginx-style configuration syntax.
+`lite-nginx` is a lightweight reverse proxy under `apps/` that uses
+nginx-style directive/block syntax, with a smaller and intentionally
+non-compatible V1 feature set.
 
-This document captures the agreed requirements and scope before code is
-implemented.
+The top-level config layout is nginx-like, but `location` matching is backed by
+`RoutePathMatcher` rather than nginx's native location engine. That difference
+is intentional and affects both supported syntax and matching behavior.
 
 ## Status
 
-- The app skeleton and config parsing layer are implemented.
-- The current executable can bind configured `http.listen` entries and serve a
-  fixed `hello lite nginx` response over HTTP or HTTPS.
-- Reverse-proxy routing and upstream forwarding are still pending.
+- Config parsing, semantic validation, runtime compilation, and reverse proxy
+  forwarding are implemented.
+- The current executable can bind configured listeners, select `server` by
+  exact `Host`, match `location`, and proxy to upstream HTTP/1.1 backends.
+- Named upstreams support round-robin peer selection and optional keepalive
+  pooling.
 
 ## Build
 
@@ -45,13 +49,14 @@ Validate a custom config file:
 - Build a runnable reverse-proxy app on top of the existing fiber HTTP stack.
 - Use nginx-style directive/block syntax for configuration files.
 - Keep the first version small, explicit, and easy to validate.
-- Reuse existing `HttpServer`, HTTP/1 client, connection pool, and DNS modules.
+- Reuse existing `HttpServer`, HTTP/1 client, and connection pool modules.
 
 ## Non-Goals For V1
 
 - Full nginx compatibility.
 - Variable support such as `$host`, `$remote_addr`, or `$request_uri`.
 - `rewrite`, `if`, regex `location`, `include`, or dynamic config reload.
+- DNS-based upstream resolution.
 - WebSocket proxying, cache, gzip, upstream HTTP/2, or active health checks.
 - Full logging subsystem compatibility with nginx.
 
@@ -64,12 +69,14 @@ Validate a custom config file:
 - Support multiple `server` blocks.
 - Support shared `http`-level listeners reused by all `server` blocks.
 - Support `server_name` exact matching.
-- Support `location =` exact match and plain prefix match.
+- Support `location =` exact match.
+- Support non-exact `location` patterns through `RoutePathMatcher`, including
+  `:name`, `*name`, and plain prefix shorthand.
 - Support upstream groups with round-robin selection.
 - Support direct static upstream targets such as `http://127.0.0.1:9001`.
 - Support named upstream targets such as `http://backend`.
-- Support DNS-based upstream host resolution with local cache.
-- Support upstream keepalive connection pooling.
+- Support upstream keepalive connection pooling for named upstreams with
+  `keepalive <n>;`.
 - Support request/response streaming instead of whole-body buffering.
 - Map upstream connect/read/write failures into standard gateway errors.
 
@@ -150,13 +157,21 @@ Top level:
 - If any `http` listener uses `ssl`, every `server` must define both
   `certificate` and `certificate_key`.
 - `server_name` uses exact match only.
-- `location` supports exact match and prefix match only.
+- Non-exact `location` uses `RoutePathMatcher` syntax and semantics, not nginx
+  `location` precedence rules.
 - Only `http://` upstream targets are supported in V1.
+- Upstream peers must be configured with IP literals in the current runtime.
 - `proxy_buffering` only accepts `off`.
+- Direct `proxy_pass http://<ip:port>` targets do not expose a separate
+  keepalive config knob in V1.
 
 Examples that are valid in V1:
 
 ```nginx
+location = /ready { ... }
+location /api/:id { ... }
+location /files/*tail { ... }
+location /api/ { ... }
 proxy_pass http://backend;
 proxy_pass http://127.0.0.1:9001;
 proxy_set_header Host backend.internal;
@@ -169,6 +184,7 @@ proxy_set_header Host $host;
 proxy_set_header X-Forwarded-For $remote_addr;
 proxy_pass http://backend$request_uri;
 location ~ ^/api/ { }
+location @named { }
 rewrite ^/a/(.*)$ /b/$1 last;
 ```
 
@@ -177,9 +193,18 @@ rewrite ^/a/(.*)$ /b/$1 last;
 - Requests are first matched by the selected `http`-level listener.
 - Non-TLS listeners accept HTTP/1.1 only.
 - TLS listeners terminate HTTPS and negotiate HTTP/1.1 or HTTP/2 automatically.
-- Within a listener, `server_name` is matched by exact hostname.
-- Within a selected `server`, `location =` has highest priority.
-- Plain prefix `location` uses longest-prefix match.
+- Within a listener, `server_name` is matched by exact hostname after stripping
+  any `:port` suffix from `Host`.
+- `location` matching uses only the URI path. Query strings are not part of the
+  route key and are proxied upstream unchanged.
+- `location = /path` matches the path exactly.
+- Non-exact `location` patterns are compiled into `RoutePathMatcher` routes:
+  `/api/:id` matches one path segment, `/files/*tail` matches a tail segment,
+  and `/` behaves like a catch-all.
+- A plain non-exact pattern without `:` or `*` is treated as prefix shorthand.
+  For example, `location /api/ { ... }` is compiled like `/api/*`.
+- When multiple non-exact routes overlap, matcher priority follows
+  `static > :placeholder > *wildcard`.
 - If no location matches, the request returns `404 Not Found`.
 
 ## Proxy Semantics
@@ -204,12 +229,12 @@ Headers that must be filtered as hop-by-hop:
 Default behavior in V1:
 
 - If `Host` is not overridden with `proxy_set_header`, upstream `Host` uses the
-  static target host from `proxy_pass`.
+  static target host from `proxy_pass`, or the named upstream's configured name
+  for `proxy_pass http://<upstream_name>;`.
 - No automatic variable-based forwarding headers are added.
 
 ## Error Mapping
 
-- DNS resolution failure: `502 Bad Gateway`
 - Upstream connect failure: `502 Bad Gateway`
 - Upstream premature close: `502 Bad Gateway`
 - Upstream connect timeout: `504 Gateway Timeout`
@@ -217,14 +242,13 @@ Default behavior in V1:
 - Upstream send timeout: `504 Gateway Timeout`
 - No matching route: `404 Not Found`
 
-## Runtime Design Requirements
+## Runtime Notes
 
 - The runtime config should be immutable after load.
 - Config parsing and semantic validation must be separate from request handling.
 - Listener configuration should be centralized at the `http` level so the app
   can reuse a small number of `HttpServer` instances.
 - Each worker event loop should own its local upstream client state.
-- DNS resolution should reuse the existing DNS cache and resolver components.
 - Upstream connection reuse should use the existing HTTP/1 keepalive pool model.
 - Request handling should avoid allocation-heavy whole-body buffering on hot
   paths.
@@ -249,67 +273,54 @@ apps/lite_nginx/
 
 ## Layout
 
-- `conf/lite_nginx.conf`: bundled sample config used by the current skeleton.
+- `conf/lite_nginx.conf`: bundled sample config.
 - `src/app/`: process entry and CLI/config loading flow.
 - `src/config/`: lexer, parser, directive AST, semantic validation, file loader.
-- `src/runtime/`: runtime placeholders for the next phase.
-- `src/proxy/`: proxy placeholders for the next phase.
-- `src/upstream/`: upstream placeholders for the next phase.
-- `tests/`: app-local unit tests for config parsing and validation.
+- `src/runtime/`: immutable compiled config, listener/server startup, route
+  dispatch.
+- `src/proxy/`: proxy request forwarding, response relay, header filtering, and
+  error mapping.
+- `src/upstream/`: upstream registry, peer selection, and keepalive pool access.
+- `tests/`: config/runtime/proxy tests.
 
-## Planned Module Responsibilities
+## Module Responsibilities
 
 - `app/`: process startup, signal handling, config loading, server lifecycle.
 - `config/`: lexer, parser, directive AST, semantic validation.
 - `runtime/`: immutable compiled config, server matcher, location matcher.
 - `proxy/`: request forwarding, response relay, header filtering, error mapping.
-- `upstream/`: upstream registry, peer selection, DNS resolve, connection pool access.
+- `upstream/`: upstream registry, peer selection, and connection pool access.
 
-## Delivery Plan
+## Current Example
 
-Phase 1:
+```nginx
+worker_processes 1;
 
-- Create app skeleton and requirement docs.
-- Implement config lexer/parser/semantic validator.
-- Validate supported directives and reject unsupported syntax clearly.
+http {
+    listen 8080;
 
-Phase 2:
+    upstream backend {
+        server 127.0.0.1:9001;
+        server 127.0.0.1:9002;
+        keepalive 32;
+    }
 
-- Build runtime config objects and route matchers.
-- Implement minimal direct proxy for static `proxy_pass http://host:port`.
+    server {
+        server_name localhost;
 
-Phase 3:
+        location = /ready {
+            proxy_pass http://127.0.0.1:9009;
+        }
 
-- Add named `upstream` groups.
-- Add round-robin peer selection.
-- Add DNS-based upstream resolution.
-- Add keepalive connection pooling.
+        location /api/:id {
+            proxy_pass http://backend;
+            proxy_set_header Host backend.internal;
+        }
 
-Phase 4:
-
-- Harden timeout handling and gateway error mapping.
-- Add more tests around routing, streaming, and pool reuse.
-- Wire `http`-level listeners and per-server TLS identities into runtime
-  startup.
-
-## Validation Plan
-
-Unit tests should cover:
-
-- Config lexing and parsing.
-- Semantic validation failures.
-- `server_name` matching.
-- `location` exact and prefix matching.
-- Header override and hop-by-hop header filtering.
-- `proxy_pass` target parsing.
-
-Integration tests should cover:
-
-- Basic GET proxying.
-- Request body streaming.
-- Response body streaming.
-- Upstream keepalive reuse.
-- Upstream group round-robin.
-- DNS resolution path.
-- Timeout-to-`504` mapping.
-- Upstream failure-to-`502` mapping.
+        location /files/*tail {
+            proxy_pass http://backend;
+            proxy_buffering off;
+        }
+    }
+}
+```
