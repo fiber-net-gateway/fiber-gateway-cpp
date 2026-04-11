@@ -131,7 +131,7 @@ int LiteNginxApp::run(int argc, char **argv) {
                   << listener.address.to_string() << '\n';
     }
 
-    std::cout << "every request currently returns: hello lite nginx\n";
+    std::cout << "reverse proxy runtime started\n";
     loop.run();
     return 0;
 }
