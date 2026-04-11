@@ -1,0 +1,188 @@
+#include <gtest/gtest.h>
+
+#include <chrono>
+#include <string_view>
+
+#include "config/Config.h"
+#include "config/ConfigLoader.h"
+#include "config/Lexer.h"
+
+namespace {
+
+using fiber::lite_nginx::config::ConfigLoader;
+using fiber::lite_nginx::config::Lexer;
+using fiber::lite_nginx::config::LocationMatchKind;
+using fiber::lite_nginx::config::ProxyPassKind;
+using fiber::lite_nginx::config::TokenKind;
+
+TEST(LiteNginxConfigTest, LexerHandlesCommentsAndQuotedStrings) {
+    Lexer lexer(R"(
+        # comment
+        proxy_set_header Host "backend internal";
+    )",
+                "inline.conf");
+
+    auto tokens_result = lexer.tokenize();
+    ASSERT_TRUE(tokens_result.has_value()) << tokens_result.error().message;
+    const auto &tokens = *tokens_result;
+
+    ASSERT_GE(tokens.size(), 5u);
+    EXPECT_EQ(tokens[0].kind, TokenKind::Word);
+    EXPECT_EQ(tokens[0].text, "proxy_set_header");
+    EXPECT_EQ(tokens[1].text, "Host");
+    EXPECT_EQ(tokens[2].kind, TokenKind::String);
+    EXPECT_EQ(tokens[2].text, "backend internal");
+    EXPECT_EQ(tokens[3].kind, TokenKind::Semicolon);
+}
+
+TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        worker_processes 4;
+
+        http {
+            listen 8080;
+            listen 8443 ssl;
+
+            upstream backend {
+                server 127.0.0.1:9001;
+                keepalive 32;
+                connect_timeout 2s;
+            }
+
+            server {
+                server_name localhost api.local;
+                certificate /tmp/localhost.crt;
+                certificate_key /tmp/localhost.key;
+                proxy_read_timeout 10s;
+                proxy_set_header Host backend.internal;
+
+                location = /ready {
+                    proxy_pass http://127.0.0.1:9009;
+                    proxy_buffering off;
+                }
+
+                location /api/ {
+                    proxy_pass http://backend;
+                    proxy_set_header X-Forwarded-Proto http;
+                }
+            }
+        }
+    )",
+                                                           "inline.conf");
+
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    const auto &config = *config_result;
+
+    EXPECT_EQ(config.worker_processes, 4u);
+    ASSERT_EQ(config.http.listens.size(), 2u);
+    EXPECT_EQ(config.http.listens[0].port, 8080);
+    EXPECT_FALSE(config.http.listens[0].tls);
+    EXPECT_EQ(config.http.listens[1].port, 8443);
+    EXPECT_TRUE(config.http.listens[1].tls);
+    ASSERT_EQ(config.http.upstreams.size(), 1u);
+    EXPECT_EQ(config.http.upstreams[0].name, "backend");
+    EXPECT_EQ(config.http.upstreams[0].servers[0].host, "127.0.0.1");
+    EXPECT_EQ(config.http.upstreams[0].servers[0].port, 9001);
+    EXPECT_EQ(config.http.upstreams[0].keepalive, 32u);
+    EXPECT_EQ(config.http.upstreams[0].connect_timeout, std::chrono::seconds(2));
+
+    ASSERT_EQ(config.http.servers.size(), 1u);
+    const auto &server = config.http.servers[0];
+    ASSERT_EQ(server.server_names.size(), 2u);
+    EXPECT_EQ(server.server_names[0], "localhost");
+    EXPECT_EQ(server.server_names[1], "api.local");
+    EXPECT_EQ(server.certificate, "/tmp/localhost.crt");
+    EXPECT_EQ(server.certificate_key, "/tmp/localhost.key");
+    ASSERT_EQ(server.locations.size(), 2u);
+
+    const auto &ready = server.locations[0];
+    EXPECT_EQ(ready.match_kind, LocationMatchKind::Exact);
+    EXPECT_EQ(ready.pattern, "/ready");
+    EXPECT_EQ(ready.proxy_pass.kind, ProxyPassKind::Direct);
+    EXPECT_EQ(ready.proxy_pass.host, "127.0.0.1");
+    EXPECT_EQ(ready.proxy_pass.port, 9009);
+
+    const auto &api = server.locations[1];
+    EXPECT_EQ(api.match_kind, LocationMatchKind::Prefix);
+    EXPECT_EQ(api.proxy_pass.kind, ProxyPassKind::NamedUpstream);
+    EXPECT_EQ(api.proxy_pass.upstream_name, "backend");
+    ASSERT_EQ(api.proxy.set_headers.size(), 2u);
+    EXPECT_EQ(api.proxy.set_headers[0].name, "Host");
+    EXPECT_EQ(api.proxy.set_headers[1].name, "X-Forwarded-Proto");
+}
+
+TEST(LiteNginxConfigTest, RejectsVariablesInV1) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8080;
+            server {
+                server_name localhost;
+                location / {
+                    proxy_pass http://backend;
+                    proxy_set_header Host $host;
+                }
+            }
+        }
+    )",
+                                                           "inline.conf");
+
+    ASSERT_FALSE(config_result.has_value());
+    EXPECT_NE(config_result.error().message.find("does not support variables"), std::string::npos);
+}
+
+TEST(LiteNginxConfigTest, RejectsUnsupportedDirective) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8080;
+            server {
+                server_name localhost;
+                rewrite ^/a/(.*)$ /b/$1 last;
+                location / {
+                    proxy_pass http://127.0.0.1:9001;
+                }
+            }
+        }
+    )",
+                                                           "inline.conf");
+
+    ASSERT_FALSE(config_result.has_value());
+    EXPECT_NE(config_result.error().message.find("unsupported directive"), std::string::npos);
+}
+
+TEST(LiteNginxConfigTest, RejectsUnknownNamedUpstream) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8080;
+            server {
+                server_name localhost;
+                location / {
+                    proxy_pass http://missing_backend;
+                }
+            }
+        }
+    )",
+                                                           "inline.conf");
+
+    ASSERT_FALSE(config_result.has_value());
+    EXPECT_NE(config_result.error().message.find("unknown upstream"), std::string::npos);
+}
+
+TEST(LiteNginxConfigTest, RejectsSslListenWithoutCertificates) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8443 ssl;
+            server {
+                server_name localhost;
+                location / {
+                    proxy_pass http://127.0.0.1:9001;
+                }
+            }
+        }
+    )",
+                                                           "inline.conf");
+
+    ASSERT_FALSE(config_result.has_value());
+    EXPECT_NE(config_result.error().message.find("certificate and certificate_key"), std::string::npos);
+}
+
+} // namespace

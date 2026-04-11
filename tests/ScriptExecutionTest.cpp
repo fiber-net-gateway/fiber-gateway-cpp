@@ -10,6 +10,7 @@
 #include "script/Script.h"
 #include "script/ir/Compiler.h"
 #include "script/parse/Parser.h"
+#include "script/run/InterpreterVm.h"
 
 namespace {
 
@@ -38,10 +39,32 @@ public:
     }
 };
 
+class DelayedAsyncFunction final : public fiber::script::Library::AsyncFunction {
+public:
+    void call(fiber::script::AsyncExecutionContext &context) override {
+        context_ = &context;
+    }
+
+    void complete_with(const fiber::json::JsValue &value) {
+        if (!context_) {
+            return;
+        }
+        auto *context = context_;
+        context_ = nullptr;
+        context->return_value(value);
+    }
+
+private:
+    fiber::script::AsyncExecutionContext *context_ = nullptr;
+};
+
 class TestLibrary final : public fiber::script::Library {
 public:
-    explicit TestLibrary(TestFunction *func, ThrowFunction *boom, TestConstant *constant)
-        : func_(func), boom_(boom), constant_(constant) {}
+    explicit TestLibrary(TestFunction *func,
+                         ThrowFunction *boom,
+                         TestConstant *constant,
+                         DelayedAsyncFunction *async_func = nullptr)
+        : func_(func), boom_(boom), constant_(constant), async_func_(async_func) {}
 
     Function *find_func(std::string_view name) override {
         if (name == "func") {
@@ -54,7 +77,9 @@ public:
     }
 
     AsyncFunction *find_async_func(std::string_view name) override {
-        (void)name;
+        if (name == "asyncFunc") {
+            return async_func_;
+        }
         return nullptr;
     }
 
@@ -84,6 +109,7 @@ private:
     TestFunction *func_ = nullptr;
     ThrowFunction *boom_ = nullptr;
     TestConstant *constant_ = nullptr;
+    DelayedAsyncFunction *async_func_ = nullptr;
 };
 
 fiber::script::ir::Compiled compile_script(std::string_view script, fiber::script::Library &library) {
@@ -94,15 +120,16 @@ fiber::script::ir::Compiled compile_script(std::string_view script, fiber::scrip
 }
 
 std::string value_to_string(const fiber::json::JsValue &value) {
-    if (value.type_ == fiber::json::JsNodeType::NativeString) {
-        return std::string(value.ns.data, value.ns.len);
+    if (js_value_type(value) != fiber::json::JsNodeType::String) {
+        return {};
     }
-    if (value.type_ == fiber::json::JsNodeType::HeapString) {
-        std::string out;
-        auto *str = reinterpret_cast<const fiber::json::GcString *>(value.gc);
-        if (fiber::json::gc_string_to_utf8(str, out)) {
-            return out;
-        }
+    if (js_value_is_borrowed_string(value)) {
+        return std::string(js_value_native_string(value).data, js_value_native_string(value).len);
+    }
+    std::string out;
+    auto *str = js_value_heap_ptr<const fiber::json::GcString>(value);
+    if (fiber::json::gc_string_to_utf8(str, out)) {
+        return out;
     }
     return {};
 }
@@ -125,8 +152,8 @@ TEST(ScriptExecutionTest, RunSimpleReturn) {
     auto run = script.exec_sync(fiber::json::JsValue::make_undefined(), nullptr, runtime);
     auto result = run();
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result.value().type_, fiber::json::JsNodeType::Integer);
-    EXPECT_EQ(result.value().i, 7);
+    EXPECT_EQ(js_value_type(result.value()), fiber::json::JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(result.value()), 7);
 }
 
 TEST(ScriptExecutionTest, RunThrowLiteral) {
@@ -165,4 +192,31 @@ TEST(ScriptExecutionTest, RunFunctionThrowCaught) {
     auto result = run();
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(value_to_string(result.value()), "boom");
+}
+
+TEST(ScriptExecutionTest, LegacyAsyncFunctionSuspendsAndResumes) {
+    TestFunction func;
+    ThrowFunction boom;
+    TestConstant constant;
+    DelayedAsyncFunction async_func;
+    TestLibrary library(&func, &boom, &constant, &async_func);
+
+    auto compiled = compile_script("return asyncFunc(1);", library);
+
+    fiber::json::GcHeap heap;
+    fiber::json::GcRootSet roots;
+    fiber::script::ScriptRuntime runtime(heap, roots);
+    fiber::script::run::InterpreterVm vm(compiled, fiber::json::JsValue::make_undefined(), nullptr, runtime);
+
+    fiber::script::run::VmResult out = fiber::json::JsValue::make_undefined();
+    auto state = vm.iterate(out);
+    ASSERT_EQ(state, fiber::script::run::InterpreterVm::VmState::Suspend);
+
+    async_func.complete_with(fiber::json::JsValue::make_integer(9));
+
+    state = vm.iterate(out);
+    ASSERT_EQ(state, fiber::script::run::InterpreterVm::VmState::Success);
+    ASSERT_TRUE(out.has_value());
+    EXPECT_EQ(js_value_type(out.value()), fiber::json::JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(out.value()), 9);
 }

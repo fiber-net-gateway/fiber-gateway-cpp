@@ -30,19 +30,19 @@ std::string to_string(const GcString *str) {
 }
 
 const GcObject *as_object(const JsValue &value) {
-    return reinterpret_cast<const GcObject *>(value.gc);
+    return js_value_heap_ptr<const GcObject>(value);
 }
 
 GcObject *as_object_mutable(const JsValue &value) {
-    return reinterpret_cast<GcObject *>(value.gc);
+    return js_value_heap_ptr<GcObject>(const_cast<JsValue &>(value));
 }
 
 const GcArray *as_array(const JsValue &value) {
-    return reinterpret_cast<const GcArray *>(value.gc);
+    return js_value_heap_ptr<const GcArray>(value);
 }
 
 const GcString *as_string(const JsValue &value) {
-    return reinterpret_cast<const GcString *>(value.gc);
+    return js_value_heap_ptr<const GcString>(value);
 }
 
 const GcObjectEntry *entry_at(const GcObject *obj, std::size_t index) {
@@ -61,29 +61,29 @@ TEST(ParserTest, ParseObjectAndArray) {
     JsValue root;
     const char *json = "{\"name\":\"fiber\",\"nums\":[1,2.5,true,null]}";
     ASSERT_TRUE(parser.parse(json, std::strlen(json), root)) << parser.error().message;
-    ASSERT_EQ(root.type_, JsNodeType::Object);
+    ASSERT_EQ(js_value_type(root), JsNodeType::Object);
 
     const GcObject *obj = as_object(root);
     ASSERT_EQ(obj->size, 2u);
     const GcObjectEntry *name_entry = entry_at(obj, 0);
     ASSERT_NE(name_entry, nullptr);
     EXPECT_EQ(to_string(name_entry->key), "name");
-    ASSERT_EQ(name_entry->value.type_, JsNodeType::HeapString);
+    ASSERT_EQ(js_value_type(name_entry->value), JsNodeType::String);
     EXPECT_EQ(to_string(as_string(name_entry->value)), "fiber");
 
     const GcObjectEntry *nums_entry = entry_at(obj, 1);
     ASSERT_NE(nums_entry, nullptr);
     EXPECT_EQ(to_string(nums_entry->key), "nums");
-    ASSERT_EQ(nums_entry->value.type_, JsNodeType::Array);
+    ASSERT_EQ(js_value_type(nums_entry->value), JsNodeType::Array);
     const GcArray *arr = as_array(nums_entry->value);
     ASSERT_EQ(arr->size, 4u);
-    EXPECT_EQ(arr->elems[0].type_, JsNodeType::Integer);
-    EXPECT_EQ(arr->elems[0].i, 1);
-    EXPECT_EQ(arr->elems[1].type_, JsNodeType::Float);
-    EXPECT_NEAR(arr->elems[1].f, 2.5, 1e-9);
-    EXPECT_EQ(arr->elems[2].type_, JsNodeType::Boolean);
-    EXPECT_TRUE(arr->elems[2].b);
-    EXPECT_EQ(arr->elems[3].type_, JsNodeType::Null);
+    EXPECT_EQ(js_value_type(arr->elems[0]), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(arr->elems[0]), 1);
+    EXPECT_EQ(js_value_type(arr->elems[1]), JsNodeType::Float);
+    EXPECT_NEAR(js_value_double(arr->elems[1]), 2.5, 1e-9);
+    EXPECT_EQ(js_value_type(arr->elems[2]), JsNodeType::Boolean);
+    EXPECT_TRUE(js_value_bool(arr->elems[2]));
+    EXPECT_EQ(js_value_type(arr->elems[3]), JsNodeType::Null);
 }
 
 TEST(ParserTest, ParseStringEscapes) {
@@ -126,7 +126,7 @@ TEST(ParserTest, StreamParseChunks) {
     EXPECT_NE(parser.parse(chunk2, std::strlen(chunk2)), StreamParser::Status::Error);
     EXPECT_EQ(parser.parse(chunk3, std::strlen(chunk3)), StreamParser::Status::Complete);
     ASSERT_TRUE(parser.has_result());
-    ASSERT_EQ(parser.root().type_, JsNodeType::Object);
+    ASSERT_EQ(js_value_type(parser.root()), JsNodeType::Object);
 }
 
 TEST(ParserTest, StreamFinishPrematureEof) {
@@ -184,20 +184,21 @@ TEST(ParserTest, DuplicateKeysOverwrite) {
     const GcObjectEntry *a_entry = entry_at(obj, 0);
     ASSERT_NE(a_entry, nullptr);
     EXPECT_EQ(to_string(a_entry->key), "a");
-    ASSERT_EQ(a_entry->value.type_, JsNodeType::Integer);
-    EXPECT_EQ(a_entry->value.i, 2);
+    ASSERT_EQ(js_value_type(a_entry->value), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(a_entry->value), 2);
     const GcObjectEntry *b_entry = entry_at(obj, 1);
     ASSERT_NE(b_entry, nullptr);
     EXPECT_EQ(to_string(b_entry->key), "b");
-    ASSERT_EQ(b_entry->value.type_, JsNodeType::Integer);
-    EXPECT_EQ(b_entry->value.i, 3);
+    ASSERT_EQ(js_value_type(b_entry->value), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(a_entry->value), 2);
+    EXPECT_EQ(js_value_int64(b_entry->value), 3);
 
     GcString *key_a = make_key(heap, "a");
     ASSERT_NE(key_a, nullptr);
     const JsValue *value = fiber::json::gc_object_get(obj, key_a);
     ASSERT_NE(value, nullptr);
-    EXPECT_EQ(value->type_, JsNodeType::Integer);
-    EXPECT_EQ(value->i, 2);
+    EXPECT_EQ(js_value_type(*value), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(*value), 2);
 }
 
 TEST(ParserTest, RemoveKeysKeepsOrder) {

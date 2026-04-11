@@ -15,8 +15,8 @@ public:
     FunctionCall(std::int32_t start,
                  std::int32_t end,
                  std::string name,
-                 Library::Function *func,
-                 Library::AsyncFunction *async_func,
+                 const Library::HostCallable *func,
+                 const Library::HostCallable *async_func,
                  std::vector<std::unique_ptr<Expression>> args)
         : Expression(start, end),
           name_(std::move(name)),
@@ -29,11 +29,11 @@ public:
         return name_;
     }
 
-    Library::Function *func() const {
+    const Library::HostCallable *func() const {
         return func_;
     }
 
-    Library::AsyncFunction *async_func() const {
+    const Library::HostCallable *async_func() const {
         return async_func_;
     }
 
@@ -47,8 +47,8 @@ public:
 
 private:
     std::string name_;
-    Library::Function *func_ = nullptr;
-    Library::AsyncFunction *async_func_ = nullptr;
+    const Library::HostCallable *func_ = nullptr;
+    const Library::HostCallable *async_func_ = nullptr;
     std::vector<std::unique_ptr<Expression>> args_;
 };
 
