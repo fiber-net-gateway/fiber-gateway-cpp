@@ -71,7 +71,7 @@ VmResult Unaries::minus(const fiber::json::JsValue &value) {
 
 VmResult Unaries::typeof_op(const fiber::json::JsValue &value, ScriptRuntime &runtime) {
     (void)runtime;
-    switch (value.type_) {
+    switch (fiber::json::js_value_type(value)) {
         case fiber::json::JsNodeType::Undefined:
             return make_typeof_value("undefined");
         case fiber::json::JsNodeType::Null:
@@ -81,8 +81,7 @@ VmResult Unaries::typeof_op(const fiber::json::JsValue &value, ScriptRuntime &ru
         case fiber::json::JsNodeType::Integer:
         case fiber::json::JsNodeType::Float:
             return make_typeof_value("number");
-        case fiber::json::JsNodeType::HeapString:
-        case fiber::json::JsNodeType::NativeString:
+        case fiber::json::JsNodeType::String:
             return make_typeof_value("string");
         case fiber::json::JsNodeType::Array:
             return make_typeof_value("array");
@@ -92,8 +91,7 @@ VmResult Unaries::typeof_op(const fiber::json::JsValue &value, ScriptRuntime &ru
             return make_typeof_value("iterator");
         case fiber::json::JsNodeType::Exception:
             return make_typeof_value("exception");
-        case fiber::json::JsNodeType::NativeBinary:
-        case fiber::json::JsNodeType::HeapBinary:
+        case fiber::json::JsNodeType::Binary:
             return make_typeof_value("binary");
     }
     return make_typeof_value("undefined");
@@ -101,27 +99,25 @@ VmResult Unaries::typeof_op(const fiber::json::JsValue &value, ScriptRuntime &ru
 
 VmResult Unaries::iterate(const fiber::json::JsValue &value, ScriptRuntime &runtime) {
     fiber::json::GcHeap *heap = &runtime.heap();
-    runtime.maybe_collect();
     fiber::json::GcIterator *iter = nullptr;
-    if (value.type_ == fiber::json::JsNodeType::Array) {
-        iter = fiber::json::gc_new_array_iterator(heap, reinterpret_cast<fiber::json::GcArray *>(value.gc),
-                                                  fiber::json::GcIteratorMode::Values);
-    } else if (value.type_ == fiber::json::JsNodeType::Object) {
-        iter = fiber::json::gc_new_object_iterator(heap, reinterpret_cast<fiber::json::GcObject *>(value.gc),
-                                                   fiber::json::GcIteratorMode::Values);
-    } else {
-        iter = fiber::json::gc_new_array_iterator(heap, nullptr, fiber::json::GcIteratorMode::Values);
-    }
+    iter = runtime.alloc_with_gc(fiber::json::gc_estimate_iterator_bytes(), [&]() {
+        if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::Array) {
+            return fiber::json::gc_new_array_iterator(heap, fiber::json::js_value_heap_ptr<fiber::json::GcArray>(const_cast<fiber::json::JsValue &>(value)),
+                                                      fiber::json::GcIteratorMode::Values);
+        }
+        if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::Object) {
+            return fiber::json::gc_new_object_iterator(heap, fiber::json::js_value_heap_ptr<fiber::json::GcObject>(const_cast<fiber::json::JsValue &>(value)),
+                                                       fiber::json::GcIteratorMode::Values);
+        }
+        return fiber::json::gc_new_array_iterator(heap, nullptr, fiber::json::GcIteratorMode::Values);
+    });
     if (!iter) {
         VmError error;
         error.name = "EXEC_OUT_OF_MEMORY";
         error.message = "out of memory for iterate";
         return std::unexpected(error);
     }
-    fiber::json::JsValue out;
-    out.type_ = fiber::json::JsNodeType::Interator;
-    out.gc = &iter->hdr;
-    return out;
+    return fiber::json::js_make_heap_ref(&iter->hdr, fiber::json::JsHeapKind::Iterator);
 }
 
 } // namespace fiber::script::run

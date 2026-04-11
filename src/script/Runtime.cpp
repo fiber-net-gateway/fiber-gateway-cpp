@@ -1,6 +1,24 @@
 #include "Runtime.h"
 
+#include <limits>
+
 namespace fiber::script {
+
+namespace {
+
+constexpr std::size_t kMinGcThreshold = 1 << 20;
+
+std::size_t next_threshold(std::size_t live_bytes) {
+    std::size_t grown = live_bytes;
+    if (grown <= (std::numeric_limits<std::size_t>::max() >> 1)) {
+        grown *= 2;
+    } else {
+        grown = std::numeric_limits<std::size_t>::max();
+    }
+    return grown < kMinGcThreshold ? kMinGcThreshold : grown;
+}
+
+} // namespace
 
 ScriptRuntime::ScriptRuntime(fiber::json::GcHeap &heap, fiber::json::GcRootSet &roots)
     : heap_(&heap),
@@ -35,11 +53,19 @@ bool ScriptRuntime::should_collect(std::size_t next_bytes) const {
     return used + next_bytes >= threshold;
 }
 
+void ScriptRuntime::collect_now() {
+    if (!heap_ || !roots_) {
+        return;
+    }
+    fiber::json::gc_collect(*heap_, *roots_);
+    fiber::json::gc_set_threshold(*heap_, next_threshold(fiber::json::gc_bytes_used(*heap_)));
+}
+
 void ScriptRuntime::maybe_collect(std::size_t next_bytes) {
     if (!should_collect(next_bytes)) {
         return;
     }
-    fiber::json::gc_collect(*heap_, *roots_);
+    collect_now();
 }
 
 GcRootGuard::GcRootGuard(ScriptRuntime &runtime, fiber::json::JsValue *value)

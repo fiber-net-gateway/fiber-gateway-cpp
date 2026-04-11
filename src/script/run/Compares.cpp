@@ -64,7 +64,7 @@ bool Compares::logic(const fiber::json::JsValue &value) {
     if (result.error != fiber::json::JsOpError::None) {
         return false;
     }
-    return !result.value.b;
+    return !fiber::json::js_value_bool(result.value);
 }
 
 VmResult Compares::eq(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
@@ -106,28 +106,32 @@ VmResult Compares::matches(const fiber::json::JsValue &a, const fiber::json::JsV
 }
 
 VmResult Compares::in(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
-    if (b.type_ == fiber::json::JsNodeType::Array) {
-        if (a.type_ != fiber::json::JsNodeType::Integer) {
+    if (fiber::json::js_value_type(b) == fiber::json::JsNodeType::Array) {
+        if (fiber::json::js_value_type(a) != fiber::json::JsNodeType::Integer) {
             return make_bool(false);
         }
-        auto *arr = reinterpret_cast<const fiber::json::GcArray *>(b.gc);
-        if (!arr || a.i < 0) {
+        auto *arr = fiber::json::js_value_heap_ptr<const fiber::json::GcArray>(b);
+        std::int64_t index = fiber::json::js_value_int64(a);
+        if (!arr || index < 0) {
             return make_bool(false);
         }
-        return make_bool(static_cast<std::size_t>(a.i) < arr->size);
+        return make_bool(static_cast<std::size_t>(index) < arr->size);
     }
-    if (b.type_ == fiber::json::JsNodeType::Object) {
-        auto *obj = reinterpret_cast<const fiber::json::GcObject *>(b.gc);
+    if (fiber::json::js_value_type(b) == fiber::json::JsNodeType::Object) {
+        auto *obj = fiber::json::js_value_heap_ptr<const fiber::json::GcObject>(b);
         if (!obj) {
             return make_bool(false);
         }
-        if (a.type_ == fiber::json::JsNodeType::HeapString) {
-            auto *key_str = reinterpret_cast<const fiber::json::GcString *>(a.gc);
+        if (fiber::json::js_value_type(a) == fiber::json::JsNodeType::String &&
+            !fiber::json::js_value_is_borrowed_string(a)) {
+            auto *key_str = fiber::json::js_value_heap_ptr<const fiber::json::GcString>(a);
             const fiber::json::JsValue *found = fiber::json::gc_object_get(obj, key_str);
             return make_bool(found != nullptr);
         }
-        if (a.type_ == fiber::json::JsNodeType::NativeString) {
-            std::string key(a.ns.data, a.ns.len);
+        if (fiber::json::js_value_type(a) == fiber::json::JsNodeType::String &&
+            fiber::json::js_value_is_borrowed_string(a)) {
+            fiber::json::NativeStr native = fiber::json::js_value_native_string(a);
+            std::string key(native.data, native.len);
             for (std::size_t i = 0; i < obj->size; ++i) {
                 const fiber::json::GcObjectEntry *entry = fiber::json::gc_object_entry_at(obj, i);
                 if (!entry || !entry->occupied || !entry->key) {

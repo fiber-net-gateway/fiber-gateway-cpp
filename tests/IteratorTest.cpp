@@ -28,11 +28,11 @@ std::string to_string(const GcString *str) {
 }
 
 const GcString *as_string(const JsValue &value) {
-    return reinterpret_cast<const GcString *>(value.gc);
+    return js_value_heap_ptr<const GcString>(value);
 }
 
 const GcArray *as_array(const JsValue &value) {
-    return reinterpret_cast<const GcArray *>(value.gc);
+    return js_value_heap_ptr<const GcArray>(value);
 }
 
 GcString *make_key(GcHeap &heap, const char *data) {
@@ -60,8 +60,8 @@ TEST(IteratorTest, ArrayIteratorSeesAppends) {
     bool done = false;
     ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
     EXPECT_FALSE(done);
-    EXPECT_EQ(out.type_, JsNodeType::Integer);
-    EXPECT_EQ(out.i, 1);
+    EXPECT_EQ(js_value_type(out), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(out), 1);
 
     arr->elems[2] = JsValue::make_integer(3);
     arr->size = 3;
@@ -69,13 +69,13 @@ TEST(IteratorTest, ArrayIteratorSeesAppends) {
 
     ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
     EXPECT_FALSE(done);
-    EXPECT_EQ(out.type_, JsNodeType::Integer);
-    EXPECT_EQ(out.i, 2);
+    EXPECT_EQ(js_value_type(out), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(out), 2);
 
     ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
     EXPECT_FALSE(done);
-    EXPECT_EQ(out.type_, JsNodeType::Integer);
-    EXPECT_EQ(out.i, 3);
+    EXPECT_EQ(js_value_type(out), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(out), 3);
 
     ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
     EXPECT_TRUE(done);
@@ -104,21 +104,21 @@ TEST(IteratorTest, ObjectIteratorSnapshotOnMutation) {
     bool done = false;
     ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
     EXPECT_FALSE(done);
-    EXPECT_EQ(out.type_, JsNodeType::HeapString);
+    EXPECT_EQ(js_value_type(out), JsNodeType::String);
     EXPECT_EQ(to_string(as_string(out)), "a");
 
     ASSERT_TRUE(fiber::json::gc_object_set(&heap, obj, key_c, JsValue::make_integer(3)));
 
     ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
     EXPECT_FALSE(done);
-    EXPECT_EQ(out.type_, JsNodeType::HeapString);
+    EXPECT_EQ(js_value_type(out), JsNodeType::String);
     EXPECT_EQ(to_string(as_string(out)), "b");
 
     ASSERT_TRUE(fiber::json::gc_object_set(&heap, obj, key_d, JsValue::make_integer(4)));
 
     ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
     EXPECT_FALSE(done);
-    EXPECT_EQ(out.type_, JsNodeType::HeapString);
+    EXPECT_EQ(js_value_type(out), JsNodeType::String);
     EXPECT_EQ(to_string(as_string(out)), "c");
 
     ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
@@ -140,12 +140,12 @@ TEST(IteratorTest, ObjectIteratorEntries) {
     bool done = false;
     ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
     EXPECT_FALSE(done);
-    ASSERT_EQ(out.type_, JsNodeType::Array);
+    ASSERT_EQ(js_value_type(out), JsNodeType::Array);
     const GcArray *arr = as_array(out);
     ASSERT_NE(arr, nullptr);
     ASSERT_EQ(arr->size, 2u);
-    EXPECT_EQ(arr->elems[0].type_, JsNodeType::HeapString);
+    EXPECT_EQ(js_value_type(arr->elems[0]), JsNodeType::String);
     EXPECT_EQ(to_string(as_string(arr->elems[0])), "k");
-    EXPECT_EQ(arr->elems[1].type_, JsNodeType::Integer);
-    EXPECT_EQ(arr->elems[1].i, 9);
+    EXPECT_EQ(js_value_type(arr->elems[1]), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(arr->elems[1]), 9);
 }

@@ -80,7 +80,7 @@ private:
     Compiled compiled_;
     std::vector<Scope> scopes_;
     std::vector<LoopContext> loops_;
-    std::unordered_map<void *, std::size_t> operand_cache_;
+    std::unordered_map<const Library::HostCallable *, std::size_t> host_symbol_cache_;
     std::unordered_map<std::string, std::size_t> string_operands_;
     std::optional<std::size_t> undef_const_;
     std::optional<std::size_t> null_const_;
@@ -164,16 +164,33 @@ private:
         compiled_.codes[index] = static_cast<std::int32_t>(op) | (static_cast<std::int32_t>(target) << 8);
     }
 
-    std::size_t add_operand(void *ptr) {
-        FIBER_ASSERT(ptr);
-        auto it = operand_cache_.find(ptr);
-        if (it != operand_cache_.end()) {
+    std::size_t add_host_symbol(const Library::HostCallable *callable) {
+        FIBER_ASSERT(callable);
+        auto it = host_symbol_cache_.find(callable);
+        if (it != host_symbol_cache_.end()) {
             return it->second;
         }
-        compiled_.operands.push_back(ptr);
-        std::size_t index = compiled_.operands.size() - 1;
-        operand_cache_.emplace(ptr, index);
+        Compiled::HostSymbol symbol;
+        symbol.kind = callable->kind;
+        symbol.flags = callable->flags;
+        symbol.callable = callable;
+        compiled_.host_symbols.push_back(symbol);
+        std::size_t index = compiled_.host_symbols.size() - 1;
+        host_symbol_cache_.emplace(callable, index);
         return index;
+    }
+
+    std::size_t add_call_site(std::size_t host_symbol_index,
+                              std::uint16_t argc,
+                              std::uint16_t flags,
+                              std::int64_t position) {
+        Compiled::CallSite site;
+        site.host_symbol_index = static_cast<std::uint32_t>(host_symbol_index);
+        site.argc = argc;
+        site.flags = flags;
+        site.position = position;
+        compiled_.call_sites.push_back(site);
+        return compiled_.call_sites.size() - 1;
     }
 
     std::size_t add_string_operand(const std::string &value) {
@@ -182,19 +199,22 @@ private:
             return it->second;
         }
         auto stored = std::make_unique<std::string>(value);
-        auto *ptr = stored.get();
         compiled_.string_pool.push_back(std::move(stored));
-        compiled_.operands.push_back(ptr);
+        Compiled::Operand operand;
+        operand.kind = Compiled::OperandKind::InternedString;
+        operand.payload = compiled_.string_pool.size() - 1;
+        compiled_.operands.push_back(operand);
         std::size_t index = compiled_.operands.size() - 1;
         string_operands_.emplace(value, index);
         return index;
     }
 
     std::size_t add_const_value(Compiled::ConstValue value) {
-        auto stored = std::make_unique<Compiled::ConstValue>(std::move(value));
-        auto *ptr = stored.get();
-        compiled_.const_pool.push_back(std::move(stored));
-        compiled_.operands.push_back(ptr);
+        compiled_.const_pool.push_back(std::make_unique<Compiled::ConstValue>(std::move(value)));
+        Compiled::Operand operand;
+        operand.kind = Compiled::OperandKind::ConstValue;
+        operand.payload = compiled_.const_pool.size() - 1;
+        compiled_.operands.push_back(operand);
         return compiled_.operands.size() - 1;
     }
 
@@ -462,11 +482,13 @@ private:
         }
         if (auto *constant = dynamic_cast<const ast::ConstantVal *>(&expr)) {
             if (constant->is_async()) {
-                std::size_t idx = add_operand(reinterpret_cast<void *>(constant->async_constant()));
-                emit_op(Code::CALL_ASYNC_CONST, idx, expr.start_pos(), 1);
+                std::size_t symbol_idx = add_host_symbol(constant->async_constant());
+                std::size_t site_idx = add_call_site(symbol_idx, 0, Compiled::CallSiteNone, expr.start_pos());
+                emit_op(Code::CALL_ASYNC_CONST, site_idx, expr.start_pos(), 1);
             } else {
-                std::size_t idx = add_operand(reinterpret_cast<void *>(constant->constant()));
-                emit_op(Code::CALL_CONST, idx, expr.start_pos(), 1);
+                std::size_t symbol_idx = add_host_symbol(constant->constant());
+                std::size_t site_idx = add_call_site(symbol_idx, 0, Compiled::CallSiteNone, expr.start_pos());
+                emit_op(Code::CALL_CONST, site_idx, expr.start_pos(), 1);
             }
             return;
         }
@@ -484,14 +506,13 @@ private:
                         compile_expression(*arg);
                     }
                 }
-                void *func_ptr = call->is_async()
-                    ? reinterpret_cast<void *>(call->async_func())
-                    : reinterpret_cast<void *>(call->func());
-                std::size_t idx = add_operand(func_ptr);
+                const Library::HostCallable *callable = call->is_async() ? call->async_func() : call->func();
+                std::size_t symbol_idx = add_host_symbol(callable);
                 std::size_t arg_count = call->args().size();
+                std::size_t site_idx =
+                    add_call_site(symbol_idx, static_cast<std::uint16_t>(arg_count), Compiled::CallSiteNone, expr.start_pos());
                 std::int32_t code = static_cast<std::int32_t>(call->is_async() ? Code::CALL_ASYNC_FUNC : Code::CALL_FUNC) |
-                                    (static_cast<std::int32_t>(arg_count & 0xFF) << 8) |
-                                    (static_cast<std::int32_t>(idx & 0xFFFF) << 16);
+                                    (static_cast<std::int32_t>(site_idx) << 8);
                 int delta = 1 - static_cast<int>(arg_count);
                 emit_raw(code, expr.start_pos(), delta);
                 return;
@@ -511,11 +532,11 @@ private:
                     emit_raw(static_cast<std::int32_t>(Code::PUSH_ARRAY), expr.start_pos(), -1);
                 }
             }
-            void *func_ptr = call->is_async()
-                ? reinterpret_cast<void *>(call->async_func())
-                : reinterpret_cast<void *>(call->func());
-            std::size_t idx = add_operand(func_ptr);
-            emit_op(call->is_async() ? Code::CALL_ASYNC_FUNC_SPREAD : Code::CALL_FUNC_SPREAD, idx, expr.start_pos(), 0);
+            const Library::HostCallable *callable = call->is_async() ? call->async_func() : call->func();
+            std::size_t symbol_idx = add_host_symbol(callable);
+            std::size_t site_idx =
+                add_call_site(symbol_idx, 0, Compiled::CallSiteSpreadArgs, expr.start_pos());
+            emit_op(call->is_async() ? Code::CALL_ASYNC_FUNC_SPREAD : Code::CALL_FUNC_SPREAD, site_idx, expr.start_pos(), 0);
             return;
         }
         if (auto *list = dynamic_cast<const ast::InlineList *>(&expr)) {
@@ -749,7 +770,9 @@ private:
 
 Compiled Compiler::compile(const ast::Node &node) {
     CompilerImpl compiler;
-    return compiler.compile(node);
+    Compiled compiled = compiler.compile(node);
+    FIBER_ASSERT(compiled.validate_operands());
+    return compiled;
 }
 
 } // namespace fiber::script::ir

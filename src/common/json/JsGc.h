@@ -136,6 +136,15 @@ struct GcHeap {
 std::size_t gc_bytes_used(const GcHeap &heap);
 std::size_t gc_threshold(const GcHeap &heap);
 void gc_set_threshold(GcHeap &heap, std::size_t value);
+std::size_t gc_estimate_utf8_string_bytes(std::size_t utf8_len);
+std::size_t gc_estimate_string_bytes(std::size_t len, GcStringEncoding encoding);
+std::size_t gc_estimate_binary_bytes(std::size_t len);
+std::size_t gc_estimate_array_bytes(std::size_t capacity);
+std::size_t gc_estimate_array_growth_bytes(const GcArray *arr, std::size_t expected);
+std::size_t gc_estimate_object_bytes(std::size_t capacity);
+std::size_t gc_estimate_object_growth_bytes(const GcObject *obj, std::size_t expected);
+std::size_t gc_estimate_iterator_bytes();
+std::size_t gc_estimate_object_snapshot_bytes(std::size_t entry_count);
 
 GcString *gc_new_string(GcHeap *heap, const char *data, std::size_t len);
 GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len);
@@ -183,25 +192,17 @@ public:
 
     class RootVisitor {
     public:
-        explicit RootVisitor(std::vector<JsValue *> &roots) : roots_(&roots) {}
-
-        void visit(JsValue *value) {
-            if (value) {
-                roots_->push_back(value);
-            }
-        }
+        virtual ~RootVisitor() = default;
+        virtual void visit(JsValue *value) = 0;
 
         void visit_range(JsValue *base, std::size_t count) {
             if (!base || count == 0) {
                 return;
             }
             for (std::size_t i = 0; i < count; ++i) {
-                roots_->push_back(base + i);
+                visit(base + i);
             }
         }
-
-    private:
-        std::vector<JsValue *> *roots_ = nullptr;
     };
 
     class RootProvider {
