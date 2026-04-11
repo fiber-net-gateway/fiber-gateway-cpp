@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <map>
-#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -21,15 +20,17 @@ struct TestRoute {
 };
 
 struct TestVarDefiner {
-    std::set<std::uint32_t> node_ids;
+    std::map<int, std::uint32_t> mounted_node_ids;
+    std::map<int, std::string> mounted_paths;
 
     void add_path_var_definer(TestRoute &route, std::string_view var_name, std::uint32_t idx) {
         ASSERT_EQ(route.path_var_names.size(), idx);
         route.path_var_names.emplace_back(var_name);
     }
 
-    int on_route_mount(std::uint32_t route_node_id, std::string_view, TestRoute &route) {
-        EXPECT_TRUE(node_ids.insert(route_node_id).second);
+    int on_route_mount(std::uint32_t route_node_id, std::string_view full_path, TestRoute &route) {
+        EXPECT_TRUE(mounted_node_ids.emplace(route.token, route_node_id).second);
+        EXPECT_TRUE(mounted_paths.emplace(route.token, std::string(full_path)).second);
         return route.token;
     }
 };
@@ -69,7 +70,6 @@ public:
     }
 
     bool matched(std::uint32_t, const int &handler) {
-        EXPECT_EQ(handler, matched_token_);
         return handler == matched_token_;
     }
 
@@ -84,6 +84,16 @@ public:
 
     [[nodiscard]] std::uint32_t max_path_var_count() const {
         return matcher_.max_path_var_count();
+    }
+
+    [[nodiscard]] const std::string &mounted_path(int token) {
+        ensure_built();
+        return definer_.mounted_paths.at(token);
+    }
+
+    [[nodiscard]] std::uint32_t mounted_node_id(int token) {
+        ensure_built();
+        return definer_.mounted_node_ids.at(token);
     }
 
 private:
@@ -209,6 +219,18 @@ TEST(RoutePathMatcherTest, HandlesLargeStaticRouteSets) {
             tester.expect_match(pattern, token);
         }
     }
+}
+
+TEST(RoutePathMatcherTest, PreservesOriginalPatternPerMountedRoute) {
+    Tester tester;
+    const int canonical = tester.add_path("/a/b");
+    const int collapsed = tester.add_path("//a///b");
+
+    tester.expect_match("/a/b", canonical);
+    tester.expect_match("/a/b", collapsed);
+    EXPECT_EQ(tester.mounted_path(canonical), "/a/b");
+    EXPECT_EQ(tester.mounted_path(collapsed), "//a///b");
+    EXPECT_EQ(tester.mounted_node_id(canonical), tester.mounted_node_id(collapsed));
 }
 
 } // namespace

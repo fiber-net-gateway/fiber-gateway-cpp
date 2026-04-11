@@ -215,6 +215,9 @@ template <typename Handler>
 template <typename BuilderPayload, typename RouteVarDefiner>
 class RoutePathMatcher<Handler>::Builder {
 public:
+    // RouteVarDefiner::add_path_var_definer receives a transient var_name view.
+    // The view is only valid for the duration of the callback and must be copied
+    // by the definer if it needs to retain the name after the call returns.
     explicit Builder(RouteVarDefiner &route_definer) : route_definer_(route_definer) {
         nodes_.reserve(16);
         nodes_.push_back(BuildNode{});
@@ -228,14 +231,14 @@ public:
         const std::uint32_t payload_index = static_cast<std::uint32_t>(payloads_.size() - 1);
         const std::uint32_t node_index = add_path(pattern, payloads_[payload_index]);
         BuildNode &node = nodes_[node_index];
-        if (node.full_path_size == 0) {
-            node.full_path_offset = append_text(pattern.data(), pattern.size());
-            node.full_path_size = static_cast<std::uint32_t>(pattern.size());
-        }
         if (node.id == kInvalidIndex) {
             node.id = next_node_id_++;
         }
-        node.route_payload_indices.push_back(payload_index);
+        node.mounted_routes.push_back({
+            .payload_index = payload_index,
+            .full_path_offset = append_text(pattern.data(), pattern.size()),
+            .full_path_size = static_cast<std::uint32_t>(pattern.size()),
+        });
     }
 
     [[nodiscard]] RoutePathMatcher build() {
@@ -278,12 +281,15 @@ public:
                                                  src.wildcard_children.end());
             }
 
-            if (!src.route_payload_indices.empty()) {
+            if (!src.mounted_routes.empty()) {
                 dst.handler_begin = static_cast<std::uint32_t>(matcher.handlers_.size());
-                dst.handler_count = static_cast<std::uint32_t>(src.route_payload_indices.size());
-                const std::string_view full_path(matcher.text_.data() + src.full_path_offset, src.full_path_size);
-                for (std::uint32_t payload_index : src.route_payload_indices) {
-                    matcher.handlers_.push_back(route_definer_.on_route_mount(dst.id, full_path, payloads_[payload_index]));
+                dst.handler_count = static_cast<std::uint32_t>(src.mounted_routes.size());
+                for (const MountedRoute &route : src.mounted_routes) {
+                    const std::string_view full_path(
+                        matcher.text_.data() + route.full_path_offset,
+                        route.full_path_size);
+                    matcher.handlers_.push_back(
+                        route_definer_.on_route_mount(dst.id, full_path, payloads_[route.payload_index]));
                 }
             }
         }
@@ -292,18 +298,22 @@ public:
     }
 
 private:
+    struct MountedRoute {
+        std::uint32_t payload_index = 0;
+        std::uint32_t full_path_offset = 0;
+        std::uint32_t full_path_size = 0;
+    };
+
     struct BuildNode {
         std::uint32_t name_offset = 0;
         std::uint32_t name_size = 0;
         std::uint32_t hash = 0;
         std::uint32_t id = kInvalidIndex;
-        std::uint32_t full_path_offset = 0;
-        std::uint32_t full_path_size = 0;
         std::vector<std::uint32_t> static_slots{};
         std::uint32_t static_child_count = 0;
         std::vector<std::uint32_t> placeholder_children{};
         std::vector<std::uint32_t> wildcard_children{};
-        std::vector<std::uint32_t> route_payload_indices{};
+        std::vector<MountedRoute> mounted_routes{};
     };
 
     void ensure_mutable() const {
