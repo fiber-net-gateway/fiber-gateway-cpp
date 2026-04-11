@@ -71,6 +71,18 @@ function(fiber_prepare_jemalloc_target)
         IMPORTED_LOCATION "${FIBER_JEMALLOC_INSTALL_DIR}/lib/libjemalloc.a")
 endfunction()
 
+function(fiber_lsquic_auto_asan_enabled output_var)
+    set(fiber_lsquic_needs_asan FALSE)
+    if ((CMAKE_BUILD_TYPE STREQUAL "" OR CMAKE_BUILD_TYPE STREQUAL "Debug")
+        AND CMAKE_C_COMPILER MATCHES "clang"
+        AND NOT CMAKE_SYSTEM_NAME STREQUAL "Android"
+        AND NOT "$ENV{TRAVIS}" MATCHES "^true$"
+        AND NOT "$ENV{EXTRA_CFLAGS}" MATCHES "-fsanitize")
+        set(fiber_lsquic_needs_asan TRUE)
+    endif()
+    set(${output_var} ${fiber_lsquic_needs_asan} PARENT_SCOPE)
+endfunction()
+
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(BUILD_STATIC_LIBS ON CACHE BOOL "" FORCE)
@@ -173,6 +185,17 @@ if (FIBER_ZLIB_TARGET AND DEFINED ZLIB_INCLUDE_DIR AND DEFINED ZLIB_LIB)
         GIT_SHALLOW TRUE
     )
     FetchContent_MakeAvailable(lsquic)
+
+    fiber_lsquic_auto_asan_enabled(FIBER_LSQUIC_AUTO_ASAN)
+    if (FIBER_LSQUIC_AUTO_ASAN)
+        if (TARGET lsquic)
+            # lsquic enables ASan internally in Debug Clang builds but does not
+            # propagate the runtime requirement to consumers of the static lib.
+            target_link_options(lsquic INTERFACE -fsanitize=address)
+        elseif (TARGET lsquic_static)
+            target_link_options(lsquic_static INTERFACE -fsanitize=address)
+        endif()
+    endif()
 
     if (NOT TARGET lsquic::lsquic)
         if (TARGET lsquic)
