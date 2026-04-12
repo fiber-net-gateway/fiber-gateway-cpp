@@ -1,48 +1,51 @@
 # Examples
 
-`example/` 目录放的是基于 `fiber_lib` 的最小可运行示例。它们的目标是演示某一类能力如何被组合使用，而不是提供完整应用结构。
+English | [简体中文](README.zh-CN.md)
 
-这些示例通常具有以下特点：
+`example/` contains minimal runnable examples built on top of `fiber_lib`. Their goal is to show how a specific capability is composed and used, not to provide a full application structure.
 
-- 单文件实现，便于快速阅读。
-- 聚焦单一主题，避免引入过多应用层封装。
-- 适合作为 API 使用样板和轻量 smoke test。
+These examples usually have the following characteristics:
 
-## 示例列表
+- Single-file implementations for quick reading.
+- Focus on one topic at a time.
+- Minimal application-layer structure and configuration.
+- Useful both as API usage references and lightweight smoke tests.
+
+## Example List
 
 - `http1_echo.cpp`
-  最小 HTTP/1.1 服务端示例，展示事件循环、请求体读取和响应写回。
+  A minimal HTTP/1.1 server example showing the event loop, request-body reading, and response writing.
 - `https_echo.cpp`
-  HTTPS 服务端示例，展示 TLS 接入和安全连接处理。
+  An HTTPS server example showing TLS ingress and secure connection handling.
 - `tcp_echo.cpp`
-  TCP Echo 示例，展示基础流式连接读写。
+  A TCP echo example showing basic stream read/write behavior.
 - `udp_echo.cpp`
-  UDP Echo 示例，展示数据报收发。
+  A UDP echo example showing datagram send/receive flow.
 - `dns_dig.cpp`
-  DNS 查询示例，展示解析器、地址解析和结果处理。
+  A DNS query example showing resolver usage, address resolution, and result handling.
 - `git_http_repo_server.cpp`
-  较完整的 HTTP 服务端示例，展示更复杂的协议处理和服务逻辑。
+  A more complete HTTP server example showing more involved protocol handling and service logic.
 - `http3_demo_lsquic.cpp`
-  基于 `lsquic` 的 HTTP/3 实验性示例；只有在相关依赖可用时才会构建。
+  An experimental HTTP/3 example based on `lsquic`; it is built only when the required dependencies are available.
 
-## 构建
+## Build
 
-默认情况下，顶层构建会同时构建 `example/` 下的示例：
+By default, top-level builds also build the examples under `example/`:
 
 ```bash
 cmake -S .. -B ../build
 cmake --build ../build
 ```
 
-如果只想关闭示例构建：
+To disable example builds:
 
 ```bash
 cmake -S .. -B ../build -DFIBER_BUILD_EXAMPLES=OFF
 ```
 
-## 运行
+## Run
 
-示例可执行文件默认输出在顶层构建目录，例如：
+Example executables are emitted into the top-level build directory, for example:
 
 ```bash
 ../build/http1_echo
