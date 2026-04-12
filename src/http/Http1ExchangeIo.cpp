@@ -132,9 +132,9 @@ fiber::async::Task<common::IoResult<void>> write_all(HttpTransport *transport, m
 
 Http1HeaderParseBufferOptions header_parse_buffer_options(const HttpServerOptions &options) noexcept {
     return Http1HeaderParseBufferOptions{
-        .init_size = options.header_init_size,
-        .large_size = options.header_large_size,
-        .large_num = options.header_large_num,
+            .init_size = options.header_init_size,
+            .large_size = options.header_large_size,
+            .large_num = options.header_large_num,
     };
 }
 
@@ -265,8 +265,8 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::read_more(std::siz
         co_return std::unexpected(ensure_result.error());
     }
 
-    auto result =
-            co_await connection_->transport().read(read_buf_.writable_data(), read_size, connection_->options().body_timeout);
+    auto result = co_await connection_->transport().read(read_buf_.writable_data(), read_size,
+                                                         connection_->options().body_timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
@@ -276,7 +276,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::read_more(std::siz
 }
 
 fiber::async::Task<common::IoResult<ParseCode>> Http1ExchangeIo::advance_chunked_body(std::size_t max_bytes,
-                                                                                       bool allow_read) noexcept {
+                                                                                      bool allow_read) noexcept {
     for (;;) {
         mem::IoBuf *front = front_body_input();
         if (!front || front->readable() == 0) {
@@ -465,8 +465,8 @@ fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::read_request_trailer
             }
             std::size_t copied = drain_body_input(header_buffer.buf());
             if (copied == 0) {
-                auto more =
-                    co_await connection_->transport().read_into(header_buffer.buf(), connection_->options().body_timeout);
+                auto more = co_await connection_->transport().read_into(header_buffer.buf(),
+                                                                        connection_->options().body_timeout);
                 if (!more) {
                     co_return std::unexpected(more.error());
                 }
@@ -532,19 +532,19 @@ common::IoErr Http1ExchangeIo::prepare_final_header(const HttpExchange &exchange
     if (header.kind != OutgoingHeaderKind::Final) {
         return common::IoErr::Invalid;
     }
+    ResponseBodyMode body_mode = header.body_mode;
     if (header.end_stream) {
-        if (header.body_mode == ResponseBodyMode::Chunked) {
-            return common::IoErr::Invalid;
-        }
         if (header.body_mode == ResponseBodyMode::ContentLength && header.content_length != 0) {
             return common::IoErr::Invalid;
+        } else if (header.body_mode == ResponseBodyMode::Chunked) {
+            body_mode = ResponseBodyMode::Auto;
         }
     }
 
     response_status_code_ = header.status_code;
     response_reason_ = header.reason;
     response_headers_ = header.headers;
-    response_body_mode_ = header.body_mode;
+    response_body_mode_ = body_mode;
     response_connection_mode_ = header.connection_mode;
     response_content_length_ = header.content_length;
 
@@ -597,8 +597,7 @@ bool Http1ExchangeIo::compute_close_conn(const HttpExchange &exchange) const noe
 }
 
 common::IoResult<mem::IoBuf> Http1ExchangeIo::build_response_header(HttpExchange &exchange, bool body_end,
-                                                                    std::size_t first_body_len,
-                                                                    bool infer_body_mode,
+                                                                    std::size_t first_body_len, bool infer_body_mode,
                                                                     bool &close_conn) noexcept {
     common::IoErr err = normalize_response_plan(body_end, first_body_len, infer_body_mode);
     if (err != common::IoErr::None) {
@@ -607,8 +606,8 @@ common::IoResult<mem::IoBuf> Http1ExchangeIo::build_response_header(HttpExchange
 
     close_conn = compute_close_conn(exchange);
 
-    std::string_view reason =
-        response_reason_.empty() ? default_reason_phrase(response_status_code_) : std::string_view(response_reason_);
+    std::string_view reason = response_reason_.empty() ? default_reason_phrase(response_status_code_)
+                                                       : std::string_view(response_reason_);
     constexpr std::string_view kHttp10 = "HTTP/1.0 ";
     constexpr std::string_view kHttp11 = "HTTP/1.1 ";
     constexpr std::string_view kCrLf = "\r\n";
@@ -617,13 +616,12 @@ common::IoResult<mem::IoBuf> Http1ExchangeIo::build_response_header(HttpExchange
     constexpr std::string_view kConnectionClose = "Connection: close\r\n";
     std::string_view version = exchange.version_ == HttpVersion::HTTP_1_0 ? kHttp10 : kHttp11;
 
-    bool write_content_length =
-        response_body_mode_ == ResponseBodyMode::ContentLength &&
-        (response_headers_ == nullptr || !response_headers_->contains("Content-Length"));
-    bool write_transfer_encoding =
-        response_body_mode_ == ResponseBodyMode::Chunked &&
-        (response_headers_ == nullptr || !response_headers_->contains("Transfer-Encoding"));
-    bool write_connection_close = close_conn && (response_headers_ == nullptr || !response_headers_->contains("Connection"));
+    bool write_content_length = response_body_mode_ == ResponseBodyMode::ContentLength &&
+                                (response_headers_ == nullptr || !response_headers_->contains("Content-Length"));
+    bool write_transfer_encoding = response_body_mode_ == ResponseBodyMode::Chunked &&
+                                   (response_headers_ == nullptr || !response_headers_->contains("Transfer-Encoding"));
+    bool write_connection_close =
+            close_conn && (response_headers_ == nullptr || !response_headers_->contains("Connection"));
 
     std::size_t header_len = version.size();
     header_len += kHttpStatusDigits;
@@ -722,8 +720,8 @@ fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::write_response_heade
 
     bool close_conn = compute_close_conn(exchange);
 
-    std::string_view reason =
-        response_reason_.empty() ? default_reason_phrase(response_status_code_) : std::string_view(response_reason_);
+    std::string_view reason = response_reason_.empty() ? default_reason_phrase(response_status_code_)
+                                                       : std::string_view(response_reason_);
     std::string header;
     header.reserve(128 + (response_headers_ ? response_headers_->size() * 32 : 0));
     if (exchange.version_ == HttpVersion::HTTP_1_0) {
@@ -777,9 +775,9 @@ fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::write_response_heade
     co_return common::IoResult<void>{};
 }
 
-fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::write_informational_header(HttpExchange &exchange,
-                                                                                        int status_code,
-                                                                                        const HttpHeaders *headers) noexcept {
+fiber::async::Task<common::IoResult<void>>
+Http1ExchangeIo::write_informational_header(HttpExchange &exchange, int status_code,
+                                            const HttpHeaders *headers) noexcept {
     if (!connection_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -826,21 +824,20 @@ fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::write_informational_
 }
 
 fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::send_header(HttpExchange &exchange,
-                                                                         const OutgoingHeaderBlockView &header) {
+                                                                        const OutgoingHeaderBlockView &header) {
     switch (header.kind) {
         case OutgoingHeaderKind::Informational:
             if (header.end_stream) {
                 co_return std::unexpected(common::IoErr::Invalid);
             }
             co_return co_await write_informational_header(exchange, header.status_code, header.headers);
-        case OutgoingHeaderKind::Final:
-            {
-                common::IoErr err = prepare_final_header(exchange, header);
-                if (err != common::IoErr::None) {
-                    co_return std::unexpected(err);
-                }
-                co_return co_await write_response_header(exchange, header.end_stream, 0, false);
+        case OutgoingHeaderKind::Final: {
+            common::IoErr err = prepare_final_header(exchange, header);
+            if (err != common::IoErr::None) {
+                co_return std::unexpected(err);
             }
+            co_return co_await write_response_header(exchange, header.end_stream, 0, false);
+        }
         case OutgoingHeaderKind::Trailer:
             if (response_phase_ == ResponsePhase::Init || response_phase_ == ResponsePhase::Finished) {
                 co_return std::unexpected(common::IoErr::Invalid);
@@ -849,7 +846,7 @@ fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::send_header(HttpExch
                 co_return std::unexpected(common::IoErr::Invalid);
             }
             auto zero_result =
-                co_await write_all(&connection_->transport(), "0\r\n", 3, connection_->options().write_timeout);
+                    co_await write_all(&connection_->transport(), "0\r\n", 3, connection_->options().write_timeout);
             if (!zero_result) {
                 co_return std::unexpected(zero_result.error());
             }
@@ -864,7 +861,8 @@ fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::send_header(HttpExch
     co_return std::unexpected(common::IoErr::Invalid);
 }
 
-fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::write_chunked_trailer_block(const HttpHeaders *headers) noexcept {
+fiber::async::Task<common::IoResult<void>>
+Http1ExchangeIo::write_chunked_trailer_block(const HttpHeaders *headers) noexcept {
     std::string block;
     block.reserve((headers ? headers->size() * 32 : 0) + 2);
     if (headers != nullptr) {
@@ -935,7 +933,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
         }
         if (chunk.last) {
             auto zero_result =
-                co_await write_all(&connection_->transport(), "0\r\n\r\n", 5, connection_->options().write_timeout);
+                    co_await write_all(&connection_->transport(), "0\r\n\r\n", 5, connection_->options().write_timeout);
             if (!zero_result) {
                 co_return std::unexpected(zero_result.error());
             }
@@ -951,7 +949,8 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
         }
     }
     if (len > 0) {
-        auto res = co_await write_all(&connection_->transport(), chunk.data_chain, connection_->options().write_timeout);
+        auto res =
+                co_await write_all(&connection_->transport(), chunk.data_chain, connection_->options().write_timeout);
         if (!res) {
             co_return std::unexpected(res.error());
         }
@@ -1017,7 +1016,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
         }
         if (end) {
             auto zero_result =
-                co_await write_all(&connection_->transport(), "0\r\n\r\n", 5, connection_->options().write_timeout);
+                    co_await write_all(&connection_->transport(), "0\r\n\r\n", 5, connection_->options().write_timeout);
             if (!zero_result) {
                 co_return std::unexpected(zero_result.error());
             }
