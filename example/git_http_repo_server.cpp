@@ -182,17 +182,15 @@ fiber::async::Task<IoResult<void>> send_final_header(
     fiber::http::HttpExchange &exchange,
     int status_code,
     const fiber::http::HttpHeaders *headers,
-    fiber::http::ResponseBodyMode body_mode,
-    std::size_t content_length,
+    fiber::http::HttpBodySpec body,
     fiber::http::ResponseConnectionMode connection_mode,
     bool end_stream) {
     co_return co_await exchange.send_header({
         .kind = fiber::http::OutgoingHeaderKind::Final,
         .status_code = status_code,
         .headers = headers,
-        .body_mode = body_mode,
+        .body = body,
         .connection_mode = connection_mode,
-        .content_length = content_length,
         .end_stream = end_stream,
     });
 }
@@ -877,7 +875,7 @@ fiber::async::Task<IoResult<void>> send_error_response(fiber::http::HttpExchange
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("Content-Type", "text/plain; charset=utf-8");
     auto header_result = co_await send_final_header(exchange, status_code, &headers,
-                                                    fiber::http::ResponseBodyMode::ContentLength, message.size(),
+                                                    fiber::http::HttpBodySpec::ContentLength(message.size()),
                                                     fiber::http::ResponseConnectionMode::Close, message.empty());
     if (!header_result) {
         co_return std::unexpected(header_result.error());
@@ -905,12 +903,12 @@ fiber::async::Task<IoResult<void>> forward_backend_response(fiber::http::HttpExc
         headers.add(header.first, header.second);
     }
 
-    fiber::http::ResponseBodyMode body_mode = response.content_length ? fiber::http::ResponseBodyMode::ContentLength
-                                                                      : fiber::http::ResponseBodyMode::Chunked;
+    fiber::http::HttpBodySpec body = response.content_length
+                                         ? fiber::http::HttpBodySpec::ContentLength(*response.content_length)
+                                         : fiber::http::HttpBodySpec::Chunked();
     bool header_end_stream = response.content_length && *response.content_length == 0;
 
-    auto header_result = co_await send_final_header(exchange, response.status_code, &headers, body_mode,
-                                                    response.content_length.value_or(0),
+    auto header_result = co_await send_final_header(exchange, response.status_code, &headers, body,
                                                     fiber::http::ResponseConnectionMode::Auto, header_end_stream);
     if (!header_result) {
         co_return std::unexpected(header_result.error());

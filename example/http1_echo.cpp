@@ -20,17 +20,15 @@ fiber::async::Task<fiber::common::IoResult<void>> send_final_header(
     fiber::http::HttpExchange &exchange,
     int status_code,
     const fiber::http::HttpHeaders *headers,
-    fiber::http::ResponseBodyMode body_mode,
-    std::size_t content_length,
+    fiber::http::HttpBodySpec body,
     fiber::http::ResponseConnectionMode connection_mode,
     bool end_stream) {
     co_return co_await exchange.send_header({
         .kind = fiber::http::OutgoingHeaderKind::Final,
         .status_code = status_code,
         .headers = headers,
-        .body_mode = body_mode,
+        .body = body,
         .connection_mode = connection_mode,
-        .content_length = content_length,
         .end_stream = end_stream,
     });
 }
@@ -65,7 +63,7 @@ fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange) {
     for (;;) {
         auto read_result = co_await exchange.read_body(4096);
         if (!read_result) {
-            co_await send_final_header(exchange, 400, nullptr, fiber::http::ResponseBodyMode::ContentLength, 0,
+            co_await send_final_header(exchange, 400, nullptr, fiber::http::HttpBodySpec::ContentLength(0),
                                        fiber::http::ResponseConnectionMode::Close, true);
             co_return;
         }
@@ -85,8 +83,8 @@ fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange) {
 
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("Content-Type", "text/plain");
-    auto header_result = co_await send_final_header(exchange, 200, &headers,
-                                                    fiber::http::ResponseBodyMode::ContentLength, body.size(),
+    auto header_result = co_await send_final_header(exchange, 200, &headers, fiber::http::HttpBodySpec::ContentLength(
+                                                                                   body.size()),
                                                     fiber::http::ResponseConnectionMode::Auto, false);
     if (!header_result) {
         co_return;
