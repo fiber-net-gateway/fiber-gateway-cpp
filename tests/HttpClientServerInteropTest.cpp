@@ -194,7 +194,7 @@ fiber::async::Task<fiber::common::IoResult<void>> send_final_header(
     fiber::http::HttpExchange &exchange,
     int status_code,
     const fiber::http::HttpHeaders *headers,
-    fiber::http::ResponseBodySpec body,
+    fiber::http::HttpBodySpec body,
     bool end_stream) {
     co_return co_await exchange.send_header({
         .kind = fiber::http::OutgoingHeaderKind::Final,
@@ -231,7 +231,7 @@ fiber::async::Task<void> handle_no_body_request(fiber::http::HttpExchange &excha
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("x-echo-method", exchange.method_view());
     headers.set("x-echo-path", exchange.uri().path);
-    (void)co_await send_final_header(exchange, 204, &headers, fiber::http::ResponseBodySpec::None(), true);
+    (void)co_await send_final_header(exchange, 204, &headers, fiber::http::HttpBodySpec::None(), true);
 }
 
 fiber::async::Task<void> handle_body_request(fiber::http::HttpExchange &exchange,
@@ -249,7 +249,7 @@ fiber::async::Task<void> handle_body_request(fiber::http::HttpExchange &exchange
     auto header_result = co_await send_final_header(exchange,
                                                     200,
                                                     &headers,
-                                                    fiber::http::ResponseBodySpec::ContentLength(body.size()),
+                                                    fiber::http::HttpBodySpec::ContentLength(body.size()),
                                                     false);
     if (!header_result) {
         co_return;
@@ -378,8 +378,7 @@ DetachedTask run_http1_client_with_body(fiber::event::EventLoop *loop,
     head.method = fiber::http::HttpMethod::Post;
     head.target = "/interop/http1/with-body";
     head.headers = &headers;
-    head.body_mode = fiber::http::Http1RequestBodyMode::ContentLength;
-    head.content_length = kBody.size();
+    head.body = fiber::http::HttpBodySpec::ContentLength(kBody.size());
 
     auto send_result = co_await exchange.send_header(head, false);
     if (!send_result) {
@@ -811,7 +810,7 @@ TEST(HttpClientServerInteropTest, Http2ServerEventLoopGroupDispatch) {
             if (&fiber::event::EventLoop::current() == &group.at(1)) {
                 saw_worker_loop.store(true, std::memory_order_release);
             }
-            (void)co_await send_final_header(exchange, 204, nullptr, fiber::http::ResponseBodySpec::None(), true);
+            (void)co_await send_final_header(exchange, 204, nullptr, fiber::http::HttpBodySpec::None(), true);
         };
         return start_http_server(&group.at(0), std::move(handler), std::move(server_options), &group, &port_promise,
                                  &server_promise);

@@ -6,16 +6,11 @@
 #include <cstdint>
 #include <string_view>
 
+#include "HttpBodySpec.h"
 #include "HttpCommon.h"
 #include "HttpHeaders.h"
 
 namespace fiber::http {
-
-enum class Http1RequestBodyMode : std::uint8_t {
-    None,
-    ContentLength,
-    Chunked,
-};
 
 struct Http1ClientExchangeOptions {
     std::chrono::milliseconds write_timeout{30000};
@@ -30,8 +25,7 @@ struct Http1RequestHead {
     HttpMethod method = HttpMethod::Unknown;
     std::string_view target{};
     const HttpHeaders *headers = nullptr;
-    Http1RequestBodyMode body_mode = Http1RequestBodyMode::None;
-    std::size_t content_length = 0;
+    HttpBodySpec body = HttpBodySpec::None();
 };
 
 struct Http1ResponseHead {

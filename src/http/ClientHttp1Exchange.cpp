@@ -263,16 +263,18 @@ common::IoResult<std::size_t> estimate_header_bytes(const Http1RequestHead &head
     }
 
     std::size_t total = method.size() + 1 + head.target.size() + kHttp11Suffix.size();
-    switch (head.body_mode) {
-        case Http1RequestBodyMode::None:
+    switch (head.body.kind()) {
+        case HttpBodySpec::Kind::Auto:
+            return std::unexpected(common::IoErr::Invalid);
+        case HttpBodySpec::Kind::None:
             break;
-        case Http1RequestBodyMode::ContentLength:
-            if (head.content_length > static_cast<std::size_t>(std::numeric_limits<std::uint64_t>::max())) {
+        case HttpBodySpec::Kind::ContentLength:
+            if (head.body.content_length() > static_cast<std::size_t>(std::numeric_limits<std::uint64_t>::max())) {
                 return std::unexpected(common::IoErr::Invalid);
             }
             total += kContentLengthPrefix.size() + kMaxContentLengthDigits + kLineTerminator.size();
             break;
-        case Http1RequestBodyMode::Chunked:
+        case HttpBodySpec::Kind::Chunked:
             total += kChunkedHeader.size();
             break;
     }
@@ -307,15 +309,17 @@ common::IoResult<void> encode_request_header(mem::IoBuf &buf, const Http1Request
     append_bytes(ptr, head.target);
     append_bytes(ptr, kHttp11Suffix);
 
-    switch (head.body_mode) {
-        case Http1RequestBodyMode::None:
+    switch (head.body.kind()) {
+        case HttpBodySpec::Kind::Auto:
+            return std::unexpected(common::IoErr::Invalid);
+        case HttpBodySpec::Kind::None:
             break;
-        case Http1RequestBodyMode::ContentLength:
+        case HttpBodySpec::Kind::ContentLength:
             append_bytes(ptr, kContentLengthPrefix);
-            ptr += append_decimal(ptr, head.content_length);
+            ptr += append_decimal(ptr, head.body.content_length());
             append_bytes(ptr, kLineTerminator);
             break;
-        case Http1RequestBodyMode::Chunked:
+        case HttpBodySpec::Kind::Chunked:
             append_bytes(ptr, kChunkedHeader);
             break;
     }
@@ -683,10 +687,13 @@ fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::send_header(cons
     if (request_state_ != RequestState::Init) {
         co_return std::unexpected(common::IoErr::Already);
     }
-    if (head.body_mode == Http1RequestBodyMode::None && !end_stream) {
+    if (head.body.is_auto()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (head.body_mode == Http1RequestBodyMode::ContentLength && end_stream && head.content_length != 0) {
+    if (head.body.is_none() && !end_stream) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (head.body.is_content_length() && end_stream && head.body.content_length() != 0) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
     auto estimated_size = estimate_header_bytes(head);
@@ -715,7 +722,7 @@ fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::send_header(cons
         co_return std::unexpected(write_result.error());
     }
 
-    if (head.body_mode == Http1RequestBodyMode::Chunked && end_stream) {
+    if (head.body.is_chunked() && end_stream) {
         auto final_result = co_await write_all(conn_->transport_.get(),
                                                kChunkedFinal.data(),
                                                kChunkedFinal.size(),
@@ -729,8 +736,8 @@ fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::send_header(cons
         }
     }
 
-    body_mode_ = head.body_mode;
-    content_length_ = head.content_length;
+    body_spec_ = head.body;
+    content_length_ = head.body.is_content_length() ? head.body.content_length() : 0;
     body_sent_ = 0;
     request_method_ = head.method;
     final_response_received_ = false;
@@ -768,10 +775,12 @@ fiber::async::Task<common::IoResult<std::size_t>> ClientHttp1Exchange::write_bod
     }
 
     const std::size_t body_bytes = chunk.data_chain.readable_bytes();
-    switch (body_mode_) {
-        case Http1RequestBodyMode::None:
+    switch (body_spec_.kind()) {
+        case HttpBodySpec::Kind::Auto:
             co_return std::unexpected(common::IoErr::Invalid);
-        case Http1RequestBodyMode::ContentLength: {
+        case HttpBodySpec::Kind::None:
+            co_return std::unexpected(common::IoErr::Invalid);
+        case HttpBodySpec::Kind::ContentLength: {
             if (body_bytes > content_length_ - body_sent_) {
                 co_return std::unexpected(common::IoErr::Invalid);
             }
@@ -792,7 +801,7 @@ fiber::async::Task<common::IoResult<std::size_t>> ClientHttp1Exchange::write_bod
             }
             co_return body_bytes;
         }
-        case Http1RequestBodyMode::Chunked: {
+        case HttpBodySpec::Kind::Chunked: {
             if (body_bytes == 0 && !chunk.last) {
                 co_return static_cast<std::size_t>(0);
             }
@@ -884,10 +893,12 @@ fiber::async::Task<common::IoResult<std::size_t>> ClientHttp1Exchange::write_bod
         co_return std::unexpected(common::IoErr::Already);
     }
 
-    switch (body_mode_) {
-        case Http1RequestBodyMode::None:
+    switch (body_spec_.kind()) {
+        case HttpBodySpec::Kind::Auto:
             co_return std::unexpected(common::IoErr::Invalid);
-        case Http1RequestBodyMode::ContentLength: {
+        case HttpBodySpec::Kind::None:
+            co_return std::unexpected(common::IoErr::Invalid);
+        case HttpBodySpec::Kind::ContentLength: {
             if (len > content_length_ - body_sent_) {
                 co_return std::unexpected(common::IoErr::Invalid);
             }
@@ -910,7 +921,7 @@ fiber::async::Task<common::IoResult<std::size_t>> ClientHttp1Exchange::write_bod
             }
             co_return len;
         }
-        case Http1RequestBodyMode::Chunked: {
+        case HttpBodySpec::Kind::Chunked: {
             if (len == 0 && !end_stream) {
                 co_return static_cast<std::size_t>(0);
             }
@@ -989,7 +1000,7 @@ fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::send_trailer(con
     if (request_state_ == RequestState::RequestDone) {
         co_return std::unexpected(common::IoErr::Already);
     }
-    if (request_state_ == RequestState::Failed || body_mode_ != Http1RequestBodyMode::Chunked) {
+    if (request_state_ == RequestState::Failed || !body_spec_.is_chunked()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
     if (final_response_received_) {
