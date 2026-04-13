@@ -596,7 +596,7 @@ common::IoErr Http1ExchangeIo::prepare_final_header(const HttpExchange &exchange
     if (header.kind != OutgoingHeaderKind::Final) {
         return common::IoErr::Invalid;
     }
-    ResponseBodySpec body_spec = header.body;
+    HttpBodySpec body_spec = header.body;
     const bool must_not_have_body = response_must_not_have_body(exchange, header.status_code);
     if (body_spec.is_none() && !must_not_have_body) {
         return common::IoErr::Invalid;
@@ -614,7 +614,7 @@ common::IoErr Http1ExchangeIo::prepare_final_header(const HttpExchange &exchange
             return common::IoErr::Invalid;
         }
         if (body_spec.is_chunked()) {
-            body_spec = ResponseBodySpec::Auto();
+            body_spec = HttpBodySpec::Auto();
         }
     }
     if (!header.end_stream && body_spec.is_none()) {
@@ -636,19 +636,19 @@ common::IoErr Http1ExchangeIo::prepare_final_header(const HttpExchange &exchange
 
 common::IoResult<void> Http1ExchangeIo::normalize_response_plan(bool body_end, std::size_t first_body_len,
                                                                 bool infer_body_mode,
-                                                                ResponseBodySpec &body_spec) const noexcept {
+                                                                HttpBodySpec &body_spec) const noexcept {
     body_spec = response_body_spec_;
 
     if (infer_body_mode && body_spec.is_auto()) {
         if (body_end) {
-            body_spec = ResponseBodySpec::ContentLength(first_body_len);
+            body_spec = HttpBodySpec::ContentLength(first_body_len);
         } else {
-            body_spec = ResponseBodySpec::Chunked();
+            body_spec = HttpBodySpec::Chunked();
         }
     }
 
     if (body_spec.is_auto()) {
-        body_spec = body_end ? ResponseBodySpec::ContentLength(first_body_len) : ResponseBodySpec::Chunked();
+        body_spec = body_end ? HttpBodySpec::ContentLength(first_body_len) : HttpBodySpec::Chunked();
     }
 
     if (body_end) {
@@ -687,7 +687,7 @@ bool Http1ExchangeIo::compute_close_conn(const HttpExchange &exchange) const noe
 
 common::IoResult<mem::IoBuf> Http1ExchangeIo::build_response_header(HttpExchange &exchange, bool body_end,
                                                                     std::size_t first_body_len, bool infer_body_mode,
-                                                                    ResponseBodySpec &body_spec,
+                                                                    HttpBodySpec &body_spec,
                                                                     bool &close_conn) noexcept {
     auto normalize_result = normalize_response_plan(body_end, first_body_len, infer_body_mode, body_spec);
     if (!normalize_result) {
@@ -858,7 +858,7 @@ fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::write_response_heade
         co_return std::unexpected(common::IoErr::Already);
     }
 
-    ResponseBodySpec body_spec = ResponseBodySpec::Auto();
+    HttpBodySpec body_spec = HttpBodySpec::Auto();
     bool close_conn = false;
     auto header_result = build_response_header(exchange, body_end, first_body_len, infer_body_mode, body_spec,
                                                close_conn);

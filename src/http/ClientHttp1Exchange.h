@@ -94,7 +94,7 @@ private:
     bool response_eof_delimited_ = false;
     RequestState request_state_ = RequestState::Init;
     HttpMethod request_method_ = HttpMethod::Unknown;
-    Http1RequestBodyMode body_mode_ = Http1RequestBodyMode::None;
+    HttpBodySpec body_spec_ = HttpBodySpec::None();
     std::size_t content_length_ = 0;
     std::size_t body_sent_ = 0;
 };
