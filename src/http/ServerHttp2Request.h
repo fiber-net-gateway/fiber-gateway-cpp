@@ -117,9 +117,7 @@ private:
     int response_status_code_ = 0;
     std::string_view response_reason_;
     const HttpHeaders *response_headers_ = nullptr;
-    ResponseBodyMode response_body_mode_ = ResponseBodyMode::Auto;
     ResponseConnectionMode response_connection_mode_ = ResponseConnectionMode::Auto;
-    std::size_t response_content_length_ = 0;
     std::size_t response_body_sent_ = 0;
     std::string_view pending_name_;
     std::uint64_t pending_name_hash_ = 0;

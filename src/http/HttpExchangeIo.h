@@ -20,10 +20,38 @@ enum class OutgoingHeaderKind : std::uint8_t {
     Trailer,
 };
 
-enum class ResponseBodyMode : std::uint8_t {
-    Auto,
-    ContentLength,
-    Chunked,
+class ResponseBodySpec {
+public:
+    enum class Kind : std::uint8_t {
+        Auto,
+        None,
+        ContentLength,
+        Chunked,
+    };
+
+    constexpr ResponseBodySpec() noexcept = default;
+
+    [[nodiscard]] static constexpr ResponseBodySpec Auto() noexcept { return ResponseBodySpec(Kind::Auto, 0); }
+    [[nodiscard]] static constexpr ResponseBodySpec None() noexcept { return ResponseBodySpec(Kind::None, 0); }
+    [[nodiscard]] static constexpr ResponseBodySpec ContentLength(std::size_t length) noexcept {
+        return ResponseBodySpec(Kind::ContentLength, length);
+    }
+    [[nodiscard]] static constexpr ResponseBodySpec Chunked() noexcept { return ResponseBodySpec(Kind::Chunked, 0); }
+
+    [[nodiscard]] constexpr Kind kind() const noexcept { return kind_; }
+    [[nodiscard]] constexpr bool is_auto() const noexcept { return kind_ == Kind::Auto; }
+    [[nodiscard]] constexpr bool is_none() const noexcept { return kind_ == Kind::None; }
+    [[nodiscard]] constexpr bool is_content_length() const noexcept { return kind_ == Kind::ContentLength; }
+    [[nodiscard]] constexpr bool is_chunked() const noexcept { return kind_ == Kind::Chunked; }
+    [[nodiscard]] constexpr std::size_t content_length() const noexcept { return content_length_; }
+
+private:
+    constexpr ResponseBodySpec(Kind kind, std::size_t content_length) noexcept :
+        kind_(kind),
+        content_length_(content_length) {}
+
+    Kind kind_ = Kind::Auto;
+    std::size_t content_length_ = 0;
 };
 
 enum class ResponseConnectionMode : std::uint8_t {
@@ -36,9 +64,8 @@ struct OutgoingHeaderBlockView {
     int status_code = 0;
     std::string_view reason;
     const HttpHeaders *headers = nullptr;
-    ResponseBodyMode body_mode = ResponseBodyMode::Auto;
+    ResponseBodySpec body{};
     ResponseConnectionMode connection_mode = ResponseConnectionMode::Auto;
-    std::size_t content_length = 0;
     bool end_stream = false;
 };
 

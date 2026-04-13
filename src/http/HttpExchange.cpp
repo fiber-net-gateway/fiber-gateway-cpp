@@ -124,9 +124,8 @@ fiber::async::Task<common::IoResult<void>> HttpExchange::send_informational_head
         .status_code = status_code,
         .reason = {},
         .headers = headers,
-        .body_mode = ResponseBodyMode::Auto,
+        .body = ResponseBodySpec::Auto(),
         .connection_mode = ResponseConnectionMode::Auto,
-        .content_length = 0,
         .end_stream = false,
     });
 }
