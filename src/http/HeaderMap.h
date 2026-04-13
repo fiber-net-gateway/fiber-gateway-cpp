@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+#include "HttpHeaderHash.h"
+
 namespace fiber::http {
 
 template <typename V>
@@ -22,17 +24,17 @@ public:
     bool insert(std::string_view name, V &&value) {
         return insert_impl(name, hash_name(name), std::move(value));
     }
-    bool insert(std::string_view lowcase_name, std::uint32_t hash, const V &value) {
-        return insert_impl(lowcase_name, hash, value);
+    bool insert(std::string_view lowcase_name, std::uint64_t hash, const V &value) {
+        return insert_impl(lowcase_name, narrow_hash(hash), value);
     }
-    bool insert(std::string_view lowcase_name, std::uint32_t hash, V &&value) {
-        return insert_impl(lowcase_name, hash, std::move(value));
+    bool insert(std::string_view lowcase_name, std::uint64_t hash, V &&value) {
+        return insert_impl(lowcase_name, narrow_hash(hash), std::move(value));
     }
 
     V *get(std::string_view name) { return get_impl(name, hash_name(name)); }
     const V *get(std::string_view name) const { return get_impl(name, hash_name(name)); }
-    V *get(std::string_view name, std::uint32_t hash) { return get_impl(name, hash); }
-    const V *get(std::string_view name, std::uint32_t hash) const { return get_impl(name, hash); }
+    V *get(std::string_view name, std::uint64_t hash) { return get_impl(name, narrow_hash(hash)); }
+    const V *get(std::string_view name, std::uint64_t hash) const { return get_impl(name, narrow_hash(hash)); }
 
     size_t size() const noexcept { return nodes_.size(); }
 
@@ -47,35 +49,12 @@ private:
     static constexpr std::uint32_t kInvalidIndex = 0xFFFFFFFFu;
     static constexpr size_t kDefaultBuckets = 32;
 
-    static unsigned char ascii_lower(unsigned char ch) {
-        if (ch >= 'A' && ch <= 'Z') {
-            return static_cast<unsigned char>(ch + ('a' - 'A'));
-        }
-        return ch;
+    static std::uint32_t narrow_hash(std::uint64_t hash) noexcept {
+        return static_cast<std::uint32_t>(hash);
     }
 
-    static bool equals_ascii_ci(std::string_view a, std::string_view b) {
-        if (a.size() != b.size()) {
-            return false;
-        }
-        for (size_t i = 0; i < a.size(); ++i) {
-            if (ascii_lower(static_cast<unsigned char>(a[i])) != ascii_lower(static_cast<unsigned char>(b[i]))) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    static std::uint32_t hash_name(std::string_view name) {
-        std::uint32_t hash = 0;
-        for (char ch : name) {
-            unsigned char lower = static_cast<unsigned char>(ch);
-            if (lower >= 'A' && lower <= 'Z') {
-                lower = static_cast<unsigned char>(lower - 'A' + 'a');
-            }
-            hash = hash * 31 + lower;
-        }
-        return hash;
+    static std::uint32_t hash_name(std::string_view name) noexcept {
+        return narrow_hash(http_header_name_hash(name));
     }
 
     static size_t next_pow2(size_t value) {
@@ -114,7 +93,7 @@ private:
         std::uint32_t index = bucket_head_[bucket];
         while (index != kInvalidIndex) {
             const auto &node = nodes_[index];
-            if (node.hash == hash && equals_ascii_ci(node.key, key)) {
+            if (node.hash == hash && http_header_name_equals_ci(node.key, key)) {
                 return false;
             }
             index = node.next;
@@ -138,7 +117,7 @@ private:
         std::uint32_t index = bucket_head_[bucket];
         while (index != kInvalidIndex) {
             const auto &node = nodes_[index];
-            if (node.hash == hash && equals_ascii_ci(node.key, key)) {
+            if (node.hash == hash && http_header_name_equals_ci(node.key, key)) {
                 return &node.value;
             }
             index = node.next;
