@@ -493,6 +493,77 @@ http {
     EXPECT_EQ(proxied_request.find("Connection: close\r\n"), std::string::npos);
 }
 
+TEST(LiteNginxRuntimeTest, SuppressesOverriddenAndConnectionDeclaredRequestHeaders) {
+    std::promise<std::string> upstream_request;
+    auto upstream_future = upstream_request.get_future();
+    SingleRequestUpstream upstream(
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\n\r\nok",
+        &upstream_request);
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+
+    server {
+        server_name localhost;
+        location / {
+            proxy_pass http://127.0.0.1:UPSTREAM_PORT;
+            proxy_set_header Host backend.internal;
+            proxy_set_header X-Test replaced;
+        }
+    }
+}
+)";
+    std::size_t marker = config_text.find("LISTEN_PORT");
+    ASSERT_NE(marker, std::string::npos);
+    config_text.replace(marker, sizeof("LISTEN_PORT") - 1, std::to_string(port));
+
+    marker = config_text.find("UPSTREAM_PORT");
+    ASSERT_NE(marker, std::string::npos);
+    config_text.replace(marker, sizeof("UPSTREAM_PORT") - 1, std::to_string(upstream.port()));
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "runtime_skip_headers.conf");
+    ASSERT_TRUE(config.has_value());
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+
+    const char request[] =
+        "GET / HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Connection: close, x-hop\r\n"
+        "X-Hop: drop-me\r\n"
+        "X-Test: original\r\n"
+        "X-Preserve: keep-me\r\n"
+        "\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+
+    std::string response = recv_http_response(client);
+    ::close(client);
+
+    ASSERT_EQ(upstream_future.wait_for(3s), std::future_status::ready);
+    std::string proxied_request = upstream_future.get();
+
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
+    EXPECT_NE(proxied_request.find("Host: backend.internal\r\n"), std::string::npos);
+    EXPECT_NE(proxied_request.find("X-Test: replaced\r\n"), std::string::npos);
+    EXPECT_NE(proxied_request.find("X-Preserve: keep-me\r\n"), std::string::npos);
+    EXPECT_EQ(proxied_request.find("Host: localhost\r\n"), std::string::npos);
+    EXPECT_EQ(proxied_request.find("Connection: close"), std::string::npos);
+    EXPECT_EQ(proxied_request.find("X-Hop: drop-me\r\n"), std::string::npos);
+    EXPECT_EQ(proxied_request.find("X-Test: original\r\n"), std::string::npos);
+}
+
 TEST(LiteNginxRuntimeTest, RoutesNamedUpstreamAndSelectsServerByHost) {
     std::promise<std::string> api_request;
     auto api_future = api_request.get_future();
