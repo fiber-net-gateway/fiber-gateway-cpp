@@ -22,6 +22,15 @@ constexpr std::size_t kInlineFirstWriteBodyLimit = 128;
 constexpr std::size_t kHttpStatusDigits = 3;
 constexpr std::size_t kMaxContentLengthDigits = 20;
 constexpr std::size_t kMaxChunkSizeHexDigits = sizeof(std::size_t) * 2;
+constexpr std::string_view kHttp10Prefix = "HTTP/1.0 ";
+constexpr std::string_view kHttp11Prefix = "HTTP/1.1 ";
+constexpr std::string_view kHeaderNameValueSep = ": ";
+constexpr std::string_view kLineTerminator = "\r\n";
+constexpr std::string_view kContentLengthHeader = "Content-Length: ";
+constexpr std::string_view kChunkedHeader = "Transfer-Encoding: chunked\r\n";
+constexpr std::string_view kConnectionCloseHeader = "Connection: close\r\n";
+constexpr std::string_view kChunkedFinalPrefix = "0\r\n";
+constexpr std::string_view kChunkedFinal = "0\r\n\r\n";
 
 std::string_view default_reason_phrase(int status) noexcept {
     switch (status) {
@@ -96,6 +105,56 @@ std::size_t append_hex(char *dst, std::size_t value) noexcept {
     std::size_t len = static_cast<std::size_t>(ptr - buffer.data());
     std::memcpy(dst, buffer.data(), len);
     return len;
+}
+
+void append_bytes(char *&dst, std::string_view value) noexcept {
+    std::memcpy(dst, value.data(), value.size());
+    dst += value.size();
+}
+
+bool checked_add(std::size_t &total, std::size_t amount) noexcept {
+    if (amount > std::numeric_limits<std::size_t>::max() - total) {
+        return false;
+    }
+    total += amount;
+    return true;
+}
+
+common::IoResult<void> append_encoded_header_fields_size(const HttpHeaders *headers, std::size_t &total) noexcept {
+    if (headers == nullptr) {
+        return common::IoResult<void>{};
+    }
+
+    for (auto it = headers->begin(); it != headers->end(); ++it) {
+        const auto &field = *it;
+        if (field.name_len == 0) {
+            continue;
+        }
+        if (!checked_add(total, static_cast<std::size_t>(field.name_len)) ||
+            !checked_add(total, kHeaderNameValueSep.size()) ||
+            !checked_add(total, static_cast<std::size_t>(field.value_len)) ||
+            !checked_add(total, kLineTerminator.size())) {
+            return std::unexpected(common::IoErr::NoMem);
+        }
+    }
+    return common::IoResult<void>{};
+}
+
+void encode_header_fields(char *&dst, const HttpHeaders *headers) noexcept {
+    if (headers == nullptr) {
+        return;
+    }
+
+    for (auto it = headers->begin(); it != headers->end(); ++it) {
+        const auto &field = *it;
+        if (field.name_len == 0) {
+            continue;
+        }
+        append_bytes(dst, field.name_view());
+        append_bytes(dst, kHeaderNameValueSep);
+        append_bytes(dst, field.value_view());
+        append_bytes(dst, kLineTerminator);
+    }
 }
 
 fiber::async::Task<common::IoResult<void>> write_all(HttpTransport *transport, const void *buf, size_t len,
@@ -554,32 +613,36 @@ common::IoErr Http1ExchangeIo::prepare_final_header(const HttpExchange &exchange
     return common::IoErr::None;
 }
 
-common::IoErr Http1ExchangeIo::normalize_response_plan(bool body_end, std::size_t first_body_len,
-                                                       bool infer_body_mode) noexcept {
-    if (infer_body_mode && response_body_mode_ == ResponseBodyMode::Auto) {
+common::IoResult<void> Http1ExchangeIo::normalize_response_plan(bool body_end, std::size_t first_body_len,
+                                                                bool infer_body_mode, ResponseBodyMode &body_mode,
+                                                                std::size_t &content_length) const noexcept {
+    body_mode = response_body_mode_;
+    content_length = response_content_length_;
+
+    if (infer_body_mode && body_mode == ResponseBodyMode::Auto) {
         if (body_end) {
-            response_body_mode_ = ResponseBodyMode::ContentLength;
-            response_content_length_ = first_body_len;
+            body_mode = ResponseBodyMode::ContentLength;
+            content_length = first_body_len;
         } else {
-            response_body_mode_ = ResponseBodyMode::Chunked;
+            body_mode = ResponseBodyMode::Chunked;
         }
     }
 
-    if (response_body_mode_ == ResponseBodyMode::Auto) {
-        response_body_mode_ = body_end ? ResponseBodyMode::ContentLength : ResponseBodyMode::Chunked;
-        response_content_length_ = body_end ? first_body_len : 0;
+    if (body_mode == ResponseBodyMode::Auto) {
+        body_mode = body_end ? ResponseBodyMode::ContentLength : ResponseBodyMode::Chunked;
+        content_length = body_end ? first_body_len : 0;
     }
 
     if (body_end) {
-        if (response_body_mode_ == ResponseBodyMode::Chunked) {
-            return common::IoErr::Invalid;
+        if (body_mode == ResponseBodyMode::Chunked) {
+            return std::unexpected(common::IoErr::Invalid);
         }
-        if (response_body_mode_ == ResponseBodyMode::ContentLength && first_body_len != response_content_length_) {
-            return common::IoErr::Invalid;
+        if (body_mode == ResponseBodyMode::ContentLength && first_body_len != content_length) {
+            return std::unexpected(common::IoErr::Invalid);
         }
     }
 
-    return common::IoErr::None;
+    return common::IoResult<void>{};
 }
 
 bool Http1ExchangeIo::compute_close_conn(const HttpExchange &exchange) const noexcept {
@@ -598,56 +661,57 @@ bool Http1ExchangeIo::compute_close_conn(const HttpExchange &exchange) const noe
 
 common::IoResult<mem::IoBuf> Http1ExchangeIo::build_response_header(HttpExchange &exchange, bool body_end,
                                                                     std::size_t first_body_len, bool infer_body_mode,
+                                                                    ResponseBodyMode &body_mode,
+                                                                    std::size_t &content_length,
                                                                     bool &close_conn) noexcept {
-    common::IoErr err = normalize_response_plan(body_end, first_body_len, infer_body_mode);
-    if (err != common::IoErr::None) {
-        return std::unexpected(err);
+    auto normalize_result =
+            normalize_response_plan(body_end, first_body_len, infer_body_mode, body_mode, content_length);
+    if (!normalize_result) {
+        return std::unexpected(normalize_result.error());
     }
 
     close_conn = compute_close_conn(exchange);
 
     std::string_view reason = response_reason_.empty() ? default_reason_phrase(response_status_code_)
                                                        : std::string_view(response_reason_);
-    constexpr std::string_view kHttp10 = "HTTP/1.0 ";
-    constexpr std::string_view kHttp11 = "HTTP/1.1 ";
-    constexpr std::string_view kCrLf = "\r\n";
-    constexpr std::string_view kContentLength = "Content-Length: ";
-    constexpr std::string_view kTransferEncoding = "Transfer-Encoding: chunked\r\n";
-    constexpr std::string_view kConnectionClose = "Connection: close\r\n";
-    std::string_view version = exchange.version_ == HttpVersion::HTTP_1_0 ? kHttp10 : kHttp11;
+    std::string_view version = exchange.version_ == HttpVersion::HTTP_1_0 ? kHttp10Prefix : kHttp11Prefix;
 
-    bool write_content_length = response_body_mode_ == ResponseBodyMode::ContentLength &&
+    bool write_content_length = body_mode == ResponseBodyMode::ContentLength &&
                                 (response_headers_ == nullptr || !response_headers_->contains("Content-Length"));
-    bool write_transfer_encoding = response_body_mode_ == ResponseBodyMode::Chunked &&
+    bool write_transfer_encoding = body_mode == ResponseBodyMode::Chunked &&
                                    (response_headers_ == nullptr || !response_headers_->contains("Transfer-Encoding"));
     bool write_connection_close =
             close_conn && (response_headers_ == nullptr || !response_headers_->contains("Connection"));
 
-    std::size_t header_len = version.size();
-    header_len += kHttpStatusDigits;
-    header_len += 1 + reason.size() + kCrLf.size();
+    std::size_t header_len = 0;
+    if (!checked_add(header_len, version.size()) || !checked_add(header_len, kHttpStatusDigits) ||
+        !checked_add(header_len, 1) || !checked_add(header_len, reason.size()) ||
+        !checked_add(header_len, kLineTerminator.size())) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
     if (write_content_length) {
-        header_len += kContentLength.size();
-        header_len += kMaxContentLengthDigits;
-        header_len += kCrLf.size();
-    }
-    if (write_transfer_encoding) {
-        header_len += kTransferEncoding.size();
-    }
-    if (write_connection_close) {
-        header_len += kConnectionClose.size();
-    }
-    if (response_headers_ != nullptr) {
-        for (auto it = response_headers_->begin(); it != response_headers_->end(); ++it) {
-            const auto &field = *it;
-            if (field.name_len == 0) {
-                continue;
-            }
-            header_len += static_cast<std::size_t>(field.name_len) + 2 + static_cast<std::size_t>(field.value_len) +
-                          kCrLf.size();
+        if (!checked_add(header_len, kContentLengthHeader.size()) || !checked_add(header_len, kMaxContentLengthDigits) ||
+            !checked_add(header_len, kLineTerminator.size())) {
+            return std::unexpected(common::IoErr::NoMem);
         }
     }
-    header_len += kCrLf.size();
+    if (write_transfer_encoding) {
+        if (!checked_add(header_len, kChunkedHeader.size())) {
+            return std::unexpected(common::IoErr::NoMem);
+        }
+    }
+    if (write_connection_close) {
+        if (!checked_add(header_len, kConnectionCloseHeader.size())) {
+            return std::unexpected(common::IoErr::NoMem);
+        }
+    }
+    auto fields_size_result = append_encoded_header_fields_size(response_headers_, header_len);
+    if (!fields_size_result) {
+        return std::unexpected(fields_size_result.error());
+    }
+    if (!checked_add(header_len, kLineTerminator.size())) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
 
     mem::IoBuf header = mem::IoBuf::allocate(header_len);
     if (!header) {
@@ -655,52 +719,109 @@ common::IoResult<mem::IoBuf> Http1ExchangeIo::build_response_header(HttpExchange
     }
 
     char *out = reinterpret_cast<char *>(header.writable_data());
-    std::memcpy(out, version.data(), version.size());
-    out += version.size();
-    out += append_decimal(out, static_cast<std::uint64_t>(response_status_code_));
+    char *begin = out;
+    append_bytes(out, version);
+    std::size_t status_len = append_decimal(out, static_cast<std::uint64_t>(response_status_code_));
+    if (status_len == 0) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    out += status_len;
     *out++ = ' ';
-    std::memcpy(out, reason.data(), reason.size());
-    out += reason.size();
-    std::memcpy(out, kCrLf.data(), kCrLf.size());
-    out += kCrLf.size();
+    append_bytes(out, reason);
+    append_bytes(out, kLineTerminator);
 
     if (write_content_length) {
-        std::memcpy(out, kContentLength.data(), kContentLength.size());
-        out += kContentLength.size();
-        out += append_decimal(out, response_content_length_);
-        std::memcpy(out, kCrLf.data(), kCrLf.size());
-        out += kCrLf.size();
+        append_bytes(out, kContentLengthHeader);
+        std::size_t value_len = append_decimal(out, content_length);
+        if (value_len == 0) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        out += value_len;
+        append_bytes(out, kLineTerminator);
     }
     if (write_transfer_encoding) {
-        std::memcpy(out, kTransferEncoding.data(), kTransferEncoding.size());
-        out += kTransferEncoding.size();
+        append_bytes(out, kChunkedHeader);
     }
     if (write_connection_close) {
-        std::memcpy(out, kConnectionClose.data(), kConnectionClose.size());
-        out += kConnectionClose.size();
+        append_bytes(out, kConnectionCloseHeader);
     }
 
-    if (response_headers_ != nullptr) {
-        for (auto it = response_headers_->begin(); it != response_headers_->end(); ++it) {
-            const auto &field = *it;
-            if (field.name_len == 0) {
-                continue;
-            }
-            std::memcpy(out, field.name, field.name_len);
-            out += field.name_len;
-            *out++ = ':';
-            *out++ = ' ';
-            std::memcpy(out, field.value, field.value_len);
-            out += field.value_len;
-            std::memcpy(out, kCrLf.data(), kCrLf.size());
-            out += kCrLf.size();
-        }
-    }
-    std::memcpy(out, kCrLf.data(), kCrLf.size());
-    out += kCrLf.size();
-    header.commit(static_cast<std::size_t>(out - reinterpret_cast<char *>(header.writable_data())));
+    encode_header_fields(out, response_headers_);
+    append_bytes(out, kLineTerminator);
+    header.commit(static_cast<std::size_t>(out - begin));
 
     return header;
+}
+
+common::IoResult<mem::IoBuf> Http1ExchangeIo::build_informational_header(const HttpExchange &exchange, int status_code,
+                                                                         const HttpHeaders *headers) const noexcept {
+    std::string_view reason = default_reason_phrase(status_code);
+    std::string_view version = exchange.version_ == HttpVersion::HTTP_1_0 ? kHttp10Prefix : kHttp11Prefix;
+
+    std::size_t header_len = 0;
+    if (!checked_add(header_len, version.size()) || !checked_add(header_len, kHttpStatusDigits) ||
+        !checked_add(header_len, 1) || !checked_add(header_len, reason.size()) ||
+        !checked_add(header_len, kLineTerminator.size())) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    auto fields_size_result = append_encoded_header_fields_size(headers, header_len);
+    if (!fields_size_result) {
+        return std::unexpected(fields_size_result.error());
+    }
+    if (!checked_add(header_len, kLineTerminator.size())) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
+    mem::IoBuf header = mem::IoBuf::allocate(header_len);
+    if (!header) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
+    char *out = reinterpret_cast<char *>(header.writable_data());
+    char *begin = out;
+    append_bytes(out, version);
+    std::size_t status_len = append_decimal(out, static_cast<std::uint64_t>(status_code));
+    if (status_len == 0) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    out += status_len;
+    *out++ = ' ';
+    append_bytes(out, reason);
+    append_bytes(out, kLineTerminator);
+    encode_header_fields(out, headers);
+    append_bytes(out, kLineTerminator);
+    header.commit(static_cast<std::size_t>(out - begin));
+    return header;
+}
+
+common::IoResult<mem::IoBuf> Http1ExchangeIo::build_chunked_trailer_block(const HttpHeaders *headers,
+                                                                          bool include_final_chunk) const noexcept {
+    std::size_t total = 0;
+    if (include_final_chunk && !checked_add(total, kChunkedFinalPrefix.size())) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    auto fields_size_result = append_encoded_header_fields_size(headers, total);
+    if (!fields_size_result) {
+        return std::unexpected(fields_size_result.error());
+    }
+    if (!checked_add(total, kLineTerminator.size())) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
+    mem::IoBuf block = mem::IoBuf::allocate(total);
+    if (!block) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
+    char *out = reinterpret_cast<char *>(block.writable_data());
+    char *begin = out;
+    if (include_final_chunk) {
+        append_bytes(out, kChunkedFinalPrefix);
+    }
+    encode_header_fields(out, headers);
+    append_bytes(out, kLineTerminator);
+    block.commit(static_cast<std::size_t>(out - begin));
+    return block;
 }
 
 fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::write_response_header(HttpExchange &exchange, bool body_end,
@@ -713,60 +834,25 @@ fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::write_response_heade
         co_return std::unexpected(common::IoErr::Already);
     }
 
-    common::IoErr err = normalize_response_plan(body_end, first_body_len, infer_body_mode);
-    if (err != common::IoErr::None) {
-        co_return std::unexpected(err);
+    ResponseBodyMode body_mode = ResponseBodyMode::Auto;
+    std::size_t content_length = 0;
+    bool close_conn = false;
+    auto header_result =
+            build_response_header(exchange, body_end, first_body_len, infer_body_mode, body_mode, content_length,
+                                  close_conn);
+    if (!header_result) {
+        co_return std::unexpected(header_result.error());
     }
 
-    bool close_conn = compute_close_conn(exchange);
-
-    std::string_view reason = response_reason_.empty() ? default_reason_phrase(response_status_code_)
-                                                       : std::string_view(response_reason_);
-    std::string header;
-    header.reserve(128 + (response_headers_ ? response_headers_->size() * 32 : 0));
-    if (exchange.version_ == HttpVersion::HTTP_1_0) {
-        header.append("HTTP/1.0 ");
-    } else {
-        header.append("HTTP/1.1 ");
-    }
-    header.append(std::to_string(response_status_code_));
-    header.push_back(' ');
-    header.append(reason);
-    header.append("\r\n");
-
-    if (response_body_mode_ == ResponseBodyMode::ContentLength &&
-        (response_headers_ == nullptr || !response_headers_->contains("Content-Length"))) {
-        header.append("Content-Length: ");
-        header.append(std::to_string(response_content_length_));
-        header.append("\r\n");
-    }
-    if (response_body_mode_ == ResponseBodyMode::Chunked &&
-        (response_headers_ == nullptr || !response_headers_->contains("Transfer-Encoding"))) {
-        header.append("Transfer-Encoding: chunked\r\n");
-    }
-    if (close_conn && (response_headers_ == nullptr || !response_headers_->contains("Connection"))) {
-        header.append("Connection: close\r\n");
-    }
-
-    if (response_headers_ != nullptr) {
-        for (auto it = response_headers_->begin(); it != response_headers_->end(); ++it) {
-            const auto &field = *it;
-            if (field.name_len == 0) {
-                continue;
-            }
-            header.append(field.name_view());
-            header.append(": ");
-            header.append(field.value_view());
-            header.append("\r\n");
-        }
-    }
-    header.append("\r\n");
-
-    auto result = co_await write_all(&connection_->transport(), header.data(), header.size(),
+    auto result = co_await write_all(&connection_->transport(),
+                                     header_result->readable_data(),
+                                     header_result->readable(),
                                      connection_->options().write_timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
+    response_body_mode_ = body_mode;
+    response_content_length_ = content_length;
     response_phase_ = ResponsePhase::HeaderSent;
     close_after_response_ = close_conn;
     if (body_end) {
@@ -788,34 +874,14 @@ Http1ExchangeIo::write_informational_header(HttpExchange &exchange, int status_c
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    std::string_view reason = default_reason_phrase(status_code);
-    std::string header;
-    header.reserve(64 + (headers ? headers->size() * 32 : 0));
-    if (exchange.version_ == HttpVersion::HTTP_1_0) {
-        header.append("HTTP/1.0 ");
-    } else {
-        header.append("HTTP/1.1 ");
+    auto header_result = build_informational_header(exchange, status_code, headers);
+    if (!header_result) {
+        co_return std::unexpected(header_result.error());
     }
-    header.append(std::to_string(status_code));
-    header.push_back(' ');
-    header.append(reason);
-    header.append("\r\n");
 
-    if (headers != nullptr) {
-        for (auto it = headers->begin(); it != headers->end(); ++it) {
-            const auto &field = *it;
-            if (field.name_len == 0) {
-                continue;
-            }
-            header.append(field.name_view());
-            header.append(": ");
-            header.append(field.value_view());
-            header.append("\r\n");
-        }
-    }
-    header.append("\r\n");
-
-    auto result = co_await write_all(&connection_->transport(), header.data(), header.size(),
+    auto result = co_await write_all(&connection_->transport(),
+                                     header_result->readable_data(),
+                                     header_result->readable(),
                                      connection_->options().write_timeout);
     if (!result) {
         co_return std::unexpected(result.error());
@@ -845,11 +911,6 @@ fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::send_header(HttpExch
             if (response_body_mode_ != ResponseBodyMode::Chunked || !header.end_stream) {
                 co_return std::unexpected(common::IoErr::Invalid);
             }
-            auto zero_result =
-                    co_await write_all(&connection_->transport(), "0\r\n", 3, connection_->options().write_timeout);
-            if (!zero_result) {
-                co_return std::unexpected(zero_result.error());
-            }
             auto trailer_result = co_await write_chunked_trailer_block(header.headers);
             if (!trailer_result) {
                 co_return std::unexpected(trailer_result.error());
@@ -863,23 +924,14 @@ fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::send_header(HttpExch
 
 fiber::async::Task<common::IoResult<void>>
 Http1ExchangeIo::write_chunked_trailer_block(const HttpHeaders *headers) noexcept {
-    std::string block;
-    block.reserve((headers ? headers->size() * 32 : 0) + 2);
-    if (headers != nullptr) {
-        for (auto it = headers->begin(); it != headers->end(); ++it) {
-            const auto &field = *it;
-            if (field.name_len == 0) {
-                continue;
-            }
-            block.append(field.name_view());
-            block.append(": ");
-            block.append(field.value_view());
-            block.append("\r\n");
-        }
+    auto block_result = build_chunked_trailer_block(headers, true);
+    if (!block_result) {
+        co_return std::unexpected(block_result.error());
     }
-    block.append("\r\n");
 
-    auto result = co_await write_all(&connection_->transport(), block.data(), block.size(),
+    auto result = co_await write_all(&connection_->transport(),
+                                     block_result->readable_data(),
+                                     block_result->readable(),
                                      connection_->options().write_timeout);
     if (!result) {
         co_return std::unexpected(result.error());
