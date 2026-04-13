@@ -10,6 +10,7 @@
 
 #include "../config/Ast.h"
 #include "common/route/RoutePathMatcher.h"
+#include "http/HeaderMap.h"
 #include "http/Http1ConnectionGroupKey.h"
 #include "net/IpAddress.h"
 #include "net/SocketAddress.h"
@@ -56,6 +57,7 @@ struct LocationRuntime {
     std::string pattern;
     std::string matcher_pattern;
     std::string default_host_header;
+    fiber::http::HeaderMap<std::uint8_t> skip_headers;
     std::vector<ProxyHeaderRuntime> set_headers;
     std::chrono::milliseconds connect_timeout{10000};
     std::chrono::milliseconds read_timeout{30000};

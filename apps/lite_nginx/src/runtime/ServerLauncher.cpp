@@ -43,9 +43,8 @@ fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange
         .kind = fiber::http::OutgoingHeaderKind::Final,
         .status_code = status_code,
         .headers = &headers,
-        .body_mode = fiber::http::ResponseBodyMode::ContentLength,
+        .body = fiber::http::HttpBodySpec::ContentLength(body.size()),
         .connection_mode = fiber::http::ResponseConnectionMode::Auto,
-        .content_length = body.size(),
         .end_stream = body.empty(),
     });
     if (!header_result) {

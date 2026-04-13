@@ -1,6 +1,5 @@
 #include "ProxyHandler.h"
 
-#include <array>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -24,6 +23,7 @@ constexpr std::string_view kNotFoundBody = "404 Not Found\n";
 constexpr std::string_view kBadGatewayBody = "502 Bad Gateway\n";
 constexpr std::string_view kGatewayTimeoutBody = "504 Gateway Timeout\n";
 constexpr std::size_t kBodyChunkSize = 64 * 1024;
+constexpr std::uint8_t kSkipHeaderValue = 1;
 
 bool parse_decimal(std::string_view text, std::size_t &value) {
     if (text.empty()) {
@@ -40,14 +40,90 @@ bool parse_decimal(std::string_view text, std::size_t &value) {
     return true;
 }
 
-bool is_hop_by_hop(std::string_view lowcase_name, std::uint64_t hash) {
-    return (hash == fiber::http::http_header_name_hash("connection") && lowcase_name == "connection") ||
-           (hash == fiber::http::http_header_name_hash("keep-alive") && lowcase_name == "keep-alive") ||
-           (hash == fiber::http::http_header_name_hash("proxy-connection") && lowcase_name == "proxy-connection") ||
-           (hash == fiber::http::http_header_name_hash("transfer-encoding") && lowcase_name == "transfer-encoding") ||
-           (hash == fiber::http::http_header_name_hash("upgrade") && lowcase_name == "upgrade") ||
-           (hash == fiber::http::http_header_name_hash("te") && lowcase_name == "te") ||
-           (hash == fiber::http::http_header_name_hash("trailer") && lowcase_name == "trailer");
+std::string_view trim_lws(std::string_view value) noexcept {
+    while (!value.empty()) {
+        const char ch = value.front();
+        if (ch != ' ' && ch != '\t') {
+            break;
+        }
+        value.remove_prefix(1);
+    }
+    while (!value.empty()) {
+        const char ch = value.back();
+        if (ch != ' ' && ch != '\t') {
+            break;
+        }
+        value.remove_suffix(1);
+    }
+    return value;
+}
+
+template <typename F>
+void for_each_token(std::string_view value, F &&fn) {
+    std::size_t start = 0;
+    while (start < value.size()) {
+        const std::size_t comma = value.find(',', start);
+        const std::size_t end = comma == std::string_view::npos ? value.size() : comma;
+        const std::string_view token = trim_lws(value.substr(start, end - start));
+        if (!token.empty()) {
+            fn(token);
+        }
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+}
+
+const fiber::http::HeaderMap<std::uint8_t> &hop_by_hop_header_map() {
+    static const fiber::http::HeaderMap<std::uint8_t> map = []() {
+        fiber::http::HeaderMap<std::uint8_t> headers;
+        headers.insert("connection", fiber::http::http_header_name_hash("connection"), kSkipHeaderValue);
+        headers.insert("keep-alive", fiber::http::http_header_name_hash("keep-alive"), kSkipHeaderValue);
+        headers.insert("proxy-connection", fiber::http::http_header_name_hash("proxy-connection"), kSkipHeaderValue);
+        headers.insert("transfer-encoding", fiber::http::http_header_name_hash("transfer-encoding"), kSkipHeaderValue);
+        headers.insert("upgrade", fiber::http::http_header_name_hash("upgrade"), kSkipHeaderValue);
+        headers.insert("te", fiber::http::http_header_name_hash("te"), kSkipHeaderValue);
+        headers.insert("trailer", fiber::http::http_header_name_hash("trailer"), kSkipHeaderValue);
+        headers.insert("proxy-authenticate", fiber::http::http_header_name_hash("proxy-authenticate"), kSkipHeaderValue);
+        headers.insert("proxy-authorization", fiber::http::http_header_name_hash("proxy-authorization"),
+                       kSkipHeaderValue);
+        return headers;
+    }();
+    return map;
+}
+
+bool connection_declares_hop_by_hop(const fiber::http::HttpHeaders &headers, std::string_view lowcase_name) noexcept {
+    static constexpr std::uint64_t kConnectionHash = fiber::http::http_header_name_hash("connection");
+    for (const auto &field : headers.get_all("connection", kConnectionHash)) {
+        bool matched = false;
+        for_each_token(field.value_view(), [&](std::string_view token) {
+            if (!matched && fiber::http::http_header_name_equals_ci(token, lowcase_name)) {
+                matched = true;
+            }
+        });
+        if (matched) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool should_skip_request_header(const runtime::LocationRuntime &location,
+                                const fiber::http::HttpHeaders &request_headers,
+                                const fiber::http::HttpHeaders::HeaderField &field) noexcept {
+    if (location.skip_headers.get(field.lowcase_view(), field.name_hash)) {
+        return true;
+    }
+    return connection_declares_hop_by_hop(request_headers, field.lowcase_view());
+}
+
+bool should_skip_response_header(const fiber::http::HttpHeaders &response_headers,
+                                 const fiber::http::HttpHeaders::HeaderField &field) noexcept {
+    if (hop_by_hop_header_map().get(field.lowcase_view(), field.name_hash)) {
+        return true;
+    }
+    return connection_declares_hop_by_hop(response_headers, field.lowcase_view());
 }
 
 fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange,
@@ -60,9 +136,8 @@ fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange
         .kind = fiber::http::OutgoingHeaderKind::Final,
         .status_code = status_code,
         .headers = &headers,
-        .body_mode = fiber::http::ResponseBodyMode::ContentLength,
+        .body = fiber::http::HttpBodySpec::ContentLength(body.size()),
         .connection_mode = fiber::http::ResponseConnectionMode::Auto,
-        .content_length = body.size(),
         .end_stream = body.empty(),
     });
     if (!header_result) {
@@ -103,27 +178,23 @@ std::string_view request_target_view(const fiber::http::HttpUri &uri, std::strin
     return scratch;
 }
 
-fiber::http::Http1RequestBodyMode detect_request_body_mode(const fiber::http::HttpExchange &exchange,
-                                                           std::size_t &content_length,
-                                                           bool &end_stream) {
-    content_length = 0;
+fiber::http::HttpBodySpec detect_request_body(const fiber::http::HttpExchange &exchange, bool &end_stream) {
+    std::size_t content_length = 0;
     end_stream = true;
 
-    const auto *content_length_header = exchange.request_header_refs().content_type;
-    (void)content_length_header;
-    std::string_view content_length_value = exchange.request_headers().get("content-length");
+    const std::string_view content_length_value = exchange.request_headers().get("content-length");
     if (!content_length_value.empty()) {
         if (!parse_decimal(content_length_value, content_length)) {
             content_length = 0;
         }
         end_stream = content_length == 0;
-        return fiber::http::Http1RequestBodyMode::ContentLength;
+        return fiber::http::HttpBodySpec::ContentLength(content_length);
     }
     if (exchange.request_headers().contains("transfer-encoding")) {
         end_stream = false;
-        return fiber::http::Http1RequestBodyMode::Chunked;
+        return fiber::http::HttpBodySpec::Chunked();
     }
-    return fiber::http::Http1RequestBodyMode::None;
+    return fiber::http::HttpBodySpec::None();
 }
 
 void build_upstream_request_headers(const runtime::LocationRuntime &location,
@@ -131,7 +202,7 @@ void build_upstream_request_headers(const runtime::LocationRuntime &location,
                                     fiber::http::HttpHeaders &headers) {
     for (auto it = exchange.request_headers().begin(); it != exchange.request_headers().end(); ++it) {
         const auto &field = *it;
-        if (field.name_len == 0 || is_hop_by_hop(field.lowcase_view(), field.name_hash)) {
+        if (field.name_len == 0 || should_skip_request_header(location, exchange.request_headers(), field)) {
             continue;
         }
         headers.add_view(field.name_view(), field.value_view(), const_cast<char *>(field.lowcase_name), field.name_hash);
@@ -157,7 +228,7 @@ void build_downstream_response_headers(const fiber::http::Http1ResponseHead &ups
                                        fiber::http::HttpHeaders &headers) {
     for (auto it = upstream_head.headers.begin(); it != upstream_head.headers.end(); ++it) {
         const auto &field = *it;
-        if (field.name_len == 0 || is_hop_by_hop(field.lowcase_view(), field.name_hash)) {
+        if (field.name_len == 0 || should_skip_response_header(upstream_head.headers, field)) {
             continue;
         }
         headers.add_view(field.name_view(), field.value_view(), const_cast<char *>(field.lowcase_name), field.name_hash);
@@ -176,18 +247,15 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
     fiber::http::HttpHeaders request_headers(exchange.pool());
     build_upstream_request_headers(location, exchange, request_headers);
 
-    std::size_t request_content_length = 0;
     bool request_end_stream = true;
-    const fiber::http::Http1RequestBodyMode request_body_mode =
-        detect_request_body_mode(exchange, request_content_length, request_end_stream);
+    const fiber::http::HttpBodySpec request_body = detect_request_body(exchange, request_end_stream);
 
     std::string target_scratch;
     fiber::http::Http1RequestHead request_head;
     request_head.method = exchange.method();
     request_head.target = request_target_view(exchange.uri(), target_scratch);
     request_head.headers = &request_headers;
-    request_head.body_mode = request_body_mode;
-    request_head.content_length = request_content_length;
+    request_head.body = request_body;
 
     auto send_header_result = co_await upstream_exchange.send_header(request_head, request_end_stream);
     if (!send_header_result) {
@@ -235,15 +303,19 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
     std::size_t response_content_length = 0;
     const bool has_content_length =
         !no_response_body && parse_decimal(upstream_head->headers.get("content-length"), response_content_length);
+    const fiber::http::HttpBodySpec response_body = no_response_body
+                                                        ? fiber::http::HttpBodySpec::None()
+                                                        : (has_content_length
+                                                               ? fiber::http::HttpBodySpec::ContentLength(
+                                                                     response_content_length)
+                                                               : fiber::http::HttpBodySpec::Chunked());
     auto response_header_result = co_await exchange.send_header({
         .kind = fiber::http::OutgoingHeaderKind::Final,
         .status_code = upstream_head->status_code,
         .reason = upstream_head->reason,
         .headers = &response_headers,
-        .body_mode = has_content_length ? fiber::http::ResponseBodyMode::ContentLength
-                                        : fiber::http::ResponseBodyMode::Chunked,
+        .body = response_body,
         .connection_mode = fiber::http::ResponseConnectionMode::Auto,
-        .content_length = has_content_length ? response_content_length : 0,
         .end_stream = no_response_body || (has_content_length && response_content_length == 0),
     });
     if (!response_header_result) {

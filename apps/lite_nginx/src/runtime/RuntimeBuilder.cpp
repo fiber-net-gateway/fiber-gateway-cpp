@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
 
 #include "common/route/RoutePathMatcher.h"
+#include "http/HeaderMap.h"
 #include "http/HttpHeaderHash.h"
 #include "net/IpAddress.h"
 
@@ -16,6 +18,7 @@ namespace {
 constexpr std::chrono::milliseconds kDefaultConnectTimeout{10000};
 constexpr std::chrono::milliseconds kDefaultReadTimeout{30000};
 constexpr std::chrono::milliseconds kDefaultSendTimeout{30000};
+constexpr std::uint8_t kSkipHeaderValue = 1;
 
 using fiber::common::route::RoutePatternError;
 
@@ -74,6 +77,21 @@ std::chrono::milliseconds resolve_timeout(const std::optional<std::chrono::milli
         return inherited;
     }
     return fallback;
+}
+
+fiber::http::HeaderMap<std::uint8_t> make_default_skip_headers() {
+    fiber::http::HeaderMap<std::uint8_t> headers;
+    headers.insert("connection", fiber::http::http_header_name_hash("connection"), kSkipHeaderValue);
+    headers.insert("keep-alive", fiber::http::http_header_name_hash("keep-alive"), kSkipHeaderValue);
+    headers.insert("proxy-connection", fiber::http::http_header_name_hash("proxy-connection"), kSkipHeaderValue);
+    headers.insert("transfer-encoding", fiber::http::http_header_name_hash("transfer-encoding"), kSkipHeaderValue);
+    headers.insert("upgrade", fiber::http::http_header_name_hash("upgrade"), kSkipHeaderValue);
+    headers.insert("te", fiber::http::http_header_name_hash("te"), kSkipHeaderValue);
+    headers.insert("trailer", fiber::http::http_header_name_hash("trailer"), kSkipHeaderValue);
+    headers.insert("proxy-authenticate", fiber::http::http_header_name_hash("proxy-authenticate"), kSkipHeaderValue);
+    headers.insert("proxy-authorization", fiber::http::http_header_name_hash("proxy-authorization"), kSkipHeaderValue);
+    headers.insert("host", fiber::http::http_header_name_hash("host"), kSkipHeaderValue);
+    return headers;
 }
 
 std::expected<UpstreamPeerRuntime, RuntimeError> make_peer_runtime(const config::SourceLocation &location,
@@ -231,6 +249,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 resolve_timeout(location.proxy.send_timeout, inherited_send, kDefaultSendTimeout);
             runtime_location.upstream_index = upstream_index;
             runtime_location.proxy_buffering = location.proxy.proxy_buffering;
+            runtime_location.skip_headers = make_default_skip_headers();
             runtime_location.set_headers.reserve(location.proxy.set_headers.size());
 
             for (const auto &header : location.proxy.set_headers) {
@@ -241,6 +260,8 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 runtime_header.name_hash = fiber::http::http_header_name_hash(runtime_header.lowercase_name);
                 runtime_location.host_header_overridden =
                     runtime_location.host_header_overridden || runtime_header.lowercase_name == "host";
+                runtime_location.skip_headers.insert(runtime_header.lowercase_name, runtime_header.name_hash,
+                                                     kSkipHeaderValue);
                 runtime_location.set_headers.push_back(std::move(runtime_header));
             }
 
