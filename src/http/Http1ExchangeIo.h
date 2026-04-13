@@ -44,11 +44,16 @@ private:
     fiber::async::Task<common::IoResult<void>> write_informational_header(HttpExchange &exchange, int status_code,
                                                                           const HttpHeaders *headers) noexcept;
     common::IoErr prepare_final_header(const HttpExchange &exchange, const OutgoingHeaderBlockView &header) noexcept;
-    common::IoErr normalize_response_plan(bool body_end, std::size_t first_body_len, bool infer_body_mode) noexcept;
+    common::IoResult<void> normalize_response_plan(bool body_end, std::size_t first_body_len, bool infer_body_mode,
+                                                   ResponseBodyMode &body_mode, std::size_t &content_length) const noexcept;
     [[nodiscard]] bool compute_close_conn(const HttpExchange &exchange) const noexcept;
-    common::IoResult<mem::IoBuf> build_response_header(HttpExchange &exchange, bool body_end,
-                                                       std::size_t first_body_len, bool infer_body_mode,
-                                                       bool &close_conn) noexcept;
+    common::IoResult<mem::IoBuf> build_response_header(HttpExchange &exchange, bool body_end, std::size_t first_body_len,
+                                                       bool infer_body_mode, ResponseBodyMode &body_mode,
+                                                       std::size_t &content_length, bool &close_conn) noexcept;
+    common::IoResult<mem::IoBuf> build_informational_header(const HttpExchange &exchange, int status_code,
+                                                            const HttpHeaders *headers) const noexcept;
+    common::IoResult<mem::IoBuf> build_chunked_trailer_block(const HttpHeaders *headers,
+                                                             bool include_final_chunk) const noexcept;
     fiber::async::Task<common::IoResult<void>> write_response_header(HttpExchange &exchange, bool body_end,
                                                                      std::size_t first_body_len,
                                                                      bool infer_body_mode) noexcept;
