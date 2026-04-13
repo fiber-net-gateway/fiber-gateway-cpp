@@ -28,41 +28,27 @@ public:
         return literal;
     }
 
-    Literal(std::int32_t start, std::int32_t end, bool value)
-        : Expression(start, end), kind_(Kind::Boolean), bool_value_(value) {
-    }
+    Literal(std::int32_t start, std::int32_t end, bool value) :
+        Expression(start, end), kind_(Kind::Boolean), bool_value_(value) {}
 
-    Literal(std::int32_t start, std::int32_t end, std::int64_t value)
-        : Expression(start, end), kind_(Kind::Integer), int_value_(value) {
-    }
+    Literal(std::int32_t start, std::int32_t end, std::int64_t value) :
+        Expression(start, end), kind_(Kind::Integer), int_value_(value) {}
 
-    Literal(std::int32_t start, std::int32_t end, double value)
-        : Expression(start, end), kind_(Kind::Float), float_value_(value) {
-    }
+    Literal(std::int32_t start, std::int32_t end, double value) :
+        Expression(start, end), kind_(Kind::Float), float_value_(value) {}
 
-    Literal(std::int32_t start, std::int32_t end, std::string value)
-        : Expression(start, end), kind_(Kind::String), string_value_(std::move(value)) {
-    }
+    Literal(std::int32_t start, std::int32_t end, std::string value) :
+        Expression(start, end), kind_(Kind::String), string_value_(std::move(value)) {}
 
-    Kind kind() const {
-        return kind_;
-    }
+    Kind kind() const { return kind_; }
 
-    bool bool_value() const {
-        return bool_value_;
-    }
+    bool bool_value() const { return bool_value_; }
 
-    std::int64_t int_value() const {
-        return int_value_;
-    }
+    std::int64_t int_value() const { return int_value_; }
 
-    double float_value() const {
-        return float_value_;
-    }
+    double float_value() const { return float_value_; }
 
-    const std::string &string_value() const {
-        return string_value_;
-    }
+    const std::string &string_value() const { return string_value_; }
 
 private:
     Kind kind_ = Kind::NullValue;

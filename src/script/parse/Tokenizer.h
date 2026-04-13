@@ -5,8 +5,8 @@
 #include <string>
 #include <vector>
 
-#include "Token.h"
 #include "ParseError.h"
+#include "Token.h"
 
 namespace fiber::script::parse {
 
@@ -16,9 +16,7 @@ public:
 
     std::expected<void, ParseError> process();
 
-    const std::vector<Token> &tokens() const {
-        return tokens_;
-    }
+    const std::vector<Token> &tokens() const { return tokens_; }
 
 private:
     std::string input_;

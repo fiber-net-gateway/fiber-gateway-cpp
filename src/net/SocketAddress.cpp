@@ -9,13 +9,9 @@ SocketAddress::SocketAddress() : ip_(IpAddress::any_v4()), port_(0) {}
 
 SocketAddress::SocketAddress(IpAddress ip, std::uint16_t port) : ip_(ip), port_(port) {}
 
-SocketAddress SocketAddress::any_v4(std::uint16_t port) {
-    return {IpAddress::any_v4(), port};
-}
+SocketAddress SocketAddress::any_v4(std::uint16_t port) { return {IpAddress::any_v4(), port}; }
 
-SocketAddress SocketAddress::any_v6(std::uint16_t port) {
-    return {IpAddress::any_v6(), port};
-}
+SocketAddress SocketAddress::any_v6(std::uint16_t port) { return {IpAddress::any_v6(), port}; }
 
 std::string SocketAddress::to_string() const {
     std::string ip_text = ip_.to_string();

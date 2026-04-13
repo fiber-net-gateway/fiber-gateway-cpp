@@ -714,8 +714,8 @@ common::IoResult<mem::IoBuf> Http1ExchangeIo::build_response_header(HttpExchange
         return std::unexpected(common::IoErr::NoMem);
     }
     if (write_content_length) {
-        if (!checked_add(header_len, kContentLengthHeader.size()) || !checked_add(header_len, kMaxContentLengthDigits) ||
-            !checked_add(header_len, kLineTerminator.size())) {
+        if (!checked_add(header_len, kContentLengthHeader.size()) ||
+            !checked_add(header_len, kMaxContentLengthDigits) || !checked_add(header_len, kLineTerminator.size())) {
             return std::unexpected(common::IoErr::NoMem);
         }
     }
@@ -860,16 +860,14 @@ fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::write_response_heade
 
     HttpBodySpec body_spec = HttpBodySpec::Auto();
     bool close_conn = false;
-    auto header_result = build_response_header(exchange, body_end, first_body_len, infer_body_mode, body_spec,
-                                               close_conn);
+    auto header_result =
+            build_response_header(exchange, body_end, first_body_len, infer_body_mode, body_spec, close_conn);
     if (!header_result) {
         co_return std::unexpected(header_result.error());
     }
 
-    auto result = co_await write_all(&connection_->transport(),
-                                     header_result->readable_data(),
-                                     header_result->readable(),
-                                     connection_->options().write_timeout);
+    auto result = co_await write_all(&connection_->transport(), header_result->readable_data(),
+                                     header_result->readable(), connection_->options().write_timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
@@ -901,10 +899,8 @@ Http1ExchangeIo::write_informational_header(HttpExchange &exchange, int status_c
         co_return std::unexpected(header_result.error());
     }
 
-    auto result = co_await write_all(&connection_->transport(),
-                                     header_result->readable_data(),
-                                     header_result->readable(),
-                                     connection_->options().write_timeout);
+    auto result = co_await write_all(&connection_->transport(), header_result->readable_data(),
+                                     header_result->readable(), connection_->options().write_timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
@@ -951,9 +947,7 @@ Http1ExchangeIo::write_chunked_trailer_block(const HttpHeaders *headers) noexcep
         co_return std::unexpected(block_result.error());
     }
 
-    auto result = co_await write_all(&connection_->transport(),
-                                     block_result->readable_data(),
-                                     block_result->readable(),
+    auto result = co_await write_all(&connection_->transport(), block_result->readable_data(), block_result->readable(),
                                      connection_->options().write_timeout);
     if (!result) {
         co_return std::unexpected(result.error());

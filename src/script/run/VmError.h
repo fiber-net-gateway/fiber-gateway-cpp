@@ -9,10 +9,7 @@
 
 namespace fiber::script::run {
 
-enum class VmErrorKind : std::uint8_t {
-    Normal,
-    Thrown
-};
+enum class VmErrorKind : std::uint8_t { Normal, Thrown };
 
 struct VmError {
     VmErrorKind kind = VmErrorKind::Normal;

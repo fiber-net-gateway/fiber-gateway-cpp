@@ -7,13 +7,12 @@
 namespace fiber::http {
 
 const Http2HpackEncoder::OutputOps Http2HpackEncoderIoBufWriter::kOutputOps{
-    &Http2HpackEncoderIoBufWriter::acquire_output,
-    &Http2HpackEncoderIoBufWriter::commit_output,
+        &Http2HpackEncoderIoBufWriter::acquire_output,
+        &Http2HpackEncoderIoBufWriter::commit_output,
 };
 
-Http2HpackEncoderIoBufWriter::Http2HpackEncoderIoBufWriter(Http2HpackEncoder &encoder, std::size_t chunk_size) noexcept :
-    encoder_(encoder),
-    chunk_size_(chunk_size) {
+Http2HpackEncoderIoBufWriter::Http2HpackEncoderIoBufWriter(Http2HpackEncoder &encoder, std::size_t chunk_size) noexcept
+    : encoder_(encoder), chunk_size_(chunk_size) {
     FIBER_ASSERT(chunk_size_ != 0);
 }
 
@@ -76,8 +75,8 @@ void Http2HpackEncoderIoBufWriter::abort() noexcept {
     begun_ = false;
 }
 
-common::IoErr Http2HpackEncoderIoBufWriter::acquire_output(void *ctx, std::size_t min_bytes,
-                                                           std::uint8_t *&dst, std::size_t &len) noexcept {
+common::IoErr Http2HpackEncoderIoBufWriter::acquire_output(void *ctx, std::size_t min_bytes, std::uint8_t *&dst,
+                                                           std::size_t &len) noexcept {
     auto *self = static_cast<Http2HpackEncoderIoBufWriter *>(ctx);
     FIBER_ASSERT(self != nullptr);
     if (self->tail_ != nullptr && self->tail_->writable() >= min_bytes) {

@@ -23,8 +23,8 @@ using namespace std::chrono_literals;
 using fiber::async::DetachedTask;
 using fiber::common::IoErr;
 using fiber::dns::AddressPolicy;
-using fiber::dns::AddressResolveResult;
 using fiber::dns::AddressResolver;
+using fiber::dns::AddressResolveResult;
 using fiber::dns::DnsClient;
 using fiber::dns::DnsResolver;
 using fiber::dns::DnsResolverLocal;
@@ -125,12 +125,9 @@ fiber::common::IoResult<std::uint16_t> parse_question_type(const std::uint8_t *p
     return read_be16(packet + offset);
 }
 
-std::vector<std::uint8_t> make_multi_address_response(std::uint16_t id,
-                                                      std::string_view qname,
-                                                      std::uint16_t qtype,
+std::vector<std::uint8_t> make_multi_address_response(std::uint16_t id, std::string_view qname, std::uint16_t qtype,
                                                       const std::uint8_t *const *rdata_records,
-                                                      const std::uint16_t *rdata_lengths,
-                                                      std::size_t record_count,
+                                                      const std::uint16_t *rdata_lengths, std::size_t record_count,
                                                       std::uint32_t ttl) {
     std::vector<std::uint8_t> packet;
     push_be16(packet, id);
@@ -156,12 +153,8 @@ std::vector<std::uint8_t> make_multi_address_response(std::uint16_t id,
     return packet;
 }
 
-std::vector<std::uint8_t> make_address_response(std::uint16_t id,
-                                                std::string_view qname,
-                                                std::uint16_t qtype,
-                                                const std::uint8_t *rdata,
-                                                std::uint16_t rdata_len,
-                                                std::uint32_t ttl) {
+std::vector<std::uint8_t> make_address_response(std::uint16_t id, std::string_view qname, std::uint16_t qtype,
+                                                const std::uint8_t *rdata, std::uint16_t rdata_len, std::uint32_t ttl) {
     return make_multi_address_response(id, qname, qtype, &rdata, &rdata_len, 1, ttl);
 }
 
@@ -181,14 +174,10 @@ std::vector<std::uint8_t> make_empty_response(std::uint16_t id, std::string_view
     return packet;
 }
 
-DetachedTask run_dual_stack_server(fiber::event::EventLoop *loop,
-                                   std::promise<std::uint16_t> *port_promise,
-                                   std::promise<ServerOutcome> *outcome_promise,
-                                   std::string qname,
-                                   std::array<std::uint8_t, 4> v4_addr,
-                                   std::array<std::uint8_t, 16> v6_addr,
-                                   bool return_aaaa_answer,
-                                   std::size_t expected_queries = 2) {
+DetachedTask run_dual_stack_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
+                                   std::promise<ServerOutcome> *outcome_promise, std::string qname,
+                                   std::array<std::uint8_t, 4> v4_addr, std::array<std::uint8_t, 16> v6_addr,
+                                   bool return_aaaa_answer, std::size_t expected_queries = 2) {
     ServerOutcome outcome;
     fiber::net::UdpSocket socket(*loop);
     auto bind_result = socket.bind(fiber::net::SocketAddress::any_v4(), {});
@@ -210,7 +199,7 @@ DetachedTask run_dual_stack_server(fiber::event::EventLoop *loop,
     std::array<std::uint8_t, 512> buf{};
     for (std::size_t i = 0; i < expected_queries; ++i) {
         auto recv_result =
-            co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
+                co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
         if (!recv_result) {
             outcome.err = recv_result.error();
             outcome_promise->set_value(std::move(outcome));
@@ -227,17 +216,17 @@ DetachedTask run_dual_stack_server(fiber::event::EventLoop *loop,
 
         std::vector<std::uint8_t> response;
         if (*type_result == static_cast<std::uint16_t>(RecordType::A)) {
-            response =
-                make_address_response(read_be16(buf.data()), qname, *type_result, v4_addr.data(), v4_addr.size(), 60);
+            response = make_address_response(read_be16(buf.data()), qname, *type_result, v4_addr.data(), v4_addr.size(),
+                                             60);
         } else if (*type_result == static_cast<std::uint16_t>(RecordType::AAAA) && return_aaaa_answer) {
-            response =
-                make_address_response(read_be16(buf.data()), qname, *type_result, v6_addr.data(), v6_addr.size(), 120);
+            response = make_address_response(read_be16(buf.data()), qname, *type_result, v6_addr.data(), v6_addr.size(),
+                                             120);
         } else {
             response = make_empty_response(read_be16(buf.data()), qname, *type_result);
         }
 
         auto send_result = co_await fiber::async::timeout_for(
-            [&]() { return socket.send_to(response.data(), response.size(), recv_result->peer); }, 2s);
+                [&]() { return socket.send_to(response.data(), response.size(), recv_result->peer); }, 2s);
         if (!send_result) {
             outcome.err = send_result.error();
             outcome_promise->set_value(std::move(outcome));
@@ -250,12 +239,8 @@ DetachedTask run_dual_stack_server(fiber::event::EventLoop *loop,
     outcome_promise->set_value(std::move(outcome));
 }
 
-DetachedTask run_policy_resolve(fiber::event::EventLoop *loop,
-                                fiber::dns::SharedDnsCache *cache,
-                                std::uint16_t port,
-                                AddressPolicy policy,
-                                std::string_view host,
-                                std::promise<AddressOutcome> *promise) {
+DetachedTask run_policy_resolve(fiber::event::EventLoop *loop, fiber::dns::SharedDnsCache *cache, std::uint16_t port,
+                                AddressPolicy policy, std::string_view host, std::promise<AddressOutcome> *promise) {
     AddressOutcome outcome;
     DnsResolverLocal local;
     DnsClient::Options client_options{};
@@ -298,10 +283,8 @@ DetachedTask run_policy_resolve(fiber::event::EventLoop *loop,
     promise->set_value(std::move(outcome));
 }
 
-DetachedTask run_dual_policy_resolve(fiber::event::EventLoop *loop,
-                                     fiber::dns::SharedDnsCache *cache,
-                                     std::uint16_t port,
-                                     std::string_view host,
+DetachedTask run_dual_policy_resolve(fiber::event::EventLoop *loop, fiber::dns::SharedDnsCache *cache,
+                                     std::uint16_t port, std::string_view host,
                                      std::promise<DualAddressOutcome> *promise) {
     DualAddressOutcome dual_outcome;
     DnsResolverLocal local;
@@ -360,8 +343,7 @@ DetachedTask run_dual_policy_resolve(fiber::event::EventLoop *loop,
     promise->set_value(std::move(dual_outcome));
 }
 
-DetachedTask run_literal_endpoint_resolve(fiber::event::EventLoop *loop,
-                                          fiber::dns::SharedDnsCache *cache,
+DetachedTask run_literal_endpoint_resolve(fiber::event::EventLoop *loop, fiber::dns::SharedDnsCache *cache,
                                           std::promise<EndpointOutcome> *promise) {
     EndpointOutcome outcome;
     DnsResolverLocal local;
@@ -414,10 +396,8 @@ DetachedTask run_literal_endpoint_resolve(fiber::event::EventLoop *loop,
     promise->set_value(std::move(outcome));
 }
 
-DetachedTask run_multi_v4_server(fiber::event::EventLoop *loop,
-                                 std::promise<std::uint16_t> *port_promise,
-                                 std::promise<ServerOutcome> *outcome_promise,
-                                 std::string qname,
+DetachedTask run_multi_v4_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
+                                 std::promise<ServerOutcome> *outcome_promise, std::string qname,
                                  std::vector<std::array<std::uint8_t, 4>> v4_addrs) {
     ServerOutcome outcome;
     fiber::net::UdpSocket socket(*loop);
@@ -439,7 +419,7 @@ DetachedTask run_multi_v4_server(fiber::event::EventLoop *loop,
 
     std::array<std::uint8_t, 512> buf{};
     auto recv_result =
-        co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
+            co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
     if (!recv_result) {
         outcome.err = recv_result.error();
         outcome_promise->set_value(std::move(outcome));
@@ -460,7 +440,7 @@ DetachedTask run_multi_v4_server(fiber::event::EventLoop *loop,
         std::vector<std::uint16_t> record_lengths;
         record_ptrs.reserve(v4_addrs.size());
         record_lengths.reserve(v4_addrs.size());
-        for (const auto &addr : v4_addrs) {
+        for (const auto &addr: v4_addrs) {
             record_ptrs.push_back(addr.data());
             record_lengths.push_back(static_cast<std::uint16_t>(addr.size()));
         }
@@ -471,7 +451,7 @@ DetachedTask run_multi_v4_server(fiber::event::EventLoop *loop,
     }
 
     auto send_result = co_await fiber::async::timeout_for(
-        [&]() { return socket.send_to(response.data(), response.size(), recv_result->peer); }, 2s);
+            [&]() { return socket.send_to(response.data(), response.size(), recv_result->peer); }, 2s);
     if (!send_result) {
         outcome.err = send_result.error();
         outcome_promise->set_value(std::move(outcome));
@@ -508,8 +488,9 @@ TEST(DnsResolverTest, ResolvesDualStackInPreferredOrder) {
 
     std::promise<DualAddressOutcome> promise;
     auto future = promise.get_future();
-    fiber::async::spawn(group.at(0),
-                        [&]() { return run_dual_policy_resolve(&group.at(0), &cache, port, "dual.example", &promise); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_dual_policy_resolve(&group.at(0), &cache, port, "dual.example", &promise);
+    });
 
     const DualAddressOutcome outcomes = future.get();
     const ServerOutcome server_outcome = server_future.get();

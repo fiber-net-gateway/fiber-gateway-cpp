@@ -6,9 +6,7 @@ namespace fiber::async {
 
 thread_local ThreadGroup::Thread *ThreadGroup::Thread::current_thread_ = nullptr;
 
-ThreadGroup::Thread::Thread(ThreadGroup *group, std::size_t index)
-    : group_(group),
-      index_(index) {}
+ThreadGroup::Thread::Thread(ThreadGroup *group, std::size_t index) : group_(group), index_(index) {}
 
 ThreadGroup::Thread &ThreadGroup::Thread::current() {
     FIBER_ASSERT(current_thread_ != nullptr);
@@ -24,9 +22,7 @@ void ThreadGroup::Thread::start(const RunFn &fn) {
     });
 }
 
-void ThreadGroup::Thread::request_stop() {
-    thread_.request_stop();
-}
+void ThreadGroup::Thread::request_stop() { thread_.request_stop(); }
 
 void ThreadGroup::Thread::join() {
     if (thread_.joinable()) {
@@ -51,19 +47,19 @@ void ThreadGroup::start(RunFn fn) {
     FIBER_ASSERT(fn);
     bool expected = false;
     FIBER_ASSERT_MSG(started_.compare_exchange_strong(expected, true), "ThreadGroup already started");
-    for (auto &thread : threads_) {
+    for (auto &thread: threads_) {
         thread->start(fn);
     }
 }
 
 void ThreadGroup::request_stop() {
-    for (auto &thread : threads_) {
+    for (auto &thread: threads_) {
         thread->request_stop();
     }
 }
 
 void ThreadGroup::join() {
-    for (auto &thread : threads_) {
+    for (auto &thread: threads_) {
         thread->join();
     }
 }

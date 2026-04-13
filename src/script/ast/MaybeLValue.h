@@ -9,13 +9,9 @@ class MaybeLValue : public Expression {
 public:
     using Expression::Expression;
 
-    bool is_lvalue() const {
-        return lvalue_;
-    }
+    bool is_lvalue() const { return lvalue_; }
 
-    void mark_lvalue() {
-        lvalue_ = true;
-    }
+    void mark_lvalue() { lvalue_ = true; }
 
 private:
     bool lvalue_ = false;

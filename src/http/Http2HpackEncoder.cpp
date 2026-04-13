@@ -4,9 +4,9 @@
 #include <array>
 #include <cstring>
 
-#include "HttpHeaderHash.h"
 #include "Http2HpackHuffman.h"
 #include "Http2HpackStaticTable.h"
+#include "HttpHeaderHash.h"
 
 namespace fiber::http {
 
@@ -298,8 +298,8 @@ common::IoErr Http2HpackEncoder::append_table_size_update(std::uint32_t size) no
     return append_integer(0x20U, 5, size);
 }
 
-common::IoErr Http2HpackEncoder::append_literal(std::uint32_t name_index, std::string_view name,
-                                                std::string_view value, LiteralMode mode) noexcept {
+common::IoErr Http2HpackEncoder::append_literal(std::uint32_t name_index, std::string_view name, std::string_view value,
+                                                LiteralMode mode) noexcept {
     const bool new_name = name_index == 0;
     const std::uint8_t first_mask = mode == LiteralMode::IncrementalIndexing ? 0x40U : 0x00U;
     const std::uint8_t prefix_bits = mode == LiteralMode::IncrementalIndexing ? 6U : 4U;
@@ -330,7 +330,7 @@ common::IoErr Http2HpackEncoder::append_string(std::string_view value) noexcept 
     }
 
     const std::size_t encoded_len =
-        http2_huffman_encoded_length(reinterpret_cast<const std::uint8_t *>(value.data()), value.size());
+            http2_huffman_encoded_length(reinterpret_cast<const std::uint8_t *>(value.data()), value.size());
     if (encoded_len > options_.max_string_size) {
         return common::IoErr::Invalid;
     }
@@ -347,8 +347,8 @@ common::IoErr Http2HpackEncoder::append_string(std::string_view value) noexcept 
         }
     }
     if (output_len_ >= encoded_len) {
-        const std::size_t written =
-            http2_huffman_encode_exact(reinterpret_cast<const std::uint8_t *>(value.data()), value.size(), output_dst_);
+        const std::size_t written = http2_huffman_encode_exact(reinterpret_cast<const std::uint8_t *>(value.data()),
+                                                               value.size(), output_dst_);
         if (written != encoded_len) {
             return common::IoErr::Invalid;
         }
@@ -367,13 +367,9 @@ common::IoErr Http2HpackEncoder::append_string(std::string_view value) noexcept 
                 return err;
             }
         }
-        const auto result = http2_huffman_encode_incremental(
-            state,
-            reinterpret_cast<const std::uint8_t *>(value.data()) + consumed,
-            value.size() - consumed,
-            output_dst_,
-            output_len_,
-            true);
+        const auto result =
+                http2_huffman_encode_incremental(state, reinterpret_cast<const std::uint8_t *>(value.data()) + consumed,
+                                                 value.size() - consumed, output_dst_, output_len_, true);
         consumed += result.consumed;
         output_dst_ += result.written;
         output_len_ -= result.written;
@@ -427,9 +423,7 @@ common::IoErr Http2HpackEncoder::append_bytes(const std::uint8_t *data, std::siz
     return common::IoErr::None;
 }
 
-common::IoErr Http2HpackEncoder::append_byte(std::uint8_t byte) noexcept {
-    return append_bytes(&byte, 1);
-}
+common::IoErr Http2HpackEncoder::append_byte(std::uint8_t byte) noexcept { return append_bytes(&byte, 1); }
 
 common::IoErr Http2HpackEncoder::ensure_output(std::size_t min_bytes) noexcept {
     if (output_len_ >= min_bytes) {
@@ -453,8 +447,7 @@ bool Http2HpackEncoder::should_huffman_encode(std::string_view value) const noex
 
 bool Http2HpackEncoder::can_incrementally_index(const Http2HpackEncodeCatalog::EntryView &entry) const noexcept {
     return entry.kind == Http2HpackEncodeCatalog::EntryKind::Policy &&
-           entry.entry_size <= table_.max_dynamic_table_size() &&
-           table_.max_dynamic_table_size() != 0;
+           entry.entry_size <= table_.max_dynamic_table_size() && table_.max_dynamic_table_size() != 0;
 }
 
 bool Http2HpackEncoder::resolve_name_index(std::string_view name, std::uint64_t name_hash,

@@ -6,39 +6,25 @@
 
 namespace fiber::net {
 
-TcpListener::TcpListener(fiber::event::EventLoop &loop) : acceptor_(loop) {
-}
+TcpListener::TcpListener(fiber::event::EventLoop &loop) : acceptor_(loop) {}
 
-TcpListener::~TcpListener() {
-}
+TcpListener::~TcpListener() {}
 
-fiber::common::IoResult<void> TcpListener::bind(const SocketAddress &addr,
-                                                const ListenOptions &options) {
+fiber::common::IoResult<void> TcpListener::bind(const SocketAddress &addr, const ListenOptions &options) {
     return acceptor_.bind(addr, options);
 }
 
-bool TcpListener::valid() const noexcept {
-    return acceptor_.valid();
-}
+bool TcpListener::valid() const noexcept { return acceptor_.valid(); }
 
-int TcpListener::fd() const noexcept {
-    return acceptor_.fd();
-}
+int TcpListener::fd() const noexcept { return acceptor_.fd(); }
 
-fiber::event::EventLoop &TcpListener::loop() const noexcept {
-    return acceptor_.loop();
-}
+fiber::event::EventLoop &TcpListener::loop() const noexcept { return acceptor_.loop(); }
 
-void TcpListener::close() {
-    acceptor_.close();
-}
+void TcpListener::close() { acceptor_.close(); }
 
-TcpListener::AcceptAwaiter TcpListener::accept() noexcept {
-    return acceptor_.accept();
-}
+TcpListener::AcceptAwaiter TcpListener::accept() noexcept { return acceptor_.accept(); }
 
-fiber::common::IoResult<int> TcpTraits::bind(const SocketAddress &addr,
-                                             const ListenOptions &options) {
+fiber::common::IoResult<int> TcpTraits::bind(const SocketAddress &addr, const ListenOptions &options) {
     sockaddr_storage storage{};
     socklen_t len = 0;
     if (!addr.to_sockaddr(storage, len)) {

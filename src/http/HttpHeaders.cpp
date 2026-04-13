@@ -32,13 +32,8 @@ void to_lowcase_and_hash(std::string_view name, std::string &out, uint64_t &hash
     hash_out = http_header_name_to_lowercase_and_hash(name, out.data());
 }
 
-void init_field(HttpHeaders::HeaderField *field,
-                const char *name_ptr,
-                uint32_t name_len,
-                const char *lowcase_ptr,
-                const char *value_ptr,
-                uint32_t value_len,
-                uint64_t hash) {
+void init_field(HttpHeaders::HeaderField *field, const char *name_ptr, uint32_t name_len, const char *lowcase_ptr,
+                const char *value_ptr, uint32_t value_len, uint64_t hash) {
     field->name = name_ptr;
     field->name_len = name_len;
     field->lowcase_name = lowcase_ptr;
@@ -52,17 +47,13 @@ void init_field(HttpHeaders::HeaderField *field,
 
 } // namespace
 
-HttpHeaders::HttpHeaders(mem::BufPool &pool)
-    : pool_(&pool),
-      bucket_head_(mem::PoolAllocator<HeaderField *>(pool)) {
-}
+HttpHeaders::HttpHeaders(mem::BufPool &pool) : pool_(&pool), bucket_head_(mem::PoolAllocator<HeaderField *>(pool)) {}
 
 HttpHeaders::HeaderField *HttpHeaders::add(std::string_view name, std::string_view value) {
     if (!ensure_buckets()) {
         return nullptr;
     }
-    if (name.size() > std::numeric_limits<uint32_t>::max() ||
-        value.size() > std::numeric_limits<uint32_t>::max()) {
+    if (name.size() > std::numeric_limits<uint32_t>::max() || value.size() > std::numeric_limits<uint32_t>::max()) {
         return nullptr;
     }
 
@@ -90,13 +81,12 @@ HttpHeaders::HeaderField *HttpHeaders::add(std::string_view name, std::string_vi
     return link_field(field);
 }
 
-HttpHeaders::HeaderField *HttpHeaders::add(std::string_view name, std::string_view value,
-                                           char *lowcase_name, uint64_t hash) {
+HttpHeaders::HeaderField *HttpHeaders::add(std::string_view name, std::string_view value, char *lowcase_name,
+                                           uint64_t hash) {
     if (!ensure_buckets()) {
         return nullptr;
     }
-    if (name.size() > std::numeric_limits<uint32_t>::max() ||
-        value.size() > std::numeric_limits<uint32_t>::max()) {
+    if (name.size() > std::numeric_limits<uint32_t>::max() || value.size() > std::numeric_limits<uint32_t>::max()) {
         return nullptr;
     }
 
@@ -122,13 +112,7 @@ HttpHeaders::HeaderField *HttpHeaders::add(std::string_view name, std::string_vi
         return nullptr;
     }
 
-    init_field(field,
-               name_ptr,
-               name_len,
-               lowcase_ptr,
-               value_ptr,
-               value_len,
-               hash);
+    init_field(field, name_ptr, name_len, lowcase_ptr, value_ptr, value_len, hash);
     return link_field(field);
 }
 
@@ -137,8 +121,8 @@ HttpHeaders::HeaderField *HttpHeaders::set(std::string_view name, std::string_vi
     return add(name, value);
 }
 
-HttpHeaders::HeaderField *HttpHeaders::set(std::string_view name, std::string_view value,
-                                           char *lowcase_name, uint64_t hash) {
+HttpHeaders::HeaderField *HttpHeaders::set(std::string_view name, std::string_view value, char *lowcase_name,
+                                           uint64_t hash) {
     const uint32_t name_len = static_cast<uint32_t>(name.size());
     const char *lowcase_ptr = name_len == 0 ? "" : lowcase_name;
     remove_lowcase(std::string_view(lowcase_ptr, name_len), hash);
@@ -149,8 +133,7 @@ HttpHeaders::HeaderField *HttpHeaders::add_view(std::string_view name, std::stri
     if (!ensure_buckets()) {
         return nullptr;
     }
-    if (name.size() > std::numeric_limits<uint32_t>::max() ||
-        value.size() > std::numeric_limits<uint32_t>::max()) {
+    if (name.size() > std::numeric_limits<uint32_t>::max() || value.size() > std::numeric_limits<uint32_t>::max()) {
         return nullptr;
     }
     uint64_t hash = http_header_name_hash(name);
@@ -167,13 +150,12 @@ HttpHeaders::HeaderField *HttpHeaders::add_view(std::string_view name, std::stri
     return link_field(field);
 }
 
-HttpHeaders::HeaderField *HttpHeaders::add_view(std::string_view name, std::string_view value,
-                                                char *lowcase_name, uint64_t hash) {
+HttpHeaders::HeaderField *HttpHeaders::add_view(std::string_view name, std::string_view value, char *lowcase_name,
+                                                uint64_t hash) {
     if (!ensure_buckets()) {
         return nullptr;
     }
-    if (name.size() > std::numeric_limits<uint32_t>::max() ||
-        value.size() > std::numeric_limits<uint32_t>::max()) {
+    if (name.size() > std::numeric_limits<uint32_t>::max() || value.size() > std::numeric_limits<uint32_t>::max()) {
         return nullptr;
     }
 
@@ -196,8 +178,8 @@ HttpHeaders::HeaderField *HttpHeaders::set_view(std::string_view name, std::stri
     return add_view(name, value);
 }
 
-HttpHeaders::HeaderField *HttpHeaders::set_view(std::string_view name, std::string_view value,
-                                                char *lowcase_name, uint64_t hash) {
+HttpHeaders::HeaderField *HttpHeaders::set_view(std::string_view name, std::string_view value, char *lowcase_name,
+                                                uint64_t hash) {
     const uint32_t name_len = static_cast<uint32_t>(name.size());
     const char *lowcase_ptr = name_len == 0 ? "" : lowcase_name;
     remove_lowcase(std::string_view(lowcase_ptr, name_len), hash);
@@ -212,9 +194,7 @@ std::string_view HttpHeaders::get(std::string_view name) const noexcept {
     return node->value_view();
 }
 
-bool HttpHeaders::contains(std::string_view name) const noexcept {
-    return find_first_node(name) != nullptr;
-}
+bool HttpHeaders::contains(std::string_view name) const noexcept { return find_first_node(name) != nullptr; }
 
 HttpHeaders::MatchRange HttpHeaders::get_all(std::string_view lowcase_key, uint64_t hash) const noexcept {
     return MatchRange(this, lowcase_key, hash);
@@ -333,17 +313,11 @@ void HttpHeaders::release() noexcept {
     bucket_head_.swap(empty);
 }
 
-size_t HttpHeaders::size() const noexcept {
-    return size_;
-}
+size_t HttpHeaders::size() const noexcept { return size_; }
 
-HttpHeaders::ConstIterator HttpHeaders::begin() const noexcept {
-    return ConstIterator(all_head_);
-}
+HttpHeaders::ConstIterator HttpHeaders::begin() const noexcept { return ConstIterator(all_head_); }
 
-HttpHeaders::ConstIterator HttpHeaders::end() const noexcept {
-    return ConstIterator(nullptr);
-}
+HttpHeaders::ConstIterator HttpHeaders::end() const noexcept { return ConstIterator(nullptr); }
 
 bool HttpHeaders::ensure_buckets() {
     if (bucket_head_.empty()) {
@@ -407,8 +381,7 @@ const HttpHeaders::HeaderField *HttpHeaders::find_first_node_lowcase(std::string
     return nullptr;
 }
 
-const HttpHeaders::HeaderField *HttpHeaders::next_match_node(const HeaderField *start,
-                                                             std::string_view lowcase_key,
+const HttpHeaders::HeaderField *HttpHeaders::next_match_node(const HeaderField *start, std::string_view lowcase_key,
                                                              uint64_t hash) const noexcept {
     if (!start) {
         return nullptr;

@@ -15,9 +15,7 @@ namespace {
 struct TestHttp2StreamOwner {
     TestHttp2StreamOwner() : stream(this, ops()) {}
 
-    static TestHttp2StreamOwner *create_owner() noexcept {
-        return new (std::nothrow) TestHttp2StreamOwner();
-    }
+    static TestHttp2StreamOwner *create_owner() noexcept { return new (std::nothrow) TestHttp2StreamOwner(); }
 
     static fiber::http::Http2Stream::Lease create() noexcept {
         auto *owner = create_owner();
@@ -29,26 +27,24 @@ struct TestHttp2StreamOwner {
 
     static const fiber::http::Http2Stream::Ops &ops() noexcept {
         static const fiber::http::Http2HpackDecoder::Ops kDecoderOps{
-            &TestHttp2StreamOwner::on_indexed_field,
-            &TestHttp2StreamOwner::on_indexed_name,
-            &TestHttp2StreamOwner::on_name_raw,
-            &TestHttp2StreamOwner::on_name_huffman,
-            &TestHttp2StreamOwner::on_value_raw,
-            &TestHttp2StreamOwner::on_value_huffman,
+                &TestHttp2StreamOwner::on_indexed_field, &TestHttp2StreamOwner::on_indexed_name,
+                &TestHttp2StreamOwner::on_name_raw,      &TestHttp2StreamOwner::on_name_huffman,
+                &TestHttp2StreamOwner::on_value_raw,     &TestHttp2StreamOwner::on_value_huffman,
         };
         static const fiber::http::Http2Stream::Ops kOps{
-            &TestHttp2StreamOwner::destroy_owner,
-            &TestHttp2StreamOwner::on_header_block_start,
-            &TestHttp2StreamOwner::on_header_block_complete,
-            &TestHttp2StreamOwner::on_body,
-            &TestHttp2StreamOwner::on_abort,
+                &TestHttp2StreamOwner::destroy_owner,
+                &TestHttp2StreamOwner::on_header_block_start,
+                &TestHttp2StreamOwner::on_header_block_complete,
+                &TestHttp2StreamOwner::on_body,
+                &TestHttp2StreamOwner::on_abort,
         };
-        (void)kDecoderOps;
+        (void) kDecoderOps;
         return kOps;
     }
 
     static void destroy_owner(void *owner) noexcept { delete static_cast<TestHttp2StreamOwner *>(owner); }
-    static fiber::common::IoErr on_header_block_start(void *owner, fiber::http::Http2HpackDecoder::Sink &sink) noexcept {
+    static fiber::common::IoErr on_header_block_start(void *owner,
+                                                      fiber::http::Http2HpackDecoder::Sink &sink) noexcept {
         auto *self = static_cast<TestHttp2StreamOwner *>(owner);
         if (self->reading_trailers || self->trailers_complete) {
             return fiber::common::IoErr::Invalid;
@@ -111,7 +107,8 @@ struct TestHttp2StreamOwner {
         self->pending_name_storage.assign(decoded_len, '\0');
         fiber::http::Http2HuffmanDecodeState state;
         fiber::http::Http2HuffmanDecodeResult result = fiber::http::http2_huffman_decode(
-            state, data, len, reinterpret_cast<std::uint8_t *>(self->pending_name_storage.data()), decoded_len, true);
+                state, data, len, reinterpret_cast<std::uint8_t *>(self->pending_name_storage.data()), decoded_len,
+                true);
         if (result.code != fiber::http::Http2HuffmanCode::Ok || result.written != decoded_len) {
             return fiber::common::IoErr::Invalid;
         }
@@ -140,7 +137,8 @@ struct TestHttp2StreamOwner {
         self->pending_value_storage.assign(decoded_len, '\0');
         fiber::http::Http2HuffmanDecodeState state;
         fiber::http::Http2HuffmanDecodeResult result = fiber::http::http2_huffman_decode(
-            state, data, len, reinterpret_cast<std::uint8_t *>(self->pending_value_storage.data()), decoded_len, true);
+                state, data, len, reinterpret_cast<std::uint8_t *>(self->pending_value_storage.data()), decoded_len,
+                true);
         if (result.code != fiber::http::Http2HuffmanCode::Ok || result.written != decoded_len) {
             return fiber::common::IoErr::Invalid;
         }
@@ -153,12 +151,9 @@ struct TestHttp2StreamOwner {
     }
     static const fiber::http::Http2HpackDecoder::Ops &decoder_ops() noexcept {
         static const fiber::http::Http2HpackDecoder::Ops kOps{
-            &TestHttp2StreamOwner::on_indexed_field,
-            &TestHttp2StreamOwner::on_indexed_name,
-            &TestHttp2StreamOwner::on_name_raw,
-            &TestHttp2StreamOwner::on_name_huffman,
-            &TestHttp2StreamOwner::on_value_raw,
-            &TestHttp2StreamOwner::on_value_huffman,
+                &TestHttp2StreamOwner::on_indexed_field, &TestHttp2StreamOwner::on_indexed_name,
+                &TestHttp2StreamOwner::on_name_raw,      &TestHttp2StreamOwner::on_name_huffman,
+                &TestHttp2StreamOwner::on_value_raw,     &TestHttp2StreamOwner::on_value_huffman,
         };
         return kOps;
     }

@@ -14,12 +14,7 @@ namespace fiber::async {
 
 class WaitGroup : public common::NonCopyable, public common::NonMovable {
 private:
-    enum class WaiterState : std::uint8_t {
-        Waiting,
-        Notified,
-        Resumed,
-        Canceled
-    };
+    enum class WaiterState : std::uint8_t { Waiting, Notified, Resumed, Canceled };
 
     struct Waiter {
         Waiter(WaitGroup *group, fiber::event::EventLoop *loop, std::coroutine_handle<> handle);
@@ -40,8 +35,7 @@ private:
 public:
     class JoinAwaiter {
     public:
-        explicit JoinAwaiter(WaitGroup &group) noexcept : group_(&group) {
-        }
+        explicit JoinAwaiter(WaitGroup &group) noexcept : group_(&group) {}
 
         JoinAwaiter(const JoinAwaiter &) = delete;
         JoinAwaiter &operator=(const JoinAwaiter &) = delete;

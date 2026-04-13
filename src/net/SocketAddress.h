@@ -17,15 +17,9 @@ public:
     static SocketAddress any_v4(std::uint16_t port = 0);
     static SocketAddress any_v6(std::uint16_t port = 0);
 
-    [[nodiscard]] const IpAddress &ip() const noexcept {
-        return ip_;
-    }
-    [[nodiscard]] std::uint16_t port() const noexcept {
-        return port_;
-    }
-    [[nodiscard]] IpFamily family() const noexcept {
-        return ip_.family();
-    }
+    [[nodiscard]] const IpAddress &ip() const noexcept { return ip_; }
+    [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
+    [[nodiscard]] IpFamily family() const noexcept { return ip_.family(); }
 
     std::string to_string() const;
 

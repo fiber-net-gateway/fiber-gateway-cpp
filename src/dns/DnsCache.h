@@ -59,13 +59,9 @@ public:
 private:
     friend class DnsCache;
 
-    [[nodiscard]] common::IoErr assign_a(const net::IpAddress *records,
-                                         std::uint16_t count,
-                                         bool negative,
+    [[nodiscard]] common::IoErr assign_a(const net::IpAddress *records, std::uint16_t count, bool negative,
                                          std::chrono::steady_clock::time_point expire_at) noexcept;
-    [[nodiscard]] common::IoErr assign_aaaa(const net::IpAddress *records,
-                                            std::uint16_t count,
-                                            bool negative,
+    [[nodiscard]] common::IoErr assign_aaaa(const net::IpAddress *records, std::uint16_t count, bool negative,
                                             std::chrono::steady_clock::time_point expire_at) noexcept;
     [[nodiscard]] common::IoErr assign_cname(std::string_view target,
                                              std::chrono::steady_clock::time_point expire_at) noexcept;
@@ -101,41 +97,26 @@ public:
     [[nodiscard]] std::size_t entry_count() const noexcept;
     [[nodiscard]] std::size_t bytes_used() const noexcept;
 
-    [[nodiscard]] common::IoErr peek_name(std::string_view qname,
-                                          std::uint16_t qclass,
-                                          std::chrono::steady_clock::time_point now,
-                                          NameSnapshot &out) const noexcept;
-    [[nodiscard]] common::IoErr lookup_name(std::string_view qname,
-                                            std::uint16_t qclass,
-                                            std::chrono::steady_clock::time_point now,
-                                            NameSnapshot &out) noexcept;
+    [[nodiscard]] common::IoErr peek_name(std::string_view qname, std::uint16_t qclass,
+                                          std::chrono::steady_clock::time_point now, NameSnapshot &out) const noexcept;
+    [[nodiscard]] common::IoErr lookup_name(std::string_view qname, std::uint16_t qclass,
+                                            std::chrono::steady_clock::time_point now, NameSnapshot &out) noexcept;
     [[nodiscard]] common::IoErr note_name_access(std::string_view qname, std::uint16_t qclass) noexcept;
 
-    [[nodiscard]] common::IoErr upsert_a(std::string_view qname,
-                                         std::uint16_t qclass,
-                                         const net::IpAddress *records,
-                                         std::uint16_t count,
-                                         std::chrono::steady_clock::time_point expire_at) noexcept;
-    [[nodiscard]] common::IoErr upsert_aaaa(std::string_view qname,
-                                            std::uint16_t qclass,
-                                            const net::IpAddress *records,
+    [[nodiscard]] common::IoErr upsert_a(std::string_view qname, std::uint16_t qclass, const net::IpAddress *records,
+                                         std::uint16_t count, std::chrono::steady_clock::time_point expire_at) noexcept;
+    [[nodiscard]] common::IoErr upsert_aaaa(std::string_view qname, std::uint16_t qclass, const net::IpAddress *records,
                                             std::uint16_t count,
                                             std::chrono::steady_clock::time_point expire_at) noexcept;
-    [[nodiscard]] common::IoErr upsert_cname(std::string_view qname,
-                                             std::uint16_t qclass,
-                                             std::string_view target,
+    [[nodiscard]] common::IoErr upsert_cname(std::string_view qname, std::uint16_t qclass, std::string_view target,
                                              std::chrono::steady_clock::time_point expire_at) noexcept;
-    [[nodiscard]] common::IoErr upsert_negative_nxdomain(
-        std::string_view qname,
-        std::uint16_t qclass,
-        std::chrono::steady_clock::time_point expire_at) noexcept;
-    [[nodiscard]] common::IoErr upsert_negative_nodata(std::string_view qname,
-                                                       std::uint16_t qclass,
+    [[nodiscard]] common::IoErr upsert_negative_nxdomain(std::string_view qname, std::uint16_t qclass,
+                                                         std::chrono::steady_clock::time_point expire_at) noexcept;
+    [[nodiscard]] common::IoErr upsert_negative_nodata(std::string_view qname, std::uint16_t qclass,
                                                        std::uint16_t qtype,
                                                        std::chrono::steady_clock::time_point expire_at) noexcept;
     [[nodiscard]] common::IoErr erase(std::string_view qname, std::uint16_t qclass) noexcept;
-    [[nodiscard]] std::size_t sweep_expired(std::chrono::steady_clock::time_point now,
-                                            std::size_t budget) noexcept;
+    [[nodiscard]] std::size_t sweep_expired(std::chrono::steady_clock::time_point now, std::size_t budget) noexcept;
 
 private:
     enum class SlotState : std::uint8_t {
@@ -198,28 +179,21 @@ private:
     static constexpr std::uint32_t kInvalidIndex = 0xffffffffU;
     static constexpr std::uint32_t kTombstoneIndex = 0xfffffffeU;
 
-    [[nodiscard]] common::IoErr upsert_address(std::string_view qname,
-                                               std::uint16_t qclass,
-                                               const net::IpAddress *records,
-                                               std::uint16_t count,
+    [[nodiscard]] common::IoErr upsert_address(std::string_view qname, std::uint16_t qclass,
+                                               const net::IpAddress *records, std::uint16_t count,
                                                std::chrono::steady_clock::time_point expire_at,
                                                RecordType type) noexcept;
-    [[nodiscard]] common::IoErr normalize_name(std::string_view input,
-                                               char *dst,
-                                               std::size_t cap,
+    [[nodiscard]] common::IoErr normalize_name(std::string_view input, char *dst, std::size_t cap,
                                                std::string_view &out) const noexcept;
     [[nodiscard]] std::uint64_t hash_key(std::string_view name, std::uint16_t qclass) const noexcept;
-    [[nodiscard]] std::uint32_t find_entry_index(std::string_view name,
-                                                 std::uint16_t qclass,
+    [[nodiscard]] std::uint32_t find_entry_index(std::string_view name, std::uint16_t qclass,
                                                  std::uint64_t hash) const noexcept;
-    [[nodiscard]] std::uint32_t find_insert_bucket(std::string_view name,
-                                                   std::uint16_t qclass,
+    [[nodiscard]] std::uint32_t find_insert_bucket(std::string_view name, std::uint16_t qclass,
                                                    std::uint64_t hash) const noexcept;
     [[nodiscard]] std::string_view owner_name(const NameEntry &entry) const noexcept;
     [[nodiscard]] const net::IpAddress *address_records(const NameEntry &entry, const AddressSlot &slot) const noexcept;
     [[nodiscard]] std::string_view cname_target(const NameEntry &entry) const noexcept;
-    [[nodiscard]] common::IoErr fill_snapshot(const NameEntry &entry,
-                                              std::chrono::steady_clock::time_point now,
+    [[nodiscard]] common::IoErr fill_snapshot(const NameEntry &entry, std::chrono::steady_clock::time_point now,
                                               NameSnapshot &out) const noexcept;
 
     void clear_address_slot(AddressSlot &slot) noexcept;
@@ -227,13 +201,9 @@ private:
     void cleanup_entry(NameEntry &entry, std::chrono::steady_clock::time_point now) noexcept;
     [[nodiscard]] bool entry_empty(const NameEntry &entry) const noexcept;
     void load_entry_state(const NameEntry &entry, EntryState &state) const noexcept;
-    [[nodiscard]] common::IoErr store_entry_state(std::uint32_t index,
-                                                  const EntryState &state,
-                                                  bool is_new) noexcept;
-    [[nodiscard]] common::IoErr ensure_capacity(std::uint32_t protected_index,
-                                                std::size_t old_blob_size,
-                                                std::size_t new_blob_size,
-                                                bool need_new_entry) noexcept;
+    [[nodiscard]] common::IoErr store_entry_state(std::uint32_t index, const EntryState &state, bool is_new) noexcept;
+    [[nodiscard]] common::IoErr ensure_capacity(std::uint32_t protected_index, std::size_t old_blob_size,
+                                                std::size_t new_blob_size, bool need_new_entry) noexcept;
     [[nodiscard]] std::uint32_t allocate_entry() noexcept;
     void recycle_entry(std::uint32_t index) noexcept;
     void erase_entry(std::uint32_t index) noexcept;
@@ -265,34 +235,25 @@ public:
     [[nodiscard]] async::Task<std::size_t> entry_count() noexcept;
     [[nodiscard]] async::Task<std::size_t> bytes_used() noexcept;
 
-    [[nodiscard]] async::Task<common::IoErr> lookup_name(std::string_view qname,
-                                                         std::uint16_t qclass,
+    [[nodiscard]] async::Task<common::IoErr> lookup_name(std::string_view qname, std::uint16_t qclass,
                                                          std::chrono::steady_clock::time_point now,
                                                          NameSnapshot &out) noexcept;
 
-    [[nodiscard]] async::Task<common::IoErr> upsert_a(std::string_view qname,
-                                                      std::uint16_t qclass,
-                                                      const net::IpAddress *records,
-                                                      std::uint16_t count,
+    [[nodiscard]] async::Task<common::IoErr> upsert_a(std::string_view qname, std::uint16_t qclass,
+                                                      const net::IpAddress *records, std::uint16_t count,
                                                       std::chrono::steady_clock::time_point expire_at) noexcept;
-    [[nodiscard]] async::Task<common::IoErr> upsert_aaaa(std::string_view qname,
-                                                         std::uint16_t qclass,
-                                                         const net::IpAddress *records,
-                                                         std::uint16_t count,
+    [[nodiscard]] async::Task<common::IoErr> upsert_aaaa(std::string_view qname, std::uint16_t qclass,
+                                                         const net::IpAddress *records, std::uint16_t count,
                                                          std::chrono::steady_clock::time_point expire_at) noexcept;
-    [[nodiscard]] async::Task<common::IoErr> upsert_cname(std::string_view qname,
-                                                          std::uint16_t qclass,
+    [[nodiscard]] async::Task<common::IoErr> upsert_cname(std::string_view qname, std::uint16_t qclass,
                                                           std::string_view target,
                                                           std::chrono::steady_clock::time_point expire_at) noexcept;
-    [[nodiscard]] async::Task<common::IoErr> upsert_negative_nxdomain(
-        std::string_view qname,
-        std::uint16_t qclass,
-        std::chrono::steady_clock::time_point expire_at) noexcept;
-    [[nodiscard]] async::Task<common::IoErr> upsert_negative_nodata(
-        std::string_view qname,
-        std::uint16_t qclass,
-        std::uint16_t qtype,
-        std::chrono::steady_clock::time_point expire_at) noexcept;
+    [[nodiscard]] async::Task<common::IoErr>
+    upsert_negative_nxdomain(std::string_view qname, std::uint16_t qclass,
+                             std::chrono::steady_clock::time_point expire_at) noexcept;
+    [[nodiscard]] async::Task<common::IoErr>
+    upsert_negative_nodata(std::string_view qname, std::uint16_t qclass, std::uint16_t qtype,
+                           std::chrono::steady_clock::time_point expire_at) noexcept;
     [[nodiscard]] async::Task<common::IoErr> erase(std::string_view qname, std::uint16_t qclass) noexcept;
     [[nodiscard]] async::Task<std::size_t> sweep_expired(std::chrono::steady_clock::time_point now,
                                                          std::size_t budget) noexcept;

@@ -18,7 +18,7 @@ namespace {
 JsValue make_array(GcHeap &heap, std::initializer_list<JsValue> values) {
     JsValue arr = JsValue::make_array(heap, values.size());
     auto *arr_ptr = js_value_heap_ptr<GcArray>(arr);
-    for (const auto &value : values) {
+    for (const auto &value: values) {
         if (!fiber::json::gc_array_push(&heap, arr_ptr, value)) {
             ADD_FAILURE() << "gc_array_push failed";
             break;

@@ -165,7 +165,7 @@ public:
             return;
         }
         FIBER_ASSERT(rwfd_->loop().in_loop());
-        (void)rwfd_->cancel_wait<RWFdLocalThreadWaiter>(this);
+        (void) rwfd_->cancel_wait<RWFdLocalThreadWaiter>(this);
     }
 
     bool await_ready() noexcept {

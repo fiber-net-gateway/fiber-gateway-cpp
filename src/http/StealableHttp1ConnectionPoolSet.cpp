@@ -11,22 +11,16 @@ namespace fiber::http {
 
 class StealableHttp1ConnectionPoolSet::AdminAwaiter : public common::NonCopyable, public common::NonMovable {
 public:
-    enum class Operation : std::uint8_t {
-        Clear,
-        Shutdown
-    };
+    enum class Operation : std::uint8_t { Clear, Shutdown };
 
-    AdminAwaiter(StealableHttp1ConnectionPoolSet &set, Operation operation) noexcept
-        : set_(&set),
-          operation_(operation) {
-    }
+    AdminAwaiter(StealableHttp1ConnectionPoolSet &set, Operation operation) noexcept :
+        set_(&set), operation_(operation) {}
 
     bool await_ready() noexcept {
         if (!set_) {
             return true;
         }
-        if (operation_ == Operation::Clear &&
-            set_->shutdown_requested_.load(std::memory_order_acquire)) {
+        if (operation_ == Operation::Clear && set_->shutdown_requested_.load(std::memory_order_acquire)) {
             return true;
         }
         if (set_->group().running()) {
@@ -46,9 +40,7 @@ public:
 
         const std::size_t shard_count = set_->size();
         if (shard_count == 0) {
-            caller_loop_->post<AdminAwaiter,
-                               &AdminAwaiter::resume_notify_,
-                               &AdminAwaiter::resume_caller>(*this);
+            caller_loop_->post<AdminAwaiter, &AdminAwaiter::resume_notify_, &AdminAwaiter::resume_caller>(*this);
             return true;
         }
 
@@ -100,9 +92,7 @@ private:
             return;
         }
         FIBER_ASSERT(caller_loop_ != nullptr);
-        caller_loop_->post<AdminAwaiter,
-                           &AdminAwaiter::resume_notify_,
-                           &AdminAwaiter::resume_caller>(*this);
+        caller_loop_->post<AdminAwaiter, &AdminAwaiter::resume_notify_, &AdminAwaiter::resume_caller>(*this);
     }
 
     static void resume_caller(AdminAwaiter *awaiter) {
@@ -124,24 +114,16 @@ private:
     event::EventLoop::NotifyEntry resume_notify_{};
 };
 
-StealableHttp1ConnectionPoolSet::Lease::Lease(Http1ConnectionPoolCore::Lease &&local) noexcept
-    : kind_(Kind::Local),
-      local_(std::move(local)) {}
+StealableHttp1ConnectionPoolSet::Lease::Lease(Http1ConnectionPoolCore::Lease &&local) noexcept :
+    kind_(Kind::Local), local_(std::move(local)) {}
 
-StealableHttp1ConnectionPoolSet::Lease::Lease(Http1ConnectionPoolCore &home_core,
-                                              Http1ConnectionPoolEntry &entry,
-                                              const Http1ConnectionGroupKey &key) noexcept
-    : kind_(Kind::Remote),
-      entry_(&entry),
-      home_core_(&home_core),
-      key_(key) {}
+StealableHttp1ConnectionPoolSet::Lease::Lease(Http1ConnectionPoolCore &home_core, Http1ConnectionPoolEntry &entry,
+                                              const Http1ConnectionGroupKey &key) noexcept :
+    kind_(Kind::Remote), entry_(&entry), home_core_(&home_core), key_(key) {}
 
-StealableHttp1ConnectionPoolSet::Lease::Lease(Lease &&other) noexcept
-    : kind_(other.kind_),
-      local_(std::move(other.local_)),
-      entry_(other.entry_),
-      home_core_(other.home_core_),
-      key_(std::move(other.key_)) {
+StealableHttp1ConnectionPoolSet::Lease::Lease(Lease &&other) noexcept :
+    kind_(other.kind_), local_(std::move(other.local_)), entry_(other.entry_), home_core_(other.home_core_),
+    key_(std::move(other.key_)) {
     other.kind_ = Kind::Empty;
     other.entry_ = nullptr;
     other.home_core_ = nullptr;
@@ -246,8 +228,8 @@ const Http1ConnectionGroupKey &StealableHttp1ConnectionPoolSet::Lease::key() con
     FIBER_PANIC("empty stealable pool lease has no key");
 }
 
-common::IoResult<Http1ClientConnection *> StealableHttp1ConnectionPoolSet::Lease::emplace_connection(
-    Http1ClientConnectionOptions options) noexcept {
+common::IoResult<Http1ClientConnection *>
+StealableHttp1ConnectionPoolSet::Lease::emplace_connection(Http1ClientConnectionOptions options) noexcept {
     if (kind_ != Kind::Local) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -278,10 +260,8 @@ void StealableHttp1ConnectionPoolSet::Lease::reset() noexcept {
 }
 
 StealableHttp1ConnectionPoolSet::StealableHttp1ConnectionPoolSet(event::EventLoopGroup &group,
-                                                                 Options pool_options) noexcept
-    : group_(&group),
-      pool_options_(pool_options),
-      storage_(std::make_unique<ShardSlot[]>(group.size())) {
+                                                                 Options pool_options) noexcept :
+    group_(&group), pool_options_(pool_options), storage_(std::make_unique<ShardSlot[]>(group.size())) {
     for (std::size_t i = 0; i < group.size(); ++i) {
         auto *shard = reinterpret_cast<Shard *>(storage_[i].storage);
         std::construct_at(shard, group.at(i), pool_options_);
@@ -295,8 +275,8 @@ StealableHttp1ConnectionPoolSet::StealableHttp1ConnectionPoolSet(event::EventLoo
     }
 }
 
-StealableHttp1ConnectionPoolSet::StealableHttp1ConnectionPoolSet(event::EventLoopGroup &group) noexcept
-    : StealableHttp1ConnectionPoolSet(group, Options{}) {}
+StealableHttp1ConnectionPoolSet::StealableHttp1ConnectionPoolSet(event::EventLoopGroup &group) noexcept :
+    StealableHttp1ConnectionPoolSet(group, Options{}) {}
 
 StealableHttp1ConnectionPoolSet::~StealableHttp1ConnectionPoolSet() {
     for (std::size_t i = 0; i < group_->size(); ++i) {
@@ -342,13 +322,10 @@ async::Task<void> StealableHttp1ConnectionPoolSet::shutdown_async() noexcept {
 }
 
 StealableHttp1ConnectionPoolSet::AcquireAwaiter::AcquireAwaiter(StealableHttp1ConnectionPoolSet &set,
-                                                                const Http1ConnectionGroupKey &key) noexcept
-    : set_(&set),
-      key_(key) {}
+                                                                const Http1ConnectionGroupKey &key) noexcept :
+    set_(&set), key_(key) {}
 
-bool StealableHttp1ConnectionPoolSet::AcquireAwaiter::await_ready() noexcept {
-    return prepare();
-}
+bool StealableHttp1ConnectionPoolSet::AcquireAwaiter::await_ready() noexcept { return prepare(); }
 
 bool StealableHttp1ConnectionPoolSet::AcquireAwaiter::await_suspend(std::coroutine_handle<> handle) noexcept {
     if (!prepared_ && prepare()) {
@@ -428,8 +405,8 @@ void StealableHttp1ConnectionPoolSet::AcquireAwaiter::run_notify(AcquireAwaiter 
             awaiter->result_entry_ = awaiter->result_home_core_->try_steal_idle_entry(*awaiter->key_);
             if (awaiter->result_entry_ && awaiter->result_home_core_) {
                 awaiter->phase_ = Phase::ResumeCaller;
-                awaiter->caller_loop_->post<AcquireAwaiter, &AcquireAwaiter::notify_entry_, &AcquireAwaiter::run_notify>(
-                    *awaiter);
+                awaiter->caller_loop_
+                        ->post<AcquireAwaiter, &AcquireAwaiter::notify_entry_, &AcquireAwaiter::run_notify>(*awaiter);
                 return;
             }
 
@@ -445,7 +422,7 @@ void StealableHttp1ConnectionPoolSet::AcquireAwaiter::run_notify(AcquireAwaiter 
             awaiter->cursor_ = nullptr;
             awaiter->phase_ = Phase::ResumeCaller;
             awaiter->caller_loop_->post<AcquireAwaiter, &AcquireAwaiter::notify_entry_, &AcquireAwaiter::run_notify>(
-                *awaiter);
+                    *awaiter);
             return;
         case Phase::ResumeCaller:
             if (awaiter->result_entry_ && awaiter->result_home_core_) {
@@ -498,7 +475,8 @@ StealableHttp1ConnectionPoolSet::Shard &StealableHttp1ConnectionPoolSet::shard_a
     return *std::launder(reinterpret_cast<Shard *>(storage_[index].storage));
 }
 
-const StealableHttp1ConnectionPoolSet::Shard &StealableHttp1ConnectionPoolSet::shard_at(std::size_t index) const noexcept {
+const StealableHttp1ConnectionPoolSet::Shard &
+StealableHttp1ConnectionPoolSet::shard_at(std::size_t index) const noexcept {
     FIBER_ASSERT(index < group_->size());
     return *std::launder(reinterpret_cast<const Shard *>(storage_[index].storage));
 }
@@ -508,7 +486,8 @@ StealableHttp1ConnectionPoolSet::ShardSlot &StealableHttp1ConnectionPoolSet::slo
     return storage_[index];
 }
 
-const StealableHttp1ConnectionPoolSet::ShardSlot &StealableHttp1ConnectionPoolSet::slot_at(std::size_t index) const noexcept {
+const StealableHttp1ConnectionPoolSet::ShardSlot &
+StealableHttp1ConnectionPoolSet::slot_at(std::size_t index) const noexcept {
     FIBER_ASSERT(index < group_->size());
     return storage_[index];
 }

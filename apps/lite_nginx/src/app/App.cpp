@@ -18,9 +18,7 @@ struct Options {
     bool check_config = false;
 };
 
-void print_usage(const char *argv0) {
-    std::cerr << "usage: " << argv0 << " [--check-config] [--config <path>]\n";
-}
+void print_usage(const char *argv0) { std::cerr << "usage: " << argv0 << " [--check-config] [--config <path>]\n"; }
 
 std::string format_config_error(const config::ConfigError &error) {
     std::string formatted;
@@ -78,7 +76,7 @@ bool parse_options(int argc, char **argv, Options &options) {
 
 void print_summary(const config::MainConfig &config, std::string_view path) {
     std::size_t tls_listeners = 0;
-    for (const auto &listen : config.http.listens) {
+    for (const auto &listen: config.http.listens) {
         if (listen.tls) {
             ++tls_listeners;
         }
@@ -126,9 +124,8 @@ int LiteNginxApp::run(int argc, char **argv) {
         return 1;
     }
 
-    for (const auto &listener : launcher.bound_listeners()) {
-        std::cout << "listening on " << (listener.tls ? "https://" : "http://")
-                  << listener.address.to_string() << '\n';
+    for (const auto &listener: launcher.bound_listeners()) {
+        std::cout << "listening on " << (listener.tls ? "https://" : "http://") << listener.address.to_string() << '\n';
     }
 
     std::cout << "reverse proxy runtime started\n";

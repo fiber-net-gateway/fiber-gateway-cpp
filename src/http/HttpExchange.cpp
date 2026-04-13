@@ -34,9 +34,7 @@ const HeaderMap<RequestHeaderRefKind> &request_header_ref_map() noexcept {
 
 } // namespace
 
-HttpExchange::HttpExchange(const HttpServerOptions &options) :
-    request_headers_(pool_),
-    request_trailers_(pool_) {
+HttpExchange::HttpExchange(const HttpServerOptions &options) : request_headers_(pool_), request_trailers_(pool_) {
     request_headers_.reserve_bytes(options.header_init_size);
     request_trailers_.reserve_bytes(options.header_init_size);
 }
@@ -110,23 +108,23 @@ fiber::async::Task<common::IoResult<void>> HttpExchange::send_header(const Outgo
 
 fiber::async::Task<common::IoResult<void>> HttpExchange::send_continue_header() {
     co_return co_await send_header({
-        .kind = OutgoingHeaderKind::Informational,
-        .status_code = 100,
-        .headers = nullptr,
-        .end_stream = false,
+            .kind = OutgoingHeaderKind::Informational,
+            .status_code = 100,
+            .headers = nullptr,
+            .end_stream = false,
     });
 }
 
 fiber::async::Task<common::IoResult<void>> HttpExchange::send_informational_header(int status_code,
-                                                                                    const HttpHeaders *headers) {
+                                                                                   const HttpHeaders *headers) {
     co_return co_await send_header({
-        .kind = OutgoingHeaderKind::Informational,
-        .status_code = status_code,
-        .reason = {},
-        .headers = headers,
-        .body = HttpBodySpec::Auto(),
-        .connection_mode = ResponseConnectionMode::Auto,
-        .end_stream = false,
+            .kind = OutgoingHeaderKind::Informational,
+            .status_code = status_code,
+            .reason = {},
+            .headers = headers,
+            .body = HttpBodySpec::Auto(),
+            .connection_mode = ResponseConnectionMode::Auto,
+            .end_stream = false,
     });
 }
 

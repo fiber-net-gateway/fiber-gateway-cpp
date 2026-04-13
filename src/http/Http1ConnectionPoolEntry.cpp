@@ -7,9 +7,9 @@ namespace fiber::http {
 void Http1ConnectionPoolEntry::post_remote_return(Http1ConnectionPoolCore &home_core,
                                                   const Http1ConnectionGroupKey &key) noexcept {
     arm_remote_return(home_core, key);
-    home_core.loop().post<Http1ConnectionPoolEntry,
-                          &Http1ConnectionPoolEntry::return_notify_,
-                          &Http1ConnectionPoolEntry::run_remote_return>(*this);
+    home_core.loop()
+            .post<Http1ConnectionPoolEntry, &Http1ConnectionPoolEntry::return_notify_,
+                  &Http1ConnectionPoolEntry::run_remote_return>(*this);
 }
 
 void Http1ConnectionPoolEntry::run_remote_return(Http1ConnectionPoolEntry *entry) {

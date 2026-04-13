@@ -102,8 +102,8 @@ bool Http2HpackEncodeCatalog::is_policy_entry(const EntryView *entry) const noex
     return entry != nullptr && entry->kind == EntryKind::Policy;
 }
 
-Http2HpackEncodeCatalog::FindResult
-Http2HpackEncodeCatalog::find(std::string_view name, std::uint64_t name_hash, std::string_view value) const noexcept {
+Http2HpackEncodeCatalog::FindResult Http2HpackEncodeCatalog::find(std::string_view name, std::uint64_t name_hash,
+                                                                  std::string_view value) const noexcept {
     if (!entries_ || !bucket_head_ || !next_bucket_ || bucket_cap_ == 0) {
         return {};
     }

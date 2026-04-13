@@ -20,26 +20,15 @@ std::size_t next_threshold(std::size_t live_bytes) {
 
 } // namespace
 
-ScriptRuntime::ScriptRuntime(fiber::json::GcHeap &heap, fiber::json::GcRootSet &roots)
-    : heap_(&heap),
-      roots_(&roots) {
-}
+ScriptRuntime::ScriptRuntime(fiber::json::GcHeap &heap, fiber::json::GcRootSet &roots) : heap_(&heap), roots_(&roots) {}
 
-fiber::json::GcHeap &ScriptRuntime::heap() {
-    return *heap_;
-}
+fiber::json::GcHeap &ScriptRuntime::heap() { return *heap_; }
 
-const fiber::json::GcHeap &ScriptRuntime::heap() const {
-    return *heap_;
-}
+const fiber::json::GcHeap &ScriptRuntime::heap() const { return *heap_; }
 
-fiber::json::GcRootSet &ScriptRuntime::roots() {
-    return *roots_;
-}
+fiber::json::GcRootSet &ScriptRuntime::roots() { return *roots_; }
 
-const fiber::json::GcRootSet &ScriptRuntime::roots() const {
-    return *roots_;
-}
+const fiber::json::GcRootSet &ScriptRuntime::roots() const { return *roots_; }
 
 bool ScriptRuntime::should_collect(std::size_t next_bytes) const {
     if (!heap_ || !roots_) {
@@ -68,13 +57,9 @@ void ScriptRuntime::maybe_collect(std::size_t next_bytes) {
     collect_now();
 }
 
-GcRootGuard::GcRootGuard(ScriptRuntime &runtime, fiber::json::JsValue *value)
-    : handle_(runtime.roots(), value) {
-}
+GcRootGuard::GcRootGuard(ScriptRuntime &runtime, fiber::json::JsValue *value) : handle_(runtime.roots(), value) {}
 
-TempRootScope::TempRootScope(ScriptRuntime &runtime)
-    : roots_(&runtime.roots()) {
-}
+TempRootScope::TempRootScope(ScriptRuntime &runtime) : roots_(&runtime.roots()) {}
 
 void TempRootScope::add(fiber::json::JsValue *value) {
     if (!roots_ || !value) {

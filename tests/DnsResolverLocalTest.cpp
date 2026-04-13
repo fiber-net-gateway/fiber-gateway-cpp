@@ -90,9 +90,7 @@ std::uint16_t read_be16(const std::uint8_t *data) {
     return static_cast<std::uint16_t>((static_cast<std::uint16_t>(data[0]) << 8U) | data[1]);
 }
 
-std::vector<std::uint8_t> make_a_response(std::uint16_t id,
-                                          std::string_view qname,
-                                          std::array<std::uint8_t, 4> addr) {
+std::vector<std::uint8_t> make_a_response(std::uint16_t id, std::string_view qname, std::array<std::uint8_t, 4> addr) {
     std::vector<std::uint8_t> packet;
     push_be16(packet, id);
     push_be16(packet, 0x8180U);
@@ -115,9 +113,7 @@ std::vector<std::uint8_t> make_a_response(std::uint16_t id,
     return packet;
 }
 
-std::vector<std::uint8_t> make_cname_a_response(std::uint16_t id,
-                                                std::string_view qname,
-                                                std::string_view target,
+std::vector<std::uint8_t> make_cname_a_response(std::uint16_t id, std::string_view qname, std::string_view target,
                                                 std::array<std::uint8_t, 4> addr) {
     std::vector<std::uint8_t> packet;
     push_be16(packet, id);
@@ -149,11 +145,9 @@ std::vector<std::uint8_t> make_cname_a_response(std::uint16_t id,
     return packet;
 }
 
-DetachedTask run_single_response_server(fiber::event::EventLoop *loop,
-                                        std::promise<std::uint16_t> *port_promise,
+DetachedTask run_single_response_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
                                         std::promise<ServerOutcome> *outcome_promise,
-                                        std::vector<std::uint8_t> response,
-                                        std::chrono::milliseconds delay = 0ms) {
+                                        std::vector<std::uint8_t> response, std::chrono::milliseconds delay = 0ms) {
     ServerOutcome outcome;
     fiber::net::UdpSocket socket(*loop);
     auto bind_result = socket.bind(fiber::net::SocketAddress::any_v4(), {});
@@ -173,7 +167,8 @@ DetachedTask run_single_response_server(fiber::event::EventLoop *loop,
     }
 
     std::array<std::uint8_t, 512> buf{};
-    auto recv_result = co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
+    auto recv_result =
+            co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
     if (!recv_result) {
         outcome.err = recv_result.error();
         outcome_promise->set_value(std::move(outcome));
@@ -188,14 +183,13 @@ DetachedTask run_single_response_server(fiber::event::EventLoop *loop,
     }
 
     auto send_result = co_await fiber::async::timeout_for(
-        [&]() { return socket.send_to(response.data(), response.size(), recv_result->peer); }, 2s);
+            [&]() { return socket.send_to(response.data(), response.size(), recv_result->peer); }, 2s);
     outcome.err = send_result ? IoErr::None : send_result.error();
     socket.close();
     outcome_promise->set_value(std::move(outcome));
 }
 
-DetachedTask run_cache_hit_resolve(fiber::event::EventLoop *loop,
-                                   fiber::dns::SharedDnsCache *cache,
+DetachedTask run_cache_hit_resolve(fiber::event::EventLoop *loop, fiber::dns::SharedDnsCache *cache,
                                    std::promise<ResolveOutcome> *promise) {
     ResolveOutcome outcome;
     DnsResolverLocal resolver;
@@ -210,8 +204,8 @@ DetachedTask run_cache_hit_resolve(fiber::event::EventLoop *loop,
 
     std::array<fiber::net::IpAddress, 1> records{fiber::net::IpAddress::v4({10, 0, 0, 1})};
     auto now = loop->now();
-    auto cache_err =
-        co_await cache->upsert_a("cache.example", static_cast<std::uint16_t>(RecordClass::IN), records.data(), 1, now + 30s);
+    auto cache_err = co_await cache->upsert_a("cache.example", static_cast<std::uint16_t>(RecordClass::IN),
+                                              records.data(), 1, now + 30s);
     if (cache_err != IoErr::None) {
         outcome.err = cache_err;
         resolver.release();
@@ -244,9 +238,7 @@ DetachedTask run_cache_hit_resolve(fiber::event::EventLoop *loop,
     promise->set_value(std::move(outcome));
 }
 
-DetachedTask run_double_resolve(fiber::event::EventLoop *loop,
-                                fiber::dns::SharedDnsCache *cache,
-                                std::uint16_t port,
+DetachedTask run_double_resolve(fiber::event::EventLoop *loop, fiber::dns::SharedDnsCache *cache, std::uint16_t port,
                                 std::promise<ResolveOutcome> *promise) {
     ResolveOutcome outcome;
     DnsResolverLocal resolver;
@@ -296,10 +288,8 @@ DetachedTask run_double_resolve(fiber::event::EventLoop *loop,
     promise->set_value(std::move(outcome));
 }
 
-DetachedTask run_singleflight_resolve(fiber::event::EventLoop *loop,
-                                      fiber::dns::SharedDnsCache *cache,
-                                      std::uint16_t port,
-                                      std::promise<ResolveOutcome> *first_promise,
+DetachedTask run_singleflight_resolve(fiber::event::EventLoop *loop, fiber::dns::SharedDnsCache *cache,
+                                      std::uint16_t port, std::promise<ResolveOutcome> *first_promise,
                                       std::promise<ResolveOutcome> *second_promise) {
     DnsResolverLocal resolver;
     DnsClient::Options client_options{};
@@ -386,12 +376,14 @@ TEST(DnsResolverLocalTest, ResolvesCnameAndUsesCacheOnSecondLookup) {
     std::promise<ResolveOutcome> resolve_promise;
 
     auto response = make_cname_a_response(0, "www.example.com", "edge.example.net", {7, 7, 7, 7});
-    fiber::async::spawn(group.at(0),
-                        [&]() { return run_single_response_server(&group.at(0), &port_promise, &server_promise, response); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_single_response_server(&group.at(0), &port_promise, &server_promise, response);
+    });
     const auto port = port_promise.get_future().get();
     ASSERT_NE(port, 0);
 
-    fiber::async::spawn(group.at(0), [&]() { return run_double_resolve(&group.at(0), &cache, port, &resolve_promise); });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_double_resolve(&group.at(0), &cache, port, &resolve_promise); });
 
     const auto outcome = resolve_promise.get_future().get();
     const auto server = server_promise.get_future().get();
@@ -421,15 +413,15 @@ TEST(DnsResolverLocalTest, ConcurrentLookupsShareSingleUpstreamQuery) {
     std::promise<ResolveOutcome> second_promise;
 
     auto response = make_a_response(0, "singleflight.example", {9, 8, 7, 6});
-    fiber::async::spawn(group.at(0),
-                        [&]() {
-                            return run_single_response_server(&group.at(0), &port_promise, &server_promise, response, 50ms);
-                        });
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_single_response_server(&group.at(0), &port_promise, &server_promise, response, 50ms);
+    });
     const auto port = port_promise.get_future().get();
     ASSERT_NE(port, 0);
 
-    fiber::async::spawn(group.at(0),
-                        [&]() { return run_singleflight_resolve(&group.at(0), &cache, port, &first_promise, &second_promise); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_singleflight_resolve(&group.at(0), &cache, port, &first_promise, &second_promise);
+    });
 
     const auto first = first_promise.get_future().get();
     const auto second = second_promise.get_future().get();

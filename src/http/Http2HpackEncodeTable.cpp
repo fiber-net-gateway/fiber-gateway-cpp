@@ -4,7 +4,8 @@
 
 namespace fiber::http {
 
-bool Http2HpackEncodeTable::init(const Http2HpackEncodeCatalog &catalog, std::uint32_t max_dynamic_table_size) noexcept {
+bool Http2HpackEncodeTable::init(const Http2HpackEncodeCatalog &catalog,
+                                 std::uint32_t max_dynamic_table_size) noexcept {
     release();
 
     std::unique_ptr<PolicyState[]> policy_state;
@@ -68,8 +69,8 @@ Http2HpackEncodeTable::activate(const Http2HpackEncodeCatalog::EntryView *entry)
     if (state.active) {
         return ActivateResult::AlreadyActive;
     }
-    if (entry->kind != Http2HpackEncodeCatalog::EntryKind::Policy ||
-        entry->entry_size > target_dynamic_table_size_ || target_dynamic_table_size_ == 0) {
+    if (entry->kind != Http2HpackEncodeCatalog::EntryKind::Policy || entry->entry_size > target_dynamic_table_size_ ||
+        target_dynamic_table_size_ == 0) {
         return ActivateResult::Rejected;
     }
 
@@ -124,8 +125,7 @@ bool Http2HpackEncodeTable::resolve_index(const Http2HpackEncodeCatalog::EntryVi
 
 bool Http2HpackEncodeTable::owns_entry(const Http2HpackEncodeCatalog::EntryView *entry) const noexcept {
     return catalog_ != nullptr && entry != nullptr && catalog_->entries_ != nullptr &&
-           entry >= catalog_->entries_.get() &&
-           entry < catalog_->entries_.get() + catalog_->entry_count_;
+           entry >= catalog_->entries_.get() && entry < catalog_->entries_.get() + catalog_->entry_count_;
 }
 
 void Http2HpackEncodeTable::unlink_slot(std::uint32_t slot) noexcept {
@@ -162,8 +162,7 @@ void Http2HpackEncodeTable::evict_oldest() noexcept {
     }
 
     const std::uint32_t slot = oldest_slot_;
-    const Http2HpackEncodeCatalog::EntryView &entry =
-        catalog_->entries_[catalog_->static_count() + slot];
+    const Http2HpackEncodeCatalog::EntryView &entry = catalog_->entries_[catalog_->static_count() + slot];
     if (current_dynamic_size_ >= entry.entry_size) {
         current_dynamic_size_ -= entry.entry_size;
     } else {

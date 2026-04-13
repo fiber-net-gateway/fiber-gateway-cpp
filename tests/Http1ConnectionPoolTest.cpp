@@ -45,8 +45,7 @@ struct HoldServerState {
     std::atomic_bool stop{false};
 };
 
-DetachedTask run_hold_server(fiber::event::EventLoop *loop,
-                             std::size_t accept_count,
+DetachedTask run_hold_server(fiber::event::EventLoop *loop, std::size_t accept_count,
                              std::promise<std::uint16_t> *port_promise,
                              std::promise<fiber::common::IoErr> *result_promise,
                              std::shared_ptr<HoldServerState> state) {
@@ -72,7 +71,7 @@ DetachedTask run_hold_server(fiber::event::EventLoop *loop,
     for (std::size_t i = 0; i < accept_count; ++i) {
         auto accept_result = co_await listener.accept();
         if (!accept_result) {
-            for (int fd : accepted_fds) {
+            for (int fd: accepted_fds) {
                 ::close(fd);
             }
             listener.close();
@@ -87,7 +86,7 @@ DetachedTask run_hold_server(fiber::event::EventLoop *loop,
         co_await fiber::async::sleep(1ms);
     }
 
-    for (int fd : accepted_fds) {
+    for (int fd: accepted_fds) {
         ::close(fd);
     }
     result_promise->set_value(fiber::common::IoErr::None);
@@ -125,16 +124,15 @@ struct LifoScenarioResult {
     std::size_t groups_while_leased = 0;
 };
 
-DetachedTask run_lifo_scenario(fiber::event::EventLoop *loop,
-                               std::uint16_t port,
+DetachedTask run_lifo_scenario(fiber::event::EventLoop *loop, std::uint16_t port,
                                std::promise<LifoScenarioResult> *promise) {
     LifoScenarioResult out;
     fiber::http::Http1ConnectionPoolCore pool(*loop, {
-        .max_idle_per_group = 2,
-        .max_idle_total = 4,
-        .idle_timeout = 30s,
-        .initial_group_capacity = 2,
-    });
+                                                             .max_idle_per_group = 2,
+                                                             .max_idle_total = 4,
+                                                             .idle_timeout = 30s,
+                                                             .initial_group_capacity = 2,
+                                                     });
     if (!pool.init()) {
         out.err = fiber::common::IoErr::NoMem;
         promise->set_value(out);
@@ -188,16 +186,15 @@ struct PerGroupEvictionResult {
     std::size_t groups_after_release = 0;
 };
 
-DetachedTask run_per_group_eviction_scenario(fiber::event::EventLoop *loop,
-                                             std::uint16_t port,
+DetachedTask run_per_group_eviction_scenario(fiber::event::EventLoop *loop, std::uint16_t port,
                                              std::promise<PerGroupEvictionResult> *promise) {
     PerGroupEvictionResult out;
     fiber::http::Http1ConnectionPoolCore pool(*loop, {
-        .max_idle_per_group = 1,
-        .max_idle_total = 4,
-        .idle_timeout = 30s,
-        .initial_group_capacity = 1,
-    });
+                                                             .max_idle_per_group = 1,
+                                                             .max_idle_total = 4,
+                                                             .idle_timeout = 30s,
+                                                             .initial_group_capacity = 1,
+                                                     });
     if (!pool.init()) {
         out.err = fiber::common::IoErr::NoMem;
         promise->set_value(out);
@@ -245,17 +242,15 @@ struct GlobalEvictionResult {
     std::size_t groups_after_release = 0;
 };
 
-DetachedTask run_global_eviction_scenario(fiber::event::EventLoop *loop,
-                                          std::uint16_t port1,
-                                          std::uint16_t port2,
+DetachedTask run_global_eviction_scenario(fiber::event::EventLoop *loop, std::uint16_t port1, std::uint16_t port2,
                                           std::promise<GlobalEvictionResult> *promise) {
     GlobalEvictionResult out;
     fiber::http::Http1ConnectionPoolCore pool(*loop, {
-        .max_idle_per_group = 2,
-        .max_idle_total = 2,
-        .idle_timeout = 30s,
-        .initial_group_capacity = 2,
-    });
+                                                             .max_idle_per_group = 2,
+                                                             .max_idle_total = 2,
+                                                             .idle_timeout = 30s,
+                                                             .initial_group_capacity = 2,
+                                                     });
     if (!pool.init()) {
         out.err = fiber::common::IoErr::NoMem;
         promise->set_value(out);
@@ -315,16 +310,15 @@ struct ExpireScenarioResult {
     std::size_t groups_after_sweep = 0;
 };
 
-DetachedTask run_expire_scenario(fiber::event::EventLoop *loop,
-                                 std::uint16_t port,
+DetachedTask run_expire_scenario(fiber::event::EventLoop *loop, std::uint16_t port,
                                  std::promise<ExpireScenarioResult> *promise) {
     ExpireScenarioResult out;
     fiber::http::Http1ConnectionPoolCore pool(*loop, {
-        .max_idle_per_group = 1,
-        .max_idle_total = 1,
-        .idle_timeout = 10ms,
-        .initial_group_capacity = 1,
-    });
+                                                             .max_idle_per_group = 1,
+                                                             .max_idle_total = 1,
+                                                             .idle_timeout = 10ms,
+                                                             .initial_group_capacity = 1,
+                                                     });
     if (!pool.init()) {
         out.err = fiber::common::IoErr::NoMem;
         promise->set_value(out);
@@ -359,16 +353,15 @@ struct ClosedScenarioResult {
     std::size_t groups_after_release = 0;
 };
 
-DetachedTask run_closed_scenario(fiber::event::EventLoop *loop,
-                                 std::uint16_t port,
+DetachedTask run_closed_scenario(fiber::event::EventLoop *loop, std::uint16_t port,
                                  std::promise<ClosedScenarioResult> *promise) {
     ClosedScenarioResult out;
     fiber::http::Http1ConnectionPoolCore pool(*loop, {
-        .max_idle_per_group = 1,
-        .max_idle_total = 1,
-        .idle_timeout = 30s,
-        .initial_group_capacity = 1,
-    });
+                                                             .max_idle_per_group = 1,
+                                                             .max_idle_total = 1,
+                                                             .idle_timeout = 30s,
+                                                             .initial_group_capacity = 1,
+                                                     });
     if (!pool.init()) {
         out.err = fiber::common::IoErr::NoMem;
         promise->set_value(out);
@@ -451,9 +444,8 @@ TEST(Http1ConnectionPoolTest, PerGroupLimitEvictsOldestIdleConnection) {
 
     std::promise<PerGroupEvictionResult> result_promise;
     auto result_future = result_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() {
-        return run_per_group_eviction_scenario(&group.at(0), port, &result_promise);
-    });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_per_group_eviction_scenario(&group.at(0), port, &result_promise); });
 
     const PerGroupEvictionResult result = result_future.get();
     EXPECT_EQ(result.err, fiber::common::IoErr::None);
@@ -497,9 +489,8 @@ TEST(Http1ConnectionPoolTest, GlobalLimitEvictsOldestIdleConnectionAcrossGroups)
 
     std::promise<GlobalEvictionResult> result_promise;
     auto result_future = result_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() {
-        return run_global_eviction_scenario(&group.at(0), port1, port2, &result_promise);
-    });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_global_eviction_scenario(&group.at(0), port1, port2, &result_promise); });
 
     const GlobalEvictionResult result = result_future.get();
     EXPECT_EQ(result.err, fiber::common::IoErr::None);

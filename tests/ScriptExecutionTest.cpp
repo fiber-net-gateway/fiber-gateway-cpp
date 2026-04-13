@@ -17,7 +17,7 @@ namespace {
 class TestFunction final : public fiber::script::Library::Function {
 public:
     fiber::script::Library::FunctionResult call(fiber::script::ExecutionContext &context) override {
-        (void)context;
+        (void) context;
         return fiber::json::JsValue::make_integer(7);
     }
 };
@@ -25,7 +25,7 @@ public:
 class ThrowFunction final : public fiber::script::Library::Function {
 public:
     fiber::script::Library::FunctionResult call(fiber::script::ExecutionContext &context) override {
-        (void)context;
+        (void) context;
         static char msg[] = "boom";
         return std::unexpected(fiber::json::JsValue::make_native_string(msg, 4));
     }
@@ -34,16 +34,14 @@ public:
 class TestConstant final : public fiber::script::Library::Constant {
 public:
     fiber::script::Library::FunctionResult get(fiber::script::ExecutionContext &context) override {
-        (void)context;
+        (void) context;
         return fiber::json::JsValue::make_integer(41);
     }
 };
 
 class DelayedAsyncFunction final : public fiber::script::Library::AsyncFunction {
 public:
-    void call(fiber::script::AsyncExecutionContext &context) override {
-        context_ = &context;
-    }
+    void call(fiber::script::AsyncExecutionContext &context) override { context_ = &context; }
 
     void complete_with(const fiber::json::JsValue &value) {
         if (!context_) {
@@ -60,11 +58,9 @@ private:
 
 class TestLibrary final : public fiber::script::Library {
 public:
-    explicit TestLibrary(TestFunction *func,
-                         ThrowFunction *boom,
-                         TestConstant *constant,
-                         DelayedAsyncFunction *async_func = nullptr)
-        : func_(func), boom_(boom), constant_(constant), async_func_(async_func) {}
+    explicit TestLibrary(TestFunction *func, ThrowFunction *boom, TestConstant *constant,
+                         DelayedAsyncFunction *async_func = nullptr) :
+        func_(func), boom_(boom), constant_(constant), async_func_(async_func) {}
 
     Function *find_func(std::string_view name) override {
         if (name == "func") {
@@ -91,17 +87,16 @@ public:
     }
 
     AsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) override {
-        (void)namespace_name;
-        (void)key;
+        (void) namespace_name;
+        (void) key;
         return nullptr;
     }
 
-    DirectiveDef *find_directive_def(std::string_view type,
-                                     std::string_view name,
+    DirectiveDef *find_directive_def(std::string_view type, std::string_view name,
                                      const std::vector<fiber::json::JsValue> &literals) override {
-        (void)type;
-        (void)name;
-        (void)literals;
+        (void) type;
+        (void) name;
+        (void) literals;
         return nullptr;
     }
 

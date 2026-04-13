@@ -41,7 +41,7 @@ void RWFd::close() {
         return;
     }
 
-    (void)efd_.unwatch_all();
+    (void) efd_.unwatch_all();
 
     if (waiter_ != nullptr) {
         if (local_waiting_) {
@@ -92,7 +92,7 @@ void RWFd::handle_events(fiber::event::IoEvent events) {
         return;
     }
 
-    (void)efd_.consume_ready(ready);
+    (void) efd_.consume_ready(ready);
 
     waiter_ = nullptr;
     local_waiting_ = false;
@@ -114,7 +114,7 @@ void RWFdCrossThreadWaiter::on_notify_cancel(RWFdCrossThreadWaiter *waiter) {
     RWFd *rwfd = waiter->rwfd_;
     FIBER_ASSERT(rwfd->loop().in_loop());
     if (state == RWFdWaiterState::Request_Cancel) {
-        (void)rwfd->cancel_wait<RWFdCrossThreadWaiter>(waiter);
+        (void) rwfd->cancel_wait<RWFdCrossThreadWaiter>(waiter);
     } else {
         FIBER_ASSERT(state == RWFdWaiterState::Waiting_Cancel);
     }

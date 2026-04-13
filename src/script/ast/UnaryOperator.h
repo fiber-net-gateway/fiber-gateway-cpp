@@ -11,24 +11,14 @@ namespace fiber::script::ast {
 
 class UnaryOperator : public Expression {
 public:
-    UnaryOperator(std::int32_t start,
-                  std::int32_t end,
-                  Operator op,
-                  std::unique_ptr<Expression> operand)
-        : Expression(start, end), op_(op), operand_(std::move(operand)) {
-    }
+    UnaryOperator(std::int32_t start, std::int32_t end, Operator op, std::unique_ptr<Expression> operand) :
+        Expression(start, end), op_(op), operand_(std::move(operand)) {}
 
-    Operator op() const {
-        return op_;
-    }
+    Operator op() const { return op_; }
 
-    const Expression *operand() const {
-        return operand_.get();
-    }
+    const Expression *operand() const { return operand_.get(); }
 
-    std::unique_ptr<Expression> take_operand() {
-        return std::move(operand_);
-    }
+    std::unique_ptr<Expression> take_operand() { return std::move(operand_); }
 
 private:
     Operator op_ = Operator::Add;

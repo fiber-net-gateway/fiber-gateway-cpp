@@ -34,14 +34,14 @@ std::expected<MainConfig, ConfigError> ConfigLoader::load_from_file(const std::s
     std::ifstream input(path);
     if (!input) {
         return std::unexpected(ConfigError{
-            .message = "failed to open config file",
-            .location =
-                SourceLocation{
-                    .source_name = path,
-                    .line = 1,
-                    .column = 1,
-                    .offset = 0,
-                },
+                .message = "failed to open config file",
+                .location =
+                        SourceLocation{
+                                .source_name = path,
+                                .line = 1,
+                                .column = 1,
+                                .offset = 0,
+                        },
         });
     }
 

@@ -1,8 +1,8 @@
 #ifndef FIBER_HTTP_HTTP_SERVER_H
 #define FIBER_HTTP_HTTP_SERVER_H
 
-#include <memory>
 #include <atomic>
+#include <memory>
 
 #include "../async/Spawn.h"
 #include "../common/IoError.h"
@@ -11,9 +11,9 @@
 #include "../event/EventLoop.h"
 #include "../event/EventLoopGroup.h"
 #include "../net/TcpListener.h"
-#include "HttpExchange.h"
 #include "Http2Connection.h"
 #include "Http2HpackEncodeCatalog.h"
+#include "HttpExchange.h"
 #include "HttpTransport.h"
 #include "ServerRequestFactory.h"
 #include "TlsContext.h"
@@ -25,8 +25,7 @@ public:
     HttpServer(event::EventLoop &loop, HttpHandler handler, HttpServerOptions options = {},
                event::EventLoopGroup *worker_group = nullptr);
 
-    fiber::common::IoResult<void> bind(const net::SocketAddress &addr,
-                                       const net::ListenOptions &options);
+    fiber::common::IoResult<void> bind(const net::SocketAddress &addr, const net::ListenOptions &options);
     fiber::async::DetachedTask serve();
     void close();
     [[nodiscard]] int fd() const noexcept;

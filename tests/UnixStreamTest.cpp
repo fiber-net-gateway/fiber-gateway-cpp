@@ -28,8 +28,7 @@ std::string make_socket_path() {
     return std::string(pattern);
 }
 
-DetachedTask accept_once(fiber::event::EventLoop *loop,
-                         fiber::net::UnixAddress address,
+DetachedTask accept_once(fiber::event::EventLoop *loop, fiber::net::UnixAddress address,
                          std::promise<fiber::common::IoResult<void>> *ready_promise,
                          std::promise<fiber::common::IoResult<fiber::net::UnixAcceptResult>> *accept_promise) {
     fiber::net::UnixListener listener(*loop);
@@ -57,8 +56,7 @@ DetachedTask accept_once(fiber::event::EventLoop *loop,
     co_return;
 }
 
-DetachedTask connect_client(fiber::event::EventLoop *loop,
-                            fiber::net::UnixAddress address,
+DetachedTask connect_client(fiber::event::EventLoop *loop, fiber::net::UnixAddress address,
                             std::promise<fiber::common::IoResult<void>> *connect_promise) {
     auto infant_result = co_await fiber::net::UnixStream::connect(*loop, address);
     if (!infant_result) {
@@ -90,9 +88,8 @@ TEST(UnixStreamTest, ConnectsWithAwaiter) {
     auto accept_future = accept_promise.get_future();
     auto connect_future = connect_promise.get_future();
 
-    fiber::async::spawn(group.at(0), [&]() {
-        return accept_once(&group.at(0), address, &ready_promise, &accept_promise);
-    });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return accept_once(&group.at(0), address, &ready_promise, &accept_promise); });
 
     if (ready_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
         group.stop();
@@ -104,9 +101,7 @@ TEST(UnixStreamTest, ConnectsWithAwaiter) {
     auto ready_result = ready_future.get();
     ASSERT_TRUE(ready_result);
 
-    fiber::async::spawn(group.at(1), [&]() {
-        return connect_client(&group.at(1), address, &connect_promise);
-    });
+    fiber::async::spawn(group.at(1), [&]() { return connect_client(&group.at(1), address, &connect_promise); });
 
     if (connect_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
         group.stop();

@@ -45,15 +45,9 @@ public:
 private:
     friend class Script;
 
-    ScriptRun(const ir::Compiled &compiled,
-              const fiber::json::JsValue &root,
-              void *attach,
-              ScriptRuntime &runtime);
+    ScriptRun(const ir::Compiled &compiled, const fiber::json::JsValue &root, void *attach, ScriptRuntime &runtime);
 
-    ScriptRun(const ir::Compiled &compiled,
-              const fiber::json::JsValue &root,
-              void *attach,
-              fiber::json::GcHeap &heap,
+    ScriptRun(const ir::Compiled &compiled, const fiber::json::JsValue &root, void *attach, fiber::json::GcHeap &heap,
               fiber::json::GcRootSet &roots);
 
     Result to_result(run::VmResult result);
@@ -130,22 +124,14 @@ public:
     Script() = default;
     explicit Script(std::shared_ptr<ir::Compiled> compiled);
 
-    ScriptAsyncRun exec_async(const fiber::json::JsValue &root,
-                              void *attach,
-                              ScriptRuntime &runtime);
+    ScriptAsyncRun exec_async(const fiber::json::JsValue &root, void *attach, ScriptRuntime &runtime);
 
-    ScriptAsyncRun exec_async(const fiber::json::JsValue &root,
-                              void *attach,
-                              fiber::json::GcHeap &heap,
+    ScriptAsyncRun exec_async(const fiber::json::JsValue &root, void *attach, fiber::json::GcHeap &heap,
                               fiber::json::GcRootSet &roots);
 
-    ScriptSyncRun exec_sync(const fiber::json::JsValue &root,
-                            void *attach,
-                            ScriptRuntime &runtime);
+    ScriptSyncRun exec_sync(const fiber::json::JsValue &root, void *attach, ScriptRuntime &runtime);
 
-    ScriptSyncRun exec_sync(const fiber::json::JsValue &root,
-                            void *attach,
-                            fiber::json::GcHeap &heap,
+    ScriptSyncRun exec_sync(const fiber::json::JsValue &root, void *attach, fiber::json::GcHeap &heap,
                             fiber::json::GcRootSet &roots);
 
     bool contains_async() const;

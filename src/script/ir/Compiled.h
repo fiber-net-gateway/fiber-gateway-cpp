@@ -8,8 +8,8 @@
 #include <type_traits>
 #include <vector>
 
-#include "Code.h"
 #include "../Library.h"
+#include "Code.h"
 
 namespace fiber::script::ir {
 
@@ -83,7 +83,7 @@ struct Compiled {
     bool validate_operands() const;
 
     bool contains_async() const {
-        for (std::int32_t code : codes) {
+        for (std::int32_t code: codes) {
             switch (code & 0xFF) {
                 case Code::CALL_ASYNC_CONST:
                 case Code::CALL_ASYNC_FUNC:

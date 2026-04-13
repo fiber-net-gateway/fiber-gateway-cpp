@@ -7,8 +7,8 @@
 
 #include <cstdint>
 
-#include "JsNode.h"
 #include "JsGc.h"
+#include "JsNode.h"
 
 namespace fiber::json {
 

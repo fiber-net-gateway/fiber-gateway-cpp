@@ -15,9 +15,9 @@
 #include <netinet/in.h>
 
 #include <lsquic.h>
+#include <lsquic_logger.h>
 #include <lsxpack_header.h>
 #include <openssl/ssl.h>
-#include <lsquic_logger.h>
 
 #include "async/Spawn.h"
 #include "common/IoError.h"
@@ -39,8 +39,7 @@ constexpr auto kStopPollInterval = std::chrono::milliseconds(200);
 
 struct ServerCtx;
 
-struct ConnCtx {
-};
+struct ConnCtx {};
 
 struct HeaderField {
     std::string name;
@@ -134,19 +133,11 @@ void configure_lsquic_logging() {
     }
 }
 
-int select_alpn_cb(SSL *ssl,
-                   const unsigned char **out,
-                   unsigned char *outlen,
-                   const unsigned char *in,
-                   unsigned int inlen,
-                   void *arg) {
+int select_alpn_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen, const unsigned char *in,
+                   unsigned int inlen, void *arg) {
     (void) ssl;
     (void) arg;
-    int rc = SSL_select_next_proto(const_cast<unsigned char **>(out),
-                                   outlen,
-                                   in,
-                                   inlen,
-                                   kH3AlpnWire,
+    int rc = SSL_select_next_proto(const_cast<unsigned char **>(out), outlen, in, inlen, kH3AlpnWire,
                                    sizeof(kH3AlpnWire));
     return rc == OPENSSL_NPN_NEGOTIATED ? SSL_TLSEXT_ERR_OK : SSL_TLSEXT_ERR_ALERT_FATAL;
 }
@@ -162,22 +153,14 @@ bool bind_udp_socket(fiber::net::UdpSocket &socket, uint16_t port) {
     return static_cast<bool>(bind_result);
 }
 
-int header_set_ptr(lsxpack_header *hdr,
-                   HeaderBuf &header_buf,
-                   std::string_view name,
-                   std::string_view value) {
+int header_set_ptr(lsxpack_header *hdr, HeaderBuf &header_buf, std::string_view name, std::string_view value) {
     if (header_buf.off + name.size() + value.size() > header_buf.buf.size()) {
         return -1;
     }
     char *dst = header_buf.buf.data() + header_buf.off;
     std::memcpy(dst, name.data(), name.size());
     std::memcpy(dst + name.size(), value.data(), value.size());
-    lsxpack_header_set_offset2(hdr,
-                               dst,
-                               0,
-                               name.size(),
-                               name.size(),
-                               value.size());
+    lsxpack_header_set_offset2(hdr, dst, 0, name.size(), name.size(), value.size());
     header_buf.off += static_cast<unsigned>(name.size() + value.size());
     return 0;
 }
@@ -308,9 +291,7 @@ lsxpack_header *prepare_decode_header(void *header_set, lsxpack_header *hdr, siz
         return nullptr;
     }
 
-    lsxpack_header_prepare_decode(hdr ? hdr : &headers->xhdr,
-                                  headers->decode_buf.data(),
-                                  headers->decode_off,
+    lsxpack_header_prepare_decode(hdr ? hdr : &headers->xhdr, headers->decode_buf.data(), headers->decode_off,
                                   headers->decode_buf.size() - headers->decode_off);
     return hdr ? hdr : &headers->xhdr;
 }
@@ -340,9 +321,7 @@ int process_decoded_header(void *header_set, lsxpack_header *hdr) {
     return 0;
 }
 
-void discard_header_set(void *header_set) {
-    delete static_cast<RequestHeaders *>(header_set);
-}
+void discard_header_set(void *header_set) { delete static_cast<RequestHeaders *>(header_set); }
 
 lsquic_conn_ctx_t *on_new_conn(void *stream_if_ctx, lsquic_conn_t *conn) {
     (void) stream_if_ctx;
@@ -472,11 +451,11 @@ lsquic_stream_if make_stream_if() {
 const lsquic_stream_if kStreamIf = make_stream_if();
 
 const lsquic_hset_if kHeaderSetIf{
-    .hsi_create_header_set = create_header_set,
-    .hsi_prepare_decode = prepare_decode_header,
-    .hsi_process_header = process_decoded_header,
-    .hsi_discard_header_set = discard_header_set,
-    .hsi_flags = static_cast<lsquic_hsi_flag>(0),
+        .hsi_create_header_set = create_header_set,
+        .hsi_prepare_decode = prepare_decode_header,
+        .hsi_process_header = process_decoded_header,
+        .hsi_discard_header_set = discard_header_set,
+        .hsi_flags = static_cast<lsquic_hsi_flag>(0),
 };
 
 void drain_udp_and_feed_engine(ServerCtx &server) {
@@ -508,13 +487,9 @@ void drain_udp_and_feed_engine(ServerCtx &server) {
             continue;
         }
 
-        lsquic_engine_packet_in(server.engine,
-                                packet.data(),
-                                recv_result->size,
-                                reinterpret_cast<const sockaddr *>(&local),
-                                reinterpret_cast<const sockaddr *>(&peer),
-                                &server,
-                                to_lsquic_ecn(recv_result->ecn));
+        lsquic_engine_packet_in(server.engine, packet.data(), recv_result->size,
+                                reinterpret_cast<const sockaddr *>(&local), reinterpret_cast<const sockaddr *>(&peer),
+                                &server, to_lsquic_ecn(recv_result->ecn));
     }
 }
 
@@ -585,7 +560,7 @@ void on_signal(int signo) {
 }
 
 bool install_signal_handlers() {
-    struct sigaction sa{};
+    struct sigaction sa {};
     sa.sa_handler = on_signal;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;

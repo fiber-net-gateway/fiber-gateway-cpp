@@ -39,9 +39,7 @@ ResolveStatus map_error_rcode(RCode rcode) noexcept {
     return ResolveStatus::ServerFailure;
 }
 
-std::chrono::seconds clamp_ttl(std::uint32_t ttl,
-                               std::chrono::seconds min_ttl,
-                               std::chrono::seconds max_ttl) noexcept {
+std::chrono::seconds clamp_ttl(std::uint32_t ttl, std::chrono::seconds min_ttl, std::chrono::seconds max_ttl) noexcept {
     auto clamped = std::chrono::seconds(ttl);
     if (clamped < min_ttl) {
         clamped = min_ttl;
@@ -52,16 +50,14 @@ std::chrono::seconds clamp_ttl(std::uint32_t ttl,
     return clamped;
 }
 
-std::chrono::steady_clock::time_point ttl_deadline(std::chrono::steady_clock::time_point now,
-                                                   std::uint32_t ttl,
+std::chrono::steady_clock::time_point ttl_deadline(std::chrono::steady_clock::time_point now, std::uint32_t ttl,
                                                    std::chrono::seconds min_ttl,
                                                    std::chrono::seconds max_ttl) noexcept {
     return now + clamp_ttl(ttl, min_ttl, max_ttl);
 }
 
 bool is_supported_type(std::uint16_t qtype) noexcept {
-    return qtype == static_cast<std::uint16_t>(RecordType::A) ||
-           qtype == static_cast<std::uint16_t>(RecordType::AAAA);
+    return qtype == static_cast<std::uint16_t>(RecordType::A) || qtype == static_cast<std::uint16_t>(RecordType::AAAA);
 }
 
 bool parse_ipv4(const MessageParser::ResourceRecord &record, net::IpAddress &out) noexcept {
@@ -91,12 +87,13 @@ common::IoResult<std::uint32_t> parse_soa_negative_ttl(const MessageParser::Mess
     }
 
     std::array<char, kMaxDnsNameLen + 1> scratch{};
-    auto mname = decode_name(message.packet_data, message.packet_len, record.rdata_offset, scratch.data(), scratch.size());
+    auto mname =
+            decode_name(message.packet_data, message.packet_len, record.rdata_offset, scratch.data(), scratch.size());
     if (!mname) {
         return std::unexpected(mname.error());
     }
     auto rname =
-        decode_name(message.packet_data, message.packet_len, mname->next_offset, scratch.data(), scratch.size());
+            decode_name(message.packet_data, message.packet_len, mname->next_offset, scratch.data(), scratch.size());
     if (!rname) {
         return std::unexpected(rname.error());
     }
@@ -165,8 +162,7 @@ bool ResolveResult::valid() const noexcept {
     return name_storage_ != nullptr && (options_.max_records == 0 || records_ != nullptr);
 }
 
-common::IoErr ResolveResult::assign_positive(std::string_view canonical_name,
-                                             const net::IpAddress *records,
+common::IoErr ResolveResult::assign_positive(std::string_view canonical_name, const net::IpAddress *records,
                                              std::uint16_t count,
                                              std::chrono::steady_clock::time_point expire_at) noexcept {
     if ((count != 0 && records == nullptr) || count > options_.max_records) {
@@ -194,8 +190,7 @@ common::IoErr ResolveResult::assign_canonical(std::string_view canonical_name) n
 }
 
 DnsResolverLocal::PendingAwaiter::PendingAwaiter(DnsResolverLocal &resolver, std::uint16_t pending_index) noexcept :
-    resolver_(&resolver), pending_index_(pending_index) {
-}
+    resolver_(&resolver), pending_index_(pending_index) {}
 
 DnsResolverLocal::PendingAwaiter::~PendingAwaiter() {
     if (resolver_ && queued_) {
@@ -223,9 +218,7 @@ DnsResolverLocal::~DnsResolverLocal() {
     }
 }
 
-bool DnsResolverLocal::init(event::EventLoop &loop,
-                            SharedDnsCache &cache,
-                            DnsClient::Options client_options,
+bool DnsResolverLocal::init(event::EventLoop &loop, SharedDnsCache &cache, DnsClient::Options client_options,
                             Options options) noexcept {
     release();
     if (options.max_cname_hops == 0 || options.max_pending == 0 || options.max_packet_size < kDnsHeaderSize ||
@@ -272,9 +265,7 @@ void DnsResolverLocal::release() noexcept {
     reset_state();
 }
 
-bool DnsResolverLocal::valid() const noexcept {
-    return loop_ != nullptr && cache_ != nullptr && client_.valid();
-}
+bool DnsResolverLocal::valid() const noexcept { return loop_ != nullptr && cache_ != nullptr && client_.valid(); }
 
 event::EventLoop &DnsResolverLocal::loop() const noexcept {
     FIBER_ASSERT(loop_ != nullptr);
@@ -284,7 +275,7 @@ event::EventLoop &DnsResolverLocal::loop() const noexcept {
 bool DnsResolverLocal::init_pending_storage() noexcept {
     pending_ = std::make_unique<PendingEntry[]>(options_.max_pending);
     packet_storage_ =
-        std::make_unique<std::uint8_t[]>(static_cast<std::size_t>(options_.max_pending) * options_.max_packet_size);
+            std::make_unique<std::uint8_t[]>(static_cast<std::size_t>(options_.max_pending) * options_.max_packet_size);
     if (!pending_ || !packet_storage_) {
         return false;
     }
@@ -340,15 +331,12 @@ void DnsResolverLocal::cancel_all_pending(common::IoErr err) noexcept {
     }
 }
 
-common::IoErr DnsResolverLocal::normalize_name(std::string_view input,
-                                               char *dst,
-                                               std::size_t cap,
+common::IoErr DnsResolverLocal::normalize_name(std::string_view input, char *dst, std::size_t cap,
                                                std::string_view &out) const noexcept {
     return dns::normalize_name(input, dst, cap, out);
 }
 
-std::uint16_t DnsResolverLocal::find_pending(std::string_view qname,
-                                             std::uint16_t qtype,
+std::uint16_t DnsResolverLocal::find_pending(std::string_view qname, std::uint16_t qtype,
                                              std::uint16_t qclass) const noexcept {
     if (!pending_) {
         return kInvalidPending;
@@ -366,8 +354,7 @@ std::uint16_t DnsResolverLocal::find_pending(std::string_view qname,
     return kInvalidPending;
 }
 
-std::uint16_t DnsResolverLocal::allocate_pending(std::string_view qname,
-                                                 std::uint16_t qtype,
+std::uint16_t DnsResolverLocal::allocate_pending(std::string_view qname, std::uint16_t qtype,
                                                  std::uint16_t qclass) noexcept {
     if (free_head_ == kInvalidPending || qname.size() > kMaxNormalizedNameLen) {
         return kInvalidPending;
@@ -450,7 +437,7 @@ DnsResolverLocal::CacheLookup DnsResolverLocal::lookup_snapshot(const NameSnapsh
                                                                 std::uint16_t qtype) const noexcept {
     CacheLookup out{};
     const NameSnapshot::AddressView &view =
-        qtype == static_cast<std::uint16_t>(RecordType::A) ? snapshot.a() : snapshot.aaaa();
+            qtype == static_cast<std::uint16_t>(RecordType::A) ? snapshot.a() : snapshot.aaaa();
 
     if (view.present) {
         out.kind = view.negative ? CacheLookupKind::NoData : CacheLookupKind::Positive;
@@ -512,11 +499,12 @@ async::Task<common::IoResult<ResolveStatus>> DnsResolverLocal::resolve(const Que
     if (!valid() || closing_) {
         co_return std::unexpected(common::IoErr::Canceled);
     }
-    if (!out.valid() || question.dns_class != static_cast<std::uint16_t>(RecordClass::IN) || !is_supported_type(question.type)) {
+    if (!out.valid() || question.dns_class != static_cast<std::uint16_t>(RecordClass::IN) ||
+        !is_supported_type(question.type)) {
         co_return std::unexpected(question.dns_class != static_cast<std::uint16_t>(RecordClass::IN) ||
-                                          !is_supported_type(question.type)
-                                      ? common::IoErr::NotSupported
-                                      : common::IoErr::Invalid);
+                                                  !is_supported_type(question.type)
+                                          ? common::IoErr::NotSupported
+                                          : common::IoErr::Invalid);
     }
 
     NameSnapshot snapshot;
@@ -601,11 +589,9 @@ async::Task<common::IoResult<ResolveStatus>> DnsResolverLocal::resolve(const Que
     }
 }
 
-async::Task<common::IoResult<DnsResolverLocal::PendingOutcome>> DnsResolverLocal::query_upstream(
-    std::string_view qname,
-    std::uint16_t qtype,
-    std::uint16_t qclass,
-    PendingEntry &pending) noexcept {
+async::Task<common::IoResult<DnsResolverLocal::PendingOutcome>>
+DnsResolverLocal::query_upstream(std::string_view qname, std::uint16_t qtype, std::uint16_t qclass,
+                                 PendingEntry &pending) noexcept {
     QuestionSpec question{};
     question.name = qname;
     question.type = qtype;
@@ -619,13 +605,9 @@ async::Task<common::IoResult<DnsResolverLocal::PendingOutcome>> DnsResolverLocal
     co_return co_await handle_response(qname, qtype, qclass, pending.packet_buf, *query_result, pending.parser);
 }
 
-async::Task<common::IoResult<DnsResolverLocal::PendingOutcome>> DnsResolverLocal::handle_response(
-    std::string_view qname,
-    std::uint16_t qtype,
-    std::uint16_t qclass,
-    const std::uint8_t *packet,
-    std::size_t packet_len,
-    MessageParser &parser) noexcept {
+async::Task<common::IoResult<DnsResolverLocal::PendingOutcome>>
+DnsResolverLocal::handle_response(std::string_view qname, std::uint16_t qtype, std::uint16_t qclass,
+                                  const std::uint8_t *packet, std::size_t packet_len, MessageParser &parser) noexcept {
     auto parsed = parser.parse(packet, packet_len);
     if (!parsed) {
         co_return std::unexpected(parsed.error());
@@ -638,14 +620,13 @@ async::Task<common::IoResult<DnsResolverLocal::PendingOutcome>> DnsResolverLocal
 
     std::array<char, kMaxDnsNameLen + 1> question_name_buf{};
     std::string_view normalized_question_name;
-    common::IoErr err = normalize_name(message.questions[0].name,
-                                       question_name_buf.data(),
-                                       question_name_buf.size(),
+    common::IoErr err = normalize_name(message.questions[0].name, question_name_buf.data(), question_name_buf.size(),
                                        normalized_question_name);
     if (err != common::IoErr::None) {
         co_return std::unexpected(err);
     }
-    if (normalized_question_name != qname || message.questions[0].type != qtype || message.questions[0].dns_class != qclass) {
+    if (normalized_question_name != qname || message.questions[0].type != qtype ||
+        message.questions[0].dns_class != qclass) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -662,9 +643,7 @@ async::Task<common::IoResult<DnsResolverLocal::PendingOutcome>> DnsResolverLocal
         auto neg_ttl = find_negative_ttl(message, qclass);
         if (neg_ttl) {
             err = co_await cache_->upsert_negative_nxdomain(
-                qname,
-                qclass,
-                ttl_deadline(now, *neg_ttl, options_.min_negative_ttl, options_.max_negative_ttl));
+                    qname, qclass, ttl_deadline(now, *neg_ttl, options_.min_negative_ttl, options_.max_negative_ttl));
             if (err != common::IoErr::None) {
                 co_return std::unexpected(err);
             }
@@ -735,10 +714,7 @@ async::Task<common::IoResult<DnsResolverLocal::PendingOutcome>> DnsResolverLocal
         }
 
         if (record.type == static_cast<std::uint16_t>(RecordType::CNAME)) {
-            auto cname = decode_name(message.packet_data,
-                                     message.packet_len,
-                                     record.rdata_offset,
-                                     target_buf.data(),
+            auto cname = decode_name(message.packet_data, message.packet_len, record.rdata_offset, target_buf.data(),
                                      target_buf.size());
             if (!cname) {
                 co_return std::unexpected(cname.error());
@@ -760,10 +736,9 @@ async::Task<common::IoResult<DnsResolverLocal::PendingOutcome>> DnsResolverLocal
                 }
             }
 
-            err = co_await cache_->upsert_cname(owner_name,
-                                                qclass,
-                                                cname->name,
-                                                ttl_deadline(now, ttl, options_.min_positive_ttl, options_.max_positive_ttl));
+            err = co_await cache_->upsert_cname(
+                    owner_name, qclass, cname->name,
+                    ttl_deadline(now, ttl, options_.min_positive_ttl, options_.max_positive_ttl));
             if (err != common::IoErr::None) {
                 co_return std::unexpected(err);
             }
@@ -789,7 +764,7 @@ async::Task<common::IoResult<DnsResolverLocal::PendingOutcome>> DnsResolverLocal
 
             net::IpAddress address;
             bool parsed_ok = record.type == static_cast<std::uint16_t>(RecordType::A) ? parse_ipv4(other, address)
-                                                                                       : parse_ipv6(other, address);
+                                                                                      : parse_ipv6(other, address);
             if (!parsed_ok) {
                 continue;
             }
@@ -822,10 +797,8 @@ async::Task<common::IoResult<DnsResolverLocal::PendingOutcome>> DnsResolverLocal
         auto neg_ttl = find_negative_ttl(message, qclass);
         if (neg_ttl) {
             err = co_await cache_->upsert_negative_nodata(
-                qname,
-                qclass,
-                qtype,
-                ttl_deadline(now, *neg_ttl, options_.min_negative_ttl, options_.max_negative_ttl));
+                    qname, qclass, qtype,
+                    ttl_deadline(now, *neg_ttl, options_.min_negative_ttl, options_.max_negative_ttl));
             if (err != common::IoErr::None) {
                 co_return std::unexpected(err);
             }

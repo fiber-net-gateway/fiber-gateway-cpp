@@ -32,7 +32,7 @@ enum class IoErr : std::uint16_t {
     Unknown,
 };
 
-template <typename E>
+template<typename E>
 using IoResult = std::expected<E, IoErr>;
 
 IoErr io_err_from_errno(int err) noexcept;

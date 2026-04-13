@@ -2,26 +2,18 @@
 
 namespace fiber::event {
 
-TimerQueue::TimerQueue() {
-    init();
-}
+TimerQueue::TimerQueue() { init(); }
 
 void TimerQueue::init() {
     min_ = nullptr;
     count_ = 0;
 }
 
-TimerQueue::Node *TimerQueue::min() const {
-    return min_;
-}
+TimerQueue::Node *TimerQueue::min() const { return min_; }
 
-std::size_t TimerQueue::size() const {
-    return count_;
-}
+std::size_t TimerQueue::size() const { return count_; }
 
-bool TimerQueue::empty() const {
-    return count_ == 0;
-}
+bool TimerQueue::empty() const { return count_ == 0; }
 
 void TimerQueue::swap_nodes(TimerQueue *heap, Node *parent, Node *child) {
     Node *sibling;
@@ -173,8 +165,6 @@ void TimerQueue::remove(Node *node) {
     }
 }
 
-void TimerQueue::dequeue() {
-    remove(min_);
-}
+void TimerQueue::dequeue() { remove(min_); }
 
 } // namespace fiber::event

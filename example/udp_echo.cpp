@@ -77,8 +77,8 @@ DetachedTask echo_loop(fiber::event::EventLoop *loop, std::uint16_t port) {
         auto send_result = co_await socket.send_to(buffer.data(), recv_result->size, recv_result->peer);
         if (!send_result) {
             IoErr err = send_result.error();
-            std::cerr << "send error to " << recv_result->peer.to_string() << ": "
-                      << fiber::common::io_err_name(err) << '\n';
+            std::cerr << "send error to " << recv_result->peer.to_string() << ": " << fiber::common::io_err_name(err)
+                      << '\n';
             if (err == IoErr::BadFd || err == IoErr::Canceled) {
                 break;
             }
@@ -86,8 +86,8 @@ DetachedTask echo_loop(fiber::event::EventLoop *loop, std::uint16_t port) {
         }
 
         if (*send_result != recv_result->size) {
-            std::cerr << "short send to " << recv_result->peer.to_string() << " ("
-                      << *send_result << " of " << recv_result->size << ")\n";
+            std::cerr << "short send to " << recv_result->peer.to_string() << " (" << *send_result << " of "
+                      << recv_result->size << ")\n";
         }
     }
     co_return;
@@ -107,9 +107,7 @@ int main(int argc, char **argv) {
     }
 
     fiber::event::EventLoop loop;
-    fiber::async::spawn(loop, [&]() {
-        return echo_loop(&loop, port);
-    });
+    fiber::async::spawn(loop, [&]() { return echo_loop(&loop, port); });
     loop.run();
     return 0;
 }

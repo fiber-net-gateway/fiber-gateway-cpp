@@ -6,12 +6,12 @@
 #include <unistd.h>
 #include <utility>
 
+#include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
-#include "../common/IoError.h"
 #include "../event/EventLoop.h"
-#include "detail/AcceptFd.h"
 #include "SocketAddress.h"
+#include "detail/AcceptFd.h"
 
 namespace fiber::net {
 
@@ -28,9 +28,7 @@ struct AcceptResult {
     AcceptResult(const AcceptResult &) = delete;
     AcceptResult &operator=(const AcceptResult &) = delete;
 
-    AcceptResult(AcceptResult &&other) noexcept : fd_(other.fd_), peer_(std::move(other.peer_)) {
-        other.fd_ = -1;
-    }
+    AcceptResult(AcceptResult &&other) noexcept : fd_(other.fd_), peer_(std::move(other.peer_)) { other.fd_ = -1; }
 
     AcceptResult &operator=(AcceptResult &&other) noexcept {
         if (this == &other) {
@@ -43,9 +41,7 @@ struct AcceptResult {
         return *this;
     }
 
-    ~AcceptResult() {
-        close_fd();
-    }
+    ~AcceptResult() { close_fd(); }
 
     [[nodiscard]] bool valid() const noexcept { return fd_ >= 0; }
     [[nodiscard]] int fd() const noexcept { return fd_; }
@@ -76,8 +72,7 @@ struct TcpTraits {
     using ListenOptions = fiber::net::ListenOptions;
     using AcceptResult = fiber::net::AcceptResult;
 
-    static fiber::common::IoResult<int> bind(const Address &addr,
-                                             const ListenOptions &options);
+    static fiber::common::IoResult<int> bind(const Address &addr, const ListenOptions &options);
     static fiber::common::IoErr accept_once(int fd, AcceptResult &out);
 };
 
@@ -88,8 +83,7 @@ public:
     explicit TcpListener(fiber::event::EventLoop &loop);
     ~TcpListener();
 
-    fiber::common::IoResult<void> bind(const SocketAddress &addr,
-                                       const ListenOptions &options);
+    fiber::common::IoResult<void> bind(const SocketAddress &addr, const ListenOptions &options);
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] int fd() const noexcept;
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept;

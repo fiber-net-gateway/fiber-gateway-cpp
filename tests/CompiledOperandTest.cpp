@@ -13,8 +13,8 @@
 namespace {
 
 using fiber::json::JsValue;
-using fiber::script::ExecutionContext;
 using fiber::script::AsyncExecutionContext;
+using fiber::script::ExecutionContext;
 using fiber::script::Library;
 using fiber::script::ir::Code;
 using fiber::script::ir::Compiled;
@@ -22,31 +22,27 @@ using fiber::script::ir::Compiled;
 class DummyFunction final : public Library::Function {
 public:
     Library::FunctionResult call(ExecutionContext &context) override {
-        (void)context;
+        (void) context;
         return JsValue::make_undefined();
     }
 };
 
 class DummyAsyncFunction final : public Library::AsyncFunction {
 public:
-    void call(AsyncExecutionContext &context) override {
-        context.return_value(JsValue::make_undefined());
-    }
+    void call(AsyncExecutionContext &context) override { context.return_value(JsValue::make_undefined()); }
 };
 
 class DummyConstant final : public Library::Constant {
 public:
     Library::FunctionResult get(ExecutionContext &context) override {
-        (void)context;
+        (void) context;
         return JsValue::make_undefined();
     }
 };
 
 class DummyAsyncConstant final : public Library::AsyncConstant {
 public:
-    void get(AsyncExecutionContext &context) override {
-        context.return_value(JsValue::make_undefined());
-    }
+    void get(AsyncExecutionContext &context) override { context.return_value(JsValue::make_undefined()); }
 };
 
 class OperandLibrary final : public Library {
@@ -79,12 +75,11 @@ public:
         return nullptr;
     }
 
-    DirectiveDef *find_directive_def(std::string_view type,
-                                     std::string_view name,
+    DirectiveDef *find_directive_def(std::string_view type, std::string_view name,
                                      const std::vector<JsValue> &literals) override {
-        (void)type;
-        (void)name;
-        (void)literals;
+        (void) type;
+        (void) name;
+        (void) literals;
         return nullptr;
     }
 
@@ -136,13 +131,23 @@ TEST(CompiledOperandTest, CompilerEmitsTypedOperands) {
 
     EXPECT_EQ(compiled.operand_at(operand_index_for_code(compiled.codes[prop_get])).kind,
               Compiled::OperandKind::InternedString);
-    EXPECT_EQ(compiled.host_symbol_at(compiled.call_site_at(operand_index_for_code(compiled.codes[call_func])).host_symbol_index).kind,
-              Library::HostCallable::Kind::SyncFunction);
-    EXPECT_EQ(compiled.host_symbol_at(compiled.call_site_at(operand_index_for_code(compiled.codes[call_async_func])).host_symbol_index).kind,
+    EXPECT_EQ(
+            compiled.host_symbol_at(
+                            compiled.call_site_at(operand_index_for_code(compiled.codes[call_func])).host_symbol_index)
+                    .kind,
+            Library::HostCallable::Kind::SyncFunction);
+    EXPECT_EQ(compiled.host_symbol_at(compiled.call_site_at(operand_index_for_code(compiled.codes[call_async_func]))
+                                              .host_symbol_index)
+                      .kind,
               Library::HostCallable::Kind::AsyncFunction);
-    EXPECT_EQ(compiled.host_symbol_at(compiled.call_site_at(operand_index_for_code(compiled.codes[call_const])).host_symbol_index).kind,
-              Library::HostCallable::Kind::SyncConstant);
-    EXPECT_EQ(compiled.host_symbol_at(compiled.call_site_at(operand_index_for_code(compiled.codes[call_async_const])).host_symbol_index).kind,
+    EXPECT_EQ(
+            compiled.host_symbol_at(
+                            compiled.call_site_at(operand_index_for_code(compiled.codes[call_const])).host_symbol_index)
+                    .kind,
+            Library::HostCallable::Kind::SyncConstant);
+    EXPECT_EQ(compiled.host_symbol_at(compiled.call_site_at(operand_index_for_code(compiled.codes[call_async_const]))
+                                              .host_symbol_index)
+                      .kind,
               Library::HostCallable::Kind::AsyncConstant);
     EXPECT_TRUE(compiled.validate_operands());
 }

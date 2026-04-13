@@ -7,8 +7,8 @@
 #include "Utf.h"
 
 #include <cmath>
-#include <cstring>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <string>
 
@@ -23,13 +23,9 @@ JsOpResult make_error(JsOpError error) {
     return result;
 }
 
-bool is_string_type(JsNodeType type) {
-    return type == JsNodeType::String;
-}
+bool is_string_type(JsNodeType type) { return type == JsNodeType::String; }
 
-bool is_number_type(JsNodeType type) {
-    return type == JsNodeType::Integer || type == JsNodeType::Float;
-}
+bool is_number_type(JsNodeType type) { return type == JsNodeType::Integer || type == JsNodeType::Float; }
 
 bool is_numeric_like(JsNodeType type) {
     return type == JsNodeType::Integer || type == JsNodeType::Float || type == JsNodeType::Boolean ||
@@ -288,9 +284,7 @@ bool string_to_utf8_copy(const JsValue &value, std::string &out, JsOpError &erro
     return true;
 }
 
-bool ascii_is_space(char ch) {
-    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v';
-}
+bool ascii_is_space(char ch) { return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v'; }
 
 bool string_to_number(const JsValue &value, double &out, JsOpError &error) {
     std::string buffer;
@@ -499,7 +493,8 @@ bool compare_strings(const JsValue &lhs, const JsValue &rhs, int &result, JsOpEr
 }
 
 double number_value(const JsValue &value) {
-    return js_value_type(value) == JsNodeType::Integer ? static_cast<double>(js_value_int64(value)) : js_value_double(value);
+    return js_value_type(value) == JsNodeType::Integer ? static_cast<double>(js_value_int64(value))
+                                                       : js_value_double(value);
 }
 
 bool numbers_equal(double lhs, double rhs) {

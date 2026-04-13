@@ -33,8 +33,7 @@ public:
 
 private:
     constexpr HttpBodySpec(Kind kind, std::size_t content_length) noexcept :
-        kind_(kind),
-        content_length_(content_length) {}
+        kind_(kind), content_length_(content_length) {}
 
     Kind kind_ = Kind::Auto;
     std::size_t content_length_ = 0;

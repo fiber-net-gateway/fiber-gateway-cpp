@@ -12,9 +12,7 @@ constexpr size_t kSunPathOffset = offsetof(sockaddr_un, sun_path);
 
 } // namespace
 
-UnixAddress::UnixAddress(UnixAddressKind kind, std::string value)
-    : kind_(kind), value_(std::move(value)) {
-}
+UnixAddress::UnixAddress(UnixAddressKind kind, std::string value) : kind_(kind), value_(std::move(value)) {}
 
 UnixAddress UnixAddress::filesystem(std::string path) {
     return UnixAddress(UnixAddressKind::Filesystem, std::move(path));
@@ -24,21 +22,13 @@ UnixAddress UnixAddress::abstract(std::string bytes) {
     return UnixAddress(UnixAddressKind::Abstract, std::move(bytes));
 }
 
-UnixAddress UnixAddress::unnamed() {
-    return UnixAddress(UnixAddressKind::Unnamed, {});
-}
+UnixAddress UnixAddress::unnamed() { return UnixAddress(UnixAddressKind::Unnamed, {}); }
 
-UnixAddressKind UnixAddress::kind() const noexcept {
-    return kind_;
-}
+UnixAddressKind UnixAddress::kind() const noexcept { return kind_; }
 
-const std::string &UnixAddress::path() const noexcept {
-    return value_;
-}
+const std::string &UnixAddress::path() const noexcept { return value_; }
 
-const std::string &UnixAddress::bytes() const noexcept {
-    return value_;
-}
+const std::string &UnixAddress::bytes() const noexcept { return value_; }
 
 bool UnixAddress::to_sockaddr(sockaddr_storage &out, socklen_t &len) const noexcept {
     sockaddr_un addr{};

@@ -6,17 +6,9 @@
 
 namespace fiber::async {
 
-RWMutex::Waiter::Waiter(RWMutex *owner,
-                        WaiterKind kind,
-                        std::coroutine_handle<> handle,
-                        fiber::event::EventLoop *loop,
-                        std::thread::id thread_id)
-    : mutex(owner),
-      kind(kind),
-      handle(handle),
-      loop(loop),
-      thread(thread_id) {
-}
+RWMutex::Waiter::Waiter(RWMutex *owner, WaiterKind kind, std::coroutine_handle<> handle, fiber::event::EventLoop *loop,
+                        std::thread::id thread_id) :
+    mutex(owner), kind(kind), handle(handle), loop(loop), thread(thread_id) {}
 
 void RWMutex::Waiter::resume() {
     WaiterState expected = WaiterState::Notified;
@@ -82,13 +74,9 @@ void RWMutex::WriteLockGuard::unlock() {
     mutex_ = nullptr;
 }
 
-bool RWMutex::WriteLockGuard::owns_lock() const noexcept {
-    return mutex_ != nullptr;
-}
+bool RWMutex::WriteLockGuard::owns_lock() const noexcept { return mutex_ != nullptr; }
 
-RWMutex::ReadLockGuard::ReadLockGuard(ReadLockGuard &&other) noexcept : mutex_(other.mutex_) {
-    other.mutex_ = nullptr;
-}
+RWMutex::ReadLockGuard::ReadLockGuard(ReadLockGuard &&other) noexcept : mutex_(other.mutex_) { other.mutex_ = nullptr; }
 
 RWMutex::ReadLockGuard &RWMutex::ReadLockGuard::operator=(ReadLockGuard &&other) noexcept {
     if (this == &other) {
@@ -116,9 +104,7 @@ void RWMutex::ReadLockGuard::unlock() {
     mutex_ = nullptr;
 }
 
-bool RWMutex::ReadLockGuard::owns_lock() const noexcept {
-    return mutex_ != nullptr;
-}
+bool RWMutex::ReadLockGuard::owns_lock() const noexcept { return mutex_ != nullptr; }
 
 RWMutex::WriteLockAwaiter::~WriteLockAwaiter() {
     if (mutex_ && waiter_) {
@@ -196,13 +182,9 @@ RWMutex::ReadLockGuard RWMutex::ReadLockAwaiter::await_resume() noexcept {
     return mutex_ ? ReadLockGuard(mutex_) : ReadLockGuard();
 }
 
-RWMutex::WriteLockAwaiter RWMutex::lock() noexcept {
-    return WriteLockAwaiter(*this);
-}
+RWMutex::WriteLockAwaiter RWMutex::lock() noexcept { return WriteLockAwaiter(*this); }
 
-RWMutex::ReadLockAwaiter RWMutex::lock_shared() noexcept {
-    return ReadLockAwaiter(*this);
-}
+RWMutex::ReadLockAwaiter RWMutex::lock_shared() noexcept { return ReadLockAwaiter(*this); }
 
 bool RWMutex::try_lock() noexcept {
     std::lock_guard guard(state_mu_);

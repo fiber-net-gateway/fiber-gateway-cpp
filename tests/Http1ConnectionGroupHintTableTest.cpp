@@ -45,9 +45,8 @@ TEST(Http1ConnectionGroupHintTableTest, SeparatesDifferentGroups) {
 
 TEST(Http1ConnectionGroupHintTableTest, ClearRemovesPublishedHints) {
     Http1ConnectionGroupHintTable table;
-    const auto ip_key =
-        Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::v4({127, 0, 0, 1}), 8080,
-                                         Http1ConnectionGroupKey::Scheme::Http);
+    const auto ip_key = Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::v4({127, 0, 0, 1}), 8080,
+                                                         Http1ConnectionGroupKey::Scheme::Http);
 
     table.note_idle_add(ip_key);
     ASSERT_EQ(table.probe(ip_key).approx_count, 1);

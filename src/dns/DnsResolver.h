@@ -49,11 +49,8 @@ public:
 private:
     friend class DnsResolver;
 
-    [[nodiscard]] common::IoErr assign_positive(std::string_view canonical_name,
-                                                const net::IpAddress *records,
-                                                std::uint16_t count,
-                                                std::uint16_t v4_count,
-                                                std::uint16_t v6_count,
+    [[nodiscard]] common::IoErr assign_positive(std::string_view canonical_name, const net::IpAddress *records,
+                                                std::uint16_t count, std::uint16_t v4_count, std::uint16_t v6_count,
                                                 std::chrono::steady_clock::time_point expire_at) noexcept;
     [[nodiscard]] common::IoErr assign_canonical(std::string_view canonical_name) noexcept;
 
@@ -90,8 +87,7 @@ public:
 private:
     friend class AddressResolver;
 
-    [[nodiscard]] common::IoErr assign_positive(std::string_view canonical_name,
-                                                const net::SocketAddress *records,
+    [[nodiscard]] common::IoErr assign_positive(std::string_view canonical_name, const net::SocketAddress *records,
                                                 std::uint16_t count,
                                                 std::chrono::steady_clock::time_point expire_at) noexcept;
     [[nodiscard]] common::IoErr assign_canonical(std::string_view canonical_name) noexcept;
@@ -123,8 +119,7 @@ public:
 
     [[nodiscard]] async::Task<common::IoResult<ResolveStatus>> resolve_host(std::string_view host,
                                                                             AddressResolveResult &out) noexcept;
-    [[nodiscard]] async::Task<common::IoResult<ResolveStatus>> resolve_host(std::string_view host,
-                                                                            AddressPolicy policy,
+    [[nodiscard]] async::Task<common::IoResult<ResolveStatus>> resolve_host(std::string_view host, AddressPolicy policy,
                                                                             AddressResolveResult &out) noexcept;
 
 private:
@@ -148,13 +143,10 @@ public:
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] event::EventLoop &loop() const noexcept;
 
-    [[nodiscard]] async::Task<common::IoResult<ResolveStatus>> resolve(std::string_view host,
-                                                                       std::uint16_t port,
+    [[nodiscard]] async::Task<common::IoResult<ResolveStatus>> resolve(std::string_view host, std::uint16_t port,
                                                                        EndpointResolveResult &out) noexcept;
-    [[nodiscard]] async::Task<common::IoResult<ResolveStatus>> resolve(std::string_view host,
-                                                                       std::uint16_t port,
-                                                                       AddressPolicy policy,
-                                                                       EndpointResolveResult &out) noexcept;
+    [[nodiscard]] async::Task<common::IoResult<ResolveStatus>>
+    resolve(std::string_view host, std::uint16_t port, AddressPolicy policy, EndpointResolveResult &out) noexcept;
 
 private:
     DnsResolver *resolver_ = nullptr;

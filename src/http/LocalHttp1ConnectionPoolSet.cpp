@@ -11,22 +11,15 @@ namespace fiber::http {
 
 class LocalHttp1ConnectionPoolSet::AdminAwaiter : public common::NonCopyable, public common::NonMovable {
 public:
-    enum class Operation : std::uint8_t {
-        Clear,
-        Shutdown
-    };
+    enum class Operation : std::uint8_t { Clear, Shutdown };
 
-    AdminAwaiter(LocalHttp1ConnectionPoolSet &set, Operation operation) noexcept
-        : set_(&set),
-          operation_(operation) {
-    }
+    AdminAwaiter(LocalHttp1ConnectionPoolSet &set, Operation operation) noexcept : set_(&set), operation_(operation) {}
 
     bool await_ready() noexcept {
         if (!set_) {
             return true;
         }
-        if (operation_ == Operation::Clear &&
-            set_->shutdown_requested_.load(std::memory_order_acquire)) {
+        if (operation_ == Operation::Clear && set_->shutdown_requested_.load(std::memory_order_acquire)) {
             return true;
         }
         if (set_->group().running()) {
@@ -51,9 +44,7 @@ public:
 
         const std::size_t shard_count = set_->size();
         if (shard_count == 0) {
-            caller_loop_->post<AdminAwaiter,
-                               &AdminAwaiter::resume_notify_,
-                               &AdminAwaiter::resume_caller>(*this);
+            caller_loop_->post<AdminAwaiter, &AdminAwaiter::resume_notify_, &AdminAwaiter::resume_caller>(*this);
             return true;
         }
 
@@ -104,9 +95,7 @@ private:
             return;
         }
         FIBER_ASSERT(caller_loop_ != nullptr);
-        caller_loop_->post<AdminAwaiter,
-                           &AdminAwaiter::resume_notify_,
-                           &AdminAwaiter::resume_caller>(*this);
+        caller_loop_->post<AdminAwaiter, &AdminAwaiter::resume_notify_, &AdminAwaiter::resume_caller>(*this);
     }
 
     static void resume_caller(AdminAwaiter *awaiter) {
@@ -128,11 +117,8 @@ private:
     event::EventLoop::NotifyEntry resume_notify_{};
 };
 
-LocalHttp1ConnectionPoolSet::LocalHttp1ConnectionPoolSet(event::EventLoopGroup &group,
-                                                         Options pool_options) noexcept
-    : group_(&group),
-      pool_options_(pool_options),
-      storage_(std::make_unique<Slot[]>(group.size())) {
+LocalHttp1ConnectionPoolSet::LocalHttp1ConnectionPoolSet(event::EventLoopGroup &group, Options pool_options) noexcept :
+    group_(&group), pool_options_(pool_options), storage_(std::make_unique<Slot[]>(group.size())) {
     for (std::size_t i = 0; i < group.size(); ++i) {
         auto *core = reinterpret_cast<Http1ConnectionPoolCore *>(storage_[i].storage);
         std::construct_at(core, group.at(i), pool_options_);
@@ -140,8 +126,8 @@ LocalHttp1ConnectionPoolSet::LocalHttp1ConnectionPoolSet(event::EventLoopGroup &
     }
 }
 
-LocalHttp1ConnectionPoolSet::LocalHttp1ConnectionPoolSet(event::EventLoopGroup &group) noexcept
-    : LocalHttp1ConnectionPoolSet(group, Options{}) {}
+LocalHttp1ConnectionPoolSet::LocalHttp1ConnectionPoolSet(event::EventLoopGroup &group) noexcept :
+    LocalHttp1ConnectionPoolSet(group, Options{}) {}
 
 LocalHttp1ConnectionPoolSet::~LocalHttp1ConnectionPoolSet() {
     for (std::size_t i = 0; i < group_->size(); ++i) {

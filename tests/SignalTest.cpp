@@ -22,7 +22,7 @@ namespace {
 
 fiber::async::SignalSet block_signals(std::initializer_list<int> sigs) {
     fiber::async::SignalSet mask;
-    for (int sig : sigs) {
+    for (int sig: sigs) {
         mask.add(sig);
     }
     pthread_sigmask(SIG_BLOCK, &mask.native(), nullptr);
@@ -34,37 +34,25 @@ using DetachedTask = fiber::async::DetachedTask;
 class ManualTask {
 public:
     struct promise_type : fiber::async::CoroutinePromiseBase {
-        ManualTask get_return_object() {
-            return ManualTask{handle_type::from_promise(*this)};
-        }
+        ManualTask get_return_object() { return ManualTask{handle_type::from_promise(*this)}; }
 
-        std::suspend_always initial_suspend() noexcept {
-            return {};
-        }
+        std::suspend_always initial_suspend() noexcept { return {}; }
 
-        std::suspend_always final_suspend() noexcept {
-            return {};
-        }
+        std::suspend_always final_suspend() noexcept { return {}; }
 
-        void return_void() noexcept {
-        }
+        void return_void() noexcept {}
 
-        void unhandled_exception() {
-            std::terminate();
-        }
+        void unhandled_exception() { std::terminate(); }
     };
 
     using handle_type = std::coroutine_handle<promise_type>;
 
-    explicit ManualTask(handle_type handle) : handle_(handle) {
-    }
+    explicit ManualTask(handle_type handle) : handle_(handle) {}
 
     ManualTask(const ManualTask &) = delete;
     ManualTask &operator=(const ManualTask &) = delete;
 
-    ManualTask(ManualTask &&other) noexcept : handle_(other.handle_) {
-        other.handle_ = nullptr;
-    }
+    ManualTask(ManualTask &&other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
 
     ManualTask &operator=(ManualTask &&other) noexcept {
         if (this == &other) {
@@ -94,8 +82,7 @@ private:
     handle_type handle_{};
 };
 
-DetachedTask wait_once(std::promise<fiber::async::SignalInfo> *promise,
-                       fiber::event::SignalService *service,
+DetachedTask wait_once(std::promise<fiber::async::SignalInfo> *promise, fiber::event::SignalService *service,
                        int signum) {
     auto info = co_await fiber::async::wait_signal(signum);
     promise->set_value(info);
@@ -104,12 +91,8 @@ DetachedTask wait_once(std::promise<fiber::async::SignalInfo> *promise,
     co_return;
 }
 
-DetachedTask wait_and_record(std::atomic<int> *order,
-                             std::array<int, 2> *seen,
-                             int id,
-                             std::promise<void> *notify,
-                             fiber::event::SignalService *service,
-                             bool stop_on_resume) {
+DetachedTask wait_and_record(std::atomic<int> *order, std::array<int, 2> *seen, int id, std::promise<void> *notify,
+                             fiber::event::SignalService *service, bool stop_on_resume) {
     auto info = co_await fiber::async::wait_signal(SIGUSR1);
     (void) info;
     int idx = order->fetch_add(1, std::memory_order_acq_rel);
@@ -203,9 +186,7 @@ TEST(SignalTest, PendingBeforeAwait) {
 
     ::kill(getpid(), SIGUSR1);
 
-    fiber::async::spawn(group.at(0), [&]() {
-        return wait_once(&promise, &service, SIGUSR1);
-    });
+    fiber::async::spawn(group.at(0), [&]() { return wait_once(&promise, &service, SIGUSR1); });
 
     if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
         group.stop();

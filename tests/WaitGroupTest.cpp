@@ -33,10 +33,8 @@ DetachedTask record_loop_id(std::promise<std::thread::id> *promise) {
     co_return;
 }
 
-DetachedTask await_join_record_and_maybe_stop(WaitGroup *wg,
-                                              std::promise<std::thread::id> *promise,
-                                              std::atomic<int> *resumed,
-                                              int stop_when_resumed,
+DetachedTask await_join_record_and_maybe_stop(WaitGroup *wg, std::promise<std::thread::id> *promise,
+                                              std::atomic<int> *resumed, int stop_when_resumed,
                                               fiber::event::EventLoopGroup *group) {
     co_await wg->join();
     promise->set_value(std::this_thread::get_id());
@@ -55,9 +53,7 @@ TEST(WaitGroupTest, JoinReturnsImmediatelyWhenEmpty) {
     auto future = promise.get_future();
 
     group.start();
-    fiber::async::spawn(group.at(0), [&]() {
-        return await_join_and_stop(&wg, &promise);
-    });
+    fiber::async::spawn(group.at(0), [&]() { return await_join_and_stop(&wg, &promise); });
 
     if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
         group.stop();
@@ -79,12 +75,8 @@ TEST(WaitGroupTest, JoinResumesAfterDone) {
     wg.add(1);
 
     group.start();
-    fiber::async::spawn(group.at(0), [&]() {
-        return await_join_and_stop(&wg, &promise);
-    });
-    fiber::async::spawn(group.at(0), [&]() {
-        return sleep_then_done(&wg, std::chrono::milliseconds(20));
-    });
+    fiber::async::spawn(group.at(0), [&]() { return await_join_and_stop(&wg, &promise); });
+    fiber::async::spawn(group.at(0), [&]() { return sleep_then_done(&wg, std::chrono::milliseconds(20)); });
 
     if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
         group.stop();
@@ -116,12 +108,8 @@ TEST(WaitGroupTest, WaitersResumeOnOwningLoops) {
 
     group.start();
 
-    fiber::async::spawn(group.at(0), [&]() {
-        return record_loop_id(&loop0_promise);
-    });
-    fiber::async::spawn(group.at(1), [&]() {
-        return record_loop_id(&loop1_promise);
-    });
+    fiber::async::spawn(group.at(0), [&]() { return record_loop_id(&loop0_promise); });
+    fiber::async::spawn(group.at(1), [&]() { return record_loop_id(&loop1_promise); });
 
     if (loop0_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready ||
         loop1_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
@@ -131,19 +119,13 @@ TEST(WaitGroupTest, WaitersResumeOnOwningLoops) {
         return;
     }
 
-    fiber::async::spawn(group.at(0), [&]() {
-        return await_join_record_and_maybe_stop(&wg, &waiter0_promise, &resumed, 2, &group);
-    });
-    fiber::async::spawn(group.at(1), [&]() {
-        return await_join_record_and_maybe_stop(&wg, &waiter1_promise, &resumed, 2, &group);
-    });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return await_join_record_and_maybe_stop(&wg, &waiter0_promise, &resumed, 2, &group); });
+    fiber::async::spawn(group.at(1),
+                        [&]() { return await_join_record_and_maybe_stop(&wg, &waiter1_promise, &resumed, 2, &group); });
 
-    fiber::async::spawn(group.at(0), [&]() {
-        return sleep_then_done(&wg, std::chrono::milliseconds(10));
-    });
-    fiber::async::spawn(group.at(1), [&]() {
-        return sleep_then_done(&wg, std::chrono::milliseconds(20));
-    });
+    fiber::async::spawn(group.at(0), [&]() { return sleep_then_done(&wg, std::chrono::milliseconds(10)); });
+    fiber::async::spawn(group.at(1), [&]() { return sleep_then_done(&wg, std::chrono::milliseconds(20)); });
 
     if (waiter0_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready ||
         waiter1_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {

@@ -68,7 +68,7 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
             }
         }
     )",
-                                                           "inline.conf");
+                                                        "inline.conf");
 
     ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
     const auto &config = *config_result;
@@ -124,7 +124,7 @@ TEST(LiteNginxConfigTest, RejectsVariablesInV1) {
             }
         }
     )",
-                                                           "inline.conf");
+                                                        "inline.conf");
 
     ASSERT_FALSE(config_result.has_value());
     EXPECT_NE(config_result.error().message.find("does not support variables"), std::string::npos);
@@ -143,7 +143,7 @@ TEST(LiteNginxConfigTest, RejectsUnsupportedDirective) {
             }
         }
     )",
-                                                           "inline.conf");
+                                                        "inline.conf");
 
     ASSERT_FALSE(config_result.has_value());
     EXPECT_NE(config_result.error().message.find("unsupported directive"), std::string::npos);
@@ -161,7 +161,7 @@ TEST(LiteNginxConfigTest, RejectsUnknownNamedUpstream) {
             }
         }
     )",
-                                                           "inline.conf");
+                                                        "inline.conf");
 
     ASSERT_FALSE(config_result.has_value());
     EXPECT_NE(config_result.error().message.find("unknown upstream"), std::string::npos);
@@ -179,7 +179,7 @@ TEST(LiteNginxConfigTest, RejectsSslListenWithoutCertificates) {
             }
         }
     )",
-                                                           "inline.conf");
+                                                        "inline.conf");
 
     ASSERT_FALSE(config_result.has_value());
     EXPECT_NE(config_result.error().message.find("certificate and certificate_key"), std::string::npos);

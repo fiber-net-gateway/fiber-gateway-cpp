@@ -20,9 +20,7 @@ StdLibrary &StdLibrary::instance() {
     return inst;
 }
 
-StdLibrary::StdLibrary() {
-    register_std_library(*this);
-}
+StdLibrary::StdLibrary() { register_std_library(*this); }
 
 Library::Function *StdLibrary::find_func(std::string_view name) {
     auto it = functions_.find(std::string(name));
@@ -56,18 +54,15 @@ Library::AsyncConstant *StdLibrary::find_async_constant(std::string_view namespa
     return it->second;
 }
 
-Library::DirectiveDef *StdLibrary::find_directive_def(std::string_view type,
-                                                      std::string_view name,
+Library::DirectiveDef *StdLibrary::find_directive_def(std::string_view type, std::string_view name,
                                                       const std::vector<fiber::json::JsValue> &literals) {
-    (void)type;
-    (void)name;
-    (void)literals;
+    (void) type;
+    (void) name;
+    (void) literals;
     return nullptr;
 }
 
-void StdLibrary::register_func(std::string name, Function *func) {
-    functions_.emplace(std::move(name), func);
-}
+void StdLibrary::register_func(std::string name, Function *func) { functions_.emplace(std::move(name), func); }
 
 void StdLibrary::register_async_func(std::string name, AsyncFunction *func) {
     async_functions_.emplace(std::move(name), func);

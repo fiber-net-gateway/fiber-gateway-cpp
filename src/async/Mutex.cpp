@@ -8,15 +8,8 @@
 
 namespace fiber::async {
 
-Mutex::Waiter::Waiter(Mutex *owner,
-                      std::coroutine_handle<> handle,
-                      fiber::event::EventLoop *loop,
-                      std::thread::id thread_id)
-    : mutex(owner),
-      handle(handle),
-      loop(loop),
-      thread(thread_id) {
-}
+Mutex::Waiter::Waiter(Mutex *owner, std::coroutine_handle<> handle, fiber::event::EventLoop *loop,
+                      std::thread::id thread_id) : mutex(owner), handle(handle), loop(loop), thread(thread_id) {}
 
 void Mutex::Waiter::resume() {
     WaiterState expected = WaiterState::Notified;
@@ -38,9 +31,7 @@ void Mutex::Waiter::on_run(Waiter *waiter) {
     delete waiter;
 }
 
-Mutex::LockGuard::LockGuard(LockGuard &&other) noexcept : mutex_(other.mutex_) {
-    other.mutex_ = nullptr;
-}
+Mutex::LockGuard::LockGuard(LockGuard &&other) noexcept : mutex_(other.mutex_) { other.mutex_ = nullptr; }
 
 Mutex::LockGuard &Mutex::LockGuard::operator=(LockGuard &&other) noexcept {
     if (this == &other) {
@@ -68,9 +59,7 @@ void Mutex::LockGuard::unlock() {
     mutex_ = nullptr;
 }
 
-bool Mutex::LockGuard::owns_lock() const noexcept {
-    return mutex_ != nullptr;
-}
+bool Mutex::LockGuard::owns_lock() const noexcept { return mutex_ != nullptr; }
 
 Mutex::LockAwaiter::~LockAwaiter() {
     if (mutex_ && waiter_) {
@@ -110,9 +99,7 @@ Mutex::LockGuard Mutex::LockAwaiter::await_resume() noexcept {
     return mutex_ ? LockGuard(mutex_) : LockGuard();
 }
 
-Mutex::LockAwaiter Mutex::lock() noexcept {
-    return LockAwaiter(*this);
-}
+Mutex::LockAwaiter Mutex::lock() noexcept { return LockAwaiter(*this); }
 
 bool Mutex::try_lock() noexcept {
     std::lock_guard guard(state_mu_);

@@ -27,12 +27,12 @@ fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     return local.port();
 }
 
-DetachedTask run_hold_server(fiber::event::EventLoop *loop,
-                             std::promise<std::uint16_t> *port_promise,
+DetachedTask run_hold_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
                              std::promise<void> *done_promise) {
     fiber::net::TcpListener listener(*loop);
     fiber::net::ListenOptions listen_options{};
-    auto bind_result = listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
+    auto bind_result =
+            listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
     if (!bind_result) {
         port_promise->set_value(0);
         done_promise->set_value();
@@ -43,13 +43,12 @@ DetachedTask run_hold_server(fiber::event::EventLoop *loop,
     port_promise->set_value(port_result ? *port_result : 0);
 
     auto accept_result = co_await listener.accept();
-    (void)accept_result;
+    (void) accept_result;
     listener.close();
     done_promise->set_value();
 }
 
-DetachedTask run_client_connect(fiber::event::EventLoop *loop,
-                                std::uint16_t port,
+DetachedTask run_client_connect(fiber::event::EventLoop *loop, std::uint16_t port,
                                 std::promise<fiber::common::IoErr> *result_promise,
                                 std::promise<bool> *connected_promise) {
     fiber::http::Http1ClientConnectionOptions options;
@@ -72,9 +71,8 @@ TEST(Http1ClientConnectionTest, ConnectTransitionsToIdleReusableConnection) {
     auto port_future = port_promise.get_future();
     std::promise<void> server_done_promise;
     auto server_done_future = server_done_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() {
-        return run_hold_server(&group.at(0), &port_promise, &server_done_promise);
-    });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_hold_server(&group.at(0), &port_promise, &server_done_promise); });
 
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
@@ -83,9 +81,8 @@ TEST(Http1ClientConnectionTest, ConnectTransitionsToIdleReusableConnection) {
     std::promise<bool> connected_promise;
     auto result_future = result_promise.get_future();
     auto connected_future = connected_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() {
-        return run_client_connect(&group.at(0), port, &result_promise, &connected_promise);
-    });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_client_connect(&group.at(0), port, &result_promise, &connected_promise); });
 
     EXPECT_TRUE(connected_future.get());
     EXPECT_EQ(result_future.get(), fiber::common::IoErr::None);

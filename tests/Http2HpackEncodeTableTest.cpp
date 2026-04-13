@@ -16,8 +16,8 @@ using fiber::http::Http2HpackStaticTable;
 
 TEST(Http2HpackEncodeTableTest, ResolveIndexReturnsStaticAndDynamicIndexes) {
     constexpr std::array<Http2HpackEncodeCatalog::PolicyEntry, 2> kPolicies{{
-        {"server", fiber::http::http_header_name_hash("server"), "nginx-1.25.1"},
-        {"x-powered-by", fiber::http::http_header_name_hash("x-powered-by"), "openresty"},
+            {"server", fiber::http::http_header_name_hash("server"), "nginx-1.25.1"},
+            {"x-powered-by", fiber::http::http_header_name_hash("x-powered-by"), "openresty"},
     }};
 
     Http2HpackEncodeCatalog catalog;
@@ -34,7 +34,7 @@ TEST(Http2HpackEncodeTableTest, ResolveIndexReturnsStaticAndDynamicIndexes) {
 
     const auto server_result = catalog.find("server", fiber::http::http_header_name_hash("server"), "nginx-1.25.1");
     const auto powered_by_result =
-        catalog.find("x-powered-by", fiber::http::http_header_name_hash("x-powered-by"), "openresty");
+            catalog.find("x-powered-by", fiber::http::http_header_name_hash("x-powered-by"), "openresty");
     ASSERT_NE(server_result.entry, nullptr);
     ASSERT_NE(powered_by_result.entry, nullptr);
 
@@ -52,8 +52,8 @@ TEST(Http2HpackEncodeTableTest, ResolveIndexReturnsStaticAndDynamicIndexes) {
 
 TEST(Http2HpackEncodeTableTest, ShrinkEvictsOldestPoliciesAndTracksPendingSizeUpdate) {
     constexpr std::array<Http2HpackEncodeCatalog::PolicyEntry, 2> kPolicies{{
-        {"server", fiber::http::http_header_name_hash("server"), "nginx-1.25.1"},
-        {"x-powered-by", fiber::http::http_header_name_hash("x-powered-by"), "openresty"},
+            {"server", fiber::http::http_header_name_hash("server"), "nginx-1.25.1"},
+            {"x-powered-by", fiber::http::http_header_name_hash("x-powered-by"), "openresty"},
     }};
 
     Http2HpackEncodeCatalog catalog;
@@ -61,7 +61,7 @@ TEST(Http2HpackEncodeTableTest, ShrinkEvictsOldestPoliciesAndTracksPendingSizeUp
 
     const auto server_result = catalog.find("server", fiber::http::http_header_name_hash("server"), "nginx-1.25.1");
     const auto powered_by_result =
-        catalog.find("x-powered-by", fiber::http::http_header_name_hash("x-powered-by"), "openresty");
+            catalog.find("x-powered-by", fiber::http::http_header_name_hash("x-powered-by"), "openresty");
     ASSERT_NE(server_result.entry, nullptr);
     ASSERT_NE(powered_by_result.entry, nullptr);
 

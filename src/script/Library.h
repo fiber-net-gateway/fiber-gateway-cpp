@@ -71,8 +71,7 @@ public:
     };
 
     using HostSyncThunk = HostCallResult (*)(void *userdata, const HostCallFrame &frame) noexcept;
-    using HostAsyncThunk = HostCallResult (*)(void *userdata,
-                                              const HostCallFrame &frame,
+    using HostAsyncThunk = HostCallResult (*)(void *userdata, const HostCallFrame &frame,
                                               const HostAsyncCompletion &completion) noexcept;
 
     struct HostCallable {
@@ -124,16 +123,13 @@ public:
 
     virtual ~Library() = default;
 
-    virtual void mark_root_prop(std::string_view prop_name) {
-        (void)prop_name;
-    }
+    virtual void mark_root_prop(std::string_view prop_name) { (void) prop_name; }
 
     virtual Function *find_func(std::string_view name) = 0;
     virtual AsyncFunction *find_async_func(std::string_view name) = 0;
     virtual Constant *find_constant(std::string_view namespace_name, std::string_view key) = 0;
     virtual AsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) = 0;
-    virtual DirectiveDef *find_directive_def(std::string_view type,
-                                             std::string_view name,
+    virtual DirectiveDef *find_directive_def(std::string_view type, std::string_view name,
                                              const std::vector<fiber::json::JsValue> &literals) = 0;
 
     const HostCallable *resolve_func(std::string_view name) const;

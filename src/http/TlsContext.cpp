@@ -90,7 +90,8 @@ enum ssl_select_cert_result_t select_server_certificate_cb(const SSL_CLIENT_HELL
         return ssl_select_cert_error;
     }
 
-    auto *server_ctx = static_cast<TlsServerContext *>(SSL_get_ex_data(client_hello->ssl, ssl_server_context_ex_index()));
+    auto *server_ctx =
+            static_cast<TlsServerContext *>(SSL_get_ex_data(client_hello->ssl, ssl_server_context_ex_index()));
     if (!server_ctx) {
         return ssl_select_cert_error;
     }
@@ -121,12 +122,10 @@ enum ssl_select_cert_result_t select_server_certificate_cb(const SSL_CLIENT_HELL
 
 } // namespace
 
-TlsContext::TlsContext(TlsOptions options, bool is_server, bool require_server_identity)
-    : options_(std::move(options)), is_server_(is_server), require_server_identity_(require_server_identity) {
+TlsContext::TlsContext(TlsOptions options, bool is_server, bool require_server_identity) :
+    options_(std::move(options)), is_server_(is_server), require_server_identity_(require_server_identity) {
     alpn_ = options_.alpn;
-    alpn_.erase(std::remove_if(alpn_.begin(),
-                               alpn_.end(),
-                               [](const std::string &proto) { return proto.empty(); }),
+    alpn_.erase(std::remove_if(alpn_.begin(), alpn_.end(), [](const std::string &proto) { return proto.empty(); }),
                 alpn_.end());
 }
 
@@ -169,7 +168,7 @@ common::IoResult<void> TlsContext::init() {
             SSL_CTX_set_alpn_select_cb(ctx, &TlsContext::alpn_select_cb, this);
         } else {
             alpn_wire_.clear();
-            for (const auto &proto : alpn_) {
+            for (const auto &proto: alpn_) {
                 if (proto.size() > 255) {
                     SSL_CTX_free(ctx);
                     return std::unexpected(common::IoErr::Invalid);
@@ -188,18 +187,14 @@ common::IoResult<void> TlsContext::init() {
     return {};
 }
 
-int TlsContext::alpn_select_cb(SSL *,
-                               const unsigned char **out,
-                               unsigned char *outlen,
-                               const unsigned char *in,
-                               unsigned int inlen,
-                               void *arg) {
+int TlsContext::alpn_select_cb(SSL *, const unsigned char **out, unsigned char *outlen, const unsigned char *in,
+                               unsigned int inlen, void *arg) {
     auto *self = static_cast<TlsContext *>(arg);
     if (!self || self->alpn().empty() || !in || inlen == 0) {
         return SSL_TLSEXT_ERR_NOACK;
     }
 
-    for (const auto &proto : self->alpn()) {
+    for (const auto &proto: self->alpn()) {
         const unsigned char *ptr = in;
         unsigned int remaining = inlen;
         while (remaining > 0) {
@@ -221,8 +216,7 @@ int TlsContext::alpn_select_cb(SSL *,
 }
 
 TlsServerContext::TlsServerContext(TlsOptions options) :
-    options_(std::move(options)),
-    identity_selector_(options_.identity_selector_ops) {}
+    options_(std::move(options)), identity_selector_(options_.identity_selector_ops) {}
 
 TlsServerContext::~TlsServerContext() = default;
 

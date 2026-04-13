@@ -18,7 +18,7 @@ public:
 
     void *alloc(size_t size, size_t align = alignof(std::max_align_t));
 
-    template <typename T>
+    template<typename T>
     T *alloc(size_t n = 1) {
         size_t bytes = sizeof(T) * n;
         return static_cast<T *>(alloc(bytes, alignof(T)));
@@ -51,7 +51,7 @@ private:
     size_t block_size_ = 0;
 };
 
-template <typename T>
+template<typename T>
 class PoolAllocator {
 public:
     using value_type = T;
@@ -59,7 +59,7 @@ public:
     PoolAllocator() noexcept = default;
     explicit PoolAllocator(BufPool &pool) noexcept : pool_(&pool) {}
 
-    template <typename U>
+    template<typename U>
     PoolAllocator(const PoolAllocator<U> &other) noexcept : pool_(other.pool_) {}
 
     T *allocate(std::size_t n) {
@@ -75,18 +75,18 @@ public:
 
     void deallocate(T *, std::size_t) noexcept {}
 
-    template <typename U>
+    template<typename U>
     bool operator==(const PoolAllocator<U> &other) const noexcept {
         return pool_ == other.pool_;
     }
 
-    template <typename U>
+    template<typename U>
     bool operator!=(const PoolAllocator<U> &other) const noexcept {
         return pool_ != other.pool_;
     }
 
 private:
-    template <typename U>
+    template<typename U>
     friend class PoolAllocator;
 
     BufPool *pool_ = nullptr;

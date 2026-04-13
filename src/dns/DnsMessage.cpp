@@ -13,10 +13,8 @@ std::uint16_t read_be16(const std::uint8_t *data) noexcept {
 }
 
 std::uint32_t read_be32(const std::uint8_t *data) noexcept {
-    return (static_cast<std::uint32_t>(data[0]) << 24U) |
-           (static_cast<std::uint32_t>(data[1]) << 16U) |
-           (static_cast<std::uint32_t>(data[2]) << 8U) |
-           static_cast<std::uint32_t>(data[3]);
+    return (static_cast<std::uint32_t>(data[0]) << 24U) | (static_cast<std::uint32_t>(data[1]) << 16U) |
+           (static_cast<std::uint32_t>(data[2]) << 8U) | static_cast<std::uint32_t>(data[3]);
 }
 
 void write_be16(std::uint8_t *dst, std::uint16_t value) noexcept {
@@ -75,8 +73,7 @@ void MessageParser::reset_parse_state(const std::uint8_t *data, std::size_t len)
     message_.packet_len = len;
 }
 
-common::IoResult<std::string_view> MessageParser::decode_name_into(const std::uint8_t *data,
-                                                                   std::size_t len,
+common::IoResult<std::string_view> MessageParser::decode_name_into(const std::uint8_t *data, std::size_t len,
                                                                    std::size_t offset,
                                                                    std::size_t &next_offset) noexcept {
     if (!name_storage_) {
@@ -86,10 +83,7 @@ common::IoResult<std::string_view> MessageParser::decode_name_into(const std::ui
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    common::IoResult<DecodedName> result = decode_name(data,
-                                                       len,
-                                                       offset,
-                                                       name_storage_.get() + name_storage_used_,
+    common::IoResult<DecodedName> result = decode_name(data, len, offset, name_storage_.get() + name_storage_used_,
                                                        options_.max_name_storage - name_storage_used_);
     if (!result) {
         return std::unexpected(result.error());
@@ -100,9 +94,7 @@ common::IoResult<std::string_view> MessageParser::decode_name_into(const std::ui
     return result->name;
 }
 
-common::IoErr MessageParser::parse_question(const std::uint8_t *data,
-                                            std::size_t len,
-                                            std::size_t &offset,
+common::IoErr MessageParser::parse_question(const std::uint8_t *data, std::size_t len, std::size_t &offset,
                                             Question &out) noexcept {
     std::size_t next_offset = offset;
     auto name = decode_name_into(data, len, offset, next_offset);
@@ -120,9 +112,7 @@ common::IoErr MessageParser::parse_question(const std::uint8_t *data,
     return common::IoErr::None;
 }
 
-common::IoErr MessageParser::parse_record(const std::uint8_t *data,
-                                          std::size_t len,
-                                          std::size_t &offset,
+common::IoErr MessageParser::parse_record(const std::uint8_t *data, std::size_t len, std::size_t &offset,
                                           ResourceRecord &out) noexcept {
     std::size_t next_offset = offset;
     auto name = decode_name_into(data, len, offset, next_offset);
@@ -150,8 +140,7 @@ common::IoErr MessageParser::parse_record(const std::uint8_t *data,
     return common::IoErr::None;
 }
 
-common::IoResult<MessageParser::MessageView> MessageParser::parse(const std::uint8_t *data,
-                                                                  std::size_t len) noexcept {
+common::IoResult<MessageParser::MessageView> MessageParser::parse(const std::uint8_t *data, std::size_t len) noexcept {
     if (!questions_ || !name_storage_ || data == nullptr || len < kDnsHeaderSize) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -196,9 +185,8 @@ common::IoResult<MessageParser::MessageView> MessageParser::parse(const std::uin
     message_.questions = header.question_count != 0 ? questions_.get() : nullptr;
     message_.answers = header.answer_count != 0 ? records_.get() : nullptr;
     message_.authorities = header.authority_count != 0 ? records_.get() + header.answer_count : nullptr;
-    message_.additionals = header.additional_count != 0
-                               ? records_.get() + header.answer_count + header.authority_count
-                               : nullptr;
+    message_.additionals =
+            header.additional_count != 0 ? records_.get() + header.answer_count + header.authority_count : nullptr;
     message_.question_count = header.question_count;
     message_.answer_count = header.answer_count;
     message_.authority_count = header.authority_count;
@@ -206,9 +194,7 @@ common::IoResult<MessageParser::MessageView> MessageParser::parse(const std::uin
     return message_;
 }
 
-common::IoResult<std::size_t> encode_query(const QueryOptions &options,
-                                           const QuestionSpec &question,
-                                           std::uint8_t *dst,
+common::IoResult<std::size_t> encode_query(const QueryOptions &options, const QuestionSpec &question, std::uint8_t *dst,
                                            std::size_t cap) noexcept {
     if ((dst == nullptr && cap != 0) || question.type == 0 || question.dns_class == 0) {
         return std::unexpected(common::IoErr::Invalid);

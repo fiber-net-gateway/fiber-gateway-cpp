@@ -9,13 +9,13 @@
 #include "../async/Spawn.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
-#include "detail/Http2BodyRecvState.h"
-#include "detail/Http2SendAwaiter.h"
 #include "HeaderMap.h"
+#include "Http2Stream.h"
 #include "HttpExchange.h"
 #include "HttpExchangeIo.h"
 #include "HttpHeaderHash.h"
-#include "Http2Stream.h"
+#include "detail/Http2BodyRecvState.h"
+#include "detail/Http2SendAwaiter.h"
 
 namespace fiber::http {
 
@@ -86,8 +86,8 @@ private:
                                                       std::string_view &out) noexcept;
     [[nodiscard]] common::IoErr materialize_value_huffman(const std::uint8_t *data, std::size_t len,
                                                           std::string_view &out) noexcept;
-    [[nodiscard]] common::IoErr commit_field(std::string_view name, std::uint64_t name_hash,
-                                             std::string_view value, bool name_owned = false) noexcept;
+    [[nodiscard]] common::IoErr commit_field(std::string_view name, std::uint64_t name_hash, std::string_view value,
+                                             bool name_owned = false) noexcept;
     [[nodiscard]] common::IoErr commit_regular_header(std::string_view name, std::uint64_t name_hash,
                                                       std::string_view value, bool name_owned = false) noexcept;
     [[nodiscard]] std::string_view copy_to_pool(const std::uint8_t *data, std::size_t len) noexcept;

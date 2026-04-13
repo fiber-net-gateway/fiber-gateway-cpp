@@ -119,12 +119,12 @@ NativeBin js_value_native_binary(const JsValue &value);
 GcHeader *js_value_heap_header(JsValue &value);
 const GcHeader *js_value_heap_header(const JsValue &value);
 
-template <typename T>
+template<typename T>
 T *js_value_heap_ptr(JsValue &value) {
     return reinterpret_cast<T *>(js_value_heap_header(value));
 }
 
-template <typename T>
+template<typename T>
 const T *js_value_heap_ptr(const JsValue &value) {
     return reinterpret_cast<const T *>(js_value_heap_header(value));
 }

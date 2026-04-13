@@ -30,10 +30,11 @@ struct DecodedEvent {
 };
 
 struct DecoderRecorder {
-    static fiber::common::IoErr on_indexed_field(void *ctx, fiber::http::Http2HpackDecoder::TableEntryView entry) noexcept {
+    static fiber::common::IoErr on_indexed_field(void *ctx,
+                                                 fiber::http::Http2HpackDecoder::TableEntryView entry) noexcept {
         auto *self = static_cast<DecoderRecorder *>(ctx);
-        self->events.push_back({DecodedEvent::Kind::IndexedField, std::string(entry.name), std::string(entry.value),
-                                entry.name_hash});
+        self->events.push_back(
+                {DecodedEvent::Kind::IndexedField, std::string(entry.name), std::string(entry.value), entry.name_hash});
         return fiber::common::IoErr::None;
     }
 
@@ -52,7 +53,7 @@ struct DecoderRecorder {
         self->pending_name = self->names.back();
         self->pending_name_hash = fiber::http::http_header_name_hash(self->pending_name);
         self->events.push_back(
-            {DecodedEvent::Kind::NameRaw, std::string(self->pending_name), {}, self->pending_name_hash});
+                {DecodedEvent::Kind::NameRaw, std::string(self->pending_name), {}, self->pending_name_hash});
         return fiber::common::IoErr::None;
     }
 
@@ -67,7 +68,7 @@ struct DecoderRecorder {
         self->names.emplace_back(decoded_len, '\0');
         fiber::http::Http2HuffmanDecodeState state;
         fiber::http::Http2HuffmanDecodeResult result = fiber::http::http2_huffman_decode(
-            state, data, len, reinterpret_cast<std::uint8_t *>(self->names.back().data()), decoded_len, true);
+                state, data, len, reinterpret_cast<std::uint8_t *>(self->names.back().data()), decoded_len, true);
         if (result.code != fiber::http::Http2HuffmanCode::Ok || result.written != decoded_len) {
             return fiber::common::IoErr::Invalid;
         }
@@ -75,7 +76,7 @@ struct DecoderRecorder {
         self->pending_name = self->names.back();
         self->pending_name_hash = fiber::http::http_header_name_hash(self->pending_name);
         self->events.push_back(
-            {DecodedEvent::Kind::NameHuffman, std::string(self->pending_name), {}, self->pending_name_hash});
+                {DecodedEvent::Kind::NameHuffman, std::string(self->pending_name), {}, self->pending_name_hash});
         return fiber::common::IoErr::None;
     }
 
@@ -105,7 +106,7 @@ struct DecoderRecorder {
         self->values.emplace_back(decoded_len, '\0');
         fiber::http::Http2HuffmanDecodeState state;
         fiber::http::Http2HuffmanDecodeResult result = fiber::http::http2_huffman_decode(
-            state, data, len, reinterpret_cast<std::uint8_t *>(self->values.back().data()), decoded_len, true);
+                state, data, len, reinterpret_cast<std::uint8_t *>(self->values.back().data()), decoded_len, true);
         if (result.code != fiber::http::Http2HuffmanCode::Ok || result.written != decoded_len) {
             return fiber::common::IoErr::Invalid;
         }
@@ -122,12 +123,9 @@ struct DecoderRecorder {
 
     static const fiber::http::Http2HpackDecoder::Ops &ops() noexcept {
         static const fiber::http::Http2HpackDecoder::Ops kOps{
-            &DecoderRecorder::on_indexed_field,
-            &DecoderRecorder::on_indexed_name,
-            &DecoderRecorder::on_name_raw,
-            &DecoderRecorder::on_name_huffman,
-            &DecoderRecorder::on_value_raw,
-            &DecoderRecorder::on_value_huffman,
+                &DecoderRecorder::on_indexed_field, &DecoderRecorder::on_indexed_name,
+                &DecoderRecorder::on_name_raw,      &DecoderRecorder::on_name_huffman,
+                &DecoderRecorder::on_value_raw,     &DecoderRecorder::on_value_huffman,
         };
         return kOps;
     }
@@ -192,16 +190,17 @@ TEST(Http2HpackDecoderTest, DecodesHuffmanLiteralFieldViaOwnerCallbacks) {
 
     const std::string name = "foo";
     const std::string value = "bar";
-    const std::size_t encoded_name_len = fiber::http::http2_huffman_encoded_length(
-        reinterpret_cast<const std::uint8_t *>(name.data()), name.size());
+    const std::size_t encoded_name_len =
+            fiber::http::http2_huffman_encoded_length(reinterpret_cast<const std::uint8_t *>(name.data()), name.size());
     const std::size_t encoded_value_len = fiber::http::http2_huffman_encoded_length(
-        reinterpret_cast<const std::uint8_t *>(value.data()), value.size());
+            reinterpret_cast<const std::uint8_t *>(value.data()), value.size());
     std::vector<std::uint8_t> encoded_name(encoded_name_len);
     std::vector<std::uint8_t> encoded_value(encoded_value_len);
     fiber::http::Http2HuffmanEncodeResult name_result = fiber::http::http2_huffman_encode(
-        reinterpret_cast<const std::uint8_t *>(name.data()), name.size(), encoded_name.data(), encoded_name.size());
-    fiber::http::Http2HuffmanEncodeResult value_result = fiber::http::http2_huffman_encode(
-        reinterpret_cast<const std::uint8_t *>(value.data()), value.size(), encoded_value.data(), encoded_value.size());
+            reinterpret_cast<const std::uint8_t *>(name.data()), name.size(), encoded_name.data(), encoded_name.size());
+    fiber::http::Http2HuffmanEncodeResult value_result =
+            fiber::http::http2_huffman_encode(reinterpret_cast<const std::uint8_t *>(value.data()), value.size(),
+                                              encoded_value.data(), encoded_value.size());
     ASSERT_EQ(name_result.code, fiber::http::Http2HuffmanCode::Ok);
     ASSERT_EQ(value_result.code, fiber::http::Http2HuffmanCode::Ok);
 

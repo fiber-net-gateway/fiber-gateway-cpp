@@ -5,45 +5,26 @@
 #include <string>
 #include <vector>
 
-#include "Expression.h"
 #include "../Library.h"
+#include "Expression.h"
 
 namespace fiber::script::ast {
 
 class FunctionCall : public Expression {
 public:
-    FunctionCall(std::int32_t start,
-                 std::int32_t end,
-                 std::string name,
-                 const Library::HostCallable *func,
-                 const Library::HostCallable *async_func,
-                 std::vector<std::unique_ptr<Expression>> args)
-        : Expression(start, end),
-          name_(std::move(name)),
-          func_(func),
-          async_func_(async_func),
-          args_(std::move(args)) {
-    }
+    FunctionCall(std::int32_t start, std::int32_t end, std::string name, const Library::HostCallable *func,
+                 const Library::HostCallable *async_func, std::vector<std::unique_ptr<Expression>> args) :
+        Expression(start, end), name_(std::move(name)), func_(func), async_func_(async_func), args_(std::move(args)) {}
 
-    const std::string &name() const {
-        return name_;
-    }
+    const std::string &name() const { return name_; }
 
-    const Library::HostCallable *func() const {
-        return func_;
-    }
+    const Library::HostCallable *func() const { return func_; }
 
-    const Library::HostCallable *async_func() const {
-        return async_func_;
-    }
+    const Library::HostCallable *async_func() const { return async_func_; }
 
-    bool is_async() const {
-        return async_func_ != nullptr;
-    }
+    bool is_async() const { return async_func_ != nullptr; }
 
-    const std::vector<std::unique_ptr<Expression>> &args() const {
-        return args_;
-    }
+    const std::vector<std::unique_ptr<Expression>> &args() const { return args_; }
 
 private:
     std::string name_;

@@ -13,56 +13,41 @@ namespace fiber::async {
 
 class TaskPromiseBase : public CoroutinePromiseBase {
 public:
-    std::suspend_always initial_suspend() noexcept {
-        return {};
-    }
+    std::suspend_always initial_suspend() noexcept { return {}; }
 
     struct FinalAwaiter {
-        bool await_ready() noexcept {
-            return false;
-        }
+        bool await_ready() noexcept { return false; }
 
-        template <typename Promise>
+        template<typename Promise>
         auto await_suspend(std::coroutine_handle<Promise> handle) noexcept {
             Promise &promise = handle.promise();
             return promise.continuation();
         }
 
-        void await_resume() noexcept {
-        }
+        void await_resume() noexcept {}
     };
 
-    FinalAwaiter final_suspend() noexcept {
-        return {};
-    }
+    FinalAwaiter final_suspend() noexcept { return {}; }
 
-    void set_continuation(std::coroutine_handle<> handle) noexcept {
-        continuation_ = handle;
-    }
+    void set_continuation(std::coroutine_handle<> handle) noexcept { continuation_ = handle; }
 
-    std::coroutine_handle<> continuation() const noexcept {
-        return continuation_;
-    }
+    std::coroutine_handle<> continuation() const noexcept { return continuation_; }
 
 private:
     std::coroutine_handle<> continuation_ = nullptr;
 };
 
-template <typename T>
+template<typename T>
 class Task {
 public:
     struct promise_type : TaskPromiseBase {
         std::optional<T> result_;
 
-        Task get_return_object() noexcept {
-            return Task{handle_type::from_promise(*this)};
-        }
+        Task get_return_object() noexcept { return Task{handle_type::from_promise(*this)}; }
 
-        void unhandled_exception() {
-            FIBER_PANIC("unhandled exception in Task");
-        }
+        void unhandled_exception() { FIBER_PANIC("unhandled exception in Task"); }
 
-        template <typename U>
+        template<typename U>
             requires std::convertible_to<U, T>
         void return_value(U &&value) {
             result_ = std::forward<U>(value);
@@ -79,15 +64,12 @@ public:
     using handle_type = std::coroutine_handle<promise_type>;
 
     Task() = default;
-    explicit Task(handle_type handle) : handle_(handle) {
-    }
+    explicit Task(handle_type handle) : handle_(handle) {}
 
     Task(const Task &) = delete;
     Task &operator=(const Task &) = delete;
 
-    Task(Task &&other) noexcept : handle_(other.handle_) {
-        other.handle_ = nullptr;
-    }
+    Task(Task &&other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
 
     Task &operator=(Task &&other) noexcept {
         if (this == &other) {
@@ -107,52 +89,38 @@ public:
         }
     }
 
-    bool valid() const noexcept {
-        return static_cast<bool>(handle_);
-    }
+    bool valid() const noexcept { return static_cast<bool>(handle_); }
 
     struct Awaiter {
         handle_type handle;
 
-        bool await_ready() const noexcept {
-            return !handle || handle.done();
-        }
+        bool await_ready() const noexcept { return !handle || handle.done(); }
 
         std::coroutine_handle<> await_suspend(std::coroutine_handle<> cont) {
             handle.promise().set_continuation(cont);
             return handle;
         }
 
-        T await_resume() {
-            return handle.promise().result();
-        }
+        T await_resume() { return handle.promise().result(); }
     };
 
-    Awaiter operator co_await() {
-        return Awaiter{handle_};
-    }
+    Awaiter operator co_await() { return Awaiter{handle_}; }
 
 private:
     handle_type handle_ = nullptr;
 };
 
-template <>
+template<>
 class Task<void> {
 public:
     struct promise_type : TaskPromiseBase {
         bool completed_ = false;
 
-        Task get_return_object() noexcept {
-            return Task{handle_type::from_promise(*this)};
-        }
+        Task get_return_object() noexcept { return Task{handle_type::from_promise(*this)}; }
 
-        void unhandled_exception() {
-            FIBER_PANIC("unhandled exception in Task");
-        }
+        void unhandled_exception() { FIBER_PANIC("unhandled exception in Task"); }
 
-        void return_void() noexcept {
-            completed_ = true;
-        }
+        void return_void() noexcept { completed_ = true; }
 
         void result() const {
             if (!completed_) {
@@ -164,15 +132,12 @@ public:
     using handle_type = std::coroutine_handle<promise_type>;
 
     Task() = default;
-    explicit Task(handle_type handle) : handle_(handle) {
-    }
+    explicit Task(handle_type handle) : handle_(handle) {}
 
     Task(const Task &) = delete;
     Task &operator=(const Task &) = delete;
 
-    Task(Task &&other) noexcept : handle_(other.handle_) {
-        other.handle_ = nullptr;
-    }
+    Task(Task &&other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
 
     Task &operator=(Task &&other) noexcept {
         if (this == &other) {
@@ -192,30 +157,22 @@ public:
         }
     }
 
-    bool valid() const noexcept {
-        return static_cast<bool>(handle_);
-    }
+    bool valid() const noexcept { return static_cast<bool>(handle_); }
 
     struct Awaiter {
         handle_type handle;
 
-        bool await_ready() const noexcept {
-            return !handle || handle.done();
-        }
+        bool await_ready() const noexcept { return !handle || handle.done(); }
 
         std::coroutine_handle<> await_suspend(std::coroutine_handle<> cont) {
             handle.promise().set_continuation(cont);
             return handle;
         }
 
-        void await_resume() {
-            handle.promise().result();
-        }
+        void await_resume() { handle.promise().result(); }
     };
 
-    Awaiter operator co_await() {
-        return Awaiter{handle_};
-    }
+    Awaiter operator co_await() { return Awaiter{handle_}; }
 
 private:
     handle_type handle_ = nullptr;

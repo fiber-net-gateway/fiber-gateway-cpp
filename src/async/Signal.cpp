@@ -5,9 +5,7 @@
 
 namespace fiber::async {
 
-SignalSet::SignalSet() {
-    sigemptyset(&set_);
-}
+SignalSet::SignalSet() { sigemptyset(&set_); }
 
 SignalSet &SignalSet::add(int signum) {
     sigaddset(&set_, signum);
@@ -19,19 +17,11 @@ SignalSet &SignalSet::remove(int signum) {
     return *this;
 }
 
-bool SignalSet::contains(int signum) const noexcept {
-    return sigismember(&set_, signum) == 1;
-}
+bool SignalSet::contains(int signum) const noexcept { return sigismember(&set_, signum) == 1; }
 
-detail::SignalWaiter::SignalWaiter(SignalAwaiter *owner,
-                                   int signum,
-                                   fiber::event::EventLoop *loop,
-                                   std::coroutine_handle<> handle)
-    : loop(loop),
-      handle(handle),
-      signum(signum),
-      owner(owner) {
-}
+detail::SignalWaiter::SignalWaiter(SignalAwaiter *owner, int signum, fiber::event::EventLoop *loop,
+                                   std::coroutine_handle<> handle) :
+    loop(loop), handle(handle), signum(signum), owner(owner) {}
 
 void detail::SignalWaiter::resume() {
     SignalWaiterState expected = SignalWaiterState::Notified;
@@ -58,8 +48,7 @@ void detail::SignalWaiter::on_run(SignalWaiter *waiter) {
     delete waiter;
 }
 
-SignalAwaiter::SignalAwaiter(int signum) noexcept : signum_(signum) {
-}
+SignalAwaiter::SignalAwaiter(int signum) noexcept : signum_(signum) {}
 
 SignalAwaiter::~SignalAwaiter() {
     if (waiting_ && service_) {
@@ -101,8 +90,6 @@ SignalInfo SignalAwaiter::await_resume() noexcept {
     return info_;
 }
 
-SignalAwaiter wait_signal(int signum) {
-    return SignalAwaiter(signum);
-}
+SignalAwaiter wait_signal(int signum) { return SignalAwaiter(signum); }
 
 } // namespace fiber::async

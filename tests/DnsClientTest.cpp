@@ -83,9 +83,7 @@ void push_be32(std::vector<std::uint8_t> &out, std::uint32_t value) {
     out.push_back(static_cast<std::uint8_t>(value & 0xffU));
 }
 
-std::vector<std::uint8_t> make_a_response(std::uint16_t id,
-                                          std::string_view qname,
-                                          std::array<std::uint8_t, 4> addr) {
+std::vector<std::uint8_t> make_a_response(std::uint16_t id, std::string_view qname, std::array<std::uint8_t, 4> addr) {
     std::vector<std::uint8_t> packet;
     packet.reserve(64);
     push_be16(packet, id);
@@ -130,13 +128,12 @@ std::uint16_t read_be16(const std::uint8_t *data) {
     return static_cast<std::uint16_t>((static_cast<std::uint16_t>(data[0]) << 8U) | data[1]);
 }
 
-fiber::async::Task<fiber::common::IoResult<void>> read_exact(fiber::net::TcpStream &stream,
-                                                             std::uint8_t *buf,
+fiber::async::Task<fiber::common::IoResult<void>> read_exact(fiber::net::TcpStream &stream, std::uint8_t *buf,
                                                              std::size_t len) {
     std::size_t total = 0;
     while (total < len) {
-        auto read_result = co_await fiber::async::timeout_for(
-            [&]() { return stream.read(buf + total, len - total); }, 2s);
+        auto read_result =
+                co_await fiber::async::timeout_for([&]() { return stream.read(buf + total, len - total); }, 2s);
         if (!read_result) {
             co_return std::unexpected(read_result.error());
         }
@@ -148,13 +145,12 @@ fiber::async::Task<fiber::common::IoResult<void>> read_exact(fiber::net::TcpStre
     co_return fiber::common::IoResult<void>{};
 }
 
-fiber::async::Task<fiber::common::IoResult<void>> write_all(fiber::net::TcpStream &stream,
-                                                            const std::uint8_t *buf,
+fiber::async::Task<fiber::common::IoResult<void>> write_all(fiber::net::TcpStream &stream, const std::uint8_t *buf,
                                                             std::size_t len) {
     std::size_t total = 0;
     while (total < len) {
-        auto write_result = co_await fiber::async::timeout_for(
-            [&]() { return stream.write(buf + total, len - total); }, 2s);
+        auto write_result =
+                co_await fiber::async::timeout_for([&]() { return stream.write(buf + total, len - total); }, 2s);
         if (!write_result) {
             co_return std::unexpected(write_result.error());
         }
@@ -166,8 +162,7 @@ fiber::async::Task<fiber::common::IoResult<void>> write_all(fiber::net::TcpStrea
     co_return fiber::common::IoResult<void>{};
 }
 
-DetachedTask run_udp_success_server(fiber::event::EventLoop *loop,
-                                    std::promise<std::uint16_t> *port_promise,
+DetachedTask run_udp_success_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
                                     std::promise<ServerOutcome> *outcome_promise) {
     ServerOutcome outcome;
     fiber::net::UdpSocket socket(*loop);
@@ -189,7 +184,8 @@ DetachedTask run_udp_success_server(fiber::event::EventLoop *loop,
     }
 
     std::array<std::uint8_t, 512> buf{};
-    auto recv_result = co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
+    auto recv_result =
+            co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
     if (!recv_result) {
         outcome.err = recv_result.error();
         outcome_promise->set_value(std::move(outcome));
@@ -199,14 +195,13 @@ DetachedTask run_udp_success_server(fiber::event::EventLoop *loop,
     ++outcome.recv_count;
     auto response = make_a_response(read_be16(buf.data()), "www.example.com", {1, 2, 3, 4});
     auto send_result = co_await fiber::async::timeout_for(
-        [&]() { return socket.send_to(response.data(), response.size(), recv_result->peer); }, 2s);
+            [&]() { return socket.send_to(response.data(), response.size(), recv_result->peer); }, 2s);
     outcome.err = send_result ? IoErr::None : send_result.error();
     socket.close();
     outcome_promise->set_value(std::move(outcome));
 }
 
-DetachedTask run_udp_retry_server(fiber::event::EventLoop *loop,
-                                  std::promise<std::uint16_t> *port_promise,
+DetachedTask run_udp_retry_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
                                   std::promise<ServerOutcome> *outcome_promise) {
     ServerOutcome outcome;
     fiber::net::UdpSocket socket(*loop);
@@ -229,7 +224,8 @@ DetachedTask run_udp_retry_server(fiber::event::EventLoop *loop,
     std::array<std::uint8_t, 512> buf{};
     fiber::net::SocketAddress peer;
     for (std::size_t attempt = 0; attempt < 2; ++attempt) {
-        auto recv_result = co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
+        auto recv_result =
+                co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
         if (!recv_result) {
             outcome.err = recv_result.error();
             outcome_promise->set_value(std::move(outcome));
@@ -242,7 +238,7 @@ DetachedTask run_udp_retry_server(fiber::event::EventLoop *loop,
         }
         auto response = make_a_response(read_be16(buf.data()), "www.example.com", {5, 6, 7, 8});
         auto send_result = co_await fiber::async::timeout_for(
-            [&]() { return socket.send_to(response.data(), response.size(), peer); }, 2s);
+                [&]() { return socket.send_to(response.data(), response.size(), peer); }, 2s);
         outcome.err = send_result ? IoErr::None : send_result.error();
         socket.close();
         outcome_promise->set_value(std::move(outcome));
@@ -254,8 +250,7 @@ DetachedTask run_udp_retry_server(fiber::event::EventLoop *loop,
     outcome_promise->set_value(std::move(outcome));
 }
 
-DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop,
-                                         std::promise<std::uint16_t> *port_promise,
+DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
                                          std::promise<ServerOutcome> *outcome_promise) {
     ServerOutcome outcome;
     fiber::net::UdpSocket udp(*loop);
@@ -297,7 +292,7 @@ DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop,
 
     auto truncated = make_truncated_response(read_be16(buf.data()), "www.example.com");
     auto udp_send = co_await fiber::async::timeout_for(
-        [&]() { return udp.send_to(truncated.data(), truncated.size(), recv_result->peer); }, 2s);
+            [&]() { return udp.send_to(truncated.data(), truncated.size(), recv_result->peer); }, 2s);
     if (!udp_send) {
         outcome.err = udp_send.error();
         outcome_promise->set_value(std::move(outcome));
@@ -347,11 +342,8 @@ DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop,
     outcome_promise->set_value(std::move(outcome));
 }
 
-DetachedTask run_client_query(fiber::event::EventLoop *loop,
-                              std::uint16_t port,
-                              std::chrono::milliseconds timeout,
-                              std::uint8_t attempts,
-                              bool enable_tcp_fallback,
+DetachedTask run_client_query(fiber::event::EventLoop *loop, std::uint16_t port, std::chrono::milliseconds timeout,
+                              std::uint8_t attempts, bool enable_tcp_fallback,
                               std::promise<ClientOutcome> *outcome_promise) {
     ClientOutcome outcome;
     DnsClient client;
@@ -421,11 +413,13 @@ TEST(DnsClientTest, QueryRawReturnsUdpResponse) {
     std::promise<ServerOutcome> server_promise;
     std::promise<ClientOutcome> client_promise;
 
-    fiber::async::spawn(group.at(0), [&]() { return run_udp_success_server(&group.at(0), &port_promise, &server_promise); });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_udp_success_server(&group.at(0), &port_promise, &server_promise); });
     const auto port = port_promise.get_future().get();
     ASSERT_NE(port, 0);
 
-    fiber::async::spawn(group.at(0), [&]() { return run_client_query(&group.at(0), port, 200ms, 1, true, &client_promise); });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_client_query(&group.at(0), port, 200ms, 1, true, &client_promise); });
 
     const auto client = client_promise.get_future().get();
     const auto server = server_promise.get_future().get();
@@ -456,11 +450,13 @@ TEST(DnsClientTest, QueryRawRetriesAfterTimeout) {
     std::promise<ServerOutcome> server_promise;
     std::promise<ClientOutcome> client_promise;
 
-    fiber::async::spawn(group.at(0), [&]() { return run_udp_retry_server(&group.at(0), &port_promise, &server_promise); });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_udp_retry_server(&group.at(0), &port_promise, &server_promise); });
     const auto port = port_promise.get_future().get();
     ASSERT_NE(port, 0);
 
-    fiber::async::spawn(group.at(0), [&]() { return run_client_query(&group.at(0), port, 40ms, 2, true, &client_promise); });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_client_query(&group.at(0), port, 40ms, 2, true, &client_promise); });
 
     const auto client = client_promise.get_future().get();
     const auto server = server_promise.get_future().get();
@@ -485,7 +481,8 @@ TEST(DnsClientTest, QueryRawFallsBackToTcpOnTruncatedUdpResponse) {
     const auto port = port_promise.get_future().get();
     ASSERT_NE(port, 0);
 
-    fiber::async::spawn(group.at(0), [&]() { return run_client_query(&group.at(0), port, 200ms, 1, true, &client_promise); });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_client_query(&group.at(0), port, 200ms, 1, true, &client_promise); });
 
     const auto client = client_promise.get_future().get();
     const auto server = server_promise.get_future().get();

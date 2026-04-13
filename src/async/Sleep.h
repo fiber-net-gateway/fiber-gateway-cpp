@@ -9,7 +9,7 @@
 
 namespace fiber::async {
 
-    class SleepAwaiter {
+class SleepAwaiter {
 public:
     explicit SleepAwaiter(std::chrono::steady_clock::duration delay);
     SleepAwaiter(const SleepAwaiter &) = delete;
@@ -27,8 +27,7 @@ public:
 
     bool await_ready() const noexcept;
     void await_suspend(std::coroutine_handle<> handle);
-    void await_resume() const noexcept {
-    }
+    void await_resume() const noexcept {}
 
 private:
     struct SleepTimer final {

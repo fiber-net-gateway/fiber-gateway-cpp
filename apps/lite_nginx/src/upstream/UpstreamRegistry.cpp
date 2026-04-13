@@ -16,7 +16,7 @@ fiber::http::LocalHttp1ConnectionPoolSet::Options make_pool_options(const runtim
     std::size_t max_idle_total = 0;
     std::size_t initial_group_capacity = 0;
 
-    for (const auto &upstream : runtime.upstreams) {
+    for (const auto &upstream: runtime.upstreams) {
         if (upstream.keepalive == 0) {
             continue;
         }
@@ -35,9 +35,10 @@ fiber::http::LocalHttp1ConnectionPoolSet::Options make_pool_options(const runtim
 } // namespace
 
 UpstreamRegistry::UpstreamRegistry(fiber::event::EventLoopGroup &group, const runtime::RuntimeConfig &runtime) noexcept
-    : group_(&group),
-      runtime_(&runtime),
-      cursors_(runtime.upstreams.empty() ? nullptr : std::make_unique<std::atomic<std::uint32_t>[]>(runtime.upstreams.size())) {
+    :
+    group_(&group), runtime_(&runtime),
+    cursors_(runtime.upstreams.empty() ? nullptr
+                                       : std::make_unique<std::atomic<std::uint32_t>[]>(runtime.upstreams.size())) {
     for (std::size_t i = 0; i < runtime.upstreams.size(); ++i) {
         cursors_[i].store(0, std::memory_order_relaxed);
     }
@@ -46,9 +47,7 @@ UpstreamRegistry::UpstreamRegistry(fiber::event::EventLoopGroup &group, const ru
 
 UpstreamRegistry::~UpstreamRegistry() = default;
 
-bool UpstreamRegistry::init() noexcept {
-    return pools_ ? pools_->init() : true;
-}
+bool UpstreamRegistry::init() noexcept { return pools_ ? pools_->init() : true; }
 
 void UpstreamRegistry::shutdown() noexcept {
     if (!pools_) {

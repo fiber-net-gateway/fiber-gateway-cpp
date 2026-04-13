@@ -26,10 +26,8 @@ Http1ClientConnectionOptions Http1ClientConnection::normalize_options(Http1Clien
     return options;
 }
 
-Http1ClientConnection::Http1ClientConnection(event::EventLoop &loop, Http1ClientConnectionOptions options) noexcept
-    : loop_(&loop),
-      options_(normalize_options(std::move(options))),
-      tls_ctx_(options_.tls, false, false) {}
+Http1ClientConnection::Http1ClientConnection(event::EventLoop &loop, Http1ClientConnectionOptions options) noexcept :
+    loop_(&loop), options_(normalize_options(std::move(options))), tls_ctx_(options_.tls, false, false) {}
 
 Http1ClientConnection::~Http1ClientConnection() { close(); }
 
@@ -50,7 +48,7 @@ fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect() noex
     }
 
     auto connect_result = co_await fiber::async::timeout_for(
-        [&]() { return net::TcpStream::connect(*loop_, options_.peer_addr); }, options_.connect_timeout);
+            [&]() { return net::TcpStream::connect(*loop_, options_.peer_addr); }, options_.connect_timeout);
     if (!connect_result) {
         co_return std::unexpected(connect_result.error());
     }

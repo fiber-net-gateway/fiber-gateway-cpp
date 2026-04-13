@@ -6,13 +6,13 @@
 #include <utility>
 
 #include "../../common/Assert.h"
+#include "../../common/json/JsGc.h"
 #include "../Library.h"
+#include "../Runtime.h"
 #include "Access.h"
 #include "Binaries.h"
 #include "Compares.h"
-#include "../../common/json/JsGc.h"
 #include "Unaries.h"
-#include "../Runtime.h"
 
 namespace fiber::script::run {
 
@@ -26,9 +26,7 @@ VmError make_error(std::string name, std::string message, std::int64_t position)
     return error;
 }
 
-VmError make_oom(std::int64_t position) {
-    return make_error("EXEC_OUT_OF_MEMORY", "out of memory", position);
-}
+VmError make_oom(std::int64_t position) { return make_error("EXEC_OUT_OF_MEMORY", "out of memory", position); }
 
 VmError make_throw_error() {
     VmError error;
@@ -39,8 +37,7 @@ VmError make_throw_error() {
 }
 
 std::size_t estimate_exception_bytes(std::string_view name, std::string_view message) {
-    return sizeof(fiber::json::GcException) +
-           fiber::json::gc_estimate_utf8_string_bytes(name.size()) +
+    return sizeof(fiber::json::GcException) + fiber::json::gc_estimate_utf8_string_bytes(name.size()) +
            fiber::json::gc_estimate_utf8_string_bytes(message.size());
 }
 
@@ -91,14 +88,9 @@ Library::HostCallable::Kind expected_host_kind(std::uint8_t op) {
 
 } // namespace
 
-InterpreterVm::InterpreterVm(const ir::Compiled &compiled,
-                             const fiber::json::JsValue &root,
-                             void *attach,
-                             ScriptRuntime &runtime)
-    : compiled_(compiled),
-      root_(root),
-      attach_(attach),
-      runtime_(runtime) {
+InterpreterVm::InterpreterVm(const ir::Compiled &compiled, const fiber::json::JsValue &root, void *attach,
+                             ScriptRuntime &runtime) :
+    compiled_(compiled), root_(root), attach_(attach), runtime_(runtime) {
     FIBER_ASSERT(compiled_.validate_operands());
     stack_size_ = compiled_.stack_size;
     var_count_ = compiled_.var_table_size;
@@ -114,9 +106,7 @@ InterpreterVm::InterpreterVm(const ir::Compiled &compiled,
     runtime_.roots().add_provider(this);
 }
 
-InterpreterVm::~InterpreterVm() {
-    runtime_.roots().remove_provider(this);
-}
+InterpreterVm::~InterpreterVm() { runtime_.roots().remove_provider(this); }
 
 InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
     if (state_ == VmState::Success) {
@@ -415,54 +405,46 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
                     stack_[sp_ - 1] = result.value();
                 }
                 break;
-            case ir::Code::UNARY_PLUS:
-                {
-                    VmResult result = Unaries::plus(stack_[sp_ - 1]);
-                    if (!result) {
-                        if (!handle_error(result.error(), pc_ - 1)) {
-                            return finish_error(result.error());
-                        }
-                        continue;
+            case ir::Code::UNARY_PLUS: {
+                VmResult result = Unaries::plus(stack_[sp_ - 1]);
+                if (!result) {
+                    if (!handle_error(result.error(), pc_ - 1)) {
+                        return finish_error(result.error());
                     }
-                    stack_[sp_ - 1] = result.value();
+                    continue;
                 }
-                break;
-            case ir::Code::UNARY_MINUS:
-                {
-                    VmResult result = Unaries::minus(stack_[sp_ - 1]);
-                    if (!result) {
-                        if (!handle_error(result.error(), pc_ - 1)) {
-                            return finish_error(result.error());
-                        }
-                        continue;
+                stack_[sp_ - 1] = result.value();
+            } break;
+            case ir::Code::UNARY_MINUS: {
+                VmResult result = Unaries::minus(stack_[sp_ - 1]);
+                if (!result) {
+                    if (!handle_error(result.error(), pc_ - 1)) {
+                        return finish_error(result.error());
                     }
-                    stack_[sp_ - 1] = result.value();
+                    continue;
                 }
-                break;
-            case ir::Code::UNARY_NEG:
-                {
-                    VmResult result = Unaries::neg(stack_[sp_ - 1]);
-                    if (!result) {
-                        if (!handle_error(result.error(), pc_ - 1)) {
-                            return finish_error(result.error());
-                        }
-                        continue;
+                stack_[sp_ - 1] = result.value();
+            } break;
+            case ir::Code::UNARY_NEG: {
+                VmResult result = Unaries::neg(stack_[sp_ - 1]);
+                if (!result) {
+                    if (!handle_error(result.error(), pc_ - 1)) {
+                        return finish_error(result.error());
                     }
-                    stack_[sp_ - 1] = result.value();
+                    continue;
                 }
-                break;
-            case ir::Code::UNARY_TYPEOF:
-                {
-                    VmResult result = Unaries::typeof_op(stack_[sp_ - 1], runtime_);
-                    if (!result) {
-                        if (!handle_error(result.error(), pc_ - 1)) {
-                            return finish_error(result.error());
-                        }
-                        continue;
+                stack_[sp_ - 1] = result.value();
+            } break;
+            case ir::Code::UNARY_TYPEOF: {
+                VmResult result = Unaries::typeof_op(stack_[sp_ - 1], runtime_);
+                if (!result) {
+                    if (!handle_error(result.error(), pc_ - 1)) {
+                        return finish_error(result.error());
                     }
-                    stack_[sp_ - 1] = result.value();
+                    continue;
                 }
-                break;
+                stack_[sp_ - 1] = result.value();
+            } break;
             case ir::Code::NEW_OBJECT: {
                 fiber::json::JsValue obj = fiber::json::JsValue::make_undefined();
                 runtime_.run_with_gc_retry(fiber::json::gc_estimate_object_bytes(0), [&]() {
@@ -576,9 +558,8 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
                 std::size_t idx = static_cast<std::size_t>(instr >> 8);
                 const auto *name = compiled_.operand_string(idx);
                 FIBER_ASSERT(name);
-                fiber::json::JsValue key = fiber::json::JsValue::make_native_string(
-                    const_cast<char *>(name->data()),
-                    name->size());
+                fiber::json::JsValue key =
+                        fiber::json::JsValue::make_native_string(const_cast<char *>(name->data()), name->size());
                 VmResult result = Access::prop_get(stack_[sp_ - 1], key, runtime_);
                 if (!result) {
                     if (!handle_error(result.error(), pc_ - 1)) {
@@ -593,9 +574,8 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
                 std::size_t idx = static_cast<std::size_t>(instr >> 8);
                 const auto *name = compiled_.operand_string(idx);
                 FIBER_ASSERT(name);
-                fiber::json::JsValue key = fiber::json::JsValue::make_native_string(
-                    const_cast<char *>(name->data()),
-                    name->size());
+                fiber::json::JsValue key =
+                        fiber::json::JsValue::make_native_string(const_cast<char *>(name->data()), name->size());
                 --sp_;
                 VmResult result = Access::prop_set(stack_[sp_ - 1], stack_[sp_], key, runtime_);
                 if (!result) {
@@ -611,9 +591,8 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
                 std::size_t idx = static_cast<std::size_t>(instr >> 8);
                 const auto *name = compiled_.operand_string(idx);
                 FIBER_ASSERT(name);
-                fiber::json::JsValue key = fiber::json::JsValue::make_native_string(
-                    const_cast<char *>(name->data()),
-                    name->size());
+                fiber::json::JsValue key =
+                        fiber::json::JsValue::make_native_string(const_cast<char *>(name->data()), name->size());
                 --sp_;
                 VmResult result = Access::prop_set1(stack_[sp_ - 1], stack_[sp_], key, runtime_);
                 if (!result) {
@@ -632,8 +611,8 @@ InterpreterVm::VmState InterpreterVm::iterate(VmResult &out) {
             case ir::Code::CALL_ASYNC_CONST: {
                 const auto &site = compiled_.call_site_at(decode_call_site_index(instr));
                 const bool is_spread = opcode_uses_spread(op);
-                const AsyncResumeKind resume_kind = is_spread ? AsyncResumeKind::ReplaceTop
-                                                              : AsyncResumeKind::PushResult;
+                const AsyncResumeKind resume_kind =
+                        is_spread ? AsyncResumeKind::ReplaceTop : AsyncResumeKind::PushResult;
                 const auto &symbol = compiled_.host_symbol_at(site.host_symbol_index);
                 FIBER_ASSERT(symbol.kind == expected_host_kind(op));
                 FIBER_ASSERT(is_spread == ((site.flags & ir::Compiled::CallSiteSpreadArgs) != 0));
@@ -788,9 +767,7 @@ void InterpreterVm::async_complete(void *context, Library::HostCallResult result
     }
 }
 
-bool InterpreterVm::has_thrown() const {
-    return pending_value_kind_ == PendingValueKind::Thrown;
-}
+bool InterpreterVm::has_thrown() const { return pending_value_kind_ == PendingValueKind::Thrown; }
 
 const fiber::json::JsValue &InterpreterVm::thrown() const {
     if (pending_value_kind_ == PendingValueKind::Thrown) {
@@ -900,9 +877,7 @@ VmError InterpreterVm::make_host_fault_error(const Library::HostFault &fault, st
     return error;
 }
 
-bool InterpreterVm::dispatch_call_site(const ir::Compiled::CallSite &site,
-                                       AsyncResumeKind resume_kind,
-                                       VmResult &out) {
+bool InterpreterVm::dispatch_call_site(const ir::Compiled::CallSite &site, AsyncResumeKind resume_kind, VmResult &out) {
     const auto &symbol = compiled_.host_symbol_at(site.host_symbol_index);
     const bool is_spread = (site.flags & ir::Compiled::CallSiteSpreadArgs) != 0;
     if (!is_spread) {
@@ -926,13 +901,9 @@ bool InterpreterVm::dispatch_call_site(const ir::Compiled::CallSite &site,
                 call_args_.clear();
             }
             if (result.kind == Library::HostCallResultKind::Pending) {
-                result = Library::HostCallResult::faulted({
-                    Library::HostFaultCode::InvalidState,
-                    "HOST_INVALID_STATE",
-                    "sync host callable returned pending",
-                    500,
-                    fiber::json::JsValue::make_undefined()
-                });
+                result = Library::HostCallResult::faulted({Library::HostFaultCode::InvalidState, "HOST_INVALID_STATE",
+                                                           "sync host callable returned pending", 500,
+                                                           fiber::json::JsValue::make_undefined()});
             }
             if (!apply_call_result(result, resume_kind, epc, out, false)) {
                 state_ = VmState::Error;
@@ -949,8 +920,7 @@ bool InterpreterVm::dispatch_call_site(const ir::Compiled::CallSite &site,
             async_resume_epc_ = epc;
             async_result_ = Library::HostCallResult::pending();
             const Library::HostAsyncCompletion completion{&InterpreterVm::async_complete, this};
-            Library::HostCallResult result =
-                symbol.callable->async(symbol.callable->userdata, frame, completion);
+            Library::HostCallResult result = symbol.callable->async(symbol.callable->userdata, frame, completion);
             if (is_spread) {
                 call_args_.clear();
             }
@@ -972,11 +942,8 @@ bool InterpreterVm::dispatch_call_site(const ir::Compiled::CallSite &site,
     return true;
 }
 
-bool InterpreterVm::apply_call_result(const Library::HostCallResult &result,
-                                      AsyncResumeKind resume_kind,
-                                      std::size_t resume_epc,
-                                      VmResult &out,
-                                      bool from_async_completion) {
+bool InterpreterVm::apply_call_result(const Library::HostCallResult &result, AsyncResumeKind resume_kind,
+                                      std::size_t resume_epc, VmResult &out, bool from_async_completion) {
     switch (result.kind) {
         case Library::HostCallResultKind::Return:
             if (from_async_completion) {
@@ -1041,8 +1008,7 @@ int InterpreterVm::search_catch(std::size_t epc) const {
     if (len == 0) {
         return -1;
     }
-    if (epc < static_cast<std::size_t>(exp_ins_[0]) ||
-        static_cast<std::size_t>(exp_ins_[len - 1]) <= epc) {
+    if (epc < static_cast<std::size_t>(exp_ins_[0]) || static_cast<std::size_t>(exp_ins_[len - 1]) <= epc) {
         return -1;
     }
     if (len <= 8) {
@@ -1092,7 +1058,7 @@ void InterpreterVm::build_exception_index() {
     std::size_t size = ranges.size();
     exp_ins_.resize(size * 2);
     std::size_t idx = 0;
-    for (const auto &entry : ranges) {
+    for (const auto &entry: ranges) {
         exp_ins_[idx] = entry.first;
         exp_ins_[idx + size] = entry.second;
         ++idx;
@@ -1173,17 +1139,17 @@ VmResult InterpreterVm::make_exception_value(const VmError &error) {
     temp_roots.add(&rooted_meta);
 
     fiber::json::GcString *name_str =
-        runtime_.alloc_with_gc(fiber::json::gc_estimate_utf8_string_bytes(name.size()), [&]() {
-            return fiber::json::gc_new_string(&runtime_.heap(), name.c_str(), name.size());
-        });
+            runtime_.alloc_with_gc(fiber::json::gc_estimate_utf8_string_bytes(name.size()), [&]() {
+                return fiber::json::gc_new_string(&runtime_.heap(), name.c_str(), name.size());
+            });
     if (!name_str) {
         return std::unexpected(make_oom(error.position));
     }
     rooted_name = fiber::json::js_make_heap_ref(&name_str->hdr, fiber::json::JsHeapKind::String);
     fiber::json::GcString *message_str =
-        runtime_.alloc_with_gc(fiber::json::gc_estimate_utf8_string_bytes(message.size()), [&]() {
-            return fiber::json::gc_new_string(&runtime_.heap(), message.c_str(), message.size());
-        });
+            runtime_.alloc_with_gc(fiber::json::gc_estimate_utf8_string_bytes(message.size()), [&]() {
+                return fiber::json::gc_new_string(&runtime_.heap(), message.c_str(), message.size());
+            });
     if (!message_str) {
         return std::unexpected(make_oom(error.position));
     }

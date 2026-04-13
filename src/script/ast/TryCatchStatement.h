@@ -3,36 +3,24 @@
 
 #include <memory>
 
-#include "Statement.h"
 #include "Block.h"
 #include "Identifier.h"
+#include "Statement.h"
 
 namespace fiber::script::ast {
 
 class TryCatchStatement : public Statement {
 public:
-    TryCatchStatement(std::int32_t start,
-                      std::int32_t end,
-                      std::unique_ptr<Identifier> identifier,
-                      std::unique_ptr<Block> try_block,
-                      std::unique_ptr<Block> catch_block)
-        : Statement(start, end),
-          identifier_(std::move(identifier)),
-          try_block_(std::move(try_block)),
-          catch_block_(std::move(catch_block)) {
-    }
+    TryCatchStatement(std::int32_t start, std::int32_t end, std::unique_ptr<Identifier> identifier,
+                      std::unique_ptr<Block> try_block, std::unique_ptr<Block> catch_block) :
+        Statement(start, end), identifier_(std::move(identifier)), try_block_(std::move(try_block)),
+        catch_block_(std::move(catch_block)) {}
 
-    const Identifier *identifier() const {
-        return identifier_.get();
-    }
+    const Identifier *identifier() const { return identifier_.get(); }
 
-    const Block *try_block() const {
-        return try_block_.get();
-    }
+    const Block *try_block() const { return try_block_.get(); }
 
-    const Block *catch_block() const {
-        return catch_block_.get();
-    }
+    const Block *catch_block() const { return catch_block_.get(); }
 
 private:
     std::unique_ptr<Identifier> identifier_;

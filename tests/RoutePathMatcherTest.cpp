@@ -45,15 +45,13 @@ public:
         return token;
     }
 
-    void expect_match(std::string_view path, int expected_token) {
-        expect_match(path, expected_token, {});
-    }
+    void expect_match(std::string_view path, int expected_token) { expect_match(path, expected_token, {}); }
 
     void expect_match(std::string_view path, int expected_token, std::map<std::string, std::string> expected_vars) {
         matched_token_ = expected_token;
         ensure_built();
         ASSERT_TRUE(matcher_.match_path(path, *this));
-        for (const auto &[name, value] : path_vars_) {
+        for (const auto &[name, value]: path_vars_) {
             auto it = expected_vars.find(name);
             ASSERT_NE(it, expected_vars.end());
             EXPECT_EQ(it->second, value);
@@ -69,9 +67,7 @@ public:
         path_vars_.clear();
     }
 
-    bool matched(std::uint32_t, const int &handler) {
-        return handler == matched_token_;
-    }
+    bool matched(std::uint32_t, const int &handler) { return handler == matched_token_; }
 
     void add_path_var(std::string_view name, std::string_view value) {
         path_vars_.emplace_back(std::string(name), std::string(value));
@@ -82,9 +78,7 @@ public:
         path_vars_.pop_back();
     }
 
-    [[nodiscard]] std::uint32_t max_path_var_count() const {
-        return matcher_.max_path_var_count();
-    }
+    [[nodiscard]] std::uint32_t max_path_var_count() const { return matcher_.max_path_var_count(); }
 
     [[nodiscard]] const std::string &mounted_path(int token) {
         ensure_built();
@@ -215,7 +209,7 @@ TEST(RoutePathMatcherTest, HandlesLargeStaticRouteSets) {
     }
 
     for (int round = 0; round < 100; ++round) {
-        for (const auto &[pattern, token] : routes) {
+        for (const auto &[pattern, token]: routes) {
             tester.expect_match(pattern, token);
         }
     }

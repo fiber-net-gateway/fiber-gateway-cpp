@@ -4,11 +4,8 @@
 
 namespace fiber::net::detail {
 
-Efd::Efd(fiber::event::EventLoop &loop,
-         void *owner,
-         EventCallback callback,
-         fiber::event::Poller::Mode mode) noexcept
-    : loop_(loop), owner_(owner), callback_(callback), mode_(mode) {
+Efd::Efd(fiber::event::EventLoop &loop, void *owner, EventCallback callback, fiber::event::Poller::Mode mode) noexcept :
+    loop_(loop), owner_(owner), callback_(callback), mode_(mode) {
     item_.efd = this;
     item_.callback = &Efd::on_poller_event;
 }
@@ -133,13 +130,9 @@ fiber::common::IoErr Efd::watch_set(fiber::event::IoEvent desired) noexcept {
     return fiber::common::IoErr::None;
 }
 
-fiber::common::IoErr Efd::watch_add(fiber::event::IoEvent events) noexcept {
-    return watch_set(watching_ | events);
-}
+fiber::common::IoErr Efd::watch_add(fiber::event::IoEvent events) noexcept { return watch_set(watching_ | events); }
 
-fiber::common::IoErr Efd::watch_del(fiber::event::IoEvent events) noexcept {
-    return watch_set(watching_ & ~events);
-}
+fiber::common::IoErr Efd::watch_del(fiber::event::IoEvent events) noexcept { return watch_set(watching_ & ~events); }
 
 fiber::common::IoErr Efd::consume_ready(fiber::event::IoEvent ready) noexcept {
     if (!fiber::event::any(ready)) {

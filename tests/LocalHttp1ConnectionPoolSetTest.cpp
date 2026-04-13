@@ -42,8 +42,7 @@ TEST(LocalHttp1ConnectionPoolSetTest, AcquireUsesCurrentEventLoopShard) {
         auto conn_result = lease.emplace_connection({});
         bool ok = lease.valid() && !lease.hit() && conn_result.has_value() && lease.get() != nullptr &&
                   &lease.connection().loop() == &fiber::event::EventLoop::current() &&
-                  &set.loop() == &fiber::event::EventLoop::current() && set.idle_total() == 0 &&
-                  set.group_count() == 0;
+                  &set.loop() == &fiber::event::EventLoop::current() && set.idle_total() == 0 && set.group_count() == 0;
         lease.reset();
         loop0_promise.set_value(ok);
         return fiber::async::DetachedTask{};
@@ -53,8 +52,7 @@ TEST(LocalHttp1ConnectionPoolSetTest, AcquireUsesCurrentEventLoopShard) {
         auto conn_result = lease.emplace_connection({});
         bool ok = lease.valid() && !lease.hit() && conn_result.has_value() && lease.get() != nullptr &&
                   &lease.connection().loop() == &fiber::event::EventLoop::current() &&
-                  &set.loop() == &fiber::event::EventLoop::current() && set.idle_total() == 0 &&
-                  set.group_count() == 0;
+                  &set.loop() == &fiber::event::EventLoop::current() && set.idle_total() == 0 && set.group_count() == 0;
         lease.reset();
         loop1_promise.set_value(ok);
         return fiber::async::DetachedTask{};

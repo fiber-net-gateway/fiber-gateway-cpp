@@ -63,17 +63,14 @@ TEST(JsGcTest, IteratorSnapshotBytesAreAccounted) {
     ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
     ASSERT_FALSE(done);
 
-    EXPECT_EQ(fiber::json::gc_bytes_used(heap),
-              before_snapshot + fiber::json::gc_estimate_object_snapshot_bytes(2));
+    EXPECT_EQ(fiber::json::gc_bytes_used(heap), before_snapshot + fiber::json::gc_estimate_object_snapshot_bytes(2));
 }
 
 class SingleValueProvider final : public GcRootSet::RootProvider {
 public:
     explicit SingleValueProvider(JsValue &value) : value_(&value) {}
 
-    void visit_roots(GcRootSet::RootVisitor &visitor) override {
-        visitor.visit(value_);
-    }
+    void visit_roots(GcRootSet::RootVisitor &visitor) override { visitor.visit(value_); }
 
 private:
     JsValue *value_ = nullptr;

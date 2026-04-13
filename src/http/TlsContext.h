@@ -38,12 +38,8 @@ public:
     [[nodiscard]] bool require_server_identity() const noexcept { return require_server_identity_; }
 
 private:
-    static int alpn_select_cb(SSL *ssl,
-                              const unsigned char **out,
-                              unsigned char *outlen,
-                              const unsigned char *in,
-                              unsigned int inlen,
-                              void *arg);
+    static int alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen, const unsigned char *in,
+                              unsigned int inlen, void *arg);
 
     SSL_CTX *ctx_ = nullptr;
     TlsOptions options_{};

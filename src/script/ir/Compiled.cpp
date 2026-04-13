@@ -99,7 +99,7 @@ const Compiled::CallSite &Compiled::call_site_at(std::size_t index) const {
 }
 
 bool Compiled::validate_operands() const {
-    for (const Operand &operand : operands) {
+    for (const Operand &operand: operands) {
         const std::size_t payload_index = static_cast<std::size_t>(operand.payload);
         switch (operand.kind) {
             case OperandKind::ConstValue:
@@ -115,7 +115,7 @@ bool Compiled::validate_operands() const {
         }
     }
 
-    for (const HostSymbol &symbol : host_symbols) {
+    for (const HostSymbol &symbol: host_symbols) {
         if (!symbol.callable) {
             return false;
         }
@@ -138,7 +138,7 @@ bool Compiled::validate_operands() const {
         }
     }
 
-    for (const CallSite &site : call_sites) {
+    for (const CallSite &site: call_sites) {
         if (site.host_symbol_index >= host_symbols.size()) {
             return false;
         }
@@ -147,7 +147,7 @@ bool Compiled::validate_operands() const {
         }
     }
 
-    for (std::int32_t code : codes) {
+    for (std::int32_t code: codes) {
         const std::uint32_t raw_code = static_cast<std::uint32_t>(code);
         const std::uint8_t op = static_cast<std::uint8_t>(raw_code & 0xFF);
         if (code_uses_operand(op)) {

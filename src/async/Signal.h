@@ -33,9 +33,7 @@ public:
     SignalSet &add(int signum);
     SignalSet &remove(int signum);
     bool contains(int signum) const noexcept;
-    const sigset_t &native() const noexcept {
-        return set_;
-    }
+    const sigset_t &native() const noexcept { return set_; }
 
 private:
     sigset_t set_{};
@@ -45,17 +43,10 @@ class SignalAwaiter;
 
 namespace detail {
 
-enum class SignalWaiterState : std::uint8_t {
-    Waiting,
-    Notified,
-    Resumed,
-    Canceled
-};
+enum class SignalWaiterState : std::uint8_t { Waiting, Notified, Resumed, Canceled };
 
 struct SignalWaiter {
-    explicit SignalWaiter(SignalAwaiter *owner,
-                          int signum,
-                          fiber::event::EventLoop *loop,
+    explicit SignalWaiter(SignalAwaiter *owner, int signum, fiber::event::EventLoop *loop,
                           std::coroutine_handle<> handle);
 
     SignalInfo info{};

@@ -6,9 +6,9 @@
 #include <cstdlib>
 #include <fstream>
 #include <future>
+#include <signal.h>
 #include <string>
 #include <string_view>
-#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -122,12 +122,11 @@ struct SigpipeGuard {
 
     SigpipeGuard() { old = ::signal(SIGPIPE, SIG_IGN); }
 
-    ~SigpipeGuard() { (void)::signal(SIGPIPE, old); }
+    ~SigpipeGuard() { (void) ::signal(SIGPIPE, old); }
 };
 
 DetachedTask close_tls_streams(fiber::net::detail::TlsStreamFd *server_stream,
-                               fiber::net::detail::TlsStreamFd *client_stream,
-                               std::promise<void> *done) {
+                               fiber::net::detail::TlsStreamFd *client_stream, std::promise<void> *done) {
     if (server_stream) {
         server_stream->close();
         delete server_stream;

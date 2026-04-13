@@ -23,20 +23,15 @@ struct LookupResult {
     IpAddress address{};
 };
 
-DetachedTask write_a_record(SharedDnsCache *cache,
-                            std::promise<IoErr> *done) {
+DetachedTask write_a_record(SharedDnsCache *cache, std::promise<IoErr> *done) {
     auto now = std::chrono::steady_clock::now();
     IpAddress address = IpAddress::v4({9, 9, 9, 9});
-    done->set_value(co_await cache->upsert_a("shared.example",
-                                             static_cast<std::uint16_t>(RecordClass::IN),
-                                             &address,
-                                             1,
+    done->set_value(co_await cache->upsert_a("shared.example", static_cast<std::uint16_t>(RecordClass::IN), &address, 1,
                                              now + std::chrono::seconds(30)));
     co_return;
 }
 
-DetachedTask read_name(SharedDnsCache *cache,
-                       std::promise<LookupResult> *done) {
+DetachedTask read_name(SharedDnsCache *cache, std::promise<LookupResult> *done) {
     LookupResult result;
     fiber::dns::NameSnapshot snapshot;
     if (!snapshot.init()) {
@@ -45,10 +40,8 @@ DetachedTask read_name(SharedDnsCache *cache,
     }
 
     auto now = std::chrono::steady_clock::now();
-    result.err = co_await cache->lookup_name("shared.example",
-                                             static_cast<std::uint16_t>(RecordClass::IN),
-                                             now,
-                                             snapshot);
+    result.err =
+            co_await cache->lookup_name("shared.example", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot);
     result.found = snapshot.found();
     result.a_present = snapshot.a().present;
     result.a_negative = snapshot.a().negative;
@@ -72,9 +65,7 @@ TEST(SharedDnsCacheTest, SupportsCrossLoopReadAndWrite) {
     auto read_future = read_done.get_future();
 
     group.start();
-    fiber::async::spawn(group.at(0), [&cache, &write_done]() {
-        return write_a_record(&cache, &write_done);
-    });
+    fiber::async::spawn(group.at(0), [&cache, &write_done]() { return write_a_record(&cache, &write_done); });
 
     if (write_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
         group.stop();
@@ -84,9 +75,7 @@ TEST(SharedDnsCacheTest, SupportsCrossLoopReadAndWrite) {
     }
     ASSERT_EQ(write_future.get(), IoErr::None);
 
-    fiber::async::spawn(group.at(1), [&cache, &read_done]() {
-        return read_name(&cache, &read_done);
-    });
+    fiber::async::spawn(group.at(1), [&cache, &read_done]() { return read_name(&cache, &read_done); });
 
     if (read_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
         group.stop();

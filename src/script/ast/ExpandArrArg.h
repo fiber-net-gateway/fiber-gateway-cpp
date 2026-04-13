@@ -15,17 +15,12 @@ public:
         InitArr,
     };
 
-    ExpandArrArg(std::int32_t start, std::int32_t end, std::unique_ptr<Expression> value, Where where)
-        : Expression(start, end), value_(std::move(value)), where_(where) {
-    }
+    ExpandArrArg(std::int32_t start, std::int32_t end, std::unique_ptr<Expression> value, Where where) :
+        Expression(start, end), value_(std::move(value)), where_(where) {}
 
-    const Expression *value() const {
-        return value_.get();
-    }
+    const Expression *value() const { return value_.get(); }
 
-    Where where() const {
-        return where_;
-    }
+    Where where() const { return where_; }
 
 private:
     std::unique_ptr<Expression> value_;

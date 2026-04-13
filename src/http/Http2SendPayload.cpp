@@ -113,8 +113,8 @@ bool Http2SendPayload::split_prefix_to(std::size_t bytes, Http2SendPayload &out)
     }
 }
 
-fiber::async::Task<common::IoResult<size_t>>
-Http2SendPayload::write_once(HttpTransport &transport, std::chrono::milliseconds timeout) noexcept {
+fiber::async::Task<common::IoResult<size_t>> Http2SendPayload::write_once(HttpTransport &transport,
+                                                                          std::chrono::milliseconds timeout) noexcept {
     switch (kind_) {
         case Kind::StableSpan: {
             Http2StableSpan &value = span();

@@ -5,20 +5,20 @@
 #include <utility>
 
 #include "../common/Assert.h"
+#include "ClientHttp2Request.h"
 #include "Http2ClientConnection.h"
 #include "Http2Connection.h"
-#include "ClientHttp2Request.h"
 
 namespace fiber::http {
 
-ClientHttp2Exchange::ClientHttp2Exchange(Http2Connection &conn, mem::BufPool &pool) noexcept
-    : conn_(&conn), pool_(&pool) {}
+ClientHttp2Exchange::ClientHttp2Exchange(Http2Connection &conn, mem::BufPool &pool) noexcept :
+    conn_(&conn), pool_(&pool) {}
 
-ClientHttp2Exchange::ClientHttp2Exchange(Http2ClientConnection &conn, mem::BufPool &pool) noexcept
-    : ClientHttp2Exchange(conn.http2(), pool) {}
+ClientHttp2Exchange::ClientHttp2Exchange(Http2ClientConnection &conn, mem::BufPool &pool) noexcept :
+    ClientHttp2Exchange(conn.http2(), pool) {}
 
-ClientHttp2Exchange::ClientHttp2Exchange(Http2Stream::Lease stream, mem::BufPool &pool) noexcept
-    : pool_(&pool), stream_(std::move(stream)) {}
+ClientHttp2Exchange::ClientHttp2Exchange(Http2Stream::Lease stream, mem::BufPool &pool) noexcept :
+    pool_(&pool), stream_(std::move(stream)) {}
 
 ClientHttp2Exchange::ClientHttp2Exchange(ClientHttp2Exchange &&other) noexcept :
     conn_(other.conn_), pool_(other.pool_), stream_(std::move(other.stream_)) {
@@ -39,7 +39,7 @@ ClientHttp2Exchange &ClientHttp2Exchange::operator=(ClientHttp2Exchange &&other)
 }
 
 fiber::async::Task<common::IoResult<void>> ClientHttp2Exchange::send_request_header(const Http2RequestHead &head,
-                                                                                     bool end_stream) noexcept {
+                                                                                    bool end_stream) noexcept {
     auto request_result = ensure_request_opened();
     if (!request_result) {
         co_return std::unexpected(request_result.error());
@@ -61,7 +61,7 @@ fiber::async::Task<common::IoResult<size_t>> ClientHttp2Exchange::write_body(Bod
 }
 
 fiber::async::Task<common::IoResult<size_t>> ClientHttp2Exchange::write_body(const std::uint8_t *buf, std::size_t len,
-                                                                              bool end_stream) noexcept {
+                                                                             bool end_stream) noexcept {
     if (len != 0 && buf == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }

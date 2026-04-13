@@ -9,9 +9,7 @@
 
 namespace fiber::script {
 
-std::expected<Script, parse::ParseError> compile_script(Library &library,
-                                                        std::string_view script,
-                                                        bool allow_assign) {
+std::expected<Script, parse::ParseError> compile_script(Library &library, std::string_view script, bool allow_assign) {
     parse::Parser parser(library, allow_assign);
     auto parsed = parser.parse_script(script);
     if (!parsed) {

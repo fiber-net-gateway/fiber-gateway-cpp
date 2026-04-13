@@ -15,9 +15,7 @@ using fiber::json::JsValue;
 
 namespace {
 
-const GcString *as_string(const JsValue &value) {
-    return js_value_heap_ptr<const GcString>(value);
-}
+const GcString *as_string(const JsValue &value) { return js_value_heap_ptr<const GcString>(value); }
 
 std::string string_to_utf8(const JsValue &value) {
     std::string out;
@@ -30,9 +28,7 @@ std::string string_to_utf8(const JsValue &value) {
 
 } // namespace
 
-TEST(JsValueOpsTest, JsValueIsTriviallyCopyable) {
-    EXPECT_TRUE(std::is_trivially_copyable_v<JsValue>);
-}
+TEST(JsValueOpsTest, JsValueIsTriviallyCopyable) { EXPECT_TRUE(std::is_trivially_copyable_v<JsValue>); }
 
 TEST(JsValueOpsTest, ConcatKeepsByteForNativeUtf8) {
     GcHeap heap;
@@ -50,8 +46,10 @@ TEST(JsValueOpsTest, ConcatKeepsByteForNativeUtf8) {
     EXPECT_EQ(str->len, 2u);
 
     const char expected_bytes[] = {
-        static_cast<char>(0xC3), static_cast<char>(0xA9),
-        static_cast<char>(0xC3), static_cast<char>(0x9F),
+            static_cast<char>(0xC3),
+            static_cast<char>(0xA9),
+            static_cast<char>(0xC3),
+            static_cast<char>(0x9F),
     };
     std::string expected(expected_bytes, sizeof(expected_bytes));
     EXPECT_EQ(string_to_utf8(result.value), expected);
@@ -73,7 +71,10 @@ TEST(JsValueOpsTest, ConcatUpgradesToUtf16ForWide) {
     EXPECT_EQ(str->len, 2u);
 
     const char expected_bytes[] = {
-        static_cast<char>(0xE2), static_cast<char>(0x82), static_cast<char>(0xAC), 'A',
+            static_cast<char>(0xE2),
+            static_cast<char>(0x82),
+            static_cast<char>(0xAC),
+            'A',
     };
     std::string expected(expected_bytes, sizeof(expected_bytes));
     EXPECT_EQ(string_to_utf8(result.value), expected);

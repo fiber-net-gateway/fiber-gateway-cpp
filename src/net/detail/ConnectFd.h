@@ -15,21 +15,18 @@
 
 namespace fiber::net::detail {
 
-template <typename Traits>
+template<typename Traits>
 class StreamInfant {
 public:
     using Address = typename Traits::Address;
 
     StreamInfant() = delete;
-    StreamInfant(fiber::event::EventLoop *loop, int fd, Address peer)
-        : loop_(loop), fd_(fd), peer_(std::move(peer)) {
-    }
+    StreamInfant(fiber::event::EventLoop *loop, int fd, Address peer) : loop_(loop), fd_(fd), peer_(std::move(peer)) {}
 
     StreamInfant(const StreamInfant &) = delete;
     StreamInfant &operator=(const StreamInfant &) = delete;
 
-    StreamInfant(StreamInfant &&other) noexcept
-        : loop_(other.loop_), fd_(other.fd_), peer_(std::move(other.peer_)) {
+    StreamInfant(StreamInfant &&other) noexcept : loop_(other.loop_), fd_(other.fd_), peer_(std::move(other.peer_)) {
         other.loop_ = nullptr;
         other.fd_ = -1;
     }
@@ -47,13 +44,9 @@ public:
         return *this;
     }
 
-    ~StreamInfant() {
-        close_fd();
-    }
+    ~StreamInfant() { close_fd(); }
 
-    [[nodiscard]] bool valid() const noexcept {
-        return fd_ >= 0;
-    }
+    [[nodiscard]] bool valid() const noexcept { return fd_ >= 0; }
 
     fiber::event::EventLoop &loop() const noexcept {
         FIBER_ASSERT(loop_ != nullptr);
@@ -66,13 +59,9 @@ public:
         return fd;
     }
 
-    Address take_peer() {
-        return std::move(peer_);
-    }
+    Address take_peer() { return std::move(peer_); }
 
-    const Address &peer() const noexcept {
-        return peer_;
-    }
+    const Address &peer() const noexcept { return peer_; }
 
 private:
     void close_fd() noexcept {
@@ -88,7 +77,7 @@ private:
     Address peer_;
 };
 
-template <typename Traits>
+template<typename Traits>
 class ConnectFd {
 public:
     using Address = typename Traits::Address;
@@ -101,11 +90,11 @@ public:
     }
 };
 
-template <typename Traits>
+template<typename Traits>
 class ConnectFd<Traits>::ConnectAwaiter {
 public:
-    ConnectAwaiter(fiber::event::EventLoop &loop, Address peer) noexcept
-        : efd_(loop, this, &ConnectAwaiter::on_efd_events), peer_(std::move(peer)) {}
+    ConnectAwaiter(fiber::event::EventLoop &loop, Address peer) noexcept :
+        efd_(loop, this, &ConnectAwaiter::on_efd_events), peer_(std::move(peer)) {}
 
     ConnectAwaiter(const ConnectAwaiter &) = delete;
     ConnectAwaiter &operator=(const ConnectAwaiter &) = delete;
@@ -162,14 +151,10 @@ public:
         return true;
     }
 
-    fiber::common::IoResult<ConnectResult> await_resume() noexcept {
-        return std::move(result_);
-    }
+    fiber::common::IoResult<ConnectResult> await_resume() noexcept { return std::move(result_); }
 
 private:
-    void close_fd() noexcept {
-        efd_.close_fd();
-    }
+    void close_fd() noexcept { efd_.close_fd(); }
 
     fiber::common::IoErr finish_connect() noexcept {
         int socket_fd = efd_.fd();

@@ -1,12 +1,12 @@
 #ifndef FIBER_HTTP_LOCAL_HTTP1_CONNECTION_POOL_SET_H
 #define FIBER_HTTP_LOCAL_HTTP1_CONNECTION_POOL_SET_H
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <memory>
 #include <mutex>
 #include <new>
-#include <atomic>
 
 #include "../async/Task.h"
 #include "../async/WaitGroup.h"

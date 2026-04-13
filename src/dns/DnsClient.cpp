@@ -63,8 +63,7 @@ common::IoResult<std::size_t> consume_stream_read(fiber::common::IoResult<std::s
 DnsClient::DnsClient() noexcept = default;
 
 DnsClient::ResponseAwaiter::ResponseAwaiter(DnsClient &client, std::uint16_t slot_index) noexcept :
-    client_(&client), slot_index_(slot_index) {
-}
+    client_(&client), slot_index_(slot_index) {}
 
 DnsClient::ResponseAwaiter::~ResponseAwaiter() {
     if (client_ && armed_) {
@@ -171,21 +170,16 @@ void DnsClient::release() noexcept {
     reset_state();
 }
 
-bool DnsClient::valid() const noexcept {
-    return socket_ && socket_->valid();
-}
+bool DnsClient::valid() const noexcept { return socket_ && socket_->valid(); }
 
 event::EventLoop &DnsClient::loop() const noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     return *loop_;
 }
 
-const net::SocketAddress &DnsClient::server() const noexcept {
-    return options_.server;
-}
+const net::SocketAddress &DnsClient::server() const noexcept { return options_.server; }
 
-async::Task<common::IoResult<std::size_t>> DnsClient::query_raw(const QuestionSpec &question,
-                                                                std::uint8_t *dst,
+async::Task<common::IoResult<std::size_t>> DnsClient::query_raw(const QuestionSpec &question, std::uint8_t *dst,
                                                                 std::size_t cap) noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     FIBER_ASSERT(loop_->in_loop());
@@ -290,8 +284,8 @@ async::Task<void> DnsClient::recv_loop() noexcept {
 
 async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(const InflightSlot &slot) noexcept {
     FIBER_ASSERT(loop_ != nullptr);
-    auto connect_result = co_await async::timeout_for([this]() { return net::TcpStream::connect(*loop_, options_.server); },
-                                                      options_.timeout);
+    auto connect_result = co_await async::timeout_for(
+            [this]() { return net::TcpStream::connect(*loop_, options_.server); }, options_.timeout);
     if (!connect_result) {
         co_return std::unexpected(connect_result.error());
     }
@@ -303,8 +297,8 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(const InflightSl
     std::size_t prefix_written = 0;
     while (prefix_written < len_prefix.size()) {
         auto write_prefix = co_await async::timeout_for(
-            [&]() { return stream.write(len_prefix.data() + prefix_written, len_prefix.size() - prefix_written); },
-            options_.timeout);
+                [&]() { return stream.write(len_prefix.data() + prefix_written, len_prefix.size() - prefix_written); },
+                options_.timeout);
         if (!write_prefix) {
             stream.close();
             co_return std::unexpected(write_prefix.error());
@@ -319,7 +313,8 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(const InflightSl
     std::size_t written = 0;
     while (written < slot.request_size) {
         auto write_result = co_await async::timeout_for(
-            [&]() { return stream.write(slot.request_buf + written, slot.request_size - written); }, options_.timeout);
+                [&]() { return stream.write(slot.request_buf + written, slot.request_size - written); },
+                options_.timeout);
         if (!write_result) {
             stream.close();
             co_return std::unexpected(write_result.error());
@@ -341,8 +336,8 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(const InflightSl
     std::size_t prefix_read = *prefix_result;
     while (prefix_read < len_prefix.size()) {
         auto more = co_await async::timeout_for(
-            [&]() { return stream.read(len_prefix.data() + prefix_read, len_prefix.size() - prefix_read); },
-            options_.timeout);
+                [&]() { return stream.read(len_prefix.data() + prefix_read, len_prefix.size() - prefix_read); },
+                options_.timeout);
         auto more_result = consume_stream_read(more);
         if (!more_result) {
             stream.close();
@@ -360,7 +355,8 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(const InflightSl
     std::size_t total_read = 0;
     while (total_read < response_len) {
         auto read_result = co_await async::timeout_for(
-            [&]() { return stream.read(slot.response_dst + total_read, response_len - total_read); }, options_.timeout);
+                [&]() { return stream.read(slot.response_dst + total_read, response_len - total_read); },
+                options_.timeout);
         auto payload_result = consume_stream_read(read_result);
         if (!payload_result) {
             stream.close();
@@ -515,9 +511,7 @@ common::IoResult<std::size_t> DnsClient::wait_result(std::uint16_t slot_index) n
     return slot.response_size;
 }
 
-void DnsClient::complete_slot(std::uint16_t slot_index,
-                              common::IoErr err,
-                              std::size_t response_size,
+void DnsClient::complete_slot(std::uint16_t slot_index, common::IoErr err, std::size_t response_size,
                               bool need_tcp_fallback) noexcept {
     FIBER_ASSERT(slot_index < options_.max_inflight);
     InflightSlot &slot = slots_[slot_index];
@@ -532,8 +526,7 @@ void DnsClient::complete_slot(std::uint16_t slot_index,
     }
 }
 
-void DnsClient::handle_udp_packet(const std::uint8_t *packet,
-                                  std::size_t packet_len,
+void DnsClient::handle_udp_packet(const std::uint8_t *packet, std::size_t packet_len,
                                   const net::SocketAddress &peer) noexcept {
     if (closing_ || packet_len < kDnsHeaderSize || !socket_address_equal(peer, options_.server)) {
         return;

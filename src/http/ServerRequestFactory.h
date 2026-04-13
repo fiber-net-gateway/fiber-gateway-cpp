@@ -3,8 +3,8 @@
 
 #include <cstdint>
 
-#include "HttpExchange.h"
 #include "Http2StreamFactory.h"
+#include "HttpExchange.h"
 
 namespace fiber::http {
 
@@ -19,8 +19,7 @@ public:
     [[nodiscard]] Http2Stream::Lease create_peer_stream(std::uint32_t stream_id, Http2Connection &conn) noexcept;
 
 private:
-    static Http2Stream::Lease create_peer_stream_op(void *ctx, std::uint32_t stream_id,
-                                                    Http2Connection &conn) noexcept;
+    static Http2Stream::Lease create_peer_stream_op(void *ctx, std::uint32_t stream_id, Http2Connection &conn) noexcept;
 
     const HttpServerOptions *http_options_ = nullptr;
     const HttpHandler *handler_ = nullptr;

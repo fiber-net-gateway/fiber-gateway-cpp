@@ -27,8 +27,7 @@ public:
 
     static constexpr std::size_t kMaxHostNameSize = 255;
 
-    [[nodiscard]] static std::optional<Http1ConnectionGroupKey> from_name(std::string_view host,
-                                                                          std::uint16_t port,
+    [[nodiscard]] static std::optional<Http1ConnectionGroupKey> from_name(std::string_view host, std::uint16_t port,
                                                                           Scheme scheme) noexcept;
     [[nodiscard]] static Http1ConnectionGroupKey from_ip(net::IpAddress ip, std::uint16_t port, Scheme scheme) noexcept;
 

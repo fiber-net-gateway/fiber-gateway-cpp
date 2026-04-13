@@ -10,7 +10,7 @@ namespace {
 std::vector<std::string> normalize_base(const TlsOptions &options) {
     std::vector<std::string> normalized;
     normalized.reserve(options.alpn.size() + 2);
-    for (const auto &proto : options.alpn) {
+    for (const auto &proto: options.alpn) {
         if (proto.empty()) {
             continue;
         }

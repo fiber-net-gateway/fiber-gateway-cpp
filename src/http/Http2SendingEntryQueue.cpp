@@ -15,10 +15,9 @@ const Http2SendPayload *Http2SendingEntry::payload_ptr() const noexcept {
     return std::launder(reinterpret_cast<const Http2SendPayload *>(payload_storage_));
 }
 
-Http2SendingEntryQueue::PollAwaiter::PollAwaiter(Http2SendingEntryQueue &queue, std::chrono::milliseconds timeout) noexcept
-    : queue_(&queue),
-      timeout_(timeout) {
-}
+Http2SendingEntryQueue::PollAwaiter::PollAwaiter(Http2SendingEntryQueue &queue,
+                                                 std::chrono::milliseconds timeout) noexcept :
+    queue_(&queue), timeout_(timeout) {}
 
 Http2SendingEntryQueue::PollAwaiter::~PollAwaiter() {
     if (!queue_) {
@@ -48,7 +47,8 @@ bool Http2SendingEntryQueue::PollAwaiter::await_suspend(std::coroutine_handle<> 
     }
 
     if (has_timer()) {
-        loop_->post_at<PollAwaiter, &PollAwaiter::timer_entry_, &PollAwaiter::on_timeout>(loop_->now() + timeout_, *this);
+        loop_->post_at<PollAwaiter, &PollAwaiter::timer_entry_, &PollAwaiter::on_timeout>(loop_->now() + timeout_,
+                                                                                          *this);
     }
     return true;
 }

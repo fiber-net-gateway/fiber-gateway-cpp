@@ -22,8 +22,7 @@ public:
     class WriteLockGuard {
     public:
         WriteLockGuard() = default;
-        explicit WriteLockGuard(RWMutex *mutex) : mutex_(mutex) {
-        }
+        explicit WriteLockGuard(RWMutex *mutex) : mutex_(mutex) {}
 
         WriteLockGuard(const WriteLockGuard &) = delete;
         WriteLockGuard &operator=(const WriteLockGuard &) = delete;
@@ -41,8 +40,7 @@ public:
     class ReadLockGuard {
     public:
         ReadLockGuard() = default;
-        explicit ReadLockGuard(RWMutex *mutex) : mutex_(mutex) {
-        }
+        explicit ReadLockGuard(RWMutex *mutex) : mutex_(mutex) {}
 
         ReadLockGuard(const ReadLockGuard &) = delete;
         ReadLockGuard &operator=(const ReadLockGuard &) = delete;
@@ -59,8 +57,7 @@ public:
 
     class WriteLockAwaiter {
     public:
-        explicit WriteLockAwaiter(RWMutex &mutex) noexcept : mutex_(&mutex) {
-        }
+        explicit WriteLockAwaiter(RWMutex &mutex) noexcept : mutex_(&mutex) {}
 
         WriteLockAwaiter(const WriteLockAwaiter &) = delete;
         WriteLockAwaiter &operator=(const WriteLockAwaiter &) = delete;
@@ -80,8 +77,7 @@ public:
 
     class ReadLockAwaiter {
     public:
-        explicit ReadLockAwaiter(RWMutex &mutex) noexcept : mutex_(&mutex) {
-        }
+        explicit ReadLockAwaiter(RWMutex &mutex) noexcept : mutex_(&mutex) {}
 
         ReadLockAwaiter(const ReadLockAwaiter &) = delete;
         ReadLockAwaiter &operator=(const ReadLockAwaiter &) = delete;
@@ -113,23 +109,12 @@ public:
     [[nodiscard]] std::uint32_t reader_count() const noexcept;
 
 private:
-    enum class WaiterKind : std::uint8_t {
-        Reader,
-        Writer
-    };
+    enum class WaiterKind : std::uint8_t { Reader, Writer };
 
-    enum class WaiterState : std::uint8_t {
-        Waiting,
-        Notified,
-        Resumed,
-        Canceled
-    };
+    enum class WaiterState : std::uint8_t { Waiting, Notified, Resumed, Canceled };
 
     struct Waiter {
-        Waiter(RWMutex *owner,
-               WaiterKind kind,
-               std::coroutine_handle<> handle,
-               fiber::event::EventLoop *loop,
+        Waiter(RWMutex *owner, WaiterKind kind, std::coroutine_handle<> handle, fiber::event::EventLoop *loop,
                std::thread::id thread_id);
 
         void resume();

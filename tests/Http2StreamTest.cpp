@@ -26,26 +26,25 @@ struct OwnedStreamHolder {
 
     static const fiber::http::Http2Stream::Ops &ops() noexcept {
         static const fiber::http::Http2Stream::Ops kOps{
-            &OwnedStreamHolder::destroy_owner,
-            &OwnedStreamHolder::on_header_block_start,
-            &OwnedStreamHolder::on_header_block_complete,
-            &OwnedStreamHolder::on_body,
-            &OwnedStreamHolder::on_abort,
+                &OwnedStreamHolder::destroy_owner,
+                &OwnedStreamHolder::on_header_block_start,
+                &OwnedStreamHolder::on_header_block_complete,
+                &OwnedStreamHolder::on_body,
+                &OwnedStreamHolder::on_abort,
         };
         return kOps;
     }
 
     static void destroy_owner(void *owner) noexcept { delete static_cast<OwnedStreamHolder *>(owner); }
 
-    static fiber::common::IoErr on_header_block_start(void *owner, fiber::http::Http2HpackDecoder::Sink &sink) noexcept {
+    static fiber::common::IoErr on_header_block_start(void *owner,
+                                                      fiber::http::Http2HpackDecoder::Sink &sink) noexcept {
         sink.ctx = owner;
         sink.ops = &decoder_ops();
         return fiber::common::IoErr::None;
     }
 
-    static fiber::common::IoErr on_header_block_complete(void *, bool) noexcept {
-        return fiber::common::IoErr::None;
-    }
+    static fiber::common::IoErr on_header_block_complete(void *, bool) noexcept { return fiber::common::IoErr::None; }
 
     static fiber::common::IoErr on_body(void *, fiber::mem::IoBuf &&, bool) noexcept {
         return fiber::common::IoErr::None;
@@ -81,7 +80,8 @@ struct OwnedStreamHolder {
         self->pending_name_storage.assign(decoded_len, '\0');
         fiber::http::Http2HuffmanDecodeState state;
         fiber::http::Http2HuffmanDecodeResult result = fiber::http::http2_huffman_decode(
-            state, data, len, reinterpret_cast<std::uint8_t *>(self->pending_name_storage.data()), decoded_len, true);
+                state, data, len, reinterpret_cast<std::uint8_t *>(self->pending_name_storage.data()), decoded_len,
+                true);
         if (result.code != fiber::http::Http2HuffmanCode::Ok || result.written != decoded_len) {
             return fiber::common::IoErr::Invalid;
         }
@@ -112,7 +112,8 @@ struct OwnedStreamHolder {
         self->pending_value_storage.assign(decoded_len, '\0');
         fiber::http::Http2HuffmanDecodeState state;
         fiber::http::Http2HuffmanDecodeResult result = fiber::http::http2_huffman_decode(
-            state, data, len, reinterpret_cast<std::uint8_t *>(self->pending_value_storage.data()), decoded_len, true);
+                state, data, len, reinterpret_cast<std::uint8_t *>(self->pending_value_storage.data()), decoded_len,
+                true);
         if (result.code != fiber::http::Http2HuffmanCode::Ok || result.written != decoded_len) {
             return fiber::common::IoErr::Invalid;
         }
@@ -126,12 +127,9 @@ struct OwnedStreamHolder {
 
     static const fiber::http::Http2HpackDecoder::Ops &decoder_ops() noexcept {
         static const fiber::http::Http2HpackDecoder::Ops kOps{
-            &OwnedStreamHolder::on_indexed_field,
-            &OwnedStreamHolder::on_indexed_name,
-            &OwnedStreamHolder::on_name_raw,
-            &OwnedStreamHolder::on_name_huffman,
-            &OwnedStreamHolder::on_value_raw,
-            &OwnedStreamHolder::on_value_huffman,
+                &OwnedStreamHolder::on_indexed_field, &OwnedStreamHolder::on_indexed_name,
+                &OwnedStreamHolder::on_name_raw,      &OwnedStreamHolder::on_name_huffman,
+                &OwnedStreamHolder::on_value_raw,     &OwnedStreamHolder::on_value_huffman,
         };
         return kOps;
     }
@@ -154,12 +152,12 @@ struct SendWindowNotifyOwner {
 
     static const fiber::http::Http2Stream::Ops &ops() noexcept {
         static const fiber::http::Http2Stream::Ops kOps{
-            &SendWindowNotifyOwner::destroy_owner,
-            &SendWindowNotifyOwner::on_header_block_start,
-            &SendWindowNotifyOwner::on_header_block_complete,
-            &SendWindowNotifyOwner::on_body,
-            &SendWindowNotifyOwner::on_abort,
-            &SendWindowNotifyOwner::on_send_window_available,
+                &SendWindowNotifyOwner::destroy_owner,
+                &SendWindowNotifyOwner::on_header_block_start,
+                &SendWindowNotifyOwner::on_header_block_complete,
+                &SendWindowNotifyOwner::on_body,
+                &SendWindowNotifyOwner::on_abort,
+                &SendWindowNotifyOwner::on_send_window_available,
         };
         return kOps;
     }
@@ -168,9 +166,7 @@ struct SendWindowNotifyOwner {
     static fiber::common::IoErr on_header_block_start(void *, fiber::http::Http2HpackDecoder::Sink &) noexcept {
         return fiber::common::IoErr::None;
     }
-    static fiber::common::IoErr on_header_block_complete(void *, bool) noexcept {
-        return fiber::common::IoErr::None;
-    }
+    static fiber::common::IoErr on_header_block_complete(void *, bool) noexcept { return fiber::common::IoErr::None; }
     static fiber::common::IoErr on_body(void *, fiber::mem::IoBuf &&, bool) noexcept {
         return fiber::common::IoErr::None;
     }
@@ -215,8 +211,7 @@ public:
         co_return std::unexpected(fiber::common::IoErr::NotSupported);
     }
 
-    fiber::async::Task<fiber::common::IoResult<size_t>> write(fiber::mem::IoBuf &,
-                                                              std::chrono::milliseconds) override {
+    fiber::async::Task<fiber::common::IoResult<size_t>> write(fiber::mem::IoBuf &, std::chrono::milliseconds) override {
         co_return std::unexpected(fiber::common::IoErr::NotSupported);
     }
 
@@ -327,7 +322,8 @@ TEST(Http2StreamTest, AdditionalLeaseRetainsEmbeddedOwnerUntilLastReferenceDrops
 }
 
 TEST(Http2StreamTest, MaybeReplenishRecvWindowEnqueuesWindowUpdateAndTracksRemainingWindow) {
-    fiber::http::Http2Connection connection(make_options(), &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
+    fiber::http::Http2Connection connection(make_options(), &test_http2_stream_factory(),
+                                            TestHttp2StreamFactory::ops());
     connection.state_ = fiber::http::Http2Connection::State::Running;
 
     fiber::http::Http2Stream *stream = connection.create_peer_stream(1);

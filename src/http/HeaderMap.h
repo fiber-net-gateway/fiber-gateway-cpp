@@ -12,18 +12,14 @@
 
 namespace fiber::http {
 
-template <typename V>
+template<typename V>
 class HeaderMap {
 public:
     HeaderMap() { init_buckets(kDefaultBuckets); }
     explicit HeaderMap(size_t bucket_count) { init_buckets(bucket_count); }
 
-    bool insert(std::string_view name, const V &value) {
-        return insert_impl(name, hash_name(name), value);
-    }
-    bool insert(std::string_view name, V &&value) {
-        return insert_impl(name, hash_name(name), std::move(value));
-    }
+    bool insert(std::string_view name, const V &value) { return insert_impl(name, hash_name(name), value); }
+    bool insert(std::string_view name, V &&value) { return insert_impl(name, hash_name(name), std::move(value)); }
     bool insert(std::string_view lowcase_name, std::uint64_t hash, const V &value) {
         return insert_impl(lowcase_name, narrow_hash(hash), value);
     }
@@ -49,13 +45,9 @@ private:
     static constexpr std::uint32_t kInvalidIndex = 0xFFFFFFFFu;
     static constexpr size_t kDefaultBuckets = 32;
 
-    static std::uint32_t narrow_hash(std::uint64_t hash) noexcept {
-        return static_cast<std::uint32_t>(hash);
-    }
+    static std::uint32_t narrow_hash(std::uint64_t hash) noexcept { return static_cast<std::uint32_t>(hash); }
 
-    static std::uint32_t hash_name(std::string_view name) noexcept {
-        return narrow_hash(http_header_name_hash(name));
-    }
+    static std::uint32_t hash_name(std::string_view name) noexcept { return narrow_hash(http_header_name_hash(name)); }
 
     static size_t next_pow2(size_t value) {
         if (value <= 1) {
@@ -84,7 +76,7 @@ private:
         bucket_head_.assign(count, kInvalidIndex);
     }
 
-    template <typename T>
+    template<typename T>
     bool insert_impl(std::string_view key, std::uint32_t hash, T &&value) {
         if (bucket_head_.empty()) {
             init_buckets(kDefaultBuckets);

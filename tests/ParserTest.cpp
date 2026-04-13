@@ -3,14 +3,14 @@
 #include <cstring>
 #include <string>
 
-#include "common/json/JsonDecode.h"
 #include "common/json/JsGc.h"
+#include "common/json/JsonDecode.h"
 
 using fiber::json::GcArray;
+using fiber::json::GcHeap;
 using fiber::json::GcObject;
 using fiber::json::GcObjectEntry;
 using fiber::json::GcString;
-using fiber::json::GcHeap;
 using fiber::json::JsNodeType;
 using fiber::json::JsValue;
 using fiber::json::Parser;
@@ -29,21 +29,13 @@ std::string to_string(const GcString *str) {
     return out;
 }
 
-const GcObject *as_object(const JsValue &value) {
-    return js_value_heap_ptr<const GcObject>(value);
-}
+const GcObject *as_object(const JsValue &value) { return js_value_heap_ptr<const GcObject>(value); }
 
-GcObject *as_object_mutable(const JsValue &value) {
-    return js_value_heap_ptr<GcObject>(const_cast<JsValue &>(value));
-}
+GcObject *as_object_mutable(const JsValue &value) { return js_value_heap_ptr<GcObject>(const_cast<JsValue &>(value)); }
 
-const GcArray *as_array(const JsValue &value) {
-    return js_value_heap_ptr<const GcArray>(value);
-}
+const GcArray *as_array(const JsValue &value) { return js_value_heap_ptr<const GcArray>(value); }
 
-const GcString *as_string(const JsValue &value) {
-    return js_value_heap_ptr<const GcString>(value);
-}
+const GcString *as_string(const JsValue &value) { return js_value_heap_ptr<const GcString>(value); }
 
 const GcObjectEntry *entry_at(const GcObject *obj, std::size_t index) {
     return fiber::json::gc_object_entry_at(obj, index);

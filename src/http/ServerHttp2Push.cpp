@@ -26,12 +26,8 @@ common::IoErr noop_value_huffman(void *, const std::uint8_t *, std::size_t, Http
 
 common::IoErr noop_header_block_start(void *, Http2HpackDecoder::Sink &sink) noexcept {
     static const Http2HpackDecoder::Ops kDecoderOps{
-        &noop_indexed_field,
-        &noop_indexed_name,
-        &noop_name_raw,
-        &noop_name_huffman,
-        &noop_value_raw,
-        &noop_value_huffman,
+            &noop_indexed_field, &noop_indexed_name, &noop_name_raw,
+            &noop_name_huffman,  &noop_value_raw,    &noop_value_huffman,
     };
     sink.ctx = nullptr;
     sink.ops = &kDecoderOps;
@@ -48,11 +44,11 @@ void noop_abort(void *, common::IoErr) noexcept {}
 
 const Http2Stream::Ops &ServerHttp2Push::stream_ops() noexcept {
     static const Http2Stream::Ops kOps{
-        &ServerHttp2Push::destroy_owner,
-        &noop_header_block_start,
-        &noop_header_block_complete,
-        &noop_body,
-        &noop_abort,
+            &ServerHttp2Push::destroy_owner,
+            &noop_header_block_start,
+            &noop_header_block_complete,
+            &noop_body,
+            &noop_abort,
     };
     return kOps;
 }

@@ -13,9 +13,7 @@ class Efd : public common::NonCopyable, public common::NonMovable {
 public:
     using EventCallback = void (*)(void *owner, fiber::event::IoEvent events);
 
-    Efd(fiber::event::EventLoop &loop,
-        void *owner,
-        EventCallback callback,
+    Efd(fiber::event::EventLoop &loop, void *owner, EventCallback callback,
         fiber::event::Poller::Mode mode = fiber::event::Poller::Mode::None) noexcept;
     ~Efd();
 

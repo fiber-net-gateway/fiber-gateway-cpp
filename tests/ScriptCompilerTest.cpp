@@ -14,33 +14,32 @@ namespace {
 class TestLibrary final : public fiber::script::Library {
 public:
     Function *find_func(std::string_view name) override {
-        (void)name;
+        (void) name;
         return nullptr;
     }
 
     AsyncFunction *find_async_func(std::string_view name) override {
-        (void)name;
+        (void) name;
         return nullptr;
     }
 
     Constant *find_constant(std::string_view namespace_name, std::string_view key) override {
-        (void)namespace_name;
-        (void)key;
+        (void) namespace_name;
+        (void) key;
         return nullptr;
     }
 
     AsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) override {
-        (void)namespace_name;
-        (void)key;
+        (void) namespace_name;
+        (void) key;
         return nullptr;
     }
 
-    DirectiveDef *find_directive_def(std::string_view type,
-                                     std::string_view name,
+    DirectiveDef *find_directive_def(std::string_view type, std::string_view name,
                                      const std::vector<fiber::json::JsValue> &literals) override {
-        (void)type;
-        (void)name;
-        (void)literals;
+        (void) type;
+        (void) name;
+        (void) literals;
         return nullptr;
     }
 };
@@ -56,7 +55,7 @@ fiber::script::ir::Compiled compile_script(std::string_view script) {
 std::vector<std::uint8_t> extract_opcodes(const fiber::script::ir::Compiled &compiled) {
     std::vector<std::uint8_t> ops;
     ops.reserve(compiled.codes.size());
-    for (std::int32_t code : compiled.codes) {
+    for (std::int32_t code: compiled.codes) {
         ops.push_back(static_cast<std::uint8_t>(code & 0xFF));
     }
     return ops;

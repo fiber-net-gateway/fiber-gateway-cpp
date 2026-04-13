@@ -125,13 +125,9 @@ private:
         unwatch_read();
     }
 
-    fiber::common::IoErr watch_read() {
-        return efd_.watch_add(fiber::event::IoEvent::Read);
-    }
+    fiber::common::IoErr watch_read() { return efd_.watch_add(fiber::event::IoEvent::Read); }
 
-    void unwatch_read() {
-        (void) efd_.watch_del(fiber::event::IoEvent::Read);
-    }
+    void unwatch_read() { (void) efd_.watch_del(fiber::event::IoEvent::Read); }
 
     void handle_acceptable() {
         if (!waiter_) {

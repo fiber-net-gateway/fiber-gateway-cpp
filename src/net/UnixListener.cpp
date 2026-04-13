@@ -6,35 +6,23 @@
 
 namespace fiber::net {
 
-UnixListener::UnixListener(fiber::event::EventLoop &loop) : acceptor_(loop) {
-}
+UnixListener::UnixListener(fiber::event::EventLoop &loop) : acceptor_(loop) {}
 
-UnixListener::~UnixListener() {
-}
+UnixListener::~UnixListener() {}
 
-fiber::common::IoResult<void> UnixListener::bind(const UnixAddress &addr,
-                                                 const UnixListenOptions &options) {
+fiber::common::IoResult<void> UnixListener::bind(const UnixAddress &addr, const UnixListenOptions &options) {
     return acceptor_.bind(addr, options);
 }
 
-bool UnixListener::valid() const noexcept {
-    return acceptor_.valid();
-}
+bool UnixListener::valid() const noexcept { return acceptor_.valid(); }
 
-int UnixListener::fd() const noexcept {
-    return acceptor_.fd();
-}
+int UnixListener::fd() const noexcept { return acceptor_.fd(); }
 
-void UnixListener::close() {
-    acceptor_.close();
-}
+void UnixListener::close() { acceptor_.close(); }
 
-UnixListener::AcceptAwaiter UnixListener::accept() noexcept {
-    return acceptor_.accept();
-}
+UnixListener::AcceptAwaiter UnixListener::accept() noexcept { return acceptor_.accept(); }
 
-fiber::common::IoResult<int> UnixTraits::bind(const UnixAddress &addr,
-                                              const UnixListenOptions &options) {
+fiber::common::IoResult<int> UnixTraits::bind(const UnixAddress &addr, const UnixListenOptions &options) {
     if (addr.kind() == UnixAddressKind::Unnamed) {
         return std::unexpected(fiber::common::IoErr::NotSupported);
     }
