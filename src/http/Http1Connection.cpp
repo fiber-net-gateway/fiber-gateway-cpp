@@ -8,8 +8,8 @@
 #include <utility>
 
 #include "HeaderMap.h"
-#include "Http1HeaderParseBuffer.h"
 #include "Http1ExchangeIo.h"
+#include "Http1HeaderParseBuffer.h"
 #include "Http1Server.h"
 #include "HttpTransport.h"
 
@@ -75,9 +75,9 @@ void for_each_token(std::string_view value, F &&fn) {
 
 Http1HeaderParseBufferOptions header_parse_buffer_options(const HttpServerOptions &options) noexcept {
     return Http1HeaderParseBufferOptions{
-        .init_size = options.header_init_size,
-        .large_size = options.header_large_size,
-        .large_num = options.header_large_num,
+            .init_size = options.header_init_size,
+            .large_size = options.header_large_size,
+            .large_num = options.header_large_num,
     };
 }
 
@@ -212,8 +212,8 @@ fiber::async::Task<fiber::common::IoResult<ParseCode>> Http1Connection::parse_re
                 }
                 std::size_t copied = drain_inbound(header_buffer.buf());
                 if (copied == 0) {
-                    auto timeout = header_buffer.buf().readable() == 0 ? options_.keep_alive_timeout
-                                                                       : options_.header_timeout;
+                    auto timeout =
+                            header_buffer.buf().readable() == 0 ? options_.keep_alive_timeout : options_.header_timeout;
                     auto result = co_await transport_->read_into(header_buffer.buf(), timeout);
                     if (!result) {
                         co_return std::unexpected(result.error());
@@ -282,8 +282,8 @@ fiber::async::Task<fiber::common::IoResult<ParseCode>> Http1Connection::parse_re
                 }
                 std::size_t copied = drain_inbound(header_buffer.buf());
                 if (copied == 0) {
-                    auto timeout = header_buffer.buf().readable() == 0 ? options_.keep_alive_timeout
-                                                                       : options_.header_timeout;
+                    auto timeout =
+                            header_buffer.buf().readable() == 0 ? options_.keep_alive_timeout : options_.header_timeout;
                     auto result = co_await transport_->read_into(header_buffer.buf(), timeout);
                     if (!result) {
                         co_return std::unexpected(result.error());
@@ -331,7 +331,7 @@ fiber::async::Task<fiber::common::IoResult<ParseCode>> Http1Connection::parse_re
             }
             if (code == ParseCode::HeaderDone) {
                 const std::size_t header_bytes =
-                    static_cast<std::size_t>(header_buffer.buf().readable_data() - header_buffer.buf().data());
+                        static_cast<std::size_t>(header_buffer.buf().readable_data() - header_buffer.buf().data());
                 auto header_owner_result = header_buffer.retain_prefix(header_bytes);
                 if (!header_owner_result) {
                     co_return std::unexpected(header_owner_result.error());

@@ -9,8 +9,8 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../event/EventLoop.h"
-#include "UdpPacket.h"
 #include "SocketAddress.h"
+#include "UdpPacket.h"
 
 namespace fiber::net {
 
@@ -55,8 +55,7 @@ public:
     [[nodiscard]] RecvFromAwaiter recv_from(void *buf, size_t len) noexcept;
     [[nodiscard]] SendToAwaiter send_to(const void *buf, size_t len, const SocketAddress &peer) noexcept;
     [[nodiscard]] fiber::common::IoResult<UdpRecvResult> try_recv_from(void *buf, size_t len) noexcept;
-    [[nodiscard]] fiber::common::IoResult<size_t> try_send_to(const void *buf,
-                                                              size_t len,
+    [[nodiscard]] fiber::common::IoResult<size_t> try_send_to(const void *buf, size_t len,
                                                               const SocketAddress &peer) noexcept;
 
     [[nodiscard]] RecvPacketAwaiter recv_packet(void *buf, size_t len) noexcept;

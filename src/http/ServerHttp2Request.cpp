@@ -49,9 +49,7 @@ HttpMethod parse_method(std::string_view method) noexcept {
     return HttpMethod::Unknown;
 }
 
-bool is_pseudo_header(std::string_view name) noexcept {
-    return !name.empty() && name.front() == ':';
-}
+bool is_pseudo_header(std::string_view name) noexcept { return !name.empty() && name.front() == ':'; }
 
 } // namespace
 
@@ -59,12 +57,8 @@ struct ServerHttp2Request::SendResponseHeaderOp {
     using SuccessType = void;
 
     SendResponseHeaderOp(const OutgoingHeaderBlockView &header) noexcept :
-        kind_(header.kind),
-        headers_(header.headers),
-        status_code_(header.status_code),
-        reason_(header.reason),
-        end_stream_(header.end_stream),
-        informational_(header.kind == OutgoingHeaderKind::Informational) {}
+        kind_(header.kind), headers_(header.headers), status_code_(header.status_code), reason_(header.reason),
+        end_stream_(header.end_stream), informational_(header.kind == OutgoingHeaderKind::Informational) {}
 
     [[nodiscard]] common::IoErr submit(ServerHttp2Request &request, HeaderSendAwaiter &awaiter) noexcept {
         return request.conn_->request_stream_send(request.stream_, Http2OutboundNextKind::Headers,
@@ -104,24 +98,21 @@ struct ServerHttp2Request::SendResponseBodyOp {
 
 const Http2Stream::Ops &ServerHttp2Request::stream_ops() noexcept {
     static const Http2Stream::Ops kOps{
-        &ServerHttp2Request::destroy_owner,
-        &ServerHttp2Request::on_header_block_start,
-        &ServerHttp2Request::on_header_block_complete,
-        &ServerHttp2Request::on_body,
-        &ServerHttp2Request::on_stream_abort,
-        &ServerHttp2Request::on_stream_send_window_available,
+            &ServerHttp2Request::destroy_owner,
+            &ServerHttp2Request::on_header_block_start,
+            &ServerHttp2Request::on_header_block_complete,
+            &ServerHttp2Request::on_body,
+            &ServerHttp2Request::on_stream_abort,
+            &ServerHttp2Request::on_stream_send_window_available,
     };
     return kOps;
 }
 
 const Http2HpackDecoder::Ops &ServerHttp2Request::decoder_ops() noexcept {
     static const Http2HpackDecoder::Ops kOps{
-        &ServerHttp2Request::on_indexed_field,
-        &ServerHttp2Request::on_indexed_name,
-        &ServerHttp2Request::on_name_raw,
-        &ServerHttp2Request::on_name_huffman,
-        &ServerHttp2Request::on_value_raw,
-        &ServerHttp2Request::on_value_huffman,
+            &ServerHttp2Request::on_indexed_field, &ServerHttp2Request::on_indexed_name,
+            &ServerHttp2Request::on_name_raw,      &ServerHttp2Request::on_name_huffman,
+            &ServerHttp2Request::on_value_raw,     &ServerHttp2Request::on_value_huffman,
     };
     return kOps;
 }
@@ -139,8 +130,7 @@ const HeaderMap<ServerHttp2Request::PseudoHeaderHandler> &ServerHttp2Request::ps
 }
 
 ServerHttp2Request::ServerHttp2Request(std::uint32_t stream_id, Http2Connection &conn,
-                                       const HttpServerOptions &http_options,
-                                       const HttpHandler &handler) noexcept :
+                                       const HttpServerOptions &http_options, const HttpHandler &handler) noexcept :
     conn_(&conn), handler_(&handler), stream_(this, stream_ops()), exchange_(http_options),
     request_body_recv_(http_options.body_timeout), write_timeout_(http_options.write_timeout) {
     (void) stream_id;
@@ -204,7 +194,8 @@ common::IoErr ServerHttp2Request::on_header_block_complete(void *owner, bool end
 
 common::IoErr ServerHttp2Request::on_body(void *owner, mem::IoBuf &&buf, bool end_stream) noexcept {
     auto *request = static_cast<ServerHttp2Request *>(owner);
-    if (!request->request_head_received_ || request->reading_trailers_ || request->exchange_.request_trailers_complete_) {
+    if (!request->request_head_received_ || request->reading_trailers_ ||
+        request->exchange_.request_trailers_complete_) {
         return common::IoErr::Invalid;
     }
     common::IoErr err = request->request_body_recv_.push_body(std::move(buf), end_stream);
@@ -257,25 +248,28 @@ common::IoErr ServerHttp2Request::encode_response_frames(Http2Stream &stream, vo
         return common::IoErr::Invalid;
     }
     auto *request = awaiter->owner();
-    if (request->abort_reason_ != common::IoErr::None || request->stream_.local_rst() || request->stream_.remote_rst()) {
+    if (request->abort_reason_ != common::IoErr::None || request->stream_.local_rst() ||
+        request->stream_.remote_rst()) {
         request->on_header_send_complete(awaiter, request->abort_reason_ != common::IoErr::None
-                                                      ? request->abort_reason_
-                                                      : common::IoErr::Canceled);
+                                                          ? request->abort_reason_
+                                                          : common::IoErr::Canceled);
         result.status = Http2OutboundEncodeResult::Status::Closed;
         result.next_kind = Http2OutboundNextKind::None;
         return common::IoErr::None;
     }
 
-    Http2HeadersFrameEncoder frame_encoder(request->conn_->outbound_hpack_encoder(), {
-        .stream_id = stream.stream_id(),
-        .max_frame_size = req.max_frame_size,
-        .first_frame_payload_cap = static_cast<std::uint16_t>(std::min<std::uint32_t>(
-            req.max_frame_size,
-            static_cast<std::uint32_t>(std::min<std::size_t>(
-                target.slot_available() > 9 ? target.slot_available() - 9 : 0,
-                static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()))))),
-        .end_stream = awaiter->op_.end_stream_,
-    });
+    Http2HeadersFrameEncoder frame_encoder(
+            request->conn_->outbound_hpack_encoder(),
+            {
+                    .stream_id = stream.stream_id(),
+                    .max_frame_size = req.max_frame_size,
+                    .first_frame_payload_cap = static_cast<std::uint16_t>(std::min<std::uint32_t>(
+                            req.max_frame_size,
+                            static_cast<std::uint32_t>(std::min<std::size_t>(
+                                    target.slot_available() > 9 ? target.slot_available() - 9 : 0,
+                                    static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()))))),
+                    .end_stream = awaiter->op_.end_stream_,
+            });
     common::IoErr err = frame_encoder.begin(target);
     if (err != common::IoErr::None) {
         request->on_header_send_complete(awaiter, err);
@@ -347,9 +341,11 @@ common::IoErr ServerHttp2Request::encode_body_frames(Http2Stream &stream, void *
     }
 
     auto *request = awaiter->owner();
-    if (request->abort_reason_ != common::IoErr::None || request->stream_.local_rst() || request->stream_.remote_rst()) {
-        request->on_body_send_complete(awaiter, request->abort_reason_ != common::IoErr::None ? request->abort_reason_
-                                                                                               : common::IoErr::Canceled);
+    if (request->abort_reason_ != common::IoErr::None || request->stream_.local_rst() ||
+        request->stream_.remote_rst()) {
+        request->on_body_send_complete(awaiter, request->abort_reason_ != common::IoErr::None
+                                                        ? request->abort_reason_
+                                                        : common::IoErr::Canceled);
         result.status = Http2OutboundEncodeResult::Status::Closed;
         result.next_kind = Http2OutboundNextKind::None;
         return common::IoErr::None;
@@ -360,7 +356,8 @@ common::IoErr ServerHttp2Request::encode_body_frames(Http2Stream &stream, void *
     const std::size_t remaining = awaiter->op_.chunk_.data_chain.readable_bytes();
     const std::int32_t stream_window = stream.send_window();
     const std::uint32_t stream_budget = stream_window > 0 ? static_cast<std::uint32_t>(stream_window) : 0U;
-    const std::uint32_t conn_budget = req.conn_window_budget > 0 ? static_cast<std::uint32_t>(req.conn_window_budget) : 0U;
+    const std::uint32_t conn_budget =
+            req.conn_window_budget > 0 ? static_cast<std::uint32_t>(req.conn_window_budget) : 0U;
 
     if (remaining == 0) {
         if (!awaiter->op_.chunk_.last) {
@@ -371,9 +368,9 @@ common::IoErr ServerHttp2Request::encode_body_frames(Http2Stream &stream, void *
         }
 
         Http2DataFrameEncoder frame_encoder({
-            .stream_id = stream.stream_id(),
-            .max_frame_size = req.max_frame_size,
-            .end_stream = true,
+                .stream_id = stream.stream_id(),
+                .max_frame_size = req.max_frame_size,
+                .end_stream = true,
         });
         common::IoErr err = frame_encoder.encode(target, awaiter->op_.chunk_.data_chain, 0);
         if (err != common::IoErr::None) {
@@ -405,11 +402,11 @@ common::IoErr ServerHttp2Request::encode_body_frames(Http2Stream &stream, void *
     }
 
     const std::size_t payload_budget =
-        std::min<std::size_t>(remaining, std::min<std::uint32_t>(conn_budget, stream_budget));
+            std::min<std::size_t>(remaining, std::min<std::uint32_t>(conn_budget, stream_budget));
     Http2DataFrameEncoder frame_encoder({
-        .stream_id = stream.stream_id(),
-        .max_frame_size = req.max_frame_size,
-        .end_stream = awaiter->op_.chunk_.last && payload_budget == remaining,
+            .stream_id = stream.stream_id(),
+            .max_frame_size = req.max_frame_size,
+            .end_stream = awaiter->op_.chunk_.last && payload_budget == remaining,
     });
     common::IoErr err = frame_encoder.encode(target, awaiter->op_.chunk_.data_chain, payload_budget);
     if (err != common::IoErr::None) {
@@ -466,12 +463,13 @@ void ServerHttp2Request::on_stream_aborted(common::IoErr reason) noexcept {
     request_body_recv_.abort(abort_reason_);
 }
 
-fiber::async::Task<common::IoResult<BodyChunk>> ServerHttp2Request::read_body(HttpExchange &, std::size_t max_bytes) noexcept {
+fiber::async::Task<common::IoResult<BodyChunk>> ServerHttp2Request::read_body(HttpExchange &,
+                                                                              std::size_t max_bytes) noexcept {
     co_return co_await request_body_recv_.read_body(stream_, max_bytes);
 }
 
 fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_header(HttpExchange &exchange,
-                                                                            const OutgoingHeaderBlockView &header) {
+                                                                           const OutgoingHeaderBlockView &header) {
     if (conn_ == nullptr || &exchange != &exchange_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -533,9 +531,8 @@ fiber::async::Task<common::IoResult<size_t>> ServerHttp2Request::write_body(Http
     co_return co_await awaiter;
 }
 
-fiber::async::Task<common::IoResult<size_t>> ServerHttp2Request::write_body(HttpExchange &exchange,
-                                                                            const std::uint8_t *buf, std::size_t len,
-                                                                            bool end) noexcept {
+fiber::async::Task<common::IoResult<size_t>>
+ServerHttp2Request::write_body(HttpExchange &exchange, const std::uint8_t *buf, std::size_t len, bool end) noexcept {
     if (len != 0 && buf == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -682,8 +679,8 @@ common::IoErr ServerHttp2Request::on_value_huffman(void *owner, const std::uint8
     return request->commit_field(pending_name, pending_name_hash, value, pending_name_owned);
 }
 
-common::IoErr ServerHttp2Request::materialize_name_raw(const std::uint8_t *data, std::size_t len,
-                                                       std::string_view &out, std::uint64_t &name_hash) noexcept {
+common::IoErr ServerHttp2Request::materialize_name_raw(const std::uint8_t *data, std::size_t len, std::string_view &out,
+                                                       std::uint64_t &name_hash) noexcept {
     std::string_view name = copy_to_pool(data, len);
     if (!name.data() && len != 0) {
         return common::IoErr::NoMem;
@@ -694,8 +691,7 @@ common::IoErr ServerHttp2Request::materialize_name_raw(const std::uint8_t *data,
 }
 
 common::IoErr ServerHttp2Request::materialize_name_huffman(const std::uint8_t *data, std::size_t len,
-                                                           std::string_view &out,
-                                                           std::uint64_t &name_hash) noexcept {
+                                                           std::string_view &out, std::uint64_t &name_hash) noexcept {
     out = {};
     bool ok = false;
     std::size_t decoded_len = http2_huffman_decoded_length(data, len, &ok);
@@ -710,7 +706,7 @@ common::IoErr ServerHttp2Request::materialize_name_huffman(const std::uint8_t *d
 
         Http2HuffmanDecodeState state;
         Http2HuffmanDecodeResult result =
-            http2_huffman_decode_exact(state, data, len, reinterpret_cast<std::uint8_t *>(mem), true);
+                http2_huffman_decode_exact(state, data, len, reinterpret_cast<std::uint8_t *>(mem), true);
         if (result.code != Http2HuffmanCode::Ok || result.written != decoded_len) {
             return common::IoErr::Invalid;
         }
@@ -749,7 +745,7 @@ common::IoErr ServerHttp2Request::materialize_value_huffman(const std::uint8_t *
 
     Http2HuffmanDecodeState state;
     Http2HuffmanDecodeResult result =
-        http2_huffman_decode_exact(state, data, len, reinterpret_cast<std::uint8_t *>(mem), true);
+            http2_huffman_decode_exact(state, data, len, reinterpret_cast<std::uint8_t *>(mem), true);
     if (result.code != Http2HuffmanCode::Ok || result.written != decoded_len) {
         return common::IoErr::Invalid;
     }

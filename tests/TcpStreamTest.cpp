@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 
 #include <array>
-#include <chrono>
 #include <cerrno>
+#include <chrono>
 #include <coroutine>
 #include <future>
 #include <memory>
@@ -92,11 +92,9 @@ void consume_iov(struct iovec *iov, int &iovcnt, size_t consumed) {
     }
 }
 
-DetachedTask read_write_server(fiber::event::EventLoop *loop,
-                               std::promise<uint16_t> *port_promise,
+DetachedTask read_write_server(fiber::event::EventLoop *loop, std::promise<uint16_t> *port_promise,
                                std::promise<fiber::common::IoResult<std::string>> *read_promise,
-                               std::promise<fiber::common::IoResult<void>> *write_promise,
-                               std::string request,
+                               std::promise<fiber::common::IoResult<void>> *write_promise, std::string request,
                                std::string response) {
     fiber::net::TcpListener listener(*loop);
     fiber::net::ListenOptions options{};
@@ -124,9 +122,7 @@ DetachedTask read_write_server(fiber::event::EventLoop *loop,
         }
     };
 
-    auto fail = [&](fiber::common::IoErr err,
-                    std::unique_ptr<fiber::net::TcpStream> &stream,
-                    int &accepted_fd) {
+    auto fail = [&](fiber::common::IoErr err, std::unique_ptr<fiber::net::TcpStream> &stream, int &accepted_fd) {
         if (!port_set) {
             set_port(0);
         }
@@ -172,8 +168,7 @@ DetachedTask read_write_server(fiber::event::EventLoop *loop,
         fail(fiber::common::IoErr::BadFd, none, accepted_fd);
         co_return;
     }
-    std::unique_ptr<fiber::net::TcpStream> stream =
-        std::make_unique<fiber::net::TcpStream>(*loop, accepted_fd);
+    std::unique_ptr<fiber::net::TcpStream> stream = std::make_unique<fiber::net::TcpStream>(*loop, accepted_fd);
     accepted_fd = -1;
 
     std::string buffer(request.size(), '\0');
@@ -207,14 +202,10 @@ DetachedTask read_write_server(fiber::event::EventLoop *loop,
     co_return;
 }
 
-DetachedTask readv_writev_server(fiber::event::EventLoop *loop,
-                                 std::promise<uint16_t> *port_promise,
+DetachedTask readv_writev_server(fiber::event::EventLoop *loop, std::promise<uint16_t> *port_promise,
                                  std::promise<fiber::common::IoResult<std::string>> *read_promise,
-                                 std::promise<fiber::common::IoResult<void>> *write_promise,
-                                 std::string request_part1,
-                                 std::string request_part2,
-                                 std::string response_part1,
-                                 std::string response_part2) {
+                                 std::promise<fiber::common::IoResult<void>> *write_promise, std::string request_part1,
+                                 std::string request_part2, std::string response_part1, std::string response_part2) {
     fiber::net::TcpListener listener(*loop);
     fiber::net::ListenOptions options{};
     fiber::net::SocketAddress addr(fiber::net::IpAddress::loopback_v4(), 0);
@@ -241,9 +232,7 @@ DetachedTask readv_writev_server(fiber::event::EventLoop *loop,
         }
     };
 
-    auto fail = [&](fiber::common::IoErr err,
-                    std::unique_ptr<fiber::net::TcpStream> &stream,
-                    int &accepted_fd) {
+    auto fail = [&](fiber::common::IoErr err, std::unique_ptr<fiber::net::TcpStream> &stream, int &accepted_fd) {
         if (!port_set) {
             set_port(0);
         }
@@ -289,8 +278,7 @@ DetachedTask readv_writev_server(fiber::event::EventLoop *loop,
         fail(fiber::common::IoErr::BadFd, none, accepted_fd);
         co_return;
     }
-    std::unique_ptr<fiber::net::TcpStream> stream =
-        std::make_unique<fiber::net::TcpStream>(*loop, accepted_fd);
+    std::unique_ptr<fiber::net::TcpStream> stream = std::make_unique<fiber::net::TcpStream>(*loop, accepted_fd);
     accepted_fd = -1;
 
     std::string buffer1(request_part1.size(), '\0');
@@ -339,10 +327,8 @@ DetachedTask readv_writev_server(fiber::event::EventLoop *loop,
     co_return;
 }
 
-DetachedTask connect_client(fiber::event::EventLoop *loop,
-                            fiber::net::SocketAddress target,
-                            std::promise<fiber::common::IoResult<std::string>> *response_promise,
-                            std::string request,
+DetachedTask connect_client(fiber::event::EventLoop *loop, fiber::net::SocketAddress target,
+                            std::promise<fiber::common::IoResult<std::string>> *response_promise, std::string request,
                             std::string expected_response) {
     auto infant_result = co_await fiber::net::TcpStream::connect(*loop, target);
     if (!infant_result) {
@@ -466,9 +452,8 @@ TEST(TcpStreamTest, ConnectsWithAwaiter) {
     ASSERT_NE(port, 0);
 
     fiber::net::SocketAddress target(fiber::net::IpAddress::loopback_v4(), port);
-    fiber::async::spawn(group.at(1), [&]() {
-        return connect_client(&group.at(1), target, &response_promise, request, response);
-    });
+    fiber::async::spawn(group.at(1),
+                        [&]() { return connect_client(&group.at(1), target, &response_promise, request, response); });
 
     if (response_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
         group.stop();
@@ -517,14 +502,8 @@ TEST(TcpStreamTest, ReadvWritevRoundTrip) {
     const std::string response_part2 = "there";
 
     fiber::async::spawn(group.at(0), [&]() {
-        return readv_writev_server(&group.at(0),
-                                   &port_promise,
-                                   &read_promise,
-                                   &write_promise,
-                                   request_part1,
-                                   request_part2,
-                                   response_part1,
-                                   response_part2);
+        return readv_writev_server(&group.at(0), &port_promise, &read_promise, &write_promise, request_part1,
+                                   request_part2, response_part1, response_part2);
     });
 
     uint16_t port = port_future.get();

@@ -27,13 +27,9 @@ std::string to_string(const GcString *str) {
     return out;
 }
 
-const GcString *as_string(const JsValue &value) {
-    return js_value_heap_ptr<const GcString>(value);
-}
+const GcString *as_string(const JsValue &value) { return js_value_heap_ptr<const GcString>(value); }
 
-const GcArray *as_array(const JsValue &value) {
-    return js_value_heap_ptr<const GcArray>(value);
-}
+const GcArray *as_array(const JsValue &value) { return js_value_heap_ptr<const GcArray>(value); }
 
 GcString *make_key(GcHeap &heap, const char *data) {
     return fiber::json::gc_new_string(&heap, data, std::strlen(data));

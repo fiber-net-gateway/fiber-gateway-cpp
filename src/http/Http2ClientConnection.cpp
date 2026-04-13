@@ -29,11 +29,10 @@ Http2Connection::Options Http2ClientConnection::normalize_h2_options(Http2Connec
     return options;
 }
 
-Http2ClientConnection::Http2ClientConnection(event::EventLoop &loop, Options options) noexcept
-    : loop_(&loop),
-      peer_addr_(std::move(options.peer_addr)),
-      tls_ctx_(normalize_tls_options(std::move(options.tls)), false, false),
-      conn_(normalize_h2_options(std::move(options.h2)), nullptr, ClientHttp2Request::factory_ops()) {}
+Http2ClientConnection::Http2ClientConnection(event::EventLoop &loop, Options options) noexcept :
+    loop_(&loop), peer_addr_(std::move(options.peer_addr)),
+    tls_ctx_(normalize_tls_options(std::move(options.tls)), false, false),
+    conn_(normalize_h2_options(std::move(options.h2)), nullptr, ClientHttp2Request::factory_ops()) {}
 
 fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect() noexcept {
     FIBER_ASSERT(loop_ != nullptr);

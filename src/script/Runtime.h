@@ -22,7 +22,7 @@ public:
     void collect_now();
     void maybe_collect(std::size_t next_bytes = 0);
 
-    template <typename AllocFn>
+    template<typename AllocFn>
     auto alloc_with_gc(std::size_t next_bytes, AllocFn &&fn) -> decltype(fn()) {
         auto &&alloc_fn = fn;
         maybe_collect(next_bytes);
@@ -34,7 +34,7 @@ public:
         return alloc_fn();
     }
 
-    template <typename OpFn>
+    template<typename OpFn>
     bool run_with_gc_retry(std::size_t next_bytes, OpFn &&fn) {
         auto &&op_fn = fn;
         maybe_collect(next_bytes);

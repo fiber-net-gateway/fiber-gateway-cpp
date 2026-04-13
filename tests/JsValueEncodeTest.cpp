@@ -4,9 +4,9 @@
 #include <string>
 #include <utility>
 
-#include "common/json/JsonEncode.h"
 #include "common/json/JsGc.h"
 #include "common/json/JsValueEncode.h"
+#include "common/json/JsonEncode.h"
 
 using fiber::json::GcArray;
 using fiber::json::GcException;
@@ -33,9 +33,7 @@ public:
         return true;
     }
 
-    void reset() override {
-        output.clear();
-    }
+    void reset() override { output.clear(); }
 
     std::string output;
 };
@@ -102,10 +100,8 @@ TEST(JsValueEncodeTest, EncodeExceptionObject) {
 
     const char *name = "TypeError";
     const char *message = "boom";
-    GcException *exc = fiber::json::gc_new_exception(&heap, 42,
-                                                     name, std::strlen(name),
-                                                     message, std::strlen(message),
-                                                     meta);
+    GcException *exc =
+            fiber::json::gc_new_exception(&heap, 42, name, std::strlen(name), message, std::strlen(message), meta);
     ASSERT_NE(exc, nullptr);
 
     JsValue root = js_make_heap_ref(&exc->hdr, JsHeapKind::Exception);
@@ -119,9 +115,7 @@ TEST(JsValueEncodeTest, EncodeExceptionObject) {
 TEST(JsValueEncodeTest, EncodeExceptionDefaultMeta) {
     GcHeap heap;
     const char *name = "RangeError";
-    GcException *exc = fiber::json::gc_new_exception(&heap, -1,
-                                                     name, std::strlen(name),
-                                                     nullptr, 0);
+    GcException *exc = fiber::json::gc_new_exception(&heap, -1, name, std::strlen(name), nullptr, 0);
     ASSERT_NE(exc, nullptr);
 
     JsValue root = js_make_heap_ref(&exc->hdr, JsHeapKind::Exception);

@@ -53,14 +53,13 @@ DetachedTask echo_session(std::unique_ptr<fiber::net::TcpStream> stream) {
     const std::string peer = stream->remote_addr().to_string();
     for (;;) {
         auto read_result = co_await fiber::async::timeout_for(
-            [&]() { return stream->read(buffer.data(), buffer.size()); },
-            std::chrono::minutes(1));
+                [&]() { return stream->read(buffer.data(), buffer.size()); }, std::chrono::minutes(1));
         if (!read_result) {
             if (read_result.error() == IoErr::TimedOut) {
                 std::cerr << "idle timeout from " << peer << '\n';
             } else {
-                std::cerr << "read error from " << peer << ": "
-                          << fiber::common::io_err_name(read_result.error()) << '\n';
+                std::cerr << "read error from " << peer << ": " << fiber::common::io_err_name(read_result.error())
+                          << '\n';
             }
             break;
         }
@@ -69,11 +68,10 @@ DetachedTask echo_session(std::unique_ptr<fiber::net::TcpStream> stream) {
         }
         size_t offset = 0;
         while (offset < *read_result) {
-            auto write_result =
-                co_await stream->write(buffer.data() + offset, *read_result - offset);
+            auto write_result = co_await stream->write(buffer.data() + offset, *read_result - offset);
             if (!write_result) {
-                std::cerr << "write error to " << peer << ": "
-                          << fiber::common::io_err_name(write_result.error()) << '\n';
+                std::cerr << "write error to " << peer << ": " << fiber::common::io_err_name(write_result.error())
+                          << '\n';
                 stream->close();
                 co_return;
             }
@@ -122,12 +120,8 @@ DetachedTask accept_loop(fiber::event::EventLoop *loop, std::uint16_t port) {
         }
         auto accept = std::move(*accept_result);
         std::cerr << "client connected: " << accept.peer().to_string() << '\n';
-        auto stream = std::make_unique<fiber::net::TcpStream>(*loop,
-                                                              accept.release_fd(),
-                                                              accept.take_peer());
-        fiber::async::spawn(*loop, [stream = std::move(stream)]() mutable {
-            return echo_session(std::move(stream));
-        });
+        auto stream = std::make_unique<fiber::net::TcpStream>(*loop, accept.release_fd(), accept.take_peer());
+        fiber::async::spawn(*loop, [stream = std::move(stream)]() mutable { return echo_session(std::move(stream)); });
     }
     co_return;
 }
@@ -147,9 +141,7 @@ int main(int argc, char **argv) {
 
     fiber::event::EventLoop loop;
 
-    fiber::async::spawn(loop, [&]() {
-        return accept_loop(&loop, port);
-    });
+    fiber::async::spawn(loop, [&]() { return accept_loop(&loop, port); });
     loop.run();
     return 0;
 }

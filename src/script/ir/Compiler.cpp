@@ -10,8 +10,8 @@
 
 #include "../../common/Assert.h"
 #include "../ast/Assign.h"
-#include "../ast/Block.h"
 #include "../ast/BinaryOperator.h"
+#include "../ast/Block.h"
 #include "../ast/BreakStatement.h"
 #include "../ast/ConstantVal.h"
 #include "../ast/ContinueStatement.h"
@@ -25,8 +25,8 @@
 #include "../ast/Indexer.h"
 #include "../ast/InlineList.h"
 #include "../ast/InlineObject.h"
-#include "../ast/LogicRelationalExpression.h"
 #include "../ast/Literal.h"
+#include "../ast/LogicRelationalExpression.h"
 #include "../ast/PropertyReference.h"
 #include "../ast/ReturnStatement.h"
 #include "../ast/Statement.h"
@@ -90,9 +90,7 @@ private:
     int stack_depth_ = 0;
     int max_stack_ = 0;
 
-    void push_scope() {
-        scopes_.push_back(Scope{});
-    }
+    void push_scope() { scopes_.push_back(Scope{}); }
 
     void pop_scope() {
         if (!scopes_.empty()) {
@@ -124,9 +122,7 @@ private:
         return declare_var(name);
     }
 
-    std::size_t reserve_temp_var() {
-        return next_var_index_++;
-    }
+    std::size_t reserve_temp_var() { return next_var_index_++; }
 
     void update_stack(int delta) {
         stack_depth_ += delta;
@@ -180,9 +176,7 @@ private:
         return index;
     }
 
-    std::size_t add_call_site(std::size_t host_symbol_index,
-                              std::uint16_t argc,
-                              std::uint16_t flags,
+    std::size_t add_call_site(std::size_t host_symbol_index, std::uint16_t argc, std::uint16_t flags,
                               std::int64_t position) {
         Compiled::CallSite site;
         site.host_symbol_index = static_cast<std::uint32_t>(host_symbol_index);
@@ -273,7 +267,7 @@ private:
         if (push_new_scope) {
             push_scope();
         }
-        for (const auto &stmt : block.statements()) {
+        for (const auto &stmt: block.statements()) {
             if (stmt) {
                 compile_statement(*stmt);
             }
@@ -386,10 +380,10 @@ private:
             emit_jump(Code::JUMP, loop_start, stmt.start_pos());
             std::size_t loop_end = compiled_.codes.size();
             patch_jump(exit_jump, loop_end);
-            for (std::size_t jump_index : finished.break_jumps) {
+            for (std::size_t jump_index: finished.break_jumps) {
                 patch_jump(jump_index, loop_end);
             }
-            for (std::size_t jump_index : finished.continue_jumps) {
+            for (std::size_t jump_index: finished.continue_jumps) {
                 patch_jump(jump_index, finished.continue_target);
             }
             pop_scope();
@@ -494,14 +488,14 @@ private:
         }
         if (auto *call = dynamic_cast<const ast::FunctionCall *>(&expr)) {
             bool has_spread = false;
-            for (const auto &arg : call->args()) {
+            for (const auto &arg: call->args()) {
                 if (dynamic_cast<const ast::ExpandArrArg *>(arg.get())) {
                     has_spread = true;
                     break;
                 }
             }
             if (!has_spread) {
-                for (const auto &arg : call->args()) {
+                for (const auto &arg: call->args()) {
                     if (arg) {
                         compile_expression(*arg);
                     }
@@ -509,16 +503,17 @@ private:
                 const Library::HostCallable *callable = call->is_async() ? call->async_func() : call->func();
                 std::size_t symbol_idx = add_host_symbol(callable);
                 std::size_t arg_count = call->args().size();
-                std::size_t site_idx =
-                    add_call_site(symbol_idx, static_cast<std::uint16_t>(arg_count), Compiled::CallSiteNone, expr.start_pos());
-                std::int32_t code = static_cast<std::int32_t>(call->is_async() ? Code::CALL_ASYNC_FUNC : Code::CALL_FUNC) |
-                                    (static_cast<std::int32_t>(site_idx) << 8);
+                std::size_t site_idx = add_call_site(symbol_idx, static_cast<std::uint16_t>(arg_count),
+                                                     Compiled::CallSiteNone, expr.start_pos());
+                std::int32_t code =
+                        static_cast<std::int32_t>(call->is_async() ? Code::CALL_ASYNC_FUNC : Code::CALL_FUNC) |
+                        (static_cast<std::int32_t>(site_idx) << 8);
                 int delta = 1 - static_cast<int>(arg_count);
                 emit_raw(code, expr.start_pos(), delta);
                 return;
             }
             emit_raw(static_cast<std::int32_t>(Code::NEW_ARRAY), expr.start_pos(), 1);
-            for (const auto &arg : call->args()) {
+            for (const auto &arg: call->args()) {
                 if (!arg) {
                     continue;
                 }
@@ -534,14 +529,14 @@ private:
             }
             const Library::HostCallable *callable = call->is_async() ? call->async_func() : call->func();
             std::size_t symbol_idx = add_host_symbol(callable);
-            std::size_t site_idx =
-                add_call_site(symbol_idx, 0, Compiled::CallSiteSpreadArgs, expr.start_pos());
-            emit_op(call->is_async() ? Code::CALL_ASYNC_FUNC_SPREAD : Code::CALL_FUNC_SPREAD, site_idx, expr.start_pos(), 0);
+            std::size_t site_idx = add_call_site(symbol_idx, 0, Compiled::CallSiteSpreadArgs, expr.start_pos());
+            emit_op(call->is_async() ? Code::CALL_ASYNC_FUNC_SPREAD : Code::CALL_FUNC_SPREAD, site_idx,
+                    expr.start_pos(), 0);
             return;
         }
         if (auto *list = dynamic_cast<const ast::InlineList *>(&expr)) {
             emit_raw(static_cast<std::int32_t>(Code::NEW_ARRAY), expr.start_pos(), 1);
-            for (const auto &item : list->values()) {
+            for (const auto &item: list->values()) {
                 if (!item) {
                     continue;
                 }
@@ -559,7 +554,7 @@ private:
         }
         if (auto *obj = dynamic_cast<const ast::InlineObject *>(&expr)) {
             emit_raw(static_cast<std::int32_t>(Code::NEW_OBJECT), expr.start_pos(), 1);
-            for (const auto &entry : obj->entries()) {
+            for (const auto &entry: obj->entries()) {
                 if (entry.key.kind == ast::InlineObject::KeyKind::Expand) {
                     if (entry.value) {
                         if (auto *expand = dynamic_cast<const ast::ExpandArrArg *>(entry.value.get())) {

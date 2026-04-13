@@ -30,7 +30,7 @@ public:
     [[nodiscard]] std::size_t max_active_streams() const noexcept { return max_active_streams_; }
     [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
 
-    template <typename Fn>
+    template<typename Fn>
     void for_each(Fn &&fn) noexcept {
         for (std::size_t i = 0; i < bucket_count_; ++i) {
             if (buckets_[i].stream) {
@@ -39,7 +39,7 @@ public:
         }
     }
 
-    template <typename Fn>
+    template<typename Fn>
     void for_each(Fn &&fn) const noexcept {
         for (std::size_t i = 0; i < bucket_count_; ++i) {
             if (buckets_[i].stream) {

@@ -8,7 +8,7 @@
 
 namespace fiber::test {
 
-template <typename F>
+template<typename F>
 struct NotifyTask {
     fiber::event::EventLoop::NotifyEntry entry{};
     F fn;
@@ -20,12 +20,10 @@ struct NotifyTask {
         delete task;
     }
 
-    static void cancel(NotifyTask *task) {
-        delete task;
-    }
+    static void cancel(NotifyTask *task) { delete task; }
 };
 
-template <typename F>
+template<typename F>
 void post_task(fiber::event::EventLoop &loop, F &&fn) {
     using Task = NotifyTask<std::decay_t<F>>;
     auto *task = new Task(std::forward<F>(fn));

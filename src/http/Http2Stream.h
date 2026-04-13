@@ -7,8 +7,8 @@
 #include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
 #include "../common/mem/IoBuf.h"
-#include "Http2OutboundHook.h"
 #include "Http2HpackDecoder.h"
+#include "Http2OutboundHook.h"
 #include "Http2Protocol.h"
 
 namespace fiber::http {

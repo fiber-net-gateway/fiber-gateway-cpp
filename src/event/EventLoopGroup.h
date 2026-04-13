@@ -1,9 +1,9 @@
 #ifndef FIBER_EVENT_EVENT_LOOP_GROUP_H
 #define FIBER_EVENT_EVENT_LOOP_GROUP_H
 
+#include <atomic>
 #include <cstddef>
 #include <memory>
-#include <atomic>
 #include <vector>
 
 #include "../async/ThreadGroup.h"
@@ -19,8 +19,7 @@ class SignalSet;
 
 namespace fiber::event {
 
-class EventLoopGroup : public common::NonCopyable,
-                       public common::NonMovable {
+class EventLoopGroup : public common::NonCopyable, public common::NonMovable {
 public:
     explicit EventLoopGroup(std::size_t size);
     ~EventLoopGroup();
@@ -31,9 +30,7 @@ public:
     void join();
     [[nodiscard]] bool running() const noexcept;
 
-    std::size_t size() const noexcept {
-        return loops_.size();
-    }
+    std::size_t size() const noexcept { return loops_.size(); }
 
     EventLoop &at(std::size_t index);
     const EventLoop &at(std::size_t index) const;

@@ -11,9 +11,7 @@ namespace {
 
 using fiber::http::Http2HpackDecodeTable;
 
-std::string repeated(char ch, std::size_t count) {
-    return std::string(count, ch);
-}
+std::string repeated(char ch, std::size_t count) { return std::string(count, ch); }
 
 } // namespace
 

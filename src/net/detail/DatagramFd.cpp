@@ -119,7 +119,8 @@ void apply_ipv4_local(sockaddr_storage &storage, std::uint16_t port, const in_ad
     std::memcpy(&storage, &sa, sizeof(sa));
 }
 
-void apply_ipv6_local(sockaddr_storage &storage, std::uint16_t port, const in6_addr &addr, std::uint32_t scope_id) noexcept {
+void apply_ipv6_local(sockaddr_storage &storage, std::uint16_t port, const in6_addr &addr,
+                      std::uint32_t scope_id) noexcept {
     sockaddr_in6 sa{};
     sa.sin6_family = AF_INET6;
     sa.sin6_port = htons(port);
@@ -384,8 +385,7 @@ fiber::common::IoResult<UdpRecvResult> DatagramFd::try_recv_from(void *buf, size
     return UdpRecvResult{packet_result->size, packet_result->peer};
 }
 
-fiber::common::IoResult<size_t> DatagramFd::try_send_to(const void *buf,
-                                                        size_t len,
+fiber::common::IoResult<size_t> DatagramFd::try_send_to(const void *buf, size_t len,
                                                         const SocketAddress &peer) noexcept {
     UdpPacketSendSpec spec;
     spec.buf = buf;
@@ -440,7 +440,8 @@ fiber::common::IoErr DatagramFd::recv_packet_once(void *buf, size_t len, UdpPack
         ssize_t rc = ::recvmsg(socket_fd, &msg, MSG_DONTWAIT);
         if (rc >= 0) {
             SocketAddress parsed_peer;
-            if (!SocketAddress::from_sockaddr(reinterpret_cast<const sockaddr *>(&peer), msg.msg_namelen, parsed_peer)) {
+            if (!SocketAddress::from_sockaddr(reinterpret_cast<const sockaddr *>(&peer), msg.msg_namelen,
+                                              parsed_peer)) {
                 return fiber::common::IoErr::NotSupported;
             }
             out.size = static_cast<size_t>(rc);
@@ -512,8 +513,8 @@ fiber::common::IoErr DatagramFd::send_packet_once(const UdpPacketSendSpec &spec,
     }
 }
 
-DatagramFd::RecvFromAwaiter::RecvFromAwaiter(DatagramFd &socket, void *buf, size_t len) noexcept
-    : socket_(&socket), buf_(buf), len_(len) {}
+DatagramFd::RecvFromAwaiter::RecvFromAwaiter(DatagramFd &socket, void *buf, size_t len) noexcept :
+    socket_(&socket), buf_(buf), len_(len) {}
 
 DatagramFd::RecvFromAwaiter::~RecvFromAwaiter() {}
 
@@ -561,8 +562,8 @@ fiber::common::IoResult<UdpRecvResult> DatagramFd::RecvFromAwaiter::await_resume
     return std::unexpected(err_);
 }
 
-DatagramFd::SendToAwaiter::SendToAwaiter(DatagramFd &socket, const void *buf, size_t len, SocketAddress peer) noexcept
-    : socket_(&socket) {
+DatagramFd::SendToAwaiter::SendToAwaiter(DatagramFd &socket, const void *buf, size_t len, SocketAddress peer) noexcept :
+    socket_(&socket) {
     spec_.buf = buf;
     spec_.len = len;
     spec_.peer = std::move(peer);
@@ -614,8 +615,8 @@ fiber::common::IoResult<size_t> DatagramFd::SendToAwaiter::await_resume() noexce
     return std::unexpected(err_);
 }
 
-DatagramFd::RecvPacketAwaiter::RecvPacketAwaiter(DatagramFd &socket, void *buf, size_t len) noexcept
-    : socket_(&socket), buf_(buf), len_(len) {}
+DatagramFd::RecvPacketAwaiter::RecvPacketAwaiter(DatagramFd &socket, void *buf, size_t len) noexcept :
+    socket_(&socket), buf_(buf), len_(len) {}
 
 DatagramFd::RecvPacketAwaiter::~RecvPacketAwaiter() {}
 
@@ -663,8 +664,8 @@ fiber::common::IoResult<UdpPacketRecvResult> DatagramFd::RecvPacketAwaiter::awai
     return std::unexpected(err_);
 }
 
-DatagramFd::SendPacketAwaiter::SendPacketAwaiter(DatagramFd &socket, UdpPacketSendSpec spec) noexcept
-    : socket_(&socket), spec_(std::move(spec)) {}
+DatagramFd::SendPacketAwaiter::SendPacketAwaiter(DatagramFd &socket, UdpPacketSendSpec spec) noexcept :
+    socket_(&socket), spec_(std::move(spec)) {}
 
 DatagramFd::SendPacketAwaiter::~SendPacketAwaiter() {}
 

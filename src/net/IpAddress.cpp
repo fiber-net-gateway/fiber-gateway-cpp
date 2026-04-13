@@ -22,18 +22,14 @@ IpAddress IpAddress::v6(std::array<std::uint8_t, 16> bytes, std::uint32_t scope_
     return out;
 }
 
-IpAddress IpAddress::any_v4() {
-    return v4({0, 0, 0, 0});
-}
+IpAddress IpAddress::any_v4() { return v4({0, 0, 0, 0}); }
 
 IpAddress IpAddress::any_v6() {
     std::array<std::uint8_t, 16> bytes{};
     return v6(bytes);
 }
 
-IpAddress IpAddress::loopback_v4() {
-    return v4({127, 0, 0, 1});
-}
+IpAddress IpAddress::loopback_v4() { return v4({127, 0, 0, 1}); }
 
 IpAddress IpAddress::loopback_v6() {
     std::array<std::uint8_t, 16> bytes{};
@@ -61,7 +57,7 @@ bool IpAddress::is_unspecified() const noexcept {
         return bytes_.v4[0] == 0 && bytes_.v4[1] == 0 && bytes_.v4[2] == 0 && bytes_.v4[3] == 0;
     }
     if (is_v6()) {
-        for (auto byte : bytes_.v6) {
+        for (auto byte: bytes_.v6) {
             if (byte != 0) {
                 return false;
             }

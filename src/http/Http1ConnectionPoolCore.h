@@ -18,8 +18,8 @@ namespace fiber::http {
 
 class Http1ConnectionPoolCore : public common::NonCopyable, public common::NonMovable {
 public:
-    using IdleCountChangedCallback =
-        void (*)(void *ctx, const Http1ConnectionGroupKey &key, std::size_t idle_count) noexcept;
+    using IdleCountChangedCallback = void (*)(void *ctx, const Http1ConnectionGroupKey &key,
+                                              std::size_t idle_count) noexcept;
 
     class Lease : public common::NonCopyable {
     public:
@@ -33,11 +33,14 @@ public:
         [[nodiscard]] bool hit() const noexcept { return hit_; }
 
         [[nodiscard]] Http1ClientConnection *get() noexcept { return entry_ ? entry_->connection() : nullptr; }
-        [[nodiscard]] const Http1ClientConnection *get() const noexcept { return entry_ ? entry_->connection() : nullptr; }
+        [[nodiscard]] const Http1ClientConnection *get() const noexcept {
+            return entry_ ? entry_->connection() : nullptr;
+        }
 
         [[nodiscard]] Http1ClientConnection &connection() noexcept;
         [[nodiscard]] const Http1ConnectionGroupKey &key() const noexcept;
-        [[nodiscard]] common::IoResult<Http1ClientConnection *> emplace_connection(Http1ClientConnectionOptions options) noexcept;
+        [[nodiscard]] common::IoResult<Http1ClientConnection *>
+        emplace_connection(Http1ClientConnectionOptions options) noexcept;
         void reset() noexcept;
 
     private:
@@ -86,6 +89,7 @@ public:
     [[nodiscard]] std::size_t idle_total() const noexcept { return idle_total_; }
     [[nodiscard]] std::size_t group_count() const noexcept { return bucket_index_.size(); }
     [[nodiscard]] bool shutdown_requested() const noexcept;
+
 private:
     friend class Lease;
 

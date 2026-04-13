@@ -1,16 +1,16 @@
 #ifndef FIBER_HTTP_HTTP2_CONNECTION_H
 #define FIBER_HTTP_HTTP2_CONNECTION_H
 
-#include <chrono>
 #include <array>
-#include <cstring>
+#include <chrono>
+#include <coroutine>
 #include <cstddef>
 #include <cstdint>
-#include <coroutine>
+#include <cstring>
 #include <memory>
 
-#include "../async/Task.h"
 #include "../async/Spawn.h"
+#include "../async/Task.h"
 #include "../async/WaitGroup.h"
 #include "../common/Assert.h"
 #include "../common/IntrusiveList.h"
@@ -18,12 +18,12 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../common/mem/IoBuf.h"
+#include "Http2HpackDecoder.h"
+#include "Http2HpackEncodeCatalog.h"
+#include "Http2HpackEncoder.h"
 #include "Http2OutboundHook.h"
 #include "Http2OutboundScheduler.h"
 #include "Http2Protocol.h"
-#include "Http2HpackEncodeCatalog.h"
-#include "Http2HpackDecoder.h"
-#include "Http2HpackEncoder.h"
 #include "Http2Stream.h"
 #include "Http2StreamFactory.h"
 #include "Http2StreamTable.h"
@@ -75,7 +75,8 @@ public:
 
     virtual ~Http2Connection();
 
-    Http2Connection(Options options, void *peer_stream_factory_ctx, const Http2StreamFactoryOps &peer_stream_factory_ops);
+    Http2Connection(Options options, void *peer_stream_factory_ctx,
+                    const Http2StreamFactoryOps &peer_stream_factory_ops);
 
     common::IoErr start(std::unique_ptr<HttpTransport> transport) noexcept;
 
@@ -113,7 +114,9 @@ protected:
     }
     [[nodiscard]] ConnectionRole role() const noexcept { return options_.role; }
     [[nodiscard]] bool peer_enable_push() const noexcept { return peer_enable_push_; }
-    [[nodiscard]] bool has_stream(std::uint32_t stream_id) const noexcept { return streams_.find(stream_id) != nullptr; }
+    [[nodiscard]] bool has_stream(std::uint32_t stream_id) const noexcept {
+        return streams_.find(stream_id) != nullptr;
+    }
     [[nodiscard]] bool send_loop_exited() const noexcept { return !send_loop_running_; }
     [[nodiscard]] Http2HpackDecoder &inbound_hpack_decoder() noexcept { return inbound_hpack_decoder_; }
     [[nodiscard]] const Http2HpackDecoder &inbound_hpack_decoder() const noexcept { return inbound_hpack_decoder_; }

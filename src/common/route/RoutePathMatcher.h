@@ -16,25 +16,21 @@ public:
     using std::invalid_argument::invalid_argument;
 };
 
-template <typename Handler>
+template<typename Handler>
 class RoutePathMatcher {
 public:
     static constexpr std::uint32_t kInvalidIndex = std::numeric_limits<std::uint32_t>::max();
 
-    template <typename BuilderPayload, typename RouteVarDefiner>
+    template<typename BuilderPayload, typename RouteVarDefiner>
     class Builder;
 
     RoutePathMatcher() = default;
 
-    [[nodiscard]] std::uint32_t max_path_var_count() const noexcept {
-        return max_path_var_count_;
-    }
+    [[nodiscard]] std::uint32_t max_path_var_count() const noexcept { return max_path_var_count_; }
 
-    [[nodiscard]] bool empty() const noexcept {
-        return handlers_.empty();
-    }
+    [[nodiscard]] bool empty() const noexcept { return handlers_.empty(); }
 
-    template <typename Context>
+    template<typename Context>
     [[nodiscard]] bool match_path(std::string_view path, Context &context) const {
         if (nodes_.empty()) {
             return false;
@@ -58,16 +54,14 @@ private:
         std::uint32_t handler_count = 0;
     };
 
-    template <typename BuilderPayload, typename RouteVarDefiner>
+    template<typename BuilderPayload, typename RouteVarDefiner>
     friend class Builder;
 
     [[nodiscard]] std::string_view node_name_view(const Node &node) const noexcept {
         return std::string_view(text_.data() + node.name_offset, node.name_size);
     }
 
-    [[nodiscard]] bool node_name_equals(const Node &node,
-                                        const char *segment_data,
-                                        std::size_t segment_size,
+    [[nodiscard]] bool node_name_equals(const Node &node, const char *segment_data, std::size_t segment_size,
                                         std::uint32_t hash) const noexcept {
         if (node.hash != hash || node.name_size != segment_size) {
             return false;
@@ -81,9 +75,7 @@ private:
         return true;
     }
 
-    [[nodiscard]] std::uint32_t find_static_child(const Node &node,
-                                                  const char *segment_data,
-                                                  std::size_t segment_size,
+    [[nodiscard]] std::uint32_t find_static_child(const Node &node, const char *segment_data, std::size_t segment_size,
                                                   std::uint32_t hash) const noexcept {
         if (node.static_slot_count == 0) {
             return kInvalidIndex;
@@ -102,7 +94,7 @@ private:
         }
     }
 
-    template <typename Context>
+    template<typename Context>
     [[nodiscard]] bool match_node(std::uint32_t node_index, Context &context) const {
         const Node &node = nodes_[node_index];
         if (node.handler_count == 0) {
@@ -118,7 +110,7 @@ private:
         return false;
     }
 
-    template <typename Context>
+    template<typename Context>
     [[nodiscard]] bool exec(std::string_view path, std::size_t idx, std::uint32_t node_index, Context &context) const {
         const std::size_t length = path.size();
         std::size_t begin = idx;
@@ -211,8 +203,8 @@ private:
     std::uint32_t max_path_var_count_{0};
 };
 
-template <typename Handler>
-template <typename BuilderPayload, typename RouteVarDefiner>
+template<typename Handler>
+template<typename BuilderPayload, typename RouteVarDefiner>
 class RoutePathMatcher<Handler>::Builder {
 public:
     // RouteVarDefiner::add_path_var_definer receives a transient var_name view.
@@ -235,9 +227,9 @@ public:
             node.id = next_node_id_++;
         }
         node.mounted_routes.push_back({
-            .payload_index = payload_index,
-            .full_path_offset = append_text(pattern.data(), pattern.size()),
-            .full_path_size = static_cast<std::uint32_t>(pattern.size()),
+                .payload_index = payload_index,
+                .full_path_offset = append_text(pattern.data(), pattern.size()),
+                .full_path_size = static_cast<std::uint32_t>(pattern.size()),
         });
     }
 
@@ -262,34 +254,32 @@ public:
             if (!src.static_slots.empty()) {
                 dst.static_slot_begin = static_cast<std::uint32_t>(matcher.static_slots_.size());
                 dst.static_slot_count = static_cast<std::uint32_t>(src.static_slots.size());
-                matcher.static_slots_.insert(matcher.static_slots_.end(), src.static_slots.begin(), src.static_slots.end());
+                matcher.static_slots_.insert(matcher.static_slots_.end(), src.static_slots.begin(),
+                                             src.static_slots.end());
             }
 
             if (!src.placeholder_children.empty()) {
                 dst.placeholder_begin = static_cast<std::uint32_t>(matcher.placeholder_children_.size());
                 dst.placeholder_count = static_cast<std::uint32_t>(src.placeholder_children.size());
                 matcher.placeholder_children_.insert(matcher.placeholder_children_.end(),
-                                                    src.placeholder_children.begin(),
-                                                    src.placeholder_children.end());
+                                                     src.placeholder_children.begin(), src.placeholder_children.end());
             }
 
             if (!src.wildcard_children.empty()) {
                 dst.wildcard_begin = static_cast<std::uint32_t>(matcher.wildcard_children_.size());
                 dst.wildcard_count = static_cast<std::uint32_t>(src.wildcard_children.size());
-                matcher.wildcard_children_.insert(matcher.wildcard_children_.end(),
-                                                 src.wildcard_children.begin(),
-                                                 src.wildcard_children.end());
+                matcher.wildcard_children_.insert(matcher.wildcard_children_.end(), src.wildcard_children.begin(),
+                                                  src.wildcard_children.end());
             }
 
             if (!src.mounted_routes.empty()) {
                 dst.handler_begin = static_cast<std::uint32_t>(matcher.handlers_.size());
                 dst.handler_count = static_cast<std::uint32_t>(src.mounted_routes.size());
-                for (const MountedRoute &route : src.mounted_routes) {
-                    const std::string_view full_path(
-                        matcher.text_.data() + route.full_path_offset,
-                        route.full_path_size);
+                for (const MountedRoute &route: src.mounted_routes) {
+                    const std::string_view full_path(matcher.text_.data() + route.full_path_offset,
+                                                     route.full_path_size);
                     matcher.handlers_.push_back(
-                        route_definer_.on_route_mount(dst.id, full_path, payloads_[route.payload_index]));
+                            route_definer_.on_route_mount(dst.id, full_path, payloads_[route.payload_index]));
                 }
             }
         }
@@ -326,7 +316,7 @@ private:
         if (pattern.empty()) {
             throw RoutePatternError("empty path pattern is not allowed");
         }
-        for (const unsigned char ch : pattern) {
+        for (const unsigned char ch: pattern) {
             if ((ch & 0x80u) != 0) {
                 throw RoutePatternError("path pattern must use ASCII bytes only");
             }
@@ -344,9 +334,7 @@ private:
         return std::string_view(text_.data() + node.name_offset, node.name_size);
     }
 
-    [[nodiscard]] bool node_name_equals(const BuildNode &node,
-                                        const char *segment_data,
-                                        std::size_t segment_size,
+    [[nodiscard]] bool node_name_equals(const BuildNode &node, const char *segment_data, std::size_t segment_size,
                                         std::uint32_t hash) const noexcept {
         if (node.hash != hash || node.name_size != segment_size) {
             return false;
@@ -376,7 +364,7 @@ private:
     void rehash_static_slots(BuildNode &node, std::size_t new_size) {
         std::vector<std::uint32_t> rehashed;
         fill_invalid(rehashed, new_size);
-        for (std::uint32_t child_index : node.static_slots) {
+        for (std::uint32_t child_index: node.static_slots) {
             if (child_index == kInvalidIndex) {
                 continue;
             }
@@ -390,10 +378,8 @@ private:
         node.static_slots = std::move(rehashed);
     }
 
-    [[nodiscard]] std::uint32_t add_or_get_static_child(std::uint32_t node_index,
-                                                        const char *segment_data,
-                                                        std::size_t segment_size,
-                                                        std::uint32_t hash) {
+    [[nodiscard]] std::uint32_t add_or_get_static_child(std::uint32_t node_index, const char *segment_data,
+                                                        std::size_t segment_size, std::uint32_t hash) {
         if (nodes_[node_index].static_slots.empty()) {
             fill_invalid(nodes_[node_index].static_slots, 8);
         } else if ((nodes_[node_index].static_child_count << 1u) > nodes_[node_index].static_slots.size()) {
@@ -417,11 +403,9 @@ private:
         }
     }
 
-    [[nodiscard]] std::uint32_t add_or_get_placeholder(std::uint32_t node_index,
-                                                       const char *segment_data,
-                                                       std::size_t segment_size,
-                                                       std::uint32_t hash) {
-        for (std::uint32_t child_index : nodes_[node_index].placeholder_children) {
+    [[nodiscard]] std::uint32_t add_or_get_placeholder(std::uint32_t node_index, const char *segment_data,
+                                                       std::size_t segment_size, std::uint32_t hash) {
+        for (std::uint32_t child_index: nodes_[node_index].placeholder_children) {
             if (node_name_equals(nodes_[child_index], segment_data, segment_size, hash)) {
                 return child_index;
             }
@@ -431,11 +415,9 @@ private:
         return created;
     }
 
-    [[nodiscard]] std::uint32_t add_or_get_wildcard(std::uint32_t node_index,
-                                                    const char *segment_data,
-                                                    std::size_t segment_size,
-                                                    std::uint32_t hash) {
-        for (std::uint32_t child_index : nodes_[node_index].wildcard_children) {
+    [[nodiscard]] std::uint32_t add_or_get_wildcard(std::uint32_t node_index, const char *segment_data,
+                                                    std::size_t segment_size, std::uint32_t hash) {
+        for (std::uint32_t child_index: nodes_[node_index].wildcard_children) {
             if (node_name_equals(nodes_[child_index], segment_data, segment_size, hash)) {
                 return child_index;
             }
@@ -463,19 +445,21 @@ private:
                     if (ch != 0) {
                         throw RoutePatternError("wildcard segment must be the last path segment");
                     }
-                    child_index = add_or_get_wildcard(node_index, chars + segment_start + 1, i - segment_start - 1, hash);
+                    child_index =
+                            add_or_get_wildcard(node_index, chars + segment_start + 1, i - segment_start - 1, hash);
                     if (segment_start + 1 < i) {
                         route_definer_.add_path_var_definer(payload, node_name_view(child_index), path_var_index++);
                     }
                 } else if (wild == 1) {
                     child_index =
-                        add_or_get_placeholder(node_index, chars + segment_start + 1, i - segment_start - 1, hash);
+                            add_or_get_placeholder(node_index, chars + segment_start + 1, i - segment_start - 1, hash);
                     if (segment_start + 1 < i) {
                         route_definer_.add_path_var_definer(payload, node_name_view(child_index), path_var_index++);
                     }
                 } else if (i > 0) {
                     if (segment_start < i || segment_start == length) {
-                        child_index = add_or_get_static_child(node_index, chars + segment_start, i - segment_start, hash);
+                        child_index =
+                                add_or_get_static_child(node_index, chars + segment_start, i - segment_start, hash);
                     }
                 } else {
                     child_index = 0;

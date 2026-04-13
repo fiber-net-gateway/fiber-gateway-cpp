@@ -10,12 +10,12 @@
 #include "../common/NonMovable.h"
 #include "../common/mem/BufPool.h"
 #include "ClientHttp2Types.h"
+#include "Http2HpackDecoder.h"
+#include "Http2Stream.h"
+#include "Http2StreamFactory.h"
 #include "detail/Http2BodyRecvState.h"
 #include "detail/Http2HeaderBlockQueue.h"
 #include "detail/Http2SendAwaiter.h"
-#include "Http2HpackDecoder.h"
-#include "Http2StreamFactory.h"
-#include "Http2Stream.h"
 
 namespace fiber::http {
 
@@ -53,8 +53,7 @@ private:
     using TrailerSendAwaiter = detail::HeaderSendAwaiter<ClientHttp2Request, SendRequestTrailerOp>;
 
     static Http2Stream::Lease create_peer_stream(std::uint32_t stream_id, Http2Connection &conn) noexcept;
-    static Http2Stream::Lease create_peer_stream_op(void *ctx, std::uint32_t stream_id,
-                                                    Http2Connection &conn) noexcept;
+    static Http2Stream::Lease create_peer_stream_op(void *ctx, std::uint32_t stream_id, Http2Connection &conn) noexcept;
     explicit ClientHttp2Request(Http2Connection &conn, mem::BufPool &pool) noexcept;
     static const Http2Stream::Ops &stream_ops() noexcept;
     static const Http2HpackDecoder::Ops &decoder_ops() noexcept;

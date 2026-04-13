@@ -82,11 +82,13 @@ common::IoErr Http2HpackDecoder::decode(const std::uint8_t *data, std::size_t le
                 integer_prefix_max_ = 0x7fU;
                 integer_value_ = byte & integer_prefix_max_;
                 if (integer_value_ != integer_prefix_max_) {
-                    err = prepare_string_accumulator(
-                        integer_value_, state_ == State::LiteralNameLenFirst ? State::LiteralNameData : State::LiteralValueData);
+                    err = prepare_string_accumulator(integer_value_, state_ == State::LiteralNameLenFirst
+                                                                             ? State::LiteralNameData
+                                                                             : State::LiteralValueData);
                 } else {
                     integer_shift_ = 0;
-                    state_ = state_ == State::LiteralNameLenFirst ? State::LiteralNameLenCont : State::LiteralValueLenCont;
+                    state_ = state_ == State::LiteralNameLenFirst ? State::LiteralNameLenCont
+                                                                  : State::LiteralValueLenCont;
                 }
                 break;
             }
@@ -255,9 +257,8 @@ common::IoErr Http2HpackDecoder::handle_string_complete() noexcept {
     }
 
     if (state_ == State::LiteralNameData) {
-        common::IoErr err =
-            string_huffman_ ? ops_->on_name_huffman(ctx_, scratch_.get(), string_length_)
-                            : ops_->on_name_raw(ctx_, scratch_.get(), string_length_);
+        common::IoErr err = string_huffman_ ? ops_->on_name_huffman(ctx_, scratch_.get(), string_length_)
+                                            : ops_->on_name_raw(ctx_, scratch_.get(), string_length_);
         if (err != common::IoErr::None) {
             return err;
         }
@@ -277,7 +278,7 @@ common::IoErr Http2HpackDecoder::handle_string_complete() noexcept {
         return common::IoErr::Invalid;
     }
     if (field_out != nullptr) {
-        (void)decode_table_.insert(field.name, field.value);
+        (void) decode_table_.insert(field.name, field.value);
     }
     finish_literal_field();
     return common::IoErr::None;

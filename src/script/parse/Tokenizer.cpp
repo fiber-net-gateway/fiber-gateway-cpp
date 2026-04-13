@@ -4,9 +4,7 @@
 
 namespace fiber::script::parse {
 
-Tokenizer::Tokenizer(std::string input) : input_(std::move(input)) {
-    max_ = input_.size();
-}
+Tokenizer::Tokenizer(std::string input) : input_(std::move(input)) { max_ = input_.size(); }
 
 std::expected<void, ParseError> Tokenizer::process() {
     tokens_.clear();
@@ -413,9 +411,7 @@ std::expected<void, ParseError> Tokenizer::lex_numeric_literal(bool first_char_z
         } else if (pos_ < max_ && is_double_suffix(input_[pos_])) {
             ++pos_;
         }
-        push_token(is_float ? TokenKind::LiteralRealFloat : TokenKind::LiteralReal,
-                   start,
-                   pos_,
+        push_token(is_float ? TokenKind::LiteralRealFloat : TokenKind::LiteralReal, start, pos_,
                    input_.substr(start, pos_ - start));
         return {};
     }
@@ -431,9 +427,7 @@ std::expected<void, ParseError> Tokenizer::lex_numeric_literal(bool first_char_z
     }
 
     if (is_real) {
-        push_token(is_float ? TokenKind::LiteralRealFloat : TokenKind::LiteralReal,
-                   start,
-                   pos_,
+        push_token(is_float ? TokenKind::LiteralRealFloat : TokenKind::LiteralReal, start, pos_,
                    input_.substr(start, pos_ - start));
     } else {
         push_token(TokenKind::LiteralInt, start, end_of_number, input_.substr(start, end_of_number - start));
@@ -449,9 +443,7 @@ void Tokenizer::lex_identifier() {
     push_token(TokenKind::Identifier, start, pos_, input_.substr(start, pos_ - start));
 }
 
-bool Tokenizer::is_identifier(char ch) const {
-    return is_alpha(ch) || is_digit(ch) || ch == '_' || ch == '$';
-}
+bool Tokenizer::is_identifier(char ch) const { return is_alpha(ch) || is_digit(ch) || ch == '_' || ch == '$'; }
 
 bool Tokenizer::is_digit(char ch) const {
     if (static_cast<unsigned char>(ch) > 255) {
@@ -482,21 +474,13 @@ bool Tokenizer::is_char(char a, char b) const {
     return ch == a || ch == b;
 }
 
-bool Tokenizer::is_exponent_char(char ch) const {
-    return ch == 'e' || ch == 'E';
-}
+bool Tokenizer::is_exponent_char(char ch) const { return ch == 'e' || ch == 'E'; }
 
-bool Tokenizer::is_float_suffix(char ch) const {
-    return ch == 'f' || ch == 'F';
-}
+bool Tokenizer::is_float_suffix(char ch) const { return ch == 'f' || ch == 'F'; }
 
-bool Tokenizer::is_double_suffix(char ch) const {
-    return ch == 'd' || ch == 'D';
-}
+bool Tokenizer::is_double_suffix(char ch) const { return ch == 'd' || ch == 'D'; }
 
-bool Tokenizer::is_sign(char ch) const {
-    return ch == '+' || ch == '-';
-}
+bool Tokenizer::is_sign(char ch) const { return ch == '+' || ch == '-'; }
 
 void Tokenizer::push_char_token(TokenKind kind) {
     tokens_.push_back({kind, pos_, pos_ + 1, std::string(1, input_[pos_])});

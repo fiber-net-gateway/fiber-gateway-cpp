@@ -5,9 +5,7 @@
 namespace fiber::lite_nginx::config {
 namespace {
 
-bool is_whitespace(char ch) {
-    return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
-}
+bool is_whitespace(char ch) { return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n'; }
 
 bool is_delimiter(char ch) {
     return is_whitespace(ch) || ch == '#' || ch == '{' || ch == '}' || ch == ';' || ch == '=' || ch == '"' ||
@@ -87,9 +85,7 @@ std::expected<std::vector<Token>, ConfigError> Lexer::tokenize() {
     return tokens;
 }
 
-bool Lexer::eof() const noexcept {
-    return pos_ >= input_.size();
-}
+bool Lexer::eof() const noexcept { return pos_ >= input_.size(); }
 
 char Lexer::peek(std::size_t offset) const noexcept {
     if (pos_ + offset >= input_.size()) {
@@ -100,10 +96,10 @@ char Lexer::peek(std::size_t offset) const noexcept {
 
 SourceLocation Lexer::current_location() const {
     return SourceLocation{
-        .source_name = source_name_,
-        .line = line_,
-        .column = column_,
-        .offset = pos_,
+            .source_name = source_name_,
+            .line = line_,
+            .column = column_,
+            .offset = pos_,
     };
 }
 
@@ -144,8 +140,8 @@ std::expected<Token, ConfigError> Lexer::read_word() {
 
     if (token.text.empty()) {
         return std::unexpected(ConfigError{
-            .message = "unexpected character in config",
-            .location = token.location,
+                .message = "unexpected character in config",
+                .location = token.location,
         });
     }
     return token;
@@ -169,8 +165,8 @@ std::expected<Token, ConfigError> Lexer::read_string() {
             advance();
             if (eof()) {
                 return std::unexpected(ConfigError{
-                    .message = "unterminated escape sequence in string literal",
-                    .location = current_location(),
+                        .message = "unterminated escape sequence in string literal",
+                        .location = current_location(),
                 });
             }
             token.text.push_back(decode_escape(peek()));
@@ -182,8 +178,8 @@ std::expected<Token, ConfigError> Lexer::read_string() {
     }
 
     return std::unexpected(ConfigError{
-        .message = "unterminated string literal",
-        .location = token.location,
+            .message = "unterminated string literal",
+            .location = token.location,
     });
 }
 

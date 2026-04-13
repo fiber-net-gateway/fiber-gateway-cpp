@@ -2,8 +2,8 @@
 #define FIBER_ASYNC_MUTEX_H
 
 #include <atomic>
-#include <cstdint>
 #include <coroutine>
+#include <cstdint>
 #include <mutex>
 #include <thread>
 
@@ -22,8 +22,7 @@ public:
     class LockGuard {
     public:
         LockGuard() = default;
-        explicit LockGuard(Mutex *mutex) : mutex_(mutex) {
-        }
+        explicit LockGuard(Mutex *mutex) : mutex_(mutex) {}
 
         LockGuard(const LockGuard &) = delete;
         LockGuard &operator=(const LockGuard &) = delete;
@@ -40,8 +39,7 @@ public:
 
     class LockAwaiter {
     public:
-        explicit LockAwaiter(Mutex &mutex) noexcept : mutex_(&mutex) {
-        }
+        explicit LockAwaiter(Mutex &mutex) noexcept : mutex_(&mutex) {}
 
         LockAwaiter(const LockAwaiter &) = delete;
         LockAwaiter &operator=(const LockAwaiter &) = delete;
@@ -70,17 +68,10 @@ public:
     bool locked() const noexcept;
 
 private:
-    enum class WaiterState : std::uint8_t {
-        Waiting,
-        Notified,
-        Resumed,
-        Canceled
-    };
+    enum class WaiterState : std::uint8_t { Waiting, Notified, Resumed, Canceled };
 
     struct Waiter {
-        explicit Waiter(Mutex *owner,
-                        std::coroutine_handle<> handle,
-                        fiber::event::EventLoop *loop,
+        explicit Waiter(Mutex *owner, std::coroutine_handle<> handle, fiber::event::EventLoop *loop,
                         std::thread::id thread_id);
 
         void resume();

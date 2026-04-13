@@ -12,9 +12,9 @@
 #include "../common/mem/BufPool.h"
 #include "../common/mem/IoBuf.h"
 #include "ClientHttp1Types.h"
-#include "HttpExchange.h"
 #include "Http1HeaderParseBuffer.h"
 #include "Http1Parser.h"
+#include "HttpExchange.h"
 
 namespace fiber::http {
 
@@ -22,8 +22,7 @@ class Http1ClientConnection;
 
 class ClientHttp1Exchange : public common::NonCopyable, public common::NonMovable {
 public:
-    ClientHttp1Exchange(Http1ClientConnection &conn,
-                        mem::BufPool &pool,
+    ClientHttp1Exchange(Http1ClientConnection &conn, mem::BufPool &pool,
                         Http1ClientExchangeOptions options = {}) noexcept;
     ~ClientHttp1Exchange();
 

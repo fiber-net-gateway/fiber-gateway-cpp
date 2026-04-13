@@ -62,7 +62,7 @@ public:
         }
         if (has_timer()) {
             loop_->post_at<HeaderReadAwaiter, &HeaderReadAwaiter::timer_entry_, &HeaderReadAwaiter::on_timeout>(
-                loop_->now() + timeout_, *this);
+                    loop_->now() + timeout_, *this);
         }
         return true;
     }

@@ -59,8 +59,7 @@ private:
     [[nodiscard]] bool should_shift_bucket(std::size_t hole, std::size_t current, std::size_t home) const noexcept;
     [[nodiscard]] bool ensure_capacity_for_insert() noexcept;
     [[nodiscard]] bool rehash(std::size_t new_slot_capacity) noexcept;
-    [[nodiscard]] std::size_t find_insert_slot(const Slot *slots,
-                                               std::size_t slot_capacity,
+    [[nodiscard]] std::size_t find_insert_slot(const Slot *slots, std::size_t slot_capacity,
                                                const Http1ConnectionGroupKey &key) const noexcept;
     static void destroy_slot(Slot &slot) noexcept;
     static void move_slot(Slot &dst, std::size_t dst_index, Slot &src) noexcept;

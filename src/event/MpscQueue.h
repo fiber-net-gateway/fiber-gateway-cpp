@@ -11,7 +11,7 @@
 
 namespace fiber::event {
 
-template <typename T>
+template<typename T>
 class MpscQueue {
 public:
     class Node {
@@ -40,9 +40,7 @@ public:
         Node *stale_head = head_.load(std::memory_order_relaxed);
         for (;;) {
             node->next_ = stale_head;
-            if (head_.compare_exchange_weak(stale_head, node,
-                                           std::memory_order_release,
-                                           std::memory_order_relaxed)) {
+            if (head_.compare_exchange_weak(stale_head, node, std::memory_order_release, std::memory_order_relaxed)) {
                 return;
             }
         }
@@ -72,11 +70,9 @@ public:
         node->next_ = nullptr;
     }
 
-    static Node *next(Node *node) noexcept {
-        return node ? node->next_ : nullptr;
-    }
+    static Node *next(Node *node) noexcept { return node ? node->next_ : nullptr; }
 
-    template <std::invocable<T &> F>
+    template<std::invocable<T &> F>
     static void for_each(Node *root, F &&func) noexcept(std::is_nothrow_invocable_v<F, T &>) {
         while (root) {
             Node *next = root->next_;

@@ -48,8 +48,8 @@ Http1ConnectionBucketIndex::EntryRef Http1ConnectionBucketIndex::find(const Http
         return {};
     }
     return EntryRef{
-        .slot_index = static_cast<std::uint32_t>(slot_index),
-        .bucket = slots_[slot_index].bucket,
+            .slot_index = static_cast<std::uint32_t>(slot_index),
+            .bucket = slots_[slot_index].bucket,
     };
 }
 
@@ -157,8 +157,7 @@ std::size_t Http1ConnectionBucketIndex::find_slot(const Http1ConnectionGroupKey 
     return slot_capacity_;
 }
 
-bool Http1ConnectionBucketIndex::should_shift_bucket(std::size_t hole,
-                                                     std::size_t current,
+bool Http1ConnectionBucketIndex::should_shift_bucket(std::size_t hole, std::size_t current,
                                                      std::size_t home) const noexcept {
     return probe_distance(home, hole) < probe_distance(home, current);
 }
@@ -219,8 +218,7 @@ bool Http1ConnectionBucketIndex::rehash(std::size_t new_slot_capacity) noexcept 
     return true;
 }
 
-std::size_t Http1ConnectionBucketIndex::find_insert_slot(const Slot *slots,
-                                                         std::size_t slot_capacity,
+std::size_t Http1ConnectionBucketIndex::find_insert_slot(const Slot *slots, std::size_t slot_capacity,
                                                          const Http1ConnectionGroupKey &key) const noexcept {
     FIBER_ASSERT(slots != nullptr);
     FIBER_ASSERT(slot_capacity > 0);

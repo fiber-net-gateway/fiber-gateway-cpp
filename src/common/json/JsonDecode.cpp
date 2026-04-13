@@ -42,7 +42,7 @@ void append_code_unit(DecodedString &out, char16_t unit) {
     if (out.is_byte) {
         out.is_byte = false;
         out.u16.reserve(out.bytes.size() + 1);
-        for (std::uint8_t byte : out.bytes) {
+        for (std::uint8_t byte: out.bytes) {
             out.u16.push_back(static_cast<char16_t>(byte));
         }
         out.bytes.clear();
@@ -170,9 +170,7 @@ bool set_parse_error(ParseError &error, const char *message, std::size_t offset)
     return false;
 }
 
-bool is_ws(char ch) {
-    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r';
-}
+bool is_ws(char ch) { return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'; }
 
 enum class TokenType {
     End,
@@ -203,9 +201,7 @@ struct LexToken {
     std::size_t end = 0;
 };
 
-bool is_delimiter(char ch) {
-    return is_ws(ch) || ch == ',' || ch == ']' || ch == '}' || ch == ':';
-}
+bool is_delimiter(char ch) { return is_ws(ch) || ch == ',' || ch == ']' || ch == '}' || ch == ':'; }
 
 LexResult lex_string(const std::string &buffer, std::size_t start, bool final, LexToken &out, ParseError &error,
                      std::size_t total_offset) {
@@ -324,8 +320,8 @@ LexResult lex_string(const std::string &buffer, std::size_t start, bool final, L
         }
         std::size_t cursor = i;
         std::uint32_t codepoint = 0;
-        Utf8DecodeResult result = decode_utf8_codepoint(buffer.data(), buffer.size(), cursor, final, codepoint,
-                                                        error, total_offset);
+        Utf8DecodeResult result =
+                decode_utf8_codepoint(buffer.data(), buffer.size(), cursor, final, codepoint, error, total_offset);
         if (result == Utf8DecodeResult::NeedMore) {
             return LexResult::NeedMore;
         }
@@ -347,9 +343,8 @@ LexResult lex_string(const std::string &buffer, std::size_t start, bool final, L
     return LexResult::Error;
 }
 
-LexResult lex_literal(const std::string &buffer, std::size_t start, bool final,
-                      const char *literal, TokenType type, LexToken &out, ParseError &error,
-                      std::size_t total_offset) {
+LexResult lex_literal(const std::string &buffer, std::size_t start, bool final, const char *literal, TokenType type,
+                      LexToken &out, ParseError &error, std::size_t total_offset) {
     std::size_t len = std::strlen(literal);
     if (start + len > buffer.size()) {
         if (!final) {
@@ -536,24 +531,21 @@ LexResult lex_token(const std::string &buffer, std::size_t &pos, bool final, Lex
             }
             return result;
         }
-        case 't':
-        {
+        case 't': {
             LexResult result = lex_literal(buffer, i, final, "true", TokenType::True, out, error, total_offset);
             if (result == LexResult::Ok) {
                 pos = out.end;
             }
             return result;
         }
-        case 'f':
-        {
+        case 'f': {
             LexResult result = lex_literal(buffer, i, final, "false", TokenType::False, out, error, total_offset);
             if (result == LexResult::Ok) {
                 pos = out.end;
             }
             return result;
         }
-        case 'n':
-        {
+        case 'n': {
             LexResult result = lex_literal(buffer, i, final, "null", TokenType::Null, out, error, total_offset);
             if (result == LexResult::Ok) {
                 pos = out.end;
@@ -575,8 +567,8 @@ LexResult lex_token(const std::string &buffer, std::size_t &pos, bool final, Lex
 
 class ParserImpl {
 public:
-    ParserImpl(GcHeap &heap, ParseError &error, const char *data, std::size_t len)
-        : heap_(heap), error_(error), data_(data), len_(len) {}
+    ParserImpl(GcHeap &heap, ParseError &error, const char *data, std::size_t len) :
+        heap_(heap), error_(error), data_(data), len_(len) {}
 
     bool parse(JsValue &out) {
         skip_ws();
@@ -955,8 +947,7 @@ private:
 
 } // namespace
 
-Parser::Parser(GcHeap &heap)
-    : heap_(heap) {}
+Parser::Parser(GcHeap &heap) : heap_(heap) {}
 
 bool Parser::parse(const char *data, std::size_t len, JsValue &out) {
     error_ = {};
@@ -969,18 +960,11 @@ bool Parser::parse(const char *data, std::size_t len, JsValue &out) {
     return impl.parse(out);
 }
 
-bool Parser::parse(const std::string &data, JsValue &out) {
-    return parse(data.data(), data.size(), out);
-}
+bool Parser::parse(const std::string &data, JsValue &out) { return parse(data.data(), data.size(), out); }
 
-const ParseError &Parser::error() const {
-    return error_;
-}
+const ParseError &Parser::error() const { return error_; }
 
-StreamParser::StreamParser(GcHeap &heap)
-    : heap_(heap) {
-    reset();
-}
+StreamParser::StreamParser(GcHeap &heap) : heap_(heap) { reset(); }
 
 void StreamParser::reset() {
     clear_error();
@@ -997,7 +981,7 @@ void StreamParser::reset() {
 
 StreamParser::Status StreamParser::parse(const char *data, std::size_t len) {
     if (!data && len > 0) {
-        (void)set_error("input is null", total_offset_ + pos_);
+        (void) set_error("input is null", total_offset_ + pos_);
         return Status::Error;
     }
     if (complete_) {
@@ -1008,31 +992,21 @@ StreamParser::Status StreamParser::parse(const char *data, std::size_t len) {
     return parse_internal(false);
 }
 
-StreamParser::Status StreamParser::finish() {
-    return parse_internal(true);
-}
+StreamParser::Status StreamParser::finish() { return parse_internal(true); }
 
-const ParseError &StreamParser::error() const {
-    return error_;
-}
+const ParseError &StreamParser::error() const { return error_; }
 
-const JsValue &StreamParser::root() const {
-    return root_;
-}
+const JsValue &StreamParser::root() const { return root_; }
 
-bool StreamParser::has_result() const {
-    return has_result_;
-}
+bool StreamParser::has_result() const { return has_result_; }
 
 StreamParser::Status StreamParser::parse_internal(bool final) {
-    auto current_state = [&]() -> ParseState & {
-        return state_stack_.back();
-    };
+    auto current_state = [&]() -> ParseState & { return state_stack_.back(); };
 
     auto can_accept_value = [&]() -> bool {
         ParseState state = current_state();
-        return state == ParseState::Start || state == ParseState::MapNeedVal ||
-               state == ParseState::ArrayNeedVal || state == ParseState::ArrayStart;
+        return state == ParseState::Start || state == ParseState::MapNeedVal || state == ParseState::ArrayNeedVal ||
+               state == ParseState::ArrayStart;
     };
 
     auto value_complete = [&](std::size_t offset) -> bool {
@@ -1192,7 +1166,7 @@ StreamParser::Status StreamParser::parse_internal(bool final) {
                 current_state() = ParseState::ParseError;
                 return Status::Error;
             }
-            (void)set_error("trailing garbage after JSON value", extra.offset);
+            (void) set_error("trailing garbage after JSON value", extra.offset);
             current_state() = ParseState::ParseError;
             return Status::Error;
         }
@@ -1209,7 +1183,7 @@ StreamParser::Status StreamParser::parse_internal(bool final) {
         }
         if (tok.type == TokenType::End) {
             if (final) {
-                (void)set_error("premature EOF", total_offset_ + pos_);
+                (void) set_error("premature EOF", total_offset_ + pos_);
                 current_state() = ParseState::ParseError;
                 return Status::Error;
             }
@@ -1229,12 +1203,12 @@ StreamParser::Status StreamParser::parse_internal(bool final) {
                     break;
                 }
                 if (tok.type != TokenType::String) {
-                    (void)set_error("object key must be a string", tok.offset);
+                    (void) set_error("object key must be a string", tok.offset);
                     current_state() = ParseState::ParseError;
                     return Status::Error;
                 }
                 if (containers_.empty() || containers_.back().type != JsNodeType::Object) {
-                    (void)set_error("invalid object state", tok.offset);
+                    (void) set_error("invalid object state", tok.offset);
                     current_state() = ParseState::ParseError;
                     return Status::Error;
                 }
@@ -1244,7 +1218,7 @@ StreamParser::Status StreamParser::parse_internal(bool final) {
                 break;
             case ParseState::MapSep:
                 if (tok.type != TokenType::Colon) {
-                    (void)set_error("object key and value must be separated by ':'", tok.offset);
+                    (void) set_error("object key and value must be separated by ':'", tok.offset);
                     current_state() = ParseState::ParseError;
                     return Status::Error;
                 }
@@ -1262,7 +1236,7 @@ StreamParser::Status StreamParser::parse_internal(bool final) {
                     state = ParseState::MapNeedKey;
                     break;
                 }
-                (void)set_error("after object value, expected ',' or '}'", tok.offset);
+                (void) set_error("after object value, expected ',' or '}'", tok.offset);
                 current_state() = ParseState::ParseError;
                 return Status::Error;
             case ParseState::ArrayStart:
@@ -1278,7 +1252,7 @@ StreamParser::Status StreamParser::parse_internal(bool final) {
             case ParseState::MapNeedVal:
             case ParseState::Start: {
                 if (!can_accept_value()) {
-                    (void)set_error("unexpected token", tok.offset);
+                    (void) set_error("unexpected token", tok.offset);
                     current_state() = ParseState::ParseError;
                     return Status::Error;
                 }
@@ -1323,12 +1297,12 @@ StreamParser::Status StreamParser::parse_internal(bool final) {
                     state = ParseState::ArrayNeedVal;
                     break;
                 }
-                (void)set_error("after array value, expected ',' or ']'", tok.offset);
+                (void) set_error("after array value, expected ',' or ']'", tok.offset);
                 current_state() = ParseState::ParseError;
                 return Status::Error;
             case ParseState::ParseComplete:
             case ParseState::ParseError:
-                (void)set_error("invalid parser state", tok.offset);
+                (void) set_error("invalid parser state", tok.offset);
                 current_state() = ParseState::ParseError;
                 return Status::Error;
         }
@@ -1344,9 +1318,7 @@ void StreamParser::compact_buffer() {
     pos_ = 0;
 }
 
-void StreamParser::clear_error() {
-    error_ = {};
-}
+void StreamParser::clear_error() { error_ = {}; }
 
 bool StreamParser::set_error(const char *message, std::size_t offset) {
     return set_parse_error(error_, message, offset);

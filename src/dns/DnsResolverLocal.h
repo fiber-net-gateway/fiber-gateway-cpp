@@ -53,8 +53,7 @@ public:
 private:
     friend class DnsResolverLocal;
 
-    [[nodiscard]] common::IoErr assign_positive(std::string_view canonical_name,
-                                                const net::IpAddress *records,
+    [[nodiscard]] common::IoErr assign_positive(std::string_view canonical_name, const net::IpAddress *records,
                                                 std::uint16_t count,
                                                 std::chrono::steady_clock::time_point expire_at) noexcept;
     [[nodiscard]] common::IoErr assign_canonical(std::string_view canonical_name) noexcept;
@@ -86,14 +85,10 @@ public:
     DnsResolverLocal() noexcept = default;
     ~DnsResolverLocal();
 
-    [[nodiscard]] bool init(event::EventLoop &loop,
-                            SharedDnsCache &cache,
-                            DnsClient::Options client_options) noexcept {
+    [[nodiscard]] bool init(event::EventLoop &loop, SharedDnsCache &cache, DnsClient::Options client_options) noexcept {
         return init(loop, cache, client_options, Options{});
     }
-    [[nodiscard]] bool init(event::EventLoop &loop,
-                            SharedDnsCache &cache,
-                            DnsClient::Options client_options,
+    [[nodiscard]] bool init(event::EventLoop &loop, SharedDnsCache &cache, DnsClient::Options client_options,
                             Options options) noexcept;
     void close() noexcept;
     void release() noexcept;
@@ -170,15 +165,11 @@ private:
     void reset_state() noexcept;
     void cancel_all_pending(common::IoErr err) noexcept;
 
-    [[nodiscard]] common::IoErr normalize_name(std::string_view input,
-                                               char *dst,
-                                               std::size_t cap,
+    [[nodiscard]] common::IoErr normalize_name(std::string_view input, char *dst, std::size_t cap,
                                                std::string_view &out) const noexcept;
-    [[nodiscard]] std::uint16_t find_pending(std::string_view qname,
-                                             std::uint16_t qtype,
+    [[nodiscard]] std::uint16_t find_pending(std::string_view qname, std::uint16_t qtype,
                                              std::uint16_t qclass) const noexcept;
-    [[nodiscard]] std::uint16_t allocate_pending(std::string_view qname,
-                                                 std::uint16_t qtype,
+    [[nodiscard]] std::uint16_t allocate_pending(std::string_view qname, std::uint16_t qtype,
                                                  std::uint16_t qclass) noexcept;
     void release_pending(std::uint16_t index) noexcept;
     [[nodiscard]] bool enqueue_waiter(std::uint16_t index, PendingWaiter *waiter) noexcept;
@@ -186,20 +177,14 @@ private:
     void complete_pending(std::uint16_t index, PendingOutcome outcome) noexcept;
 
     [[nodiscard]] CacheLookup lookup_snapshot(const NameSnapshot &snapshot, std::uint16_t qtype) const noexcept;
-    [[nodiscard]] common::IoResult<ResolveStatus> finish_from_cache(std::string_view canonical_name,
-                                                                    const CacheLookup &lookup,
-                                                                    ResolveResult &out) noexcept;
-    [[nodiscard]] async::Task<common::IoResult<PendingOutcome>> query_upstream(std::string_view qname,
-                                                                               std::uint16_t qtype,
-                                                                               std::uint16_t qclass,
-                                                                               PendingEntry &pending) noexcept;
+    [[nodiscard]] common::IoResult<ResolveStatus>
+    finish_from_cache(std::string_view canonical_name, const CacheLookup &lookup, ResolveResult &out) noexcept;
+    [[nodiscard]] async::Task<common::IoResult<PendingOutcome>>
+    query_upstream(std::string_view qname, std::uint16_t qtype, std::uint16_t qclass, PendingEntry &pending) noexcept;
 
-    [[nodiscard]] async::Task<common::IoResult<PendingOutcome>> handle_response(std::string_view qname,
-                                                                                std::uint16_t qtype,
-                                                                                std::uint16_t qclass,
-                                                                                const std::uint8_t *packet,
-                                                                                std::size_t packet_len,
-                                                                                MessageParser &parser) noexcept;
+    [[nodiscard]] async::Task<common::IoResult<PendingOutcome>>
+    handle_response(std::string_view qname, std::uint16_t qtype, std::uint16_t qclass, const std::uint8_t *packet,
+                    std::size_t packet_len, MessageParser &parser) noexcept;
 
     Options options_{};
     event::EventLoop *loop_ = nullptr;

@@ -10,25 +10,15 @@ namespace fiber::script::ast {
 
 class LogicRelationalExpression : public Expression {
 public:
-    LogicRelationalExpression(std::int32_t start,
-                              std::int32_t end,
-                              std::unique_ptr<Expression> left,
-                              Operator op,
-                              std::unique_ptr<Expression> right)
-        : Expression(start, end), left_(std::move(left)), op_(op), right_(std::move(right)) {
-    }
+    LogicRelationalExpression(std::int32_t start, std::int32_t end, std::unique_ptr<Expression> left, Operator op,
+                              std::unique_ptr<Expression> right) :
+        Expression(start, end), left_(std::move(left)), op_(op), right_(std::move(right)) {}
 
-    const Expression *left() const {
-        return left_.get();
-    }
+    const Expression *left() const { return left_.get(); }
 
-    Operator op() const {
-        return op_;
-    }
+    Operator op() const { return op_; }
 
-    const Expression *right() const {
-        return right_.get();
-    }
+    const Expression *right() const { return right_.get(); }
 
 private:
     std::unique_ptr<Expression> left_;

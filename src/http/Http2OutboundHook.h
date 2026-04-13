@@ -21,8 +21,7 @@ enum class Http2OutboundNextKind : std::uint8_t {
     Data,
 };
 
-using Http2OutboundEncodeFn = common::IoErr (*)(Http2Stream &stream, void *ctx,
-                                                const Http2OutboundEncodeRequest &req,
+using Http2OutboundEncodeFn = common::IoErr (*)(Http2Stream &stream, void *ctx, const Http2OutboundEncodeRequest &req,
                                                 Http2OutboundEncodeTarget &target,
                                                 Http2OutboundEncodeResult &result) noexcept;
 

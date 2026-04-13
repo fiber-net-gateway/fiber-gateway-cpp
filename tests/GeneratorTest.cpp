@@ -24,9 +24,7 @@ public:
         return true;
     }
 
-    void reset() override {
-        output.clear();
-    }
+    void reset() override { output.clear(); }
 
     std::string output;
 };

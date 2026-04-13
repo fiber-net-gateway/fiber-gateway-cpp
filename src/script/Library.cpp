@@ -10,21 +10,13 @@ namespace {
 
 class LegacyExecutionContextAdapter final : public ExecutionContext {
 public:
-    explicit LegacyExecutionContextAdapter(const Library::HostCallFrame &frame)
-        : frame_(frame) {
-    }
+    explicit LegacyExecutionContextAdapter(const Library::HostCallFrame &frame) : frame_(frame) {}
 
-    ScriptRuntime &runtime() override {
-        return *frame_.runtime;
-    }
+    ScriptRuntime &runtime() override { return *frame_.runtime; }
 
-    const fiber::json::JsValue &root() const override {
-        return *frame_.root;
-    }
+    const fiber::json::JsValue &root() const override { return *frame_.root; }
 
-    void *attach() const override {
-        return frame_.attach;
-    }
+    void *attach() const override { return frame_.attach; }
 
     const fiber::json::JsValue &arg_value(std::size_t index) const override {
         if (!frame_.args || index >= frame_.argc) {
@@ -33,9 +25,7 @@ public:
         return frame_.args[index];
     }
 
-    std::size_t arg_count() const override {
-        return frame_.argc;
-    }
+    std::size_t arg_count() const override { return frame_.argc; }
 
 private:
     const Library::HostCallFrame &frame_;
@@ -45,21 +35,14 @@ private:
 class LegacyAsyncExecutionContextAdapter final : public AsyncExecutionContext {
 public:
     LegacyAsyncExecutionContextAdapter(const Library::HostCallFrame &frame,
-                                       const Library::HostAsyncCompletion &completion)
-        : frame_(frame), completion_(completion) {
-    }
+                                       const Library::HostAsyncCompletion &completion) :
+        frame_(frame), completion_(completion) {}
 
-    ScriptRuntime &runtime() override {
-        return *frame_.runtime;
-    }
+    ScriptRuntime &runtime() override { return *frame_.runtime; }
 
-    const fiber::json::JsValue &root() const override {
-        return *frame_.root;
-    }
+    const fiber::json::JsValue &root() const override { return *frame_.root; }
 
-    void *attach() const override {
-        return frame_.attach;
-    }
+    void *attach() const override { return frame_.attach; }
 
     const fiber::json::JsValue &arg_value(std::size_t index) const override {
         if (!frame_.args || index >= frame_.argc) {
@@ -68,9 +51,7 @@ public:
         return frame_.args[index];
     }
 
-    std::size_t arg_count() const override {
-        return frame_.argc;
-    }
+    std::size_t arg_count() const override { return frame_.argc; }
 
     void return_value(const fiber::json::JsValue &value) override {
         if (done_) {
@@ -100,13 +81,9 @@ public:
         }
     }
 
-    bool done() const {
-        return done_;
-    }
+    bool done() const { return done_; }
 
-    const Library::HostCallResult &result() const {
-        return result_;
-    }
+    const Library::HostCallResult &result() const { return result_; }
 
     void detach() {
         detached_ = true;
@@ -127,9 +104,9 @@ private:
     fiber::json::JsValue undefined_ = fiber::json::JsValue::make_undefined();
 };
 
-template <typename T>
+template<typename T>
 Library::HostCallResult make_internal_fault(T *object, std::string_view debug_name) {
-    (void)object;
+    (void) object;
     Library::HostFault fault;
     fault.code = Library::HostFaultCode::Internal;
     fault.name = "HOST_INTERNAL";
@@ -138,8 +115,7 @@ Library::HostCallResult make_internal_fault(T *object, std::string_view debug_na
     return Library::HostCallResult::faulted(fault);
 }
 
-Library::HostCallResult legacy_function_thunk(void *userdata,
-                                              const Library::HostCallFrame &frame) noexcept {
+Library::HostCallResult legacy_function_thunk(void *userdata, const Library::HostCallFrame &frame) noexcept {
     auto *func = static_cast<Library::Function *>(userdata);
     try {
         LegacyExecutionContextAdapter context(frame);
@@ -153,8 +129,7 @@ Library::HostCallResult legacy_function_thunk(void *userdata,
     }
 }
 
-Library::HostCallResult legacy_constant_thunk(void *userdata,
-                                              const Library::HostCallFrame &frame) noexcept {
+Library::HostCallResult legacy_constant_thunk(void *userdata, const Library::HostCallFrame &frame) noexcept {
     auto *constant = static_cast<Library::Constant *>(userdata);
     try {
         LegacyExecutionContextAdapter context(frame);
@@ -168,8 +143,7 @@ Library::HostCallResult legacy_constant_thunk(void *userdata,
     }
 }
 
-Library::HostCallResult legacy_async_function_thunk(void *userdata,
-                                                    const Library::HostCallFrame &frame,
+Library::HostCallResult legacy_async_function_thunk(void *userdata, const Library::HostCallFrame &frame,
                                                     const Library::HostAsyncCompletion &completion) noexcept {
     auto *func = static_cast<Library::AsyncFunction *>(userdata);
     auto *context = new LegacyAsyncExecutionContextAdapter(frame, completion);
@@ -188,8 +162,7 @@ Library::HostCallResult legacy_async_function_thunk(void *userdata,
     }
 }
 
-Library::HostCallResult legacy_async_constant_thunk(void *userdata,
-                                                    const Library::HostCallFrame &frame,
+Library::HostCallResult legacy_async_constant_thunk(void *userdata, const Library::HostCallFrame &frame,
                                                     const Library::HostAsyncCompletion &completion) noexcept {
     auto *constant = static_cast<Library::AsyncConstant *>(userdata);
     auto *context = new LegacyAsyncExecutionContextAdapter(frame, completion);
@@ -208,13 +181,11 @@ Library::HostCallResult legacy_async_constant_thunk(void *userdata,
     }
 }
 
-template <typename LegacyPtr>
-const Library::HostCallable *wrap_legacy_callable(
-    LegacyPtr *legacy,
-    std::unordered_map<LegacyPtr *, std::unique_ptr<Library::HostCallable>> &cache,
-    typename Library::HostCallable::Kind kind,
-    Library::HostSyncThunk sync_thunk,
-    Library::HostAsyncThunk async_thunk) {
+template<typename LegacyPtr>
+const Library::HostCallable *
+wrap_legacy_callable(LegacyPtr *legacy, std::unordered_map<LegacyPtr *, std::unique_ptr<Library::HostCallable>> &cache,
+                     typename Library::HostCallable::Kind kind, Library::HostSyncThunk sync_thunk,
+                     Library::HostAsyncThunk async_thunk) {
     if (!legacy) {
         return nullptr;
     }
@@ -285,43 +256,32 @@ const Library::HostCallable *Library::resolve_constant(std::string_view namespac
     return host_callable_for(const_cast<Library *>(this)->find_constant(namespace_name, key));
 }
 
-const Library::HostCallable *Library::resolve_async_constant(std::string_view namespace_name, std::string_view key) const {
+const Library::HostCallable *Library::resolve_async_constant(std::string_view namespace_name,
+                                                             std::string_view key) const {
     return host_callable_for(const_cast<Library *>(this)->find_async_constant(namespace_name, key));
 }
 
 const Library::HostCallable *Library::host_callable_for(Function *func) const {
     auto &cache = host_cache(this);
-    return wrap_legacy_callable(func,
-                                cache.functions,
-                                HostCallable::Kind::SyncFunction,
-                                legacy_function_thunk,
+    return wrap_legacy_callable(func, cache.functions, HostCallable::Kind::SyncFunction, legacy_function_thunk,
                                 nullptr);
 }
 
 const Library::HostCallable *Library::host_callable_for(AsyncFunction *func) const {
     auto &cache = host_cache(this);
-    return wrap_legacy_callable(func,
-                                cache.async_functions,
-                                HostCallable::Kind::AsyncFunction,
-                                nullptr,
+    return wrap_legacy_callable(func, cache.async_functions, HostCallable::Kind::AsyncFunction, nullptr,
                                 legacy_async_function_thunk);
 }
 
 const Library::HostCallable *Library::host_callable_for(Constant *constant) const {
     auto &cache = host_cache(this);
-    return wrap_legacy_callable(constant,
-                                cache.constants,
-                                HostCallable::Kind::SyncConstant,
-                                legacy_constant_thunk,
+    return wrap_legacy_callable(constant, cache.constants, HostCallable::Kind::SyncConstant, legacy_constant_thunk,
                                 nullptr);
 }
 
 const Library::HostCallable *Library::host_callable_for(AsyncConstant *constant) const {
     auto &cache = host_cache(this);
-    return wrap_legacy_callable(constant,
-                                cache.async_constants,
-                                HostCallable::Kind::AsyncConstant,
-                                nullptr,
+    return wrap_legacy_callable(constant, cache.async_constants, HostCallable::Kind::AsyncConstant, nullptr,
                                 legacy_async_constant_thunk);
 }
 

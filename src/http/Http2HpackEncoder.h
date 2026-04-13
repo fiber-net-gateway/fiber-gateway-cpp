@@ -8,17 +8,17 @@
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
-#include "HttpCommon.h"
 #include "Http2HpackEncodeCatalog.h"
 #include "Http2HpackEncodeTable.h"
+#include "HttpCommon.h"
 
 namespace fiber::http {
 
 class Http2HpackEncoder : public common::NonCopyable, public common::NonMovable {
 public:
     struct OutputOps {
-        common::IoErr (*acquire)(void *ctx, std::size_t min_bytes,
-                                 std::uint8_t *&dst, std::size_t &len) noexcept = nullptr;
+        common::IoErr (*acquire)(void *ctx, std::size_t min_bytes, std::uint8_t *&dst,
+                                 std::size_t &len) noexcept = nullptr;
         void (*commit)(void *ctx, std::size_t written) noexcept = nullptr;
     };
 
@@ -55,8 +55,8 @@ private:
 
     [[nodiscard]] common::IoErr append_indexed(std::uint32_t index) noexcept;
     [[nodiscard]] common::IoErr append_table_size_update(std::uint32_t size) noexcept;
-    [[nodiscard]] common::IoErr append_literal(std::uint32_t name_index, std::string_view name,
-                                               std::string_view value, LiteralMode mode) noexcept;
+    [[nodiscard]] common::IoErr append_literal(std::uint32_t name_index, std::string_view name, std::string_view value,
+                                               LiteralMode mode) noexcept;
     [[nodiscard]] common::IoErr append_string(std::string_view value) noexcept;
     [[nodiscard]] common::IoErr append_integer(std::uint8_t first_byte_mask, std::uint8_t prefix_bits,
                                                std::uint32_t value) noexcept;

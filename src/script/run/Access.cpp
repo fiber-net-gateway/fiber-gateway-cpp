@@ -16,17 +16,11 @@ VmError make_error(std::string name, std::string message) {
     return error;
 }
 
-VmError heap_required_error() {
-    return make_error("EXEC_HEAP_REQUIRED", "heap required for access operation");
-}
+VmError heap_required_error() { return make_error("EXEC_HEAP_REQUIRED", "heap required for access operation"); }
 
-VmError oom_error() {
-    return make_error("EXEC_OUT_OF_MEMORY", "out of memory");
-}
+VmError oom_error() { return make_error("EXEC_OUT_OF_MEMORY", "out of memory"); }
 
-VmError index_error(std::string message) {
-    return make_error("EXEC_INDEX_ERROR", std::move(message));
-}
+VmError index_error(std::string message) { return make_error("EXEC_INDEX_ERROR", std::move(message)); }
 
 bool get_index(const fiber::json::JsValue &key, std::int64_t &out) {
     if (fiber::json::js_value_type(key) == fiber::json::JsNodeType::Integer) {
@@ -36,9 +30,7 @@ bool get_index(const fiber::json::JsValue &key, std::int64_t &out) {
     return false;
 }
 
-fiber::json::GcString *ensure_heap_string(ScriptRuntime &runtime,
-                                          const fiber::json::JsValue &value,
-                                          VmError &error) {
+fiber::json::GcString *ensure_heap_string(ScriptRuntime &runtime, const fiber::json::JsValue &value, VmError &error) {
     if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::String &&
         !fiber::json::js_value_is_borrowed_string(value)) {
         return fiber::json::js_value_heap_ptr<fiber::json::GcString>(const_cast<fiber::json::JsValue &>(value));
@@ -48,10 +40,9 @@ fiber::json::GcString *ensure_heap_string(ScriptRuntime &runtime,
         return nullptr;
     }
     fiber::json::NativeStr native = fiber::json::js_value_native_string(value);
-    fiber::json::GcString *str =
-        runtime.alloc_with_gc(fiber::json::gc_estimate_utf8_string_bytes(native.len), [&]() {
-            return fiber::json::gc_new_string(&runtime.heap(), native.data, native.len);
-        });
+    fiber::json::GcString *str = runtime.alloc_with_gc(fiber::json::gc_estimate_utf8_string_bytes(native.len), [&]() {
+        return fiber::json::gc_new_string(&runtime.heap(), native.data, native.len);
+    });
     if (!str) {
         error = oom_error();
         return nullptr;
@@ -85,9 +76,7 @@ bool string_length(const fiber::json::JsValue &value, std::size_t &out, VmError 
     return false;
 }
 
-VmResult string_char_at(ScriptRuntime &runtime,
-                        const fiber::json::JsValue &value,
-                        std::int64_t index) {
+VmResult string_char_at(ScriptRuntime &runtime, const fiber::json::JsValue &value, std::int64_t index) {
     if (index < 0) {
         return fiber::json::JsValue::make_undefined();
     }
@@ -115,8 +104,8 @@ VmResult string_char_at(ScriptRuntime &runtime,
     if (str->encoding == fiber::json::GcStringEncoding::Byte) {
         std::uint8_t byte = str->data8[index];
         fiber::json::GcString *out =
-            runtime.alloc_with_gc(fiber::json::gc_estimate_string_bytes(1, fiber::json::GcStringEncoding::Byte),
-                                  [&]() { return fiber::json::gc_new_string_bytes(&runtime.heap(), &byte, 1); });
+                runtime.alloc_with_gc(fiber::json::gc_estimate_string_bytes(1, fiber::json::GcStringEncoding::Byte),
+                                      [&]() { return fiber::json::gc_new_string_bytes(&runtime.heap(), &byte, 1); });
         if (!out) {
             return std::unexpected(oom_error());
         }
@@ -124,8 +113,8 @@ VmResult string_char_at(ScriptRuntime &runtime,
     }
     char16_t unit = str->data16[index];
     fiber::json::GcString *out =
-        runtime.alloc_with_gc(fiber::json::gc_estimate_string_bytes(1, fiber::json::GcStringEncoding::Utf16),
-                              [&]() { return fiber::json::gc_new_string_utf16(&runtime.heap(), &unit, 1); });
+            runtime.alloc_with_gc(fiber::json::gc_estimate_string_bytes(1, fiber::json::GcStringEncoding::Utf16),
+                                  [&]() { return fiber::json::gc_new_string_utf16(&runtime.heap(), &unit, 1); });
     if (!out) {
         return std::unexpected(oom_error());
     }
@@ -134,23 +123,22 @@ VmResult string_char_at(ScriptRuntime &runtime,
 
 } // namespace
 
-VmResult Access::expand_object(const fiber::json::JsValue &target,
-                               const fiber::json::JsValue &addition,
+VmResult Access::expand_object(const fiber::json::JsValue &target, const fiber::json::JsValue &addition,
                                ScriptRuntime &runtime) {
     if (fiber::json::js_value_type(target) != fiber::json::JsNodeType::Object ||
         fiber::json::js_value_type(addition) != fiber::json::JsNodeType::Object) {
         return target;
     }
     fiber::json::GcHeap *heap = &runtime.heap();
-    auto *target_obj = fiber::json::js_value_heap_ptr<fiber::json::GcObject>(const_cast<fiber::json::JsValue &>(target));
+    auto *target_obj =
+            fiber::json::js_value_heap_ptr<fiber::json::GcObject>(const_cast<fiber::json::JsValue &>(target));
     auto *add_obj = fiber::json::js_value_heap_ptr<const fiber::json::GcObject>(addition);
     if (!target_obj || !add_obj) {
         return target;
     }
     std::size_t expected = target_obj->size + add_obj->size;
-    if (!runtime.run_with_gc_retry(fiber::json::gc_estimate_object_growth_bytes(target_obj, expected), [&]() {
-            return fiber::json::gc_object_reserve(heap, target_obj, expected);
-        })) {
+    if (!runtime.run_with_gc_retry(fiber::json::gc_estimate_object_growth_bytes(target_obj, expected),
+                                   [&]() { return fiber::json::gc_object_reserve(heap, target_obj, expected); })) {
         return std::unexpected(oom_error());
     }
     for (std::size_t i = 0; i < add_obj->size; ++i) {
@@ -165,8 +153,7 @@ VmResult Access::expand_object(const fiber::json::JsValue &target,
     return target;
 }
 
-VmResult Access::expand_array(const fiber::json::JsValue &target,
-                              const fiber::json::JsValue &addition,
+VmResult Access::expand_array(const fiber::json::JsValue &target, const fiber::json::JsValue &addition,
                               ScriptRuntime &runtime) {
     if (fiber::json::js_value_type(target) != fiber::json::JsNodeType::Array) {
         return target;
@@ -186,9 +173,8 @@ VmResult Access::expand_array(const fiber::json::JsValue &target,
             return target;
         }
         std::size_t expected = target_arr->size + add_arr->size;
-        if (!runtime.run_with_gc_retry(fiber::json::gc_estimate_array_growth_bytes(target_arr, expected), [&]() {
-                return fiber::json::gc_array_reserve(heap, target_arr, expected);
-            })) {
+        if (!runtime.run_with_gc_retry(fiber::json::gc_estimate_array_growth_bytes(target_arr, expected),
+                                       [&]() { return fiber::json::gc_array_reserve(heap, target_arr, expected); })) {
             return std::unexpected(oom_error());
         }
         for (std::size_t i = 0; i < add_arr->size; ++i) {
@@ -204,9 +190,8 @@ VmResult Access::expand_array(const fiber::json::JsValue &target,
         return target;
     }
     std::size_t expected = target_arr->size + add_obj->size;
-    if (!runtime.run_with_gc_retry(fiber::json::gc_estimate_array_growth_bytes(target_arr, expected), [&]() {
-            return fiber::json::gc_array_reserve(heap, target_arr, expected);
-        })) {
+    if (!runtime.run_with_gc_retry(fiber::json::gc_estimate_array_growth_bytes(target_arr, expected),
+                                   [&]() { return fiber::json::gc_array_reserve(heap, target_arr, expected); })) {
         return std::unexpected(oom_error());
     }
     for (std::size_t i = 0; i < add_obj->size; ++i) {
@@ -221,8 +206,7 @@ VmResult Access::expand_array(const fiber::json::JsValue &target,
     return target;
 }
 
-VmResult Access::push_array(const fiber::json::JsValue &target,
-                            const fiber::json::JsValue &addition,
+VmResult Access::push_array(const fiber::json::JsValue &target, const fiber::json::JsValue &addition,
                             ScriptRuntime &runtime) {
     if (fiber::json::js_value_type(target) != fiber::json::JsNodeType::Array) {
         return target;
@@ -232,16 +216,14 @@ VmResult Access::push_array(const fiber::json::JsValue &target,
     if (!arr) {
         return target;
     }
-    if (!runtime.run_with_gc_retry(fiber::json::gc_estimate_array_growth_bytes(arr, arr->size + 1), [&]() {
-            return fiber::json::gc_array_push(heap, arr, addition);
-        })) {
+    if (!runtime.run_with_gc_retry(fiber::json::gc_estimate_array_growth_bytes(arr, arr->size + 1),
+                                   [&]() { return fiber::json::gc_array_push(heap, arr, addition); })) {
         return std::unexpected(oom_error());
     }
     return target;
 }
 
-VmResult Access::index_get(const fiber::json::JsValue &parent,
-                           const fiber::json::JsValue &key,
+VmResult Access::index_get(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
                            ScriptRuntime &runtime) {
     if (fiber::json::js_value_type(parent) == fiber::json::JsNodeType::Array) {
         std::int64_t idx = 0;
@@ -252,7 +234,8 @@ VmResult Access::index_get(const fiber::json::JsValue &parent,
             return fiber::json::JsValue::make_undefined();
         }
         auto *arr = fiber::json::js_value_heap_ptr<const fiber::json::GcArray>(parent);
-        const fiber::json::JsValue *found = arr ? fiber::json::gc_array_get(arr, static_cast<std::size_t>(idx)) : nullptr;
+        const fiber::json::JsValue *found =
+                arr ? fiber::json::gc_array_get(arr, static_cast<std::size_t>(idx)) : nullptr;
         return found ? *found : fiber::json::JsValue::make_undefined();
     }
     if (fiber::json::js_value_type(parent) == fiber::json::JsNodeType::Object) {
@@ -278,10 +261,8 @@ VmResult Access::index_get(const fiber::json::JsValue &parent,
     return fiber::json::JsValue::make_undefined();
 }
 
-VmResult Access::index_set(const fiber::json::JsValue &parent,
-                           const fiber::json::JsValue &key,
-                           const fiber::json::JsValue &value,
-                           ScriptRuntime &runtime) {
+VmResult Access::index_set(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
+                           const fiber::json::JsValue &value, ScriptRuntime &runtime) {
     if (fiber::json::js_value_type(parent) == fiber::json::JsNodeType::Array) {
         std::int64_t idx = 0;
         if (!get_index(key, idx)) {
@@ -293,8 +274,8 @@ VmResult Access::index_set(const fiber::json::JsValue &parent,
         }
         fiber::json::GcHeap *heap = &runtime.heap();
         if (!runtime.run_with_gc_retry(
-                fiber::json::gc_estimate_array_growth_bytes(arr, static_cast<std::size_t>(idx) + 1),
-                [&]() { return fiber::json::gc_array_set(heap, arr, static_cast<std::size_t>(idx), value); })) {
+                    fiber::json::gc_estimate_array_growth_bytes(arr, static_cast<std::size_t>(idx) + 1),
+                    [&]() { return fiber::json::gc_array_set(heap, arr, static_cast<std::size_t>(idx), value); })) {
             return std::unexpected(oom_error());
         }
         return value;
@@ -314,9 +295,8 @@ VmResult Access::index_set(const fiber::json::JsValue &parent,
         temp_roots.add(&rooted_key);
         rooted_key = fiber::json::js_make_heap_ref(&key_str->hdr, fiber::json::JsHeapKind::String);
         auto *obj = fiber::json::js_value_heap_ptr<fiber::json::GcObject>(const_cast<fiber::json::JsValue &>(parent));
-        if (!runtime.run_with_gc_retry(fiber::json::gc_estimate_object_growth_bytes(obj, obj->size + 1), [&]() {
-                return fiber::json::gc_object_set(heap, obj, key_str, value);
-            })) {
+        if (!runtime.run_with_gc_retry(fiber::json::gc_estimate_object_growth_bytes(obj, obj->size + 1),
+                                       [&]() { return fiber::json::gc_object_set(heap, obj, key_str, value); })) {
             return std::unexpected(oom_error());
         }
         return value;
@@ -324,10 +304,8 @@ VmResult Access::index_set(const fiber::json::JsValue &parent,
     return std::unexpected(index_error("indexing not supported"));
 }
 
-VmResult Access::index_set1(const fiber::json::JsValue &parent,
-                            const fiber::json::JsValue &key,
-                            const fiber::json::JsValue &value,
-                            ScriptRuntime &runtime) {
+VmResult Access::index_set1(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
+                            const fiber::json::JsValue &value, ScriptRuntime &runtime) {
     VmResult result = index_set(parent, key, value, runtime);
     if (!result) {
         return result;
@@ -335,9 +313,7 @@ VmResult Access::index_set1(const fiber::json::JsValue &parent,
     return parent;
 }
 
-VmResult Access::prop_get(const fiber::json::JsValue &parent,
-                          const fiber::json::JsValue &key,
-                          ScriptRuntime &runtime) {
+VmResult Access::prop_get(const fiber::json::JsValue &parent, const fiber::json::JsValue &key, ScriptRuntime &runtime) {
     if (fiber::json::js_value_type(parent) == fiber::json::JsNodeType::Object) {
         VmError error;
         fiber::json::GcString *key_str = ensure_heap_string(runtime, key, error);
@@ -363,14 +339,12 @@ VmResult Access::prop_get(const fiber::json::JsValue &parent,
         }
         return fiber::json::JsValue::make_integer(static_cast<std::int64_t>(len));
     }
-    (void)key;
+    (void) key;
     return fiber::json::JsValue::make_undefined();
 }
 
-VmResult Access::prop_set(const fiber::json::JsValue &parent,
-                          const fiber::json::JsValue &value,
-                          const fiber::json::JsValue &key,
-                          ScriptRuntime &runtime) {
+VmResult Access::prop_set(const fiber::json::JsValue &parent, const fiber::json::JsValue &value,
+                          const fiber::json::JsValue &key, ScriptRuntime &runtime) {
     if (fiber::json::js_value_type(parent) != fiber::json::JsNodeType::Object) {
         return std::unexpected(index_error("property set not supported"));
     }
@@ -388,18 +362,15 @@ VmResult Access::prop_set(const fiber::json::JsValue &parent,
     temp_roots.add(&rooted_key);
     rooted_key = fiber::json::js_make_heap_ref(&key_str->hdr, fiber::json::JsHeapKind::String);
     auto *obj = fiber::json::js_value_heap_ptr<fiber::json::GcObject>(const_cast<fiber::json::JsValue &>(parent));
-    if (!runtime.run_with_gc_retry(fiber::json::gc_estimate_object_growth_bytes(obj, obj->size + 1), [&]() {
-            return fiber::json::gc_object_set(heap, obj, key_str, value);
-        })) {
+    if (!runtime.run_with_gc_retry(fiber::json::gc_estimate_object_growth_bytes(obj, obj->size + 1),
+                                   [&]() { return fiber::json::gc_object_set(heap, obj, key_str, value); })) {
         return std::unexpected(oom_error());
     }
     return value;
 }
 
-VmResult Access::prop_set1(const fiber::json::JsValue &parent,
-                           const fiber::json::JsValue &value,
-                           const fiber::json::JsValue &key,
-                           ScriptRuntime &runtime) {
+VmResult Access::prop_set1(const fiber::json::JsValue &parent, const fiber::json::JsValue &value,
+                           const fiber::json::JsValue &key, ScriptRuntime &runtime) {
     VmResult result = prop_set(parent, value, key, runtime);
     if (!result) {
         return result;

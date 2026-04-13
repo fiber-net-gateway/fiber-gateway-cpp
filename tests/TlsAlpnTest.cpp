@@ -49,9 +49,7 @@ TEST(TlsAlpnTest, NormalizeHttpServerAlpnAddsSupportedDefaultsWhenMissing) {
 
 TEST(TlsAlpnTest, AlpnProtocolsViewContainsOfferedProtocols) {
     const std::uint8_t encoded[] = {
-            0x00, 0x0c,
-            0x02, 'h', '2',
-            0x08, 'h', 't', 't', 'p', '/', '1', '.', '1',
+            0x00, 0x0c, 0x02, 'h', '2', 0x08, 'h', 't', 't', 'p', '/', '1', '.', '1',
     };
 
     fiber::http::TlsAlpnProtocolsView offered(encoded, sizeof(encoded));

@@ -19,13 +19,9 @@ std::expected<Document, ConfigError> Parser::parse() {
     return document;
 }
 
-const Token &Parser::peek() const noexcept {
-    return tokens_[pos_];
-}
+const Token &Parser::peek() const noexcept { return tokens_[pos_]; }
 
-const Token &Parser::next() noexcept {
-    return tokens_[pos_++];
-}
+const Token &Parser::next() noexcept { return tokens_[pos_++]; }
 
 bool Parser::match(TokenKind kind) noexcept {
     if (peek().kind != kind) {
@@ -78,7 +74,7 @@ std::expected<DirectiveNode, ConfigError> Parser::parse_directive() {
         }
         directive.children.push_back(std::move(*child_result));
     }
-    (void)match(TokenKind::RBrace);
+    (void) match(TokenKind::RBrace);
     return directive;
 }
 
@@ -87,7 +83,7 @@ std::expected<std::string, ConfigError> Parser::parse_argument() {
         return next().text;
     }
     if (peek().kind == TokenKind::Equal) {
-        (void)next();
+        (void) next();
         return std::string("=");
     }
     return std::unexpected(make_error("expected directive argument", peek()));
@@ -95,8 +91,8 @@ std::expected<std::string, ConfigError> Parser::parse_argument() {
 
 ConfigError Parser::make_error(const char *message, const Token &token) const {
     return ConfigError{
-        .message = message,
-        .location = token.location,
+            .message = message,
+            .location = token.location,
     };
 }
 

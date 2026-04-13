@@ -6,11 +6,8 @@
 
 namespace fiber::async {
 
-WaitGroup::Waiter::Waiter(WaitGroup *group, fiber::event::EventLoop *loop, std::coroutine_handle<> handle)
-    : group(group),
-      loop(loop),
-      handle(handle) {
-}
+WaitGroup::Waiter::Waiter(WaitGroup *group, fiber::event::EventLoop *loop, std::coroutine_handle<> handle) :
+    group(group), loop(loop), handle(handle) {}
 
 void WaitGroup::Waiter::resume() {
     WaiterState expected = WaiterState::Notified;
@@ -38,9 +35,7 @@ WaitGroup::JoinAwaiter::~JoinAwaiter() {
     }
 }
 
-bool WaitGroup::JoinAwaiter::await_ready() const noexcept {
-    return !group_ || group_->empty();
-}
+bool WaitGroup::JoinAwaiter::await_ready() const noexcept { return !group_ || group_->empty(); }
 
 bool WaitGroup::JoinAwaiter::await_suspend(std::coroutine_handle<> handle) {
     if (!group_) {
@@ -57,9 +52,7 @@ bool WaitGroup::JoinAwaiter::await_suspend(std::coroutine_handle<> handle) {
     return true;
 }
 
-void WaitGroup::JoinAwaiter::await_resume() noexcept {
-    waiter_ = nullptr;
-}
+void WaitGroup::JoinAwaiter::await_resume() noexcept { waiter_ = nullptr; }
 
 WaitGroup::~WaitGroup() {
     std::lock_guard guard(state_mu_);
@@ -110,9 +103,7 @@ bool WaitGroup::empty() const noexcept {
     return count_ == 0;
 }
 
-WaitGroup::JoinAwaiter WaitGroup::join() noexcept {
-    return JoinAwaiter(*this);
-}
+WaitGroup::JoinAwaiter WaitGroup::join() noexcept { return JoinAwaiter(*this); }
 
 bool WaitGroup::enqueue_waiter(Waiter *waiter) {
     FIBER_ASSERT(waiter != nullptr);

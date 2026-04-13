@@ -3,43 +3,28 @@
 
 #include <memory>
 
-#include "Statement.h"
 #include "Block.h"
-#include "Identifier.h"
 #include "Expression.h"
+#include "Identifier.h"
+#include "Statement.h"
 
 namespace fiber::script::ast {
 
 class ForeachStatement : public Statement {
 public:
-    ForeachStatement(std::int32_t start,
-                     std::int32_t end,
-                     std::unique_ptr<Identifier> key,
-                     std::unique_ptr<Identifier> value,
-                     std::unique_ptr<Expression> collection,
-                     std::unique_ptr<Block> block)
-        : Statement(start, end),
-          key_(std::move(key)),
-          value_(std::move(value)),
-          collection_(std::move(collection)),
-          block_(std::move(block)) {
-    }
+    ForeachStatement(std::int32_t start, std::int32_t end, std::unique_ptr<Identifier> key,
+                     std::unique_ptr<Identifier> value, std::unique_ptr<Expression> collection,
+                     std::unique_ptr<Block> block) :
+        Statement(start, end), key_(std::move(key)), value_(std::move(value)), collection_(std::move(collection)),
+        block_(std::move(block)) {}
 
-    const Identifier *key() const {
-        return key_.get();
-    }
+    const Identifier *key() const { return key_.get(); }
 
-    const Identifier *value() const {
-        return value_.get();
-    }
+    const Identifier *value() const { return value_.get(); }
 
-    const Expression *collection() const {
-        return collection_.get();
-    }
+    const Expression *collection() const { return collection_.get(); }
 
-    const Block *block() const {
-        return block_.get();
-    }
+    const Block *block() const { return block_.get(); }
 
 private:
     std::unique_ptr<Identifier> key_;

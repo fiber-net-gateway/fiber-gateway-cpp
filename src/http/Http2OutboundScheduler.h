@@ -3,9 +3,9 @@
 
 #include <chrono>
 #include <concepts>
+#include <coroutine>
 #include <cstddef>
 #include <cstdint>
-#include <coroutine>
 #include <functional>
 #include <type_traits>
 #include <utility>
@@ -82,8 +82,7 @@ class Http2OutboundScheduler {
 public:
     static constexpr std::size_t kPrimarySlabCapacity = 16 * 1024;
 
-    explicit Http2OutboundScheduler(HttpTransport *transport = nullptr,
-                                    std::size_t slab_capacity = 1024,
+    explicit Http2OutboundScheduler(HttpTransport *transport = nullptr, std::size_t slab_capacity = 1024,
                                     std::chrono::milliseconds write_timeout = std::chrono::seconds(30),
                                     std::uint32_t peer_max_frame_size = 16384) noexcept;
     Http2OutboundScheduler(const Http2OutboundScheduler &) = delete;

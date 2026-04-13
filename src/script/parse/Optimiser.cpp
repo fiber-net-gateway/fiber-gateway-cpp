@@ -2,8 +2,6 @@
 
 namespace fiber::script::parse {
 
-std::unique_ptr<ast::Node> optimise(std::unique_ptr<ast::Node> node) {
-    return node;
-}
+std::unique_ptr<ast::Node> optimise(std::unique_ptr<ast::Node> node) { return node; }
 
 } // namespace fiber::script::parse

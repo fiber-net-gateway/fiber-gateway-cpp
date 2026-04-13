@@ -42,7 +42,8 @@ TEST(DnsCacheTest, LookupReturnsAllCachedSlotsForName) {
     v6_bytes[15] = 1;
     IpAddress aaaa = IpAddress::v6(v6_bytes);
 
-    ASSERT_EQ(cache.upsert_a("Example.COM.", static_cast<std::uint16_t>(RecordClass::IN), &a, 1, now + std::chrono::seconds(60)),
+    ASSERT_EQ(cache.upsert_a("Example.COM.", static_cast<std::uint16_t>(RecordClass::IN), &a, 1,
+                             now + std::chrono::seconds(60)),
               IoErr::None);
     ASSERT_EQ(cache.upsert_aaaa("example.com", static_cast<std::uint16_t>(RecordClass::IN), &aaaa, 1,
                                 now + std::chrono::seconds(90)),
@@ -51,7 +52,8 @@ TEST(DnsCacheTest, LookupReturnsAllCachedSlotsForName) {
                                  now + std::chrono::seconds(30)),
               IoErr::None);
 
-    ASSERT_EQ(cache.lookup_name("EXAMPLE.com.", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot), IoErr::None);
+    ASSERT_EQ(cache.lookup_name("EXAMPLE.com.", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot),
+              IoErr::None);
     EXPECT_TRUE(snapshot.found());
     ASSERT_TRUE(snapshot.a().present);
     ASSERT_FALSE(snapshot.a().negative);
@@ -83,14 +85,16 @@ TEST(DnsCacheTest, NegativeSlotsAreReturned) {
                                              now + std::chrono::seconds(40)),
               IoErr::None);
 
-    ASSERT_EQ(cache.lookup_name("nodata.example", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot), IoErr::None);
+    ASSERT_EQ(cache.lookup_name("nodata.example", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot),
+              IoErr::None);
     EXPECT_TRUE(snapshot.found());
     ASSERT_TRUE(snapshot.a().present);
     EXPECT_TRUE(snapshot.a().negative);
     EXPECT_EQ(snapshot.a().count, 0);
     EXPECT_FALSE(snapshot.has_nxdomain());
 
-    ASSERT_EQ(cache.lookup_name("gone.example", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot), IoErr::None);
+    ASSERT_EQ(cache.lookup_name("gone.example", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot),
+              IoErr::None);
     EXPECT_TRUE(snapshot.found());
     EXPECT_TRUE(snapshot.has_nxdomain());
     EXPECT_FALSE(snapshot.a().present);
@@ -115,13 +119,15 @@ TEST(DnsCacheTest, ExpiredSlotsAreDroppedDuringLookup) {
     v6_bytes[15] = 2;
     IpAddress aaaa = IpAddress::v6(v6_bytes);
 
-    ASSERT_EQ(cache.upsert_a("expire.example", static_cast<std::uint16_t>(RecordClass::IN), &a, 1, now - std::chrono::seconds(1)),
+    ASSERT_EQ(cache.upsert_a("expire.example", static_cast<std::uint16_t>(RecordClass::IN), &a, 1,
+                             now - std::chrono::seconds(1)),
               IoErr::None);
     ASSERT_EQ(cache.upsert_aaaa("expire.example", static_cast<std::uint16_t>(RecordClass::IN), &aaaa, 1,
                                 now + std::chrono::seconds(10)),
               IoErr::None);
 
-    ASSERT_EQ(cache.lookup_name("expire.example", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot), IoErr::None);
+    ASSERT_EQ(cache.lookup_name("expire.example", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot),
+              IoErr::None);
     EXPECT_TRUE(snapshot.found());
     EXPECT_FALSE(snapshot.a().present);
     ASSERT_TRUE(snapshot.aaaa().present);
@@ -143,11 +149,13 @@ TEST(DnsCacheTest, PeekNameDoesNotReclaimExpiredEntries) {
               IoErr::None);
     ASSERT_EQ(cache.entry_count(), 1u);
 
-    ASSERT_EQ(cache.peek_name("stale.example", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot), IoErr::None);
+    ASSERT_EQ(cache.peek_name("stale.example", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot),
+              IoErr::None);
     EXPECT_FALSE(snapshot.found());
     EXPECT_EQ(cache.entry_count(), 1u);
 
-    ASSERT_EQ(cache.lookup_name("stale.example", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot), IoErr::None);
+    ASSERT_EQ(cache.lookup_name("stale.example", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot),
+              IoErr::None);
     EXPECT_FALSE(snapshot.found());
     EXPECT_EQ(cache.entry_count(), 0u);
 }
@@ -211,5 +219,6 @@ TEST(DnsCacheTest, LookupFailsWhenSnapshotCapacityIsTooSmall) {
                              now + std::chrono::seconds(20)),
               IoErr::None);
 
-    EXPECT_EQ(cache.lookup_name("wide.example", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot), IoErr::NoMem);
+    EXPECT_EQ(cache.lookup_name("wide.example", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot),
+              IoErr::NoMem);
 }

@@ -221,14 +221,14 @@ void TlsTransport::configure_ssl(SSL *ssl, void *ctx) noexcept {
         return;
     }
     if (self->server_context_) {
-        (void)self->server_context_->bind_ssl(ssl, &self->stream_.remote_addr());
+        (void) self->server_context_->bind_ssl(ssl, &self->stream_.remote_addr());
         return;
     }
     if (!self->context_ || self->context_->is_server()) {
         return;
     }
     if (!self->context_->options().server_name.empty()) {
-        (void)SSL_set_tlsext_host_name(ssl, self->context_->options().server_name.c_str());
+        (void) SSL_set_tlsext_host_name(ssl, self->context_->options().server_name.c_str());
     }
 }
 

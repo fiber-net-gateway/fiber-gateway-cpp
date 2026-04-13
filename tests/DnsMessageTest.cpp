@@ -42,12 +42,7 @@ TEST(DnsMessageTest, EncodeQueryWithEdns) {
     EXPECT_EQ(buf[10], 0x00);
     EXPECT_EQ(buf[11], 0x01);
 
-    const std::uint8_t expected_name[] = {
-        3, 'w', 'w', 'w',
-        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
-        3, 'c', 'o', 'm',
-        0
-    };
+    const std::uint8_t expected_name[] = {3, 'w', 'w', 'w', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0};
     EXPECT_EQ(std::memcmp(buf.data() + 12, expected_name, sizeof(expected_name)), 0);
     EXPECT_EQ(buf[29], 0x00);
     EXPECT_EQ(buf[30], 0x01);
@@ -90,27 +85,12 @@ TEST(DnsMessageTest, EncodeQueryCarriesEdnsVersionAndDoBit) {
 
 TEST(DnsMessageTest, ParseMessageWithCompressedOwnerNames) {
     const std::uint8_t packet[] = {
-        0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01,
-        0x03, 'w', 'w', 'w', 0x07, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0x03, 'c', 'o', 'm', 0x00,
-        0x00, 0x01, 0x00, 0x01,
-        0xC0, 0x0C,
-        0x00, 0x05,
-        0x00, 0x01,
-        0x00, 0x00, 0x00, 0x3C,
-        0x00, 0x12,
-        0x04, 'e', 'd', 'g', 'e', 0x07, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0x03, 'c', 'o', 'm', 0x00,
-        0x04, 'e', 'd', 'g', 'e', 0x07, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0x03, 'c', 'o', 'm', 0x00,
-        0x00, 0x01,
-        0x00, 0x01,
-        0x00, 0x00, 0x00, 0x3C,
-        0x00, 0x04,
-        0x01, 0x02, 0x03, 0x04,
-        0x00,
-        0x00, 0x29,
-        0x04, 0xD0,
-        0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00
-    };
+            0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x03, 'w',  'w',  'w',  0x07, 'e',
+            'x',  'a',  'm',  'p',  'l',  'e',  0x03, 'c',  'o',  'm',  0x00, 0x00, 0x01, 0x00, 0x01, 0xC0, 0x0C, 0x00,
+            0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x12, 0x04, 'e',  'd',  'g',  'e',  0x07, 'e',  'x',  'a',
+            'm',  'p',  'l',  'e',  0x03, 'c',  'o',  'm',  0x00, 0x04, 'e',  'd',  'g',  'e',  0x07, 'e',  'x',  'a',
+            'm',  'p',  'l',  'e',  0x03, 'c',  'o',  'm',  0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C, 0x00,
+            0x04, 0x01, 0x02, 0x03, 0x04, 0x00, 0x00, 0x29, 0x04, 0xD0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
     MessageParser parser;
     ASSERT_TRUE(parser.init());
@@ -136,21 +116,15 @@ TEST(DnsMessageTest, ParseMessageWithCompressedOwnerNames) {
     EXPECT_EQ(parsed->additionals[0].type, static_cast<std::uint16_t>(RecordType::OPT));
 
     std::array<char, 64> cname_storage{};
-    auto cname = fiber::dns::decode_name(parsed->packet_data,
-                                         parsed->packet_len,
-                                         parsed->answers[0].rdata_offset,
-                                         cname_storage.data(),
-                                         cname_storage.size());
+    auto cname = fiber::dns::decode_name(parsed->packet_data, parsed->packet_len, parsed->answers[0].rdata_offset,
+                                         cname_storage.data(), cname_storage.size());
     ASSERT_TRUE(cname.has_value()) << fiber::common::io_err_name(cname.error());
     EXPECT_EQ(cname->name, "edge.example.com");
 }
 
 TEST(DnsMessageTest, RejectCompressionPointerLoop) {
-    const std::uint8_t packet[] = {
-        0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0xC0, 0x0C,
-        0x00, 0x01, 0x00, 0x01
-    };
+    const std::uint8_t packet[] = {0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+                                   0x00, 0x00, 0x00, 0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01};
 
     MessageParser parser;
     ASSERT_TRUE(parser.init());
@@ -160,11 +134,9 @@ TEST(DnsMessageTest, RejectCompressionPointerLoop) {
 }
 
 TEST(DnsMessageTest, FailWhenNameScratchTooSmall) {
-    const std::uint8_t packet[] = {
-        0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x03, 'w', 'w', 'w', 0x07, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0x03, 'c', 'o', 'm', 0x00,
-        0x00, 0x01, 0x00, 0x01
-    };
+    const std::uint8_t packet[] = {0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                   0x00, 0x03, 'w',  'w',  'w',  0x07, 'e',  'x',  'a',  'm',  'p',
+                                   'l',  'e',  0x03, 'c',  'o',  'm',  0x00, 0x00, 0x01, 0x00, 0x01};
 
     MessageParser parser;
     ASSERT_TRUE(parser.init({1, 0, 4}));

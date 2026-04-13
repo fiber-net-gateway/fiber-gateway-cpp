@@ -1,8 +1,8 @@
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
-#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -152,9 +152,7 @@ struct BackendProcess {
     UniqueFd stdin_write;
     UniqueFd stdout_read;
 
-    [[nodiscard]] bool valid() const noexcept {
-        return pid > 0 && stdin_write.valid() && stdout_read.valid();
-    }
+    [[nodiscard]] bool valid() const noexcept { return pid > 0 && stdin_write.valid() && stdout_read.valid(); }
 };
 
 struct CgiResponse {
@@ -178,20 +176,18 @@ struct ServerConfig {
     TempAliasRoot alias_root;
 };
 
-fiber::async::Task<IoResult<void>> send_final_header(
-    fiber::http::HttpExchange &exchange,
-    int status_code,
-    const fiber::http::HttpHeaders *headers,
-    fiber::http::HttpBodySpec body,
-    fiber::http::ResponseConnectionMode connection_mode,
-    bool end_stream) {
+fiber::async::Task<IoResult<void>> send_final_header(fiber::http::HttpExchange &exchange, int status_code,
+                                                     const fiber::http::HttpHeaders *headers,
+                                                     fiber::http::HttpBodySpec body,
+                                                     fiber::http::ResponseConnectionMode connection_mode,
+                                                     bool end_stream) {
     co_return co_await exchange.send_header({
-        .kind = fiber::http::OutgoingHeaderKind::Final,
-        .status_code = status_code,
-        .headers = headers,
-        .body = body,
-        .connection_mode = connection_mode,
-        .end_stream = end_stream,
+            .kind = fiber::http::OutgoingHeaderKind::Final,
+            .status_code = status_code,
+            .headers = headers,
+            .body = body,
+            .connection_mode = connection_mode,
+            .end_stream = end_stream,
     });
 }
 
@@ -249,7 +245,7 @@ bool iequals_ascii(std::string_view lhs, std::string_view rhs) {
 bool contains_100_continue(std::string_view value) {
     std::string lower;
     lower.reserve(value.size());
-    for (char ch : value) {
+    for (char ch: value) {
         lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
     }
     return lower.find("100-continue") != std::string::npos;
@@ -260,7 +256,7 @@ std::optional<std::size_t> parse_size(std::string_view text) {
         return std::nullopt;
     }
     std::size_t value = 0;
-    for (char ch : text) {
+    for (char ch: text) {
         if (ch < '0' || ch > '9') {
             return std::nullopt;
         }
@@ -277,7 +273,7 @@ bool is_valid_repo_name(std::string_view name) {
     if (name.empty()) {
         return false;
     }
-    for (char ch : name) {
+    for (char ch: name) {
         unsigned char c = static_cast<unsigned char>(ch);
         if (std::isalnum(c) != 0 || ch == '.' || ch == '_' || ch == '-') {
             continue;
@@ -334,7 +330,7 @@ std::string header_to_cgi_key(std::string_view lowcase_name) {
     std::string key;
     key.reserve(lowcase_name.size() + 5);
     key.append("HTTP_");
-    for (char ch : lowcase_name) {
+    for (char ch: lowcase_name) {
         if (ch == '-') {
             key.push_back('_');
         } else {
@@ -347,7 +343,7 @@ std::string header_to_cgi_key(std::string_view lowcase_name) {
 void set_env_entry(std::vector<std::string> &env, std::string key, std::string value) {
     std::string prefix = key;
     prefix.push_back('=');
-    for (std::string &entry : env) {
+    for (std::string &entry: env) {
         if (entry.size() >= prefix.size() && entry.compare(0, prefix.size(), prefix) == 0) {
             entry = std::move(prefix);
             entry.append(value);
@@ -383,10 +379,8 @@ std::string extract_server_name(const fiber::http::HttpExchange &exchange) {
     return std::string(host.substr(0, colon));
 }
 
-std::vector<std::string> build_backend_env(const ServerConfig &config,
-                                           const RepoRoute &route,
-                                           fiber::http::HttpExchange &exchange,
-                                           std::size_t body_size) {
+std::vector<std::string> build_backend_env(const ServerConfig &config, const RepoRoute &route,
+                                           fiber::http::HttpExchange &exchange, std::size_t body_size) {
     std::vector<std::string> env;
     for (char **current = environ; current && *current; ++current) {
         env.emplace_back(*current);
@@ -407,7 +401,8 @@ std::vector<std::string> build_backend_env(const ServerConfig &config,
     set_env_entry(env, "REQUEST_URI", request_uri);
     set_env_entry(env, "CONTENT_TYPE", std::string(exchange.header("content-type")));
     set_env_entry(env, "CONTENT_LENGTH", std::to_string(body_size));
-    set_env_entry(env, "SERVER_PROTOCOL", exchange.version_view().empty() ? "HTTP/1.1" : std::string(exchange.version_view()));
+    set_env_entry(env, "SERVER_PROTOCOL",
+                  exchange.version_view().empty() ? "HTTP/1.1" : std::string(exchange.version_view()));
     set_env_entry(env, "SERVER_SOFTWARE", "fiber-gateway-cpp-example");
     set_env_entry(env, "SERVER_NAME", extract_server_name(exchange));
     set_env_entry(env, "REQUEST_SCHEME", "http");
@@ -420,7 +415,7 @@ std::vector<std::string> build_backend_env(const ServerConfig &config,
         set_env_entry(env, "GIT_PROTOCOL", std::string(git_protocol));
     }
 
-    for (const auto &header : exchange.request_headers()) {
+    for (const auto &header: exchange.request_headers()) {
         if (iequals_ascii(header.lowcase_view(), "content-length") ||
             iequals_ascii(header.lowcase_view(), "content-type")) {
             continue;
@@ -447,10 +442,10 @@ IoResult<UniqueFd> create_temp_body_file() {
     if (fd < 0) {
         return std::unexpected(fiber::common::io_err_from_errno(errno));
     }
-    (void)::unlink(templ);
+    (void) ::unlink(templ);
     int fd_flags = ::fcntl(fd, F_GETFD, 0);
     if (fd_flags >= 0) {
-        (void)::fcntl(fd, F_SETFD, fd_flags | FD_CLOEXEC);
+        (void) ::fcntl(fd, F_SETFD, fd_flags | FD_CLOEXEC);
     }
     return UniqueFd(fd);
 }
@@ -493,13 +488,11 @@ void clear_nonblock(int fd) {
     if (flags < 0) {
         return;
     }
-    (void)::fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    (void) ::fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 }
 
-IoResult<BackendProcess> spawn_backend_process(const ServerConfig &config,
-                                               const RepoRoute &route,
-                                               fiber::http::HttpExchange &exchange,
-                                               std::size_t body_size) {
+IoResult<BackendProcess> spawn_backend_process(const ServerConfig &config, const RepoRoute &route,
+                                               fiber::http::HttpExchange &exchange, std::size_t body_size) {
     if (!config.alias_root.ensure_repo_alias(route.repo_url_name, route.repo_target_path)) {
         return std::unexpected(IoErr::Unknown);
     }
@@ -540,7 +533,7 @@ IoResult<BackendProcess> spawn_backend_process(const ServerConfig &config,
 
         std::vector<char *> envp;
         envp.reserve(env.size() + 1);
-        for (std::string &entry : env) {
+        for (std::string &entry: env) {
             envp.push_back(entry.data());
         }
         envp.push_back(nullptr);
@@ -559,14 +552,13 @@ IoResult<BackendProcess> spawn_backend_process(const ServerConfig &config,
     return process;
 }
 
-fiber::async::Task<IoResult<void>> write_all(fiber::net::detail::StreamFd &stream,
-                                             const std::uint8_t *data,
+fiber::async::Task<IoResult<void>> write_all(fiber::net::detail::StreamFd &stream, const std::uint8_t *data,
                                              std::size_t len) {
     std::size_t offset = 0;
     while (offset < len) {
         iovec iov{
-            .iov_base = const_cast<std::uint8_t *>(data + offset),
-            .iov_len = len - offset,
+                .iov_base = const_cast<std::uint8_t *>(data + offset),
+                .iov_len = len - offset,
         };
         auto write_result = co_await stream.writev(&iov, 1);
         if (!write_result) {
@@ -580,12 +572,11 @@ fiber::async::Task<IoResult<void>> write_all(fiber::net::detail::StreamFd &strea
     co_return IoResult<void>{};
 }
 
-fiber::async::Task<IoResult<std::size_t>> read_some(fiber::net::detail::StreamFd &stream,
-                                                    std::uint8_t *buf,
+fiber::async::Task<IoResult<std::size_t>> read_some(fiber::net::detail::StreamFd &stream, std::uint8_t *buf,
                                                     std::size_t len) {
     iovec iov{
-        .iov_base = buf,
-        .iov_len = len,
+            .iov_base = buf,
+            .iov_len = len,
     };
     co_return co_await stream.readv(&iov, 1);
 }
@@ -649,8 +640,7 @@ fiber::async::Task<IoResult<RequestBodyStorage>> collect_request_body(fiber::htt
     co_return body;
 }
 
-fiber::async::Task<IoResult<void>> stream_file_via_read(fiber::net::detail::StreamFd &stream,
-                                                        int file_fd,
+fiber::async::Task<IoResult<void>> stream_file_via_read(fiber::net::detail::StreamFd &stream, int file_fd,
                                                         std::size_t total_size) {
     std::array<std::uint8_t, kIoChunkSize> chunk{};
     std::size_t offset = 0;
@@ -676,8 +666,7 @@ fiber::async::Task<IoResult<void>> stream_file_via_read(fiber::net::detail::Stre
     co_return IoResult<void>{};
 }
 
-fiber::async::Task<IoResult<void>> stream_file_to_backend(fiber::net::detail::StreamFd &stream,
-                                                          int file_fd,
+fiber::async::Task<IoResult<void>> stream_file_to_backend(fiber::net::detail::StreamFd &stream, int file_fd,
                                                           std::size_t total_size) {
     off_t offset = 0;
     while (static_cast<std::size_t>(offset) < total_size) {
@@ -726,9 +715,8 @@ std::optional<std::pair<std::size_t, std::size_t>> find_header_terminator(const 
         return std::nullopt;
     }
     for (std::size_t i = 0; i + 1 < buffer.size(); ++i) {
-        if (i + 3 < buffer.size() &&
-            buffer[i] == '\r' && buffer[i + 1] == '\n' &&
-            buffer[i + 2] == '\r' && buffer[i + 3] == '\n') {
+        if (i + 3 < buffer.size() && buffer[i] == '\r' && buffer[i + 1] == '\n' && buffer[i + 2] == '\r' &&
+            buffer[i + 3] == '\n') {
             return std::pair{i, std::size_t{4}};
         }
         if (buffer[i] == '\n' && buffer[i + 1] == '\n') {
@@ -767,8 +755,8 @@ std::optional<CgiResponse> parse_cgi_response_headers(const std::vector<std::uin
     while (offset <= text.size()) {
         std::size_t line_end = text.find('\n', offset);
         std::string_view line = line_end == std::string::npos
-                                    ? std::string_view(text).substr(offset)
-                                    : std::string_view(text).substr(offset, line_end - offset);
+                                        ? std::string_view(text).substr(offset)
+                                        : std::string_view(text).substr(offset, line_end - offset);
         if (!line.empty() && line.back() == '\r') {
             line.remove_suffix(1);
         }
@@ -824,9 +812,10 @@ fiber::async::Task<IoResult<CgiResponse>> read_cgi_response(fiber::net::detail::
 
     for (;;) {
         if (auto terminator = find_header_terminator(buffer); terminator) {
-            std::vector<std::uint8_t> headers(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(terminator->first));
-            std::vector<std::uint8_t> body_prefix(buffer.begin() + static_cast<std::ptrdiff_t>(terminator->first + terminator->second),
-                                                  buffer.end());
+            std::vector<std::uint8_t> headers(buffer.begin(),
+                                              buffer.begin() + static_cast<std::ptrdiff_t>(terminator->first));
+            std::vector<std::uint8_t> body_prefix(
+                    buffer.begin() + static_cast<std::ptrdiff_t>(terminator->first + terminator->second), buffer.end());
             auto parsed = parse_cgi_response_headers(headers, body_prefix);
             if (!parsed) {
                 co_return std::unexpected(IoErr::Invalid);
@@ -869,8 +858,7 @@ fiber::async::Task<IoResult<void>> wait_for_pid(pid_t pid) {
     }
 }
 
-fiber::async::Task<IoResult<void>> send_error_response(fiber::http::HttpExchange &exchange,
-                                                       int status_code,
+fiber::async::Task<IoResult<void>> send_error_response(fiber::http::HttpExchange &exchange, int status_code,
                                                        std::string_view message) {
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("Content-Type", "text/plain; charset=utf-8");
@@ -899,13 +887,13 @@ fiber::async::Task<IoResult<void>> forward_backend_response(fiber::http::HttpExc
 
     const CgiResponse &response = *response_result;
     fiber::http::HttpHeaders headers(exchange.pool());
-    for (const auto &header : response.headers) {
+    for (const auto &header: response.headers) {
         headers.add(header.first, header.second);
     }
 
     fiber::http::HttpBodySpec body = response.content_length
-                                         ? fiber::http::HttpBodySpec::ContentLength(*response.content_length)
-                                         : fiber::http::HttpBodySpec::Chunked();
+                                             ? fiber::http::HttpBodySpec::ContentLength(*response.content_length)
+                                             : fiber::http::HttpBodySpec::Chunked();
     bool header_end_stream = response.content_length && *response.content_length == 0;
 
     auto header_result = co_await send_final_header(exchange, response.status_code, &headers, body,
@@ -953,7 +941,8 @@ fiber::async::Task<IoResult<void>> forward_backend_response(fiber::http::HttpExc
     }
 
     if (!response.body_prefix.empty()) {
-        auto write_result = co_await exchange.write_body(response.body_prefix.data(), response.body_prefix.size(), false);
+        auto write_result =
+                co_await exchange.write_body(response.body_prefix.data(), response.body_prefix.size(), false);
         if (!write_result) {
             co_return std::unexpected(write_result.error());
         }
@@ -991,11 +980,11 @@ std::string resolve_backend_path() {
     }
 
     constexpr const char *candidates[] = {
-        "/usr/lib/git-core/git-http-backend",
-        "/usr/libexec/git-core/git-http-backend",
+            "/usr/lib/git-core/git-http-backend",
+            "/usr/libexec/git-core/git-http-backend",
     };
 
-    for (const char *candidate : candidates) {
+    for (const char *candidate: candidates) {
         if (::access(candidate, X_OK) == 0) {
             return candidate;
         }
@@ -1007,13 +996,13 @@ fiber::async::Task<void> handle_git_http(const std::shared_ptr<ServerConfig> &co
                                          fiber::http::HttpExchange &exchange) {
     std::string method = method_to_string(exchange.method());
     if (method.empty()) {
-        (void)co_await send_error_response(exchange, 405, "method not allowed\n");
+        (void) co_await send_error_response(exchange, 405, "method not allowed\n");
         co_return;
     }
 
     auto route = resolve_repo_route(config->repositories_root, exchange.uri().path);
     if (!route) {
-        (void)co_await send_error_response(exchange, 404, "repository not found\n");
+        (void) co_await send_error_response(exchange, 404, "repository not found\n");
         co_return;
     }
 
@@ -1027,13 +1016,13 @@ fiber::async::Task<void> handle_git_http(const std::shared_ptr<ServerConfig> &co
 
     auto body_result = co_await collect_request_body(exchange);
     if (!body_result) {
-        (void)co_await send_error_response(exchange, 400, "invalid request body\n");
+        (void) co_await send_error_response(exchange, 400, "invalid request body\n");
         co_return;
     }
 
     auto process_result = spawn_backend_process(*config, *route, exchange, body_result->size);
     if (!process_result) {
-        (void)co_await send_error_response(exchange, 500, "failed to start git-http-backend\n");
+        (void) co_await send_error_response(exchange, 500, "failed to start git-http-backend\n");
         co_return;
     }
 
@@ -1056,8 +1045,9 @@ fiber::async::Task<void> handle_git_http(const std::shared_ptr<ServerConfig> &co
         if (write_error != IoErr::None) {
             std::cerr << "backend stdin write failed: " << fiber::common::io_err_name(write_error) << '\n';
         }
-        std::cerr << "backend response forwarding failed: " << fiber::common::io_err_name(forward_result.error()) << '\n';
-        (void)co_await send_error_response(exchange, 502, "git-http-backend failed\n");
+        std::cerr << "backend response forwarding failed: " << fiber::common::io_err_name(forward_result.error())
+                  << '\n';
+        (void) co_await send_error_response(exchange, 502, "git-http-backend failed\n");
         co_return;
     }
 
@@ -1123,17 +1113,13 @@ int main(int argc, char **argv) {
 
     auto bound_port_result = resolve_port(server.fd());
     if (bound_port_result) {
-        std::cout << "listening on 0.0.0.0:" << *bound_port_result
-                  << " root=" << config->repositories_root
-                  << " alias_root=" << config->alias_root.path
-                  << " backend=" << config->backend_path << '\n';
+        std::cout << "listening on 0.0.0.0:" << *bound_port_result << " root=" << config->repositories_root
+                  << " alias_root=" << config->alias_root.path << " backend=" << config->backend_path << '\n';
     } else {
         std::cout << "listening on 0.0.0.0 root=" << config->repositories_root << '\n';
     }
 
-    fiber::async::spawn(loop, [&]() {
-        return server.serve();
-    });
+    fiber::async::spawn(loop, [&]() { return server.serve(); });
     loop.run();
     return 0;
 }

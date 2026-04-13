@@ -118,14 +118,12 @@ struct TempFile {
     }
 };
 
-fiber::async::Task<fiber::common::IoResult<void>> send_final_header(
-    fiber::http::HttpExchange &exchange,
-    int status_code,
-    bool end_stream = true) {
+fiber::async::Task<fiber::common::IoResult<void>> send_final_header(fiber::http::HttpExchange &exchange,
+                                                                    int status_code, bool end_stream = true) {
     co_return co_await exchange.send_header({
-        .kind = fiber::http::OutgoingHeaderKind::Final,
-        .status_code = status_code,
-        .end_stream = end_stream,
+            .kind = fiber::http::OutgoingHeaderKind::Final,
+            .status_code = status_code,
+            .end_stream = end_stream,
     });
 }
 
@@ -156,10 +154,8 @@ DetachedTask stop_http_server(fiber::event::EventLoop *loop, fiber::http::HttpSe
     co_return;
 }
 
-DetachedTask start_http_server(fiber::event::EventLoop *loop,
-                               fiber::http::HttpHandler handler,
-                               fiber::http::HttpServerOptions options,
-                               std::promise<std::uint16_t> *port_promise,
+DetachedTask start_http_server(fiber::event::EventLoop *loop, fiber::http::HttpHandler handler,
+                               fiber::http::HttpServerOptions options, std::promise<std::uint16_t> *port_promise,
                                std::promise<fiber::http::HttpServer *> *server_promise) {
     auto *server = new fiber::http::HttpServer(*loop, std::move(handler), std::move(options));
     fiber::net::ListenOptions listen_options{};
@@ -179,9 +175,7 @@ DetachedTask start_http_server(fiber::event::EventLoop *loop,
     co_return;
 }
 
-DetachedTask run_tls_http1_client(fiber::event::EventLoop *loop,
-                                  std::uint16_t port,
-                                  std::string_view server_name,
+DetachedTask run_tls_http1_client(fiber::event::EventLoop *loop, std::uint16_t port, std::string_view server_name,
                                   std::promise<ClientResult> *result_promise) {
     ClientResult result;
 
@@ -302,7 +296,7 @@ TEST(HttpServerTlsDynamicCertTest, SelectorCallbackCanChooseNamedIdentityUsingSn
 
     fiber::async::spawn(group.at(0), [&]() {
         auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-            (void)co_await send_final_header(exchange, 204, true);
+            (void) co_await send_final_header(exchange, 204, true);
             co_return;
         };
         return start_http_server(&group.at(0), handler, server_options, &port_promise, &server_promise);
@@ -315,9 +309,8 @@ TEST(HttpServerTlsDynamicCertTest, SelectorCallbackCanChooseNamedIdentityUsingSn
 
     std::promise<ClientResult> client_promise;
     auto client_future = client_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() {
-        return run_tls_http1_client(&group.at(0), port, "foo.a.com", &client_promise);
-    });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_tls_http1_client(&group.at(0), port, "foo.a.com", &client_promise); });
 
     ClientResult client = client_future.get();
     EXPECT_EQ(client.err, fiber::common::IoErr::None);
@@ -354,7 +347,7 @@ TEST(HttpServerTlsDynamicCertTest, DefaultIdentityCanServeWithoutCustomSelector)
 
     fiber::async::spawn(group.at(0), [&]() {
         auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-            (void)co_await send_final_header(exchange, 204, true);
+            (void) co_await send_final_header(exchange, 204, true);
             co_return;
         };
         return start_http_server(&group.at(0), handler, server_options, &port_promise, &server_promise);
@@ -367,9 +360,8 @@ TEST(HttpServerTlsDynamicCertTest, DefaultIdentityCanServeWithoutCustomSelector)
 
     std::promise<ClientResult> client_promise;
     auto client_future = client_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() {
-        return run_tls_http1_client(&group.at(0), port, "bar.b.com", &client_promise);
-    });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_tls_http1_client(&group.at(0), port, "bar.b.com", &client_promise); });
 
     ClientResult client = client_future.get();
     EXPECT_EQ(client.err, fiber::common::IoErr::None);

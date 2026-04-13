@@ -1,7 +1,7 @@
 #include "Parser.h"
 
-#include <cerrno>
 #include <cctype>
+#include <cerrno>
 #include <cstdlib>
 #include <optional>
 #include <unordered_set>
@@ -11,9 +11,9 @@ namespace fiber::script::parse {
 namespace {
 
 bool is_keyword(std::string_view text) {
-    return text == "let" || text == "if" || text == "else" || text == "for" || text == "of" ||
-           text == "continue" || text == "break" || text == "return" || text == "directive" ||
-           text == "try" || text == "catch" || text == "throw";
+    return text == "let" || text == "if" || text == "else" || text == "for" || text == "of" || text == "continue" ||
+           text == "break" || text == "return" || text == "directive" || text == "try" || text == "catch" ||
+           text == "throw";
 }
 
 void append_utf8(std::string &out, std::uint32_t codepoint) {
@@ -36,9 +36,7 @@ void append_utf8(std::string &out, std::uint32_t codepoint) {
 
 } // namespace
 
-Parser::Parser(Library &library, bool allow_assign)
-    : library_(library), allow_assign_(allow_assign) {
-}
+Parser::Parser(Library &library, bool allow_assign) : library_(library), allow_assign_(allow_assign) {}
 
 std::expected<std::unique_ptr<ast::Block>, ParseError> Parser::parse_script(std::string_view script) {
     Tokenizer tokenizer{std::string(script)};
@@ -243,11 +241,9 @@ std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_try_cat
     }
     std::int32_t start = static_cast<std::int32_t>(try_token->start);
     std::int32_t end = catch_block_result.value()->end_pos();
-    return std::make_unique<ast::TryCatchStatement>(start,
-                                                    end,
-                                                    std::make_unique<ast::Identifier>(std::move(identifier_result.value())),
-                                                    std::move(try_block_result.value()),
-                                                    std::move(catch_block_result.value()));
+    return std::make_unique<ast::TryCatchStatement>(
+            start, end, std::make_unique<ast::Identifier>(std::move(identifier_result.value())),
+            std::move(try_block_result.value()), std::move(catch_block_result.value()));
 }
 
 std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_if_statement() {
@@ -293,11 +289,8 @@ std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_if_stat
     if (else_stmt) {
         end = else_stmt->end_pos();
     }
-    return std::make_unique<ast::IfStatement>(start,
-                                              end,
-                                              std::move(cond_result.value()),
-                                              std::move(true_block_result.value()),
-                                              std::move(else_stmt));
+    return std::make_unique<ast::IfStatement>(start, end, std::move(cond_result.value()),
+                                              std::move(true_block_result.value()), std::move(else_stmt));
 }
 
 std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_foreach_statement() {
@@ -343,12 +336,10 @@ std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_foreach
     }
     std::int32_t start = static_cast<std::int32_t>(for_token->start);
     std::int32_t end = block_result.value()->end_pos();
-    return std::make_unique<ast::ForeachStatement>(start,
-                                                   end,
-                                                   std::make_unique<ast::Identifier>(std::move(key_result.value())),
-                                                   std::make_unique<ast::Identifier>(std::move(value_result.value())),
-                                                   std::move(collection_result.value()),
-                                                   std::move(block_result.value()));
+    return std::make_unique<ast::ForeachStatement>(
+            start, end, std::make_unique<ast::Identifier>(std::move(key_result.value())),
+            std::make_unique<ast::Identifier>(std::move(value_result.value())), std::move(collection_result.value()),
+            std::move(block_result.value()));
 }
 
 std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_variable_declare_statement() {
@@ -374,10 +365,9 @@ std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_variabl
     }
     std::int32_t start = static_cast<std::int32_t>(let_token->start);
     std::int32_t end = static_cast<std::int32_t>(semi_result->end);
-    return std::make_unique<ast::VariableDeclareStatement>(start,
-                                                           end,
-                                                           std::make_unique<ast::Identifier>(std::move(identifier_result.value())),
-                                                           std::move(initializer));
+    return std::make_unique<ast::VariableDeclareStatement>(
+            start, end, std::make_unique<ast::Identifier>(std::move(identifier_result.value())),
+            std::move(initializer));
 }
 
 std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_directive_statement() {
@@ -423,7 +413,7 @@ std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_directi
     }
 
     std::vector<fiber::json::JsValue> literal_values;
-    for (const auto &lit : literals) {
+    for (const auto &lit: literals) {
         switch (lit.kind()) {
             case ast::Literal::Kind::NullValue:
                 literal_values.push_back(fiber::json::JsValue::make_null());
@@ -439,8 +429,7 @@ std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_directi
                 break;
             case ast::Literal::Kind::String:
                 literal_values.push_back(fiber::json::JsValue::make_native_string(
-                    const_cast<char *>(lit.string_value().data()),
-                    lit.string_value().size()));
+                        const_cast<char *>(lit.string_value().data()), lit.string_value().size()));
                 break;
         }
     }
@@ -451,11 +440,9 @@ std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_directi
     }
     std::int32_t start = static_cast<std::int32_t>(directive_token->start);
     std::int32_t end = static_cast<std::int32_t>(semi_result->end);
-    auto stmt = std::make_unique<ast::DirectiveStatement>(start,
-                                                          end,
-                                                          std::make_unique<ast::Identifier>(std::move(type_result.value())),
-                                                          std::make_unique<ast::Identifier>(std::move(name_result.value())),
-                                                          def);
+    auto stmt = std::make_unique<ast::DirectiveStatement>(
+            start, end, std::make_unique<ast::Identifier>(std::move(type_result.value())),
+            std::make_unique<ast::Identifier>(std::move(name_result.value())), def);
     return stmt;
 }
 
@@ -472,8 +459,7 @@ std::expected<std::unique_ptr<ast::Block>, ParseError> Parser::parse_block(bool 
     }
 
     auto block = std::make_unique<ast::Block>(static_cast<std::int32_t>(start_pos),
-                                              static_cast<std::int32_t>(start_pos),
-                                              type);
+                                              static_cast<std::int32_t>(start_pos), type);
     bool has_statement = false;
     while (has_more()) {
         if (must_curly && peek(TokenKind::RCurly)) {
@@ -494,7 +480,7 @@ std::expected<std::unique_ptr<ast::Block>, ParseError> Parser::parse_block(bool 
         auto stmt = std::move(stmt_result.value());
         if (auto *directive = dynamic_cast<ast::DirectiveStatement *>(stmt.get())) {
             auto directive_ptr =
-                std::unique_ptr<ast::DirectiveStatement>(static_cast<ast::DirectiveStatement *>(stmt.release()));
+                    std::unique_ptr<ast::DirectiveStatement>(static_cast<ast::DirectiveStatement *>(stmt.release()));
             directive_map_[directive_ptr->name()->name()] = directive_ptr.get();
             directive_statements_.push_back(std::move(directive_ptr));
             continue;
@@ -556,10 +542,7 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_expres
             }
             std::int32_t start = expr->start_pos();
             std::int32_t end = false_result.value()->end_pos();
-            return std::make_unique<ast::Ternary>(start,
-                                                  end,
-                                                  std::move(expr),
-                                                  std::move(true_result.value()),
+            return std::make_unique<ast::Ternary>(start, end, std::move(expr), std::move(true_result.value()),
                                                   std::move(false_result.value()));
         }
     }
@@ -580,10 +563,7 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_logica
         }
         std::int32_t start = expr->start_pos();
         std::int32_t end = rhs_result.value()->end_pos();
-        expr = std::make_unique<ast::LogicRelationalExpression>(start,
-                                                                end,
-                                                                std::move(expr),
-                                                                ast::Operator::Or,
+        expr = std::make_unique<ast::LogicRelationalExpression>(start, end, std::move(expr), ast::Operator::Or,
                                                                 std::move(rhs_result.value()));
     }
     return expr;
@@ -603,10 +583,7 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_logica
         }
         std::int32_t start = expr->start_pos();
         std::int32_t end = rhs_result.value()->end_pos();
-        expr = std::make_unique<ast::LogicRelationalExpression>(start,
-                                                                end,
-                                                                std::move(expr),
-                                                                ast::Operator::And,
+        expr = std::make_unique<ast::LogicRelationalExpression>(start, end, std::move(expr), ast::Operator::And,
                                                                 std::move(rhs_result.value()));
     }
     return expr;
@@ -666,7 +643,8 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_sum() 
         }
         std::int32_t start = expr->start_pos();
         std::int32_t end = rhs_result.value()->end_pos();
-        expr = std::make_unique<ast::BinaryOperator>(start, end, *mapped, std::move(expr), std::move(rhs_result.value()));
+        expr = std::make_unique<ast::BinaryOperator>(start, end, *mapped, std::move(expr),
+                                                     std::move(rhs_result.value()));
     }
     return expr;
 }
@@ -689,7 +667,8 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_produc
         }
         std::int32_t start = expr->start_pos();
         std::int32_t end = rhs_result.value()->end_pos();
-        expr = std::make_unique<ast::BinaryOperator>(start, end, *mapped, std::move(expr), std::move(rhs_result.value()));
+        expr = std::make_unique<ast::BinaryOperator>(start, end, *mapped, std::move(expr),
+                                                     std::move(rhs_result.value()));
     }
     return expr;
 }
@@ -811,8 +790,7 @@ std::expected<std::optional<ast::Literal>, ParseError> Parser::parse_optional_li
             bool value = token->text == "true";
             next();
             return std::optional<ast::Literal>(ast::Literal(static_cast<std::int32_t>(token->start),
-                                                            static_cast<std::int32_t>(token->end),
-                                                            value));
+                                                            static_cast<std::int32_t>(token->end), value));
         }
         if (token->text == "null") {
             next();
@@ -844,8 +822,7 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_inline
     std::vector<std::unique_ptr<ast::Expression>> values;
     if (peek(TokenKind::RSquare, true)) {
         return std::make_unique<ast::InlineList>(static_cast<std::int32_t>(start.start),
-                                                 static_cast<std::int32_t>(tokens_[pos_ - 1].end),
-                                                 std::move(values));
+                                                 static_cast<std::int32_t>(tokens_[pos_ - 1].end), std::move(values));
     }
     while (has_more()) {
         if (peek(TokenKind::RSquare)) {
@@ -859,8 +836,7 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_inline
                 return std::unexpected(inner_result.error());
             }
             std::int32_t end = inner_result.value()->end_pos();
-            expr = std::make_unique<ast::ExpandArrArg>(static_cast<std::int32_t>(expand_token.start),
-                                                       end,
+            expr = std::make_unique<ast::ExpandArrArg>(static_cast<std::int32_t>(expand_token.start), end,
                                                        std::move(inner_result.value()),
                                                        ast::ExpandArrArg::Where::InitArr);
         } else {
@@ -881,8 +857,7 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_inline
         return std::unexpected(end_token.error());
     }
     return std::make_unique<ast::InlineList>(static_cast<std::int32_t>(start.start),
-                                             static_cast<std::int32_t>(end_token->end),
-                                             std::move(values));
+                                             static_cast<std::int32_t>(end_token->end), std::move(values));
 }
 
 std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_inline_object() {
@@ -915,10 +890,9 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_inline
             key.kind = ast::InlineObject::KeyKind::Expand;
             ast::InlineObject::Entry entry;
             entry.key = std::move(key);
-            entry.value = std::make_unique<ast::ExpandArrArg>(static_cast<std::int32_t>(expand_token.start),
-                                                              inner_result.value()->end_pos(),
-                                                              std::move(inner_result.value()),
-                                                              ast::ExpandArrArg::Where::InitObj);
+            entry.value = std::make_unique<ast::ExpandArrArg>(
+                    static_cast<std::int32_t>(expand_token.start), inner_result.value()->end_pos(),
+                    std::move(inner_result.value()), ast::ExpandArrArg::Where::InitObj);
             entries.push_back(std::move(entry));
         } else if (token->kind == TokenKind::LSquare) {
             next();
@@ -958,9 +932,8 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_inline
                 key_name = token->text;
                 next();
                 if (peek(TokenKind::Comma) || peek(TokenKind::RCurly)) {
-                    auto var = std::make_unique<ast::VariableReference>(static_cast<std::int32_t>(token->start),
-                                                                        static_cast<std::int32_t>(token->end),
-                                                                        key_name);
+                    auto var = std::make_unique<ast::VariableReference>(
+                            static_cast<std::int32_t>(token->start), static_cast<std::int32_t>(token->end), key_name);
                     ast::InlineObject::Key key;
                     key.kind = ast::InlineObject::KeyKind::String;
                     key.string_key = key_name;
@@ -1008,8 +981,7 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_inline
         return std::unexpected(end_token.error());
     }
     return std::make_unique<ast::InlineObject>(static_cast<std::int32_t>(start.start),
-                                               static_cast<std::int32_t>(end_token->end),
-                                               std::move(entries));
+                                               static_cast<std::int32_t>(end_token->end), std::move(entries));
 }
 
 std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_function_or_var() {
@@ -1037,12 +1009,7 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_functi
         if (!args_result.value().empty()) {
             end = args_result.value().back()->end_pos();
         }
-        return std::make_unique<ast::FunctionCall>(start,
-                                                   end,
-                                                   name,
-                                                   func,
-                                                   async_func,
-                                                   std::move(args_result.value()));
+        return std::make_unique<ast::FunctionCall>(start, end, name, func, async_func, std::move(args_result.value()));
     }
 
     if (!identifier.name().empty() && identifier.name()[0] == '$') {
@@ -1066,10 +1033,7 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_functi
                     full_name.append(key);
                     std::int32_t start = identifier.start_pos();
                     std::int32_t end = static_cast<std::int32_t>(token->end);
-                    return std::make_unique<ast::ConstantVal>(start,
-                                                              end,
-                                                              std::move(full_name),
-                                                              constant,
+                    return std::make_unique<ast::ConstantVal>(start, end, std::move(full_name), constant,
                                                               async_constant);
                 }
             }
@@ -1080,7 +1044,8 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_functi
     return std::make_unique<ast::VariableReference>(identifier.start_pos(), identifier.end_pos(), identifier.name());
 }
 
-std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_indexer(std::unique_ptr<ast::Expression> parent) {
+std::expected<std::unique_ptr<ast::Expression>, ParseError>
+Parser::parse_indexer(std::unique_ptr<ast::Expression> parent) {
     auto start_token = eat(TokenKind::LSquare);
     if (!start_token) {
         return std::unexpected(start_token.error());
@@ -1098,7 +1063,8 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_indexe
     return std::make_unique<ast::Indexer>(start, end, std::move(parent), std::move(expr_result.value()));
 }
 
-std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_dotted_node(std::unique_ptr<ast::Expression> parent) {
+std::expected<std::unique_ptr<ast::Expression>, ParseError>
+Parser::parse_dotted_node(std::unique_ptr<ast::Expression> parent) {
     auto dot = eat(TokenKind::Dot);
     if (!dot) {
         return std::unexpected(dot.error());
@@ -1106,7 +1072,8 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_dotted
     return parse_property(std::move(parent));
 }
 
-std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_node(std::unique_ptr<ast::Expression> parent) {
+std::expected<std::unique_ptr<ast::Expression>, ParseError>
+Parser::parse_node(std::unique_ptr<ast::Expression> parent) {
     if (peek(TokenKind::Dot)) {
         return parse_dotted_node(std::move(parent));
     }
@@ -1116,14 +1083,16 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_node(s
     return std::unexpected(ParseError{});
 }
 
-std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_non_dotted_node(std::unique_ptr<ast::Expression> parent) {
+std::expected<std::unique_ptr<ast::Expression>, ParseError>
+Parser::parse_non_dotted_node(std::unique_ptr<ast::Expression> parent) {
     if (peek(TokenKind::LSquare)) {
         return parse_indexer(std::move(parent));
     }
     return std::unexpected(ParseError{});
 }
 
-std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_property(std::unique_ptr<ast::Expression> parent) {
+std::expected<std::unique_ptr<ast::Expression>, ParseError>
+Parser::parse_property(std::unique_ptr<ast::Expression> parent) {
     if (!peek(TokenKind::Identifier)) {
         return std::unexpected(make_error("expected property name", peek()));
     }
@@ -1133,7 +1102,8 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_proper
     return std::make_unique<ast::PropertyReference>(start, end, token.text, std::move(parent));
 }
 
-std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_function_call(ast::VariableReference &prefix) {
+std::expected<std::unique_ptr<ast::Expression>, ParseError>
+Parser::parse_function_call(ast::VariableReference &prefix) {
     std::size_t saved = pos_;
     int dot_size = 0;
     std::string name = prefix.name();
@@ -1171,11 +1141,7 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_functi
             if (!args_result.value().empty()) {
                 end = args_result.value().back()->end_pos();
             }
-            return std::make_unique<ast::FunctionCall>(start,
-                                                       end,
-                                                       name,
-                                                       func,
-                                                       async_func,
+            return std::make_unique<ast::FunctionCall>(start, end, name, func, async_func,
                                                        std::move(args_result.value()));
         }
     }
@@ -1204,8 +1170,7 @@ std::expected<std::vector<std::unique_ptr<ast::Expression>>, ParseError> Parser:
                 return std::unexpected(inner_result.error());
             }
             expr = std::make_unique<ast::ExpandArrArg>(static_cast<std::int32_t>(expand_token.start),
-                                                       inner_result.value()->end_pos(),
-                                                       std::move(inner_result.value()),
+                                                       inner_result.value()->end_pos(), std::move(inner_result.value()),
                                                        ast::ExpandArrArg::Where::FuncCall);
         } else {
             auto expr_result = parse_expression_internal();
@@ -1235,8 +1200,7 @@ std::expected<ast::Literal, ParseError> Parser::parse_literal_token(const Token 
         if (end == token.text.c_str() || errno == ERANGE) {
             return std::unexpected(make_error("invalid integer literal", &token));
         }
-        return ast::Literal(static_cast<std::int32_t>(token.start),
-                            static_cast<std::int32_t>(token.end),
+        return ast::Literal(static_cast<std::int32_t>(token.start), static_cast<std::int32_t>(token.end),
                             static_cast<std::int64_t>(value));
     }
     if (token.kind == TokenKind::LiteralHexInt || token.kind == TokenKind::LiteralHexLong) {
@@ -1245,8 +1209,7 @@ std::expected<ast::Literal, ParseError> Parser::parse_literal_token(const Token 
         if (end == token.text.c_str() || errno == ERANGE) {
             return std::unexpected(make_error("invalid hex literal", &token));
         }
-        return ast::Literal(static_cast<std::int32_t>(token.start),
-                            static_cast<std::int32_t>(token.end),
+        return ast::Literal(static_cast<std::int32_t>(token.start), static_cast<std::int32_t>(token.end),
                             static_cast<std::int64_t>(value));
     }
     if (token.kind == TokenKind::LiteralReal || token.kind == TokenKind::LiteralRealFloat) {
@@ -1255,17 +1218,14 @@ std::expected<ast::Literal, ParseError> Parser::parse_literal_token(const Token 
         if (end == token.text.c_str() || errno == ERANGE) {
             return std::unexpected(make_error("invalid real literal", &token));
         }
-        return ast::Literal(static_cast<std::int32_t>(token.start),
-                            static_cast<std::int32_t>(token.end),
-                            value);
+        return ast::Literal(static_cast<std::int32_t>(token.start), static_cast<std::int32_t>(token.end), value);
     }
     if (token.kind == TokenKind::LiteralString) {
         auto parsed = parse_string_literal(token.text, token.start);
         if (!parsed) {
             return std::unexpected(parsed.error());
         }
-        return ast::Literal(static_cast<std::int32_t>(token.start),
-                            static_cast<std::int32_t>(token.end),
+        return ast::Literal(static_cast<std::int32_t>(token.start), static_cast<std::int32_t>(token.end),
                             std::move(parsed.value()));
     }
     return std::unexpected(make_error("unsupported literal", &token));
@@ -1333,8 +1293,8 @@ std::expected<std::string, ParseError> Parser::parse_string_literal(const std::s
                         return std::unexpected(ParseError{"invalid hex escape", start_pos + i});
                     }
                     value = value * 16 + static_cast<unsigned>(std::isdigit(static_cast<unsigned char>(c))
-                                                                  ? c - '0'
-                                                                  : std::tolower(c) - 'a' + 10);
+                                                                       ? c - '0'
+                                                                       : std::tolower(c) - 'a' + 10);
                 }
                 i += 2;
                 append_utf8(out, value);
@@ -1351,8 +1311,8 @@ std::expected<std::string, ParseError> Parser::parse_string_literal(const std::s
                         return std::unexpected(ParseError{"invalid unicode escape", start_pos + i});
                     }
                     value = value * 16 + static_cast<unsigned>(std::isdigit(static_cast<unsigned char>(c))
-                                                                  ? c - '0'
-                                                                  : std::tolower(c) - 'a' + 10);
+                                                                       ? c - '0'
+                                                                       : std::tolower(c) - 'a' + 10);
                 }
                 i += 4;
                 append_utf8(out, value);
@@ -1395,14 +1355,11 @@ std::expected<ast::Identifier, ParseError> Parser::parse_identifier_token() {
     if (is_keyword(token_result->text)) {
         return std::unexpected(make_error("keyword not expected", &token_result.value()));
     }
-    return ast::Identifier(static_cast<std::int32_t>(token_result->start),
-                           static_cast<std::int32_t>(token_result->end),
+    return ast::Identifier(static_cast<std::int32_t>(token_result->start), static_cast<std::int32_t>(token_result->end),
                            token_result->text);
 }
 
-bool Parser::has_more() const {
-    return pos_ < tokens_.size();
-}
+bool Parser::has_more() const { return pos_ < tokens_.size(); }
 
 const Token *Parser::peek() const {
     if (!has_more()) {

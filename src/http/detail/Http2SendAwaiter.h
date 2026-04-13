@@ -62,7 +62,7 @@ public:
         handle_ = handle;
         if (has_timer()) {
             loop_->template post_at<SendAwaiterBase, &SendAwaiterBase::timer_entry_, &SendAwaiterBase::on_timeout>(
-                loop_->now() + timeout_, *this);
+                    loop_->now() + timeout_, *this);
         }
         return true;
     }
@@ -154,8 +154,8 @@ public:
     using AwaitResult = common::IoResult<SuccessType>;
 
     template<class... Args>
-    HeaderSendAwaiter(Owner &owner, std::chrono::milliseconds timeout, Args &&...args) noexcept(
-        std::is_nothrow_constructible_v<Op, Args...>) :
+    HeaderSendAwaiter(Owner &owner, std::chrono::milliseconds timeout,
+                      Args &&...args) noexcept(std::is_nothrow_constructible_v<Op, Args...>) :
         Base(owner, timeout), op_(static_cast<Args &&>(args)...) {}
 
     ~HeaderSendAwaiter() override { this->on_destroy_cleanup(); }
@@ -211,8 +211,8 @@ public:
     using AwaitResult = common::IoResult<SuccessType>;
 
     template<class... Args>
-    BodySendAwaiter(Owner &owner, std::chrono::milliseconds timeout, Args &&...args) noexcept(
-        std::is_nothrow_constructible_v<Op, Args...>) :
+    BodySendAwaiter(Owner &owner, std::chrono::milliseconds timeout,
+                    Args &&...args) noexcept(std::is_nothrow_constructible_v<Op, Args...>) :
         Base(owner, timeout), op_(static_cast<Args &&>(args)...) {}
 
     ~BodySendAwaiter() override { this->on_destroy_cleanup(); }
@@ -260,9 +260,8 @@ public:
             return;
         }
         resume_submit_posted_ = true;
-        this->loop_
-            ->template post<BodySendAwaiter, &BodySendAwaiter::submit_notify_entry_, &BodySendAwaiter::on_submit_notify>(
-            *this);
+        this->loop_->template post<BodySendAwaiter, &BodySendAwaiter::submit_notify_entry_,
+                                   &BodySendAwaiter::on_submit_notify>(*this);
     }
 
     Op op_;

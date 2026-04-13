@@ -23,8 +23,8 @@ std::string_view copy_to_pool(mem::BufPool &pool, std::string_view value) noexce
     return copy_to_pool(pool, reinterpret_cast<const std::uint8_t *>(value.data()), value.size());
 }
 
-common::IoErr materialize_name_raw(mem::BufPool &pool, const std::uint8_t *data, std::size_t len,
-                                   std::string_view &out, std::uint64_t &name_hash) noexcept {
+common::IoErr materialize_name_raw(mem::BufPool &pool, const std::uint8_t *data, std::size_t len, std::string_view &out,
+                                   std::uint64_t &name_hash) noexcept {
     out = copy_to_pool(pool, data, len);
     if (!out.data() && len != 0) {
         return common::IoErr::NoMem;
@@ -48,7 +48,7 @@ common::IoErr materialize_name_huffman(mem::BufPool &pool, const std::uint8_t *d
         }
         Http2HuffmanDecodeState state;
         Http2HuffmanDecodeResult result =
-            http2_huffman_decode_exact(state, data, len, reinterpret_cast<std::uint8_t *>(mem), true);
+                http2_huffman_decode_exact(state, data, len, reinterpret_cast<std::uint8_t *>(mem), true);
         if (result.code != Http2HuffmanCode::Ok || result.written != decoded_len) {
             return common::IoErr::Invalid;
         }
@@ -84,7 +84,7 @@ common::IoErr materialize_value_huffman(mem::BufPool &pool, const std::uint8_t *
     }
     Http2HuffmanDecodeState state;
     Http2HuffmanDecodeResult result =
-        http2_huffman_decode_exact(state, data, len, reinterpret_cast<std::uint8_t *>(mem), true);
+            http2_huffman_decode_exact(state, data, len, reinterpret_cast<std::uint8_t *>(mem), true);
     if (result.code != Http2HuffmanCode::Ok || result.written != decoded_len) {
         return common::IoErr::Invalid;
     }

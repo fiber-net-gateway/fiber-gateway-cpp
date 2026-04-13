@@ -20,17 +20,11 @@ public:
     public:
         using RunFn = std::function<void(Thread &)>;
 
-        std::size_t index() const noexcept {
-            return index_;
-        }
+        std::size_t index() const noexcept { return index_; }
 
-        ThreadGroup &group() const noexcept {
-            return *group_;
-        }
+        ThreadGroup &group() const noexcept { return *group_; }
 
-        std::stop_token stop_token() const noexcept {
-            return thread_.get_stop_token();
-        }
+        std::stop_token stop_token() const noexcept { return thread_.get_stop_token(); }
 
         static Thread &current();
 
@@ -58,9 +52,7 @@ public:
     void join();
     [[nodiscard]] bool started() const noexcept { return started_.load(std::memory_order_acquire); }
 
-    std::size_t size() const noexcept {
-        return threads_.size();
-    }
+    std::size_t size() const noexcept { return threads_.size(); }
 
     Thread &at(std::size_t index);
     const Thread &at(std::size_t index) const;

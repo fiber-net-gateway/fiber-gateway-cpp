@@ -51,8 +51,7 @@ std::uint8_t status_rank(ResolveStatus status) noexcept {
     return 0;
 }
 
-const FamilyQueryState *preferred_family(AddressPolicy policy,
-                                         const FamilyQueryState &v4,
+const FamilyQueryState *preferred_family(AddressPolicy policy, const FamilyQueryState &v4,
                                          const FamilyQueryState &v6) noexcept {
     switch (policy) {
         case AddressPolicy::V6First:
@@ -65,14 +64,12 @@ const FamilyQueryState *preferred_family(AddressPolicy policy,
     return &v6;
 }
 
-const FamilyQueryState *fallback_family(AddressPolicy policy,
-                                        const FamilyQueryState &v4,
+const FamilyQueryState *fallback_family(AddressPolicy policy, const FamilyQueryState &v4,
                                         const FamilyQueryState &v6) noexcept {
     return preferred_family(policy, v4, v6) == &v6 ? &v4 : &v6;
 }
 
-const FamilyQueryState *pick_status_family(AddressPolicy policy,
-                                           const FamilyQueryState &v4,
+const FamilyQueryState *pick_status_family(AddressPolicy policy, const FamilyQueryState &v4,
                                            const FamilyQueryState &v6) noexcept {
     const FamilyQueryState *first = preferred_family(policy, v4, v6);
     const FamilyQueryState *second = fallback_family(policy, v4, v6);
@@ -131,11 +128,8 @@ bool AddressResolveResult::valid() const noexcept {
     return name_storage_ != nullptr && (options_.max_records == 0 || records_ != nullptr);
 }
 
-common::IoErr AddressResolveResult::assign_positive(std::string_view canonical_name,
-                                                    const net::IpAddress *records,
-                                                    std::uint16_t count,
-                                                    std::uint16_t v4_count,
-                                                    std::uint16_t v6_count,
+common::IoErr AddressResolveResult::assign_positive(std::string_view canonical_name, const net::IpAddress *records,
+                                                    std::uint16_t count, std::uint16_t v4_count, std::uint16_t v6_count,
                                                     std::chrono::steady_clock::time_point expire_at) noexcept {
     if ((count != 0 && records == nullptr) || count > options_.max_records || count != v4_count + v6_count) {
         return count > options_.max_records ? common::IoErr::NoMem : common::IoErr::Invalid;
@@ -202,8 +196,7 @@ bool EndpointResolveResult::valid() const noexcept {
     return name_storage_ != nullptr && (options_.max_records == 0 || records_ != nullptr);
 }
 
-common::IoErr EndpointResolveResult::assign_positive(std::string_view canonical_name,
-                                                     const net::SocketAddress *records,
+common::IoErr EndpointResolveResult::assign_positive(std::string_view canonical_name, const net::SocketAddress *records,
                                                      std::uint16_t count,
                                                      std::chrono::steady_clock::time_point expire_at) noexcept {
     if ((count != 0 && records == nullptr) || count > options_.max_records) {
@@ -245,9 +238,7 @@ void DnsResolver::release() noexcept {
     options_ = {};
 }
 
-bool DnsResolver::valid() const noexcept {
-    return local_ != nullptr && local_->valid();
-}
+bool DnsResolver::valid() const noexcept { return local_ != nullptr && local_->valid(); }
 
 event::EventLoop &DnsResolver::loop() const noexcept {
     FIBER_ASSERT(local_ != nullptr);
@@ -259,8 +250,7 @@ async::Task<common::IoResult<ResolveStatus>> DnsResolver::resolve_host(std::stri
     co_return co_await resolve_host(host, options_.default_policy, out);
 }
 
-async::Task<common::IoResult<ResolveStatus>> DnsResolver::resolve_host(std::string_view host,
-                                                                       AddressPolicy policy,
+async::Task<common::IoResult<ResolveStatus>> DnsResolver::resolve_host(std::string_view host, AddressPolicy policy,
                                                                        AddressResolveResult &out) noexcept {
     FIBER_ASSERT(local_ != nullptr);
     FIBER_ASSERT(local_->loop().in_loop());
@@ -290,8 +280,8 @@ async::Task<common::IoResult<ResolveStatus>> DnsResolver::resolve_host(std::stri
         co_return ResolveStatus::Success;
     }
 
-    auto run_one = [this, host](std::uint16_t qtype, FamilyQueryState &state, async::WaitGroup &wait_group)
-        -> async::DetachedTask {
+    auto run_one = [this, host](std::uint16_t qtype, FamilyQueryState &state,
+                                async::WaitGroup &wait_group) -> async::DetachedTask {
         QuestionSpec question{};
         question.name = host;
         question.type = qtype;
@@ -324,12 +314,9 @@ async::Task<common::IoResult<ResolveStatus>> DnsResolver::resolve_host(std::stri
             v4_count += state.result.records()[i].is_v4() ? 1 : 0;
             v6_count += state.result.records()[i].is_v6() ? 1 : 0;
         }
-        common::IoErr err = out.assign_positive(state.result.canonical_name(),
-                                                state.result.records(),
-                                                state.result.record_count(),
-                                                v4_count,
-                                                v6_count,
-                                                state.result.expire_at());
+        common::IoErr err =
+                out.assign_positive(state.result.canonical_name(), state.result.records(), state.result.record_count(),
+                                    v4_count, v6_count, state.result.expire_at());
         if (err != common::IoErr::None) {
             return std::unexpected(err);
         }
@@ -401,7 +388,7 @@ async::Task<common::IoResult<ResolveStatus>> DnsResolver::resolve_host(std::stri
         std::array<net::IpAddress, 32> stack_records{};
         std::unique_ptr<net::IpAddress[]> heap_records{};
         const std::uint16_t total_count =
-            (v4_success ? v4.result.record_count() : 0) + (v6_success ? v6.result.record_count() : 0);
+                (v4_success ? v4.result.record_count() : 0) + (v6_success ? v6.result.record_count() : 0);
         net::IpAddress *merged = nullptr;
         if (total_count <= stack_records.size()) {
             merged = stack_records.data();
@@ -444,12 +431,9 @@ async::Task<common::IoResult<ResolveStatus>> DnsResolver::resolve_host(std::stri
             expire_at = std::min(expire_at, v6.result.expire_at());
         }
 
-        common::IoErr err = out.assign_positive(canonical_source->result.canonical_name(),
-                                                merged,
-                                                total_count,
+        common::IoErr err = out.assign_positive(canonical_source->result.canonical_name(), merged, total_count,
                                                 v4_success ? v4.result.record_count() : 0,
-                                                v6_success ? v6.result.record_count() : 0,
-                                                expire_at);
+                                                v6_success ? v6.result.record_count() : 0, expire_at);
         if (err != common::IoErr::None) {
             co_return std::unexpected(err);
         }
@@ -482,23 +466,19 @@ void AddressResolver::release() noexcept {
     options_ = {};
 }
 
-bool AddressResolver::valid() const noexcept {
-    return resolver_ != nullptr && resolver_->valid();
-}
+bool AddressResolver::valid() const noexcept { return resolver_ != nullptr && resolver_->valid(); }
 
 event::EventLoop &AddressResolver::loop() const noexcept {
     FIBER_ASSERT(resolver_ != nullptr);
     return resolver_->loop();
 }
 
-async::Task<common::IoResult<ResolveStatus>> AddressResolver::resolve(std::string_view host,
-                                                                      std::uint16_t port,
+async::Task<common::IoResult<ResolveStatus>> AddressResolver::resolve(std::string_view host, std::uint16_t port,
                                                                       EndpointResolveResult &out) noexcept {
     co_return co_await resolve(host, port, options_.default_policy, out);
 }
 
-async::Task<common::IoResult<ResolveStatus>> AddressResolver::resolve(std::string_view host,
-                                                                      std::uint16_t port,
+async::Task<common::IoResult<ResolveStatus>> AddressResolver::resolve(std::string_view host, std::uint16_t port,
                                                                       AddressPolicy policy,
                                                                       EndpointResolveResult &out) noexcept {
     FIBER_ASSERT(resolver_ != nullptr);
@@ -546,8 +526,8 @@ async::Task<common::IoResult<ResolveStatus>> AddressResolver::resolve(std::strin
         records[i] = net::SocketAddress(addresses.records()[i], port);
     }
 
-    common::IoErr err = out.assign_positive(addresses.canonical_name(), records, addresses.record_count(),
-                                            addresses.expire_at());
+    common::IoErr err =
+            out.assign_positive(addresses.canonical_name(), records, addresses.record_count(), addresses.expire_at());
     if (err != common::IoErr::None) {
         co_return std::unexpected(err);
     }

@@ -11,8 +11,7 @@
 
 namespace fiber::script {
 
-std::expected<Script, parse::ParseError> compile_script(Library &library,
-                                                        std::string_view script,
+std::expected<Script, parse::ParseError> compile_script(Library &library, std::string_view script,
                                                         bool allow_assign = true);
 
 } // namespace fiber::script

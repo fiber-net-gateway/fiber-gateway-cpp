@@ -69,7 +69,7 @@ struct DecodeRecorder {
         self->pending_name.assign(decoded_len, '\0');
         fiber::http::Http2HuffmanDecodeState state;
         auto result = fiber::http::http2_huffman_decode_exact(
-            state, data, len, reinterpret_cast<std::uint8_t *>(self->pending_name.data()), true);
+                state, data, len, reinterpret_cast<std::uint8_t *>(self->pending_name.data()), true);
         if (result.code != fiber::http::Http2HuffmanCode::Ok || result.written != decoded_len) {
             return IoErr::Invalid;
         }
@@ -96,8 +96,8 @@ struct DecodeRecorder {
         }
         std::string value(decoded_len, '\0');
         fiber::http::Http2HuffmanDecodeState state;
-        auto result = fiber::http::http2_huffman_decode_exact(
-            state, data, len, reinterpret_cast<std::uint8_t *>(value.data()), true);
+        auto result = fiber::http::http2_huffman_decode_exact(state, data, len,
+                                                              reinterpret_cast<std::uint8_t *>(value.data()), true);
         if (result.code != fiber::http::Http2HuffmanCode::Ok || result.written != decoded_len) {
             return IoErr::Invalid;
         }
@@ -109,12 +109,8 @@ struct DecodeRecorder {
 
     static const Http2HpackDecoder::Ops &ops() noexcept {
         static const Http2HpackDecoder::Ops kOps{
-            &DecodeRecorder::on_indexed_field,
-            &DecodeRecorder::on_indexed_name,
-            &DecodeRecorder::on_name_raw,
-            &DecodeRecorder::on_name_huffman,
-            &DecodeRecorder::on_value_raw,
-            &DecodeRecorder::on_value_huffman,
+                &DecodeRecorder::on_indexed_field, &DecodeRecorder::on_indexed_name, &DecodeRecorder::on_name_raw,
+                &DecodeRecorder::on_name_huffman,  &DecodeRecorder::on_value_raw,    &DecodeRecorder::on_value_huffman,
         };
         return kOps;
     }
@@ -191,7 +187,7 @@ TEST(Http2HpackEncoderTest, EncodesStaticNameMatchWithoutIndexingAndDecodesBack)
 
 TEST(Http2HpackEncoderTest, ActivatesPolicyEntryAndReusesDynamicIndexOnSecondBlock) {
     constexpr std::array<Http2HpackEncodeCatalog::PolicyEntry, 1> kPolicies{{
-        {"server", fiber::http::http_header_name_hash("server"), "nginx-1.25.1"},
+            {"server", fiber::http::http_header_name_hash("server"), "nginx-1.25.1"},
     }};
 
     Http2HpackEncodeCatalog catalog;
@@ -238,8 +234,7 @@ TEST(Http2HpackEncoderTest, UsesRawOrHuffmanStringEncodingBasedOnThreshold) {
     ASSERT_TRUE(huffman_encoder.init());
     Http2HpackEncoderIoBufWriter huffman_writer(huffman_encoder);
     ASSERT_EQ(huffman_writer.begin(), IoErr::None);
-    ASSERT_EQ(huffman_writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "abc"),
-              IoErr::None);
+    ASSERT_EQ(huffman_writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "abc"), IoErr::None);
     IoBufChain huffman_block;
     ASSERT_EQ(huffman_writer.finish(huffman_block), IoErr::None);
     const std::vector<std::uint8_t> huffman_bytes = chain_to_bytes(std::move(huffman_block));

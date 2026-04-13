@@ -4,8 +4,8 @@
 #include <string>
 
 #include "../common/mem/IoBuf.h"
-#include "HttpExchangeIo.h"
 #include "Http1Parser.h"
+#include "HttpExchangeIo.h"
 
 namespace fiber::http {
 
@@ -47,9 +47,9 @@ private:
     common::IoResult<void> normalize_response_plan(bool body_end, std::size_t first_body_len, bool infer_body_mode,
                                                    HttpBodySpec &body_spec) const noexcept;
     [[nodiscard]] bool compute_close_conn(const HttpExchange &exchange) const noexcept;
-    common::IoResult<mem::IoBuf> build_response_header(HttpExchange &exchange, bool body_end, std::size_t first_body_len,
-                                                       bool infer_body_mode, HttpBodySpec &body_spec,
-                                                       bool &close_conn) noexcept;
+    common::IoResult<mem::IoBuf> build_response_header(HttpExchange &exchange, bool body_end,
+                                                       std::size_t first_body_len, bool infer_body_mode,
+                                                       HttpBodySpec &body_spec, bool &close_conn) noexcept;
     common::IoResult<mem::IoBuf> build_informational_header(const HttpExchange &exchange, int status_code,
                                                             const HttpHeaders *headers) const noexcept;
     common::IoResult<mem::IoBuf> build_chunked_trailer_block(const HttpHeaders *headers,

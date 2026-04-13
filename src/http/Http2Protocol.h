@@ -43,8 +43,8 @@ struct Http2FrameHeader {
     std::uint32_t stream_id = 0;
 };
 
-inline void encode_http2_frame_header(std::uint8_t *out, std::uint32_t length, Http2FrameType type,
-                                      std::uint8_t flags, std::uint32_t stream_id) noexcept {
+inline void encode_http2_frame_header(std::uint8_t *out, std::uint32_t length, Http2FrameType type, std::uint8_t flags,
+                                      std::uint32_t stream_id) noexcept {
     out[0] = static_cast<std::uint8_t>((length >> 16) & 0xffU);
     out[1] = static_cast<std::uint8_t>((length >> 8) & 0xffU);
     out[2] = static_cast<std::uint8_t>(length & 0xffU);

@@ -24,8 +24,8 @@ using fiber::common::route::RoutePatternError;
 
 RuntimeError make_error(const config::SourceLocation &location, std::string message) {
     return RuntimeError{
-        .message = std::move(message),
-        .location = location,
+            .message = std::move(message),
+            .location = location,
     };
 }
 
@@ -68,8 +68,7 @@ std::string compile_location_pattern(const config::LocationConfig &location) {
 }
 
 std::chrono::milliseconds resolve_timeout(const std::optional<std::chrono::milliseconds> &override_value,
-                                          std::chrono::milliseconds inherited,
-                                          std::chrono::milliseconds fallback) {
+                                          std::chrono::milliseconds inherited, std::chrono::milliseconds fallback) {
     if (override_value.has_value()) {
         return *override_value;
     }
@@ -95,13 +94,11 @@ fiber::http::HeaderMap<std::uint8_t> make_default_skip_headers() {
 }
 
 std::expected<UpstreamPeerRuntime, RuntimeError> make_peer_runtime(const config::SourceLocation &location,
-                                                                   std::string host,
-                                                                   std::uint16_t port) {
+                                                                   std::string host, std::uint16_t port) {
     fiber::net::IpAddress ip;
     if (!fiber::net::IpAddress::parse(host, ip)) {
-        return std::unexpected(make_error(
-            location,
-            "upstream host must be an IP literal in lite-nginx runtime: " + host));
+        return std::unexpected(
+                make_error(location, "upstream host must be an IP literal in lite-nginx runtime: " + host));
     }
 
     UpstreamPeerRuntime peer;
@@ -109,10 +106,8 @@ std::expected<UpstreamPeerRuntime, RuntimeError> make_peer_runtime(const config:
     peer.port = port;
     peer.ip = ip;
     peer.address = fiber::net::SocketAddress(ip, port);
-    peer.connection_key = fiber::http::Http1ConnectionGroupKey::from_ip(
-        ip,
-        port,
-        fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    peer.connection_key =
+            fiber::http::Http1ConnectionGroupKey::from_ip(ip, port, fiber::http::Http1ConnectionGroupKey::Scheme::Http);
     return peer;
 }
 
@@ -140,7 +135,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
     std::unordered_map<std::string, std::uint32_t> upstream_indices;
     upstream_indices.reserve(config.http.upstreams.size() * 2 + 4);
 
-    for (const auto &upstream : config.http.upstreams) {
+    for (const auto &upstream: config.http.upstreams) {
         UpstreamRuntime runtime_upstream;
         runtime_upstream.name = upstream.name;
         runtime_upstream.keepalive = upstream.keepalive;
@@ -149,7 +144,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
         runtime_upstream.send_timeout = upstream.send_timeout.value_or(kDefaultSendTimeout);
         runtime_upstream.peers.reserve(upstream.servers.size());
 
-        for (const auto &server : upstream.servers) {
+        for (const auto &server: upstream.servers) {
             auto peer_result = make_peer_runtime(config::SourceLocation{}, server.host, server.port);
             if (!peer_result) {
                 return std::unexpected(peer_result.error());
@@ -168,7 +163,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
     std::unordered_map<std::string, config::SourceLocation> seen_server_names;
     seen_server_names.reserve(config.http.servers.size() * 2);
 
-    for (const auto &server : config.http.servers) {
+    for (const auto &server: config.http.servers) {
         ServerRuntime runtime_server;
         runtime_server.location = server.location;
         runtime_server.server_names = server.server_names;
@@ -178,18 +173,17 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
 
         LocationRouteDefiner route_definer;
         fiber::common::route::RoutePathMatcher<std::uint32_t>::Builder<LocationRoutePayload, LocationRouteDefiner>
-            matcher_builder(route_definer);
+                matcher_builder(route_definer);
 
-        for (const auto &name : server.server_names) {
+        for (const auto &name: server.server_names) {
             auto [it, inserted] = seen_server_names.emplace(name, server.location);
             if (!inserted) {
                 return std::unexpected(make_error(
-                    server.location,
-                    "duplicate server_name is not supported in lite-nginx runtime: " + name));
+                        server.location, "duplicate server_name is not supported in lite-nginx runtime: " + name));
             }
         }
 
-        for (const auto &location : server.locations) {
+        for (const auto &location: server.locations) {
             std::uint32_t upstream_index = 0;
             std::string default_host_header;
             std::chrono::milliseconds inherited_connect = kDefaultConnectTimeout;
@@ -199,9 +193,9 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
             if (location.proxy_pass.kind == config::ProxyPassKind::NamedUpstream) {
                 auto it = upstream_indices.find(location.proxy_pass.upstream_name);
                 if (it == upstream_indices.end()) {
-                    return std::unexpected(make_error(
-                        location.proxy_pass.location,
-                        "proxy_pass references unknown upstream in runtime: " + location.proxy_pass.upstream_name));
+                    return std::unexpected(make_error(location.proxy_pass.location,
+                                                      "proxy_pass references unknown upstream in runtime: " +
+                                                              location.proxy_pass.upstream_name));
                 }
                 upstream_index = it->second;
                 const UpstreamRuntime &upstream = runtime.upstreams[upstream_index];
@@ -213,10 +207,8 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 const std::string key = direct_upstream_key(location.proxy_pass.host, location.proxy_pass.port);
                 auto it = direct_upstream_indices.find(key);
                 if (it == direct_upstream_indices.end()) {
-                    auto peer_result = make_peer_runtime(
-                        location.proxy_pass.location,
-                        location.proxy_pass.host,
-                        location.proxy_pass.port);
+                    auto peer_result = make_peer_runtime(location.proxy_pass.location, location.proxy_pass.host,
+                                                         location.proxy_pass.port);
                     if (!peer_result) {
                         return std::unexpected(peer_result.error());
                     }
@@ -242,24 +234,24 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
             runtime_location.matcher_pattern = compile_location_pattern(location);
             runtime_location.default_host_header = std::move(default_host_header);
             runtime_location.connect_timeout =
-                resolve_timeout(location.proxy.connect_timeout, inherited_connect, kDefaultConnectTimeout);
+                    resolve_timeout(location.proxy.connect_timeout, inherited_connect, kDefaultConnectTimeout);
             runtime_location.read_timeout =
-                resolve_timeout(location.proxy.read_timeout, inherited_read, kDefaultReadTimeout);
+                    resolve_timeout(location.proxy.read_timeout, inherited_read, kDefaultReadTimeout);
             runtime_location.send_timeout =
-                resolve_timeout(location.proxy.send_timeout, inherited_send, kDefaultSendTimeout);
+                    resolve_timeout(location.proxy.send_timeout, inherited_send, kDefaultSendTimeout);
             runtime_location.upstream_index = upstream_index;
             runtime_location.proxy_buffering = location.proxy.proxy_buffering;
             runtime_location.skip_headers = make_default_skip_headers();
             runtime_location.set_headers.reserve(location.proxy.set_headers.size());
 
-            for (const auto &header : location.proxy.set_headers) {
+            for (const auto &header: location.proxy.set_headers) {
                 ProxyHeaderRuntime runtime_header;
                 runtime_header.name = header.name;
                 runtime_header.lowercase_name = header.lowercase_name;
                 runtime_header.value = header.value;
                 runtime_header.name_hash = fiber::http::http_header_name_hash(runtime_header.lowercase_name);
                 runtime_location.host_header_overridden =
-                    runtime_location.host_header_overridden || runtime_header.lowercase_name == "host";
+                        runtime_location.host_header_overridden || runtime_header.lowercase_name == "host";
                 runtime_location.skip_headers.insert(runtime_header.lowercase_name, runtime_header.name_hash,
                                                      kSkipHeaderValue);
                 runtime_location.set_headers.push_back(std::move(runtime_header));
@@ -267,7 +259,8 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
 
             const std::uint32_t location_index = static_cast<std::uint32_t>(runtime_server.locations.size());
             try {
-                matcher_builder.add_route(runtime_location.matcher_pattern, LocationRoutePayload{.location_index = location_index});
+                matcher_builder.add_route(runtime_location.matcher_pattern,
+                                          LocationRoutePayload{.location_index = location_index});
             } catch (const RoutePatternError &error) {
                 return std::unexpected(make_error(location.proxy_pass.location, error.what()));
             }
@@ -280,13 +273,12 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
 
     std::unordered_map<std::string, config::SourceLocation> seen_listeners;
     seen_listeners.reserve(config.http.listens.size());
-    for (const auto &listen : config.http.listens) {
+    for (const auto &listen: config.http.listens) {
         auto key = listener_key(listen);
         auto [it, inserted] = seen_listeners.emplace(key, listen.location);
         if (!inserted) {
-            return std::unexpected(make_error(
-                listen.location,
-                "duplicate listen is not supported in lite-nginx runtime: " + key));
+            return std::unexpected(
+                    make_error(listen.location, "duplicate listen is not supported in lite-nginx runtime: " + key));
         }
 
         ListenerRuntime runtime_listener;
@@ -300,17 +292,15 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
 
         for (std::uint32_t server_index = 0; server_index < runtime.servers.size(); ++server_index) {
             const auto &server = runtime.servers[server_index];
-            for (const auto &name : server.server_names) {
+            for (const auto &name: server.server_names) {
                 runtime_listener.server_names.push_back({
-                    .name = name,
-                    .server_index = server_index,
+                        .name = name,
+                        .server_index = server_index,
                 });
             }
         }
         std::sort(runtime_listener.server_names.begin(), runtime_listener.server_names.end(),
-                  [](const ServerNameRuntime &left, const ServerNameRuntime &right) {
-                      return left.name < right.name;
-                  });
+                  [](const ServerNameRuntime &left, const ServerNameRuntime &right) { return left.name < right.name; });
 
         if (listen.tls) {
             const auto &default_server = config.http.servers.front();
@@ -318,16 +308,16 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
             runtime_listener.default_certificate_key = default_server.certificate_key;
 
             std::size_t identity_count = 0;
-            for (const auto &server : config.http.servers) {
+            for (const auto &server: config.http.servers) {
                 identity_count += server.server_names.size();
             }
             runtime_listener.tls_identities.reserve(identity_count);
-            for (const auto &server : config.http.servers) {
-                for (const auto &name : server.server_names) {
+            for (const auto &server: config.http.servers) {
+                for (const auto &name: server.server_names) {
                     runtime_listener.tls_identities.push_back({
-                        .server_name = name,
-                        .certificate = server.certificate,
-                        .certificate_key = server.certificate_key,
+                            .server_name = name,
+                            .certificate = server.certificate,
+                            .certificate_key = server.certificate_key,
                     });
                 }
             }

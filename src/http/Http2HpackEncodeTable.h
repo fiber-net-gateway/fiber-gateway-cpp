@@ -35,7 +35,8 @@ public:
 
     [[nodiscard]] ActivateResult activate(const Http2HpackEncodeCatalog::EntryView *entry) noexcept;
     [[nodiscard]] bool is_active(const Http2HpackEncodeCatalog::EntryView *entry) const noexcept;
-    [[nodiscard]] bool resolve_index(const Http2HpackEncodeCatalog::EntryView *entry, std::uint32_t &hpack_index) const noexcept;
+    [[nodiscard]] bool resolve_index(const Http2HpackEncodeCatalog::EntryView *entry,
+                                     std::uint32_t &hpack_index) const noexcept;
 
     [[nodiscard]] std::uint32_t current_dynamic_size() const noexcept { return current_dynamic_size_; }
     [[nodiscard]] std::uint32_t max_dynamic_table_size() const noexcept { return target_dynamic_table_size_; }

@@ -8,8 +8,8 @@
 #include <thread>
 
 #include "async/CoroutinePromiseBase.h"
-#include "async/Spawn.h"
 #include "async/Sleep.h"
+#include "async/Spawn.h"
 #include "event/EventLoopGroup.h"
 
 namespace {
@@ -29,37 +29,25 @@ DetachedTask run_sleep(std::promise<std::chrono::steady_clock::duration> *promis
 class ManualTask {
 public:
     struct promise_type : fiber::async::CoroutinePromiseBase {
-        ManualTask get_return_object() {
-            return ManualTask{handle_type::from_promise(*this)};
-        }
+        ManualTask get_return_object() { return ManualTask{handle_type::from_promise(*this)}; }
 
-        std::suspend_always initial_suspend() noexcept {
-            return {};
-        }
+        std::suspend_always initial_suspend() noexcept { return {}; }
 
-        std::suspend_always final_suspend() noexcept {
-            return {};
-        }
+        std::suspend_always final_suspend() noexcept { return {}; }
 
-        void return_void() noexcept {
-        }
+        void return_void() noexcept {}
 
-        void unhandled_exception() {
-            std::terminate();
-        }
+        void unhandled_exception() { std::terminate(); }
     };
 
     using handle_type = std::coroutine_handle<promise_type>;
 
-    explicit ManualTask(handle_type handle) : handle_(handle) {
-    }
+    explicit ManualTask(handle_type handle) : handle_(handle) {}
 
     ManualTask(const ManualTask &) = delete;
     ManualTask &operator=(const ManualTask &) = delete;
 
-    ManualTask(ManualTask &&other) noexcept : handle_(other.handle_) {
-        other.handle_ = nullptr;
-    }
+    ManualTask(ManualTask &&other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
 
     ManualTask &operator=(ManualTask &&other) noexcept {
         if (this == &other) {
@@ -89,8 +77,7 @@ private:
     handle_type handle_{};
 };
 
-ManualTask run_sleep_cancel(std::atomic<int> *hits,
-                            std::chrono::steady_clock::duration delay) {
+ManualTask run_sleep_cancel(std::atomic<int> *hits, std::chrono::steady_clock::duration delay) {
     co_await fiber::async::sleep(delay);
     hits->fetch_add(1, std::memory_order_relaxed);
     co_return;
@@ -104,9 +91,7 @@ TEST(SleepTest, ResumesAfterDelay) {
     auto future = promise.get_future();
 
     group.start();
-    fiber::async::spawn(group.at(0), [&promise]() {
-        return run_sleep(&promise, std::chrono::milliseconds(30));
-    });
+    fiber::async::spawn(group.at(0), [&promise]() { return run_sleep(&promise, std::chrono::milliseconds(30)); });
 
     if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
         group.stop();

@@ -49,15 +49,11 @@ VmResult from_js_result(const fiber::json::JsOpResult &result, std::string_view 
     return std::unexpected(map_error(result.error, op));
 }
 
-VmResult make_bool(bool value) {
-    return fiber::json::JsValue::make_boolean(value);
-}
+VmResult make_bool(bool value) { return fiber::json::JsValue::make_boolean(value); }
 
 } // namespace
 
-bool Compares::neg(const fiber::json::JsValue &value) {
-    return !logic(value);
-}
+bool Compares::neg(const fiber::json::JsValue &value) { return !logic(value); }
 
 bool Compares::logic(const fiber::json::JsValue &value) {
     fiber::json::JsOpResult result = fiber::json::js_unary_op(fiber::json::JsUnaryOp::LogicalNot, value);
@@ -100,8 +96,8 @@ VmResult Compares::gte(const fiber::json::JsValue &a, const fiber::json::JsValue
 }
 
 VmResult Compares::matches(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
-    (void)a;
-    (void)b;
+    (void) a;
+    (void) b;
     return make_bool(false);
 }
 

@@ -10,28 +10,16 @@ namespace fiber::script::ast {
 
 class Assign : public Expression {
 public:
-    Assign(std::int32_t start,
-           std::int32_t end,
-           std::unique_ptr<MaybeLValue> left,
-           std::unique_ptr<Expression> right)
-        : Expression(start, end), left_(std::move(left)), right_(std::move(right)) {
-    }
+    Assign(std::int32_t start, std::int32_t end, std::unique_ptr<MaybeLValue> left, std::unique_ptr<Expression> right) :
+        Expression(start, end), left_(std::move(left)), right_(std::move(right)) {}
 
-    const MaybeLValue *left() const {
-        return left_.get();
-    }
+    const MaybeLValue *left() const { return left_.get(); }
 
-    const Expression *right() const {
-        return right_.get();
-    }
+    const Expression *right() const { return right_.get(); }
 
-    std::unique_ptr<MaybeLValue> take_left() {
-        return std::move(left_);
-    }
+    std::unique_ptr<MaybeLValue> take_left() { return std::move(left_); }
 
-    std::unique_ptr<Expression> take_right() {
-        return std::move(right_);
-    }
+    std::unique_ptr<Expression> take_right() { return std::move(right_); }
 
 private:
     std::unique_ptr<MaybeLValue> left_;

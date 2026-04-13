@@ -24,22 +24,17 @@ std::size_t next_power_of_two(std::size_t value) noexcept {
     return out;
 }
 
-std::size_t align_up(std::size_t value, std::size_t align) noexcept {
-    return (value + align - 1U) & ~(align - 1U);
-}
+std::size_t align_up(std::size_t value, std::size_t align) noexcept { return (value + align - 1U) & ~(align - 1U); }
 
 bool has_deadline(std::chrono::steady_clock::time_point when) noexcept {
     return when.time_since_epoch() != std::chrono::steady_clock::duration::zero();
 }
 
-bool expired_at(std::chrono::steady_clock::time_point when,
-                std::chrono::steady_clock::time_point now) noexcept {
+bool expired_at(std::chrono::steady_clock::time_point when, std::chrono::steady_clock::time_point now) noexcept {
     return has_deadline(when) && when <= now;
 }
 
-void reset_address_view(NameSnapshot::AddressView &view) noexcept {
-    view = {};
-}
+void reset_address_view(NameSnapshot::AddressView &view) noexcept { view = {}; }
 
 } // namespace
 
@@ -96,9 +91,7 @@ bool NameSnapshot::valid() const noexcept {
            (options_.max_aaaa_records == 0 || aaaa_storage_ != nullptr);
 }
 
-common::IoErr NameSnapshot::assign_a(const net::IpAddress *records,
-                                     std::uint16_t count,
-                                     bool negative,
+common::IoErr NameSnapshot::assign_a(const net::IpAddress *records, std::uint16_t count, bool negative,
                                      std::chrono::steady_clock::time_point expire_at) noexcept {
     if (!negative && (records == nullptr || count == 0)) {
         return common::IoErr::Invalid;
@@ -118,9 +111,7 @@ common::IoErr NameSnapshot::assign_a(const net::IpAddress *records,
     return common::IoErr::None;
 }
 
-common::IoErr NameSnapshot::assign_aaaa(const net::IpAddress *records,
-                                        std::uint16_t count,
-                                        bool negative,
+common::IoErr NameSnapshot::assign_aaaa(const net::IpAddress *records, std::uint16_t count, bool negative,
                                         std::chrono::steady_clock::time_point expire_at) noexcept {
     if (!negative && (records == nullptr || count == 0)) {
         return common::IoErr::Invalid;
@@ -218,24 +209,18 @@ void DnsCache::release() noexcept {
     access_clock_ = 0;
 }
 
-std::size_t DnsCache::entry_count() const noexcept {
-    return entry_count_;
-}
+std::size_t DnsCache::entry_count() const noexcept { return entry_count_; }
 
-std::size_t DnsCache::bytes_used() const noexcept {
-    return bytes_used_;
-}
+std::size_t DnsCache::bytes_used() const noexcept { return bytes_used_; }
 
-common::IoErr DnsCache::normalize_name(std::string_view input,
-                                       char *dst,
-                                       std::size_t cap,
+common::IoErr DnsCache::normalize_name(std::string_view input, char *dst, std::size_t cap,
                                        std::string_view &out) const noexcept {
     return dns::normalize_name(input, dst, cap, out);
 }
 
 std::uint64_t DnsCache::hash_key(std::string_view name, std::uint16_t qclass) const noexcept {
     std::uint64_t hash = 1469598103934665603ULL;
-    for (unsigned char ch : name) {
+    for (unsigned char ch: name) {
         hash ^= static_cast<std::uint64_t>(ch);
         hash *= 1099511628211ULL;
     }
@@ -267,8 +252,7 @@ std::string_view DnsCache::cname_target(const NameEntry &entry) const noexcept {
     return std::string_view(entry.blob + entry.cname.blob_offset, entry.cname.target_len);
 }
 
-std::uint32_t DnsCache::find_entry_index(std::string_view name,
-                                         std::uint16_t qclass,
+std::uint32_t DnsCache::find_entry_index(std::string_view name, std::uint16_t qclass,
                                          std::uint64_t hash) const noexcept {
     if (!buckets_ || bucket_count_ == 0) {
         return kInvalidIndex;
@@ -291,8 +275,7 @@ std::uint32_t DnsCache::find_entry_index(std::string_view name,
     return kInvalidIndex;
 }
 
-std::uint32_t DnsCache::find_insert_bucket(std::string_view name,
-                                           std::uint16_t qclass,
+std::uint32_t DnsCache::find_insert_bucket(std::string_view name, std::uint16_t qclass,
                                            std::uint64_t hash) const noexcept {
     std::size_t mask = bucket_count_ - 1U;
     std::size_t bucket = static_cast<std::size_t>(hash) & mask;
@@ -317,13 +300,9 @@ std::uint32_t DnsCache::find_insert_bucket(std::string_view name,
     return tombstone_bucket;
 }
 
-void DnsCache::clear_address_slot(AddressSlot &slot) noexcept {
-    slot = {};
-}
+void DnsCache::clear_address_slot(AddressSlot &slot) noexcept { slot = {}; }
 
-void DnsCache::clear_cname_slot(CnameSlot &slot) noexcept {
-    slot = {};
-}
+void DnsCache::clear_cname_slot(CnameSlot &slot) noexcept { slot = {}; }
 
 void DnsCache::cleanup_entry(NameEntry &entry, std::chrono::steady_clock::time_point now) noexcept {
     if (!entry.occupied) {
@@ -411,9 +390,7 @@ void DnsCache::erase_entry(std::uint32_t index) noexcept {
     recycle_entry(index);
 }
 
-void DnsCache::touch_entry(NameEntry &entry) noexcept {
-    entry.approx_last_access = ++access_clock_;
-}
+void DnsCache::touch_entry(NameEntry &entry) noexcept { entry.approx_last_access = ++access_clock_; }
 
 std::uint32_t DnsCache::select_eviction_candidate(std::uint32_t protected_index) noexcept {
     if (entry_count_ == 0) {
@@ -453,10 +430,8 @@ std::uint32_t DnsCache::select_eviction_candidate(std::uint32_t protected_index)
     return best;
 }
 
-common::IoErr DnsCache::ensure_capacity(std::uint32_t protected_index,
-                                        std::size_t old_blob_size,
-                                        std::size_t new_blob_size,
-                                        bool need_new_entry) noexcept {
+common::IoErr DnsCache::ensure_capacity(std::uint32_t protected_index, std::size_t old_blob_size,
+                                        std::size_t new_blob_size, bool need_new_entry) noexcept {
     if (new_blob_size > options_.max_bytes) {
         return common::IoErr::NoMem;
     }
@@ -476,9 +451,7 @@ common::IoErr DnsCache::ensure_capacity(std::uint32_t protected_index,
     }
 }
 
-common::IoErr DnsCache::store_entry_state(std::uint32_t index,
-                                          const EntryState &state,
-                                          bool is_new) noexcept {
+common::IoErr DnsCache::store_entry_state(std::uint32_t index, const EntryState &state, bool is_new) noexcept {
     if (state.owner.empty()) {
         if (!is_new) {
             erase_entry(index);
@@ -554,21 +527,19 @@ common::IoErr DnsCache::store_entry_state(std::uint32_t index,
     entry.aaaa.count = state.aaaa.state == SlotState::Positive ? state.aaaa.count : 0;
     entry.aaaa.blob_offset = state.aaaa.state == SlotState::Positive ? aaaa_offset : 0;
     entry.aaaa.expire_at =
-        state.aaaa.state != SlotState::Empty ? state.aaaa.expire_at : std::chrono::steady_clock::time_point{};
+            state.aaaa.state != SlotState::Empty ? state.aaaa.expire_at : std::chrono::steady_clock::time_point{};
 
     entry.cname.present = state.cname.present;
     entry.cname.target_len = state.cname.present ? static_cast<std::uint16_t>(state.cname.target.size()) : 0;
     entry.cname.blob_offset = state.cname.present ? cname_offset : 0;
     entry.cname.expire_at = state.cname.present ? state.cname.expire_at : std::chrono::steady_clock::time_point{};
 
-    entry.nxdomain_expire_at =
-        state.has_nxdomain ? state.nxdomain_expire_at : std::chrono::steady_clock::time_point{};
+    entry.nxdomain_expire_at = state.has_nxdomain ? state.nxdomain_expire_at : std::chrono::steady_clock::time_point{};
     touch_entry(entry);
     return common::IoErr::None;
 }
 
-common::IoErr DnsCache::fill_snapshot(const NameEntry &entry,
-                                      std::chrono::steady_clock::time_point now,
+common::IoErr DnsCache::fill_snapshot(const NameEntry &entry, std::chrono::steady_clock::time_point now,
                                       NameSnapshot &out) const noexcept {
     common::IoErr err = common::IoErr::None;
     if (entry.a.state == SlotState::Positive && !expired_at(entry.a.expire_at, now)) {
@@ -607,10 +578,8 @@ common::IoErr DnsCache::fill_snapshot(const NameEntry &entry,
     return common::IoErr::None;
 }
 
-common::IoErr DnsCache::peek_name(std::string_view qname,
-                                  std::uint16_t qclass,
-                                  std::chrono::steady_clock::time_point now,
-                                  NameSnapshot &out) const noexcept {
+common::IoErr DnsCache::peek_name(std::string_view qname, std::uint16_t qclass,
+                                  std::chrono::steady_clock::time_point now, NameSnapshot &out) const noexcept {
     out.clear();
     if (!out.valid() || qclass == 0) {
         return common::IoErr::Invalid;
@@ -632,10 +601,8 @@ common::IoErr DnsCache::peek_name(std::string_view qname,
     return fill_snapshot(entries_[index], now, out);
 }
 
-common::IoErr DnsCache::lookup_name(std::string_view qname,
-                                    std::uint16_t qclass,
-                                    std::chrono::steady_clock::time_point now,
-                                    NameSnapshot &out) noexcept {
+common::IoErr DnsCache::lookup_name(std::string_view qname, std::uint16_t qclass,
+                                    std::chrono::steady_clock::time_point now, NameSnapshot &out) noexcept {
     out.clear();
     if (!out.valid() || qclass == 0) {
         return common::IoErr::Invalid;
@@ -688,11 +655,8 @@ common::IoErr DnsCache::note_name_access(std::string_view qname, std::uint16_t q
     return common::IoErr::None;
 }
 
-common::IoErr DnsCache::upsert_address(std::string_view qname,
-                                       std::uint16_t qclass,
-                                       const net::IpAddress *records,
-                                       std::uint16_t count,
-                                       std::chrono::steady_clock::time_point expire_at,
+common::IoErr DnsCache::upsert_address(std::string_view qname, std::uint16_t qclass, const net::IpAddress *records,
+                                       std::uint16_t count, std::chrono::steady_clock::time_point expire_at,
                                        RecordType type) noexcept {
     if (qclass == 0 || records == nullptr || count == 0 || !has_deadline(expire_at)) {
         return common::IoErr::Invalid;
@@ -767,25 +731,17 @@ common::IoErr DnsCache::upsert_address(std::string_view qname,
     return common::IoErr::None;
 }
 
-common::IoErr DnsCache::upsert_a(std::string_view qname,
-                                 std::uint16_t qclass,
-                                 const net::IpAddress *records,
-                                 std::uint16_t count,
-                                 std::chrono::steady_clock::time_point expire_at) noexcept {
+common::IoErr DnsCache::upsert_a(std::string_view qname, std::uint16_t qclass, const net::IpAddress *records,
+                                 std::uint16_t count, std::chrono::steady_clock::time_point expire_at) noexcept {
     return upsert_address(qname, qclass, records, count, expire_at, RecordType::A);
 }
 
-common::IoErr DnsCache::upsert_aaaa(std::string_view qname,
-                                    std::uint16_t qclass,
-                                    const net::IpAddress *records,
-                                    std::uint16_t count,
-                                    std::chrono::steady_clock::time_point expire_at) noexcept {
+common::IoErr DnsCache::upsert_aaaa(std::string_view qname, std::uint16_t qclass, const net::IpAddress *records,
+                                    std::uint16_t count, std::chrono::steady_clock::time_point expire_at) noexcept {
     return upsert_address(qname, qclass, records, count, expire_at, RecordType::AAAA);
 }
 
-common::IoErr DnsCache::upsert_cname(std::string_view qname,
-                                     std::uint16_t qclass,
-                                     std::string_view target,
+common::IoErr DnsCache::upsert_cname(std::string_view qname, std::uint16_t qclass, std::string_view target,
                                      std::chrono::steady_clock::time_point expire_at) noexcept {
     if (qclass == 0 || !has_deadline(expire_at)) {
         return common::IoErr::Invalid;
@@ -810,7 +766,8 @@ common::IoErr DnsCache::upsert_cname(std::string_view qname,
     if (index == kInvalidIndex) {
         index = allocate_entry();
         if (index == kInvalidIndex) {
-            common::IoErr cap_err = ensure_capacity(kInvalidIndex, 0, normalized.size() + normalized_target.size(), true);
+            common::IoErr cap_err =
+                    ensure_capacity(kInvalidIndex, 0, normalized.size() + normalized_target.size(), true);
             if (cap_err != common::IoErr::None) {
                 return cap_err;
             }
@@ -853,8 +810,7 @@ common::IoErr DnsCache::upsert_cname(std::string_view qname,
     return common::IoErr::None;
 }
 
-common::IoErr DnsCache::upsert_negative_nxdomain(std::string_view qname,
-                                                 std::uint16_t qclass,
+common::IoErr DnsCache::upsert_negative_nxdomain(std::string_view qname, std::uint16_t qclass,
                                                  std::chrono::steady_clock::time_point expire_at) noexcept {
     if (qclass == 0 || !has_deadline(expire_at)) {
         return common::IoErr::Invalid;
@@ -912,15 +868,12 @@ common::IoErr DnsCache::upsert_negative_nxdomain(std::string_view qname,
     return common::IoErr::None;
 }
 
-common::IoErr DnsCache::upsert_negative_nodata(std::string_view qname,
-                                               std::uint16_t qclass,
-                                               std::uint16_t qtype,
+common::IoErr DnsCache::upsert_negative_nodata(std::string_view qname, std::uint16_t qclass, std::uint16_t qtype,
                                                std::chrono::steady_clock::time_point expire_at) noexcept {
     if (qclass == 0 || !has_deadline(expire_at)) {
         return common::IoErr::Invalid;
     }
-    if (qtype != static_cast<std::uint16_t>(RecordType::A) &&
-        qtype != static_cast<std::uint16_t>(RecordType::AAAA)) {
+    if (qtype != static_cast<std::uint16_t>(RecordType::A) && qtype != static_cast<std::uint16_t>(RecordType::AAAA)) {
         return common::IoErr::NotSupported;
     }
 
@@ -1038,8 +991,7 @@ async::Task<std::size_t> SharedDnsCache::bytes_used() noexcept {
     co_return cache_.bytes_used();
 }
 
-async::Task<common::IoErr> SharedDnsCache::lookup_name(std::string_view qname,
-                                                       std::uint16_t qclass,
+async::Task<common::IoErr> SharedDnsCache::lookup_name(std::string_view qname, std::uint16_t qclass,
                                                        std::chrono::steady_clock::time_point now,
                                                        NameSnapshot &out) noexcept {
     common::IoErr err = common::IoErr::None;
@@ -1060,45 +1012,37 @@ async::Task<common::IoErr> SharedDnsCache::lookup_name(std::string_view qname,
     co_return err;
 }
 
-async::Task<common::IoErr> SharedDnsCache::upsert_a(std::string_view qname,
-                                                    std::uint16_t qclass,
-                                                    const net::IpAddress *records,
-                                                    std::uint16_t count,
+async::Task<common::IoErr> SharedDnsCache::upsert_a(std::string_view qname, std::uint16_t qclass,
+                                                    const net::IpAddress *records, std::uint16_t count,
                                                     std::chrono::steady_clock::time_point expire_at) noexcept {
     auto guard = co_await mutex_.lock();
     co_return cache_.upsert_a(qname, qclass, records, count, expire_at);
 }
 
-async::Task<common::IoErr> SharedDnsCache::upsert_aaaa(std::string_view qname,
-                                                       std::uint16_t qclass,
-                                                       const net::IpAddress *records,
-                                                       std::uint16_t count,
+async::Task<common::IoErr> SharedDnsCache::upsert_aaaa(std::string_view qname, std::uint16_t qclass,
+                                                       const net::IpAddress *records, std::uint16_t count,
                                                        std::chrono::steady_clock::time_point expire_at) noexcept {
     auto guard = co_await mutex_.lock();
     co_return cache_.upsert_aaaa(qname, qclass, records, count, expire_at);
 }
 
-async::Task<common::IoErr> SharedDnsCache::upsert_cname(std::string_view qname,
-                                                        std::uint16_t qclass,
+async::Task<common::IoErr> SharedDnsCache::upsert_cname(std::string_view qname, std::uint16_t qclass,
                                                         std::string_view target,
                                                         std::chrono::steady_clock::time_point expire_at) noexcept {
     auto guard = co_await mutex_.lock();
     co_return cache_.upsert_cname(qname, qclass, target, expire_at);
 }
 
-async::Task<common::IoErr> SharedDnsCache::upsert_negative_nxdomain(
-    std::string_view qname,
-    std::uint16_t qclass,
-    std::chrono::steady_clock::time_point expire_at) noexcept {
+async::Task<common::IoErr>
+SharedDnsCache::upsert_negative_nxdomain(std::string_view qname, std::uint16_t qclass,
+                                         std::chrono::steady_clock::time_point expire_at) noexcept {
     auto guard = co_await mutex_.lock();
     co_return cache_.upsert_negative_nxdomain(qname, qclass, expire_at);
 }
 
-async::Task<common::IoErr> SharedDnsCache::upsert_negative_nodata(
-    std::string_view qname,
-    std::uint16_t qclass,
-    std::uint16_t qtype,
-    std::chrono::steady_clock::time_point expire_at) noexcept {
+async::Task<common::IoErr>
+SharedDnsCache::upsert_negative_nodata(std::string_view qname, std::uint16_t qclass, std::uint16_t qtype,
+                                       std::chrono::steady_clock::time_point expire_at) noexcept {
     auto guard = co_await mutex_.lock();
     co_return cache_.upsert_negative_nodata(qname, qclass, qtype, expire_at);
 }

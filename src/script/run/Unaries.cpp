@@ -70,7 +70,7 @@ VmResult Unaries::minus(const fiber::json::JsValue &value) {
 }
 
 VmResult Unaries::typeof_op(const fiber::json::JsValue &value, ScriptRuntime &runtime) {
-    (void)runtime;
+    (void) runtime;
     switch (fiber::json::js_value_type(value)) {
         case fiber::json::JsNodeType::Undefined:
             return make_typeof_value("undefined");
@@ -102,12 +102,16 @@ VmResult Unaries::iterate(const fiber::json::JsValue &value, ScriptRuntime &runt
     fiber::json::GcIterator *iter = nullptr;
     iter = runtime.alloc_with_gc(fiber::json::gc_estimate_iterator_bytes(), [&]() {
         if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::Array) {
-            return fiber::json::gc_new_array_iterator(heap, fiber::json::js_value_heap_ptr<fiber::json::GcArray>(const_cast<fiber::json::JsValue &>(value)),
-                                                      fiber::json::GcIteratorMode::Values);
+            return fiber::json::gc_new_array_iterator(
+                    heap,
+                    fiber::json::js_value_heap_ptr<fiber::json::GcArray>(const_cast<fiber::json::JsValue &>(value)),
+                    fiber::json::GcIteratorMode::Values);
         }
         if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::Object) {
-            return fiber::json::gc_new_object_iterator(heap, fiber::json::js_value_heap_ptr<fiber::json::GcObject>(const_cast<fiber::json::JsValue &>(value)),
-                                                       fiber::json::GcIteratorMode::Values);
+            return fiber::json::gc_new_object_iterator(
+                    heap,
+                    fiber::json::js_value_heap_ptr<fiber::json::GcObject>(const_cast<fiber::json::JsValue &>(value)),
+                    fiber::json::GcIteratorMode::Values);
         }
         return fiber::json::gc_new_array_iterator(heap, nullptr, fiber::json::GcIteratorMode::Values);
     });

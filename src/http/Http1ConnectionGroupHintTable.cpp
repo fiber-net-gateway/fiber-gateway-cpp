@@ -15,8 +15,8 @@ constexpr std::uint64_t kGenerationMask = 0xffffffULL;
 } // namespace
 
 void Http1ConnectionGroupHintTable::clear() noexcept {
-    for (auto &set : sets_) {
-        for (auto &slot : set.slots) {
+    for (auto &set: sets_) {
+        for (auto &slot: set.slots) {
             slot.word.store(0, std::memory_order_release);
         }
     }
@@ -80,7 +80,7 @@ Http1ConnectionGroupHintTable::probe(const Http1ConnectionGroupKey &key) const n
     const Set &set = sets_[set_index(hash)];
 
     std::uint8_t best_count = 0;
-    for (const auto &slot : set.slots) {
+    for (const auto &slot: set.slots) {
         const std::uint64_t word = slot.word.load(std::memory_order_acquire);
         const std::uint8_t count = unpack_count(word);
         if (count == 0 || unpack_fp(word) != fp) {
@@ -99,11 +99,9 @@ std::uint32_t Http1ConnectionGroupHintTable::fingerprint(std::uint64_t hash) noe
     return static_cast<std::uint32_t>(hash ^ (hash >> 32U));
 }
 
-std::uint64_t Http1ConnectionGroupHintTable::pack(std::uint32_t fp,
-                                                  std::uint8_t count,
+std::uint64_t Http1ConnectionGroupHintTable::pack(std::uint32_t fp, std::uint8_t count,
                                                   std::uint32_t generation) noexcept {
-    return static_cast<std::uint64_t>(fp) |
-           (static_cast<std::uint64_t>(count) << kCountShift) |
+    return static_cast<std::uint64_t>(fp) | (static_cast<std::uint64_t>(count) << kCountShift) |
            ((static_cast<std::uint64_t>(generation) & kGenerationMask) << kGenerationShift);
 }
 

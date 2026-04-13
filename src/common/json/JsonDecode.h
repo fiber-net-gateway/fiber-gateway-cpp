@@ -30,9 +30,7 @@ struct DecodedString {
         u16.clear();
     }
 
-    [[nodiscard]] std::size_t size() const {
-        return is_byte ? bytes.size() : u16.size();
-    }
+    [[nodiscard]] std::size_t size() const { return is_byte ? bytes.size() : u16.size(); }
 };
 
 class Parser {

@@ -7,20 +7,12 @@
 
 namespace fiber::http {
 
-Http1ConnectionPoolCore::Lease::Lease(Http1ConnectionPoolCore &pool,
-                                      Http1ConnectionPoolEntry *entry,
-                                      const Http1ConnectionGroupKey &key,
-                                      bool hit) noexcept
-    : pool_(&pool),
-      entry_(entry),
-      key_(key),
-      hit_(hit) {}
+Http1ConnectionPoolCore::Lease::Lease(Http1ConnectionPoolCore &pool, Http1ConnectionPoolEntry *entry,
+                                      const Http1ConnectionGroupKey &key, bool hit) noexcept :
+    pool_(&pool), entry_(entry), key_(key), hit_(hit) {}
 
-Http1ConnectionPoolCore::Lease::Lease(Lease &&other) noexcept
-    : pool_(other.pool_),
-      entry_(other.entry_),
-      key_(std::move(other.key_)),
-      hit_(other.hit_) {
+Http1ConnectionPoolCore::Lease::Lease(Lease &&other) noexcept :
+    pool_(other.pool_), entry_(other.entry_), key_(std::move(other.key_)), hit_(other.hit_) {
     other.pool_ = nullptr;
     other.entry_ = nullptr;
     other.key_.reset();
@@ -57,8 +49,8 @@ const Http1ConnectionGroupKey &Http1ConnectionPoolCore::Lease::key() const noexc
     return *key_;
 }
 
-common::IoResult<Http1ClientConnection *> Http1ConnectionPoolCore::Lease::emplace_connection(
-    Http1ClientConnectionOptions options) noexcept {
+common::IoResult<Http1ClientConnection *>
+Http1ConnectionPoolCore::Lease::emplace_connection(Http1ClientConnectionOptions options) noexcept {
     if (!pool_ || !key_.has_value()) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -104,28 +96,24 @@ Http1ConnectionPoolCore::Options Http1ConnectionPoolCore::normalize_options(Opti
     return options;
 }
 
-Http1ConnectionPoolCore::Http1ConnectionPoolCore(event::EventLoop &loop, Options options) noexcept
-    : loop_(&loop),
-      options_(normalize_options(options)) {}
+Http1ConnectionPoolCore::Http1ConnectionPoolCore(event::EventLoop &loop, Options options) noexcept :
+    loop_(&loop), options_(normalize_options(options)) {}
 
-Http1ConnectionPoolCore::Http1ConnectionPoolCore(event::EventLoop &loop) noexcept
-    : Http1ConnectionPoolCore(loop, Options{}) {}
+Http1ConnectionPoolCore::Http1ConnectionPoolCore(event::EventLoop &loop) noexcept :
+    Http1ConnectionPoolCore(loop, Options{}) {}
 
 Http1ConnectionPoolCore::~Http1ConnectionPoolCore() {
     clear();
     destroy_free_lists();
 }
 
-bool Http1ConnectionPoolCore::shutdown_requested() const noexcept {
-    return shutdown_effective();
-}
+bool Http1ConnectionPoolCore::shutdown_requested() const noexcept { return shutdown_effective(); }
 
 bool Http1ConnectionPoolCore::shutdown_effective() const noexcept {
     if (shutdown_) {
         return true;
     }
-    return external_shutdown_flag_ != nullptr &&
-           external_shutdown_flag_->load(std::memory_order_acquire);
+    return external_shutdown_flag_ != nullptr && external_shutdown_flag_->load(std::memory_order_acquire);
 }
 
 bool Http1ConnectionPoolCore::init() noexcept { return bucket_index_.init(options_.initial_group_capacity); }
@@ -291,8 +279,7 @@ void Http1ConnectionPoolCore::destroy_free_lists() noexcept {
     }
 }
 
-void Http1ConnectionPoolCore::park_entry(Http1ConnectionPoolEntry &entry,
-                                         const Http1ConnectionGroupKey &key) noexcept {
+void Http1ConnectionPoolCore::park_entry(Http1ConnectionPoolEntry &entry, const Http1ConnectionGroupKey &key) noexcept {
     if (!entry.has_connection()) {
         recycle_entry(&entry);
         return;
@@ -304,7 +291,8 @@ void Http1ConnectionPoolCore::park_entry(Http1ConnectionPoolEntry &entry,
 
     Http1ClientConnection *conn = entry.connection();
     FIBER_ASSERT(conn != nullptr);
-    if (options_.max_idle_total == 0 || options_.max_idle_per_group == 0 || &conn->loop() != loop_ || !conn->reusable()) {
+    if (options_.max_idle_total == 0 || options_.max_idle_per_group == 0 || &conn->loop() != loop_ ||
+        !conn->reusable()) {
         recycle_entry(&entry);
         return;
     }
@@ -360,9 +348,9 @@ void Http1ConnectionPoolCore::detach_idle_entry(Http1ConnectionPoolEntry &entry)
     Http1ConnectionPoolGroupBucket *bucket = entry.bucket_;
     FIBER_ASSERT(bucket != nullptr);
     FIBER_ASSERT(bucket->idle_entries_.back() != nullptr);
-    const Http1ConnectionGroupKey *key =
-        bucket->slot_index_ != Http1ConnectionPoolGroupBucket::kInvalidSlotIndex ? bucket_index_.key_at(bucket->slot_index_)
-                                                                                  : nullptr;
+    const Http1ConnectionGroupKey *key = bucket->slot_index_ != Http1ConnectionPoolGroupBucket::kInvalidSlotIndex
+                                                 ? bucket_index_.key_at(bucket->slot_index_)
+                                                 : nullptr;
 
     bucket->idle_entries_.erase(entry);
     global_idle_entries_.erase(entry);

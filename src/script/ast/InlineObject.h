@@ -29,13 +29,10 @@ public:
         std::unique_ptr<Expression> value;
     };
 
-    InlineObject(std::int32_t start, std::int32_t end, std::vector<Entry> entries)
-        : Expression(start, end), entries_(std::move(entries)) {
-    }
+    InlineObject(std::int32_t start, std::int32_t end, std::vector<Entry> entries) :
+        Expression(start, end), entries_(std::move(entries)) {}
 
-    const std::vector<Entry> &entries() const {
-        return entries_;
-    }
+    const std::vector<Entry> &entries() const { return entries_; }
 
 private:
     std::vector<Entry> entries_;

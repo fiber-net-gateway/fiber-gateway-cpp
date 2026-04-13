@@ -9,8 +9,8 @@
 
 #include "async/CoroutinePromiseBase.h"
 #include "async/Mutex.h"
-#include "async/Spawn.h"
 #include "async/Sleep.h"
+#include "async/Spawn.h"
 #include "event/EventLoopGroup.h"
 
 namespace {
@@ -20,37 +20,25 @@ using DetachedTask = fiber::async::DetachedTask;
 class ManualTask {
 public:
     struct promise_type : fiber::async::CoroutinePromiseBase {
-        ManualTask get_return_object() {
-            return ManualTask{handle_type::from_promise(*this)};
-        }
+        ManualTask get_return_object() { return ManualTask{handle_type::from_promise(*this)}; }
 
-        std::suspend_always initial_suspend() noexcept {
-            return {};
-        }
+        std::suspend_always initial_suspend() noexcept { return {}; }
 
-        std::suspend_always final_suspend() noexcept {
-            return {};
-        }
+        std::suspend_always final_suspend() noexcept { return {}; }
 
-        void return_void() noexcept {
-        }
+        void return_void() noexcept {}
 
-        void unhandled_exception() {
-            std::terminate();
-        }
+        void unhandled_exception() { std::terminate(); }
     };
 
     using handle_type = std::coroutine_handle<promise_type>;
 
-    explicit ManualTask(handle_type handle) : handle_(handle) {
-    }
+    explicit ManualTask(handle_type handle) : handle_(handle) {}
 
     ManualTask(const ManualTask &) = delete;
     ManualTask &operator=(const ManualTask &) = delete;
 
-    ManualTask(ManualTask &&other) noexcept : handle_(other.handle_) {
-        other.handle_ = nullptr;
-    }
+    ManualTask(ManualTask &&other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
 
     ManualTask &operator=(ManualTask &&other) noexcept {
         if (this == &other) {
@@ -80,8 +68,7 @@ private:
     handle_type handle_{};
 };
 
-DetachedTask hold_lock(fiber::async::Mutex *mutex,
-                       std::atomic<int> *state) {
+DetachedTask hold_lock(fiber::async::Mutex *mutex, std::atomic<int> *state) {
     auto guard = co_await mutex->lock();
     state->store(1, std::memory_order_relaxed);
     co_await fiber::async::sleep(std::chrono::milliseconds(30));
@@ -89,17 +76,14 @@ DetachedTask hold_lock(fiber::async::Mutex *mutex,
     co_return;
 }
 
-DetachedTask wait_lock(fiber::async::Mutex *mutex,
-                       std::atomic<int> *state,
-                       std::promise<int> *promise) {
+DetachedTask wait_lock(fiber::async::Mutex *mutex, std::atomic<int> *state, std::promise<int> *promise) {
     auto guard = co_await mutex->lock();
     promise->set_value(state->load(std::memory_order_relaxed));
     fiber::event::EventLoop::current().stop();
     co_return;
 }
 
-DetachedTask hold_and_finish(fiber::async::Mutex *mutex,
-                             std::promise<void> *done) {
+DetachedTask hold_and_finish(fiber::async::Mutex *mutex, std::promise<void> *done) {
     {
         auto guard = co_await mutex->lock();
         co_await fiber::async::sleep(std::chrono::milliseconds(30));
@@ -109,15 +93,13 @@ DetachedTask hold_and_finish(fiber::async::Mutex *mutex,
     co_return;
 }
 
-ManualTask wait_then_hit(fiber::async::Mutex *mutex,
-                         std::atomic<int> *hits) {
+ManualTask wait_then_hit(fiber::async::Mutex *mutex, std::atomic<int> *hits) {
     auto guard = co_await mutex->lock();
     hits->fetch_add(1, std::memory_order_relaxed);
     co_return;
 }
 
-DetachedTask hold_lock_with_signal(fiber::async::Mutex *mutex,
-                                   std::promise<void> *locked,
+DetachedTask hold_lock_with_signal(fiber::async::Mutex *mutex, std::promise<void> *locked,
                                    std::chrono::steady_clock::duration delay) {
     auto guard = co_await mutex->lock();
     locked->set_value();
@@ -125,8 +107,7 @@ DetachedTask hold_lock_with_signal(fiber::async::Mutex *mutex,
     co_return;
 }
 
-DetachedTask wait_lock_thread(fiber::async::Mutex *mutex,
-                              std::promise<std::thread::id> *resumed) {
+DetachedTask wait_lock_thread(fiber::async::Mutex *mutex, std::promise<std::thread::id> *resumed) {
     auto guard = co_await mutex->lock();
     resumed->set_value(std::this_thread::get_id());
     co_return;
@@ -229,9 +210,7 @@ TEST(MutexTest, ResumesOnWaiterLoopThread) {
         return;
     }
 
-    fiber::async::spawn(group.at(1), [&mutex, &resumed]() {
-        return wait_lock_thread(&mutex, &resumed);
-    });
+    fiber::async::spawn(group.at(1), [&mutex, &resumed]() { return wait_lock_thread(&mutex, &resumed); });
 
     if (resumed_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
         group.stop();

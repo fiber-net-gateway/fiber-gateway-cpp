@@ -3,9 +3,9 @@
 
 #include <cstdint>
 
+#include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
-#include "../common/IoError.h"
 #include "../event/EventLoop.h"
 #include "UnixAddress.h"
 #include "detail/AcceptFd.h"
@@ -27,8 +27,7 @@ struct UnixTraits {
     using ListenOptions = fiber::net::UnixListenOptions;
     using AcceptResult = fiber::net::UnixAcceptResult;
 
-    static fiber::common::IoResult<int> bind(const Address &addr,
-                                             const ListenOptions &options);
+    static fiber::common::IoResult<int> bind(const Address &addr, const ListenOptions &options);
     static fiber::common::IoErr accept_once(int fd, AcceptResult &out);
 };
 
@@ -39,8 +38,7 @@ public:
     explicit UnixListener(fiber::event::EventLoop &loop);
     ~UnixListener();
 
-    fiber::common::IoResult<void> bind(const UnixAddress &addr,
-                                       const UnixListenOptions &options);
+    fiber::common::IoResult<void> bind(const UnixAddress &addr, const UnixListenOptions &options);
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] int fd() const noexcept;
     void close();

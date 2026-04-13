@@ -20,14 +20,12 @@ constexpr std::uint8_t kFlagPriority = 0x20;
 } // namespace
 
 const Http2HpackEncoder::OutputOps Http2HeadersFrameEncoder::kOutputOps{
-    &Http2HeadersFrameEncoder::acquire_output,
-    &Http2HeadersFrameEncoder::commit_output,
+        &Http2HeadersFrameEncoder::acquire_output,
+        &Http2HeadersFrameEncoder::commit_output,
 };
 
 Http2HeadersFrameEncoder::Http2HeadersFrameEncoder(Http2HpackEncoder &encoder, Options options) noexcept :
-    encoder_(encoder),
-    options_(options) {
-}
+    encoder_(encoder), options_(options) {}
 
 Http2HeadersFrameEncoder::~Http2HeadersFrameEncoder() {
     if (begun_) {
@@ -174,8 +172,7 @@ common::IoErr Http2HeadersFrameEncoder::append_payload_buf(std::uint32_t payload
         return err;
     }
 
-    const std::size_t capacity = static_cast<std::size_t>(payload_cap) +
-                                 (reserve_frame_header ? kFrameHeaderSize : 0U);
+    const std::size_t capacity = static_cast<std::size_t>(payload_cap) + (reserve_frame_header ? kFrameHeaderSize : 0U);
     if (target_ != nullptr) {
         const std::size_t min_capacity = reserve_frame_header ? kFrameHeaderSize + 1U : 1U;
         const std::size_t slot_capacity = std::min<std::size_t>(capacity, target_->slot_available());
@@ -260,8 +257,8 @@ common::IoErr Http2HeadersFrameEncoder::validate_options() const noexcept {
         return common::IoErr::Invalid;
     }
     const std::uint32_t first_cap = first_frame_buf_payload_cap();
-    const std::uint32_t reserved = (options_.pad_length != 0 ? 1U : 0U) + (options_.has_priority ? 5U : 0U) +
-                                   options_.pad_length;
+    const std::uint32_t reserved =
+            (options_.pad_length != 0 ? 1U : 0U) + (options_.has_priority ? 5U : 0U) + options_.pad_length;
     if (reserved > options_.max_frame_size || reserved > first_cap) {
         return common::IoErr::Invalid;
     }
@@ -290,9 +287,7 @@ std::uint32_t Http2HeadersFrameEncoder::first_frame_buf_payload_cap() const noex
     return std::min<std::uint32_t>(options_.max_frame_size, options_.first_frame_payload_cap);
 }
 
-std::uint32_t Http2HeadersFrameEncoder::next_buf_payload_cap() const noexcept {
-    return options_.max_frame_size;
-}
+std::uint32_t Http2HeadersFrameEncoder::next_buf_payload_cap() const noexcept { return options_.max_frame_size; }
 
 void Http2HeadersFrameEncoder::reset_state() noexcept {
     if (using_target_slot() && target_ != nullptr) {
@@ -358,8 +353,8 @@ std::size_t Http2HeadersFrameEncoder::current_writable_bytes() const noexcept {
     return current_buf_storage_.writable();
 }
 
-common::IoErr Http2HeadersFrameEncoder::acquire_output(void *ctx, std::size_t min_bytes,
-                                                       std::uint8_t *&dst, std::size_t &len) noexcept {
+common::IoErr Http2HeadersFrameEncoder::acquire_output(void *ctx, std::size_t min_bytes, std::uint8_t *&dst,
+                                                       std::size_t &len) noexcept {
     auto *self = static_cast<Http2HeadersFrameEncoder *>(ctx);
     FIBER_ASSERT(self != nullptr);
     std::size_t writable = self->current_hpack_writable();
@@ -376,7 +371,7 @@ common::IoErr Http2HeadersFrameEncoder::acquire_output(void *ctx, std::size_t mi
             }
         } else if ((!self->current_buf_storage_ && !self->using_target_slot()) || self->current_writable_bytes() == 0) {
             const std::uint32_t next_payload_cap =
-                static_cast<std::uint32_t>(std::min<std::size_t>(frame_remaining, self->next_buf_payload_cap()));
+                    static_cast<std::uint32_t>(std::min<std::size_t>(frame_remaining, self->next_buf_payload_cap()));
             common::IoErr err = self->append_payload_buf(next_payload_cap, false);
             if (err != common::IoErr::None) {
                 return err;

@@ -36,15 +36,7 @@ private:
 
     static constexpr std::size_t kClassCount = 7;
     static constexpr std::uint32_t kLargeClass = 0xFFFFFFFFu;
-    static constexpr std::size_t kClassSizes[kClassCount] = {
-        64,
-        128,
-        256,
-        512,
-        1024,
-        2048,
-        4096
-    };
+    static constexpr std::size_t kClassSizes[kClassCount] = {64, 128, 256, 512, 1024, 2048, 4096};
 
     static std::size_t select_class(std::size_t total) noexcept;
     static std::size_t class_size(std::size_t class_id) noexcept;

@@ -30,9 +30,7 @@ public:
         pool->deallocate(ptr);
     }
 
-    static void operator delete(void *ptr, std::size_t) noexcept {
-        operator delete(ptr);
-    }
+    static void operator delete(void *ptr, std::size_t) noexcept { operator delete(ptr); }
 };
 
 } // namespace fiber::async

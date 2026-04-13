@@ -14,7 +14,7 @@ struct IntrusiveListHook {
     [[nodiscard]] bool linked() const noexcept { return in_list; }
 };
 
-template <typename T, std::size_t Offset>
+template<typename T, std::size_t Offset>
 class IntrusiveList {
 public:
     [[nodiscard]] bool empty() const noexcept { return head_ == nullptr; }

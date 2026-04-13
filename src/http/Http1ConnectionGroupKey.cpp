@@ -40,19 +40,19 @@ bool ip_equal(const net::IpAddress &left, const net::IpAddress &right) noexcept 
     return left.scope_id() == right.scope_id() && left.v6_bytes() == right.v6_bytes();
 }
 
-std::uint64_t compute_name_hash(std::string_view host, std::uint16_t port, Http1ConnectionGroupKey::Scheme scheme) noexcept {
+std::uint64_t compute_name_hash(std::string_view host, std::uint16_t port,
+                                Http1ConnectionGroupKey::Scheme scheme) noexcept {
     std::uint64_t hash = kFnvOffsetBasis;
     hash_byte(hash, static_cast<std::uint8_t>(Http1ConnectionGroupKey::HostKind::Name));
     hash_byte(hash, static_cast<std::uint8_t>(scheme));
     hash_be16(hash, port);
-    for (char ch : host) {
+    for (char ch: host) {
         hash_byte(hash, ascii_to_lower(static_cast<unsigned char>(ch)));
     }
     return hash;
 }
 
-std::uint64_t compute_ip_hash(const net::IpAddress &ip,
-                              std::uint16_t port,
+std::uint64_t compute_ip_hash(const net::IpAddress &ip, std::uint16_t port,
                               Http1ConnectionGroupKey::Scheme scheme) noexcept {
     std::uint64_t hash = kFnvOffsetBasis;
     hash_byte(hash, static_cast<std::uint8_t>(Http1ConnectionGroupKey::HostKind::Ip));
@@ -60,12 +60,12 @@ std::uint64_t compute_ip_hash(const net::IpAddress &ip,
     hash_be16(hash, port);
     hash_byte(hash, static_cast<std::uint8_t>(ip.family()));
     if (ip.is_v4()) {
-        for (std::uint8_t byte : ip.v4_bytes()) {
+        for (std::uint8_t byte: ip.v4_bytes()) {
             hash_byte(hash, byte);
         }
         return hash;
     }
-    for (std::uint8_t byte : ip.v6_bytes()) {
+    for (std::uint8_t byte: ip.v6_bytes()) {
         hash_byte(hash, byte);
     }
     hash_be32(hash, ip.scope_id());
@@ -74,8 +74,7 @@ std::uint64_t compute_ip_hash(const net::IpAddress &ip,
 
 } // namespace
 
-std::optional<Http1ConnectionGroupKey> Http1ConnectionGroupKey::from_name(std::string_view host,
-                                                                          std::uint16_t port,
+std::optional<Http1ConnectionGroupKey> Http1ConnectionGroupKey::from_name(std::string_view host, std::uint16_t port,
                                                                           Scheme scheme) noexcept {
     if (host.empty() || host.size() > kMaxHostNameSize) {
         return std::nullopt;
@@ -93,8 +92,7 @@ std::optional<Http1ConnectionGroupKey> Http1ConnectionGroupKey::from_name(std::s
     return key;
 }
 
-Http1ConnectionGroupKey Http1ConnectionGroupKey::from_ip(net::IpAddress ip,
-                                                         std::uint16_t port,
+Http1ConnectionGroupKey Http1ConnectionGroupKey::from_ip(net::IpAddress ip, std::uint16_t port,
                                                          Scheme scheme) noexcept {
     Http1ConnectionGroupKey key;
     key.host_kind_ = HostKind::Ip;

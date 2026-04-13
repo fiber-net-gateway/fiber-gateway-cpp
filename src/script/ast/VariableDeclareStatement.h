@@ -3,30 +3,21 @@
 
 #include <memory>
 
-#include "Statement.h"
-#include "Identifier.h"
 #include "Expression.h"
+#include "Identifier.h"
+#include "Statement.h"
 
 namespace fiber::script::ast {
 
 class VariableDeclareStatement : public Statement {
 public:
-    VariableDeclareStatement(std::int32_t start,
-                             std::int32_t end,
-                             std::unique_ptr<Identifier> identifier,
-                             std::unique_ptr<Expression> initializer)
-        : Statement(start, end),
-          identifier_(std::move(identifier)),
-          initializer_(std::move(initializer)) {
-    }
+    VariableDeclareStatement(std::int32_t start, std::int32_t end, std::unique_ptr<Identifier> identifier,
+                             std::unique_ptr<Expression> initializer) :
+        Statement(start, end), identifier_(std::move(identifier)), initializer_(std::move(initializer)) {}
 
-    const Identifier *identifier() const {
-        return identifier_.get();
-    }
+    const Identifier *identifier() const { return identifier_.get(); }
 
-    const Expression *initializer() const {
-        return initializer_.get();
-    }
+    const Expression *initializer() const { return initializer_.get(); }
 
 private:
     std::unique_ptr<Identifier> identifier_;

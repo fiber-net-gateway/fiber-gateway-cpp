@@ -9,8 +9,8 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../common/mem/IoBuf.h"
-#include "HttpCommon.h"
 #include "Http2HpackEncoder.h"
+#include "HttpCommon.h"
 
 namespace fiber::http {
 
@@ -48,8 +48,7 @@ private:
     static const Http2HpackEncoder::OutputOps kOutputOps;
 
     [[nodiscard]] common::IoErr open_frame(bool first_frame) noexcept;
-    [[nodiscard]] common::IoErr append_payload_buf(std::uint32_t payload_cap,
-                                                   bool reserve_frame_header) noexcept;
+    [[nodiscard]] common::IoErr append_payload_buf(std::uint32_t payload_cap, bool reserve_frame_header) noexcept;
     [[nodiscard]] common::IoErr seal_current_frame(bool end_headers) noexcept;
     [[nodiscard]] common::IoErr validate_options() const noexcept;
     [[nodiscard]] std::size_t current_hpack_writable() const noexcept;
@@ -63,8 +62,8 @@ private:
     void reset_state() noexcept;
     void commit_to_output(std::size_t bytes) noexcept;
 
-    static common::IoErr acquire_output(void *ctx, std::size_t min_bytes,
-                                        std::uint8_t *&dst, std::size_t &len) noexcept;
+    static common::IoErr acquire_output(void *ctx, std::size_t min_bytes, std::uint8_t *&dst,
+                                        std::size_t &len) noexcept;
     static void commit_output(void *ctx, std::size_t written) noexcept;
 
     Http2HpackEncoder &encoder_;

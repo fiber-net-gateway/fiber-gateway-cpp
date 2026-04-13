@@ -46,8 +46,7 @@ public:
     [[nodiscard]] event::EventLoop &loop() const noexcept;
     [[nodiscard]] const net::SocketAddress &server() const noexcept;
 
-    async::Task<common::IoResult<std::size_t>> query_raw(const QuestionSpec &question,
-                                                         std::uint8_t *dst,
+    async::Task<common::IoResult<std::size_t>> query_raw(const QuestionSpec &question, std::uint8_t *dst,
                                                          std::size_t cap) noexcept;
 
 private:
@@ -102,13 +101,9 @@ private:
     void cancel_waiter(std::uint16_t slot_index, std::coroutine_handle<> handle) noexcept;
     [[nodiscard]] common::IoResult<std::size_t> wait_result(std::uint16_t slot_index) noexcept;
 
-    void complete_slot(std::uint16_t slot_index,
-                       common::IoErr err,
-                       std::size_t response_size,
+    void complete_slot(std::uint16_t slot_index, common::IoErr err, std::size_t response_size,
                        bool need_tcp_fallback) noexcept;
-    void handle_udp_packet(const std::uint8_t *packet,
-                           std::size_t packet_len,
-                           const net::SocketAddress &peer) noexcept;
+    void handle_udp_packet(const std::uint8_t *packet, std::size_t packet_len, const net::SocketAddress &peer) noexcept;
 
     Options options_{};
     event::EventLoop *loop_ = nullptr;

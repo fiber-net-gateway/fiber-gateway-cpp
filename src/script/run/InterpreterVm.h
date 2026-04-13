@@ -17,20 +17,11 @@ namespace fiber::script::run {
 
 class InterpreterVm final : public fiber::json::GcRootSet::RootProvider {
 public:
-    enum class VmState {
-        Init,
-        Running,
-        Suspend,
-        Success,
-        Error
-    };
+    enum class VmState { Init, Running, Suspend, Success, Error };
 
     using ResumeCallback = void (*)(void *context);
 
-    InterpreterVm(const ir::Compiled &compiled,
-                  const fiber::json::JsValue &root,
-                  void *attach,
-                  ScriptRuntime &runtime);
+    InterpreterVm(const ir::Compiled &compiled, const fiber::json::JsValue &root, void *attach, ScriptRuntime &runtime);
     ~InterpreterVm() override;
 
     VmState iterate(VmResult &out);
@@ -63,21 +54,13 @@ private:
     std::vector<fiber::json::JsValue> call_args_;
     VmError pending_error_{};
     bool has_error_ = false;
-    enum class PendingValueKind {
-        None,
-        Thrown,
-        Return
-    };
+    enum class PendingValueKind { None, Thrown, Return };
     PendingValueKind pending_value_kind_ = PendingValueKind::None;
     fiber::json::JsValue pending_value_ = fiber::json::JsValue::make_undefined();
     Library::HostCallResult async_result_{};
     bool async_pending_ = false;
     bool async_ready_ = false;
-    enum class AsyncResumeKind {
-        None,
-        PushResult,
-        ReplaceTop
-    };
+    enum class AsyncResumeKind { None, PushResult, ReplaceTop };
     AsyncResumeKind async_resume_kind_ = AsyncResumeKind::None;
     std::size_t async_resume_epc_ = 0;
     fiber::json::JsValue undefined_ = fiber::json::JsValue::make_undefined();
@@ -94,14 +77,9 @@ private:
     const fiber::json::JsValue *prepare_spread_call_args(std::size_t slot, std::uint32_t &argc);
     Library::HostCallFrame make_call_frame(const fiber::json::JsValue *args, std::uint32_t argc) const;
     VmError make_host_fault_error(const Library::HostFault &fault, std::size_t epc) const;
-    bool dispatch_call_site(const ir::Compiled::CallSite &site,
-                            AsyncResumeKind resume_kind,
-                            VmResult &out);
-    bool apply_call_result(const Library::HostCallResult &result,
-                           AsyncResumeKind resume_kind,
-                           std::size_t resume_epc,
-                           VmResult &out,
-                           bool from_async_completion);
+    bool dispatch_call_site(const ir::Compiled::CallSite &site, AsyncResumeKind resume_kind, VmResult &out);
+    bool apply_call_result(const Library::HostCallResult &result, AsyncResumeKind resume_kind, std::size_t resume_epc,
+                           VmResult &out, bool from_async_completion);
 
     bool catch_for_exception(std::size_t epc);
     int search_catch(std::size_t epc) const;

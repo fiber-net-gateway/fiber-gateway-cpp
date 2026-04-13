@@ -24,7 +24,7 @@ const fiber::http::Http2HpackEncodeCatalog &test_http2_encode_catalog() {
         EXPECT_TRUE(catalog.init({}));
         return true;
     }();
-    (void)initialized;
+    (void) initialized;
     return catalog;
 }
 
@@ -41,12 +41,12 @@ fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     return local.port();
 }
 
-DetachedTask run_hold_server(fiber::event::EventLoop *loop,
-                             std::promise<std::uint16_t> *port_promise,
+DetachedTask run_hold_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
                              std::atomic<bool> *stop_flag) {
     fiber::net::TcpListener listener(*loop);
     fiber::net::ListenOptions listen_options{};
-    auto bind_result = listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
+    auto bind_result =
+            listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
     if (!bind_result) {
         port_promise->set_value(0);
         co_return;
@@ -66,8 +66,7 @@ DetachedTask run_hold_server(fiber::event::EventLoop *loop,
     listener.close();
 }
 
-DetachedTask run_client_connect_and_shutdown(fiber::event::EventLoop *loop,
-                                             std::uint16_t port,
+DetachedTask run_client_connect_and_shutdown(fiber::event::EventLoop *loop, std::uint16_t port,
                                              std::atomic<bool> *stop_flag,
                                              std::promise<fiber::common::IoErr> *result_promise,
                                              std::promise<bool> *opened_promise) {
@@ -86,12 +85,14 @@ DetachedTask run_client_connect_and_shutdown(fiber::event::EventLoop *loop,
 
     fiber::mem::BufPool pool;
     fiber::http::ClientHttp2Exchange exchange = connection.open_exchange(pool);
-    auto send_result = co_await exchange.send_request_header({
-        .method = fiber::http::HttpMethod::Get,
-        .scheme = "http",
-        .authority = "127.0.0.1",
-        .path = "/",
-    }, true);
+    auto send_result = co_await exchange.send_request_header(
+            {
+                    .method = fiber::http::HttpMethod::Get,
+                    .scheme = "http",
+                    .authority = "127.0.0.1",
+                    .path = "/",
+            },
+            true);
     bool opened = send_result.has_value() && exchange.stream_id() != 0;
     opened_promise->set_value(opened);
     stop_flag->store(true, std::memory_order_release);

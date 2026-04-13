@@ -11,17 +11,11 @@ namespace fiber::http {
 struct Http2OutboundScheduler::Slab {
     explicit Slab(std::size_t cap) noexcept : capacity(cap) {}
 
-    [[nodiscard]] std::uint8_t *data() noexcept {
-        return reinterpret_cast<std::uint8_t *>(this + 1);
-    }
+    [[nodiscard]] std::uint8_t *data() noexcept { return reinterpret_cast<std::uint8_t *>(this + 1); }
 
-    [[nodiscard]] const std::uint8_t *data() const noexcept {
-        return reinterpret_cast<const std::uint8_t *>(this + 1);
-    }
+    [[nodiscard]] const std::uint8_t *data() const noexcept { return reinterpret_cast<const std::uint8_t *>(this + 1); }
 
-    [[nodiscard]] std::size_t writable_bytes() const noexcept {
-        return capacity - commit_pos;
-    }
+    [[nodiscard]] std::size_t writable_bytes() const noexcept { return capacity - commit_pos; }
 
     static Slab *allocate(std::size_t capacity) noexcept {
         void *mem = ::operator new(sizeof(Slab) + capacity, std::nothrow);
@@ -47,12 +41,9 @@ struct Http2OutboundScheduler::Slab {
 
 Http2OutboundScheduler::Http2OutboundScheduler(HttpTransport *transport, std::size_t slab_capacity,
                                                std::chrono::milliseconds write_timeout,
-                                               std::uint32_t peer_max_frame_size) noexcept
-    : transport_(transport),
-      write_timeout_(write_timeout),
-      slab_capacity_(slab_capacity),
-      peer_max_frame_size_(peer_max_frame_size) {
-}
+                                               std::uint32_t peer_max_frame_size) noexcept :
+    transport_(transport), write_timeout_(write_timeout), slab_capacity_(slab_capacity),
+    peer_max_frame_size_(peer_max_frame_size) {}
 
 Http2OutboundScheduler::~Http2OutboundScheduler() {
     FIBER_ASSERT(!send_loop_running_);
@@ -76,9 +67,7 @@ Http2OutboundScheduler::~Http2OutboundScheduler() {
     }
 }
 
-bool Http2OutboundEncodeTarget::empty() const noexcept {
-    return slot_used_ == 0 && tail_chain_.readable_bytes() == 0;
-}
+bool Http2OutboundEncodeTarget::empty() const noexcept { return slot_used_ == 0 && tail_chain_.readable_bytes() == 0; }
 
 std::size_t Http2OutboundEncodeTarget::total_bytes() const noexcept {
     return slot_used_ + tail_chain_.readable_bytes();
@@ -116,9 +105,7 @@ void Http2OutboundEncodeTarget::commit_slot(std::size_t bytes) noexcept {
     slot_reserved_ = 0;
 }
 
-void Http2OutboundEncodeTarget::rollback_slot() noexcept {
-    slot_reserved_ = 0;
-}
+void Http2OutboundEncodeTarget::rollback_slot() noexcept { slot_reserved_ = 0; }
 
 common::IoErr Http2OutboundEncodeTarget::append_copy(const void *src, std::size_t bytes) noexcept {
     if (!src || bytes == 0 || slot_reserved_ != 0) {
@@ -281,8 +268,7 @@ common::IoErr Http2OutboundScheduler::reserve_tail(std::size_t bytes, Reservatio
     return common::IoErr::None;
 }
 
-void Http2OutboundScheduler::rollback_reservation(const Reservation &) noexcept {
-}
+void Http2OutboundScheduler::rollback_reservation(const Reservation &) noexcept {}
 
 void Http2OutboundScheduler::commit_reservation(const Reservation &reservation) noexcept {
     FIBER_ASSERT(reservation.slab != nullptr);
@@ -314,7 +300,7 @@ void Http2OutboundScheduler::notify_waiter() noexcept {
 
     waiter_->resume_posted_ = true;
     waiter_->loop_->post<WaitForWorkAwaiter, &WaitForWorkAwaiter::notify_entry_, &WaitForWorkAwaiter::on_notify>(
-        *waiter_);
+            *waiter_);
 }
 
 bool Http2OutboundScheduler::should_wake_waiter() const noexcept {
@@ -749,8 +735,8 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
                     fail(common::IoErr::Invalid);
                     return false;
                 }
-                hook.next_kind_ =
-                    result.next_kind != Http2OutboundNextKind::None ? result.next_kind : Http2OutboundNextKind::Data;
+                hook.next_kind_ = result.next_kind != Http2OutboundNextKind::None ? result.next_kind
+                                                                                  : Http2OutboundNextKind::Data;
                 hook.queue_state_ = static_cast<std::uint8_t>(QueueState::None);
                 enqueue_waiting_conn_window(*stream);
                 return false;
@@ -813,8 +799,7 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
             }
             common::IoResult<size_t> result;
             if (!inflight_stream_write_.slot_done()) {
-                const std::size_t remaining =
-                    inflight_stream_write_.slot_size - inflight_stream_write_.slot_written;
+                const std::size_t remaining = inflight_stream_write_.slot_size - inflight_stream_write_.slot_written;
                 result = co_await transport_->write(inflight_stream_write_.slot + inflight_stream_write_.slot_written,
                                                     remaining, write_timeout_);
                 if (result) {
@@ -897,8 +882,6 @@ void Http2OutboundScheduler::close() noexcept {
     notify_waiter();
 }
 
-void Http2OutboundScheduler::abort(common::IoErr reason) noexcept {
-    fail(reason);
-}
+void Http2OutboundScheduler::abort(common::IoErr reason) noexcept { fail(reason); }
 
 } // namespace fiber::http

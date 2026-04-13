@@ -57,21 +57,14 @@ public:
     [[nodiscard]] bool init() noexcept { return init(Options{}); }
     [[nodiscard]] bool init(Options options) noexcept;
     void release() noexcept;
-    [[nodiscard]] common::IoResult<MessageView> parse(const std::uint8_t *data,
-                                                      std::size_t len) noexcept;
+    [[nodiscard]] common::IoResult<MessageView> parse(const std::uint8_t *data, std::size_t len) noexcept;
 
 private:
-    [[nodiscard]] common::IoResult<std::string_view> decode_name_into(const std::uint8_t *data,
-                                                                      std::size_t len,
-                                                                      std::size_t offset,
-                                                                      std::size_t &next_offset) noexcept;
-    [[nodiscard]] common::IoErr parse_question(const std::uint8_t *data,
-                                               std::size_t len,
-                                               std::size_t &offset,
+    [[nodiscard]] common::IoResult<std::string_view>
+    decode_name_into(const std::uint8_t *data, std::size_t len, std::size_t offset, std::size_t &next_offset) noexcept;
+    [[nodiscard]] common::IoErr parse_question(const std::uint8_t *data, std::size_t len, std::size_t &offset,
                                                Question &out) noexcept;
-    [[nodiscard]] common::IoErr parse_record(const std::uint8_t *data,
-                                             std::size_t len,
-                                             std::size_t &offset,
+    [[nodiscard]] common::IoErr parse_record(const std::uint8_t *data, std::size_t len, std::size_t &offset,
                                              ResourceRecord &out) noexcept;
     void reset_parse_state(const std::uint8_t *data, std::size_t len) noexcept;
 
@@ -83,10 +76,8 @@ private:
     MessageView message_{};
 };
 
-[[nodiscard]] common::IoResult<std::size_t> encode_query(const QueryOptions &options,
-                                                         const QuestionSpec &question,
-                                                         std::uint8_t *dst,
-                                                         std::size_t cap) noexcept;
+[[nodiscard]] common::IoResult<std::size_t> encode_query(const QueryOptions &options, const QuestionSpec &question,
+                                                         std::uint8_t *dst, std::size_t cap) noexcept;
 
 } // namespace fiber::dns
 

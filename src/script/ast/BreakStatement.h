@@ -7,9 +7,7 @@ namespace fiber::script::ast {
 
 class BreakStatement : public Statement {
 public:
-    BreakStatement(std::int32_t start, std::int32_t end)
-        : Statement(start, end) {
-    }
+    BreakStatement(std::int32_t start, std::int32_t end) : Statement(start, end) {}
 };
 
 } // namespace fiber::script::ast

@@ -1,8 +1,8 @@
 #ifndef FIBER_SCRIPT_IR_COMPILER_H
 #define FIBER_SCRIPT_IR_COMPILER_H
 
-#include "Compiled.h"
 #include "../ast/Node.h"
+#include "Compiled.h"
 
 namespace fiber::script::ir {
 

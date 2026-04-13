@@ -11,9 +11,7 @@ constexpr std::size_t kMaxWireNameLen = 255;
 
 } // namespace
 
-common::IoResult<std::size_t> encode_name(std::string_view name,
-                                          std::uint8_t *dst,
-                                          std::size_t cap) noexcept {
+common::IoResult<std::size_t> encode_name(std::string_view name, std::uint8_t *dst, std::size_t cap) noexcept {
     if ((dst == nullptr && cap != 0) || name.size() > kMaxWireNameLen) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -61,10 +59,7 @@ common::IoResult<std::size_t> encode_name(std::string_view name,
     return write_pos;
 }
 
-common::IoErr normalize_name(std::string_view input,
-                             char *dst,
-                             std::size_t cap,
-                             std::string_view &out) noexcept {
+common::IoErr normalize_name(std::string_view input, char *dst, std::size_t cap, std::string_view &out) noexcept {
     if (dst == nullptr || cap == 0 || input.empty()) {
         return common::IoErr::Invalid;
     }
@@ -96,11 +91,8 @@ common::IoErr normalize_name(std::string_view input,
     return common::IoErr::None;
 }
 
-common::IoResult<DecodedName> decode_name(const std::uint8_t *packet,
-                                          std::size_t packet_len,
-                                          std::size_t offset,
-                                          char *storage,
-                                          std::size_t storage_cap) noexcept {
+common::IoResult<DecodedName> decode_name(const std::uint8_t *packet, std::size_t packet_len, std::size_t offset,
+                                          char *storage, std::size_t storage_cap) noexcept {
     if (packet == nullptr || offset >= packet_len || (storage == nullptr && storage_cap != 0)) {
         return std::unexpected(common::IoErr::Invalid);
     }

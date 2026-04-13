@@ -68,7 +68,7 @@ public:
         }
         if (has_timer()) {
             loop_->post_at<BodyReadAwaiter, &BodyReadAwaiter::timer_entry_, &BodyReadAwaiter::on_timeout>(
-                loop_->now() + timeout_, *this);
+                    loop_->now() + timeout_, *this);
         }
         return true;
     }
@@ -131,9 +131,7 @@ private:
         }
     }
 
-    bool has_timer() const noexcept {
-        return timeout_.count() > 0 && timeout_ != std::chrono::milliseconds::max();
-    }
+    bool has_timer() const noexcept { return timeout_.count() > 0 && timeout_ != std::chrono::milliseconds::max(); }
 
     Http2BodyRecvState *state_ = nullptr;
     std::chrono::milliseconds timeout_{};
@@ -176,7 +174,7 @@ void Http2BodyRecvState::abort(common::IoErr reason) noexcept {
 }
 
 fiber::async::Task<common::IoResult<BodyChunk>> Http2BodyRecvState::read_body(Http2Stream &stream,
-                                                                               std::size_t max_bytes) noexcept {
+                                                                              std::size_t max_bytes) noexcept {
     BodyChunk out{};
     if (max_bytes == 0) {
         if (queue_.readable_bytes() == 0 && input_closed_) {

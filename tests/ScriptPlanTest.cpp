@@ -55,13 +55,9 @@ bool value_to_number(const JsValue &value, double &out) {
     return false;
 }
 
-bool is_string_type(const JsValue &value) {
-    return js_value_type(value) == JsNodeType::String;
-}
+bool is_string_type(const JsValue &value) { return js_value_type(value) == JsNodeType::String; }
 
-bool is_binary_type(const JsValue &value) {
-    return js_value_type(value) == JsNodeType::Binary;
-}
+bool is_binary_type(const JsValue &value) { return js_value_type(value) == JsNodeType::Binary; }
 
 const JsValue *object_value(const JsValue &obj, std::string_view key) {
     if (js_value_type(obj) != JsNodeType::Object) {
@@ -119,9 +115,8 @@ const JsValue &array_value_or_default(const JsValue &arr, std::size_t index) {
 }
 
 JsValue make_heap_string(fiber::script::ScriptRuntime &runtime, std::string_view text) {
-    GcString *str = runtime.alloc_with_gc(text.size(), [&]() {
-        return fiber::json::gc_new_string(&runtime.heap(), text.data(), text.size());
-    });
+    GcString *str = runtime.alloc_with_gc(
+            text.size(), [&]() { return fiber::json::gc_new_string(&runtime.heap(), text.data(), text.size()); });
     if (!str) {
         return JsValue::make_undefined();
     }
@@ -157,7 +152,7 @@ public:
 class ReqReadBinaryFunc final : public fiber::script::Library::Function {
 public:
     FunctionResult call(fiber::script::ExecutionContext &context) override {
-        (void)context;
+        (void) context;
         static std::uint8_t data[] = {0x01, 0x02, 0x03};
         return JsValue::make_native_binary(data, sizeof(data));
     }
@@ -184,7 +179,7 @@ public:
 class RandRandomStub final : public fiber::script::Library::Function {
 public:
     FunctionResult call(fiber::script::ExecutionContext &context) override {
-        (void)context;
+        (void) context;
         return JsValue::make_integer(7);
     }
 };
@@ -192,7 +187,7 @@ public:
 class RandCanaryStub final : public fiber::script::Library::Function {
 public:
     FunctionResult call(fiber::script::ExecutionContext &context) override {
-        (void)context;
+        (void) context;
         return JsValue::make_integer(42);
     }
 };
@@ -200,7 +195,7 @@ public:
 class TimeFormatStub final : public fiber::script::Library::Function {
 public:
     FunctionResult call(fiber::script::ExecutionContext &context) override {
-        (void)context;
+        (void) context;
         JsValue value = make_heap_string(context.runtime(), "2023-11-14");
         if (js_value_type(value) == JsNodeType::Undefined) {
             static char msg[] = "out of memory";
@@ -229,11 +224,9 @@ private:
 
 class DemoServiceDirective final : public fiber::script::Library::DirectiveDef {
 public:
-    explicit DemoServiceDirective(fiber::script::Library::Function *create_user)
-        : create_user_(create_user) {}
+    explicit DemoServiceDirective(fiber::script::Library::Function *create_user) : create_user_(create_user) {}
 
-    fiber::script::Library::Function *find_func(std::string_view directive,
-                                                std::string_view function) override {
+    fiber::script::Library::Function *find_func(std::string_view directive, std::string_view function) override {
         if (directive == "demoService" && function == "createUser") {
             return create_user_;
         }
@@ -242,8 +235,8 @@ public:
 
     fiber::script::Library::AsyncFunction *find_async_func(std::string_view directive,
                                                            std::string_view function) override {
-        (void)directive;
-        (void)function;
+        (void) directive;
+        (void) function;
         return nullptr;
     }
 
@@ -253,13 +246,10 @@ private:
 
 class StubLibrary final : public fiber::script::Library {
 public:
-    explicit StubLibrary(fiber::script::Library &fallback)
-        : fallback_(fallback),
-          url_parse_query_("URL.parseQuery"),
-          url_build_query_("URL.buildQuery"),
-          url_encode_component_("URL.encodeComponent"),
-          url_decode_component_("URL.decodeComponent"),
-          directive_(&demo_create_user_) {
+    explicit StubLibrary(fiber::script::Library &fallback) :
+        fallback_(fallback), url_parse_query_("URL.parseQuery"), url_build_query_("URL.buildQuery"),
+        url_encode_component_("URL.encodeComponent"), url_decode_component_("URL.decodeComponent"),
+        directive_(&demo_create_user_) {
         register_func("add", &add_);
         register_func("req.readBinary", &read_binary_);
         register_func("rand.random", &rand_random_);
@@ -271,9 +261,7 @@ public:
         register_func("url.decodeComponent", &url_decode_component_);
     }
 
-    void mark_root_prop(std::string_view prop_name) override {
-        fallback_.mark_root_prop(prop_name);
-    }
+    void mark_root_prop(std::string_view prop_name) override { fallback_.mark_root_prop(prop_name); }
 
     Function *find_func(std::string_view name) override {
         auto it = functions_.find(std::string(name));
@@ -313,19 +301,16 @@ public:
         return fallback_.find_async_constant(namespace_name, key);
     }
 
-    DirectiveDef *find_directive_def(std::string_view type,
-                                     std::string_view name,
+    DirectiveDef *find_directive_def(std::string_view type, std::string_view name,
                                      const std::vector<fiber::json::JsValue> &literals) override {
-        (void)literals;
+        (void) literals;
         if (type == "dubbo" && name == "demoService") {
             return &directive_;
         }
         return fallback_.find_directive_def(type, name, literals);
     }
 
-    void register_func(std::string name, Function *func) {
-        functions_.emplace(std::move(name), func);
-    }
+    void register_func(std::string name, Function *func) { functions_.emplace(std::move(name), func); }
 
 private:
     fiber::script::Library &fallback_;
@@ -358,8 +343,7 @@ bool compile_script(std::string_view script, fiber::script::Library &library, fi
     return true;
 }
 
-ScriptResult run_script(std::string_view script,
-                        fiber::script::Library &library,
+ScriptResult run_script(std::string_view script, fiber::script::Library &library,
                         fiber::script::ScriptRuntime &runtime) {
     fiber::script::ir::Compiled compiled;
     if (!compile_script(script, library, compiled)) {
@@ -377,30 +361,26 @@ struct TestEnv {
     fiber::script::ScriptRuntime runtime;
     StubLibrary library;
 
-    TestEnv()
-        : runtime(heap, roots),
-          library(fiber::script::std_lib::StdLibrary::instance()) {}
+    TestEnv() : runtime(heap, roots), library(fiber::script::std_lib::StdLibrary::instance()) {}
 };
 
 } // namespace
 
 TEST(ScriptPlanTest, LiteralsAndTypeof) {
     TestEnv env;
-    auto result = run_script(
-        "let num = 1;\n"
-        "let txt = \"this is string\";\n"
-        "let bin = req.readBinary();\n"
-        "let boo = true;\n"
-        "let nul = null;\n"
-        "let obj = {n:num};\n"
-        "let mis = obj.cc;\n"
-        "let arr = [1,2,num];\n"
-        "let result = {num, txt, bin, nul, obj, boo, mis, arr};\n"
-        "let types = {};\n"
-        "for (let k, v of result) { types[k] = typeof v; }\n"
-        "return {types, result};\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("let num = 1;\n"
+                             "let txt = \"this is string\";\n"
+                             "let bin = req.readBinary();\n"
+                             "let boo = true;\n"
+                             "let nul = null;\n"
+                             "let obj = {n:num};\n"
+                             "let mis = obj.cc;\n"
+                             "let arr = [1,2,num];\n"
+                             "let result = {num, txt, bin, nul, obj, boo, mis, arr};\n"
+                             "let types = {};\n"
+                             "for (let k, v of result) { types[k] = typeof v; }\n"
+                             "return {types, result};\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
     ASSERT_EQ(js_value_type(value), JsNodeType::Object);
@@ -441,22 +421,18 @@ TEST(ScriptPlanTest, ArithmeticPrecedence) {
 
 TEST(ScriptPlanTest, StringConcat) {
     TestEnv env;
-    auto result = run_script("return strings.toString(1) + \"a\" + strings.toString(2);",
-                             env.library,
-                             env.runtime);
+    auto result = run_script("return strings.toString(1) + \"a\" + strings.toString(2);", env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(value_to_string(result.value()), "1a2");
 }
 
 TEST(ScriptPlanTest, LogicalShortCircuit) {
     TestEnv env;
-    auto result = run_script(
-        "let v = 0;\n"
-        "let a = v && (v = 2);\n"
-        "let b = v || (v = 3);\n"
-        "return {a, b, v};\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("let v = 0;\n"
+                             "let a = v && (v = 2);\n"
+                             "let b = v || (v = 3);\n"
+                             "return {a, b, v};\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
     ASSERT_EQ(js_value_type(value), JsNodeType::Object);
@@ -476,15 +452,13 @@ TEST(ScriptPlanTest, LogicalShortCircuit) {
 
 TEST(ScriptPlanTest, ComparisonsAndEquality) {
     TestEnv env;
-    auto result = run_script(
-        "return {\n"
-        "  a: 1 == \"1\",\n"
-        "  b: 1 === \"1\",\n"
-        "  c: 1 != \"1\",\n"
-        "  d: 1 !== \"1\"\n"
-        "};\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("return {\n"
+                             "  a: 1 == \"1\",\n"
+                             "  b: 1 === \"1\",\n"
+                             "  c: 1 != \"1\",\n"
+                             "  d: 1 !== \"1\"\n"
+                             "};\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
     ASSERT_EQ(js_value_type(value), JsNodeType::Object);
@@ -496,11 +470,9 @@ TEST(ScriptPlanTest, ComparisonsAndEquality) {
 
 TEST(ScriptPlanTest, InOperator) {
     TestEnv env;
-    auto result = run_script(
-        "let obj = {n:1};\n"
-        "return {t: \"n\" in obj, f: \"x\" in obj};\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("let obj = {n:1};\n"
+                             "return {t: \"n\" in obj, f: \"x\" in obj};\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
     ASSERT_EQ(js_value_type(value), JsNodeType::Object);
@@ -510,9 +482,7 @@ TEST(ScriptPlanTest, InOperator) {
 
 TEST(ScriptPlanTest, UnaryOps) {
     TestEnv env;
-    auto result = run_script("return {a:+3, b:-(2), c:!0, d:typeof null};",
-                             env.library,
-                             env.runtime);
+    auto result = run_script("return {a:+3, b:-(2), c:!0, d:typeof null};", env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
     ASSERT_EQ(js_value_type(value), JsNodeType::Object);
@@ -535,14 +505,12 @@ TEST(ScriptPlanTest, TernaryOperator) {
 
 TEST(ScriptPlanTest, AccessAndAssignment) {
     TestEnv env;
-    auto result = run_script(
-        "let o = {a:1};\n"
-        "let a = [o.a, 2];\n"
-        "o.a = 3;\n"
-        "a[1] = 4;\n"
-        "return {o, a};\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("let o = {a:1};\n"
+                             "let a = [o.a, 2];\n"
+                             "o.a = 3;\n"
+                             "a[1] = 4;\n"
+                             "return {o, a};\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
     ASSERT_EQ(js_value_type(value), JsNodeType::Object);
@@ -558,14 +526,12 @@ TEST(ScriptPlanTest, AccessAndAssignment) {
 
 TEST(ScriptPlanTest, SpreadInArrayObjectAndCall) {
     TestEnv env;
-    auto result = run_script(
-        "let a = [1,2];\n"
-        "let b = [0, ...a, 3];\n"
-        "let o = {a:1};\n"
-        "let p = {z:0, ...o, b:2};\n"
-        "return {b, p, sum: add(...b)};\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("let a = [1,2];\n"
+                             "let b = [0, ...a, 3];\n"
+                             "let o = {a:1};\n"
+                             "let p = {z:0, ...o, b:2};\n"
+                             "return {b, p, sum: add(...b)};\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
     ASSERT_EQ(js_value_type(value), JsNodeType::Object);
@@ -588,29 +554,25 @@ TEST(ScriptPlanTest, SpreadInArrayObjectAndCall) {
 
 TEST(ScriptPlanTest, IfElseReturn) {
     TestEnv env;
-    auto result = run_script(
-        "let v = 2;\n"
-        "if (v > 1) { return \"big\"; }\n"
-        "return \"small\";\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("let v = 2;\n"
+                             "if (v > 1) { return \"big\"; }\n"
+                             "return \"small\";\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(value_to_string(result.value()), "big");
 }
 
 TEST(ScriptPlanTest, ForOfArrayWithBreakContinue) {
     TestEnv env;
-    auto result = run_script(
-        "let arr = [10, 20, 30];\n"
-        "let out = [];\n"
-        "for (let i, v of arr) {\n"
-        "  if (i == 0) { continue; }\n"
-        "  array.push(out, v);\n"
-        "  break;\n"
-        "}\n"
-        "return out;\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("let arr = [10, 20, 30];\n"
+                             "let out = [];\n"
+                             "for (let i, v of arr) {\n"
+                             "  if (i == 0) { continue; }\n"
+                             "  array.push(out, v);\n"
+                             "  break;\n"
+                             "}\n"
+                             "return out;\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
     ASSERT_EQ(js_value_type(value), JsNodeType::Array);
@@ -619,13 +581,11 @@ TEST(ScriptPlanTest, ForOfArrayWithBreakContinue) {
 
 TEST(ScriptPlanTest, ForOfObjectKeysValues) {
     TestEnv env;
-    auto result = run_script(
-        "let obj = {a:1, b:2};\n"
-        "let out = {};\n"
-        "for (let k, v of obj) { out[k] = v + 1; }\n"
-        "return out;\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("let obj = {a:1, b:2};\n"
+                             "let out = {};\n"
+                             "for (let k, v of obj) { out[k] = v + 1; }\n"
+                             "return out;\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
     ASSERT_EQ(js_value_type(value), JsNodeType::Object);
@@ -635,20 +595,16 @@ TEST(ScriptPlanTest, ForOfObjectKeysValues) {
 
 TEST(ScriptPlanTest, TryCatchThrowString) {
     TestEnv env;
-    auto result = run_script("try { throw \"err\"; } catch (e) { return e; }",
-                             env.library,
-                             env.runtime);
+    auto result = run_script("try { throw \"err\"; } catch (e) { return e; }", env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(value_to_string(result.value()), "err");
 }
 
 TEST(ScriptPlanTest, TryCatchThrowObject) {
     TestEnv env;
-    auto result = run_script(
-        "let obj = {a:1};\n"
-        "try { throw obj; } catch (e) { return e === obj; }\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("let obj = {a:1};\n"
+                             "try { throw obj; } catch (e) { return e === obj; }\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_type(result.value()), JsNodeType::Boolean);
     EXPECT_TRUE(js_value_bool(result.value()));
@@ -656,29 +612,25 @@ TEST(ScriptPlanTest, TryCatchThrowObject) {
 
 TEST(ScriptPlanTest, DirectiveCall) {
     TestEnv env;
-    auto result = run_script(
-        "directive demoService from dubbo \"com.test.dubbo.DemoService\";\n"
-        "return demoService.createUser(\"name\");\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("directive demoService from dubbo \"com.test.dubbo.DemoService\";\n"
+                             "return demoService.createUser(\"name\");\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(value_to_string(result.value()), "user:name");
 }
 
 TEST(ScriptPlanTest, LengthAndIncludes) {
     TestEnv env;
-    auto result = run_script(
-        "return {\n"
-        "  a: length(\"abc\") === 3,\n"
-        "  b: length({a:1,b:2}) === 2,\n"
-        "  c: length([1,2,3]) === 3,\n"
-        "  d: length(1) === 0,\n"
-        "  e: includes(\"abcabc\", \"cab\") === true,\n"
-        "  f: includes([\"aa\",\"bb\",\"cc\"], \"aa\") === true,\n"
-        "  g: includes({a:1}, \"a\") === false\n"
-        "};\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("return {\n"
+                             "  a: length(\"abc\") === 3,\n"
+                             "  b: length({a:1,b:2}) === 2,\n"
+                             "  c: length([1,2,3]) === 3,\n"
+                             "  d: length(1) === 0,\n"
+                             "  e: includes(\"abcabc\", \"cab\") === true,\n"
+                             "  f: includes([\"aa\",\"bb\",\"cc\"], \"aa\") === true,\n"
+                             "  g: includes({a:1}, \"a\") === false\n"
+                             "};\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
     ASSERT_EQ(js_value_type(value), JsNodeType::Object);
@@ -693,13 +645,11 @@ TEST(ScriptPlanTest, LengthAndIncludes) {
 
 TEST(ScriptPlanTest, ArrayPushPopJoin) {
     TestEnv env;
-    auto result = run_script(
-        "let a = [1,2];\n"
-        "let b = array.push(a, 3, 4);\n"
-        "let c = array.pop(a);\n"
-        "return {same: a === b, c, join: array.join(a, \"-\"), len: length(a)};\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("let a = [1,2];\n"
+                             "let b = array.push(a, 3, 4);\n"
+                             "let c = array.pop(a);\n"
+                             "return {same: a === b, c, join: array.join(a, \"-\"), len: length(a)};\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
     ASSERT_EQ(js_value_type(value), JsNodeType::Object);
@@ -711,15 +661,13 @@ TEST(ScriptPlanTest, ArrayPushPopJoin) {
 
 TEST(ScriptPlanTest, ObjectAssignKeysValuesDelete) {
     TestEnv env;
-    auto result = run_script(
-        "let a = {a:1,b:2};\n"
-        "Object.assign(a, {c:3});\n"
-        "let keys = Object.keys(a);\n"
-        "let values = Object.values(a);\n"
-        "Object.deleteProperties(a, \"a\", \"x\");\n"
-        "return {len:length(a), a:a.a, keys, values};\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("let a = {a:1,b:2};\n"
+                             "Object.assign(a, {c:3});\n"
+                             "let keys = Object.keys(a);\n"
+                             "let values = Object.values(a);\n"
+                             "Object.deleteProperties(a, \"a\", \"x\");\n"
+                             "return {len:length(a), a:a.a, keys, values};\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
     ASSERT_EQ(js_value_type(value), JsNodeType::Object);
@@ -764,23 +712,21 @@ TEST(ScriptPlanTest, ObjectAssignKeysValuesDelete) {
 
 TEST(ScriptPlanTest, StringsCoreSet) {
     TestEnv env;
-    auto result = run_script(
-        "return {\n"
-        "  prefix: strings.hasPrefix(\"abcdedf\", \"abc\"),\n"
-        "  suffix: strings.hasSuffix(\"abcdedf\", \"edf\"),\n"
-        "  lower: strings.toLower(\"AbC\") === \"abc\",\n"
-        "  upper: strings.toUpper(\"AbC\") === \"ABC\",\n"
-        "  trim: strings.trim(\"  \\tabc\\t \") === \"abc\",\n"
-        "  split: strings.split(\"abcecdf\", \"c\")[1] === \"e\",\n"
-        "  contains: strings.contains(\"abcd-effe-ssf-fd\", \"e-ssf\"),\n"
-        "  index: strings.index(\"aabbcc\", \"bcc\") === 3,\n"
-        "  last: strings.lastIndex(\"cabcd\", \"c\") === 3,\n"
-        "  repeat: strings.repeat(\"acd\", 3) === \"acdacdacd\",\n"
-        "  match: strings.match(\"aaabbbbccc\", \"a+b+c+\"),\n"
-        "  substring: strings.substring(\"0123456789\", 3, 6) === \"345\"\n"
-        "};\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("return {\n"
+                             "  prefix: strings.hasPrefix(\"abcdedf\", \"abc\"),\n"
+                             "  suffix: strings.hasSuffix(\"abcdedf\", \"edf\"),\n"
+                             "  lower: strings.toLower(\"AbC\") === \"abc\",\n"
+                             "  upper: strings.toUpper(\"AbC\") === \"ABC\",\n"
+                             "  trim: strings.trim(\"  \\tabc\\t \") === \"abc\",\n"
+                             "  split: strings.split(\"abcecdf\", \"c\")[1] === \"e\",\n"
+                             "  contains: strings.contains(\"abcd-effe-ssf-fd\", \"e-ssf\"),\n"
+                             "  index: strings.index(\"aabbcc\", \"bcc\") === 3,\n"
+                             "  last: strings.lastIndex(\"cabcd\", \"c\") === 3,\n"
+                             "  repeat: strings.repeat(\"acd\", 3) === \"acdacdacd\",\n"
+                             "  match: strings.match(\"aaabbbbccc\", \"a+b+c+\"),\n"
+                             "  substring: strings.substring(\"0123456789\", 3, 6) === \"345\"\n"
+                             "};\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
     ASSERT_EQ(js_value_type(value), JsNodeType::Object);
@@ -800,19 +746,17 @@ TEST(ScriptPlanTest, StringsCoreSet) {
 
 TEST(ScriptPlanTest, BinaryAndHash) {
     TestEnv env;
-    auto result = run_script(
-        "let bin = binary.base64Decode(\"AQID\");\n"
-        "return {\n"
-        "  b64: binary.base64Encode(bin) === \"AQID\",\n"
-        "  hex: binary.hex(bin) === \"010203\",\n"
-        "  crc: hash.crc32(\"abc\") === 891568578,\n"
-        "  md5: hash.md5(\"abc\") === \"900150983cd24fb0d6963f7d28e17f72\",\n"
-        "  sha1: hash.sha1(\"abc\") === \"a9993e364706816aba3e25717850c26c9cd0d89d\",\n"
-        "  sha256: hash.sha256(\"abc\") ===\n"
-        "    \"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\"\n"
-        "};\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("let bin = binary.base64Decode(\"AQID\");\n"
+                             "return {\n"
+                             "  b64: binary.base64Encode(bin) === \"AQID\",\n"
+                             "  hex: binary.hex(bin) === \"010203\",\n"
+                             "  crc: hash.crc32(\"abc\") === 891568578,\n"
+                             "  md5: hash.md5(\"abc\") === \"900150983cd24fb0d6963f7d28e17f72\",\n"
+                             "  sha1: hash.sha1(\"abc\") === \"a9993e364706816aba3e25717850c26c9cd0d89d\",\n"
+                             "  sha256: hash.sha256(\"abc\") ===\n"
+                             "    \"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\"\n"
+                             "};\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
     ASSERT_EQ(js_value_type(value), JsNodeType::Object);
@@ -826,11 +770,9 @@ TEST(ScriptPlanTest, BinaryAndHash) {
 
 TEST(ScriptPlanTest, JsonParseStringify) {
     TestEnv env;
-    auto result = run_script(
-        "let obj = JSON.parse(\"{\\\"a\\\":1,\\\"b\\\":[2,3]}\");\n"
-        "return JSON.stringify(obj) === \"{\\\"a\\\":1,\\\"b\\\":[2,3]}\";\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("let obj = JSON.parse(\"{\\\"a\\\":1,\\\"b\\\":[2,3]}\");\n"
+                             "return JSON.stringify(obj) === \"{\\\"a\\\":1,\\\"b\\\":[2,3]}\";\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_type(result.value()), JsNodeType::Boolean);
     EXPECT_TRUE(js_value_bool(result.value()));
@@ -838,10 +780,7 @@ TEST(ScriptPlanTest, JsonParseStringify) {
 
 TEST(ScriptPlanTest, MathHelpers) {
     TestEnv env;
-    auto result = run_script(
-        "return {a: math.floor(3.9) === 3, b: math.abs(-4) === 4};",
-        env.library,
-        env.runtime);
+    auto result = run_script("return {a: math.floor(3.9) === 3, b: math.abs(-4) === 4};", env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
     ASSERT_EQ(js_value_type(value), JsNodeType::Object);
@@ -851,10 +790,8 @@ TEST(ScriptPlanTest, MathHelpers) {
 
 TEST(ScriptPlanTest, RandStubbed) {
     TestEnv env;
-    auto result = run_script(
-        "return {a: rand.canary(\"42\") === 42, b: rand.random() >= 0};",
-        env.library,
-        env.runtime);
+    auto result =
+            run_script("return {a: rand.canary(\"42\") === 42, b: rand.random() >= 0};", env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     const JsValue &value = result.value();
     ASSERT_EQ(js_value_type(value), JsNodeType::Object);
@@ -864,10 +801,8 @@ TEST(ScriptPlanTest, RandStubbed) {
 
 TEST(ScriptPlanTest, TimeStubbed) {
     TestEnv env;
-    auto result = run_script(
-        "return time.format(1700000000, \"yyyy-MM-dd\") === \"2023-11-14\";",
-        env.library,
-        env.runtime);
+    auto result =
+            run_script("return time.format(1700000000, \"yyyy-MM-dd\") === \"2023-11-14\";", env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_type(result.value()), JsNodeType::Boolean);
     EXPECT_TRUE(js_value_bool(result.value()));
@@ -875,13 +810,11 @@ TEST(ScriptPlanTest, TimeStubbed) {
 
 TEST(ScriptPlanTest, UrlHelpers) {
     TestEnv env;
-    auto result = run_script(
-        "let q = url.parseQuery(\"a=1&b=2\");\n"
-        "return (url.buildQuery(q) === \"a=1&b=2\" || url.buildQuery(q) === \"b=2&a=1\")\n"
-        "  && url.encodeComponent(\"a b\") === \"a+b\"\n"
-        "  && url.decodeComponent(\"a%20b\") === \"a b\";\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("let q = url.parseQuery(\"a=1&b=2\");\n"
+                             "return (url.buildQuery(q) === \"a=1&b=2\" || url.buildQuery(q) === \"b=2&a=1\")\n"
+                             "  && url.encodeComponent(\"a b\") === \"a+b\"\n"
+                             "  && url.decodeComponent(\"a%20b\") === \"a b\";\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_type(result.value()), JsNodeType::Boolean);
     EXPECT_TRUE(js_value_bool(result.value()));
@@ -889,11 +822,9 @@ TEST(ScriptPlanTest, UrlHelpers) {
 
 TEST(ScriptPlanTest, MissingTypeof) {
     TestEnv env;
-    auto result = run_script(
-        "let o = {};\n"
-        "return typeof o.miss;\n",
-        env.library,
-        env.runtime);
+    auto result = run_script("let o = {};\n"
+                             "return typeof o.miss;\n",
+                             env.library, env.runtime);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(value_to_string(result.value()), "undefined");
 }

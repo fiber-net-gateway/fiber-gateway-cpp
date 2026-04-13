@@ -28,24 +28,23 @@ constexpr std::string_view kNotFoundBody = "404 Not Found\n";
 
 RuntimeError make_error(const config::SourceLocation &location, std::string message) {
     return RuntimeError{
-        .message = std::move(message),
-        .location = location,
+            .message = std::move(message),
+            .location = location,
     };
 }
 
-fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange,
-                                             int status_code,
+fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange, int status_code,
                                              std::string_view body) {
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("Content-Type", "text/plain");
 
     auto header_result = co_await exchange.send_header({
-        .kind = fiber::http::OutgoingHeaderKind::Final,
-        .status_code = status_code,
-        .headers = &headers,
-        .body = fiber::http::HttpBodySpec::ContentLength(body.size()),
-        .connection_mode = fiber::http::ResponseConnectionMode::Auto,
-        .end_stream = body.empty(),
+            .kind = fiber::http::OutgoingHeaderKind::Final,
+            .status_code = status_code,
+            .headers = &headers,
+            .body = fiber::http::HttpBodySpec::ContentLength(body.size()),
+            .connection_mode = fiber::http::ResponseConnectionMode::Auto,
+            .end_stream = body.empty(),
     });
     if (!header_result) {
         co_return;
@@ -54,10 +53,11 @@ fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange
         co_return;
     }
 
-    (void)co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
+    (void) co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
 }
 
-fiber::http::TlsContext *select_identity_by_server_name(void *, const fiber::http::TlsClientHelloView &client_hello) noexcept {
+fiber::http::TlsContext *select_identity_by_server_name(void *,
+                                                        const fiber::http::TlsClientHelloView &client_hello) noexcept {
     if (!client_hello.server_context || client_hello.server_name.empty()) {
         return nullptr;
     }
@@ -71,9 +71,8 @@ std::expected<fiber::net::SocketAddress, RuntimeError> make_socket_address(const
 
     fiber::net::IpAddress ip;
     if (!fiber::net::IpAddress::parse(listener.host, ip)) {
-        return std::unexpected(make_error(
-            listener.location,
-            "listen host must be an IP literal in lite-nginx runtime: " + listener.host));
+        return std::unexpected(make_error(listener.location,
+                                          "listen host must be an IP literal in lite-nginx runtime: " + listener.host));
     }
     return fiber::net::SocketAddress(ip, listener.port);
 }
@@ -103,15 +102,15 @@ fiber::http::HttpServerOptions make_server_options(const ListenerRuntime &listen
     options.tls.key_file = listener.default_certificate_key;
     options.tls.alpn = {"h2", "http/1.1"};
     options.tls.identity_selector_ops = {
-        .select = &select_identity_by_server_name,
-        .ctx = nullptr,
+            .select = &select_identity_by_server_name,
+            .ctx = nullptr,
     };
     options.tls.identities.reserve(listener.tls_identities.size());
-    for (const auto &identity : listener.tls_identities) {
+    for (const auto &identity: listener.tls_identities) {
         options.tls.identities.push_back({
-            .name = identity.server_name,
-            .cert_file = identity.certificate,
-            .key_file = identity.certificate_key,
+                .name = identity.server_name,
+                .cert_file = identity.certificate,
+                .key_file = identity.certificate_key,
         });
     }
     return options;
@@ -142,9 +141,7 @@ std::uint32_t find_server_index(const ListenerRuntime &listener, std::string_vie
     }
 
     auto it = std::lower_bound(listener.server_names.begin(), listener.server_names.end(), host_name,
-                               [](const ServerNameRuntime &entry, std::string_view key) {
-                                   return entry.name < key;
-                               });
+                               [](const ServerNameRuntime &entry, std::string_view key) { return entry.name < key; });
     if (it == listener.server_names.end() || it->name != host_name) {
         return listener.default_server_index;
     }
@@ -168,10 +165,8 @@ struct LocationMatchContext {
 class RequestDispatcher {
 public:
     RequestDispatcher(std::shared_ptr<const RuntimeConfig> runtime,
-                      std::shared_ptr<upstream::UpstreamRegistry> upstreams) noexcept
-        : runtime_(std::move(runtime)),
-          upstreams_(std::move(upstreams)),
-          proxy_(*upstreams_) {}
+                      std::shared_ptr<upstream::UpstreamRegistry> upstreams) noexcept :
+        runtime_(std::move(runtime)), upstreams_(std::move(upstreams)), proxy_(*upstreams_) {}
 
     fiber::async::Task<void> handle(std::uint32_t listener_index, fiber::http::HttpExchange &exchange) const {
         if (!runtime_ || listener_index >= runtime_->listeners.size()) {
@@ -221,7 +216,8 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
     }
 
     runtime_ = std::make_shared<RuntimeConfig>(runtime);
-    worker_group_ = std::make_unique<fiber::event::EventLoopGroup>(std::max<std::size_t>(runtime_->worker_processes, 1));
+    worker_group_ =
+            std::make_unique<fiber::event::EventLoopGroup>(std::max<std::size_t>(runtime_->worker_processes, 1));
     worker_group_->start();
 
     upstreams_ = std::make_shared<upstream::UpstreamRegistry>(*worker_group_, *runtime_);
@@ -245,37 +241,32 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
 
         auto options = make_server_options(listener);
         auto server = std::make_unique<fiber::http::HttpServer>(
-            accept_loop_,
-            [dispatcher, listener_index](fiber::http::HttpExchange &exchange) {
-                return dispatcher->handle(listener_index, exchange);
-            },
-            std::move(options),
-            worker_group_.get());
+                accept_loop_,
+                [dispatcher, listener_index](fiber::http::HttpExchange &exchange) {
+                    return dispatcher->handle(listener_index, exchange);
+                },
+                std::move(options), worker_group_.get());
 
         fiber::net::ListenOptions listen_options{};
         auto bind_result = server->bind(*addr_result, listen_options);
         if (!bind_result) {
             close();
-            return std::unexpected(make_error(
-                listener.location,
-                "bind failed for listen " + addr_result->to_string() + ": " +
-                    std::string(fiber::common::io_err_name(bind_result.error()))));
+            return std::unexpected(make_error(listener.location,
+                                              "bind failed for listen " + addr_result->to_string() + ": " +
+                                                      std::string(fiber::common::io_err_name(bind_result.error()))));
         }
 
         auto bound_port_result = resolve_port(server->fd());
         if (!bound_port_result) {
             close();
-            return std::unexpected(make_error(
-                listener.location,
-                "failed to resolve bound port for listen " + addr_result->to_string()));
+            return std::unexpected(make_error(listener.location,
+                                              "failed to resolve bound port for listen " + addr_result->to_string()));
         }
 
-        fiber::net::SocketAddress bound_address(
-            addr_result->ip(),
-            *bound_port_result);
+        fiber::net::SocketAddress bound_address(addr_result->ip(), *bound_port_result);
         bound_listeners_.push_back({
-            .address = bound_address,
-            .tls = listener.tls,
+                .address = bound_address,
+                .tls = listener.tls,
         });
 
         auto *server_ptr = server.get();
@@ -288,7 +279,7 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
 }
 
 void ServerLauncher::close() {
-    for (auto &server : servers_) {
+    for (auto &server: servers_) {
         server->close();
     }
     servers_.clear();

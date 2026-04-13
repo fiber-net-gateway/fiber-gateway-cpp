@@ -16,20 +16,17 @@
 
 namespace {
 
-fiber::async::Task<fiber::common::IoResult<void>> send_final_header(
-    fiber::http::HttpExchange &exchange,
-    int status_code,
-    const fiber::http::HttpHeaders *headers,
-    fiber::http::HttpBodySpec body,
-    fiber::http::ResponseConnectionMode connection_mode,
-    bool end_stream) {
+fiber::async::Task<fiber::common::IoResult<void>>
+send_final_header(fiber::http::HttpExchange &exchange, int status_code, const fiber::http::HttpHeaders *headers,
+                  fiber::http::HttpBodySpec body, fiber::http::ResponseConnectionMode connection_mode,
+                  bool end_stream) {
     co_return co_await exchange.send_header({
-        .kind = fiber::http::OutgoingHeaderKind::Final,
-        .status_code = status_code,
-        .headers = headers,
-        .body = body,
-        .connection_mode = connection_mode,
-        .end_stream = end_stream,
+            .kind = fiber::http::OutgoingHeaderKind::Final,
+            .status_code = status_code,
+            .headers = headers,
+            .body = body,
+            .connection_mode = connection_mode,
+            .end_stream = end_stream,
     });
 }
 
@@ -83,9 +80,9 @@ fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange) {
 
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("Content-Type", "text/plain");
-    auto header_result = co_await send_final_header(exchange, 200, &headers, fiber::http::HttpBodySpec::ContentLength(
-                                                                                   body.size()),
-                                                    fiber::http::ResponseConnectionMode::Auto, false);
+    auto header_result =
+            co_await send_final_header(exchange, 200, &headers, fiber::http::HttpBodySpec::ContentLength(body.size()),
+                                       fiber::http::ResponseConnectionMode::Auto, false);
     if (!header_result) {
         co_return;
     }
@@ -128,9 +125,7 @@ int main(int argc, char **argv) {
         std::cout << "listening on 0.0.0.0\n";
     }
 
-    fiber::async::spawn(loop, [&]() {
-        return server.serve();
-    });
+    fiber::async::spawn(loop, [&]() { return server.serve(); });
     loop.run();
     return 0;
 }

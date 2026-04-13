@@ -8,19 +8,19 @@
 #include <cstdlib>
 
 namespace fiber::mem {
-    class Allocator {
-    public:
-        Allocator() = default;
-        ~Allocator() = default;
-        Allocator(const Allocator &) = delete;
-        Allocator &operator=(const Allocator &) = delete;
-        Allocator(Allocator &&) = delete;
-        Allocator &operator=(Allocator &&) = delete;
+class Allocator {
+public:
+    Allocator() = default;
+    ~Allocator() = default;
+    Allocator(const Allocator &) = delete;
+    Allocator &operator=(const Allocator &) = delete;
+    Allocator(Allocator &&) = delete;
+    Allocator &operator=(Allocator &&) = delete;
 
-        [[nodiscard]] void *alloc(size_t size);
-        void free(void *ptr);
-        [[nodiscard]] void *realloc(void *ptr, size_t size);
-    };
+    [[nodiscard]] void *alloc(size_t size);
+    void free(void *ptr);
+    [[nodiscard]] void *realloc(void *ptr, size_t size);
+};
 } // namespace fiber::mem
 
 #endif // FIBER_ALLOCATOR_H

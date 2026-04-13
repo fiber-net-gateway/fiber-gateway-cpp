@@ -79,7 +79,8 @@ bool Http2HpackDecodeTable::insert(std::string_view name, std::string_view value
         return false;
     }
 
-    const std::uint64_t value_bytes64 = static_cast<std::uint64_t>(name.size()) + static_cast<std::uint64_t>(value.size());
+    const std::uint64_t value_bytes64 =
+            static_cast<std::uint64_t>(name.size()) + static_cast<std::uint64_t>(value.size());
     if (value_bytes64 > std::numeric_limits<std::uint32_t>::max()) {
         return false;
     }
@@ -157,9 +158,7 @@ std::uint32_t Http2HpackDecodeTable::slot_to_dynamic_index(std::uint32_t slot) c
     return ((slot + entry_cap_ - head_) % entry_cap_) + 1U;
 }
 
-std::uint32_t Http2HpackDecodeTable::oldest_slot() const noexcept {
-    return dynamic_index_to_slot(count_);
-}
+std::uint32_t Http2HpackDecodeTable::oldest_slot() const noexcept { return dynamic_index_to_slot(count_); }
 
 void Http2HpackDecodeTable::compact_bytes() noexcept {
     if (count_ == 0) {

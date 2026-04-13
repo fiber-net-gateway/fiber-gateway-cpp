@@ -3,39 +3,24 @@
 
 #include <string>
 
-#include "Expression.h"
 #include "../Library.h"
+#include "Expression.h"
 
 namespace fiber::script::ast {
 
 class ConstantVal : public Expression {
 public:
-    ConstantVal(std::int32_t start,
-                std::int32_t end,
-                std::string name,
-                const Library::HostCallable *constant,
-                const Library::HostCallable *async_constant)
-        : Expression(start, end),
-          name_(std::move(name)),
-          constant_(constant),
-          async_constant_(async_constant) {
-    }
+    ConstantVal(std::int32_t start, std::int32_t end, std::string name, const Library::HostCallable *constant,
+                const Library::HostCallable *async_constant) :
+        Expression(start, end), name_(std::move(name)), constant_(constant), async_constant_(async_constant) {}
 
-    const std::string &name() const {
-        return name_;
-    }
+    const std::string &name() const { return name_; }
 
-    bool is_async() const {
-        return async_constant_ != nullptr;
-    }
+    bool is_async() const { return async_constant_ != nullptr; }
 
-    const Library::HostCallable *constant() const {
-        return constant_;
-    }
+    const Library::HostCallable *constant() const { return constant_; }
 
-    const Library::HostCallable *async_constant() const {
-        return async_constant_;
-    }
+    const Library::HostCallable *async_constant() const { return async_constant_; }
 
 private:
     std::string name_;

@@ -3,33 +3,23 @@
 
 #include <memory>
 
-#include "Statement.h"
-#include "Identifier.h"
 #include "../Library.h"
+#include "Identifier.h"
+#include "Statement.h"
 
 namespace fiber::script::ast {
 
 class DirectiveStatement : public Statement {
 public:
-    DirectiveStatement(std::int32_t start,
-                       std::int32_t end,
-                       std::unique_ptr<Identifier> type,
-                       std::unique_ptr<Identifier> name,
-                       Library::DirectiveDef *def)
-        : Statement(start, end), type_(std::move(type)), name_(std::move(name)), def_(def) {
-    }
+    DirectiveStatement(std::int32_t start, std::int32_t end, std::unique_ptr<Identifier> type,
+                       std::unique_ptr<Identifier> name, Library::DirectiveDef *def) :
+        Statement(start, end), type_(std::move(type)), name_(std::move(name)), def_(def) {}
 
-    const Identifier *type() const {
-        return type_.get();
-    }
+    const Identifier *type() const { return type_.get(); }
 
-    const Identifier *name() const {
-        return name_.get();
-    }
+    const Identifier *name() const { return name_.get(); }
 
-    Library::DirectiveDef *directive_def() const {
-        return def_;
-    }
+    Library::DirectiveDef *directive_def() const { return def_; }
 
 private:
     std::unique_ptr<Identifier> type_;

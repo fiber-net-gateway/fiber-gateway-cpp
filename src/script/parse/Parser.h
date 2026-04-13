@@ -9,11 +9,9 @@
 #include <unordered_map>
 #include <vector>
 
-#include "Tokenizer.h"
-#include "ParseError.h"
 #include "../ast/Assign.h"
-#include "../ast/Block.h"
 #include "../ast/BinaryOperator.h"
+#include "../ast/Block.h"
 #include "../ast/BreakStatement.h"
 #include "../ast/ConstantVal.h"
 #include "../ast/ContinueStatement.h"
@@ -25,11 +23,11 @@
 #include "../ast/FunctionCall.h"
 #include "../ast/Identifier.h"
 #include "../ast/IfStatement.h"
+#include "../ast/Indexer.h"
 #include "../ast/InlineList.h"
 #include "../ast/InlineObject.h"
-#include "../ast/Indexer.h"
-#include "../ast/LogicRelationalExpression.h"
 #include "../ast/Literal.h"
+#include "../ast/LogicRelationalExpression.h"
 #include "../ast/MaybeLValue.h"
 #include "../ast/PropertyReference.h"
 #include "../ast/ReturnStatement.h"
@@ -39,6 +37,8 @@
 #include "../ast/UnaryOperator.h"
 #include "../ast/VariableDeclareStatement.h"
 #include "../ast/VariableReference.h"
+#include "ParseError.h"
+#include "Tokenizer.h"
 
 namespace fiber::script {
 class Library;
@@ -82,9 +82,11 @@ private:
     std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_inline_object();
     std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_function_or_var();
     std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_indexer(std::unique_ptr<ast::Expression> parent);
-    std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_dotted_node(std::unique_ptr<ast::Expression> parent);
+    std::expected<std::unique_ptr<ast::Expression>, ParseError>
+    parse_dotted_node(std::unique_ptr<ast::Expression> parent);
     std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_node(std::unique_ptr<ast::Expression> parent);
-    std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_non_dotted_node(std::unique_ptr<ast::Expression> parent);
+    std::expected<std::unique_ptr<ast::Expression>, ParseError>
+    parse_non_dotted_node(std::unique_ptr<ast::Expression> parent);
     std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_property(std::unique_ptr<ast::Expression> parent);
     std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_function_call(ast::VariableReference &prefix);
     std::expected<std::vector<std::unique_ptr<ast::Expression>>, ParseError> parse_method_args();

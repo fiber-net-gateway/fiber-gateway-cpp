@@ -10,15 +10,15 @@
 
 #include "async/Spawn.h"
 #include "event/EventLoopGroup.h"
-#include "http/HttpHeaderHash.h"
 #include "http/Http2HeadersFrameEncoder.h"
-#include "http/Http2HpackEncodeCatalog.h"
 #include "http/Http2HpackDecoder.h"
+#include "http/Http2HpackEncodeCatalog.h"
 #include "http/Http2HpackEncoder.h"
+#include "http/HttpHeaderHash.h"
 #define private public
 #include "http/Http2OutboundScheduler.h"
-#include "http/HttpTransport.h"
 #include "http/Http2Stream.h"
+#include "http/HttpTransport.h"
 #undef private
 
 namespace {
@@ -112,24 +112,15 @@ fiber::common::IoErr on_header_block_start(void *, fiber::http::Http2HpackDecode
     return fiber::common::IoErr::None;
 }
 
-fiber::common::IoErr on_header_block_complete(void *, bool) noexcept {
-    return fiber::common::IoErr::None;
-}
+fiber::common::IoErr on_header_block_complete(void *, bool) noexcept { return fiber::common::IoErr::None; }
 
-fiber::common::IoErr on_body(void *, fiber::mem::IoBuf &&, bool) noexcept {
-    return fiber::common::IoErr::None;
-}
+fiber::common::IoErr on_body(void *, fiber::mem::IoBuf &&, bool) noexcept { return fiber::common::IoErr::None; }
 
 void on_abort(void *, fiber::common::IoErr) noexcept {}
 void on_destroy(void *) noexcept {}
 
 const fiber::http::Http2Stream::Ops kStreamOps{
-    &on_destroy,
-    &on_header_block_start,
-    &on_header_block_complete,
-    &on_body,
-    &on_abort,
-    nullptr,
+        &on_destroy, &on_header_block_start, &on_header_block_complete, &on_body, &on_abort, nullptr,
 };
 
 fiber::common::IoErr encode_headers_to_target(fiber::http::Http2Stream &, void *ctx,
@@ -161,7 +152,7 @@ fiber::common::IoErr encode_headers_to_target(fiber::http::Http2Stream &, void *
         frame_encoder.abort();
         return err;
     }
-    for (const auto &[name, value] : test_case->headers) {
+    for (const auto &[name, value]: test_case->headers) {
         err = frame_encoder.encode_field(name, fiber::http::http_header_name_hash(name), value);
         if (err != fiber::common::IoErr::None) {
             frame_encoder.abort();
@@ -188,8 +179,7 @@ std::vector<std::uint8_t> encode_headers_bytes_in_place(EncodeCase &test_case) {
     auto future = promise->get_future();
 
     group.start();
-    fiber::async::spawn(group.at(0), [promise, &test_case, &group]() mutable
-        -> fiber::async::DetachedTask {
+    fiber::async::spawn(group.at(0), [promise, &test_case, &group]() mutable -> fiber::async::DetachedTask {
         RecordingTransport transport;
         fiber::http::Http2OutboundScheduler scheduler(&transport, 1024, std::chrono::seconds(30),
                                                       test_case.options.max_frame_size);
@@ -226,81 +216,109 @@ std::vector<std::uint8_t> encode_headers_bytes(EncodeCase test_case) {
 
 TEST(Http2HeadersFrameEncoderTest, EncodesSingleHeadersFrame) {
     EXPECT_EQ(encode_headers_bytes({
-                  .status_code = 200,
-                  .options =
-                      {
-                          .stream_id = 1,
-                          .max_frame_size = 16384,
-                          .first_frame_payload_cap = 1024,
-                      },
+                      .status_code = 200,
+                      .options =
+                              {
+                                      .stream_id = 1,
+                                      .max_frame_size = 16384,
+                                      .first_frame_payload_cap = 1024,
+                              },
               }),
               (std::vector<std::uint8_t>{0x00, 0x00, 0x01, 0x01, 0x04, 0x00, 0x00, 0x00, 0x01, 0x88}));
 }
 
 TEST(Http2HeadersFrameEncoderTest, SplitsHeaderBlockIntoContinuationFrames) {
     EXPECT_EQ(encode_headers_bytes({
-                  .status_code = 418,
-                  .options =
-                      {
-                          .stream_id = 3,
-                          .max_frame_size = 4,
-                          .first_frame_payload_cap = 4,
-                      },
+                      .status_code = 418,
+                      .options =
+                              {
+                                      .stream_id = 3,
+                                      .max_frame_size = 4,
+                                      .first_frame_payload_cap = 4,
+                              },
               }),
               (std::vector<std::uint8_t>{
-                  0x00, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x03, 0x08, 0x03, '4', '1',
-                  0x00, 0x00, 0x01, 0x09, 0x04, 0x00, 0x00, 0x00, 0x03, '8',
+                      0x00, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x03, 0x08, 0x03, '4',
+                      '1',  0x00, 0x00, 0x01, 0x09, 0x04, 0x00, 0x00, 0x00, 0x03, '8',
               }));
 }
 
 TEST(Http2HeadersFrameEncoderTest, KeepsSingleFrameAcrossMultipleIoBufs) {
     std::vector<std::uint8_t> out = encode_headers_bytes({
-        .status_code = 418,
-        .options =
-            {
-                .stream_id = 7,
-                .max_frame_size = 16,
-                .first_frame_payload_cap = 4,
-            },
+            .status_code = 418,
+            .options =
+                    {
+                            .stream_id = 7,
+                            .max_frame_size = 16,
+                            .first_frame_payload_cap = 4,
+                    },
     });
     EXPECT_EQ(out.size(), 14U);
-    EXPECT_EQ(out,
-              (std::vector<std::uint8_t>{
-                  0x00, 0x00, 0x05, 0x01, 0x04, 0x00, 0x00, 0x00, 0x07, 0x08, 0x03, '4', '1', '8',
-              }));
+    EXPECT_EQ(out, (std::vector<std::uint8_t>{
+                           0x00,
+                           0x00,
+                           0x05,
+                           0x01,
+                           0x04,
+                           0x00,
+                           0x00,
+                           0x00,
+                           0x07,
+                           0x08,
+                           0x03,
+                           '4',
+                           '1',
+                           '8',
+                   }));
 }
 
 TEST(Http2HeadersFrameEncoderTest, EncodesHeadersFrameWithPaddingAndPriority) {
     EXPECT_EQ(encode_headers_bytes({
-                  .status_code = 200,
-                  .options =
-                      {
-                          .stream_id = 5,
-                          .max_frame_size = 32,
-                          .first_frame_payload_cap = 32,
-                          .end_stream = true,
-                          .pad_length = 2,
-                          .has_priority = true,
-                          .exclusive = true,
-                          .stream_dependency = 3,
-                          .weight = 10,
-                      },
+                      .status_code = 200,
+                      .options =
+                              {
+                                      .stream_id = 5,
+                                      .max_frame_size = 32,
+                                      .first_frame_payload_cap = 32,
+                                      .end_stream = true,
+                                      .pad_length = 2,
+                                      .has_priority = true,
+                                      .exclusive = true,
+                                      .stream_dependency = 3,
+                                      .weight = 10,
+                              },
               }),
               (std::vector<std::uint8_t>{
-                  0x00, 0x00, 0x09, 0x01, 0x2d, 0x00, 0x00, 0x00, 0x05,
-                  0x02, 0x80, 0x00, 0x00, 0x03, 0x0a, 0x88, 0x00, 0x00,
+                      0x00,
+                      0x00,
+                      0x09,
+                      0x01,
+                      0x2d,
+                      0x00,
+                      0x00,
+                      0x00,
+                      0x05,
+                      0x02,
+                      0x80,
+                      0x00,
+                      0x00,
+                      0x03,
+                      0x0a,
+                      0x88,
+                      0x00,
+                      0x00,
               }));
 }
 
 TEST(Http2HeadersFrameEncoderTest, SmallHeaderBlockStaysInTargetSlot) {
     EncodeCase test_case{
-        .status_code = 200,
-        .options =
-            {
-                .stream_id = 9,
-                .max_frame_size = 16384,
-                .first_frame_payload_cap = 16384,
-            },
+            .status_code = 200,
+            .options =
+                    {
+                            .stream_id = 9,
+                            .max_frame_size = 16384,
+                            .first_frame_payload_cap = 16384,
+                    },
     };
 
     EXPECT_EQ(encode_headers_bytes_in_place(test_case),

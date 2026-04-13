@@ -21,7 +21,8 @@ TEST(Http2HpackEncodeCatalogTest, FindReturnsStaticExactAndStaticNameMatches) {
     EXPECT_EQ(exact.entry->kind, Http2HpackEncodeCatalog::EntryKind::Static);
     EXPECT_EQ(exact.entry->hpack_index, 8u);
 
-    const auto name_only = catalog.find("content-type", fiber::http::http_header_name_hash("content-type"), "text/plain");
+    const auto name_only =
+            catalog.find("content-type", fiber::http::http_header_name_hash("content-type"), "text/plain");
     ASSERT_NE(name_only.entry, nullptr);
     EXPECT_FALSE(name_only.exact);
     EXPECT_EQ(name_only.entry->kind, Http2HpackEncodeCatalog::EntryKind::Static);
@@ -30,8 +31,8 @@ TEST(Http2HpackEncodeCatalogTest, FindReturnsStaticExactAndStaticNameMatches) {
 
 TEST(Http2HpackEncodeCatalogTest, FindReturnsPolicyEntriesWhenStaticTableMisses) {
     constexpr std::array<Http2HpackEncodeCatalog::PolicyEntry, 2> kPolicies{{
-        {"server", fiber::http::http_header_name_hash("server"), "nginx-1.25.1"},
-        {"x-powered-by", fiber::http::http_header_name_hash("x-powered-by"), "openresty"},
+            {"server", fiber::http::http_header_name_hash("server"), "nginx-1.25.1"},
+            {"x-powered-by", fiber::http::http_header_name_hash("x-powered-by"), "openresty"},
     }};
 
     Http2HpackEncodeCatalog catalog;

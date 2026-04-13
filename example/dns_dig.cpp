@@ -11,8 +11,8 @@
 #include <string>
 #include <string_view>
 
-#include "async/Timeout.h"
 #include "async/Spawn.h"
+#include "async/Timeout.h"
 #include "common/IoError.h"
 #include "dns/DnsClient.h"
 #include "dns/DnsMessage.h"
@@ -130,9 +130,8 @@ void override_port(fiber::net::SocketAddress &addr, std::uint16_t port) {
 
 std::optional<std::uint16_t> parse_qtype(std::string_view text) {
     std::string normalized(text);
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::toupper(ch));
-    });
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
 
     if (normalized == "A") {
         return static_cast<std::uint16_t>(RecordType::A);
@@ -248,24 +247,9 @@ std::string format_ipv4(const std::uint8_t *data) {
 }
 
 std::string format_ipv6(const std::uint8_t *data) {
-    return fiber::net::IpAddress::v6(
-               {data[0],
-                data[1],
-                data[2],
-                data[3],
-                data[4],
-                data[5],
-                data[6],
-                data[7],
-                data[8],
-                data[9],
-                data[10],
-                data[11],
-                data[12],
-                data[13],
-                data[14],
-                data[15]})
-        .to_string();
+    return fiber::net::IpAddress::v6({data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8],
+                                      data[9], data[10], data[11], data[12], data[13], data[14], data[15]})
+            .to_string();
 }
 
 std::uint16_t read_be16(const std::uint8_t *data) {
@@ -336,13 +320,9 @@ std::string format_txt(const std::uint8_t *data, std::size_t len) {
     return out;
 }
 
-std::string decode_name_rdata(const MessageParser::MessageView &message,
-                              const MessageParser::ResourceRecord &record) {
+std::string decode_name_rdata(const MessageParser::MessageView &message, const MessageParser::ResourceRecord &record) {
     std::array<char, 256> scratch{};
-    auto decoded = fiber::dns::decode_name(message.packet_data,
-                                           message.packet_len,
-                                           record.rdata_offset,
-                                           scratch.data(),
+    auto decoded = fiber::dns::decode_name(message.packet_data, message.packet_len, record.rdata_offset, scratch.data(),
                                            scratch.size());
     if (!decoded) {
         return "<invalid-name>";
@@ -371,11 +351,8 @@ std::string format_rdata(const MessageParser::MessageView &message, const Messag
         case RecordType::MX:
             if (record.rdata_len >= 2) {
                 std::array<char, 256> scratch{};
-                auto exchange = fiber::dns::decode_name(message.packet_data,
-                                                        message.packet_len,
-                                                        record.rdata_offset + 2,
-                                                        scratch.data(),
-                                                        scratch.size());
+                auto exchange = fiber::dns::decode_name(message.packet_data, message.packet_len,
+                                                        record.rdata_offset + 2, scratch.data(), scratch.size());
                 if (exchange) {
                     return std::to_string(read_be16(record.rdata)) + " " + std::string(exchange->name);
                 }
@@ -384,18 +361,12 @@ std::string format_rdata(const MessageParser::MessageView &message, const Messag
         case RecordType::SOA:
             if (record.rdata_len >= 20) {
                 std::array<char, 256> mname_storage{};
-                auto mname = fiber::dns::decode_name(message.packet_data,
-                                                     message.packet_len,
-                                                     record.rdata_offset,
-                                                     mname_storage.data(),
-                                                     mname_storage.size());
+                auto mname = fiber::dns::decode_name(message.packet_data, message.packet_len, record.rdata_offset,
+                                                     mname_storage.data(), mname_storage.size());
                 if (mname) {
                     std::array<char, 256> rname_storage{};
-                    auto rname = fiber::dns::decode_name(message.packet_data,
-                                                         message.packet_len,
-                                                         mname->next_offset,
-                                                         rname_storage.data(),
-                                                         rname_storage.size());
+                    auto rname = fiber::dns::decode_name(message.packet_data, message.packet_len, mname->next_offset,
+                                                         rname_storage.data(), rname_storage.size());
                     if (rname && rname->next_offset + 20 <= message.packet_len) {
                         const std::uint8_t *tail = message.packet_data + rname->next_offset;
                         return std::string(mname->name) + " " + std::string(rname->name) + " " +
@@ -409,22 +380,18 @@ std::string format_rdata(const MessageParser::MessageView &message, const Messag
         case RecordType::SRV:
             if (record.rdata_len >= 6) {
                 std::array<char, 256> scratch{};
-                auto target = fiber::dns::decode_name(message.packet_data,
-                                                      message.packet_len,
-                                                      record.rdata_offset + 6,
-                                                      scratch.data(),
-                                                      scratch.size());
+                auto target = fiber::dns::decode_name(message.packet_data, message.packet_len, record.rdata_offset + 6,
+                                                      scratch.data(), scratch.size());
                 if (target) {
-                    return std::to_string(read_be16(record.rdata)) + " " +
-                           std::to_string(read_be16(record.rdata + 2)) + " " +
-                           std::to_string(read_be16(record.rdata + 4)) + " " + std::string(target->name);
+                    return std::to_string(read_be16(record.rdata)) + " " + std::to_string(read_be16(record.rdata + 2)) +
+                           " " + std::to_string(read_be16(record.rdata + 4)) + " " + std::string(target->name);
                 }
             }
             break;
         case RecordType::OPT:
-            return "udp=" + std::to_string(record.dns_class) + " ext-rcode=" +
-                   std::to_string((record.ttl >> 24U) & 0xffU) + " version=" +
-                   std::to_string((record.ttl >> 16U) & 0xffU) + " flags=0x" +
+            return "udp=" + std::to_string(record.dns_class) +
+                   " ext-rcode=" + std::to_string((record.ttl >> 24U) & 0xffU) +
+                   " version=" + std::to_string((record.ttl >> 16U) & 0xffU) + " flags=0x" +
                    format_hex_u16(static_cast<std::uint16_t>(record.ttl & 0xffffU));
         case RecordType::HTTPS:
             break;
@@ -450,10 +417,8 @@ void print_short_answers(const MessageParser::MessageView &message) {
     }
 }
 
-void print_record_section(std::string_view title,
-                          const MessageParser::MessageView &message,
-                          const MessageParser::ResourceRecord *records,
-                          std::size_t count) {
+void print_record_section(std::string_view title, const MessageParser::MessageView &message,
+                          const MessageParser::ResourceRecord *records, std::size_t count) {
     if (count == 0) {
         return;
     }
@@ -568,8 +533,7 @@ std::optional<CliOptions> parse_args(int argc, char **argv) {
 
 fiber::async::Task<fiber::common::IoResult<std::size_t>> query_via_tcp(fiber::event::EventLoop &loop,
                                                                        const CliOptions &options,
-                                                                       const QuestionSpec &question,
-                                                                       std::uint8_t *dst,
+                                                                       const QuestionSpec &question, std::uint8_t *dst,
                                                                        std::size_t cap) {
     constexpr std::size_t kRequestCap = 4096;
     std::array<std::uint8_t, kRequestCap> request{};
@@ -580,8 +544,7 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> query_via_tcp(fiber::ev
     }
 
     auto connect_result = co_await fiber::async::timeout_for(
-        [&]() { return fiber::net::TcpStream::connect(loop, options.server); },
-        std::chrono::milliseconds(2000));
+            [&]() { return fiber::net::TcpStream::connect(loop, options.server); }, std::chrono::milliseconds(2000));
     if (!connect_result) {
         co_return std::unexpected(connect_result.error());
     }
@@ -593,8 +556,8 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> query_via_tcp(fiber::ev
     std::size_t prefix_written = 0;
     while (prefix_written < len_prefix.size()) {
         auto write_result = co_await fiber::async::timeout_for(
-            [&]() { return stream.write(len_prefix.data() + prefix_written, len_prefix.size() - prefix_written); },
-            std::chrono::milliseconds(2000));
+                [&]() { return stream.write(len_prefix.data() + prefix_written, len_prefix.size() - prefix_written); },
+                std::chrono::milliseconds(2000));
         if (!write_result) {
             stream.close();
             co_return std::unexpected(write_result.error());
@@ -609,8 +572,8 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> query_via_tcp(fiber::ev
     std::size_t body_written = 0;
     while (body_written < *encoded) {
         auto write_result = co_await fiber::async::timeout_for(
-            [&]() { return stream.write(request.data() + body_written, *encoded - body_written); },
-            std::chrono::milliseconds(2000));
+                [&]() { return stream.write(request.data() + body_written, *encoded - body_written); },
+                std::chrono::milliseconds(2000));
         if (!write_result) {
             stream.close();
             co_return std::unexpected(write_result.error());
@@ -625,8 +588,8 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> query_via_tcp(fiber::ev
     std::size_t prefix_read = 0;
     while (prefix_read < len_prefix.size()) {
         auto read_result = co_await fiber::async::timeout_for(
-            [&]() { return stream.read(len_prefix.data() + prefix_read, len_prefix.size() - prefix_read); },
-            std::chrono::milliseconds(2000));
+                [&]() { return stream.read(len_prefix.data() + prefix_read, len_prefix.size() - prefix_read); },
+                std::chrono::milliseconds(2000));
         auto consumed = consume_stream_read(read_result);
         if (!consumed) {
             stream.close();
@@ -644,8 +607,8 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> query_via_tcp(fiber::ev
     std::size_t total_read = 0;
     while (total_read < response_len) {
         auto read_result = co_await fiber::async::timeout_for(
-            [&]() { return stream.read(dst + total_read, response_len - total_read); },
-            std::chrono::milliseconds(2000));
+                [&]() { return stream.read(dst + total_read, response_len - total_read); },
+                std::chrono::milliseconds(2000));
         auto consumed = consume_stream_read(read_result);
         if (!consumed) {
             stream.close();
@@ -661,8 +624,7 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> query_via_tcp(fiber::ev
 fiber::async::Task<fiber::common::IoResult<std::size_t>> query_via_client(fiber::event::EventLoop &loop,
                                                                           const CliOptions &options,
                                                                           const QuestionSpec &question,
-                                                                          std::uint8_t *dst,
-                                                                          std::size_t cap) {
+                                                                          std::uint8_t *dst, std::size_t cap) {
     fiber::dns::DnsClient client;
     fiber::dns::DnsClient::Options client_options{};
     client_options.server = options.server;
@@ -675,12 +637,9 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> query_via_client(fiber:
     co_return result;
 }
 
-std::string transport_name(const CliOptions &options) {
-    return options.force_tcp ? "tcp" : "udp";
-}
+std::string transport_name(const CliOptions &options) { return options.force_tcp ? "tcp" : "udp"; }
 
-void print_parsed_response(const CliOptions &options,
-                           std::size_t packet_size,
+void print_parsed_response(const CliOptions &options, std::size_t packet_size,
                            const MessageParser::MessageView &message) {
     if (options.short_output) {
         print_short_answers(message);
@@ -690,8 +649,7 @@ void print_parsed_response(const CliOptions &options,
     std::cout << ";; server: " << options.server.to_string() << '\n';
     std::cout << ";; transport: " << transport_name(options) << '\n';
     std::cout << ";; opcode: " << static_cast<unsigned int>(message.header.opcode())
-              << ", status: " << rcode_name(message.header.rcode())
-              << ", id: " << message.header.id << '\n';
+              << ", status: " << rcode_name(message.header.rcode()) << ", id: " << message.header.id << '\n';
     std::cout << ";; flags: " << format_flags(message.header) << "; QUERY: " << message.question_count
               << ", ANSWER: " << message.answer_count << ", AUTHORITY: " << message.authority_count
               << ", ADDITIONAL: " << message.additional_count << '\n';
@@ -765,9 +723,7 @@ int main(int argc, char **argv) {
 
     fiber::event::EventLoop loop;
     int exit_code = 0;
-    fiber::async::spawn(loop, [&]() {
-        return run_query(&loop, &*options, &exit_code);
-    });
+    fiber::async::spawn(loop, [&]() { return run_query(&loop, &*options, &exit_code); });
     loop.run();
     return exit_code;
 }

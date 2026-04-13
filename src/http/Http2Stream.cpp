@@ -35,7 +35,8 @@ common::IoErr Http2Stream::on_headers_payload_recv(const mem::IoBuf &payload, bo
     }
 
     if (payload.readable() != 0) {
-        common::IoErr err = conn_->inbound_hpack_decoder().decode(payload.readable_data(), payload.readable(), end_headers);
+        common::IoErr err =
+                conn_->inbound_hpack_decoder().decode(payload.readable_data(), payload.readable(), end_headers);
         if (err != common::IoErr::None) {
             return err;
         }

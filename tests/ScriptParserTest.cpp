@@ -3,7 +3,6 @@
 #include <string_view>
 
 #include "script/Library.h"
-#include "script/parse/Parser.h"
 #include "script/ast/BinaryOperator.h"
 #include "script/ast/Block.h"
 #include "script/ast/ExpressionStatement.h"
@@ -15,39 +14,39 @@
 #include "script/ast/ReturnStatement.h"
 #include "script/ast/UnaryOperator.h"
 #include "script/ast/VariableReference.h"
+#include "script/parse/Parser.h"
 
 namespace {
 
 class TestLibrary final : public fiber::script::Library {
 public:
     Function *find_func(std::string_view name) override {
-        (void)name;
+        (void) name;
         return nullptr;
     }
 
     AsyncFunction *find_async_func(std::string_view name) override {
-        (void)name;
+        (void) name;
         return nullptr;
     }
 
     Constant *find_constant(std::string_view namespace_name, std::string_view key) override {
-        (void)namespace_name;
-        (void)key;
+        (void) namespace_name;
+        (void) key;
         return nullptr;
     }
 
     AsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) override {
-        (void)namespace_name;
-        (void)key;
+        (void) namespace_name;
+        (void) key;
         return nullptr;
     }
 
-    DirectiveDef *find_directive_def(std::string_view type,
-                                     std::string_view name,
+    DirectiveDef *find_directive_def(std::string_view type, std::string_view name,
                                      const std::vector<fiber::json::JsValue> &literals) override {
-        (void)type;
-        (void)name;
-        (void)literals;
+        (void) type;
+        (void) name;
+        (void) literals;
         return nullptr;
     }
 };
@@ -273,12 +272,14 @@ TEST(ScriptParserTest, ParseIfStatement) {
     const auto *then_block = dynamic_cast<const fiber::script::ast::Block *>(stmt->then_branch());
     ASSERT_NE(then_block, nullptr);
     ASSERT_EQ(then_block->statements().size(), 1u);
-    EXPECT_NE(dynamic_cast<const fiber::script::ast::ReturnStatement *>(then_block->statements().front().get()), nullptr);
+    EXPECT_NE(dynamic_cast<const fiber::script::ast::ReturnStatement *>(then_block->statements().front().get()),
+              nullptr);
 
     const auto *else_block = dynamic_cast<const fiber::script::ast::Block *>(stmt->else_branch());
     ASSERT_NE(else_block, nullptr);
     ASSERT_EQ(else_block->statements().size(), 1u);
-    EXPECT_NE(dynamic_cast<const fiber::script::ast::ReturnStatement *>(else_block->statements().front().get()), nullptr);
+    EXPECT_NE(dynamic_cast<const fiber::script::ast::ReturnStatement *>(else_block->statements().front().get()),
+              nullptr);
 }
 
 TEST(ScriptParserTest, ParseTypeofUnary) {

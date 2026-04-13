@@ -23,15 +23,15 @@ struct ProxySettingsBuilder {
 
 ConfigError make_error(const DirectiveNode &directive, std::string message) {
     return ConfigError{
-        .message = std::move(message),
-        .location = directive.location,
+            .message = std::move(message),
+            .location = directive.location,
     };
 }
 
 std::string to_lowercase(std::string_view value) {
     std::string lowered;
     lowered.reserve(value.size());
-    for (char ch : value) {
+    for (char ch: value) {
         if (ch >= 'A' && ch <= 'Z') {
             lowered.push_back(static_cast<char>(ch - 'A' + 'a'));
         } else {
@@ -41,9 +41,7 @@ std::string to_lowercase(std::string_view value) {
     return lowered;
 }
 
-bool contains_variable(std::string_view value) {
-    return value.find('$') != std::string_view::npos;
-}
+bool contains_variable(std::string_view value) { return value.find('$') != std::string_view::npos; }
 
 std::expected<std::size_t, ConfigError> parse_positive_size(const DirectiveNode &directive, std::string_view value,
                                                             const char *field_name) {
@@ -73,8 +71,8 @@ std::expected<std::uint16_t, ConfigError> parse_port(const DirectiveNode &direct
     return static_cast<std::uint16_t>(*parsed);
 }
 
-std::expected<std::chrono::milliseconds, ConfigError> parse_duration(const DirectiveNode &directive, std::string_view value,
-                                                                     const char *field_name) {
+std::expected<std::chrono::milliseconds, ConfigError> parse_duration(const DirectiveNode &directive,
+                                                                     std::string_view value, const char *field_name) {
     if (value.empty()) {
         return std::unexpected(make_error(directive, std::string(field_name) + " must not be empty"));
     }
@@ -151,7 +149,7 @@ std::expected<ListenAddress, ConfigError> parse_listen_address(const DirectiveNo
         return std::unexpected(make_error(directive, "listen expects '<port>' or '<port> ssl'"));
     }
 
-    for (const auto &arg : directive.args) {
+    for (const auto &arg: directive.args) {
         if (contains_variable(arg)) {
             return std::unexpected(make_error(directive, "listen does not support variables in V1"));
         }
@@ -189,7 +187,7 @@ std::expected<ListenAddress, ConfigError> parse_listen_address(const DirectiveNo
 }
 
 void upsert_header(std::vector<HeaderOverride> &headers, HeaderOverride header) {
-    for (auto &existing : headers) {
+    for (auto &existing: headers) {
         if (existing.lowercase_name == header.lowercase_name) {
             existing = std::move(header);
             return;
@@ -216,7 +214,7 @@ ProxySettings merge_proxy_settings(const ProxySettingsBuilder &base, const Proxy
     settings.proxy_buffering = overrides.proxy_buffering;
 
     settings.set_headers = base.set_headers;
-    for (const auto &header : overrides.set_headers) {
+    for (const auto &header: overrides.set_headers) {
         upsert_header(settings.set_headers, header);
     }
     return settings;
@@ -235,9 +233,9 @@ std::expected<HeaderOverride, ConfigError> parse_proxy_set_header(const Directiv
     }
 
     return HeaderOverride{
-        .name = directive.args[0],
-        .lowercase_name = to_lowercase(directive.args[0]),
-        .value = directive.args[1],
+            .name = directive.args[0],
+            .lowercase_name = to_lowercase(directive.args[0]),
+            .value = directive.args[1],
     };
 }
 
@@ -324,7 +322,7 @@ std::expected<UpstreamConfig, ConfigError> parse_upstream(const DirectiveNode &d
     UpstreamConfig upstream;
     upstream.name = directive.args[0];
 
-    for (const auto &child : directive.children) {
+    for (const auto &child: directive.children) {
         if (child.has_block) {
             return std::unexpected(make_error(child, "nested blocks are not allowed inside upstream"));
         }
@@ -341,8 +339,8 @@ std::expected<UpstreamConfig, ConfigError> parse_upstream(const DirectiveNode &d
                 return std::unexpected(host_port.error());
             }
             upstream.servers.push_back({
-                .host = std::move(host_port->host),
-                .port = host_port->port,
+                    .host = std::move(host_port->host),
+                    .port = host_port->port,
             });
             continue;
         }
@@ -425,7 +423,7 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
     ProxySettingsBuilder location_proxy_defaults;
     bool has_proxy_pass = false;
 
-    for (const auto &child : directive.children) {
+    for (const auto &child: directive.children) {
         if (child.has_block) {
             return std::unexpected(make_error(child, "nested blocks are not allowed inside location"));
         }
@@ -487,12 +485,12 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
     bool seen_certificate = false;
     bool seen_certificate_key = false;
 
-    for (const auto &child : directive.children) {
+    for (const auto &child: directive.children) {
         if (child.name == "server_name") {
             if (child.has_block || child.args.empty()) {
                 return std::unexpected(make_error(child, "server_name expects one or more names"));
             }
-            for (const auto &name : child.args) {
+            for (const auto &name: child.args) {
                 if (contains_variable(name)) {
                     return std::unexpected(make_error(child, "server_name does not support variables in V1"));
                 }
@@ -587,7 +585,7 @@ std::expected<HttpConfig, ConfigError> parse_http(const DirectiveNode &directive
     std::unordered_set<std::string> upstream_names;
     bool has_tls_listen = false;
 
-    for (const auto &child : directive.children) {
+    for (const auto &child: directive.children) {
         if (child.name == "listen") {
             auto listen = parse_listen_address(child);
             if (!listen) {
@@ -626,25 +624,25 @@ std::expected<HttpConfig, ConfigError> parse_http(const DirectiveNode &directive
         return std::unexpected(make_error(directive, "http must define at least one server"));
     }
 
-    for (const auto &server : http.servers) {
+    for (const auto &server: http.servers) {
         if (has_tls_listen && !has_tls_identity(server)) {
             return std::unexpected(ConfigError{
-                .message = "server must define certificate and certificate_key when any ssl listen is configured",
-                .location = server.location,
+                    .message = "server must define certificate and certificate_key when any ssl listen is configured",
+                    .location = server.location,
             });
         }
         if (!has_tls_listen && has_tls_identity(server)) {
             return std::unexpected(ConfigError{
-                .message = "certificate directives require at least one ssl listen in http",
-                .location = server.location,
+                    .message = "certificate directives require at least one ssl listen in http",
+                    .location = server.location,
             });
         }
-        for (const auto &location : server.locations) {
+        for (const auto &location: server.locations) {
             if (location.proxy_pass.kind == ProxyPassKind::NamedUpstream &&
                 !upstream_names.contains(location.proxy_pass.upstream_name)) {
                 return std::unexpected(ConfigError{
-                    .message = "proxy_pass references unknown upstream: " + location.proxy_pass.upstream_name,
-                    .location = location.proxy_pass.location,
+                        .message = "proxy_pass references unknown upstream: " + location.proxy_pass.upstream_name,
+                        .location = location.proxy_pass.location,
                 });
             }
         }
@@ -660,7 +658,7 @@ std::expected<MainConfig, ConfigError> SemanticAnalyzer::analyze(const Document 
     bool seen_http = false;
     bool seen_worker_processes = false;
 
-    for (const auto &directive : document.directives) {
+    for (const auto &directive: document.directives) {
         if (directive.name == "worker_processes") {
             if (directive.has_block || directive.args.size() != 1) {
                 return std::unexpected(make_error(directive, "worker_processes expects exactly one integer argument"));
@@ -695,8 +693,8 @@ std::expected<MainConfig, ConfigError> SemanticAnalyzer::analyze(const Document 
 
     if (!seen_http) {
         return std::unexpected(ConfigError{
-            .message = "missing required http block",
-            .location = SourceLocation{},
+                .message = "missing required http block",
+                .location = SourceLocation{},
         });
     }
 

@@ -54,7 +54,8 @@ public:
 
     [[nodiscard]] bool is_static_entry(const EntryView *entry) const noexcept;
     [[nodiscard]] bool is_policy_entry(const EntryView *entry) const noexcept;
-    [[nodiscard]] FindResult find(std::string_view name, std::uint64_t name_hash, std::string_view value) const noexcept;
+    [[nodiscard]] FindResult find(std::string_view name, std::uint64_t name_hash,
+                                  std::string_view value) const noexcept;
 
 private:
     static constexpr std::uint32_t kInvalidId = 0xffffffffU;

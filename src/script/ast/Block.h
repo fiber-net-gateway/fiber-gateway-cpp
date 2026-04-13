@@ -20,21 +20,13 @@ enum class BlockType : std::uint8_t {
 class Block : public Statement {
 public:
     Block() = default;
-    Block(std::int32_t start, std::int32_t end, BlockType type)
-        : Statement(start, end), type_(type) {
-    }
+    Block(std::int32_t start, std::int32_t end, BlockType type) : Statement(start, end), type_(type) {}
 
-    BlockType type() const {
-        return type_;
-    }
+    BlockType type() const { return type_; }
 
-    const std::vector<std::unique_ptr<Statement>> &statements() const {
-        return statements_;
-    }
+    const std::vector<std::unique_ptr<Statement>> &statements() const { return statements_; }
 
-    void add_statement(std::unique_ptr<Statement> stmt) {
-        statements_.push_back(std::move(stmt));
-    }
+    void add_statement(std::unique_ptr<Statement> stmt) { statements_.push_back(std::move(stmt)); }
 
     void set_range(std::int32_t start, std::int32_t end) {
         start_ = start;

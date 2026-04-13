@@ -6,8 +6,7 @@ namespace fiber::async {
 
 thread_local CoroutineFramePool *CoroutineFramePool::current_ = nullptr;
 
-CoroutineFramePool::CoroutineFramePool(mem::Allocator *allocator)
-    : allocator_(allocator) {
+CoroutineFramePool::CoroutineFramePool(mem::Allocator *allocator) : allocator_(allocator) {
     static mem::Allocator default_allocator{};
     if (!allocator_) {
         allocator_ = &default_allocator;
@@ -68,13 +67,9 @@ void CoroutineFramePool::deallocate(void *ptr) noexcept {
     }
 }
 
-CoroutineFramePool *CoroutineFramePool::current() noexcept {
-    return current_;
-}
+CoroutineFramePool *CoroutineFramePool::current() noexcept { return current_; }
 
-void CoroutineFramePool::set_current(CoroutineFramePool *pool) noexcept {
-    current_ = pool;
-}
+void CoroutineFramePool::set_current(CoroutineFramePool *pool) noexcept { current_ = pool; }
 
 std::size_t CoroutineFramePool::select_class(std::size_t total) noexcept {
     for (std::size_t i = 0; i < kClassCount; ++i) {
@@ -114,13 +109,11 @@ void CoroutineFramePool::free_block(std::size_t class_id, void *block) noexcept 
     free_lists_[class_id] = node;
 }
 
-CoroutineFrameAllocScope::CoroutineFrameAllocScope(CoroutineFramePool *pool) noexcept
-    : prev_(CoroutineFramePool::current()) {
+CoroutineFrameAllocScope::CoroutineFrameAllocScope(CoroutineFramePool *pool) noexcept :
+    prev_(CoroutineFramePool::current()) {
     CoroutineFramePool::set_current(pool);
 }
 
-CoroutineFrameAllocScope::~CoroutineFrameAllocScope() {
-    CoroutineFramePool::set_current(prev_);
-}
+CoroutineFrameAllocScope::~CoroutineFrameAllocScope() { CoroutineFramePool::set_current(prev_); }
 
 } // namespace fiber::async

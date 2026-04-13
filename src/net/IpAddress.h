@@ -24,18 +24,10 @@ public:
     static IpAddress loopback_v4();
     static IpAddress loopback_v6();
 
-    [[nodiscard]] IpFamily family() const noexcept {
-        return family_;
-    }
-    [[nodiscard]] bool is_v4() const noexcept {
-        return family_ == IpFamily::V4;
-    }
-    [[nodiscard]] bool is_v6() const noexcept {
-        return family_ == IpFamily::V6;
-    }
-    [[nodiscard]] std::uint32_t scope_id() const noexcept {
-        return scope_id_;
-    }
+    [[nodiscard]] IpFamily family() const noexcept { return family_; }
+    [[nodiscard]] bool is_v4() const noexcept { return family_ == IpFamily::V4; }
+    [[nodiscard]] bool is_v6() const noexcept { return family_ == IpFamily::V6; }
+    [[nodiscard]] std::uint32_t scope_id() const noexcept { return scope_id_; }
     [[nodiscard]] bool is_loopback() const noexcept;
     [[nodiscard]] bool is_unspecified() const noexcept;
     [[nodiscard]] bool is_multicast() const noexcept;

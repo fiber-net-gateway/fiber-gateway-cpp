@@ -28,9 +28,7 @@ std::size_t saturating_add(std::size_t lhs, std::size_t rhs) {
     return lhs + rhs;
 }
 
-GcMark flip_mark(GcMark mark) {
-    return (mark == GcMark::GcMark_0) ? GcMark::GcMark_1 : GcMark::GcMark_0;
-}
+GcMark flip_mark(GcMark mark) { return (mark == GcMark::GcMark_0) ? GcMark::GcMark_1 : GcMark::GcMark_0; }
 
 std::uint64_t hash_code_units(const GcString *str) {
     std::uint64_t hash = kFnvOffsetBasis;
@@ -114,8 +112,7 @@ std::size_t bucket_count_for_entries(std::size_t entry_capacity) {
     if (entry_capacity == 0) {
         return 0;
     }
-    std::size_t needed =
-        (entry_capacity * kMaxLoadDenominator + kMaxLoadNumerator - 1) / kMaxLoadNumerator;
+    std::size_t needed = (entry_capacity * kMaxLoadDenominator + kMaxLoadNumerator - 1) / kMaxLoadNumerator;
     if (needed < kMinBucketCount) {
         needed = kMinBucketCount;
     }
@@ -129,17 +126,11 @@ std::size_t string_storage_bytes(std::size_t len, GcStringEncoding encoding) {
     return len + 1;
 }
 
-std::size_t array_storage_bytes(std::size_t capacity) {
-    return sizeof(JsValue) * capacity;
-}
+std::size_t array_storage_bytes(std::size_t capacity) { return sizeof(JsValue) * capacity; }
 
-std::size_t entry_storage_bytes(std::size_t capacity) {
-    return sizeof(GcObjectEntry) * capacity;
-}
+std::size_t entry_storage_bytes(std::size_t capacity) { return sizeof(GcObjectEntry) * capacity; }
 
-std::size_t bucket_storage_bytes(std::size_t bucket_count) {
-    return sizeof(std::int32_t) * bucket_count;
-}
+std::size_t bucket_storage_bytes(std::size_t bucket_count) { return sizeof(std::int32_t) * bucket_count; }
 
 std::size_t next_array_capacity(const GcArray *arr, std::size_t expected) {
     if (!arr || expected <= arr->capacity) {
@@ -217,7 +208,7 @@ void append_code_unit(DecodedString &out, char16_t unit) {
     if (out.is_byte) {
         out.is_byte = false;
         out.u16.reserve(out.bytes.size() + 1);
-        for (std::uint8_t byte : out.bytes) {
+        for (std::uint8_t byte: out.bytes) {
             out.u16.push_back(static_cast<char16_t>(byte));
         }
         out.bytes.clear();
@@ -625,13 +616,9 @@ std::size_t gc_estimate_string_bytes(std::size_t len, GcStringEncoding encoding)
     return sizeof(GcString) + string_storage_bytes(len, encoding);
 }
 
-std::size_t gc_estimate_binary_bytes(std::size_t len) {
-    return sizeof(GcBinary) + len;
-}
+std::size_t gc_estimate_binary_bytes(std::size_t len) { return sizeof(GcBinary) + len; }
 
-std::size_t gc_estimate_array_bytes(std::size_t capacity) {
-    return sizeof(GcArray) + array_storage_bytes(capacity);
-}
+std::size_t gc_estimate_array_bytes(std::size_t capacity) { return sizeof(GcArray) + array_storage_bytes(capacity); }
 
 std::size_t gc_estimate_array_growth_bytes(const GcArray *arr, std::size_t expected) {
     if (!arr) {
@@ -669,13 +656,9 @@ std::size_t gc_estimate_object_growth_bytes(const GcObject *obj, std::size_t exp
     return delta;
 }
 
-std::size_t gc_estimate_iterator_bytes() {
-    return sizeof(GcIterator);
-}
+std::size_t gc_estimate_iterator_bytes() { return sizeof(GcIterator); }
 
-std::size_t gc_estimate_object_snapshot_bytes(std::size_t entry_count) {
-    return sizeof(GcString *) * entry_count;
-}
+std::size_t gc_estimate_object_snapshot_bytes(std::size_t entry_count) { return sizeof(GcString *) * entry_count; }
 
 GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len) {
     auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcKind::String);
@@ -693,7 +676,8 @@ GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_
         return nullptr;
     }
     if (len > 0) {
-        str->data8 = static_cast<std::uint8_t *>(gc_alloc_extra(heap, string_storage_bytes(len, GcStringEncoding::Byte)));
+        str->data8 =
+                static_cast<std::uint8_t *>(gc_alloc_extra(heap, string_storage_bytes(len, GcStringEncoding::Byte)));
         if (!str->data8) {
             heap->alloc.free(str);
             return nullptr;
@@ -717,7 +701,8 @@ GcString *gc_new_string_bytes_uninit(GcHeap *heap, std::size_t len) {
     str->hash_valid = false;
     str->data8 = nullptr;
     if (len > 0) {
-        str->data8 = static_cast<std::uint8_t *>(gc_alloc_extra(heap, string_storage_bytes(len, GcStringEncoding::Byte)));
+        str->data8 =
+                static_cast<std::uint8_t *>(gc_alloc_extra(heap, string_storage_bytes(len, GcStringEncoding::Byte)));
         if (!str->data8) {
             heap->alloc.free(str);
             return nullptr;
@@ -744,8 +729,7 @@ GcString *gc_new_string_utf16(GcHeap *heap, const char16_t *data, std::size_t le
         return nullptr;
     }
     if (len > 0) {
-        str->data16 =
-            static_cast<char16_t *>(gc_alloc_extra(heap, string_storage_bytes(len, GcStringEncoding::Utf16)));
+        str->data16 = static_cast<char16_t *>(gc_alloc_extra(heap, string_storage_bytes(len, GcStringEncoding::Utf16)));
         if (!str->data16) {
             heap->alloc.free(str);
             return nullptr;
@@ -769,8 +753,7 @@ GcString *gc_new_string_utf16_uninit(GcHeap *heap, std::size_t len) {
     str->hash_valid = false;
     str->data16 = nullptr;
     if (len > 0) {
-        str->data16 =
-            static_cast<char16_t *>(gc_alloc_extra(heap, string_storage_bytes(len, GcStringEncoding::Utf16)));
+        str->data16 = static_cast<char16_t *>(gc_alloc_extra(heap, string_storage_bytes(len, GcStringEncoding::Utf16)));
         if (!str->data16) {
             heap->alloc.free(str);
             return nullptr;
@@ -865,8 +848,7 @@ bool gc_string_to_utf8(const GcString *str, std::string &out) {
             if (low < 0xDC00 || low > 0xDFFF) {
                 return false;
             }
-            std::uint32_t codepoint = 0x10000 +
-                                      ((static_cast<std::uint32_t>(unit) - 0xD800) << 10) +
+            std::uint32_t codepoint = 0x10000 + ((static_cast<std::uint32_t>(unit) - 0xD800) << 10) +
                                       (static_cast<std::uint32_t>(low) - 0xDC00);
             *dst++ = static_cast<char>(0xF0 | (codepoint >> 18));
             *dst++ = static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
@@ -1143,10 +1125,8 @@ GcException *gc_new_exception(GcHeap *heap, std::int64_t position, GcString *nam
     return gc_new_exception(heap, position, name, message, JsValue::make_undefined());
 }
 
-GcException *gc_new_exception(GcHeap *heap, std::int64_t position,
-                              const char *name, std::size_t name_len,
-                              const char *message, std::size_t message_len,
-                              JsValue meta) {
+GcException *gc_new_exception(GcHeap *heap, std::int64_t position, const char *name, std::size_t name_len,
+                              const char *message, std::size_t message_len, JsValue meta) {
     GcString *name_str = nullptr;
     GcString *message_str = nullptr;
     if (name || name_len > 0) {
@@ -1170,8 +1150,7 @@ GcException *gc_new_exception(GcHeap *heap, std::int64_t position,
     return gc_new_exception(heap, position, name_str, message_str, std::move(meta));
 }
 
-GcException *gc_new_exception(GcHeap *heap, std::int64_t position,
-                              const char *name, std::size_t name_len,
+GcException *gc_new_exception(GcHeap *heap, std::int64_t position, const char *name, std::size_t name_len,
                               const char *message, std::size_t message_len) {
     return gc_new_exception(heap, position, name, name_len, message, message_len, JsValue::make_undefined());
 }
@@ -1379,8 +1358,7 @@ bool gc_object_reserve(GcHeap *heap, GcObject *obj, std::size_t expected) {
             return false;
         }
     }
-    std::size_t desired_bucket_count =
-        bucket_count_for_entries(std::max(expected, obj->size));
+    std::size_t desired_bucket_count = bucket_count_for_entries(std::max(expected, obj->size));
     if (desired_bucket_count > obj->bucket_count) {
         if (!rehash_buckets(heap, obj, desired_bucket_count)) {
             return false;
@@ -1529,17 +1507,11 @@ void gc_collect(GcHeap *heap, JsValue **roots, std::size_t root_count) {
     gc_sweep_unmarked(heap);
 }
 
-std::size_t gc_bytes_used(const GcHeap &heap) {
-    return heap.bytes;
-}
+std::size_t gc_bytes_used(const GcHeap &heap) { return heap.bytes; }
 
-std::size_t gc_threshold(const GcHeap &heap) {
-    return heap.threshold;
-}
+std::size_t gc_threshold(const GcHeap &heap) { return heap.threshold; }
 
-void gc_set_threshold(GcHeap &heap, std::size_t value) {
-    heap.threshold = value;
-}
+void gc_set_threshold(GcHeap &heap, std::size_t value) { heap.threshold = value; }
 
 void GcRootSet::add_global(JsValue *value) {
     if (value) {
@@ -1557,9 +1529,7 @@ void GcRootSet::remove_global(JsValue *value) {
     }
 }
 
-void GcRootSet::push_frame() {
-    frames_.push_back(stack_.size());
-}
+void GcRootSet::push_frame() { frames_.push_back(stack_.size()); }
 
 void GcRootSet::pop_frame() {
     if (frames_.empty()) {
@@ -1611,16 +1581,16 @@ void GcRootSet::remove_provider(RootProvider *provider) {
 }
 
 void GcRootSet::visit_all(RootVisitor &visitor) {
-    for (auto *value : globals_) {
+    for (auto *value: globals_) {
         visitor.visit(value);
     }
-    for (auto *value : stack_) {
+    for (auto *value: stack_) {
         visitor.visit(value);
     }
-    for (auto *value : temps_) {
+    for (auto *value: temps_) {
         visitor.visit(value);
     }
-    for (auto *provider : providers_) {
+    for (auto *provider: providers_) {
         if (provider) {
             provider->visit_roots(visitor);
         }
@@ -1648,15 +1618,13 @@ void gc_collect(GcHeap &heap, GcRootSet &roots) {
     gc_sweep_unmarked(&heap);
 }
 
-GcRootHandle::GcRootHandle(GcRootSet &roots, JsValue *value)
-    : roots_(&roots), value_(value) {
+GcRootHandle::GcRootHandle(GcRootSet &roots, JsValue *value) : roots_(&roots), value_(value) {
     if (roots_ && value_) {
         roots_->add_temp_root(value_);
     }
 }
 
-GcRootHandle::GcRootHandle(GcRootHandle &&other) noexcept
-    : roots_(other.roots_), value_(other.value_) {
+GcRootHandle::GcRootHandle(GcRootHandle &&other) noexcept : roots_(other.roots_), value_(other.value_) {
     other.roots_ = nullptr;
     other.value_ = nullptr;
 }
@@ -1672,9 +1640,7 @@ GcRootHandle &GcRootHandle::operator=(GcRootHandle &&other) noexcept {
     return *this;
 }
 
-GcRootHandle::~GcRootHandle() {
-    reset();
-}
+GcRootHandle::~GcRootHandle() { reset(); }
 
 void GcRootHandle::reset() {
     if (roots_ && value_) {

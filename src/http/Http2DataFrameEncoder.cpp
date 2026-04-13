@@ -34,7 +34,7 @@ common::IoErr Http2DataFrameEncoder::encode(Http2OutboundEncodeTarget &target, m
     std::size_t remaining = payload_bytes;
     while (remaining != 0) {
         const std::uint32_t frame_payload_bytes =
-            static_cast<std::uint32_t>(std::min<std::size_t>(remaining, options_.max_frame_size));
+                static_cast<std::uint32_t>(std::min<std::size_t>(remaining, options_.max_frame_size));
         const bool end_stream = options_.end_stream && remaining == frame_payload_bytes;
         err = append_frame(target, payload, frame_payload_bytes, end_stream);
         if (err != common::IoErr::None) {
@@ -56,8 +56,8 @@ common::IoErr Http2DataFrameEncoder::validate_options() const noexcept {
 common::IoErr Http2DataFrameEncoder::append_frame(Http2OutboundEncodeTarget &target, mem::IoBufChain &payload,
                                                   std::uint32_t payload_bytes, bool end_stream) noexcept {
     std::array<std::uint8_t, 9> header{};
-    encode_http2_frame_header(header.data(), payload_bytes, Http2FrameType::Data,
-                              end_stream ? kFlagEndStream : 0, options_.stream_id);
+    encode_http2_frame_header(header.data(), payload_bytes, Http2FrameType::Data, end_stream ? kFlagEndStream : 0,
+                              options_.stream_id);
     common::IoErr err = target.append_copy(header.data(), header.size());
     if (err != common::IoErr::None) {
         return err;

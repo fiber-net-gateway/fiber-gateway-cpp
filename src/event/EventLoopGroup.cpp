@@ -8,8 +8,7 @@
 
 namespace fiber::event {
 
-EventLoopGroup::EventLoopGroup(std::size_t size)
-    : threads_(size) {
+EventLoopGroup::EventLoopGroup(std::size_t size) : threads_(size) {
     FIBER_ASSERT(size > 0);
     loops_.reserve(size);
     for (std::size_t i = 0; i < size; ++i) {
@@ -22,13 +21,9 @@ EventLoopGroup::~EventLoopGroup() {
     join();
 }
 
-void EventLoopGroup::start() {
-    start_with_mask(nullptr);
-}
+void EventLoopGroup::start() { start_with_mask(nullptr); }
 
-void EventLoopGroup::start(const fiber::async::SignalSet &mask) {
-    start_with_mask(&mask);
-}
+void EventLoopGroup::start(const fiber::async::SignalSet &mask) { start_with_mask(&mask); }
 
 void EventLoopGroup::start_with_mask(const fiber::async::SignalSet *mask) {
     running_.store(true, std::memory_order_release);
@@ -50,7 +45,7 @@ void EventLoopGroup::start_with_mask(const fiber::async::SignalSet *mask) {
 }
 
 void EventLoopGroup::stop() {
-    for (auto &loop : loops_) {
+    for (auto &loop: loops_) {
         loop->stop();
     }
 }

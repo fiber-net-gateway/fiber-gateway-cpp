@@ -9,8 +9,8 @@
 
 #include "async/CoroutinePromiseBase.h"
 #include "async/RWMutex.h"
-#include "async/Spawn.h"
 #include "async/Sleep.h"
+#include "async/Spawn.h"
 #include "event/EventLoopGroup.h"
 
 namespace {
@@ -20,37 +20,25 @@ using DetachedTask = fiber::async::DetachedTask;
 class ManualTask {
 public:
     struct promise_type : fiber::async::CoroutinePromiseBase {
-        ManualTask get_return_object() {
-            return ManualTask{handle_type::from_promise(*this)};
-        }
+        ManualTask get_return_object() { return ManualTask{handle_type::from_promise(*this)}; }
 
-        std::suspend_always initial_suspend() noexcept {
-            return {};
-        }
+        std::suspend_always initial_suspend() noexcept { return {}; }
 
-        std::suspend_always final_suspend() noexcept {
-            return {};
-        }
+        std::suspend_always final_suspend() noexcept { return {}; }
 
-        void return_void() noexcept {
-        }
+        void return_void() noexcept {}
 
-        void unhandled_exception() {
-            std::terminate();
-        }
+        void unhandled_exception() { std::terminate(); }
     };
 
     using handle_type = std::coroutine_handle<promise_type>;
 
-    explicit ManualTask(handle_type handle) : handle_(handle) {
-    }
+    explicit ManualTask(handle_type handle) : handle_(handle) {}
 
     ManualTask(const ManualTask &) = delete;
     ManualTask &operator=(const ManualTask &) = delete;
 
-    ManualTask(ManualTask &&other) noexcept : handle_(other.handle_) {
-        other.handle_ = nullptr;
-    }
+    ManualTask(ManualTask &&other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
 
     ManualTask &operator=(ManualTask &&other) noexcept {
         if (this == &other) {
@@ -80,12 +68,9 @@ private:
     handle_type handle_{};
 };
 
-DetachedTask hold_read_lock(fiber::async::RWMutex *mutex,
-                            std::atomic<int> *active_readers,
-                            std::promise<int> *second_reader,
-                            std::atomic<bool> *reported_second,
-                            std::atomic<int> *completed,
-                            std::promise<void> *done) {
+DetachedTask hold_read_lock(fiber::async::RWMutex *mutex, std::atomic<int> *active_readers,
+                            std::promise<int> *second_reader, std::atomic<bool> *reported_second,
+                            std::atomic<int> *completed, std::promise<void> *done) {
     auto guard = co_await mutex->lock_shared();
     int current = active_readers->fetch_add(1, std::memory_order_relaxed) + 1;
     if (current == 2 && !reported_second->exchange(true, std::memory_order_relaxed)) {
@@ -100,8 +85,7 @@ DetachedTask hold_read_lock(fiber::async::RWMutex *mutex,
     co_return;
 }
 
-DetachedTask hold_read_then_write(fiber::async::RWMutex *mutex,
-                                  std::atomic<int> *state) {
+DetachedTask hold_read_then_write(fiber::async::RWMutex *mutex, std::atomic<int> *state) {
     auto guard = co_await mutex->lock_shared();
     state->store(1, std::memory_order_relaxed);
     co_await fiber::async::sleep(std::chrono::milliseconds(30));
@@ -109,17 +93,14 @@ DetachedTask hold_read_then_write(fiber::async::RWMutex *mutex,
     co_return;
 }
 
-DetachedTask wait_write_lock(fiber::async::RWMutex *mutex,
-                             std::atomic<int> *state,
-                             std::promise<int> *promise) {
+DetachedTask wait_write_lock(fiber::async::RWMutex *mutex, std::atomic<int> *state, std::promise<int> *promise) {
     auto guard = co_await mutex->lock();
     promise->set_value(state->load(std::memory_order_relaxed));
     fiber::event::EventLoop::current().stop();
     co_return;
 }
 
-DetachedTask hold_reader_with_signal(fiber::async::RWMutex *mutex,
-                                     std::promise<void> *locked,
+DetachedTask hold_reader_with_signal(fiber::async::RWMutex *mutex, std::promise<void> *locked,
                                      std::chrono::steady_clock::duration delay) {
     auto guard = co_await mutex->lock_shared();
     locked->set_value();
@@ -127,25 +108,21 @@ DetachedTask hold_reader_with_signal(fiber::async::RWMutex *mutex,
     co_return;
 }
 
-DetachedTask wait_writer_order(fiber::async::RWMutex *mutex,
-                               std::atomic<int> *order) {
+DetachedTask wait_writer_order(fiber::async::RWMutex *mutex, std::atomic<int> *order) {
     auto guard = co_await mutex->lock();
     order->store(1, std::memory_order_relaxed);
     co_await fiber::async::sleep(std::chrono::milliseconds(20));
     co_return;
 }
 
-DetachedTask wait_reader_order(fiber::async::RWMutex *mutex,
-                               std::atomic<int> *order,
-                               std::promise<int> *promise) {
+DetachedTask wait_reader_order(fiber::async::RWMutex *mutex, std::atomic<int> *order, std::promise<int> *promise) {
     auto guard = co_await mutex->lock_shared();
     promise->set_value(order->fetch_add(1, std::memory_order_relaxed) + 1);
     fiber::event::EventLoop::current().stop();
     co_return;
 }
 
-DetachedTask hold_writer_with_signal(fiber::async::RWMutex *mutex,
-                                     std::promise<void> *locked,
+DetachedTask hold_writer_with_signal(fiber::async::RWMutex *mutex, std::promise<void> *locked,
                                      std::chrono::steady_clock::duration delay) {
     auto guard = co_await mutex->lock();
     locked->set_value();
@@ -153,22 +130,19 @@ DetachedTask hold_writer_with_signal(fiber::async::RWMutex *mutex,
     co_return;
 }
 
-DetachedTask wait_read_lock_thread(fiber::async::RWMutex *mutex,
-                                   std::promise<std::thread::id> *resumed) {
+DetachedTask wait_read_lock_thread(fiber::async::RWMutex *mutex, std::promise<std::thread::id> *resumed) {
     auto guard = co_await mutex->lock_shared();
     resumed->set_value(std::this_thread::get_id());
     co_return;
 }
 
-ManualTask wait_write_then_hit(fiber::async::RWMutex *mutex,
-                               std::atomic<int> *hits) {
+ManualTask wait_write_then_hit(fiber::async::RWMutex *mutex, std::atomic<int> *hits) {
     auto guard = co_await mutex->lock();
     hits->fetch_add(1, std::memory_order_relaxed);
     co_return;
 }
 
-DetachedTask hold_read_and_finish(fiber::async::RWMutex *mutex,
-                                  std::promise<void> *done) {
+DetachedTask hold_read_and_finish(fiber::async::RWMutex *mutex, std::promise<void> *done) {
     {
         auto guard = co_await mutex->lock_shared();
         co_await fiber::async::sleep(std::chrono::milliseconds(30));
@@ -250,9 +224,8 @@ TEST(RWMutexTest, WaitingWriterBlocksLaterReaders) {
     auto future = promise.get_future();
 
     group.start();
-    fiber::async::spawn(group.at(0), [&]() {
-        return hold_reader_with_signal(&mutex, &locked, std::chrono::milliseconds(50));
-    });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return hold_reader_with_signal(&mutex, &locked, std::chrono::milliseconds(50)); });
 
     if (locked_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
         group.stop();
@@ -261,12 +234,8 @@ TEST(RWMutexTest, WaitingWriterBlocksLaterReaders) {
         return;
     }
 
-    fiber::async::spawn(group.at(0), [&]() {
-        return wait_writer_order(&mutex, &order);
-    });
-    fiber::async::spawn(group.at(0), [&]() {
-        return wait_reader_order(&mutex, &order, &promise);
-    });
+    fiber::async::spawn(group.at(0), [&]() { return wait_writer_order(&mutex, &order); });
+    fiber::async::spawn(group.at(0), [&]() { return wait_reader_order(&mutex, &order, &promise); });
 
     if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
         group.stop();
@@ -309,9 +278,8 @@ TEST(RWMutexTest, ResumesReaderOnWaiterLoopThread) {
         return;
     }
 
-    fiber::async::spawn(group.at(0), [&]() {
-        return hold_writer_with_signal(&mutex, &locked, std::chrono::milliseconds(50));
-    });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return hold_writer_with_signal(&mutex, &locked, std::chrono::milliseconds(50)); });
 
     if (locked_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
         group.stop();
@@ -320,9 +288,7 @@ TEST(RWMutexTest, ResumesReaderOnWaiterLoopThread) {
         return;
     }
 
-    fiber::async::spawn(group.at(1), [&]() {
-        return wait_read_lock_thread(&mutex, &resumed);
-    });
+    fiber::async::spawn(group.at(1), [&]() { return wait_read_lock_thread(&mutex, &resumed); });
 
     if (resumed_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
         group.stop();

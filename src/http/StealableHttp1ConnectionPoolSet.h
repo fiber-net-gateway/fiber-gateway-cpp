@@ -2,8 +2,8 @@
 #define FIBER_HTTP_STEALABLE_HTTP1_CONNECTION_POOL_SET_H
 
 #include <atomic>
-#include <cstddef>
 #include <coroutine>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -43,21 +43,17 @@ public:
 
         [[nodiscard]] Http1ClientConnection &connection() noexcept;
         [[nodiscard]] const Http1ConnectionGroupKey &key() const noexcept;
-        [[nodiscard]] common::IoResult<Http1ClientConnection *> emplace_connection(Http1ClientConnectionOptions options) noexcept;
+        [[nodiscard]] common::IoResult<Http1ClientConnection *>
+        emplace_connection(Http1ClientConnectionOptions options) noexcept;
         void reset() noexcept;
 
     private:
         friend class StealableHttp1ConnectionPoolSet;
 
-        enum class Kind : std::uint8_t {
-            Empty,
-            Local,
-            Remote
-        };
+        enum class Kind : std::uint8_t { Empty, Local, Remote };
 
         explicit Lease(Http1ConnectionPoolCore::Lease &&local) noexcept;
-        Lease(Http1ConnectionPoolCore &home_core,
-              Http1ConnectionPoolEntry &entry,
+        Lease(Http1ConnectionPoolCore &home_core, Http1ConnectionPoolEntry &entry,
               const Http1ConnectionGroupKey &key) noexcept;
 
         Kind kind_ = Kind::Empty;
@@ -85,16 +81,13 @@ private:
     class AdminAwaiter;
 
     struct Shard {
-        Shard(event::EventLoop &loop, Options pool_options) noexcept
-            : core(loop, pool_options),
-              hint() {
+        Shard(event::EventLoop &loop, Options pool_options) noexcept : core(loop, pool_options), hint() {
             core.set_idle_count_changed_callback(&Shard::on_idle_count_changed, this);
         }
 
         ~Shard() { core.clear_idle_count_changed_callback(); }
 
-        static void on_idle_count_changed(void *ctx,
-                                          const Http1ConnectionGroupKey &key,
+        static void on_idle_count_changed(void *ctx, const Http1ConnectionGroupKey &key,
                                           std::size_t idle_count) noexcept {
             auto *self = static_cast<Shard *>(ctx);
             FIBER_ASSERT(self != nullptr);
@@ -149,10 +142,7 @@ public:
 private:
     friend class StealableHttp1ConnectionPoolSet;
 
-    enum class Phase : std::uint8_t {
-        SubmitSteal,
-        ResumeCaller
-    };
+    enum class Phase : std::uint8_t { SubmitSteal, ResumeCaller };
 
     [[nodiscard]] Shard &target_shard() const noexcept;
     [[nodiscard]] bool prepare() noexcept;

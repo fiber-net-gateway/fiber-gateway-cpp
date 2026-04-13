@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 
-#include <future>
 #include <csignal>
 #include <cstdlib>
+#include <future>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
@@ -30,7 +30,7 @@ int run_broken_pipe_child(bool use_writev) {
         return 11;
     }
     if (pid == 0) {
-        (void)::signal(SIGPIPE, SIG_DFL);
+        (void) ::signal(SIGPIPE, SIG_DFL);
 
         fiber::event::EventLoopGroup group(1);
         group.start();
@@ -83,10 +83,6 @@ int run_broken_pipe_child(bool use_writev) {
 
 } // namespace
 
-TEST(StreamFdTest, TryWriteReturnsBrokenPipeInsteadOfSigpipe) {
-    EXPECT_EQ(run_broken_pipe_child(false), 0);
-}
+TEST(StreamFdTest, TryWriteReturnsBrokenPipeInsteadOfSigpipe) { EXPECT_EQ(run_broken_pipe_child(false), 0); }
 
-TEST(StreamFdTest, TryWritevReturnsBrokenPipeInsteadOfSigpipe) {
-    EXPECT_EQ(run_broken_pipe_child(true), 0);
-}
+TEST(StreamFdTest, TryWritevReturnsBrokenPipeInsteadOfSigpipe) { EXPECT_EQ(run_broken_pipe_child(true), 0); }

@@ -114,12 +114,13 @@ public:
 };
 
 inline constexpr std::size_t kHttp1ConnectionPoolEntryGroupHookOffset = offsetof(Http1ConnectionPoolEntry, group_hook_);
-inline constexpr std::size_t kHttp1ConnectionPoolEntryGlobalHookOffset = offsetof(Http1ConnectionPoolEntry, global_hook_);
+inline constexpr std::size_t kHttp1ConnectionPoolEntryGlobalHookOffset =
+        offsetof(Http1ConnectionPoolEntry, global_hook_);
 
 using Http1ConnectionPoolGroupList =
-    common::IntrusiveList<Http1ConnectionPoolEntry, kHttp1ConnectionPoolEntryGroupHookOffset>;
+        common::IntrusiveList<Http1ConnectionPoolEntry, kHttp1ConnectionPoolEntryGroupHookOffset>;
 using Http1ConnectionPoolGlobalList =
-    common::IntrusiveList<Http1ConnectionPoolEntry, kHttp1ConnectionPoolEntryGlobalHookOffset>;
+        common::IntrusiveList<Http1ConnectionPoolEntry, kHttp1ConnectionPoolEntryGlobalHookOffset>;
 
 class Http1ConnectionPoolGroupBucket {
 public:

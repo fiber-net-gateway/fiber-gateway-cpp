@@ -1,11 +1,11 @@
 #include <gtest/gtest.h>
 
-#include <chrono>
 #include <cerrno>
+#include <chrono>
 #include <coroutine>
 #include <future>
-#include <thread>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 
 #include "async/Spawn.h"
@@ -18,8 +18,7 @@ namespace {
 
 using DetachedTask = fiber::async::DetachedTask;
 
-DetachedTask accept_once(fiber::event::EventLoop *loop,
-                         fiber::net::TcpListener **out_listener,
+DetachedTask accept_once(fiber::event::EventLoop *loop, fiber::net::TcpListener **out_listener,
                          std::promise<uint16_t> *port_promise,
                          std::promise<fiber::common::IoResult<fiber::net::AcceptResult>> *accept_promise) {
     fiber::net::TcpListener *listener = new fiber::net::TcpListener(*loop);
@@ -62,8 +61,7 @@ DetachedTask accept_once(fiber::event::EventLoop *loop,
     co_return;
 }
 
-DetachedTask expect_busy(fiber::net::TcpListener *listener,
-                         std::promise<void> *started_promise,
+DetachedTask expect_busy(fiber::net::TcpListener *listener, std::promise<void> *started_promise,
                          std::promise<fiber::common::IoErr> *error_promise) {
     started_promise->set_value();
     auto result = co_await listener->accept();
@@ -87,9 +85,8 @@ TEST(TcpListenerTest, AcceptsConnection) {
     auto accept_future = accept_promise.get_future();
     fiber::net::TcpListener *listener = nullptr;
 
-    fiber::async::spawn(group.at(0), [&]() {
-        return accept_once(&group.at(0), &listener, &port_promise, &accept_promise);
-    });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return accept_once(&group.at(0), &listener, &port_promise, &accept_promise); });
 
     uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
@@ -129,17 +126,14 @@ TEST(TcpListenerTest, OwnerMismatchReturnsBusy) {
     auto busy_future = busy_promise.get_future();
     fiber::net::TcpListener *listener = nullptr;
 
-    fiber::async::spawn(group.at(0), [&]() {
-        return accept_once(&group.at(0), &listener, &port_promise, &accept_promise);
-    });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return accept_once(&group.at(0), &listener, &port_promise, &accept_promise); });
 
     uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
     ASSERT_NE(listener, nullptr);
 
-    fiber::async::spawn(group.at(0), [&]() {
-        return expect_busy(listener, &busy_started_promise, &busy_promise);
-    });
+    fiber::async::spawn(group.at(0), [&]() { return expect_busy(listener, &busy_started_promise, &busy_promise); });
 
     if (busy_started_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
         group.stop();

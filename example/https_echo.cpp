@@ -138,18 +138,16 @@ fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     return local.port();
 }
 
-fiber::async::Task<fiber::common::IoResult<void>> send_final_header(
-    fiber::http::HttpExchange &exchange,
-    int status_code,
-    const fiber::http::HttpHeaders *headers,
-    fiber::http::HttpBodySpec body,
-    bool end_stream) {
+fiber::async::Task<fiber::common::IoResult<void>> send_final_header(fiber::http::HttpExchange &exchange,
+                                                                    int status_code,
+                                                                    const fiber::http::HttpHeaders *headers,
+                                                                    fiber::http::HttpBodySpec body, bool end_stream) {
     co_return co_await exchange.send_header({
-        .kind = fiber::http::OutgoingHeaderKind::Final,
-        .status_code = status_code,
-        .headers = headers,
-        .body = body,
-        .end_stream = end_stream,
+            .kind = fiber::http::OutgoingHeaderKind::Final,
+            .status_code = status_code,
+            .headers = headers,
+            .body = body,
+            .end_stream = end_stream,
     });
 }
 
@@ -163,7 +161,7 @@ std::optional<std::size_t> parse_query_len(std::string_view query) {
                 return std::nullopt;
             }
             std::size_t value = 0;
-            for (char ch : value_text) {
+            for (char ch: value_text) {
                 if (ch < '0' || ch > '9') {
                     return std::nullopt;
                 }
@@ -228,7 +226,7 @@ fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange) {
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("Content-Type", "application/octet-stream");
     auto header_result =
-        co_await send_final_header(exchange, 200, &headers, fiber::http::HttpBodySpec::Chunked(), false);
+            co_await send_final_header(exchange, 200, &headers, fiber::http::HttpBodySpec::Chunked(), false);
     if (!header_result) {
         co_return;
     }

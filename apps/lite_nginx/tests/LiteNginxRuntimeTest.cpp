@@ -1,18 +1,18 @@
 #include <gtest/gtest.h>
 
-#include <atomic>
+#include <arpa/inet.h>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <future>
+#include <netinet/in.h>
 #include <string>
 #include <string_view>
-#include <thread>
-#include <arpa/inet.h>
-#include <netinet/in.h>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 
 #include "config/ConfigLoader.h"
@@ -175,9 +175,8 @@ std::string read_http_request(int fd) {
 
 class SingleRequestUpstream {
 public:
-    SingleRequestUpstream(std::string response, std::promise<std::string> *request_promise)
-        : response_(std::move(response)),
-          request_promise_(request_promise) {
+    SingleRequestUpstream(std::string response, std::promise<std::string> *request_promise) :
+        response_(std::move(response)), request_promise_(request_promise) {
         listener_fd_ = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
         EXPECT_GE(listener_fd_, 0);
         if (listener_fd_ < 0) {
@@ -265,9 +264,9 @@ private:
 
 class KeepAliveUpstream {
 public:
-    KeepAliveUpstream(std::array<std::string, 2> responses, std::array<std::promise<std::string> *, 2> request_promises)
-        : responses_(std::move(responses)),
-          request_promises_(request_promises) {
+    KeepAliveUpstream(std::array<std::string, 2> responses,
+                      std::array<std::promise<std::string> *, 2> request_promises) :
+        responses_(std::move(responses)), request_promises_(request_promises) {
         listener_fd_ = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
         EXPECT_GE(listener_fd_, 0);
         if (listener_fd_ < 0) {
@@ -368,8 +367,7 @@ private:
 
 class RuntimeHarness {
 public:
-    explicit RuntimeHarness(const fiber::lite_nginx::runtime::RuntimeConfig &runtime)
-        : launcher_(loop_) {
+    explicit RuntimeHarness(const fiber::lite_nginx::runtime::RuntimeConfig &runtime) : launcher_(loop_) {
         auto start_result = launcher_.start(runtime);
         if (!start_result.has_value()) {
             ADD_FAILURE() << start_result.error().message;
@@ -379,15 +377,13 @@ public:
             ADD_FAILURE() << "unexpected listener count";
             return;
         }
-        thread_ = std::thread([this]() {
-            loop_.run();
-        });
+        thread_ = std::thread([this]() { loop_.run(); });
     }
 
     ~RuntimeHarness() {
         ShutdownOp shutdown{
-            .launcher = &launcher_,
-            .loop = &loop_,
+                .launcher = &launcher_,
+                .loop = &loop_,
         };
         loop_.post<ShutdownOp, &ShutdownOp::entry, &ShutdownOp::on_run>(shutdown);
         if (thread_.joinable()) {
@@ -395,9 +391,7 @@ public:
         }
     }
 
-    [[nodiscard]] std::uint16_t port() const {
-        return launcher_.bound_listeners().front().address.port();
-    }
+    [[nodiscard]] std::uint16_t port() const { return launcher_.bound_listeners().front().address.port(); }
 
 private:
     fiber::event::EventLoop loop_;
@@ -425,7 +419,8 @@ http {
         }
     }
 }
-)", "dup_server_name.conf");
+)",
+                                                                            "dup_server_name.conf");
     ASSERT_TRUE(config.has_value());
 
     auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
@@ -436,9 +431,8 @@ http {
 TEST(LiteNginxRuntimeTest, ProxiesDirectRouteMatcherLocation) {
     std::promise<std::string> upstream_request;
     auto upstream_future = upstream_request.get_future();
-    SingleRequestUpstream upstream(
-        "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nContent-Type: text/plain\r\n\r\nproxied",
-        &upstream_request);
+    SingleRequestUpstream upstream("HTTP/1.1 200 OK\r\nContent-Length: 7\r\nContent-Type: text/plain\r\n\r\nproxied",
+                                   &upstream_request);
     ASSERT_NE(upstream.port(), 0);
 
     std::uint16_t port = reserve_loopback_port();
@@ -496,9 +490,8 @@ http {
 TEST(LiteNginxRuntimeTest, SuppressesOverriddenAndConnectionDeclaredRequestHeaders) {
     std::promise<std::string> upstream_request;
     auto upstream_future = upstream_request.get_future();
-    SingleRequestUpstream upstream(
-        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\n\r\nok",
-        &upstream_request);
+    SingleRequestUpstream upstream("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\n\r\nok",
+                                   &upstream_request);
     ASSERT_NE(upstream.port(), 0);
 
     std::uint16_t port = reserve_loopback_port();
@@ -538,14 +531,13 @@ http {
     int client = connect_client(harness.port());
     ASSERT_GE(client, 0);
 
-    const char request[] =
-        "GET / HTTP/1.1\r\n"
-        "Host: localhost\r\n"
-        "Connection: close, x-hop\r\n"
-        "X-Hop: drop-me\r\n"
-        "X-Test: original\r\n"
-        "X-Preserve: keep-me\r\n"
-        "\r\n";
+    const char request[] = "GET / HTTP/1.1\r\n"
+                           "Host: localhost\r\n"
+                           "Connection: close, x-hop\r\n"
+                           "X-Hop: drop-me\r\n"
+                           "X-Test: original\r\n"
+                           "X-Preserve: keep-me\r\n"
+                           "\r\n";
     ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
 
     std::string response = recv_http_response(client);
@@ -567,16 +559,14 @@ http {
 TEST(LiteNginxRuntimeTest, RoutesNamedUpstreamAndSelectsServerByHost) {
     std::promise<std::string> api_request;
     auto api_future = api_request.get_future();
-    SingleRequestUpstream api_upstream(
-        "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Type: text/plain\r\n\r\napi",
-        &api_request);
+    SingleRequestUpstream api_upstream("HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Type: text/plain\r\n\r\napi",
+                                       &api_request);
     ASSERT_NE(api_upstream.port(), 0);
 
     std::promise<std::string> other_request;
     auto other_future = other_request.get_future();
     SingleRequestUpstream other_upstream(
-        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\n\r\nother",
-        &other_request);
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\n\r\nother", &other_request);
     ASSERT_NE(other_upstream.port(), 0);
 
     std::uint16_t port = reserve_loopback_port();
@@ -703,11 +693,13 @@ TEST(LiteNginxRuntimeTest, ReusesNamedUpstreamConnectionsWithKeepalive) {
     auto first_future = first_upstream_request.get_future();
     auto second_future = second_upstream_request.get_future();
     KeepAliveUpstream upstream(
-        {
-            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\n\r\nfirst",
-            "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\n\r\nsecond",
-        },
-        {&first_upstream_request, &second_upstream_request});
+            {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\nConnection: "
+                    "keep-alive\r\n\r\nfirst",
+                    "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nContent-Type: text/plain\r\nConnection: "
+                    "keep-alive\r\n\r\nsecond",
+            },
+            {&first_upstream_request, &second_upstream_request});
     ASSERT_NE(upstream.port(), 0);
 
     std::uint16_t port = reserve_loopback_port();

@@ -28,8 +28,8 @@ public:
 private:
     static const Http2HpackEncoder::OutputOps kOutputOps;
 
-    static common::IoErr acquire_output(void *ctx, std::size_t min_bytes,
-                                        std::uint8_t *&dst, std::size_t &len) noexcept;
+    static common::IoErr acquire_output(void *ctx, std::size_t min_bytes, std::uint8_t *&dst,
+                                        std::size_t &len) noexcept;
     static void commit_output(void *ctx, std::size_t written) noexcept;
 
     Http2HpackEncoder &encoder_;

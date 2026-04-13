@@ -61,15 +61,14 @@ fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     return local.port();
 }
 
-DetachedTask run_capture_server(fiber::event::EventLoop *loop,
-                                std::promise<std::uint16_t> *port_promise,
-                                std::size_t expected_size,
-                                std::promise<CaptureOutcome> *outcome_promise) {
+DetachedTask run_capture_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
+                                std::size_t expected_size, std::promise<CaptureOutcome> *outcome_promise) {
     CaptureOutcome outcome;
 
     fiber::net::TcpListener listener(*loop);
     fiber::net::ListenOptions listen_options{};
-    auto bind_result = listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
+    auto bind_result =
+            listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
     if (!bind_result) {
         port_promise->set_value(0);
         outcome.err = bind_result.error();
@@ -98,7 +97,7 @@ DetachedTask run_capture_server(fiber::event::EventLoop *loop,
         char chunk[256];
         const std::size_t remaining = expected_size - outcome.bytes.size();
         auto read_result = co_await fiber::async::timeout_for(
-            [&]() { return stream.read(chunk, std::min<std::size_t>(remaining, sizeof(chunk))); }, 2s);
+                [&]() { return stream.read(chunk, std::min<std::size_t>(remaining, sizeof(chunk))); }, 2s);
         if (!read_result) {
             outcome.err = read_result.error();
             outcome_promise->set_value(std::move(outcome));
@@ -133,14 +132,13 @@ fiber::async::Task<fiber::common::IoResult<void>> read_until_header_end(fiber::n
     co_return fiber::common::IoResult<void>{};
 }
 
-fiber::async::Task<fiber::common::IoResult<void>> read_exact(fiber::net::TcpStream &stream,
-                                                             std::size_t bytes,
+fiber::async::Task<fiber::common::IoResult<void>> read_exact(fiber::net::TcpStream &stream, std::size_t bytes,
                                                              std::string &out) {
     while (out.size() < bytes) {
         char chunk[256];
         std::size_t remaining = bytes - out.size();
         auto read_result = co_await fiber::async::timeout_for(
-            [&]() { return stream.read(chunk, std::min<std::size_t>(remaining, sizeof(chunk))); }, 2s);
+                [&]() { return stream.read(chunk, std::min<std::size_t>(remaining, sizeof(chunk))); }, 2s);
         if (!read_result) {
             co_return std::unexpected(read_result.error());
         }
@@ -182,12 +180,12 @@ std::string flatten_body_chunk(fiber::http::BodyChunk &chunk) {
     return out;
 }
 
-DetachedTask run_response_header_server(fiber::event::EventLoop *loop,
-                                        std::promise<std::uint16_t> *port_promise,
+DetachedTask run_response_header_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
                                         std::promise<fiber::common::IoErr> *result_promise) {
     fiber::net::TcpListener listener(*loop);
     fiber::net::ListenOptions listen_options{};
-    auto bind_result = listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
+    auto bind_result =
+            listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
     if (!bind_result) {
         port_promise->set_value(0);
         result_promise->set_value(bind_result.error());
@@ -216,22 +214,21 @@ DetachedTask run_response_header_server(fiber::event::EventLoop *loop,
         co_return;
     }
 
-    auto write_result = co_await write_all(stream,
-                                           "HTTP/1.1 200 OK\r\n"
-                                           "Content-Length: 5\r\n"
-                                           "X-Test: one\r\n"
-                                           "\r\n"
-                                           "hello");
+    auto write_result = co_await write_all(stream, "HTTP/1.1 200 OK\r\n"
+                                                   "Content-Length: 5\r\n"
+                                                   "X-Test: one\r\n"
+                                                   "\r\n"
+                                                   "hello");
     stream.close();
     result_promise->set_value(write_result ? fiber::common::IoErr::None : write_result.error());
 }
 
-DetachedTask run_expect_continue_server(fiber::event::EventLoop *loop,
-                                        std::promise<std::uint16_t> *port_promise,
+DetachedTask run_expect_continue_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
                                         std::promise<fiber::common::IoErr> *result_promise) {
     fiber::net::TcpListener listener(*loop);
     fiber::net::ListenOptions listen_options{};
-    auto bind_result = listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
+    auto bind_result =
+            listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
     if (!bind_result) {
         port_promise->set_value(0);
         result_promise->set_value(bind_result.error());
@@ -280,12 +277,12 @@ DetachedTask run_expect_continue_server(fiber::event::EventLoop *loop,
     result_promise->set_value(final_result ? fiber::common::IoErr::None : final_result.error());
 }
 
-DetachedTask run_large_response_header_server(fiber::event::EventLoop *loop,
-                                              std::promise<std::uint16_t> *port_promise,
+DetachedTask run_large_response_header_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
                                               std::promise<fiber::common::IoErr> *result_promise) {
     fiber::net::TcpListener listener(*loop);
     fiber::net::ListenOptions listen_options{};
-    auto bind_result = listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
+    auto bind_result =
+            listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
     if (!bind_result) {
         port_promise->set_value(0);
         result_promise->set_value(bind_result.error());
@@ -314,13 +311,12 @@ DetachedTask run_large_response_header_server(fiber::event::EventLoop *loop,
         co_return;
     }
 
-    std::string response =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Length: 0\r\n"
-        "X-Large: " +
-        std::string(180, 'a') +
-        "\r\n"
-        "\r\n";
+    std::string response = "HTTP/1.1 200 OK\r\n"
+                           "Content-Length: 0\r\n"
+                           "X-Large: " +
+                           std::string(180, 'a') +
+                           "\r\n"
+                           "\r\n";
     auto write_result = co_await write_all(stream, response);
     stream.close();
     result_promise->set_value(write_result ? fiber::common::IoErr::None : write_result.error());
@@ -331,7 +327,8 @@ DetachedTask run_content_length_response_server(fiber::event::EventLoop *loop,
                                                 std::promise<fiber::common::IoErr> *result_promise) {
     fiber::net::TcpListener listener(*loop);
     fiber::net::ListenOptions listen_options{};
-    auto bind_result = listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
+    auto bind_result =
+            listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
     if (!bind_result) {
         port_promise->set_value(0);
         result_promise->set_value(bind_result.error());
@@ -360,11 +357,10 @@ DetachedTask run_content_length_response_server(fiber::event::EventLoop *loop,
         co_return;
     }
 
-    auto write_result = co_await write_all(stream,
-                                           "HTTP/1.1 200 OK\r\n"
-                                           "Content-Length: 5\r\n"
-                                           "\r\n"
-                                           "hello");
+    auto write_result = co_await write_all(stream, "HTTP/1.1 200 OK\r\n"
+                                                   "Content-Length: 5\r\n"
+                                                   "\r\n"
+                                                   "hello");
     stream.close();
     result_promise->set_value(write_result ? fiber::common::IoErr::None : write_result.error());
 }
@@ -374,7 +370,8 @@ DetachedTask run_chunked_response_with_trailer_server(fiber::event::EventLoop *l
                                                       std::promise<fiber::common::IoErr> *result_promise) {
     fiber::net::TcpListener listener(*loop);
     fiber::net::ListenOptions listen_options{};
-    auto bind_result = listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
+    auto bind_result =
+            listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
     if (!bind_result) {
         port_promise->set_value(0);
         result_promise->set_value(bind_result.error());
@@ -403,13 +400,12 @@ DetachedTask run_chunked_response_with_trailer_server(fiber::event::EventLoop *l
         co_return;
     }
 
-    auto first_write = co_await write_all(stream,
-                                          "HTTP/1.1 200 OK\r\n"
-                                          "Transfer-Encoding: chunked\r\n"
-                                          "\r\n"
-                                          "5\r\n"
-                                          "hello\r\n"
-                                          "0\r\n");
+    auto first_write = co_await write_all(stream, "HTTP/1.1 200 OK\r\n"
+                                                  "Transfer-Encoding: chunked\r\n"
+                                                  "\r\n"
+                                                  "5\r\n"
+                                                  "hello\r\n"
+                                                  "0\r\n");
     if (!first_write) {
         stream.close();
         result_promise->set_value(first_write.error());
@@ -421,8 +417,7 @@ DetachedTask run_chunked_response_with_trailer_server(fiber::event::EventLoop *l
     result_promise->set_value(second_write ? fiber::common::IoErr::None : second_write.error());
 }
 
-DetachedTask run_content_length_client(fiber::event::EventLoop *loop,
-                                       std::uint16_t port,
+DetachedTask run_content_length_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                        std::promise<fiber::common::IoErr> *result_promise,
                                        std::promise<bool> *request_done_promise) {
     fiber::http::Http1ClientConnectionOptions conn_options;
@@ -455,8 +450,7 @@ DetachedTask run_content_length_client(fiber::event::EventLoop *loop,
         if (!header_result) {
             result = header_result.error();
         } else {
-            auto body_result =
-                co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
+            auto body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
             if (!body_result) {
                 result = body_result.error();
             } else {
@@ -471,8 +465,7 @@ DetachedTask run_content_length_client(fiber::event::EventLoop *loop,
     request_done_promise->set_value(request_done);
 }
 
-DetachedTask run_chunked_client(fiber::event::EventLoop *loop,
-                                std::uint16_t port,
+DetachedTask run_chunked_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                 std::promise<fiber::common::IoErr> *result_promise,
                                 std::promise<bool> *request_done_promise) {
     fiber::http::Http1ClientConnectionOptions conn_options;
@@ -507,8 +500,7 @@ DetachedTask run_chunked_client(fiber::event::EventLoop *loop,
         if (!header_result) {
             result = header_result.error();
         } else {
-            auto body_result =
-                co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, false);
+            auto body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, false);
             if (!body_result) {
                 result = body_result.error();
             } else {
@@ -528,8 +520,7 @@ DetachedTask run_chunked_client(fiber::event::EventLoop *loop,
     request_done_promise->set_value(request_done);
 }
 
-DetachedTask run_empty_chunked_client(fiber::event::EventLoop *loop,
-                                      std::uint16_t port,
+DetachedTask run_empty_chunked_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                       std::promise<fiber::common::IoErr> *result_promise,
                                       std::promise<bool> *request_done_promise) {
     fiber::http::Http1ClientConnectionOptions conn_options;
@@ -572,8 +563,7 @@ DetachedTask run_empty_chunked_client(fiber::event::EventLoop *loop,
     request_done_promise->set_value(request_done);
 }
 
-DetachedTask run_auto_body_spec_client(fiber::event::EventLoop *loop,
-                                       std::uint16_t port,
+DetachedTask run_auto_body_spec_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                        std::promise<fiber::common::IoErr> *result_promise) {
     fiber::http::Http1ClientConnectionOptions conn_options;
     conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
@@ -601,8 +591,7 @@ DetachedTask run_auto_body_spec_client(fiber::event::EventLoop *loop,
     connection.close();
 }
 
-DetachedTask run_read_header_client(fiber::event::EventLoop *loop,
-                                    std::uint16_t port,
+DetachedTask run_read_header_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                     std::promise<ReadHeaderOutcome> *result_promise) {
     ReadHeaderOutcome outcome;
 
@@ -654,8 +643,7 @@ DetachedTask run_read_header_client(fiber::event::EventLoop *loop,
     result_promise->set_value(std::move(outcome));
 }
 
-DetachedTask run_expect_continue_client(fiber::event::EventLoop *loop,
-                                        std::uint16_t port,
+DetachedTask run_expect_continue_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                         std::promise<ReadHeaderOutcome> *result_promise) {
     ReadHeaderOutcome outcome;
 
@@ -725,8 +713,7 @@ DetachedTask run_expect_continue_client(fiber::event::EventLoop *loop,
     result_promise->set_value(std::move(outcome));
 }
 
-DetachedTask run_read_header_small_buffer_client(fiber::event::EventLoop *loop,
-                                                 std::uint16_t port,
+DetachedTask run_read_header_small_buffer_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                                  std::promise<ReadHeaderOutcome> *result_promise) {
     ReadHeaderOutcome outcome;
 
@@ -782,8 +769,7 @@ DetachedTask run_read_header_small_buffer_client(fiber::event::EventLoop *loop,
     result_promise->set_value(std::move(outcome));
 }
 
-DetachedTask run_read_content_length_body_client(fiber::event::EventLoop *loop,
-                                                 std::uint16_t port,
+DetachedTask run_read_content_length_body_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                                  std::promise<ReadBodyOutcome> *result_promise) {
     ReadBodyOutcome outcome;
 
@@ -849,8 +835,7 @@ DetachedTask run_read_content_length_body_client(fiber::event::EventLoop *loop,
     result_promise->set_value(std::move(outcome));
 }
 
-DetachedTask run_read_chunked_body_with_trailer_client(fiber::event::EventLoop *loop,
-                                                       std::uint16_t port,
+DetachedTask run_read_chunked_body_with_trailer_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                                        std::promise<ReadBodyOutcome> *result_promise) {
     ReadBodyOutcome outcome;
 
@@ -908,8 +893,7 @@ DetachedTask run_read_chunked_body_with_trailer_client(fiber::event::EventLoop *
     result_promise->set_value(std::move(outcome));
 }
 
-DetachedTask run_discard_chunked_body_with_trailer_client(fiber::event::EventLoop *loop,
-                                                          std::uint16_t port,
+DetachedTask run_discard_chunked_body_with_trailer_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                                           std::promise<ReadBodyOutcome> *result_promise) {
     ReadBodyOutcome outcome;
 
@@ -967,13 +951,12 @@ DetachedTask run_discard_chunked_body_with_trailer_client(fiber::event::EventLoo
 }
 
 TEST(ClientHttp1ExchangeTest, SendHeaderAndContentLengthBodyWriteRawHttp1Request) {
-    const std::string expected =
-        "POST /submit HTTP/1.1\r\n"
-        "Content-Length: 5\r\n"
-        "host: example.com\r\n"
-        "x-test: 1\r\n"
-        "\r\n"
-        "hello";
+    const std::string expected = "POST /submit HTTP/1.1\r\n"
+                                 "Content-Length: 5\r\n"
+                                 "host: example.com\r\n"
+                                 "x-test: 1\r\n"
+                                 "\r\n"
+                                 "hello";
 
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -1009,17 +992,16 @@ TEST(ClientHttp1ExchangeTest, SendHeaderAndContentLengthBodyWriteRawHttp1Request
 }
 
 TEST(ClientHttp1ExchangeTest, SendChunkedBodyAndTrailerWriteRawHttp1Request) {
-    const std::string expected =
-        "POST /upload HTTP/1.1\r\n"
-        "Transfer-Encoding: chunked\r\n"
-        "host: example.com\r\n"
-        "x-test: 1\r\n"
-        "\r\n"
-        "5\r\n"
-        "hello\r\n"
-        "0\r\n"
-        "x-checksum: 123\r\n"
-        "\r\n";
+    const std::string expected = "POST /upload HTTP/1.1\r\n"
+                                 "Transfer-Encoding: chunked\r\n"
+                                 "host: example.com\r\n"
+                                 "x-test: 1\r\n"
+                                 "\r\n"
+                                 "5\r\n"
+                                 "hello\r\n"
+                                 "0\r\n"
+                                 "x-checksum: 123\r\n"
+                                 "\r\n";
 
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -1055,14 +1037,13 @@ TEST(ClientHttp1ExchangeTest, SendChunkedBodyAndTrailerWriteRawHttp1Request) {
 }
 
 TEST(ClientHttp1ExchangeTest, SendEmptyChunkedRequestFromHeaderWriteRawHttp1Request) {
-    const std::string expected =
-        "POST /empty HTTP/1.1\r\n"
-        "Transfer-Encoding: chunked\r\n"
-        "host: example.com\r\n"
-        "x-test: 1\r\n"
-        "\r\n"
-        "0\r\n"
-        "\r\n";
+    const std::string expected = "POST /empty HTTP/1.1\r\n"
+                                 "Transfer-Encoding: chunked\r\n"
+                                 "host: example.com\r\n"
+                                 "x-test: 1\r\n"
+                                 "\r\n"
+                                 "0\r\n"
+                                 "\r\n";
 
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -1105,18 +1086,15 @@ TEST(ClientHttp1ExchangeTest, RejectsAutoBodySpecForHttp1RequestHeader) {
     auto port_future = port_promise.get_future();
     std::promise<CaptureOutcome> capture_promise;
     auto capture_future = capture_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() {
-        return run_capture_server(&group.at(0), &port_promise, 0, &capture_promise);
-    });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_capture_server(&group.at(0), &port_promise, 0, &capture_promise); });
 
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
     std::promise<fiber::common::IoErr> result_promise;
     auto result_future = result_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() {
-        return run_auto_body_spec_client(&group.at(0), port, &result_promise);
-    });
+    fiber::async::spawn(group.at(0), [&]() { return run_auto_body_spec_client(&group.at(0), port, &result_promise); });
 
     EXPECT_EQ(result_future.get(), fiber::common::IoErr::Invalid);
 
@@ -1145,9 +1123,8 @@ TEST(ClientHttp1ExchangeTest, ReadFinalResponseHeaderParsesStatusReasonAndHeader
 
     std::promise<ReadHeaderOutcome> client_result_promise;
     auto client_result_future = client_result_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() {
-        return run_read_header_client(&group.at(0), port, &client_result_promise);
-    });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_read_header_client(&group.at(0), port, &client_result_promise); });
 
     ReadHeaderOutcome outcome = client_result_future.get();
     EXPECT_EQ(outcome.err, fiber::common::IoErr::None);
@@ -1180,9 +1157,8 @@ TEST(ClientHttp1ExchangeTest, ReadHeaderSupportsInformationalResponseBeforeReque
 
     std::promise<ReadHeaderOutcome> client_result_promise;
     auto client_result_future = client_result_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() {
-        return run_expect_continue_client(&group.at(0), port, &client_result_promise);
-    });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_expect_continue_client(&group.at(0), port, &client_result_promise); });
 
     ReadHeaderOutcome outcome = client_result_future.get();
     EXPECT_EQ(outcome.err, fiber::common::IoErr::None);
@@ -1226,7 +1202,8 @@ TEST(ClientHttp1ExchangeTest, ReadHeaderGrowsResponseHeaderParseBufferWhenNeeded
     EXPECT_EQ(outcome.err, fiber::common::IoErr::None);
     EXPECT_EQ(outcome.first_status, 200);
     EXPECT_EQ(outcome.header_value.size(), 180);
-    EXPECT_TRUE(std::all_of(outcome.header_value.begin(), outcome.header_value.end(), [](char ch) { return ch == 'a'; }));
+    EXPECT_TRUE(
+            std::all_of(outcome.header_value.begin(), outcome.header_value.end(), [](char ch) { return ch == 'a'; }));
     EXPECT_TRUE(outcome.response_complete);
     EXPECT_TRUE(outcome.reusable_after_scope);
 
