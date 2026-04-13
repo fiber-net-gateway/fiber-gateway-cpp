@@ -142,15 +142,13 @@ fiber::async::Task<fiber::common::IoResult<void>> send_final_header(
     fiber::http::HttpExchange &exchange,
     int status_code,
     const fiber::http::HttpHeaders *headers,
-    fiber::http::ResponseBodyMode body_mode,
-    std::size_t content_length,
+    fiber::http::HttpBodySpec body,
     bool end_stream) {
     co_return co_await exchange.send_header({
         .kind = fiber::http::OutgoingHeaderKind::Final,
         .status_code = status_code,
         .headers = headers,
-        .body_mode = body_mode,
-        .content_length = content_length,
+        .body = body,
         .end_stream = end_stream,
     });
 }
@@ -189,7 +187,7 @@ fiber::async::Task<void> handle_generate(fiber::http::HttpExchange &exchange, st
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("Content-Type", "application/octet-stream");
     auto header_result = co_await send_final_header(exchange, 200, &headers,
-                                                    fiber::http::ResponseBodyMode::ContentLength, total_len, false);
+                                                    fiber::http::HttpBodySpec::ContentLength(total_len), false);
     if (!header_result) {
         co_return;
     }
@@ -219,7 +217,7 @@ fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange) {
             fiber::http::HttpHeaders headers(exchange.pool());
             headers.set("Content-Type", "text/plain");
             auto header_result = co_await send_final_header(exchange, 400, &headers,
-                                                            fiber::http::ResponseBodyMode::ContentLength, 0, true);
+                                                            fiber::http::HttpBodySpec::ContentLength(0), true);
             (void) header_result;
             co_return;
         }
@@ -229,8 +227,8 @@ fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange) {
 
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("Content-Type", "application/octet-stream");
-    auto header_result = co_await send_final_header(exchange, 200, &headers,
-                                                    fiber::http::ResponseBodyMode::Chunked, 0, false);
+    auto header_result =
+        co_await send_final_header(exchange, 200, &headers, fiber::http::HttpBodySpec::Chunked(), false);
     if (!header_result) {
         co_return;
     }
