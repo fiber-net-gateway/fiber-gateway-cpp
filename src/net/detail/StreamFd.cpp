@@ -7,6 +7,28 @@
 #include "../../common/Assert.h"
 
 namespace fiber::net::detail {
+namespace {
+
+ssize_t send_no_sigpipe(int fd, const void *buf, size_t len) noexcept {
+#ifdef MSG_NOSIGNAL
+    return ::send(fd, buf, len, MSG_NOSIGNAL);
+#else
+    return ::send(fd, buf, len, 0);
+#endif
+}
+
+ssize_t sendv_no_sigpipe(int fd, const struct iovec *iov, int iovcnt) noexcept {
+#ifdef MSG_NOSIGNAL
+    struct msghdr msg {};
+    msg.msg_iov = const_cast<struct iovec *>(iov);
+    msg.msg_iovlen = static_cast<decltype(msg.msg_iovlen)>(iovcnt);
+    return ::sendmsg(fd, &msg, MSG_NOSIGNAL);
+#else
+    return ::writev(fd, iov, iovcnt);
+#endif
+}
+
+} // namespace
 
 StreamFd::StreamFd(fiber::event::EventLoop &loop, int fd) : rwfd_(loop, fd) {}
 
@@ -111,7 +133,7 @@ fiber::common::IoErr StreamFd::write_once(const void *buf, size_t len, size_t &o
         return fiber::common::IoErr::BadFd;
     }
     for (;;) {
-        ssize_t rc = ::send(socket_fd, buf, len, 0);
+        ssize_t rc = send_no_sigpipe(socket_fd, buf, len);
         if (rc >= 0) {
             out = static_cast<size_t>(rc);
             return fiber::common::IoErr::None;
@@ -157,7 +179,7 @@ fiber::common::IoErr StreamFd::writev_once(const struct iovec *iov, int iovcnt, 
         return fiber::common::IoErr::BadFd;
     }
     for (;;) {
-        ssize_t rc = ::writev(socket_fd, iov, iovcnt);
+        ssize_t rc = sendv_no_sigpipe(socket_fd, iov, iovcnt);
         if (rc >= 0) {
             out = static_cast<size_t>(rc);
             return fiber::common::IoErr::None;
