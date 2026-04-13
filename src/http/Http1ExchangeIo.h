@@ -45,11 +45,11 @@ private:
                                                                           const HttpHeaders *headers) noexcept;
     common::IoErr prepare_final_header(const HttpExchange &exchange, const OutgoingHeaderBlockView &header) noexcept;
     common::IoResult<void> normalize_response_plan(bool body_end, std::size_t first_body_len, bool infer_body_mode,
-                                                   ResponseBodyMode &body_mode, std::size_t &content_length) const noexcept;
+                                                   ResponseBodySpec &body_spec) const noexcept;
     [[nodiscard]] bool compute_close_conn(const HttpExchange &exchange) const noexcept;
     common::IoResult<mem::IoBuf> build_response_header(HttpExchange &exchange, bool body_end, std::size_t first_body_len,
-                                                       bool infer_body_mode, ResponseBodyMode &body_mode,
-                                                       std::size_t &content_length, bool &close_conn) noexcept;
+                                                       bool infer_body_mode, ResponseBodySpec &body_spec,
+                                                       bool &close_conn) noexcept;
     common::IoResult<mem::IoBuf> build_informational_header(const HttpExchange &exchange, int status_code,
                                                             const HttpHeaders *headers) const noexcept;
     common::IoResult<mem::IoBuf> build_chunked_trailer_block(const HttpHeaders *headers,
@@ -75,7 +75,7 @@ private:
     int response_status_code_ = 0;
     std::string_view response_reason_;
     const HttpHeaders *response_headers_ = nullptr;
-    ResponseBodyMode response_body_mode_ = ResponseBodyMode::Auto;
+    ResponseBodySpec response_body_spec_{};
     ResponseConnectionMode response_connection_mode_ = ResponseConnectionMode::Auto;
     size_t response_content_length_ = 0;
 };
