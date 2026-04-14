@@ -23,7 +23,7 @@ void Mutex::Waiter::resume() {
     }
 }
 
-void Mutex::Waiter::on_run(Waiter *waiter) {
+void Mutex::Waiter::on_run(Waiter *waiter) noexcept {
     if (!waiter) {
         return;
     }

@@ -12,7 +12,7 @@ void Http1ConnectionPoolEntry::post_remote_return(Http1ConnectionPoolCore &home_
                   &Http1ConnectionPoolEntry::run_remote_return>(*this);
 }
 
-void Http1ConnectionPoolEntry::run_remote_return(Http1ConnectionPoolEntry *entry) {
+void Http1ConnectionPoolEntry::run_remote_return(Http1ConnectionPoolEntry *entry) noexcept {
     FIBER_ASSERT(entry != nullptr);
     Http1ConnectionPoolCore &home_core = entry->remote_return_home_core();
     Http1ConnectionGroupKey key = entry->remote_return_key();

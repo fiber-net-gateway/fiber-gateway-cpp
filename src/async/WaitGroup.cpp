@@ -21,7 +21,7 @@ void WaitGroup::Waiter::resume() {
     }
 }
 
-void WaitGroup::Waiter::on_run(Waiter *waiter) {
+void WaitGroup::Waiter::on_run(Waiter *waiter) noexcept {
     if (!waiter) {
         return;
     }

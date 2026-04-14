@@ -95,7 +95,7 @@ public:
     }
 
 private:
-    static void on_notify(HeaderReadAwaiter *awaiter) {
+    static void on_notify(HeaderReadAwaiter *awaiter) noexcept {
         if (!awaiter) {
             return;
         }
@@ -103,7 +103,7 @@ private:
         awaiter->resume();
     }
 
-    static void on_timeout(HeaderReadAwaiter *awaiter) {
+    static void on_timeout(HeaderReadAwaiter *awaiter) noexcept {
         if (!awaiter) {
             return;
         }

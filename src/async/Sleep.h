@@ -34,7 +34,7 @@ private:
         fiber::event::EventLoop::TimerEntry entry{};
         SleepAwaiter *owner = nullptr;
 
-        static void on_timer(SleepTimer *timer);
+        static void on_timer(SleepTimer *timer) noexcept;
     };
 
     void fire();

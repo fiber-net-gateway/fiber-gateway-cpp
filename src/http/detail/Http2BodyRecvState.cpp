@@ -104,7 +104,7 @@ public:
     }
 
 private:
-    static void on_notify(BodyReadAwaiter *awaiter) {
+    static void on_notify(BodyReadAwaiter *awaiter) noexcept {
         if (!awaiter) {
             return;
         }
@@ -112,7 +112,7 @@ private:
         awaiter->resume();
     }
 
-    static void on_timeout(BodyReadAwaiter *awaiter) {
+    static void on_timeout(BodyReadAwaiter *awaiter) noexcept {
         if (!awaiter) {
             return;
         }

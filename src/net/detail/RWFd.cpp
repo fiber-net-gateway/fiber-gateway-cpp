@@ -109,7 +109,7 @@ void RWFd::handle_events(fiber::event::IoEvent events) {
 
 bool RWFd::has_waiters() const noexcept { return waiter_ != nullptr; }
 
-void RWFdCrossThreadWaiter::on_notify_cancel(RWFdCrossThreadWaiter *waiter) {
+void RWFdCrossThreadWaiter::on_notify_cancel(RWFdCrossThreadWaiter *waiter) noexcept {
     RWFdWaiterState state = waiter->state_.load(std::memory_order_relaxed);
     RWFd *rwfd = waiter->rwfd_;
     FIBER_ASSERT(rwfd->loop().in_loop());
@@ -183,7 +183,7 @@ void RWFdCrossThreadWaiter::do_notify_resume(RWFdCrossThreadWaiter *waiter) noex
     }
 }
 
-void RWFdCrossThreadWaiter::on_notify_watch(RWFdCrossThreadWaiter *waiter) {
+void RWFdCrossThreadWaiter::on_notify_watch(RWFdCrossThreadWaiter *waiter) noexcept {
     FIBER_ASSERT(waiter);
     FIBER_ASSERT(waiter->rwfd_);
 
@@ -203,7 +203,7 @@ void RWFdCrossThreadWaiter::on_notify_watch(RWFdCrossThreadWaiter *waiter) {
     }
 }
 
-void RWFdCrossThreadWaiter::on_notify_resume(RWFdCrossThreadWaiter *waiter) {
+void RWFdCrossThreadWaiter::on_notify_resume(RWFdCrossThreadWaiter *waiter) noexcept {
     FIBER_ASSERT(waiter);
     FIBER_ASSERT(waiter->loop_->in_loop());
 

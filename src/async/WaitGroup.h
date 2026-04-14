@@ -29,7 +29,7 @@ private:
         fiber::event::EventLoop::NotifyEntry notify_entry{};
 
         void resume();
-        static void on_run(Waiter *waiter);
+        static void on_run(Waiter *waiter) noexcept;
     };
 
 public:

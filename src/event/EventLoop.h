@@ -40,13 +40,13 @@ concept DeferEntryMember = std::is_object_v<Handle> && !std::is_const_v<Handle> 
                            };
 
 template<typename Handle, auto Cb>
-concept TimerCallback = std::same_as<decltype(Cb), void (*)(Handle *)>;
+concept TimerCallback = std::same_as<decltype(Cb), void (*)(Handle *) noexcept>;
 
 template<typename Handle, auto Cb>
-concept NotifyCallback = std::same_as<decltype(Cb), void (*)(Handle *)>;
+concept NotifyCallback = std::same_as<decltype(Cb), void (*)(Handle *) noexcept>;
 
 template<typename Handle, auto Cb>
-concept DeferCallback = std::same_as<decltype(Cb), void (*)(Handle *)>;
+concept DeferCallback = std::same_as<decltype(Cb), void (*)(Handle *) noexcept>;
 
 struct Queue {
     struct Queue *next;
@@ -231,6 +231,13 @@ public:
         cancel(entry);
     }
 
+    template<typename Handle, auto EntryMember>
+        requires detail::TimerEntryMember<Handle, TimerEntry, EntryMember>
+    void cancel_quiesced(Handle &handle) {
+        TimerEntry &entry = handle.*EntryMember;
+        cancel_quiesced(entry);
+    }
+
 
     fiber::async::CoroutineFramePool &frame_pool() noexcept { return frame_pool_; }
 
@@ -331,6 +338,7 @@ private:
     int next_timeout_ms(std::chrono::steady_clock::time_point now) const;
     void post_at(std::chrono::steady_clock::time_point when, TimerEntry &entry);
     void cancel(TimerEntry &entry);
+    void cancel_quiesced(TimerEntry &entry);
     void cancel(DeferEntry &entry);
 
     MpscQueue<NotifyEntry *> notify_queue_;

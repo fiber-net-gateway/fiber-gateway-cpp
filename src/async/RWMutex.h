@@ -118,7 +118,7 @@ private:
                std::thread::id thread_id);
 
         void resume();
-        static void on_run(Waiter *waiter);
+        static void on_run(Waiter *waiter) noexcept;
 
         RWMutex *mutex = nullptr;
         WaiterKind kind = WaiterKind::Writer;

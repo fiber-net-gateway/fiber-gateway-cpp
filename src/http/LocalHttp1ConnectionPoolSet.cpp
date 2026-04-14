@@ -73,7 +73,7 @@ private:
         Http1ConnectionPoolCore *core = nullptr;
         event::EventLoop::NotifyEntry notify{};
 
-        static void run(ShardOp *op) {
+        static void run(ShardOp *op) noexcept {
             FIBER_ASSERT(op != nullptr);
             FIBER_ASSERT(op->awaiter != nullptr);
             FIBER_ASSERT(op->core != nullptr);
@@ -98,7 +98,7 @@ private:
         caller_loop_->post<AdminAwaiter, &AdminAwaiter::resume_notify_, &AdminAwaiter::resume_caller>(*this);
     }
 
-    static void resume_caller(AdminAwaiter *awaiter) {
+    static void resume_caller(AdminAwaiter *awaiter) noexcept {
         FIBER_ASSERT(awaiter != nullptr);
         if (!awaiter->handle_) {
             return;

@@ -22,7 +22,7 @@ void RWMutex::Waiter::resume() {
     }
 }
 
-void RWMutex::Waiter::on_run(Waiter *waiter) {
+void RWMutex::Waiter::on_run(Waiter *waiter) noexcept {
     if (!waiter) {
         return;
     }

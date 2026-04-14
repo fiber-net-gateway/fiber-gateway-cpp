@@ -31,7 +31,6 @@ public:
     [[nodiscard]] async::Task<void> clear_async() noexcept;
     [[nodiscard]] async::Task<void> shutdown_async() noexcept;
     [[nodiscard]] Lease acquire(const Http1ConnectionGroupKey &key) noexcept { return current_core().acquire(key); }
-    void sweep_expired(std::chrono::steady_clock::time_point now) noexcept { current_core().sweep_expired(now); }
 
     [[nodiscard]] std::size_t size() const noexcept { return group_->size(); }
     [[nodiscard]] event::EventLoopGroup &group() noexcept { return *group_; }

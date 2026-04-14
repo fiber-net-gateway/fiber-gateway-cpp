@@ -143,7 +143,7 @@ public:
     }
 
 private:
-    static void on_timeout(TimeoutAwaiter *awaiter) {
+    static void on_timeout(TimeoutAwaiter *awaiter) noexcept {
         awaiter->timed_out_ = true;
         awaiter->handle_.resume();
     }

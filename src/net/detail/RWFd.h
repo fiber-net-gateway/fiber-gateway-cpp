@@ -135,9 +135,9 @@ struct RWFdCrossThreadWaiter : RWFdWaiterBase {
     void cancel_wait() noexcept;
 
     static void do_notify_resume(RWFdCrossThreadWaiter *waiter) noexcept;
-    static void on_notify_watch(RWFdCrossThreadWaiter *waiter);
-    static void on_notify_cancel(RWFdCrossThreadWaiter *waiter);
-    static void on_notify_resume(RWFdCrossThreadWaiter *waiter);
+    static void on_notify_watch(RWFdCrossThreadWaiter *waiter) noexcept;
+    static void on_notify_cancel(RWFdCrossThreadWaiter *waiter) noexcept;
+    static void on_notify_resume(RWFdCrossThreadWaiter *waiter) noexcept;
 };
 
 class RWFd::WaitEventAwaiter : public RWFdLocalThreadWaiter {

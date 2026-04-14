@@ -65,8 +65,8 @@ public:
         PollResult await_resume() noexcept;
 
     private:
-        static void on_notify(PollAwaiter *awaiter);
-        static void on_timeout(PollAwaiter *awaiter);
+        static void on_notify(PollAwaiter *awaiter) noexcept;
+        static void on_timeout(PollAwaiter *awaiter) noexcept;
         void resume() noexcept;
         bool has_timer() const noexcept;
 

@@ -148,7 +148,7 @@ private:
     [[nodiscard]] bool prepare() noexcept;
     [[nodiscard]] bool advance_to_candidate() noexcept;
     void post_target() noexcept;
-    static void run_notify(AcquireAwaiter *awaiter);
+    static void run_notify(AcquireAwaiter *awaiter) noexcept;
 
     StealableHttp1ConnectionPoolSet *set_ = nullptr;
     std::optional<Http1ConnectionGroupKey> key_{};

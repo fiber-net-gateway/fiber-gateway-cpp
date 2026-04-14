@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "../common/Assert.h"
+#include "EventLoopGroup.h"
 
 namespace fiber::event {
 
@@ -223,6 +224,16 @@ void EventLoop::post_at(std::chrono::steady_clock::time_point when, TimerEntry &
 
 void EventLoop::cancel(TimerEntry &entry) {
     FIBER_ASSERT(in_loop());
+    if (!entry.in_heap_) {
+        return;
+    }
+    timers_.remove(&entry.node);
+    entry.in_heap_ = false;
+}
+
+void EventLoop::cancel_quiesced(TimerEntry &entry) {
+    FIBER_ASSERT(group_ != nullptr);
+    FIBER_ASSERT(!group_->running());
     if (!entry.in_heap_) {
         return;
     }

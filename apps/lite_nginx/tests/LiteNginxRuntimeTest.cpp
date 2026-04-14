@@ -29,7 +29,7 @@ struct ShutdownOp {
     fiber::lite_nginx::runtime::ServerLauncher *launcher = nullptr;
     fiber::event::EventLoop *loop = nullptr;
 
-    static void on_run(ShutdownOp *self) {
+    static void on_run(ShutdownOp *self) noexcept {
         if (self->launcher) {
             self->launcher->close();
         }
