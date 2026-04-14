@@ -75,7 +75,7 @@ private:
                         std::thread::id thread_id);
 
         void resume();
-        static void on_run(Waiter *waiter);
+        static void on_run(Waiter *waiter) noexcept;
 
         Mutex *mutex = nullptr;
         std::coroutine_handle<> handle{};

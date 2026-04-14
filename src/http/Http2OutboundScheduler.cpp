@@ -200,7 +200,7 @@ void Http2OutboundScheduler::WaitForWorkAwaiter::await_resume() noexcept {
     resume_posted_ = false;
 }
 
-void Http2OutboundScheduler::WaitForWorkAwaiter::on_notify(WaitForWorkAwaiter *awaiter) {
+void Http2OutboundScheduler::WaitForWorkAwaiter::on_notify(WaitForWorkAwaiter *awaiter) noexcept {
     if (!awaiter) {
         return;
     }

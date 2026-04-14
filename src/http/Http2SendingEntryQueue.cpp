@@ -83,7 +83,7 @@ Http2SendingEntryQueue::PollResult Http2SendingEntryQueue::PollAwaiter::await_re
     return result;
 }
 
-void Http2SendingEntryQueue::PollAwaiter::on_notify(PollAwaiter *awaiter) {
+void Http2SendingEntryQueue::PollAwaiter::on_notify(PollAwaiter *awaiter) noexcept {
     if (!awaiter) {
         return;
     }
@@ -91,7 +91,7 @@ void Http2SendingEntryQueue::PollAwaiter::on_notify(PollAwaiter *awaiter) {
     awaiter->resume();
 }
 
-void Http2SendingEntryQueue::PollAwaiter::on_timeout(PollAwaiter *awaiter) {
+void Http2SendingEntryQueue::PollAwaiter::on_timeout(PollAwaiter *awaiter) noexcept {
     if (!awaiter) {
         return;
     }

@@ -15,12 +15,12 @@ struct NotifyTask {
 
     explicit NotifyTask(F &&func) : fn(std::forward<F>(func)) {}
 
-    static void run(NotifyTask *task) {
+    static void run(NotifyTask *task) noexcept {
         task->fn();
         delete task;
     }
 
-    static void cancel(NotifyTask *task) { delete task; }
+    static void cancel(NotifyTask *task) noexcept { delete task; }
 };
 
 template<typename F>

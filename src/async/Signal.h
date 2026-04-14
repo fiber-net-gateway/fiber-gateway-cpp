@@ -61,7 +61,7 @@ struct SignalWaiter {
     SignalAwaiter *owner = nullptr;
 
     void resume();
-    static void on_run(SignalWaiter *waiter);
+    static void on_run(SignalWaiter *waiter) noexcept;
 };
 
 } // namespace detail

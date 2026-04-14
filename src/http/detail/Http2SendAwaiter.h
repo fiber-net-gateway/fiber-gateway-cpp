@@ -96,7 +96,7 @@ public:
     }
 
 protected:
-    static void on_notify(SendAwaiterBase *awaiter) {
+    static void on_notify(SendAwaiterBase *awaiter) noexcept {
         if (!awaiter) {
             return;
         }
@@ -104,7 +104,7 @@ protected:
         awaiter->resume();
     }
 
-    static void on_timeout(SendAwaiterBase *awaiter) {
+    static void on_timeout(SendAwaiterBase *awaiter) noexcept {
         if (!awaiter || awaiter->completed_) {
             return;
         }
@@ -271,7 +271,7 @@ public:
     bool waiting_stream_window_ = false;
 
 private:
-    static void on_submit_notify(BodySendAwaiter *awaiter) {
+    static void on_submit_notify(BodySendAwaiter *awaiter) noexcept {
         if (!awaiter) {
             return;
         }

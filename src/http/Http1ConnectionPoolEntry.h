@@ -63,7 +63,7 @@ private:
     }
 
     void post_remote_return(Http1ConnectionPoolCore &home_core, const Http1ConnectionGroupKey &key) noexcept;
-    static void run_remote_return(Http1ConnectionPoolEntry *entry);
+    static void run_remote_return(Http1ConnectionPoolEntry *entry) noexcept;
 
     void clear_remote_return_state() noexcept {
         if (has_return_key_) {

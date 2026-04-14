@@ -25,7 +25,7 @@ void SleepAwaiter::await_suspend(std::coroutine_handle<> handle) {
                                                                           timer_);
 }
 
-void SleepAwaiter::SleepTimer::on_timer(SleepTimer *timer) {
+void SleepAwaiter::SleepTimer::on_timer(SleepTimer *timer) noexcept {
     if (!timer || !timer->owner) {
         return;
     }

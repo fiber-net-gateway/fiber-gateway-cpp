@@ -69,7 +69,7 @@ private:
         Shard *shard = nullptr;
         event::EventLoop::NotifyEntry notify{};
 
-        static void run(ShardOp *op) {
+        static void run(ShardOp *op) noexcept {
             FIBER_ASSERT(op != nullptr);
             FIBER_ASSERT(op->awaiter != nullptr);
             FIBER_ASSERT(op->shard != nullptr);
@@ -95,7 +95,7 @@ private:
         caller_loop_->post<AdminAwaiter, &AdminAwaiter::resume_notify_, &AdminAwaiter::resume_caller>(*this);
     }
 
-    static void resume_caller(AdminAwaiter *awaiter) {
+    static void resume_caller(AdminAwaiter *awaiter) noexcept {
         FIBER_ASSERT(awaiter != nullptr);
         if (!awaiter->handle_) {
             return;
@@ -397,7 +397,7 @@ void StealableHttp1ConnectionPoolSet::AcquireAwaiter::post_target() noexcept {
     target_shard().core.loop().post<AcquireAwaiter, &AcquireAwaiter::notify_entry_, &AcquireAwaiter::run_notify>(*this);
 }
 
-void StealableHttp1ConnectionPoolSet::AcquireAwaiter::run_notify(AcquireAwaiter *awaiter) {
+void StealableHttp1ConnectionPoolSet::AcquireAwaiter::run_notify(AcquireAwaiter *awaiter) noexcept {
     FIBER_ASSERT(awaiter != nullptr);
     switch (awaiter->phase_) {
         case Phase::SubmitSteal:

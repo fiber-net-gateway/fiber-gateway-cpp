@@ -88,6 +88,7 @@ void Http1ConnectionPoolCore::Lease::reset() noexcept {
 }
 
 Http1ConnectionPoolCore::Options Http1ConnectionPoolCore::normalize_options(Options options) noexcept {
+    FIBER_ASSERT(options.idle_timeout > std::chrono::milliseconds::zero());
     if (options.max_idle_total == 0) {
         options.max_idle_per_group = 0;
     } else if (options.max_idle_per_group > options.max_idle_total) {
@@ -136,9 +137,6 @@ Http1ConnectionPoolEntry *Http1ConnectionPoolCore::try_steal_idle_entry(const Ht
         return nullptr;
     }
 
-    const auto now = loop_->now();
-    sweep_expired(now);
-
     for (;;) {
         auto entry_ref = bucket_index_.find(key);
         if (!entry_ref) {
@@ -156,10 +154,7 @@ Http1ConnectionPoolEntry *Http1ConnectionPoolCore::try_steal_idle_entry(const Ht
 
         Http1ConnectionPoolEntry *entry = bucket->idle_entries_.back();
         FIBER_ASSERT(entry != nullptr);
-        if (entry_expired(*entry, now) || !entry_reusable(*entry)) {
-            evict_entry(*entry);
-            continue;
-        }
+        FIBER_ASSERT(entry->has_connection());
         detach_idle_entry(*entry);
         return entry;
     }
@@ -182,10 +177,50 @@ void Http1ConnectionPoolCore::shutdown() noexcept {
     clear();
 }
 
-void Http1ConnectionPoolCore::sweep_expired(std::chrono::steady_clock::time_point now) noexcept {
+void Http1ConnectionPoolCore::on_expiry_timer(Http1ConnectionPoolCore *pool) noexcept {
+    FIBER_ASSERT(pool != nullptr);
+    pool->on_expiry_timer_fired();
+}
+
+void Http1ConnectionPoolCore::arm_expiry_timer(std::chrono::steady_clock::time_point when) noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     FIBER_ASSERT(loop_->in_loop());
+    loop_->post_at<Http1ConnectionPoolCore, &Http1ConnectionPoolCore::expiry_timer_,
+                   &Http1ConnectionPoolCore::on_expiry_timer>(when, *this);
+}
 
+void Http1ConnectionPoolCore::arm_expiry_timer_if_needed() noexcept {
+    if (expiry_timer_.is_in_heap() || global_idle_entries_.empty()) {
+        return;
+    }
+    Http1ConnectionPoolEntry *entry = global_idle_entries_.front();
+    FIBER_ASSERT(entry != nullptr);
+    arm_expiry_timer(entry->idle_since_ + options_.idle_timeout);
+}
+
+void Http1ConnectionPoolCore::cancel_expiry_timer() noexcept {
+    if (!expiry_timer_.is_in_heap()) {
+        return;
+    }
+    FIBER_ASSERT(loop_ != nullptr);
+    if (loop_->in_loop()) {
+        loop_->cancel<Http1ConnectionPoolCore, &Http1ConnectionPoolCore::expiry_timer_>(*this);
+        return;
+    }
+    loop_->cancel_quiesced<Http1ConnectionPoolCore, &Http1ConnectionPoolCore::expiry_timer_>(*this);
+}
+
+void Http1ConnectionPoolCore::on_expiry_timer_fired() noexcept {
+    FIBER_ASSERT(loop_ != nullptr);
+    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(!expiry_timer_.is_in_heap());
+    evict_expired_entries(loop_->now());
+    arm_expiry_timer_if_needed();
+}
+
+void Http1ConnectionPoolCore::evict_expired_entries(std::chrono::steady_clock::time_point now) noexcept {
+    FIBER_ASSERT(loop_ != nullptr);
+    FIBER_ASSERT(loop_->in_loop());
     while (!global_idle_entries_.empty()) {
         Http1ConnectionPoolEntry *entry = global_idle_entries_.front();
         FIBER_ASSERT(entry != nullptr);
@@ -197,6 +232,7 @@ void Http1ConnectionPoolCore::sweep_expired(std::chrono::steady_clock::time_poin
 }
 
 void Http1ConnectionPoolCore::clear() noexcept {
+    cancel_expiry_timer();
     while (!global_idle_entries_.empty()) {
         Http1ConnectionPoolEntry *entry = global_idle_entries_.front();
         FIBER_ASSERT(entry != nullptr);
@@ -208,15 +244,7 @@ void Http1ConnectionPoolCore::clear() noexcept {
 
 bool Http1ConnectionPoolCore::entry_expired(const Http1ConnectionPoolEntry &entry,
                                             std::chrono::steady_clock::time_point now) const noexcept {
-    if (options_.idle_timeout <= std::chrono::milliseconds::zero()) {
-        return true;
-    }
     return now - entry.idle_since_ >= options_.idle_timeout;
-}
-
-bool Http1ConnectionPoolCore::entry_reusable(const Http1ConnectionPoolEntry &entry) const noexcept {
-    const Http1ClientConnection *conn = entry.connection();
-    return conn && conn->reusable();
 }
 
 Http1ConnectionPoolGroupBucket *Http1ConnectionPoolCore::allocate_bucket() noexcept {
@@ -298,8 +326,6 @@ void Http1ConnectionPoolCore::park_entry(Http1ConnectionPoolEntry &entry, const 
     }
 
     const auto now = loop_->now();
-    sweep_expired(now);
-
     Http1ConnectionPoolGroupBucket *bucket = nullptr;
     auto entry_ref = bucket_index_.find(key);
     if (entry_ref) {
@@ -334,6 +360,7 @@ void Http1ConnectionPoolCore::park_entry(Http1ConnectionPoolEntry &entry, const 
     while (idle_total_ > options_.max_idle_total) {
         evict_global_oldest();
     }
+    arm_expiry_timer_if_needed();
 }
 
 void Http1ConnectionPoolCore::release_lease(Lease &lease) noexcept {

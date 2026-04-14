@@ -51,7 +51,7 @@ struct SpawnTask {
 
     explicit SpawnTask(F &&fn) : factory(std::forward<F>(fn)) {}
 
-    static void run(SpawnTask *task) {
+    static void run(SpawnTask *task) noexcept {
         if (!task) {
             return;
         }

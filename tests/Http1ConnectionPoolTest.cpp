@@ -337,7 +337,6 @@ DetachedTask run_expire_scenario(fiber::event::EventLoop *loop, std::uint16_t po
 
     lease.reset();
     co_await fiber::async::sleep(30ms);
-    pool.sweep_expired(loop->now());
 
     auto miss = pool.acquire(key);
     out.expired = miss.valid() && !miss.hit() && !miss.has_connection();
@@ -508,7 +507,7 @@ TEST(Http1ConnectionPoolTest, GlobalLimitEvictsOldestIdleConnectionAcrossGroups)
     group.join();
 }
 
-TEST(Http1ConnectionPoolTest, SweepExpiredRemovesIdleConnectionsAndBuckets) {
+TEST(Http1ConnectionPoolTest, IdleExpiryTimerRemovesIdleConnectionsAndBuckets) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 

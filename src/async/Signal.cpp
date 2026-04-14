@@ -40,7 +40,7 @@ void detail::SignalWaiter::resume() {
     }
 }
 
-void detail::SignalWaiter::on_run(SignalWaiter *waiter) {
+void detail::SignalWaiter::on_run(SignalWaiter *waiter) noexcept {
     if (!waiter) {
         return;
     }

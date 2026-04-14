@@ -71,7 +71,6 @@ public:
     [[nodiscard]] Http1ConnectionPoolEntry *try_steal_idle_entry(const Http1ConnectionGroupKey &key) noexcept;
     void accept_returned_entry(Http1ConnectionPoolEntry &entry, const Http1ConnectionGroupKey &key) noexcept;
     void shutdown() noexcept;
-    void sweep_expired(std::chrono::steady_clock::time_point now) noexcept;
     void clear() noexcept;
     void set_idle_count_changed_callback(IdleCountChangedCallback cb, void *ctx) noexcept {
         idle_count_changed_cb_ = cb;
@@ -94,17 +93,22 @@ private:
     friend class Lease;
 
     static Options normalize_options(Options options) noexcept;
+    static void on_expiry_timer(Http1ConnectionPoolCore *pool) noexcept;
     [[nodiscard]] bool shutdown_effective() const noexcept;
 
     [[nodiscard]] bool entry_expired(const Http1ConnectionPoolEntry &entry,
                                      std::chrono::steady_clock::time_point now) const noexcept;
-    [[nodiscard]] bool entry_reusable(const Http1ConnectionPoolEntry &entry) const noexcept;
     [[nodiscard]] Http1ConnectionPoolGroupBucket *allocate_bucket() noexcept;
     [[nodiscard]] Http1ConnectionPoolEntry *allocate_entry() noexcept;
     void recycle_bucket(Http1ConnectionPoolGroupBucket *bucket) noexcept;
     void recycle_entry(Http1ConnectionPoolEntry *entry) noexcept;
     void destroy_free_lists() noexcept;
 
+    void arm_expiry_timer(std::chrono::steady_clock::time_point when) noexcept;
+    void arm_expiry_timer_if_needed() noexcept;
+    void cancel_expiry_timer() noexcept;
+    void on_expiry_timer_fired() noexcept;
+    void evict_expired_entries(std::chrono::steady_clock::time_point now) noexcept;
     void park_entry(Http1ConnectionPoolEntry &entry, const Http1ConnectionGroupKey &key) noexcept;
     void release_lease(Lease &lease) noexcept;
     void detach_idle_entry(Http1ConnectionPoolEntry &entry) noexcept;
@@ -116,6 +120,7 @@ private:
     Options options_{};
     Http1ConnectionBucketIndex bucket_index_{};
     Http1ConnectionPoolGlobalList global_idle_entries_{};
+    event::EventLoop::TimerEntry expiry_timer_{};
     Http1ConnectionPoolGroupBucket *free_bucket_head_ = nullptr;
     Http1ConnectionPoolEntry *free_entry_head_ = nullptr;
     std::size_t idle_total_ = 0;

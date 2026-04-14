@@ -167,7 +167,7 @@ private:
         void await_resume() noexcept;
 
     private:
-        static void on_notify(WaitForWorkAwaiter *awaiter);
+        static void on_notify(WaitForWorkAwaiter *awaiter) noexcept;
         void resume() noexcept;
 
         Http2OutboundScheduler *queue_ = nullptr;
