@@ -55,4 +55,16 @@ TEST(Http1ConnectionGroupHintTableTest, ClearRemovesPublishedHints) {
     EXPECT_EQ(table.probe(ip_key).approx_count, 0);
 }
 
+TEST(Http1ConnectionGroupHintTableTest, CountSaturatesAtMaxApproxCount) {
+    Http1ConnectionGroupHintTable table;
+    auto key = Http1ConnectionGroupKey::from_name("example.com", 8080, Http1ConnectionGroupKey::Scheme::Http);
+    ASSERT_TRUE(key.has_value());
+
+    for (std::size_t i = 0; i < static_cast<std::size_t>(Http1ConnectionGroupHintTable::kMaxApproxCount) + 32; ++i) {
+        table.note_idle_add(*key);
+    }
+
+    EXPECT_EQ(table.probe(*key).approx_count, Http1ConnectionGroupHintTable::kMaxApproxCount);
+}
+
 } // namespace

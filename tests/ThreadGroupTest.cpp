@@ -34,4 +34,8 @@ TEST(ThreadGroupTest, CurrentMatchesThread) {
 TEST(ThreadGroupTest, CurrentOutsideThreadAborts) {
     EXPECT_DEATH(fiber::async::ThreadGroup::Thread::current(), "FIBER_ASSERT failed");
 }
+
+TEST(ThreadGroupTest, CurrentOutsideThreadPrintsStacktrace) {
+    EXPECT_DEATH(fiber::async::ThreadGroup::Thread::current(), "stacktrace:");
+}
 #endif

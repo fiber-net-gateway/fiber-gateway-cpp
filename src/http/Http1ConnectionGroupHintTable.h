@@ -17,6 +17,7 @@ public:
     static constexpr std::uint32_t kWays = 4;
     static constexpr std::uint32_t kSetCount = 64;
     static constexpr std::uint32_t kSlotCount = kWays * kSetCount;
+    static constexpr std::uint8_t kMaxApproxCount = 0xffU;
 
     struct ProbeResult {
         std::uint8_t approx_count = 0;

@@ -91,12 +91,16 @@ private:
                                           std::size_t idle_count) noexcept {
             auto *self = static_cast<Shard *>(ctx);
             FIBER_ASSERT(self != nullptr);
-            auto current = self->hint.probe(key).approx_count;
-            while (current < idle_count) {
+            const std::size_t target =
+                    idle_count < static_cast<std::size_t>(Http1ConnectionGroupHintTable::kMaxApproxCount)
+                            ? idle_count
+                            : static_cast<std::size_t>(Http1ConnectionGroupHintTable::kMaxApproxCount);
+            std::size_t current = self->hint.probe(key).approx_count;
+            while (current < target) {
                 self->hint.note_idle_add(key);
                 ++current;
             }
-            while (current > idle_count) {
+            while (current > target) {
                 self->hint.note_idle_remove(key);
                 --current;
             }
