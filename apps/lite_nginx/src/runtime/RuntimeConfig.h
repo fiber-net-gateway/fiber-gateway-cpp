@@ -17,6 +17,11 @@
 
 namespace fiber::lite_nginx::runtime {
 
+enum class KeepaliveMode : unsigned char {
+    Local,
+    Stealable,
+};
+
 struct RuntimeError {
     std::string message;
     config::SourceLocation location;
@@ -47,6 +52,7 @@ struct UpstreamRuntime {
     std::string name;
     std::vector<UpstreamPeerRuntime> peers;
     std::size_t keepalive = 0;
+    KeepaliveMode keepalive_mode = KeepaliveMode::Local;
     std::chrono::milliseconds connect_timeout{10000};
     std::chrono::milliseconds read_timeout{30000};
     std::chrono::milliseconds send_timeout{30000};

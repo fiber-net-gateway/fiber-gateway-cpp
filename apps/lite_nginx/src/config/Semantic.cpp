@@ -220,6 +220,22 @@ ProxySettings merge_proxy_settings(const ProxySettingsBuilder &base, const Proxy
     return settings;
 }
 
+std::expected<KeepaliveMode, ConfigError> parse_keepalive_mode(const DirectiveNode &directive) {
+    if (directive.args.size() != 1) {
+        return std::unexpected(make_error(directive, "keepalive_mode expects exactly one argument"));
+    }
+    if (contains_variable(directive.args[0])) {
+        return std::unexpected(make_error(directive, "keepalive_mode does not support variables in V1"));
+    }
+    if (directive.args[0] == "local") {
+        return KeepaliveMode::Local;
+    }
+    if (directive.args[0] == "stealable") {
+        return KeepaliveMode::Stealable;
+    }
+    return std::unexpected(make_error(directive, "keepalive_mode must be 'local' or 'stealable'"));
+}
+
 bool has_tls_identity(const ServerConfig &server) {
     return !server.certificate.empty() || !server.certificate_key.empty();
 }
@@ -321,6 +337,7 @@ std::expected<UpstreamConfig, ConfigError> parse_upstream(const DirectiveNode &d
 
     UpstreamConfig upstream;
     upstream.name = directive.args[0];
+    bool seen_keepalive_mode = false;
 
     for (const auto &child: directive.children) {
         if (child.has_block) {
@@ -354,6 +371,18 @@ std::expected<UpstreamConfig, ConfigError> parse_upstream(const DirectiveNode &d
                 return std::unexpected(keepalive.error());
             }
             upstream.keepalive = *keepalive;
+            continue;
+        }
+        if (child.name == "keepalive_mode") {
+            if (seen_keepalive_mode) {
+                return std::unexpected(make_error(child, "keepalive_mode must not be repeated"));
+            }
+            auto keepalive_mode = parse_keepalive_mode(child);
+            if (!keepalive_mode) {
+                return std::unexpected(keepalive_mode.error());
+            }
+            upstream.keepalive_mode = *keepalive_mode;
+            seen_keepalive_mode = true;
             continue;
         }
 

@@ -10,6 +10,7 @@
 namespace {
 
 using fiber::lite_nginx::config::ConfigLoader;
+using fiber::lite_nginx::config::KeepaliveMode;
 using fiber::lite_nginx::config::Lexer;
 using fiber::lite_nginx::config::LocationMatchKind;
 using fiber::lite_nginx::config::ProxyPassKind;
@@ -46,6 +47,7 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
             upstream backend {
                 server 127.0.0.1:9001;
                 keepalive 32;
+                keepalive_mode stealable;
                 connect_timeout 2s;
             }
 
@@ -84,6 +86,7 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
     EXPECT_EQ(config.http.upstreams[0].servers[0].host, "127.0.0.1");
     EXPECT_EQ(config.http.upstreams[0].servers[0].port, 9001);
     EXPECT_EQ(config.http.upstreams[0].keepalive, 32u);
+    EXPECT_EQ(config.http.upstreams[0].keepalive_mode, KeepaliveMode::Stealable);
     EXPECT_EQ(config.http.upstreams[0].connect_timeout, std::chrono::seconds(2));
 
     ASSERT_EQ(config.http.servers.size(), 1u);
@@ -147,6 +150,29 @@ TEST(LiteNginxConfigTest, RejectsUnsupportedDirective) {
 
     ASSERT_FALSE(config_result.has_value());
     EXPECT_NE(config_result.error().message.find("unsupported directive"), std::string::npos);
+}
+
+TEST(LiteNginxConfigTest, RejectsInvalidKeepaliveMode) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8080;
+            upstream backend {
+                server 127.0.0.1:9001;
+                keepalive 8;
+                keepalive_mode shared;
+            }
+            server {
+                server_name localhost;
+                location / {
+                    proxy_pass http://backend;
+                }
+            }
+        }
+    )",
+                                                        "inline.conf");
+
+    ASSERT_FALSE(config_result.has_value());
+    EXPECT_NE(config_result.error().message.find("keepalive_mode"), std::string::npos);
 }
 
 TEST(LiteNginxConfigTest, RejectsUnknownNamedUpstream) {

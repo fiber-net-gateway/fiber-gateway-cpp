@@ -22,6 +22,16 @@ constexpr std::uint8_t kSkipHeaderValue = 1;
 
 using fiber::common::route::RoutePatternError;
 
+KeepaliveMode to_runtime_keepalive_mode(config::KeepaliveMode mode) noexcept {
+    switch (mode) {
+        case config::KeepaliveMode::Local:
+            return KeepaliveMode::Local;
+        case config::KeepaliveMode::Stealable:
+            return KeepaliveMode::Stealable;
+    }
+    return KeepaliveMode::Local;
+}
+
 RuntimeError make_error(const config::SourceLocation &location, std::string message) {
     return RuntimeError{
             .message = std::move(message),
@@ -139,6 +149,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
         UpstreamRuntime runtime_upstream;
         runtime_upstream.name = upstream.name;
         runtime_upstream.keepalive = upstream.keepalive;
+        runtime_upstream.keepalive_mode = to_runtime_keepalive_mode(upstream.keepalive_mode);
         runtime_upstream.connect_timeout = upstream.connect_timeout.value_or(kDefaultConnectTimeout);
         runtime_upstream.read_timeout = upstream.read_timeout.value_or(kDefaultReadTimeout);
         runtime_upstream.send_timeout = upstream.send_timeout.value_or(kDefaultSendTimeout);

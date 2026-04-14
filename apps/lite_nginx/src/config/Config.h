@@ -11,6 +11,11 @@
 
 namespace fiber::lite_nginx::config {
 
+enum class KeepaliveMode : unsigned char {
+    Local,
+    Stealable,
+};
+
 struct HeaderOverride {
     std::string name;
     std::string lowercase_name;
@@ -42,6 +47,7 @@ struct UpstreamConfig {
     std::string name;
     std::vector<UpstreamServerConfig> servers;
     std::size_t keepalive = 0;
+    KeepaliveMode keepalive_mode = KeepaliveMode::Local;
     std::optional<std::chrono::milliseconds> connect_timeout;
     std::optional<std::chrono::milliseconds> read_timeout;
     std::optional<std::chrono::milliseconds> send_timeout;
