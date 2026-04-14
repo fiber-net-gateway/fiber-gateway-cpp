@@ -345,7 +345,7 @@ fiber::async::Task<void> ProxyHandler::handle(fiber::http::HttpExchange &exchang
         co_return;
     }
 
-    auto handle = upstreams_->acquire_connection(location.upstream_index);
+    auto handle = co_await upstreams_->acquire_connection(location.upstream_index);
     if (!handle.valid()) {
         co_await send_plain_response(exchange, 502, kBadGatewayBody);
         co_return;

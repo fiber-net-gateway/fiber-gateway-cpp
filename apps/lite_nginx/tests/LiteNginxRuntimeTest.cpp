@@ -769,4 +769,153 @@ http {
     EXPECT_EQ(upstream.accept_count(), 1);
 }
 
+TEST(LiteNginxRuntimeTest, DoesNotPoolDirectProxyPassTargets) {
+    std::promise<std::string> first_upstream_request;
+    std::promise<std::string> second_upstream_request;
+    auto first_future = first_upstream_request.get_future();
+    auto second_future = second_upstream_request.get_future();
+    KeepAliveUpstream upstream(
+            {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\nConnection: "
+                    "keep-alive\r\n\r\nfirst",
+                    "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nContent-Type: text/plain\r\nConnection: "
+                    "keep-alive\r\n\r\nsecond",
+            },
+            {&first_upstream_request, &second_upstream_request});
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+
+    server {
+        server_name localhost;
+        location / {
+            proxy_pass http://127.0.0.1:UPSTREAM_PORT;
+        }
+    }
+}
+)";
+    std::size_t marker = config_text.find("LISTEN_PORT");
+    ASSERT_NE(marker, std::string::npos);
+    config_text.replace(marker, sizeof("LISTEN_PORT") - 1, std::to_string(port));
+
+    marker = config_text.find("UPSTREAM_PORT");
+    ASSERT_NE(marker, std::string::npos);
+    config_text.replace(marker, sizeof("UPSTREAM_PORT") - 1, std::to_string(upstream.port()));
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "runtime_direct_short.conf");
+    ASSERT_TRUE(config.has_value());
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const char first_request[] = "GET /first HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, first_request, sizeof(first_request) - 1, 0),
+              static_cast<ssize_t>(sizeof(first_request) - 1));
+    std::string first_response = recv_http_response(client);
+    ::close(client);
+
+    client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const char second_request[] = "GET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, second_request, sizeof(second_request) - 1, 0),
+              static_cast<ssize_t>(sizeof(second_request) - 1));
+    std::string second_response = recv_http_response(client);
+    ::close(client);
+
+    ASSERT_EQ(first_future.wait_for(3s), std::future_status::ready);
+    ASSERT_EQ(second_future.wait_for(3s), std::future_status::ready);
+
+    EXPECT_NE(first_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
+    EXPECT_NE(second_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
+    EXPECT_EQ(upstream.accept_count(), 2);
+}
+
+TEST(LiteNginxRuntimeTest, StealsNamedUpstreamConnectionsAcrossWorkersWhenEnabled) {
+    std::promise<std::string> first_upstream_request;
+    std::promise<std::string> second_upstream_request;
+    auto first_future = first_upstream_request.get_future();
+    auto second_future = second_upstream_request.get_future();
+    KeepAliveUpstream upstream(
+            {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\nConnection: "
+                    "keep-alive\r\n\r\nfirst",
+                    "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nContent-Type: text/plain\r\nConnection: "
+                    "keep-alive\r\n\r\nsecond",
+            },
+            {&first_upstream_request, &second_upstream_request});
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 2;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+
+    upstream backend {
+        server 127.0.0.1:UPSTREAM_PORT;
+        keepalive 2;
+        keepalive_mode stealable;
+    }
+
+    server {
+        server_name localhost;
+        location / {
+            proxy_pass http://backend;
+        }
+    }
+}
+)";
+    std::size_t marker = config_text.find("LISTEN_PORT");
+    ASSERT_NE(marker, std::string::npos);
+    config_text.replace(marker, sizeof("LISTEN_PORT") - 1, std::to_string(port));
+
+    marker = config_text.find("UPSTREAM_PORT");
+    ASSERT_NE(marker, std::string::npos);
+    config_text.replace(marker, sizeof("UPSTREAM_PORT") - 1, std::to_string(upstream.port()));
+
+    auto config =
+            fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "runtime_stealable_keepalive.conf");
+    ASSERT_TRUE(config.has_value());
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const char first_request[] = "GET /first HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, first_request, sizeof(first_request) - 1, 0),
+              static_cast<ssize_t>(sizeof(first_request) - 1));
+    std::string first_response = recv_http_response(client);
+    ::close(client);
+
+    client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const char second_request[] = "GET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, second_request, sizeof(second_request) - 1, 0),
+              static_cast<ssize_t>(sizeof(second_request) - 1));
+    std::string second_response = recv_http_response(client);
+    ::close(client);
+
+    ASSERT_EQ(first_future.wait_for(3s), std::future_status::ready);
+    ASSERT_EQ(second_future.wait_for(3s), std::future_status::ready);
+
+    EXPECT_NE(first_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
+    EXPECT_NE(second_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
+    EXPECT_EQ(upstream.accept_count(), 1);
+}
+
 } // namespace
