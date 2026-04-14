@@ -17,8 +17,11 @@
 #include "async/Sleep.h"
 #include "async/Spawn.h"
 #include "common/IoError.h"
+#include "common/mem/BufPool.h"
 #include "event/EventLoopGroup.h"
+#include "http/ClientHttp1Exchange.h"
 #include "http/Http1ConnectionGroupKey.h"
+#include "http/HttpHeaders.h"
 #include "http/StealableHttp1ConnectionPoolSet.h"
 #include "http/TlsContext.h"
 #include "net/TcpListener.h"
@@ -203,6 +206,38 @@ DetachedTask run_hold_server(fiber::event::EventLoop *loop, std::size_t accept_c
     for (int fd: accepted_fds) {
         ::close(fd);
     }
+    result_promise->set_value(fiber::common::IoErr::None);
+}
+
+DetachedTask run_close_after_accept_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
+                                           std::promise<fiber::common::IoErr> *result_promise) {
+    fiber::net::TcpListener listener(*loop);
+    fiber::net::ListenOptions options{};
+    auto bind_result = listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), options);
+    if (!bind_result) {
+        port_promise->set_value(0);
+        result_promise->set_value(bind_result.error());
+        co_return;
+    }
+
+    auto port_result = resolve_port(listener.fd());
+    port_promise->set_value(port_result ? *port_result : 0);
+    if (!port_result) {
+        listener.close();
+        result_promise->set_value(port_result.error());
+        co_return;
+    }
+
+    auto accept_result = co_await listener.accept();
+    if (!accept_result) {
+        listener.close();
+        result_promise->set_value(accept_result.error());
+        co_return;
+    }
+
+    int client = accept_result->release_fd();
+    listener.close();
+    ::close(client);
     result_promise->set_value(fiber::common::IoErr::None);
 }
 
@@ -703,6 +738,90 @@ TEST(StealableHttp1ConnectionPoolSetTest, BorrowedConnectionHeldByOneLoopMakesOt
     final_close_future.get();
 
     server_state->stop.store(true, std::memory_order_release);
+    EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);
+    group.stop();
+    group.join();
+    server_group.stop();
+    server_group.join();
+}
+
+TEST(StealableHttp1ConnectionPoolSetTest, BorrowedConnectionFailureOnBorrowerLoopDropsItAtHome) {
+    fiber::event::EventLoopGroup server_group(1);
+    std::promise<std::uint16_t> server_port_promise;
+    std::promise<fiber::common::IoErr> server_result_promise;
+    auto server_port_future = server_port_promise.get_future();
+    auto server_result_future = server_result_promise.get_future();
+
+    server_group.start();
+    fiber::async::spawn(server_group.at(0), [&]() {
+        return run_close_after_accept_server(&server_group.at(0), &server_port_promise, &server_result_promise);
+    });
+
+    const std::uint16_t port = server_port_future.get();
+    ASSERT_NE(port, 0);
+
+    fiber::event::EventLoopGroup group(2);
+    fiber::http::StealableHttp1ConnectionPoolSet set(group);
+    ASSERT_TRUE(set.init());
+    const auto key = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
+                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+
+    std::promise<void> home_ready_promise;
+    auto home_ready_future = home_ready_promise.get_future();
+    std::promise<bool> borrower_failed_promise;
+    auto borrower_failed_future = borrower_failed_promise.get_future();
+    std::promise<bool> dropped_promise;
+    auto dropped_future = dropped_promise.get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
+        auto lease = co_await set.acquire(key);
+        auto conn_result = co_await ensure_connected(lease, port);
+        if (conn_result) {
+            lease.reset();
+        }
+        home_ready_promise.set_value();
+        co_return;
+    });
+
+    home_ready_future.get();
+
+    fiber::async::spawn(group.at(1), [&]() -> DetachedTask {
+        auto borrowed = co_await set.acquire(key);
+        bool failed = false;
+        if (borrowed.hit() && borrowed.has_connection()) {
+            fiber::mem::BufPool pool;
+            fiber::http::HttpHeaders headers(pool);
+            headers.add_view("host", "example.com");
+            fiber::http::ClientHttp1Exchange exchange(borrowed.connection(), pool);
+            fiber::http::Http1RequestHead head;
+            head.method = fiber::http::HttpMethod::Get;
+            head.target = "/drop";
+            head.headers = &headers;
+
+            auto send_result = co_await exchange.send_header(head, true);
+            if (!send_result) {
+                failed = true;
+            } else {
+                auto header_result = co_await exchange.read_header();
+                failed = !header_result.has_value();
+            }
+        }
+        borrowed.reset();
+        borrower_failed_promise.set_value(failed);
+        co_return;
+    });
+
+    EXPECT_TRUE(borrower_failed_future.get());
+
+    fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
+        co_await fiber::async::sleep(10ms);
+        auto after_close = co_await set.acquire(key);
+        dropped_promise.set_value(after_close.valid() && !after_close.hit() && !after_close.has_connection());
+        co_return;
+    });
+
+    EXPECT_TRUE(dropped_future.get());
     EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);
     group.stop();
     group.join();

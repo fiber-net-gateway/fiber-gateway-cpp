@@ -29,7 +29,16 @@ Http1ClientConnectionOptions Http1ClientConnection::normalize_options(Http1Clien
 Http1ClientConnection::Http1ClientConnection(event::EventLoop &loop, Http1ClientConnectionOptions options) noexcept :
     loop_(&loop), options_(normalize_options(std::move(options))), tls_ctx_(options_.tls, false, false) {}
 
-Http1ClientConnection::~Http1ClientConnection() { close(); }
+Http1ClientConnection::~Http1ClientConnection() {
+    if (!transport_) {
+        return;
+    }
+    if (loop_ && loop_->in_loop()) {
+        close();
+        return;
+    }
+    FIBER_ASSERT(false);
+}
 
 fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect() noexcept {
     FIBER_ASSERT(loop_ != nullptr);
@@ -91,10 +100,16 @@ fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect() noex
     co_return common::IoResult<void>{};
 }
 
-void Http1ClientConnection::close() noexcept {
+void Http1ClientConnection::mark_unusable() noexcept {
     keepalive_usable_ = false;
     active_exchange_ = nullptr;
     state_ = State::Closed;
+}
+
+void Http1ClientConnection::close() noexcept {
+    FIBER_ASSERT(loop_ != nullptr);
+    FIBER_ASSERT(loop_->in_loop());
+    mark_unusable();
     if (transport_) {
         transport_->close();
         transport_.reset();
@@ -133,7 +148,7 @@ void Http1ClientConnection::release_exchange(ClientHttp1Exchange *exchange, bool
     }
     active_exchange_ = nullptr;
     if (!keepalive || !valid()) {
-        close();
+        mark_unusable();
         return;
     }
     keepalive_usable_ = true;
@@ -144,7 +159,7 @@ void Http1ClientConnection::fail_exchange(ClientHttp1Exchange *exchange) noexcep
     if (active_exchange_ == exchange) {
         active_exchange_ = nullptr;
     }
-    close();
+    mark_unusable();
 }
 
 } // namespace fiber::http

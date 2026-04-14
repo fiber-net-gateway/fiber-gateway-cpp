@@ -48,6 +48,7 @@ private:
     };
 
     static Http1ClientConnectionOptions normalize_options(Http1ClientConnectionOptions options) noexcept;
+    void mark_unusable() noexcept;
     [[nodiscard]] bool acquire_exchange(ClientHttp1Exchange *exchange) noexcept;
     void release_exchange(ClientHttp1Exchange *exchange, bool keepalive) noexcept;
     void fail_exchange(ClientHttp1Exchange *exchange) noexcept;
