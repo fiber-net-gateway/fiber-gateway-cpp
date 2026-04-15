@@ -1096,6 +1096,7 @@ common::IoResult<Http2Stream::Lease> Http2Connection::attach_local_stream(Http2S
 
     last_local_stream_id_ = stream_id;
     next_local_stream_id_ += 2U;
+    ++local_active_stream_count_;
     return stream.lease();
 }
 
@@ -1107,6 +1108,9 @@ void Http2Connection::detach_stream(Http2Stream &stream) noexcept {
     Http2Stream::Lease held = streams_.erase(stream.stream_id_);
     if (is_peer_stream_id(stream.stream_id_) && peer_active_stream_count_ != 0) {
         --peer_active_stream_count_;
+    }
+    if (is_local_stream_id(stream.stream_id_) && local_active_stream_count_ != 0) {
+        --local_active_stream_count_;
     }
     owned_stream_list_.erase(stream);
     stream.attached_to_connection_ = false;
@@ -1137,14 +1141,14 @@ void Http2Connection::try_release_stream(Http2Stream &stream) noexcept {
 
 bool Http2Connection::can_accept_peer_stream(std::uint32_t stream_id) const noexcept {
     return state_ == State::Running && stream_id != 0 && is_peer_stream_id(stream_id) &&
-           is_next_peer_stream_id(stream_id) && peer_active_stream_count_ < options_.max_peer_concurrent_streams;
+           is_next_peer_stream_id(stream_id) && peer_active_stream_count_ < options_.local_max_concurrent_streams;
 }
 
 bool Http2Connection::can_attach_local_stream() const noexcept {
     const bool local_session_ready =
             state_ == State::Running || (options_.role == ConnectionRole::Client && state_ == State::Start);
     return local_session_ready && !peer_goaway_received_ && is_local_stream_id(next_local_stream_id_) &&
-           local_push_stream_count_ < peer_advertised_max_concurrent_streams_;
+           local_active_stream_count_ < peer_advertised_max_concurrent_streams_;
 }
 
 bool Http2Connection::is_next_peer_stream_id(std::uint32_t stream_id) const noexcept {
@@ -1371,8 +1375,9 @@ void Http2Connection::enter_closing(common::IoErr reason, bool abortive) noexcep
 }
 
 std::size_t Http2Connection::configured_max_active_streams() const noexcept {
-    return static_cast<std::size_t>(options_.max_peer_concurrent_streams) +
-           static_cast<std::size_t>(options_.max_local_push_streams);
+    return static_cast<std::size_t>(options_.local_max_concurrent_streams) +
+           std::max(static_cast<std::size_t>(options_.max_peer_concurrent_streams),
+                    static_cast<std::size_t>(options_.max_local_push_streams));
 }
 
 common::IoErr Http2Connection::request_stream_send(Http2Stream &stream, Http2OutboundNextKind next_kind,

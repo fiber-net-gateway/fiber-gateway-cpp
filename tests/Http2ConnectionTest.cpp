@@ -866,6 +866,28 @@ std::uint32_t parse_window_update_increment(const EncodedFrame &frame) {
            static_cast<std::uint32_t>(static_cast<std::uint8_t>(frame.payload[3]));
 }
 
+std::optional<std::uint32_t> parse_settings_parameter(const EncodedFrame &frame, std::uint16_t id) {
+    if (frame.type != static_cast<std::uint8_t>(fiber::http::Http2FrameType::Settings) ||
+        (frame.payload.size() % 6U) != 0) {
+        return std::nullopt;
+    }
+
+    for (std::size_t pos = 0; pos < frame.payload.size(); pos += 6U) {
+        std::uint16_t current_id =
+                (static_cast<std::uint16_t>(static_cast<std::uint8_t>(frame.payload[pos])) << 8) |
+                static_cast<std::uint16_t>(static_cast<std::uint8_t>(frame.payload[pos + 1]));
+        if (current_id != id) {
+            continue;
+        }
+        return (static_cast<std::uint32_t>(static_cast<std::uint8_t>(frame.payload[pos + 2])) << 24) |
+               (static_cast<std::uint32_t>(static_cast<std::uint8_t>(frame.payload[pos + 3])) << 16) |
+               (static_cast<std::uint32_t>(static_cast<std::uint8_t>(frame.payload[pos + 4])) << 8) |
+               static_cast<std::uint32_t>(static_cast<std::uint8_t>(frame.payload[pos + 5]));
+    }
+
+    return std::nullopt;
+}
+
 std::size_t client_initial_flight_prefix_length(std::string_view written) {
     if (written.size() < kClientConnectionPreface.size() ||
         written.substr(0, kClientConnectionPreface.size()) != kClientConnectionPreface) {
@@ -1924,6 +1946,115 @@ ControlRunOutcome execute_control_connection(std::vector<std::string> chunks, Co
     return outcome;
 }
 
+struct ClientConcurrentLimitOutcome {
+    bool first_opened = false;
+    fiber::common::IoErr second_open_error = fiber::common::IoErr::None;
+    bool third_opened = false;
+};
+
+DetachedTask run_client_concurrent_limit(std::shared_ptr<std::promise<ClientConcurrentLimitOutcome>> promise,
+                                         fiber::http::Http2Connection::Options options = {}) {
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+    auto transport =
+            std::make_unique<FakeHttpTransport>(std::vector<std::string>{}, std::vector<size_t>{}, true, false);
+    auto *fake_transport = transport.get();
+    ControlHttp2Connection connection(std::move(transport), fake_transport, options);
+
+    ClientConcurrentLimitOutcome outcome;
+    EXPECT_EQ(connection.apply_settings_parameter(0x3, 1), fiber::common::IoErr::None);
+
+    auto *owner1 = TestHttp2StreamOwner::create_owner();
+    if (!owner1) {
+        connection.request_stop(fiber::common::IoErr::NoMem);
+        co_await connection.stop_and_join();
+        promise->set_value(outcome);
+        fiber::event::EventLoop::current().stop();
+        co_return;
+    }
+    auto first = connection.attach_local_stream(owner1->stream);
+    outcome.first_opened = first.has_value();
+
+    auto *owner2 = TestHttp2StreamOwner::create_owner();
+    if (!owner2) {
+        if (first) {
+            first->get()->close(fiber::common::IoErr::Canceled);
+            connection.try_release_stream(*first->get());
+            first->reset();
+        } else {
+            delete owner1;
+        }
+        connection.request_stop(fiber::common::IoErr::NoMem);
+        co_await connection.stop_and_join();
+        promise->set_value(outcome);
+        fiber::event::EventLoop::current().stop();
+        co_return;
+    }
+    auto second = connection.attach_local_stream(owner2->stream);
+    if (!second) {
+        delete owner2;
+        outcome.second_open_error = second.error();
+    } else {
+        second->get()->close(fiber::common::IoErr::Canceled);
+        connection.try_release_stream(*second->get());
+        second->reset();
+    }
+
+    if (first) {
+        first->get()->close(fiber::common::IoErr::Canceled);
+        connection.try_release_stream(*first->get());
+        first->reset();
+    } else {
+        delete owner1;
+    }
+
+    auto *owner3 = TestHttp2StreamOwner::create_owner();
+    if (!owner3) {
+        connection.request_stop(fiber::common::IoErr::NoMem);
+        co_await connection.stop_and_join();
+        promise->set_value(outcome);
+        fiber::event::EventLoop::current().stop();
+        co_return;
+    }
+    auto third = connection.attach_local_stream(owner3->stream);
+    outcome.third_opened = third.has_value();
+    if (third) {
+        third->get()->close(fiber::common::IoErr::Canceled);
+        connection.try_release_stream(*third->get());
+        third->reset();
+    } else {
+        delete owner3;
+    }
+
+    connection.request_stop();
+    co_await connection.stop_and_join();
+    promise->set_value(outcome);
+    fiber::event::EventLoop::current().stop();
+    co_return;
+}
+
+ClientConcurrentLimitOutcome execute_client_concurrent_limit(fiber::http::Http2Connection::Options options = {}) {
+    fiber::event::EventLoopGroup group(1);
+    auto promise = std::make_shared<std::promise<ClientConcurrentLimitOutcome>>();
+    auto future = promise->get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [promise = std::move(promise), options]() mutable {
+        return run_client_concurrent_limit(std::move(promise), options);
+    });
+
+    auto status = future.wait_for(std::chrono::seconds(2));
+    if (status != std::future_status::ready) {
+        group.stop();
+        group.join();
+        ADD_FAILURE() << "Timed out waiting for http2 client concurrent limit task";
+        return {};
+    }
+
+    ClientConcurrentLimitOutcome outcome = future.get();
+    group.join();
+    return outcome;
+}
+
 DetachedTask run_keepalive_connection(std::shared_ptr<std::promise<KeepaliveRunOutcome>> promise,
                                       std::vector<ScriptedReadTransport::ReadAction> actions,
                                       fiber::http::Http2Connection::Options options = {}) {
@@ -2433,6 +2564,8 @@ TEST(Http2ConnectionTest, ClientConnectionPrefaceSendsPrefaceSettingsAndWindowUp
     EXPECT_EQ(frames[0].flags, 0x0);
     EXPECT_EQ(frames[0].stream_id, 0U);
     EXPECT_EQ(frames[0].length, 18U);
+    ASSERT_TRUE(parse_settings_parameter(frames[0], 0x3).has_value());
+    EXPECT_EQ(*parse_settings_parameter(frames[0], 0x3), 128U);
     EXPECT_EQ(frames[1].type, 0x8);
     EXPECT_EQ(frames[1].stream_id, 0U);
     EXPECT_EQ(frames[1].length, 4U);
@@ -2450,7 +2583,7 @@ TEST(Http2ConnectionTest, ServerConnectionPrefaceSendsSettingsAndWindowUpdateAft
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Server;
     options.max_frame_size = 0x00ffffffU;
-    options.local_max_concurrent_streams = 128;
+    options.local_max_concurrent_streams = 1;
     options.initial_stream_send_window = 65535;
     options.initial_connection_recv_window = 0x7fffffffU;
 
@@ -2463,9 +2596,53 @@ TEST(Http2ConnectionTest, ServerConnectionPrefaceSendsSettingsAndWindowUpdateAft
     EXPECT_EQ(frames[0].flags, 0x0);
     EXPECT_EQ(frames[0].stream_id, 0U);
     EXPECT_EQ(frames[0].length, 18U);
+    ASSERT_TRUE(parse_settings_parameter(frames[0], 0x3).has_value());
+    EXPECT_EQ(*parse_settings_parameter(frames[0], 0x3), 1U);
     EXPECT_EQ(frames[1].type, 0x8);
     EXPECT_EQ(frames[1].stream_id, 0U);
     EXPECT_EQ(frames[1].length, 4U);
+}
+
+TEST(Http2ConnectionTest, ClientLocalStreamsRespectPeerAdvertisedConcurrentLimit) {
+    fiber::http::Http2Connection::Options options;
+    options.max_peer_concurrent_streams = 100;
+
+    ClientConcurrentLimitOutcome outcome = execute_client_concurrent_limit(options);
+
+    EXPECT_TRUE(outcome.first_opened);
+    EXPECT_EQ(outcome.second_open_error, fiber::common::IoErr::Busy);
+    EXPECT_TRUE(outcome.third_opened);
+}
+
+TEST(Http2ConnectionTest, ServerRejectsPeerStreamsBeyondAdvertisedConcurrentLimit) {
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Server;
+    options.local_max_concurrent_streams = 1;
+    options.max_peer_concurrent_streams = 100;
+
+    std::string request = std::string(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0x0, 0, {});
+    request += build_headers_frame_bytes(1,
+                                         {
+                                                 {":method", "GET"},
+                                                 {":scheme", "https"},
+                                                 {":path", "/one"},
+                                                 {":authority", "example.com"},
+                                         },
+                                         false);
+    request += build_headers_frame_bytes(3,
+                                         {
+                                                 {":method", "GET"},
+                                                 {":scheme", "https"},
+                                                 {":path", "/two"},
+                                                 {":authority", "example.com"},
+                                         },
+                                         true);
+
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, options);
+
+    ASSERT_FALSE(outcome.result.has_value());
+    EXPECT_EQ(outcome.result.error(), fiber::common::IoErr::Invalid);
 }
 
 TEST(Http2ConnectionTest, LocalStreamCreationRequiresStart) {

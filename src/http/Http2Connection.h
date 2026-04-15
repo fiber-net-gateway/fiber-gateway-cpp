@@ -62,7 +62,11 @@ public:
         std::uint32_t max_frame_size = 16384;
         std::uint32_t max_hpack_string_size = 64 * 1024;
         std::size_t max_free_send_entries = 64;
+        // Initial peer-advertised SETTINGS_MAX_CONCURRENT_STREAMS budget used
+        // for streams we create until the peer sends its own SETTINGS frame.
         std::uint32_t max_peer_concurrent_streams = 100;
+        // SETTINGS_MAX_CONCURRENT_STREAMS that we advertise to the peer and
+        // enforce for peer-created streams on this connection.
         std::uint32_t local_max_concurrent_streams = 128;
         std::uint32_t max_local_push_streams = 0;
         std::uint32_t initial_connection_recv_window = 0x7fffffffU;
@@ -212,7 +216,7 @@ private:
     std::uint32_t last_local_stream_id_ = 0;
     std::uint32_t next_local_stream_id_ = 0;
     std::size_t peer_active_stream_count_ = 0;
-    std::size_t local_push_stream_count_ = 0;
+    std::size_t local_active_stream_count_ = 0;
     std::int32_t conn_recv_window_remaining_ = 65535;
     std::uint32_t conn_recv_window_target_ = 65535;
     std::int32_t peer_initial_stream_send_window_ = 65535;
