@@ -744,6 +744,9 @@ void ClientHttp2Request::on_stream_send_window_available(void *owner) noexcept {
 }
 
 bool ClientHttp2Request::cancel_queued_send() noexcept {
+    if (abort_reason_ != common::IoErr::None) {
+        return false;
+    }
     return conn_ != nullptr && conn_->cancel_queued_stream_send(stream_);
 }
 

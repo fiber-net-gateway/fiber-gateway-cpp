@@ -112,6 +112,19 @@ TEST(TcpListenerTest, AcceptsConnection) {
     group.join();
 }
 
+TEST(TcpListenerTest, BoundListenerCanDestructBeforeLoopRuns) {
+    fiber::event::EventLoop loop;
+    fiber::net::ListenOptions options{};
+    fiber::net::SocketAddress addr(fiber::net::IpAddress::loopback_v4(), 0);
+
+    {
+        fiber::net::TcpListener listener(loop);
+        auto bind_result = listener.bind(addr, options);
+        ASSERT_TRUE(bind_result);
+        EXPECT_GE(listener.fd(), 0);
+    }
+}
+
 TEST(TcpListenerTest, OwnerMismatchReturnsBusy) {
     fiber::event::EventLoopGroup group(1);
     group.start();

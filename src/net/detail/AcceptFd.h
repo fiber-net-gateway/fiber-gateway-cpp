@@ -30,7 +30,7 @@ public:
         if (!efd_.valid()) {
             return;
         }
-        if (efd_.loop().in_loop()) {
+        if (!close_requires_loop() || efd_.loop().in_loop()) {
             close();
             return;
         }
@@ -59,7 +59,7 @@ public:
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept { return efd_.loop(); }
 
     void close() {
-        FIBER_ASSERT(efd_.loop().in_loop());
+        FIBER_ASSERT(!close_requires_loop() || efd_.loop().in_loop());
         if (!efd_.valid()) {
             return;
         }
@@ -82,6 +82,8 @@ public:
 
 private:
     friend class AcceptAwaiter;
+
+    [[nodiscard]] bool close_requires_loop() const noexcept { return efd_.registered() || waiter_ != nullptr; }
 
     bool begin_wait(AcceptAwaiter *awaiter) {
         FIBER_ASSERT(efd_.loop().in_loop());
