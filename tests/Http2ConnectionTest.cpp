@@ -379,6 +379,12 @@ struct ServerHeaderRunOutcome {
     std::string written;
 };
 
+struct ServerDelayedSendAfterCloseOutcome {
+    fiber::common::IoResult<void> run_result;
+    fiber::common::IoResult<void> delayed_send_result;
+    bool delayed_send_completed = false;
+};
+
 struct ClientRequestHeaderRunOutcome {
     fiber::common::IoResult<void> result;
     std::string written;
@@ -1035,6 +1041,79 @@ ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks,
     };
     ServerHeaderRunOutcome outcome = execute_server_request(std::move(chunks), std::move(handler), options);
     outcome.header_result = *header_result;
+    return outcome;
+}
+
+DetachedTask run_server_delayed_send_after_close(std::shared_ptr<std::promise<ServerDelayedSendAfterCloseOutcome>> promise,
+                                                 std::vector<std::string> chunks,
+                                                 fiber::http::HttpServerOptions http_options,
+                                                 fiber::http::Http2Connection::Options options = {}) {
+    options = with_test_hpack_catalog(options);
+    auto delayed_send_result = std::make_shared<fiber::common::IoResult<void>>();
+    auto delayed_send_completed = std::make_shared<std::atomic<bool>>(false);
+    fiber::http::HttpHandler handler = [delayed_send_result,
+                                        delayed_send_completed](fiber::http::HttpExchange &exchange)
+            -> fiber::async::Task<void> {
+        co_await fiber::async::sleep(std::chrono::milliseconds(10));
+        *delayed_send_result = co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = 204,
+                .end_stream = true,
+        });
+        delayed_send_completed->store(true, std::memory_order_release);
+        co_return;
+    };
+
+    ServerDelayedSendAfterCloseOutcome outcome;
+    {
+        auto transport = std::make_unique<FakeHttpTransport>(std::move(chunks), std::vector<size_t>{}, false, false);
+        fiber::http::ServerRequestFactory factory(http_options, handler);
+        fiber::http::Http2Connection connection(options, &factory, fiber::http::ServerRequestFactory::ops());
+        fiber::common::IoErr start_err = connection.start(std::move(transport));
+        if (start_err != fiber::common::IoErr::None) {
+            outcome.run_result = std::unexpected(start_err);
+            promise->set_value(std::move(outcome));
+            fiber::event::EventLoop::current().stop();
+            co_return;
+        }
+
+        outcome.run_result = co_await connection.run();
+    }
+
+    for (int i = 0; i < 100 && !delayed_send_completed->load(std::memory_order_acquire); ++i) {
+        co_await fiber::async::sleep(std::chrono::milliseconds(1));
+    }
+
+    outcome.delayed_send_completed = delayed_send_completed->load(std::memory_order_acquire);
+    outcome.delayed_send_result = *delayed_send_result;
+    promise->set_value(std::move(outcome));
+    fiber::event::EventLoop::current().stop();
+    co_return;
+}
+
+ServerDelayedSendAfterCloseOutcome execute_server_delayed_send_after_close(
+        std::vector<std::string> chunks, fiber::http::HttpServerOptions http_options = {},
+        fiber::http::Http2Connection::Options options = {}) {
+    fiber::event::EventLoopGroup group(1);
+    auto promise = std::make_shared<std::promise<ServerDelayedSendAfterCloseOutcome>>();
+    auto future = promise->get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [promise = std::move(promise), chunks = std::move(chunks), http_options,
+                                      options]() mutable {
+        return run_server_delayed_send_after_close(std::move(promise), std::move(chunks), http_options, options);
+    });
+
+    auto status = future.wait_for(std::chrono::seconds(2));
+    if (status != std::future_status::ready) {
+        group.stop();
+        group.join();
+        ADD_FAILURE() << "Timed out waiting for delayed send after close task";
+        return {};
+    }
+
+    ServerDelayedSendAfterCloseOutcome outcome = future.get();
+    group.join();
     return outcome;
 }
 
@@ -3217,6 +3296,26 @@ TEST(Http2ConnectionTest, ServerHandlerCanAwaitLaterRequestBodyFrame) {
     ASSERT_TRUE(header_result->has_value());
     EXPECT_EQ(*observed_body, "delayed body");
     EXPECT_TRUE(read_result->value().last);
+}
+
+TEST(Http2ConnectionTest, ServerHandlerSendAfterConnectionCloseReturnsCanceled) {
+    std::string request = std::string(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0x0, 0, {});
+    request += build_headers_frame_bytes(1,
+                                         {
+                                                 {":method", "GET"},
+                                                 {":scheme", "https"},
+                                                 {":path", "/late-send"},
+                                                 {":authority", "example.com"},
+                                         },
+                                         true);
+
+    ServerDelayedSendAfterCloseOutcome outcome = execute_server_delayed_send_after_close({std::move(request)});
+
+    ASSERT_TRUE(outcome.run_result.has_value());
+    ASSERT_TRUE(outcome.delayed_send_completed);
+    ASSERT_FALSE(outcome.delayed_send_result.has_value());
+    EXPECT_EQ(outcome.delayed_send_result.error(), fiber::common::IoErr::Canceled);
 }
 
 TEST(Http2ConnectionTest, ServerReadBodyReturnsLastWhenRequestEndsAtHeaders) {

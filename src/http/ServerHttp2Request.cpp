@@ -441,6 +441,9 @@ common::IoErr ServerHttp2Request::encode_body_frames(Http2Stream &stream, void *
 }
 
 bool ServerHttp2Request::cancel_queued_send() noexcept {
+    if (abort_reason_ != common::IoErr::None) {
+        return false;
+    }
     if (conn_ == nullptr) {
         return false;
     }
@@ -470,7 +473,13 @@ fiber::async::Task<common::IoResult<BodyChunk>> ServerHttp2Request::read_body(Ht
 
 fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_header(HttpExchange &exchange,
                                                                            const OutgoingHeaderBlockView &header) {
-    if (conn_ == nullptr || &exchange != &exchange_) {
+    if (&exchange != &exchange_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (abort_reason_ != common::IoErr::None) {
+        co_return std::unexpected(abort_reason_);
+    }
+    if (conn_ == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
     if (!handler_started_ || stream_.local_rst() || stream_.remote_rst()) {
