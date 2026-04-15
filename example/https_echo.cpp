@@ -13,6 +13,7 @@
 
 #include <sys/socket.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include "async/Spawn.h"
 #include "async/Task.h"
@@ -373,6 +374,7 @@ int main(int argc, char **argv) {
         std::cerr << "write temp cert/key failed\n";
         return 1;
     }
+    ::signal(SIGPIPE, SIG_IGN);
 
     fiber::event::EventLoop loop;
 
