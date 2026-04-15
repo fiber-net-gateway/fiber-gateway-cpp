@@ -82,19 +82,22 @@ private:
         if (!valid()) {
             return fiber::common::IoErr::BadFd;
         }
-        if (waiter_ != nullptr) {
+        if ((fiber::event::any(waiter->interested_ & fiber::event::IoEvent::Read) && read_waiter_ != nullptr) ||
+            (fiber::event::any(waiter->interested_ & fiber::event::IoEvent::Write) && write_waiter_ != nullptr)) {
             return fiber::common::IoErr::Busy;
         }
-        fiber::common::IoErr err = efd_.watch_add(waiter->interested_);
+        fiber::common::IoErr err = efd_.watch_set(waiting_events() | waiter->interested_);
         if (err != fiber::common::IoErr::None) {
             return err;
         }
-        if constexpr (std::same_as<std::remove_cvref_t<Waiter>, RWFdLocalThreadWaiter>) {
-            waiter_ = waiter;
-            local_waiting_ = true;
-        } else {
-            waiter_ = waiter;
-            local_waiting_ = false;
+        constexpr bool kIsLocal = std::same_as<std::remove_cvref_t<Waiter>, RWFdLocalThreadWaiter>;
+        if (fiber::event::any(waiter->interested_ & fiber::event::IoEvent::Read)) {
+            read_waiter_ = waiter;
+            read_waiter_local_ = kIsLocal;
+        }
+        if (fiber::event::any(waiter->interested_ & fiber::event::IoEvent::Write)) {
+            write_waiter_ = waiter;
+            write_waiter_local_ = kIsLocal;
         }
         return fiber::common::IoErr::None;
     }
@@ -104,26 +107,33 @@ private:
     fiber::common::IoErr cancel_wait(Waiter *waiter) noexcept {
         FIBER_ASSERT(loop().in_loop());
         FIBER_ASSERT(waiter != nullptr);
-        if (waiter_ != waiter) {
+        bool removed = false;
+        if (read_waiter_ == waiter) {
+            read_waiter_ = nullptr;
+            read_waiter_local_ = false;
+            removed = true;
+        }
+        if (write_waiter_ == waiter) {
+            write_waiter_ = nullptr;
+            write_waiter_local_ = false;
+            removed = true;
+        }
+        if (!removed) {
             return fiber::common::IoErr::None;
         }
-        waiter_ = nullptr;
-        local_waiting_ = false;
-        return efd_.watch_del(waiter->interested_);
+        return efd_.watch_set(waiting_events());
     }
 
     static void on_efd_events(void *owner, fiber::event::IoEvent events);
     void handle_events(fiber::event::IoEvent events);
     [[nodiscard]] bool has_waiters() const noexcept;
+    [[nodiscard]] fiber::event::IoEvent waiting_events() const noexcept;
 
     Efd efd_;
-    bool local_waiting_ = false;
-    union {
-        RWFdLocalThreadWaiter *local_waiter_ = nullptr;
-        RWFdCrossThreadWaiter *cross_waiter_;
-        RWFdWaiterBase *waiter_base_;
-        void *waiter_;
-    };
+    RWFdWaiterBase *read_waiter_ = nullptr;
+    RWFdWaiterBase *write_waiter_ = nullptr;
+    bool read_waiter_local_ = false;
+    bool write_waiter_local_ = false;
 };
 
 struct RWFdCrossThreadWaiter : RWFdWaiterBase {

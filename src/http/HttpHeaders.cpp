@@ -287,15 +287,6 @@ size_t HttpHeaders::remove_lowcase(std::string_view lowcase_key, uint64_t hash) 
     return removed;
 }
 
-void HttpHeaders::reserve_bytes(size_t bytes) {
-    size_t estimated_fields = bytes / 32 + 8;
-    size_t buckets = next_pow2(std::max(kDefaultBuckets, estimated_fields * 2));
-    if (bucket_head_.size() < buckets) {
-        init_buckets(buckets);
-        rebuild_buckets();
-    }
-}
-
 void HttpHeaders::clear() noexcept {
     all_head_ = nullptr;
     all_tail_ = nullptr;

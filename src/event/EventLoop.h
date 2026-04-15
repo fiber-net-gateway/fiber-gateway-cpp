@@ -8,7 +8,6 @@
 #include <cstdint>
 #include <type_traits>
 
-#include "../async/CoroutineFramePool.h"
 #include "MpscQueue.h"
 #include "Poller.h"
 #include "TimerQueue.h"
@@ -238,11 +237,6 @@ public:
         cancel_quiesced(entry);
     }
 
-
-    fiber::async::CoroutineFramePool &frame_pool() noexcept { return frame_pool_; }
-
-    const fiber::async::CoroutineFramePool &frame_pool() const noexcept { return frame_pool_; }
-
     Poller &poller() noexcept { return poller_; }
     const Poller &poller() const noexcept { return poller_; }
 
@@ -351,7 +345,6 @@ private:
     std::atomic<bool> wakeup_pending_{false};
     std::atomic<bool> stop_requested_{false};
     std::chrono::steady_clock::time_point now_{};
-    fiber::async::CoroutineFramePool frame_pool_{};
     EventLoopGroup *group_ = nullptr;
     std::size_t group_index_ = kInvalidGroupIndex;
 };
