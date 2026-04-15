@@ -43,22 +43,29 @@ void RWFd::close() {
 
     (void) efd_.unwatch_all();
 
-    if (waiter_ != nullptr) {
-        if (local_waiting_) {
-            auto *waiter = local_waiter_;
-            local_waiter_ = nullptr;
-            waiter->err_ = fiber::common::IoErr::Canceled;
-            waiter->ready_ = fiber::event::IoEvent::None;
-            waiter->coro_.resume();
+    RWFdWaiterBase *waiters[2] = {read_waiter_, write_waiter_};
+    bool was_local[2] = {read_waiter_local_, write_waiter_local_};
+    read_waiter_ = nullptr;
+    write_waiter_ = nullptr;
+    read_waiter_local_ = false;
+    write_waiter_local_ = false;
+
+    for (std::size_t i = 0; i < 2; ++i) {
+        RWFdWaiterBase *waiter = waiters[i];
+        if (!waiter) {
+            continue;
+        }
+        if (i != 0 && waiter == waiters[0]) {
+            continue;
+        }
+        waiter->err_ = fiber::common::IoErr::Canceled;
+        waiter->ready_ = fiber::event::IoEvent::None;
+        if (was_local[i]) {
+            static_cast<RWFdLocalThreadWaiter *>(waiter)->coro_.resume();
         } else {
-            auto *waiter = cross_waiter_;
-            cross_waiter_ = nullptr;
-            waiter->err_ = fiber::common::IoErr::Canceled;
-            waiter->ready_ = fiber::event::IoEvent::None;
-            RWFdCrossThreadWaiter::do_notify_resume(waiter);
+            RWFdCrossThreadWaiter::do_notify_resume(static_cast<RWFdCrossThreadWaiter *>(waiter));
         }
     }
-    local_waiting_ = false;
 
     efd_.close_fd();
 }
@@ -81,33 +88,76 @@ void RWFd::on_efd_events(void *owner, fiber::event::IoEvent events) {
 
 void RWFd::handle_events(fiber::event::IoEvent events) {
     FIBER_ASSERT(loop().in_loop());
-    if (!fiber::event::any(events) || waiter_ == nullptr) {
+    if (!fiber::event::any(events) || !has_waiters()) {
         return;
     }
 
-    auto *waiter = waiter_base_;
-    bool was_local = local_waiting_;
-    fiber::event::IoEvent ready = events & waiter->interested_;
-    if (!fiber::event::any(ready)) {
+    RWFdWaiterBase *waiters[2] = {read_waiter_, write_waiter_};
+    bool was_local[2] = {read_waiter_local_, write_waiter_local_};
+    std::size_t count = 0;
+    fiber::event::IoEvent consumed = fiber::event::IoEvent::None;
+
+    auto collect_waiter = [&](RWFdWaiterBase *waiter, bool local) noexcept {
+        if (!waiter) {
+            return;
+        }
+        for (std::size_t i = 0; i < count; ++i) {
+            if (waiters[i] == waiter) {
+                return;
+            }
+        }
+        fiber::event::IoEvent ready = events & waiter->interested_;
+        if (!fiber::event::any(ready)) {
+            return;
+        }
+        waiter->ready_ = ready;
+        waiter->err_ = fiber::common::IoErr::None;
+        waiters[count] = waiter;
+        was_local[count] = local;
+        ++count;
+        consumed |= waiter->interested_;
+    };
+
+    collect_waiter(read_waiter_, read_waiter_local_);
+    collect_waiter(write_waiter_, write_waiter_local_);
+    if (count == 0) {
         return;
     }
 
-    (void) efd_.consume_ready(ready);
-
-    waiter_ = nullptr;
-    local_waiting_ = false;
-    waiter->ready_ = ready;
-    waiter->err_ = fiber::common::IoErr::None;
-
-    if (was_local) {
-        static_cast<RWFdLocalThreadWaiter *>(waiter)->coro_.resume();
-        return;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (read_waiter_ == waiters[i]) {
+            read_waiter_ = nullptr;
+            read_waiter_local_ = false;
+        }
+        if (write_waiter_ == waiters[i]) {
+            write_waiter_ = nullptr;
+            write_waiter_local_ = false;
+        }
     }
 
-    RWFdCrossThreadWaiter::do_notify_resume(static_cast<RWFdCrossThreadWaiter *>(waiter));
+    (void) efd_.consume_ready(consumed);
+
+    for (std::size_t i = 0; i < count; ++i) {
+        if (was_local[i]) {
+            static_cast<RWFdLocalThreadWaiter *>(waiters[i])->coro_.resume();
+        } else {
+            RWFdCrossThreadWaiter::do_notify_resume(static_cast<RWFdCrossThreadWaiter *>(waiters[i]));
+        }
+    }
 }
 
-bool RWFd::has_waiters() const noexcept { return waiter_ != nullptr; }
+bool RWFd::has_waiters() const noexcept { return read_waiter_ != nullptr || write_waiter_ != nullptr; }
+
+fiber::event::IoEvent RWFd::waiting_events() const noexcept {
+    fiber::event::IoEvent events = fiber::event::IoEvent::None;
+    if (read_waiter_ != nullptr) {
+        events |= fiber::event::IoEvent::Read;
+    }
+    if (write_waiter_ != nullptr) {
+        events |= fiber::event::IoEvent::Write;
+    }
+    return events;
+}
 
 void RWFdCrossThreadWaiter::on_notify_cancel(RWFdCrossThreadWaiter *waiter) noexcept {
     RWFdWaiterState state = waiter->state_.load(std::memory_order_relaxed);

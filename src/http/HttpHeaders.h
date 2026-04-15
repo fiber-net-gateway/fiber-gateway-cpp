@@ -151,7 +151,6 @@ public:
         const HeaderField *node_ = nullptr;
     };
 
-    void reserve_bytes(size_t bytes);
     void clear() noexcept;
     void release() noexcept;
     size_t size() const noexcept;

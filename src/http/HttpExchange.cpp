@@ -34,10 +34,7 @@ const HeaderMap<RequestHeaderRefKind> &request_header_ref_map() noexcept {
 
 } // namespace
 
-HttpExchange::HttpExchange(const HttpServerOptions &options) : request_headers_(pool_), request_trailers_(pool_) {
-    request_headers_.reserve_bytes(options.header_init_size);
-    request_trailers_.reserve_bytes(options.header_init_size);
-}
+HttpExchange::HttpExchange(const HttpServerOptions &options) : request_headers_(pool_), request_trailers_(pool_) {}
 
 HttpExchange::~HttpExchange() = default;
 
