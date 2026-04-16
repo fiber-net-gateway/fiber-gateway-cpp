@@ -250,8 +250,7 @@ fiber::async::Task<fiber::common::IoResult<ParseCode>> Http1Connection::parse_re
             if (line.uri_start && line.uri_end && line.uri_end >= line.uri_start) {
                 std::size_t uri_len = static_cast<std::size_t>(line.uri_end - line.uri_start);
                 std::string_view raw_uri(reinterpret_cast<char *>(line.uri_start), uri_len);
-                common::IoErr uri_err =
-                        http_finalize_request_uri(raw_uri, line.uri_parse, exchange.uri_, &exchange.pool());
+                common::IoErr uri_err = http_process_uri(raw_uri, line.uri_parse, exchange.uri_, &exchange.pool());
                 if (uri_err != common::IoErr::None) {
                     if (uri_err == common::IoErr::NoMem) {
                         co_return std::unexpected(uri_err);

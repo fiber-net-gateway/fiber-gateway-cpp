@@ -819,11 +819,11 @@ common::IoErr ServerHttp2Request::handle_path(ServerHttp2Request &request, std::
         return common::IoErr::NoMem;
     }
     HttpUriParseState uri_state{};
-    common::IoErr err = http_scan_origin_form_uri(path, uri_state);
+    common::IoErr err = http_parse_uri(path, uri_state);
     if (err != common::IoErr::None) {
         return err;
     }
-    err = http_finalize_request_uri(path, uri_state, request.exchange_.uri_, &request.exchange_.pool());
+    err = http_process_uri(path, uri_state, request.exchange_.uri_, &request.exchange_.pool());
     if (err != common::IoErr::None) {
         return err;
     }
