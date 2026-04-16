@@ -13,6 +13,7 @@
 #include "Http2DataFrameEncoder.h"
 #include "Http2HeadersFrameEncoder.h"
 #include "Http2HpackHuffman.h"
+#include "HttpUriParse.h"
 
 namespace fiber::http {
 
@@ -817,21 +818,14 @@ common::IoErr ServerHttp2Request::handle_path(ServerHttp2Request &request, std::
     if (path.data() == nullptr && !path.empty()) {
         return common::IoErr::NoMem;
     }
-    request.exchange_.uri_.unparsed_uri = path;
-    request.exchange_.uri_.path = path;
-    request.exchange_.uri_.query = {};
-    request.exchange_.uri_.exten = {};
-    for (std::size_t i = 0; i < path.size(); ++i) {
-        if (path[i] == '?') {
-            request.exchange_.uri_.path = path.substr(0, i);
-            request.exchange_.uri_.query = path.substr(i + 1);
-            break;
-        }
+    HttpUriParseState uri_state{};
+    common::IoErr err = http_scan_origin_form_uri(path, uri_state);
+    if (err != common::IoErr::None) {
+        return err;
     }
-    std::size_t slash = request.exchange_.uri_.path.find_last_of('/');
-    std::size_t dot = request.exchange_.uri_.path.find_last_of('.');
-    if (dot != std::string_view::npos && (slash == std::string_view::npos || dot > slash + 1)) {
-        request.exchange_.uri_.exten = request.exchange_.uri_.path.substr(dot + 1);
+    err = http_finalize_request_uri(path, uri_state, request.exchange_.uri_, &request.exchange_.pool());
+    if (err != common::IoErr::None) {
+        return err;
     }
     request.exchange_.version_ = HttpVersion::HTTP_2_0;
     return common::IoErr::None;

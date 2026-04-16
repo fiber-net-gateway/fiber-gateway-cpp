@@ -984,15 +984,17 @@ RunOutcome execute_connection(std::vector<std::string> chunks, fiber::http::Http
 DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderRunOutcome>> promise,
                                       std::vector<std::string> chunks, fiber::http::HttpHandler handler,
                                       fiber::http::HttpServerOptions http_options,
-                                      fiber::http::Http2Connection::Options options) {
+                                      fiber::http::Http2Connection::Options options, bool hold_eof = true) {
     options = with_test_hpack_catalog(options);
-    auto transport = std::make_unique<FakeHttpTransport>(std::move(chunks), std::vector<size_t>{}, false, true);
+    auto transport = std::make_unique<FakeHttpTransport>(std::move(chunks), std::vector<size_t>{}, false, hold_eof);
     FakeHttpTransport *fake_transport = transport.get();
     fiber::http::HttpHandler wrapped_handler =
             [handler = std::move(handler),
-             fake_transport](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+             fake_transport, hold_eof](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         co_await handler(exchange);
-        fake_transport->release_eof();
+        if (hold_eof) {
+            fake_transport->release_eof();
+        }
         co_return;
     };
     fiber::http::ServerRequestFactory factory(http_options, wrapped_handler);
@@ -1016,16 +1018,17 @@ DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderR
 
 ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks, fiber::http::HttpHandler handler,
                                               fiber::http::HttpServerOptions http_options,
-                                              fiber::http::Http2Connection::Options options = {}) {
+                                              fiber::http::Http2Connection::Options options = {},
+                                              bool hold_eof = true) {
     fiber::event::EventLoopGroup group(1);
     auto promise = std::make_shared<std::promise<ServerHeaderRunOutcome>>();
     auto future = promise->get_future();
 
     group.start();
     fiber::async::spawn(group.at(0), [promise = std::move(promise), chunks = std::move(chunks),
-                                      handler = std::move(handler), http_options, options]() mutable {
+                                      handler = std::move(handler), http_options, options, hold_eof]() mutable {
         return run_http2_server_request(std::move(promise), std::move(chunks), std::move(handler), http_options,
-                                        options);
+                                        options, hold_eof);
     });
 
     auto status = future.wait_for(std::chrono::seconds(2));
@@ -1042,8 +1045,10 @@ ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks, f
 }
 
 ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks, fiber::http::HttpHandler handler,
-                                              fiber::http::Http2Connection::Options options = {}) {
-    return execute_server_request(std::move(chunks), std::move(handler), fiber::http::HttpServerOptions{}, options);
+                                              fiber::http::Http2Connection::Options options = {},
+                                              bool hold_eof = true) {
+    return execute_server_request(std::move(chunks), std::move(handler), fiber::http::HttpServerOptions{}, options,
+                                  hold_eof);
 }
 
 ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks,
@@ -2643,6 +2648,77 @@ TEST(Http2ConnectionTest, ServerRejectsPeerStreamsBeyondAdvertisedConcurrentLimi
 
     ASSERT_FALSE(outcome.result.has_value());
     EXPECT_EQ(outcome.result.error(), fiber::common::IoErr::Invalid);
+}
+
+TEST(Http2ConnectionTest, ServerParsesPathQueryAndExtensionFromPseudoPath) {
+    struct UriSnapshot {
+        std::string unparsed_uri;
+        std::string path;
+        std::string query;
+        std::string exten;
+    };
+
+    std::string request = std::string(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0x0, 0, {});
+    request += build_headers_frame_bytes(1,
+                                         {
+                                                 {":method", "GET"},
+                                                 {":scheme", "https"},
+                                                 {":path", "/assets/app.js?v=42#fragment"},
+                                                 {":authority", "example.com"},
+                                         },
+                                         true);
+
+    auto snapshot_promise = std::make_shared<std::promise<UriSnapshot>>();
+    auto snapshot_future = snapshot_promise->get_future();
+    fiber::http::HttpHandler handler = [snapshot_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        snapshot_promise->set_value(UriSnapshot{
+                .unparsed_uri = std::string(exchange.uri().unparsed_uri),
+                .path = std::string(exchange.uri().path),
+                .query = std::string(exchange.uri().query),
+                .exten = std::string(exchange.uri().exten),
+        });
+        (void) co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = 204,
+                .end_stream = true,
+        });
+        co_return;
+    };
+
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, std::move(handler));
+
+    ASSERT_TRUE(outcome.result.has_value());
+    UriSnapshot snapshot = snapshot_future.get();
+    EXPECT_EQ(snapshot.unparsed_uri, "/assets/app.js?v=42#fragment");
+    EXPECT_EQ(snapshot.path, "/assets/app.js");
+    EXPECT_EQ(snapshot.query, "v=42");
+    EXPECT_EQ(snapshot.exten, "js");
+}
+
+TEST(Http2ConnectionTest, ServerRejectsPseudoPathWithoutLeadingSlash) {
+    std::string request = std::string(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0x0, 0, {});
+    request += build_headers_frame_bytes(1,
+                                         {
+                                                 {":method", "GET"},
+                                                 {":scheme", "https"},
+                                                 {":path", "not-a-path"},
+                                                 {":authority", "example.com"},
+                                         },
+                                         true);
+
+    fiber::http::HttpHandler handler = [](fiber::http::HttpExchange &) -> fiber::async::Task<void> { co_return; };
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, std::move(handler), {}, false);
+
+    ASSERT_TRUE(outcome.result.has_value());
+    std::vector<EncodedFrame> frames = parse_frames(outcome.written);
+    auto it = std::find_if(frames.begin(), frames.end(), [](const EncodedFrame &frame) {
+        return frame.type == 0x3U && frame.stream_id == 1U;
+    });
+    ASSERT_NE(it, frames.end()) << describe_frames(frames);
+    ASSERT_EQ(it->payload.size(), 4U);
+    EXPECT_EQ(static_cast<unsigned char>((*it).payload[3]), 0x1U);
 }
 
 TEST(Http2ConnectionTest, LocalStreamCreationRequiresStart) {

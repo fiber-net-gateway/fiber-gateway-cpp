@@ -318,7 +318,7 @@ ParseCode RequestLineParser::execute(mem::IoBuf *buffer) {
                     case '?':
                         line_.uri_start = p;
                         line_.args_start = p + 1;
-                        line_.empty_path_in_uri = true;
+                        line_.uri_parse.empty_path_in_uri = true;
                         state = State::Uri;
                         break;
                     case ' ':
@@ -383,7 +383,7 @@ ParseCode RequestLineParser::execute(mem::IoBuf *buffer) {
                     case '?':
                         line_.uri_start = p;
                         line_.args_start = p + 1;
-                        line_.empty_path_in_uri = true;
+                        line_.uri_parse.empty_path_in_uri = true;
                         state = State::Uri;
                         break;
                     case ' ':
@@ -421,20 +421,20 @@ ParseCode RequestLineParser::execute(mem::IoBuf *buffer) {
                         line_.http_minor = 9;
                         goto done;
                     case '.':
-                        line_.complex_uri = true;
+                        line_.uri_parse.complex_uri = true;
                         state = State::Uri;
                         break;
                     case '%':
-                        line_.quoted_uri = true;
+                        line_.uri_parse.quoted_uri = true;
                         state = State::Uri;
                         break;
                     case '/':
-                        line_.complex_uri = true;
+                        line_.uri_parse.complex_uri = true;
                         state = State::Uri;
                         break;
 #if defined(_WIN32)
                     case '\\':
-                        line_.complex_uri = true;
+                        line_.uri_parse.complex_uri = true;
                         state = State::Uri;
                         break;
 #endif
@@ -443,11 +443,11 @@ ParseCode RequestLineParser::execute(mem::IoBuf *buffer) {
                         state = State::Uri;
                         break;
                     case '#':
-                        line_.complex_uri = true;
+                        line_.uri_parse.complex_uri = true;
                         state = State::Uri;
                         break;
                     case '+':
-                        line_.plus_in_uri = true;
+                        line_.uri_parse.plus_in_uri = true;
                         break;
                     default:
                         if (ch < 0x20 || ch == 0x7f) {
@@ -466,7 +466,7 @@ ParseCode RequestLineParser::execute(mem::IoBuf *buffer) {
                     case '/':
 #if defined(_WIN32)
                         if (line_.uri_ext == p) {
-                            line_.complex_uri = true;
+                            line_.uri_parse.complex_uri = true;
                             state = State::Uri;
                             break;
                         }
@@ -492,12 +492,12 @@ ParseCode RequestLineParser::execute(mem::IoBuf *buffer) {
                         goto done;
 #if defined(_WIN32)
                     case '\\':
-                        line_.complex_uri = true;
+                        line_.uri_parse.complex_uri = true;
                         state = State::AfterSlashInUri;
                         break;
 #endif
                     case '%':
-                        line_.quoted_uri = true;
+                        line_.uri_parse.quoted_uri = true;
                         state = State::Uri;
                         break;
                     case '?':
@@ -505,11 +505,11 @@ ParseCode RequestLineParser::execute(mem::IoBuf *buffer) {
                         state = State::Uri;
                         break;
                     case '#':
-                        line_.complex_uri = true;
+                        line_.uri_parse.complex_uri = true;
                         state = State::Uri;
                         break;
                     case '+':
-                        line_.plus_in_uri = true;
+                        line_.uri_parse.plus_in_uri = true;
                         break;
                     default:
                         if (ch < 0x20 || ch == 0x7f) {
@@ -538,7 +538,7 @@ ParseCode RequestLineParser::execute(mem::IoBuf *buffer) {
                         line_.http_minor = 9;
                         goto done;
                     case '#':
-                        line_.complex_uri = true;
+                        line_.uri_parse.complex_uri = true;
                         break;
                     default:
                         if (ch < 0x20 || ch == 0x7f) {

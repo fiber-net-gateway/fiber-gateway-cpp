@@ -119,7 +119,10 @@ struct TempFile {
 struct ObservedRequest {
     fiber::http::HttpMethod method = fiber::http::HttpMethod::Unknown;
     fiber::http::HttpVersion version = fiber::http::HttpVersion::HTTP_1_1;
+    std::string unparsed_uri;
     std::string path;
+    std::string query;
+    std::string exten;
     std::string host;
     std::string body;
 };
@@ -207,7 +210,10 @@ fiber::async::Task<fiber::common::IoResult<ObservedRequest>> collect_request(fib
     ObservedRequest observed;
     observed.method = exchange.method();
     observed.version = exchange.version();
+    observed.unparsed_uri.assign(exchange.uri().unparsed_uri.data(), exchange.uri().unparsed_uri.size());
     observed.path.assign(exchange.uri().path.data(), exchange.uri().path.size());
+    observed.query.assign(exchange.uri().query.data(), exchange.uri().query.size());
+    observed.exten.assign(exchange.uri().exten.data(), exchange.uri().exten.size());
     std::string_view host = exchange.request_headers().get("host");
     observed.host.assign(host.data(), host.size());
     auto body_result = co_await read_body_to_string(exchange);
@@ -293,6 +299,7 @@ DetachedTask run_http2_connection_task(fiber::http::Http2ClientConnection *conne
 
 DetachedTask run_http1_client_no_body(fiber::event::EventLoop *loop, std::uint16_t port,
                                       std::promise<ClientRoundTripResult> *promise) {
+    constexpr std::string_view kTarget = "/interop/http1/no-body";
     ClientRoundTripResult result;
     fiber::http::Http1ClientConnectionOptions options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
@@ -312,7 +319,60 @@ DetachedTask run_http1_client_no_body(fiber::event::EventLoop *loop, std::uint16
     fiber::http::ClientHttp1Exchange exchange(connection, pool);
     fiber::http::Http1RequestHead head;
     head.method = fiber::http::HttpMethod::Get;
-    head.target = "/interop/http1/no-body";
+    head.target = kTarget;
+    head.headers = &headers;
+
+    auto send_result = co_await exchange.send_header(head, true);
+    if (!send_result) {
+        result.err = send_result.error();
+        promise->set_value(std::move(result));
+        co_return;
+    }
+
+    auto header_result = co_await exchange.read_header();
+    if (!header_result) {
+        result.err = header_result.error();
+        promise->set_value(std::move(result));
+        co_return;
+    }
+
+    result.status_code = (*header_result)->status_code;
+    result.echoed_method = std::string((*header_result)->headers.get("x-echo-method"));
+    result.echoed_path = std::string((*header_result)->headers.get("x-echo-path"));
+
+    auto body_result = co_await exchange.read_body(64);
+    if (!body_result) {
+        result.err = body_result.error();
+        promise->set_value(std::move(result));
+        co_return;
+    }
+    result.response_body = chain_to_string(std::move(body_result->data_chain));
+    result.body_last = body_result->last;
+    promise->set_value(std::move(result));
+}
+
+DetachedTask run_http1_client_no_body_target(fiber::event::EventLoop *loop, std::uint16_t port, std::string target,
+                                             std::promise<ClientRoundTripResult> *promise) {
+    ClientRoundTripResult result;
+    fiber::http::Http1ClientConnectionOptions options;
+    options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+
+    fiber::http::Http1ClientConnection connection(*loop, options);
+    auto connect_result = co_await connection.connect();
+    if (!connect_result) {
+        result.err = connect_result.error();
+        promise->set_value(std::move(result));
+        co_return;
+    }
+
+    fiber::mem::BufPool pool;
+    fiber::http::HttpHeaders headers(pool);
+    headers.set("host", "localhost");
+
+    fiber::http::ClientHttp1Exchange exchange(connection, pool);
+    fiber::http::Http1RequestHead head;
+    head.method = fiber::http::HttpMethod::Get;
+    head.target = target;
     head.headers = &headers;
 
     auto send_result = co_await exchange.send_header(head, true);
@@ -639,6 +699,61 @@ TEST(HttpClientServerInteropTest, Http1ClientAndServerRoundTripWithBody) {
     EXPECT_EQ(observed.path, "/interop/http1/with-body");
     EXPECT_EQ(observed.host, "localhost");
     EXPECT_EQ(observed.body, "http1-client-body");
+
+    std::promise<void> close_promise;
+    auto close_future = close_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return close_server_on_loop(server, &close_promise); });
+    close_future.get();
+    group.stop();
+    group.join();
+    delete server;
+}
+
+TEST(HttpClientServerInteropTest, Http1ClientAndServerNormalizeComplexUri) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<std::uint16_t> port_promise;
+    std::promise<fiber::http::HttpServer *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    auto observed_promise = std::make_shared<std::promise<ObservedRequest>>();
+    auto observed_future = observed_promise->get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        fiber::http::HttpHandler handler = [observed_promise](fiber::http::HttpExchange &exchange) {
+            return handle_no_body_request(exchange, observed_promise);
+        };
+        return start_http_server(&group.at(0), std::move(handler), {}, nullptr, &port_promise, &server_promise);
+    });
+
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    constexpr std::string_view kTarget = "/alpha//beta/../gamma/%64.txt?x=1#frag";
+    std::promise<ClientRoundTripResult> client_promise;
+    auto client_future = client_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_http1_client_no_body_target(&group.at(0), port, std::string(kTarget), &client_promise);
+    });
+
+    ClientRoundTripResult client = client_future.get();
+    ObservedRequest observed = observed_future.get();
+
+    EXPECT_EQ(client.err, fiber::common::IoErr::None);
+    EXPECT_EQ(client.status_code, 204);
+    EXPECT_EQ(client.echoed_path, "/alpha/gamma/d.txt");
+
+    EXPECT_EQ(observed.method, fiber::http::HttpMethod::Get);
+    EXPECT_EQ(observed.version, fiber::http::HttpVersion::HTTP_1_1);
+    EXPECT_EQ(observed.unparsed_uri, kTarget);
+    EXPECT_EQ(observed.path, "/alpha/gamma/d.txt");
+    EXPECT_EQ(observed.query, "x=1");
+    EXPECT_EQ(observed.exten, "txt");
+    EXPECT_EQ(observed.host, "localhost");
+    EXPECT_TRUE(observed.body.empty());
 
     std::promise<void> close_promise;
     auto close_future = close_promise.get_future();

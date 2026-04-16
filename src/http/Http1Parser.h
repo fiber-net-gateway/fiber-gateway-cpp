@@ -11,6 +11,7 @@
 #include "../common/NonMovable.h"
 #include "../common/mem/IoBuf.h"
 #include "HttpCommon.h"
+#include "HttpUriParse.h"
 
 namespace fiber::http {
 
@@ -51,10 +52,7 @@ public:
         int http_minor = 0;
         int http_version = 0;
         HttpMethod method = HttpMethod::Unknown;
-        bool complex_uri = false;
-        bool quoted_uri = false;
-        bool plus_in_uri = false;
-        bool empty_path_in_uri = false;
+        HttpUriParseState uri_parse{};
     };
 
 public:
