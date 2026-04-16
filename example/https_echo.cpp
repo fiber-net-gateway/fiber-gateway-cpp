@@ -11,9 +11,9 @@
 #include <string>
 #include <string_view>
 
+#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <signal.h>
 
 #include "async/Spawn.h"
 #include "async/Task.h"

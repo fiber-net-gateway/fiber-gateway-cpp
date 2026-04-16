@@ -22,9 +22,7 @@ struct HttpUriParseState {
     bool has_fragment = false;
     bool has_exten = false;
 
-    [[nodiscard]] bool needs_complex_parse() const noexcept {
-        return complex_uri || quoted_uri || empty_path_in_uri;
-    }
+    [[nodiscard]] bool needs_complex_parse() const noexcept { return complex_uri || quoted_uri || empty_path_in_uri; }
 };
 
 [[nodiscard]] common::IoErr http_parse_uri(std::string_view raw_uri, HttpUriParseState &state) noexcept;

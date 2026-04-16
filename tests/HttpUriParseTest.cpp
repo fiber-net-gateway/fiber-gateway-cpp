@@ -24,8 +24,7 @@ TEST(HttpUriParseTest, FinalizeSimpleOriginFormUri) {
 
 TEST(HttpUriParseTest, FinalizeComplexUriNormalizesSegmentsAndQuotedBytes) {
     fiber::http::HttpUriParseState state{};
-    ASSERT_EQ(fiber::http::http_parse_uri("/alpha//beta/../gamma/%64.txt?x=1#frag", state),
-              fiber::common::IoErr::None);
+    ASSERT_EQ(fiber::http::http_parse_uri("/alpha//beta/../gamma/%64.txt?x=1#frag", state), fiber::common::IoErr::None);
     EXPECT_TRUE(state.complex_uri);
     EXPECT_TRUE(state.quoted_uri);
     EXPECT_TRUE(state.has_query);
