@@ -319,6 +319,8 @@ ParseCode RequestLineParser::execute(mem::IoBuf *buffer) {
                         line_.uri_start = p;
                         line_.args_start = p + 1;
                         line_.uri_parse.empty_path_in_uri = true;
+                        line_.uri_parse.has_query = true;
+                        line_.uri_parse.query_pos = 1;
                         state = State::Uri;
                         break;
                     case ' ':
@@ -384,6 +386,8 @@ ParseCode RequestLineParser::execute(mem::IoBuf *buffer) {
                         line_.uri_start = p;
                         line_.args_start = p + 1;
                         line_.uri_parse.empty_path_in_uri = true;
+                        line_.uri_parse.has_query = true;
+                        line_.uri_parse.query_pos = 1;
                         state = State::Uri;
                         break;
                     case ' ':
@@ -422,6 +426,8 @@ ParseCode RequestLineParser::execute(mem::IoBuf *buffer) {
                         goto done;
                     case '.':
                         line_.uri_parse.complex_uri = true;
+                        line_.uri_parse.has_exten = true;
+                        line_.uri_parse.exten_pos = static_cast<std::size_t>((p + 1) - line_.uri_start);
                         state = State::Uri;
                         break;
                     case '%':
@@ -430,20 +436,28 @@ ParseCode RequestLineParser::execute(mem::IoBuf *buffer) {
                         break;
                     case '/':
                         line_.uri_parse.complex_uri = true;
+                        line_.uri_parse.has_exten = false;
+                        line_.uri_parse.exten_pos = 0;
                         state = State::Uri;
                         break;
 #if defined(_WIN32)
                     case '\\':
                         line_.uri_parse.complex_uri = true;
+                        line_.uri_parse.has_exten = false;
+                        line_.uri_parse.exten_pos = 0;
                         state = State::Uri;
                         break;
 #endif
                     case '?':
                         line_.args_start = p + 1;
+                        line_.uri_parse.has_query = true;
+                        line_.uri_parse.query_pos = static_cast<std::size_t>((p + 1) - line_.uri_start);
                         state = State::Uri;
                         break;
                     case '#':
                         line_.uri_parse.complex_uri = true;
+                        line_.uri_parse.has_fragment = true;
+                        line_.uri_parse.fragment_pos = static_cast<std::size_t>(p - line_.uri_start);
                         state = State::Uri;
                         break;
                     case '+':
@@ -472,10 +486,14 @@ ParseCode RequestLineParser::execute(mem::IoBuf *buffer) {
                         }
 #endif
                         line_.uri_ext = nullptr;
+                        line_.uri_parse.has_exten = false;
+                        line_.uri_parse.exten_pos = 0;
                         state = State::AfterSlashInUri;
                         break;
                     case '.':
                         line_.uri_ext = p + 1;
+                        line_.uri_parse.has_exten = true;
+                        line_.uri_parse.exten_pos = static_cast<std::size_t>((p + 1) - line_.uri_start);
                         break;
                     case ' ':
                         line_.uri_end = p;
@@ -493,6 +511,8 @@ ParseCode RequestLineParser::execute(mem::IoBuf *buffer) {
 #if defined(_WIN32)
                     case '\\':
                         line_.uri_parse.complex_uri = true;
+                        line_.uri_parse.has_exten = false;
+                        line_.uri_parse.exten_pos = 0;
                         state = State::AfterSlashInUri;
                         break;
 #endif
@@ -502,10 +522,14 @@ ParseCode RequestLineParser::execute(mem::IoBuf *buffer) {
                         break;
                     case '?':
                         line_.args_start = p + 1;
+                        line_.uri_parse.has_query = true;
+                        line_.uri_parse.query_pos = static_cast<std::size_t>((p + 1) - line_.uri_start);
                         state = State::Uri;
                         break;
                     case '#':
                         line_.uri_parse.complex_uri = true;
+                        line_.uri_parse.has_fragment = true;
+                        line_.uri_parse.fragment_pos = static_cast<std::size_t>(p - line_.uri_start);
                         state = State::Uri;
                         break;
                     case '+':
@@ -539,6 +563,16 @@ ParseCode RequestLineParser::execute(mem::IoBuf *buffer) {
                         goto done;
                     case '#':
                         line_.uri_parse.complex_uri = true;
+                        if (!line_.uri_parse.has_fragment) {
+                            line_.uri_parse.has_fragment = true;
+                            line_.uri_parse.fragment_pos = static_cast<std::size_t>(p - line_.uri_start);
+                        }
+                        break;
+                    case '?':
+                        if (!line_.uri_parse.has_query) {
+                            line_.uri_parse.has_query = true;
+                            line_.uri_parse.query_pos = static_cast<std::size_t>((p + 1) - line_.uri_start);
+                        }
                         break;
                     default:
                         if (ch < 0x20 || ch == 0x7f) {

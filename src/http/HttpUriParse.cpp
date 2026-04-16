@@ -52,40 +52,65 @@ unsigned char next_uri_char(std::string_view raw_uri, std::size_t &pos) noexcept
     return '\0';
 }
 
-void assign_simple_extension(std::string_view path, HttpUri &uri) noexcept {
-    uri.exten = {};
-
-    const std::size_t dot = path.find_last_of('.');
-    if (dot == std::string_view::npos) {
+void assign_query_from_state(std::string_view raw_uri, const HttpUriParseState &state, HttpUri &uri) noexcept {
+    uri.query = {};
+    if (!state.has_query) {
         return;
     }
 
-    const std::size_t slash = path.find_last_of('/');
-    if (slash != std::string_view::npos && dot <= slash + 1) {
+    const std::size_t query_end = state.has_fragment ? state.fragment_pos : raw_uri.size();
+    if (state.query_pos > query_end || state.query_pos > raw_uri.size()) {
         return;
     }
 
-    uri.exten = path.substr(dot + 1);
+    uri.query = raw_uri.substr(state.query_pos, query_end - state.query_pos);
 }
 
-common::IoErr finalize_simple_uri(std::string_view raw_uri, HttpUri &uri) noexcept {
-    uri.unparsed_uri = raw_uri;
-    uri.path = raw_uri;
-    uri.query = {};
-    uri.exten = {};
+std::size_t simple_path_end(std::string_view raw_uri, const HttpUriParseState &state) noexcept {
+    if (state.has_query) {
+        return state.query_pos - 1;
+    }
+    if (state.has_fragment) {
+        return state.fragment_pos;
+    }
+    return raw_uri.size();
+}
 
-    const std::size_t query_marker = raw_uri.find('?');
-    if (query_marker != std::string_view::npos) {
-        uri.path = raw_uri.substr(0, query_marker);
-        uri.query = raw_uri.substr(query_marker + 1);
+void assign_simple_extension(std::size_t path_len, const HttpUriParseState &state, HttpUri &uri) noexcept {
+    uri.exten = {};
+    if (!state.has_exten || state.exten_pos >= path_len || state.exten_pos == kUriPosNpos) {
+        return;
     }
 
-    assign_simple_extension(uri.path, uri);
+    uri.exten = uri.path.substr(state.exten_pos, path_len - state.exten_pos);
+}
+
+common::IoErr process_simple_uri(std::string_view raw_uri, const HttpUriParseState &state, HttpUri &uri) noexcept {
+    const std::size_t path_len = simple_path_end(raw_uri, state);
+    if (path_len > raw_uri.size()) {
+        return common::IoErr::Invalid;
+    }
+
+    uri.unparsed_uri = raw_uri;
+    uri.path = raw_uri.substr(0, path_len);
+    assign_query_from_state(raw_uri, state, uri);
+    assign_simple_extension(path_len, state, uri);
     return common::IoErr::None;
 }
 
-common::IoErr finalize_complex_uri(std::string_view raw_uri, const HttpUriParseState &state, HttpUri &uri,
-                                   mem::BufPool *pool, bool merge_slashes) noexcept {
+void assign_complex_result(std::string_view raw_uri, const HttpUriParseState &state, char *dst, std::size_t out,
+                           std::size_t exten_start, HttpUri &uri) noexcept {
+    uri.unparsed_uri = raw_uri;
+    uri.path = std::string_view(dst, out);
+    assign_query_from_state(raw_uri, state, uri);
+    uri.exten = {};
+    if (exten_start != kUriPosNpos && exten_start <= out) {
+        uri.exten = std::string_view(dst + exten_start, out - exten_start);
+    }
+}
+
+common::IoErr process_complex_uri(std::string_view raw_uri, const HttpUriParseState &state, HttpUri &uri,
+                                  mem::BufPool *pool, bool merge_slashes) noexcept {
     if (!pool) {
         return common::IoErr::NoMem;
     }
@@ -101,9 +126,6 @@ common::IoErr finalize_complex_uri(std::string_view raw_uri, const HttpUriParseS
     std::size_t src = 0;
     std::size_t out = 0;
     std::size_t exten_start = kUriPosNpos;
-    std::size_t query_start = kUriPosNpos;
-    std::size_t query_len = 0;
-    bool query_len_set = false;
     unsigned char decoded = '\0';
 
     if (state.empty_path_in_uri) {
@@ -149,8 +171,6 @@ common::IoErr finalize_complex_uri(std::string_view raw_uri, const HttpUriParseS
                         current = ComplexState::Quoted;
                         break;
                     case '?':
-                        query_start = src;
-                        goto args;
                     case '#':
                         goto done;
                     case '.':
@@ -195,8 +215,6 @@ common::IoErr finalize_complex_uri(std::string_view raw_uri, const HttpUriParseS
                         current = ComplexState::Quoted;
                         break;
                     case '?':
-                        query_start = src;
-                        goto args;
                     case '#':
                         goto done;
                     case '+':
@@ -237,9 +255,6 @@ common::IoErr finalize_complex_uri(std::string_view raw_uri, const HttpUriParseS
                         current = ComplexState::Quoted;
                         break;
                     case '?':
-                        --out;
-                        query_start = src;
-                        goto args;
                     case '#':
                         --out;
                         goto done;
@@ -284,11 +299,7 @@ common::IoErr finalize_complex_uri(std::string_view raw_uri, const HttpUriParseS
                             }
                             --out;
                         }
-                        if (ch == '?') {
-                            query_start = src;
-                            goto args;
-                        }
-                        if (ch == '#') {
+                        if (ch == '?' || ch == '#') {
                             goto done;
                         }
                         current = ComplexState::Slash;
@@ -392,42 +403,13 @@ common::IoErr finalize_complex_uri(std::string_view raw_uri, const HttpUriParseS
     }
 
 done:
-    uri.unparsed_uri = raw_uri;
-    uri.path = std::string_view(dst, out);
-    uri.query = {};
-    uri.exten = {};
-    if (exten_start != kUriPosNpos && exten_start <= out) {
-        uri.exten = std::string_view(dst + exten_start, out - exten_start);
-    }
-    return common::IoErr::None;
-
-args:
-    while (src < raw_uri.size()) {
-        if (raw_uri[src++] != '#') {
-            continue;
-        }
-        query_len = (src - 1) - query_start;
-        query_len_set = true;
-        break;
-    }
-
-    uri.unparsed_uri = raw_uri;
-    uri.path = std::string_view(dst, out);
-    uri.query = {};
-    uri.exten = {};
-    if (exten_start != kUriPosNpos && exten_start <= out) {
-        uri.exten = std::string_view(dst + exten_start, out - exten_start);
-    }
-    if (query_start != kUriPosNpos) {
-        const std::size_t len = query_len_set ? query_len : raw_uri.size() - query_start;
-        uri.query = raw_uri.substr(query_start, len);
-    }
+    assign_complex_result(raw_uri, state, dst, out, exten_start, uri);
     return common::IoErr::None;
 }
 
 } // namespace
 
-common::IoErr http_scan_origin_form_uri(std::string_view raw_uri, HttpUriParseState &state) noexcept {
+common::IoErr http_parse_uri(std::string_view raw_uri, HttpUriParseState &state) noexcept {
     state = {};
 
     if (raw_uri.empty()) {
@@ -456,6 +438,8 @@ common::IoErr http_scan_origin_form_uri(std::string_view raw_uri, HttpUriParseSt
                 switch (ch) {
                     case '.':
                         state.complex_uri = true;
+                        state.has_exten = true;
+                        state.exten_pos = i + 1;
                         current = ScanState::Uri;
                         break;
                     case '%':
@@ -464,19 +448,27 @@ common::IoErr http_scan_origin_form_uri(std::string_view raw_uri, HttpUriParseSt
                         break;
                     case '/':
                         state.complex_uri = true;
+                        state.has_exten = false;
+                        state.exten_pos = kUriPosNpos;
                         current = ScanState::Uri;
                         break;
 #if defined(_WIN32)
                     case '\\':
                         state.complex_uri = true;
+                        state.has_exten = false;
+                        state.exten_pos = kUriPosNpos;
                         current = ScanState::Uri;
                         break;
 #endif
                     case '?':
+                        state.has_query = true;
+                        state.query_pos = i + 1;
                         current = ScanState::Uri;
                         break;
                     case '#':
                         state.complex_uri = true;
+                        state.has_fragment = true;
+                        state.fragment_pos = i;
                         current = ScanState::Uri;
                         break;
                     case '+':
@@ -498,6 +490,8 @@ common::IoErr http_scan_origin_form_uri(std::string_view raw_uri, HttpUriParseSt
 
                 switch (ch) {
                     case '/':
+                        state.has_exten = false;
+                        state.exten_pos = kUriPosNpos;
 #if defined(_WIN32)
                         current = ScanState::Uri;
                         state.complex_uri = true;
@@ -507,10 +501,14 @@ common::IoErr http_scan_origin_form_uri(std::string_view raw_uri, HttpUriParseSt
                         break;
 #endif
                     case '.':
+                        state.has_exten = true;
+                        state.exten_pos = i + 1;
                         break;
 #if defined(_WIN32)
                     case '\\':
                         state.complex_uri = true;
+                        state.has_exten = false;
+                        state.exten_pos = kUriPosNpos;
                         current = ScanState::AfterSlash;
                         break;
 #endif
@@ -519,10 +517,14 @@ common::IoErr http_scan_origin_form_uri(std::string_view raw_uri, HttpUriParseSt
                         current = ScanState::Uri;
                         break;
                     case '?':
+                        state.has_query = true;
+                        state.query_pos = i + 1;
                         current = ScanState::Uri;
                         break;
                     case '#':
                         state.complex_uri = true;
+                        state.has_fragment = true;
+                        state.fragment_pos = i;
                         current = ScanState::Uri;
                         break;
                     case '+':
@@ -542,8 +544,24 @@ common::IoErr http_scan_origin_form_uri(std::string_view raw_uri, HttpUriParseSt
                 }
 
                 switch (ch) {
+                    case '%':
+                        state.quoted_uri = true;
+                        break;
+                    case '+':
+                        state.plus_in_uri = true;
+                        break;
+                    case '?':
+                        if (!state.has_query) {
+                            state.has_query = true;
+                            state.query_pos = i + 1;
+                        }
+                        break;
                     case '#':
                         state.complex_uri = true;
+                        if (!state.has_fragment) {
+                            state.has_fragment = true;
+                            state.fragment_pos = i;
+                        }
                         break;
                     default:
                         if (ch <= 0x20 || ch == 0x7f) {
@@ -558,13 +576,13 @@ common::IoErr http_scan_origin_form_uri(std::string_view raw_uri, HttpUriParseSt
     return common::IoErr::None;
 }
 
-common::IoErr http_finalize_request_uri(std::string_view raw_uri, const HttpUriParseState &state, HttpUri &uri,
-                                        mem::BufPool *pool, bool merge_slashes) noexcept {
-    if (state.complex_uri || state.quoted_uri || state.empty_path_in_uri) {
-        return finalize_complex_uri(raw_uri, state, uri, pool, merge_slashes);
+common::IoErr http_process_uri(std::string_view raw_uri, const HttpUriParseState &state, HttpUri &uri,
+                               mem::BufPool *pool, bool merge_slashes) noexcept {
+    if (state.needs_complex_parse()) {
+        return process_complex_uri(raw_uri, state, uri, pool, merge_slashes);
     }
 
-    return finalize_simple_uri(raw_uri, uri);
+    return process_simple_uri(raw_uri, state, uri);
 }
 
 } // namespace fiber::http
