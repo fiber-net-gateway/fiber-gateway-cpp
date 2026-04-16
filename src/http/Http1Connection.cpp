@@ -10,6 +10,7 @@
 #include "HeaderMap.h"
 #include "Http1ExchangeIo.h"
 #include "Http1HeaderParseBuffer.h"
+#include "HttpUriParse.h"
 #include "Http1Server.h"
 #include "HttpTransport.h"
 
@@ -248,18 +249,14 @@ fiber::async::Task<fiber::common::IoResult<ParseCode>> Http1Connection::parse_re
 
             if (line.uri_start && line.uri_end && line.uri_end >= line.uri_start) {
                 std::size_t uri_len = static_cast<std::size_t>(line.uri_end - line.uri_start);
-                exchange.uri_.unparsed_uri = std::string_view(reinterpret_cast<char *>(line.uri_start), uri_len);
-                if (line.args_start && line.args_start <= line.uri_end) {
-                    std::size_t path_len = static_cast<size_t>(line.args_start - line.uri_start - 1);
-                    exchange.uri_.path = std::string_view(reinterpret_cast<char *>(line.uri_start), path_len);
-                    std::size_t query_len = static_cast<size_t>(line.uri_end - line.args_start);
-                    exchange.uri_.query = std::string_view(reinterpret_cast<char *>(line.args_start), query_len);
-                } else {
-                    exchange.uri_.path = exchange.uri_.unparsed_uri;
-                }
-                if (line.uri_ext && line.uri_ext < line.uri_end) {
-                    size_t ext_len = static_cast<size_t>(line.uri_end - line.uri_ext);
-                    exchange.uri_.exten = std::string_view(reinterpret_cast<char *>(line.uri_ext), ext_len);
+                std::string_view raw_uri(reinterpret_cast<char *>(line.uri_start), uri_len);
+                common::IoErr uri_err =
+                        http_finalize_request_uri(raw_uri, line.uri_parse, exchange.uri_, &exchange.pool());
+                if (uri_err != common::IoErr::None) {
+                    if (uri_err == common::IoErr::NoMem) {
+                        co_return std::unexpected(uri_err);
+                    }
+                    co_return ParseCode::InvalidRequest;
                 }
             }
             break;

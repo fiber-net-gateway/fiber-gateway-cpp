@@ -5,6 +5,8 @@
 #ifndef FIBER_HTTPCOMMON_H
 #define FIBER_HTTPCOMMON_H
 
+#include <string_view>
+
 namespace fiber::http {
 
 struct HttpUri {
