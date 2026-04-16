@@ -12,7 +12,6 @@
 #define private public
 #define protected public
 #include "http/Http2Connection.h"
-#include "http/Http2SendPayload.h"
 #include "http/Http2Stream.h"
 #undef private
 #undef protected
