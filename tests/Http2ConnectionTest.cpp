@@ -873,9 +873,8 @@ std::optional<std::uint32_t> parse_settings_parameter(const EncodedFrame &frame,
     }
 
     for (std::size_t pos = 0; pos < frame.payload.size(); pos += 6U) {
-        std::uint16_t current_id =
-                (static_cast<std::uint16_t>(static_cast<std::uint8_t>(frame.payload[pos])) << 8) |
-                static_cast<std::uint16_t>(static_cast<std::uint8_t>(frame.payload[pos + 1]));
+        std::uint16_t current_id = (static_cast<std::uint16_t>(static_cast<std::uint8_t>(frame.payload[pos])) << 8) |
+                                   static_cast<std::uint16_t>(static_cast<std::uint8_t>(frame.payload[pos + 1]));
         if (current_id != id) {
             continue;
         }
@@ -989,8 +988,8 @@ DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderR
     auto transport = std::make_unique<FakeHttpTransport>(std::move(chunks), std::vector<size_t>{}, false, hold_eof);
     FakeHttpTransport *fake_transport = transport.get();
     fiber::http::HttpHandler wrapped_handler =
-            [handler = std::move(handler),
-             fake_transport, hold_eof](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            [handler = std::move(handler), fake_transport,
+             hold_eof](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         co_await handler(exchange);
         if (hold_eof) {
             fake_transport->release_eof();
@@ -1071,16 +1070,15 @@ ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks,
     return outcome;
 }
 
-DetachedTask run_server_delayed_send_after_close(std::shared_ptr<std::promise<ServerDelayedSendAfterCloseOutcome>> promise,
-                                                 std::vector<std::string> chunks,
-                                                 fiber::http::HttpServerOptions http_options,
-                                                 fiber::http::Http2Connection::Options options = {}) {
+DetachedTask
+run_server_delayed_send_after_close(std::shared_ptr<std::promise<ServerDelayedSendAfterCloseOutcome>> promise,
+                                    std::vector<std::string> chunks, fiber::http::HttpServerOptions http_options,
+                                    fiber::http::Http2Connection::Options options = {}) {
     options = with_test_hpack_catalog(options);
     auto delayed_send_result = std::make_shared<fiber::common::IoResult<void>>();
     auto delayed_send_completed = std::make_shared<std::atomic<bool>>(false);
-    fiber::http::HttpHandler handler = [delayed_send_result,
-                                        delayed_send_completed](fiber::http::HttpExchange &exchange)
-            -> fiber::async::Task<void> {
+    fiber::http::HttpHandler handler = [delayed_send_result, delayed_send_completed](
+                                               fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         co_await fiber::async::sleep(std::chrono::milliseconds(10));
         *delayed_send_result = co_await exchange.send_header({
                 .kind = fiber::http::OutgoingHeaderKind::Final,
@@ -1118,9 +1116,10 @@ DetachedTask run_server_delayed_send_after_close(std::shared_ptr<std::promise<Se
     co_return;
 }
 
-ServerDelayedSendAfterCloseOutcome execute_server_delayed_send_after_close(
-        std::vector<std::string> chunks, fiber::http::HttpServerOptions http_options = {},
-        fiber::http::Http2Connection::Options options = {}) {
+ServerDelayedSendAfterCloseOutcome
+execute_server_delayed_send_after_close(std::vector<std::string> chunks,
+                                        fiber::http::HttpServerOptions http_options = {},
+                                        fiber::http::Http2Connection::Options options = {}) {
     fiber::event::EventLoopGroup group(1);
     auto promise = std::make_shared<std::promise<ServerDelayedSendAfterCloseOutcome>>();
     auto future = promise->get_future();
@@ -2671,7 +2670,8 @@ TEST(Http2ConnectionTest, ServerParsesPathQueryAndExtensionFromPseudoPath) {
 
     auto snapshot_promise = std::make_shared<std::promise<UriSnapshot>>();
     auto snapshot_future = snapshot_promise->get_future();
-    fiber::http::HttpHandler handler = [snapshot_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+    fiber::http::HttpHandler handler =
+            [snapshot_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         snapshot_promise->set_value(UriSnapshot{
                 .unparsed_uri = std::string(exchange.uri().unparsed_uri),
                 .path = std::string(exchange.uri().path),
@@ -2713,9 +2713,8 @@ TEST(Http2ConnectionTest, ServerRejectsPseudoPathWithoutLeadingSlash) {
 
     ASSERT_TRUE(outcome.result.has_value());
     std::vector<EncodedFrame> frames = parse_frames(outcome.written);
-    auto it = std::find_if(frames.begin(), frames.end(), [](const EncodedFrame &frame) {
-        return frame.type == 0x3U && frame.stream_id == 1U;
-    });
+    auto it = std::find_if(frames.begin(), frames.end(),
+                           [](const EncodedFrame &frame) { return frame.type == 0x3U && frame.stream_id == 1U; });
     ASSERT_NE(it, frames.end()) << describe_frames(frames);
     ASSERT_EQ(it->payload.size(), 4U);
     EXPECT_EQ(static_cast<unsigned char>((*it).payload[3]), 0x1U);

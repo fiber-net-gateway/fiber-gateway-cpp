@@ -10,18 +10,13 @@ namespace {
 constexpr std::size_t kUriPosNpos = std::numeric_limits<std::size_t>::max();
 
 constexpr std::uint32_t kUsualUriChar[8] = {
-        0x00000000u,
-        0x7fff37d6u,
+        0x00000000u, 0x7fff37d6u,
 #if defined(_WIN32)
         0xefffffffu,
 #else
         0xffffffffu,
 #endif
-        0x7fffffffu,
-        0xffffffffu,
-        0xffffffffu,
-        0xffffffffu,
-        0xffffffffu,
+        0x7fffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu,
 };
 
 enum class ScanState : std::uint8_t {
