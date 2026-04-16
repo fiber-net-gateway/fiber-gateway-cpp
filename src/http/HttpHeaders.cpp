@@ -125,7 +125,7 @@ HttpHeaders::HeaderField *HttpHeaders::set(std::string_view name, std::string_vi
                                            uint64_t hash) {
     const uint32_t name_len = static_cast<uint32_t>(name.size());
     const char *lowcase_ptr = name_len == 0 ? "" : lowcase_name;
-    remove_lowcase(std::string_view(lowcase_ptr, name_len), hash);
+    remove(std::string_view(lowcase_ptr, name_len), hash);
     return add(name, value, lowcase_name, hash);
 }
 
@@ -182,7 +182,7 @@ HttpHeaders::HeaderField *HttpHeaders::set_view(std::string_view name, std::stri
                                                 uint64_t hash) {
     const uint32_t name_len = static_cast<uint32_t>(name.size());
     const char *lowcase_ptr = name_len == 0 ? "" : lowcase_name;
-    remove_lowcase(std::string_view(lowcase_ptr, name_len), hash);
+    remove(std::string_view(lowcase_ptr, name_len), hash);
     return add_view(name, value, lowcase_name, hash);
 }
 
@@ -248,7 +248,7 @@ size_t HttpHeaders::remove(std::string_view name) noexcept {
     return removed;
 }
 
-size_t HttpHeaders::remove_lowcase(std::string_view lowcase_key, uint64_t hash) noexcept {
+size_t HttpHeaders::remove(std::string_view lowcase_key, uint64_t hash) noexcept {
     if (!all_head_ || bucket_head_.empty()) {
         return 0;
     }
@@ -287,6 +287,8 @@ size_t HttpHeaders::remove_lowcase(std::string_view lowcase_key, uint64_t hash) 
     return removed;
 }
 
+bool HttpHeaders::remove(const HeaderField &field) noexcept { return erase(field); }
+
 void HttpHeaders::clear() noexcept {
     all_head_ = nullptr;
     all_tail_ = nullptr;
@@ -305,6 +307,26 @@ void HttpHeaders::release() noexcept {
 }
 
 size_t HttpHeaders::size() const noexcept { return size_; }
+
+bool HttpHeaders::erase(const HeaderField &field) noexcept { return unlink_field(const_cast<HeaderField *>(&field)); }
+
+HttpHeaders::ConstIterator HttpHeaders::erase(ConstIterator it) noexcept {
+    if (it.node_ == nullptr) {
+        return end();
+    }
+    const HeaderField *next = it.node_->next_all;
+    unlink_field(const_cast<HeaderField *>(it.node_));
+    return ConstIterator(next);
+}
+
+HttpHeaders::MatchIterator HttpHeaders::erase(MatchIterator it) noexcept {
+    if (it.headers_ != this || it.node_ == nullptr) {
+        return MatchIterator(this, it.key_, it.hash_, nullptr);
+    }
+    const HeaderField *next = next_match_node(it.node_, it.key_, it.hash_);
+    unlink_field(const_cast<HeaderField *>(it.node_));
+    return MatchIterator(this, it.key_, it.hash_, next);
+}
 
 HttpHeaders::ConstIterator HttpHeaders::begin() const noexcept { return ConstIterator(all_head_); }
 
@@ -385,6 +407,50 @@ const HttpHeaders::HeaderField *HttpHeaders::next_match_node(const HeaderField *
         node = node->next_bucket;
     }
     return nullptr;
+}
+
+bool HttpHeaders::unlink_field(HeaderField *field) noexcept {
+    if (field == nullptr || bucket_head_.empty()) {
+        return false;
+    }
+
+    std::uint32_t bucket = static_cast<std::uint32_t>(field->name_hash & (bucket_head_.size() - 1));
+    HeaderField *prev_bucket = nullptr;
+    HeaderField *node = bucket_head_[bucket];
+    while (node) {
+        if (node == field) {
+            unlink_field(field, prev_bucket);
+            return true;
+        }
+        prev_bucket = node;
+        node = node->next_bucket;
+    }
+    return false;
+}
+
+void HttpHeaders::unlink_field(HeaderField *field, HeaderField *prev_bucket) noexcept {
+    if (prev_bucket) {
+        prev_bucket->next_bucket = field->next_bucket;
+    } else {
+        std::uint32_t bucket = static_cast<std::uint32_t>(field->name_hash & (bucket_head_.size() - 1));
+        bucket_head_[bucket] = field->next_bucket;
+    }
+
+    if (field->prev_all) {
+        field->prev_all->next_all = field->next_all;
+    } else {
+        all_head_ = field->next_all;
+    }
+    if (field->next_all) {
+        field->next_all->prev_all = field->prev_all;
+    } else {
+        all_tail_ = field->prev_all;
+    }
+
+    field->next_bucket = nullptr;
+    field->next_all = nullptr;
+    field->prev_all = nullptr;
+    --size_;
 }
 
 const char *HttpHeaders::copy_to_pool(std::string_view data) {

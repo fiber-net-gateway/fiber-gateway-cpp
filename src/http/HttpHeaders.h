@@ -57,6 +57,8 @@ public:
     std::string_view get(std::string_view name) const noexcept;
     bool contains(std::string_view name) const noexcept;
     size_t remove(std::string_view name) noexcept;
+    size_t remove(std::string_view lowcase_name, uint64_t hash) noexcept;
+    bool remove(const HeaderField &field) noexcept;
 
     class MatchIterator {
     public:
@@ -88,6 +90,8 @@ public:
         bool operator!=(const MatchIterator &other) const { return !(*this == other); }
 
     private:
+        friend class HttpHeaders;
+
         const HttpHeaders *headers_ = nullptr;
         std::string_view key_;
         uint64_t hash_ = 0;
@@ -148,12 +152,17 @@ public:
         bool operator!=(const ConstIterator &other) const { return !(*this == other); }
 
     private:
+        friend class HttpHeaders;
+
         const HeaderField *node_ = nullptr;
     };
 
     void clear() noexcept;
     void release() noexcept;
     size_t size() const noexcept;
+    bool erase(const HeaderField &field) noexcept;
+    ConstIterator erase(ConstIterator it) noexcept;
+    MatchIterator erase(MatchIterator it) noexcept;
 
     ConstIterator begin() const noexcept;
     ConstIterator end() const noexcept;
@@ -170,7 +179,8 @@ private:
     const HeaderField *find_first_node_lowcase(std::string_view lowcase_key, uint64_t hash) const noexcept;
     const HeaderField *next_match_node(const HeaderField *start, std::string_view lowcase_key,
                                        uint64_t hash) const noexcept;
-    size_t remove_lowcase(std::string_view lowcase_key, uint64_t hash) noexcept;
+    bool unlink_field(HeaderField *field) noexcept;
+    void unlink_field(HeaderField *field, HeaderField *prev_bucket) noexcept;
     const char *copy_to_pool(std::string_view data);
     const char *copy_lowercase_to_pool(std::string_view data, uint64_t &hash);
     HeaderField *alloc_field() noexcept {
