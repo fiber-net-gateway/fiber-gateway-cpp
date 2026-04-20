@@ -8,6 +8,7 @@ set(FIBER_DEPS_DIR "${CMAKE_CURRENT_LIST_DIR}/temp/_deps" CACHE PATH "Shared dep
 set(FETCHCONTENT_BASE_DIR "${FIBER_DEPS_DIR}" CACHE PATH "FetchContent base directory")
 option(FIBER_FETCH_DEPS "Allow CMake to download third-party dependencies" ON)
 option(FIBER_USE_JEMALLOC "Link final executables against jemalloc" OFF)
+option(FIBER_ENABLE_HTTP3 "Enable HTTP/3 support via lsquic" ON)
 
 include(cmake/Deps.cmake)
 include(cmake/CompilerChecks.cmake)
@@ -18,12 +19,27 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 fiber_validate_cxx_toolchain()
 
 file(GLOB_RECURSE CPP_SRC_LIST ${CMAKE_CURRENT_LIST_DIR}/src/*.cpp)
+if (NOT FIBER_ENABLE_HTTP3 OR NOT FIBER_HAVE_LSQUIC)
+    list(REMOVE_ITEM CPP_SRC_LIST "${CMAKE_CURRENT_LIST_DIR}/src/http/Http3Engine.cpp")
+endif()
 
 add_library(fiber_lib STATIC ${CPP_SRC_LIST})
 add_library(fiber_allocator INTERFACE)
 add_library(fiber_stdlib INTERFACE)
 target_include_directories(fiber_lib PUBLIC ${CMAKE_CURRENT_LIST_DIR}/src)
 target_link_libraries(fiber_lib PUBLIC boringssl::ssl boringssl::crypto)
+if (FIBER_ENABLE_HTTP3 AND FIBER_HAVE_LSQUIC)
+    target_link_libraries(fiber_lib PUBLIC lsquic::lsquic ${FIBER_ZLIB_TARGET})
+    if (DEFINED lsquic_SOURCE_DIR)
+        target_include_directories(fiber_lib PRIVATE
+            ${lsquic_SOURCE_DIR}/include
+            ${lsquic_SOURCE_DIR}/src/liblsquic)
+    else()
+        target_include_directories(fiber_lib PRIVATE
+            ${CMAKE_CURRENT_LIST_DIR}/temp/_deps/lsquic-src/include
+            ${CMAKE_CURRENT_LIST_DIR}/temp/_deps/lsquic-src/src/liblsquic)
+    endif()
+endif()
 if (FIBER_USE_LIBCXX)
     if (FIBER_STDLIB_LINK_OPTIONS)
         target_link_options(fiber_stdlib INTERFACE ${FIBER_STDLIB_LINK_OPTIONS})

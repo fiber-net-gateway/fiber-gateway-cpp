@@ -99,11 +99,13 @@ enum ssl_select_cert_result_t select_server_certificate_cb(const SSL_CLIENT_HELL
     auto *remote_addr =
             static_cast<const net::SocketAddress *>(SSL_get_ex_data(client_hello->ssl, ssl_remote_addr_ex_index()));
     const char *server_name = SSL_get_servername(client_hello->ssl, TLSEXT_NAMETYPE_host_name);
-    TlsClientHelloView hello_view{
+    TlsIdentitySelectInput hello_view{
             .server_name = server_name ? std::string_view(server_name) : std::string_view{},
             .alpn = parse_client_hello_alpn(client_hello),
+            .selected_alpn = {},
             .remote_addr = remote_addr,
             .server_context = server_ctx,
+            .transport = TlsTransportKind::Tcp,
     };
 
     TlsContext *selected = server_ctx->select_identity(hello_view);

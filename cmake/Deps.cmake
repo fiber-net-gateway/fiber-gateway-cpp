@@ -176,7 +176,9 @@ if (FIBER_ZLIB_TARGET AND NOT DEFINED ZLIB_LIB)
 endif()
 
 set(FIBER_HAVE_LSQUIC OFF)
-if (FIBER_ZLIB_TARGET AND DEFINED ZLIB_INCLUDE_DIR AND DEFINED ZLIB_LIB)
+if (NOT FIBER_ENABLE_HTTP3)
+    message(STATUS "Skipping lsquic dependency because FIBER_ENABLE_HTTP3=OFF.")
+elseif (FIBER_ZLIB_TARGET AND DEFINED ZLIB_INCLUDE_DIR AND DEFINED ZLIB_LIB)
     fiber_use_cached_content(lsquic)
     FetchContent_Declare(
         lsquic

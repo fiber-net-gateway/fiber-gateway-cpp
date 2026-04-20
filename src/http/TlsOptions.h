@@ -67,15 +67,25 @@ inline bool TlsAlpnProtocolsView::contains(std::string_view protocol) const noex
     return false;
 }
 
-struct TlsClientHelloView {
-    std::string_view server_name{};
-    TlsAlpnProtocolsView alpn{};
-    const fiber::net::SocketAddress *remote_addr = nullptr;
-    const TlsServerContext *server_context = nullptr;
+enum class TlsTransportKind : std::uint8_t {
+    Tcp,
+    Quic,
 };
 
+struct TlsIdentitySelectInput {
+    std::string_view server_name{};
+    TlsAlpnProtocolsView alpn{};
+    std::string_view selected_alpn{};
+    const fiber::net::SocketAddress *remote_addr = nullptr;
+    const fiber::net::SocketAddress *local_addr = nullptr;
+    const TlsServerContext *server_context = nullptr;
+    TlsTransportKind transport = TlsTransportKind::Tcp;
+};
+
+using TlsClientHelloView = TlsIdentitySelectInput;
+
 struct TlsIdentitySelectorOps {
-    TlsContext *(*select)(void *ctx, const TlsClientHelloView &client_hello) noexcept = nullptr;
+    TlsContext *(*select)(void *ctx, const TlsIdentitySelectInput &input) noexcept = nullptr;
     void *ctx = nullptr;
 };
 
