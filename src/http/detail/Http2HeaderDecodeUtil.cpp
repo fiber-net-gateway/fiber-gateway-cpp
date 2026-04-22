@@ -2,7 +2,7 @@
 
 #include <cstring>
 
-#include "../Http2HpackHuffman.h"
+#include "../Huffman.h"
 #include "../HttpHeaderHash.h"
 
 namespace fiber::http::detail {
@@ -37,7 +37,7 @@ common::IoErr materialize_name_huffman(mem::BufPool &pool, const std::uint8_t *d
                                        std::string_view &out, std::uint64_t &name_hash) noexcept {
     out = {};
     bool ok = false;
-    std::size_t decoded_len = http2_huffman_decoded_length(data, len, &ok);
+    std::size_t decoded_len = hpack_huffman_decoded_length(data, len, &ok);
     if (!ok) {
         return common::IoErr::Invalid;
     }
@@ -46,10 +46,10 @@ common::IoErr materialize_name_huffman(mem::BufPool &pool, const std::uint8_t *d
         if (!mem) {
             return common::IoErr::NoMem;
         }
-        Http2HuffmanDecodeState state;
-        Http2HuffmanDecodeResult result =
-                http2_huffman_decode_exact(state, data, len, reinterpret_cast<std::uint8_t *>(mem), true);
-        if (result.code != Http2HuffmanCode::Ok || result.written != decoded_len) {
+        HpackHuffmanDecodeState state;
+        HpackHuffmanDecodeResult result =
+                hpack_huffman_decode_exact(state, data, len, reinterpret_cast<std::uint8_t *>(mem), true);
+        if (result.code != HpackHuffmanCode::Ok || result.written != decoded_len) {
             return common::IoErr::Invalid;
         }
         out = std::string_view(mem, decoded_len);
@@ -71,7 +71,7 @@ common::IoErr materialize_value_huffman(mem::BufPool &pool, const std::uint8_t *
                                         std::string_view &out) noexcept {
     out = {};
     bool ok = false;
-    std::size_t decoded_len = http2_huffman_decoded_length(data, len, &ok);
+    std::size_t decoded_len = hpack_huffman_decoded_length(data, len, &ok);
     if (!ok) {
         return common::IoErr::Invalid;
     }
@@ -82,10 +82,10 @@ common::IoErr materialize_value_huffman(mem::BufPool &pool, const std::uint8_t *
     if (!mem) {
         return common::IoErr::NoMem;
     }
-    Http2HuffmanDecodeState state;
-    Http2HuffmanDecodeResult result =
-            http2_huffman_decode_exact(state, data, len, reinterpret_cast<std::uint8_t *>(mem), true);
-    if (result.code != Http2HuffmanCode::Ok || result.written != decoded_len) {
+    HpackHuffmanDecodeState state;
+    HpackHuffmanDecodeResult result =
+            hpack_huffman_decode_exact(state, data, len, reinterpret_cast<std::uint8_t *>(mem), true);
+    if (result.code != HpackHuffmanCode::Ok || result.written != decoded_len) {
         return common::IoErr::Invalid;
     }
     out = std::string_view(mem, decoded_len);

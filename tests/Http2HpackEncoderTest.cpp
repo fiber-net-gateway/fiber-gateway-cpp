@@ -11,7 +11,7 @@
 #include "http/Http2HpackEncodeCatalog.h"
 #include "http/Http2HpackEncoder.h"
 #include "http/Http2HpackEncoderIoBufWriter.h"
-#include "http/Http2HpackHuffman.h"
+#include "http/Huffman.h"
 #include "http/HttpHeaderHash.h"
 
 namespace {
@@ -62,15 +62,15 @@ struct DecodeRecorder {
     static IoErr on_name_huffman(void *ctx, const std::uint8_t *data, std::size_t len) noexcept {
         auto *self = static_cast<DecodeRecorder *>(ctx);
         bool ok = false;
-        const std::size_t decoded_len = fiber::http::http2_huffman_decoded_length(data, len, &ok);
+        const std::size_t decoded_len = fiber::http::hpack_huffman_decoded_length(data, len, &ok);
         if (!ok) {
             return IoErr::Invalid;
         }
         self->pending_name.assign(decoded_len, '\0');
-        fiber::http::Http2HuffmanDecodeState state;
-        auto result = fiber::http::http2_huffman_decode_exact(
+        fiber::http::HpackHuffmanDecodeState state;
+        auto result = fiber::http::hpack_huffman_decode_exact(
                 state, data, len, reinterpret_cast<std::uint8_t *>(self->pending_name.data()), true);
-        if (result.code != fiber::http::Http2HuffmanCode::Ok || result.written != decoded_len) {
+        if (result.code != fiber::http::HpackHuffmanCode::Ok || result.written != decoded_len) {
             return IoErr::Invalid;
         }
         self->pending_name_hash = fiber::http::http_header_name_hash(self->pending_name);
@@ -90,15 +90,15 @@ struct DecodeRecorder {
                                   Http2HpackDecoder::FieldView *) noexcept {
         auto *self = static_cast<DecodeRecorder *>(ctx);
         bool ok = false;
-        const std::size_t decoded_len = fiber::http::http2_huffman_decoded_length(data, len, &ok);
+        const std::size_t decoded_len = fiber::http::hpack_huffman_decoded_length(data, len, &ok);
         if (!ok) {
             return IoErr::Invalid;
         }
         std::string value(decoded_len, '\0');
-        fiber::http::Http2HuffmanDecodeState state;
-        auto result = fiber::http::http2_huffman_decode_exact(state, data, len,
+        fiber::http::HpackHuffmanDecodeState state;
+        auto result = fiber::http::hpack_huffman_decode_exact(state, data, len,
                                                               reinterpret_cast<std::uint8_t *>(value.data()), true);
-        if (result.code != fiber::http::Http2HuffmanCode::Ok || result.written != decoded_len) {
+        if (result.code != fiber::http::HpackHuffmanCode::Ok || result.written != decoded_len) {
             return IoErr::Invalid;
         }
         self->fields.emplace_back(self->pending_name + "=" + value);

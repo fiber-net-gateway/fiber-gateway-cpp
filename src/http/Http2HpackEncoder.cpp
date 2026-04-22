@@ -4,7 +4,7 @@
 #include <array>
 #include <cstring>
 
-#include "Http2HpackHuffman.h"
+#include "Huffman.h"
 #include "Http2HpackStaticTable.h"
 #include "HttpHeaderHash.h"
 
@@ -330,7 +330,7 @@ common::IoErr Http2HpackEncoder::append_string(std::string_view value) noexcept 
     }
 
     const std::size_t encoded_len =
-            http2_huffman_encoded_length(reinterpret_cast<const std::uint8_t *>(value.data()), value.size());
+            hpack_huffman_encoded_length(reinterpret_cast<const std::uint8_t *>(value.data()), value.size());
     if (encoded_len > options_.max_string_size) {
         return common::IoErr::Invalid;
     }
@@ -347,7 +347,7 @@ common::IoErr Http2HpackEncoder::append_string(std::string_view value) noexcept 
         }
     }
     if (output_len_ >= encoded_len) {
-        const std::size_t written = http2_huffman_encode_exact(reinterpret_cast<const std::uint8_t *>(value.data()),
+        const std::size_t written = hpack_huffman_encode_exact(reinterpret_cast<const std::uint8_t *>(value.data()),
                                                                value.size(), output_dst_);
         if (written != encoded_len) {
             return common::IoErr::Invalid;
@@ -358,7 +358,7 @@ common::IoErr Http2HpackEncoder::append_string(std::string_view value) noexcept 
         return common::IoErr::None;
     }
 
-    Http2HuffmanEncodeState state;
+    HpackHuffmanEncodeState state;
     std::size_t consumed = 0;
     while (true) {
         if (output_len_ == 0) {
@@ -368,16 +368,16 @@ common::IoErr Http2HpackEncoder::append_string(std::string_view value) noexcept 
             }
         }
         const auto result =
-                http2_huffman_encode_incremental(state, reinterpret_cast<const std::uint8_t *>(value.data()) + consumed,
+                hpack_huffman_encode_incremental(state, reinterpret_cast<const std::uint8_t *>(value.data()) + consumed,
                                                  value.size() - consumed, output_dst_, output_len_, true);
         consumed += result.consumed;
         output_dst_ += result.written;
         output_len_ -= result.written;
         output_ops_->commit(output_ctx_, result.written);
-        if (result.code == Http2HuffmanCode::Ok) {
+        if (result.code == HpackHuffmanCode::Ok) {
             return consumed == value.size() ? common::IoErr::None : common::IoErr::Invalid;
         }
-        if (result.code != Http2HuffmanCode::OutputFull) {
+        if (result.code != HpackHuffmanCode::OutputFull) {
             return common::IoErr::Invalid;
         }
     }
