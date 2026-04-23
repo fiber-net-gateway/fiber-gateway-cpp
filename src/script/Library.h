@@ -9,6 +9,8 @@
 
 #include "../common/json/JsNode.h"
 #include "ExecutionContext.h"
+#include "ScriptResult.h"
+#include "async/AsyncTask.h"
 #include "async/AsyncExecutionContext.h"
 
 namespace fiber::script {
@@ -17,7 +19,24 @@ class ScriptRuntime;
 
 class Library {
 public:
+    // Legacy hook kept while StdLibrary and existing tests migrate to ScriptResult.
     using FunctionResult = std::expected<fiber::json::JsValue, fiber::json::JsValue>;
+
+    struct ScriptCallContext {
+        ScriptRuntime *runtime = nullptr;
+        const fiber::json::JsValue *root = nullptr;
+        void *attach = nullptr;
+        const fiber::json::JsValue *args = nullptr;
+        std::uint32_t argc = 0;
+        std::uint32_t flags = 0;
+
+        [[nodiscard]] ScriptRuntime &runtime_ref() const noexcept;
+        [[nodiscard]] const fiber::json::JsValue &root_value() const noexcept;
+        [[nodiscard]] void *attach_ptr() const noexcept;
+        [[nodiscard]] std::uint32_t arg_count() const noexcept;
+        [[nodiscard]] const fiber::json::JsValue *arg(std::uint32_t index) const noexcept;
+        [[nodiscard]] fiber::json::JsValue arg_or_undefined(std::uint32_t index) const noexcept;
+    };
 
     struct HostCallFrame {
         ScriptRuntime *runtime = nullptr;
@@ -59,10 +78,11 @@ public:
         fiber::json::JsValue value = fiber::json::JsValue::make_undefined();
         HostFault fault{};
 
-        static HostCallResult returned(const fiber::json::JsValue &value);
-        static HostCallResult thrown(const fiber::json::JsValue &value);
-        static HostCallResult faulted(HostFault fault);
-        static HostCallResult pending();
+        static HostCallResult returned(const fiber::json::JsValue &value) noexcept;
+        static HostCallResult thrown(const fiber::json::JsValue &value) noexcept;
+        static HostCallResult faulted(HostFault fault) noexcept;
+        static HostCallResult pending() noexcept;
+        static HostCallResult from_script_result(const ScriptResult &result) noexcept;
     };
 
     struct HostAsyncCompletion {
@@ -93,25 +113,33 @@ public:
     class Constant {
     public:
         virtual ~Constant() = default;
-        virtual FunctionResult get(ExecutionContext &context) = 0;
+        virtual ScriptResult get(ScriptCallContext context) noexcept;
+        // Legacy hook kept while concrete libraries migrate.
+        virtual FunctionResult get(ExecutionContext &context);
     };
 
     class Function {
     public:
         virtual ~Function() = default;
-        virtual FunctionResult call(ExecutionContext &context) = 0;
+        virtual ScriptResult call(ScriptCallContext context) noexcept;
+        // Legacy hook kept while concrete libraries migrate.
+        virtual FunctionResult call(ExecutionContext &context);
     };
 
     class AsyncConstant {
     public:
         virtual ~AsyncConstant() = default;
-        virtual void get(AsyncExecutionContext &context) = 0;
+        virtual AsyncTask get(ScriptCallContext context) noexcept;
+        // Legacy hook kept while concrete libraries migrate.
+        virtual void get(AsyncExecutionContext &context);
     };
 
     class AsyncFunction {
     public:
         virtual ~AsyncFunction() = default;
-        virtual void call(AsyncExecutionContext &context) = 0;
+        virtual AsyncTask call(ScriptCallContext context) noexcept;
+        // Legacy hook kept while concrete libraries migrate.
+        virtual void call(AsyncExecutionContext &context);
     };
 
     class DirectiveDef {

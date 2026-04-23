@@ -2,11 +2,11 @@
 #define FIBER_SCRIPT_SCRIPT_H
 
 #include <coroutine>
-#include <expected>
 #include <memory>
 #include <optional>
 
 #include "../common/json/JsNode.h"
+#include "ScriptResult.h"
 #include "async/Task.h"
 #include "ir/Compiled.h"
 #include "run/VmError.h"
@@ -25,7 +25,7 @@ class InterpreterVm;
 
 class ScriptRun {
 public:
-    using Result = std::expected<fiber::json::JsValue, fiber::json::JsValue>;
+    using Result = ScriptResult;
 
     class Awaiter;
 
