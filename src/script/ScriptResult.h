@@ -1,0 +1,117 @@
+#ifndef FIBER_SCRIPT_SCRIPT_RESULT_H
+#define FIBER_SCRIPT_SCRIPT_RESULT_H
+
+#include <cstdint>
+#include <expected>
+#include <type_traits>
+
+#include "../common/Assert.h"
+#include "../common/json/JsNode.h"
+
+namespace fiber::script {
+
+enum class ScriptResultKind : std::uint8_t {
+    Success,
+    Exception,
+    Abort,
+};
+
+enum class ScriptAbortReason : std::uint8_t {
+    None,
+    OutOfMemory,
+    InvalidState,
+    InvalidArgument,
+    TypeError,
+    IndexError,
+    DivisionByZero,
+    UnknownIdentifier,
+    InvalidOpcode,
+    NoReturn,
+    HostFault,
+    Timeout,
+    Cancelled,
+    Internal,
+};
+
+struct ScriptAbort {
+    ScriptAbortReason reason = ScriptAbortReason::None;
+    std::int64_t position = -1;
+};
+
+struct alignas(16) ScriptResult {
+    union Payload {
+        constexpr Payload() : abort{} {}
+
+        fiber::json::JsValue value;
+        ScriptAbort abort;
+    };
+
+    constexpr ScriptResult() noexcept = default;
+
+    ScriptResult(const fiber::json::JsValue &value) noexcept : kind(ScriptResultKind::Success), payload{} {
+        payload.value = value;
+    }
+
+    ScriptResult(std::unexpected<fiber::json::JsValue> unexpected) noexcept :
+        kind(ScriptResultKind::Exception), payload{} {
+        payload.value = unexpected.error();
+    }
+
+    static ScriptResult success(const fiber::json::JsValue &value) noexcept {
+        ScriptResult result;
+        result.kind = ScriptResultKind::Success;
+        result.payload.value = value;
+        return result;
+    }
+
+    static ScriptResult exception(const fiber::json::JsValue &value) noexcept {
+        ScriptResult result;
+        result.kind = ScriptResultKind::Exception;
+        result.payload.value = value;
+        return result;
+    }
+
+    static ScriptResult abort(ScriptAbortReason reason, std::int64_t position = -1) noexcept {
+        ScriptResult result;
+        result.kind = ScriptResultKind::Abort;
+        result.payload.abort = ScriptAbort{reason, position};
+        return result;
+    }
+
+    [[nodiscard]] bool is_success() const noexcept { return kind == ScriptResultKind::Success; }
+
+    [[nodiscard]] bool is_exception() const noexcept { return kind == ScriptResultKind::Exception; }
+
+    [[nodiscard]] bool is_abort() const noexcept { return kind == ScriptResultKind::Abort; }
+
+    [[nodiscard]] const fiber::json::JsValue &value() const noexcept {
+        FIBER_ASSERT(is_success());
+        return payload.value;
+    }
+
+    [[nodiscard]] const fiber::json::JsValue &exception() const noexcept {
+        FIBER_ASSERT(is_exception());
+        return payload.value;
+    }
+
+    [[nodiscard]] const ScriptAbort &abort() const noexcept {
+        FIBER_ASSERT(is_abort());
+        return payload.abort;
+    }
+
+    [[nodiscard]] bool has_value() const noexcept { return is_success(); }
+
+    [[nodiscard]] explicit operator bool() const noexcept { return has_value(); }
+
+    [[nodiscard]] const fiber::json::JsValue &error() const noexcept { return exception(); }
+
+    ScriptResultKind kind = ScriptResultKind::Abort;
+    Payload payload{};
+};
+
+static_assert(std::is_trivially_copyable_v<ScriptAbort>);
+static_assert(std::is_trivially_copyable_v<ScriptResult>);
+
+} // namespace fiber::script
+
+#endif // FIBER_SCRIPT_SCRIPT_RESULT_H

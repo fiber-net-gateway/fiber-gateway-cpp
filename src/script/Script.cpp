@@ -1,11 +1,9 @@
 #include "Script.h"
 
-#include <string>
 #include <string_view>
 #include <utility>
 
 #include "../common/Assert.h"
-#include "../common/json/JsGc.h"
 #include "Runtime.h"
 #include "run/InterpreterVm.h"
 #include "run/VmError.h"
@@ -14,22 +12,36 @@ namespace fiber::script {
 
 namespace {
 
-constexpr const char kExecError[] = "EXEC_ERROR";
-constexpr const char kOutOfMemory[] = "EXEC_OUT_OF_MEMORY";
-
-fiber::json::JsValue make_fallback_error(std::string_view message) {
-    return fiber::json::JsValue::make_native_string(const_cast<char *>(message.data()), message.size());
-}
-
-fiber::json::JsValue make_error_value(fiber::json::GcHeap &heap, const run::VmError &error) {
-    std::string name = error.name.empty() ? "EXEC_ERROR" : error.name;
-    std::string message = error.message.empty() ? "script error" : error.message;
-    fiber::json::GcException *exc = fiber::json::gc_new_exception(&heap, error.position, name.c_str(), name.size(),
-                                                                  message.c_str(), message.size(), error.meta);
-    if (!exc) {
-        return make_fallback_error(kOutOfMemory);
+ScriptAbortReason abort_reason_from_vm_error(const run::VmError &error) noexcept {
+    std::string_view name = error.name;
+    if (name == "EXEC_OUT_OF_MEMORY") {
+        return ScriptAbortReason::OutOfMemory;
     }
-    return fiber::json::js_make_heap_ref(&exc->hdr, fiber::json::JsHeapKind::Exception);
+    if (name == "EXEC_TYPE_ERROR") {
+        return ScriptAbortReason::TypeError;
+    }
+    if (name == "EXEC_INDEX_ERROR") {
+        return ScriptAbortReason::IndexError;
+    }
+    if (name == "EXEC_DIVISION_BY_ZERO") {
+        return ScriptAbortReason::DivisionByZero;
+    }
+    if (name == "EXEC_UNKNOWN_IDENTIFIER") {
+        return ScriptAbortReason::UnknownIdentifier;
+    }
+    if (name == "EXEC_UNKNOWN_OPCODE") {
+        return ScriptAbortReason::InvalidOpcode;
+    }
+    if (name == "EXEC_NO_RETURN") {
+        return ScriptAbortReason::NoReturn;
+    }
+    if (name == "HOST_INVALID_STATE") {
+        return ScriptAbortReason::InvalidState;
+    }
+    if (!name.empty() && name.starts_with("HOST_")) {
+        return ScriptAbortReason::HostFault;
+    }
+    return ScriptAbortReason::Internal;
 }
 
 } // namespace
@@ -53,7 +65,7 @@ ScriptRun::ScriptRun(const ir::Compiled &compiled, const fiber::json::JsValue &r
 
 ScriptRun::Result ScriptRun::operator()() {
     if (!vm_ || !runtime_) {
-        return fiber::json::JsValue::make_undefined();
+        return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
     run::VmResult vm_out = fiber::json::JsValue::make_undefined();
     auto state = vm_->iterate(vm_out);
@@ -77,7 +89,7 @@ ScriptRun::Awaiter::~Awaiter() {
 
 bool ScriptRun::Awaiter::await_ready() {
     if (!run_.valid()) {
-        result_ = fiber::json::JsValue::make_undefined();
+        result_ = ScriptResult::abort(ScriptAbortReason::InvalidState);
         return true;
     }
     return false;
@@ -93,7 +105,7 @@ bool ScriptRun::Awaiter::await_suspend(std::coroutine_handle<> handle) {
 
 ScriptRun::Result ScriptRun::Awaiter::await_resume() {
     if (!result_) {
-        return fiber::json::JsValue::make_undefined();
+        return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
     return std::move(*result_);
 }
@@ -108,7 +120,7 @@ void ScriptRun::Awaiter::resume_callback(void *context) {
 
 bool ScriptRun::Awaiter::pump() {
     if (!run_.vm_ || !run_.runtime_) {
-        result_ = fiber::json::JsValue::make_undefined();
+        result_ = ScriptResult::abort(ScriptAbortReason::InvalidState);
         return true;
     }
     run::VmResult vm_out = fiber::json::JsValue::make_undefined();
@@ -144,15 +156,12 @@ bool ScriptRun::valid() const { return static_cast<bool>(vm_); }
 
 ScriptRun::Result ScriptRun::to_result(run::VmResult result) {
     if (result) {
-        return result.value();
+        return ScriptResult::success(result.value());
     }
     if (result.error().kind == run::VmErrorKind::Thrown && vm_ && vm_->has_thrown()) {
-        return std::unexpected(vm_->thrown());
+        return ScriptResult::exception(vm_->thrown());
     }
-    if (!runtime_) {
-        return std::unexpected(make_fallback_error(kExecError));
-    }
-    return std::unexpected(make_error_value(runtime_->heap(), result.error()));
+    return ScriptResult::abort(abort_reason_from_vm_error(result.error()), result.error().position);
 }
 
 ScriptSyncRun::ScriptSyncRun(ScriptRun run) : run_(std::move(run)) {}
