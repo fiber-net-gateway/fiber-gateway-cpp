@@ -149,8 +149,8 @@ public:
     FunctionMatchResult resolve_func(std::string_view name, const FunctionMatchRequest &request) const;
     FunctionMatchResult resolve_async_func(std::string_view name, const FunctionMatchRequest &request) const;
 
-    virtual LegacyConstant *find_constant(std::string_view namespace_name, std::string_view key) = 0;
-    virtual LegacyAsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) = 0;
+    virtual const HostCallable *find_constant(std::string_view namespace_name, std::string_view key) = 0;
+    virtual const HostCallable *find_async_constant(std::string_view namespace_name, std::string_view key) = 0;
     virtual FunctionMatchResult find_func(std::string_view name, const FunctionMatchRequest &request) = 0;
     virtual FunctionMatchResult find_async_func(std::string_view name, const FunctionMatchRequest &request) = 0;
 

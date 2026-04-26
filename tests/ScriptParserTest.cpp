@@ -32,13 +32,13 @@ public:
         return FunctionMatchResult::not_found();
     }
 
-    LegacyConstant *find_constant(std::string_view namespace_name, std::string_view key) override {
+    const HostCallable *find_constant(std::string_view namespace_name, std::string_view key) override {
         (void) namespace_name;
         (void) key;
         return nullptr;
     }
 
-    LegacyAsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) override {
+    const HostCallable *find_async_constant(std::string_view namespace_name, std::string_view key) override {
         (void) namespace_name;
         (void) key;
         return nullptr;

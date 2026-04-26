@@ -15,8 +15,8 @@ public:
 
     FunctionMatchResult find_func(std::string_view name, const FunctionMatchRequest &request) override;
     FunctionMatchResult find_async_func(std::string_view name, const FunctionMatchRequest &request) override;
-    LegacyConstant *find_constant(std::string_view namespace_name, std::string_view key) override;
-    LegacyAsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) override;
+    const HostCallable *find_constant(std::string_view namespace_name, std::string_view key) override;
+    const HostCallable *find_async_constant(std::string_view namespace_name, std::string_view key) override;
     DirectiveDef *find_directive_def(std::string_view type, std::string_view name,
                                      const std::vector<fiber::json::JsValue> &literals) override;
 
