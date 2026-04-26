@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "common/json/JsGc.h"
@@ -27,6 +29,33 @@ using fiber::json::JsValue;
 using FunctionResult = fiber::script::Library::FunctionResult;
 
 using ScriptResult = fiber::script::ScriptSyncRun::Result;
+
+fiber::script::Library::FunctionSignature exact_args(std::uint16_t argc) {
+    fiber::script::Library::FunctionSignature signature;
+    signature.required_argc = argc;
+    signature.fixed_argc = argc;
+    signature.variadic = false;
+    return signature;
+}
+
+fiber::script::Library::FunctionSignature variadic_args(std::uint16_t fixed_argc) {
+    fiber::script::Library::FunctionSignature signature;
+    signature.required_argc = fixed_argc;
+    signature.fixed_argc = fixed_argc;
+    signature.variadic = true;
+    return signature;
+}
+
+bool matches_signature(const fiber::script::Library::FunctionSignature &signature,
+                       const fiber::script::Library::FunctionMatchRequest &request) {
+    if (request.spread_argc_unknown && !signature.variadic) {
+        return false;
+    }
+    if (signature.variadic) {
+        return request.known_argc >= signature.fixed_argc;
+    }
+    return request.known_argc >= signature.required_argc && request.known_argc <= signature.fixed_argc;
+}
 
 std::string value_to_string(const JsValue &value) {
     if (js_value_type(value) != JsNodeType::String) {
@@ -205,39 +234,34 @@ public:
     }
 };
 
-class UrlAliasFunc final : public fiber::script::Library::Function {
-public:
-    explicit UrlAliasFunc(std::string target) : target_(std::move(target)) {}
-
-    FunctionResult call(fiber::script::ExecutionContext &context) override {
-        auto *func = fiber::script::std_lib::StdLibrary::instance().find_func(target_);
-        if (!func) {
-            static char msg[] = "url function not found";
-            return std::unexpected(JsValue::make_native_string(msg, sizeof(msg) - 1));
-        }
-        return func->call(context);
-    }
-
-private:
-    std::string target_;
-};
-
 class DemoServiceDirective final : public fiber::script::Library::DirectiveDef {
 public:
     explicit DemoServiceDirective(fiber::script::Library::Function *create_user) : create_user_(create_user) {}
 
-    fiber::script::Library::Function *find_func(std::string_view directive, std::string_view function) override {
+    fiber::script::Library::FunctionMatchResult
+    find_func(std::string_view directive, std::string_view function,
+              const fiber::script::Library::FunctionMatchRequest &request,
+              const fiber::script::Library &library) override {
         if (directive == "demoService" && function == "createUser") {
-            return create_user_;
+            auto signature = exact_args(1);
+            if (!matches_signature(signature, request)) {
+                return fiber::script::Library::FunctionMatchResult::arity_mismatch();
+            }
+            return fiber::script::Library::FunctionMatchResult::found(library.host_callable_for(create_user_),
+                                                                      signature, nullptr, 0);
         }
-        return nullptr;
+        return fiber::script::Library::FunctionMatchResult::not_found();
     }
 
-    fiber::script::Library::AsyncFunction *find_async_func(std::string_view directive,
-                                                           std::string_view function) override {
+    fiber::script::Library::FunctionMatchResult
+    find_async_func(std::string_view directive, std::string_view function,
+                    const fiber::script::Library::FunctionMatchRequest &request,
+                    const fiber::script::Library &library) override {
         (void) directive;
         (void) function;
-        return nullptr;
+        (void) request;
+        (void) library;
+        return fiber::script::Library::FunctionMatchResult::not_found();
     }
 
 private:
@@ -247,36 +271,44 @@ private:
 class StubLibrary final : public fiber::script::Library {
 public:
     explicit StubLibrary(fiber::script::Library &fallback) :
-        fallback_(fallback), url_parse_query_("URL.parseQuery"), url_build_query_("URL.buildQuery"),
-        url_encode_component_("URL.encodeComponent"), url_decode_component_("URL.decodeComponent"),
-        directive_(&demo_create_user_) {
-        register_func("add", &add_);
-        register_func("req.readBinary", &read_binary_);
-        register_func("rand.random", &rand_random_);
-        register_func("rand.canary", &rand_canary_);
-        register_func("time.format", &time_format_);
-        register_func("url.parseQuery", &url_parse_query_);
-        register_func("url.buildQuery", &url_build_query_);
-        register_func("url.encodeComponent", &url_encode_component_);
-        register_func("url.decodeComponent", &url_decode_component_);
+        fallback_(fallback), directive_(&demo_create_user_) {
+        register_func("add", variadic_args(0), &add_);
+        register_func("req.readBinary", exact_args(0), &read_binary_);
+        register_func("rand.random", exact_args(0), &rand_random_);
+        register_func("rand.canary", exact_args(1), &rand_canary_);
+        register_func("time.format", exact_args(2), &time_format_);
+        aliases_.emplace("url.parseQuery", "URL.parseQuery");
+        aliases_.emplace("url.buildQuery", "URL.buildQuery");
+        aliases_.emplace("url.encodeComponent", "URL.encodeComponent");
+        aliases_.emplace("url.decodeComponent", "URL.decodeComponent");
     }
 
     void mark_root_prop(std::string_view prop_name) override { fallback_.mark_root_prop(prop_name); }
 
-    Function *find_func(std::string_view name) override {
+    FunctionMatchResult find_func(std::string_view name, const FunctionMatchRequest &request) override {
         auto it = functions_.find(std::string(name));
         if (it != functions_.end()) {
-            return it->second;
+            if (!matches_signature(it->second.signature, request)) {
+                return FunctionMatchResult::arity_mismatch();
+            }
+            return FunctionMatchResult::found(host_callable_for(it->second.func), it->second.signature, nullptr, 0);
         }
-        return fallback_.find_func(name);
+        auto alias = aliases_.find(std::string(name));
+        if (alias != aliases_.end()) {
+            return fallback_.find_func(alias->second, request);
+        }
+        return fallback_.find_func(name, request);
     }
 
-    AsyncFunction *find_async_func(std::string_view name) override {
+    FunctionMatchResult find_async_func(std::string_view name, const FunctionMatchRequest &request) override {
         auto it = async_functions_.find(std::string(name));
         if (it != async_functions_.end()) {
-            return it->second;
+            if (!matches_signature(it->second.signature, request)) {
+                return FunctionMatchResult::arity_mismatch();
+            }
+            return FunctionMatchResult::found(host_callable_for(it->second.func), it->second.signature, nullptr, 0);
         }
-        return fallback_.find_async_func(name);
+        return fallback_.find_async_func(name, request);
     }
 
     Constant *find_constant(std::string_view namespace_name, std::string_view key) override {
@@ -310,12 +342,28 @@ public:
         return fallback_.find_directive_def(type, name, literals);
     }
 
-    void register_func(std::string name, Function *func) { functions_.emplace(std::move(name), func); }
+    void register_func(std::string name, FunctionSignature signature, Function *func) {
+        FunctionEntry entry;
+        entry.signature = signature;
+        entry.func = func;
+        functions_.emplace(std::move(name), entry);
+    }
 
 private:
+    struct FunctionEntry {
+        FunctionSignature signature{};
+        Function *func = nullptr;
+    };
+
+    struct AsyncFunctionEntry {
+        FunctionSignature signature{};
+        AsyncFunction *func = nullptr;
+    };
+
     fiber::script::Library &fallback_;
-    std::unordered_map<std::string, Function *> functions_;
-    std::unordered_map<std::string, AsyncFunction *> async_functions_;
+    std::unordered_map<std::string, FunctionEntry> functions_;
+    std::unordered_map<std::string, AsyncFunctionEntry> async_functions_;
+    std::unordered_map<std::string, std::string> aliases_;
     std::unordered_map<std::string, Constant *> constants_;
     std::unordered_map<std::string, AsyncConstant *> async_constants_;
 
@@ -325,10 +373,6 @@ private:
     RandRandomStub rand_random_;
     RandCanaryStub rand_canary_;
     TimeFormatStub time_format_;
-    UrlAliasFunc url_parse_query_;
-    UrlAliasFunc url_build_query_;
-    UrlAliasFunc url_encode_component_;
-    UrlAliasFunc url_decode_component_;
     DemoServiceDirective directive_;
 };
 

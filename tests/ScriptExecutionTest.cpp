@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -11,6 +13,7 @@
 #include "script/ir/Compiler.h"
 #include "script/parse/Parser.h"
 #include "script/run/InterpreterVm.h"
+#include "script/std/StdLibrary.h"
 
 namespace {
 
@@ -56,27 +59,56 @@ private:
     fiber::script::AsyncExecutionContext *context_ = nullptr;
 };
 
+class AddDefaultFunction final : public fiber::script::Library::Function {
+public:
+    fiber::script::Library::FunctionResult call(fiber::script::ExecutionContext &context) override {
+        observed_argc = context.arg_count();
+        std::int64_t a = js_value_int64(context.arg_value(0));
+        std::int64_t b = js_value_int64(context.arg_value(1));
+        return fiber::json::JsValue::make_integer(a + b);
+    }
+
+    std::size_t observed_argc = 0;
+};
+
 class TestLibrary final : public fiber::script::Library {
 public:
     explicit TestLibrary(TestFunction *func, ThrowFunction *boom, TestConstant *constant,
                          DelayedAsyncFunction *async_func = nullptr) :
         func_(func), boom_(boom), constant_(constant), async_func_(async_func) {}
 
-    Function *find_func(std::string_view name) override {
+    FunctionMatchResult find_func(std::string_view name, const FunctionMatchRequest &request) override {
+        Function *func = nullptr;
+        std::uint16_t argc = 0;
         if (name == "func") {
-            return func_;
+            func = func_;
+        } else if (name == "boom") {
+            func = boom_;
+        } else {
+            return FunctionMatchResult::not_found();
         }
-        if (name == "boom") {
-            return boom_;
+        if (request.has_spread || request.known_argc != argc) {
+            return FunctionMatchResult::arity_mismatch();
         }
-        return nullptr;
+        FunctionSignature signature;
+        signature.required_argc = argc;
+        signature.fixed_argc = argc;
+        signature.variadic = false;
+        return FunctionMatchResult::found(host_callable_for(func), signature, nullptr, 0);
     }
 
-    AsyncFunction *find_async_func(std::string_view name) override {
+    FunctionMatchResult find_async_func(std::string_view name, const FunctionMatchRequest &request) override {
         if (name == "asyncFunc") {
-            return async_func_;
+            if (request.has_spread || request.known_argc != 1) {
+                return FunctionMatchResult::arity_mismatch();
+            }
+            FunctionSignature signature;
+            signature.required_argc = 1;
+            signature.fixed_argc = 1;
+            signature.variadic = false;
+            return FunctionMatchResult::found(host_callable_for(async_func_), signature, nullptr, 0);
         }
-        return nullptr;
+        return FunctionMatchResult::not_found();
     }
 
     Constant *find_constant(std::string_view namespace_name, std::string_view key) override {
@@ -105,6 +137,62 @@ private:
     ThrowFunction *boom_ = nullptr;
     TestConstant *constant_ = nullptr;
     DelayedAsyncFunction *async_func_ = nullptr;
+};
+
+class SignatureTestLibrary final : public fiber::script::Library {
+public:
+    explicit SignatureTestLibrary(AddDefaultFunction *func) : func_(func) {}
+
+    FunctionMatchResult find_func(std::string_view name, const FunctionMatchRequest &request) override {
+        if (name != "addDefault") {
+            return FunctionMatchResult::not_found();
+        }
+        if (request.has_spread) {
+            return FunctionMatchResult::arity_mismatch();
+        }
+        if (request.known_argc < 1 || request.known_argc > 2) {
+            return FunctionMatchResult::arity_mismatch();
+        }
+        FunctionSignature signature;
+        signature.required_argc = 1;
+        signature.fixed_argc = 2;
+        signature.variadic = false;
+        signature.default_count = 1;
+        signature.defaults = defaults_;
+        const std::uint16_t default_count = static_cast<std::uint16_t>(2 - request.known_argc);
+        const fiber::json::JsValue *defaults = default_count == 0 ? nullptr : defaults_;
+        return FunctionMatchResult::found(host_callable_for(func_), signature, defaults, default_count);
+    }
+
+    FunctionMatchResult find_async_func(std::string_view name, const FunctionMatchRequest &request) override {
+        (void) name;
+        (void) request;
+        return FunctionMatchResult::not_found();
+    }
+
+    Constant *find_constant(std::string_view namespace_name, std::string_view key) override {
+        (void) namespace_name;
+        (void) key;
+        return nullptr;
+    }
+
+    AsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) override {
+        (void) namespace_name;
+        (void) key;
+        return nullptr;
+    }
+
+    DirectiveDef *find_directive_def(std::string_view type, std::string_view name,
+                                     const std::vector<fiber::json::JsValue> &literals) override {
+        (void) type;
+        (void) name;
+        (void) literals;
+        return nullptr;
+    }
+
+private:
+    AddDefaultFunction *func_ = nullptr;
+    fiber::json::JsValue defaults_[1] = {fiber::json::JsValue::make_integer(1)};
 };
 
 fiber::script::ir::Compiled compile_script(std::string_view script, fiber::script::Library &library) {
@@ -214,4 +302,73 @@ TEST(ScriptExecutionTest, LegacyAsyncFunctionSuspendsAndResumes) {
     ASSERT_TRUE(out.has_value());
     EXPECT_EQ(js_value_type(out.value()), fiber::json::JsNodeType::Integer);
     EXPECT_EQ(js_value_int64(out.value()), 9);
+}
+
+TEST(ScriptExecutionTest, FunctionDefaultArgumentIsAppendedBeforeHostCall) {
+    AddDefaultFunction func;
+    SignatureTestLibrary library(&func);
+
+    auto compiled = compile_script("return addDefault(3);", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::json::GcHeap heap;
+    fiber::json::GcRootSet roots;
+    fiber::script::ScriptRuntime runtime(heap, roots);
+    auto run = script.exec_sync(fiber::json::JsValue::make_undefined(), nullptr, runtime);
+    auto result = run();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(js_value_int64(result.value()), 4);
+    EXPECT_EQ(func.observed_argc, 2u);
+}
+
+TEST(ScriptExecutionTest, StdArrayPushAcceptsVariadicSpreadArguments) {
+    auto &library = fiber::script::std_lib::StdLibrary::instance();
+    auto compiled = compile_script("let arr = [0];\n"
+                                   "array.push(arr, 1, 2, 3);\n"
+                                   "let others = [4, 5];\n"
+                                   "array.push(arr, ...others);\n"
+                                   "return length(arr);\n",
+                                   library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::json::GcHeap heap;
+    fiber::json::GcRootSet roots;
+    fiber::script::ScriptRuntime runtime(heap, roots);
+    auto run = script.exec_sync(fiber::json::JsValue::make_undefined(), nullptr, runtime);
+    auto result = run();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(js_value_int64(result.value()), 6);
+}
+
+TEST(ScriptExecutionTest, StdFunctionArityMismatchFailsParsing) {
+    auto &library = fiber::script::std_lib::StdLibrary::instance();
+    fiber::script::parse::Parser parser(library, true);
+    auto parsed = parser.parse_script("return length();");
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().message, "function argument count mismatch");
+}
+
+TEST(ScriptExecutionTest, StdFunctionTooManyArgumentsFailsParsing) {
+    auto &library = fiber::script::std_lib::StdLibrary::instance();
+    fiber::script::parse::Parser parser(library, true);
+    auto parsed = parser.parse_script("return length(\"abc\", \"extra\");");
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().message, "function argument count mismatch");
+}
+
+TEST(ScriptExecutionTest, StdFunctionDefaultArgumentIsAppended) {
+    auto &library = fiber::script::std_lib::StdLibrary::instance();
+    auto compiled = compile_script("return array.join([1, 2]);", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::json::GcHeap heap;
+    fiber::json::GcRootSet roots;
+    fiber::script::ScriptRuntime runtime(heap, roots);
+    auto run = script.exec_sync(fiber::json::JsValue::make_undefined(), nullptr, runtime);
+    auto result = run();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(value_to_string(result.value()), "12");
 }

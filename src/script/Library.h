@@ -10,8 +10,8 @@
 #include "../common/json/JsNode.h"
 #include "ExecutionContext.h"
 #include "ScriptResult.h"
-#include "async/AsyncTask.h"
 #include "async/AsyncExecutionContext.h"
+#include "async/AsyncTask.h"
 
 namespace fiber::script {
 
@@ -110,6 +110,41 @@ public:
         const char *debug_name = nullptr;
     };
 
+    struct FunctionSignature {
+        std::uint16_t required_argc = 0;
+        std::uint16_t fixed_argc = 0;
+        bool variadic = true;
+        const fiber::json::JsValue *defaults = nullptr;
+        std::uint16_t default_count = 0;
+    };
+
+    struct FunctionMatchRequest {
+        std::uint16_t known_argc = 0;
+        bool has_spread = false;
+        bool spread_argc_unknown = false;
+    };
+
+    enum class FunctionMatchStatus : std::uint8_t {
+        Found = 0,
+        NotFound,
+        ArityMismatch,
+        Ambiguous,
+    };
+
+    struct FunctionMatchResult {
+        FunctionMatchStatus status = FunctionMatchStatus::NotFound;
+        const HostCallable *callable = nullptr;
+        FunctionSignature signature{};
+        const fiber::json::JsValue *defaults_to_append = nullptr;
+        std::uint16_t default_count = 0;
+
+        static FunctionMatchResult not_found() noexcept;
+        static FunctionMatchResult arity_mismatch() noexcept;
+        static FunctionMatchResult ambiguous() noexcept;
+        static FunctionMatchResult found(const HostCallable *callable, FunctionSignature signature,
+                                         const fiber::json::JsValue *defaults, std::uint16_t default_count) noexcept;
+    };
+
     class Constant {
     public:
         virtual ~Constant() = default;
@@ -145,25 +180,28 @@ public:
     class DirectiveDef {
     public:
         virtual ~DirectiveDef() = default;
-        virtual Function *find_func(std::string_view directive, std::string_view function) = 0;
-        virtual AsyncFunction *find_async_func(std::string_view directive, std::string_view function) = 0;
+        virtual FunctionMatchResult find_func(std::string_view directive, std::string_view function,
+                                              const FunctionMatchRequest &request, const Library &library) = 0;
+        virtual FunctionMatchResult find_async_func(std::string_view directive, std::string_view function,
+                                                    const FunctionMatchRequest &request, const Library &library) = 0;
     };
 
     virtual ~Library() = default;
 
     virtual void mark_root_prop(std::string_view prop_name) { (void) prop_name; }
 
-    virtual Function *find_func(std::string_view name) = 0;
-    virtual AsyncFunction *find_async_func(std::string_view name) = 0;
     virtual Constant *find_constant(std::string_view namespace_name, std::string_view key) = 0;
     virtual AsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) = 0;
     virtual DirectiveDef *find_directive_def(std::string_view type, std::string_view name,
                                              const std::vector<fiber::json::JsValue> &literals) = 0;
 
-    const HostCallable *resolve_func(std::string_view name) const;
-    const HostCallable *resolve_async_func(std::string_view name) const;
+    FunctionMatchResult resolve_func(std::string_view name, const FunctionMatchRequest &request) const;
+    FunctionMatchResult resolve_async_func(std::string_view name, const FunctionMatchRequest &request) const;
     const HostCallable *resolve_constant(std::string_view namespace_name, std::string_view key) const;
     const HostCallable *resolve_async_constant(std::string_view namespace_name, std::string_view key) const;
+
+    virtual FunctionMatchResult find_func(std::string_view name, const FunctionMatchRequest &request) = 0;
+    virtual FunctionMatchResult find_async_func(std::string_view name, const FunctionMatchRequest &request) = 0;
 
     const HostCallable *host_callable_for(Function *func) const;
     const HostCallable *host_callable_for(AsyncFunction *func) const;

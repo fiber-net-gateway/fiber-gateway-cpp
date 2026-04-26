@@ -47,18 +47,32 @@ public:
 
 class OperandLibrary final : public Library {
 public:
-    Function *find_func(std::string_view name) override {
+    FunctionMatchResult find_func(std::string_view name, const FunctionMatchRequest &request) override {
         if (name == "syncFn") {
-            return &sync_fn_;
+            FunctionSignature signature;
+            signature.required_argc = 1;
+            signature.fixed_argc = 1;
+            signature.variadic = false;
+            if (request.known_argc != 1 || request.has_spread) {
+                return FunctionMatchResult::arity_mismatch();
+            }
+            return FunctionMatchResult::found(host_callable_for(&sync_fn_), signature, nullptr, 0);
         }
-        return nullptr;
+        return FunctionMatchResult::not_found();
     }
 
-    AsyncFunction *find_async_func(std::string_view name) override {
+    FunctionMatchResult find_async_func(std::string_view name, const FunctionMatchRequest &request) override {
         if (name == "asyncFn") {
-            return &async_fn_;
+            FunctionSignature signature;
+            signature.required_argc = 1;
+            signature.fixed_argc = 1;
+            signature.variadic = false;
+            if (request.known_argc != 1 || request.has_spread) {
+                return FunctionMatchResult::arity_mismatch();
+            }
+            return FunctionMatchResult::found(host_callable_for(&async_fn_), signature, nullptr, 0);
         }
-        return nullptr;
+        return FunctionMatchResult::not_found();
     }
 
     Constant *find_constant(std::string_view namespace_name, std::string_view key) override {

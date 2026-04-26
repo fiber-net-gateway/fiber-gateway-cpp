@@ -45,6 +45,30 @@ constexpr std::string_view kNilText = "<nil>";
 constexpr std::string_view kArrayText = "<ArrayNode>";
 constexpr std::string_view kObjectText = "<ObjectNode>";
 
+Library::FunctionSignature exact_args(std::uint16_t argc) {
+    Library::FunctionSignature signature;
+    signature.required_argc = argc;
+    signature.fixed_argc = argc;
+    signature.variadic = false;
+    return signature;
+}
+
+Library::FunctionSignature variadic_args(std::uint16_t fixed_argc) {
+    Library::FunctionSignature signature;
+    signature.required_argc = fixed_argc;
+    signature.fixed_argc = fixed_argc;
+    signature.variadic = true;
+    return signature;
+}
+
+Library::FunctionSignature default_args(std::uint16_t required_argc, std::uint16_t fixed_argc) {
+    Library::FunctionSignature signature;
+    signature.required_argc = required_argc;
+    signature.fixed_argc = fixed_argc;
+    signature.variadic = false;
+    return signature;
+}
+
 std::string_view type_name(JsNodeType type) {
     switch (type) {
         case JsNodeType::Undefined:
@@ -2685,55 +2709,64 @@ void register_std_library(StdLibrary &library) {
     static UrlParseQueryFunc url_parse_query;
     static UrlBuildQueryFunc url_build_query;
 
-    library.register_func("length", &length_func);
-    library.register_func("includes", &includes_func);
-    library.register_func("array.join", &array_join);
-    library.register_func("array.pop", &array_pop);
-    library.register_func("array.push", &array_push);
-    library.register_func("Object.assign", &obj_assign);
-    library.register_func("Object.keys", &obj_keys);
-    library.register_func("Object.values", &obj_values);
-    library.register_func("Object.deleteProperties", &obj_delete);
-    library.register_func("strings.hasPrefix", &strings_has_prefix);
-    library.register_func("strings.hasSuffix", &strings_has_suffix);
-    library.register_func("strings.toLower", &strings_to_lower);
-    library.register_func("strings.toUpper", &strings_to_upper);
-    library.register_func("strings.trim", &strings_trim);
-    library.register_func("strings.trimLeft", &strings_trim_left);
-    library.register_func("strings.trimRight", &strings_trim_right);
-    library.register_func("strings.split", &strings_split);
-    library.register_func("strings.findAll", &strings_find_all);
-    library.register_func("strings.contains", &strings_contains);
-    library.register_func("strings.contains_any", &strings_contains_any);
-    library.register_func("strings.index", &strings_index);
-    library.register_func("strings.indexAny", &strings_index_any);
-    library.register_func("strings.lastIndex", &strings_last_index);
-    library.register_func("strings.lastIndexAny", &strings_last_index_any);
-    library.register_func("strings.repeat", &strings_repeat);
-    library.register_func("strings.match", &strings_match);
-    library.register_func("strings.substring", &strings_substring);
-    library.register_func("strings.toString", &strings_to_string);
-    library.register_func("JSON.parse", &json_parse);
-    library.register_func("JSON.stringify", &json_stringify);
-    library.register_func("math.floor", &math_floor);
-    library.register_func("math.abs", &math_abs);
-    library.register_func("binary.base64Encode", &bin_b64_encode);
-    library.register_func("binary.base64Decode", &bin_b64_decode);
-    library.register_func("binary.hex", &bin_hex);
-    library.register_func("binary.fromHex", &bin_from_hex);
-    library.register_func("binary.getUtf8Bytes", &bin_utf8);
-    library.register_func("hash.crc32", &hash_crc32);
-    library.register_func("hash.md5", &hash_md5);
-    library.register_func("hash.sha1", &hash_sha1);
-    library.register_func("hash.sha256", &hash_sha256);
-    library.register_func("rand.random", &rand_random);
-    library.register_func("rand.canary", &rand_canary);
-    library.register_func("time.now", &time_now);
-    library.register_func("time.format", &time_format);
-    library.register_func("URL.encodeComponent", &url_encode_component);
-    library.register_func("URL.decodeComponent", &url_decode_component);
-    library.register_func("URL.parseQuery", &url_parse_query);
-    library.register_func("URL.buildQuery", &url_build_query);
+    library.register_func("length", exact_args(1), &length_func);
+    library.register_func("includes", variadic_args(2), &includes_func);
+    library.register_func("array.join", default_args(1, 2), {JsValue::make_native_string("", 0)}, &array_join);
+    library.register_func("array.pop", exact_args(1), &array_pop);
+    library.register_func("array.push", variadic_args(1), &array_push);
+    library.register_func("Object.assign", variadic_args(1), &obj_assign);
+    library.register_func("Object.keys", exact_args(1), &obj_keys);
+    library.register_func("Object.values", exact_args(1), &obj_values);
+    library.register_func("Object.deleteProperties", variadic_args(2), &obj_delete);
+    library.register_func("strings.hasPrefix", exact_args(2), &strings_has_prefix);
+    library.register_func("strings.hasSuffix", exact_args(2), &strings_has_suffix);
+    library.register_func("strings.toLower", exact_args(1), &strings_to_lower);
+    library.register_func("strings.toUpper", exact_args(1), &strings_to_upper);
+    library.register_func("strings.trim", exact_args(1), &strings_trim);
+    library.register_func("strings.trim", exact_args(2), &strings_trim);
+    library.register_func("strings.trimLeft", exact_args(1), &strings_trim_left);
+    library.register_func("strings.trimLeft", exact_args(2), &strings_trim_left);
+    library.register_func("strings.trimRight", exact_args(1), &strings_trim_right);
+    library.register_func("strings.trimRight", exact_args(2), &strings_trim_right);
+    library.register_func("strings.split", exact_args(1), &strings_split);
+    library.register_func("strings.split", exact_args(2), &strings_split);
+    library.register_func("strings.findAll", exact_args(2), &strings_find_all);
+    library.register_func("strings.contains", exact_args(2), &strings_contains);
+    library.register_func("strings.contains_any", exact_args(2), &strings_contains_any);
+    library.register_func("strings.index", exact_args(2), &strings_index);
+    library.register_func("strings.indexAny", exact_args(2), &strings_index_any);
+    library.register_func("strings.lastIndex", exact_args(2), &strings_last_index);
+    library.register_func("strings.lastIndexAny", exact_args(2), &strings_last_index_any);
+    library.register_func("strings.repeat", exact_args(2), &strings_repeat);
+    library.register_func("strings.match", exact_args(2), &strings_match);
+    library.register_func("strings.substring", exact_args(1), &strings_substring);
+    library.register_func("strings.substring", exact_args(2), &strings_substring);
+    library.register_func("strings.substring", exact_args(3), &strings_substring);
+    library.register_func("strings.toString", exact_args(1), &strings_to_string);
+    library.register_func("JSON.parse", exact_args(1), &json_parse);
+    library.register_func("JSON.stringify", exact_args(1), &json_stringify);
+    library.register_func("math.floor", exact_args(1), &math_floor);
+    library.register_func("math.abs", exact_args(1), &math_abs);
+    library.register_func("binary.base64Encode", exact_args(1), &bin_b64_encode);
+    library.register_func("binary.base64Decode", exact_args(1), &bin_b64_decode);
+    library.register_func("binary.hex", exact_args(1), &bin_hex);
+    library.register_func("binary.fromHex", exact_args(1), &bin_from_hex);
+    library.register_func("binary.getUtf8Bytes", exact_args(1), &bin_utf8);
+    library.register_func("hash.crc32", exact_args(1), &hash_crc32);
+    library.register_func("hash.md5", exact_args(1), &hash_md5);
+    library.register_func("hash.sha1", exact_args(1), &hash_sha1);
+    library.register_func("hash.sha256", exact_args(1), &hash_sha256);
+    library.register_func("rand.random", default_args(0, 1), {JsValue::make_integer(1000)}, &rand_random);
+    library.register_func("rand.canary", variadic_args(1), &rand_canary);
+    library.register_func("time.now", exact_args(0), &time_now);
+    library.register_func("time.now", exact_args(1), &time_now);
+    library.register_func("time.format", exact_args(0), &time_format);
+    library.register_func("time.format", exact_args(1), &time_format);
+    library.register_func("time.format", exact_args(2), &time_format);
+    library.register_func("URL.encodeComponent", exact_args(1), &url_encode_component);
+    library.register_func("URL.decodeComponent", exact_args(1), &url_decode_component);
+    library.register_func("URL.parseQuery", exact_args(1), &url_parse_query);
+    library.register_func("URL.buildQuery", exact_args(1), &url_build_query);
 }
 
 } // namespace fiber::script::std_lib

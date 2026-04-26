@@ -54,6 +54,12 @@ public:
     std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_expression(std::string_view expression);
 
 private:
+    struct ResolvedFunctionCall {
+        const Library::HostCallable *func = nullptr;
+        const Library::HostCallable *async_func = nullptr;
+        std::vector<fiber::json::JsValue> default_args;
+    };
+
     std::expected<std::unique_ptr<ast::Statement>, ParseError> parse_statement();
     std::expected<std::unique_ptr<ast::Statement>, ParseError> parse_break_statement();
     std::expected<std::unique_ptr<ast::Statement>, ParseError> parse_continue_statement();
@@ -90,6 +96,12 @@ private:
     std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_property(std::unique_ptr<ast::Expression> parent);
     std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_function_call(ast::VariableReference &prefix);
     std::expected<std::vector<std::unique_ptr<ast::Expression>>, ParseError> parse_method_args();
+    std::expected<Library::FunctionMatchRequest, ParseError>
+    make_function_match_request(const std::vector<std::unique_ptr<ast::Expression>> &args,
+                                const Token *error_token) const;
+    std::expected<ResolvedFunctionCall, ParseError>
+    resolve_function_call(std::string_view name, const std::vector<std::unique_ptr<ast::Expression>> &args,
+                          const Token *error_token) const;
 
     std::expected<ast::Literal, ParseError> parse_literal_token(const Token &token);
     std::expected<std::string, ParseError> parse_string_literal(const std::string &token_text, std::size_t start_pos);

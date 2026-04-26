@@ -115,7 +115,8 @@ std::string_view abort_message(ScriptAbortReason reason) noexcept {
 
 class LegacyExecutionContextAdapter final : public ExecutionContext {
 public:
-    explicit LegacyExecutionContextAdapter(const Library::HostCallFrame &frame) : context_(script_context_from_frame(frame)) {}
+    explicit LegacyExecutionContextAdapter(const Library::HostCallFrame &frame) :
+        context_(script_context_from_frame(frame)) {}
 
     explicit LegacyExecutionContextAdapter(Library::ScriptCallContext context) : context_(context) {}
 
@@ -386,6 +387,37 @@ Library::HostCallResult Library::HostCallResult::from_script_result(const Script
     return faulted(fault);
 }
 
+Library::FunctionMatchResult Library::FunctionMatchResult::not_found() noexcept {
+    FunctionMatchResult result;
+    result.status = FunctionMatchStatus::NotFound;
+    return result;
+}
+
+Library::FunctionMatchResult Library::FunctionMatchResult::arity_mismatch() noexcept {
+    FunctionMatchResult result;
+    result.status = FunctionMatchStatus::ArityMismatch;
+    return result;
+}
+
+Library::FunctionMatchResult Library::FunctionMatchResult::ambiguous() noexcept {
+    FunctionMatchResult result;
+    result.status = FunctionMatchStatus::Ambiguous;
+    return result;
+}
+
+Library::FunctionMatchResult Library::FunctionMatchResult::found(const HostCallable *callable,
+                                                                 FunctionSignature signature,
+                                                                 const fiber::json::JsValue *defaults,
+                                                                 std::uint16_t default_count) noexcept {
+    FunctionMatchResult result;
+    result.status = FunctionMatchStatus::Found;
+    result.callable = callable;
+    result.signature = signature;
+    result.defaults_to_append = defaults;
+    result.default_count = default_count;
+    return result;
+}
+
 Library::FunctionResult Library::Constant::get(ExecutionContext &context) {
     (void) context;
     return std::unexpected(fiber::json::JsValue::make_undefined());
@@ -419,25 +451,22 @@ AsyncTask Library::AsyncConstant::get(ScriptCallContext context) noexcept {
     return {};
 }
 
-void Library::AsyncConstant::get(AsyncExecutionContext &context) {
-    (void) context;
-}
+void Library::AsyncConstant::get(AsyncExecutionContext &context) { (void) context; }
 
 AsyncTask Library::AsyncFunction::call(ScriptCallContext context) noexcept {
     (void) context;
     return {};
 }
 
-void Library::AsyncFunction::call(AsyncExecutionContext &context) {
-    (void) context;
+void Library::AsyncFunction::call(AsyncExecutionContext &context) { (void) context; }
+
+Library::FunctionMatchResult Library::resolve_func(std::string_view name, const FunctionMatchRequest &request) const {
+    return const_cast<Library *>(this)->find_func(name, request);
 }
 
-const Library::HostCallable *Library::resolve_func(std::string_view name) const {
-    return host_callable_for(const_cast<Library *>(this)->find_func(name));
-}
-
-const Library::HostCallable *Library::resolve_async_func(std::string_view name) const {
-    return host_callable_for(const_cast<Library *>(this)->find_async_func(name));
+Library::FunctionMatchResult Library::resolve_async_func(std::string_view name,
+                                                         const FunctionMatchRequest &request) const {
+    return const_cast<Library *>(this)->find_async_func(name, request);
 }
 
 const Library::HostCallable *Library::resolve_constant(std::string_view namespace_name, std::string_view key) const {
