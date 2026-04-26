@@ -309,24 +309,24 @@ public:
         return fallback_.find_async_func(name, request);
     }
 
-    LegacyConstant *find_constant(std::string_view namespace_name, std::string_view key) override {
+    const HostCallable *find_constant(std::string_view namespace_name, std::string_view key) override {
         std::string full(namespace_name);
         full.append(".");
         full.append(key);
         auto it = constants_.find(full);
         if (it != constants_.end()) {
-            return it->second;
+            return host_callable_for(it->second);
         }
         return fallback_.find_constant(namespace_name, key);
     }
 
-    LegacyAsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) override {
+    const HostCallable *find_async_constant(std::string_view namespace_name, std::string_view key) override {
         std::string full(namespace_name);
         full.append(".");
         full.append(key);
         auto it = async_constants_.find(full);
         if (it != async_constants_.end()) {
-            return it->second;
+            return host_callable_for(it->second);
         }
         return fallback_.find_async_constant(namespace_name, key);
     }

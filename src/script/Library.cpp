@@ -250,12 +250,12 @@ Library::FunctionMatchResult Library::resolve_async_func(std::string_view name,
 
 const Library::HostCallable *Library::resolve_constant(std::string_view namespace_name,
                                                        std::string_view key) const {
-    return host_callable_for(const_cast<Library *>(this)->find_constant(namespace_name, key));
+    return const_cast<Library *>(this)->find_constant(namespace_name, key);
 }
 
 const Library::HostCallable *Library::resolve_async_constant(std::string_view namespace_name,
                                                              std::string_view key) const {
-    return host_callable_for(const_cast<Library *>(this)->find_async_constant(namespace_name, key));
+    return const_cast<Library *>(this)->find_async_constant(namespace_name, key);
 }
 
 const Library::HostCallable *Library::host_callable_for(LegacyFunction *func) const {
