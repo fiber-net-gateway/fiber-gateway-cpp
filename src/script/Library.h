@@ -49,12 +49,13 @@ public:
         };
 
         Kind kind = Kind::SyncFunction;
-        std::uint32_t flags = 0;
         void *userdata = nullptr;
-        Function function = nullptr;
-        AsyncFunction async_function = nullptr;
-        Constant constant = nullptr;
-        AsyncConstant async_constant = nullptr;
+        union {
+            Function function = nullptr;
+            AsyncFunction async_function;
+            Constant constant;
+            AsyncConstant async_constant;
+        };
         const char *debug_name = nullptr;
     };
 
