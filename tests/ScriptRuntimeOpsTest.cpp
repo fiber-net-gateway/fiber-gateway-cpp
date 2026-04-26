@@ -53,7 +53,8 @@ TEST(ScriptRuntimeOpsTest, BinaryPlusTypeError) {
     fiber::script::GcRootGuard rhs_guard(runtime, &rhs);
     auto result = fiber::script::run::Binaries::plus(lhs, rhs, runtime);
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().name, "EXEC_TYPE_ERROR");
+    ASSERT_TRUE(result.is_abort());
+    EXPECT_EQ(result.abort().reason, fiber::script::ScriptAbortReason::TypeError);
 }
 
 TEST(ScriptRuntimeOpsTest, BinaryDivideByZero) {
@@ -64,7 +65,8 @@ TEST(ScriptRuntimeOpsTest, BinaryDivideByZero) {
     JsValue rhs = JsValue::make_integer(0);
     auto result = fiber::script::run::Binaries::divide(lhs, rhs, runtime);
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().name, "EXEC_DIVISION_BY_ZERO");
+    ASSERT_TRUE(result.is_abort());
+    EXPECT_EQ(result.abort().reason, fiber::script::ScriptAbortReason::DivisionByZero);
 }
 
 TEST(ScriptRuntimeOpsTest, UnaryPlusTypeError) {
@@ -72,7 +74,8 @@ TEST(ScriptRuntimeOpsTest, UnaryPlusTypeError) {
     JsValue value = JsValue::make_native_string(data, sizeof(data));
     auto result = fiber::script::run::Unaries::plus(value);
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().name, "EXEC_TYPE_ERROR");
+    ASSERT_TRUE(result.is_abort());
+    EXPECT_EQ(result.abort().reason, fiber::script::ScriptAbortReason::TypeError);
 }
 
 TEST(ScriptRuntimeOpsTest, AccessIndexSetInvalidKey) {
@@ -87,7 +90,8 @@ TEST(ScriptRuntimeOpsTest, AccessIndexSetInvalidKey) {
     JsValue key = JsValue::make_native_string(key_bytes, sizeof(key_bytes));
     auto result = fiber::script::run::Access::index_set(arr, key, JsValue::make_integer(2), runtime);
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().name, "EXEC_INDEX_ERROR");
+    ASSERT_TRUE(result.is_abort());
+    EXPECT_EQ(result.abort().reason, fiber::script::ScriptAbortReason::IndexError);
 }
 
 TEST(ScriptRuntimeOpsTest, AccessIndexSetOutOfBounds) {
@@ -101,7 +105,8 @@ TEST(ScriptRuntimeOpsTest, AccessIndexSetOutOfBounds) {
     JsValue key = JsValue::make_integer(3);
     auto result = fiber::script::run::Access::index_set(arr, key, JsValue::make_integer(2), runtime);
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().name, "EXEC_INDEX_ERROR");
+    ASSERT_TRUE(result.is_abort());
+    EXPECT_EQ(result.abort().reason, fiber::script::ScriptAbortReason::IndexError);
 }
 
 TEST(ScriptRuntimeOpsTest, AccessPropSetNonObject) {
@@ -113,7 +118,8 @@ TEST(ScriptRuntimeOpsTest, AccessPropSetNonObject) {
     JsValue key = JsValue::make_native_string(key_bytes, sizeof(key_bytes));
     auto result = fiber::script::run::Access::prop_set(parent, JsValue::make_integer(2), key, runtime);
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().name, "EXEC_INDEX_ERROR");
+    ASSERT_TRUE(result.is_abort());
+    EXPECT_EQ(result.abort().reason, fiber::script::ScriptAbortReason::IndexError);
 }
 
 TEST(ScriptRuntimeOpsTest, InSemanticsArray) {

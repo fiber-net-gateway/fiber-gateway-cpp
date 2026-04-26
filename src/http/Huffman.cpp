@@ -115,9 +115,7 @@ constexpr std::array<EncodeCode, 257> kCodeTable{{
         {0x07ffffee, 27}, {0x07ffffef, 27}, {0x07fffff0, 27}, {0x03ffffee, 26}, {0x3fffffff, 30},
 }};
 
-constexpr TrieNode make_trie_node() noexcept {
-    return {kInvalidNode, kInvalidNode, kNoSymbol};
-}
+constexpr TrieNode make_trie_node() noexcept { return {kInvalidNode, kInvalidNode, kNoSymbol}; }
 
 constexpr std::uint8_t to_lower_ascii(std::uint8_t ch) noexcept {
     if (ch >= 'A' && ch <= 'Z') {
@@ -152,8 +150,7 @@ constexpr std::uint64_t keep_low_bits(std::uint64_t bits, std::uint8_t bit_count
 }
 
 constexpr PackedByteEntry pack_byte_entry(DecodeTransition transition) noexcept {
-    return {static_cast<std::uint32_t>(transition.out[0]) |
-            (static_cast<std::uint32_t>(transition.out[1]) << 8U) |
+    return {static_cast<std::uint32_t>(transition.out[0]) | (static_cast<std::uint32_t>(transition.out[1]) << 8U) |
             (static_cast<std::uint32_t>(transition.next_state) << 16U) |
             (static_cast<std::uint32_t>(transition.emit_count) << 26U) |
             (static_cast<std::uint32_t>(transition.accepted) << 28U) |
@@ -161,8 +158,7 @@ constexpr PackedByteEntry pack_byte_entry(DecodeTransition transition) noexcept 
 }
 
 constexpr PackedRoot16Entry pack_root16_entry(DecodeTransition transition) noexcept {
-    return {static_cast<std::uint64_t>(transition.out[0]) |
-            (static_cast<std::uint64_t>(transition.out[1]) << 8U) |
+    return {static_cast<std::uint64_t>(transition.out[0]) | (static_cast<std::uint64_t>(transition.out[1]) << 8U) |
             (static_cast<std::uint64_t>(transition.out[2]) << 16U) |
             (static_cast<std::uint64_t>(transition.next_state) << 24U) |
             (static_cast<std::uint64_t>(transition.emit_count) << 34U) |
@@ -186,21 +182,13 @@ constexpr std::uint16_t root16_next_state(PackedRoot16Entry entry) noexcept {
     return static_cast<std::uint16_t>((entry.value >> 24U) & 0x03ffU);
 }
 
-constexpr bool byte_accepted(PackedByteEntry entry) noexcept {
-    return ((entry.value >> 28U) & 0x01U) != 0;
-}
+constexpr bool byte_accepted(PackedByteEntry entry) noexcept { return ((entry.value >> 28U) & 0x01U) != 0; }
 
-constexpr bool root16_accepted(PackedRoot16Entry entry) noexcept {
-    return ((entry.value >> 36U) & 0x01U) != 0;
-}
+constexpr bool root16_accepted(PackedRoot16Entry entry) noexcept { return ((entry.value >> 36U) & 0x01U) != 0; }
 
-constexpr bool byte_invalid(PackedByteEntry entry) noexcept {
-    return ((entry.value >> 29U) & 0x01U) != 0;
-}
+constexpr bool byte_invalid(PackedByteEntry entry) noexcept { return ((entry.value >> 29U) & 0x01U) != 0; }
 
-constexpr bool root16_invalid(PackedRoot16Entry entry) noexcept {
-    return ((entry.value >> 37U) & 0x01U) != 0;
-}
+constexpr bool root16_invalid(PackedRoot16Entry entry) noexcept { return ((entry.value >> 37U) & 0x01U) != 0; }
 
 constexpr std::uint8_t entry_out0(PackedByteEntry entry) noexcept {
     return static_cast<std::uint8_t>(entry.value & 0xffU);
@@ -274,7 +262,7 @@ constexpr void assign_decode_states(DecodeBuildTables &build) noexcept {
     while (head < tail) {
         const std::uint16_t trie_node = build.queue[head++];
         const std::uint16_t children[2] = {build.trie[trie_node].child0, build.trie[trie_node].child1};
-        for (std::uint16_t child : children) {
+        for (std::uint16_t child: children) {
             if (child == kInvalidNode || build.trie[child].symbol != kNoSymbol ||
                 build.trie_to_state[child] != kInvalidState) {
                 continue;
@@ -417,8 +405,8 @@ template<std::size_t State>
 constexpr ByteDecodeRow kByteDecodeRow = build_byte_decode_row(kDecodeBuildTables, static_cast<std::uint16_t>(State));
 
 template<std::size_t... States>
-constexpr std::array<const ByteDecodeRow *, sizeof...(States)> build_byte_decode_row_refs(
-        std::index_sequence<States...>) noexcept {
+constexpr std::array<const ByteDecodeRow *, sizeof...(States)>
+build_byte_decode_row_refs(std::index_sequence<States...>) noexcept {
     return {&kByteDecodeRow<States>...};
 }
 
@@ -429,8 +417,7 @@ constexpr bool byte_decode_rows_output_overflow(std::index_sequence<States...>) 
 
 constexpr ByteDecodeTables build_byte_decode_tables() noexcept {
     return {build_byte_decode_row_refs(std::make_index_sequence<256>{}), kDecodeBuildTables.state_count,
-            kDecodeBuildTables.state_overflow,
-            byte_decode_rows_output_overflow(std::make_index_sequence<256>{})};
+            kDecodeBuildTables.state_overflow, byte_decode_rows_output_overflow(std::make_index_sequence<256>{})};
 }
 
 constexpr ByteDecodeTables kByteDecodeTables = build_byte_decode_tables();

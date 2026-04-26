@@ -2,7 +2,7 @@
 #define FIBER_SCRIPT_RUN_ACCESS_H
 
 #include "../../common/json/JsGc.h"
-#include "VmError.h"
+#include "../ScriptResult.h"
 
 namespace fiber::script {
 class ScriptRuntime;
@@ -12,25 +12,25 @@ namespace fiber::script::run {
 
 class Access {
 public:
-    static VmResult expand_object(const fiber::json::JsValue &target, const fiber::json::JsValue &addition,
+    static ScriptResult expand_object(const fiber::json::JsValue &target, const fiber::json::JsValue &addition,
                                   ScriptRuntime &runtime);
-    static VmResult expand_array(const fiber::json::JsValue &target, const fiber::json::JsValue &addition,
+    static ScriptResult expand_array(const fiber::json::JsValue &target, const fiber::json::JsValue &addition,
                                  ScriptRuntime &runtime);
-    static VmResult push_array(const fiber::json::JsValue &target, const fiber::json::JsValue &addition,
+    static ScriptResult push_array(const fiber::json::JsValue &target, const fiber::json::JsValue &addition,
                                ScriptRuntime &runtime);
 
-    static VmResult index_get(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
+    static ScriptResult index_get(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
                               ScriptRuntime &runtime);
-    static VmResult index_set(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
+    static ScriptResult index_set(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
                               const fiber::json::JsValue &value, ScriptRuntime &runtime);
-    static VmResult index_set1(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
+    static ScriptResult index_set1(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
                                const fiber::json::JsValue &value, ScriptRuntime &runtime);
 
-    static VmResult prop_get(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
+    static ScriptResult prop_get(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
                              ScriptRuntime &runtime);
-    static VmResult prop_set(const fiber::json::JsValue &parent, const fiber::json::JsValue &value,
+    static ScriptResult prop_set(const fiber::json::JsValue &parent, const fiber::json::JsValue &value,
                              const fiber::json::JsValue &key, ScriptRuntime &runtime);
-    static VmResult prop_set1(const fiber::json::JsValue &parent, const fiber::json::JsValue &value,
+    static ScriptResult prop_set1(const fiber::json::JsValue &parent, const fiber::json::JsValue &value,
                               const fiber::json::JsValue &key, ScriptRuntime &runtime);
 };
 

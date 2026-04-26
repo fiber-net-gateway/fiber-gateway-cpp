@@ -7,9 +7,9 @@
 
 #include "../common/json/JsNode.h"
 #include "ScriptResult.h"
+#include "async/AsyncTask.h"
 #include "async/Task.h"
 #include "ir/Compiled.h"
-#include "run/VmError.h"
 
 namespace fiber::json {
 class GcHeap;
@@ -50,7 +50,7 @@ private:
     ScriptRun(const ir::Compiled &compiled, const fiber::json::JsValue &root, void *attach, fiber::json::GcHeap &heap,
               fiber::json::GcRootSet &roots);
 
-    Result to_result(run::VmResult result);
+    AsyncTask run_async_task();
 
     std::unique_ptr<ScriptRuntime> owned_runtime_;
     ScriptRuntime *runtime_ = nullptr;
@@ -62,18 +62,15 @@ public:
     explicit Awaiter(ScriptRun &&run);
     ~Awaiter();
     bool await_ready();
-    bool await_suspend(std::coroutine_handle<> handle);
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> handle);
     Result await_resume();
 
 private:
-    static void resume_callback(void *context);
-    bool pump();
-    void resume_if_complete();
+    static void complete(void *context, const ScriptResult &result) noexcept;
 
     ScriptRun run_;
     std::optional<Result> result_;
-    std::coroutine_handle<> continuation_ = nullptr;
-    bool resuming_ = false;
+    AsyncTask task_;
 };
 
 class ScriptSyncRun {

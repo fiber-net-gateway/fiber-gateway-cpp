@@ -124,14 +124,22 @@ bool Compiled::validate_operands() const {
         }
         switch (symbol.kind) {
             case Library::HostCallable::Kind::SyncFunction:
+                if (!symbol.callable->function) {
+                    return false;
+                }
+                break;
             case Library::HostCallable::Kind::SyncConstant:
-                if (!symbol.callable->sync) {
+                if (!symbol.callable->constant) {
                     return false;
                 }
                 break;
             case Library::HostCallable::Kind::AsyncFunction:
+                if (!symbol.callable->async_function) {
+                    return false;
+                }
+                break;
             case Library::HostCallable::Kind::AsyncConstant:
-                if (!symbol.callable->async) {
+                if (!symbol.callable->async_constant) {
                     return false;
                 }
                 break;

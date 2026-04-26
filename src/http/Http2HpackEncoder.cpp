@@ -4,9 +4,9 @@
 #include <array>
 #include <cstring>
 
-#include "Huffman.h"
 #include "Http2HpackStaticTable.h"
 #include "HttpHeaderHash.h"
+#include "Huffman.h"
 
 namespace fiber::http {
 

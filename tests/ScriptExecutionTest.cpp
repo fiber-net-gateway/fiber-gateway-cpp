@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cstddef>
+#include <coroutine>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -17,7 +18,7 @@
 
 namespace {
 
-class TestFunction final : public fiber::script::Library::Function {
+class TestFunction final : public fiber::script::Library::LegacyFunction {
 public:
     fiber::script::Library::FunctionResult call(fiber::script::ExecutionContext &context) override {
         (void) context;
@@ -25,7 +26,7 @@ public:
     }
 };
 
-class ThrowFunction final : public fiber::script::Library::Function {
+class ThrowFunction final : public fiber::script::Library::LegacyFunction {
 public:
     fiber::script::Library::FunctionResult call(fiber::script::ExecutionContext &context) override {
         (void) context;
@@ -34,7 +35,7 @@ public:
     }
 };
 
-class TestConstant final : public fiber::script::Library::Constant {
+class TestConstant final : public fiber::script::Library::LegacyConstant {
 public:
     fiber::script::Library::FunctionResult get(fiber::script::ExecutionContext &context) override {
         (void) context;
@@ -42,7 +43,7 @@ public:
     }
 };
 
-class DelayedAsyncFunction final : public fiber::script::Library::AsyncFunction {
+class DelayedAsyncFunction final : public fiber::script::Library::LegacyAsyncFunction {
 public:
     void call(fiber::script::AsyncExecutionContext &context) override { context_ = &context; }
 
@@ -59,7 +60,7 @@ private:
     fiber::script::AsyncExecutionContext *context_ = nullptr;
 };
 
-class AddDefaultFunction final : public fiber::script::Library::Function {
+class AddDefaultFunction final : public fiber::script::Library::LegacyFunction {
 public:
     fiber::script::Library::FunctionResult call(fiber::script::ExecutionContext &context) override {
         observed_argc = context.arg_count();
@@ -78,7 +79,7 @@ public:
         func_(func), boom_(boom), constant_(constant), async_func_(async_func) {}
 
     FunctionMatchResult find_func(std::string_view name, const FunctionMatchRequest &request) override {
-        Function *func = nullptr;
+        LegacyFunction *func = nullptr;
         std::uint16_t argc = 0;
         if (name == "func") {
             func = func_;
@@ -111,14 +112,14 @@ public:
         return FunctionMatchResult::not_found();
     }
 
-    Constant *find_constant(std::string_view namespace_name, std::string_view key) override {
+    LegacyConstant *find_constant(std::string_view namespace_name, std::string_view key) override {
         if (namespace_name == "$test" && key == "answer") {
             return constant_;
         }
         return nullptr;
     }
 
-    AsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) override {
+    LegacyAsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) override {
         (void) namespace_name;
         (void) key;
         return nullptr;
@@ -170,13 +171,13 @@ public:
         return FunctionMatchResult::not_found();
     }
 
-    Constant *find_constant(std::string_view namespace_name, std::string_view key) override {
+    LegacyConstant *find_constant(std::string_view namespace_name, std::string_view key) override {
         (void) namespace_name;
         (void) key;
         return nullptr;
     }
 
-    AsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) override {
+    LegacyAsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) override {
         (void) namespace_name;
         (void) key;
         return nullptr;
@@ -291,17 +292,19 @@ TEST(ScriptExecutionTest, LegacyAsyncFunctionSuspendsAndResumes) {
     fiber::script::ScriptRuntime runtime(heap, roots);
     fiber::script::run::InterpreterVm vm(compiled, fiber::json::JsValue::make_undefined(), nullptr, runtime);
 
-    fiber::script::run::VmResult out = fiber::json::JsValue::make_undefined();
-    auto state = vm.iterate(out);
-    ASSERT_EQ(state, fiber::script::run::InterpreterVm::VmState::Suspend);
+    vm.iterate();
+    ASSERT_FALSE(vm.done());
+    ASSERT_TRUE(vm.async_task().valid());
+    std::coroutine_handle<> handle = vm.async_task().swap_coroutine_handle(std::noop_coroutine());
+    handle.resume();
 
     async_func.complete_with(fiber::json::JsValue::make_integer(9));
 
-    state = vm.iterate(out);
-    ASSERT_EQ(state, fiber::script::run::InterpreterVm::VmState::Success);
-    ASSERT_TRUE(out.has_value());
-    EXPECT_EQ(js_value_type(out.value()), fiber::json::JsNodeType::Integer);
-    EXPECT_EQ(js_value_int64(out.value()), 9);
+    vm.iterate();
+    ASSERT_TRUE(vm.done());
+    ASSERT_TRUE(vm.result().has_value());
+    EXPECT_EQ(js_value_type(vm.result().value()), fiber::json::JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(vm.result().value()), 9);
 }
 
 TEST(ScriptExecutionTest, FunctionDefaultArgumentIsAppendedBeforeHostCall) {

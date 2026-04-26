@@ -5,6 +5,7 @@
 #include <expected>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 #include "../common/json/JsNode.h"
@@ -19,80 +20,25 @@ class ScriptRuntime;
 
 class Library {
 public:
-    // Legacy hook kept while StdLibrary and existing tests migrate to ScriptResult.
     using FunctionResult = std::expected<fiber::json::JsValue, fiber::json::JsValue>;
-
-    struct ScriptCallContext {
-        ScriptRuntime *runtime = nullptr;
-        const fiber::json::JsValue *root = nullptr;
-        void *attach = nullptr;
-        const fiber::json::JsValue *args = nullptr;
-        std::uint32_t argc = 0;
-        std::uint32_t flags = 0;
-
-        [[nodiscard]] ScriptRuntime &runtime_ref() const noexcept;
-        [[nodiscard]] const fiber::json::JsValue &root_value() const noexcept;
-        [[nodiscard]] void *attach_ptr() const noexcept;
-        [[nodiscard]] std::uint32_t arg_count() const noexcept;
-        [[nodiscard]] const fiber::json::JsValue *arg(std::uint32_t index) const noexcept;
-        [[nodiscard]] fiber::json::JsValue arg_or_undefined(std::uint32_t index) const noexcept;
-    };
 
     struct HostCallFrame {
         ScriptRuntime *runtime = nullptr;
         const fiber::json::JsValue *root = nullptr;
         void *attach = nullptr;
+    };
+
+    struct Arguments {
         const fiber::json::JsValue *args = nullptr;
         std::uint32_t argc = 0;
-        std::uint32_t flags = 0;
     };
 
-    enum class HostFaultCode : std::uint16_t {
-        None = 0,
-        OutOfMemory,
-        InvalidArgument,
-        InvalidState,
-        ServiceUnavailable,
-        Timeout,
-        Cancelled,
-        Internal,
-    };
+    using Function = ScriptResult (*)(void *userdata, const HostCallFrame &frame, const Arguments &arguments) noexcept;
+    using AsyncFunction = AsyncTask (*)(void *userdata, const HostCallFrame &frame,
+                                        const Arguments &arguments) noexcept;
 
-    struct HostFault {
-        HostFaultCode code = HostFaultCode::None;
-        std::string_view name{};
-        std::string_view message{};
-        int status = 500;
-        fiber::json::JsValue meta = fiber::json::JsValue::make_undefined();
-    };
-
-    enum class HostCallResultKind : std::uint8_t {
-        Return = 0,
-        Throw,
-        Fault,
-        Pending,
-    };
-
-    struct HostCallResult {
-        HostCallResultKind kind = HostCallResultKind::Fault;
-        fiber::json::JsValue value = fiber::json::JsValue::make_undefined();
-        HostFault fault{};
-
-        static HostCallResult returned(const fiber::json::JsValue &value) noexcept;
-        static HostCallResult thrown(const fiber::json::JsValue &value) noexcept;
-        static HostCallResult faulted(HostFault fault) noexcept;
-        static HostCallResult pending() noexcept;
-        static HostCallResult from_script_result(const ScriptResult &result) noexcept;
-    };
-
-    struct HostAsyncCompletion {
-        void (*complete)(void *ctx, HostCallResult result) noexcept = nullptr;
-        void *ctx = nullptr;
-    };
-
-    using HostSyncThunk = HostCallResult (*)(void *userdata, const HostCallFrame &frame) noexcept;
-    using HostAsyncThunk = HostCallResult (*)(void *userdata, const HostCallFrame &frame,
-                                              const HostAsyncCompletion &completion) noexcept;
+    using Constant = ScriptResult (*)(void *userdata, const HostCallFrame &frame) noexcept;
+    using AsyncConstant = AsyncTask (*)(void *userdata, const HostCallFrame &frame) noexcept;
 
     struct HostCallable {
         enum class Kind : std::uint8_t {
@@ -105,8 +51,10 @@ public:
         Kind kind = Kind::SyncFunction;
         std::uint32_t flags = 0;
         void *userdata = nullptr;
-        HostSyncThunk sync = nullptr;
-        HostAsyncThunk async = nullptr;
+        Function function = nullptr;
+        AsyncFunction async_function = nullptr;
+        Constant constant = nullptr;
+        AsyncConstant async_constant = nullptr;
         const char *debug_name = nullptr;
     };
 
@@ -116,6 +64,15 @@ public:
         bool variadic = true;
         const fiber::json::JsValue *defaults = nullptr;
         std::uint16_t default_count = 0;
+    };
+
+    template<typename FC>
+        requires(std::is_same_v<FC, Function> || std::is_same_v<FC, AsyncFunction>)
+    struct HostFunction {
+        FC fc = nullptr;
+        std::string name;
+        void *userdata = nullptr;
+        FunctionSignature fs;
     };
 
     struct FunctionMatchRequest {
@@ -145,37 +102,30 @@ public:
                                          const fiber::json::JsValue *defaults, std::uint16_t default_count) noexcept;
     };
 
-    class Constant {
+    class LegacyConstant {
     public:
-        virtual ~Constant() = default;
-        virtual ScriptResult get(ScriptCallContext context) noexcept;
-        // Legacy hook kept while concrete libraries migrate.
+        virtual ~LegacyConstant() = default;
         virtual FunctionResult get(ExecutionContext &context);
     };
 
-    class Function {
+    class LegacyFunction {
     public:
-        virtual ~Function() = default;
-        virtual ScriptResult call(ScriptCallContext context) noexcept;
-        // Legacy hook kept while concrete libraries migrate.
+        virtual ~LegacyFunction() = default;
         virtual FunctionResult call(ExecutionContext &context);
     };
 
-    class AsyncConstant {
+    class LegacyAsyncConstant {
     public:
-        virtual ~AsyncConstant() = default;
-        virtual AsyncTask get(ScriptCallContext context) noexcept;
-        // Legacy hook kept while concrete libraries migrate.
+        virtual ~LegacyAsyncConstant() = default;
         virtual void get(AsyncExecutionContext &context);
     };
 
-    class AsyncFunction {
+    class LegacyAsyncFunction {
     public:
-        virtual ~AsyncFunction() = default;
-        virtual AsyncTask call(ScriptCallContext context) noexcept;
-        // Legacy hook kept while concrete libraries migrate.
+        virtual ~LegacyAsyncFunction() = default;
         virtual void call(AsyncExecutionContext &context);
     };
+
 
     class DirectiveDef {
     public:
@@ -190,23 +140,23 @@ public:
 
     virtual void mark_root_prop(std::string_view prop_name) { (void) prop_name; }
 
-    virtual Constant *find_constant(std::string_view namespace_name, std::string_view key) = 0;
-    virtual AsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) = 0;
+    const HostCallable *resolve_constant(std::string_view namespace_name, std::string_view key) const;
+    const HostCallable *resolve_async_constant(std::string_view namespace_name, std::string_view key) const;
     virtual DirectiveDef *find_directive_def(std::string_view type, std::string_view name,
                                              const std::vector<fiber::json::JsValue> &literals) = 0;
 
     FunctionMatchResult resolve_func(std::string_view name, const FunctionMatchRequest &request) const;
     FunctionMatchResult resolve_async_func(std::string_view name, const FunctionMatchRequest &request) const;
-    const HostCallable *resolve_constant(std::string_view namespace_name, std::string_view key) const;
-    const HostCallable *resolve_async_constant(std::string_view namespace_name, std::string_view key) const;
 
+    virtual LegacyConstant *find_constant(std::string_view namespace_name, std::string_view key) = 0;
+    virtual LegacyAsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) = 0;
     virtual FunctionMatchResult find_func(std::string_view name, const FunctionMatchRequest &request) = 0;
     virtual FunctionMatchResult find_async_func(std::string_view name, const FunctionMatchRequest &request) = 0;
 
-    const HostCallable *host_callable_for(Function *func) const;
-    const HostCallable *host_callable_for(AsyncFunction *func) const;
-    const HostCallable *host_callable_for(Constant *constant) const;
-    const HostCallable *host_callable_for(AsyncConstant *constant) const;
+    const HostCallable *host_callable_for(LegacyFunction *func) const;
+    const HostCallable *host_callable_for(LegacyAsyncFunction *func) const;
+    const HostCallable *host_callable_for(LegacyConstant *constant) const;
+    const HostCallable *host_callable_for(LegacyAsyncConstant *constant) const;
 };
 
 } // namespace fiber::script

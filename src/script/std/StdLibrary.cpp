@@ -106,7 +106,7 @@ Library::FunctionMatchResult StdLibrary::find_async_func(std::string_view name, 
     return match_entries(it->second, request, *this);
 }
 
-Library::Constant *StdLibrary::find_constant(std::string_view namespace_name, std::string_view key) {
+Library::LegacyConstant *StdLibrary::find_constant(std::string_view namespace_name, std::string_view key) {
     auto it = constants_.find(make_constant_key(namespace_name, key));
     if (it == constants_.end()) {
         return nullptr;
@@ -114,7 +114,7 @@ Library::Constant *StdLibrary::find_constant(std::string_view namespace_name, st
     return it->second;
 }
 
-Library::AsyncConstant *StdLibrary::find_async_constant(std::string_view namespace_name, std::string_view key) {
+Library::LegacyAsyncConstant *StdLibrary::find_async_constant(std::string_view namespace_name, std::string_view key) {
     auto it = async_constants_.find(make_constant_key(namespace_name, key));
     if (it == async_constants_.end()) {
         return nullptr;
@@ -130,12 +130,12 @@ Library::DirectiveDef *StdLibrary::find_directive_def(std::string_view type, std
     return nullptr;
 }
 
-void StdLibrary::register_func(std::string name, FunctionSignature signature, Function *func) {
+void StdLibrary::register_func(std::string name, FunctionSignature signature, LegacyFunction *func) {
     register_func(std::move(name), signature, {}, func);
 }
 
 void StdLibrary::register_func(std::string name, FunctionSignature signature,
-                               std::vector<fiber::json::JsValue> defaults, Function *func) {
+                               std::vector<fiber::json::JsValue> defaults, LegacyFunction *func) {
     signature.default_count = static_cast<std::uint16_t>(defaults.size());
     signature.defaults = nullptr;
     FIBER_ASSERT(func != nullptr);
@@ -151,12 +151,12 @@ void StdLibrary::register_func(std::string name, FunctionSignature signature,
     entries.push_back(std::move(entry));
 }
 
-void StdLibrary::register_async_func(std::string name, FunctionSignature signature, AsyncFunction *func) {
+void StdLibrary::register_async_func(std::string name, FunctionSignature signature, LegacyAsyncFunction *func) {
     register_async_func(std::move(name), signature, {}, func);
 }
 
 void StdLibrary::register_async_func(std::string name, FunctionSignature signature,
-                                     std::vector<fiber::json::JsValue> defaults, AsyncFunction *func) {
+                                     std::vector<fiber::json::JsValue> defaults, LegacyAsyncFunction *func) {
     signature.default_count = static_cast<std::uint16_t>(defaults.size());
     signature.defaults = nullptr;
     FIBER_ASSERT(func != nullptr);
@@ -172,11 +172,11 @@ void StdLibrary::register_async_func(std::string name, FunctionSignature signatu
     entries.push_back(std::move(entry));
 }
 
-void StdLibrary::register_constant(std::string name, Constant *constant) {
+void StdLibrary::register_constant(std::string name, LegacyConstant *constant) {
     constants_.emplace(std::move(name), constant);
 }
 
-void StdLibrary::register_async_constant(std::string name, AsyncConstant *constant) {
+void StdLibrary::register_async_constant(std::string name, LegacyAsyncConstant *constant) {
     async_constants_.emplace(std::move(name), constant);
 }
 

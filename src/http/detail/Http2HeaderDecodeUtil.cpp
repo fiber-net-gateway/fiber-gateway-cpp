@@ -2,8 +2,8 @@
 
 #include <cstring>
 
-#include "../Huffman.h"
 #include "../HttpHeaderHash.h"
+#include "../Huffman.h"
 
 namespace fiber::http::detail {
 

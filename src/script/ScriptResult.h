@@ -84,6 +84,12 @@ struct alignas(16) ScriptResult {
 
     [[nodiscard]] bool is_abort() const noexcept { return kind == ScriptResultKind::Abort; }
 
+    [[nodiscard]] bool is_pending() const noexcept {
+        return kind == ScriptResultKind::Abort && payload.abort.reason == ScriptAbortReason::None;
+    }
+
+    [[nodiscard]] bool is_done() const noexcept { return !is_pending(); }
+
     [[nodiscard]] const fiber::json::JsValue &value() const noexcept {
         FIBER_ASSERT(is_success());
         return payload.value;

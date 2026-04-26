@@ -6,8 +6,8 @@
 #include <memory>
 #include <string>
 
-#include "http/Huffman.h"
 #include "http/HttpHeaderHash.h"
+#include "http/Huffman.h"
 
 #define private public
 #define protected public

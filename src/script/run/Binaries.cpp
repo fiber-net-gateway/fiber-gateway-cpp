@@ -11,44 +11,30 @@ namespace fiber::script::run {
 
 namespace {
 
-VmError map_error(fiber::json::JsOpError error, std::string_view op) {
-    VmError vm_error;
-    vm_error.status = 500;
+ScriptAbortReason map_error(fiber::json::JsOpError error) {
     switch (error) {
         case fiber::json::JsOpError::TypeError:
-            vm_error.name = "EXEC_TYPE_ERROR";
-            vm_error.message = "type error in operator ";
-            break;
+            return ScriptAbortReason::TypeError;
         case fiber::json::JsOpError::DivisionByZero:
-            vm_error.name = "EXEC_DIVISION_BY_ZERO";
-            vm_error.message = "division by zero in operator ";
-            break;
+            return ScriptAbortReason::DivisionByZero;
         case fiber::json::JsOpError::HeapRequired:
-            vm_error.name = "EXEC_HEAP_REQUIRED";
-            vm_error.message = "heap required in operator ";
-            break;
+            return ScriptAbortReason::InvalidState;
         case fiber::json::JsOpError::OutOfMemory:
-            vm_error.name = "EXEC_OUT_OF_MEMORY";
-            vm_error.message = "out of memory in operator ";
-            break;
+            return ScriptAbortReason::OutOfMemory;
         case fiber::json::JsOpError::InvalidUtf8:
-            vm_error.name = "EXEC_INVALID_UTF8";
-            vm_error.message = "invalid utf-8 in operator ";
-            break;
+            return ScriptAbortReason::InvalidArgument;
         case fiber::json::JsOpError::None:
-            vm_error.name = "EXEC_ERROR";
-            vm_error.message = "unknown error in operator ";
-            break;
+            return ScriptAbortReason::Internal;
     }
-    vm_error.message += op;
-    return vm_error;
+    return ScriptAbortReason::Internal;
 }
 
-VmResult from_js_result(const fiber::json::JsOpResult &result, std::string_view op) {
+ScriptResult from_js_result(const fiber::json::JsOpResult &result, std::string_view op) {
+    (void) op;
     if (result.error == fiber::json::JsOpError::None) {
         return result.value;
     }
-    return std::unexpected(map_error(result.error, op));
+    return ScriptResult::abort(map_error(result.error));
 }
 
 bool value_to_string(const fiber::json::JsValue &value, std::string &out) {
@@ -64,7 +50,7 @@ bool value_to_string(const fiber::json::JsValue &value, std::string &out) {
     return fiber::json::gc_string_to_utf8(str, out);
 }
 
-VmResult make_bool(bool value) { return fiber::json::JsValue::make_boolean(value); }
+ScriptResult make_bool(bool value) { return fiber::json::JsValue::make_boolean(value); }
 
 bool is_string_like(const fiber::json::JsValue &value) {
     return fiber::json::js_value_type(value) == fiber::json::JsNodeType::String;
@@ -101,7 +87,7 @@ std::size_t estimate_plus_alloc_bytes(const fiber::json::JsValue &lhs, const fib
 
 } // namespace
 
-VmResult Binaries::plus(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
+ScriptResult Binaries::plus(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
     fiber::json::JsOpResult result;
     runtime.run_with_gc_retry(estimate_plus_alloc_bytes(a, b), [&]() {
         result = fiber::json::js_binary_op(fiber::json::JsBinaryOp::Add, a, b, &runtime.heap());
@@ -110,62 +96,62 @@ VmResult Binaries::plus(const fiber::json::JsValue &a, const fiber::json::JsValu
     return from_js_result(result, "+");
 }
 
-VmResult Binaries::minus(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
+ScriptResult Binaries::minus(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Sub, a, b, &runtime.heap()), "-");
 }
 
-VmResult Binaries::multiply(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
+ScriptResult Binaries::multiply(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Mul, a, b, &runtime.heap()), "*");
 }
 
-VmResult Binaries::divide(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
+ScriptResult Binaries::divide(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Div, a, b, &runtime.heap()), "/");
 }
 
-VmResult Binaries::modulo(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
+ScriptResult Binaries::modulo(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Mod, a, b, &runtime.heap()), "%");
 }
 
-VmResult Binaries::matches(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
+ScriptResult Binaries::matches(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
     (void) a;
     (void) b;
     (void) runtime;
     return make_bool(false);
 }
 
-VmResult Binaries::lt(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
+ScriptResult Binaries::lt(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Lt, a, b, &runtime.heap()), "<");
 }
 
-VmResult Binaries::lte(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
+ScriptResult Binaries::lte(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Le, a, b, &runtime.heap()), "<=");
 }
 
-VmResult Binaries::gt(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
+ScriptResult Binaries::gt(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Gt, a, b, &runtime.heap()), ">");
 }
 
-VmResult Binaries::gte(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
+ScriptResult Binaries::gte(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Ge, a, b, &runtime.heap()), ">=");
 }
 
-VmResult Binaries::eq(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
+ScriptResult Binaries::eq(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Eq, a, b, &runtime.heap()), "==");
 }
 
-VmResult Binaries::seq(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
+ScriptResult Binaries::seq(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::StrictEq, a, b, &runtime.heap()), "===");
 }
 
-VmResult Binaries::ne(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
+ScriptResult Binaries::ne(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Ne, a, b, &runtime.heap()), "!=");
 }
 
-VmResult Binaries::sne(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
+ScriptResult Binaries::sne(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::StrictNe, a, b, &runtime.heap()), "!==");
 }
 
-VmResult Binaries::in(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
+ScriptResult Binaries::in(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
     return Compares::in(a, b);
 }
 

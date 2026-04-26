@@ -1096,7 +1096,7 @@ bool url_decode(std::string_view input, std::string &out) {
     return true;
 }
 
-class LengthFunc final : public Library::Function {
+class LengthFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -1130,7 +1130,7 @@ public:
     }
 };
 
-class IncludesFunc final : public Library::Function {
+class IncludesFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -1184,7 +1184,7 @@ public:
     }
 };
 
-class ArrayJoinFunc final : public Library::Function {
+class ArrayJoinFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -1219,7 +1219,7 @@ public:
     }
 };
 
-class ArrayPopFunc final : public Library::Function {
+class ArrayPopFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -1241,7 +1241,7 @@ public:
     }
 };
 
-class ArrayPushFunc final : public Library::Function {
+class ArrayPushFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -1284,7 +1284,7 @@ GcString *ensure_heap_string(ScriptRuntime &runtime, const JsValue &value) {
     return nullptr;
 }
 
-class ObjectAssignFunc final : public Library::Function {
+class ObjectAssignFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -1341,7 +1341,7 @@ public:
     }
 };
 
-class ObjectKeysFunc final : public Library::Function {
+class ObjectKeysFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -1377,7 +1377,7 @@ public:
     }
 };
 
-class ObjectValuesFunc final : public Library::Function {
+class ObjectValuesFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -1411,7 +1411,7 @@ public:
     }
 };
 
-class ObjectDeletePropsFunc final : public Library::Function {
+class ObjectDeletePropsFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() < 2) {
@@ -1441,7 +1441,7 @@ public:
     }
 };
 
-class HasPrefixFunc final : public Library::Function {
+class HasPrefixFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() < 2) {
@@ -1462,7 +1462,7 @@ public:
     }
 };
 
-class HasSuffixFunc final : public Library::Function {
+class HasSuffixFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() < 2) {
@@ -1483,7 +1483,7 @@ public:
     }
 };
 
-class ToLowerFunc final : public Library::Function {
+class ToLowerFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -1506,7 +1506,7 @@ public:
     }
 };
 
-class ToUpperFunc final : public Library::Function {
+class ToUpperFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -1529,7 +1529,7 @@ public:
     }
 };
 
-class TrimFunc final : public Library::Function {
+class TrimFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -1561,7 +1561,7 @@ public:
     }
 };
 
-class TrimLeftFunc final : public Library::Function {
+class TrimLeftFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -1592,7 +1592,7 @@ public:
     }
 };
 
-class TrimRightFunc final : public Library::Function {
+class TrimRightFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -1623,7 +1623,7 @@ public:
     }
 };
 
-class SplitFunc final : public Library::Function {
+class SplitFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -1678,7 +1678,7 @@ public:
     }
 };
 
-class FindAllFunc final : public Library::Function {
+class FindAllFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() < 2) {
@@ -1722,7 +1722,7 @@ public:
     }
 };
 
-class ContainsFunc final : public Library::Function {
+class ContainsFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() < 2) {
@@ -1741,7 +1741,7 @@ public:
     }
 };
 
-class ContainsAnyFunc final : public Library::Function {
+class ContainsAnyFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() < 2) {
@@ -1759,7 +1759,7 @@ public:
     }
 };
 
-class IndexFunc final : public Library::Function {
+class IndexFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() < 2) {
@@ -1784,7 +1784,7 @@ public:
     }
 };
 
-class IndexAnyFunc final : public Library::Function {
+class IndexAnyFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() < 2) {
@@ -1802,7 +1802,7 @@ public:
     }
 };
 
-class LastIndexFunc final : public Library::Function {
+class LastIndexFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() < 2) {
@@ -1827,7 +1827,7 @@ public:
     }
 };
 
-class LastIndexAnyFunc final : public Library::Function {
+class LastIndexAnyFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() < 2) {
@@ -1845,7 +1845,7 @@ public:
     }
 };
 
-class RepeatFunc final : public Library::Function {
+class RepeatFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() < 2) {
@@ -1886,7 +1886,7 @@ public:
     }
 };
 
-class MatchFunc final : public Library::Function {
+class MatchFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() < 2) {
@@ -1909,7 +1909,7 @@ public:
     }
 };
 
-class SubstringFunc final : public Library::Function {
+class SubstringFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -1973,7 +1973,7 @@ public:
     }
 };
 
-class ToStringFunc final : public Library::Function {
+class ToStringFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -2000,7 +2000,7 @@ public:
     }
 };
 
-class JsonParseFunc final : public Library::Function {
+class JsonParseFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -2021,7 +2021,7 @@ public:
     }
 };
 
-class JsonStringifyFunc final : public Library::Function {
+class JsonStringifyFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -2049,7 +2049,7 @@ public:
     }
 };
 
-class MathFloorFunc final : public Library::Function {
+class MathFloorFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0 || !is_number_type(context.arg_value(0))) {
@@ -2068,7 +2068,7 @@ public:
     }
 };
 
-class MathAbsFunc final : public Library::Function {
+class MathAbsFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0 || !is_number_type(context.arg_value(0))) {
@@ -2086,7 +2086,7 @@ public:
     }
 };
 
-class BinaryBase64EncodeFunc final : public Library::Function {
+class BinaryBase64EncodeFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -2107,7 +2107,7 @@ public:
     }
 };
 
-class BinaryBase64DecodeFunc final : public Library::Function {
+class BinaryBase64DecodeFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -2129,7 +2129,7 @@ public:
     }
 };
 
-class BinaryHexFunc final : public Library::Function {
+class BinaryHexFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -2152,7 +2152,7 @@ public:
     }
 };
 
-class BinaryFromHexFunc final : public Library::Function {
+class BinaryFromHexFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -2176,7 +2176,7 @@ public:
     }
 };
 
-class BinaryUtf8BytesFunc final : public Library::Function {
+class BinaryUtf8BytesFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -2192,7 +2192,7 @@ public:
     }
 };
 
-class HashCrc32Func final : public Library::Function {
+class HashCrc32Func final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -2207,7 +2207,7 @@ public:
     }
 };
 
-class HashMd5Func final : public Library::Function {
+class HashMd5Func final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -2245,7 +2245,7 @@ public:
     }
 };
 
-class HashSha1Func final : public Library::Function {
+class HashSha1Func final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -2283,7 +2283,7 @@ public:
     }
 };
 
-class HashSha256Func final : public Library::Function {
+class HashSha256Func final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -2321,7 +2321,7 @@ public:
     }
 };
 
-class RandRandomFunc final : public Library::Function {
+class RandRandomFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         std::int64_t bound = 1000;
@@ -2341,7 +2341,7 @@ public:
     }
 };
 
-class RandCanaryFunc final : public Library::Function {
+class RandCanaryFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -2372,7 +2372,7 @@ public:
     }
 };
 
-class TimeNowFunc final : public Library::Function {
+class TimeNowFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         auto now = std::chrono::system_clock::now();
@@ -2400,7 +2400,7 @@ public:
     }
 };
 
-class TimeFormatFunc final : public Library::Function {
+class TimeFormatFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() == 0) {
@@ -2438,7 +2438,7 @@ public:
     }
 };
 
-class UrlEncodeComponentFunc final : public Library::Function {
+class UrlEncodeComponentFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() < 1) {
@@ -2465,7 +2465,7 @@ public:
     }
 };
 
-class UrlDecodeComponentFunc final : public Library::Function {
+class UrlDecodeComponentFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() < 1) {
@@ -2494,7 +2494,7 @@ public:
     }
 };
 
-class UrlParseQueryFunc final : public Library::Function {
+class UrlParseQueryFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() < 1) {
@@ -2579,7 +2579,7 @@ public:
     }
 };
 
-class UrlBuildQueryFunc final : public Library::Function {
+class UrlBuildQueryFunc final : public Library::LegacyFunction {
 public:
     FunctionResult call(ExecutionContext &context) override {
         if (context.arg_count() < 1) {
