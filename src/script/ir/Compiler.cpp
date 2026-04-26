@@ -168,7 +168,6 @@ private:
         }
         Compiled::HostSymbol symbol;
         symbol.kind = callable->kind;
-        symbol.flags = callable->flags;
         symbol.callable = callable;
         compiled_.host_symbols.push_back(symbol);
         std::size_t index = compiled_.host_symbols.size() - 1;

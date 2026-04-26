@@ -48,7 +48,6 @@ struct Compiled {
 
     struct HostSymbol {
         Library::HostCallable::Kind kind = Library::HostCallable::Kind::SyncFunction;
-        std::uint32_t flags = 0;
         const Library::HostCallable *callable = nullptr;
     };
 
