@@ -31,8 +31,8 @@
 #include "http/Http2HpackDecoder.h"
 #include "http/Http2HpackEncodeCatalog.h"
 #include "http/Http2HpackEncoder.h"
-#include "http/Huffman.h"
 #include "http/Http2Stream.h"
+#include "http/Huffman.h"
 #include "http/ServerRequestFactory.h"
 
 namespace {

@@ -9,47 +9,33 @@ namespace fiber::script::run {
 
 namespace {
 
-VmError map_error(fiber::json::JsOpError error, std::string_view op) {
-    VmError vm_error;
-    vm_error.status = 500;
+ScriptAbortReason map_error(fiber::json::JsOpError error) {
     switch (error) {
         case fiber::json::JsOpError::TypeError:
-            vm_error.name = "EXEC_TYPE_ERROR";
-            vm_error.message = "type error in operator ";
-            break;
+            return ScriptAbortReason::TypeError;
         case fiber::json::JsOpError::DivisionByZero:
-            vm_error.name = "EXEC_DIVISION_BY_ZERO";
-            vm_error.message = "division by zero in operator ";
-            break;
+            return ScriptAbortReason::DivisionByZero;
         case fiber::json::JsOpError::HeapRequired:
-            vm_error.name = "EXEC_HEAP_REQUIRED";
-            vm_error.message = "heap required in operator ";
-            break;
+            return ScriptAbortReason::InvalidState;
         case fiber::json::JsOpError::OutOfMemory:
-            vm_error.name = "EXEC_OUT_OF_MEMORY";
-            vm_error.message = "out of memory in operator ";
-            break;
+            return ScriptAbortReason::OutOfMemory;
         case fiber::json::JsOpError::InvalidUtf8:
-            vm_error.name = "EXEC_INVALID_UTF8";
-            vm_error.message = "invalid utf-8 in operator ";
-            break;
+            return ScriptAbortReason::InvalidArgument;
         case fiber::json::JsOpError::None:
-            vm_error.name = "EXEC_ERROR";
-            vm_error.message = "unknown error in operator ";
-            break;
+            return ScriptAbortReason::Internal;
     }
-    vm_error.message += op;
-    return vm_error;
+    return ScriptAbortReason::Internal;
 }
 
-VmResult from_js_result(const fiber::json::JsOpResult &result, std::string_view op) {
+ScriptResult from_js_result(const fiber::json::JsOpResult &result, std::string_view op) {
+    (void) op;
     if (result.error == fiber::json::JsOpError::None) {
         return result.value;
     }
-    return std::unexpected(map_error(result.error, op));
+    return ScriptResult::abort(map_error(result.error));
 }
 
-VmResult make_bool(bool value) { return fiber::json::JsValue::make_boolean(value); }
+ScriptResult make_bool(bool value) { return fiber::json::JsValue::make_boolean(value); }
 
 } // namespace
 
@@ -63,45 +49,45 @@ bool Compares::logic(const fiber::json::JsValue &value) {
     return !fiber::json::js_value_bool(result.value);
 }
 
-VmResult Compares::eq(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
+ScriptResult Compares::eq(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Eq, a, b, nullptr), "==");
 }
 
-VmResult Compares::seq(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
+ScriptResult Compares::seq(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::StrictEq, a, b, nullptr), "===");
 }
 
-VmResult Compares::ne(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
+ScriptResult Compares::ne(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Ne, a, b, nullptr), "!=");
 }
 
-VmResult Compares::sne(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
+ScriptResult Compares::sne(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::StrictNe, a, b, nullptr), "!==");
 }
 
-VmResult Compares::lt(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
+ScriptResult Compares::lt(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Lt, a, b, nullptr), "<");
 }
 
-VmResult Compares::lte(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
+ScriptResult Compares::lte(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Le, a, b, nullptr), "<=");
 }
 
-VmResult Compares::gt(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
+ScriptResult Compares::gt(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Gt, a, b, nullptr), ">");
 }
 
-VmResult Compares::gte(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
+ScriptResult Compares::gte(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
     return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Ge, a, b, nullptr), ">=");
 }
 
-VmResult Compares::matches(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
+ScriptResult Compares::matches(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
     (void) a;
     (void) b;
     return make_bool(false);
 }
 
-VmResult Compares::in(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
+ScriptResult Compares::in(const fiber::json::JsValue &a, const fiber::json::JsValue &b) {
     if (fiber::json::js_value_type(b) == fiber::json::JsNodeType::Array) {
         if (fiber::json::js_value_type(a) != fiber::json::JsNodeType::Integer) {
             return make_bool(false);

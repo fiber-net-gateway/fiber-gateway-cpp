@@ -6,9 +6,9 @@
 #include <string>
 
 #include "http/Http2Connection.h"
-#include "http/Huffman.h"
 #include "http/Http2StreamFactory.h"
 #include "http/HttpHeaderHash.h"
+#include "http/Huffman.h"
 
 namespace {
 

@@ -19,7 +19,7 @@ using fiber::script::Library;
 using fiber::script::ir::Code;
 using fiber::script::ir::Compiled;
 
-class DummyFunction final : public Library::Function {
+class DummyFunction final : public Library::LegacyFunction {
 public:
     Library::FunctionResult call(ExecutionContext &context) override {
         (void) context;
@@ -27,12 +27,12 @@ public:
     }
 };
 
-class DummyAsyncFunction final : public Library::AsyncFunction {
+class DummyAsyncFunction final : public Library::LegacyAsyncFunction {
 public:
     void call(AsyncExecutionContext &context) override { context.return_value(JsValue::make_undefined()); }
 };
 
-class DummyConstant final : public Library::Constant {
+class DummyConstant final : public Library::LegacyConstant {
 public:
     Library::FunctionResult get(ExecutionContext &context) override {
         (void) context;
@@ -40,7 +40,7 @@ public:
     }
 };
 
-class DummyAsyncConstant final : public Library::AsyncConstant {
+class DummyAsyncConstant final : public Library::LegacyAsyncConstant {
 public:
     void get(AsyncExecutionContext &context) override { context.return_value(JsValue::make_undefined()); }
 };
@@ -75,14 +75,14 @@ public:
         return FunctionMatchResult::not_found();
     }
 
-    Constant *find_constant(std::string_view namespace_name, std::string_view key) override {
+    LegacyConstant *find_constant(std::string_view namespace_name, std::string_view key) override {
         if (namespace_name == "$env" && key == "value") {
             return &constant_;
         }
         return nullptr;
     }
 
-    AsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) override {
+    LegacyAsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) override {
         if (namespace_name == "$env" && key == "asyncValue") {
             return &async_constant_;
         }

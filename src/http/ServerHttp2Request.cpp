@@ -12,8 +12,8 @@
 #include "Http2Connection.h"
 #include "Http2DataFrameEncoder.h"
 #include "Http2HeadersFrameEncoder.h"
-#include "Huffman.h"
 #include "HttpUriParse.h"
+#include "Huffman.h"
 
 namespace fiber::http {
 

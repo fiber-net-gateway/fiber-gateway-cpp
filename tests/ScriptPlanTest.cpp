@@ -152,7 +152,7 @@ JsValue make_heap_string(fiber::script::ScriptRuntime &runtime, std::string_view
     return js_make_heap_ref(&str->hdr, JsHeapKind::String);
 }
 
-class AddFunc final : public fiber::script::Library::Function {
+class AddFunc final : public fiber::script::Library::LegacyFunction {
 public:
     FunctionResult call(fiber::script::ExecutionContext &context) override {
         double sum = 0.0;
@@ -178,7 +178,7 @@ public:
     }
 };
 
-class ReqReadBinaryFunc final : public fiber::script::Library::Function {
+class ReqReadBinaryFunc final : public fiber::script::Library::LegacyFunction {
 public:
     FunctionResult call(fiber::script::ExecutionContext &context) override {
         (void) context;
@@ -187,7 +187,7 @@ public:
     }
 };
 
-class DemoCreateUserFunc final : public fiber::script::Library::Function {
+class DemoCreateUserFunc final : public fiber::script::Library::LegacyFunction {
 public:
     FunctionResult call(fiber::script::ExecutionContext &context) override {
         std::string arg;
@@ -205,7 +205,7 @@ public:
     }
 };
 
-class RandRandomStub final : public fiber::script::Library::Function {
+class RandRandomStub final : public fiber::script::Library::LegacyFunction {
 public:
     FunctionResult call(fiber::script::ExecutionContext &context) override {
         (void) context;
@@ -213,7 +213,7 @@ public:
     }
 };
 
-class RandCanaryStub final : public fiber::script::Library::Function {
+class RandCanaryStub final : public fiber::script::Library::LegacyFunction {
 public:
     FunctionResult call(fiber::script::ExecutionContext &context) override {
         (void) context;
@@ -221,7 +221,7 @@ public:
     }
 };
 
-class TimeFormatStub final : public fiber::script::Library::Function {
+class TimeFormatStub final : public fiber::script::Library::LegacyFunction {
 public:
     FunctionResult call(fiber::script::ExecutionContext &context) override {
         (void) context;
@@ -236,12 +236,11 @@ public:
 
 class DemoServiceDirective final : public fiber::script::Library::DirectiveDef {
 public:
-    explicit DemoServiceDirective(fiber::script::Library::Function *create_user) : create_user_(create_user) {}
+    explicit DemoServiceDirective(fiber::script::Library::LegacyFunction *create_user) : create_user_(create_user) {}
 
-    fiber::script::Library::FunctionMatchResult
-    find_func(std::string_view directive, std::string_view function,
-              const fiber::script::Library::FunctionMatchRequest &request,
-              const fiber::script::Library &library) override {
+    fiber::script::Library::FunctionMatchResult find_func(std::string_view directive, std::string_view function,
+                                                          const fiber::script::Library::FunctionMatchRequest &request,
+                                                          const fiber::script::Library &library) override {
         if (directive == "demoService" && function == "createUser") {
             auto signature = exact_args(1);
             if (!matches_signature(signature, request)) {
@@ -265,13 +264,12 @@ public:
     }
 
 private:
-    fiber::script::Library::Function *create_user_ = nullptr;
+    fiber::script::Library::LegacyFunction *create_user_ = nullptr;
 };
 
 class StubLibrary final : public fiber::script::Library {
 public:
-    explicit StubLibrary(fiber::script::Library &fallback) :
-        fallback_(fallback), directive_(&demo_create_user_) {
+    explicit StubLibrary(fiber::script::Library &fallback) : fallback_(fallback), directive_(&demo_create_user_) {
         register_func("add", variadic_args(0), &add_);
         register_func("req.readBinary", exact_args(0), &read_binary_);
         register_func("rand.random", exact_args(0), &rand_random_);
@@ -311,7 +309,7 @@ public:
         return fallback_.find_async_func(name, request);
     }
 
-    Constant *find_constant(std::string_view namespace_name, std::string_view key) override {
+    LegacyConstant *find_constant(std::string_view namespace_name, std::string_view key) override {
         std::string full(namespace_name);
         full.append(".");
         full.append(key);
@@ -322,7 +320,7 @@ public:
         return fallback_.find_constant(namespace_name, key);
     }
 
-    AsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) override {
+    LegacyAsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) override {
         std::string full(namespace_name);
         full.append(".");
         full.append(key);
@@ -342,7 +340,7 @@ public:
         return fallback_.find_directive_def(type, name, literals);
     }
 
-    void register_func(std::string name, FunctionSignature signature, Function *func) {
+    void register_func(std::string name, FunctionSignature signature, LegacyFunction *func) {
         FunctionEntry entry;
         entry.signature = signature;
         entry.func = func;
@@ -352,20 +350,20 @@ public:
 private:
     struct FunctionEntry {
         FunctionSignature signature{};
-        Function *func = nullptr;
+        LegacyFunction *func = nullptr;
     };
 
     struct AsyncFunctionEntry {
         FunctionSignature signature{};
-        AsyncFunction *func = nullptr;
+        LegacyAsyncFunction *func = nullptr;
     };
 
     fiber::script::Library &fallback_;
     std::unordered_map<std::string, FunctionEntry> functions_;
     std::unordered_map<std::string, AsyncFunctionEntry> async_functions_;
     std::unordered_map<std::string, std::string> aliases_;
-    std::unordered_map<std::string, Constant *> constants_;
-    std::unordered_map<std::string, AsyncConstant *> async_constants_;
+    std::unordered_map<std::string, LegacyConstant *> constants_;
+    std::unordered_map<std::string, LegacyAsyncConstant *> async_constants_;
 
     AddFunc add_;
     ReqReadBinaryFunc read_binary_;

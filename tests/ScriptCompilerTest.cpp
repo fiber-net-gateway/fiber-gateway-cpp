@@ -25,13 +25,13 @@ public:
         return FunctionMatchResult::not_found();
     }
 
-    Constant *find_constant(std::string_view namespace_name, std::string_view key) override {
+    LegacyConstant *find_constant(std::string_view namespace_name, std::string_view key) override {
         (void) namespace_name;
         (void) key;
         return nullptr;
     }
 
-    AsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) override {
+    LegacyAsyncConstant *find_async_constant(std::string_view namespace_name, std::string_view key) override {
         (void) namespace_name;
         (void) key;
         return nullptr;

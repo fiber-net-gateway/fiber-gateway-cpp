@@ -1,48 +1,26 @@
 #include "Script.h"
 
-#include <string_view>
 #include <utility>
 
 #include "../common/Assert.h"
 #include "Runtime.h"
 #include "run/InterpreterVm.h"
-#include "run/VmError.h"
 
 namespace fiber::script {
 
 namespace {
 
-ScriptAbortReason abort_reason_from_vm_error(const run::VmError &error) noexcept {
-    std::string_view name = error.name;
-    if (name == "EXEC_OUT_OF_MEMORY") {
-        return ScriptAbortReason::OutOfMemory;
+struct VmTaskAwaiter {
+    AsyncTask &task;
+
+    bool await_ready() const noexcept { return !task.valid(); }
+
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> continuation) noexcept {
+        return task.swap_coroutine_handle(continuation);
     }
-    if (name == "EXEC_TYPE_ERROR") {
-        return ScriptAbortReason::TypeError;
-    }
-    if (name == "EXEC_INDEX_ERROR") {
-        return ScriptAbortReason::IndexError;
-    }
-    if (name == "EXEC_DIVISION_BY_ZERO") {
-        return ScriptAbortReason::DivisionByZero;
-    }
-    if (name == "EXEC_UNKNOWN_IDENTIFIER") {
-        return ScriptAbortReason::UnknownIdentifier;
-    }
-    if (name == "EXEC_UNKNOWN_OPCODE") {
-        return ScriptAbortReason::InvalidOpcode;
-    }
-    if (name == "EXEC_NO_RETURN") {
-        return ScriptAbortReason::NoReturn;
-    }
-    if (name == "HOST_INVALID_STATE") {
-        return ScriptAbortReason::InvalidState;
-    }
-    if (!name.empty() && name.starts_with("HOST_")) {
-        return ScriptAbortReason::HostFault;
-    }
-    return ScriptAbortReason::Internal;
-}
+
+    void await_resume() const noexcept {}
+};
 
 } // namespace
 
@@ -67,40 +45,53 @@ ScriptRun::Result ScriptRun::operator()() {
     if (!vm_ || !runtime_) {
         return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
-    run::VmResult vm_out = fiber::json::JsValue::make_undefined();
-    auto state = vm_->iterate(vm_out);
-    if (state == run::InterpreterVm::VmState::Suspend) {
-        FIBER_PANIC("async opcode encountered in exec_sync");
+    while (!vm_->done()) {
+        vm_->iterate();
+        if (!vm_->done() && vm_->async_task().valid()) {
+            FIBER_PANIC("async opcode encountered in exec_sync");
+        }
     }
-    return to_result(std::move(vm_out));
+    return vm_->result();
 }
 
-ScriptRun::Awaiter::Awaiter(ScriptRun &&run) : run_(std::move(run)) {
-    if (run_.vm_) {
-        run_.vm_->set_resume_callback(&ScriptRun::Awaiter::resume_callback, this);
+AsyncTask ScriptRun::run_async_task() {
+    if (!vm_ || !runtime_) {
+        co_return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
+    while (!vm_->done()) {
+        vm_->iterate();
+        if (vm_->done()) {
+            break;
+        }
+        if (!vm_->async_task().valid()) {
+            co_return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        }
+        co_await VmTaskAwaiter{vm_->async_task()};
+    }
+    co_return vm_->result();
 }
 
-ScriptRun::Awaiter::~Awaiter() {
-    if (run_.vm_) {
-        run_.vm_->set_resume_callback(nullptr, nullptr);
-    }
-}
+ScriptRun::Awaiter::Awaiter(ScriptRun &&run) : run_(std::move(run)) {}
+
+ScriptRun::Awaiter::~Awaiter() = default;
 
 bool ScriptRun::Awaiter::await_ready() {
     if (!run_.valid()) {
         result_ = ScriptResult::abort(ScriptAbortReason::InvalidState);
         return true;
     }
+    task_ = run_.run_async_task();
+    if (!task_.valid()) {
+        result_ = ScriptResult::abort(task_.allocation_failed() ? ScriptAbortReason::OutOfMemory
+                                                                : ScriptAbortReason::InvalidState);
+        return true;
+    }
     return false;
 }
 
-bool ScriptRun::Awaiter::await_suspend(std::coroutine_handle<> handle) {
-    continuation_ = handle;
-    if (pump()) {
-        return false;
-    }
-    return true;
+std::coroutine_handle<> ScriptRun::Awaiter::await_suspend(std::coroutine_handle<> handle) {
+    task_.set_completion({&ScriptRun::Awaiter::complete, this});
+    return task_.swap_coroutine_handle(handle);
 }
 
 ScriptRun::Result ScriptRun::Awaiter::await_resume() {
@@ -110,59 +101,17 @@ ScriptRun::Result ScriptRun::Awaiter::await_resume() {
     return std::move(*result_);
 }
 
-void ScriptRun::Awaiter::resume_callback(void *context) {
+void ScriptRun::Awaiter::complete(void *context, const ScriptResult &result) noexcept {
     auto *self = static_cast<Awaiter *>(context);
     if (!self) {
         return;
     }
-    self->resume_if_complete();
-}
-
-bool ScriptRun::Awaiter::pump() {
-    if (!run_.vm_ || !run_.runtime_) {
-        result_ = ScriptResult::abort(ScriptAbortReason::InvalidState);
-        return true;
-    }
-    run::VmResult vm_out = fiber::json::JsValue::make_undefined();
-    auto state = run_.vm_->iterate(vm_out);
-    if (state == run::InterpreterVm::VmState::Success || state == run::InterpreterVm::VmState::Error) {
-        result_ = run_.to_result(std::move(vm_out));
-        run_.vm_->set_resume_callback(nullptr, nullptr);
-        return true;
-    }
-    return false;
-}
-
-void ScriptRun::Awaiter::resume_if_complete() {
-    if (resuming_) {
-        return;
-    }
-    resuming_ = true;
-    if (pump()) {
-        auto handle = continuation_;
-        resuming_ = false;
-        if (!handle) {
-            return;
-        }
-        handle.resume();
-        return;
-    }
-    resuming_ = false;
+    self->result_ = result;
 }
 
 ScriptRun::Awaiter ScriptRun::operator co_await() && { return Awaiter(std::move(*this)); }
 
 bool ScriptRun::valid() const { return static_cast<bool>(vm_); }
-
-ScriptRun::Result ScriptRun::to_result(run::VmResult result) {
-    if (result) {
-        return ScriptResult::success(result.value());
-    }
-    if (result.error().kind == run::VmErrorKind::Thrown && vm_ && vm_->has_thrown()) {
-        return ScriptResult::exception(vm_->thrown());
-    }
-    return ScriptResult::abort(abort_reason_from_vm_error(result.error()), result.error().position);
-}
 
 ScriptSyncRun::ScriptSyncRun(ScriptRun run) : run_(std::move(run)) {}
 

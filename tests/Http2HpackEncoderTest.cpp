@@ -11,8 +11,8 @@
 #include "http/Http2HpackEncodeCatalog.h"
 #include "http/Http2HpackEncoder.h"
 #include "http/Http2HpackEncoderIoBufWriter.h"
-#include "http/Huffman.h"
 #include "http/HttpHeaderHash.h"
+#include "http/Huffman.h"
 
 namespace {
 

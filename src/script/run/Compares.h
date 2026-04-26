@@ -2,7 +2,7 @@
 #define FIBER_SCRIPT_RUN_COMPARES_H
 
 #include "../../common/json/JsGc.h"
-#include "VmError.h"
+#include "../ScriptResult.h"
 
 namespace fiber::script::run {
 
@@ -11,18 +11,18 @@ public:
     static bool neg(const fiber::json::JsValue &value);
     static bool logic(const fiber::json::JsValue &value);
 
-    static VmResult eq(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
-    static VmResult seq(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
-    static VmResult ne(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
-    static VmResult sne(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
+    static ScriptResult eq(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
+    static ScriptResult seq(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
+    static ScriptResult ne(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
+    static ScriptResult sne(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
 
-    static VmResult lt(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
-    static VmResult lte(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
-    static VmResult gt(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
-    static VmResult gte(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
+    static ScriptResult lt(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
+    static ScriptResult lte(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
+    static ScriptResult gt(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
+    static ScriptResult gte(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
 
-    static VmResult matches(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
-    static VmResult in(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
+    static ScriptResult matches(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
+    static ScriptResult in(const fiber::json::JsValue &a, const fiber::json::JsValue &b);
 };
 
 } // namespace fiber::script::run

@@ -8,8 +8,8 @@
 
 #include "common/IoError.h"
 #include "http/Http2HpackDecoder.h"
-#include "http/Huffman.h"
 #include "http/HttpHeaderHash.h"
+#include "http/Huffman.h"
 
 namespace {
 

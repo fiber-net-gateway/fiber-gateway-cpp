@@ -10,66 +10,52 @@ namespace fiber::script::run {
 
 namespace {
 
-VmError map_error(fiber::json::JsOpError error, std::string_view op) {
-    VmError vm_error;
-    vm_error.status = 500;
+ScriptAbortReason map_error(fiber::json::JsOpError error) {
     switch (error) {
         case fiber::json::JsOpError::TypeError:
-            vm_error.name = "EXEC_TYPE_ERROR";
-            vm_error.message = "type error in operator ";
-            break;
+            return ScriptAbortReason::TypeError;
         case fiber::json::JsOpError::DivisionByZero:
-            vm_error.name = "EXEC_DIVISION_BY_ZERO";
-            vm_error.message = "division by zero in operator ";
-            break;
+            return ScriptAbortReason::DivisionByZero;
         case fiber::json::JsOpError::HeapRequired:
-            vm_error.name = "EXEC_HEAP_REQUIRED";
-            vm_error.message = "heap required in operator ";
-            break;
+            return ScriptAbortReason::InvalidState;
         case fiber::json::JsOpError::OutOfMemory:
-            vm_error.name = "EXEC_OUT_OF_MEMORY";
-            vm_error.message = "out of memory in operator ";
-            break;
+            return ScriptAbortReason::OutOfMemory;
         case fiber::json::JsOpError::InvalidUtf8:
-            vm_error.name = "EXEC_INVALID_UTF8";
-            vm_error.message = "invalid utf-8 in operator ";
-            break;
+            return ScriptAbortReason::InvalidArgument;
         case fiber::json::JsOpError::None:
-            vm_error.name = "EXEC_ERROR";
-            vm_error.message = "unknown error in operator ";
-            break;
+            return ScriptAbortReason::Internal;
     }
-    vm_error.message += op;
-    return vm_error;
+    return ScriptAbortReason::Internal;
 }
 
-VmResult from_js_result(const fiber::json::JsOpResult &result, std::string_view op) {
+ScriptResult from_js_result(const fiber::json::JsOpResult &result, std::string_view op) {
+    (void) op;
     if (result.error == fiber::json::JsOpError::None) {
         return result.value;
     }
-    return std::unexpected(map_error(result.error, op));
+    return ScriptResult::abort(map_error(result.error));
 }
 
-VmResult make_typeof_value(const char *text) {
+ScriptResult make_typeof_value(const char *text) {
     fiber::json::JsValue value = fiber::json::JsValue::make_native_string(const_cast<char *>(text), std::strlen(text));
     return value;
 }
 
 } // namespace
 
-VmResult Unaries::neg(const fiber::json::JsValue &value) {
+ScriptResult Unaries::neg(const fiber::json::JsValue &value) {
     return from_js_result(fiber::json::js_unary_op(fiber::json::JsUnaryOp::LogicalNot, value), "!");
 }
 
-VmResult Unaries::plus(const fiber::json::JsValue &value) {
+ScriptResult Unaries::plus(const fiber::json::JsValue &value) {
     return from_js_result(fiber::json::js_unary_op(fiber::json::JsUnaryOp::Plus, value), "+");
 }
 
-VmResult Unaries::minus(const fiber::json::JsValue &value) {
+ScriptResult Unaries::minus(const fiber::json::JsValue &value) {
     return from_js_result(fiber::json::js_unary_op(fiber::json::JsUnaryOp::Negate, value), "-");
 }
 
-VmResult Unaries::typeof_op(const fiber::json::JsValue &value, ScriptRuntime &runtime) {
+ScriptResult Unaries::typeof_op(const fiber::json::JsValue &value, ScriptRuntime &runtime) {
     (void) runtime;
     switch (fiber::json::js_value_type(value)) {
         case fiber::json::JsNodeType::Undefined:
@@ -97,7 +83,7 @@ VmResult Unaries::typeof_op(const fiber::json::JsValue &value, ScriptRuntime &ru
     return make_typeof_value("undefined");
 }
 
-VmResult Unaries::iterate(const fiber::json::JsValue &value, ScriptRuntime &runtime) {
+ScriptResult Unaries::iterate(const fiber::json::JsValue &value, ScriptRuntime &runtime) {
     fiber::json::GcHeap *heap = &runtime.heap();
     fiber::json::GcIterator *iter = nullptr;
     iter = runtime.alloc_with_gc(fiber::json::gc_estimate_iterator_bytes(), [&]() {
@@ -116,10 +102,7 @@ VmResult Unaries::iterate(const fiber::json::JsValue &value, ScriptRuntime &runt
         return fiber::json::gc_new_array_iterator(heap, nullptr, fiber::json::GcIteratorMode::Values);
     });
     if (!iter) {
-        VmError error;
-        error.name = "EXEC_OUT_OF_MEMORY";
-        error.message = "out of memory for iterate";
-        return std::unexpected(error);
+        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
     }
     return fiber::json::js_make_heap_ref(&iter->hdr, fiber::json::JsHeapKind::Iterator);
 }
