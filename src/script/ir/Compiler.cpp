@@ -253,6 +253,55 @@ private:
         return idx;
     }
 
+    std::size_t const_js_value(const fiber::json::JsValue &value) {
+        Compiled::ConstValue cv;
+        switch (fiber::json::js_value_type(value)) {
+            case fiber::json::JsNodeType::Undefined:
+                return const_undefined();
+            case fiber::json::JsNodeType::Null:
+                return const_null();
+            case fiber::json::JsNodeType::Boolean:
+                return const_bool(fiber::json::js_value_bool(value));
+            case fiber::json::JsNodeType::Integer:
+                cv.kind = Compiled::ConstValue::Kind::Integer;
+                cv.int_value = fiber::json::js_value_int64(value);
+                break;
+            case fiber::json::JsNodeType::Float:
+                cv.kind = Compiled::ConstValue::Kind::Float;
+                cv.float_value = fiber::json::js_value_double(value);
+                break;
+            case fiber::json::JsNodeType::String: {
+                FIBER_ASSERT(fiber::json::js_value_is_borrowed_string(value));
+                fiber::json::NativeStr text = fiber::json::js_value_native_string(value);
+                cv.kind = Compiled::ConstValue::Kind::String;
+                if (text.len > 0) {
+                    cv.text.assign(text.data, text.len);
+                }
+                break;
+            }
+            case fiber::json::JsNodeType::Binary: {
+                FIBER_ASSERT(fiber::json::js_value_is_borrowed_binary(value));
+                fiber::json::NativeBin bytes = fiber::json::js_value_native_binary(value);
+                cv.kind = Compiled::ConstValue::Kind::Binary;
+                if (bytes.len > 0) {
+                    cv.bytes.assign(bytes.data, bytes.data + bytes.len);
+                }
+                break;
+            }
+            case fiber::json::JsNodeType::Array:
+            case fiber::json::JsNodeType::Object:
+            case fiber::json::JsNodeType::Interator:
+            case fiber::json::JsNodeType::Exception:
+                FIBER_ASSERT(false);
+                return const_undefined();
+        }
+        return add_const_value(std::move(cv));
+    }
+
+    void emit_load_js_value(const fiber::json::JsValue &value, std::int32_t pos) {
+        emit_op(Code::LOAD_CONST, const_js_value(value), pos, 1);
+    }
+
     void emit_default_return(std::int32_t pos) {
         emit_op(Code::LOAD_CONST, const_undefined(), pos, 1);
         emit_end_return(pos);
@@ -500,9 +549,12 @@ private:
                         compile_expression(*arg);
                     }
                 }
+                for (const fiber::json::JsValue &default_arg: call->default_args()) {
+                    emit_load_js_value(default_arg, expr.start_pos());
+                }
                 const Library::HostCallable *callable = call->is_async() ? call->async_func() : call->func();
                 std::size_t symbol_idx = add_host_symbol(callable);
-                std::size_t arg_count = call->args().size();
+                std::size_t arg_count = call->args().size() + call->default_args().size();
                 std::size_t site_idx = add_call_site(symbol_idx, static_cast<std::uint16_t>(arg_count),
                                                      Compiled::CallSiteNone, expr.start_pos());
                 std::int32_t code =
@@ -512,6 +564,7 @@ private:
                 emit_raw(code, expr.start_pos(), delta);
                 return;
             }
+            FIBER_ASSERT(call->default_args().empty());
             emit_raw(static_cast<std::int32_t>(Code::NEW_ARRAY), expr.start_pos(), 1);
             for (const auto &arg: call->args()) {
                 if (!arg) {

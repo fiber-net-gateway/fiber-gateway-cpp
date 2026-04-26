@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 #include <unordered_set>
 
@@ -996,12 +997,12 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_functi
             return std::unexpected(args_result.error());
         }
         std::string name = identifier.name();
-        const Library::HostCallable *func = library_.resolve_func(name);
-        const Library::HostCallable *async_func = library_.resolve_async_func(name);
-        if (!func && !async_func) {
-            ParseError error;
-            error.message = "function not defined";
-            error.position = static_cast<std::size_t>(identifier.start_pos());
+        auto resolved_result = resolve_function_call(name, args_result.value(), nullptr);
+        if (!resolved_result) {
+            ParseError error = resolved_result.error();
+            if (!error.position) {
+                error.position = static_cast<std::size_t>(identifier.start_pos());
+            }
             return std::unexpected(error);
         }
         std::int32_t start = identifier.start_pos();
@@ -1009,7 +1010,9 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_functi
         if (!args_result.value().empty()) {
             end = args_result.value().back()->end_pos();
         }
-        return std::make_unique<ast::FunctionCall>(start, end, name, func, async_func, std::move(args_result.value()));
+        return std::make_unique<ast::FunctionCall>(start, end, name, resolved_result.value().func,
+                                                   resolved_result.value().async_func, std::move(args_result.value()),
+                                                   std::move(resolved_result.value().default_args));
     }
 
     if (!identifier.name().empty() && identifier.name()[0] == '$') {
@@ -1121,19 +1124,53 @@ Parser::parse_function_call(ast::VariableReference &prefix) {
             if (!args_result) {
                 return std::unexpected(args_result.error());
             }
-            const Library::HostCallable *func = library_.resolve_func(name);
-            const Library::HostCallable *async_func = library_.resolve_async_func(name);
-            if (!func && !async_func && dot_size == 1) {
+            auto resolved_result = resolve_function_call(name, args_result.value(), &token);
+            ResolvedFunctionCall resolved;
+            if (resolved_result) {
+                resolved = std::move(resolved_result.value());
+            } else if (resolved_result.error().message == "function not defined" && dot_size == 1) {
                 auto it = directive_map_.find(prefix.name());
                 if (it != directive_map_.end()) {
                     Library::DirectiveDef *def = it->second->directive_def();
                     if (def) {
-                        func = library_.host_callable_for(def->find_func(prefix.name(), token.text));
-                        async_func = library_.host_callable_for(def->find_async_func(prefix.name(), token.text));
+                        auto request_result = make_function_match_request(args_result.value(), &token);
+                        if (!request_result) {
+                            return std::unexpected(request_result.error());
+                        }
+                        Library::FunctionMatchResult func =
+                                def->find_func(prefix.name(), token.text, request_result.value(), library_);
+                        Library::FunctionMatchResult async_func =
+                                def->find_async_func(prefix.name(), token.text, request_result.value(), library_);
+                        const bool has_func = func.status == Library::FunctionMatchStatus::Found;
+                        const bool has_async_func = async_func.status == Library::FunctionMatchStatus::Found;
+                        if (has_func && has_async_func) {
+                            return std::unexpected(make_error("ambiguous function call", &token));
+                        }
+                        if (has_func) {
+                            resolved.func = func.callable;
+                            resolved.default_args.reserve(func.default_count);
+                            for (std::uint16_t i = 0; i < func.default_count; ++i) {
+                                resolved.default_args.push_back(func.defaults_to_append[i]);
+                            }
+                        } else if (has_async_func) {
+                            resolved.async_func = async_func.callable;
+                            resolved.default_args.reserve(async_func.default_count);
+                            for (std::uint16_t i = 0; i < async_func.default_count; ++i) {
+                                resolved.default_args.push_back(async_func.defaults_to_append[i]);
+                            }
+                        } else if (func.status == Library::FunctionMatchStatus::Ambiguous ||
+                                   async_func.status == Library::FunctionMatchStatus::Ambiguous) {
+                            return std::unexpected(make_error("ambiguous function call", &token));
+                        } else if (func.status == Library::FunctionMatchStatus::ArityMismatch ||
+                                   async_func.status == Library::FunctionMatchStatus::ArityMismatch) {
+                            return std::unexpected(make_error("function argument count mismatch", &token));
+                        }
                     }
                 }
+            } else {
+                return std::unexpected(resolved_result.error());
             }
-            if (!func && !async_func) {
+            if (!resolved.func && !resolved.async_func) {
                 return std::unexpected(make_error("function not defined", &token));
             }
             std::int32_t start = prefix.start_pos();
@@ -1141,8 +1178,9 @@ Parser::parse_function_call(ast::VariableReference &prefix) {
             if (!args_result.value().empty()) {
                 end = args_result.value().back()->end_pos();
             }
-            return std::make_unique<ast::FunctionCall>(start, end, name, func, async_func,
-                                                       std::move(args_result.value()));
+            return std::make_unique<ast::FunctionCall>(start, end, name, resolved.func, resolved.async_func,
+                                                       std::move(args_result.value()),
+                                                       std::move(resolved.default_args));
         }
     }
     pos_ = saved;
@@ -1190,6 +1228,71 @@ std::expected<std::vector<std::unique_ptr<ast::Expression>>, ParseError> Parser:
         return std::unexpected(rp_result.error());
     }
     return args;
+}
+
+std::expected<Library::FunctionMatchRequest, ParseError>
+Parser::make_function_match_request(const std::vector<std::unique_ptr<ast::Expression>> &args,
+                                    const Token *error_token) const {
+    if (args.size() > std::numeric_limits<std::uint16_t>::max()) {
+        return std::unexpected(make_error("too many function arguments", error_token));
+    }
+    Library::FunctionMatchRequest request;
+    std::uint16_t known_argc = 0;
+    for (const auto &arg: args) {
+        if (dynamic_cast<const ast::ExpandArrArg *>(arg.get())) {
+            request.has_spread = true;
+            request.spread_argc_unknown = true;
+            break;
+        }
+        ++known_argc;
+    }
+    request.known_argc = request.spread_argc_unknown ? known_argc : static_cast<std::uint16_t>(args.size());
+    return request;
+}
+
+std::expected<Parser::ResolvedFunctionCall, ParseError>
+Parser::resolve_function_call(std::string_view name, const std::vector<std::unique_ptr<ast::Expression>> &args,
+                              const Token *error_token) const {
+    auto request_result = make_function_match_request(args, error_token);
+    if (!request_result) {
+        return std::unexpected(request_result.error());
+    }
+    Library::FunctionMatchRequest request = request_result.value();
+
+    Library::FunctionMatchResult func = library_.resolve_func(name, request);
+    Library::FunctionMatchResult async_func = library_.resolve_async_func(name, request);
+    const bool has_func = func.status == Library::FunctionMatchStatus::Found;
+    const bool has_async_func = async_func.status == Library::FunctionMatchStatus::Found;
+    if (has_func && has_async_func) {
+        return std::unexpected(make_error("ambiguous function call", error_token));
+    }
+
+    ResolvedFunctionCall resolved;
+    const Library::FunctionMatchResult *match = nullptr;
+    if (has_func) {
+        resolved.func = func.callable;
+        match = &func;
+    } else if (has_async_func) {
+        resolved.async_func = async_func.callable;
+        match = &async_func;
+    }
+    if (match) {
+        resolved.default_args.reserve(match->default_count);
+        for (std::uint16_t i = 0; i < match->default_count; ++i) {
+            resolved.default_args.push_back(match->defaults_to_append[i]);
+        }
+        return resolved;
+    }
+
+    if (func.status == Library::FunctionMatchStatus::Ambiguous ||
+        async_func.status == Library::FunctionMatchStatus::Ambiguous) {
+        return std::unexpected(make_error("ambiguous function call", error_token));
+    }
+    if (func.status == Library::FunctionMatchStatus::ArityMismatch ||
+        async_func.status == Library::FunctionMatchStatus::ArityMismatch) {
+        return std::unexpected(make_error("function argument count mismatch", error_token));
+    }
+    return std::unexpected(make_error("function not defined", error_token));
 }
 
 std::expected<ast::Literal, ParseError> Parser::parse_literal_token(const Token &token) {

@@ -20,14 +20,16 @@ namespace {
 
 class TestLibrary final : public fiber::script::Library {
 public:
-    Function *find_func(std::string_view name) override {
+    FunctionMatchResult find_func(std::string_view name, const FunctionMatchRequest &request) override {
         (void) name;
-        return nullptr;
+        (void) request;
+        return FunctionMatchResult::not_found();
     }
 
-    AsyncFunction *find_async_func(std::string_view name) override {
+    FunctionMatchResult find_async_func(std::string_view name, const FunctionMatchRequest &request) override {
         (void) name;
-        return nullptr;
+        (void) request;
+        return FunctionMatchResult::not_found();
     }
 
     Constant *find_constant(std::string_view namespace_name, std::string_view key) override {
