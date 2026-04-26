@@ -28,6 +28,10 @@ add_library(fiber_allocator INTERFACE)
 add_library(fiber_stdlib INTERFACE)
 target_include_directories(fiber_lib PUBLIC ${CMAKE_CURRENT_LIST_DIR}/src)
 target_link_libraries(fiber_lib PUBLIC boringssl::ssl boringssl::crypto)
+set(FIBER_CLANG_CONSTEXPR_STEPS "16777216" CACHE STRING
+    "Clang constexpr evaluator step limit for compile-time generated tables")
+target_compile_options(fiber_lib PRIVATE
+    "$<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-fconstexpr-steps=${FIBER_CLANG_CONSTEXPR_STEPS}>")
 if (FIBER_ENABLE_HTTP3 AND FIBER_HAVE_LSQUIC)
     target_link_libraries(fiber_lib PUBLIC lsquic::lsquic ${FIBER_ZLIB_TARGET})
     if (DEFINED lsquic_SOURCE_DIR)
