@@ -435,7 +435,8 @@ std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_directi
         }
     }
 
-    Library::DirectiveDef *def = library_.find_directive_def(type_result->name(), name_result->name(), literal_values);
+    Library::DirectiveDef *def = library_.resolve_directive_def(type_result->name(), name_result->name(),
+                                                                 literal_values);
     if (!def) {
         return std::unexpected(make_error("directive not found", directive_token ? &directive_token.value() : nullptr));
     }
@@ -1138,9 +1139,9 @@ Parser::parse_function_call(ast::VariableReference &prefix) {
                             return std::unexpected(request_result.error());
                         }
                         Library::FunctionMatchResult func =
-                                def->find_func(prefix.name(), token.text, request_result.value(), library_);
+                                def->resolve_func(prefix.name(), token.text, request_result.value(), library_);
                         Library::FunctionMatchResult async_func =
-                                def->find_async_func(prefix.name(), token.text, request_result.value(), library_);
+                                def->resolve_async_func(prefix.name(), token.text, request_result.value(), library_);
                         const bool has_func = func.status == Library::FunctionMatchStatus::Found;
                         const bool has_async_func = async_func.status == Library::FunctionMatchStatus::Found;
                         if (has_func && has_async_func) {

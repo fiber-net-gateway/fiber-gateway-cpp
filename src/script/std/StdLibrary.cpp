@@ -7,8 +7,6 @@
 
 namespace fiber::script::std_lib {
 
-void register_std_library(StdLibrary &library);
-
 namespace {
 bool signature_valid(const Library::FunctionSignature &signature, std::size_t default_count) {
     if (signature.required_argc > signature.fixed_argc) {
@@ -45,8 +43,8 @@ bool matches_signature(const Library::FunctionSignature &signature, const Librar
 }
 
 template<typename Entry>
-Library::FunctionMatchResult match_entries(const std::vector<Entry> &entries,
-                                           const Library::FunctionMatchRequest &request, const Library &library) {
+Library::FunctionMatchResult match_entries(const std::deque<Entry> &entries,
+                                           const Library::FunctionMatchRequest &request) {
     const Entry *matched = nullptr;
     for (const Entry &entry: entries) {
         if (!matches_signature(entry.signature, request)) {
@@ -69,8 +67,7 @@ Library::FunctionMatchResult match_entries(const std::vector<Entry> &entries,
         default_count = static_cast<std::uint16_t>(signature.fixed_argc - request.known_argc);
         defaults = signature.defaults + default_offset;
     }
-    return Library::FunctionMatchResult::found(library.host_callable_for(matched->func), signature, defaults,
-                                               default_count);
+    return Library::FunctionMatchResult::found(&matched->callable, signature, defaults, default_count);
 }
 
 std::string make_constant_key(std::string_view ns, std::string_view key) {
@@ -81,6 +78,46 @@ std::string make_constant_key(std::string_view ns, std::string_view key) {
     name.append(key.begin(), key.end());
     return name;
 }
+
+Library::HostCallable make_function_callable(Library::Function function, void *userdata,
+                                             const char *debug_name) noexcept {
+    Library::HostCallable callable;
+    callable.kind = Library::HostCallable::Kind::SyncFunction;
+    callable.userdata = userdata;
+    callable.function = function;
+    callable.debug_name = debug_name;
+    return callable;
+}
+
+Library::HostCallable make_async_function_callable(Library::AsyncFunction function, void *userdata,
+                                                   const char *debug_name) noexcept {
+    Library::HostCallable callable;
+    callable.kind = Library::HostCallable::Kind::AsyncFunction;
+    callable.userdata = userdata;
+    callable.async_function = function;
+    callable.debug_name = debug_name;
+    return callable;
+}
+
+Library::HostCallable make_constant_callable(Library::Constant constant, void *userdata,
+                                             const char *debug_name) noexcept {
+    Library::HostCallable callable;
+    callable.kind = Library::HostCallable::Kind::SyncConstant;
+    callable.userdata = userdata;
+    callable.constant = constant;
+    callable.debug_name = debug_name;
+    return callable;
+}
+
+Library::HostCallable make_async_constant_callable(Library::AsyncConstant constant, void *userdata,
+                                                   const char *debug_name) noexcept {
+    Library::HostCallable callable;
+    callable.kind = Library::HostCallable::Kind::AsyncConstant;
+    callable.userdata = userdata;
+    callable.async_constant = constant;
+    callable.debug_name = debug_name;
+    return callable;
+}
 } // namespace
 
 StdLibrary &StdLibrary::instance() {
@@ -88,57 +125,62 @@ StdLibrary &StdLibrary::instance() {
     return inst;
 }
 
-StdLibrary::StdLibrary() { register_std_library(*this); }
+StdLibrary::StdLibrary() = default;
 
-Library::FunctionMatchResult StdLibrary::find_func(std::string_view name, const FunctionMatchRequest &request) {
+Library::FunctionMatchResult StdLibrary::resolve_func(std::string_view name,
+                                                      const FunctionMatchRequest &request) const {
     auto it = functions_.find(std::string(name));
     if (it == functions_.end()) {
         return FunctionMatchResult::not_found();
     }
-    return match_entries(it->second, request, *this);
+    return match_entries(it->second, request);
 }
 
-Library::FunctionMatchResult StdLibrary::find_async_func(std::string_view name, const FunctionMatchRequest &request) {
+Library::FunctionMatchResult StdLibrary::resolve_async_func(std::string_view name,
+                                                            const FunctionMatchRequest &request) const {
     auto it = async_functions_.find(std::string(name));
     if (it == async_functions_.end()) {
         return FunctionMatchResult::not_found();
     }
-    return match_entries(it->second, request, *this);
+    return match_entries(it->second, request);
 }
 
-const Library::HostCallable *StdLibrary::find_constant(std::string_view namespace_name, std::string_view key) {
+const Library::HostCallable *StdLibrary::resolve_constant(std::string_view namespace_name, std::string_view key) const {
     auto it = constants_.find(make_constant_key(namespace_name, key));
     if (it == constants_.end()) {
         return nullptr;
     }
-    return host_callable_for(it->second);
+    return &it->second;
 }
 
-const Library::HostCallable *StdLibrary::find_async_constant(std::string_view namespace_name, std::string_view key) {
+const Library::HostCallable *StdLibrary::resolve_async_constant(std::string_view namespace_name,
+                                                                std::string_view key) const {
     auto it = async_constants_.find(make_constant_key(namespace_name, key));
     if (it == async_constants_.end()) {
         return nullptr;
     }
-    return host_callable_for(it->second);
+    return &it->second;
 }
 
-Library::DirectiveDef *StdLibrary::find_directive_def(std::string_view type, std::string_view name,
-                                                      const std::vector<fiber::json::JsValue> &literals) {
+Library::DirectiveDef *StdLibrary::resolve_directive_def(std::string_view type, std::string_view name,
+                                                         const std::vector<fiber::json::JsValue> &literals) const {
     (void) type;
     (void) name;
     (void) literals;
     return nullptr;
 }
 
-void StdLibrary::register_func(std::string name, FunctionSignature signature, LegacyFunction *func) {
-    register_func(std::move(name), signature, {}, func);
+void StdLibrary::register_func(std::string name, FunctionSignature signature, Function function, void *userdata,
+                               const char *debug_name) {
+    register_func(std::move(name), signature, {}, function, userdata, debug_name);
 }
 
 void StdLibrary::register_func(std::string name, FunctionSignature signature,
-                               std::vector<fiber::json::JsValue> defaults, LegacyFunction *func) {
+                               std::vector<fiber::json::JsValue> defaults, Function function, void *userdata,
+                               const char *debug_name) {
     signature.default_count = static_cast<std::uint16_t>(defaults.size());
     signature.defaults = nullptr;
-    FIBER_ASSERT(func != nullptr);
+    FIBER_ASSERT(function != nullptr);
     FIBER_ASSERT(signature_valid(signature, defaults.size()));
     auto &entries = functions_[std::move(name)];
     for (const FunctionEntry &entry: entries) {
@@ -147,37 +189,46 @@ void StdLibrary::register_func(std::string name, FunctionSignature signature,
     FunctionEntry entry;
     entry.signature = signature;
     entry.defaults = std::move(defaults);
-    entry.func = func;
+    entry.callable = make_function_callable(function, userdata, debug_name);
     entries.push_back(std::move(entry));
 }
 
-void StdLibrary::register_async_func(std::string name, FunctionSignature signature, LegacyAsyncFunction *func) {
-    register_async_func(std::move(name), signature, {}, func);
+void StdLibrary::register_async_func(std::string name, FunctionSignature signature, AsyncFunction function,
+                                     void *userdata, const char *debug_name) {
+    register_async_func(std::move(name), signature, {}, function, userdata, debug_name);
 }
 
 void StdLibrary::register_async_func(std::string name, FunctionSignature signature,
-                                     std::vector<fiber::json::JsValue> defaults, LegacyAsyncFunction *func) {
+                                     std::vector<fiber::json::JsValue> defaults, AsyncFunction function,
+                                     void *userdata, const char *debug_name) {
     signature.default_count = static_cast<std::uint16_t>(defaults.size());
     signature.defaults = nullptr;
-    FIBER_ASSERT(func != nullptr);
+    FIBER_ASSERT(function != nullptr);
     FIBER_ASSERT(signature_valid(signature, defaults.size()));
     auto &entries = async_functions_[std::move(name)];
-    for (const AsyncFunctionEntry &entry: entries) {
+    for (const FunctionEntry &entry: entries) {
         FIBER_ASSERT(!signature_ranges_overlap(entry.signature, signature));
     }
-    AsyncFunctionEntry entry;
+    FunctionEntry entry;
     entry.signature = signature;
     entry.defaults = std::move(defaults);
-    entry.func = func;
+    entry.callable = make_async_function_callable(function, userdata, debug_name);
     entries.push_back(std::move(entry));
 }
 
-void StdLibrary::register_constant(std::string name, LegacyConstant *constant) {
-    constants_.emplace(std::move(name), constant);
+void StdLibrary::register_constant(std::string name, Constant constant, void *userdata, const char *debug_name) {
+    FIBER_ASSERT(constant != nullptr);
+    const bool inserted =
+            constants_.emplace(std::move(name), make_constant_callable(constant, userdata, debug_name)).second;
+    FIBER_ASSERT(inserted);
 }
 
-void StdLibrary::register_async_constant(std::string name, LegacyAsyncConstant *constant) {
-    async_constants_.emplace(std::move(name), constant);
+void StdLibrary::register_async_constant(std::string name, AsyncConstant constant, void *userdata,
+                                         const char *debug_name) {
+    FIBER_ASSERT(constant != nullptr);
+    const bool inserted =
+            async_constants_.emplace(std::move(name), make_async_constant_callable(constant, userdata, debug_name)).second;
+    FIBER_ASSERT(inserted);
 }
 
 } // namespace fiber::script::std_lib
