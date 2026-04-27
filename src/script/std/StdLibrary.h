@@ -1,6 +1,7 @@
 #ifndef FIBER_SCRIPT_STD_LIBRARY_H
 #define FIBER_SCRIPT_STD_LIBRARY_H
 
+#include <deque>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -13,41 +14,39 @@ class StdLibrary : public Library {
 public:
     static StdLibrary &instance();
 
-    FunctionMatchResult find_func(std::string_view name, const FunctionMatchRequest &request) override;
-    FunctionMatchResult find_async_func(std::string_view name, const FunctionMatchRequest &request) override;
-    const HostCallable *find_constant(std::string_view namespace_name, std::string_view key) override;
-    const HostCallable *find_async_constant(std::string_view namespace_name, std::string_view key) override;
-    DirectiveDef *find_directive_def(std::string_view type, std::string_view name,
-                                     const std::vector<fiber::json::JsValue> &literals) override;
+    FunctionMatchResult resolve_func(std::string_view name, const FunctionMatchRequest &request) const override;
+    FunctionMatchResult resolve_async_func(std::string_view name, const FunctionMatchRequest &request) const override;
+    const HostCallable *resolve_constant(std::string_view namespace_name, std::string_view key) const override;
+    const HostCallable *resolve_async_constant(std::string_view namespace_name, std::string_view key) const override;
+    DirectiveDef *resolve_directive_def(std::string_view type, std::string_view name,
+                                        const std::vector<fiber::json::JsValue> &literals) const override;
 
-    void register_func(std::string name, FunctionSignature signature, LegacyFunction *func);
+    void register_func(std::string name, FunctionSignature signature, Function function, void *userdata = nullptr,
+                       const char *debug_name = nullptr);
     void register_func(std::string name, FunctionSignature signature, std::vector<fiber::json::JsValue> defaults,
-                       LegacyFunction *func);
-    void register_async_func(std::string name, FunctionSignature signature, LegacyAsyncFunction *func);
+                       Function function, void *userdata = nullptr, const char *debug_name = nullptr);
+    void register_async_func(std::string name, FunctionSignature signature, AsyncFunction function,
+                             void *userdata = nullptr, const char *debug_name = nullptr);
     void register_async_func(std::string name, FunctionSignature signature, std::vector<fiber::json::JsValue> defaults,
-                             LegacyAsyncFunction *func);
-    void register_constant(std::string name, LegacyConstant *constant);
-    void register_async_constant(std::string name, LegacyAsyncConstant *constant);
+                             AsyncFunction function, void *userdata = nullptr, const char *debug_name = nullptr);
+    void register_constant(std::string name, Constant constant, void *userdata = nullptr,
+                           const char *debug_name = nullptr);
+    void register_async_constant(std::string name, AsyncConstant constant, void *userdata = nullptr,
+                                 const char *debug_name = nullptr);
 
 private:
     struct FunctionEntry {
         FunctionSignature signature{};
         std::vector<fiber::json::JsValue> defaults;
-        LegacyFunction *func = nullptr;
-    };
-
-    struct AsyncFunctionEntry {
-        FunctionSignature signature{};
-        std::vector<fiber::json::JsValue> defaults;
-        LegacyAsyncFunction *func = nullptr;
+        HostCallable callable;
     };
 
     StdLibrary();
 
-    std::unordered_map<std::string, std::vector<FunctionEntry>> functions_;
-    std::unordered_map<std::string, std::vector<AsyncFunctionEntry>> async_functions_;
-    std::unordered_map<std::string, LegacyConstant *> constants_;
-    std::unordered_map<std::string, LegacyAsyncConstant *> async_constants_;
+    std::unordered_map<std::string, std::deque<FunctionEntry>> functions_;
+    std::unordered_map<std::string, std::deque<FunctionEntry>> async_functions_;
+    std::unordered_map<std::string, HostCallable> constants_;
+    std::unordered_map<std::string, HostCallable> async_constants_;
 };
 
 } // namespace fiber::script::std_lib
