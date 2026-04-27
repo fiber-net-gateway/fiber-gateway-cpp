@@ -11,6 +11,7 @@ enum class TokenKind : std::uint8_t {
     LiteralHexInt,
     LiteralHexLong,
     LiteralString,
+    TemplateLiteral,
     LiteralReal,
     LiteralRealFloat,
     LParen,

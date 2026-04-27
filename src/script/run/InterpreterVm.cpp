@@ -101,9 +101,7 @@ void InterpreterVm::iterate() {
     if (async_task_.valid() && async_ready_ && !apply_async_ready()) {
         return;
     }
-    auto finish_error = [&](ScriptResult error) {
-        handle_error(error, pc_ == 0 ? 0 : pc_ - 1);
-    };
+    auto finish_error = [&](ScriptResult error) { handle_error(error, pc_ == 0 ? 0 : pc_ - 1); };
     const auto &codes = compiled_.codes;
     while (pc_ < codes.size()) {
         if (async_task_.valid() && async_ready_ && !apply_async_ready()) {
@@ -119,8 +117,8 @@ void InterpreterVm::iterate() {
                 ScriptResult loaded = load_const(idx);
                 if (!loaded) {
                     if (!handle_error(loaded, pc_ - 1)) {
-                            return;
-                        }
+                        return;
+                    }
                     continue;
                 }
                 stack_[sp_++] = loaded.value();
@@ -350,7 +348,7 @@ void InterpreterVm::iterate() {
                 if (!result) {
                     if (!handle_error(result, pc_ - 1)) {
                         finish_error(result);
-                            return;
+                        return;
                     }
                     continue;
                 }
@@ -361,7 +359,7 @@ void InterpreterVm::iterate() {
                 if (!result) {
                     if (!handle_error(result, pc_ - 1)) {
                         finish_error(result);
-                            return;
+                        return;
                     }
                     continue;
                 }
@@ -372,7 +370,7 @@ void InterpreterVm::iterate() {
                 if (!result) {
                     if (!handle_error(result, pc_ - 1)) {
                         finish_error(result);
-                            return;
+                        return;
                     }
                     continue;
                 }
@@ -383,7 +381,7 @@ void InterpreterVm::iterate() {
                 if (!result) {
                     if (!handle_error(result, pc_ - 1)) {
                         finish_error(result);
-                            return;
+                        return;
                     }
                     continue;
                 }
@@ -516,7 +514,7 @@ void InterpreterVm::iterate() {
                 if (!result) {
                     if (!handle_error(result, pc_ - 1)) {
                         finish_error(result);
-                            return;
+                        return;
                     }
                     continue;
                 }
@@ -534,7 +532,7 @@ void InterpreterVm::iterate() {
                 if (!result) {
                     if (!handle_error(result, pc_ - 1)) {
                         finish_error(result);
-                            return;
+                        return;
                     }
                     continue;
                 }
@@ -552,7 +550,7 @@ void InterpreterVm::iterate() {
                 if (!result) {
                     if (!handle_error(result, pc_ - 1)) {
                         finish_error(result);
-                            return;
+                        return;
                     }
                     continue;
                 }
@@ -602,7 +600,7 @@ void InterpreterVm::iterate() {
                 if (!result) {
                     if (!handle_error(result, pc_ - 1)) {
                         finish_error(result);
-                            return;
+                        return;
                     }
                     continue;
                 }
@@ -835,8 +833,7 @@ bool InterpreterVm::dispatch_call_site(const ir::Compiled::CallSite &site, Async
     return true;
 }
 
-bool InterpreterVm::apply_call_result(const ScriptResult &result, AsyncResumeKind resume_kind,
-                                      std::size_t resume_epc) {
+bool InterpreterVm::apply_call_result(const ScriptResult &result, AsyncResumeKind resume_kind, std::size_t resume_epc) {
     if (result.is_success()) {
         switch (resume_kind) {
             case AsyncResumeKind::PushResult:

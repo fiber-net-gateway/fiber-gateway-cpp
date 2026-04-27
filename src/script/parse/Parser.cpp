@@ -35,6 +35,144 @@ void append_utf8(std::string &out, std::uint32_t codepoint) {
     }
 }
 
+std::size_t js_line_terminator_length(std::string_view input, std::size_t pos) {
+    if (pos >= input.size()) {
+        return 0;
+    }
+    unsigned char ch = static_cast<unsigned char>(input[pos]);
+    if (ch == '\n') {
+        return 1;
+    }
+    if (ch == '\r') {
+        if (pos + 1 < input.size() && input[pos + 1] == '\n') {
+            return 2;
+        }
+        return 1;
+    }
+    if (ch == 0xE2 && pos + 2 < input.size()) {
+        unsigned char next = static_cast<unsigned char>(input[pos + 1]);
+        unsigned char tail = static_cast<unsigned char>(input[pos + 2]);
+        if (next == 0x80 && (tail == 0xA8 || tail == 0xA9)) {
+            return 3;
+        }
+    }
+    return 0;
+}
+
+std::expected<std::size_t, ParseError> find_template_expression_end(std::string_view input, std::size_t pos,
+                                                                    std::size_t start_pos);
+
+std::expected<std::size_t, ParseError> find_template_literal_end(std::string_view input, std::size_t pos,
+                                                                 std::size_t start_pos) {
+    std::size_t p = pos + 1;
+    while (p < input.size()) {
+        char chr = input[p];
+        if (chr == '`') {
+            return p + 1;
+        }
+        if (chr == '\\') {
+            ++p;
+            if (p >= input.size()) {
+                return std::unexpected(ParseError{"unexpected escape", start_pos + p});
+            }
+            std::size_t eol_len = js_line_terminator_length(input, p);
+            p += eol_len != 0 ? eol_len : 1;
+            continue;
+        }
+        if (chr == '$' && p + 1 < input.size() && input[p + 1] == '{') {
+            auto expr_end = find_template_expression_end(input, p + 2, start_pos);
+            if (!expr_end) {
+                return std::unexpected(expr_end.error());
+            }
+            p = expr_end.value();
+            continue;
+        }
+        ++p;
+    }
+    return std::unexpected(ParseError{"unterminated template literal", start_pos + pos});
+}
+
+std::expected<std::size_t, ParseError> find_template_expression_end(std::string_view input, std::size_t pos,
+                                                                    std::size_t start_pos) {
+    std::size_t p = pos;
+    int curly_depth = 1;
+    while (p < input.size()) {
+        char chr = input[p];
+        if (chr == '\'' || chr == '"') {
+            char quote = chr;
+            ++p;
+            bool closed = false;
+            while (p < input.size()) {
+                if (input[p] == quote) {
+                    ++p;
+                    closed = true;
+                    break;
+                }
+                if (js_line_terminator_length(input, p) != 0) {
+                    return std::unexpected(ParseError{"unterminated string literal", start_pos + p});
+                }
+                if (input[p] == '\\') {
+                    ++p;
+                    if (p >= input.size()) {
+                        return std::unexpected(ParseError{"unexpected escape", start_pos + p});
+                    }
+                    std::size_t eol_len = js_line_terminator_length(input, p);
+                    p += eol_len != 0 ? eol_len : 1;
+                    continue;
+                }
+                ++p;
+            }
+            if (!closed) {
+                return std::unexpected(ParseError{"unterminated string literal", start_pos + p});
+            }
+            continue;
+        }
+        if (chr == '`') {
+            auto nested_end = find_template_literal_end(input, p, start_pos);
+            if (!nested_end) {
+                return std::unexpected(nested_end.error());
+            }
+            p = nested_end.value();
+            continue;
+        }
+        if (chr == '/' && p + 1 < input.size()) {
+            if (input[p + 1] == '/') {
+                p += 2;
+                while (p < input.size() && js_line_terminator_length(input, p) == 0) {
+                    ++p;
+                }
+                continue;
+            }
+            if (input[p + 1] == '*') {
+                p += 2;
+                while (p + 1 < input.size() && !(input[p] == '*' && input[p + 1] == '/')) {
+                    ++p;
+                }
+                if (p + 1 >= input.size()) {
+                    return std::unexpected(ParseError{"unterminated comment", start_pos + p});
+                }
+                p += 2;
+                continue;
+            }
+        }
+        if (chr == '{') {
+            ++curly_depth;
+            ++p;
+            continue;
+        }
+        if (chr == '}') {
+            --curly_depth;
+            ++p;
+            if (curly_depth == 0) {
+                return p;
+            }
+            continue;
+        }
+        ++p;
+    }
+    return std::unexpected(ParseError{"unterminated template expression", start_pos + pos});
+}
+
 } // namespace
 
 Parser::Parser(Library &library, bool allow_assign) : library_(library), allow_assign_(allow_assign) {}
@@ -435,8 +573,8 @@ std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_directi
         }
     }
 
-    Library::DirectiveDef *def = library_.resolve_directive_def(type_result->name(), name_result->name(),
-                                                                 literal_values);
+    Library::DirectiveDef *def =
+            library_.resolve_directive_def(type_result->name(), name_result->name(), literal_values);
     if (!def) {
         return std::unexpected(make_error("directive not found", directive_token ? &directive_token.value() : nullptr));
     }
@@ -740,6 +878,10 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_start_
     if (literal_result) {
         return literal_result;
     }
+    auto template_result = parse_template_literal();
+    if (template_result) {
+        return template_result;
+    }
     auto list_result = parse_inline_list();
     if (list_result) {
         return list_result;
@@ -780,6 +922,92 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_litera
         return std::unexpected(ParseError{});
     }
     return std::make_unique<ast::Literal>(std::move(*literal_result.value()));
+}
+
+std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_template_literal() {
+    const Token *token = peek();
+    if (!token || token->kind != TokenKind::TemplateLiteral) {
+        return std::unexpected(ParseError{});
+    }
+    Token tpl = *next();
+    if (tpl.text.size() < 2 || tpl.text.front() != '`' || tpl.text.back() != '`') {
+        return std::unexpected(make_error("invalid template literal", &tpl));
+    }
+
+    std::unique_ptr<ast::Expression> expr;
+    auto append_part = [&](std::unique_ptr<ast::Expression> part) {
+        if (!expr) {
+            expr = std::move(part);
+            return;
+        }
+        std::int32_t start = expr->start_pos();
+        std::int32_t end = part->end_pos();
+        expr = std::make_unique<ast::BinaryOperator>(start, end, ast::Operator::Add, std::move(expr), std::move(part));
+    };
+    auto append_string = [&](std::string value, std::size_t start, std::size_t end) {
+        append_part(std::make_unique<ast::Literal>(static_cast<std::int32_t>(start), static_cast<std::int32_t>(end),
+                                                   std::move(value)));
+    };
+
+    std::size_t chunk_start = 1;
+    std::size_t i = 1;
+    const std::size_t last = tpl.text.size() - 1;
+    while (i < last) {
+        char ch = tpl.text[i];
+        if (ch == '\\') {
+            ++i;
+            if (i >= last) {
+                return std::unexpected(ParseError{"unterminated escape", tpl.start + i});
+            }
+            std::size_t eol_len = js_line_terminator_length(tpl.text, i);
+            i += eol_len != 0 ? eol_len : 1;
+            continue;
+        }
+        if (ch == '$' && i + 1 < last && tpl.text[i + 1] == '{') {
+            auto parsed_chunk = parse_template_chunk(std::string_view(tpl.text).substr(chunk_start, i - chunk_start),
+                                                     tpl.start + chunk_start);
+            if (!parsed_chunk) {
+                return std::unexpected(parsed_chunk.error());
+            }
+            if (!parsed_chunk->empty()) {
+                append_string(std::move(parsed_chunk.value()), tpl.start + chunk_start, tpl.start + i);
+            } else if (!expr) {
+                append_string(std::string{}, tpl.start + chunk_start, tpl.start + chunk_start);
+            }
+
+            auto expr_end = find_template_expression_end(tpl.text, i + 2, tpl.start);
+            if (!expr_end) {
+                return std::unexpected(expr_end.error());
+            }
+            std::size_t inner_start = i + 2;
+            std::size_t inner_end = expr_end.value() - 1;
+            std::string_view inner = std::string_view(tpl.text).substr(inner_start, inner_end - inner_start);
+            Parser nested(library_, allow_assign_);
+            auto inner_expr = nested.parse_expression(inner);
+            if (!inner_expr) {
+                ParseError error = inner_expr.error();
+                error.position += tpl.start + inner_start;
+                return std::unexpected(std::move(error));
+            }
+            append_part(std::move(inner_expr.value()));
+            i = expr_end.value();
+            chunk_start = i;
+            continue;
+        }
+        ++i;
+    }
+
+    auto parsed_tail = parse_template_chunk(std::string_view(tpl.text).substr(chunk_start, last - chunk_start),
+                                            tpl.start + chunk_start);
+    if (!parsed_tail) {
+        return std::unexpected(parsed_tail.error());
+    }
+    if (!parsed_tail->empty()) {
+        append_string(std::move(parsed_tail.value()), tpl.start + chunk_start, tpl.start + last);
+    } else if (!expr) {
+        append_string(std::string{}, tpl.start + chunk_start, tpl.start + chunk_start);
+    }
+    return expr;
 }
 
 std::expected<std::optional<ast::Literal>, ParseError> Parser::parse_optional_literal() {
@@ -1386,6 +1614,9 @@ std::expected<std::string, ParseError> Parser::parse_string_literal(const std::s
             case '\'':
                 out.push_back('\'');
                 break;
+            case '`':
+                out.push_back('`');
+                break;
             case 'x': {
                 if (i + 2 >= token_text.size() - 1) {
                     return std::unexpected(ParseError{"invalid hex escape", start_pos + i});
@@ -1434,6 +1665,121 @@ std::expected<std::string, ParseError> Parser::parse_string_literal(const std::s
                     unsigned value = esc - '0';
                     int count = 1;
                     while (count < 3 && i + 1 < token_text.size() - 1) {
+                        char c = token_text[i + 1];
+                        if (c < '0' || c > '7') {
+                            break;
+                        }
+                        value = value * 8 + static_cast<unsigned>(c - '0');
+                        ++i;
+                        ++count;
+                    }
+                    append_utf8(out, value);
+                } else {
+                    return std::unexpected(ParseError{"invalid escape", start_pos + i});
+                }
+        }
+    }
+    return out;
+}
+
+std::expected<std::string, ParseError> Parser::parse_template_chunk(std::string_view token_text,
+                                                                    std::size_t start_pos) {
+    std::string out;
+    for (std::size_t i = 0; i < token_text.size(); ++i) {
+        char ch = token_text[i];
+        if (ch != '\\') {
+            out.push_back(ch);
+            continue;
+        }
+        if (i + 1 >= token_text.size()) {
+            return std::unexpected(ParseError{"unterminated escape", start_pos + i});
+        }
+        char esc = token_text[++i];
+        switch (esc) {
+            case 'a':
+                out.push_back('a');
+                break;
+            case 'b':
+                out.push_back('\b');
+                break;
+            case 'f':
+                out.push_back('\f');
+                break;
+            case 'n':
+                out.push_back('\n');
+                break;
+            case 'r':
+                out.push_back('\r');
+                break;
+            case 't':
+                out.push_back('\t');
+                break;
+            case 'v':
+                out.push_back('\v');
+                break;
+            case '\\':
+                out.push_back('\\');
+                break;
+            case '\"':
+                out.push_back('\"');
+                break;
+            case '\'':
+                out.push_back('\'');
+                break;
+            case '`':
+                out.push_back('`');
+                break;
+            case '$':
+                out.push_back('$');
+                break;
+            case 'x': {
+                if (i + 2 >= token_text.size()) {
+                    return std::unexpected(ParseError{"invalid hex escape", start_pos + i});
+                }
+                unsigned value = 0;
+                for (int k = 0; k < 2; ++k) {
+                    char c = token_text[i + 1 + k];
+                    if (!std::isxdigit(static_cast<unsigned char>(c))) {
+                        return std::unexpected(ParseError{"invalid hex escape", start_pos + i});
+                    }
+                    value = value * 16 + static_cast<unsigned>(std::isdigit(static_cast<unsigned char>(c))
+                                                                       ? c - '0'
+                                                                       : std::tolower(c) - 'a' + 10);
+                }
+                i += 2;
+                append_utf8(out, value);
+                break;
+            }
+            case 'u': {
+                if (i + 4 >= token_text.size()) {
+                    return std::unexpected(ParseError{"invalid unicode escape", start_pos + i});
+                }
+                unsigned value = 0;
+                for (int k = 0; k < 4; ++k) {
+                    char c = token_text[i + 1 + k];
+                    if (!std::isxdigit(static_cast<unsigned char>(c))) {
+                        return std::unexpected(ParseError{"invalid unicode escape", start_pos + i});
+                    }
+                    value = value * 16 + static_cast<unsigned>(std::isdigit(static_cast<unsigned char>(c))
+                                                                       ? c - '0'
+                                                                       : std::tolower(c) - 'a' + 10);
+                }
+                i += 4;
+                append_utf8(out, value);
+                break;
+            }
+            case '\r':
+                if (i + 1 < token_text.size() && token_text[i + 1] == '\n') {
+                    ++i;
+                }
+                break;
+            case '\n':
+                break;
+            default:
+                if (esc >= '0' && esc <= '7') {
+                    unsigned value = esc - '0';
+                    int count = 1;
+                    while (count < 3 && i + 1 < token_text.size()) {
                         char c = token_text[i + 1];
                         if (c < '0' || c > '7') {
                             break;

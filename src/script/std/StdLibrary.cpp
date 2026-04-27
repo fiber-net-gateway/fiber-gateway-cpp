@@ -199,8 +199,8 @@ void StdLibrary::register_async_func(std::string name, FunctionSignature signatu
 }
 
 void StdLibrary::register_async_func(std::string name, FunctionSignature signature,
-                                     std::vector<fiber::json::JsValue> defaults, AsyncFunction function,
-                                     void *userdata, const char *debug_name) {
+                                     std::vector<fiber::json::JsValue> defaults, AsyncFunction function, void *userdata,
+                                     const char *debug_name) {
     signature.default_count = static_cast<std::uint16_t>(defaults.size());
     signature.defaults = nullptr;
     FIBER_ASSERT(function != nullptr);
@@ -227,7 +227,8 @@ void StdLibrary::register_async_constant(std::string name, AsyncConstant constan
                                          const char *debug_name) {
     FIBER_ASSERT(constant != nullptr);
     const bool inserted =
-            async_constants_.emplace(std::move(name), make_async_constant_callable(constant, userdata, debug_name)).second;
+            async_constants_.emplace(std::move(name), make_async_constant_callable(constant, userdata, debug_name))
+                    .second;
     FIBER_ASSERT(inserted);
 }
 

@@ -108,12 +108,24 @@ TEST(JsValueOpsTest, AddInteger) {
     EXPECT_EQ(js_value_int64(result.value), 7);
 }
 
-TEST(JsValueOpsTest, AddStringAndNumberTypeError) {
+TEST(JsValueOpsTest, AddStringAndNumberConcats) {
     GcHeap heap;
     JsValue lhs = JsValue::make_string(heap, "hi", 2);
     JsValue rhs = JsValue::make_integer(1);
     auto result = fiber::json::js_binary_op(JsBinaryOp::Add, lhs, rhs, &heap);
-    EXPECT_EQ(result.error, JsOpError::TypeError);
+    ASSERT_EQ(result.error, JsOpError::None);
+    ASSERT_EQ(js_value_type(result.value), JsNodeType::String);
+    EXPECT_EQ(string_to_utf8(result.value), "hi1");
+}
+
+TEST(JsValueOpsTest, AddPrimitiveAndStringConcats) {
+    GcHeap heap;
+    JsValue lhs = JsValue::make_boolean(false);
+    JsValue rhs = JsValue::make_string(heap, " value", 6);
+    auto result = fiber::json::js_binary_op(JsBinaryOp::Add, lhs, rhs, &heap);
+    ASSERT_EQ(result.error, JsOpError::None);
+    ASSERT_EQ(js_value_type(result.value), JsNodeType::String);
+    EXPECT_EQ(string_to_utf8(result.value), "false value");
 }
 
 TEST(JsValueOpsTest, UnaryLogicalNot) {

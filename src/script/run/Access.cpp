@@ -121,7 +121,7 @@ ScriptResult string_char_at(ScriptRuntime &runtime, const fiber::json::JsValue &
 } // namespace
 
 ScriptResult Access::expand_object(const fiber::json::JsValue &target, const fiber::json::JsValue &addition,
-                               ScriptRuntime &runtime) {
+                                   ScriptRuntime &runtime) {
     if (fiber::json::js_value_type(target) != fiber::json::JsNodeType::Object ||
         fiber::json::js_value_type(addition) != fiber::json::JsNodeType::Object) {
         return target;
@@ -151,7 +151,7 @@ ScriptResult Access::expand_object(const fiber::json::JsValue &target, const fib
 }
 
 ScriptResult Access::expand_array(const fiber::json::JsValue &target, const fiber::json::JsValue &addition,
-                              ScriptRuntime &runtime) {
+                                  ScriptRuntime &runtime) {
     if (fiber::json::js_value_type(target) != fiber::json::JsNodeType::Array) {
         return target;
     }
@@ -204,7 +204,7 @@ ScriptResult Access::expand_array(const fiber::json::JsValue &target, const fibe
 }
 
 ScriptResult Access::push_array(const fiber::json::JsValue &target, const fiber::json::JsValue &addition,
-                            ScriptRuntime &runtime) {
+                                ScriptRuntime &runtime) {
     if (fiber::json::js_value_type(target) != fiber::json::JsNodeType::Array) {
         return target;
     }
@@ -221,7 +221,7 @@ ScriptResult Access::push_array(const fiber::json::JsValue &target, const fiber:
 }
 
 ScriptResult Access::index_get(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
-                           ScriptRuntime &runtime) {
+                               ScriptRuntime &runtime) {
     if (fiber::json::js_value_type(parent) == fiber::json::JsNodeType::Array) {
         std::int64_t idx = 0;
         if (!get_index(key, idx)) {
@@ -259,7 +259,7 @@ ScriptResult Access::index_get(const fiber::json::JsValue &parent, const fiber::
 }
 
 ScriptResult Access::index_set(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
-                           const fiber::json::JsValue &value, ScriptRuntime &runtime) {
+                               const fiber::json::JsValue &value, ScriptRuntime &runtime) {
     if (fiber::json::js_value_type(parent) == fiber::json::JsNodeType::Array) {
         std::int64_t idx = 0;
         if (!get_index(key, idx)) {
@@ -302,7 +302,7 @@ ScriptResult Access::index_set(const fiber::json::JsValue &parent, const fiber::
 }
 
 ScriptResult Access::index_set1(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
-                            const fiber::json::JsValue &value, ScriptRuntime &runtime) {
+                                const fiber::json::JsValue &value, ScriptRuntime &runtime) {
     ScriptResult result = index_set(parent, key, value, runtime);
     if (!result) {
         return result;
@@ -310,7 +310,8 @@ ScriptResult Access::index_set1(const fiber::json::JsValue &parent, const fiber:
     return parent;
 }
 
-ScriptResult Access::prop_get(const fiber::json::JsValue &parent, const fiber::json::JsValue &key, ScriptRuntime &runtime) {
+ScriptResult Access::prop_get(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
+                              ScriptRuntime &runtime) {
     if (fiber::json::js_value_type(parent) == fiber::json::JsNodeType::Object) {
         ScriptAbortReason error = ScriptAbortReason::None;
         fiber::json::GcString *key_str = ensure_heap_string(runtime, key, error);
@@ -341,7 +342,7 @@ ScriptResult Access::prop_get(const fiber::json::JsValue &parent, const fiber::j
 }
 
 ScriptResult Access::prop_set(const fiber::json::JsValue &parent, const fiber::json::JsValue &value,
-                          const fiber::json::JsValue &key, ScriptRuntime &runtime) {
+                              const fiber::json::JsValue &key, ScriptRuntime &runtime) {
     if (fiber::json::js_value_type(parent) != fiber::json::JsNodeType::Object) {
         return ScriptResult::abort(index_error("property set not supported"));
     }
@@ -367,7 +368,7 @@ ScriptResult Access::prop_set(const fiber::json::JsValue &parent, const fiber::j
 }
 
 ScriptResult Access::prop_set1(const fiber::json::JsValue &parent, const fiber::json::JsValue &value,
-                           const fiber::json::JsValue &key, ScriptRuntime &runtime) {
+                               const fiber::json::JsValue &key, ScriptRuntime &runtime) {
     ScriptResult result = prop_set(parent, value, key, runtime);
     if (!result) {
         return result;

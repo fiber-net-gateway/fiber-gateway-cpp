@@ -6,8 +6,8 @@
 #include <vector>
 
 #include "../common/json/JsNode.h"
+#include "AsyncTask.h"
 #include "ScriptResult.h"
-#include "async/AsyncTask.h"
 
 namespace fiber::script {
 

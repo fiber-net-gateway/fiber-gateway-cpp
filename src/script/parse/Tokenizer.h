@@ -26,6 +26,9 @@ private:
 
     bool skip_comment();
     std::expected<void, ParseError> scan_string();
+    std::expected<void, ParseError> scan_template_literal();
+    std::expected<std::size_t, ParseError> skip_template_literal(std::size_t pos) const;
+    std::expected<std::size_t, ParseError> skip_template_expression(std::size_t pos) const;
     std::expected<void, ParseError> lex_numeric_literal(bool first_char_zero);
     void lex_identifier();
     bool is_identifier(char ch) const;

@@ -1,5 +1,7 @@
 #include "Binaries.h"
 
+#include <charconv>
+#include <cmath>
 #include <string>
 #include <string_view>
 
@@ -67,11 +69,48 @@ std::size_t string_code_unit_upper_bound(const fiber::json::JsValue &value) {
     return str ? str->len : 0;
 }
 
+std::size_t primitive_string_code_unit_upper_bound(const fiber::json::JsValue &value) {
+    switch (fiber::json::js_value_type(value)) {
+        case fiber::json::JsNodeType::String:
+            return string_code_unit_upper_bound(value);
+        case fiber::json::JsNodeType::Undefined:
+            return 9;
+        case fiber::json::JsNodeType::Null:
+            return 4;
+        case fiber::json::JsNodeType::Boolean:
+            return fiber::json::js_value_bool(value) ? 4 : 5;
+        case fiber::json::JsNodeType::Integer: {
+            char buffer[64];
+            auto converted = std::to_chars(buffer, buffer + sizeof(buffer), fiber::json::js_value_int64(value));
+            return converted.ec == std::errc{} ? static_cast<std::size_t>(converted.ptr - buffer) : 0;
+        }
+        case fiber::json::JsNodeType::Float: {
+            double number = fiber::json::js_value_double(value);
+            if (std::isnan(number)) {
+                return 3;
+            }
+            if (std::isinf(number)) {
+                return number < 0 ? 9 : 8;
+            }
+            char buffer[64];
+            auto converted = std::to_chars(buffer, buffer + sizeof(buffer), number);
+            return converted.ec == std::errc{} ? static_cast<std::size_t>(converted.ptr - buffer) : 0;
+        }
+        case fiber::json::JsNodeType::Array:
+        case fiber::json::JsNodeType::Object:
+        case fiber::json::JsNodeType::Interator:
+        case fiber::json::JsNodeType::Exception:
+        case fiber::json::JsNodeType::Binary:
+            return 0;
+    }
+    return 0;
+}
+
 std::size_t estimate_plus_alloc_bytes(const fiber::json::JsValue &lhs, const fiber::json::JsValue &rhs) {
     if (!is_string_like(lhs) && !is_string_like(rhs)) {
         return 0;
     }
-    std::size_t total_units = string_code_unit_upper_bound(lhs) + string_code_unit_upper_bound(rhs);
+    std::size_t total_units = primitive_string_code_unit_upper_bound(lhs) + primitive_string_code_unit_upper_bound(rhs);
     bool all_byte = fiber::json::js_value_type(lhs) == fiber::json::JsNodeType::String &&
                     fiber::json::js_value_type(rhs) == fiber::json::JsNodeType::String &&
                     !fiber::json::js_value_is_borrowed_string(lhs) && !fiber::json::js_value_is_borrowed_string(rhs);

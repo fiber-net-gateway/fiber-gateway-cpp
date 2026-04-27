@@ -173,6 +173,13 @@ std::expected<void, ParseError> Tokenizer::process() {
                 }
                 break;
             }
+            case '`': {
+                auto result = scan_template_literal();
+                if (!result) {
+                    return std::unexpected(result.error());
+                }
+                break;
+            }
             case '\\':
                 return std::unexpected(ParseError{"unexpected escape char", pos_});
             default:
@@ -260,6 +267,124 @@ std::expected<void, ParseError> Tokenizer::scan_string() {
     return std::unexpected(ParseError{"unterminated string literal", start});
 }
 
+std::expected<void, ParseError> Tokenizer::scan_template_literal() {
+    std::size_t start = pos_;
+    auto end_result = skip_template_literal(pos_);
+    if (!end_result) {
+        return std::unexpected(end_result.error());
+    }
+    pos_ = end_result.value();
+    push_token(TokenKind::TemplateLiteral, start, pos_, input_.substr(start, pos_ - start));
+    return {};
+}
+
+std::expected<std::size_t, ParseError> Tokenizer::skip_template_literal(std::size_t pos) const {
+    std::size_t p = pos + 1;
+    while (p < max_) {
+        char chr = input_[p];
+        if (chr == '`') {
+            return p + 1;
+        }
+        if (chr == '\\') {
+            ++p;
+            if (p >= max_) {
+                return std::unexpected(ParseError{"unexpected escape", p});
+            }
+            std::size_t eol_len = js_line_terminator_length(p);
+            p += eol_len != 0 ? eol_len : 1;
+            continue;
+        }
+        if (chr == '$' && p + 1 < max_ && input_[p + 1] == '{') {
+            auto expr_end = skip_template_expression(p + 2);
+            if (!expr_end) {
+                return std::unexpected(expr_end.error());
+            }
+            p = expr_end.value();
+            continue;
+        }
+        ++p;
+    }
+    return std::unexpected(ParseError{"unterminated template literal", pos});
+}
+
+std::expected<std::size_t, ParseError> Tokenizer::skip_template_expression(std::size_t pos) const {
+    std::size_t p = pos;
+    int curly_depth = 1;
+    while (p < max_) {
+        char chr = input_[p];
+        if (chr == '\'' || chr == '"') {
+            char quote = chr;
+            ++p;
+            while (p < max_) {
+                if (input_[p] == quote) {
+                    ++p;
+                    break;
+                }
+                if (js_line_terminator_length(p) != 0) {
+                    return std::unexpected(ParseError{"unterminated string literal", p});
+                }
+                if (input_[p] == '\\') {
+                    ++p;
+                    if (p >= max_) {
+                        return std::unexpected(ParseError{"unexpected escape", p});
+                    }
+                    std::size_t eol_len = js_line_terminator_length(p);
+                    p += eol_len != 0 ? eol_len : 1;
+                    continue;
+                }
+                ++p;
+            }
+            if (p >= max_) {
+                return std::unexpected(ParseError{"unterminated string literal", p});
+            }
+            continue;
+        }
+        if (chr == '`') {
+            auto nested_end = skip_template_literal(p);
+            if (!nested_end) {
+                return std::unexpected(nested_end.error());
+            }
+            p = nested_end.value();
+            continue;
+        }
+        if (chr == '/' && p + 1 < max_) {
+            if (input_[p + 1] == '/') {
+                p += 2;
+                while (p < max_ && js_line_terminator_length(p) == 0) {
+                    ++p;
+                }
+                continue;
+            }
+            if (input_[p + 1] == '*') {
+                p += 2;
+                while (p + 1 < max_ && !(input_[p] == '*' && input_[p + 1] == '/')) {
+                    ++p;
+                }
+                if (p + 1 >= max_) {
+                    return std::unexpected(ParseError{"unterminated comment", p});
+                }
+                p += 2;
+                continue;
+            }
+        }
+        if (chr == '{') {
+            ++curly_depth;
+            ++p;
+            continue;
+        }
+        if (chr == '}') {
+            --curly_depth;
+            ++p;
+            if (curly_depth == 0) {
+                return p;
+            }
+            continue;
+        }
+        ++p;
+    }
+    return std::unexpected(ParseError{"unterminated template expression", pos});
+}
+
 std::expected<std::size_t, ParseError> Tokenizer::scan_escape(char quote) {
     if (pos_ >= max_) {
         return std::unexpected(ParseError{"unexpected escape", pos_});
@@ -276,6 +401,7 @@ std::expected<std::size_t, ParseError> Tokenizer::scan_escape(char quote) {
         case 'a':
         case '\'':
         case '\"':
+        case '`':
         case 'b':
         case 'f':
         case 'n':

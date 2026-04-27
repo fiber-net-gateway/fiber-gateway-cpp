@@ -83,6 +83,7 @@ private:
     std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_start_node();
     std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_paren_expression();
     std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_literal();
+    std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_template_literal();
     std::expected<std::optional<ast::Literal>, ParseError> parse_optional_literal();
     std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_inline_list();
     std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_inline_object();
@@ -105,6 +106,7 @@ private:
 
     std::expected<ast::Literal, ParseError> parse_literal_token(const Token &token);
     std::expected<std::string, ParseError> parse_string_literal(const std::string &token_text, std::size_t start_pos);
+    std::expected<std::string, ParseError> parse_template_chunk(std::string_view token_text, std::size_t start_pos);
     std::expected<ast::Identifier, ParseError> parse_identifier_token();
 
     bool has_more() const;
