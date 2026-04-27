@@ -1,12 +1,12 @@
-#ifndef FIBER_SCRIPT_ASYNC_ASYNC_TASK_H
-#define FIBER_SCRIPT_ASYNC_ASYNC_TASK_H
+#ifndef FIBER_SCRIPT_ASYNC_TASK_H
+#define FIBER_SCRIPT_ASYNC_TASK_H
 
 #include <coroutine>
 #include <cstddef>
 #include <new>
 
-#include "../../common/Assert.h"
-#include "../ScriptResult.h"
+#include "../common/Assert.h"
+#include "ScriptResult.h"
 
 namespace fiber::script {
 
@@ -133,4 +133,4 @@ private:
 
 } // namespace fiber::script
 
-#endif // FIBER_SCRIPT_ASYNC_ASYNC_TASK_H
+#endif // FIBER_SCRIPT_ASYNC_TASK_H

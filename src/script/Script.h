@@ -5,10 +5,10 @@
 #include <memory>
 #include <optional>
 
+#include "../async/Task.h"
 #include "../common/json/JsNode.h"
+#include "AsyncTask.h"
 #include "ScriptResult.h"
-#include "async/AsyncTask.h"
-#include "async/Task.h"
 #include "ir/Compiled.h"
 
 namespace fiber::json {

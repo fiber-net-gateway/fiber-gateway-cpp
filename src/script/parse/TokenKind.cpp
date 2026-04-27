@@ -14,6 +14,8 @@ const char *token_kind_name(TokenKind kind) {
             return "LiteralHexLong";
         case TokenKind::LiteralString:
             return "LiteralString";
+        case TokenKind::TemplateLiteral:
+            return "TemplateLiteral";
         case TokenKind::LiteralReal:
             return "LiteralReal";
         case TokenKind::LiteralRealFloat:

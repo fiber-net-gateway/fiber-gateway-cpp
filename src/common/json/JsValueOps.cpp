@@ -6,6 +6,7 @@
 
 #include "Utf.h"
 
+#include <charconv>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -149,6 +150,78 @@ bool build_string_source(const JsValue &value, StringSource &out, JsOpError &err
         return false;
     }
     return true;
+}
+
+void set_ascii_string_source(StringSource &out, const char *data, std::size_t len) {
+    out.kind = StringKind::NativeUtf8;
+    out.utf8 = data;
+    out.len = len;
+    out.scan.all_byte = true;
+    out.scan.utf16_len = len;
+}
+
+bool primitive_to_string_source(const JsValue &value, StringSource &out, char *buffer, std::size_t buffer_len,
+                                JsOpError &error) {
+    if (js_value_type(value) == JsNodeType::String) {
+        return build_string_source(value, out, error);
+    }
+    switch (js_value_type(value)) {
+        case JsNodeType::Undefined:
+            set_ascii_string_source(out, "undefined", 9);
+            return true;
+        case JsNodeType::Null:
+            set_ascii_string_source(out, "null", 4);
+            return true;
+        case JsNodeType::Boolean:
+            if (js_value_bool(value)) {
+                set_ascii_string_source(out, "true", 4);
+            } else {
+                set_ascii_string_source(out, "false", 5);
+            }
+            return true;
+        case JsNodeType::Integer: {
+            auto converted = std::to_chars(buffer, buffer + buffer_len, js_value_int64(value));
+            if (converted.ec != std::errc{}) {
+                error = JsOpError::TypeError;
+                return false;
+            }
+            set_ascii_string_source(out, buffer, static_cast<std::size_t>(converted.ptr - buffer));
+            return true;
+        }
+        case JsNodeType::Float: {
+            double number = js_value_double(value);
+            if (std::isnan(number)) {
+                set_ascii_string_source(out, "NaN", 3);
+                return true;
+            }
+            if (std::isinf(number)) {
+                if (number < 0) {
+                    set_ascii_string_source(out, "-Infinity", 9);
+                } else {
+                    set_ascii_string_source(out, "Infinity", 8);
+                }
+                return true;
+            }
+            auto converted = std::to_chars(buffer, buffer + buffer_len, number);
+            if (converted.ec != std::errc{}) {
+                error = JsOpError::TypeError;
+                return false;
+            }
+            set_ascii_string_source(out, buffer, static_cast<std::size_t>(converted.ptr - buffer));
+            return true;
+        }
+        case JsNodeType::String:
+            return build_string_source(value, out, error);
+        case JsNodeType::Array:
+        case JsNodeType::Object:
+        case JsNodeType::Interator:
+        case JsNodeType::Exception:
+        case JsNodeType::Binary:
+            error = JsOpError::TypeError;
+            return false;
+    }
+    error = JsOpError::TypeError;
+    return false;
 }
 
 bool concat_strings(GcHeap *heap, const StringSource &lhs, const StringSource &rhs, JsValue &out, JsOpError &error) {
@@ -759,16 +832,15 @@ JsOpResult js_binary_op(JsBinaryOp op, const JsValue &lhs, const JsValue &rhs, G
         }
         case JsBinaryOp::Add: {
             if (is_string_type(js_value_type(lhs)) || is_string_type(js_value_type(rhs))) {
-                if (!is_string_type(js_value_type(lhs)) || !is_string_type(js_value_type(rhs))) {
-                    return make_error(JsOpError::TypeError);
-                }
                 StringSource lhs_src;
                 StringSource rhs_src;
+                char lhs_buf[64];
+                char rhs_buf[64];
                 JsOpError error = JsOpError::None;
-                if (!build_string_source(lhs, lhs_src, error)) {
+                if (!primitive_to_string_source(lhs, lhs_src, lhs_buf, sizeof(lhs_buf), error)) {
                     return make_error(error);
                 }
-                if (!build_string_source(rhs, rhs_src, error)) {
+                if (!primitive_to_string_source(rhs, rhs_src, rhs_buf, sizeof(rhs_buf), error)) {
                     return make_error(error);
                 }
                 JsValue out;
