@@ -330,7 +330,6 @@ fiber::async::Task<Http2Connection::RunResult> Http2Connection::finalize_run(Run
         outbound_scheduler_.close();
     }
 
-    co_await wait_for_send_loop_exit();
     close_all_streams(stop_sending_requested_ ? stop_sending_reason_ : common::IoErr::Canceled);
     co_await lifetime_wg_.join();
     if (transport_ && transport_->valid()) {
@@ -340,14 +339,7 @@ fiber::async::Task<Http2Connection::RunResult> Http2Connection::finalize_run(Run
     co_return result;
 }
 
-fiber::async::Task<void> Http2Connection::wait_for_send_loop_exit() noexcept {
-    while (send_loop_running_) {
-        co_await fiber::async::sleep(std::chrono::milliseconds(1));
-    }
-}
-
 fiber::async::Task<void> Http2Connection::close_transport_after_send_loop() noexcept {
-    co_await wait_for_send_loop_exit();
     if (transport_ && transport_->valid()) {
         transport_->close();
     }
@@ -1226,24 +1218,10 @@ bool Http2Connection::is_peer_stream_id(std::uint32_t stream_id) const noexcept 
     return !is_local_stream_id(stream_id);
 }
 
-fiber::async::Task<void> Http2Connection::run_send_loop() noexcept {
+fiber::async::DetachedTask Http2Connection::run_send_loop() noexcept {
     co_await outbound_scheduler_.send_loop();
-
     send_loop_running_ = false;
-    if (outbound_scheduler_.stop_reason() != common::IoErr::None && !stop_sending_requested_) {
-        enter_closing(outbound_scheduler_.stop_reason());
-    }
-    if (stop_sending_requested_) {
-        close_all_streams(stop_sending_reason_);
-    }
     lifetime_wg_.done();
-}
-
-fiber::async::DetachedTask Http2Connection::run_send_loop_task(Http2Connection *connection) noexcept {
-    if (!connection) {
-        co_return;
-    }
-    co_await connection->run_send_loop();
 }
 
 void Http2Connection::start_send_loop() noexcept {
@@ -1254,7 +1232,7 @@ void Http2Connection::start_send_loop() noexcept {
     lifetime_wg_.add(1);
     send_loop_running_ = true;
     fiber::async::spawn(transport_->loop(),
-                        [connection = this]() { return Http2Connection::run_send_loop_task(connection); });
+                        [connection = this]() -> async::DetachedTask { return connection->run_send_loop(); });
 }
 
 std::chrono::milliseconds Http2Connection::current_read_timeout() const noexcept {

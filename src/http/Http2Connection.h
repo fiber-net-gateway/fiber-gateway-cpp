@@ -189,11 +189,9 @@ private:
     common::IoErr start_server_session() noexcept;
     void on_stream_outbound_idle(Http2Stream &stream) noexcept;
     fiber::async::Task<RunResult> finalize_run(RunResult result) noexcept;
-    fiber::async::Task<void> wait_for_send_loop_exit() noexcept;
     fiber::async::Task<void> close_transport_after_send_loop() noexcept;
-    fiber::async::Task<void> run_send_loop() noexcept;
+    fiber::async::DetachedTask run_send_loop() noexcept;
     static fiber::async::DetachedTask close_transport_after_send_loop_task(Http2Connection *connection) noexcept;
-    static fiber::async::DetachedTask run_send_loop_task(Http2Connection *connection) noexcept;
     void start_send_loop() noexcept;
     common::IoErr start_draining() noexcept;
     void maybe_enter_closing_from_draining() noexcept;
