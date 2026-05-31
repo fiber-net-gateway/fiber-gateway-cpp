@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "QuicCrypto.h"
 #include "QuicProtocol.h"
 
 namespace fiber::quic {
@@ -46,6 +47,33 @@ common::IoResult<QuicConnectionId> QuicConnectionId::from_bytes(const std::uint8
         std::memcpy(out.bytes.data(), data, len);
     }
     return out;
+}
+
+QuicPacketProtectionKeys::QuicPacketProtectionKeys() noexcept {
+    EVP_AEAD_CTX_zero(&aead);
+}
+
+QuicPacketProtectionKeys::~QuicPacketProtectionKeys() {
+    reset();
+}
+
+void QuicPacketProtectionKeys::reset() noexcept {
+    if (aead_initialized) {
+        EVP_AEAD_CTX_cleanup(&aead);
+        aead_initialized = false;
+    }
+    EVP_AEAD_CTX_zero(&aead);
+    key = {};
+    iv = {};
+    hp = {};
+    hp_key = {};
+    ready = false;
+}
+
+void QuicCryptoState::reset() noexcept {
+    initial_read.reset();
+    initial_write.reset();
+    initial_ready = false;
 }
 
 QuicFrame *QuicFrameQueue::front() noexcept {
@@ -256,6 +284,10 @@ QuicPacketNumberSpace &QuicConnection::packet_number_space(QuicEncryptionLevel l
 
 const QuicPacketNumberSpace &QuicConnection::packet_number_space(QuicEncryptionLevel level) const noexcept {
     return packet_number_spaces_[packet_number_space_index(level)];
+}
+
+common::IoResult<void> QuicConnection::init_initial_crypto(const QuicConnectionId &original_dcid) noexcept {
+    return quic_init_initial_crypto(crypto_, options_.role, original_dcid);
 }
 
 std::size_t QuicConnection::packet_number_space_index(QuicEncryptionLevel level) noexcept {
