@@ -16,8 +16,8 @@
 #include "async/Task.h"
 #include "common/IoError.h"
 #include "event/EventLoopGroup.h"
-#include "http/TlsContext.h"
-#include "http/TlsOptions.h"
+#include "net/TlsContext.h"
+#include "net/TlsOptions.h"
 #include "net/detail/TlsStreamFd.h"
 
 namespace {
@@ -198,14 +198,14 @@ TEST(TlsStreamFdTest, CrossLoopHandshakeAndReadWriteUseOwnerPoller) {
     ASSERT_TRUE(cert.ok);
     ASSERT_TRUE(key.ok);
 
-    fiber::http::TlsOptions server_options{};
+    fiber::net::TlsOptions server_options{};
     server_options.cert_file = cert.path;
     server_options.key_file = key.path;
-    fiber::http::TlsContext server_ctx(std::move(server_options), true);
+    fiber::net::TlsContext server_ctx(std::move(server_options), true);
     ASSERT_TRUE(server_ctx.init());
 
-    fiber::http::TlsOptions client_options{};
-    fiber::http::TlsContext client_ctx(std::move(client_options), false);
+    fiber::net::TlsOptions client_options{};
+    fiber::net::TlsContext client_ctx(std::move(client_options), false);
     ASSERT_TRUE(client_ctx.init());
 
     int fds[2] = {-1, -1};

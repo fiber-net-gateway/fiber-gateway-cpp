@@ -18,7 +18,7 @@
 #include "HttpCommon.h"
 #include "HttpExchangeIo.h"
 #include "HttpHeaders.h"
-#include "TlsOptions.h"
+#include "../net/TlsOptions.h"
 
 namespace fiber::http {
 
@@ -31,7 +31,7 @@ struct HttpServerOptions {
     std::size_t header_large_size = 32 * 1024;
     std::size_t header_large_num = 4;
     bool drain_unread_body = false;
-    TlsOptions tls{};
+    net::TlsOptions tls{};
 };
 
 struct BodyChunk {

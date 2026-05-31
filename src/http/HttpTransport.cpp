@@ -160,7 +160,7 @@ const net::SocketAddress &TcpTransport::remote_addr() const noexcept { return st
 event::EventLoop &TcpTransport::loop() const noexcept { return stream_.loop(); }
 
 common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                     TlsContext &context) {
+                                                                     net::TlsContext &context) {
     if (!accept.valid()) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -174,7 +174,7 @@ common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::Even
 }
 
 common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                     TlsServerContext &context) {
+                                                                     net::TlsServerContext &context) {
     if (!accept.valid()) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -187,10 +187,11 @@ common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::Even
     return transport;
 }
 
-TlsTransport::TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, TlsContext &context) :
+TlsTransport::TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, net::TlsContext &context) :
     stream_(loop, fd, std::move(remote_addr)), context_(&context) {}
 
-TlsTransport::TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, TlsServerContext &context) :
+TlsTransport::TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr,
+                           net::TlsServerContext &context) :
     stream_(loop, fd, std::move(remote_addr)), server_context_(&context) {}
 
 TlsTransport::~TlsTransport() = default;

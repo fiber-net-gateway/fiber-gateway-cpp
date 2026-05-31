@@ -188,10 +188,10 @@ DetachedTask run_tls_http1_client(fiber::event::EventLoop *loop, std::uint16_t p
     }
 
     auto stream = std::make_unique<fiber::net::TcpStream>(std::move(*connect_result));
-    fiber::http::TlsOptions tls_options{};
+    fiber::net::TlsOptions tls_options{};
     tls_options.alpn = {"http/1.1"};
     tls_options.server_name.assign(server_name.data(), server_name.size());
-    fiber::http::TlsContext client_ctx(std::move(tls_options), false);
+    fiber::net::TlsContext client_ctx(std::move(tls_options), false);
     auto init_result = client_ctx.init();
     if (!init_result) {
         result.err = init_result.error();
@@ -254,7 +254,7 @@ struct SelectorState {
     std::array<char, 128> server_name{};
 };
 
-fiber::http::TlsContext *select_alt_identity(void *ctx, const fiber::http::TlsClientHelloView &client_hello) noexcept {
+fiber::net::TlsContext *select_alt_identity(void *ctx, const fiber::net::TlsClientHelloView &client_hello) noexcept {
     auto *state = static_cast<SelectorState *>(ctx);
     state->calls.fetch_add(1, std::memory_order_relaxed);
     state->saw_http11.store(client_hello.alpn.contains("http/1.1"), std::memory_order_relaxed);

@@ -21,7 +21,7 @@
 #include "event/EventLoop.h"
 #include "http/HttpServer.h"
 #include "http/HttpTransport.h"
-#include "http/TlsContext.h"
+#include "net/TlsContext.h"
 #include "net/SocketAddress.h"
 
 namespace {
@@ -278,9 +278,9 @@ fiber::async::DetachedTask run_demo_client(fiber::event::EventLoop *loop, fiber:
 
     auto stream = std::make_unique<fiber::net::TcpStream>(std::move(*infant_result));
 
-    fiber::http::TlsOptions tls_options{};
+    fiber::net::TlsOptions tls_options{};
     tls_options.alpn = {"http/1.1"};
-    fiber::http::TlsContext client_ctx(tls_options, false);
+    fiber::net::TlsContext client_ctx(tls_options, false);
     auto ctx_result = client_ctx.init();
     if (!ctx_result) {
         fail("tls context init failed", ctx_result.error());

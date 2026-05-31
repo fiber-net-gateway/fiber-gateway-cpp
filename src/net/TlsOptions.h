@@ -1,5 +1,5 @@
-#ifndef FIBER_HTTP_TLS_OPTIONS_H
-#define FIBER_HTTP_TLS_OPTIONS_H
+#ifndef FIBER_NET_TLS_OPTIONS_H
+#define FIBER_NET_TLS_OPTIONS_H
 
 #include <chrono>
 #include <cstddef>
@@ -9,10 +9,8 @@
 #include <vector>
 
 namespace fiber::net {
-class SocketAddress;
-}
 
-namespace fiber::http {
+class SocketAddress;
 
 class TlsContext;
 class TlsServerContext;
@@ -76,8 +74,8 @@ struct TlsIdentitySelectInput {
     std::string_view server_name{};
     TlsAlpnProtocolsView alpn{};
     std::string_view selected_alpn{};
-    const fiber::net::SocketAddress *remote_addr = nullptr;
-    const fiber::net::SocketAddress *local_addr = nullptr;
+    const SocketAddress *remote_addr = nullptr;
+    const SocketAddress *local_addr = nullptr;
     const TlsServerContext *server_context = nullptr;
     TlsTransportKind transport = TlsTransportKind::Tcp;
 };
@@ -110,6 +108,6 @@ struct TlsOptions {
     TlsIdentitySelectorOps identity_selector_ops{};
 };
 
-} // namespace fiber::http
+} // namespace fiber::net
 
-#endif // FIBER_HTTP_TLS_OPTIONS_H
+#endif // FIBER_NET_TLS_OPTIONS_H

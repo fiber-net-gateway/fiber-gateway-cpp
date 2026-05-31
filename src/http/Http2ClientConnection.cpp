@@ -16,7 +16,7 @@ constexpr std::string_view kH2Alpn = "h2";
 
 } // namespace
 
-TlsOptions Http2ClientConnection::normalize_tls_options(TlsOptions options) noexcept {
+net::TlsOptions Http2ClientConnection::normalize_tls_options(net::TlsOptions options) noexcept {
     if (options.enabled) {
         options.alpn.clear();
         options.alpn.push_back(std::string(kH2Alpn));

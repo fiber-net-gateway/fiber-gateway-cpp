@@ -16,7 +16,7 @@
 #include "HttpExchange.h"
 #include "HttpTransport.h"
 #include "ServerRequestFactory.h"
-#include "TlsContext.h"
+#include "../net/TlsContext.h"
 
 namespace fiber::http {
 
@@ -43,7 +43,7 @@ private:
     Http2HpackEncodeCatalog http2_hpack_encode_catalog_;
     ServerRequestFactory http2_request_factory_;
     net::TcpListener listener_;
-    std::unique_ptr<TlsServerContext> tls_ctx_;
+    std::unique_ptr<net::TlsServerContext> tls_ctx_;
     std::atomic<std::size_t> next_loop_index_{0};
 };
 

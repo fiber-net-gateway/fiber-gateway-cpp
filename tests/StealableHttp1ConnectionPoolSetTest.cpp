@@ -23,7 +23,7 @@
 #include "http/Http1ConnectionGroupKey.h"
 #include "http/HttpHeaders.h"
 #include "http/StealableHttp1ConnectionPoolSet.h"
-#include "http/TlsContext.h"
+#include "net/TlsContext.h"
 #include "net/TcpListener.h"
 #include "net/detail/TlsStreamFd.h"
 
@@ -262,10 +262,10 @@ DetachedTask run_tls_hold_server(fiber::event::EventLoop *loop, std::string cert
         co_return;
     }
 
-    fiber::http::TlsOptions server_options{};
+    fiber::net::TlsOptions server_options{};
     server_options.cert_file = std::move(cert_path);
     server_options.key_file = std::move(key_path);
-    fiber::http::TlsContext server_ctx(std::move(server_options), true);
+    fiber::net::TlsContext server_ctx(std::move(server_options), true);
     auto init_result = server_ctx.init();
     if (!init_result) {
         listener.close();

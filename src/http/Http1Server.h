@@ -13,7 +13,7 @@
 #include "../event/EventLoopGroup.h"
 #include "../net/TcpListener.h"
 #include "HttpExchange.h"
-#include "TlsContext.h"
+#include "../net/TlsContext.h"
 
 namespace fiber::http {
 
@@ -41,7 +41,7 @@ private:
     HttpHandler handler_;
     HttpServerOptions options_;
     net::TcpListener listener_;
-    std::unique_ptr<TlsContext> tls_ctx_;
+    std::unique_ptr<net::TlsContext> tls_ctx_;
     fiber::async::WaitGroup connections_wg_{};
     std::atomic<bool> shutdown_{false};
     std::atomic<std::size_t> next_loop_index_{0};

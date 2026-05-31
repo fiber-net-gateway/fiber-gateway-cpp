@@ -11,7 +11,7 @@
 #include "../net/SocketAddress.h"
 #include "ClientHttp2Request.h"
 #include "Http2Connection.h"
-#include "TlsContext.h"
+#include "../net/TlsContext.h"
 
 namespace fiber::http {
 
@@ -21,7 +21,7 @@ class Http2ClientConnection : public common::NonCopyable, public common::NonMova
 public:
     struct Options {
         net::SocketAddress peer_addr{};
-        TlsOptions tls{};
+        net::TlsOptions tls{};
         Http2Connection::Options h2{};
     };
 
@@ -40,12 +40,12 @@ public:
     [[nodiscard]] const Http2Connection &http2() const noexcept;
 
 private:
-    static TlsOptions normalize_tls_options(TlsOptions options) noexcept;
+    static net::TlsOptions normalize_tls_options(net::TlsOptions options) noexcept;
     static Http2Connection::Options normalize_h2_options(Http2Connection::Options options) noexcept;
 
     event::EventLoop *loop_ = nullptr;
     net::SocketAddress peer_addr_{};
-    TlsContext tls_ctx_;
+    net::TlsContext tls_ctx_;
     Http2Connection conn_;
 };
 

@@ -14,7 +14,7 @@
 #include "http/HttpExchange.h"
 #include "http/HttpExchangeIo.h"
 #include "http/HttpHeaders.h"
-#include "http/TlsContext.h"
+#include "net/TlsContext.h"
 #include "net/IpAddress.h"
 #include "net/TcpListener.h"
 
@@ -56,8 +56,8 @@ fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange
     (void) co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
 }
 
-fiber::http::TlsContext *select_identity_by_server_name(void *,
-                                                        const fiber::http::TlsClientHelloView &client_hello) noexcept {
+fiber::net::TlsContext *select_identity_by_server_name(void *,
+                                                       const fiber::net::TlsClientHelloView &client_hello) noexcept {
     if (!client_hello.server_context || client_hello.server_name.empty()) {
         return nullptr;
     }
