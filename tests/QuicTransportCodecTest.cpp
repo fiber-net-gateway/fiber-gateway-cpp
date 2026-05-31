@@ -112,6 +112,94 @@ TEST(QuicTransportCodecTest, CreatesLongHeaderWithPacketNumberPointer) {
     EXPECT_EQ(pn[3], 0x04);
 }
 
+TEST(QuicTransportCodecTest, SelectsPacketNumberLengthFromLargestAcked) {
+    EXPECT_EQ(fiber::quic::quic_packet_number_len(0, fiber::quic::kUnsetPacketNumber), 1U);
+    EXPECT_EQ(fiber::quic::quic_packet_number_len(126, fiber::quic::kUnsetPacketNumber), 1U);
+    EXPECT_EQ(fiber::quic::quic_packet_number_len(127, fiber::quic::kUnsetPacketNumber), 2U);
+    EXPECT_EQ(fiber::quic::quic_packet_number_len(0x7fff, 0), 2U);
+    EXPECT_EQ(fiber::quic::quic_packet_number_len(0x8000, 0), 3U);
+    EXPECT_EQ(fiber::quic::quic_packet_number_len(0x800000, 0), 4U);
+}
+
+TEST(QuicTransportCodecTest, DecodesTruncatedPacketNumberFromSpaceLargestReceived) {
+    auto first = fiber::quic::quic_decode_packet_number(0x7b, 1, fiber::quic::kUnsetPacketNumber);
+    auto near_next_window = fiber::quic::quic_decode_packet_number(0x02, 1, 0xff);
+    auto previous_window = fiber::quic::quic_decode_packet_number(0xff, 1, 0x180);
+
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(near_next_window.has_value());
+    ASSERT_TRUE(previous_window.has_value());
+    EXPECT_EQ(*first, 0x7bU);
+    EXPECT_EQ(*near_next_window, 0x102U);
+    EXPECT_EQ(*previous_window, 0x1ffU);
+}
+
+TEST(QuicTransportCodecTest, ReadsPacketNumberAndMovesCiphertextPastPacketNumber) {
+    const std::array<std::uint8_t, 5> datagram{0x41, 0x10, 0x02, 0xaa, 0xbb};
+    fiber::quic::QuicPacketHeader packet{};
+    packet.packet_data = datagram.data();
+    packet.packet_len = datagram.size();
+    packet.flags = datagram[0];
+    packet.type = fiber::quic::QuicPacketType::Short;
+    packet.level = fiber::quic::QuicEncryptionLevel::Application;
+    packet.protected_pn = datagram.data() + 1;
+
+    fiber::quic::QuicPacketNumberSpace space{};
+    space.reset(fiber::quic::QuicEncryptionLevel::Application);
+    space.largest_received_packet_number = 0xff;
+
+    auto read = fiber::quic::quic_read_packet_number(packet, space);
+
+    ASSERT_TRUE(read.has_value());
+    EXPECT_EQ(packet.pn_len, 2U);
+    EXPECT_EQ(packet.truncated_pn, 0x1002U);
+    EXPECT_EQ(packet.packet_number, 0x1002U);
+    EXPECT_EQ(packet.ciphertext, datagram.data() + 3);
+    EXPECT_EQ(packet.ciphertext_len, 2U);
+}
+
+TEST(QuicTransportCodecTest, InitializesPacketHeaderFromPacketNumberSpaceLevel) {
+    fiber::quic::QuicPacketNumberSpace initial{};
+    initial.reset(fiber::quic::QuicEncryptionLevel::Initial);
+    initial.next_packet_number = 127;
+    fiber::quic::QuicPacketHeader initial_packet{};
+
+    fiber::quic::quic_init_packet_header(initial_packet, initial);
+
+    EXPECT_TRUE(initial_packet.long_header);
+    EXPECT_EQ(initial_packet.type, fiber::quic::QuicPacketType::Initial);
+    EXPECT_EQ(initial_packet.level, fiber::quic::QuicEncryptionLevel::Initial);
+    EXPECT_EQ(initial_packet.pn_len, 2U);
+    EXPECT_EQ(initial_packet.truncated_pn, 127U);
+    EXPECT_EQ(initial_packet.flags, fiber::quic::kPacketFlagLong | fiber::quic::kPacketFlagFixed |
+                                    fiber::quic::kLongPacketTypeInitial | 0x01);
+
+    fiber::quic::QuicPacketNumberSpace application{};
+    application.reset(fiber::quic::QuicEncryptionLevel::Application);
+    fiber::quic::QuicPacketHeader app_packet{};
+
+    fiber::quic::quic_init_packet_header(app_packet, application);
+
+    EXPECT_FALSE(app_packet.long_header);
+    EXPECT_EQ(app_packet.type, fiber::quic::QuicPacketType::Short);
+    EXPECT_EQ(app_packet.level, fiber::quic::QuicEncryptionLevel::Application);
+    EXPECT_EQ(app_packet.flags, fiber::quic::kPacketFlagFixed);
+}
+
+TEST(QuicTransportCodecTest, PreservesAndRestoresPacketNumberForSendRollback) {
+    fiber::quic::QuicPacketNumberSpace space{};
+    space.reset(fiber::quic::QuicEncryptionLevel::Initial);
+    auto snapshot = fiber::quic::quic_preserve_packet_number(space);
+
+    EXPECT_EQ(fiber::quic::quic_use_next_packet_number(space), 0U);
+    EXPECT_EQ(fiber::quic::quic_use_next_packet_number(space), 1U);
+    ASSERT_EQ(space.next_packet_number, 2U);
+
+    fiber::quic::quic_restore_packet_number(space, snapshot);
+
+    EXPECT_EQ(space.next_packet_number, 0U);
+}
+
 TEST(QuicTransportCodecTest, ParsesStreamFrameWithOffsetLengthAndFin) {
     const std::array<std::uint8_t, 7> bytes{
             0x0f, // STREAM + OFF + LEN + FIN

@@ -446,6 +446,151 @@ common::IoResult<std::size_t> quic_create_packet_header(QuicWriteCursor &out, co
     return out.offset() - start;
 }
 
+std::uint8_t quic_packet_number_len(std::uint64_t next_packet_number,
+                                    std::uint64_t largest_acked_packet_number) noexcept {
+    std::uint64_t delta = 0;
+    if (largest_acked_packet_number == kUnsetPacketNumber) {
+        delta = next_packet_number == UINT64_MAX ? UINT64_MAX : next_packet_number + 1;
+    } else if (next_packet_number >= largest_acked_packet_number) {
+        delta = next_packet_number - largest_acked_packet_number;
+    }
+
+    if (delta <= 0x7fU) {
+        return 1;
+    }
+    if (delta <= 0x7fffU) {
+        return 2;
+    }
+    if (delta <= 0x7fffffU) {
+        return 3;
+    }
+    return 4;
+}
+
+std::uint8_t quic_packet_number_len(const QuicPacketNumberSpace &space) noexcept {
+    return quic_packet_number_len(space.next_packet_number, space.largest_acked_packet_number);
+}
+
+std::uint32_t quic_truncate_packet_number(std::uint64_t packet_number, std::uint8_t pn_len) noexcept {
+    switch (pn_len) {
+        case 1:
+            return static_cast<std::uint32_t>(packet_number & 0xffU);
+        case 2:
+            return static_cast<std::uint32_t>(packet_number & 0xffffU);
+        case 3:
+            return static_cast<std::uint32_t>(packet_number & 0xffffffU);
+        default:
+            return static_cast<std::uint32_t>(packet_number & 0xffffffffU);
+    }
+}
+
+common::IoResult<std::uint64_t> quic_decode_packet_number(std::uint32_t truncated_packet_number, std::uint8_t pn_len,
+                                                          std::uint64_t largest_received_packet_number) noexcept {
+    if (pn_len == 0 || pn_len > 4) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    const std::uint32_t pn_nbits = static_cast<std::uint32_t>(pn_len) * 8U;
+    const std::uint64_t pn_win = 1ULL << pn_nbits;
+    const std::uint64_t pn_hwin = pn_win / 2;
+    const std::uint64_t pn_mask = pn_win - 1;
+    const std::uint64_t expected_packet_number =
+            largest_received_packet_number == kUnsetPacketNumber ? 0 : largest_received_packet_number + 1;
+
+    std::uint64_t candidate = (expected_packet_number & ~pn_mask) | truncated_packet_number;
+    if (candidate + pn_hwin <= expected_packet_number && candidate < kMaxVarint - pn_win) {
+        candidate += pn_win;
+    } else if (candidate > expected_packet_number + pn_hwin && candidate >= pn_win) {
+        candidate -= pn_win;
+    }
+    return candidate;
+}
+
+common::IoResult<void> quic_read_packet_number(QuicPacketHeader &packet,
+                                               const QuicPacketNumberSpace &space) noexcept {
+    if (packet.protected_pn == nullptr || packet.packet_data == nullptr) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    const std::uint8_t pn_len = static_cast<std::uint8_t>((packet.flags & kPacketFlagPnLengthMask) + 1);
+    const std::uint8_t *packet_end = packet.packet_data + packet.packet_len;
+    if (packet.protected_pn > packet_end || static_cast<std::size_t>(packet_end - packet.protected_pn) < pn_len) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    std::uint32_t truncated = 0;
+    for (std::uint8_t i = 0; i < pn_len; ++i) {
+        truncated = (truncated << 8U) | packet.protected_pn[i];
+    }
+
+    auto decoded = quic_decode_packet_number(truncated, pn_len, space.largest_received_packet_number);
+    if (!decoded) {
+        return std::unexpected(decoded.error());
+    }
+
+    packet.pn_len = pn_len;
+    packet.truncated_pn = truncated;
+    packet.packet_number = *decoded;
+    packet.ciphertext = packet.protected_pn + pn_len;
+    if (packet.long_header) {
+        if (packet.length < pn_len) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        packet.ciphertext_len = static_cast<std::size_t>(packet.length - pn_len);
+    } else {
+        packet.ciphertext_len = static_cast<std::size_t>(packet_end - packet.ciphertext);
+    }
+    return {};
+}
+
+void quic_init_packet_header(QuicPacketHeader &packet, const QuicPacketNumberSpace &space) noexcept {
+    const std::uint8_t pn_len = quic_packet_number_len(space);
+    const std::uint8_t pn_bits = static_cast<std::uint8_t>(pn_len - 1);
+
+    packet.level = space.level;
+    packet.packet_number = space.next_packet_number;
+    packet.pn_len = pn_len;
+    packet.truncated_pn = quic_truncate_packet_number(packet.packet_number, pn_len);
+
+    switch (space.level) {
+        case QuicEncryptionLevel::Initial:
+            packet.long_header = true;
+            packet.type = QuicPacketType::Initial;
+            packet.flags = kPacketFlagLong | kPacketFlagFixed | kLongPacketTypeInitial | pn_bits;
+            break;
+        case QuicEncryptionLevel::Handshake:
+            packet.long_header = true;
+            packet.type = QuicPacketType::Handshake;
+            packet.flags = kPacketFlagLong | kPacketFlagFixed | kLongPacketTypeHandshake | pn_bits;
+            break;
+        case QuicEncryptionLevel::EarlyData:
+            packet.long_header = true;
+            packet.type = QuicPacketType::ZeroRtt;
+            packet.flags = kPacketFlagLong | kPacketFlagFixed | kLongPacketTypeZeroRtt | pn_bits;
+            break;
+        case QuicEncryptionLevel::Application:
+            packet.long_header = false;
+            packet.type = QuicPacketType::Short;
+            packet.flags = kPacketFlagFixed | pn_bits;
+            break;
+    }
+    packet.protected_flags = packet.flags;
+}
+
+QuicPacketNumberSpaceSnapshot quic_preserve_packet_number(const QuicPacketNumberSpace &space) noexcept {
+    return QuicPacketNumberSpaceSnapshot{space.next_packet_number};
+}
+
+void quic_restore_packet_number(QuicPacketNumberSpace &space, QuicPacketNumberSpaceSnapshot snapshot) noexcept {
+    space.next_packet_number = snapshot.next_packet_number;
+}
+
+std::uint64_t quic_use_next_packet_number(QuicPacketNumberSpace &space) noexcept {
+    const std::uint64_t packet_number = space.next_packet_number;
+    ++space.next_packet_number;
+    return packet_number;
+}
+
 std::size_t quic_packet_payload_capacity(const QuicPacketHeader &packet, std::size_t target_packet_len) noexcept {
     std::size_t len = 0;
 

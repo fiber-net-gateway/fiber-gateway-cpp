@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "../common/IntrusiveList.h"
 #include "QuicConnection.h"
 
 namespace fiber::quic {
@@ -230,6 +231,8 @@ struct QuicFrame {
         QuicPathChallengeFrame path_challenge;
         QuicPathChallengeFrame path_response;
     } u;
+
+    common::IntrusiveListHook queue_hook{};
 };
 
 struct QuicFrameParseResult {

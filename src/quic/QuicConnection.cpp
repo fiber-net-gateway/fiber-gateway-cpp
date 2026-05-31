@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstring>
 
+#include "QuicProtocol.h"
+
 namespace fiber::quic {
 
 namespace {
@@ -23,6 +25,14 @@ constexpr std::uint64_t kStreamIncrement = 4;
     return id;
 }
 
+[[nodiscard]] common::IntrusiveListHook &queue_hook_of(QuicFrame &frame) noexcept {
+    return frame.queue_hook;
+}
+
+[[nodiscard]] const common::IntrusiveListHook &queue_hook_of(const QuicFrame &frame) noexcept {
+    return frame.queue_hook;
+}
+
 } // namespace
 
 common::IoResult<QuicConnectionId> QuicConnectionId::from_bytes(const std::uint8_t *data, std::size_t len) noexcept {
@@ -38,10 +48,117 @@ common::IoResult<QuicConnectionId> QuicConnectionId::from_bytes(const std::uint8
     return out;
 }
 
+QuicFrame *QuicFrameQueue::front() noexcept {
+    return owner_from_hook(head_);
+}
+
+const QuicFrame *QuicFrameQueue::front() const noexcept {
+    return owner_from_hook(head_);
+}
+
+QuicFrame *QuicFrameQueue::back() noexcept {
+    return owner_from_hook(tail_);
+}
+
+const QuicFrame *QuicFrameQueue::back() const noexcept {
+    return owner_from_hook(tail_);
+}
+
+void QuicFrameQueue::push_back(QuicFrame &frame) noexcept {
+    common::IntrusiveListHook &hook = queue_hook_of(frame);
+    if (hook.in_list) {
+        return;
+    }
+
+    hook.prev = tail_;
+    hook.next = nullptr;
+    if (tail_ != nullptr) {
+        tail_->next = &hook;
+    } else {
+        head_ = &hook;
+    }
+    tail_ = &hook;
+    hook.in_list = true;
+}
+
+void QuicFrameQueue::erase(QuicFrame &frame) noexcept {
+    common::IntrusiveListHook &hook = queue_hook_of(frame);
+    if (!hook.in_list) {
+        return;
+    }
+
+    if (hook.prev != nullptr) {
+        hook.prev->next = hook.next;
+    } else {
+        head_ = hook.next;
+    }
+    if (hook.next != nullptr) {
+        hook.next->prev = hook.prev;
+    } else {
+        tail_ = hook.prev;
+    }
+    hook.prev = nullptr;
+    hook.next = nullptr;
+    hook.in_list = false;
+}
+
+QuicFrame *QuicFrameQueue::owner_from_hook(common::IntrusiveListHook *hook) noexcept {
+    if (hook == nullptr) {
+        return nullptr;
+    }
+    return reinterpret_cast<QuicFrame *>(reinterpret_cast<std::uint8_t *>(hook) - offsetof(QuicFrame, queue_hook));
+}
+
+const QuicFrame *QuicFrameQueue::owner_from_hook(const common::IntrusiveListHook *hook) noexcept {
+    if (hook == nullptr) {
+        return nullptr;
+    }
+    return reinterpret_cast<const QuicFrame *>(reinterpret_cast<const std::uint8_t *>(hook) -
+                                               offsetof(QuicFrame, queue_hook));
+}
+
+QuicPacketNumberSpace::QuicPacketNumberSpace() noexcept {
+    reset(QuicEncryptionLevel::Initial);
+}
+
+void QuicPacketNumberSpace::reset(QuicEncryptionLevel space_level) noexcept {
+    level = space_level;
+    crypto_sent = 0;
+    next_packet_number = 0;
+    largest_acked_packet_number = kUnsetPacketNumber;
+    largest_received_packet_number = kUnsetPacketNumber;
+    pending_ack = kUnsetPacketNumber;
+    largest_range = kUnsetPacketNumber;
+    first_range = kUnsetPacketNumber;
+    largest_received_time = std::chrono::milliseconds{0};
+    ack_delay_start = std::chrono::milliseconds{0};
+    ack_range_count = 0;
+    ack_ranges = {};
+    send_ack = false;
+}
+
+void QuicPacketNumberSpace::record_received_packet_number(std::uint64_t packet_number) noexcept {
+    if (largest_received_packet_number == kUnsetPacketNumber || packet_number > largest_received_packet_number) {
+        largest_received_packet_number = packet_number;
+    }
+    pending_ack = packet_number;
+    send_ack = true;
+}
+
+void QuicPacketNumberSpace::record_acked_packet_number(std::uint64_t packet_number) noexcept {
+    if (largest_acked_packet_number == kUnsetPacketNumber || packet_number > largest_acked_packet_number) {
+        largest_acked_packet_number = packet_number;
+    }
+}
+
 QuicConnection::QuicConnection(const Options &options) noexcept :
     options_(options),
     next_local_bidi_stream_id_(initial_stream_id(options.role, QuicStreamType::Bidirectional)),
-    next_local_uni_stream_id_(initial_stream_id(options.role, QuicStreamType::Unidirectional)) {}
+    next_local_uni_stream_id_(initial_stream_id(options.role, QuicStreamType::Unidirectional)) {
+    packet_number_spaces_[0].reset(QuicEncryptionLevel::Initial);
+    packet_number_spaces_[1].reset(QuicEncryptionLevel::Handshake);
+    packet_number_spaces_[2].reset(QuicEncryptionLevel::Application);
+}
 
 common::IoResult<void> QuicConnection::start_handshake() noexcept {
     if (state_ != QuicConnectionState::Init) {
@@ -131,6 +248,27 @@ bool QuicConnection::is_unidirectional_stream(std::uint64_t stream_id) noexcept 
 
 QuicStreamType QuicConnection::stream_type(std::uint64_t stream_id) noexcept {
     return is_bidirectional_stream(stream_id) ? QuicStreamType::Bidirectional : QuicStreamType::Unidirectional;
+}
+
+QuicPacketNumberSpace &QuicConnection::packet_number_space(QuicEncryptionLevel level) noexcept {
+    return packet_number_spaces_[packet_number_space_index(level)];
+}
+
+const QuicPacketNumberSpace &QuicConnection::packet_number_space(QuicEncryptionLevel level) const noexcept {
+    return packet_number_spaces_[packet_number_space_index(level)];
+}
+
+std::size_t QuicConnection::packet_number_space_index(QuicEncryptionLevel level) noexcept {
+    switch (level) {
+        case QuicEncryptionLevel::Initial:
+            return 0;
+        case QuicEncryptionLevel::Handshake:
+            return 1;
+        case QuicEncryptionLevel::EarlyData:
+        case QuicEncryptionLevel::Application:
+            return 2;
+    }
+    return 2;
 }
 
 std::uint8_t QuicConnection::local_initiator_bit() const noexcept {

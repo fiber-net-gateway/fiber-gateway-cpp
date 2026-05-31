@@ -21,6 +21,20 @@ quic_parse_packet_header(const std::uint8_t *datagram, std::size_t datagram_len,
                                                                       const QuicPacketHeader &packet,
                                                                       std::uint8_t **packet_number_pos) noexcept;
 
+[[nodiscard]] std::uint8_t quic_packet_number_len(std::uint64_t next_packet_number,
+                                                  std::uint64_t largest_acked_packet_number) noexcept;
+[[nodiscard]] std::uint8_t quic_packet_number_len(const QuicPacketNumberSpace &space) noexcept;
+[[nodiscard]] std::uint32_t quic_truncate_packet_number(std::uint64_t packet_number, std::uint8_t pn_len) noexcept;
+[[nodiscard]] common::IoResult<std::uint64_t>
+quic_decode_packet_number(std::uint32_t truncated_packet_number, std::uint8_t pn_len,
+                          std::uint64_t largest_received_packet_number) noexcept;
+[[nodiscard]] common::IoResult<void> quic_read_packet_number(QuicPacketHeader &packet,
+                                                             const QuicPacketNumberSpace &space) noexcept;
+void quic_init_packet_header(QuicPacketHeader &packet, const QuicPacketNumberSpace &space) noexcept;
+[[nodiscard]] QuicPacketNumberSpaceSnapshot quic_preserve_packet_number(const QuicPacketNumberSpace &space) noexcept;
+void quic_restore_packet_number(QuicPacketNumberSpace &space, QuicPacketNumberSpaceSnapshot snapshot) noexcept;
+[[nodiscard]] std::uint64_t quic_use_next_packet_number(QuicPacketNumberSpace &space) noexcept;
+
 [[nodiscard]] std::size_t quic_packet_payload_capacity(const QuicPacketHeader &packet,
                                                        std::size_t target_packet_len) noexcept;
 
