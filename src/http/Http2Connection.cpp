@@ -343,6 +343,7 @@ fiber::async::Task<void> Http2Connection::close_transport_after_send_loop() noex
     if (transport_ && transport_->valid()) {
         transport_->close();
     }
+    co_return;
 }
 
 fiber::async::DetachedTask Http2Connection::close_transport_after_send_loop_task(Http2Connection *connection) noexcept {

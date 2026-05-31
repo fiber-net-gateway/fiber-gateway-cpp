@@ -454,6 +454,18 @@ struct ClientGoawayRunOutcome {
     std::string written;
 };
 
+DetachedTask run_http2_connection_capture_task(fiber::http::Http2Connection *connection,
+                                               std::shared_ptr<fiber::common::IoResult<void>> result,
+                                               std::shared_ptr<std::atomic_bool> done) {
+    if (connection) {
+        *result = co_await connection->run();
+    }
+    if (done) {
+        done->store(true, std::memory_order_release);
+    }
+    co_return;
+}
+
 struct ControlRunOutcome {
     fiber::common::IoResult<void> result;
     std::string written;
@@ -1529,10 +1541,8 @@ DetachedTask run_client_exchange_open_after_goaway(std::shared_ptr<std::promise<
 
     auto run_result = std::make_shared<fiber::common::IoResult<void>>();
     auto run_done = std::make_shared<std::atomic_bool>(false);
-    fiber::async::spawn([connection = &connection, run_result, run_done]() -> DetachedTask {
-        *run_result = co_await connection->run();
-        run_done->store(true, std::memory_order_release);
-        co_return;
+    fiber::async::spawn([connection = &connection, run_result, run_done]() {
+        return run_http2_connection_capture_task(connection, run_result, run_done);
     });
 
     for (int i = 0; i < 50 && connection.state() != fiber::http::Http2Connection::State::Draining &&
