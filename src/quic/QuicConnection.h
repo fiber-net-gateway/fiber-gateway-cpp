@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
@@ -14,6 +15,11 @@
 namespace fiber::quic {
 
 inline constexpr std::size_t kMaxConnectionIdLength = 20;
+inline constexpr std::size_t kQuicPacketNumberSpaceCount = 3;
+inline constexpr std::size_t kQuicMaxAckRanges = 32;
+
+enum class QuicEncryptionLevel : std::uint8_t;
+struct QuicFrame;
 
 enum class QuicConnectionRole : std::uint8_t {
     Client,
@@ -65,6 +71,62 @@ struct QuicConnectionId {
     static common::IoResult<QuicConnectionId> from_bytes(const std::uint8_t *data, std::size_t len) noexcept;
 };
 
+struct QuicAckRange {
+    std::uint64_t gap = 0;
+    std::uint64_t range = 0;
+};
+
+struct QuicFrameQueue {
+    [[nodiscard]] bool empty() const noexcept { return head_ == nullptr; }
+    [[nodiscard]] QuicFrame *front() noexcept;
+    [[nodiscard]] const QuicFrame *front() const noexcept;
+    [[nodiscard]] QuicFrame *back() noexcept;
+    [[nodiscard]] const QuicFrame *back() const noexcept;
+
+    void push_back(QuicFrame &frame) noexcept;
+    void erase(QuicFrame &frame) noexcept;
+
+private:
+    [[nodiscard]] static QuicFrame *owner_from_hook(common::IntrusiveListHook *hook) noexcept;
+    [[nodiscard]] static const QuicFrame *owner_from_hook(const common::IntrusiveListHook *hook) noexcept;
+
+    common::IntrusiveListHook *head_ = nullptr;
+    common::IntrusiveListHook *tail_ = nullptr;
+};
+
+struct QuicPacketNumberSpace {
+    QuicPacketNumberSpace() noexcept;
+
+    void reset(QuicEncryptionLevel space_level) noexcept;
+    void record_received_packet_number(std::uint64_t packet_number) noexcept;
+    void record_acked_packet_number(std::uint64_t packet_number) noexcept;
+
+    QuicEncryptionLevel level;
+
+    std::uint64_t crypto_sent = 0;
+
+    std::uint64_t next_packet_number = 0;
+    std::uint64_t largest_acked_packet_number = 0;
+    std::uint64_t largest_received_packet_number = 0;
+
+    QuicFrameQueue pending_frames{};
+    QuicFrameQueue sending_frames{};
+    QuicFrameQueue sent_frames{};
+
+    std::uint64_t pending_ack = 0;
+    std::uint64_t largest_range = 0;
+    std::uint64_t first_range = 0;
+    std::chrono::milliseconds largest_received_time{0};
+    std::chrono::milliseconds ack_delay_start{0};
+    std::uint32_t ack_range_count = 0;
+    std::array<QuicAckRange, kQuicMaxAckRanges> ack_ranges{};
+    bool send_ack = false;
+};
+
+struct QuicPacketNumberSpaceSnapshot {
+    std::uint64_t next_packet_number = 0;
+};
+
 class QuicConnection : public common::NonCopyable, public common::NonMovable {
 public:
     struct Options {
@@ -114,6 +176,10 @@ public:
     [[nodiscard]] static bool is_unidirectional_stream(std::uint64_t stream_id) noexcept;
     [[nodiscard]] static QuicStreamType stream_type(std::uint64_t stream_id) noexcept;
 
+    [[nodiscard]] QuicPacketNumberSpace &packet_number_space(QuicEncryptionLevel level) noexcept;
+    [[nodiscard]] const QuicPacketNumberSpace &packet_number_space(QuicEncryptionLevel level) const noexcept;
+    [[nodiscard]] static std::size_t packet_number_space_index(QuicEncryptionLevel level) noexcept;
+
 private:
     [[nodiscard]] std::uint8_t local_initiator_bit() const noexcept;
     [[nodiscard]] std::uint64_t local_stream_limit(QuicStreamType type) const noexcept;
@@ -126,6 +192,7 @@ private:
     std::uint64_t next_local_uni_stream_id_ = 0;
     std::uint64_t largest_peer_bidi_sequence_ = 0;
     std::uint64_t largest_peer_uni_sequence_ = 0;
+    std::array<QuicPacketNumberSpace, kQuicPacketNumberSpaceCount> packet_number_spaces_{};
 };
 
 } // namespace fiber::quic
