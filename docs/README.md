@@ -125,10 +125,6 @@ The following examples are built by default:
 - `dns_dig`
 - `git_http_repo_server`
 
-When `lsquic` and its dependencies are available, the build also includes:
-
-- `http3_demo_lsquic`
-
 ### `apps/`
 
 `apps/` is the multi-file application directory used for real runnable programs built on top of `fiber_lib`. Compared with `example/`, `apps/` is intended for complete applications rather than minimal demonstrations.
@@ -174,8 +170,6 @@ The project checks compiler capability during configuration.
 ### Optional Dependencies
 
 - GoogleTest: used for tests; can be downloaded automatically when `FIBER_FETCH_DEPS=ON`.
-- zlib: required for `lsquic` and the HTTP/3 example.
-- lsquic: enables the `http3_demo_lsquic` example.
 - jemalloc: optional runtime allocator for final executables.
 
 ## Quick Start

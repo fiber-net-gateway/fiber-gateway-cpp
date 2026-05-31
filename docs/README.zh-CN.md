@@ -125,10 +125,6 @@
 - `dns_dig`
 - `git_http_repo_server`
 
-当 `lsquic` 及其依赖可用时，还会额外构建：
-
-- `http3_demo_lsquic`
-
 ### `apps/`
 
 `apps/` 是建立在 `fiber_lib` 之上的多文件应用目录。与 `example/` 相比，`apps/` 面向的是完整应用，而不是最小演示。
@@ -174,8 +170,6 @@
 ### 可选依赖
 
 - GoogleTest：用于测试；在 `FIBER_FETCH_DEPS=ON` 时可自动下载。
-- zlib：`lsquic` 和 HTTP/3 示例所需。
-- lsquic：启用 `http3_demo_lsquic` 示例。
 - jemalloc：可选运行时分配器。
 
 ## 快速开始
