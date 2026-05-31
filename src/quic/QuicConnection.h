@@ -6,6 +6,9 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <openssl/aead.h>
+#include <openssl/aes.h>
+
 #include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
@@ -17,6 +20,12 @@ namespace fiber::quic {
 inline constexpr std::size_t kMaxConnectionIdLength = 20;
 inline constexpr std::size_t kQuicPacketNumberSpaceCount = 3;
 inline constexpr std::size_t kQuicMaxAckRanges = 32;
+inline constexpr std::size_t kQuicInitialSecretLength = 32;
+inline constexpr std::size_t kQuicInitialKeyLength = 16;
+inline constexpr std::size_t kQuicInitialIvLength = 12;
+inline constexpr std::size_t kQuicInitialHeaderProtectionKeyLength = 16;
+inline constexpr std::size_t kQuicHeaderProtectionSampleLength = 16;
+inline constexpr std::size_t kQuicHeaderProtectionMaskLength = 5;
 
 enum class QuicEncryptionLevel : std::uint8_t;
 struct QuicFrame;
@@ -127,6 +136,36 @@ struct QuicPacketNumberSpaceSnapshot {
     std::uint64_t next_packet_number = 0;
 };
 
+enum class QuicCryptoSuite : std::uint8_t {
+    InitialAes128GcmSha256,
+};
+
+struct QuicPacketProtectionKeys : public common::NonCopyable, public common::NonMovable {
+    QuicPacketProtectionKeys() noexcept;
+    ~QuicPacketProtectionKeys();
+
+    void reset() noexcept;
+
+    QuicCryptoSuite suite = QuicCryptoSuite::InitialAes128GcmSha256;
+    std::array<std::uint8_t, kQuicInitialKeyLength> key{};
+    std::array<std::uint8_t, kQuicInitialIvLength> iv{};
+    std::array<std::uint8_t, kQuicInitialHeaderProtectionKeyLength> hp{};
+    EVP_AEAD_CTX aead{};
+    AES_KEY hp_key{};
+    bool aead_initialized = false;
+    bool ready = false;
+};
+
+struct QuicCryptoState : public common::NonCopyable, public common::NonMovable {
+    QuicCryptoState() noexcept = default;
+
+    void reset() noexcept;
+
+    QuicPacketProtectionKeys initial_read{};
+    QuicPacketProtectionKeys initial_write{};
+    bool initial_ready = false;
+};
+
 class QuicConnection : public common::NonCopyable, public common::NonMovable {
 public:
     struct Options {
@@ -179,6 +218,9 @@ public:
     [[nodiscard]] QuicPacketNumberSpace &packet_number_space(QuicEncryptionLevel level) noexcept;
     [[nodiscard]] const QuicPacketNumberSpace &packet_number_space(QuicEncryptionLevel level) const noexcept;
     [[nodiscard]] static std::size_t packet_number_space_index(QuicEncryptionLevel level) noexcept;
+    [[nodiscard]] QuicCryptoState &crypto() noexcept { return crypto_; }
+    [[nodiscard]] const QuicCryptoState &crypto() const noexcept { return crypto_; }
+    common::IoResult<void> init_initial_crypto(const QuicConnectionId &original_dcid) noexcept;
 
 private:
     [[nodiscard]] std::uint8_t local_initiator_bit() const noexcept;
@@ -193,6 +235,7 @@ private:
     std::uint64_t largest_peer_bidi_sequence_ = 0;
     std::uint64_t largest_peer_uni_sequence_ = 0;
     std::array<QuicPacketNumberSpace, kQuicPacketNumberSpaceCount> packet_number_spaces_{};
+    QuicCryptoState crypto_{};
 };
 
 } // namespace fiber::quic
