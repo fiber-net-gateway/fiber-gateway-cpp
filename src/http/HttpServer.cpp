@@ -28,7 +28,7 @@ fiber::common::IoResult<void> HttpServer::bind(const net::SocketAddress &addr, c
     }
     if (options_.tls.enabled) {
         normalize_http_server_alpn(options_.tls);
-        auto ctx = std::make_unique<TlsServerContext>(options_.tls);
+        auto ctx = std::make_unique<net::TlsServerContext>(options_.tls);
         auto init_result = ctx->init();
         if (!init_result) {
             return std::unexpected(init_result.error());

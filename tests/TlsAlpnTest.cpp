@@ -8,7 +8,7 @@
 namespace {
 
 TEST(TlsAlpnTest, NormalizeHttp1AlpnPrefersHttp11AndDropsH2) {
-    fiber::http::TlsOptions options;
+    fiber::net::TlsOptions options;
     options.alpn = {"h2", "", "acme/1", "http/1.1", "custom"};
 
     fiber::http::normalize_http1_alpn(options);
@@ -18,7 +18,7 @@ TEST(TlsAlpnTest, NormalizeHttp1AlpnPrefersHttp11AndDropsH2) {
 }
 
 TEST(TlsAlpnTest, NormalizeHttp1AlpnAddsHttp11WhenMissing) {
-    fiber::http::TlsOptions options;
+    fiber::net::TlsOptions options;
     options.alpn.clear();
 
     fiber::http::normalize_http1_alpn(options);
@@ -28,7 +28,7 @@ TEST(TlsAlpnTest, NormalizeHttp1AlpnAddsHttp11WhenMissing) {
 }
 
 TEST(TlsAlpnTest, NormalizeHttpServerAlpnPrefersH2ThenHttp11) {
-    fiber::http::TlsOptions options;
+    fiber::net::TlsOptions options;
     options.alpn = {"custom", "http/1.1", "h2", "", "custom"};
 
     fiber::http::normalize_http_server_alpn(options);
@@ -38,7 +38,7 @@ TEST(TlsAlpnTest, NormalizeHttpServerAlpnPrefersH2ThenHttp11) {
 }
 
 TEST(TlsAlpnTest, NormalizeHttpServerAlpnAddsSupportedDefaultsWhenMissing) {
-    fiber::http::TlsOptions options;
+    fiber::net::TlsOptions options;
     options.alpn = {"acme/1"};
 
     fiber::http::normalize_http_server_alpn(options);
@@ -52,7 +52,7 @@ TEST(TlsAlpnTest, AlpnProtocolsViewContainsOfferedProtocols) {
             0x00, 0x0c, 0x02, 'h', '2', 0x08, 'h', 't', 't', 'p', '/', '1', '.', '1',
     };
 
-    fiber::http::TlsAlpnProtocolsView offered(encoded, sizeof(encoded));
+    fiber::net::TlsAlpnProtocolsView offered(encoded, sizeof(encoded));
 
     EXPECT_TRUE(offered.contains("h2"));
     EXPECT_TRUE(offered.contains("http/1.1"));

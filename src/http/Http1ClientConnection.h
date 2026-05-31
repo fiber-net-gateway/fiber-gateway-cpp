@@ -9,7 +9,7 @@
 #include "../common/NonMovable.h"
 #include "../event/EventLoop.h"
 #include "../net/SocketAddress.h"
-#include "TlsContext.h"
+#include "../net/TlsContext.h"
 
 namespace fiber::http {
 
@@ -18,7 +18,7 @@ class HttpTransport;
 
 struct Http1ClientConnectionOptions {
     net::SocketAddress peer_addr{};
-    TlsOptions tls{};
+    net::TlsOptions tls{};
     std::chrono::milliseconds connect_timeout{10000};
 };
 
@@ -57,7 +57,7 @@ private:
 
     event::EventLoop *loop_ = nullptr;
     Http1ClientConnectionOptions options_{};
-    TlsContext tls_ctx_;
+    net::TlsContext tls_ctx_;
     std::unique_ptr<HttpTransport> transport_;
     ClientHttp1Exchange *active_exchange_ = nullptr;
     State state_ = State::Init;

@@ -7,9 +7,9 @@
 #include <openssl/ssl.h>
 #include <openssl/tls1.h>
 
-#include "../net/SocketAddress.h"
+#include "SocketAddress.h"
 
-namespace fiber::http {
+namespace fiber::net {
 
 namespace {
 
@@ -97,7 +97,7 @@ enum ssl_select_cert_result_t select_server_certificate_cb(const SSL_CLIENT_HELL
     }
 
     auto *remote_addr =
-            static_cast<const net::SocketAddress *>(SSL_get_ex_data(client_hello->ssl, ssl_remote_addr_ex_index()));
+            static_cast<const SocketAddress *>(SSL_get_ex_data(client_hello->ssl, ssl_remote_addr_ex_index()));
     const char *server_name = SSL_get_servername(client_hello->ssl, TLSEXT_NAMETYPE_host_name);
     TlsIdentitySelectInput hello_view{
             .server_name = server_name ? std::string_view(server_name) : std::string_view{},
@@ -257,7 +257,7 @@ common::IoResult<void> TlsServerContext::init() {
 
 SSL_CTX *TlsServerContext::raw() const noexcept { return base_context_ ? base_context_->raw() : nullptr; }
 
-common::IoResult<void> TlsServerContext::bind_ssl(SSL *ssl, const net::SocketAddress *remote_addr) noexcept {
+common::IoResult<void> TlsServerContext::bind_ssl(SSL *ssl, const SocketAddress *remote_addr) noexcept {
     if (!ssl || !base_context_ || !base_context_->raw()) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -369,4 +369,4 @@ TlsContext *TlsServerContext::find_identity_by_name(std::string_view name) const
     return nullptr;
 }
 
-} // namespace fiber::http
+} // namespace fiber::net

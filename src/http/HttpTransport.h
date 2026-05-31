@@ -15,7 +15,7 @@
 #include "../net/TcpListener.h"
 #include "../net/TcpStream.h"
 #include "../net/TlsTcpStream.h"
-#include "TlsContext.h"
+#include "../net/TlsContext.h"
 
 namespace fiber::http {
 
@@ -77,9 +77,9 @@ class TlsTransport final : public HttpTransport {
 public:
     ~TlsTransport() override;
     static common::IoResult<std::unique_ptr<TlsTransport>> create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                  TlsContext &context);
+                                                                  net::TlsContext &context);
     static common::IoResult<std::unique_ptr<TlsTransport>> create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                  TlsServerContext &context);
+                                                                  net::TlsServerContext &context);
 
     fiber::async::Task<common::IoResult<void>> handshake(std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds timeout) override;
@@ -101,15 +101,15 @@ public:
     [[nodiscard]] event::EventLoop &loop() const noexcept override;
 
 private:
-    TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, TlsContext &context);
-    TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, TlsServerContext &context);
+    TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, net::TlsContext &context);
+    TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, net::TlsServerContext &context);
     common::IoResult<void> init();
     static void configure_ssl(SSL *ssl, void *ctx) noexcept;
     [[nodiscard]] bool handshake_done() const noexcept;
 
     net::TlsTcpStream stream_;
-    TlsContext *context_ = nullptr;
-    TlsServerContext *server_context_ = nullptr;
+    net::TlsContext *context_ = nullptr;
+    net::TlsServerContext *server_context_ = nullptr;
 };
 
 } // namespace fiber::http

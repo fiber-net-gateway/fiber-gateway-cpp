@@ -1,5 +1,5 @@
-#ifndef FIBER_HTTP_TLS_CONTEXT_H
-#define FIBER_HTTP_TLS_CONTEXT_H
+#ifndef FIBER_NET_TLS_CONTEXT_H
+#define FIBER_NET_TLS_CONTEXT_H
 
 #include <memory>
 #include <string>
@@ -19,10 +19,8 @@ struct ssl_early_callback_ctx;
 typedef struct ssl_early_callback_ctx SSL_CLIENT_HELLO;
 
 namespace fiber::net {
-class SocketAddress;
-}
 
-namespace fiber::http {
+class SocketAddress;
 
 class TlsContext : public common::NonCopyable, public common::NonMovable {
 public:
@@ -57,7 +55,7 @@ public:
     common::IoResult<void> init();
 
     [[nodiscard]] SSL_CTX *raw() const noexcept;
-    common::IoResult<void> bind_ssl(SSL *ssl, const net::SocketAddress *remote_addr) noexcept;
+    common::IoResult<void> bind_ssl(SSL *ssl, const SocketAddress *remote_addr) noexcept;
     [[nodiscard]] TlsContext *select_identity(const TlsClientHelloView &client_hello) const noexcept;
     [[nodiscard]] TlsContext *find_identity_by_name(std::string_view name) const noexcept;
     [[nodiscard]] TlsContext *default_identity() const noexcept { return default_identity_.get(); }
@@ -81,6 +79,6 @@ private:
     std::size_t identity_count_ = 0;
 };
 
-} // namespace fiber::http
+} // namespace fiber::net
 
-#endif // FIBER_HTTP_TLS_CONTEXT_H
+#endif // FIBER_NET_TLS_CONTEXT_H
