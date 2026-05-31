@@ -25,8 +25,6 @@ These examples usually have the following characteristics:
   A DNS query example showing resolver usage, address resolution, and result handling.
 - `git_http_repo_server.cpp`
   A more complete HTTP server example showing more involved protocol handling and service logic.
-- `http3_demo_lsquic.cpp`
-  An experimental HTTP/3 example based on `lsquic`; it is built only when the required dependencies are available.
 
 ## Build
 

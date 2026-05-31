@@ -25,8 +25,6 @@
   DNS 查询示例，展示 resolver 使用、地址解析和结果处理。
 - `git_http_repo_server.cpp`
   更完整的 HTTP 服务端示例，展示更复杂的协议处理和服务逻辑。
-- `http3_demo_lsquic.cpp`
-  基于 `lsquic` 的实验性 HTTP/3 示例；只有在相关依赖可用时才会构建。
 
 ## 构建
 
