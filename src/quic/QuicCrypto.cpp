@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include <openssl/aead.h>
+#include <openssl/chacha.h>
 #include <openssl/evp.h>
 #include <openssl/hkdf.h>
 
@@ -25,7 +26,38 @@ constexpr char kQuicKeyLabel[] = "quic key";
 constexpr char kQuicIvLabel[] = "quic iv";
 constexpr char kQuicHeaderProtectionLabel[] = "quic hp";
 
-[[nodiscard]] common::IoResult<void> hkdf_expand_label(std::uint8_t *out, std::size_t out_len,
+constexpr std::uint8_t kRetryIntegrityKey[] = {
+        0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a,
+        0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8, 0x4e,
+};
+
+constexpr std::uint8_t kRetryIntegrityNonce[] = {
+        0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2, 0x23, 0x98, 0x25, 0xbb,
+};
+
+struct SuiteSpec {
+    const EVP_AEAD *aead = nullptr;
+    const EVP_MD *digest = nullptr;
+    std::size_t key_len = 0;
+    std::size_t secret_len = 0;
+    std::size_t hp_len = 0;
+    bool hp_chacha20 = false;
+};
+
+[[nodiscard]] SuiteSpec suite_spec(QuicCryptoSuite suite) noexcept {
+    switch (suite) {
+        case QuicCryptoSuite::InitialAes128GcmSha256:
+        case QuicCryptoSuite::Aes128GcmSha256:
+            return {EVP_aead_aes_128_gcm(), EVP_sha256(), 16, 32, 16, false};
+        case QuicCryptoSuite::Aes256GcmSha384:
+            return {EVP_aead_aes_256_gcm(), EVP_sha384(), 32, 48, 32, false};
+        case QuicCryptoSuite::ChaCha20Poly1305Sha256:
+            return {EVP_aead_chacha20_poly1305(), EVP_sha256(), 32, 32, 32, true};
+    }
+    return {};
+}
+
+[[nodiscard]] common::IoResult<void> hkdf_expand_label(const EVP_MD *digest, std::uint8_t *out, std::size_t out_len,
                                                        const std::uint8_t *secret, std::size_t secret_len,
                                                        const char *label, const std::uint8_t *context,
                                                        std::size_t context_len) noexcept {
@@ -55,7 +87,7 @@ constexpr char kQuicHeaderProtectionLabel[] = "quic hp";
         offset += context_len;
     }
 
-    if (!HKDF_expand(out, out_len, EVP_sha256(), secret, secret_len, info, offset)) {
+    if (!HKDF_expand(out, out_len, digest, secret, secret_len, info, offset)) {
         return std::unexpected(common::IoErr::Invalid);
     }
     return {};
@@ -64,34 +96,62 @@ constexpr char kQuicHeaderProtectionLabel[] = "quic hp";
 [[nodiscard]] common::IoResult<void>
 derive_packet_protection_keys(QuicPacketProtectionKeys &keys,
                               const std::array<std::uint8_t, kQuicInitialSecretLength> &secret) noexcept {
-    keys.reset();
-    keys.suite = QuicCryptoSuite::InitialAes128GcmSha256;
+    return quic_set_packet_protection_secret(keys, QuicCryptoSuite::InitialAes128GcmSha256, secret.data(),
+                                             secret.size());
+}
 
-    auto derived = hkdf_expand_label(keys.key.data(), keys.key.size(), secret.data(), secret.size(), kQuicKeyLabel,
+[[nodiscard]] common::IoResult<void> init_aes_header_protection(QuicPacketProtectionKeys &keys) noexcept {
+    if (AES_set_encrypt_key(keys.hp.data(), static_cast<unsigned>(keys.hp_len * 8U), &keys.hp_key) != 0) {
+        keys.reset();
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return {};
+}
+
+[[nodiscard]] common::IoResult<void>
+derive_packet_protection_keys_from_secret(QuicPacketProtectionKeys &keys, QuicCryptoSuite suite,
+                                          const std::uint8_t *secret, std::size_t secret_len) noexcept {
+    const SuiteSpec spec = suite_spec(suite);
+    if (spec.aead == nullptr || spec.digest == nullptr || secret == nullptr || secret_len != spec.secret_len) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    keys.reset();
+    keys.suite = suite;
+    keys.secret_len = secret_len;
+    keys.key_len = spec.key_len;
+    keys.iv_len = kQuicIvLength;
+    keys.hp_len = spec.hp_len;
+    keys.hp_chacha20 = spec.hp_chacha20;
+    std::memcpy(keys.secret.data(), secret, secret_len);
+
+    auto derived = hkdf_expand_label(spec.digest, keys.key.data(), keys.key_len, secret, secret_len, kQuicKeyLabel,
                                      nullptr, 0);
     if (!derived) {
         return std::unexpected(derived.error());
     }
-    derived = hkdf_expand_label(keys.iv.data(), keys.iv.size(), secret.data(), secret.size(), kQuicIvLabel, nullptr, 0);
+    derived = hkdf_expand_label(spec.digest, keys.iv.data(), keys.iv_len, secret, secret_len, kQuicIvLabel, nullptr, 0);
     if (!derived) {
         return std::unexpected(derived.error());
     }
-    derived = hkdf_expand_label(keys.hp.data(), keys.hp.size(), secret.data(), secret.size(),
+    derived = hkdf_expand_label(spec.digest, keys.hp.data(), keys.hp_len, secret, secret_len,
                                 kQuicHeaderProtectionLabel, nullptr, 0);
     if (!derived) {
         return std::unexpected(derived.error());
     }
 
-    if (!EVP_AEAD_CTX_init(&keys.aead, EVP_aead_aes_128_gcm(), keys.key.data(), keys.key.size(),
+    if (!EVP_AEAD_CTX_init(&keys.aead, spec.aead, keys.key.data(), keys.key_len,
                            EVP_AEAD_DEFAULT_TAG_LENGTH, nullptr)) {
         keys.reset();
         return std::unexpected(common::IoErr::Invalid);
     }
     keys.aead_initialized = true;
 
-    if (AES_set_encrypt_key(keys.hp.data(), static_cast<unsigned>(keys.hp.size() * 8U), &keys.hp_key) != 0) {
-        keys.reset();
-        return std::unexpected(common::IoErr::Invalid);
+    if (!keys.hp_chacha20) {
+        auto hp = init_aes_header_protection(keys);
+        if (!hp) {
+            return std::unexpected(hp.error());
+        }
     }
 
     keys.ready = true;
@@ -120,9 +180,9 @@ derive_packet_protection_keys(QuicPacketProtectionKeys &keys,
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    std::memcpy(nonce, keys.iv.data(), keys.iv.size());
+    std::memcpy(nonce, keys.iv.data(), keys.iv_len);
     for (std::size_t i = 0; i < 8; ++i) {
-        nonce[kQuicInitialIvLength - 1 - i] ^=
+        nonce[kQuicIvLength - 1 - i] ^=
                 static_cast<std::uint8_t>((packet_number >> static_cast<unsigned>(i * 8U)) & 0xffU);
     }
     return {};
@@ -147,12 +207,12 @@ common::IoResult<QuicInitialSecrets> quic_derive_initial_secrets(const QuicConne
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    auto expanded = hkdf_expand_label(secrets.client.data(), secrets.client.size(), secrets.initial.data(),
+    auto expanded = hkdf_expand_label(EVP_sha256(), secrets.client.data(), secrets.client.size(), secrets.initial.data(),
                                       secrets.initial.size(), kClientInitialLabel, nullptr, 0);
     if (!expanded) {
         return std::unexpected(expanded.error());
     }
-    expanded = hkdf_expand_label(secrets.server.data(), secrets.server.size(), secrets.initial.data(),
+    expanded = hkdf_expand_label(EVP_sha256(), secrets.server.data(), secrets.server.size(), secrets.initial.data(),
                                  secrets.initial.size(), kServerInitialLabel, nullptr, 0);
     if (!expanded) {
         return std::unexpected(expanded.error());
@@ -184,11 +244,96 @@ common::IoResult<void> quic_init_initial_crypto(QuicCryptoState &state, QuicConn
     return {};
 }
 
+common::IoResult<void> quic_create_retry_integrity_tag(const QuicConnectionId &original_dcid,
+                                                       const std::uint8_t *retry_packet,
+                                                       std::size_t retry_packet_len, std::uint8_t *tag_out,
+                                                       std::size_t tag_len) noexcept {
+    if ((retry_packet == nullptr && retry_packet_len != 0) || tag_out == nullptr || tag_len != kAeadTagLength ||
+        original_dcid.size() > kMaxConnectionIdLength) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    std::uint8_t pseudo_packet[1 + kMaxConnectionIdLength + 1500]{};
+    if (retry_packet_len > sizeof(pseudo_packet) - 1 - original_dcid.size()) {
+        return std::unexpected(common::IoErr::MessageTooLarge);
+    }
+    std::size_t offset = 0;
+    pseudo_packet[offset++] = original_dcid.length;
+    if (!original_dcid.empty()) {
+        std::memcpy(pseudo_packet + offset, original_dcid.data(), original_dcid.size());
+        offset += original_dcid.size();
+    }
+    if (retry_packet_len != 0) {
+        std::memcpy(pseudo_packet + offset, retry_packet, retry_packet_len);
+        offset += retry_packet_len;
+    }
+
+    EVP_AEAD_CTX ctx;
+    EVP_AEAD_CTX_zero(&ctx);
+    if (!EVP_AEAD_CTX_init(&ctx, EVP_aead_aes_128_gcm(), kRetryIntegrityKey, sizeof(kRetryIntegrityKey),
+                           EVP_AEAD_DEFAULT_TAG_LENGTH, nullptr)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    std::size_t out_len = tag_len;
+    const int ok = EVP_AEAD_CTX_seal(&ctx, tag_out, &out_len, tag_len, kRetryIntegrityNonce,
+                                     sizeof(kRetryIntegrityNonce), nullptr, 0, pseudo_packet, offset);
+    EVP_AEAD_CTX_cleanup(&ctx);
+    if (!ok || out_len != tag_len) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return {};
+}
+
+common::IoResult<void> quic_set_packet_protection_secret(QuicPacketProtectionKeys &keys, QuicCryptoSuite suite,
+                                                         const std::uint8_t *secret,
+                                                         std::size_t secret_len) noexcept {
+    return derive_packet_protection_keys_from_secret(keys, suite, secret, secret_len);
+}
+
+common::IoResult<void> quic_set_encryption_secret(QuicCryptoState &state, QuicEncryptionLevel level, bool write_secret,
+                                                  QuicCryptoSuite suite, const std::uint8_t *secret,
+                                                  std::size_t secret_len) noexcept {
+    auto *keys = quic_packet_keys(state, level, write_secret);
+    if (keys == nullptr || level == QuicEncryptionLevel::Initial) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return quic_set_packet_protection_secret(*keys, suite, secret, secret_len);
+}
+
+QuicPacketProtectionKeys *quic_packet_keys(QuicCryptoState &state, QuicEncryptionLevel level,
+                                           bool write_keys) noexcept {
+    switch (level) {
+        case QuicEncryptionLevel::Initial:
+            return write_keys ? &state.initial_write : &state.initial_read;
+        case QuicEncryptionLevel::EarlyData:
+            return write_keys ? &state.early_write : &state.early_read;
+        case QuicEncryptionLevel::Handshake:
+            return write_keys ? &state.handshake_write : &state.handshake_read;
+        case QuicEncryptionLevel::Application:
+            return write_keys ? &state.application_write : &state.application_read;
+    }
+    return nullptr;
+}
+
+const QuicPacketProtectionKeys *quic_packet_keys(const QuicCryptoState &state, QuicEncryptionLevel level,
+                                                 bool write_keys) noexcept {
+    return quic_packet_keys(const_cast<QuicCryptoState &>(state), level, write_keys);
+}
+
 common::IoResult<void> quic_header_protection_mask(const QuicPacketProtectionKeys &keys, const std::uint8_t *sample,
                                                    std::size_t sample_len,
                                                    std::uint8_t (&mask)[kQuicHeaderProtectionMaskLength]) noexcept {
     if (!keys.ready || sample == nullptr || sample_len < kQuicHeaderProtectionSampleLength) {
         return std::unexpected(common::IoErr::Invalid);
+    }
+
+    if (keys.hp_chacha20) {
+        std::uint32_t counter = 0;
+        std::memcpy(&counter, sample, sizeof(counter));
+        static constexpr std::uint8_t kZeros[kQuicHeaderProtectionMaskLength]{};
+        CRYPTO_chacha_20(mask, kZeros, kQuicHeaderProtectionMaskLength, keys.hp.data(), sample + 4, counter);
+        return {};
     }
 
     std::uint8_t encrypted[AES_BLOCK_SIZE]{};

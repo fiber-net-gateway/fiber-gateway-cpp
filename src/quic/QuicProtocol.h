@@ -133,6 +133,10 @@ struct QuicCryptoFrame {
     std::uint64_t length = 0;
 };
 
+struct QuicNewTokenFrame {
+    std::uint64_t length = 0;
+};
+
 struct QuicStreamFrame {
     std::uint64_t offset = 0;
     std::uint64_t length = 0;
@@ -216,6 +220,7 @@ struct QuicFrame {
         QuicPaddingFrame padding;
         QuicAckFrame ack;
         QuicCryptoFrame crypto;
+        QuicNewTokenFrame new_token;
         QuicStreamFrame stream;
         QuicCloseFrame close;
         QuicResetStreamFrame reset_stream;

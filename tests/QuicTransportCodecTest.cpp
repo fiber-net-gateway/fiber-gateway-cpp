@@ -112,6 +112,32 @@ TEST(QuicTransportCodecTest, CreatesLongHeaderWithPacketNumberPointer) {
     EXPECT_EQ(pn[3], 0x04);
 }
 
+TEST(QuicTransportCodecTest, CreatesShortHeaderWithDestinationConnectionId) {
+    fiber::quic::QuicPacketHeader packet{};
+    packet.long_header = false;
+    packet.type = fiber::quic::QuicPacketType::Short;
+    packet.level = fiber::quic::QuicEncryptionLevel::Application;
+    packet.flags = fiber::quic::kPacketFlagFixed;
+    packet.dcid = cid_from({0x01, 0x02, 0x03, 0x04});
+    packet.pn_len = 1;
+    packet.truncated_pn = 0x7a;
+
+    std::array<std::uint8_t, 16> buf{};
+    fiber::quic::QuicWriteCursor out(buf.data(), buf.size());
+    std::uint8_t *pn = nullptr;
+
+    auto len = fiber::quic::quic_create_packet_header(out, packet, &pn);
+
+    ASSERT_TRUE(len.has_value());
+    EXPECT_EQ(*len, 1U + packet.dcid.size() + packet.pn_len);
+    ASSERT_NE(pn, nullptr);
+    EXPECT_EQ(pn, buf.data() + 1 + packet.dcid.size());
+    EXPECT_EQ(buf[1], 0x01);
+    EXPECT_EQ(buf[4], 0x04);
+    EXPECT_EQ(*pn, 0x7a);
+}
+
+
 TEST(QuicTransportCodecTest, SelectsPacketNumberLengthFromLargestAcked) {
     EXPECT_EQ(fiber::quic::quic_packet_number_len(0, fiber::quic::kUnsetPacketNumber), 1U);
     EXPECT_EQ(fiber::quic::quic_packet_number_len(126, fiber::quic::kUnsetPacketNumber), 1U);
@@ -265,4 +291,49 @@ TEST(QuicTransportCodecTest, ChecksFramePermissionByEncryptionLevel) {
                                                  fiber::quic::QuicFrameType::Ack));
     EXPECT_TRUE(fiber::quic::quic_frame_allowed(fiber::quic::QuicEncryptionLevel::Application,
                                                 fiber::quic::QuicFrameType::PathResponse));
+}
+
+TEST(QuicTransportCodecTest, CreatesAndClientParsesNewTokenFrame) {
+    const std::array<std::uint8_t, 3> token{'a', 'b', 'c'};
+    fiber::quic::QuicFrame frame{};
+    frame.type = fiber::quic::QuicFrameType::NewToken;
+    frame.u.new_token.length = token.size();
+    frame.data = {token.data(), token.size()};
+
+    std::array<std::uint8_t, 16> buf{};
+    fiber::quic::QuicWriteCursor out(buf.data(), buf.size());
+    auto written = fiber::quic::quic_create_frame(&out, frame);
+    ASSERT_TRUE(written.has_value());
+
+    fiber::quic::QuicReadCursor server_in(buf.data(), out.offset());
+    auto server_parsed =
+            fiber::quic::quic_parse_frame(fiber::quic::QuicEncryptionLevel::Application, server_in);
+    EXPECT_FALSE(server_parsed.has_value());
+
+    fiber::quic::QuicReadCursor client_in(buf.data(), out.offset());
+    auto client_parsed = fiber::quic::quic_parse_frame_for_receiver(
+            fiber::quic::QuicConnectionRole::Client, fiber::quic::QuicEncryptionLevel::Application, client_in);
+
+    ASSERT_TRUE(client_parsed.has_value());
+    EXPECT_EQ(client_parsed->frame.type, fiber::quic::QuicFrameType::NewToken);
+    EXPECT_EQ(client_parsed->frame.u.new_token.length, token.size());
+    EXPECT_EQ(client_parsed->frame.data.data[2], 'c');
+}
+
+TEST(QuicTransportCodecTest, ClientParsesHandshakeDoneFrame) {
+    fiber::quic::QuicFrame frame{};
+    frame.type = fiber::quic::QuicFrameType::HandshakeDone;
+
+    std::array<std::uint8_t, 8> buf{};
+    fiber::quic::QuicWriteCursor out(buf.data(), buf.size());
+    auto written = fiber::quic::quic_create_frame(&out, frame);
+    ASSERT_TRUE(written.has_value());
+
+    fiber::quic::QuicReadCursor in(buf.data(), out.offset());
+    auto parsed = fiber::quic::quic_parse_frame_for_receiver(
+            fiber::quic::QuicConnectionRole::Client, fiber::quic::QuicEncryptionLevel::Application, in);
+
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed->frame.type, fiber::quic::QuicFrameType::HandshakeDone);
+    EXPECT_TRUE(parsed->frame.ack_eliciting);
 }

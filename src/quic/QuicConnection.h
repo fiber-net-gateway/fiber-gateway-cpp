@@ -21,8 +21,12 @@ inline constexpr std::size_t kMaxConnectionIdLength = 20;
 inline constexpr std::size_t kQuicPacketNumberSpaceCount = 3;
 inline constexpr std::size_t kQuicMaxAckRanges = 32;
 inline constexpr std::size_t kQuicInitialSecretLength = 32;
+inline constexpr std::size_t kQuicMaxSecretLength = 48;
+inline constexpr std::size_t kQuicMaxKeyLength = 32;
+inline constexpr std::size_t kQuicIvLength = 12;
+inline constexpr std::size_t kQuicMaxHeaderProtectionKeyLength = 32;
 inline constexpr std::size_t kQuicInitialKeyLength = 16;
-inline constexpr std::size_t kQuicInitialIvLength = 12;
+inline constexpr std::size_t kQuicInitialIvLength = kQuicIvLength;
 inline constexpr std::size_t kQuicInitialHeaderProtectionKeyLength = 16;
 inline constexpr std::size_t kQuicHeaderProtectionSampleLength = 16;
 inline constexpr std::size_t kQuicHeaderProtectionMaskLength = 5;
@@ -138,6 +142,9 @@ struct QuicPacketNumberSpaceSnapshot {
 
 enum class QuicCryptoSuite : std::uint8_t {
     InitialAes128GcmSha256,
+    Aes128GcmSha256,
+    Aes256GcmSha384,
+    ChaCha20Poly1305Sha256,
 };
 
 struct QuicPacketProtectionKeys : public common::NonCopyable, public common::NonMovable {
@@ -147,12 +154,18 @@ struct QuicPacketProtectionKeys : public common::NonCopyable, public common::Non
     void reset() noexcept;
 
     QuicCryptoSuite suite = QuicCryptoSuite::InitialAes128GcmSha256;
-    std::array<std::uint8_t, kQuicInitialKeyLength> key{};
-    std::array<std::uint8_t, kQuicInitialIvLength> iv{};
-    std::array<std::uint8_t, kQuicInitialHeaderProtectionKeyLength> hp{};
+    std::array<std::uint8_t, kQuicMaxSecretLength> secret{};
+    std::array<std::uint8_t, kQuicMaxKeyLength> key{};
+    std::array<std::uint8_t, kQuicIvLength> iv{};
+    std::array<std::uint8_t, kQuicMaxHeaderProtectionKeyLength> hp{};
+    std::size_t secret_len = 0;
+    std::size_t key_len = 0;
+    std::size_t iv_len = 0;
+    std::size_t hp_len = 0;
     EVP_AEAD_CTX aead{};
     AES_KEY hp_key{};
     bool aead_initialized = false;
+    bool hp_chacha20 = false;
     bool ready = false;
 };
 
@@ -163,6 +176,12 @@ struct QuicCryptoState : public common::NonCopyable, public common::NonMovable {
 
     QuicPacketProtectionKeys initial_read{};
     QuicPacketProtectionKeys initial_write{};
+    QuicPacketProtectionKeys early_read{};
+    QuicPacketProtectionKeys early_write{};
+    QuicPacketProtectionKeys handshake_read{};
+    QuicPacketProtectionKeys handshake_write{};
+    QuicPacketProtectionKeys application_read{};
+    QuicPacketProtectionKeys application_write{};
     bool initial_ready = false;
 };
 

@@ -66,13 +66,25 @@ void QuicPacketProtectionKeys::reset() noexcept {
     key = {};
     iv = {};
     hp = {};
+    secret = {};
+    secret_len = 0;
+    key_len = 0;
+    iv_len = 0;
+    hp_len = 0;
     hp_key = {};
+    hp_chacha20 = false;
     ready = false;
 }
 
 void QuicCryptoState::reset() noexcept {
     initial_read.reset();
     initial_write.reset();
+    early_read.reset();
+    early_write.reset();
+    handshake_read.reset();
+    handshake_write.reset();
+    application_read.reset();
+    application_write.reset();
     initial_ready = false;
 }
 
