@@ -436,6 +436,11 @@ common::IoResult<std::size_t> quic_create_packet_header(QuicWriteCursor &out, co
         if (!wrote) {
             return std::unexpected(wrote.error());
         }
+    } else {
+        wrote = write_connection_id(out, packet.dcid);
+        if (!wrote) {
+            return std::unexpected(wrote.error());
+        }
     }
 
     *packet_number_pos = out.pos();
@@ -622,7 +627,24 @@ bool quic_frame_allowed(QuicEncryptionLevel level, QuicFrameType frame_type) noe
     return (permission_for_level(level) & kFramePermissionMasks[static_cast<std::size_t>(type)]) != 0;
 }
 
+bool quic_frame_allowed_for_receiver(QuicConnectionRole receiver_role, QuicEncryptionLevel level,
+                                     QuicFrameType frame_type) noexcept {
+    if (quic_frame_allowed(level, frame_type)) {
+        return true;
+    }
+    if (receiver_role != QuicConnectionRole::Client || level != QuicEncryptionLevel::Application) {
+        return false;
+    }
+    return frame_type == QuicFrameType::NewToken || frame_type == QuicFrameType::HandshakeDone;
+}
+
 common::IoResult<QuicFrameParseResult> quic_parse_frame(QuicEncryptionLevel level, QuicReadCursor &payload) noexcept {
+    return quic_parse_frame_for_receiver(QuicConnectionRole::Server, level, payload);
+}
+
+common::IoResult<QuicFrameParseResult> quic_parse_frame_for_receiver(QuicConnectionRole receiver_role,
+                                                                     QuicEncryptionLevel level,
+                                                                     QuicReadCursor &payload) noexcept {
     const std::size_t start = payload.offset();
     auto type_value = quic_parse_varint(payload);
     if (!type_value || *type_value > kLastFrameType) {
@@ -636,7 +658,7 @@ common::IoResult<QuicFrameParseResult> quic_parse_frame(QuicEncryptionLevel leve
                           frame.type != QuicFrameType::AckEcn && frame.type != QuicFrameType::ConnectionClose &&
                           frame.type != QuicFrameType::ConnectionCloseApp;
 
-    if (!quic_frame_allowed(level, frame.type)) {
+    if (!quic_frame_allowed_for_receiver(receiver_role, level, frame.type)) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -705,6 +727,20 @@ common::IoResult<QuicFrameParseResult> quic_parse_frame(QuicEncryptionLevel leve
             }
             frame.u.crypto.offset = *offset;
             frame.u.crypto.length = *length;
+            frame.data = *data;
+            break;
+        }
+
+        case QuicFrameType::NewToken: {
+            auto length = quic_parse_varint(payload);
+            if (!length) {
+                return std::unexpected(length.error());
+            }
+            auto data = payload.read_slice(static_cast<std::size_t>(*length));
+            if (!data) {
+                return std::unexpected(data.error());
+            }
+            frame.u.new_token.length = *length;
             frame.data = *data;
             break;
         }
@@ -901,9 +937,8 @@ common::IoResult<QuicFrameParseResult> quic_parse_frame(QuicEncryptionLevel leve
             break;
         }
 
-        case QuicFrameType::NewToken:
         case QuicFrameType::HandshakeDone:
-            return std::unexpected(common::IoErr::Invalid);
+            break;
     }
 
     QuicFrameParseResult result{};
@@ -1239,7 +1274,22 @@ common::IoResult<std::size_t> quic_create_frame(QuicWriteCursor *out, QuicFrame 
             return len;
         }
 
-        case QuicFrameType::NewToken:
+        case QuicFrameType::NewToken: {
+            auto wrote = write_or_count_varint(out, static_cast<std::uint64_t>(QuicFrameType::NewToken), len);
+            if (!wrote) {
+                return std::unexpected(wrote.error());
+            }
+            wrote = write_or_count_varint(out, frame.u.new_token.length, len);
+            if (!wrote) {
+                return std::unexpected(wrote.error());
+            }
+            wrote = write_or_count_bytes(out, frame.data.data, static_cast<std::size_t>(frame.u.new_token.length), len);
+            if (!wrote) {
+                return std::unexpected(wrote.error());
+            }
+            return len;
+        }
+
         case QuicFrameType::Stream1:
         case QuicFrameType::Stream2:
         case QuicFrameType::Stream3:

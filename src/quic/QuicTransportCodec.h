@@ -39,8 +39,13 @@ void quic_restore_packet_number(QuicPacketNumberSpace &space, QuicPacketNumberSp
                                                        std::size_t target_packet_len) noexcept;
 
 [[nodiscard]] bool quic_frame_allowed(QuicEncryptionLevel level, QuicFrameType frame_type) noexcept;
+[[nodiscard]] bool quic_frame_allowed_for_receiver(QuicConnectionRole receiver_role, QuicEncryptionLevel level,
+                                                   QuicFrameType frame_type) noexcept;
 [[nodiscard]] common::IoResult<QuicFrameParseResult> quic_parse_frame(QuicEncryptionLevel level,
                                                                       QuicReadCursor &payload) noexcept;
+[[nodiscard]] common::IoResult<QuicFrameParseResult> quic_parse_frame_for_receiver(QuicConnectionRole receiver_role,
+                                                                                   QuicEncryptionLevel level,
+                                                                                   QuicReadCursor &payload) noexcept;
 [[nodiscard]] common::IoResult<std::size_t> quic_create_frame(QuicWriteCursor *out, QuicFrame &frame) noexcept;
 
 } // namespace fiber::quic

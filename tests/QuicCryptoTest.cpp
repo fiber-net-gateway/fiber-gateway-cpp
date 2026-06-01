@@ -58,6 +58,10 @@ std::vector<std::uint8_t> vec_from_array(const std::array<std::uint8_t, N> &valu
     return {value.begin(), value.end()};
 }
 
+std::vector<std::uint8_t> vec_from_bytes(const std::uint8_t *data, std::size_t len) {
+    return {data, data + len};
+}
+
 void build_initial_datagram(std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> &datagram,
                             fiber::quic::QuicPacketHeader &packet, std::uint8_t **packet_number_pos,
                             std::size_t plaintext_len) {
@@ -112,12 +116,16 @@ TEST(QuicCryptoTest, InitializesInitialPacketProtectionKeysForServerRole) {
     ASSERT_TRUE(state.initial_ready);
     ASSERT_TRUE(state.initial_read.ready);
     ASSERT_TRUE(state.initial_write.ready);
-    EXPECT_EQ(vec_from_array(state.initial_read.key), hex("1f369613dd76d5467730efcbe3b1a22d"));
+    EXPECT_EQ(vec_from_bytes(state.initial_read.key.data(), state.initial_read.key_len),
+              hex("1f369613dd76d5467730efcbe3b1a22d"));
     EXPECT_EQ(vec_from_array(state.initial_read.iv), hex("fa044b2f42a3fd3b46fb255c"));
-    EXPECT_EQ(vec_from_array(state.initial_read.hp), hex("9f50449e04a0e810283a1e9933adedd2"));
-    EXPECT_EQ(vec_from_array(state.initial_write.key), hex("cf3a5331653c364c88f0f379b6067e37"));
+    EXPECT_EQ(vec_from_bytes(state.initial_read.hp.data(), state.initial_read.hp_len),
+              hex("9f50449e04a0e810283a1e9933adedd2"));
+    EXPECT_EQ(vec_from_bytes(state.initial_write.key.data(), state.initial_write.key_len),
+              hex("cf3a5331653c364c88f0f379b6067e37"));
     EXPECT_EQ(vec_from_array(state.initial_write.iv), hex("0ac1493ca1905853b0bba03e"));
-    EXPECT_EQ(vec_from_array(state.initial_write.hp), hex("c206b8d9b9f0f37644430b490eeaa314"));
+    EXPECT_EQ(vec_from_bytes(state.initial_write.hp.data(), state.initial_write.hp_len),
+              hex("c206b8d9b9f0f37644430b490eeaa314"));
 }
 
 TEST(QuicCryptoTest, AppliesAndRemovesInitialHeaderProtection) {
