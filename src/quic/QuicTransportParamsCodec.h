@@ -59,8 +59,7 @@ struct QuicTransportParams {
 };
 
 [[nodiscard]] bool quic_is_reserved_transport_param(std::uint64_t id) noexcept;
-[[nodiscard]] common::IoResult<void> quic_parse_transport_params(QuicTransportParamOwner owner,
-                                                                 QuicReadCursor &in,
+[[nodiscard]] common::IoResult<void> quic_parse_transport_params(QuicTransportParamOwner owner, QuicReadCursor &in,
                                                                  QuicTransportParams &out) noexcept;
 [[nodiscard]] common::IoResult<std::size_t> quic_create_transport_params(QuicTransportParamOwner owner,
                                                                          QuicWriteCursor *out,

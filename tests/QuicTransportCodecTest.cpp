@@ -198,7 +198,7 @@ TEST(QuicTransportCodecTest, InitializesPacketHeaderFromPacketNumberSpaceLevel) 
     EXPECT_EQ(initial_packet.pn_len, 2U);
     EXPECT_EQ(initial_packet.truncated_pn, 127U);
     EXPECT_EQ(initial_packet.flags, fiber::quic::kPacketFlagLong | fiber::quic::kPacketFlagFixed |
-                                    fiber::quic::kLongPacketTypeInitial | 0x01);
+                                            fiber::quic::kLongPacketTypeInitial | 0x01);
 
     fiber::quic::QuicPacketNumberSpace application{};
     application.reset(fiber::quic::QuicEncryptionLevel::Application);
@@ -306,8 +306,7 @@ TEST(QuicTransportCodecTest, CreatesAndClientParsesNewTokenFrame) {
     ASSERT_TRUE(written.has_value());
 
     fiber::quic::QuicReadCursor server_in(buf.data(), out.offset());
-    auto server_parsed =
-            fiber::quic::quic_parse_frame(fiber::quic::QuicEncryptionLevel::Application, server_in);
+    auto server_parsed = fiber::quic::quic_parse_frame(fiber::quic::QuicEncryptionLevel::Application, server_in);
     EXPECT_FALSE(server_parsed.has_value());
 
     fiber::quic::QuicReadCursor client_in(buf.data(), out.offset());
@@ -330,8 +329,8 @@ TEST(QuicTransportCodecTest, ClientParsesHandshakeDoneFrame) {
     ASSERT_TRUE(written.has_value());
 
     fiber::quic::QuicReadCursor in(buf.data(), out.offset());
-    auto parsed = fiber::quic::quic_parse_frame_for_receiver(
-            fiber::quic::QuicConnectionRole::Client, fiber::quic::QuicEncryptionLevel::Application, in);
+    auto parsed = fiber::quic::quic_parse_frame_for_receiver(fiber::quic::QuicConnectionRole::Client,
+                                                             fiber::quic::QuicEncryptionLevel::Application, in);
 
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(parsed->frame.type, fiber::quic::QuicFrameType::HandshakeDone);

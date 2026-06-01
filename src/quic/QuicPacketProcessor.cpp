@@ -35,8 +35,7 @@ namespace {
         !socket_address_equal(conn.remote_addr(), datagram.peer)) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    if (!socket_address_is_unspecified(conn.local_addr()) &&
-        !socket_address_equal(conn.local_addr(), datagram.local)) {
+    if (!socket_address_is_unspecified(conn.local_addr()) && !socket_address_equal(conn.local_addr(), datagram.local)) {
         return std::unexpected(common::IoErr::Invalid);
     }
     return {};
@@ -44,11 +43,12 @@ namespace {
 
 } // namespace
 
-common::IoResult<QuicPacketProcessResult>
-quic_process_initial_datagram(QuicConnection &conn, const QuicReceivedDatagram &datagram, std::uint8_t *plaintext,
-                              std::size_t plaintext_cap) noexcept {
-    if (conn.role() != QuicConnectionRole::Server || datagram.data == nullptr || datagram.len < kMinInitialDatagramSize ||
-        plaintext == nullptr || plaintext_cap == 0) {
+common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConnection &conn,
+                                                                        const QuicReceivedDatagram &datagram,
+                                                                        std::uint8_t *plaintext,
+                                                                        std::size_t plaintext_cap) noexcept {
+    if (conn.role() != QuicConnectionRole::Server || datagram.data == nullptr ||
+        datagram.len < kMinInitialDatagramSize || plaintext == nullptr || plaintext_cap == 0) {
         return std::unexpected(common::IoErr::Invalid);
     }
     if (conn.closing()) {
@@ -76,8 +76,8 @@ quic_process_initial_datagram(QuicConnection &conn, const QuicReceivedDatagram &
         }
     }
 
-    auto opened = quic_decrypt_initial_packet(conn, *packet, datagram.data, packet->packet_len, plaintext,
-                                              plaintext_cap);
+    auto opened =
+            quic_decrypt_initial_packet(conn, *packet, datagram.data, packet->packet_len, plaintext, plaintext_cap);
     if (!opened) {
         return std::unexpected(opened.error());
     }

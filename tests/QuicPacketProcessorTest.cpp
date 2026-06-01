@@ -54,9 +54,7 @@ fiber::quic::QuicConnectionId cid_from_hex(std::string_view value) {
     return cid.value_or(fiber::quic::QuicConnectionId{});
 }
 
-fiber::net::SocketAddress loopback(std::uint16_t port) {
-    return {fiber::net::IpAddress::loopback_v4(), port};
-}
+fiber::net::SocketAddress loopback(std::uint16_t port) { return {fiber::net::IpAddress::loopback_v4(), port}; }
 
 void build_initial_datagram(std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> &datagram,
                             fiber::quic::QuicPacketHeader &packet, const std::uint8_t *plaintext,
@@ -68,8 +66,8 @@ void build_initial_datagram(std::array<std::uint8_t, fiber::quic::kMinInitialDat
     packet.long_header = true;
     packet.type = fiber::quic::QuicPacketType::Initial;
     packet.level = fiber::quic::QuicEncryptionLevel::Initial;
-    packet.flags = fiber::quic::kPacketFlagLong | fiber::quic::kPacketFlagFixed |
-                   fiber::quic::kLongPacketTypeInitial | 0x03;
+    packet.flags =
+            fiber::quic::kPacketFlagLong | fiber::quic::kPacketFlagFixed | fiber::quic::kLongPacketTypeInitial | 0x03;
     packet.version = fiber::quic::kQuicVersion1;
     packet.dcid = dcid;
     packet.scid = cid_from_hex("11223344");
@@ -90,15 +88,13 @@ void build_initial_datagram(std::array<std::uint8_t, fiber::quic::kMinInitialDat
     packet.ciphertext = pn + packet.pn_len;
     packet.ciphertext_len = plaintext_len + fiber::quic::kAeadTagLength;
 
-    auto sealed = fiber::quic::quic_encrypt_packet_payload(packet, crypto.initial_read, plaintext, plaintext_len,
-                                                           pn + packet.pn_len,
-                                                           datagram.size() - static_cast<std::size_t>(
-                                                                                     pn + packet.pn_len -
-                                                                                     datagram.data()));
+    auto sealed = fiber::quic::quic_encrypt_packet_payload(
+            packet, crypto.initial_read, plaintext, plaintext_len, pn + packet.pn_len,
+            datagram.size() - static_cast<std::size_t>(pn + packet.pn_len - datagram.data()));
     ASSERT_TRUE(sealed.has_value());
     packet.packet_len = static_cast<std::size_t>(pn + packet.pn_len - datagram.data()) + *sealed;
-    ASSERT_TRUE(fiber::quic::quic_apply_header_protection(packet, crypto.initial_read, datagram.data(),
-                                                          packet.packet_len));
+    ASSERT_TRUE(
+            fiber::quic::quic_apply_header_protection(packet, crypto.initial_read, datagram.data(), packet.packet_len));
 }
 
 fiber::quic::QuicReceivedDatagram received_datagram(std::uint8_t *data, std::size_t len) {
@@ -209,8 +205,8 @@ TEST(QuicPacketProcessorTest, RejectsNonInitialPacket) {
     packet.long_header = true;
     packet.type = fiber::quic::QuicPacketType::Handshake;
     packet.level = fiber::quic::QuicEncryptionLevel::Handshake;
-    packet.flags = fiber::quic::kPacketFlagLong | fiber::quic::kPacketFlagFixed |
-                   fiber::quic::kLongPacketTypeHandshake | 0x03;
+    packet.flags =
+            fiber::quic::kPacketFlagLong | fiber::quic::kPacketFlagFixed | fiber::quic::kLongPacketTypeHandshake | 0x03;
     packet.version = fiber::quic::kQuicVersion1;
     packet.dcid = cid_from_hex("8394c8f03e515708");
     packet.scid = cid_from_hex("11223344");

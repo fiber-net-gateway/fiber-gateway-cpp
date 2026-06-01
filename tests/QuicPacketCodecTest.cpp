@@ -86,16 +86,15 @@ TEST(QuicPacketCodecTest, EncodesAndDecodesProtectedInitialPacket) {
     EXPECT_TRUE(encoded->ack_eliciting);
 
     std::array<std::uint8_t, 1400> plaintext{};
-    auto decoded = fiber::quic::quic_decode_packet(client, datagram.data(), encoded->packet_len, 0,
-                                                   plaintext.data(), plaintext.size());
+    auto decoded = fiber::quic::quic_decode_packet(client, datagram.data(), encoded->packet_len, 0, plaintext.data(),
+                                                   plaintext.size());
 
     ASSERT_TRUE(decoded.has_value()) << static_cast<int>(decoded.error());
     EXPECT_EQ(decoded->header.type, fiber::quic::QuicPacketType::Initial);
     EXPECT_EQ(decoded->header.packet_number, 0U);
     EXPECT_EQ(decoded->frame_count, 2U);
     EXPECT_TRUE(decoded->ack_eliciting);
-    EXPECT_EQ(client.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial).largest_received_packet_number,
-              0U);
+    EXPECT_EQ(client.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial).largest_received_packet_number, 0U);
 }
 
 TEST(QuicPacketCodecTest, CreatesVersionNegotiationPacket) {
@@ -136,8 +135,8 @@ TEST(QuicPacketCodecTest, CreatesAndParsesRetryPacket) {
     EXPECT_EQ(parsed->type, fiber::quic::QuicPacketType::Retry);
     EXPECT_EQ(parsed->token.len, token.size());
     EXPECT_EQ(parsed->token.data[0], 't');
-    EXPECT_EQ(*written, 1U + 4U + 1U + spec.dcid.size() + 1U + spec.scid.size() + token.size() +
-                        fiber::quic::kAeadTagLength);
+    EXPECT_EQ(*written,
+              1U + 4U + 1U + spec.dcid.size() + 1U + spec.scid.size() + token.size() + fiber::quic::kAeadTagLength);
 }
 
 class QuicPacketCodecSuiteTest : public ::testing::TestWithParam<fiber::quic::QuicCryptoSuite> {};
@@ -145,8 +144,7 @@ class QuicPacketCodecSuiteTest : public ::testing::TestWithParam<fiber::quic::Qu
 TEST_P(QuicPacketCodecSuiteTest, EncodesAndDecodesApplicationPacket) {
     const fiber::quic::QuicCryptoSuite suite = GetParam();
     std::array<std::uint8_t, fiber::quic::kQuicMaxSecretLength> secret{};
-    const std::size_t secret_len =
-            suite == fiber::quic::QuicCryptoSuite::Aes256GcmSha384 ? 48U : 32U;
+    const std::size_t secret_len = suite == fiber::quic::QuicCryptoSuite::Aes256GcmSha384 ? 48U : 32U;
     for (std::size_t i = 0; i < secret_len; ++i) {
         secret[i] = static_cast<std::uint8_t>(i + 1);
     }
@@ -154,20 +152,18 @@ TEST_P(QuicPacketCodecSuiteTest, EncodesAndDecodesApplicationPacket) {
     fiber::quic::QuicConnection::Options server_options{};
     server_options.role = fiber::quic::QuicConnectionRole::Server;
     fiber::quic::QuicConnection server(server_options);
-    ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(server.crypto(),
-                                                        fiber::quic::QuicEncryptionLevel::Application, true, suite,
-                                                        secret.data(), secret_len));
+    ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(server.crypto(), fiber::quic::QuicEncryptionLevel::Application,
+                                                        true, suite, secret.data(), secret_len));
 
     fiber::quic::QuicConnection::Options client_options{};
     client_options.role = fiber::quic::QuicConnectionRole::Client;
     fiber::quic::QuicConnection client(client_options);
-    ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(client.crypto(),
-                                                        fiber::quic::QuicEncryptionLevel::Application, false, suite,
-                                                        secret.data(), secret_len));
-    auto *server_keys = fiber::quic::quic_packet_keys(server.crypto(), fiber::quic::QuicEncryptionLevel::Application,
-                                                      true);
-    auto *client_keys = fiber::quic::quic_packet_keys(client.crypto(), fiber::quic::QuicEncryptionLevel::Application,
-                                                      false);
+    ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(client.crypto(), fiber::quic::QuicEncryptionLevel::Application,
+                                                        false, suite, secret.data(), secret_len));
+    auto *server_keys =
+            fiber::quic::quic_packet_keys(server.crypto(), fiber::quic::QuicEncryptionLevel::Application, true);
+    auto *client_keys =
+            fiber::quic::quic_packet_keys(client.crypto(), fiber::quic::QuicEncryptionLevel::Application, false);
     ASSERT_NE(server_keys, nullptr);
     ASSERT_NE(client_keys, nullptr);
     ASSERT_EQ(server_keys->hp_len, client_keys->hp_len);

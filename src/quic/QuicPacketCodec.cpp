@@ -133,8 +133,8 @@ common::IoResult<std::size_t> quic_create_retry_packet(const QuicRetryPacketSpec
 
     std::uint8_t tag[kAeadTagLength]{};
     const std::size_t retry_without_tag_len = out.offset() - start;
-    auto tagged = quic_create_retry_integrity_tag(spec.original_dcid, out.begin() + start, retry_without_tag_len,
-                                                  tag, sizeof(tag));
+    auto tagged = quic_create_retry_integrity_tag(spec.original_dcid, out.begin() + start, retry_without_tag_len, tag,
+                                                  sizeof(tag));
     if (!tagged) {
         return std::unexpected(tagged.error());
     }
@@ -286,8 +286,8 @@ common::IoResult<QuicPacketDecodeResult> quic_decode_packet(QuicConnection &conn
     const std::uint64_t saved_largest_received = space.largest_received_packet_number;
     const std::uint64_t saved_pending_ack = space.pending_ack;
     const bool saved_send_ack = space.send_ack;
-    auto opened = quic_decrypt_packet_payload(*packet, space, *keys, datagram, packet->packet_len, plaintext,
-                                              plaintext_cap);
+    auto opened =
+            quic_decrypt_packet_payload(*packet, space, *keys, datagram, packet->packet_len, plaintext, plaintext_cap);
     if (!opened) {
         return std::unexpected(opened.error());
     }

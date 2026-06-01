@@ -45,8 +45,8 @@ TEST(QuicTransportParamsCodecTest, ServerParamsRoundTrip) {
     fiber::quic::QuicWriteCursor out(buf.data(), buf.size());
     std::size_t zero_rtt_len = 0;
 
-    auto written = fiber::quic::quic_create_transport_params(fiber::quic::QuicTransportParamOwner::Server, &out,
-                                                             params, &zero_rtt_len);
+    auto written = fiber::quic::quic_create_transport_params(fiber::quic::QuicTransportParamOwner::Server, &out, params,
+                                                             &zero_rtt_len);
 
     ASSERT_TRUE(written.has_value());
     EXPECT_EQ(*written, out.offset());

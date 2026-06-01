@@ -49,21 +49,17 @@ struct QuicRetryPacketSpec {
 [[nodiscard]] common::IoResult<std::size_t> quic_create_retry_packet(const QuicRetryPacketSpec &spec,
                                                                      QuicWriteCursor &out) noexcept;
 
-[[nodiscard]] common::IoResult<QuicConnectionId> quic_get_packet_dcid(const std::uint8_t *datagram,
-                                                                       std::size_t datagram_len,
-                                                                       std::uint8_t short_dcid_len) noexcept;
+[[nodiscard]] common::IoResult<QuicConnectionId>
+quic_get_packet_dcid(const std::uint8_t *datagram, std::size_t datagram_len, std::uint8_t short_dcid_len) noexcept;
 
 [[nodiscard]] common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &connection,
                                                                           const QuicPacketEncodeSpec &spec,
                                                                           std::uint8_t *out,
                                                                           std::size_t out_cap) noexcept;
 
-[[nodiscard]] common::IoResult<QuicPacketDecodeResult> quic_decode_packet(QuicConnection &connection,
-                                                                          std::uint8_t *datagram,
-                                                                          std::size_t datagram_len,
-                                                                          std::uint8_t short_dcid_len,
-                                                                          std::uint8_t *plaintext,
-                                                                          std::size_t plaintext_cap) noexcept;
+[[nodiscard]] common::IoResult<QuicPacketDecodeResult>
+quic_decode_packet(QuicConnection &connection, std::uint8_t *datagram, std::size_t datagram_len,
+                   std::uint8_t short_dcid_len, std::uint8_t *plaintext, std::size_t plaintext_cap) noexcept;
 
 } // namespace fiber::quic
 

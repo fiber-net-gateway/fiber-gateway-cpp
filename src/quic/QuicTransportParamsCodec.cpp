@@ -89,9 +89,8 @@ namespace {
     return quic_write_varint(*out, 0);
 }
 
-[[nodiscard]] common::IoResult<void> write_bytes_param(QuicWriteCursor *out, std::uint64_t id,
-                                                       const std::uint8_t *data, std::size_t bytes,
-                                                       std::size_t &len) noexcept {
+[[nodiscard]] common::IoResult<void> write_bytes_param(QuicWriteCursor *out, std::uint64_t id, const std::uint8_t *data,
+                                                       std::size_t bytes, std::size_t &len) noexcept {
     auto wrote = write_or_count_varint(out, id, len);
     if (!wrote) {
         return std::unexpected(wrote.error());
@@ -105,9 +104,7 @@ namespace {
 
 } // namespace
 
-bool quic_is_reserved_transport_param(std::uint64_t id) noexcept {
-    return id % 31U == 27U;
-}
+bool quic_is_reserved_transport_param(std::uint64_t id) noexcept { return id % 31U == 27U; }
 
 common::IoResult<void> quic_parse_transport_params(QuicTransportParamOwner owner, QuicReadCursor &in,
                                                    QuicTransportParams &out) noexcept {
@@ -298,13 +295,13 @@ common::IoResult<std::size_t> quic_create_transport_params(QuicTransportParamOwn
     if (!wrote) {
         return std::unexpected(wrote.error());
     }
-    wrote = write_varint_param(out, kQuicTpInitialMaxStreamDataBidiLocal,
-                               params.initial_max_stream_data_bidi_local, len);
+    wrote = write_varint_param(out, kQuicTpInitialMaxStreamDataBidiLocal, params.initial_max_stream_data_bidi_local,
+                               len);
     if (!wrote) {
         return std::unexpected(wrote.error());
     }
-    wrote = write_varint_param(out, kQuicTpInitialMaxStreamDataBidiRemote,
-                               params.initial_max_stream_data_bidi_remote, len);
+    wrote = write_varint_param(out, kQuicTpInitialMaxStreamDataBidiRemote, params.initial_max_stream_data_bidi_remote,
+                               len);
     if (!wrote) {
         return std::unexpected(wrote.error());
     }
