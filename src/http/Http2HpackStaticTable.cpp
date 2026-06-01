@@ -9,11 +9,8 @@ namespace fiber::http {
 namespace {
 
 #define FIBER_HTTP2_STATIC_ENTRY(name_literal, value_literal)                                                          \
-    {                                                                                                                  \
-        name_literal, value_literal, fiber::http::http_header_name_hash(name_literal),                                 \
-                static_cast<std::uint16_t>(sizeof(name_literal) - 1),                                                  \
-                static_cast<std::uint16_t>(sizeof(value_literal) - 1)                                                  \
-    }
+    {name_literal, value_literal, fiber::http::http_header_name_hash(name_literal),                                    \
+     static_cast<std::uint16_t>(sizeof(name_literal) - 1), static_cast<std::uint16_t>(sizeof(value_literal) - 1)}
 
 inline bool same_bytes(std::string_view left, const char *right, std::size_t right_len) noexcept {
     return left.size() == right_len && std::memcmp(left.data(), right, right_len) == 0;

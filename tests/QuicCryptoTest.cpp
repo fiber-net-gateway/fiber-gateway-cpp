@@ -58,9 +58,7 @@ std::vector<std::uint8_t> vec_from_array(const std::array<std::uint8_t, N> &valu
     return {value.begin(), value.end()};
 }
 
-std::vector<std::uint8_t> vec_from_bytes(const std::uint8_t *data, std::size_t len) {
-    return {data, data + len};
-}
+std::vector<std::uint8_t> vec_from_bytes(const std::uint8_t *data, std::size_t len) { return {data, data + len}; }
 
 void build_initial_datagram(std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> &datagram,
                             fiber::quic::QuicPacketHeader &packet, std::uint8_t **packet_number_pos,
@@ -68,8 +66,8 @@ void build_initial_datagram(std::array<std::uint8_t, fiber::quic::kMinInitialDat
     packet.long_header = true;
     packet.type = fiber::quic::QuicPacketType::Initial;
     packet.level = fiber::quic::QuicEncryptionLevel::Initial;
-    packet.flags = fiber::quic::kPacketFlagLong | fiber::quic::kPacketFlagFixed |
-                   fiber::quic::kLongPacketTypeInitial | 0x03;
+    packet.flags =
+            fiber::quic::kPacketFlagLong | fiber::quic::kPacketFlagFixed | fiber::quic::kLongPacketTypeInitial | 0x03;
     packet.version = fiber::quic::kQuicVersion1;
     packet.dcid = cid_from_hex("8394c8f03e515708");
     packet.scid = cid_from_hex("11223344");
@@ -100,10 +98,8 @@ TEST(QuicCryptoTest, DerivesRfc9001InitialSecrets) {
     ASSERT_TRUE(secrets.has_value());
     EXPECT_EQ(vec_from_array(secrets->initial),
               hex("7db5df06e7a69e432496adedb00851923595221596ae2ae9fb8115c1e9ed0a44"));
-    EXPECT_EQ(vec_from_array(secrets->client),
-              hex("c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea"));
-    EXPECT_EQ(vec_from_array(secrets->server),
-              hex("3c199828fd139efd216c155ad844cc81fb82fa8d7446fa7d78be803acdda951b"));
+    EXPECT_EQ(vec_from_array(secrets->client), hex("c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea"));
+    EXPECT_EQ(vec_from_array(secrets->server), hex("3c199828fd139efd216c155ad844cc81fb82fa8d7446fa7d78be803acdda951b"));
 }
 
 TEST(QuicCryptoTest, InitializesInitialPacketProtectionKeysForServerRole) {
@@ -134,8 +130,8 @@ TEST(QuicCryptoTest, AppliesAndRemovesInitialHeaderProtection) {
     ASSERT_TRUE(fiber::quic::quic_init_initial_crypto(state, fiber::quic::QuicConnectionRole::Server, dcid));
 
     std::array<std::uint8_t, 64> datagram{};
-    datagram[0] = fiber::quic::kPacketFlagLong | fiber::quic::kPacketFlagFixed |
-                  fiber::quic::kLongPacketTypeInitial | 0x03;
+    datagram[0] =
+            fiber::quic::kPacketFlagLong | fiber::quic::kPacketFlagFixed | fiber::quic::kLongPacketTypeInitial | 0x03;
     for (std::size_t i = 1; i < datagram.size(); ++i) {
         datagram[i] = static_cast<std::uint8_t>(i);
     }
@@ -143,7 +139,10 @@ TEST(QuicCryptoTest, AppliesAndRemovesInitialHeaderProtection) {
     constexpr std::size_t pn_offset = 18;
     const std::uint8_t original_flags = datagram[0];
     const std::array<std::uint8_t, 4> original_pn{
-            datagram[pn_offset], datagram[pn_offset + 1], datagram[pn_offset + 2], datagram[pn_offset + 3],
+            datagram[pn_offset],
+            datagram[pn_offset + 1],
+            datagram[pn_offset + 2],
+            datagram[pn_offset + 3],
     };
 
     fiber::quic::QuicPacketHeader packet{};
@@ -154,13 +153,13 @@ TEST(QuicCryptoTest, AppliesAndRemovesInitialHeaderProtection) {
     packet.pn_len = 4;
     packet.protected_pn = datagram.data() + pn_offset;
 
-    auto applied = fiber::quic::quic_apply_header_protection(packet, state.initial_read, datagram.data(),
-                                                             datagram.size());
+    auto applied =
+            fiber::quic::quic_apply_header_protection(packet, state.initial_read, datagram.data(), datagram.size());
     ASSERT_TRUE(applied.has_value());
     EXPECT_NE(datagram[0], original_flags);
 
-    auto removed = fiber::quic::quic_remove_header_protection(packet, state.initial_read, datagram.data(),
-                                                              datagram.size());
+    auto removed =
+            fiber::quic::quic_remove_header_protection(packet, state.initial_read, datagram.data(), datagram.size());
     ASSERT_TRUE(removed.has_value());
     EXPECT_EQ(datagram[0], original_flags);
     EXPECT_EQ(datagram[pn_offset], original_pn[0]);
@@ -205,9 +204,9 @@ TEST(QuicCryptoTest, DecryptsInitialPacketAndUpdatesOnlyInitialPacketNumberSpace
     EXPECT_TRUE(std::equal(plaintext.begin(), plaintext.end(), opened->data));
     EXPECT_EQ(connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial).largest_received_packet_number,
               2U);
-    EXPECT_EQ(connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Handshake)
-                      .largest_received_packet_number,
-              fiber::quic::kUnsetPacketNumber);
+    EXPECT_EQ(
+            connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Handshake).largest_received_packet_number,
+            fiber::quic::kUnsetPacketNumber);
     EXPECT_EQ(connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Application)
                       .largest_received_packet_number,
               fiber::quic::kUnsetPacketNumber);

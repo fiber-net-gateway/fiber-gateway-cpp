@@ -19,7 +19,7 @@ ssize_t send_no_sigpipe(int fd, const void *buf, size_t len) noexcept {
 
 ssize_t sendv_no_sigpipe(int fd, const struct iovec *iov, int iovcnt) noexcept {
 #ifdef MSG_NOSIGNAL
-    struct msghdr msg {};
+    struct msghdr msg{};
     msg.msg_iov = const_cast<struct iovec *>(iov);
     msg.msg_iovlen = static_cast<decltype(msg.msg_iovlen)>(iovcnt);
     return ::sendmsg(fd, &msg, MSG_NOSIGNAL);

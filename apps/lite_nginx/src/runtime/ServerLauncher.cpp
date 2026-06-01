@@ -14,9 +14,9 @@
 #include "http/HttpExchange.h"
 #include "http/HttpExchangeIo.h"
 #include "http/HttpHeaders.h"
-#include "net/TlsContext.h"
 #include "net/IpAddress.h"
 #include "net/TcpListener.h"
+#include "net/TlsContext.h"
 
 #include "../proxy/ProxyHandler.h"
 #include "../upstream/UpstreamRegistry.h"

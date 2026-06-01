@@ -511,8 +511,7 @@ common::IoResult<std::uint64_t> quic_decode_packet_number(std::uint32_t truncate
     return candidate;
 }
 
-common::IoResult<void> quic_read_packet_number(QuicPacketHeader &packet,
-                                               const QuicPacketNumberSpace &space) noexcept {
+common::IoResult<void> quic_read_packet_number(QuicPacketHeader &packet, const QuicPacketNumberSpace &space) noexcept {
     if (packet.protected_pn == nullptr || packet.packet_data == nullptr) {
         return std::unexpected(common::IoErr::Invalid);
     }

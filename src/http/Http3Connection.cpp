@@ -51,8 +51,6 @@ void Http3Connection::close(Http3ErrorCode error) noexcept {
     quic_->close(quic::QuicErrorCode::ApplicationError);
 }
 
-void Http3Connection::mark_closed() noexcept {
-    state_ = Http3ConnectionState::Closed;
-}
+void Http3Connection::mark_closed() noexcept { state_ = Http3ConnectionState::Closed; }
 
 } // namespace fiber::http

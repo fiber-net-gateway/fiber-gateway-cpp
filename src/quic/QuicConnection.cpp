@@ -14,9 +14,7 @@ constexpr std::uint64_t kStreamTypeMask = 0x02;
 constexpr std::uint64_t kStreamInitiatorMask = 0x01;
 constexpr std::uint64_t kStreamIncrement = 4;
 
-[[nodiscard]] std::uint64_t stream_sequence(std::uint64_t stream_id) noexcept {
-    return stream_id >> 2;
-}
+[[nodiscard]] std::uint64_t stream_sequence(std::uint64_t stream_id) noexcept { return stream_id >> 2; }
 
 [[nodiscard]] std::uint64_t initial_stream_id(QuicConnectionRole role, QuicStreamType type) noexcept {
     std::uint64_t id = role == QuicConnectionRole::Server ? 1 : 0;
@@ -26,9 +24,7 @@ constexpr std::uint64_t kStreamIncrement = 4;
     return id;
 }
 
-[[nodiscard]] common::IntrusiveListHook &queue_hook_of(QuicFrame &frame) noexcept {
-    return frame.queue_hook;
-}
+[[nodiscard]] common::IntrusiveListHook &queue_hook_of(QuicFrame &frame) noexcept { return frame.queue_hook; }
 
 [[nodiscard]] const common::IntrusiveListHook &queue_hook_of(const QuicFrame &frame) noexcept {
     return frame.queue_hook;
@@ -49,13 +45,9 @@ common::IoResult<QuicConnectionId> QuicConnectionId::from_bytes(const std::uint8
     return out;
 }
 
-QuicPacketProtectionKeys::QuicPacketProtectionKeys() noexcept {
-    EVP_AEAD_CTX_zero(&aead);
-}
+QuicPacketProtectionKeys::QuicPacketProtectionKeys() noexcept { EVP_AEAD_CTX_zero(&aead); }
 
-QuicPacketProtectionKeys::~QuicPacketProtectionKeys() {
-    reset();
-}
+QuicPacketProtectionKeys::~QuicPacketProtectionKeys() { reset(); }
 
 void QuicPacketProtectionKeys::reset() noexcept {
     if (aead_initialized) {
@@ -88,21 +80,13 @@ void QuicCryptoState::reset() noexcept {
     initial_ready = false;
 }
 
-QuicFrame *QuicFrameQueue::front() noexcept {
-    return owner_from_hook(head_);
-}
+QuicFrame *QuicFrameQueue::front() noexcept { return owner_from_hook(head_); }
 
-const QuicFrame *QuicFrameQueue::front() const noexcept {
-    return owner_from_hook(head_);
-}
+const QuicFrame *QuicFrameQueue::front() const noexcept { return owner_from_hook(head_); }
 
-QuicFrame *QuicFrameQueue::back() noexcept {
-    return owner_from_hook(tail_);
-}
+QuicFrame *QuicFrameQueue::back() noexcept { return owner_from_hook(tail_); }
 
-const QuicFrame *QuicFrameQueue::back() const noexcept {
-    return owner_from_hook(tail_);
-}
+const QuicFrame *QuicFrameQueue::back() const noexcept { return owner_from_hook(tail_); }
 
 void QuicFrameQueue::push_back(QuicFrame &frame) noexcept {
     common::IntrusiveListHook &hook = queue_hook_of(frame);
@@ -157,9 +141,7 @@ const QuicFrame *QuicFrameQueue::owner_from_hook(const common::IntrusiveListHook
                                                offsetof(QuicFrame, queue_hook));
 }
 
-QuicPacketNumberSpace::QuicPacketNumberSpace() noexcept {
-    reset(QuicEncryptionLevel::Initial);
-}
+QuicPacketNumberSpace::QuicPacketNumberSpace() noexcept { reset(QuicEncryptionLevel::Initial); }
 
 void QuicPacketNumberSpace::reset(QuicEncryptionLevel space_level) noexcept {
     level = space_level;
@@ -192,8 +174,7 @@ void QuicPacketNumberSpace::record_acked_packet_number(std::uint64_t packet_numb
 }
 
 QuicConnection::QuicConnection(const Options &options) noexcept :
-    options_(options),
-    next_local_bidi_stream_id_(initial_stream_id(options.role, QuicStreamType::Bidirectional)),
+    options_(options), next_local_bidi_stream_id_(initial_stream_id(options.role, QuicStreamType::Bidirectional)),
     next_local_uni_stream_id_(initial_stream_id(options.role, QuicStreamType::Unidirectional)) {
     packet_number_spaces_[0].reset(QuicEncryptionLevel::Initial);
     packet_number_spaces_[1].reset(QuicEncryptionLevel::Handshake);
@@ -235,9 +216,7 @@ void QuicConnection::close(QuicErrorCode error) noexcept {
     state_ = QuicConnectionState::Closing;
 }
 
-void QuicConnection::mark_closed() noexcept {
-    state_ = QuicConnectionState::Closed;
-}
+void QuicConnection::mark_closed() noexcept { state_ = QuicConnectionState::Closed; }
 
 common::IoResult<std::uint64_t> QuicConnection::next_local_stream_id(QuicStreamType type) noexcept {
     if (closing()) {

@@ -74,10 +74,8 @@ TEST(QuicConnectionTest, MapsEarlyDataToApplicationPacketNumberSpace) {
 
     EXPECT_EQ(&early, &application);
     EXPECT_EQ(fiber::quic::QuicConnection::packet_number_space_index(fiber::quic::QuicEncryptionLevel::Initial), 0U);
-    EXPECT_EQ(fiber::quic::QuicConnection::packet_number_space_index(fiber::quic::QuicEncryptionLevel::Handshake),
-              1U);
-    EXPECT_EQ(fiber::quic::QuicConnection::packet_number_space_index(fiber::quic::QuicEncryptionLevel::EarlyData),
-              2U);
+    EXPECT_EQ(fiber::quic::QuicConnection::packet_number_space_index(fiber::quic::QuicEncryptionLevel::Handshake), 1U);
+    EXPECT_EQ(fiber::quic::QuicConnection::packet_number_space_index(fiber::quic::QuicEncryptionLevel::EarlyData), 2U);
     EXPECT_EQ(fiber::quic::QuicConnection::packet_number_space_index(fiber::quic::QuicEncryptionLevel::Application),
               2U);
 }
