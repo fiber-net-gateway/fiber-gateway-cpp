@@ -240,6 +240,9 @@ TEST(QuicUdpEndpointTest, CreatesConnectionForNewInitialDcid) {
     EXPECT_EQ(result->connection->state(), fiber::quic::QuicConnectionState::Handshaking);
     EXPECT_EQ(result->connection->local_addr().port(), endpoint.local_addr().port());
     EXPECT_NE(result->connection->remote_addr().port(), 0);
+    EXPECT_EQ(result->connection->original_destination_connection_id().size(), dcid.size());
+    EXPECT_EQ(result->connection->local_connection_id().size(), fiber::quic::kQuicConnectionIdLength);
+    EXPECT_EQ(endpoint.find_connection(result->connection->local_connection_id()), result->connection);
 
     close_endpoint_on_loop(group, endpoint);
     group.stop();

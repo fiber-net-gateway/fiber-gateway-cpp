@@ -15,10 +15,12 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../net/SocketAddress.h"
+#include "QuicTlsSession.h"
 
 namespace fiber::quic {
 
 inline constexpr std::size_t kMaxConnectionIdLength = 20;
+inline constexpr std::size_t kQuicConnectionIdLength = kMaxConnectionIdLength;
 inline constexpr std::size_t kQuicPacketNumberSpaceCount = 3;
 inline constexpr std::size_t kQuicMaxAckRanges = 32;
 inline constexpr std::size_t kQuicInitialSecretLength = 32;
@@ -190,16 +192,21 @@ class QuicConnection : public common::NonCopyable, public common::NonMovable {
 public:
     struct EndpointIndex {
         QuicConnection *connection = nullptr;
-        QuicConnectionId dcid_key{};
-        std::uint64_t dcid_hash = 0;
-        common::IntrusiveRbTreeHook dcid_hook{};
         common::IntrusiveListHook link{};
+    };
+
+    struct ConnectionIdIndex {
+        QuicConnection *connection = nullptr;
+        QuicConnectionId cid_key{};
+        std::uint64_t cid_hash = 0;
+        common::IntrusiveRbTreeHook cid_hook{};
     };
 
     struct Options {
         QuicConnectionRole role = QuicConnectionRole::Server;
         net::SocketAddress local_addr{};
         net::SocketAddress remote_addr{};
+        QuicConnectionId original_destination_connection_id{};
         QuicConnectionId local_connection_id{};
         QuicConnectionId remote_connection_id{};
         std::chrono::milliseconds idle_timeout = std::chrono::seconds(30);
@@ -216,6 +223,9 @@ public:
     [[nodiscard]] QuicConnectionState state() const noexcept { return state_; }
     [[nodiscard]] const net::SocketAddress &local_addr() const noexcept { return options_.local_addr; }
     [[nodiscard]] const net::SocketAddress &remote_addr() const noexcept { return options_.remote_addr; }
+    [[nodiscard]] const QuicConnectionId &original_destination_connection_id() const noexcept {
+        return options_.original_destination_connection_id;
+    }
     [[nodiscard]] const QuicConnectionId &local_connection_id() const noexcept { return options_.local_connection_id; }
     [[nodiscard]] const QuicConnectionId &remote_connection_id() const noexcept {
         return options_.remote_connection_id;
@@ -248,9 +258,13 @@ public:
     [[nodiscard]] static std::size_t packet_number_space_index(QuicEncryptionLevel level) noexcept;
     [[nodiscard]] QuicCryptoState &crypto() noexcept { return crypto_; }
     [[nodiscard]] const QuicCryptoState &crypto() const noexcept { return crypto_; }
+    [[nodiscard]] QuicTlsSession &tls() noexcept { return tls_; }
+    [[nodiscard]] const QuicTlsSession &tls() const noexcept { return tls_; }
     common::IoResult<void> init_initial_crypto(const QuicConnectionId &original_dcid) noexcept;
 
     EndpointIndex endpoint_index{};
+    ConnectionIdIndex original_dcid_index{};
+    ConnectionIdIndex local_cid_index{};
 
 private:
     [[nodiscard]] std::uint8_t local_initiator_bit() const noexcept;
@@ -266,6 +280,7 @@ private:
     std::uint64_t largest_peer_uni_sequence_ = 0;
     std::array<QuicPacketNumberSpace, kQuicPacketNumberSpaceCount> packet_number_spaces_{};
     QuicCryptoState crypto_{};
+    QuicTlsSession tls_{};
 };
 
 } // namespace fiber::quic
