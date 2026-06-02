@@ -149,8 +149,8 @@ int QuicUdpEndpoint::compare_connection_id(const QuicConnectionId &left, const Q
     return left.size() < right.size() ? -1 : 1;
 }
 
-int QuicUdpEndpoint::compare_dcid_key(std::uint64_t left_hash, const QuicConnectionId &left,
-                                      std::uint64_t right_hash, const QuicConnectionId &right) noexcept {
+int QuicUdpEndpoint::compare_dcid_key(std::uint64_t left_hash, const QuicConnectionId &left, std::uint64_t right_hash,
+                                      const QuicConnectionId &right) noexcept {
     if (left_hash != right_hash) {
         return left_hash < right_hash ? -1 : 1;
     }
@@ -186,8 +186,8 @@ QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &dcid, s
     return nullptr;
 }
 
-const QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &dcid, std::uint64_t hash) const
-        noexcept {
+const QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &dcid,
+                                                       std::uint64_t hash) const noexcept {
     const QuicConnection::EndpointIndex *node = dcid_tree_.root();
     while (node != nullptr) {
         const int cmp = compare_dcid_key(hash, dcid, node->dcid_hash, node->dcid_key);
@@ -283,7 +283,7 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
     }
 
     auto result = quic_process_initial_datagram(*connection, datagram, plaintext_buffer_.get(),
-                                               options_.plaintext_buffer_size);
+                                                options_.plaintext_buffer_size);
     if (!result) {
         ++dropped_datagram_count_;
         if (created) {

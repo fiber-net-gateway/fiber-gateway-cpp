@@ -65,8 +65,7 @@ private:
     };
 
     using DcidTree =
-            common::IntrusiveRbTree<QuicConnection::EndpointIndex,
-                                    offsetof(QuicConnection::EndpointIndex, dcid_hook),
+            common::IntrusiveRbTree<QuicConnection::EndpointIndex, offsetof(QuicConnection::EndpointIndex, dcid_hook),
                                     QuicConnectionDcidLess>;
     using ConnectionList =
             common::IntrusiveList<QuicConnection::EndpointIndex, offsetof(QuicConnection::EndpointIndex, link)>;
@@ -76,20 +75,19 @@ private:
                                                    const QuicConnectionId &right) noexcept;
     [[nodiscard]] static int compare_dcid_key(std::uint64_t left_hash, const QuicConnectionId &left,
                                               std::uint64_t right_hash, const QuicConnectionId &right) noexcept;
-    [[nodiscard]] static QuicConnection::EndpointIndex *index_from_dcid_hook(common::IntrusiveRbTreeHook *hook)
-            noexcept;
+    [[nodiscard]] static QuicConnection::EndpointIndex *
+    index_from_dcid_hook(common::IntrusiveRbTreeHook *hook) noexcept;
     [[nodiscard]] static const QuicConnection::EndpointIndex *
     index_from_dcid_hook(const common::IntrusiveRbTreeHook *hook) noexcept;
 
     [[nodiscard]] QuicConnection *find_connection(const QuicConnectionId &dcid, std::uint64_t hash) noexcept;
-    [[nodiscard]] const QuicConnection *find_connection(const QuicConnectionId &dcid, std::uint64_t hash) const
-            noexcept;
+    [[nodiscard]] const QuicConnection *find_connection(const QuicConnectionId &dcid,
+                                                        std::uint64_t hash) const noexcept;
     void delete_connection(QuicConnection &connection) noexcept;
     [[nodiscard]] common::IoResult<QuicConnection *> create_connection(const QuicPacketHeader &packet,
                                                                        const QuicReceivedDatagram &datagram) noexcept;
-    [[nodiscard]] common::IoResult<QuicUdpReceiveResult> process_datagram(net::UdpPacketRecvResult recv,
-                                                                          std::chrono::steady_clock::time_point now)
-            noexcept;
+    [[nodiscard]] common::IoResult<QuicUdpReceiveResult>
+    process_datagram(net::UdpPacketRecvResult recv, std::chrono::steady_clock::time_point now) noexcept;
 
     Options options_{};
     event::EventLoop *loop_ = nullptr;
