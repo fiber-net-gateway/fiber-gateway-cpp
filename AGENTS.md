@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Source lives under `src/`. The entry point is `src/main.cpp`. Shared utilities are grouped in `src/common/`, with memory helpers in `src/common/mem/` and JSON helpers in `src/common/json/`. Headers and implementations stay together (e.g., `Buffer.h` + `Buffer.cpp`). Tests live in `tests/` and are wired through CTest/GoogleTest.
+This repository is not organized around a single default executable. Core framework code lives under `src/` and is built into the reusable static library `fiber_lib`, which is shared by examples, tests, and applications. Key source modules include `src/event/`, `src/async/`, `src/net/`, `src/dns/`, `src/http/`, `src/common/`, and `src/script/`; shared memory helpers live in `src/common/mem/`, and JSON helpers live in `src/common/json/`. Single-file runnable examples live in `example/`. Multi-file applications live in `apps/`; the current application is `apps/lite_nginx`. Tests live in `tests/` and are wired through CTest/GoogleTest. Documentation and design notes live in `docs/` and `feature/`, with build support under `cmake/` and auxiliary tooling under `scripts/`. Headers and implementations stay together where practical (e.g., `IoBuf.h` + `IoBuf.cpp`).
 
 ## Build, Test, and Development Commands
 This project uses CMake and targets C++23. Typical local workflow:
@@ -9,8 +9,8 @@ This project uses CMake and targets C++23. Typical local workflow:
 ```bash
 cmake -S . -B build
 cmake --build build
-./build/fiber
 ```
+The build normally produces `fiber_lib`, `fiber_tests`, example executables such as `http1_echo` and `dns_dig`, and applications such as `build/apps/lite_nginx`.
 
 If you use CLion, it will generate `cmake-build-debug/` in the repo; do not commit build outputs. Tests can be enabled (default) and run via:
 
