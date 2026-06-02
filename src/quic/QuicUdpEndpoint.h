@@ -18,6 +18,10 @@
 #include "QuicConnection.h"
 #include "QuicPacketProcessor.h"
 
+namespace fiber::net {
+class TlsServerContext;
+} // namespace fiber::net
+
 namespace fiber::quic {
 
 inline constexpr std::size_t kQuicUdpDefaultReadBufferSize = 65536;
@@ -36,7 +40,7 @@ public:
         std::size_t max_connections = 1024;
         std::size_t read_buffer_size = kQuicUdpDefaultReadBufferSize;
         std::size_t plaintext_buffer_size = kQuicUdpDefaultPlaintextBufferSize;
-        std::uint8_t short_connection_id_length = 0;
+        net::TlsServerContext *tls_context = nullptr;
         net::UdpBindOptions udp{};
     };
 
@@ -60,13 +64,13 @@ public:
 
 private:
     struct QuicConnectionDcidLess {
-        [[nodiscard]] bool operator()(const QuicConnection::EndpointIndex *left,
-                                      const QuicConnection::EndpointIndex *right) const noexcept;
+        [[nodiscard]] bool operator()(const QuicConnection::ConnectionIdIndex *left,
+                                      const QuicConnection::ConnectionIdIndex *right) const noexcept;
     };
 
     using DcidTree =
-            common::IntrusiveRbTree<QuicConnection::EndpointIndex, offsetof(QuicConnection::EndpointIndex, dcid_hook),
-                                    QuicConnectionDcidLess>;
+            common::IntrusiveRbTree<QuicConnection::ConnectionIdIndex,
+                                    offsetof(QuicConnection::ConnectionIdIndex, cid_hook), QuicConnectionDcidLess>;
     using ConnectionList =
             common::IntrusiveList<QuicConnection::EndpointIndex, offsetof(QuicConnection::EndpointIndex, link)>;
 
@@ -75,15 +79,19 @@ private:
                                                    const QuicConnectionId &right) noexcept;
     [[nodiscard]] static int compare_dcid_key(std::uint64_t left_hash, const QuicConnectionId &left,
                                               std::uint64_t right_hash, const QuicConnectionId &right) noexcept;
-    [[nodiscard]] static QuicConnection::EndpointIndex *
+    [[nodiscard]] static QuicConnection::ConnectionIdIndex *
     index_from_dcid_hook(common::IntrusiveRbTreeHook *hook) noexcept;
-    [[nodiscard]] static const QuicConnection::EndpointIndex *
+    [[nodiscard]] static const QuicConnection::ConnectionIdIndex *
     index_from_dcid_hook(const common::IntrusiveRbTreeHook *hook) noexcept;
 
     [[nodiscard]] QuicConnection *find_connection(const QuicConnectionId &dcid, std::uint64_t hash) noexcept;
     [[nodiscard]] const QuicConnection *find_connection(const QuicConnectionId &dcid,
                                                         std::uint64_t hash) const noexcept;
     void delete_connection(QuicConnection &connection) noexcept;
+    [[nodiscard]] common::IoResult<QuicConnectionId> generate_connection_id() noexcept;
+    [[nodiscard]] common::IoResult<void> register_connection_id(QuicConnection &connection,
+                                                                QuicConnection::ConnectionIdIndex &index,
+                                                                const QuicConnectionId &cid) noexcept;
     [[nodiscard]] common::IoResult<QuicConnection *> create_connection(const QuicPacketHeader &packet,
                                                                        const QuicReceivedDatagram &datagram) noexcept;
     [[nodiscard]] common::IoResult<QuicUdpReceiveResult>

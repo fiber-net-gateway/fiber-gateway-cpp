@@ -56,6 +56,8 @@ public:
 
     [[nodiscard]] SSL_CTX *raw() const noexcept;
     common::IoResult<void> bind_ssl(SSL *ssl, const SocketAddress *remote_addr) noexcept;
+    common::IoResult<void> bind_quic_ssl(SSL *ssl, const SocketAddress *local_addr,
+                                         const SocketAddress *remote_addr) noexcept;
     [[nodiscard]] TlsContext *select_identity(const TlsClientHelloView &client_hello) const noexcept;
     [[nodiscard]] TlsContext *find_identity_by_name(std::string_view name) const noexcept;
     [[nodiscard]] TlsContext *default_identity() const noexcept { return default_identity_.get(); }

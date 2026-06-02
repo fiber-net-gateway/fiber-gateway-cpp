@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 
 #include <openssl/ssl.h>
@@ -73,6 +74,16 @@ int ssl_remote_addr_ex_index() {
     return index;
 }
 
+int ssl_local_addr_ex_index() {
+    static int index = SSL_get_ex_new_index(0, nullptr, nullptr, nullptr, nullptr);
+    return index;
+}
+
+int ssl_transport_kind_ex_index() {
+    static int index = SSL_get_ex_new_index(0, nullptr, nullptr, nullptr, nullptr);
+    return index;
+}
+
 TlsAlpnProtocolsView parse_client_hello_alpn(const SSL_CLIENT_HELLO *client_hello) noexcept {
     if (!client_hello) {
         return {};
@@ -98,14 +109,22 @@ enum ssl_select_cert_result_t select_server_certificate_cb(const SSL_CLIENT_HELL
 
     auto *remote_addr =
             static_cast<const SocketAddress *>(SSL_get_ex_data(client_hello->ssl, ssl_remote_addr_ex_index()));
+    auto *local_addr =
+            static_cast<const SocketAddress *>(SSL_get_ex_data(client_hello->ssl, ssl_local_addr_ex_index()));
+    const auto transport_value =
+            reinterpret_cast<std::uintptr_t>(SSL_get_ex_data(client_hello->ssl, ssl_transport_kind_ex_index()));
+    const TlsTransportKind transport = transport_value == static_cast<std::uintptr_t>(TlsTransportKind::Quic)
+                                               ? TlsTransportKind::Quic
+                                               : TlsTransportKind::Tcp;
     const char *server_name = SSL_get_servername(client_hello->ssl, TLSEXT_NAMETYPE_host_name);
     TlsIdentitySelectInput hello_view{
             .server_name = server_name ? std::string_view(server_name) : std::string_view{},
             .alpn = parse_client_hello_alpn(client_hello),
             .selected_alpn = {},
             .remote_addr = remote_addr,
+            .local_addr = local_addr,
             .server_context = server_ctx,
-            .transport = TlsTransportKind::Tcp,
+            .transport = transport,
     };
 
     TlsContext *selected = server_ctx->select_identity(hello_view);
@@ -265,6 +284,31 @@ common::IoResult<void> TlsServerContext::bind_ssl(SSL *ssl, const SocketAddress 
         return std::unexpected(common::IoErr::Invalid);
     }
     if (SSL_set_ex_data(ssl, ssl_remote_addr_ex_index(), const_cast<net::SocketAddress *>(remote_addr)) != 1) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (SSL_set_ex_data(ssl, ssl_transport_kind_ex_index(),
+                        reinterpret_cast<void *>(static_cast<std::uintptr_t>(TlsTransportKind::Tcp))) != 1) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return {};
+}
+
+common::IoResult<void> TlsServerContext::bind_quic_ssl(SSL *ssl, const SocketAddress *local_addr,
+                                                       const SocketAddress *remote_addr) noexcept {
+    if (!ssl || !base_context_ || !base_context_->raw()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (SSL_set_ex_data(ssl, ssl_server_context_ex_index(), this) != 1) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (SSL_set_ex_data(ssl, ssl_remote_addr_ex_index(), const_cast<net::SocketAddress *>(remote_addr)) != 1) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (SSL_set_ex_data(ssl, ssl_local_addr_ex_index(), const_cast<net::SocketAddress *>(local_addr)) != 1) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (SSL_set_ex_data(ssl, ssl_transport_kind_ex_index(),
+                        reinterpret_cast<void *>(static_cast<std::uintptr_t>(TlsTransportKind::Quic))) != 1) {
         return std::unexpected(common::IoErr::Invalid);
     }
     return {};

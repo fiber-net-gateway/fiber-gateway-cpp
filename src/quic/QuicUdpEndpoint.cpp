@@ -5,6 +5,8 @@
 #include <expected>
 #include <new>
 
+#include <openssl/rand.h>
+
 #include "QuicPacketCodec.h"
 #include "QuicTransportCodec.h"
 
@@ -119,9 +121,9 @@ async::Task<void> QuicUdpEndpoint::recv_loop() noexcept {
     }
 }
 
-bool QuicUdpEndpoint::QuicConnectionDcidLess::operator()(const QuicConnection::EndpointIndex *left,
-                                                         const QuicConnection::EndpointIndex *right) const noexcept {
-    return compare_dcid_key(left->dcid_hash, left->dcid_key, right->dcid_hash, right->dcid_key) < 0;
+bool QuicUdpEndpoint::QuicConnectionDcidLess::operator()(
+        const QuicConnection::ConnectionIdIndex *left, const QuicConnection::ConnectionIdIndex *right) const noexcept {
+    return compare_dcid_key(left->cid_hash, left->cid_key, right->cid_hash, right->cid_key) < 0;
 }
 
 std::uint64_t QuicUdpEndpoint::hash_connection_id(const QuicConnectionId &id) noexcept {
@@ -157,52 +159,55 @@ int QuicUdpEndpoint::compare_dcid_key(std::uint64_t left_hash, const QuicConnect
     return compare_connection_id(left, right);
 }
 
-QuicConnection::EndpointIndex *QuicUdpEndpoint::index_from_dcid_hook(common::IntrusiveRbTreeHook *hook) noexcept {
+QuicConnection::ConnectionIdIndex *QuicUdpEndpoint::index_from_dcid_hook(common::IntrusiveRbTreeHook *hook) noexcept {
     if (hook == nullptr || !hook->linked()) {
         return nullptr;
     }
-    return reinterpret_cast<QuicConnection::EndpointIndex *>(reinterpret_cast<std::uint8_t *>(hook) -
-                                                             offsetof(QuicConnection::EndpointIndex, dcid_hook));
+    return reinterpret_cast<QuicConnection::ConnectionIdIndex *>(reinterpret_cast<std::uint8_t *>(hook) -
+                                                                 offsetof(QuicConnection::ConnectionIdIndex, cid_hook));
 }
 
-const QuicConnection::EndpointIndex *
+const QuicConnection::ConnectionIdIndex *
 QuicUdpEndpoint::index_from_dcid_hook(const common::IntrusiveRbTreeHook *hook) noexcept {
     if (hook == nullptr || !hook->linked()) {
         return nullptr;
     }
-    return reinterpret_cast<const QuicConnection::EndpointIndex *>(reinterpret_cast<const std::uint8_t *>(hook) -
-                                                                   offsetof(QuicConnection::EndpointIndex, dcid_hook));
+    return reinterpret_cast<const QuicConnection::ConnectionIdIndex *>(
+            reinterpret_cast<const std::uint8_t *>(hook) - offsetof(QuicConnection::ConnectionIdIndex, cid_hook));
 }
 
 QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &dcid, std::uint64_t hash) noexcept {
-    QuicConnection::EndpointIndex *node = dcid_tree_.root();
+    QuicConnection::ConnectionIdIndex *node = dcid_tree_.root();
     while (node != nullptr) {
-        const int cmp = compare_dcid_key(hash, dcid, node->dcid_hash, node->dcid_key);
+        const int cmp = compare_dcid_key(hash, dcid, node->cid_hash, node->cid_key);
         if (cmp == 0) {
             return node->connection;
         }
-        node = cmp < 0 ? index_from_dcid_hook(node->dcid_hook.left) : index_from_dcid_hook(node->dcid_hook.right);
+        node = cmp < 0 ? index_from_dcid_hook(node->cid_hook.left) : index_from_dcid_hook(node->cid_hook.right);
     }
     return nullptr;
 }
 
 const QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &dcid,
                                                        std::uint64_t hash) const noexcept {
-    const QuicConnection::EndpointIndex *node = dcid_tree_.root();
+    const QuicConnection::ConnectionIdIndex *node = dcid_tree_.root();
     while (node != nullptr) {
-        const int cmp = compare_dcid_key(hash, dcid, node->dcid_hash, node->dcid_key);
+        const int cmp = compare_dcid_key(hash, dcid, node->cid_hash, node->cid_key);
         if (cmp == 0) {
             return node->connection;
         }
-        node = cmp < 0 ? index_from_dcid_hook(node->dcid_hook.left) : index_from_dcid_hook(node->dcid_hook.right);
+        node = cmp < 0 ? index_from_dcid_hook(node->cid_hook.left) : index_from_dcid_hook(node->cid_hook.right);
     }
     return nullptr;
 }
 
 void QuicUdpEndpoint::delete_connection(QuicConnection &connection) noexcept {
     QuicConnection::EndpointIndex &index = connection.endpoint_index;
-    if (index.dcid_hook.linked()) {
-        dcid_tree_.erase(index);
+    if (connection.original_dcid_index.cid_hook.linked()) {
+        dcid_tree_.erase(connection.original_dcid_index);
+    }
+    if (connection.local_cid_index.cid_hook.linked()) {
+        dcid_tree_.erase(connection.local_cid_index);
     }
     if (index.link.linked()) {
         connections_.erase(index);
@@ -211,6 +216,29 @@ void QuicUdpEndpoint::delete_connection(QuicConnection &connection) noexcept {
         --active_connection_count_;
     }
     delete &connection;
+}
+
+common::IoResult<QuicConnectionId> QuicUdpEndpoint::generate_connection_id() noexcept {
+    std::uint8_t bytes[kQuicConnectionIdLength]{};
+    if (RAND_bytes(bytes, sizeof(bytes)) != 1) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return QuicConnectionId::from_bytes(bytes, sizeof(bytes));
+}
+
+common::IoResult<void> QuicUdpEndpoint::register_connection_id(QuicConnection &connection,
+                                                               QuicConnection::ConnectionIdIndex &index,
+                                                               const QuicConnectionId &cid) noexcept {
+    const std::uint64_t cid_hash = hash_connection_id(cid);
+    if (find_connection(cid, cid_hash) != nullptr) {
+        return std::unexpected(common::IoErr::Already);
+    }
+
+    index.connection = &connection;
+    index.cid_key = cid;
+    index.cid_hash = cid_hash;
+    dcid_tree_.insert(index);
+    return {};
 }
 
 common::IoResult<QuicConnection *> QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet,
@@ -224,11 +252,31 @@ common::IoResult<QuicConnection *> QuicUdpEndpoint::create_connection(const Quic
         return std::unexpected(common::IoErr::NoMem);
     }
 
+    QuicConnectionId local_connection_id{};
+    bool generated_unique_cid = false;
+    for (std::uint8_t attempt = 0; attempt < 8; ++attempt) {
+        auto generated = generate_connection_id();
+        if (!generated) {
+            ++rejected_connection_count_;
+            return std::unexpected(generated.error());
+        }
+        if (compare_connection_id(*generated, packet.dcid) != 0 && find_connection(*generated) == nullptr) {
+            local_connection_id = *generated;
+            generated_unique_cid = true;
+            break;
+        }
+    }
+    if (!generated_unique_cid) {
+        ++rejected_connection_count_;
+        return std::unexpected(common::IoErr::Already);
+    }
+
     QuicConnection::Options conn_options{};
     conn_options.role = QuicConnectionRole::Server;
     conn_options.local_addr = datagram.local;
     conn_options.remote_addr = datagram.peer;
-    conn_options.local_connection_id = packet.dcid;
+    conn_options.original_destination_connection_id = packet.dcid;
+    conn_options.local_connection_id = local_connection_id;
     conn_options.remote_connection_id = packet.scid;
 
     auto *connection = new (std::nothrow) QuicConnection(conn_options);
@@ -238,9 +286,26 @@ common::IoResult<QuicConnection *> QuicUdpEndpoint::create_connection(const Quic
     }
 
     connection->endpoint_index.connection = connection;
-    connection->endpoint_index.dcid_key = packet.dcid;
-    connection->endpoint_index.dcid_hash = dcid_hash;
-    dcid_tree_.insert(connection->endpoint_index);
+    auto registered = register_connection_id(*connection, connection->original_dcid_index, packet.dcid);
+    if (!registered) {
+        delete connection;
+        return std::unexpected(registered.error());
+    }
+    registered = register_connection_id(*connection, connection->local_cid_index, local_connection_id);
+    if (!registered) {
+        dcid_tree_.erase(connection->original_dcid_index);
+        delete connection;
+        return std::unexpected(registered.error());
+    }
+    if (options_.tls_context != nullptr) {
+        auto tls_initialized = connection->tls().init_server(*options_.tls_context, *connection);
+        if (!tls_initialized) {
+            dcid_tree_.erase(connection->original_dcid_index);
+            dcid_tree_.erase(connection->local_cid_index);
+            delete connection;
+            return std::unexpected(tls_initialized.error());
+        }
+    }
     connections_.push_back(connection->endpoint_index);
     ++active_connection_count_;
     return connection;
@@ -248,7 +313,7 @@ common::IoResult<QuicConnection *> QuicUdpEndpoint::create_connection(const Quic
 
 common::IoResult<QuicUdpReceiveResult>
 QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::steady_clock::time_point now) noexcept {
-    auto dcid = quic_get_packet_dcid(read_buffer_.get(), recv.size, options_.short_connection_id_length);
+    auto dcid = quic_get_packet_dcid(read_buffer_.get(), recv.size, static_cast<std::uint8_t>(kQuicConnectionIdLength));
     if (!dcid) {
         ++dropped_datagram_count_;
         return std::unexpected(dcid.error());
@@ -266,7 +331,8 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
     QuicConnection *connection = find_connection(*dcid, dcid_hash);
     bool created = false;
     if (connection == nullptr) {
-        auto packet = quic_parse_packet_header(read_buffer_.get(), recv.size, options_.short_connection_id_length);
+        auto packet = quic_parse_packet_header(read_buffer_.get(), recv.size,
+                                               static_cast<std::uint8_t>(kQuicConnectionIdLength));
         if (!packet || !packet->long_header || packet->type != QuicPacketType::Initial ||
             packet->version != kQuicVersion1 || recv.size < kMinInitialDatagramSize) {
             ++dropped_datagram_count_;
