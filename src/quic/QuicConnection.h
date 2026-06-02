@@ -10,6 +10,7 @@
 #include <openssl/aes.h>
 
 #include "../common/IntrusiveList.h"
+#include "../common/IntrusiveRbTree.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
@@ -187,6 +188,14 @@ struct QuicCryptoState : public common::NonCopyable, public common::NonMovable {
 
 class QuicConnection : public common::NonCopyable, public common::NonMovable {
 public:
+    struct EndpointIndex {
+        QuicConnection *connection = nullptr;
+        QuicConnectionId dcid_key{};
+        std::uint64_t dcid_hash = 0;
+        common::IntrusiveRbTreeHook dcid_hook{};
+        common::IntrusiveListHook link{};
+    };
+
     struct Options {
         QuicConnectionRole role = QuicConnectionRole::Server;
         net::SocketAddress local_addr{};
@@ -240,6 +249,8 @@ public:
     [[nodiscard]] QuicCryptoState &crypto() noexcept { return crypto_; }
     [[nodiscard]] const QuicCryptoState &crypto() const noexcept { return crypto_; }
     common::IoResult<void> init_initial_crypto(const QuicConnectionId &original_dcid) noexcept;
+
+    EndpointIndex endpoint_index{};
 
 private:
     [[nodiscard]] std::uint8_t local_initiator_bit() const noexcept;
