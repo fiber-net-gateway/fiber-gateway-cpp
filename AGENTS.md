@@ -25,6 +25,8 @@ Design state and member variables to be minimal and explicit. Prefer establishin
 
 Do not use C++ exceptions in this project. Do not write `throw`, and prefer `noexcept` for internal callback-style functions and other code paths that are required to be non-throwing by design.
 
+When retrieving time in request-handling paths, prefer `fiber::event::EventLoop::current().now();` as the time source.
+
 ## Performance & Memory Requirements
 Code in this project is performance-first. Pay close attention to memory allocation and release efficiency, and reduce dynamic allocation churn in latency-sensitive paths. In hot code paths, do not use allocation-heavy standard library types such as `std::string`, `std::vector`, and `std::function` by default; only use them when there is a clear non-hot-path justification. Prefer reusable buffers, fixed-size structures, intrusive or custom memory-managed types, and compile-time or lightweight callable abstractions.
 
