@@ -15,11 +15,11 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../net/SocketAddress.h"
+#include "QuicFrame.h"
 #include "QuicTlsSession.h"
 
 namespace fiber::quic {
 
-inline constexpr std::size_t kMaxConnectionIdLength = 20;
 inline constexpr std::size_t kQuicConnectionIdLength = kMaxConnectionIdLength;
 inline constexpr std::size_t kQuicPacketNumberSpaceCount = 3;
 inline constexpr std::size_t kQuicMaxAckRanges = 32;
@@ -33,9 +33,6 @@ inline constexpr std::size_t kQuicInitialIvLength = kQuicIvLength;
 inline constexpr std::size_t kQuicInitialHeaderProtectionKeyLength = 16;
 inline constexpr std::size_t kQuicHeaderProtectionSampleLength = 16;
 inline constexpr std::size_t kQuicHeaderProtectionMaskLength = 5;
-
-enum class QuicEncryptionLevel : std::uint8_t;
-struct QuicFrame;
 
 enum class QuicConnectionRole : std::uint8_t {
     Client,
@@ -92,23 +89,7 @@ struct QuicAckRange {
     std::uint64_t range = 0;
 };
 
-struct QuicFrameQueue {
-    [[nodiscard]] bool empty() const noexcept { return head_ == nullptr; }
-    [[nodiscard]] QuicFrame *front() noexcept;
-    [[nodiscard]] const QuicFrame *front() const noexcept;
-    [[nodiscard]] QuicFrame *back() noexcept;
-    [[nodiscard]] const QuicFrame *back() const noexcept;
-
-    void push_back(QuicFrame &frame) noexcept;
-    void erase(QuicFrame &frame) noexcept;
-
-private:
-    [[nodiscard]] static QuicFrame *owner_from_hook(common::IntrusiveListHook *hook) noexcept;
-    [[nodiscard]] static const QuicFrame *owner_from_hook(const common::IntrusiveListHook *hook) noexcept;
-
-    common::IntrusiveListHook *head_ = nullptr;
-    common::IntrusiveListHook *tail_ = nullptr;
-};
+using QuicFrameQueue = common::IntrusiveList<QuicFrame, offsetof(QuicFrame, queue_hook)>;
 
 struct QuicPacketNumberSpace {
     QuicPacketNumberSpace() noexcept;
