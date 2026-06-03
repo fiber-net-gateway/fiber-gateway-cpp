@@ -17,6 +17,7 @@
 #include "../net/UdpSocket.h"
 #include "QuicConnection.h"
 #include "QuicPacketProcessor.h"
+#include "QuicSendScheduler.h"
 
 namespace fiber::net {
 class TlsServerContext;
@@ -42,6 +43,7 @@ public:
         std::size_t plaintext_buffer_size = kQuicUdpDefaultPlaintextBufferSize;
         net::TlsServerContext *tls_context = nullptr;
         net::UdpBindOptions udp{};
+        QuicSendScheduler::Options send{};
     };
 
     QuicUdpEndpoint() noexcept;
@@ -58,11 +60,14 @@ public:
     [[nodiscard]] QuicConnection *find_connection(const QuicConnectionId &dcid) noexcept;
     [[nodiscard]] const QuicConnection *find_connection(const QuicConnectionId &dcid) const noexcept;
     [[nodiscard]] common::IoResult<void> remove_connection(const QuicConnectionId &dcid) noexcept;
+    void schedule_send(QuicConnection &connection) noexcept;
 
     [[nodiscard]] async::Task<common::IoResult<QuicUdpReceiveResult>> recv_once() noexcept;
     [[nodiscard]] async::Task<void> recv_loop() noexcept;
 
 private:
+    friend class QuicSendScheduler;
+
     struct QuicConnectionDcidLess {
         [[nodiscard]] bool operator()(const QuicConnection::ConnectionIdIndex *left,
                                       const QuicConnection::ConnectionIdIndex *right) const noexcept;
@@ -96,12 +101,18 @@ private:
                                                                        const QuicReceivedDatagram &datagram) noexcept;
     [[nodiscard]] common::IoResult<QuicUdpReceiveResult>
     process_datagram(net::UdpPacketRecvResult recv, std::chrono::steady_clock::time_point now) noexcept;
+    [[nodiscard]] common::IoResult<QuicBuildSendResult> build_send_datagram(QuicConnection &connection,
+                                                                            QuicSendDatagram &datagram) noexcept;
+    void commit_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept;
+    void rollback_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept;
+    [[nodiscard]] bool connection_has_send_work(const QuicConnection &connection) const noexcept;
 
     Options options_{};
     event::EventLoop *loop_ = nullptr;
     std::unique_ptr<net::UdpSocket> socket_{};
     std::unique_ptr<std::uint8_t[]> read_buffer_{};
     std::unique_ptr<std::uint8_t[]> plaintext_buffer_{};
+    QuicSendScheduler send_scheduler_{};
     DcidTree dcid_tree_{};
     ConnectionList connections_{};
     std::size_t active_connection_count_ = 0;
