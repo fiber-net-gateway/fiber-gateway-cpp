@@ -7,6 +7,7 @@
 
 #include <openssl/rand.h>
 
+#include "../async/Spawn.h"
 #include "QuicPacketCodec.h"
 #include "QuicTransportCodec.h"
 
@@ -22,6 +23,37 @@ inline constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 QuicUdpEndpoint::QuicUdpEndpoint() noexcept = default;
 
 QuicUdpEndpoint::~QuicUdpEndpoint() { close(); }
+
+namespace {
+
+[[nodiscard]] bool has_packet_space_work(const QuicPacketNumberSpace &space) noexcept {
+    return (space.send_ack && space.pending_ack != kUnsetPacketNumber) || !space.pending_frames.empty();
+}
+
+void copy_send_frame(QuicFrame &dst, const QuicFrame &src) noexcept {
+    dst = src;
+    dst.queue_hook = {};
+}
+
+[[nodiscard]] bool fill_ack_frame(const QuicPacketNumberSpace &space, QuicFrame &frame) noexcept {
+    if (!space.send_ack || space.pending_ack == kUnsetPacketNumber) {
+        return false;
+    }
+
+    const std::uint64_t largest = space.largest_received_packet_number != kUnsetPacketNumber
+                                          ? space.largest_received_packet_number
+                                          : space.pending_ack;
+    frame = QuicFrame{};
+    frame.type = QuicFrameType::Ack;
+    frame.level = space.level;
+    frame.u.ack.largest = largest;
+    frame.u.ack.delay = 0;
+    frame.u.ack.range_count = 0;
+    frame.u.ack.first_range = 0;
+    return true;
+}
+
+} // namespace
 
 common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Options &options) noexcept {
     if (initialized_ || options.max_connections == 0 || options.read_buffer_size < kMinInitialDatagramSize ||
@@ -53,12 +85,20 @@ common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Optio
         return std::unexpected(bound.error());
     }
 
+    auto send_initialized = send_scheduler_.init(loop, *socket_, *this, options_.send);
+    if (!send_initialized) {
+        close();
+        return std::unexpected(send_initialized.error());
+    }
+
     initialized_ = true;
+    async::spawn(loop, [this]() -> async::DetachedTask { co_await send_scheduler_.run(); });
     return {};
 }
 
 void QuicUdpEndpoint::close() noexcept {
     closing_ = true;
+    send_scheduler_.close();
     if (socket_ && socket_->valid()) {
         socket_->close();
     }
@@ -95,6 +135,8 @@ common::IoResult<void> QuicUdpEndpoint::remove_connection(const QuicConnectionId
     delete_connection(*connection);
     return {};
 }
+
+void QuicUdpEndpoint::schedule_send(QuicConnection &connection) noexcept { send_scheduler_.submit(connection); }
 
 async::Task<common::IoResult<QuicUdpReceiveResult>> QuicUdpEndpoint::recv_once() noexcept {
     if (!valid() || !read_buffer_) {
@@ -202,6 +244,7 @@ const QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &d
 }
 
 void QuicUdpEndpoint::delete_connection(QuicConnection &connection) noexcept {
+    send_scheduler_.remove(connection);
     QuicConnection::EndpointIndex &index = connection.endpoint_index;
     if (connection.original_dcid_index.cid_hook.linked()) {
         dcid_tree_.erase(connection.original_dcid_index);
@@ -362,7 +405,107 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
     out.connection = connection;
     out.packet = *result;
     out.created = created;
+    if (result->send_ack) {
+        schedule_send(*connection);
+    }
     return out;
+}
+
+common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicConnection &connection,
+                                                                           QuicSendDatagram &datagram) noexcept {
+    if (!valid() || datagram.data == nullptr || datagram.capacity == 0 || connection.closing()) {
+        return QuicBuildSendResult{QuicBuildSendStatus::Closed};
+    }
+
+    constexpr QuicEncryptionLevel levels[] = {QuicEncryptionLevel::Initial, QuicEncryptionLevel::Handshake,
+                                              QuicEncryptionLevel::Application};
+
+    for (QuicEncryptionLevel level: levels) {
+        QuicPacketNumberSpace &space = connection.packet_number_space(level);
+        if (!has_packet_space_work(space)) {
+            continue;
+        }
+
+        std::uint8_t *data = datagram.data;
+        const std::size_t capacity = datagram.capacity;
+        datagram = QuicSendDatagram{};
+        datagram.data = data;
+        datagram.capacity = capacity;
+        datagram.level = level;
+        datagram.packet_number_snapshot = quic_preserve_packet_number(space);
+
+        if (fill_ack_frame(space, datagram.frames[0])) {
+            datagram.frame_count = 1;
+            datagram.sends_ack = true;
+        } else {
+            QuicFrame *source = space.pending_frames.front();
+            if (source == nullptr) {
+                continue;
+            }
+            copy_send_frame(datagram.frames[0], *source);
+            datagram.source_frames[0] = source;
+            datagram.frame_count = 1;
+        }
+
+        QuicPacketEncodeSpec spec{};
+        spec.level = level;
+        spec.dcid = connection.remote_connection_id();
+        spec.scid = connection.local_connection_id();
+        spec.frames = datagram.frames;
+        spec.frame_count = datagram.frame_count;
+        spec.min_packet_len = level == QuicEncryptionLevel::Initial ? kMinInitialDatagramSize : 0;
+
+        auto encoded = quic_encode_packet(connection, spec, datagram.data, datagram.capacity);
+        if (!encoded) {
+            quic_restore_packet_number(space, datagram.packet_number_snapshot);
+            if (encoded.error() == common::IoErr::NotFound) {
+                continue;
+            }
+            return std::unexpected(encoded.error());
+        }
+
+        datagram.length = encoded->packet_len;
+        datagram.packet_number = encoded->packet_number;
+        datagram.ack_eliciting = encoded->ack_eliciting;
+        datagram.spec.buf = datagram.data;
+        datagram.spec.len = datagram.length;
+        datagram.spec.peer = connection.remote_addr();
+        datagram.spec.local = connection.local_addr();
+        datagram.spec.has_local = true;
+        return QuicBuildSendResult{QuicBuildSendStatus::Encoded};
+    }
+
+    return QuicBuildSendResult{QuicBuildSendStatus::NoWork};
+}
+
+void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept {
+    QuicPacketNumberSpace &space = connection.packet_number_space(datagram.level);
+    if (datagram.sends_ack) {
+        space.send_ack = false;
+    }
+
+    for (std::size_t i = 0; i < datagram.frame_count; ++i) {
+        QuicFrame *frame = datagram.source_frames[i];
+        if (frame == nullptr) {
+            continue;
+        }
+        if (frame->queue_hook.linked()) {
+            space.pending_frames.erase(*frame);
+        }
+        frame->packet_number = datagram.packet_number;
+        space.sent_frames.push_back(*frame);
+    }
+}
+
+void QuicUdpEndpoint::rollback_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept {
+    QuicPacketNumberSpace &space = connection.packet_number_space(datagram.level);
+    quic_restore_packet_number(space, datagram.packet_number_snapshot);
+}
+
+bool QuicUdpEndpoint::connection_has_send_work(const QuicConnection &connection) const noexcept {
+    return has_packet_space_work(connection.packet_number_space(QuicEncryptionLevel::Initial)) ||
+           has_packet_space_work(connection.packet_number_space(QuicEncryptionLevel::Handshake)) ||
+           has_packet_space_work(connection.packet_number_space(QuicEncryptionLevel::Application));
 }
 
 } // namespace fiber::quic

@@ -183,6 +183,18 @@ public:
         common::IntrusiveRbTreeHook cid_hook{};
     };
 
+    struct SendIndex {
+        enum class State : std::uint8_t {
+            None,
+            Ready,
+            Inflight,
+        };
+
+        QuicConnection *connection = nullptr;
+        common::IntrusiveListHook link{};
+        State state = State::None;
+    };
+
     struct Options {
         QuicConnectionRole role = QuicConnectionRole::Server;
         net::SocketAddress local_addr{};
@@ -246,6 +258,7 @@ public:
     EndpointIndex endpoint_index{};
     ConnectionIdIndex original_dcid_index{};
     ConnectionIdIndex local_cid_index{};
+    SendIndex send_index{};
 
 private:
     [[nodiscard]] std::uint8_t local_initiator_bit() const noexcept;

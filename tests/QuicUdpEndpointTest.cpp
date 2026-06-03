@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <future>
 #include <string_view>
 
@@ -14,6 +15,7 @@
 #include "net/SocketAddress.h"
 #include "net/UdpSocket.h"
 #include "quic/QuicCrypto.h"
+#include "quic/QuicPacketCodec.h"
 #include "quic/QuicTransportCodec.h"
 #include "quic/QuicUdpEndpoint.h"
 
@@ -140,6 +142,30 @@ DetachedTask send_datagram(fiber::event::EventLoop *loop, std::uint16_t port, co
     client.close();
 }
 
+DetachedTask send_datagram_and_recv_response(fiber::event::EventLoop *loop, std::uint16_t port,
+                                             const std::uint8_t *data, std::size_t len, std::uint8_t *response,
+                                             std::size_t response_cap,
+                                             std::promise<fiber::common::IoResult<std::size_t>> *done_promise) {
+    fiber::net::UdpSocket client(*loop);
+    auto bound = client.bind(loopback(0), {});
+    if (!bound) {
+        done_promise->set_value(std::unexpected(bound.error()));
+        co_return;
+    }
+
+    auto sent = co_await client.send_to(data, len, loopback(port));
+    if (!sent) {
+        done_promise->set_value(std::unexpected(sent.error()));
+        client.close();
+        co_return;
+    }
+
+    auto received = co_await client.recv_from(response, response_cap);
+    done_promise->set_value(received ? fiber::common::IoResult<std::size_t>{received->size}
+                                     : std::unexpected(received.error()));
+    client.close();
+}
+
 DetachedTask send_two_datagrams(fiber::event::EventLoop *loop, std::uint16_t port, const std::uint8_t *first,
                                 std::size_t first_len, const std::uint8_t *second, std::size_t second_len,
                                 std::promise<fiber::common::IoErr> *done_promise) {
@@ -243,6 +269,59 @@ TEST(QuicUdpEndpointTest, CreatesConnectionForNewInitialDcid) {
     EXPECT_EQ(result->connection->original_destination_connection_id().size(), dcid.size());
     EXPECT_EQ(result->connection->local_connection_id().size(), fiber::quic::kQuicConnectionIdLength);
     EXPECT_EQ(endpoint.find_connection(result->connection->local_connection_id()), result->connection);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, SendsInitialAckAfterProcessingAckElicitingInitial) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("8394c8f03e515708");
+    const auto scid = cid_from_hex("11223344");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
+    build_initial_datagram(datagram, dcid, scid, 7);
+
+    std::array<std::uint8_t, 1400> response{};
+    std::promise<EndpointResult> recv_promise;
+    std::promise<fiber::common::IoResult<std::size_t>> response_promise;
+    auto recv_future = recv_promise.get_future();
+    auto response_future = response_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() { return recv_endpoint_once(&endpoint, &recv_promise); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return send_datagram_and_recv_response(&group.at(0), endpoint.local_addr().port(), datagram.data(),
+                                               datagram.size(), response.data(), response.size(), &response_promise);
+    });
+
+    ASSERT_EQ(recv_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(response_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+    auto recv_result = recv_future.get();
+    ASSERT_TRUE(recv_result.has_value()) << static_cast<int>(recv_result.error());
+    auto response_size = response_future.get();
+    ASSERT_TRUE(response_size.has_value()) << static_cast<int>(response_size.error());
+
+    fiber::quic::QuicConnection::Options client_options{};
+    client_options.role = fiber::quic::QuicConnectionRole::Client;
+    fiber::quic::QuicConnection client(client_options);
+    ASSERT_TRUE(client.init_initial_crypto(dcid));
+
+    std::array<std::uint8_t, 1400> plaintext{};
+    auto decoded = fiber::quic::quic_decode_packet(client, response.data(), *response_size, 0, plaintext.data(),
+                                                   plaintext.size());
+
+    ASSERT_TRUE(decoded.has_value()) << static_cast<int>(decoded.error());
+    EXPECT_EQ(decoded->header.type, fiber::quic::QuicPacketType::Initial);
+    EXPECT_FALSE(decoded->ack_eliciting);
+    EXPECT_GE(decoded->frame_count, 1U);
 
     close_endpoint_on_loop(group, endpoint);
     group.stop();
