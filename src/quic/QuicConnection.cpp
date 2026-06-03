@@ -24,12 +24,6 @@ constexpr std::uint64_t kStreamIncrement = 4;
     return id;
 }
 
-[[nodiscard]] common::IntrusiveListHook &queue_hook_of(QuicFrame &frame) noexcept { return frame.queue_hook; }
-
-[[nodiscard]] const common::IntrusiveListHook &queue_hook_of(const QuicFrame &frame) noexcept {
-    return frame.queue_hook;
-}
-
 } // namespace
 
 common::IoResult<QuicConnectionId> QuicConnectionId::from_bytes(const std::uint8_t *data, std::size_t len) noexcept {
@@ -78,67 +72,6 @@ void QuicCryptoState::reset() noexcept {
     application_read.reset();
     application_write.reset();
     initial_ready = false;
-}
-
-QuicFrame *QuicFrameQueue::front() noexcept { return owner_from_hook(head_); }
-
-const QuicFrame *QuicFrameQueue::front() const noexcept { return owner_from_hook(head_); }
-
-QuicFrame *QuicFrameQueue::back() noexcept { return owner_from_hook(tail_); }
-
-const QuicFrame *QuicFrameQueue::back() const noexcept { return owner_from_hook(tail_); }
-
-void QuicFrameQueue::push_back(QuicFrame &frame) noexcept {
-    common::IntrusiveListHook &hook = queue_hook_of(frame);
-    if (hook.in_list) {
-        return;
-    }
-
-    hook.prev = tail_;
-    hook.next = nullptr;
-    if (tail_ != nullptr) {
-        tail_->next = &hook;
-    } else {
-        head_ = &hook;
-    }
-    tail_ = &hook;
-    hook.in_list = true;
-}
-
-void QuicFrameQueue::erase(QuicFrame &frame) noexcept {
-    common::IntrusiveListHook &hook = queue_hook_of(frame);
-    if (!hook.in_list) {
-        return;
-    }
-
-    if (hook.prev != nullptr) {
-        hook.prev->next = hook.next;
-    } else {
-        head_ = hook.next;
-    }
-    if (hook.next != nullptr) {
-        hook.next->prev = hook.prev;
-    } else {
-        tail_ = hook.prev;
-    }
-    hook.prev = nullptr;
-    hook.next = nullptr;
-    hook.in_list = false;
-}
-
-QuicFrame *QuicFrameQueue::owner_from_hook(common::IntrusiveListHook *hook) noexcept {
-    if (hook == nullptr) {
-        return nullptr;
-    }
-    return reinterpret_cast<QuicFrame *>(reinterpret_cast<std::uint8_t *>(hook) - offsetof(QuicFrame, queue_hook));
-}
-
-const QuicFrame *QuicFrameQueue::owner_from_hook(const common::IntrusiveListHook *hook) noexcept {
-    if (hook == nullptr) {
-        return nullptr;
-    }
-    return reinterpret_cast<const QuicFrame *>(reinterpret_cast<const std::uint8_t *>(hook) -
-                                               offsetof(QuicFrame, queue_hook));
 }
 
 QuicPacketNumberSpace::QuicPacketNumberSpace() noexcept { reset(QuicEncryptionLevel::Initial); }
