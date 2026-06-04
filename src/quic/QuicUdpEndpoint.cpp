@@ -8,6 +8,7 @@
 #include <openssl/rand.h>
 
 #include "../async/Spawn.h"
+#include "QuicCongestion.h"
 #include "QuicPacketCodec.h"
 #include "QuicTransportCodec.h"
 
@@ -147,7 +148,7 @@ async::Task<common::IoResult<QuicUdpReceiveResult>> QuicUdpEndpoint::recv_once()
     if (!recv) {
         co_return std::unexpected(recv.error());
     }
-    co_return process_datagram(*recv, std::chrono::steady_clock::now());
+    co_return process_datagram(*recv, loop_ != nullptr ? loop_->now() : std::chrono::steady_clock::now());
 }
 
 async::Task<void> QuicUdpEndpoint::recv_loop() noexcept {
@@ -442,6 +443,9 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
             if (source == nullptr) {
                 continue;
             }
+            if (!quic_congestion_can_send(connection.congestion(), source->ignore_congestion)) {
+                return QuicBuildSendResult{QuicBuildSendStatus::Blocked};
+            }
             copy_send_frame(datagram.frames[0], *source);
             datagram.source_frames[0] = source;
             datagram.frame_count = 1;
@@ -480,10 +484,12 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
 
 void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept {
     QuicPacketNumberSpace &space = connection.packet_number_space(datagram.level);
+    const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
     if (datagram.sends_ack) {
         space.send_ack = false;
     }
 
+    bool accounted_packet = false;
     for (std::size_t i = 0; i < datagram.frame_count; ++i) {
         QuicFrame *frame = datagram.source_frames[i];
         if (frame == nullptr) {
@@ -493,8 +499,22 @@ void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const Qui
             space.pending_frames.erase(*frame);
         }
         frame->packet_number = datagram.packet_number;
-        space.sent_frames.push_back(*frame);
+        frame->send_time = now;
+        frame->packet_ack_eliciting = datagram.ack_eliciting;
+        frame->packet_len = 0;
+
+        if (datagram.ack_eliciting && !connection.closing()) {
+            if (!accounted_packet) {
+                frame->packet_len = datagram.length;
+                accounted_packet = true;
+            }
+            space.sent_frames.push_back(*frame);
+        }
     }
+
+    quic_congestion_on_packet_sent(connection.congestion(), datagram.length, datagram.ack_eliciting,
+                                   connection.closing());
+    quic_congestion_on_idle(connection.congestion(), !connection_has_send_work(connection), now);
 }
 
 void QuicUdpEndpoint::rollback_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept {

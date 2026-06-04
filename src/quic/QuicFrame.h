@@ -1,6 +1,7 @@
 #ifndef FIBER_QUIC_QUIC_FRAME_H
 #define FIBER_QUIC_QUIC_FRAME_H
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 
@@ -161,7 +162,12 @@ struct QuicFrame {
     QuicFrameType type = QuicFrameType::Padding;
     QuicEncryptionLevel level = QuicEncryptionLevel::Initial;
     std::uint64_t packet_number = 0;
+    std::size_t packet_len = 0;
+    std::chrono::milliseconds send_time{0};
     bool ack_eliciting = false;
+    bool packet_ack_eliciting = false;
+    bool ignore_congestion = false;
+    bool ignore_loss = false;
     QuicSlice data{};
 
     union Payload {
