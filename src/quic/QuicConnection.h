@@ -15,6 +15,7 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../net/SocketAddress.h"
+#include "QuicCongestion.h"
 #include "QuicFrame.h"
 #include "QuicTlsSession.h"
 
@@ -251,6 +252,12 @@ public:
     [[nodiscard]] static std::size_t packet_number_space_index(QuicEncryptionLevel level) noexcept;
     [[nodiscard]] QuicCryptoState &crypto() noexcept { return crypto_; }
     [[nodiscard]] const QuicCryptoState &crypto() const noexcept { return crypto_; }
+    [[nodiscard]] QuicCongestionState &congestion() noexcept { return congestion_; }
+    [[nodiscard]] const QuicCongestionState &congestion() const noexcept { return congestion_; }
+    [[nodiscard]] QuicRttState &rtt() noexcept { return rtt_; }
+    [[nodiscard]] const QuicRttState &rtt() const noexcept { return rtt_; }
+    [[nodiscard]] std::uint64_t reset_packet_number() const noexcept { return reset_packet_number_; }
+    void reset_congestion_for_path(QuicTime now) noexcept;
     [[nodiscard]] QuicTlsSession &tls() noexcept { return tls_; }
     [[nodiscard]] const QuicTlsSession &tls() const noexcept { return tls_; }
     common::IoResult<void> init_initial_crypto(const QuicConnectionId &original_dcid) noexcept;
@@ -273,6 +280,9 @@ private:
     std::uint64_t largest_peer_bidi_sequence_ = 0;
     std::uint64_t largest_peer_uni_sequence_ = 0;
     std::array<QuicPacketNumberSpace, kQuicPacketNumberSpaceCount> packet_number_spaces_{};
+    QuicCongestionState congestion_{};
+    QuicRttState rtt_{};
+    std::uint64_t reset_packet_number_ = 0;
     QuicCryptoState crypto_{};
     QuicTlsSession tls_{};
 };

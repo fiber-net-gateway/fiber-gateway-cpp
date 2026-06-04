@@ -112,6 +112,8 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
     packet_number_spaces_[0].reset(QuicEncryptionLevel::Initial);
     packet_number_spaces_[1].reset(QuicEncryptionLevel::Handshake);
     packet_number_spaces_[2].reset(QuicEncryptionLevel::Application);
+    quic_congestion_init(congestion_, QuicTime{0});
+    quic_rtt_init(rtt_);
 }
 
 common::IoResult<void> QuicConnection::start_handshake() noexcept {
@@ -212,6 +214,12 @@ const QuicPacketNumberSpace &QuicConnection::packet_number_space(QuicEncryptionL
 
 common::IoResult<void> QuicConnection::init_initial_crypto(const QuicConnectionId &original_dcid) noexcept {
     return quic_init_initial_crypto(crypto_, options_.role, original_dcid);
+}
+
+void QuicConnection::reset_congestion_for_path(QuicTime now) noexcept {
+    auto &space = packet_number_space(QuicEncryptionLevel::Application);
+    reset_packet_number_ = space.next_packet_number;
+    quic_congestion_reset_for_path(congestion_, rtt_, now);
 }
 
 std::size_t QuicConnection::packet_number_space_index(QuicEncryptionLevel level) noexcept {
