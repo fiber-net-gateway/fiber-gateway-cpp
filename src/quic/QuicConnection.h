@@ -120,6 +120,7 @@ struct QuicPacketNumberSpace {
     std::chrono::milliseconds ack_delay_start{0};
     std::uint32_t ack_range_count = 0;
     std::array<QuicAckRange, kQuicMaxAckRanges> ack_ranges{};
+    std::uint32_t send_ack_count = 0;
     bool send_ack = false;
 };
 
@@ -226,11 +227,13 @@ public:
         enum class State : std::uint8_t {
             None,
             Ready,
+            Delayed,
             Inflight,
         };
 
         QuicConnection *connection = nullptr;
         common::IntrusiveListHook link{};
+        std::chrono::steady_clock::time_point ready_at{};
         State state = State::None;
     };
 
@@ -299,8 +302,7 @@ public:
     [[nodiscard]] QuicPath *active_path() noexcept { return active_path_; }
     [[nodiscard]] const QuicPath *active_path() const noexcept { return active_path_; }
     [[nodiscard]] std::size_t path_count() const noexcept;
-    [[nodiscard]] QuicPath *find_path(const net::SocketAddress &remote,
-                                      const net::SocketAddress &local) noexcept;
+    [[nodiscard]] QuicPath *find_path(const net::SocketAddress &remote, const net::SocketAddress &local) noexcept;
     [[nodiscard]] const QuicPath *find_path(const net::SocketAddress &remote,
                                             const net::SocketAddress &local) const noexcept;
     [[nodiscard]] QuicPath *find_path(QuicPathTag tag) noexcept;

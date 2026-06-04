@@ -103,6 +103,7 @@ void QuicPacketNumberSpace::reset(QuicEncryptionLevel space_level) noexcept {
     ack_delay_start = std::chrono::milliseconds{0};
     ack_range_count = 0;
     ack_ranges = {};
+    send_ack_count = 0;
     send_ack = false;
 }
 
@@ -110,8 +111,6 @@ void QuicPacketNumberSpace::record_received_packet_number(std::uint64_t packet_n
     if (largest_received_packet_number == kUnsetPacketNumber || packet_number > largest_received_packet_number) {
         largest_received_packet_number = packet_number;
     }
-    pending_ack = packet_number;
-    send_ack = true;
 }
 
 void QuicPacketNumberSpace::record_acked_packet_number(std::uint64_t packet_number) noexcept {
@@ -129,8 +128,8 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
     quic_congestion_init(congestion_, QuicTime{0});
     quic_rtt_init(rtt_);
 
-    active_path_ = create_path(options_.remote_addr, options_.local_addr, options_.remote_connection_id,
-                               QuicPathTag::Active);
+    active_path_ =
+            create_path(options_.remote_addr, options_.local_addr, options_.remote_connection_id, QuicPathTag::Active);
 }
 
 common::IoResult<void> QuicConnection::start_handshake() noexcept {

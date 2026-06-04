@@ -18,6 +18,7 @@ namespace {
 
 inline constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 inline constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
+inline constexpr std::size_t kPacketEncodingReserve = 64;
 
 } // namespace
 
@@ -36,7 +37,8 @@ void copy_send_frame(QuicFrame &dst, const QuicFrame &src) noexcept {
     dst.queue_hook = {};
 }
 
-[[nodiscard]] bool fill_ack_frame(const QuicPacketNumberSpace &space, QuicFrame &frame) noexcept {
+[[nodiscard]] bool fill_ack_frame(const QuicPacketNumberSpace &space, QuicFrame &frame, QuicTime now,
+                                  std::uint64_t ack_delay_exponent) noexcept {
     if (!space.send_ack || space.pending_ack == kUnsetPacketNumber) {
         return false;
     }
@@ -44,11 +46,21 @@ void copy_send_frame(QuicFrame &dst, const QuicFrame &src) noexcept {
     const std::uint64_t largest = space.largest_received_packet_number != kUnsetPacketNumber
                                           ? space.largest_received_packet_number
                                           : space.pending_ack;
+    std::uint64_t ack_delay_us = 0;
+    if (space.level == QuicEncryptionLevel::Application && now > space.largest_received_time) {
+        ack_delay_us = static_cast<std::uint64_t>((now - space.largest_received_time).count()) * 1000;
+        if (ack_delay_exponent < 63) {
+            ack_delay_us >>= ack_delay_exponent;
+        } else {
+            ack_delay_us = 0;
+        }
+    }
+
     frame = QuicFrame{};
     frame.type = QuicFrameType::Ack;
     frame.level = space.level;
     frame.u.ack.largest = largest;
-    frame.u.ack.delay = 0;
+    frame.u.ack.delay = ack_delay_us;
     frame.u.ack.range_count = 0;
     frame.u.ack.first_range = 0;
     return true;
@@ -138,6 +150,10 @@ common::IoResult<void> QuicUdpEndpoint::remove_connection(const QuicConnectionId
 }
 
 void QuicUdpEndpoint::schedule_send(QuicConnection &connection) noexcept { send_scheduler_.submit(connection); }
+
+void QuicUdpEndpoint::schedule_send_after(QuicConnection &connection, std::chrono::milliseconds delay) noexcept {
+    send_scheduler_.submit_after(connection, delay);
+}
 
 async::Task<common::IoResult<QuicUdpReceiveResult>> QuicUdpEndpoint::recv_once() noexcept {
     if (!valid() || !read_buffer_) {
@@ -406,10 +422,47 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
     out.connection = connection;
     out.packet = *result;
     out.created = created;
-    if (result->send_ack) {
-        schedule_send(*connection);
-    }
+    schedule_after_receive(*connection, *result);
     return out;
+}
+
+void QuicUdpEndpoint::schedule_after_receive(QuicConnection &connection,
+                                             const QuicPacketProcessResult &result) noexcept {
+    if (result.send_output) {
+        schedule_send(connection);
+        return;
+    }
+
+    if (!result.send_ack) {
+        return;
+    }
+
+    QuicPacketNumberSpace &space = connection.packet_number_space(result.level);
+    const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
+    if (should_delay_ack(space, now)) {
+        schedule_send_after(connection, ack_delay_remaining(space, now));
+        return;
+    }
+
+    schedule_send(connection);
+}
+
+bool QuicUdpEndpoint::should_delay_ack(const QuicPacketNumberSpace &space, QuicTime now) const noexcept {
+    if (space.level != QuicEncryptionLevel::Application || !space.send_ack || space.pending_ack == kUnsetPacketNumber ||
+        !space.pending_frames.empty() || space.send_ack_count >= kQuicMaxAckGap) {
+        return false;
+    }
+
+    return now - space.ack_delay_start < options_.max_ack_delay;
+}
+
+std::chrono::milliseconds QuicUdpEndpoint::ack_delay_remaining(const QuicPacketNumberSpace &space,
+                                                               QuicTime now) const noexcept {
+    const QuicTime elapsed = now - space.ack_delay_start;
+    if (elapsed >= options_.max_ack_delay) {
+        return std::chrono::milliseconds{0};
+    }
+    return options_.max_ack_delay - elapsed;
 }
 
 common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicConnection &connection,
@@ -424,6 +477,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
 
     constexpr QuicEncryptionLevel levels[] = {QuicEncryptionLevel::Initial, QuicEncryptionLevel::Handshake,
                                               QuicEncryptionLevel::Application};
+    const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
 
     for (QuicEncryptionLevel level: levels) {
         QuicPacketNumberSpace &space = connection.packet_number_space(level);
@@ -447,20 +501,56 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         }
         datagram.capacity = allowed;
 
-        if (fill_ack_frame(space, datagram.frames[0])) {
+        if (should_delay_ack(space, now)) {
+            quic_restore_packet_number(space, datagram.packet_number_snapshot);
+            return QuicBuildSendResult{QuicBuildSendStatus::Delayed, ack_delay_remaining(space, now)};
+        }
+
+        std::size_t estimated_payload_len = 0;
+        if (fill_ack_frame(space, datagram.frames[0], now, options_.ack_delay_exponent)) {
+            auto frame_len = quic_create_frame(nullptr, datagram.frames[0]);
+            if (!frame_len) {
+                quic_restore_packet_number(space, datagram.packet_number_snapshot);
+                return std::unexpected(frame_len.error());
+            }
+            estimated_payload_len += *frame_len;
             datagram.frame_count = 1;
             datagram.sends_ack = true;
-        } else {
-            QuicFrame *source = space.pending_frames.front();
-            if (source == nullptr) {
-                continue;
-            }
+        }
+
+        QuicFrame *source = space.pending_frames.front();
+        while (source != nullptr && datagram.frame_count < kQuicSendMaxFramesPerDatagram) {
             if (!quic_congestion_can_send(connection.congestion(), source->ignore_congestion)) {
+                break;
+            }
+
+            QuicFrame candidate{};
+            copy_send_frame(candidate, *source);
+            auto frame_len = quic_create_frame(nullptr, candidate);
+            if (!frame_len) {
+                quic_restore_packet_number(space, datagram.packet_number_snapshot);
+                return std::unexpected(frame_len.error());
+            }
+
+            if (datagram.frame_count != 0 &&
+                estimated_payload_len + *frame_len + kAeadTagLength + kPacketEncodingReserve > datagram.capacity) {
+                break;
+            }
+
+            copy_send_frame(datagram.frames[datagram.frame_count], candidate);
+            datagram.source_frames[datagram.frame_count] = source;
+            estimated_payload_len += *frame_len;
+            ++datagram.frame_count;
+
+            source = space.pending_frames.next_of(*source);
+        }
+
+        if (datagram.frame_count == 0) {
+            quic_restore_packet_number(space, datagram.packet_number_snapshot);
+            if (!space.pending_frames.empty()) {
                 return QuicBuildSendResult{QuicBuildSendStatus::Blocked};
             }
-            copy_send_frame(datagram.frames[0], *source);
-            datagram.source_frames[0] = source;
-            datagram.frame_count = 1;
+            continue;
         }
 
         QuicPacketEncodeSpec spec{};
@@ -499,6 +589,7 @@ void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const Qui
     const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
     if (datagram.sends_ack) {
         space.send_ack = false;
+        space.send_ack_count = 0;
     }
 
     bool accounted_packet = false;

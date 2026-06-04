@@ -44,6 +44,8 @@ public:
         net::TlsServerContext *tls_context = nullptr;
         net::UdpBindOptions udp{};
         QuicSendScheduler::Options send{};
+        std::chrono::milliseconds max_ack_delay{25};
+        std::uint64_t ack_delay_exponent = 3;
     };
 
     QuicUdpEndpoint() noexcept;
@@ -61,6 +63,7 @@ public:
     [[nodiscard]] const QuicConnection *find_connection(const QuicConnectionId &dcid) const noexcept;
     [[nodiscard]] common::IoResult<void> remove_connection(const QuicConnectionId &dcid) noexcept;
     void schedule_send(QuicConnection &connection) noexcept;
+    void schedule_send_after(QuicConnection &connection, std::chrono::milliseconds delay) noexcept;
 
     [[nodiscard]] async::Task<common::IoResult<QuicUdpReceiveResult>> recv_once() noexcept;
     [[nodiscard]] async::Task<void> recv_loop() noexcept;
@@ -106,6 +109,10 @@ private:
     void commit_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept;
     void rollback_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept;
     [[nodiscard]] bool connection_has_send_work(const QuicConnection &connection) const noexcept;
+    void schedule_after_receive(QuicConnection &connection, const QuicPacketProcessResult &result) noexcept;
+    [[nodiscard]] bool should_delay_ack(const QuicPacketNumberSpace &space, QuicTime now) const noexcept;
+    [[nodiscard]] std::chrono::milliseconds ack_delay_remaining(const QuicPacketNumberSpace &space,
+                                                                QuicTime now) const noexcept;
 
     Options options_{};
     event::EventLoop *loop_ = nullptr;

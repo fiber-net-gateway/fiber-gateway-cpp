@@ -285,6 +285,7 @@ common::IoResult<QuicPacketDecodeResult> quic_decode_packet(QuicConnection &conn
     auto &space = connection.packet_number_space(packet->level);
     const std::uint64_t saved_largest_received = space.largest_received_packet_number;
     const std::uint64_t saved_pending_ack = space.pending_ack;
+    const std::uint32_t saved_send_ack_count = space.send_ack_count;
     const bool saved_send_ack = space.send_ack;
     auto opened =
             quic_decrypt_packet_payload(*packet, space, *keys, datagram, packet->packet_len, plaintext, plaintext_cap);
@@ -294,6 +295,7 @@ common::IoResult<QuicPacketDecodeResult> quic_decode_packet(QuicConnection &conn
     if (opened->empty()) {
         space.largest_received_packet_number = saved_largest_received;
         space.pending_ack = saved_pending_ack;
+        space.send_ack_count = saved_send_ack_count;
         space.send_ack = saved_send_ack;
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -301,6 +303,7 @@ common::IoResult<QuicPacketDecodeResult> quic_decode_packet(QuicConnection &conn
     if ((packet->flags & reserved_mask) != 0) {
         space.largest_received_packet_number = saved_largest_received;
         space.pending_ack = saved_pending_ack;
+        space.send_ack_count = saved_send_ack_count;
         space.send_ack = saved_send_ack;
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -315,6 +318,7 @@ common::IoResult<QuicPacketDecodeResult> quic_decode_packet(QuicConnection &conn
         if (!parsed) {
             space.largest_received_packet_number = saved_largest_received;
             space.pending_ack = saved_pending_ack;
+            space.send_ack_count = saved_send_ack_count;
             space.send_ack = saved_send_ack;
             return std::unexpected(parsed.error());
         }
