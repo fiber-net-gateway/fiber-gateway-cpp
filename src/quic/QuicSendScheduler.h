@@ -26,11 +26,13 @@ enum class QuicBuildSendStatus : std::uint8_t {
     Encoded,
     NoWork,
     Blocked,
+    Delayed,
     Closed,
 };
 
 struct QuicBuildSendResult {
     QuicBuildSendStatus status = QuicBuildSendStatus::NoWork;
+    std::chrono::milliseconds delay{0};
 };
 
 struct QuicSendDatagram {
@@ -54,7 +56,7 @@ public:
     struct Options {
         std::size_t send_buffer_size = kQuicSendDefaultBufferSize;
         std::size_t max_packets_per_wakeup = 64;
-        std::size_t max_packets_per_connection = 8;
+        std::size_t max_packets_per_connection = 64;
     };
 
     QuicSendScheduler() noexcept;
@@ -63,6 +65,7 @@ public:
     [[nodiscard]] common::IoResult<void> init(event::EventLoop &loop, net::UdpSocket &socket, QuicUdpEndpoint &endpoint,
                                               const Options &options) noexcept;
     void submit(QuicConnection &connection) noexcept;
+    void submit_after(QuicConnection &connection, std::chrono::milliseconds delay) noexcept;
     void remove(QuicConnection &connection) noexcept;
     void close(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
@@ -83,10 +86,16 @@ private:
     void cancel_waiter(WaitForWorkAwaiter *awaiter) noexcept;
     void notify_waiter() noexcept;
     [[nodiscard]] bool has_work() const noexcept;
+    [[nodiscard]] bool has_due_delayed() const noexcept;
+    void promote_due_delayed() noexcept;
+    void arm_delay_timer() noexcept;
     void enqueue_ready(QuicConnection &connection) noexcept;
+    void enqueue_delayed(QuicConnection &connection, std::chrono::steady_clock::time_point ready_at) noexcept;
     [[nodiscard]] QuicConnection *pop_ready() noexcept;
     void clear_ready() noexcept;
+    void clear_delayed() noexcept;
     [[nodiscard]] async::Task<common::IoErr> flush_connection(QuicConnection &connection) noexcept;
+    static void on_delay_timer(QuicSendScheduler *scheduler) noexcept;
 
     event::EventLoop *loop_ = nullptr;
     net::UdpSocket *socket_ = nullptr;
@@ -94,6 +103,8 @@ private:
     Options options_{};
     std::unique_ptr<std::uint8_t[]> send_buffer_{};
     ReadyList ready_{};
+    ReadyList delayed_{};
+    event::EventLoop::TimerEntry delay_timer_{};
     WaitForWorkAwaiter *waiter_ = nullptr;
     QuicConnection *blocked_connection_ = nullptr;
     common::IoErr stop_reason_ = common::IoErr::None;

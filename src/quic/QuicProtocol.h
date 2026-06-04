@@ -16,6 +16,7 @@ inline constexpr std::size_t kHeaderProtectionMaskLength = 5;
 inline constexpr std::size_t kHeaderProtectionSampleLength = 16;
 inline constexpr std::uint64_t kMaxVarint = (1ULL << 62U) - 1U;
 inline constexpr std::uint64_t kUnsetPacketNumber = UINT64_MAX;
+inline constexpr std::uint32_t kQuicMaxAckGap = 2;
 
 inline constexpr std::uint8_t kPacketFlagLong = 0x80;
 inline constexpr std::uint8_t kPacketFlagFixed = 0x40;

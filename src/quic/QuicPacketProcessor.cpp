@@ -96,6 +96,9 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
         }
     }
 
+    auto &space = conn.packet_number_space(packet->level);
+    const std::uint64_t previous_largest_received = space.largest_received_packet_number;
+
     auto opened =
             quic_decrypt_initial_packet(conn, *packet, datagram.data, packet->packet_len, plaintext, plaintext_cap);
     if (!opened) {
@@ -110,9 +113,9 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
     QuicPacketProcessResult result{};
     result.path = *bound_path;
     result.created_path = result.path->tag == QuicPathTag::Probe;
-    result.rebound = result.created_path &&
-                     (connection_id_equal(packet->dcid, conn.local_connection_id()) ||
-                      connection_id_equal(packet->dcid, conn.original_destination_connection_id()));
+    result.rebound =
+            result.created_path && (connection_id_equal(packet->dcid, conn.local_connection_id()) ||
+                                    connection_id_equal(packet->dcid, conn.original_destination_connection_id()));
     result.packet_type = packet->type;
     result.level = packet->level;
     result.packet_number = packet->packet_number;
@@ -128,6 +131,7 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
             if (!acked) {
                 return std::unexpected(acked.error());
             }
+            result.send_output = result.send_output || acked->unblocked || acked->lost_frames;
         }
         ++result.frame_count;
         result.ack_eliciting = result.ack_eliciting || parsed->frame.ack_eliciting;
@@ -141,8 +145,21 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
         }
     }
 
-    auto &space = conn.packet_number_space(QuicEncryptionLevel::Initial);
     if (result.ack_eliciting) {
+        const QuicTime now = quic_time_ms(datagram.received_at);
+        if (!space.send_ack) {
+            space.ack_delay_start = now;
+        }
+        ++space.send_ack_count;
+        if (space.pending_ack == kUnsetPacketNumber || space.pending_ack < packet->packet_number) {
+            space.pending_ack = packet->packet_number;
+        }
+        if (space.largest_received_packet_number == packet->packet_number) {
+            space.largest_received_time = now;
+        }
+        if (previous_largest_received != kUnsetPacketNumber && packet->packet_number != previous_largest_received + 1) {
+            space.send_ack_count = kQuicMaxAckGap;
+        }
         space.send_ack = true;
     }
     result.send_ack = space.send_ack;

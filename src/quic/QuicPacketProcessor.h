@@ -30,6 +30,7 @@ struct QuicPacketProcessResult {
     std::uint32_t frame_count = 0;
     bool ack_eliciting = false;
     bool send_ack = false;
+    bool send_output = false;
     bool non_probing = false;
     bool created_path = false;
     bool rebound = false;
