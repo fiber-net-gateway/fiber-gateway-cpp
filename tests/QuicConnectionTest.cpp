@@ -7,6 +7,17 @@
 #include "quic/QuicProtocol.h"
 #include "quic/QuicTransportCodec.h"
 
+namespace {
+
+fiber::net::SocketAddress loopback(std::uint16_t port) { return {fiber::net::IpAddress::loopback_v4(), port}; }
+
+fiber::quic::QuicConnectionId cid_from(std::initializer_list<std::uint8_t> bytes) {
+    auto cid = fiber::quic::QuicConnectionId::from_bytes(bytes.begin(), bytes.size());
+    return cid.value_or(fiber::quic::QuicConnectionId{});
+}
+
+} // namespace
+
 TEST(QuicConnectionTest, BuildsConnectionIdFromBytes) {
     const std::array<std::uint8_t, 4> bytes{0x01, 0x02, 0x03, 0x04};
 
@@ -110,4 +121,58 @@ TEST(QuicConnectionTest, QueuesFramesIntrusively) {
 
     EXPECT_EQ(space.pending_frames.front(), &second);
     EXPECT_EQ(space.pending_frames.back(), &second);
+}
+
+TEST(QuicConnectionTest, CreatesInitialActivePathFromOptions) {
+    fiber::quic::QuicConnection::Options options{};
+    options.local_addr = loopback(4433);
+    options.remote_addr = loopback(5555);
+    options.remote_connection_id = cid_from({0x01, 0x02, 0x03, 0x04});
+
+    fiber::quic::QuicConnection conn(options);
+
+    auto *path = conn.active_path();
+    ASSERT_NE(path, nullptr);
+    EXPECT_EQ(conn.path_count(), 1U);
+    EXPECT_EQ(path->tag, fiber::quic::QuicPathTag::Active);
+    EXPECT_EQ(path->remote.port(), 5555);
+    EXPECT_EQ(path->local.port(), 4433);
+    EXPECT_EQ(path->remote_connection_id.size(), options.remote_connection_id.size());
+    EXPECT_EQ(conn.remote_addr().port(), 5555);
+}
+
+TEST(QuicConnectionTest, TracksPathReceiveSendAndAntiAmplificationLimit) {
+    fiber::quic::QuicConnection conn(fiber::quic::QuicConnection::Options{});
+    auto *path = conn.active_path();
+    ASSERT_NE(path, nullptr);
+
+    EXPECT_EQ(fiber::quic::QuicConnection::path_send_limit(*path, 1200), 0U);
+
+    conn.record_path_received(*path, 400);
+    EXPECT_EQ(fiber::quic::QuicConnection::path_send_limit(*path, 2000), 1200U);
+
+    conn.record_path_sent(*path, 500);
+    EXPECT_EQ(fiber::quic::QuicConnection::path_send_limit(*path, 2000), 700U);
+
+    path->validated = true;
+    EXPECT_EQ(fiber::quic::QuicConnection::path_send_limit(*path, 2000), 2000U);
+}
+
+TEST(QuicConnectionTest, ReplacesProbePathWhenCreatingAnotherProbe) {
+    fiber::quic::QuicConnection conn(fiber::quic::QuicConnection::Options{});
+    const auto cid = cid_from({0x11, 0x22});
+
+    auto *first = conn.create_path(loopback(6001), loopback(4433), cid, fiber::quic::QuicPathTag::Probe);
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(conn.path_count(), 2U);
+
+    if (auto *probe = conn.find_path(fiber::quic::QuicPathTag::Probe)) {
+        conn.free_path(*probe);
+    }
+    auto *second = conn.create_path(loopback(6002), loopback(4433), cid, fiber::quic::QuicPathTag::Probe);
+
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(conn.path_count(), 2U);
+    EXPECT_EQ(second->remote.port(), 6002);
+    EXPECT_EQ(conn.find_path(loopback(6001), loopback(4433)), nullptr);
 }

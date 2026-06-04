@@ -23,12 +23,16 @@ struct QuicReceivedDatagram {
 };
 
 struct QuicPacketProcessResult {
+    QuicPath *path = nullptr;
     QuicPacketType packet_type = QuicPacketType::Initial;
     QuicEncryptionLevel level = QuicEncryptionLevel::Initial;
     std::uint64_t packet_number = 0;
     std::uint32_t frame_count = 0;
     bool ack_eliciting = false;
     bool send_ack = false;
+    bool non_probing = false;
+    bool created_path = false;
+    bool rebound = false;
 };
 
 [[nodiscard]] common::IoResult<QuicPacketProcessResult>

@@ -34,6 +34,8 @@ inline constexpr std::size_t kQuicInitialIvLength = kQuicIvLength;
 inline constexpr std::size_t kQuicInitialHeaderProtectionKeyLength = 16;
 inline constexpr std::size_t kQuicHeaderProtectionSampleLength = 16;
 inline constexpr std::size_t kQuicHeaderProtectionMaskLength = 5;
+inline constexpr std::size_t kQuicMaxPaths = 3;
+inline constexpr std::size_t kQuicPathRetries = 3;
 
 enum class QuicConnectionRole : std::uint8_t {
     Client,
@@ -170,6 +172,42 @@ struct QuicCryptoState : public common::NonCopyable, public common::NonMovable {
     bool initial_ready = false;
 };
 
+enum class QuicPathTag : std::uint8_t {
+    Probe,
+    Active,
+    Backup,
+};
+
+enum class QuicPathState : std::uint8_t {
+    Idle,
+    Validating,
+    WaitingMtuProbe,
+    MtuDiscovery,
+};
+
+struct QuicPath {
+    net::SocketAddress remote{};
+    net::SocketAddress local{};
+    QuicConnectionId remote_connection_id{};
+    std::uint64_t remote_connection_id_sequence = 0;
+    QuicPathState state = QuicPathState::Idle;
+    QuicTime expires{0};
+    std::uint32_t tries = 0;
+    QuicPathTag tag = QuicPathTag::Probe;
+    std::size_t mtu = kQuicCongestionMinInitialSize;
+    std::size_t mtud = 0;
+    std::size_t max_mtu = 0;
+    std::uint64_t sent = 0;
+    std::uint64_t received = 0;
+    std::uint8_t challenge[2][8]{};
+    std::uint64_t seqnum = 0;
+    std::uint64_t mtu_packet_numbers[kQuicPathRetries]{};
+    bool allocated = false;
+    bool validated = false;
+    bool mtu_unvalidated = false;
+    bool used = false;
+};
+
 class QuicConnection : public common::NonCopyable, public common::NonMovable {
 public:
     struct EndpointIndex {
@@ -258,6 +296,22 @@ public:
     [[nodiscard]] const QuicRttState &rtt() const noexcept { return rtt_; }
     [[nodiscard]] std::uint64_t reset_packet_number() const noexcept { return reset_packet_number_; }
     void reset_congestion_for_path(QuicTime now) noexcept;
+    [[nodiscard]] QuicPath *active_path() noexcept { return active_path_; }
+    [[nodiscard]] const QuicPath *active_path() const noexcept { return active_path_; }
+    [[nodiscard]] std::size_t path_count() const noexcept;
+    [[nodiscard]] QuicPath *find_path(const net::SocketAddress &remote,
+                                      const net::SocketAddress &local) noexcept;
+    [[nodiscard]] const QuicPath *find_path(const net::SocketAddress &remote,
+                                            const net::SocketAddress &local) const noexcept;
+    [[nodiscard]] QuicPath *find_path(QuicPathTag tag) noexcept;
+    [[nodiscard]] const QuicPath *find_path(QuicPathTag tag) const noexcept;
+    [[nodiscard]] QuicPath *create_path(const net::SocketAddress &remote, const net::SocketAddress &local,
+                                        const QuicConnectionId &remote_connection_id, QuicPathTag tag) noexcept;
+    void free_path(QuicPath &path) noexcept;
+    [[nodiscard]] bool set_active_path(QuicPath &path) noexcept;
+    void record_path_received(QuicPath &path, std::size_t len) noexcept;
+    void record_path_sent(QuicPath &path, std::size_t len) noexcept;
+    [[nodiscard]] static std::size_t path_send_limit(const QuicPath &path, std::size_t size) noexcept;
     [[nodiscard]] QuicTlsSession &tls() noexcept { return tls_; }
     [[nodiscard]] const QuicTlsSession &tls() const noexcept { return tls_; }
     common::IoResult<void> init_initial_crypto(const QuicConnectionId &original_dcid) noexcept;
@@ -285,6 +339,9 @@ private:
     std::uint64_t reset_packet_number_ = 0;
     QuicCryptoState crypto_{};
     QuicTlsSession tls_{};
+    std::array<QuicPath, kQuicMaxPaths> paths_{};
+    QuicPath *active_path_ = nullptr;
+    std::uint64_t next_path_seqnum_ = 0;
 };
 
 } // namespace fiber::quic

@@ -29,6 +29,11 @@ struct TwoEndpointResults {
     EndpointResult second;
 };
 
+struct TwoEndpointResultsWithPorts {
+    TwoEndpointResults results{};
+    std::array<std::uint16_t, 2> ports{};
+};
+
 int hex_value(char c) {
     if (c >= '0' && c <= '9') {
         return c - '0';
@@ -188,6 +193,42 @@ DetachedTask send_two_datagrams(fiber::event::EventLoop *loop, std::uint16_t por
     client.close();
 }
 
+DetachedTask send_two_datagrams_from_distinct_clients(
+        fiber::event::EventLoop *loop, std::uint16_t port, const std::uint8_t *first, std::size_t first_len,
+        const std::uint8_t *second, std::size_t second_len,
+        std::promise<fiber::common::IoResult<std::array<std::uint16_t, 2>>> *done_promise) {
+    fiber::net::UdpSocket first_client(*loop);
+    auto first_bound = first_client.bind(loopback(0), {});
+    if (!first_bound) {
+        done_promise->set_value(std::unexpected(first_bound.error()));
+        co_return;
+    }
+
+    fiber::net::UdpSocket second_client(*loop);
+    auto second_bound = second_client.bind(loopback(0), {});
+    if (!second_bound) {
+        done_promise->set_value(std::unexpected(second_bound.error()));
+        first_client.close();
+        co_return;
+    }
+
+    std::array<std::uint16_t, 2> ports{first_client.local_addr().port(), second_client.local_addr().port()};
+
+    auto first_sent = co_await first_client.send_to(first, first_len, loopback(port));
+    if (!first_sent) {
+        done_promise->set_value(std::unexpected(first_sent.error()));
+        first_client.close();
+        second_client.close();
+        co_return;
+    }
+
+    auto second_sent = co_await second_client.send_to(second, second_len, loopback(port));
+    done_promise->set_value(second_sent ? fiber::common::IoResult<std::array<std::uint16_t, 2>>{ports}
+                                        : std::unexpected(second_sent.error()));
+    first_client.close();
+    second_client.close();
+}
+
 DetachedTask close_endpoint(fiber::quic::QuicUdpEndpoint *endpoint, std::promise<void> *done_promise) {
     endpoint->close();
     done_promise->set_value();
@@ -231,6 +272,27 @@ TwoEndpointResults recv_twice_after_send_twice(fiber::event::EventLoopGroup &gro
     EXPECT_EQ(recv_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     EXPECT_EQ(send_future.get(), fiber::common::IoErr::None);
     return recv_future.get();
+}
+
+TwoEndpointResultsWithPorts recv_twice_after_send_from_distinct_clients(
+        fiber::event::EventLoopGroup &group, fiber::quic::QuicUdpEndpoint &endpoint, const std::uint8_t *first,
+        std::size_t first_len, const std::uint8_t *second, std::size_t second_len) {
+    std::promise<TwoEndpointResults> recv_promise;
+    std::promise<fiber::common::IoResult<std::array<std::uint16_t, 2>>> send_promise;
+    auto recv_future = recv_promise.get_future();
+    auto send_future = send_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() { return recv_endpoint_twice(&endpoint, &recv_promise); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return send_two_datagrams_from_distinct_clients(&group.at(0), endpoint.local_addr().port(), first, first_len,
+                                                        second, second_len, &send_promise);
+    });
+
+    EXPECT_EQ(send_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(recv_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto send_result = send_future.get();
+    EXPECT_TRUE(send_result.has_value()) << static_cast<int>(send_result.error());
+    return TwoEndpointResultsWithPorts{recv_future.get(), send_result.value_or(std::array<std::uint16_t, 2>{})};
 }
 
 void close_endpoint_on_loop(fiber::event::EventLoopGroup &group, fiber::quic::QuicUdpEndpoint &endpoint) {
@@ -355,6 +417,41 @@ TEST(QuicUdpEndpointTest, ReusesExistingConnectionForSameDcid) {
     EXPECT_FALSE(second_result->created);
     EXPECT_EQ(first_result->connection, second_result->connection);
     EXPECT_EQ(endpoint.active_connection_count(), 1U);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, MovesActivePathWhenSameConnectionArrivesFromDifferentRemoteAddress) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("0102030405060708");
+    const auto scid = cid_from_hex("aabbccdd");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> first{};
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> second{};
+    build_initial_datagram(first, dcid, scid, 1);
+    build_initial_datagram(second, dcid, scid, 2);
+
+    auto outcome = recv_twice_after_send_from_distinct_clients(group, endpoint, first.data(), first.size(),
+                                                               second.data(), second.size());
+
+    ASSERT_TRUE(outcome.results.first.has_value()) << static_cast<int>(outcome.results.first.error());
+    ASSERT_TRUE(outcome.results.second.has_value()) << static_cast<int>(outcome.results.second.error());
+    ASSERT_NE(outcome.results.first->connection, nullptr);
+    EXPECT_EQ(outcome.results.first->connection, outcome.results.second->connection);
+    EXPECT_TRUE(outcome.results.first->created);
+    EXPECT_FALSE(outcome.results.second->created);
+    EXPECT_TRUE(outcome.results.second->packet.created_path);
+    EXPECT_EQ(outcome.results.second->packet.path, outcome.results.second->connection->active_path());
+    EXPECT_EQ(outcome.results.second->connection->remote_addr().port(), outcome.ports[1]);
+    EXPECT_EQ(outcome.results.second->connection->path_count(), 1U);
 
     close_endpoint_on_loop(group, endpoint);
     group.stop();
