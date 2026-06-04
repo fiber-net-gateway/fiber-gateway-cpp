@@ -37,6 +37,7 @@ struct QuicSendDatagram {
     std::uint8_t *data = nullptr;
     std::size_t capacity = 0;
     std::size_t length = 0;
+    QuicPath *path = nullptr;
     net::UdpPacketSendSpec spec{};
     QuicEncryptionLevel level = QuicEncryptionLevel::Initial;
     QuicPacketNumberSpaceSnapshot packet_number_snapshot{};

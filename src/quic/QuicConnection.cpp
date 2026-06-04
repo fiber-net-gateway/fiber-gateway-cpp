@@ -24,6 +24,20 @@ constexpr std::uint64_t kStreamIncrement = 4;
     return id;
 }
 
+[[nodiscard]] bool ip_address_equal(const net::IpAddress &lhs, const net::IpAddress &rhs) noexcept {
+    if (lhs.family() != rhs.family()) {
+        return false;
+    }
+    if (lhs.is_v4()) {
+        return lhs.v4_bytes() == rhs.v4_bytes();
+    }
+    return lhs.scope_id() == rhs.scope_id() && lhs.v6_bytes() == rhs.v6_bytes();
+}
+
+[[nodiscard]] bool socket_address_equal(const net::SocketAddress &lhs, const net::SocketAddress &rhs) noexcept {
+    return lhs.port() == rhs.port() && ip_address_equal(lhs.ip(), rhs.ip());
+}
+
 } // namespace
 
 common::IoResult<QuicConnectionId> QuicConnectionId::from_bytes(const std::uint8_t *data, std::size_t len) noexcept {
@@ -114,6 +128,9 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
     packet_number_spaces_[2].reset(QuicEncryptionLevel::Application);
     quic_congestion_init(congestion_, QuicTime{0});
     quic_rtt_init(rtt_);
+
+    active_path_ = create_path(options_.remote_addr, options_.local_addr, options_.remote_connection_id,
+                               QuicPathTag::Active);
 }
 
 common::IoResult<void> QuicConnection::start_handshake() noexcept {
@@ -220,6 +237,134 @@ void QuicConnection::reset_congestion_for_path(QuicTime now) noexcept {
     auto &space = packet_number_space(QuicEncryptionLevel::Application);
     reset_packet_number_ = space.next_packet_number;
     quic_congestion_reset_for_path(congestion_, rtt_, now);
+}
+
+std::size_t QuicConnection::path_count() const noexcept {
+    std::size_t count = 0;
+    for (const QuicPath &path: paths_) {
+        if (path.allocated) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+QuicPath *QuicConnection::find_path(const net::SocketAddress &remote, const net::SocketAddress &local) noexcept {
+    for (QuicPath &path: paths_) {
+        if (path.allocated && socket_address_equal(path.remote, remote) && socket_address_equal(path.local, local)) {
+            return &path;
+        }
+    }
+    return nullptr;
+}
+
+const QuicPath *QuicConnection::find_path(const net::SocketAddress &remote,
+                                          const net::SocketAddress &local) const noexcept {
+    for (const QuicPath &path: paths_) {
+        if (path.allocated && socket_address_equal(path.remote, remote) && socket_address_equal(path.local, local)) {
+            return &path;
+        }
+    }
+    return nullptr;
+}
+
+QuicPath *QuicConnection::find_path(QuicPathTag tag) noexcept {
+    for (QuicPath &path: paths_) {
+        if (path.allocated && path.tag == tag) {
+            return &path;
+        }
+    }
+    return nullptr;
+}
+
+const QuicPath *QuicConnection::find_path(QuicPathTag tag) const noexcept {
+    for (const QuicPath &path: paths_) {
+        if (path.allocated && path.tag == tag) {
+            return &path;
+        }
+    }
+    return nullptr;
+}
+
+QuicPath *QuicConnection::create_path(const net::SocketAddress &remote, const net::SocketAddress &local,
+                                      const QuicConnectionId &remote_connection_id, QuicPathTag tag) noexcept {
+    QuicPath *slot = nullptr;
+    for (QuicPath &path: paths_) {
+        if (!path.allocated) {
+            slot = &path;
+            break;
+        }
+    }
+    if (slot == nullptr) {
+        return nullptr;
+    }
+
+    *slot = QuicPath{};
+    slot->allocated = true;
+    slot->remote = remote;
+    slot->local = local;
+    slot->remote_connection_id = remote_connection_id;
+    slot->tag = tag;
+    slot->seqnum = next_path_seqnum_++;
+    slot->mtu = kQuicCongestionMinInitialSize;
+    for (std::uint64_t &packet_number: slot->mtu_packet_numbers) {
+        packet_number = kUnsetPacketNumber;
+    }
+    return slot;
+}
+
+void QuicConnection::free_path(QuicPath &path) noexcept {
+    if (&path == active_path_) {
+        active_path_ = nullptr;
+    }
+    path = QuicPath{};
+}
+
+bool QuicConnection::set_active_path(QuicPath &path) noexcept {
+    if (!path.allocated) {
+        return false;
+    }
+    if (active_path_ != nullptr && active_path_ != &path && active_path_->allocated) {
+        active_path_->tag = QuicPathTag::Backup;
+    }
+    path.tag = QuicPathTag::Active;
+    active_path_ = &path;
+    options_.remote_addr = path.remote;
+    options_.local_addr = path.local;
+    options_.remote_connection_id = path.remote_connection_id;
+    return true;
+}
+
+void QuicConnection::record_path_received(QuicPath &path, std::size_t len) noexcept {
+    if (!path.allocated) {
+        return;
+    }
+    path.used = true;
+    path.received += len;
+}
+
+void QuicConnection::record_path_sent(QuicPath &path, std::size_t len) noexcept {
+    if (!path.allocated) {
+        return;
+    }
+    path.sent += len;
+}
+
+std::size_t QuicConnection::path_send_limit(const QuicPath &path, std::size_t size) noexcept {
+    if (path.validated) {
+        return size;
+    }
+
+    const std::uint64_t max = path.received * 3;
+    if (path.sent >= max) {
+        return 0;
+    }
+
+    const std::uint64_t left = max - path.sent;
+    if (static_cast<std::uint64_t>(size) > left) {
+        return static_cast<std::size_t>(left);
+    }
+    return size;
 }
 
 std::size_t QuicConnection::packet_number_space_index(QuicEncryptionLevel level) noexcept {

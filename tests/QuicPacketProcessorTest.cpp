@@ -232,7 +232,7 @@ TEST(QuicPacketProcessorTest, RejectsNonInitialPacket) {
     EXPECT_EQ(result.error(), fiber::common::IoErr::Invalid);
 }
 
-TEST(QuicPacketProcessorTest, RejectsWrongPath) {
+TEST(QuicPacketProcessorTest, CreatesProbePathForDifferentRemoteAddress) {
     const std::array<std::uint8_t, 1> payload{0x01};
     std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
     fiber::quic::QuicPacketHeader packet{};
@@ -249,6 +249,10 @@ TEST(QuicPacketProcessorTest, RejectsWrongPath) {
 
     auto result = fiber::quic::quic_process_initial_datagram(conn, received, plaintext.data(), plaintext.size());
 
-    EXPECT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), fiber::common::IoErr::Invalid);
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_TRUE(result->created_path);
+    ASSERT_NE(result->path, nullptr);
+    EXPECT_EQ(result->path, conn.active_path());
+    EXPECT_EQ(conn.remote_addr().port(), 4434);
+    EXPECT_EQ(conn.path_count(), 1U);
 }

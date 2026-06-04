@@ -26,20 +26,44 @@ namespace {
     return lhs.port() == rhs.port() && ip_address_equal(lhs.ip(), rhs.ip());
 }
 
-[[nodiscard]] bool socket_address_is_unspecified(const net::SocketAddress &addr) noexcept {
-    return addr.port() == 0 && addr.ip().is_unspecified();
+[[nodiscard]] bool connection_id_equal(const QuicConnectionId &lhs, const QuicConnectionId &rhs) noexcept {
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    if (lhs.size() == 0) {
+        return true;
+    }
+    return std::equal(lhs.data(), lhs.data() + lhs.size(), rhs.data());
 }
 
-[[nodiscard]] common::IoResult<void> validate_path(const QuicConnection &conn,
-                                                   const QuicReceivedDatagram &datagram) noexcept {
-    if (!socket_address_is_unspecified(conn.remote_addr()) &&
-        !socket_address_equal(conn.remote_addr(), datagram.peer)) {
+[[nodiscard]] bool probing_frame(QuicFrameType type) noexcept {
+    return type == QuicFrameType::Padding || type == QuicFrameType::PathChallenge ||
+           type == QuicFrameType::PathResponse || type == QuicFrameType::NewConnectionId;
+}
+
+[[nodiscard]] common::IoResult<QuicPath *> bind_datagram_path(QuicConnection &conn,
+                                                              const QuicReceivedDatagram &datagram,
+                                                              const QuicPacketHeader &packet) noexcept {
+    if (QuicPath *path = conn.find_path(datagram.peer, datagram.local)) {
+        conn.record_path_received(*path, datagram.len);
+        return path;
+    }
+
+    auto &space = conn.packet_number_space(packet.level);
+    if (packet.packet_number != space.largest_received_packet_number) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    if (!socket_address_is_unspecified(conn.local_addr()) && !socket_address_equal(conn.local_addr(), datagram.local)) {
-        return std::unexpected(common::IoErr::Invalid);
+
+    if (QuicPath *probe = conn.find_path(QuicPathTag::Probe)) {
+        conn.free_path(*probe);
     }
-    return {};
+
+    QuicPath *path = conn.create_path(datagram.peer, datagram.local, packet.scid, QuicPathTag::Probe);
+    if (path == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    conn.record_path_received(*path, datagram.len);
+    return path;
 }
 
 } // namespace
@@ -65,11 +89,6 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    auto path_valid = validate_path(conn, datagram);
-    if (!path_valid) {
-        return std::unexpected(path_valid.error());
-    }
-
     if (!conn.crypto().initial_ready) {
         auto initialized = conn.init_initial_crypto(packet->dcid);
         if (!initialized) {
@@ -83,7 +102,17 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
         return std::unexpected(opened.error());
     }
 
+    auto bound_path = bind_datagram_path(conn, datagram, *packet);
+    if (!bound_path) {
+        return std::unexpected(bound_path.error());
+    }
+
     QuicPacketProcessResult result{};
+    result.path = *bound_path;
+    result.created_path = result.path->tag == QuicPathTag::Probe;
+    result.rebound = result.created_path &&
+                     (connection_id_equal(packet->dcid, conn.local_connection_id()) ||
+                      connection_id_equal(packet->dcid, conn.original_destination_connection_id()));
     result.packet_type = packet->type;
     result.level = packet->level;
     result.packet_number = packet->packet_number;
@@ -102,6 +131,7 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
         }
         ++result.frame_count;
         result.ack_eliciting = result.ack_eliciting || parsed->frame.ack_eliciting;
+        result.non_probing = result.non_probing || !probing_frame(parsed->frame.type);
     }
 
     if (conn.state() == QuicConnectionState::Init) {
@@ -116,6 +146,18 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
         space.send_ack = true;
     }
     result.send_ack = space.send_ack;
+
+    if (result.path != conn.active_path() && result.non_probing &&
+        packet->packet_number == space.largest_received_packet_number) {
+        QuicPath *old = conn.active_path();
+        if (old != nullptr && !old->validated) {
+            conn.free_path(*old);
+        }
+        if (!conn.set_active_path(*result.path)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+
     return result;
 }
 

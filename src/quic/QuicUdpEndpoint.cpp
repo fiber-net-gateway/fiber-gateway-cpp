@@ -417,6 +417,10 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
     if (!valid() || datagram.data == nullptr || datagram.capacity == 0 || connection.closing()) {
         return QuicBuildSendResult{QuicBuildSendStatus::Closed};
     }
+    QuicPath *path = connection.active_path();
+    if (path == nullptr) {
+        return QuicBuildSendResult{QuicBuildSendStatus::Closed};
+    }
 
     constexpr QuicEncryptionLevel levels[] = {QuicEncryptionLevel::Initial, QuicEncryptionLevel::Handshake,
                                               QuicEncryptionLevel::Application};
@@ -432,8 +436,16 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         datagram = QuicSendDatagram{};
         datagram.data = data;
         datagram.capacity = capacity;
+        datagram.path = path;
         datagram.level = level;
         datagram.packet_number_snapshot = quic_preserve_packet_number(space);
+
+        const std::size_t allowed = QuicConnection::path_send_limit(*path, datagram.capacity);
+        if (allowed == 0) {
+            quic_restore_packet_number(space, datagram.packet_number_snapshot);
+            return QuicBuildSendResult{QuicBuildSendStatus::Blocked};
+        }
+        datagram.capacity = allowed;
 
         if (fill_ack_frame(space, datagram.frames[0])) {
             datagram.frame_count = 1;
@@ -453,7 +465,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
 
         QuicPacketEncodeSpec spec{};
         spec.level = level;
-        spec.dcid = connection.remote_connection_id();
+        spec.dcid = path->remote_connection_id;
         spec.scid = connection.local_connection_id();
         spec.frames = datagram.frames;
         spec.frame_count = datagram.frame_count;
@@ -473,8 +485,8 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         datagram.ack_eliciting = encoded->ack_eliciting;
         datagram.spec.buf = datagram.data;
         datagram.spec.len = datagram.length;
-        datagram.spec.peer = connection.remote_addr();
-        datagram.spec.local = connection.local_addr();
+        datagram.spec.peer = path->remote;
+        datagram.spec.local = path->local;
         datagram.spec.has_local = true;
         return QuicBuildSendResult{QuicBuildSendStatus::Encoded};
     }
@@ -512,6 +524,9 @@ void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const Qui
         }
     }
 
+    if (datagram.path != nullptr) {
+        connection.record_path_sent(*datagram.path, datagram.length);
+    }
     quic_congestion_on_packet_sent(connection.congestion(), datagram.length, datagram.ack_eliciting,
                                    connection.closing());
     quic_congestion_on_idle(connection.congestion(), !connection_has_send_work(connection), now);
