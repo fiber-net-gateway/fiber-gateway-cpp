@@ -440,7 +440,7 @@ async::Task<common::IoErr> QuicSendScheduler::flush_connection(QuicConnection &c
         }
 
         endpoint_->commit_send_datagram(connection, datagram);
-        ++packets_for_connection;
+        packets_for_connection += datagram.packet_count;
         if (packets_for_connection >= options_.max_packets_per_connection) {
             connection.send_index.state = QuicConnection::SendIndex::State::None;
             if (endpoint_->connection_has_send_work(connection)) {

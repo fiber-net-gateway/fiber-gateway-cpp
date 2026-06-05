@@ -21,6 +21,7 @@ class QuicUdpEndpoint;
 
 inline constexpr std::size_t kQuicSendDefaultBufferSize = 65536;
 inline constexpr std::size_t kQuicSendMaxFramesPerDatagram = 8;
+inline constexpr std::size_t kQuicSendMaxPacketsPerDatagram = 3;
 
 enum class QuicBuildSendStatus : std::uint8_t {
     Encoded,
@@ -35,13 +36,9 @@ struct QuicBuildSendResult {
     std::chrono::milliseconds delay{0};
 };
 
-struct QuicSendDatagram {
-    std::uint8_t *data = nullptr;
-    std::size_t capacity = 0;
-    std::size_t length = 0;
-    QuicPath *path = nullptr;
-    net::UdpPacketSendSpec spec{};
+struct QuicSendPacketRecord {
     QuicEncryptionLevel level = QuicEncryptionLevel::Initial;
+    std::size_t length = 0;
     QuicPacketNumberSpaceSnapshot packet_number_snapshot{};
     std::uint64_t packet_number = 0;
     QuicFrame frames[kQuicSendMaxFramesPerDatagram]{};
@@ -49,6 +46,16 @@ struct QuicSendDatagram {
     std::size_t frame_count = 0;
     bool sends_ack = false;
     bool ack_eliciting = false;
+};
+
+struct QuicSendDatagram {
+    std::uint8_t *data = nullptr;
+    std::size_t capacity = 0;
+    std::size_t length = 0;
+    QuicPath *path = nullptr;
+    net::UdpPacketSendSpec spec{};
+    QuicSendPacketRecord packets[kQuicSendMaxPacketsPerDatagram]{};
+    std::size_t packet_count = 0;
 };
 
 class QuicSendScheduler : public common::NonCopyable, public common::NonMovable {
