@@ -169,6 +169,7 @@ struct QuicFrame {
     bool packet_ack_eliciting = false;
     bool ignore_congestion = false;
     bool ignore_loss = false;
+    bool connection_owned = false;
     QuicSlice data{};
 
     union Payload {

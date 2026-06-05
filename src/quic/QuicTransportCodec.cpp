@@ -191,10 +191,6 @@ parse_long_header(const std::uint8_t *datagram, std::size_t datagram_len, std::u
     }
 
     if (long_type == kLongPacketTypeInitial) {
-        if (datagram_len < kMinInitialDatagramSize) {
-            return std::unexpected(common::IoErr::Invalid);
-        }
-
         auto token_len = quic_parse_varint(in);
         if (!token_len) {
             return std::unexpected(token_len.error());

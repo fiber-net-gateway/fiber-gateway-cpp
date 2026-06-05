@@ -20,6 +20,7 @@ struct QuicPacketEncodeSpec {
     QuicFrame *frames = nullptr;
     std::size_t frame_count = 0;
     std::size_t min_packet_len = 0;
+    std::size_t max_packet_len = 0;
 };
 
 struct QuicPacketEncodeResult {

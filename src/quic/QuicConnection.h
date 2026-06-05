@@ -96,10 +96,13 @@ using QuicFrameQueue = common::IntrusiveList<QuicFrame, offsetof(QuicFrame, queu
 
 struct QuicPacketNumberSpace {
     QuicPacketNumberSpace() noexcept;
+    ~QuicPacketNumberSpace();
 
     void reset(QuicEncryptionLevel space_level) noexcept;
     void record_received_packet_number(std::uint64_t packet_number) noexcept;
     void record_acked_packet_number(std::uint64_t packet_number) noexcept;
+    [[nodiscard]] QuicFrame *alloc_frame() noexcept;
+    void release_frame(QuicFrame &frame) noexcept;
 
     QuicEncryptionLevel level;
 
@@ -112,6 +115,7 @@ struct QuicPacketNumberSpace {
     QuicFrameQueue pending_frames{};
     QuicFrameQueue sending_frames{};
     QuicFrameQueue sent_frames{};
+    QuicFrameQueue free_frames{};
     QuicFrame ack_frame{};
 
     std::uint64_t pending_ack = 0;

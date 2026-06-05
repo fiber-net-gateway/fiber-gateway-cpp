@@ -22,8 +22,8 @@ inline constexpr std::uint8_t kShortReservedBitsMask = 0x18;
     return (spec.frame_queue != nullptr && !spec.frame_queue->empty()) || spec.frame_count != 0;
 }
 
-[[nodiscard]] common::IoResult<std::size_t> encoded_frames_len(const QuicPacketEncodeSpec &spec,
-                                                               bool &ack_eliciting) noexcept {
+[[nodiscard]] common::IoResult<std::size_t> encoded_frames_len(const QuicPacketEncodeSpec &spec, bool &ack_eliciting,
+                                                               std::size_t &frame_count) noexcept {
     QuicFrame *frames = spec.frames;
     const std::size_t count = spec.frame_count;
     if (frames == nullptr && count != 0) {
@@ -32,6 +32,7 @@ inline constexpr std::uint8_t kShortReservedBitsMask = 0x18;
 
     std::size_t len = 0;
     ack_eliciting = false;
+    frame_count = 0;
     if (spec.frame_queue != nullptr) {
         for (QuicFrame *frame = spec.frame_queue->front(); frame != nullptr;
              frame = spec.frame_queue->next_of(*frame)) {
@@ -41,6 +42,7 @@ inline constexpr std::uint8_t kShortReservedBitsMask = 0x18;
             }
             len += *frame_len;
             ack_eliciting = ack_eliciting || frame->ack_eliciting;
+            ++frame_count;
         }
     }
     for (std::size_t i = 0; i < count; ++i) {
@@ -50,6 +52,7 @@ inline constexpr std::uint8_t kShortReservedBitsMask = 0x18;
         }
         len += *frame_len;
         ack_eliciting = ack_eliciting || frames[i].ack_eliciting;
+        ++frame_count;
     }
     return len;
 }
@@ -206,12 +209,13 @@ common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &conn
     }
 
     bool ack_eliciting = false;
-    auto payload_len = encoded_frames_len(spec, ack_eliciting);
+    std::size_t frame_count = 0;
+    auto payload_len = encoded_frames_len(spec, ack_eliciting, frame_count);
     if (!payload_len) {
         return std::unexpected(payload_len.error());
     }
 
-    const std::size_t target_len = std::max(spec.min_packet_len, *payload_len + kAeadTagLength + 64U);
+    const std::size_t target_len = spec.max_packet_len == 0 ? out_cap : std::min(spec.max_packet_len, out_cap);
     auto &space = connection.packet_number_space(spec.level);
     const auto pn_snapshot = quic_preserve_packet_number(space);
 
@@ -225,11 +229,15 @@ common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &conn
     packet.truncated_pn = quic_truncate_packet_number(packet.packet_number, packet.pn_len);
     packet.length = packet.pn_len + *payload_len + kAeadTagLength;
 
-    const std::size_t cap = quic_packet_payload_capacity(packet, target_len);
-    if (cap > *payload_len) {
-        *payload_len = cap;
-        packet.length = packet.pn_len + *payload_len + kAeadTagLength;
+    const std::size_t min_payload = std::max(quic_packet_payload_capacity(packet, spec.min_packet_len),
+                                             static_cast<std::size_t>(4U - packet.pn_len));
+    const std::size_t max_payload = quic_packet_payload_capacity(packet, target_len);
+    if (min_payload > max_payload || *payload_len > max_payload) {
+        quic_restore_packet_number(space, pn_snapshot);
+        return std::unexpected(common::IoErr::NoMem);
     }
+    *payload_len = std::max(*payload_len, min_payload);
+    packet.length = packet.pn_len + *payload_len + kAeadTagLength;
 
     QuicWriteCursor writer(out, out_cap);
     std::uint8_t *pn = nullptr;
@@ -286,7 +294,7 @@ common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &conn
     QuicPacketEncodeResult result{};
     result.packet_len = packet.packet_len;
     result.packet_number = packet.packet_number;
-    result.frame_count = static_cast<std::uint32_t>(spec.frame_count);
+    result.frame_count = static_cast<std::uint32_t>(frame_count);
     result.ack_eliciting = ack_eliciting;
     return result;
 }

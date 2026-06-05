@@ -105,6 +105,7 @@ struct AckStat {
             space.sent_frames.erase(*frame);
             frame->packet_len = 0;
             frame->packet_ack_eliciting = false;
+            space.release_frame(*frame);
             found = true;
             result.acked_frames = true;
         }
@@ -175,6 +176,8 @@ struct AckStat {
             if (retransmittable_on_loss(front->type)) {
                 space.pending_frames.push_back(*front);
                 result.lost_frames = true;
+            } else {
+                space.release_frame(*front);
             }
         }
     }
