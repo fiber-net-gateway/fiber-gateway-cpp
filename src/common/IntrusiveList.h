@@ -63,6 +63,24 @@ public:
         hook.in_list = true;
     }
 
+    void insert_after(T &position, T &owner) noexcept {
+        IntrusiveListHook &pos_hook = hook_of(position);
+        IntrusiveListHook &hook = hook_of(owner);
+        if (!pos_hook.in_list || hook.in_list) {
+            return;
+        }
+
+        hook.prev = &pos_hook;
+        hook.next = pos_hook.next;
+        if (pos_hook.next) {
+            pos_hook.next->prev = &hook;
+        } else {
+            tail_ = &hook;
+        }
+        pos_hook.next = &hook;
+        hook.in_list = true;
+    }
+
     void erase(T &owner) noexcept {
         IntrusiveListHook &hook = hook_of(owner);
         if (!hook.in_list) {

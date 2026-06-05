@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <new>
 
 #include "QuicCrypto.h"
 #include "QuicProtocol.h"
@@ -90,6 +91,25 @@ void QuicCryptoState::reset() noexcept {
 
 QuicPacketNumberSpace::QuicPacketNumberSpace() noexcept { reset(QuicEncryptionLevel::Initial); }
 
+QuicPacketNumberSpace::~QuicPacketNumberSpace() {
+    auto delete_owned = [](QuicFrameQueue &queue) noexcept {
+        QuicFrame *frame = queue.front();
+        while (frame != nullptr) {
+            QuicFrame *next = queue.next_of(*frame);
+            queue.erase(*frame);
+            if (frame->connection_owned) {
+                delete frame;
+            }
+            frame = next;
+        }
+    };
+
+    delete_owned(pending_frames);
+    delete_owned(sending_frames);
+    delete_owned(sent_frames);
+    delete_owned(free_frames);
+}
+
 void QuicPacketNumberSpace::reset(QuicEncryptionLevel space_level) noexcept {
     level = space_level;
     crypto_sent = 0;
@@ -106,6 +126,35 @@ void QuicPacketNumberSpace::reset(QuicEncryptionLevel space_level) noexcept {
     ack_ranges = {};
     send_ack_count = 0;
     send_ack = false;
+}
+
+QuicFrame *QuicPacketNumberSpace::alloc_frame() noexcept {
+    QuicFrame *frame = free_frames.front();
+    if (frame != nullptr) {
+        free_frames.erase(*frame);
+        *frame = QuicFrame{};
+        frame->connection_owned = true;
+        return frame;
+    }
+
+    frame = new (std::nothrow) QuicFrame{};
+    if (frame != nullptr) {
+        frame->connection_owned = true;
+    }
+    return frame;
+}
+
+void QuicPacketNumberSpace::release_frame(QuicFrame &frame) noexcept {
+    if (&frame == &ack_frame || !frame.connection_owned) {
+        return;
+    }
+    if (frame.queue_hook.linked()) {
+        return;
+    }
+
+    frame = QuicFrame{};
+    frame.connection_owned = true;
+    free_frames.push_front(frame);
 }
 
 void QuicPacketNumberSpace::record_received_packet_number(std::uint64_t packet_number) noexcept {

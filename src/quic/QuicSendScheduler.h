@@ -51,6 +51,8 @@ struct QuicSendDatagram {
     std::size_t length = 0;
     QuicPath *path = nullptr;
     net::UdpPacketSendSpec spec{};
+    QuicPacketNumberSpaceSnapshot packet_number_snapshots[kQuicSendLevelCount]{};
+    bool packet_number_snapshot_valid[kQuicSendLevelCount]{};
     QuicSendPacketRecord packets[kQuicSendLevelCount]{};
     std::size_t packet_count = 0;
 };
