@@ -112,6 +112,7 @@ struct QuicPacketNumberSpace {
     QuicFrameQueue pending_frames{};
     QuicFrameQueue sending_frames{};
     QuicFrameQueue sent_frames{};
+    QuicFrame ack_frame{};
 
     std::uint64_t pending_ack = 0;
     std::uint64_t largest_range = 0;

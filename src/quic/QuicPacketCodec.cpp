@@ -19,8 +19,7 @@ inline constexpr std::uint8_t kLongReservedBitsMask = 0x0c;
 inline constexpr std::uint8_t kShortReservedBitsMask = 0x18;
 
 [[nodiscard]] bool has_frames(const QuicPacketEncodeSpec &spec) noexcept {
-    return spec.ack_frame != nullptr || (spec.frame_queue != nullptr && !spec.frame_queue->empty()) ||
-           spec.frame_count != 0;
+    return (spec.frame_queue != nullptr && !spec.frame_queue->empty()) || spec.frame_count != 0;
 }
 
 [[nodiscard]] common::IoResult<std::size_t> encoded_frames_len(const QuicPacketEncodeSpec &spec,
@@ -33,18 +32,10 @@ inline constexpr std::uint8_t kShortReservedBitsMask = 0x18;
 
     std::size_t len = 0;
     ack_eliciting = false;
-    if (spec.ack_frame != nullptr) {
-        auto frame_len = quic_create_frame(nullptr, *spec.ack_frame);
-        if (!frame_len) {
-            return std::unexpected(frame_len.error());
-        }
-        len += *frame_len;
-        ack_eliciting = ack_eliciting || spec.ack_frame->ack_eliciting;
-    }
     if (spec.frame_queue != nullptr) {
         for (QuicFrame *frame = spec.frame_queue->front(); frame != nullptr;
              frame = spec.frame_queue->next_of(*frame)) {
-            auto frame_len = quic_create_frame(nullptr, *frame);
+            auto frame_len = quic_frame_encoded_len(*frame);
             if (!frame_len) {
                 return std::unexpected(frame_len.error());
             }
@@ -53,7 +44,7 @@ inline constexpr std::uint8_t kShortReservedBitsMask = 0x18;
         }
     }
     for (std::size_t i = 0; i < count; ++i) {
-        auto frame_len = quic_create_frame(nullptr, frames[i]);
+        auto frame_len = quic_frame_encoded_len(frames[i]);
         if (!frame_len) {
             return std::unexpected(frame_len.error());
         }
@@ -68,12 +59,6 @@ inline constexpr std::uint8_t kShortReservedBitsMask = 0x18;
     const std::size_t count = spec.frame_count;
     if (frames == nullptr && count != 0) {
         return std::unexpected(common::IoErr::Invalid);
-    }
-    if (spec.ack_frame != nullptr) {
-        auto written = quic_create_frame(&out, *spec.ack_frame);
-        if (!written) {
-            return std::unexpected(written.error());
-        }
     }
     if (spec.frame_queue != nullptr) {
         for (QuicFrame *frame = spec.frame_queue->front(); frame != nullptr;

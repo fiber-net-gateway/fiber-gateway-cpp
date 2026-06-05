@@ -96,6 +96,7 @@ void QuicPacketNumberSpace::reset(QuicEncryptionLevel space_level) noexcept {
     next_packet_number = 0;
     largest_acked_packet_number = kUnsetPacketNumber;
     largest_received_packet_number = kUnsetPacketNumber;
+    ack_frame = QuicFrame{};
     pending_ack = kUnsetPacketNumber;
     largest_range = kUnsetPacketNumber;
     first_range = kUnsetPacketNumber;

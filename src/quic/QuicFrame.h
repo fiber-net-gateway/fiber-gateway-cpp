@@ -162,6 +162,7 @@ struct QuicFrame {
     QuicFrameType type = QuicFrameType::Padding;
     QuicEncryptionLevel level = QuicEncryptionLevel::Initial;
     std::uint64_t packet_number = 0;
+    std::size_t encoded_len = 0;
     std::size_t packet_len = 0;
     std::chrono::milliseconds send_time{0};
     bool ack_eliciting = false;
