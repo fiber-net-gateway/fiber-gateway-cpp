@@ -19,6 +19,8 @@ namespace {
 inline constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 inline constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 inline constexpr std::size_t kPacketEncodingReserve = 64;
+inline constexpr QuicEncryptionLevel kSendLevels[] = {QuicEncryptionLevel::Initial, QuicEncryptionLevel::Handshake,
+                                                      QuicEncryptionLevel::Application};
 
 } // namespace
 
@@ -30,6 +32,21 @@ namespace {
 
 [[nodiscard]] bool has_packet_space_work(const QuicPacketNumberSpace &space) noexcept {
     return (space.send_ack && space.pending_ack != kUnsetPacketNumber) || !space.pending_frames.empty();
+}
+
+[[nodiscard]] std::size_t padding_level_index(const QuicConnection &connection) noexcept {
+    const QuicPacketNumberSpace &initial = connection.packet_number_space(QuicEncryptionLevel::Initial);
+    if (!has_packet_space_work(initial)) {
+        return kQuicSendMaxPacketsPerDatagram;
+    }
+
+    std::size_t index = 0;
+    for (; index + 1 < kQuicSendMaxPacketsPerDatagram; ++index) {
+        if (connection.packet_number_space(kSendLevels[index + 1]).pending_frames.empty()) {
+            break;
+        }
+    }
+    return index;
 }
 
 void copy_send_frame(QuicFrame &dst, const QuicFrame &src) noexcept {
@@ -475,51 +492,65 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         return QuicBuildSendResult{QuicBuildSendStatus::Closed};
     }
 
-    constexpr QuicEncryptionLevel levels[] = {QuicEncryptionLevel::Initial, QuicEncryptionLevel::Handshake,
-                                              QuicEncryptionLevel::Application};
-    const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
+    std::uint8_t *data = datagram.data;
+    const std::size_t requested = std::min(datagram.capacity, path->mtu);
+    datagram = QuicSendDatagram{};
+    datagram.data = data;
+    datagram.path = path;
 
-    for (QuicEncryptionLevel level: levels) {
+    const std::size_t allowed = QuicConnection::path_send_limit(*path, requested);
+    if (allowed == 0) {
+        return QuicBuildSendResult{QuicBuildSendStatus::Blocked};
+    }
+    datagram.capacity = allowed;
+
+    const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
+    const std::size_t pad_level = padding_level_index(connection);
+
+    auto rollback_encoded = [&]() noexcept {
+        for (std::size_t i = 0; i < datagram.packet_count; ++i) {
+            QuicSendPacketRecord &packet = datagram.packets[i];
+            QuicPacketNumberSpace &space = connection.packet_number_space(packet.level);
+            quic_restore_packet_number(space, packet.packet_number_snapshot);
+        }
+        datagram.length = 0;
+        datagram.packet_count = 0;
+    };
+
+    for (std::size_t level_index = 0; level_index < kQuicSendMaxPacketsPerDatagram; ++level_index) {
+        QuicEncryptionLevel level = kSendLevels[level_index];
         QuicPacketNumberSpace &space = connection.packet_number_space(level);
         if (!has_packet_space_work(space)) {
             continue;
         }
 
-        std::uint8_t *data = datagram.data;
-        const std::size_t capacity = datagram.capacity;
-        datagram = QuicSendDatagram{};
-        datagram.data = data;
-        datagram.capacity = capacity;
-        datagram.path = path;
-        datagram.level = level;
-        datagram.packet_number_snapshot = quic_preserve_packet_number(space);
-
-        const std::size_t allowed = QuicConnection::path_send_limit(*path, datagram.capacity);
-        if (allowed == 0) {
-            quic_restore_packet_number(space, datagram.packet_number_snapshot);
-            return QuicBuildSendResult{QuicBuildSendStatus::Blocked};
-        }
-        datagram.capacity = allowed;
-
         if (should_delay_ack(space, now)) {
-            quic_restore_packet_number(space, datagram.packet_number_snapshot);
+            if (datagram.packet_count != 0) {
+                break;
+            }
             return QuicBuildSendResult{QuicBuildSendStatus::Delayed, ack_delay_remaining(space, now)};
         }
 
+        QuicSendPacketRecord &packet = datagram.packets[datagram.packet_count];
+        packet = QuicSendPacketRecord{};
+        packet.level = level;
+        packet.packet_number_snapshot = quic_preserve_packet_number(space);
+
         std::size_t estimated_payload_len = 0;
-        if (fill_ack_frame(space, datagram.frames[0], now, options_.ack_delay_exponent)) {
-            auto frame_len = quic_create_frame(nullptr, datagram.frames[0]);
+        if (fill_ack_frame(space, packet.frames[0], now, options_.ack_delay_exponent)) {
+            auto frame_len = quic_create_frame(nullptr, packet.frames[0]);
             if (!frame_len) {
-                quic_restore_packet_number(space, datagram.packet_number_snapshot);
+                quic_restore_packet_number(space, packet.packet_number_snapshot);
+                packet = QuicSendPacketRecord{};
                 return std::unexpected(frame_len.error());
             }
             estimated_payload_len += *frame_len;
-            datagram.frame_count = 1;
-            datagram.sends_ack = true;
+            packet.frame_count = 1;
+            packet.sends_ack = true;
         }
 
         QuicFrame *source = space.pending_frames.front();
-        while (source != nullptr && datagram.frame_count < kQuicSendMaxFramesPerDatagram) {
+        while (source != nullptr && packet.frame_count < kQuicSendMaxFramesPerDatagram) {
             if (!quic_congestion_can_send(connection.congestion(), source->ignore_congestion)) {
                 break;
             }
@@ -528,104 +559,141 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
             copy_send_frame(candidate, *source);
             auto frame_len = quic_create_frame(nullptr, candidate);
             if (!frame_len) {
-                quic_restore_packet_number(space, datagram.packet_number_snapshot);
+                quic_restore_packet_number(space, packet.packet_number_snapshot);
+                packet = QuicSendPacketRecord{};
                 return std::unexpected(frame_len.error());
             }
 
-            if (datagram.frame_count != 0 &&
-                estimated_payload_len + *frame_len + kAeadTagLength + kPacketEncodingReserve > datagram.capacity) {
+            if (packet.frame_count != 0 &&
+                estimated_payload_len + *frame_len + kAeadTagLength + kPacketEncodingReserve >
+                        datagram.capacity - datagram.length) {
                 break;
             }
 
-            copy_send_frame(datagram.frames[datagram.frame_count], candidate);
-            datagram.source_frames[datagram.frame_count] = source;
+            copy_send_frame(packet.frames[packet.frame_count], candidate);
+            packet.source_frames[packet.frame_count] = source;
             estimated_payload_len += *frame_len;
-            ++datagram.frame_count;
+            ++packet.frame_count;
 
             source = space.pending_frames.next_of(*source);
         }
 
-        if (datagram.frame_count == 0) {
-            quic_restore_packet_number(space, datagram.packet_number_snapshot);
+        if (packet.frame_count == 0) {
+            quic_restore_packet_number(space, packet.packet_number_snapshot);
+            packet = QuicSendPacketRecord{};
             if (!space.pending_frames.empty()) {
+                if (datagram.packet_count != 0) {
+                    break;
+                }
                 return QuicBuildSendResult{QuicBuildSendStatus::Blocked};
             }
             continue;
+        }
+
+        std::size_t min_packet_len = 0;
+        if (level_index == pad_level && (level == QuicEncryptionLevel::Initial || datagram.packet_count != 0) &&
+            datagram.length < kMinInitialDatagramSize) {
+            min_packet_len = kMinInitialDatagramSize - datagram.length;
+            if (min_packet_len > datagram.capacity - datagram.length) {
+                quic_restore_packet_number(space, packet.packet_number_snapshot);
+                packet = QuicSendPacketRecord{};
+                rollback_encoded();
+                return QuicBuildSendResult{QuicBuildSendStatus::Blocked};
+            }
         }
 
         QuicPacketEncodeSpec spec{};
         spec.level = level;
         spec.dcid = path->remote_connection_id;
         spec.scid = connection.local_connection_id();
-        spec.frames = datagram.frames;
-        spec.frame_count = datagram.frame_count;
-        spec.min_packet_len = level == QuicEncryptionLevel::Initial ? kMinInitialDatagramSize : 0;
+        spec.frames = packet.frames;
+        spec.frame_count = packet.frame_count;
+        spec.min_packet_len = min_packet_len;
 
-        auto encoded = quic_encode_packet(connection, spec, datagram.data, datagram.capacity);
+        auto encoded = quic_encode_packet(connection, spec, datagram.data + datagram.length,
+                                          datagram.capacity - datagram.length);
         if (!encoded) {
-            quic_restore_packet_number(space, datagram.packet_number_snapshot);
+            quic_restore_packet_number(space, packet.packet_number_snapshot);
+            packet = QuicSendPacketRecord{};
             if (encoded.error() == common::IoErr::NotFound) {
                 continue;
             }
+            rollback_encoded();
             return std::unexpected(encoded.error());
         }
 
-        datagram.length = encoded->packet_len;
-        datagram.packet_number = encoded->packet_number;
-        datagram.ack_eliciting = encoded->ack_eliciting;
-        datagram.spec.buf = datagram.data;
-        datagram.spec.len = datagram.length;
-        datagram.spec.peer = path->remote;
-        datagram.spec.local = path->local;
-        datagram.spec.has_local = true;
-        return QuicBuildSendResult{QuicBuildSendStatus::Encoded};
+        packet.length = encoded->packet_len;
+        packet.packet_number = encoded->packet_number;
+        packet.ack_eliciting = encoded->ack_eliciting;
+        datagram.length += encoded->packet_len;
+        ++datagram.packet_count;
     }
 
-    return QuicBuildSendResult{QuicBuildSendStatus::NoWork};
+    if (datagram.packet_count == 0) {
+        return QuicBuildSendResult{QuicBuildSendStatus::NoWork};
+    }
+
+    datagram.spec.buf = datagram.data;
+    datagram.spec.len = datagram.length;
+    datagram.spec.peer = path->remote;
+    datagram.spec.local = path->local;
+    datagram.spec.has_local = true;
+    return QuicBuildSendResult{QuicBuildSendStatus::Encoded};
 }
 
 void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept {
-    QuicPacketNumberSpace &space = connection.packet_number_space(datagram.level);
     const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
-    if (datagram.sends_ack) {
-        space.send_ack = false;
-        space.send_ack_count = 0;
-    }
+    bool has_send_work = false;
 
-    bool accounted_packet = false;
-    for (std::size_t i = 0; i < datagram.frame_count; ++i) {
-        QuicFrame *frame = datagram.source_frames[i];
-        if (frame == nullptr) {
-            continue;
+    for (std::size_t packet_index = 0; packet_index < datagram.packet_count; ++packet_index) {
+        const QuicSendPacketRecord &packet = datagram.packets[packet_index];
+        QuicPacketNumberSpace &space = connection.packet_number_space(packet.level);
+        if (packet.sends_ack) {
+            space.send_ack = false;
+            space.send_ack_count = 0;
         }
-        if (frame->queue_hook.linked()) {
-            space.pending_frames.erase(*frame);
-        }
-        frame->packet_number = datagram.packet_number;
-        frame->send_time = now;
-        frame->packet_ack_eliciting = datagram.ack_eliciting;
-        frame->packet_len = 0;
 
-        if (datagram.ack_eliciting && !connection.closing()) {
-            if (!accounted_packet) {
-                frame->packet_len = datagram.length;
-                accounted_packet = true;
+        bool accounted_packet = false;
+        for (std::size_t i = 0; i < packet.frame_count; ++i) {
+            QuicFrame *frame = packet.source_frames[i];
+            if (frame == nullptr) {
+                continue;
             }
-            space.sent_frames.push_back(*frame);
+            if (frame->queue_hook.linked()) {
+                space.pending_frames.erase(*frame);
+            }
+            frame->packet_number = packet.packet_number;
+            frame->send_time = now;
+            frame->packet_ack_eliciting = packet.ack_eliciting;
+            frame->packet_len = 0;
+
+            if (packet.ack_eliciting && !connection.closing()) {
+                if (!accounted_packet) {
+                    frame->packet_len = packet.length;
+                    accounted_packet = true;
+                }
+                space.sent_frames.push_back(*frame);
+            }
         }
+
+        quic_congestion_on_packet_sent(connection.congestion(), packet.length, packet.ack_eliciting,
+                                       connection.closing());
+        has_send_work = has_send_work || has_packet_space_work(space);
     }
 
     if (datagram.path != nullptr) {
         connection.record_path_sent(*datagram.path, datagram.length);
     }
-    quic_congestion_on_packet_sent(connection.congestion(), datagram.length, datagram.ack_eliciting,
-                                   connection.closing());
-    quic_congestion_on_idle(connection.congestion(), !connection_has_send_work(connection), now);
+    has_send_work = has_send_work || connection_has_send_work(connection);
+    quic_congestion_on_idle(connection.congestion(), !has_send_work, now);
 }
 
 void QuicUdpEndpoint::rollback_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept {
-    QuicPacketNumberSpace &space = connection.packet_number_space(datagram.level);
-    quic_restore_packet_number(space, datagram.packet_number_snapshot);
+    for (std::size_t i = 0; i < datagram.packet_count; ++i) {
+        const QuicSendPacketRecord &packet = datagram.packets[i];
+        QuicPacketNumberSpace &space = connection.packet_number_space(packet.level);
+        quic_restore_packet_number(space, packet.packet_number_snapshot);
+    }
 }
 
 bool QuicUdpEndpoint::connection_has_send_work(const QuicConnection &connection) const noexcept {

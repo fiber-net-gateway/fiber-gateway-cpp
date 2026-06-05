@@ -30,6 +30,15 @@ struct DecodedPacketSummary {
     bool ack_eliciting = false;
 };
 
+struct CoalescedPacketSummary {
+    std::size_t datagram_len = 0;
+    std::size_t first_packet_len = 0;
+    fiber::quic::QuicPacketType first_type = fiber::quic::QuicPacketType::Initial;
+    fiber::quic::QuicPacketType second_type = fiber::quic::QuicPacketType::Handshake;
+    bool first_ack_eliciting = false;
+    bool second_ack_eliciting = false;
+};
+
 struct TwoEndpointResults {
     EndpointResult first;
     EndpointResult second;
@@ -326,6 +335,119 @@ DetachedTask recv_delayed_application_ack(fiber::event::EventLoop *loop, fiber::
     client.close();
 }
 
+DetachedTask
+recv_coalesced_initial_handshake(fiber::event::EventLoop *loop, fiber::quic::QuicUdpEndpoint *endpoint,
+                                 std::promise<fiber::common::IoResult<CoalescedPacketSummary>> *done_promise) {
+    fiber::net::UdpSocket client(*loop);
+    auto bound = client.bind(loopback(0), {});
+    if (!bound) {
+        done_promise->set_value(std::unexpected(bound.error()));
+        co_return;
+    }
+
+    const auto original_dcid = cid_from_hex("8394c8f03e515708");
+    const auto server_cid = cid_from_hex("0102030405060708");
+    const auto client_cid = cid_from_hex("1112131415161718");
+    constexpr fiber::quic::QuicCryptoSuite suite = fiber::quic::QuicCryptoSuite::Aes128GcmSha256;
+    std::array<std::uint8_t, fiber::quic::kQuicMaxSecretLength> handshake_secret{};
+    for (std::size_t i = 0; i < 32; ++i) {
+        handshake_secret[i] = static_cast<std::uint8_t>(0x80U + i);
+    }
+
+    fiber::quic::QuicConnection::Options server_options{};
+    server_options.role = fiber::quic::QuicConnectionRole::Server;
+    server_options.local_addr = endpoint->local_addr();
+    server_options.remote_addr = client.local_addr();
+    server_options.local_connection_id = server_cid;
+    server_options.remote_connection_id = client_cid;
+    fiber::quic::QuicConnection server(server_options);
+    auto *path = server.active_path();
+    if (path == nullptr) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+        co_return;
+    }
+    path->validated = true;
+
+    auto initial_ready = server.init_initial_crypto(original_dcid);
+    if (!initial_ready) {
+        done_promise->set_value(std::unexpected(initial_ready.error()));
+        co_return;
+    }
+    auto server_handshake_secret = fiber::quic::quic_set_encryption_secret(
+            server.crypto(), fiber::quic::QuicEncryptionLevel::Handshake, true, suite, handshake_secret.data(), 32);
+    if (!server_handshake_secret) {
+        done_promise->set_value(std::unexpected(server_handshake_secret.error()));
+        co_return;
+    }
+
+    fiber::quic::QuicFrame initial_ping{};
+    initial_ping.type = fiber::quic::QuicFrameType::Ping;
+    initial_ping.level = fiber::quic::QuicEncryptionLevel::Initial;
+    initial_ping.ack_eliciting = true;
+    server.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial).pending_frames.push_back(initial_ping);
+
+    fiber::quic::QuicFrame handshake_ping{};
+    handshake_ping.type = fiber::quic::QuicFrameType::Ping;
+    handshake_ping.level = fiber::quic::QuicEncryptionLevel::Handshake;
+    handshake_ping.ack_eliciting = true;
+    server.packet_number_space(fiber::quic::QuicEncryptionLevel::Handshake).pending_frames.push_back(handshake_ping);
+
+    fiber::quic::QuicConnection::Options client_options{};
+    client_options.role = fiber::quic::QuicConnectionRole::Client;
+    fiber::quic::QuicConnection peer(client_options);
+    auto peer_initial_ready = peer.init_initial_crypto(original_dcid);
+    if (!peer_initial_ready) {
+        done_promise->set_value(std::unexpected(peer_initial_ready.error()));
+        co_return;
+    }
+    auto peer_handshake_secret = fiber::quic::quic_set_encryption_secret(
+            peer.crypto(), fiber::quic::QuicEncryptionLevel::Handshake, false, suite, handshake_secret.data(), 32);
+    if (!peer_handshake_secret) {
+        done_promise->set_value(std::unexpected(peer_handshake_secret.error()));
+        co_return;
+    }
+
+    endpoint->schedule_send(server);
+
+    auto readable = co_await client.wait_event(fiber::event::IoEvent::Read, std::chrono::milliseconds{500});
+    if (!readable) {
+        done_promise->set_value(std::unexpected(readable.error()));
+        co_return;
+    }
+
+    std::array<std::uint8_t, 1400> response{};
+    auto received = client.try_recv_from(response.data(), response.size());
+    if (!received) {
+        done_promise->set_value(std::unexpected(received.error()));
+        co_return;
+    }
+
+    std::array<std::uint8_t, 1400> plaintext{};
+    auto first = fiber::quic::quic_decode_packet(peer, response.data(), received->size, 0, plaintext.data(),
+                                                 plaintext.size());
+    if (!first) {
+        done_promise->set_value(std::unexpected(first.error()));
+        co_return;
+    }
+
+    const std::size_t second_offset = first->header.packet_len;
+    if (second_offset >= received->size) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+        co_return;
+    }
+
+    auto second = fiber::quic::quic_decode_packet(peer, response.data() + second_offset, received->size - second_offset,
+                                                  0, plaintext.data(), plaintext.size());
+    if (!second) {
+        done_promise->set_value(std::unexpected(second.error()));
+        co_return;
+    }
+
+    done_promise->set_value(CoalescedPacketSummary{received->size, first->header.packet_len, first->header.type,
+                                                   second->header.type, first->ack_eliciting, second->ack_eliciting});
+    client.close();
+}
+
 EndpointResult recv_after_send(fiber::event::EventLoopGroup &group, fiber::quic::QuicUdpEndpoint &endpoint,
                                const std::uint8_t *data, std::size_t len) {
     std::promise<EndpointResult> recv_promise;
@@ -476,6 +598,36 @@ TEST(QuicUdpEndpointTest, SendsInitialAckAfterProcessingAckElicitingInitial) {
     EXPECT_EQ(decoded->header.type, fiber::quic::QuicPacketType::Initial);
     EXPECT_FALSE(decoded->ack_eliciting);
     EXPECT_GE(decoded->frame_count, 1U);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, CoalescesInitialAndHandshakePacketsIntoOneUdpDatagram) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    std::promise<fiber::common::IoResult<CoalescedPacketSummary>> response_promise;
+    auto response_future = response_promise.get_future();
+
+    fiber::async::spawn(group.at(0),
+                        [&]() { return recv_coalesced_initial_handshake(&group.at(0), &endpoint, &response_promise); });
+
+    ASSERT_EQ(response_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto response = response_future.get();
+    ASSERT_TRUE(response.has_value()) << static_cast<int>(response.error());
+    EXPECT_EQ(response->datagram_len, fiber::quic::kMinInitialDatagramSize);
+    EXPECT_LT(response->first_packet_len, response->datagram_len);
+    EXPECT_EQ(response->first_type, fiber::quic::QuicPacketType::Initial);
+    EXPECT_EQ(response->second_type, fiber::quic::QuicPacketType::Handshake);
+    EXPECT_TRUE(response->first_ack_eliciting);
+    EXPECT_TRUE(response->second_ack_eliciting);
 
     close_endpoint_on_loop(group, endpoint);
     group.stop();
