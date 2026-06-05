@@ -6,6 +6,7 @@
 #include <cstdint>
 
 #include "../common/IntrusiveList.h"
+#include "../common/IoError.h"
 
 namespace fiber::quic {
 
@@ -60,6 +61,12 @@ struct QuicSlice {
     std::size_t len = 0;
 
     [[nodiscard]] bool empty() const noexcept { return len == 0; }
+};
+
+struct QuicFrameDataBlock {
+    std::uint8_t *data = nullptr;
+    std::size_t len = 0;
+    std::uint32_t refs = 1;
 };
 
 struct QuicPaddingFrame {
@@ -171,6 +178,7 @@ struct QuicFrame {
     bool ignore_loss = false;
     bool connection_owned = false;
     QuicSlice data{};
+    QuicFrameDataBlock *data_block = nullptr;
 
     union Payload {
         QuicPaddingFrame padding;
@@ -205,6 +213,11 @@ struct QuicFrameParseResult {
     return type >= static_cast<std::uint64_t>(QuicFrameType::Stream) &&
            type <= static_cast<std::uint64_t>(QuicFrameType::Stream7);
 }
+
+[[nodiscard]] common::IoResult<void> quic_frame_set_owned_data(QuicFrame &frame, const std::uint8_t *data,
+                                                               std::size_t len) noexcept;
+void quic_frame_retain_data(QuicFrame &frame) noexcept;
+void quic_frame_release_data(QuicFrame &frame) noexcept;
 
 } // namespace fiber::quic
 

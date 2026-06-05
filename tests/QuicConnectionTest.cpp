@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 
 #include "quic/QuicConnection.h"
 #include "quic/QuicProtocol.h"
 #include "quic/QuicTransportCodec.h"
+#include "quic/QuicTransportParamsCodec.h"
 
 namespace {
 
@@ -175,4 +177,57 @@ TEST(QuicConnectionTest, ReplacesProbePathWhenCreatingAnotherProbe) {
     EXPECT_EQ(conn.path_count(), 2U);
     EXPECT_EQ(second->remote.port(), 6002);
     EXPECT_EQ(conn.find_path(loopback(6001), loopback(4433)), nullptr);
+}
+
+TEST(QuicConnectionTest, AppliesPeerTransportParamsAndUpdatesLocalStreamLimits) {
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Server;
+    options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
+    fiber::quic::QuicConnection conn(options);
+
+    fiber::quic::QuicTransportParams params{};
+    params.has_initial_source_connection_id = true;
+    params.initial_source_connection_id = options.remote_connection_id;
+    params.max_udp_payload_size = fiber::quic::kMinInitialDatagramSize;
+    params.active_connection_id_limit = 2;
+    params.ack_delay_exponent = 7;
+    params.max_ack_delay = 33;
+    params.initial_max_data = 4096;
+    params.initial_max_stream_data_bidi_local = 1024;
+    params.initial_max_stream_data_bidi_remote = 2048;
+    params.initial_max_stream_data_uni = 512;
+    params.initial_max_streams_bidi = 2;
+    params.initial_max_streams_uni = 1;
+
+    auto applied = conn.apply_peer_transport_params(params);
+
+    ASSERT_TRUE(applied.has_value());
+    EXPECT_TRUE(conn.peer_transport_params_received());
+    EXPECT_EQ(conn.peer_transport().params.ack_delay_exponent, 7U);
+    EXPECT_EQ(conn.peer_transport().params.max_ack_delay, std::chrono::milliseconds(33));
+
+    auto first = conn.next_local_stream_id(fiber::quic::QuicStreamType::Bidirectional);
+    auto second = conn.next_local_stream_id(fiber::quic::QuicStreamType::Bidirectional);
+    auto third = conn.next_local_stream_id(fiber::quic::QuicStreamType::Bidirectional);
+
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+    EXPECT_FALSE(third.has_value());
+}
+
+TEST(QuicConnectionTest, RejectsPeerTransportParamsWithMismatchedInitialScid) {
+    fiber::quic::QuicConnection::Options options{};
+    options.remote_connection_id = cid_from({0x11, 0x22});
+    fiber::quic::QuicConnection conn(options);
+
+    fiber::quic::QuicTransportParams params{};
+    params.has_initial_source_connection_id = true;
+    params.initial_source_connection_id = cid_from({0x33, 0x44});
+    params.max_udp_payload_size = fiber::quic::kMinInitialDatagramSize;
+    params.active_connection_id_limit = 2;
+
+    auto applied = conn.apply_peer_transport_params(params);
+
+    EXPECT_FALSE(applied.has_value());
+    EXPECT_FALSE(conn.peer_transport_params_received());
 }

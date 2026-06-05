@@ -27,6 +27,7 @@ struct QuicPacketProcessResult {
     QuicPacketType packet_type = QuicPacketType::Initial;
     QuicEncryptionLevel level = QuicEncryptionLevel::Initial;
     std::uint64_t packet_number = 0;
+    std::uint32_t packet_count = 0;
     std::uint32_t frame_count = 0;
     bool ack_eliciting = false;
     bool send_ack = false;
@@ -39,6 +40,10 @@ struct QuicPacketProcessResult {
 [[nodiscard]] common::IoResult<QuicPacketProcessResult>
 quic_process_initial_datagram(QuicConnection &conn, const QuicReceivedDatagram &datagram, std::uint8_t *plaintext,
                               std::size_t plaintext_cap) noexcept;
+
+[[nodiscard]] common::IoResult<QuicPacketProcessResult>
+quic_process_datagram(QuicConnection &conn, const QuicReceivedDatagram &datagram, std::uint8_t *plaintext,
+                      std::size_t plaintext_cap, std::uint8_t short_dcid_len = kQuicConnectionIdLength) noexcept;
 
 } // namespace fiber::quic
 

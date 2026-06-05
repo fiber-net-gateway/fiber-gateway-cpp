@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 #include <openssl/aead.h>
 #include <openssl/aes.h>
@@ -21,9 +22,13 @@
 
 namespace fiber::quic {
 
+struct QuicTransportParams;
+
 inline constexpr std::size_t kQuicConnectionIdLength = kMaxConnectionIdLength;
 inline constexpr std::size_t kQuicPacketNumberSpaceCount = 3;
 inline constexpr std::size_t kQuicMaxAckRanges = 32;
+inline constexpr std::size_t kQuicMaxCryptoBuffered = 65536;
+inline constexpr std::size_t kQuicMaxCryptoBufferedSegments = 16;
 inline constexpr std::size_t kQuicInitialSecretLength = 32;
 inline constexpr std::size_t kQuicMaxSecretLength = 48;
 inline constexpr std::size_t kQuicMaxKeyLength = 32;
@@ -36,6 +41,12 @@ inline constexpr std::size_t kQuicHeaderProtectionSampleLength = 16;
 inline constexpr std::size_t kQuicHeaderProtectionMaskLength = 5;
 inline constexpr std::size_t kQuicMaxPaths = 3;
 inline constexpr std::size_t kQuicPathRetries = 3;
+inline constexpr std::size_t kQuicMaxUdpPayloadSize = 65527;
+inline constexpr std::size_t kQuicDefaultStreamBufferSize = 65536;
+inline constexpr std::uint64_t kQuicDefaultMaxBidirectionalStreams = 128;
+inline constexpr std::uint64_t kQuicDefaultMaxUnidirectionalStreams = 32;
+inline constexpr std::uint64_t kQuicDefaultInitialMaxData =
+        (kQuicDefaultMaxBidirectionalStreams + kQuicDefaultMaxUnidirectionalStreams) * kQuicDefaultStreamBufferSize;
 
 enum class QuicConnectionRole : std::uint8_t {
     Client,
@@ -131,6 +142,38 @@ struct QuicPacketNumberSpace {
 
 struct QuicPacketNumberSpaceSnapshot {
     std::uint64_t next_packet_number = 0;
+};
+
+struct QuicCryptoBufferedSegment {
+    std::unique_ptr<std::uint8_t[]> data{};
+    std::uint64_t offset = 0;
+    std::size_t len = 0;
+    bool used = false;
+};
+
+struct QuicCryptoRecvBuffer {
+    std::uint64_t next_offset = 0;
+    std::array<QuicCryptoBufferedSegment, kQuicMaxCryptoBufferedSegments> segments{};
+};
+
+struct QuicTransportSettings {
+    std::chrono::milliseconds max_idle_timeout = std::chrono::seconds(30);
+    std::size_t max_udp_payload_size = kQuicMaxUdpPayloadSize;
+    std::uint64_t initial_max_data = kQuicDefaultInitialMaxData;
+    std::uint64_t initial_max_stream_data_bidi_local = kQuicDefaultStreamBufferSize;
+    std::uint64_t initial_max_stream_data_bidi_remote = kQuicDefaultStreamBufferSize;
+    std::uint64_t initial_max_stream_data_uni = kQuicDefaultStreamBufferSize;
+    std::uint64_t initial_max_streams_bidi = kQuicDefaultMaxBidirectionalStreams;
+    std::uint64_t initial_max_streams_uni = kQuicDefaultMaxUnidirectionalStreams;
+    std::uint64_t ack_delay_exponent = 3;
+    std::chrono::milliseconds max_ack_delay{25};
+    std::uint64_t active_connection_id_limit = 2;
+    bool disable_active_migration = false;
+};
+
+struct QuicPeerTransportState {
+    QuicTransportSettings params{};
+    bool received = false;
 };
 
 enum class QuicCryptoSuite : std::uint8_t {
@@ -249,11 +292,11 @@ public:
         QuicConnectionId original_destination_connection_id{};
         QuicConnectionId local_connection_id{};
         QuicConnectionId remote_connection_id{};
-        std::chrono::milliseconds idle_timeout = std::chrono::seconds(30);
-        std::uint64_t max_peer_bidirectional_streams = 128;
-        std::uint64_t max_peer_unidirectional_streams = 32;
-        std::uint64_t max_local_bidirectional_streams = 128;
-        std::uint64_t max_local_unidirectional_streams = 32;
+        QuicTransportSettings transport{};
+        std::uint64_t max_peer_bidirectional_streams = kQuicDefaultMaxBidirectionalStreams;
+        std::uint64_t max_peer_unidirectional_streams = kQuicDefaultMaxUnidirectionalStreams;
+        std::uint64_t max_local_bidirectional_streams = kQuicDefaultMaxBidirectionalStreams;
+        std::uint64_t max_local_unidirectional_streams = kQuicDefaultMaxUnidirectionalStreams;
     };
 
     explicit QuicConnection(const Options &options) noexcept;
@@ -322,6 +365,12 @@ public:
     [[nodiscard]] QuicTlsSession &tls() noexcept { return tls_; }
     [[nodiscard]] const QuicTlsSession &tls() const noexcept { return tls_; }
     common::IoResult<void> init_initial_crypto(const QuicConnectionId &original_dcid) noexcept;
+    common::IoResult<void> apply_peer_transport_params(const QuicTransportParams &params) noexcept;
+    [[nodiscard]] const QuicTransportSettings &local_transport() const noexcept { return options_.transport; }
+    [[nodiscard]] const QuicPeerTransportState &peer_transport() const noexcept { return peer_transport_; }
+    [[nodiscard]] bool peer_transport_params_received() const noexcept { return peer_transport_.received; }
+    [[nodiscard]] QuicCryptoRecvBuffer &crypto_recv_buffer(QuicEncryptionLevel level) noexcept;
+    [[nodiscard]] const QuicCryptoRecvBuffer &crypto_recv_buffer(QuicEncryptionLevel level) const noexcept;
 
     EndpointIndex endpoint_index{};
     ConnectionIdIndex original_dcid_index{};
@@ -345,6 +394,8 @@ private:
     QuicRttState rtt_{};
     std::uint64_t reset_packet_number_ = 0;
     QuicCryptoState crypto_{};
+    QuicPeerTransportState peer_transport_{};
+    std::array<QuicCryptoRecvBuffer, kQuicPacketNumberSpaceCount> crypto_recv_buffers_{};
     QuicTlsSession tls_{};
     std::array<QuicPath, kQuicMaxPaths> paths_{};
     QuicPath *active_path_ = nullptr;

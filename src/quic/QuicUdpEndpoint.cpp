@@ -117,6 +117,7 @@ enum class QuicSplitFrameResult : std::uint8_t {
     }
 
     *remainder = frame;
+    quic_frame_retain_data(*remainder);
     remainder->queue_hook = {};
     remainder->connection_owned = true;
     remainder->encoded_len = 0;
@@ -470,6 +471,11 @@ common::IoResult<QuicConnection *> QuicUdpEndpoint::create_connection(const Quic
     conn_options.original_destination_connection_id = packet.dcid;
     conn_options.local_connection_id = local_connection_id;
     conn_options.remote_connection_id = packet.scid;
+    conn_options.transport = options_.transport;
+    conn_options.transport.max_ack_delay = options_.max_ack_delay;
+    conn_options.transport.ack_delay_exponent = options_.ack_delay_exponent;
+    conn_options.max_peer_bidirectional_streams = options_.transport.initial_max_streams_bidi;
+    conn_options.max_peer_unidirectional_streams = options_.transport.initial_max_streams_uni;
 
     auto *connection = new (std::nothrow) QuicConnection(conn_options);
     if (connection == nullptr) {
@@ -540,8 +546,8 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
         created = true;
     }
 
-    auto result = quic_process_initial_datagram(*connection, datagram, plaintext_buffer_.get(),
-                                                options_.plaintext_buffer_size);
+    auto result = quic_process_datagram(*connection, datagram, plaintext_buffer_.get(), options_.plaintext_buffer_size,
+                                        static_cast<std::uint8_t>(kQuicConnectionIdLength));
     if (!result) {
         ++dropped_datagram_count_;
         if (created) {
