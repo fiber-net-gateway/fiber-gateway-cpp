@@ -6,6 +6,7 @@
 
 #include "QuicCrypto.h"
 #include "QuicProtocol.h"
+#include "QuicTransportParamsCodec.h"
 
 namespace fiber::quic {
 
@@ -98,6 +99,7 @@ QuicPacketNumberSpace::~QuicPacketNumberSpace() {
             QuicFrame *next = queue.next_of(*frame);
             queue.erase(*frame);
             if (frame->connection_owned) {
+                quic_frame_release_data(*frame);
                 delete frame;
             }
             frame = next;
@@ -132,6 +134,7 @@ QuicFrame *QuicPacketNumberSpace::alloc_frame() noexcept {
     QuicFrame *frame = free_frames.front();
     if (frame != nullptr) {
         free_frames.erase(*frame);
+        quic_frame_release_data(*frame);
         *frame = QuicFrame{};
         frame->connection_owned = true;
         return frame;
@@ -152,6 +155,7 @@ void QuicPacketNumberSpace::release_frame(QuicFrame &frame) noexcept {
         return;
     }
 
+    quic_frame_release_data(frame);
     frame = QuicFrame{};
     frame.connection_owned = true;
     free_frames.push_front(frame);
@@ -280,6 +284,57 @@ const QuicPacketNumberSpace &QuicConnection::packet_number_space(QuicEncryptionL
 
 common::IoResult<void> QuicConnection::init_initial_crypto(const QuicConnectionId &original_dcid) noexcept {
     return quic_init_initial_crypto(crypto_, options_.role, original_dcid);
+}
+
+common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTransportParams &params) noexcept {
+    if (peer_transport_.received) {
+        return std::unexpected(common::IoErr::Already);
+    }
+    if (!params.has_initial_source_connection_id) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (params.initial_source_connection_id.size() != options_.remote_connection_id.size() ||
+        (params.initial_source_connection_id.size() != 0 &&
+         std::memcmp(params.initial_source_connection_id.data(), options_.remote_connection_id.data(),
+                     params.initial_source_connection_id.size()) != 0)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (params.max_udp_payload_size < kMinInitialDatagramSize || params.max_udp_payload_size > kQuicMaxUdpPayloadSize ||
+        params.active_connection_id_limit < 2 || params.ack_delay_exponent > 20 || params.max_ack_delay >= 16384) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    QuicTransportSettings applied{};
+    applied.max_idle_timeout = std::chrono::milliseconds(params.max_idle_timeout);
+    applied.max_udp_payload_size = static_cast<std::size_t>(params.max_udp_payload_size);
+    applied.initial_max_data = params.initial_max_data;
+    applied.initial_max_stream_data_bidi_local = params.initial_max_stream_data_bidi_local;
+    applied.initial_max_stream_data_bidi_remote = params.initial_max_stream_data_bidi_remote;
+    applied.initial_max_stream_data_uni = params.initial_max_stream_data_uni;
+    applied.initial_max_streams_bidi = params.initial_max_streams_bidi;
+    applied.initial_max_streams_uni = params.initial_max_streams_uni;
+    applied.ack_delay_exponent = params.ack_delay_exponent;
+    applied.max_ack_delay = std::chrono::milliseconds(params.max_ack_delay);
+    applied.active_connection_id_limit = params.active_connection_id_limit;
+    applied.disable_active_migration = params.disable_active_migration;
+
+    peer_transport_.params = applied;
+    peer_transport_.received = true;
+    options_.max_local_bidirectional_streams = params.initial_max_streams_bidi;
+    options_.max_local_unidirectional_streams = params.initial_max_streams_uni;
+    if (params.max_idle_timeout > 0 &&
+        std::chrono::milliseconds(params.max_idle_timeout) < options_.transport.max_idle_timeout) {
+        options_.transport.max_idle_timeout = std::chrono::milliseconds(params.max_idle_timeout);
+    }
+    return {};
+}
+
+QuicCryptoRecvBuffer &QuicConnection::crypto_recv_buffer(QuicEncryptionLevel level) noexcept {
+    return crypto_recv_buffers_[packet_number_space_index(level)];
+}
+
+const QuicCryptoRecvBuffer &QuicConnection::crypto_recv_buffer(QuicEncryptionLevel level) const noexcept {
+    return crypto_recv_buffers_[packet_number_space_index(level)];
 }
 
 void QuicConnection::reset_congestion_for_path(QuicTime now) noexcept {

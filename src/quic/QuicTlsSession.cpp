@@ -100,10 +100,64 @@ int set_write_secret(SSL *ssl, enum ssl_encryption_level_t level, const SSL_CIPH
 
 int add_handshake_data(SSL *ssl, enum ssl_encryption_level_t level, const std::uint8_t *data,
                        std::size_t len) noexcept {
-    if (connection_from_ssl(ssl) == nullptr || (data == nullptr && len != 0)) {
+    QuicConnection *connection = connection_from_ssl(ssl);
+    if (connection == nullptr || (data == nullptr && len != 0)) {
         return 0;
     }
-    (void) level;
+
+    if (!connection->peer_transport_params_received()) {
+        const std::uint8_t *peer_params = nullptr;
+        std::size_t peer_params_len = 0;
+        SSL_get_peer_quic_transport_params(ssl, &peer_params, &peer_params_len);
+        if (peer_params == nullptr || peer_params_len == 0) {
+            connection->close(QuicErrorCode::TransportParameterError);
+            return 0;
+        }
+
+        QuicTransportParams params{};
+        QuicReadCursor reader(peer_params, peer_params_len);
+        auto parsed = quic_parse_transport_params(QuicTransportParamOwner::Client, reader, params);
+        if (!parsed) {
+            connection->close(QuicErrorCode::TransportParameterError);
+            return 0;
+        }
+        auto applied = connection->apply_peer_transport_params(params);
+        if (!applied) {
+            connection->close(QuicErrorCode::TransportParameterError);
+            return 0;
+        }
+    }
+
+    if (len == 0) {
+        return 1;
+    }
+
+    auto quic_level = quic_level_from_ssl(level);
+    if (!quic_level) {
+        return 0;
+    }
+
+    QuicPacketNumberSpace &space = connection->packet_number_space(*quic_level);
+    QuicFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        connection->close(QuicErrorCode::InternalError);
+        return 0;
+    }
+
+    frame->type = QuicFrameType::Crypto;
+    frame->level = *quic_level;
+    frame->u.crypto.offset = space.crypto_sent;
+    frame->u.crypto.length = len;
+    frame->ack_eliciting = true;
+    auto copied = quic_frame_set_owned_data(*frame, data, len);
+    if (!copied) {
+        space.release_frame(*frame);
+        connection->close(QuicErrorCode::InternalError);
+        return 0;
+    }
+
+    space.crypto_sent += len;
+    space.pending_frames.push_back(*frame);
     return 1;
 }
 
@@ -128,15 +182,20 @@ const SSL_QUIC_METHOD kQuicTlsMethod{
 
 [[nodiscard]] common::IoResult<std::size_t>
 create_server_transport_params(QuicConnection &connection, std::uint8_t *out, std::size_t out_cap) noexcept {
+    const QuicTransportSettings &settings = connection.local_transport();
     QuicTransportParams params{};
-    params.max_idle_timeout = 30000;
-    params.initial_max_data = 0;
-    params.initial_max_stream_data_bidi_local = 0;
-    params.initial_max_stream_data_bidi_remote = 0;
-    params.initial_max_stream_data_uni = 0;
-    params.initial_max_streams_bidi = 0;
-    params.initial_max_streams_uni = 0;
-    params.active_connection_id_limit = 2;
+    params.max_idle_timeout = static_cast<std::uint64_t>(settings.max_idle_timeout.count());
+    params.max_udp_payload_size = settings.max_udp_payload_size;
+    params.initial_max_data = settings.initial_max_data;
+    params.initial_max_stream_data_bidi_local = settings.initial_max_stream_data_bidi_local;
+    params.initial_max_stream_data_bidi_remote = settings.initial_max_stream_data_bidi_remote;
+    params.initial_max_stream_data_uni = settings.initial_max_stream_data_uni;
+    params.initial_max_streams_bidi = settings.initial_max_streams_bidi;
+    params.initial_max_streams_uni = settings.initial_max_streams_uni;
+    params.ack_delay_exponent = settings.ack_delay_exponent;
+    params.max_ack_delay = static_cast<std::uint64_t>(settings.max_ack_delay.count());
+    params.active_connection_id_limit = settings.active_connection_id_limit;
+    params.disable_active_migration = settings.disable_active_migration;
     params.has_original_destination_connection_id = true;
     params.original_destination_connection_id = connection.original_destination_connection_id();
     params.has_initial_source_connection_id = true;

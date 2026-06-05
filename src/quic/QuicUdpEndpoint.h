@@ -44,6 +44,7 @@ public:
         net::TlsServerContext *tls_context = nullptr;
         net::UdpBindOptions udp{};
         QuicSendScheduler::Options send{};
+        QuicTransportSettings transport{};
         std::chrono::milliseconds max_ack_delay{25};
         std::uint64_t ack_delay_exponent = 3;
     };

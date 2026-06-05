@@ -8,6 +8,7 @@
 
 #include "net/IpAddress.h"
 #include "quic/QuicCrypto.h"
+#include "quic/QuicPacketCodec.h"
 #include "quic/QuicPacketProcessor.h"
 #include "quic/QuicTransportCodec.h"
 
@@ -255,4 +256,57 @@ TEST(QuicPacketProcessorTest, CreatesProbePathForDifferentRemoteAddress) {
     EXPECT_EQ(result->path, conn.active_path());
     EXPECT_EQ(conn.remote_addr().port(), 4434);
     EXPECT_EQ(conn.path_count(), 1U);
+}
+
+TEST(QuicPacketProcessorTest, ProcessesApplicationPingPacket) {
+    constexpr fiber::quic::QuicCryptoSuite suite = fiber::quic::QuicCryptoSuite::Aes128GcmSha256;
+    std::array<std::uint8_t, fiber::quic::kQuicMaxSecretLength> secret{};
+    for (std::size_t i = 0; i < 32; ++i) {
+        secret[i] = static_cast<std::uint8_t>(i + 1);
+    }
+
+    const auto server_cid = cid_from_hex("0102030405060708");
+    const auto client_cid = cid_from_hex("1112131415161718");
+
+    fiber::quic::QuicConnection::Options client_options{};
+    client_options.role = fiber::quic::QuicConnectionRole::Client;
+    fiber::quic::QuicConnection client(client_options);
+    ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(client.crypto(), fiber::quic::QuicEncryptionLevel::Application,
+                                                        true, suite, secret.data(), 32));
+
+    fiber::quic::QuicConnection::Options server_options{};
+    server_options.role = fiber::quic::QuicConnectionRole::Server;
+    server_options.local_addr = loopback(8443);
+    server_options.remote_addr = loopback(4433);
+    server_options.local_connection_id = server_cid;
+    server_options.remote_connection_id = client_cid;
+    fiber::quic::QuicConnection server(server_options);
+    ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(server.crypto(), fiber::quic::QuicEncryptionLevel::Application,
+                                                        false, suite, secret.data(), 32));
+
+    fiber::quic::QuicFrame frame{};
+    frame.type = fiber::quic::QuicFrameType::Ping;
+
+    std::array<std::uint8_t, 256> datagram{};
+    fiber::quic::QuicPacketEncodeSpec spec{};
+    spec.level = fiber::quic::QuicEncryptionLevel::Application;
+    spec.dcid = server_cid;
+    spec.frames = &frame;
+    spec.frame_count = 1;
+    auto encoded = fiber::quic::quic_encode_packet(client, spec, datagram.data(), datagram.size());
+    ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
+
+    std::array<std::uint8_t, 256> plaintext{};
+    auto received = received_datagram(datagram.data(), encoded->packet_len);
+    auto result = fiber::quic::quic_process_datagram(server, received, plaintext.data(), plaintext.size(),
+                                                     static_cast<std::uint8_t>(server_cid.size()));
+
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_EQ(result->packet_type, fiber::quic::QuicPacketType::Short);
+    EXPECT_EQ(result->level, fiber::quic::QuicEncryptionLevel::Application);
+    EXPECT_EQ(result->packet_count, 1U);
+    EXPECT_EQ(result->packet_number, 0U);
+    EXPECT_TRUE(result->ack_eliciting);
+    EXPECT_TRUE(result->send_ack);
+    EXPECT_EQ(server.packet_number_space(fiber::quic::QuicEncryptionLevel::Application).pending_ack, 0U);
 }
