@@ -46,6 +46,7 @@ void quic_restore_packet_number(QuicPacketNumberSpace &space, QuicPacketNumberSp
 [[nodiscard]] common::IoResult<QuicFrameParseResult> quic_parse_frame_for_receiver(QuicConnectionRole receiver_role,
                                                                                    QuicEncryptionLevel level,
                                                                                    QuicReadCursor &payload) noexcept;
+[[nodiscard]] common::IoResult<std::size_t> quic_frame_encoded_len(QuicFrame &frame) noexcept;
 [[nodiscard]] common::IoResult<std::size_t> quic_create_frame(QuicWriteCursor *out, QuicFrame &frame) noexcept;
 
 } // namespace fiber::quic

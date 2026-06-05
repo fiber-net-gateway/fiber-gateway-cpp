@@ -40,7 +40,6 @@ struct QuicSendPacketRecord {
     std::size_t length = 0;
     QuicPacketNumberSpaceSnapshot packet_number_snapshot{};
     std::uint64_t packet_number = 0;
-    QuicFrame ack_frame{};
     std::size_t frame_count = 0;
     bool sends_ack = false;
     bool ack_eliciting = false;

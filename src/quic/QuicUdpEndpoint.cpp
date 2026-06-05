@@ -57,10 +57,13 @@ void restore_sending_frames(QuicPacketNumberSpace &space) noexcept {
     }
 }
 
-[[nodiscard]] bool fill_ack_frame(const QuicPacketNumberSpace &space, QuicFrame &frame, QuicTime now,
-                                  std::uint64_t ack_delay_exponent) noexcept {
+[[nodiscard]] common::IoResult<void> generate_ack_frame_into_pending(QuicPacketNumberSpace &space, QuicTime now,
+                                                                     std::uint64_t ack_delay_exponent) noexcept {
     if (!space.send_ack || space.pending_ack == kUnsetPacketNumber) {
-        return false;
+        return {};
+    }
+    if (space.ack_frame.queue_hook.linked()) {
+        return {};
     }
 
     const std::uint64_t largest = space.largest_received_packet_number != kUnsetPacketNumber
@@ -76,14 +79,20 @@ void restore_sending_frames(QuicPacketNumberSpace &space) noexcept {
         }
     }
 
-    frame = QuicFrame{};
-    frame.type = QuicFrameType::Ack;
-    frame.level = space.level;
-    frame.u.ack.largest = largest;
-    frame.u.ack.delay = ack_delay_us;
-    frame.u.ack.range_count = 0;
-    frame.u.ack.first_range = 0;
-    return true;
+    space.ack_frame = QuicFrame{};
+    space.ack_frame.type = QuicFrameType::Ack;
+    space.ack_frame.level = space.level;
+    space.ack_frame.u.ack.largest = largest;
+    space.ack_frame.u.ack.delay = ack_delay_us;
+    space.ack_frame.u.ack.range_count = 0;
+    space.ack_frame.u.ack.first_range = 0;
+
+    auto frame_len = quic_frame_encoded_len(space.ack_frame);
+    if (!frame_len) {
+        return std::unexpected(frame_len.error());
+    }
+    space.pending_frames.push_front(space.ack_frame);
+    return {};
 }
 
 } // namespace
@@ -535,23 +544,17 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
             return QuicBuildSendResult{QuicBuildSendStatus::Delayed, ack_delay_remaining(space, now)};
         }
 
+        auto generated_ack = generate_ack_frame_into_pending(space, now, options_.ack_delay_exponent);
+        if (!generated_ack) {
+            return std::unexpected(generated_ack.error());
+        }
+
         QuicSendPacketRecord &packet = datagram.packets[datagram.packet_count];
         packet = QuicSendPacketRecord{};
         packet.level = level;
         packet.packet_number_snapshot = quic_preserve_packet_number(space);
 
         std::size_t estimated_payload_len = 0;
-        if (fill_ack_frame(space, packet.ack_frame, now, options_.ack_delay_exponent)) {
-            auto frame_len = quic_create_frame(nullptr, packet.ack_frame);
-            if (!frame_len) {
-                quic_restore_packet_number(space, packet.packet_number_snapshot);
-                packet = QuicSendPacketRecord{};
-                return std::unexpected(frame_len.error());
-            }
-            estimated_payload_len += *frame_len;
-            packet.sends_ack = true;
-        }
-
         QuicFrame *source = space.pending_frames.front();
         while (source != nullptr) {
             QuicFrame *next = space.pending_frames.next_of(*source);
@@ -559,7 +562,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
                 break;
             }
 
-            auto frame_len = quic_create_frame(nullptr, *source);
+            auto frame_len = quic_frame_encoded_len(*source);
             if (!frame_len) {
                 restore_sending_frames(space);
                 quic_restore_packet_number(space, packet.packet_number_snapshot);
@@ -567,7 +570,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
                 return std::unexpected(frame_len.error());
             }
 
-            if ((packet.sends_ack || packet.frame_count != 0) &&
+            if (packet.frame_count != 0 &&
                 estimated_payload_len + *frame_len + kAeadTagLength + kPacketEncodingReserve >
                         datagram.capacity - datagram.length) {
                 break;
@@ -575,13 +578,14 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
 
             space.pending_frames.erase(*source);
             space.sending_frames.push_back(*source);
+            packet.sends_ack = packet.sends_ack || source == &space.ack_frame;
             estimated_payload_len += *frame_len;
             ++packet.frame_count;
 
             source = next;
         }
 
-        if (!packet.sends_ack && packet.frame_count == 0) {
+        if (packet.frame_count == 0) {
             quic_restore_packet_number(space, packet.packet_number_snapshot);
             packet = QuicSendPacketRecord{};
             if (!space.pending_frames.empty()) {
@@ -609,7 +613,6 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         spec.level = level;
         spec.dcid = path->remote_connection_id;
         spec.scid = connection.local_connection_id();
-        spec.ack_frame = packet.sends_ack ? &packet.ack_frame : nullptr;
         spec.frame_queue = &space.sending_frames;
         spec.min_packet_len = min_packet_len;
 

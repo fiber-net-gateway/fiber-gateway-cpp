@@ -1302,4 +1302,17 @@ common::IoResult<std::size_t> quic_create_frame(QuicWriteCursor *out, QuicFrame 
     return std::unexpected(common::IoErr::NotSupported);
 }
 
+common::IoResult<std::size_t> quic_frame_encoded_len(QuicFrame &frame) noexcept {
+    if (frame.encoded_len != 0) {
+        return frame.encoded_len;
+    }
+
+    auto frame_len = quic_create_frame(nullptr, frame);
+    if (!frame_len) {
+        return std::unexpected(frame_len.error());
+    }
+    frame.encoded_len = *frame_len;
+    return frame.encoded_len;
+}
+
 } // namespace fiber::quic
