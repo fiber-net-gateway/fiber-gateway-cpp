@@ -20,8 +20,7 @@ namespace fiber::quic {
 class QuicUdpEndpoint;
 
 inline constexpr std::size_t kQuicSendDefaultBufferSize = 65536;
-inline constexpr std::size_t kQuicSendMaxFramesPerDatagram = 8;
-inline constexpr std::size_t kQuicSendMaxPacketsPerDatagram = 3;
+inline constexpr std::size_t kQuicSendLevelCount = 3;
 
 enum class QuicBuildSendStatus : std::uint8_t {
     Encoded,
@@ -41,8 +40,7 @@ struct QuicSendPacketRecord {
     std::size_t length = 0;
     QuicPacketNumberSpaceSnapshot packet_number_snapshot{};
     std::uint64_t packet_number = 0;
-    QuicFrame frames[kQuicSendMaxFramesPerDatagram]{};
-    QuicFrame *source_frames[kQuicSendMaxFramesPerDatagram]{};
+    QuicFrame ack_frame{};
     std::size_t frame_count = 0;
     bool sends_ack = false;
     bool ack_eliciting = false;
@@ -54,7 +52,7 @@ struct QuicSendDatagram {
     std::size_t length = 0;
     QuicPath *path = nullptr;
     net::UdpPacketSendSpec spec{};
-    QuicSendPacketRecord packets[kQuicSendMaxPacketsPerDatagram]{};
+    QuicSendPacketRecord packets[kQuicSendLevelCount]{};
     std::size_t packet_count = 0;
 };
 

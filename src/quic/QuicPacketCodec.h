@@ -16,6 +16,8 @@ struct QuicPacketEncodeSpec {
     QuicConnectionId dcid{};
     QuicConnectionId scid{};
     QuicSlice token{};
+    QuicFrame *ack_frame = nullptr;
+    QuicFrameQueue *frame_queue = nullptr;
     QuicFrame *frames = nullptr;
     std::size_t frame_count = 0;
     std::size_t min_packet_len = 0;

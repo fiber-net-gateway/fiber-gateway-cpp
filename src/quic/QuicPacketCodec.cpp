@@ -18,14 +18,40 @@ inline constexpr std::uint8_t kShortDcidOffset = 1;
 inline constexpr std::uint8_t kLongReservedBitsMask = 0x0c;
 inline constexpr std::uint8_t kShortReservedBitsMask = 0x18;
 
-[[nodiscard]] common::IoResult<std::size_t> encoded_frames_len(QuicFrame *frames, std::size_t count,
+[[nodiscard]] bool has_frames(const QuicPacketEncodeSpec &spec) noexcept {
+    return spec.ack_frame != nullptr || (spec.frame_queue != nullptr && !spec.frame_queue->empty()) ||
+           spec.frame_count != 0;
+}
+
+[[nodiscard]] common::IoResult<std::size_t> encoded_frames_len(const QuicPacketEncodeSpec &spec,
                                                                bool &ack_eliciting) noexcept {
+    QuicFrame *frames = spec.frames;
+    const std::size_t count = spec.frame_count;
     if (frames == nullptr && count != 0) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
     std::size_t len = 0;
     ack_eliciting = false;
+    if (spec.ack_frame != nullptr) {
+        auto frame_len = quic_create_frame(nullptr, *spec.ack_frame);
+        if (!frame_len) {
+            return std::unexpected(frame_len.error());
+        }
+        len += *frame_len;
+        ack_eliciting = ack_eliciting || spec.ack_frame->ack_eliciting;
+    }
+    if (spec.frame_queue != nullptr) {
+        for (QuicFrame *frame = spec.frame_queue->front(); frame != nullptr;
+             frame = spec.frame_queue->next_of(*frame)) {
+            auto frame_len = quic_create_frame(nullptr, *frame);
+            if (!frame_len) {
+                return std::unexpected(frame_len.error());
+            }
+            len += *frame_len;
+            ack_eliciting = ack_eliciting || frame->ack_eliciting;
+        }
+    }
     for (std::size_t i = 0; i < count; ++i) {
         auto frame_len = quic_create_frame(nullptr, frames[i]);
         if (!frame_len) {
@@ -37,10 +63,26 @@ inline constexpr std::uint8_t kShortReservedBitsMask = 0x18;
     return len;
 }
 
-[[nodiscard]] common::IoResult<void> encode_frames(QuicWriteCursor &out, QuicFrame *frames,
-                                                   std::size_t count) noexcept {
+[[nodiscard]] common::IoResult<void> encode_frames(QuicWriteCursor &out, const QuicPacketEncodeSpec &spec) noexcept {
+    QuicFrame *frames = spec.frames;
+    const std::size_t count = spec.frame_count;
     if (frames == nullptr && count != 0) {
         return std::unexpected(common::IoErr::Invalid);
+    }
+    if (spec.ack_frame != nullptr) {
+        auto written = quic_create_frame(&out, *spec.ack_frame);
+        if (!written) {
+            return std::unexpected(written.error());
+        }
+    }
+    if (spec.frame_queue != nullptr) {
+        for (QuicFrame *frame = spec.frame_queue->front(); frame != nullptr;
+             frame = spec.frame_queue->next_of(*frame)) {
+            auto written = quic_create_frame(&out, *frame);
+            if (!written) {
+                return std::unexpected(written.error());
+            }
+        }
     }
     for (std::size_t i = 0; i < count; ++i) {
         auto written = quic_create_frame(&out, frames[i]);
@@ -169,7 +211,7 @@ common::IoResult<QuicConnectionId> quic_get_packet_dcid(const std::uint8_t *data
 common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &connection,
                                                             const QuicPacketEncodeSpec &spec, std::uint8_t *out,
                                                             std::size_t out_cap) noexcept {
-    if (out == nullptr || spec.frame_count == 0) {
+    if (out == nullptr || !has_frames(spec)) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -179,7 +221,7 @@ common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &conn
     }
 
     bool ack_eliciting = false;
-    auto payload_len = encoded_frames_len(spec.frames, spec.frame_count, ack_eliciting);
+    auto payload_len = encoded_frames_len(spec, ack_eliciting);
     if (!payload_len) {
         return std::unexpected(payload_len.error());
     }
@@ -219,7 +261,7 @@ common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &conn
     }
 
     QuicWriteCursor payload_writer(plaintext.data(), *payload_len);
-    auto encoded = encode_frames(payload_writer, spec.frames, spec.frame_count);
+    auto encoded = encode_frames(payload_writer, spec);
     if (!encoded) {
         quic_restore_packet_number(space, pn_snapshot);
         return std::unexpected(encoded.error());

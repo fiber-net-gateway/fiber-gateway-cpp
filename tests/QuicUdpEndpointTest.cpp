@@ -39,6 +39,13 @@ struct CoalescedPacketSummary {
     bool second_ack_eliciting = false;
 };
 
+struct ManyFramePacketSummary {
+    std::uint32_t decoded_frame_count = 0;
+    std::size_t sent_frame_count = 0;
+    bool pending_empty = false;
+    bool sending_empty = false;
+};
+
 struct TwoEndpointResults {
     EndpointResult first;
     EndpointResult second;
@@ -448,6 +455,98 @@ recv_coalesced_initial_handshake(fiber::event::EventLoop *loop, fiber::quic::Qui
     client.close();
 }
 
+DetachedTask
+recv_handshake_packet_with_many_frames(fiber::event::EventLoop *loop, fiber::quic::QuicUdpEndpoint *endpoint,
+                                       std::promise<fiber::common::IoResult<ManyFramePacketSummary>> *done_promise) {
+    fiber::net::UdpSocket client(*loop);
+    auto bound = client.bind(loopback(0), {});
+    if (!bound) {
+        done_promise->set_value(std::unexpected(bound.error()));
+        co_return;
+    }
+
+    const auto server_cid = cid_from_hex("2223242526272829");
+    const auto client_cid = cid_from_hex("3132333435363738");
+    constexpr fiber::quic::QuicCryptoSuite suite = fiber::quic::QuicCryptoSuite::Aes128GcmSha256;
+    std::array<std::uint8_t, fiber::quic::kQuicMaxSecretLength> handshake_secret{};
+    for (std::size_t i = 0; i < 32; ++i) {
+        handshake_secret[i] = static_cast<std::uint8_t>(0x40U + i);
+    }
+
+    fiber::quic::QuicConnection::Options server_options{};
+    server_options.role = fiber::quic::QuicConnectionRole::Server;
+    server_options.local_addr = endpoint->local_addr();
+    server_options.remote_addr = client.local_addr();
+    server_options.local_connection_id = server_cid;
+    server_options.remote_connection_id = client_cid;
+    fiber::quic::QuicConnection server(server_options);
+    auto *path = server.active_path();
+    if (path == nullptr) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+        co_return;
+    }
+    path->validated = true;
+
+    auto server_secret = fiber::quic::quic_set_encryption_secret(
+            server.crypto(), fiber::quic::QuicEncryptionLevel::Handshake, true, suite, handshake_secret.data(), 32);
+    if (!server_secret) {
+        done_promise->set_value(std::unexpected(server_secret.error()));
+        co_return;
+    }
+
+    std::array<fiber::quic::QuicFrame, 12> pings{};
+    auto &space = server.packet_number_space(fiber::quic::QuicEncryptionLevel::Handshake);
+    for (fiber::quic::QuicFrame &frame: pings) {
+        frame.type = fiber::quic::QuicFrameType::Ping;
+        frame.level = fiber::quic::QuicEncryptionLevel::Handshake;
+        frame.ack_eliciting = true;
+        space.pending_frames.push_back(frame);
+    }
+
+    fiber::quic::QuicConnection::Options client_options{};
+    client_options.role = fiber::quic::QuicConnectionRole::Client;
+    fiber::quic::QuicConnection peer(client_options);
+    auto peer_secret = fiber::quic::quic_set_encryption_secret(
+            peer.crypto(), fiber::quic::QuicEncryptionLevel::Handshake, false, suite, handshake_secret.data(), 32);
+    if (!peer_secret) {
+        done_promise->set_value(std::unexpected(peer_secret.error()));
+        co_return;
+    }
+
+    endpoint->schedule_send(server);
+
+    auto readable = co_await client.wait_event(fiber::event::IoEvent::Read, std::chrono::milliseconds{500});
+    if (!readable) {
+        done_promise->set_value(std::unexpected(readable.error()));
+        co_return;
+    }
+
+    std::array<std::uint8_t, 1400> response{};
+    auto received = client.try_recv_from(response.data(), response.size());
+    if (!received) {
+        done_promise->set_value(std::unexpected(received.error()));
+        co_return;
+    }
+
+    std::array<std::uint8_t, 256> plaintext{};
+    auto decoded = fiber::quic::quic_decode_packet(peer, response.data(), received->size, 0, plaintext.data(),
+                                                   plaintext.size());
+    if (!decoded) {
+        done_promise->set_value(std::unexpected(decoded.error()));
+        co_return;
+    }
+
+    std::size_t sent_count = 0;
+    for (fiber::quic::QuicFrame *frame = space.sent_frames.front(); frame != nullptr;
+         frame = space.sent_frames.next_of(*frame)) {
+        ++sent_count;
+    }
+
+    done_promise->set_value(ManyFramePacketSummary{decoded->frame_count, sent_count, space.pending_frames.empty(),
+                                                   space.sending_frames.empty()});
+    client.close();
+}
+
 EndpointResult recv_after_send(fiber::event::EventLoopGroup &group, fiber::quic::QuicUdpEndpoint &endpoint,
                                const std::uint8_t *data, std::size_t len) {
     std::promise<EndpointResult> recv_promise;
@@ -628,6 +727,35 @@ TEST(QuicUdpEndpointTest, CoalescesInitialAndHandshakePacketsIntoOneUdpDatagram)
     EXPECT_EQ(response->second_type, fiber::quic::QuicPacketType::Handshake);
     EXPECT_TRUE(response->first_ack_eliciting);
     EXPECT_TRUE(response->second_ack_eliciting);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, EncodesMoreThanEightFramesInOnePacket) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    std::promise<fiber::common::IoResult<ManyFramePacketSummary>> response_promise;
+    auto response_future = response_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        return recv_handshake_packet_with_many_frames(&group.at(0), &endpoint, &response_promise);
+    });
+
+    ASSERT_EQ(response_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto response = response_future.get();
+    ASSERT_TRUE(response.has_value()) << static_cast<int>(response.error());
+    EXPECT_GE(response->decoded_frame_count, 12U);
+    EXPECT_EQ(response->sent_frame_count, 12U);
+    EXPECT_TRUE(response->pending_empty);
+    EXPECT_TRUE(response->sending_empty);
 
     close_endpoint_on_loop(group, endpoint);
     group.stop();
