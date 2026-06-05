@@ -46,6 +46,23 @@ public:
         hook.in_list = true;
     }
 
+    void push_front(T &owner) noexcept {
+        IntrusiveListHook &hook = hook_of(owner);
+        if (hook.in_list) {
+            return;
+        }
+
+        hook.prev = nullptr;
+        hook.next = head_;
+        if (head_) {
+            head_->prev = &hook;
+        } else {
+            tail_ = &hook;
+        }
+        head_ = &hook;
+        hook.in_list = true;
+    }
+
     void erase(T &owner) noexcept {
         IntrusiveListHook &hook = hook_of(owner);
         if (!hook.in_list) {
