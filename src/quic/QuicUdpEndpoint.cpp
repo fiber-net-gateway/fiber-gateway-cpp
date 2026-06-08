@@ -202,8 +202,7 @@ enum class QuicSplitFrameResult : std::uint8_t {
 } // namespace
 
 common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Options &options) noexcept {
-    if (initialized_ || options.max_connections == 0 || options.read_buffer_size < kMinInitialDatagramSize ||
-        options.plaintext_buffer_size == 0) {
+    if (initialized_ || options.max_connections == 0) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -215,8 +214,8 @@ common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Optio
     rejected_connection_count_ = 0;
 
     socket_ = std::make_unique<net::UdpSocket>(loop);
-    read_buffer_ = std::make_unique<std::uint8_t[]>(options_.read_buffer_size);
-    plaintext_buffer_ = std::make_unique<std::uint8_t[]>(options_.plaintext_buffer_size);
+    read_buffer_ = std::make_unique<std::uint8_t[]>(kQuicUdpDefaultReadBufferSize);
+    plaintext_buffer_ = std::make_unique<std::uint8_t[]>(kQuicUdpDefaultPlaintextBufferSize);
     if (!socket_ || !read_buffer_ || !plaintext_buffer_) {
         close();
         return std::unexpected(common::IoErr::NoMem);
@@ -293,7 +292,7 @@ async::Task<common::IoResult<QuicUdpReceiveResult>> QuicUdpEndpoint::recv_once()
         co_return std::unexpected(common::IoErr::BadFd);
     }
 
-    auto recv = co_await socket_->recv_packet(read_buffer_.get(), options_.read_buffer_size);
+    auto recv = co_await socket_->recv_packet(read_buffer_.get(), kQuicUdpDefaultReadBufferSize);
     if (!recv) {
         co_return std::unexpected(recv.error());
     }
@@ -546,8 +545,9 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
         created = true;
     }
 
-    auto result = quic_process_datagram(*connection, datagram, plaintext_buffer_.get(), options_.plaintext_buffer_size,
-                                        static_cast<std::uint8_t>(kQuicConnectionIdLength));
+    auto result =
+            quic_process_datagram(*connection, datagram, plaintext_buffer_.get(), kQuicUdpDefaultPlaintextBufferSize,
+                                  static_cast<std::uint8_t>(kQuicConnectionIdLength));
     if (!result) {
         ++dropped_datagram_count_;
         if (created) {
