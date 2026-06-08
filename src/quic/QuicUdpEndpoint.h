@@ -39,8 +39,6 @@ public:
     struct Options {
         net::SocketAddress bind_addr{};
         std::size_t max_connections = 1024;
-        std::size_t read_buffer_size = kQuicUdpDefaultReadBufferSize;
-        std::size_t plaintext_buffer_size = kQuicUdpDefaultPlaintextBufferSize;
         net::TlsServerContext *tls_context = nullptr;
         net::UdpBindOptions udp{};
         QuicSendScheduler::Options send{};
