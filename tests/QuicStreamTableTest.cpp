@@ -25,12 +25,17 @@ std::array<std::uint64_t, 3> find_colliding_stream_ids(std::size_t bucket_count)
     return out;
 }
 
+fiber::quic::QuicStream::Lease make_stream(std::uint64_t stream_id, fiber::quic::QuicRecvExtentPool &pool) {
+    return fiber::quic::QuicStream::Lease::adopt(new fiber::quic::QuicStream(stream_id, pool));
+}
+
 } // namespace
 
 TEST(QuicStreamTest, ExposesStreamIdTypeAndSequence) {
-    fiber::quic::QuicStream client_bidi(0);
-    fiber::quic::QuicStream server_uni(3);
-    fiber::quic::QuicStream later_client_bidi(20);
+    fiber::quic::QuicRecvExtentPool pool;
+    fiber::quic::QuicStream client_bidi(0, pool);
+    fiber::quic::QuicStream server_uni(3, pool);
+    fiber::quic::QuicStream later_client_bidi(20, pool);
 
     EXPECT_EQ(client_bidi.stream_id(), 0U);
     EXPECT_EQ(client_bidi.sequence(), 0U);
@@ -58,16 +63,19 @@ TEST(QuicStreamTableTest, InsertsFindsAndRejectsDuplicateStreamIds) {
     fiber::quic::QuicStreamTable table;
     ASSERT_TRUE(table.init(4));
 
-    fiber::quic::QuicStream stream0(0);
-    fiber::quic::QuicStream stream4(4);
-    fiber::quic::QuicStream duplicate0(0);
+    fiber::quic::QuicRecvExtentPool pool;
+    auto stream0 = make_stream(0, pool);
+    auto stream4 = make_stream(4, pool);
+    auto duplicate0 = make_stream(0, pool);
+    auto *stream0_ptr = stream0.get();
+    auto *stream4_ptr = stream4.get();
 
-    EXPECT_TRUE(table.insert(stream0));
-    EXPECT_TRUE(table.insert(stream4));
-    EXPECT_FALSE(table.insert(duplicate0));
+    EXPECT_TRUE(table.insert(std::move(stream0)));
+    EXPECT_TRUE(table.insert(std::move(stream4)));
+    EXPECT_FALSE(table.insert(std::move(duplicate0)));
     EXPECT_EQ(table.size(), 2U);
-    EXPECT_EQ(table.find(0), &stream0);
-    EXPECT_EQ(table.find(4), &stream4);
+    EXPECT_EQ(table.find(0), stream0_ptr);
+    EXPECT_EQ(table.find(4), stream4_ptr);
     EXPECT_EQ(table.find(8), nullptr);
 }
 
@@ -75,46 +83,58 @@ TEST(QuicStreamTableTest, GrowsWhenLoadFactorWouldExceedHalf) {
     fiber::quic::QuicStreamTable table;
     ASSERT_TRUE(table.init(1));
 
-    fiber::quic::QuicStream stream0(0);
-    fiber::quic::QuicStream stream4(4);
-    fiber::quic::QuicStream stream8(8);
-    fiber::quic::QuicStream stream12(12);
-    fiber::quic::QuicStream stream16(16);
+    fiber::quic::QuicRecvExtentPool pool;
+    auto stream0 = make_stream(0, pool);
+    auto stream4 = make_stream(4, pool);
+    auto stream8 = make_stream(8, pool);
+    auto stream12 = make_stream(12, pool);
+    auto stream16 = make_stream(16, pool);
+    auto *stream0_ptr = stream0.get();
+    auto *stream4_ptr = stream4.get();
+    auto *stream8_ptr = stream8.get();
+    auto *stream12_ptr = stream12.get();
+    auto *stream16_ptr = stream16.get();
     const std::size_t initial_bucket_count = table.bucket_count();
 
-    EXPECT_TRUE(table.insert(stream0));
-    EXPECT_TRUE(table.insert(stream4));
-    EXPECT_TRUE(table.insert(stream8));
-    EXPECT_TRUE(table.insert(stream12));
-    EXPECT_TRUE(table.insert(stream16));
+    EXPECT_TRUE(table.insert(std::move(stream0)));
+    EXPECT_TRUE(table.insert(std::move(stream4)));
+    EXPECT_TRUE(table.insert(std::move(stream8)));
+    EXPECT_TRUE(table.insert(std::move(stream12)));
+    EXPECT_TRUE(table.insert(std::move(stream16)));
 
     EXPECT_GT(table.bucket_count(), initial_bucket_count);
-    EXPECT_EQ(table.find(0), &stream0);
-    EXPECT_EQ(table.find(4), &stream4);
-    EXPECT_EQ(table.find(8), &stream8);
-    EXPECT_EQ(table.find(12), &stream12);
-    EXPECT_EQ(table.find(16), &stream16);
+    EXPECT_EQ(table.find(0), stream0_ptr);
+    EXPECT_EQ(table.find(4), stream4_ptr);
+    EXPECT_EQ(table.find(8), stream8_ptr);
+    EXPECT_EQ(table.find(12), stream12_ptr);
+    EXPECT_EQ(table.find(16), stream16_ptr);
 }
 
 TEST(QuicStreamTableTest, EraseKeepsLaterCollisionsReachable) {
     fiber::quic::QuicStreamTable table;
     ASSERT_TRUE(table.init(4));
 
+    fiber::quic::QuicRecvExtentPool pool;
     const auto ids = find_colliding_stream_ids(table.bucket_count());
-    fiber::quic::QuicStream stream_a(ids[0]);
-    fiber::quic::QuicStream stream_b(ids[1]);
-    fiber::quic::QuicStream stream_c(ids[2]);
+    auto stream_a = make_stream(ids[0], pool);
+    auto stream_b = make_stream(ids[1], pool);
+    auto stream_c = make_stream(ids[2], pool);
+    auto *stream_a_ptr = stream_a.get();
+    auto *stream_b_ptr = stream_b.get();
+    auto *stream_c_ptr = stream_c.get();
 
-    ASSERT_TRUE(table.insert(stream_a));
-    ASSERT_TRUE(table.insert(stream_b));
-    ASSERT_TRUE(table.insert(stream_c));
+    ASSERT_TRUE(table.insert(std::move(stream_a)));
+    ASSERT_TRUE(table.insert(std::move(stream_b)));
+    ASSERT_TRUE(table.insert(std::move(stream_c)));
 
-    EXPECT_EQ(table.erase(stream_a.stream_id()), &stream_a);
-    EXPECT_EQ(table.find(stream_b.stream_id()), &stream_b);
-    EXPECT_EQ(table.find(stream_c.stream_id()), &stream_c);
+    auto erased_a = table.erase(stream_a_ptr->stream_id());
+    EXPECT_EQ(erased_a.get(), stream_a_ptr);
+    EXPECT_EQ(table.find(stream_b_ptr->stream_id()), stream_b_ptr);
+    EXPECT_EQ(table.find(stream_c_ptr->stream_id()), stream_c_ptr);
 
-    EXPECT_EQ(table.erase(stream_b.stream_id()), &stream_b);
-    EXPECT_EQ(table.find(stream_c.stream_id()), &stream_c);
+    auto erased_b = table.erase(stream_b_ptr->stream_id());
+    EXPECT_EQ(erased_b.get(), stream_b_ptr);
+    EXPECT_EQ(table.find(stream_c_ptr->stream_id()), stream_c_ptr);
     EXPECT_EQ(table.size(), 1U);
 }
 
@@ -122,11 +142,14 @@ TEST(QuicStreamTableTest, SupportsLargeStreamIds) {
     fiber::quic::QuicStreamTable table;
     ASSERT_TRUE(table.init(2));
 
+    fiber::quic::QuicRecvExtentPool pool;
     constexpr std::uint64_t large_stream_id = (1ULL << 62U) - 4U;
-    fiber::quic::QuicStream stream(large_stream_id);
+    auto stream = make_stream(large_stream_id, pool);
+    auto *stream_ptr = stream.get();
 
-    EXPECT_TRUE(table.insert(stream));
-    EXPECT_EQ(table.find(large_stream_id), &stream);
-    EXPECT_EQ(table.erase(large_stream_id), &stream);
+    EXPECT_TRUE(table.insert(std::move(stream)));
+    EXPECT_EQ(table.find(large_stream_id), stream_ptr);
+    auto erased = table.erase(large_stream_id);
+    EXPECT_EQ(erased.get(), stream_ptr);
     EXPECT_TRUE(table.empty());
 }
