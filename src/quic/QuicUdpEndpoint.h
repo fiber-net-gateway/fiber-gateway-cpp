@@ -18,6 +18,7 @@
 #include "QuicConnection.h"
 #include "QuicPacketProcessor.h"
 #include "QuicSendScheduler.h"
+#include "QuicStreamReassembler.h"
 
 namespace fiber::net {
 class TlsServerContext;
@@ -57,6 +58,7 @@ public:
     [[nodiscard]] std::size_t active_connection_count() const noexcept { return active_connection_count_; }
     [[nodiscard]] std::size_t dropped_datagram_count() const noexcept { return dropped_datagram_count_; }
     [[nodiscard]] std::size_t rejected_connection_count() const noexcept { return rejected_connection_count_; }
+    [[nodiscard]] QuicRecvExtentPool &recv_extent_pool() noexcept { return recv_extent_pool_; }
 
     [[nodiscard]] QuicConnection *find_connection(const QuicConnectionId &dcid) noexcept;
     [[nodiscard]] const QuicConnection *find_connection(const QuicConnectionId &dcid) const noexcept;
@@ -118,6 +120,7 @@ private:
     std::unique_ptr<net::UdpSocket> socket_{};
     std::unique_ptr<std::uint8_t[]> read_buffer_{};
     std::unique_ptr<std::uint8_t[]> plaintext_buffer_{};
+    QuicRecvExtentPool recv_extent_pool_{};
     QuicSendScheduler send_scheduler_{};
     DcidTree dcid_tree_{};
     ConnectionList connections_{};
