@@ -18,6 +18,7 @@
 #include "../net/SocketAddress.h"
 #include "QuicCongestion.h"
 #include "QuicFrame.h"
+#include "QuicStream.h"
 #include "QuicTlsSession.h"
 
 namespace fiber::quic {
@@ -60,11 +61,6 @@ enum class QuicConnectionState : std::uint8_t {
     Draining,
     Closing,
     Closed,
-};
-
-enum class QuicStreamType : std::uint8_t {
-    Bidirectional,
-    Unidirectional,
 };
 
 enum class QuicErrorCode : std::uint64_t {
