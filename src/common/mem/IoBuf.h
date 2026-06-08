@@ -51,6 +51,9 @@ public:
 
     [[nodiscard]] IoBuf retain_slice(std::size_t offset, std::size_t len) const noexcept;
     [[nodiscard]] IoBuf unsafe_retain_slice(std::size_t offset, std::size_t len) const noexcept;
+    [[nodiscard]] IoBuf retain_storage_slice(std::size_t offset, std::size_t len) const noexcept;
+    [[nodiscard]] bool same_storage(const IoBuf &other) const noexcept;
+    bool try_merge_adjacent(IoBuf &&next) noexcept;
 
 private:
     struct ControlBlock;

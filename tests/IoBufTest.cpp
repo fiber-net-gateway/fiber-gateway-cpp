@@ -114,6 +114,40 @@ TEST(IoBufTest, UnsafeRetainSliceUsesSameStorage) {
     EXPECT_EQ(slice.data(), buf.data());
 }
 
+TEST(IoBufTest, RetainStorageSliceBuildsReadableViewAtAbsoluteOffset) {
+    IoBuf storage = IoBuf::allocate(16);
+    ASSERT_TRUE(storage);
+
+    std::memcpy(storage.data() + 5, "abc", 3);
+    IoBuf slice = storage.retain_storage_slice(5, 3);
+
+    ASSERT_TRUE(slice);
+    EXPECT_TRUE(storage.same_storage(slice));
+    EXPECT_EQ(readable_view(slice), "abc");
+    EXPECT_EQ(slice.writable(), 0u);
+    EXPECT_EQ(slice.readable_data(), storage.data() + 5);
+}
+
+TEST(IoBufTest, TryMergeAdjacentExtendsSameStorageReadableView) {
+    IoBuf storage = IoBuf::allocate(16);
+    ASSERT_TRUE(storage);
+
+    std::memcpy(storage.data() + 4, "abcd", 4);
+    IoBuf first = storage.retain_storage_slice(4, 2);
+    IoBuf second = storage.retain_storage_slice(6, 2);
+
+    ASSERT_TRUE(first.try_merge_adjacent(std::move(second)));
+    EXPECT_EQ(readable_view(first), "abcd");
+    EXPECT_FALSE(second.valid());
+
+    IoBuf other = IoBuf::allocate(4);
+    ASSERT_TRUE(other);
+    std::memcpy(other.writable_data(), "zz", 2);
+    other.commit(2);
+    EXPECT_FALSE(first.try_merge_adjacent(std::move(other)));
+    EXPECT_TRUE(other.valid());
+}
+
 TEST(IoBufTest, ChainExportsReadableAndWritableIovecs) {
     IoBuf a = IoBuf::allocate(8);
     IoBuf b = IoBuf::allocate(8);

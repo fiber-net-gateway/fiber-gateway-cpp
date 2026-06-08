@@ -187,6 +187,32 @@ IoBuf IoBuf::unsafe_retain_slice(std::size_t offset, std::size_t len) const noex
     return retain_slice_impl(offset, len, false);
 }
 
+IoBuf IoBuf::retain_storage_slice(std::size_t offset, std::size_t len) const noexcept {
+    FIBER_ASSERT(control_ != nullptr);
+    FIBER_ASSERT(offset <= control_->capacity);
+    FIBER_ASSERT(len <= control_->capacity - offset);
+
+    retain(control_);
+    std::uint8_t *begin = storage_begin(control_) + offset;
+    std::uint8_t *end = begin + len;
+    return IoBuf(control_, begin, end, begin, end);
+}
+
+bool IoBuf::same_storage(const IoBuf &other) const noexcept {
+    return control_ != nullptr && control_ == other.control_;
+}
+
+bool IoBuf::try_merge_adjacent(IoBuf &&next) noexcept {
+    if (control_ == nullptr || control_ != next.control_ || last_ != next.pos_) {
+        return false;
+    }
+
+    IoBuf consumed = std::move(next);
+    view_end_ = consumed.view_end_;
+    last_ = consumed.last_;
+    return true;
+}
+
 IoBuf IoBuf::retain_slice_impl(std::size_t offset, std::size_t len, bool safe) const noexcept {
     FIBER_ASSERT(control_ != nullptr);
     FIBER_ASSERT(offset <= readable());
