@@ -3,6 +3,8 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <new>
+#include <string_view>
 
 #include "quic/QuicConnection.h"
 #include "quic/QuicProtocol.h"
@@ -16,6 +18,88 @@ fiber::net::SocketAddress loopback(std::uint16_t port) { return {fiber::net::IpA
 fiber::quic::QuicConnectionId cid_from(std::initializer_list<std::uint8_t> bytes) {
     auto cid = fiber::quic::QuicConnectionId::from_bytes(bytes.begin(), bytes.size());
     return cid.value_or(fiber::quic::QuicConnectionId{});
+}
+
+fiber::quic::QuicSlice slice_of(std::string_view value) {
+    return {reinterpret_cast<const std::uint8_t *>(value.data()), value.size()};
+}
+
+struct StreamCallbackState {
+    std::uint32_t calls = 0;
+    std::uint32_t destroy_calls = 0;
+    std::uint32_t reset_calls = 0;
+    std::uint64_t last_stream_id = 0;
+    std::uint64_t last_reset_error_code = 0;
+    bool return_empty = false;
+    fiber::quic::QuicStream::Lease lease{};
+};
+
+const fiber::quic::QuicStream::Ops &test_stream_ops() noexcept;
+
+struct TestStreamOwner {
+    TestStreamOwner(const fiber::quic::QuicNewStreamContext &ctx, StreamCallbackState &callback_state) noexcept :
+        state(&callback_state), stream(ctx.stream_id, ctx.recv_extent_pool, this, test_stream_ops()) {}
+
+    StreamCallbackState *state = nullptr;
+    fiber::quic::QuicStream stream;
+};
+
+void on_quic_stream_destroy(void *owner) noexcept {
+    auto *stream_owner = static_cast<TestStreamOwner *>(owner);
+    ++stream_owner->state->destroy_calls;
+    delete stream_owner;
+}
+
+void on_quic_stream_reset(void *owner, fiber::quic::QuicStream &, std::uint64_t error_code, std::uint64_t) noexcept {
+    auto *state = static_cast<TestStreamOwner *>(owner)->state;
+    ++state->reset_calls;
+    state->last_reset_error_code = error_code;
+}
+
+const fiber::quic::QuicStream::Ops &test_stream_ops() noexcept {
+    static const fiber::quic::QuicStream::Ops kOps{
+            .on_destroy = on_quic_stream_destroy,
+            .on_data = nullptr,
+            .on_reset = on_quic_stream_reset,
+            .on_abort = nullptr,
+    };
+    return kOps;
+}
+
+fiber::quic::QuicStream::Lease make_test_stream(const fiber::quic::QuicNewStreamContext &ctx) noexcept {
+    return fiber::quic::QuicStream::Lease::adopt(new fiber::quic::QuicStream(ctx.stream_id, ctx.recv_extent_pool));
+}
+
+fiber::quic::QuicStream::Lease on_new_stream_record(void *owner,
+                                                    const fiber::quic::QuicNewStreamContext &ctx) noexcept {
+    auto *state = static_cast<StreamCallbackState *>(owner);
+    ++state->calls;
+    state->last_stream_id = ctx.stream_id;
+    if (state->return_empty) {
+        return {};
+    }
+    return make_test_stream(ctx);
+}
+
+fiber::quic::QuicStream::Lease on_new_stream_retain(void *owner,
+                                                    const fiber::quic::QuicNewStreamContext &ctx) noexcept {
+    auto *state = static_cast<StreamCallbackState *>(owner);
+    ++state->calls;
+    state->last_stream_id = ctx.stream_id;
+    auto *stream_owner = new (std::nothrow) TestStreamOwner(ctx, *state);
+    if (stream_owner == nullptr) {
+        return {};
+    }
+    state->lease = stream_owner->stream.lease();
+    return fiber::quic::QuicStream::Lease::adopt(&stream_owner->stream);
+}
+
+fiber::quic::QuicConnection::Options server_options_with_factory(StreamCallbackState &state) noexcept {
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Server;
+    options.owner = &state;
+    options.ops.on_new_stream = on_new_stream_record;
+    return options;
 }
 
 } // namespace
@@ -230,4 +314,202 @@ TEST(QuicConnectionTest, RejectsPeerTransportParamsWithMismatchedInitialScid) {
 
     EXPECT_FALSE(applied.has_value());
     EXPECT_FALSE(conn.peer_transport_params_received());
+}
+
+TEST(QuicConnectionTest, RecvStreamFrameCreatesPeerInitiatedStream) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame frame{};
+    frame.stream_id = 0;
+    frame.length = 3;
+
+    auto received = conn.recv_stream_frame(frame, slice_of("abc"));
+
+    ASSERT_TRUE(received.has_value());
+    auto *stream = conn.find_stream(0);
+    ASSERT_NE(stream, nullptr);
+    EXPECT_EQ(conn.active_stream_count(), 1U);
+    EXPECT_EQ(stream->buffered_recv_bytes(), 3U);
+    EXPECT_FALSE(stream->has_final_size());
+}
+
+TEST(QuicConnectionTest, RejectsPassiveStreamWhenConnectionOpsIsMissing) {
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Server;
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame frame{};
+    frame.stream_id = 0;
+
+    auto received = conn.recv_stream_frame(frame, {});
+
+    EXPECT_FALSE(received.has_value());
+    EXPECT_EQ(received.error(), fiber::common::IoErr::NotSupported);
+    EXPECT_EQ(conn.active_stream_count(), 0U);
+}
+
+TEST(QuicConnectionTest, UsesConnectionOpsToCreatePeerStreamOnce) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame frame{};
+    frame.stream_id = 0;
+    frame.length = 3;
+
+    auto first = conn.recv_stream_frame(frame, slice_of("abc"));
+    auto duplicate = conn.recv_stream_frame(frame, slice_of("abc"));
+
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(duplicate.has_value());
+    EXPECT_EQ(state.calls, 1U);
+    EXPECT_EQ(state.last_stream_id, 0U);
+    EXPECT_EQ(conn.active_stream_count(), 1U);
+}
+
+TEST(QuicConnectionTest, RejectsPeerStreamWhenConnectionOpsReturnsEmptyLease) {
+    StreamCallbackState state{};
+    state.return_empty = true;
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Server;
+    options.owner = &state;
+    options.ops.on_new_stream = on_new_stream_record;
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame frame{};
+    frame.stream_id = 0;
+
+    auto received = conn.recv_stream_frame(frame, {});
+
+    EXPECT_FALSE(received.has_value());
+    EXPECT_EQ(received.error(), fiber::common::IoErr::NoMem);
+    EXPECT_EQ(state.calls, 1U);
+    EXPECT_EQ(conn.find_stream(0), nullptr);
+    EXPECT_EQ(conn.active_stream_count(), 0U);
+}
+
+TEST(QuicConnectionTest, ConnectionOpsCanCreateStreamWithStreamOpsAndRetainIt) {
+    StreamCallbackState state{};
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Server;
+    options.owner = &state;
+    options.ops.on_new_stream = on_new_stream_retain;
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicResetStreamFrame reset{};
+    reset.id = 0;
+    reset.error_code = 7;
+    reset.final_size = 0;
+
+    auto received = conn.recv_reset_stream_frame(reset);
+
+    ASSERT_TRUE(received.has_value());
+    ASSERT_TRUE(state.lease);
+    EXPECT_EQ(state.calls, 1U);
+    EXPECT_EQ(state.reset_calls, 1U);
+    EXPECT_EQ(state.last_reset_error_code, 7U);
+    EXPECT_EQ(state.lease->stream_id(), 0U);
+    EXPECT_TRUE(state.lease->attached_to_connection());
+    EXPECT_EQ(conn.active_stream_count(), 1U);
+
+    conn.release_stream_app(*state.lease);
+    EXPECT_FALSE(state.lease->attached_to_connection());
+    EXPECT_EQ(conn.active_stream_count(), 0U);
+    state.lease.reset();
+    EXPECT_EQ(state.destroy_calls, 1U);
+}
+
+TEST(QuicConnectionTest, RecvFinStreamRetiresAfterDataIsTaken) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame frame{};
+    frame.stream_id = 0;
+    frame.length = 3;
+    frame.fin = true;
+
+    auto received = conn.recv_stream_frame(frame, slice_of("abc"));
+    ASSERT_TRUE(received.has_value());
+    auto *stream = conn.find_stream(0);
+    ASSERT_NE(stream, nullptr);
+    EXPECT_TRUE(stream->has_final_size());
+    EXPECT_EQ(stream->final_size(), 3U);
+
+    fiber::mem::IoBufChain out;
+    auto taken = conn.take_stream_data(0, 3, out);
+
+    ASSERT_TRUE(taken.has_value());
+    EXPECT_EQ(*taken, 3U);
+    EXPECT_EQ(out.readable_bytes(), 3U);
+    EXPECT_EQ(conn.find_stream(0), nullptr);
+    EXPECT_EQ(conn.active_stream_count(), 0U);
+
+    auto duplicate = conn.recv_stream_frame(frame, slice_of("abc"));
+    EXPECT_TRUE(duplicate.has_value());
+    EXPECT_EQ(conn.active_stream_count(), 0U);
+}
+
+TEST(QuicConnectionTest, ResetStreamCreatesAndRetiresPeerStream) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicResetStreamFrame reset{};
+    reset.id = 0;
+    reset.error_code = 42;
+    reset.final_size = 0;
+
+    auto received = conn.recv_reset_stream_frame(reset);
+
+    ASSERT_TRUE(received.has_value());
+    EXPECT_EQ(conn.find_stream(0), nullptr);
+    EXPECT_EQ(conn.active_stream_count(), 0U);
+
+    auto duplicate = conn.recv_reset_stream_frame(reset);
+    EXPECT_TRUE(duplicate.has_value());
+
+    reset.final_size = 1;
+    auto conflict = conn.recv_reset_stream_frame(reset);
+    EXPECT_FALSE(conflict.has_value());
+}
+
+TEST(QuicConnectionTest, RejectsFinalSizeBelowReceivedStreamData) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame data{};
+    data.stream_id = 0;
+    data.offset = 10;
+    data.has_offset = true;
+    data.length = 3;
+    fiber::quic::QuicStreamFrame fin{};
+    fin.stream_id = 0;
+    fin.length = 1;
+    fin.fin = true;
+    fiber::quic::QuicResetStreamFrame reset{};
+    reset.id = 0;
+    reset.final_size = 5;
+
+    auto received = conn.recv_stream_frame(data, slice_of("abc"));
+    ASSERT_TRUE(received.has_value());
+
+    auto fin_conflict = conn.recv_stream_frame(fin, slice_of("x"));
+    auto reset_conflict = conn.recv_reset_stream_frame(reset);
+
+    EXPECT_FALSE(fin_conflict.has_value());
+    EXPECT_FALSE(reset_conflict.has_value());
+}
+
+TEST(QuicConnectionTest, RejectsLocalOrLimitExceededPassiveStreams) {
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Server;
+    options.max_peer_bidirectional_streams = 1;
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame server_initiated{};
+    server_initiated.stream_id = 1;
+    fiber::quic::QuicStreamFrame over_limit{};
+    over_limit.stream_id = 4;
+
+    auto local = conn.recv_stream_frame(server_initiated, {});
+    auto limited = conn.recv_stream_frame(over_limit, {});
+
+    EXPECT_FALSE(local.has_value());
+    EXPECT_FALSE(limited.has_value());
+    EXPECT_EQ(conn.active_stream_count(), 0U);
 }

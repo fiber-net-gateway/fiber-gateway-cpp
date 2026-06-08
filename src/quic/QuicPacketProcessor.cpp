@@ -334,18 +334,42 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 result.send_output = result.send_output || *handled;
                 break;
             }
-            case QuicFrameType::Stream:
-            case QuicFrameType::ResetStream:
+            case QuicFrameType::Stream: {
+                auto received = conn.recv_stream_frame(frame.u.stream, frame.data);
+                if (!received) {
+                    return std::unexpected(received.error());
+                }
+                break;
+            }
+            case QuicFrameType::ResetStream: {
+                auto reset = conn.recv_reset_stream_frame(frame.u.reset_stream);
+                if (!reset) {
+                    return std::unexpected(reset.error());
+                }
+                break;
+            }
             case QuicFrameType::StopSending:
-            case QuicFrameType::MaxData:
+                if (conn.find_stream(frame.u.stop_sending.id) == nullptr) {
+                    return std::unexpected(common::IoErr::Invalid);
+                }
+                break;
             case QuicFrameType::MaxStreamData:
+                if (conn.find_stream(frame.u.max_stream_data.id) == nullptr) {
+                    return std::unexpected(common::IoErr::Invalid);
+                }
+                break;
+            case QuicFrameType::StreamDataBlocked:
+                if (conn.find_stream(frame.u.stream_data_blocked.id) == nullptr) {
+                    return std::unexpected(common::IoErr::Invalid);
+                }
+                break;
+            case QuicFrameType::MaxData:
             case QuicFrameType::MaxStreamsBidi:
             case QuicFrameType::MaxStreamsUni:
             case QuicFrameType::DataBlocked:
-            case QuicFrameType::StreamDataBlocked:
             case QuicFrameType::StreamsBlockedBidi:
             case QuicFrameType::StreamsBlockedUni:
-                return std::unexpected(common::IoErr::NotSupported);
+                break;
             case QuicFrameType::NewToken:
             case QuicFrameType::NewConnectionId:
             case QuicFrameType::RetireConnectionId:

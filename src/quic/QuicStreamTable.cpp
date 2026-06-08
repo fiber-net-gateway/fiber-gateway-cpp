@@ -13,6 +13,8 @@ constexpr std::size_t kMinBucketCount = 8;
 
 } // namespace
 
+QuicStreamTable::~QuicStreamTable() { clear(); }
+
 bool QuicStreamTable::init(std::size_t initial_stream_capacity) noexcept {
     clear();
     if (initial_stream_capacity == 0) {
@@ -22,6 +24,15 @@ bool QuicStreamTable::init(std::size_t initial_stream_capacity) noexcept {
 }
 
 void QuicStreamTable::clear() noexcept {
+    if (buckets_) {
+        for (std::size_t i = 0; i < bucket_count_; ++i) {
+            if (buckets_[i].stream) {
+                buckets_[i].stream->detach_from_connection();
+                QuicStream::Lease::adopt(buckets_[i].stream).reset();
+                buckets_[i] = Bucket{};
+            }
+        }
+    }
     buckets_.reset();
     bucket_count_ = 0;
     size_ = 0;
@@ -43,8 +54,12 @@ const QuicStream *QuicStreamTable::find(std::uint64_t stream_id) const noexcept 
     return buckets_[slot].stream;
 }
 
-bool QuicStreamTable::insert(QuicStream &stream) noexcept {
-    const std::uint64_t stream_id = stream.stream_id();
+bool QuicStreamTable::insert(QuicStream::Lease &&lease) noexcept {
+    QuicStream *stream = lease.get();
+    if (stream == nullptr) {
+        return false;
+    }
+    const std::uint64_t stream_id = stream->stream_id();
     if (find_slot(stream_id) != bucket_count_) {
         return false;
     }
@@ -56,21 +71,21 @@ bool QuicStreamTable::insert(QuicStream &stream) noexcept {
     FIBER_ASSERT(slot < bucket_count_);
     buckets_[slot] = Bucket{
             .stream_id = stream_id,
-            .stream = &stream,
+            .stream = lease.release_raw(),
     };
     ++size_;
     return true;
 }
 
-QuicStream *QuicStreamTable::erase(std::uint64_t stream_id) noexcept {
+QuicStream::Lease QuicStreamTable::erase(std::uint64_t stream_id) noexcept {
     const std::size_t slot = find_slot(stream_id);
     if (slot == bucket_count_) {
-        return nullptr;
+        return {};
     }
 
     QuicStream *stream = buckets_[slot].stream;
     erase_at(slot);
-    return stream;
+    return QuicStream::Lease::adopt(stream);
 }
 
 std::size_t QuicStreamTable::next_pow2(std::size_t value) noexcept {

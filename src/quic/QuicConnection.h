@@ -19,6 +19,7 @@
 #include "QuicCongestion.h"
 #include "QuicFrame.h"
 #include "QuicStream.h"
+#include "QuicStreamTable.h"
 #include "QuicTlsSession.h"
 
 namespace fiber::quic {
@@ -48,6 +49,7 @@ inline constexpr std::uint64_t kQuicDefaultMaxBidirectionalStreams = 128;
 inline constexpr std::uint64_t kQuicDefaultMaxUnidirectionalStreams = 32;
 inline constexpr std::uint64_t kQuicDefaultInitialMaxData =
         (kQuicDefaultMaxBidirectionalStreams + kQuicDefaultMaxUnidirectionalStreams) * kQuicDefaultStreamBufferSize;
+inline constexpr std::size_t kQuicRetiredStreamRecordCount = 1024;
 
 enum class QuicConnectionRole : std::uint8_t {
     Client,
@@ -172,6 +174,22 @@ struct QuicPeerTransportState {
     bool received = false;
 };
 
+struct QuicRetiredStreamRecord {
+    std::uint64_t stream_id = 0;
+    std::uint64_t final_size = 0;
+    bool used = false;
+    bool has_final_size = false;
+    bool reset_received = false;
+};
+
+class QuicConnection;
+
+struct QuicNewStreamContext {
+    std::uint64_t stream_id = 0;
+    QuicConnection &connection;
+    QuicRecvExtentPool &recv_extent_pool;
+};
+
 enum class QuicCryptoSuite : std::uint8_t {
     InitialAes128GcmSha256,
     Aes128GcmSha256,
@@ -255,6 +273,10 @@ struct QuicPath {
 
 class QuicConnection : public common::NonCopyable, public common::NonMovable {
 public:
+    struct Ops {
+        QuicStream::Lease (*on_new_stream)(void *owner, const QuicNewStreamContext &ctx) noexcept = nullptr;
+    };
+
     struct EndpointIndex {
         QuicConnection *connection = nullptr;
         common::IntrusiveListHook link{};
@@ -293,6 +315,8 @@ public:
         std::uint64_t max_peer_unidirectional_streams = kQuicDefaultMaxUnidirectionalStreams;
         std::uint64_t max_local_bidirectional_streams = kQuicDefaultMaxBidirectionalStreams;
         std::uint64_t max_local_unidirectional_streams = kQuicDefaultMaxUnidirectionalStreams;
+        void *owner = nullptr;
+        Ops ops{};
     };
 
     explicit QuicConnection(const Options &options) noexcept;
@@ -325,6 +349,15 @@ public:
     [[nodiscard]] common::IoResult<std::uint64_t> next_local_stream_id(QuicStreamType type) noexcept;
     [[nodiscard]] bool can_accept_peer_stream(std::uint64_t stream_id) const noexcept;
     common::IoResult<void> record_peer_stream_id(std::uint64_t stream_id) noexcept;
+    [[nodiscard]] QuicStream *find_stream(std::uint64_t stream_id) noexcept;
+    [[nodiscard]] const QuicStream *find_stream(std::uint64_t stream_id) const noexcept;
+    [[nodiscard]] std::size_t active_stream_count() const noexcept { return streams_.size(); }
+    [[nodiscard]] common::IoResult<QuicStream *> get_or_create_peer_stream(std::uint64_t stream_id) noexcept;
+    [[nodiscard]] common::IoResult<void> recv_stream_frame(const QuicStreamFrame &frame, QuicSlice data) noexcept;
+    [[nodiscard]] common::IoResult<void> recv_reset_stream_frame(const QuicResetStreamFrame &frame) noexcept;
+    [[nodiscard]] common::IoResult<std::size_t> take_stream_data(std::uint64_t stream_id, std::size_t max_bytes,
+                                                                 mem::IoBufChain &out) noexcept;
+    void release_stream_app(QuicStream &stream) noexcept;
 
     [[nodiscard]] bool is_local_stream(std::uint64_t stream_id) const noexcept;
     [[nodiscard]] bool is_peer_stream(std::uint64_t stream_id) const noexcept { return !is_local_stream(stream_id); }
@@ -377,6 +410,15 @@ private:
     [[nodiscard]] std::uint8_t local_initiator_bit() const noexcept;
     [[nodiscard]] std::uint64_t local_stream_limit(QuicStreamType type) const noexcept;
     [[nodiscard]] std::uint64_t peer_stream_limit(QuicStreamType type) const noexcept;
+    [[nodiscard]] const QuicRetiredStreamRecord *find_retired_stream(std::uint64_t stream_id) const noexcept;
+    void retire_stream(QuicStream &stream) noexcept;
+    void record_retired_stream(const QuicStream &stream) noexcept;
+    void try_release_stream(QuicStream &stream) noexcept;
+    [[nodiscard]] static common::IoResult<void> check_retired_stream_frame(const QuicRetiredStreamRecord &retired,
+                                                                           std::uint64_t offset, QuicSlice data,
+                                                                           bool fin) noexcept;
+    [[nodiscard]] static common::IoResult<void> check_retired_reset_stream_frame(const QuicRetiredStreamRecord &retired,
+                                                                                 std::uint64_t final_size) noexcept;
 
     Options options_{};
     QuicConnectionState state_ = QuicConnectionState::Init;
@@ -391,6 +433,10 @@ private:
     std::uint64_t reset_packet_number_ = 0;
     QuicCryptoState crypto_{};
     QuicPeerTransportState peer_transport_{};
+    QuicRecvExtentPool recv_extent_pool_{};
+    QuicStreamTable streams_{};
+    std::array<QuicRetiredStreamRecord, kQuicRetiredStreamRecordCount> retired_streams_{};
+    std::uint64_t next_retired_stream_slot_ = 0;
     std::array<QuicCryptoRecvBuffer, kQuicPacketNumberSpaceCount> crypto_recv_buffers_{};
     QuicTlsSession tls_{};
     std::array<QuicPath, kQuicMaxPaths> paths_{};

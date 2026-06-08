@@ -14,7 +14,7 @@ namespace fiber::quic {
 class QuicStreamTable : public common::NonCopyable, public common::NonMovable {
 public:
     QuicStreamTable() noexcept = default;
-    ~QuicStreamTable() = default;
+    ~QuicStreamTable();
 
     [[nodiscard]] bool init(std::size_t initial_stream_capacity = 0) noexcept;
     void clear() noexcept;
@@ -22,8 +22,8 @@ public:
     [[nodiscard]] QuicStream *find(std::uint64_t stream_id) noexcept;
     [[nodiscard]] const QuicStream *find(std::uint64_t stream_id) const noexcept;
 
-    [[nodiscard]] bool insert(QuicStream &stream) noexcept;
-    [[nodiscard]] QuicStream *erase(std::uint64_t stream_id) noexcept;
+    [[nodiscard]] bool insert(QuicStream::Lease &&stream) noexcept;
+    [[nodiscard]] QuicStream::Lease erase(std::uint64_t stream_id) noexcept;
 
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
     [[nodiscard]] std::size_t bucket_count() const noexcept { return bucket_count_; }
