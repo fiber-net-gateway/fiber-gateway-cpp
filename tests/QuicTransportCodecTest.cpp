@@ -254,18 +254,17 @@ TEST(QuicTransportCodecTest, ParsesStreamFrameWithOffsetLengthAndFin) {
 
 TEST(QuicTransportCodecTest, CreatesAndParsesCryptoFrame) {
     const std::array<std::uint8_t, 3> payload{0xde, 0xad, 0xbe};
-    fiber::quic::QuicFrame frame{};
+    fiber::quic::QuicOutputFrame frame{};
     frame.type = fiber::quic::QuicFrameType::Crypto;
     frame.u.crypto.offset = 7;
-    frame.u.crypto.length = payload.size();
     frame.data = {payload.data(), payload.size()};
 
-    auto expected_len = fiber::quic::quic_create_frame(nullptr, frame);
+    auto expected_len = fiber::quic::quic_create_output_frame(nullptr, frame);
 
     ASSERT_TRUE(expected_len.has_value());
     std::array<std::uint8_t, 32> buf{};
     fiber::quic::QuicWriteCursor out(buf.data(), buf.size());
-    auto written = fiber::quic::quic_create_frame(&out, frame);
+    auto written = fiber::quic::quic_create_output_frame(&out, frame);
 
     ASSERT_TRUE(written.has_value());
     EXPECT_EQ(*written, *expected_len);
@@ -295,14 +294,13 @@ TEST(QuicTransportCodecTest, ChecksFramePermissionByEncryptionLevel) {
 
 TEST(QuicTransportCodecTest, CreatesAndClientParsesNewTokenFrame) {
     const std::array<std::uint8_t, 3> token{'a', 'b', 'c'};
-    fiber::quic::QuicFrame frame{};
+    fiber::quic::QuicOutputFrame frame{};
     frame.type = fiber::quic::QuicFrameType::NewToken;
-    frame.u.new_token.length = token.size();
     frame.data = {token.data(), token.size()};
 
     std::array<std::uint8_t, 16> buf{};
     fiber::quic::QuicWriteCursor out(buf.data(), buf.size());
-    auto written = fiber::quic::quic_create_frame(&out, frame);
+    auto written = fiber::quic::quic_create_output_frame(&out, frame);
     ASSERT_TRUE(written.has_value());
 
     fiber::quic::QuicReadCursor server_in(buf.data(), out.offset());
@@ -320,12 +318,12 @@ TEST(QuicTransportCodecTest, CreatesAndClientParsesNewTokenFrame) {
 }
 
 TEST(QuicTransportCodecTest, ClientParsesHandshakeDoneFrame) {
-    fiber::quic::QuicFrame frame{};
+    fiber::quic::QuicOutputFrame frame{};
     frame.type = fiber::quic::QuicFrameType::HandshakeDone;
 
     std::array<std::uint8_t, 8> buf{};
     fiber::quic::QuicWriteCursor out(buf.data(), buf.size());
-    auto written = fiber::quic::quic_create_frame(&out, frame);
+    auto written = fiber::quic::quic_create_output_frame(&out, frame);
     ASSERT_TRUE(written.has_value());
 
     fiber::quic::QuicReadCursor in(buf.data(), out.offset());

@@ -5,8 +5,9 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
+#include "../common/NonCopyable.h"
+#include "../common/NonMovable.h"
 
 namespace fiber::quic {
 
@@ -63,7 +64,7 @@ struct QuicSlice {
     [[nodiscard]] bool empty() const noexcept { return len == 0; }
 };
 
-struct QuicFrameDataBlock {
+struct QuicOutputFrameDataBlock {
     std::uint8_t *data = nullptr;
     std::size_t len = 0;
     std::uint32_t refs = 1;
@@ -106,6 +107,42 @@ struct QuicCloseFrame {
     std::uint64_t error_code = 0;
     std::uint64_t frame_type = 0;
     QuicSlice reason{};
+};
+
+struct QuicOutputAckFrame {
+    std::uint64_t largest = 0;
+    std::uint64_t delay = 0;
+    std::uint64_t range_count = 0;
+    std::uint64_t first_range = 0;
+    std::uint64_t ect0 = 0;
+    std::uint64_t ect1 = 0;
+    std::uint64_t ce = 0;
+};
+
+struct QuicOutputCryptoFrame {
+    std::uint64_t offset = 0;
+};
+
+struct QuicOutputNewTokenFrame {};
+
+struct QuicOutputStreamFrame {
+    std::uint64_t stream_id = 0;
+    std::uint64_t offset = 0;
+    bool has_length = false;
+    bool fin = false;
+};
+
+struct QuicOutputCloseFrame {
+    std::uint64_t error_code = 0;
+    std::uint64_t frame_type = 0;
+};
+
+struct QuicOutputMaxStreamsFrame {
+    std::uint64_t limit = 0;
+};
+
+struct QuicOutputStreamsBlockedFrame {
+    std::uint64_t limit = 0;
 };
 
 struct QuicResetStreamFrame {
@@ -193,45 +230,88 @@ struct QuicInputFrame {
     } u;
 };
 
-struct QuicFrame {
-    QuicFrame() noexcept : u{} {}
+struct QuicOutputFrame {
+    QuicOutputFrame() noexcept : u{} {}
 
     QuicFrameType type = QuicFrameType::Padding;
-    QuicEncryptionLevel level = QuicEncryptionLevel::Initial;
     std::uint64_t packet_number = 0;
     std::size_t encoded_len = 0;
-    std::size_t packet_len = 0;
+    std::uint32_t packet_len = 0;
     std::chrono::milliseconds send_time{0};
-    bool ack_eliciting = false;
-    bool packet_ack_eliciting = false;
-    bool ignore_congestion = false;
-    bool ignore_loss = false;
-    bool connection_owned = false;
+    std::uint8_t flags = 0;
     QuicSlice data{};
-    QuicFrameDataBlock *data_block = nullptr;
+    QuicOutputFrameDataBlock *data_block = nullptr;
 
     union Payload {
         QuicPaddingFrame padding;
-        QuicAckFrame ack;
-        QuicCryptoFrame crypto;
-        QuicNewTokenFrame new_token;
-        QuicStreamFrame stream;
-        QuicCloseFrame close;
+        QuicOutputAckFrame ack;
+        QuicOutputCryptoFrame crypto;
+        QuicOutputNewTokenFrame new_token;
+        QuicOutputStreamFrame stream;
+        QuicOutputCloseFrame close;
         QuicResetStreamFrame reset_stream;
         QuicStopSendingFrame stop_sending;
         QuicMaxDataFrame max_data;
         QuicMaxStreamDataFrame max_stream_data;
-        QuicMaxStreamsFrame max_streams;
+        QuicOutputMaxStreamsFrame max_streams;
         QuicDataBlockedFrame data_blocked;
         QuicStreamDataBlockedFrame stream_data_blocked;
-        QuicStreamsBlockedFrame streams_blocked;
+        QuicOutputStreamsBlockedFrame streams_blocked;
         QuicNewConnectionIdFrame new_connection_id;
         QuicRetireConnectionIdFrame retire_connection_id;
         QuicPathChallengeFrame path_challenge;
         QuicPathChallengeFrame path_response;
     } u;
 
-    common::IntrusiveListHook queue_hook{};
+    QuicOutputFrame *next = nullptr;
+    bool queued = false;
+};
+
+enum QuicOutputFrameFlag : std::uint8_t {
+    QuicOutputFramePacketAnchor = 1U << 0U,
+    QuicOutputFramePacketAckEliciting = 1U << 1U,
+    QuicOutputFrameIgnoreLoss = 1U << 2U,
+};
+
+class QuicOutputFrameQueue {
+public:
+    [[nodiscard]] bool empty() const noexcept { return head_ == nullptr; }
+    [[nodiscard]] QuicOutputFrame *front() noexcept { return head_; }
+    [[nodiscard]] const QuicOutputFrame *front() const noexcept { return head_; }
+    [[nodiscard]] QuicOutputFrame *back() noexcept { return tail_; }
+    [[nodiscard]] const QuicOutputFrame *back() const noexcept { return tail_; }
+    [[nodiscard]] QuicOutputFrame *next_of(QuicOutputFrame &frame) noexcept { return frame.next; }
+    [[nodiscard]] const QuicOutputFrame *next_of(const QuicOutputFrame &frame) const noexcept { return frame.next; }
+
+    void push_front(QuicOutputFrame &frame) noexcept;
+    void push_back(QuicOutputFrame &frame) noexcept;
+    void insert_after(QuicOutputFrame &position, QuicOutputFrame &frame) noexcept;
+    void erase(QuicOutputFrame &frame) noexcept;
+    void erase_after(QuicOutputFrame *prev, QuicOutputFrame &frame) noexcept;
+    [[nodiscard]] QuicOutputFrame *pop_front() noexcept;
+    void prepend_all(QuicOutputFrameQueue &source) noexcept;
+
+private:
+    QuicOutputFrame *head_ = nullptr;
+    QuicOutputFrame *tail_ = nullptr;
+};
+
+inline constexpr std::size_t kQuicOutputFramePoolMaxCached = 1024;
+
+class QuicOutputFramePool : public common::NonCopyable, public common::NonMovable {
+public:
+    QuicOutputFramePool() noexcept = default;
+    ~QuicOutputFramePool();
+
+    [[nodiscard]] QuicOutputFrame *alloc() noexcept;
+    void release(QuicOutputFrame *frame) noexcept;
+    void clear() noexcept;
+
+    [[nodiscard]] std::size_t cached_count() const noexcept { return cached_count_; }
+
+private:
+    QuicOutputFrame *free_head_ = nullptr;
+    std::size_t cached_count_ = 0;
 };
 
 struct QuicInputFrameParseResult {
@@ -244,10 +324,12 @@ struct QuicInputFrameParseResult {
            type <= static_cast<std::uint64_t>(QuicFrameType::Stream7);
 }
 
-[[nodiscard]] common::IoResult<void> quic_frame_set_owned_data(QuicFrame &frame, const std::uint8_t *data,
-                                                               std::size_t len) noexcept;
-void quic_frame_retain_data(QuicFrame &frame) noexcept;
-void quic_frame_release_data(QuicFrame &frame) noexcept;
+[[nodiscard]] common::IoResult<void> quic_output_frame_set_owned_data(QuicOutputFrame &frame, const std::uint8_t *data,
+                                                                      std::size_t len) noexcept;
+void quic_output_frame_retain_data(QuicOutputFrame &frame) noexcept;
+void quic_output_frame_release_data(QuicOutputFrame &frame) noexcept;
+[[nodiscard]] bool quic_output_frame_ack_eliciting(QuicFrameType type) noexcept;
+[[nodiscard]] bool quic_output_frame_retransmittable_on_loss(QuicFrameType type) noexcept;
 
 } // namespace fiber::quic
 

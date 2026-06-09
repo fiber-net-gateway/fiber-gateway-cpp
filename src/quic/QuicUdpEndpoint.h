@@ -120,6 +120,7 @@ private:
     std::unique_ptr<net::UdpSocket> socket_{};
     std::unique_ptr<std::uint8_t[]> read_buffer_{};
     std::unique_ptr<std::uint8_t[]> plaintext_buffer_{};
+    QuicOutputFramePool output_frame_pool_{};
     QuicRecvExtentPool recv_extent_pool_{};
     QuicSendScheduler send_scheduler_{};
     DcidTree dcid_tree_{};

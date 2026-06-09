@@ -138,18 +138,15 @@ int add_handshake_data(SSL *ssl, enum ssl_encryption_level_t level, const std::u
     }
 
     QuicPacketNumberSpace &space = connection->packet_number_space(*quic_level);
-    QuicFrame *frame = space.alloc_frame();
+    QuicOutputFrame *frame = space.alloc_frame();
     if (frame == nullptr) {
         connection->close(QuicErrorCode::InternalError);
         return 0;
     }
 
     frame->type = QuicFrameType::Crypto;
-    frame->level = *quic_level;
     frame->u.crypto.offset = space.crypto_sent;
-    frame->u.crypto.length = len;
-    frame->ack_eliciting = true;
-    auto copied = quic_frame_set_owned_data(*frame, data, len);
+    auto copied = quic_output_frame_set_owned_data(*frame, data, len);
     if (!copied) {
         space.release_frame(*frame);
         connection->close(QuicErrorCode::InternalError);

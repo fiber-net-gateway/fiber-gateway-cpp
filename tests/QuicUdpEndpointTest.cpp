@@ -116,13 +116,12 @@ void build_initial_datagram(std::array<std::uint8_t, fiber::quic::kMinInitialDat
                             std::uint64_t packet_number = 1) {
     datagram = {};
 
-    fiber::quic::QuicFrame frame{};
+    fiber::quic::QuicOutputFrame frame{};
     frame.type = fiber::quic::QuicFrameType::Ping;
-    frame.ack_eliciting = true;
 
     std::array<std::uint8_t, 16> payload{};
     fiber::quic::QuicWriteCursor payload_out(payload.data(), payload.size());
-    auto payload_len = fiber::quic::quic_create_frame(&payload_out, frame);
+    auto payload_len = fiber::quic::quic_create_output_frame(&payload_out, frame);
     ASSERT_TRUE(payload_len.has_value());
 
     fiber::quic::QuicCryptoState crypto{};
@@ -405,17 +404,23 @@ recv_coalesced_initial_handshake(fiber::event::EventLoop *loop, fiber::quic::Qui
         co_return;
     }
 
-    fiber::quic::QuicFrame initial_ping{};
-    initial_ping.type = fiber::quic::QuicFrameType::Ping;
-    initial_ping.level = fiber::quic::QuicEncryptionLevel::Initial;
-    initial_ping.ack_eliciting = true;
-    server.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial).pending_frames.push_back(initial_ping);
+    auto &initial_space = server.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
+    fiber::quic::QuicOutputFrame *initial_ping = initial_space.alloc_frame();
+    if (initial_ping == nullptr) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::NoMem));
+        co_return;
+    }
+    initial_ping->type = fiber::quic::QuicFrameType::Ping;
+    initial_space.pending_frames.push_back(*initial_ping);
 
-    fiber::quic::QuicFrame handshake_ping{};
-    handshake_ping.type = fiber::quic::QuicFrameType::Ping;
-    handshake_ping.level = fiber::quic::QuicEncryptionLevel::Handshake;
-    handshake_ping.ack_eliciting = true;
-    server.packet_number_space(fiber::quic::QuicEncryptionLevel::Handshake).pending_frames.push_back(handshake_ping);
+    auto &handshake_space = server.packet_number_space(fiber::quic::QuicEncryptionLevel::Handshake);
+    fiber::quic::QuicOutputFrame *handshake_ping = handshake_space.alloc_frame();
+    if (handshake_ping == nullptr) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::NoMem));
+        co_return;
+    }
+    handshake_ping->type = fiber::quic::QuicFrameType::Ping;
+    handshake_space.pending_frames.push_back(*handshake_ping);
 
     fiber::quic::QuicConnection::Options client_options{};
     client_options.role = fiber::quic::QuicConnectionRole::Client;
@@ -512,13 +517,15 @@ recv_handshake_packet_with_many_frames(fiber::event::EventLoop *loop, fiber::qui
         co_return;
     }
 
-    std::array<fiber::quic::QuicFrame, 12> pings{};
     auto &space = server.packet_number_space(fiber::quic::QuicEncryptionLevel::Handshake);
-    for (fiber::quic::QuicFrame &frame: pings) {
-        frame.type = fiber::quic::QuicFrameType::Ping;
-        frame.level = fiber::quic::QuicEncryptionLevel::Handshake;
-        frame.ack_eliciting = true;
-        space.pending_frames.push_back(frame);
+    for (std::size_t i = 0; i < 12; ++i) {
+        fiber::quic::QuicOutputFrame *frame = space.alloc_frame();
+        if (frame == nullptr) {
+            done_promise->set_value(std::unexpected(fiber::common::IoErr::NoMem));
+            co_return;
+        }
+        frame->type = fiber::quic::QuicFrameType::Ping;
+        space.pending_frames.push_back(*frame);
     }
 
     fiber::quic::QuicConnection::Options client_options{};
@@ -555,7 +562,7 @@ recv_handshake_packet_with_many_frames(fiber::event::EventLoop *loop, fiber::qui
     }
 
     std::size_t sent_count = 0;
-    for (fiber::quic::QuicFrame *frame = space.sent_frames.front(); frame != nullptr;
+    for (fiber::quic::QuicOutputFrame *frame = space.sent_frames.front(); frame != nullptr;
          frame = space.sent_frames.next_of(*frame)) {
         ++sent_count;
     }
@@ -609,16 +616,16 @@ recv_split_handshake_crypto_frame(fiber::event::EventLoop *loop, fiber::quic::Qu
     for (std::size_t i = 0; i < crypto_data.size(); ++i) {
         crypto_data[i] = static_cast<std::uint8_t>(i);
     }
-    fiber::quic::QuicFrame crypto{};
-    crypto.type = fiber::quic::QuicFrameType::Crypto;
-    crypto.level = fiber::quic::QuicEncryptionLevel::Handshake;
-    crypto.ack_eliciting = true;
-    crypto.u.crypto.offset = 0;
-    crypto.u.crypto.length = crypto_data.size();
-    crypto.data = fiber::quic::QuicSlice{crypto_data.data(), crypto_data.size()};
-
     auto &space = server.packet_number_space(fiber::quic::QuicEncryptionLevel::Handshake);
-    space.pending_frames.push_back(crypto);
+    fiber::quic::QuicOutputFrame *crypto = space.alloc_frame();
+    if (crypto == nullptr) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::NoMem));
+        co_return;
+    }
+    crypto->type = fiber::quic::QuicFrameType::Crypto;
+    crypto->u.crypto.offset = 0;
+    crypto->data = fiber::quic::QuicSlice{crypto_data.data(), crypto_data.size()};
+    space.pending_frames.push_back(*crypto);
 
     fiber::quic::QuicConnection::Options client_options{};
     client_options.role = fiber::quic::QuicConnectionRole::Client;
@@ -653,13 +660,13 @@ recv_split_handshake_crypto_frame(fiber::event::EventLoop *loop, fiber::quic::Qu
         co_return;
     }
 
-    const fiber::quic::QuicFrame *sent = space.sent_frames.front();
-    const fiber::quic::QuicFrame *pending = space.pending_frames.front();
+    const fiber::quic::QuicOutputFrame *sent = space.sent_frames.front();
+    const fiber::quic::QuicOutputFrame *pending = space.pending_frames.front();
     done_promise->set_value(SplitFramePacketSummary{
             decoded->frame_count,
-            sent != nullptr ? static_cast<std::size_t>(sent->u.crypto.length) : 0,
-            pending != nullptr ? static_cast<std::size_t>(pending->u.crypto.length) : 0,
-            pending != nullptr && pending->connection_owned,
+            sent != nullptr ? sent->data.len : 0,
+            pending != nullptr ? pending->data.len : 0,
+            pending != nullptr,
             space.sending_frames.empty(),
             server.congestion().in_flight,
     });
@@ -712,11 +719,13 @@ DetachedTask recv_handshake_ack_only_when_congestion_full(
     space.pending_ack = 3;
     space.largest_received_packet_number = 3;
 
-    fiber::quic::QuicFrame ping{};
-    ping.type = fiber::quic::QuicFrameType::Ping;
-    ping.level = fiber::quic::QuicEncryptionLevel::Handshake;
-    ping.ack_eliciting = true;
-    space.pending_frames.push_back(ping);
+    fiber::quic::QuicOutputFrame *ping = space.alloc_frame();
+    if (ping == nullptr) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::NoMem));
+        co_return;
+    }
+    ping->type = fiber::quic::QuicFrameType::Ping;
+    space.pending_frames.push_back(*ping);
 
     fiber::quic::QuicConnection::Options client_options{};
     client_options.role = fiber::quic::QuicConnectionRole::Client;
@@ -752,7 +761,7 @@ DetachedTask recv_handshake_ack_only_when_congestion_full(
     }
 
     done_promise->set_value(AckOnlyPacketSummary{received->size, decoded->frame_count, decoded->ack_eliciting,
-                                                 space.pending_frames.front() == &ping, space.sending_frames.empty(),
+                                                 space.pending_frames.front() == ping, space.sending_frames.empty(),
                                                  server.congestion().in_flight});
     client.close();
 }

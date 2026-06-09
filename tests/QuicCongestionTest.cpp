@@ -66,15 +66,15 @@ TEST(QuicAckHandlerTest, AckedSentFrameUpdatesCongestionAndRtt) {
     fiber::quic::QuicConnection connection(options);
     auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
 
-    fiber::quic::QuicFrame frame{};
-    frame.type = fiber::quic::QuicFrameType::Ping;
-    frame.level = fiber::quic::QuicEncryptionLevel::Initial;
-    frame.packet_number = 0;
-    frame.packet_len = 1200;
-    frame.send_time = fiber::quic::QuicTime{10};
-    frame.packet_ack_eliciting = true;
+    fiber::quic::QuicOutputFrame *frame = space.alloc_frame();
+    ASSERT_NE(frame, nullptr);
+    frame->type = fiber::quic::QuicFrameType::Ping;
+    frame->packet_number = 0;
+    frame->packet_len = 1200;
+    frame->send_time = fiber::quic::QuicTime{10};
+    frame->flags = fiber::quic::QuicOutputFramePacketAnchor | fiber::quic::QuicOutputFramePacketAckEliciting;
     space.next_packet_number = 1;
-    space.sent_frames.push_back(frame);
+    space.sent_frames.push_back(*frame);
     fiber::quic::quic_congestion_on_packet_sent(connection.congestion(), 1200, true, false);
 
     fiber::quic::QuicInputFrame ack{};

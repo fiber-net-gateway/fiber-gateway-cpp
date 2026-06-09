@@ -66,7 +66,7 @@ TEST(QuicPacketCodecTest, EncodesAndDecodesProtectedInitialPacket) {
     fiber::quic::QuicConnection client(client_options);
     ASSERT_TRUE(client.init_initial_crypto(original_dcid));
 
-    fiber::quic::QuicFrame frames[1]{};
+    fiber::quic::QuicOutputFrame frames[1]{};
     frames[0].type = fiber::quic::QuicFrameType::Ping;
 
     std::array<std::uint8_t, 1400> datagram{};
@@ -171,7 +171,7 @@ TEST_P(QuicPacketCodecSuiteTest, EncodesAndDecodesApplicationPacket) {
         ASSERT_EQ(server_keys->hp[i], client_keys->hp[i]) << i;
     }
 
-    fiber::quic::QuicFrame frame{};
+    fiber::quic::QuicOutputFrame frame{};
     frame.type = fiber::quic::QuicFrameType::Ping;
 
     std::array<std::uint8_t, 256> datagram{};
