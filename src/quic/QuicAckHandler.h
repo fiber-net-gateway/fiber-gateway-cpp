@@ -16,7 +16,7 @@ struct QuicAckProcessResult {
 };
 
 [[nodiscard]] common::IoResult<QuicAckProcessResult>
-quic_handle_ack_frame(QuicConnection &connection, QuicEncryptionLevel level, const QuicFrame &frame, QuicTime now,
+quic_handle_ack_frame(QuicConnection &connection, QuicEncryptionLevel level, const QuicInputFrame &frame, QuicTime now,
                       std::uint64_t ack_delay_exponent = 3, QuicTime max_ack_delay = QuicTime{25},
                       bool handshake_confirmed = false) noexcept;
 

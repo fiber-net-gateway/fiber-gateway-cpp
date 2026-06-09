@@ -41,11 +41,11 @@ void quic_restore_packet_number(QuicPacketNumberSpace &space, QuicPacketNumberSp
 [[nodiscard]] bool quic_frame_allowed(QuicEncryptionLevel level, QuicFrameType frame_type) noexcept;
 [[nodiscard]] bool quic_frame_allowed_for_receiver(QuicConnectionRole receiver_role, QuicEncryptionLevel level,
                                                    QuicFrameType frame_type) noexcept;
-[[nodiscard]] common::IoResult<QuicFrameParseResult> quic_parse_frame(QuicEncryptionLevel level,
-                                                                      QuicReadCursor &payload) noexcept;
-[[nodiscard]] common::IoResult<QuicFrameParseResult> quic_parse_frame_for_receiver(QuicConnectionRole receiver_role,
-                                                                                   QuicEncryptionLevel level,
-                                                                                   QuicReadCursor &payload) noexcept;
+[[nodiscard]] common::IoResult<QuicInputFrameParseResult> quic_parse_frame(QuicEncryptionLevel level,
+                                                                           QuicReadCursor &payload) noexcept;
+[[nodiscard]] common::IoResult<QuicInputFrameParseResult>
+quic_parse_frame_for_receiver(QuicConnectionRole receiver_role, QuicEncryptionLevel level,
+                              QuicReadCursor &payload) noexcept;
 [[nodiscard]] common::IoResult<std::size_t> quic_frame_encoded_len(QuicFrame &frame) noexcept;
 [[nodiscard]] common::IoResult<std::size_t> quic_create_frame(QuicWriteCursor *out, QuicFrame &frame) noexcept;
 

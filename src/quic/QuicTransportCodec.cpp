@@ -272,7 +272,7 @@ parse_long_header(const std::uint8_t *datagram, std::size_t datagram_len, std::u
     return out->fill(0, bytes);
 }
 
-[[nodiscard]] common::IoResult<void> parse_close_frame(QuicReadCursor &payload, QuicFrame &frame) noexcept {
+[[nodiscard]] common::IoResult<void> parse_close_frame(QuicReadCursor &payload, QuicInputFrame &frame) noexcept {
     auto error_code = quic_parse_varint(payload);
     if (!error_code) {
         return std::unexpected(error_code.error());
@@ -633,20 +633,21 @@ bool quic_frame_allowed_for_receiver(QuicConnectionRole receiver_role, QuicEncry
     return frame_type == QuicFrameType::NewToken || frame_type == QuicFrameType::HandshakeDone;
 }
 
-common::IoResult<QuicFrameParseResult> quic_parse_frame(QuicEncryptionLevel level, QuicReadCursor &payload) noexcept {
+common::IoResult<QuicInputFrameParseResult> quic_parse_frame(QuicEncryptionLevel level,
+                                                             QuicReadCursor &payload) noexcept {
     return quic_parse_frame_for_receiver(QuicConnectionRole::Server, level, payload);
 }
 
-common::IoResult<QuicFrameParseResult> quic_parse_frame_for_receiver(QuicConnectionRole receiver_role,
-                                                                     QuicEncryptionLevel level,
-                                                                     QuicReadCursor &payload) noexcept {
+common::IoResult<QuicInputFrameParseResult> quic_parse_frame_for_receiver(QuicConnectionRole receiver_role,
+                                                                          QuicEncryptionLevel level,
+                                                                          QuicReadCursor &payload) noexcept {
     const std::size_t start = payload.offset();
     auto type_value = quic_parse_varint(payload);
     if (!type_value || *type_value > kLastFrameType) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    QuicFrame frame{};
+    QuicInputFrame frame{};
     frame.type = static_cast<QuicFrameType>(*type_value);
     frame.level = level;
     frame.ack_eliciting = frame.type != QuicFrameType::Padding && frame.type != QuicFrameType::Ack &&
@@ -936,7 +937,7 @@ common::IoResult<QuicFrameParseResult> quic_parse_frame_for_receiver(QuicConnect
             break;
     }
 
-    QuicFrameParseResult result{};
+    QuicInputFrameParseResult result{};
     result.frame = frame;
     result.consumed = payload.offset() - start;
     return result;
