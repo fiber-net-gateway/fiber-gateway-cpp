@@ -95,24 +95,18 @@ void QuicCryptoState::reset() noexcept {
 QuicPacketNumberSpace::QuicPacketNumberSpace() noexcept { reset(QuicEncryptionLevel::Initial); }
 
 QuicPacketNumberSpace::~QuicPacketNumberSpace() {
-    auto delete_owned = [](QuicFrameQueue &queue) noexcept {
-        QuicFrame *frame = queue.front();
-        while (frame != nullptr) {
-            QuicFrame *next = queue.next_of(*frame);
-            queue.erase(*frame);
-            if (frame->connection_owned) {
-                quic_frame_release_data(*frame);
-                delete frame;
-            }
-            frame = next;
+    auto release_queue = [this](QuicOutputFrameQueue &queue) noexcept {
+        while (QuicOutputFrame *frame = queue.pop_front()) {
+            release_frame(*frame);
         }
     };
 
-    delete_owned(pending_frames);
-    delete_owned(sending_frames);
-    delete_owned(sent_frames);
-    delete_owned(free_frames);
+    release_queue(pending_frames);
+    release_queue(sending_frames);
+    release_queue(sent_frames);
 }
+
+void QuicPacketNumberSpace::set_frame_pool(QuicOutputFramePool &pool) noexcept { frame_pool = &pool; }
 
 void QuicPacketNumberSpace::reset(QuicEncryptionLevel space_level) noexcept {
     level = space_level;
@@ -120,7 +114,7 @@ void QuicPacketNumberSpace::reset(QuicEncryptionLevel space_level) noexcept {
     next_packet_number = 0;
     largest_acked_packet_number = kUnsetPacketNumber;
     largest_received_packet_number = kUnsetPacketNumber;
-    ack_frame = QuicFrame{};
+    ack_frame = QuicOutputFrame{};
     pending_ack = kUnsetPacketNumber;
     largest_range = kUnsetPacketNumber;
     first_range = kUnsetPacketNumber;
@@ -132,35 +126,25 @@ void QuicPacketNumberSpace::reset(QuicEncryptionLevel space_level) noexcept {
     send_ack = false;
 }
 
-QuicFrame *QuicPacketNumberSpace::alloc_frame() noexcept {
-    QuicFrame *frame = free_frames.front();
-    if (frame != nullptr) {
-        free_frames.erase(*frame);
-        quic_frame_release_data(*frame);
-        *frame = QuicFrame{};
-        frame->connection_owned = true;
-        return frame;
-    }
-
-    frame = new (std::nothrow) QuicFrame{};
-    if (frame != nullptr) {
-        frame->connection_owned = true;
-    }
-    return frame;
+QuicOutputFrame *QuicPacketNumberSpace::alloc_frame() noexcept {
+    return frame_pool != nullptr ? frame_pool->alloc() : new (std::nothrow) QuicOutputFrame{};
 }
 
-void QuicPacketNumberSpace::release_frame(QuicFrame &frame) noexcept {
-    if (&frame == &ack_frame || !frame.connection_owned) {
+void QuicPacketNumberSpace::release_frame(QuicOutputFrame &frame) noexcept {
+    if (&frame == &ack_frame) {
         return;
     }
-    if (frame.queue_hook.linked()) {
+    if (frame.queued) {
         return;
     }
 
-    quic_frame_release_data(frame);
-    frame = QuicFrame{};
-    frame.connection_owned = true;
-    free_frames.push_front(frame);
+    if (frame_pool != nullptr) {
+        frame_pool->release(&frame);
+        return;
+    }
+
+    quic_output_frame_release_data(frame);
+    delete &frame;
 }
 
 void QuicPacketNumberSpace::record_received_packet_number(std::uint64_t packet_number) noexcept {
@@ -178,9 +162,14 @@ void QuicPacketNumberSpace::record_acked_packet_number(std::uint64_t packet_numb
 QuicConnection::QuicConnection(const Options &options) noexcept :
     options_(options), next_local_bidi_stream_id_(initial_stream_id(options.role, QuicStreamType::Bidirectional)),
     next_local_uni_stream_id_(initial_stream_id(options.role, QuicStreamType::Unidirectional)) {
+    QuicOutputFramePool &frame_pool =
+            options_.output_frame_pool != nullptr ? *options_.output_frame_pool : output_frame_pool_;
     packet_number_spaces_[0].reset(QuicEncryptionLevel::Initial);
+    packet_number_spaces_[0].set_frame_pool(frame_pool);
     packet_number_spaces_[1].reset(QuicEncryptionLevel::Handshake);
+    packet_number_spaces_[1].set_frame_pool(frame_pool);
     packet_number_spaces_[2].reset(QuicEncryptionLevel::Application);
+    packet_number_spaces_[2].set_frame_pool(frame_pool);
     quic_congestion_init(congestion_, QuicTime{0});
     quic_rtt_init(rtt_);
 

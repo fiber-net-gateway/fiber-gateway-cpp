@@ -193,20 +193,23 @@ TEST(QuicConnectionTest, AdvancesPacketNumbersIndependentlyPerSpace) {
 TEST(QuicConnectionTest, QueuesFramesIntrusively) {
     fiber::quic::QuicConnection conn(fiber::quic::QuicConnection::Options{});
     auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
-    fiber::quic::QuicFrame first{};
-    fiber::quic::QuicFrame second{};
+    fiber::quic::QuicOutputFrame *first = space.alloc_frame();
+    fiber::quic::QuicOutputFrame *second = space.alloc_frame();
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
 
-    space.pending_frames.push_back(first);
-    space.pending_frames.push_back(second);
+    space.pending_frames.push_back(*first);
+    space.pending_frames.push_back(*second);
 
     EXPECT_FALSE(space.pending_frames.empty());
-    EXPECT_EQ(space.pending_frames.front(), &first);
-    EXPECT_EQ(space.pending_frames.back(), &second);
+    EXPECT_EQ(space.pending_frames.front(), first);
+    EXPECT_EQ(space.pending_frames.back(), second);
 
-    space.pending_frames.erase(first);
+    space.pending_frames.erase(*first);
+    space.release_frame(*first);
 
-    EXPECT_EQ(space.pending_frames.front(), &second);
-    EXPECT_EQ(space.pending_frames.back(), &second);
+    EXPECT_EQ(space.pending_frames.front(), second);
+    EXPECT_EQ(space.pending_frames.back(), second);
 }
 
 TEST(QuicConnectionTest, CreatesInitialActivePathFromOptions) {

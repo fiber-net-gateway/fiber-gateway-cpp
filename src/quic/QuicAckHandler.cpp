@@ -17,52 +17,12 @@ struct AckStat {
     bool max_packet_ack_eliciting = false;
 };
 
-[[nodiscard]] bool retransmittable_on_loss(QuicFrameType type) noexcept {
-    switch (type) {
-        case QuicFrameType::Ack:
-        case QuicFrameType::AckEcn:
-        case QuicFrameType::Padding:
-        case QuicFrameType::Ping:
-        case QuicFrameType::PathChallenge:
-        case QuicFrameType::PathResponse:
-        case QuicFrameType::ConnectionClose:
-        case QuicFrameType::ConnectionCloseApp:
-            return false;
-
-        case QuicFrameType::Crypto:
-        case QuicFrameType::ResetStream:
-        case QuicFrameType::StopSending:
-        case QuicFrameType::NewToken:
-        case QuicFrameType::Stream:
-        case QuicFrameType::Stream1:
-        case QuicFrameType::Stream2:
-        case QuicFrameType::Stream3:
-        case QuicFrameType::Stream4:
-        case QuicFrameType::Stream5:
-        case QuicFrameType::Stream6:
-        case QuicFrameType::Stream7:
-        case QuicFrameType::MaxData:
-        case QuicFrameType::MaxStreamData:
-        case QuicFrameType::MaxStreamsBidi:
-        case QuicFrameType::MaxStreamsUni:
-        case QuicFrameType::DataBlocked:
-        case QuicFrameType::StreamDataBlocked:
-        case QuicFrameType::StreamsBlockedBidi:
-        case QuicFrameType::StreamsBlockedUni:
-        case QuicFrameType::NewConnectionId:
-        case QuicFrameType::RetireConnectionId:
-        case QuicFrameType::HandshakeDone:
-            return true;
-    }
-    return false;
-}
-
 [[nodiscard]] QuicTime oldest_sent_time(QuicConnection &connection) noexcept {
     QuicTime oldest = QuicTime::max();
     constexpr QuicEncryptionLevel levels[] = {QuicEncryptionLevel::Initial, QuicEncryptionLevel::Handshake,
                                               QuicEncryptionLevel::Application};
     for (QuicEncryptionLevel level: levels) {
-        QuicFrame *frame = connection.packet_number_space(level).sent_frames.front();
+        QuicOutputFrame *frame = connection.packet_number_space(level).sent_frames.front();
         if (frame != nullptr && frame->send_time < oldest) {
             oldest = frame->send_time;
         }
@@ -75,9 +35,10 @@ struct AckStat {
                                                       QuicTime now, AckStat &stat,
                                                       QuicAckProcessResult &result) noexcept {
     bool found = false;
-    QuicFrame *frame = space.sent_frames.front();
+    QuicOutputFrame *prev = nullptr;
+    QuicOutputFrame *frame = space.sent_frames.front();
     while (frame != nullptr) {
-        QuicFrame *next = space.sent_frames.next_of(*frame);
+        QuicOutputFrame *next = space.sent_frames.next_of(*frame);
         if (frame->packet_number > max_packet_number) {
             break;
         }
@@ -91,7 +52,7 @@ struct AckStat {
                 result.unblocked = result.unblocked || unblocked;
             }
 
-            if (frame->packet_number == max_packet_number && frame->packet_ack_eliciting) {
+            if (frame->packet_number == max_packet_number && (frame->flags & QuicOutputFramePacketAckEliciting) != 0) {
                 stat.max_packet_send_time = frame->send_time;
                 stat.max_packet_ack_eliciting = true;
             }
@@ -102,12 +63,14 @@ struct AckStat {
                 stat.newest = frame->send_time;
             }
 
-            space.sent_frames.erase(*frame);
+            space.sent_frames.erase_after(prev, *frame);
             frame->packet_len = 0;
-            frame->packet_ack_eliciting = false;
+            frame->flags = 0;
             space.release_frame(*frame);
             found = true;
             result.acked_frames = true;
+        } else {
+            prev = frame;
         }
 
         frame = next;
@@ -134,7 +97,7 @@ struct AckStat {
             continue;
         }
 
-        QuicFrame *front = space.sent_frames.front();
+        QuicOutputFrame *front = space.sent_frames.front();
         if (front == nullptr) {
             continue;
         }
@@ -165,15 +128,18 @@ struct AckStat {
             if (front->packet_len != 0) {
                 const bool unblocked = quic_congestion_on_loss(
                         connection.congestion(),
-                        QuicLossSample{front->packet_len, front->packet_number, front->send_time, front->ignore_loss},
+                        QuicLossSample{front->packet_len, front->packet_number, front->send_time,
+                                       (front->flags & QuicOutputFrameIgnoreLoss) != 0},
                         connection.reset_packet_number(), now, connection.congestion().mtu);
                 result.unblocked = result.unblocked || unblocked;
             }
 
-            space.sent_frames.erase(*front);
+            (void) space.sent_frames.pop_front();
+            front->packet_number = 0;
             front->packet_len = 0;
-            front->packet_ack_eliciting = false;
-            if (retransmittable_on_loss(front->type)) {
+            front->send_time = QuicTime{0};
+            front->flags = 0;
+            if (quic_output_frame_retransmittable_on_loss(front->type)) {
                 space.pending_frames.push_back(*front);
                 result.lost_frames = true;
             } else {

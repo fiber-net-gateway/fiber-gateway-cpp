@@ -24,7 +24,7 @@ inline constexpr std::uint8_t kShortReservedBitsMask = 0x18;
 
 [[nodiscard]] common::IoResult<std::size_t> encoded_frames_len(const QuicPacketEncodeSpec &spec, bool &ack_eliciting,
                                                                std::size_t &frame_count) noexcept {
-    QuicFrame *frames = spec.frames;
+    QuicOutputFrame *frames = spec.frames;
     const std::size_t count = spec.frame_count;
     if (frames == nullptr && count != 0) {
         return std::unexpected(common::IoErr::Invalid);
@@ -34,46 +34,46 @@ inline constexpr std::uint8_t kShortReservedBitsMask = 0x18;
     ack_eliciting = false;
     frame_count = 0;
     if (spec.frame_queue != nullptr) {
-        for (QuicFrame *frame = spec.frame_queue->front(); frame != nullptr;
+        for (QuicOutputFrame *frame = spec.frame_queue->front(); frame != nullptr;
              frame = spec.frame_queue->next_of(*frame)) {
-            auto frame_len = quic_frame_encoded_len(*frame);
+            auto frame_len = quic_output_frame_encoded_len(*frame);
             if (!frame_len) {
                 return std::unexpected(frame_len.error());
             }
             len += *frame_len;
-            ack_eliciting = ack_eliciting || frame->ack_eliciting;
+            ack_eliciting = ack_eliciting || quic_output_frame_ack_eliciting(frame->type);
             ++frame_count;
         }
     }
     for (std::size_t i = 0; i < count; ++i) {
-        auto frame_len = quic_frame_encoded_len(frames[i]);
+        auto frame_len = quic_output_frame_encoded_len(frames[i]);
         if (!frame_len) {
             return std::unexpected(frame_len.error());
         }
         len += *frame_len;
-        ack_eliciting = ack_eliciting || frames[i].ack_eliciting;
+        ack_eliciting = ack_eliciting || quic_output_frame_ack_eliciting(frames[i].type);
         ++frame_count;
     }
     return len;
 }
 
 [[nodiscard]] common::IoResult<void> encode_frames(QuicWriteCursor &out, const QuicPacketEncodeSpec &spec) noexcept {
-    QuicFrame *frames = spec.frames;
+    QuicOutputFrame *frames = spec.frames;
     const std::size_t count = spec.frame_count;
     if (frames == nullptr && count != 0) {
         return std::unexpected(common::IoErr::Invalid);
     }
     if (spec.frame_queue != nullptr) {
-        for (QuicFrame *frame = spec.frame_queue->front(); frame != nullptr;
+        for (QuicOutputFrame *frame = spec.frame_queue->front(); frame != nullptr;
              frame = spec.frame_queue->next_of(*frame)) {
-            auto written = quic_create_frame(&out, *frame);
+            auto written = quic_create_output_frame(&out, *frame);
             if (!written) {
                 return std::unexpected(written.error());
             }
         }
     }
     for (std::size_t i = 0; i < count; ++i) {
-        auto written = quic_create_frame(&out, frames[i]);
+        auto written = quic_create_output_frame(&out, frames[i]);
         if (!written) {
             return std::unexpected(written.error());
         }

@@ -101,17 +101,16 @@ struct QuicAckRange {
     std::uint64_t range = 0;
 };
 
-using QuicFrameQueue = common::IntrusiveList<QuicFrame, offsetof(QuicFrame, queue_hook)>;
-
 struct QuicPacketNumberSpace {
     QuicPacketNumberSpace() noexcept;
     ~QuicPacketNumberSpace();
 
+    void set_frame_pool(QuicOutputFramePool &pool) noexcept;
     void reset(QuicEncryptionLevel space_level) noexcept;
     void record_received_packet_number(std::uint64_t packet_number) noexcept;
     void record_acked_packet_number(std::uint64_t packet_number) noexcept;
-    [[nodiscard]] QuicFrame *alloc_frame() noexcept;
-    void release_frame(QuicFrame &frame) noexcept;
+    [[nodiscard]] QuicOutputFrame *alloc_frame() noexcept;
+    void release_frame(QuicOutputFrame &frame) noexcept;
 
     QuicEncryptionLevel level;
 
@@ -121,11 +120,11 @@ struct QuicPacketNumberSpace {
     std::uint64_t largest_acked_packet_number = 0;
     std::uint64_t largest_received_packet_number = 0;
 
-    QuicFrameQueue pending_frames{};
-    QuicFrameQueue sending_frames{};
-    QuicFrameQueue sent_frames{};
-    QuicFrameQueue free_frames{};
-    QuicFrame ack_frame{};
+    QuicOutputFrameQueue pending_frames{};
+    QuicOutputFrameQueue sending_frames{};
+    QuicOutputFrameQueue sent_frames{};
+    QuicOutputFrame ack_frame{};
+    QuicOutputFramePool *frame_pool = nullptr;
 
     std::uint64_t pending_ack = 0;
     std::uint64_t largest_range = 0;
@@ -315,6 +314,7 @@ public:
         std::uint64_t max_peer_unidirectional_streams = kQuicDefaultMaxUnidirectionalStreams;
         std::uint64_t max_local_bidirectional_streams = kQuicDefaultMaxBidirectionalStreams;
         std::uint64_t max_local_unidirectional_streams = kQuicDefaultMaxUnidirectionalStreams;
+        QuicOutputFramePool *output_frame_pool = nullptr;
         void *owner = nullptr;
         Ops ops{};
     };
@@ -427,6 +427,7 @@ private:
     std::uint64_t next_local_uni_stream_id_ = 0;
     std::uint64_t largest_peer_bidi_sequence_ = 0;
     std::uint64_t largest_peer_uni_sequence_ = 0;
+    QuicOutputFramePool output_frame_pool_{};
     std::array<QuicPacketNumberSpace, kQuicPacketNumberSpaceCount> packet_number_spaces_{};
     QuicCongestionState congestion_{};
     QuicRttState rtt_{};

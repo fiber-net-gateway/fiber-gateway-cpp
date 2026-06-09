@@ -113,15 +113,14 @@ fiber::quic::QuicReceivedDatagram received_datagram(std::uint8_t *data, std::siz
 
 TEST(QuicPacketProcessorTest, ProcessesClientInitialCryptoFrame) {
     const std::array<std::uint8_t, 3> crypto_data{'t', 'l', 's'};
-    fiber::quic::QuicFrame frame{};
+    fiber::quic::QuicOutputFrame frame{};
     frame.type = fiber::quic::QuicFrameType::Crypto;
     frame.u.crypto.offset = 0;
-    frame.u.crypto.length = crypto_data.size();
     frame.data = {crypto_data.data(), crypto_data.size()};
 
     std::array<std::uint8_t, 64> payload{};
     fiber::quic::QuicWriteCursor payload_out(payload.data(), payload.size());
-    auto payload_len = fiber::quic::quic_create_frame(&payload_out, frame);
+    auto payload_len = fiber::quic::quic_create_output_frame(&payload_out, frame);
     ASSERT_TRUE(payload_len.has_value());
 
     std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
@@ -152,16 +151,15 @@ TEST(QuicPacketProcessorTest, ProcessesClientInitialCryptoFrame) {
 
 TEST(QuicPacketProcessorTest, RejectsInitialStreamFrame) {
     const std::array<std::uint8_t, 3> stream_data{'b', 'a', 'd'};
-    fiber::quic::QuicFrame frame{};
+    fiber::quic::QuicOutputFrame frame{};
     frame.type = fiber::quic::QuicFrameType::Stream;
     frame.u.stream.stream_id = 0;
-    frame.u.stream.length = stream_data.size();
     frame.u.stream.has_length = true;
     frame.data = {stream_data.data(), stream_data.size()};
 
     std::array<std::uint8_t, 64> payload{};
     fiber::quic::QuicWriteCursor payload_out(payload.data(), payload.size());
-    auto payload_len = fiber::quic::quic_create_frame(&payload_out, frame);
+    auto payload_len = fiber::quic::quic_create_output_frame(&payload_out, frame);
     ASSERT_TRUE(payload_len.has_value());
 
     std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
@@ -284,7 +282,7 @@ TEST(QuicPacketProcessorTest, ProcessesApplicationPingPacket) {
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(server.crypto(), fiber::quic::QuicEncryptionLevel::Application,
                                                         false, suite, secret.data(), 32));
 
-    fiber::quic::QuicFrame frame{};
+    fiber::quic::QuicOutputFrame frame{};
     frame.type = fiber::quic::QuicFrameType::Ping;
 
     std::array<std::uint8_t, 256> datagram{};

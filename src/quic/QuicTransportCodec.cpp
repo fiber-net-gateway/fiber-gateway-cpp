@@ -943,13 +943,11 @@ common::IoResult<QuicInputFrameParseResult> quic_parse_frame_for_receiver(QuicCo
     return result;
 }
 
-common::IoResult<std::size_t> quic_create_frame(QuicWriteCursor *out, QuicFrame &frame) noexcept {
+common::IoResult<std::size_t> quic_create_output_frame(QuicWriteCursor *out, QuicOutputFrame &frame) noexcept {
     std::size_t len = 0;
-    frame.ack_eliciting = true;
 
     switch (frame.type) {
         case QuicFrameType::Padding: {
-            frame.ack_eliciting = false;
             const std::size_t count = std::max<std::size_t>(1, static_cast<std::size_t>(frame.u.padding.length));
             auto wrote = write_or_count_padding(out, count, len);
             if (!wrote) {
@@ -968,7 +966,6 @@ common::IoResult<std::size_t> quic_create_frame(QuicWriteCursor *out, QuicFrame 
 
         case QuicFrameType::Ack:
         case QuicFrameType::AckEcn: {
-            frame.ack_eliciting = false;
             auto wrote = write_or_count_varint(out, static_cast<std::uint64_t>(frame.type), len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
@@ -1006,11 +1003,11 @@ common::IoResult<std::size_t> quic_create_frame(QuicWriteCursor *out, QuicFrame 
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
-            wrote = write_or_count_varint(out, frame.u.crypto.length, len);
+            wrote = write_or_count_varint(out, frame.data.len, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
-            wrote = write_or_count_bytes(out, frame.data.data, static_cast<std::size_t>(frame.u.crypto.length), len);
+            wrote = write_or_count_bytes(out, frame.data.data, frame.data.len, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
@@ -1019,7 +1016,7 @@ common::IoResult<std::size_t> quic_create_frame(QuicWriteCursor *out, QuicFrame 
 
         case QuicFrameType::Stream: {
             std::uint64_t type = static_cast<std::uint64_t>(QuicFrameType::Stream);
-            if (frame.u.stream.has_offset) {
+            if (frame.u.stream.offset != 0) {
                 type |= kStreamFrameOff;
             }
             if (frame.u.stream.has_length) {
@@ -1036,19 +1033,19 @@ common::IoResult<std::size_t> quic_create_frame(QuicWriteCursor *out, QuicFrame 
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
-            if (frame.u.stream.has_offset) {
+            if (frame.u.stream.offset != 0) {
                 wrote = write_or_count_varint(out, frame.u.stream.offset, len);
                 if (!wrote) {
                     return std::unexpected(wrote.error());
                 }
             }
             if (frame.u.stream.has_length) {
-                wrote = write_or_count_varint(out, frame.u.stream.length, len);
+                wrote = write_or_count_varint(out, frame.data.len, len);
                 if (!wrote) {
                     return std::unexpected(wrote.error());
                 }
             }
-            wrote = write_or_count_bytes(out, frame.data.data, static_cast<std::size_t>(frame.u.stream.length), len);
+            wrote = write_or_count_bytes(out, frame.data.data, frame.data.len, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
@@ -1057,7 +1054,6 @@ common::IoResult<std::size_t> quic_create_frame(QuicWriteCursor *out, QuicFrame 
 
         case QuicFrameType::ConnectionClose:
         case QuicFrameType::ConnectionCloseApp: {
-            frame.ack_eliciting = false;
             auto wrote = write_or_count_varint(out, static_cast<std::uint64_t>(frame.type), len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
@@ -1072,11 +1068,11 @@ common::IoResult<std::size_t> quic_create_frame(QuicWriteCursor *out, QuicFrame 
                     return std::unexpected(wrote.error());
                 }
             }
-            wrote = write_or_count_varint(out, frame.u.close.reason.len, len);
+            wrote = write_or_count_varint(out, frame.data.len, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
-            wrote = write_or_count_bytes(out, frame.u.close.reason.data, frame.u.close.reason.len, len);
+            wrote = write_or_count_bytes(out, frame.data.data, frame.data.len, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
@@ -1145,8 +1141,8 @@ common::IoResult<std::size_t> quic_create_frame(QuicWriteCursor *out, QuicFrame 
 
         case QuicFrameType::MaxStreamsBidi:
         case QuicFrameType::MaxStreamsUni: {
-            const auto type =
-                    frame.u.max_streams.bidirectional ? QuicFrameType::MaxStreamsBidi : QuicFrameType::MaxStreamsUni;
+            const auto type = frame.type == QuicFrameType::MaxStreamsBidi ? QuicFrameType::MaxStreamsBidi
+                                                                          : QuicFrameType::MaxStreamsUni;
             auto wrote = write_or_count_varint(out, static_cast<std::uint64_t>(type), len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
@@ -1188,8 +1184,8 @@ common::IoResult<std::size_t> quic_create_frame(QuicWriteCursor *out, QuicFrame 
 
         case QuicFrameType::StreamsBlockedBidi:
         case QuicFrameType::StreamsBlockedUni: {
-            const auto type = frame.u.streams_blocked.bidirectional ? QuicFrameType::StreamsBlockedBidi
-                                                                    : QuicFrameType::StreamsBlockedUni;
+            const auto type = frame.type == QuicFrameType::StreamsBlockedBidi ? QuicFrameType::StreamsBlockedBidi
+                                                                              : QuicFrameType::StreamsBlockedUni;
             auto wrote = write_or_count_varint(out, static_cast<std::uint64_t>(type), len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
@@ -1275,11 +1271,11 @@ common::IoResult<std::size_t> quic_create_frame(QuicWriteCursor *out, QuicFrame 
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
-            wrote = write_or_count_varint(out, frame.u.new_token.length, len);
+            wrote = write_or_count_varint(out, frame.data.len, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
-            wrote = write_or_count_bytes(out, frame.data.data, static_cast<std::size_t>(frame.u.new_token.length), len);
+            wrote = write_or_count_bytes(out, frame.data.data, frame.data.len, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
@@ -1299,12 +1295,12 @@ common::IoResult<std::size_t> quic_create_frame(QuicWriteCursor *out, QuicFrame 
     return std::unexpected(common::IoErr::NotSupported);
 }
 
-common::IoResult<std::size_t> quic_frame_encoded_len(QuicFrame &frame) noexcept {
+common::IoResult<std::size_t> quic_output_frame_encoded_len(QuicOutputFrame &frame) noexcept {
     if (frame.encoded_len != 0) {
         return frame.encoded_len;
     }
 
-    auto frame_len = quic_create_frame(nullptr, frame);
+    auto frame_len = quic_create_output_frame(nullptr, frame);
     if (!frame_len) {
         return std::unexpected(frame_len.error());
     }

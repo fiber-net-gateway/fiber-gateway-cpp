@@ -70,10 +70,8 @@ namespace {
     return path;
 }
 
-void discard_frame_queue(QuicPacketNumberSpace &space, QuicFrameQueue &queue) noexcept {
-    while (!queue.empty()) {
-        QuicFrame *frame = queue.front();
-        queue.erase(*frame);
+void discard_frame_queue(QuicPacketNumberSpace &space, QuicOutputFrameQueue &queue) noexcept {
+    while (QuicOutputFrame *frame = queue.pop_front()) {
         space.release_frame(*frame);
     }
 }
@@ -83,7 +81,7 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
     discard_frame_queue(space, space.pending_frames);
     discard_frame_queue(space, space.sending_frames);
     discard_frame_queue(space, space.sent_frames);
-    if (space.ack_frame.queue_hook.linked()) {
+    if (space.ack_frame.queued) {
         space.pending_frames.erase(space.ack_frame);
     }
     space.send_ack = false;
@@ -104,13 +102,11 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
     }
 
     QuicPacketNumberSpace &space = conn.packet_number_space(QuicEncryptionLevel::Application);
-    QuicFrame *frame = space.alloc_frame();
+    QuicOutputFrame *frame = space.alloc_frame();
     if (frame == nullptr) {
         return std::unexpected(common::IoErr::NoMem);
     }
     frame->type = QuicFrameType::HandshakeDone;
-    frame->level = QuicEncryptionLevel::Application;
-    frame->ack_eliciting = true;
     space.pending_frames.push_back(*frame);
     return {};
 }
