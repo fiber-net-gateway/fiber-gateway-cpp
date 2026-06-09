@@ -211,7 +211,7 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
 }
 
 [[nodiscard]] common::IoResult<bool> handle_crypto_frame(QuicConnection &conn, QuicEncryptionLevel level,
-                                                         const QuicFrame &frame) noexcept {
+                                                         const QuicInputFrame &frame) noexcept {
     auto provided = provide_crypto_data(conn, level, frame.u.crypto.offset, frame.data);
     if (!provided) {
         return std::unexpected(provided.error());
@@ -301,7 +301,7 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
             return std::unexpected(parsed.error());
         }
 
-        QuicFrame &frame = parsed->frame;
+        QuicInputFrame &frame = parsed->frame;
         ++result.frame_count;
         result.ack_eliciting = result.ack_eliciting || frame.ack_eliciting;
         result.non_probing = result.non_probing || !probing_frame(frame.type);

@@ -194,7 +194,7 @@ struct AckStat {
 } // namespace
 
 common::IoResult<QuicAckProcessResult> quic_handle_ack_frame(QuicConnection &connection, QuicEncryptionLevel level,
-                                                             const QuicFrame &frame, QuicTime now,
+                                                             const QuicInputFrame &frame, QuicTime now,
                                                              std::uint64_t ack_delay_exponent, QuicTime max_ack_delay,
                                                              bool handshake_confirmed) noexcept {
     if (frame.type != QuicFrameType::Ack && frame.type != QuicFrameType::AckEcn) {

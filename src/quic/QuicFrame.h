@@ -163,6 +163,36 @@ struct QuicPathChallengeFrame {
     std::uint8_t data[8]{};
 };
 
+struct QuicInputFrame {
+    QuicInputFrame() noexcept : u{} {}
+
+    QuicFrameType type = QuicFrameType::Padding;
+    QuicEncryptionLevel level = QuicEncryptionLevel::Initial;
+    bool ack_eliciting = false;
+    QuicSlice data{};
+
+    union Payload {
+        QuicPaddingFrame padding;
+        QuicAckFrame ack;
+        QuicCryptoFrame crypto;
+        QuicNewTokenFrame new_token;
+        QuicStreamFrame stream;
+        QuicCloseFrame close;
+        QuicResetStreamFrame reset_stream;
+        QuicStopSendingFrame stop_sending;
+        QuicMaxDataFrame max_data;
+        QuicMaxStreamDataFrame max_stream_data;
+        QuicMaxStreamsFrame max_streams;
+        QuicDataBlockedFrame data_blocked;
+        QuicStreamDataBlockedFrame stream_data_blocked;
+        QuicStreamsBlockedFrame streams_blocked;
+        QuicNewConnectionIdFrame new_connection_id;
+        QuicRetireConnectionIdFrame retire_connection_id;
+        QuicPathChallengeFrame path_challenge;
+        QuicPathChallengeFrame path_response;
+    } u;
+};
+
 struct QuicFrame {
     QuicFrame() noexcept : u{} {}
 
@@ -204,8 +234,8 @@ struct QuicFrame {
     common::IntrusiveListHook queue_hook{};
 };
 
-struct QuicFrameParseResult {
-    QuicFrame frame{};
+struct QuicInputFrameParseResult {
+    QuicInputFrame frame{};
     std::size_t consumed = 0;
 };
 

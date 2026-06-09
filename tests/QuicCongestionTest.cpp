@@ -77,7 +77,7 @@ TEST(QuicAckHandlerTest, AckedSentFrameUpdatesCongestionAndRtt) {
     space.sent_frames.push_back(frame);
     fiber::quic::quic_congestion_on_packet_sent(connection.congestion(), 1200, true, false);
 
-    fiber::quic::QuicFrame ack{};
+    fiber::quic::QuicInputFrame ack{};
     ack.type = fiber::quic::QuicFrameType::Ack;
     ack.level = fiber::quic::QuicEncryptionLevel::Initial;
     ack.u.ack.largest = 0;
