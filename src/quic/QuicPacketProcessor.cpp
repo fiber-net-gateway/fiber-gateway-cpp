@@ -9,6 +9,7 @@
 #include "QuicCrypto.h"
 #include "QuicCursor.h"
 #include "QuicPacketCodec.h"
+#include "QuicPacketNumberSpace.h"
 #include "QuicTransportCodec.h"
 
 namespace fiber::quic {
@@ -250,20 +251,7 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
     }
 
     const QuicTime now = quic_time_ms(datagram.received_at);
-    if (!space.send_ack) {
-        space.ack_delay_start = now;
-    }
-    ++space.send_ack_count;
-    if (space.pending_ack == kUnsetPacketNumber || space.pending_ack < packet.packet_number) {
-        space.pending_ack = packet.packet_number;
-    }
-    if (space.largest_received_packet_number == packet.packet_number) {
-        space.largest_received_time = now;
-    }
-    if (previous_largest_received != kUnsetPacketNumber && packet.packet_number != previous_largest_received + 1) {
-        space.send_ack_count = kQuicMaxAckGap;
-    }
-    space.send_ack = true;
+    quic_record_ack_eliciting_received(space, packet.packet_number, now, previous_largest_received);
     return {};
 }
 
@@ -312,7 +300,7 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 if (!acked) {
                     return std::unexpected(acked.error());
                 }
-                result.send_output = result.send_output || acked->unblocked || acked->lost_frames;
+                result.send_output = result.send_output || acked->unblocked || acked->lost_frames || acked->force_send;
                 break;
             }
             case QuicFrameType::Padding:
@@ -382,6 +370,12 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 break;
         }
     }
+
+    // Track ACK ranges for this received packet.
+    // on_packet_received handles forced ACK creation internally when range
+    // overflow or too-old conditions occur (mirrors ngx_quic_ack_packet).
+    const QuicTime received_time = quic_time_ms(datagram.received_at);
+    space.on_packet_received(packet.packet_number, received_time, result.ack_eliciting);
 
     auto acked = handle_ack_eliciting_packet(space, packet, datagram, previous_largest_received, result.ack_eliciting);
     if (!acked) {
@@ -481,7 +475,7 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
             if (!acked) {
                 return std::unexpected(acked.error());
             }
-            result.send_output = result.send_output || acked->unblocked || acked->lost_frames;
+            result.send_output = result.send_output || acked->unblocked || acked->lost_frames || acked->force_send;
         }
         ++result.frame_count;
         result.ack_eliciting = result.ack_eliciting || parsed->frame.ack_eliciting;
@@ -497,21 +491,14 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
 
     if (result.ack_eliciting) {
         const QuicTime now = quic_time_ms(datagram.received_at);
-        if (!space.send_ack) {
-            space.ack_delay_start = now;
-        }
-        ++space.send_ack_count;
-        if (space.pending_ack == kUnsetPacketNumber || space.pending_ack < packet->packet_number) {
-            space.pending_ack = packet->packet_number;
-        }
-        if (space.largest_received_packet_number == packet->packet_number) {
-            space.largest_received_time = now;
-        }
-        if (previous_largest_received != kUnsetPacketNumber && packet->packet_number != previous_largest_received + 1) {
-            space.send_ack_count = kQuicMaxAckGap;
-        }
-        space.send_ack = true;
+        quic_record_ack_eliciting_received(space, packet->packet_number, now, previous_largest_received);
     }
+
+    // Track ACK ranges for every valid received packet.
+    // on_packet_received handles forced ACK creation internally when range
+    // overflow or too-old conditions occur (mirrors ngx_quic_ack_packet).
+    const QuicTime received_time = quic_time_ms(datagram.received_at);
+    space.on_packet_received(packet->packet_number, received_time, result.ack_eliciting);
     result.send_ack = space.send_ack;
 
     if (result.path != conn.active_path() && result.non_probing &&

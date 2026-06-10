@@ -159,9 +159,11 @@ split_ordered_frame(QuicPacketNumberSpace &space, QuicOutputFrame &frame, std::s
         return {};
     }
 
-    const std::uint64_t largest = space.largest_received_packet_number != kUnsetPacketNumber
-                                          ? space.largest_received_packet_number
-                                          : space.pending_ack;
+    // Use tracked ACK ranges when available, otherwise fall back to simple tracking.
+    const std::uint64_t largest = space.largest_range != kUnsetPacketNumber ? space.largest_range : space.pending_ack;
+    const std::uint64_t first_range = space.largest_range != kUnsetPacketNumber ? space.first_range : 0;
+    const std::uint32_t range_count = space.largest_range != kUnsetPacketNumber ? space.ack_range_count : 0;
+
     std::uint64_t ack_delay_us = 0;
     if (space.level == QuicEncryptionLevel::Application && now > space.largest_received_time) {
         ack_delay_us = static_cast<std::uint64_t>((now - space.largest_received_time).count()) * 1000;
@@ -172,12 +174,38 @@ split_ordered_frame(QuicPacketNumberSpace &space, QuicOutputFrame &frame, std::s
         }
     }
 
+    // Serialize ACK range gap/range pairs (each a varint pair).
+    // Max: 32 ranges × (8 + 8) bytes = 512 bytes.
+    std::uint8_t range_buf[512];
+    std::size_t range_buf_len = 0;
+    if (range_count > 0) {
+        QuicWriteCursor rcur(range_buf, sizeof(range_buf));
+        for (std::uint32_t i = 0; i < range_count; ++i) {
+            auto wrote = quic_write_varint(rcur, space.ack_ranges[i].gap);
+            if (!wrote) {
+                return std::unexpected(wrote.error());
+            }
+            wrote = quic_write_varint(rcur, space.ack_ranges[i].range);
+            if (!wrote) {
+                return std::unexpected(wrote.error());
+            }
+        }
+        range_buf_len = rcur.offset();
+    }
+
     space.ack_frame = QuicOutputFrame{};
     space.ack_frame.type = QuicFrameType::Ack;
     space.ack_frame.u.ack.largest = largest;
     space.ack_frame.u.ack.delay = ack_delay_us;
-    space.ack_frame.u.ack.range_count = 0;
-    space.ack_frame.u.ack.first_range = 0;
+    space.ack_frame.u.ack.range_count = range_count;
+    space.ack_frame.u.ack.first_range = first_range;
+
+    if (range_buf_len > 0) {
+        auto set_data = quic_output_frame_set_owned_data(space.ack_frame, range_buf, range_buf_len);
+        if (!set_data) {
+            return std::unexpected(set_data.error());
+        }
+    }
 
     auto frame_len = quic_output_frame_encoded_len(space.ack_frame);
     if (!frame_len) {

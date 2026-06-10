@@ -13,6 +13,7 @@ struct QuicAckProcessResult {
     bool unblocked = false;
     bool lost_frames = false;
     bool acked_frames = false;
+    bool force_send = false; // set when a lost ACK frame requires immediate re-generation
 };
 
 [[nodiscard]] common::IoResult<QuicAckProcessResult>
