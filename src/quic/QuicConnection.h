@@ -18,6 +18,7 @@
 #include "../net/SocketAddress.h"
 #include "QuicCongestion.h"
 #include "QuicFrame.h"
+#include "QuicPacketNumberSpace.h"
 #include "QuicStream.h"
 #include "QuicStreamTable.h"
 #include "QuicTlsSession.h"
@@ -27,8 +28,6 @@ namespace fiber::quic {
 struct QuicTransportParams;
 
 inline constexpr std::size_t kQuicConnectionIdLength = kMaxConnectionIdLength;
-inline constexpr std::size_t kQuicPacketNumberSpaceCount = 3;
-inline constexpr std::size_t kQuicMaxAckRanges = 32;
 inline constexpr std::size_t kQuicMaxCryptoBuffered = 65536;
 inline constexpr std::size_t kQuicMaxCryptoBufferedSegments = 16;
 inline constexpr std::size_t kQuicInitialSecretLength = 32;
@@ -94,51 +93,6 @@ struct QuicConnectionId {
     [[nodiscard]] std::size_t size() const noexcept { return length; }
 
     static common::IoResult<QuicConnectionId> from_bytes(const std::uint8_t *data, std::size_t len) noexcept;
-};
-
-struct QuicAckRange {
-    std::uint64_t gap = 0;
-    std::uint64_t range = 0;
-};
-
-struct QuicPacketNumberSpace {
-    QuicPacketNumberSpace() noexcept;
-    ~QuicPacketNumberSpace();
-
-    void set_frame_pool(QuicOutputFramePool &pool) noexcept;
-    void reset(QuicEncryptionLevel space_level) noexcept;
-    void record_received_packet_number(std::uint64_t packet_number) noexcept;
-    void record_acked_packet_number(std::uint64_t packet_number) noexcept;
-    [[nodiscard]] QuicOutputFrame *alloc_frame() noexcept;
-    void release_frame(QuicOutputFrame &frame) noexcept;
-
-    QuicEncryptionLevel level;
-
-    std::uint64_t crypto_sent = 0;
-
-    std::uint64_t next_packet_number = 0;
-    std::uint64_t largest_acked_packet_number = 0;
-    std::uint64_t largest_received_packet_number = 0;
-
-    QuicOutputFrameQueue pending_frames{};
-    QuicOutputFrameQueue sending_frames{};
-    QuicOutputFrameQueue sent_frames{};
-    QuicOutputFrame ack_frame{};
-    QuicOutputFramePool *frame_pool = nullptr;
-
-    std::uint64_t pending_ack = 0;
-    std::uint64_t largest_range = 0;
-    std::uint64_t first_range = 0;
-    std::chrono::milliseconds largest_received_time{0};
-    std::chrono::milliseconds ack_delay_start{0};
-    std::uint32_t ack_range_count = 0;
-    std::array<QuicAckRange, kQuicMaxAckRanges> ack_ranges{};
-    std::uint32_t send_ack_count = 0;
-    bool send_ack = false;
-};
-
-struct QuicPacketNumberSpaceSnapshot {
-    std::uint64_t next_packet_number = 0;
 };
 
 struct QuicCryptoBufferedSegment {

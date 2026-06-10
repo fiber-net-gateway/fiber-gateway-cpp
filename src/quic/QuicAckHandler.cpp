@@ -66,6 +66,14 @@ struct AckStat {
             space.sent_frames.erase_after(prev, *frame);
             frame->packet_len = 0;
             frame->flags = 0;
+
+            // RFC 9000, 13.2.4: Limiting Ranges by Tracking ACK Frames.
+            // When an ACK frame we sent is acknowledged, drop ranges up to
+            // that point to prevent generating ACKs for already-ACKed data.
+            if (frame->type == QuicFrameType::Ack || frame->type == QuicFrameType::AckEcn) {
+                space.drop_ack_ranges(frame->packet_number);
+            }
+
             space.release_frame(*frame);
             found = true;
             result.acked_frames = true;
@@ -135,6 +143,18 @@ struct AckStat {
             }
 
             (void) space.sent_frames.pop_front();
+
+            // RFC 9000, Section 13.2.1 / nginx ngx_quic_resend_frames:
+            // When a packet containing an ACK frame is declared lost, force
+            // generation of a fresh ACK so the peer gets up-to-date ack info.
+            // Only applies at Application level (matching nginx's behaviour).
+            if ((front->type == QuicFrameType::Ack || front->type == QuicFrameType::AckEcn) &&
+                level == QuicEncryptionLevel::Application) {
+                space.send_ack_count = kQuicMaxAckGap;
+                space.send_ack = true;
+                result.force_send = true;
+            }
+
             front->packet_number = 0;
             front->packet_len = 0;
             front->send_time = QuicTime{0};
