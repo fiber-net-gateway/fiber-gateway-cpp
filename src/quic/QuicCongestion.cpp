@@ -27,9 +27,6 @@ void subtract_in_flight(QuicCongestionState &cg, std::size_t packet_len) noexcep
 
 } // namespace
 
-QuicTime quic_time_ms(std::chrono::steady_clock::time_point time) noexcept {
-    return std::chrono::duration_cast<QuicTime>(time.time_since_epoch());
-}
 
 void quic_rtt_init(QuicRttState &rtt) noexcept {
     rtt.latest_rtt = QuicTime{0};

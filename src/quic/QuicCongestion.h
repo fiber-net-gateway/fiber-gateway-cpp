@@ -52,7 +52,9 @@ struct QuicLossSample {
     bool ignore_loss = false;
 };
 
-[[nodiscard]] QuicTime quic_time_ms(std::chrono::steady_clock::time_point time) noexcept;
+[[nodiscard]] inline QuicTime quic_time_ms(std::chrono::steady_clock::time_point time) noexcept {
+    return std::chrono::duration_cast<QuicTime>(time.time_since_epoch());
+}
 
 void quic_rtt_init(QuicRttState &rtt) noexcept;
 void quic_rtt_sample(QuicRttState &rtt, QuicTime now, QuicTime send_time, std::uint64_t ack_delay_raw,
