@@ -1034,7 +1034,7 @@ fiber::async::Task<common::IoResult<const Http1ResponseHead *>> ClientHttp1Excha
     saw_connection_keep_alive_ = false;
     response_eof_delimited_ = false;
 
-    auto *header_node = new (*pool_) ResponseHeaderNode(*pool_);
+    auto *header_node = new (*pool_) ResponseHeaderNode(*pool_, conn_->transport_->loop().io_buf_node_pool());
     if (!header_node) {
         co_return std::unexpected(common::IoErr::NoMem);
     }
@@ -1263,23 +1263,25 @@ fiber::async::Task<common::IoResult<const Http1ResponseHead *>> ClientHttp1Excha
 }
 
 fiber::async::Task<common::IoResult<BodyChunk>> ClientHttp1Exchange::read_body(std::size_t max_bytes) noexcept {
-    BodyChunk out{};
     if (!active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
     if (!conn_ || !conn_->transport_ || !conn_->valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
+    BodyChunk out(conn_->transport_->loop().io_buf_node_pool());
     if (!final_response_received_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
     if (response_complete_) {
         out.last = true;
+        out.data_chain.mark_complete();
         co_return out;
     }
     if (response_body_parser_.type() == BodyParser::Type::None && !response_eof_delimited_) {
         response_complete_ = true;
         out.last = true;
+        out.data_chain.mark_complete();
         co_return out;
     }
 
@@ -1303,6 +1305,7 @@ fiber::async::Task<common::IoResult<BodyChunk>> ClientHttp1Exchange::read_body(s
             if (*more == 0) {
                 response_complete_ = true;
                 out.last = true;
+                out.data_chain.mark_complete();
                 co_return out;
             }
         }
@@ -1343,6 +1346,7 @@ fiber::async::Task<common::IoResult<BodyChunk>> ClientHttp1Exchange::read_body(s
         if (response_body_parser_.done()) {
             response_complete_ = true;
             out.last = true;
+            out.data_chain.mark_complete();
         }
 
         auto stash_result = stash_pending_buf(read_buf);
@@ -1373,6 +1377,7 @@ fiber::async::Task<common::IoResult<BodyChunk>> ClientHttp1Exchange::read_body(s
                     co_return fail_exchange(trailer_result.error());
                 }
                 out.last = true;
+                out.data_chain.mark_complete();
                 co_return out;
             }
             if (*parse_result == ParseCode::Again) {

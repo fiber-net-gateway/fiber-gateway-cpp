@@ -30,6 +30,7 @@ public:
     ~QuicStreamSendBuffer();
 
     [[nodiscard]] common::IoResult<std::size_t> append(const mem::IoBuf &buf, bool fin = false) noexcept;
+    [[nodiscard]] common::IoResult<std::size_t> append_chain(mem::IoBufChain &chain) noexcept;
     [[nodiscard]] common::IoResult<EncodedFrameResult> encode_stream_frame(std::uint64_t stream_id, std::uint8_t *dst,
                                                                            std::size_t capacity) noexcept;
     [[nodiscard]] common::IoResult<void> mark_acked(std::size_t offset, std::size_t length, bool encoded_fin) noexcept;

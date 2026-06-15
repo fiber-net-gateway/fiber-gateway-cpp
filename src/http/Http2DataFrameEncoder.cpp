@@ -66,7 +66,7 @@ common::IoErr Http2DataFrameEncoder::append_frame(Http2OutboundEncodeTarget &tar
         return common::IoErr::None;
     }
 
-    mem::IoBufChain frame_payload;
+    mem::IoBufChain frame_payload(payload.node_pool());
     if (!payload.take_prefix(payload_bytes, frame_payload)) {
         return common::IoErr::NoMem;
     }

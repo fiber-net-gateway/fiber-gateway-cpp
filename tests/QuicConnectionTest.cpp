@@ -435,7 +435,7 @@ TEST(QuicConnectionTest, RecvFinStreamRetiresAfterDataIsTaken) {
     EXPECT_TRUE(stream->has_final_size());
     EXPECT_EQ(stream->final_size(), 3U);
 
-    fiber::mem::IoBufChain out;
+    fiber::mem::IoBufChain out(conn.recv_extent_pool());
     auto taken = conn.take_stream_data(0, 3, out);
 
     ASSERT_TRUE(taken.has_value());

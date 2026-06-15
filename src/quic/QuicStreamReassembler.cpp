@@ -5,6 +5,8 @@
 #include <expected>
 #include <limits>
 
+#include "../common/Assert.h"
+
 namespace fiber::quic {
 
 // Block size is 64 KiB = 2^16, so block index = offset >> 16.
@@ -142,6 +144,7 @@ common::IoResult<std::size_t> QuicStreamReassembler::insert(std::uint64_t offset
 }
 
 common::IoResult<std::size_t> QuicStreamReassembler::take(std::size_t max_bytes, mem::IoBufChain &out) noexcept {
+    FIBER_ASSERT(&out.node_pool() == pool_);
     std::size_t taken = 0;
     while (max_bytes != 0 && head_ != nullptr && head_->offset == next_read_offset_) {
         mem::IoBufNode *extent = head_;
@@ -176,6 +179,9 @@ common::IoResult<std::size_t> QuicStreamReassembler::take(std::size_t max_bytes,
         break;
     }
 
+    if (finished()) {
+        out.mark_complete();
+    }
     return taken;
 }
 

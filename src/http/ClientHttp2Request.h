@@ -42,6 +42,7 @@ public:
 
     [[nodiscard]] Http2Stream &stream() noexcept { return stream_; }
     [[nodiscard]] const Http2Stream &stream() const noexcept { return stream_; }
+    [[nodiscard]] mem::IoBufNodePool &node_pool() noexcept;
 
 private:
     struct SendRequestHeaderOp;

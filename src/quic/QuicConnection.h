@@ -11,11 +11,11 @@
 #include <openssl/aes.h>
 
 #include "../common/IntrusiveList.h"
-#include "../common/mem/IoBufChain.h"
 #include "../common/IntrusiveRbTree.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
+#include "../common/mem/IoBufChain.h"
 #include "../net/SocketAddress.h"
 #include "QuicCongestion.h"
 #include "QuicFrame.h"
@@ -312,6 +312,7 @@ public:
     [[nodiscard]] common::IoResult<void> recv_reset_stream_frame(const QuicResetStreamFrame &frame) noexcept;
     [[nodiscard]] common::IoResult<std::size_t> take_stream_data(std::uint64_t stream_id, std::size_t max_bytes,
                                                                  mem::IoBufChain &out) noexcept;
+    [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return recv_extent_pool_; }
     void release_stream_app(QuicStream &stream) noexcept;
 
     [[nodiscard]] bool is_local_stream(std::uint64_t stream_id) const noexcept;

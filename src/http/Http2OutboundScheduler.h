@@ -61,7 +61,7 @@ public:
     void clear() noexcept;
 
 private:
-    void reset(std::uint8_t *slot, std::size_t capacity) noexcept;
+    void reset(mem::IoBufNodePool &node_pool, std::uint8_t *slot, std::size_t capacity) noexcept;
     [[nodiscard]] mem::IoBufChain take_tail_chain() noexcept { return std::move(tail_chain_); }
     [[nodiscard]] Http2OutboundDoneFn done_fn() const noexcept { return done_fn_; }
     [[nodiscard]] void *done_ctx() const noexcept { return done_ctx_; }

@@ -3093,7 +3093,8 @@ TEST(Http2ConnectionTest, SendsIoBufChainUsingWritev) {
                 std::memcpy(second.writable_data(), "cdef", 4);
                 second.commit(4);
 
-                fiber::mem::IoBufChain chain;
+                fiber::mem::IoBufNodePool pool;
+                fiber::mem::IoBufChain chain(pool);
                 if (!chain.append(std::move(first))) {
                     return fiber::common::IoErr::NoMem;
                 }

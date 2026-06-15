@@ -82,6 +82,66 @@ common::IoResult<std::size_t> QuicStreamSendBuffer::append(const mem::IoBuf &buf
     return bytes;
 }
 
+common::IoResult<std::size_t> QuicStreamSendBuffer::append_chain(mem::IoBufChain &chain) noexcept {
+    if (!chain.bound() || &chain.node_pool() != pool_) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (fin_acked_) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    const bool chain_complete = chain.complete();
+    const std::size_t bytes = chain.readable_bytes();
+    if (fin_appended_ && (bytes > 0 || chain_complete)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    std::size_t appended = 0;
+    for (;;) {
+        mem::IoBufNode *extent = chain.pop_front_node();
+        if (extent == nullptr) {
+            break;
+        }
+
+        const std::size_t readable = extent->buf.readable();
+        if (readable == 0) {
+            pool_->release(extent);
+            continue;
+        }
+
+        extent->offset = total_appended_bytes_;
+        extent->state = static_cast<std::uint8_t>(QuicSendExtentState::Ready);
+        extent->next = nullptr;
+
+        if (tail_ != nullptr && tail_->buf && extent->buf.same_storage(tail_->buf) &&
+            tail_->buf.try_merge_adjacent(std::move(extent->buf))) {
+            pool_->release(extent);
+        } else {
+            if (tail_ != nullptr) {
+                tail_->next = extent;
+            } else {
+                head_ = extent;
+            }
+            tail_ = extent;
+            if (ready_head_ == nullptr) {
+                ready_head_ = extent;
+            }
+            ++active_extent_count_;
+        }
+
+        ready_bytes_ += readable;
+        total_appended_bytes_ += readable;
+        appended += readable;
+    }
+
+    if (chain_complete) {
+        fin_appended_ = true;
+        chain.clear_complete();
+    }
+
+    return appended;
+}
+
 common::IoResult<QuicStreamSendBuffer::EncodedFrameResult>
 QuicStreamSendBuffer::encode_stream_frame(std::uint64_t stream_id, std::uint8_t *dst, std::size_t capacity) noexcept {
     EncodedFrameResult result{};

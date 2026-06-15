@@ -28,6 +28,7 @@ public:
     [[nodiscard]] std::size_t buffered_bytes() const noexcept { return buffered_bytes_; }
     [[nodiscard]] std::size_t active_extent_count() const noexcept { return active_extent_count_; }
     [[nodiscard]] std::size_t active_block_count() const noexcept { return active_block_count_; }
+    [[nodiscard]] mem::IoBufNodePool &node_pool() noexcept { return *pool_; }
 
 private:
     [[nodiscard]] static std::uint64_t block_of(std::uint64_t offset) noexcept;

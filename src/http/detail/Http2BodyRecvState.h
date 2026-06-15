@@ -20,7 +20,8 @@ namespace detail {
 
 class Http2BodyRecvState : public common::NonCopyable, public common::NonMovable {
 public:
-    explicit Http2BodyRecvState(std::chrono::milliseconds timeout = std::chrono::milliseconds::zero()) noexcept;
+    Http2BodyRecvState(mem::IoBufNodePool &node_pool,
+                       std::chrono::milliseconds timeout = std::chrono::milliseconds::zero()) noexcept;
     ~Http2BodyRecvState() = default;
 
     [[nodiscard]] common::IoErr push_body(mem::IoBuf &&buf, bool end_stream) noexcept;

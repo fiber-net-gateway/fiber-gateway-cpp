@@ -34,7 +34,10 @@ const HeaderMap<RequestHeaderRefKind> &request_header_ref_map() noexcept {
 
 } // namespace
 
-HttpExchange::HttpExchange(const HttpServerOptions &options) : request_headers_(pool_), request_trailers_(pool_) {}
+HttpExchange::HttpExchange(mem::IoBufNodePool &node_pool, const HttpServerOptions &options) :
+    header_bufs_(node_pool), trailer_bufs_(node_pool), request_headers_(pool_), request_trailers_(pool_) {
+    (void) options;
+}
 
 HttpExchange::~HttpExchange() = default;
 
