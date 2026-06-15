@@ -57,17 +57,8 @@ common::IoResult<std::size_t> QuicStreamSendBuffer::append(mem::IoBuf data, bool
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    std::uint64_t cursor = next_append_offset_;
-    std::size_t copied = 0;
-    while (copied < len) {
-        const std::uint64_t chunk_end64 = std::min<std::uint64_t>(next_append_offset_ + len, block_end(cursor));
-        const std::size_t chunk_len = static_cast<std::size_t>(chunk_end64 - cursor);
-        mem::IoBuf view = data.retain_slice(copied, chunk_len);
-        if (!view) {
-            return std::unexpected(common::IoErr::NoMem);
-        }
-
-        auto extent = create_extent(cursor, chunk_end64, std::move(view));
+    if (len != 0) {
+        auto extent = create_extent(next_append_offset_, next_append_offset_ + len, std::move(data));
         if (!extent) {
             return std::unexpected(extent.error());
         }
@@ -77,9 +68,6 @@ common::IoResult<std::size_t> QuicStreamSendBuffer::append(mem::IoBuf data, bool
         if (prev_tail != nullptr) {
             (void) try_merge_with_next(prev_tail);
         }
-
-        cursor = chunk_end64;
-        copied += chunk_len;
     }
 
     next_append_offset_ += len;
@@ -247,21 +235,8 @@ void QuicStreamSendBuffer::clear() noexcept {
     ready_bytes_ = 0;
     inflight_bytes_ = 0;
     active_extent_count_ = 0;
-    active_block_count_ = 0;
     has_final_size_ = false;
     fin_state_ = QuicStreamSendFinState::None;
-}
-
-std::uint64_t QuicStreamSendBuffer::block_index(std::uint64_t offset) noexcept {
-    return offset / kQuicStreamDataBlockSize;
-}
-
-std::uint64_t QuicStreamSendBuffer::block_end(std::uint64_t offset) noexcept {
-    const std::uint64_t block = block_index(offset);
-    if (block >= std::numeric_limits<std::uint64_t>::max() / kQuicStreamDataBlockSize) {
-        return std::numeric_limits<std::uint64_t>::max();
-    }
-    return (block + 1) * kQuicStreamDataBlockSize;
 }
 
 QuicStreamSendExtentState QuicStreamSendBuffer::extent_state(const QuicStreamDataExtent &extent) noexcept {
@@ -336,16 +311,10 @@ common::IoResult<void> QuicStreamSendBuffer::split_at(std::uint64_t offset) noex
 
 common::IoResult<QuicStreamDataExtent *> QuicStreamSendBuffer::create_extent(std::uint64_t start, std::uint64_t end,
                                                                              mem::IoBuf &&view) noexcept {
-    if (start >= end || !view) {
+    if (start >= end || !view || view.readable() != end - start) {
         return std::unexpected(common::IoErr::Invalid);
     }
     if (active_extent_count_ >= kQuicStreamDataMaxActiveExtents) {
-        return std::unexpected(common::IoErr::MessageTooLarge);
-    }
-
-    const std::uint64_t block = block_index(start);
-    const bool new_block = tail_ == nullptr || tail_->block_index != block;
-    if (new_block && active_block_count_ >= kQuicStreamDataMaxActiveBlocks) {
         return std::unexpected(common::IoErr::MessageTooLarge);
     }
 
@@ -356,14 +325,11 @@ common::IoResult<QuicStreamDataExtent *> QuicStreamSendBuffer::create_extent(std
 
     extent->start = start;
     extent->end = end;
-    extent->block_index = block;
+    extent->block_index = 0;
     set_extent_state(*extent, QuicStreamSendExtentState::Ready);
     extent->view = std::move(view);
     extent->next = nullptr;
     ++active_extent_count_;
-    if (new_block) {
-        ++active_block_count_;
-    }
 
     const std::size_t len = static_cast<std::size_t>(end - start);
     buffered_bytes_ += len;
@@ -406,7 +372,7 @@ QuicStreamDataExtent *QuicStreamSendBuffer::try_merge_with_next(QuicStreamDataEx
     QuicStreamDataExtent *right = extent->next;
     if (extent_state(*extent) != QuicStreamSendExtentState::Ready ||
         extent_state(*right) != QuicStreamSendExtentState::Ready || extent->end != right->start ||
-        extent->block_index != right->block_index || !extent->view.try_merge_adjacent(std::move(right->view))) {
+        !extent->view.try_merge_adjacent(std::move(right->view))) {
         return extent;
     }
 
@@ -421,7 +387,6 @@ QuicStreamDataExtent *QuicStreamSendBuffer::try_merge_with_next(QuicStreamDataEx
 }
 
 void QuicStreamSendBuffer::unlink_after(QuicStreamDataExtent *prev, QuicStreamDataExtent &extent) noexcept {
-    const bool has_same_block = has_same_block_neighbor(prev, extent.next, extent.block_index);
     if (prev == nullptr) {
         head_ = extent.next;
     } else {
@@ -430,16 +395,8 @@ void QuicStreamSendBuffer::unlink_after(QuicStreamDataExtent *prev, QuicStreamDa
     if (tail_ == &extent) {
         tail_ = prev;
     }
-    if (!has_same_block) {
-        --active_block_count_;
-    }
     --active_extent_count_;
     pool_->release(&extent);
-}
-
-bool QuicStreamSendBuffer::has_same_block_neighbor(const QuicStreamDataExtent *prev, const QuicStreamDataExtent *next,
-                                                   std::uint64_t block) const noexcept {
-    return (prev != nullptr && prev->block_index == block) || (next != nullptr && next->block_index == block);
 }
 
 void QuicStreamSendBuffer::merge_around(std::uint64_t offset) noexcept {

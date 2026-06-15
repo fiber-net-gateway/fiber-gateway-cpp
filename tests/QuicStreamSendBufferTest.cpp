@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstring>
+#include <string>
 #include <string_view>
 
 #include "quic/QuicStreamSendBuffer.h"
@@ -64,7 +65,6 @@ TEST(QuicStreamSendBufferTest, EncodesAppendedDataAsInflightAndAckReleasesIt) {
     EXPECT_TRUE(buffer.empty());
     EXPECT_EQ(buffer.buffered_bytes(), 0u);
     EXPECT_EQ(buffer.active_extent_count(), 0u);
-    EXPECT_EQ(buffer.active_block_count(), 0u);
 }
 
 TEST(QuicStreamSendBufferTest, FailedRangeReturnsToReadyAndCanBeEncodedAgain) {
@@ -110,6 +110,49 @@ TEST(QuicStreamSendBufferTest, InsufficientCapacityDoesNotChangeState) {
     EXPECT_FALSE(encoded->encoded);
     EXPECT_EQ(buffer.ready_bytes(), 3u);
     EXPECT_EQ(buffer.inflight_bytes(), 0u);
+}
+
+TEST(QuicStreamSendBufferTest, LargeIoBufAppendsAsSingleExtent) {
+    fiber::quic::QuicStreamDataExtentPool pool;
+    fiber::quic::QuicStreamSendBuffer buffer(pool);
+
+    std::string payload(fiber::quic::kQuicStreamDataBlockSize + 17, 'x');
+    auto appended = buffer.append(iobuf_of(payload));
+    ASSERT_TRUE(appended.has_value());
+    EXPECT_EQ(*appended, payload.size());
+    EXPECT_EQ(buffer.active_extent_count(), 1u);
+    EXPECT_EQ(buffer.ready_bytes(), payload.size());
+}
+
+TEST(QuicStreamSendBufferTest, FailedPartialEncodeMergesReadySlicesFromSameIoBuf) {
+    fiber::quic::QuicStreamDataExtentPool pool;
+    fiber::quic::QuicStreamSendBuffer buffer(pool);
+
+    ASSERT_TRUE(buffer.append(iobuf_of("abcdef")).has_value());
+
+    std::array<std::uint8_t, 6> out{};
+    auto encoded = buffer.encode_stream_frame(4, out.data(), out.size());
+    ASSERT_TRUE(encoded.has_value());
+    ASSERT_TRUE(encoded->encoded);
+    EXPECT_EQ(encoded->data_len, 3u);
+    EXPECT_EQ(buffer.active_extent_count(), 2u);
+
+    auto failed = buffer.mark_failed(encoded->offset, encoded->data_len, encoded->fin);
+    ASSERT_TRUE(failed.has_value());
+    EXPECT_EQ(buffer.active_extent_count(), 1u);
+    EXPECT_EQ(buffer.ready_bytes(), 6u);
+}
+
+TEST(QuicStreamSendBufferTest, SeparateIoBufAppendsRemainSeparateReadyExtents) {
+    fiber::quic::QuicStreamDataExtentPool pool;
+    fiber::quic::QuicStreamSendBuffer buffer(pool);
+
+    ASSERT_TRUE(buffer.append(iobuf_of("abc")).has_value());
+    ASSERT_TRUE(buffer.append(iobuf_of("def")).has_value());
+
+    EXPECT_EQ(buffer.buffered_bytes(), 6u);
+    EXPECT_EQ(buffer.ready_bytes(), 6u);
+    EXPECT_EQ(buffer.active_extent_count(), 2u);
 }
 
 TEST(QuicStreamSendBufferTest, FinalDataCarriesFinUntilAcked) {
