@@ -233,6 +233,12 @@ DetachedTask stop_server(fiber::event::EventLoop *loop, fiber::http::Http1Server
     co_return;
 }
 
+DetachedTask shutdown_server_and_signal(fiber::http::Http1Server *server, std::promise<void> *done) {
+    co_await server->shutdown_and_wait();
+    done->set_value();
+    co_return;
+}
+
 } // namespace
 
 TEST(Http1ServerTest, BasicGet) {
@@ -1133,10 +1139,8 @@ TEST(Http1ServerTest, EventLoopGroupDispatch) {
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
-        co_await server->shutdown_and_wait();
-        shutdown_promise.set_value();
-        co_return;
+    fiber::async::spawn(group.at(0), [server, &shutdown_promise]() {
+        return shutdown_server_and_signal(server, &shutdown_promise);
     });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     group.stop();
@@ -1186,10 +1190,8 @@ TEST(Http1ServerTest, ShutdownAndWait) {
     ASSERT_EQ(::send(client, request, std::strlen(request), 0), static_cast<ssize_t>(std::strlen(request)));
 
     entered_future.get();
-    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
-        co_await server->shutdown_and_wait();
-        shutdown_promise.set_value();
-        co_return;
+    fiber::async::spawn(group.at(0), [server, &shutdown_promise]() {
+        return shutdown_server_and_signal(server, &shutdown_promise);
     });
 
     EXPECT_EQ(shutdown_future.wait_for(100ms), std::future_status::timeout);
