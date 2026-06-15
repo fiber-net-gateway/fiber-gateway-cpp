@@ -13,7 +13,7 @@
 #include "../async/Task.h"
 #include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
-#include "../common/mem/IoBuf.h"
+#include "../common/mem/IoBufChain.h"
 #include "../event/EventLoop.h"
 #include "Http2OutboundHook.h"
 #include "Http2Stream.h"

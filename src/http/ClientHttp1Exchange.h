@@ -10,7 +10,7 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../common/mem/BufPool.h"
-#include "../common/mem/IoBuf.h"
+#include "../common/mem/IoBufChain.h"
 #include "ClientHttp1Types.h"
 #include "Http1HeaderParseBuffer.h"
 #include "Http1Parser.h"

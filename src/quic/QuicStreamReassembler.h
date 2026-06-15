@@ -7,7 +7,7 @@
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
-#include "../common/mem/IoBuf.h"
+#include "../common/mem/IoBufChain.h"
 #include "QuicFrame.h"
 
 namespace fiber::quic {
