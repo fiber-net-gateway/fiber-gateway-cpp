@@ -16,11 +16,9 @@ inline constexpr std::size_t kQuicStreamDataMaxActiveExtents = 4096;
 inline constexpr std::size_t kQuicStreamDataMaxActiveBlocks = 1024;
 
 struct QuicStreamDataExtent {
-    std::uint64_t start = 0;
-    std::uint64_t end = 0;
-    std::uint64_t block_index = 0;
-    std::uint8_t state = 0;
-    mem::IoBuf view{};
+    std::uint64_t offset = 0; // stream data offset.
+    std::uint8_t state = 0; // state represent ready|inflight (in sending buffer) or hole (in reassemble)
+    mem::IoBuf view{}; // readable data represent stream data;
     QuicStreamDataExtent *next = nullptr;
 };
 
