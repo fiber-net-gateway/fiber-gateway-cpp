@@ -54,11 +54,8 @@ public:
     [[nodiscard]] std::size_t ready_bytes() const noexcept { return ready_bytes_; }
     [[nodiscard]] std::size_t inflight_bytes() const noexcept { return inflight_bytes_; }
     [[nodiscard]] std::size_t active_extent_count() const noexcept { return active_extent_count_; }
-    [[nodiscard]] std::size_t active_block_count() const noexcept { return active_block_count_; }
 
 private:
-    [[nodiscard]] static std::uint64_t block_index(std::uint64_t offset) noexcept;
-    [[nodiscard]] static std::uint64_t block_end(std::uint64_t offset) noexcept;
     [[nodiscard]] static QuicStreamSendExtentState extent_state(const QuicStreamDataExtent &extent) noexcept;
     static void set_extent_state(QuicStreamDataExtent &extent, QuicStreamSendExtentState state) noexcept;
 
@@ -71,8 +68,6 @@ private:
     void insert_after(QuicStreamDataExtent *prev, QuicStreamDataExtent &extent) noexcept;
     [[nodiscard]] QuicStreamDataExtent *try_merge_with_next(QuicStreamDataExtent *extent) noexcept;
     void unlink_after(QuicStreamDataExtent *prev, QuicStreamDataExtent &extent) noexcept;
-    [[nodiscard]] bool has_same_block_neighbor(const QuicStreamDataExtent *prev, const QuicStreamDataExtent *next,
-                                               std::uint64_t block) const noexcept;
     void merge_around(std::uint64_t offset) noexcept;
     [[nodiscard]] common::IoResult<void> set_range_state(std::uint64_t offset, std::size_t len,
                                                          QuicStreamSendExtentState from,
@@ -89,7 +84,6 @@ private:
     std::size_t ready_bytes_ = 0;
     std::size_t inflight_bytes_ = 0;
     std::size_t active_extent_count_ = 0;
-    std::size_t active_block_count_ = 0;
     bool has_final_size_ = false;
     QuicStreamSendFinState fin_state_ = QuicStreamSendFinState::None;
 };
