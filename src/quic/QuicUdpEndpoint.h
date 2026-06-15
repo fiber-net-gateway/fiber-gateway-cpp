@@ -8,6 +8,7 @@
 
 #include "../async/Task.h"
 #include "../common/IntrusiveList.h"
+#include "../common/mem/IoBufChain.h"
 #include "../common/IntrusiveRbTree.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"

@@ -10,7 +10,7 @@
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
-#include "../common/mem/IoBuf.h"
+#include "../common/mem/IoBufChain.h"
 #include "../event/EventLoop.h"
 #include "Http1Parser.h"
 #include "HttpExchange.h"

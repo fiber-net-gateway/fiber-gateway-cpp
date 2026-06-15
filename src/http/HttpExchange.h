@@ -14,7 +14,7 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../common/mem/BufPool.h"
-#include "../common/mem/IoBuf.h"
+#include "../common/mem/IoBufChain.h"
 #include "../net/TlsOptions.h"
 #include "HttpCommon.h"
 #include "HttpExchangeIo.h"

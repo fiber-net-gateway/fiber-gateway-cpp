@@ -3,7 +3,7 @@
 
 #include <string>
 
-#include "../common/mem/IoBuf.h"
+#include "../common/mem/IoBufChain.h"
 #include "Http1Parser.h"
 #include "HttpExchangeIo.h"
 
