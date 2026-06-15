@@ -4,56 +4,8 @@
 #include <cstring>
 #include <expected>
 #include <limits>
-#include <new>
 
 namespace fiber::quic {
-
-QuicRecvExtentPool::~QuicRecvExtentPool() { clear(); }
-
-QuicRecvExtent *QuicRecvExtentPool::alloc() noexcept {
-    if (free_head_ != nullptr) {
-        QuicRecvExtent *extent = free_head_;
-        free_head_ = extent->next;
-        --cached_count_;
-        extent->start = 0;
-        extent->end = 0;
-        extent->block_index = 0;
-        extent->view = {};
-        extent->next = nullptr;
-        return extent;
-    }
-    return new (std::nothrow) QuicRecvExtent{};
-}
-
-void QuicRecvExtentPool::release(QuicRecvExtent *extent) noexcept {
-    if (extent == nullptr) {
-        return;
-    }
-
-    extent->start = 0;
-    extent->end = 0;
-    extent->block_index = 0;
-    extent->view = {};
-    if (cached_count_ < kQuicRecvExtentPoolMaxCached) {
-        extent->next = free_head_;
-        free_head_ = extent;
-        ++cached_count_;
-        return;
-    }
-
-    delete extent;
-}
-
-void QuicRecvExtentPool::clear() noexcept {
-    QuicRecvExtent *extent = free_head_;
-    while (extent != nullptr) {
-        QuicRecvExtent *next = extent->next;
-        delete extent;
-        extent = next;
-    }
-    free_head_ = nullptr;
-    cached_count_ = 0;
-}
 
 QuicStreamReassembler::QuicStreamReassembler(QuicRecvExtentPool &pool) noexcept : pool_(&pool) {}
 

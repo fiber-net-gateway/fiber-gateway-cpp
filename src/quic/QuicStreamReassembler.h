@@ -9,37 +9,9 @@
 #include "../common/NonMovable.h"
 #include "../common/mem/IoBuf.h"
 #include "QuicFrame.h"
+#include "QuicStreamDataExtent.h"
 
 namespace fiber::quic {
-
-inline constexpr std::size_t kQuicStreamRecvBlockSize = 64 * 1024;
-inline constexpr std::size_t kQuicRecvExtentPoolMaxCached = 1000;
-inline constexpr std::size_t kQuicStreamRecvMaxActiveExtents = 4096;
-inline constexpr std::size_t kQuicStreamRecvMaxActiveBlocks = 1024;
-
-struct QuicRecvExtent {
-    std::uint64_t start = 0;
-    std::uint64_t end = 0;
-    std::uint64_t block_index = 0;
-    mem::IoBuf view{};
-    QuicRecvExtent *next = nullptr;
-};
-
-class QuicRecvExtentPool : public common::NonCopyable, public common::NonMovable {
-public:
-    QuicRecvExtentPool() noexcept = default;
-    ~QuicRecvExtentPool();
-
-    [[nodiscard]] QuicRecvExtent *alloc() noexcept;
-    void release(QuicRecvExtent *extent) noexcept;
-    void clear() noexcept;
-
-    [[nodiscard]] std::size_t cached_count() const noexcept { return cached_count_; }
-
-private:
-    QuicRecvExtent *free_head_ = nullptr;
-    std::size_t cached_count_ = 0;
-};
 
 class QuicStreamReassembler : public common::NonCopyable, public common::NonMovable {
 public:
