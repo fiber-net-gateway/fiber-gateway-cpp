@@ -282,8 +282,7 @@ mem::IoBufNode *QuicStreamReassembler::try_merge_with_next(mem::IoBufNode *exten
     }
 
     mem::IoBufNode *right = extent->next;
-    if (block_of(extent->offset) != block_of(right->offset) ||
-        !extent->buf.try_merge_adjacent(std::move(right->buf))) {
+    if (block_of(extent->offset) != block_of(right->offset) || !extent->buf.try_merge_adjacent(std::move(right->buf))) {
         return extent;
     }
 
