@@ -8,7 +8,6 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../common/mem/IoBuf.h"
-#include "QuicStreamDataExtent.h"
 
 namespace fiber::quic {
 
@@ -27,7 +26,7 @@ public:
         bool encoded = false;
     };
 
-    explicit QuicStreamSendBuffer(QuicStreamDataExtentPool &pool) noexcept;
+    explicit QuicStreamSendBuffer(mem::IoBufNodePool &pool) noexcept;
     ~QuicStreamSendBuffer();
 
     [[nodiscard]] common::IoResult<std::size_t> append(const mem::IoBuf &buf, bool fin = false) noexcept;
@@ -46,13 +45,13 @@ public:
 
 private:
     [[nodiscard]] bool has_pending_fin() const noexcept { return fin_appended_ && !fin_inflight_ && !fin_acked_; }
-    [[nodiscard]] bool is_last_ready_extent(const QuicStreamDataExtent *extent) const noexcept;
-    void try_merge_with_next(QuicStreamDataExtent *extent) noexcept;
+    [[nodiscard]] bool is_last_ready_extent(const mem::IoBufNode *extent) const noexcept;
+    void try_merge_with_next(mem::IoBufNode *extent) noexcept;
 
-    QuicStreamDataExtentPool *pool_ = nullptr;
-    QuicStreamDataExtent *head_ = nullptr;
-    QuicStreamDataExtent *tail_ = nullptr;
-    QuicStreamDataExtent *ready_head_ = nullptr;
+    mem::IoBufNodePool *pool_ = nullptr;
+    mem::IoBufNode *head_ = nullptr;
+    mem::IoBufNode *tail_ = nullptr;
+    mem::IoBufNode *ready_head_ = nullptr;
     std::size_t ready_bytes_ = 0;
     std::size_t inflight_bytes_ = 0;
     std::size_t active_extent_count_ = 0;

@@ -25,14 +25,14 @@ std::array<std::uint64_t, 3> find_colliding_stream_ids(std::size_t bucket_count)
     return out;
 }
 
-fiber::quic::QuicStream::Lease make_stream(std::uint64_t stream_id, fiber::quic::QuicRecvExtentPool &pool) {
+fiber::quic::QuicStream::Lease make_stream(std::uint64_t stream_id, fiber::mem::IoBufNodePool &pool) {
     return fiber::quic::QuicStream::Lease::adopt(new fiber::quic::QuicStream(stream_id, pool));
 }
 
 } // namespace
 
 TEST(QuicStreamTest, ExposesStreamIdTypeAndSequence) {
-    fiber::quic::QuicRecvExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStream client_bidi(0, pool);
     fiber::quic::QuicStream server_uni(3, pool);
     fiber::quic::QuicStream later_client_bidi(20, pool);
@@ -63,7 +63,7 @@ TEST(QuicStreamTableTest, InsertsFindsAndRejectsDuplicateStreamIds) {
     fiber::quic::QuicStreamTable table;
     ASSERT_TRUE(table.init(4));
 
-    fiber::quic::QuicRecvExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     auto stream0 = make_stream(0, pool);
     auto stream4 = make_stream(4, pool);
     auto duplicate0 = make_stream(0, pool);
@@ -83,7 +83,7 @@ TEST(QuicStreamTableTest, GrowsWhenLoadFactorWouldExceedHalf) {
     fiber::quic::QuicStreamTable table;
     ASSERT_TRUE(table.init(1));
 
-    fiber::quic::QuicRecvExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     auto stream0 = make_stream(0, pool);
     auto stream4 = make_stream(4, pool);
     auto stream8 = make_stream(8, pool);
@@ -114,7 +114,7 @@ TEST(QuicStreamTableTest, EraseKeepsLaterCollisionsReachable) {
     fiber::quic::QuicStreamTable table;
     ASSERT_TRUE(table.init(4));
 
-    fiber::quic::QuicRecvExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     const auto ids = find_colliding_stream_ids(table.bucket_count());
     auto stream_a = make_stream(ids[0], pool);
     auto stream_b = make_stream(ids[1], pool);
@@ -142,7 +142,7 @@ TEST(QuicStreamTableTest, SupportsLargeStreamIds) {
     fiber::quic::QuicStreamTable table;
     ASSERT_TRUE(table.init(2));
 
-    fiber::quic::QuicRecvExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     constexpr std::uint64_t large_stream_id = (1ULL << 62U) - 4U;
     auto stream = make_stream(large_stream_id, pool);
     auto *stream_ptr = stream.get();

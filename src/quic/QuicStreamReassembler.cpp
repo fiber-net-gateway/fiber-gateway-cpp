@@ -8,10 +8,13 @@
 namespace fiber::quic {
 
 // Block size is 64 KiB = 2^16, so block index = offset >> 16.
+static constexpr std::size_t kQuicStreamRecvBlockSize = 64 * 1024;
+static constexpr std::size_t kQuicStreamRecvMaxActiveExtents = 4096;
+static constexpr std::size_t kQuicStreamRecvMaxActiveBlocks = 1024;
 static constexpr unsigned kBlockSizeShift = 16;
 static constexpr std::uint64_t kBlockOffsetMask = kQuicStreamRecvBlockSize - 1;
 
-QuicStreamReassembler::QuicStreamReassembler(QuicRecvExtentPool &pool) noexcept : pool_(&pool) {}
+QuicStreamReassembler::QuicStreamReassembler(mem::IoBufNodePool &pool) noexcept : pool_(&pool) {}
 
 QuicStreamReassembler::~QuicStreamReassembler() { clear(); }
 
@@ -55,8 +58,8 @@ common::IoResult<std::size_t> QuicStreamReassembler::insert(std::uint64_t offset
     // extent to examine.  Because cursor is monotonically non-decreasing and
     // the list is sorted by offset, we never need to scan backwards.
 
-    QuicRecvExtent *prev = nullptr;
-    QuicRecvExtent *cur = head_;
+    mem::IoBufNode *prev = nullptr;
+    mem::IoBufNode *cur = head_;
 
     // Use last_insert_ as a search hint: only valid when the hint starts
     // at or before cursor (so we don't skip extents that precede the hint).
@@ -68,7 +71,7 @@ common::IoResult<std::size_t> QuicStreamReassembler::insert(std::uint64_t offset
     while (cursor < data_end) {
         // Advance past extents that already cover the cursor position.
         while (cur != nullptr && cur->offset <= cursor) {
-            const std::uint64_t cur_end = cur->offset + cur->view.readable();
+            const std::uint64_t cur_end = cur->offset + cur->buf.readable();
             if (cur_end > cursor) {
                 cursor = std::min(cur_end, data_end);
                 if (cursor >= data_end) {
@@ -82,7 +85,7 @@ common::IoResult<std::size_t> QuicStreamReassembler::insert(std::uint64_t offset
         // After a forward merge in the previous iteration, prev may have been
         // extended past cursor.  Skip forward if so.
         if (prev != nullptr) {
-            const std::uint64_t prev_end = prev->offset + prev->view.readable();
+            const std::uint64_t prev_end = prev->offset + prev->buf.readable();
             if (prev_end > cursor) {
                 cursor = std::min(prev_end, data_end);
                 if (cursor >= data_end) {
@@ -108,7 +111,7 @@ common::IoResult<std::size_t> QuicStreamReassembler::insert(std::uint64_t offset
             return std::unexpected(result.error());
         }
 
-        QuicRecvExtent *new_ext = *result;
+        mem::IoBufNode *new_ext = *result;
         insert_after(prev, *new_ext);
 
         // Backward merge: try merging prev → new_ext.
@@ -141,15 +144,12 @@ common::IoResult<std::size_t> QuicStreamReassembler::insert(std::uint64_t offset
 common::IoResult<std::size_t> QuicStreamReassembler::take(std::size_t max_bytes, mem::IoBufChain &out) noexcept {
     std::size_t taken = 0;
     while (max_bytes != 0 && head_ != nullptr && head_->offset == next_read_offset_) {
-        QuicRecvExtent *extent = head_;
-        const std::size_t readable = extent->view.readable();
+        mem::IoBufNode *extent = head_;
+        const std::size_t readable = extent->buf.readable();
         const std::size_t take_bytes = std::min(readable, max_bytes);
 
         if (take_bytes == readable) [[likely]] {
-            if (!out.append(std::move(extent->view))) {
-                return std::unexpected(common::IoErr::NoMem);
-            }
-            next_read_offset_ = extent->offset + readable;
+            const std::uint64_t next_read = extent->offset + readable;
             buffered_bytes_ -= readable;
             max_bytes -= readable;
             taken += readable;
@@ -157,14 +157,18 @@ common::IoResult<std::size_t> QuicStreamReassembler::take(std::size_t max_bytes,
                 last_insert_ = nullptr;
             }
             unlink_after(nullptr, *extent);
+            next_read_offset_ = next_read;
+            if (!out.append_node(extent)) {
+                return std::unexpected(common::IoErr::NoMem);
+            }
             continue;
         }
 
-        mem::IoBuf piece = extent->view.retain_slice(0, take_bytes);
+        mem::IoBuf piece = extent->buf.retain_slice(0, take_bytes);
         if (!piece || !out.append(std::move(piece))) {
             return std::unexpected(common::IoErr::NoMem);
         }
-        extent->view.consume(take_bytes);
+        extent->buf.consume(take_bytes);
         extent->offset += take_bytes;
         next_read_offset_ += take_bytes;
         buffered_bytes_ -= take_bytes;
@@ -176,9 +180,9 @@ common::IoResult<std::size_t> QuicStreamReassembler::take(std::size_t max_bytes,
 }
 
 void QuicStreamReassembler::clear() noexcept {
-    QuicRecvExtent *extent = head_;
+    mem::IoBufNode *extent = head_;
     while (extent != nullptr) {
-        QuicRecvExtent *next = extent->next;
+        mem::IoBufNode *next = extent->next;
         pool_->release(extent);
         extent = next;
     }
@@ -207,8 +211,8 @@ std::uint64_t QuicStreamReassembler::block_end(std::uint64_t offset) noexcept {
 
 // --- Extent lifecycle ---
 
-common::IoResult<QuicRecvExtent *> QuicStreamReassembler::create_extent(std::uint64_t offset, std::size_t len,
-                                                                        QuicRecvExtent *prev, QuicRecvExtent *next,
+common::IoResult<mem::IoBufNode *> QuicStreamReassembler::create_extent(std::uint64_t offset, std::size_t len,
+                                                                        mem::IoBufNode *prev, mem::IoBufNode *next,
                                                                         const std::uint8_t *src,
                                                                         std::uint64_t block) noexcept {
     if (len == 0 || src == nullptr) [[unlikely]] {
@@ -225,7 +229,7 @@ common::IoResult<QuicRecvExtent *> QuicStreamReassembler::create_extent(std::uin
         return std::unexpected(common::IoErr::MessageTooLarge);
     }
 
-    QuicRecvExtent *extent = pool_->alloc();
+    mem::IoBufNode *extent = pool_->alloc();
     if (extent == nullptr) [[unlikely]] {
         return std::unexpected(common::IoErr::NoMem);
     }
@@ -233,7 +237,7 @@ common::IoResult<QuicRecvExtent *> QuicStreamReassembler::create_extent(std::uin
     const std::size_t local = block_offset(offset);
     mem::IoBuf view{};
     if (reuse_prev || reuse_next) {
-        mem::IoBuf &owner = reuse_prev ? prev->view : next->view;
+        mem::IoBuf &owner = reuse_prev ? prev->buf : next->buf;
         std::memcpy(owner.data() + local, src, len);
         view = owner.retain_storage_slice(local, len);
     } else {
@@ -248,14 +252,14 @@ common::IoResult<QuicRecvExtent *> QuicStreamReassembler::create_extent(std::uin
     }
 
     extent->offset = offset;
-    extent->view = std::move(view);
+    extent->buf = std::move(view);
     extent->next = nullptr;
     ++active_extent_count_;
     buffered_bytes_ += len;
     return extent;
 }
 
-void QuicStreamReassembler::insert_after(QuicRecvExtent *prev, QuicRecvExtent &extent) noexcept {
+void QuicStreamReassembler::insert_after(mem::IoBufNode *prev, mem::IoBufNode &extent) noexcept {
     if (prev == nullptr) {
         extent.next = head_;
         head_ = &extent;
@@ -272,14 +276,14 @@ void QuicStreamReassembler::insert_after(QuicRecvExtent *prev, QuicRecvExtent &e
     }
 }
 
-QuicRecvExtent *QuicStreamReassembler::try_merge_with_next(QuicRecvExtent *extent) noexcept {
+mem::IoBufNode *QuicStreamReassembler::try_merge_with_next(mem::IoBufNode *extent) noexcept {
     if (extent == nullptr || extent->next == nullptr) {
         return extent;
     }
 
-    QuicRecvExtent *right = extent->next;
+    mem::IoBufNode *right = extent->next;
     if (block_of(extent->offset) != block_of(right->offset) ||
-        !extent->view.try_merge_adjacent(std::move(right->view))) {
+        !extent->buf.try_merge_adjacent(std::move(right->buf))) {
         return extent;
     }
 
@@ -296,7 +300,7 @@ QuicRecvExtent *QuicStreamReassembler::try_merge_with_next(QuicRecvExtent *exten
     return extent;
 }
 
-void QuicStreamReassembler::unlink_after(QuicRecvExtent *prev, QuicRecvExtent &extent) noexcept {
+void QuicStreamReassembler::unlink_after(mem::IoBufNode *prev, mem::IoBufNode &extent) noexcept {
     const std::uint64_t block = block_of(extent.offset);
     const bool has_same_block = has_same_block_neighbor(prev, extent.next, block);
     if (prev == nullptr) {
@@ -316,7 +320,7 @@ void QuicStreamReassembler::unlink_after(QuicRecvExtent *prev, QuicRecvExtent &e
     --active_extent_count_;
 }
 
-bool QuicStreamReassembler::has_same_block_neighbor(const QuicRecvExtent *prev, const QuicRecvExtent *next,
+bool QuicStreamReassembler::has_same_block_neighbor(const mem::IoBufNode *prev, const mem::IoBufNode *next,
                                                     std::uint64_t block) noexcept {
     return (prev != nullptr && block_of(prev->offset) == block) || (next != nullptr && block_of(next->offset) == block);
 }

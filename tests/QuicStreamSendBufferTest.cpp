@@ -10,6 +10,8 @@
 
 namespace {
 
+constexpr std::size_t kStreamDataBlockSize = 64 * 1024;
+
 fiber::mem::IoBuf iobuf_of(std::string_view value) {
     fiber::mem::IoBuf buf = fiber::mem::IoBuf::allocate(value.size());
     if (!buf) {
@@ -35,7 +37,7 @@ std::string_view frame_data_view(const fiber::quic::QuicInputFrame &frame) {
 }
 
 TEST(QuicStreamSendBufferTest, EncodesAppendedDataAsInflightAndAckReleasesIt) {
-    fiber::quic::QuicStreamDataExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamSendBuffer buffer(pool);
 
     auto appended = buffer.append(iobuf_of("hello"));
@@ -68,7 +70,7 @@ TEST(QuicStreamSendBufferTest, EncodesAppendedDataAsInflightAndAckReleasesIt) {
 }
 
 TEST(QuicStreamSendBufferTest, FailedRangeReturnsToReadyAndCanBeEncodedAgain) {
-    fiber::quic::QuicStreamDataExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamSendBuffer buffer(pool);
 
     ASSERT_TRUE(buffer.append(iobuf_of("abcdef")).has_value());
@@ -99,7 +101,7 @@ TEST(QuicStreamSendBufferTest, FailedRangeReturnsToReadyAndCanBeEncodedAgain) {
 }
 
 TEST(QuicStreamSendBufferTest, InsufficientCapacityDoesNotChangeState) {
-    fiber::quic::QuicStreamDataExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamSendBuffer buffer(pool);
 
     ASSERT_TRUE(buffer.append(iobuf_of("abc")).has_value());
@@ -113,10 +115,10 @@ TEST(QuicStreamSendBufferTest, InsufficientCapacityDoesNotChangeState) {
 }
 
 TEST(QuicStreamSendBufferTest, LargeIoBufAppendsAsSingleExtent) {
-    fiber::quic::QuicStreamDataExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamSendBuffer buffer(pool);
 
-    std::string payload(fiber::quic::kQuicStreamDataBlockSize + 17, 'x');
+    std::string payload(kStreamDataBlockSize + 17, 'x');
     auto appended = buffer.append(iobuf_of(payload));
     ASSERT_TRUE(appended.has_value());
     EXPECT_EQ(*appended, payload.size());
@@ -125,7 +127,7 @@ TEST(QuicStreamSendBufferTest, LargeIoBufAppendsAsSingleExtent) {
 }
 
 TEST(QuicStreamSendBufferTest, FailedPartialEncodeMergesReadySlicesFromSameIoBuf) {
-    fiber::quic::QuicStreamDataExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamSendBuffer buffer(pool);
 
     ASSERT_TRUE(buffer.append(iobuf_of("abcdef")).has_value());
@@ -144,7 +146,7 @@ TEST(QuicStreamSendBufferTest, FailedPartialEncodeMergesReadySlicesFromSameIoBuf
 }
 
 TEST(QuicStreamSendBufferTest, SeparateIoBufAppendsRemainSeparateReadyExtents) {
-    fiber::quic::QuicStreamDataExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamSendBuffer buffer(pool);
 
     ASSERT_TRUE(buffer.append(iobuf_of("abc")).has_value());
@@ -156,7 +158,7 @@ TEST(QuicStreamSendBufferTest, SeparateIoBufAppendsRemainSeparateReadyExtents) {
 }
 
 TEST(QuicStreamSendBufferTest, FinalDataCarriesFinUntilAcked) {
-    fiber::quic::QuicStreamDataExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamSendBuffer buffer(pool);
 
     auto appended = buffer.append(iobuf_of("done"), true);
@@ -184,7 +186,7 @@ TEST(QuicStreamSendBufferTest, FinalDataCarriesFinUntilAcked) {
 }
 
 TEST(QuicStreamSendBufferTest, FinOnlyFrameCanFailAndRetry) {
-    fiber::quic::QuicStreamDataExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamSendBuffer buffer(pool);
 
     ASSERT_TRUE(buffer.append(fiber::mem::IoBuf{}, true).has_value());
@@ -215,7 +217,7 @@ TEST(QuicStreamSendBufferTest, FinOnlyFrameCanFailAndRetry) {
 }
 
 TEST(QuicStreamSendBufferTest, OmitsLengthFieldWhenPayloadFillsBuffer) {
-    fiber::quic::QuicStreamDataExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamSendBuffer buffer(pool);
 
     // 20 bytes of data — more than any reasonable header, so the buffer-filling path triggers.
@@ -244,7 +246,7 @@ TEST(QuicStreamSendBufferTest, OmitsLengthFieldWhenPayloadFillsBuffer) {
 }
 
 TEST(QuicStreamSendBufferTest, IncludesLengthFieldWhenPayloadDoesNotFillBuffer) {
-    fiber::quic::QuicStreamDataExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamSendBuffer buffer(pool);
 
     ASSERT_TRUE(buffer.append(iobuf_of("hi")).has_value());
@@ -266,7 +268,7 @@ TEST(QuicStreamSendBufferTest, IncludesLengthFieldWhenPayloadDoesNotFillBuffer) 
 }
 
 TEST(QuicStreamSendBufferTest, OmitsLengthWithOffsetAndFin) {
-    fiber::quic::QuicStreamDataExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamSendBuffer buffer(pool);
 
     // Append first 5 bytes without FIN, then 5 more bytes with FIN.

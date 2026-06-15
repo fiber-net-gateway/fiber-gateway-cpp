@@ -83,8 +83,8 @@ public:
         QuicStream *stream_ = nullptr;
     };
 
-    QuicStream(std::uint64_t stream_id, QuicRecvExtentPool &recv_extent_pool) noexcept;
-    QuicStream(std::uint64_t stream_id, QuicRecvExtentPool &recv_extent_pool, void *owner, const Ops &ops) noexcept;
+    QuicStream(std::uint64_t stream_id, mem::IoBufNodePool &recv_extent_pool) noexcept;
+    QuicStream(std::uint64_t stream_id, mem::IoBufNodePool &recv_extent_pool, void *owner, const Ops &ops) noexcept;
     ~QuicStream();
 
     [[nodiscard]] std::uint64_t stream_id() const noexcept { return stream_id_; }

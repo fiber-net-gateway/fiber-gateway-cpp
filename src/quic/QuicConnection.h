@@ -140,7 +140,7 @@ class QuicConnection;
 struct QuicNewStreamContext {
     std::uint64_t stream_id = 0;
     QuicConnection &connection;
-    QuicRecvExtentPool &recv_extent_pool;
+    mem::IoBufNodePool &recv_extent_pool;
 };
 
 enum class QuicCryptoSuite : std::uint8_t {
@@ -388,7 +388,7 @@ private:
     std::uint64_t reset_packet_number_ = 0;
     QuicCryptoState crypto_{};
     QuicPeerTransportState peer_transport_{};
-    QuicRecvExtentPool recv_extent_pool_{};
+    mem::IoBufNodePool recv_extent_pool_{};
     QuicStreamTable streams_{};
     std::array<QuicRetiredStreamRecord, kQuicRetiredStreamRecordCount> retired_streams_{};
     std::uint64_t next_retired_stream_slot_ = 0;

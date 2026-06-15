@@ -9,13 +9,12 @@
 #include "../common/NonMovable.h"
 #include "../common/mem/IoBuf.h"
 #include "QuicFrame.h"
-#include "QuicStreamDataExtent.h"
 
 namespace fiber::quic {
 
 class QuicStreamReassembler : public common::NonCopyable, public common::NonMovable {
 public:
-    explicit QuicStreamReassembler(QuicRecvExtentPool &pool) noexcept;
+    explicit QuicStreamReassembler(mem::IoBufNodePool &pool) noexcept;
     ~QuicStreamReassembler();
 
     [[nodiscard]] common::IoResult<std::size_t> insert(std::uint64_t offset, QuicSlice data, bool fin = false) noexcept;
@@ -35,20 +34,20 @@ private:
     [[nodiscard]] static std::size_t block_offset(std::uint64_t offset) noexcept;
     [[nodiscard]] static std::uint64_t block_end(std::uint64_t offset) noexcept;
 
-    [[nodiscard]] common::IoResult<QuicRecvExtent *> create_extent(std::uint64_t offset, std::size_t len,
-                                                                   QuicRecvExtent *prev, QuicRecvExtent *next,
+    [[nodiscard]] common::IoResult<mem::IoBufNode *> create_extent(std::uint64_t offset, std::size_t len,
+                                                                   mem::IoBufNode *prev, mem::IoBufNode *next,
                                                                    const std::uint8_t *src,
                                                                    std::uint64_t block) noexcept;
-    void insert_after(QuicRecvExtent *prev, QuicRecvExtent &extent) noexcept;
-    [[nodiscard]] QuicRecvExtent *try_merge_with_next(QuicRecvExtent *extent) noexcept;
-    void unlink_after(QuicRecvExtent *prev, QuicRecvExtent &extent) noexcept;
-    [[nodiscard]] static bool has_same_block_neighbor(const QuicRecvExtent *prev, const QuicRecvExtent *next,
+    void insert_after(mem::IoBufNode *prev, mem::IoBufNode &extent) noexcept;
+    [[nodiscard]] mem::IoBufNode *try_merge_with_next(mem::IoBufNode *extent) noexcept;
+    void unlink_after(mem::IoBufNode *prev, mem::IoBufNode &extent) noexcept;
+    [[nodiscard]] static bool has_same_block_neighbor(const mem::IoBufNode *prev, const mem::IoBufNode *next,
                                                       std::uint64_t block) noexcept;
 
-    QuicRecvExtentPool *pool_ = nullptr;
-    QuicRecvExtent *head_ = nullptr;
-    QuicRecvExtent *tail_ = nullptr;
-    QuicRecvExtent *last_insert_ = nullptr;
+    mem::IoBufNodePool *pool_ = nullptr;
+    mem::IoBufNode *head_ = nullptr;
+    mem::IoBufNode *tail_ = nullptr;
+    mem::IoBufNode *last_insert_ = nullptr;
     std::uint64_t next_read_offset_ = 0;
     std::uint64_t final_size_ = 0;
     std::size_t buffered_bytes_ = 0;

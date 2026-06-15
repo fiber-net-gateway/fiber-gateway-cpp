@@ -22,10 +22,10 @@ void QuicStream::Lease::reset() noexcept {
     stream->release();
 }
 
-QuicStream::QuicStream(std::uint64_t stream_id, QuicRecvExtentPool &recv_extent_pool) noexcept :
+QuicStream::QuicStream(std::uint64_t stream_id, mem::IoBufNodePool &recv_extent_pool) noexcept :
     stream_id_(stream_id), reassembler_(recv_extent_pool) {}
 
-QuicStream::QuicStream(std::uint64_t stream_id, QuicRecvExtentPool &recv_extent_pool, void *owner,
+QuicStream::QuicStream(std::uint64_t stream_id, mem::IoBufNodePool &recv_extent_pool, void *owner,
                        const Ops &ops) noexcept :
     stream_id_(stream_id), owner_(owner), ops_(&ops), reassembler_(recv_extent_pool), app_released_(false) {}
 

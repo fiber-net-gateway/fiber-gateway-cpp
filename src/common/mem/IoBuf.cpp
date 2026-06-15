@@ -288,6 +288,51 @@ void IoBuf::reset_handle() noexcept {
     last_ = nullptr;
 }
 
+IoBufNodePool::~IoBufNodePool() { clear(); }
+
+IoBufNode *IoBufNodePool::alloc() noexcept {
+    if (free_head_ != nullptr) {
+        IoBufNode *node = free_head_;
+        free_head_ = node->next;
+        --cached_count_;
+        node->offset = 0;
+        node->state = 0;
+        node->buf = {};
+        node->next = nullptr;
+        return node;
+    }
+    return new (std::nothrow) IoBufNode{};
+}
+
+void IoBufNodePool::release(IoBufNode *node) noexcept {
+    if (node == nullptr) {
+        return;
+    }
+
+    node->offset = 0;
+    node->state = 0;
+    node->buf = {};
+    if (cached_count_ < kIoBufNodePoolMaxCached) {
+        node->next = free_head_;
+        free_head_ = node;
+        ++cached_count_;
+        return;
+    }
+
+    delete node;
+}
+
+void IoBufNodePool::clear() noexcept {
+    IoBufNode *node = free_head_;
+    while (node != nullptr) {
+        IoBufNode *next = node->next;
+        delete node;
+        node = next;
+    }
+    free_head_ = nullptr;
+    cached_count_ = 0;
+}
+
 IoBufChain::~IoBufChain() { clear(); }
 
 IoBufChain::IoBufChain(IoBufChain &&other) noexcept :
@@ -331,14 +376,35 @@ bool IoBufChain::append(IoBuf &&buf) noexcept {
         return true;
     }
 
-    std::size_t readable = buf.readable();
-    std::size_t writable = buf.writable();
-
-    auto *node = new (std::nothrow) Node{};
+    IoBufNode *node = node_pool_.alloc();
     if (!node) {
         return false;
     }
     node->buf = std::move(buf);
+    return append_node(node);
+}
+
+bool IoBufChain::prepend(IoBuf &&buf) noexcept {
+    if (!buf) {
+        return true;
+    }
+
+    IoBufNode *node = node_pool_.alloc();
+    if (!node) {
+        return false;
+    }
+    node->buf = std::move(buf);
+    return prepend_node(node);
+}
+
+bool IoBufChain::append_node(IoBufNode *node) noexcept {
+    if (node == nullptr) {
+        return false;
+    }
+
+    std::size_t readable = node->buf.readable();
+    std::size_t writable = node->buf.writable();
+    reset_node_for_chain(*node);
 
     if (tail_) {
         tail_->next = node;
@@ -352,19 +418,15 @@ bool IoBufChain::append(IoBuf &&buf) noexcept {
     return true;
 }
 
-bool IoBufChain::prepend(IoBuf &&buf) noexcept {
-    if (!buf) {
-        return true;
-    }
-
-    std::size_t readable = buf.readable();
-    std::size_t writable = buf.writable();
-
-    auto *node = new (std::nothrow) Node{};
-    if (!node) {
+bool IoBufChain::prepend_node(IoBufNode *node) noexcept {
+    if (node == nullptr) {
         return false;
     }
-    node->buf = std::move(buf);
+
+    std::size_t readable = node->buf.readable();
+    std::size_t writable = node->buf.writable();
+    reset_node_for_chain(*node);
+
     node->next = head_;
     head_ = node;
     if (!tail_) {
@@ -380,7 +442,7 @@ bool IoBufChain::retain_prefix(std::size_t bytes, IoBufChain &out) const noexcep
     FIBER_ASSERT(bytes <= readable_bytes_);
 
     std::size_t remaining = bytes;
-    for (Node *node = head_; node && remaining > 0; node = node->next) {
+    for (IoBufNode *node = head_; node && remaining > 0; node = node->next) {
         std::size_t readable = node->buf.readable();
         if (readable == 0) {
             continue;
@@ -411,10 +473,10 @@ bool IoBufChain::take_prefix(std::size_t bytes, IoBufChain &dst) noexcept {
         return true;
     }
 
-    Node *boundary = nullptr;
+    IoBufNode *boundary = nullptr;
     std::size_t boundary_bytes = 0;
     std::size_t remaining = bytes;
-    for (Node *node = head_; node && remaining > 0; node = node->next) {
+    for (IoBufNode *node = head_; node && remaining > 0; node = node->next) {
         std::size_t readable = node->buf.readable();
         if (readable == 0) {
             continue;
@@ -427,13 +489,13 @@ bool IoBufChain::take_prefix(std::size_t bytes, IoBufChain &dst) noexcept {
         remaining -= readable;
     }
 
-    Node *partial = nullptr;
+    IoBufNode *partial = nullptr;
     if (boundary_bytes > 0) {
         IoBuf slice = boundary->buf.retain_slice(0, boundary_bytes);
         if (!slice) {
             return false;
         }
-        partial = new (std::nothrow) Node{};
+        partial = node_pool_.alloc();
         if (!partial) {
             return false;
         }
@@ -441,10 +503,10 @@ bool IoBufChain::take_prefix(std::size_t bytes, IoBufChain &dst) noexcept {
     }
 
     remaining = bytes;
-    Node *prev = nullptr;
-    Node *node = head_;
+    IoBufNode *prev = nullptr;
+    IoBufNode *node = head_;
     while (node && remaining > 0) {
-        Node *next = node->next;
+        IoBufNode *next = node->next;
         std::size_t readable = node->buf.readable();
         if (readable == 0) {
             prev = node;
@@ -504,7 +566,7 @@ bool IoBufChain::take_prefix(std::size_t bytes, IoBufChain &dst) noexcept {
 }
 
 void IoBufChain::clear() noexcept {
-    delete_nodes(head_);
+    release_nodes(head_);
     head_ = nullptr;
     tail_ = nullptr;
     size_ = 0;
@@ -515,7 +577,7 @@ void IoBufChain::clear() noexcept {
 void IoBufChain::consume(std::size_t bytes) noexcept {
     FIBER_ASSERT(bytes <= readable_bytes_);
     readable_bytes_ -= bytes;
-    for (Node *node = head_; node && bytes > 0; node = node->next) {
+    for (IoBufNode *node = head_; node && bytes > 0; node = node->next) {
         std::size_t readable = node->buf.readable();
         if (bytes < readable) {
             node->buf.consume(bytes);
@@ -529,8 +591,8 @@ void IoBufChain::consume(std::size_t bytes) noexcept {
 void IoBufChain::drop_empty_front() noexcept {
     while (head_ && head_->buf.readable() == 0) {
         writable_bytes_ -= head_->buf.writable();
-        Node *next = head_->next;
-        delete head_;
+        IoBufNode *next = head_->next;
+        node_pool_.release(head_);
         head_ = next;
         --size_;
     }
@@ -543,7 +605,7 @@ void IoBufChain::consume_and_compact(std::size_t bytes) noexcept {
     FIBER_ASSERT(bytes <= readable_bytes_);
     readable_bytes_ -= bytes;
 
-    Node *node = head_;
+    IoBufNode *node = head_;
     while (node && bytes > 0) {
         std::size_t readable = node->buf.readable();
         if (bytes < readable) {
@@ -555,9 +617,9 @@ void IoBufChain::consume_and_compact(std::size_t bytes) noexcept {
         node->buf.consume(readable);
         bytes -= readable;
 
-        Node *next = node->next;
+        IoBufNode *next = node->next;
         writable_bytes_ -= node->buf.writable();
-        delete node;
+        node_pool_.release(node);
         node = next;
         --size_;
     }
@@ -572,7 +634,7 @@ void IoBufChain::commit(std::size_t bytes) noexcept {
     FIBER_ASSERT(bytes <= writable_bytes_);
     writable_bytes_ -= bytes;
     readable_bytes_ += bytes;
-    for (Node *node = head_; node && bytes > 0; node = node->next) {
+    for (IoBufNode *node = head_; node && bytes > 0; node = node->next) {
         std::size_t writable = node->buf.writable();
         if (bytes < writable) {
             node->buf.commit(bytes);
@@ -589,7 +651,7 @@ int IoBufChain::fill_write_iov(struct iovec *iov, int max_iov) const noexcept {
     }
 
     int count = 0;
-    for (Node *node = head_; node && count < max_iov; node = node->next) {
+    for (IoBufNode *node = head_; node && count < max_iov; node = node->next) {
         std::size_t len = node->buf.readable();
         if (len == 0) {
             continue;
@@ -607,7 +669,7 @@ int IoBufChain::fill_read_iov(struct iovec *iov, int max_iov) const noexcept {
     }
 
     int count = 0;
-    for (Node *node = head_; node && count < max_iov; node = node->next) {
+    for (IoBufNode *node = head_; node && count < max_iov; node = node->next) {
         std::size_t len = node->buf.writable();
         if (len == 0) {
             continue;
@@ -624,7 +686,7 @@ IoBuf *IoBufChain::front() noexcept { return head_ ? &head_->buf : nullptr; }
 const IoBuf *IoBufChain::front() const noexcept { return head_ ? &head_->buf : nullptr; }
 
 IoBuf *IoBufChain::first_readable() noexcept {
-    for (Node *node = head_; node; node = node->next) {
+    for (IoBufNode *node = head_; node; node = node->next) {
         if (node->buf.readable() > 0) {
             return &node->buf;
         }
@@ -633,7 +695,7 @@ IoBuf *IoBufChain::first_readable() noexcept {
 }
 
 const IoBuf *IoBufChain::first_readable() const noexcept {
-    for (Node *node = head_; node; node = node->next) {
+    for (IoBufNode *node = head_; node; node = node->next) {
         if (node->buf.readable() > 0) {
             return &node->buf;
         }
@@ -642,7 +704,7 @@ const IoBuf *IoBufChain::first_readable() const noexcept {
 }
 
 IoBuf *IoBufChain::first_writable() noexcept {
-    for (Node *node = head_; node; node = node->next) {
+    for (IoBufNode *node = head_; node; node = node->next) {
         if (node->buf.writable() > 0) {
             return &node->buf;
         }
@@ -651,7 +713,7 @@ IoBuf *IoBufChain::first_writable() noexcept {
 }
 
 const IoBuf *IoBufChain::first_writable() const noexcept {
-    for (Node *node = head_; node; node = node->next) {
+    for (IoBufNode *node = head_; node; node = node->next) {
         if (node->buf.writable() > 0) {
             return &node->buf;
         }
@@ -659,12 +721,18 @@ const IoBuf *IoBufChain::first_writable() const noexcept {
     return nullptr;
 }
 
-void IoBufChain::delete_nodes(Node *node) noexcept {
+void IoBufChain::release_nodes(IoBufNode *node) noexcept {
     while (node) {
-        Node *next = node->next;
-        delete node;
+        IoBufNode *next = node->next;
+        node_pool_.release(node);
         node = next;
     }
+}
+
+void IoBufChain::reset_node_for_chain(IoBufNode &node) noexcept {
+    node.offset = 0;
+    node.state = 0;
+    node.next = nullptr;
 }
 
 } // namespace fiber::mem

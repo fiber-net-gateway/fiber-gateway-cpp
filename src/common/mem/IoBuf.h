@@ -78,6 +78,36 @@ private:
     std::uint8_t *last_ = nullptr;
 };
 
+inline constexpr std::size_t kIoBufNodePoolMaxCached = 1000;
+
+struct IoBufNode {
+    std::uint64_t offset = 0;
+    std::uint8_t state = 0;
+    IoBuf buf{};
+    IoBufNode *next = nullptr;
+};
+
+class IoBufNodePool {
+public:
+    IoBufNodePool() noexcept = default;
+    ~IoBufNodePool();
+
+    IoBufNodePool(const IoBufNodePool &) = delete;
+    IoBufNodePool &operator=(const IoBufNodePool &) = delete;
+    IoBufNodePool(IoBufNodePool &&) = delete;
+    IoBufNodePool &operator=(IoBufNodePool &&) = delete;
+
+    [[nodiscard]] IoBufNode *alloc() noexcept;
+    void release(IoBufNode *node) noexcept;
+    void clear() noexcept;
+
+    [[nodiscard]] std::size_t cached_count() const noexcept { return cached_count_; }
+
+private:
+    IoBufNode *free_head_ = nullptr;
+    std::size_t cached_count_ = 0;
+};
+
 class IoBufChain {
 public:
     IoBufChain() noexcept = default;
@@ -96,6 +126,8 @@ public:
 
     bool append(IoBuf &&buf) noexcept;
     bool prepend(IoBuf &&buf) noexcept;
+    bool append_node(IoBufNode *node) noexcept;
+    bool prepend_node(IoBufNode *node) noexcept;
     [[nodiscard]] bool retain_prefix(std::size_t bytes, IoBufChain &out) const noexcept;
     bool take_prefix(std::size_t bytes, IoBufChain &dst) noexcept;
     void clear() noexcept;
@@ -115,18 +147,15 @@ public:
     [[nodiscard]] const IoBuf *first_writable() const noexcept;
 
 private:
-    struct Node {
-        IoBuf buf;
-        Node *next = nullptr;
-    };
+    void release_nodes(IoBufNode *node) noexcept;
+    static void reset_node_for_chain(IoBufNode &node) noexcept;
 
-    static void delete_nodes(Node *node) noexcept;
-
-    Node *head_ = nullptr;
-    Node *tail_ = nullptr;
+    IoBufNode *head_ = nullptr;
+    IoBufNode *tail_ = nullptr;
     std::size_t size_ = 0;
     std::size_t readable_bytes_ = 0;
     std::size_t writable_bytes_ = 0;
+    IoBufNodePool node_pool_{};
 };
 
 } // namespace fiber::mem
