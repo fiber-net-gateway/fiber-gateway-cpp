@@ -11,9 +11,7 @@ QuicStreamDataExtent *QuicStreamDataExtentPool::alloc() noexcept {
         QuicStreamDataExtent *extent = free_head_;
         free_head_ = extent->next;
         --cached_count_;
-        extent->start = 0;
-        extent->end = 0;
-        extent->block_index = 0;
+        extent->offset = 0;
         extent->state = 0;
         extent->view = {};
         extent->next = nullptr;
@@ -27,9 +25,7 @@ void QuicStreamDataExtentPool::release(QuicStreamDataExtent *extent) noexcept {
         return;
     }
 
-    extent->start = 0;
-    extent->end = 0;
-    extent->block_index = 0;
+    extent->offset = 0;
     extent->state = 0;
     extent->view = {};
     if (cached_count_ < kQuicStreamDataExtentPoolMaxCached) {

@@ -31,19 +31,19 @@ public:
     [[nodiscard]] std::size_t active_block_count() const noexcept { return active_block_count_; }
 
 private:
-    [[nodiscard]] static std::uint64_t block_index(std::uint64_t offset) noexcept;
+    [[nodiscard]] static std::uint64_t block_of(std::uint64_t offset) noexcept;
     [[nodiscard]] static std::size_t block_offset(std::uint64_t offset) noexcept;
     [[nodiscard]] static std::uint64_t block_end(std::uint64_t offset) noexcept;
 
-    [[nodiscard]] QuicRecvExtent *find_prev(std::uint64_t offset) noexcept;
-    [[nodiscard]] common::IoResult<QuicRecvExtent *> create_extent(std::uint64_t start, std::uint64_t end,
+    [[nodiscard]] common::IoResult<QuicRecvExtent *> create_extent(std::uint64_t offset, std::size_t len,
                                                                    QuicRecvExtent *prev, QuicRecvExtent *next,
-                                                                   const std::uint8_t *src) noexcept;
+                                                                   const std::uint8_t *src,
+                                                                   std::uint64_t block) noexcept;
     void insert_after(QuicRecvExtent *prev, QuicRecvExtent &extent) noexcept;
     [[nodiscard]] QuicRecvExtent *try_merge_with_next(QuicRecvExtent *extent) noexcept;
     void unlink_after(QuicRecvExtent *prev, QuicRecvExtent &extent) noexcept;
-    [[nodiscard]] bool has_same_block_neighbor(const QuicRecvExtent *prev, const QuicRecvExtent *next,
-                                               std::uint64_t block) const noexcept;
+    [[nodiscard]] static bool has_same_block_neighbor(const QuicRecvExtent *prev, const QuicRecvExtent *next,
+                                                      std::uint64_t block) noexcept;
 
     QuicRecvExtentPool *pool_ = nullptr;
     QuicRecvExtent *head_ = nullptr;
