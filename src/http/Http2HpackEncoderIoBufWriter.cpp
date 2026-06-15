@@ -11,8 +11,9 @@ const Http2HpackEncoder::OutputOps Http2HpackEncoderIoBufWriter::kOutputOps{
         &Http2HpackEncoderIoBufWriter::commit_output,
 };
 
-Http2HpackEncoderIoBufWriter::Http2HpackEncoderIoBufWriter(Http2HpackEncoder &encoder, std::size_t chunk_size) noexcept
-    : encoder_(encoder), chunk_size_(chunk_size) {
+Http2HpackEncoderIoBufWriter::Http2HpackEncoderIoBufWriter(Http2HpackEncoder &encoder, mem::IoBufNodePool &node_pool,
+                                                           std::size_t chunk_size) noexcept :
+    encoder_(encoder), block_(node_pool), chunk_size_(chunk_size) {
     FIBER_ASSERT(chunk_size_ != 0);
 }
 

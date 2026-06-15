@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <type_traits>
 
+#include "../common/mem/IoBufChain.h"
 #include "MpscQueue.h"
 #include "Poller.h"
 #include "TimerQueue.h"
@@ -239,6 +240,7 @@ public:
 
     Poller &poller() noexcept { return poller_; }
     const Poller &poller() const noexcept { return poller_; }
+    mem::IoBufNodePool &io_buf_node_pool() noexcept { return io_buf_node_pool_; }
 
     EventLoopGroup *group() noexcept { return group_; }
 
@@ -345,6 +347,7 @@ private:
     std::atomic<bool> wakeup_pending_{false};
     std::atomic<bool> stop_requested_{false};
     std::chrono::steady_clock::time_point now_{};
+    mem::IoBufNodePool io_buf_node_pool_{};
     EventLoopGroup *group_ = nullptr;
     std::size_t group_index_ = kInvalidGroupIndex;
 };

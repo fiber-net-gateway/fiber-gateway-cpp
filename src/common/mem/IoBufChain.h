@@ -42,6 +42,7 @@ private:
 class IoBufChain {
 public:
     IoBufChain() noexcept = default;
+    explicit IoBufChain(IoBufNodePool &node_pool) noexcept;
     ~IoBufChain();
 
     IoBufChain(const IoBufChain &) = delete;
@@ -54,6 +55,12 @@ public:
     [[nodiscard]] std::size_t size() const noexcept;
     [[nodiscard]] std::size_t readable_bytes() const noexcept;
     [[nodiscard]] std::size_t writable_bytes() const noexcept;
+    [[nodiscard]] bool complete() const noexcept;
+    [[nodiscard]] IoBufNodePool &node_pool() noexcept;
+    [[nodiscard]] const IoBufNodePool &node_pool() const noexcept;
+    [[nodiscard]] bool bound() const noexcept;
+    [[nodiscard]] bool same_pool(const IoBufChain &other) const noexcept;
+    void bind_node_pool(IoBufNodePool &node_pool) noexcept;
 
     bool append(IoBuf &&buf) noexcept;
     bool prepend(IoBuf &&buf) noexcept;
@@ -66,6 +73,9 @@ public:
     void drop_empty_front() noexcept;
     void consume_and_compact(std::size_t bytes) noexcept;
     void commit(std::size_t bytes) noexcept;
+    void mark_complete() noexcept;
+    void clear_complete() noexcept;
+    [[nodiscard]] IoBufNode *pop_front_node() noexcept;
 
     [[nodiscard]] int fill_write_iov(struct iovec *iov, int max_iov) const noexcept;
     [[nodiscard]] int fill_read_iov(struct iovec *iov, int max_iov) const noexcept;
@@ -86,7 +96,8 @@ private:
     std::size_t size_ = 0;
     std::size_t readable_bytes_ = 0;
     std::size_t writable_bytes_ = 0;
-    IoBufNodePool node_pool_{};
+    IoBufNodePool *node_pool_ = nullptr;
+    bool complete_ = false;
 };
 
 } // namespace fiber::mem

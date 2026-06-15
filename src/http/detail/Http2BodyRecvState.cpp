@@ -145,7 +145,8 @@ private:
     friend class Http2BodyRecvState;
 };
 
-Http2BodyRecvState::Http2BodyRecvState(std::chrono::milliseconds timeout) noexcept : timeout_(timeout) {}
+Http2BodyRecvState::Http2BodyRecvState(mem::IoBufNodePool &node_pool, std::chrono::milliseconds timeout) noexcept :
+    queue_(node_pool), timeout_(timeout) {}
 
 common::IoErr Http2BodyRecvState::push_body(mem::IoBuf &&buf, bool end_stream) noexcept {
     const bool queued_data = buf.readable() != 0;
@@ -175,10 +176,11 @@ void Http2BodyRecvState::abort(common::IoErr reason) noexcept {
 
 fiber::async::Task<common::IoResult<BodyChunk>> Http2BodyRecvState::read_body(Http2Stream &stream,
                                                                               std::size_t max_bytes) noexcept {
-    BodyChunk out{};
+    BodyChunk out(queue_.node_pool());
     if (max_bytes == 0) {
         if (queue_.readable_bytes() == 0 && input_closed_) {
             out.last = true;
+            out.data_chain.mark_complete();
         }
         co_return out;
     }
@@ -189,6 +191,7 @@ fiber::async::Task<common::IoResult<BodyChunk>> Http2BodyRecvState::read_body(Ht
             break;
         case PollResult::Kind::End:
             out.last = true;
+            out.data_chain.mark_complete();
             co_return out;
         case PollResult::Kind::TimedOut:
             co_return std::unexpected(common::IoErr::TimedOut);
@@ -209,6 +212,7 @@ fiber::async::Task<common::IoResult<BodyChunk>> Http2BodyRecvState::read_body(Ht
     }
     if (queue_.readable_bytes() == 0 && input_closed_) {
         out.last = true;
+        out.data_chain.mark_complete();
     }
     co_return out;
 }

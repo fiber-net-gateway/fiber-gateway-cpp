@@ -53,16 +53,19 @@ void IoBufNodePool::clear() noexcept {
     cached_count_ = 0;
 }
 
+IoBufChain::IoBufChain(IoBufNodePool &node_pool) noexcept : node_pool_(&node_pool) {}
+
 IoBufChain::~IoBufChain() { clear(); }
 
 IoBufChain::IoBufChain(IoBufChain &&other) noexcept :
     head_(other.head_), tail_(other.tail_), size_(other.size_), readable_bytes_(other.readable_bytes_),
-    writable_bytes_(other.writable_bytes_) {
+    writable_bytes_(other.writable_bytes_), node_pool_(other.node_pool_), complete_(other.complete_) {
     other.head_ = nullptr;
     other.tail_ = nullptr;
     other.size_ = 0;
     other.readable_bytes_ = 0;
     other.writable_bytes_ = 0;
+    other.complete_ = false;
 }
 
 IoBufChain &IoBufChain::operator=(IoBufChain &&other) noexcept {
@@ -75,11 +78,14 @@ IoBufChain &IoBufChain::operator=(IoBufChain &&other) noexcept {
     size_ = other.size_;
     readable_bytes_ = other.readable_bytes_;
     writable_bytes_ = other.writable_bytes_;
+    node_pool_ = other.node_pool_;
+    complete_ = other.complete_;
     other.head_ = nullptr;
     other.tail_ = nullptr;
     other.size_ = 0;
     other.readable_bytes_ = 0;
     other.writable_bytes_ = 0;
+    other.complete_ = false;
     return *this;
 }
 
@@ -91,12 +97,34 @@ std::size_t IoBufChain::readable_bytes() const noexcept { return readable_bytes_
 
 std::size_t IoBufChain::writable_bytes() const noexcept { return writable_bytes_; }
 
+bool IoBufChain::complete() const noexcept { return complete_; }
+
+IoBufNodePool &IoBufChain::node_pool() noexcept {
+    FIBER_ASSERT(node_pool_ != nullptr);
+    return *node_pool_;
+}
+
+const IoBufNodePool &IoBufChain::node_pool() const noexcept {
+    FIBER_ASSERT(node_pool_ != nullptr);
+    return *node_pool_;
+}
+
+bool IoBufChain::bound() const noexcept { return node_pool_ != nullptr; }
+
+bool IoBufChain::same_pool(const IoBufChain &other) const noexcept { return node_pool_ == other.node_pool_; }
+
+void IoBufChain::bind_node_pool(IoBufNodePool &node_pool) noexcept {
+    FIBER_ASSERT(empty());
+    FIBER_ASSERT(node_pool_ == nullptr || node_pool_ == &node_pool);
+    node_pool_ = &node_pool;
+}
+
 bool IoBufChain::append(IoBuf &&buf) noexcept {
     if (!buf) {
         return true;
     }
 
-    IoBufNode *node = node_pool_.alloc();
+    IoBufNode *node = node_pool().alloc();
     if (!node) {
         return false;
     }
@@ -109,7 +137,7 @@ bool IoBufChain::prepend(IoBuf &&buf) noexcept {
         return true;
     }
 
-    IoBufNode *node = node_pool_.alloc();
+    IoBufNode *node = node_pool().alloc();
     if (!node) {
         return false;
     }
@@ -118,6 +146,7 @@ bool IoBufChain::prepend(IoBuf &&buf) noexcept {
 }
 
 bool IoBufChain::append_node(IoBufNode *node) noexcept {
+    FIBER_ASSERT(bound());
     if (node == nullptr) {
         return false;
     }
@@ -139,6 +168,7 @@ bool IoBufChain::append_node(IoBufNode *node) noexcept {
 }
 
 bool IoBufChain::prepend_node(IoBufNode *node) noexcept {
+    FIBER_ASSERT(bound());
     if (node == nullptr) {
         return false;
     }
@@ -160,6 +190,7 @@ bool IoBufChain::prepend_node(IoBufNode *node) noexcept {
 
 bool IoBufChain::retain_prefix(std::size_t bytes, IoBufChain &out) const noexcept {
     FIBER_ASSERT(bytes <= readable_bytes_);
+    FIBER_ASSERT(same_pool(out));
 
     std::size_t remaining = bytes;
     for (IoBufNode *node = head_; node && remaining > 0; node = node->next) {
@@ -182,14 +213,23 @@ bool IoBufChain::retain_prefix(std::size_t bytes, IoBufChain &out) const noexcep
     }
 
     FIBER_ASSERT(remaining == 0);
+    if (bytes == readable_bytes_ && complete_) {
+        out.mark_complete();
+    }
     return true;
 }
 
 bool IoBufChain::take_prefix(std::size_t bytes, IoBufChain &dst) noexcept {
     FIBER_ASSERT(this != &dst);
     FIBER_ASSERT(bytes <= readable_bytes_);
+    FIBER_ASSERT(same_pool(dst));
+    const bool transfers_complete = bytes == readable_bytes_ && complete_;
 
     if (bytes == 0) {
+        if (transfers_complete) {
+            dst.mark_complete();
+            complete_ = false;
+        }
         return true;
     }
 
@@ -215,7 +255,7 @@ bool IoBufChain::take_prefix(std::size_t bytes, IoBufChain &dst) noexcept {
         if (!slice) {
             return false;
         }
-        partial = node_pool_.alloc();
+        partial = node_pool().alloc();
         if (!partial) {
             return false;
         }
@@ -282,6 +322,11 @@ bool IoBufChain::take_prefix(std::size_t bytes, IoBufChain &dst) noexcept {
         dst.readable_bytes_ += boundary_bytes;
     }
 
+    if (transfers_complete) {
+        dst.mark_complete();
+        complete_ = false;
+    }
+
     return true;
 }
 
@@ -292,6 +337,7 @@ void IoBufChain::clear() noexcept {
     size_ = 0;
     readable_bytes_ = 0;
     writable_bytes_ = 0;
+    complete_ = false;
 }
 
 void IoBufChain::consume(std::size_t bytes) noexcept {
@@ -312,7 +358,7 @@ void IoBufChain::drop_empty_front() noexcept {
     while (head_ && head_->buf.readable() == 0) {
         writable_bytes_ -= head_->buf.writable();
         IoBufNode *next = head_->next;
-        node_pool_.release(head_);
+        node_pool().release(head_);
         head_ = next;
         --size_;
     }
@@ -339,7 +385,7 @@ void IoBufChain::consume_and_compact(std::size_t bytes) noexcept {
 
         IoBufNode *next = node->next;
         writable_bytes_ -= node->buf.writable();
-        node_pool_.release(node);
+        node_pool().release(node);
         node = next;
         --size_;
     }
@@ -363,6 +409,31 @@ void IoBufChain::commit(std::size_t bytes) noexcept {
         node->buf.commit(writable);
         bytes -= writable;
     }
+}
+
+void IoBufChain::mark_complete() noexcept { complete_ = true; }
+
+void IoBufChain::clear_complete() noexcept { complete_ = false; }
+
+IoBufNode *IoBufChain::pop_front_node() noexcept {
+    FIBER_ASSERT(bound());
+    IoBufNode *node = head_;
+    if (node == nullptr) {
+        return nullptr;
+    }
+
+    head_ = node->next;
+    if (tail_ == node) {
+        tail_ = nullptr;
+    }
+    node->next = nullptr;
+    --size_;
+    readable_bytes_ -= node->buf.readable();
+    writable_bytes_ -= node->buf.writable();
+    if (head_ == nullptr) {
+        tail_ = nullptr;
+    }
+    return node;
 }
 
 int IoBufChain::fill_write_iov(struct iovec *iov, int max_iov) const noexcept {
@@ -444,7 +515,7 @@ const IoBuf *IoBufChain::first_writable() const noexcept {
 void IoBufChain::release_nodes(IoBufNode *node) noexcept {
     while (node) {
         IoBufNode *next = node->next;
-        node_pool_.release(node);
+        node_pool().release(node);
         node = next;
     }
 }

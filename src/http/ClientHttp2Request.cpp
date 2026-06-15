@@ -63,7 +63,7 @@ struct ClientHttp2Request::SendRequestBodyOp {
 
     [[nodiscard]] std::size_t success_result(const BodySendAwaiter &) const noexcept { return total_bytes_; }
 
-    BodyChunk chunk_{};
+    BodyChunk chunk_;
     std::size_t total_bytes_ = 0;
 };
 
@@ -119,11 +119,17 @@ const Http2HpackDecoder::Ops &ClientHttp2Request::decoder_ops() noexcept {
 }
 
 ClientHttp2Request::ClientHttp2Request(Http2Connection &conn, mem::BufPool &pool) noexcept :
-    conn_(&conn), stream_(this, stream_ops()), pool_(&pool), response_body_recv_(conn.options_.read_timeout),
+    conn_(&conn), stream_(this, stream_ops()), pool_(&pool),
+    response_body_recv_(conn.transport().loop().io_buf_node_pool(), conn.options_.read_timeout),
     response_header_recv_(pool, conn.options_.read_timeout) {}
 
 ClientHttp2Request *ClientHttp2Request::create(Http2Connection &conn, mem::BufPool &pool) noexcept {
     return new (std::nothrow) ClientHttp2Request(conn, pool);
+}
+
+mem::IoBufNodePool &ClientHttp2Request::node_pool() noexcept {
+    FIBER_ASSERT(conn_ != nullptr);
+    return conn_->transport().loop().io_buf_node_pool();
 }
 
 fiber::async::Task<common::IoResult<void>> ClientHttp2Request::send_request_header(const Http2RequestHead &head,

@@ -185,6 +185,67 @@ TEST(QuicStreamSendBufferTest, FinalDataCarriesFinUntilAcked) {
     EXPECT_TRUE(buffer.empty());
 }
 
+TEST(QuicStreamSendBufferTest, AppendChainTakesReadableNodesAndUsesCompleteAsFin) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicStreamSendBuffer buffer(pool);
+    fiber::mem::IoBufChain chain(pool);
+
+    ASSERT_TRUE(chain.append(iobuf_of("ab")));
+    ASSERT_TRUE(chain.append(iobuf_of("cd")));
+    chain.mark_complete();
+
+    auto appended = buffer.append_chain(chain);
+    ASSERT_TRUE(appended.has_value());
+    EXPECT_EQ(*appended, 4u);
+    EXPECT_TRUE(chain.empty());
+    EXPECT_FALSE(chain.complete());
+    EXPECT_EQ(buffer.ready_bytes(), 4u);
+    EXPECT_TRUE(buffer.has_final_size());
+    EXPECT_EQ(buffer.final_size(), 4u);
+
+    std::array<std::uint8_t, 64> out{};
+    auto encoded = buffer.encode_stream_frame(8, out.data(), out.size());
+    ASSERT_TRUE(encoded.has_value());
+    ASSERT_TRUE(encoded->encoded);
+    EXPECT_EQ(encoded->data_len, 2u);
+    EXPECT_FALSE(encoded->fin);
+
+    fiber::quic::QuicInputFrame frame = parse_stream_frame(out.data(), encoded->encoded_len);
+    EXPECT_EQ(frame_data_view(frame), "ab");
+    EXPECT_FALSE(frame.u.stream.fin);
+
+    ASSERT_TRUE(buffer.mark_acked(encoded->offset, encoded->data_len, encoded->fin).has_value());
+    encoded = buffer.encode_stream_frame(8, out.data(), out.size());
+    ASSERT_TRUE(encoded.has_value());
+    ASSERT_TRUE(encoded->encoded);
+    EXPECT_EQ(encoded->data_len, 2u);
+    EXPECT_TRUE(encoded->fin);
+    frame = parse_stream_frame(out.data(), encoded->encoded_len);
+    EXPECT_EQ(frame_data_view(frame), "cd");
+    EXPECT_TRUE(frame.u.stream.fin);
+}
+
+TEST(QuicStreamSendBufferTest, AppendCompleteEmptyChainProducesFinOnlyFrame) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicStreamSendBuffer buffer(pool);
+    fiber::mem::IoBufChain chain(pool);
+    chain.mark_complete();
+
+    auto appended = buffer.append_chain(chain);
+    ASSERT_TRUE(appended.has_value());
+    EXPECT_EQ(*appended, 0u);
+    EXPECT_FALSE(chain.complete());
+    EXPECT_TRUE(buffer.has_final_size());
+    EXPECT_EQ(buffer.final_size(), 0u);
+
+    std::array<std::uint8_t, 64> out{};
+    auto encoded = buffer.encode_stream_frame(12, out.data(), out.size());
+    ASSERT_TRUE(encoded.has_value());
+    ASSERT_TRUE(encoded->encoded);
+    EXPECT_EQ(encoded->data_len, 0u);
+    EXPECT_TRUE(encoded->fin);
+}
+
 TEST(QuicStreamSendBufferTest, FinOnlyFrameCanFailAndRetry) {
     fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamSendBuffer buffer(pool);

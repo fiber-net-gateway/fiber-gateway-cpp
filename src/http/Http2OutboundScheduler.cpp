@@ -73,7 +73,9 @@ std::size_t Http2OutboundEncodeTarget::total_bytes() const noexcept {
     return slot_used_ + tail_chain_.readable_bytes();
 }
 
-void Http2OutboundEncodeTarget::reset(std::uint8_t *slot, std::size_t capacity) noexcept {
+void Http2OutboundEncodeTarget::reset(mem::IoBufNodePool &node_pool, std::uint8_t *slot,
+                                      std::size_t capacity) noexcept {
+    tail_chain_.bind_node_pool(node_pool);
     slot_ = slot;
     slot_capacity_ = capacity;
     slot_used_ = 0;
@@ -692,7 +694,7 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
         inflight_stream_write_.slot = slot_slab->data();
         inflight_stream_write_.slot_capacity = slot_slab->capacity;
         Http2OutboundEncodeTarget target;
-        target.reset(inflight_stream_write_.slot, inflight_stream_write_.slot_capacity);
+        target.reset(loop->io_buf_node_pool(), inflight_stream_write_.slot, inflight_stream_write_.slot_capacity);
         Http2OutboundEncodeResult result;
         common::IoErr err = hook.encode_(*stream, hook.encode_ctx_, req, target, result);
         if (err != common::IoErr::None) {

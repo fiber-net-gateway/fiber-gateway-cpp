@@ -52,7 +52,7 @@ private:
     };
 
     struct ResponseHeaderNode {
-        explicit ResponseHeaderNode(mem::BufPool &pool) : head(pool) {}
+        ResponseHeaderNode(mem::BufPool &pool, mem::IoBufNodePool &node_pool) : head(pool), owner_bufs(node_pool) {}
 
         static void *operator new(std::size_t size, mem::BufPool &pool) noexcept {
             return pool.alloc(size, alignof(ResponseHeaderNode));

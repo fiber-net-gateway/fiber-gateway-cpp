@@ -75,7 +75,7 @@ common::IoResult<std::size_t> QuicStream::recv_stream_data(std::uint64_t offset,
         recv_state_ = QuicStreamRecvState::Closed;
     }
     if (ops_ != nullptr && ops_->on_data != nullptr && (*inserted != 0 || recv_state_ == QuicStreamRecvState::Closed)) {
-        mem::IoBufChain out;
+        mem::IoBufChain out(reassembler_.node_pool());
         auto taken = take_recv_data(reassembler_.buffered_bytes(), out);
         if (!taken) {
             return std::unexpected(taken.error());

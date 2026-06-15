@@ -28,6 +28,7 @@ static_assert(!std::is_copy_constructible_v<IoBufChain>);
 static_assert(std::is_move_constructible_v<IoBufChain>);
 
 TEST(IoBufChainTest, ChainExportsReadableAndWritableIovecs) {
+    IoBufNodePool pool;
     IoBuf a = IoBuf::allocate(8);
     IoBuf b = IoBuf::allocate(8);
     ASSERT_TRUE(a);
@@ -38,7 +39,7 @@ TEST(IoBufChainTest, ChainExportsReadableAndWritableIovecs) {
     std::memcpy(b.writable_data(), "cdef", 4);
     b.commit(4);
 
-    IoBufChain chain;
+    IoBufChain chain(pool);
     ASSERT_TRUE(chain.append(std::move(a)));
     ASSERT_TRUE(chain.append(std::move(b)));
     EXPECT_EQ(chain.size(), 2u);
@@ -99,7 +100,7 @@ TEST(IoBufChainTest, ChainAppendNodeTakesOwnershipAndResetsOwnerFields) {
     node->buf = std::move(buf);
     node->next = node;
 
-    IoBufChain chain;
+    IoBufChain chain(pool);
     ASSERT_TRUE(chain.append_node(node));
     EXPECT_EQ(node->offset, 0u);
     EXPECT_EQ(node->state, 0u);
@@ -110,6 +111,7 @@ TEST(IoBufChainTest, ChainAppendNodeTakesOwnershipAndResetsOwnerFields) {
 }
 
 TEST(IoBufChainTest, DropEmptyFrontRemovesOnlyDrainedPrefix) {
+    IoBufNodePool pool;
     IoBuf a = IoBuf::allocate(4);
     IoBuf b = IoBuf::allocate(4);
     ASSERT_TRUE(a);
@@ -120,7 +122,7 @@ TEST(IoBufChainTest, DropEmptyFrontRemovesOnlyDrainedPrefix) {
     std::memcpy(b.writable_data(), "cd", 2);
     b.commit(2);
 
-    IoBufChain chain;
+    IoBufChain chain(pool);
     ASSERT_TRUE(chain.append(std::move(a)));
     ASSERT_TRUE(chain.append(std::move(b)));
 
@@ -132,12 +134,14 @@ TEST(IoBufChainTest, DropEmptyFrontRemovesOnlyDrainedPrefix) {
     chain.drop_empty_front();
     ASSERT_NE(chain.front(), nullptr);
     EXPECT_EQ(chain.size(), 1u);
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(chain.front()->readable_data()), chain.front()->readable()),
-              "cd");
+    EXPECT_EQ(
+            std::string_view(reinterpret_cast<const char *>(chain.front()->readable_data()), chain.front()->readable()),
+            "cd");
     EXPECT_EQ(chain.writable_bytes(), 2u);
 }
 
 TEST(IoBufChainTest, ConsumeAndCompactDropsFullyConsumedFrontNodes) {
+    IoBufNodePool pool;
     IoBuf a = IoBuf::allocate(4);
     IoBuf b = IoBuf::allocate(4);
     IoBuf c = IoBuf::allocate(4);
@@ -152,15 +156,16 @@ TEST(IoBufChainTest, ConsumeAndCompactDropsFullyConsumedFrontNodes) {
     std::memcpy(c.writable_data(), "ef", 2);
     c.commit(2);
 
-    IoBufChain chain;
+    IoBufChain chain(pool);
     ASSERT_TRUE(chain.append(std::move(a)));
     ASSERT_TRUE(chain.append(std::move(b)));
     ASSERT_TRUE(chain.append(std::move(c)));
 
     chain.consume_and_compact(3);
     ASSERT_NE(chain.front(), nullptr);
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(chain.front()->readable_data()), chain.front()->readable()),
-              "d");
+    EXPECT_EQ(
+            std::string_view(reinterpret_cast<const char *>(chain.front()->readable_data()), chain.front()->readable()),
+            "d");
     EXPECT_EQ(chain.size(), 2u);
     EXPECT_EQ(chain.readable_bytes(), 3u);
     EXPECT_EQ(chain.writable_bytes(), 4u);
@@ -172,12 +177,13 @@ TEST(IoBufChainTest, ConsumeAndCompactDropsFullyConsumedFrontNodes) {
 }
 
 TEST(IoBufChainTest, ChainCommitBuildsWritableIovecs) {
+    IoBufNodePool pool;
     IoBuf a = IoBuf::allocate(4);
     IoBuf b = IoBuf::allocate(3);
     ASSERT_TRUE(a);
     ASSERT_TRUE(b);
 
-    IoBufChain chain;
+    IoBufChain chain(pool);
     ASSERT_TRUE(chain.append(std::move(a)));
     ASSERT_TRUE(chain.append(std::move(b)));
     EXPECT_EQ(chain.writable_bytes(), 7u);
@@ -201,6 +207,7 @@ TEST(IoBufChainTest, ChainCommitBuildsWritableIovecs) {
 }
 
 TEST(IoBufChainTest, TakePrefixMovesWholeNodesAndAppendsToExistingDestination) {
+    IoBufNodePool pool;
     IoBuf a = IoBuf::allocate(4);
     IoBuf b = IoBuf::allocate(5);
     IoBuf c = IoBuf::allocate(4);
@@ -219,8 +226,8 @@ TEST(IoBufChainTest, TakePrefixMovesWholeNodesAndAppendsToExistingDestination) {
     std::memcpy(dst_buf.writable_data(), "xy", 2);
     dst_buf.commit(2);
 
-    IoBufChain src;
-    IoBufChain dst;
+    IoBufChain src(pool);
+    IoBufChain dst(pool);
     ASSERT_TRUE(src.append(std::move(a)));
     ASSERT_TRUE(src.append(std::move(b)));
     ASSERT_TRUE(src.append(std::move(c)));
@@ -239,14 +246,15 @@ TEST(IoBufChainTest, TakePrefixMovesWholeNodesAndAppendsToExistingDestination) {
 }
 
 TEST(IoBufChainTest, TakePrefixSplitsBoundaryNodeUsingRetainedSlice) {
+    IoBufNodePool pool;
     IoBuf buf = IoBuf::allocate(8);
     ASSERT_TRUE(buf);
 
     std::memcpy(buf.writable_data(), "abcdef", 6);
     buf.commit(6);
 
-    IoBufChain src;
-    IoBufChain dst;
+    IoBufChain src(pool);
+    IoBufChain dst(pool);
     ASSERT_TRUE(src.append(std::move(buf)));
 
     ASSERT_TRUE(src.take_prefix(3, dst));
@@ -266,6 +274,7 @@ TEST(IoBufChainTest, TakePrefixSplitsBoundaryNodeUsingRetainedSlice) {
 }
 
 TEST(IoBufChainTest, TakePrefixSkipsEmptyReadableNodes) {
+    IoBufNodePool pool;
     IoBuf empty = IoBuf::allocate(4);
     IoBuf full = IoBuf::allocate(4);
     IoBuf tail = IoBuf::allocate(4);
@@ -278,8 +287,8 @@ TEST(IoBufChainTest, TakePrefixSkipsEmptyReadableNodes) {
     std::memcpy(tail.writable_data(), "cd", 2);
     tail.commit(2);
 
-    IoBufChain src;
-    IoBufChain dst;
+    IoBufChain src(pool);
+    IoBufChain dst(pool);
     ASSERT_TRUE(src.append(std::move(empty)));
     ASSERT_TRUE(src.append(std::move(full)));
     ASSERT_TRUE(src.append(std::move(tail)));
@@ -294,6 +303,41 @@ TEST(IoBufChainTest, TakePrefixSkipsEmptyReadableNodes) {
     EXPECT_EQ(dst.readable_bytes(), 3u);
     EXPECT_EQ(src.writable_bytes(), 6u);
     EXPECT_EQ(dst.writable_bytes(), 2u);
+}
+
+TEST(IoBufChainTest, TakePrefixTransfersCompleteOnlyWithFullReadableRange) {
+    IoBufNodePool pool;
+    IoBuf buf = IoBuf::allocate(8);
+    ASSERT_TRUE(buf);
+    std::memcpy(buf.writable_data(), "abcdef", 6);
+    buf.commit(6);
+
+    IoBufChain src(pool);
+    IoBufChain first(pool);
+    IoBufChain second(pool);
+    ASSERT_TRUE(src.append(std::move(buf)));
+    src.mark_complete();
+
+    ASSERT_TRUE(src.take_prefix(3, first));
+    EXPECT_FALSE(first.complete());
+    EXPECT_TRUE(src.complete());
+
+    ASSERT_TRUE(src.take_prefix(3, second));
+    EXPECT_TRUE(second.complete());
+    EXPECT_FALSE(src.complete());
+    EXPECT_EQ(readable_string(first), "abc");
+    EXPECT_EQ(readable_string(second), "def");
+}
+
+TEST(IoBufChainTest, EmptyCompleteCanBeTransferred) {
+    IoBufNodePool pool;
+    IoBufChain src(pool);
+    IoBufChain dst(pool);
+    src.mark_complete();
+
+    ASSERT_TRUE(src.take_prefix(0, dst));
+    EXPECT_FALSE(src.complete());
+    EXPECT_TRUE(dst.complete());
 }
 
 } // namespace

@@ -412,14 +412,15 @@ common::IoResult<void> Http1ExchangeIo::take_prefix(mem::IoBufChain &out, std::s
 
 fiber::async::Task<common::IoResult<BodyChunk>> Http1ExchangeIo::read_body(HttpExchange &exchange,
                                                                            size_t max_bytes) noexcept {
-    BodyChunk out{};
+    if (!connection_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    BodyChunk out(connection_->loop().io_buf_node_pool());
     if (body_parser_.done()) {
         exchange.request_trailers_complete_ = true;
         out.last = true;
+        out.data_chain.mark_complete();
         co_return out;
-    }
-    if (!connection_) {
-        co_return std::unexpected(common::IoErr::Invalid);
     }
 
     if (body_parser_.type() == BodyParser::Type::Chunked) {
@@ -441,6 +442,7 @@ fiber::async::Task<common::IoResult<BodyChunk>> Http1ExchangeIo::read_body(HttpE
                         co_return std::unexpected(trailer_result.error());
                     }
                     out.last = true;
+                    out.data_chain.mark_complete();
                     co_return out;
                 }
                 if (*parse_result == ParseCode::Again) {
@@ -499,6 +501,7 @@ fiber::async::Task<common::IoResult<BodyChunk>> Http1ExchangeIo::read_body(HttpE
     if (body_parser_.done()) {
         exchange.request_trailers_complete_ = true;
         out.last = true;
+        out.data_chain.mark_complete();
     }
     co_return out;
 }

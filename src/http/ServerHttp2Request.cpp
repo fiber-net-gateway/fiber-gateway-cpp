@@ -93,7 +93,7 @@ struct ServerHttp2Request::SendResponseBodyOp {
 
     [[nodiscard]] std::size_t success_result(const BodySendAwaiter &) const noexcept { return total_bytes_; }
 
-    BodyChunk chunk_{};
+    BodyChunk chunk_;
     std::size_t total_bytes_ = 0;
 };
 
@@ -132,8 +132,10 @@ const HeaderMap<ServerHttp2Request::PseudoHeaderHandler> &ServerHttp2Request::ps
 
 ServerHttp2Request::ServerHttp2Request(std::uint32_t stream_id, Http2Connection &conn,
                                        const HttpServerOptions &http_options, const HttpHandler &handler) noexcept :
-    conn_(&conn), handler_(&handler), stream_(this, stream_ops()), exchange_(http_options),
-    request_body_recv_(http_options.body_timeout), write_timeout_(http_options.write_timeout) {
+    conn_(&conn), handler_(&handler), stream_(this, stream_ops()),
+    exchange_(conn.transport().loop().io_buf_node_pool(), http_options),
+    request_body_recv_(conn.transport().loop().io_buf_node_pool(), http_options.body_timeout),
+    write_timeout_(http_options.write_timeout) {
     (void) stream_id;
     FIBER_ASSERT(handler_ != nullptr);
 }
@@ -547,8 +549,11 @@ ServerHttp2Request::write_body(HttpExchange &exchange, const std::uint8_t *buf, 
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    BodyChunk chunk;
+    BodyChunk chunk(conn_->transport().loop().io_buf_node_pool());
     chunk.last = end;
+    if (end) {
+        chunk.data_chain.mark_complete();
+    }
     if (len != 0) {
         mem::IoBuf owned = mem::IoBuf::allocate(len);
         if (!owned) {

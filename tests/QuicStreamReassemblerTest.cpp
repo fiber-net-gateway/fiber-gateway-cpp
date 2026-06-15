@@ -35,7 +35,7 @@ TEST(QuicStreamReassemblerTest, OutOfOrderDataMergesSameStorageExtentsAndTakesIn
     EXPECT_EQ(reassembler.active_extent_count(), 1u);
     EXPECT_EQ(reassembler.active_block_count(), 1u);
 
-    fiber::mem::IoBufChain out;
+    fiber::mem::IoBufChain out(pool);
     auto early_take = reassembler.take(16, out);
     ASSERT_TRUE(early_take.has_value());
     EXPECT_EQ(*early_take, 0u);
@@ -75,7 +75,7 @@ TEST(QuicStreamReassemblerTest, OverlappingInsertCopiesOnlyMissingPrefix) {
     EXPECT_EQ(reassembler.active_extent_count(), 1u);
     EXPECT_EQ(reassembler.buffered_bytes(), 6u);
 
-    fiber::mem::IoBufChain out;
+    fiber::mem::IoBufChain out(pool);
     auto taken = reassembler.take(16, out);
     ASSERT_TRUE(taken.has_value());
     EXPECT_EQ(*taken, 6u);
@@ -88,7 +88,7 @@ TEST(QuicStreamReassemblerTest, DeliveredDuplicateIsIgnored) {
 
     ASSERT_TRUE(reassembler.insert(0, slice_of("abc")).has_value());
 
-    fiber::mem::IoBufChain out;
+    fiber::mem::IoBufChain out(pool);
     auto taken = reassembler.take(3, out);
     ASSERT_TRUE(taken.has_value());
     EXPECT_EQ(*taken, 3u);
@@ -102,7 +102,7 @@ TEST(QuicStreamReassemblerTest, DeliveredDuplicateIsIgnored) {
     ASSERT_TRUE(next.has_value());
     EXPECT_EQ(*next, 2u);
 
-    fiber::mem::IoBufChain tail;
+    fiber::mem::IoBufChain tail(pool);
     taken = reassembler.take(8, tail);
     ASSERT_TRUE(taken.has_value());
     EXPECT_EQ(*taken, 2u);
@@ -120,6 +120,13 @@ TEST(QuicStreamReassemblerTest, FinalSizeMustRemainConsistent) {
 
     auto mismatched_fin = reassembler.insert(0, slice_of("abcd"), true);
     EXPECT_FALSE(mismatched_fin.has_value());
+
+    fiber::mem::IoBufChain out(pool);
+    auto taken = reassembler.take(16, out);
+    ASSERT_TRUE(taken.has_value());
+    EXPECT_EQ(*taken, 3u);
+    EXPECT_EQ(chain_to_string(out), "abc");
+    EXPECT_TRUE(out.complete());
 }
 
 TEST(QuicStreamReassemblerTest, FirstFrameCanCrossRecvBlockBoundary) {
@@ -138,7 +145,7 @@ TEST(QuicStreamReassemblerTest, FirstFrameCanCrossRecvBlockBoundary) {
     EXPECT_EQ(reassembler.active_extent_count(), 2u);
     EXPECT_EQ(reassembler.active_block_count(), 2u);
 
-    fiber::mem::IoBufChain empty;
+    fiber::mem::IoBufChain empty(pool);
     auto taken = reassembler.take(payload.size(), empty);
     ASSERT_TRUE(taken.has_value());
     EXPECT_EQ(*taken, 0u);
@@ -150,7 +157,7 @@ TEST(QuicStreamReassemblerTest, FirstFrameCanCrossRecvBlockBoundary) {
     EXPECT_EQ(reassembler.active_extent_count(), 2u);
     EXPECT_EQ(reassembler.active_block_count(), 2u);
 
-    fiber::mem::IoBufChain out;
+    fiber::mem::IoBufChain out(pool);
     taken = reassembler.take(prefix.size() + payload.size(), out);
     ASSERT_TRUE(taken.has_value());
     EXPECT_EQ(*taken, prefix.size() + payload.size());
@@ -172,7 +179,7 @@ TEST(QuicStreamReassemblerTest, FirstFrameCanStartInSecondRecvBlock) {
     EXPECT_EQ(reassembler.active_extent_count(), 1u);
     EXPECT_EQ(reassembler.active_block_count(), 1u);
 
-    fiber::mem::IoBufChain out;
+    fiber::mem::IoBufChain out(pool);
     auto taken = reassembler.take(16, out);
     ASSERT_TRUE(taken.has_value());
     EXPECT_EQ(*taken, 0u);

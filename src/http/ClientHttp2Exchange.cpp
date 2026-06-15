@@ -65,9 +65,19 @@ fiber::async::Task<common::IoResult<size_t>> ClientHttp2Exchange::write_body(con
     if (len != 0 && buf == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
+    if (!stream_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    ClientHttp2Request *req = request();
+    if (!req) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
 
-    BodyChunk chunk;
+    BodyChunk chunk(req->node_pool());
     chunk.last = end_stream;
+    if (end_stream) {
+        chunk.data_chain.mark_complete();
+    }
     if (len != 0) {
         mem::IoBuf owned = mem::IoBuf::allocate(len);
         if (!owned) {
@@ -80,7 +90,7 @@ fiber::async::Task<common::IoResult<size_t>> ClientHttp2Exchange::write_body(con
         }
     }
 
-    co_return co_await write_body(std::move(chunk));
+    co_return co_await req->write_body(std::move(chunk));
 }
 
 fiber::async::Task<common::IoResult<void>> ClientHttp2Exchange::write_trailer(const HttpHeaders &headers) noexcept {

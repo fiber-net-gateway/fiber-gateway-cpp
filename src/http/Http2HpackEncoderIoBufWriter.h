@@ -15,7 +15,8 @@ namespace fiber::http {
 
 class Http2HpackEncoderIoBufWriter : public common::NonCopyable, public common::NonMovable {
 public:
-    explicit Http2HpackEncoderIoBufWriter(Http2HpackEncoder &encoder, std::size_t chunk_size = 512) noexcept;
+    Http2HpackEncoderIoBufWriter(Http2HpackEncoder &encoder, mem::IoBufNodePool &node_pool,
+                                 std::size_t chunk_size = 512) noexcept;
     ~Http2HpackEncoderIoBufWriter();
 
     [[nodiscard]] common::IoErr begin() noexcept;

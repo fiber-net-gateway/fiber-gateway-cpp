@@ -22,6 +22,7 @@ using fiber::http::Http2HpackEncodeCatalog;
 using fiber::http::Http2HpackEncoder;
 using fiber::http::Http2HpackEncoderIoBufWriter;
 using fiber::mem::IoBufChain;
+using fiber::mem::IoBufNodePool;
 
 std::vector<std::uint8_t> chain_to_bytes(IoBufChain chain) {
     std::vector<std::uint8_t> out;
@@ -121,31 +122,33 @@ struct DecodeRecorder {
 };
 
 TEST(Http2HpackEncoderTest, EncodesStaticExactAsIndexedField) {
+    IoBufNodePool pool;
     Http2HpackEncodeCatalog catalog;
     ASSERT_TRUE(catalog.init({}));
 
     Http2HpackEncoder encoder({.catalog = &catalog});
     ASSERT_TRUE(encoder.init());
-    Http2HpackEncoderIoBufWriter writer(encoder);
+    Http2HpackEncoderIoBufWriter writer(encoder, pool);
     ASSERT_EQ(writer.begin(), IoErr::None);
     ASSERT_EQ(writer.encode_status(200), IoErr::None);
 
-    IoBufChain block;
+    IoBufChain block(pool);
     ASSERT_EQ(writer.finish(block), IoErr::None);
     EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x88}));
 }
 
 TEST(Http2HpackEncoderTest, EncodesNonStaticStatusUsingIndexedName) {
+    IoBufNodePool pool;
     Http2HpackEncodeCatalog catalog;
     ASSERT_TRUE(catalog.init({}));
 
     Http2HpackEncoder encoder({.catalog = &catalog, .huffman_threshold = 1024});
     ASSERT_TRUE(encoder.init());
-    Http2HpackEncoderIoBufWriter writer(encoder);
+    Http2HpackEncoderIoBufWriter writer(encoder, pool);
     ASSERT_EQ(writer.begin(), IoErr::None);
     ASSERT_EQ(writer.encode_status(418), IoErr::None);
 
-    IoBufChain block;
+    IoBufChain block(pool);
     ASSERT_EQ(writer.finish(block), IoErr::None);
     const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
     EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x08, 0x03, '4', '1', '8'}));
@@ -160,17 +163,18 @@ TEST(Http2HpackEncoderTest, EncodesNonStaticStatusUsingIndexedName) {
 }
 
 TEST(Http2HpackEncoderTest, EncodesStaticNameMatchWithoutIndexingAndDecodesBack) {
+    IoBufNodePool pool;
     Http2HpackEncodeCatalog catalog;
     ASSERT_TRUE(catalog.init({}));
 
     Http2HpackEncoder encoder({.catalog = &catalog, .huffman_threshold = 1024});
     ASSERT_TRUE(encoder.init());
-    Http2HpackEncoderIoBufWriter writer(encoder);
+    Http2HpackEncoderIoBufWriter writer(encoder, pool);
     ASSERT_EQ(writer.begin(), IoErr::None);
     ASSERT_EQ(writer.encode_field("content-type", fiber::http::http_header_name_hash("content-type"), "text/plain"),
               IoErr::None);
 
-    IoBufChain block;
+    IoBufChain block(pool);
     ASSERT_EQ(writer.finish(block), IoErr::None);
     const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
     ASSERT_FALSE(bytes.empty());
@@ -186,6 +190,7 @@ TEST(Http2HpackEncoderTest, EncodesStaticNameMatchWithoutIndexingAndDecodesBack)
 }
 
 TEST(Http2HpackEncoderTest, ActivatesPolicyEntryAndReusesDynamicIndexOnSecondBlock) {
+    IoBufNodePool pool;
     constexpr std::array<Http2HpackEncodeCatalog::PolicyEntry, 1> kPolicies{{
             {"server", fiber::http::http_header_name_hash("server"), "nginx-1.25.1"},
     }};
@@ -196,34 +201,35 @@ TEST(Http2HpackEncoderTest, ActivatesPolicyEntryAndReusesDynamicIndexOnSecondBlo
     Http2HpackEncoder encoder({.catalog = &catalog, .huffman_threshold = 1024});
     ASSERT_TRUE(encoder.init());
 
-    Http2HpackEncoderIoBufWriter first_writer(encoder);
+    Http2HpackEncoderIoBufWriter first_writer(encoder, pool);
     ASSERT_EQ(first_writer.begin(), IoErr::None);
     ASSERT_EQ(first_writer.encode_field("server", fiber::http::http_header_name_hash("server"), "nginx-1.25.1"),
               IoErr::None);
-    IoBufChain first_block;
+    IoBufChain first_block(pool);
     ASSERT_EQ(first_writer.finish(first_block), IoErr::None);
     EXPECT_EQ(chain_to_bytes(std::move(first_block)),
               (std::vector<std::uint8_t>{0x76, 0x0c, 'n', 'g', 'i', 'n', 'x', '-', '1', '.', '2', '5', '.', '1'}));
 
-    Http2HpackEncoderIoBufWriter second_writer(encoder);
+    Http2HpackEncoderIoBufWriter second_writer(encoder, pool);
     ASSERT_EQ(second_writer.begin(), IoErr::None);
     ASSERT_EQ(second_writer.encode_field("server", fiber::http::http_header_name_hash("server"), "nginx-1.25.1"),
               IoErr::None);
-    IoBufChain second_block;
+    IoBufChain second_block(pool);
     ASSERT_EQ(second_writer.finish(second_block), IoErr::None);
     EXPECT_EQ(chain_to_bytes(std::move(second_block)), (std::vector<std::uint8_t>{0xbe}));
 }
 
 TEST(Http2HpackEncoderTest, UsesRawOrHuffmanStringEncodingBasedOnThreshold) {
+    IoBufNodePool pool;
     Http2HpackEncodeCatalog catalog;
     ASSERT_TRUE(catalog.init({}));
 
     Http2HpackEncoder raw_encoder({.catalog = &catalog, .huffman_threshold = 1024});
     ASSERT_TRUE(raw_encoder.init());
-    Http2HpackEncoderIoBufWriter raw_writer(raw_encoder);
+    Http2HpackEncoderIoBufWriter raw_writer(raw_encoder, pool);
     ASSERT_EQ(raw_writer.begin(), IoErr::None);
     ASSERT_EQ(raw_writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "abc"), IoErr::None);
-    IoBufChain raw_block;
+    IoBufChain raw_block(pool);
     ASSERT_EQ(raw_writer.finish(raw_block), IoErr::None);
     const std::vector<std::uint8_t> raw_bytes = chain_to_bytes(std::move(raw_block));
     ASSERT_GE(raw_bytes.size(), 2U);
@@ -232,10 +238,10 @@ TEST(Http2HpackEncoderTest, UsesRawOrHuffmanStringEncodingBasedOnThreshold) {
 
     Http2HpackEncoder huffman_encoder({.catalog = &catalog, .huffman_threshold = 1});
     ASSERT_TRUE(huffman_encoder.init());
-    Http2HpackEncoderIoBufWriter huffman_writer(huffman_encoder);
+    Http2HpackEncoderIoBufWriter huffman_writer(huffman_encoder, pool);
     ASSERT_EQ(huffman_writer.begin(), IoErr::None);
     ASSERT_EQ(huffman_writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "abc"), IoErr::None);
-    IoBufChain huffman_block;
+    IoBufChain huffman_block(pool);
     ASSERT_EQ(huffman_writer.finish(huffman_block), IoErr::None);
     const std::vector<std::uint8_t> huffman_bytes = chain_to_bytes(std::move(huffman_block));
     ASSERT_GE(huffman_bytes.size(), 2U);
@@ -244,6 +250,7 @@ TEST(Http2HpackEncoderTest, UsesRawOrHuffmanStringEncodingBasedOnThreshold) {
 }
 
 TEST(Http2HpackEncoderTest, EmitsTableSizeUpdateAtStartOfNextBlock) {
+    IoBufNodePool pool;
     Http2HpackEncodeCatalog catalog;
     ASSERT_TRUE(catalog.init({}));
 
@@ -251,9 +258,9 @@ TEST(Http2HpackEncoderTest, EmitsTableSizeUpdateAtStartOfNextBlock) {
     ASSERT_TRUE(encoder.init());
     encoder.update_max_dynamic_table_size(128);
 
-    Http2HpackEncoderIoBufWriter writer(encoder);
+    Http2HpackEncoderIoBufWriter writer(encoder, pool);
     ASSERT_EQ(writer.begin(), IoErr::None);
-    IoBufChain block;
+    IoBufChain block(pool);
     ASSERT_EQ(writer.finish(block), IoErr::None);
     EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x3f, 0x61}));
 }

@@ -35,6 +35,14 @@ struct HttpServerOptions {
 };
 
 struct BodyChunk {
+    BodyChunk() noexcept = default;
+    explicit BodyChunk(mem::IoBufNodePool &node_pool) noexcept : data_chain(node_pool) {}
+    BodyChunk(BodyChunk &&) noexcept = default;
+    BodyChunk &operator=(BodyChunk &&) noexcept = default;
+
+    BodyChunk(const BodyChunk &) = delete;
+    BodyChunk &operator=(const BodyChunk &) = delete;
+
     bool last = false;
     mem::IoBufChain data_chain;
 };
@@ -59,7 +67,7 @@ public:
         const HttpHeaders::HeaderField *expect = nullptr;
     };
 
-    explicit HttpExchange(const HttpServerOptions &options);
+    HttpExchange(mem::IoBufNodePool &node_pool, const HttpServerOptions &options);
     ~HttpExchange();
 
     [[nodiscard]] HttpMethod method() const noexcept { return method_; }
