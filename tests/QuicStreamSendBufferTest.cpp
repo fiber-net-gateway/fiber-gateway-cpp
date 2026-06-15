@@ -295,9 +295,9 @@ TEST(QuicStreamSendBufferTest, OmitsLengthWithOffsetAndFin) {
     EXPECT_EQ(enc2->encoded_len, 8u); // fills buffer exactly
 
     // LEN bit must not be set, but OFF and FIN bits must be set.
-    EXPECT_EQ(out2[0] & 0x02, 0u);     // no LEN
-    EXPECT_NE(out2[0] & 0x04, 0u);     // has OFF
-    EXPECT_NE(out2[0] & 0x01, 0u);     // has FIN
+    EXPECT_EQ(out2[0] & 0x02, 0u); // no LEN
+    EXPECT_NE(out2[0] & 0x04, 0u); // has OFF
+    EXPECT_NE(out2[0] & 0x01, 0u); // has FIN
 
     fiber::quic::QuicInputFrame frame = parse_stream_frame(out2.data(), enc2->encoded_len);
     EXPECT_EQ(frame.u.stream.offset, 5u);
