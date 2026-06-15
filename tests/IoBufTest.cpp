@@ -12,6 +12,7 @@ namespace {
 
 using fiber::mem::IoBuf;
 using fiber::mem::IoBufChain;
+using fiber::mem::IoBufNodePool;
 
 std::string_view readable_view(const IoBuf &buf) {
     return {reinterpret_cast<const char *>(buf.readable_data()), buf.readable()};
@@ -177,6 +178,57 @@ TEST(IoBufTest, ChainExportsReadableAndWritableIovecs) {
     count = chain.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
     ASSERT_EQ(count, 1);
     EXPECT_EQ(std::string_view(static_cast<const char *>(iov[0].iov_base), iov[0].iov_len), "def");
+}
+
+TEST(IoBufTest, NodePoolResetsNodeOnReuse) {
+    IoBufNodePool pool;
+    auto *node = pool.alloc();
+    ASSERT_NE(node, nullptr);
+
+    IoBuf buf = IoBuf::allocate(8);
+    ASSERT_TRUE(buf);
+    std::memcpy(buf.writable_data(), "abc", 3);
+    buf.commit(3);
+
+    node->offset = 42;
+    node->state = 7;
+    node->buf = std::move(buf);
+    node->next = node;
+    pool.release(node);
+    EXPECT_EQ(pool.cached_count(), 1u);
+
+    auto *reused = pool.alloc();
+    ASSERT_EQ(reused, node);
+    EXPECT_EQ(reused->offset, 0u);
+    EXPECT_EQ(reused->state, 0u);
+    EXPECT_FALSE(reused->buf.valid());
+    EXPECT_EQ(reused->next, nullptr);
+    pool.release(reused);
+}
+
+TEST(IoBufTest, ChainAppendNodeTakesOwnershipAndResetsOwnerFields) {
+    IoBufNodePool pool;
+    auto *node = pool.alloc();
+    ASSERT_NE(node, nullptr);
+
+    IoBuf buf = IoBuf::allocate(8);
+    ASSERT_TRUE(buf);
+    std::memcpy(buf.writable_data(), "abc", 3);
+    buf.commit(3);
+
+    node->offset = 99;
+    node->state = 3;
+    node->buf = std::move(buf);
+    node->next = node;
+
+    IoBufChain chain;
+    ASSERT_TRUE(chain.append_node(node));
+    EXPECT_EQ(node->offset, 0u);
+    EXPECT_EQ(node->state, 0u);
+    EXPECT_EQ(node->next, nullptr);
+    EXPECT_EQ(chain.size(), 1u);
+    EXPECT_EQ(chain.readable_bytes(), 3u);
+    EXPECT_EQ(readable_string(chain), "abc");
 }
 
 TEST(IoBufTest, DropEmptyFrontRemovesOnlyDrainedPrefix) {

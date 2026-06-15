@@ -9,6 +9,8 @@
 
 namespace {
 
+constexpr std::uint64_t kStreamRecvBlockSize = 64 * 1024;
+
 fiber::quic::QuicSlice slice_of(std::string_view value) {
     return {reinterpret_cast<const std::uint8_t *>(value.data()), value.size()};
 }
@@ -24,7 +26,7 @@ std::string chain_to_string(const fiber::mem::IoBufChain &chain) {
 }
 
 TEST(QuicStreamReassemblerTest, OutOfOrderDataMergesSameStorageExtentsAndTakesInOrder) {
-    fiber::quic::QuicRecvExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamReassembler reassembler(pool);
 
     auto first = reassembler.insert(4, slice_of("ef"));
@@ -60,7 +62,7 @@ TEST(QuicStreamReassemblerTest, OutOfOrderDataMergesSameStorageExtentsAndTakesIn
 }
 
 TEST(QuicStreamReassemblerTest, OverlappingInsertCopiesOnlyMissingPrefix) {
-    fiber::quic::QuicRecvExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamReassembler reassembler(pool);
 
     auto first = reassembler.insert(2, slice_of("cdef"));
@@ -81,7 +83,7 @@ TEST(QuicStreamReassemblerTest, OverlappingInsertCopiesOnlyMissingPrefix) {
 }
 
 TEST(QuicStreamReassemblerTest, DeliveredDuplicateIsIgnored) {
-    fiber::quic::QuicRecvExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamReassembler reassembler(pool);
 
     ASSERT_TRUE(reassembler.insert(0, slice_of("abc")).has_value());
@@ -108,7 +110,7 @@ TEST(QuicStreamReassemblerTest, DeliveredDuplicateIsIgnored) {
 }
 
 TEST(QuicStreamReassemblerTest, FinalSizeMustRemainConsistent) {
-    fiber::quic::QuicRecvExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamReassembler reassembler(pool);
 
     auto fin = reassembler.insert(0, slice_of("abc"), true);
@@ -121,12 +123,12 @@ TEST(QuicStreamReassemblerTest, FinalSizeMustRemainConsistent) {
 }
 
 TEST(QuicStreamReassemblerTest, FirstFrameCanCrossRecvBlockBoundary) {
-    fiber::quic::QuicRecvExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamReassembler reassembler(pool);
 
     constexpr std::uint64_t half_k = 512;
-    constexpr std::uint64_t start = fiber::quic::kQuicStreamRecvBlockSize - half_k;
-    std::string payload(fiber::quic::kQuicStreamRecvBlockSize / 64, 'x');
+    constexpr std::uint64_t start = kStreamRecvBlockSize - half_k;
+    std::string payload(kStreamRecvBlockSize / 64, 'x');
     payload.replace(0, 4, "head");
     payload.replace(payload.size() - 4, 4, "tail");
 
@@ -160,10 +162,10 @@ TEST(QuicStreamReassemblerTest, FirstFrameCanCrossRecvBlockBoundary) {
 }
 
 TEST(QuicStreamReassemblerTest, FirstFrameCanStartInSecondRecvBlock) {
-    fiber::quic::QuicRecvExtentPool pool;
+    fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamReassembler reassembler(pool);
 
-    constexpr std::uint64_t first_start = fiber::quic::kQuicStreamRecvBlockSize + 1024;
+    constexpr std::uint64_t first_start = kStreamRecvBlockSize + 1024;
     auto inserted = reassembler.insert(first_start, slice_of("late"));
     ASSERT_TRUE(inserted.has_value());
     EXPECT_EQ(*inserted, 4u);
@@ -176,13 +178,13 @@ TEST(QuicStreamReassemblerTest, FirstFrameCanStartInSecondRecvBlock) {
     EXPECT_EQ(*taken, 0u);
 
     std::string block_prefix(1024, 'b');
-    inserted = reassembler.insert(fiber::quic::kQuicStreamRecvBlockSize, slice_of(block_prefix));
+    inserted = reassembler.insert(kStreamRecvBlockSize, slice_of(block_prefix));
     ASSERT_TRUE(inserted.has_value());
     EXPECT_EQ(*inserted, block_prefix.size());
     EXPECT_EQ(reassembler.active_extent_count(), 1u);
     EXPECT_EQ(reassembler.active_block_count(), 1u);
 
-    std::string first_block(fiber::quic::kQuicStreamRecvBlockSize, 'a');
+    std::string first_block(kStreamRecvBlockSize, 'a');
     inserted = reassembler.insert(0, slice_of(first_block));
     ASSERT_TRUE(inserted.has_value());
     EXPECT_EQ(*inserted, first_block.size());

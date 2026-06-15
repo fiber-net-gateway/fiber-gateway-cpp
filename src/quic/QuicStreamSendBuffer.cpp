@@ -18,12 +18,12 @@ constexpr std::uint8_t kStreamFrameOff = 0x04;
 
 } // namespace
 
-QuicStreamSendBuffer::QuicStreamSendBuffer(QuicStreamDataExtentPool &pool) noexcept : pool_(&pool) {}
+QuicStreamSendBuffer::QuicStreamSendBuffer(mem::IoBufNodePool &pool) noexcept : pool_(&pool) {}
 
 QuicStreamSendBuffer::~QuicStreamSendBuffer() {
-    QuicStreamDataExtent *cur = head_;
+    mem::IoBufNode *cur = head_;
     while (cur != nullptr) {
-        QuicStreamDataExtent *next = cur->next;
+        mem::IoBufNode *next = cur->next;
         pool_->release(cur);
         cur = next;
     }
@@ -45,7 +45,7 @@ common::IoResult<std::size_t> QuicStreamSendBuffer::append(const mem::IoBuf &buf
             return std::unexpected(common::IoErr::NoMem);
         }
 
-        QuicStreamDataExtent *extent = pool_->alloc();
+        mem::IoBufNode *extent = pool_->alloc();
         if (extent == nullptr) {
             return std::unexpected(common::IoErr::NoMem);
         }
@@ -53,11 +53,11 @@ common::IoResult<std::size_t> QuicStreamSendBuffer::append(const mem::IoBuf &buf
         extent->offset = total_appended_bytes_;
 
         // Try to merge with tail if same underlying storage and adjacent.
-        if (tail_ != nullptr && tail_->view && slice.same_storage(tail_->view) &&
-            tail_->view.try_merge_adjacent(std::move(slice))) {
+        if (tail_ != nullptr && tail_->buf && slice.same_storage(tail_->buf) &&
+            tail_->buf.try_merge_adjacent(std::move(slice))) {
             pool_->release(extent);
         } else {
-            extent->view = std::move(slice);
+            extent->buf = std::move(slice);
             extent->next = nullptr;
             if (tail_ != nullptr) {
                 tail_->next = extent;
@@ -86,7 +86,7 @@ common::IoResult<QuicStreamSendBuffer::EncodedFrameResult>
 QuicStreamSendBuffer::encode_stream_frame(std::uint64_t stream_id, std::uint8_t *dst, std::size_t capacity) noexcept {
     EncodedFrameResult result{};
 
-    QuicStreamDataExtent *cur = ready_head_;
+    mem::IoBufNode *cur = ready_head_;
 
     // No ready data — check if we need to send a fin-only frame.
     if (cur == nullptr) {
@@ -134,7 +134,7 @@ QuicStreamSendBuffer::encode_stream_frame(std::uint64_t stream_id, std::uint8_t 
     }
 
     // Has ready data — encode from cur.
-    const std::size_t data_len = cur->view.readable();
+    const std::size_t data_len = cur->buf.readable();
     std::size_t base_hdr = 1 + quic_varint_len(stream_id);
     if (cur->offset > 0) {
         base_hdr += quic_varint_len(cur->offset);
@@ -185,15 +185,15 @@ QuicStreamSendBuffer::encode_stream_frame(std::uint64_t stream_id, std::uint8_t 
 
     // Split extent if encoding only part of it.
     if (actual_data < data_len) {
-        QuicStreamDataExtent *remainder = pool_->alloc();
+        mem::IoBufNode *remainder = pool_->alloc();
         if (remainder == nullptr) {
             return std::unexpected(common::IoErr::NoMem);
         }
         remainder->offset = cur->offset + actual_data;
         remainder->state = static_cast<std::uint8_t>(QuicSendExtentState::Ready);
-        remainder->view = cur->view.retain_slice(actual_data, data_len - actual_data);
+        remainder->buf = cur->buf.retain_slice(actual_data, data_len - actual_data);
         remainder->next = cur->next;
-        cur->view = cur->view.retain_slice(0, actual_data);
+        cur->buf = cur->buf.retain_slice(0, actual_data);
         cur->next = remainder;
         if (cur == tail_) {
             tail_ = remainder;
@@ -234,7 +234,7 @@ QuicStreamSendBuffer::encode_stream_frame(std::uint64_t stream_id, std::uint8_t 
             return std::unexpected(r.error());
         }
     }
-    r = wc.write_bytes(cur->view.readable_data(), actual_data);
+    r = wc.write_bytes(cur->buf.readable_data(), actual_data);
     if (!r) {
         return std::unexpected(r.error());
     }
@@ -264,12 +264,12 @@ QuicStreamSendBuffer::encode_stream_frame(std::uint64_t stream_id, std::uint8_t 
 common::IoResult<void> QuicStreamSendBuffer::mark_acked(std::size_t offset, std::size_t length,
                                                         bool encoded_fin) noexcept {
     const std::size_t end = offset + length;
-    QuicStreamDataExtent *prev = nullptr;
-    QuicStreamDataExtent *cur = head_;
+    mem::IoBufNode *prev = nullptr;
+    mem::IoBufNode *cur = head_;
 
     while (cur != nullptr) {
-        QuicStreamDataExtent *next = cur->next;
-        const std::size_t extent_end = static_cast<std::size_t>(cur->offset) + cur->view.readable();
+        mem::IoBufNode *next = cur->next;
+        const std::size_t extent_end = static_cast<std::size_t>(cur->offset) + cur->buf.readable();
 
         if (cur->state == static_cast<std::uint8_t>(QuicSendExtentState::Inflight) &&
             static_cast<std::size_t>(cur->offset) >= offset && extent_end <= end) {
@@ -284,7 +284,7 @@ common::IoResult<void> QuicStreamSendBuffer::mark_acked(std::size_t offset, std:
                 tail_ = prev;
             }
 
-            inflight_bytes_ -= cur->view.readable();
+            inflight_bytes_ -= cur->buf.readable();
             pool_->release(cur);
             --active_extent_count_;
         } else {
@@ -311,17 +311,17 @@ common::IoResult<void> QuicStreamSendBuffer::mark_acked(std::size_t offset, std:
 common::IoResult<void> QuicStreamSendBuffer::mark_failed(std::size_t offset, std::size_t length,
                                                          bool encoded_fin) noexcept {
     const std::size_t end = offset + length;
-    QuicStreamDataExtent *cur = head_;
+    mem::IoBufNode *cur = head_;
 
     while (cur != nullptr) {
-        QuicStreamDataExtent *next = cur->next;
-        const std::size_t extent_end = static_cast<std::size_t>(cur->offset) + cur->view.readable();
+        mem::IoBufNode *next = cur->next;
+        const std::size_t extent_end = static_cast<std::size_t>(cur->offset) + cur->buf.readable();
 
         if (cur->state == static_cast<std::uint8_t>(QuicSendExtentState::Inflight) &&
             static_cast<std::size_t>(cur->offset) >= offset && extent_end <= end) {
 
             cur->state = static_cast<std::uint8_t>(QuicSendExtentState::Ready);
-            const std::size_t bytes = cur->view.readable();
+            const std::size_t bytes = cur->buf.readable();
             inflight_bytes_ -= bytes;
             ready_bytes_ += bytes;
 
@@ -345,15 +345,15 @@ common::IoResult<void> QuicStreamSendBuffer::mark_failed(std::size_t offset, std
     return {};
 }
 
-bool QuicStreamSendBuffer::is_last_ready_extent(const QuicStreamDataExtent *extent) const noexcept {
+bool QuicStreamSendBuffer::is_last_ready_extent(const mem::IoBufNode *extent) const noexcept {
     if (extent->next != nullptr) {
         return false;
     }
     return ready_head_ == extent || ready_head_ == nullptr;
 }
 
-void QuicStreamSendBuffer::try_merge_with_next(QuicStreamDataExtent *extent) noexcept {
-    QuicStreamDataExtent *next = extent->next;
+void QuicStreamSendBuffer::try_merge_with_next(mem::IoBufNode *extent) noexcept {
+    mem::IoBufNode *next = extent->next;
     if (next == nullptr) {
         return;
     }
@@ -361,13 +361,13 @@ void QuicStreamSendBuffer::try_merge_with_next(QuicStreamDataExtent *extent) noe
         next->state != static_cast<std::uint8_t>(QuicSendExtentState::Ready)) {
         return;
     }
-    if (static_cast<std::size_t>(extent->offset) + extent->view.readable() != static_cast<std::size_t>(next->offset)) {
+    if (static_cast<std::size_t>(extent->offset) + extent->buf.readable() != static_cast<std::size_t>(next->offset)) {
         return;
     }
-    if (!extent->view.same_storage(next->view)) {
+    if (!extent->buf.same_storage(next->buf)) {
         return;
     }
-    if (!extent->view.try_merge_adjacent(std::move(next->view))) {
+    if (!extent->buf.try_merge_adjacent(std::move(next->buf))) {
         return;
     }
 
