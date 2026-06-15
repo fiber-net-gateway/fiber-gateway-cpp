@@ -245,8 +245,7 @@ QuicStreamSendBuffer::encode_stream_frame(std::uint64_t stream_id, std::uint8_t 
     inflight_bytes_ += actual_data;
 
     // Advance ready_head_ past inflight extents.
-    while (ready_head_ != nullptr &&
-           ready_head_->state == static_cast<std::uint8_t>(QuicSendExtentState::Inflight)) {
+    while (ready_head_ != nullptr && ready_head_->state == static_cast<std::uint8_t>(QuicSendExtentState::Inflight)) {
         ready_head_ = ready_head_->next;
     }
 
@@ -263,7 +262,7 @@ QuicStreamSendBuffer::encode_stream_frame(std::uint64_t stream_id, std::uint8_t 
 }
 
 common::IoResult<void> QuicStreamSendBuffer::mark_acked(std::size_t offset, std::size_t length,
-                                                         bool encoded_fin) noexcept {
+                                                        bool encoded_fin) noexcept {
     const std::size_t end = offset + length;
     QuicStreamDataExtent *prev = nullptr;
     QuicStreamDataExtent *cur = head_;
@@ -297,8 +296,7 @@ common::IoResult<void> QuicStreamSendBuffer::mark_acked(std::size_t offset, std:
 
     // Recompute ready_head_: scan from head for the first ready extent.
     ready_head_ = head_;
-    while (ready_head_ != nullptr &&
-           ready_head_->state == static_cast<std::uint8_t>(QuicSendExtentState::Inflight)) {
+    while (ready_head_ != nullptr && ready_head_->state == static_cast<std::uint8_t>(QuicSendExtentState::Inflight)) {
         ready_head_ = ready_head_->next;
     }
 
@@ -311,7 +309,7 @@ common::IoResult<void> QuicStreamSendBuffer::mark_acked(std::size_t offset, std:
 }
 
 common::IoResult<void> QuicStreamSendBuffer::mark_failed(std::size_t offset, std::size_t length,
-                                                          bool encoded_fin) noexcept {
+                                                         bool encoded_fin) noexcept {
     const std::size_t end = offset + length;
     QuicStreamDataExtent *cur = head_;
 
@@ -336,8 +334,7 @@ common::IoResult<void> QuicStreamSendBuffer::mark_failed(std::size_t offset, std
 
     // Recompute ready_head_: find the first ready extent.
     ready_head_ = head_;
-    while (ready_head_ != nullptr &&
-           ready_head_->state == static_cast<std::uint8_t>(QuicSendExtentState::Inflight)) {
+    while (ready_head_ != nullptr && ready_head_->state == static_cast<std::uint8_t>(QuicSendExtentState::Inflight)) {
         ready_head_ = ready_head_->next;
     }
 
@@ -364,8 +361,7 @@ void QuicStreamSendBuffer::try_merge_with_next(QuicStreamDataExtent *extent) noe
         next->state != static_cast<std::uint8_t>(QuicSendExtentState::Ready)) {
         return;
     }
-    if (static_cast<std::size_t>(extent->offset) + extent->view.readable() !=
-        static_cast<std::size_t>(next->offset)) {
+    if (static_cast<std::size_t>(extent->offset) + extent->view.readable() != static_cast<std::size_t>(next->offset)) {
         return;
     }
     if (!extent->view.same_storage(next->view)) {

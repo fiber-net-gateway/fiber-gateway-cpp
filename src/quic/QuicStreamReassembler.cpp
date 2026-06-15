@@ -16,8 +16,8 @@ QuicStreamReassembler::QuicStreamReassembler(QuicRecvExtentPool &pool) noexcept 
 QuicStreamReassembler::~QuicStreamReassembler() { clear(); }
 
 common::IoResult<std::size_t> QuicStreamReassembler::insert(std::uint64_t offset, QuicSlice data, bool fin) noexcept {
-    if ((data.data == nullptr && data.len != 0) ||
-        offset > std::numeric_limits<std::uint64_t>::max() - data.len) [[unlikely]] {
+    if ((data.data == nullptr && data.len != 0) || offset > std::numeric_limits<std::uint64_t>::max() - data.len)
+            [[unlikely]] {
         return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -195,9 +195,7 @@ void QuicStreamReassembler::clear() noexcept {
 
 // --- Block helpers ---
 
-std::uint64_t QuicStreamReassembler::block_of(std::uint64_t offset) noexcept {
-    return offset >> kBlockSizeShift;
-}
+std::uint64_t QuicStreamReassembler::block_of(std::uint64_t offset) noexcept { return offset >> kBlockSizeShift; }
 
 std::size_t QuicStreamReassembler::block_offset(std::uint64_t offset) noexcept {
     return static_cast<std::size_t>(offset & kBlockOffsetMask);
@@ -320,8 +318,7 @@ void QuicStreamReassembler::unlink_after(QuicRecvExtent *prev, QuicRecvExtent &e
 
 bool QuicStreamReassembler::has_same_block_neighbor(const QuicRecvExtent *prev, const QuicRecvExtent *next,
                                                     std::uint64_t block) noexcept {
-    return (prev != nullptr && block_of(prev->offset) == block) ||
-           (next != nullptr && block_of(next->offset) == block);
+    return (prev != nullptr && block_of(prev->offset) == block) || (next != nullptr && block_of(next->offset) == block);
 }
 
 } // namespace fiber::quic
