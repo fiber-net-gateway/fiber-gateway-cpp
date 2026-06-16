@@ -1,0 +1,252 @@
+#include <gtest/gtest.h>
+
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <future>
+#include <string_view>
+
+#include "async/Sleep.h"
+#include "async/Spawn.h"
+#include "event/EventLoopGroup.h"
+#include "quic/QuicStreamSendQueue.h"
+
+namespace {
+
+using DetachedTask = fiber::async::DetachedTask;
+
+struct AppendResult {
+    bool ok = false;
+    std::size_t value = 0;
+    fiber::common::IoErr error = fiber::common::IoErr::None;
+};
+
+fiber::mem::IoBuf iobuf_of(std::string_view value) {
+    fiber::mem::IoBuf buf = fiber::mem::IoBuf::allocate(value.size());
+    if (!buf) {
+        return {};
+    }
+    if (!value.empty()) {
+        std::memcpy(buf.writable_data(), value.data(), value.size());
+        buf.commit(value.size());
+    }
+    return buf;
+}
+
+AppendResult to_append_result(fiber::common::IoResult<std::size_t> result) {
+    if (result) {
+        return {.ok = true, .value = *result};
+    }
+    return {.ok = false, .error = result.error()};
+}
+
+DetachedTask append_one(fiber::quic::QuicStreamSendQueue *queue, std::promise<AppendResult> *done) {
+    auto result = co_await queue->append(iobuf_of("!"));
+    done->set_value(to_append_result(result));
+    fiber::event::EventLoop::current().stop();
+}
+
+DetachedTask append_one_with_timeout(fiber::quic::QuicStreamSendQueue *queue, std::promise<AppendResult> *done,
+                                     std::chrono::milliseconds timeout) {
+    auto result = co_await queue->append(iobuf_of("!"), false, timeout);
+    done->set_value(to_append_result(result));
+    fiber::event::EventLoop::current().stop();
+}
+
+DetachedTask ack_after_delay(fiber::quic::QuicStreamSendQueue *queue, std::atomic<bool> *waiter_seen) {
+    co_await fiber::async::sleep(std::chrono::milliseconds(20));
+    waiter_seen->store(queue->has_append_waiter(), std::memory_order_relaxed);
+
+    std::array<std::uint8_t, 64> out{};
+    auto encoded = queue->encode_stream_frame(4, out.data(), out.size());
+    if (encoded && encoded->encoded) {
+        (void) queue->mark_acked(encoded->offset, encoded->data_len, encoded->fin);
+    }
+}
+
+DetachedTask update_window_after_delay(fiber::quic::QuicStreamSendQueue *queue, std::atomic<bool> *waiter_seen,
+                                       std::uint64_t limit) {
+    co_await fiber::async::sleep(std::chrono::milliseconds(20));
+    waiter_seen->store(queue->has_append_waiter(), std::memory_order_relaxed);
+    queue->update_max_stream_data(limit);
+}
+
+DetachedTask reset_after_delay(fiber::quic::QuicStreamSendQueue *queue, std::atomic<bool> *waiter_seen,
+                               std::promise<fiber::common::IoResult<std::uint64_t>> *reset_done) {
+    co_await fiber::async::sleep(std::chrono::milliseconds(20));
+    waiter_seen->store(queue->has_append_waiter(), std::memory_order_relaxed);
+    reset_done->set_value(queue->mark_reset());
+}
+
+} // namespace
+
+TEST(QuicStreamSendQueueTest, AppendWaitsForBufferedBytesToBeAcked) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicStreamSendQueue queue(pool, {.buffer_limit = 5, .max_stream_data = 64});
+
+    ASSERT_TRUE(queue.try_append(iobuf_of("hello")).has_value());
+    EXPECT_EQ(queue.buffer_available(), 0u);
+
+    fiber::event::EventLoopGroup group(1);
+    std::promise<AppendResult> done;
+    auto future = done.get_future();
+    std::atomic<bool> waiter_seen{false};
+
+    group.start();
+    fiber::async::spawn(group.at(0), [&queue, &done]() { return append_one(&queue, &done); });
+    fiber::async::spawn(group.at(0), [&queue, &waiter_seen]() { return ack_after_delay(&queue, &waiter_seen); });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "append did not resume after ack";
+        return;
+    }
+
+    AppendResult result = future.get();
+    EXPECT_TRUE(waiter_seen.load(std::memory_order_relaxed));
+    EXPECT_TRUE(result.ok);
+    EXPECT_EQ(result.value, 1u);
+    EXPECT_EQ(queue.buffer().ready_bytes(), 1u);
+    group.join();
+}
+
+TEST(QuicStreamSendQueueTest, AppendWaitsForMaxStreamDataIncrease) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicStreamSendQueue queue(pool, {.buffer_limit = 64, .max_stream_data = 5});
+
+    ASSERT_TRUE(queue.try_append(iobuf_of("hello")).has_value());
+    EXPECT_EQ(queue.stream_data_available(), 0u);
+
+    fiber::event::EventLoopGroup group(1);
+    std::promise<AppendResult> done;
+    auto future = done.get_future();
+    std::atomic<bool> waiter_seen{false};
+
+    group.start();
+    fiber::async::spawn(group.at(0), [&queue, &done]() { return append_one(&queue, &done); });
+    fiber::async::spawn(group.at(0),
+                        [&queue, &waiter_seen]() { return update_window_after_delay(&queue, &waiter_seen, 6); });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "append did not resume after max_stream_data update";
+        return;
+    }
+
+    AppendResult result = future.get();
+    EXPECT_TRUE(waiter_seen.load(std::memory_order_relaxed));
+    EXPECT_TRUE(result.ok);
+    EXPECT_EQ(result.value, 1u);
+    EXPECT_EQ(queue.buffer().total_appended_bytes(), 6u);
+    group.join();
+}
+
+TEST(QuicStreamSendQueueTest, ResetWakesBlockedAppend) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicStreamSendQueue queue(pool, {.buffer_limit = 5, .max_stream_data = 64});
+
+    ASSERT_TRUE(queue.try_append(iobuf_of("hello")).has_value());
+
+    fiber::event::EventLoopGroup group(1);
+    std::promise<AppendResult> done;
+    auto future = done.get_future();
+    std::promise<fiber::common::IoResult<std::uint64_t>> reset_done;
+    auto reset_future = reset_done.get_future();
+    std::atomic<bool> waiter_seen{false};
+
+    group.start();
+    fiber::async::spawn(group.at(0), [&queue, &done]() { return append_one(&queue, &done); });
+    fiber::async::spawn(group.at(0), [&queue, &waiter_seen, &reset_done]() {
+        return reset_after_delay(&queue, &waiter_seen, &reset_done);
+    });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready ||
+        reset_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "reset did not wake blocked append";
+        return;
+    }
+
+    auto reset = reset_future.get();
+    ASSERT_TRUE(reset.has_value());
+    EXPECT_EQ(*reset, 5u);
+
+    AppendResult result = future.get();
+    EXPECT_TRUE(waiter_seen.load(std::memory_order_relaxed));
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.error, fiber::common::IoErr::BrokenPipe);
+    EXPECT_TRUE(queue.buffer().reset());
+    EXPECT_EQ(queue.buffer().final_size(), 5u);
+    group.join();
+}
+
+TEST(QuicStreamSendQueueTest, AppendLargerThanBufferLimitFailsImmediately) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicStreamSendQueue queue(pool, {.buffer_limit = 2, .max_stream_data = 64});
+
+    auto result = queue.try_append(iobuf_of("abc"));
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), fiber::common::IoErr::MessageTooLarge);
+}
+
+TEST(QuicStreamSendQueueTest, AppendTimesOutWhenBlockedTooLong) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicStreamSendQueue queue(pool, {.buffer_limit = 5, .max_stream_data = 64});
+
+    ASSERT_TRUE(queue.try_append(iobuf_of("hello")).has_value());
+
+    fiber::event::EventLoopGroup group(1);
+    std::promise<AppendResult> done;
+    auto future = done.get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [&queue, &done]() {
+        return append_one_with_timeout(&queue, &done, std::chrono::milliseconds(20));
+    });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "append did not time out";
+        return;
+    }
+
+    AppendResult result = future.get();
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.error, fiber::common::IoErr::TimedOut);
+    EXPECT_FALSE(queue.has_append_waiter());
+    group.join();
+}
+
+TEST(QuicStreamSendQueueTest, AppendZeroTimeoutFailsImmediatelyWhenBlocked) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicStreamSendQueue queue(pool, {.buffer_limit = 5, .max_stream_data = 64});
+
+    ASSERT_TRUE(queue.try_append(iobuf_of("hello")).has_value());
+
+    fiber::event::EventLoopGroup group(1);
+    std::promise<AppendResult> done;
+    auto future = done.get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [&queue, &done]() {
+        return append_one_with_timeout(&queue, &done, std::chrono::milliseconds(0));
+    });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "append did not return zero-timeout result";
+        return;
+    }
+
+    AppendResult result = future.get();
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.error, fiber::common::IoErr::TimedOut);
+    EXPECT_FALSE(queue.has_append_waiter());
+    group.join();
+}
