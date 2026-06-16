@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 namespace fiber::common {
 
@@ -16,6 +17,9 @@ struct IntrusiveListHook {
 
 template<typename T, std::size_t Offset>
 class IntrusiveList {
+    static_assert(std::is_standard_layout_v<T>,
+                  "IntrusiveList owner type must be standard-layout because Offset is used for container_of.");
+
 public:
     [[nodiscard]] bool empty() const noexcept { return head_ == nullptr; }
 

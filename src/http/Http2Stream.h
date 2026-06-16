@@ -6,6 +6,7 @@
 
 #include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
+#include "../common/SpecialMember.h"
 #include "../common/mem/IoBuf.h"
 #include "Http2HpackDecoder.h"
 #include "Http2OutboundHook.h"
@@ -87,10 +88,7 @@ public:
         Http2Stream *stream_ = nullptr;
     };
 
-    Http2Stream(const Http2Stream &) = delete;
-    Http2Stream &operator=(const Http2Stream &) = delete;
-    Http2Stream(Http2Stream &&) = delete;
-    Http2Stream &operator=(Http2Stream &&) = delete;
+    FIBER_NON_COPYABLE_NON_MOVABLE(Http2Stream);
 
     Http2Stream(void *owner, const Ops &ops) noexcept;
 

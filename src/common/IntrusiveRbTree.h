@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 #include "Assert.h"
 
@@ -25,6 +26,9 @@ struct IntrusiveRbTreeHook {
 
 template<typename T, std::size_t Offset, typename Compare>
 class IntrusiveRbTree {
+    static_assert(std::is_standard_layout_v<T>,
+                  "IntrusiveRbTree owner type must be standard-layout because Offset is used for container_of.");
+
 public:
     IntrusiveRbTree() noexcept { init_sentinel(); }
 
