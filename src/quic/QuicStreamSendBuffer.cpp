@@ -20,16 +20,12 @@ constexpr std::uint8_t kStreamFrameOff = 0x04;
 
 QuicStreamSendBuffer::QuicStreamSendBuffer(mem::IoBufNodePool &pool) noexcept : pool_(&pool) {}
 
-QuicStreamSendBuffer::~QuicStreamSendBuffer() {
-    mem::IoBufNode *cur = head_;
-    while (cur != nullptr) {
-        mem::IoBufNode *next = cur->next;
-        pool_->release(cur);
-        cur = next;
-    }
-}
+QuicStreamSendBuffer::~QuicStreamSendBuffer() { clear_extents(); }
 
 common::IoResult<std::size_t> QuicStreamSendBuffer::append(const mem::IoBuf &buf, bool fin) noexcept {
+    if (reset_) {
+        return std::unexpected(common::IoErr::BrokenPipe);
+    }
     if (fin_acked_) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -77,6 +73,7 @@ common::IoResult<std::size_t> QuicStreamSendBuffer::append(const mem::IoBuf &buf
 
     if (fin) {
         fin_appended_ = true;
+        final_size_ = total_appended_bytes_;
     }
 
     return bytes;
@@ -85,6 +82,9 @@ common::IoResult<std::size_t> QuicStreamSendBuffer::append(const mem::IoBuf &buf
 common::IoResult<std::size_t> QuicStreamSendBuffer::append_chain(mem::IoBufChain &chain) noexcept {
     if (!chain.bound() || &chain.node_pool() != pool_) {
         return std::unexpected(common::IoErr::Invalid);
+    }
+    if (reset_) {
+        return std::unexpected(common::IoErr::BrokenPipe);
     }
     if (fin_acked_) {
         return std::unexpected(common::IoErr::Invalid);
@@ -136,6 +136,7 @@ common::IoResult<std::size_t> QuicStreamSendBuffer::append_chain(mem::IoBufChain
 
     if (chain_complete) {
         fin_appended_ = true;
+        final_size_ = total_appended_bytes_;
         chain.clear_complete();
     }
 
@@ -145,6 +146,9 @@ common::IoResult<std::size_t> QuicStreamSendBuffer::append_chain(mem::IoBufChain
 common::IoResult<QuicStreamSendBuffer::EncodedFrameResult>
 QuicStreamSendBuffer::encode_stream_frame(std::uint64_t stream_id, std::uint8_t *dst, std::size_t capacity) noexcept {
     EncodedFrameResult result{};
+    if (reset_) {
+        return result;
+    }
 
     mem::IoBufNode *cur = ready_head_;
 
@@ -323,6 +327,10 @@ QuicStreamSendBuffer::encode_stream_frame(std::uint64_t stream_id, std::uint8_t 
 
 common::IoResult<void> QuicStreamSendBuffer::mark_acked(std::size_t offset, std::size_t length,
                                                         bool encoded_fin) noexcept {
+    if (reset_) {
+        return {};
+    }
+
     const std::size_t end = offset + length;
     mem::IoBufNode *prev = nullptr;
     mem::IoBufNode *cur = head_;
@@ -370,6 +378,10 @@ common::IoResult<void> QuicStreamSendBuffer::mark_acked(std::size_t offset, std:
 
 common::IoResult<void> QuicStreamSendBuffer::mark_failed(std::size_t offset, std::size_t length,
                                                          bool encoded_fin) noexcept {
+    if (reset_) {
+        return {};
+    }
+
     const std::size_t end = offset + length;
     mem::IoBufNode *cur = head_;
 
@@ -405,11 +417,42 @@ common::IoResult<void> QuicStreamSendBuffer::mark_failed(std::size_t offset, std
     return {};
 }
 
+common::IoResult<std::uint64_t> QuicStreamSendBuffer::mark_reset() noexcept {
+    if (reset_) {
+        return final_size_;
+    }
+    if (fin_appended_) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    final_size_ = total_appended_bytes_;
+    reset_ = true;
+    fin_inflight_ = false;
+    fin_acked_ = false;
+    clear_extents();
+    return final_size_;
+}
+
 bool QuicStreamSendBuffer::is_last_ready_extent(const mem::IoBufNode *extent) const noexcept {
     if (extent->next != nullptr) {
         return false;
     }
     return ready_head_ == extent || ready_head_ == nullptr;
+}
+
+void QuicStreamSendBuffer::clear_extents() noexcept {
+    mem::IoBufNode *cur = head_;
+    while (cur != nullptr) {
+        mem::IoBufNode *next = cur->next;
+        pool_->release(cur);
+        cur = next;
+    }
+    head_ = nullptr;
+    tail_ = nullptr;
+    ready_head_ = nullptr;
+    ready_bytes_ = 0;
+    inflight_bytes_ = 0;
+    active_extent_count_ = 0;
 }
 
 void QuicStreamSendBuffer::try_merge_with_next(mem::IoBufNode *extent) noexcept {

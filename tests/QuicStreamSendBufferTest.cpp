@@ -370,4 +370,54 @@ TEST(QuicStreamSendBufferTest, OmitsLengthWithOffsetAndFin) {
     EXPECT_EQ(frame_data_view(frame), "fghij");
 }
 
+TEST(QuicStreamSendBufferTest, ResetBeforeFinRecordsFinalSizeAndReleasesBufferedData) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicStreamSendBuffer buffer(pool);
+
+    ASSERT_TRUE(buffer.append(iobuf_of("abcdef")).has_value());
+
+    std::array<std::uint8_t, 6> out{};
+    auto encoded = buffer.encode_stream_frame(4, out.data(), out.size());
+    ASSERT_TRUE(encoded.has_value());
+    ASSERT_TRUE(encoded->encoded);
+    EXPECT_EQ(buffer.ready_bytes(), 2u);
+    EXPECT_EQ(buffer.inflight_bytes(), 4u);
+
+    auto final_size = buffer.mark_reset();
+    ASSERT_TRUE(final_size.has_value());
+    EXPECT_EQ(*final_size, 6u);
+    EXPECT_TRUE(buffer.reset());
+    EXPECT_TRUE(buffer.has_final_size());
+    EXPECT_EQ(buffer.final_size(), 6u);
+    EXPECT_TRUE(buffer.empty());
+    EXPECT_EQ(buffer.buffered_bytes(), 0u);
+    EXPECT_EQ(buffer.active_extent_count(), 0u);
+
+    auto append_after_reset = buffer.append(iobuf_of("x"));
+    ASSERT_FALSE(append_after_reset.has_value());
+    EXPECT_EQ(append_after_reset.error(), fiber::common::IoErr::BrokenPipe);
+
+    std::array<std::uint8_t, 64> retry{};
+    auto after_reset = buffer.encode_stream_frame(4, retry.data(), retry.size());
+    ASSERT_TRUE(after_reset.has_value());
+    EXPECT_FALSE(after_reset->encoded);
+
+    EXPECT_TRUE(buffer.mark_acked(encoded->offset, encoded->data_len, encoded->fin).has_value());
+    EXPECT_TRUE(buffer.mark_failed(encoded->offset, encoded->data_len, encoded->fin).has_value());
+}
+
+TEST(QuicStreamSendBufferTest, ResetAfterFinIsInvalid) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicStreamSendBuffer buffer(pool);
+
+    ASSERT_TRUE(buffer.append(iobuf_of("done"), true).has_value());
+
+    auto reset = buffer.mark_reset();
+    ASSERT_FALSE(reset.has_value());
+    EXPECT_EQ(reset.error(), fiber::common::IoErr::Invalid);
+    EXPECT_FALSE(buffer.reset());
+    EXPECT_TRUE(buffer.has_final_size());
+    EXPECT_EQ(buffer.final_size(), 4u);
+}
+
 } // namespace
