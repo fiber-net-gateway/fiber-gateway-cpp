@@ -22,6 +22,7 @@ public:
     void clear() noexcept;
 
     [[nodiscard]] std::uint64_t next_read_offset() const noexcept { return next_read_offset_; }
+    [[nodiscard]] std::uint64_t received_end_offset() const noexcept { return received_end_offset_; }
     [[nodiscard]] bool has_final_size() const noexcept { return has_final_size_; }
     [[nodiscard]] std::uint64_t final_size() const noexcept { return final_size_; }
     [[nodiscard]] bool finished() const noexcept { return has_final_size_ && next_read_offset_ == final_size_; }
@@ -50,6 +51,7 @@ private:
     mem::IoBufNode *tail_ = nullptr;
     mem::IoBufNode *last_insert_ = nullptr;
     std::uint64_t next_read_offset_ = 0;
+    std::uint64_t received_end_offset_ = 0;
     std::uint64_t final_size_ = 0;
     std::size_t buffered_bytes_ = 0;
     std::size_t active_extent_count_ = 0;

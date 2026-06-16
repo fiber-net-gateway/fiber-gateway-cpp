@@ -32,6 +32,7 @@ TEST(QuicStreamReassemblerTest, OutOfOrderDataMergesSameStorageExtentsAndTakesIn
     auto first = reassembler.insert(4, slice_of("ef"));
     ASSERT_TRUE(first.has_value());
     EXPECT_EQ(*first, 2u);
+    EXPECT_EQ(reassembler.received_end_offset(), 6u);
     EXPECT_EQ(reassembler.active_extent_count(), 1u);
     EXPECT_EQ(reassembler.active_block_count(), 1u);
 
@@ -43,11 +44,13 @@ TEST(QuicStreamReassemblerTest, OutOfOrderDataMergesSameStorageExtentsAndTakesIn
     auto second = reassembler.insert(2, slice_of("cd"));
     ASSERT_TRUE(second.has_value());
     EXPECT_EQ(*second, 2u);
+    EXPECT_EQ(reassembler.received_end_offset(), 6u);
     EXPECT_EQ(reassembler.active_extent_count(), 1u);
 
     auto third = reassembler.insert(0, slice_of("ab"));
     ASSERT_TRUE(third.has_value());
     EXPECT_EQ(*third, 2u);
+    EXPECT_EQ(reassembler.received_end_offset(), 6u);
     EXPECT_EQ(reassembler.active_extent_count(), 1u);
     EXPECT_EQ(reassembler.buffered_bytes(), 6u);
 
@@ -97,16 +100,45 @@ TEST(QuicStreamReassemblerTest, DeliveredDuplicateIsIgnored) {
     auto duplicate = reassembler.insert(0, slice_of("abc"));
     ASSERT_TRUE(duplicate.has_value());
     EXPECT_EQ(*duplicate, 0u);
+    EXPECT_EQ(reassembler.received_end_offset(), 3u);
 
     auto next = reassembler.insert(3, slice_of("de"));
     ASSERT_TRUE(next.has_value());
     EXPECT_EQ(*next, 2u);
+    EXPECT_EQ(reassembler.received_end_offset(), 5u);
 
     fiber::mem::IoBufChain tail(pool);
     taken = reassembler.take(8, tail);
     ASSERT_TRUE(taken.has_value());
     EXPECT_EQ(*taken, 2u);
     EXPECT_EQ(chain_to_string(tail), "de");
+}
+
+TEST(QuicStreamReassemblerTest, ReceivedEndOffsetTracksMaxAcceptedFrameEnd) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicStreamReassembler reassembler(pool);
+
+    auto late = reassembler.insert(10, slice_of("xy"));
+    ASSERT_TRUE(late.has_value());
+    EXPECT_EQ(*late, 2u);
+    EXPECT_EQ(reassembler.received_end_offset(), 12u);
+
+    auto earlier = reassembler.insert(0, slice_of("abc"));
+    ASSERT_TRUE(earlier.has_value());
+    EXPECT_EQ(*earlier, 3u);
+    EXPECT_EQ(reassembler.received_end_offset(), 12u);
+
+    fiber::quic::QuicSlice empty{};
+    auto fin = reassembler.insert(12, empty, true);
+    ASSERT_TRUE(fin.has_value());
+    EXPECT_EQ(*fin, 0u);
+    EXPECT_EQ(reassembler.received_end_offset(), 12u);
+    EXPECT_TRUE(reassembler.has_final_size());
+    EXPECT_EQ(reassembler.final_size(), 12u);
+
+    auto invalid = reassembler.insert(12, slice_of("overflow"));
+    EXPECT_FALSE(invalid.has_value());
+    EXPECT_EQ(reassembler.received_end_offset(), 12u);
 }
 
 TEST(QuicStreamReassemblerTest, FinalSizeMustRemainConsistent) {

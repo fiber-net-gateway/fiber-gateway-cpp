@@ -811,8 +811,7 @@ fiber::async::Task<common::IoResult<std::size_t>> ClientHttp1Exchange::write_bod
                     conn_ = nullptr;
                     co_return std::unexpected(prefix_result.error());
                 }
-                auto body_result =
-                        co_await write_all(conn_->transport_.get(), chunk, options_.write_timeout);
+                auto body_result = co_await write_all(conn_->transport_.get(), chunk, options_.write_timeout);
                 if (!body_result) {
                     request_state_ = RequestState::Failed;
                     active_ = false;

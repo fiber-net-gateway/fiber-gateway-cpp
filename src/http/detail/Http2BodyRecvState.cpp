@@ -175,7 +175,7 @@ void Http2BodyRecvState::abort(common::IoErr reason) noexcept {
 }
 
 fiber::async::Task<common::IoResult<mem::IoBufChain>> Http2BodyRecvState::read_body(Http2Stream &stream,
-                                                                              std::size_t max_bytes) noexcept {
+                                                                                    std::size_t max_bytes) noexcept {
     mem::IoBufChain out(queue_.node_pool());
     if (max_bytes == 0) {
         if (queue_.readable_bytes() == 0 && input_closed_) {
