@@ -185,8 +185,9 @@ fiber::async::Task<fiber::common::IoResult<std::string>> read_body_to_string(Exc
         if (!chunk_result) {
             co_return std::unexpected(chunk_result.error());
         }
-        out.append(chain_to_string(std::move(chunk_result->data_chain)));
-        if (chunk_result->last) {
+        const bool last = chunk_result->complete();
+        out.append(chain_to_string(std::move(*chunk_result)));
+        if (last) {
             break;
         }
     }
@@ -346,8 +347,8 @@ DetachedTask run_http1_client_no_body(fiber::event::EventLoop *loop, std::uint16
         promise->set_value(std::move(result));
         co_return;
     }
-    result.response_body = chain_to_string(std::move(body_result->data_chain));
-    result.body_last = body_result->last;
+    result.body_last = body_result->complete();
+    result.response_body = chain_to_string(std::move(*body_result));
     promise->set_value(std::move(result));
 }
 
@@ -399,8 +400,8 @@ DetachedTask run_http1_client_no_body_target(fiber::event::EventLoop *loop, std:
         promise->set_value(std::move(result));
         co_return;
     }
-    result.response_body = chain_to_string(std::move(body_result->data_chain));
-    result.body_last = body_result->last;
+    result.body_last = body_result->complete();
+    result.response_body = chain_to_string(std::move(*body_result));
     promise->set_value(std::move(result));
 }
 
@@ -510,8 +511,8 @@ DetachedTask run_http2_client_no_body(fiber::event::EventLoop *loop, std::uint16
             if (!body_result) {
                 result.err = body_result.error();
             } else {
-                result.response_body = chain_to_string(std::move(body_result->data_chain));
-                result.body_last = body_result->last;
+                result.body_last = body_result->complete();
+                result.response_body = chain_to_string(std::move(*body_result));
             }
         }
         connection.shutdown();

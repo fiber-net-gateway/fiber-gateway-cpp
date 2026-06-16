@@ -64,16 +64,16 @@ fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange) {
                                        fiber::http::ResponseConnectionMode::Close, true);
             co_return;
         }
-        while (auto *chunk = read_result->data_chain.front()) {
+        while (auto *chunk = read_result->front()) {
             auto readable = chunk->readable();
             if (readable == 0) {
-                read_result->data_chain.drop_empty_front();
+                read_result->drop_empty_front();
                 break;
             }
             body.append(reinterpret_cast<const char *>(chunk->readable_data()), readable);
-            read_result->data_chain.consume_and_compact(readable);
+            read_result->consume_and_compact(readable);
         }
-        if (read_result->last) {
+        if (read_result->complete()) {
             break;
         }
     }

@@ -49,7 +49,7 @@ fiber::async::Task<common::IoResult<void>> ClientHttp2Exchange::send_request_hea
     co_return co_await req->send_request_header(head, end_stream);
 }
 
-fiber::async::Task<common::IoResult<size_t>> ClientHttp2Exchange::write_body(BodyChunk chunk) noexcept {
+fiber::async::Task<common::IoResult<size_t>> ClientHttp2Exchange::write_body(mem::IoBufChain chunk) noexcept {
     if (!stream_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -73,10 +73,9 @@ fiber::async::Task<common::IoResult<size_t>> ClientHttp2Exchange::write_body(con
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    BodyChunk chunk(req->node_pool());
-    chunk.last = end_stream;
+    mem::IoBufChain chunk(req->node_pool());
     if (end_stream) {
-        chunk.data_chain.mark_complete();
+        chunk.mark_complete();
     }
     if (len != 0) {
         mem::IoBuf owned = mem::IoBuf::allocate(len);
@@ -85,7 +84,7 @@ fiber::async::Task<common::IoResult<size_t>> ClientHttp2Exchange::write_body(con
         }
         std::memcpy(owned.writable_data(), buf, len);
         owned.commit(len);
-        if (!chunk.data_chain.append(std::move(owned))) {
+        if (!chunk.append(std::move(owned))) {
             co_return std::unexpected(common::IoErr::NoMem);
         }
     }
@@ -115,7 +114,7 @@ fiber::async::Task<common::IoResult<const Http2ResponseHead *>> ClientHttp2Excha
     co_return co_await req->read_header();
 }
 
-fiber::async::Task<common::IoResult<BodyChunk>> ClientHttp2Exchange::read_body(std::size_t max_bytes) noexcept {
+fiber::async::Task<common::IoResult<mem::IoBufChain>> ClientHttp2Exchange::read_body(std::size_t max_bytes) noexcept {
     if (!stream_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }

@@ -23,11 +23,12 @@ class Http1ExchangeIo final : public HttpExchangeIo {
 public:
     Http1ExchangeIo(Http1Connection &connection, const HttpExchange &exchange);
 
-    fiber::async::Task<common::IoResult<BodyChunk>> read_body(HttpExchange &exchange,
-                                                              size_t max_bytes) noexcept override;
+    fiber::async::Task<common::IoResult<mem::IoBufChain>> read_body(HttpExchange &exchange,
+                                                                    size_t max_bytes) noexcept override;
     fiber::async::Task<common::IoResult<void>> send_header(HttpExchange &exchange,
                                                            const OutgoingHeaderBlockView &header) override;
-    fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, BodyChunk chunk) noexcept override;
+    fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange,
+                                                            mem::IoBufChain chunk) noexcept override;
     fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, const uint8_t *buf, size_t len,
                                                             bool end) noexcept override;
 

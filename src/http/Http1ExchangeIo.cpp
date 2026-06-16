@@ -410,16 +410,15 @@ common::IoResult<void> Http1ExchangeIo::take_prefix(mem::IoBufChain &out, std::s
     return {};
 }
 
-fiber::async::Task<common::IoResult<BodyChunk>> Http1ExchangeIo::read_body(HttpExchange &exchange,
+fiber::async::Task<common::IoResult<mem::IoBufChain>> Http1ExchangeIo::read_body(HttpExchange &exchange,
                                                                            size_t max_bytes) noexcept {
     if (!connection_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    BodyChunk out(connection_->loop().io_buf_node_pool());
+    mem::IoBufChain out(connection_->loop().io_buf_node_pool());
     if (body_parser_.done()) {
         exchange.request_trailers_complete_ = true;
-        out.last = true;
-        out.data_chain.mark_complete();
+        out.mark_complete();
         co_return out;
     }
 
@@ -441,8 +440,7 @@ fiber::async::Task<common::IoResult<BodyChunk>> Http1ExchangeIo::read_body(HttpE
                     if (!trailer_result) {
                         co_return std::unexpected(trailer_result.error());
                     }
-                    out.last = true;
-                    out.data_chain.mark_complete();
+                    out.mark_complete();
                     co_return out;
                 }
                 if (*parse_result == ParseCode::Again) {
@@ -464,7 +462,7 @@ fiber::async::Task<common::IoResult<BodyChunk>> Http1ExchangeIo::read_body(HttpE
             }
 
             std::size_t take = std::min({remaining_budget, body_parser_.remaining(), body_input_readable()});
-            auto take_result = take_prefix(out.data_chain, take);
+            auto take_result = take_prefix(out, take);
             if (!take_result) {
                 co_return std::unexpected(take_result.error());
             }
@@ -493,15 +491,14 @@ fiber::async::Task<common::IoResult<BodyChunk>> Http1ExchangeIo::read_body(HttpE
     }
 
     std::size_t take = std::min({max_bytes, body_parser_.remaining(), body_input_readable()});
-    auto take_result = take_prefix(out.data_chain, take);
+    auto take_result = take_prefix(out, take);
     if (!take_result) {
         co_return std::unexpected(take_result.error());
     }
     body_parser_.consume(take);
     if (body_parser_.done()) {
         exchange.request_trailers_complete_ = true;
-        out.last = true;
-        out.data_chain.mark_complete();
+        out.mark_complete();
     }
     co_return out;
 }
@@ -959,7 +956,7 @@ Http1ExchangeIo::write_chunked_trailer_block(const HttpHeaders *headers) noexcep
 }
 
 fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExchange &exchange,
-                                                                         BodyChunk chunk) noexcept {
+                                                                         mem::IoBufChain chunk) noexcept {
     if (!connection_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -967,7 +964,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
         co_return std::unexpected(common::IoErr::Already);
     }
 
-    size_t len = chunk.data_chain.readable_bytes();
+    size_t len = chunk.readable_bytes();
     if (response_phase_ == ResponsePhase::Init) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -989,7 +986,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
             if (!res) {
                 co_return std::unexpected(res.error());
             }
-            res = co_await write_all(&connection_->transport(), chunk.data_chain, connection_->options().write_timeout);
+            res = co_await write_all(&connection_->transport(), chunk, connection_->options().write_timeout);
             if (!res) {
                 co_return std::unexpected(res.error());
             }
@@ -1002,7 +999,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
         if (len > 0) {
             response_phase_ = ResponsePhase::BodyStreaming;
         }
-        if (chunk.last) {
+        if (chunk.complete()) {
             auto zero_result =
                     co_await write_all(&connection_->transport(), "0\r\n\r\n", 5, connection_->options().write_timeout);
             if (!zero_result) {
@@ -1014,7 +1011,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
     }
 
     if (response_body_spec_.is_none()) {
-        if (len != 0 || chunk.last) {
+        if (len != 0 || chunk.complete()) {
             co_return std::unexpected(common::IoErr::Invalid);
         }
         co_return len;
@@ -1028,7 +1025,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
     }
     if (len > 0) {
         auto res =
-                co_await write_all(&connection_->transport(), chunk.data_chain, connection_->options().write_timeout);
+                co_await write_all(&connection_->transport(), chunk, connection_->options().write_timeout);
         if (!res) {
             co_return std::unexpected(res.error());
         }
@@ -1037,7 +1034,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
     if (len > 0) {
         response_phase_ = ResponsePhase::BodyStreaming;
     }
-    if (chunk.last) {
+    if (chunk.complete()) {
         if (response_body_spec_.is_content_length() && response_body_sent_ != response_content_length_) {
             co_return std::unexpected(common::IoErr::Invalid);
         }

@@ -27,13 +27,13 @@ public:
     ~ClientHttp1Exchange();
 
     fiber::async::Task<common::IoResult<void>> send_header(const Http1RequestHead &head, bool end_stream) noexcept;
-    fiber::async::Task<common::IoResult<std::size_t>> write_body(BodyChunk chunk) noexcept;
+    fiber::async::Task<common::IoResult<std::size_t>> write_body(mem::IoBufChain chunk) noexcept;
     fiber::async::Task<common::IoResult<std::size_t>> write_body(const std::uint8_t *buf, std::size_t len,
                                                                  bool end_stream) noexcept;
     fiber::async::Task<common::IoResult<void>> send_trailer(const HttpHeaders &trailers) noexcept;
 
     fiber::async::Task<common::IoResult<const Http1ResponseHead *>> read_header() noexcept;
-    fiber::async::Task<common::IoResult<BodyChunk>> read_body(std::size_t max_bytes = 64 * 1024) noexcept;
+    fiber::async::Task<common::IoResult<mem::IoBufChain>> read_body(std::size_t max_bytes = 64 * 1024) noexcept;
     fiber::async::Task<common::IoResult<void>> discard_response_body() noexcept;
 
     [[nodiscard]] const HttpHeaders &response_trailers() const noexcept { return response_trailers_; }

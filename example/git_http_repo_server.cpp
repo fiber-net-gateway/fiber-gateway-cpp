@@ -614,7 +614,7 @@ fiber::async::Task<IoResult<RequestBodyStorage>> collect_request_body(fiber::htt
         if (!read_result) {
             co_return std::unexpected(read_result.error());
         }
-        std::size_t chunk_bytes = read_result->data_chain.readable_bytes();
+        std::size_t chunk_bytes = read_result->readable_bytes();
         if (!body.uses_temp_file() && body.size + chunk_bytes > kRequestBodyMemoryThreshold) {
             auto spill_result = spill_request_body_to_file(body);
             if (!spill_result) {
@@ -623,17 +623,17 @@ fiber::async::Task<IoResult<RequestBodyStorage>> collect_request_body(fiber::htt
         }
         if (body.uses_temp_file()) {
             std::vector<std::uint8_t> chunk;
-            append_chain_bytes(chunk, read_result->data_chain);
+            append_chain_bytes(chunk, *read_result);
             auto write_result = write_fd_all(body.temp_file.fd, chunk.data(), chunk.size());
             if (!write_result) {
                 co_return std::unexpected(write_result.error());
             }
             body.size += chunk.size();
         } else {
-            append_chain_bytes(body.memory, read_result->data_chain);
+            append_chain_bytes(body.memory, *read_result);
             body.size = body.memory.size();
         }
-        if (read_result->last) {
+        if (read_result->complete()) {
             break;
         }
     }

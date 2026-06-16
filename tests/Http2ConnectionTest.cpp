@@ -410,7 +410,7 @@ struct ClientRequestTrailerRunOutcome {
 struct ClientResponseBodyRunOutcome {
     fiber::common::IoResult<void> header_result;
     fiber::common::IoResult<void> run_result;
-    fiber::common::IoResult<fiber::http::BodyChunk> body_result;
+    fiber::common::IoResult<fiber::mem::IoBufChain> body_result;
     std::string written;
     std::uint32_t stream_id = 0;
 };
@@ -428,7 +428,7 @@ struct ClientResponseHeaderRunOutcome {
     fiber::common::IoResult<void> run_result;
     fiber::common::IoResult<const fiber::http::Http2ResponseHead *> informational_result;
     fiber::common::IoResult<const fiber::http::Http2ResponseHead *> final_result;
-    fiber::common::IoResult<fiber::http::BodyChunk> body_result;
+    fiber::common::IoResult<fiber::mem::IoBufChain> body_result;
     fiber::common::IoResult<const fiber::http::Http2ResponseHead *> trailer_result;
     fiber::common::IoResult<const fiber::http::Http2ResponseHead *> end_result;
     ResponseHeadSnapshot informational;
@@ -442,7 +442,7 @@ struct ClientResponseAbortRunOutcome {
     fiber::common::IoResult<void> header_result;
     fiber::common::IoResult<void> run_result;
     fiber::common::IoResult<const fiber::http::Http2ResponseHead *> read_header_result;
-    fiber::common::IoResult<fiber::http::BodyChunk> read_body_result;
+    fiber::common::IoResult<fiber::mem::IoBufChain> read_body_result;
     std::string written;
     std::uint32_t stream_id = 0;
 };
@@ -2904,9 +2904,9 @@ TEST(Http2ConnectionTest, ClientExchangeCanReadBufferedResponseBody) {
     ASSERT_TRUE(outcome.body_result.has_value());
     EXPECT_EQ(outcome.stream_id, 1U);
 
-    const auto bytes = chain_to_bytes(std::move(outcome.body_result->data_chain));
+    EXPECT_TRUE(outcome.body_result->complete());
+    const auto bytes = chain_to_bytes(std::move(outcome.body_result.value()));
     EXPECT_EQ(std::string(reinterpret_cast<const char *>(bytes.data()), bytes.size()), "hello");
-    EXPECT_TRUE(outcome.body_result->last);
 }
 
 TEST(Http2ConnectionTest, ClientExchangeCanReadInformationalFinalAndTrailerHeaders) {
@@ -2944,9 +2944,9 @@ TEST(Http2ConnectionTest, ClientExchangeCanReadInformationalFinalAndTrailerHeade
     EXPECT_EQ(outcome.final.headers[0].second, "text/plain");
 
     ASSERT_TRUE(outcome.body_result.has_value());
-    const auto body_bytes = chain_to_bytes(std::move(outcome.body_result->data_chain));
+    EXPECT_TRUE(outcome.body_result->complete());
+    const auto body_bytes = chain_to_bytes(std::move(outcome.body_result.value()));
     EXPECT_EQ(std::string(reinterpret_cast<const char *>(body_bytes.data()), body_bytes.size()), "hello");
-    EXPECT_TRUE(outcome.body_result->last);
 
     ASSERT_TRUE(outcome.trailer_result.has_value());
     ASSERT_TRUE(outcome.trailer.present);
@@ -2986,8 +2986,8 @@ TEST(Http2ConnectionTest, ClientExchangeHeaderEndStreamClosesBodyAndHeaderInput)
     EXPECT_EQ(outcome.final.headers[0].second, "text/plain");
 
     ASSERT_TRUE(outcome.body_result.has_value());
-    EXPECT_EQ(outcome.body_result->data_chain.readable_bytes(), 0U);
-    EXPECT_TRUE(outcome.body_result->last);
+    EXPECT_EQ(outcome.body_result->readable_bytes(), 0U);
+    EXPECT_TRUE(outcome.body_result->complete());
 
     ASSERT_TRUE(outcome.end_result.has_value());
     EXPECT_EQ(*outcome.end_result, nullptr);
@@ -3478,10 +3478,11 @@ TEST(Http2ConnectionTest, ServerHandlerCanReadBufferedRequestBodyAcrossMultipleD
                 co_return;
             }
 
-            const auto bytes = chain_to_bytes(std::move(chunk->data_chain));
+            const bool last = chunk->complete();
+            const auto bytes = chain_to_bytes(std::move(*chunk));
             observed_body->append(reinterpret_cast<const char *>(bytes.data()), bytes.size());
-            last_flags->push_back(chunk->last);
-            if (chunk->last) {
+            last_flags->push_back(last);
+            if (last) {
                 break;
             }
         }
@@ -3529,16 +3530,18 @@ TEST(Http2ConnectionTest, ServerHandlerCanAwaitLaterRequestBodyFrame) {
     std::string second = make_frame(12, 0x0, 0x1, 1, "delayed body");
 
     auto observed_body = std::make_shared<std::string>();
-    auto read_result = std::make_shared<fiber::common::IoResult<fiber::http::BodyChunk>>();
+    auto observed_last = std::make_shared<bool>(false);
+    auto read_result = std::make_shared<fiber::common::IoResult<fiber::mem::IoBufChain>>();
     auto header_result = std::make_shared<fiber::common::IoResult<void>>();
-    fiber::http::HttpHandler handler = [observed_body, read_result, header_result](
+    fiber::http::HttpHandler handler = [observed_body, observed_last, read_result, header_result](
                                                fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         *read_result = co_await exchange.read_body(64);
         if (!*read_result) {
             co_return;
         }
 
-        const auto bytes = chain_to_bytes(std::move(read_result->value().data_chain));
+        *observed_last = read_result->value().complete();
+        const auto bytes = chain_to_bytes(std::move(read_result->value()));
         observed_body->assign(reinterpret_cast<const char *>(bytes.data()), bytes.size());
 
         fiber::http::HttpHeaders headers(exchange.pool());
@@ -3558,7 +3561,7 @@ TEST(Http2ConnectionTest, ServerHandlerCanAwaitLaterRequestBodyFrame) {
     ASSERT_TRUE(read_result->has_value());
     ASSERT_TRUE(header_result->has_value());
     EXPECT_EQ(*observed_body, "delayed body");
-    EXPECT_TRUE(read_result->value().last);
+    EXPECT_TRUE(*observed_last);
 }
 
 TEST(Http2ConnectionTest, ServerHandlerSendAfterConnectionCloseReturnsCanceled) {
@@ -3593,7 +3596,7 @@ TEST(Http2ConnectionTest, ServerReadBodyReturnsLastWhenRequestEndsAtHeaders) {
                                          },
                                          true);
 
-    auto read_result = std::make_shared<fiber::common::IoResult<fiber::http::BodyChunk>>();
+    auto read_result = std::make_shared<fiber::common::IoResult<fiber::mem::IoBufChain>>();
     fiber::http::HttpHandler handler = [read_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         *read_result = co_await exchange.read_body(64);
         co_return;
@@ -3603,8 +3606,8 @@ TEST(Http2ConnectionTest, ServerReadBodyReturnsLastWhenRequestEndsAtHeaders) {
 
     ASSERT_TRUE(outcome.result.has_value());
     ASSERT_TRUE(read_result->has_value());
-    EXPECT_EQ(read_result->value().data_chain.readable_bytes(), 0u);
-    EXPECT_TRUE(read_result->value().last);
+    EXPECT_EQ(read_result->value().readable_bytes(), 0u);
+    EXPECT_TRUE(read_result->value().complete());
 }
 
 TEST(Http2ConnectionTest, ServerReadBodyTimesOutWhileWaitingForMoreBody) {
@@ -3622,7 +3625,7 @@ TEST(Http2ConnectionTest, ServerReadBodyTimesOutWhileWaitingForMoreBody) {
     fiber::http::HttpServerOptions http_options;
     http_options.body_timeout = std::chrono::seconds(0);
 
-    auto read_result = std::make_shared<fiber::common::IoResult<fiber::http::BodyChunk>>();
+    auto read_result = std::make_shared<fiber::common::IoResult<fiber::mem::IoBufChain>>();
     fiber::http::HttpHandler handler = [read_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         *read_result = co_await exchange.read_body(64);
         co_return;
@@ -3650,7 +3653,7 @@ TEST(Http2ConnectionTest, ServerReadBodyReturnsCanceledWhenPeerResetsStreamWhile
     std::string rst_payload(4, '\0');
     std::string second = make_frame(4, 0x3, 0x0, 1, rst_payload);
 
-    auto read_result = std::make_shared<fiber::common::IoResult<fiber::http::BodyChunk>>();
+    auto read_result = std::make_shared<fiber::common::IoResult<fiber::mem::IoBufChain>>();
     fiber::http::HttpHandler handler = [read_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         *read_result = co_await exchange.read_body(64);
         co_return;
@@ -3682,7 +3685,7 @@ TEST(Http2ConnectionTest, ServerReadBodyReplenishesStreamWindowAfterCrossingLowW
                                          false);
     request += make_frame(static_cast<std::uint32_t>(body.size()), 0x0, 0x1, 1, body);
 
-    auto read_result = std::make_shared<fiber::common::IoResult<fiber::http::BodyChunk>>();
+    auto read_result = std::make_shared<fiber::common::IoResult<fiber::mem::IoBufChain>>();
     auto header_result = std::make_shared<fiber::common::IoResult<void>>();
     fiber::http::HttpHandler handler =
             [read_result, header_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {

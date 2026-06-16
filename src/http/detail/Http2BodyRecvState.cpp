@@ -174,13 +174,12 @@ void Http2BodyRecvState::abort(common::IoErr reason) noexcept {
     notify_waiter();
 }
 
-fiber::async::Task<common::IoResult<BodyChunk>> Http2BodyRecvState::read_body(Http2Stream &stream,
+fiber::async::Task<common::IoResult<mem::IoBufChain>> Http2BodyRecvState::read_body(Http2Stream &stream,
                                                                               std::size_t max_bytes) noexcept {
-    BodyChunk out(queue_.node_pool());
+    mem::IoBufChain out(queue_.node_pool());
     if (max_bytes == 0) {
         if (queue_.readable_bytes() == 0 && input_closed_) {
-            out.last = true;
-            out.data_chain.mark_complete();
+            out.mark_complete();
         }
         co_return out;
     }
@@ -190,8 +189,7 @@ fiber::async::Task<common::IoResult<BodyChunk>> Http2BodyRecvState::read_body(Ht
         case PollResult::Kind::Readable:
             break;
         case PollResult::Kind::End:
-            out.last = true;
-            out.data_chain.mark_complete();
+            out.mark_complete();
             co_return out;
         case PollResult::Kind::TimedOut:
             co_return std::unexpected(common::IoErr::TimedOut);
@@ -204,15 +202,14 @@ fiber::async::Task<common::IoResult<BodyChunk>> Http2BodyRecvState::read_body(Ht
 
     const std::size_t queued_bytes = queue_.readable_bytes();
     const std::size_t take = std::min(max_bytes, queued_bytes);
-    if (!queue_.take_prefix(take, out.data_chain)) {
+    if (!queue_.take_prefix(take, out)) {
         co_return std::unexpected(common::IoErr::NoMem);
     }
     if (common::IoErr err = stream.maybe_replenish_recv_window(queue_.readable_bytes()); err != common::IoErr::None) {
         co_return std::unexpected(err);
     }
     if (queue_.readable_bytes() == 0 && input_closed_) {
-        out.last = true;
-        out.data_chain.mark_complete();
+        out.mark_complete();
     }
     co_return out;
 }
