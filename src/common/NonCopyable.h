@@ -1,6 +1,8 @@
 #ifndef FIBER_COMMON_NON_COPYABLE_H
 #define FIBER_COMMON_NON_COPYABLE_H
 
+#include "SpecialMember.h"
+
 namespace fiber::common {
 
 struct NonCopyable {
