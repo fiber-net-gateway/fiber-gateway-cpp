@@ -12,6 +12,27 @@
 #include "event/EventLoopGroup.h"
 #include "quic/QuicStreamSendQueue.h"
 
+namespace fiber::quic {
+
+struct QuicStreamSendQueueTestAccess {
+    static common::IoResult<QuicStreamSendBuffer::EncodedFrameResult>
+    encode_stream_frame(QuicStreamSendQueue &queue, std::uint64_t stream_id, std::uint8_t *dst,
+                        std::size_t capacity) noexcept {
+        return queue.encode_stream_frame(stream_id, dst, capacity);
+    }
+
+    static common::IoResult<void> mark_acked(QuicStreamSendQueue &queue, std::size_t offset, std::size_t length,
+                                             bool encoded_fin) noexcept {
+        return queue.mark_acked(offset, length, encoded_fin);
+    }
+
+    static void update_max_stream_data(QuicStreamSendQueue &queue, std::uint64_t limit) noexcept {
+        queue.update_max_stream_data(limit);
+    }
+};
+
+} // namespace fiber::quic
+
 namespace {
 
 using DetachedTask = fiber::async::DetachedTask;
@@ -59,9 +80,10 @@ DetachedTask ack_after_delay(fiber::quic::QuicStreamSendQueue *queue, std::atomi
     waiter_seen->store(queue->has_append_waiter(), std::memory_order_relaxed);
 
     std::array<std::uint8_t, 64> out{};
-    auto encoded = queue->encode_stream_frame(4, out.data(), out.size());
+    auto encoded = fiber::quic::QuicStreamSendQueueTestAccess::encode_stream_frame(*queue, 4, out.data(), out.size());
     if (encoded && encoded->encoded) {
-        (void) queue->mark_acked(encoded->offset, encoded->data_len, encoded->fin);
+        (void) fiber::quic::QuicStreamSendQueueTestAccess::mark_acked(*queue, encoded->offset, encoded->data_len,
+                                                                      encoded->fin);
     }
 }
 
@@ -69,7 +91,7 @@ DetachedTask update_window_after_delay(fiber::quic::QuicStreamSendQueue *queue, 
                                        std::uint64_t limit) {
     co_await fiber::async::sleep(std::chrono::milliseconds(20));
     waiter_seen->store(queue->has_append_waiter(), std::memory_order_relaxed);
-    queue->update_max_stream_data(limit);
+    fiber::quic::QuicStreamSendQueueTestAccess::update_max_stream_data(*queue, limit);
 }
 
 DetachedTask reset_after_delay(fiber::quic::QuicStreamSendQueue *queue, std::atomic<bool> *waiter_seen,

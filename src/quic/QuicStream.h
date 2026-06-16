@@ -8,7 +8,8 @@
 #include "../common/NonMovable.h"
 #include "../common/mem/IoBufChain.h"
 #include "QuicFrame.h"
-#include "QuicStreamReassembler.h"
+#include "QuicStreamRecvQueue.h"
+#include "QuicStreamSendQueue.h"
 
 namespace fiber::quic {
 
@@ -23,6 +24,7 @@ enum class QuicStreamRecvState : std::uint8_t {
     Open,
     SizeKnown,
     ResetRecvd,
+    Stopped,
     Closed,
 };
 
@@ -94,23 +96,34 @@ public:
     [[nodiscard]] QuicStreamType type() const noexcept;
     [[nodiscard]] bool bidirectional() const noexcept;
     [[nodiscard]] bool unidirectional() const noexcept;
-    [[nodiscard]] QuicStreamRecvState recv_state() const noexcept { return recv_state_; }
-    [[nodiscard]] bool has_final_size() const noexcept { return has_final_size_; }
-    [[nodiscard]] std::uint64_t final_size() const noexcept { return final_size_; }
-    [[nodiscard]] std::uint64_t reset_error_code() const noexcept { return reset_error_code_; }
-    [[nodiscard]] bool reset_received() const noexcept { return recv_state_ == QuicStreamRecvState::ResetRecvd; }
-    [[nodiscard]] bool recv_closed() const noexcept { return recv_state_ == QuicStreamRecvState::Closed; }
+    [[nodiscard]] QuicStreamRecvState recv_state() const noexcept {
+        if (recv_queue_.reset_received()) {
+            return QuicStreamRecvState::ResetRecvd;
+        }
+        if (recv_queue_.stop_sending()) {
+            return QuicStreamRecvState::Stopped;
+        }
+        if (recv_queue_.finished()) {
+            return QuicStreamRecvState::Closed;
+        }
+        return recv_queue_.has_final_size() ? QuicStreamRecvState::SizeKnown : QuicStreamRecvState::Open;
+    }
+    [[nodiscard]] bool has_final_size() const noexcept { return recv_queue_.has_final_size(); }
+    [[nodiscard]] std::uint64_t final_size() const noexcept { return recv_queue_.final_size(); }
+    [[nodiscard]] std::uint64_t reset_error_code() const noexcept { return recv_queue_.reset_error_code(); }
+    [[nodiscard]] std::uint64_t stop_error_code() const noexcept { return recv_queue_.stop_error_code(); }
+    [[nodiscard]] bool reset_received() const noexcept { return recv_queue_.reset_received(); }
+    [[nodiscard]] bool stop_sending() const noexcept { return recv_queue_.stop_sending(); }
+    [[nodiscard]] bool recv_closed() const noexcept { return recv_queue_.finished(); }
     [[nodiscard]] bool attached_to_connection() const noexcept { return attached_to_connection_; }
     [[nodiscard]] bool app_released() const noexcept { return app_released_; }
-    [[nodiscard]] std::size_t buffered_recv_bytes() const noexcept { return reassembler_.buffered_bytes(); }
-    [[nodiscard]] std::uint64_t received_end_offset() const noexcept { return recv_highest_offset_; }
     [[nodiscard]] std::uint32_t ref_count() const noexcept { return ref_count_; }
     [[nodiscard]] Lease lease() noexcept { return Lease(this); }
+    [[nodiscard]] QuicStreamRecvQueue &recv_queue() noexcept { return recv_queue_; }
+    [[nodiscard]] const QuicStreamRecvQueue &recv_queue() const noexcept { return recv_queue_; }
+    [[nodiscard]] QuicStreamSendQueue &send_queue() noexcept { return send_queue_; }
+    [[nodiscard]] const QuicStreamSendQueue &send_queue() const noexcept { return send_queue_; }
 
-    [[nodiscard]] common::IoResult<std::size_t> recv_stream_data(std::uint64_t offset, QuicSlice data,
-                                                                 bool fin) noexcept;
-    [[nodiscard]] common::IoResult<void> recv_reset(std::uint64_t error_code, std::uint64_t final_size) noexcept;
-    [[nodiscard]] common::IoResult<std::size_t> take_recv_data(std::size_t max_bytes, mem::IoBufChain &out) noexcept;
     void mark_app_released() noexcept;
     void abort(common::IoErr reason) noexcept;
 
@@ -124,18 +137,22 @@ public:
 private:
     void attach_to_connection(QuicConnection &conn) noexcept;
     void detach_from_connection() noexcept;
+    [[nodiscard]] common::IoResult<std::size_t> recv_stream_data(std::uint64_t offset, QuicSlice data,
+                                                                 bool fin) noexcept;
+    [[nodiscard]] common::IoResult<void> recv_reset(std::uint64_t error_code, std::uint64_t final_size) noexcept;
     void retain() noexcept;
     void release() noexcept;
     [[nodiscard]] common::IoResult<void> set_final_size(std::uint64_t final_size) noexcept;
+    void sync_recv_state_from_queue() noexcept;
 
     std::uint64_t stream_id_ = 0;
     QuicConnection *conn_ = nullptr;
     void *owner_ = nullptr;
     const Ops *ops_ = nullptr;
-    QuicStreamReassembler reassembler_;
+    QuicStreamRecvQueue recv_queue_;
+    QuicStreamSendQueue send_queue_;
     QuicStreamRecvState recv_state_ = QuicStreamRecvState::Open;
     std::uint64_t final_size_ = 0;
-    std::uint64_t recv_highest_offset_ = 0;
     std::uint64_t reset_error_code_ = 0;
     std::uint32_t ref_count_ = 1;
     bool has_final_size_ = false;
