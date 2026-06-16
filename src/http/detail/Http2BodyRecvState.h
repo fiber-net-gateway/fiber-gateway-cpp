@@ -29,7 +29,8 @@ public:
     void abort(common::IoErr reason) noexcept;
     [[nodiscard]] std::size_t queued_bytes() const noexcept { return queue_.readable_bytes(); }
 
-    fiber::async::Task<common::IoResult<mem::IoBufChain>> read_body(Http2Stream &stream, std::size_t max_bytes) noexcept;
+    fiber::async::Task<common::IoResult<mem::IoBufChain>> read_body(Http2Stream &stream,
+                                                                    std::size_t max_bytes) noexcept;
 
 private:
     struct PollResult;

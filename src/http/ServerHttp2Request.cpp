@@ -470,7 +470,7 @@ void ServerHttp2Request::on_stream_aborted(common::IoErr reason) noexcept {
 }
 
 fiber::async::Task<common::IoResult<mem::IoBufChain>> ServerHttp2Request::read_body(HttpExchange &,
-                                                                              std::size_t max_bytes) noexcept {
+                                                                                    std::size_t max_bytes) noexcept {
     co_return co_await request_body_recv_.read_body(stream_, max_bytes);
 }
 

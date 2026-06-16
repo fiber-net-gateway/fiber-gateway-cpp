@@ -103,6 +103,7 @@ public:
     [[nodiscard]] bool attached_to_connection() const noexcept { return attached_to_connection_; }
     [[nodiscard]] bool app_released() const noexcept { return app_released_; }
     [[nodiscard]] std::size_t buffered_recv_bytes() const noexcept { return reassembler_.buffered_bytes(); }
+    [[nodiscard]] std::uint64_t received_end_offset() const noexcept { return recv_highest_offset_; }
     [[nodiscard]] std::uint32_t ref_count() const noexcept { return ref_count_; }
     [[nodiscard]] Lease lease() noexcept { return Lease(this); }
 

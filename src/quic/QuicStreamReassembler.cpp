@@ -37,6 +37,7 @@ common::IoResult<std::size_t> QuicStreamReassembler::insert(std::uint64_t offset
         final_size_ = data_end;
         has_final_size_ = true;
     }
+    received_end_offset_ = std::max(received_end_offset_, data_end);
 
     if (data_end <= next_read_offset_ || data.len == 0) {
         return 0;
@@ -199,6 +200,7 @@ void QuicStreamReassembler::clear() noexcept {
     active_extent_count_ = 0;
     active_block_count_ = 0;
     next_read_offset_ = 0;
+    received_end_offset_ = 0;
     final_size_ = 0;
     has_final_size_ = false;
 }

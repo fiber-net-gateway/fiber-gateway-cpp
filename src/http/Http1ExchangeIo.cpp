@@ -411,7 +411,7 @@ common::IoResult<void> Http1ExchangeIo::take_prefix(mem::IoBufChain &out, std::s
 }
 
 fiber::async::Task<common::IoResult<mem::IoBufChain>> Http1ExchangeIo::read_body(HttpExchange &exchange,
-                                                                           size_t max_bytes) noexcept {
+                                                                                 size_t max_bytes) noexcept {
     if (!connection_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -1024,8 +1024,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
         }
     }
     if (len > 0) {
-        auto res =
-                co_await write_all(&connection_->transport(), chunk, connection_->options().write_timeout);
+        auto res = co_await write_all(&connection_->transport(), chunk, connection_->options().write_timeout);
         if (!res) {
             co_return std::unexpected(res.error());
         }
