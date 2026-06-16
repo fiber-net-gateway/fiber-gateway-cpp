@@ -167,15 +167,15 @@ fiber::async::Task<fiber::common::IoResult<void>> write_all(fiber::net::TcpStrea
     co_return fiber::common::IoResult<void>{};
 }
 
-std::string flatten_body_chunk(fiber::http::BodyChunk &chunk) {
+std::string flatten_body_chunk(fiber::mem::IoBufChain &chunk) {
     std::string out;
-    while (chunk.data_chain.readable_bytes() > 0) {
-        fiber::mem::IoBuf *front = chunk.data_chain.first_readable();
+    while (chunk.readable_bytes() > 0) {
+        fiber::mem::IoBuf *front = chunk.first_readable();
         if (!front) {
             break;
         }
         out.append(reinterpret_cast<const char *>(front->readable_data()), front->readable());
-        chunk.data_chain.consume_and_compact(front->readable());
+        chunk.consume_and_compact(front->readable());
     }
     return out;
 }
@@ -816,7 +816,7 @@ DetachedTask run_read_content_length_body_client(fiber::event::EventLoop *loop, 
             co_return;
         }
         outcome.first_body = flatten_body_chunk(*first_body_result);
-        outcome.first_last = first_body_result->last;
+        outcome.first_last = first_body_result->complete();
 
         auto second_body_result = co_await exchange.read_body(3);
         if (!second_body_result) {
@@ -825,7 +825,7 @@ DetachedTask run_read_content_length_body_client(fiber::event::EventLoop *loop, 
             co_return;
         }
         outcome.second_body = flatten_body_chunk(*second_body_result);
-        outcome.second_last = second_body_result->last;
+        outcome.second_last = second_body_result->complete();
         outcome.response_complete = exchange.response_complete();
         outcome.err = fiber::common::IoErr::None;
     }
@@ -882,7 +882,7 @@ DetachedTask run_read_chunked_body_with_trailer_client(fiber::event::EventLoop *
             co_return;
         }
         outcome.first_body = flatten_body_chunk(*body_result);
-        outcome.first_last = body_result->last;
+        outcome.first_last = body_result->complete();
         outcome.trailer_value = std::string(exchange.response_trailers().get("x-checksum"));
         outcome.response_complete = exchange.response_complete();
         outcome.err = fiber::common::IoErr::None;

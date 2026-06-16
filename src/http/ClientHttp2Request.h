@@ -9,6 +9,7 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../common/mem/BufPool.h"
+#include "../common/mem/IoBufChain.h"
 #include "ClientHttp2Types.h"
 #include "Http2HpackDecoder.h"
 #include "Http2Stream.h"
@@ -24,7 +25,6 @@ class Http2OutboundEncodeTarget;
 class HttpHeaders;
 struct Http2OutboundEncodeRequest;
 struct Http2OutboundEncodeResult;
-struct BodyChunk;
 
 class ClientHttp2Request : public common::NonCopyable, public common::NonMovable {
 public:
@@ -35,10 +35,10 @@ public:
 
     fiber::async::Task<common::IoResult<void>> send_request_header(const Http2RequestHead &head,
                                                                    bool end_stream) noexcept;
-    fiber::async::Task<common::IoResult<std::size_t>> write_body(BodyChunk chunk) noexcept;
+    fiber::async::Task<common::IoResult<std::size_t>> write_body(mem::IoBufChain chunk) noexcept;
     fiber::async::Task<common::IoResult<void>> write_trailer(const HttpHeaders &headers) noexcept;
     fiber::async::Task<common::IoResult<const Http2ResponseHead *>> read_header() noexcept;
-    fiber::async::Task<common::IoResult<BodyChunk>> read_body(std::size_t max_bytes) noexcept;
+    fiber::async::Task<common::IoResult<mem::IoBufChain>> read_body(std::size_t max_bytes) noexcept;
 
     [[nodiscard]] Http2Stream &stream() noexcept { return stream_; }
     [[nodiscard]] const Http2Stream &stream() const noexcept { return stream_; }

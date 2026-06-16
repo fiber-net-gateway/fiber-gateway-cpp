@@ -77,14 +77,14 @@ struct ServerHttp2Request::SendResponseHeaderOp {
 struct ServerHttp2Request::SendResponseBodyOp {
     using SuccessType = std::size_t;
 
-    explicit SendResponseBodyOp(BodyChunk &&chunk) noexcept :
-        chunk_(std::move(chunk)), total_bytes_(chunk_.data_chain.readable_bytes()) {}
+    explicit SendResponseBodyOp(mem::IoBufChain &&chunk) noexcept :
+        chunk_(std::move(chunk)), total_bytes_(chunk_.readable_bytes()) {}
 
     [[nodiscard]] bool should_complete_without_submit() const noexcept {
-        return chunk_.data_chain.readable_bytes() == 0 && !chunk_.last;
+        return chunk_.readable_bytes() == 0 && !chunk_.complete();
     }
 
-    [[nodiscard]] bool needs_stream_window() const noexcept { return chunk_.data_chain.readable_bytes() != 0; }
+    [[nodiscard]] bool needs_stream_window() const noexcept { return chunk_.readable_bytes() != 0; }
 
     [[nodiscard]] common::IoErr submit(ServerHttp2Request &request, BodySendAwaiter &awaiter) noexcept {
         return request.conn_->request_stream_send(request.stream_, Http2OutboundNextKind::Data,
@@ -93,7 +93,7 @@ struct ServerHttp2Request::SendResponseBodyOp {
 
     [[nodiscard]] std::size_t success_result(const BodySendAwaiter &) const noexcept { return total_bytes_; }
 
-    BodyChunk chunk_;
+    mem::IoBufChain chunk_;
     std::size_t total_bytes_ = 0;
 };
 
@@ -356,14 +356,14 @@ common::IoErr ServerHttp2Request::encode_body_frames(Http2Stream &stream, void *
 
     awaiter->clear_waiting_stream_window();
 
-    const std::size_t remaining = awaiter->op_.chunk_.data_chain.readable_bytes();
+    const std::size_t remaining = awaiter->op_.chunk_.readable_bytes();
     const std::int32_t stream_window = stream.send_window();
     const std::uint32_t stream_budget = stream_window > 0 ? static_cast<std::uint32_t>(stream_window) : 0U;
     const std::uint32_t conn_budget =
             req.conn_window_budget > 0 ? static_cast<std::uint32_t>(req.conn_window_budget) : 0U;
 
     if (remaining == 0) {
-        if (!awaiter->op_.chunk_.last) {
+        if (!awaiter->op_.chunk_.complete()) {
             request->on_body_send_complete(awaiter, common::IoErr::None);
             result.status = Http2OutboundEncodeResult::Status::NoWork;
             result.next_kind = Http2OutboundNextKind::None;
@@ -375,7 +375,7 @@ common::IoErr ServerHttp2Request::encode_body_frames(Http2Stream &stream, void *
                 .max_frame_size = req.max_frame_size,
                 .end_stream = true,
         });
-        common::IoErr err = frame_encoder.encode(target, awaiter->op_.chunk_.data_chain, 0);
+        common::IoErr err = frame_encoder.encode(target, awaiter->op_.chunk_, 0);
         if (err != common::IoErr::None) {
             request->on_body_send_complete(awaiter, err);
             return err;
@@ -409,21 +409,21 @@ common::IoErr ServerHttp2Request::encode_body_frames(Http2Stream &stream, void *
     Http2DataFrameEncoder frame_encoder({
             .stream_id = stream.stream_id(),
             .max_frame_size = req.max_frame_size,
-            .end_stream = awaiter->op_.chunk_.last && payload_budget == remaining,
+            .end_stream = awaiter->op_.chunk_.complete() && payload_budget == remaining,
     });
-    common::IoErr err = frame_encoder.encode(target, awaiter->op_.chunk_.data_chain, payload_budget);
+    common::IoErr err = frame_encoder.encode(target, awaiter->op_.chunk_, payload_budget);
     if (err != common::IoErr::None) {
         request->on_body_send_complete(awaiter, err);
         return err;
     }
 
     request->response_body_sent_ += payload_budget;
-    const std::size_t after_remaining = awaiter->op_.chunk_.data_chain.readable_bytes();
+    const std::size_t after_remaining = awaiter->op_.chunk_.readable_bytes();
     result.status = Http2OutboundEncodeResult::Status::Encoded;
     result.consumed_conn_window = static_cast<std::uint32_t>(payload_budget);
 
     if (after_remaining == 0) {
-        if (awaiter->op_.chunk_.last) {
+        if (awaiter->op_.chunk_.complete()) {
             request->stream_.local_end_stream_ = true;
             request->response_finished_ = true;
             request->conn_->try_release_stream(request->stream_);
@@ -469,7 +469,7 @@ void ServerHttp2Request::on_stream_aborted(common::IoErr reason) noexcept {
     request_body_recv_.abort(abort_reason_);
 }
 
-fiber::async::Task<common::IoResult<BodyChunk>> ServerHttp2Request::read_body(HttpExchange &,
+fiber::async::Task<common::IoResult<mem::IoBufChain>> ServerHttp2Request::read_body(HttpExchange &,
                                                                               std::size_t max_bytes) noexcept {
     co_return co_await request_body_recv_.read_body(stream_, max_bytes);
 }
@@ -517,7 +517,7 @@ fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_header(HttpE
 }
 
 fiber::async::Task<common::IoResult<size_t>> ServerHttp2Request::write_body(HttpExchange &exchange,
-                                                                            BodyChunk chunk) noexcept {
+                                                                            mem::IoBufChain chunk) noexcept {
     if (conn_ == nullptr || &exchange != &exchange_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -549,10 +549,9 @@ ServerHttp2Request::write_body(HttpExchange &exchange, const std::uint8_t *buf, 
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    BodyChunk chunk(conn_->transport().loop().io_buf_node_pool());
-    chunk.last = end;
+    mem::IoBufChain chunk(conn_->transport().loop().io_buf_node_pool());
     if (end) {
-        chunk.data_chain.mark_complete();
+        chunk.mark_complete();
     }
     if (len != 0) {
         mem::IoBuf owned = mem::IoBuf::allocate(len);
@@ -561,7 +560,7 @@ ServerHttp2Request::write_body(HttpExchange &exchange, const std::uint8_t *buf, 
         }
         std::memcpy(owned.writable_data(), buf, len);
         owned.commit(len);
-        if (!chunk.data_chain.append(std::move(owned))) {
+        if (!chunk.append(std::move(owned))) {
             co_return std::unexpected(common::IoErr::NoMem);
         }
     }

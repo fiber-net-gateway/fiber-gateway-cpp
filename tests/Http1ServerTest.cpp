@@ -543,10 +543,11 @@ TEST(Http1ServerTest, ChunkedPost) {
                                                fiber::http::ResponseConnectionMode::Close, true);
                     co_return;
                 }
-                if (read_result->data_chain.readable_bytes() > 0) {
-                    body.append(chain_to_string(std::move(read_result->data_chain)));
+                const bool last = read_result->complete();
+                if (read_result->readable_bytes() > 0) {
+                    body.append(chain_to_string(std::move(*read_result)));
                 }
-                if (read_result->last) {
+                if (last) {
                     break;
                 }
             }
@@ -601,7 +602,7 @@ TEST(Http1ServerTest, ChunkedPost) {
     delete server;
 }
 
-TEST(Http1ServerTest, WriteBodyAcceptsBodyChunk) {
+TEST(Http1ServerTest, WriteBodyAcceptsIoBufChain) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
@@ -612,7 +613,7 @@ TEST(Http1ServerTest, WriteBodyAcceptsBodyChunk) {
 
     fiber::async::spawn(group.at(0), [&]() {
         auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-            std::vector<fiber::http::BodyChunk> chunks;
+            std::vector<fiber::mem::IoBufChain> chunks;
 
             for (;;) {
                 auto read_result = co_await exchange.read_body(4);
@@ -620,7 +621,7 @@ TEST(Http1ServerTest, WriteBodyAcceptsBodyChunk) {
                     co_return;
                 }
 
-                bool last = read_result->last;
+                bool last = read_result->complete();
                 chunks.push_back(std::move(*read_result));
                 if (last) {
                     break;
@@ -691,10 +692,11 @@ TEST(Http1ServerTest, ChunkedPostTrailersAreAvailableAfterBody) {
                                                fiber::http::ResponseConnectionMode::Close, true);
                     co_return;
                 }
-                if (read_result->data_chain.readable_bytes() > 0) {
-                    body.append(chain_to_string(std::move(read_result->data_chain)));
+                const bool last = read_result->complete();
+                if (read_result->readable_bytes() > 0) {
+                    body.append(chain_to_string(std::move(*read_result)));
                 }
-                if (read_result->last) {
+                if (last) {
                     break;
                 }
             }
@@ -764,10 +766,11 @@ TEST(Http1ServerTest, ChunkedPostWaitsForCompleteTrailersBeforeLastChunk) {
                                                fiber::http::ResponseConnectionMode::Close, true);
                     co_return;
                 }
-                if (read_result->data_chain.readable_bytes() > 0) {
-                    body.append(chain_to_string(std::move(read_result->data_chain)));
+                const bool last = read_result->complete();
+                if (read_result->readable_bytes() > 0) {
+                    body.append(chain_to_string(std::move(*read_result)));
                 }
-                if (read_result->last) {
+                if (last) {
                     break;
                 }
             }
@@ -842,7 +845,7 @@ TEST(Http1ServerTest, InvalidChunkedPostReturnsBadRequest) {
                                                fiber::http::ResponseConnectionMode::Close, true);
                     co_return;
                 }
-                if (read_result->last) {
+                if (read_result->complete()) {
                     break;
                 }
             }
@@ -1013,10 +1016,11 @@ TEST(Http1ServerTest, ChunkedKeepAlivePipelinedNextRequest) {
                                                fiber::http::ResponseConnectionMode::Close, true);
                     co_return;
                 }
-                if (read_result->data_chain.readable_bytes() > 0) {
-                    body.append(chain_to_string(std::move(read_result->data_chain)));
+                const bool last = read_result->complete();
+                if (read_result->readable_bytes() > 0) {
+                    body.append(chain_to_string(std::move(*read_result)));
                 }
-                if (read_result->last) {
+                if (last) {
                     break;
                 }
             }

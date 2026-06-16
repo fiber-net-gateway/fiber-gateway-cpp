@@ -34,21 +34,6 @@ struct HttpServerOptions {
     net::TlsOptions tls{};
 };
 
-struct BodyChunk {
-    BodyChunk() noexcept = default;
-    explicit BodyChunk(mem::IoBufNodePool &node_pool) noexcept : data_chain(node_pool) {}
-    BodyChunk(BodyChunk &&) noexcept = default;
-    BodyChunk &operator=(BodyChunk &&) noexcept = default;
-
-    BodyChunk(const BodyChunk &) = delete;
-    BodyChunk &operator=(const BodyChunk &) = delete;
-
-    bool last = false;
-    mem::IoBufChain data_chain;
-};
-
-using ReadBodyChunk = BodyChunk;
-
 class Http1Connection;
 class Http1ExchangeIo;
 class HttpTransport;
@@ -87,14 +72,14 @@ public:
     bool request_trailers_complete() const noexcept { return request_trailers_complete_; }
     mem::BufPool &pool() noexcept { return pool_; }
 
-    fiber::async::Task<common::IoResult<BodyChunk>> read_body(std::size_t max_bytes) noexcept;
+    fiber::async::Task<common::IoResult<mem::IoBufChain>> read_body(std::size_t max_bytes) noexcept;
     fiber::async::Task<common::IoResult<void>> discard_body() noexcept;
 
     fiber::async::Task<common::IoResult<void>> send_header(const OutgoingHeaderBlockView &header);
     fiber::async::Task<common::IoResult<void>> send_continue_header();
     fiber::async::Task<common::IoResult<void>> send_informational_header(int status_code,
                                                                          const HttpHeaders *headers = nullptr);
-    fiber::async::Task<common::IoResult<size_t>> write_body(BodyChunk chunk) noexcept;
+    fiber::async::Task<common::IoResult<size_t>> write_body(mem::IoBufChain chunk) noexcept;
     fiber::async::Task<common::IoResult<size_t>> write_body(const uint8_t *buf, size_t len, bool end) noexcept;
 
 

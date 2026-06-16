@@ -32,11 +32,12 @@ public:
     [[nodiscard]] HttpExchange &exchange() noexcept { return exchange_; }
     [[nodiscard]] const HttpExchange &exchange() const noexcept { return exchange_; }
 
-    fiber::async::Task<common::IoResult<BodyChunk>> read_body(HttpExchange &exchange,
-                                                              std::size_t max_bytes) noexcept override;
+    fiber::async::Task<common::IoResult<mem::IoBufChain>> read_body(HttpExchange &exchange,
+                                                                    std::size_t max_bytes) noexcept override;
     fiber::async::Task<common::IoResult<void>> send_header(HttpExchange &exchange,
                                                            const OutgoingHeaderBlockView &header) override;
-    fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, BodyChunk chunk) noexcept override;
+    fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange,
+                                                            mem::IoBufChain chunk) noexcept override;
     fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, const std::uint8_t *buf,
                                                             std::size_t len, bool end) noexcept override;
 

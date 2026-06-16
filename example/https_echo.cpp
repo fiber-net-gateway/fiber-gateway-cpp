@@ -238,7 +238,7 @@ fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange) {
             std::cout << "1111 end....." << std::endl;
             co_return;
         }
-        bool last = read_result->last;
+        bool last = read_result->complete();
         auto write_result = co_await exchange.write_body(std::move(*read_result));
         if (!write_result) {
 

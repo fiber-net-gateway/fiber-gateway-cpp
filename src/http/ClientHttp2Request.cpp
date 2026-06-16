@@ -47,14 +47,14 @@ struct ClientHttp2Request::SendRequestHeaderOp {
 struct ClientHttp2Request::SendRequestBodyOp {
     using SuccessType = std::size_t;
 
-    explicit SendRequestBodyOp(BodyChunk &&chunk) noexcept :
-        chunk_(std::move(chunk)), total_bytes_(chunk_.data_chain.readable_bytes()) {}
+    explicit SendRequestBodyOp(mem::IoBufChain &&chunk) noexcept :
+        chunk_(std::move(chunk)), total_bytes_(chunk_.readable_bytes()) {}
 
     [[nodiscard]] bool should_complete_without_submit() const noexcept {
-        return chunk_.data_chain.readable_bytes() == 0 && !chunk_.last;
+        return chunk_.readable_bytes() == 0 && !chunk_.complete();
     }
 
-    [[nodiscard]] bool needs_stream_window() const noexcept { return chunk_.data_chain.readable_bytes() != 0; }
+    [[nodiscard]] bool needs_stream_window() const noexcept { return chunk_.readable_bytes() != 0; }
 
     [[nodiscard]] common::IoErr submit(ClientHttp2Request &request, BodySendAwaiter &awaiter) noexcept {
         return request.conn_->request_stream_send(request.stream_, Http2OutboundNextKind::Data,
@@ -63,7 +63,7 @@ struct ClientHttp2Request::SendRequestBodyOp {
 
     [[nodiscard]] std::size_t success_result(const BodySendAwaiter &) const noexcept { return total_bytes_; }
 
-    BodyChunk chunk_;
+    mem::IoBufChain chunk_;
     std::size_t total_bytes_ = 0;
 };
 
@@ -158,7 +158,7 @@ fiber::async::Task<common::IoResult<void>> ClientHttp2Request::send_request_head
     co_return co_await awaiter;
 }
 
-fiber::async::Task<common::IoResult<std::size_t>> ClientHttp2Request::write_body(BodyChunk chunk) noexcept {
+fiber::async::Task<common::IoResult<std::size_t>> ClientHttp2Request::write_body(mem::IoBufChain chunk) noexcept {
     if (conn_ == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -214,7 +214,7 @@ fiber::async::Task<common::IoResult<void>> ClientHttp2Request::write_trailer(con
     co_return co_await awaiter;
 }
 
-fiber::async::Task<common::IoResult<BodyChunk>> ClientHttp2Request::read_body(std::size_t max_bytes) noexcept {
+fiber::async::Task<common::IoResult<mem::IoBufChain>> ClientHttp2Request::read_body(std::size_t max_bytes) noexcept {
     if (conn_ == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -576,14 +576,14 @@ common::IoErr ClientHttp2Request::encode_body_frames(Http2Stream &stream, void *
 
     awaiter->clear_waiting_stream_window();
 
-    const std::size_t remaining = awaiter->op_.chunk_.data_chain.readable_bytes();
+    const std::size_t remaining = awaiter->op_.chunk_.readable_bytes();
     const std::int32_t stream_window = stream.send_window();
     const std::uint32_t stream_budget = stream_window > 0 ? static_cast<std::uint32_t>(stream_window) : 0U;
     const std::uint32_t conn_budget =
             req.conn_window_budget > 0 ? static_cast<std::uint32_t>(req.conn_window_budget) : 0U;
 
     if (remaining == 0) {
-        if (!awaiter->op_.chunk_.last) {
+        if (!awaiter->op_.chunk_.complete()) {
             request->on_body_send_complete(awaiter, common::IoErr::None);
             result.status = Http2OutboundEncodeResult::Status::NoWork;
             result.next_kind = Http2OutboundNextKind::None;
@@ -595,7 +595,7 @@ common::IoErr ClientHttp2Request::encode_body_frames(Http2Stream &stream, void *
                 .max_frame_size = req.max_frame_size,
                 .end_stream = true,
         });
-        common::IoErr err = frame_encoder.encode(target, awaiter->op_.chunk_.data_chain, 0);
+        common::IoErr err = frame_encoder.encode(target, awaiter->op_.chunk_, 0);
         if (err != common::IoErr::None) {
             request->on_body_send_complete(awaiter, err);
             return err;
@@ -629,20 +629,20 @@ common::IoErr ClientHttp2Request::encode_body_frames(Http2Stream &stream, void *
     Http2DataFrameEncoder frame_encoder({
             .stream_id = stream.stream_id(),
             .max_frame_size = req.max_frame_size,
-            .end_stream = awaiter->op_.chunk_.last && payload_budget == remaining,
+            .end_stream = awaiter->op_.chunk_.complete() && payload_budget == remaining,
     });
-    common::IoErr err = frame_encoder.encode(target, awaiter->op_.chunk_.data_chain, payload_budget);
+    common::IoErr err = frame_encoder.encode(target, awaiter->op_.chunk_, payload_budget);
     if (err != common::IoErr::None) {
         request->on_body_send_complete(awaiter, err);
         return err;
     }
 
-    const std::size_t after_remaining = awaiter->op_.chunk_.data_chain.readable_bytes();
+    const std::size_t after_remaining = awaiter->op_.chunk_.readable_bytes();
     result.status = Http2OutboundEncodeResult::Status::Encoded;
     result.consumed_conn_window = static_cast<std::uint32_t>(payload_budget);
 
     if (after_remaining == 0) {
-        if (awaiter->op_.chunk_.last) {
+        if (awaiter->op_.chunk_.complete()) {
             request->stream_.local_end_stream_ = true;
             request->request_finished_ = true;
             request->conn_->try_release_stream(request->stream_);

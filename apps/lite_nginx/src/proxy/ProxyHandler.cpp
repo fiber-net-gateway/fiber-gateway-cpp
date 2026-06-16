@@ -265,13 +265,14 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
             if (!body_result) {
                 co_return;
             }
+            const bool last = body_result->complete();
             auto write_result = co_await upstream_exchange.write_body(std::move(*body_result));
             if (!write_result) {
                 co_await send_plain_response(exchange, map_upstream_error_status(write_result.error()),
                                              map_upstream_error_body(write_result.error()));
                 co_return;
             }
-            if (body_result->last) {
+            if (last) {
                 break;
             }
         }
@@ -325,7 +326,7 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
         if (!body_result) {
             co_return;
         }
-        const bool last = body_result->last;
+        const bool last = body_result->complete();
         auto write_result = co_await exchange.write_body(std::move(*body_result));
         if (!write_result) {
             co_return;

@@ -79,7 +79,7 @@ void HttpExchange::cache_request_header_field(const HttpHeaders::HeaderField &fi
     }
 }
 
-fiber::async::Task<common::IoResult<BodyChunk>> HttpExchange::read_body(std::size_t max_bytes) noexcept {
+fiber::async::Task<common::IoResult<mem::IoBufChain>> HttpExchange::read_body(std::size_t max_bytes) noexcept {
     if (!io_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -92,7 +92,7 @@ fiber::async::Task<common::IoResult<void>> HttpExchange::discard_body() noexcept
         if (!result) {
             co_return std::unexpected(result.error());
         }
-        if (result->last) {
+        if (result->complete()) {
             break;
         }
     }
@@ -128,7 +128,7 @@ fiber::async::Task<common::IoResult<void>> HttpExchange::send_informational_head
     });
 }
 
-fiber::async::Task<common::IoResult<size_t>> HttpExchange::write_body(BodyChunk chunk) noexcept {
+fiber::async::Task<common::IoResult<size_t>> HttpExchange::write_body(mem::IoBufChain chunk) noexcept {
     if (!io_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
