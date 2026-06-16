@@ -310,8 +310,6 @@ public:
     [[nodiscard]] common::IoResult<QuicStream *> get_or_create_peer_stream(std::uint64_t stream_id) noexcept;
     [[nodiscard]] common::IoResult<void> recv_stream_frame(const QuicStreamFrame &frame, QuicSlice data) noexcept;
     [[nodiscard]] common::IoResult<void> recv_reset_stream_frame(const QuicResetStreamFrame &frame) noexcept;
-    [[nodiscard]] common::IoResult<std::size_t> take_stream_data(std::uint64_t stream_id, std::size_t max_bytes,
-                                                                 mem::IoBufChain &out) noexcept;
     [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return recv_extent_pool_; }
     void release_stream_app(QuicStream &stream) noexcept;
 

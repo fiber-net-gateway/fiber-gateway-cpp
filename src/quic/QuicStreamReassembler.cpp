@@ -9,16 +9,80 @@
 
 namespace fiber::quic {
 
-// Block size is 64 KiB = 2^16, so block index = offset >> 16.
-static constexpr std::size_t kQuicStreamRecvBlockSize = 64 * 1024;
 static constexpr std::size_t kQuicStreamRecvMaxActiveExtents = 4096;
 static constexpr std::size_t kQuicStreamRecvMaxActiveBlocks = 1024;
 static constexpr unsigned kBlockSizeShift = 16;
-static constexpr std::uint64_t kBlockOffsetMask = kQuicStreamRecvBlockSize - 1;
+static constexpr std::uint64_t kBlockOffsetMask = QuicStreamReassembler::kRecvBlockSize - 1;
 
 QuicStreamReassembler::QuicStreamReassembler(mem::IoBufNodePool &pool) noexcept : pool_(&pool) {}
 
 QuicStreamReassembler::~QuicStreamReassembler() { clear(); }
+
+common::IoResult<QuicStreamReassembler::InsertCost> QuicStreamReassembler::insert_cost(std::uint64_t offset,
+                                                                                       std::size_t len) const noexcept {
+    if (offset > std::numeric_limits<std::uint64_t>::max() - len) [[unlikely]] {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    const std::uint64_t data_end = offset + len;
+    if (data_end <= next_read_offset_ || len == 0) {
+        return InsertCost{};
+    }
+
+    if (offset < next_read_offset_) {
+        offset = next_read_offset_;
+    }
+
+    InsertCost cost{};
+    std::uint64_t cursor = offset;
+    mem::IoBufNode *prev = nullptr;
+    mem::IoBufNode *cur = head_;
+
+    if (last_insert_ != nullptr && last_insert_->offset <= cursor) {
+        prev = last_insert_;
+        cur = last_insert_->next;
+    }
+
+    while (cursor < data_end) {
+        while (cur != nullptr && cur->offset <= cursor) {
+            const std::uint64_t cur_end = cur->offset + cur->buf.readable();
+            if (cur_end > cursor) {
+                cursor = std::min(cur_end, data_end);
+                if (cursor >= data_end) {
+                    return cost;
+                }
+            }
+            prev = cur;
+            cur = cur->next;
+        }
+
+        if (prev != nullptr) {
+            const std::uint64_t prev_end = prev->offset + prev->buf.readable();
+            if (prev_end > cursor) {
+                cursor = std::min(prev_end, data_end);
+                if (cursor >= data_end) {
+                    return cost;
+                }
+                continue;
+            }
+        }
+
+        const std::uint64_t next_start = cur != nullptr ? cur->offset : data_end;
+        const std::uint64_t hole_end = std::min({next_start, data_end, block_end(cursor)});
+        if (hole_end <= cursor) [[unlikely]] {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+
+        const std::uint64_t block = block_of(cursor);
+        cost.bytes += static_cast<std::size_t>(hole_end - cursor);
+        if (!has_same_block_neighbor(prev, cur, block)) {
+            ++cost.blocks;
+        }
+        cursor = hole_end;
+    }
+
+    return cost;
+}
 
 common::IoResult<std::size_t> QuicStreamReassembler::insert(std::uint64_t offset, QuicSlice data, bool fin) noexcept {
     if ((data.data == nullptr && data.len != 0) || offset > std::numeric_limits<std::uint64_t>::max() - data.len)
@@ -214,7 +278,7 @@ std::size_t QuicStreamReassembler::block_offset(std::uint64_t offset) noexcept {
 }
 
 std::uint64_t QuicStreamReassembler::block_end(std::uint64_t offset) noexcept {
-    return (offset & ~kBlockOffsetMask) + kQuicStreamRecvBlockSize;
+    return (offset & ~kBlockOffsetMask) + kRecvBlockSize;
 }
 
 // --- Extent lifecycle ---
@@ -249,7 +313,7 @@ common::IoResult<mem::IoBufNode *> QuicStreamReassembler::create_extent(std::uin
         std::memcpy(owner.data() + local, src, len);
         view = owner.retain_storage_slice(local, len);
     } else {
-        mem::IoBuf storage = mem::IoBuf::allocate(kQuicStreamRecvBlockSize);
+        mem::IoBuf storage = mem::IoBuf::allocate(kRecvBlockSize);
         if (!storage) [[unlikely]] {
             pool_->release(extent);
             return std::unexpected(common::IoErr::NoMem);

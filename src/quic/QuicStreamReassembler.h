@@ -14,9 +14,17 @@ namespace fiber::quic {
 
 class QuicStreamReassembler : public common::NonCopyable, public common::NonMovable {
 public:
+    struct InsertCost {
+        std::size_t bytes = 0;
+        std::size_t blocks = 0;
+    };
+
+    static constexpr std::size_t kRecvBlockSize = 64 * 1024;
+
     explicit QuicStreamReassembler(mem::IoBufNodePool &pool) noexcept;
     ~QuicStreamReassembler();
 
+    [[nodiscard]] common::IoResult<InsertCost> insert_cost(std::uint64_t offset, std::size_t len) const noexcept;
     [[nodiscard]] common::IoResult<std::size_t> insert(std::uint64_t offset, QuicSlice data, bool fin = false) noexcept;
     [[nodiscard]] common::IoResult<std::size_t> take(std::size_t max_bytes, mem::IoBufChain &out) noexcept;
     void clear() noexcept;
@@ -26,6 +34,9 @@ public:
     [[nodiscard]] bool has_final_size() const noexcept { return has_final_size_; }
     [[nodiscard]] std::uint64_t final_size() const noexcept { return final_size_; }
     [[nodiscard]] bool finished() const noexcept { return has_final_size_ && next_read_offset_ == final_size_; }
+    [[nodiscard]] bool has_readable_data() const noexcept {
+        return head_ != nullptr && head_->offset == next_read_offset_ && head_->buf.readable() != 0;
+    }
     [[nodiscard]] std::size_t buffered_bytes() const noexcept { return buffered_bytes_; }
     [[nodiscard]] std::size_t active_extent_count() const noexcept { return active_extent_count_; }
     [[nodiscard]] std::size_t active_block_count() const noexcept { return active_block_count_; }

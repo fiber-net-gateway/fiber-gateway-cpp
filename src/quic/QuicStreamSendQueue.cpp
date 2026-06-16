@@ -3,6 +3,7 @@
 #include <expected>
 
 #include "../common/Assert.h"
+#include "../event/EventLoop.h"
 
 namespace fiber::quic {
 

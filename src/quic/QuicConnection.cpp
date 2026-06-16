@@ -263,20 +263,6 @@ common::IoResult<void> QuicConnection::recv_reset_stream_frame(const QuicResetSt
     return {};
 }
 
-common::IoResult<std::size_t> QuicConnection::take_stream_data(std::uint64_t stream_id, std::size_t max_bytes,
-                                                               mem::IoBufChain &out) noexcept {
-    QuicStream *stream = streams_.find(stream_id);
-    if (stream == nullptr) {
-        return std::unexpected(common::IoErr::NotFound);
-    }
-    auto taken = stream->take_recv_data(max_bytes, out);
-    if (!taken) {
-        return std::unexpected(taken.error());
-    }
-    try_release_stream(*stream);
-    return *taken;
-}
-
 void QuicConnection::release_stream_app(QuicStream &stream) noexcept {
     stream.mark_app_released();
     try_release_stream(stream);

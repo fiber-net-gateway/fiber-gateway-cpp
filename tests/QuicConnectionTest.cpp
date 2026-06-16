@@ -333,7 +333,7 @@ TEST(QuicConnectionTest, RecvStreamFrameCreatesPeerInitiatedStream) {
     auto *stream = conn.find_stream(0);
     ASSERT_NE(stream, nullptr);
     EXPECT_EQ(conn.active_stream_count(), 1U);
-    EXPECT_EQ(stream->buffered_recv_bytes(), 3U);
+    EXPECT_EQ(stream->recv_queue().buffered_bytes(), 3U);
     EXPECT_FALSE(stream->has_final_size());
 }
 
@@ -436,11 +436,12 @@ TEST(QuicConnectionTest, RecvFinStreamRetiresAfterDataIsTaken) {
     EXPECT_EQ(stream->final_size(), 3U);
 
     fiber::mem::IoBufChain out(conn.recv_extent_pool());
-    auto taken = conn.take_stream_data(0, 3, out);
+    auto taken = stream->recv_queue().try_take(3, out);
 
     ASSERT_TRUE(taken.has_value());
     EXPECT_EQ(*taken, 3U);
     EXPECT_EQ(out.readable_bytes(), 3U);
+    conn.release_stream_app(*stream);
     EXPECT_EQ(conn.find_stream(0), nullptr);
     EXPECT_EQ(conn.active_stream_count(), 0U);
 
