@@ -19,7 +19,6 @@
 #include "QuicConnection.h"
 #include "QuicPacketProcessor.h"
 #include "QuicSendScheduler.h"
-#include "QuicStreamReassembler.h"
 
 namespace fiber::net {
 class TlsServerContext;
