@@ -74,7 +74,7 @@ async::Task<common::IoResult<std::size_t>> QuicStream::read(std::size_t max_byte
 common::IoResult<std::size_t> QuicStream::try_write(const mem::IoBuf &buf, bool fin) noexcept {
     auto appended = send_queue_.try_append(buf, fin);
     if (appended && conn_ != nullptr && has_send_work()) {
-        conn_->submit_stream_send(*this);
+        (void) conn_->queue_stream_frame(*this);
     }
     return appended;
 }
@@ -82,7 +82,7 @@ common::IoResult<std::size_t> QuicStream::try_write(const mem::IoBuf &buf, bool 
 common::IoResult<std::size_t> QuicStream::try_write(mem::IoBufChain &chain) noexcept {
     auto appended = send_queue_.try_append_chain(chain);
     if (appended && conn_ != nullptr && has_send_work()) {
-        conn_->submit_stream_send(*this);
+        (void) conn_->queue_stream_frame(*this);
     }
     return appended;
 }
@@ -94,7 +94,7 @@ async::Task<common::IoResult<std::size_t>> QuicStream::write(mem::IoBuf buf, boo
         co_return std::unexpected(written.error());
     }
     if (conn_ != nullptr && has_send_work()) {
-        conn_->submit_stream_send(*this);
+        (void) conn_->queue_stream_frame(*this);
     }
     co_return *written;
 }
@@ -106,7 +106,7 @@ async::Task<common::IoResult<std::size_t>> QuicStream::write(mem::IoBufChain &ch
         co_return std::unexpected(written.error());
     }
     if (conn_ != nullptr && has_send_work()) {
-        conn_->submit_stream_send(*this);
+        (void) conn_->queue_stream_frame(*this);
     }
     co_return *written;
 }
@@ -134,7 +134,6 @@ common::IoResult<void> QuicStream::reset(std::uint64_t error_code) noexcept {
     if (conn_ == nullptr) {
         return {};
     }
-    conn_->remove_stream_send(*this);
     return conn_->queue_reset_stream_frame(stream_id_, error_code, *final_size);
 }
 
@@ -213,7 +212,7 @@ common::IoResult<void> QuicStream::on_remote_stop_sending(std::uint64_t error_co
 void QuicStream::on_max_stream_data(std::uint64_t limit) noexcept {
     send_queue_.update_max_stream_data(limit);
     if (conn_ != nullptr && has_send_work()) {
-        conn_->submit_stream_send(*this);
+        (void) conn_->queue_stream_frame(*this);
     }
 }
 
@@ -258,7 +257,7 @@ void QuicStream::abort(common::IoErr reason) noexcept {
 
 bool QuicStream::ready_for_connection_release() const noexcept {
     return app_released_ && (recv_queue_.finished() || recv_queue_.reset_received()) && send_queue_.buffer().empty() &&
-           !stream_send_queue_entry_.link.linked();
+           !stream_send_pending_;
 }
 
 bool QuicStream::ready_for_destruction() const noexcept { return !attached_to_connection_ && ref_count_ == 0; }

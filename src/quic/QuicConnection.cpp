@@ -315,6 +315,17 @@ void QuicConnection::release_stream_app(QuicStream &stream) noexcept {
     try_release_stream(stream);
 }
 
+bool QuicConnection::has_stream_send_work() const noexcept {
+    const QuicPacketNumberSpace &space = packet_number_space(QuicEncryptionLevel::Application);
+    for (const QuicOutputFrame *frame = space.pending_frames.front(); frame != nullptr;
+         frame = space.pending_frames.next_of(*frame)) {
+        if ((frame->flags & QuicOutputFrameStreamPlaceholder) != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool QuicConnection::is_local_stream(std::uint64_t stream_id) const noexcept {
     return (stream_id & kStreamInitiatorMask) == local_initiator_bit();
 }
@@ -570,7 +581,6 @@ void QuicConnection::retire_stream(QuicStream &stream) noexcept {
         return;
     }
 
-    remove_stream_send(stream);
     QuicStream::Lease lease = streams_.erase(stream.stream_id());
     if (!lease) {
         stream.detach_from_connection();
@@ -597,47 +607,33 @@ void QuicConnection::try_release_stream(QuicStream &stream) noexcept {
     }
 }
 
-void QuicConnection::submit_stream_send(QuicStream &stream) noexcept {
-    if (closing() || !stream.attached_to_connection() || !stream.has_send_work()) {
-        return;
+common::IoResult<void> QuicConnection::queue_stream_frame(QuicStream &stream) noexcept {
+    if (closing() || !stream.attached_to_connection() || stream.stream_send_pending_ || !stream.has_send_work()) {
+        return {};
     }
 
-    auto &entry = stream.stream_send_queue_entry_;
-    if (entry.link.linked()) {
-        return;
+    QuicPacketNumberSpace &space = packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
     }
-    entry.stream = &stream;
-    stream_send_queue_.push_back(entry);
+
+    frame->type = QuicFrameType::Stream;
+    frame->flags = QuicOutputFrameStreamPlaceholder;
+    frame->u.stream.stream_id = stream.stream_id();
+    space.pending_frames.push_back(*frame);
+    stream.stream_send_pending_ = true;
     schedule_send();
+    return {};
 }
 
-void QuicConnection::remove_stream_send(QuicStream &stream) noexcept {
-    auto &entry = stream.stream_send_queue_entry_;
-    if (entry.link.linked()) {
-        stream_send_queue_.erase(entry);
-    }
-    entry.stream = nullptr;
-}
-
-QuicStream *QuicConnection::pop_stream_send() noexcept {
-    auto *entry = stream_send_queue_.front();
-    if (entry == nullptr) {
-        return nullptr;
-    }
-    stream_send_queue_.erase(*entry);
-    QuicStream *stream = entry->stream;
-    entry->stream = nullptr;
-    if (stream == nullptr || !stream->attached_to_connection() || !stream->has_send_work()) {
-        return nullptr;
-    }
-    return stream;
-}
-
-void QuicConnection::requeue_stream_send_if_needed(QuicStream &stream) noexcept {
-    if (closing() || !stream.attached_to_connection() || !stream.has_send_work()) {
+void QuicConnection::clear_stream_frame_pending(std::uint64_t stream_id) noexcept {
+    QuicStream *stream = find_stream(stream_id);
+    if (stream == nullptr) {
         return;
     }
-    submit_stream_send(stream);
+    stream->stream_send_pending_ = false;
+    try_release_stream(*stream);
 }
 
 void QuicConnection::schedule_send() noexcept {
@@ -670,8 +666,7 @@ common::IoResult<void> QuicConnection::on_stream_send_failed(std::uint64_t strea
     if (!failed) {
         return std::unexpected(failed.error());
     }
-    submit_stream_send(*stream);
-    return {};
+    return queue_stream_frame(*stream);
 }
 
 common::IoResult<void> QuicConnection::queue_reset_stream_frame(std::uint64_t stream_id, std::uint64_t error_code,

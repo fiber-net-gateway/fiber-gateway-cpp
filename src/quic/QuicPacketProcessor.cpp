@@ -71,17 +71,20 @@ namespace {
     return path;
 }
 
-void discard_frame_queue(QuicPacketNumberSpace &space, QuicOutputFrameQueue &queue) noexcept {
+void discard_frame_queue(QuicConnection &conn, QuicPacketNumberSpace &space, QuicOutputFrameQueue &queue) noexcept {
     while (QuicOutputFrame *frame = queue.pop_front()) {
+        if ((frame->flags & QuicOutputFrameStreamPlaceholder) != 0) {
+            conn.clear_stream_frame_pending(frame->u.stream.stream_id);
+        }
         space.release_frame(*frame);
     }
 }
 
 void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level) noexcept {
     QuicPacketNumberSpace &space = conn.packet_number_space(level);
-    discard_frame_queue(space, space.pending_frames);
-    discard_frame_queue(space, space.sending_frames);
-    discard_frame_queue(space, space.sent_frames);
+    discard_frame_queue(conn, space, space.pending_frames);
+    discard_frame_queue(conn, space, space.sending_frames);
+    discard_frame_queue(conn, space, space.sent_frames);
     if (space.ack_frame.queued) {
         space.pending_frames.erase(space.ack_frame);
     }

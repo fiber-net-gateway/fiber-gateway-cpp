@@ -42,11 +42,6 @@ public:
         void (*on_abort)(void *owner, common::IoErr reason) noexcept = nullptr;
     };
 
-    struct StreamSendQueueEntry {
-        QuicStream *stream = nullptr;
-        common::IntrusiveListHook link{};
-    };
-
     class Lease {
     public:
         Lease() noexcept = default;
@@ -181,7 +176,6 @@ private:
     const Ops *ops_ = nullptr;
     QuicStreamRecvQueue recv_queue_;
     QuicStreamSendQueue send_queue_;
-    StreamSendQueueEntry stream_send_queue_entry_{};
     QuicStreamRecvState recv_state_ = QuicStreamRecvState::Open;
     std::uint64_t final_size_ = 0;
     std::uint64_t reset_error_code_ = 0;
@@ -189,6 +183,7 @@ private:
     bool has_final_size_ = false;
     bool attached_to_connection_ = false;
     bool app_released_ = true;
+    bool stream_send_pending_ = false;
 
     friend class QuicConnection;
     friend class QuicUdpEndpoint;

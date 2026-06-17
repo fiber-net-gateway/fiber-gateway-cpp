@@ -311,7 +311,8 @@ public:
     [[nodiscard]] std::uint64_t recv_data_consumed() const noexcept { return recv_data_consumed_; }
     [[nodiscard]] std::uint64_t recv_data_limit() const noexcept { return recv_data_limit_; }
     [[nodiscard]] std::uint64_t peer_max_data() const noexcept { return peer_max_data_; }
-    [[nodiscard]] bool has_stream_send_work() const noexcept { return !stream_send_queue_.empty(); }
+    [[nodiscard]] bool has_stream_send_work() const noexcept;
+    void clear_stream_frame_pending(std::uint64_t stream_id) noexcept;
     [[nodiscard]] common::IoResult<void> on_stream_send_acked(std::uint64_t stream_id, std::size_t offset,
                                                               std::size_t length, bool fin) noexcept;
     [[nodiscard]] common::IoResult<void> on_stream_send_failed(std::uint64_t stream_id, std::size_t offset,
@@ -372,10 +373,7 @@ private:
     void retire_stream(QuicStream &stream) noexcept;
     void record_retired_stream(const QuicStream &stream) noexcept;
     void try_release_stream(QuicStream &stream) noexcept;
-    void submit_stream_send(QuicStream &stream) noexcept;
-    void remove_stream_send(QuicStream &stream) noexcept;
-    [[nodiscard]] QuicStream *pop_stream_send() noexcept;
-    void requeue_stream_send_if_needed(QuicStream &stream) noexcept;
+    [[nodiscard]] common::IoResult<void> queue_stream_frame(QuicStream &stream) noexcept;
     void schedule_send() noexcept;
     [[nodiscard]] common::IoResult<void> queue_reset_stream_frame(std::uint64_t stream_id, std::uint64_t error_code,
                                                                   std::uint64_t final_size) noexcept;
@@ -409,9 +407,6 @@ private:
     QuicPeerTransportState peer_transport_{};
     mem::IoBufNodePool recv_extent_pool_{};
     QuicStreamTable streams_{};
-    using StreamSendQueue =
-            common::IntrusiveList<QuicStream::StreamSendQueueEntry, offsetof(QuicStream::StreamSendQueueEntry, link)>;
-    StreamSendQueue stream_send_queue_{};
     std::array<QuicRetiredStreamRecord, kQuicRetiredStreamRecordCount> retired_streams_{};
     std::uint64_t next_retired_stream_slot_ = 0;
     std::array<QuicCryptoRecvBuffer, kQuicPacketNumberSpaceCount> crypto_recv_buffers_{};
