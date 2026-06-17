@@ -53,6 +53,7 @@ public:
     }
     [[nodiscard]] bool reset_received() const noexcept { return reset_received_; }
     [[nodiscard]] bool stop_sending() const noexcept { return stop_sending_; }
+    [[nodiscard]] bool receive_completed() const noexcept { return fin_received() || reset_received(); }
     [[nodiscard]] std::uint64_t reset_error_code() const noexcept { return reset_error_code_; }
     [[nodiscard]] std::uint64_t stop_error_code() const noexcept { return stop_error_code_; }
     [[nodiscard]] std::size_t buffered_bytes() const noexcept { return buffered_bytes_; }
