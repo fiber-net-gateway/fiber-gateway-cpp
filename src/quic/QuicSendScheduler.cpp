@@ -1,7 +1,6 @@
 #include "QuicSendScheduler.h"
 
 #include <expected>
-#include <new>
 
 #include "../common/Assert.h"
 #include "QuicUdpEndpoint.h"
@@ -113,14 +112,8 @@ QuicSendScheduler::~QuicSendScheduler() {
 
 common::IoResult<void> QuicSendScheduler::init(event::EventLoop &loop, net::UdpSocket &socket,
                                                QuicUdpEndpoint &endpoint, const Options &options) noexcept {
-    if (initialized_ || options.send_buffer_size == 0 || options.max_packets_per_wakeup == 0 ||
-        options.max_packets_per_connection == 0) {
+    if (initialized_ || options.max_packets_per_wakeup == 0 || options.max_packets_per_connection == 0) {
         return std::unexpected(common::IoErr::Invalid);
-    }
-
-    send_buffer_ = std::make_unique<std::uint8_t[]>(options.send_buffer_size);
-    if (!send_buffer_) {
-        return std::unexpected(common::IoErr::NoMem);
     }
 
     loop_ = &loop;
@@ -143,39 +136,12 @@ void QuicSendScheduler::submit(QuicConnection &connection) noexcept {
     notify_waiter();
 }
 
-void QuicSendScheduler::submit_after(QuicConnection &connection, std::chrono::milliseconds delay) noexcept {
-    if (!initialized_ || closing_) {
-        return;
-    }
-    FIBER_ASSERT(loop_ != nullptr);
-    FIBER_ASSERT(loop_->in_loop());
-
-    if (delay <= std::chrono::milliseconds{0}) {
-        submit(connection);
-        return;
-    }
-
-    enqueue_delayed(connection, loop_->now() + delay);
-    arm_delay_timer();
-}
-
 void QuicSendScheduler::remove(QuicConnection &connection) noexcept {
-    auto &index = connection.send_index;
-    if (index.link.linked()) {
-        if (index.state == QuicConnection::SendIndex::State::Ready) {
-            ready_.erase(index);
-        } else if (index.state == QuicConnection::SendIndex::State::Delayed) {
-            delayed_.erase(index);
-        }
+    auto &entry = connection.send_queue_entry;
+    if (entry.link.linked()) {
+        ready_.erase(entry);
     }
-    if (blocked_connection_ == &connection) {
-        blocked_connection_ = nullptr;
-    }
-    index.connection = nullptr;
-    index.state = QuicConnection::SendIndex::State::None;
-    if (initialized_ && loop_ != nullptr && loop_->in_loop()) {
-        arm_delay_timer();
-    }
+    entry.connection = nullptr;
 }
 
 void QuicSendScheduler::close(common::IoErr reason) noexcept {
@@ -186,12 +152,7 @@ void QuicSendScheduler::close(common::IoErr reason) noexcept {
         stop_reason_ = reason;
     }
     closing_ = true;
-    blocked_connection_ = nullptr;
     clear_ready();
-    clear_delayed();
-    if (delay_timer_.is_in_heap()) {
-        loop_->cancel<QuicSendScheduler, &QuicSendScheduler::delay_timer_>(*this);
-    }
     notify_waiter();
 }
 
@@ -203,19 +164,14 @@ async::Task<void> QuicSendScheduler::run() noexcept {
 
     running_ = true;
     while (!closing_) {
-        promote_due_delayed();
         if (!has_work()) {
-            arm_delay_timer();
             co_await WaitForWorkAwaiter(*this);
             continue;
         }
 
         std::size_t packets_this_wakeup = 0;
         while (!closing_ && has_work()) {
-            QuicConnection *connection = blocked_connection_;
-            if (connection == nullptr) {
-                connection = pop_ready();
-            }
+            QuicConnection *connection = front_ready();
             if (connection == nullptr) {
                 break;
             }
@@ -237,7 +193,7 @@ async::Task<void> QuicSendScheduler::run() noexcept {
     running_ = false;
 }
 
-bool QuicSendScheduler::should_wake_waiter() const noexcept { return closing_ || has_work() || has_due_delayed(); }
+bool QuicSendScheduler::should_wake_waiter() const noexcept { return closing_ || has_work(); }
 
 bool QuicSendScheduler::arm_waiter(WaitForWorkAwaiter *awaiter) noexcept {
     if (!awaiter || should_wake_waiter()) {
@@ -263,162 +219,65 @@ void QuicSendScheduler::notify_waiter() noexcept {
             *waiter_);
 }
 
-bool QuicSendScheduler::has_work() const noexcept { return blocked_connection_ != nullptr || !ready_.empty(); }
-
-bool QuicSendScheduler::has_due_delayed() const noexcept {
-    if (loop_ == nullptr) {
-        return false;
-    }
-    const auto now = loop_->now();
-    const QuicConnection::SendIndex *index = delayed_.front();
-    while (index != nullptr) {
-        if (index->ready_at <= now) {
-            return true;
-        }
-        index = delayed_.next_of(*index);
-    }
-    return false;
-}
-
-void QuicSendScheduler::promote_due_delayed() noexcept {
-    if (loop_ == nullptr) {
-        return;
-    }
-
-    const auto now = loop_->now();
-    QuicConnection::SendIndex *index = delayed_.front();
-    while (index != nullptr) {
-        QuicConnection::SendIndex *next = delayed_.next_of(*index);
-        if (index->ready_at <= now) {
-            delayed_.erase(*index);
-            index->state = QuicConnection::SendIndex::State::None;
-            if (index->connection != nullptr) {
-                enqueue_ready(*index->connection);
-            }
-        }
-        index = next;
-    }
-
-    arm_delay_timer();
-}
-
-void QuicSendScheduler::arm_delay_timer() noexcept {
-    if (!initialized_ || closing_ || loop_ == nullptr || !loop_->in_loop()) {
-        return;
-    }
-
-    if (delay_timer_.is_in_heap()) {
-        loop_->cancel<QuicSendScheduler, &QuicSendScheduler::delay_timer_>(*this);
-    }
-
-    QuicConnection::SendIndex *best = nullptr;
-    QuicConnection::SendIndex *index = delayed_.front();
-    while (index != nullptr) {
-        if (best == nullptr || index->ready_at < best->ready_at) {
-            best = index;
-        }
-        index = delayed_.next_of(*index);
-    }
-
-    if (best != nullptr) {
-        loop_->post_at<QuicSendScheduler, &QuicSendScheduler::delay_timer_, &QuicSendScheduler::on_delay_timer>(
-                best->ready_at, *this);
-    }
-}
+bool QuicSendScheduler::has_work() const noexcept { return !ready_.empty(); }
 
 void QuicSendScheduler::enqueue_ready(QuicConnection &connection) noexcept {
-    auto &index = connection.send_index;
-    if (index.state == QuicConnection::SendIndex::State::Delayed) {
-        delayed_.erase(index);
-        index.state = QuicConnection::SendIndex::State::None;
-        arm_delay_timer();
-    }
-    if (index.state != QuicConnection::SendIndex::State::None) {
+    auto &entry = connection.send_queue_entry;
+    if (entry.link.linked()) {
         return;
     }
-    index.connection = &connection;
-    index.state = QuicConnection::SendIndex::State::Ready;
-    ready_.push_back(index);
+    entry.connection = &connection;
+    ready_.push_back(entry);
 }
 
-void QuicSendScheduler::enqueue_delayed(QuicConnection &connection,
-                                        std::chrono::steady_clock::time_point ready_at) noexcept {
-    auto &index = connection.send_index;
-    if (index.state == QuicConnection::SendIndex::State::Ready ||
-        index.state == QuicConnection::SendIndex::State::Inflight) {
+void QuicSendScheduler::rotate_front_to_back(QuicConnection &connection) noexcept {
+    auto &entry = connection.send_queue_entry;
+    if (!entry.link.linked() || ready_.front() != &entry || ready_.back() == &entry) {
         return;
     }
-
-    index.connection = &connection;
-    index.ready_at = ready_at;
-    if (index.state == QuicConnection::SendIndex::State::Delayed) {
-        return;
-    }
-
-    index.state = QuicConnection::SendIndex::State::Delayed;
-    delayed_.push_back(index);
+    ready_.erase(entry);
+    ready_.push_back(entry);
 }
 
-QuicConnection *QuicSendScheduler::pop_ready() noexcept {
-    auto *index = ready_.front();
-    if (!index) {
+QuicConnection *QuicSendScheduler::front_ready() noexcept {
+    auto *entry = ready_.front();
+    if (!entry) {
         return nullptr;
     }
-    ready_.erase(*index);
-    QuicConnection *connection = index->connection;
-    index->state = QuicConnection::SendIndex::State::Inflight;
-    return connection;
+    if (entry->connection == nullptr) {
+        ready_.erase(*entry);
+        return nullptr;
+    }
+    return entry->connection;
 }
 
 void QuicSendScheduler::clear_ready() noexcept {
     while (!ready_.empty()) {
-        auto *index = ready_.front();
-        ready_.erase(*index);
-        index->state = QuicConnection::SendIndex::State::None;
+        auto *entry = ready_.front();
+        ready_.erase(*entry);
+        entry->connection = nullptr;
     }
-}
-
-void QuicSendScheduler::clear_delayed() noexcept {
-    while (!delayed_.empty()) {
-        auto *index = delayed_.front();
-        delayed_.erase(*index);
-        index->state = QuicConnection::SendIndex::State::None;
-    }
-}
-
-void QuicSendScheduler::on_delay_timer(QuicSendScheduler *scheduler) noexcept {
-    if (scheduler == nullptr || scheduler->closing_) {
-        return;
-    }
-    scheduler->promote_due_delayed();
-    scheduler->notify_waiter();
 }
 
 async::Task<common::IoErr> QuicSendScheduler::flush_connection(QuicConnection &connection) noexcept {
     FIBER_ASSERT(endpoint_ != nullptr);
     FIBER_ASSERT(socket_ != nullptr);
+    FIBER_ASSERT(connection.send_queue_entry.link.linked());
 
     std::size_t packets_for_connection = 0;
     for (;;) {
         QuicSendDatagram datagram{};
-        datagram.data = send_buffer_.get();
+        datagram.data = endpoint_->send_buffer_.get();
         datagram.capacity = options_.send_buffer_size;
 
         auto built = endpoint_->build_send_datagram(connection, datagram);
         if (!built) {
-            connection.send_index.state = QuicConnection::SendIndex::State::None;
             co_return built.error();
-        }
-
-        if (built->status == QuicBuildSendStatus::Delayed) {
-            connection.send_index.state = QuicConnection::SendIndex::State::None;
-            submit_after(connection, built->delay);
-            co_return common::IoErr::None;
         }
 
         if (built->status == QuicBuildSendStatus::NoWork || built->status == QuicBuildSendStatus::Closed ||
             built->status == QuicBuildSendStatus::Blocked) {
-            connection.send_index.state = QuicConnection::SendIndex::State::None;
+            remove(connection);
             co_return common::IoErr::None;
         }
 
@@ -426,30 +285,27 @@ async::Task<common::IoErr> QuicSendScheduler::flush_connection(QuicConnection &c
         if (!sent) {
             endpoint_->rollback_send_datagram(connection, datagram);
             if (sent.error() == common::IoErr::WouldBlock) {
-                blocked_connection_ = &connection;
                 auto writable = co_await socket_->wait_writable();
-                blocked_connection_ = nullptr;
                 if (!writable) {
-                    connection.send_index.state = QuicConnection::SendIndex::State::None;
                     co_return writable.error();
                 }
                 continue;
             }
-            connection.send_index.state = QuicConnection::SendIndex::State::None;
             co_return sent.error();
         }
 
         endpoint_->commit_send_datagram(connection, datagram);
         packets_for_connection += datagram.packet_count;
         if (packets_for_connection >= options_.max_packets_per_connection) {
-            connection.send_index.state = QuicConnection::SendIndex::State::None;
             if (endpoint_->connection_has_send_work(connection)) {
-                enqueue_ready(connection);
+                rotate_front_to_back(connection);
+            } else {
+                remove(connection);
             }
             co_return common::IoErr::None;
         }
         if (!endpoint_->connection_has_send_work(connection)) {
-            connection.send_index.state = QuicConnection::SendIndex::State::None;
+            remove(connection);
             co_return common::IoErr::None;
         }
     }

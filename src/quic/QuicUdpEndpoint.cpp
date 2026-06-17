@@ -218,7 +218,7 @@ split_ordered_frame(QuicPacketNumberSpace &space, QuicOutputFrame &frame, std::s
 } // namespace
 
 common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Options &options) noexcept {
-    if (initialized_ || options.max_connections == 0) {
+    if (initialized_ || options.max_connections == 0 || options.send.send_buffer_size == 0) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -232,7 +232,8 @@ common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Optio
     socket_ = std::make_unique<net::UdpSocket>(loop);
     read_buffer_ = std::make_unique<std::uint8_t[]>(kQuicUdpDefaultReadBufferSize);
     plaintext_buffer_ = std::make_unique<std::uint8_t[]>(kQuicUdpDefaultPlaintextBufferSize);
-    if (!socket_ || !read_buffer_ || !plaintext_buffer_) {
+    send_buffer_ = std::make_unique<std::uint8_t[]>(options_.send.send_buffer_size);
+    if (!socket_ || !read_buffer_ || !plaintext_buffer_ || !send_buffer_) {
         close();
         return std::unexpected(common::IoErr::NoMem);
     }
@@ -271,6 +272,7 @@ void QuicUdpEndpoint::close() noexcept {
     socket_.reset();
     read_buffer_.reset();
     plaintext_buffer_.reset();
+    send_buffer_.reset();
     active_connection_count_ = 0;
     loop_ = nullptr;
     initialized_ = false;
@@ -298,10 +300,6 @@ common::IoResult<void> QuicUdpEndpoint::remove_connection(const QuicConnectionId
 }
 
 void QuicUdpEndpoint::schedule_send(QuicConnection &connection) noexcept { send_scheduler_.submit(connection); }
-
-void QuicUdpEndpoint::schedule_send_after(QuicConnection &connection, std::chrono::milliseconds delay) noexcept {
-    send_scheduler_.submit_after(connection, delay);
-}
 
 async::Task<common::IoResult<QuicUdpReceiveResult>> QuicUdpEndpoint::recv_once() noexcept {
     if (!valid() || !read_buffer_) {
@@ -595,7 +593,6 @@ void QuicUdpEndpoint::schedule_after_receive(QuicConnection &connection,
     QuicPacketNumberSpace &space = connection.packet_number_space(result.level);
     const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
     if (should_delay_ack(space, now)) {
-        schedule_send_after(connection, ack_delay_remaining(space, now));
         return;
     }
 
@@ -609,15 +606,6 @@ bool QuicUdpEndpoint::should_delay_ack(const QuicPacketNumberSpace &space, QuicT
     }
 
     return now - space.ack_delay_start < options_.max_ack_delay;
-}
-
-std::chrono::milliseconds QuicUdpEndpoint::ack_delay_remaining(const QuicPacketNumberSpace &space,
-                                                               QuicTime now) const noexcept {
-    const QuicTime elapsed = now - space.ack_delay_start;
-    if (elapsed >= options_.max_ack_delay) {
-        return std::chrono::milliseconds{0};
-    }
-    return options_.max_ack_delay - elapsed;
 }
 
 common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicConnection &connection,
@@ -675,7 +663,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
             if (datagram.packet_count != 0) {
                 break;
             }
-            return QuicBuildSendResult{QuicBuildSendStatus::Delayed, ack_delay_remaining(space, now)};
+            continue;
         }
 
         auto generated_ack = generate_ack_frame_into_pending(space, now, options_.ack_delay_exponent);
