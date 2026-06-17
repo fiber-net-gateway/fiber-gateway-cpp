@@ -27,11 +27,6 @@ void QuicStream::Lease::reset() noexcept {
 QuicStream::QuicStream(std::uint64_t stream_id, mem::IoBufNodePool &recv_extent_pool) noexcept :
     stream_id_(stream_id), recv_queue_(recv_extent_pool), send_queue_(recv_extent_pool) {}
 
-QuicStream::QuicStream(std::uint64_t stream_id, mem::IoBufNodePool &recv_extent_pool, void *owner,
-                       const Ops &ops) noexcept :
-    stream_id_(stream_id), owner_(owner), ops_(&ops), recv_queue_(recv_extent_pool), send_queue_(recv_extent_pool),
-    app_released_(false) {}
-
 QuicStream::~QuicStream() = default;
 
 std::uint64_t QuicStream::sequence() const noexcept { return stream_sequence(stream_id_); }
@@ -139,50 +134,14 @@ common::IoResult<void> QuicStream::reset(std::uint64_t error_code) noexcept {
 
 common::IoResult<std::uint64_t> QuicStream::on_stream_data_recv(const std::uint8_t *src, std::size_t length,
                                                                 std::uint64_t offset, bool fin) noexcept {
-    if (offset > std::numeric_limits<std::uint64_t>::max() - length) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
     const std::uint64_t old_end = recv_queue_.received_end_offset();
-    const std::uint64_t end = offset + length;
     QuicSlice data{src, length};
-
-    if (recv_state_ == QuicStreamRecvState::ResetRecvd || recv_state_ == QuicStreamRecvState::Closed) {
-        if (!has_final_size_ || end > final_size_ || (fin && end != final_size_)) {
-            return std::unexpected(common::IoErr::Invalid);
-        }
-        return 0;
-    }
 
     auto inserted = recv_queue_.recv_stream_data(offset, data, fin);
     if (!inserted) {
         return std::unexpected(inserted.error());
     }
-    if (recv_queue_.has_final_size()) {
-        auto fixed = set_final_size(recv_queue_.final_size());
-        if (!fixed) {
-            return std::unexpected(fixed.error());
-        }
-    }
     sync_recv_state_from_queue();
-    if (ops_ != nullptr && ops_->on_data != nullptr && (*inserted != 0 || recv_state_ == QuicStreamRecvState::Closed)) {
-        mem::IoBufChain out(recv_queue_.node_pool());
-        auto taken = recv_queue_.try_take(recv_queue_.buffered_bytes(), out);
-        if (!taken) {
-            if (taken.error() == common::IoErr::WouldBlock) {
-                return *inserted;
-            }
-            return std::unexpected(taken.error());
-        }
-        sync_recv_state_from_queue();
-        const bool fin_delivered = recv_state_ == QuicStreamRecvState::Closed;
-        if (*taken == 0 && !fin_delivered) {
-            return *inserted;
-        }
-        const common::IoErr err = ops_->on_data(owner_, *this, std::move(out), fin_delivered);
-        if (err != common::IoErr::None) {
-            return std::unexpected(err);
-        }
-    }
     return recv_queue_.received_end_offset() - old_end;
 }
 
@@ -193,15 +152,7 @@ common::IoResult<std::uint64_t> QuicStream::on_remote_reset(std::uint64_t error_
     if (!reset) {
         return std::unexpected(reset.error());
     }
-    auto fixed = set_final_size(final_size);
-    if (!fixed) {
-        return std::unexpected(fixed.error());
-    }
-    reset_error_code_ = error_code;
     sync_recv_state_from_queue();
-    if (ops_ != nullptr && ops_->on_reset != nullptr) {
-        ops_->on_reset(owner_, *this, error_code, final_size);
-    }
     return final_size - old_end;
 }
 
@@ -249,12 +200,6 @@ void QuicStream::maybe_extend_recv_flow_control() noexcept {
 
 void QuicStream::mark_app_released() noexcept { app_released_ = true; }
 
-void QuicStream::abort(common::IoErr reason) noexcept {
-    if (ops_ != nullptr && ops_->on_abort != nullptr) {
-        ops_->on_abort(owner_, reason);
-    }
-}
-
 bool QuicStream::ready_for_connection_release() const noexcept {
     return app_released_ && (recv_queue_.finished() || recv_queue_.reset_received()) && send_queue_.buffer().empty() &&
            !stream_send_pending_;
@@ -287,25 +232,8 @@ void QuicStream::retain() noexcept { ++ref_count_; }
 void QuicStream::release() noexcept {
     --ref_count_;
     if (ready_for_destruction()) {
-        void *owner = owner_;
-        const Ops *ops = ops_;
-        owner_ = nullptr;
-        ops_ = nullptr;
-        if (ops != nullptr && ops->on_destroy != nullptr) {
-            ops->on_destroy(owner);
-            return;
-        }
         delete this;
     }
-}
-
-common::IoResult<void> QuicStream::set_final_size(std::uint64_t final_size) noexcept {
-    if (has_final_size_ && final_size_ != final_size) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
-    final_size_ = final_size;
-    has_final_size_ = true;
-    return {};
 }
 
 void QuicStream::sync_recv_state_from_queue() noexcept {
