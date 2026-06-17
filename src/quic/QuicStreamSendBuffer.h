@@ -26,11 +26,23 @@ public:
         bool encoded = false;
     };
 
+    struct PreparedFrameResult {
+        const std::uint8_t *data = nullptr;
+        std::size_t offset = 0;
+        std::size_t data_len = 0;
+        std::size_t encoded_len = 0;
+        bool has_length = false;
+        bool fin = false;
+        bool encoded = false;
+    };
+
     explicit QuicStreamSendBuffer(mem::IoBufNodePool &pool) noexcept;
     ~QuicStreamSendBuffer();
 
     [[nodiscard]] common::IoResult<std::size_t> append(const mem::IoBuf &buf, bool fin = false) noexcept;
     [[nodiscard]] common::IoResult<std::size_t> append_chain(mem::IoBufChain &chain) noexcept;
+    [[nodiscard]] common::IoResult<PreparedFrameResult> prepare_stream_frame(std::uint64_t stream_id,
+                                                                             std::size_t capacity) noexcept;
     [[nodiscard]] common::IoResult<EncodedFrameResult> encode_stream_frame(std::uint64_t stream_id, std::uint8_t *dst,
                                                                            std::size_t capacity) noexcept;
     [[nodiscard]] common::IoResult<void> mark_acked(std::size_t offset, std::size_t length, bool encoded_fin) noexcept;
@@ -50,6 +62,7 @@ public:
     [[nodiscard]] bool reset() const noexcept { return reset_; }
     [[nodiscard]] bool send_closed() const noexcept { return reset_ || fin_appended_; }
     [[nodiscard]] bool can_append() const noexcept { return !reset_ && !fin_appended_ && !fin_acked_; }
+    [[nodiscard]] bool has_send_work() const noexcept { return !reset_ && (ready_bytes_ != 0 || has_pending_fin()); }
 
 private:
     [[nodiscard]] bool has_pending_fin() const noexcept { return fin_appended_ && !fin_inflight_ && !fin_acked_; }

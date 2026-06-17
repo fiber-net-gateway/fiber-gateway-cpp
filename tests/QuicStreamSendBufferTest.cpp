@@ -100,6 +100,28 @@ TEST(QuicStreamSendBufferTest, FailedRangeReturnsToReadyAndCanBeEncodedAgain) {
     EXPECT_EQ(frame_data_view(frame), "abcdef");
 }
 
+TEST(QuicStreamSendBufferTest, PrepareFrameMarksInflightAndFailedRangeReturnsReady) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicStreamSendBuffer buffer(pool);
+
+    ASSERT_TRUE(buffer.append(iobuf_of("abcdef")).has_value());
+
+    auto prepared = buffer.prepare_stream_frame(4, 6);
+    ASSERT_TRUE(prepared.has_value());
+    ASSERT_TRUE(prepared->encoded);
+    EXPECT_EQ(prepared->offset, 0u);
+    EXPECT_EQ(prepared->data_len, 3u);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(prepared->data), prepared->data_len), "abc");
+    EXPECT_TRUE(prepared->has_length);
+    EXPECT_EQ(buffer.ready_bytes(), 3u);
+    EXPECT_EQ(buffer.inflight_bytes(), 3u);
+
+    auto failed = buffer.mark_failed(prepared->offset, prepared->data_len, prepared->fin);
+    ASSERT_TRUE(failed.has_value());
+    EXPECT_EQ(buffer.ready_bytes(), 6u);
+    EXPECT_EQ(buffer.inflight_bytes(), 0u);
+}
+
 TEST(QuicStreamSendBufferTest, InsufficientCapacityDoesNotChangeState) {
     fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamSendBuffer buffer(pool);

@@ -64,6 +64,7 @@ struct AckStat {
             }
 
             space.sent_frames.erase_after(prev, *frame);
+            const bool generated_stream = (frame->flags & QuicOutputFrameGeneratedStream) != 0;
             frame->packet_len = 0;
             frame->flags = 0;
 
@@ -72,6 +73,15 @@ struct AckStat {
             // that point to prevent generating ACKs for already-ACKed data.
             if (frame->type == QuicFrameType::Ack || frame->type == QuicFrameType::AckEcn) {
                 space.drop_ack_ranges(frame->packet_number);
+            }
+
+            if (generated_stream) {
+                auto acked = connection.on_stream_send_acked(frame->u.stream.stream_id,
+                                                             static_cast<std::size_t>(frame->u.stream.offset),
+                                                             frame->data.len, frame->u.stream.fin);
+                if (!acked) {
+                    return std::unexpected(acked.error());
+                }
             }
 
             space.release_frame(*frame);
@@ -158,7 +168,19 @@ struct AckStat {
             front->packet_number = 0;
             front->packet_len = 0;
             front->send_time = QuicTime{0};
+            const bool generated_stream = (front->flags & QuicOutputFrameGeneratedStream) != 0;
             front->flags = 0;
+            if (generated_stream) {
+                auto failed = connection.on_stream_send_failed(front->u.stream.stream_id,
+                                                               static_cast<std::size_t>(front->u.stream.offset),
+                                                               front->data.len, front->u.stream.fin);
+                if (!failed) {
+                    return std::unexpected(failed.error());
+                }
+                space.release_frame(*front);
+                result.lost_frames = true;
+                continue;
+            }
             if (quic_output_frame_retransmittable_on_loss(front->type)) {
                 space.pending_frames.push_back(*front);
                 result.lost_frames = true;

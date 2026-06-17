@@ -41,6 +41,7 @@ struct StreamCallbackState {
     std::uint32_t calls = 0;
     std::uint32_t destroy_calls = 0;
     std::uint32_t reset_calls = 0;
+    std::uint32_t schedule_calls = 0;
     std::uint64_t last_stream_id = 0;
     std::uint64_t last_reset_error_code = 0;
     bool return_empty = false;
@@ -113,6 +114,10 @@ fiber::quic::QuicConnection::Options server_options_with_factory(StreamCallbackS
     options.owner = &state;
     options.ops.on_new_stream = on_new_stream_record;
     return options;
+}
+
+void schedule_send_record(void *owner, fiber::quic::QuicConnection &) noexcept {
+    ++static_cast<StreamCallbackState *>(owner)->schedule_calls;
 }
 
 } // namespace
@@ -223,6 +228,28 @@ TEST(QuicConnectionTest, QueuesFramesIntrusively) {
 
     EXPECT_EQ(space.pending_frames.front(), second);
     EXPECT_EQ(space.pending_frames.back(), second);
+}
+
+TEST(QuicConnectionTest, StreamWriteSubmitsConnectionSendWork) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    options.schedule_send_owner = &state;
+    options.schedule_send = schedule_send_record;
+    fiber::quic::QuicConnection conn(options);
+
+    auto stream = conn.get_or_create_peer_stream(0);
+    ASSERT_TRUE(stream.has_value());
+    fiber::quic::QuicMaxStreamDataFrame limit{};
+    limit.id = 0;
+    limit.limit = 1024;
+    ASSERT_TRUE(conn.recv_max_stream_data_frame(limit).has_value());
+
+    auto written = (*stream)->try_write(iobuf_of("abc"));
+
+    ASSERT_TRUE(written.has_value());
+    EXPECT_EQ(*written, 3u);
+    EXPECT_TRUE(conn.has_stream_send_work());
+    EXPECT_EQ(state.schedule_calls, 1u);
 }
 
 TEST(QuicConnectionTest, CreatesInitialActivePathFromOptions) {

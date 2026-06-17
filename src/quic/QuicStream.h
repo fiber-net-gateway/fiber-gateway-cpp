@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "../async/Task.h"
+#include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
@@ -16,6 +17,7 @@
 namespace fiber::quic {
 
 class QuicConnection;
+class QuicUdpEndpoint;
 
 enum class QuicStreamType : std::uint8_t {
     Bidirectional,
@@ -38,6 +40,11 @@ public:
         void (*on_reset)(void *owner, QuicStream &stream, std::uint64_t error_code,
                          std::uint64_t final_size) noexcept = nullptr;
         void (*on_abort)(void *owner, common::IoErr reason) noexcept = nullptr;
+    };
+
+    struct StreamSendQueueEntry {
+        QuicStream *stream = nullptr;
+        common::IntrusiveListHook link{};
     };
 
     class Lease {
@@ -155,6 +162,13 @@ private:
                                                                   std::uint64_t final_size) noexcept;
     [[nodiscard]] common::IoResult<void> on_remote_stop_sending(std::uint64_t error_code) noexcept;
     void on_max_stream_data(std::uint64_t limit) noexcept;
+    [[nodiscard]] bool has_send_work() const noexcept;
+    [[nodiscard]] common::IoResult<QuicStreamSendBuffer::PreparedFrameResult>
+    prepare_stream_frame(std::size_t capacity) noexcept;
+    [[nodiscard]] common::IoResult<QuicStreamSendBuffer::EncodedFrameResult>
+    encode_stream_frame(std::uint8_t *dst, std::size_t capacity) noexcept;
+    [[nodiscard]] common::IoResult<void> mark_send_acked(std::size_t offset, std::size_t length, bool fin) noexcept;
+    [[nodiscard]] common::IoResult<void> mark_send_failed(std::size_t offset, std::size_t length, bool fin) noexcept;
     void maybe_extend_recv_flow_control() noexcept;
     void retain() noexcept;
     void release() noexcept;
@@ -167,6 +181,7 @@ private:
     const Ops *ops_ = nullptr;
     QuicStreamRecvQueue recv_queue_;
     QuicStreamSendQueue send_queue_;
+    StreamSendQueueEntry stream_send_queue_entry_{};
     QuicStreamRecvState recv_state_ = QuicStreamRecvState::Open;
     std::uint64_t final_size_ = 0;
     std::uint64_t reset_error_code_ = 0;
@@ -176,6 +191,7 @@ private:
     bool app_released_ = true;
 
     friend class QuicConnection;
+    friend class QuicUdpEndpoint;
     friend class QuicStreamTable;
 };
 

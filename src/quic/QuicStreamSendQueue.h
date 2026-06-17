@@ -55,12 +55,15 @@ public:
 private:
     class AppendAwaiter;
 
+    [[nodiscard]] common::IoResult<QuicStreamSendBuffer::PreparedFrameResult>
+    prepare_stream_frame(std::uint64_t stream_id, std::size_t capacity) noexcept;
     [[nodiscard]] common::IoResult<QuicStreamSendBuffer::EncodedFrameResult>
     encode_stream_frame(std::uint64_t stream_id, std::uint8_t *dst, std::size_t capacity) noexcept;
     [[nodiscard]] common::IoResult<void> mark_acked(std::size_t offset, std::size_t length, bool encoded_fin) noexcept;
     [[nodiscard]] common::IoResult<void> mark_failed(std::size_t offset, std::size_t length, bool encoded_fin) noexcept;
     void update_max_stream_data(std::uint64_t limit) noexcept;
     [[nodiscard]] bool can_append_now(std::size_t bytes) const noexcept;
+    [[nodiscard]] bool has_send_work() const noexcept { return !closed_ && buffer_.has_send_work(); }
     [[nodiscard]] common::IoErr terminal_append_error() const noexcept;
     [[nodiscard]] common::IoResult<void> check_append_preconditions(std::size_t bytes) const noexcept;
     void notify_append_waiter(common::IoErr result = common::IoErr::None) noexcept;
