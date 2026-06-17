@@ -153,7 +153,7 @@ common::IoResult<std::uint64_t> QuicStream::on_remote_reset(std::uint64_t error_
         return std::unexpected(reset.error());
     }
     sync_recv_state_from_queue();
-    return final_size - old_end;
+    return recv_queue_.received_end_offset() - old_end;
 }
 
 common::IoResult<void> QuicStream::on_remote_stop_sending(std::uint64_t error_code) noexcept {
