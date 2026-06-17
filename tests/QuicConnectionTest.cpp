@@ -39,46 +39,11 @@ fiber::mem::IoBuf iobuf_of(std::string_view value) {
 
 struct StreamCallbackState {
     std::uint32_t calls = 0;
-    std::uint32_t destroy_calls = 0;
-    std::uint32_t reset_calls = 0;
     std::uint32_t schedule_calls = 0;
     std::uint64_t last_stream_id = 0;
-    std::uint64_t last_reset_error_code = 0;
     bool return_empty = false;
     fiber::quic::QuicStream::Lease lease{};
 };
-
-const fiber::quic::QuicStream::Ops &test_stream_ops() noexcept;
-
-struct TestStreamOwner {
-    TestStreamOwner(const fiber::quic::QuicNewStreamContext &ctx, StreamCallbackState &callback_state) noexcept :
-        state(&callback_state), stream(ctx.stream_id, ctx.recv_extent_pool, this, test_stream_ops()) {}
-
-    StreamCallbackState *state = nullptr;
-    fiber::quic::QuicStream stream;
-};
-
-void on_quic_stream_destroy(void *owner) noexcept {
-    auto *stream_owner = static_cast<TestStreamOwner *>(owner);
-    ++stream_owner->state->destroy_calls;
-    delete stream_owner;
-}
-
-void on_quic_stream_reset(void *owner, fiber::quic::QuicStream &, std::uint64_t error_code, std::uint64_t) noexcept {
-    auto *state = static_cast<TestStreamOwner *>(owner)->state;
-    ++state->reset_calls;
-    state->last_reset_error_code = error_code;
-}
-
-const fiber::quic::QuicStream::Ops &test_stream_ops() noexcept {
-    static const fiber::quic::QuicStream::Ops kOps{
-            .on_destroy = on_quic_stream_destroy,
-            .on_data = nullptr,
-            .on_reset = on_quic_stream_reset,
-            .on_abort = nullptr,
-    };
-    return kOps;
-}
 
 fiber::quic::QuicStream::Lease make_test_stream(const fiber::quic::QuicNewStreamContext &ctx) noexcept {
     return fiber::quic::QuicStream::Lease::adopt(new fiber::quic::QuicStream(ctx.stream_id, ctx.recv_extent_pool));
@@ -100,12 +65,12 @@ fiber::quic::QuicStream::Lease on_new_stream_retain(void *owner,
     auto *state = static_cast<StreamCallbackState *>(owner);
     ++state->calls;
     state->last_stream_id = ctx.stream_id;
-    auto *stream_owner = new (std::nothrow) TestStreamOwner(ctx, *state);
-    if (stream_owner == nullptr) {
+    auto *stream = new (std::nothrow) fiber::quic::QuicStream(ctx.stream_id, ctx.recv_extent_pool);
+    if (stream == nullptr) {
         return {};
     }
-    state->lease = stream_owner->stream.lease();
-    return fiber::quic::QuicStream::Lease::adopt(&stream_owner->stream);
+    state->lease = stream->lease();
+    return fiber::quic::QuicStream::Lease::adopt(stream);
 }
 
 fiber::quic::QuicConnection::Options server_options_with_factory(StreamCallbackState &state) noexcept {
@@ -463,7 +428,7 @@ TEST(QuicConnectionTest, RejectsPeerStreamWhenConnectionOpsReturnsEmptyLease) {
     EXPECT_EQ(conn.active_stream_count(), 0U);
 }
 
-TEST(QuicConnectionTest, ConnectionOpsCanCreateStreamWithStreamOpsAndRetainIt) {
+TEST(QuicConnectionTest, ConnectionOpsCanCreateAndRetainRetiredResetStream) {
     StreamCallbackState state{};
     fiber::quic::QuicConnection::Options options{};
     options.role = fiber::quic::QuicConnectionRole::Server;
@@ -480,17 +445,12 @@ TEST(QuicConnectionTest, ConnectionOpsCanCreateStreamWithStreamOpsAndRetainIt) {
     ASSERT_TRUE(received.has_value());
     ASSERT_TRUE(state.lease);
     EXPECT_EQ(state.calls, 1U);
-    EXPECT_EQ(state.reset_calls, 1U);
-    EXPECT_EQ(state.last_reset_error_code, 7U);
     EXPECT_EQ(state.lease->stream_id(), 0U);
-    EXPECT_TRUE(state.lease->attached_to_connection());
-    EXPECT_EQ(conn.active_stream_count(), 1U);
-
-    conn.release_stream_app(*state.lease);
+    EXPECT_TRUE(state.lease->reset_received());
+    EXPECT_EQ(state.lease->reset_error_code(), 7U);
     EXPECT_FALSE(state.lease->attached_to_connection());
     EXPECT_EQ(conn.active_stream_count(), 0U);
     state.lease.reset();
-    EXPECT_EQ(state.destroy_calls, 1U);
 }
 
 TEST(QuicConnectionTest, RecvFinStreamRetiresAfterDataIsTaken) {

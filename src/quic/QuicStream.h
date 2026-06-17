@@ -34,7 +34,6 @@ enum class QuicStreamRecvState : std::uint8_t {
 
 class QuicStream : public common::NonCopyable, public common::NonMovable {
 public:
-
     class Lease {
     public:
         Lease() noexcept = default;
