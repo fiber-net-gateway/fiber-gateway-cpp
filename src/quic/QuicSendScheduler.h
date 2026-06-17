@@ -4,7 +4,6 @@
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 
 #include "../async/Task.h"
 #include "../common/IntrusiveList.h"
@@ -26,13 +25,11 @@ enum class QuicBuildSendStatus : std::uint8_t {
     Encoded,
     NoWork,
     Blocked,
-    Delayed,
     Closed,
 };
 
 struct QuicBuildSendResult {
     QuicBuildSendStatus status = QuicBuildSendStatus::NoWork;
-    std::chrono::milliseconds delay{0};
 };
 
 struct QuicSendPacketRecord {
@@ -71,7 +68,6 @@ public:
     [[nodiscard]] common::IoResult<void> init(event::EventLoop &loop, net::UdpSocket &socket, QuicUdpEndpoint &endpoint,
                                               const Options &options) noexcept;
     void submit(QuicConnection &connection) noexcept;
-    void submit_after(QuicConnection &connection, std::chrono::milliseconds delay) noexcept;
     void remove(QuicConnection &connection) noexcept;
     void close(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
@@ -85,34 +81,26 @@ private:
     class WaitForWorkAwaiter;
     class DeferAwaiter;
 
-    using ReadyList = common::IntrusiveList<QuicConnection::SendIndex, offsetof(QuicConnection::SendIndex, link)>;
+    using ReadyList =
+            common::IntrusiveList<QuicConnection::SendQueueEntry, offsetof(QuicConnection::SendQueueEntry, link)>;
 
     [[nodiscard]] bool should_wake_waiter() const noexcept;
     [[nodiscard]] bool arm_waiter(WaitForWorkAwaiter *awaiter) noexcept;
     void cancel_waiter(WaitForWorkAwaiter *awaiter) noexcept;
     void notify_waiter() noexcept;
     [[nodiscard]] bool has_work() const noexcept;
-    [[nodiscard]] bool has_due_delayed() const noexcept;
-    void promote_due_delayed() noexcept;
-    void arm_delay_timer() noexcept;
     void enqueue_ready(QuicConnection &connection) noexcept;
-    void enqueue_delayed(QuicConnection &connection, std::chrono::steady_clock::time_point ready_at) noexcept;
-    [[nodiscard]] QuicConnection *pop_ready() noexcept;
+    void rotate_front_to_back(QuicConnection &connection) noexcept;
+    [[nodiscard]] QuicConnection *front_ready() noexcept;
     void clear_ready() noexcept;
-    void clear_delayed() noexcept;
     [[nodiscard]] async::Task<common::IoErr> flush_connection(QuicConnection &connection) noexcept;
-    static void on_delay_timer(QuicSendScheduler *scheduler) noexcept;
 
     event::EventLoop *loop_ = nullptr;
     net::UdpSocket *socket_ = nullptr;
     QuicUdpEndpoint *endpoint_ = nullptr;
     Options options_{};
-    std::unique_ptr<std::uint8_t[]> send_buffer_{};
     ReadyList ready_{};
-    ReadyList delayed_{};
-    event::EventLoop::TimerEntry delay_timer_{};
     WaitForWorkAwaiter *waiter_ = nullptr;
-    QuicConnection *blocked_connection_ = nullptr;
     common::IoErr stop_reason_ = common::IoErr::None;
     bool initialized_ = false;
     bool closing_ = false;

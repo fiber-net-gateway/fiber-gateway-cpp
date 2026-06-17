@@ -243,18 +243,9 @@ public:
         common::IntrusiveRbTreeHook cid_hook{};
     };
 
-    struct SendIndex {
-        enum class State : std::uint8_t {
-            None,
-            Ready,
-            Delayed,
-            Inflight,
-        };
-
+    struct SendQueueEntry {
         QuicConnection *connection = nullptr;
         common::IntrusiveListHook link{};
-        std::chrono::steady_clock::time_point ready_at{};
-        State state = State::None;
     };
 
     struct Options {
@@ -358,7 +349,7 @@ public:
     EndpointIndex endpoint_index{};
     ConnectionIdIndex original_dcid_index{};
     ConnectionIdIndex local_cid_index{};
-    SendIndex send_index{};
+    SendQueueEntry send_queue_entry{};
 
 private:
     [[nodiscard]] std::uint8_t local_initiator_bit() const noexcept;
