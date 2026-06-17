@@ -5,6 +5,8 @@
 #include <limits>
 #include <utility>
 
+#include "QuicConnection.h"
+
 namespace fiber::quic {
 
 namespace {
@@ -42,11 +44,93 @@ bool QuicStream::bidirectional() const noexcept { return is_bidirectional_stream
 
 bool QuicStream::unidirectional() const noexcept { return is_unidirectional_stream_id(stream_id_); }
 
-common::IoResult<std::size_t> QuicStream::recv_stream_data(std::uint64_t offset, QuicSlice data, bool fin) noexcept {
-    if (offset > std::numeric_limits<std::uint64_t>::max() - data.len) {
+common::IoResult<std::size_t> QuicStream::try_read(std::size_t max_bytes, mem::IoBufChain &out) noexcept {
+    auto taken = recv_queue_.try_take(max_bytes, out);
+    if (!taken) {
+        return std::unexpected(taken.error());
+    }
+    if (*taken != 0 && conn_ != nullptr) {
+        conn_->on_stream_data_consumed(*taken);
+    }
+    sync_recv_state_from_queue();
+    maybe_extend_recv_flow_control();
+    return *taken;
+}
+
+async::Task<common::IoResult<std::size_t>> QuicStream::read(std::size_t max_bytes, mem::IoBufChain &out,
+                                                            std::chrono::milliseconds timeout) noexcept {
+    auto taken = co_await recv_queue_.take(max_bytes, out, timeout);
+    if (!taken) {
+        co_return std::unexpected(taken.error());
+    }
+    if (*taken != 0 && conn_ != nullptr) {
+        conn_->on_stream_data_consumed(*taken);
+    }
+    sync_recv_state_from_queue();
+    maybe_extend_recv_flow_control();
+    co_return *taken;
+}
+
+common::IoResult<std::size_t> QuicStream::try_write(const mem::IoBuf &buf, bool fin) noexcept {
+    return send_queue_.try_append(buf, fin);
+}
+
+common::IoResult<std::size_t> QuicStream::try_write(mem::IoBufChain &chain) noexcept {
+    return send_queue_.try_append_chain(chain);
+}
+
+async::Task<common::IoResult<std::size_t>> QuicStream::write(mem::IoBuf buf, bool fin,
+                                                             std::chrono::milliseconds timeout) noexcept {
+    auto written = co_await send_queue_.append(std::move(buf), fin, timeout);
+    if (!written) {
+        co_return std::unexpected(written.error());
+    }
+    co_return *written;
+}
+
+async::Task<common::IoResult<std::size_t>> QuicStream::write(mem::IoBufChain &chain,
+                                                             std::chrono::milliseconds timeout) noexcept {
+    auto written = co_await send_queue_.append_chain(chain, timeout);
+    if (!written) {
+        co_return std::unexpected(written.error());
+    }
+    co_return *written;
+}
+
+common::IoResult<void> QuicStream::stop_read(std::uint64_t error_code) noexcept {
+    if (recv_queue_.stop_sending()) {
+        return {};
+    }
+    if (conn_ != nullptr) {
+        auto queued = conn_->queue_stop_sending_frame(stream_id_, error_code);
+        if (!queued) {
+            return std::unexpected(queued.error());
+        }
+    }
+    recv_queue_.stop_receiving(error_code);
+    sync_recv_state_from_queue();
+    return {};
+}
+
+common::IoResult<void> QuicStream::reset(std::uint64_t error_code) noexcept {
+    auto final_size = send_queue_.mark_reset();
+    if (!final_size) {
+        return std::unexpected(final_size.error());
+    }
+    if (conn_ == nullptr) {
+        return {};
+    }
+    return conn_->queue_reset_stream_frame(stream_id_, error_code, *final_size);
+}
+
+common::IoResult<std::uint64_t> QuicStream::on_stream_data_recv(const std::uint8_t *src, std::size_t length,
+                                                                std::uint64_t offset, bool fin) noexcept {
+    if (offset > std::numeric_limits<std::uint64_t>::max() - length) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    const std::uint64_t end = offset + data.len;
+    const std::uint64_t old_end = recv_queue_.received_end_offset();
+    const std::uint64_t end = offset + length;
+    QuicSlice data{src, length};
 
     if (recv_state_ == QuicStreamRecvState::ResetRecvd || recv_state_ == QuicStreamRecvState::Closed) {
         if (!has_final_size_ || end > final_size_ || (fin && end != final_size_)) {
@@ -85,10 +169,12 @@ common::IoResult<std::size_t> QuicStream::recv_stream_data(std::uint64_t offset,
             return std::unexpected(err);
         }
     }
-    return *inserted;
+    return recv_queue_.received_end_offset() - old_end;
 }
 
-common::IoResult<void> QuicStream::recv_reset(std::uint64_t error_code, std::uint64_t final_size) noexcept {
+common::IoResult<std::uint64_t> QuicStream::on_remote_reset(std::uint64_t error_code,
+                                                            std::uint64_t final_size) noexcept {
+    const std::uint64_t old_end = recv_queue_.received_end_offset();
     auto reset = recv_queue_.recv_reset(error_code, final_size);
     if (!reset) {
         return std::unexpected(reset.error());
@@ -102,7 +188,24 @@ common::IoResult<void> QuicStream::recv_reset(std::uint64_t error_code, std::uin
     if (ops_ != nullptr && ops_->on_reset != nullptr) {
         ops_->on_reset(owner_, *this, error_code, final_size);
     }
-    return {};
+    return final_size - old_end;
+}
+
+common::IoResult<void> QuicStream::on_remote_stop_sending(std::uint64_t error_code) noexcept {
+    return reset(error_code);
+}
+
+void QuicStream::on_max_stream_data(std::uint64_t limit) noexcept { send_queue_.update_max_stream_data(limit); }
+
+void QuicStream::maybe_extend_recv_flow_control() noexcept {
+    if (conn_ == nullptr || !recv_queue_.should_extend_max_stream_data()) {
+        return;
+    }
+    const std::uint64_t limit = recv_queue_.next_max_stream_data_limit();
+    auto queued = conn_->queue_max_stream_data_frame(stream_id_, limit);
+    if (queued) {
+        recv_queue_.update_max_stream_data(limit);
+    }
 }
 
 void QuicStream::mark_app_released() noexcept { app_released_ = true; }

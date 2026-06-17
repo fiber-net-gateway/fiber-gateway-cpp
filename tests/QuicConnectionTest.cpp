@@ -3,6 +3,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <new>
 #include <string_view>
 
@@ -22,6 +23,18 @@ fiber::quic::QuicConnectionId cid_from(std::initializer_list<std::uint8_t> bytes
 
 fiber::quic::QuicSlice slice_of(std::string_view value) {
     return {reinterpret_cast<const std::uint8_t *>(value.data()), value.size()};
+}
+
+fiber::mem::IoBuf iobuf_of(std::string_view value) {
+    fiber::mem::IoBuf buf = fiber::mem::IoBuf::allocate(value.size());
+    if (!buf) {
+        return {};
+    }
+    if (!value.empty()) {
+        std::memcpy(buf.writable_data(), value.data(), value.size());
+        buf.commit(value.size());
+    }
+    return buf;
 }
 
 struct StreamCallbackState {
@@ -333,8 +346,36 @@ TEST(QuicConnectionTest, RecvStreamFrameCreatesPeerInitiatedStream) {
     auto *stream = conn.find_stream(0);
     ASSERT_NE(stream, nullptr);
     EXPECT_EQ(conn.active_stream_count(), 1U);
-    EXPECT_EQ(stream->recv_queue().buffered_bytes(), 3U);
+    fiber::mem::IoBufChain out(conn.recv_extent_pool());
+    auto taken = stream->try_read(3, out);
+    ASSERT_TRUE(taken.has_value());
+    EXPECT_EQ(*taken, 3U);
     EXPECT_FALSE(stream->has_final_size());
+}
+
+TEST(QuicConnectionTest, RecvStreamFrameCountsEndOffsetGrowthForConnectionFlowControl) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    options.transport.initial_max_data = 13;
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame frame{};
+    frame.stream_id = 0;
+    frame.offset = 10;
+    frame.has_offset = true;
+    frame.length = 3;
+
+    auto received = conn.recv_stream_frame(frame, slice_of("abc"));
+    auto duplicate = conn.recv_stream_frame(frame, slice_of("abc"));
+    frame.offset = 13;
+    frame.length = 1;
+    auto over_limit = conn.recv_stream_frame(frame, slice_of("x"));
+
+    ASSERT_TRUE(received.has_value());
+    ASSERT_TRUE(duplicate.has_value());
+    EXPECT_EQ(conn.recv_data_consumed(), 13U);
+    EXPECT_FALSE(over_limit.has_value());
+    EXPECT_EQ(over_limit.error(), fiber::common::IoErr::MessageTooLarge);
+    EXPECT_EQ(conn.recv_data_consumed(), 13U);
 }
 
 TEST(QuicConnectionTest, RejectsPassiveStreamWhenConnectionOpsIsMissing) {
@@ -436,7 +477,7 @@ TEST(QuicConnectionTest, RecvFinStreamRetiresAfterDataIsTaken) {
     EXPECT_EQ(stream->final_size(), 3U);
 
     fiber::mem::IoBufChain out(conn.recv_extent_pool());
-    auto taken = stream->recv_queue().try_take(3, out);
+    auto taken = stream->try_read(3, out);
 
     ASSERT_TRUE(taken.has_value());
     EXPECT_EQ(*taken, 3U);
@@ -448,6 +489,96 @@ TEST(QuicConnectionTest, RecvFinStreamRetiresAfterDataIsTaken) {
     auto duplicate = conn.recv_stream_frame(frame, slice_of("abc"));
     EXPECT_TRUE(duplicate.has_value());
     EXPECT_EQ(conn.active_stream_count(), 0U);
+}
+
+TEST(QuicConnectionTest, ResetStreamCountsFinalSizeGrowthForConnectionFlowControl) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    options.transport.initial_max_data = 10;
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame data{};
+    data.stream_id = 0;
+    data.offset = 5;
+    data.has_offset = true;
+    data.length = 1;
+    fiber::quic::QuicResetStreamFrame reset{};
+    reset.id = 0;
+    reset.error_code = 42;
+    reset.final_size = 10;
+
+    auto received = conn.recv_stream_frame(data, slice_of("x"));
+    auto reset_result = conn.recv_reset_stream_frame(reset);
+
+    ASSERT_TRUE(received.has_value());
+    ASSERT_TRUE(reset_result.has_value());
+    EXPECT_EQ(conn.recv_data_consumed(), 10U);
+}
+
+TEST(QuicConnectionTest, StopReadQueuesStopSendingFrame) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame frame{};
+    frame.stream_id = 0;
+
+    ASSERT_TRUE(conn.recv_stream_frame(frame, {}).has_value());
+    auto *stream = conn.find_stream(0);
+    ASSERT_NE(stream, nullptr);
+
+    auto stopped = stream->stop_read(7);
+
+    ASSERT_TRUE(stopped.has_value());
+    auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    ASSERT_NE(space.pending_frames.front(), nullptr);
+    EXPECT_EQ(space.pending_frames.front()->type, fiber::quic::QuicFrameType::StopSending);
+    EXPECT_EQ(space.pending_frames.front()->u.stop_sending.id, 0U);
+    EXPECT_EQ(space.pending_frames.front()->u.stop_sending.error_code, 7U);
+}
+
+TEST(QuicConnectionTest, RemoteStopSendingQueuesResetStreamFrame) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame frame{};
+    frame.stream_id = 0;
+    ASSERT_TRUE(conn.recv_stream_frame(frame, {}).has_value());
+    fiber::quic::QuicStopSendingFrame stop{};
+    stop.id = 0;
+    stop.error_code = 9;
+
+    auto stopped = conn.recv_stop_sending_frame(stop);
+
+    ASSERT_TRUE(stopped.has_value());
+    auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    ASSERT_NE(space.pending_frames.front(), nullptr);
+    EXPECT_EQ(space.pending_frames.front()->type, fiber::quic::QuicFrameType::ResetStream);
+    EXPECT_EQ(space.pending_frames.front()->u.reset_stream.id, 0U);
+    EXPECT_EQ(space.pending_frames.front()->u.reset_stream.error_code, 9U);
+    EXPECT_EQ(space.pending_frames.front()->u.reset_stream.final_size, 0U);
+}
+
+TEST(QuicConnectionTest, MaxStreamDataUpdatesStreamWriteWindow) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame frame{};
+    frame.stream_id = 0;
+    ASSERT_TRUE(conn.recv_stream_frame(frame, {}).has_value());
+    auto *stream = conn.find_stream(0);
+    ASSERT_NE(stream, nullptr);
+
+    auto blocked = stream->try_write(iobuf_of("abc"));
+    fiber::quic::QuicMaxStreamDataFrame max_stream_data{};
+    max_stream_data.id = 0;
+    max_stream_data.limit = 5;
+    auto updated = conn.recv_max_stream_data_frame(max_stream_data);
+    auto written = stream->try_write(iobuf_of("abc"));
+
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error(), fiber::common::IoErr::WouldBlock);
+    ASSERT_TRUE(updated.has_value());
+    ASSERT_TRUE(written.has_value());
+    EXPECT_EQ(*written, 3U);
 }
 
 TEST(QuicConnectionTest, ResetStreamCreatesAndRetiresPeerStream) {

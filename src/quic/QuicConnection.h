@@ -301,8 +301,14 @@ public:
     [[nodiscard]] common::IoResult<QuicStream *> get_or_create_peer_stream(std::uint64_t stream_id) noexcept;
     [[nodiscard]] common::IoResult<void> recv_stream_frame(const QuicStreamFrame &frame, QuicSlice data) noexcept;
     [[nodiscard]] common::IoResult<void> recv_reset_stream_frame(const QuicResetStreamFrame &frame) noexcept;
+    [[nodiscard]] common::IoResult<void> recv_stop_sending_frame(const QuicStopSendingFrame &frame) noexcept;
+    [[nodiscard]] common::IoResult<void> recv_max_stream_data_frame(const QuicMaxStreamDataFrame &frame) noexcept;
+    [[nodiscard]] common::IoResult<void> recv_max_data_frame(const QuicMaxDataFrame &frame) noexcept;
     [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return recv_extent_pool_; }
     void release_stream_app(QuicStream &stream) noexcept;
+    [[nodiscard]] std::uint64_t recv_data_consumed() const noexcept { return recv_data_consumed_; }
+    [[nodiscard]] std::uint64_t recv_data_limit() const noexcept { return recv_data_limit_; }
+    [[nodiscard]] std::uint64_t peer_max_data() const noexcept { return peer_max_data_; }
 
     [[nodiscard]] bool is_local_stream(std::uint64_t stream_id) const noexcept;
     [[nodiscard]] bool is_peer_stream(std::uint64_t stream_id) const noexcept { return !is_local_stream(stream_id); }
@@ -359,6 +365,16 @@ private:
     void retire_stream(QuicStream &stream) noexcept;
     void record_retired_stream(const QuicStream &stream) noexcept;
     void try_release_stream(QuicStream &stream) noexcept;
+    [[nodiscard]] common::IoResult<void> queue_reset_stream_frame(std::uint64_t stream_id, std::uint64_t error_code,
+                                                                  std::uint64_t final_size) noexcept;
+    [[nodiscard]] common::IoResult<void> queue_stop_sending_frame(std::uint64_t stream_id,
+                                                                  std::uint64_t error_code) noexcept;
+    [[nodiscard]] common::IoResult<void> queue_max_stream_data_frame(std::uint64_t stream_id,
+                                                                     std::uint64_t limit) noexcept;
+    [[nodiscard]] common::IoResult<void> queue_max_data_frame(std::uint64_t limit) noexcept;
+    [[nodiscard]] common::IoResult<void> check_recv_data_delta(std::uint64_t delta) const noexcept;
+    void commit_recv_data_delta(std::uint64_t delta) noexcept;
+    void on_stream_data_consumed(std::uint64_t bytes) noexcept;
     [[nodiscard]] static common::IoResult<void> check_retired_stream_frame(const QuicRetiredStreamRecord &retired,
                                                                            std::uint64_t offset, QuicSlice data,
                                                                            bool fin) noexcept;
@@ -388,6 +404,12 @@ private:
     std::array<QuicPath, kQuicMaxPaths> paths_{};
     QuicPath *active_path_ = nullptr;
     std::uint64_t next_path_seqnum_ = 0;
+    std::uint64_t recv_data_consumed_ = 0;
+    std::uint64_t recv_data_released_ = 0;
+    std::uint64_t recv_data_limit_ = 0;
+    std::uint64_t peer_max_data_ = 0;
+
+    friend class QuicStream;
 };
 
 } // namespace fiber::quic
