@@ -272,6 +272,7 @@ enum QuicOutputFrameFlag : std::uint8_t {
     QuicOutputFramePacketAckEliciting = 1U << 1U,
     QuicOutputFrameIgnoreLoss = 1U << 2U,
     QuicOutputFrameGeneratedStream = 1U << 3U,
+    QuicOutputFrameStreamPlaceholder = 1U << 4U,
 };
 
 class QuicOutputFrameQueue {

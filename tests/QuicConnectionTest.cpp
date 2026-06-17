@@ -249,6 +249,12 @@ TEST(QuicConnectionTest, StreamWriteSubmitsConnectionSendWork) {
     ASSERT_TRUE(written.has_value());
     EXPECT_EQ(*written, 3u);
     EXPECT_TRUE(conn.has_stream_send_work());
+    auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    ASSERT_NE(space.pending_frames.front(), nullptr);
+    EXPECT_EQ(space.pending_frames.front(), space.pending_frames.back());
+    EXPECT_EQ(space.pending_frames.front()->type, fiber::quic::QuicFrameType::Stream);
+    EXPECT_NE(space.pending_frames.front()->flags & fiber::quic::QuicOutputFrameStreamPlaceholder, 0u);
+    EXPECT_EQ(space.pending_frames.front()->u.stream.stream_id, 0u);
     EXPECT_EQ(state.schedule_calls, 1u);
 }
 
