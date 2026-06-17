@@ -164,7 +164,6 @@ private:
     QuicStreamSendQueue send_queue_;
     QuicStreamRecvState recv_state_ = QuicStreamRecvState::Open;
     std::uint32_t ref_count_ = 1;
-    bool has_final_size_ = false;
     bool attached_to_connection_ = false;
     bool app_released_ = true;
     bool stream_send_pending_ = false;
