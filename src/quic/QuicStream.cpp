@@ -27,6 +27,10 @@ void QuicStream::Lease::reset() noexcept {
 QuicStream::QuicStream(std::uint64_t stream_id, mem::IoBufNodePool &recv_extent_pool) noexcept :
     stream_id_(stream_id), recv_queue_(recv_extent_pool), send_queue_(recv_extent_pool) {}
 
+QuicStream::QuicStream(std::uint64_t stream_id, mem::IoBufNodePool &recv_extent_pool,
+                       QuicStreamRecvQueue::Options recv_options) noexcept :
+    stream_id_(stream_id), recv_queue_(recv_extent_pool, recv_options), send_queue_(recv_extent_pool) {}
+
 QuicStream::~QuicStream() = default;
 
 std::uint64_t QuicStream::sequence() const noexcept { return stream_sequence(stream_id_); }
@@ -44,9 +48,6 @@ common::IoResult<std::size_t> QuicStream::try_read(std::size_t max_bytes, mem::I
     if (!taken) {
         return std::unexpected(taken.error());
     }
-    if (*taken != 0 && conn_ != nullptr) {
-        conn_->on_stream_data_consumed(*taken);
-    }
     sync_recv_state_from_queue();
     maybe_extend_recv_flow_control();
     return *taken;
@@ -57,9 +58,6 @@ async::Task<common::IoResult<std::size_t>> QuicStream::read(std::size_t max_byte
     auto taken = co_await recv_queue_.take(max_bytes, out, timeout);
     if (!taken) {
         co_return std::unexpected(taken.error());
-    }
-    if (*taken != 0 && conn_ != nullptr) {
-        conn_->on_stream_data_consumed(*taken);
     }
     sync_recv_state_from_queue();
     maybe_extend_recv_flow_control();

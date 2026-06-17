@@ -554,6 +554,7 @@ common::IoResult<QuicConnection *> QuicUdpEndpoint::create_connection(const Quic
     conn_options.transport = options_.transport;
     conn_options.transport.max_ack_delay = options_.max_ack_delay;
     conn_options.transport.ack_delay_exponent = options_.ack_delay_exponent;
+    conn_options.recv_flow = options_.recv_flow;
     conn_options.max_peer_bidirectional_streams = options_.transport.initial_max_streams_bidi;
     conn_options.max_peer_unidirectional_streams = options_.transport.initial_max_streams_uni;
     conn_options.output_frame_pool = &output_frame_pool_;

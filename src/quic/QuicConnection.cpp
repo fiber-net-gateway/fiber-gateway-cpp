@@ -95,7 +95,11 @@ void QuicCryptoState::reset() noexcept {
 QuicConnection::QuicConnection(const Options &options) noexcept :
     options_(options), next_local_bidi_stream_id_(initial_stream_id(options.role, QuicStreamType::Bidirectional)),
     next_local_uni_stream_id_(initial_stream_id(options.role, QuicStreamType::Unidirectional)) {
-    recv_data_limit_ = options_.transport.initial_max_data;
+    options_.transport.initial_max_data = options_.recv_flow.conn_recv_limit;
+    options_.transport.initial_max_stream_data_bidi_local = options_.recv_flow.stream_buffer_limit;
+    options_.transport.initial_max_stream_data_bidi_remote = options_.recv_flow.stream_buffer_limit;
+    options_.transport.initial_max_stream_data_uni = options_.recv_flow.stream_buffer_limit;
+    recv_data_limit_ = options_.recv_flow.conn_recv_limit;
     QuicOutputFramePool &frame_pool =
             options_.output_frame_pool != nullptr ? *options_.output_frame_pool : output_frame_pool_;
     packet_number_spaces_[0].reset(QuicEncryptionLevel::Initial);
@@ -212,6 +216,12 @@ common::IoResult<QuicStream *> QuicConnection::get_or_create_peer_stream(std::ui
             .stream_id = stream_id,
             .connection = *this,
             .recv_extent_pool = recv_extent_pool_,
+            .recv_options =
+                    {
+                            .buffer_limit = options_.recv_flow.stream_buffer_limit,
+                            .low_water = options_.recv_flow.stream_low_water,
+                            .max_stream_data = options_.recv_flow.stream_buffer_limit,
+                    },
     };
     QuicStream::Lease lease = options_.ops.on_new_stream(options_.owner, ctx);
     if (!lease || lease->stream_id() != stream_id || lease->attached_to_connection()) {
@@ -254,6 +264,7 @@ common::IoResult<void> QuicConnection::recv_stream_frame(const QuicStreamFrame &
         return std::unexpected(received.error());
     }
     commit_recv_data_delta(*received);
+    maybe_extend_recv_data_flow_control();
     try_release_stream(**stream);
     return {};
 }
@@ -282,6 +293,7 @@ common::IoResult<void> QuicConnection::recv_reset_stream_frame(const QuicResetSt
         return std::unexpected(reset.error());
     }
     commit_recv_data_delta(*reset);
+    maybe_extend_recv_data_flow_control();
     try_release_stream(**stream);
     return {};
 }
@@ -681,6 +693,7 @@ common::IoResult<void> QuicConnection::queue_reset_stream_frame(std::uint64_t st
     frame->u.reset_stream.error_code = error_code;
     frame->u.reset_stream.final_size = final_size;
     space.pending_frames.push_back(*frame);
+    schedule_send();
     return {};
 }
 
@@ -695,6 +708,7 @@ common::IoResult<void> QuicConnection::queue_stop_sending_frame(std::uint64_t st
     frame->u.stop_sending.id = stream_id;
     frame->u.stop_sending.error_code = error_code;
     space.pending_frames.push_back(*frame);
+    schedule_send();
     return {};
 }
 
@@ -709,6 +723,7 @@ common::IoResult<void> QuicConnection::queue_max_stream_data_frame(std::uint64_t
     frame->u.max_stream_data.id = stream_id;
     frame->u.max_stream_data.limit = limit;
     space.pending_frames.push_back(*frame);
+    schedule_send();
     return {};
 }
 
@@ -721,6 +736,7 @@ common::IoResult<void> QuicConnection::queue_max_data_frame(std::uint64_t limit)
     frame->type = QuicFrameType::MaxData;
     frame->u.max_data.max_data = limit;
     space.pending_frames.push_back(*frame);
+    schedule_send();
     return {};
 }
 
@@ -733,30 +749,25 @@ common::IoResult<void> QuicConnection::check_recv_data_delta(std::uint64_t delta
 
 void QuicConnection::commit_recv_data_delta(std::uint64_t delta) noexcept { recv_data_consumed_ += delta; }
 
-void QuicConnection::on_stream_data_consumed(std::uint64_t bytes) noexcept {
-    if (bytes > std::numeric_limits<std::uint64_t>::max() - recv_data_released_) {
-        recv_data_released_ = std::numeric_limits<std::uint64_t>::max();
-    } else {
-        recv_data_released_ += bytes;
-    }
-
-    const std::uint64_t window = options_.transport.initial_max_data;
+void QuicConnection::maybe_extend_recv_data_flow_control() noexcept {
+    const std::uint64_t window = options_.recv_flow.conn_recv_limit;
     if (window == 0) {
         return;
     }
-    if (recv_data_limit_ > recv_data_released_) {
-        const std::uint64_t remaining = recv_data_limit_ - recv_data_released_;
-        if (remaining > std::max<std::uint64_t>(1, window / 4)) {
-            return;
-        }
+
+    const std::uint64_t remaining = recv_data_limit_ > recv_data_consumed_ ? recv_data_limit_ - recv_data_consumed_ : 0;
+    if (remaining >= options_.recv_flow.conn_recv_low_water) {
+        return;
     }
 
-    const std::uint64_t limit = recv_data_released_ > std::numeric_limits<std::uint64_t>::max() - window
-                                        ? std::numeric_limits<std::uint64_t>::max()
-                                        : recv_data_released_ + window;
+    std::uint64_t limit = kMaxVarint;
+    if (recv_data_limit_ <= kMaxVarint && window <= kMaxVarint - recv_data_limit_) {
+        limit = recv_data_limit_ + window;
+    }
     if (limit <= recv_data_limit_) {
         return;
     }
+
     auto queued = queue_max_data_frame(limit);
     if (queued) {
         recv_data_limit_ = limit;

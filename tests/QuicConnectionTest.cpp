@@ -46,7 +46,8 @@ struct StreamCallbackState {
 };
 
 fiber::quic::QuicStream::Lease make_test_stream(const fiber::quic::QuicNewStreamContext &ctx) noexcept {
-    return fiber::quic::QuicStream::Lease::adopt(new fiber::quic::QuicStream(ctx.stream_id, ctx.recv_extent_pool));
+    return fiber::quic::QuicStream::Lease::adopt(
+            new fiber::quic::QuicStream(ctx.stream_id, ctx.recv_extent_pool, ctx.recv_options));
 }
 
 fiber::quic::QuicStream::Lease on_new_stream_record(void *owner,
@@ -65,7 +66,7 @@ fiber::quic::QuicStream::Lease on_new_stream_retain(void *owner,
     auto *state = static_cast<StreamCallbackState *>(owner);
     ++state->calls;
     state->last_stream_id = ctx.stream_id;
-    auto *stream = new (std::nothrow) fiber::quic::QuicStream(ctx.stream_id, ctx.recv_extent_pool);
+    auto *stream = new (std::nothrow) fiber::quic::QuicStream(ctx.stream_id, ctx.recv_extent_pool, ctx.recv_options);
     if (stream == nullptr) {
         return {};
     }
@@ -223,6 +224,16 @@ TEST(QuicConnectionTest, StreamWriteSubmitsConnectionSendWork) {
     EXPECT_EQ(state.schedule_calls, 1u);
 }
 
+TEST(QuicConnectionTest, RecvFlowDefaultsInitializeLocalTransportAndLimit) {
+    fiber::quic::QuicConnection conn(fiber::quic::QuicConnection::Options{});
+
+    EXPECT_EQ(conn.recv_data_limit(), fiber::quic::kQuicDefaultConnRecvLimit);
+    EXPECT_EQ(conn.local_transport().initial_max_data, fiber::quic::kQuicDefaultConnRecvLimit);
+    EXPECT_EQ(conn.local_transport().initial_max_stream_data_bidi_local, fiber::quic::kQuicDefaultStreamBufferSize);
+    EXPECT_EQ(conn.local_transport().initial_max_stream_data_bidi_remote, fiber::quic::kQuicDefaultStreamBufferSize);
+    EXPECT_EQ(conn.local_transport().initial_max_stream_data_uni, fiber::quic::kQuicDefaultStreamBufferSize);
+}
+
 TEST(QuicConnectionTest, CreatesInitialActivePathFromOptions) {
     fiber::quic::QuicConnection::Options options{};
     options.local_addr = loopback(4433);
@@ -354,7 +365,8 @@ TEST(QuicConnectionTest, RecvStreamFrameCreatesPeerInitiatedStream) {
 TEST(QuicConnectionTest, RecvStreamFrameCountsEndOffsetGrowthForConnectionFlowControl) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    options.transport.initial_max_data = 13;
+    options.recv_flow.conn_recv_limit = 13;
+    options.recv_flow.conn_recv_low_water = 0;
     fiber::quic::QuicConnection conn(options);
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = 0;
@@ -374,6 +386,63 @@ TEST(QuicConnectionTest, RecvStreamFrameCountsEndOffsetGrowthForConnectionFlowCo
     EXPECT_FALSE(over_limit.has_value());
     EXPECT_EQ(over_limit.error(), fiber::common::IoErr::MessageTooLarge);
     EXPECT_EQ(conn.recv_data_consumed(), 13U);
+}
+
+TEST(QuicConnectionTest, RecvStreamFrameExtendsConnectionFlowControlAtLowWater) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    options.recv_flow.conn_recv_limit = 20;
+    options.recv_flow.conn_recv_low_water = 5;
+    options.schedule_send_owner = &state;
+    options.schedule_send = schedule_send_record;
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame frame{};
+    frame.stream_id = 0;
+    frame.offset = 15;
+    frame.has_offset = true;
+    frame.length = 1;
+
+    auto received = conn.recv_stream_frame(frame, slice_of("x"));
+
+    ASSERT_TRUE(received.has_value());
+    EXPECT_EQ(conn.recv_data_consumed(), 16U);
+    EXPECT_EQ(conn.recv_data_limit(), 40U);
+    auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    ASSERT_NE(space.pending_frames.front(), nullptr);
+    EXPECT_EQ(space.pending_frames.front()->type, fiber::quic::QuicFrameType::MaxData);
+    EXPECT_EQ(space.pending_frames.front()->u.max_data.max_data, 40U);
+    EXPECT_EQ(state.schedule_calls, 1U);
+}
+
+TEST(QuicConnectionTest, StreamReadExtendsStreamFlowControlOnly) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    options.recv_flow.conn_recv_limit = 100;
+    options.recv_flow.conn_recv_low_water = 0;
+    options.recv_flow.stream_buffer_limit = 8;
+    options.recv_flow.stream_low_water = 3;
+    options.schedule_send_owner = &state;
+    options.schedule_send = schedule_send_record;
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame frame{};
+    frame.stream_id = 0;
+    frame.length = 6;
+    ASSERT_TRUE(conn.recv_stream_frame(frame, slice_of("abcdef")).has_value());
+    auto *stream = conn.find_stream(0);
+    ASSERT_NE(stream, nullptr);
+
+    fiber::mem::IoBufChain out(conn.recv_extent_pool());
+    auto taken = stream->try_read(6, out);
+
+    ASSERT_TRUE(taken.has_value());
+    EXPECT_EQ(*taken, 6U);
+    EXPECT_EQ(conn.recv_data_limit(), 100U);
+    auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    ASSERT_NE(space.pending_frames.front(), nullptr);
+    EXPECT_EQ(space.pending_frames.front()->type, fiber::quic::QuicFrameType::MaxStreamData);
+    EXPECT_EQ(space.pending_frames.front()->u.max_stream_data.id, 0U);
+    EXPECT_EQ(space.pending_frames.front()->u.max_stream_data.limit, 14U);
+    EXPECT_EQ(state.schedule_calls, 1U);
 }
 
 TEST(QuicConnectionTest, RejectsPassiveStreamWhenConnectionOpsIsMissing) {
@@ -487,7 +556,8 @@ TEST(QuicConnectionTest, RecvFinStreamRetiresAfterDataIsTaken) {
 TEST(QuicConnectionTest, ResetStreamCountsFinalSizeGrowthForConnectionFlowControl) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    options.transport.initial_max_data = 10;
+    options.recv_flow.conn_recv_limit = 10;
+    options.recv_flow.conn_recv_low_water = 0;
     fiber::quic::QuicConnection conn(options);
     fiber::quic::QuicStreamFrame data{};
     data.stream_id = 0;

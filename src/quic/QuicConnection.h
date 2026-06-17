@@ -45,10 +45,11 @@ inline constexpr std::size_t kQuicMaxPaths = 3;
 inline constexpr std::size_t kQuicPathRetries = 3;
 inline constexpr std::size_t kQuicMaxUdpPayloadSize = 65527;
 inline constexpr std::size_t kQuicDefaultStreamBufferSize = 65536;
+inline constexpr std::uint64_t kQuicDefaultConnRecvLimit = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+inline constexpr std::uint64_t kQuicDefaultConnRecvLowWater = 10ULL * 1024ULL * 1024ULL;
 inline constexpr std::uint64_t kQuicDefaultMaxBidirectionalStreams = 128;
 inline constexpr std::uint64_t kQuicDefaultMaxUnidirectionalStreams = 32;
-inline constexpr std::uint64_t kQuicDefaultInitialMaxData =
-        (kQuicDefaultMaxBidirectionalStreams + kQuicDefaultMaxUnidirectionalStreams) * kQuicDefaultStreamBufferSize;
+inline constexpr std::uint64_t kQuicDefaultInitialMaxData = kQuicDefaultConnRecvLimit;
 inline constexpr std::size_t kQuicRetiredStreamRecordCount = 1024;
 
 enum class QuicConnectionRole : std::uint8_t {
@@ -123,6 +124,13 @@ struct QuicTransportSettings {
     bool disable_active_migration = false;
 };
 
+struct QuicRecvFlowControlSettings {
+    std::uint64_t conn_recv_limit = kQuicDefaultConnRecvLimit;
+    std::uint64_t conn_recv_low_water = kQuicDefaultConnRecvLowWater;
+    std::size_t stream_buffer_limit = kQuicDefaultStreamBufferSize;
+    std::size_t stream_low_water = kQuicStreamRecvDefaultLowWater;
+};
+
 struct QuicPeerTransportState {
     QuicTransportSettings params{};
     bool received = false;
@@ -142,6 +150,7 @@ struct QuicNewStreamContext {
     std::uint64_t stream_id = 0;
     QuicConnection &connection;
     mem::IoBufNodePool &recv_extent_pool;
+    QuicStreamRecvQueue::Options recv_options{};
 };
 
 enum class QuicCryptoSuite : std::uint8_t {
@@ -256,6 +265,7 @@ public:
         QuicConnectionId local_connection_id{};
         QuicConnectionId remote_connection_id{};
         QuicTransportSettings transport{};
+        QuicRecvFlowControlSettings recv_flow{};
         std::uint64_t max_peer_bidirectional_streams = kQuicDefaultMaxBidirectionalStreams;
         std::uint64_t max_peer_unidirectional_streams = kQuicDefaultMaxUnidirectionalStreams;
         std::uint64_t max_local_bidirectional_streams = kQuicDefaultMaxBidirectionalStreams;
@@ -384,7 +394,7 @@ private:
     [[nodiscard]] common::IoResult<void> queue_max_data_frame(std::uint64_t limit) noexcept;
     [[nodiscard]] common::IoResult<void> check_recv_data_delta(std::uint64_t delta) const noexcept;
     void commit_recv_data_delta(std::uint64_t delta) noexcept;
-    void on_stream_data_consumed(std::uint64_t bytes) noexcept;
+    void maybe_extend_recv_data_flow_control() noexcept;
     [[nodiscard]] static common::IoResult<void> check_retired_stream_frame(const QuicRetiredStreamRecord &retired,
                                                                            std::uint64_t offset, QuicSlice data,
                                                                            bool fin) noexcept;
@@ -415,7 +425,6 @@ private:
     QuicPath *active_path_ = nullptr;
     std::uint64_t next_path_seqnum_ = 0;
     std::uint64_t recv_data_consumed_ = 0;
-    std::uint64_t recv_data_released_ = 0;
     std::uint64_t recv_data_limit_ = 0;
     std::uint64_t peer_max_data_ = 0;
 

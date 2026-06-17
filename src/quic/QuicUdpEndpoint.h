@@ -44,6 +44,7 @@ public:
         net::UdpBindOptions udp{};
         QuicSendScheduler::Options send{};
         QuicTransportSettings transport{};
+        QuicRecvFlowControlSettings recv_flow{};
         std::chrono::milliseconds max_ack_delay{25};
         std::uint64_t ack_delay_exponent = 3;
     };
