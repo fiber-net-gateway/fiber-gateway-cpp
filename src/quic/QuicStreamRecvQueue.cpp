@@ -14,6 +14,7 @@ static constexpr std::size_t kQuicStreamRecvMaxActiveExtents = 4096;
 static constexpr std::size_t kQuicStreamRecvMaxActiveBlocks = 1024;
 static constexpr unsigned kBlockSizeShift = 16;
 static constexpr std::uint64_t kBlockOffsetMask = 64 * 1024 - 1;
+static constexpr std::uint64_t kQuicMaxFlowControlLimit = (1ULL << 62U) - 1U;
 
 class QuicStreamRecvQueue::ReadAwaiter {
 public:
@@ -298,8 +299,8 @@ void QuicStreamRecvQueue::update_max_stream_data(std::uint64_t limit) noexcept {
 }
 
 std::uint64_t QuicStreamRecvQueue::next_max_stream_data_limit() const noexcept {
-    if (next_read_offset_ > std::numeric_limits<std::uint64_t>::max() - buffer_limit_) {
-        return std::numeric_limits<std::uint64_t>::max();
+    if (next_read_offset_ >= kQuicMaxFlowControlLimit || buffer_limit_ > kQuicMaxFlowControlLimit - next_read_offset_) {
+        return kQuicMaxFlowControlLimit;
     }
     return next_read_offset_ + buffer_limit_;
 }
@@ -308,7 +309,7 @@ bool QuicStreamRecvQueue::should_extend_max_stream_data() const noexcept {
     if (reset_received_ || stop_sending_ || finished()) {
         return false;
     }
-    return max_stream_data_ <= next_read_offset_ || max_stream_data_ - next_read_offset_ <= low_water_;
+    return max_stream_data_ <= next_read_offset_ || max_stream_data_ - next_read_offset_ < low_water_;
 }
 
 common::IoResult<void> QuicStreamRecvQueue::set_final_size_from_fin(std::uint64_t final_size) noexcept {

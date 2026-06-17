@@ -82,6 +82,8 @@ public:
     };
 
     QuicStream(std::uint64_t stream_id, mem::IoBufNodePool &recv_extent_pool) noexcept;
+    QuicStream(std::uint64_t stream_id, mem::IoBufNodePool &recv_extent_pool,
+               QuicStreamRecvQueue::Options recv_options) noexcept;
     ~QuicStream();
 
     [[nodiscard]] std::uint64_t stream_id() const noexcept { return stream_id_; }
