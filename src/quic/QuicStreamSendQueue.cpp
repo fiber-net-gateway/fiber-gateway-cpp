@@ -259,6 +259,11 @@ QuicStreamSendQueue::encode_stream_frame(std::uint64_t stream_id, std::uint8_t *
     return buffer_.encode_stream_frame(stream_id, dst, capacity);
 }
 
+common::IoResult<QuicStreamSendBuffer::PreparedFrameResult>
+QuicStreamSendQueue::prepare_stream_frame(std::uint64_t stream_id, std::size_t capacity) noexcept {
+    return buffer_.prepare_stream_frame(stream_id, capacity);
+}
+
 common::IoResult<void> QuicStreamSendQueue::mark_acked(std::size_t offset, std::size_t length,
                                                        bool encoded_fin) noexcept {
     auto acked = buffer_.mark_acked(offset, length, encoded_fin);

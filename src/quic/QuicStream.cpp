@@ -72,11 +72,19 @@ async::Task<common::IoResult<std::size_t>> QuicStream::read(std::size_t max_byte
 }
 
 common::IoResult<std::size_t> QuicStream::try_write(const mem::IoBuf &buf, bool fin) noexcept {
-    return send_queue_.try_append(buf, fin);
+    auto appended = send_queue_.try_append(buf, fin);
+    if (appended && conn_ != nullptr && has_send_work()) {
+        conn_->submit_stream_send(*this);
+    }
+    return appended;
 }
 
 common::IoResult<std::size_t> QuicStream::try_write(mem::IoBufChain &chain) noexcept {
-    return send_queue_.try_append_chain(chain);
+    auto appended = send_queue_.try_append_chain(chain);
+    if (appended && conn_ != nullptr && has_send_work()) {
+        conn_->submit_stream_send(*this);
+    }
+    return appended;
 }
 
 async::Task<common::IoResult<std::size_t>> QuicStream::write(mem::IoBuf buf, bool fin,
@@ -84,6 +92,9 @@ async::Task<common::IoResult<std::size_t>> QuicStream::write(mem::IoBuf buf, boo
     auto written = co_await send_queue_.append(std::move(buf), fin, timeout);
     if (!written) {
         co_return std::unexpected(written.error());
+    }
+    if (conn_ != nullptr && has_send_work()) {
+        conn_->submit_stream_send(*this);
     }
     co_return *written;
 }
@@ -93,6 +104,9 @@ async::Task<common::IoResult<std::size_t>> QuicStream::write(mem::IoBufChain &ch
     auto written = co_await send_queue_.append_chain(chain, timeout);
     if (!written) {
         co_return std::unexpected(written.error());
+    }
+    if (conn_ != nullptr && has_send_work()) {
+        conn_->submit_stream_send(*this);
     }
     co_return *written;
 }
@@ -120,6 +134,7 @@ common::IoResult<void> QuicStream::reset(std::uint64_t error_code) noexcept {
     if (conn_ == nullptr) {
         return {};
     }
+    conn_->remove_stream_send(*this);
     return conn_->queue_reset_stream_frame(stream_id_, error_code, *final_size);
 }
 
@@ -195,7 +210,32 @@ common::IoResult<void> QuicStream::on_remote_stop_sending(std::uint64_t error_co
     return reset(error_code);
 }
 
-void QuicStream::on_max_stream_data(std::uint64_t limit) noexcept { send_queue_.update_max_stream_data(limit); }
+void QuicStream::on_max_stream_data(std::uint64_t limit) noexcept {
+    send_queue_.update_max_stream_data(limit);
+    if (conn_ != nullptr && has_send_work()) {
+        conn_->submit_stream_send(*this);
+    }
+}
+
+bool QuicStream::has_send_work() const noexcept { return send_queue_.has_send_work(); }
+
+common::IoResult<QuicStreamSendBuffer::PreparedFrameResult>
+QuicStream::prepare_stream_frame(std::size_t capacity) noexcept {
+    return send_queue_.prepare_stream_frame(stream_id_, capacity);
+}
+
+common::IoResult<QuicStreamSendBuffer::EncodedFrameResult>
+QuicStream::encode_stream_frame(std::uint8_t *dst, std::size_t capacity) noexcept {
+    return send_queue_.encode_stream_frame(stream_id_, dst, capacity);
+}
+
+common::IoResult<void> QuicStream::mark_send_acked(std::size_t offset, std::size_t length, bool fin) noexcept {
+    return send_queue_.mark_acked(offset, length, fin);
+}
+
+common::IoResult<void> QuicStream::mark_send_failed(std::size_t offset, std::size_t length, bool fin) noexcept {
+    return send_queue_.mark_failed(offset, length, fin);
+}
 
 void QuicStream::maybe_extend_recv_flow_control() noexcept {
     if (conn_ == nullptr || !recv_queue_.should_extend_max_stream_data()) {
@@ -217,7 +257,8 @@ void QuicStream::abort(common::IoErr reason) noexcept {
 }
 
 bool QuicStream::ready_for_connection_release() const noexcept {
-    return app_released_ && (recv_queue_.finished() || recv_queue_.reset_received());
+    return app_released_ && (recv_queue_.finished() || recv_queue_.reset_received()) && send_queue_.buffer().empty() &&
+           !stream_send_queue_entry_.link.linked();
 }
 
 bool QuicStream::ready_for_destruction() const noexcept { return !attached_to_connection_ && ref_count_ == 0; }
