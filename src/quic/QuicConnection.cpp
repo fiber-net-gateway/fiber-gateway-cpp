@@ -95,6 +95,7 @@ void QuicCryptoState::reset() noexcept {
 QuicConnection::QuicConnection(const Options &options) noexcept :
     options_(options), next_local_bidi_stream_id_(initial_stream_id(options.role, QuicStreamType::Bidirectional)),
     next_local_uni_stream_id_(initial_stream_id(options.role, QuicStreamType::Unidirectional)) {
+    recv_data_limit_ = options_.transport.initial_max_data;
     QuicOutputFramePool &frame_pool =
             options_.output_frame_pool != nullptr ? *options_.output_frame_pool : output_frame_pool_;
     packet_number_spaces_[0].reset(QuicEncryptionLevel::Initial);
@@ -237,10 +238,22 @@ common::IoResult<void> QuicConnection::recv_stream_frame(const QuicStreamFrame &
         return std::unexpected(stream.error());
     }
 
-    auto received = (*stream)->recv_stream_data(frame.offset, data, frame.fin);
+    if (frame.offset > std::numeric_limits<std::uint64_t>::max() - data.len) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const std::uint64_t old_end = (*stream)->recv_queue_.received_end_offset();
+    const std::uint64_t frame_end = frame.offset + data.len;
+    const std::uint64_t pending_delta = frame_end > old_end ? frame_end - old_end : 0;
+    auto allowed = check_recv_data_delta(pending_delta);
+    if (!allowed) {
+        return std::unexpected(allowed.error());
+    }
+
+    auto received = (*stream)->on_stream_data_recv(data.data, data.len, frame.offset, frame.fin);
     if (!received) {
         return std::unexpected(received.error());
     }
+    commit_recv_data_delta(*received);
     try_release_stream(**stream);
     return {};
 }
@@ -255,11 +268,45 @@ common::IoResult<void> QuicConnection::recv_reset_stream_frame(const QuicResetSt
         return std::unexpected(stream.error());
     }
 
-    auto reset = (*stream)->recv_reset(frame.error_code, frame.final_size);
+    const std::uint64_t old_end = (*stream)->recv_queue_.received_end_offset();
+    if (frame.final_size < old_end) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    auto allowed = check_recv_data_delta(frame.final_size - old_end);
+    if (!allowed) {
+        return std::unexpected(allowed.error());
+    }
+
+    auto reset = (*stream)->on_remote_reset(frame.error_code, frame.final_size);
     if (!reset) {
         return std::unexpected(reset.error());
     }
+    commit_recv_data_delta(*reset);
     try_release_stream(**stream);
+    return {};
+}
+
+common::IoResult<void> QuicConnection::recv_stop_sending_frame(const QuicStopSendingFrame &frame) noexcept {
+    QuicStream *stream = find_stream(frame.id);
+    if (stream == nullptr) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return stream->on_remote_stop_sending(frame.error_code);
+}
+
+common::IoResult<void> QuicConnection::recv_max_stream_data_frame(const QuicMaxStreamDataFrame &frame) noexcept {
+    QuicStream *stream = find_stream(frame.id);
+    if (stream == nullptr) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    stream->on_max_stream_data(frame.limit);
+    return {};
+}
+
+common::IoResult<void> QuicConnection::recv_max_data_frame(const QuicMaxDataFrame &frame) noexcept {
+    if (frame.max_data > peer_max_data_) {
+        peer_max_data_ = frame.max_data;
+    }
     return {};
 }
 
@@ -330,6 +377,7 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
 
     peer_transport_.params = applied;
     peer_transport_.received = true;
+    peer_max_data_ = params.initial_max_data;
     options_.max_local_bidirectional_streams = params.initial_max_streams_bidi;
     options_.max_local_unidirectional_streams = params.initial_max_streams_uni;
     if (params.max_idle_timeout > 0 &&
@@ -545,6 +593,100 @@ void QuicConnection::record_retired_stream(const QuicStream &stream) noexcept {
 void QuicConnection::try_release_stream(QuicStream &stream) noexcept {
     if (stream.ready_for_connection_release()) {
         retire_stream(stream);
+    }
+}
+
+common::IoResult<void> QuicConnection::queue_reset_stream_frame(std::uint64_t stream_id, std::uint64_t error_code,
+                                                                std::uint64_t final_size) noexcept {
+    auto &space = packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    frame->type = QuicFrameType::ResetStream;
+    frame->u.reset_stream.id = stream_id;
+    frame->u.reset_stream.error_code = error_code;
+    frame->u.reset_stream.final_size = final_size;
+    space.pending_frames.push_back(*frame);
+    return {};
+}
+
+common::IoResult<void> QuicConnection::queue_stop_sending_frame(std::uint64_t stream_id,
+                                                                std::uint64_t error_code) noexcept {
+    auto &space = packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    frame->type = QuicFrameType::StopSending;
+    frame->u.stop_sending.id = stream_id;
+    frame->u.stop_sending.error_code = error_code;
+    space.pending_frames.push_back(*frame);
+    return {};
+}
+
+common::IoResult<void> QuicConnection::queue_max_stream_data_frame(std::uint64_t stream_id,
+                                                                   std::uint64_t limit) noexcept {
+    auto &space = packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    frame->type = QuicFrameType::MaxStreamData;
+    frame->u.max_stream_data.id = stream_id;
+    frame->u.max_stream_data.limit = limit;
+    space.pending_frames.push_back(*frame);
+    return {};
+}
+
+common::IoResult<void> QuicConnection::queue_max_data_frame(std::uint64_t limit) noexcept {
+    auto &space = packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    frame->type = QuicFrameType::MaxData;
+    frame->u.max_data.max_data = limit;
+    space.pending_frames.push_back(*frame);
+    return {};
+}
+
+common::IoResult<void> QuicConnection::check_recv_data_delta(std::uint64_t delta) const noexcept {
+    if (delta > recv_data_limit_ || recv_data_consumed_ > recv_data_limit_ - delta) {
+        return std::unexpected(common::IoErr::MessageTooLarge);
+    }
+    return {};
+}
+
+void QuicConnection::commit_recv_data_delta(std::uint64_t delta) noexcept { recv_data_consumed_ += delta; }
+
+void QuicConnection::on_stream_data_consumed(std::uint64_t bytes) noexcept {
+    if (bytes > std::numeric_limits<std::uint64_t>::max() - recv_data_released_) {
+        recv_data_released_ = std::numeric_limits<std::uint64_t>::max();
+    } else {
+        recv_data_released_ += bytes;
+    }
+
+    const std::uint64_t window = options_.transport.initial_max_data;
+    if (window == 0) {
+        return;
+    }
+    if (recv_data_limit_ > recv_data_released_) {
+        const std::uint64_t remaining = recv_data_limit_ - recv_data_released_;
+        if (remaining > std::max<std::uint64_t>(1, window / 4)) {
+            return;
+        }
+    }
+
+    const std::uint64_t limit = recv_data_released_ > std::numeric_limits<std::uint64_t>::max() - window
+                                        ? std::numeric_limits<std::uint64_t>::max()
+                                        : recv_data_released_ + window;
+    if (limit <= recv_data_limit_) {
+        return;
+    }
+    auto queued = queue_max_data_frame(limit);
+    if (queued) {
+        recv_data_limit_ = limit;
     }
 }
 

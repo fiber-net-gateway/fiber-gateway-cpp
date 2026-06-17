@@ -1,8 +1,10 @@
 #ifndef FIBER_QUIC_QUIC_STREAM_H
 #define FIBER_QUIC_QUIC_STREAM_H
 
+#include <chrono>
 #include <cstdint>
 
+#include "../async/Task.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
@@ -119,10 +121,20 @@ public:
     [[nodiscard]] bool app_released() const noexcept { return app_released_; }
     [[nodiscard]] std::uint32_t ref_count() const noexcept { return ref_count_; }
     [[nodiscard]] Lease lease() noexcept { return Lease(this); }
-    [[nodiscard]] QuicStreamRecvQueue &recv_queue() noexcept { return recv_queue_; }
-    [[nodiscard]] const QuicStreamRecvQueue &recv_queue() const noexcept { return recv_queue_; }
-    [[nodiscard]] QuicStreamSendQueue &send_queue() noexcept { return send_queue_; }
-    [[nodiscard]] const QuicStreamSendQueue &send_queue() const noexcept { return send_queue_; }
+
+    [[nodiscard]] common::IoResult<std::size_t> try_read(std::size_t max_bytes, mem::IoBufChain &out) noexcept;
+    [[nodiscard]] async::Task<common::IoResult<std::size_t>>
+    read(std::size_t max_bytes, mem::IoBufChain &out,
+         std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    [[nodiscard]] common::IoResult<std::size_t> try_write(const mem::IoBuf &buf, bool fin = false) noexcept;
+    [[nodiscard]] common::IoResult<std::size_t> try_write(mem::IoBufChain &chain) noexcept;
+    [[nodiscard]] async::Task<common::IoResult<std::size_t>>
+    write(mem::IoBuf buf, bool fin = false,
+          std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    [[nodiscard]] async::Task<common::IoResult<std::size_t>>
+    write(mem::IoBufChain &chain, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    [[nodiscard]] common::IoResult<void> stop_read(std::uint64_t error_code = 0) noexcept;
+    [[nodiscard]] common::IoResult<void> reset(std::uint64_t error_code = 0) noexcept;
 
     void mark_app_released() noexcept;
     void abort(common::IoErr reason) noexcept;
@@ -137,9 +149,13 @@ public:
 private:
     void attach_to_connection(QuicConnection &conn) noexcept;
     void detach_from_connection() noexcept;
-    [[nodiscard]] common::IoResult<std::size_t> recv_stream_data(std::uint64_t offset, QuicSlice data,
-                                                                 bool fin) noexcept;
-    [[nodiscard]] common::IoResult<void> recv_reset(std::uint64_t error_code, std::uint64_t final_size) noexcept;
+    [[nodiscard]] common::IoResult<std::uint64_t> on_stream_data_recv(const std::uint8_t *src, std::size_t length,
+                                                                      std::uint64_t offset, bool fin) noexcept;
+    [[nodiscard]] common::IoResult<std::uint64_t> on_remote_reset(std::uint64_t error_code,
+                                                                  std::uint64_t final_size) noexcept;
+    [[nodiscard]] common::IoResult<void> on_remote_stop_sending(std::uint64_t error_code) noexcept;
+    void on_max_stream_data(std::uint64_t limit) noexcept;
+    void maybe_extend_recv_flow_control() noexcept;
     void retain() noexcept;
     void release() noexcept;
     [[nodiscard]] common::IoResult<void> set_final_size(std::uint64_t final_size) noexcept;

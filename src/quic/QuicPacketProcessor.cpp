@@ -332,22 +332,32 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 }
                 break;
             }
-            case QuicFrameType::StopSending:
-                if (conn.find_stream(frame.u.stop_sending.id) == nullptr) {
-                    return std::unexpected(common::IoErr::Invalid);
+            case QuicFrameType::StopSending: {
+                auto stopped = conn.recv_stop_sending_frame(frame.u.stop_sending);
+                if (!stopped) {
+                    return std::unexpected(stopped.error());
                 }
                 break;
-            case QuicFrameType::MaxStreamData:
-                if (conn.find_stream(frame.u.max_stream_data.id) == nullptr) {
-                    return std::unexpected(common::IoErr::Invalid);
+            }
+            case QuicFrameType::MaxStreamData: {
+                auto updated = conn.recv_max_stream_data_frame(frame.u.max_stream_data);
+                if (!updated) {
+                    return std::unexpected(updated.error());
                 }
                 break;
+            }
+            case QuicFrameType::MaxData: {
+                auto updated = conn.recv_max_data_frame(frame.u.max_data);
+                if (!updated) {
+                    return std::unexpected(updated.error());
+                }
+                break;
+            }
             case QuicFrameType::StreamDataBlocked:
                 if (conn.find_stream(frame.u.stream_data_blocked.id) == nullptr) {
                     return std::unexpected(common::IoErr::Invalid);
                 }
                 break;
-            case QuicFrameType::MaxData:
             case QuicFrameType::MaxStreamsBidi:
             case QuicFrameType::MaxStreamsUni:
             case QuicFrameType::DataBlocked:
