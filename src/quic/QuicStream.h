@@ -34,13 +34,6 @@ enum class QuicStreamRecvState : std::uint8_t {
 
 class QuicStream : public common::NonCopyable, public common::NonMovable {
 public:
-    struct Ops {
-        void (*on_destroy)(void *owner) noexcept = nullptr;
-        common::IoErr (*on_data)(void *owner, QuicStream &stream, mem::IoBufChain &&data, bool fin) noexcept = nullptr;
-        void (*on_reset)(void *owner, QuicStream &stream, std::uint64_t error_code,
-                         std::uint64_t final_size) noexcept = nullptr;
-        void (*on_abort)(void *owner, common::IoErr reason) noexcept = nullptr;
-    };
 
     class Lease {
     public:
@@ -90,12 +83,9 @@ public:
     };
 
     QuicStream(std::uint64_t stream_id, mem::IoBufNodePool &recv_extent_pool) noexcept;
-    QuicStream(std::uint64_t stream_id, mem::IoBufNodePool &recv_extent_pool, void *owner, const Ops &ops) noexcept;
     ~QuicStream();
 
     [[nodiscard]] std::uint64_t stream_id() const noexcept { return stream_id_; }
-    [[nodiscard]] void *owner() noexcept { return owner_; }
-    [[nodiscard]] const void *owner() const noexcept { return owner_; }
     [[nodiscard]] std::uint64_t sequence() const noexcept;
     [[nodiscard]] QuicStreamType type() const noexcept;
     [[nodiscard]] bool bidirectional() const noexcept;
@@ -139,7 +129,6 @@ public:
     [[nodiscard]] common::IoResult<void> reset(std::uint64_t error_code = 0) noexcept;
 
     void mark_app_released() noexcept;
-    void abort(common::IoErr reason) noexcept;
 
     [[nodiscard]] bool ready_for_connection_release() const noexcept;
     [[nodiscard]] bool ready_for_destruction() const noexcept;
@@ -167,18 +156,13 @@ private:
     void maybe_extend_recv_flow_control() noexcept;
     void retain() noexcept;
     void release() noexcept;
-    [[nodiscard]] common::IoResult<void> set_final_size(std::uint64_t final_size) noexcept;
     void sync_recv_state_from_queue() noexcept;
 
     std::uint64_t stream_id_ = 0;
     QuicConnection *conn_ = nullptr;
-    void *owner_ = nullptr;
-    const Ops *ops_ = nullptr;
     QuicStreamRecvQueue recv_queue_;
     QuicStreamSendQueue send_queue_;
     QuicStreamRecvState recv_state_ = QuicStreamRecvState::Open;
-    std::uint64_t final_size_ = 0;
-    std::uint64_t reset_error_code_ = 0;
     std::uint32_t ref_count_ = 1;
     bool has_final_size_ = false;
     bool attached_to_connection_ = false;
