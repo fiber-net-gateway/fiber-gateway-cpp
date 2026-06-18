@@ -74,11 +74,12 @@ void restore_sending_frames(QuicConnection &connection, QuicPacketNumberSpace &s
 }
 
 void discard_pending_frames(QuicConnection &connection, QuicPacketNumberSpace &space) noexcept {
-    (void) connection;
     while (QuicOutputFrame *frame = space.pending_frames.pop_front()) {
         if (frame == &space.ack_frame) {
             space.send_ack = false;
             space.send_ack_count = 0;
+        } else if (frame->type == QuicFrameType::Stream) {
+            connection.drop_stream_send_ticket(frame->u.stream.stream_id);
         }
         space.release_frame(*frame);
     }
@@ -182,36 +183,14 @@ split_crypto_frame(QuicPacketNumberSpace &space, QuicOutputFrame &frame, std::si
 
 } // namespace
 
-common::IoResult<QuicUdpEndpoint::StreamFrameResult>
-QuicUdpEndpoint::encode_stream_frame_into_payload(QuicConnection &connection, QuicStream &stream,
-                                                  QuicOutputFrame &frame, std::uint8_t *dst,
+common::IoResult<QuicStreamFrameEncodeStatus>
+QuicUdpEndpoint::encode_stream_frame_into_payload(QuicConnection &connection, QuicOutputFrame &frame, std::uint8_t *dst,
                                                   std::size_t available) noexcept {
-    if (!stream.attached_to_connection() || !stream.has_send_work()) {
-        connection.pop_stream_send_work(stream);
-        return StreamFrameResult::Skipped;
+    QuicStream *stream = connection.find_stream(frame.u.stream.stream_id);
+    if (stream == nullptr) {
+        return QuicStreamFrameEncodeStatus::Skipped;
     }
-
-    auto encoded = stream.encode_stream_frame(dst, available);
-    if (!encoded) {
-        return std::unexpected(encoded.error());
-    }
-    if (!encoded->encoded) {
-        return StreamFrameResult::Blocked;
-    }
-
-    connection.pop_stream_send_work(stream);
-    frame.type = QuicFrameType::Stream;
-    frame.encoded_len = encoded->encoded_len;
-    frame.u.stream.length = static_cast<std::uint32_t>(encoded->data_len);
-    frame.u.stream.stream_id = stream.stream_id();
-    frame.u.stream.offset = encoded->offset;
-    frame.u.stream.has_length = encoded->has_length;
-    frame.u.stream.fin = encoded->fin;
-
-    if (stream.has_send_work()) {
-        (void) connection.queue_stream_frame(stream);
-    }
-    return StreamFrameResult::Encoded;
+    return stream->encode_stream_frame(frame, dst, available);
 }
 
 namespace {
@@ -726,13 +705,11 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
     for (std::size_t level_index = 0; level_index < kQuicSendLevelCount; ++level_index) {
         QuicEncryptionLevel level = kSendLevels[level_index];
         QuicPacketNumberSpace &space = connection.packet_number_space(level);
-        const bool level_can_send_stream =
-                level == QuicEncryptionLevel::Application && connection.has_stream_send_work();
-        if (!has_packet_space_work(space) && !level_can_send_stream) {
+        if (!has_packet_space_work(space)) {
             continue;
         }
 
-        if (should_delay_ack(space, now) && !level_can_send_stream) {
+        if (should_delay_ack(space, now)) {
             if (datagram.packet_count != 0) {
                 break;
             }
@@ -788,15 +765,48 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
 
         const bool ack_only = connection.congestion().in_flight >= connection.congestion().window;
         std::size_t payload_len = 0;
-        std::size_t control_frame_count = 0;
-        QuicOutputFrame *source = space.pending_frames.front();
-        while (source != nullptr) {
+        bool payload_ack_eliciting = false;
+        while (QuicOutputFrame *source = space.pending_frames.front()) {
             if (ack_only && !ack_frame_type(source->type)) {
                 break;
             }
 
             if (payload_len >= max_payload) {
                 break;
+            }
+
+            if (source->type == QuicFrameType::Stream) {
+                QuicOutputFrame *frame = space.pending_frames.pop_front();
+                if (frame == nullptr) {
+                    packet = QuicSendPacketRecord{};
+                    rollback_encoded();
+                    return std::unexpected(common::IoErr::Invalid);
+                }
+
+                auto encoded_stream = encode_stream_frame_into_payload(
+                        connection, *frame, packet_payload.data() + payload_len, max_payload - payload_len);
+                if (!encoded_stream) {
+                    space.release_frame(*frame);
+                    packet = QuicSendPacketRecord{};
+                    rollback_encoded();
+                    return std::unexpected(encoded_stream.error());
+                }
+                if (*encoded_stream == QuicStreamFrameEncodeStatus::Skipped) {
+                    const std::uint64_t stream_id = frame->u.stream.stream_id;
+                    space.release_frame(*frame);
+                    connection.drop_stream_send_ticket(stream_id);
+                    continue;
+                }
+                if (*encoded_stream == QuicStreamFrameEncodeStatus::Blocked) {
+                    space.pending_frames.push_front(*frame);
+                    break;
+                }
+
+                payload_len += frame->encoded_len;
+                payload_ack_eliciting = true;
+                space.sending_frames.push_back(*frame);
+                ++packet.frame_count;
+                continue;
             }
 
             auto frame_len = quic_output_frame_encoded_len(*source);
@@ -824,14 +834,6 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
                 }
             }
 
-            payload_len += *frame_len;
-            ++control_frame_count;
-            source = space.pending_frames.next_of(*source);
-        }
-
-        QuicWriteCursor payload_writer(packet_payload.data(), max_payload);
-        bool payload_ack_eliciting = false;
-        for (std::size_t i = 0; i < control_frame_count; ++i) {
             QuicOutputFrame *frame = space.pending_frames.pop_front();
             if (frame == nullptr) {
                 packet = QuicSendPacketRecord{};
@@ -841,57 +843,21 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
             space.sending_frames.push_back(*frame);
             packet.sends_ack = packet.sends_ack || frame == &space.ack_frame;
             payload_ack_eliciting = payload_ack_eliciting || quic_output_frame_ack_eliciting(frame->type);
+
+            QuicWriteCursor payload_writer(packet_payload.data() + payload_len, max_payload - payload_len);
             auto written = quic_create_output_frame(&payload_writer, *frame);
             if (!written) {
                 packet = QuicSendPacketRecord{};
                 rollback_encoded();
                 return std::unexpected(written.error());
             }
-        }
-        packet.frame_count = control_frame_count;
-        payload_len = payload_writer.offset();
-
-        if (level == QuicEncryptionLevel::Application && !ack_only) {
-            while (payload_len < max_payload) {
-                QuicStream *stream = connection.peek_stream_send_work();
-                if (stream == nullptr) {
-                    break;
-                }
-
-                QuicOutputFrame *frame = space.alloc_frame();
-                if (frame == nullptr) {
-                    packet = QuicSendPacketRecord{};
-                    rollback_encoded();
-                    return std::unexpected(common::IoErr::NoMem);
-                }
-
-                auto encoded_stream = encode_stream_frame_into_payload(
-                        connection, *stream, *frame, packet_payload.data() + payload_len, max_payload - payload_len);
-                if (!encoded_stream) {
-                    space.release_frame(*frame);
-                    packet = QuicSendPacketRecord{};
-                    rollback_encoded();
-                    return std::unexpected(encoded_stream.error());
-                }
-                if (*encoded_stream == StreamFrameResult::Skipped) {
-                    space.release_frame(*frame);
-                    continue;
-                }
-                if (*encoded_stream == StreamFrameResult::Blocked) {
-                    space.release_frame(*frame);
-                    break;
-                }
-
-                payload_len += frame->encoded_len;
-                payload_ack_eliciting = true;
-                space.sending_frames.push_back(*frame);
-                ++packet.frame_count;
-            }
+            payload_len += *written;
+            ++packet.frame_count;
         }
 
         if (packet.frame_count == 0) {
             packet = QuicSendPacketRecord{};
-            if (!space.pending_frames.empty() || level_can_send_stream) {
+            if (!space.pending_frames.empty()) {
                 if (datagram.packet_count != 0) {
                     break;
                 }
@@ -1008,8 +974,7 @@ void QuicUdpEndpoint::rollback_send_datagram(QuicConnection &connection, const Q
 bool QuicUdpEndpoint::connection_has_send_work(const QuicConnection &connection) const noexcept {
     return has_packet_space_work(connection.packet_number_space(QuicEncryptionLevel::Initial)) ||
            has_packet_space_work(connection.packet_number_space(QuicEncryptionLevel::Handshake)) ||
-           has_packet_space_work(connection.packet_number_space(QuicEncryptionLevel::Application)) ||
-           connection.has_stream_send_work();
+           has_packet_space_work(connection.packet_number_space(QuicEncryptionLevel::Application));
 }
 
 } // namespace fiber::quic

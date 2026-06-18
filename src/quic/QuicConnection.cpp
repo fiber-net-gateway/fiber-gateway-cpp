@@ -327,8 +327,6 @@ void QuicConnection::release_stream_app(QuicStream &stream) noexcept {
     try_release_stream(stream);
 }
 
-bool QuicConnection::has_stream_send_work() const noexcept { return stream_send_head_ != nullptr; }
-
 bool QuicConnection::is_local_stream(std::uint64_t stream_id) const noexcept {
     return (stream_id & kStreamInitiatorMask) == local_initiator_bit();
 }
@@ -610,56 +608,32 @@ void QuicConnection::try_release_stream(QuicStream &stream) noexcept {
     }
 }
 
+void QuicConnection::drop_stream_send_ticket(std::uint64_t stream_id) noexcept {
+    QuicStream *stream = find_stream(stream_id);
+    if (stream == nullptr) {
+        return;
+    }
+    stream->stream_send_pending_ = false;
+    try_release_stream(*stream);
+}
+
 common::IoResult<void> QuicConnection::queue_stream_frame(QuicStream &stream) noexcept {
     if (closing() || !stream.attached_to_connection() || stream.stream_send_pending_ || !stream.has_send_work()) {
         return {};
     }
 
-    stream.stream_send_next_ = nullptr;
-    stream.stream_send_pending_ = true;
-    if (stream_send_tail_ != nullptr) {
-        stream_send_tail_->stream_send_next_ = &stream;
-    } else {
-        stream_send_head_ = &stream;
+    auto &space = packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
     }
-    stream_send_tail_ = &stream;
+
+    frame->type = QuicFrameType::Stream;
+    frame->u.stream.stream_id = stream.stream_id();
+    stream.stream_send_pending_ = true;
+    space.pending_frames.push_back(*frame);
     schedule_send();
     return {};
-}
-
-void QuicConnection::pop_stream_send_work(QuicStream &stream) noexcept {
-    if (!stream.stream_send_pending_) {
-        return;
-    }
-
-    QuicStream *prev = nullptr;
-    QuicStream *current = stream_send_head_;
-    while (current != nullptr) {
-        if (current == &stream) {
-            if (prev != nullptr) {
-                prev->stream_send_next_ = stream.stream_send_next_;
-            } else {
-                stream_send_head_ = stream.stream_send_next_;
-            }
-            if (stream_send_tail_ == &stream) {
-                stream_send_tail_ = prev;
-            }
-            stream.stream_send_next_ = nullptr;
-            stream.stream_send_pending_ = false;
-            return;
-        }
-        prev = current;
-        current = current->stream_send_next_;
-    }
-}
-
-void QuicConnection::clear_stream_frame_pending(std::uint64_t stream_id) noexcept {
-    QuicStream *stream = find_stream(stream_id);
-    if (stream == nullptr) {
-        return;
-    }
-    pop_stream_send_work(*stream);
-    try_release_stream(*stream);
 }
 
 void QuicConnection::schedule_send() noexcept {

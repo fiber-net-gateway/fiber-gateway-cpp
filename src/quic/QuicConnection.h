@@ -318,13 +318,10 @@ public:
     [[nodiscard]] common::IoResult<void> recv_max_data_frame(const QuicMaxDataFrame &frame) noexcept;
     [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return recv_extent_pool_; }
     void release_stream_app(QuicStream &stream) noexcept;
+    void drop_stream_send_ticket(std::uint64_t stream_id) noexcept;
     [[nodiscard]] std::uint64_t recv_data_consumed() const noexcept { return recv_data_consumed_; }
     [[nodiscard]] std::uint64_t recv_data_limit() const noexcept { return recv_data_limit_; }
     [[nodiscard]] std::uint64_t peer_max_data() const noexcept { return peer_max_data_; }
-    [[nodiscard]] bool has_stream_send_work() const noexcept;
-    [[nodiscard]] QuicStream *peek_stream_send_work() noexcept { return stream_send_head_; }
-    void pop_stream_send_work(QuicStream &stream) noexcept;
-    void clear_stream_frame_pending(std::uint64_t stream_id) noexcept;
     [[nodiscard]] common::IoResult<void> on_stream_send_acked(std::uint64_t stream_id, std::size_t offset,
                                                               std::size_t length, bool fin) noexcept;
     [[nodiscard]] common::IoResult<void> on_stream_send_failed(std::uint64_t stream_id, std::size_t offset,
@@ -429,8 +426,6 @@ private:
     std::uint64_t recv_data_consumed_ = 0;
     std::uint64_t recv_data_limit_ = 0;
     std::uint64_t peer_max_data_ = 0;
-    QuicStream *stream_send_head_ = nullptr;
-    QuicStream *stream_send_tail_ = nullptr;
 
     friend class QuicStream;
     friend class QuicUdpEndpoint;

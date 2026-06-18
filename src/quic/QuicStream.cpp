@@ -167,9 +167,34 @@ void QuicStream::on_max_stream_data(std::uint64_t limit) noexcept {
 
 bool QuicStream::has_send_work() const noexcept { return send_queue_.has_send_work(); }
 
-common::IoResult<QuicStreamSendQueue::EncodedFrameResult>
-QuicStream::encode_stream_frame(std::uint8_t *dst, std::size_t capacity) noexcept {
-    return send_queue_.encode_stream_frame(stream_id_, dst, capacity);
+common::IoResult<QuicStreamFrameEncodeStatus> QuicStream::encode_stream_frame(QuicOutputFrame &frame, std::uint8_t *dst,
+                                                                              std::size_t capacity) noexcept {
+    if (!attached_to_connection_ || !has_send_work()) {
+        stream_send_pending_ = false;
+        return QuicStreamFrameEncodeStatus::Skipped;
+    }
+
+    auto encoded = send_queue_.encode_stream_frame(stream_id_, dst, capacity);
+    if (!encoded) {
+        return std::unexpected(encoded.error());
+    }
+    if (!encoded->encoded) {
+        return QuicStreamFrameEncodeStatus::Blocked;
+    }
+
+    stream_send_pending_ = false;
+    frame.type = QuicFrameType::Stream;
+    frame.encoded_len = encoded->encoded_len;
+    frame.u.stream.length = static_cast<std::uint32_t>(encoded->data_len);
+    frame.u.stream.stream_id = stream_id_;
+    frame.u.stream.offset = encoded->offset;
+    frame.u.stream.has_length = encoded->has_length;
+    frame.u.stream.fin = encoded->fin;
+
+    if (has_send_work() && conn_ != nullptr) {
+        (void) conn_->queue_stream_frame(*this);
+    }
+    return QuicStreamFrameEncodeStatus::Encoded;
 }
 
 common::IoResult<void> QuicStream::mark_send_acked(std::size_t offset, std::size_t length, bool fin) noexcept {
@@ -216,9 +241,6 @@ void QuicStream::attach_to_connection(QuicConnection &conn) noexcept {
 }
 
 void QuicStream::detach_from_connection() noexcept {
-    if (conn_ != nullptr && stream_send_pending_) {
-        conn_->clear_stream_frame_pending(stream_id_);
-    }
     conn_ = nullptr;
     attached_to_connection_ = false;
 }
