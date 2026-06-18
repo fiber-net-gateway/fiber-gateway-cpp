@@ -257,7 +257,8 @@ TEST(QuicTransportCodecTest, CreatesAndParsesCryptoFrame) {
     fiber::quic::QuicOutputFrame frame{};
     frame.type = fiber::quic::QuicFrameType::Crypto;
     frame.u.crypto.offset = 7;
-    frame.data = {payload.data(), payload.size()};
+    frame.u.crypto.data = payload.data();
+    frame.u.crypto.length = payload.size();
 
     auto expected_len = fiber::quic::quic_create_output_frame(nullptr, frame);
 
@@ -296,7 +297,8 @@ TEST(QuicTransportCodecTest, CreatesAndClientParsesNewTokenFrame) {
     const std::array<std::uint8_t, 3> token{'a', 'b', 'c'};
     fiber::quic::QuicOutputFrame frame{};
     frame.type = fiber::quic::QuicFrameType::NewToken;
-    frame.data = {token.data(), token.size()};
+    frame.u.new_token.data = token.data();
+    frame.u.new_token.length = token.size();
 
     std::array<std::uint8_t, 16> buf{};
     fiber::quic::QuicWriteCursor out(buf.data(), buf.size());

@@ -57,21 +57,13 @@ namespace {
     return index;
 }
 
-[[nodiscard]] bool generated_stream_frame(const QuicOutputFrame &frame) noexcept {
-    return (frame.flags & QuicOutputFrameGeneratedStream) != 0;
-}
-
-[[nodiscard]] bool stream_placeholder_frame(const QuicOutputFrame &frame) noexcept {
-    return (frame.flags & QuicOutputFrameStreamPlaceholder) != 0;
-}
-
 void restore_sending_frames(QuicConnection &connection, QuicPacketNumberSpace &space) noexcept {
     QuicOutputFrameQueue restored{};
     while (QuicOutputFrame *frame = space.sending_frames.pop_front()) {
-        if (generated_stream_frame(*frame)) {
+        if (frame->type == QuicFrameType::Stream) {
             (void) connection.on_stream_send_failed(frame->u.stream.stream_id,
-                                                    static_cast<std::size_t>(frame->u.stream.offset), frame->data.len,
-                                                    frame->u.stream.fin);
+                                                    static_cast<std::size_t>(frame->u.stream.offset),
+                                                    frame->u.stream.length, frame->u.stream.fin);
             space.release_frame(*frame);
             continue;
         }
@@ -81,13 +73,11 @@ void restore_sending_frames(QuicConnection &connection, QuicPacketNumberSpace &s
 }
 
 void discard_pending_frames(QuicConnection &connection, QuicPacketNumberSpace &space) noexcept {
+    (void) connection;
     while (QuicOutputFrame *frame = space.pending_frames.pop_front()) {
         if (frame == &space.ack_frame) {
             space.send_ack = false;
             space.send_ack_count = 0;
-        }
-        if (stream_placeholder_frame(*frame)) {
-            connection.clear_stream_frame_pending(frame->u.stream.stream_id);
         }
         space.release_frame(*frame);
     }
@@ -113,16 +103,19 @@ split_ordered_frame(QuicPacketNumberSpace &space, QuicOutputFrame &frame, std::s
     }
 
     const std::size_t shrink = *current_len - available;
+    const std::uint8_t *payload_data = nullptr;
     std::uint64_t payload_len = 0;
     if (frame.type == QuicFrameType::Crypto) {
-        payload_len = frame.data.len;
+        payload_data = frame.u.crypto.data;
+        payload_len = frame.u.crypto.length;
     } else {
-        payload_len = frame.data.len;
+        payload_data = frame.u.stream.data;
+        payload_len = frame.u.stream.length;
     }
     if (payload_len <= shrink) {
         return QuicSplitFrameResult::Declined;
     }
-    if (frame.data.data == nullptr) {
+    if (payload_data == nullptr) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -137,11 +130,17 @@ split_ordered_frame(QuicPacketNumberSpace &space, QuicOutputFrame &frame, std::s
     remainder->encoded_len = 0;
     remainder->next = nullptr;
     remainder->queued = false;
-    remainder->data.data = frame.data.data + first_payload_len;
-    remainder->data.len = static_cast<std::size_t>(shrink);
+    if (frame.type == QuicFrameType::Crypto) {
+        remainder->u.crypto.data = payload_data + first_payload_len;
+        remainder->u.crypto.length = static_cast<std::uint32_t>(shrink);
+        frame.u.crypto.length = static_cast<std::uint32_t>(first_payload_len);
+    } else {
+        remainder->u.stream.data = payload_data + first_payload_len;
+        remainder->u.stream.length = static_cast<std::uint32_t>(shrink);
+        frame.u.stream.length = static_cast<std::uint32_t>(first_payload_len);
+    }
 
     frame.encoded_len = 0;
-    frame.data.len = static_cast<std::size_t>(first_payload_len);
 
     if (frame.type == QuicFrameType::Crypto) {
         remainder->u.crypto.offset += first_payload_len;
@@ -174,45 +173,36 @@ split_ordered_frame(QuicPacketNumberSpace &space, QuicOutputFrame &frame, std::s
 
 } // namespace
 
-common::IoResult<QuicUdpEndpoint::StreamPlaceholderResult>
-QuicUdpEndpoint::materialize_stream_placeholder(QuicConnection &connection, QuicOutputFrame &frame,
-                                                std::size_t available) noexcept {
-    if (!stream_placeholder_frame(frame)) {
-        return std::unexpected(common::IoErr::Invalid);
+common::IoResult<QuicUdpEndpoint::StreamFrameResult>
+QuicUdpEndpoint::materialize_stream_frame(QuicConnection &connection, QuicStream &stream, QuicOutputFrame &frame,
+                                          std::size_t available) noexcept {
+    if (!stream.attached_to_connection() || !stream.has_send_work()) {
+        connection.pop_stream_send_work(stream);
+        return StreamFrameResult::Skipped;
     }
 
-    QuicStream *stream = connection.find_stream(frame.u.stream.stream_id);
-    if (stream == nullptr) {
-        return StreamPlaceholderResult::Skipped;
-    }
-
-    if (!stream->has_send_work()) {
-        connection.clear_stream_frame_pending(stream->stream_id());
-        return StreamPlaceholderResult::Skipped;
-    }
-
-    auto prepared = stream->prepare_stream_frame(available);
+    auto prepared = stream.prepare_stream_frame(available);
     if (!prepared) {
         return std::unexpected(prepared.error());
     }
     if (!prepared->encoded) {
-        return StreamPlaceholderResult::Blocked;
+        return StreamFrameResult::Blocked;
     }
 
-    connection.clear_stream_frame_pending(stream->stream_id());
+    connection.pop_stream_send_work(stream);
+    frame.type = QuicFrameType::Stream;
     frame.encoded_len = prepared->encoded_len;
-    frame.flags &= static_cast<std::uint8_t>(~QuicOutputFrameStreamPlaceholder);
-    frame.flags |= QuicOutputFrameGeneratedStream;
-    frame.data = {prepared->data, prepared->data_len};
-    frame.u.stream.stream_id = stream->stream_id();
+    frame.u.stream.data = prepared->data;
+    frame.u.stream.length = static_cast<std::uint32_t>(prepared->data_len);
+    frame.u.stream.stream_id = stream.stream_id();
     frame.u.stream.offset = prepared->offset;
     frame.u.stream.has_length = prepared->has_length;
     frame.u.stream.fin = prepared->fin;
 
-    if (stream->has_send_work()) {
-        (void) connection.queue_stream_frame(*stream);
+    if (stream.has_send_work()) {
+        (void) connection.queue_stream_frame(stream);
     }
-    return StreamPlaceholderResult::Encoded;
+    return StreamFrameResult::Encoded;
 }
 
 namespace {
@@ -796,31 +786,6 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
                 break;
             }
 
-            if (stream_placeholder_frame(*source)) {
-                if (level != QuicEncryptionLevel::Application) {
-                    packet = QuicSendPacketRecord{};
-                    rollback_encoded();
-                    return std::unexpected(common::IoErr::Invalid);
-                }
-
-                auto materialized = materialize_stream_placeholder(connection, *source, max_payload - payload_len);
-                if (!materialized) {
-                    packet = QuicSendPacketRecord{};
-                    rollback_encoded();
-                    return std::unexpected(materialized.error());
-                }
-                if (*materialized == StreamPlaceholderResult::Skipped) {
-                    QuicOutputFrame *next = space.pending_frames.next_of(*source);
-                    space.pending_frames.erase_after(prev, *source);
-                    space.release_frame(*source);
-                    source = next;
-                    continue;
-                }
-                if (*materialized == StreamPlaceholderResult::Blocked) {
-                    break;
-                }
-            }
-
             auto frame_len = quic_output_frame_encoded_len(*source);
             if (!frame_len) {
                 packet = QuicSendPacketRecord{};
@@ -864,6 +829,53 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         }
         packet.frame_count = control_frame_count;
 
+        if (level == QuicEncryptionLevel::Application && !ack_only) {
+            while (payload_len < max_payload) {
+                QuicStream *stream = connection.peek_stream_send_work();
+                if (stream == nullptr) {
+                    break;
+                }
+
+                QuicOutputFrame *frame = space.alloc_frame();
+                if (frame == nullptr) {
+                    packet = QuicSendPacketRecord{};
+                    rollback_encoded();
+                    return std::unexpected(common::IoErr::NoMem);
+                }
+
+                auto materialized = materialize_stream_frame(connection, *stream, *frame, max_payload - payload_len);
+                if (!materialized) {
+                    space.release_frame(*frame);
+                    packet = QuicSendPacketRecord{};
+                    rollback_encoded();
+                    return std::unexpected(materialized.error());
+                }
+                if (*materialized == StreamFrameResult::Skipped) {
+                    space.release_frame(*frame);
+                    continue;
+                }
+                if (*materialized == StreamFrameResult::Blocked) {
+                    space.release_frame(*frame);
+                    break;
+                }
+
+                auto frame_len = quic_output_frame_encoded_len(*frame);
+                if (!frame_len) {
+                    (void) connection.on_stream_send_failed(frame->u.stream.stream_id,
+                                                            static_cast<std::size_t>(frame->u.stream.offset),
+                                                            frame->u.stream.length, frame->u.stream.fin);
+                    space.release_frame(*frame);
+                    packet = QuicSendPacketRecord{};
+                    rollback_encoded();
+                    return std::unexpected(frame_len.error());
+                }
+
+                payload_len += *frame_len;
+                space.sending_frames.push_back(*frame);
+                ++packet.frame_count;
+            }
+        }
+
         if (packet.frame_count == 0) {
             packet = QuicSendPacketRecord{};
             if (!space.pending_frames.empty() || level_can_send_stream) {
@@ -906,12 +918,9 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
              frame = space.sending_frames.next_of(*frame)) {
             frame->packet_number = encoded->packet_number;
             frame->send_time = now;
-            if (encoded->ack_eliciting) {
-                frame->flags |= QuicOutputFramePacketAckEliciting;
-            }
+            frame->packet_ack_eliciting = encoded->ack_eliciting;
             frame->packet_len = 0;
             if (encoded->ack_eliciting && !accounted_packet) {
-                frame->flags |= QuicOutputFramePacketAnchor;
                 frame->packet_len = static_cast<std::uint32_t>(encoded->packet_len);
                 accounted_packet = true;
             }
@@ -949,7 +958,7 @@ void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const Qui
                 space.send_ack_count = 0;
             }
 
-            if ((frame->flags & QuicOutputFramePacketAckEliciting) != 0 && !connection.closing()) {
+            if (frame->packet_ack_eliciting && !connection.closing()) {
                 if (frame->packet_len != 0) {
                     quic_congestion_on_packet_sent(connection.congestion(), frame->packet_len, true, false);
                 }

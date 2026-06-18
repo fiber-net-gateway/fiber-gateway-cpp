@@ -978,7 +978,7 @@ common::IoResult<std::size_t> quic_create_output_frame(QuicWriteCursor *out, Qui
                     return std::unexpected(wrote.error());
                 }
             }
-            wrote = write_or_count_bytes(out, frame.data.data, frame.data.len, len);
+            wrote = write_or_count_bytes(out, frame.u.ack.ranges, frame.u.ack.ranges_length, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
@@ -1003,11 +1003,11 @@ common::IoResult<std::size_t> quic_create_output_frame(QuicWriteCursor *out, Qui
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
-            wrote = write_or_count_varint(out, frame.data.len, len);
+            wrote = write_or_count_varint(out, frame.u.crypto.length, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
-            wrote = write_or_count_bytes(out, frame.data.data, frame.data.len, len);
+            wrote = write_or_count_bytes(out, frame.u.crypto.data, frame.u.crypto.length, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
@@ -1040,12 +1040,12 @@ common::IoResult<std::size_t> quic_create_output_frame(QuicWriteCursor *out, Qui
                 }
             }
             if (frame.u.stream.has_length) {
-                wrote = write_or_count_varint(out, frame.data.len, len);
+                wrote = write_or_count_varint(out, frame.u.stream.length, len);
                 if (!wrote) {
                     return std::unexpected(wrote.error());
                 }
             }
-            wrote = write_or_count_bytes(out, frame.data.data, frame.data.len, len);
+            wrote = write_or_count_bytes(out, frame.u.stream.data, frame.u.stream.length, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
@@ -1068,11 +1068,11 @@ common::IoResult<std::size_t> quic_create_output_frame(QuicWriteCursor *out, Qui
                     return std::unexpected(wrote.error());
                 }
             }
-            wrote = write_or_count_varint(out, frame.data.len, len);
+            wrote = write_or_count_varint(out, frame.u.close.reason_length, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
-            wrote = write_or_count_bytes(out, frame.data.data, frame.data.len, len);
+            wrote = write_or_count_bytes(out, frame.u.close.reason, frame.u.close.reason_length, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
@@ -1271,11 +1271,11 @@ common::IoResult<std::size_t> quic_create_output_frame(QuicWriteCursor *out, Qui
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
-            wrote = write_or_count_varint(out, frame.data.len, len);
+            wrote = write_or_count_varint(out, frame.u.new_token.length, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
-            wrote = write_or_count_bytes(out, frame.data.data, frame.data.len, len);
+            wrote = write_or_count_bytes(out, frame.u.new_token.data, frame.u.new_token.length, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }

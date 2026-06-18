@@ -221,6 +221,9 @@ void QuicStream::attach_to_connection(QuicConnection &conn) noexcept {
 }
 
 void QuicStream::detach_from_connection() noexcept {
+    if (conn_ != nullptr && stream_send_pending_) {
+        conn_->clear_stream_frame_pending(stream_id_);
+    }
     conn_ = nullptr;
     attached_to_connection_ = false;
 }
