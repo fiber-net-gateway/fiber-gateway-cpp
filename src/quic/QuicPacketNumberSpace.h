@@ -6,6 +6,7 @@
 #include <cstdint>
 
 #include "QuicCongestion.h"
+#include "QuicDataReassembler.h"
 #include "QuicFrame.h"
 
 namespace fiber::quic {
@@ -55,6 +56,7 @@ struct QuicPacketNumberSpace {
     QuicEncryptionLevel level;
 
     std::uint64_t crypto_sent = 0;
+    QuicDataReassembler crypto_recv{};
 
     std::uint64_t next_packet_number = 0;
     std::uint64_t largest_acked_packet_number = 0;

@@ -1,9 +1,7 @@
 #include "QuicPacketProcessor.h"
 
 #include <algorithm>
-#include <cstring>
 #include <expected>
-#include <memory>
 
 #include "QuicAckHandler.h"
 #include "QuicCrypto.h"
@@ -89,6 +87,7 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
     space.send_ack = false;
     space.send_ack_count = 0;
     space.pending_ack = kUnsetPacketNumber;
+    space.crypto_recv.clear();
 
     if (QuicPacketProtectionKeys *read = quic_packet_keys(conn.crypto(), level, false)) {
         read->reset();
@@ -113,95 +112,32 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
     return {};
 }
 
-[[nodiscard]] common::IoResult<void> buffer_crypto_segment(QuicCryptoRecvBuffer &buffer, std::uint64_t offset,
-                                                           QuicSlice data) noexcept {
-    if (data.len == 0) {
-        return {};
-    }
-    const std::uint64_t end = offset + data.len;
-    if (end <= buffer.next_offset) {
-        return {};
-    }
-    if (offset < buffer.next_offset) {
-        const std::size_t skip = static_cast<std::size_t>(buffer.next_offset - offset);
-        offset = buffer.next_offset;
-        data.data += skip;
-        data.len -= skip;
-    }
-    if (offset + data.len > buffer.next_offset + kQuicMaxCryptoBuffered) {
-        return std::unexpected(common::IoErr::MessageTooLarge);
-    }
-
-    for (QuicCryptoBufferedSegment &segment: buffer.segments) {
-        if (segment.used && segment.offset == offset) {
-            return {};
-        }
-    }
-
-    for (QuicCryptoBufferedSegment &segment: buffer.segments) {
-        if (!segment.used) {
-            segment.data = std::make_unique<std::uint8_t[]>(data.len);
-            if (!segment.data) {
-                return std::unexpected(common::IoErr::NoMem);
-            }
-            std::memcpy(segment.data.get(), data.data, data.len);
-            segment.offset = offset;
-            segment.len = data.len;
-            segment.used = true;
-            return {};
-        }
-    }
-
-    return std::unexpected(common::IoErr::NoMem);
-}
-
 [[nodiscard]] common::IoResult<void> provide_crypto_data(QuicConnection &conn, QuicEncryptionLevel level,
                                                          std::uint64_t offset, QuicSlice data) noexcept {
     if (!conn.tls().initialized()) {
         return {};
     }
 
-    QuicCryptoRecvBuffer &buffer = conn.crypto_recv_buffer(level);
-    if (offset > buffer.next_offset) {
-        return buffer_crypto_segment(buffer, offset, data);
-    }
-
-    if (offset < buffer.next_offset) {
-        const std::uint64_t skip64 = buffer.next_offset - offset;
-        if (skip64 >= data.len) {
-            return {};
+    QuicPacketNumberSpace &space = conn.packet_number_space(level);
+    auto inserted = space.crypto_recv.insert(offset, data);
+    if (!inserted) {
+        if (inserted.error() == common::IoErr::MessageTooLarge) {
+            conn.close(QuicErrorCode::CryptoBufferExceeded);
         }
-        const std::size_t skip = static_cast<std::size_t>(skip64);
-        data.data += skip;
-        data.len -= skip;
+        return std::unexpected(inserted.error());
     }
 
-    if (data.len != 0) {
-        auto provided = conn.tls().provide_crypto_data(level, data.data, data.len);
+    mem::IoBufChain contiguous(conn.recv_extent_pool());
+    auto taken = space.crypto_recv.take_contiguous(contiguous);
+    if (!taken) {
+        return std::unexpected(taken.error());
+    }
+
+    while (mem::IoBufNode *node = contiguous.pop_front_node()) {
+        auto provided = conn.tls().provide_crypto_data(level, node->buf.readable_data(), node->buf.readable());
+        conn.recv_extent_pool().release(node);
         if (!provided) {
             return std::unexpected(provided.error());
-        }
-        buffer.next_offset += data.len;
-    }
-
-    bool progressed = true;
-    while (progressed) {
-        progressed = false;
-        for (QuicCryptoBufferedSegment &segment: buffer.segments) {
-            if (!segment.used || segment.offset != buffer.next_offset) {
-                continue;
-            }
-            auto provided = conn.tls().provide_crypto_data(level, segment.data.get(), segment.len);
-            if (!provided) {
-                return std::unexpected(provided.error());
-            }
-            buffer.next_offset += segment.len;
-            segment.data.reset();
-            segment.offset = 0;
-            segment.len = 0;
-            segment.used = false;
-            progressed = true;
-            break;
         }
     }
 
