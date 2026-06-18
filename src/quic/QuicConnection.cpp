@@ -181,9 +181,8 @@ common::IoResult<void> QuicConnection::record_peer_stream_id(std::uint64_t strea
         return std::unexpected(common::IoErr::Busy);
     }
 
-    std::uint64_t &largest =
-            is_bidirectional_stream(stream_id) ? largest_peer_bidi_sequence_ : largest_peer_uni_sequence_;
-    largest = std::max(largest, stream_sequence(stream_id));
+    std::uint64_t &next = is_bidirectional_stream(stream_id) ? next_peer_bidi_sequence_ : next_peer_uni_sequence_;
+    next = std::max(next, stream_sequence(stream_id) + 1);
     return {};
 }
 
@@ -199,9 +198,6 @@ common::IoResult<QuicStream *> QuicConnection::get_or_create_peer_stream(std::ui
     }
     if (QuicStream *stream = streams_.find(stream_id)) {
         return stream;
-    }
-    if (find_retired_stream(stream_id) != nullptr) {
-        return std::unexpected(common::IoErr::Invalid);
     }
     auto recorded = record_peer_stream_id(stream_id);
     if (!recorded) {
@@ -239,8 +235,8 @@ common::IoResult<QuicStream *> QuicConnection::get_or_create_peer_stream(std::ui
 }
 
 common::IoResult<void> QuicConnection::recv_stream_frame(const QuicStreamFrame &frame, QuicSlice data) noexcept {
-    if (const QuicRetiredStreamRecord *retired = find_retired_stream(frame.stream_id)) {
-        return check_retired_stream_frame(*retired, frame.offset, data, frame.fin);
+    if (find_stream(frame.stream_id) == nullptr && is_gone_peer_stream(frame.stream_id)) {
+        return {};
     }
 
     auto stream = get_or_create_peer_stream(frame.stream_id);
@@ -270,8 +266,8 @@ common::IoResult<void> QuicConnection::recv_stream_frame(const QuicStreamFrame &
 }
 
 common::IoResult<void> QuicConnection::recv_reset_stream_frame(const QuicResetStreamFrame &frame) noexcept {
-    if (const QuicRetiredStreamRecord *retired = find_retired_stream(frame.id)) {
-        return check_retired_reset_stream_frame(*retired, frame.final_size);
+    if (find_stream(frame.id) == nullptr && is_gone_peer_stream(frame.id)) {
+        return {};
     }
 
     auto stream = get_or_create_peer_stream(frame.id);
@@ -568,13 +564,14 @@ std::uint64_t QuicConnection::peer_stream_limit(QuicStreamType type) const noexc
                                                  : options_.max_peer_unidirectional_streams;
 }
 
-const QuicRetiredStreamRecord *QuicConnection::find_retired_stream(std::uint64_t stream_id) const noexcept {
-    for (const QuicRetiredStreamRecord &record: retired_streams_) {
-        if (record.used && record.stream_id == stream_id) {
-            return &record;
-        }
+bool QuicConnection::is_gone_peer_stream(std::uint64_t stream_id) const noexcept {
+    if (!is_peer_stream(stream_id)) {
+        return false;
     }
-    return nullptr;
+
+    const std::uint64_t next =
+            is_bidirectional_stream(stream_id) ? next_peer_bidi_sequence_ : next_peer_uni_sequence_;
+    return stream_sequence(stream_id) < next;
 }
 
 void QuicConnection::retire_stream(QuicStream &stream) noexcept {
@@ -587,19 +584,7 @@ void QuicConnection::retire_stream(QuicStream &stream) noexcept {
         stream.detach_from_connection();
         return;
     }
-    record_retired_stream(*lease);
     lease->detach_from_connection();
-}
-
-void QuicConnection::record_retired_stream(const QuicStream &stream) noexcept {
-    const std::size_t slot = static_cast<std::size_t>(next_retired_stream_slot_++ % retired_streams_.size());
-    retired_streams_[slot] = QuicRetiredStreamRecord{
-            .stream_id = stream.stream_id(),
-            .final_size = stream.final_size(),
-            .used = true,
-            .has_final_size = stream.has_final_size(),
-            .reset_received = stream.reset_received(),
-    };
 }
 
 void QuicConnection::try_release_stream(QuicStream &stream) noexcept {
@@ -760,28 +745,6 @@ void QuicConnection::maybe_extend_recv_data_flow_control() noexcept {
     if (queued) {
         recv_data_limit_ = limit;
     }
-}
-
-common::IoResult<void> QuicConnection::check_retired_stream_frame(const QuicRetiredStreamRecord &retired,
-                                                                  std::uint64_t offset, QuicSlice data,
-                                                                  bool fin) noexcept {
-    if (offset > std::numeric_limits<std::uint64_t>::max() - data.len || !retired.has_final_size) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
-
-    const std::uint64_t end = offset + data.len;
-    if (end > retired.final_size || (fin && end != retired.final_size)) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
-    return {};
-}
-
-common::IoResult<void> QuicConnection::check_retired_reset_stream_frame(const QuicRetiredStreamRecord &retired,
-                                                                        std::uint64_t final_size) noexcept {
-    if (!retired.has_final_size || retired.final_size != final_size) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
-    return {};
 }
 
 } // namespace fiber::quic

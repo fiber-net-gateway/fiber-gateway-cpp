@@ -549,6 +549,16 @@ TEST(QuicConnectionTest, RecvFinStreamRetiresAfterDataIsTaken) {
     auto duplicate = conn.recv_stream_frame(frame, slice_of("abc"));
     EXPECT_TRUE(duplicate.has_value());
     EXPECT_EQ(conn.active_stream_count(), 0U);
+
+    fiber::quic::QuicStreamFrame conflicting{};
+    conflicting.stream_id = 0;
+    conflicting.length = 4;
+    conflicting.fin = true;
+    auto ignored_conflict = conn.recv_stream_frame(conflicting, slice_of("abcd"));
+    EXPECT_TRUE(ignored_conflict.has_value());
+    EXPECT_EQ(conn.find_stream(0), nullptr);
+    EXPECT_EQ(conn.active_stream_count(), 0U);
+    EXPECT_EQ(state.calls, 1U);
 }
 
 TEST(QuicConnectionTest, ResetStreamCountsFinalSizeGrowthForConnectionFlowControl) {
@@ -662,7 +672,34 @@ TEST(QuicConnectionTest, ResetStreamCreatesAndRetiresPeerStream) {
 
     reset.final_size = 1;
     auto conflict = conn.recv_reset_stream_frame(reset);
-    EXPECT_FALSE(conflict.has_value());
+    EXPECT_TRUE(conflict.has_value());
+    EXPECT_EQ(conn.find_stream(0), nullptr);
+    EXPECT_EQ(conn.active_stream_count(), 0U);
+}
+
+TEST(QuicConnectionTest, LowerPeerStreamBelowOpenedWatermarkIsGoneWhenMissing) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame later{};
+    later.stream_id = 4;
+    later.length = 3;
+
+    auto later_received = conn.recv_stream_frame(later, slice_of("abc"));
+    ASSERT_TRUE(later_received.has_value());
+    EXPECT_EQ(state.calls, 1U);
+    EXPECT_EQ(state.last_stream_id, 4U);
+    EXPECT_NE(conn.find_stream(4), nullptr);
+
+    fiber::quic::QuicStreamFrame lower{};
+    lower.stream_id = 0;
+    lower.length = 3;
+    auto lower_received = conn.recv_stream_frame(lower, slice_of("xyz"));
+
+    EXPECT_TRUE(lower_received.has_value());
+    EXPECT_EQ(conn.find_stream(0), nullptr);
+    EXPECT_EQ(conn.active_stream_count(), 1U);
+    EXPECT_EQ(state.calls, 1U);
 }
 
 TEST(QuicConnectionTest, RejectsFinalSizeBelowReceivedStreamData) {
