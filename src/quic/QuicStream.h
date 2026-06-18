@@ -32,6 +32,12 @@ enum class QuicStreamRecvState : std::uint8_t {
     Closed,
 };
 
+enum class QuicStreamFrameEncodeStatus : std::uint8_t {
+    Encoded,
+    Skipped,
+    Blocked,
+};
+
 class QuicStream : public common::NonCopyable, public common::NonMovable {
 public:
     class Lease {
@@ -148,8 +154,8 @@ private:
     [[nodiscard]] common::IoResult<void> on_remote_stop_sending(std::uint64_t error_code) noexcept;
     void on_max_stream_data(std::uint64_t limit) noexcept;
     [[nodiscard]] bool has_send_work() const noexcept;
-    [[nodiscard]] common::IoResult<QuicStreamSendQueue::EncodedFrameResult>
-    encode_stream_frame(std::uint8_t *dst, std::size_t capacity) noexcept;
+    [[nodiscard]] common::IoResult<QuicStreamFrameEncodeStatus>
+    encode_stream_frame(QuicOutputFrame &frame, std::uint8_t *dst, std::size_t capacity) noexcept;
     [[nodiscard]] common::IoResult<void> mark_send_acked(std::size_t offset, std::size_t length, bool fin) noexcept;
     [[nodiscard]] common::IoResult<void> mark_send_failed(std::size_t offset, std::size_t length, bool fin) noexcept;
     void maybe_extend_recv_flow_control() noexcept;
@@ -162,7 +168,6 @@ private:
     QuicStreamRecvQueue recv_queue_;
     QuicStreamSendQueue send_queue_;
     QuicStreamRecvState recv_state_ = QuicStreamRecvState::Open;
-    QuicStream *stream_send_next_ = nullptr;
     std::uint32_t ref_count_ = 1;
     bool attached_to_connection_ = false;
     bool app_released_ = true;

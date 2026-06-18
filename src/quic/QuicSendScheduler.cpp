@@ -2,8 +2,8 @@
 
 #include <expected>
 
-#include "../common/Assert.h"
 #include "../async/Yield.h"
+#include "../common/Assert.h"
 #include "QuicUdpEndpoint.h"
 
 namespace fiber::quic {
