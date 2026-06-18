@@ -148,6 +148,25 @@ common::IoResult<void> quic_output_frame_set_owned_data(QuicOutputFrame &frame, 
         return std::unexpected(common::IoErr::Invalid);
     }
 
+    if (frame.type == QuicFrameType::Crypto) {
+        if (frame.u.crypto.data != nullptr) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        if (len == 0) {
+            return {};
+        }
+
+        auto *buf = new (std::nothrow) mem::IoBuf(mem::IoBuf::allocate(len));
+        if (buf == nullptr || !*buf) {
+            delete buf;
+            return std::unexpected(common::IoErr::NoMem);
+        }
+        std::memcpy(buf->writable_data(), data, len);
+        buf->commit(len);
+        frame.u.crypto.data = buf;
+        return {};
+    }
+
     QuicOutputFrameDataBlock **target = nullptr;
     const std::uint8_t **target_data = nullptr;
     std::uint32_t *target_len = nullptr;
@@ -157,11 +176,6 @@ common::IoResult<void> quic_output_frame_set_owned_data(QuicOutputFrame &frame, 
             target = &frame.u.ack.owned_ranges;
             target_data = &frame.u.ack.ranges;
             target_len = &frame.u.ack.ranges_length;
-            break;
-        case QuicFrameType::Crypto:
-            target = &frame.u.crypto.owned;
-            target_data = &frame.u.crypto.data;
-            target_len = &frame.u.crypto.length;
             break;
         case QuicFrameType::NewToken:
             target = &frame.u.new_token.owned;
@@ -214,9 +228,6 @@ void quic_output_frame_retain_data(QuicOutputFrame &frame) noexcept {
         case QuicFrameType::AckEcn:
             block = frame.u.ack.owned_ranges;
             break;
-        case QuicFrameType::Crypto:
-            block = frame.u.crypto.owned;
-            break;
         case QuicFrameType::NewToken:
             block = frame.u.new_token.owned;
             break;
@@ -243,11 +254,9 @@ void quic_output_frame_release_data(QuicOutputFrame &frame) noexcept {
             frame.u.ack.ranges_length = 0;
             break;
         case QuicFrameType::Crypto:
-            block = frame.u.crypto.owned;
-            frame.u.crypto.owned = nullptr;
+            delete frame.u.crypto.data;
             frame.u.crypto.data = nullptr;
-            frame.u.crypto.length = 0;
-            break;
+            return;
         case QuicFrameType::NewToken:
             block = frame.u.new_token.owned;
             frame.u.new_token.owned = nullptr;

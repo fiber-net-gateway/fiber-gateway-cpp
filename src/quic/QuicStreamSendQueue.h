@@ -36,15 +36,6 @@ public:
         std::size_t offset = 0;
         std::size_t data_len = 0;
         std::size_t encoded_len = 0;
-        bool fin = false;
-        bool encoded = false;
-    };
-
-    struct PreparedFrameResult {
-        const std::uint8_t *data = nullptr;
-        std::size_t offset = 0;
-        std::size_t data_len = 0;
-        std::size_t encoded_len = 0;
         bool has_length = false;
         bool fin = false;
         bool encoded = false;
@@ -87,8 +78,6 @@ public:
 private:
     class AppendAwaiter;
 
-    [[nodiscard]] common::IoResult<PreparedFrameResult> prepare_stream_frame(std::uint64_t stream_id,
-                                                                             std::size_t capacity) noexcept;
     [[nodiscard]] common::IoResult<EncodedFrameResult> encode_stream_frame(std::uint64_t stream_id, std::uint8_t *dst,
                                                                            std::size_t capacity) noexcept;
     [[nodiscard]] common::IoResult<void> mark_acked(std::size_t offset, std::size_t length, bool encoded_fin) noexcept;

@@ -8,6 +8,7 @@
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
+#include "../common/mem/IoBuf.h"
 
 namespace fiber::quic {
 
@@ -124,9 +125,7 @@ struct QuicOutputAckFrame {
 
 struct QuicOutputCryptoFrame {
     std::uint64_t offset = 0;
-    const std::uint8_t *data = nullptr;
-    std::uint32_t length = 0;
-    QuicOutputFrameDataBlock *owned = nullptr;
+    mem::IoBuf *data = nullptr;
 };
 
 struct QuicOutputNewTokenFrame {
@@ -138,7 +137,6 @@ struct QuicOutputNewTokenFrame {
 struct QuicOutputStreamFrame {
     std::uint64_t stream_id = 0;
     std::uint64_t offset = 0;
-    const std::uint8_t *data = nullptr;
     std::uint32_t length = 0;
     bool has_length = false;
     bool fin = false;

@@ -19,6 +19,10 @@ struct QuicPacketEncodeSpec {
     QuicOutputFrameQueue *frame_queue = nullptr;
     QuicOutputFrame *frames = nullptr;
     std::size_t frame_count = 0;
+    const std::uint8_t *payload = nullptr;
+    std::size_t payload_len = 0;
+    std::size_t payload_frame_count = 0;
+    bool payload_ack_eliciting = false;
     std::size_t min_packet_len = 0;
     std::size_t max_packet_len = 0;
 };

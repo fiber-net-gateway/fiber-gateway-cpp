@@ -11,11 +11,6 @@
 namespace fiber::quic {
 
 struct QuicStreamSendQueueFrameTestAccess {
-    static common::IoResult<QuicStreamSendQueue::PreparedFrameResult>
-    prepare_stream_frame(QuicStreamSendQueue &queue, std::uint64_t stream_id, std::size_t capacity) noexcept {
-        return queue.prepare_stream_frame(stream_id, capacity);
-    }
-
     static common::IoResult<QuicStreamSendQueue::EncodedFrameResult>
     encode_stream_frame(QuicStreamSendQueue &queue, std::uint64_t stream_id, std::uint8_t *dst,
                         std::size_t capacity) noexcept {
@@ -129,23 +124,26 @@ TEST(QuicStreamSendQueueFrameTest, FailedRangeReturnsToReadyAndCanBeEncodedAgain
     EXPECT_EQ(frame_data_view(frame), "abcdef");
 }
 
-TEST(QuicStreamSendQueueFrameTest, PrepareFrameMarksInflightAndFailedRangeReturnsReady) {
+TEST(QuicStreamSendQueueFrameTest, EncodeFrameMarksInflightAndFailedRangeReturnsReady) {
     fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
 
     ASSERT_TRUE(buffer.try_append(iobuf_of("abcdef")).has_value());
 
-    auto prepared = QueueAccess::prepare_stream_frame(buffer, 4, 6);
-    ASSERT_TRUE(prepared.has_value());
-    ASSERT_TRUE(prepared->encoded);
-    EXPECT_EQ(prepared->offset, 0u);
-    EXPECT_EQ(prepared->data_len, 3u);
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(prepared->data), prepared->data_len), "abc");
-    EXPECT_TRUE(prepared->has_length);
-    EXPECT_EQ(buffer.ready_bytes(), 3u);
-    EXPECT_EQ(buffer.inflight_bytes(), 3u);
+    std::array<std::uint8_t, 6> out{};
+    auto encoded = QueueAccess::encode_stream_frame(buffer, 4, out.data(), out.size());
+    ASSERT_TRUE(encoded.has_value());
+    ASSERT_TRUE(encoded->encoded);
+    EXPECT_EQ(encoded->offset, 0u);
+    EXPECT_EQ(encoded->data_len, 4u);
+    EXPECT_FALSE(encoded->has_length);
+    EXPECT_EQ(buffer.ready_bytes(), 2u);
+    EXPECT_EQ(buffer.inflight_bytes(), 4u);
 
-    auto failed = QueueAccess::mark_failed(buffer, prepared->offset, prepared->data_len, prepared->fin);
+    fiber::quic::QuicInputFrame frame = parse_stream_frame(out.data(), encoded->encoded_len);
+    EXPECT_EQ(frame_data_view(frame), "abcd");
+
+    auto failed = QueueAccess::mark_failed(buffer, encoded->offset, encoded->data_len, encoded->fin);
     ASSERT_TRUE(failed.has_value());
     EXPECT_EQ(buffer.ready_bytes(), 6u);
     EXPECT_EQ(buffer.inflight_bytes(), 0u);

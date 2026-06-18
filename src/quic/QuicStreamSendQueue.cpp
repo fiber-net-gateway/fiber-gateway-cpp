@@ -368,117 +368,6 @@ QuicStreamSendQueue::append_chain(mem::IoBufChain &chain, std::chrono::milliseco
     }
 }
 
-common::IoResult<QuicStreamSendQueue::PreparedFrameResult>
-QuicStreamSendQueue::prepare_stream_frame(std::uint64_t stream_id, std::size_t capacity) noexcept {
-    PreparedFrameResult result{};
-    if (reset_sent_) {
-        return result;
-    }
-
-    mem::IoBufNode *cur = ready_head_;
-    if (cur == nullptr) {
-        if (!has_pending_fin() || buffered_bytes() > 0) {
-            return result;
-        }
-
-        const std::uint64_t offset = total_appended_bytes_ - buffered_bytes();
-        std::size_t encoded_len = 1 + quic_varint_len(stream_id) + 1;
-        if (offset > 0) {
-            encoded_len += quic_varint_len(offset);
-        }
-        if (capacity < encoded_len) {
-            return result;
-        }
-
-        result.offset = static_cast<std::size_t>(offset);
-        result.data_len = 0;
-        result.encoded_len = encoded_len;
-        result.has_length = true;
-        result.fin = true;
-        result.encoded = true;
-        fin_inflight_ = true;
-        return result;
-    }
-
-    const std::size_t data_len = cur->buf.readable();
-    std::size_t base_hdr = 1 + quic_varint_len(stream_id);
-    if (cur->offset > 0) {
-        base_hdr += quic_varint_len(cur->offset);
-    }
-    if (capacity <= base_hdr) {
-        return result;
-    }
-
-    const std::size_t remaining = capacity - base_hdr;
-    if (remaining < 2) {
-        return result;
-    }
-
-    std::size_t actual_data = std::min(data_len, remaining - 1);
-    for (int i = 0; i < 3; ++i) {
-        const std::size_t len_len = quic_varint_len(actual_data);
-        if (len_len >= remaining) {
-            return result;
-        }
-        const std::size_t revised = std::min(data_len, remaining - len_len);
-        if (revised == actual_data) {
-            break;
-        }
-        actual_data = revised;
-    }
-    if (actual_data == 0) {
-        return result;
-    }
-
-    const std::size_t encoded_len = base_hdr + quic_varint_len(actual_data) + actual_data;
-    if (encoded_len > capacity) {
-        return result;
-    }
-
-    bool encode_fin = false;
-    if (fin_appended_ && !fin_inflight_ && actual_data == data_len && is_last_ready_extent(cur)) {
-        encode_fin = true;
-    }
-
-    if (actual_data < data_len) {
-        mem::IoBufNode *remainder = pool_->alloc();
-        if (remainder == nullptr) {
-            return std::unexpected(common::IoErr::NoMem);
-        }
-        remainder->offset = cur->offset + actual_data;
-        remainder->state = static_cast<std::uint8_t>(QuicSendExtentState::Ready);
-        remainder->buf = cur->buf.retain_slice(actual_data, data_len - actual_data);
-        cur->buf = cur->buf.retain_slice(0, actual_data);
-        remainder->next = cur->next;
-        cur->next = remainder;
-        if (cur == tail_) {
-            tail_ = remainder;
-        }
-        ++active_extent_count_;
-    }
-
-    cur->state = static_cast<std::uint8_t>(QuicSendExtentState::Inflight);
-    ready_bytes_ -= actual_data;
-    inflight_bytes_ += actual_data;
-
-    while (ready_head_ != nullptr && ready_head_->state == static_cast<std::uint8_t>(QuicSendExtentState::Inflight)) {
-        ready_head_ = ready_head_->next;
-    }
-
-    if (encode_fin) {
-        fin_inflight_ = true;
-    }
-
-    result.data = cur->buf.readable_data();
-    result.offset = static_cast<std::size_t>(cur->offset);
-    result.data_len = actual_data;
-    result.encoded_len = encoded_len;
-    result.has_length = true;
-    result.fin = encode_fin;
-    result.encoded = true;
-    return result;
-}
-
 common::IoResult<QuicStreamSendQueue::EncodedFrameResult>
 QuicStreamSendQueue::encode_stream_frame(std::uint64_t stream_id, std::uint8_t *dst, std::size_t capacity) noexcept {
     EncodedFrameResult result{};
@@ -526,6 +415,7 @@ QuicStreamSendQueue::encode_stream_frame(std::uint64_t stream_id, std::uint8_t *
         result.offset = static_cast<std::size_t>(offset);
         result.data_len = 0;
         result.encoded_len = wc.offset();
+        result.has_length = false;
         result.fin = true;
         result.encoded = true;
         fin_inflight_ = true;
@@ -646,6 +536,7 @@ QuicStreamSendQueue::encode_stream_frame(std::uint64_t stream_id, std::uint8_t *
     result.offset = static_cast<std::size_t>(cur->offset);
     result.data_len = actual_data;
     result.encoded_len = wc.offset();
+    result.has_length = use_len;
     result.fin = encode_fin;
     result.encoded = true;
     return result;
