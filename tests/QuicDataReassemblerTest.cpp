@@ -1,0 +1,200 @@
+#include <gtest/gtest.h>
+
+#include <array>
+#include <string>
+#include <string_view>
+
+#include "quic/QuicDataReassembler.h"
+
+namespace {
+
+fiber::quic::QuicSlice slice_of(std::string_view value) {
+    return {reinterpret_cast<const std::uint8_t *>(value.data()), value.size()};
+}
+
+std::string chain_to_string(const fiber::mem::IoBufChain &chain) {
+    std::array<iovec, 32> iov{};
+    int count = chain.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
+    std::string out;
+    for (int i = 0; i < count; ++i) {
+        out.append(static_cast<const char *>(iov[i].iov_base), iov[i].iov_len);
+    }
+    return out;
+}
+
+} // namespace
+
+TEST(QuicDataReassemblerTest, SequentialInsertCanBeTakenImmediately) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicDataReassembler reassembler;
+    reassembler.init(pool);
+
+    auto inserted = reassembler.insert(0, slice_of("abc"));
+    ASSERT_TRUE(inserted.has_value());
+    EXPECT_EQ(*inserted, 3U);
+
+    fiber::mem::IoBufChain out(pool);
+    auto taken = reassembler.take_contiguous(out);
+    ASSERT_TRUE(taken.has_value());
+    EXPECT_EQ(*taken, 3U);
+    EXPECT_EQ(chain_to_string(out), "abc");
+    EXPECT_EQ(reassembler.next_offset(), 3U);
+    EXPECT_EQ(reassembler.buffered_bytes(), 0U);
+}
+
+TEST(QuicDataReassemblerTest, OutOfOrderDataWaitsForGapThenTakesAllContiguousBytes) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicDataReassembler reassembler;
+    reassembler.init(pool);
+
+    auto inserted = reassembler.insert(3, slice_of("def"));
+    ASSERT_TRUE(inserted.has_value());
+    EXPECT_EQ(*inserted, 3U);
+
+    fiber::mem::IoBufChain out(pool);
+    auto taken = reassembler.take_contiguous(out);
+    ASSERT_TRUE(taken.has_value());
+    EXPECT_EQ(*taken, 0U);
+    EXPECT_TRUE(out.empty());
+
+    inserted = reassembler.insert(0, slice_of("abc"));
+    ASSERT_TRUE(inserted.has_value());
+    EXPECT_EQ(*inserted, 3U);
+
+    taken = reassembler.take_contiguous(out);
+    ASSERT_TRUE(taken.has_value());
+    EXPECT_EQ(*taken, 6U);
+    EXPECT_EQ(chain_to_string(out), "abcdef");
+    EXPECT_EQ(reassembler.next_offset(), 6U);
+}
+
+TEST(QuicDataReassemblerTest, OverlapAcrossGapCopiesOnlyMissingBytes) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicDataReassembler reassembler;
+    reassembler.init(pool);
+
+    auto inserted = reassembler.insert(2, slice_of("cdef"));
+    ASSERT_TRUE(inserted.has_value());
+    EXPECT_EQ(*inserted, 4U);
+
+    inserted = reassembler.insert(0, slice_of("abcd"));
+    ASSERT_TRUE(inserted.has_value());
+    EXPECT_EQ(*inserted, 2U);
+
+    fiber::mem::IoBufChain out(pool);
+    auto taken = reassembler.take_contiguous(out);
+    ASSERT_TRUE(taken.has_value());
+    EXPECT_EQ(*taken, 6U);
+    EXPECT_EQ(chain_to_string(out), "abcdef");
+    EXPECT_EQ(reassembler.buffered_bytes(), 0U);
+}
+
+TEST(QuicDataReassemblerTest, DeliveredDuplicateIsIgnored) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicDataReassembler reassembler;
+    reassembler.init(pool);
+
+    ASSERT_TRUE(reassembler.insert(0, slice_of("abc")).has_value());
+    fiber::mem::IoBufChain out(pool);
+    ASSERT_TRUE(reassembler.take_contiguous(out).has_value());
+    out.clear();
+
+    auto duplicate = reassembler.insert(0, slice_of("abc"));
+    ASSERT_TRUE(duplicate.has_value());
+    EXPECT_EQ(*duplicate, 0U);
+
+    auto inserted = reassembler.insert(3, slice_of("de"));
+    ASSERT_TRUE(inserted.has_value());
+    EXPECT_EQ(*inserted, 2U);
+
+    auto taken = reassembler.take_contiguous(out);
+    ASSERT_TRUE(taken.has_value());
+    EXPECT_EQ(*taken, 2U);
+    EXPECT_EQ(chain_to_string(out), "de");
+    EXPECT_EQ(reassembler.next_offset(), 5U);
+}
+
+TEST(QuicDataReassemblerTest, BufferedDuplicateIsIgnored) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicDataReassembler reassembler;
+    reassembler.init(pool);
+
+    auto first = reassembler.insert(4, slice_of("ef"));
+    ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(*first, 2U);
+
+    auto duplicate = reassembler.insert(4, slice_of("ef"));
+    ASSERT_TRUE(duplicate.has_value());
+    EXPECT_EQ(*duplicate, 0U);
+    EXPECT_EQ(reassembler.buffered_bytes(), 2U);
+}
+
+TEST(QuicDataReassemblerTest, FrameCrossingFourKilobyteBlockBoundaryIsSplitAndTakenInOrder) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicDataReassembler reassembler;
+    reassembler.init(pool);
+
+    constexpr std::size_t block = 4 * 1024;
+    std::string payload(32, 'x');
+    payload.replace(0, 4, "abcd");
+    payload.replace(payload.size() - 4, 4, "wxyz");
+
+    auto inserted = reassembler.insert(block - 16, slice_of(payload));
+    ASSERT_TRUE(inserted.has_value());
+    EXPECT_EQ(*inserted, payload.size());
+    EXPECT_EQ(reassembler.active_block_count(), 2U);
+
+    std::string prefix(block - 16, 'p');
+    inserted = reassembler.insert(0, slice_of(prefix));
+    ASSERT_TRUE(inserted.has_value());
+    EXPECT_EQ(*inserted, prefix.size());
+
+    fiber::mem::IoBufChain out(pool);
+    auto taken = reassembler.take_contiguous(out);
+    ASSERT_TRUE(taken.has_value());
+    EXPECT_EQ(*taken, block + 16U);
+
+    std::string expected = prefix + payload;
+    EXPECT_EQ(chain_to_string(out), expected);
+    EXPECT_EQ(reassembler.next_offset(), expected.size());
+}
+
+TEST(QuicDataReassemblerTest, BufferLimitRejectsAdditionalBufferedBytesWithoutConsumingExistingData) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicDataReassembler reassembler;
+    reassembler.init(pool, {.buffer_limit = 8});
+
+    auto inserted = reassembler.insert(4, slice_of("abcdefgh"));
+    ASSERT_TRUE(inserted.has_value());
+    EXPECT_EQ(*inserted, 8U);
+    EXPECT_EQ(reassembler.buffered_bytes(), 8U);
+
+    inserted = reassembler.insert(12, slice_of("x"));
+    ASSERT_FALSE(inserted.has_value());
+    EXPECT_EQ(inserted.error(), fiber::common::IoErr::MessageTooLarge);
+    EXPECT_EQ(reassembler.buffered_bytes(), 8U);
+
+    inserted = reassembler.insert(0, slice_of("0123"));
+    ASSERT_TRUE(inserted.has_value());
+
+    fiber::mem::IoBufChain out(pool);
+    auto taken = reassembler.take_contiguous(out);
+    ASSERT_TRUE(taken.has_value());
+    EXPECT_EQ(*taken, 12U);
+    EXPECT_EQ(chain_to_string(out), "0123abcdefgh");
+}
+
+TEST(QuicDataReassemblerTest, ClearDropsBufferedDataAndResetsOffset) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicDataReassembler reassembler;
+    reassembler.init(pool);
+
+    ASSERT_TRUE(reassembler.insert(4, slice_of("late")).has_value());
+    EXPECT_EQ(reassembler.buffered_bytes(), 4U);
+    reassembler.clear();
+
+    EXPECT_EQ(reassembler.buffered_bytes(), 0U);
+    EXPECT_EQ(reassembler.next_offset(), 0U);
+    EXPECT_EQ(reassembler.active_extent_count(), 0U);
+    EXPECT_EQ(reassembler.active_block_count(), 0U);
+}

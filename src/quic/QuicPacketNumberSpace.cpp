@@ -28,6 +28,7 @@ void QuicPacketNumberSpace::set_frame_pool(QuicOutputFramePool &pool) noexcept {
 void QuicPacketNumberSpace::reset(QuicEncryptionLevel space_level) noexcept {
     level = space_level;
     crypto_sent = 0;
+    crypto_recv.clear();
     next_packet_number = 0;
     largest_acked_packet_number = kUnsetPacketNumber;
     largest_received_packet_number = kUnsetPacketNumber;

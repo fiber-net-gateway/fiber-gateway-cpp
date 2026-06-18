@@ -104,10 +104,13 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
             options_.output_frame_pool != nullptr ? *options_.output_frame_pool : output_frame_pool_;
     packet_number_spaces_[0].reset(QuicEncryptionLevel::Initial);
     packet_number_spaces_[0].set_frame_pool(frame_pool);
+    packet_number_spaces_[0].crypto_recv.init(recv_extent_pool_);
     packet_number_spaces_[1].reset(QuicEncryptionLevel::Handshake);
     packet_number_spaces_[1].set_frame_pool(frame_pool);
+    packet_number_spaces_[1].crypto_recv.init(recv_extent_pool_);
     packet_number_spaces_[2].reset(QuicEncryptionLevel::Application);
     packet_number_spaces_[2].set_frame_pool(frame_pool);
+    packet_number_spaces_[2].crypto_recv.init(recv_extent_pool_);
     quic_congestion_init(congestion_, QuicTime{0});
     quic_rtt_init(rtt_);
 
@@ -395,14 +398,6 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
     return {};
 }
 
-QuicCryptoRecvBuffer &QuicConnection::crypto_recv_buffer(QuicEncryptionLevel level) noexcept {
-    return crypto_recv_buffers_[packet_number_space_index(level)];
-}
-
-const QuicCryptoRecvBuffer &QuicConnection::crypto_recv_buffer(QuicEncryptionLevel level) const noexcept {
-    return crypto_recv_buffers_[packet_number_space_index(level)];
-}
-
 void QuicConnection::reset_congestion_for_path(QuicTime now) noexcept {
     auto &space = packet_number_space(QuicEncryptionLevel::Application);
     reset_packet_number_ = space.next_packet_number;
@@ -569,8 +564,7 @@ bool QuicConnection::is_gone_peer_stream(std::uint64_t stream_id) const noexcept
         return false;
     }
 
-    const std::uint64_t next =
-            is_bidirectional_stream(stream_id) ? next_peer_bidi_sequence_ : next_peer_uni_sequence_;
+    const std::uint64_t next = is_bidirectional_stream(stream_id) ? next_peer_bidi_sequence_ : next_peer_uni_sequence_;
     return stream_sequence(stream_id) < next;
 }
 

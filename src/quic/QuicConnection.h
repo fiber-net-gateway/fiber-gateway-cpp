@@ -5,7 +5,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 
 #include <openssl/aead.h>
 #include <openssl/aes.h>
@@ -29,8 +28,6 @@ namespace fiber::quic {
 struct QuicTransportParams;
 
 inline constexpr std::size_t kQuicConnectionIdLength = kMaxConnectionIdLength;
-inline constexpr std::size_t kQuicMaxCryptoBuffered = 65536;
-inline constexpr std::size_t kQuicMaxCryptoBufferedSegments = 16;
 inline constexpr std::size_t kQuicInitialSecretLength = 32;
 inline constexpr std::size_t kQuicMaxSecretLength = 48;
 inline constexpr std::size_t kQuicMaxKeyLength = 32;
@@ -94,18 +91,6 @@ struct QuicConnectionId {
     [[nodiscard]] std::size_t size() const noexcept { return length; }
 
     static common::IoResult<QuicConnectionId> from_bytes(const std::uint8_t *data, std::size_t len) noexcept;
-};
-
-struct QuicCryptoBufferedSegment {
-    std::unique_ptr<std::uint8_t[]> data{};
-    std::uint64_t offset = 0;
-    std::size_t len = 0;
-    bool used = false;
-};
-
-struct QuicCryptoRecvBuffer {
-    std::uint64_t next_offset = 0;
-    std::array<QuicCryptoBufferedSegment, kQuicMaxCryptoBufferedSegments> segments{};
 };
 
 struct QuicTransportSettings {
@@ -357,9 +342,6 @@ public:
     [[nodiscard]] const QuicTransportSettings &local_transport() const noexcept { return options_.transport; }
     [[nodiscard]] const QuicPeerTransportState &peer_transport() const noexcept { return peer_transport_; }
     [[nodiscard]] bool peer_transport_params_received() const noexcept { return peer_transport_.received; }
-    [[nodiscard]] QuicCryptoRecvBuffer &crypto_recv_buffer(QuicEncryptionLevel level) noexcept;
-    [[nodiscard]] const QuicCryptoRecvBuffer &crypto_recv_buffer(QuicEncryptionLevel level) const noexcept;
-
     EndpointIndex endpoint_index{};
     ConnectionIdIndex original_dcid_index{};
     ConnectionIdIndex local_cid_index{};
@@ -401,7 +383,6 @@ private:
     QuicPeerTransportState peer_transport_{};
     mem::IoBufNodePool recv_extent_pool_{};
     QuicStreamTable streams_{};
-    std::array<QuicCryptoRecvBuffer, kQuicPacketNumberSpaceCount> crypto_recv_buffers_{};
     QuicTlsSession tls_{};
     std::array<QuicPath, kQuicMaxPaths> paths_{};
     QuicPath *active_path_ = nullptr;
