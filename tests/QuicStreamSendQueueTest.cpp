@@ -15,7 +15,7 @@
 namespace fiber::quic {
 
 struct QuicStreamSendQueueTestAccess {
-    static common::IoResult<QuicStreamSendBuffer::EncodedFrameResult>
+    static common::IoResult<QuicStreamSendQueue::EncodedFrameResult>
     encode_stream_frame(QuicStreamSendQueue &queue, std::uint64_t stream_id, std::uint8_t *dst,
                         std::size_t capacity) noexcept {
         return queue.encode_stream_frame(stream_id, dst, capacity);
@@ -98,7 +98,7 @@ DetachedTask reset_after_delay(fiber::quic::QuicStreamSendQueue *queue, std::ato
                                std::promise<fiber::common::IoResult<std::uint64_t>> *reset_done) {
     co_await fiber::async::sleep(std::chrono::milliseconds(20));
     waiter_seen->store(queue->has_append_waiter(), std::memory_order_relaxed);
-    reset_done->set_value(queue->mark_reset());
+    reset_done->set_value(queue->reset(42));
 }
 
 } // namespace
@@ -130,7 +130,7 @@ TEST(QuicStreamSendQueueTest, AppendWaitsForBufferedBytesToBeAcked) {
     EXPECT_TRUE(waiter_seen.load(std::memory_order_relaxed));
     EXPECT_TRUE(result.ok);
     EXPECT_EQ(result.value, 1u);
-    EXPECT_EQ(queue.buffer().ready_bytes(), 1u);
+    EXPECT_EQ(queue.ready_bytes(), 1u);
     group.join();
 }
 
@@ -162,7 +162,7 @@ TEST(QuicStreamSendQueueTest, AppendWaitsForMaxStreamDataIncrease) {
     EXPECT_TRUE(waiter_seen.load(std::memory_order_relaxed));
     EXPECT_TRUE(result.ok);
     EXPECT_EQ(result.value, 1u);
-    EXPECT_EQ(queue.buffer().total_appended_bytes(), 6u);
+    EXPECT_EQ(queue.total_appended_bytes(), 6u);
     group.join();
 }
 
@@ -201,8 +201,9 @@ TEST(QuicStreamSendQueueTest, ResetWakesBlockedAppend) {
     EXPECT_TRUE(waiter_seen.load(std::memory_order_relaxed));
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.error, fiber::common::IoErr::BrokenPipe);
-    EXPECT_TRUE(queue.buffer().reset());
-    EXPECT_EQ(queue.buffer().final_size(), 5u);
+    EXPECT_TRUE(queue.reset_sent());
+    EXPECT_EQ(queue.final_size(), 5u);
+    EXPECT_EQ(queue.reset_error_code(), 42u);
     group.join();
 }
 

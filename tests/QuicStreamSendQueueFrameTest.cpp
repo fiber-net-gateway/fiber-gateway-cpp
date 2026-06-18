@@ -5,12 +5,41 @@
 #include <string>
 #include <string_view>
 
-#include "quic/QuicStreamSendBuffer.h"
+#include "quic/QuicStreamSendQueue.h"
 #include "quic/QuicTransportCodec.h"
+
+namespace fiber::quic {
+
+struct QuicStreamSendQueueFrameTestAccess {
+    static common::IoResult<QuicStreamSendQueue::PreparedFrameResult>
+    prepare_stream_frame(QuicStreamSendQueue &queue, std::uint64_t stream_id, std::size_t capacity) noexcept {
+        return queue.prepare_stream_frame(stream_id, capacity);
+    }
+
+    static common::IoResult<QuicStreamSendQueue::EncodedFrameResult>
+    encode_stream_frame(QuicStreamSendQueue &queue, std::uint64_t stream_id, std::uint8_t *dst,
+                        std::size_t capacity) noexcept {
+        return queue.encode_stream_frame(stream_id, dst, capacity);
+    }
+
+    static common::IoResult<void> mark_acked(QuicStreamSendQueue &queue, std::size_t offset, std::size_t length,
+                                             bool encoded_fin) noexcept {
+        return queue.mark_acked(offset, length, encoded_fin);
+    }
+
+    static common::IoResult<void> mark_failed(QuicStreamSendQueue &queue, std::size_t offset, std::size_t length,
+                                              bool encoded_fin) noexcept {
+        return queue.mark_failed(offset, length, encoded_fin);
+    }
+};
+
+} // namespace fiber::quic
 
 namespace {
 
 constexpr std::size_t kStreamDataBlockSize = 64 * 1024;
+
+using QueueAccess = fiber::quic::QuicStreamSendQueueFrameTestAccess;
 
 fiber::mem::IoBuf iobuf_of(std::string_view value) {
     fiber::mem::IoBuf buf = fiber::mem::IoBuf::allocate(value.size());
@@ -36,17 +65,17 @@ std::string_view frame_data_view(const fiber::quic::QuicInputFrame &frame) {
     return {reinterpret_cast<const char *>(frame.data.data), frame.data.len};
 }
 
-TEST(QuicStreamSendBufferTest, EncodesAppendedDataAsInflightAndAckReleasesIt) {
+TEST(QuicStreamSendQueueFrameTest, EncodesAppendedDataAsInflightAndAckReleasesIt) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendBuffer buffer(pool);
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
 
-    auto appended = buffer.append(iobuf_of("hello"));
+    auto appended = buffer.try_append(iobuf_of("hello"));
     ASSERT_TRUE(appended.has_value());
     EXPECT_EQ(*appended, 5u);
     EXPECT_EQ(buffer.ready_bytes(), 5u);
 
     std::array<std::uint8_t, 64> out{};
-    auto encoded = buffer.encode_stream_frame(4, out.data(), out.size());
+    auto encoded = QueueAccess::encode_stream_frame(buffer, 4, out.data(), out.size());
     ASSERT_TRUE(encoded.has_value());
     ASSERT_TRUE(encoded->encoded);
     EXPECT_EQ(encoded->offset, 0u);
@@ -62,35 +91,35 @@ TEST(QuicStreamSendBufferTest, EncodesAppendedDataAsInflightAndAckReleasesIt) {
     EXPECT_FALSE(frame.u.stream.fin);
     EXPECT_EQ(frame_data_view(frame), "hello");
 
-    auto acked = buffer.mark_acked(encoded->offset, encoded->data_len, encoded->fin);
+    auto acked = QueueAccess::mark_acked(buffer, encoded->offset, encoded->data_len, encoded->fin);
     ASSERT_TRUE(acked.has_value());
     EXPECT_TRUE(buffer.empty());
     EXPECT_EQ(buffer.buffered_bytes(), 0u);
     EXPECT_EQ(buffer.active_extent_count(), 0u);
 }
 
-TEST(QuicStreamSendBufferTest, FailedRangeReturnsToReadyAndCanBeEncodedAgain) {
+TEST(QuicStreamSendQueueFrameTest, FailedRangeReturnsToReadyAndCanBeEncodedAgain) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendBuffer buffer(pool);
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
 
-    ASSERT_TRUE(buffer.append(iobuf_of("abcdef")).has_value());
+    ASSERT_TRUE(buffer.try_append(iobuf_of("abcdef")).has_value());
 
     std::array<std::uint8_t, 6> out{};
-    auto encoded = buffer.encode_stream_frame(4, out.data(), out.size());
+    auto encoded = QueueAccess::encode_stream_frame(buffer, 4, out.data(), out.size());
     ASSERT_TRUE(encoded.has_value());
     ASSERT_TRUE(encoded->encoded);
     EXPECT_EQ(encoded->data_len, 4u);
     EXPECT_EQ(buffer.ready_bytes(), 2u);
     EXPECT_EQ(buffer.inflight_bytes(), 4u);
 
-    auto failed = buffer.mark_failed(encoded->offset, encoded->data_len, encoded->fin);
+    auto failed = QueueAccess::mark_failed(buffer, encoded->offset, encoded->data_len, encoded->fin);
     ASSERT_TRUE(failed.has_value());
     EXPECT_EQ(buffer.ready_bytes(), 6u);
     EXPECT_EQ(buffer.inflight_bytes(), 0u);
     EXPECT_EQ(buffer.active_extent_count(), 1u);
 
     std::array<std::uint8_t, 64> retry{};
-    auto retried = buffer.encode_stream_frame(4, retry.data(), retry.size());
+    auto retried = QueueAccess::encode_stream_frame(buffer, 4, retry.data(), retry.size());
     ASSERT_TRUE(retried.has_value());
     ASSERT_TRUE(retried->encoded);
     EXPECT_EQ(retried->offset, 0u);
@@ -100,13 +129,13 @@ TEST(QuicStreamSendBufferTest, FailedRangeReturnsToReadyAndCanBeEncodedAgain) {
     EXPECT_EQ(frame_data_view(frame), "abcdef");
 }
 
-TEST(QuicStreamSendBufferTest, PrepareFrameMarksInflightAndFailedRangeReturnsReady) {
+TEST(QuicStreamSendQueueFrameTest, PrepareFrameMarksInflightAndFailedRangeReturnsReady) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendBuffer buffer(pool);
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
 
-    ASSERT_TRUE(buffer.append(iobuf_of("abcdef")).has_value());
+    ASSERT_TRUE(buffer.try_append(iobuf_of("abcdef")).has_value());
 
-    auto prepared = buffer.prepare_stream_frame(4, 6);
+    auto prepared = QueueAccess::prepare_stream_frame(buffer, 4, 6);
     ASSERT_TRUE(prepared.has_value());
     ASSERT_TRUE(prepared->encoded);
     EXPECT_EQ(prepared->offset, 0u);
@@ -116,80 +145,80 @@ TEST(QuicStreamSendBufferTest, PrepareFrameMarksInflightAndFailedRangeReturnsRea
     EXPECT_EQ(buffer.ready_bytes(), 3u);
     EXPECT_EQ(buffer.inflight_bytes(), 3u);
 
-    auto failed = buffer.mark_failed(prepared->offset, prepared->data_len, prepared->fin);
+    auto failed = QueueAccess::mark_failed(buffer, prepared->offset, prepared->data_len, prepared->fin);
     ASSERT_TRUE(failed.has_value());
     EXPECT_EQ(buffer.ready_bytes(), 6u);
     EXPECT_EQ(buffer.inflight_bytes(), 0u);
 }
 
-TEST(QuicStreamSendBufferTest, InsufficientCapacityDoesNotChangeState) {
+TEST(QuicStreamSendQueueFrameTest, InsufficientCapacityDoesNotChangeState) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendBuffer buffer(pool);
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
 
-    ASSERT_TRUE(buffer.append(iobuf_of("abc")).has_value());
+    ASSERT_TRUE(buffer.try_append(iobuf_of("abc")).has_value());
 
     std::array<std::uint8_t, 2> out{};
-    auto encoded = buffer.encode_stream_frame(4, out.data(), out.size());
+    auto encoded = QueueAccess::encode_stream_frame(buffer, 4, out.data(), out.size());
     ASSERT_TRUE(encoded.has_value());
     EXPECT_FALSE(encoded->encoded);
     EXPECT_EQ(buffer.ready_bytes(), 3u);
     EXPECT_EQ(buffer.inflight_bytes(), 0u);
 }
 
-TEST(QuicStreamSendBufferTest, LargeIoBufAppendsAsSingleExtent) {
+TEST(QuicStreamSendQueueFrameTest, LargeIoBufAppendsAsSingleExtent) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendBuffer buffer(pool);
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
 
     std::string payload(kStreamDataBlockSize + 17, 'x');
-    auto appended = buffer.append(iobuf_of(payload));
+    auto appended = buffer.try_append(iobuf_of(payload));
     ASSERT_TRUE(appended.has_value());
     EXPECT_EQ(*appended, payload.size());
     EXPECT_EQ(buffer.active_extent_count(), 1u);
     EXPECT_EQ(buffer.ready_bytes(), payload.size());
 }
 
-TEST(QuicStreamSendBufferTest, FailedPartialEncodeMergesReadySlicesFromSameIoBuf) {
+TEST(QuicStreamSendQueueFrameTest, FailedPartialEncodeMergesReadySlicesFromSameIoBuf) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendBuffer buffer(pool);
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
 
-    ASSERT_TRUE(buffer.append(iobuf_of("abcdef")).has_value());
+    ASSERT_TRUE(buffer.try_append(iobuf_of("abcdef")).has_value());
 
     std::array<std::uint8_t, 5> out{};
-    auto encoded = buffer.encode_stream_frame(4, out.data(), out.size());
+    auto encoded = QueueAccess::encode_stream_frame(buffer, 4, out.data(), out.size());
     ASSERT_TRUE(encoded.has_value());
     ASSERT_TRUE(encoded->encoded);
     EXPECT_EQ(encoded->data_len, 3u);
     EXPECT_EQ(buffer.active_extent_count(), 2u);
 
-    auto failed = buffer.mark_failed(encoded->offset, encoded->data_len, encoded->fin);
+    auto failed = QueueAccess::mark_failed(buffer, encoded->offset, encoded->data_len, encoded->fin);
     ASSERT_TRUE(failed.has_value());
     EXPECT_EQ(buffer.active_extent_count(), 1u);
     EXPECT_EQ(buffer.ready_bytes(), 6u);
 }
 
-TEST(QuicStreamSendBufferTest, SeparateIoBufAppendsRemainSeparateReadyExtents) {
+TEST(QuicStreamSendQueueFrameTest, SeparateIoBufAppendsRemainSeparateReadyExtents) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendBuffer buffer(pool);
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
 
-    ASSERT_TRUE(buffer.append(iobuf_of("abc")).has_value());
-    ASSERT_TRUE(buffer.append(iobuf_of("def")).has_value());
+    ASSERT_TRUE(buffer.try_append(iobuf_of("abc")).has_value());
+    ASSERT_TRUE(buffer.try_append(iobuf_of("def")).has_value());
 
     EXPECT_EQ(buffer.buffered_bytes(), 6u);
     EXPECT_EQ(buffer.ready_bytes(), 6u);
     EXPECT_EQ(buffer.active_extent_count(), 2u);
 }
 
-TEST(QuicStreamSendBufferTest, FinalDataCarriesFinUntilAcked) {
+TEST(QuicStreamSendQueueFrameTest, FinalDataCarriesFinUntilAcked) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendBuffer buffer(pool);
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
 
-    auto appended = buffer.append(iobuf_of("done"), true);
+    auto appended = buffer.try_append(iobuf_of("done"), true);
     ASSERT_TRUE(appended.has_value());
     EXPECT_TRUE(buffer.has_final_size());
     EXPECT_EQ(buffer.final_size(), 4u);
 
     std::array<std::uint8_t, 64> out{};
-    auto encoded = buffer.encode_stream_frame(8, out.data(), out.size());
+    auto encoded = QueueAccess::encode_stream_frame(buffer, 8, out.data(), out.size());
     ASSERT_TRUE(encoded.has_value());
     ASSERT_TRUE(encoded->encoded);
     EXPECT_EQ(encoded->offset, 0u);
@@ -200,23 +229,23 @@ TEST(QuicStreamSendBufferTest, FinalDataCarriesFinUntilAcked) {
     EXPECT_TRUE(frame.u.stream.fin);
     EXPECT_EQ(frame_data_view(frame), "done");
 
-    auto acked = buffer.mark_acked(encoded->offset, encoded->data_len, encoded->fin);
+    auto acked = QueueAccess::mark_acked(buffer, encoded->offset, encoded->data_len, encoded->fin);
     ASSERT_TRUE(acked.has_value());
     EXPECT_TRUE(buffer.has_final_size());
     EXPECT_EQ(buffer.final_size(), 4u);
     EXPECT_TRUE(buffer.empty());
 }
 
-TEST(QuicStreamSendBufferTest, AppendChainTakesReadableNodesAndUsesCompleteAsFin) {
+TEST(QuicStreamSendQueueFrameTest, AppendChainTakesReadableNodesAndUsesCompleteAsFin) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendBuffer buffer(pool);
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
     fiber::mem::IoBufChain chain(pool);
 
     ASSERT_TRUE(chain.append(iobuf_of("ab")));
     ASSERT_TRUE(chain.append(iobuf_of("cd")));
     chain.mark_complete();
 
-    auto appended = buffer.append_chain(chain);
+    auto appended = buffer.try_append_chain(chain);
     ASSERT_TRUE(appended.has_value());
     EXPECT_EQ(*appended, 4u);
     EXPECT_TRUE(chain.empty());
@@ -226,7 +255,7 @@ TEST(QuicStreamSendBufferTest, AppendChainTakesReadableNodesAndUsesCompleteAsFin
     EXPECT_EQ(buffer.final_size(), 4u);
 
     std::array<std::uint8_t, 64> out{};
-    auto encoded = buffer.encode_stream_frame(8, out.data(), out.size());
+    auto encoded = QueueAccess::encode_stream_frame(buffer, 8, out.data(), out.size());
     ASSERT_TRUE(encoded.has_value());
     ASSERT_TRUE(encoded->encoded);
     EXPECT_EQ(encoded->data_len, 2u);
@@ -236,8 +265,8 @@ TEST(QuicStreamSendBufferTest, AppendChainTakesReadableNodesAndUsesCompleteAsFin
     EXPECT_EQ(frame_data_view(frame), "ab");
     EXPECT_FALSE(frame.u.stream.fin);
 
-    ASSERT_TRUE(buffer.mark_acked(encoded->offset, encoded->data_len, encoded->fin).has_value());
-    encoded = buffer.encode_stream_frame(8, out.data(), out.size());
+    ASSERT_TRUE(QueueAccess::mark_acked(buffer, encoded->offset, encoded->data_len, encoded->fin).has_value());
+    encoded = QueueAccess::encode_stream_frame(buffer, 8, out.data(), out.size());
     ASSERT_TRUE(encoded.has_value());
     ASSERT_TRUE(encoded->encoded);
     EXPECT_EQ(encoded->data_len, 2u);
@@ -247,13 +276,13 @@ TEST(QuicStreamSendBufferTest, AppendChainTakesReadableNodesAndUsesCompleteAsFin
     EXPECT_TRUE(frame.u.stream.fin);
 }
 
-TEST(QuicStreamSendBufferTest, AppendCompleteEmptyChainProducesFinOnlyFrame) {
+TEST(QuicStreamSendQueueFrameTest, AppendCompleteEmptyChainProducesFinOnlyFrame) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendBuffer buffer(pool);
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
     fiber::mem::IoBufChain chain(pool);
     chain.mark_complete();
 
-    auto appended = buffer.append_chain(chain);
+    auto appended = buffer.try_append_chain(chain);
     ASSERT_TRUE(appended.has_value());
     EXPECT_EQ(*appended, 0u);
     EXPECT_FALSE(chain.complete());
@@ -261,21 +290,21 @@ TEST(QuicStreamSendBufferTest, AppendCompleteEmptyChainProducesFinOnlyFrame) {
     EXPECT_EQ(buffer.final_size(), 0u);
 
     std::array<std::uint8_t, 64> out{};
-    auto encoded = buffer.encode_stream_frame(12, out.data(), out.size());
+    auto encoded = QueueAccess::encode_stream_frame(buffer, 12, out.data(), out.size());
     ASSERT_TRUE(encoded.has_value());
     ASSERT_TRUE(encoded->encoded);
     EXPECT_EQ(encoded->data_len, 0u);
     EXPECT_TRUE(encoded->fin);
 }
 
-TEST(QuicStreamSendBufferTest, FinOnlyFrameCanFailAndRetry) {
+TEST(QuicStreamSendQueueFrameTest, FinOnlyFrameCanFailAndRetry) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendBuffer buffer(pool);
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
 
-    ASSERT_TRUE(buffer.append(fiber::mem::IoBuf{}, true).has_value());
+    ASSERT_TRUE(buffer.try_append(fiber::mem::IoBuf{}, true).has_value());
 
     std::array<std::uint8_t, 64> out{};
-    auto encoded = buffer.encode_stream_frame(12, out.data(), out.size());
+    auto encoded = QueueAccess::encode_stream_frame(buffer, 12, out.data(), out.size());
     ASSERT_TRUE(encoded.has_value());
     ASSERT_TRUE(encoded->encoded);
     EXPECT_EQ(encoded->offset, 0u);
@@ -287,29 +316,29 @@ TEST(QuicStreamSendBufferTest, FinOnlyFrameCanFailAndRetry) {
     EXPECT_TRUE(frame.u.stream.fin);
     EXPECT_EQ(frame.u.stream.length, 0u);
 
-    ASSERT_TRUE(buffer.mark_failed(encoded->offset, encoded->data_len, encoded->fin).has_value());
-    auto retried = buffer.encode_stream_frame(12, out.data(), out.size());
+    ASSERT_TRUE(QueueAccess::mark_failed(buffer, encoded->offset, encoded->data_len, encoded->fin).has_value());
+    auto retried = QueueAccess::encode_stream_frame(buffer, 12, out.data(), out.size());
     ASSERT_TRUE(retried.has_value());
     ASSERT_TRUE(retried->encoded);
     EXPECT_TRUE(retried->fin);
 
-    ASSERT_TRUE(buffer.mark_acked(retried->offset, retried->data_len, retried->fin).has_value());
+    ASSERT_TRUE(QueueAccess::mark_acked(buffer, retried->offset, retried->data_len, retried->fin).has_value());
     EXPECT_TRUE(buffer.has_final_size());
     EXPECT_EQ(buffer.final_size(), 0u);
     EXPECT_TRUE(buffer.empty());
 }
 
-TEST(QuicStreamSendBufferTest, OmitsLengthFieldWhenPayloadFillsBuffer) {
+TEST(QuicStreamSendQueueFrameTest, OmitsLengthFieldWhenPayloadFillsBuffer) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendBuffer buffer(pool);
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
 
     // 20 bytes of data — more than any reasonable header, so the buffer-filling path triggers.
-    ASSERT_TRUE(buffer.append(iobuf_of("01234567890123456789")).has_value());
+    ASSERT_TRUE(buffer.try_append(iobuf_of("01234567890123456789")).has_value());
 
     // capacity = 22: header (type=1 + stream_id=1) = 2, so remaining = 20 = available → no LEN.
     constexpr std::size_t capacity = 22;
     std::array<std::uint8_t, capacity> out{};
-    auto encoded = buffer.encode_stream_frame(4, out.data(), out.size());
+    auto encoded = QueueAccess::encode_stream_frame(buffer, 4, out.data(), out.size());
     ASSERT_TRUE(encoded.has_value());
     ASSERT_TRUE(encoded->encoded);
     EXPECT_EQ(encoded->data_len, 20u);
@@ -328,15 +357,15 @@ TEST(QuicStreamSendBufferTest, OmitsLengthFieldWhenPayloadFillsBuffer) {
     EXPECT_EQ(frame_data_view(frame), "01234567890123456789");
 }
 
-TEST(QuicStreamSendBufferTest, IncludesLengthFieldWhenPayloadDoesNotFillBuffer) {
+TEST(QuicStreamSendQueueFrameTest, IncludesLengthFieldWhenPayloadDoesNotFillBuffer) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendBuffer buffer(pool);
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
 
-    ASSERT_TRUE(buffer.append(iobuf_of("hi")).has_value());
+    ASSERT_TRUE(buffer.try_append(iobuf_of("hi")).has_value());
 
     // capacity = 64 but only 2 bytes of data → cannot fill → LEN must be set.
     std::array<std::uint8_t, 64> out{};
-    auto encoded = buffer.encode_stream_frame(4, out.data(), out.size());
+    auto encoded = QueueAccess::encode_stream_frame(buffer, 4, out.data(), out.size());
     ASSERT_TRUE(encoded.has_value());
     ASSERT_TRUE(encoded->encoded);
     EXPECT_EQ(encoded->data_len, 2u);
@@ -350,28 +379,28 @@ TEST(QuicStreamSendBufferTest, IncludesLengthFieldWhenPayloadDoesNotFillBuffer) 
     EXPECT_EQ(frame_data_view(frame), "hi");
 }
 
-TEST(QuicStreamSendBufferTest, OmitsLengthWithOffsetAndFin) {
+TEST(QuicStreamSendQueueFrameTest, OmitsLengthWithOffsetAndFin) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendBuffer buffer(pool);
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
 
     // Append first 5 bytes without FIN, then 5 more bytes with FIN.
-    ASSERT_TRUE(buffer.append(iobuf_of("abcde")).has_value());
-    ASSERT_TRUE(buffer.append(iobuf_of("fghij"), true).has_value());
+    ASSERT_TRUE(buffer.try_append(iobuf_of("abcde")).has_value());
+    ASSERT_TRUE(buffer.try_append(iobuf_of("fghij"), true).has_value());
 
     // First frame: encode 5 bytes at offset 0 with large capacity → uses LEN.
     std::array<std::uint8_t, 64> out1{};
-    auto enc1 = buffer.encode_stream_frame(4, out1.data(), out1.size());
+    auto enc1 = QueueAccess::encode_stream_frame(buffer, 4, out1.data(), out1.size());
     ASSERT_TRUE(enc1.has_value());
     ASSERT_TRUE(enc1->encoded);
     EXPECT_EQ(enc1->offset, 0u);
     EXPECT_EQ(enc1->data_len, 5u);
     EXPECT_FALSE(enc1->fin);
-    ASSERT_TRUE(buffer.mark_acked(enc1->offset, enc1->data_len, enc1->fin).has_value());
+    ASSERT_TRUE(QueueAccess::mark_acked(buffer, enc1->offset, enc1->data_len, enc1->fin).has_value());
 
     // Second frame: 5 bytes at offset 5 with FIN.
     // capacity=8: header(type=1 + sid=1 + off=1)=3, remaining=5=available → no LEN.
     std::array<std::uint8_t, 8> out2{};
-    auto enc2 = buffer.encode_stream_frame(4, out2.data(), out2.size());
+    auto enc2 = QueueAccess::encode_stream_frame(buffer, 4, out2.data(), out2.size());
     ASSERT_TRUE(enc2.has_value());
     ASSERT_TRUE(enc2->encoded);
     EXPECT_EQ(enc2->offset, 5u);
@@ -392,52 +421,53 @@ TEST(QuicStreamSendBufferTest, OmitsLengthWithOffsetAndFin) {
     EXPECT_EQ(frame_data_view(frame), "fghij");
 }
 
-TEST(QuicStreamSendBufferTest, ResetBeforeFinRecordsFinalSizeAndReleasesBufferedData) {
+TEST(QuicStreamSendQueueFrameTest, ResetBeforeFinRecordsFinalSizeAndReleasesBufferedData) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendBuffer buffer(pool);
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
 
-    ASSERT_TRUE(buffer.append(iobuf_of("abcdef")).has_value());
+    ASSERT_TRUE(buffer.try_append(iobuf_of("abcdef")).has_value());
 
     std::array<std::uint8_t, 6> out{};
-    auto encoded = buffer.encode_stream_frame(4, out.data(), out.size());
+    auto encoded = QueueAccess::encode_stream_frame(buffer, 4, out.data(), out.size());
     ASSERT_TRUE(encoded.has_value());
     ASSERT_TRUE(encoded->encoded);
     EXPECT_EQ(buffer.ready_bytes(), 2u);
     EXPECT_EQ(buffer.inflight_bytes(), 4u);
 
-    auto final_size = buffer.mark_reset();
+    auto final_size = buffer.reset(42);
     ASSERT_TRUE(final_size.has_value());
     EXPECT_EQ(*final_size, 6u);
-    EXPECT_TRUE(buffer.reset());
+    EXPECT_TRUE(buffer.reset_sent());
     EXPECT_TRUE(buffer.has_final_size());
     EXPECT_EQ(buffer.final_size(), 6u);
+    EXPECT_EQ(buffer.reset_error_code(), 42u);
     EXPECT_TRUE(buffer.empty());
     EXPECT_EQ(buffer.buffered_bytes(), 0u);
     EXPECT_EQ(buffer.active_extent_count(), 0u);
 
-    auto append_after_reset = buffer.append(iobuf_of("x"));
+    auto append_after_reset = buffer.try_append(iobuf_of("x"));
     ASSERT_FALSE(append_after_reset.has_value());
     EXPECT_EQ(append_after_reset.error(), fiber::common::IoErr::BrokenPipe);
 
     std::array<std::uint8_t, 64> retry{};
-    auto after_reset = buffer.encode_stream_frame(4, retry.data(), retry.size());
+    auto after_reset = QueueAccess::encode_stream_frame(buffer, 4, retry.data(), retry.size());
     ASSERT_TRUE(after_reset.has_value());
     EXPECT_FALSE(after_reset->encoded);
 
-    EXPECT_TRUE(buffer.mark_acked(encoded->offset, encoded->data_len, encoded->fin).has_value());
-    EXPECT_TRUE(buffer.mark_failed(encoded->offset, encoded->data_len, encoded->fin).has_value());
+    EXPECT_TRUE(QueueAccess::mark_acked(buffer, encoded->offset, encoded->data_len, encoded->fin).has_value());
+    EXPECT_TRUE(QueueAccess::mark_failed(buffer, encoded->offset, encoded->data_len, encoded->fin).has_value());
 }
 
-TEST(QuicStreamSendBufferTest, ResetAfterFinIsInvalid) {
+TEST(QuicStreamSendQueueFrameTest, ResetAfterFinIsInvalid) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendBuffer buffer(pool);
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
 
-    ASSERT_TRUE(buffer.append(iobuf_of("done"), true).has_value());
+    ASSERT_TRUE(buffer.try_append(iobuf_of("done"), true).has_value());
 
-    auto reset = buffer.mark_reset();
+    auto reset = buffer.reset(42);
     ASSERT_FALSE(reset.has_value());
     EXPECT_EQ(reset.error(), fiber::common::IoErr::Invalid);
-    EXPECT_FALSE(buffer.reset());
+    EXPECT_FALSE(buffer.reset_sent());
     EXPECT_TRUE(buffer.has_final_size());
     EXPECT_EQ(buffer.final_size(), 4u);
 }

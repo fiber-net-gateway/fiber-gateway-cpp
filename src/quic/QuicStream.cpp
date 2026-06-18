@@ -120,7 +120,7 @@ common::IoResult<void> QuicStream::stop_read(std::uint64_t error_code) noexcept 
 }
 
 common::IoResult<void> QuicStream::reset(std::uint64_t error_code) noexcept {
-    auto final_size = send_queue_.mark_reset();
+    auto final_size = send_queue_.reset(error_code);
     if (!final_size) {
         return std::unexpected(final_size.error());
     }
@@ -167,12 +167,12 @@ void QuicStream::on_max_stream_data(std::uint64_t limit) noexcept {
 
 bool QuicStream::has_send_work() const noexcept { return send_queue_.has_send_work(); }
 
-common::IoResult<QuicStreamSendBuffer::PreparedFrameResult>
+common::IoResult<QuicStreamSendQueue::PreparedFrameResult>
 QuicStream::prepare_stream_frame(std::size_t capacity) noexcept {
     return send_queue_.prepare_stream_frame(stream_id_, capacity);
 }
 
-common::IoResult<QuicStreamSendBuffer::EncodedFrameResult>
+common::IoResult<QuicStreamSendQueue::EncodedFrameResult>
 QuicStream::encode_stream_frame(std::uint8_t *dst, std::size_t capacity) noexcept {
     return send_queue_.encode_stream_frame(stream_id_, dst, capacity);
 }
@@ -199,7 +199,7 @@ void QuicStream::maybe_extend_recv_flow_control() noexcept {
 void QuicStream::mark_app_released() noexcept { app_released_ = true; }
 
 bool QuicStream::ready_for_connection_release() const noexcept {
-    return app_released_ && (recv_queue_.finished() || recv_queue_.reset_received()) && send_queue_.buffer().empty() &&
+    return app_released_ && (recv_queue_.finished() || recv_queue_.reset_received()) && send_queue_.empty() &&
            !stream_send_pending_;
 }
 
