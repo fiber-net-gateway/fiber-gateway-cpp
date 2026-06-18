@@ -72,7 +72,7 @@ TEST(QuicAckHandlerTest, AckedSentFrameUpdatesCongestionAndRtt) {
     frame->packet_number = 0;
     frame->packet_len = 1200;
     frame->send_time = fiber::quic::QuicTime{10};
-    frame->flags = fiber::quic::QuicOutputFramePacketAnchor | fiber::quic::QuicOutputFramePacketAckEliciting;
+    frame->packet_ack_eliciting = true;
     space.next_packet_number = 1;
     space.sent_frames.push_back(*frame);
     fiber::quic::quic_congestion_on_packet_sent(connection.congestion(), 1200, true, false);

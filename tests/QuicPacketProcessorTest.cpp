@@ -116,7 +116,8 @@ TEST(QuicPacketProcessorTest, ProcessesClientInitialCryptoFrame) {
     fiber::quic::QuicOutputFrame frame{};
     frame.type = fiber::quic::QuicFrameType::Crypto;
     frame.u.crypto.offset = 0;
-    frame.data = {crypto_data.data(), crypto_data.size()};
+    frame.u.crypto.data = crypto_data.data();
+    frame.u.crypto.length = crypto_data.size();
 
     std::array<std::uint8_t, 64> payload{};
     fiber::quic::QuicWriteCursor payload_out(payload.data(), payload.size());
@@ -155,7 +156,8 @@ TEST(QuicPacketProcessorTest, RejectsInitialStreamFrame) {
     frame.type = fiber::quic::QuicFrameType::Stream;
     frame.u.stream.stream_id = 0;
     frame.u.stream.has_length = true;
-    frame.data = {stream_data.data(), stream_data.size()};
+    frame.u.stream.data = stream_data.data();
+    frame.u.stream.length = stream_data.size();
 
     std::array<std::uint8_t, 64> payload{};
     fiber::quic::QuicWriteCursor payload_out(payload.data(), payload.size());

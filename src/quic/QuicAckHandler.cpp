@@ -52,7 +52,7 @@ struct AckStat {
                 result.unblocked = result.unblocked || unblocked;
             }
 
-            if (frame->packet_number == max_packet_number && (frame->flags & QuicOutputFramePacketAckEliciting) != 0) {
+            if (frame->packet_number == max_packet_number && frame->packet_ack_eliciting) {
                 stat.max_packet_send_time = frame->send_time;
                 stat.max_packet_ack_eliciting = true;
             }
@@ -64,9 +64,8 @@ struct AckStat {
             }
 
             space.sent_frames.erase_after(prev, *frame);
-            const bool generated_stream = (frame->flags & QuicOutputFrameGeneratedStream) != 0;
             frame->packet_len = 0;
-            frame->flags = 0;
+            frame->packet_ack_eliciting = false;
 
             // RFC 9000, 13.2.4: Limiting Ranges by Tracking ACK Frames.
             // When an ACK frame we sent is acknowledged, drop ranges up to
@@ -75,10 +74,10 @@ struct AckStat {
                 space.drop_ack_ranges(frame->packet_number);
             }
 
-            if (generated_stream) {
+            if (frame->type == QuicFrameType::Stream) {
                 auto acked = connection.on_stream_send_acked(frame->u.stream.stream_id,
                                                              static_cast<std::size_t>(frame->u.stream.offset),
-                                                             frame->data.len, frame->u.stream.fin);
+                                                             frame->u.stream.length, frame->u.stream.fin);
                 if (!acked) {
                     return std::unexpected(acked.error());
                 }
@@ -146,8 +145,7 @@ struct AckStat {
             if (front->packet_len != 0) {
                 const bool unblocked = quic_congestion_on_loss(
                         connection.congestion(),
-                        QuicLossSample{front->packet_len, front->packet_number, front->send_time,
-                                       (front->flags & QuicOutputFrameIgnoreLoss) != 0},
+                        QuicLossSample{front->packet_len, front->packet_number, front->send_time, front->ignore_loss},
                         connection.reset_packet_number(), now, connection.congestion().mtu);
                 result.unblocked = result.unblocked || unblocked;
             }
@@ -168,12 +166,11 @@ struct AckStat {
             front->packet_number = 0;
             front->packet_len = 0;
             front->send_time = QuicTime{0};
-            const bool generated_stream = (front->flags & QuicOutputFrameGeneratedStream) != 0;
-            front->flags = 0;
-            if (generated_stream) {
+            front->packet_ack_eliciting = false;
+            if (front->type == QuicFrameType::Stream) {
                 auto failed = connection.on_stream_send_failed(front->u.stream.stream_id,
                                                                static_cast<std::size_t>(front->u.stream.offset),
-                                                               front->data.len, front->u.stream.fin);
+                                                               front->u.stream.length, front->u.stream.fin);
                 if (!failed) {
                     return std::unexpected(failed.error());
                 }

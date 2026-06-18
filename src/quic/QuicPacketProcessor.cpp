@@ -72,10 +72,8 @@ namespace {
 }
 
 void discard_frame_queue(QuicConnection &conn, QuicPacketNumberSpace &space, QuicOutputFrameQueue &queue) noexcept {
+    (void) conn;
     while (QuicOutputFrame *frame = queue.pop_front()) {
-        if ((frame->flags & QuicOutputFrameStreamPlaceholder) != 0) {
-            conn.clear_stream_frame_pending(frame->u.stream.stream_id);
-        }
         space.release_frame(*frame);
     }
 }

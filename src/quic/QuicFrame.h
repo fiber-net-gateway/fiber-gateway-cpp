@@ -114,6 +114,9 @@ struct QuicOutputAckFrame {
     std::uint64_t delay = 0;
     std::uint64_t range_count = 0;
     std::uint64_t first_range = 0;
+    const std::uint8_t *ranges = nullptr;
+    std::uint32_t ranges_length = 0;
+    QuicOutputFrameDataBlock *owned_ranges = nullptr;
     std::uint64_t ect0 = 0;
     std::uint64_t ect1 = 0;
     std::uint64_t ce = 0;
@@ -121,13 +124,22 @@ struct QuicOutputAckFrame {
 
 struct QuicOutputCryptoFrame {
     std::uint64_t offset = 0;
+    const std::uint8_t *data = nullptr;
+    std::uint32_t length = 0;
+    QuicOutputFrameDataBlock *owned = nullptr;
 };
 
-struct QuicOutputNewTokenFrame {};
+struct QuicOutputNewTokenFrame {
+    const std::uint8_t *data = nullptr;
+    std::uint32_t length = 0;
+    QuicOutputFrameDataBlock *owned = nullptr;
+};
 
 struct QuicOutputStreamFrame {
     std::uint64_t stream_id = 0;
     std::uint64_t offset = 0;
+    const std::uint8_t *data = nullptr;
+    std::uint32_t length = 0;
     bool has_length = false;
     bool fin = false;
 };
@@ -135,6 +147,9 @@ struct QuicOutputStreamFrame {
 struct QuicOutputCloseFrame {
     std::uint64_t error_code = 0;
     std::uint64_t frame_type = 0;
+    const std::uint8_t *reason = nullptr;
+    std::uint32_t reason_length = 0;
+    QuicOutputFrameDataBlock *owned_reason = nullptr;
 };
 
 struct QuicOutputMaxStreamsFrame {
@@ -238,9 +253,8 @@ struct QuicOutputFrame {
     std::size_t encoded_len = 0;
     std::uint32_t packet_len = 0;
     std::chrono::milliseconds send_time{0};
-    std::uint8_t flags = 0;
-    QuicSlice data{};
-    QuicOutputFrameDataBlock *data_block = nullptr;
+    bool packet_ack_eliciting = false;
+    bool ignore_loss = false;
 
     union Payload {
         QuicPaddingFrame padding;
@@ -265,14 +279,6 @@ struct QuicOutputFrame {
 
     QuicOutputFrame *next = nullptr;
     bool queued = false;
-};
-
-enum QuicOutputFrameFlag : std::uint8_t {
-    QuicOutputFramePacketAnchor = 1U << 0U,
-    QuicOutputFramePacketAckEliciting = 1U << 1U,
-    QuicOutputFrameIgnoreLoss = 1U << 2U,
-    QuicOutputFrameGeneratedStream = 1U << 3U,
-    QuicOutputFrameStreamPlaceholder = 1U << 4U,
 };
 
 class QuicOutputFrameQueue {

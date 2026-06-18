@@ -539,7 +539,8 @@ recv_split_handshake_crypto_frame(fiber::event::EventLoop *loop, fiber::quic::Qu
     }
     crypto->type = fiber::quic::QuicFrameType::Crypto;
     crypto->u.crypto.offset = 0;
-    crypto->data = fiber::quic::QuicSlice{crypto_data.data(), crypto_data.size()};
+    crypto->u.crypto.data = crypto_data.data();
+    crypto->u.crypto.length = crypto_data.size();
     space.pending_frames.push_back(*crypto);
 
     fiber::quic::QuicConnection::Options client_options{};
@@ -579,8 +580,8 @@ recv_split_handshake_crypto_frame(fiber::event::EventLoop *loop, fiber::quic::Qu
     const fiber::quic::QuicOutputFrame *pending = space.pending_frames.front();
     done_promise->set_value(SplitFramePacketSummary{
             decoded->frame_count,
-            sent != nullptr ? sent->data.len : 0,
-            pending != nullptr ? pending->data.len : 0,
+            sent != nullptr ? sent->u.crypto.length : 0,
+            pending != nullptr ? pending->u.crypto.length : 0,
             pending != nullptr,
             space.sending_frames.empty(),
             server.congestion().in_flight,

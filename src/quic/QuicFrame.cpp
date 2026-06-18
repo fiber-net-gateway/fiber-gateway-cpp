@@ -144,11 +144,46 @@ void QuicOutputFramePool::clear() noexcept {
 
 common::IoResult<void> quic_output_frame_set_owned_data(QuicOutputFrame &frame, const std::uint8_t *data,
                                                         std::size_t len) noexcept {
-    if ((data == nullptr && len != 0) || frame.data_block != nullptr) {
+    if ((data == nullptr && len != 0) || len > UINT32_MAX) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    QuicOutputFrameDataBlock **target = nullptr;
+    const std::uint8_t **target_data = nullptr;
+    std::uint32_t *target_len = nullptr;
+    switch (frame.type) {
+        case QuicFrameType::Ack:
+        case QuicFrameType::AckEcn:
+            target = &frame.u.ack.owned_ranges;
+            target_data = &frame.u.ack.ranges;
+            target_len = &frame.u.ack.ranges_length;
+            break;
+        case QuicFrameType::Crypto:
+            target = &frame.u.crypto.owned;
+            target_data = &frame.u.crypto.data;
+            target_len = &frame.u.crypto.length;
+            break;
+        case QuicFrameType::NewToken:
+            target = &frame.u.new_token.owned;
+            target_data = &frame.u.new_token.data;
+            target_len = &frame.u.new_token.length;
+            break;
+        case QuicFrameType::ConnectionClose:
+        case QuicFrameType::ConnectionCloseApp:
+            target = &frame.u.close.owned_reason;
+            target_data = &frame.u.close.reason;
+            target_len = &frame.u.close.reason_length;
+            break;
+        default:
+            return std::unexpected(common::IoErr::Invalid);
+    }
+
+    if (*target != nullptr) {
         return std::unexpected(common::IoErr::Invalid);
     }
     if (len == 0) {
-        frame.data = {nullptr, 0};
+        *target_data = nullptr;
+        *target_len = 0;
         return {};
     }
 
@@ -166,25 +201,73 @@ common::IoResult<void> quic_output_frame_set_owned_data(QuicOutputFrame &frame, 
     std::memcpy(block->data, data, len);
     block->len = len;
     block->refs = 1;
-    frame.data_block = block;
-    frame.data = {block->data, len};
+    *target = block;
+    *target_data = block->data;
+    *target_len = static_cast<std::uint32_t>(len);
     return {};
 }
 
 void quic_output_frame_retain_data(QuicOutputFrame &frame) noexcept {
-    if (frame.data_block != nullptr) {
-        ++frame.data_block->refs;
+    QuicOutputFrameDataBlock *block = nullptr;
+    switch (frame.type) {
+        case QuicFrameType::Ack:
+        case QuicFrameType::AckEcn:
+            block = frame.u.ack.owned_ranges;
+            break;
+        case QuicFrameType::Crypto:
+            block = frame.u.crypto.owned;
+            break;
+        case QuicFrameType::NewToken:
+            block = frame.u.new_token.owned;
+            break;
+        case QuicFrameType::ConnectionClose:
+        case QuicFrameType::ConnectionCloseApp:
+            block = frame.u.close.owned_reason;
+            break;
+        default:
+            break;
+    }
+    if (block != nullptr) {
+        ++block->refs;
     }
 }
 
 void quic_output_frame_release_data(QuicOutputFrame &frame) noexcept {
-    QuicOutputFrameDataBlock *block = frame.data_block;
+    QuicOutputFrameDataBlock *block = nullptr;
+    switch (frame.type) {
+        case QuicFrameType::Ack:
+        case QuicFrameType::AckEcn:
+            block = frame.u.ack.owned_ranges;
+            frame.u.ack.owned_ranges = nullptr;
+            frame.u.ack.ranges = nullptr;
+            frame.u.ack.ranges_length = 0;
+            break;
+        case QuicFrameType::Crypto:
+            block = frame.u.crypto.owned;
+            frame.u.crypto.owned = nullptr;
+            frame.u.crypto.data = nullptr;
+            frame.u.crypto.length = 0;
+            break;
+        case QuicFrameType::NewToken:
+            block = frame.u.new_token.owned;
+            frame.u.new_token.owned = nullptr;
+            frame.u.new_token.data = nullptr;
+            frame.u.new_token.length = 0;
+            break;
+        case QuicFrameType::ConnectionClose:
+        case QuicFrameType::ConnectionCloseApp:
+            block = frame.u.close.owned_reason;
+            frame.u.close.owned_reason = nullptr;
+            frame.u.close.reason = nullptr;
+            frame.u.close.reason_length = 0;
+            break;
+        default:
+            break;
+    }
     if (block == nullptr) {
         return;
     }
 
-    frame.data_block = nullptr;
-    frame.data = {};
     if (block->refs > 1) {
         --block->refs;
         return;
