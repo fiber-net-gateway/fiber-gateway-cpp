@@ -79,7 +79,6 @@ public:
 
 private:
     class WaitForWorkAwaiter;
-    class DeferAwaiter;
 
     using ReadyList =
             common::IntrusiveList<QuicConnection::SendQueueEntry, offsetof(QuicConnection::SendQueueEntry, link)>;
