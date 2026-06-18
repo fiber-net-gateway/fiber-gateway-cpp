@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <expected>
 
 #include "QuicCrypto.h"
@@ -19,7 +20,8 @@ inline constexpr std::uint8_t kLongReservedBitsMask = 0x0c;
 inline constexpr std::uint8_t kShortReservedBitsMask = 0x18;
 
 [[nodiscard]] bool has_frames(const QuicPacketEncodeSpec &spec) noexcept {
-    return (spec.frame_queue != nullptr && !spec.frame_queue->empty()) || spec.frame_count != 0;
+    return spec.payload_len != 0 || (spec.frame_queue != nullptr && !spec.frame_queue->empty()) ||
+           spec.frame_count != 0;
 }
 
 [[nodiscard]] common::IoResult<std::size_t> encoded_frames_len(const QuicPacketEncodeSpec &spec, bool &ack_eliciting,
@@ -208,11 +210,21 @@ common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &conn
         return std::unexpected(common::IoErr::NotFound);
     }
 
-    bool ack_eliciting = false;
-    std::size_t frame_count = 0;
-    auto payload_len = encoded_frames_len(spec, ack_eliciting, frame_count);
-    if (!payload_len) {
-        return std::unexpected(payload_len.error());
+    const bool raw_payload = spec.payload != nullptr || spec.payload_len != 0;
+    if (raw_payload && (spec.payload == nullptr || spec.frame_queue != nullptr || spec.frames != nullptr ||
+                        spec.frame_count != 0 || spec.payload_frame_count == 0)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    bool ack_eliciting = spec.payload_ack_eliciting;
+    std::size_t frame_count = spec.payload_frame_count;
+    std::size_t payload_len = spec.payload_len;
+    if (!raw_payload) {
+        auto measured_payload_len = encoded_frames_len(spec, ack_eliciting, frame_count);
+        if (!measured_payload_len) {
+            return std::unexpected(measured_payload_len.error());
+        }
+        payload_len = *measured_payload_len;
     }
 
     const std::size_t target_len = spec.max_packet_len == 0 ? out_cap : std::min(spec.max_packet_len, out_cap);
@@ -227,17 +239,17 @@ common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &conn
     packet.token = spec.token;
     packet.packet_number = quic_use_next_packet_number(space);
     packet.truncated_pn = quic_truncate_packet_number(packet.packet_number, packet.pn_len);
-    packet.length = packet.pn_len + *payload_len + kAeadTagLength;
+    packet.length = packet.pn_len + payload_len + kAeadTagLength;
 
     const std::size_t min_payload = std::max(quic_packet_payload_capacity(packet, spec.min_packet_len),
                                              static_cast<std::size_t>(4U - packet.pn_len));
     const std::size_t max_payload = quic_packet_payload_capacity(packet, target_len);
-    if (min_payload > max_payload || *payload_len > max_payload) {
+    if (min_payload > max_payload || payload_len > max_payload) {
         quic_restore_packet_number(space, pn_snapshot);
         return std::unexpected(common::IoErr::NoMem);
     }
-    *payload_len = std::max(*payload_len, min_payload);
-    packet.length = packet.pn_len + *payload_len + kAeadTagLength;
+    const std::size_t padded_payload_len = std::max(payload_len, min_payload);
+    packet.length = packet.pn_len + padded_payload_len + kAeadTagLength;
 
     QuicWriteCursor writer(out, out_cap);
     std::uint8_t *pn = nullptr;
@@ -248,19 +260,25 @@ common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &conn
     }
 
     std::array<std::uint8_t, 4096> plaintext{};
-    if (*payload_len > plaintext.size()) {
+    if (padded_payload_len > plaintext.size()) {
         quic_restore_packet_number(space, pn_snapshot);
         return std::unexpected(common::IoErr::MessageTooLarge);
     }
 
-    QuicWriteCursor payload_writer(plaintext.data(), *payload_len);
-    auto encoded = encode_frames(payload_writer, spec);
-    if (!encoded) {
-        quic_restore_packet_number(space, pn_snapshot);
-        return std::unexpected(encoded.error());
+    QuicWriteCursor payload_writer(plaintext.data(), padded_payload_len);
+    if (raw_payload) {
+        std::memcpy(plaintext.data(), spec.payload, payload_len);
+    } else {
+        auto encoded = encode_frames(payload_writer, spec);
+        if (!encoded) {
+            quic_restore_packet_number(space, pn_snapshot);
+            return std::unexpected(encoded.error());
+        }
+        payload_len = payload_writer.offset();
     }
-    if (payload_writer.offset() < *payload_len) {
-        auto padded = payload_writer.fill(0, *payload_len - payload_writer.offset());
+    if (payload_len < padded_payload_len) {
+        QuicWriteCursor padding_writer(plaintext.data() + payload_len, padded_payload_len - payload_len);
+        auto padded = padding_writer.fill(0, padded_payload_len - payload_len);
         if (!padded) {
             quic_restore_packet_number(space, pn_snapshot);
             return std::unexpected(padded.error());
@@ -268,16 +286,16 @@ common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &conn
     }
 
     packet.packet_data = out;
-    packet.packet_len = *header_len + *payload_len + kAeadTagLength;
+    packet.packet_len = *header_len + padded_payload_len + kAeadTagLength;
     packet.protected_pn = pn;
     packet.ciphertext = pn + packet.pn_len;
-    packet.ciphertext_len = *payload_len + kAeadTagLength;
+    packet.ciphertext_len = padded_payload_len + kAeadTagLength;
     if (packet.packet_len > out_cap) {
         quic_restore_packet_number(space, pn_snapshot);
         return std::unexpected(common::IoErr::NoMem);
     }
 
-    auto sealed = quic_encrypt_packet_payload(packet, *keys, plaintext.data(), *payload_len, out + *header_len,
+    auto sealed = quic_encrypt_packet_payload(packet, *keys, plaintext.data(), padded_payload_len, out + *header_len,
                                               out_cap - *header_len);
     if (!sealed) {
         quic_restore_packet_number(space, pn_snapshot);

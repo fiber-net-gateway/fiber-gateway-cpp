@@ -113,10 +113,9 @@ private:
     process_datagram(net::UdpPacketRecvResult recv, std::chrono::steady_clock::time_point now) noexcept;
     [[nodiscard]] common::IoResult<QuicBuildSendResult> build_send_datagram(QuicConnection &connection,
                                                                             QuicSendDatagram &datagram) noexcept;
-    [[nodiscard]] static common::IoResult<StreamFrameResult> materialize_stream_frame(QuicConnection &connection,
-                                                                                      QuicStream &stream,
-                                                                                      QuicOutputFrame &frame,
-                                                                                      std::size_t available) noexcept;
+    [[nodiscard]] static common::IoResult<StreamFrameResult>
+    encode_stream_frame_into_payload(QuicConnection &connection, QuicStream &stream, QuicOutputFrame &frame,
+                                     std::uint8_t *dst, std::size_t available) noexcept;
     void commit_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept;
     void rollback_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept;
     [[nodiscard]] bool connection_has_send_work(const QuicConnection &connection) const noexcept;

@@ -257,8 +257,8 @@ TEST(QuicTransportCodecTest, CreatesAndParsesCryptoFrame) {
     fiber::quic::QuicOutputFrame frame{};
     frame.type = fiber::quic::QuicFrameType::Crypto;
     frame.u.crypto.offset = 7;
-    frame.u.crypto.data = payload.data();
-    frame.u.crypto.length = payload.size();
+    auto owned = fiber::quic::quic_output_frame_set_owned_data(frame, payload.data(), payload.size());
+    ASSERT_TRUE(owned.has_value());
 
     auto expected_len = fiber::quic::quic_create_output_frame(nullptr, frame);
 
@@ -280,6 +280,7 @@ TEST(QuicTransportCodecTest, CreatesAndParsesCryptoFrame) {
     EXPECT_EQ(parsed->frame.u.crypto.length, payload.size());
     ASSERT_EQ(parsed->frame.data.len, payload.size());
     EXPECT_EQ(parsed->frame.data.data[1], 0xad);
+    fiber::quic::quic_output_frame_release_data(frame);
 }
 
 TEST(QuicTransportCodecTest, ChecksFramePermissionByEncryptionLevel) {

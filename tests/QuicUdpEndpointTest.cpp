@@ -6,10 +6,12 @@
 #include <cstdint>
 #include <expected>
 #include <future>
+#include <new>
 #include <string_view>
 
 #include "async/Spawn.h"
 #include "common/IoError.h"
+#include "common/mem/IoBuf.h"
 #include "event/EventLoopGroup.h"
 #include "net/IpAddress.h"
 #include "net/SocketAddress.h"
@@ -64,6 +66,16 @@ struct AckOnlyPacketSummary {
     std::size_t in_flight = 0;
 };
 
+struct StreamPacketSummary {
+    std::uint32_t decoded_frame_count = 0;
+    std::uint64_t stream_id = 0;
+    std::uint64_t stream_offset = 0;
+    std::uint64_t stream_length = 0;
+    bool has_length = false;
+    bool fin = false;
+    std::array<std::uint8_t, 8> data{};
+};
+
 struct TwoEndpointResults {
     EndpointResult first;
     EndpointResult second;
@@ -110,6 +122,19 @@ fiber::quic::QuicConnectionId cid_from_hex(std::string_view value) {
 }
 
 fiber::net::SocketAddress loopback(std::uint16_t port) { return {fiber::net::IpAddress::loopback_v4(), port}; }
+
+fiber::quic::QuicStream::Lease make_test_stream(void *, const fiber::quic::QuicNewStreamContext &ctx) noexcept {
+    return fiber::quic::QuicStream::Lease::adopt(
+            new (std::nothrow) fiber::quic::QuicStream(ctx.stream_id, ctx.recv_extent_pool, ctx.recv_options));
+}
+
+fiber::mem::IoBuf iobuf_of(std::string_view value) {
+    auto buf = fiber::mem::IoBuf::allocate(value.size());
+    EXPECT_TRUE(buf.valid());
+    std::memcpy(buf.writable_data(), value.data(), value.size());
+    buf.commit(value.size());
+    return buf;
+}
 
 void build_initial_datagram(std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> &datagram,
                             const fiber::quic::QuicConnectionId &dcid, const fiber::quic::QuicConnectionId &scid,
@@ -539,8 +564,12 @@ recv_split_handshake_crypto_frame(fiber::event::EventLoop *loop, fiber::quic::Qu
     }
     crypto->type = fiber::quic::QuicFrameType::Crypto;
     crypto->u.crypto.offset = 0;
-    crypto->u.crypto.data = crypto_data.data();
-    crypto->u.crypto.length = crypto_data.size();
+    auto owned = fiber::quic::quic_output_frame_set_owned_data(*crypto, crypto_data.data(), crypto_data.size());
+    if (!owned) {
+        space.release_frame(*crypto);
+        done_promise->set_value(std::unexpected(owned.error()));
+        co_return;
+    }
     space.pending_frames.push_back(*crypto);
 
     fiber::quic::QuicConnection::Options client_options{};
@@ -580,9 +609,9 @@ recv_split_handshake_crypto_frame(fiber::event::EventLoop *loop, fiber::quic::Qu
     const fiber::quic::QuicOutputFrame *pending = space.pending_frames.front();
     done_promise->set_value(SplitFramePacketSummary{
             decoded->frame_count,
-            sent != nullptr ? sent->u.crypto.length : 0,
-            pending != nullptr ? pending->u.crypto.length : 0,
-            pending != nullptr,
+            sent != nullptr && sent->u.crypto.data != nullptr ? sent->u.crypto.data->readable() : 0,
+            pending != nullptr && pending->u.crypto.data != nullptr ? pending->u.crypto.data->readable() : 0,
+            pending != nullptr && pending->u.crypto.data != nullptr,
             space.sending_frames.empty(),
             server.congestion().in_flight,
     });
@@ -679,6 +708,121 @@ DetachedTask recv_handshake_ack_only_when_congestion_full(
     done_promise->set_value(AckOnlyPacketSummary{received->size, decoded->frame_count, decoded->ack_eliciting,
                                                  space.pending_frames.front() == ping, space.sending_frames.empty(),
                                                  server.congestion().in_flight});
+    client.close();
+}
+
+DetachedTask recv_application_stream_frame(fiber::event::EventLoop *loop, fiber::quic::QuicUdpEndpoint *endpoint,
+                                           std::promise<fiber::common::IoResult<StreamPacketSummary>> *done_promise) {
+    fiber::net::UdpSocket client(*loop);
+    auto bound = client.bind(loopback(0), {});
+    if (!bound) {
+        done_promise->set_value(std::unexpected(bound.error()));
+        co_return;
+    }
+
+    const auto server_cid = cid_from_hex("c1c2c3c4c5c6c7c8");
+    const auto client_cid = cid_from_hex("d1d2d3d4d5d6d7d8");
+    constexpr fiber::quic::QuicCryptoSuite suite = fiber::quic::QuicCryptoSuite::Aes128GcmSha256;
+    std::array<std::uint8_t, fiber::quic::kQuicMaxSecretLength> app_secret{};
+    for (std::size_t i = 0; i < 32; ++i) {
+        app_secret[i] = static_cast<std::uint8_t>(0xa0U + i);
+    }
+
+    fiber::quic::QuicConnection::Options server_options{};
+    server_options.role = fiber::quic::QuicConnectionRole::Server;
+    server_options.local_addr = endpoint->local_addr();
+    server_options.remote_addr = client.local_addr();
+    server_options.local_connection_id = server_cid;
+    server_options.remote_connection_id = client_cid;
+    server_options.ops.on_new_stream = make_test_stream;
+    fiber::quic::QuicConnection server(server_options);
+    auto *path = server.active_path();
+    if (path == nullptr) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+        co_return;
+    }
+    path->validated = true;
+
+    auto server_secret = fiber::quic::quic_set_encryption_secret(
+            server.crypto(), fiber::quic::QuicEncryptionLevel::Application, true, suite, app_secret.data(), 32);
+    if (!server_secret) {
+        done_promise->set_value(std::unexpected(server_secret.error()));
+        co_return;
+    }
+
+    auto stream = server.get_or_create_peer_stream(0);
+    if (!stream) {
+        done_promise->set_value(std::unexpected(stream.error()));
+        co_return;
+    }
+    fiber::quic::QuicMaxStreamDataFrame limit{};
+    limit.id = 0;
+    limit.limit = 1024;
+    auto max_stream_data = server.recv_max_stream_data_frame(limit);
+    if (!max_stream_data) {
+        done_promise->set_value(std::unexpected(max_stream_data.error()));
+        co_return;
+    }
+    auto written = (*stream)->try_write(iobuf_of("stream"));
+    if (!written) {
+        done_promise->set_value(std::unexpected(written.error()));
+        co_return;
+    }
+
+    fiber::quic::QuicConnection::Options client_options{};
+    client_options.role = fiber::quic::QuicConnectionRole::Client;
+    fiber::quic::QuicConnection peer(client_options);
+    auto peer_secret = fiber::quic::quic_set_encryption_secret(
+            peer.crypto(), fiber::quic::QuicEncryptionLevel::Application, false, suite, app_secret.data(), 32);
+    if (!peer_secret) {
+        done_promise->set_value(std::unexpected(peer_secret.error()));
+        co_return;
+    }
+
+    endpoint->schedule_send(server);
+
+    auto readable = co_await client.wait_event(fiber::event::IoEvent::Read, std::chrono::milliseconds{500});
+    if (!readable) {
+        done_promise->set_value(std::unexpected(readable.error()));
+        co_return;
+    }
+
+    std::array<std::uint8_t, 1400> response{};
+    auto received = client.try_recv_from(response.data(), response.size());
+    if (!received) {
+        done_promise->set_value(std::unexpected(received.error()));
+        co_return;
+    }
+
+    std::array<std::uint8_t, 256> plaintext{};
+    auto decoded = fiber::quic::quic_decode_packet(peer, response.data(), received->size, client_cid.size(),
+                                                   plaintext.data(), plaintext.size());
+    if (!decoded) {
+        done_promise->set_value(std::unexpected(decoded.error()));
+        co_return;
+    }
+
+    fiber::quic::QuicReadCursor payload(decoded->payload.data, decoded->payload.len);
+    auto parsed = fiber::quic::quic_parse_frame_for_receiver(fiber::quic::QuicConnectionRole::Client,
+                                                             fiber::quic::QuicEncryptionLevel::Application, payload);
+    if (!parsed) {
+        done_promise->set_value(std::unexpected(parsed.error()));
+        co_return;
+    }
+    if (parsed->frame.type != fiber::quic::QuicFrameType::Stream || parsed->frame.data.len > 8) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+        co_return;
+    }
+
+    StreamPacketSummary summary{};
+    summary.decoded_frame_count = decoded->frame_count;
+    summary.stream_id = parsed->frame.u.stream.stream_id;
+    summary.stream_offset = parsed->frame.u.stream.offset;
+    summary.stream_length = parsed->frame.u.stream.length;
+    summary.has_length = parsed->frame.u.stream.has_length;
+    summary.fin = parsed->frame.u.stream.fin;
+    std::memcpy(summary.data.data(), parsed->frame.data.data, parsed->frame.data.len);
+    done_promise->set_value(summary);
     client.close();
 }
 
@@ -1032,6 +1176,38 @@ TEST(QuicUdpEndpointTest, SendsOnlyAckWhenCongestionWindowIsFull) {
     EXPECT_TRUE(response->data_pending);
     EXPECT_TRUE(response->sending_empty);
     EXPECT_EQ(response->in_flight, fiber::quic::kQuicCongestionMinInitialSize);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, EncodesApplicationStreamFrameFromSendQueue) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    std::promise<fiber::common::IoResult<StreamPacketSummary>> response_promise;
+    auto response_future = response_promise.get_future();
+
+    fiber::async::spawn(group.at(0),
+                        [&]() { return recv_application_stream_frame(&group.at(0), &endpoint, &response_promise); });
+
+    ASSERT_EQ(response_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto response = response_future.get();
+    ASSERT_TRUE(response.has_value()) << static_cast<int>(response.error());
+    EXPECT_EQ(response->decoded_frame_count, 1U);
+    EXPECT_EQ(response->stream_id, 0U);
+    EXPECT_EQ(response->stream_offset, 0U);
+    EXPECT_EQ(response->stream_length, 6U);
+    EXPECT_TRUE(response->has_length);
+    EXPECT_FALSE(response->fin);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(response->data.data()), response->stream_length),
+              "stream");
 
     close_endpoint_on_loop(group, endpoint);
     group.stop();

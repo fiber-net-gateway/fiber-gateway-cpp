@@ -167,11 +167,6 @@ void QuicStream::on_max_stream_data(std::uint64_t limit) noexcept {
 
 bool QuicStream::has_send_work() const noexcept { return send_queue_.has_send_work(); }
 
-common::IoResult<QuicStreamSendQueue::PreparedFrameResult>
-QuicStream::prepare_stream_frame(std::size_t capacity) noexcept {
-    return send_queue_.prepare_stream_frame(stream_id_, capacity);
-}
-
 common::IoResult<QuicStreamSendQueue::EncodedFrameResult>
 QuicStream::encode_stream_frame(std::uint8_t *dst, std::size_t capacity) noexcept {
     return send_queue_.encode_stream_frame(stream_id_, dst, capacity);

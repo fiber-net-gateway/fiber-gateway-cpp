@@ -995,6 +995,10 @@ common::IoResult<std::size_t> quic_create_output_frame(QuicWriteCursor *out, Qui
         }
 
         case QuicFrameType::Crypto: {
+            const mem::IoBuf *crypto_data = frame.u.crypto.data;
+            if (crypto_data == nullptr || !*crypto_data || crypto_data->readable() > UINT32_MAX) {
+                return std::unexpected(common::IoErr::Invalid);
+            }
             auto wrote = write_or_count_varint(out, static_cast<std::uint64_t>(QuicFrameType::Crypto), len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
@@ -1003,11 +1007,11 @@ common::IoResult<std::size_t> quic_create_output_frame(QuicWriteCursor *out, Qui
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
-            wrote = write_or_count_varint(out, frame.u.crypto.length, len);
+            wrote = write_or_count_varint(out, crypto_data->readable(), len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
-            wrote = write_or_count_bytes(out, frame.u.crypto.data, frame.u.crypto.length, len);
+            wrote = write_or_count_bytes(out, crypto_data->readable_data(), crypto_data->readable(), len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
@@ -1045,9 +1049,9 @@ common::IoResult<std::size_t> quic_create_output_frame(QuicWriteCursor *out, Qui
                     return std::unexpected(wrote.error());
                 }
             }
-            wrote = write_or_count_bytes(out, frame.u.stream.data, frame.u.stream.length, len);
-            if (!wrote) {
-                return std::unexpected(wrote.error());
+            len += frame.u.stream.length;
+            if (out != nullptr && frame.u.stream.length != 0) {
+                return std::unexpected(common::IoErr::NotSupported);
             }
             return len;
         }

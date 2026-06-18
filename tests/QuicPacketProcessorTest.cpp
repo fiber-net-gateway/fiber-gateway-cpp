@@ -116,13 +116,14 @@ TEST(QuicPacketProcessorTest, ProcessesClientInitialCryptoFrame) {
     fiber::quic::QuicOutputFrame frame{};
     frame.type = fiber::quic::QuicFrameType::Crypto;
     frame.u.crypto.offset = 0;
-    frame.u.crypto.data = crypto_data.data();
-    frame.u.crypto.length = crypto_data.size();
+    auto owned = fiber::quic::quic_output_frame_set_owned_data(frame, crypto_data.data(), crypto_data.size());
+    ASSERT_TRUE(owned.has_value());
 
     std::array<std::uint8_t, 64> payload{};
     fiber::quic::QuicWriteCursor payload_out(payload.data(), payload.size());
     auto payload_len = fiber::quic::quic_create_output_frame(&payload_out, frame);
     ASSERT_TRUE(payload_len.has_value());
+    fiber::quic::quic_output_frame_release_data(frame);
 
     std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
     fiber::quic::QuicPacketHeader packet{};
@@ -152,17 +153,12 @@ TEST(QuicPacketProcessorTest, ProcessesClientInitialCryptoFrame) {
 
 TEST(QuicPacketProcessorTest, RejectsInitialStreamFrame) {
     const std::array<std::uint8_t, 3> stream_data{'b', 'a', 'd'};
-    fiber::quic::QuicOutputFrame frame{};
-    frame.type = fiber::quic::QuicFrameType::Stream;
-    frame.u.stream.stream_id = 0;
-    frame.u.stream.has_length = true;
-    frame.u.stream.data = stream_data.data();
-    frame.u.stream.length = stream_data.size();
-
     std::array<std::uint8_t, 64> payload{};
     fiber::quic::QuicWriteCursor payload_out(payload.data(), payload.size());
-    auto payload_len = fiber::quic::quic_create_output_frame(&payload_out, frame);
-    ASSERT_TRUE(payload_len.has_value());
+    ASSERT_TRUE(payload_out.write_u8(0x0a).has_value());
+    ASSERT_TRUE(fiber::quic::quic_write_varint(payload_out, 0).has_value());
+    ASSERT_TRUE(fiber::quic::quic_write_varint(payload_out, stream_data.size()).has_value());
+    ASSERT_TRUE(payload_out.write_bytes(stream_data.data(), stream_data.size()).has_value());
 
     std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
     fiber::quic::QuicPacketHeader packet{};
