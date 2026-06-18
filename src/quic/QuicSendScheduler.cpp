@@ -3,6 +3,7 @@
 #include <expected>
 
 #include "../common/Assert.h"
+#include "../async/Yield.h"
 #include "QuicUdpEndpoint.h"
 
 namespace fiber::quic {
@@ -64,43 +65,6 @@ private:
     bool resume_posted_ = false;
 
     friend class QuicSendScheduler;
-};
-
-class QuicSendScheduler::DeferAwaiter {
-public:
-    explicit DeferAwaiter(event::EventLoop &loop) noexcept : loop_(&loop) {}
-    DeferAwaiter(const DeferAwaiter &) = delete;
-    DeferAwaiter &operator=(const DeferAwaiter &) = delete;
-    DeferAwaiter(DeferAwaiter &&) = delete;
-    DeferAwaiter &operator=(DeferAwaiter &&) = delete;
-
-    bool await_ready() const noexcept { return false; }
-
-    bool await_suspend(std::coroutine_handle<> handle) noexcept {
-        FIBER_ASSERT(loop_ != nullptr);
-        FIBER_ASSERT(loop_->in_loop());
-        handle_ = handle;
-        loop_->post_local<DeferAwaiter, &DeferAwaiter::entry_, &DeferAwaiter::on_defer>(*this);
-        return true;
-    }
-
-    void await_resume() noexcept { handle_ = {}; }
-
-private:
-    static void on_defer(DeferAwaiter *awaiter) noexcept {
-        if (!awaiter) {
-            return;
-        }
-        auto handle = awaiter->handle_;
-        awaiter->handle_ = {};
-        if (handle) {
-            handle.resume();
-        }
-    }
-
-    event::EventLoop *loop_ = nullptr;
-    std::coroutine_handle<> handle_{};
-    event::EventLoop::DeferEntry entry_{};
 };
 
 QuicSendScheduler::QuicSendScheduler() noexcept = default;
@@ -184,7 +148,7 @@ async::Task<void> QuicSendScheduler::run() noexcept {
 
             ++packets_this_wakeup;
             if (packets_this_wakeup >= options_.max_packets_per_wakeup) {
-                co_await DeferAwaiter(*loop_);
+                co_await async::yield();
                 packets_this_wakeup = 0;
             }
         }
