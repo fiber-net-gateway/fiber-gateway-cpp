@@ -148,9 +148,9 @@ private:
     [[nodiscard]] common::IoResult<void> on_remote_stop_sending(std::uint64_t error_code) noexcept;
     void on_max_stream_data(std::uint64_t limit) noexcept;
     [[nodiscard]] bool has_send_work() const noexcept;
-    [[nodiscard]] common::IoResult<QuicStreamSendBuffer::PreparedFrameResult>
+    [[nodiscard]] common::IoResult<QuicStreamSendQueue::PreparedFrameResult>
     prepare_stream_frame(std::size_t capacity) noexcept;
-    [[nodiscard]] common::IoResult<QuicStreamSendBuffer::EncodedFrameResult>
+    [[nodiscard]] common::IoResult<QuicStreamSendQueue::EncodedFrameResult>
     encode_stream_frame(std::uint8_t *dst, std::size_t capacity) noexcept;
     [[nodiscard]] common::IoResult<void> mark_send_acked(std::size_t offset, std::size_t length, bool fin) noexcept;
     [[nodiscard]] common::IoResult<void> mark_send_failed(std::size_t offset, std::size_t length, bool fin) noexcept;
