@@ -1,10 +1,13 @@
 #include "QuicStream.h"
 
 #include <algorithm>
+#include <coroutine>
 #include <expected>
 #include <limits>
 #include <utility>
 
+#include "../common/Assert.h"
+#include "../event/EventLoop.h"
 #include "QuicConnection.h"
 
 namespace fiber::quic {
@@ -14,6 +17,148 @@ namespace {
 constexpr std::uint64_t kStreamTypeMask = 0x02;
 
 } // namespace
+
+class QuicStream::WriteAwaiter {
+public:
+    WriteAwaiter(QuicStream &stream, std::chrono::steady_clock::time_point deadline) noexcept :
+        stream_(&stream), deadline_(deadline) {}
+
+    WriteAwaiter(const WriteAwaiter &) = delete;
+    WriteAwaiter &operator=(const WriteAwaiter &) = delete;
+    WriteAwaiter(WriteAwaiter &&) = delete;
+    WriteAwaiter &operator=(WriteAwaiter &&) = delete;
+
+    ~WriteAwaiter() {
+        cancel_timer();
+        if (stream_ != nullptr) {
+            stream_->cancel_write_waiter(this);
+        }
+    }
+
+    bool await_ready() noexcept {
+        if (stream_ == nullptr || should_resume()) {
+            return true;
+        }
+        if (timed_out(std::chrono::steady_clock::now())) {
+            result_ = common::IoErr::TimedOut;
+            completed_ = true;
+            return true;
+        }
+        return false;
+    }
+
+    bool await_suspend(std::coroutine_handle<> handle) noexcept {
+        if (stream_ == nullptr || should_resume()) {
+            return false;
+        }
+        loop_ = event::EventLoop::current_or_null();
+        FIBER_ASSERT(loop_ != nullptr);
+        if (timed_out(loop_->now())) {
+            result_ = common::IoErr::TimedOut;
+            completed_ = true;
+            loop_ = nullptr;
+            return false;
+        }
+        if (stream_->write_waiter_ != nullptr) {
+            result_ = common::IoErr::Busy;
+            completed_ = true;
+            loop_ = nullptr;
+            return false;
+        }
+
+        handle_ = handle;
+        stream_->write_waiter_ = this;
+        arm_timer();
+        return true;
+    }
+
+    common::IoErr await_resume() noexcept {
+        common::IoErr result = result_;
+        cancel_timer();
+        if (stream_ != nullptr && stream_->write_waiter_ == this) {
+            stream_->write_waiter_ = nullptr;
+        }
+        stream_ = nullptr;
+        loop_ = nullptr;
+        handle_ = {};
+        result_ = common::IoErr::None;
+        resume_posted_ = false;
+        completed_ = false;
+        return result;
+    }
+
+    [[nodiscard]] bool should_resume() const noexcept {
+        return stream_ == nullptr || stream_->terminal_write_error() != common::IoErr::None ||
+               stream_->write_available() > 0;
+    }
+
+    void complete(common::IoErr result) noexcept {
+        if (completed_) {
+            return;
+        }
+        completed_ = true;
+        result_ = result;
+        cancel_timer();
+        post_resume();
+    }
+
+private:
+    [[nodiscard]] bool has_timer() const noexcept { return deadline_ != std::chrono::steady_clock::time_point::max(); }
+
+    [[nodiscard]] bool timed_out(std::chrono::steady_clock::time_point now) const noexcept {
+        return has_timer() && now >= deadline_;
+    }
+
+    void arm_timer() noexcept {
+        if (!has_timer() || loop_ == nullptr) {
+            return;
+        }
+        loop_->post_at<WriteAwaiter, &WriteAwaiter::timer_entry_, &WriteAwaiter::on_timeout>(deadline_, *this);
+    }
+
+    void cancel_timer() noexcept {
+        if (loop_ != nullptr && timer_entry_.is_in_heap()) {
+            loop_->cancel<WriteAwaiter, &WriteAwaiter::timer_entry_>(*this);
+        }
+    }
+
+    static void on_notify(WriteAwaiter *awaiter) noexcept {
+        if (awaiter == nullptr) {
+            return;
+        }
+        awaiter->resume_posted_ = false;
+        auto handle = awaiter->handle_;
+        awaiter->handle_ = {};
+        if (handle) {
+            handle.resume();
+        }
+    }
+
+    static void on_timeout(WriteAwaiter *awaiter) noexcept {
+        if (awaiter == nullptr) {
+            return;
+        }
+        awaiter->complete(common::IoErr::TimedOut);
+    }
+
+    void post_resume() noexcept {
+        if (resume_posted_ || loop_ == nullptr) {
+            return;
+        }
+        resume_posted_ = true;
+        loop_->post<WriteAwaiter, &WriteAwaiter::notify_entry_, &WriteAwaiter::on_notify>(*this);
+    }
+
+    QuicStream *stream_ = nullptr;
+    std::chrono::steady_clock::time_point deadline_{std::chrono::steady_clock::time_point::max()};
+    event::EventLoop *loop_ = nullptr;
+    std::coroutine_handle<> handle_{};
+    event::EventLoop::NotifyEntry notify_entry_{};
+    event::EventLoop::TimerEntry timer_entry_{};
+    common::IoErr result_ = common::IoErr::None;
+    bool resume_posted_ = false;
+    bool completed_ = false;
+};
 
 void QuicStream::Lease::reset() noexcept {
     if (!stream_) {
@@ -65,7 +210,34 @@ async::Task<common::IoResult<std::size_t>> QuicStream::read(std::size_t max_byte
 }
 
 common::IoResult<std::size_t> QuicStream::try_write(const mem::IoBuf &buf, bool fin) noexcept {
-    auto appended = send_queue_.try_append(buf, fin);
+    const std::size_t bytes = buf.readable();
+    const common::IoErr terminal = terminal_write_error();
+    if (terminal != common::IoErr::None) {
+        return std::unexpected(terminal);
+    }
+
+    mem::IoBuf append_buf = buf;
+    bool append_fin = fin;
+    if (bytes > 0) {
+        const std::size_t available = write_available();
+        if (available == 0) {
+            return std::unexpected(common::IoErr::WouldBlock);
+        }
+        const std::size_t append_bytes = std::min(bytes, available);
+        append_fin = fin && append_bytes == bytes;
+        if (append_bytes < bytes) {
+            append_buf = buf.retain_slice(0, append_bytes);
+            if (!append_buf) {
+                return std::unexpected(common::IoErr::NoMem);
+            }
+        }
+    }
+
+    auto appended = send_queue_.try_append(append_buf, append_fin);
+    if (appended && *appended > 0 && conn_ != nullptr) {
+        const bool reserved = conn_->reserve_peer_data(*appended);
+        FIBER_ASSERT(reserved);
+    }
     if (appended && conn_ != nullptr && has_send_work()) {
         (void) conn_->queue_stream_frame(*this);
     }
@@ -73,7 +245,37 @@ common::IoResult<std::size_t> QuicStream::try_write(const mem::IoBuf &buf, bool 
 }
 
 common::IoResult<std::size_t> QuicStream::try_write(mem::IoBufChain &chain) noexcept {
-    auto appended = send_queue_.try_append_chain(chain);
+    if (!chain.bound() || &chain.node_pool() != &send_queue_.node_pool()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    const std::size_t bytes = chain.readable_bytes();
+    const common::IoErr terminal = terminal_write_error();
+    if (terminal != common::IoErr::None) {
+        return std::unexpected(terminal);
+    }
+
+    mem::IoBufChain *append_chain = &chain;
+    mem::IoBufChain prefix(chain.node_pool());
+    if (bytes > 0) {
+        const std::size_t available = write_available();
+        if (available == 0) {
+            return std::unexpected(common::IoErr::WouldBlock);
+        }
+        const std::size_t append_bytes = std::min(bytes, available);
+        if (append_bytes < bytes) {
+            if (!chain.take_prefix(append_bytes, prefix)) {
+                return std::unexpected(common::IoErr::NoMem);
+            }
+            append_chain = &prefix;
+        }
+    }
+
+    auto appended = send_queue_.try_append_chain(*append_chain);
+    if (appended && *appended > 0 && conn_ != nullptr) {
+        const bool reserved = conn_->reserve_peer_data(*appended);
+        FIBER_ASSERT(reserved);
+    }
     if (appended && conn_ != nullptr && has_send_work()) {
         (void) conn_->queue_stream_frame(*this);
     }
@@ -82,26 +284,64 @@ common::IoResult<std::size_t> QuicStream::try_write(mem::IoBufChain &chain) noex
 
 async::Task<common::IoResult<std::size_t>> QuicStream::write(mem::IoBuf buf, bool fin,
                                                              std::chrono::milliseconds timeout) noexcept {
-    auto written = co_await send_queue_.append(std::move(buf), fin, timeout);
-    if (!written) {
-        co_return std::unexpected(written.error());
+    if (timeout < std::chrono::milliseconds::zero()) {
+        timeout = std::chrono::milliseconds::zero();
     }
-    if (conn_ != nullptr && has_send_work()) {
-        (void) conn_->queue_stream_frame(*this);
+
+    std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
+    bool deadline_set = timeout == std::chrono::milliseconds::max();
+
+    for (;;) {
+        auto written = try_write(buf, fin);
+        if (written || written.error() != common::IoErr::WouldBlock) {
+            co_return written;
+        }
+        if (timeout == std::chrono::milliseconds::zero()) {
+            co_return std::unexpected(common::IoErr::TimedOut);
+        }
+        if (!deadline_set) {
+            auto *loop = event::EventLoop::current_or_null();
+            FIBER_ASSERT(loop != nullptr);
+            deadline = loop->now() + timeout;
+            deadline_set = true;
+        }
+
+        common::IoErr wait_result = co_await WriteAwaiter(*this, deadline);
+        if (wait_result != common::IoErr::None) {
+            co_return std::unexpected(wait_result);
+        }
     }
-    co_return *written;
 }
 
 async::Task<common::IoResult<std::size_t>> QuicStream::write(mem::IoBufChain &chain,
                                                              std::chrono::milliseconds timeout) noexcept {
-    auto written = co_await send_queue_.append_chain(chain, timeout);
-    if (!written) {
-        co_return std::unexpected(written.error());
+    if (timeout < std::chrono::milliseconds::zero()) {
+        timeout = std::chrono::milliseconds::zero();
     }
-    if (conn_ != nullptr && has_send_work()) {
-        (void) conn_->queue_stream_frame(*this);
+
+    std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
+    bool deadline_set = timeout == std::chrono::milliseconds::max();
+
+    for (;;) {
+        auto written = try_write(chain);
+        if (written || written.error() != common::IoErr::WouldBlock) {
+            co_return written;
+        }
+        if (timeout == std::chrono::milliseconds::zero()) {
+            co_return std::unexpected(common::IoErr::TimedOut);
+        }
+        if (!deadline_set) {
+            auto *loop = event::EventLoop::current_or_null();
+            FIBER_ASSERT(loop != nullptr);
+            deadline = loop->now() + timeout;
+            deadline_set = true;
+        }
+
+        common::IoErr wait_result = co_await WriteAwaiter(*this, deadline);
+        if (wait_result != common::IoErr::None) {
+            co_return std::unexpected(wait_result);
+        }
     }
-    co_return *written;
 }
 
 common::IoResult<void> QuicStream::stop_read(std::uint64_t error_code) noexcept {
@@ -124,6 +364,7 @@ common::IoResult<void> QuicStream::reset(std::uint64_t error_code) noexcept {
     if (!final_size) {
         return std::unexpected(final_size.error());
     }
+    notify_write_waiter(common::IoErr::BrokenPipe);
     if (conn_ == nullptr) {
         return {};
     }
@@ -159,11 +400,16 @@ common::IoResult<void> QuicStream::on_remote_stop_sending(std::uint64_t error_co
 }
 
 void QuicStream::on_max_stream_data(std::uint64_t limit) noexcept {
-    send_queue_.update_max_stream_data(limit);
+    if (limit > max_stream_data_) {
+        max_stream_data_ = limit;
+    }
+    notify_write_waiter();
     if (conn_ != nullptr && has_send_work()) {
         (void) conn_->queue_stream_frame(*this);
     }
 }
+
+void QuicStream::on_connection_max_data() noexcept { notify_write_waiter(); }
 
 bool QuicStream::has_send_work() const noexcept { return send_queue_.has_send_work(); }
 
@@ -198,7 +444,11 @@ common::IoResult<QuicStreamFrameEncodeStatus> QuicStream::encode_stream_frame(Qu
 }
 
 common::IoResult<void> QuicStream::mark_send_acked(std::size_t offset, std::size_t length, bool fin) noexcept {
-    return send_queue_.mark_acked(offset, length, fin);
+    auto acked = send_queue_.mark_acked(offset, length, fin);
+    if (acked) {
+        notify_write_waiter();
+    }
+    return acked;
 }
 
 common::IoResult<void> QuicStream::mark_send_failed(std::size_t offset, std::size_t length, bool fin) noexcept {
@@ -238,6 +488,7 @@ bool QuicStream::is_unidirectional_stream_id(std::uint64_t stream_id) noexcept {
 void QuicStream::attach_to_connection(QuicConnection &conn) noexcept {
     conn_ = &conn;
     attached_to_connection_ = true;
+    max_stream_data_ = std::max(max_stream_data_, conn.initial_stream_send_limit(stream_id_));
 }
 
 void QuicStream::detach_from_connection() noexcept {
@@ -272,6 +523,52 @@ void QuicStream::sync_recv_state_from_queue() noexcept {
         return;
     }
     recv_state_ = QuicStreamRecvState::Open;
+}
+
+std::uint64_t QuicStream::stream_data_available() const noexcept {
+    const std::uint64_t appended = send_queue_.total_appended_bytes();
+    if (appended >= max_stream_data_) {
+        return 0;
+    }
+    return max_stream_data_ - appended;
+}
+
+std::size_t QuicStream::write_available() const noexcept {
+    std::uint64_t available = send_queue_.buffer_available();
+    available = std::min(available, stream_data_available());
+    if (conn_ != nullptr) {
+        available = std::min(available, conn_->peer_data_available());
+    }
+    if (available > std::numeric_limits<std::size_t>::max()) {
+        return std::numeric_limits<std::size_t>::max();
+    }
+    return static_cast<std::size_t>(available);
+}
+
+common::IoErr QuicStream::terminal_write_error() const noexcept {
+    if (send_queue_.reset_sent()) {
+        return common::IoErr::BrokenPipe;
+    }
+    if (conn_ != nullptr && conn_->closing()) {
+        return common::IoErr::Canceled;
+    }
+    return common::IoErr::None;
+}
+
+void QuicStream::notify_write_waiter(common::IoErr result) noexcept {
+    WriteAwaiter *waiter = write_waiter_;
+    if (waiter == nullptr) {
+        return;
+    }
+    if (result != common::IoErr::None || waiter->should_resume()) {
+        waiter->complete(result);
+    }
+}
+
+void QuicStream::cancel_write_waiter(WriteAwaiter *awaiter) noexcept {
+    if (write_waiter_ == awaiter) {
+        write_waiter_ = nullptr;
+    }
 }
 
 } // namespace fiber::quic
