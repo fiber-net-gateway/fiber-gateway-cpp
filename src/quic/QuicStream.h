@@ -167,6 +167,8 @@ private:
     [[nodiscard]] std::uint64_t stream_data_available() const noexcept;
     [[nodiscard]] std::size_t write_available() const noexcept;
     [[nodiscard]] bool blocked_by_connection_window() const noexcept;
+    void maybe_report_write_flow_blocked() noexcept;
+    [[nodiscard]] bool should_retransmit_stream_data_blocked(std::uint64_t limit) const noexcept;
     [[nodiscard]] common::IoErr terminal_write_error() const noexcept;
     void notify_write_waiter(common::IoErr result = common::IoErr::None) noexcept;
     void cancel_write_waiter(WriteAwaiter *awaiter) noexcept;
@@ -178,10 +180,12 @@ private:
     QuicStreamRecvState recv_state_ = QuicStreamRecvState::Open;
     std::uint64_t max_stream_data_ = 0;
     WriteAwaiter *write_waiter_ = nullptr;
+    std::uint64_t last_stream_data_blocked_limit_ = 0;
     std::uint32_t ref_count_ = 1;
     bool attached_to_connection_ = false;
     bool app_released_ = true;
     bool stream_send_pending_ = false;
+    bool stream_data_blocked_reported_ = false;
 
     friend class QuicConnection;
     friend class QuicUdpEndpoint;

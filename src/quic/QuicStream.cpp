@@ -298,13 +298,16 @@ common::IoResult<std::size_t> QuicStream::try_write(const mem::IoBuf &buf, bool 
 
     mem::IoBuf append_buf = buf;
     bool append_fin = fin;
+    bool report_flow_blocked = false;
     if (bytes > 0) {
         const std::size_t available = write_available();
         if (available == 0) {
+            maybe_report_write_flow_blocked();
             return std::unexpected(common::IoErr::WouldBlock);
         }
         const std::size_t append_bytes = std::min(bytes, available);
         append_fin = fin && append_bytes == bytes;
+        report_flow_blocked = append_bytes < bytes;
         if (append_bytes < bytes) {
             append_buf = buf.retain_slice(0, append_bytes);
             if (!append_buf) {
@@ -320,6 +323,9 @@ common::IoResult<std::size_t> QuicStream::try_write(const mem::IoBuf &buf, bool 
     }
     if (appended && conn_ != nullptr && has_send_work()) {
         (void) conn_->queue_stream_frame(*this);
+    }
+    if (appended && report_flow_blocked) {
+        maybe_report_write_flow_blocked();
     }
     return appended;
 }
@@ -337,12 +343,15 @@ common::IoResult<std::size_t> QuicStream::try_write(mem::IoBufChain &chain) noex
 
     mem::IoBufChain *append_chain = &chain;
     mem::IoBufChain prefix(chain.node_pool());
+    bool report_flow_blocked = false;
     if (bytes > 0) {
         const std::size_t available = write_available();
         if (available == 0) {
+            maybe_report_write_flow_blocked();
             return std::unexpected(common::IoErr::WouldBlock);
         }
         const std::size_t append_bytes = std::min(bytes, available);
+        report_flow_blocked = append_bytes < bytes;
         if (append_bytes < bytes) {
             if (!chain.take_prefix(append_bytes, prefix)) {
                 return std::unexpected(common::IoErr::NoMem);
@@ -358,6 +367,9 @@ common::IoResult<std::size_t> QuicStream::try_write(mem::IoBufChain &chain) noex
     }
     if (appended && conn_ != nullptr && has_send_work()) {
         (void) conn_->queue_stream_frame(*this);
+    }
+    if (appended && report_flow_blocked) {
+        maybe_report_write_flow_blocked();
     }
     return appended;
 }
@@ -628,6 +640,23 @@ bool QuicStream::blocked_by_connection_window() const noexcept {
         return false;
     }
     return send_queue_.buffer_available() > 0 && stream_data_available() > 0 && conn_->peer_data_available() == 0;
+}
+
+void QuicStream::maybe_report_write_flow_blocked() noexcept {
+    if (conn_ == nullptr || terminal_write_error() != common::IoErr::None || !send_queue_.can_append()) {
+        return;
+    }
+
+    if (stream_data_available() == 0) {
+        (void) conn_->queue_stream_data_blocked_frame(*this, max_stream_data_);
+    }
+    if (conn_->peer_data_available() == 0) {
+        (void) conn_->queue_data_blocked_frame(conn_->peer_max_data_);
+    }
+}
+
+bool QuicStream::should_retransmit_stream_data_blocked(std::uint64_t limit) const noexcept {
+    return terminal_write_error() == common::IoErr::None && max_stream_data_ == limit && stream_data_available() == 0;
 }
 
 common::IoErr QuicStream::terminal_write_error() const noexcept {

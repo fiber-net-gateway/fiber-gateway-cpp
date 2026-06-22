@@ -307,6 +307,9 @@ public:
     [[nodiscard]] std::uint64_t peer_max_data() const noexcept { return peer_max_data_; }
     [[nodiscard]] std::uint64_t peer_data_reserved() const noexcept { return peer_data_reserved_; }
     [[nodiscard]] std::uint64_t peer_data_available() const noexcept;
+    [[nodiscard]] bool should_retransmit_data_blocked(std::uint64_t limit) const noexcept;
+    [[nodiscard]] bool should_retransmit_stream_data_blocked(std::uint64_t stream_id,
+                                                             std::uint64_t limit) const noexcept;
     [[nodiscard]] common::IoResult<void> on_stream_send_acked(std::uint64_t stream_id, std::size_t offset,
                                                               std::size_t length, bool fin) noexcept;
     [[nodiscard]] common::IoResult<void> on_stream_send_failed(std::uint64_t stream_id, std::size_t offset,
@@ -378,6 +381,9 @@ private:
     [[nodiscard]] common::IoResult<void> queue_max_stream_data_frame(std::uint64_t stream_id,
                                                                      std::uint64_t limit) noexcept;
     [[nodiscard]] common::IoResult<void> queue_max_data_frame(std::uint64_t limit) noexcept;
+    [[nodiscard]] common::IoResult<void> queue_data_blocked_frame(std::uint64_t limit) noexcept;
+    [[nodiscard]] common::IoResult<void> queue_stream_data_blocked_frame(QuicStream &stream,
+                                                                         std::uint64_t limit) noexcept;
     [[nodiscard]] bool reserve_peer_data(std::uint64_t bytes) noexcept;
     [[nodiscard]] std::uint64_t initial_stream_send_limit(std::uint64_t stream_id) const noexcept;
     void wait_for_peer_data(QuicStream::WriteAwaiter &awaiter) noexcept;
@@ -415,8 +421,10 @@ private:
     std::uint64_t recv_data_limit_ = 0;
     std::uint64_t peer_max_data_ = 0;
     std::uint64_t peer_data_reserved_ = 0;
+    std::uint64_t last_data_blocked_limit_ = 0;
     common::IntrusiveListHook *peer_data_wait_head_ = nullptr;
     common::IntrusiveListHook *peer_data_wait_tail_ = nullptr;
+    bool data_blocked_reported_ = false;
 
     friend class QuicStream;
     friend class QuicStream::WriteAwaiter;

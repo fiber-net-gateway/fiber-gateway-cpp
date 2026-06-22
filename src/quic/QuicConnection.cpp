@@ -789,11 +789,62 @@ common::IoResult<void> QuicConnection::queue_max_data_frame(std::uint64_t limit)
     return {};
 }
 
+common::IoResult<void> QuicConnection::queue_data_blocked_frame(std::uint64_t limit) noexcept {
+    if (closing() || (data_blocked_reported_ && last_data_blocked_limit_ == limit)) {
+        return {};
+    }
+
+    auto &space = packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    frame->type = QuicFrameType::DataBlocked;
+    frame->u.data_blocked.limit = limit;
+    space.pending_frames.push_back(*frame);
+    data_blocked_reported_ = true;
+    last_data_blocked_limit_ = limit;
+    schedule_send();
+    return {};
+}
+
+common::IoResult<void> QuicConnection::queue_stream_data_blocked_frame(QuicStream &stream,
+                                                                       std::uint64_t limit) noexcept {
+    if (closing() || !stream.attached_to_connection() ||
+        (stream.stream_data_blocked_reported_ && stream.last_stream_data_blocked_limit_ == limit)) {
+        return {};
+    }
+
+    auto &space = packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    frame->type = QuicFrameType::StreamDataBlocked;
+    frame->u.stream_data_blocked.id = stream.stream_id();
+    frame->u.stream_data_blocked.limit = limit;
+    space.pending_frames.push_back(*frame);
+    stream.stream_data_blocked_reported_ = true;
+    stream.last_stream_data_blocked_limit_ = limit;
+    schedule_send();
+    return {};
+}
+
 std::uint64_t QuicConnection::peer_data_available() const noexcept {
     if (peer_data_reserved_ >= peer_max_data_) {
         return 0;
     }
     return peer_max_data_ - peer_data_reserved_;
+}
+
+bool QuicConnection::should_retransmit_data_blocked(std::uint64_t limit) const noexcept {
+    return !closing() && peer_max_data_ == limit && peer_data_available() == 0;
+}
+
+bool QuicConnection::should_retransmit_stream_data_blocked(std::uint64_t stream_id,
+                                                           std::uint64_t limit) const noexcept {
+    const QuicStream *stream = find_stream(stream_id);
+    return stream != nullptr && !closing() && stream->should_retransmit_stream_data_blocked(limit);
 }
 
 bool QuicConnection::reserve_peer_data(std::uint64_t bytes) noexcept {

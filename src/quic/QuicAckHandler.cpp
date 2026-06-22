@@ -26,11 +26,10 @@ namespace {
 
         if (frame->packet_number >= min_packet_number) {
             if (frame->packet_len != 0) {
-                const bool unblocked =
-                        quic_congestion_on_ack(connection.congestion(),
-                                               QuicAckSample{frame->packet_len, frame->packet_number, frame->send_time},
-                                               connection.reset_packet_number(), now,
-                                               quic_oldest_sent_time(connection));
+                const bool unblocked = quic_congestion_on_ack(
+                        connection.congestion(),
+                        QuicAckSample{frame->packet_len, frame->packet_number, frame->send_time},
+                        connection.reset_packet_number(), now, quic_oldest_sent_time(connection));
                 result.unblocked = result.unblocked || unblocked;
             }
 
