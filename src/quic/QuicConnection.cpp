@@ -6,6 +6,8 @@
 #include <limits>
 #include <new>
 
+#include <openssl/rand.h>
+
 #include "QuicCrypto.h"
 #include "QuicLossRecovery.h"
 #include "QuicProtocol.h"
@@ -42,6 +44,12 @@ constexpr std::uint64_t kStreamIncrement = 4;
 [[nodiscard]] bool socket_address_equal(const net::SocketAddress &lhs, const net::SocketAddress &rhs) noexcept {
     return lhs.port() == rhs.port() && ip_address_equal(lhs.ip(), rhs.ip());
 }
+
+[[nodiscard]] bool same_peer_ip(const net::SocketAddress &lhs, const net::SocketAddress &rhs) noexcept {
+    return ip_address_equal(lhs.ip(), rhs.ip());
+}
+
+[[nodiscard]] QuicTime max_path_validation_delay(QuicTime pto) noexcept { return std::max(pto, QuicTime{1000}); }
 
 } // namespace
 
@@ -119,6 +127,17 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
             create_path(options_.remote_addr, options_.local_addr, options_.remote_connection_id, QuicPathTag::Active);
 }
 
+QuicConnection::~QuicConnection() {
+    if (auto *loop = event::EventLoop::current_or_null()) {
+        cancel_loss_detection_timer(*loop);
+        cancel_path_validation_timer(*loop);
+    }
+
+    for (QuicPath &path: paths_) {
+        clear_path_frames(path);
+    }
+}
+
 common::IoResult<void> QuicConnection::start_handshake() noexcept {
     if (state_ != QuicConnectionState::Init) {
         return std::unexpected(common::IoErr::Already);
@@ -184,6 +203,46 @@ void QuicConnection::cancel_loss_detection_timer(event::EventLoop &loop) noexcep
     loss_timer_mode_ = QuicLossTimerMode::None;
 }
 
+void QuicConnection::arm_path_validation_timer(event::EventLoop &loop) noexcept {
+    if (path_timer_entry_.is_in_heap()) {
+        loop.cancel<QuicConnection, &QuicConnection::path_timer_entry_>(*this);
+    }
+    if (closing()) {
+        return;
+    }
+
+    const QuicTime now = quic_time_ms(loop.now());
+    bool found = false;
+    QuicTime delay{0};
+    for (const QuicPath &path: paths_) {
+        if (!path.allocated || path.state == QuicPathState::Idle) {
+            continue;
+        }
+
+        QuicTime left = path.expires - now;
+        if (left < QuicTime{1}) {
+            left = QuicTime{1};
+        }
+        if (!found || left < delay) {
+            delay = left;
+            found = true;
+        }
+    }
+
+    if (!found) {
+        return;
+    }
+
+    loop.post_at<QuicConnection, &QuicConnection::path_timer_entry_, &QuicConnection::on_path_validation_timer>(
+            loop.now() + delay, *this);
+}
+
+void QuicConnection::cancel_path_validation_timer(event::EventLoop &loop) noexcept {
+    if (path_timer_entry_.is_in_heap()) {
+        loop.cancel<QuicConnection, &QuicConnection::path_timer_entry_>(*this);
+    }
+}
+
 void QuicConnection::on_loss_detection_timer(QuicConnection *connection) noexcept {
     if (connection == nullptr) {
         return;
@@ -230,6 +289,43 @@ void QuicConnection::on_loss_detection_timer(QuicConnection *connection) noexcep
     }
 
     connection->arm_loss_detection_timer(*loop);
+}
+
+void QuicConnection::on_path_validation_timer(QuicConnection *connection) noexcept {
+    if (connection == nullptr) {
+        return;
+    }
+
+    event::EventLoop *loop = event::EventLoop::current_or_null();
+    if (loop == nullptr || connection->closing()) {
+        return;
+    }
+
+    const QuicTime now = quic_time_ms(loop->now());
+    bool send_output = false;
+    for (QuicPath &path: connection->paths_) {
+        if (!path.allocated || path.state == QuicPathState::Idle || path.expires > now) {
+            continue;
+        }
+        if (path.state != QuicPathState::Validating) {
+            continue;
+        }
+
+        auto expired = connection->expire_path_validation(path, now);
+        if (!expired) {
+            connection->close(QuicErrorCode::InternalError);
+            return;
+        }
+        send_output = send_output || *expired;
+        if (connection->closing()) {
+            return;
+        }
+    }
+
+    if (send_output) {
+        connection->schedule_send();
+    }
+    connection->arm_path_validation_timer(*loop);
 }
 
 common::IoResult<std::uint64_t> QuicConnection::next_local_stream_id(QuicStreamType type) noexcept {
@@ -561,6 +657,7 @@ QuicPath *QuicConnection::create_path(const net::SocketAddress &remote, const ne
 }
 
 void QuicConnection::free_path(QuicPath &path) noexcept {
+    clear_path_frames(path);
     if (&path == active_path_) {
         active_path_ = nullptr;
     }
@@ -597,6 +694,15 @@ void QuicConnection::record_path_sent(QuicPath &path, std::size_t len) noexcept 
     path.sent += len;
 }
 
+bool QuicConnection::has_path_send_work() const noexcept {
+    for (const QuicPath &path: paths_) {
+        if (path.allocated && !path.pending_frames.empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::size_t QuicConnection::path_send_limit(const QuicPath &path, std::size_t size) noexcept {
     if (path.validated) {
         return size;
@@ -612,6 +718,47 @@ std::size_t QuicConnection::path_send_limit(const QuicPath &path, std::size_t si
         return static_cast<std::size_t>(left);
     }
     return size;
+}
+
+void QuicConnection::clear_path_frames(QuicPath &path) noexcept {
+    auto &space = packet_number_space(QuicEncryptionLevel::Application);
+    while (QuicOutputFrame *frame = path.pending_frames.pop_front()) {
+        frame->path = nullptr;
+        space.release_frame(*frame);
+    }
+}
+
+void QuicConnection::clear_path_frames(QuicPath &path, QuicFrameType type) noexcept {
+    auto &space = packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrame *prev = nullptr;
+    QuicOutputFrame *frame = path.pending_frames.front();
+    while (frame != nullptr) {
+        QuicOutputFrame *next = path.pending_frames.next_of(*frame);
+        if (frame->type == type) {
+            path.pending_frames.erase_after(prev, *frame);
+            frame->path = nullptr;
+            space.release_frame(*frame);
+        } else {
+            prev = frame;
+        }
+        frame = next;
+    }
+}
+
+QuicTime QuicConnection::path_validation_delay() const noexcept {
+    return max_path_validation_delay(
+            quic_pto(rtt_, peer_transport_.params.max_ack_delay, true, state_ == QuicConnectionState::Established));
+}
+
+QuicTime QuicConnection::path_validation_delay(std::uint32_t tries) const noexcept {
+    QuicTime delay = path_validation_delay();
+    while (tries-- != 0) {
+        if (delay > QuicTime::max() / 2) {
+            return QuicTime::max();
+        }
+        delay *= 2;
+    }
+    return delay;
 }
 
 std::size_t QuicConnection::packet_number_space_index(QuicEncryptionLevel level) noexcept {
@@ -701,6 +848,244 @@ void QuicConnection::schedule_send() noexcept {
     if (options_.schedule_send != nullptr) {
         options_.schedule_send(options_.schedule_send_owner, *this);
     }
+}
+
+common::IoResult<void> QuicConnection::queue_ping_frame() noexcept {
+    if (closing()) {
+        return {};
+    }
+
+    auto &space = packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
+    frame->type = QuicFrameType::Ping;
+    space.pending_frames.push_back(*frame);
+    schedule_send();
+    return {};
+}
+
+common::IoResult<void> QuicConnection::queue_path_challenge_frame(QuicPath &path, const std::uint8_t data[8]) noexcept {
+    if (!path.allocated || data == nullptr || closing()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    auto &space = packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
+    frame->type = QuicFrameType::PathChallenge;
+    frame->path = &path;
+    frame->min_packet_len = static_cast<std::uint16_t>(kMinInitialDatagramSize);
+    std::memcpy(frame->u.path_challenge.data, data, sizeof(frame->u.path_challenge.data));
+    path.pending_frames.push_back(*frame);
+    schedule_send();
+    return {};
+}
+
+common::IoResult<void> QuicConnection::queue_path_response_frame(QuicPath &path, const std::uint8_t data[8]) noexcept {
+    if (!path.allocated || data == nullptr || closing()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    auto &space = packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
+    frame->type = QuicFrameType::PathResponse;
+    frame->path = &path;
+    frame->min_packet_len = static_cast<std::uint16_t>(kMinInitialDatagramSize);
+    std::memcpy(frame->u.path_response.data, data, sizeof(frame->u.path_response.data));
+    path.pending_frames.push_back(*frame);
+    schedule_send();
+    return {};
+}
+
+common::IoResult<void> QuicConnection::recv_path_challenge_frame(QuicPath &path,
+                                                                 const QuicPathChallengeFrame &frame) noexcept {
+    auto queued = queue_path_response_frame(path, frame.data);
+    if (!queued) {
+        return std::unexpected(queued.error());
+    }
+
+    if (&path == active_path_) {
+        auto ping = queue_ping_frame();
+        if (!ping) {
+            return std::unexpected(ping.error());
+        }
+    }
+    return {};
+}
+
+common::IoResult<void> QuicConnection::start_path_validation(QuicPath &path, QuicTime now) noexcept {
+    if (!path.allocated || closing()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (path.state == QuicPathState::Validating) {
+        return {};
+    }
+
+    path.tries = 0;
+    if (RAND_bytes(reinterpret_cast<unsigned char *>(path.challenge), sizeof(path.challenge)) != 1) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    clear_path_frames(path, QuicFrameType::PathChallenge);
+    auto first = queue_path_challenge_frame(path, path.challenge[0]);
+    if (!first) {
+        return std::unexpected(first.error());
+    }
+    auto second = queue_path_challenge_frame(path, path.challenge[1]);
+    if (!second) {
+        clear_path_frames(path, QuicFrameType::PathChallenge);
+        return std::unexpected(second.error());
+    }
+
+    path.expires = now + path_validation_delay();
+    path.state = QuicPathState::Validating;
+
+    if (auto *loop = event::EventLoop::current_or_null()) {
+        arm_path_validation_timer(*loop);
+    }
+    return {};
+}
+
+common::IoResult<bool> QuicConnection::recv_path_response_frame(const QuicPathChallengeFrame &frame,
+                                                                QuicTime now) noexcept {
+    for (QuicPath &path: paths_) {
+        if (!path.allocated || path.state != QuicPathState::Validating) {
+            continue;
+        }
+        if (std::memcmp(path.challenge[0], frame.data, sizeof(frame.data)) != 0 &&
+            std::memcmp(path.challenge[1], frame.data, sizeof(frame.data)) != 0) {
+            continue;
+        }
+
+        clear_path_frames(path, QuicFrameType::PathChallenge);
+
+        const bool active = &path == active_path_;
+        if (active) {
+            bool reset_congestion = true;
+            if (QuicPath *backup = find_path(QuicPathTag::Backup)) {
+                if (same_peer_ip(backup->remote, path.remote)) {
+                    reset_congestion = false;
+                    path.mtu = backup->mtu;
+                    path.max_mtu = backup->max_mtu;
+                }
+            }
+            if (reset_congestion) {
+                reset_congestion_for_path(now);
+            }
+        }
+
+        path.validated = true;
+        path.mtu_unvalidated = false;
+        path.state = QuicPathState::Idle;
+        path.expires = QuicTime{0};
+        path.tries = 0;
+        if (active) {
+            options_.remote_addr = path.remote;
+            options_.local_addr = path.local;
+            options_.remote_connection_id = path.remote_connection_id;
+        }
+
+        if (auto *loop = event::EventLoop::current_or_null()) {
+            arm_path_validation_timer(*loop);
+        }
+        return true;
+    }
+
+    return false;
+}
+
+common::IoResult<bool> QuicConnection::expire_path_validation(QuicPath &path, QuicTime now) noexcept {
+    if (!path.allocated || path.state != QuicPathState::Validating) {
+        return false;
+    }
+
+    if (++path.tries < kQuicPathRetries) {
+        clear_path_frames(path, QuicFrameType::PathChallenge);
+        auto first = queue_path_challenge_frame(path, path.challenge[0]);
+        if (!first) {
+            return std::unexpected(first.error());
+        }
+        auto second = queue_path_challenge_frame(path, path.challenge[1]);
+        if (!second) {
+            return std::unexpected(second.error());
+        }
+        path.expires = now + path_validation_delay(path.tries);
+        return true;
+    }
+
+    path.validated = false;
+    path.state = QuicPathState::Idle;
+
+    if (&path == active_path_) {
+        QuicPath *backup = find_path(QuicPathTag::Backup);
+        if (backup == nullptr) {
+            close(QuicErrorCode::NoViablePath);
+            return false;
+        }
+
+        if (!set_active_path(*backup)) {
+            close(QuicErrorCode::NoViablePath);
+            return false;
+        }
+    }
+
+    free_path(path);
+    return false;
+}
+
+common::IoResult<void> QuicConnection::handle_migration(QuicPath &path, bool rebound, QuicTime now) noexcept {
+    if (!path.allocated) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    QuicPath *old = active_path_;
+    if (old == &path) {
+        return {};
+    }
+
+    if (rebound && old != nullptr && old->validated) {
+        auto validating_old = start_path_validation(*old, now);
+        if (!validating_old) {
+            return std::unexpected(validating_old.error());
+        }
+    }
+
+    if (old != nullptr) {
+        if (old->validated) {
+            if (path.tag != QuicPathTag::Backup) {
+                QuicPath *backup = find_path(QuicPathTag::Backup);
+                if (backup != nullptr && backup != &path && backup != old) {
+                    free_path(*backup);
+                }
+            }
+            old->tag = QuicPathTag::Backup;
+        } else {
+            free_path(*old);
+        }
+    }
+
+    if (!set_active_path(path)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    if (!path.validated && path.state != QuicPathState::Validating) {
+        auto validating = start_path_validation(path, now);
+        if (!validating) {
+            return std::unexpected(validating.error());
+        }
+    }
+
+    return {};
 }
 
 common::IoResult<void> QuicConnection::on_stream_send_acked(std::uint64_t stream_id, std::size_t offset,

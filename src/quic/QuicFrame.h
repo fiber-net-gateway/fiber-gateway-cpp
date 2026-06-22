@@ -12,6 +12,8 @@
 
 namespace fiber::quic {
 
+struct QuicPath;
+
 inline constexpr std::size_t kMaxConnectionIdLength = 20;
 inline constexpr std::size_t kStatelessResetTokenLength = 16;
 
@@ -247,9 +249,11 @@ struct QuicOutputFrame {
     QuicOutputFrame() noexcept : u{} {}
 
     QuicFrameType type = QuicFrameType::Padding;
+    QuicPath *path = nullptr;
     std::uint64_t packet_number = 0;
     std::size_t encoded_len = 0;
     std::uint32_t packet_len = 0;
+    std::uint16_t min_packet_len = 0;
     std::chrono::milliseconds send_time{0};
     bool packet_ack_eliciting = false;
     bool ignore_loss = false;

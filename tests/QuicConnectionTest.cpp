@@ -24,6 +24,10 @@ namespace {
 
 fiber::net::SocketAddress loopback(std::uint16_t port) { return {fiber::net::IpAddress::loopback_v4(), port}; }
 
+fiber::net::SocketAddress v4_addr(std::array<std::uint8_t, 4> ip, std::uint16_t port) {
+    return {fiber::net::IpAddress::v4(ip), port};
+}
+
 fiber::quic::QuicConnectionId cid_from(std::initializer_list<std::uint8_t> bytes) {
     auto cid = fiber::quic::QuicConnectionId::from_bytes(bytes.begin(), bytes.size());
     return cid.value_or(fiber::quic::QuicConnectionId{});
@@ -157,6 +161,17 @@ std::size_t count_pending_frame_type(const fiber::quic::QuicConnection &conn, fi
     std::size_t count = 0;
     for (const fiber::quic::QuicOutputFrame *frame = space.pending_frames.front(); frame != nullptr;
          frame = space.pending_frames.next_of(*frame)) {
+        if (frame->type == type) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::size_t count_path_pending_frame_type(const fiber::quic::QuicPath &path, fiber::quic::QuicFrameType type) {
+    std::size_t count = 0;
+    for (const fiber::quic::QuicOutputFrame *frame = path.pending_frames.front(); frame != nullptr;
+         frame = path.pending_frames.next_of(*frame)) {
         if (frame->type == type) {
             ++count;
         }
@@ -389,6 +404,104 @@ TEST(QuicConnectionTest, ReplacesProbePathWhenCreatingAnotherProbe) {
     EXPECT_EQ(conn.path_count(), 2U);
     EXPECT_EQ(second->remote.port(), 6002);
     EXPECT_EQ(conn.find_path(loopback(6001), loopback(4433)), nullptr);
+}
+
+TEST(QuicConnectionTest, RecvPathChallengeQueuesPathResponseOnSamePath) {
+    StreamCallbackState state{};
+    fiber::quic::QuicConnection::Options options{};
+    options.local_addr = loopback(4433);
+    options.remote_addr = loopback(5555);
+    options.remote_connection_id = cid_from({0x01, 0x02, 0x03, 0x04});
+    options.schedule_send_owner = &state;
+    options.schedule_send = schedule_send_record;
+    fiber::quic::QuicConnection conn(options);
+    auto *path = conn.active_path();
+    ASSERT_NE(path, nullptr);
+    path->validated = true;
+
+    fiber::quic::QuicPathChallengeFrame challenge{};
+    for (std::size_t i = 0; i < sizeof(challenge.data); ++i) {
+        challenge.data[i] = static_cast<std::uint8_t>(0xa0 + i);
+    }
+
+    auto handled = conn.recv_path_challenge_frame(*path, challenge);
+
+    ASSERT_TRUE(handled.has_value()) << static_cast<int>(handled.error());
+    ASSERT_FALSE(path->pending_frames.empty());
+    const fiber::quic::QuicOutputFrame *response = path->pending_frames.front();
+    ASSERT_NE(response, nullptr);
+    EXPECT_EQ(response->type, fiber::quic::QuicFrameType::PathResponse);
+    EXPECT_EQ(response->path, path);
+    EXPECT_EQ(response->min_packet_len, fiber::quic::kMinInitialDatagramSize);
+    EXPECT_EQ(std::memcmp(response->u.path_response.data, challenge.data, sizeof(challenge.data)), 0);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::Ping), 1U);
+    EXPECT_GE(state.schedule_calls, 2U);
+}
+
+TEST(QuicConnectionTest, MigrationQueuesPathChallengesAndValidatesPortOnlyRebindWithoutCongestionReset) {
+    fiber::quic::QuicConnection::Options options{};
+    options.local_addr = loopback(4433);
+    options.remote_addr = loopback(5555);
+    options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
+    fiber::quic::QuicConnection conn(options);
+    auto *old = conn.active_path();
+    ASSERT_NE(old, nullptr);
+    old->validated = true;
+    old->mtu = 1400;
+    conn.congestion().window = 77777;
+
+    auto *next = conn.create_path(loopback(6666), loopback(4433), options.remote_connection_id,
+                                  fiber::quic::QuicPathTag::Probe);
+    ASSERT_NE(next, nullptr);
+
+    auto migrated = conn.handle_migration(*next, false, fiber::quic::QuicTime{10000});
+
+    ASSERT_TRUE(migrated.has_value()) << static_cast<int>(migrated.error());
+    EXPECT_EQ(conn.active_path(), next);
+    EXPECT_EQ(old->tag, fiber::quic::QuicPathTag::Backup);
+    EXPECT_EQ(next->state, fiber::quic::QuicPathState::Validating);
+    EXPECT_EQ(count_path_pending_frame_type(*next, fiber::quic::QuicFrameType::PathChallenge), 2U);
+
+    fiber::quic::QuicPathChallengeFrame response{};
+    std::memcpy(response.data, next->challenge[0], sizeof(response.data));
+    auto validated = conn.recv_path_response_frame(response, fiber::quic::QuicTime{11000});
+
+    ASSERT_TRUE(validated.has_value()) << static_cast<int>(validated.error());
+    EXPECT_TRUE(*validated);
+    EXPECT_TRUE(next->validated);
+    EXPECT_EQ(next->state, fiber::quic::QuicPathState::Idle);
+    EXPECT_EQ(next->mtu, 1400U);
+    EXPECT_EQ(conn.congestion().window, 77777U);
+    EXPECT_EQ(count_path_pending_frame_type(*next, fiber::quic::QuicFrameType::PathChallenge), 0U);
+}
+
+TEST(QuicConnectionTest, ValidatingMigratedIpResetsCongestionAndRtt) {
+    fiber::quic::QuicConnection::Options options{};
+    options.local_addr = loopback(4433);
+    options.remote_addr = v4_addr({127, 0, 0, 1}, 5555);
+    options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
+    fiber::quic::QuicConnection conn(options);
+    auto *old = conn.active_path();
+    ASSERT_NE(old, nullptr);
+    old->validated = true;
+
+    conn.congestion().window = 77777;
+    conn.rtt().avg_rtt = fiber::quic::QuicTime{42};
+
+    auto *next = conn.create_path(v4_addr({127, 0, 0, 2}, 6666), loopback(4433), options.remote_connection_id,
+                                  fiber::quic::QuicPathTag::Probe);
+    ASSERT_NE(next, nullptr);
+    ASSERT_TRUE(conn.handle_migration(*next, false, fiber::quic::QuicTime{10000}).has_value());
+
+    fiber::quic::QuicPathChallengeFrame response{};
+    std::memcpy(response.data, next->challenge[1], sizeof(response.data));
+    auto validated = conn.recv_path_response_frame(response, fiber::quic::QuicTime{11000});
+
+    ASSERT_TRUE(validated.has_value()) << static_cast<int>(validated.error());
+    EXPECT_TRUE(*validated);
+    EXPECT_TRUE(next->validated);
+    EXPECT_NE(conn.congestion().window, 77777U);
+    EXPECT_EQ(conn.rtt().avg_rtt, fiber::quic::QuicTime{fiber::quic::kQuicCongestionInitialRttMs});
 }
 
 TEST(QuicConnectionTest, AppliesPeerTransportParamsAndUpdatesLocalStreamLimits) {

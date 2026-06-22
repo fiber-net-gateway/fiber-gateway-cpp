@@ -211,6 +211,7 @@ struct QuicPath {
     std::uint8_t challenge[2][8]{};
     std::uint64_t seqnum = 0;
     std::uint64_t mtu_packet_numbers[kQuicPathRetries]{};
+    QuicOutputFrameQueue pending_frames{};
     bool allocated = false;
     bool validated = false;
     bool mtu_unvalidated = false;
@@ -261,7 +262,7 @@ public:
     };
 
     explicit QuicConnection(const Options &options) noexcept;
-    ~QuicConnection() = default;
+    ~QuicConnection();
 
     [[nodiscard]] QuicConnectionRole role() const noexcept { return options_.role; }
     [[nodiscard]] QuicConnectionState state() const noexcept { return state_; }
@@ -338,6 +339,8 @@ public:
     void arm_loss_detection_timer(event::EventLoop &loop) noexcept;
     void cancel_loss_detection_timer(event::EventLoop &loop) noexcept;
     void reset_congestion_for_path(QuicTime now) noexcept;
+    void arm_path_validation_timer(event::EventLoop &loop) noexcept;
+    void cancel_path_validation_timer(event::EventLoop &loop) noexcept;
     [[nodiscard]] QuicPath *active_path() noexcept { return active_path_; }
     [[nodiscard]] const QuicPath *active_path() const noexcept { return active_path_; }
     [[nodiscard]] std::size_t path_count() const noexcept;
@@ -352,6 +355,12 @@ public:
     [[nodiscard]] bool set_active_path(QuicPath &path) noexcept;
     void record_path_received(QuicPath &path, std::size_t len) noexcept;
     void record_path_sent(QuicPath &path, std::size_t len) noexcept;
+    [[nodiscard]] bool has_path_send_work() const noexcept;
+    [[nodiscard]] common::IoResult<void> recv_path_challenge_frame(QuicPath &path,
+                                                                   const QuicPathChallengeFrame &frame) noexcept;
+    [[nodiscard]] common::IoResult<bool> recv_path_response_frame(const QuicPathChallengeFrame &frame,
+                                                                  QuicTime now) noexcept;
+    [[nodiscard]] common::IoResult<void> handle_migration(QuicPath &path, bool rebound, QuicTime now) noexcept;
     [[nodiscard]] static std::size_t path_send_limit(const QuicPath &path, std::size_t size) noexcept;
     [[nodiscard]] QuicTlsSession &tls() noexcept { return tls_; }
     [[nodiscard]] const QuicTlsSession &tls() const noexcept { return tls_; }
@@ -384,6 +393,16 @@ private:
     [[nodiscard]] common::IoResult<void> queue_data_blocked_frame(std::uint64_t limit) noexcept;
     [[nodiscard]] common::IoResult<void> queue_stream_data_blocked_frame(QuicStream &stream,
                                                                          std::uint64_t limit) noexcept;
+    [[nodiscard]] common::IoResult<void> queue_ping_frame() noexcept;
+    [[nodiscard]] common::IoResult<void> queue_path_challenge_frame(QuicPath &path,
+                                                                    const std::uint8_t data[8]) noexcept;
+    [[nodiscard]] common::IoResult<void> queue_path_response_frame(QuicPath &path, const std::uint8_t data[8]) noexcept;
+    [[nodiscard]] common::IoResult<void> start_path_validation(QuicPath &path, QuicTime now) noexcept;
+    [[nodiscard]] common::IoResult<bool> expire_path_validation(QuicPath &path, QuicTime now) noexcept;
+    void clear_path_frames(QuicPath &path) noexcept;
+    void clear_path_frames(QuicPath &path, QuicFrameType type) noexcept;
+    [[nodiscard]] QuicTime path_validation_delay() const noexcept;
+    [[nodiscard]] QuicTime path_validation_delay(std::uint32_t tries) const noexcept;
     [[nodiscard]] bool reserve_peer_data(std::uint64_t bytes) noexcept;
     [[nodiscard]] std::uint64_t initial_stream_send_limit(std::uint64_t stream_id) const noexcept;
     void wait_for_peer_data(QuicStream::WriteAwaiter &awaiter) noexcept;
@@ -393,6 +412,7 @@ private:
     void commit_recv_data_delta(std::uint64_t delta) noexcept;
     void maybe_extend_recv_data_flow_control() noexcept;
     static void on_loss_detection_timer(QuicConnection *connection) noexcept;
+    static void on_path_validation_timer(QuicConnection *connection) noexcept;
 
     Options options_{};
     QuicConnectionState state_ = QuicConnectionState::Init;
@@ -409,6 +429,7 @@ private:
     std::uint32_t pto_count_ = 0;
     QuicLossTimerMode loss_timer_mode_ = QuicLossTimerMode::None;
     event::EventLoop::TimerEntry loss_timer_entry_{};
+    event::EventLoop::TimerEntry path_timer_entry_{};
     QuicCryptoState crypto_{};
     QuicPeerTransportState peer_transport_{};
     mem::IoBufNodePool recv_extent_pool_{};
