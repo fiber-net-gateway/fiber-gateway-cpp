@@ -92,9 +92,17 @@ private:
     using ConnectionList =
             common::IntrusiveList<QuicConnection::EndpointIndex, offsetof(QuicConnection::EndpointIndex, link)>;
 
+    enum class QuicInitialValidationAction : std::uint8_t {
+        Accept,
+        SendRetry,
+        SendInvalidTokenClose,
+    };
+
     struct QuicInitialValidation {
         QuicConnectionId original_destination_connection_id{};
         QuicConnectionId retry_source_connection_id{};
+        const char *close_reason = nullptr;
+        QuicInitialValidationAction action = QuicInitialValidationAction::Accept;
         bool address_validated = false;
         bool retried = false;
     };
@@ -120,11 +128,8 @@ private:
                                                                 const QuicConnectionId &cid) noexcept;
     [[nodiscard]] common::IoResult<QuicInitialValidation>
     validate_initial_address(const QuicPacketHeader &packet, const QuicReceivedDatagram &datagram) noexcept;
-    [[nodiscard]] common::IoResult<void> send_retry_packet(const QuicPacketHeader &packet,
-                                                           const QuicReceivedDatagram &datagram) noexcept;
-    [[nodiscard]] common::IoResult<void> send_invalid_token_close(const QuicPacketHeader &packet,
-                                                                  const QuicReceivedDatagram &datagram,
-                                                                  const char *reason) noexcept;
+    [[nodiscard]] common::IoResult<void> send_direct_datagram(const std::uint8_t *data, std::size_t len,
+                                                              const QuicReceivedDatagram &datagram) noexcept;
     [[nodiscard]] common::IoResult<void> queue_new_token(QuicConnection &connection, QuicPath &path) noexcept;
     [[nodiscard]] common::IoResult<QuicConnection *>
     create_connection(const QuicPacketHeader &packet, const QuicReceivedDatagram &datagram,
