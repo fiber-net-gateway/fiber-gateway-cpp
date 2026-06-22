@@ -452,6 +452,9 @@ const QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &d
 }
 
 void QuicUdpEndpoint::delete_connection(QuicConnection &connection) noexcept {
+    if (loop_ != nullptr) {
+        connection.cancel_loss_detection_timer(*loop_);
+    }
     send_scheduler_.remove(connection);
     QuicConnection::EndpointIndex &index = connection.endpoint_index;
     if (connection.original_dcid_index.cid_hook.linked()) {
@@ -631,18 +634,19 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
 
 void QuicUdpEndpoint::schedule_after_receive(QuicConnection &connection,
                                              const QuicPacketProcessResult &result) noexcept {
-    if (result.send_output) {
-        schedule_send(connection);
-        return;
+    bool should_send = result.send_output;
+
+    if (result.send_ack && !should_send) {
+        QuicPacketNumberSpace &space = connection.packet_number_space(result.level);
+        const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
+        should_send = !should_delay_ack(space, now);
     }
 
-    if (!result.send_ack) {
-        return;
+    if (loop_ != nullptr) {
+        connection.arm_loss_detection_timer(*loop_);
     }
 
-    QuicPacketNumberSpace &space = connection.packet_number_space(result.level);
-    const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
-    if (should_delay_ack(space, now)) {
+    if (!should_send) {
         return;
     }
 
@@ -767,7 +771,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         std::size_t payload_len = 0;
         bool payload_ack_eliciting = false;
         while (QuicOutputFrame *source = space.pending_frames.front()) {
-            if (ack_only && !ack_frame_type(source->type)) {
+            if (ack_only && !ack_frame_type(source->type) && !source->ignore_congestion) {
                 break;
             }
 
@@ -927,6 +931,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
 void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept {
     const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
     bool has_send_work = false;
+    bool sent_ack_eliciting = false;
 
     for (std::size_t level_index = 0; level_index < kQuicSendLevelCount; ++level_index) {
         QuicPacketNumberSpace &space = connection.packet_number_space(kSendLevels[level_index]);
@@ -945,6 +950,7 @@ void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const Qui
                     quic_congestion_on_packet_sent(connection.congestion(), frame->packet_len, true, false);
                 }
                 space.sent_frames.push_back(*frame);
+                sent_ack_eliciting = true;
             } else {
                 space.release_frame(*frame);
             }
@@ -956,6 +962,9 @@ void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const Qui
     }
     has_send_work = has_send_work || connection_has_send_work(connection);
     quic_congestion_on_idle(connection.congestion(), !has_send_work, now);
+    if (sent_ack_eliciting && loop_ != nullptr) {
+        connection.arm_loss_detection_timer(*loop_);
+    }
 }
 
 void QuicUdpEndpoint::rollback_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept {

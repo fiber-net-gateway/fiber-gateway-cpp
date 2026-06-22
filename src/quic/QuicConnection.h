@@ -15,6 +15,7 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../common/mem/IoBufChain.h"
+#include "../event/EventLoop.h"
 #include "../net/SocketAddress.h"
 #include "QuicCongestion.h"
 #include "QuicFrame.h"
@@ -187,6 +188,12 @@ enum class QuicPathState : std::uint8_t {
     MtuDiscovery,
 };
 
+enum class QuicLossTimerMode : std::uint8_t {
+    None,
+    Lost,
+    Pto,
+};
+
 struct QuicPath {
     net::SocketAddress remote{};
     net::SocketAddress local{};
@@ -321,6 +328,12 @@ public:
     [[nodiscard]] QuicRttState &rtt() noexcept { return rtt_; }
     [[nodiscard]] const QuicRttState &rtt() const noexcept { return rtt_; }
     [[nodiscard]] std::uint64_t reset_packet_number() const noexcept { return reset_packet_number_; }
+    [[nodiscard]] std::uint32_t pto_count() const noexcept { return pto_count_; }
+    [[nodiscard]] QuicLossTimerMode loss_timer_mode() const noexcept { return loss_timer_mode_; }
+    [[nodiscard]] bool loss_timer_armed() const noexcept { return loss_timer_entry_.is_in_heap(); }
+    void reset_pto_count() noexcept { pto_count_ = 0; }
+    void arm_loss_detection_timer(event::EventLoop &loop) noexcept;
+    void cancel_loss_detection_timer(event::EventLoop &loop) noexcept;
     void reset_congestion_for_path(QuicTime now) noexcept;
     [[nodiscard]] QuicPath *active_path() noexcept { return active_path_; }
     [[nodiscard]] const QuicPath *active_path() const noexcept { return active_path_; }
@@ -373,6 +386,7 @@ private:
     [[nodiscard]] common::IoResult<void> check_recv_data_delta(std::uint64_t delta) const noexcept;
     void commit_recv_data_delta(std::uint64_t delta) noexcept;
     void maybe_extend_recv_data_flow_control() noexcept;
+    static void on_loss_detection_timer(QuicConnection *connection) noexcept;
 
     Options options_{};
     QuicConnectionState state_ = QuicConnectionState::Init;
@@ -386,6 +400,9 @@ private:
     QuicCongestionState congestion_{};
     QuicRttState rtt_{};
     std::uint64_t reset_packet_number_ = 0;
+    std::uint32_t pto_count_ = 0;
+    QuicLossTimerMode loss_timer_mode_ = QuicLossTimerMode::None;
+    event::EventLoop::TimerEntry loss_timer_entry_{};
     QuicCryptoState crypto_{};
     QuicPeerTransportState peer_transport_{};
     mem::IoBufNodePool recv_extent_pool_{};

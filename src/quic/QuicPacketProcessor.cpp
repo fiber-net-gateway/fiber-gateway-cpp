@@ -78,6 +78,7 @@ void discard_frame_queue(QuicConnection &conn, QuicPacketNumberSpace &space, Qui
 
 void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level) noexcept {
     QuicPacketNumberSpace &space = conn.packet_number_space(level);
+    conn.reset_pto_count();
     discard_frame_queue(conn, space, space.pending_frames);
     discard_frame_queue(conn, space, space.sending_frames);
     discard_frame_queue(conn, space, space.sent_frames);
