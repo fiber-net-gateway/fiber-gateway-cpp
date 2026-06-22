@@ -543,7 +543,7 @@ common::IoResult<void> quic_read_packet_number(QuicPacketHeader &packet, const Q
     return {};
 }
 
-void quic_init_packet_header(QuicPacketHeader &packet, const QuicPacketNumberSpace &space) noexcept {
+void quic_init_packet_header(QuicPacketHeader &packet, const QuicPacketNumberSpace &space, bool key_phase) noexcept {
     const std::uint8_t pn_len = quic_packet_number_len(space);
     const std::uint8_t pn_bits = static_cast<std::uint8_t>(pn_len - 1);
 
@@ -572,6 +572,9 @@ void quic_init_packet_header(QuicPacketHeader &packet, const QuicPacketNumberSpa
             packet.long_header = false;
             packet.type = QuicPacketType::Short;
             packet.flags = kPacketFlagFixed | pn_bits;
+            if (key_phase) {
+                packet.flags |= kPacketFlagKeyPhase;
+            }
             break;
     }
     packet.protected_flags = packet.flags;

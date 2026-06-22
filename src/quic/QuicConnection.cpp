@@ -64,6 +64,30 @@ void QuicPacketProtectionKeys::reset() noexcept {
     ready = false;
 }
 
+void QuicPacketProtectionKeys::swap(QuicPacketProtectionKeys &other) noexcept {
+    using std::swap;
+    swap(suite, other.suite);
+    swap(secret, other.secret);
+    swap(key, other.key);
+    swap(iv, other.iv);
+    swap(hp, other.hp);
+    swap(secret_len, other.secret_len);
+    swap(key_len, other.key_len);
+    swap(iv_len, other.iv_len);
+    swap(hp_len, other.hp_len);
+    // EVP_AEAD_CTX is a POD value (struct evp_aead_ctx_st). It carries a pointer
+    // to the AEAD method plus an inline state union; swapping by value is safe
+    // because no internal pointer references the context's own address.
+    EVP_AEAD_CTX tmp;
+    std::memcpy(&tmp, &aead, sizeof(EVP_AEAD_CTX));
+    std::memcpy(&aead, &other.aead, sizeof(EVP_AEAD_CTX));
+    std::memcpy(&other.aead, &tmp, sizeof(EVP_AEAD_CTX));
+    swap(hp_key, other.hp_key);
+    swap(aead_initialized, other.aead_initialized);
+    swap(hp_chacha20, other.hp_chacha20);
+    swap(ready, other.ready);
+}
+
 void QuicCryptoState::reset() noexcept {
     initial_read.reset();
     initial_write.reset();
@@ -73,7 +97,12 @@ void QuicCryptoState::reset() noexcept {
     handshake_write.reset();
     application_read.reset();
     application_write.reset();
+    next_application_read.reset();
+    next_application_write.reset();
+    previous_application_read.reset();
     initial_ready = false;
+    next_application_keys_ready = false;
+    previous_application_keys_ready = false;
 }
 
 QuicConnection::QuicConnection(const Options &options) noexcept :
@@ -112,6 +141,7 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
 QuicConnection::~QuicConnection() {
     if (auto *loop = event::EventLoop::current_or_null()) {
         cancel_loss_detection_timer(*loop);
+        cancel_key_update_discard_timer(*loop);
     }
 }
 
@@ -178,6 +208,37 @@ void QuicConnection::cancel_loss_detection_timer(event::EventLoop &loop) noexcep
         loop.cancel<QuicConnection, &QuicConnection::loss_timer_entry_>(*this);
     }
     loss_timer_mode_ = QuicLossTimerMode::None;
+}
+
+
+void QuicConnection::arm_key_update_discard_timer(event::EventLoop &loop) noexcept {
+    if (key_update_discard_timer_entry_.is_in_heap()) {
+        loop.cancel<QuicConnection, &QuicConnection::key_update_discard_timer_entry_>(*this);
+    }
+    if (closing() || !crypto_.previous_application_keys_ready) {
+        return;
+    }
+    // RFC 9001 §6.5: retain old keys for at least three times the PTO so that
+    // reordered packets carrying the previous key phase can still be decrypted.
+    const QuicTime pto = quic_pto(rtt_, std::chrono::duration_cast<QuicTime>(peer_transport_.params.max_ack_delay),
+                                  true, state_ == QuicConnectionState::Established);
+    const QuicTime delay = pto * 3;
+    loop.post_at<QuicConnection, &QuicConnection::key_update_discard_timer_entry_,
+                 &QuicConnection::on_key_update_discard_timer>(loop.now() + delay, *this);
+}
+
+void QuicConnection::cancel_key_update_discard_timer(event::EventLoop &loop) noexcept {
+    if (key_update_discard_timer_entry_.is_in_heap()) {
+        loop.cancel<QuicConnection, &QuicConnection::key_update_discard_timer_entry_>(*this);
+    }
+}
+
+void QuicConnection::on_key_update_discard_timer(QuicConnection *connection) noexcept {
+    if (connection == nullptr) {
+        return;
+    }
+    connection->crypto_.previous_application_read.reset();
+    connection->crypto_.previous_application_keys_ready = false;
 }
 
 

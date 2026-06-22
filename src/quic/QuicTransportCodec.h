@@ -30,7 +30,8 @@ quic_decode_packet_number(std::uint32_t truncated_packet_number, std::uint8_t pn
                           std::uint64_t largest_received_packet_number) noexcept;
 [[nodiscard]] common::IoResult<void> quic_read_packet_number(QuicPacketHeader &packet,
                                                              const QuicPacketNumberSpace &space) noexcept;
-void quic_init_packet_header(QuicPacketHeader &packet, const QuicPacketNumberSpace &space) noexcept;
+void quic_init_packet_header(QuicPacketHeader &packet, const QuicPacketNumberSpace &space,
+                             bool key_phase = false) noexcept;
 [[nodiscard]] QuicPacketNumberSpaceSnapshot quic_preserve_packet_number(const QuicPacketNumberSpace &space) noexcept;
 void quic_restore_packet_number(QuicPacketNumberSpace &space, QuicPacketNumberSpaceSnapshot snapshot) noexcept;
 [[nodiscard]] std::uint64_t quic_use_next_packet_number(QuicPacketNumberSpace &space) noexcept;

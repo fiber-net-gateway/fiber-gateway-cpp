@@ -131,6 +131,10 @@ struct QuicPacketProtectionKeys : public common::NonCopyable, public common::Non
     ~QuicPacketProtectionKeys();
 
     void reset() noexcept;
+    // POD-only field-by-field swap. Used by the key-update path to rotate
+    // application_read/write ↔ next_application_read/write without moving the
+    // owning struct (it is NonMovable to keep references stable).
+    void swap(QuicPacketProtectionKeys &other) noexcept;
 
     QuicCryptoSuite suite = QuicCryptoSuite::InitialAes128GcmSha256;
     std::array<std::uint8_t, kQuicMaxSecretLength> secret{};
@@ -161,7 +165,18 @@ struct QuicCryptoState : public common::NonCopyable, public common::NonMovable {
     QuicPacketProtectionKeys handshake_write{};
     QuicPacketProtectionKeys application_read{};
     QuicPacketProtectionKeys application_write{};
+    // Pre-derived next-generation application keys (RFC 9001 §6.1, "tls13 quic ku").
+    // Populated after the handshake is confirmed so the connection can immediately
+    // respond to a peer-initiated key update.
+    QuicPacketProtectionKeys next_application_read{};
+    QuicPacketProtectionKeys next_application_write{};
+    // Previous-generation application keys, retained for a grace period after a key
+    // update to decrypt reordered packets that still carry the old key phase
+    // (RFC 9001 §6.5).
+    QuicPacketProtectionKeys previous_application_read{};
     bool initial_ready = false;
+    bool next_application_keys_ready = false;
+    bool previous_application_keys_ready = false;
 };
 
 enum class QuicLossTimerMode : std::uint8_t {
@@ -290,6 +305,11 @@ public:
     [[nodiscard]] static std::size_t packet_number_space_index(QuicEncryptionLevel level) noexcept;
     [[nodiscard]] QuicCryptoState &crypto() noexcept { return crypto_; }
     [[nodiscard]] const QuicCryptoState &crypto() const noexcept { return crypto_; }
+    [[nodiscard]] bool key_phase() const noexcept { return key_phase_; }
+    [[nodiscard]] bool next_keys_ready() const noexcept { return crypto_.next_application_keys_ready; }
+    void flip_key_phase() noexcept { key_phase_ = !key_phase_; }
+    void arm_key_update_discard_timer(event::EventLoop &loop) noexcept;
+    void cancel_key_update_discard_timer(event::EventLoop &loop) noexcept;
     [[nodiscard]] QuicCongestionState &congestion() noexcept { return congestion_; }
     [[nodiscard]] const QuicCongestionState &congestion() const noexcept { return congestion_; }
     [[nodiscard]] QuicRttState &rtt() noexcept { return rtt_; }
@@ -390,6 +410,7 @@ private:
     void commit_recv_data_delta(std::uint64_t delta) noexcept;
     void maybe_extend_recv_data_flow_control() noexcept;
     static void on_loss_detection_timer(QuicConnection *connection) noexcept;
+    static void on_key_update_discard_timer(QuicConnection *connection) noexcept;
 
     friend class QuicPathManager;
 
@@ -408,6 +429,7 @@ private:
     std::uint32_t pto_count_ = 0;
     QuicLossTimerMode loss_timer_mode_ = QuicLossTimerMode::None;
     event::EventLoop::TimerEntry loss_timer_entry_{};
+    event::EventLoop::TimerEntry key_update_discard_timer_entry_{};
     QuicCryptoState crypto_{};
     QuicPeerTransportState peer_transport_{};
     mem::IoBufNodePool recv_extent_pool_{};
@@ -422,6 +444,7 @@ private:
     common::IntrusiveListHook *peer_data_wait_head_ = nullptr;
     common::IntrusiveListHook *peer_data_wait_tail_ = nullptr;
     bool data_blocked_reported_ = false;
+    bool key_phase_ = false;
 
     friend class QuicStream;
     friend class QuicStream::WriteAwaiter;

@@ -43,6 +43,51 @@ namespace {
            type == QuicFrameType::PathResponse || type == QuicFrameType::NewConnectionId;
 }
 
+// Apply a peer-initiated key update after a packet was successfully decrypted
+// with next_application_read. The current application_read/write become the
+// "previous" generation (kept for a 3×PTO grace period), next_application_read/write
+// become the new current keys, and the next-next pair is immediately pre-derived.
+// RFC 9001 §6.1, §6.5.
+[[nodiscard]] common::IoResult<void> apply_key_update(QuicConnection &conn, event::EventLoop &loop) noexcept {
+    QuicCryptoState &crypto = conn.crypto();
+
+    // 1. Save current application_read as previous (grace period).
+    //    previous starts empty (or held the prior-prior generation that has
+    //    already passed the discard timer); resetting first guarantees we
+    //    drop any stale AEAD context before swapping.
+    crypto.previous_application_read.reset();
+    crypto.previous_application_read.swap(crypto.application_read);
+    crypto.previous_application_keys_ready = true;
+
+    // 2. Promote next_application_read → application_read.
+    crypto.application_read.swap(crypto.next_application_read);
+    crypto.next_application_read.reset();
+
+    // 3. Promote next_application_write → application_write (writes have no
+    //    grace-period retention; the old write context is simply discarded).
+    crypto.application_write.swap(crypto.next_application_write);
+    crypto.next_application_write.reset();
+
+    crypto.next_application_keys_ready = false;
+
+    // 4. Flip the key phase bit so subsequent outbound short headers carry
+    //    the new phase.
+    conn.flip_key_phase();
+
+    // 5. Derive the next-next generation immediately so the connection can
+    //    accept another update without deriving on the fly.
+    auto derived = quic_derive_next_key_pair(crypto);
+    if (!derived) {
+        conn.close(QuicErrorCode::InternalError);
+        return std::unexpected(derived.error());
+    }
+
+    // 6. Arm the grace-period timer to discard the previous application keys.
+    conn.arm_key_update_discard_timer(loop);
+
+    return {};
+}
+
 [[nodiscard]] common::IoResult<QuicPath *> bind_datagram_path(QuicConnection &conn,
                                                               const QuicReceivedDatagram &datagram,
                                                               const QuicPacketHeader &packet,
@@ -179,6 +224,16 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
             return std::unexpected(queued.error());
         }
         discard_packet_number_space(conn, QuicEncryptionLevel::Handshake);
+        // RFC 9001 §9.5 / nginx ngx_event_quic_ssl.c — pre-derive the first
+        // next-generation application keys so the connection can immediately
+        // respond to a peer-initiated key update without deriving on the fly
+        // (which would also leak a timing side channel).
+        if (conn.crypto().application_read.ready && conn.crypto().application_write.ready) {
+            auto derived = quic_derive_next_key_pair(conn.crypto());
+            if (!derived) {
+                return std::unexpected(derived.error());
+            }
+        }
         handshake_confirmed = true;
         return true;
     }
@@ -398,6 +453,21 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 return std::unexpected(common::IoErr::Invalid);
             }
         }
+    }
+
+    // RFC 9001 §6.1 — apply key update only after the packet decoded cleanly
+    // (frames parsed, no protocol violations). Doing this last guarantees we
+    // never rotate keys for a packet that ends up being rejected.
+    if (decoded.key_update) {
+        event::EventLoop *loop = event::EventLoop::current_or_null();
+        if (loop == nullptr) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        auto applied = apply_key_update(conn, *loop);
+        if (!applied) {
+            return std::unexpected(applied.error());
+        }
+        result.send_output = true;
     }
 
     return result;
