@@ -108,6 +108,22 @@ void QuicCryptoState::reset() noexcept {
 QuicConnection::QuicConnection(const Options &options) noexcept :
     options_(options), next_local_bidi_stream_id_(initial_stream_id(options.role, QuicStreamType::Bidirectional)),
     next_local_uni_stream_id_(initial_stream_id(options.role, QuicStreamType::Unidirectional)) {
+    auto peer_stream_limit = [](std::uint64_t concurrent_limit, std::uint64_t transport_limit,
+                                std::uint64_t default_limit) noexcept {
+        concurrent_limit = std::min(concurrent_limit, kQuicMaxStreamLimit);
+        transport_limit = std::min(transport_limit, kQuicMaxStreamLimit);
+        return concurrent_limit == default_limit && transport_limit != default_limit ? transport_limit
+                                                                                     : concurrent_limit;
+    };
+    options_.max_peer_bidirectional_streams =
+            peer_stream_limit(options_.max_peer_bidirectional_streams, options_.transport.initial_max_streams_bidi,
+                              kQuicDefaultMaxBidirectionalStreams);
+    options_.max_peer_unidirectional_streams =
+            peer_stream_limit(options_.max_peer_unidirectional_streams, options_.transport.initial_max_streams_uni,
+                              kQuicDefaultMaxUnidirectionalStreams);
+    options_.max_local_bidirectional_streams = std::min(options_.max_local_bidirectional_streams, kQuicMaxStreamLimit);
+    options_.max_local_unidirectional_streams =
+            std::min(options_.max_local_unidirectional_streams, kQuicMaxStreamLimit);
     if (options_.initial_destination_connection_id.empty()) {
         options_.initial_destination_connection_id = options_.original_destination_connection_id;
     }
@@ -115,6 +131,12 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
     options_.transport.initial_max_stream_data_bidi_local = options_.recv_flow.stream_buffer_limit;
     options_.transport.initial_max_stream_data_bidi_remote = options_.recv_flow.stream_buffer_limit;
     options_.transport.initial_max_stream_data_uni = options_.recv_flow.stream_buffer_limit;
+    options_.transport.initial_max_streams_bidi = options_.max_peer_bidirectional_streams;
+    options_.transport.initial_max_streams_uni = options_.max_peer_unidirectional_streams;
+    peer_bidi_streams_.concurrent_limit = options_.max_peer_bidirectional_streams;
+    peer_bidi_streams_.advertised_limit = options_.max_peer_bidirectional_streams;
+    peer_uni_streams_.concurrent_limit = options_.max_peer_unidirectional_streams;
+    peer_uni_streams_.advertised_limit = options_.max_peer_unidirectional_streams;
     recv_data_limit_ = options_.recv_flow.conn_recv_limit;
     QuicOutputFramePool &frame_pool =
             options_.output_frame_pool != nullptr ? *options_.output_frame_pool : output_frame_pool_;
@@ -482,7 +504,12 @@ common::IoResult<std::uint64_t> QuicConnection::next_local_stream_id(QuicStreamT
 
     std::uint64_t &next =
             type == QuicStreamType::Bidirectional ? next_local_bidi_stream_id_ : next_local_uni_stream_id_;
-    if (stream_sequence(next) >= local_stream_limit(type)) {
+    const std::uint64_t limit = local_stream_limit(type);
+    if (stream_sequence(next) >= limit) {
+        auto queued = queue_streams_blocked_frame(type, limit);
+        if (!queued) {
+            return std::unexpected(queued.error());
+        }
         return std::unexpected(common::IoErr::Busy);
     }
 
@@ -496,7 +523,15 @@ bool QuicConnection::can_accept_peer_stream(std::uint64_t stream_id) const noexc
         return false;
     }
     const QuicStreamType type = stream_type(stream_id);
-    return stream_sequence(stream_id) < peer_stream_limit(type);
+    const PeerStreamLimitWindow &window = peer_stream_window(type);
+    const std::uint64_t sequence = stream_sequence(stream_id);
+    if (sequence >= window.advertised_limit) {
+        return false;
+    }
+    if (sequence >= window.opened_count && window.opened_count - window.retired_count >= window.concurrent_limit) {
+        return false;
+    }
+    return true;
 }
 
 common::IoResult<void> QuicConnection::record_peer_stream_id(std::uint64_t stream_id) noexcept {
@@ -504,8 +539,17 @@ common::IoResult<void> QuicConnection::record_peer_stream_id(std::uint64_t strea
         return std::unexpected(common::IoErr::Busy);
     }
 
-    std::uint64_t &next = is_bidirectional_stream(stream_id) ? next_peer_bidi_sequence_ : next_peer_uni_sequence_;
-    next = std::max(next, stream_sequence(stream_id) + 1);
+    const QuicStreamType type = stream_type(stream_id);
+    PeerStreamLimitWindow &window = peer_stream_window(type);
+    const std::uint64_t opened = stream_sequence(stream_id) + 1;
+    if (opened > window.opened_count) {
+        const std::uint64_t implicit_retired = opened - window.opened_count - 1;
+        window.opened_count = opened;
+        window.retired_count += implicit_retired;
+        if (implicit_retired != 0) {
+            maybe_extend_peer_stream_limit(type);
+        }
+    }
     return {};
 }
 
@@ -634,10 +678,36 @@ common::IoResult<void> QuicConnection::recv_max_stream_data_frame(const QuicMaxS
     return {};
 }
 
+common::IoResult<void> QuicConnection::recv_max_streams_frame(const QuicMaxStreamsFrame &frame) noexcept {
+    if (frame.limit > kQuicMaxStreamLimit) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    const QuicStreamType type = frame.bidirectional ? QuicStreamType::Bidirectional : QuicStreamType::Unidirectional;
+    std::uint64_t &limit =
+            frame.bidirectional ? options_.max_local_bidirectional_streams : options_.max_local_unidirectional_streams;
+    if (frame.limit <= limit) {
+        return {};
+    }
+
+    limit = frame.limit;
+    LocalStreamBlockedState &blocked = local_stream_blocked_state(type);
+    blocked.reported = false;
+    blocked.last_limit = 0;
+    return {};
+}
+
 common::IoResult<void> QuicConnection::recv_max_data_frame(const QuicMaxDataFrame &frame) noexcept {
     if (frame.max_data > peer_max_data_) {
         peer_max_data_ = frame.max_data;
         notify_peer_data_waiters();
+    }
+    return {};
+}
+
+common::IoResult<void> QuicConnection::recv_streams_blocked_frame(const QuicStreamsBlockedFrame &frame) noexcept {
+    if (frame.limit > kQuicMaxStreamLimit) {
+        return std::unexpected(common::IoErr::Invalid);
     }
     return {};
 }
@@ -712,6 +782,9 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
         params.active_connection_id_limit < 2 || params.ack_delay_exponent > 20 || params.max_ack_delay >= 16384) {
         return std::unexpected(common::IoErr::Invalid);
     }
+    if (params.initial_max_streams_bidi > kQuicMaxStreamLimit || params.initial_max_streams_uni > kQuicMaxStreamLimit) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
 
     QuicTransportSettings applied{};
     applied.max_idle_timeout = std::chrono::milliseconds(params.max_idle_timeout);
@@ -732,6 +805,8 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
     peer_max_data_ = params.initial_max_data;
     options_.max_local_bidirectional_streams = params.initial_max_streams_bidi;
     options_.max_local_unidirectional_streams = params.initial_max_streams_uni;
+    local_bidi_streams_blocked_ = {};
+    local_uni_streams_blocked_ = {};
     streams_.for_each([this](QuicStream &stream) noexcept {
         stream.on_max_stream_data(initial_stream_send_limit(stream.stream_id()));
     });
@@ -768,14 +843,36 @@ std::uint8_t QuicConnection::local_initiator_bit() const noexcept {
     return options_.role == QuicConnectionRole::Server ? 1 : 0;
 }
 
+QuicConnection::PeerStreamLimitWindow &QuicConnection::peer_stream_window(QuicStreamType type) noexcept {
+    return type == QuicStreamType::Bidirectional ? peer_bidi_streams_ : peer_uni_streams_;
+}
+
+const QuicConnection::PeerStreamLimitWindow &QuicConnection::peer_stream_window(QuicStreamType type) const noexcept {
+    return type == QuicStreamType::Bidirectional ? peer_bidi_streams_ : peer_uni_streams_;
+}
+
+QuicConnection::LocalStreamBlockedState &QuicConnection::local_stream_blocked_state(QuicStreamType type) noexcept {
+    return type == QuicStreamType::Bidirectional ? local_bidi_streams_blocked_ : local_uni_streams_blocked_;
+}
+
+const QuicConnection::LocalStreamBlockedState &
+QuicConnection::local_stream_blocked_state(QuicStreamType type) const noexcept {
+    return type == QuicStreamType::Bidirectional ? local_bidi_streams_blocked_ : local_uni_streams_blocked_;
+}
+
 std::uint64_t QuicConnection::local_stream_limit(QuicStreamType type) const noexcept {
     return type == QuicStreamType::Bidirectional ? options_.max_local_bidirectional_streams
                                                  : options_.max_local_unidirectional_streams;
 }
 
 std::uint64_t QuicConnection::peer_stream_limit(QuicStreamType type) const noexcept {
-    return type == QuicStreamType::Bidirectional ? options_.max_peer_bidirectional_streams
-                                                 : options_.max_peer_unidirectional_streams;
+    return peer_stream_window(type).advertised_limit;
+}
+
+bool QuicConnection::local_stream_blocked(QuicStreamType type) const noexcept {
+    const std::uint64_t next =
+            type == QuicStreamType::Bidirectional ? next_local_bidi_stream_id_ : next_local_uni_stream_id_;
+    return stream_sequence(next) >= local_stream_limit(type);
 }
 
 bool QuicConnection::is_gone_peer_stream(std::uint64_t stream_id) const noexcept {
@@ -783,8 +880,49 @@ bool QuicConnection::is_gone_peer_stream(std::uint64_t stream_id) const noexcept
         return false;
     }
 
-    const std::uint64_t next = is_bidirectional_stream(stream_id) ? next_peer_bidi_sequence_ : next_peer_uni_sequence_;
-    return stream_sequence(stream_id) < next;
+    return stream_sequence(stream_id) < peer_stream_window(stream_type(stream_id)).opened_count;
+}
+
+void QuicConnection::on_peer_stream_retired(std::uint64_t stream_id) noexcept {
+    if (!is_peer_stream(stream_id)) {
+        return;
+    }
+
+    const QuicStreamType type = stream_type(stream_id);
+    PeerStreamLimitWindow &window = peer_stream_window(type);
+    if (window.retired_count < window.opened_count) {
+        ++window.retired_count;
+    }
+    maybe_extend_peer_stream_limit(type);
+}
+
+void QuicConnection::maybe_extend_peer_stream_limit(QuicStreamType type) noexcept {
+    PeerStreamLimitWindow &window = peer_stream_window(type);
+    if (window.concurrent_limit == 0 || window.advertised_limit >= kQuicMaxStreamLimit) {
+        return;
+    }
+
+    std::uint64_t target = kQuicMaxStreamLimit;
+    if (window.retired_count <= kQuicMaxStreamLimit &&
+        window.concurrent_limit <= kQuicMaxStreamLimit - window.retired_count) {
+        target = window.retired_count + window.concurrent_limit;
+    }
+    if (target <= window.advertised_limit) {
+        return;
+    }
+
+    std::uint64_t threshold = window.concurrent_limit / 4;
+    if (threshold == 0) {
+        threshold = 1;
+    }
+    if (target != kQuicMaxStreamLimit && target - window.advertised_limit < threshold) {
+        return;
+    }
+
+    auto queued = queue_max_streams_frame(type, target);
+    if (queued) {
+        window.advertised_limit = target;
+    }
 }
 
 void QuicConnection::retire_stream(QuicStream &stream) noexcept {
@@ -792,10 +930,15 @@ void QuicConnection::retire_stream(QuicStream &stream) noexcept {
         return;
     }
 
+    const std::uint64_t stream_id = stream.stream_id();
+    const bool peer_stream = is_peer_stream(stream_id);
     QuicStream::Lease lease = streams_.erase(stream.stream_id());
     if (!lease) {
         stream.detach_from_connection();
         return;
+    }
+    if (peer_stream) {
+        on_peer_stream_retired(stream_id);
     }
     lease->detach_from_connection();
 }
@@ -943,6 +1086,26 @@ common::IoResult<void> QuicConnection::queue_max_stream_data_frame(std::uint64_t
     return {};
 }
 
+common::IoResult<void> QuicConnection::queue_max_streams_frame(QuicStreamType type, std::uint64_t limit) noexcept {
+    if (closing()) {
+        return {};
+    }
+    if (limit > kQuicMaxStreamLimit) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    auto &space = packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    frame->type = type == QuicStreamType::Bidirectional ? QuicFrameType::MaxStreamsBidi : QuicFrameType::MaxStreamsUni;
+    frame->u.max_streams.limit = limit;
+    space.pending_frames.push_back(*frame);
+    schedule_send();
+    return {};
+}
+
 common::IoResult<void> QuicConnection::queue_max_data_frame(std::uint64_t limit) noexcept {
     auto &space = packet_number_space(QuicEncryptionLevel::Application);
     QuicOutputFrame *frame = space.alloc_frame();
@@ -952,6 +1115,34 @@ common::IoResult<void> QuicConnection::queue_max_data_frame(std::uint64_t limit)
     frame->type = QuicFrameType::MaxData;
     frame->u.max_data.max_data = limit;
     space.pending_frames.push_back(*frame);
+    schedule_send();
+    return {};
+}
+
+common::IoResult<void> QuicConnection::queue_streams_blocked_frame(QuicStreamType type, std::uint64_t limit) noexcept {
+    if (closing()) {
+        return {};
+    }
+    if (limit > kQuicMaxStreamLimit) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    LocalStreamBlockedState &blocked = local_stream_blocked_state(type);
+    if (blocked.reported && blocked.last_limit == limit) {
+        return {};
+    }
+
+    auto &space = packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    frame->type = type == QuicStreamType::Bidirectional ? QuicFrameType::StreamsBlockedBidi
+                                                        : QuicFrameType::StreamsBlockedUni;
+    frame->u.streams_blocked.limit = limit;
+    space.pending_frames.push_back(*frame);
+    blocked.reported = true;
+    blocked.last_limit = limit;
     schedule_send();
     return {};
 }
@@ -1012,6 +1203,14 @@ bool QuicConnection::should_retransmit_stream_data_blocked(std::uint64_t stream_
                                                            std::uint64_t limit) const noexcept {
     const QuicStream *stream = find_stream(stream_id);
     return stream != nullptr && !closing() && stream->should_retransmit_stream_data_blocked(limit);
+}
+
+bool QuicConnection::should_retransmit_max_streams(QuicStreamType type, std::uint64_t limit) const noexcept {
+    return !closing() && peer_stream_window(type).advertised_limit == limit;
+}
+
+bool QuicConnection::should_retransmit_streams_blocked(QuicStreamType type, std::uint64_t limit) const noexcept {
+    return !closing() && local_stream_limit(type) == limit && local_stream_blocked(type);
 }
 
 bool QuicConnection::reserve_peer_data(std::uint64_t bytes) noexcept {

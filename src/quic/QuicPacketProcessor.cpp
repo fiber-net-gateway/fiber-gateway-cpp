@@ -365,11 +365,23 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 }
                 break;
             case QuicFrameType::MaxStreamsBidi:
-            case QuicFrameType::MaxStreamsUni:
-            case QuicFrameType::DataBlocked:
-            case QuicFrameType::StreamsBlockedBidi:
-            case QuicFrameType::StreamsBlockedUni:
+            case QuicFrameType::MaxStreamsUni: {
+                auto updated = conn.recv_max_streams_frame(frame.u.max_streams);
+                if (!updated) {
+                    return std::unexpected(updated.error());
+                }
                 break;
+            }
+            case QuicFrameType::DataBlocked:
+                break;
+            case QuicFrameType::StreamsBlockedBidi:
+            case QuicFrameType::StreamsBlockedUni: {
+                auto blocked = conn.recv_streams_blocked_frame(frame.u.streams_blocked);
+                if (!blocked) {
+                    return std::unexpected(blocked.error());
+                }
+                break;
+            }
             case QuicFrameType::NewToken:
             case QuicFrameType::NewConnectionId:
             case QuicFrameType::RetireConnectionId:
