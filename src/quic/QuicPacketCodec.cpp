@@ -232,7 +232,7 @@ common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &conn
     const auto pn_snapshot = quic_preserve_packet_number(space);
 
     QuicPacketHeader packet{};
-    quic_init_packet_header(packet, space);
+    quic_init_packet_header(packet, space, connection.key_phase());
     packet.version = kQuicVersion1;
     packet.dcid = spec.dcid;
     packet.scid = spec.scid;
@@ -340,39 +340,91 @@ common::IoResult<QuicPacketDecodeResult> quic_decode_packet(QuicConnection &conn
     const std::uint64_t saved_pending_ack = space.pending_ack;
     const std::uint32_t saved_send_ack_count = space.send_ack_count;
     const bool saved_send_ack = space.send_ack;
-    auto opened =
-            quic_decrypt_packet_payload(*packet, space, *keys, datagram, packet->packet_len, plaintext, plaintext_cap);
-    if (!opened) {
-        return std::unexpected(opened.error());
-    }
-    if (opened->empty()) {
+
+    auto restore_space = [&]() noexcept {
         space.largest_received_packet_number = saved_largest_received;
         space.pending_ack = saved_pending_ack;
         space.send_ack_count = saved_send_ack_count;
         space.send_ack = saved_send_ack;
+    };
+
+    bool key_update = false;
+    QuicSlice opened_payload{};
+
+    if (!packet->long_header && packet->level == QuicEncryptionLevel::Application) {
+        // RFC 9001 §6.3 — header protection must be removed before the key_phase
+        // bit becomes visible. Remove HP first (HP keys are not rotated by key
+        // update), then inspect the bit and choose the AEAD key set accordingly.
+        auto unprotected = quic_remove_header_protection(*packet, *keys, datagram, packet->packet_len);
+        if (!unprotected) {
+            return std::unexpected(unprotected.error());
+        }
+        auto read_pn = quic_read_packet_number(*packet, space);
+        if (!read_pn) {
+            return std::unexpected(read_pn.error());
+        }
+
+        const bool wire_key_phase = (packet->flags & kPacketFlagKeyPhase) != 0;
+        const QuicPacketProtectionKeys *aead_keys = keys;
+        if (wire_key_phase != connection.key_phase()) {
+            if (!connection.next_keys_ready()) {
+                // Peer initiated a key update before we derived the next keys —
+                // RFC 9001 §6: this is a fatal KEY_UPDATE_ERROR.
+                connection.close(QuicErrorCode::KeyUpdateError);
+                return std::unexpected(common::IoErr::Invalid);
+            }
+            aead_keys = &connection.crypto().next_application_read;
+            key_update = true;
+        }
+
+        auto opened = quic_decrypt_aead_payload(*packet, *aead_keys, plaintext, plaintext_cap);
+        if (opened) {
+            opened_payload = *opened;
+            space.record_received_packet_number(packet->packet_number);
+        } else if (!key_update && connection.crypto().previous_application_keys_ready) {
+            // Trial decryption — packet may belong to the previous key generation
+            // that is still within the grace window (RFC 9001 §6.5).
+            auto retry = quic_decrypt_aead_payload(*packet, connection.crypto().previous_application_read, plaintext,
+                                                   plaintext_cap);
+            if (!retry) {
+                restore_space();
+                return std::unexpected(retry.error());
+            }
+            opened_payload = *retry;
+            space.record_received_packet_number(packet->packet_number);
+        } else {
+            restore_space();
+            return std::unexpected(opened.error());
+        }
+    } else {
+        auto opened = quic_decrypt_packet_payload(*packet, space, *keys, datagram, packet->packet_len, plaintext,
+                                                  plaintext_cap);
+        if (!opened) {
+            return std::unexpected(opened.error());
+        }
+        opened_payload = *opened;
+    }
+
+    if (opened_payload.empty()) {
+        restore_space();
         return std::unexpected(common::IoErr::Invalid);
     }
     const std::uint8_t reserved_mask = packet->long_header ? kLongReservedBitsMask : kShortReservedBitsMask;
     if ((packet->flags & reserved_mask) != 0) {
-        space.largest_received_packet_number = saved_largest_received;
-        space.pending_ack = saved_pending_ack;
-        space.send_ack_count = saved_send_ack_count;
-        space.send_ack = saved_send_ack;
+        restore_space();
         return std::unexpected(common::IoErr::Invalid);
     }
 
     QuicPacketDecodeResult result{};
     result.header = *packet;
-    result.payload = *opened;
+    result.payload = opened_payload;
+    result.key_update = key_update;
 
-    QuicReadCursor payload_reader(opened->data, opened->len);
+    QuicReadCursor payload_reader(opened_payload.data, opened_payload.len);
     while (!payload_reader.empty()) {
         auto parsed = quic_parse_frame_for_receiver(connection.role(), packet->level, payload_reader);
         if (!parsed) {
-            space.largest_received_packet_number = saved_largest_received;
-            space.pending_ack = saved_pending_ack;
-            space.send_ack_count = saved_send_ack_count;
-            space.send_ack = saved_send_ack;
+            restore_space();
             return std::unexpected(parsed.error());
         }
         ++result.frame_count;

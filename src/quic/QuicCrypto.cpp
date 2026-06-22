@@ -25,6 +25,7 @@ constexpr char kServerInitialLabel[] = "server in";
 constexpr char kQuicKeyLabel[] = "quic key";
 constexpr char kQuicIvLabel[] = "quic iv";
 constexpr char kQuicHeaderProtectionLabel[] = "quic hp";
+constexpr char kQuicKeyUpdateLabel[] = "quic ku";
 
 constexpr std::uint8_t kRetryIntegrityKey[] = {
         0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a, 0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8, 0x4e,
@@ -297,6 +298,85 @@ common::IoResult<void> quic_set_encryption_secret(QuicCryptoState &state, QuicEn
     return quic_set_packet_protection_secret(*keys, suite, secret, secret_len);
 }
 
+namespace {
+
+[[nodiscard]] common::IoResult<void> derive_next_keys(const QuicPacketProtectionKeys &current,
+                                                      QuicPacketProtectionKeys &next) noexcept {
+    if (!current.ready || current.secret_len == 0) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const SuiteSpec spec = suite_spec(current.suite);
+    if (spec.aead == nullptr || spec.digest == nullptr || current.secret_len != spec.secret_len) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    next.reset();
+    next.suite = current.suite;
+    next.secret_len = current.secret_len;
+    next.key_len = current.key_len;
+    next.iv_len = current.iv_len;
+    // Header protection keys are not rotated by key update (RFC 9001 §5.4.3) —
+    // carry the existing hp material and AES schedule forward unchanged.
+    next.hp_len = current.hp_len;
+    next.hp = current.hp;
+    next.hp_chacha20 = current.hp_chacha20;
+    if (!next.hp_chacha20) {
+        if (AES_set_encrypt_key(next.hp.data(), static_cast<unsigned>(next.hp_len * 8U), &next.hp_key) != 0) {
+            next.reset();
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+
+    auto derived = hkdf_expand_label(spec.digest, next.secret.data(), next.secret_len, current.secret.data(),
+                                     current.secret_len, kQuicKeyUpdateLabel, nullptr, 0);
+    if (!derived) {
+        next.reset();
+        return std::unexpected(derived.error());
+    }
+    derived = hkdf_expand_label(spec.digest, next.key.data(), next.key_len, next.secret.data(), next.secret_len,
+                                kQuicKeyLabel, nullptr, 0);
+    if (!derived) {
+        next.reset();
+        return std::unexpected(derived.error());
+    }
+    derived = hkdf_expand_label(spec.digest, next.iv.data(), next.iv_len, next.secret.data(), next.secret_len,
+                                kQuicIvLabel, nullptr, 0);
+    if (!derived) {
+        next.reset();
+        return std::unexpected(derived.error());
+    }
+
+    if (!EVP_AEAD_CTX_init(&next.aead, spec.aead, next.key.data(), next.key_len, EVP_AEAD_DEFAULT_TAG_LENGTH,
+                           nullptr)) {
+        next.reset();
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    next.aead_initialized = true;
+    next.ready = true;
+    return {};
+}
+
+} // namespace
+
+common::IoResult<void> quic_derive_next_key_pair(QuicCryptoState &state) noexcept {
+    if (!state.application_read.ready || !state.application_write.ready) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    auto derived_read = derive_next_keys(state.application_read, state.next_application_read);
+    if (!derived_read) {
+        state.next_application_read.reset();
+        return std::unexpected(derived_read.error());
+    }
+    auto derived_write = derive_next_keys(state.application_write, state.next_application_write);
+    if (!derived_write) {
+        state.next_application_read.reset();
+        state.next_application_write.reset();
+        return std::unexpected(derived_write.error());
+    }
+    state.next_application_keys_ready = true;
+    return {};
+}
+
 QuicPacketProtectionKeys *quic_packet_keys(QuicCryptoState &state, QuicEncryptionLevel level,
                                            bool write_keys) noexcept {
     switch (level) {
@@ -423,6 +503,32 @@ common::IoResult<std::size_t> quic_encrypt_packet_payload(const QuicPacketHeader
     return out_len;
 }
 
+common::IoResult<QuicSlice> quic_decrypt_aead_payload(const QuicPacketHeader &packet,
+                                                      const QuicPacketProtectionKeys &keys, std::uint8_t *plaintext,
+                                                      std::size_t plaintext_cap) noexcept {
+    if (!keys.ready || plaintext == nullptr || packet.packet_data == nullptr || packet.ciphertext == nullptr) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    auto header_len = aead_header_len(packet);
+    if (!header_len) {
+        return std::unexpected(header_len.error());
+    }
+
+    std::uint8_t nonce[kQuicInitialIvLength]{};
+    auto made_nonce = make_packet_nonce(keys, packet.packet_number, nonce);
+    if (!made_nonce) {
+        return std::unexpected(made_nonce.error());
+    }
+
+    std::size_t plaintext_len = 0;
+    if (!EVP_AEAD_CTX_open(&keys.aead, plaintext, &plaintext_len, plaintext_cap, nonce, sizeof(nonce),
+                           packet.ciphertext, packet.ciphertext_len, packet.packet_data, *header_len)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return QuicSlice{plaintext, plaintext_len};
+}
+
 common::IoResult<QuicSlice> quic_decrypt_packet_payload(QuicPacketHeader &packet, QuicPacketNumberSpace &space,
                                                         const QuicPacketProtectionKeys &keys, std::uint8_t *datagram,
                                                         std::size_t datagram_len, std::uint8_t *plaintext,
@@ -445,20 +551,13 @@ common::IoResult<QuicSlice> quic_decrypt_packet_payload(QuicPacketHeader &packet
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    std::uint8_t nonce[kQuicInitialIvLength]{};
-    auto made_nonce = make_packet_nonce(keys, packet.packet_number, nonce);
-    if (!made_nonce) {
-        return std::unexpected(made_nonce.error());
-    }
-
-    std::size_t plaintext_len = 0;
-    if (!EVP_AEAD_CTX_open(&keys.aead, plaintext, &plaintext_len, plaintext_cap, nonce, sizeof(nonce),
-                           packet.ciphertext, packet.ciphertext_len, datagram, *header_len)) {
-        return std::unexpected(common::IoErr::Invalid);
+    auto opened = quic_decrypt_aead_payload(packet, keys, plaintext, plaintext_cap);
+    if (!opened) {
+        return std::unexpected(opened.error());
     }
 
     space.record_received_packet_number(packet.packet_number);
-    return QuicSlice{plaintext, plaintext_len};
+    return *opened;
 }
 
 common::IoResult<QuicSlice> quic_decrypt_initial_packet(QuicConnection &connection, QuicPacketHeader &packet,

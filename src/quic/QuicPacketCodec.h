@@ -39,6 +39,10 @@ struct QuicPacketDecodeResult {
     QuicSlice payload{};
     std::uint32_t frame_count = 0;
     bool ack_eliciting = false;
+    // Set to true when this packet's key_phase bit differs from the connection's
+    // current key_phase and we successfully decrypted with next_application_read.
+    // The processor uses this signal to swap keys and arm the discard timer.
+    bool key_update = false;
 };
 
 struct QuicRetryPacketSpec {

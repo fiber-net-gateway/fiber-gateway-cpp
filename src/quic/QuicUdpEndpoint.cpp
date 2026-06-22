@@ -984,7 +984,7 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
         }
 
         QuicPacketHeader header{};
-        quic_init_packet_header(header, space);
+        quic_init_packet_header(header, space, connection.key_phase());
         header.version = kQuicVersion1;
         header.dcid = candidate.remote_connection_id;
         header.scid = connection.local_connection_id();
@@ -1165,7 +1165,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         }
 
         QuicPacketHeader header{};
-        quic_init_packet_header(header, space);
+        quic_init_packet_header(header, space, connection.key_phase());
         header.version = kQuicVersion1;
         header.dcid = path->remote_connection_id;
         header.scid = connection.local_connection_id();

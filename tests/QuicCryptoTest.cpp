@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string_view>
 #include <vector>
 
@@ -245,4 +246,78 @@ TEST(QuicCryptoTest, FailedInitialDecryptDoesNotUpdatePacketNumberSpace) {
     EXPECT_FALSE(opened.has_value());
     EXPECT_EQ(connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial).largest_received_packet_number,
               fiber::quic::kUnsetPacketNumber);
+}
+
+TEST(QuicCryptoTest, DerivesNextKeyPair) {
+    // Set up application_read and application_write with a well-known AES-128-GCM
+    // secret (32 bytes, which is the TLS 1.3 SHA-256 secret length for AES-128-GCM).
+    const std::string ku_hex = "9ac72ae2655b796a2e76aeee5ac549a70bc028b7b5ee39ed6add81c59e5a5f06";
+    auto secret = hex(ku_hex);
+    ASSERT_EQ(secret.size(), 32U);
+
+    fiber::quic::QuicCryptoState state{};
+    auto set_read = fiber::quic::quic_set_packet_protection_secret(
+            state.application_read, fiber::quic::QuicCryptoSuite::Aes128GcmSha256, secret.data(), secret.size());
+    ASSERT_TRUE(set_read.has_value());
+    auto set_write = fiber::quic::quic_set_packet_protection_secret(
+            state.application_write, fiber::quic::QuicCryptoSuite::Aes128GcmSha256, secret.data(), secret.size());
+    ASSERT_TRUE(set_write.has_value());
+
+    // Capture the original HP material so we can verify it carries forward.
+    const auto original_hp = state.application_read.hp;
+    const std::size_t original_hp_len = state.application_read.hp_len;
+
+    // Derive the next-generation keys.
+    auto derived = fiber::quic::quic_derive_next_key_pair(state);
+    ASSERT_TRUE(derived.has_value());
+    EXPECT_TRUE(state.next_application_keys_ready);
+    EXPECT_TRUE(state.next_application_read.ready);
+    EXPECT_TRUE(state.next_application_write.ready);
+
+    // Verify that the next secret differs from the current secret.
+    auto next_secret_read =
+            vec_from_bytes(state.next_application_read.secret.data(), state.next_application_read.secret_len);
+    auto next_secret_write =
+            vec_from_bytes(state.next_application_write.secret.data(), state.next_application_write.secret_len);
+    EXPECT_NE(next_secret_read, secret);
+    EXPECT_NE(next_secret_write, secret);
+    // Both directions derived from the same input secret with the same label →
+    // identical next-generation secret.
+    EXPECT_EQ(next_secret_read, next_secret_write);
+
+    // Verify that HP material is carried forward (RFC 9001 §5.4.3).
+    EXPECT_EQ(state.next_application_read.hp_len, original_hp_len);
+    EXPECT_EQ(state.next_application_read.hp, original_hp);
+    EXPECT_EQ(state.next_application_write.hp, original_hp);
+
+    // Verify that the derived key/iv material differs from the current generation
+    // (a sanity check that HKDF was actually applied).
+    EXPECT_NE(vec_from_bytes(state.application_read.key.data(), state.application_read.key_len),
+              vec_from_bytes(state.next_application_read.key.data(), state.next_application_read.key_len));
+    EXPECT_NE(vec_from_bytes(state.application_read.iv.data(), state.application_read.iv_len),
+              vec_from_bytes(state.next_application_read.iv.data(), state.next_application_read.iv_len));
+}
+
+TEST(QuicCryptoTest, KeySwapRotatesApplicationKeys) {
+    // Set up current keys with one secret and derive next keys.
+    const auto secret_a = hex("9ac72ae2655b796a2e76aeee5ac549a70bc028b7b5ee39ed6add81c59e5a5f06");
+    ASSERT_EQ(secret_a.size(), 32U);
+
+    fiber::quic::QuicCryptoState state{};
+    ASSERT_TRUE(fiber::quic::quic_set_packet_protection_secret(
+            state.application_read, fiber::quic::QuicCryptoSuite::Aes128GcmSha256, secret_a.data(), secret_a.size()));
+    ASSERT_TRUE(fiber::quic::quic_set_packet_protection_secret(
+            state.application_write, fiber::quic::QuicCryptoSuite::Aes128GcmSha256, secret_a.data(), secret_a.size()));
+    ASSERT_TRUE(fiber::quic::quic_derive_next_key_pair(state));
+
+    // Snapshot the next-generation key material.
+    const auto next_key_before = state.next_application_read.key;
+    const auto next_iv_before = state.next_application_read.iv;
+
+    // Swap current ← next. After this, application_read should carry what was
+    // in next_application_read.
+    state.application_read.swap(state.next_application_read);
+    EXPECT_EQ(state.application_read.key, next_key_before);
+    EXPECT_EQ(state.application_read.iv, next_iv_before);
+    EXPECT_TRUE(state.application_read.ready);
 }
