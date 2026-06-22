@@ -5,6 +5,7 @@
 #include "quic/QuicAckHandler.h"
 #include "quic/QuicCongestion.h"
 #include "quic/QuicConnection.h"
+#include "quic/QuicLossRecovery.h"
 
 TEST(QuicCongestionTest, InitializesLikeNginx) {
     fiber::quic::QuicCongestionState cg{};
@@ -94,4 +95,82 @@ TEST(QuicAckHandlerTest, AckedSentFrameUpdatesCongestionAndRtt) {
     EXPECT_EQ(connection.congestion().in_flight, 0U);
     EXPECT_EQ(connection.congestion().window, 13200U);
     EXPECT_EQ(connection.rtt().latest_rtt, fiber::quic::QuicTime{80});
+}
+
+TEST(QuicLossRecoveryTest, SelectsPtoTimerFromLatestSentPacket) {
+    fiber::quic::QuicConnection connection(fiber::quic::QuicConnection::Options{});
+    auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
+
+    fiber::quic::QuicOutputFrame *frame = space.alloc_frame();
+    ASSERT_NE(frame, nullptr);
+    frame->type = fiber::quic::QuicFrameType::Ping;
+    frame->packet_number = 0;
+    frame->send_time = fiber::quic::QuicTime{10};
+    frame->packet_ack_eliciting = true;
+    space.next_packet_number = 1;
+    space.sent_frames.push_back(*frame);
+
+    const auto timer = fiber::quic::quic_loss_detection_timer(connection, fiber::quic::QuicTime{10}, 0);
+
+    EXPECT_EQ(timer.mode, fiber::quic::QuicLossTimerMode::Pto);
+    EXPECT_EQ(timer.delay, fiber::quic::QuicTime{997});
+}
+
+TEST(QuicLossRecoveryTest, LossTimerTakesPriorityOverPto) {
+    fiber::quic::QuicConnection connection(fiber::quic::QuicConnection::Options{});
+    auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
+
+    fiber::quic::QuicOutputFrame *frame = space.alloc_frame();
+    ASSERT_NE(frame, nullptr);
+    frame->type = fiber::quic::QuicFrameType::Ping;
+    frame->packet_number = 0;
+    frame->send_time = fiber::quic::QuicTime{10};
+    frame->packet_ack_eliciting = true;
+    space.next_packet_number = 4;
+    space.largest_acked_packet_number = 3;
+    space.sent_frames.push_back(*frame);
+
+    const auto timer = fiber::quic::quic_loss_detection_timer(connection, fiber::quic::QuicTime{10}, 0);
+
+    EXPECT_EQ(timer.mode, fiber::quic::QuicLossTimerMode::Lost);
+    EXPECT_EQ(timer.delay, fiber::quic::QuicTime{0});
+}
+
+TEST(QuicLossRecoveryTest, PtoQueuesTwoCongestionIgnoringPingProbes) {
+    fiber::quic::QuicConnection connection(fiber::quic::QuicConnection::Options{});
+    auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
+
+    fiber::quic::QuicOutputFrame *sent = space.alloc_frame();
+    ASSERT_NE(sent, nullptr);
+    sent->type = fiber::quic::QuicFrameType::Ping;
+    sent->packet_number = 0;
+    sent->send_time = fiber::quic::QuicTime{0};
+    sent->packet_ack_eliciting = true;
+    space.next_packet_number = 1;
+    space.sent_frames.push_back(*sent);
+
+    fiber::quic::QuicOutputFrame *normal = space.alloc_frame();
+    ASSERT_NE(normal, nullptr);
+    normal->type = fiber::quic::QuicFrameType::MaxData;
+    normal->u.max_data.max_data = 1024;
+    space.pending_frames.push_back(*normal);
+
+    auto queued = fiber::quic::quic_queue_pto_probe_frames(connection, fiber::quic::QuicTime{997}, 0);
+
+    ASSERT_TRUE(queued.has_value()) << static_cast<int>(queued.error());
+    EXPECT_TRUE(*queued);
+
+    std::size_t count = 0;
+    std::size_t ping_count = 0;
+    for (fiber::quic::QuicOutputFrame *frame = space.pending_frames.front(); frame != nullptr;
+         frame = space.pending_frames.next_of(*frame)) {
+        if (count < 2) {
+            EXPECT_EQ(frame->type, fiber::quic::QuicFrameType::Ping);
+            EXPECT_TRUE(frame->ignore_congestion);
+            ++ping_count;
+        }
+        ++count;
+    }
+    EXPECT_EQ(ping_count, 2U);
+    EXPECT_EQ(count, 3U);
 }

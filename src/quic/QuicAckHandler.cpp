@@ -3,6 +3,7 @@
 #include <expected>
 
 #include "QuicCursor.h"
+#include "QuicLossRecovery.h"
 #include "QuicProtocol.h"
 #include "QuicTransportCodec.h"
 
@@ -10,29 +11,9 @@ namespace fiber::quic {
 
 namespace {
 
-struct AckStat {
-    QuicTime max_packet_send_time{QuicTime::max()};
-    QuicTime oldest{QuicTime::max()};
-    QuicTime newest{QuicTime::max()};
-    bool max_packet_ack_eliciting = false;
-};
-
-[[nodiscard]] QuicTime oldest_sent_time(QuicConnection &connection) noexcept {
-    QuicTime oldest = QuicTime::max();
-    constexpr QuicEncryptionLevel levels[] = {QuicEncryptionLevel::Initial, QuicEncryptionLevel::Handshake,
-                                              QuicEncryptionLevel::Application};
-    for (QuicEncryptionLevel level: levels) {
-        QuicOutputFrame *frame = connection.packet_number_space(level).sent_frames.front();
-        if (frame != nullptr && frame->send_time < oldest) {
-            oldest = frame->send_time;
-        }
-    }
-    return oldest == QuicTime::max() ? QuicTime{0} : oldest;
-}
-
 [[nodiscard]] common::IoResult<void> handle_ack_range(QuicConnection &connection, QuicPacketNumberSpace &space,
                                                       std::uint64_t min_packet_number, std::uint64_t max_packet_number,
-                                                      QuicTime now, AckStat &stat,
+                                                      QuicTime now, QuicLossAckStat &stat,
                                                       QuicAckProcessResult &result) noexcept {
     bool found = false;
     QuicOutputFrame *prev = nullptr;
@@ -48,7 +29,8 @@ struct AckStat {
                 const bool unblocked =
                         quic_congestion_on_ack(connection.congestion(),
                                                QuicAckSample{frame->packet_len, frame->packet_number, frame->send_time},
-                                               connection.reset_packet_number(), now, oldest_sent_time(connection));
+                                               connection.reset_packet_number(), now,
+                                               quic_oldest_sent_time(connection));
                 result.unblocked = result.unblocked || unblocked;
             }
 
@@ -96,103 +78,9 @@ struct AckStat {
     if (!found && max_packet_number >= space.next_packet_number) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    return {};
-}
-
-[[nodiscard]] common::IoResult<void> detect_lost(QuicConnection &connection, QuicTime now, const AckStat &stat,
-                                                 QuicAckProcessResult &result) noexcept {
-    const QuicTime threshold = quic_loss_time_threshold(connection.rtt());
-    std::uint32_t lost_count = 0;
-    QuicTime oldest_lost{0};
-    QuicTime newest_lost{0};
-
-    constexpr QuicEncryptionLevel levels[] = {QuicEncryptionLevel::Initial, QuicEncryptionLevel::Handshake,
-                                              QuicEncryptionLevel::Application};
-    for (QuicEncryptionLevel level: levels) {
-        QuicPacketNumberSpace &space = connection.packet_number_space(level);
-        if (space.largest_acked_packet_number == kUnsetPacketNumber) {
-            continue;
-        }
-
-        QuicOutputFrame *front = space.sent_frames.front();
-        if (front == nullptr) {
-            continue;
-        }
-        const std::uint64_t packet_threshold =
-                quic_loss_packet_threshold(space.next_packet_number, front->packet_number);
-
-        while ((front = space.sent_frames.front()) != nullptr) {
-            if (front->packet_number > space.largest_acked_packet_number) {
-                break;
-            }
-
-            const bool time_lost = front->send_time + threshold <= now;
-            const bool packet_lost = space.largest_acked_packet_number - front->packet_number >= packet_threshold;
-            if (!time_lost && !packet_lost) {
-                break;
-            }
-
-            if (front->send_time > connection.rtt().first_rtt) {
-                if (lost_count == 0 || front->send_time < oldest_lost) {
-                    oldest_lost = front->send_time;
-                }
-                if (lost_count == 0 || front->send_time > newest_lost) {
-                    newest_lost = front->send_time;
-                }
-                ++lost_count;
-            }
-
-            if (front->packet_len != 0) {
-                const bool unblocked = quic_congestion_on_loss(
-                        connection.congestion(),
-                        QuicLossSample{front->packet_len, front->packet_number, front->send_time, front->ignore_loss},
-                        connection.reset_packet_number(), now, connection.congestion().mtu);
-                result.unblocked = result.unblocked || unblocked;
-            }
-
-            (void) space.sent_frames.pop_front();
-
-            // RFC 9000, Section 13.2.1 / nginx ngx_quic_resend_frames:
-            // When a packet containing an ACK frame is declared lost, force
-            // generation of a fresh ACK so the peer gets up-to-date ack info.
-            // Only applies at Application level (matching nginx's behaviour).
-            if ((front->type == QuicFrameType::Ack || front->type == QuicFrameType::AckEcn) &&
-                level == QuicEncryptionLevel::Application) {
-                space.send_ack_count = kQuicMaxAckGap;
-                space.send_ack = true;
-                result.force_send = true;
-            }
-
-            front->packet_number = 0;
-            front->packet_len = 0;
-            front->send_time = QuicTime{0};
-            front->packet_ack_eliciting = false;
-            if (front->type == QuicFrameType::Stream) {
-                auto failed = connection.on_stream_send_failed(front->u.stream.stream_id,
-                                                               static_cast<std::size_t>(front->u.stream.offset),
-                                                               front->u.stream.length, front->u.stream.fin);
-                if (!failed) {
-                    return std::unexpected(failed.error());
-                }
-                space.release_frame(*front);
-                result.lost_frames = true;
-                continue;
-            }
-            if (quic_output_frame_retransmittable_on_loss(front->type)) {
-                space.pending_frames.push_back(*front);
-                result.lost_frames = true;
-            } else {
-                space.release_frame(*front);
-            }
-        }
+    if (found) {
+        connection.reset_pto_count();
     }
-
-    if (lost_count >= 2 && stat.oldest != QuicTime::max() && (stat.newest < oldest_lost || stat.oldest > newest_lost) &&
-        newest_lost - oldest_lost > quic_persistent_congestion_duration(connection.rtt(), QuicTime{25})) {
-        quic_congestion_on_persistent_congestion(connection.congestion(), oldest_sent_time(connection),
-                                                 connection.congestion().mtu);
-    }
-
     return {};
 }
 
@@ -211,7 +99,7 @@ common::IoResult<QuicAckProcessResult> quic_handle_ack_frame(QuicConnection &con
 
     QuicPacketNumberSpace &space = connection.packet_number_space(level);
     QuicAckProcessResult result{};
-    AckStat stat{};
+    QuicLossAckStat stat{};
 
     std::uint64_t min_packet_number = frame.u.ack.largest - frame.u.ack.first_range;
     std::uint64_t max_packet_number = frame.u.ack.largest;
@@ -251,10 +139,13 @@ common::IoResult<QuicAckProcessResult> quic_handle_ack_frame(QuicConnection &con
         }
     }
 
-    auto lost = detect_lost(connection, now, stat, result);
+    auto lost = quic_detect_lost(connection, now, &stat);
     if (!lost) {
         return std::unexpected(lost.error());
     }
+    result.unblocked = result.unblocked || lost->unblocked;
+    result.lost_frames = result.lost_frames || lost->lost_frames;
+    result.force_send = result.force_send || lost->force_send;
     return result;
 }
 

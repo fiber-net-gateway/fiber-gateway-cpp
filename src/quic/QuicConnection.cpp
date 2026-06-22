@@ -7,6 +7,7 @@
 #include <new>
 
 #include "QuicCrypto.h"
+#include "QuicLossRecovery.h"
 #include "QuicProtocol.h"
 #include "QuicTransportParamsCodec.h"
 
@@ -154,6 +155,82 @@ void QuicConnection::close(QuicErrorCode error) noexcept {
 }
 
 void QuicConnection::mark_closed() noexcept { state_ = QuicConnectionState::Closed; }
+
+void QuicConnection::arm_loss_detection_timer(event::EventLoop &loop) noexcept {
+    if (loss_timer_entry_.is_in_heap()) {
+        loop.cancel<QuicConnection, &QuicConnection::loss_timer_entry_>(*this);
+    }
+
+    if (closing()) {
+        loss_timer_mode_ = QuicLossTimerMode::None;
+        return;
+    }
+
+    const QuicTime now = quic_time_ms(loop.now());
+    const QuicLossDetectionTimer timer = quic_loss_detection_timer(*this, now, pto_count_);
+    loss_timer_mode_ = timer.mode;
+    if (timer.mode == QuicLossTimerMode::None) {
+        return;
+    }
+
+    loop.post_at<QuicConnection, &QuicConnection::loss_timer_entry_, &QuicConnection::on_loss_detection_timer>(
+            loop.now() + timer.delay, *this);
+}
+
+void QuicConnection::cancel_loss_detection_timer(event::EventLoop &loop) noexcept {
+    if (loss_timer_entry_.is_in_heap()) {
+        loop.cancel<QuicConnection, &QuicConnection::loss_timer_entry_>(*this);
+    }
+    loss_timer_mode_ = QuicLossTimerMode::None;
+}
+
+void QuicConnection::on_loss_detection_timer(QuicConnection *connection) noexcept {
+    if (connection == nullptr) {
+        return;
+    }
+
+    event::EventLoop *loop = event::EventLoop::current_or_null();
+    if (loop == nullptr) {
+        connection->loss_timer_mode_ = QuicLossTimerMode::None;
+        return;
+    }
+
+    if (connection->closing()) {
+        connection->loss_timer_mode_ = QuicLossTimerMode::None;
+        return;
+    }
+
+    const QuicTime now = quic_time_ms(loop->now());
+    const QuicLossTimerMode mode = connection->loss_timer_mode_;
+
+    if (mode == QuicLossTimerMode::Lost) {
+        auto lost = quic_detect_lost(*connection, now, nullptr);
+        if (!lost) {
+            connection->close(QuicErrorCode::InternalError);
+            connection->loss_timer_mode_ = QuicLossTimerMode::None;
+            return;
+        }
+
+        if (lost->unblocked || lost->lost_frames || lost->force_send) {
+            connection->schedule_send();
+        }
+
+    } else if (mode == QuicLossTimerMode::Pto) {
+        auto queued = quic_queue_pto_probe_frames(*connection, now, connection->pto_count_);
+        if (!queued) {
+            connection->close(QuicErrorCode::InternalError);
+            connection->loss_timer_mode_ = QuicLossTimerMode::None;
+            return;
+        }
+
+        if (*queued) {
+            ++connection->pto_count_;
+            connection->schedule_send();
+        }
+    }
+
+    connection->arm_loss_detection_timer(*loop);
+}
 
 common::IoResult<std::uint64_t> QuicConnection::next_local_stream_id(QuicStreamType type) noexcept {
     if (closing()) {

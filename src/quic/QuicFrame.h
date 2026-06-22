@@ -253,6 +253,7 @@ struct QuicOutputFrame {
     std::chrono::milliseconds send_time{0};
     bool packet_ack_eliciting = false;
     bool ignore_loss = false;
+    bool ignore_congestion = false;
 
     union Payload {
         QuicPaddingFrame padding;
