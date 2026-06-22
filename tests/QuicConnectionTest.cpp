@@ -33,6 +33,15 @@ fiber::quic::QuicConnectionId cid_from(std::initializer_list<std::uint8_t> bytes
     return cid.value_or(fiber::quic::QuicConnectionId{});
 }
 
+fiber::quic::QuicTransportParams valid_server_peer_params(const fiber::quic::QuicConnection::Options &options) {
+    fiber::quic::QuicTransportParams params{};
+    params.has_initial_source_connection_id = true;
+    params.initial_source_connection_id = options.remote_connection_id;
+    params.max_udp_payload_size = fiber::quic::kMinInitialDatagramSize;
+    params.active_connection_id_limit = 2;
+    return params;
+}
+
 fiber::quic::QuicSlice slice_of(std::string_view value) {
     return {reinterpret_cast<const std::uint8_t *>(value.data()), value.size()};
 }
@@ -52,10 +61,25 @@ fiber::mem::IoBuf iobuf_of(std::string_view value) {
 struct StreamCallbackState {
     std::uint32_t calls = 0;
     std::uint32_t schedule_calls = 0;
+    std::uint32_t idle_timeout_calls = 0;
     std::uint64_t last_stream_id = 0;
     bool return_empty = false;
     fiber::quic::QuicStream::Lease lease{};
 };
+
+struct IdleTimerSnapshot {
+    bool send_timer_after_send = false;
+    bool idle_armed_after_send = false;
+    bool send_timer_after_receive = true;
+    bool idle_armed_after_receive = false;
+};
+
+struct KeepaliveTimerSnapshot {
+    std::size_t pending_ping_count = 0;
+    std::uint32_t schedule_calls = 0;
+};
+
+std::size_t count_pending_frame_type(const fiber::quic::QuicConnection &conn, fiber::quic::QuicFrameType type);
 
 fiber::quic::QuicStream::Lease make_test_stream(const fiber::quic::QuicNewStreamContext &ctx) noexcept {
     return fiber::quic::QuicStream::Lease::adopt(
@@ -96,6 +120,10 @@ fiber::quic::QuicConnection::Options server_options_with_factory(StreamCallbackS
 
 void schedule_send_record(void *owner, fiber::quic::QuicConnection &) noexcept {
     ++static_cast<StreamCallbackState *>(owner)->schedule_calls;
+}
+
+void idle_timeout_record(void *owner, fiber::quic::QuicConnection &) noexcept {
+    ++static_cast<StreamCallbackState *>(owner)->idle_timeout_calls;
 }
 
 struct WriteResult {
@@ -141,6 +169,42 @@ fiber::async::DetachedTask grant_max_data_after_delay(fiber::quic::QuicConnectio
     fiber::quic::QuicMaxDataFrame frame{};
     frame.max_data = limit;
     (void) conn->recv_max_data_frame(frame);
+}
+
+fiber::async::DetachedTask record_idle_timer_lifecycle(fiber::quic::QuicConnection *conn,
+                                                       std::promise<IdleTimerSnapshot> *done) {
+    fiber::event::EventLoop &loop = fiber::event::EventLoop::current();
+    conn->on_ack_eliciting_packet_sent(loop);
+    IdleTimerSnapshot snapshot{};
+    snapshot.send_timer_after_send = conn->idle_send_timer_set();
+    snapshot.idle_armed_after_send = conn->idle_timer_armed();
+    conn->on_packet_processed(loop);
+    snapshot.send_timer_after_receive = conn->idle_send_timer_set();
+    snapshot.idle_armed_after_receive = conn->idle_timer_armed();
+    conn->cancel_idle_timer(loop);
+    conn->cancel_keepalive_timer(loop);
+    done->set_value(snapshot);
+    loop.stop();
+    co_return;
+}
+
+fiber::async::DetachedTask run_idle_timeout_callback(fiber::quic::QuicConnection *conn, std::chrono::milliseconds delay,
+                                                     std::promise<std::uint32_t> *done, StreamCallbackState *state) {
+    conn->arm_idle_timer(fiber::event::EventLoop::current());
+    co_await fiber::async::sleep(delay);
+    done->set_value(state->idle_timeout_calls);
+    fiber::event::EventLoop::current().stop();
+}
+
+fiber::async::DetachedTask run_keepalive_timer(fiber::quic::QuicConnection *conn, std::chrono::milliseconds delay,
+                                               std::promise<KeepaliveTimerSnapshot> *done, StreamCallbackState *state) {
+    conn->arm_keepalive_timer(fiber::event::EventLoop::current());
+    co_await fiber::async::sleep(delay);
+    KeepaliveTimerSnapshot snapshot{};
+    snapshot.pending_ping_count = count_pending_frame_type(*conn, fiber::quic::QuicFrameType::Ping);
+    snapshot.schedule_calls = state->schedule_calls;
+    done->set_value(snapshot);
+    fiber::event::EventLoop::current().stop();
 }
 
 void grant_max_stream_data(fiber::quic::QuicConnection &conn, std::uint64_t stream_id, std::uint64_t limit) {
@@ -538,6 +602,120 @@ TEST(QuicConnectionTest, AppliesPeerTransportParamsAndUpdatesLocalStreamLimits) 
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(second.has_value());
     EXPECT_FALSE(third.has_value());
+}
+
+TEST(QuicConnectionTest, PeerIdleTimeoutUsesMinimumNonZeroTransportValue) {
+    fiber::quic::QuicConnection::Options options{};
+    options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
+    options.transport.max_idle_timeout = std::chrono::milliseconds(30000);
+    fiber::quic::QuicConnection conn(options);
+
+    auto params = valid_server_peer_params(options);
+    params.max_idle_timeout = 12000;
+    auto applied = conn.apply_peer_transport_params(params);
+
+    ASSERT_TRUE(applied.has_value()) << static_cast<int>(applied.error());
+    EXPECT_EQ(conn.effective_idle_timeout(), std::chrono::milliseconds(12000));
+}
+
+TEST(QuicConnectionTest, ZeroLocalIdleTimeoutAllowsPeerIdleTimeout) {
+    fiber::quic::QuicConnection::Options options{};
+    options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
+    options.transport.max_idle_timeout = std::chrono::milliseconds(0);
+    fiber::quic::QuicConnection conn(options);
+
+    auto params = valid_server_peer_params(options);
+    params.max_idle_timeout = 9000;
+    auto applied = conn.apply_peer_transport_params(params);
+
+    ASSERT_TRUE(applied.has_value()) << static_cast<int>(applied.error());
+    EXPECT_EQ(conn.effective_idle_timeout(), std::chrono::milliseconds(9000));
+}
+
+TEST(QuicConnectionTest, ZeroPeerIdleTimeoutKeepsLocalIdleTimeout) {
+    fiber::quic::QuicConnection::Options options{};
+    options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
+    options.transport.max_idle_timeout = std::chrono::milliseconds(7000);
+    fiber::quic::QuicConnection conn(options);
+
+    auto params = valid_server_peer_params(options);
+    params.max_idle_timeout = 0;
+    auto applied = conn.apply_peer_transport_params(params);
+
+    ASSERT_TRUE(applied.has_value()) << static_cast<int>(applied.error());
+    EXPECT_EQ(conn.effective_idle_timeout(), std::chrono::milliseconds(7000));
+}
+
+TEST(QuicConnectionTest, ReceiveClearsSendSideIdleTimerState) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicConnection::Options options{};
+    options.transport.max_idle_timeout = std::chrono::milliseconds(1000);
+    fiber::quic::QuicConnection conn(options);
+
+    std::promise<IdleTimerSnapshot> done;
+    auto future = done.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return record_idle_timer_lifecycle(&conn, &done); });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    const IdleTimerSnapshot snapshot = future.get();
+    EXPECT_TRUE(snapshot.send_timer_after_send);
+    EXPECT_TRUE(snapshot.idle_armed_after_send);
+    EXPECT_FALSE(snapshot.send_timer_after_receive);
+    EXPECT_TRUE(snapshot.idle_armed_after_receive);
+
+    group.join();
+}
+
+TEST(QuicConnectionTest, IdleTimerMarksClosedAndInvokesCallback) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    StreamCallbackState state{};
+    fiber::quic::QuicConnection::Options options{};
+    options.transport.max_idle_timeout = std::chrono::milliseconds(5);
+    options.lifecycle_owner = &state;
+    options.on_idle_timeout = idle_timeout_record;
+    fiber::quic::QuicConnection conn(options);
+
+    std::promise<std::uint32_t> done;
+    auto future = done.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_idle_timeout_callback(&conn, std::chrono::milliseconds(25), &done, &state);
+    });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(future.get(), 1U);
+    EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Closed);
+
+    group.join();
+}
+
+TEST(QuicConnectionTest, KeepaliveTimerQueuesApplicationPingWhenEstablished) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    StreamCallbackState state{};
+    fiber::quic::QuicConnection::Options options{};
+    options.keepalive_interval = std::chrono::milliseconds(5);
+    options.schedule_send_owner = &state;
+    options.schedule_send = schedule_send_record;
+    fiber::quic::QuicConnection conn(options);
+    ASSERT_TRUE(conn.mark_established());
+    conn.crypto().application_write.ready = true;
+
+    std::promise<KeepaliveTimerSnapshot> done;
+    auto future = done.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_keepalive_timer(&conn, std::chrono::milliseconds(25), &done, &state); });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    const KeepaliveTimerSnapshot snapshot = future.get();
+    EXPECT_EQ(snapshot.pending_ping_count, 1U);
+    EXPECT_EQ(snapshot.schedule_calls, 1U);
+
+    group.join();
 }
 
 TEST(QuicConnectionTest, RejectsPeerTransportParamsWithMismatchedInitialScid) {

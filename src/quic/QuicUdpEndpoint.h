@@ -46,6 +46,7 @@ public:
         net::UdpBindOptions udp{};
         QuicSendScheduler::Options send{};
         QuicTransportSettings transport{};
+        std::chrono::milliseconds keepalive_interval{0};
         QuicRecvFlowControlSettings recv_flow{};
         std::chrono::milliseconds max_ack_delay{25};
         std::uint64_t ack_delay_exponent = 3;
@@ -112,6 +113,7 @@ private:
     [[nodiscard]] const QuicConnection *find_connection(const QuicConnectionId &dcid,
                                                         std::uint64_t hash) const noexcept;
     void delete_connection(QuicConnection &connection) noexcept;
+    static void delete_connection_on_timer(void *owner, QuicConnection &connection) noexcept;
     [[nodiscard]] common::IoResult<QuicConnectionId> generate_connection_id() noexcept;
     [[nodiscard]] common::IoResult<void> register_connection_id(QuicConnection &connection,
                                                                 QuicConnection::ConnectionIdIndex &index,

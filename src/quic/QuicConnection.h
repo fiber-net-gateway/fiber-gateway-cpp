@@ -218,6 +218,7 @@ public:
         QuicConnectionId remote_connection_id{};
         QuicConnectionId retry_source_connection_id{};
         QuicTransportSettings transport{};
+        std::chrono::milliseconds keepalive_interval{0};
         QuicRecvFlowControlSettings recv_flow{};
         std::uint64_t max_peer_bidirectional_streams = kQuicDefaultMaxBidirectionalStreams;
         std::uint64_t max_peer_unidirectional_streams = kQuicDefaultMaxUnidirectionalStreams;
@@ -226,6 +227,9 @@ public:
         QuicOutputFramePool *output_frame_pool = nullptr;
         void *schedule_send_owner = nullptr;
         void (*schedule_send)(void *owner, QuicConnection &connection) noexcept = nullptr;
+        void *lifecycle_owner = nullptr;
+        void (*on_idle_timeout)(void *owner, QuicConnection &connection) noexcept = nullptr;
+        void (*on_close_timeout)(void *owner, QuicConnection &connection) noexcept = nullptr;
         void *owner = nullptr;
         Ops ops{};
         bool has_retry_source_connection_id = false;
@@ -310,6 +314,19 @@ public:
     void flip_key_phase() noexcept { key_phase_ = !key_phase_; }
     void arm_key_update_discard_timer(event::EventLoop &loop) noexcept;
     void cancel_key_update_discard_timer(event::EventLoop &loop) noexcept;
+    void on_packet_processed(event::EventLoop &loop) noexcept;
+    void on_ack_eliciting_packet_sent(event::EventLoop &loop) noexcept;
+    [[nodiscard]] std::chrono::milliseconds effective_idle_timeout() const noexcept;
+    [[nodiscard]] bool idle_timer_armed() const noexcept { return idle_timer_entry_.is_in_heap(); }
+    [[nodiscard]] bool close_timer_armed() const noexcept { return close_timer_entry_.is_in_heap(); }
+    [[nodiscard]] bool keepalive_timer_armed() const noexcept { return keepalive_timer_entry_.is_in_heap(); }
+    [[nodiscard]] bool idle_send_timer_set() const noexcept { return idle_send_timer_set_; }
+    void arm_idle_timer(event::EventLoop &loop) noexcept;
+    void cancel_idle_timer(event::EventLoop &loop) noexcept;
+    void arm_close_timer(event::EventLoop &loop) noexcept;
+    void cancel_close_timer(event::EventLoop &loop) noexcept;
+    void arm_keepalive_timer(event::EventLoop &loop) noexcept;
+    void cancel_keepalive_timer(event::EventLoop &loop) noexcept;
     [[nodiscard]] QuicCongestionState &congestion() noexcept { return congestion_; }
     [[nodiscard]] const QuicCongestionState &congestion() const noexcept { return congestion_; }
     [[nodiscard]] QuicRttState &rtt() noexcept { return rtt_; }
@@ -401,6 +418,8 @@ private:
     [[nodiscard]] common::IoResult<void> queue_stream_data_blocked_frame(QuicStream &stream,
                                                                          std::uint64_t limit) noexcept;
     [[nodiscard]] common::IoResult<void> queue_ping_frame() noexcept;
+    [[nodiscard]] bool has_pending_send_work() const noexcept;
+    [[nodiscard]] std::chrono::milliseconds keepalive_delay() const noexcept;
     [[nodiscard]] bool reserve_peer_data(std::uint64_t bytes) noexcept;
     [[nodiscard]] std::uint64_t initial_stream_send_limit(std::uint64_t stream_id) const noexcept;
     void wait_for_peer_data(QuicStream::WriteAwaiter &awaiter) noexcept;
@@ -411,6 +430,9 @@ private:
     void maybe_extend_recv_data_flow_control() noexcept;
     static void on_loss_detection_timer(QuicConnection *connection) noexcept;
     static void on_key_update_discard_timer(QuicConnection *connection) noexcept;
+    static void on_idle_timer(QuicConnection *connection) noexcept;
+    static void on_close_timer(QuicConnection *connection) noexcept;
+    static void on_keepalive_timer(QuicConnection *connection) noexcept;
 
     friend class QuicPathManager;
 
@@ -430,6 +452,9 @@ private:
     QuicLossTimerMode loss_timer_mode_ = QuicLossTimerMode::None;
     event::EventLoop::TimerEntry loss_timer_entry_{};
     event::EventLoop::TimerEntry key_update_discard_timer_entry_{};
+    event::EventLoop::TimerEntry idle_timer_entry_{};
+    event::EventLoop::TimerEntry close_timer_entry_{};
+    event::EventLoop::TimerEntry keepalive_timer_entry_{};
     QuicCryptoState crypto_{};
     QuicPeerTransportState peer_transport_{};
     mem::IoBufNodePool recv_extent_pool_{};
@@ -445,6 +470,7 @@ private:
     common::IntrusiveListHook *peer_data_wait_tail_ = nullptr;
     bool data_blocked_reported_ = false;
     bool key_phase_ = false;
+    bool idle_send_timer_set_ = false;
 
     friend class QuicStream;
     friend class QuicStream::WriteAwaiter;
