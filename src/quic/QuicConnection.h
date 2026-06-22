@@ -198,8 +198,10 @@ public:
         net::SocketAddress local_addr{};
         net::SocketAddress remote_addr{};
         QuicConnectionId original_destination_connection_id{};
+        QuicConnectionId initial_destination_connection_id{};
         QuicConnectionId local_connection_id{};
         QuicConnectionId remote_connection_id{};
+        QuicConnectionId retry_source_connection_id{};
         QuicTransportSettings transport{};
         QuicRecvFlowControlSettings recv_flow{};
         std::uint64_t max_peer_bidirectional_streams = kQuicDefaultMaxBidirectionalStreams;
@@ -211,6 +213,8 @@ public:
         void (*schedule_send)(void *owner, QuicConnection &connection) noexcept = nullptr;
         void *owner = nullptr;
         Ops ops{};
+        bool has_retry_source_connection_id = false;
+        bool initial_path_validated = false;
     };
 
     explicit QuicConnection(const Options &options) noexcept;
@@ -223,9 +227,16 @@ public:
     [[nodiscard]] const QuicConnectionId &original_destination_connection_id() const noexcept {
         return options_.original_destination_connection_id;
     }
+    [[nodiscard]] const QuicConnectionId &initial_destination_connection_id() const noexcept {
+        return options_.initial_destination_connection_id;
+    }
     [[nodiscard]] const QuicConnectionId &local_connection_id() const noexcept { return options_.local_connection_id; }
     [[nodiscard]] const QuicConnectionId &remote_connection_id() const noexcept {
         return options_.remote_connection_id;
+    }
+    [[nodiscard]] bool retried() const noexcept { return options_.has_retry_source_connection_id; }
+    [[nodiscard]] const QuicConnectionId &retry_source_connection_id() const noexcept {
+        return options_.retry_source_connection_id;
     }
     [[nodiscard]] QuicErrorCode close_error() const noexcept { return close_error_; }
     [[nodiscard]] bool closed() const noexcept { return state_ == QuicConnectionState::Closed; }
@@ -326,6 +337,10 @@ public:
     [[nodiscard]] common::IoResult<bool> recv_path_response_frame(const QuicPathChallengeFrame &frame,
                                                                   QuicTime now) noexcept {
         return path_manager_.recv_path_response_frame(frame, now);
+    }
+    [[nodiscard]] common::IoResult<QuicPath *> recv_path_response_frame_with_path(const QuicPathChallengeFrame &frame,
+                                                                                  QuicTime now) noexcept {
+        return path_manager_.recv_path_response_frame_with_path(frame, now);
     }
     [[nodiscard]] common::IoResult<void> handle_migration(QuicPath &path, bool rebound, QuicTime now) noexcept {
         return path_manager_.handle_migration(path, rebound, now);

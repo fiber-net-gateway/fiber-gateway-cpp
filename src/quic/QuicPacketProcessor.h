@@ -24,6 +24,7 @@ struct QuicReceivedDatagram {
 
 struct QuicPacketProcessResult {
     QuicPath *path = nullptr;
+    QuicPath *validated_path = nullptr;
     QuicPacketType packet_type = QuicPacketType::Initial;
     QuicEncryptionLevel level = QuicEncryptionLevel::Initial;
     std::uint64_t packet_number = 0;
@@ -35,6 +36,8 @@ struct QuicPacketProcessResult {
     bool non_probing = false;
     bool created_path = false;
     bool rebound = false;
+    bool handshake_confirmed = false;
+    bool path_validated = false;
 };
 
 [[nodiscard]] common::IoResult<QuicPacketProcessResult>

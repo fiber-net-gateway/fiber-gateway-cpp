@@ -270,6 +270,15 @@ common::IoResult<void> QuicPathManager::recv_path_challenge_frame(QuicPath &path
 
 common::IoResult<bool> QuicPathManager::recv_path_response_frame(const QuicPathChallengeFrame &frame,
                                                                  QuicTime now) noexcept {
+    auto path = recv_path_response_frame_with_path(frame, now);
+    if (!path) {
+        return std::unexpected(path.error());
+    }
+    return *path != nullptr;
+}
+
+common::IoResult<QuicPath *> QuicPathManager::recv_path_response_frame_with_path(const QuicPathChallengeFrame &frame,
+                                                                                 QuicTime now) noexcept {
     for (QuicPath &path: paths_) {
         if (!path.allocated || path.state != QuicPathState::Validating) {
             continue;
@@ -310,10 +319,10 @@ common::IoResult<bool> QuicPathManager::recv_path_response_frame(const QuicPathC
         if (auto *loop = event::EventLoop::current_or_null()) {
             arm_validation_timer(*loop);
         }
-        return true;
+        return &path;
     }
 
-    return false;
+    return nullptr;
 }
 
 common::IoResult<void> QuicPathManager::start_validation(QuicPath &path, QuicTime now) noexcept {
