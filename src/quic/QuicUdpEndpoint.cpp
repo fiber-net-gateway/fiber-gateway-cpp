@@ -463,7 +463,7 @@ const QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &d
 void QuicUdpEndpoint::delete_connection(QuicConnection &connection) noexcept {
     if (loop_ != nullptr) {
         connection.cancel_loss_detection_timer(*loop_);
-        connection.cancel_path_validation_timer(*loop_);
+        connection.paths().cancel_validation_timer(*loop_);
     }
     send_scheduler_.remove(connection);
     QuicConnection::EndpointIndex &index = connection.endpoint_index;
@@ -654,7 +654,7 @@ void QuicUdpEndpoint::schedule_after_receive(QuicConnection &connection,
 
     if (loop_ != nullptr) {
         connection.arm_loss_detection_timer(*loop_);
-        connection.arm_path_validation_timer(*loop_);
+        connection.paths().arm_validation_timer(*loop_);
     }
 
     if (!should_send) {
@@ -688,7 +688,7 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
     std::uint8_t *const data = datagram.data;
     const std::size_t capacity = datagram.capacity;
 
-    for (QuicPath &candidate: connection.paths_) {
+    for (QuicPath &candidate: connection.paths().paths()) {
         if (!candidate.allocated || candidate.pending_frames.empty()) {
             continue;
         }

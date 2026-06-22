@@ -18,8 +18,11 @@
 #include "../event/EventLoop.h"
 #include "../net/SocketAddress.h"
 #include "QuicCongestion.h"
+#include "QuicConnectionId.h"
 #include "QuicFrame.h"
 #include "QuicPacketNumberSpace.h"
+#include "QuicPath.h"
+#include "QuicPathManager.h"
 #include "QuicStream.h"
 #include "QuicStreamTable.h"
 #include "QuicTlsSession.h"
@@ -28,7 +31,6 @@ namespace fiber::quic {
 
 struct QuicTransportParams;
 
-inline constexpr std::size_t kQuicConnectionIdLength = kMaxConnectionIdLength;
 inline constexpr std::size_t kQuicInitialSecretLength = 32;
 inline constexpr std::size_t kQuicMaxSecretLength = 48;
 inline constexpr std::size_t kQuicMaxKeyLength = 32;
@@ -39,8 +41,6 @@ inline constexpr std::size_t kQuicInitialIvLength = kQuicIvLength;
 inline constexpr std::size_t kQuicInitialHeaderProtectionKeyLength = 16;
 inline constexpr std::size_t kQuicHeaderProtectionSampleLength = 16;
 inline constexpr std::size_t kQuicHeaderProtectionMaskLength = 5;
-inline constexpr std::size_t kQuicMaxPaths = 3;
-inline constexpr std::size_t kQuicPathRetries = 3;
 inline constexpr std::size_t kQuicMaxUdpPayloadSize = 65527;
 inline constexpr std::size_t kQuicDefaultStreamBufferSize = 65536;
 inline constexpr std::uint64_t kQuicDefaultConnRecvLimit = 2ULL * 1024ULL * 1024ULL * 1024ULL;
@@ -81,17 +81,6 @@ enum class QuicErrorCode : std::uint64_t {
     KeyUpdateError = 0x0E,
     AeadLimitReached = 0x0F,
     NoViablePath = 0x10,
-};
-
-struct QuicConnectionId {
-    std::array<std::uint8_t, kMaxConnectionIdLength> bytes{};
-    std::uint8_t length = 0;
-
-    [[nodiscard]] bool empty() const noexcept { return length == 0; }
-    [[nodiscard]] const std::uint8_t *data() const noexcept { return bytes.data(); }
-    [[nodiscard]] std::size_t size() const noexcept { return length; }
-
-    static common::IoResult<QuicConnectionId> from_bytes(const std::uint8_t *data, std::size_t len) noexcept;
 };
 
 struct QuicTransportSettings {
@@ -175,47 +164,10 @@ struct QuicCryptoState : public common::NonCopyable, public common::NonMovable {
     bool initial_ready = false;
 };
 
-enum class QuicPathTag : std::uint8_t {
-    Probe,
-    Active,
-    Backup,
-};
-
-enum class QuicPathState : std::uint8_t {
-    Idle,
-    Validating,
-    WaitingMtuProbe,
-    MtuDiscovery,
-};
-
 enum class QuicLossTimerMode : std::uint8_t {
     None,
     Lost,
     Pto,
-};
-
-struct QuicPath {
-    net::SocketAddress remote{};
-    net::SocketAddress local{};
-    QuicConnectionId remote_connection_id{};
-    std::uint64_t remote_connection_id_sequence = 0;
-    QuicPathState state = QuicPathState::Idle;
-    QuicTime expires{0};
-    std::uint32_t tries = 0;
-    QuicPathTag tag = QuicPathTag::Probe;
-    std::size_t mtu = kQuicCongestionMinInitialSize;
-    std::size_t mtud = 0;
-    std::size_t max_mtu = 0;
-    std::uint64_t sent = 0;
-    std::uint64_t received = 0;
-    std::uint8_t challenge[2][8]{};
-    std::uint64_t seqnum = 0;
-    std::uint64_t mtu_packet_numbers[kQuicPathRetries]{};
-    QuicOutputFrameQueue pending_frames{};
-    bool allocated = false;
-    bool validated = false;
-    bool mtu_unvalidated = false;
-    bool used = false;
 };
 
 class QuicConnection : public common::NonCopyable, public common::NonMovable {
@@ -339,29 +291,49 @@ public:
     void arm_loss_detection_timer(event::EventLoop &loop) noexcept;
     void cancel_loss_detection_timer(event::EventLoop &loop) noexcept;
     void reset_congestion_for_path(QuicTime now) noexcept;
-    void arm_path_validation_timer(event::EventLoop &loop) noexcept;
-    void cancel_path_validation_timer(event::EventLoop &loop) noexcept;
-    [[nodiscard]] QuicPath *active_path() noexcept { return active_path_; }
-    [[nodiscard]] const QuicPath *active_path() const noexcept { return active_path_; }
-    [[nodiscard]] std::size_t path_count() const noexcept;
-    [[nodiscard]] QuicPath *find_path(const net::SocketAddress &remote, const net::SocketAddress &local) noexcept;
+
+    [[nodiscard]] QuicPathManager &paths() noexcept { return path_manager_; }
+    [[nodiscard]] const QuicPathManager &paths() const noexcept { return path_manager_; }
+
+    // Thin forwarders preserved for external callers.
+    void arm_path_validation_timer(event::EventLoop &loop) noexcept { path_manager_.arm_validation_timer(loop); }
+    void cancel_path_validation_timer(event::EventLoop &loop) noexcept { path_manager_.cancel_validation_timer(loop); }
+    [[nodiscard]] QuicPath *active_path() noexcept { return path_manager_.active(); }
+    [[nodiscard]] const QuicPath *active_path() const noexcept { return path_manager_.active(); }
+    [[nodiscard]] std::size_t path_count() const noexcept { return path_manager_.count(); }
+    [[nodiscard]] QuicPath *find_path(const net::SocketAddress &remote, const net::SocketAddress &local) noexcept {
+        return path_manager_.find(remote, local);
+    }
     [[nodiscard]] const QuicPath *find_path(const net::SocketAddress &remote,
-                                            const net::SocketAddress &local) const noexcept;
-    [[nodiscard]] QuicPath *find_path(QuicPathTag tag) noexcept;
-    [[nodiscard]] const QuicPath *find_path(QuicPathTag tag) const noexcept;
+                                            const net::SocketAddress &local) const noexcept {
+        return path_manager_.find(remote, local);
+    }
+    [[nodiscard]] QuicPath *find_path(QuicPathTag tag) noexcept { return path_manager_.find(tag); }
+    [[nodiscard]] const QuicPath *find_path(QuicPathTag tag) const noexcept { return path_manager_.find(tag); }
     [[nodiscard]] QuicPath *create_path(const net::SocketAddress &remote, const net::SocketAddress &local,
-                                        const QuicConnectionId &remote_connection_id, QuicPathTag tag) noexcept;
-    void free_path(QuicPath &path) noexcept;
-    [[nodiscard]] bool set_active_path(QuicPath &path) noexcept;
-    void record_path_received(QuicPath &path, std::size_t len) noexcept;
-    void record_path_sent(QuicPath &path, std::size_t len) noexcept;
-    [[nodiscard]] bool has_path_send_work() const noexcept;
+                                        const QuicConnectionId &remote_connection_id, QuicPathTag tag) noexcept {
+        return path_manager_.create(remote, local, remote_connection_id, tag);
+    }
+    void free_path(QuicPath &path) noexcept { path_manager_.free(path); }
+    [[nodiscard]] bool set_active_path(QuicPath &path) noexcept { return path_manager_.set_active(path); }
+    void record_path_received(QuicPath &path, std::size_t len) noexcept { path_manager_.record_received(path, len); }
+    void record_path_sent(QuicPath &path, std::size_t len) noexcept { path_manager_.record_sent(path, len); }
+    [[nodiscard]] bool has_path_send_work() const noexcept { return path_manager_.has_send_work(); }
     [[nodiscard]] common::IoResult<void> recv_path_challenge_frame(QuicPath &path,
-                                                                   const QuicPathChallengeFrame &frame) noexcept;
+                                                                   const QuicPathChallengeFrame &frame) noexcept {
+        return path_manager_.recv_path_challenge_frame(path, frame);
+    }
     [[nodiscard]] common::IoResult<bool> recv_path_response_frame(const QuicPathChallengeFrame &frame,
-                                                                  QuicTime now) noexcept;
-    [[nodiscard]] common::IoResult<void> handle_migration(QuicPath &path, bool rebound, QuicTime now) noexcept;
-    [[nodiscard]] static std::size_t path_send_limit(const QuicPath &path, std::size_t size) noexcept;
+                                                                  QuicTime now) noexcept {
+        return path_manager_.recv_path_response_frame(frame, now);
+    }
+    [[nodiscard]] common::IoResult<void> handle_migration(QuicPath &path, bool rebound, QuicTime now) noexcept {
+        return path_manager_.handle_migration(path, rebound, now);
+    }
+    [[nodiscard]] static std::size_t path_send_limit(const QuicPath &path, std::size_t size) noexcept {
+        return QuicPathManager::send_limit(path, size);
+    }
+
     [[nodiscard]] QuicTlsSession &tls() noexcept { return tls_; }
     [[nodiscard]] const QuicTlsSession &tls() const noexcept { return tls_; }
     common::IoResult<void> init_initial_crypto(const QuicConnectionId &original_dcid) noexcept;
@@ -394,15 +366,6 @@ private:
     [[nodiscard]] common::IoResult<void> queue_stream_data_blocked_frame(QuicStream &stream,
                                                                          std::uint64_t limit) noexcept;
     [[nodiscard]] common::IoResult<void> queue_ping_frame() noexcept;
-    [[nodiscard]] common::IoResult<void> queue_path_challenge_frame(QuicPath &path,
-                                                                    const std::uint8_t data[8]) noexcept;
-    [[nodiscard]] common::IoResult<void> queue_path_response_frame(QuicPath &path, const std::uint8_t data[8]) noexcept;
-    [[nodiscard]] common::IoResult<void> start_path_validation(QuicPath &path, QuicTime now) noexcept;
-    [[nodiscard]] common::IoResult<bool> expire_path_validation(QuicPath &path, QuicTime now) noexcept;
-    void clear_path_frames(QuicPath &path) noexcept;
-    void clear_path_frames(QuicPath &path, QuicFrameType type) noexcept;
-    [[nodiscard]] QuicTime path_validation_delay() const noexcept;
-    [[nodiscard]] QuicTime path_validation_delay(std::uint32_t tries) const noexcept;
     [[nodiscard]] bool reserve_peer_data(std::uint64_t bytes) noexcept;
     [[nodiscard]] std::uint64_t initial_stream_send_limit(std::uint64_t stream_id) const noexcept;
     void wait_for_peer_data(QuicStream::WriteAwaiter &awaiter) noexcept;
@@ -412,7 +375,8 @@ private:
     void commit_recv_data_delta(std::uint64_t delta) noexcept;
     void maybe_extend_recv_data_flow_control() noexcept;
     static void on_loss_detection_timer(QuicConnection *connection) noexcept;
-    static void on_path_validation_timer(QuicConnection *connection) noexcept;
+
+    friend class QuicPathManager;
 
     Options options_{};
     QuicConnectionState state_ = QuicConnectionState::Init;
@@ -429,15 +393,12 @@ private:
     std::uint32_t pto_count_ = 0;
     QuicLossTimerMode loss_timer_mode_ = QuicLossTimerMode::None;
     event::EventLoop::TimerEntry loss_timer_entry_{};
-    event::EventLoop::TimerEntry path_timer_entry_{};
     QuicCryptoState crypto_{};
     QuicPeerTransportState peer_transport_{};
     mem::IoBufNodePool recv_extent_pool_{};
     QuicStreamTable streams_{};
     QuicTlsSession tls_{};
-    std::array<QuicPath, kQuicMaxPaths> paths_{};
-    QuicPath *active_path_ = nullptr;
-    std::uint64_t next_path_seqnum_ = 0;
+    QuicPathManager path_manager_{*this};
     std::uint64_t recv_data_consumed_ = 0;
     std::uint64_t recv_data_limit_ = 0;
     std::uint64_t peer_max_data_ = 0;
