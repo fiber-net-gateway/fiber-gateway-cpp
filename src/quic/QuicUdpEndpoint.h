@@ -146,7 +146,7 @@ private:
     void commit_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept;
     void rollback_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept;
     [[nodiscard]] bool connection_has_send_work(const QuicConnection &connection) const noexcept;
-    void schedule_after_receive(QuicConnection &connection, const QuicPacketProcessResult &result) noexcept;
+    void handle_receive_result(QuicConnection &connection, const QuicPacketProcessResult &result) noexcept;
     [[nodiscard]] bool should_delay_ack(const QuicPacketNumberSpace &space, QuicTime now) const noexcept;
 
     Options options_{};
