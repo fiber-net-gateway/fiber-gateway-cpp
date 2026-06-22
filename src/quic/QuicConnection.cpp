@@ -317,7 +317,7 @@ common::IoResult<void> QuicConnection::recv_max_stream_data_frame(const QuicMaxS
 common::IoResult<void> QuicConnection::recv_max_data_frame(const QuicMaxDataFrame &frame) noexcept {
     if (frame.max_data > peer_max_data_) {
         peer_max_data_ = frame.max_data;
-        notify_stream_write_waiters();
+        notify_peer_data_waiters();
     }
     return {};
 }
@@ -395,7 +395,7 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
     streams_.for_each([this](QuicStream &stream) noexcept {
         stream.on_max_stream_data(initial_stream_send_limit(stream.stream_id()));
     });
-    notify_stream_write_waiters();
+    notify_peer_data_waiters();
     if (params.max_idle_timeout > 0 &&
         std::chrono::milliseconds(params.max_idle_timeout) < options_.transport.max_idle_timeout) {
         options_.transport.max_idle_timeout = std::chrono::milliseconds(params.max_idle_timeout);
@@ -740,10 +740,6 @@ std::uint64_t QuicConnection::initial_stream_send_limit(std::uint64_t stream_id)
     }
     return is_local_stream(stream_id) ? peer_transport_.params.initial_max_stream_data_bidi_remote
                                       : peer_transport_.params.initial_max_stream_data_bidi_local;
-}
-
-void QuicConnection::notify_stream_write_waiters() noexcept {
-    streams_.for_each([](QuicStream &stream) noexcept { stream.on_connection_max_data(); });
 }
 
 common::IoResult<void> QuicConnection::check_recv_data_delta(std::uint64_t delta) const noexcept {
