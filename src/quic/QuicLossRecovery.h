@@ -26,8 +26,8 @@ struct QuicLossDetectionTimer {
 
 [[nodiscard]] QuicTime quic_oldest_sent_time(QuicConnection &connection) noexcept;
 
-[[nodiscard]] common::IoResult<QuicLossRecoveryResult>
-quic_detect_lost(QuicConnection &connection, QuicTime now, const QuicLossAckStat *stat) noexcept;
+[[nodiscard]] common::IoResult<QuicLossRecoveryResult> quic_detect_lost(QuicConnection &connection, QuicTime now,
+                                                                        const QuicLossAckStat *stat) noexcept;
 
 [[nodiscard]] QuicLossDetectionTimer quic_loss_detection_timer(const QuicConnection &connection, QuicTime now,
                                                                std::uint32_t pto_count) noexcept;

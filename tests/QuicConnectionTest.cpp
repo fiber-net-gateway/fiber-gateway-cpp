@@ -15,6 +15,7 @@
 #include "async/Spawn.h"
 #include "event/EventLoopGroup.h"
 #include "quic/QuicConnection.h"
+#include "quic/QuicLossRecovery.h"
 #include "quic/QuicProtocol.h"
 #include "quic/QuicTransportCodec.h"
 #include "quic/QuicTransportParamsCodec.h"
@@ -149,6 +150,44 @@ void grant_max_data(fiber::quic::QuicConnection &conn, std::uint64_t limit) {
     fiber::quic::QuicMaxDataFrame frame{};
     frame.max_data = limit;
     ASSERT_TRUE(conn.recv_max_data_frame(frame).has_value());
+}
+
+std::size_t count_pending_frame_type(const fiber::quic::QuicConnection &conn, fiber::quic::QuicFrameType type) {
+    const auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    std::size_t count = 0;
+    for (const fiber::quic::QuicOutputFrame *frame = space.pending_frames.front(); frame != nullptr;
+         frame = space.pending_frames.next_of(*frame)) {
+        if (frame->type == type) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::size_t count_pending_data_blocked(const fiber::quic::QuicConnection &conn, std::uint64_t limit) {
+    const auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    std::size_t count = 0;
+    for (const fiber::quic::QuicOutputFrame *frame = space.pending_frames.front(); frame != nullptr;
+         frame = space.pending_frames.next_of(*frame)) {
+        if (frame->type == fiber::quic::QuicFrameType::DataBlocked && frame->u.data_blocked.limit == limit) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::size_t count_pending_stream_data_blocked(const fiber::quic::QuicConnection &conn, std::uint64_t stream_id,
+                                              std::uint64_t limit) {
+    const auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    std::size_t count = 0;
+    for (const fiber::quic::QuicOutputFrame *frame = space.pending_frames.front(); frame != nullptr;
+         frame = space.pending_frames.next_of(*frame)) {
+        if (frame->type == fiber::quic::QuicFrameType::StreamDataBlocked &&
+            frame->u.stream_data_blocked.id == stream_id && frame->u.stream_data_blocked.limit == limit) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 } // namespace
@@ -774,6 +813,158 @@ TEST(QuicConnectionTest, StreamWriteShortWritesToBufferLimit) {
     EXPECT_EQ(*written, fiber::quic::kQuicStreamSendDefaultBufferLimit);
     ASSERT_FALSE(blocked.has_value());
     EXPECT_EQ(blocked.error(), fiber::common::IoErr::WouldBlock);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::StreamDataBlocked), 0U);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::DataBlocked), 0U);
+}
+
+TEST(QuicConnectionTest, StreamWriteQueuesStreamDataBlockedAtStreamLimit) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    auto stream = conn.get_or_create_peer_stream(0);
+    ASSERT_TRUE(stream.has_value());
+    grant_max_data(conn, 1024);
+
+    auto blocked = (*stream)->try_write(iobuf_of("a"));
+    auto duplicate = (*stream)->try_write(iobuf_of("b"));
+
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error(), fiber::common::IoErr::WouldBlock);
+    ASSERT_FALSE(duplicate.has_value());
+    EXPECT_EQ(duplicate.error(), fiber::common::IoErr::WouldBlock);
+    EXPECT_EQ(count_pending_stream_data_blocked(conn, 0, 0), 1U);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::DataBlocked), 0U);
+}
+
+TEST(QuicConnectionTest, StreamWriteQueuesDataBlockedAtConnectionLimit) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    auto stream = conn.get_or_create_peer_stream(0);
+    ASSERT_TRUE(stream.has_value());
+    grant_max_stream_data(conn, 0, 1024);
+
+    auto blocked = (*stream)->try_write(iobuf_of("a"));
+    auto duplicate = (*stream)->try_write(iobuf_of("b"));
+
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error(), fiber::common::IoErr::WouldBlock);
+    ASSERT_FALSE(duplicate.has_value());
+    EXPECT_EQ(duplicate.error(), fiber::common::IoErr::WouldBlock);
+    EXPECT_EQ(count_pending_data_blocked(conn, 0), 1U);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::StreamDataBlocked), 0U);
+}
+
+TEST(QuicConnectionTest, StreamWriteQueuesBothBlockedFramesWhenBothLimitsApply) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    auto stream = conn.get_or_create_peer_stream(0);
+    ASSERT_TRUE(stream.has_value());
+
+    auto blocked = (*stream)->try_write(iobuf_of("a"));
+
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error(), fiber::common::IoErr::WouldBlock);
+    EXPECT_EQ(count_pending_stream_data_blocked(conn, 0, 0), 1U);
+    EXPECT_EQ(count_pending_data_blocked(conn, 0), 1U);
+}
+
+TEST(QuicConnectionTest, StreamWriteReportsStreamDataBlockedAgainForNewLimit) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    auto stream = conn.get_or_create_peer_stream(0);
+    ASSERT_TRUE(stream.has_value());
+    grant_max_stream_data(conn, 0, 2);
+    grant_max_data(conn, 1024);
+
+    auto first = (*stream)->try_write(iobuf_of("abc"));
+    grant_max_stream_data(conn, 0, 4);
+    auto second = (*stream)->try_write(iobuf_of("cde"));
+
+    ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(*first, 2U);
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(*second, 2U);
+    EXPECT_EQ(count_pending_stream_data_blocked(conn, 0, 2), 1U);
+    EXPECT_EQ(count_pending_stream_data_blocked(conn, 0, 4), 1U);
+}
+
+TEST(QuicConnectionTest, StreamWriteReportsDataBlockedAgainForNewLimit) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    auto stream = conn.get_or_create_peer_stream(0);
+    ASSERT_TRUE(stream.has_value());
+    grant_max_stream_data(conn, 0, 1024);
+    grant_max_data(conn, 2);
+
+    auto first = (*stream)->try_write(iobuf_of("abc"));
+    grant_max_data(conn, 4);
+    auto second = (*stream)->try_write(iobuf_of("cde"));
+
+    ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(*first, 2U);
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(*second, 2U);
+    EXPECT_EQ(count_pending_data_blocked(conn, 2), 1U);
+    EXPECT_EQ(count_pending_data_blocked(conn, 4), 1U);
+}
+
+TEST(QuicConnectionTest, LostDataBlockedFrameRequeuesOnlyWhileStillBlocked) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    auto stream = conn.get_or_create_peer_stream(0);
+    ASSERT_TRUE(stream.has_value());
+    grant_max_stream_data(conn, 0, 1024);
+    ASSERT_FALSE((*stream)->try_write(iobuf_of("a")).has_value());
+
+    auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    fiber::quic::QuicOutputFrame *frame = space.pending_frames.pop_front();
+    ASSERT_NE(frame, nullptr);
+    ASSERT_EQ(frame->type, fiber::quic::QuicFrameType::DataBlocked);
+    frame->packet_number = 0;
+    frame->send_time = fiber::quic::QuicTime{0};
+    frame->packet_ack_eliciting = true;
+    space.sent_frames.push_back(*frame);
+    space.largest_acked_packet_number = 4;
+    space.next_packet_number = 5;
+
+    auto lost = fiber::quic::quic_detect_lost(conn, fiber::quic::QuicTime{1000}, nullptr);
+
+    ASSERT_TRUE(lost.has_value());
+    EXPECT_TRUE(lost->lost_frames);
+    EXPECT_EQ(count_pending_data_blocked(conn, 0), 1U);
+}
+
+TEST(QuicConnectionTest, LostDataBlockedFrameDropsAfterConnectionLimitIncreases) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    auto stream = conn.get_or_create_peer_stream(0);
+    ASSERT_TRUE(stream.has_value());
+    grant_max_stream_data(conn, 0, 1024);
+    ASSERT_FALSE((*stream)->try_write(iobuf_of("a")).has_value());
+
+    auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    fiber::quic::QuicOutputFrame *frame = space.pending_frames.pop_front();
+    ASSERT_NE(frame, nullptr);
+    ASSERT_EQ(frame->type, fiber::quic::QuicFrameType::DataBlocked);
+    frame->packet_number = 0;
+    frame->send_time = fiber::quic::QuicTime{0};
+    frame->packet_ack_eliciting = true;
+    space.sent_frames.push_back(*frame);
+    space.largest_acked_packet_number = 4;
+    space.next_packet_number = 5;
+    grant_max_data(conn, 1);
+
+    auto lost = fiber::quic::quic_detect_lost(conn, fiber::quic::QuicTime{1000}, nullptr);
+
+    ASSERT_TRUE(lost.has_value());
+    EXPECT_FALSE(lost->lost_frames);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::DataBlocked), 0U);
 }
 
 TEST(QuicConnectionTest, AsyncWriteResumesAfterMaxStreamData) {

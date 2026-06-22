@@ -16,8 +16,7 @@ inline constexpr QuicEncryptionLevel kLossLevels[] = {QuicEncryptionLevel::Initi
 
 [[nodiscard]] QuicTime pto_duration(const QuicConnection &connection, QuicEncryptionLevel level) noexcept {
     return quic_pto(connection.rtt(), connection.peer_transport().params.max_ack_delay,
-                    level == QuicEncryptionLevel::Application,
-                    connection.state() == QuicConnectionState::Established);
+                    level == QuicEncryptionLevel::Application, connection.state() == QuicConnectionState::Established);
 }
 
 [[nodiscard]] QuicTime pto_backoff(QuicTime base, std::uint32_t count) noexcept {
@@ -34,6 +33,19 @@ inline constexpr QuicEncryptionLevel kLossLevels[] = {QuicEncryptionLevel::Initi
         value *= 2;
     }
     return QuicTime{value};
+}
+
+[[nodiscard]] bool should_retransmit_lost_frame(const QuicConnection &connection,
+                                                const QuicOutputFrame &frame) noexcept {
+    switch (frame.type) {
+        case QuicFrameType::DataBlocked:
+            return connection.should_retransmit_data_blocked(frame.u.data_blocked.limit);
+        case QuicFrameType::StreamDataBlocked:
+            return connection.should_retransmit_stream_data_blocked(frame.u.stream_data_blocked.id,
+                                                                    frame.u.stream_data_blocked.limit);
+        default:
+            return quic_output_frame_retransmittable_on_loss(frame.type);
+    }
 }
 
 } // namespace
@@ -76,8 +88,7 @@ common::IoResult<QuicLossRecoveryResult> quic_detect_lost(QuicConnection &connec
             }
 
             const bool time_lost = front->send_time + threshold <= now;
-            const bool packet_lost =
-                    space.largest_acked_packet_number - front->packet_number >= packet_threshold;
+            const bool packet_lost = space.largest_acked_packet_number - front->packet_number >= packet_threshold;
             if (!time_lost && !packet_lost) {
                 break;
             }
@@ -124,7 +135,7 @@ common::IoResult<QuicLossRecoveryResult> quic_detect_lost(QuicConnection &connec
                 result.lost_frames = true;
                 continue;
             }
-            if (quic_output_frame_retransmittable_on_loss(front->type)) {
+            if (should_retransmit_lost_frame(connection, *front)) {
                 space.pending_frames.push_back(*front);
                 result.lost_frames = true;
             } else {
@@ -135,8 +146,8 @@ common::IoResult<QuicLossRecoveryResult> quic_detect_lost(QuicConnection &connec
 
     if (stat != nullptr && lost_count >= 2 && stat->oldest != QuicTime::max() &&
         (stat->newest < oldest_lost || stat->oldest > newest_lost) &&
-        newest_lost - oldest_lost >
-                quic_persistent_congestion_duration(connection.rtt(), connection.peer_transport().params.max_ack_delay)) {
+        newest_lost - oldest_lost > quic_persistent_congestion_duration(
+                                            connection.rtt(), connection.peer_transport().params.max_ack_delay)) {
         quic_congestion_on_persistent_congestion(connection.congestion(), quic_oldest_sent_time(connection),
                                                  connection.congestion().mtu);
     }
