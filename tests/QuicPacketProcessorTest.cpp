@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string_view>
 #include <vector>
 
@@ -305,4 +306,66 @@ TEST(QuicPacketProcessorTest, ProcessesApplicationPingPacket) {
     EXPECT_TRUE(result->ack_eliciting);
     EXPECT_TRUE(result->send_ack);
     EXPECT_EQ(server.packet_number_space(fiber::quic::QuicEncryptionLevel::Application).pending_ack, 0U);
+}
+
+TEST(QuicPacketProcessorTest, PathChallengeQueuesPathResponse) {
+    constexpr fiber::quic::QuicCryptoSuite suite = fiber::quic::QuicCryptoSuite::Aes128GcmSha256;
+    std::array<std::uint8_t, fiber::quic::kQuicMaxSecretLength> secret{};
+    for (std::size_t i = 0; i < 32; ++i) {
+        secret[i] = static_cast<std::uint8_t>(0x30 + i);
+    }
+
+    const auto server_cid = cid_from_hex("0102030405060708");
+    const auto client_cid = cid_from_hex("1112131415161718");
+
+    fiber::quic::QuicConnection::Options client_options{};
+    client_options.role = fiber::quic::QuicConnectionRole::Client;
+    fiber::quic::QuicConnection client(client_options);
+    ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(client.crypto(), fiber::quic::QuicEncryptionLevel::Application,
+                                                        true, suite, secret.data(), 32));
+
+    fiber::quic::QuicConnection::Options server_options{};
+    server_options.role = fiber::quic::QuicConnectionRole::Server;
+    server_options.local_addr = loopback(8443);
+    server_options.remote_addr = loopback(4433);
+    server_options.local_connection_id = server_cid;
+    server_options.remote_connection_id = client_cid;
+    fiber::quic::QuicConnection server(server_options);
+    ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(server.crypto(), fiber::quic::QuicEncryptionLevel::Application,
+                                                        false, suite, secret.data(), 32));
+
+    fiber::quic::QuicOutputFrame frame{};
+    frame.type = fiber::quic::QuicFrameType::PathChallenge;
+    for (std::size_t i = 0; i < sizeof(frame.u.path_challenge.data); ++i) {
+        frame.u.path_challenge.data[i] = static_cast<std::uint8_t>(0xc0 + i);
+    }
+
+    std::array<std::uint8_t, 256> datagram{};
+    fiber::quic::QuicPacketEncodeSpec spec{};
+    spec.level = fiber::quic::QuicEncryptionLevel::Application;
+    spec.dcid = server_cid;
+    spec.frames = &frame;
+    spec.frame_count = 1;
+    auto encoded = fiber::quic::quic_encode_packet(client, spec, datagram.data(), datagram.size());
+    ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
+
+    std::array<std::uint8_t, 256> plaintext{};
+    auto received = received_datagram(datagram.data(), encoded->packet_len);
+    auto result = fiber::quic::quic_process_datagram(server, received, plaintext.data(), plaintext.size(),
+                                                     static_cast<std::uint8_t>(server_cid.size()));
+
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_TRUE(result->send_output);
+    ASSERT_NE(result->path, nullptr);
+    ASSERT_FALSE(result->path->pending_frames.empty());
+    const fiber::quic::QuicOutputFrame *response = result->path->pending_frames.front();
+    ASSERT_NE(response, nullptr);
+    EXPECT_EQ(response->type, fiber::quic::QuicFrameType::PathResponse);
+    EXPECT_EQ(response->path, result->path);
+    EXPECT_EQ(response->min_packet_len, fiber::quic::kMinInitialDatagramSize);
+    EXPECT_EQ(std::memcmp(response->u.path_response.data, frame.u.path_challenge.data,
+                          sizeof(frame.u.path_challenge.data)),
+              0);
+    EXPECT_EQ(server.packet_number_space(fiber::quic::QuicEncryptionLevel::Application).pending_frames.front()->type,
+              fiber::quic::QuicFrameType::Ping);
 }

@@ -61,7 +61,14 @@ namespace {
         conn.free_path(*probe);
     }
 
-    QuicPath *path = conn.create_path(datagram.peer, datagram.local, packet.scid, QuicPathTag::Probe);
+    QuicConnectionId remote_connection_id = packet.scid;
+    if (remote_connection_id.empty()) {
+        if (QuicPath *active = conn.active_path()) {
+            remote_connection_id = active->remote_connection_id;
+        }
+    }
+
+    QuicPath *path = conn.create_path(datagram.peer, datagram.local, remote_connection_id, QuicPathTag::Probe);
     if (path == nullptr) {
         return std::unexpected(common::IoErr::NoMem);
     }
@@ -216,6 +223,8 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
     result.packet_number = packet.packet_number;
     result.packet_count = 1;
 
+    const QuicTime now = quic_time_ms(datagram.received_at);
+    bool path_challenged = false;
     QuicReadCursor payload(decoded.payload.data, decoded.payload.len);
     while (!payload.empty()) {
         auto parsed = quic_parse_frame_for_receiver(conn.role(), packet.level, payload);
@@ -305,8 +314,6 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
             case QuicFrameType::NewToken:
             case QuicFrameType::NewConnectionId:
             case QuicFrameType::RetireConnectionId:
-            case QuicFrameType::PathChallenge:
-            case QuicFrameType::PathResponse:
             case QuicFrameType::HandshakeDone:
             case QuicFrameType::Stream1:
             case QuicFrameType::Stream2:
@@ -316,14 +323,35 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
             case QuicFrameType::Stream6:
             case QuicFrameType::Stream7:
                 break;
+            case QuicFrameType::PathChallenge: {
+                if (packet.level != QuicEncryptionLevel::Application || path_challenged || result.path == nullptr) {
+                    break;
+                }
+                path_challenged = true;
+                auto handled = conn.recv_path_challenge_frame(*result.path, frame.u.path_challenge);
+                if (!handled) {
+                    return std::unexpected(handled.error());
+                }
+                result.send_output = true;
+                break;
+            }
+            case QuicFrameType::PathResponse: {
+                if (packet.level != QuicEncryptionLevel::Application) {
+                    break;
+                }
+                auto validated = conn.recv_path_response_frame(frame.u.path_response, now);
+                if (!validated) {
+                    return std::unexpected(validated.error());
+                }
+                break;
+            }
         }
     }
 
     // Track ACK ranges for this received packet.
     // on_packet_received handles forced ACK creation internally when range
     // overflow or too-old conditions occur (mirrors ngx_quic_ack_packet).
-    const QuicTime received_time = quic_time_ms(datagram.received_at);
-    space.on_packet_received(packet.packet_number, received_time, result.ack_eliciting);
+    space.on_packet_received(packet.packet_number, now, result.ack_eliciting);
 
     auto acked = handle_ack_eliciting_packet(space, packet, datagram, previous_largest_received, result.ack_eliciting);
     if (!acked) {
@@ -346,12 +374,20 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
 
     if (result.path != conn.active_path() && result.non_probing &&
         packet.packet_number == space.largest_received_packet_number) {
-        QuicPath *old = conn.active_path();
-        if (old != nullptr && !old->validated) {
-            conn.free_path(*old);
-        }
-        if (!conn.set_active_path(*result.path)) {
-            return std::unexpected(common::IoErr::Invalid);
+        if (packet.level == QuicEncryptionLevel::Application) {
+            auto migrated = conn.handle_migration(*result.path, result.rebound, now);
+            if (!migrated) {
+                return std::unexpected(migrated.error());
+            }
+            result.send_output = true;
+        } else {
+            QuicPath *old = conn.active_path();
+            if (old != nullptr && !old->validated) {
+                conn.free_path(*old);
+            }
+            if (!conn.set_active_path(*result.path)) {
+                return std::unexpected(common::IoErr::Invalid);
+            }
         }
     }
 
