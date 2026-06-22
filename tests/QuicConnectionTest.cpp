@@ -557,6 +557,50 @@ TEST(QuicConnectionTest, RejectsPeerTransportParamsWithMismatchedInitialScid) {
     EXPECT_FALSE(conn.peer_transport_params_received());
 }
 
+TEST(QuicConnectionTest, ClientAcceptsServerTransportParamsWithMatchingRetryIds) {
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Client;
+    options.original_destination_connection_id = cid_from({0x01, 0x02, 0x03, 0x04});
+    options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
+    options.retry_source_connection_id = cid_from({0xaa, 0xbb, 0xcc, 0xdd});
+    options.has_retry_source_connection_id = true;
+    fiber::quic::QuicConnection conn(options);
+
+    fiber::quic::QuicTransportParams params{};
+    params.has_initial_source_connection_id = true;
+    params.initial_source_connection_id = options.remote_connection_id;
+    params.has_original_destination_connection_id = true;
+    params.original_destination_connection_id = options.original_destination_connection_id;
+    params.has_retry_source_connection_id = true;
+    params.retry_source_connection_id = options.retry_source_connection_id;
+
+    auto applied = conn.apply_peer_transport_params(params);
+
+    EXPECT_TRUE(applied.has_value()) << static_cast<int>(applied.error());
+    EXPECT_TRUE(conn.peer_transport_params_received());
+}
+
+TEST(QuicConnectionTest, ClientRejectsUnexpectedRetrySourceConnectionId) {
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Client;
+    options.original_destination_connection_id = cid_from({0x01, 0x02, 0x03, 0x04});
+    options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
+    fiber::quic::QuicConnection conn(options);
+
+    fiber::quic::QuicTransportParams params{};
+    params.has_initial_source_connection_id = true;
+    params.initial_source_connection_id = options.remote_connection_id;
+    params.has_original_destination_connection_id = true;
+    params.original_destination_connection_id = options.original_destination_connection_id;
+    params.has_retry_source_connection_id = true;
+    params.retry_source_connection_id = cid_from({0xaa, 0xbb, 0xcc, 0xdd});
+
+    auto applied = conn.apply_peer_transport_params(params);
+
+    EXPECT_FALSE(applied.has_value());
+    EXPECT_FALSE(conn.peer_transport_params_received());
+}
+
 TEST(QuicConnectionTest, RecvStreamFrameCreatesPeerInitiatedStream) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);

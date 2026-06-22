@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <expected>
 #include <new>
@@ -20,8 +21,27 @@ namespace {
 
 inline constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 inline constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
+inline constexpr std::size_t kQuicStatelessResponseBufferSize = 1500;
 inline constexpr QuicEncryptionLevel kSendLevels[] = {QuicEncryptionLevel::Initial, QuicEncryptionLevel::Handshake,
                                                       QuicEncryptionLevel::Application};
+
+[[nodiscard]] common::IoResult<void> send_exact(net::UdpSocket &socket, const std::uint8_t *data, std::size_t len,
+                                                const QuicReceivedDatagram &datagram) noexcept {
+    net::UdpPacketSendSpec spec{};
+    spec.buf = data;
+    spec.len = len;
+    spec.peer = datagram.peer;
+    spec.local = datagram.local;
+    spec.has_local = true;
+    auto sent = socket.try_send_packet(spec);
+    if (!sent) {
+        return std::unexpected(sent.error());
+    }
+    if (*sent != len) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return {};
+}
 
 } // namespace
 
@@ -272,11 +292,21 @@ namespace {
 } // namespace
 
 common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Options &options) noexcept {
-    if (initialized_ || options.max_connections == 0 || options.send.send_buffer_size == 0) {
+    if (initialized_ || options.max_connections == 0 || options.send.send_buffer_size == 0 ||
+        options.retry_token_lifetime.count() < 0 || options.new_token_lifetime.count() < 0) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
     options_ = options;
+    if (options_.retry) {
+        options_.issue_new_token = true;
+    }
+    if ((options_.retry || options_.issue_new_token) && !options_.address_validation_key_set) {
+        if (RAND_bytes(options_.address_validation_key.data(), options_.address_validation_key.size()) != 1) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        options_.address_validation_key_set = true;
+    }
     loop_ = &loop;
     closing_ = false;
     active_connection_count_ = 0;
@@ -505,8 +535,219 @@ common::IoResult<void> QuicUdpEndpoint::register_connection_id(QuicConnection &c
     return {};
 }
 
-common::IoResult<QuicConnection *> QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet,
-                                                                      const QuicReceivedDatagram &datagram) noexcept {
+common::IoResult<QuicUdpEndpoint::QuicInitialValidation>
+QuicUdpEndpoint::validate_initial_address(const QuicPacketHeader &packet,
+                                          const QuicReceivedDatagram &datagram) noexcept {
+    QuicInitialValidation validation{};
+    validation.original_destination_connection_id = packet.dcid;
+
+    if (packet.token.empty()) {
+        if (!options_.retry) {
+            return validation;
+        }
+        auto sent = send_retry_packet(packet, datagram);
+        if (!sent) {
+            return std::unexpected(sent.error());
+        }
+        return std::unexpected(common::IoErr::WouldBlock);
+    }
+
+    if (!options_.address_validation_key_set) {
+        if (options_.retry) {
+            auto sent = send_retry_packet(packet, datagram);
+            if (!sent) {
+                return std::unexpected(sent.error());
+            }
+            return std::unexpected(common::IoErr::WouldBlock);
+        }
+        return validation;
+    }
+
+    auto checked = quic_validate_address_token(options_.address_validation_key, datagram.peer, quic_unix_seconds_now(),
+                                               packet.token);
+    if (!checked) {
+        return std::unexpected(checked.error());
+    }
+
+    switch (checked->status) {
+        case QuicAddressTokenValidationStatus::Valid:
+            validation.address_validated = true;
+            if (checked->kind == QuicAddressTokenKind::Retry) {
+                validation.retried = true;
+                validation.original_destination_connection_id = checked->original_destination_connection_id;
+                validation.retry_source_connection_id = packet.dcid;
+            }
+            return validation;
+
+        case QuicAddressTokenValidationStatus::Garbage: {
+            auto sent = send_invalid_token_close(packet, datagram, "invalid address validation token");
+            if (!sent) {
+                return std::unexpected(sent.error());
+            }
+            return std::unexpected(common::IoErr::WouldBlock);
+        }
+
+        case QuicAddressTokenValidationStatus::Invalid:
+        case QuicAddressTokenValidationStatus::Expired:
+            if (checked->kind == QuicAddressTokenKind::Retry) {
+                const char *reason = checked->status == QuicAddressTokenValidationStatus::Expired
+                                             ? "expired address validation token"
+                                             : "invalid address validation token";
+                auto sent = send_invalid_token_close(packet, datagram, reason);
+                if (!sent) {
+                    return std::unexpected(sent.error());
+                }
+                return std::unexpected(common::IoErr::WouldBlock);
+            }
+            if (options_.retry) {
+                auto sent = send_retry_packet(packet, datagram);
+                if (!sent) {
+                    return std::unexpected(sent.error());
+                }
+                return std::unexpected(common::IoErr::WouldBlock);
+            }
+            return validation;
+    }
+
+    return std::unexpected(common::IoErr::Invalid);
+}
+
+common::IoResult<void> QuicUdpEndpoint::send_retry_packet(const QuicPacketHeader &packet,
+                                                          const QuicReceivedDatagram &datagram) noexcept {
+    if (!valid()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    QuicConnectionId retry_scid{};
+    bool generated_unique_cid = false;
+    for (std::uint8_t attempt = 0; attempt < 8; ++attempt) {
+        auto generated = generate_connection_id();
+        if (!generated) {
+            return std::unexpected(generated.error());
+        }
+        if (compare_connection_id(*generated, packet.dcid) != 0 &&
+            compare_connection_id(*generated, packet.scid) != 0 && find_connection(*generated) == nullptr) {
+            retry_scid = *generated;
+            generated_unique_cid = true;
+            break;
+        }
+    }
+    if (!generated_unique_cid) {
+        return std::unexpected(common::IoErr::Already);
+    }
+
+    const std::uint64_t expires =
+            quic_unix_seconds_now() + static_cast<std::uint64_t>(options_.retry_token_lifetime.count());
+    auto token = quic_create_address_token(options_.address_validation_key, datagram.peer, expires,
+                                           QuicAddressTokenKind::Retry, &packet.dcid);
+    if (!token) {
+        return std::unexpected(token.error());
+    }
+
+    std::array<std::uint8_t, kQuicStatelessResponseBufferSize> out{};
+    QuicWriteCursor writer(out.data(), out.size());
+    QuicRetryPacketSpec spec{};
+    spec.version = packet.version;
+    spec.original_dcid = packet.dcid;
+    spec.dcid = packet.scid;
+    spec.scid = retry_scid;
+    spec.token = token->slice();
+    auto written = quic_create_retry_packet(spec, writer);
+    if (!written) {
+        return std::unexpected(written.error());
+    }
+    return send_exact(*socket_, out.data(), *written, datagram);
+}
+
+common::IoResult<void> QuicUdpEndpoint::send_invalid_token_close(const QuicPacketHeader &packet,
+                                                                 const QuicReceivedDatagram &datagram,
+                                                                 const char *reason) noexcept {
+    if (!valid() || reason == nullptr) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    QuicOutputFrame frame{};
+    frame.type = QuicFrameType::ConnectionClose;
+    frame.u.close.error_code = static_cast<std::uint64_t>(QuicErrorCode::InvalidToken);
+    frame.u.close.frame_type = 0;
+    frame.u.close.reason = reinterpret_cast<const std::uint8_t *>(reason);
+    frame.u.close.reason_length = static_cast<std::uint32_t>(std::strlen(reason));
+
+    std::array<std::uint8_t, 256> payload{};
+    QuicWriteCursor payload_writer(payload.data(), payload.size());
+    auto frame_len = quic_create_output_frame(&payload_writer, frame);
+    if (!frame_len) {
+        return std::unexpected(frame_len.error());
+    }
+
+    QuicConnection::Options conn_options{};
+    conn_options.role = QuicConnectionRole::Server;
+    conn_options.local_addr = datagram.local;
+    conn_options.remote_addr = datagram.peer;
+    conn_options.original_destination_connection_id = packet.dcid;
+    conn_options.initial_destination_connection_id = packet.dcid;
+    conn_options.local_connection_id = packet.dcid;
+    conn_options.remote_connection_id = packet.scid;
+
+    QuicConnection temp(conn_options);
+    auto initialized = temp.init_initial_crypto(packet.dcid);
+    if (!initialized) {
+        return std::unexpected(initialized.error());
+    }
+
+    std::array<std::uint8_t, kQuicStatelessResponseBufferSize> out{};
+    QuicPacketEncodeSpec spec{};
+    spec.level = QuicEncryptionLevel::Initial;
+    spec.dcid = packet.scid;
+    spec.scid = packet.dcid;
+    spec.payload = payload.data();
+    spec.payload_len = *frame_len;
+    spec.payload_frame_count = 1;
+    spec.payload_ack_eliciting = false;
+    spec.max_packet_len = out.size();
+
+    auto encoded = quic_encode_packet(temp, spec, out.data(), out.size());
+    if (!encoded) {
+        return std::unexpected(encoded.error());
+    }
+    return send_exact(*socket_, out.data(), encoded->packet_len, datagram);
+}
+
+common::IoResult<void> QuicUdpEndpoint::queue_new_token(QuicConnection &connection, QuicPath &path) noexcept {
+    if (!options_.issue_new_token) {
+        return {};
+    }
+    if (!options_.address_validation_key_set) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    const std::uint64_t expires =
+            quic_unix_seconds_now() + static_cast<std::uint64_t>(options_.new_token_lifetime.count());
+    auto token = quic_create_address_token(options_.address_validation_key, path.remote, expires,
+                                           QuicAddressTokenKind::NewToken, nullptr);
+    if (!token) {
+        return std::unexpected(token.error());
+    }
+
+    QuicPacketNumberSpace &space = connection.packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
+    frame->type = QuicFrameType::NewToken;
+    auto copied = quic_output_frame_set_owned_data(*frame, token->bytes.data(), token->len);
+    if (!copied) {
+        space.release_frame(*frame);
+        return std::unexpected(copied.error());
+    }
+    space.pending_frames.push_back(*frame);
+    return {};
+}
+
+common::IoResult<QuicConnection *>
+QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicReceivedDatagram &datagram,
+                                   const QuicInitialValidation &validation) noexcept {
     const std::uint64_t dcid_hash = hash_connection_id(packet.dcid);
     if (find_connection(packet.dcid, dcid_hash) != nullptr) {
         return std::unexpected(common::IoErr::Already);
@@ -539,9 +780,11 @@ common::IoResult<QuicConnection *> QuicUdpEndpoint::create_connection(const Quic
     conn_options.role = QuicConnectionRole::Server;
     conn_options.local_addr = datagram.local;
     conn_options.remote_addr = datagram.peer;
-    conn_options.original_destination_connection_id = packet.dcid;
+    conn_options.original_destination_connection_id = validation.original_destination_connection_id;
+    conn_options.initial_destination_connection_id = packet.dcid;
     conn_options.local_connection_id = local_connection_id;
     conn_options.remote_connection_id = packet.scid;
+    conn_options.retry_source_connection_id = validation.retry_source_connection_id;
     conn_options.transport = options_.transport;
     conn_options.transport.max_ack_delay = options_.max_ack_delay;
     conn_options.transport.ack_delay_exponent = options_.ack_delay_exponent;
@@ -553,6 +796,8 @@ common::IoResult<QuicConnection *> QuicUdpEndpoint::create_connection(const Quic
     conn_options.schedule_send = [](void *owner, QuicConnection &connection) noexcept {
         static_cast<QuicUdpEndpoint *>(owner)->schedule_send(connection);
     };
+    conn_options.has_retry_source_connection_id = validation.retried;
+    conn_options.initial_path_validated = validation.address_validated;
 
     auto *connection = new (std::nothrow) QuicConnection(conn_options);
     if (connection == nullptr) {
@@ -614,7 +859,16 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
             return std::unexpected(packet ? common::IoErr::Invalid : packet.error());
         }
 
-        auto created_connection = create_connection(*packet, datagram);
+        auto validation = validate_initial_address(*packet, datagram);
+        if (!validation) {
+            if (validation.error() == common::IoErr::WouldBlock) {
+                return std::unexpected(common::IoErr::WouldBlock);
+            }
+            ++dropped_datagram_count_;
+            return std::unexpected(validation.error());
+        }
+
+        auto created_connection = create_connection(*packet, datagram, *validation);
         if (!created_connection) {
             ++dropped_datagram_count_;
             return std::unexpected(created_connection.error());
@@ -645,6 +899,28 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
 void QuicUdpEndpoint::schedule_after_receive(QuicConnection &connection,
                                              const QuicPacketProcessResult &result) noexcept {
     bool should_send = result.send_output;
+
+    if (result.handshake_confirmed && result.path != nullptr && !result.path->validated) {
+        result.path->validated = true;
+    }
+    if (result.handshake_confirmed && result.path != nullptr) {
+        auto queued = queue_new_token(connection, *result.path);
+        if (queued) {
+            should_send = true;
+        } else {
+            connection.close(QuicErrorCode::InternalError);
+            should_send = true;
+        }
+    }
+    if (result.path_validated && result.validated_path != nullptr) {
+        auto queued = queue_new_token(connection, *result.validated_path);
+        if (queued) {
+            should_send = true;
+        } else {
+            connection.close(QuicErrorCode::InternalError);
+            should_send = true;
+        }
+    }
 
     if (result.send_ack && !should_send) {
         QuicPacketNumberSpace &space = connection.packet_number_space(result.level);

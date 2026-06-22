@@ -29,6 +29,16 @@ constexpr std::uint64_t kStreamIncrement = 4;
     return id;
 }
 
+[[nodiscard]] bool connection_id_equal(const QuicConnectionId &left, const QuicConnectionId &right) noexcept {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    if (left.size() == 0) {
+        return true;
+    }
+    return std::memcmp(left.data(), right.data(), left.size()) == 0;
+}
+
 } // namespace
 
 QuicPacketProtectionKeys::QuicPacketProtectionKeys() noexcept { EVP_AEAD_CTX_zero(&aead); }
@@ -69,6 +79,9 @@ void QuicCryptoState::reset() noexcept {
 QuicConnection::QuicConnection(const Options &options) noexcept :
     options_(options), next_local_bidi_stream_id_(initial_stream_id(options.role, QuicStreamType::Bidirectional)),
     next_local_uni_stream_id_(initial_stream_id(options.role, QuicStreamType::Unidirectional)) {
+    if (options_.initial_destination_connection_id.empty()) {
+        options_.initial_destination_connection_id = options_.original_destination_connection_id;
+    }
     options_.transport.initial_max_data = options_.recv_flow.conn_recv_limit;
     options_.transport.initial_max_stream_data_bidi_local = options_.recv_flow.stream_buffer_limit;
     options_.transport.initial_max_stream_data_bidi_remote = options_.recv_flow.stream_buffer_limit;
@@ -91,6 +104,7 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
     QuicPath *path = path_manager_.create(options_.remote_addr, options_.local_addr, options_.remote_connection_id,
                                           QuicPathTag::Active);
     if (path != nullptr) {
+        path->validated = options_.initial_path_validated;
         (void) path_manager_.set_active(*path);
     }
 }
@@ -428,6 +442,26 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
          std::memcmp(params.initial_source_connection_id.data(), options_.remote_connection_id.data(),
                      params.initial_source_connection_id.size()) != 0)) {
         return std::unexpected(common::IoErr::Invalid);
+    }
+    if (options_.role == QuicConnectionRole::Server) {
+        if (params.has_original_destination_connection_id || params.has_retry_source_connection_id ||
+            params.has_stateless_reset_token) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    } else {
+        if (!params.has_original_destination_connection_id ||
+            !connection_id_equal(params.original_destination_connection_id,
+                                 options_.original_destination_connection_id)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        if (options_.has_retry_source_connection_id) {
+            if (!params.has_retry_source_connection_id ||
+                !connection_id_equal(params.retry_source_connection_id, options_.retry_source_connection_id)) {
+                return std::unexpected(common::IoErr::Invalid);
+            }
+        } else if (params.has_retry_source_connection_id) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
     }
     if (params.max_udp_payload_size < kMinInitialDatagramSize || params.max_udp_payload_size > kQuicMaxUdpPayloadSize ||
         params.active_connection_id_limit < 2 || params.ack_delay_exponent > 20 || params.max_ack_delay >= 16384) {

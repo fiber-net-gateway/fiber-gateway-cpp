@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <expected>
 #include <future>
 #include <new>
@@ -18,6 +19,7 @@
 #include "net/UdpSocket.h"
 #include "quic/QuicCrypto.h"
 #include "quic/QuicPacketCodec.h"
+#include "quic/QuicToken.h"
 #include "quic/QuicTransportCodec.h"
 #include "quic/QuicUdpEndpoint.h"
 
@@ -86,6 +88,18 @@ struct TwoEndpointResultsWithPorts {
     std::array<std::uint16_t, 2> ports{};
 };
 
+struct RetryInitialResult {
+    fiber::quic::QuicConnectionId retry_scid{};
+    std::size_t token_len = 0;
+};
+
+struct PortResponseResult {
+    std::uint16_t port = 0;
+    std::size_t response_len = 0;
+};
+
+using PathChallengeBytes = std::array<std::uint8_t, 8>;
+
 int hex_value(char c) {
     if (c >= '0' && c <= '9') {
         return c - '0';
@@ -136,9 +150,16 @@ fiber::mem::IoBuf iobuf_of(std::string_view value) {
     return buf;
 }
 
+void fill_new_token_test_secret(std::array<std::uint8_t, fiber::quic::kQuicMaxSecretLength> &secret) {
+    secret = {};
+    for (std::size_t i = 0; i < 32; ++i) {
+        secret[i] = static_cast<std::uint8_t>(0x90U + i);
+    }
+}
+
 void build_initial_datagram(std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> &datagram,
                             const fiber::quic::QuicConnectionId &dcid, const fiber::quic::QuicConnectionId &scid,
-                            std::uint64_t packet_number = 1) {
+                            std::uint64_t packet_number = 1, fiber::quic::QuicSlice token = {}) {
     datagram = {};
 
     fiber::quic::QuicOutputFrame frame{};
@@ -161,6 +182,7 @@ void build_initial_datagram(std::array<std::uint8_t, fiber::quic::kMinInitialDat
     packet.version = fiber::quic::kQuicVersion1;
     packet.dcid = dcid;
     packet.scid = scid;
+    packet.token = token;
     packet.length = 4 + payload_out.offset() + fiber::quic::kAeadTagLength;
     packet.pn_len = 4;
     packet.packet_number = packet_number;
@@ -235,6 +257,61 @@ DetachedTask send_datagram_and_recv_response(fiber::event::EventLoop *loop, std:
     client.close();
 }
 
+DetachedTask
+send_datagram_recv_response_with_port(fiber::event::EventLoop *loop, std::uint16_t port, const std::uint8_t *data,
+                                      std::size_t len, std::uint8_t *response, std::size_t response_cap,
+                                      std::promise<fiber::common::IoResult<PortResponseResult>> *done_promise) {
+    fiber::net::UdpSocket client(*loop);
+    auto bound = client.bind(loopback(0), {});
+    if (!bound) {
+        done_promise->set_value(std::unexpected(bound.error()));
+        co_return;
+    }
+    const std::uint16_t local_port = client.local_addr().port();
+
+    auto sent = co_await client.send_to(data, len, loopback(port));
+    if (!sent) {
+        done_promise->set_value(std::unexpected(sent.error()));
+        client.close();
+        co_return;
+    }
+
+    auto received = co_await client.recv_from(response, response_cap);
+    if (!received) {
+        done_promise->set_value(std::unexpected(received.error()));
+        client.close();
+        co_return;
+    }
+
+    client.close();
+    done_promise->set_value(PortResponseResult{local_port, received->size});
+}
+
+DetachedTask
+send_datagram_from_port_and_recv_response(fiber::event::EventLoop *loop, std::uint16_t port, std::uint16_t local_port,
+                                          const std::uint8_t *data, std::size_t len, std::uint8_t *response,
+                                          std::size_t response_cap,
+                                          std::promise<fiber::common::IoResult<std::size_t>> *done_promise) {
+    fiber::net::UdpSocket client(*loop);
+    auto bound = client.bind(loopback(local_port), {});
+    if (!bound) {
+        done_promise->set_value(std::unexpected(bound.error()));
+        co_return;
+    }
+
+    auto sent = co_await client.send_to(data, len, loopback(port));
+    if (!sent) {
+        done_promise->set_value(std::unexpected(sent.error()));
+        client.close();
+        co_return;
+    }
+
+    auto received = co_await client.recv_from(response, response_cap);
+    done_promise->set_value(received ? fiber::common::IoResult<std::size_t>{received->size}
+                                     : std::unexpected(received.error()));
+    client.close();
+}
+
 DetachedTask send_two_datagrams(fiber::event::EventLoop *loop, std::uint16_t port, const std::uint8_t *first,
                                 std::size_t first_len, const std::uint8_t *second, std::size_t second_len,
                                 std::promise<fiber::common::IoErr> *done_promise) {
@@ -254,6 +331,54 @@ DetachedTask send_two_datagrams(fiber::event::EventLoop *loop, std::uint16_t por
 
     auto second_sent = co_await client.send_to(second, second_len, loopback(port));
     done_promise->set_value(second_sent ? fiber::common::IoErr::None : second_sent.error());
+    client.close();
+}
+
+DetachedTask send_initial_then_retry_initial(fiber::event::EventLoop *loop, std::uint16_t port,
+                                             const fiber::quic::QuicConnectionId original_dcid,
+                                             const fiber::quic::QuicConnectionId client_scid,
+                                             std::promise<fiber::common::IoResult<RetryInitialResult>> *done_promise) {
+    fiber::net::UdpSocket client(*loop);
+    auto bound = client.bind(loopback(0), {});
+    if (!bound) {
+        done_promise->set_value(std::unexpected(bound.error()));
+        co_return;
+    }
+
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> first{};
+    build_initial_datagram(first, original_dcid, client_scid, 1);
+    auto first_sent = co_await client.send_to(first.data(), first.size(), loopback(port));
+    if (!first_sent) {
+        done_promise->set_value(std::unexpected(first_sent.error()));
+        client.close();
+        co_return;
+    }
+
+    std::array<std::uint8_t, 512> retry_response{};
+    auto received = co_await client.recv_from(retry_response.data(), retry_response.size());
+    if (!received) {
+        done_promise->set_value(std::unexpected(received.error()));
+        client.close();
+        co_return;
+    }
+
+    auto retry = fiber::quic::quic_parse_packet_header(retry_response.data(), received->size, 0);
+    if (!retry || retry->type != fiber::quic::QuicPacketType::Retry || retry->token.empty()) {
+        done_promise->set_value(std::unexpected(retry ? fiber::common::IoErr::Invalid : retry.error()));
+        client.close();
+        co_return;
+    }
+
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> second{};
+    build_initial_datagram(second, retry->scid, client_scid, 1, retry->token);
+    auto second_sent = co_await client.send_to(second.data(), second.size(), loopback(port));
+    if (!second_sent) {
+        done_promise->set_value(std::unexpected(second_sent.error()));
+        client.close();
+        co_return;
+    }
+
+    done_promise->set_value(RetryInitialResult{retry->scid, retry->token.len});
     client.close();
 }
 
@@ -296,6 +421,49 @@ DetachedTask send_two_datagrams_from_distinct_clients(
 DetachedTask close_endpoint(fiber::quic::QuicUdpEndpoint *endpoint, std::promise<void> *done_promise) {
     endpoint->close();
     done_promise->set_value();
+    co_return;
+}
+
+DetachedTask prepare_connection_for_new_token(fiber::quic::QuicConnection *connection,
+                                              std::promise<fiber::common::IoResult<PathChallengeBytes>> *done_promise) {
+    if (connection == nullptr) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+        co_return;
+    }
+
+    constexpr fiber::quic::QuicCryptoSuite suite = fiber::quic::QuicCryptoSuite::Aes128GcmSha256;
+    std::array<std::uint8_t, fiber::quic::kQuicMaxSecretLength> app_secret{};
+    fill_new_token_test_secret(app_secret);
+
+    auto read_secret = fiber::quic::quic_set_encryption_secret(
+            connection->crypto(), fiber::quic::QuicEncryptionLevel::Application, false, suite, app_secret.data(), 32);
+    if (!read_secret) {
+        done_promise->set_value(std::unexpected(read_secret.error()));
+        co_return;
+    }
+    auto write_secret = fiber::quic::quic_set_encryption_secret(
+            connection->crypto(), fiber::quic::QuicEncryptionLevel::Application, true, suite, app_secret.data(), 32);
+    if (!write_secret) {
+        done_promise->set_value(std::unexpected(write_secret.error()));
+        co_return;
+    }
+
+    auto *path = connection->active_path();
+    if (path == nullptr) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+        co_return;
+    }
+
+    auto validating = connection->paths().start_validation(*path, fiber::quic::QuicTime{100});
+    if (!validating) {
+        done_promise->set_value(std::unexpected(validating.error()));
+        co_return;
+    }
+    connection->paths().clear_frames(*path, fiber::quic::QuicFrameType::PathChallenge);
+
+    PathChallengeBytes challenge{};
+    std::memcpy(challenge.data(), path->challenge[0], challenge.size());
+    done_promise->set_value(challenge);
     co_return;
 }
 
@@ -1009,6 +1177,245 @@ TEST(QuicUdpEndpointTest, CreatesConnectionForNewInitialDcid) {
     EXPECT_EQ(result->connection->original_destination_connection_id().size(), dcid.size());
     EXPECT_EQ(result->connection->local_connection_id().size(), fiber::quic::kQuicConnectionIdLength);
     EXPECT_EQ(endpoint.find_connection(result->connection->local_connection_id()), result->connection);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, RetryEnabledSendsRetryWithoutCreatingConnection) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    options.retry = true;
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("1020304050607080");
+    const auto scid = cid_from_hex("a1a2a3a4");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
+    build_initial_datagram(datagram, dcid, scid);
+
+    std::array<std::uint8_t, 512> response{};
+    std::promise<EndpointResult> recv_promise;
+    std::promise<fiber::common::IoResult<std::size_t>> response_promise;
+    auto recv_future = recv_promise.get_future();
+    auto response_future = response_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() { return recv_endpoint_once(&endpoint, &recv_promise); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return send_datagram_and_recv_response(&group.at(0), endpoint.local_addr().port(), datagram.data(),
+                                               datagram.size(), response.data(), response.size(), &response_promise);
+    });
+
+    ASSERT_EQ(recv_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(response_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+    auto recv_result = recv_future.get();
+    EXPECT_FALSE(recv_result.has_value());
+    EXPECT_EQ(recv_result.error(), fiber::common::IoErr::WouldBlock);
+    auto response_size = response_future.get();
+    ASSERT_TRUE(response_size.has_value()) << static_cast<int>(response_size.error());
+
+    auto retry = fiber::quic::quic_parse_packet_header(response.data(), *response_size, 0);
+    ASSERT_TRUE(retry.has_value()) << static_cast<int>(retry.error());
+    EXPECT_EQ(retry->type, fiber::quic::QuicPacketType::Retry);
+    EXPECT_EQ(retry->dcid.size(), scid.size());
+    EXPECT_EQ(std::memcmp(retry->dcid.data(), scid.data(), scid.size()), 0);
+    EXPECT_EQ(retry->scid.size(), fiber::quic::kQuicConnectionIdLength);
+    EXPECT_FALSE(retry->token.empty());
+    EXPECT_EQ(endpoint.active_connection_count(), 0U);
+    EXPECT_EQ(endpoint.find_connection(dcid), nullptr);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, ValidRetryTokenCreatesValidatedConnectionWithRetryIds) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    options.retry = true;
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto original_dcid = cid_from_hex("0102030405060708");
+    const auto client_scid = cid_from_hex("aabbccdd");
+    std::promise<TwoEndpointResults> recv_promise;
+    std::promise<fiber::common::IoResult<RetryInitialResult>> send_promise;
+    auto recv_future = recv_promise.get_future();
+    auto send_future = send_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() { return recv_endpoint_twice(&endpoint, &recv_promise); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return send_initial_then_retry_initial(&group.at(0), endpoint.local_addr().port(), original_dcid, client_scid,
+                                               &send_promise);
+    });
+
+    ASSERT_EQ(send_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(recv_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+    auto send_result = send_future.get();
+    ASSERT_TRUE(send_result.has_value()) << static_cast<int>(send_result.error());
+    auto recv_results = recv_future.get();
+    EXPECT_FALSE(recv_results.first.has_value());
+    EXPECT_EQ(recv_results.first.error(), fiber::common::IoErr::WouldBlock);
+    ASSERT_TRUE(recv_results.second.has_value()) << static_cast<int>(recv_results.second.error());
+
+    fiber::quic::QuicConnection *connection = recv_results.second->connection;
+    ASSERT_NE(connection, nullptr);
+    EXPECT_TRUE(recv_results.second->created);
+    EXPECT_TRUE(connection->retried());
+    EXPECT_EQ(connection->original_destination_connection_id().size(), original_dcid.size());
+    EXPECT_EQ(std::memcmp(connection->original_destination_connection_id().data(), original_dcid.data(),
+                          original_dcid.size()),
+              0);
+    EXPECT_EQ(connection->initial_destination_connection_id().size(), send_result->retry_scid.size());
+    EXPECT_EQ(std::memcmp(connection->initial_destination_connection_id().data(), send_result->retry_scid.data(),
+                          send_result->retry_scid.size()),
+              0);
+    EXPECT_EQ(connection->retry_source_connection_id().size(), send_result->retry_scid.size());
+    EXPECT_EQ(std::memcmp(connection->retry_source_connection_id().data(), send_result->retry_scid.data(),
+                          send_result->retry_scid.size()),
+              0);
+    ASSERT_NE(connection->active_path(), nullptr);
+    EXPECT_TRUE(connection->active_path()->validated);
+    EXPECT_GT(send_result->token_len, 0U);
+    EXPECT_EQ(endpoint.active_connection_count(), 1U);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, SendsNewTokenWhenPathValidationCompletes) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::array<std::uint8_t, fiber::quic::kQuicAddressValidationKeyLength> key{};
+    for (std::size_t i = 0; i < key.size(); ++i) {
+        key[i] = static_cast<std::uint8_t>(0x50U + i);
+    }
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    options.issue_new_token = true;
+    options.address_validation_key_set = true;
+    options.address_validation_key = key;
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("a0a1a2a3a4a5a6a7");
+    const auto client_scid = cid_from_hex("b0b1b2b3");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> initial{};
+    build_initial_datagram(initial, dcid, client_scid);
+
+    std::array<std::uint8_t, 1400> initial_response{};
+    std::promise<EndpointResult> initial_recv_promise;
+    std::promise<fiber::common::IoResult<PortResponseResult>> initial_send_promise;
+    auto initial_recv_future = initial_recv_promise.get_future();
+    auto initial_send_future = initial_send_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() { return recv_endpoint_once(&endpoint, &initial_recv_promise); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return send_datagram_recv_response_with_port(&group.at(0), endpoint.local_addr().port(), initial.data(),
+                                                     initial.size(), initial_response.data(), initial_response.size(),
+                                                     &initial_send_promise);
+    });
+
+    ASSERT_EQ(initial_recv_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(initial_send_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto initial_recv = initial_recv_future.get();
+    ASSERT_TRUE(initial_recv.has_value()) << static_cast<int>(initial_recv.error());
+    auto initial_send = initial_send_future.get();
+    ASSERT_TRUE(initial_send.has_value()) << static_cast<int>(initial_send.error());
+
+    fiber::quic::QuicConnection *connection = initial_recv->connection;
+    ASSERT_NE(connection, nullptr);
+
+    constexpr fiber::quic::QuicCryptoSuite suite = fiber::quic::QuicCryptoSuite::Aes128GcmSha256;
+    std::array<std::uint8_t, fiber::quic::kQuicMaxSecretLength> app_secret{};
+    fill_new_token_test_secret(app_secret);
+
+    std::promise<fiber::common::IoResult<PathChallengeBytes>> prepare_promise;
+    auto prepare_future = prepare_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return prepare_connection_for_new_token(connection, &prepare_promise); });
+    ASSERT_EQ(prepare_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto challenge = prepare_future.get();
+    ASSERT_TRUE(challenge.has_value()) << static_cast<int>(challenge.error());
+
+    fiber::quic::QuicConnection::Options peer_options{};
+    peer_options.role = fiber::quic::QuicConnectionRole::Client;
+    fiber::quic::QuicConnection peer(peer_options);
+    ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(peer.crypto(), fiber::quic::QuicEncryptionLevel::Application,
+                                                        true, suite, app_secret.data(), 32));
+    ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(peer.crypto(), fiber::quic::QuicEncryptionLevel::Application,
+                                                        false, suite, app_secret.data(), 32));
+
+    fiber::quic::QuicOutputFrame path_response{};
+    path_response.type = fiber::quic::QuicFrameType::PathResponse;
+    std::memcpy(path_response.u.path_response.data, challenge->data(), challenge->size());
+
+    std::array<std::uint8_t, 1200> app_datagram{};
+    fiber::quic::QuicPacketEncodeSpec app_spec{};
+    app_spec.level = fiber::quic::QuicEncryptionLevel::Application;
+    app_spec.dcid = connection->local_connection_id();
+    app_spec.frames = &path_response;
+    app_spec.frame_count = 1;
+    auto encoded_app = fiber::quic::quic_encode_packet(peer, app_spec, app_datagram.data(), app_datagram.size());
+    ASSERT_TRUE(encoded_app.has_value()) << static_cast<int>(encoded_app.error());
+
+    std::array<std::uint8_t, 1400> new_token_response{};
+    std::promise<EndpointResult> app_recv_promise;
+    std::promise<fiber::common::IoResult<std::size_t>> app_send_promise;
+    auto app_recv_future = app_recv_promise.get_future();
+    auto app_send_future = app_send_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() { return recv_endpoint_once(&endpoint, &app_recv_promise); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return send_datagram_from_port_and_recv_response(
+                &group.at(0), endpoint.local_addr().port(), initial_send->port, app_datagram.data(),
+                encoded_app->packet_len, new_token_response.data(), new_token_response.size(), &app_send_promise);
+    });
+
+    ASSERT_EQ(app_recv_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(app_send_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto app_recv = app_recv_future.get();
+    ASSERT_TRUE(app_recv.has_value()) << static_cast<int>(app_recv.error());
+    EXPECT_TRUE(app_recv->packet.path_validated);
+    EXPECT_EQ(app_recv->packet.validated_path, connection->active_path());
+    auto app_response_size = app_send_future.get();
+    ASSERT_TRUE(app_response_size.has_value()) << static_cast<int>(app_response_size.error());
+
+    std::array<std::uint8_t, 1400> plaintext{};
+    auto decoded = fiber::quic::quic_decode_packet(peer, new_token_response.data(), *app_response_size,
+                                                   static_cast<std::uint8_t>(client_scid.size()), plaintext.data(),
+                                                   plaintext.size());
+    ASSERT_TRUE(decoded.has_value()) << static_cast<int>(decoded.error());
+
+    fiber::quic::QuicSlice token{};
+    fiber::quic::QuicReadCursor payload(decoded->payload.data, decoded->payload.len);
+    while (!payload.empty()) {
+        auto parsed = fiber::quic::quic_parse_frame_for_receiver(
+                fiber::quic::QuicConnectionRole::Client, fiber::quic::QuicEncryptionLevel::Application, payload);
+        ASSERT_TRUE(parsed.has_value()) << static_cast<int>(parsed.error());
+        if (parsed->frame.type == fiber::quic::QuicFrameType::NewToken) {
+            token = parsed->frame.data;
+            break;
+        }
+    }
+    ASSERT_FALSE(token.empty());
+
+    auto checked = fiber::quic::quic_validate_address_token(key, loopback(initial_send->port),
+                                                            fiber::quic::quic_unix_seconds_now(), token);
+    ASSERT_TRUE(checked.has_value()) << static_cast<int>(checked.error());
+    EXPECT_EQ(checked->status, fiber::quic::QuicAddressTokenValidationStatus::Valid);
+    EXPECT_EQ(checked->kind, fiber::quic::QuicAddressTokenKind::NewToken);
 
     close_endpoint_on_loop(group, endpoint);
     group.stop();

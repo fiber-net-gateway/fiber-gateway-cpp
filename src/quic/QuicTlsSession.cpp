@@ -197,6 +197,10 @@ create_server_transport_params(QuicConnection &connection, std::uint8_t *out, st
     params.original_destination_connection_id = connection.original_destination_connection_id();
     params.has_initial_source_connection_id = true;
     params.initial_source_connection_id = connection.local_connection_id();
+    if (connection.retried()) {
+        params.has_retry_source_connection_id = true;
+        params.retry_source_connection_id = connection.retry_source_connection_id();
+    }
 
     QuicWriteCursor writer(out, out_cap);
     return quic_create_transport_params(QuicTransportParamOwner::Server, &writer, params);

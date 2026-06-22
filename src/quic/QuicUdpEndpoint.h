@@ -1,6 +1,7 @@
 #ifndef FIBER_QUIC_QUIC_UDP_ENDPOINT_H
 #define FIBER_QUIC_QUIC_UDP_ENDPOINT_H
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -19,6 +20,7 @@
 #include "QuicConnection.h"
 #include "QuicPacketProcessor.h"
 #include "QuicSendScheduler.h"
+#include "QuicToken.h"
 
 namespace fiber::net {
 class TlsServerContext;
@@ -47,6 +49,12 @@ public:
         QuicRecvFlowControlSettings recv_flow{};
         std::chrono::milliseconds max_ack_delay{25};
         std::uint64_t ack_delay_exponent = 3;
+        bool retry = false;
+        bool issue_new_token = false;
+        bool address_validation_key_set = false;
+        std::array<std::uint8_t, kQuicAddressValidationKeyLength> address_validation_key{};
+        std::chrono::seconds retry_token_lifetime{3};
+        std::chrono::seconds new_token_lifetime{600};
     };
 
     QuicUdpEndpoint() noexcept;
@@ -83,6 +91,13 @@ private:
     using ConnectionList =
             common::IntrusiveList<QuicConnection::EndpointIndex, offsetof(QuicConnection::EndpointIndex, link)>;
 
+    struct QuicInitialValidation {
+        QuicConnectionId original_destination_connection_id{};
+        QuicConnectionId retry_source_connection_id{};
+        bool address_validated = false;
+        bool retried = false;
+    };
+
     [[nodiscard]] static std::uint64_t hash_connection_id(const QuicConnectionId &id) noexcept;
     [[nodiscard]] static int compare_connection_id(const QuicConnectionId &left,
                                                    const QuicConnectionId &right) noexcept;
@@ -101,8 +116,17 @@ private:
     [[nodiscard]] common::IoResult<void> register_connection_id(QuicConnection &connection,
                                                                 QuicConnection::ConnectionIdIndex &index,
                                                                 const QuicConnectionId &cid) noexcept;
-    [[nodiscard]] common::IoResult<QuicConnection *> create_connection(const QuicPacketHeader &packet,
-                                                                       const QuicReceivedDatagram &datagram) noexcept;
+    [[nodiscard]] common::IoResult<QuicInitialValidation>
+    validate_initial_address(const QuicPacketHeader &packet, const QuicReceivedDatagram &datagram) noexcept;
+    [[nodiscard]] common::IoResult<void> send_retry_packet(const QuicPacketHeader &packet,
+                                                           const QuicReceivedDatagram &datagram) noexcept;
+    [[nodiscard]] common::IoResult<void> send_invalid_token_close(const QuicPacketHeader &packet,
+                                                                  const QuicReceivedDatagram &datagram,
+                                                                  const char *reason) noexcept;
+    [[nodiscard]] common::IoResult<void> queue_new_token(QuicConnection &connection, QuicPath &path) noexcept;
+    [[nodiscard]] common::IoResult<QuicConnection *>
+    create_connection(const QuicPacketHeader &packet, const QuicReceivedDatagram &datagram,
+                      const QuicInitialValidation &validation) noexcept;
     [[nodiscard]] common::IoResult<QuicUdpReceiveResult>
     process_datagram(net::UdpPacketRecvResult recv, std::chrono::steady_clock::time_point now) noexcept;
     [[nodiscard]] common::IoResult<QuicBuildSendResult> build_send_datagram(QuicConnection &connection,

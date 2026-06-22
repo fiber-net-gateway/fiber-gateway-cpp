@@ -58,6 +58,8 @@ public:
                                                                    const QuicPathChallengeFrame &frame) noexcept;
     [[nodiscard]] common::IoResult<bool> recv_path_response_frame(const QuicPathChallengeFrame &frame,
                                                                   QuicTime now) noexcept;
+    [[nodiscard]] common::IoResult<QuicPath *> recv_path_response_frame_with_path(const QuicPathChallengeFrame &frame,
+                                                                                  QuicTime now) noexcept;
     [[nodiscard]] common::IoResult<void> handle_migration(QuicPath &path, bool rebound, QuicTime now) noexcept;
 
     [[nodiscard]] common::IoResult<void> start_validation(QuicPath &path, QuicTime now) noexcept;

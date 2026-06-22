@@ -153,7 +153,8 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
 }
 
 [[nodiscard]] common::IoResult<bool> handle_crypto_frame(QuicConnection &conn, QuicEncryptionLevel level,
-                                                         const QuicInputFrame &frame) noexcept {
+                                                         const QuicInputFrame &frame,
+                                                         bool &handshake_confirmed) noexcept {
     auto provided = provide_crypto_data(conn, level, frame.u.crypto.offset, frame.data);
     if (!provided) {
         return std::unexpected(provided.error());
@@ -178,6 +179,7 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
             return std::unexpected(queued.error());
         }
         discard_packet_number_space(conn, QuicEncryptionLevel::Handshake);
+        handshake_confirmed = true;
         return true;
     }
 
@@ -258,11 +260,13 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 conn.begin_draining(static_cast<QuicErrorCode>(frame.u.close.error_code));
                 break;
             case QuicFrameType::Crypto: {
-                auto handled = handle_crypto_frame(conn, packet.level, frame);
+                bool handshake_confirmed = false;
+                auto handled = handle_crypto_frame(conn, packet.level, frame, handshake_confirmed);
                 if (!handled) {
                     return std::unexpected(handled.error());
                 }
                 result.send_output = result.send_output || *handled;
+                result.handshake_confirmed = result.handshake_confirmed || handshake_confirmed;
                 break;
             }
             case QuicFrameType::Stream: {
@@ -339,9 +343,14 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 if (packet.level != QuicEncryptionLevel::Application) {
                     break;
                 }
-                auto validated = conn.recv_path_response_frame(frame.u.path_response, now);
-                if (!validated) {
-                    return std::unexpected(validated.error());
+                auto validated_path = conn.recv_path_response_frame_with_path(frame.u.path_response, now);
+                if (!validated_path) {
+                    return std::unexpected(validated_path.error());
+                }
+                if (*validated_path != nullptr) {
+                    result.validated_path = *validated_path;
+                    result.path_validated = true;
+                    result.send_output = true;
                 }
                 break;
             }
@@ -587,6 +596,11 @@ common::IoResult<QuicPacketProcessResult> quic_process_datagram(QuicConnection &
         aggregate.non_probing = aggregate.non_probing || processed->non_probing;
         aggregate.created_path = aggregate.created_path || processed->created_path;
         aggregate.rebound = aggregate.rebound || processed->rebound;
+        aggregate.handshake_confirmed = aggregate.handshake_confirmed || processed->handshake_confirmed;
+        aggregate.path_validated = aggregate.path_validated || processed->path_validated;
+        if (processed->validated_path != nullptr) {
+            aggregate.validated_path = processed->validated_path;
+        }
 
         offset += packet->packet_len;
     }
