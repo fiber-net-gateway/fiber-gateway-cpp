@@ -317,6 +317,7 @@ common::IoResult<void> QuicConnection::recv_max_stream_data_frame(const QuicMaxS
 common::IoResult<void> QuicConnection::recv_max_data_frame(const QuicMaxDataFrame &frame) noexcept {
     if (frame.max_data > peer_max_data_) {
         peer_max_data_ = frame.max_data;
+        notify_stream_write_waiters();
     }
     return {};
 }
@@ -391,6 +392,10 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
     peer_max_data_ = params.initial_max_data;
     options_.max_local_bidirectional_streams = params.initial_max_streams_bidi;
     options_.max_local_unidirectional_streams = params.initial_max_streams_uni;
+    streams_.for_each([this](QuicStream &stream) noexcept {
+        stream.on_max_stream_data(initial_stream_send_limit(stream.stream_id()));
+    });
+    notify_stream_write_waiters();
     if (params.max_idle_timeout > 0 &&
         std::chrono::milliseconds(params.max_idle_timeout) < options_.transport.max_idle_timeout) {
         options_.transport.max_idle_timeout = std::chrono::milliseconds(params.max_idle_timeout);
@@ -705,6 +710,40 @@ common::IoResult<void> QuicConnection::queue_max_data_frame(std::uint64_t limit)
     space.pending_frames.push_back(*frame);
     schedule_send();
     return {};
+}
+
+std::uint64_t QuicConnection::peer_data_available() const noexcept {
+    if (peer_data_reserved_ >= peer_max_data_) {
+        return 0;
+    }
+    return peer_max_data_ - peer_data_reserved_;
+}
+
+bool QuicConnection::reserve_peer_data(std::uint64_t bytes) noexcept {
+    if (bytes == 0) {
+        return true;
+    }
+    if (bytes > peer_data_available()) {
+        return false;
+    }
+    peer_data_reserved_ += bytes;
+    return true;
+}
+
+std::uint64_t QuicConnection::initial_stream_send_limit(std::uint64_t stream_id) const noexcept {
+    if (!peer_transport_.received) {
+        return 0;
+    }
+    const QuicStreamType type = stream_type(stream_id);
+    if (type == QuicStreamType::Unidirectional) {
+        return is_local_stream(stream_id) ? peer_transport_.params.initial_max_stream_data_uni : 0;
+    }
+    return is_local_stream(stream_id) ? peer_transport_.params.initial_max_stream_data_bidi_remote
+                                      : peer_transport_.params.initial_max_stream_data_bidi_local;
+}
+
+void QuicConnection::notify_stream_write_waiters() noexcept {
+    streams_.for_each([](QuicStream &stream) noexcept { stream.on_connection_max_data(); });
 }
 
 common::IoResult<void> QuicConnection::check_recv_data_delta(std::uint64_t delta) const noexcept {

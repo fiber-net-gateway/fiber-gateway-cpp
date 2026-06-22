@@ -763,6 +763,13 @@ DetachedTask recv_application_stream_frame(fiber::event::EventLoop *loop, fiber:
         done_promise->set_value(std::unexpected(max_stream_data.error()));
         co_return;
     }
+    fiber::quic::QuicMaxDataFrame max_data{};
+    max_data.max_data = 1024;
+    auto max_conn_data = server.recv_max_data_frame(max_data);
+    if (!max_conn_data) {
+        done_promise->set_value(std::unexpected(max_conn_data.error()));
+        co_return;
+    }
     auto written = (*stream)->try_write(iobuf_of("stream"));
     if (!written) {
         done_promise->set_value(std::unexpected(written.error()));

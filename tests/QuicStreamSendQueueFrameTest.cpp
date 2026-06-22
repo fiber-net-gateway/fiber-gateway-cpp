@@ -62,7 +62,7 @@ std::string_view frame_data_view(const fiber::quic::QuicInputFrame &frame) {
 
 TEST(QuicStreamSendQueueFrameTest, EncodesAppendedDataAsInflightAndAckReleasesIt) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
 
     auto appended = buffer.try_append(iobuf_of("hello"));
     ASSERT_TRUE(appended.has_value());
@@ -95,7 +95,7 @@ TEST(QuicStreamSendQueueFrameTest, EncodesAppendedDataAsInflightAndAckReleasesIt
 
 TEST(QuicStreamSendQueueFrameTest, FailedRangeReturnsToReadyAndCanBeEncodedAgain) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
 
     ASSERT_TRUE(buffer.try_append(iobuf_of("abcdef")).has_value());
 
@@ -126,7 +126,7 @@ TEST(QuicStreamSendQueueFrameTest, FailedRangeReturnsToReadyAndCanBeEncodedAgain
 
 TEST(QuicStreamSendQueueFrameTest, EncodeFrameMarksInflightAndFailedRangeReturnsReady) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
 
     ASSERT_TRUE(buffer.try_append(iobuf_of("abcdef")).has_value());
 
@@ -151,7 +151,7 @@ TEST(QuicStreamSendQueueFrameTest, EncodeFrameMarksInflightAndFailedRangeReturns
 
 TEST(QuicStreamSendQueueFrameTest, InsufficientCapacityDoesNotChangeState) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
 
     ASSERT_TRUE(buffer.try_append(iobuf_of("abc")).has_value());
 
@@ -165,7 +165,7 @@ TEST(QuicStreamSendQueueFrameTest, InsufficientCapacityDoesNotChangeState) {
 
 TEST(QuicStreamSendQueueFrameTest, LargeIoBufAppendsAsSingleExtent) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
 
     std::string payload(kStreamDataBlockSize + 17, 'x');
     auto appended = buffer.try_append(iobuf_of(payload));
@@ -177,7 +177,7 @@ TEST(QuicStreamSendQueueFrameTest, LargeIoBufAppendsAsSingleExtent) {
 
 TEST(QuicStreamSendQueueFrameTest, FailedPartialEncodeMergesReadySlicesFromSameIoBuf) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
 
     ASSERT_TRUE(buffer.try_append(iobuf_of("abcdef")).has_value());
 
@@ -196,7 +196,7 @@ TEST(QuicStreamSendQueueFrameTest, FailedPartialEncodeMergesReadySlicesFromSameI
 
 TEST(QuicStreamSendQueueFrameTest, SeparateIoBufAppendsRemainSeparateReadyExtents) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
 
     ASSERT_TRUE(buffer.try_append(iobuf_of("abc")).has_value());
     ASSERT_TRUE(buffer.try_append(iobuf_of("def")).has_value());
@@ -208,7 +208,7 @@ TEST(QuicStreamSendQueueFrameTest, SeparateIoBufAppendsRemainSeparateReadyExtent
 
 TEST(QuicStreamSendQueueFrameTest, FinalDataCarriesFinUntilAcked) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
 
     auto appended = buffer.try_append(iobuf_of("done"), true);
     ASSERT_TRUE(appended.has_value());
@@ -236,7 +236,7 @@ TEST(QuicStreamSendQueueFrameTest, FinalDataCarriesFinUntilAcked) {
 
 TEST(QuicStreamSendQueueFrameTest, AppendChainTakesReadableNodesAndUsesCompleteAsFin) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
     fiber::mem::IoBufChain chain(pool);
 
     ASSERT_TRUE(chain.append(iobuf_of("ab")));
@@ -276,7 +276,7 @@ TEST(QuicStreamSendQueueFrameTest, AppendChainTakesReadableNodesAndUsesCompleteA
 
 TEST(QuicStreamSendQueueFrameTest, AppendCompleteEmptyChainProducesFinOnlyFrame) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
     fiber::mem::IoBufChain chain(pool);
     chain.mark_complete();
 
@@ -297,7 +297,7 @@ TEST(QuicStreamSendQueueFrameTest, AppendCompleteEmptyChainProducesFinOnlyFrame)
 
 TEST(QuicStreamSendQueueFrameTest, FinOnlyFrameCanFailAndRetry) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
 
     ASSERT_TRUE(buffer.try_append(fiber::mem::IoBuf{}, true).has_value());
 
@@ -328,7 +328,7 @@ TEST(QuicStreamSendQueueFrameTest, FinOnlyFrameCanFailAndRetry) {
 
 TEST(QuicStreamSendQueueFrameTest, OmitsLengthFieldWhenPayloadFillsBuffer) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
 
     // 20 bytes of data — more than any reasonable header, so the buffer-filling path triggers.
     ASSERT_TRUE(buffer.try_append(iobuf_of("01234567890123456789")).has_value());
@@ -357,7 +357,7 @@ TEST(QuicStreamSendQueueFrameTest, OmitsLengthFieldWhenPayloadFillsBuffer) {
 
 TEST(QuicStreamSendQueueFrameTest, IncludesLengthFieldWhenPayloadDoesNotFillBuffer) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
 
     ASSERT_TRUE(buffer.try_append(iobuf_of("hi")).has_value());
 
@@ -379,7 +379,7 @@ TEST(QuicStreamSendQueueFrameTest, IncludesLengthFieldWhenPayloadDoesNotFillBuff
 
 TEST(QuicStreamSendQueueFrameTest, OmitsLengthWithOffsetAndFin) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
 
     // Append first 5 bytes without FIN, then 5 more bytes with FIN.
     ASSERT_TRUE(buffer.try_append(iobuf_of("abcde")).has_value());
@@ -421,7 +421,7 @@ TEST(QuicStreamSendQueueFrameTest, OmitsLengthWithOffsetAndFin) {
 
 TEST(QuicStreamSendQueueFrameTest, ResetBeforeFinRecordsFinalSizeAndReleasesBufferedData) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
 
     ASSERT_TRUE(buffer.try_append(iobuf_of("abcdef")).has_value());
 
@@ -458,7 +458,7 @@ TEST(QuicStreamSendQueueFrameTest, ResetBeforeFinRecordsFinalSizeAndReleasesBuff
 
 TEST(QuicStreamSendQueueFrameTest, ResetAfterFinIsInvalid) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024, .max_stream_data = 128 * 1024});
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
 
     ASSERT_TRUE(buffer.try_append(iobuf_of("done"), true).has_value());
 

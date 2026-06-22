@@ -298,6 +298,8 @@ public:
     [[nodiscard]] std::uint64_t recv_data_consumed() const noexcept { return recv_data_consumed_; }
     [[nodiscard]] std::uint64_t recv_data_limit() const noexcept { return recv_data_limit_; }
     [[nodiscard]] std::uint64_t peer_max_data() const noexcept { return peer_max_data_; }
+    [[nodiscard]] std::uint64_t peer_data_reserved() const noexcept { return peer_data_reserved_; }
+    [[nodiscard]] std::uint64_t peer_data_available() const noexcept;
     [[nodiscard]] common::IoResult<void> on_stream_send_acked(std::uint64_t stream_id, std::size_t offset,
                                                               std::size_t length, bool fin) noexcept;
     [[nodiscard]] common::IoResult<void> on_stream_send_failed(std::uint64_t stream_id, std::size_t offset,
@@ -363,6 +365,9 @@ private:
     [[nodiscard]] common::IoResult<void> queue_max_stream_data_frame(std::uint64_t stream_id,
                                                                      std::uint64_t limit) noexcept;
     [[nodiscard]] common::IoResult<void> queue_max_data_frame(std::uint64_t limit) noexcept;
+    [[nodiscard]] bool reserve_peer_data(std::uint64_t bytes) noexcept;
+    [[nodiscard]] std::uint64_t initial_stream_send_limit(std::uint64_t stream_id) const noexcept;
+    void notify_stream_write_waiters() noexcept;
     [[nodiscard]] common::IoResult<void> check_recv_data_delta(std::uint64_t delta) const noexcept;
     void commit_recv_data_delta(std::uint64_t delta) noexcept;
     void maybe_extend_recv_data_flow_control() noexcept;
@@ -390,6 +395,7 @@ private:
     std::uint64_t recv_data_consumed_ = 0;
     std::uint64_t recv_data_limit_ = 0;
     std::uint64_t peer_max_data_ = 0;
+    std::uint64_t peer_data_reserved_ = 0;
 
     friend class QuicStream;
     friend class QuicUdpEndpoint;

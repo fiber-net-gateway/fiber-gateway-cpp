@@ -145,6 +145,8 @@ public:
     [[nodiscard]] static bool is_unidirectional_stream_id(std::uint64_t stream_id) noexcept;
 
 private:
+    class WriteAwaiter;
+
     void attach_to_connection(QuicConnection &conn) noexcept;
     void detach_from_connection() noexcept;
     [[nodiscard]] common::IoResult<std::uint64_t> on_stream_data_recv(const std::uint8_t *src, std::size_t length,
@@ -153,6 +155,7 @@ private:
                                                                   std::uint64_t final_size) noexcept;
     [[nodiscard]] common::IoResult<void> on_remote_stop_sending(std::uint64_t error_code) noexcept;
     void on_max_stream_data(std::uint64_t limit) noexcept;
+    void on_connection_max_data() noexcept;
     [[nodiscard]] bool has_send_work() const noexcept;
     [[nodiscard]] common::IoResult<QuicStreamFrameEncodeStatus>
     encode_stream_frame(QuicOutputFrame &frame, std::uint8_t *dst, std::size_t capacity) noexcept;
@@ -162,12 +165,19 @@ private:
     void retain() noexcept;
     void release() noexcept;
     void sync_recv_state_from_queue() noexcept;
+    [[nodiscard]] std::uint64_t stream_data_available() const noexcept;
+    [[nodiscard]] std::size_t write_available() const noexcept;
+    [[nodiscard]] common::IoErr terminal_write_error() const noexcept;
+    void notify_write_waiter(common::IoErr result = common::IoErr::None) noexcept;
+    void cancel_write_waiter(WriteAwaiter *awaiter) noexcept;
 
     std::uint64_t stream_id_ = 0;
     QuicConnection *conn_ = nullptr;
     QuicStreamRecvQueue recv_queue_;
     QuicStreamSendQueue send_queue_;
     QuicStreamRecvState recv_state_ = QuicStreamRecvState::Open;
+    std::uint64_t max_stream_data_ = 0;
+    WriteAwaiter *write_waiter_ = nullptr;
     std::uint32_t ref_count_ = 1;
     bool attached_to_connection_ = false;
     bool app_released_ = true;

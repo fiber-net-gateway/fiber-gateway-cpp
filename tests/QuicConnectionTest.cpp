@@ -1,12 +1,18 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <future>
 #include <new>
+#include <string>
 #include <string_view>
 
+#include "async/Sleep.h"
+#include "async/Spawn.h"
+#include "event/EventLoopGroup.h"
 #include "quic/QuicConnection.h"
 #include "quic/QuicProtocol.h"
 #include "quic/QuicTransportCodec.h"
@@ -84,6 +90,57 @@ fiber::quic::QuicConnection::Options server_options_with_factory(StreamCallbackS
 
 void schedule_send_record(void *owner, fiber::quic::QuicConnection &) noexcept {
     ++static_cast<StreamCallbackState *>(owner)->schedule_calls;
+}
+
+struct WriteResult {
+    bool ok = false;
+    std::size_t value = 0;
+    fiber::common::IoErr error = fiber::common::IoErr::None;
+};
+
+WriteResult to_write_result(fiber::common::IoResult<std::size_t> result) {
+    if (result) {
+        return {.ok = true, .value = *result};
+    }
+    return {.ok = false, .error = result.error()};
+}
+
+fiber::async::DetachedTask write_one(fiber::quic::QuicStream *stream, std::promise<WriteResult> *done) {
+    auto result = co_await stream->write(iobuf_of("!"));
+    done->set_value(to_write_result(result));
+    fiber::event::EventLoop::current().stop();
+}
+
+fiber::async::DetachedTask grant_max_stream_data_after_delay(fiber::quic::QuicConnection *conn, std::uint64_t stream_id,
+                                                             std::uint64_t limit, std::atomic<bool> *started) {
+    co_await fiber::async::sleep(std::chrono::milliseconds(20));
+    started->store(true, std::memory_order_relaxed);
+    fiber::quic::QuicMaxStreamDataFrame frame{};
+    frame.id = stream_id;
+    frame.limit = limit;
+    (void) conn->recv_max_stream_data_frame(frame);
+}
+
+fiber::async::DetachedTask grant_max_data_after_delay(fiber::quic::QuicConnection *conn, std::uint64_t limit,
+                                                      std::atomic<bool> *started) {
+    co_await fiber::async::sleep(std::chrono::milliseconds(20));
+    started->store(true, std::memory_order_relaxed);
+    fiber::quic::QuicMaxDataFrame frame{};
+    frame.max_data = limit;
+    (void) conn->recv_max_data_frame(frame);
+}
+
+void grant_max_stream_data(fiber::quic::QuicConnection &conn, std::uint64_t stream_id, std::uint64_t limit) {
+    fiber::quic::QuicMaxStreamDataFrame frame{};
+    frame.id = stream_id;
+    frame.limit = limit;
+    ASSERT_TRUE(conn.recv_max_stream_data_frame(frame).has_value());
+}
+
+void grant_max_data(fiber::quic::QuicConnection &conn, std::uint64_t limit) {
+    fiber::quic::QuicMaxDataFrame frame{};
+    frame.max_data = limit;
+    ASSERT_TRUE(conn.recv_max_data_frame(frame).has_value());
 }
 
 } // namespace
@@ -209,6 +266,7 @@ TEST(QuicConnectionTest, StreamWriteSubmitsConnectionSendWork) {
     limit.id = 0;
     limit.limit = 1024;
     ASSERT_TRUE(conn.recv_max_stream_data_frame(limit).has_value());
+    grant_max_data(conn, 1024);
 
     auto written = (*stream)->try_write(iobuf_of("abc"));
 
@@ -637,6 +695,7 @@ TEST(QuicConnectionTest, MaxStreamDataUpdatesStreamWriteWindow) {
     ASSERT_TRUE(conn.recv_stream_frame(frame, {}).has_value());
     auto *stream = conn.find_stream(0);
     ASSERT_NE(stream, nullptr);
+    grant_max_data(conn, 1024);
 
     auto blocked = stream->try_write(iobuf_of("abc"));
     fiber::quic::QuicMaxStreamDataFrame max_stream_data{};
@@ -650,6 +709,128 @@ TEST(QuicConnectionTest, MaxStreamDataUpdatesStreamWriteWindow) {
     ASSERT_TRUE(updated.has_value());
     ASSERT_TRUE(written.has_value());
     EXPECT_EQ(*written, 3U);
+}
+
+TEST(QuicConnectionTest, StreamWriteShortWritesToStreamCredit) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    auto stream = conn.get_or_create_peer_stream(0);
+    ASSERT_TRUE(stream.has_value());
+    grant_max_stream_data(conn, 0, 2);
+    grant_max_data(conn, 1024);
+
+    auto written = (*stream)->try_write(iobuf_of("abc"));
+    auto blocked = (*stream)->try_write(iobuf_of("c"));
+
+    ASSERT_TRUE(written.has_value());
+    EXPECT_EQ(*written, 2U);
+    EXPECT_EQ(conn.peer_data_reserved(), 2U);
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error(), fiber::common::IoErr::WouldBlock);
+}
+
+TEST(QuicConnectionTest, StreamWriteShortWritesToConnectionCredit) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    auto stream = conn.get_or_create_peer_stream(0);
+    ASSERT_TRUE(stream.has_value());
+    grant_max_stream_data(conn, 0, 1024);
+    grant_max_data(conn, 2);
+
+    auto written = (*stream)->try_write(iobuf_of("abc"));
+    auto blocked = (*stream)->try_write(iobuf_of("c"));
+
+    ASSERT_TRUE(written.has_value());
+    EXPECT_EQ(*written, 2U);
+    EXPECT_EQ(conn.peer_data_reserved(), 2U);
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error(), fiber::common::IoErr::WouldBlock);
+}
+
+TEST(QuicConnectionTest, StreamWriteShortWritesToBufferLimit) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    auto stream = conn.get_or_create_peer_stream(0);
+    ASSERT_TRUE(stream.has_value());
+    grant_max_stream_data(conn, 0, fiber::quic::kQuicStreamSendDefaultBufferLimit + 4);
+    grant_max_data(conn, fiber::quic::kQuicStreamSendDefaultBufferLimit + 4);
+
+    std::string payload(fiber::quic::kQuicStreamSendDefaultBufferLimit + 4, 'x');
+    auto written = (*stream)->try_write(iobuf_of(payload));
+    auto blocked = (*stream)->try_write(iobuf_of("x"));
+
+    ASSERT_TRUE(written.has_value());
+    EXPECT_EQ(*written, fiber::quic::kQuicStreamSendDefaultBufferLimit);
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error(), fiber::common::IoErr::WouldBlock);
+}
+
+TEST(QuicConnectionTest, AsyncWriteResumesAfterMaxStreamData) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    auto stream = conn.get_or_create_peer_stream(0);
+    ASSERT_TRUE(stream.has_value());
+    grant_max_data(conn, 1024);
+
+    fiber::event::EventLoopGroup group(1);
+    std::promise<WriteResult> done;
+    auto future = done.get_future();
+    std::atomic<bool> grant_seen{false};
+
+    group.start();
+    fiber::async::spawn(group.at(0), [stream = *stream, &done]() { return write_one(stream, &done); });
+    fiber::async::spawn(group.at(0),
+                        [&conn, &grant_seen]() { return grant_max_stream_data_after_delay(&conn, 0, 1, &grant_seen); });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "write did not resume after MAX_STREAM_DATA";
+        return;
+    }
+
+    WriteResult result = future.get();
+    EXPECT_TRUE(grant_seen.load(std::memory_order_relaxed));
+    EXPECT_TRUE(result.ok);
+    EXPECT_EQ(result.value, 1U);
+    group.join();
+}
+
+TEST(QuicConnectionTest, AsyncWriteResumesAfterMaxData) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    auto stream = conn.get_or_create_peer_stream(0);
+    ASSERT_TRUE(stream.has_value());
+    grant_max_stream_data(conn, 0, 1024);
+
+    fiber::event::EventLoopGroup group(1);
+    std::promise<WriteResult> done;
+    auto future = done.get_future();
+    std::atomic<bool> grant_seen{false};
+
+    group.start();
+    fiber::async::spawn(group.at(0), [stream = *stream, &done]() { return write_one(stream, &done); });
+    fiber::async::spawn(group.at(0),
+                        [&conn, &grant_seen]() { return grant_max_data_after_delay(&conn, 1, &grant_seen); });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "write did not resume after MAX_DATA";
+        return;
+    }
+
+    WriteResult result = future.get();
+    EXPECT_TRUE(grant_seen.load(std::memory_order_relaxed));
+    EXPECT_TRUE(result.ok);
+    EXPECT_EQ(result.value, 1U);
+    EXPECT_EQ(conn.peer_data_reserved(), 1U);
+    group.join();
 }
 
 TEST(QuicConnectionTest, ResetStreamCreatesAndRetiresPeerStream) {
