@@ -10,6 +10,7 @@
 #include <new>
 #include <string_view>
 
+#include "async/Sleep.h"
 #include "async/Spawn.h"
 #include "common/IoError.h"
 #include "common/mem/IoBuf.h"
@@ -217,6 +218,15 @@ DetachedTask recv_endpoint_twice(fiber::quic::QuicUdpEndpoint *endpoint,
                                  std::promise<TwoEndpointResults> *done_promise) {
     TwoEndpointResults results{co_await endpoint->recv_once(), co_await endpoint->recv_once()};
     done_promise->set_value(results);
+}
+
+DetachedTask observe_endpoint_connection_count_after_delay(fiber::quic::QuicUdpEndpoint *endpoint,
+                                                           std::chrono::milliseconds delay,
+                                                           std::promise<std::size_t> *done_promise) {
+    co_await fiber::async::sleep(delay);
+    done_promise->set_value(endpoint->active_connection_count());
+    endpoint->close();
+    fiber::event::EventLoop::current().stop();
 }
 
 DetachedTask send_datagram(fiber::event::EventLoop *loop, std::uint16_t port, const std::uint8_t *data, std::size_t len,
@@ -1180,6 +1190,37 @@ TEST(QuicUdpEndpointTest, CreatesConnectionForNewInitialDcid) {
 
     close_endpoint_on_loop(group, endpoint);
     group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, IdleTimeoutDeletesConnection) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    options.transport.max_idle_timeout = std::chrono::milliseconds(5);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("8394c8f03e515708");
+    const auto scid = cid_from_hex("11223344");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
+    build_initial_datagram(datagram, dcid, scid);
+
+    auto result = recv_after_send(group, endpoint, datagram.data(), datagram.size());
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_EQ(endpoint.active_connection_count(), 1U);
+
+    std::promise<std::size_t> count_promise;
+    auto count_future = count_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return observe_endpoint_connection_count_after_delay(&endpoint, std::chrono::milliseconds(30), &count_promise);
+    });
+
+    ASSERT_EQ(count_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(count_future.get(), 0U);
+
     group.join();
 }
 

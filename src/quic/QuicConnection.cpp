@@ -142,6 +142,9 @@ QuicConnection::~QuicConnection() {
     if (auto *loop = event::EventLoop::current_or_null()) {
         cancel_loss_detection_timer(*loop);
         cancel_key_update_discard_timer(*loop);
+        cancel_idle_timer(*loop);
+        cancel_close_timer(*loop);
+        cancel_keepalive_timer(*loop);
     }
 }
 
@@ -181,6 +184,120 @@ void QuicConnection::close(QuicErrorCode error) noexcept {
 }
 
 void QuicConnection::mark_closed() noexcept { state_ = QuicConnectionState::Closed; }
+
+std::chrono::milliseconds QuicConnection::effective_idle_timeout() const noexcept {
+    return options_.transport.max_idle_timeout;
+}
+
+void QuicConnection::arm_idle_timer(event::EventLoop &loop) noexcept {
+    if (idle_timer_entry_.is_in_heap()) {
+        loop.cancel<QuicConnection, &QuicConnection::idle_timer_entry_>(*this);
+    }
+
+    const std::chrono::milliseconds timeout = effective_idle_timeout();
+    if (timeout.count() <= 0 || state_ == QuicConnectionState::Closed) {
+        return;
+    }
+
+    loop.post_at<QuicConnection, &QuicConnection::idle_timer_entry_, &QuicConnection::on_idle_timer>(
+            loop.now() + timeout, *this);
+}
+
+void QuicConnection::cancel_idle_timer(event::EventLoop &loop) noexcept {
+    if (idle_timer_entry_.is_in_heap()) {
+        loop.cancel<QuicConnection, &QuicConnection::idle_timer_entry_>(*this);
+    }
+    idle_send_timer_set_ = false;
+}
+
+void QuicConnection::arm_close_timer(event::EventLoop &loop) noexcept {
+    if (close_timer_entry_.is_in_heap()) {
+        return;
+    }
+    if (state_ == QuicConnectionState::Closed) {
+        return;
+    }
+
+    cancel_idle_timer(loop);
+    cancel_loss_detection_timer(loop);
+    cancel_key_update_discard_timer(loop);
+    cancel_keepalive_timer(loop);
+    path_manager_.cancel_validation_timer(loop);
+
+    QuicTime pto = quic_pto(rtt_, peer_transport_.params.max_ack_delay, state_ == QuicConnectionState::Established,
+                            state_ == QuicConnectionState::Established);
+    if (pto <= QuicTime{0}) {
+        pto = QuicTime{1};
+    }
+
+    loop.post_at<QuicConnection, &QuicConnection::close_timer_entry_, &QuicConnection::on_close_timer>(
+            loop.now() + pto * 3, *this);
+}
+
+void QuicConnection::cancel_close_timer(event::EventLoop &loop) noexcept {
+    if (close_timer_entry_.is_in_heap()) {
+        loop.cancel<QuicConnection, &QuicConnection::close_timer_entry_>(*this);
+    }
+}
+
+std::chrono::milliseconds QuicConnection::keepalive_delay() const noexcept {
+    std::chrono::milliseconds delay = options_.keepalive_interval;
+    if (delay.count() <= 0) {
+        return std::chrono::milliseconds{0};
+    }
+
+    const std::chrono::milliseconds idle = effective_idle_timeout();
+    if (idle.count() > 0 && delay >= idle) {
+        delay = idle / 2;
+        if (delay.count() <= 0) {
+            delay = idle;
+        }
+    }
+    return delay;
+}
+
+void QuicConnection::arm_keepalive_timer(event::EventLoop &loop) noexcept {
+    if (keepalive_timer_entry_.is_in_heap()) {
+        loop.cancel<QuicConnection, &QuicConnection::keepalive_timer_entry_>(*this);
+    }
+    if (closing() || state_ != QuicConnectionState::Established || !crypto_.application_write.ready) {
+        return;
+    }
+
+    const std::chrono::milliseconds delay = keepalive_delay();
+    if (delay.count() <= 0) {
+        return;
+    }
+
+    loop.post_at<QuicConnection, &QuicConnection::keepalive_timer_entry_, &QuicConnection::on_keepalive_timer>(
+            loop.now() + delay, *this);
+}
+
+void QuicConnection::cancel_keepalive_timer(event::EventLoop &loop) noexcept {
+    if (keepalive_timer_entry_.is_in_heap()) {
+        loop.cancel<QuicConnection, &QuicConnection::keepalive_timer_entry_>(*this);
+    }
+}
+
+void QuicConnection::on_packet_processed(event::EventLoop &loop) noexcept {
+    if (closing()) {
+        return;
+    }
+    idle_send_timer_set_ = false;
+    arm_idle_timer(loop);
+    arm_keepalive_timer(loop);
+}
+
+void QuicConnection::on_ack_eliciting_packet_sent(event::EventLoop &loop) noexcept {
+    if (closing()) {
+        return;
+    }
+    if (!idle_send_timer_set_) {
+        idle_send_timer_set_ = true;
+        arm_idle_timer(loop);
+    }
+    arm_keepalive_timer(loop);
+}
 
 void QuicConnection::arm_loss_detection_timer(event::EventLoop &loop) noexcept {
     if (loss_timer_entry_.is_in_heap()) {
@@ -239,6 +356,73 @@ void QuicConnection::on_key_update_discard_timer(QuicConnection *connection) noe
     }
     connection->crypto_.previous_application_read.reset();
     connection->crypto_.previous_application_keys_ready = false;
+}
+
+void QuicConnection::on_idle_timer(QuicConnection *connection) noexcept {
+    if (connection == nullptr || connection->state_ == QuicConnectionState::Closed) {
+        return;
+    }
+
+    event::EventLoop *loop = event::EventLoop::current_or_null();
+    if (loop != nullptr) {
+        connection->cancel_loss_detection_timer(*loop);
+        connection->cancel_key_update_discard_timer(*loop);
+        connection->cancel_close_timer(*loop);
+        connection->cancel_keepalive_timer(*loop);
+        connection->path_manager_.cancel_validation_timer(*loop);
+    }
+
+    connection->idle_send_timer_set_ = false;
+    connection->close_error_ = QuicErrorCode::NoError;
+    connection->state_ = QuicConnectionState::Closed;
+
+    if (connection->options_.on_idle_timeout != nullptr) {
+        connection->options_.on_idle_timeout(connection->options_.lifecycle_owner, *connection);
+    }
+}
+
+void QuicConnection::on_close_timer(QuicConnection *connection) noexcept {
+    if (connection == nullptr || connection->state_ == QuicConnectionState::Closed) {
+        return;
+    }
+
+    event::EventLoop *loop = event::EventLoop::current_or_null();
+    if (loop != nullptr) {
+        connection->cancel_loss_detection_timer(*loop);
+        connection->cancel_key_update_discard_timer(*loop);
+        connection->cancel_idle_timer(*loop);
+        connection->cancel_keepalive_timer(*loop);
+        connection->path_manager_.cancel_validation_timer(*loop);
+    }
+
+    connection->state_ = QuicConnectionState::Closed;
+
+    if (connection->options_.on_close_timeout != nullptr) {
+        connection->options_.on_close_timeout(connection->options_.lifecycle_owner, *connection);
+    }
+}
+
+void QuicConnection::on_keepalive_timer(QuicConnection *connection) noexcept {
+    if (connection == nullptr || connection->closing() || connection->state_ != QuicConnectionState::Established ||
+        !connection->crypto_.application_write.ready) {
+        return;
+    }
+
+    event::EventLoop *loop = event::EventLoop::current_or_null();
+    if (loop == nullptr) {
+        return;
+    }
+
+    if (connection->has_pending_send_work()) {
+        connection->arm_keepalive_timer(*loop);
+        return;
+    }
+
+    auto queued = connection->queue_ping_frame();
+    if (!queued) {
+        connection->close(QuicErrorCode::InternalError);
+        connection->arm_close_timer(*loop);
+    }
 }
 
 
@@ -552,9 +736,10 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
         stream.on_max_stream_data(initial_stream_send_limit(stream.stream_id()));
     });
     notify_peer_data_waiters();
-    if (params.max_idle_timeout > 0 &&
-        std::chrono::milliseconds(params.max_idle_timeout) < options_.transport.max_idle_timeout) {
-        options_.transport.max_idle_timeout = std::chrono::milliseconds(params.max_idle_timeout);
+    const std::chrono::milliseconds peer_idle_timeout(params.max_idle_timeout);
+    if (peer_idle_timeout.count() > 0 &&
+        (options_.transport.max_idle_timeout.count() <= 0 || peer_idle_timeout < options_.transport.max_idle_timeout)) {
+        options_.transport.max_idle_timeout = peer_idle_timeout;
     }
     return {};
 }
@@ -670,6 +855,18 @@ common::IoResult<void> QuicConnection::queue_ping_frame() noexcept {
     space.pending_frames.push_back(*frame);
     schedule_send();
     return {};
+}
+
+bool QuicConnection::has_pending_send_work() const noexcept {
+    if (has_path_send_work()) {
+        return true;
+    }
+    for (const QuicPacketNumberSpace &space: packet_number_spaces_) {
+        if ((space.send_ack && space.pending_ack != kUnsetPacketNumber) || !space.pending_frames.empty()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 

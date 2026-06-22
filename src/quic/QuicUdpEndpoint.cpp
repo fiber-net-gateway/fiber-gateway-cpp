@@ -492,7 +492,11 @@ const QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &d
 
 void QuicUdpEndpoint::delete_connection(QuicConnection &connection) noexcept {
     if (loop_ != nullptr) {
+        connection.cancel_idle_timer(*loop_);
+        connection.cancel_close_timer(*loop_);
+        connection.cancel_keepalive_timer(*loop_);
         connection.cancel_loss_detection_timer(*loop_);
+        connection.cancel_key_update_discard_timer(*loop_);
         connection.paths().cancel_validation_timer(*loop_);
     }
     send_scheduler_.remove(connection);
@@ -510,6 +514,14 @@ void QuicUdpEndpoint::delete_connection(QuicConnection &connection) noexcept {
         --active_connection_count_;
     }
     delete &connection;
+}
+
+void QuicUdpEndpoint::delete_connection_on_timer(void *owner, QuicConnection &connection) noexcept {
+    if (owner == nullptr) {
+        connection.mark_closed();
+        return;
+    }
+    static_cast<QuicUdpEndpoint *>(owner)->delete_connection(connection);
 }
 
 common::IoResult<QuicConnectionId> QuicUdpEndpoint::generate_connection_id() noexcept {
@@ -786,6 +798,7 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     conn_options.remote_connection_id = packet.scid;
     conn_options.retry_source_connection_id = validation.retry_source_connection_id;
     conn_options.transport = options_.transport;
+    conn_options.keepalive_interval = options_.keepalive_interval;
     conn_options.transport.max_ack_delay = options_.max_ack_delay;
     conn_options.transport.ack_delay_exponent = options_.ack_delay_exponent;
     conn_options.recv_flow = options_.recv_flow;
@@ -796,6 +809,9 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     conn_options.schedule_send = [](void *owner, QuicConnection &connection) noexcept {
         static_cast<QuicUdpEndpoint *>(owner)->schedule_send(connection);
     };
+    conn_options.lifecycle_owner = this;
+    conn_options.on_idle_timeout = &QuicUdpEndpoint::delete_connection_on_timer;
+    conn_options.on_close_timeout = &QuicUdpEndpoint::delete_connection_on_timer;
     conn_options.has_retry_source_connection_id = validation.retried;
     conn_options.initial_path_validated = validation.address_validated;
 
@@ -929,8 +945,17 @@ void QuicUdpEndpoint::schedule_after_receive(QuicConnection &connection,
     }
 
     if (loop_ != nullptr) {
-        connection.arm_loss_detection_timer(*loop_);
-        connection.paths().arm_validation_timer(*loop_);
+        if (connection.closing()) {
+            connection.arm_close_timer(*loop_);
+        } else {
+            connection.on_packet_processed(*loop_);
+            connection.arm_loss_detection_timer(*loop_);
+            connection.paths().arm_validation_timer(*loop_);
+        }
+    }
+
+    if (connection.closing()) {
+        return;
     }
 
     if (!should_send) {
@@ -1378,6 +1403,7 @@ void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const Qui
     has_send_work = has_send_work || connection_has_send_work(connection);
     quic_congestion_on_idle(connection.congestion(), !has_send_work, now);
     if (sent_ack_eliciting && loop_ != nullptr) {
+        connection.on_ack_eliciting_packet_sent(*loop_);
         connection.arm_loss_detection_timer(*loop_);
     }
 }
