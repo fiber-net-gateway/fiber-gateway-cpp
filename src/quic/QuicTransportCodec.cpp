@@ -12,7 +12,6 @@ namespace {
 constexpr std::uint8_t kStreamFrameFin = 0x01;
 constexpr std::uint8_t kStreamFrameLen = 0x02;
 constexpr std::uint8_t kStreamFrameOff = 0x04;
-constexpr std::uint64_t kMaxStreamLimit = 0x1000000000000000ULL;
 
 enum class FramePermission : std::uint8_t {
     Application = 0x1,
@@ -839,7 +838,7 @@ common::IoResult<QuicInputFrameParseResult> quic_parse_frame_for_receiver(QuicCo
         case QuicFrameType::MaxStreamsBidi:
         case QuicFrameType::MaxStreamsUni: {
             auto limit = quic_parse_varint(payload);
-            if (!limit || *limit > kMaxStreamLimit) {
+            if (!limit || *limit > kQuicMaxStreamLimit) {
                 return std::unexpected(common::IoErr::Invalid);
             }
             frame.u.max_streams.limit = *limit;
@@ -870,7 +869,7 @@ common::IoResult<QuicInputFrameParseResult> quic_parse_frame_for_receiver(QuicCo
         case QuicFrameType::StreamsBlockedBidi:
         case QuicFrameType::StreamsBlockedUni: {
             auto limit = quic_parse_varint(payload);
-            if (!limit || *limit > kMaxStreamLimit) {
+            if (!limit || *limit > kQuicMaxStreamLimit) {
                 return std::unexpected(common::IoErr::Invalid);
             }
             frame.u.streams_blocked.limit = *limit;

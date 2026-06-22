@@ -108,3 +108,27 @@ TEST(QuicTransportParamsCodecTest, SkipsUnknownTransportParam) {
 
     EXPECT_TRUE(read.has_value());
 }
+
+TEST(QuicTransportParamsCodecTest, RejectsInitialMaxStreamsAboveProtocolLimit) {
+    fiber::quic::QuicTransportParams params{};
+    params.initial_max_streams_bidi = fiber::quic::kQuicMaxStreamLimit + 1;
+
+    std::array<std::uint8_t, 64> buf{};
+    fiber::quic::QuicWriteCursor out(buf.data(), buf.size());
+    auto written =
+            fiber::quic::quic_create_transport_params(fiber::quic::QuicTransportParamOwner::Client, &out, params);
+
+    EXPECT_FALSE(written.has_value());
+
+    fiber::quic::QuicWriteCursor param_out(buf.data(), buf.size());
+    ASSERT_TRUE(fiber::quic::quic_write_varint(param_out, fiber::quic::kQuicTpInitialMaxStreamsBidi).has_value());
+    ASSERT_TRUE(fiber::quic::quic_write_varint(param_out, fiber::quic::quic_varint_len(params.initial_max_streams_bidi))
+                        .has_value());
+    ASSERT_TRUE(fiber::quic::quic_write_varint(param_out, params.initial_max_streams_bidi).has_value());
+
+    fiber::quic::QuicReadCursor in(buf.data(), param_out.offset());
+    fiber::quic::QuicTransportParams parsed{};
+    auto read = fiber::quic::quic_parse_transport_params(fiber::quic::QuicTransportParamOwner::Client, in, parsed);
+
+    EXPECT_FALSE(read.has_value());
+}

@@ -46,7 +46,7 @@ inline constexpr std::size_t kQuicDefaultStreamBufferSize = 65536;
 inline constexpr std::uint64_t kQuicDefaultConnRecvLimit = 2ULL * 1024ULL * 1024ULL * 1024ULL;
 inline constexpr std::uint64_t kQuicDefaultConnRecvLowWater = 10ULL * 1024ULL * 1024ULL;
 inline constexpr std::uint64_t kQuicDefaultMaxBidirectionalStreams = 128;
-inline constexpr std::uint64_t kQuicDefaultMaxUnidirectionalStreams = 32;
+inline constexpr std::uint64_t kQuicDefaultMaxUnidirectionalStreams = 128;
 inline constexpr std::uint64_t kQuicDefaultInitialMaxData = kQuicDefaultConnRecvLimit;
 
 enum class QuicConnectionRole : std::uint8_t {
@@ -281,7 +281,9 @@ public:
     [[nodiscard]] common::IoResult<void> recv_reset_stream_frame(const QuicResetStreamFrame &frame) noexcept;
     [[nodiscard]] common::IoResult<void> recv_stop_sending_frame(const QuicStopSendingFrame &frame) noexcept;
     [[nodiscard]] common::IoResult<void> recv_max_stream_data_frame(const QuicMaxStreamDataFrame &frame) noexcept;
+    [[nodiscard]] common::IoResult<void> recv_max_streams_frame(const QuicMaxStreamsFrame &frame) noexcept;
     [[nodiscard]] common::IoResult<void> recv_max_data_frame(const QuicMaxDataFrame &frame) noexcept;
+    [[nodiscard]] common::IoResult<void> recv_streams_blocked_frame(const QuicStreamsBlockedFrame &frame) noexcept;
     [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return recv_extent_pool_; }
     void release_stream_app(QuicStream &stream) noexcept;
     void drop_stream_send_ticket(std::uint64_t stream_id) noexcept;
@@ -293,6 +295,8 @@ public:
     [[nodiscard]] bool should_retransmit_data_blocked(std::uint64_t limit) const noexcept;
     [[nodiscard]] bool should_retransmit_stream_data_blocked(std::uint64_t stream_id,
                                                              std::uint64_t limit) const noexcept;
+    [[nodiscard]] bool should_retransmit_max_streams(QuicStreamType type, std::uint64_t limit) const noexcept;
+    [[nodiscard]] bool should_retransmit_streams_blocked(QuicStreamType type, std::uint64_t limit) const noexcept;
     [[nodiscard]] common::IoResult<void> on_stream_send_acked(std::uint64_t stream_id, std::size_t offset,
                                                               std::size_t length, bool fin) noexcept;
     [[nodiscard]] common::IoResult<void> on_stream_send_failed(std::uint64_t stream_id, std::size_t offset,
@@ -399,10 +403,29 @@ public:
     SendQueueEntry send_queue_entry{};
 
 private:
+    struct PeerStreamLimitWindow {
+        std::uint64_t concurrent_limit = 0;
+        std::uint64_t opened_count = 0;
+        std::uint64_t retired_count = 0;
+        std::uint64_t advertised_limit = 0;
+    };
+
+    struct LocalStreamBlockedState {
+        std::uint64_t last_limit = 0;
+        bool reported = false;
+    };
+
     [[nodiscard]] std::uint8_t local_initiator_bit() const noexcept;
+    [[nodiscard]] PeerStreamLimitWindow &peer_stream_window(QuicStreamType type) noexcept;
+    [[nodiscard]] const PeerStreamLimitWindow &peer_stream_window(QuicStreamType type) const noexcept;
+    [[nodiscard]] LocalStreamBlockedState &local_stream_blocked_state(QuicStreamType type) noexcept;
+    [[nodiscard]] const LocalStreamBlockedState &local_stream_blocked_state(QuicStreamType type) const noexcept;
     [[nodiscard]] std::uint64_t local_stream_limit(QuicStreamType type) const noexcept;
     [[nodiscard]] std::uint64_t peer_stream_limit(QuicStreamType type) const noexcept;
+    [[nodiscard]] bool local_stream_blocked(QuicStreamType type) const noexcept;
     [[nodiscard]] bool is_gone_peer_stream(std::uint64_t stream_id) const noexcept;
+    void on_peer_stream_retired(std::uint64_t stream_id) noexcept;
+    void maybe_extend_peer_stream_limit(QuicStreamType type) noexcept;
     void retire_stream(QuicStream &stream) noexcept;
     void try_release_stream(QuicStream &stream) noexcept;
     [[nodiscard]] common::IoResult<void> queue_stream_frame(QuicStream &stream) noexcept;
@@ -413,7 +436,9 @@ private:
                                                                   std::uint64_t error_code) noexcept;
     [[nodiscard]] common::IoResult<void> queue_max_stream_data_frame(std::uint64_t stream_id,
                                                                      std::uint64_t limit) noexcept;
+    [[nodiscard]] common::IoResult<void> queue_max_streams_frame(QuicStreamType type, std::uint64_t limit) noexcept;
     [[nodiscard]] common::IoResult<void> queue_max_data_frame(std::uint64_t limit) noexcept;
+    [[nodiscard]] common::IoResult<void> queue_streams_blocked_frame(QuicStreamType type, std::uint64_t limit) noexcept;
     [[nodiscard]] common::IoResult<void> queue_data_blocked_frame(std::uint64_t limit) noexcept;
     [[nodiscard]] common::IoResult<void> queue_stream_data_blocked_frame(QuicStream &stream,
                                                                          std::uint64_t limit) noexcept;
@@ -441,8 +466,10 @@ private:
     QuicErrorCode close_error_ = QuicErrorCode::NoError;
     std::uint64_t next_local_bidi_stream_id_ = 0;
     std::uint64_t next_local_uni_stream_id_ = 0;
-    std::uint64_t next_peer_bidi_sequence_ = 0;
-    std::uint64_t next_peer_uni_sequence_ = 0;
+    PeerStreamLimitWindow peer_bidi_streams_{};
+    PeerStreamLimitWindow peer_uni_streams_{};
+    LocalStreamBlockedState local_bidi_streams_blocked_{};
+    LocalStreamBlockedState local_uni_streams_blocked_{};
     QuicOutputFramePool output_frame_pool_{};
     std::array<QuicPacketNumberSpace, kQuicPacketNumberSpaceCount> packet_number_spaces_{};
     QuicCongestionState congestion_{};

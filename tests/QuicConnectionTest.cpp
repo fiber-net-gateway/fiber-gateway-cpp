@@ -269,6 +269,32 @@ std::size_t count_pending_stream_data_blocked(const fiber::quic::QuicConnection 
     return count;
 }
 
+std::size_t count_pending_max_streams(const fiber::quic::QuicConnection &conn, fiber::quic::QuicFrameType type,
+                                      std::uint64_t limit) {
+    const auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    std::size_t count = 0;
+    for (const fiber::quic::QuicOutputFrame *frame = space.pending_frames.front(); frame != nullptr;
+         frame = space.pending_frames.next_of(*frame)) {
+        if (frame->type == type && frame->u.max_streams.limit == limit) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::size_t count_pending_streams_blocked(const fiber::quic::QuicConnection &conn, fiber::quic::QuicFrameType type,
+                                          std::uint64_t limit) {
+    const auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    std::size_t count = 0;
+    for (const fiber::quic::QuicOutputFrame *frame = space.pending_frames.front(); frame != nullptr;
+         frame = space.pending_frames.next_of(*frame)) {
+        if (frame->type == type && frame->u.streams_blocked.limit == limit) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 } // namespace
 
 TEST(QuicConnectionTest, BuildsConnectionIdFromBytes) {
@@ -414,6 +440,8 @@ TEST(QuicConnectionTest, RecvFlowDefaultsInitializeLocalTransportAndLimit) {
     EXPECT_EQ(conn.local_transport().initial_max_stream_data_bidi_local, fiber::quic::kQuicDefaultStreamBufferSize);
     EXPECT_EQ(conn.local_transport().initial_max_stream_data_bidi_remote, fiber::quic::kQuicDefaultStreamBufferSize);
     EXPECT_EQ(conn.local_transport().initial_max_stream_data_uni, fiber::quic::kQuicDefaultStreamBufferSize);
+    EXPECT_EQ(conn.local_transport().initial_max_streams_bidi, fiber::quic::kQuicDefaultMaxBidirectionalStreams);
+    EXPECT_EQ(conn.local_transport().initial_max_streams_uni, fiber::quic::kQuicDefaultMaxUnidirectionalStreams);
 }
 
 TEST(QuicConnectionTest, CreatesInitialActivePathFromOptions) {
@@ -1492,6 +1520,120 @@ TEST(QuicConnectionTest, LowerPeerStreamBelowOpenedWatermarkIsGoneWhenMissing) {
     EXPECT_EQ(conn.find_stream(0), nullptr);
     EXPECT_EQ(conn.active_stream_count(), 1U);
     EXPECT_EQ(state.calls, 1U);
+}
+
+TEST(QuicConnectionTest, RetiringPeerStreamQueuesMaxStreamsWithinConcurrentLimit) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    options.max_peer_bidirectional_streams = 4;
+    options.schedule_send_owner = &state;
+    options.schedule_send = schedule_send_record;
+    fiber::quic::QuicConnection conn(options);
+
+    for (std::uint64_t id = 0; id < 16; id += 4) {
+        fiber::quic::QuicStreamFrame frame{};
+        frame.stream_id = id;
+        ASSERT_TRUE(conn.recv_stream_frame(frame, {}).has_value());
+    }
+
+    fiber::quic::QuicStreamFrame over_limit{};
+    over_limit.stream_id = 16;
+    EXPECT_FALSE(conn.recv_stream_frame(over_limit, {}).has_value());
+    EXPECT_EQ(conn.active_stream_count(), 4U);
+
+    fiber::quic::QuicStreamFrame fin{};
+    fin.stream_id = 0;
+    fin.fin = true;
+    ASSERT_TRUE(conn.recv_stream_frame(fin, {}).has_value());
+
+    EXPECT_EQ(conn.active_stream_count(), 3U);
+    EXPECT_EQ(count_pending_max_streams(conn, fiber::quic::QuicFrameType::MaxStreamsBidi, 5), 1U);
+    EXPECT_EQ(state.schedule_calls, 1U);
+
+    ASSERT_TRUE(conn.recv_stream_frame(over_limit, {}).has_value());
+    EXPECT_EQ(conn.active_stream_count(), 4U);
+}
+
+TEST(QuicConnectionTest, PeerBidirectionalAndUnidirectionalStreamLimitsAreIndependent) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    options.max_peer_bidirectional_streams = 1;
+    options.max_peer_unidirectional_streams = 1;
+    fiber::quic::QuicConnection conn(options);
+
+    fiber::quic::QuicStreamFrame bidi{};
+    bidi.stream_id = 0;
+    fiber::quic::QuicStreamFrame uni{};
+    uni.stream_id = 2;
+    fiber::quic::QuicStreamFrame second_bidi{};
+    second_bidi.stream_id = 4;
+    fiber::quic::QuicStreamFrame second_uni{};
+    second_uni.stream_id = 6;
+
+    EXPECT_TRUE(conn.recv_stream_frame(bidi, {}).has_value());
+    EXPECT_TRUE(conn.recv_stream_frame(uni, {}).has_value());
+    EXPECT_FALSE(conn.recv_stream_frame(second_bidi, {}).has_value());
+    EXPECT_FALSE(conn.recv_stream_frame(second_uni, {}).has_value());
+    EXPECT_EQ(conn.active_stream_count(), 2U);
+}
+
+TEST(QuicConnectionTest, RecvMaxStreamsUpdatesLocalStreamLimitAndIgnoresLowerValues) {
+    StreamCallbackState state{};
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Client;
+    options.max_local_bidirectional_streams = 1;
+    options.schedule_send_owner = &state;
+    options.schedule_send = schedule_send_record;
+    fiber::quic::QuicConnection conn(options);
+
+    auto first = conn.next_local_stream_id(fiber::quic::QuicStreamType::Bidirectional);
+    auto blocked = conn.next_local_stream_id(fiber::quic::QuicStreamType::Bidirectional);
+
+    ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(*first, 0U);
+    EXPECT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error(), fiber::common::IoErr::Busy);
+    EXPECT_EQ(count_pending_streams_blocked(conn, fiber::quic::QuicFrameType::StreamsBlockedBidi, 1), 1U);
+
+    fiber::quic::QuicMaxStreamsFrame max_streams{};
+    max_streams.bidirectional = true;
+    max_streams.limit = 3;
+    ASSERT_TRUE(conn.recv_max_streams_frame(max_streams).has_value());
+
+    auto second = conn.next_local_stream_id(fiber::quic::QuicStreamType::Bidirectional);
+    auto third = conn.next_local_stream_id(fiber::quic::QuicStreamType::Bidirectional);
+    ASSERT_TRUE(second.has_value());
+    ASSERT_TRUE(third.has_value());
+    EXPECT_EQ(*second, 4U);
+    EXPECT_EQ(*third, 8U);
+
+    max_streams.limit = 2;
+    ASSERT_TRUE(conn.recv_max_streams_frame(max_streams).has_value());
+    auto still_blocked = conn.next_local_stream_id(fiber::quic::QuicStreamType::Bidirectional);
+    EXPECT_FALSE(still_blocked.has_value());
+    EXPECT_EQ(still_blocked.error(), fiber::common::IoErr::Busy);
+    EXPECT_EQ(count_pending_streams_blocked(conn, fiber::quic::QuicFrameType::StreamsBlockedBidi, 3), 1U);
+}
+
+TEST(QuicConnectionTest, RecvStreamsBlockedDoesNotIncreasePeerStreamLimit) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    options.max_peer_bidirectional_streams = 1;
+    fiber::quic::QuicConnection conn(options);
+
+    fiber::quic::QuicStreamFrame first{};
+    first.stream_id = 0;
+    ASSERT_TRUE(conn.recv_stream_frame(first, {}).has_value());
+
+    fiber::quic::QuicStreamsBlockedFrame blocked{};
+    blocked.bidirectional = true;
+    blocked.limit = 1;
+    ASSERT_TRUE(conn.recv_streams_blocked_frame(blocked).has_value());
+
+    fiber::quic::QuicStreamFrame second{};
+    second.stream_id = 4;
+    EXPECT_FALSE(conn.recv_stream_frame(second, {}).has_value());
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::MaxStreamsBidi), 0U);
 }
 
 TEST(QuicConnectionTest, RejectsFinalSizeBelowReceivedStreamData) {

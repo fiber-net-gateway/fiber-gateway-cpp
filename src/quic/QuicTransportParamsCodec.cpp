@@ -190,6 +190,9 @@ common::IoResult<void> quic_parse_transport_params(QuicTransportParamOwner owner
                 if (!parsed) {
                     return std::unexpected(parsed.error());
                 }
+                if (*parsed > kQuicMaxStreamLimit) {
+                    return std::unexpected(common::IoErr::Invalid);
+                }
                 out.initial_max_streams_bidi = *parsed;
                 break;
             }
@@ -197,6 +200,9 @@ common::IoResult<void> quic_parse_transport_params(QuicTransportParamOwner owner
                 auto parsed = parse_exact_varint(param);
                 if (!parsed) {
                     return std::unexpected(parsed.error());
+                }
+                if (*parsed > kQuicMaxStreamLimit) {
+                    return std::unexpected(common::IoErr::Invalid);
                 }
                 out.initial_max_streams_uni = *parsed;
                 break;
@@ -279,6 +285,9 @@ common::IoResult<std::size_t> quic_create_transport_params(QuicTransportParamOwn
     if (owner == QuicTransportParamOwner::Client &&
         (params.has_original_destination_connection_id || params.has_retry_source_connection_id ||
          params.has_stateless_reset_token)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (params.initial_max_streams_bidi > kQuicMaxStreamLimit || params.initial_max_streams_uni > kQuicMaxStreamLimit) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
