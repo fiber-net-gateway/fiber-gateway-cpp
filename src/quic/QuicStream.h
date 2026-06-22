@@ -155,7 +155,6 @@ private:
                                                                   std::uint64_t final_size) noexcept;
     [[nodiscard]] common::IoResult<void> on_remote_stop_sending(std::uint64_t error_code) noexcept;
     void on_max_stream_data(std::uint64_t limit) noexcept;
-    void on_connection_max_data() noexcept;
     [[nodiscard]] bool has_send_work() const noexcept;
     [[nodiscard]] common::IoResult<QuicStreamFrameEncodeStatus>
     encode_stream_frame(QuicOutputFrame &frame, std::uint8_t *dst, std::size_t capacity) noexcept;
@@ -167,6 +166,7 @@ private:
     void sync_recv_state_from_queue() noexcept;
     [[nodiscard]] std::uint64_t stream_data_available() const noexcept;
     [[nodiscard]] std::size_t write_available() const noexcept;
+    [[nodiscard]] bool blocked_by_connection_window() const noexcept;
     [[nodiscard]] common::IoErr terminal_write_error() const noexcept;
     void notify_write_waiter(common::IoErr result = common::IoErr::None) noexcept;
     void cancel_write_waiter(WriteAwaiter *awaiter) noexcept;

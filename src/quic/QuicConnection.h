@@ -367,7 +367,9 @@ private:
     [[nodiscard]] common::IoResult<void> queue_max_data_frame(std::uint64_t limit) noexcept;
     [[nodiscard]] bool reserve_peer_data(std::uint64_t bytes) noexcept;
     [[nodiscard]] std::uint64_t initial_stream_send_limit(std::uint64_t stream_id) const noexcept;
-    void notify_stream_write_waiters() noexcept;
+    void wait_for_peer_data(QuicStream::WriteAwaiter &awaiter) noexcept;
+    void cancel_peer_data_wait(QuicStream::WriteAwaiter &awaiter) noexcept;
+    void notify_peer_data_waiters(common::IoErr result = common::IoErr::None) noexcept;
     [[nodiscard]] common::IoResult<void> check_recv_data_delta(std::uint64_t delta) const noexcept;
     void commit_recv_data_delta(std::uint64_t delta) noexcept;
     void maybe_extend_recv_data_flow_control() noexcept;
@@ -396,8 +398,11 @@ private:
     std::uint64_t recv_data_limit_ = 0;
     std::uint64_t peer_max_data_ = 0;
     std::uint64_t peer_data_reserved_ = 0;
+    common::IntrusiveListHook *peer_data_wait_head_ = nullptr;
+    common::IntrusiveListHook *peer_data_wait_tail_ = nullptr;
 
     friend class QuicStream;
+    friend class QuicStream::WriteAwaiter;
     friend class QuicUdpEndpoint;
 };
 

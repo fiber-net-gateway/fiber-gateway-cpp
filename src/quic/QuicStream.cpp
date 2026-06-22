@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <coroutine>
+#include <cstddef>
 #include <expected>
 #include <limits>
 #include <utility>
@@ -30,6 +31,7 @@ public:
 
     ~WriteAwaiter() {
         cancel_timer();
+        unlink_connection_window_wait();
         if (stream_ != nullptr) {
             stream_->cancel_write_waiter(this);
         }
@@ -68,6 +70,7 @@ public:
 
         handle_ = handle;
         stream_->write_waiter_ = this;
+        maybe_wait_for_connection_window();
         arm_timer();
         return true;
     }
@@ -75,6 +78,7 @@ public:
     common::IoErr await_resume() noexcept {
         common::IoErr result = result_;
         cancel_timer();
+        unlink_connection_window_wait();
         if (stream_ != nullptr && stream_->write_waiter_ == this) {
             stream_->write_waiter_ = nullptr;
         }
@@ -99,10 +103,37 @@ public:
         completed_ = true;
         result_ = result;
         cancel_timer();
+        unlink_connection_window_wait();
         post_resume();
     }
 
+    void maybe_wait_for_connection_window() noexcept {
+        if (stream_ == nullptr) {
+            return;
+        }
+        if (!stream_->blocked_by_connection_window()) {
+            unlink_connection_window_wait();
+            return;
+        }
+        stream_->conn_->wait_for_peer_data(*this);
+    }
+
+    void unlink_connection_window_wait() noexcept {
+        if (stream_ == nullptr || stream_->conn_ == nullptr || !peer_data_wait_link_.linked()) {
+            return;
+        }
+        stream_->conn_->cancel_peer_data_wait(*this);
+    }
+
 private:
+    [[nodiscard]] static WriteAwaiter *from_peer_data_wait_link(common::IntrusiveListHook *hook) noexcept {
+        if (hook == nullptr) {
+            return nullptr;
+        }
+        return reinterpret_cast<WriteAwaiter *>(reinterpret_cast<std::uint8_t *>(hook) -
+                                                offsetof(WriteAwaiter, peer_data_wait_link_));
+    }
+
     [[nodiscard]] bool has_timer() const noexcept { return deadline_ != std::chrono::steady_clock::time_point::max(); }
 
     [[nodiscard]] bool timed_out(std::chrono::steady_clock::time_point now) const noexcept {
@@ -155,10 +186,59 @@ private:
     std::coroutine_handle<> handle_{};
     event::EventLoop::NotifyEntry notify_entry_{};
     event::EventLoop::TimerEntry timer_entry_{};
+    common::IntrusiveListHook peer_data_wait_link_{};
     common::IoErr result_ = common::IoErr::None;
     bool resume_posted_ = false;
     bool completed_ = false;
+
+    friend class QuicConnection;
 };
+
+void QuicConnection::wait_for_peer_data(QuicStream::WriteAwaiter &awaiter) noexcept {
+    common::IntrusiveListHook &hook = awaiter.peer_data_wait_link_;
+    if (hook.linked()) {
+        return;
+    }
+
+    hook.prev = peer_data_wait_tail_;
+    hook.next = nullptr;
+    if (peer_data_wait_tail_ != nullptr) {
+        peer_data_wait_tail_->next = &hook;
+    } else {
+        peer_data_wait_head_ = &hook;
+    }
+    peer_data_wait_tail_ = &hook;
+    hook.in_list = true;
+}
+
+void QuicConnection::cancel_peer_data_wait(QuicStream::WriteAwaiter &awaiter) noexcept {
+    common::IntrusiveListHook &hook = awaiter.peer_data_wait_link_;
+    if (!hook.linked()) {
+        return;
+    }
+
+    if (hook.prev != nullptr) {
+        hook.prev->next = hook.next;
+    } else {
+        peer_data_wait_head_ = hook.next;
+    }
+    if (hook.next != nullptr) {
+        hook.next->prev = hook.prev;
+    } else {
+        peer_data_wait_tail_ = hook.prev;
+    }
+    hook.prev = nullptr;
+    hook.next = nullptr;
+    hook.in_list = false;
+}
+
+void QuicConnection::notify_peer_data_waiters(common::IoErr result) noexcept {
+    while (peer_data_wait_head_ != nullptr) {
+        QuicStream::WriteAwaiter *awaiter = QuicStream::WriteAwaiter::from_peer_data_wait_link(peer_data_wait_head_);
+        cancel_peer_data_wait(*awaiter);
+        awaiter->complete(result);
+    }
+}
 
 void QuicStream::Lease::reset() noexcept {
     if (!stream_) {
@@ -409,8 +489,6 @@ void QuicStream::on_max_stream_data(std::uint64_t limit) noexcept {
     }
 }
 
-void QuicStream::on_connection_max_data() noexcept { notify_write_waiter(); }
-
 bool QuicStream::has_send_work() const noexcept { return send_queue_.has_send_work(); }
 
 common::IoResult<QuicStreamFrameEncodeStatus> QuicStream::encode_stream_frame(QuicOutputFrame &frame, std::uint8_t *dst,
@@ -545,6 +623,13 @@ std::size_t QuicStream::write_available() const noexcept {
     return static_cast<std::size_t>(available);
 }
 
+bool QuicStream::blocked_by_connection_window() const noexcept {
+    if (conn_ == nullptr || terminal_write_error() != common::IoErr::None) {
+        return false;
+    }
+    return send_queue_.buffer_available() > 0 && stream_data_available() > 0 && conn_->peer_data_available() == 0;
+}
+
 common::IoErr QuicStream::terminal_write_error() const noexcept {
     if (send_queue_.reset_sent()) {
         return common::IoErr::BrokenPipe;
@@ -562,7 +647,9 @@ void QuicStream::notify_write_waiter(common::IoErr result) noexcept {
     }
     if (result != common::IoErr::None || waiter->should_resume()) {
         waiter->complete(result);
+        return;
     }
+    waiter->maybe_wait_for_connection_window();
 }
 
 void QuicStream::cancel_write_waiter(WriteAwaiter *awaiter) noexcept {

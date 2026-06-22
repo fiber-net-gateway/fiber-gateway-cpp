@@ -9,6 +9,7 @@
 #include <new>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include "async/Sleep.h"
 #include "async/Spawn.h"
@@ -107,6 +108,13 @@ WriteResult to_write_result(fiber::common::IoResult<std::size_t> result) {
 
 fiber::async::DetachedTask write_one(fiber::quic::QuicStream *stream, std::promise<WriteResult> *done) {
     auto result = co_await stream->write(iobuf_of("!"));
+    done->set_value(to_write_result(result));
+    fiber::event::EventLoop::current().stop();
+}
+
+fiber::async::DetachedTask write_one_with_timeout(fiber::quic::QuicStream *stream, std::chrono::milliseconds timeout,
+                                                  std::promise<WriteResult> *done) {
+    auto result = co_await stream->write(iobuf_of("!"), false, timeout);
     done->set_value(to_write_result(result));
     fiber::event::EventLoop::current().stop();
 }
@@ -831,6 +839,83 @@ TEST(QuicConnectionTest, AsyncWriteResumesAfterMaxData) {
     EXPECT_EQ(result.value, 1U);
     EXPECT_EQ(conn.peer_data_reserved(), 1U);
     group.join();
+}
+
+TEST(QuicConnectionTest, AsyncWriteRequeuesForConnectionWindowAfterMaxStreamData) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    auto stream = conn.get_or_create_peer_stream(0);
+    ASSERT_TRUE(stream.has_value());
+
+    fiber::event::EventLoopGroup group(1);
+    std::promise<WriteResult> done;
+    auto future = done.get_future();
+    std::atomic<bool> stream_grant_seen{false};
+    std::atomic<bool> data_grant_seen{false};
+
+    group.start();
+    fiber::async::spawn(group.at(0), [stream = *stream, &done]() { return write_one(stream, &done); });
+    fiber::async::spawn(group.at(0), [&conn, &stream_grant_seen]() {
+        return grant_max_stream_data_after_delay(&conn, 0, 1, &stream_grant_seen);
+    });
+
+    const auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!stream_grant_seen.load(std::memory_order_relaxed) && std::chrono::steady_clock::now() < wait_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(stream_grant_seen.load(std::memory_order_relaxed));
+    EXPECT_NE(future.wait_for(std::chrono::milliseconds(20)), std::future_status::ready);
+
+    fiber::async::spawn(group.at(0),
+                        [&conn, &data_grant_seen]() { return grant_max_data_after_delay(&conn, 1, &data_grant_seen); });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "write did not resume after later MAX_DATA";
+        return;
+    }
+
+    WriteResult result = future.get();
+    EXPECT_TRUE(data_grant_seen.load(std::memory_order_relaxed));
+    EXPECT_TRUE(result.ok);
+    EXPECT_EQ(result.value, 1U);
+    EXPECT_EQ(conn.peer_data_reserved(), 1U);
+    group.join();
+}
+
+TEST(QuicConnectionTest, AsyncWriteTimeoutUnlinksConnectionWindowWaiter) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    auto stream = conn.get_or_create_peer_stream(0);
+    ASSERT_TRUE(stream.has_value());
+    grant_max_stream_data(conn, 0, 1);
+
+    fiber::event::EventLoopGroup group(1);
+    std::promise<WriteResult> done;
+    auto future = done.get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [stream = *stream, &done]() {
+        return write_one_with_timeout(stream, std::chrono::milliseconds(20), &done);
+    });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "write did not time out";
+        return;
+    }
+
+    WriteResult result = future.get();
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.error, fiber::common::IoErr::TimedOut);
+    group.join();
+
+    grant_max_data(conn, 1);
+    EXPECT_EQ(conn.peer_data_reserved(), 0U);
 }
 
 TEST(QuicConnectionTest, ResetStreamCreatesAndRetiresPeerStream) {
