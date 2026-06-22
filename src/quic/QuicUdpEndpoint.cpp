@@ -921,34 +921,31 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
     out.connection = connection;
     out.packet = *result;
     out.created = created;
-    schedule_after_receive(*connection, *result);
+    handle_receive_result(*connection, *result);
     return out;
 }
 
-void QuicUdpEndpoint::schedule_after_receive(QuicConnection &connection,
-                                             const QuicPacketProcessResult &result) noexcept {
+void QuicUdpEndpoint::handle_receive_result(QuicConnection &connection,
+                                            const QuicPacketProcessResult &result) noexcept {
+    const QuicReceiveApplyResult applied = quic_apply_receive_result(connection, result);
     bool should_send = result.send_output;
 
-    if (result.handshake_confirmed && result.path != nullptr && !result.path->validated) {
-        result.path->validated = true;
-    }
-    if (result.handshake_confirmed && result.path != nullptr) {
-        auto queued = queue_new_token(connection, *result.path);
+    auto queue_token = [&](QuicPath *path) noexcept {
+        if (path == nullptr) {
+            return;
+        }
+        auto queued = queue_new_token(connection, *path);
         if (queued) {
             should_send = true;
         } else {
             connection.close(QuicErrorCode::InternalError);
             should_send = true;
         }
-    }
-    if (result.path_validated && result.validated_path != nullptr) {
-        auto queued = queue_new_token(connection, *result.validated_path);
-        if (queued) {
-            should_send = true;
-        } else {
-            connection.close(QuicErrorCode::InternalError);
-            should_send = true;
-        }
+    };
+
+    queue_token(applied.handshake_validated_path);
+    if (result.path_validated && result.validated_path != applied.handshake_validated_path) {
+        queue_token(result.validated_path);
     }
 
     if (result.send_ack && !should_send) {

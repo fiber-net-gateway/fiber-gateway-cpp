@@ -40,6 +40,13 @@ struct QuicPacketProcessResult {
     bool path_validated = false;
 };
 
+struct QuicReceiveApplyResult {
+    QuicPath *handshake_validated_path = nullptr;
+};
+
+[[nodiscard]] QuicReceiveApplyResult quic_apply_receive_result(QuicConnection &conn,
+                                                               const QuicPacketProcessResult &result) noexcept;
+
 [[nodiscard]] common::IoResult<QuicPacketProcessResult>
 quic_process_initial_datagram(QuicConnection &conn, const QuicReceivedDatagram &datagram, std::uint8_t *plaintext,
                               std::size_t plaintext_cap) noexcept;

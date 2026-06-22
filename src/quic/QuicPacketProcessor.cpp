@@ -475,6 +475,17 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
 
 } // namespace
 
+QuicReceiveApplyResult quic_apply_receive_result(QuicConnection &conn, const QuicPacketProcessResult &result) noexcept {
+    (void) conn;
+
+    QuicReceiveApplyResult applied{};
+    if (result.handshake_confirmed && result.path != nullptr) {
+        result.path->validated = true;
+        applied.handshake_validated_path = result.path;
+    }
+    return applied;
+}
+
 common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConnection &conn,
                                                                         const QuicReceivedDatagram &datagram,
                                                                         std::uint8_t *plaintext,
