@@ -232,6 +232,10 @@ public:
         void (*on_close_timeout)(void *owner, QuicConnection &connection) noexcept = nullptr;
         void *owner = nullptr;
         Ops ops{};
+        // Default grace period for graceful shutdown. Applies when shutdown()/
+        // shutdown_application() is called with grace == 0. After the period the
+        // connection is forced into Closing regardless of in-flight streams.
+        std::chrono::milliseconds graceful_shutdown_grace{30000};
         bool has_retry_source_connection_id = false;
         bool initial_path_validated = false;
     };
@@ -280,6 +284,21 @@ public:
     // accepts the full uint64 application error space. Initial/Handshake levels still
     // carry CONNECTION_CLOSE with error_code = APPLICATION_ERROR (0x0C) per RFC 9000 §10.2.3.
     void close_application(std::uint64_t error_code) noexcept;
+    // Graceful shutdown: stop accepting new streams, let in-flight streams finish,
+    // then transition to Closing once active_stream_count() reaches zero. If the
+    // grace period (`grace`, or `options_.graceful_shutdown_grace` when 0) elapses
+    // first, the connection is forced into Closing immediately. While shutting down,
+    // the connection still processes packets, runs ACK / loss recovery / key update
+    // normally. shutdown() prepares a transport-level CONNECTION_CLOSE; calling it
+    // a second time is a no-op (state is not refreshed, grace is not extended).
+    void shutdown(QuicErrorCode error = QuicErrorCode::NoError, std::uint64_t frame_type = 0,
+                  std::chrono::milliseconds grace = std::chrono::milliseconds{0}) noexcept;
+    // Like shutdown() but prepares a CONNECTION_CLOSE_APP, carrying `error_code`
+    // in the application error space (RFC 9000 §10.2.3).
+    void shutdown_application(std::uint64_t error_code,
+                              std::chrono::milliseconds grace = std::chrono::milliseconds{0}) noexcept;
+    [[nodiscard]] bool shutting_down() const noexcept { return shutdown_pending_; }
+    [[nodiscard]] bool accepting_new_streams() const noexcept { return !shutdown_pending_ && !closing(); }
     void mark_closed() noexcept;
     // RFC 9000 §10.2.1 — when a packet arrives in Closing state, requeue a CC frame
     // on the level the packet was received (rate-limited to 1s). Called from the
@@ -469,6 +488,13 @@ private:
     void enqueue_close_frames_all_levels() noexcept;
     void notify_streams_closing() noexcept;
     void arm_close_state(event::EventLoop &loop) noexcept;
+    // graceful-shutdown helpers. finalize_shutdown_close() routes the pre-stored
+    // close_error_ / close_frame_type_ / error_app_ into close() or close_application(),
+    // which then handles CC enqueue, stream notify, and the 3*PTO timer.
+    // maybe_finalize_shutdown() is invoked from retire_stream() when the last
+    // stream is removed.
+    void finalize_shutdown_close() noexcept;
+    void maybe_finalize_shutdown() noexcept;
     [[nodiscard]] bool has_pending_send_work() const noexcept;
     [[nodiscard]] std::chrono::milliseconds keepalive_delay() const noexcept;
     [[nodiscard]] bool reserve_peer_data(std::uint64_t bytes) noexcept;
@@ -524,6 +550,12 @@ private:
     bool data_blocked_reported_ = false;
     bool key_phase_ = false;
     bool idle_send_timer_set_ = false;
+    // Graceful shutdown flag. Set by shutdown() / shutdown_application() while
+    // state_ == Established (or Init/Handshaking) — the connection then continues
+    // to serve existing streams but rejects new ones, and waits for the stream
+    // count to drop to zero or for the grace timer to expire. Cleared on every
+    // entry into Closing/Draining/Closed via clear_shutdown_state().
+    bool shutdown_pending_ = false;
 
     // RFC 9000 §10.2 Immediate Close bookkeeping.
     // close_frame_type_ carries the QUIC frame type that triggered the close (set to the
@@ -531,6 +563,9 @@ private:
     // serialised into the Frame Type field of the CONNECTION_CLOSE frame.
     // error_app_ selects CONNECTION_CLOSE_APP at the Application level (RFC 9000 §10.2.3).
     // last_cc_msec_ rate-limits requeueing per nginx's NGX_QUIC_CC_MIN_INTERVAL (1s).
+    // While shutdown_pending_ is set, close_error_ / close_frame_type_ / error_app_
+    // are also used as the staging area for the eventual close — finalize_shutdown_close()
+    // reads them when transitioning out of graceful shutdown.
     std::chrono::milliseconds last_cc_msec_{0};
     std::uint64_t close_frame_type_ = 0;
     bool error_app_ = false;
