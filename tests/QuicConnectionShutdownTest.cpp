@@ -149,7 +149,7 @@ TEST(QuicConnectionShutdownTest, LastStreamRetirementFinalizesShutdown) {
 
     conn.shutdown(fiber::quic::QuicErrorCode::NoError);
     EXPECT_TRUE(conn.shutting_down());
-    EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Established);
+    EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::GracefulClosing);
 
     conn.release_stream_app(*stream);
 
@@ -201,7 +201,7 @@ TEST(QuicConnectionShutdownTest, GraceTimerForcesCloseWhenStreamsRemain) {
 }
 
 // Test 4 — Receiving a CONNECTION_CLOSE while in graceful shutdown switches
-// the connection to Draining and clears shutdown_pending_.
+// the connection to Draining and leaves graceful shutdown state.
 TEST(QuicConnectionShutdownTest, ReceivingCloseDuringShutdownEntersDraining) {
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
@@ -219,6 +219,15 @@ TEST(QuicConnectionShutdownTest, ReceivingCloseDuringShutdownEntersDraining) {
     EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Draining);
     EXPECT_FALSE(conn.shutting_down());
     EXPECT_FALSE(conn.close_timer_armed());
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicEncryptionLevel::Application,
+                                       fiber::quic::QuicFrameType::ConnectionClose),
+              0U);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicEncryptionLevel::Application,
+                                       fiber::quic::QuicFrameType::StopSending),
+              0U);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicEncryptionLevel::Application,
+                                       fiber::quic::QuicFrameType::ResetStream),
+              0U);
 }
 
 // Test 5 — close_immediately() taking over a graceful shutdown clears the
@@ -242,6 +251,34 @@ TEST(QuicConnectionShutdownTest, CloseImmediatelyTakesOverGracefulShutdown) {
     EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicEncryptionLevel::Application,
                                        fiber::quic::QuicFrameType::ConnectionClose),
               1U);
+}
+
+TEST(QuicConnectionShutdownTest, CloseTakesOverGracefulShutdownWithoutStreamControlFrames) {
+    ShutdownCallbackState state{};
+    auto options = established_server_options(state);
+    fiber::quic::QuicConnection conn(options);
+    mark_established_with_app_keys(conn);
+
+    auto *stream = open_peer_stream(conn, 0);
+    ASSERT_NE(stream, nullptr);
+
+    conn.shutdown(fiber::quic::QuicErrorCode::NoError);
+    ASSERT_EQ(conn.state(), fiber::quic::QuicConnectionState::GracefulClosing);
+
+    conn.close(fiber::quic::QuicErrorCode::InternalError);
+
+    EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Closing);
+    EXPECT_FALSE(conn.shutting_down());
+    EXPECT_EQ(conn.close_error(), fiber::quic::QuicErrorCode::InternalError);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicEncryptionLevel::Application,
+                                       fiber::quic::QuicFrameType::ConnectionClose),
+              1U);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicEncryptionLevel::Application,
+                                       fiber::quic::QuicFrameType::StopSending),
+              0U);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicEncryptionLevel::Application,
+                                       fiber::quic::QuicFrameType::ResetStream),
+              0U);
 }
 
 namespace {
@@ -348,7 +385,7 @@ fiber::async::DetachedTask run_keepalive_during_shutdown(fiber::quic::QuicConnec
 
 } // namespace
 
-// Test 9 — arm_keepalive_timer() while shutdown_pending_ is no-op; even if the
+// Test 9 — arm_keepalive_timer() while GracefulClosing is a no-op; even if the
 // timer were already in flight, on_keepalive_timer suppresses the PING.
 TEST(QuicConnectionShutdownTest, KeepaliveSuppressedDuringShutdown) {
     fiber::event::EventLoopGroup group(1);
@@ -425,9 +462,9 @@ TEST(QuicConnectionShutdownTest, RepeatedShutdownIsNoOp) {
     EXPECT_EQ(frame->u.close.error_code, static_cast<std::uint64_t>(fiber::quic::QuicErrorCode::InternalError));
 }
 
-// Test 13 — shutdown() during Handshaking parks the flag; mark_established()
-// then immediately finalises into Closing.
-TEST(QuicConnectionShutdownTest, ShutdownDuringHandshakingFinalisesOnEstablish) {
+// Test 13 — shutdown() with no active streams closes immediately even while
+// handshaking; there is no stream work to wait for.
+TEST(QuicConnectionShutdownTest, ShutdownDuringHandshakingWithNoStreamsClosesImmediately) {
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
     fiber::quic::QuicConnection conn(options);
@@ -435,17 +472,57 @@ TEST(QuicConnectionShutdownTest, ShutdownDuringHandshakingFinalisesOnEstablish) 
     EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Handshaking);
 
     conn.shutdown(fiber::quic::QuicErrorCode::NoError);
-    EXPECT_TRUE(conn.shutting_down());
-    EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Handshaking);
-
-    // Application keys come online with the handshake; arm them before
-    // mark_established so the CC frame can be queued at the Application level.
-    conn.crypto().application_write.ready = true;
-    ASSERT_TRUE(conn.mark_established().has_value());
-
     EXPECT_FALSE(conn.shutting_down());
     EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Closing);
     EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicEncryptionLevel::Application,
                                        fiber::quic::QuicFrameType::ConnectionClose),
+              0U);
+}
+
+TEST(QuicConnectionShutdownTest, StreamCloseQueuesControlFramesBeforeConnectionClosing) {
+    ShutdownCallbackState state{};
+    auto options = established_server_options(state);
+    fiber::quic::QuicConnection conn(options);
+    mark_established_with_app_keys(conn);
+
+    fiber::quic::QuicStreamFrame frame{};
+    frame.stream_id = 0;
+    frame.length = 3;
+    ASSERT_TRUE(conn.recv_stream_frame(frame, slice_of("abc")).has_value());
+    auto *stream = conn.find_stream(0);
+    ASSERT_NE(stream, nullptr);
+    fiber::mem::IoBufChain out(conn.recv_extent_pool());
+    ASSERT_TRUE(stream->try_read(3, out).has_value());
+
+    stream->close(7);
+
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicEncryptionLevel::Application,
+                                       fiber::quic::QuicFrameType::StopSending),
               1U);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicEncryptionLevel::Application,
+                                       fiber::quic::QuicFrameType::ResetStream),
+              1U);
+}
+
+TEST(QuicConnectionShutdownTest, ConnectionCloseDoesNotQueueStreamControlFrames) {
+    ShutdownCallbackState state{};
+    auto options = established_server_options(state);
+    fiber::quic::QuicConnection conn(options);
+    mark_established_with_app_keys(conn);
+
+    auto *stream = open_peer_stream(conn, 0);
+    ASSERT_NE(stream, nullptr);
+
+    conn.close(fiber::quic::QuicErrorCode::InternalError);
+
+    EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Closing);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicEncryptionLevel::Application,
+                                       fiber::quic::QuicFrameType::ConnectionClose),
+              1U);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicEncryptionLevel::Application,
+                                       fiber::quic::QuicFrameType::StopSending),
+              0U);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicEncryptionLevel::Application,
+                                       fiber::quic::QuicFrameType::ResetStream),
+              0U);
 }
