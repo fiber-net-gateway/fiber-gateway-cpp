@@ -135,6 +135,12 @@ public:
     [[nodiscard]] common::IoResult<void> stop_read(std::uint64_t error_code = 0) noexcept;
     [[nodiscard]] common::IoResult<void> reset(std::uint64_t error_code = 0) noexcept;
 
+    // Called by QuicConnection when the connection enters the Closing state.
+    // Wakes any suspended reader/writer with IoErr::Canceled so application
+    // coroutines unwind instead of hanging on now-doomed I/O.
+    // Mirrors nginx ngx_event_quic.c:217-228 (sc->read->error = sc->write->error = 1).
+    void notify_connection_closing() noexcept;
+
     void mark_app_released() noexcept;
 
     [[nodiscard]] bool ready_for_connection_release() const noexcept;

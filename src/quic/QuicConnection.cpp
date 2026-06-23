@@ -19,6 +19,11 @@ constexpr std::uint64_t kStreamTypeMask = 0x02;
 constexpr std::uint64_t kStreamInitiatorMask = 0x01;
 constexpr std::uint64_t kStreamIncrement = 4;
 
+// RFC 9000 doesn't mandate a specific retransmission interval for CONNECTION_CLOSE
+// in the Closing state. nginx uses 1s (NGX_QUIC_CC_MIN_INTERVAL); we match that to
+// avoid sending more than one CC per second when receiving a burst of peer packets.
+constexpr std::chrono::milliseconds kQuicCloseFrameMinInterval{1000};
+
 [[nodiscard]] std::uint64_t stream_sequence(std::uint64_t stream_id) noexcept { return stream_id >> 2; }
 
 [[nodiscard]] std::uint64_t initial_stream_id(QuicConnectionRole role, QuicStreamType type) noexcept {
@@ -197,12 +202,195 @@ void QuicConnection::begin_draining(QuicErrorCode error) noexcept {
     state_ = QuicConnectionState::Draining;
 }
 
-void QuicConnection::close(QuicErrorCode error) noexcept {
-    if (state_ == QuicConnectionState::Closed) {
+bool QuicConnection::queue_close_frame_for_level(QuicEncryptionLevel level) noexcept {
+    QuicPacketNumberSpace &space = packet_number_space(level);
+    QuicPacketProtectionKeys *keys = quic_packet_keys(crypto_, level, /*write_keys=*/true);
+    if (keys == nullptr || !keys->ready) {
+        return false;
+    }
+
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        return false;
+    }
+
+    // RFC 9000 §10.2.3: Application-level close with error_app_ uses
+    // CONNECTION_CLOSE_APP on the Application level. Initial/Handshake levels
+    // always use plain CONNECTION_CLOSE, with error code APPLICATION_ERROR.
+    if (error_app_ && level == QuicEncryptionLevel::Application) {
+        frame->type = QuicFrameType::ConnectionCloseApp;
+        frame->u.close.error_code = static_cast<std::uint64_t>(close_error_);
+    } else if (error_app_) {
+        // Non-application level: downgrade to transport CC with APPLICATION_ERROR
+        frame->type = QuicFrameType::ConnectionClose;
+        frame->u.close.error_code = static_cast<std::uint64_t>(QuicErrorCode::ApplicationError);
+    } else {
+        frame->type = QuicFrameType::ConnectionClose;
+        frame->u.close.error_code = static_cast<std::uint64_t>(close_error_);
+    }
+    frame->u.close.frame_type = close_frame_type_;
+    frame->u.close.reason = nullptr;
+    frame->u.close.reason_length = 0;
+    frame->u.close.owned_reason = nullptr;
+    frame->ignore_congestion = true;
+    frame->ignore_loss = true;
+
+    space.pending_frames.push_back(*frame);
+    return true;
+}
+
+void QuicConnection::enqueue_close_frames_all_levels() noexcept {
+    constexpr QuicEncryptionLevel kAllLevels[] = {
+            QuicEncryptionLevel::Initial,
+            QuicEncryptionLevel::Handshake,
+            QuicEncryptionLevel::Application,
+    };
+
+    // RFC 9000 §10.2: in the Closing state we only retain enough state to send CC.
+    // Mirror nginx's "drop packets from retransmit queues, no ack is expected" — discard
+    // pending frames so the next datagram carries only the CC. Pending ACKs are also
+    // suppressed; the peer doesn't need a final ACK from us. sent_frames is left alone
+    // (ACK handling still references those entries).
+    for (QuicEncryptionLevel level: kAllLevels) {
+        QuicPacketNumberSpace &space = packet_number_space(level);
+        while (QuicOutputFrame *frame = space.pending_frames.pop_front()) {
+            space.release_frame(*frame);
+        }
+        space.send_ack = false;
+    }
+
+    bool any_queued = false;
+    for (QuicEncryptionLevel level: kAllLevels) {
+        if (queue_close_frame_for_level(level)) {
+            any_queued = true;
+        }
+    }
+
+    // Stamp last_cc_msec_ so requeue_close_frame() rate-limits subsequent
+    // retransmissions against this initial send. Matches nginx's qc->last_cc.
+    if (any_queued) {
+        if (event::EventLoop *loop = event::EventLoop::current_or_null()) {
+            last_cc_msec_ = quic_time_ms(loop->now());
+        }
+    }
+}
+
+void QuicConnection::arm_close_state(event::EventLoop &loop) noexcept {
+    // arm_close_timer cancels all other timers and schedules 3*PTO.
+    arm_close_timer(loop);
+    // Schedule a send so the CC frames are flushed to the wire.
+    schedule_send();
+}
+
+void QuicConnection::notify_streams_closing() noexcept {
+    // Wake any suspended reader/writer so application coroutines can unwind.
+    // notify_connection_closing() observes the now-Closing state via
+    // QuicStream::terminal_write_error() (write side) and a stop_receiving()
+    // flag (read side).
+    streams_.for_each([](QuicStream &stream) noexcept { stream.notify_connection_closing(); });
+}
+
+void QuicConnection::close(QuicErrorCode error, std::uint64_t frame_type) noexcept {
+    if (state_ == QuicConnectionState::Closing || state_ == QuicConnectionState::Closed ||
+        state_ == QuicConnectionState::Draining) {
         return;
     }
     close_error_ = error;
+    close_frame_type_ = frame_type;
+    error_app_ = false;
     state_ = QuicConnectionState::Closing;
+
+    enqueue_close_frames_all_levels();
+    notify_streams_closing();
+
+    event::EventLoop *loop = event::EventLoop::current_or_null();
+    if (loop != nullptr) {
+        arm_close_state(*loop);
+    }
+}
+
+void QuicConnection::close_immediately(QuicErrorCode error, std::uint64_t frame_type) noexcept {
+    if (state_ == QuicConnectionState::Closed) {
+        return;
+    }
+    // If we're already in Closing/Draining via the slow path, accelerate cleanup
+    // by re-arming the close timer for immediate fire. Don't re-queue CC frames —
+    // those have already been sent (or are queued for send).
+    if (state_ == QuicConnectionState::Closing || state_ == QuicConnectionState::Draining) {
+        event::EventLoop *loop = event::EventLoop::current_or_null();
+        if (loop != nullptr) {
+            arm_close_timer_immediate(*loop);
+        }
+        return;
+    }
+
+    close_error_ = error;
+    close_frame_type_ = frame_type;
+    error_app_ = false;
+    state_ = QuicConnectionState::Closing;
+
+    enqueue_close_frames_all_levels();
+    notify_streams_closing();
+
+    event::EventLoop *loop = event::EventLoop::current_or_null();
+    if (loop != nullptr) {
+        schedule_send();
+        arm_close_timer_immediate(*loop);
+    }
+}
+
+void QuicConnection::close_application(std::uint64_t error_code) noexcept {
+    if (state_ == QuicConnectionState::Closing || state_ == QuicConnectionState::Closed ||
+        state_ == QuicConnectionState::Draining) {
+        return;
+    }
+    // Store the raw application error code in close_error_. QuicErrorCode is
+    // a uint64-backed enum so the cast is well-defined and preserves the value.
+    close_error_ = static_cast<QuicErrorCode>(error_code);
+    close_frame_type_ = 0;
+    error_app_ = true;
+    state_ = QuicConnectionState::Closing;
+
+    enqueue_close_frames_all_levels();
+    notify_streams_closing();
+
+    event::EventLoop *loop = event::EventLoop::current_or_null();
+    if (loop != nullptr) {
+        arm_close_state(*loop);
+    }
+}
+
+void QuicConnection::requeue_close_frame(QuicEncryptionLevel level) noexcept {
+    if (state_ != QuicConnectionState::Closing) {
+        return;
+    }
+
+    event::EventLoop *loop = event::EventLoop::current_or_null();
+    if (loop == nullptr) {
+        return;
+    }
+
+    const std::chrono::milliseconds now = quic_time_ms(loop->now());
+    if (last_cc_msec_.count() > 0 && now - last_cc_msec_ < kQuicCloseFrameMinInterval) {
+        return; // rate-limited
+    }
+
+    // Clear any existing CC frame on this level first (N + 1 duplicates)
+    QuicPacketNumberSpace &space = packet_number_space(level);
+    QuicOutputFrame *existing = space.pending_frames.front();
+    while (existing != nullptr) {
+        QuicOutputFrame *next = space.pending_frames.next_of(*existing);
+        if (existing->type == QuicFrameType::ConnectionClose || existing->type == QuicFrameType::ConnectionCloseApp) {
+            space.pending_frames.erase(*existing);
+            space.release_frame(*existing);
+        }
+        existing = next;
+    }
+
+    if (queue_close_frame_for_level(level)) {
+        last_cc_msec_ = now;
+        schedule_send();
+    }
 }
 
 void QuicConnection::mark_closed() noexcept { state_ = QuicConnectionState::Closed; }
@@ -254,6 +442,27 @@ void QuicConnection::arm_close_timer(event::EventLoop &loop) noexcept {
 
     loop.post_at<QuicConnection, &QuicConnection::close_timer_entry_, &QuicConnection::on_close_timer>(
             loop.now() + pto * 3, *this);
+}
+
+void QuicConnection::arm_close_timer_immediate(event::EventLoop &loop) noexcept {
+    // Fast-close path: cancel any existing close timer and schedule one for "now"
+    // so on_close_timer fires on the next event-loop iteration, after this turn's
+    // pending sends have flushed. Mirrors nginx's rc == NGX_ERROR path.
+    if (close_timer_entry_.is_in_heap()) {
+        loop.cancel<QuicConnection, &QuicConnection::close_timer_entry_>(*this);
+    }
+    if (state_ == QuicConnectionState::Closed) {
+        return;
+    }
+
+    cancel_idle_timer(loop);
+    cancel_loss_detection_timer(loop);
+    cancel_key_update_discard_timer(loop);
+    cancel_keepalive_timer(loop);
+    path_manager_.cancel_validation_timer(loop);
+
+    loop.post_at<QuicConnection, &QuicConnection::close_timer_entry_, &QuicConnection::on_close_timer>(loop.now(),
+                                                                                                       *this);
 }
 
 void QuicConnection::cancel_close_timer(event::EventLoop &loop) noexcept {
