@@ -58,9 +58,30 @@ enum class QuicConnectionState : std::uint8_t {
     Init,
     Handshaking,
     Established,
-    Draining,
+    GracefulClosing,
     Closing,
+    Draining,
     Closed,
+};
+
+enum class QuicCloseSource : std::uint8_t {
+    None,
+    Local,
+    PeerConnectionClose,
+    StatelessReset,
+    IdleTimeout,
+};
+
+enum class QuicCloseFrameKind : std::uint8_t {
+    Transport,
+    Application,
+};
+
+struct QuicCloseInfo {
+    QuicCloseSource source = QuicCloseSource::None;
+    QuicCloseFrameKind frame_kind = QuicCloseFrameKind::Transport;
+    std::uint64_t error_code = 0;
+    std::uint64_t frame_type = 0;
 };
 
 enum class QuicErrorCode : std::uint64_t {
@@ -261,16 +282,21 @@ public:
     [[nodiscard]] const QuicConnectionId &retry_source_connection_id() const noexcept {
         return options_.retry_source_connection_id;
     }
-    [[nodiscard]] QuicErrorCode close_error() const noexcept { return close_error_; }
+    [[nodiscard]] QuicErrorCode close_error() const noexcept {
+        return static_cast<QuicErrorCode>(close_info_.error_code);
+    }
     [[nodiscard]] bool closed() const noexcept { return state_ == QuicConnectionState::Closed; }
-    [[nodiscard]] bool closing() const noexcept {
+    [[nodiscard]] bool terminal_closing() const noexcept {
         return state_ == QuicConnectionState::Draining || state_ == QuicConnectionState::Closing ||
                state_ == QuicConnectionState::Closed;
     }
+    [[nodiscard]] bool closing() const noexcept { return terminal_closing(); }
+    [[nodiscard]] bool graceful_closing() const noexcept { return state_ == QuicConnectionState::GracefulClosing; }
 
     common::IoResult<void> start_handshake() noexcept;
     common::IoResult<void> mark_established() noexcept;
     void begin_draining(QuicErrorCode error = QuicErrorCode::NoError) noexcept;
+    void begin_draining(QuicCloseInfo info) noexcept;
     // RFC 9000 §10.2 Immediate Close — transport error path.
     // Sets state to Closing, queues a CONNECTION_CLOSE frame on every encryption level
     // for which write keys are available, then arms the 3*PTO close timer.
@@ -297,8 +323,10 @@ public:
     // in the application error space (RFC 9000 §10.2.3).
     void shutdown_application(std::uint64_t error_code,
                               std::chrono::milliseconds grace = std::chrono::milliseconds{0}) noexcept;
-    [[nodiscard]] bool shutting_down() const noexcept { return shutdown_pending_; }
-    [[nodiscard]] bool accepting_new_streams() const noexcept { return !shutdown_pending_ && !closing(); }
+    [[nodiscard]] bool shutting_down() const noexcept { return graceful_closing(); }
+    [[nodiscard]] bool accepting_new_streams() const noexcept {
+        return state_ != QuicConnectionState::GracefulClosing && !terminal_closing();
+    }
     void mark_closed() noexcept;
     // RFC 9000 §10.2.1 — when a packet arrives in Closing state, requeue a CC frame
     // on the level the packet was received (rate-limited to 1s). Called from the
@@ -481,20 +509,18 @@ private:
                                                                          std::uint64_t limit) noexcept;
     [[nodiscard]] common::IoResult<void> queue_ping_frame() noexcept;
     // Queue a single CONNECTION_CLOSE / CONNECTION_CLOSE_APP frame in `level`'s pending
-    // queue. Picks the correct frame type from `error_app_` and the level, and stamps
-    // close_error_ / close_frame_type_ into the payload. No-op when write keys for that
-    // level are not yet derived. Returns whether a frame was actually queued.
+    // queue. Picks the correct frame type from close_info_ and the level. No-op when
+    // write keys for that level are not yet derived. Returns whether a frame was
+    // actually queued.
     [[nodiscard]] bool queue_close_frame_for_level(QuicEncryptionLevel level) noexcept;
     void enqueue_close_frames_all_levels() noexcept;
-    void notify_streams_closing() noexcept;
-    void arm_close_state(event::EventLoop &loop) noexcept;
-    // graceful-shutdown helpers. finalize_shutdown_close() routes the pre-stored
-    // close_error_ / close_frame_type_ / error_app_ into close() or close_application(),
-    // which then handles CC enqueue, stream notify, and the 3*PTO timer.
-    // maybe_finalize_shutdown() is invoked from retire_stream() when the last
-    // stream is removed.
-    void finalize_shutdown_close() noexcept;
-    void maybe_finalize_shutdown() noexcept;
+    void clear_pending_frames_all_levels() noexcept;
+    void close_all_streams(std::uint64_t error_code) noexcept;
+    void enter_graceful_closing(QuicCloseInfo info, std::chrono::milliseconds grace) noexcept;
+    void enter_closing(QuicCloseInfo info, bool immediate = false) noexcept;
+    void enter_draining(QuicCloseInfo info) noexcept;
+    void enter_closed() noexcept;
+    void maybe_finish_graceful_close() noexcept;
     [[nodiscard]] bool has_pending_send_work() const noexcept;
     [[nodiscard]] std::chrono::milliseconds keepalive_delay() const noexcept;
     [[nodiscard]] bool reserve_peer_data(std::uint64_t bytes) noexcept;
@@ -515,7 +541,6 @@ private:
 
     Options options_{};
     QuicConnectionState state_ = QuicConnectionState::Init;
-    QuicErrorCode close_error_ = QuicErrorCode::NoError;
     std::uint64_t next_local_bidi_stream_id_ = 0;
     std::uint64_t next_local_uni_stream_id_ = 0;
     PeerStreamLimitWindow peer_bidi_streams_{};
@@ -550,25 +575,12 @@ private:
     bool data_blocked_reported_ = false;
     bool key_phase_ = false;
     bool idle_send_timer_set_ = false;
-    // Graceful shutdown flag. Set by shutdown() / shutdown_application() while
-    // state_ == Established (or Init/Handshaking) — the connection then continues
-    // to serve existing streams but rejects new ones, and waits for the stream
-    // count to drop to zero or for the grace timer to expire. Cleared on every
-    // entry into Closing/Draining/Closed via clear_shutdown_state().
-    bool shutdown_pending_ = false;
-
-    // RFC 9000 §10.2 Immediate Close bookkeeping.
-    // close_frame_type_ carries the QUIC frame type that triggered the close (set to the
-    // received frame type when handling a malformed peer frame, otherwise 0). It is
-    // serialised into the Frame Type field of the CONNECTION_CLOSE frame.
-    // error_app_ selects CONNECTION_CLOSE_APP at the Application level (RFC 9000 §10.2.3).
-    // last_cc_msec_ rate-limits requeueing per nginx's NGX_QUIC_CC_MIN_INTERVAL (1s).
-    // While shutdown_pending_ is set, close_error_ / close_frame_type_ / error_app_
-    // are also used as the staging area for the eventual close — finalize_shutdown_close()
-    // reads them when transitioning out of graceful shutdown.
+    // close_info_ is interpreted by state_: in GracefulClosing it is the staged
+    // final close, in Closing it is the sent CONNECTION_CLOSE, and in Draining it
+    // is the peer/stateless-reset reason. last_cc_msec_ rate-limits close-frame
+    // requeueing in Closing.
+    QuicCloseInfo close_info_{};
     std::chrono::milliseconds last_cc_msec_{0};
-    std::uint64_t close_frame_type_ = 0;
-    bool error_app_ = false;
 
     friend class QuicStream;
     friend class QuicStream::WriteAwaiter;

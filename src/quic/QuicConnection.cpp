@@ -18,6 +18,11 @@ namespace {
 constexpr std::uint64_t kStreamTypeMask = 0x02;
 constexpr std::uint64_t kStreamInitiatorMask = 0x01;
 constexpr std::uint64_t kStreamIncrement = 4;
+constexpr QuicEncryptionLevel kCloseLevels[] = {
+        QuicEncryptionLevel::Initial,
+        QuicEncryptionLevel::Handshake,
+        QuicEncryptionLevel::Application,
+};
 
 // RFC 9000 doesn't mandate a specific retransmission interval for CONNECTION_CLOSE
 // in the Closing state. nginx uses 1s (NGX_QUIC_CC_MIN_INTERVAL); we match that to
@@ -184,39 +189,30 @@ common::IoResult<void> QuicConnection::start_handshake() noexcept {
 }
 
 common::IoResult<void> QuicConnection::mark_established() noexcept {
-    if (closing()) {
+    if (terminal_closing()) {
         return std::unexpected(common::IoErr::Canceled);
+    }
+    if (state_ == QuicConnectionState::GracefulClosing) {
+        enter_closing(close_info_);
+        return {};
     }
     if (state_ != QuicConnectionState::Init && state_ != QuicConnectionState::Handshaking) {
         return std::unexpected(common::IoErr::Already);
     }
     state_ = QuicConnectionState::Established;
-    // shutdown() called during Init/Handshaking parks here: now that we have
-    // Application-level keys (or will shortly), drop straight into Closing.
-    if (shutdown_pending_) {
-        finalize_shutdown_close();
-    }
     return {};
 }
 
 void QuicConnection::begin_draining(QuicErrorCode error) noexcept {
-    if (state_ == QuicConnectionState::Closed) {
-        return;
-    }
-    // Discard any in-flight graceful shutdown. RFC 9000 §10.2.2: in Draining we
-    // silently discard packets, so the grace timer (or pending CC enqueue) is
-    // no longer relevant.
-    if (shutdown_pending_) {
-        if (event::EventLoop *loop = event::EventLoop::current_or_null()) {
-            if (close_timer_entry_.is_in_heap()) {
-                loop->cancel<QuicConnection, &QuicConnection::close_timer_entry_>(*this);
-            }
-        }
-        shutdown_pending_ = false;
-    }
-    close_error_ = error;
-    state_ = QuicConnectionState::Draining;
+    enter_draining(QuicCloseInfo{
+            .source = QuicCloseSource::PeerConnectionClose,
+            .frame_kind = QuicCloseFrameKind::Transport,
+            .error_code = static_cast<std::uint64_t>(error),
+            .frame_type = 0,
+    });
 }
+
+void QuicConnection::begin_draining(QuicCloseInfo info) noexcept { enter_draining(info); }
 
 bool QuicConnection::queue_close_frame_for_level(QuicEncryptionLevel level) noexcept {
     QuicPacketNumberSpace &space = packet_number_space(level);
@@ -230,21 +226,21 @@ bool QuicConnection::queue_close_frame_for_level(QuicEncryptionLevel level) noex
         return false;
     }
 
-    // RFC 9000 §10.2.3: Application-level close with error_app_ uses
-    // CONNECTION_CLOSE_APP on the Application level. Initial/Handshake levels
-    // always use plain CONNECTION_CLOSE, with error code APPLICATION_ERROR.
-    if (error_app_ && level == QuicEncryptionLevel::Application) {
+    // RFC 9000 §10.2.3: Application-level close uses CONNECTION_CLOSE_APP on the
+    // Application level. Initial/Handshake levels always use plain
+    // CONNECTION_CLOSE, with error code APPLICATION_ERROR.
+    if (close_info_.frame_kind == QuicCloseFrameKind::Application && level == QuicEncryptionLevel::Application) {
         frame->type = QuicFrameType::ConnectionCloseApp;
-        frame->u.close.error_code = static_cast<std::uint64_t>(close_error_);
-    } else if (error_app_) {
+        frame->u.close.error_code = close_info_.error_code;
+    } else if (close_info_.frame_kind == QuicCloseFrameKind::Application) {
         // Non-application level: downgrade to transport CC with APPLICATION_ERROR
         frame->type = QuicFrameType::ConnectionClose;
         frame->u.close.error_code = static_cast<std::uint64_t>(QuicErrorCode::ApplicationError);
     } else {
         frame->type = QuicFrameType::ConnectionClose;
-        frame->u.close.error_code = static_cast<std::uint64_t>(close_error_);
+        frame->u.close.error_code = close_info_.error_code;
     }
-    frame->u.close.frame_type = close_frame_type_;
+    frame->u.close.frame_type = close_info_.frame_kind == QuicCloseFrameKind::Transport ? close_info_.frame_type : 0;
     frame->u.close.reason = nullptr;
     frame->u.close.reason_length = 0;
     frame->u.close.owned_reason = nullptr;
@@ -256,27 +252,10 @@ bool QuicConnection::queue_close_frame_for_level(QuicEncryptionLevel level) noex
 }
 
 void QuicConnection::enqueue_close_frames_all_levels() noexcept {
-    constexpr QuicEncryptionLevel kAllLevels[] = {
-            QuicEncryptionLevel::Initial,
-            QuicEncryptionLevel::Handshake,
-            QuicEncryptionLevel::Application,
-    };
-
-    // RFC 9000 §10.2: in the Closing state we only retain enough state to send CC.
-    // Mirror nginx's "drop packets from retransmit queues, no ack is expected" — discard
-    // pending frames so the next datagram carries only the CC. Pending ACKs are also
-    // suppressed; the peer doesn't need a final ACK from us. sent_frames is left alone
-    // (ACK handling still references those entries).
-    for (QuicEncryptionLevel level: kAllLevels) {
-        QuicPacketNumberSpace &space = packet_number_space(level);
-        while (QuicOutputFrame *frame = space.pending_frames.pop_front()) {
-            space.release_frame(*frame);
-        }
-        space.send_ack = false;
-    }
+    clear_pending_frames_all_levels();
 
     bool any_queued = false;
-    for (QuicEncryptionLevel level: kAllLevels) {
+    for (QuicEncryptionLevel level: kCloseLevels) {
         if (queue_close_frame_for_level(level)) {
             any_queued = true;
         }
@@ -291,186 +270,110 @@ void QuicConnection::enqueue_close_frames_all_levels() noexcept {
     }
 }
 
-void QuicConnection::arm_close_state(event::EventLoop &loop) noexcept {
-    // arm_close_timer cancels all other timers and schedules 3*PTO.
-    arm_close_timer(loop);
-    // Schedule a send so the CC frames are flushed to the wire.
-    schedule_send();
+void QuicConnection::clear_pending_frames_all_levels() noexcept {
+    for (QuicEncryptionLevel level: kCloseLevels) {
+        QuicPacketNumberSpace &space = packet_number_space(level);
+        while (QuicOutputFrame *frame = space.pending_frames.pop_front()) {
+            space.release_frame(*frame);
+        }
+        space.send_ack = false;
+        space.send_ack_count = 0;
+        space.pending_ack = kUnsetPacketNumber;
+    }
+
+    for (QuicPath &path: path_manager_.paths()) {
+        if (path.allocated) {
+            path_manager_.clear_frames(path);
+        }
+    }
 }
 
-void QuicConnection::notify_streams_closing() noexcept {
-    // Wake any suspended reader/writer so application coroutines can unwind.
-    // notify_connection_closing() observes the now-Closing state via
-    // QuicStream::terminal_write_error() (write side) and a stop_receiving()
-    // flag (read side).
-    streams_.for_each([](QuicStream &stream) noexcept { stream.notify_connection_closing(); });
+void QuicConnection::close_all_streams(std::uint64_t error_code) noexcept {
+    streams_.for_each([error_code](QuicStream &stream) noexcept { stream.close(error_code); });
 }
 
 void QuicConnection::close(QuicErrorCode error, std::uint64_t frame_type) noexcept {
-    if (state_ == QuicConnectionState::Closing || state_ == QuicConnectionState::Closed ||
-        state_ == QuicConnectionState::Draining) {
-        return;
-    }
-    // If a graceful shutdown grace timer is armed in close_timer_entry_, cancel
-    // it now so arm_close_timer() below isn't short-circuited by an "already in
-    // heap" check and can install the proper 3*PTO deadline.
-    if (shutdown_pending_) {
-        if (event::EventLoop *loop = event::EventLoop::current_or_null()) {
-            if (close_timer_entry_.is_in_heap()) {
-                loop->cancel<QuicConnection, &QuicConnection::close_timer_entry_>(*this);
-            }
-        }
-        shutdown_pending_ = false;
-    }
-    close_error_ = error;
-    close_frame_type_ = frame_type;
-    error_app_ = false;
-    state_ = QuicConnectionState::Closing;
-
-    enqueue_close_frames_all_levels();
-    notify_streams_closing();
-
-    event::EventLoop *loop = event::EventLoop::current_or_null();
-    if (loop != nullptr) {
-        arm_close_state(*loop);
-    }
+    enter_closing(QuicCloseInfo{
+            .source = QuicCloseSource::Local,
+            .frame_kind = QuicCloseFrameKind::Transport,
+            .error_code = static_cast<std::uint64_t>(error),
+            .frame_type = frame_type,
+    });
 }
 
 void QuicConnection::close_immediately(QuicErrorCode error, std::uint64_t frame_type) noexcept {
-    if (state_ == QuicConnectionState::Closed) {
-        return;
-    }
-    // If we're already in Closing/Draining via the slow path, accelerate cleanup
-    // by re-arming the close timer for immediate fire. Don't re-queue CC frames —
-    // those have already been sent (or are queued for send).
-    if (state_ == QuicConnectionState::Closing || state_ == QuicConnectionState::Draining) {
-        event::EventLoop *loop = event::EventLoop::current_or_null();
-        if (loop != nullptr) {
-            arm_close_timer_immediate(*loop);
-        }
-        return;
-    }
-
-    // arm_close_timer_immediate() below unconditionally cancels close_timer_entry_,
-    // so any in-flight grace timer is naturally superseded.
-    shutdown_pending_ = false;
-    close_error_ = error;
-    close_frame_type_ = frame_type;
-    error_app_ = false;
-    state_ = QuicConnectionState::Closing;
-
-    enqueue_close_frames_all_levels();
-    notify_streams_closing();
-
-    event::EventLoop *loop = event::EventLoop::current_or_null();
-    if (loop != nullptr) {
-        schedule_send();
-        arm_close_timer_immediate(*loop);
-    }
+    enter_closing(
+            QuicCloseInfo{
+                    .source = QuicCloseSource::Local,
+                    .frame_kind = QuicCloseFrameKind::Transport,
+                    .error_code = static_cast<std::uint64_t>(error),
+                    .frame_type = frame_type,
+            },
+            true);
 }
 
 void QuicConnection::close_application(std::uint64_t error_code) noexcept {
-    if (state_ == QuicConnectionState::Closing || state_ == QuicConnectionState::Closed ||
-        state_ == QuicConnectionState::Draining) {
-        return;
-    }
-    // Cancel any in-flight grace timer so arm_close_timer() can install the
-    // 3*PTO deadline (see close() for the rationale).
-    if (shutdown_pending_) {
-        if (event::EventLoop *loop = event::EventLoop::current_or_null()) {
-            if (close_timer_entry_.is_in_heap()) {
-                loop->cancel<QuicConnection, &QuicConnection::close_timer_entry_>(*this);
-            }
-        }
-        shutdown_pending_ = false;
-    }
-    // Store the raw application error code in close_error_. QuicErrorCode is
-    // a uint64-backed enum so the cast is well-defined and preserves the value.
-    close_error_ = static_cast<QuicErrorCode>(error_code);
-    close_frame_type_ = 0;
-    error_app_ = true;
-    state_ = QuicConnectionState::Closing;
-
-    enqueue_close_frames_all_levels();
-    notify_streams_closing();
-
-    event::EventLoop *loop = event::EventLoop::current_or_null();
-    if (loop != nullptr) {
-        arm_close_state(*loop);
-    }
+    enter_closing(QuicCloseInfo{
+            .source = QuicCloseSource::Local,
+            .frame_kind = QuicCloseFrameKind::Application,
+            .error_code = error_code,
+            .frame_type = 0,
+    });
 }
 
 void QuicConnection::shutdown(QuicErrorCode error, std::uint64_t frame_type, std::chrono::milliseconds grace) noexcept {
-    if (shutdown_pending_ || closing()) {
+    if (state_ == QuicConnectionState::GracefulClosing || terminal_closing()) {
         return;
     }
 
-    // Stage CC parameters for the eventual close. close() / close_application()
-    // re-assign these unconditionally when finalize_shutdown_close() runs, so the
-    // stage is just for our own use in the meantime.
-    close_error_ = error;
-    close_frame_type_ = frame_type;
-    error_app_ = false;
+    QuicCloseInfo info{
+            .source = QuicCloseSource::Local,
+            .frame_kind = QuicCloseFrameKind::Transport,
+            .error_code = static_cast<std::uint64_t>(error),
+            .frame_type = frame_type,
+    };
 
-    // During Init/Handshaking we can't pick an Application-level CC frame yet —
-    // park the flag and let mark_established() finalize.
-    if (state_ == QuicConnectionState::Init || state_ == QuicConnectionState::Handshaking) {
-        shutdown_pending_ = true;
-        return;
-    }
-
-    // Established with no in-flight streams: there's nothing to wait for.
     if (active_stream_count() == 0) {
-        close(error, frame_type);
+        enter_closing(info);
         return;
     }
 
-    shutdown_pending_ = true;
-
-    event::EventLoop *loop = event::EventLoop::current_or_null();
-    if (loop == nullptr) {
-        return;
-    }
-    const std::chrono::milliseconds delay = grace.count() > 0 ? grace : options_.graceful_shutdown_grace;
-    if (delay.count() <= 0) {
-        // No grace requested at all — just leave the flag set; the next stream
-        // retirement triggers finalize.
-        return;
-    }
-    if (close_timer_entry_.is_in_heap()) {
-        loop->cancel<QuicConnection, &QuicConnection::close_timer_entry_>(*this);
-    }
-    loop->post_at<QuicConnection, &QuicConnection::close_timer_entry_, &QuicConnection::on_close_timer>(
-            loop->now() + delay, *this);
+    enter_graceful_closing(info, grace);
 }
 
 void QuicConnection::shutdown_application(std::uint64_t error_code, std::chrono::milliseconds grace) noexcept {
-    if (shutdown_pending_ || closing()) {
+    if (state_ == QuicConnectionState::GracefulClosing || terminal_closing()) {
         return;
     }
 
-    close_error_ = static_cast<QuicErrorCode>(error_code);
-    close_frame_type_ = 0;
-    error_app_ = true;
-
-    if (state_ == QuicConnectionState::Init || state_ == QuicConnectionState::Handshaking) {
-        shutdown_pending_ = true;
-        return;
-    }
+    QuicCloseInfo info{
+            .source = QuicCloseSource::Local,
+            .frame_kind = QuicCloseFrameKind::Application,
+            .error_code = error_code,
+            .frame_type = 0,
+    };
 
     if (active_stream_count() == 0) {
-        close_application(error_code);
+        enter_closing(info);
         return;
     }
 
-    shutdown_pending_ = true;
+    enter_graceful_closing(info, grace);
+}
 
-    event::EventLoop *loop = event::EventLoop::current_or_null();
-    if (loop == nullptr) {
+void QuicConnection::enter_graceful_closing(QuicCloseInfo info, std::chrono::milliseconds grace) noexcept {
+    if (state_ == QuicConnectionState::GracefulClosing || terminal_closing()) {
         return;
     }
+    close_info_ = info;
+    state_ = QuicConnectionState::GracefulClosing;
+
     const std::chrono::milliseconds delay = grace.count() > 0 ? grace : options_.graceful_shutdown_grace;
     if (delay.count() <= 0) {
+        return;
+    }
+    event::EventLoop *loop = event::EventLoop::current_or_null();
+    if (loop == nullptr) {
         return;
     }
     if (close_timer_entry_.is_in_heap()) {
@@ -480,43 +383,91 @@ void QuicConnection::shutdown_application(std::uint64_t error_code, std::chrono:
             loop->now() + delay, *this);
 }
 
-void QuicConnection::finalize_shutdown_close() noexcept {
-    // Pre: shutdown_pending_ is set, state_ is one of Init/Handshaking/Established,
-    // and close_error_ / close_frame_type_ / error_app_ have been staged.
-    if (!shutdown_pending_) {
+void QuicConnection::enter_closing(QuicCloseInfo info, bool immediate) noexcept {
+    if (state_ == QuicConnectionState::Closed || state_ == QuicConnectionState::Draining) {
         return;
     }
-    if (closing()) {
+    if (state_ == QuicConnectionState::Closing) {
+        if (immediate) {
+            if (event::EventLoop *loop = event::EventLoop::current_or_null()) {
+                arm_close_timer_immediate(*loop);
+            }
+        }
         return;
     }
-    // If the grace timer is still armed (i.e. we got here via the last stream
-    // retiring, not via the grace deadline), cancel it. close() → arm_close_timer()
-    // is a no-op when close_timer_entry_ is already in the heap, so without this
-    // we'd keep the 30s grace deadline instead of the 3*PTO close deadline.
+
     if (event::EventLoop *loop = event::EventLoop::current_or_null()) {
         if (close_timer_entry_.is_in_heap()) {
             loop->cancel<QuicConnection, &QuicConnection::close_timer_entry_>(*this);
         }
     }
-    // close() / close_application() will clear shutdown_pending_ themselves and
-    // overwrite the staged CC parameters with their argument values — pass the
-    // staged values straight through so the final CC carries what shutdown()
-    // intended.
-    if (error_app_) {
-        close_application(static_cast<std::uint64_t>(close_error_));
-    } else {
-        close(close_error_, close_frame_type_);
+
+    close_info_ = info;
+    state_ = QuicConnectionState::Closing;
+
+    enqueue_close_frames_all_levels();
+    close_all_streams(close_info_.error_code);
+
+    event::EventLoop *loop = event::EventLoop::current_or_null();
+    if (loop != nullptr) {
+        schedule_send();
+        if (immediate) {
+            arm_close_timer_immediate(*loop);
+        } else {
+            arm_close_timer(*loop);
+        }
     }
 }
 
-void QuicConnection::maybe_finalize_shutdown() noexcept {
-    if (!shutdown_pending_ || closing()) {
+void QuicConnection::enter_draining(QuicCloseInfo info) noexcept {
+    if (state_ == QuicConnectionState::Closed || state_ == QuicConnectionState::Draining) {
         return;
     }
-    if (active_stream_count() > 0) {
+    if (event::EventLoop *loop = event::EventLoop::current_or_null()) {
+        if (close_timer_entry_.is_in_heap()) {
+            loop->cancel<QuicConnection, &QuicConnection::close_timer_entry_>(*this);
+        }
+    }
+
+    close_info_ = info;
+    state_ = QuicConnectionState::Draining;
+    clear_pending_frames_all_levels();
+    close_all_streams(close_info_.error_code);
+
+    if (event::EventLoop *loop = event::EventLoop::current_or_null()) {
+        arm_close_timer(*loop);
+    }
+}
+
+void QuicConnection::enter_closed() noexcept {
+    if (state_ == QuicConnectionState::Closed) {
         return;
     }
-    finalize_shutdown_close();
+
+    event::EventLoop *loop = event::EventLoop::current_or_null();
+    if (loop != nullptr) {
+        cancel_loss_detection_timer(*loop);
+        cancel_key_update_discard_timer(*loop);
+        cancel_idle_timer(*loop);
+        cancel_close_timer(*loop);
+        cancel_keepalive_timer(*loop);
+        path_manager_.cancel_validation_timer(*loop);
+    }
+
+    state_ = QuicConnectionState::Closed;
+    close_all_streams(close_info_.error_code);
+    streams_.clear();
+
+    if (options_.on_close_timeout != nullptr) {
+        options_.on_close_timeout(options_.lifecycle_owner, *this);
+    }
+}
+
+void QuicConnection::maybe_finish_graceful_close() noexcept {
+    if (state_ != QuicConnectionState::GracefulClosing || active_stream_count() > 0) {
+        return;
+    }
+    enter_closing(close_info_);
 }
 
 void QuicConnection::requeue_close_frame(QuicEncryptionLevel level) noexcept {
@@ -552,7 +503,14 @@ void QuicConnection::requeue_close_frame(QuicEncryptionLevel level) noexcept {
     }
 }
 
-void QuicConnection::mark_closed() noexcept { state_ = QuicConnectionState::Closed; }
+void QuicConnection::mark_closed() noexcept {
+    if (state_ == QuicConnectionState::Closed) {
+        return;
+    }
+    state_ = QuicConnectionState::Closed;
+    close_all_streams(close_info_.error_code);
+    streams_.clear();
+}
 
 std::chrono::milliseconds QuicConnection::effective_idle_timeout() const noexcept {
     return options_.transport.max_idle_timeout;
@@ -650,8 +608,7 @@ void QuicConnection::arm_keepalive_timer(event::EventLoop &loop) noexcept {
     if (keepalive_timer_entry_.is_in_heap()) {
         loop.cancel<QuicConnection, &QuicConnection::keepalive_timer_entry_>(*this);
     }
-    if (closing() || shutdown_pending_ || state_ != QuicConnectionState::Established ||
-        !crypto_.application_write.ready) {
+    if (state_ != QuicConnectionState::Established || !crypto_.application_write.ready) {
         return;
     }
 
@@ -764,13 +721,16 @@ void QuicConnection::on_idle_timer(QuicConnection *connection) noexcept {
     }
 
     // RFC 9000 §10.1: idle timeout is silent — discard state without sending CC.
-    // If a graceful shutdown was in progress, drop it: the peer's gone idle, no
-    // point waiting for streams to finish. cancel_close_timer above already
-    // released the grace timer; just clear the flag.
-    connection->shutdown_pending_ = false;
     connection->idle_send_timer_set_ = false;
-    connection->close_error_ = QuicErrorCode::NoError;
+    connection->close_info_ = QuicCloseInfo{
+            .source = QuicCloseSource::IdleTimeout,
+            .frame_kind = QuicCloseFrameKind::Transport,
+            .error_code = static_cast<std::uint64_t>(QuicErrorCode::NoError),
+            .frame_type = 0,
+    };
     connection->state_ = QuicConnectionState::Closed;
+    connection->close_all_streams(connection->close_info_.error_code);
+    connection->streams_.clear();
 
     if (connection->options_.on_idle_timeout != nullptr) {
         connection->options_.on_idle_timeout(connection->options_.lifecycle_owner, *connection);
@@ -782,33 +742,22 @@ void QuicConnection::on_close_timer(QuicConnection *connection) noexcept {
         return;
     }
 
-    // Dispatch: in shutdown_pending_ (Established or earlier) the timer represents
-    // the grace deadline → force the connection into Closing. Otherwise we're in
-    // Closing and the 3*PTO timer just fired → transition to Closed.
-    if (connection->shutdown_pending_ && !connection->closing()) {
-        connection->finalize_shutdown_close();
-        return;
-    }
-
-    event::EventLoop *loop = event::EventLoop::current_or_null();
-    if (loop != nullptr) {
-        connection->cancel_loss_detection_timer(*loop);
-        connection->cancel_key_update_discard_timer(*loop);
-        connection->cancel_idle_timer(*loop);
-        connection->cancel_keepalive_timer(*loop);
-        connection->path_manager_.cancel_validation_timer(*loop);
-    }
-
-    connection->state_ = QuicConnectionState::Closed;
-
-    if (connection->options_.on_close_timeout != nullptr) {
-        connection->options_.on_close_timeout(connection->options_.lifecycle_owner, *connection);
+    switch (connection->state_) {
+        case QuicConnectionState::GracefulClosing:
+            connection->enter_closing(connection->close_info_);
+            return;
+        case QuicConnectionState::Closing:
+        case QuicConnectionState::Draining:
+            connection->enter_closed();
+            return;
+        default:
+            return;
     }
 }
 
 void QuicConnection::on_keepalive_timer(QuicConnection *connection) noexcept {
-    if (connection == nullptr || connection->closing() || connection->shutdown_pending_ ||
-        connection->state_ != QuicConnectionState::Established || !connection->crypto_.application_write.ready) {
+    if (connection == nullptr || connection->state_ != QuicConnectionState::Established ||
+        !connection->crypto_.application_write.ready) {
         return;
     }
 
@@ -880,7 +829,7 @@ void QuicConnection::on_loss_detection_timer(QuicConnection *connection) noexcep
 
 
 common::IoResult<std::uint64_t> QuicConnection::next_local_stream_id(QuicStreamType type) noexcept {
-    if (closing() || shutdown_pending_) {
+    if (!accepting_new_streams()) {
         return std::unexpected(common::IoErr::Canceled);
     }
 
@@ -901,7 +850,7 @@ common::IoResult<std::uint64_t> QuicConnection::next_local_stream_id(QuicStreamT
 }
 
 bool QuicConnection::can_accept_peer_stream(std::uint64_t stream_id) const noexcept {
-    if (shutdown_pending_) {
+    if (!accepting_new_streams()) {
         return false;
     }
     if (!is_peer_stream(stream_id)) {
@@ -945,7 +894,7 @@ const QuicStream *QuicConnection::find_stream(std::uint64_t stream_id) const noe
 }
 
 common::IoResult<QuicStream *> QuicConnection::get_or_create_peer_stream(std::uint64_t stream_id) noexcept {
-    if (closing() || shutdown_pending_) {
+    if (!accepting_new_streams()) {
         return std::unexpected(common::IoErr::Canceled);
     }
     if (QuicStream *stream = streams_.find(stream_id)) {
@@ -1330,9 +1279,7 @@ void QuicConnection::retire_stream(QuicStream &stream) noexcept {
     }
     lease->detach_from_connection();
 
-    // Last stream gone while shutdown is in progress → trigger the final close.
-    // Safe to call unconditionally: it short-circuits when not in graceful mode.
-    maybe_finalize_shutdown();
+    maybe_finish_graceful_close();
 }
 
 void QuicConnection::try_release_stream(QuicStream &stream) noexcept {
@@ -1434,6 +1381,9 @@ common::IoResult<void> QuicConnection::on_stream_send_failed(std::uint64_t strea
 
 common::IoResult<void> QuicConnection::queue_reset_stream_frame(std::uint64_t stream_id, std::uint64_t error_code,
                                                                 std::uint64_t final_size) noexcept {
+    if (terminal_closing()) {
+        return {};
+    }
     auto &space = packet_number_space(QuicEncryptionLevel::Application);
     QuicOutputFrame *frame = space.alloc_frame();
     if (frame == nullptr) {
@@ -1450,6 +1400,9 @@ common::IoResult<void> QuicConnection::queue_reset_stream_frame(std::uint64_t st
 
 common::IoResult<void> QuicConnection::queue_stop_sending_frame(std::uint64_t stream_id,
                                                                 std::uint64_t error_code) noexcept {
+    if (terminal_closing()) {
+        return {};
+    }
     auto &space = packet_number_space(QuicEncryptionLevel::Application);
     QuicOutputFrame *frame = space.alloc_frame();
     if (frame == nullptr) {

@@ -327,8 +327,14 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 break;
             case QuicFrameType::ConnectionClose:
             case QuicFrameType::ConnectionCloseApp:
-                conn.begin_draining(static_cast<QuicErrorCode>(frame.u.close.error_code));
-                break;
+                conn.begin_draining(QuicCloseInfo{
+                        .source = QuicCloseSource::PeerConnectionClose,
+                        .frame_kind = frame.type == QuicFrameType::ConnectionCloseApp ? QuicCloseFrameKind::Application
+                                                                                      : QuicCloseFrameKind::Transport,
+                        .error_code = frame.u.close.error_code,
+                        .frame_type = frame.u.close.frame_type,
+                });
+                return result;
             case QuicFrameType::Crypto: {
                 bool handshake_confirmed = false;
                 auto handled = handle_crypto_frame(conn, packet.level, frame, handshake_confirmed);
@@ -521,7 +527,7 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
         datagram.len < kMinInitialDatagramSize || plaintext == nullptr || plaintext_cap == 0) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    if (conn.closing()) {
+    if (conn.closed()) {
         return std::unexpected(common::IoErr::Canceled);
     }
 
@@ -620,8 +626,8 @@ common::IoResult<QuicPacketProcessResult> quic_process_datagram(QuicConnection &
                                                                 const QuicReceivedDatagram &datagram,
                                                                 std::uint8_t *plaintext, std::size_t plaintext_cap,
                                                                 std::uint8_t short_dcid_len) noexcept {
-    if (datagram.data == nullptr || datagram.len == 0 || plaintext == nullptr || plaintext_cap == 0 || conn.closing()) {
-        return std::unexpected(conn.closing() ? common::IoErr::Canceled : common::IoErr::Invalid);
+    if (datagram.data == nullptr || datagram.len == 0 || plaintext == nullptr || plaintext_cap == 0 || conn.closed()) {
+        return std::unexpected(conn.closed() ? common::IoErr::Canceled : common::IoErr::Invalid);
     }
 
     QuicPacketProcessResult aggregate{};

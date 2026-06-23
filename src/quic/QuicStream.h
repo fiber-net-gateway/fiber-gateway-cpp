@@ -134,12 +134,11 @@ public:
     write(mem::IoBufChain &chain, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] common::IoResult<void> stop_read(std::uint64_t error_code = 0) noexcept;
     [[nodiscard]] common::IoResult<void> reset(std::uint64_t error_code = 0) noexcept;
+    void close(std::uint64_t error_code = 0) noexcept;
 
-    // Called by QuicConnection when the connection enters the Closing state.
-    // Wakes any suspended reader/writer with IoErr::Canceled so application
-    // coroutines unwind instead of hanging on now-doomed I/O.
-    // Mirrors nginx ngx_event_quic.c:217-228 (sc->read->error = sc->write->error = 1).
-    void notify_connection_closing() noexcept;
+    // Compatibility shim for callers that still use the old connection-close
+    // notification name.
+    void notify_connection_closing() noexcept { close(); }
 
     void mark_app_released() noexcept;
 
@@ -188,8 +187,10 @@ private:
     WriteAwaiter *write_waiter_ = nullptr;
     std::uint64_t last_stream_data_blocked_limit_ = 0;
     std::uint32_t ref_count_ = 1;
+    common::IoErr terminal_error_ = common::IoErr::None;
     bool attached_to_connection_ = false;
     bool app_released_ = true;
+    bool closed_ = false;
     bool stream_send_pending_ = false;
     bool stream_data_blocked_reported_ = false;
 

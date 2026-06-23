@@ -58,6 +58,15 @@ fiber::quic::QuicConnectionId cid_from_hex(std::string_view value) {
 
 fiber::net::SocketAddress loopback(std::uint16_t port) { return {fiber::net::IpAddress::loopback_v4(), port}; }
 
+fiber::quic::QuicStream::Lease make_test_stream(const fiber::quic::QuicNewStreamContext &ctx) noexcept {
+    return fiber::quic::QuicStream::Lease::adopt(
+            new fiber::quic::QuicStream(ctx.stream_id, ctx.recv_extent_pool, ctx.recv_options));
+}
+
+fiber::quic::QuicStream::Lease on_new_stream(void * /*owner*/, const fiber::quic::QuicNewStreamContext &ctx) noexcept {
+    return make_test_stream(ctx);
+}
+
 void build_initial_datagram(std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> &datagram,
                             fiber::quic::QuicPacketHeader &packet, const std::uint8_t *plaintext,
                             std::size_t plaintext_len) {
@@ -306,6 +315,67 @@ TEST(QuicPacketProcessorTest, ProcessesApplicationPingPacket) {
     EXPECT_TRUE(result->ack_eliciting);
     EXPECT_TRUE(result->send_ack);
     EXPECT_EQ(server.packet_number_space(fiber::quic::QuicEncryptionLevel::Application).pending_ack, 0U);
+}
+
+TEST(QuicPacketProcessorTest, ConnectionCloseDuringGracefulShutdownEntersDrainingAndStopsFrameDispatch) {
+    constexpr fiber::quic::QuicCryptoSuite suite = fiber::quic::QuicCryptoSuite::Aes128GcmSha256;
+    std::array<std::uint8_t, fiber::quic::kQuicMaxSecretLength> secret{};
+    for (std::size_t i = 0; i < 32; ++i) {
+        secret[i] = static_cast<std::uint8_t>(0x80 + i);
+    }
+
+    const auto server_cid = cid_from_hex("0102030405060708");
+    const auto client_cid = cid_from_hex("1112131415161718");
+
+    fiber::quic::QuicConnection::Options client_options{};
+    client_options.role = fiber::quic::QuicConnectionRole::Client;
+    fiber::quic::QuicConnection client(client_options);
+    ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(client.crypto(), fiber::quic::QuicEncryptionLevel::Application,
+                                                        true, suite, secret.data(), 32));
+
+    fiber::quic::QuicConnection::Options server_options{};
+    server_options.role = fiber::quic::QuicConnectionRole::Server;
+    server_options.local_addr = loopback(8443);
+    server_options.remote_addr = loopback(4433);
+    server_options.local_connection_id = server_cid;
+    server_options.remote_connection_id = client_cid;
+    server_options.ops.on_new_stream = on_new_stream;
+    fiber::quic::QuicConnection server(server_options);
+    ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(server.crypto(), fiber::quic::QuicEncryptionLevel::Application,
+                                                        false, suite, secret.data(), 32));
+    ASSERT_TRUE(server.mark_established().has_value());
+
+    fiber::quic::QuicStreamFrame stream_frame{};
+    stream_frame.stream_id = 0;
+    ASSERT_TRUE(server.recv_stream_frame(stream_frame, {}).has_value());
+    ASSERT_EQ(server.active_stream_count(), 1U);
+    server.shutdown(fiber::quic::QuicErrorCode::NoError);
+    ASSERT_EQ(server.state(), fiber::quic::QuicConnectionState::GracefulClosing);
+
+    std::array<fiber::quic::QuicOutputFrame, 2> frames{};
+    frames[0].type = fiber::quic::QuicFrameType::ConnectionClose;
+    frames[0].u.close.error_code = static_cast<std::uint64_t>(fiber::quic::QuicErrorCode::InternalError);
+    frames[0].u.close.frame_type = 0;
+    frames[1].type = fiber::quic::QuicFrameType::Ping;
+
+    std::array<std::uint8_t, 256> datagram{};
+    fiber::quic::QuicPacketEncodeSpec spec{};
+    spec.level = fiber::quic::QuicEncryptionLevel::Application;
+    spec.dcid = server_cid;
+    spec.frames = frames.data();
+    spec.frame_count = frames.size();
+    auto encoded = fiber::quic::quic_encode_packet(client, spec, datagram.data(), datagram.size());
+    ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
+
+    std::array<std::uint8_t, 256> plaintext{};
+    auto received = received_datagram(datagram.data(), encoded->packet_len);
+    auto result = fiber::quic::quic_process_datagram(server, received, plaintext.data(), plaintext.size(),
+                                                     static_cast<std::uint8_t>(server_cid.size()));
+
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_EQ(server.state(), fiber::quic::QuicConnectionState::Draining);
+    EXPECT_EQ(result->frame_count, 1U);
+    EXPECT_FALSE(result->send_ack);
 }
 
 TEST(QuicPacketProcessorTest, PathChallengeQueuesPathResponse) {

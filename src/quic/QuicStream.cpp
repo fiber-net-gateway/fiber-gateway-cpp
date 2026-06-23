@@ -463,16 +463,31 @@ common::IoResult<void> QuicStream::reset(std::uint64_t error_code) noexcept {
     return conn_->queue_reset_stream_frame(stream_id_, error_code, *final_size);
 }
 
-void QuicStream::notify_connection_closing() noexcept {
-    // Recv side: stop_receiving() flags the queue as stopped (terminal_read_error
-    // becomes Canceled) and wakes any blocked reader.
-    recv_queue_.stop_receiving(0);
+void QuicStream::close(std::uint64_t error_code) noexcept {
+    if (closed_) {
+        return;
+    }
+    closed_ = true;
+    terminal_error_ = common::IoErr::Canceled;
+
+    const bool can_send_control = conn_ != nullptr && !conn_->terminal_closing();
+
+    if (can_send_control && !recv_queue_.receive_completed() && !recv_queue_.stop_sending()) {
+        (void) conn_->queue_stop_sending_frame(stream_id_, error_code);
+    }
+
+    recv_queue_.stop_receiving(error_code);
     sync_recv_state_from_queue();
 
-    // Send side: notify_write_waiter resumes the writer; terminal_write_error()
-    // already returns Canceled when conn_->closing() is true, so the writer will
-    // observe the failure on its next poll.
+    auto final_size = send_queue_.reset(error_code);
+    if (can_send_control && final_size) {
+        (void) conn_->queue_reset_stream_frame(stream_id_, error_code, *final_size);
+    }
+
     notify_write_waiter(common::IoErr::Canceled);
+    if (conn_ != nullptr && !conn_->terminal_closing()) {
+        conn_->try_release_stream(*this);
+    }
 }
 
 common::IoResult<std::uint64_t> QuicStream::on_stream_data_recv(const std::uint8_t *src, std::size_t length,
@@ -571,8 +586,8 @@ void QuicStream::maybe_extend_recv_flow_control() noexcept {
 void QuicStream::mark_app_released() noexcept { app_released_ = true; }
 
 bool QuicStream::ready_for_connection_release() const noexcept {
-    return app_released_ && (recv_queue_.finished() || recv_queue_.reset_received()) && send_queue_.empty() &&
-           !stream_send_pending_;
+    return app_released_ && (closed_ || recv_queue_.finished() || recv_queue_.reset_received()) &&
+           send_queue_.empty() && !stream_send_pending_;
 }
 
 bool QuicStream::ready_for_destruction() const noexcept { return !attached_to_connection_ && ref_count_ == 0; }
@@ -672,10 +687,13 @@ bool QuicStream::should_retransmit_stream_data_blocked(std::uint64_t limit) cons
 }
 
 common::IoErr QuicStream::terminal_write_error() const noexcept {
+    if (terminal_error_ != common::IoErr::None) {
+        return terminal_error_;
+    }
     if (send_queue_.reset_sent()) {
         return common::IoErr::BrokenPipe;
     }
-    if (conn_ != nullptr && conn_->closing()) {
+    if (conn_ != nullptr && conn_->terminal_closing()) {
         return common::IoErr::Canceled;
     }
     return common::IoErr::None;
