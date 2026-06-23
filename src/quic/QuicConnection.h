@@ -267,8 +267,25 @@ public:
     common::IoResult<void> start_handshake() noexcept;
     common::IoResult<void> mark_established() noexcept;
     void begin_draining(QuicErrorCode error = QuicErrorCode::NoError) noexcept;
-    void close(QuicErrorCode error = QuicErrorCode::NoError) noexcept;
+    // RFC 9000 §10.2 Immediate Close — transport error path.
+    // Sets state to Closing, queues a CONNECTION_CLOSE frame on every encryption level
+    // for which write keys are available, then arms the 3*PTO close timer.
+    void close(QuicErrorCode error = QuicErrorCode::NoError, std::uint64_t frame_type = 0) noexcept;
+    // Like close() but skips the 3*PTO close timer — transitions to Closed immediately
+    // after queuing CC frames and scheduling the send. For fatal errors where waiting
+    // 3*PTO only delays cleanup (mirrors nginx's rc == NGX_ERROR path).
+    void close_immediately(QuicErrorCode error = QuicErrorCode::NoError, std::uint64_t frame_type = 0) noexcept;
+    // RFC 9000 §10.2 Immediate Close — application error path.
+    // Identical to close() but uses CONNECTION_CLOSE_APP on Application-level packets and
+    // accepts the full uint64 application error space. Initial/Handshake levels still
+    // carry CONNECTION_CLOSE with error_code = APPLICATION_ERROR (0x0C) per RFC 9000 §10.2.3.
+    void close_application(std::uint64_t error_code) noexcept;
     void mark_closed() noexcept;
+    // RFC 9000 §10.2.1 — when a packet arrives in Closing state, requeue a CC frame
+    // on the level the packet was received (rate-limited to 1s). Called from the
+    // packet processor.
+    void requeue_close_frame(QuicEncryptionLevel level) noexcept;
+    [[nodiscard]] std::chrono::milliseconds last_cc_msec() const noexcept { return last_cc_msec_; }
 
     [[nodiscard]] common::IoResult<std::uint64_t> next_local_stream_id(QuicStreamType type) noexcept;
     [[nodiscard]] bool can_accept_peer_stream(std::uint64_t stream_id) const noexcept;
@@ -328,6 +345,7 @@ public:
     void arm_idle_timer(event::EventLoop &loop) noexcept;
     void cancel_idle_timer(event::EventLoop &loop) noexcept;
     void arm_close_timer(event::EventLoop &loop) noexcept;
+    void arm_close_timer_immediate(event::EventLoop &loop) noexcept;
     void cancel_close_timer(event::EventLoop &loop) noexcept;
     void arm_keepalive_timer(event::EventLoop &loop) noexcept;
     void cancel_keepalive_timer(event::EventLoop &loop) noexcept;
@@ -443,6 +461,14 @@ private:
     [[nodiscard]] common::IoResult<void> queue_stream_data_blocked_frame(QuicStream &stream,
                                                                          std::uint64_t limit) noexcept;
     [[nodiscard]] common::IoResult<void> queue_ping_frame() noexcept;
+    // Queue a single CONNECTION_CLOSE / CONNECTION_CLOSE_APP frame in `level`'s pending
+    // queue. Picks the correct frame type from `error_app_` and the level, and stamps
+    // close_error_ / close_frame_type_ into the payload. No-op when write keys for that
+    // level are not yet derived. Returns whether a frame was actually queued.
+    [[nodiscard]] bool queue_close_frame_for_level(QuicEncryptionLevel level) noexcept;
+    void enqueue_close_frames_all_levels() noexcept;
+    void notify_streams_closing() noexcept;
+    void arm_close_state(event::EventLoop &loop) noexcept;
     [[nodiscard]] bool has_pending_send_work() const noexcept;
     [[nodiscard]] std::chrono::milliseconds keepalive_delay() const noexcept;
     [[nodiscard]] bool reserve_peer_data(std::uint64_t bytes) noexcept;
@@ -498,6 +524,16 @@ private:
     bool data_blocked_reported_ = false;
     bool key_phase_ = false;
     bool idle_send_timer_set_ = false;
+
+    // RFC 9000 §10.2 Immediate Close bookkeeping.
+    // close_frame_type_ carries the QUIC frame type that triggered the close (set to the
+    // received frame type when handling a malformed peer frame, otherwise 0). It is
+    // serialised into the Frame Type field of the CONNECTION_CLOSE frame.
+    // error_app_ selects CONNECTION_CLOSE_APP at the Application level (RFC 9000 §10.2.3).
+    // last_cc_msec_ rate-limits requeueing per nginx's NGX_QUIC_CC_MIN_INTERVAL (1s).
+    std::chrono::milliseconds last_cc_msec_{0};
+    std::uint64_t close_frame_type_ = 0;
+    bool error_app_ = false;
 
     friend class QuicStream;
     friend class QuicStream::WriteAwaiter;

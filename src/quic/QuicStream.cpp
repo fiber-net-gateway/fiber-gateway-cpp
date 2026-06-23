@@ -463,6 +463,18 @@ common::IoResult<void> QuicStream::reset(std::uint64_t error_code) noexcept {
     return conn_->queue_reset_stream_frame(stream_id_, error_code, *final_size);
 }
 
+void QuicStream::notify_connection_closing() noexcept {
+    // Recv side: stop_receiving() flags the queue as stopped (terminal_read_error
+    // becomes Canceled) and wakes any blocked reader.
+    recv_queue_.stop_receiving(0);
+    sync_recv_state_from_queue();
+
+    // Send side: notify_write_waiter resumes the writer; terminal_write_error()
+    // already returns Canceled when conn_->closing() is true, so the writer will
+    // observe the failure on its next poll.
+    notify_write_waiter(common::IoErr::Canceled);
+}
+
 common::IoResult<std::uint64_t> QuicStream::on_stream_data_recv(const std::uint8_t *src, std::size_t length,
                                                                 std::uint64_t offset, bool fin) noexcept {
     const std::uint64_t old_end = recv_queue_.received_end_offset();

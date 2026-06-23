@@ -280,6 +280,21 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
     result.packet_number = packet.packet_number;
     result.packet_count = 1;
 
+    // RFC 9000 §10.2.2: in the Closing state, received packets only prompt a
+    // CONNECTION_CLOSE frame on the same encryption level. We skip the normal
+    // frame dispatch — there is no point processing stream data or flow-control
+    // updates when the connection is being torn down. ACK frames are also not
+    // processed, matching nginx's behaviour. Rate limiting is handled inside
+    // requeue_close_frame (1s interval).
+    if (conn.state() == QuicConnectionState::Closing) {
+        conn.requeue_close_frame(packet.level);
+        return result;
+    }
+    // RFC 9000 §10.2.2: in the Draining state we silently discard packets.
+    if (conn.state() == QuicConnectionState::Draining || conn.state() == QuicConnectionState::Closed) {
+        return result;
+    }
+
     const QuicTime now = quic_time_ms(datagram.received_at);
     bool path_challenged = false;
     QuicReadCursor payload(decoded.payload.data, decoded.payload.len);

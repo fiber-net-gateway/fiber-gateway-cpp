@@ -956,6 +956,9 @@ void QuicUdpEndpoint::handle_receive_result(QuicConnection &connection,
 
     if (loop_ != nullptr) {
         if (connection.closing()) {
+            // arm_close_timer is idempotent; this is a safety net in case close() was
+            // called without an EventLoop context (the 3*PTO timer must be armed before
+            // we let the connection idle).
             connection.arm_close_timer(*loop_);
         } else {
             connection.on_packet_processed(*loop_);
@@ -964,7 +967,18 @@ void QuicUdpEndpoint::handle_receive_result(QuicConnection &connection,
         }
     }
 
-    if (connection.closing()) {
+    // In Draining state we never send anything (RFC §10.2.2).
+    if (connection.state() == QuicConnectionState::Draining || connection.state() == QuicConnectionState::Closed) {
+        return;
+    }
+
+    // In Closing we may have CC frames queued by close() or by the packet processor
+    // requeueing them in response to this datagram; in either case let the scheduler
+    // flush them.
+    if (connection.state() == QuicConnectionState::Closing) {
+        if (connection_has_send_work(connection)) {
+            schedule_send(connection);
+        }
         return;
     }
 
@@ -1103,11 +1117,17 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
 
 common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicConnection &connection,
                                                                            QuicSendDatagram &datagram) noexcept {
-    if (!valid() || datagram.data == nullptr || datagram.capacity == 0 || connection.closing()) {
+    // In Closing state the connection has CC frames queued; the only way those
+    // frames reach the wire is through this function. Draining and Closed never
+    // send anything (RFC §10.2.2).
+    if (!valid() || datagram.data == nullptr || datagram.capacity == 0 ||
+        connection.state() == QuicConnectionState::Closed || connection.state() == QuicConnectionState::Draining) {
         return QuicBuildSendResult{QuicBuildSendStatus::Closed};
     }
 
-    if (connection.has_path_send_work()) {
+    // Path-control frames (PATH_CHALLENGE / PATH_RESPONSE / NEW_CONNECTION_ID) are
+    // suppressed once the connection is Closing — only the CC frame is allowed out.
+    if (!connection.closing() && connection.has_path_send_work()) {
         auto path_control = build_path_control_datagram(connection, datagram);
         if (!path_control) {
             return std::unexpected(path_control.error());
