@@ -7,6 +7,7 @@
 #include <expected>
 #include <new>
 
+#include <openssl/hmac.h>
 #include <openssl/rand.h>
 
 #include "../async/Spawn.h"
@@ -358,6 +359,12 @@ common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Optio
         }
         options_.address_validation_key_set = true;
     }
+    if (!options_.stateless_reset_secret_set) {
+        if (RAND_bytes(options_.stateless_reset_secret.data(), options_.stateless_reset_secret.size()) != 1) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        options_.stateless_reset_secret_set = true;
+    }
     loop_ = &loop;
     closing_ = false;
     active_connection_count_ = 0;
@@ -483,8 +490,8 @@ async::Task<void> QuicUdpEndpoint::recv_loop() noexcept {
     }
 }
 
-bool QuicUdpEndpoint::QuicConnectionDcidLess::operator()(
-        const QuicConnection::ConnectionIdIndex *left, const QuicConnection::ConnectionIdIndex *right) const noexcept {
+bool QuicUdpEndpoint::QuicConnectionDcidLess::operator()(const QuicConnectionIdIndex *left,
+                                                         const QuicConnectionIdIndex *right) const noexcept {
     return compare_dcid_key(left->cid_hash, left->cid_key, right->cid_hash, right->cid_key) < 0;
 }
 
@@ -521,25 +528,24 @@ int QuicUdpEndpoint::compare_dcid_key(std::uint64_t left_hash, const QuicConnect
     return compare_connection_id(left, right);
 }
 
-QuicConnection::ConnectionIdIndex *QuicUdpEndpoint::index_from_dcid_hook(common::IntrusiveRbTreeHook *hook) noexcept {
+QuicConnectionIdIndex *QuicUdpEndpoint::index_from_dcid_hook(common::IntrusiveRbTreeHook *hook) noexcept {
     if (hook == nullptr || !hook->linked()) {
         return nullptr;
     }
-    return reinterpret_cast<QuicConnection::ConnectionIdIndex *>(reinterpret_cast<std::uint8_t *>(hook) -
-                                                                 offsetof(QuicConnection::ConnectionIdIndex, cid_hook));
+    return reinterpret_cast<QuicConnectionIdIndex *>(reinterpret_cast<std::uint8_t *>(hook) -
+                                                     offsetof(QuicConnectionIdIndex, cid_hook));
 }
 
-const QuicConnection::ConnectionIdIndex *
-QuicUdpEndpoint::index_from_dcid_hook(const common::IntrusiveRbTreeHook *hook) noexcept {
+const QuicConnectionIdIndex *QuicUdpEndpoint::index_from_dcid_hook(const common::IntrusiveRbTreeHook *hook) noexcept {
     if (hook == nullptr || !hook->linked()) {
         return nullptr;
     }
-    return reinterpret_cast<const QuicConnection::ConnectionIdIndex *>(
-            reinterpret_cast<const std::uint8_t *>(hook) - offsetof(QuicConnection::ConnectionIdIndex, cid_hook));
+    return reinterpret_cast<const QuicConnectionIdIndex *>(reinterpret_cast<const std::uint8_t *>(hook) -
+                                                           offsetof(QuicConnectionIdIndex, cid_hook));
 }
 
 QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &dcid, std::uint64_t hash) noexcept {
-    QuicConnection::ConnectionIdIndex *node = dcid_tree_.root();
+    QuicConnectionIdIndex *node = dcid_tree_.root();
     while (node != nullptr) {
         const int cmp = compare_dcid_key(hash, dcid, node->cid_hash, node->cid_key);
         if (cmp == 0) {
@@ -552,7 +558,7 @@ QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &dcid, s
 
 const QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &dcid,
                                                        std::uint64_t hash) const noexcept {
-    const QuicConnection::ConnectionIdIndex *node = dcid_tree_.root();
+    const QuicConnectionIdIndex *node = dcid_tree_.root();
     while (node != nullptr) {
         const int cmp = compare_dcid_key(hash, dcid, node->cid_hash, node->cid_key);
         if (cmp == 0) {
@@ -574,11 +580,9 @@ void QuicUdpEndpoint::delete_connection(QuicConnection &connection) noexcept {
     }
     send_scheduler_.remove(connection);
     QuicConnection::EndpointIndex &index = connection.endpoint_index;
-    if (connection.original_dcid_index.cid_hook.linked()) {
-        dcid_tree_.erase(connection.original_dcid_index);
-    }
-    if (connection.local_cid_index.cid_hook.linked()) {
-        dcid_tree_.erase(connection.local_cid_index);
+    unregister_connection_id(connection.original_dcid_index);
+    for (QuicLocalConnectionIdSlot &slot: connection.local_cids_) {
+        unregister_connection_id(slot.endpoint_index);
     }
     if (index.link.linked()) {
         connections_.erase(index);
@@ -605,9 +609,24 @@ common::IoResult<QuicConnectionId> QuicUdpEndpoint::generate_connection_id() noe
     return QuicConnectionId::from_bytes(bytes, sizeof(bytes));
 }
 
-common::IoResult<void> QuicUdpEndpoint::register_connection_id(QuicConnection &connection,
-                                                               QuicConnection::ConnectionIdIndex &index,
+common::IoResult<QuicConnectionId> QuicUdpEndpoint::generate_unique_connection_id() noexcept {
+    for (std::uint8_t attempt = 0; attempt < 8; ++attempt) {
+        auto generated = generate_connection_id();
+        if (!generated) {
+            return std::unexpected(generated.error());
+        }
+        if (find_connection(*generated) == nullptr) {
+            return *generated;
+        }
+    }
+    return std::unexpected(common::IoErr::Already);
+}
+
+common::IoResult<void> QuicUdpEndpoint::register_connection_id(QuicConnection &connection, QuicConnectionIdIndex &index,
                                                                const QuicConnectionId &cid) noexcept {
+    if (index.cid_hook.linked()) {
+        return std::unexpected(common::IoErr::Already);
+    }
     const std::uint64_t cid_hash = hash_connection_id(cid);
     if (find_connection(cid, cid_hash) != nullptr) {
         return std::unexpected(common::IoErr::Already);
@@ -618,6 +637,120 @@ common::IoResult<void> QuicUdpEndpoint::register_connection_id(QuicConnection &c
     index.cid_hash = cid_hash;
     dcid_tree_.insert(index);
     return {};
+}
+
+void QuicUdpEndpoint::unregister_connection_id(QuicConnectionIdIndex &index) noexcept {
+    if (index.cid_hook.linked()) {
+        dcid_tree_.erase(index);
+    }
+    index = QuicConnectionIdIndex{};
+}
+
+common::IoResult<void>
+QuicUdpEndpoint::create_stateless_reset_token(const QuicConnectionId &cid,
+                                              std::uint8_t out[kStatelessResetTokenLength]) const noexcept {
+    if (out == nullptr || !options_.stateless_reset_secret_set) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    std::uint8_t message[1 + kMaxConnectionIdLength]{};
+    message[0] = cid.length;
+    if (!cid.empty()) {
+        std::memcpy(message + 1, cid.data(), cid.size());
+    }
+
+    std::uint8_t digest[32]{};
+    unsigned int digest_len = 0;
+    if (HMAC(EVP_sha256(), options_.stateless_reset_secret.data(),
+             static_cast<int>(options_.stateless_reset_secret.size()), message, 1 + cid.size(), digest,
+             &digest_len) == nullptr) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (digest_len < kStatelessResetTokenLength) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    std::memcpy(out, digest, kStatelessResetTokenLength);
+    return {};
+}
+
+common::IoResult<bool> QuicUdpEndpoint::fill_local_connection_ids(QuicConnection &connection) noexcept {
+    if (connection.terminal_closing()) {
+        return false;
+    }
+
+    const std::size_t target = connection.local_connection_id_target();
+    bool queued = false;
+    while (connection.active_local_connection_id_count() < target) {
+        QuicLocalConnectionIdSlot *slot = connection.find_free_local_connection_id_slot();
+        if (slot == nullptr) {
+            return std::unexpected(common::IoErr::NoMem);
+        }
+
+        auto generated = generate_unique_connection_id();
+        if (!generated) {
+            return std::unexpected(generated.error());
+        }
+
+        auto registered = register_connection_id(connection, slot->endpoint_index, *generated);
+        if (!registered) {
+            return std::unexpected(registered.error());
+        }
+
+        slot->sequence_number = connection.next_local_cid_sequence_;
+        slot->used = true;
+        slot->advertised = false;
+
+        std::uint8_t token[kStatelessResetTokenLength]{};
+        auto token_created = create_stateless_reset_token(slot->endpoint_index.cid_key, token);
+        if (!token_created) {
+            unregister_connection_id(slot->endpoint_index);
+            *slot = QuicLocalConnectionIdSlot{};
+            return std::unexpected(token_created.error());
+        }
+
+        auto frame_queued = connection.queue_new_connection_id_frame(*slot, token);
+        if (!frame_queued) {
+            unregister_connection_id(slot->endpoint_index);
+            *slot = QuicLocalConnectionIdSlot{};
+            return std::unexpected(frame_queued.error());
+        }
+
+        slot->advertised = true;
+        ++connection.next_local_cid_sequence_;
+        queued = true;
+    }
+
+    return queued;
+}
+
+common::IoResult<bool>
+QuicUdpEndpoint::retire_local_connection_id_and_resend(QuicConnection &connection, std::uint64_t sequence_number,
+                                                       const QuicConnectionId &packet_dcid) noexcept {
+    if (sequence_number >= connection.next_local_cid_sequence_) {
+        connection.close(QuicErrorCode::ProtocolViolation,
+                         static_cast<std::uint64_t>(QuicFrameType::RetireConnectionId));
+        return true;
+    }
+
+    QuicLocalConnectionIdSlot *slot = connection.find_local_connection_id_slot(sequence_number);
+    if (slot == nullptr) {
+        return false;
+    }
+    if (compare_connection_id(slot->endpoint_index.cid_key, packet_dcid) == 0) {
+        connection.close(QuicErrorCode::ProtocolViolation,
+                         static_cast<std::uint64_t>(QuicFrameType::RetireConnectionId));
+        return true;
+    }
+
+    unregister_connection_id(slot->endpoint_index);
+    *slot = QuicLocalConnectionIdSlot{};
+    auto filled = fill_local_connection_ids(connection);
+    if (!filled) {
+        connection.close(QuicErrorCode::InternalError);
+        return true;
+    }
+    return *filled;
 }
 
 common::IoResult<QuicUdpEndpoint::QuicInitialValidation>
@@ -760,6 +893,7 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     conn_options.max_peer_bidirectional_streams = options_.transport.initial_max_streams_bidi;
     conn_options.max_peer_unidirectional_streams = options_.transport.initial_max_streams_uni;
     conn_options.output_frame_pool = &output_frame_pool_;
+    conn_options.endpoint = this;
     conn_options.schedule_send_owner = this;
     conn_options.schedule_send = [](void *owner, QuicConnection &connection) noexcept {
         static_cast<QuicUdpEndpoint *>(owner)->schedule_send(connection);
@@ -782,17 +916,17 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
         delete connection;
         return std::unexpected(registered.error());
     }
-    registered = register_connection_id(*connection, connection->local_cid_index, local_connection_id);
+    registered = register_connection_id(*connection, connection->local_cids_[0].endpoint_index, local_connection_id);
     if (!registered) {
-        dcid_tree_.erase(connection->original_dcid_index);
+        unregister_connection_id(connection->original_dcid_index);
         delete connection;
         return std::unexpected(registered.error());
     }
     if (options_.tls_context != nullptr) {
         auto tls_initialized = connection->tls().init_server(*options_.tls_context, *connection);
         if (!tls_initialized) {
-            dcid_tree_.erase(connection->original_dcid_index);
-            dcid_tree_.erase(connection->local_cid_index);
+            unregister_connection_id(connection->original_dcid_index);
+            unregister_connection_id(connection->local_cids_[0].endpoint_index);
             delete connection;
             return std::unexpected(tls_initialized.error());
         }

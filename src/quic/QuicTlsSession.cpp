@@ -197,6 +197,11 @@ create_server_transport_params(QuicConnection &connection, std::uint8_t *out, st
     params.original_destination_connection_id = connection.original_destination_connection_id();
     params.has_initial_source_connection_id = true;
     params.initial_source_connection_id = connection.local_connection_id();
+    auto reset_token =
+            connection.stateless_reset_token_for(connection.local_connection_id(), params.stateless_reset_token);
+    if (reset_token) {
+        params.has_stateless_reset_token = true;
+    }
     if (connection.retried()) {
         params.has_retry_source_connection_id = true;
         params.retry_source_connection_id = connection.retry_source_connection_id();

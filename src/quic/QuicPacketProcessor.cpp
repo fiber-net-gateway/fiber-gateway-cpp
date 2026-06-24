@@ -273,7 +273,7 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
     result.path = *bound_path;
     result.created_path = result.path->tag == QuicPathTag::Probe;
     result.rebound =
-            result.created_path && (connection_id_equal(packet.dcid, conn.local_connection_id()) ||
+            result.created_path && (conn.has_active_local_connection_id(packet.dcid) ||
                                     connection_id_equal(packet.dcid, conn.original_destination_connection_id()));
     result.packet_type = packet.type;
     result.level = packet.level;
@@ -405,7 +405,6 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
             }
             case QuicFrameType::NewToken:
             case QuicFrameType::NewConnectionId:
-            case QuicFrameType::RetireConnectionId:
             case QuicFrameType::HandshakeDone:
             case QuicFrameType::Stream1:
             case QuicFrameType::Stream2:
@@ -415,6 +414,14 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
             case QuicFrameType::Stream6:
             case QuicFrameType::Stream7:
                 break;
+            case QuicFrameType::RetireConnectionId: {
+                auto retired = conn.recv_retire_connection_id_frame(frame.u.retire_connection_id, packet.dcid);
+                if (!retired) {
+                    return std::unexpected(retired.error());
+                }
+                result.send_output = result.send_output || *retired;
+                break;
+            }
             case QuicFrameType::PathChallenge: {
                 if (packet.level != QuicEncryptionLevel::Application || path_challenged || result.path == nullptr) {
                     break;
@@ -565,7 +572,7 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
     result.path = *bound_path;
     result.created_path = result.path->tag == QuicPathTag::Probe;
     result.rebound =
-            result.created_path && (connection_id_equal(packet->dcid, conn.local_connection_id()) ||
+            result.created_path && (conn.has_active_local_connection_id(packet->dcid) ||
                                     connection_id_equal(packet->dcid, conn.original_destination_connection_id()));
     result.packet_type = packet->type;
     result.level = packet->level;

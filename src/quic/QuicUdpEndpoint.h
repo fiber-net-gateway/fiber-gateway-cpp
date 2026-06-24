@@ -30,6 +30,7 @@ namespace fiber::quic {
 
 inline constexpr std::size_t kQuicUdpDefaultReadBufferSize = 65536;
 inline constexpr std::size_t kQuicUdpDefaultPlaintextBufferSize = 65536;
+inline constexpr std::size_t kQuicStatelessResetSecretLength = 32;
 
 struct QuicUdpReceiveResult {
     QuicConnection *connection = nullptr;
@@ -54,6 +55,8 @@ public:
         bool issue_new_token = false;
         bool address_validation_key_set = false;
         std::array<std::uint8_t, kQuicAddressValidationKeyLength> address_validation_key{};
+        bool stateless_reset_secret_set = false;
+        std::array<std::uint8_t, kQuicStatelessResetSecretLength> stateless_reset_secret{};
         std::chrono::seconds retry_token_lifetime{3};
         std::chrono::seconds new_token_lifetime{600};
     };
@@ -80,15 +83,15 @@ public:
 
 private:
     friend class QuicSendScheduler;
+    friend class QuicConnection;
 
     struct QuicConnectionDcidLess {
-        [[nodiscard]] bool operator()(const QuicConnection::ConnectionIdIndex *left,
-                                      const QuicConnection::ConnectionIdIndex *right) const noexcept;
+        [[nodiscard]] bool operator()(const QuicConnectionIdIndex *left,
+                                      const QuicConnectionIdIndex *right) const noexcept;
     };
 
-    using DcidTree =
-            common::IntrusiveRbTree<QuicConnection::ConnectionIdIndex,
-                                    offsetof(QuicConnection::ConnectionIdIndex, cid_hook), QuicConnectionDcidLess>;
+    using DcidTree = common::IntrusiveRbTree<QuicConnectionIdIndex, offsetof(QuicConnectionIdIndex, cid_hook),
+                                             QuicConnectionDcidLess>;
     using ConnectionList =
             common::IntrusiveList<QuicConnection::EndpointIndex, offsetof(QuicConnection::EndpointIndex, link)>;
 
@@ -112,9 +115,8 @@ private:
                                                    const QuicConnectionId &right) noexcept;
     [[nodiscard]] static int compare_dcid_key(std::uint64_t left_hash, const QuicConnectionId &left,
                                               std::uint64_t right_hash, const QuicConnectionId &right) noexcept;
-    [[nodiscard]] static QuicConnection::ConnectionIdIndex *
-    index_from_dcid_hook(common::IntrusiveRbTreeHook *hook) noexcept;
-    [[nodiscard]] static const QuicConnection::ConnectionIdIndex *
+    [[nodiscard]] static QuicConnectionIdIndex *index_from_dcid_hook(common::IntrusiveRbTreeHook *hook) noexcept;
+    [[nodiscard]] static const QuicConnectionIdIndex *
     index_from_dcid_hook(const common::IntrusiveRbTreeHook *hook) noexcept;
 
     [[nodiscard]] QuicConnection *find_connection(const QuicConnectionId &dcid, std::uint64_t hash) noexcept;
@@ -123,9 +125,18 @@ private:
     void delete_connection(QuicConnection &connection) noexcept;
     static void delete_connection_on_timer(void *owner, QuicConnection &connection) noexcept;
     [[nodiscard]] common::IoResult<QuicConnectionId> generate_connection_id() noexcept;
+    [[nodiscard]] common::IoResult<QuicConnectionId> generate_unique_connection_id() noexcept;
     [[nodiscard]] common::IoResult<void> register_connection_id(QuicConnection &connection,
-                                                                QuicConnection::ConnectionIdIndex &index,
+                                                                QuicConnectionIdIndex &index,
                                                                 const QuicConnectionId &cid) noexcept;
+    void unregister_connection_id(QuicConnectionIdIndex &index) noexcept;
+    [[nodiscard]] common::IoResult<void>
+    create_stateless_reset_token(const QuicConnectionId &cid,
+                                 std::uint8_t out[kStatelessResetTokenLength]) const noexcept;
+    [[nodiscard]] common::IoResult<bool> fill_local_connection_ids(QuicConnection &connection) noexcept;
+    [[nodiscard]] common::IoResult<bool>
+    retire_local_connection_id_and_resend(QuicConnection &connection, std::uint64_t sequence_number,
+                                          const QuicConnectionId &packet_dcid) noexcept;
     [[nodiscard]] common::IoResult<QuicInitialValidation>
     validate_initial_address(const QuicPacketHeader &packet, const QuicReceivedDatagram &datagram) noexcept;
     [[nodiscard]] common::IoResult<void> send_direct_datagram(const std::uint8_t *data, std::size_t len,

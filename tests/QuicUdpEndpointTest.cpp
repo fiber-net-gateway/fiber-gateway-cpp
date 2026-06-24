@@ -22,6 +22,7 @@
 #include "quic/QuicPacketCodec.h"
 #include "quic/QuicToken.h"
 #include "quic/QuicTransportCodec.h"
+#include "quic/QuicTransportParamsCodec.h"
 #include "quic/QuicUdpEndpoint.h"
 
 namespace {
@@ -431,6 +432,47 @@ DetachedTask send_two_datagrams_from_distinct_clients(
 DetachedTask close_endpoint(fiber::quic::QuicUdpEndpoint *endpoint, std::promise<void> *done_promise) {
     endpoint->close();
     done_promise->set_value();
+    co_return;
+}
+
+DetachedTask establish_connection(fiber::quic::QuicConnection *connection, std::uint64_t active_connection_id_limit,
+                                  std::promise<fiber::common::IoResult<void>> *done_promise) {
+    if (connection == nullptr) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+        co_return;
+    }
+
+    fiber::quic::QuicTransportParams params{};
+    params.has_initial_source_connection_id = true;
+    params.initial_source_connection_id = connection->remote_connection_id();
+    params.max_udp_payload_size = fiber::quic::kMinInitialDatagramSize;
+    params.active_connection_id_limit = active_connection_id_limit;
+
+    auto applied = connection->apply_peer_transport_params(params);
+    if (!applied) {
+        done_promise->set_value(std::unexpected(applied.error()));
+        co_return;
+    }
+    auto established = connection->mark_established();
+    if (!established) {
+        done_promise->set_value(std::unexpected(established.error()));
+        co_return;
+    }
+    done_promise->set_value({});
+    co_return;
+}
+
+DetachedTask retire_connection_id(fiber::quic::QuicConnection *connection, std::uint64_t sequence_number,
+                                  fiber::quic::QuicConnectionId packet_dcid,
+                                  std::promise<fiber::common::IoResult<bool>> *done_promise) {
+    if (connection == nullptr) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+        co_return;
+    }
+
+    fiber::quic::QuicRetireConnectionIdFrame frame{};
+    frame.sequence_number = sequence_number;
+    done_promise->set_value(connection->recv_retire_connection_id_frame(frame, packet_dcid));
     co_return;
 }
 
@@ -1158,6 +1200,69 @@ void close_endpoint_on_loop(fiber::event::EventLoopGroup &group, fiber::quic::Qu
     EXPECT_EQ(close_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
 }
 
+fiber::common::IoResult<void> establish_connection_on_loop(fiber::event::EventLoopGroup &group,
+                                                           fiber::quic::QuicConnection *connection,
+                                                           std::uint64_t active_connection_id_limit) {
+    std::promise<fiber::common::IoResult<void>> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return establish_connection(connection, active_connection_id_limit, &promise); });
+    EXPECT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    return future.get();
+}
+
+fiber::common::IoResult<bool> retire_connection_id_on_loop(fiber::event::EventLoopGroup &group,
+                                                           fiber::quic::QuicConnection *connection,
+                                                           std::uint64_t sequence_number,
+                                                           const fiber::quic::QuicConnectionId &packet_dcid) {
+    std::promise<fiber::common::IoResult<bool>> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return retire_connection_id(connection, sequence_number, packet_dcid, &promise); });
+    EXPECT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    return future.get();
+}
+
+std::size_t collect_pending_new_connection_ids(
+        const fiber::quic::QuicConnection &connection,
+        std::array<fiber::quic::QuicNewConnectionIdFrame, fiber::quic::kQuicLocalConnectionIdSlotCount> &frames) {
+    const auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    std::size_t count = 0;
+    for (const fiber::quic::QuicOutputFrame *frame = space.pending_frames.front(); frame != nullptr;
+         frame = space.pending_frames.next_of(*frame)) {
+        if (frame->type != fiber::quic::QuicFrameType::NewConnectionId) {
+            continue;
+        }
+        if (count < frames.size()) {
+            frames[count] = frame->u.new_connection_id;
+        }
+        ++count;
+    }
+    return count;
+}
+
+void clear_pending_new_connection_ids(fiber::quic::QuicConnection &connection) {
+    auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    fiber::quic::QuicOutputFrame *prev = nullptr;
+    fiber::quic::QuicOutputFrame *frame = space.pending_frames.front();
+    while (frame != nullptr) {
+        fiber::quic::QuicOutputFrame *next = space.pending_frames.next_of(*frame);
+        if (frame->type == fiber::quic::QuicFrameType::NewConnectionId) {
+            space.pending_frames.erase_after(prev, *frame);
+            space.release_frame(*frame);
+        } else {
+            prev = frame;
+        }
+        frame = next;
+    }
+}
+
+fiber::quic::QuicConnectionId cid_from_new_connection_id(const fiber::quic::QuicNewConnectionIdFrame &frame) {
+    auto cid = fiber::quic::QuicConnectionId::from_bytes(frame.cid, frame.cid_len);
+    EXPECT_TRUE(cid.has_value());
+    return cid.value_or(fiber::quic::QuicConnectionId{});
+}
+
 } // namespace
 
 TEST(QuicUdpEndpointTest, CreatesConnectionForNewInitialDcid) {
@@ -1187,6 +1292,156 @@ TEST(QuicUdpEndpointTest, CreatesConnectionForNewInitialDcid) {
     EXPECT_EQ(result->connection->original_destination_connection_id().size(), dcid.size());
     EXPECT_EQ(result->connection->local_connection_id().size(), fiber::quic::kQuicConnectionIdLength);
     EXPECT_EQ(endpoint.find_connection(result->connection->local_connection_id()), result->connection);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, EstablishingConnectionQueuesLocalConnectionIdsUpToPeerLimit) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("8394c8f03e515708");
+    const auto scid = cid_from_hex("11223344");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
+    build_initial_datagram(datagram, dcid, scid);
+
+    auto result = recv_after_send(group, endpoint, datagram.data(), datagram.size());
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    ASSERT_NE(result->connection, nullptr);
+
+    auto established = establish_connection_on_loop(group, result->connection, 3);
+    ASSERT_TRUE(established.has_value()) << static_cast<int>(established.error());
+
+    std::array<fiber::quic::QuicNewConnectionIdFrame, fiber::quic::kQuicLocalConnectionIdSlotCount> frames{};
+    EXPECT_EQ(collect_pending_new_connection_ids(*result->connection, frames), 2U);
+    EXPECT_EQ(frames[0].sequence_number, 1U);
+    EXPECT_EQ(frames[1].sequence_number, 2U);
+    EXPECT_EQ(frames[0].retire_prior_to, 0U);
+    EXPECT_EQ(frames[1].retire_prior_to, 0U);
+
+    const auto first_cid = cid_from_new_connection_id(frames[0]);
+    const auto second_cid = cid_from_new_connection_id(frames[1]);
+    EXPECT_EQ(first_cid.size(), fiber::quic::kQuicConnectionIdLength);
+    EXPECT_EQ(second_cid.size(), fiber::quic::kQuicConnectionIdLength);
+    EXPECT_EQ(endpoint.find_connection(first_cid), result->connection);
+    EXPECT_EQ(endpoint.find_connection(second_cid), result->connection);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, EstablishingConnectionCapsLocalConnectionIdsAtPeerLimit) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("7394c8f03e515708");
+    const auto scid = cid_from_hex("21223344");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
+    build_initial_datagram(datagram, dcid, scid);
+
+    auto result = recv_after_send(group, endpoint, datagram.data(), datagram.size());
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    ASSERT_NE(result->connection, nullptr);
+
+    auto established = establish_connection_on_loop(group, result->connection, 2);
+    ASSERT_TRUE(established.has_value()) << static_cast<int>(established.error());
+
+    std::array<fiber::quic::QuicNewConnectionIdFrame, fiber::quic::kQuicLocalConnectionIdSlotCount> frames{};
+    EXPECT_EQ(collect_pending_new_connection_ids(*result->connection, frames), 1U);
+    EXPECT_EQ(frames[0].sequence_number, 1U);
+    EXPECT_EQ(endpoint.find_connection(cid_from_new_connection_id(frames[0])), result->connection);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, RetiringLocalConnectionIdUnregistersAndReplenishes) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("6394c8f03e515708");
+    const auto scid = cid_from_hex("31223344");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
+    build_initial_datagram(datagram, dcid, scid);
+
+    auto result = recv_after_send(group, endpoint, datagram.data(), datagram.size());
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    ASSERT_NE(result->connection, nullptr);
+    auto established = establish_connection_on_loop(group, result->connection, 3);
+    ASSERT_TRUE(established.has_value()) << static_cast<int>(established.error());
+
+    std::array<fiber::quic::QuicNewConnectionIdFrame, fiber::quic::kQuicLocalConnectionIdSlotCount> frames{};
+    ASSERT_EQ(collect_pending_new_connection_ids(*result->connection, frames), 2U);
+    const auto retired_cid = cid_from_new_connection_id(frames[0]);
+    const auto kept_cid = cid_from_new_connection_id(frames[1]);
+    clear_pending_new_connection_ids(*result->connection);
+
+    auto retired =
+            retire_connection_id_on_loop(group, result->connection, 1, result->connection->local_connection_id());
+    ASSERT_TRUE(retired.has_value()) << static_cast<int>(retired.error());
+    EXPECT_TRUE(*retired);
+    EXPECT_EQ(endpoint.find_connection(retired_cid), nullptr);
+    EXPECT_EQ(endpoint.find_connection(kept_cid), result->connection);
+
+    frames = {};
+    ASSERT_EQ(collect_pending_new_connection_ids(*result->connection, frames), 1U);
+    EXPECT_EQ(frames[0].sequence_number, 3U);
+    EXPECT_EQ(endpoint.find_connection(cid_from_new_connection_id(frames[0])), result->connection);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, RejectsRetiringCurrentLocalConnectionId) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("5394c8f03e515708");
+    const auto scid = cid_from_hex("41223344");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
+    build_initial_datagram(datagram, dcid, scid);
+
+    auto result = recv_after_send(group, endpoint, datagram.data(), datagram.size());
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    ASSERT_NE(result->connection, nullptr);
+    auto established = establish_connection_on_loop(group, result->connection, 3);
+    ASSERT_TRUE(established.has_value()) << static_cast<int>(established.error());
+
+    std::array<fiber::quic::QuicNewConnectionIdFrame, fiber::quic::kQuicLocalConnectionIdSlotCount> frames{};
+    ASSERT_EQ(collect_pending_new_connection_ids(*result->connection, frames), 2U);
+    const auto retired_cid = cid_from_new_connection_id(frames[0]);
+    clear_pending_new_connection_ids(*result->connection);
+
+    auto retired = retire_connection_id_on_loop(group, result->connection, 1, retired_cid);
+    ASSERT_TRUE(retired.has_value()) << static_cast<int>(retired.error());
+    EXPECT_TRUE(*retired);
+    EXPECT_EQ(result->connection->state(), fiber::quic::QuicConnectionState::Closing);
+    EXPECT_EQ(result->connection->close_error(), fiber::quic::QuicErrorCode::ProtocolViolation);
 
     close_endpoint_on_loop(group, endpoint);
     group.stop();

@@ -30,6 +30,7 @@
 namespace fiber::quic {
 
 struct QuicTransportParams;
+class QuicUdpEndpoint;
 
 inline constexpr std::size_t kQuicInitialSecretLength = 32;
 inline constexpr std::size_t kQuicMaxSecretLength = 48;
@@ -217,13 +218,6 @@ public:
         common::IntrusiveListHook link{};
     };
 
-    struct ConnectionIdIndex {
-        QuicConnection *connection = nullptr;
-        QuicConnectionId cid_key{};
-        std::uint64_t cid_hash = 0;
-        common::IntrusiveRbTreeHook cid_hook{};
-    };
-
     struct SendQueueEntry {
         QuicConnection *connection = nullptr;
         common::IntrusiveListHook link{};
@@ -246,6 +240,7 @@ public:
         std::uint64_t max_local_bidirectional_streams = kQuicDefaultMaxBidirectionalStreams;
         std::uint64_t max_local_unidirectional_streams = kQuicDefaultMaxUnidirectionalStreams;
         QuicOutputFramePool *output_frame_pool = nullptr;
+        QuicUdpEndpoint *endpoint = nullptr;
         void *schedule_send_owner = nullptr;
         void (*schedule_send)(void *owner, QuicConnection &connection) noexcept = nullptr;
         void *lifecycle_owner = nullptr;
@@ -459,12 +454,17 @@ public:
     [[nodiscard]] const QuicTlsSession &tls() const noexcept { return tls_; }
     common::IoResult<void> init_initial_crypto(const QuicConnectionId &original_dcid) noexcept;
     common::IoResult<void> apply_peer_transport_params(const QuicTransportParams &params) noexcept;
+    [[nodiscard]] common::IoResult<bool> recv_retire_connection_id_frame(const QuicRetireConnectionIdFrame &frame,
+                                                                         const QuicConnectionId &packet_dcid) noexcept;
+    [[nodiscard]] bool should_retransmit_new_connection_id(std::uint64_t sequence_number) const noexcept;
+    [[nodiscard]] bool has_active_local_connection_id(const QuicConnectionId &cid) const noexcept;
+    [[nodiscard]] common::IoResult<void>
+    stateless_reset_token_for(const QuicConnectionId &cid, std::uint8_t out[kStatelessResetTokenLength]) const noexcept;
     [[nodiscard]] const QuicTransportSettings &local_transport() const noexcept { return options_.transport; }
     [[nodiscard]] const QuicPeerTransportState &peer_transport() const noexcept { return peer_transport_; }
     [[nodiscard]] bool peer_transport_params_received() const noexcept { return peer_transport_.received; }
     EndpointIndex endpoint_index{};
-    ConnectionIdIndex original_dcid_index{};
-    ConnectionIdIndex local_cid_index{};
+    QuicConnectionIdIndex original_dcid_index{};
     SendQueueEntry send_queue_entry{};
 
 private:
@@ -508,6 +508,15 @@ private:
     [[nodiscard]] common::IoResult<void> queue_stream_data_blocked_frame(QuicStream &stream,
                                                                          std::uint64_t limit) noexcept;
     [[nodiscard]] common::IoResult<void> queue_ping_frame() noexcept;
+    [[nodiscard]] std::size_t active_local_connection_id_count() const noexcept;
+    [[nodiscard]] std::size_t local_connection_id_target() const noexcept;
+    [[nodiscard]] QuicLocalConnectionIdSlot *find_local_connection_id_slot(std::uint64_t sequence_number) noexcept;
+    [[nodiscard]] const QuicLocalConnectionIdSlot *
+    find_local_connection_id_slot(std::uint64_t sequence_number) const noexcept;
+    [[nodiscard]] QuicLocalConnectionIdSlot *find_free_local_connection_id_slot() noexcept;
+    [[nodiscard]] common::IoResult<void>
+    queue_new_connection_id_frame(const QuicLocalConnectionIdSlot &slot,
+                                  const std::uint8_t token[kStatelessResetTokenLength]) noexcept;
     // Queue a single CONNECTION_CLOSE / CONNECTION_CLOSE_APP frame in `level`'s pending
     // queue. Picks the correct frame type from close_info_ and the level. No-op when
     // write keys for that level are not yet derived. Returns whether a frame was
@@ -565,6 +574,8 @@ private:
     QuicStreamTable streams_{};
     QuicTlsSession tls_{};
     QuicPathManager path_manager_{*this};
+    std::array<QuicLocalConnectionIdSlot, kQuicLocalConnectionIdSlotCount> local_cids_{};
+    std::uint64_t next_local_cid_sequence_ = 1;
     std::uint64_t recv_data_consumed_ = 0;
     std::uint64_t recv_data_limit_ = 0;
     std::uint64_t peer_max_data_ = 0;
