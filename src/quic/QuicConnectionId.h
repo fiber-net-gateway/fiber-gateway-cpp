@@ -15,6 +15,12 @@ class QuicConnection;
 
 inline constexpr std::size_t kQuicConnectionIdLength = kMaxConnectionIdLength;
 inline constexpr std::size_t kQuicLocalConnectionIdSlotCount = 3;
+// Capacity for peer-issued CIDs we track per connection (RFC 9000 §5.1.1).
+// Sized larger than the advertised active_connection_id_limit so that a peer
+// NEW_CONNECTION_ID frame which adds one CID and only later retires others
+// can be processed without temporarily exceeding the slot array (cf. nginx
+// NGX_QUIC_MAX_SERVER_IDS = 8). We advertise 4 and reserve 8 slots.
+inline constexpr std::size_t kQuicRemoteConnectionIdSlotCount = 8;
 
 struct QuicConnectionId {
     std::array<std::uint8_t, kMaxConnectionIdLength> bytes{};
@@ -39,6 +45,23 @@ struct QuicLocalConnectionIdSlot {
     std::uint64_t sequence_number = 0;
     bool used = false;
     bool advertised = false;
+};
+
+// Peer-issued Connection ID held in the connection's remote-CID pool. Created
+// either at handshake time from the peer's initial Source Connection ID
+// (sequence_number = 0) or in response to a NEW_CONNECTION_ID frame.
+//
+// in_use marks the slot as populated with a valid CID still active in the pool.
+// used marks the slot as bound to a QuicPath; per RFC 9000 §9.5 a CID MUST NOT
+// be sent to more than one local address, so once used the slot stays sticky
+// until the peer retires it via retire_prior_to (whereupon the slot is wiped
+// and becomes available for a future NEW_CONNECTION_ID).
+struct QuicRemoteConnectionIdSlot {
+    QuicConnectionId cid{};
+    std::uint64_t sequence_number = 0;
+    std::uint8_t stateless_reset_token[kStatelessResetTokenLength]{};
+    bool in_use = false;
+    bool used = false;
 };
 
 } // namespace fiber::quic

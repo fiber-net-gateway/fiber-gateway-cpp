@@ -113,6 +113,24 @@ QuicPath *QuicPathManager::create(const net::SocketAddress &remote, const net::S
     slot->remote = remote;
     slot->local = local;
     slot->remote_connection_id = remote_connection_id;
+    // Bind to the peer-CID pool slot whose cid bytes match. If the cid is not
+    // (yet) in the pool, default to sequence 0 — the slot for the peer's
+    // initial Source Connection ID — which always exists once handshake CIDs
+    // are seeded. This keeps path-to-slot accounting consistent so that a
+    // later retire_remote_connection_id can find and rebind the path.
+    slot->remote_connection_id_sequence = 0;
+    for (QuicRemoteConnectionIdSlot &cid_slot: connection_.remote_cids_) {
+        if (!cid_slot.in_use) {
+            continue;
+        }
+        if (cid_slot.cid.size() == remote_connection_id.size() &&
+            (remote_connection_id.empty() ||
+             std::memcmp(cid_slot.cid.data(), remote_connection_id.data(), remote_connection_id.size()) == 0)) {
+            slot->remote_connection_id_sequence = cid_slot.sequence_number;
+            cid_slot.used = true;
+            break;
+        }
+    }
     slot->tag = tag;
     slot->seqnum = next_seqnum_++;
     slot->mtu = kQuicCongestionMinInitialSize;
@@ -127,7 +145,61 @@ void QuicPathManager::free(QuicPath &path) noexcept {
     if (&path == active_) {
         active_ = nullptr;
     }
+    // Release the bound remote-CID slot so it can be reassigned to another
+    // path or retired by the peer. A slot kept after the path is gone would
+    // pin the CID against future rebinds. We only touch slots whose
+    // sequence_number matches and that hold the same cid bytes — other paths
+    // sharing the same sequence (transitional state during a retire) keep
+    // their own binding via rebind_paths_to_cid.
+    QuicRemoteConnectionIdSlot *bound = nullptr;
+    for (QuicRemoteConnectionIdSlot &cid_slot: connection_.remote_cids_) {
+        if (cid_slot.in_use && cid_slot.sequence_number == path.remote_connection_id_sequence) {
+            bound = &cid_slot;
+            break;
+        }
+    }
+    if (bound != nullptr) {
+        bool still_used = false;
+        for (const QuicPath &other: paths_) {
+            if (&other == &path || !other.allocated) {
+                continue;
+            }
+            if (other.remote_connection_id_sequence == bound->sequence_number) {
+                still_used = true;
+                break;
+            }
+        }
+        if (!still_used) {
+            bound->used = false;
+        }
+    }
     path = QuicPath{};
+}
+
+QuicPath *QuicPathManager::find_path_by_remote_cid_sequence(std::uint64_t sequence) noexcept {
+    for (QuicPath &path: paths_) {
+        if (path.allocated && path.remote_connection_id_sequence == sequence) {
+            return &path;
+        }
+    }
+    return nullptr;
+}
+
+std::size_t QuicPathManager::rebind_paths_to_cid(std::uint64_t from_sequence,
+                                                 const QuicRemoteConnectionIdSlot &to) noexcept {
+    std::size_t rebound = 0;
+    for (QuicPath &path: paths_) {
+        if (!path.allocated || path.remote_connection_id_sequence != from_sequence) {
+            continue;
+        }
+        path.remote_connection_id = to.cid;
+        path.remote_connection_id_sequence = to.sequence_number;
+        if (&path == active_) {
+            connection_.options_.remote_connection_id = to.cid;
+        }
+        ++rebound;
+    }
+    return rebound;
 }
 
 bool QuicPathManager::set_active(QuicPath &path) noexcept {

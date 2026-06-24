@@ -116,7 +116,7 @@ struct QuicTransportSettings {
     std::uint64_t initial_max_streams_uni = kQuicDefaultMaxUnidirectionalStreams;
     std::uint64_t ack_delay_exponent = 3;
     std::chrono::milliseconds max_ack_delay{25};
-    std::uint64_t active_connection_id_limit = 2;
+    std::uint64_t active_connection_id_limit = 4;
     bool disable_active_migration = false;
 };
 
@@ -456,7 +456,13 @@ public:
     common::IoResult<void> apply_peer_transport_params(const QuicTransportParams &params) noexcept;
     [[nodiscard]] common::IoResult<bool> recv_retire_connection_id_frame(const QuicRetireConnectionIdFrame &frame,
                                                                          const QuicConnectionId &packet_dcid) noexcept;
+    // Handle a peer-issued NEW_CONNECTION_ID frame (RFC 9000 §19.15). On success
+    // returns whether new outbound traffic was queued (a RETIRE_CONNECTION_ID
+    // frame in response, or a path-CID switch). Protocol-level violations
+    // close the connection and propagate as IoErr::Invalid.
+    [[nodiscard]] common::IoResult<bool> recv_new_connection_id_frame(const QuicNewConnectionIdFrame &frame) noexcept;
     [[nodiscard]] bool should_retransmit_new_connection_id(std::uint64_t sequence_number) const noexcept;
+    [[nodiscard]] bool should_retransmit_retire_connection_id(std::uint64_t sequence_number) const noexcept;
     [[nodiscard]] bool has_active_local_connection_id(const QuicConnectionId &cid) const noexcept;
     [[nodiscard]] common::IoResult<void>
     stateless_reset_token_for(const QuicConnectionId &cid, std::uint8_t out[kStatelessResetTokenLength]) const noexcept;
@@ -517,6 +523,17 @@ private:
     [[nodiscard]] common::IoResult<void>
     queue_new_connection_id_frame(const QuicLocalConnectionIdSlot &slot,
                                   const std::uint8_t token[kStatelessResetTokenLength]) noexcept;
+    [[nodiscard]] common::IoResult<void> queue_retire_connection_id_frame(std::uint64_t sequence_number) noexcept;
+    [[nodiscard]] QuicRemoteConnectionIdSlot *find_remote_connection_id_slot(std::uint64_t sequence_number) noexcept;
+    [[nodiscard]] const QuicRemoteConnectionIdSlot *
+    find_remote_connection_id_slot(std::uint64_t sequence_number) const noexcept;
+    [[nodiscard]] QuicRemoteConnectionIdSlot *find_free_remote_connection_id_slot() noexcept;
+    [[nodiscard]] std::size_t active_remote_connection_id_count() const noexcept;
+    // Drop a single remote-CID slot, posting the corresponding RETIRE frame and
+    // — if the CID is bound to a path — either swapping to an unused CID
+    // (active path) or releasing the path (non-active). Returns true when any
+    // outbound frame was queued.
+    [[nodiscard]] common::IoResult<bool> retire_remote_connection_id(QuicRemoteConnectionIdSlot &slot) noexcept;
     // Queue a single CONNECTION_CLOSE / CONNECTION_CLOSE_APP frame in `level`'s pending
     // queue. Picks the correct frame type from close_info_ and the level. No-op when
     // write keys for that level are not yet derived. Returns whether a frame was
@@ -576,6 +593,16 @@ private:
     QuicPathManager path_manager_{*this};
     std::array<QuicLocalConnectionIdSlot, kQuicLocalConnectionIdSlotCount> local_cids_{};
     std::uint64_t next_local_cid_sequence_ = 1;
+    std::array<QuicRemoteConnectionIdSlot, kQuicRemoteConnectionIdSlotCount> remote_cids_{};
+    // Largest retire_prior_to value we have observed; per RFC 9000 §19.15
+    // smaller subsequent values MUST be ignored, and CIDs below it that have
+    // not yet been retired MUST be retired.
+    std::uint64_t max_retired_remote_seq_ = 0;
+    // Largest sequence_number ever installed (locally accepted) into the pool.
+    // Tracks the boundary used to detect peer-side replays after retirement
+    // (RFC 9000 §19.15 — receipt of NEW_CONNECTION_ID with sequence_number
+    // smaller than Retire Prior To MUST be RETIRE-acknowledged).
+    std::uint64_t largest_seen_remote_seq_ = 0;
     std::uint64_t recv_data_consumed_ = 0;
     std::uint64_t recv_data_limit_ = 0;
     std::uint64_t peer_max_data_ = 0;

@@ -142,6 +142,15 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
     local_cids_[0].sequence_number = 0;
     local_cids_[0].used = true;
     local_cids_[0].advertised = true;
+    // Seed the peer-CID pool with the peer's initial Source Connection ID at
+    // sequence 0 (RFC 9000 §5.1.1). This CID arrived in the long-header SCID
+    // field, not via a NEW_CONNECTION_ID frame, but RFC 9000 §19.16 mandates
+    // that the peer not RETIRE_CONNECTION_ID(0) referencing the packet's own
+    // DCID; we track it like any other slot so path-CID accounting is uniform.
+    remote_cids_[0].cid = options_.remote_connection_id;
+    remote_cids_[0].sequence_number = 0;
+    remote_cids_[0].in_use = !options_.remote_connection_id.empty();
+    remote_cids_[0].used = remote_cids_[0].in_use;
     options_.transport.initial_max_data = options_.recv_flow.conn_recv_limit;
     options_.transport.initial_max_stream_data_bidi_local = options_.recv_flow.stream_buffer_limit;
     options_.transport.initial_max_stream_data_bidi_remote = options_.recv_flow.stream_buffer_limit;
@@ -1273,6 +1282,197 @@ QuicConnection::queue_new_connection_id_frame(const QuicLocalConnectionIdSlot &s
     std::memcpy(frame->u.new_connection_id.stateless_reset_token, token, kStatelessResetTokenLength);
     space.pending_frames.push_back(*frame);
     return {};
+}
+
+common::IoResult<void> QuicConnection::queue_retire_connection_id_frame(std::uint64_t sequence_number) noexcept {
+    QuicPacketNumberSpace &space = packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
+    frame->type = QuicFrameType::RetireConnectionId;
+    frame->u.retire_connection_id.sequence_number = sequence_number;
+    space.pending_frames.push_back(*frame);
+    return {};
+}
+
+QuicRemoteConnectionIdSlot *QuicConnection::find_remote_connection_id_slot(std::uint64_t sequence_number) noexcept {
+    for (QuicRemoteConnectionIdSlot &slot: remote_cids_) {
+        if (slot.in_use && slot.sequence_number == sequence_number) {
+            return &slot;
+        }
+    }
+    return nullptr;
+}
+
+const QuicRemoteConnectionIdSlot *
+QuicConnection::find_remote_connection_id_slot(std::uint64_t sequence_number) const noexcept {
+    for (const QuicRemoteConnectionIdSlot &slot: remote_cids_) {
+        if (slot.in_use && slot.sequence_number == sequence_number) {
+            return &slot;
+        }
+    }
+    return nullptr;
+}
+
+QuicRemoteConnectionIdSlot *QuicConnection::find_free_remote_connection_id_slot() noexcept {
+    for (QuicRemoteConnectionIdSlot &slot: remote_cids_) {
+        if (!slot.in_use) {
+            return &slot;
+        }
+    }
+    return nullptr;
+}
+
+std::size_t QuicConnection::active_remote_connection_id_count() const noexcept {
+    std::size_t count = 0;
+    for (const QuicRemoteConnectionIdSlot &slot: remote_cids_) {
+        if (slot.in_use) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+bool QuicConnection::should_retransmit_retire_connection_id(std::uint64_t sequence_number) const noexcept {
+    // Only retransmit a lost RETIRE_CONNECTION_ID when the CID it refers to is
+    // no longer in our pool. If the slot is still in_use, the peer will (or
+    // already did) re-issue it via NEW_CONNECTION_ID and we'll re-RETIRE.
+    return find_remote_connection_id_slot(sequence_number) == nullptr;
+}
+
+common::IoResult<bool> QuicConnection::retire_remote_connection_id(QuicRemoteConnectionIdSlot &slot) noexcept {
+    if (!slot.in_use) {
+        return false;
+    }
+
+    bool queued = false;
+    if (slot.used) {
+        QuicPath *path = path_manager_.find_path_by_remote_cid_sequence(slot.sequence_number);
+        if (path != nullptr) {
+            if (path == path_manager_.active()) {
+                // Active path needs a replacement CID, otherwise we cannot keep
+                // sending; if none available the connection has run out of
+                // peer-provided CIDs and must close (RFC 9000 §5.1.2 — implicit:
+                // a peer that retires more than it issues breaks the protocol).
+                QuicRemoteConnectionIdSlot *replacement = nullptr;
+                for (QuicRemoteConnectionIdSlot &candidate: remote_cids_) {
+                    if (&candidate == &slot) {
+                        continue;
+                    }
+                    if (candidate.in_use && !candidate.used) {
+                        replacement = &candidate;
+                        break;
+                    }
+                }
+                if (replacement == nullptr) {
+                    close(QuicErrorCode::InternalError);
+                    return std::unexpected(common::IoErr::Invalid);
+                }
+                replacement->used = true;
+                (void) path_manager_.rebind_paths_to_cid(slot.sequence_number, *replacement);
+            } else {
+                path_manager_.free(*path);
+            }
+        }
+    }
+
+    const std::uint64_t seq = slot.sequence_number;
+    slot = QuicRemoteConnectionIdSlot{};
+    auto enqueued = queue_retire_connection_id_frame(seq);
+    if (!enqueued) {
+        return std::unexpected(enqueued.error());
+    }
+    queued = true;
+    return queued;
+}
+
+common::IoResult<bool> QuicConnection::recv_new_connection_id_frame(const QuicNewConnectionIdFrame &frame) noexcept {
+    // RFC 9000 §19.15: Connection ID length MUST be at least 1 and MUST NOT
+    // exceed 20. retire_prior_to MUST be ≤ sequence_number.
+    if (frame.cid_len == 0 || frame.cid_len > kMaxConnectionIdLength || frame.retire_prior_to > frame.sequence_number) {
+        close(QuicErrorCode::FrameEncodingError, static_cast<std::uint64_t>(QuicFrameType::NewConnectionId));
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    auto incoming = QuicConnectionId::from_bytes(frame.cid, frame.cid_len);
+    if (!incoming) {
+        close(QuicErrorCode::FrameEncodingError, static_cast<std::uint64_t>(QuicFrameType::NewConnectionId));
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const QuicConnectionId &new_cid = *incoming;
+
+    bool send_output = false;
+
+    // RFC 9000 §19.15:
+    //   An endpoint that receives a NEW_CONNECTION_ID frame with a sequence
+    //   number smaller than the Retire Prior To field of a previously received
+    //   NEW_CONNECTION_ID frame MUST send a corresponding RETIRE_CONNECTION_ID
+    //   frame.
+    if (frame.sequence_number < max_retired_remote_seq_) {
+        auto queued = queue_retire_connection_id_frame(frame.sequence_number);
+        if (!queued) {
+            return std::unexpected(queued.error());
+        }
+        return true;
+    }
+
+    // De-duplicate: a retransmitted NEW_CONNECTION_ID with the same seqnum is
+    // legal as long as the cid bytes and token match; otherwise § says we MAY
+    // treat as PROTOCOL_VIOLATION.
+    if (QuicRemoteConnectionIdSlot *existing = find_remote_connection_id_slot(frame.sequence_number)) {
+        if (!connection_id_equal(existing->cid, new_cid) ||
+            std::memcmp(existing->stateless_reset_token, frame.stateless_reset_token, kStatelessResetTokenLength) !=
+                    0) {
+            close(QuicErrorCode::ProtocolViolation, static_cast<std::uint64_t>(QuicFrameType::NewConnectionId));
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        // Already in pool: only retire_prior_to / limit checks remain.
+    } else {
+        QuicRemoteConnectionIdSlot *slot = find_free_remote_connection_id_slot();
+        if (slot == nullptr) {
+            // Over capacity even before applying retire_prior_to from this
+            // very frame (which might free slots below). RFC 9000 §5.1.1
+            // grants us at most active_connection_id_limit + 1 transient
+            // entries — kQuicRemoteConnectionIdSlotCount is sized generously
+            // so this is a hard limit error.
+            close(QuicErrorCode::ConnectionIdLimitError, static_cast<std::uint64_t>(QuicFrameType::NewConnectionId));
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        slot->cid = new_cid;
+        slot->sequence_number = frame.sequence_number;
+        std::memcpy(slot->stateless_reset_token, frame.stateless_reset_token, kStatelessResetTokenLength);
+        slot->in_use = true;
+        slot->used = false;
+        if (frame.sequence_number > largest_seen_remote_seq_) {
+            largest_seen_remote_seq_ = frame.sequence_number;
+        }
+    }
+
+    if (frame.retire_prior_to > max_retired_remote_seq_) {
+        max_retired_remote_seq_ = frame.retire_prior_to;
+        for (QuicRemoteConnectionIdSlot &slot: remote_cids_) {
+            if (!slot.in_use || slot.sequence_number >= max_retired_remote_seq_) {
+                continue;
+            }
+            auto retired = retire_remote_connection_id(slot);
+            if (!retired) {
+                return std::unexpected(retired.error());
+            }
+            send_output = send_output || *retired;
+        }
+    }
+
+    // RFC 9000 §5.1.1: After processing NEW_CONNECTION_ID and adding/retiring
+    // CIDs, if the number of active CIDs exceeds our advertised limit, close
+    // the connection with CONNECTION_ID_LIMIT_ERROR.
+    if (active_remote_connection_id_count() > options_.transport.active_connection_id_limit) {
+        close(QuicErrorCode::ConnectionIdLimitError, static_cast<std::uint64_t>(QuicFrameType::NewConnectionId));
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    return send_output;
 }
 
 void QuicConnection::reset_congestion_for_path(QuicTime now) noexcept {
