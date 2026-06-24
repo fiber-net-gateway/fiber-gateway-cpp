@@ -404,7 +404,6 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 break;
             }
             case QuicFrameType::NewToken:
-            case QuicFrameType::NewConnectionId:
             case QuicFrameType::HandshakeDone:
             case QuicFrameType::Stream1:
             case QuicFrameType::Stream2:
@@ -414,6 +413,14 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
             case QuicFrameType::Stream6:
             case QuicFrameType::Stream7:
                 break;
+            case QuicFrameType::NewConnectionId: {
+                auto received = conn.recv_new_connection_id_frame(frame.u.new_connection_id);
+                if (!received) {
+                    return std::unexpected(received.error());
+                }
+                result.send_output = result.send_output || *received;
+                break;
+            }
             case QuicFrameType::RetireConnectionId: {
                 auto retired = conn.recv_retire_connection_id_frame(frame.u.retire_connection_id, packet.dcid);
                 if (!retired) {

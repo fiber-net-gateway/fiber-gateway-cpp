@@ -41,6 +41,15 @@ public:
                                    const QuicConnectionId &remote_connection_id, QuicPathTag tag) noexcept;
     void free(QuicPath &path) noexcept;
     [[nodiscard]] bool set_active(QuicPath &path) noexcept;
+    // Rebind every path currently pointing at `from_sequence` to `to`. Updates
+    // the active-path cached `options_.remote_connection_id` when applicable.
+    // Used when retiring a peer-issued CID that is still bound to a path
+    // (RFC 9000 §5.1.2 / nginx ngx_quic_retire_client_id) — caller has already
+    // checked that some unused CID is available.
+    [[nodiscard]] std::size_t rebind_paths_to_cid(std::uint64_t from_sequence,
+                                                  const QuicRemoteConnectionIdSlot &to) noexcept;
+    // Find any path bound to `sequence` via its remote_connection_id_sequence.
+    [[nodiscard]] QuicPath *find_path_by_remote_cid_sequence(std::uint64_t sequence) noexcept;
 
     void record_received(QuicPath &path, std::size_t len) noexcept;
     void record_sent(QuicPath &path, std::size_t len) noexcept;

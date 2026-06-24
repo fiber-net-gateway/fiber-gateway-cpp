@@ -55,6 +55,8 @@ inline constexpr QuicEncryptionLevel kLossLevels[] = {QuicEncryptionLevel::Initi
                                                                 frame.u.streams_blocked.limit);
         case QuicFrameType::NewConnectionId:
             return connection.should_retransmit_new_connection_id(frame.u.new_connection_id.sequence_number);
+        case QuicFrameType::RetireConnectionId:
+            return connection.should_retransmit_retire_connection_id(frame.u.retire_connection_id.sequence_number);
         default:
             return quic_output_frame_retransmittable_on_loss(frame.type);
     }

@@ -1680,3 +1680,185 @@ TEST(QuicConnectionTest, RejectsLocalOrLimitExceededPassiveStreams) {
     EXPECT_FALSE(limited.has_value());
     EXPECT_EQ(conn.active_stream_count(), 0U);
 }
+
+// === Peer Connection ID pool (RFC 9000 §5.1, §19.15) ====================
+
+namespace {
+
+fiber::quic::QuicNewConnectionIdFrame make_new_cid_frame(std::uint64_t sequence_number, std::uint64_t retire_prior_to,
+                                                         std::initializer_list<std::uint8_t> cid_bytes,
+                                                         std::uint8_t token_pattern) {
+    fiber::quic::QuicNewConnectionIdFrame frame{};
+    frame.sequence_number = sequence_number;
+    frame.retire_prior_to = retire_prior_to;
+    frame.cid_len = static_cast<std::uint8_t>(cid_bytes.size());
+    std::size_t i = 0;
+    for (std::uint8_t byte: cid_bytes) {
+        frame.cid[i++] = byte;
+    }
+    for (std::size_t j = 0; j < fiber::quic::kStatelessResetTokenLength; ++j) {
+        frame.stateless_reset_token[j] = static_cast<std::uint8_t>(token_pattern ^ static_cast<std::uint8_t>(j));
+    }
+    return frame;
+}
+
+fiber::quic::QuicConnection::Options peer_pool_options() {
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Client;
+    options.local_addr = loopback(4433);
+    options.remote_addr = loopback(5555);
+    options.remote_connection_id = cid_from({0x10, 0x20, 0x30, 0x40});
+    return options;
+}
+
+std::size_t count_pending_retire_for(const fiber::quic::QuicConnection &conn, std::uint64_t sequence_number) {
+    const auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    std::size_t count = 0;
+    for (const fiber::quic::QuicOutputFrame *frame = space.pending_frames.front(); frame != nullptr;
+         frame = space.pending_frames.next_of(*frame)) {
+        if (frame->type == fiber::quic::QuicFrameType::RetireConnectionId &&
+            frame->u.retire_connection_id.sequence_number == sequence_number) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+} // namespace
+
+TEST(QuicConnectionTest, PeerCidPoolInstallsNewConnectionIdFrame) {
+    fiber::quic::QuicConnection conn(peer_pool_options());
+    auto frame = make_new_cid_frame(1, 0, {0xaa, 0xbb, 0xcc, 0xdd}, 0x42);
+
+    auto result = conn.recv_new_connection_id_frame(frame);
+
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_FALSE(*result);
+    EXPECT_EQ(count_pending_retire_for(conn, 1), 0U);
+}
+
+TEST(QuicConnectionTest, PeerCidPoolIgnoresRetransmittedNewConnectionId) {
+    fiber::quic::QuicConnection conn(peer_pool_options());
+    auto frame = make_new_cid_frame(1, 0, {0xaa, 0xbb, 0xcc, 0xdd}, 0x42);
+
+    ASSERT_TRUE(conn.recv_new_connection_id_frame(frame).has_value());
+    auto second = conn.recv_new_connection_id_frame(frame);
+
+    ASSERT_TRUE(second.has_value());
+    EXPECT_FALSE(*second);
+}
+
+TEST(QuicConnectionTest, PeerCidPoolRejectsConflictingDuplicateSeqnum) {
+    fiber::quic::QuicConnection conn(peer_pool_options());
+    ASSERT_TRUE(conn.recv_new_connection_id_frame(make_new_cid_frame(1, 0, {0xaa, 0xbb}, 0x42)).has_value());
+
+    auto conflict = conn.recv_new_connection_id_frame(make_new_cid_frame(1, 0, {0x11, 0x22}, 0x42));
+
+    EXPECT_FALSE(conflict.has_value());
+    EXPECT_EQ(static_cast<std::uint64_t>(conn.close_error()),
+              static_cast<std::uint64_t>(fiber::quic::QuicErrorCode::ProtocolViolation));
+}
+
+TEST(QuicConnectionTest, PeerCidPoolRejectsZeroLengthCid) {
+    fiber::quic::QuicConnection conn(peer_pool_options());
+    fiber::quic::QuicNewConnectionIdFrame frame{};
+    frame.sequence_number = 1;
+    frame.cid_len = 0;
+
+    auto result = conn.recv_new_connection_id_frame(frame);
+
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(static_cast<std::uint64_t>(conn.close_error()),
+              static_cast<std::uint64_t>(fiber::quic::QuicErrorCode::FrameEncodingError));
+}
+
+TEST(QuicConnectionTest, PeerCidPoolRejectsRetirePriorToAboveSeqnum) {
+    fiber::quic::QuicConnection conn(peer_pool_options());
+    auto bad = make_new_cid_frame(1, 5, {0xaa, 0xbb}, 0x42);
+
+    auto result = conn.recv_new_connection_id_frame(bad);
+
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(static_cast<std::uint64_t>(conn.close_error()),
+              static_cast<std::uint64_t>(fiber::quic::QuicErrorCode::FrameEncodingError));
+}
+
+TEST(QuicConnectionTest, PeerCidPoolImmediatelyRetiresBelowMaxRetiredSeqnum) {
+    fiber::quic::QuicConnection conn(peer_pool_options());
+    // Bump max_retired_remote_seq_ to 3 via a frame with seq=5, retire_prior_to=3.
+    ASSERT_TRUE(conn.recv_new_connection_id_frame(make_new_cid_frame(5, 3, {0x55, 0x55}, 0x42)).has_value());
+
+    // A late NEW_CONNECTION_ID with seq=2 (< 3) MUST be acked with RETIRE.
+    auto result = conn.recv_new_connection_id_frame(make_new_cid_frame(2, 0, {0x22, 0x22}, 0x33));
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_TRUE(*result);
+    EXPECT_EQ(count_pending_retire_for(conn, 2), 1U);
+}
+
+TEST(QuicConnectionTest, PeerCidPoolAppliesRetirePriorToAndQueuesRetires) {
+    fiber::quic::QuicConnection conn(peer_pool_options());
+    ASSERT_TRUE(conn.recv_new_connection_id_frame(make_new_cid_frame(1, 0, {0xa1, 0xb1}, 0x11)).has_value());
+    ASSERT_TRUE(conn.recv_new_connection_id_frame(make_new_cid_frame(2, 0, {0xa2, 0xb2}, 0x22)).has_value());
+
+    auto result = conn.recv_new_connection_id_frame(make_new_cid_frame(3, 2, {0xa3, 0xb3}, 0x33));
+
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_TRUE(*result);
+    // seq 0 (initial DCID, in pool, bound to active path) and seq 1 are < 2 and must retire.
+    EXPECT_EQ(count_pending_retire_for(conn, 0), 1U);
+    EXPECT_EQ(count_pending_retire_for(conn, 1), 1U);
+    EXPECT_EQ(count_pending_retire_for(conn, 2), 0U);
+    EXPECT_EQ(count_pending_retire_for(conn, 3), 0U);
+}
+
+TEST(QuicConnectionTest, PeerCidPoolSwitchesActivePathToReplacementOnRetire) {
+    fiber::quic::QuicConnection conn(peer_pool_options());
+    // Provide a replacement CID, then ask to retire seq=0 (the active path's CID).
+    auto replacement = make_new_cid_frame(1, 0, {0xaa, 0xbb, 0xcc}, 0x42);
+    ASSERT_TRUE(conn.recv_new_connection_id_frame(replacement).has_value());
+
+    // Frame with seq=2 and retire_prior_to=1 retires seq=0 (active).
+    auto migrate = make_new_cid_frame(2, 1, {0x77, 0x88}, 0x99);
+    auto result = conn.recv_new_connection_id_frame(migrate);
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_TRUE(*result);
+    auto *path = conn.active_path();
+    ASSERT_NE(path, nullptr);
+    EXPECT_EQ(path->remote_connection_id_sequence, 1U);
+    ASSERT_EQ(path->remote_connection_id.size(), 3U);
+    EXPECT_EQ(path->remote_connection_id.data()[0], 0xaa);
+    EXPECT_EQ(conn.remote_connection_id().size(), 3U);
+    EXPECT_EQ(conn.remote_connection_id().data()[0], 0xaa);
+}
+
+TEST(QuicConnectionTest, PeerCidPoolEnforcesActiveConnectionIdLimit) {
+    auto options = peer_pool_options();
+    // Connection's advertised active_connection_id_limit defaults to 4 — pool
+    // contains slot 0 plus up to 3 more. Push past the limit.
+    options.transport.active_connection_id_limit = 3;
+    fiber::quic::QuicConnection conn(options);
+
+    ASSERT_TRUE(conn.recv_new_connection_id_frame(make_new_cid_frame(1, 0, {0x01}, 0x11)).has_value());
+    ASSERT_TRUE(conn.recv_new_connection_id_frame(make_new_cid_frame(2, 0, {0x02}, 0x22)).has_value());
+    // pool now holds {0, 1, 2} == limit. Next one violates the bound.
+    auto fourth = conn.recv_new_connection_id_frame(make_new_cid_frame(3, 0, {0x03}, 0x33));
+
+    EXPECT_FALSE(fourth.has_value());
+    EXPECT_EQ(static_cast<std::uint64_t>(conn.close_error()),
+              static_cast<std::uint64_t>(fiber::quic::QuicErrorCode::ConnectionIdLimitError));
+}
+
+TEST(QuicConnectionTest, PeerCidPoolRetransmitsRetireOnlyWhenSlotEvicted) {
+    fiber::quic::QuicConnection conn(peer_pool_options());
+    ASSERT_TRUE(conn.recv_new_connection_id_frame(make_new_cid_frame(1, 0, {0xaa}, 0x11)).has_value());
+
+    // While the slot is still in the pool, a lost RETIRE for seq=1 would be
+    // redundant (the peer will re-issue via NEW_CONNECTION_ID).
+    EXPECT_FALSE(conn.should_retransmit_retire_connection_id(1));
+
+    // Trigger retire of seq=1 by issuing a frame with retire_prior_to > 1.
+    ASSERT_TRUE(conn.recv_new_connection_id_frame(make_new_cid_frame(2, 2, {0xbb}, 0x22)).has_value());
+    EXPECT_TRUE(conn.should_retransmit_retire_connection_id(1));
+}
