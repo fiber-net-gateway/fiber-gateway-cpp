@@ -10,6 +10,7 @@
 #include "QuicLossRecovery.h"
 #include "QuicProtocol.h"
 #include "QuicTransportParamsCodec.h"
+#include "QuicUdpEndpoint.h"
 
 namespace fiber::quic {
 
@@ -137,6 +138,10 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
     if (options_.initial_destination_connection_id.empty()) {
         options_.initial_destination_connection_id = options_.original_destination_connection_id;
     }
+    local_cids_[0].endpoint_index.cid_key = options_.local_connection_id;
+    local_cids_[0].sequence_number = 0;
+    local_cids_[0].used = true;
+    local_cids_[0].advertised = true;
     options_.transport.initial_max_data = options_.recv_flow.conn_recv_limit;
     options_.transport.initial_max_stream_data_bidi_local = options_.recv_flow.stream_buffer_limit;
     options_.transport.initial_max_stream_data_bidi_remote = options_.recv_flow.stream_buffer_limit;
@@ -200,6 +205,13 @@ common::IoResult<void> QuicConnection::mark_established() noexcept {
         return std::unexpected(common::IoErr::Already);
     }
     state_ = QuicConnectionState::Established;
+    if (options_.endpoint != nullptr) {
+        auto filled = options_.endpoint->fill_local_connection_ids(*this);
+        if (!filled) {
+            close(QuicErrorCode::InternalError);
+            return std::unexpected(filled.error());
+        }
+    }
     return {};
 }
 
@@ -1150,6 +1162,116 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
         (options_.transport.max_idle_timeout.count() <= 0 || peer_idle_timeout < options_.transport.max_idle_timeout)) {
         options_.transport.max_idle_timeout = peer_idle_timeout;
     }
+    return {};
+}
+
+common::IoResult<bool> QuicConnection::recv_retire_connection_id_frame(const QuicRetireConnectionIdFrame &frame,
+                                                                       const QuicConnectionId &packet_dcid) noexcept {
+    if (options_.endpoint == nullptr) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return options_.endpoint->retire_local_connection_id_and_resend(*this, frame.sequence_number, packet_dcid);
+}
+
+bool QuicConnection::should_retransmit_new_connection_id(std::uint64_t sequence_number) const noexcept {
+    const QuicLocalConnectionIdSlot *slot = find_local_connection_id_slot(sequence_number);
+    return slot != nullptr && slot->used && slot->advertised;
+}
+
+bool QuicConnection::has_active_local_connection_id(const QuicConnectionId &cid) const noexcept {
+    for (const QuicLocalConnectionIdSlot &slot: local_cids_) {
+        if (!slot.used) {
+            continue;
+        }
+        if (connection_id_equal(slot.endpoint_index.cid_key, cid)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+common::IoResult<void>
+QuicConnection::stateless_reset_token_for(const QuicConnectionId &cid,
+                                          std::uint8_t out[kStatelessResetTokenLength]) const noexcept {
+    if (options_.endpoint == nullptr) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return options_.endpoint->create_stateless_reset_token(cid, out);
+}
+
+std::size_t QuicConnection::active_local_connection_id_count() const noexcept {
+    std::size_t count = 0;
+    for (const QuicLocalConnectionIdSlot &slot: local_cids_) {
+        if (slot.used) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::size_t QuicConnection::local_connection_id_target() const noexcept {
+    if (!peer_transport_.received) {
+        return 1;
+    }
+    const std::uint64_t peer_limit = peer_transport_.params.active_connection_id_limit;
+    const std::uint64_t capped =
+            std::min<std::uint64_t>(peer_limit, static_cast<std::uint64_t>(kQuicLocalConnectionIdSlotCount));
+    return static_cast<std::size_t>(capped);
+}
+
+QuicLocalConnectionIdSlot *QuicConnection::find_local_connection_id_slot(std::uint64_t sequence_number) noexcept {
+    for (QuicLocalConnectionIdSlot &slot: local_cids_) {
+        if (slot.used && slot.sequence_number == sequence_number) {
+            return &slot;
+        }
+    }
+    return nullptr;
+}
+
+const QuicLocalConnectionIdSlot *
+QuicConnection::find_local_connection_id_slot(std::uint64_t sequence_number) const noexcept {
+    for (const QuicLocalConnectionIdSlot &slot: local_cids_) {
+        if (slot.used && slot.sequence_number == sequence_number) {
+            return &slot;
+        }
+    }
+    return nullptr;
+}
+
+QuicLocalConnectionIdSlot *QuicConnection::find_free_local_connection_id_slot() noexcept {
+    for (QuicLocalConnectionIdSlot &slot: local_cids_) {
+        if (!slot.used) {
+            return &slot;
+        }
+    }
+    return nullptr;
+}
+
+common::IoResult<void>
+QuicConnection::queue_new_connection_id_frame(const QuicLocalConnectionIdSlot &slot,
+                                              const std::uint8_t token[kStatelessResetTokenLength]) noexcept {
+    if (!slot.used || token == nullptr) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    const QuicConnectionId &cid = slot.endpoint_index.cid_key;
+    if (cid.empty() || cid.size() > kMaxConnectionIdLength) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    QuicPacketNumberSpace &space = packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
+    frame->type = QuicFrameType::NewConnectionId;
+    frame->u.new_connection_id.sequence_number = slot.sequence_number;
+    frame->u.new_connection_id.retire_prior_to = 0;
+    frame->u.new_connection_id.cid_len = static_cast<std::uint8_t>(cid.size());
+    std::memcpy(frame->u.new_connection_id.cid, cid.data(), cid.size());
+    std::memcpy(frame->u.new_connection_id.stateless_reset_token, token, kStatelessResetTokenLength);
+    space.pending_frames.push_back(*frame);
     return {};
 }
 
