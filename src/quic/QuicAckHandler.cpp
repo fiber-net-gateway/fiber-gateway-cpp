@@ -78,6 +78,12 @@ namespace {
         return std::unexpected(common::IoErr::Invalid);
     }
     if (found) {
+        if (space.level == QuicEncryptionLevel::Application) {
+            auto mtu = connection.paths().handle_mtu_ack(min_packet_number, max_packet_number, now);
+            if (!mtu) {
+                return std::unexpected(mtu.error());
+            }
+        }
         connection.reset_pto_count();
     }
     return {};

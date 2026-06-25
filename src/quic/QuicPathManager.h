@@ -73,6 +73,12 @@ public:
 
     [[nodiscard]] common::IoResult<void> start_validation(QuicPath &path, QuicTime now) noexcept;
     [[nodiscard]] common::IoResult<bool> expire_validation(QuicPath &path, QuicTime now) noexcept;
+    [[nodiscard]] common::IoResult<void> discover_path_mtu(QuicPath &path, QuicTime now) noexcept;
+    [[nodiscard]] common::IoResult<bool> expire_mtu_delay(QuicPath &path, QuicTime now) noexcept;
+    [[nodiscard]] common::IoResult<bool> expire_mtu_discovery(QuicPath &path, QuicTime now) noexcept;
+    [[nodiscard]] common::IoResult<bool> handle_mtu_ack(std::uint64_t min_packet_number,
+                                                        std::uint64_t max_packet_number, QuicTime now) noexcept;
+    [[nodiscard]] common::IoResult<bool> handle_mtu_probe_send_failed(QuicPath &path, QuicTime now) noexcept;
 
     void arm_validation_timer(event::EventLoop &loop) noexcept;
     void cancel_validation_timer(event::EventLoop &loop) noexcept;
@@ -83,6 +89,7 @@ public:
 
 private:
     static void on_validation_timer(QuicPathManager *manager) noexcept;
+    [[nodiscard]] common::IoResult<bool> queue_mtu_probe_frame(QuicPath &path) noexcept;
 
     QuicConnection &connection_;
     std::array<QuicPath, kQuicMaxPaths> paths_{};

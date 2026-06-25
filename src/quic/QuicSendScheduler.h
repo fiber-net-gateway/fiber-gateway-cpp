@@ -52,6 +52,7 @@ struct QuicSendDatagram {
     bool packet_number_snapshot_valid[kQuicSendLevelCount]{};
     QuicSendPacketRecord packets[kQuicSendLevelCount]{};
     std::size_t packet_count = 0;
+    bool mtu_probe = false;
 };
 
 class QuicSendScheduler : public common::NonCopyable, public common::NonMovable {

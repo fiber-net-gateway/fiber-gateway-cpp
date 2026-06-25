@@ -386,6 +386,10 @@ common::IoResult<QuicPath *> QuicPathManager::recv_path_response_frame_with_path
             connection_.options_.remote_addr = path.remote;
             connection_.options_.local_addr = path.local;
             connection_.options_.remote_connection_id = path.remote_connection_id;
+            auto discovered = discover_path_mtu(path, now);
+            if (!discovered) {
+                return std::unexpected(discovered.error());
+            }
         }
 
         if (auto *loop = event::EventLoop::current_or_null()) {
@@ -467,6 +471,169 @@ common::IoResult<bool> QuicPathManager::expire_validation(QuicPath &path, QuicTi
 
     free(path);
     return false;
+}
+
+common::IoResult<void> QuicPathManager::discover_path_mtu(QuicPath &path, QuicTime now) noexcept {
+    if (!path.allocated || connection_.closing()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (!path.validated || !connection_.peer_transport().received) {
+        return {};
+    }
+
+    const std::size_t peer_max = connection_.peer_transport().params.max_udp_payload_size;
+    if (peer_max <= path.mtu) {
+        path.mtud = path.mtu;
+        path.max_mtu = path.mtu;
+        path.state = QuicPathState::Idle;
+        path.expires = QuicTime{0};
+        return {};
+    }
+
+    if (path.max_mtu != 0) {
+        if (path.max_mtu <= path.mtu || path.max_mtu - path.mtu <= kQuicPathMtuPrecision) {
+            path.state = QuicPathState::Idle;
+            path.expires = QuicTime{0};
+            return {};
+        }
+
+        path.mtud = (path.mtu + path.max_mtu) / 2;
+    } else {
+        path.mtud = path.mtu * 2;
+        if (path.mtud >= peer_max) {
+            path.mtud = peer_max;
+            path.max_mtu = peer_max;
+        }
+    }
+
+    path.state = QuicPathState::WaitingMtuProbe;
+    path.expires = now + kQuicPathMtuDelay;
+
+    if (auto *loop = event::EventLoop::current_or_null()) {
+        arm_validation_timer(*loop);
+    }
+    return {};
+}
+
+common::IoResult<bool> QuicPathManager::queue_mtu_probe_frame(QuicPath &path) noexcept {
+    if (!path.allocated || !path.validated || path.mtud <= path.mtu || connection_.closing()) {
+        return false;
+    }
+
+    auto &space = connection_.packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
+    frame->type = QuicFrameType::Ping;
+    frame->path = &path;
+    frame->min_packet_len = static_cast<std::uint16_t>(path.mtud);
+    frame->ignore_loss = true;
+    frame->ignore_congestion = true;
+    frame->mtu_probe = true;
+    path.pending_frames.push_back(*frame);
+    connection_.schedule_send();
+    return true;
+}
+
+common::IoResult<bool> QuicPathManager::expire_mtu_delay(QuicPath &path, QuicTime now) noexcept {
+    if (!path.allocated || path.state != QuicPathState::WaitingMtuProbe) {
+        return false;
+    }
+
+    path.tries = 0;
+    for (std::uint64_t &packet_number: path.mtu_packet_numbers) {
+        packet_number = kUnsetPacketNumber;
+    }
+
+    for (;;) {
+        auto queued = queue_mtu_probe_frame(path);
+        if (!queued) {
+            return std::unexpected(queued.error());
+        }
+        if (*queued) {
+            path.expires = now + validation_delay();
+            path.state = QuicPathState::MtuDiscovery;
+            return true;
+        }
+
+        path.max_mtu = path.mtud;
+        if (path.max_mtu <= path.mtu || path.max_mtu - path.mtu <= kQuicPathMtuPrecision) {
+            path.state = QuicPathState::Idle;
+            path.expires = QuicTime{0};
+            return false;
+        }
+
+        path.mtud = (path.mtu + path.max_mtu) / 2;
+    }
+}
+
+common::IoResult<bool> QuicPathManager::expire_mtu_discovery(QuicPath &path, QuicTime now) noexcept {
+    if (!path.allocated || path.state != QuicPathState::MtuDiscovery) {
+        return false;
+    }
+
+    if (++path.tries < kQuicPathRetries) {
+        auto queued = queue_mtu_probe_frame(path);
+        if (!queued) {
+            return std::unexpected(queued.error());
+        }
+        if (*queued) {
+            path.expires = now + validation_delay(path.tries);
+            return true;
+        }
+    }
+
+    path.max_mtu = path.mtud;
+    auto discovered = discover_path_mtu(path, now);
+    if (!discovered) {
+        return std::unexpected(discovered.error());
+    }
+    return true;
+}
+
+common::IoResult<bool> QuicPathManager::handle_mtu_ack(std::uint64_t min_packet_number, std::uint64_t max_packet_number,
+                                                       QuicTime now) noexcept {
+    bool handled = false;
+    for (QuicPath &path: paths_) {
+        if (!path.allocated || path.state != QuicPathState::MtuDiscovery) {
+            continue;
+        }
+
+        for (std::uint64_t packet_number: path.mtu_packet_numbers) {
+            if (packet_number == kUnsetPacketNumber || packet_number < min_packet_number ||
+                packet_number > max_packet_number) {
+                continue;
+            }
+
+            path.mtu = path.mtud;
+            if (&path == active_) {
+                connection_.congestion().mtu = path.mtu;
+            }
+            auto discovered = discover_path_mtu(path, now);
+            if (!discovered) {
+                return std::unexpected(discovered.error());
+            }
+            handled = true;
+            break;
+        }
+    }
+    return handled;
+}
+
+common::IoResult<bool> QuicPathManager::handle_mtu_probe_send_failed(QuicPath &path, QuicTime now) noexcept {
+    if (!path.allocated || path.state != QuicPathState::MtuDiscovery) {
+        return false;
+    }
+
+    clear_frames(path, QuicFrameType::Ping);
+    path.max_mtu = path.mtud;
+    auto discovered = discover_path_mtu(path, now);
+    if (!discovered) {
+        return std::unexpected(discovered.error());
+    }
+    return true;
 }
 
 common::IoResult<void> QuicPathManager::handle_migration(QuicPath &path, bool rebound, QuicTime now) noexcept {
@@ -570,12 +737,22 @@ void QuicPathManager::on_validation_timer(QuicPathManager *manager) noexcept {
         if (!path.allocated || path.state == QuicPathState::Idle || path.expires > now) {
             continue;
         }
-        if (path.state != QuicPathState::Validating) {
-            continue;
+        common::IoResult<bool> expired = false;
+        switch (path.state) {
+            case QuicPathState::Validating:
+                expired = manager->expire_validation(path, now);
+                break;
+            case QuicPathState::WaitingMtuProbe:
+                expired = manager->expire_mtu_delay(path, now);
+                break;
+            case QuicPathState::MtuDiscovery:
+                expired = manager->expire_mtu_discovery(path, now);
+                break;
+            case QuicPathState::Idle:
+                break;
         }
-
-        auto expired = manager->expire_validation(path, now);
         if (!expired) {
+            manager->connection_.close(QuicErrorCode::InternalError);
             return;
         }
         if (*expired) {

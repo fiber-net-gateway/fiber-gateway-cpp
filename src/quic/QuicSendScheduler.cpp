@@ -248,6 +248,16 @@ async::Task<common::IoErr> QuicSendScheduler::flush_connection(QuicConnection &c
         auto sent = socket_->try_send_packet(datagram.spec);
         if (!sent) {
             endpoint_->rollback_send_datagram(connection, datagram);
+            if (sent.error() == common::IoErr::MessageTooLarge && datagram.mtu_probe && datagram.path != nullptr) {
+                const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
+                auto handled = connection.paths().handle_mtu_probe_send_failed(*datagram.path, now);
+                if (!handled) {
+                    co_return handled.error();
+                }
+                if (*handled) {
+                    continue;
+                }
+            }
             if (sent.error() == common::IoErr::WouldBlock) {
                 auto writable = co_await socket_->wait_writable();
                 if (!writable) {
