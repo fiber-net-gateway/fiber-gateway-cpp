@@ -674,6 +674,63 @@ QuicUdpEndpoint::create_stateless_reset_token(const QuicConnectionId &cid,
     return {};
 }
 
+bool QuicUdpEndpoint::allow_stateless_reset(std::chrono::steady_clock::time_point now) noexcept {
+    if (now - stateless_reset_window_start_ >= std::chrono::seconds(1)) {
+        stateless_reset_window_start_ = now;
+        stateless_reset_tokens_ = kQuicStatelessResetRateLimitCapacity;
+    }
+    if (stateless_reset_tokens_ == 0) {
+        return false;
+    }
+    --stateless_reset_tokens_;
+    return true;
+}
+
+common::IoResult<void> QuicUdpEndpoint::send_stateless_reset(const QuicPacketHeader &packet, std::uint8_t *out,
+                                                             std::size_t out_cap,
+                                                             const QuicReceivedDatagram &datagram) noexcept {
+    // Mirrors nginx ngx_quic_send_stateless_reset: pick a random length in
+    // [kQuicStatelessResetMinPacket, min(kQuicStatelessResetMaxPacket, pkt_len))
+    // (or pkt_len-1 for tiny triggers), randomize the body, shape the first byte
+    // as a short header, and append the 16-byte stateless_reset_token. The reset
+    // is never larger than the triggering datagram (anti-amplification).
+    const std::size_t pkt_len = packet.packet_len;
+
+    std::size_t len;
+    if (pkt_len <= kQuicStatelessResetMinPacket) {
+        len = pkt_len - 1;
+    } else {
+        const std::size_t max = std::min(kQuicStatelessResetMaxPacket, pkt_len);
+        std::uint16_t rndbytes = 0;
+        if (RAND_bytes(reinterpret_cast<std::uint8_t *>(&rndbytes), sizeof(rndbytes)) != 1) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        len = (static_cast<std::size_t>(rndbytes) % (max - kQuicStatelessResetMinPacket)) +
+              kQuicStatelessResetMinPacket;
+    }
+
+    if (len <= kStatelessResetTokenLength || len > out_cap) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    // Randomize everything except the final 16-byte token.
+    if (RAND_bytes(out, len - kStatelessResetTokenLength) != 1) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    // Shape it as a short header: clear the long-header bit, set the fixed bit.
+    out[0] &= ~kPacketFlagLong;
+    out[0] |= kPacketFlagFixed;
+
+    // Final 16 bytes = HMAC-SHA256(stateless_reset_secret, [len|dcid])[:16].
+    auto token_ok = create_stateless_reset_token(packet.dcid, out + len - kStatelessResetTokenLength);
+    if (!token_ok) {
+        return std::unexpected(token_ok.error());
+    }
+
+    return send_direct_datagram(out, len, datagram);
+}
+
 common::IoResult<bool> QuicUdpEndpoint::fill_local_connection_ids(QuicConnection &connection) noexcept {
     if (connection.terminal_closing()) {
         return false;
@@ -958,6 +1015,27 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
     if (connection == nullptr) {
         auto packet = quic_parse_packet_header(read_buffer_.get(), recv.size,
                                                static_cast<std::uint8_t>(kQuicConnectionIdLength));
+        // RFC 9000 §10.3 / nginx ngx_quic_send_stateless_reset: a short-header
+        // (1-RTT) packet addressed to a DCID we no longer recognize means this
+        // endpoint has lost state. Send a stateless reset so the peer can tear
+        // the dead connection down instead of waiting for a timeout. Long
+        // headers (Initial/Handshake/0-RTT/Retry/VN) are NOT reset triggers and
+        // keep their existing handling below.
+        if (packet && !packet->long_header) {
+            if (packet->packet_len > kQuicStatelessResetMinTriggerSize && allow_stateless_reset(now)) {
+                std::array<std::uint8_t, kQuicStatelessResponseBufferSize> out{};
+                auto sent = send_stateless_reset(*packet, out.data(), out.size(), datagram);
+                if (!sent) {
+                    ++dropped_datagram_count_;
+                    return std::unexpected(sent.error());
+                }
+                return std::unexpected(common::IoErr::WouldBlock);
+            }
+            // Too small to be a plausible short header, or rate-limited: drop
+            // silently. No stateless reset is sent.
+            ++dropped_datagram_count_;
+            return std::unexpected(common::IoErr::Invalid);
+        }
         if (!packet || !packet->long_header || packet->type != QuicPacketType::Initial ||
             packet->version != kQuicVersion1 || recv.size < kMinInitialDatagramSize) {
             ++dropped_datagram_count_;

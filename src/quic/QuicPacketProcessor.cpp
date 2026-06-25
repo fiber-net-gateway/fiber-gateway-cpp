@@ -381,6 +381,17 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 break;
             }
             case QuicFrameType::StreamDataBlocked:
+                // RFC 9000 §4.1: STREAM_DATA_BLOCKED is sent by the stream
+                // sender. On a unidirectional stream the local side initiated,
+                // the peer is the receiver and MUST NOT send it →
+                // STREAM_STATE_ERROR (nginx
+                // ngx_quic_handle_stream_data_blocked_frame).
+                if (conn.is_local_stream(frame.u.stream_data_blocked.id) &&
+                    conn.is_unidirectional_stream(frame.u.stream_data_blocked.id)) {
+                    conn.close(QuicErrorCode::StreamStateError,
+                               static_cast<std::uint64_t>(QuicFrameType::StreamDataBlocked));
+                    return std::unexpected(common::IoErr::Busy);
+                }
                 if (conn.find_stream(frame.u.stream_data_blocked.id) == nullptr) {
                     return std::unexpected(common::IoErr::Invalid);
                 }
@@ -697,6 +708,25 @@ common::IoResult<QuicPacketProcessResult> quic_process_datagram(QuicConnection &
             if (decoded.error() == common::IoErr::NotFound) {
                 offset += packet->packet_len;
                 continue;
+            }
+            // RFC 9000 §10.3: a short-header (1-RTT) packet that fails to
+            // decrypt may be a stateless reset. A stateless reset occupies an
+            // entire datagram, so only the first packet of a datagram can be
+            // one; a short header can never be coalesced behind another packet,
+            // so for the first packet packet_len spans the whole datagram and
+            // its trailing 16 bytes are the datagram's trailing 16 bytes. If
+            // they match a stateless_reset_token the peer advertised, enter the
+            // DRAINING state SILENTLY — no CONNECTION_CLOSE is sent (§10.2.2:
+            // the peer already lost state, so a close frame is pointless).
+            if (offset == 0 && !packet->long_header && packet->level == QuicEncryptionLevel::Application &&
+                conn.detects_stateless_reset(packet_data, packet->packet_len)) {
+                conn.begin_draining(QuicCloseInfo{
+                        .source = QuicCloseSource::StatelessReset,
+                        .frame_kind = QuicCloseFrameKind::Transport,
+                        .error_code = static_cast<std::uint64_t>(QuicErrorCode::NoError),
+                        .frame_type = 0,
+                });
+                return aggregate;
             }
             if (has_good_packet) {
                 return aggregate;

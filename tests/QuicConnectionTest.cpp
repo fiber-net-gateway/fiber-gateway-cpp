@@ -1501,25 +1501,178 @@ TEST(QuicConnectionTest, LowerPeerStreamBelowOpenedWatermarkIsGoneWhenMissing) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
     fiber::quic::QuicConnection conn(options);
-    fiber::quic::QuicStreamFrame later{};
-    later.stream_id = 4;
-    later.length = 3;
 
-    auto later_received = conn.recv_stream_frame(later, slice_of("abc"));
-    ASSERT_TRUE(later_received.has_value());
-    EXPECT_EQ(state.calls, 1U);
-    EXPECT_EQ(state.last_stream_id, 4U);
-    EXPECT_NE(conn.find_stream(4), nullptr);
+    // Open stream 0, then retire it with a FIN (final_size 0). Test streams are
+    // app-released by default and carry no local send work, so receiving the
+    // FIN makes the stream ready_for_connection_release and try_release_stream
+    // retires it.
+    fiber::quic::QuicStreamFrame open{};
+    open.stream_id = 0;
+    ASSERT_TRUE(conn.recv_stream_frame(open, {}).has_value());
+    fiber::quic::QuicStreamFrame fin{};
+    fin.stream_id = 0;
+    fin.fin = true;
+    ASSERT_TRUE(conn.recv_stream_frame(fin, {}).has_value());
+    ASSERT_EQ(state.calls, 1U);
+    EXPECT_EQ(conn.find_stream(0), nullptr); // retired
+    EXPECT_EQ(conn.active_stream_count(), 0U);
 
-    fiber::quic::QuicStreamFrame lower{};
-    lower.stream_id = 0;
-    lower.length = 3;
-    auto lower_received = conn.recv_stream_frame(lower, slice_of("xyz"));
+    // A late duplicate frame for the now-gone stream 0 is silently dropped
+    // (is_gone_peer_stream: seq < opened_count and absent from the table), not
+    // re-created and not re-delivered. This is the genuinely-gone path —
+    // distinct from an out-of-order gap, whose intermediate streams are now
+    // real active streams (see OutOfOrderPeerStreamFrameCreatesImplicit*).
+    fiber::quic::QuicStreamFrame late{};
+    late.stream_id = 0;
+    late.length = 3;
+    auto late_received = conn.recv_stream_frame(late, slice_of("xyz"));
 
-    EXPECT_TRUE(lower_received.has_value());
+    EXPECT_TRUE(late_received.has_value());
     EXPECT_EQ(conn.find_stream(0), nullptr);
-    EXPECT_EQ(conn.active_stream_count(), 1U);
+    EXPECT_EQ(conn.active_stream_count(), 0U);
     EXPECT_EQ(state.calls, 1U);
+}
+
+// RFC 9000 §2.1: a STREAM frame for a higher stream ID that arrives before the
+// lower-numbered ones (packet loss / reordering) implicitly opens every
+// intermediate stream. They are real active streams — the app is notified of
+// each — and frames arriving later for them are delivered, not dropped.
+// Previously the gap was marked retired and the intermediate streams were never
+// created, causing permanent data loss on lossy links.
+TEST(QuicConnectionTest, OutOfOrderPeerStreamFrameCreatesImplicitIntermediates) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+
+    // Stream 8 (seq 2) arrives before streams 0 and 4. nginx creates streams
+    // 0, 4, 8 in order and notifies the app for each.
+    fiber::quic::QuicStreamFrame frame8{};
+    frame8.stream_id = 8;
+    frame8.length = 3;
+    ASSERT_TRUE(conn.recv_stream_frame(frame8, slice_of("abc")).has_value());
+
+    EXPECT_EQ(state.calls, 3U);
+    EXPECT_EQ(state.last_stream_id, 8U);
+    EXPECT_NE(conn.find_stream(0), nullptr);
+    EXPECT_NE(conn.find_stream(4), nullptr);
+    EXPECT_NE(conn.find_stream(8), nullptr);
+    EXPECT_EQ(conn.active_stream_count(), 3U);
+
+    // The implicit intermediate stream 4 is open with no data and no final
+    // size (nginx sets send/recv_final_size = -1; it is NOT half-closed/FIN'd).
+    auto *stream4 = conn.find_stream(4);
+    ASSERT_NE(stream4, nullptr);
+    EXPECT_FALSE(stream4->has_final_size());
+    EXPECT_FALSE(stream4->reset_received());
+
+    // A later STREAM+data frame for the implicit stream 4 is delivered (NOT
+    // dropped) — proving the previous data-loss bug is fixed.
+    fiber::quic::QuicStreamFrame frame4{};
+    frame4.stream_id = 4;
+    frame4.length = 3;
+    ASSERT_TRUE(conn.recv_stream_frame(frame4, slice_of("xyz")).has_value());
+
+    fiber::mem::IoBufChain out(conn.recv_extent_pool());
+    auto delivered = stream4->try_read(3, out);
+    ASSERT_TRUE(delivered.has_value());
+    EXPECT_EQ(*delivered, 3U);
+    EXPECT_EQ(state.calls, 3U); // no new streams notified for the in-order frame
+}
+
+TEST(QuicConnectionTest, OutOfOrderPeerStreamFrameCreatesMultipleImplicitIntermediates) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+
+    // Stream 0 opens normally.
+    fiber::quic::QuicStreamFrame frame0{};
+    frame0.stream_id = 0;
+    ASSERT_TRUE(conn.recv_stream_frame(frame0, {}).has_value());
+    EXPECT_EQ(state.calls, 1U);
+
+    // Stream 16 (seq 4) arrives out of order: implicit streams 4, 8, 12 are
+    // created in addition to 16.
+    fiber::quic::QuicStreamFrame frame16{};
+    frame16.stream_id = 16;
+    ASSERT_TRUE(conn.recv_stream_frame(frame16, {}).has_value());
+
+    EXPECT_EQ(state.calls, 5U); // 0, 4, 8, 12, 16
+    EXPECT_EQ(state.last_stream_id, 16U);
+    EXPECT_NE(conn.find_stream(0), nullptr);
+    EXPECT_NE(conn.find_stream(4), nullptr);
+    EXPECT_NE(conn.find_stream(8), nullptr);
+    EXPECT_NE(conn.find_stream(12), nullptr);
+    EXPECT_NE(conn.find_stream(16), nullptr);
+    EXPECT_EQ(conn.active_stream_count(), 5U);
+}
+
+// An implicitly-opened stream with no data is open (not half-closed/FIN'd); a
+// later FIN or RESET_STREAM on it is honored (nginx delivers later frames for
+// implicit streams rather than dropping them).
+TEST(QuicConnectionTest, ImplicitlyOpenedPeerStreamIsOpenAndHonorsLaterFinAndReset) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+
+    // Stream 8 (seq 2) arrives first; streams 0 and 4 are implicitly opened.
+    fiber::quic::QuicStreamFrame frame8{};
+    frame8.stream_id = 8;
+    ASSERT_TRUE(conn.recv_stream_frame(frame8, {}).has_value());
+    ASSERT_EQ(state.calls, 3U);
+    EXPECT_EQ(conn.active_stream_count(), 3U);
+
+    auto *stream4 = conn.find_stream(4);
+    ASSERT_NE(stream4, nullptr);
+    EXPECT_FALSE(stream4->has_final_size());
+    EXPECT_FALSE(stream4->reset_received());
+
+    // A later FIN on the implicit stream 4 is honored: it sets the final size
+    // and (test streams are app-released with no local send work) retires the
+    // stream. Had the FIN been dropped, stream 4 would still be open.
+    fiber::quic::QuicStreamFrame fin4{};
+    fin4.stream_id = 4;
+    fin4.fin = true;
+    ASSERT_TRUE(conn.recv_stream_frame(fin4, {}).has_value());
+    EXPECT_EQ(conn.find_stream(4), nullptr);
+    EXPECT_EQ(conn.active_stream_count(), 2U);
+
+    // A later RESET_STREAM on the implicit stream 0 is honored likewise.
+    fiber::quic::QuicResetStreamFrame reset0{};
+    reset0.id = 0;
+    reset0.error_code = 7;
+    reset0.final_size = 0;
+    ASSERT_TRUE(conn.recv_reset_stream_frame(reset0).has_value());
+    EXPECT_EQ(conn.find_stream(0), nullptr);
+    EXPECT_EQ(conn.active_stream_count(), 1U); // only stream 8 remains
+}
+
+// nginx's only hard gate on peer stream creation is the advertised max_streams
+// (client_max_streams_bidi): a stream at or beyond it is a STREAM_LIMIT_ERROR.
+// There is no separate concurrent-active gate that drops gap data — nginx
+// creates intermediate streams unconditionally within the advertised limit.
+TEST(QuicConnectionTest, ImplicitPeerStreamCreationRespectsAdvertisedStreamLimit) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    options.max_peer_bidirectional_streams = 3; // advertised = concurrent = 3
+    fiber::quic::QuicConnection conn(options);
+
+    // Stream 8 (seq 2) arrives out of order: implicit 0, 4, 8 — all within the
+    // advertised limit (seq 0..2). Created unconditionally.
+    fiber::quic::QuicStreamFrame frame8{};
+    frame8.stream_id = 8;
+    ASSERT_TRUE(conn.recv_stream_frame(frame8, {}).has_value());
+    EXPECT_EQ(state.calls, 3U);
+    EXPECT_EQ(conn.active_stream_count(), 3U);
+
+    // A further out-of-order stream whose sequence reaches the advertised
+    // limit (seq 3 >= advertised 3) is a STREAM_LIMIT_ERROR peer violation:
+    // the connection closes (nginx closes here too). The gap is NOT created.
+    fiber::quic::QuicStreamFrame over{};
+    over.stream_id = 12; // seq 3 >= advertised 3
+    EXPECT_FALSE(conn.recv_stream_frame(over, {}).has_value());
+    EXPECT_TRUE(conn.terminal_closing());
+    EXPECT_EQ(conn.close_error(), fiber::quic::QuicErrorCode::StreamLimitError);
+    EXPECT_EQ(state.calls, 3U); // no implicit streams for the over-limit gap
 }
 
 TEST(QuicConnectionTest, RetiringPeerStreamQueuesMaxStreamsWithinConcurrentLimit) {
@@ -1535,12 +1688,12 @@ TEST(QuicConnectionTest, RetiringPeerStreamQueuesMaxStreamsWithinConcurrentLimit
         frame.stream_id = id;
         ASSERT_TRUE(conn.recv_stream_frame(frame, {}).has_value());
     }
-
-    fiber::quic::QuicStreamFrame over_limit{};
-    over_limit.stream_id = 16;
-    EXPECT_FALSE(conn.recv_stream_frame(over_limit, {}).has_value());
     EXPECT_EQ(conn.active_stream_count(), 4U);
 
+    // Retiring one peer stream grows the advertised max_streams (a MAX_STREAMS
+    // frame is queued) and frees a concurrent slot, so the next in-range stream
+    // can still open. This is the concurrent-active-stream accounting, which is
+    // a non-fatal flow-control gate (RFC 9000 §4.6), NOT a peer violation.
     fiber::quic::QuicStreamFrame fin{};
     fin.stream_id = 0;
     fin.fin = true;
@@ -1550,8 +1703,19 @@ TEST(QuicConnectionTest, RetiringPeerStreamQueuesMaxStreamsWithinConcurrentLimit
     EXPECT_EQ(count_pending_max_streams(conn, fiber::quic::QuicFrameType::MaxStreamsBidi, 5), 1U);
     EXPECT_EQ(state.schedule_calls, 1U);
 
-    ASSERT_TRUE(conn.recv_stream_frame(over_limit, {}).has_value());
+    fiber::quic::QuicStreamFrame in_range{};
+    in_range.stream_id = 16; // seq 4 < advertised 5, concurrent slot free
+    ASSERT_TRUE(conn.recv_stream_frame(in_range, {}).has_value());
     EXPECT_EQ(conn.active_stream_count(), 4U);
+
+    // A stream ID at or beyond the advertised max_streams is a STREAM_LIMIT_ERROR
+    // peer violation (RFC 9000 §4.6): the connection closes immediately rather
+    // than silently tolerating the over-limit stream (nginx closes here too).
+    fiber::quic::QuicStreamFrame over_advertised{};
+    over_advertised.stream_id = 20; // seq 5 >= advertised 5
+    EXPECT_FALSE(conn.recv_stream_frame(over_advertised, {}).has_value());
+    EXPECT_TRUE(conn.terminal_closing());
+    EXPECT_EQ(conn.close_error(), fiber::quic::QuicErrorCode::StreamLimitError);
 }
 
 TEST(QuicConnectionTest, PeerBidirectionalAndUnidirectionalStreamLimitsAreIndependent) {

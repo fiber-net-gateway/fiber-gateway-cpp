@@ -31,6 +31,15 @@ namespace fiber::quic {
 inline constexpr std::size_t kQuicUdpDefaultReadBufferSize = 65536;
 inline constexpr std::size_t kQuicUdpDefaultPlaintextBufferSize = 65536;
 inline constexpr std::size_t kQuicStatelessResetSecretLength = 32;
+// Stateless reset packet sizing, matching nginx (ngx_event_quic_output.c):
+// NGX_QUIC_MIN_PKT_LEN (41 = 21 + 20-byte server CID) is the smallest short
+// header that may trigger a reset; NGX_QUIC_MIN_SR_PACKET (43) / MAX (1200) bound
+// the generated reset's length.
+inline constexpr std::size_t kQuicStatelessResetMinTriggerSize = 41;
+inline constexpr std::size_t kQuicStatelessResetMinPacket = 43;
+inline constexpr std::size_t kQuicStatelessResetMaxPacket = 1200;
+// Per-endpoint stateless-reset rate-limit capacity: resets permitted per second.
+inline constexpr std::size_t kQuicStatelessResetRateLimitCapacity = 8;
 
 struct QuicUdpReceiveResult {
     QuicConnection *connection = nullptr;
@@ -141,6 +150,10 @@ private:
     validate_initial_address(const QuicPacketHeader &packet, const QuicReceivedDatagram &datagram) noexcept;
     [[nodiscard]] common::IoResult<void> send_direct_datagram(const std::uint8_t *data, std::size_t len,
                                                               const QuicReceivedDatagram &datagram) noexcept;
+    [[nodiscard]] bool allow_stateless_reset(std::chrono::steady_clock::time_point now) noexcept;
+    [[nodiscard]] common::IoResult<void> send_stateless_reset(const QuicPacketHeader &packet, std::uint8_t *out,
+                                                              std::size_t out_cap,
+                                                              const QuicReceivedDatagram &datagram) noexcept;
     [[nodiscard]] common::IoResult<void> queue_new_token(QuicConnection &connection, QuicPath &path) noexcept;
     [[nodiscard]] common::IoResult<QuicConnection *>
     create_connection(const QuicPacketHeader &packet, const QuicReceivedDatagram &datagram,
@@ -174,6 +187,12 @@ private:
     std::size_t active_connection_count_ = 0;
     std::size_t dropped_datagram_count_ = 0;
     std::size_t rejected_connection_count_ = 0;
+    // Per-endpoint stateless-reset rate limit (token bucket, refill once per
+    // second). nginx rate-limits per peer (~3/peer/sec via a counting Bloom
+    // filter); this coarser per-endpoint bucket bounds amplification with the
+    // same per-second window (RFC 9000 §10.3.1).
+    std::chrono::steady_clock::time_point stateless_reset_window_start_{};
+    std::size_t stateless_reset_tokens_ = 0;
     bool initialized_ = false;
     bool closing_ = false;
 };

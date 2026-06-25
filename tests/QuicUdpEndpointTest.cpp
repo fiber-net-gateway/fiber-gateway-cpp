@@ -10,6 +10,9 @@
 #include <new>
 #include <string_view>
 
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+
 #include "async/Sleep.h"
 #include "async/Spawn.h"
 #include "common/IoError.h"
@@ -1263,6 +1266,110 @@ fiber::quic::QuicConnectionId cid_from_new_connection_id(const fiber::quic::Quic
     return cid.value_or(fiber::quic::QuicConnectionId{});
 }
 
+// Replicates QuicUdpEndpoint::create_stateless_reset_token exactly:
+// HMAC-SHA256(secret, [1 byte cid.length | cid bytes]) truncated to 16 bytes.
+void compute_expected_stateless_reset_token(
+        const std::array<std::uint8_t, fiber::quic::kQuicStatelessResetSecretLength> &secret,
+        const fiber::quic::QuicConnectionId &cid, std::uint8_t out[fiber::quic::kStatelessResetTokenLength]) {
+    std::uint8_t message[1 + fiber::quic::kMaxConnectionIdLength]{};
+    message[0] = cid.length;
+    if (!cid.empty()) {
+        std::memcpy(message + 1, cid.data(), cid.size());
+    }
+    std::uint8_t digest[32]{};
+    unsigned int digest_len = 0;
+    HMAC(EVP_sha256(), secret.data(), static_cast<int>(secret.size()), message, 1 + cid.size(), digest, &digest_len);
+    std::memcpy(out, digest, fiber::quic::kStatelessResetTokenLength);
+}
+
+// A minimal short-header (1-RTT) datagram: fixed bit set, long-header bit clear,
+// followed by a 20-byte DCID and zero padding. Larger than the 41-byte trigger
+// minimum so it elicits a stateless reset.
+void build_short_header_datagram(std::array<std::uint8_t, 50> &datagram, const fiber::quic::QuicConnectionId &dcid) {
+    datagram = {};
+    datagram[0] = fiber::quic::kPacketFlagFixed | 0x01; // short header, packet-number length 1
+    std::memcpy(datagram.data() + 1, dcid.data(), dcid.size());
+}
+
+// A minimal long-header Handshake datagram with an unknown DCID. Parses as a
+// long header (not a reset trigger) and is dropped by the existing path.
+void build_long_header_handshake_datagram(std::array<std::uint8_t, 50> &datagram,
+                                          const fiber::quic::QuicConnectionId &dcid) {
+    datagram = {};
+    datagram[0] = fiber::quic::kPacketFlagLong | fiber::quic::kPacketFlagFixed | fiber::quic::kLongPacketTypeHandshake;
+    datagram[1] = 0x00;
+    datagram[2] = 0x00;
+    datagram[3] = 0x00;
+    datagram[4] = 0x01; // version 1 (big-endian)
+    datagram[5] = static_cast<std::uint8_t>(dcid.size());
+    std::memcpy(datagram.data() + 6, dcid.data(), dcid.size());
+    datagram[6 + dcid.size()] = 0; // SCID length 0
+    datagram[7 + dcid.size()] = 0; // length varint 0
+}
+
+DetachedTask recv_endpoint_n_times(fiber::quic::QuicUdpEndpoint *endpoint, std::size_t n,
+                                   std::promise<void> *done_promise) {
+    for (std::size_t i = 0; i < n; ++i) {
+        auto result = co_await endpoint->recv_once();
+        if (!result &&
+            (result.error() == fiber::common::IoErr::Canceled || result.error() == fiber::common::IoErr::BadFd)) {
+            break; // endpoint closing
+        }
+    }
+    done_promise->set_value();
+}
+
+// Sends a datagram, then waits (bounded) for a response. Resolves to false on
+// timeout (no response), true if a response arrived.
+DetachedTask send_datagram_and_check_no_response(fiber::event::EventLoop *loop, std::uint16_t port,
+                                                 const std::uint8_t *data, std::size_t len,
+                                                 std::promise<fiber::common::IoResult<bool>> *done_promise) {
+    fiber::net::UdpSocket client(*loop);
+    auto bound = client.bind(loopback(0), {});
+    if (!bound) {
+        done_promise->set_value(std::unexpected(bound.error()));
+        co_return;
+    }
+    auto sent = co_await client.send_to(data, len, loopback(port));
+    if (!sent) {
+        done_promise->set_value(std::unexpected(sent.error()));
+        client.close();
+        co_return;
+    }
+    auto readable = co_await client.wait_event(fiber::event::IoEvent::Read, std::chrono::milliseconds(150));
+    done_promise->set_value(readable.has_value());
+    client.close();
+}
+
+// Sends `count` copies of a datagram, then counts responses with a bounded
+// receive loop. Used to exercise the stateless-reset rate limit.
+DetachedTask send_flood_and_count_responses(fiber::event::EventLoop *loop, std::uint16_t port, const std::uint8_t *data,
+                                            std::size_t len, std::size_t count,
+                                            std::promise<std::size_t> *done_promise) {
+    fiber::net::UdpSocket client(*loop);
+    auto bound = client.bind(loopback(0), {});
+    if (!bound) {
+        done_promise->set_value(0);
+        co_return;
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+        co_await client.send_to(data, len, loopback(port));
+    }
+    std::size_t got = 0;
+    for (;;) {
+        auto readable = co_await client.wait_event(fiber::event::IoEvent::Read, std::chrono::milliseconds(150));
+        if (!readable) {
+            break; // timeout => no more responses
+        }
+        std::array<std::uint8_t, 1500> buf{};
+        auto drained = client.try_recv_from(buf.data(), buf.size());
+        (void) drained;
+        ++got;
+    }
+    client.close();
+    done_promise->set_value(got);
+}
+
 } // namespace
 
 TEST(QuicUdpEndpointTest, CreatesConnectionForNewInitialDcid) {
@@ -2071,6 +2178,201 @@ TEST(QuicUdpEndpointTest, DropsMalformedPacketWithoutCreatingConnection) {
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(endpoint.active_connection_count(), 0U);
     EXPECT_EQ(endpoint.dropped_datagram_count(), 1U);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, SendsStatelessResetForUnknownShortHeaderDcid) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    // Fixed secret so the reset token can be recomputed in the test.
+    options.stateless_reset_secret_set = true;
+    for (std::size_t i = 0; i < fiber::quic::kQuicStatelessResetSecretLength; ++i) {
+        options.stateless_reset_secret[i] = static_cast<std::uint8_t>(0xa0U + i);
+    }
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("0102030405060708090a0b0c0d0e0f1011121314"); // 20 bytes, unknown
+    std::array<std::uint8_t, 50> datagram{};
+    build_short_header_datagram(datagram, dcid);
+
+    std::array<std::uint8_t, 512> response{};
+    std::promise<EndpointResult> recv_promise;
+    std::promise<fiber::common::IoResult<std::size_t>> response_promise;
+    auto recv_future = recv_promise.get_future();
+    auto response_future = response_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() { return recv_endpoint_once(&endpoint, &recv_promise); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return send_datagram_and_recv_response(&group.at(0), endpoint.local_addr().port(), datagram.data(),
+                                               datagram.size(), response.data(), response.size(), &response_promise);
+    });
+
+    ASSERT_EQ(recv_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(response_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+    auto recv_result = recv_future.get();
+    EXPECT_FALSE(recv_result.has_value());
+    EXPECT_EQ(recv_result.error(), fiber::common::IoErr::WouldBlock); // reset sent, no connection created
+
+    auto response_size = response_future.get();
+    ASSERT_TRUE(response_size.has_value()) << static_cast<int>(response_size.error());
+    const std::size_t len = *response_size;
+
+    // Length within nginx's range and never larger than the triggering datagram.
+    EXPECT_GE(len, fiber::quic::kQuicStatelessResetMinPacket);
+    EXPECT_LE(len, datagram.size()); // anti-amplification
+    EXPECT_LT(len, fiber::quic::kQuicStatelessResetMaxPacket);
+
+    // Shaped as a short header: fixed bit set, long-header bit clear.
+    EXPECT_NE(response[0] & fiber::quic::kPacketFlagFixed, 0u);
+    EXPECT_EQ(response[0] & fiber::quic::kPacketFlagLong, 0u);
+
+    // Final 16 bytes == HMAC-SHA256(secret, [len|dcid])[:16].
+    std::array<std::uint8_t, fiber::quic::kStatelessResetTokenLength> expected_token{};
+    compute_expected_stateless_reset_token(options.stateless_reset_secret, dcid, expected_token.data());
+    EXPECT_EQ(std::memcmp(response.data() + len - fiber::quic::kStatelessResetTokenLength, expected_token.data(),
+                          fiber::quic::kStatelessResetTokenLength),
+              0);
+
+    // Fully stateless: no connection was created.
+    EXPECT_EQ(endpoint.active_connection_count(), 0U);
+    EXPECT_EQ(endpoint.find_connection(dcid), nullptr);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, DoesNotSendStatelessResetForLongHeader) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("0102030405060708"); // 8 bytes, unknown
+    std::array<std::uint8_t, 50> datagram{};
+    build_long_header_handshake_datagram(datagram, dcid);
+
+    std::promise<EndpointResult> recv_promise;
+    std::promise<fiber::common::IoResult<bool>> response_promise;
+    auto recv_future = recv_promise.get_future();
+    auto response_future = response_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() { return recv_endpoint_once(&endpoint, &recv_promise); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return send_datagram_and_check_no_response(&group.at(0), endpoint.local_addr().port(), datagram.data(),
+                                                   datagram.size(), &response_promise);
+    });
+
+    ASSERT_EQ(recv_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(response_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+    auto recv_result = recv_future.get();
+    EXPECT_FALSE(recv_result.has_value());
+    // Long-header non-Initial for an unknown DCID is dropped, not reset.
+    EXPECT_EQ(recv_result.error(), fiber::common::IoErr::Invalid);
+    EXPECT_EQ(endpoint.dropped_datagram_count(), 1U);
+    EXPECT_EQ(endpoint.active_connection_count(), 0U);
+
+    auto response = response_future.get();
+    ASSERT_TRUE(response.has_value()) << static_cast<int>(response.error());
+    EXPECT_FALSE(*response); // no stateless reset sent
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, DoesNotSendStatelessResetForTooSmallShortHeader) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("0102030405060708090a0b0c0d0e0f1011121314"); // 20 bytes, unknown
+    // 30-byte short header: below the 41-byte trigger minimum (nginx
+    // NGX_QUIC_MIN_PKT_LEN). Must not elicit a reset (also serves as
+    // loop-prevention against tiny/spurious packets).
+    std::array<std::uint8_t, 30> datagram{};
+    datagram[0] = fiber::quic::kPacketFlagFixed | 0x01;
+    std::memcpy(datagram.data() + 1, dcid.data(), dcid.size());
+
+    std::promise<EndpointResult> recv_promise;
+    std::promise<fiber::common::IoResult<bool>> response_promise;
+    auto recv_future = recv_promise.get_future();
+    auto response_future = response_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() { return recv_endpoint_once(&endpoint, &recv_promise); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return send_datagram_and_check_no_response(&group.at(0), endpoint.local_addr().port(), datagram.data(),
+                                                   datagram.size(), &response_promise);
+    });
+
+    ASSERT_EQ(recv_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(response_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+    auto recv_result = recv_future.get();
+    EXPECT_FALSE(recv_result.has_value());
+    EXPECT_EQ(recv_result.error(), fiber::common::IoErr::Invalid); // dropped, not reset
+    EXPECT_EQ(endpoint.dropped_datagram_count(), 1U);
+
+    auto response = response_future.get();
+    ASSERT_TRUE(response.has_value()) << static_cast<int>(response.error());
+    EXPECT_FALSE(*response); // no stateless reset sent
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, StatelessResetIsRateLimited) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("0102030405060708090a0b0c0d0e0f1011121314"); // 20 bytes, unknown
+    std::array<std::uint8_t, 50> datagram{};
+    build_short_header_datagram(datagram, dcid);
+
+    const std::size_t flood = 50;
+    const std::uint16_t port = endpoint.local_addr().port();
+
+    std::promise<void> recv_done;
+    std::promise<std::size_t> count_promise;
+    auto recv_future = recv_done.get_future();
+    auto count_future = count_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() { return recv_endpoint_n_times(&endpoint, flood, &recv_done); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return send_flood_and_count_responses(&group.at(0), port, datagram.data(), datagram.size(), flood,
+                                              &count_promise);
+    });
+
+    ASSERT_EQ(count_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    ASSERT_EQ(recv_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    recv_future.get();
+
+    const std::size_t resets = count_future.get();
+    // A flood far larger than the capacity produces a bounded number of resets.
+    EXPECT_GE(resets, 1u);
+    EXPECT_LE(resets, fiber::quic::kQuicStatelessResetRateLimitCapacity);
 
     close_endpoint_on_loop(group, endpoint);
     group.stop();
