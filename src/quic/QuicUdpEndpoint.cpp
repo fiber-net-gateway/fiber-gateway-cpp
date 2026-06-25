@@ -1036,6 +1036,28 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
             ++dropped_datagram_count_;
             return std::unexpected(common::IoErr::Invalid);
         }
+        if (packet && packet->type == QuicPacketType::UnsupportedVersion) {
+            QuicPacketHeader response{};
+            response.long_header = true;
+            response.type = QuicPacketType::VersionNegotiation;
+            response.flags = kPacketFlagLong | kPacketFlagFixed;
+            response.dcid = packet->scid;
+            response.scid = packet->dcid;
+
+            std::array<std::uint8_t, kQuicStatelessResponseBufferSize> out{};
+            QuicWriteCursor writer(out.data(), out.size());
+            auto written = quic_create_version_negotiation_packet(response, writer);
+            if (!written) {
+                ++dropped_datagram_count_;
+                return std::unexpected(written.error());
+            }
+            auto sent = send_direct_datagram(out.data(), *written, datagram);
+            if (!sent) {
+                ++dropped_datagram_count_;
+                return std::unexpected(sent.error());
+            }
+            return std::unexpected(common::IoErr::WouldBlock);
+        }
         if (!packet || !packet->long_header || packet->type != QuicPacketType::Initial ||
             packet->version != kQuicVersion1 || recv.size < kMinInitialDatagramSize) {
             ++dropped_datagram_count_;

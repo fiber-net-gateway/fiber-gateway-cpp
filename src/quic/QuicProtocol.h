@@ -37,6 +37,7 @@ enum class QuicPacketType : std::uint8_t {
     Retry,
     Short,
     VersionNegotiation,
+    UnsupportedVersion,
 };
 
 struct QuicPacketHeader {

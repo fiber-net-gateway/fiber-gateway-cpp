@@ -1307,6 +1307,22 @@ void build_long_header_handshake_datagram(std::array<std::uint8_t, 50> &datagram
     datagram[7 + dcid.size()] = 0; // length varint 0
 }
 
+void build_unsupported_version_long_datagram(std::array<std::uint8_t, 64> &datagram,
+                                             const fiber::quic::QuicConnectionId &dcid,
+                                             const fiber::quic::QuicConnectionId &scid, std::uint32_t version) {
+    datagram = {};
+    datagram[0] = fiber::quic::kPacketFlagLong | fiber::quic::kPacketFlagFixed | fiber::quic::kLongPacketTypeInitial;
+    datagram[1] = static_cast<std::uint8_t>((version >> 24U) & 0xffU);
+    datagram[2] = static_cast<std::uint8_t>((version >> 16U) & 0xffU);
+    datagram[3] = static_cast<std::uint8_t>((version >> 8U) & 0xffU);
+    datagram[4] = static_cast<std::uint8_t>(version & 0xffU);
+    datagram[5] = static_cast<std::uint8_t>(dcid.size());
+    std::memcpy(datagram.data() + 6, dcid.data(), dcid.size());
+    const std::size_t scid_len_offset = 6 + dcid.size();
+    datagram[scid_len_offset] = static_cast<std::uint8_t>(scid.size());
+    std::memcpy(datagram.data() + scid_len_offset + 1, scid.data(), scid.size());
+}
+
 DetachedTask recv_endpoint_n_times(fiber::quic::QuicUdpEndpoint *endpoint, std::size_t n,
                                    std::promise<void> *done_promise) {
     for (std::size_t i = 0; i < n; ++i) {
@@ -2287,6 +2303,110 @@ TEST(QuicUdpEndpointTest, DoesNotSendStatelessResetForLongHeader) {
     auto response = response_future.get();
     ASSERT_TRUE(response.has_value()) << static_cast<int>(response.error());
     EXPECT_FALSE(*response); // no stateless reset sent
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, SendsVersionNegotiationForUnsupportedVersionLongHeader) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("0102030405060708");
+    const auto scid = cid_from_hex("11223344");
+    std::array<std::uint8_t, 64> datagram{};
+    build_unsupported_version_long_datagram(datagram, dcid, scid, 0xfaceb00cU);
+
+    std::array<std::uint8_t, 512> response{};
+    std::promise<EndpointResult> recv_promise;
+    std::promise<fiber::common::IoResult<std::size_t>> response_promise;
+    auto recv_future = recv_promise.get_future();
+    auto response_future = response_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() { return recv_endpoint_once(&endpoint, &recv_promise); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return send_datagram_and_recv_response(&group.at(0), endpoint.local_addr().port(), datagram.data(),
+                                               datagram.size(), response.data(), response.size(), &response_promise);
+    });
+
+    ASSERT_EQ(recv_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(response_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+    auto recv_result = recv_future.get();
+    EXPECT_FALSE(recv_result.has_value());
+    EXPECT_EQ(recv_result.error(), fiber::common::IoErr::WouldBlock);
+
+    auto response_size = response_future.get();
+    ASSERT_TRUE(response_size.has_value()) << static_cast<int>(response_size.error());
+    const std::size_t len = *response_size;
+
+    auto packet = fiber::quic::quic_parse_packet_header(response.data(), len, 0);
+    ASSERT_TRUE(packet.has_value()) << static_cast<int>(packet.error());
+    EXPECT_EQ(packet->type, fiber::quic::QuicPacketType::VersionNegotiation);
+    EXPECT_EQ(packet->version, 0U);
+    EXPECT_EQ(packet->dcid.size(), scid.size());
+    EXPECT_EQ(std::memcmp(packet->dcid.data(), scid.data(), scid.size()), 0);
+    EXPECT_EQ(packet->scid.size(), dcid.size());
+    EXPECT_EQ(std::memcmp(packet->scid.data(), dcid.data(), dcid.size()), 0);
+
+    const std::size_t supported_versions_offset = 1U + 4U + 1U + scid.size() + 1U + dcid.size();
+    ASSERT_GE(len, supported_versions_offset + 4U);
+    EXPECT_EQ(response[supported_versions_offset], 0U);
+    EXPECT_EQ(response[supported_versions_offset + 1], 0U);
+    EXPECT_EQ(response[supported_versions_offset + 2], 0U);
+    EXPECT_EQ(response[supported_versions_offset + 3], 1U);
+    EXPECT_EQ(endpoint.active_connection_count(), 0U);
+    EXPECT_EQ(endpoint.find_connection(dcid), nullptr);
+    EXPECT_EQ(endpoint.dropped_datagram_count(), 0U);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, DoesNotRespondToVersionNegotiationPacket) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("0102030405060708");
+    const auto scid = cid_from_hex("11223344");
+    std::array<std::uint8_t, 64> datagram{};
+    build_unsupported_version_long_datagram(datagram, dcid, scid, 0);
+
+    std::promise<EndpointResult> recv_promise;
+    std::promise<fiber::common::IoResult<bool>> response_promise;
+    auto recv_future = recv_promise.get_future();
+    auto response_future = response_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() { return recv_endpoint_once(&endpoint, &recv_promise); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return send_datagram_and_check_no_response(&group.at(0), endpoint.local_addr().port(), datagram.data(),
+                                                   datagram.size(), &response_promise);
+    });
+
+    ASSERT_EQ(recv_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(response_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+    auto recv_result = recv_future.get();
+    EXPECT_FALSE(recv_result.has_value());
+    EXPECT_EQ(recv_result.error(), fiber::common::IoErr::Invalid);
+    EXPECT_EQ(endpoint.dropped_datagram_count(), 1U);
+    EXPECT_EQ(endpoint.active_connection_count(), 0U);
+
+    auto response = response_future.get();
+    ASSERT_TRUE(response.has_value()) << static_cast<int>(response.error());
+    EXPECT_FALSE(*response);
 
     close_endpoint_on_loop(group, endpoint);
     group.stop();

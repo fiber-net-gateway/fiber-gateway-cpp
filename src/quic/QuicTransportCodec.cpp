@@ -174,7 +174,9 @@ parse_long_header(const std::uint8_t *datagram, std::size_t datagram_len, std::u
         return packet;
     }
     if (*version != kQuicVersion1) {
-        return std::unexpected(common::IoErr::NotSupported);
+        packet.type = QuicPacketType::UnsupportedVersion;
+        packet.packet_len = datagram_len;
+        return packet;
     }
 
     const std::uint8_t long_type = flags & kPacketFlagLongTypeMask;
@@ -384,7 +386,8 @@ common::IoResult<std::size_t> quic_create_packet_header(QuicWriteCursor &out, co
     if (packet_number_pos == nullptr || packet.pn_len == 0 || packet.pn_len > 4) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    if (packet.type == QuicPacketType::Retry || packet.type == QuicPacketType::VersionNegotiation) {
+    if (packet.type == QuicPacketType::Retry || packet.type == QuicPacketType::VersionNegotiation ||
+        packet.type == QuicPacketType::UnsupportedVersion) {
         return std::unexpected(common::IoErr::NotSupported);
     }
 
