@@ -1260,7 +1260,10 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
             continue;
         }
 
-        const std::size_t requested = std::min(capacity, candidate.mtu);
+        const std::size_t packet_limit =
+                source->mtu_probe ? std::max(candidate.mtu, static_cast<std::size_t>(source->min_packet_len))
+                                  : candidate.mtu;
+        const std::size_t requested = std::min(capacity, packet_limit);
         const std::size_t allowed = QuicConnection::path_send_limit(candidate, requested);
         if (allowed == 0) {
             continue;
@@ -1296,6 +1299,7 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
         datagram.data = data;
         datagram.capacity = allowed;
         datagram.path = &candidate;
+        datagram.mtu_probe = frame->mtu_probe;
         datagram.packet_number_snapshots[2] = quic_preserve_packet_number(space);
         datagram.packet_number_snapshot_valid[2] = true;
 
@@ -1652,6 +1656,14 @@ void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const Qui
             if (frame->packet_ack_eliciting && !connection.closing()) {
                 if (frame->packet_len != 0) {
                     quic_congestion_on_packet_sent(connection.congestion(), frame->packet_len, true, false);
+                }
+                if (frame->mtu_probe && frame->path != nullptr) {
+                    for (std::uint64_t &packet_number: frame->path->mtu_packet_numbers) {
+                        if (packet_number == kUnsetPacketNumber) {
+                            packet_number = frame->packet_number;
+                            break;
+                        }
+                    }
                 }
                 space.sent_frames.push_back(*frame);
                 sent_ack_eliciting = true;

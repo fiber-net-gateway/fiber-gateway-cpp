@@ -1326,6 +1326,15 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
         (options_.transport.max_idle_timeout.count() <= 0 || peer_idle_timeout < options_.transport.max_idle_timeout)) {
         options_.transport.max_idle_timeout = peer_idle_timeout;
     }
+    if (QuicPath *path = active_path(); path != nullptr && path->validated) {
+        const QuicTime now = event::EventLoop::current_or_null() != nullptr
+                                     ? quic_time_ms(event::EventLoop::current().now())
+                                     : QuicTime{0};
+        auto discovered = path_manager_.discover_path_mtu(*path, now);
+        if (!discovered) {
+            return std::unexpected(discovered.error());
+        }
+    }
     return {};
 }
 

@@ -14,6 +14,7 @@
 #include "async/Sleep.h"
 #include "async/Spawn.h"
 #include "event/EventLoopGroup.h"
+#include "quic/QuicAckHandler.h"
 #include "quic/QuicConnection.h"
 #include "quic/QuicLossRecovery.h"
 #include "quic/QuicProtocol.h"
@@ -477,6 +478,174 @@ TEST(QuicConnectionTest, TracksPathReceiveSendAndAntiAmplificationLimit) {
 
     path->validated = true;
     EXPECT_EQ(fiber::quic::QuicConnection::path_send_limit(*path, 2000), 2000U);
+}
+
+TEST(QuicConnectionTest, PeerTransportStartsMtuDiscoveryOnValidatedPath) {
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Server;
+    options.remote_connection_id = cid_from({0x11, 0x22});
+    options.initial_path_validated = true;
+    fiber::quic::QuicConnection conn(options);
+    auto *path = conn.active_path();
+    ASSERT_NE(path, nullptr);
+
+    fiber::quic::QuicTransportParams params{};
+    params.has_initial_source_connection_id = true;
+    params.initial_source_connection_id = options.remote_connection_id;
+    params.max_udp_payload_size = 2400;
+    params.active_connection_id_limit = 2;
+
+    auto applied = conn.apply_peer_transport_params(params);
+
+    ASSERT_TRUE(applied.has_value()) << static_cast<int>(applied.error());
+    EXPECT_EQ(path->state, fiber::quic::QuicPathState::WaitingMtuProbe);
+    EXPECT_EQ(path->mtud, 2400U);
+    EXPECT_EQ(path->max_mtu, 2400U);
+    EXPECT_EQ(path->expires, fiber::quic::QuicTime{100});
+}
+
+TEST(QuicConnectionTest, MtuDelayQueuesPingProbe) {
+    StreamCallbackState state{};
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Server;
+    options.remote_connection_id = cid_from({0x11, 0x22});
+    options.initial_path_validated = true;
+    options.schedule_send_owner = &state;
+    options.schedule_send = schedule_send_record;
+    fiber::quic::QuicConnection conn(options);
+    auto *path = conn.active_path();
+    ASSERT_NE(path, nullptr);
+
+    path->state = fiber::quic::QuicPathState::WaitingMtuProbe;
+    path->mtud = 2400;
+
+    auto expired = conn.paths().expire_mtu_delay(*path, fiber::quic::QuicTime{100});
+
+    ASSERT_TRUE(expired.has_value()) << static_cast<int>(expired.error());
+    EXPECT_TRUE(*expired);
+    EXPECT_EQ(path->state, fiber::quic::QuicPathState::MtuDiscovery);
+    ASSERT_FALSE(path->pending_frames.empty());
+    const auto *probe = path->pending_frames.front();
+    ASSERT_NE(probe, nullptr);
+    EXPECT_EQ(probe->type, fiber::quic::QuicFrameType::Ping);
+    EXPECT_TRUE(probe->mtu_probe);
+    EXPECT_TRUE(probe->ignore_loss);
+    EXPECT_TRUE(probe->ignore_congestion);
+    EXPECT_EQ(probe->min_packet_len, 2400U);
+    EXPECT_EQ(probe->path, path);
+    EXPECT_EQ(state.schedule_calls, 1U);
+}
+
+TEST(QuicConnectionTest, MtuAckRaisesPathMtuAndContinuesDiscovery) {
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Server;
+    options.remote_connection_id = cid_from({0x11, 0x22});
+    options.initial_path_validated = true;
+    fiber::quic::QuicConnection conn(options);
+    auto *path = conn.active_path();
+    ASSERT_NE(path, nullptr);
+
+    fiber::quic::QuicTransportParams params{};
+    params.has_initial_source_connection_id = true;
+    params.initial_source_connection_id = options.remote_connection_id;
+    params.max_udp_payload_size = 3000;
+    params.active_connection_id_limit = 2;
+    ASSERT_TRUE(conn.apply_peer_transport_params(params).has_value());
+
+    path->state = fiber::quic::QuicPathState::MtuDiscovery;
+    path->mtu = fiber::quic::kMinInitialDatagramSize;
+    path->mtud = 2400;
+    path->max_mtu = 0;
+    path->mtu_packet_numbers[0] = 42;
+
+    auto handled = conn.paths().handle_mtu_ack(40, 50, fiber::quic::QuicTime{200});
+
+    ASSERT_TRUE(handled.has_value()) << static_cast<int>(handled.error());
+    EXPECT_TRUE(*handled);
+    EXPECT_EQ(path->mtu, 2400U);
+    EXPECT_EQ(conn.congestion().mtu, 2400U);
+    EXPECT_EQ(path->state, fiber::quic::QuicPathState::WaitingMtuProbe);
+    EXPECT_EQ(path->mtud, 3000U);
+    EXPECT_EQ(path->max_mtu, 3000U);
+}
+
+TEST(QuicConnectionTest, MtuProbeFailureSetsUpperBoundAndBisects) {
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Server;
+    options.remote_connection_id = cid_from({0x11, 0x22});
+    options.initial_path_validated = true;
+    fiber::quic::QuicConnection conn(options);
+    auto *path = conn.active_path();
+    ASSERT_NE(path, nullptr);
+
+    fiber::quic::QuicTransportParams params{};
+    params.has_initial_source_connection_id = true;
+    params.initial_source_connection_id = options.remote_connection_id;
+    params.max_udp_payload_size = 3000;
+    params.active_connection_id_limit = 2;
+    ASSERT_TRUE(conn.apply_peer_transport_params(params).has_value());
+
+    path->state = fiber::quic::QuicPathState::MtuDiscovery;
+    path->mtu = fiber::quic::kMinInitialDatagramSize;
+    path->mtud = 2400;
+    path->max_mtu = 0;
+
+    auto handled = conn.paths().handle_mtu_probe_send_failed(*path, fiber::quic::QuicTime{200});
+
+    ASSERT_TRUE(handled.has_value()) << static_cast<int>(handled.error());
+    EXPECT_TRUE(*handled);
+    EXPECT_EQ(path->max_mtu, 2400U);
+    EXPECT_EQ(path->mtud, 1800U);
+    EXPECT_EQ(path->state, fiber::quic::QuicPathState::WaitingMtuProbe);
+}
+
+TEST(QuicConnectionTest, AckHandlerPromotesMtuProbePacket) {
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Server;
+    options.remote_connection_id = cid_from({0x11, 0x22});
+    options.initial_path_validated = true;
+    fiber::quic::QuicConnection conn(options);
+    auto *path = conn.active_path();
+    ASSERT_NE(path, nullptr);
+
+    fiber::quic::QuicTransportParams params{};
+    params.has_initial_source_connection_id = true;
+    params.initial_source_connection_id = options.remote_connection_id;
+    params.max_udp_payload_size = 2400;
+    params.active_connection_id_limit = 2;
+    ASSERT_TRUE(conn.apply_peer_transport_params(params).has_value());
+
+    auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    auto *probe = space.alloc_frame();
+    ASSERT_NE(probe, nullptr);
+    probe->type = fiber::quic::QuicFrameType::Ping;
+    probe->path = path;
+    probe->packet_number = 7;
+    probe->send_time = fiber::quic::QuicTime{100};
+    probe->packet_ack_eliciting = true;
+    probe->mtu_probe = true;
+    space.sent_frames.push_back(*probe);
+    space.next_packet_number = 8;
+
+    path->state = fiber::quic::QuicPathState::MtuDiscovery;
+    path->mtu = fiber::quic::kMinInitialDatagramSize;
+    path->mtud = 2400;
+    path->max_mtu = 2400;
+    path->mtu_packet_numbers[0] = 7;
+
+    fiber::quic::QuicInputFrame ack{};
+    ack.type = fiber::quic::QuicFrameType::Ack;
+    ack.level = fiber::quic::QuicEncryptionLevel::Application;
+    ack.u.ack.largest = 7;
+    ack.u.ack.first_range = 0;
+
+    auto handled = fiber::quic::quic_handle_ack_frame(conn, fiber::quic::QuicEncryptionLevel::Application, ack,
+                                                      fiber::quic::QuicTime{150});
+
+    ASSERT_TRUE(handled.has_value()) << static_cast<int>(handled.error());
+    EXPECT_TRUE(handled->acked_frames);
+    EXPECT_EQ(path->mtu, 2400U);
+    EXPECT_EQ(path->state, fiber::quic::QuicPathState::Idle);
 }
 
 TEST(QuicConnectionTest, ReplacesProbePathWhenCreatingAnotherProbe) {

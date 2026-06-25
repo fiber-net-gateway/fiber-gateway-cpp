@@ -13,6 +13,8 @@ namespace fiber::quic {
 
 inline constexpr std::size_t kQuicMaxPaths = 3;
 inline constexpr std::size_t kQuicPathRetries = 3;
+inline constexpr QuicTime kQuicPathMtuDelay{100};
+inline constexpr std::size_t kQuicPathMtuPrecision = 16;
 
 enum class QuicPathTag : std::uint8_t {
     Probe,
