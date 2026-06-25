@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "quic/QuicTransportCodec.h"
@@ -81,6 +82,34 @@ TEST(QuicTransportCodecTest, ParsesInitialLongHeaderAndPacketLength) {
     EXPECT_EQ(packet->length, 6U);
     EXPECT_EQ(packet->packet_len, protected_pn_offset + 6U);
     EXPECT_EQ(packet->protected_pn, datagram.data() + protected_pn_offset);
+}
+
+TEST(QuicTransportCodecTest, ParsesUnsupportedVersionLongHeaderCids) {
+    std::array<std::uint8_t, 32> datagram{};
+    fiber::quic::QuicWriteCursor out(datagram.data(), datagram.size());
+
+    ASSERT_TRUE(out.write_u8(fiber::quic::kPacketFlagLong | fiber::quic::kPacketFlagFixed |
+                             fiber::quic::kLongPacketTypeInitial)
+                        .has_value());
+    ASSERT_TRUE(out.write_be32(0xfaceb00cU).has_value());
+    const std::array<std::uint8_t, 4> dcid{0x01, 0x02, 0x03, 0x04};
+    ASSERT_TRUE(out.write_u8(dcid.size()).has_value());
+    ASSERT_TRUE(out.write_bytes(dcid.data(), dcid.size()).has_value());
+    const std::array<std::uint8_t, 3> scid{0x11, 0x22, 0x33};
+    ASSERT_TRUE(out.write_u8(scid.size()).has_value());
+    ASSERT_TRUE(out.write_bytes(scid.data(), scid.size()).has_value());
+
+    auto packet = fiber::quic::quic_parse_packet_header(datagram.data(), datagram.size(), 0);
+
+    ASSERT_TRUE(packet.has_value());
+    EXPECT_TRUE(packet->long_header);
+    EXPECT_EQ(packet->type, fiber::quic::QuicPacketType::UnsupportedVersion);
+    EXPECT_EQ(packet->version, 0xfaceb00cU);
+    EXPECT_EQ(packet->dcid.size(), dcid.size());
+    EXPECT_EQ(std::memcmp(packet->dcid.data(), dcid.data(), dcid.size()), 0);
+    EXPECT_EQ(packet->scid.size(), scid.size());
+    EXPECT_EQ(std::memcmp(packet->scid.data(), scid.data(), scid.size()), 0);
+    EXPECT_EQ(packet->packet_len, datagram.size());
 }
 
 TEST(QuicTransportCodecTest, CreatesLongHeaderWithPacketNumberPointer) {
