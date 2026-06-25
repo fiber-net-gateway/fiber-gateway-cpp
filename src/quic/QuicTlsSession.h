@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
@@ -35,8 +36,18 @@ public:
     [[nodiscard]] bool handshake_done() const noexcept;
     [[nodiscard]] SSL *raw() const noexcept { return ssl_; }
 
+    // Capture a TLS alert raised by BoringSSL's send_alert callback during the
+    // handshake. drive_handshake() consumes it via take_pending_alert() to emit
+    // a CRYPTO_ERROR close (RFC 9000 §20.1).
+    void record_alert(std::uint8_t alert) noexcept;
+    [[nodiscard]] std::optional<std::uint8_t> take_pending_alert() noexcept;
+
 private:
     SSL *ssl_ = nullptr;
+    // Alert stashed by record_alert() (set from within the TLS stack) and
+    // drained by drive_handshake() once SSL_do_handshake returns, so connection
+    // close state is never mutated re-entrantly from inside BoringSSL.
+    std::optional<std::uint8_t> pending_alert_;
 };
 
 } // namespace fiber::quic

@@ -105,6 +105,17 @@ enum class QuicErrorCode : std::uint64_t {
     NoViablePath = 0x10,
 };
 
+// RFC 9000 §20.1: a TLS failure during the handshake is reported to the peer as
+// a CRYPTO_ERROR transport error code = 0x0100 | (TLS alert value), spanning
+// 0x0100–0x01FF. nginx models this as NGX_QUIC_ERR_CRYPTO(alert). Special
+// alerts such as no_application_protocol (120) and missing_extension (109) are
+// encoded correctly by the general 0x0100 | alert mapping — no special-casing.
+inline constexpr std::uint64_t kQuicCryptoErrorBase = 0x0100u;
+
+[[nodiscard]] constexpr std::uint64_t quic_crypto_error_code(std::uint8_t alert) noexcept {
+    return kQuicCryptoErrorBase | static_cast<std::uint64_t>(alert);
+}
+
 struct QuicTransportSettings {
     std::chrono::milliseconds max_idle_timeout = std::chrono::seconds(30);
     std::size_t max_udp_payload_size = kQuicMaxUdpPayloadSize;
@@ -280,6 +291,7 @@ public:
     [[nodiscard]] QuicErrorCode close_error() const noexcept {
         return static_cast<QuicErrorCode>(close_info_.error_code);
     }
+    [[nodiscard]] QuicCloseSource close_source() const noexcept { return close_info_.source; }
     [[nodiscard]] bool closed() const noexcept { return state_ == QuicConnectionState::Closed; }
     [[nodiscard]] bool terminal_closing() const noexcept {
         return state_ == QuicConnectionState::Draining || state_ == QuicConnectionState::Closing ||
@@ -305,6 +317,15 @@ public:
     // accepts the full uint64 application error space. Initial/Handshake levels still
     // carry CONNECTION_CLOSE with error_code = APPLICATION_ERROR (0x0C) per RFC 9000 §10.2.3.
     void close_application(std::uint64_t error_code) noexcept;
+    // RFC 9000 §20.1 — close with a CRYPTO_ERROR transport code derived from a
+    // TLS alert (0x0100 | alert). Used when the TLS handshake raises a fatal
+    // alert (captured by the QUIC TLS send_alert callback). Mirrors nginx's
+    // NGX_QUIC_ERR_CRYPTO(alert) path: a transport-level CONNECTION_CLOSE is
+    // queued on every encryption level with available write keys, and the close
+    // is immediate (no 3*PTO linger) since the handshake is unrecoverable.
+    // `frame_type` defaults to 0, matching nginx (it leaves error_ftype unset
+    // for crypto alerts).
+    void close_crypto_error(std::uint8_t alert, std::uint64_t frame_type = 0) noexcept;
     // Graceful shutdown: stop accepting new streams, let in-flight streams finish,
     // then transition to Closing once active_stream_count() reaches zero. If the
     // grace period (`grace`, or `options_.graceful_shutdown_grace` when 0) elapses
@@ -466,6 +487,14 @@ public:
     [[nodiscard]] bool has_active_local_connection_id(const QuicConnectionId &cid) const noexcept;
     [[nodiscard]] common::IoResult<void>
     stateless_reset_token_for(const QuicConnectionId &cid, std::uint8_t out[kStatelessResetTokenLength]) const noexcept;
+    // RFC 9000 §10.3: detect a peer-sent stateless reset. A short-header (1-RTT)
+    // packet that fails to decrypt is a reset iff its final 16 bytes equal a
+    // stateless_reset_token the peer advertised via NEW_CONNECTION_ID. Compares
+    // the trailing 16 bytes of the supplied packet against every active
+    // peer-issued (remote) Connection ID's token in constant time. The caller is
+    // responsible for having already established that the packet is a short
+    // header that failed to decrypt.
+    [[nodiscard]] bool detects_stateless_reset(const std::uint8_t *packet_data, std::size_t packet_len) const noexcept;
     [[nodiscard]] const QuicTransportSettings &local_transport() const noexcept { return options_.transport; }
     [[nodiscard]] const QuicPeerTransportState &peer_transport() const noexcept { return peer_transport_; }
     [[nodiscard]] bool peer_transport_params_received() const noexcept { return peer_transport_.received; }
@@ -495,6 +524,19 @@ private:
     [[nodiscard]] std::uint64_t peer_stream_limit(QuicStreamType type) const noexcept;
     [[nodiscard]] bool local_stream_blocked(QuicStreamType type) const noexcept;
     [[nodiscard]] bool is_gone_peer_stream(std::uint64_t stream_id) const noexcept;
+    // RFC 9000 §4.6: a peer-initiated stream whose sequence (id >> 2) reaches or
+    // exceeds the advertised max_streams has exceeded the limit advertised via
+    // MAX_STREAMS — a STREAM_LIMIT_ERROR peer violation. This is distinct from
+    // the concurrent-active-stream window (can_accept_peer_stream's second
+    // check), which is a non-fatal flow-control gate and must NOT close the
+    // connection.
+    [[nodiscard]] bool peer_stream_exceeds_advertised_limit(std::uint64_t stream_id) const noexcept;
+    // Build the new-stream context, invoke the app's on_new_stream callback,
+    // attach the stream to this connection, and insert it into the stream
+    // table. Used for the target peer stream AND every implicitly-opened
+    // intermediate peer stream (RFC 9000 §2.1). Precondition: on_new_stream is
+    // set and stream_id is a peer stream within the advertised limit.
+    [[nodiscard]] common::IoResult<QuicStream *> create_peer_stream(std::uint64_t stream_id) noexcept;
     void on_peer_stream_retired(std::uint64_t stream_id) noexcept;
     void maybe_extend_peer_stream_limit(QuicStreamType type) noexcept;
     void retire_stream(QuicStream &stream) noexcept;

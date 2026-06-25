@@ -161,11 +161,16 @@ int add_handshake_data(SSL *ssl, enum ssl_encryption_level_t level, const std::u
 int flush_flight(SSL *ssl) noexcept { return connection_from_ssl(ssl) == nullptr ? 0 : 1; }
 
 int send_alert(SSL *ssl, enum ssl_encryption_level_t level, std::uint8_t alert) noexcept {
-    if (connection_from_ssl(ssl) == nullptr) {
+    (void) level;
+    QuicConnection *connection = connection_from_ssl(ssl);
+    if (connection == nullptr) {
         return 0;
     }
-    (void) level;
-    (void) alert;
+    // Stash the alert; drive_handshake() converts it into a CRYPTO_ERROR close
+    // once SSL_do_handshake returns. Mirrors nginx stashing qc->error in the
+    // alert callback and emitting the close from the main loop, so connection
+    // close state is never mutated re-entrantly from inside the TLS stack.
+    connection->tls().record_alert(alert);
     return 1;
 }
 
@@ -295,9 +300,29 @@ common::IoResult<void> QuicTlsSession::drive_handshake() noexcept {
     if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
         return std::unexpected(common::IoErr::WouldBlock);
     }
+
+    // A TLS alert was raised during the handshake (captured by the send_alert
+    // callback). RFC 9000 §20.1: communicate it to the peer as a
+    // CONNECTION_CLOSE carrying CRYPTO_ERROR = 0x0100 | alert, instead of
+    // collapsing every handshake failure to a generic error. The general
+    // 0x0100 | alert mapping already encodes the special alerts nginx
+    // special-cases (no_application_protocol=120, missing_extension=109).
+    if (auto alert = take_pending_alert()) {
+        if (QuicConnection *connection = connection_from_ssl(ssl_)) {
+            connection->close_crypto_error(*alert);
+        }
+    }
     return std::unexpected(common::IoErr::Invalid);
 }
 
 bool QuicTlsSession::handshake_done() const noexcept { return ssl_ != nullptr && SSL_is_init_finished(ssl_) == 1; }
+
+void QuicTlsSession::record_alert(std::uint8_t alert) noexcept { pending_alert_ = alert; }
+
+std::optional<std::uint8_t> QuicTlsSession::take_pending_alert() noexcept {
+    std::optional<std::uint8_t> alert = pending_alert_;
+    pending_alert_.reset();
+    return alert;
+}
 
 } // namespace fiber::quic

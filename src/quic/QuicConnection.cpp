@@ -342,6 +342,17 @@ void QuicConnection::close_application(std::uint64_t error_code) noexcept {
     });
 }
 
+void QuicConnection::close_crypto_error(std::uint8_t alert, std::uint64_t frame_type) noexcept {
+    enter_closing(
+            QuicCloseInfo{
+                    .source = QuicCloseSource::Local,
+                    .frame_kind = QuicCloseFrameKind::Transport,
+                    .error_code = quic_crypto_error_code(alert),
+                    .frame_type = frame_type,
+            },
+            /*immediate=*/true);
+}
+
 void QuicConnection::shutdown(QuicErrorCode error, std::uint64_t frame_type, std::chrono::milliseconds grace) noexcept {
     if (state_ == QuicConnectionState::GracefulClosing || terminal_closing()) {
         return;
@@ -894,16 +905,19 @@ common::IoResult<void> QuicConnection::record_peer_stream_id(std::uint64_t strea
         return std::unexpected(common::IoErr::Busy);
     }
 
+    // Advance the per-type high-water mark to include this stream id. RFC 9000
+    // §2.1: a stream ID used out of order opens all lower-numbered streams of
+    // that type — they are REAL active streams (created by
+    // get_or_create_peer_stream), not retired. Only on_peer_stream_retired
+    // increments retired_count; the gap must NOT inflate it (the previous code
+    // did, which caused the implicit streams to be skipped and their later data
+    // silently dropped). nginx advances client_streams_bidi to (id>>2)+1
+    // unconditionally before its create loop (ngx_quic_get_stream).
     const QuicStreamType type = stream_type(stream_id);
     PeerStreamLimitWindow &window = peer_stream_window(type);
     const std::uint64_t opened = stream_sequence(stream_id) + 1;
     if (opened > window.opened_count) {
-        const std::uint64_t implicit_retired = opened - window.opened_count - 1;
         window.opened_count = opened;
-        window.retired_count += implicit_retired;
-        if (implicit_retired != 0) {
-            maybe_extend_peer_stream_limit(type);
-        }
     }
     return {};
 }
@@ -914,22 +928,7 @@ const QuicStream *QuicConnection::find_stream(std::uint64_t stream_id) const noe
     return streams_.find(stream_id);
 }
 
-common::IoResult<QuicStream *> QuicConnection::get_or_create_peer_stream(std::uint64_t stream_id) noexcept {
-    if (!accepting_new_streams()) {
-        return std::unexpected(common::IoErr::Canceled);
-    }
-    if (QuicStream *stream = streams_.find(stream_id)) {
-        return stream;
-    }
-    auto recorded = record_peer_stream_id(stream_id);
-    if (!recorded) {
-        return std::unexpected(recorded.error());
-    }
-
-    if (options_.ops.on_new_stream == nullptr) {
-        return std::unexpected(common::IoErr::NotSupported);
-    }
-
+common::IoResult<QuicStream *> QuicConnection::create_peer_stream(std::uint64_t stream_id) noexcept {
     QuicNewStreamContext ctx{
             .stream_id = stream_id,
             .connection = *this,
@@ -956,9 +955,87 @@ common::IoResult<QuicStream *> QuicConnection::get_or_create_peer_stream(std::ui
     return stream;
 }
 
+common::IoResult<QuicStream *> QuicConnection::get_or_create_peer_stream(std::uint64_t stream_id) noexcept {
+    if (!accepting_new_streams()) {
+        return std::unexpected(common::IoErr::Canceled);
+    }
+    if (QuicStream *stream = streams_.find(stream_id)) {
+        return stream;
+    }
+
+    const QuicStreamType type = stream_type(stream_id);
+    PeerStreamLimitWindow &window = peer_stream_window(type);
+    // Capture the gap lower bound BEFORE record_peer_stream_id advances the
+    // high-water mark; every sequence in [from_seq, target_seq] that is not
+    // already in the table must be created (RFC 9000 §2.1).
+    const std::uint64_t from_seq = window.opened_count;
+
+    auto recorded = record_peer_stream_id(stream_id);
+    if (!recorded) {
+        return std::unexpected(recorded.error());
+    }
+
+    if (options_.ops.on_new_stream == nullptr) {
+        return std::unexpected(common::IoErr::NotSupported);
+    }
+
+    // RFC 9000 §2.1 / §4.6: a stream ID used out of order opens all
+    // lower-numbered streams of that type. nginx (ngx_quic_get_stream) advances
+    // the per-type count to (id>>2)+1 then creates every intermediate stream in
+    // a loop, notifying the application for each. They are real open streams
+    // (open state, no data, no FIN); frames arriving later for them are
+    // delivered, not dropped. Intermediate ids are always below the target,
+    // hence below the advertised limit (callers close with STREAM_LIMIT_ERROR
+    // on seq >= advertised_limit), so they are always creatable.
+    const std::uint64_t target_seq = stream_sequence(stream_id);
+    const std::uint64_t type_bits = stream_id & 3ULL;
+    const std::uint64_t lower = from_seq < target_seq ? from_seq : target_seq;
+    QuicStream *target = nullptr;
+    for (std::uint64_t seq = lower; seq <= target_seq; ++seq) {
+        const std::uint64_t id = (seq << 2) | type_bits;
+        if (QuicStream *existing = streams_.find(id)) {
+            if (id == stream_id) {
+                target = existing;
+            }
+            continue;
+        }
+        auto created = create_peer_stream(id);
+        if (!created) {
+            return std::unexpected(created.error());
+        }
+        if (id == stream_id) {
+            target = *created;
+        }
+    }
+
+    if (target == nullptr) {
+        return std::unexpected(common::IoErr::Unknown);
+    }
+    return target;
+}
+
 common::IoResult<void> QuicConnection::recv_stream_frame(const QuicStreamFrame &frame, QuicSlice data) noexcept {
+    // RFC 9000 §4.1: STREAM data is sent by the stream sender. On a
+    // unidirectional stream the local side initiated, the local side is the
+    // sender and the peer is the receiver, so the peer MUST NOT send STREAM
+    // data on it. nginx closes with STREAM_STATE_ERROR at the top of
+    // ngx_quic_handle_stream_frame.
+    if (is_local_stream(frame.stream_id) && is_unidirectional_stream(frame.stream_id)) {
+        close(QuicErrorCode::StreamStateError, static_cast<std::uint64_t>(QuicFrameType::Stream));
+        return std::unexpected(common::IoErr::Busy);
+    }
+
     if (find_stream(frame.stream_id) == nullptr && is_gone_peer_stream(frame.stream_id)) {
         return {};
+    }
+
+    // RFC 9000 §4.6: a stream ID at or beyond the advertised max_streams is a
+    // STREAM_LIMIT_ERROR. The concurrent-active-stream window is a separate,
+    // non-fatal gate handled by get_or_create_peer_stream (returns Busy) and is
+    // NOT closed here.
+    if (find_stream(frame.stream_id) == nullptr && peer_stream_exceeds_advertised_limit(frame.stream_id)) {
+        close(QuicErrorCode::StreamLimitError, static_cast<std::uint64_t>(QuicFrameType::Stream));
+        return std::unexpected(common::IoErr::Busy);
     }
 
     auto stream = get_or_create_peer_stream(frame.stream_id);
@@ -972,9 +1049,43 @@ common::IoResult<void> QuicConnection::recv_stream_frame(const QuicStreamFrame &
     const std::uint64_t old_end = (*stream)->recv_queue_.received_end_offset();
     const std::uint64_t frame_end = frame.offset + data.len;
     const std::uint64_t pending_delta = frame_end > old_end ? frame_end - old_end : 0;
+
+    // Connection-level flow control (max_data). nginx's ngx_quic_control_flow
+    // closes with FLOW_CONTROL_ERROR when qc->streams.recv_last exceeds
+    // recv_max_data.
     auto allowed = check_recv_data_delta(pending_delta);
     if (!allowed) {
+        close(QuicErrorCode::FlowControlError, static_cast<std::uint64_t>(QuicFrameType::Stream));
         return std::unexpected(allowed.error());
+    }
+
+    // Per-stream flow control (max_stream_data). nginx gates this on
+    // recv_state == RECV (final size not yet known); once the final size is
+    // known, data beyond it is a FINAL_SIZE_ERROR, handled below.
+    if (!(*stream)->has_final_size() && frame_end > (*stream)->recv_queue_.max_stream_data()) {
+        close(QuicErrorCode::FlowControlError, static_cast<std::uint64_t>(QuicFrameType::Stream));
+        return std::unexpected(common::IoErr::MessageTooLarge);
+    }
+
+    // FINAL_SIZE_ERROR: data extends beyond an already-known final size
+    // (set by a prior FIN or RESET_STREAM).
+    if ((*stream)->has_final_size() && frame_end > (*stream)->final_size()) {
+        close(QuicErrorCode::FinalSizeError, static_cast<std::uint64_t>(QuicFrameType::Stream));
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    if (frame.fin) {
+        // FIN final size conflicts with a previously-known final size.
+        if ((*stream)->has_final_size() && (*stream)->final_size() != frame_end) {
+            close(QuicErrorCode::FinalSizeError, static_cast<std::uint64_t>(QuicFrameType::Stream));
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        // FIN final size is smaller than data already received on the stream
+        // (recv_last > last in nginx).
+        if ((*stream)->recv_queue_.received_end_offset() > frame_end) {
+            close(QuicErrorCode::FinalSizeError, static_cast<std::uint64_t>(QuicFrameType::Stream));
+            return std::unexpected(common::IoErr::Invalid);
+        }
     }
 
     auto received = (*stream)->on_stream_data_recv(data.data, data.len, frame.offset, frame.fin);
@@ -988,8 +1099,22 @@ common::IoResult<void> QuicConnection::recv_stream_frame(const QuicStreamFrame &
 }
 
 common::IoResult<void> QuicConnection::recv_reset_stream_frame(const QuicResetStreamFrame &frame) noexcept {
+    // RFC 9000 §4.1: RESET_STREAM is sent by the stream sender. On a
+    // unidirectional stream the local side initiated, the peer is the receiver
+    // and MUST NOT reset it → STREAM_STATE_ERROR (nginx
+    // ngx_quic_handle_reset_stream_frame).
+    if (is_local_stream(frame.id) && is_unidirectional_stream(frame.id)) {
+        close(QuicErrorCode::StreamStateError, static_cast<std::uint64_t>(QuicFrameType::ResetStream));
+        return std::unexpected(common::IoErr::Busy);
+    }
+
     if (find_stream(frame.id) == nullptr && is_gone_peer_stream(frame.id)) {
         return {};
+    }
+
+    if (find_stream(frame.id) == nullptr && peer_stream_exceeds_advertised_limit(frame.id)) {
+        close(QuicErrorCode::StreamLimitError, static_cast<std::uint64_t>(QuicFrameType::ResetStream));
+        return std::unexpected(common::IoErr::Busy);
     }
 
     auto stream = get_or_create_peer_stream(frame.id);
@@ -998,12 +1123,26 @@ common::IoResult<void> QuicConnection::recv_reset_stream_frame(const QuicResetSt
     }
 
     const std::uint64_t old_end = (*stream)->recv_queue_.received_end_offset();
+    // FINAL_SIZE_ERROR: reset final size is smaller than data already received
+    // (recv_last > final_size in nginx). Checked before the connection-flow
+    // delta to avoid underflow in the subtraction below.
     if (frame.final_size < old_end) {
+        close(QuicErrorCode::FinalSizeError, static_cast<std::uint64_t>(QuicFrameType::ResetStream));
         return std::unexpected(common::IoErr::Invalid);
     }
+    // Connection-level flow control (max_data). nginx skips the per-stream
+    // max_stream_data check for RESET_STREAM (recv_state is RESET_RECVD before
+    // ngx_quic_control_flow runs), so only the connection-level limit applies.
     auto allowed = check_recv_data_delta(frame.final_size - old_end);
     if (!allowed) {
+        close(QuicErrorCode::FlowControlError, static_cast<std::uint64_t>(QuicFrameType::ResetStream));
         return std::unexpected(allowed.error());
+    }
+    // FINAL_SIZE_ERROR: reset final size conflicts with a previously-known
+    // final size (recv_final_size != final_size in nginx).
+    if ((*stream)->has_final_size() && (*stream)->final_size() != frame.final_size) {
+        close(QuicErrorCode::FinalSizeError, static_cast<std::uint64_t>(QuicFrameType::ResetStream));
+        return std::unexpected(common::IoErr::Invalid);
     }
 
     auto reset = (*stream)->on_remote_reset(frame.error_code, frame.final_size);
@@ -1017,6 +1156,14 @@ common::IoResult<void> QuicConnection::recv_reset_stream_frame(const QuicResetSt
 }
 
 common::IoResult<void> QuicConnection::recv_stop_sending_frame(const QuicStopSendingFrame &frame) noexcept {
+    // RFC 9000 §4.1: STOP_SENDING is sent by the stream receiver. On a
+    // peer-initiated unidirectional stream the peer is the sender (the local
+    // side is the receiver), so the peer MUST NOT send STOP_SENDING on it →
+    // STREAM_STATE_ERROR (nginx ngx_quic_handle_stop_sending_frame).
+    if (is_peer_stream(frame.id) && is_unidirectional_stream(frame.id)) {
+        close(QuicErrorCode::StreamStateError, static_cast<std::uint64_t>(QuicFrameType::StopSending));
+        return std::unexpected(common::IoErr::Busy);
+    }
     QuicStream *stream = find_stream(frame.id);
     if (stream == nullptr) {
         return std::unexpected(common::IoErr::Invalid);
@@ -1025,6 +1172,14 @@ common::IoResult<void> QuicConnection::recv_stop_sending_frame(const QuicStopSen
 }
 
 common::IoResult<void> QuicConnection::recv_max_stream_data_frame(const QuicMaxStreamDataFrame &frame) noexcept {
+    // RFC 9000 §4.1: MAX_STREAM_DATA is sent by the stream receiver. On a
+    // peer-initiated unidirectional stream the peer is the sender, so it MUST
+    // NOT raise the local receive window → STREAM_STATE_ERROR (nginx
+    // ngx_quic_handle_max_stream_data_frame).
+    if (is_peer_stream(frame.id) && is_unidirectional_stream(frame.id)) {
+        close(QuicErrorCode::StreamStateError, static_cast<std::uint64_t>(QuicFrameType::MaxStreamData));
+        return std::unexpected(common::IoErr::Busy);
+    }
     QuicStream *stream = find_stream(frame.id);
     if (stream == nullptr) {
         return std::unexpected(common::IoErr::Invalid);
@@ -1206,6 +1361,37 @@ QuicConnection::stateless_reset_token_for(const QuicConnectionId &cid,
         return std::unexpected(common::IoErr::Invalid);
     }
     return options_.endpoint->create_stateless_reset_token(cid, out);
+}
+
+bool QuicConnection::detects_stateless_reset(const std::uint8_t *packet_data, std::size_t packet_len) const noexcept {
+    // RFC 9000 §10.3 / §10.3.1: a stateless reset is a short-header datagram
+    // whose final 16 bytes equal a stateless_reset_token the peer advertised via
+    // NEW_CONNECTION_ID. It must be strictly longer than the token itself (there
+    // is at least a header byte preceding the trailing token); this also keeps
+    // the tail pointer below in bounds.
+    if (packet_data == nullptr || packet_len <= kStatelessResetTokenLength) {
+        return false;
+    }
+    const std::uint8_t *tail = packet_data + packet_len - kStatelessResetTokenLength;
+    for (const QuicRemoteConnectionIdSlot &slot: remote_cids_) {
+        if (!slot.in_use || slot.sequence_number == 0) {
+            // No stateless reset token is carried for the initial Connection ID;
+            // tokens arrive only in NEW_CONNECTION_ID frames (RFC 9000 §10.3.1),
+            // so the sequence-0 slot's token is always zero and must be skipped.
+            continue;
+        }
+        // Constant-time compare (cf. nginx ngx_quic_handle_stateless_reset):
+        // accumulate the XOR of every byte and match iff the aggregate is zero.
+        // Do NOT short-circuit per-byte or use std::memcmp on the secret token.
+        std::uint8_t diff = 0;
+        for (std::size_t i = 0; i < kStatelessResetTokenLength; ++i) {
+            diff |= static_cast<std::uint8_t>(tail[i] ^ slot.stateless_reset_token[i]);
+        }
+        if (diff == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 std::size_t QuicConnection::active_local_connection_id_count() const noexcept {
@@ -1537,6 +1723,13 @@ bool QuicConnection::is_gone_peer_stream(std::uint64_t stream_id) const noexcept
     }
 
     return stream_sequence(stream_id) < peer_stream_window(stream_type(stream_id)).opened_count;
+}
+
+bool QuicConnection::peer_stream_exceeds_advertised_limit(std::uint64_t stream_id) const noexcept {
+    if (!is_peer_stream(stream_id)) {
+        return false;
+    }
+    return stream_sequence(stream_id) >= peer_stream_window(stream_type(stream_id)).advertised_limit;
 }
 
 void QuicConnection::on_peer_stream_retired(std::uint64_t stream_id) noexcept {
