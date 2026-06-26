@@ -37,9 +37,13 @@ public:
         bool encoded = false;
     };
 
+    QuicStreamSendQueue() noexcept = default;
     explicit QuicStreamSendQueue(mem::IoBufNodePool &pool) noexcept;
     QuicStreamSendQueue(mem::IoBufNodePool &pool, Options options) noexcept;
     ~QuicStreamSendQueue();
+
+    void init(mem::IoBufNodePool &pool) noexcept;
+    void init(mem::IoBufNodePool &pool, Options options) noexcept;
 
     [[nodiscard]] common::IoResult<std::size_t> try_append(const mem::IoBuf &buf, bool fin = false) noexcept;
     [[nodiscard]] common::IoResult<std::size_t> try_append_chain(mem::IoBufChain &chain) noexcept;
@@ -48,6 +52,7 @@ public:
 
     [[nodiscard]] mem::IoBufNodePool &node_pool() noexcept { return *pool_; }
     [[nodiscard]] const mem::IoBufNodePool &node_pool() const noexcept { return *pool_; }
+    [[nodiscard]] bool initialized() const noexcept { return pool_ != nullptr; }
     [[nodiscard]] std::size_t buffer_limit() const noexcept { return buffer_limit_; }
     [[nodiscard]] std::size_t buffer_available() const noexcept;
     [[nodiscard]] std::size_t ready_bytes() const noexcept { return ready_bytes_; }

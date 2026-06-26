@@ -145,13 +145,6 @@ struct QuicPeerTransportState {
 
 class QuicConnection;
 
-struct QuicNewStreamContext {
-    std::uint64_t stream_id = 0;
-    QuicConnection &connection;
-    mem::IoBufNodePool &recv_extent_pool;
-    QuicStreamRecvQueue::Options recv_options{};
-};
-
 enum class QuicCryptoSuite : std::uint8_t {
     InitialAes128GcmSha256,
     Aes128GcmSha256,
@@ -221,7 +214,8 @@ enum class QuicLossTimerMode : std::uint8_t {
 class QuicConnection : public common::NonCopyable, public common::NonMovable {
 public:
     struct Ops {
-        QuicStream::Lease (*on_new_stream)(void *owner, const QuicNewStreamContext &ctx) noexcept = nullptr;
+        QuicStream::Lease (*create_stream)(void *owner) noexcept = nullptr;
+        void (*on_peer_stream_attached)(void *owner, QuicStream &stream) noexcept = nullptr;
     };
 
     struct EndpointIndex {
@@ -252,6 +246,7 @@ public:
         std::uint64_t max_local_unidirectional_streams = kQuicDefaultMaxUnidirectionalStreams;
         QuicOutputFramePool *output_frame_pool = nullptr;
         QuicUdpEndpoint *endpoint = nullptr;
+        event::EventLoop *loop = nullptr;
         void *schedule_send_owner = nullptr;
         void (*schedule_send)(void *owner, QuicConnection &connection) noexcept = nullptr;
         void *lifecycle_owner = nullptr;
@@ -358,6 +353,11 @@ public:
     [[nodiscard]] QuicStream *find_stream(std::uint64_t stream_id) noexcept;
     [[nodiscard]] const QuicStream *find_stream(std::uint64_t stream_id) const noexcept;
     [[nodiscard]] std::size_t active_stream_count() const noexcept { return streams_.size(); }
+    [[nodiscard]] common::IoResult<QuicStream *> try_attach_local_stream(QuicStream::Lease &&stream,
+                                                                         QuicStreamType type) noexcept;
+    [[nodiscard]] async::Task<common::IoResult<QuicStream *>>
+    attach_local_stream(QuicStream::Lease stream, QuicStreamType type,
+                        std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] common::IoResult<QuicStream *> get_or_create_peer_stream(std::uint64_t stream_id) noexcept;
     [[nodiscard]] common::IoResult<void> recv_stream_frame(const QuicStreamFrame &frame, QuicSlice data) noexcept;
     [[nodiscard]] common::IoResult<void> recv_reset_stream_frame(const QuicResetStreamFrame &frame) noexcept;
@@ -366,7 +366,9 @@ public:
     [[nodiscard]] common::IoResult<void> recv_max_streams_frame(const QuicMaxStreamsFrame &frame) noexcept;
     [[nodiscard]] common::IoResult<void> recv_max_data_frame(const QuicMaxDataFrame &frame) noexcept;
     [[nodiscard]] common::IoResult<void> recv_streams_blocked_frame(const QuicStreamsBlockedFrame &frame) noexcept;
-    [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return recv_extent_pool_; }
+    [[nodiscard]] event::EventLoop *loop() noexcept { return loop_; }
+    [[nodiscard]] const event::EventLoop *loop() const noexcept { return loop_; }
+    [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return *node_pool_; }
     void release_stream_app(QuicStream &stream) noexcept;
     void drop_stream_send_ticket(std::uint64_t stream_id) noexcept;
     [[nodiscard]] std::uint64_t recv_data_consumed() const noexcept { return recv_data_consumed_; }
@@ -505,6 +507,8 @@ public:
     SendQueueEntry send_queue_entry{};
 
 private:
+    class LocalStreamAttachAwaiter;
+
     struct PeerStreamLimitWindow {
         std::uint64_t concurrent_limit = 0;
         std::uint64_t opened_count = 0;
@@ -525,6 +529,7 @@ private:
     [[nodiscard]] std::uint64_t local_stream_limit(QuicStreamType type) const noexcept;
     [[nodiscard]] std::uint64_t peer_stream_limit(QuicStreamType type) const noexcept;
     [[nodiscard]] bool local_stream_blocked(QuicStreamType type) const noexcept;
+    [[nodiscard]] bool local_stream_attach_ready(QuicStreamType type) const noexcept;
     [[nodiscard]] bool is_gone_peer_stream(std::uint64_t stream_id) const noexcept;
     // RFC 9000 §4.6: a peer-initiated stream whose sequence (id >> 2) reaches or
     // exceeds the advertised max_streams has exceeded the limit advertised via
@@ -533,11 +538,13 @@ private:
     // check), which is a non-fatal flow-control gate and must NOT close the
     // connection.
     [[nodiscard]] bool peer_stream_exceeds_advertised_limit(std::uint64_t stream_id) const noexcept;
-    // Build the new-stream context, invoke the app's on_new_stream callback,
-    // attach the stream to this connection, and insert it into the stream
-    // table. Used for the target peer stream AND every implicitly-opened
-    // intermediate peer stream (RFC 9000 §2.1). Precondition: on_new_stream is
-    // set and stream_id is a peer stream within the advertised limit.
+    [[nodiscard]] common::IoResult<QuicStream *> attach_stream(QuicStream::Lease &&lease, std::uint64_t stream_id,
+                                                               QuicStreamRecvQueue::Options recv_options) noexcept;
+    // Invoke the app's create_stream callback, attach the stream to this
+    // connection, insert it into the stream table, then notify the app. Used for
+    // the target peer stream AND every implicitly-opened intermediate peer
+    // stream (RFC 9000 §2.1). Precondition: create_stream is set and stream_id
+    // is a peer stream within the advertised limit.
     [[nodiscard]] common::IoResult<QuicStream *> create_peer_stream(std::uint64_t stream_id) noexcept;
     void on_peer_stream_retired(std::uint64_t stream_id) noexcept;
     void maybe_extend_peer_stream_limit(QuicStreamType type) noexcept;
@@ -598,6 +605,10 @@ private:
     void wait_for_peer_data(QuicStream::WriteAwaiter &awaiter) noexcept;
     void cancel_peer_data_wait(QuicStream::WriteAwaiter &awaiter) noexcept;
     void notify_peer_data_waiters(common::IoErr result = common::IoErr::None) noexcept;
+    void wait_for_local_stream_attach(LocalStreamAttachAwaiter &awaiter) noexcept;
+    void cancel_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter) noexcept;
+    void notify_local_stream_attach_waiters(QuicStreamType type, common::IoErr result = common::IoErr::None) noexcept;
+    void notify_all_local_stream_attach_waiters(common::IoErr result = common::IoErr::None) noexcept;
     [[nodiscard]] common::IoResult<void> check_recv_data_delta(std::uint64_t delta) const noexcept;
     void commit_recv_data_delta(std::uint64_t delta) noexcept;
     void maybe_extend_recv_data_flow_control() noexcept;
@@ -610,6 +621,8 @@ private:
     friend class QuicPathManager;
 
     Options options_{};
+    event::EventLoop *loop_ = nullptr;
+    mem::IoBufNodePool *node_pool_ = nullptr;
     QuicConnectionState state_ = QuicConnectionState::Init;
     std::uint64_t next_local_bidi_stream_id_ = 0;
     std::uint64_t next_local_uni_stream_id_ = 0;
@@ -654,6 +667,10 @@ private:
     std::uint64_t last_data_blocked_limit_ = 0;
     common::IntrusiveListHook *peer_data_wait_head_ = nullptr;
     common::IntrusiveListHook *peer_data_wait_tail_ = nullptr;
+    common::IntrusiveListHook *local_bidi_stream_attach_wait_head_ = nullptr;
+    common::IntrusiveListHook *local_bidi_stream_attach_wait_tail_ = nullptr;
+    common::IntrusiveListHook *local_uni_stream_attach_wait_head_ = nullptr;
+    common::IntrusiveListHook *local_uni_stream_attach_wait_tail_ = nullptr;
     bool data_blocked_reported_ = false;
     bool key_phase_ = false;
     bool idle_send_timer_set_ = false;

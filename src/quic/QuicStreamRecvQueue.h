@@ -29,9 +29,13 @@ public:
         std::uint64_t max_stream_data = kQuicStreamRecvDefaultBufferLimit;
     };
 
+    QuicStreamRecvQueue() noexcept = default;
     explicit QuicStreamRecvQueue(mem::IoBufNodePool &pool) noexcept;
     QuicStreamRecvQueue(mem::IoBufNodePool &pool, Options options) noexcept;
     ~QuicStreamRecvQueue();
+
+    void init(mem::IoBufNodePool &pool) noexcept;
+    void init(mem::IoBufNodePool &pool, Options options) noexcept;
 
     void stop_receiving(std::uint64_t error_code = 0) noexcept;
 
@@ -63,6 +67,7 @@ public:
     [[nodiscard]] std::size_t active_block_count() const noexcept { return active_block_count_; }
     [[nodiscard]] mem::IoBufNodePool &node_pool() noexcept { return *pool_; }
     [[nodiscard]] bool has_read_waiter() const noexcept { return read_waiter_ != nullptr; }
+    [[nodiscard]] bool initialized() const noexcept { return pool_ != nullptr; }
 
 private:
     struct InsertCost {

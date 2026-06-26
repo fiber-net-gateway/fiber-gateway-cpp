@@ -1,6 +1,7 @@
 #include "QuicConnection.h"
 
 #include <algorithm>
+#include <coroutine>
 #include <cstring>
 #include <expected>
 #include <limits>
@@ -116,9 +117,158 @@ void QuicCryptoState::reset() noexcept {
     previous_application_keys_ready = false;
 }
 
+class QuicConnection::LocalStreamAttachAwaiter {
+public:
+    LocalStreamAttachAwaiter(QuicConnection &connection, QuicStreamType type,
+                             std::chrono::steady_clock::time_point deadline) noexcept :
+        connection_(&connection), type_(type), deadline_(deadline) {}
+
+    LocalStreamAttachAwaiter(const LocalStreamAttachAwaiter &) = delete;
+    LocalStreamAttachAwaiter &operator=(const LocalStreamAttachAwaiter &) = delete;
+    LocalStreamAttachAwaiter(LocalStreamAttachAwaiter &&) = delete;
+    LocalStreamAttachAwaiter &operator=(LocalStreamAttachAwaiter &&) = delete;
+
+    ~LocalStreamAttachAwaiter() {
+        cancel_timer();
+        if (connection_ != nullptr) {
+            connection_->cancel_local_stream_attach_wait(*this);
+        }
+    }
+
+    bool await_ready() noexcept {
+        if (connection_ == nullptr || connection_->local_stream_attach_ready(type_)) {
+            return true;
+        }
+        if (timed_out(std::chrono::steady_clock::now())) {
+            result_ = common::IoErr::TimedOut;
+            completed_ = true;
+            return true;
+        }
+        return false;
+    }
+
+    bool await_suspend(std::coroutine_handle<> handle) noexcept {
+        if (connection_ == nullptr || connection_->local_stream_attach_ready(type_)) {
+            return false;
+        }
+        loop_ = event::EventLoop::current_or_null();
+        FIBER_ASSERT(loop_ != nullptr);
+        FIBER_ASSERT(connection_->loop_ == nullptr || connection_->loop_ == loop_);
+        if (timed_out(loop_->now())) {
+            result_ = common::IoErr::TimedOut;
+            completed_ = true;
+            loop_ = nullptr;
+            return false;
+        }
+
+        handle_ = handle;
+        connection_->wait_for_local_stream_attach(*this);
+        arm_timer();
+        return true;
+    }
+
+    common::IoErr await_resume() noexcept {
+        common::IoErr result = result_;
+        cancel_timer();
+        if (connection_ != nullptr) {
+            connection_->cancel_local_stream_attach_wait(*this);
+        }
+        connection_ = nullptr;
+        loop_ = nullptr;
+        handle_ = {};
+        result_ = common::IoErr::None;
+        resume_posted_ = false;
+        completed_ = false;
+        return result;
+    }
+
+    void complete(common::IoErr result) noexcept {
+        if (completed_) {
+            return;
+        }
+        completed_ = true;
+        result_ = result;
+        cancel_timer();
+        post_resume();
+    }
+
+private:
+    [[nodiscard]] static LocalStreamAttachAwaiter *from_wait_link(common::IntrusiveListHook *hook) noexcept {
+        if (hook == nullptr) {
+            return nullptr;
+        }
+        return reinterpret_cast<LocalStreamAttachAwaiter *>(reinterpret_cast<std::uint8_t *>(hook) -
+                                                            offsetof(LocalStreamAttachAwaiter, wait_link_));
+    }
+
+    [[nodiscard]] bool has_timer() const noexcept { return deadline_ != std::chrono::steady_clock::time_point::max(); }
+
+    [[nodiscard]] bool timed_out(std::chrono::steady_clock::time_point now) const noexcept {
+        return has_timer() && now >= deadline_;
+    }
+
+    void arm_timer() noexcept {
+        if (!has_timer() || loop_ == nullptr) {
+            return;
+        }
+        loop_->post_at<LocalStreamAttachAwaiter, &LocalStreamAttachAwaiter::timer_entry_,
+                       &LocalStreamAttachAwaiter::on_timeout>(deadline_, *this);
+    }
+
+    void cancel_timer() noexcept {
+        if (loop_ != nullptr && timer_entry_.is_in_heap()) {
+            loop_->cancel<LocalStreamAttachAwaiter, &LocalStreamAttachAwaiter::timer_entry_>(*this);
+        }
+    }
+
+    static void on_notify(LocalStreamAttachAwaiter *awaiter) noexcept {
+        if (awaiter == nullptr) {
+            return;
+        }
+        awaiter->resume_posted_ = false;
+        auto handle = awaiter->handle_;
+        awaiter->handle_ = {};
+        if (handle) {
+            handle.resume();
+        }
+    }
+
+    static void on_timeout(LocalStreamAttachAwaiter *awaiter) noexcept {
+        if (awaiter == nullptr) {
+            return;
+        }
+        awaiter->complete(common::IoErr::TimedOut);
+    }
+
+    void post_resume() noexcept {
+        if (resume_posted_ || loop_ == nullptr) {
+            return;
+        }
+        resume_posted_ = true;
+        loop_->post<LocalStreamAttachAwaiter, &LocalStreamAttachAwaiter::notify_entry_,
+                    &LocalStreamAttachAwaiter::on_notify>(*this);
+    }
+
+    QuicConnection *connection_ = nullptr;
+    QuicStreamType type_ = QuicStreamType::Bidirectional;
+    std::chrono::steady_clock::time_point deadline_{std::chrono::steady_clock::time_point::max()};
+    event::EventLoop *loop_ = nullptr;
+    std::coroutine_handle<> handle_{};
+    event::EventLoop::NotifyEntry notify_entry_{};
+    event::EventLoop::TimerEntry timer_entry_{};
+    common::IntrusiveListHook wait_link_{};
+    common::IoErr result_ = common::IoErr::None;
+    bool resume_posted_ = false;
+    bool completed_ = false;
+
+    friend class QuicConnection;
+};
+
 QuicConnection::QuicConnection(const Options &options) noexcept :
     options_(options), next_local_bidi_stream_id_(initial_stream_id(options.role, QuicStreamType::Bidirectional)),
     next_local_uni_stream_id_(initial_stream_id(options.role, QuicStreamType::Unidirectional)) {
+    loop_ = options_.loop != nullptr ? options_.loop : event::EventLoop::current_or_null();
+    node_pool_ = loop_ != nullptr ? &loop_->io_buf_node_pool() : &recv_extent_pool_;
     auto peer_stream_limit = [](std::uint64_t concurrent_limit, std::uint64_t transport_limit,
                                 std::uint64_t default_limit) noexcept {
         concurrent_limit = std::min(concurrent_limit, kQuicMaxStreamLimit);
@@ -166,13 +316,13 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
             options_.output_frame_pool != nullptr ? *options_.output_frame_pool : output_frame_pool_;
     packet_number_spaces_[0].reset(QuicEncryptionLevel::Initial);
     packet_number_spaces_[0].set_frame_pool(frame_pool);
-    packet_number_spaces_[0].crypto_recv.init(recv_extent_pool_);
+    packet_number_spaces_[0].crypto_recv.init(recv_extent_pool());
     packet_number_spaces_[1].reset(QuicEncryptionLevel::Handshake);
     packet_number_spaces_[1].set_frame_pool(frame_pool);
-    packet_number_spaces_[1].crypto_recv.init(recv_extent_pool_);
+    packet_number_spaces_[1].crypto_recv.init(recv_extent_pool());
     packet_number_spaces_[2].reset(QuicEncryptionLevel::Application);
     packet_number_spaces_[2].set_frame_pool(frame_pool);
-    packet_number_spaces_[2].crypto_recv.init(recv_extent_pool_);
+    packet_number_spaces_[2].crypto_recv.init(recv_extent_pool());
     quic_congestion_init(congestion_, QuicTime{0});
     quic_rtt_init(rtt_);
 
@@ -185,6 +335,7 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
 }
 
 QuicConnection::~QuicConnection() {
+    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
     if (auto *loop = event::EventLoop::current_or_null()) {
         cancel_loss_detection_timer(*loop);
         cancel_key_update_discard_timer(*loop);
@@ -221,6 +372,7 @@ common::IoResult<void> QuicConnection::mark_established() noexcept {
             return std::unexpected(filled.error());
         }
     }
+    notify_all_local_stream_attach_waiters();
     return {};
 }
 
@@ -399,6 +551,7 @@ void QuicConnection::enter_graceful_closing(QuicCloseInfo info, std::chrono::mil
     }
     close_info_ = info;
     state_ = QuicConnectionState::GracefulClosing;
+    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
 
     const std::chrono::milliseconds delay = grace.count() > 0 ? grace : options_.graceful_shutdown_grace;
     if (delay.count() <= 0) {
@@ -436,6 +589,7 @@ void QuicConnection::enter_closing(QuicCloseInfo info, bool immediate) noexcept 
 
     close_info_ = info;
     state_ = QuicConnectionState::Closing;
+    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
 
     enqueue_close_frames_all_levels();
     close_all_streams(close_info_.error_code);
@@ -463,6 +617,7 @@ void QuicConnection::enter_draining(QuicCloseInfo info) noexcept {
 
     close_info_ = info;
     state_ = QuicConnectionState::Draining;
+    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
     clear_pending_frames_all_levels();
     close_all_streams(close_info_.error_code);
 
@@ -487,6 +642,7 @@ void QuicConnection::enter_closed() noexcept {
     }
 
     state_ = QuicConnectionState::Closed;
+    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
     close_all_streams(close_info_.error_code);
     streams_.clear();
 
@@ -540,6 +696,7 @@ void QuicConnection::mark_closed() noexcept {
         return;
     }
     state_ = QuicConnectionState::Closed;
+    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
     close_all_streams(close_info_.error_code);
     streams_.clear();
 }
@@ -761,6 +918,7 @@ void QuicConnection::on_idle_timer(QuicConnection *connection) noexcept {
             .frame_type = 0,
     };
     connection->state_ = QuicConnectionState::Closed;
+    connection->notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
     connection->close_all_streams(connection->close_info_.error_code);
     connection->streams_.clear();
 
@@ -860,6 +1018,108 @@ void QuicConnection::on_loss_detection_timer(QuicConnection *connection) noexcep
 }
 
 
+common::IoResult<QuicStream *> QuicConnection::attach_stream(QuicStream::Lease &&lease, std::uint64_t stream_id,
+                                                             QuicStreamRecvQueue::Options recv_options) noexcept {
+    if (!lease) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    if (lease->attached_to_connection() || lease->stream_id_assigned()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (streams_.find(stream_id) != nullptr) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (!streams_.reserve_for_insert()) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
+    QuicStream *stream = lease.get();
+    stream->assign_conn_ctx(*this, stream_id, recv_options);
+
+    if (!streams_.insert(std::move(lease))) {
+        stream->detach_from_connection();
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return stream;
+}
+
+common::IoResult<QuicStream *> QuicConnection::try_attach_local_stream(QuicStream::Lease &&stream,
+                                                                       QuicStreamType type) noexcept {
+    if (!stream) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    if (!accepting_new_streams()) {
+        return std::unexpected(common::IoErr::Canceled);
+    }
+    if (state_ != QuicConnectionState::Established) {
+        return std::unexpected(common::IoErr::Busy);
+    }
+    if (event::EventLoop *current = event::EventLoop::current_or_null()) {
+        FIBER_ASSERT(loop_ == nullptr || current == loop_);
+    }
+    if (stream->attached_to_connection() || stream->stream_id_assigned()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    std::uint64_t &next =
+            type == QuicStreamType::Bidirectional ? next_local_bidi_stream_id_ : next_local_uni_stream_id_;
+    const std::uint64_t limit = local_stream_limit(type);
+    if (stream_sequence(next) >= limit) {
+        auto queued = queue_streams_blocked_frame(type, limit);
+        if (!queued) {
+            return std::unexpected(queued.error());
+        }
+        return std::unexpected(common::IoErr::Busy);
+    }
+
+    QuicStreamRecvQueue::Options recv_options{
+            .buffer_limit = options_.recv_flow.stream_buffer_limit,
+            .low_water = options_.recv_flow.stream_low_water,
+            .max_stream_data = options_.recv_flow.stream_buffer_limit,
+    };
+    const std::uint64_t id = next;
+    auto attached = attach_stream(std::move(stream), id, recv_options);
+    if (!attached) {
+        return std::unexpected(attached.error());
+    }
+
+    next += kStreamIncrement;
+    return *attached;
+}
+
+async::Task<common::IoResult<QuicStream *>>
+QuicConnection::attach_local_stream(QuicStream::Lease stream, QuicStreamType type,
+                                    std::chrono::milliseconds timeout) noexcept {
+    if (timeout < std::chrono::milliseconds::zero()) {
+        timeout = std::chrono::milliseconds::zero();
+    }
+
+    std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
+    bool deadline_set = timeout == std::chrono::milliseconds::max();
+
+    for (;;) {
+        auto attached = try_attach_local_stream(std::move(stream), type);
+        if (attached || attached.error() != common::IoErr::Busy) {
+            co_return attached;
+        }
+        if (timeout == std::chrono::milliseconds::zero()) {
+            co_return std::unexpected(common::IoErr::TimedOut);
+        }
+        if (!deadline_set) {
+            auto *loop = event::EventLoop::current_or_null();
+            FIBER_ASSERT(loop != nullptr);
+            FIBER_ASSERT(loop_ == nullptr || loop == loop_);
+            deadline = loop->now() + timeout;
+            deadline_set = true;
+        }
+
+        common::IoErr wait_result = co_await LocalStreamAttachAwaiter(*this, type, deadline);
+        if (wait_result != common::IoErr::None) {
+            co_return std::unexpected(wait_result);
+        }
+    }
+}
+
 common::IoResult<std::uint64_t> QuicConnection::next_local_stream_id(QuicStreamType type) noexcept {
     if (!accepting_new_streams()) {
         return std::unexpected(common::IoErr::Canceled);
@@ -929,30 +1189,21 @@ const QuicStream *QuicConnection::find_stream(std::uint64_t stream_id) const noe
 }
 
 common::IoResult<QuicStream *> QuicConnection::create_peer_stream(std::uint64_t stream_id) noexcept {
-    QuicNewStreamContext ctx{
-            .stream_id = stream_id,
-            .connection = *this,
-            .recv_extent_pool = recv_extent_pool_,
-            .recv_options =
-                    {
-                            .buffer_limit = options_.recv_flow.stream_buffer_limit,
-                            .low_water = options_.recv_flow.stream_low_water,
-                            .max_stream_data = options_.recv_flow.stream_buffer_limit,
-                    },
+    QuicStreamRecvQueue::Options recv_options{
+            .buffer_limit = options_.recv_flow.stream_buffer_limit,
+            .low_water = options_.recv_flow.stream_low_water,
+            .max_stream_data = options_.recv_flow.stream_buffer_limit,
     };
-    QuicStream::Lease lease = options_.ops.on_new_stream(options_.owner, ctx);
-    if (!lease || lease->stream_id() != stream_id || lease->attached_to_connection()) {
-        return std::unexpected(lease ? common::IoErr::Invalid : common::IoErr::NoMem);
+    QuicStream::Lease lease = options_.ops.create_stream(options_.owner);
+    auto attached = attach_stream(std::move(lease), stream_id, recv_options);
+    if (!attached) {
+        return std::unexpected(attached.error());
     }
 
-    QuicStream *stream = lease.get();
-    stream->attach_to_connection(*this);
-
-    if (!streams_.insert(std::move(lease))) {
-        stream->detach_from_connection();
-        return std::unexpected(common::IoErr::NoMem);
+    if (options_.ops.on_peer_stream_attached != nullptr) {
+        options_.ops.on_peer_stream_attached(options_.owner, **attached);
     }
-    return stream;
+    return *attached;
 }
 
 common::IoResult<QuicStream *> QuicConnection::get_or_create_peer_stream(std::uint64_t stream_id) noexcept {
@@ -975,7 +1226,7 @@ common::IoResult<QuicStream *> QuicConnection::get_or_create_peer_stream(std::ui
         return std::unexpected(recorded.error());
     }
 
-    if (options_.ops.on_new_stream == nullptr) {
+    if (options_.ops.create_stream == nullptr) {
         return std::unexpected(common::IoErr::NotSupported);
     }
 
@@ -1204,6 +1455,7 @@ common::IoResult<void> QuicConnection::recv_max_streams_frame(const QuicMaxStrea
     LocalStreamBlockedState &blocked = local_stream_blocked_state(type);
     blocked.reported = false;
     blocked.last_limit = 0;
+    notify_local_stream_attach_waiters(type);
     return {};
 }
 
@@ -1321,6 +1573,7 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
         stream.on_max_stream_data(initial_stream_send_limit(stream.stream_id()));
     });
     notify_peer_data_waiters();
+    notify_all_local_stream_attach_waiters();
     const std::chrono::milliseconds peer_idle_timeout(params.max_idle_timeout);
     if (peer_idle_timeout.count() > 0 &&
         (options_.transport.max_idle_timeout.count() <= 0 || peer_idle_timeout < options_.transport.max_idle_timeout)) {
@@ -1724,6 +1977,78 @@ bool QuicConnection::local_stream_blocked(QuicStreamType type) const noexcept {
     const std::uint64_t next =
             type == QuicStreamType::Bidirectional ? next_local_bidi_stream_id_ : next_local_uni_stream_id_;
     return stream_sequence(next) >= local_stream_limit(type);
+}
+
+bool QuicConnection::local_stream_attach_ready(QuicStreamType type) const noexcept {
+    return state_ == QuicConnectionState::Established && accepting_new_streams() && !local_stream_blocked(type);
+}
+
+void QuicConnection::wait_for_local_stream_attach(LocalStreamAttachAwaiter &awaiter) noexcept {
+    common::IntrusiveListHook &hook = awaiter.wait_link_;
+    if (hook.linked()) {
+        return;
+    }
+
+    common::IntrusiveListHook *&head = awaiter.type_ == QuicStreamType::Bidirectional
+                                               ? local_bidi_stream_attach_wait_head_
+                                               : local_uni_stream_attach_wait_head_;
+    common::IntrusiveListHook *&tail = awaiter.type_ == QuicStreamType::Bidirectional
+                                               ? local_bidi_stream_attach_wait_tail_
+                                               : local_uni_stream_attach_wait_tail_;
+
+    hook.prev = tail;
+    hook.next = nullptr;
+    if (tail != nullptr) {
+        tail->next = &hook;
+    } else {
+        head = &hook;
+    }
+    tail = &hook;
+    hook.in_list = true;
+}
+
+void QuicConnection::cancel_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter) noexcept {
+    common::IntrusiveListHook &hook = awaiter.wait_link_;
+    if (!hook.linked()) {
+        return;
+    }
+
+    common::IntrusiveListHook *&head = awaiter.type_ == QuicStreamType::Bidirectional
+                                               ? local_bidi_stream_attach_wait_head_
+                                               : local_uni_stream_attach_wait_head_;
+    common::IntrusiveListHook *&tail = awaiter.type_ == QuicStreamType::Bidirectional
+                                               ? local_bidi_stream_attach_wait_tail_
+                                               : local_uni_stream_attach_wait_tail_;
+
+    if (hook.prev != nullptr) {
+        hook.prev->next = hook.next;
+    } else {
+        head = hook.next;
+    }
+    if (hook.next != nullptr) {
+        hook.next->prev = hook.prev;
+    } else {
+        tail = hook.prev;
+    }
+    hook.prev = nullptr;
+    hook.next = nullptr;
+    hook.in_list = false;
+}
+
+void QuicConnection::notify_local_stream_attach_waiters(QuicStreamType type, common::IoErr result) noexcept {
+    common::IntrusiveListHook *&head = type == QuicStreamType::Bidirectional ? local_bidi_stream_attach_wait_head_
+                                                                             : local_uni_stream_attach_wait_head_;
+
+    while (head != nullptr) {
+        LocalStreamAttachAwaiter *awaiter = LocalStreamAttachAwaiter::from_wait_link(head);
+        cancel_local_stream_attach_wait(*awaiter);
+        awaiter->complete(result);
+    }
+}
+
+void QuicConnection::notify_all_local_stream_attach_waiters(common::IoErr result) noexcept {
+    notify_local_stream_attach_waiters(QuicStreamType::Bidirectional, result);
+    notify_local_stream_attach_waiters(QuicStreamType::Unidirectional, result);
 }
 
 bool QuicConnection::is_gone_peer_stream(std::uint64_t stream_id) const noexcept {

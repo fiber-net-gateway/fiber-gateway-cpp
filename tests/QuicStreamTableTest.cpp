@@ -25,17 +25,26 @@ std::array<std::uint64_t, 3> find_colliding_stream_ids(std::size_t bucket_count)
     return out;
 }
 
-fiber::quic::QuicStream::Lease make_stream(std::uint64_t stream_id, fiber::mem::IoBufNodePool &pool) {
-    return fiber::quic::QuicStream::Lease::adopt(new fiber::quic::QuicStream(stream_id, pool));
+void destroy_heap_stream(void *, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
+
+void noop_destroy_stream(void *, fiber::quic::QuicStream &) noexcept {}
+
+fiber::quic::QuicStream::Lease make_stream(std::uint64_t stream_id, fiber::mem::IoBufNodePool &) {
+    auto *stream = new fiber::quic::QuicStream(nullptr, destroy_heap_stream);
+    stream->stream_id_ = stream_id;
+    return fiber::quic::QuicStream::Lease::adopt(stream);
 }
 
 } // namespace
 
 TEST(QuicStreamTest, ExposesStreamIdTypeAndSequence) {
     fiber::mem::IoBufNodePool pool;
-    fiber::quic::QuicStream client_bidi(0, pool);
-    fiber::quic::QuicStream server_uni(3, pool);
-    fiber::quic::QuicStream later_client_bidi(20, pool);
+    fiber::quic::QuicStream client_bidi(nullptr, noop_destroy_stream);
+    fiber::quic::QuicStream server_uni(nullptr, noop_destroy_stream);
+    fiber::quic::QuicStream later_client_bidi(nullptr, noop_destroy_stream);
+    client_bidi.stream_id_ = 0;
+    server_uni.stream_id_ = 3;
+    later_client_bidi.stream_id_ = 20;
 
     EXPECT_EQ(client_bidi.stream_id(), 0U);
     EXPECT_EQ(client_bidi.sequence(), 0U);

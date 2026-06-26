@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <new>
 #include <string_view>
 #include <vector>
 
@@ -59,13 +60,11 @@ fiber::quic::QuicConnectionId cid_from_hex(std::string_view value) {
 
 fiber::net::SocketAddress loopback(std::uint16_t port) { return {fiber::net::IpAddress::loopback_v4(), port}; }
 
-fiber::quic::QuicStream::Lease make_test_stream(const fiber::quic::QuicNewStreamContext &ctx) noexcept {
-    return fiber::quic::QuicStream::Lease::adopt(
-            new fiber::quic::QuicStream(ctx.stream_id, ctx.recv_extent_pool, ctx.recv_options));
-}
+void destroy_test_stream(void *, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
 
-fiber::quic::QuicStream::Lease on_new_stream(void * /*owner*/, const fiber::quic::QuicNewStreamContext &ctx) noexcept {
-    return make_test_stream(ctx);
+fiber::quic::QuicStream::Lease create_stream(void * /*owner*/) noexcept {
+    return fiber::quic::QuicStream::Lease::adopt(new (std::nothrow)
+                                                         fiber::quic::QuicStream(nullptr, destroy_test_stream));
 }
 
 void build_initial_datagram(std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> &datagram,
@@ -344,7 +343,7 @@ TEST(QuicPacketProcessorTest, ProcessesEarlyDataStreamPacketWithEarlyKeys) {
     server_options.remote_addr = loopback(4433);
     server_options.local_connection_id = server_cid;
     server_options.remote_connection_id = client_cid;
-    server_options.ops.on_new_stream = on_new_stream;
+    server_options.ops.create_stream = create_stream;
     fiber::quic::QuicConnection server(server_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(server.crypto(), fiber::quic::QuicEncryptionLevel::EarlyData,
                                                         false, suite, secret.data(), 32));
@@ -433,7 +432,7 @@ TEST(QuicPacketProcessorTest, ConnectionCloseDuringGracefulShutdownEntersDrainin
     server_options.remote_addr = loopback(4433);
     server_options.local_connection_id = server_cid;
     server_options.remote_connection_id = client_cid;
-    server_options.ops.on_new_stream = on_new_stream;
+    server_options.ops.create_stream = create_stream;
     fiber::quic::QuicConnection server(server_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(server.crypto(), fiber::quic::QuicEncryptionLevel::Application,
                                                         false, suite, secret.data(), 32));

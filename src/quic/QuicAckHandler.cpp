@@ -130,8 +130,7 @@ void confirm_ecn_validation(QuicConnection &connection, const QuicAckedEcnStats 
 }
 
 void validate_ecn_feedback(QuicConnection &connection, QuicPacketNumberSpace &space, const QuicInputFrame &frame,
-                           const QuicAckedEcnStats &stats, QuicTime now,
-                           QuicAckProcessResult &result) noexcept {
+                           const QuicAckedEcnStats &stats, QuicTime now, QuicAckProcessResult &result) noexcept {
     if (frame.type != QuicFrameType::AckEcn) {
         if (stats.has_ect) {
             fail_ecn_validation(connection, stats);
@@ -180,8 +179,7 @@ void validate_ecn_feedback(QuicConnection &connection, QuicPacketNumberSpace &sp
 
 [[nodiscard]] common::IoResult<void> handle_ack_range(QuicConnection &connection, QuicPacketNumberSpace &space,
                                                       std::uint64_t min_packet_number, std::uint64_t max_packet_number,
-                                                      QuicTime now, QuicLossAckStat &stat,
-                                                      QuicAckProcessResult &result,
+                                                      QuicTime now, QuicLossAckStat &stat, QuicAckProcessResult &result,
                                                       QuicAckedEcnStats &ecn_stats) noexcept {
     bool found = false;
     QuicOutputFrame *prev = nullptr;
@@ -278,8 +276,8 @@ common::IoResult<QuicAckProcessResult> quic_handle_ack_frame(QuicConnection &con
     std::uint64_t min_packet_number = frame.u.ack.largest - frame.u.ack.first_range;
     std::uint64_t max_packet_number = frame.u.ack.largest;
     QuicAckedEcnStats ecn_stats{};
-    auto handled = handle_ack_range(connection, space, min_packet_number, max_packet_number, now, stat, result,
-                                    ecn_stats);
+    auto handled =
+            handle_ack_range(connection, space, min_packet_number, max_packet_number, now, stat, result, ecn_stats);
     if (!handled) {
         return std::unexpected(handled.error());
     }
@@ -309,8 +307,8 @@ common::IoResult<QuicAckProcessResult> quic_handle_ack_frame(QuicConnection &con
             return std::unexpected(common::IoErr::Invalid);
         }
         min_packet_number = max_packet_number - *range;
-        handled = handle_ack_range(connection, space, min_packet_number, max_packet_number, now, stat, result,
-                                   ecn_stats);
+        handled =
+                handle_ack_range(connection, space, min_packet_number, max_packet_number, now, stat, result, ecn_stats);
         if (!handled) {
             return std::unexpected(handled.error());
         }

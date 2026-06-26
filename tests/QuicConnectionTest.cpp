@@ -82,40 +82,49 @@ struct KeepaliveTimerSnapshot {
 
 std::size_t count_pending_frame_type(const fiber::quic::QuicConnection &conn, fiber::quic::QuicFrameType type);
 
-fiber::quic::QuicStream::Lease make_test_stream(const fiber::quic::QuicNewStreamContext &ctx) noexcept {
-    return fiber::quic::QuicStream::Lease::adopt(
-            new fiber::quic::QuicStream(ctx.stream_id, ctx.recv_extent_pool, ctx.recv_options));
+void destroy_test_stream(void *, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
+
+fiber::quic::QuicStream::Lease make_test_stream() noexcept {
+    return fiber::quic::QuicStream::Lease::adopt(new (std::nothrow)
+                                                         fiber::quic::QuicStream(nullptr, destroy_test_stream));
 }
 
-fiber::quic::QuicStream::Lease on_new_stream_record(void *owner,
-                                                    const fiber::quic::QuicNewStreamContext &ctx) noexcept {
+fiber::quic::QuicStream::Lease create_stream_record(void *owner) noexcept {
     auto *state = static_cast<StreamCallbackState *>(owner);
     ++state->calls;
-    state->last_stream_id = ctx.stream_id;
     if (state->return_empty) {
         return {};
     }
-    return make_test_stream(ctx);
+    return make_test_stream();
 }
 
-fiber::quic::QuicStream::Lease on_new_stream_retain(void *owner,
-                                                    const fiber::quic::QuicNewStreamContext &ctx) noexcept {
+fiber::quic::QuicStream::Lease create_stream_retain(void *owner) noexcept {
     auto *state = static_cast<StreamCallbackState *>(owner);
     ++state->calls;
-    state->last_stream_id = ctx.stream_id;
-    auto *stream = new (std::nothrow) fiber::quic::QuicStream(ctx.stream_id, ctx.recv_extent_pool, ctx.recv_options);
+    auto *stream = new (std::nothrow) fiber::quic::QuicStream(nullptr, destroy_test_stream);
     if (stream == nullptr) {
         return {};
     }
-    state->lease = stream->lease();
     return fiber::quic::QuicStream::Lease::adopt(stream);
+}
+
+void on_peer_stream_attached_record(void *owner, fiber::quic::QuicStream &stream) noexcept {
+    auto *state = static_cast<StreamCallbackState *>(owner);
+    state->last_stream_id = stream.stream_id();
+}
+
+void on_peer_stream_attached_retain(void *owner, fiber::quic::QuicStream &stream) noexcept {
+    auto *state = static_cast<StreamCallbackState *>(owner);
+    state->last_stream_id = stream.stream_id();
+    state->lease = stream.lease();
 }
 
 fiber::quic::QuicConnection::Options server_options_with_factory(StreamCallbackState &state) noexcept {
     fiber::quic::QuicConnection::Options options{};
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.owner = &state;
-    options.ops.on_new_stream = on_new_stream_record;
+    options.ops.create_stream = create_stream_record;
+    options.ops.on_peer_stream_attached = on_peer_stream_attached_record;
     return options;
 }
 
@@ -133,11 +142,43 @@ struct WriteResult {
     fiber::common::IoErr error = fiber::common::IoErr::None;
 };
 
+struct AttachResult {
+    bool ok = false;
+    std::uint64_t stream_id = 0;
+    fiber::common::IoErr error = fiber::common::IoErr::None;
+};
+
 WriteResult to_write_result(fiber::common::IoResult<std::size_t> result) {
     if (result) {
         return {.ok = true, .value = *result};
     }
     return {.ok = false, .error = result.error()};
+}
+
+AttachResult to_attach_result(fiber::common::IoResult<fiber::quic::QuicStream *> result) {
+    if (result) {
+        return {.ok = true, .stream_id = (*result)->stream_id()};
+    }
+    return {.ok = false, .error = result.error()};
+}
+
+fiber::async::DetachedTask attach_local_stream(fiber::quic::QuicConnection *conn, fiber::quic::QuicStream::Lease stream,
+                                               fiber::quic::QuicStreamType type, std::chrono::milliseconds timeout,
+                                               std::promise<AttachResult> *done) {
+    auto result = co_await conn->attach_local_stream(std::move(stream), type, timeout);
+    done->set_value(to_attach_result(result));
+    fiber::event::EventLoop::current().stop();
+}
+
+fiber::async::DetachedTask grant_max_streams_after_delay(fiber::quic::QuicConnection *conn,
+                                                         fiber::quic::QuicStreamType type, std::uint64_t limit,
+                                                         std::atomic<bool> *started) {
+    co_await fiber::async::sleep(std::chrono::milliseconds(20));
+    started->store(true, std::memory_order_relaxed);
+    fiber::quic::QuicMaxStreamsFrame frame{};
+    frame.bidirectional = type == fiber::quic::QuicStreamType::Bidirectional;
+    frame.limit = limit;
+    (void) conn->recv_max_streams_frame(frame);
 }
 
 fiber::async::DetachedTask write_one(fiber::quic::QuicStream *stream, std::promise<WriteResult> *done) {
@@ -337,6 +378,110 @@ TEST(QuicConnectionTest, AllocatesServerInitiatedUnidirectionalStreamIds) {
     EXPECT_EQ(*stream_id, 3U);
     EXPECT_TRUE(fiber::quic::QuicConnection::is_unidirectional_stream(*stream_id));
     EXPECT_TRUE(conn.is_local_stream(*stream_id));
+}
+
+TEST(QuicConnectionTest, TryAttachLocalStreamAssignsClientBidirectionalStream) {
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Client;
+    options.max_local_bidirectional_streams = 2;
+    fiber::quic::QuicConnection conn(options);
+    ASSERT_TRUE(conn.mark_established());
+
+    auto stream = make_test_stream();
+    ASSERT_TRUE(stream);
+
+    auto attached = conn.try_attach_local_stream(std::move(stream), fiber::quic::QuicStreamType::Bidirectional);
+
+    ASSERT_TRUE(attached.has_value()) << static_cast<int>(attached.error());
+    EXPECT_FALSE(stream);
+    EXPECT_EQ((*attached)->stream_id(), 0U);
+    EXPECT_TRUE((*attached)->stream_id_assigned());
+    EXPECT_EQ(conn.find_stream(0), *attached);
+    EXPECT_EQ(conn.active_stream_count(), 1U);
+}
+
+TEST(QuicConnectionTest, TryAttachLocalStreamReturnsBusyBeforeEstablished) {
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Client;
+    fiber::quic::QuicConnection conn(options);
+    auto stream = make_test_stream();
+    ASSERT_TRUE(stream);
+
+    auto attached = conn.try_attach_local_stream(std::move(stream), fiber::quic::QuicStreamType::Bidirectional);
+
+    ASSERT_FALSE(attached.has_value());
+    EXPECT_EQ(attached.error(), fiber::common::IoErr::Busy);
+    ASSERT_TRUE(stream);
+    EXPECT_FALSE(stream->stream_id_assigned());
+    EXPECT_EQ(conn.active_stream_count(), 0U);
+}
+
+TEST(QuicConnectionTest, TryAttachLocalStreamQueuesStreamsBlockedAtLimit) {
+    StreamCallbackState state{};
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Client;
+    options.max_local_bidirectional_streams = 0;
+    options.schedule_send_owner = &state;
+    options.schedule_send = schedule_send_record;
+    fiber::quic::QuicConnection conn(options);
+    ASSERT_TRUE(conn.mark_established());
+    auto stream = make_test_stream();
+    ASSERT_TRUE(stream);
+
+    auto attached = conn.try_attach_local_stream(std::move(stream), fiber::quic::QuicStreamType::Bidirectional);
+
+    ASSERT_FALSE(attached.has_value());
+    EXPECT_EQ(attached.error(), fiber::common::IoErr::Busy);
+    ASSERT_TRUE(stream);
+    EXPECT_FALSE(stream->stream_id_assigned());
+    EXPECT_EQ(conn.active_stream_count(), 0U);
+    EXPECT_EQ(count_pending_streams_blocked(conn, fiber::quic::QuicFrameType::StreamsBlockedBidi, 0), 1U);
+    EXPECT_EQ(state.schedule_calls, 1U);
+}
+
+TEST(QuicConnectionTest, AttachLocalStreamResumesAfterMaxStreams) {
+    fiber::event::EventLoopGroup group(1);
+    StreamCallbackState state{};
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Client;
+    options.max_local_bidirectional_streams = 0;
+    options.loop = &group.at(0);
+    options.schedule_send_owner = &state;
+    options.schedule_send = schedule_send_record;
+    fiber::quic::QuicConnection conn(options);
+    ASSERT_TRUE(conn.mark_established());
+
+    std::promise<AttachResult> done;
+    auto future = done.get_future();
+    std::atomic<bool> grant_seen{false};
+    auto stream = make_test_stream();
+    ASSERT_TRUE(stream);
+
+    group.start();
+    fiber::async::spawn(group.at(0), [&conn, stream = std::move(stream), &done]() mutable {
+        return attach_local_stream(&conn, std::move(stream), fiber::quic::QuicStreamType::Bidirectional,
+                                   std::chrono::seconds(1), &done);
+    });
+    fiber::async::spawn(group.at(0), [&conn, &grant_seen]() {
+        return grant_max_streams_after_delay(&conn, fiber::quic::QuicStreamType::Bidirectional, 1, &grant_seen);
+    });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "attach did not resume after MAX_STREAMS";
+        return;
+    }
+
+    const AttachResult result = future.get();
+    EXPECT_TRUE(grant_seen.load(std::memory_order_relaxed));
+    EXPECT_TRUE(result.ok);
+    EXPECT_EQ(result.stream_id, 0U);
+    EXPECT_NE(conn.find_stream(0), nullptr);
+    EXPECT_EQ(conn.active_stream_count(), 1U);
+    EXPECT_EQ(count_pending_streams_blocked(conn, fiber::quic::QuicFrameType::StreamsBlockedBidi, 0), 1U);
+    EXPECT_EQ(state.schedule_calls, 1U);
+    group.join();
 }
 
 TEST(QuicConnectionTest, InitializesThreePacketNumberSpaces) {
@@ -1118,7 +1263,8 @@ TEST(QuicConnectionTest, RejectsPeerStreamWhenConnectionOpsReturnsEmptyLease) {
     fiber::quic::QuicConnection::Options options{};
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.owner = &state;
-    options.ops.on_new_stream = on_new_stream_record;
+    options.ops.create_stream = create_stream_record;
+    options.ops.on_peer_stream_attached = on_peer_stream_attached_record;
     fiber::quic::QuicConnection conn(options);
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = 0;
@@ -1137,7 +1283,8 @@ TEST(QuicConnectionTest, ConnectionOpsCanCreateAndRetainRetiredResetStream) {
     fiber::quic::QuicConnection::Options options{};
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.owner = &state;
-    options.ops.on_new_stream = on_new_stream_retain;
+    options.ops.create_stream = create_stream_retain;
+    options.ops.on_peer_stream_attached = on_peer_stream_attached_retain;
     fiber::quic::QuicConnection conn(options);
     fiber::quic::QuicResetStreamFrame reset{};
     reset.id = 0;

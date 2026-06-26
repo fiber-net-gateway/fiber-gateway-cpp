@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <future>
+#include <new>
 #include <string_view>
 
 #include "async/Sleep.h"
@@ -26,13 +27,11 @@ struct ShutdownCallbackState {
     std::uint32_t close_timeout_calls = 0;
 };
 
-fiber::quic::QuicStream::Lease make_test_stream(const fiber::quic::QuicNewStreamContext &ctx) noexcept {
-    return fiber::quic::QuicStream::Lease::adopt(
-            new fiber::quic::QuicStream(ctx.stream_id, ctx.recv_extent_pool, ctx.recv_options));
-}
+void destroy_test_stream(void *, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
 
-fiber::quic::QuicStream::Lease on_new_stream(void * /*owner*/, const fiber::quic::QuicNewStreamContext &ctx) noexcept {
-    return make_test_stream(ctx);
+fiber::quic::QuicStream::Lease create_stream(void * /*owner*/) noexcept {
+    return fiber::quic::QuicStream::Lease::adopt(new (std::nothrow)
+                                                         fiber::quic::QuicStream(nullptr, destroy_test_stream));
 }
 
 void schedule_send_record(void *owner, fiber::quic::QuicConnection &) noexcept {
@@ -51,7 +50,7 @@ fiber::quic::QuicConnection::Options established_server_options(ShutdownCallback
     fiber::quic::QuicConnection::Options options{};
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.owner = &state;
-    options.ops.on_new_stream = on_new_stream;
+    options.ops.create_stream = create_stream;
     options.schedule_send_owner = &state;
     options.schedule_send = schedule_send_record;
     options.lifecycle_owner = &state;

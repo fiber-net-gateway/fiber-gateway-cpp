@@ -18,6 +18,7 @@ public:
 
     [[nodiscard]] bool init(std::size_t initial_stream_capacity = 0) noexcept;
     void clear() noexcept;
+    [[nodiscard]] bool reserve_for_insert() noexcept;
 
     [[nodiscard]] QuicStream *find(std::uint64_t stream_id) noexcept;
     [[nodiscard]] const QuicStream *find(std::uint64_t stream_id) const noexcept;

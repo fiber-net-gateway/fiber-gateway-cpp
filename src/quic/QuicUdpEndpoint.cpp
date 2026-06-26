@@ -72,6 +72,7 @@ inline constexpr QuicEncryptionLevel kSendLevels[] = {QuicEncryptionLevel::Initi
     conn_options.initial_destination_connection_id = packet.dcid;
     conn_options.local_connection_id = packet.dcid;
     conn_options.remote_connection_id = packet.scid;
+    conn_options.loop = event::EventLoop::current_or_null();
 
     QuicConnection temp(conn_options);
     auto initialized = temp.init_initial_crypto(packet.dcid);
@@ -987,6 +988,7 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     conn_options.max_peer_unidirectional_streams = options_.transport.initial_max_streams_uni;
     conn_options.output_frame_pool = &output_frame_pool_;
     conn_options.endpoint = this;
+    conn_options.loop = loop_;
     conn_options.schedule_send_owner = this;
     conn_options.schedule_send = [](void *owner, QuicConnection &connection) noexcept {
         static_cast<QuicUdpEndpoint *>(owner)->schedule_send(connection);
@@ -1684,9 +1686,8 @@ void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const Qui
     bool has_send_work = false;
     bool sent_ack_eliciting = false;
     const std::uint64_t path_seqnum = datagram.path != nullptr ? datagram.path->seqnum : kQuicNoPathSeqnum;
-    const bool ecn_validation_probe =
-            datagram.spec.ecn != net::UdpEcn::Unspecified && datagram.path != nullptr &&
-            datagram.path->ecn_state == QuicEcnState::Testing;
+    const bool ecn_validation_probe = datagram.spec.ecn != net::UdpEcn::Unspecified && datagram.path != nullptr &&
+                                      datagram.path->ecn_state == QuicEcnState::Testing;
 
     record_sent_ecn_counters(connection, datagram);
 

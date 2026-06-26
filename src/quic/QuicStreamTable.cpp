@@ -38,6 +38,8 @@ void QuicStreamTable::clear() noexcept {
     size_ = 0;
 }
 
+bool QuicStreamTable::reserve_for_insert() noexcept { return ensure_capacity_for_insert(); }
+
 QuicStream *QuicStreamTable::find(std::uint64_t stream_id) noexcept {
     const std::size_t slot = find_slot(stream_id);
     if (slot == bucket_count_) {

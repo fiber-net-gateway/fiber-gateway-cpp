@@ -21,6 +21,20 @@ QuicStreamSendQueue::QuicStreamSendQueue(mem::IoBufNodePool &pool) noexcept : Qu
 QuicStreamSendQueue::QuicStreamSendQueue(mem::IoBufNodePool &pool, Options options) noexcept :
     pool_(&pool), buffer_limit_(options.buffer_limit) {}
 
+void QuicStreamSendQueue::init(mem::IoBufNodePool &pool) noexcept { init(pool, Options{}); }
+
+void QuicStreamSendQueue::init(mem::IoBufNodePool &pool, Options options) noexcept {
+    FIBER_ASSERT(pool_ == nullptr);
+    FIBER_ASSERT(head_ == nullptr);
+    FIBER_ASSERT(tail_ == nullptr);
+    FIBER_ASSERT(ready_head_ == nullptr);
+    FIBER_ASSERT(ready_bytes_ == 0);
+    FIBER_ASSERT(inflight_bytes_ == 0);
+    FIBER_ASSERT(active_extent_count_ == 0);
+    pool_ = &pool;
+    buffer_limit_ = options.buffer_limit;
+}
+
 QuicStreamSendQueue::~QuicStreamSendQueue() { clear_extents(); }
 
 common::IoResult<std::size_t> QuicStreamSendQueue::try_append(const mem::IoBuf &buf, bool fin) noexcept {
@@ -462,6 +476,9 @@ bool QuicStreamSendQueue::is_last_ready_extent(const mem::IoBufNode *extent) con
 }
 
 void QuicStreamSendQueue::clear_extents() noexcept {
+    if (pool_ == nullptr) {
+        return;
+    }
     mem::IoBufNode *cur = head_;
     while (cur != nullptr) {
         mem::IoBufNode *next = cur->next;
