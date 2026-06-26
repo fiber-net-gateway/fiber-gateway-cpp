@@ -1781,12 +1781,14 @@ TEST(QuicUdpEndpointTest, SendsNewTokenWhenPathValidationCompletes) {
     std::memcpy(path_response.u.path_response.data, challenge->data(), challenge->size());
 
     std::array<std::uint8_t, 1200> app_datagram{};
+    std::array<std::uint8_t, 1200> app_plaintext{};
     fiber::quic::QuicPacketEncodeSpec app_spec{};
     app_spec.level = fiber::quic::QuicEncryptionLevel::Application;
     app_spec.dcid = connection->local_connection_id();
     app_spec.frames = &path_response;
     app_spec.frame_count = 1;
-    auto encoded_app = fiber::quic::quic_encode_packet(peer, app_spec, app_datagram.data(), app_datagram.size());
+    auto encoded_app = fiber::quic::quic_encode_packet(peer, app_spec, {app_plaintext.data(), app_plaintext.size()},
+                                                       app_datagram.data(), app_datagram.size());
     ASSERT_TRUE(encoded_app.has_value()) << static_cast<int>(encoded_app.error());
 
     std::array<std::uint8_t, 1400> new_token_response{};

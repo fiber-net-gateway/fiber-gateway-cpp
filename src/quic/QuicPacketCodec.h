@@ -34,6 +34,11 @@ struct QuicPacketEncodeResult {
     bool ack_eliciting = false;
 };
 
+struct QuicPacketPlaintext {
+    std::uint8_t *data = nullptr;
+    std::size_t capacity = 0;
+};
+
 struct QuicPacketDecodeResult {
     QuicPacketHeader header{};
     QuicSlice payload{};
@@ -62,10 +67,9 @@ struct QuicRetryPacketSpec {
 [[nodiscard]] common::IoResult<QuicConnectionId>
 quic_get_packet_dcid(const std::uint8_t *datagram, std::size_t datagram_len, std::uint8_t short_dcid_len) noexcept;
 
-[[nodiscard]] common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &connection,
-                                                                          const QuicPacketEncodeSpec &spec,
-                                                                          std::uint8_t *out,
-                                                                          std::size_t out_cap) noexcept;
+[[nodiscard]] common::IoResult<QuicPacketEncodeResult>
+quic_encode_packet(QuicConnection &connection, const QuicPacketEncodeSpec &spec, QuicPacketPlaintext plaintext,
+                   std::uint8_t *out, std::size_t out_cap) noexcept;
 
 [[nodiscard]] common::IoResult<QuicPacketDecodeResult>
 quic_decode_packet(QuicConnection &connection, std::uint8_t *datagram, std::size_t datagram_len,

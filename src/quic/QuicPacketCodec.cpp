@@ -1,7 +1,6 @@
 #include "QuicPacketCodec.h"
 
 #include <algorithm>
-#include <array>
 #include <cstring>
 #include <expected>
 
@@ -199,9 +198,10 @@ common::IoResult<QuicConnectionId> quic_get_packet_dcid(const std::uint8_t *data
 }
 
 common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &connection,
-                                                            const QuicPacketEncodeSpec &spec, std::uint8_t *out,
+                                                            const QuicPacketEncodeSpec &spec,
+                                                            QuicPacketPlaintext plaintext, std::uint8_t *out,
                                                             std::size_t out_cap) noexcept {
-    if (out == nullptr || !has_frames(spec)) {
+    if (out == nullptr || plaintext.data == nullptr || plaintext.capacity == 0 || !has_frames(spec)) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -251,6 +251,11 @@ common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &conn
     const std::size_t padded_payload_len = std::max(payload_len, min_payload);
     packet.length = packet.pn_len + padded_payload_len + kAeadTagLength;
 
+    if (padded_payload_len > plaintext.capacity) {
+        quic_restore_packet_number(space, pn_snapshot);
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
     QuicWriteCursor writer(out, out_cap);
     std::uint8_t *pn = nullptr;
     auto header_len = quic_create_packet_header(writer, packet, &pn);
@@ -259,15 +264,11 @@ common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &conn
         return std::unexpected(header_len.error());
     }
 
-    std::array<std::uint8_t, 4096> plaintext{};
-    if (padded_payload_len > plaintext.size()) {
-        quic_restore_packet_number(space, pn_snapshot);
-        return std::unexpected(common::IoErr::MessageTooLarge);
-    }
-
-    QuicWriteCursor payload_writer(plaintext.data(), padded_payload_len);
+    QuicWriteCursor payload_writer(plaintext.data, padded_payload_len);
     if (raw_payload) {
-        std::memcpy(plaintext.data(), spec.payload, payload_len);
+        if (spec.payload != plaintext.data) {
+            std::memmove(plaintext.data, spec.payload, payload_len);
+        }
     } else {
         auto encoded = encode_frames(payload_writer, spec);
         if (!encoded) {
@@ -277,7 +278,7 @@ common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &conn
         payload_len = payload_writer.offset();
     }
     if (payload_len < padded_payload_len) {
-        QuicWriteCursor padding_writer(plaintext.data() + payload_len, padded_payload_len - payload_len);
+        QuicWriteCursor padding_writer(plaintext.data + payload_len, padded_payload_len - payload_len);
         auto padded = padding_writer.fill(0, padded_payload_len - payload_len);
         if (!padded) {
             quic_restore_packet_number(space, pn_snapshot);
@@ -295,7 +296,7 @@ common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &conn
         return std::unexpected(common::IoErr::NoMem);
     }
 
-    auto sealed = quic_encrypt_packet_payload(packet, *keys, plaintext.data(), padded_payload_len, out + *header_len,
+    auto sealed = quic_encrypt_packet_payload(packet, *keys, plaintext.data, padded_payload_len, out + *header_len,
                                               out_cap - *header_len);
     if (!sealed) {
         quic_restore_packet_number(space, pn_snapshot);

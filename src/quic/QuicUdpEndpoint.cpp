@@ -44,8 +44,9 @@ inline constexpr QuicEncryptionLevel kSendLevels[] = {QuicEncryptionLevel::Initi
 [[nodiscard]] common::IoResult<std::size_t> encode_invalid_token_close_packet(const QuicPacketHeader &packet,
                                                                               const QuicReceivedDatagram &datagram,
                                                                               const char *reason, std::uint8_t *out,
-                                                                              std::size_t out_cap) noexcept {
-    if (reason == nullptr || out == nullptr || out_cap == 0) {
+                                                                              std::size_t out_cap,
+                                                                              QuicPacketPlaintext plaintext) noexcept {
+    if (reason == nullptr || out == nullptr || out_cap == 0 || plaintext.data == nullptr || plaintext.capacity == 0) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -88,7 +89,7 @@ inline constexpr QuicEncryptionLevel kSendLevels[] = {QuicEncryptionLevel::Initi
     spec.payload_ack_eliciting = false;
     spec.max_packet_len = out_cap;
 
-    auto encoded = quic_encode_packet(temp, spec, out, out_cap);
+    auto encoded = quic_encode_packet(temp, spec, plaintext, out, out_cap);
     if (!encoded) {
         return std::unexpected(encoded.error());
     }
@@ -1086,8 +1087,9 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
 
         if (validation->action == QuicInitialValidationAction::SendInvalidTokenClose) {
             std::array<std::uint8_t, kQuicStatelessResponseBufferSize> out{};
+            QuicPacketPlaintext plaintext{plaintext_buffer_.get(), kQuicUdpDefaultPlaintextBufferSize};
             auto written = encode_invalid_token_close_packet(*packet, datagram, validation->close_reason, out.data(),
-                                                             out.size());
+                                                             out.size(), plaintext);
             if (!written) {
                 ++dropped_datagram_count_;
                 return std::unexpected(written.error());
@@ -1281,7 +1283,8 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
         spec.min_packet_len = min_packet_len;
         spec.max_packet_len = allowed;
 
-        auto encoded = quic_encode_packet(connection, spec, datagram.data, datagram.capacity);
+        QuicPacketPlaintext plaintext{plaintext_buffer_.get(), kQuicUdpDefaultPlaintextBufferSize};
+        auto encoded = quic_encode_packet(connection, spec, plaintext, datagram.data, datagram.capacity);
         if (!encoded) {
             candidate.pending_frames.push_front(*frame);
             datagram = QuicSendDatagram{};
@@ -1438,10 +1441,11 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         if (min_payload > max_payload) {
             continue;
         }
-        std::array<std::uint8_t, 4096> packet_payload{};
-        if (max_payload > packet_payload.size()) {
+        std::uint8_t *packet_payload = plaintext_buffer_.get();
+        constexpr std::size_t packet_payload_cap = kQuicUdpDefaultPlaintextBufferSize;
+        if (packet_payload == nullptr || max_payload > packet_payload_cap) {
             rollback_encoded();
-            return std::unexpected(common::IoErr::MessageTooLarge);
+            return std::unexpected(common::IoErr::NoMem);
         }
 
         const bool ack_only = connection.congestion().in_flight >= connection.congestion().window;
@@ -1464,8 +1468,8 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
                     return std::unexpected(common::IoErr::Invalid);
                 }
 
-                auto encoded_stream = encode_stream_frame_into_payload(
-                        connection, *frame, packet_payload.data() + payload_len, max_payload - payload_len);
+                auto encoded_stream = encode_stream_frame_into_payload(connection, *frame, packet_payload + payload_len,
+                                                                       max_payload - payload_len);
                 if (!encoded_stream) {
                     space.release_frame(*frame);
                     packet = QuicSendPacketRecord{};
@@ -1525,7 +1529,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
             packet.sends_ack = packet.sends_ack || frame == &space.ack_frame;
             payload_ack_eliciting = payload_ack_eliciting || quic_output_frame_ack_eliciting(frame->type);
 
-            QuicWriteCursor payload_writer(packet_payload.data() + payload_len, max_payload - payload_len);
+            QuicWriteCursor payload_writer(packet_payload + payload_len, max_payload - payload_len);
             auto written = quic_create_output_frame(&payload_writer, *frame);
             if (!written) {
                 packet = QuicSendPacketRecord{};
@@ -1551,14 +1555,15 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         spec.level = level;
         spec.dcid = path->remote_connection_id;
         spec.scid = connection.local_connection_id();
-        spec.payload = packet_payload.data();
+        spec.payload = packet_payload;
         spec.payload_len = payload_len;
         spec.payload_frame_count = packet.frame_count;
         spec.payload_ack_eliciting = payload_ack_eliciting;
         spec.min_packet_len = min_packet_len;
         spec.max_packet_len = max_packet_len;
 
-        auto encoded = quic_encode_packet(connection, spec, datagram.data + datagram.length,
+        QuicPacketPlaintext plaintext{packet_payload, packet_payload_cap};
+        auto encoded = quic_encode_packet(connection, spec, plaintext, datagram.data + datagram.length,
                                           datagram.capacity - datagram.length);
         if (!encoded) {
             restore_sending_frames(connection, space);
