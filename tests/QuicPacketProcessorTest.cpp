@@ -295,12 +295,14 @@ TEST(QuicPacketProcessorTest, ProcessesApplicationPingPacket) {
     frame.type = fiber::quic::QuicFrameType::Ping;
 
     std::array<std::uint8_t, 256> datagram{};
+    std::array<std::uint8_t, 256> encode_plaintext{};
     fiber::quic::QuicPacketEncodeSpec spec{};
     spec.level = fiber::quic::QuicEncryptionLevel::Application;
     spec.dcid = server_cid;
     spec.frames = &frame;
     spec.frame_count = 1;
-    auto encoded = fiber::quic::quic_encode_packet(client, spec, datagram.data(), datagram.size());
+    auto encoded = fiber::quic::quic_encode_packet(client, spec, {encode_plaintext.data(), encode_plaintext.size()},
+                                                   datagram.data(), datagram.size());
     ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
 
     std::array<std::uint8_t, 256> plaintext{};
@@ -451,12 +453,14 @@ TEST(QuicPacketProcessorTest, ConnectionCloseDuringGracefulShutdownEntersDrainin
     frames[1].type = fiber::quic::QuicFrameType::Ping;
 
     std::array<std::uint8_t, 256> datagram{};
+    std::array<std::uint8_t, 256> encode_plaintext{};
     fiber::quic::QuicPacketEncodeSpec spec{};
     spec.level = fiber::quic::QuicEncryptionLevel::Application;
     spec.dcid = server_cid;
     spec.frames = frames.data();
     spec.frame_count = frames.size();
-    auto encoded = fiber::quic::quic_encode_packet(client, spec, datagram.data(), datagram.size());
+    auto encoded = fiber::quic::quic_encode_packet(client, spec, {encode_plaintext.data(), encode_plaintext.size()},
+                                                   datagram.data(), datagram.size());
     ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
 
     std::array<std::uint8_t, 256> plaintext{};
@@ -503,12 +507,14 @@ TEST(QuicPacketProcessorTest, PathChallengeQueuesPathResponse) {
     }
 
     std::array<std::uint8_t, 256> datagram{};
+    std::array<std::uint8_t, 256> encode_plaintext{};
     fiber::quic::QuicPacketEncodeSpec spec{};
     spec.level = fiber::quic::QuicEncryptionLevel::Application;
     spec.dcid = server_cid;
     spec.frames = &frame;
     spec.frame_count = 1;
-    auto encoded = fiber::quic::quic_encode_packet(client, spec, datagram.data(), datagram.size());
+    auto encoded = fiber::quic::quic_encode_packet(client, spec, {encode_plaintext.data(), encode_plaintext.size()},
+                                                   datagram.data(), datagram.size());
     ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
 
     std::array<std::uint8_t, 256> plaintext{};

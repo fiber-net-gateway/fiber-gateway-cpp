@@ -70,6 +70,7 @@ TEST(QuicPacketCodecTest, EncodesAndDecodesProtectedInitialPacket) {
     frames[0].type = fiber::quic::QuicFrameType::Ping;
 
     std::array<std::uint8_t, 1400> datagram{};
+    std::array<std::uint8_t, 1400> encode_plaintext{};
     fiber::quic::QuicPacketEncodeSpec spec{};
     spec.level = fiber::quic::QuicEncryptionLevel::Initial;
     spec.dcid = original_dcid;
@@ -78,7 +79,8 @@ TEST(QuicPacketCodecTest, EncodesAndDecodesProtectedInitialPacket) {
     spec.frame_count = 1;
     spec.min_packet_len = fiber::quic::kMinInitialDatagramSize;
 
-    auto encoded = fiber::quic::quic_encode_packet(server, spec, datagram.data(), datagram.size());
+    auto encoded = fiber::quic::quic_encode_packet(server, spec, {encode_plaintext.data(), encode_plaintext.size()},
+                                                   datagram.data(), datagram.size());
 
     ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
     EXPECT_EQ(encoded->packet_number, 0U);
@@ -95,6 +97,34 @@ TEST(QuicPacketCodecTest, EncodesAndDecodesProtectedInitialPacket) {
     EXPECT_EQ(decoded->frame_count, 2U);
     EXPECT_TRUE(decoded->ack_eliciting);
     EXPECT_EQ(client.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial).largest_received_packet_number, 0U);
+}
+
+TEST(QuicPacketCodecTest, EncodesInitialPacketAboveFourKilobytes) {
+    const auto original_dcid = cid_from_hex("8394c8f03e515708");
+
+    fiber::quic::QuicConnection::Options server_options{};
+    server_options.role = fiber::quic::QuicConnectionRole::Server;
+    fiber::quic::QuicConnection server(server_options);
+    ASSERT_TRUE(server.init_initial_crypto(original_dcid));
+
+    fiber::quic::QuicOutputFrame frame{};
+    frame.type = fiber::quic::QuicFrameType::Ping;
+
+    std::array<std::uint8_t, 6000> datagram{};
+    std::array<std::uint8_t, 6000> encode_plaintext{};
+    fiber::quic::QuicPacketEncodeSpec spec{};
+    spec.level = fiber::quic::QuicEncryptionLevel::Initial;
+    spec.dcid = original_dcid;
+    spec.scid = cid_from_hex("11223344");
+    spec.frames = &frame;
+    spec.frame_count = 1;
+    spec.min_packet_len = 4800;
+
+    auto encoded = fiber::quic::quic_encode_packet(server, spec, {encode_plaintext.data(), encode_plaintext.size()},
+                                                   datagram.data(), datagram.size());
+
+    ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
+    EXPECT_GE(encoded->packet_len, 4800U);
 }
 
 TEST(QuicPacketCodecTest, CreatesVersionNegotiationPacket) {
@@ -175,13 +205,15 @@ TEST_P(QuicPacketCodecSuiteTest, EncodesAndDecodesApplicationPacket) {
     frame.type = fiber::quic::QuicFrameType::Ping;
 
     std::array<std::uint8_t, 256> datagram{};
+    std::array<std::uint8_t, 256> encode_plaintext{};
     fiber::quic::QuicPacketEncodeSpec spec{};
     spec.level = fiber::quic::QuicEncryptionLevel::Application;
     spec.dcid = cid_from_hex("01020304");
     spec.frames = &frame;
     spec.frame_count = 1;
 
-    auto encoded = fiber::quic::quic_encode_packet(server, spec, datagram.data(), datagram.size());
+    auto encoded = fiber::quic::quic_encode_packet(server, spec, {encode_plaintext.data(), encode_plaintext.size()},
+                                                   datagram.data(), datagram.size());
     ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
 
     std::array<std::uint8_t, 128> plaintext{};
