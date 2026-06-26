@@ -9,6 +9,21 @@
 
 namespace fiber::quic {
 
+namespace {
+
+void fill_ecn_fields(QuicOutputFrame &frame, const QuicEcnCounters &ecn_counters) noexcept {
+    if (!ecn_counters.any()) {
+        return;
+    }
+
+    frame.type = QuicFrameType::AckEcn;
+    frame.u.ack.ect0 = ecn_counters.ect0;
+    frame.u.ack.ect1 = ecn_counters.ect1;
+    frame.u.ack.ce = ecn_counters.ce;
+}
+
+} // namespace
+
 QuicPacketNumberSpace::QuicPacketNumberSpace() noexcept { reset(QuicEncryptionLevel::Initial); }
 
 QuicPacketNumberSpace::~QuicPacketNumberSpace() {
@@ -21,11 +36,13 @@ QuicPacketNumberSpace::~QuicPacketNumberSpace() {
     release_queue(pending_frames);
     release_queue(sending_frames);
     release_queue(sent_frames);
+    quic_output_frame_release_data(ack_frame);
 }
 
 void QuicPacketNumberSpace::set_frame_pool(QuicOutputFramePool &pool) noexcept { frame_pool = &pool; }
 
 void QuicPacketNumberSpace::reset(QuicEncryptionLevel space_level) noexcept {
+    quic_output_frame_release_data(ack_frame);
     level = space_level;
     crypto_sent = 0;
     crypto_recv.clear();
@@ -40,6 +57,7 @@ void QuicPacketNumberSpace::reset(QuicEncryptionLevel space_level) noexcept {
     ack_delay_start = QuicTime{0};
     ack_range_count = 0;
     ack_ranges = {};
+    ecn_counters = {};
     send_ack_count = 0;
     send_ack = false;
 }
@@ -77,6 +95,68 @@ void QuicPacketNumberSpace::record_acked_packet_number(std::uint64_t packet_numb
     }
 }
 
+void QuicPacketNumberSpace::record_ecn(net::UdpEcn ecn) noexcept {
+    switch (ecn) {
+        case net::UdpEcn::Ect0:
+            ++ecn_counters.ect0;
+            break;
+        case net::UdpEcn::Ect1:
+            ++ecn_counters.ect1;
+            break;
+        case net::UdpEcn::Ce:
+            ++ecn_counters.ce;
+            break;
+        case net::UdpEcn::NonEct:
+        case net::UdpEcn::Unspecified:
+            break;
+    }
+}
+
+common::IoResult<void> quic_prepare_ack_frame(QuicOutputFrame &frame, std::uint64_t largest, std::uint64_t delay,
+                                              std::uint32_t range_count, std::uint64_t first_range,
+                                              const QuicAckRange *ranges,
+                                              const QuicEcnCounters &ecn_counters) noexcept {
+    std::uint8_t range_buf[512];
+    std::size_t range_buf_len = 0;
+    if (range_count > 0 && ranges != nullptr) {
+        QuicWriteCursor rcur(range_buf, sizeof(range_buf));
+        for (std::uint32_t i = 0; i < range_count; ++i) {
+            auto wrote = quic_write_varint(rcur, ranges[i].gap);
+            if (!wrote) {
+                return std::unexpected(wrote.error());
+            }
+            wrote = quic_write_varint(rcur, ranges[i].range);
+            if (!wrote) {
+                return std::unexpected(wrote.error());
+            }
+        }
+        range_buf_len = rcur.offset();
+    }
+
+    quic_output_frame_release_data(frame);
+    frame = QuicOutputFrame{};
+    frame.type = QuicFrameType::Ack;
+    frame.u.ack.largest = largest;
+    frame.u.ack.delay = delay;
+    frame.u.ack.range_count = range_count;
+    frame.u.ack.first_range = first_range;
+    fill_ecn_fields(frame, ecn_counters);
+
+    if (range_buf_len > 0) {
+        auto set_data = quic_output_frame_set_owned_data(frame, range_buf, range_buf_len);
+        if (!set_data) {
+            return std::unexpected(set_data.error());
+        }
+    }
+
+    auto frame_len = quic_output_frame_encoded_len(frame);
+    if (!frame_len) {
+        return std::unexpected(frame_len.error());
+    }
+
+    return {};
+}
+
 // ---------------------------------------------------------------------------
 // generate_forced_ack — build and queue a forced ACK frame.
 //
@@ -103,39 +183,9 @@ void QuicPacketNumberSpace::generate_forced_ack(std::uint64_t largest, std::uint
         ack_delay_us >>= ack_delay_exponent;
     }
 
-    std::uint8_t range_buf[512];
-    std::size_t range_buf_len = 0;
-    if (range_count > 0 && ranges != nullptr) {
-        QuicWriteCursor rcur(range_buf, sizeof(range_buf));
-        for (std::uint32_t i = 0; i < range_count; ++i) {
-            auto wrote = quic_write_varint(rcur, ranges[i].gap);
-            if (!wrote) {
-                return;
-            }
-            wrote = quic_write_varint(rcur, ranges[i].range);
-            if (!wrote) {
-                return;
-            }
-        }
-        range_buf_len = rcur.offset();
-    }
-
-    *frame = QuicOutputFrame{};
-    frame->type = QuicFrameType::Ack;
-    frame->u.ack.largest = largest;
-    frame->u.ack.delay = ack_delay_us;
-    frame->u.ack.range_count = range_count;
-    frame->u.ack.first_range = first_range_val;
-
-    if (range_buf_len > 0) {
-        auto set_data = quic_output_frame_set_owned_data(*frame, range_buf, range_buf_len);
-        if (!set_data) {
-            return;
-        }
-    }
-
-    auto frame_len = quic_output_frame_encoded_len(*frame);
-    if (!frame_len) {
+    auto prepared =
+            quic_prepare_ack_frame(*frame, largest, ack_delay_us, range_count, first_range_val, ranges, ecn_counters);
+    if (!prepared) {
         return;
     }
 
@@ -166,7 +216,8 @@ void QuicPacketNumberSpace::generate_forced_ack(std::uint64_t largest, std::uint
 //         return NGX_OK;
 //     }
 // ---------------------------------------------------------------------------
-void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime received_time, bool ack_eliciting) noexcept {
+void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime received_time, bool ack_eliciting,
+                                               net::UdpEcn ecn) noexcept {
     // Always track the largest received PN.
     if (largest_received_packet_number == kUnsetPacketNumber || pn > largest_received_packet_number) {
         largest_received_packet_number = pn;
@@ -190,6 +241,7 @@ void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime receiv
 
     // First packet ever — initialise the range.
     if (base == kUnsetPacketNumber) {
+        record_ecn(ecn);
         largest_range = pn;
         largest_received_time = received_time;
         return;
@@ -197,6 +249,7 @@ void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime receiv
 
     // Duplicate of current largest — nothing to do.
     if (base == pn) {
+        record_ecn(ecn);
         return;
     }
 
@@ -209,6 +262,7 @@ void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime receiv
     if (pn > base) {
         if (pn - base == 1) {
             // Sequential extension.
+            record_ecn(ecn);
             ++first_range;
             largest_range = pn;
             largest_received_time = received_time;
@@ -229,6 +283,8 @@ void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime receiv
                 pending_ack = kUnsetPacketNumber;
             }
         }
+
+        record_ecn(ecn);
 
         const std::uint64_t gap = pn - base - 2;
         const std::uint64_t range = first_range;
@@ -261,6 +317,7 @@ void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime receiv
     // -----------------------------------------------------------------------
     // Check if PN is already covered by the first (largest) range.
     if (pn >= smallest && pn <= largest) {
+        record_ecn(ecn);
         return;
     }
 
@@ -309,6 +366,8 @@ void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime receiv
                     }
                 }
 
+                record_ecn(ecn);
+
                 const std::uint64_t new_gap = ge - pn - 1;
 
                 r.gap = pn - gs - 1;
@@ -332,6 +391,9 @@ void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime receiv
                 send_ack_count = kQuicMaxAckGap;
                 send_ack = true;
             }
+            if (pn == gs || pn == ge || gs == ge) {
+                record_ecn(ecn);
+            }
             return;
         }
 
@@ -341,12 +403,14 @@ void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime receiv
 
         // Check if PN is already covered by this range.
         if (pn >= smallest && pn <= largest) {
+            record_ecn(ecn);
             return;
         }
     }
 
     // PN is just below the last range — extend it.
     if (pn == smallest - 1) {
+        record_ecn(ecn);
         if (ack_range_count == 0) {
             ++first_range;
         } else {
@@ -359,6 +423,7 @@ void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime receiv
     // Mirror ngx_quic_send_ack_range: send a targeted ACK for just this
     // packet number if it is ack-eliciting, then return without tracking.
     if (ack_range_count == kQuicMaxAckRanges) {
+        record_ecn(ecn);
         if (ack_eliciting) {
             generate_forced_ack(pn, 0, 0, nullptr, received_time);
             send_ack_count = kQuicMaxAckGap;
@@ -368,6 +433,7 @@ void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime receiv
     }
 
     // Append a new gap+range entry at the tail.
+    record_ecn(ecn);
     const std::uint64_t gap = smallest - 2 - pn;
     ack_ranges[ack_range_count].gap = gap;
     ack_ranges[ack_range_count].range = 0;
