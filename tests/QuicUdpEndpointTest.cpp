@@ -143,9 +143,11 @@ fiber::quic::QuicConnectionId cid_from_hex(std::string_view value) {
 
 fiber::net::SocketAddress loopback(std::uint16_t port) { return {fiber::net::IpAddress::loopback_v4(), port}; }
 
-fiber::quic::QuicStream::Lease make_test_stream(void *, const fiber::quic::QuicNewStreamContext &ctx) noexcept {
-    return fiber::quic::QuicStream::Lease::adopt(
-            new (std::nothrow) fiber::quic::QuicStream(ctx.stream_id, ctx.recv_extent_pool, ctx.recv_options));
+void destroy_test_stream(void *, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
+
+fiber::quic::QuicStream::Lease make_test_stream(void *) noexcept {
+    return fiber::quic::QuicStream::Lease::adopt(new (std::nothrow)
+                                                         fiber::quic::QuicStream(nullptr, destroy_test_stream));
 }
 
 fiber::mem::IoBuf iobuf_of(std::string_view value) {
@@ -960,7 +962,7 @@ DetachedTask recv_application_stream_frame(fiber::event::EventLoop *loop, fiber:
     server_options.remote_addr = client.local_addr();
     server_options.local_connection_id = server_cid;
     server_options.remote_connection_id = client_cid;
-    server_options.ops.on_new_stream = make_test_stream;
+    server_options.ops.create_stream = make_test_stream;
     fiber::quic::QuicConnection server(server_options);
     auto *path = server.active_path();
     if (path == nullptr) {

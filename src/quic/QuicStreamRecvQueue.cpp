@@ -161,6 +161,23 @@ QuicStreamRecvQueue::QuicStreamRecvQueue(mem::IoBufNodePool &pool, Options optio
     pool_(&pool), buffer_limit_(options.buffer_limit), low_water_(std::min(options.low_water, options.buffer_limit)),
     max_stream_data_(options.max_stream_data) {}
 
+void QuicStreamRecvQueue::init(mem::IoBufNodePool &pool) noexcept { init(pool, Options{}); }
+
+void QuicStreamRecvQueue::init(mem::IoBufNodePool &pool, Options options) noexcept {
+    FIBER_ASSERT(pool_ == nullptr);
+    FIBER_ASSERT(head_ == nullptr);
+    FIBER_ASSERT(tail_ == nullptr);
+    FIBER_ASSERT(last_insert_ == nullptr);
+    FIBER_ASSERT(buffered_bytes_ == 0);
+    FIBER_ASSERT(active_extent_count_ == 0);
+    FIBER_ASSERT(active_block_count_ == 0);
+    FIBER_ASSERT(read_waiter_ == nullptr);
+    pool_ = &pool;
+    buffer_limit_ = options.buffer_limit;
+    low_water_ = std::min(options.low_water, options.buffer_limit);
+    max_stream_data_ = options.max_stream_data;
+}
+
 QuicStreamRecvQueue::~QuicStreamRecvQueue() {
     FIBER_ASSERT(read_waiter_ == nullptr);
     clear_buffered_extents();
@@ -575,6 +592,9 @@ common::IoResult<std::size_t> QuicStreamRecvQueue::take_reassembled(std::size_t 
 }
 
 void QuicStreamRecvQueue::clear_buffered_extents() noexcept {
+    if (pool_ == nullptr) {
+        return;
+    }
     mem::IoBufNode *extent = head_;
     while (extent != nullptr) {
         mem::IoBufNode *next = extent->next;

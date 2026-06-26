@@ -38,8 +38,12 @@ enum class QuicStreamFrameEncodeStatus : std::uint8_t {
     Blocked,
 };
 
+inline constexpr std::uint64_t kQuicUnassignedStreamId = UINT64_MAX;
+
 class QuicStream : public common::NonCopyable, public common::NonMovable {
 public:
+    using DestroyCallback = void (*)(void *owner, QuicStream &stream) noexcept;
+
     class Lease {
     public:
         Lease() noexcept = default;
@@ -87,12 +91,11 @@ public:
         QuicStream *stream_ = nullptr;
     };
 
-    QuicStream(std::uint64_t stream_id, mem::IoBufNodePool &recv_extent_pool) noexcept;
-    QuicStream(std::uint64_t stream_id, mem::IoBufNodePool &recv_extent_pool,
-               QuicStreamRecvQueue::Options recv_options) noexcept;
+    QuicStream(void *destroy_owner, DestroyCallback on_destroy) noexcept;
     ~QuicStream();
 
     [[nodiscard]] std::uint64_t stream_id() const noexcept { return stream_id_; }
+    [[nodiscard]] bool stream_id_assigned() const noexcept { return stream_id_ != kQuicUnassignedStreamId; }
     [[nodiscard]] std::uint64_t sequence() const noexcept;
     [[nodiscard]] QuicStreamType type() const noexcept;
     [[nodiscard]] bool bidirectional() const noexcept;
@@ -152,7 +155,8 @@ public:
 private:
     class WriteAwaiter;
 
-    void attach_to_connection(QuicConnection &conn) noexcept;
+    void assign_conn_ctx(QuicConnection &conn, std::uint64_t stream_id,
+                         QuicStreamRecvQueue::Options recv_options) noexcept;
     void detach_from_connection() noexcept;
     [[nodiscard]] common::IoResult<std::uint64_t> on_stream_data_recv(const std::uint8_t *src, std::size_t length,
                                                                       std::uint64_t offset, bool fin) noexcept;
@@ -178,7 +182,7 @@ private:
     void notify_write_waiter(common::IoErr result = common::IoErr::None) noexcept;
     void cancel_write_waiter(WriteAwaiter *awaiter) noexcept;
 
-    std::uint64_t stream_id_ = 0;
+    std::uint64_t stream_id_ = kQuicUnassignedStreamId;
     QuicConnection *conn_ = nullptr;
     QuicStreamRecvQueue recv_queue_;
     QuicStreamSendQueue send_queue_;
@@ -193,6 +197,8 @@ private:
     bool closed_ = false;
     bool stream_send_pending_ = false;
     bool stream_data_blocked_reported_ = false;
+    void *destroy_owner_ = nullptr;
+    DestroyCallback on_destroy_ = nullptr;
 
     friend class QuicConnection;
     friend class QuicUdpEndpoint;

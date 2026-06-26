@@ -249,26 +249,37 @@ void QuicStream::Lease::reset() noexcept {
     stream->release();
 }
 
-QuicStream::QuicStream(std::uint64_t stream_id, mem::IoBufNodePool &recv_extent_pool) noexcept :
-    stream_id_(stream_id), recv_queue_(recv_extent_pool), send_queue_(recv_extent_pool) {}
-
-QuicStream::QuicStream(std::uint64_t stream_id, mem::IoBufNodePool &recv_extent_pool,
-                       QuicStreamRecvQueue::Options recv_options) noexcept :
-    stream_id_(stream_id), recv_queue_(recv_extent_pool, recv_options), send_queue_(recv_extent_pool) {}
+QuicStream::QuicStream(void *destroy_owner, DestroyCallback on_destroy) noexcept :
+    destroy_owner_(destroy_owner), on_destroy_(on_destroy) {
+    FIBER_ASSERT(on_destroy_ != nullptr);
+}
 
 QuicStream::~QuicStream() = default;
 
-std::uint64_t QuicStream::sequence() const noexcept { return stream_sequence(stream_id_); }
+std::uint64_t QuicStream::sequence() const noexcept {
+    FIBER_ASSERT(stream_id_assigned());
+    return stream_sequence(stream_id_);
+}
 
 QuicStreamType QuicStream::type() const noexcept {
+    FIBER_ASSERT(stream_id_assigned());
     return bidirectional() ? QuicStreamType::Bidirectional : QuicStreamType::Unidirectional;
 }
 
-bool QuicStream::bidirectional() const noexcept { return is_bidirectional_stream_id(stream_id_); }
+bool QuicStream::bidirectional() const noexcept {
+    FIBER_ASSERT(stream_id_assigned());
+    return is_bidirectional_stream_id(stream_id_);
+}
 
-bool QuicStream::unidirectional() const noexcept { return is_unidirectional_stream_id(stream_id_); }
+bool QuicStream::unidirectional() const noexcept {
+    FIBER_ASSERT(stream_id_assigned());
+    return is_unidirectional_stream_id(stream_id_);
+}
 
 common::IoResult<std::size_t> QuicStream::try_read(std::size_t max_bytes, mem::IoBufChain &out) noexcept {
+    if (!attached_to_connection_ || !recv_queue_.initialized()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
     auto taken = recv_queue_.try_take(max_bytes, out);
     if (!taken) {
         return std::unexpected(taken.error());
@@ -280,6 +291,9 @@ common::IoResult<std::size_t> QuicStream::try_read(std::size_t max_bytes, mem::I
 
 async::Task<common::IoResult<std::size_t>> QuicStream::read(std::size_t max_bytes, mem::IoBufChain &out,
                                                             std::chrono::milliseconds timeout) noexcept {
+    if (!attached_to_connection_ || !recv_queue_.initialized()) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
     auto taken = co_await recv_queue_.take(max_bytes, out, timeout);
     if (!taken) {
         co_return std::unexpected(taken.error());
@@ -290,6 +304,9 @@ async::Task<common::IoResult<std::size_t>> QuicStream::read(std::size_t max_byte
 }
 
 common::IoResult<std::size_t> QuicStream::try_write(const mem::IoBuf &buf, bool fin) noexcept {
+    if (!attached_to_connection_ || !send_queue_.initialized()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
     const std::size_t bytes = buf.readable();
     const common::IoErr terminal = terminal_write_error();
     if (terminal != common::IoErr::None) {
@@ -331,6 +348,9 @@ common::IoResult<std::size_t> QuicStream::try_write(const mem::IoBuf &buf, bool 
 }
 
 common::IoResult<std::size_t> QuicStream::try_write(mem::IoBufChain &chain) noexcept {
+    if (!attached_to_connection_ || !send_queue_.initialized()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
     if (!chain.bound() || &chain.node_pool() != &send_queue_.node_pool()) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -437,6 +457,9 @@ async::Task<common::IoResult<std::size_t>> QuicStream::write(mem::IoBufChain &ch
 }
 
 common::IoResult<void> QuicStream::stop_read(std::uint64_t error_code) noexcept {
+    if (!attached_to_connection_ || !recv_queue_.initialized()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
     if (recv_queue_.stop_sending()) {
         return {};
     }
@@ -452,6 +475,9 @@ common::IoResult<void> QuicStream::stop_read(std::uint64_t error_code) noexcept 
 }
 
 common::IoResult<void> QuicStream::reset(std::uint64_t error_code) noexcept {
+    if (!attached_to_connection_ || !send_queue_.initialized()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
     auto final_size = send_queue_.reset(error_code);
     if (!final_size) {
         return std::unexpected(final_size.error());
@@ -528,7 +554,7 @@ void QuicStream::on_max_stream_data(std::uint64_t limit) noexcept {
     }
 }
 
-bool QuicStream::has_send_work() const noexcept { return send_queue_.has_send_work(); }
+bool QuicStream::has_send_work() const noexcept { return send_queue_.initialized() && send_queue_.has_send_work(); }
 
 common::IoResult<QuicStreamFrameEncodeStatus> QuicStream::encode_stream_frame(QuicOutputFrame &frame, std::uint8_t *dst,
                                                                               std::size_t capacity) noexcept {
@@ -586,6 +612,9 @@ void QuicStream::maybe_extend_recv_flow_control() noexcept {
 void QuicStream::mark_app_released() noexcept { app_released_ = true; }
 
 bool QuicStream::ready_for_connection_release() const noexcept {
+    if (!attached_to_connection_) {
+        return false;
+    }
     return app_released_ && (closed_ || recv_queue_.finished() || recv_queue_.reset_received()) &&
            send_queue_.empty() && !stream_send_pending_;
 }
@@ -602,8 +631,16 @@ bool QuicStream::is_unidirectional_stream_id(std::uint64_t stream_id) noexcept {
     return !is_bidirectional_stream_id(stream_id);
 }
 
-void QuicStream::attach_to_connection(QuicConnection &conn) noexcept {
+void QuicStream::assign_conn_ctx(QuicConnection &conn, std::uint64_t stream_id,
+                                 QuicStreamRecvQueue::Options recv_options) noexcept {
+    FIBER_ASSERT(!attached_to_connection_);
+    FIBER_ASSERT(!stream_id_assigned());
+    FIBER_ASSERT(!recv_queue_.initialized());
+    FIBER_ASSERT(!send_queue_.initialized());
+    stream_id_ = stream_id;
     conn_ = &conn;
+    recv_queue_.init(conn.recv_extent_pool(), recv_options);
+    send_queue_.init(conn.recv_extent_pool());
     attached_to_connection_ = true;
     max_stream_data_ = std::max(max_stream_data_, conn.initial_stream_send_limit(stream_id_));
 }
@@ -616,9 +653,10 @@ void QuicStream::detach_from_connection() noexcept {
 void QuicStream::retain() noexcept { ++ref_count_; }
 
 void QuicStream::release() noexcept {
+    FIBER_ASSERT(ref_count_ > 0);
     --ref_count_;
     if (ready_for_destruction()) {
-        delete this;
+        on_destroy_(destroy_owner_, *this);
     }
 }
 
