@@ -182,7 +182,12 @@ const SSL_QUIC_METHOD kQuicTlsMethod{
         .send_alert = send_alert,
 };
 
-[[nodiscard]] common::IoResult<std::size_t>
+struct QuicServerTransportParamsWire {
+    std::size_t len = 0;
+    std::size_t zero_rtt_len = 0;
+};
+
+[[nodiscard]] common::IoResult<QuicServerTransportParamsWire>
 create_server_transport_params(QuicConnection &connection, std::uint8_t *out, std::size_t out_cap) noexcept {
     const QuicTransportSettings &settings = connection.local_transport();
     QuicTransportParams params{};
@@ -212,8 +217,13 @@ create_server_transport_params(QuicConnection &connection, std::uint8_t *out, st
         params.retry_source_connection_id = connection.retry_source_connection_id();
     }
 
+    std::size_t zero_rtt_len = 0;
     QuicWriteCursor writer(out, out_cap);
-    return quic_create_transport_params(QuicTransportParamOwner::Server, &writer, params);
+    auto len = quic_create_transport_params(QuicTransportParamOwner::Server, &writer, params, &zero_rtt_len);
+    if (!len) {
+        return std::unexpected(len.error());
+    }
+    return QuicServerTransportParamsWire{.len = *len, .zero_rtt_len = zero_rtt_len};
 }
 
 } // namespace
@@ -260,15 +270,26 @@ common::IoResult<void> QuicTlsSession::init_server(net::TlsServerContext &contex
     }
 
     std::array<std::uint8_t, 512> transport_params{};
-    auto transport_params_len =
+    auto transport_params_wire =
             create_server_transport_params(connection, transport_params.data(), transport_params.size());
-    if (!transport_params_len) {
+    if (!transport_params_wire) {
         SSL_free(ssl);
-        return std::unexpected(transport_params_len.error());
+        return std::unexpected(transport_params_wire.error());
     }
-    if (SSL_set_quic_transport_params(ssl, transport_params.data(), *transport_params_len) != 1) {
+    if (SSL_set_quic_transport_params(ssl, transport_params.data(), transport_params_wire->len) != 1) {
         SSL_free(ssl);
         return std::unexpected(common::IoErr::Invalid);
+    }
+    if (connection.early_data_enabled()) {
+        if (transport_params_wire->zero_rtt_len == 0) {
+            SSL_free(ssl);
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        SSL_set_early_data_enabled(ssl, 1);
+        if (SSL_set_quic_early_data_context(ssl, transport_params.data(), transport_params_wire->zero_rtt_len) != 1) {
+            SSL_free(ssl);
+            return std::unexpected(common::IoErr::Invalid);
+        }
     }
 
     ssl_ = ssl;

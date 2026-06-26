@@ -319,8 +319,24 @@ TEST(QuicTransportCodecTest, ChecksFramePermissionByEncryptionLevel) {
                                                  fiber::quic::QuicFrameType::Stream));
     EXPECT_FALSE(fiber::quic::quic_frame_allowed(fiber::quic::QuicEncryptionLevel::EarlyData,
                                                  fiber::quic::QuicFrameType::Ack));
+    EXPECT_FALSE(fiber::quic::quic_frame_allowed(fiber::quic::QuicEncryptionLevel::EarlyData,
+                                                 fiber::quic::QuicFrameType::Crypto));
+    EXPECT_TRUE(fiber::quic::quic_frame_allowed(fiber::quic::QuicEncryptionLevel::EarlyData,
+                                                fiber::quic::QuicFrameType::Stream));
     EXPECT_TRUE(fiber::quic::quic_frame_allowed(fiber::quic::QuicEncryptionLevel::Application,
                                                 fiber::quic::QuicFrameType::PathResponse));
+
+    const std::array<std::uint8_t, 4> stream_bytes{0x0a, 0x00, 0x01, 0x42};
+    fiber::quic::QuicReadCursor stream_in(stream_bytes.data(), stream_bytes.size());
+    auto stream = fiber::quic::quic_parse_frame(fiber::quic::QuicEncryptionLevel::EarlyData, stream_in);
+    ASSERT_TRUE(stream.has_value());
+    EXPECT_EQ(stream->frame.type, fiber::quic::QuicFrameType::Stream);
+    EXPECT_EQ(stream->frame.u.stream.stream_id, 0U);
+    EXPECT_EQ(stream->frame.u.stream.length, 1U);
+
+    const std::array<std::uint8_t, 3> crypto_bytes{0x06, 0x00, 0x00};
+    fiber::quic::QuicReadCursor crypto_in(crypto_bytes.data(), crypto_bytes.size());
+    EXPECT_FALSE(fiber::quic::quic_parse_frame(fiber::quic::QuicEncryptionLevel::EarlyData, crypto_in).has_value());
 }
 
 TEST(QuicTransportCodecTest, CreatesAndClientParsesNewTokenFrame) {

@@ -265,6 +265,7 @@ public:
         std::chrono::milliseconds graceful_shutdown_grace{30000};
         bool has_retry_source_connection_id = false;
         bool initial_path_validated = false;
+        bool enable_early_data = false;
     };
 
     explicit QuicConnection(const Options &options) noexcept;
@@ -272,6 +273,7 @@ public:
 
     [[nodiscard]] QuicConnectionRole role() const noexcept { return options_.role; }
     [[nodiscard]] QuicConnectionState state() const noexcept { return state_; }
+    [[nodiscard]] bool early_data_enabled() const noexcept { return options_.enable_early_data; }
     [[nodiscard]] const net::SocketAddress &local_addr() const noexcept { return options_.local_addr; }
     [[nodiscard]] const net::SocketAddress &remote_addr() const noexcept { return options_.remote_addr; }
     [[nodiscard]] const QuicConnectionId &original_destination_connection_id() const noexcept {
