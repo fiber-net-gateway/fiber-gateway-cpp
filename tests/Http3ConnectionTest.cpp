@@ -3,8 +3,11 @@
 #include "http/Http3Connection.h"
 #include "quic/QuicConnection.h"
 
+#include "QuicTestLoop.h"
+
 TEST(Http3ConnectionTest, StartsOverOpenQuicConnection) {
     fiber::quic::QuicConnection::Options quic_options{};
+    quic_options.loop = &fiber::test::quic_loop();
     fiber::quic::QuicConnection quic(quic_options);
     fiber::http::Http3Connection h3(quic);
 
@@ -17,6 +20,7 @@ TEST(Http3ConnectionTest, StartsOverOpenQuicConnection) {
 
 TEST(Http3ConnectionTest, AppliesPeerSettingsOnce) {
     fiber::quic::QuicConnection::Options quic_options{};
+    quic_options.loop = &fiber::test::quic_loop();
     fiber::quic::QuicConnection quic(quic_options);
     fiber::http::Http3Connection h3(quic);
     fiber::http::Http3Settings settings{};

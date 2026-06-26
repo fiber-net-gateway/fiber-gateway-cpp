@@ -28,6 +28,8 @@
 #include "quic/QuicTransportParamsCodec.h"
 #include "quic/QuicUdpEndpoint.h"
 
+#include "QuicTestLoop.h"
+
 namespace {
 
 using DetachedTask = fiber::async::DetachedTask;
@@ -1775,6 +1777,7 @@ TEST(QuicUdpEndpointTest, SendsNewTokenWhenPathValidationCompletes) {
 
     fiber::quic::QuicConnection::Options peer_options{};
     peer_options.role = fiber::quic::QuicConnectionRole::Client;
+    peer_options.loop = &group.at(0);
     fiber::quic::QuicConnection peer(peer_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(peer.crypto(), fiber::quic::QuicEncryptionLevel::Application,
                                                         true, suite, app_secret.data(), 32));
@@ -1884,6 +1887,7 @@ TEST(QuicUdpEndpointTest, SendsInitialAckAfterProcessingAckElicitingInitial) {
 
     fiber::quic::QuicConnection::Options client_options{};
     client_options.role = fiber::quic::QuicConnectionRole::Client;
+    client_options.loop = &group.at(0);
     fiber::quic::QuicConnection client(client_options);
     ASSERT_TRUE(client.init_initial_crypto(dcid));
 

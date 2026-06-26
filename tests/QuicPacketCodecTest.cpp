@@ -9,6 +9,8 @@
 #include "quic/QuicPacketCodec.h"
 #include "quic/QuicTransportCodec.h"
 
+#include "QuicTestLoop.h"
+
 namespace {
 
 int hex_value(char c) {
@@ -56,12 +58,12 @@ fiber::quic::QuicConnectionId cid_from_hex(std::string_view value) {
 TEST(QuicPacketCodecTest, EncodesAndDecodesProtectedInitialPacket) {
     const auto original_dcid = cid_from_hex("8394c8f03e515708");
 
-    fiber::quic::QuicConnection::Options server_options{};
+    fiber::quic::QuicConnection::Options server_options = fiber::test::quic_options();
     server_options.role = fiber::quic::QuicConnectionRole::Server;
     fiber::quic::QuicConnection server(server_options);
     ASSERT_TRUE(server.init_initial_crypto(original_dcid));
 
-    fiber::quic::QuicConnection::Options client_options{};
+    fiber::quic::QuicConnection::Options client_options = fiber::test::quic_options();
     client_options.role = fiber::quic::QuicConnectionRole::Client;
     fiber::quic::QuicConnection client(client_options);
     ASSERT_TRUE(client.init_initial_crypto(original_dcid));
@@ -102,7 +104,7 @@ TEST(QuicPacketCodecTest, EncodesAndDecodesProtectedInitialPacket) {
 TEST(QuicPacketCodecTest, EncodesInitialPacketAboveFourKilobytes) {
     const auto original_dcid = cid_from_hex("8394c8f03e515708");
 
-    fiber::quic::QuicConnection::Options server_options{};
+    fiber::quic::QuicConnection::Options server_options = fiber::test::quic_options();
     server_options.role = fiber::quic::QuicConnectionRole::Server;
     fiber::quic::QuicConnection server(server_options);
     ASSERT_TRUE(server.init_initial_crypto(original_dcid));
@@ -179,13 +181,13 @@ TEST_P(QuicPacketCodecSuiteTest, EncodesAndDecodesApplicationPacket) {
         secret[i] = static_cast<std::uint8_t>(i + 1);
     }
 
-    fiber::quic::QuicConnection::Options server_options{};
+    fiber::quic::QuicConnection::Options server_options = fiber::test::quic_options();
     server_options.role = fiber::quic::QuicConnectionRole::Server;
     fiber::quic::QuicConnection server(server_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(server.crypto(), fiber::quic::QuicEncryptionLevel::Application,
                                                         true, suite, secret.data(), secret_len));
 
-    fiber::quic::QuicConnection::Options client_options{};
+    fiber::quic::QuicConnection::Options client_options = fiber::test::quic_options();
     client_options.role = fiber::quic::QuicConnectionRole::Client;
     fiber::quic::QuicConnection client(client_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(client.crypto(), fiber::quic::QuicEncryptionLevel::Application,

@@ -268,7 +268,7 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
     options_(options), next_local_bidi_stream_id_(initial_stream_id(options.role, QuicStreamType::Bidirectional)),
     next_local_uni_stream_id_(initial_stream_id(options.role, QuicStreamType::Unidirectional)) {
     loop_ = options_.loop != nullptr ? options_.loop : event::EventLoop::current_or_null();
-    node_pool_ = loop_ != nullptr ? &loop_->io_buf_node_pool() : &recv_extent_pool_;
+    FIBER_ASSERT(loop_ != nullptr);
     auto peer_stream_limit = [](std::uint64_t concurrent_limit, std::uint64_t transport_limit,
                                 std::uint64_t default_limit) noexcept {
         concurrent_limit = std::min(concurrent_limit, kQuicMaxStreamLimit);
