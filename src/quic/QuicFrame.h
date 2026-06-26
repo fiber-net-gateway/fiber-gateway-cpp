@@ -9,6 +9,7 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../common/mem/IoBuf.h"
+#include "../net/UdpPacket.h"
 
 namespace fiber::quic {
 
@@ -16,6 +17,7 @@ struct QuicPath;
 
 inline constexpr std::size_t kMaxConnectionIdLength = 20;
 inline constexpr std::size_t kStatelessResetTokenLength = 16;
+inline constexpr std::uint64_t kQuicNoPathSeqnum = UINT64_MAX;
 
 enum class QuicEncryptionLevel : std::uint8_t {
     Initial = 0,
@@ -254,11 +256,14 @@ struct QuicOutputFrame {
     std::size_t encoded_len = 0;
     std::uint32_t packet_len = 0;
     std::uint16_t min_packet_len = 0;
+    std::uint64_t packet_path_seqnum = kQuicNoPathSeqnum;
     std::chrono::milliseconds send_time{0};
+    net::UdpEcn packet_ecn = net::UdpEcn::Unspecified;
     bool packet_ack_eliciting = false;
     bool ignore_loss = false;
     bool ignore_congestion = false;
     bool mtu_probe = false;
+    bool packet_ecn_validation_probe = false;
 
     union Payload {
         QuicPaddingFrame padding;

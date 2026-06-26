@@ -15,6 +15,7 @@ inline constexpr std::size_t kQuicMaxPaths = 3;
 inline constexpr std::size_t kQuicPathRetries = 3;
 inline constexpr QuicTime kQuicPathMtuDelay{100};
 inline constexpr std::size_t kQuicPathMtuPrecision = 16;
+inline constexpr std::uint32_t kQuicEcnValidationProbePackets = 10;
 
 enum class QuicPathTag : std::uint8_t {
     Probe,
@@ -27,6 +28,12 @@ enum class QuicPathState : std::uint8_t {
     Validating,
     WaitingMtuProbe,
     MtuDiscovery,
+};
+
+enum class QuicEcnState : std::uint8_t {
+    Testing,
+    Capable,
+    Failed,
 };
 
 struct QuicPath {
@@ -43,6 +50,10 @@ struct QuicPath {
     std::size_t max_mtu = 0;
     std::uint64_t sent = 0;
     std::uint64_t received = 0;
+    QuicEcnState ecn_state = QuicEcnState::Testing;
+    std::uint32_t ecn_validation_sent = 0;
+    std::uint32_t ecn_validation_acked = 0;
+    std::uint32_t ecn_validation_lost = 0;
     std::uint8_t challenge[2][8]{};
     std::uint64_t seqnum = 0;
     std::uint64_t mtu_packet_numbers[kQuicPathRetries]{};

@@ -71,6 +71,8 @@ void quic_congestion_on_packet_sent(QuicCongestionState &cg, std::size_t packet_
 [[nodiscard]] bool quic_congestion_on_loss(QuicCongestionState &cg, const QuicLossSample &sample,
                                            std::uint64_t reset_packet_number, QuicTime now,
                                            std::size_t path_mtu) noexcept;
+[[nodiscard]] bool quic_congestion_on_ecn_ce(QuicCongestionState &cg, QuicTime sent_time, QuicTime now,
+                                             std::size_t path_mtu) noexcept;
 void quic_congestion_on_persistent_congestion(QuicCongestionState &cg, QuicTime oldest_sent_time,
                                               std::size_t path_mtu) noexcept;
 void quic_congestion_on_idle(QuicCongestionState &cg, bool idle, QuicTime now) noexcept;

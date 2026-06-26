@@ -62,6 +62,37 @@ inline constexpr QuicEncryptionLevel kLossLevels[] = {QuicEncryptionLevel::Initi
     }
 }
 
+QuicPath *find_path_by_seqnum(QuicConnection &connection, std::uint64_t seqnum) noexcept {
+    if (seqnum == kQuicNoPathSeqnum) {
+        return nullptr;
+    }
+    for (QuicPath &path: connection.paths().paths()) {
+        if (path.allocated && path.seqnum == seqnum) {
+            return &path;
+        }
+    }
+    return nullptr;
+}
+
+void record_ecn_probe_lost(QuicConnection &connection, const QuicOutputFrame &frame) noexcept {
+    if (!frame.packet_ecn_validation_probe || frame.packet_len == 0) {
+        return;
+    }
+
+    QuicPath *path = find_path_by_seqnum(connection, frame.packet_path_seqnum);
+    if (path == nullptr || path->ecn_state != QuicEcnState::Testing) {
+        return;
+    }
+
+    if (path->ecn_validation_lost != UINT32_MAX) {
+        ++path->ecn_validation_lost;
+    }
+    if (path->ecn_validation_acked == 0 && path->ecn_validation_sent != 0 &&
+        path->ecn_validation_lost >= path->ecn_validation_sent) {
+        path->ecn_state = QuicEcnState::Failed;
+    }
+}
+
 } // namespace
 
 QuicTime quic_oldest_sent_time(QuicConnection &connection) noexcept {
@@ -118,6 +149,7 @@ common::IoResult<QuicLossRecoveryResult> quic_detect_lost(QuicConnection &connec
             }
 
             if (front->packet_len != 0) {
+                record_ecn_probe_lost(connection, *front);
                 const bool unblocked = quic_congestion_on_loss(
                         connection.congestion(),
                         QuicLossSample{front->packet_len, front->packet_number, front->send_time, front->ignore_loss},

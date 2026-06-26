@@ -25,6 +25,18 @@ void subtract_in_flight(QuicCongestionState &cg, std::size_t packet_len) noexcep
     cg.in_flight -= packet_len;
 }
 
+void enter_recovery(QuicCongestionState &cg, std::size_t reduction_basis, QuicTime now, std::size_t path_mtu) noexcept {
+    cg.mtu = path_mtu;
+    cg.recovery_start = now;
+    cg.w_prior = cg.window;
+    cg.w_max = (cg.window < cg.w_max) ? cg.window * (10 + kQuicCongestionCubicBeta) / 20 : cg.window;
+    cg.ssthresh = reduction_basis * kQuicCongestionCubicBeta / 10;
+    cg.window = std::max(cg.ssthresh, cg.mtu * 2);
+    cg.w_est = cg.window;
+    cg.k = now + quic_congestion_cubic_time(cg);
+    cg.idle_start = now;
+}
+
 } // namespace
 
 
@@ -157,16 +169,19 @@ bool quic_congestion_on_loss(QuicCongestionState &cg, const QuicLossSample &samp
         return blocked && cg.in_flight < cg.window;
     }
 
-    cg.mtu = path_mtu;
-    cg.recovery_start = now;
-    cg.w_prior = cg.window;
-    cg.w_max = (cg.window < cg.w_max) ? cg.window * (10 + kQuicCongestionCubicBeta) / 20 : cg.window;
-    cg.ssthresh = cg.in_flight * kQuicCongestionCubicBeta / 10;
-    cg.window = std::max(cg.ssthresh, cg.mtu * 2);
-    cg.w_est = cg.window;
-    cg.k = now + quic_congestion_cubic_time(cg);
-    cg.idle_start = now;
+    enter_recovery(cg, cg.in_flight, now, path_mtu);
 
+    return blocked && cg.in_flight < cg.window;
+}
+
+bool quic_congestion_on_ecn_ce(QuicCongestionState &cg, QuicTime sent_time, QuicTime now,
+                               std::size_t path_mtu) noexcept {
+    const bool blocked = cg.in_flight >= cg.window;
+    if (sent_time <= cg.recovery_start) {
+        return false;
+    }
+
+    enter_recovery(cg, cg.window, now, path_mtu);
     return blocked && cg.in_flight < cg.window;
 }
 

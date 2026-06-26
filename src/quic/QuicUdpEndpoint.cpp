@@ -263,6 +263,73 @@ split_crypto_frame(QuicPacketNumberSpace &space, QuicOutputFrame &frame, std::si
     return type == QuicFrameType::Ack || type == QuicFrameType::AckEcn;
 }
 
+[[nodiscard]] bool datagram_ecn_trackable(const QuicSendDatagram &datagram) noexcept {
+    if (datagram.packet_count == 0) {
+        return false;
+    }
+    for (std::size_t i = 0; i < datagram.packet_count; ++i) {
+        if (!datagram.packets[i].ack_eliciting) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] net::UdpEcn choose_send_ecn(const QuicPath &path, const QuicSendDatagram &datagram) noexcept {
+    if (!datagram_ecn_trackable(datagram)) {
+        return net::UdpEcn::Unspecified;
+    }
+    switch (path.ecn_state) {
+        case QuicEcnState::Capable:
+            return net::UdpEcn::Ect0;
+        case QuicEcnState::Testing:
+            return path.ecn_validation_sent < kQuicEcnValidationProbePackets ? net::UdpEcn::Ect0
+                                                                             : net::UdpEcn::Unspecified;
+        case QuicEcnState::Failed:
+            return net::UdpEcn::Unspecified;
+    }
+    return net::UdpEcn::Unspecified;
+}
+
+void record_sent_ecn_counters(QuicConnection &connection, QuicSendDatagram const &datagram) noexcept {
+    if (datagram.spec.ecn == net::UdpEcn::Unspecified) {
+        return;
+    }
+
+    std::uint32_t validation_probe_count = 0;
+    const bool validation_probe = datagram.path != nullptr && datagram.path->ecn_state == QuicEcnState::Testing;
+    for (std::size_t i = 0; i < datagram.packet_count; ++i) {
+        const QuicSendPacketRecord &packet = datagram.packets[i];
+        if (!packet.ack_eliciting) {
+            continue;
+        }
+
+        QuicPacketNumberSpace &space = connection.packet_number_space(packet.level);
+        switch (datagram.spec.ecn) {
+            case net::UdpEcn::Ect0:
+                ++space.ecn_sent_counters.ect0;
+                break;
+            case net::UdpEcn::Ect1:
+                ++space.ecn_sent_counters.ect1;
+                break;
+            case net::UdpEcn::Ce:
+                ++space.ecn_sent_counters.ce;
+                break;
+            case net::UdpEcn::NonEct:
+            case net::UdpEcn::Unspecified:
+                break;
+        }
+        if (validation_probe && validation_probe_count != UINT32_MAX) {
+            ++validation_probe_count;
+        }
+    }
+
+    if (validation_probe && validation_probe_count != 0) {
+        datagram.path->ecn_validation_sent +=
+                std::min<std::uint32_t>(validation_probe_count, UINT32_MAX - datagram.path->ecn_validation_sent);
+    }
+}
+
 } // namespace
 
 common::IoResult<QuicStreamFrameEncodeStatus>
@@ -1319,6 +1386,7 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
         datagram.spec.peer = candidate.remote;
         datagram.spec.local = candidate.local;
         datagram.spec.has_local = true;
+        datagram.spec.ecn = choose_send_ecn(candidate, datagram);
         return QuicBuildSendResult{QuicBuildSendStatus::Encoded};
     }
 
@@ -1607,6 +1675,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
     datagram.spec.peer = path->remote;
     datagram.spec.local = path->local;
     datagram.spec.has_local = true;
+    datagram.spec.ecn = choose_send_ecn(*path, datagram);
     return QuicBuildSendResult{QuicBuildSendStatus::Encoded};
 }
 
@@ -1614,6 +1683,12 @@ void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const Qui
     const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
     bool has_send_work = false;
     bool sent_ack_eliciting = false;
+    const std::uint64_t path_seqnum = datagram.path != nullptr ? datagram.path->seqnum : kQuicNoPathSeqnum;
+    const bool ecn_validation_probe =
+            datagram.spec.ecn != net::UdpEcn::Unspecified && datagram.path != nullptr &&
+            datagram.path->ecn_state == QuicEcnState::Testing;
+
+    record_sent_ecn_counters(connection, datagram);
 
     for (std::size_t level_index = 0; level_index < kQuicSendLevelCount; ++level_index) {
         QuicPacketNumberSpace &space = connection.packet_number_space(kSendLevels[level_index]);
@@ -1631,6 +1706,9 @@ void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const Qui
                 if (frame->packet_len != 0) {
                     quic_congestion_on_packet_sent(connection.congestion(), frame->packet_len, true, false);
                 }
+                frame->packet_ecn = datagram.spec.ecn;
+                frame->packet_path_seqnum = path_seqnum;
+                frame->packet_ecn_validation_probe = ecn_validation_probe;
                 if (frame->mtu_probe && frame->path != nullptr) {
                     for (std::uint64_t &packet_number: frame->path->mtu_packet_numbers) {
                         if (packet_number == kUnsetPacketNumber) {

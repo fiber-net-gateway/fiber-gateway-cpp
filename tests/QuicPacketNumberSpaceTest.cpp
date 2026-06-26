@@ -19,6 +19,18 @@ TEST(QuicPacketNumberSpaceTest, RecordsEcnCountersForReceivedPackets) {
     EXPECT_EQ(space.ecn_counters.ce, 1U);
 }
 
+TEST(QuicPacketNumberSpaceTest, DoesNotCountEcnForDuplicatePackets) {
+    fiber::quic::QuicPacketNumberSpace space{};
+    space.reset(fiber::quic::QuicEncryptionLevel::Application);
+
+    space.on_packet_received(1, fiber::quic::QuicTime{1}, true, fiber::net::UdpEcn::Ect0);
+    space.on_packet_received(1, fiber::quic::QuicTime{2}, true, fiber::net::UdpEcn::Ce);
+
+    EXPECT_EQ(space.ecn_counters.ect0, 1U);
+    EXPECT_EQ(space.ecn_counters.ect1, 0U);
+    EXPECT_EQ(space.ecn_counters.ce, 0U);
+}
+
 TEST(QuicPacketNumberSpaceTest, PreparesAckEcnFrameWhenCountersArePresent) {
     fiber::quic::QuicOutputFrame frame{};
     fiber::quic::QuicEcnCounters counters{};
