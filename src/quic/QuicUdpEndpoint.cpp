@@ -300,42 +300,10 @@ namespace {
         }
     }
 
-    // Serialize ACK range gap/range pairs (each a varint pair).
-    // Max: 32 ranges × (8 + 8) bytes = 512 bytes.
-    std::uint8_t range_buf[512];
-    std::size_t range_buf_len = 0;
-    if (range_count > 0) {
-        QuicWriteCursor rcur(range_buf, sizeof(range_buf));
-        for (std::uint32_t i = 0; i < range_count; ++i) {
-            auto wrote = quic_write_varint(rcur, space.ack_ranges[i].gap);
-            if (!wrote) {
-                return std::unexpected(wrote.error());
-            }
-            wrote = quic_write_varint(rcur, space.ack_ranges[i].range);
-            if (!wrote) {
-                return std::unexpected(wrote.error());
-            }
-        }
-        range_buf_len = rcur.offset();
-    }
-
-    space.ack_frame = QuicOutputFrame{};
-    space.ack_frame.type = QuicFrameType::Ack;
-    space.ack_frame.u.ack.largest = largest;
-    space.ack_frame.u.ack.delay = ack_delay_us;
-    space.ack_frame.u.ack.range_count = range_count;
-    space.ack_frame.u.ack.first_range = first_range;
-
-    if (range_buf_len > 0) {
-        auto set_data = quic_output_frame_set_owned_data(space.ack_frame, range_buf, range_buf_len);
-        if (!set_data) {
-            return std::unexpected(set_data.error());
-        }
-    }
-
-    auto frame_len = quic_output_frame_encoded_len(space.ack_frame);
-    if (!frame_len) {
-        return std::unexpected(frame_len.error());
+    auto prepared = quic_prepare_ack_frame(space.ack_frame, largest, ack_delay_us, range_count, first_range,
+                                           space.ack_ranges.data(), space.ecn_counters);
+    if (!prepared) {
+        return std::unexpected(prepared.error());
     }
     space.pending_frames.push_front(space.ack_frame);
     return {};

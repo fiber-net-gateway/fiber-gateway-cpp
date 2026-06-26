@@ -473,7 +473,7 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
     // Track ACK ranges for this received packet.
     // on_packet_received handles forced ACK creation internally when range
     // overflow or too-old conditions occur (mirrors ngx_quic_ack_packet).
-    space.on_packet_received(packet.packet_number, now, result.ack_eliciting);
+    space.on_packet_received(packet.packet_number, now, result.ack_eliciting, datagram.ecn);
 
     auto acked = handle_ack_eliciting_packet(space, packet, datagram, previous_largest_received, result.ack_eliciting);
     if (!acked) {
@@ -630,7 +630,7 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
     // on_packet_received handles forced ACK creation internally when range
     // overflow or too-old conditions occur (mirrors ngx_quic_ack_packet).
     const QuicTime received_time = quic_time_ms(datagram.received_at);
-    space.on_packet_received(packet->packet_number, received_time, result.ack_eliciting);
+    space.on_packet_received(packet->packet_number, received_time, result.ack_eliciting, datagram.ecn);
     result.send_ack = space.send_ack;
 
     if (result.path != conn.active_path() && result.non_probing &&

@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "../net/UdpPacket.h"
 #include "QuicCongestion.h"
 #include "QuicDataReassembler.h"
 #include "QuicFrame.h"
@@ -17,6 +18,14 @@ inline constexpr std::size_t kQuicMaxAckRanges = 32;
 struct QuicAckRange {
     std::uint64_t gap = 0;
     std::uint64_t range = 0;
+};
+
+struct QuicEcnCounters {
+    std::uint64_t ect0 = 0;
+    std::uint64_t ect1 = 0;
+    std::uint64_t ce = 0;
+
+    [[nodiscard]] bool any() const noexcept { return ect0 != 0 || ect1 != 0 || ce != 0; }
 };
 
 struct QuicPacketNumberSpace {
@@ -41,10 +50,13 @@ struct QuicPacketNumberSpace {
     // before shifting the ranges array, and ngx_quic_send_ack_range for too-old packets).
     // After a forced ACK on overflow, pending_ack is cleared if it was not updated
     // by the current packet (matching nginx's prev_pending == ctx->pending_ack check).
-    void on_packet_received(std::uint64_t packet_number, QuicTime received_time, bool ack_eliciting) noexcept;
+    void on_packet_received(std::uint64_t packet_number, QuicTime received_time, bool ack_eliciting,
+                            net::UdpEcn ecn = net::UdpEcn::Unspecified) noexcept;
 
     // Record an acked packet number (largest acked by peer).
     void record_acked_packet_number(std::uint64_t packet_number) noexcept;
+
+    void record_ecn(net::UdpEcn ecn) noexcept;
 
     // Drop ACK ranges up to and including pn (nginx's ngx_quic_drop_ack_ranges).
     // Called when an ACK frame we previously sent is itself acknowledged.
@@ -76,6 +88,7 @@ struct QuicPacketNumberSpace {
     QuicTime ack_delay_start{0};
     std::uint32_t ack_range_count = 0;
     std::array<QuicAckRange, kQuicMaxAckRanges> ack_ranges{};
+    QuicEcnCounters ecn_counters{};
     std::uint32_t send_ack_count = 0;
     bool send_ack = false;
 
@@ -85,6 +98,11 @@ private:
     void generate_forced_ack(std::uint64_t largest, std::uint64_t first_range_val, std::uint32_t range_count,
                              const QuicAckRange *ranges, QuicTime now, std::uint64_t ack_delay_exponent = 3) noexcept;
 };
+
+[[nodiscard]] common::IoResult<void> quic_prepare_ack_frame(QuicOutputFrame &frame, std::uint64_t largest,
+                                                            std::uint64_t delay, std::uint32_t range_count,
+                                                            std::uint64_t first_range, const QuicAckRange *ranges,
+                                                            const QuicEcnCounters &ecn_counters) noexcept;
 
 struct QuicPacketNumberSpaceSnapshot {
     std::uint64_t next_packet_number = 0;
