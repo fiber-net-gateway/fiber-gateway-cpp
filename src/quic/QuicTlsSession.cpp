@@ -241,11 +241,6 @@ common::IoResult<void> QuicTlsSession::init_server(net::TlsServerContext &contex
         return std::unexpected(common::IoErr::Already);
     }
 
-    auto initialized = context.init();
-    if (!initialized) {
-        return std::unexpected(initialized.error());
-    }
-
     SSL_CTX *ctx = context.raw();
     if (ctx == nullptr) {
         return std::unexpected(common::IoErr::Invalid);
