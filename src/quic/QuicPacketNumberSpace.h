@@ -89,6 +89,8 @@ struct QuicPacketNumberSpace {
     std::uint32_t ack_range_count = 0;
     std::array<QuicAckRange, kQuicMaxAckRanges> ack_ranges{};
     QuicEcnCounters ecn_counters{};
+    QuicEcnCounters ecn_sent_counters{};
+    QuicEcnCounters peer_ecn_counters{};
     std::uint32_t send_ack_count = 0;
     bool send_ack = false;
 

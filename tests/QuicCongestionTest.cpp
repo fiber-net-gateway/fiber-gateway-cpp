@@ -97,6 +97,152 @@ TEST(QuicAckHandlerTest, AckedSentFrameUpdatesCongestionAndRtt) {
     EXPECT_EQ(connection.rtt().latest_rtt, fiber::quic::QuicTime{80});
 }
 
+TEST(QuicAckHandlerTest, MissingAckEcnDisablesPathEcn) {
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Server;
+    fiber::quic::QuicConnection connection(options);
+    auto *path = connection.active_path();
+    ASSERT_NE(path, nullptr);
+    path->ecn_state = fiber::quic::QuicEcnState::Testing;
+    path->ecn_validation_sent = 1;
+
+    auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    space.ecn_sent_counters.ect0 = 1;
+    fiber::quic::QuicOutputFrame *frame = space.alloc_frame();
+    ASSERT_NE(frame, nullptr);
+    frame->type = fiber::quic::QuicFrameType::Ping;
+    frame->packet_number = 0;
+    frame->packet_len = 1200;
+    frame->send_time = fiber::quic::QuicTime{10};
+    frame->packet_ack_eliciting = true;
+    frame->packet_ecn = fiber::net::UdpEcn::Ect0;
+    frame->packet_path_seqnum = path->seqnum;
+    frame->packet_ecn_validation_probe = true;
+    space.next_packet_number = 1;
+    space.sent_frames.push_back(*frame);
+    fiber::quic::quic_congestion_on_packet_sent(connection.congestion(), 1200, true, false);
+
+    fiber::quic::QuicInputFrame ack{};
+    ack.type = fiber::quic::QuicFrameType::Ack;
+    ack.level = fiber::quic::QuicEncryptionLevel::Application;
+    ack.u.ack.largest = 0;
+    ack.u.ack.first_range = 0;
+
+    auto result = fiber::quic::quic_handle_ack_frame(connection, fiber::quic::QuicEncryptionLevel::Application, ack,
+                                                     fiber::quic::QuicTime{90});
+
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_EQ(path->ecn_state, fiber::quic::QuicEcnState::Failed);
+}
+
+TEST(QuicAckHandlerTest, AckEcnValidatesTestingPath) {
+    fiber::quic::QuicConnection connection(fiber::quic::QuicConnection::Options{});
+    auto *path = connection.active_path();
+    ASSERT_NE(path, nullptr);
+    path->ecn_state = fiber::quic::QuicEcnState::Testing;
+    path->ecn_validation_sent = 1;
+
+    auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    space.ecn_sent_counters.ect0 = 1;
+    fiber::quic::QuicOutputFrame *frame = space.alloc_frame();
+    ASSERT_NE(frame, nullptr);
+    frame->type = fiber::quic::QuicFrameType::Ping;
+    frame->packet_number = 0;
+    frame->packet_len = 1200;
+    frame->send_time = fiber::quic::QuicTime{10};
+    frame->packet_ack_eliciting = true;
+    frame->packet_ecn = fiber::net::UdpEcn::Ect0;
+    frame->packet_path_seqnum = path->seqnum;
+    frame->packet_ecn_validation_probe = true;
+    space.next_packet_number = 1;
+    space.sent_frames.push_back(*frame);
+    fiber::quic::quic_congestion_on_packet_sent(connection.congestion(), 1200, true, false);
+
+    fiber::quic::QuicInputFrame ack{};
+    ack.type = fiber::quic::QuicFrameType::AckEcn;
+    ack.level = fiber::quic::QuicEncryptionLevel::Application;
+    ack.u.ack.largest = 0;
+    ack.u.ack.first_range = 0;
+    ack.u.ack.ect0 = 1;
+
+    auto result = fiber::quic::quic_handle_ack_frame(connection, fiber::quic::QuicEncryptionLevel::Application, ack,
+                                                     fiber::quic::QuicTime{90});
+
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_EQ(path->ecn_state, fiber::quic::QuicEcnState::Capable);
+    EXPECT_EQ(path->ecn_validation_acked, 1U);
+    EXPECT_EQ(space.peer_ecn_counters.ect0, 1U);
+}
+
+TEST(QuicAckHandlerTest, AckEcnCeTriggersCongestionResponse) {
+    fiber::quic::QuicConnection connection(fiber::quic::QuicConnection::Options{});
+    auto *path = connection.active_path();
+    ASSERT_NE(path, nullptr);
+    path->ecn_state = fiber::quic::QuicEcnState::Testing;
+    path->ecn_validation_sent = 1;
+
+    auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    space.ecn_sent_counters.ect0 = 1;
+    fiber::quic::QuicOutputFrame *frame = space.alloc_frame();
+    ASSERT_NE(frame, nullptr);
+    frame->type = fiber::quic::QuicFrameType::Ping;
+    frame->packet_number = 0;
+    frame->packet_len = 1200;
+    frame->send_time = fiber::quic::QuicTime{10};
+    frame->packet_ack_eliciting = true;
+    frame->packet_ecn = fiber::net::UdpEcn::Ect0;
+    frame->packet_path_seqnum = path->seqnum;
+    frame->packet_ecn_validation_probe = true;
+    space.next_packet_number = 1;
+    space.sent_frames.push_back(*frame);
+    fiber::quic::quic_congestion_on_packet_sent(connection.congestion(), 1200, true, false);
+
+    fiber::quic::QuicInputFrame ack{};
+    ack.type = fiber::quic::QuicFrameType::AckEcn;
+    ack.level = fiber::quic::QuicEncryptionLevel::Application;
+    ack.u.ack.largest = 0;
+    ack.u.ack.first_range = 0;
+    ack.u.ack.ce = 1;
+
+    auto result = fiber::quic::quic_handle_ack_frame(connection, fiber::quic::QuicEncryptionLevel::Application, ack,
+                                                     fiber::quic::QuicTime{90});
+
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_EQ(path->ecn_state, fiber::quic::QuicEcnState::Capable);
+    EXPECT_LT(connection.congestion().window, 13200U);
+    EXPECT_EQ(connection.congestion().recovery_start, fiber::quic::QuicTime{90});
+    EXPECT_EQ(space.peer_ecn_counters.ce, 1U);
+}
+
+TEST(QuicLossRecoveryTest, LostEcnValidationProbeDisablesPathEcn) {
+    fiber::quic::QuicConnection connection(fiber::quic::QuicConnection::Options{});
+    auto *path = connection.active_path();
+    ASSERT_NE(path, nullptr);
+    path->ecn_state = fiber::quic::QuicEcnState::Testing;
+    path->ecn_validation_sent = 1;
+
+    auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    fiber::quic::QuicOutputFrame *frame = space.alloc_frame();
+    ASSERT_NE(frame, nullptr);
+    frame->type = fiber::quic::QuicFrameType::Ping;
+    frame->packet_number = 0;
+    frame->packet_len = 1200;
+    frame->send_time = fiber::quic::QuicTime{0};
+    frame->packet_ack_eliciting = true;
+    frame->packet_ecn = fiber::net::UdpEcn::Ect0;
+    frame->packet_path_seqnum = path->seqnum;
+    frame->packet_ecn_validation_probe = true;
+    space.next_packet_number = 4;
+    space.largest_acked_packet_number = 3;
+    space.sent_frames.push_back(*frame);
+    fiber::quic::quic_congestion_on_packet_sent(connection.congestion(), 1200, true, false);
+
+    auto result = fiber::quic::quic_detect_lost(connection, fiber::quic::QuicTime{400}, nullptr);
+
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_EQ(path->ecn_state, fiber::quic::QuicEcnState::Failed);
+}
+
 TEST(QuicLossRecoveryTest, SelectsPtoTimerFromLatestSentPacket) {
     fiber::quic::QuicConnection connection(fiber::quic::QuicConnection::Options{});
     auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);

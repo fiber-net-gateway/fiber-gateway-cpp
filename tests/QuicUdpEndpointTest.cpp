@@ -51,6 +51,7 @@ struct CoalescedPacketSummary {
 struct ManyFramePacketSummary {
     std::uint32_t decoded_frame_count = 0;
     std::size_t sent_frame_count = 0;
+    fiber::net::UdpEcn ecn = fiber::net::UdpEcn::Unspecified;
     bool pending_empty = false;
     bool sending_empty = false;
 };
@@ -645,7 +646,9 @@ DetachedTask
 recv_handshake_packet_with_many_frames(fiber::event::EventLoop *loop, fiber::quic::QuicUdpEndpoint *endpoint,
                                        std::promise<fiber::common::IoResult<ManyFramePacketSummary>> *done_promise) {
     fiber::net::UdpSocket client(*loop);
-    auto bound = client.bind(loopback(0), {});
+    fiber::net::UdpBindOptions bind_options{};
+    bind_options.recv_ecn = true;
+    auto bound = client.bind(loopback(0), bind_options);
     if (!bound) {
         done_promise->set_value(std::unexpected(bound.error()));
         co_return;
@@ -710,7 +713,7 @@ recv_handshake_packet_with_many_frames(fiber::event::EventLoop *loop, fiber::qui
     }
 
     std::array<std::uint8_t, 1400> response{};
-    auto received = client.try_recv_from(response.data(), response.size());
+    auto received = client.try_recv_packet(response.data(), response.size());
     if (!received) {
         done_promise->set_value(std::unexpected(received.error()));
         co_return;
@@ -730,8 +733,8 @@ recv_handshake_packet_with_many_frames(fiber::event::EventLoop *loop, fiber::qui
         ++sent_count;
     }
 
-    done_promise->set_value(ManyFramePacketSummary{decoded->frame_count, sent_count, space.pending_frames.empty(),
-                                                   space.sending_frames.empty()});
+    done_promise->set_value(ManyFramePacketSummary{decoded->frame_count, sent_count, received->ecn,
+                                                   space.pending_frames.empty(), space.sending_frames.empty()});
     client.close();
 }
 
@@ -1947,6 +1950,7 @@ TEST(QuicUdpEndpointTest, EncodesMoreThanEightFramesInOnePacket) {
     ASSERT_TRUE(response.has_value()) << static_cast<int>(response.error());
     EXPECT_GE(response->decoded_frame_count, 12U);
     EXPECT_EQ(response->sent_frame_count, 12U);
+    EXPECT_EQ(response->ecn, fiber::net::UdpEcn::Ect0);
     EXPECT_TRUE(response->pending_empty);
     EXPECT_TRUE(response->sending_empty);
 

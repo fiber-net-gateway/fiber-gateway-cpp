@@ -58,6 +58,8 @@ void QuicPacketNumberSpace::reset(QuicEncryptionLevel space_level) noexcept {
     ack_range_count = 0;
     ack_ranges = {};
     ecn_counters = {};
+    ecn_sent_counters = {};
+    peer_ecn_counters = {};
     send_ack_count = 0;
     send_ack = false;
 }
@@ -249,7 +251,6 @@ void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime receiv
 
     // Duplicate of current largest — nothing to do.
     if (base == pn) {
-        record_ecn(ecn);
         return;
     }
 
@@ -317,7 +318,6 @@ void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime receiv
     // -----------------------------------------------------------------------
     // Check if PN is already covered by the first (largest) range.
     if (pn >= smallest && pn <= largest) {
-        record_ecn(ecn);
         return;
     }
 
@@ -403,7 +403,6 @@ void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime receiv
 
         // Check if PN is already covered by this range.
         if (pn >= smallest && pn <= largest) {
-            record_ecn(ecn);
             return;
         }
     }
@@ -423,7 +422,6 @@ void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime receiv
     // Mirror ngx_quic_send_ack_range: send a targeted ACK for just this
     // packet number if it is ack-eliciting, then return without tracking.
     if (ack_range_count == kQuicMaxAckRanges) {
-        record_ecn(ecn);
         if (ack_eliciting) {
             generate_forced_ack(pn, 0, 0, nullptr, received_time);
             send_ack_count = kQuicMaxAckGap;
