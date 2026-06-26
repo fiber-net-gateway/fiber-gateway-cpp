@@ -12,6 +12,7 @@
 #include "quic/QuicPacketCodec.h"
 #include "quic/QuicPacketProcessor.h"
 #include "quic/QuicTransportCodec.h"
+#include "quic/QuicTransportParamsCodec.h"
 
 namespace {
 
@@ -315,6 +316,97 @@ TEST(QuicPacketProcessorTest, ProcessesApplicationPingPacket) {
     EXPECT_TRUE(result->ack_eliciting);
     EXPECT_TRUE(result->send_ack);
     EXPECT_EQ(server.packet_number_space(fiber::quic::QuicEncryptionLevel::Application).pending_ack, 0U);
+}
+
+TEST(QuicPacketProcessorTest, ProcessesEarlyDataStreamPacketWithEarlyKeys) {
+    constexpr fiber::quic::QuicCryptoSuite suite = fiber::quic::QuicCryptoSuite::Aes128GcmSha256;
+    std::array<std::uint8_t, fiber::quic::kQuicMaxSecretLength> secret{};
+    for (std::size_t i = 0; i < 32; ++i) {
+        secret[i] = static_cast<std::uint8_t>(0xa0 + i);
+    }
+
+    const auto server_cid = cid_from_hex("0102030405060708");
+    const auto client_cid = cid_from_hex("1112131415161718");
+
+    fiber::quic::QuicConnection::Options client_options{};
+    client_options.role = fiber::quic::QuicConnectionRole::Client;
+    client_options.local_connection_id = client_cid;
+    client_options.remote_connection_id = server_cid;
+    fiber::quic::QuicConnection client(client_options);
+    ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(client.crypto(), fiber::quic::QuicEncryptionLevel::EarlyData,
+                                                        true, suite, secret.data(), 32));
+
+    fiber::quic::QuicConnection::Options server_options{};
+    server_options.role = fiber::quic::QuicConnectionRole::Server;
+    server_options.local_addr = loopback(8443);
+    server_options.remote_addr = loopback(4433);
+    server_options.local_connection_id = server_cid;
+    server_options.remote_connection_id = client_cid;
+    server_options.ops.on_new_stream = on_new_stream;
+    fiber::quic::QuicConnection server(server_options);
+    ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(server.crypto(), fiber::quic::QuicEncryptionLevel::EarlyData,
+                                                        false, suite, secret.data(), 32));
+    fiber::quic::QuicTransportParams peer_params{};
+    peer_params.initial_source_connection_id = client_cid;
+    peer_params.has_initial_source_connection_id = true;
+    peer_params.initial_max_data = 4096;
+    peer_params.initial_max_stream_data_bidi_local = 4096;
+    peer_params.initial_max_stream_data_bidi_remote = 4096;
+    peer_params.initial_max_stream_data_uni = 4096;
+    peer_params.initial_max_streams_bidi = 4;
+    peer_params.initial_max_streams_uni = 4;
+    ASSERT_TRUE(server.apply_peer_transport_params(peer_params));
+
+    const std::array<std::uint8_t, 6> stream_payload{0x0a, 0x00, 0x03, 'a', 'b', 'c'};
+    std::array<std::uint8_t, 256> datagram{};
+    fiber::quic::QuicPacketHeader packet{};
+    packet.long_header = true;
+    packet.type = fiber::quic::QuicPacketType::ZeroRtt;
+    packet.level = fiber::quic::QuicEncryptionLevel::EarlyData;
+    packet.flags =
+            fiber::quic::kPacketFlagLong | fiber::quic::kPacketFlagFixed | fiber::quic::kLongPacketTypeZeroRtt | 0x03;
+    packet.version = fiber::quic::kQuicVersion1;
+    packet.dcid = server_cid;
+    packet.scid = client_cid;
+    packet.length = 4 + stream_payload.size() + fiber::quic::kAeadTagLength;
+    packet.pn_len = 4;
+    packet.packet_number = 0;
+    packet.truncated_pn = 0;
+
+    fiber::quic::QuicWriteCursor packet_out(datagram.data(), datagram.size());
+    std::uint8_t *pn = nullptr;
+    auto header_len = fiber::quic::quic_create_packet_header(packet_out, packet, &pn);
+    ASSERT_TRUE(header_len.has_value());
+    ASSERT_NE(pn, nullptr);
+
+    packet.packet_data = datagram.data();
+    packet.packet_len = *header_len + stream_payload.size() + fiber::quic::kAeadTagLength;
+    packet.protected_pn = pn;
+    packet.ciphertext = pn + packet.pn_len;
+    packet.ciphertext_len = stream_payload.size() + fiber::quic::kAeadTagLength;
+
+    auto sealed = fiber::quic::quic_encrypt_packet_payload(
+            packet, client.crypto().early_write, stream_payload.data(), stream_payload.size(), pn + packet.pn_len,
+            datagram.size() - static_cast<std::size_t>(pn + packet.pn_len - datagram.data()));
+    ASSERT_TRUE(sealed.has_value()) << static_cast<int>(sealed.error());
+    packet.packet_len = static_cast<std::size_t>(pn + packet.pn_len - datagram.data()) + *sealed;
+    ASSERT_TRUE(fiber::quic::quic_apply_header_protection(packet, client.crypto().early_write, datagram.data(),
+                                                          packet.packet_len));
+
+    std::array<std::uint8_t, 256> plaintext{};
+    auto received = received_datagram(datagram.data(), packet.packet_len);
+    auto result = fiber::quic::quic_process_datagram(server, received, plaintext.data(), plaintext.size(),
+                                                     static_cast<std::uint8_t>(server_cid.size()));
+
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_EQ(result->packet_type, fiber::quic::QuicPacketType::ZeroRtt);
+    EXPECT_EQ(result->level, fiber::quic::QuicEncryptionLevel::EarlyData);
+    EXPECT_EQ(result->packet_count, 1U);
+    EXPECT_TRUE(result->ack_eliciting);
+    EXPECT_TRUE(result->send_ack);
+    EXPECT_EQ(server.packet_number_space(fiber::quic::QuicEncryptionLevel::Application).pending_ack, 0U);
+    ASSERT_NE(server.find_stream(0), nullptr);
+    EXPECT_EQ(server.state(), fiber::quic::QuicConnectionState::Init);
 }
 
 TEST(QuicPacketProcessorTest, ConnectionCloseDuringGracefulShutdownEntersDrainingAndStopsFrameDispatch) {

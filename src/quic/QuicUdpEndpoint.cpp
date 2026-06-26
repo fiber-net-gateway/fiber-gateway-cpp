@@ -960,6 +960,7 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     conn_options.on_close_timeout = &QuicUdpEndpoint::delete_connection_on_timer;
     conn_options.has_retry_source_connection_id = validation.retried;
     conn_options.initial_path_validated = validation.address_validated;
+    conn_options.enable_early_data = options_.enable_early_data;
 
     auto *connection = new (std::nothrow) QuicConnection(conn_options);
     if (connection == nullptr) {

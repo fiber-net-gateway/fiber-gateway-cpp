@@ -68,6 +68,7 @@ public:
         std::array<std::uint8_t, kQuicStatelessResetSecretLength> stateless_reset_secret{};
         std::chrono::seconds retry_token_lifetime{3};
         std::chrono::seconds new_token_lifetime{600};
+        bool enable_early_data = false;
     };
 
     QuicUdpEndpoint() noexcept;

@@ -53,6 +53,29 @@ TEST(QuicTransportParamsCodecTest, ServerParamsRoundTrip) {
     EXPECT_GT(zero_rtt_len, 0U);
     EXPECT_LT(zero_rtt_len, *written);
 
+    fiber::quic::QuicReadCursor zero_rtt_in(buf.data(), zero_rtt_len);
+    fiber::quic::QuicTransportParams zero_rtt{};
+    auto zero_rtt_read = fiber::quic::quic_parse_transport_params(fiber::quic::QuicTransportParamOwner::Server,
+                                                                  zero_rtt_in, zero_rtt);
+
+    ASSERT_TRUE(zero_rtt_read.has_value());
+    EXPECT_EQ(zero_rtt.initial_max_data, params.initial_max_data);
+    EXPECT_EQ(zero_rtt.initial_max_stream_data_bidi_local, params.initial_max_stream_data_bidi_local);
+    EXPECT_EQ(zero_rtt.initial_max_stream_data_bidi_remote, params.initial_max_stream_data_bidi_remote);
+    EXPECT_EQ(zero_rtt.initial_max_stream_data_uni, params.initial_max_stream_data_uni);
+    EXPECT_EQ(zero_rtt.initial_max_streams_bidi, params.initial_max_streams_bidi);
+    EXPECT_EQ(zero_rtt.initial_max_streams_uni, params.initial_max_streams_uni);
+    EXPECT_EQ(zero_rtt.max_idle_timeout, params.max_idle_timeout);
+    EXPECT_EQ(zero_rtt.max_udp_payload_size, params.max_udp_payload_size);
+    EXPECT_EQ(zero_rtt.active_connection_id_limit, params.active_connection_id_limit);
+    EXPECT_TRUE(zero_rtt.disable_active_migration);
+    EXPECT_EQ(zero_rtt.ack_delay_exponent, 3U);
+    EXPECT_EQ(zero_rtt.max_ack_delay, 25U);
+    EXPECT_FALSE(zero_rtt.has_initial_source_connection_id);
+    EXPECT_FALSE(zero_rtt.has_original_destination_connection_id);
+    EXPECT_FALSE(zero_rtt.has_retry_source_connection_id);
+    EXPECT_FALSE(zero_rtt.has_stateless_reset_token);
+
     fiber::quic::QuicReadCursor in(buf.data(), out.offset());
     fiber::quic::QuicTransportParams parsed{};
     auto read = fiber::quic::quic_parse_transport_params(fiber::quic::QuicTransportParamOwner::Server, in, parsed);
