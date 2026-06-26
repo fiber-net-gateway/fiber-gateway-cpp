@@ -11,6 +11,8 @@
 #include "quic/QuicCrypto.h"
 #include "quic/QuicTransportCodec.h"
 
+#include "QuicTestLoop.h"
+
 namespace {
 
 int hex_value(char c) {
@@ -170,7 +172,7 @@ TEST(QuicCryptoTest, AppliesAndRemovesInitialHeaderProtection) {
 }
 
 TEST(QuicCryptoTest, DecryptsInitialPacketAndUpdatesOnlyInitialPacketNumberSpace) {
-    fiber::quic::QuicConnection::Options options{};
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
     fiber::quic::QuicConnection connection(options);
     auto dcid = cid_from_hex("8394c8f03e515708");
@@ -214,7 +216,7 @@ TEST(QuicCryptoTest, DecryptsInitialPacketAndUpdatesOnlyInitialPacketNumberSpace
 }
 
 TEST(QuicCryptoTest, FailedInitialDecryptDoesNotUpdatePacketNumberSpace) {
-    fiber::quic::QuicConnection::Options options{};
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
     fiber::quic::QuicConnection connection(options);
     auto dcid = cid_from_hex("8394c8f03e515708");

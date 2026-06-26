@@ -15,6 +15,8 @@
 #include "quic/QuicTransportCodec.h"
 #include "quic/QuicTransportParamsCodec.h"
 
+#include "QuicTestLoop.h"
+
 namespace {
 
 int hex_value(char c) {
@@ -139,7 +141,7 @@ TEST(QuicPacketProcessorTest, ProcessesClientInitialCryptoFrame) {
     fiber::quic::QuicPacketHeader packet{};
     build_initial_datagram(datagram, packet, payload.data(), payload_out.offset());
 
-    fiber::quic::QuicConnection::Options options{};
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.remote_addr = loopback(4433);
     options.local_addr = loopback(8443);
@@ -174,7 +176,7 @@ TEST(QuicPacketProcessorTest, RejectsInitialStreamFrame) {
     fiber::quic::QuicPacketHeader packet{};
     build_initial_datagram(datagram, packet, payload.data(), payload_out.offset());
 
-    fiber::quic::QuicConnection::Options options{};
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
     fiber::quic::QuicConnection conn(options);
     std::array<std::uint8_t, 256> plaintext{};
@@ -193,7 +195,7 @@ TEST(QuicPacketProcessorTest, RejectsTamperedInitialWithoutPacketNumberUpdate) {
     build_initial_datagram(datagram, packet, payload.data(), payload.size());
     datagram[packet.packet_len - 1] ^= 0x40;
 
-    fiber::quic::QuicConnection::Options options{};
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
     fiber::quic::QuicConnection conn(options);
     std::array<std::uint8_t, 256> plaintext{};
@@ -227,7 +229,7 @@ TEST(QuicPacketProcessorTest, RejectsNonInitialPacket) {
     ASSERT_TRUE(header_len.has_value());
     ASSERT_TRUE(out.fill(0, 4));
 
-    fiber::quic::QuicConnection::Options options{};
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
     fiber::quic::QuicConnection conn(options);
     std::array<std::uint8_t, 256> plaintext{};
@@ -245,7 +247,7 @@ TEST(QuicPacketProcessorTest, CreatesProbePathForDifferentRemoteAddress) {
     fiber::quic::QuicPacketHeader packet{};
     build_initial_datagram(datagram, packet, payload.data(), payload.size());
 
-    fiber::quic::QuicConnection::Options options{};
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.remote_addr = loopback(4433);
     options.local_addr = loopback(8443);
@@ -274,13 +276,13 @@ TEST(QuicPacketProcessorTest, ProcessesApplicationPingPacket) {
     const auto server_cid = cid_from_hex("0102030405060708");
     const auto client_cid = cid_from_hex("1112131415161718");
 
-    fiber::quic::QuicConnection::Options client_options{};
+    fiber::quic::QuicConnection::Options client_options = fiber::test::quic_options();
     client_options.role = fiber::quic::QuicConnectionRole::Client;
     fiber::quic::QuicConnection client(client_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(client.crypto(), fiber::quic::QuicEncryptionLevel::Application,
                                                         true, suite, secret.data(), 32));
 
-    fiber::quic::QuicConnection::Options server_options{};
+    fiber::quic::QuicConnection::Options server_options = fiber::test::quic_options();
     server_options.role = fiber::quic::QuicConnectionRole::Server;
     server_options.local_addr = loopback(8443);
     server_options.remote_addr = loopback(4433);
@@ -329,7 +331,7 @@ TEST(QuicPacketProcessorTest, ProcessesEarlyDataStreamPacketWithEarlyKeys) {
     const auto server_cid = cid_from_hex("0102030405060708");
     const auto client_cid = cid_from_hex("1112131415161718");
 
-    fiber::quic::QuicConnection::Options client_options{};
+    fiber::quic::QuicConnection::Options client_options = fiber::test::quic_options();
     client_options.role = fiber::quic::QuicConnectionRole::Client;
     client_options.local_connection_id = client_cid;
     client_options.remote_connection_id = server_cid;
@@ -337,7 +339,7 @@ TEST(QuicPacketProcessorTest, ProcessesEarlyDataStreamPacketWithEarlyKeys) {
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(client.crypto(), fiber::quic::QuicEncryptionLevel::EarlyData,
                                                         true, suite, secret.data(), 32));
 
-    fiber::quic::QuicConnection::Options server_options{};
+    fiber::quic::QuicConnection::Options server_options = fiber::test::quic_options();
     server_options.role = fiber::quic::QuicConnectionRole::Server;
     server_options.local_addr = loopback(8443);
     server_options.remote_addr = loopback(4433);
@@ -420,13 +422,13 @@ TEST(QuicPacketProcessorTest, ConnectionCloseDuringGracefulShutdownEntersDrainin
     const auto server_cid = cid_from_hex("0102030405060708");
     const auto client_cid = cid_from_hex("1112131415161718");
 
-    fiber::quic::QuicConnection::Options client_options{};
+    fiber::quic::QuicConnection::Options client_options = fiber::test::quic_options();
     client_options.role = fiber::quic::QuicConnectionRole::Client;
     fiber::quic::QuicConnection client(client_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(client.crypto(), fiber::quic::QuicEncryptionLevel::Application,
                                                         true, suite, secret.data(), 32));
 
-    fiber::quic::QuicConnection::Options server_options{};
+    fiber::quic::QuicConnection::Options server_options = fiber::test::quic_options();
     server_options.role = fiber::quic::QuicConnectionRole::Server;
     server_options.local_addr = loopback(8443);
     server_options.remote_addr = loopback(4433);
@@ -483,13 +485,13 @@ TEST(QuicPacketProcessorTest, PathChallengeQueuesPathResponse) {
     const auto server_cid = cid_from_hex("0102030405060708");
     const auto client_cid = cid_from_hex("1112131415161718");
 
-    fiber::quic::QuicConnection::Options client_options{};
+    fiber::quic::QuicConnection::Options client_options = fiber::test::quic_options();
     client_options.role = fiber::quic::QuicConnectionRole::Client;
     fiber::quic::QuicConnection client(client_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(client.crypto(), fiber::quic::QuicEncryptionLevel::Application,
                                                         true, suite, secret.data(), 32));
 
-    fiber::quic::QuicConnection::Options server_options{};
+    fiber::quic::QuicConnection::Options server_options = fiber::test::quic_options();
     server_options.role = fiber::quic::QuicConnectionRole::Server;
     server_options.local_addr = loopback(8443);
     server_options.remote_addr = loopback(4433);

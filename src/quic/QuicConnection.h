@@ -368,7 +368,7 @@ public:
     [[nodiscard]] common::IoResult<void> recv_streams_blocked_frame(const QuicStreamsBlockedFrame &frame) noexcept;
     [[nodiscard]] event::EventLoop *loop() noexcept { return loop_; }
     [[nodiscard]] const event::EventLoop *loop() const noexcept { return loop_; }
-    [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return *node_pool_; }
+    [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return loop_->io_buf_node_pool(); }
     void release_stream_app(QuicStream &stream) noexcept;
     void drop_stream_send_ticket(std::uint64_t stream_id) noexcept;
     [[nodiscard]] std::uint64_t recv_data_consumed() const noexcept { return recv_data_consumed_; }
@@ -622,7 +622,6 @@ private:
 
     Options options_{};
     event::EventLoop *loop_ = nullptr;
-    mem::IoBufNodePool *node_pool_ = nullptr;
     QuicConnectionState state_ = QuicConnectionState::Init;
     std::uint64_t next_local_bidi_stream_id_ = 0;
     std::uint64_t next_local_uni_stream_id_ = 0;
@@ -644,7 +643,6 @@ private:
     event::EventLoop::TimerEntry keepalive_timer_entry_{};
     QuicCryptoState crypto_{};
     QuicPeerTransportState peer_transport_{};
-    mem::IoBufNodePool recv_extent_pool_{};
     QuicStreamTable streams_{};
     QuicTlsSession tls_{};
     QuicPathManager path_manager_{*this};

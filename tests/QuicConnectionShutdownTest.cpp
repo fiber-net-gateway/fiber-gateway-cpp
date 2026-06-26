@@ -15,6 +15,8 @@
 #include "quic/QuicCrypto.h"
 #include "quic/QuicPacketProcessor.h"
 
+#include "QuicTestLoop.h"
+
 namespace {
 
 fiber::quic::QuicSlice slice_of(std::string_view value) {
@@ -58,6 +60,9 @@ fiber::quic::QuicConnection::Options established_server_options(ShutdownCallback
     options.on_close_timeout = close_timeout_record;
     // Don't let idle timeout interfere with graceful tests by default.
     options.transport.max_idle_timeout = std::chrono::seconds(60);
+    // Default to the shared non-running test loop; callers that drive
+    // coroutines/timers override this with their running group loop.
+    options.loop = &fiber::test::quic_loop();
     return options;
 }
 
@@ -182,6 +187,7 @@ TEST(QuicConnectionShutdownTest, GraceTimerForcesCloseWhenStreamsRemain) {
 
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
+    options.loop = &group.at(0);
     fiber::quic::QuicConnection conn(options);
     mark_established_with_app_keys(conn);
 
@@ -304,6 +310,7 @@ TEST(QuicConnectionShutdownTest, IdleTimeoutDuringShutdownGoesToClosed) {
 
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
+    options.loop = &group.at(0);
     options.transport.max_idle_timeout = std::chrono::milliseconds(10);
     fiber::quic::QuicConnection conn(options);
     mark_established_with_app_keys(conn);
@@ -394,6 +401,7 @@ TEST(QuicConnectionShutdownTest, KeepaliveSuppressedDuringShutdown) {
 
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
+    options.loop = &group.at(0);
     options.keepalive_interval = std::chrono::milliseconds(5);
     fiber::quic::QuicConnection conn(options);
     mark_established_with_app_keys(conn);
@@ -569,6 +577,7 @@ TEST(QuicConnectionShutdownTest, TlsAlertCloseStagesCryptoErrorAndSchedulesSend)
 
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
+    options.loop = &group.at(0);
     fiber::quic::QuicConnection conn(options);
     mark_established_with_app_keys(conn);
 
