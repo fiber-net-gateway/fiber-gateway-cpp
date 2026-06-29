@@ -213,6 +213,51 @@ enum class QuicLossTimerMode : std::uint8_t {
 
 class QuicConnection : public common::NonCopyable, public common::NonMovable {
 public:
+    using DestroyCallback = void (*)(void *owner, QuicConnection &connection) noexcept;
+
+    class Lease {
+    public:
+        Lease() noexcept = default;
+        explicit Lease(QuicConnection *connection) noexcept;
+
+        Lease(const Lease &) = delete;
+        Lease &operator=(const Lease &) = delete;
+
+        Lease(Lease &&other) noexcept : connection_(other.connection_) { other.connection_ = nullptr; }
+
+        Lease &operator=(Lease &&other) noexcept {
+            if (this == &other) {
+                return *this;
+            }
+            reset();
+            connection_ = other.connection_;
+            other.connection_ = nullptr;
+            return *this;
+        }
+
+        ~Lease() { reset(); }
+
+        void reset() noexcept;
+        [[nodiscard]] QuicConnection *release_raw() noexcept {
+            QuicConnection *connection = connection_;
+            connection_ = nullptr;
+            return connection;
+        }
+        [[nodiscard]] QuicConnection *get() const noexcept { return connection_; }
+        [[nodiscard]] QuicConnection &operator*() const noexcept { return *connection_; }
+        [[nodiscard]] QuicConnection *operator->() const noexcept { return connection_; }
+        [[nodiscard]] explicit operator bool() const noexcept { return connection_ != nullptr; }
+
+        [[nodiscard]] static Lease adopt(QuicConnection *connection) noexcept {
+            Lease lease;
+            lease.connection_ = connection;
+            return lease;
+        }
+
+    private:
+        QuicConnection *connection_ = nullptr;
+    };
+
     struct Ops {
         QuicStream::Lease (*create_stream)(void *owner) noexcept = nullptr;
         void (*on_peer_stream_attached)(void *owner, QuicStream &stream) noexcept = nullptr;
@@ -220,6 +265,7 @@ public:
 
     struct EndpointIndex {
         QuicConnection *connection = nullptr;
+        Lease lease{};
         common::IntrusiveListHook link{};
     };
 
@@ -252,6 +298,8 @@ public:
         void *lifecycle_owner = nullptr;
         void (*on_idle_timeout)(void *owner, QuicConnection &connection) noexcept = nullptr;
         void (*on_close_timeout)(void *owner, QuicConnection &connection) noexcept = nullptr;
+        void *destroy_owner = nullptr;
+        DestroyCallback on_destroy = nullptr;
         void *owner = nullptr;
         Ops ops{};
         // Default grace period for graceful shutdown. Applies when shutdown()/
@@ -296,6 +344,10 @@ public:
     }
     [[nodiscard]] bool closing() const noexcept { return terminal_closing(); }
     [[nodiscard]] bool graceful_closing() const noexcept { return state_ == QuicConnectionState::GracefulClosing; }
+    [[nodiscard]] bool attached_to_endpoint() const noexcept { return attached_to_endpoint_; }
+    [[nodiscard]] bool detached_from_endpoint() const noexcept { return detached_from_endpoint_; }
+    [[nodiscard]] std::uint32_t ref_count() const noexcept { return ref_count_; }
+    [[nodiscard]] Lease lease() noexcept { return Lease(this); }
 
     common::IoResult<void> start_handshake() noexcept;
     common::IoResult<void> mark_established() noexcept;
@@ -593,6 +645,8 @@ private:
     void enqueue_close_frames_all_levels() noexcept;
     void clear_pending_frames_all_levels() noexcept;
     void close_all_streams(std::uint64_t error_code) noexcept;
+    void clear_frames_for_detach() noexcept;
+    void clear_packet_space_frames_for_detach(QuicPacketNumberSpace &space) noexcept;
     void enter_graceful_closing(QuicCloseInfo info, std::chrono::milliseconds grace) noexcept;
     void enter_closing(QuicCloseInfo info, bool immediate = false) noexcept;
     void enter_draining(QuicCloseInfo info) noexcept;
@@ -609,6 +663,12 @@ private:
     void cancel_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter) noexcept;
     void notify_local_stream_attach_waiters(QuicStreamType type, common::IoErr result = common::IoErr::None) noexcept;
     void notify_all_local_stream_attach_waiters(common::IoErr result = common::IoErr::None) noexcept;
+    void attach_to_endpoint() noexcept;
+    void detach_from_endpoint() noexcept;
+    void retain() noexcept;
+    void release() noexcept;
+    [[nodiscard]] bool ready_for_destruction() const noexcept;
+    [[nodiscard]] bool can_queue_frame() const noexcept;
     [[nodiscard]] common::IoResult<void> check_recv_data_delta(std::uint64_t delta) const noexcept;
     void commit_recv_data_delta(std::uint64_t delta) noexcept;
     void maybe_extend_recv_data_flow_control() noexcept;
@@ -672,6 +732,11 @@ private:
     bool data_blocked_reported_ = false;
     bool key_phase_ = false;
     bool idle_send_timer_set_ = false;
+    bool attached_to_endpoint_ = false;
+    bool detached_from_endpoint_ = false;
+    std::uint32_t ref_count_ = 1;
+    void *destroy_owner_ = nullptr;
+    DestroyCallback on_destroy_ = nullptr;
     // close_info_ is interpreted by state_: in GracefulClosing it is the staged
     // final close, in Closing it is the sent CONNECTION_CLOSE, and in Draining it
     // is the peer/stateless-reset reason. last_cc_msec_ rate-limits close-frame

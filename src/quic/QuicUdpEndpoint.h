@@ -68,6 +68,9 @@ public:
         std::array<std::uint8_t, kQuicStatelessResetSecretLength> stateless_reset_secret{};
         std::chrono::seconds retry_token_lifetime{3};
         std::chrono::seconds new_token_lifetime{600};
+        void *connection_owner = nullptr;
+        QuicConnection::Lease (*create_connection)(void *owner, const QuicConnection::Options &options) noexcept =
+                nullptr;
         bool enable_early_data = false;
     };
 
@@ -132,8 +135,12 @@ private:
     [[nodiscard]] QuicConnection *find_connection(const QuicConnectionId &dcid, std::uint64_t hash) noexcept;
     [[nodiscard]] const QuicConnection *find_connection(const QuicConnectionId &dcid,
                                                         std::uint64_t hash) const noexcept;
-    void delete_connection(QuicConnection &connection) noexcept;
-    static void delete_connection_on_timer(void *owner, QuicConnection &connection) noexcept;
+    void detach_connection(QuicConnection &connection) noexcept;
+    void force_detach_connection(QuicConnection &connection) noexcept;
+    static void detach_connection_on_timer(void *owner, QuicConnection &connection) noexcept;
+    static void destroy_default_connection(void *owner, QuicConnection &connection) noexcept;
+    [[nodiscard]] static QuicConnection::Lease
+    create_default_connection(void *owner, const QuicConnection::Options &options) noexcept;
     [[nodiscard]] common::IoResult<QuicConnectionId> generate_connection_id() noexcept;
     [[nodiscard]] common::IoResult<QuicConnectionId> generate_unique_connection_id() noexcept;
     [[nodiscard]] common::IoResult<void> register_connection_id(QuicConnection &connection,

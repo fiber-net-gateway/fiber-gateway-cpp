@@ -445,7 +445,7 @@ void QuicUdpEndpoint::close() noexcept {
     }
 
     while (QuicConnection::EndpointIndex *index = connections_.front()) {
-        delete_connection(*index->connection);
+        force_detach_connection(*index->connection);
     }
 
     socket_.reset();
@@ -474,7 +474,7 @@ common::IoResult<void> QuicUdpEndpoint::remove_connection(const QuicConnectionId
     if (connection == nullptr) {
         return std::unexpected(common::IoErr::NotFound);
     }
-    delete_connection(*connection);
+    force_detach_connection(*connection);
     return {};
 }
 
@@ -606,7 +606,7 @@ const QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &d
     return nullptr;
 }
 
-void QuicUdpEndpoint::delete_connection(QuicConnection &connection) noexcept {
+void QuicUdpEndpoint::detach_connection(QuicConnection &connection) noexcept {
     if (loop_ != nullptr) {
         connection.cancel_idle_timer(*loop_);
         connection.cancel_close_timer(*loop_);
@@ -627,15 +627,33 @@ void QuicUdpEndpoint::delete_connection(QuicConnection &connection) noexcept {
     if (active_connection_count_ != 0) {
         --active_connection_count_;
     }
-    delete &connection;
+
+    QuicConnection::Lease lease = std::move(index.lease);
+    connection.detach_from_endpoint();
+    lease.reset();
 }
 
-void QuicUdpEndpoint::delete_connection_on_timer(void *owner, QuicConnection &connection) noexcept {
+void QuicUdpEndpoint::force_detach_connection(QuicConnection &connection) noexcept {
+    connection.mark_closed();
+    detach_connection(connection);
+}
+
+void QuicUdpEndpoint::detach_connection_on_timer(void *owner, QuicConnection &connection) noexcept {
     if (owner == nullptr) {
         connection.mark_closed();
         return;
     }
-    static_cast<QuicUdpEndpoint *>(owner)->delete_connection(connection);
+    static_cast<QuicUdpEndpoint *>(owner)->detach_connection(connection);
+}
+
+void QuicUdpEndpoint::destroy_default_connection(void *, QuicConnection &connection) noexcept { delete &connection; }
+
+QuicConnection::Lease QuicUdpEndpoint::create_default_connection(void *,
+                                                                 const QuicConnection::Options &options) noexcept {
+    QuicConnection::Options owned_options = options;
+    owned_options.destroy_owner = nullptr;
+    owned_options.on_destroy = &QuicUdpEndpoint::destroy_default_connection;
+    return QuicConnection::Lease::adopt(new (std::nothrow) QuicConnection(owned_options));
 }
 
 common::IoResult<QuicConnectionId> QuicUdpEndpoint::generate_connection_id() noexcept {
@@ -994,13 +1012,17 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
         static_cast<QuicUdpEndpoint *>(owner)->schedule_send(connection);
     };
     conn_options.lifecycle_owner = this;
-    conn_options.on_idle_timeout = &QuicUdpEndpoint::delete_connection_on_timer;
-    conn_options.on_close_timeout = &QuicUdpEndpoint::delete_connection_on_timer;
+    conn_options.on_idle_timeout = &QuicUdpEndpoint::detach_connection_on_timer;
+    conn_options.on_close_timeout = &QuicUdpEndpoint::detach_connection_on_timer;
     conn_options.has_retry_source_connection_id = validation.retried;
     conn_options.initial_path_validated = validation.address_validated;
     conn_options.enable_early_data = options_.enable_early_data;
 
-    auto *connection = new (std::nothrow) QuicConnection(conn_options);
+    QuicConnection::Lease lease =
+            options_.create_connection != nullptr
+                    ? options_.create_connection(options_.connection_owner, conn_options)
+                    : create_default_connection(nullptr, conn_options);
+    QuicConnection *connection = lease.get();
     if (connection == nullptr) {
         ++rejected_connection_count_;
         return std::unexpected(common::IoErr::NoMem);
@@ -1009,13 +1031,11 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     connection->endpoint_index.connection = connection;
     auto registered = register_connection_id(*connection, connection->original_dcid_index, packet.dcid);
     if (!registered) {
-        delete connection;
         return std::unexpected(registered.error());
     }
     registered = register_connection_id(*connection, connection->local_cids_[0].endpoint_index, local_connection_id);
     if (!registered) {
         unregister_connection_id(connection->original_dcid_index);
-        delete connection;
         return std::unexpected(registered.error());
     }
     if (options_.tls_context != nullptr) {
@@ -1023,10 +1043,11 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
         if (!tls_initialized) {
             unregister_connection_id(connection->original_dcid_index);
             unregister_connection_id(connection->local_cids_[0].endpoint_index);
-            delete connection;
             return std::unexpected(tls_initialized.error());
         }
     }
+    connection->attach_to_endpoint();
+    connection->endpoint_index.lease = std::move(lease);
     connections_.push_back(connection->endpoint_index);
     ++active_connection_count_;
     return connection;
@@ -1186,7 +1207,7 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
     if (!result) {
         ++dropped_datagram_count_;
         if (created) {
-            delete_connection(*connection);
+            force_detach_connection(*connection);
         }
         return std::unexpected(result.error());
     }

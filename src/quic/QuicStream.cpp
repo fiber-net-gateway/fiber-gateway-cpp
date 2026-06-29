@@ -648,6 +648,8 @@ void QuicStream::assign_conn_ctx(QuicConnection &conn, std::uint64_t stream_id,
 void QuicStream::detach_from_connection() noexcept {
     conn_ = nullptr;
     attached_to_connection_ = false;
+    stream_send_pending_ = false;
+    stream_data_blocked_reported_ = false;
 }
 
 void QuicStream::retain() noexcept { ++ref_count_; }
