@@ -285,7 +285,7 @@ void QuicPathManager::clear_frames(QuicPath &path, QuicFrameType type) noexcept 
 
 common::IoResult<void> QuicPathManager::queue_path_challenge_frame(QuicPath &path,
                                                                    const std::uint8_t data[8]) noexcept {
-    if (!path.allocated || data == nullptr || connection_.closing()) {
+    if (!connection_.can_queue_frame() || !path.allocated || data == nullptr || connection_.closing()) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -305,7 +305,7 @@ common::IoResult<void> QuicPathManager::queue_path_challenge_frame(QuicPath &pat
 }
 
 common::IoResult<void> QuicPathManager::queue_path_response_frame(QuicPath &path, const std::uint8_t data[8]) noexcept {
-    if (!path.allocated || data == nullptr || connection_.closing()) {
+    if (!connection_.can_queue_frame() || !path.allocated || data == nullptr || connection_.closing()) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -516,7 +516,8 @@ common::IoResult<void> QuicPathManager::discover_path_mtu(QuicPath &path, QuicTi
 }
 
 common::IoResult<bool> QuicPathManager::queue_mtu_probe_frame(QuicPath &path) noexcept {
-    if (!path.allocated || !path.validated || path.mtud <= path.mtu || connection_.closing()) {
+    if (!connection_.can_queue_frame() || !path.allocated || !path.validated || path.mtud <= path.mtu ||
+        connection_.closing()) {
         return false;
     }
 

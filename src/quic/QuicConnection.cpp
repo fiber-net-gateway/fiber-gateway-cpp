@@ -264,9 +264,26 @@ private:
     friend class QuicConnection;
 };
 
+QuicConnection::Lease::Lease(QuicConnection *connection) noexcept : connection_(connection) {
+    if (connection_) {
+        connection_->retain();
+    }
+}
+
+void QuicConnection::Lease::reset() noexcept {
+    if (!connection_) {
+        return;
+    }
+    QuicConnection *connection = connection_;
+    connection_ = nullptr;
+    connection->release();
+}
+
 QuicConnection::QuicConnection(const Options &options) noexcept :
     options_(options), next_local_bidi_stream_id_(initial_stream_id(options.role, QuicStreamType::Bidirectional)),
     next_local_uni_stream_id_(initial_stream_id(options.role, QuicStreamType::Unidirectional)) {
+    destroy_owner_ = options_.destroy_owner;
+    on_destroy_ = options_.on_destroy;
     loop_ = options_.loop != nullptr ? options_.loop : event::EventLoop::current_or_null();
     FIBER_ASSERT(loop_ != nullptr);
     auto peer_stream_limit = [](std::uint64_t concurrent_limit, std::uint64_t transport_limit,
@@ -388,6 +405,9 @@ void QuicConnection::begin_draining(QuicErrorCode error) noexcept {
 void QuicConnection::begin_draining(QuicCloseInfo info) noexcept { enter_draining(info); }
 
 bool QuicConnection::queue_close_frame_for_level(QuicEncryptionLevel level) noexcept {
+    if (!can_queue_frame()) {
+        return false;
+    }
     QuicPacketNumberSpace &space = packet_number_space(level);
     QuicPacketProtectionKeys *keys = quic_packet_keys(crypto_, level, /*write_keys=*/true);
     if (keys == nullptr || !keys->ready) {
@@ -463,6 +483,41 @@ void QuicConnection::clear_pending_frames_all_levels() noexcept {
 
 void QuicConnection::close_all_streams(std::uint64_t error_code) noexcept {
     streams_.for_each([error_code](QuicStream &stream) noexcept { stream.close(error_code); });
+}
+
+void QuicConnection::clear_packet_space_frames_for_detach(QuicPacketNumberSpace &space) noexcept {
+    auto release_queue = [this, &space](QuicOutputFrameQueue &queue, bool drop_stream_tickets) noexcept {
+        while (QuicOutputFrame *frame = queue.pop_front()) {
+            if (drop_stream_tickets && frame->type == QuicFrameType::Stream) {
+                drop_stream_send_ticket(frame->u.stream.stream_id);
+            }
+            frame->path = nullptr;
+            space.release_frame(*frame);
+        }
+    };
+
+    release_queue(space.pending_frames, true);
+    release_queue(space.sending_frames, false);
+    release_queue(space.sent_frames, false);
+
+    quic_output_frame_release_data(space.ack_frame);
+    space.ack_frame = QuicOutputFrame{};
+    space.send_ack = false;
+    space.send_ack_count = 0;
+    space.pending_ack = kUnsetPacketNumber;
+}
+
+void QuicConnection::clear_frames_for_detach() noexcept {
+    for (QuicPath &path: path_manager_.paths()) {
+        if (path.allocated) {
+            path_manager_.clear_frames(path);
+        }
+    }
+
+    for (QuicPacketNumberSpace &space: packet_number_spaces_) {
+        clear_packet_space_frames_for_detach(space);
+        space.set_frame_pool(output_frame_pool_);
+    }
 }
 
 void QuicConnection::close(QuicErrorCode error, std::uint64_t frame_type) noexcept {
@@ -1707,6 +1762,9 @@ QuicLocalConnectionIdSlot *QuicConnection::find_free_local_connection_id_slot() 
 common::IoResult<void>
 QuicConnection::queue_new_connection_id_frame(const QuicLocalConnectionIdSlot &slot,
                                               const std::uint8_t token[kStatelessResetTokenLength]) noexcept {
+    if (!can_queue_frame()) {
+        return {};
+    }
     if (!slot.used || token == nullptr) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -1733,6 +1791,9 @@ QuicConnection::queue_new_connection_id_frame(const QuicLocalConnectionIdSlot &s
 }
 
 common::IoResult<void> QuicConnection::queue_retire_connection_id_frame(std::uint64_t sequence_number) noexcept {
+    if (!can_queue_frame()) {
+        return {};
+    }
     QuicPacketNumberSpace &space = packet_number_space(QuicEncryptionLevel::Application);
     QuicOutputFrame *frame = space.alloc_frame();
     if (frame == nullptr) {
@@ -2051,6 +2112,54 @@ void QuicConnection::notify_all_local_stream_attach_waiters(common::IoErr result
     notify_local_stream_attach_waiters(QuicStreamType::Unidirectional, result);
 }
 
+void QuicConnection::attach_to_endpoint() noexcept {
+    FIBER_ASSERT(!attached_to_endpoint_);
+    attached_to_endpoint_ = true;
+    detached_from_endpoint_ = false;
+}
+
+void QuicConnection::detach_from_endpoint() noexcept {
+    if (!attached_to_endpoint_ && detached_from_endpoint_) {
+        return;
+    }
+    FIBER_ASSERT(state_ == QuicConnectionState::Closed);
+
+    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
+    notify_peer_data_waiters(common::IoErr::Canceled);
+    close_all_streams(close_info_.error_code);
+    clear_frames_for_detach();
+    streams_.clear();
+
+    options_.endpoint = nullptr;
+    options_.schedule_send_owner = nullptr;
+    options_.schedule_send = nullptr;
+    options_.lifecycle_owner = nullptr;
+    options_.on_idle_timeout = nullptr;
+    options_.on_close_timeout = nullptr;
+
+    endpoint_index.connection = nullptr;
+    send_queue_entry.connection = nullptr;
+    attached_to_endpoint_ = false;
+    detached_from_endpoint_ = true;
+}
+
+void QuicConnection::retain() noexcept { ++ref_count_; }
+
+void QuicConnection::release() noexcept {
+    FIBER_ASSERT(ref_count_ > 0);
+    --ref_count_;
+    if (ready_for_destruction()) {
+        FIBER_ASSERT(on_destroy_ != nullptr);
+        on_destroy_(destroy_owner_, *this);
+    }
+}
+
+bool QuicConnection::ready_for_destruction() const noexcept {
+    return !attached_to_endpoint_ && ref_count_ == 0;
+}
+
+bool QuicConnection::can_queue_frame() const noexcept { return !detached_from_endpoint_; }
+
 bool QuicConnection::is_gone_peer_stream(std::uint64_t stream_id) const noexcept {
     if (!is_peer_stream(stream_id)) {
         return false;
@@ -2147,7 +2256,8 @@ void QuicConnection::drop_stream_send_ticket(std::uint64_t stream_id) noexcept {
 }
 
 common::IoResult<void> QuicConnection::queue_stream_frame(QuicStream &stream) noexcept {
-    if (closing() || !stream.attached_to_connection() || stream.stream_send_pending_ || !stream.has_send_work()) {
+    if (!can_queue_frame() || closing() || !stream.attached_to_connection() || stream.stream_send_pending_ ||
+        !stream.has_send_work()) {
         return {};
     }
 
@@ -2166,13 +2276,16 @@ common::IoResult<void> QuicConnection::queue_stream_frame(QuicStream &stream) no
 }
 
 void QuicConnection::schedule_send() noexcept {
+    if (!can_queue_frame()) {
+        return;
+    }
     if (options_.schedule_send != nullptr) {
         options_.schedule_send(options_.schedule_send_owner, *this);
     }
 }
 
 common::IoResult<void> QuicConnection::queue_ping_frame() noexcept {
-    if (closing()) {
+    if (!can_queue_frame() || closing()) {
         return {};
     }
 
@@ -2189,6 +2302,9 @@ common::IoResult<void> QuicConnection::queue_ping_frame() noexcept {
 }
 
 bool QuicConnection::has_pending_send_work() const noexcept {
+    if (!can_queue_frame()) {
+        return false;
+    }
     if (has_path_send_work()) {
         return true;
     }
@@ -2230,7 +2346,7 @@ common::IoResult<void> QuicConnection::on_stream_send_failed(std::uint64_t strea
 
 common::IoResult<void> QuicConnection::queue_reset_stream_frame(std::uint64_t stream_id, std::uint64_t error_code,
                                                                 std::uint64_t final_size) noexcept {
-    if (terminal_closing()) {
+    if (!can_queue_frame() || terminal_closing()) {
         return {};
     }
     auto &space = packet_number_space(QuicEncryptionLevel::Application);
@@ -2249,7 +2365,7 @@ common::IoResult<void> QuicConnection::queue_reset_stream_frame(std::uint64_t st
 
 common::IoResult<void> QuicConnection::queue_stop_sending_frame(std::uint64_t stream_id,
                                                                 std::uint64_t error_code) noexcept {
-    if (terminal_closing()) {
+    if (!can_queue_frame() || terminal_closing()) {
         return {};
     }
     auto &space = packet_number_space(QuicEncryptionLevel::Application);
@@ -2267,6 +2383,9 @@ common::IoResult<void> QuicConnection::queue_stop_sending_frame(std::uint64_t st
 
 common::IoResult<void> QuicConnection::queue_max_stream_data_frame(std::uint64_t stream_id,
                                                                    std::uint64_t limit) noexcept {
+    if (!can_queue_frame()) {
+        return {};
+    }
     auto &space = packet_number_space(QuicEncryptionLevel::Application);
     QuicOutputFrame *frame = space.alloc_frame();
     if (frame == nullptr) {
@@ -2281,7 +2400,7 @@ common::IoResult<void> QuicConnection::queue_max_stream_data_frame(std::uint64_t
 }
 
 common::IoResult<void> QuicConnection::queue_max_streams_frame(QuicStreamType type, std::uint64_t limit) noexcept {
-    if (closing()) {
+    if (!can_queue_frame() || closing()) {
         return {};
     }
     if (limit > kQuicMaxStreamLimit) {
@@ -2301,6 +2420,9 @@ common::IoResult<void> QuicConnection::queue_max_streams_frame(QuicStreamType ty
 }
 
 common::IoResult<void> QuicConnection::queue_max_data_frame(std::uint64_t limit) noexcept {
+    if (!can_queue_frame()) {
+        return {};
+    }
     auto &space = packet_number_space(QuicEncryptionLevel::Application);
     QuicOutputFrame *frame = space.alloc_frame();
     if (frame == nullptr) {
@@ -2314,7 +2436,7 @@ common::IoResult<void> QuicConnection::queue_max_data_frame(std::uint64_t limit)
 }
 
 common::IoResult<void> QuicConnection::queue_streams_blocked_frame(QuicStreamType type, std::uint64_t limit) noexcept {
-    if (closing()) {
+    if (!can_queue_frame() || closing()) {
         return {};
     }
     if (limit > kQuicMaxStreamLimit) {
@@ -2342,7 +2464,7 @@ common::IoResult<void> QuicConnection::queue_streams_blocked_frame(QuicStreamTyp
 }
 
 common::IoResult<void> QuicConnection::queue_data_blocked_frame(std::uint64_t limit) noexcept {
-    if (closing() || (data_blocked_reported_ && last_data_blocked_limit_ == limit)) {
+    if (!can_queue_frame() || closing() || (data_blocked_reported_ && last_data_blocked_limit_ == limit)) {
         return {};
     }
 
@@ -2362,7 +2484,7 @@ common::IoResult<void> QuicConnection::queue_data_blocked_frame(std::uint64_t li
 
 common::IoResult<void> QuicConnection::queue_stream_data_blocked_frame(QuicStream &stream,
                                                                        std::uint64_t limit) noexcept {
-    if (closing() || !stream.attached_to_connection() ||
+    if (!can_queue_frame() || closing() || !stream.attached_to_connection() ||
         (stream.stream_data_blocked_reported_ && stream.last_stream_data_blocked_limit_ == limit)) {
         return {};
     }

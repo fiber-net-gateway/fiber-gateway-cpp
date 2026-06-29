@@ -152,6 +152,35 @@ fiber::quic::QuicStream::Lease make_test_stream(void *) noexcept {
                                                          fiber::quic::QuicStream(nullptr, destroy_test_stream));
 }
 
+struct EmbeddedConnectionFactoryState {
+    alignas(fiber::quic::QuicConnection) std::byte storage[sizeof(fiber::quic::QuicConnection)]{};
+    fiber::quic::QuicConnection *connection = nullptr;
+    std::uint32_t create_calls = 0;
+    std::uint32_t destroy_calls = 0;
+};
+
+void destroy_embedded_connection(void *owner, fiber::quic::QuicConnection &connection) noexcept {
+    auto *state = static_cast<EmbeddedConnectionFactoryState *>(owner);
+    ++state->destroy_calls;
+    connection.~QuicConnection();
+    state->connection = nullptr;
+}
+
+fiber::quic::QuicConnection::Lease create_embedded_connection(void *owner,
+                                                              const fiber::quic::QuicConnection::Options &options) noexcept {
+    auto *state = static_cast<EmbeddedConnectionFactoryState *>(owner);
+    ++state->create_calls;
+    if (state->connection != nullptr) {
+        return {};
+    }
+
+    fiber::quic::QuicConnection::Options owned_options = options;
+    owned_options.destroy_owner = state;
+    owned_options.on_destroy = destroy_embedded_connection;
+    state->connection = new (static_cast<void *>(state->storage)) fiber::quic::QuicConnection(owned_options);
+    return fiber::quic::QuicConnection::Lease::adopt(state->connection);
+}
+
 fiber::mem::IoBuf iobuf_of(std::string_view value) {
     auto buf = fiber::mem::IoBuf::allocate(value.size());
     EXPECT_TRUE(buf.valid());
@@ -1424,6 +1453,108 @@ TEST(QuicUdpEndpointTest, CreatesConnectionForNewInitialDcid) {
     EXPECT_EQ(endpoint.find_connection(result->connection->local_connection_id()), result->connection);
 
     close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, CustomConnectionFactoryCanEmbedConnection) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    EmbeddedConnectionFactoryState state{};
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    options.connection_owner = &state;
+    options.create_connection = create_embedded_connection;
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("8394c8f03e515708");
+    const auto scid = cid_from_hex("11223344");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
+    build_initial_datagram(datagram, dcid, scid);
+
+    auto result = recv_after_send(group, endpoint, datagram.data(), datagram.size());
+
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    ASSERT_NE(result->connection, nullptr);
+    EXPECT_EQ(result->connection, state.connection);
+    EXPECT_EQ(state.create_calls, 1U);
+    EXPECT_EQ(state.destroy_calls, 0U);
+    EXPECT_EQ(endpoint.active_connection_count(), 1U);
+    EXPECT_EQ(endpoint.find_connection(dcid), result->connection);
+
+    close_endpoint_on_loop(group, endpoint);
+
+    EXPECT_EQ(endpoint.active_connection_count(), 0U);
+    EXPECT_EQ(state.destroy_calls, 1U);
+    EXPECT_EQ(state.connection, nullptr);
+
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, DetachClearsFramesAndSuppressesNewPendingFrames) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("8394c8f03e515708");
+    const auto scid = cid_from_hex("11223344");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
+    build_initial_datagram(datagram, dcid, scid);
+
+    auto result = recv_after_send(group, endpoint, datagram.data(), datagram.size());
+
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    ASSERT_NE(result->connection, nullptr);
+    auto lease = result->connection->lease();
+    fiber::quic::QuicConnection *connection = lease.get();
+    auto &space = connection->packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+
+    fiber::quic::QuicOutputFrame *pending = space.alloc_frame();
+    fiber::quic::QuicOutputFrame *sending = space.alloc_frame();
+    fiber::quic::QuicOutputFrame *sent = space.alloc_frame();
+    fiber::quic::QuicOutputFrame *path_pending = space.alloc_frame();
+    ASSERT_NE(pending, nullptr);
+    ASSERT_NE(sending, nullptr);
+    ASSERT_NE(sent, nullptr);
+    ASSERT_NE(path_pending, nullptr);
+
+    pending->type = fiber::quic::QuicFrameType::Ping;
+    sending->type = fiber::quic::QuicFrameType::MaxData;
+    sent->type = fiber::quic::QuicFrameType::RetireConnectionId;
+    space.pending_frames.push_back(*pending);
+    space.sending_frames.push_back(*sending);
+    space.sent_frames.push_back(*sent);
+
+    fiber::quic::QuicPath *path = connection->active_path();
+    ASSERT_NE(path, nullptr);
+    path_pending->type = fiber::quic::QuicFrameType::PathResponse;
+    path_pending->path = path;
+    path->pending_frames.push_back(*path_pending);
+
+    close_endpoint_on_loop(group, endpoint);
+
+    EXPECT_EQ(endpoint.active_connection_count(), 0U);
+    EXPECT_TRUE(connection->closed());
+    EXPECT_FALSE(connection->attached_to_endpoint());
+    EXPECT_TRUE(connection->detached_from_endpoint());
+    EXPECT_TRUE(space.pending_frames.empty());
+    EXPECT_TRUE(space.sending_frames.empty());
+    EXPECT_TRUE(space.sent_frames.empty());
+    EXPECT_TRUE(path->pending_frames.empty());
+
+    const std::array<std::uint8_t, 8> response_data{1, 2, 3, 4, 5, 6, 7, 8};
+    auto queued = connection->paths().queue_path_response_frame(*path, response_data.data());
+    EXPECT_FALSE(queued.has_value());
+    EXPECT_TRUE(path->pending_frames.empty());
+
+    lease.reset();
     group.stop();
     group.join();
 }
