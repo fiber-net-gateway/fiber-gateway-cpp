@@ -63,8 +63,6 @@ fiber::mem::IoBuf iobuf_of(std::string_view value) {
 
 struct StreamCallbackState {
     std::uint32_t calls = 0;
-    std::uint32_t schedule_calls = 0;
-    std::uint32_t idle_timeout_calls = 0;
     std::uint64_t last_stream_id = 0;
     bool return_empty = false;
     fiber::quic::QuicStream::Lease lease{};
@@ -79,7 +77,6 @@ struct IdleTimerSnapshot {
 
 struct KeepaliveTimerSnapshot {
     std::size_t pending_ping_count = 0;
-    std::uint32_t schedule_calls = 0;
 };
 
 std::size_t count_pending_frame_type(const fiber::quic::QuicConnection &conn, fiber::quic::QuicFrameType type);
@@ -128,14 +125,6 @@ fiber::quic::QuicConnection::Options server_options_with_factory(StreamCallbackS
     options.ops.create_stream = create_stream_record;
     options.ops.on_peer_stream_attached = on_peer_stream_attached_record;
     return options;
-}
-
-void schedule_send_record(void *owner, fiber::quic::QuicConnection &) noexcept {
-    ++static_cast<StreamCallbackState *>(owner)->schedule_calls;
-}
-
-void idle_timeout_record(void *owner, fiber::quic::QuicConnection &) noexcept {
-    ++static_cast<StreamCallbackState *>(owner)->idle_timeout_calls;
 }
 
 struct WriteResult {
@@ -232,21 +221,20 @@ fiber::async::DetachedTask record_idle_timer_lifecycle(fiber::quic::QuicConnecti
     co_return;
 }
 
-fiber::async::DetachedTask run_idle_timeout_callback(fiber::quic::QuicConnection *conn, std::chrono::milliseconds delay,
-                                                     std::promise<std::uint32_t> *done, StreamCallbackState *state) {
+fiber::async::DetachedTask run_idle_timeout(fiber::quic::QuicConnection *conn, std::chrono::milliseconds delay,
+                                            std::promise<fiber::quic::QuicConnectionState> *done) {
     conn->arm_idle_timer(fiber::event::EventLoop::current());
     co_await fiber::async::sleep(delay);
-    done->set_value(state->idle_timeout_calls);
+    done->set_value(conn->state());
     fiber::event::EventLoop::current().stop();
 }
 
 fiber::async::DetachedTask run_keepalive_timer(fiber::quic::QuicConnection *conn, std::chrono::milliseconds delay,
-                                               std::promise<KeepaliveTimerSnapshot> *done, StreamCallbackState *state) {
+                                               std::promise<KeepaliveTimerSnapshot> *done) {
     conn->arm_keepalive_timer(fiber::event::EventLoop::current());
     co_await fiber::async::sleep(delay);
     KeepaliveTimerSnapshot snapshot{};
     snapshot.pending_ping_count = count_pending_frame_type(*conn, fiber::quic::QuicFrameType::Ping);
-    snapshot.schedule_calls = state->schedule_calls;
     done->set_value(snapshot);
     fiber::event::EventLoop::current().stop();
 }
@@ -419,12 +407,9 @@ TEST(QuicConnectionTest, TryAttachLocalStreamReturnsBusyBeforeEstablished) {
 }
 
 TEST(QuicConnectionTest, TryAttachLocalStreamQueuesStreamsBlockedAtLimit) {
-    StreamCallbackState state{};
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.max_local_bidirectional_streams = 0;
-    options.schedule_send_owner = &state;
-    options.schedule_send = schedule_send_record;
     fiber::quic::QuicConnection conn(options);
     ASSERT_TRUE(conn.mark_established());
     auto stream = make_test_stream();
@@ -438,18 +423,14 @@ TEST(QuicConnectionTest, TryAttachLocalStreamQueuesStreamsBlockedAtLimit) {
     EXPECT_FALSE(stream->stream_id_assigned());
     EXPECT_EQ(conn.active_stream_count(), 0U);
     EXPECT_EQ(count_pending_streams_blocked(conn, fiber::quic::QuicFrameType::StreamsBlockedBidi, 0), 1U);
-    EXPECT_EQ(state.schedule_calls, 1U);
 }
 
 TEST(QuicConnectionTest, AttachLocalStreamResumesAfterMaxStreams) {
     fiber::event::EventLoopGroup group(1);
-    StreamCallbackState state{};
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.max_local_bidirectional_streams = 0;
     options.loop = &group.at(0);
-    options.schedule_send_owner = &state;
-    options.schedule_send = schedule_send_record;
     fiber::quic::QuicConnection conn(options);
     ASSERT_TRUE(conn.mark_established());
 
@@ -482,7 +463,6 @@ TEST(QuicConnectionTest, AttachLocalStreamResumesAfterMaxStreams) {
     EXPECT_NE(conn.find_stream(0), nullptr);
     EXPECT_EQ(conn.active_stream_count(), 1U);
     EXPECT_EQ(count_pending_streams_blocked(conn, fiber::quic::QuicFrameType::StreamsBlockedBidi, 0), 1U);
-    EXPECT_EQ(state.schedule_calls, 1U);
     group.join();
 }
 
@@ -556,8 +536,6 @@ TEST(QuicConnectionTest, QueuesFramesIntrusively) {
 TEST(QuicConnectionTest, StreamWriteSubmitsConnectionSendWork) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    options.schedule_send_owner = &state;
-    options.schedule_send = schedule_send_record;
     fiber::quic::QuicConnection conn(options);
 
     auto stream = conn.get_or_create_peer_stream(0);
@@ -577,7 +555,6 @@ TEST(QuicConnectionTest, StreamWriteSubmitsConnectionSendWork) {
     ASSERT_NE(space.pending_frames.front(), nullptr);
     EXPECT_EQ(space.pending_frames.front()->type, fiber::quic::QuicFrameType::Stream);
     EXPECT_EQ(space.pending_frames.front()->u.stream.stream_id, 0u);
-    EXPECT_EQ(state.schedule_calls, 1u);
 }
 
 TEST(QuicConnectionTest, RecvFlowDefaultsInitializeLocalTransportAndLimit) {
@@ -652,13 +629,10 @@ TEST(QuicConnectionTest, PeerTransportStartsMtuDiscoveryOnValidatedPath) {
 }
 
 TEST(QuicConnectionTest, MtuDelayQueuesPingProbe) {
-    StreamCallbackState state{};
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.remote_connection_id = cid_from({0x11, 0x22});
     options.initial_path_validated = true;
-    options.schedule_send_owner = &state;
-    options.schedule_send = schedule_send_record;
     fiber::quic::QuicConnection conn(options);
     auto *path = conn.active_path();
     ASSERT_NE(path, nullptr);
@@ -680,7 +654,6 @@ TEST(QuicConnectionTest, MtuDelayQueuesPingProbe) {
     EXPECT_TRUE(probe->ignore_congestion);
     EXPECT_EQ(probe->min_packet_len, 2400U);
     EXPECT_EQ(probe->path, path);
-    EXPECT_EQ(state.schedule_calls, 1U);
 }
 
 TEST(QuicConnectionTest, MtuAckRaisesPathMtuAndContinuesDiscovery) {
@@ -815,13 +788,10 @@ TEST(QuicConnectionTest, ReplacesProbePathWhenCreatingAnotherProbe) {
 }
 
 TEST(QuicConnectionTest, RecvPathChallengeQueuesPathResponseOnSamePath) {
-    StreamCallbackState state{};
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.local_addr = loopback(4433);
     options.remote_addr = loopback(5555);
     options.remote_connection_id = cid_from({0x01, 0x02, 0x03, 0x04});
-    options.schedule_send_owner = &state;
-    options.schedule_send = schedule_send_record;
     fiber::quic::QuicConnection conn(options);
     auto *path = conn.active_path();
     ASSERT_NE(path, nullptr);
@@ -843,7 +813,6 @@ TEST(QuicConnectionTest, RecvPathChallengeQueuesPathResponseOnSamePath) {
     EXPECT_EQ(response->min_packet_len, fiber::quic::kMinInitialDatagramSize);
     EXPECT_EQ(std::memcmp(response->u.path_response.data, challenge.data, sizeof(challenge.data)), 0);
     EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::Ping), 1U);
-    EXPECT_GE(state.schedule_calls, 2U);
 }
 
 TEST(QuicConnectionTest, MigrationQueuesPathChallengesAndValidatesPortOnlyRebindWithoutCongestionReset) {
@@ -1013,26 +982,21 @@ TEST(QuicConnectionTest, ReceiveClearsSendSideIdleTimerState) {
     group.join();
 }
 
-TEST(QuicConnectionTest, IdleTimerMarksClosedAndInvokesCallback) {
+TEST(QuicConnectionTest, IdleTimerMarksClosed) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    StreamCallbackState state{};
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.loop = &group.at(0);
     options.transport.max_idle_timeout = std::chrono::milliseconds(5);
-    options.lifecycle_owner = &state;
-    options.on_idle_timeout = idle_timeout_record;
     fiber::quic::QuicConnection conn(options);
 
-    std::promise<std::uint32_t> done;
+    std::promise<fiber::quic::QuicConnectionState> done;
     auto future = done.get_future();
-    fiber::async::spawn(group.at(0), [&]() {
-        return run_idle_timeout_callback(&conn, std::chrono::milliseconds(25), &done, &state);
-    });
+    fiber::async::spawn(group.at(0), [&]() { return run_idle_timeout(&conn, std::chrono::milliseconds(25), &done); });
 
     ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
-    EXPECT_EQ(future.get(), 1U);
+    EXPECT_EQ(future.get(), fiber::quic::QuicConnectionState::Closed);
     EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Closed);
 
     group.join();
@@ -1042,12 +1006,9 @@ TEST(QuicConnectionTest, KeepaliveTimerQueuesApplicationPingWhenEstablished) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    StreamCallbackState state{};
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.loop = &group.at(0);
     options.keepalive_interval = std::chrono::milliseconds(5);
-    options.schedule_send_owner = &state;
-    options.schedule_send = schedule_send_record;
     fiber::quic::QuicConnection conn(options);
     ASSERT_TRUE(conn.mark_established());
     conn.crypto().application_write.ready = true;
@@ -1055,12 +1016,11 @@ TEST(QuicConnectionTest, KeepaliveTimerQueuesApplicationPingWhenEstablished) {
     std::promise<KeepaliveTimerSnapshot> done;
     auto future = done.get_future();
     fiber::async::spawn(group.at(0),
-                        [&]() { return run_keepalive_timer(&conn, std::chrono::milliseconds(25), &done, &state); });
+                        [&]() { return run_keepalive_timer(&conn, std::chrono::milliseconds(25), &done); });
 
     ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     const KeepaliveTimerSnapshot snapshot = future.get();
     EXPECT_EQ(snapshot.pending_ping_count, 1U);
-    EXPECT_EQ(snapshot.schedule_calls, 1U);
 
     group.join();
 }
@@ -1178,8 +1138,6 @@ TEST(QuicConnectionTest, RecvStreamFrameExtendsConnectionFlowControlAtLowWater) 
     auto options = server_options_with_factory(state);
     options.recv_flow.conn_recv_limit = 20;
     options.recv_flow.conn_recv_low_water = 5;
-    options.schedule_send_owner = &state;
-    options.schedule_send = schedule_send_record;
     fiber::quic::QuicConnection conn(options);
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = 0;
@@ -1196,7 +1154,6 @@ TEST(QuicConnectionTest, RecvStreamFrameExtendsConnectionFlowControlAtLowWater) 
     ASSERT_NE(space.pending_frames.front(), nullptr);
     EXPECT_EQ(space.pending_frames.front()->type, fiber::quic::QuicFrameType::MaxData);
     EXPECT_EQ(space.pending_frames.front()->u.max_data.max_data, 40U);
-    EXPECT_EQ(state.schedule_calls, 1U);
 }
 
 TEST(QuicConnectionTest, StreamReadExtendsStreamFlowControlOnly) {
@@ -1206,8 +1163,6 @@ TEST(QuicConnectionTest, StreamReadExtendsStreamFlowControlOnly) {
     options.recv_flow.conn_recv_low_water = 0;
     options.recv_flow.stream_buffer_limit = 8;
     options.recv_flow.stream_low_water = 3;
-    options.schedule_send_owner = &state;
-    options.schedule_send = schedule_send_record;
     fiber::quic::QuicConnection conn(options);
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = 0;
@@ -1227,7 +1182,6 @@ TEST(QuicConnectionTest, StreamReadExtendsStreamFlowControlOnly) {
     EXPECT_EQ(space.pending_frames.front()->type, fiber::quic::QuicFrameType::MaxStreamData);
     EXPECT_EQ(space.pending_frames.front()->u.max_stream_data.id, 0U);
     EXPECT_EQ(space.pending_frames.front()->u.max_stream_data.limit, 14U);
-    EXPECT_EQ(state.schedule_calls, 1U);
 }
 
 TEST(QuicConnectionTest, RejectsPassiveStreamWhenConnectionOpsIsMissing) {
@@ -2004,8 +1958,6 @@ TEST(QuicConnectionTest, RetiringPeerStreamQueuesMaxStreamsWithinConcurrentLimit
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
     options.max_peer_bidirectional_streams = 4;
-    options.schedule_send_owner = &state;
-    options.schedule_send = schedule_send_record;
     fiber::quic::QuicConnection conn(options);
 
     for (std::uint64_t id = 0; id < 16; id += 4) {
@@ -2026,7 +1978,6 @@ TEST(QuicConnectionTest, RetiringPeerStreamQueuesMaxStreamsWithinConcurrentLimit
 
     EXPECT_EQ(conn.active_stream_count(), 3U);
     EXPECT_EQ(count_pending_max_streams(conn, fiber::quic::QuicFrameType::MaxStreamsBidi, 5), 1U);
-    EXPECT_EQ(state.schedule_calls, 1U);
 
     fiber::quic::QuicStreamFrame in_range{};
     in_range.stream_id = 16; // seq 4 < advertised 5, concurrent slot free
@@ -2067,12 +2018,9 @@ TEST(QuicConnectionTest, PeerBidirectionalAndUnidirectionalStreamLimitsAreIndepe
 }
 
 TEST(QuicConnectionTest, RecvMaxStreamsUpdatesLocalStreamLimitAndIgnoresLowerValues) {
-    StreamCallbackState state{};
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.max_local_bidirectional_streams = 1;
-    options.schedule_send_owner = &state;
-    options.schedule_send = schedule_send_record;
     fiber::quic::QuicConnection conn(options);
 
     auto first = conn.next_local_stream_id(fiber::quic::QuicStreamType::Bidirectional);

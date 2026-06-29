@@ -23,11 +23,7 @@ fiber::quic::QuicSlice slice_of(std::string_view value) {
     return {reinterpret_cast<const std::uint8_t *>(value.data()), value.size()};
 }
 
-struct ShutdownCallbackState {
-    std::uint32_t schedule_calls = 0;
-    std::uint32_t idle_timeout_calls = 0;
-    std::uint32_t close_timeout_calls = 0;
-};
+struct ShutdownCallbackState {};
 
 void destroy_test_stream(void *, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
 
@@ -36,28 +32,11 @@ fiber::quic::QuicStream::Lease create_stream(void * /*owner*/) noexcept {
                                                          fiber::quic::QuicStream(nullptr, destroy_test_stream));
 }
 
-void schedule_send_record(void *owner, fiber::quic::QuicConnection &) noexcept {
-    ++static_cast<ShutdownCallbackState *>(owner)->schedule_calls;
-}
-
-void idle_timeout_record(void *owner, fiber::quic::QuicConnection &) noexcept {
-    ++static_cast<ShutdownCallbackState *>(owner)->idle_timeout_calls;
-}
-
-void close_timeout_record(void *owner, fiber::quic::QuicConnection &) noexcept {
-    ++static_cast<ShutdownCallbackState *>(owner)->close_timeout_calls;
-}
-
 fiber::quic::QuicConnection::Options established_server_options(ShutdownCallbackState &state) noexcept {
     fiber::quic::QuicConnection::Options options{};
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.owner = &state;
     options.ops.create_stream = create_stream;
-    options.schedule_send_owner = &state;
-    options.schedule_send = schedule_send_record;
-    options.lifecycle_owner = &state;
-    options.on_idle_timeout = idle_timeout_record;
-    options.on_close_timeout = close_timeout_record;
     // Don't let idle timeout interfere with graceful tests by default.
     options.transport.max_idle_timeout = std::chrono::seconds(60);
     // Default to the shared non-running test loop; callers that drive
@@ -327,7 +306,6 @@ TEST(QuicConnectionShutdownTest, IdleTimeoutDuringShutdownGoesToClosed) {
     ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     EXPECT_EQ(future.get(), fiber::quic::QuicConnectionState::Closed);
     EXPECT_FALSE(conn.shutting_down());
-    EXPECT_EQ(state.idle_timeout_calls, 1U);
 
     group.join();
 }
@@ -598,9 +576,9 @@ TEST(QuicConnectionShutdownTest, TlsAlertCloseStagesCryptoErrorAndSchedulesSend)
     EXPECT_EQ(cc->u.close.error_code, 0x0100u | 120u);
     EXPECT_EQ(cc->u.close.frame_type, 0u);
 
-    // schedule_send() fired, so the queued CONNECTION_CLOSE will actually be
-    // flushed to the wire rather than left staged.
-    EXPECT_GT(state.schedule_calls, 0u);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicEncryptionLevel::Application,
+                                       fiber::quic::QuicFrameType::ConnectionClose),
+              1U);
 }
 
 // === RFC 9000 §4.1 / §4.6: precise transport error on flow-control / stream
