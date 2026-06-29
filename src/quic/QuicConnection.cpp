@@ -284,6 +284,7 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
     next_local_uni_stream_id_(initial_stream_id(options.role, QuicStreamType::Unidirectional)) {
     destroy_owner_ = options_.destroy_owner;
     on_destroy_ = options_.on_destroy;
+    FIBER_ASSERT(options_.endpoint == nullptr || on_destroy_ != nullptr);
     loop_ = options_.loop != nullptr ? options_.loop : event::EventLoop::current_or_null();
     FIBER_ASSERT(loop_ != nullptr);
     auto peer_stream_limit = [](std::uint64_t concurrent_limit, std::uint64_t transport_limit,
@@ -2154,9 +2155,7 @@ void QuicConnection::release() noexcept {
     }
 }
 
-bool QuicConnection::ready_for_destruction() const noexcept {
-    return !attached_to_endpoint_ && ref_count_ == 0;
-}
+bool QuicConnection::ready_for_destruction() const noexcept { return !attached_to_endpoint_ && ref_count_ == 0; }
 
 bool QuicConnection::can_queue_frame() const noexcept { return !detached_from_endpoint_; }
 

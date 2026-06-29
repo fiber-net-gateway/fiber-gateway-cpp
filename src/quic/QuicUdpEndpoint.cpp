@@ -382,7 +382,8 @@ namespace {
 
 common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Options &options) noexcept {
     if (initialized_ || options.max_connections == 0 || options.send.send_buffer_size == 0 ||
-        options.retry_token_lifetime.count() < 0 || options.new_token_lifetime.count() < 0) {
+        options.retry_token_lifetime.count() < 0 || options.new_token_lifetime.count() < 0 ||
+        options.create_connection == nullptr) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -644,16 +645,6 @@ void QuicUdpEndpoint::detach_connection_on_timer(void *owner, QuicConnection &co
         return;
     }
     static_cast<QuicUdpEndpoint *>(owner)->detach_connection(connection);
-}
-
-void QuicUdpEndpoint::destroy_default_connection(void *, QuicConnection &connection) noexcept { delete &connection; }
-
-QuicConnection::Lease QuicUdpEndpoint::create_default_connection(void *,
-                                                                 const QuicConnection::Options &options) noexcept {
-    QuicConnection::Options owned_options = options;
-    owned_options.destroy_owner = nullptr;
-    owned_options.on_destroy = &QuicUdpEndpoint::destroy_default_connection;
-    return QuicConnection::Lease::adopt(new (std::nothrow) QuicConnection(owned_options));
 }
 
 common::IoResult<QuicConnectionId> QuicUdpEndpoint::generate_connection_id() noexcept {
@@ -1018,10 +1009,7 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     conn_options.initial_path_validated = validation.address_validated;
     conn_options.enable_early_data = options_.enable_early_data;
 
-    QuicConnection::Lease lease =
-            options_.create_connection != nullptr
-                    ? options_.create_connection(options_.connection_owner, conn_options)
-                    : create_default_connection(nullptr, conn_options);
+    QuicConnection::Lease lease = options_.create_connection(options_.connection_owner, conn_options);
     QuicConnection *connection = lease.get();
     if (connection == nullptr) {
         ++rejected_connection_count_;
