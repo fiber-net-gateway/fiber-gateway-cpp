@@ -152,6 +152,23 @@ fiber::quic::QuicStream::Lease make_test_stream(void *) noexcept {
                                                          fiber::quic::QuicStream(nullptr, destroy_test_stream));
 }
 
+void destroy_heap_connection(void *, fiber::quic::QuicConnection &connection) noexcept { delete &connection; }
+
+fiber::quic::QuicConnection::Lease
+create_heap_connection(void *, const fiber::quic::QuicConnection::Options &options) noexcept {
+    fiber::quic::QuicConnection::Options owned_options = options;
+    owned_options.destroy_owner = nullptr;
+    owned_options.on_destroy = destroy_heap_connection;
+    return fiber::quic::QuicConnection::Lease::adopt(new (std::nothrow) fiber::quic::QuicConnection(owned_options));
+}
+
+fiber::quic::QuicUdpEndpoint::Options make_endpoint_options() noexcept {
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+    options.create_connection = create_heap_connection;
+    return options;
+}
+
 struct EmbeddedConnectionFactoryState {
     alignas(fiber::quic::QuicConnection) std::byte storage[sizeof(fiber::quic::QuicConnection)]{};
     fiber::quic::QuicConnection *connection = nullptr;
@@ -166,8 +183,8 @@ void destroy_embedded_connection(void *owner, fiber::quic::QuicConnection &conne
     state->connection = nullptr;
 }
 
-fiber::quic::QuicConnection::Lease create_embedded_connection(void *owner,
-                                                              const fiber::quic::QuicConnection::Options &options) noexcept {
+fiber::quic::QuicConnection::Lease
+create_embedded_connection(void *owner, const fiber::quic::QuicConnection::Options &options) noexcept {
     auto *state = static_cast<EmbeddedConnectionFactoryState *>(owner);
     ++state->create_calls;
     if (state->connection != nullptr) {
@@ -1424,13 +1441,24 @@ DetachedTask send_flood_and_count_responses(fiber::event::EventLoop *loop, std::
 
 } // namespace
 
+TEST(QuicUdpEndpointTest, InitRejectsMissingConnectionFactory) {
+    fiber::event::EventLoop loop;
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options{};
+    options.bind_addr = loopback(0);
+
+    auto initialized = endpoint.init(loop, options);
+    ASSERT_FALSE(initialized.has_value());
+    EXPECT_EQ(initialized.error(), fiber::common::IoErr::Invalid);
+}
+
 TEST(QuicUdpEndpointTest, CreatesConnectionForNewInitialDcid) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     const auto dcid = cid_from_hex("8394c8f03e515708");
@@ -1463,8 +1491,7 @@ TEST(QuicUdpEndpointTest, CustomConnectionFactoryCanEmbedConnection) {
 
     EmbeddedConnectionFactoryState state{};
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.connection_owner = &state;
     options.create_connection = create_embedded_connection;
     ASSERT_TRUE(endpoint.init(group.at(0), options));
@@ -1494,13 +1521,51 @@ TEST(QuicUdpEndpointTest, CustomConnectionFactoryCanEmbedConnection) {
     group.join();
 }
 
+TEST(QuicUdpEndpointTest, ConnectionDestroyWaitsForLastLeaseAfterEndpointDetach) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    EmbeddedConnectionFactoryState state{};
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
+    options.connection_owner = &state;
+    options.create_connection = create_embedded_connection;
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("8394c8f03e515708");
+    const auto scid = cid_from_hex("11223344");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
+    build_initial_datagram(datagram, dcid, scid);
+
+    auto result = recv_after_send(group, endpoint, datagram.data(), datagram.size());
+
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    ASSERT_NE(result->connection, nullptr);
+    auto lease = result->connection->lease();
+    EXPECT_EQ(state.create_calls, 1U);
+    EXPECT_EQ(state.destroy_calls, 0U);
+
+    close_endpoint_on_loop(group, endpoint);
+
+    EXPECT_EQ(endpoint.active_connection_count(), 0U);
+    EXPECT_EQ(state.destroy_calls, 0U);
+    EXPECT_EQ(state.connection, lease.get());
+    EXPECT_TRUE(lease->detached_from_endpoint());
+
+    lease.reset();
+    EXPECT_EQ(state.destroy_calls, 1U);
+    EXPECT_EQ(state.connection, nullptr);
+
+    group.stop();
+    group.join();
+}
+
 TEST(QuicUdpEndpointTest, DetachClearsFramesAndSuppressesNewPendingFrames) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     const auto dcid = cid_from_hex("8394c8f03e515708");
@@ -1564,8 +1629,7 @@ TEST(QuicUdpEndpointTest, EstablishingConnectionQueuesLocalConnectionIdsUpToPeer
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     const auto dcid = cid_from_hex("8394c8f03e515708");
@@ -1604,8 +1668,7 @@ TEST(QuicUdpEndpointTest, EstablishingConnectionCapsLocalConnectionIdsAtPeerLimi
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     const auto dcid = cid_from_hex("7394c8f03e515708");
@@ -1635,8 +1698,7 @@ TEST(QuicUdpEndpointTest, RetiringLocalConnectionIdUnregistersAndReplenishes) {
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     const auto dcid = cid_from_hex("6394c8f03e515708");
@@ -1678,8 +1740,7 @@ TEST(QuicUdpEndpointTest, RejectsRetiringCurrentLocalConnectionId) {
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     const auto dcid = cid_from_hex("5394c8f03e515708");
@@ -1714,8 +1775,7 @@ TEST(QuicUdpEndpointTest, IdleTimeoutDeletesConnection) {
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.transport.max_idle_timeout = std::chrono::milliseconds(5);
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
@@ -1745,8 +1805,7 @@ TEST(QuicUdpEndpointTest, RetryEnabledSendsRetryWithoutCreatingConnection) {
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.retry = true;
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
@@ -1796,8 +1855,7 @@ TEST(QuicUdpEndpointTest, ValidRetryTokenCreatesValidatedConnectionWithRetryIds)
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.retry = true;
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
@@ -1860,8 +1918,7 @@ TEST(QuicUdpEndpointTest, SendsNewTokenWhenPathValidationCompletes) {
     }
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.issue_new_token = true;
     options.address_validation_key_set = true;
     options.address_validation_key = key;
@@ -1987,8 +2044,7 @@ TEST(QuicUdpEndpointTest, SendsInitialAckAfterProcessingAckElicitingInitial) {
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     const auto dcid = cid_from_hex("8394c8f03e515708");
@@ -2041,8 +2097,7 @@ TEST(QuicUdpEndpointTest, CoalescesInitialAndHandshakePacketsIntoOneUdpDatagram)
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     std::promise<fiber::common::IoResult<CoalescedPacketSummary>> response_promise;
@@ -2071,8 +2126,7 @@ TEST(QuicUdpEndpointTest, EncodesMoreThanEightFramesInOnePacket) {
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     std::promise<fiber::common::IoResult<ManyFramePacketSummary>> response_promise;
@@ -2101,8 +2155,7 @@ TEST(QuicUdpEndpointTest, SplitsHandshakeCryptoFrameWhenPacketPayloadIsFull) {
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     std::promise<fiber::common::IoResult<SplitFramePacketSummary>> response_promise;
@@ -2133,8 +2186,7 @@ TEST(QuicUdpEndpointTest, SendsOnlyAckWhenCongestionWindowIsFull) {
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     std::promise<fiber::common::IoResult<AckOnlyPacketSummary>> response_promise;
@@ -2163,8 +2215,7 @@ TEST(QuicUdpEndpointTest, EncodesApplicationStreamFrameFromSendQueue) {
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     std::promise<fiber::common::IoResult<StreamPacketSummary>> response_promise;
@@ -2195,8 +2246,7 @@ TEST(QuicUdpEndpointTest, DoesNotPadInitialAckOnlyPacketToMinInitialSize) {
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     std::promise<fiber::common::IoResult<AckOnlyPacketSummary>> response_promise;
@@ -2225,8 +2275,7 @@ TEST(QuicUdpEndpointTest, ReusesExistingConnectionForSameDcid) {
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     const auto dcid = cid_from_hex("0011223344556677");
@@ -2258,8 +2307,7 @@ TEST(QuicUdpEndpointTest, MovesActivePathWhenSameConnectionArrivesFromDifferentR
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     const auto dcid = cid_from_hex("0102030405060708");
@@ -2293,8 +2341,7 @@ TEST(QuicUdpEndpointTest, RejectsNewConnectionWhenSlotsAreFull) {
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.max_connections = 1;
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
@@ -2327,8 +2374,7 @@ TEST(QuicUdpEndpointTest, DropsMalformedPacketWithoutCreatingConnection) {
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
@@ -2348,8 +2394,7 @@ TEST(QuicUdpEndpointTest, SendsStatelessResetForUnknownShortHeaderDcid) {
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     // Fixed secret so the reset token can be recomputed in the test.
     options.stateless_reset_secret_set = true;
     for (std::size_t i = 0; i < fiber::quic::kQuicStatelessResetSecretLength; ++i) {
@@ -2414,8 +2459,7 @@ TEST(QuicUdpEndpointTest, DoesNotSendStatelessResetForLongHeader) {
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     const auto dcid = cid_from_hex("0102030405060708"); // 8 bytes, unknown
@@ -2457,8 +2501,7 @@ TEST(QuicUdpEndpointTest, SendsVersionNegotiationForUnsupportedVersionLongHeader
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     const auto dcid = cid_from_hex("0102030405060708");
@@ -2518,8 +2561,7 @@ TEST(QuicUdpEndpointTest, DoesNotRespondToVersionNegotiationPacket) {
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     const auto dcid = cid_from_hex("0102030405060708");
@@ -2561,8 +2603,7 @@ TEST(QuicUdpEndpointTest, DoesNotSendStatelessResetForTooSmallShortHeader) {
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     const auto dcid = cid_from_hex("0102030405060708090a0b0c0d0e0f1011121314"); // 20 bytes, unknown
@@ -2606,8 +2647,7 @@ TEST(QuicUdpEndpointTest, StatelessResetIsRateLimited) {
     group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
-    options.bind_addr = loopback(0);
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     ASSERT_TRUE(endpoint.init(group.at(0), options));
 
     const auto dcid = cid_from_hex("0102030405060708090a0b0c0d0e0f1011121314"); // 20 bytes, unknown
