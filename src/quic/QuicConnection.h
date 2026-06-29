@@ -291,13 +291,7 @@ public:
         std::uint64_t max_local_bidirectional_streams = kQuicDefaultMaxBidirectionalStreams;
         std::uint64_t max_local_unidirectional_streams = kQuicDefaultMaxUnidirectionalStreams;
         QuicOutputFramePool *output_frame_pool = nullptr;
-        QuicUdpEndpoint *endpoint = nullptr;
         event::EventLoop *loop = nullptr;
-        void *schedule_send_owner = nullptr;
-        void (*schedule_send)(void *owner, QuicConnection &connection) noexcept = nullptr;
-        void *lifecycle_owner = nullptr;
-        void (*on_idle_timeout)(void *owner, QuicConnection &connection) noexcept = nullptr;
-        void (*on_close_timeout)(void *owner, QuicConnection &connection) noexcept = nullptr;
         void *destroy_owner = nullptr;
         DestroyCallback on_destroy = nullptr;
         void *owner = nullptr;
@@ -663,7 +657,7 @@ private:
     void cancel_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter) noexcept;
     void notify_local_stream_attach_waiters(QuicStreamType type, common::IoErr result = common::IoErr::None) noexcept;
     void notify_all_local_stream_attach_waiters(common::IoErr result = common::IoErr::None) noexcept;
-    void attach_to_endpoint() noexcept;
+    void attach_to_endpoint(QuicUdpEndpoint &endpoint) noexcept;
     void detach_from_endpoint() noexcept;
     void retain() noexcept;
     void release() noexcept;
@@ -682,6 +676,7 @@ private:
 
     Options options_{};
     event::EventLoop *loop_ = nullptr;
+    QuicUdpEndpoint *endpoint_ = nullptr;
     QuicConnectionState state_ = QuicConnectionState::Init;
     std::uint64_t next_local_bidi_stream_id_ = 0;
     std::uint64_t next_local_uni_stream_id_ = 0;

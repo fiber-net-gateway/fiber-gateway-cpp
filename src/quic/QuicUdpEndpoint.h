@@ -140,7 +140,6 @@ private:
                                                         std::uint64_t hash) const noexcept;
     void detach_connection(QuicConnection &connection) noexcept;
     void force_detach_connection(QuicConnection &connection) noexcept;
-    static void detach_connection_on_timer(void *owner, QuicConnection &connection) noexcept;
     [[nodiscard]] common::IoResult<QuicConnectionId> generate_connection_id() noexcept;
     [[nodiscard]] common::IoResult<QuicConnectionId> generate_unique_connection_id() noexcept;
     [[nodiscard]] common::IoResult<void> register_connection_id(QuicConnection &connection,

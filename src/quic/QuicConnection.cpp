@@ -284,7 +284,6 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
     next_local_uni_stream_id_(initial_stream_id(options.role, QuicStreamType::Unidirectional)) {
     destroy_owner_ = options_.destroy_owner;
     on_destroy_ = options_.on_destroy;
-    FIBER_ASSERT(options_.endpoint == nullptr || on_destroy_ != nullptr);
     loop_ = options_.loop != nullptr ? options_.loop : event::EventLoop::current_or_null();
     FIBER_ASSERT(loop_ != nullptr);
     auto peer_stream_limit = [](std::uint64_t concurrent_limit, std::uint64_t transport_limit,
@@ -383,8 +382,8 @@ common::IoResult<void> QuicConnection::mark_established() noexcept {
         return std::unexpected(common::IoErr::Already);
     }
     state_ = QuicConnectionState::Established;
-    if (options_.endpoint != nullptr) {
-        auto filled = options_.endpoint->fill_local_connection_ids(*this);
+    if (endpoint_ != nullptr) {
+        auto filled = endpoint_->fill_local_connection_ids(*this);
         if (!filled) {
             close(QuicErrorCode::InternalError);
             return std::unexpected(filled.error());
@@ -702,8 +701,8 @@ void QuicConnection::enter_closed() noexcept {
     close_all_streams(close_info_.error_code);
     streams_.clear();
 
-    if (options_.on_close_timeout != nullptr) {
-        options_.on_close_timeout(options_.lifecycle_owner, *this);
+    if (endpoint_ != nullptr) {
+        endpoint_->detach_connection(*this);
     }
 }
 
@@ -978,8 +977,8 @@ void QuicConnection::on_idle_timer(QuicConnection *connection) noexcept {
     connection->close_all_streams(connection->close_info_.error_code);
     connection->streams_.clear();
 
-    if (connection->options_.on_idle_timeout != nullptr) {
-        connection->options_.on_idle_timeout(connection->options_.lifecycle_owner, *connection);
+    if (connection->endpoint_ != nullptr) {
+        connection->endpoint_->detach_connection(*connection);
     }
 }
 
@@ -1649,10 +1648,10 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
 
 common::IoResult<bool> QuicConnection::recv_retire_connection_id_frame(const QuicRetireConnectionIdFrame &frame,
                                                                        const QuicConnectionId &packet_dcid) noexcept {
-    if (options_.endpoint == nullptr) {
+    if (endpoint_ == nullptr) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    return options_.endpoint->retire_local_connection_id_and_resend(*this, frame.sequence_number, packet_dcid);
+    return endpoint_->retire_local_connection_id_and_resend(*this, frame.sequence_number, packet_dcid);
 }
 
 bool QuicConnection::should_retransmit_new_connection_id(std::uint64_t sequence_number) const noexcept {
@@ -1675,10 +1674,10 @@ bool QuicConnection::has_active_local_connection_id(const QuicConnectionId &cid)
 common::IoResult<void>
 QuicConnection::stateless_reset_token_for(const QuicConnectionId &cid,
                                           std::uint8_t out[kStatelessResetTokenLength]) const noexcept {
-    if (options_.endpoint == nullptr) {
+    if (endpoint_ == nullptr) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    return options_.endpoint->create_stateless_reset_token(cid, out);
+    return endpoint_->create_stateless_reset_token(cid, out);
 }
 
 bool QuicConnection::detects_stateless_reset(const std::uint8_t *packet_data, std::size_t packet_len) const noexcept {
@@ -2113,8 +2112,10 @@ void QuicConnection::notify_all_local_stream_attach_waiters(common::IoErr result
     notify_local_stream_attach_waiters(QuicStreamType::Unidirectional, result);
 }
 
-void QuicConnection::attach_to_endpoint() noexcept {
+void QuicConnection::attach_to_endpoint(QuicUdpEndpoint &endpoint) noexcept {
     FIBER_ASSERT(!attached_to_endpoint_);
+    FIBER_ASSERT(on_destroy_ != nullptr);
+    endpoint_ = &endpoint;
     attached_to_endpoint_ = true;
     detached_from_endpoint_ = false;
 }
@@ -2131,12 +2132,7 @@ void QuicConnection::detach_from_endpoint() noexcept {
     clear_frames_for_detach();
     streams_.clear();
 
-    options_.endpoint = nullptr;
-    options_.schedule_send_owner = nullptr;
-    options_.schedule_send = nullptr;
-    options_.lifecycle_owner = nullptr;
-    options_.on_idle_timeout = nullptr;
-    options_.on_close_timeout = nullptr;
+    endpoint_ = nullptr;
 
     endpoint_index.connection = nullptr;
     send_queue_entry.connection = nullptr;
@@ -2278,8 +2274,8 @@ void QuicConnection::schedule_send() noexcept {
     if (!can_queue_frame()) {
         return;
     }
-    if (options_.schedule_send != nullptr) {
-        options_.schedule_send(options_.schedule_send_owner, *this);
+    if (endpoint_ != nullptr) {
+        endpoint_->schedule_send(*this);
     }
 }
 

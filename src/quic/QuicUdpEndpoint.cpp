@@ -639,14 +639,6 @@ void QuicUdpEndpoint::force_detach_connection(QuicConnection &connection) noexce
     detach_connection(connection);
 }
 
-void QuicUdpEndpoint::detach_connection_on_timer(void *owner, QuicConnection &connection) noexcept {
-    if (owner == nullptr) {
-        connection.mark_closed();
-        return;
-    }
-    static_cast<QuicUdpEndpoint *>(owner)->detach_connection(connection);
-}
-
 common::IoResult<QuicConnectionId> QuicUdpEndpoint::generate_connection_id() noexcept {
     std::uint8_t bytes[kQuicConnectionIdLength]{};
     if (RAND_bytes(bytes, sizeof(bytes)) != 1) {
@@ -996,15 +988,7 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     conn_options.max_peer_bidirectional_streams = options_.transport.initial_max_streams_bidi;
     conn_options.max_peer_unidirectional_streams = options_.transport.initial_max_streams_uni;
     conn_options.output_frame_pool = &output_frame_pool_;
-    conn_options.endpoint = this;
     conn_options.loop = loop_;
-    conn_options.schedule_send_owner = this;
-    conn_options.schedule_send = [](void *owner, QuicConnection &connection) noexcept {
-        static_cast<QuicUdpEndpoint *>(owner)->schedule_send(connection);
-    };
-    conn_options.lifecycle_owner = this;
-    conn_options.on_idle_timeout = &QuicUdpEndpoint::detach_connection_on_timer;
-    conn_options.on_close_timeout = &QuicUdpEndpoint::detach_connection_on_timer;
     conn_options.has_retry_source_connection_id = validation.retried;
     conn_options.initial_path_validated = validation.address_validated;
     conn_options.enable_early_data = options_.enable_early_data;
@@ -1015,6 +999,7 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
         ++rejected_connection_count_;
         return std::unexpected(common::IoErr::NoMem);
     }
+    FIBER_ASSERT(connection->on_destroy_ != nullptr);
 
     connection->endpoint_index.connection = connection;
     auto registered = register_connection_id(*connection, connection->original_dcid_index, packet.dcid);
@@ -1034,7 +1019,7 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
             return std::unexpected(tls_initialized.error());
         }
     }
-    connection->attach_to_endpoint();
+    connection->attach_to_endpoint(*this);
     connection->endpoint_index.lease = std::move(lease);
     connections_.push_back(connection->endpoint_index);
     ++active_connection_count_;
