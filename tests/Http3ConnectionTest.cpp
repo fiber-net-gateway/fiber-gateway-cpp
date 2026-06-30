@@ -255,6 +255,32 @@ TEST(Http3ConnectionTest, ReadsQpackDecoderStreamUntilShutdown) {
     group.join();
 }
 
+TEST(Http3ConnectionTest, ReadsQpackDecoderStreamCancellationUntilShutdown) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicConnection::Options quic_options{};
+    quic_options.loop = &group.at(0);
+    fiber::quic::QuicConnection quic(quic_options);
+    fiber::http::Http3Connection h3(quic);
+    ASSERT_TRUE(h3.start().has_value());
+
+    auto qpack = uni_stream_type(fiber::http::Http3StreamType::QpackDecoder);
+    qpack.push_back(0x40); // Stream Cancellation for stream 0.
+    std::promise<void> done;
+    auto future = done.get_future();
+    fiber::async::spawn(group.at(0), [&quic, &h3, &qpack, &done]() -> fiber::async::DetachedTask {
+        return feed_one_stream_then_close(&quic, &h3, &qpack, 2, false, &done);
+    });
+
+    ASSERT_EQ(future.wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(h3.peer_qpack_decoder_stream_seen());
+    EXPECT_EQ(h3.close_error(), fiber::http::Http3ErrorCode::NoError);
+
+    group.stop();
+    group.join();
+}
+
 TEST(Http3ConnectionTest, RejectsSecondQpackEncoderStream) {
     fiber::event::EventLoopGroup group(1);
     group.start();
