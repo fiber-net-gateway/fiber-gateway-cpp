@@ -15,6 +15,7 @@
 #include "Http2Connection.h"
 #include "Http2HpackEncodeCatalog.h"
 #include "HttpExchange.h"
+#include "Http3Server.h"
 #include "HttpTransport.h"
 #include "ServerRequestFactory.h"
 
@@ -44,6 +45,7 @@ private:
     ServerRequestFactory http2_request_factory_;
     net::TcpListener listener_;
     std::unique_ptr<net::TlsServerContext> tls_ctx_;
+    std::unique_ptr<Http3Server> http3_server_;
     std::atomic<std::size_t> next_loop_index_{0};
 };
 

@@ -41,4 +41,13 @@ void normalize_http_server_alpn(net::TlsOptions &options) {
     options.alpn = std::move(normalized);
 }
 
+void normalize_http3_alpn(net::TlsOptions &options) {
+    std::vector<std::string> normalized = normalize_base(options);
+    normalized.erase(std::remove(normalized.begin(), normalized.end(), "h3"), normalized.end());
+    normalized.erase(std::remove(normalized.begin(), normalized.end(), "h2"), normalized.end());
+    normalized.erase(std::remove(normalized.begin(), normalized.end(), "http/1.1"), normalized.end());
+    normalized.insert(normalized.begin(), "h3");
+    options.alpn = std::move(normalized);
+}
+
 } // namespace fiber::http
