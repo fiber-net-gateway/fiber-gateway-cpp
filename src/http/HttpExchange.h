@@ -16,13 +16,33 @@
 #include "../common/mem/BufPool.h"
 #include "../common/mem/IoBufChain.h"
 #include "../net/TlsOptions.h"
+#include "../net/UdpSocket.h"
+#include "../quic/QuicConnection.h"
+#include "../quic/QuicSendScheduler.h"
 #include "HttpCommon.h"
 #include "HttpExchangeIo.h"
 #include "HttpHeaders.h"
+#include "Http3Protocol.h"
 
 namespace fiber::http {
 
 struct HttpServerOptions {
+    struct Http3Options {
+        bool enabled = false;
+        std::size_t max_connections_per_shard = 1024;
+        net::UdpBindOptions udp{};
+        quic::QuicSendScheduler::Options send{};
+        quic::QuicTransportSettings transport{};
+        quic::QuicRecvFlowControlSettings recv_flow{};
+        Http3Settings settings{};
+        std::chrono::milliseconds keepalive_interval{0};
+        std::chrono::milliseconds max_ack_delay{25};
+        std::uint64_t ack_delay_exponent = 3;
+        bool retry = false;
+        bool issue_new_token = false;
+        bool enable_early_data = false;
+    };
+
     std::chrono::seconds keep_alive_timeout{70};
     std::chrono::seconds header_timeout{10};
     std::chrono::seconds body_timeout{60};
@@ -32,6 +52,7 @@ struct HttpServerOptions {
     std::size_t header_large_num = 4;
     bool drain_unread_body = false;
     net::TlsOptions tls{};
+    Http3Options http3{};
 };
 
 class Http1Connection;

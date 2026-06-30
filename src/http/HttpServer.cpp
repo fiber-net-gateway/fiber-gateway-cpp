@@ -1,7 +1,9 @@
 #include "HttpServer.h"
 
+#include <cerrno>
 #include <chrono>
 #include <memory>
+#include <sys/socket.h>
 #include <utility>
 
 #include "../async/Spawn.h"
@@ -14,6 +16,24 @@
 
 namespace fiber::http {
 
+namespace {
+
+common::IoResult<net::SocketAddress> resolve_local_addr(int fd) noexcept {
+    sockaddr_storage storage{};
+    socklen_t len = sizeof(storage);
+    if (::getsockname(fd, reinterpret_cast<sockaddr *>(&storage), &len) != 0) {
+        return std::unexpected(common::io_err_from_errno(errno));
+    }
+
+    net::SocketAddress local;
+    if (!net::SocketAddress::from_sockaddr(reinterpret_cast<const sockaddr *>(&storage), len, local)) {
+        return std::unexpected(common::IoErr::NotSupported);
+    }
+    return local;
+}
+
+} // namespace
+
 HttpServer::HttpServer(event::EventLoop &loop, HttpHandler handler, HttpServerOptions options,
                        event::EventLoopGroup *worker_group) :
     worker_group_(worker_group), handler_(std::move(handler)), options_(std::move(options)),
@@ -22,10 +42,23 @@ HttpServer::HttpServer(event::EventLoop &loop, HttpHandler handler, HttpServerOp
 }
 
 fiber::common::IoResult<void> HttpServer::bind(const net::SocketAddress &addr, const net::ListenOptions &options) {
+    if (options_.http3.enabled && !options_.tls.enabled) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
     auto result = listener_.bind(addr, options);
     if (!result) {
         return std::unexpected(result.error());
     }
+
+    net::SocketAddress bound_addr = addr;
+    auto local_addr = resolve_local_addr(listener_.fd());
+    if (!local_addr) {
+        listener_.close();
+        return std::unexpected(local_addr.error());
+    }
+    bound_addr = *local_addr;
+
     if (options_.tls.enabled) {
         normalize_http_server_alpn(options_.tls);
         auto ctx = std::make_unique<net::TlsServerContext>(options_.tls);
@@ -35,6 +68,19 @@ fiber::common::IoResult<void> HttpServer::bind(const net::SocketAddress &addr, c
         }
         tls_ctx_ = std::move(ctx);
     }
+    if (options_.http3.enabled) {
+        http3_server_ = std::make_unique<Http3Server>(listener_.loop(), handler_, options_, worker_group_);
+        if (!http3_server_) {
+            listener_.close();
+            return std::unexpected(common::IoErr::NoMem);
+        }
+        auto http3_bound = http3_server_->bind(bound_addr);
+        if (!http3_bound) {
+            http3_server_.reset();
+            listener_.close();
+            return std::unexpected(http3_bound.error());
+        }
+    }
     return {};
 }
 
@@ -42,6 +88,10 @@ fiber::async::DetachedTask HttpServer::serve() {
     auto *accept_loop = event::EventLoop::current_or_null();
     FIBER_ASSERT(accept_loop != nullptr);
     FIBER_ASSERT(accept_loop == &listener_.loop());
+
+    if (http3_server_) {
+        http3_server_->serve();
+    }
 
     while (listener_.valid()) {
         auto accept_result = co_await listener_.accept();
@@ -148,7 +198,12 @@ Http2Connection::Options HttpServer::make_http2_options() const noexcept {
     return options;
 }
 
-void HttpServer::close() { listener_.close(); }
+void HttpServer::close() {
+    if (http3_server_) {
+        http3_server_->close();
+    }
+    listener_.close();
+}
 
 int HttpServer::fd() const noexcept { return listener_.fd(); }
 

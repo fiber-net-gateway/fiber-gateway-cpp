@@ -47,6 +47,16 @@ TEST(TlsAlpnTest, NormalizeHttpServerAlpnAddsSupportedDefaultsWhenMissing) {
     EXPECT_EQ(options.alpn, expected);
 }
 
+TEST(TlsAlpnTest, NormalizeHttp3AlpnPrefersH3AndDropsTcpProtocols) {
+    fiber::net::TlsOptions options;
+    options.alpn = {"http/1.1", "h3", "custom", "h2", "", "custom"};
+
+    fiber::http::normalize_http3_alpn(options);
+
+    const std::vector<std::string> expected = {"h3", "custom"};
+    EXPECT_EQ(options.alpn, expected);
+}
+
 TEST(TlsAlpnTest, AlpnProtocolsViewContainsOfferedProtocols) {
     const std::uint8_t encoded[] = {
             0x00, 0x0c, 0x02, 'h', '2', 0x08, 'h', 't', 't', 'p', '/', '1', '.', '1',
