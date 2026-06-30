@@ -147,7 +147,7 @@ fiber::net::SocketAddress loopback(std::uint16_t port) { return {fiber::net::IpA
 
 void destroy_test_stream(void *, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
 
-fiber::quic::QuicStream::Lease make_test_stream(void *) noexcept {
+fiber::quic::QuicStream::Lease make_test_stream(void *, std::uint64_t) noexcept {
     return fiber::quic::QuicStream::Lease::adopt(new (std::nothrow)
                                                          fiber::quic::QuicStream(nullptr, destroy_test_stream));
 }

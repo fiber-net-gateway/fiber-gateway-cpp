@@ -609,6 +609,15 @@ void QuicStream::maybe_extend_recv_flow_control() noexcept {
     }
 }
 
+void QuicStream::retain_app() noexcept { app_released_ = false; }
+
+void QuicStream::release_app() noexcept {
+    app_released_ = true;
+    if (conn_ != nullptr) {
+        conn_->try_release_stream(*this);
+    }
+}
+
 void QuicStream::mark_app_released() noexcept { app_released_ = true; }
 
 bool QuicStream::ready_for_connection_release() const noexcept {

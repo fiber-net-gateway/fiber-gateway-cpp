@@ -122,6 +122,9 @@ public:
     [[nodiscard]] bool attached_to_connection() const noexcept { return attached_to_connection_; }
     [[nodiscard]] bool app_released() const noexcept { return app_released_; }
     [[nodiscard]] std::uint32_t ref_count() const noexcept { return ref_count_; }
+    [[nodiscard]] void *owner() noexcept { return destroy_owner_; }
+    [[nodiscard]] const void *owner() const noexcept { return destroy_owner_; }
+    [[nodiscard]] DestroyCallback destroy_callback() const noexcept { return on_destroy_; }
     [[nodiscard]] Lease lease() noexcept { return Lease(this); }
 
     [[nodiscard]] common::IoResult<std::size_t> try_read(std::size_t max_bytes, mem::IoBufChain &out) noexcept;
@@ -143,6 +146,8 @@ public:
     // notification name.
     void notify_connection_closing() noexcept { close(); }
 
+    void retain_app() noexcept;
+    void release_app() noexcept;
     void mark_app_released() noexcept;
 
     [[nodiscard]] bool ready_for_connection_release() const noexcept;

@@ -27,9 +27,16 @@ enum class Http3ConnectionState : std::uint8_t {
 
 class Http3Connection : public common::NonCopyable, public common::NonMovable {
 public:
+    struct Ops {
+        quic::QuicStream::Lease (*create_server_request)(void *owner, std::uint64_t stream_id,
+                                                         Http3Connection &conn) noexcept = nullptr;
+    };
+
     struct Options {
         Http3Settings local_settings{};
         std::chrono::milliseconds drain_timeout = std::chrono::seconds(3);
+        void *owner = nullptr;
+        Ops ops{};
         bool enable_push = false;
     };
 
@@ -70,7 +77,7 @@ private:
     using PeerStreamReaderList = common::IntrusiveList<PeerStreamReader, offsetof(PeerStreamReader, link)>;
 
     [[nodiscard]] static const quic::QuicConnection::Ops &quic_ops() noexcept;
-    [[nodiscard]] static quic::QuicStream::Lease create_peer_stream(void *owner) noexcept;
+    [[nodiscard]] static quic::QuicStream::Lease create_peer_stream(void *owner, std::uint64_t stream_id) noexcept;
     static void on_peer_stream_attached(void *owner, quic::QuicStream &stream) noexcept;
     static void destroy_peer_stream(void *owner, quic::QuicStream &stream) noexcept;
 
