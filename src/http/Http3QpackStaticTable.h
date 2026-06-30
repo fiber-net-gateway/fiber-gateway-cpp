@@ -2,6 +2,7 @@
 #define FIBER_HTTP_HTTP3_QPACK_STATIC_TABLE_H
 
 #include <cstdint>
+#include <string_view>
 
 #include "Http3QpackTableEntryView.h"
 
@@ -13,7 +14,21 @@ public:
 
     using TableEntryView = Http3QpackTableEntryView;
 
+    enum class FindKind : std::uint8_t {
+        NoMatch,
+        EntryMatch,
+        NameMatch,
+    };
+
+    struct FindResult {
+        FindKind kind = FindKind::NoMatch;
+        std::uint32_t index = 0;
+        TableEntryView entry{};
+    };
+
     [[nodiscard]] static bool get_by_index(std::uint32_t index, TableEntryView &view) noexcept;
+    [[nodiscard]] static FindResult find(std::string_view name, std::uint64_t name_hash,
+                                         std::string_view value) noexcept;
 
 private:
     struct StaticEntry {
