@@ -40,6 +40,7 @@ class HttpTransport;
 class RequestLineParser;
 class HeaderLineParser;
 class ServerHttp2Request;
+class ServerHttp3Request;
 
 
 class HttpExchange : public common::NonCopyable, public common::NonMovable {
@@ -92,6 +93,7 @@ private:
     friend class Http1Connection;
     friend class Http1ExchangeIo;
     friend class ServerHttp2Request;
+    friend class ServerHttp3Request;
 
     fiber::mem::BufPool pool_;
     fiber::mem::IoBufChain header_bufs_;

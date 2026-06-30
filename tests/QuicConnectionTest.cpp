@@ -64,6 +64,7 @@ fiber::mem::IoBuf iobuf_of(std::string_view value) {
 struct StreamCallbackState {
     std::uint32_t calls = 0;
     std::uint64_t last_stream_id = 0;
+    std::uint64_t last_created_stream_id = 0;
     bool return_empty = false;
     fiber::quic::QuicStream::Lease lease{};
 };
@@ -88,18 +89,20 @@ fiber::quic::QuicStream::Lease make_test_stream() noexcept {
                                                          fiber::quic::QuicStream(nullptr, destroy_test_stream));
 }
 
-fiber::quic::QuicStream::Lease create_stream_record(void *owner) noexcept {
+fiber::quic::QuicStream::Lease create_stream_record(void *owner, std::uint64_t stream_id) noexcept {
     auto *state = static_cast<StreamCallbackState *>(owner);
     ++state->calls;
+    state->last_created_stream_id = stream_id;
     if (state->return_empty) {
         return {};
     }
     return make_test_stream();
 }
 
-fiber::quic::QuicStream::Lease create_stream_retain(void *owner) noexcept {
+fiber::quic::QuicStream::Lease create_stream_retain(void *owner, std::uint64_t stream_id) noexcept {
     auto *state = static_cast<StreamCallbackState *>(owner);
     ++state->calls;
+    state->last_created_stream_id = stream_id;
     auto *stream = new (std::nothrow) fiber::quic::QuicStream(nullptr, destroy_test_stream);
     if (stream == nullptr) {
         return {};
@@ -1212,6 +1215,7 @@ TEST(QuicConnectionTest, UsesConnectionOpsToCreatePeerStreamOnce) {
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(duplicate.has_value());
     EXPECT_EQ(state.calls, 1U);
+    EXPECT_EQ(state.last_created_stream_id, 0U);
     EXPECT_EQ(state.last_stream_id, 0U);
     EXPECT_EQ(conn.active_stream_count(), 1U);
 }
@@ -1233,6 +1237,7 @@ TEST(QuicConnectionTest, RejectsPeerStreamWhenConnectionOpsReturnsEmptyLease) {
     EXPECT_FALSE(received.has_value());
     EXPECT_EQ(received.error(), fiber::common::IoErr::NoMem);
     EXPECT_EQ(state.calls, 1U);
+    EXPECT_EQ(state.last_created_stream_id, 0U);
     EXPECT_EQ(conn.find_stream(0), nullptr);
     EXPECT_EQ(conn.active_stream_count(), 0U);
 }
@@ -1255,6 +1260,7 @@ TEST(QuicConnectionTest, ConnectionOpsCanCreateAndRetainRetiredResetStream) {
     ASSERT_TRUE(received.has_value());
     ASSERT_TRUE(state.lease);
     EXPECT_EQ(state.calls, 1U);
+    EXPECT_EQ(state.last_created_stream_id, 0U);
     EXPECT_EQ(state.lease->stream_id(), 0U);
     EXPECT_TRUE(state.lease->reset_received());
     EXPECT_EQ(state.lease->reset_error_code(), 7U);
@@ -1302,6 +1308,35 @@ TEST(QuicConnectionTest, RecvFinStreamRetiresAfterDataIsTaken) {
     EXPECT_EQ(conn.find_stream(0), nullptr);
     EXPECT_EQ(conn.active_stream_count(), 0U);
     EXPECT_EQ(state.calls, 1U);
+}
+
+TEST(QuicConnectionTest, AppRetainDelaysRetirementUntilAppRelease) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame frame{};
+    frame.stream_id = 0;
+    frame.length = 3;
+    frame.fin = true;
+
+    auto received = conn.recv_stream_frame(frame, slice_of("abc"));
+    ASSERT_TRUE(received.has_value());
+    auto *stream = conn.find_stream(0);
+    ASSERT_NE(stream, nullptr);
+    conn.retain_stream_app(*stream);
+
+    fiber::mem::IoBufChain out(conn.recv_extent_pool());
+    auto taken = stream->try_read(3, out);
+
+    ASSERT_TRUE(taken.has_value());
+    EXPECT_EQ(*taken, 3U);
+    EXPECT_NE(conn.find_stream(0), nullptr);
+    EXPECT_EQ(conn.active_stream_count(), 1U);
+
+    conn.release_stream_app(*stream);
+
+    EXPECT_EQ(conn.find_stream(0), nullptr);
+    EXPECT_EQ(conn.active_stream_count(), 0U);
 }
 
 TEST(QuicConnectionTest, ResetStreamCountsFinalSizeGrowthForConnectionFlowControl) {

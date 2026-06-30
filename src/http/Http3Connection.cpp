@@ -10,6 +10,7 @@
 #include "Http3Codec.h"
 #include "Http3ControlStreamDecoder.h"
 #include "Http3QpackControlStreamDecoder.h"
+#include "ServerHttp3Request.h"
 
 namespace fiber::http {
 
@@ -43,7 +44,13 @@ const quic::QuicConnection::Ops &Http3Connection::quic_ops() noexcept {
     return kOps;
 }
 
-quic::QuicStream::Lease Http3Connection::create_peer_stream(void *) noexcept {
+quic::QuicStream::Lease Http3Connection::create_peer_stream(void *owner, std::uint64_t stream_id) noexcept {
+    auto *conn = static_cast<Http3Connection *>(owner);
+    if (conn != nullptr && quic::QuicStream::is_bidirectional_stream_id(stream_id) &&
+        conn->role() == quic::QuicConnectionRole::Server && conn->options_.ops.create_server_request != nullptr) {
+        return conn->options_.ops.create_server_request(conn->options_.owner, stream_id, *conn);
+    }
+
     auto *stream = new (std::nothrow) quic::QuicStream(nullptr, &Http3Connection::destroy_peer_stream);
     return quic::QuicStream::Lease::adopt(stream);
 }
@@ -120,7 +127,15 @@ void Http3Connection::handle_peer_stream_attached(quic::QuicStream &stream) noex
             close(Http3ErrorCode::StreamCreationError);
             return;
         }
-        stream.close(error_value(Http3ErrorCode::RequestRejected));
+        ServerHttp3Request *request = ServerHttp3Request::from_stream(stream);
+        if (request == nullptr) {
+            stream.close(error_value(Http3ErrorCode::RequestRejected));
+            return;
+        }
+        quic_.retain_stream_app(stream);
+        event::EventLoop *loop = quic_.loop();
+        FIBER_ASSERT(loop != nullptr);
+        request->start_read_loop(*loop);
         return;
     }
 

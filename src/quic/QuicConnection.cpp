@@ -1249,7 +1249,7 @@ common::IoResult<QuicStream *> QuicConnection::create_peer_stream(std::uint64_t 
             .low_water = options_.recv_flow.stream_low_water,
             .max_stream_data = options_.recv_flow.stream_buffer_limit,
     };
-    QuicStream::Lease lease = options_.ops.create_stream(options_.owner);
+    QuicStream::Lease lease = options_.ops.create_stream(options_.owner, stream_id);
     auto attached = attach_stream(std::move(lease), stream_id, recv_options);
     if (!attached) {
         return std::unexpected(attached.error());
@@ -1538,10 +1538,9 @@ common::IoResult<void> QuicConnection::set_app_ops(void *owner, const Ops &ops) 
     return {};
 }
 
-void QuicConnection::release_stream_app(QuicStream &stream) noexcept {
-    stream.mark_app_released();
-    try_release_stream(stream);
-}
+void QuicConnection::retain_stream_app(QuicStream &stream) noexcept { stream.retain_app(); }
+
+void QuicConnection::release_stream_app(QuicStream &stream) noexcept { stream.release_app(); }
 
 bool QuicConnection::is_local_stream(std::uint64_t stream_id) const noexcept {
     return (stream_id & kStreamInitiatorMask) == local_initiator_bit();

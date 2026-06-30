@@ -27,7 +27,7 @@ struct ShutdownCallbackState {};
 
 void destroy_test_stream(void *, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
 
-fiber::quic::QuicStream::Lease create_stream(void * /*owner*/) noexcept {
+fiber::quic::QuicStream::Lease create_stream(void * /*owner*/, std::uint64_t /*stream_id*/) noexcept {
     return fiber::quic::QuicStream::Lease::adopt(new (std::nothrow)
                                                          fiber::quic::QuicStream(nullptr, destroy_test_stream));
 }
