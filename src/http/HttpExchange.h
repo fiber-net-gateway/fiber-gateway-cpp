@@ -19,10 +19,10 @@
 #include "../net/UdpSocket.h"
 #include "../quic/QuicConnection.h"
 #include "../quic/QuicSendScheduler.h"
+#include "Http3Protocol.h"
 #include "HttpCommon.h"
 #include "HttpExchangeIo.h"
 #include "HttpHeaders.h"
-#include "Http3Protocol.h"
 
 namespace fiber::http {
 

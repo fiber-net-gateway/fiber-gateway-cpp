@@ -16,8 +16,7 @@ class Http3Server::ServerConnection final : public common::NonCopyable, public c
 public:
     ServerConnection(const quic::QuicConnection::Options &quic_options, const HttpHandler &handler,
                      const HttpServerOptions &http_options) noexcept :
-        handler_(handler),
-        http_options_(http_options), quic_(make_quic_options(quic_options, this)),
+        handler_(handler), http_options_(http_options), quic_(make_quic_options(quic_options, this)),
         h3_(quic_, make_http3_options(this)) {}
 
     [[nodiscard]] quic::QuicConnection &quic() noexcept { return quic_; }
@@ -30,8 +29,8 @@ public:
     }
 
 private:
-    [[nodiscard]] static quic::QuicConnection::Options
-    make_quic_options(const quic::QuicConnection::Options &base, ServerConnection *owner) noexcept {
+    [[nodiscard]] static quic::QuicConnection::Options make_quic_options(const quic::QuicConnection::Options &base,
+                                                                         ServerConnection *owner) noexcept {
         quic::QuicConnection::Options options = base;
         options.destroy_owner = owner;
         options.on_destroy = &ServerConnection::destroy_connection;
@@ -166,9 +165,8 @@ void Http3Server::serve() noexcept {
             continue;
         }
         shard->recv_started = true;
-        async::spawn(*shard->loop, [endpoint = &shard->endpoint]() -> async::DetachedTask {
-            co_await endpoint->recv_loop();
-        });
+        async::spawn(*shard->loop,
+                     [endpoint = &shard->endpoint]() -> async::DetachedTask { co_await endpoint->recv_loop(); });
     }
 }
 
@@ -200,8 +198,8 @@ bool Http3Server::valid() const noexcept {
 
 const net::SocketAddress &Http3Server::local_addr() const noexcept { return local_addr_; }
 
-quic::QuicConnection::Lease
-Http3Server::create_connection_op(void *owner, const quic::QuicConnection::Options &options) noexcept {
+quic::QuicConnection::Lease Http3Server::create_connection_op(void *owner,
+                                                              const quic::QuicConnection::Options &options) noexcept {
     auto *server = static_cast<Http3Server *>(owner);
     if (server == nullptr) {
         return {};
