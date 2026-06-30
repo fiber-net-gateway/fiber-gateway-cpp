@@ -12,6 +12,10 @@ namespace {
     {name_literal, value_literal, fiber::http::http_header_name_hash(name_literal),                                    \
      static_cast<std::uint16_t>(sizeof(name_literal) - 1), static_cast<std::uint16_t>(sizeof(value_literal) - 1)}
 
+[[nodiscard]] bool same_bytes(std::string_view left, std::string_view right) noexcept {
+    return left.size() == right.size() && left == right;
+}
+
 } // namespace
 
 const Http3QpackStaticTable::StaticEntry Http3QpackStaticTable::kEntries_[kEntryCount] = {
@@ -128,6 +132,39 @@ bool Http3QpackStaticTable::get_by_index(std::uint32_t index, TableEntryView &vi
     view.value = std::string_view(entry.value, entry.value_len);
     view.name_hash = entry.name_hash;
     return true;
+}
+
+Http3QpackStaticTable::FindResult Http3QpackStaticTable::find(std::string_view name, std::uint64_t name_hash,
+                                                              std::string_view value) noexcept {
+    FindResult name_match;
+    for (std::uint32_t i = 0; i < kEntryCount; ++i) {
+        const StaticEntry &entry = kEntries_[i];
+        if (entry.name_hash != name_hash || entry.name_len != name.size()) {
+            continue;
+        }
+        const std::string_view entry_name(entry.name, entry.name_len);
+        if (!http_header_name_equals_ci(name, entry_name)) {
+            continue;
+        }
+
+        const std::string_view entry_value(entry.value, entry.value_len);
+        if (entry.value_len == value.size() && same_bytes(value, entry_value)) {
+            return {
+                    .kind = FindKind::EntryMatch,
+                    .index = i,
+                    .entry = {.name = entry_name, .value = entry_value, .name_hash = entry.name_hash},
+            };
+        }
+
+        if (name_match.kind == FindKind::NoMatch) {
+            name_match.kind = FindKind::NameMatch;
+            name_match.index = i;
+            name_match.entry.name = entry_name;
+            name_match.entry.value = entry_value;
+            name_match.entry.name_hash = entry.name_hash;
+        }
+    }
+    return name_match;
 }
 
 #undef FIBER_HTTP3_QPACK_STATIC_ENTRY
