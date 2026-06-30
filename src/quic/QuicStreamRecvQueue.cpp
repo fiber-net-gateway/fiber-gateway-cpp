@@ -550,6 +550,9 @@ common::IoResult<std::size_t> QuicStreamRecvQueue::insert_reassembled(std::uint6
 
 common::IoResult<std::size_t> QuicStreamRecvQueue::take_reassembled(std::size_t max_bytes,
                                                                     mem::IoBufChain &out) noexcept {
+    if (!out.bound()) {
+        out.bind_node_pool(*pool_);
+    }
     FIBER_ASSERT(&out.node_pool() == pool_);
     std::size_t taken = 0;
     while (max_bytes != 0 && head_ != nullptr && head_->offset == next_read_offset_) {

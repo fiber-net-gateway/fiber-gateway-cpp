@@ -88,6 +88,7 @@ public:
     [[nodiscard]] const IoBuf *first_writable() const noexcept;
 
 private:
+    void bind_unbound_destination(IoBufChain &dst) const noexcept;
     void release_nodes(IoBufNode *node) noexcept;
     static void reset_node_for_chain(IoBufNode &node) noexcept;
 
