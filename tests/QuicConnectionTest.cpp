@@ -1264,6 +1264,11 @@ TEST(QuicConnectionTest, ConnectionOpsCanCreateAndRetainRetiredResetStream) {
     EXPECT_EQ(state.lease->stream_id(), 0U);
     EXPECT_TRUE(state.lease->reset_received());
     EXPECT_EQ(state.lease->reset_error_code(), 7U);
+    // RESET_STREAM ends the recv side of this bidi stream but does not retire it
+    // (send side still open). close() retires it while the app-held lease keeps
+    // the object alive.
+    EXPECT_TRUE(state.lease->attached_to_connection());
+    state.lease->close();
     EXPECT_FALSE(state.lease->attached_to_connection());
     EXPECT_EQ(conn.active_stream_count(), 0U);
     state.lease.reset();
@@ -1273,69 +1278,85 @@ TEST(QuicConnectionTest, RecvFinStreamRetiresAfterDataIsTaken) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
     fiber::quic::QuicConnection conn(options);
-    fiber::quic::QuicStreamFrame frame{};
-    frame.stream_id = 0;
-    frame.length = 3;
-    frame.fin = true;
-
-    auto received = conn.recv_stream_frame(frame, slice_of("abc"));
-    ASSERT_TRUE(received.has_value());
-    auto *stream = conn.find_stream(0);
+    // Stream 2 is a peer-initiated unidirectional stream (server role): only the
+    // recv direction applies, so recv_done retires it. The natural trigger is a
+    // FIN frame arriving once the app has consumed all buffered data: at recv
+    // time finished() holds, so on_stream_data_recv retires the stream.
+    constexpr std::uint64_t kStreamId = 2;
+    fiber::quic::QuicStreamFrame data{};
+    data.stream_id = kStreamId;
+    data.length = 3;
+    ASSERT_TRUE(conn.recv_stream_frame(data, slice_of("abc")).has_value());
+    auto *stream = conn.find_stream(kStreamId);
     ASSERT_NE(stream, nullptr);
-    EXPECT_TRUE(stream->has_final_size());
-    EXPECT_EQ(stream->final_size(), 3U);
+    EXPECT_FALSE(stream->has_final_size());
 
     fiber::mem::IoBufChain out(conn.recv_extent_pool());
     auto taken = stream->try_read(3, out);
-
     ASSERT_TRUE(taken.has_value());
     EXPECT_EQ(*taken, 3U);
     EXPECT_EQ(out.readable_bytes(), 3U);
-    conn.release_stream_app(*stream);
-    EXPECT_EQ(conn.find_stream(0), nullptr);
+    // Not retired yet: no FIN has arrived.
+    EXPECT_NE(conn.find_stream(kStreamId), nullptr);
+    EXPECT_EQ(conn.active_stream_count(), 1U);
+
+    fiber::quic::QuicStreamFrame fin{};
+    fin.stream_id = kStreamId;
+    fin.has_offset = true;
+    fin.offset = 3; // final_size == already-consumed offset
+    fin.fin = true;
+    ASSERT_TRUE(conn.recv_stream_frame(fin, {}).has_value());
+    EXPECT_TRUE(stream->has_final_size());
+    EXPECT_EQ(stream->final_size(), 3U);
+    // recv_done → peer-uni retires.
+    EXPECT_EQ(conn.find_stream(kStreamId), nullptr);
     EXPECT_EQ(conn.active_stream_count(), 0U);
 
-    auto duplicate = conn.recv_stream_frame(frame, slice_of("abc"));
+    auto duplicate = conn.recv_stream_frame(fin, {});
     EXPECT_TRUE(duplicate.has_value());
     EXPECT_EQ(conn.active_stream_count(), 0U);
 
     fiber::quic::QuicStreamFrame conflicting{};
-    conflicting.stream_id = 0;
+    conflicting.stream_id = kStreamId;
     conflicting.length = 4;
     conflicting.fin = true;
     auto ignored_conflict = conn.recv_stream_frame(conflicting, slice_of("abcd"));
     EXPECT_TRUE(ignored_conflict.has_value());
-    EXPECT_EQ(conn.find_stream(0), nullptr);
+    EXPECT_EQ(conn.find_stream(kStreamId), nullptr);
     EXPECT_EQ(conn.active_stream_count(), 0U);
     EXPECT_EQ(state.calls, 1U);
 }
 
-TEST(QuicConnectionTest, AppRetainDelaysRetirementUntilAppRelease) {
+TEST(QuicConnectionTest, BidiStreamNotRetiredUntilBothDirectionsDone) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
     fiber::quic::QuicConnection conn(options);
+    // Stream 0 is a peer-initiated bidirectional stream (server role): both recv
+    // and send must be done. Recv finishing alone must NOT retire, or the app
+    // could no longer write a response (conn_ would be detached).
+    constexpr std::uint64_t kStreamId = 0;
     fiber::quic::QuicStreamFrame frame{};
-    frame.stream_id = 0;
+    frame.stream_id = kStreamId;
     frame.length = 3;
     frame.fin = true;
 
     auto received = conn.recv_stream_frame(frame, slice_of("abc"));
     ASSERT_TRUE(received.has_value());
-    auto *stream = conn.find_stream(0);
+    auto *stream = conn.find_stream(kStreamId);
     ASSERT_NE(stream, nullptr);
-    conn.retain_stream_app(*stream);
 
     fiber::mem::IoBufChain out(conn.recv_extent_pool());
     auto taken = stream->try_read(3, out);
-
     ASSERT_TRUE(taken.has_value());
     EXPECT_EQ(*taken, 3U);
-    EXPECT_NE(conn.find_stream(0), nullptr);
+
+    // recv_done but send side never closed → must stay attached.
+    EXPECT_NE(conn.find_stream(kStreamId), nullptr);
     EXPECT_EQ(conn.active_stream_count(), 1U);
 
-    conn.release_stream_app(*stream);
-
-    EXPECT_EQ(conn.find_stream(0), nullptr);
+    // Forcing the stream closed retires it (closed_ escape hatch).
+    stream->close();
+    EXPECT_EQ(conn.find_stream(kStreamId), nullptr);
     EXPECT_EQ(conn.active_stream_count(), 0U);
 }
 
@@ -1798,6 +1819,10 @@ TEST(QuicConnectionTest, ResetStreamCreatesAndRetiresPeerStream) {
     auto received = conn.recv_reset_stream_frame(reset);
 
     ASSERT_TRUE(received.has_value());
+    // RESET_STREAM ends the recv side of this bidi stream but does not retire it
+    // (the send side is still open). close() retires it.
+    ASSERT_NE(conn.find_stream(0), nullptr);
+    conn.find_stream(0)->close();
     EXPECT_EQ(conn.find_stream(0), nullptr);
     EXPECT_EQ(conn.active_stream_count(), 0U);
 
@@ -1816,10 +1841,9 @@ TEST(QuicConnectionTest, LowerPeerStreamBelowOpenedWatermarkIsGoneWhenMissing) {
     auto options = server_options_with_factory(state);
     fiber::quic::QuicConnection conn(options);
 
-    // Open stream 0, then retire it with a FIN (final_size 0). Test streams are
-    // app-released by default and carry no local send work, so receiving the
-    // FIN makes the stream ready_for_connection_release and try_release_stream
-    // retires it.
+    // Open bidi stream 0, receive its FIN. Under the direction-aware retire
+    // model a bidi stream is not retired by recv_done alone (the local send
+    // side must also close), so close() the stream to retire it.
     fiber::quic::QuicStreamFrame open{};
     open.stream_id = 0;
     ASSERT_TRUE(conn.recv_stream_frame(open, {}).has_value());
@@ -1828,6 +1852,8 @@ TEST(QuicConnectionTest, LowerPeerStreamBelowOpenedWatermarkIsGoneWhenMissing) {
     fin.fin = true;
     ASSERT_TRUE(conn.recv_stream_frame(fin, {}).has_value());
     ASSERT_EQ(state.calls, 1U);
+    ASSERT_NE(conn.find_stream(0), nullptr); // recv_done but not retired (bidi)
+    conn.find_stream(0)->close();
     EXPECT_EQ(conn.find_stream(0), nullptr); // retired
     EXPECT_EQ(conn.active_stream_count(), 0U);
 
@@ -1940,22 +1966,27 @@ TEST(QuicConnectionTest, ImplicitlyOpenedPeerStreamIsOpenAndHonorsLaterFinAndRes
     EXPECT_FALSE(stream4->has_final_size());
     EXPECT_FALSE(stream4->reset_received());
 
-    // A later FIN on the implicit stream 4 is honored: it sets the final size
-    // and (test streams are app-released with no local send work) retires the
-    // stream. Had the FIN been dropped, stream 4 would still be open.
+    // A later FIN on the implicit bidi stream 4 is honored: it sets the final
+    // size. The stream is not retired by recv_done alone (bidi needs the send
+    // side closed too); close() retires it. Had the FIN been dropped, stream 4
+    // would still be open with no final size.
     fiber::quic::QuicStreamFrame fin4{};
     fin4.stream_id = 4;
     fin4.fin = true;
     ASSERT_TRUE(conn.recv_stream_frame(fin4, {}).has_value());
+    ASSERT_NE(conn.find_stream(4), nullptr);
+    conn.find_stream(4)->close();
     EXPECT_EQ(conn.find_stream(4), nullptr);
     EXPECT_EQ(conn.active_stream_count(), 2U);
 
-    // A later RESET_STREAM on the implicit stream 0 is honored likewise.
+    // A later RESET_STREAM on the implicit bidi stream 0 is honored likewise.
     fiber::quic::QuicResetStreamFrame reset0{};
     reset0.id = 0;
     reset0.error_code = 7;
     reset0.final_size = 0;
     ASSERT_TRUE(conn.recv_reset_stream_frame(reset0).has_value());
+    ASSERT_NE(conn.find_stream(0), nullptr);
+    conn.find_stream(0)->close();
     EXPECT_EQ(conn.find_stream(0), nullptr);
     EXPECT_EQ(conn.active_stream_count(), 1U); // only stream 8 remains
 }
@@ -2005,11 +2036,14 @@ TEST(QuicConnectionTest, RetiringPeerStreamQueuesMaxStreamsWithinConcurrentLimit
     // Retiring one peer stream grows the advertised max_streams (a MAX_STREAMS
     // frame is queued) and frees a concurrent slot, so the next in-range stream
     // can still open. This is the concurrent-active-stream accounting, which is
-    // a non-fatal flow-control gate (RFC 9000 §4.6), NOT a peer violation.
+    // a non-fatal flow-control gate (RFC 9000 §4.6), NOT a peer violation. A
+    // bidi stream is retired by closing its send side (recv_done alone is not
+    // enough), so close() stream 0 to retire it.
     fiber::quic::QuicStreamFrame fin{};
     fin.stream_id = 0;
     fin.fin = true;
     ASSERT_TRUE(conn.recv_stream_frame(fin, {}).has_value());
+    conn.find_stream(0)->close();
 
     EXPECT_EQ(conn.active_stream_count(), 3U);
     EXPECT_EQ(count_pending_max_streams(conn, fiber::quic::QuicFrameType::MaxStreamsBidi, 5), 1U);

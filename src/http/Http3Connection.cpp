@@ -132,7 +132,6 @@ void Http3Connection::handle_peer_stream_attached(quic::QuicStream &stream) noex
             stream.close(error_value(Http3ErrorCode::RequestRejected));
             return;
         }
-        quic_.retain_stream_app(stream);
         event::EventLoop *loop = quic_.loop();
         FIBER_ASSERT(loop != nullptr);
         request->start_read_loop(*loop);

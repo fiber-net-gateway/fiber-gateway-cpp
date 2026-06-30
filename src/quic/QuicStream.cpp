@@ -609,23 +609,27 @@ void QuicStream::maybe_extend_recv_flow_control() noexcept {
     }
 }
 
-void QuicStream::retain_app() noexcept { app_released_ = false; }
-
-void QuicStream::release_app() noexcept {
-    app_released_ = true;
-    if (conn_ != nullptr) {
-        conn_->try_release_stream(*this);
-    }
-}
-
-void QuicStream::mark_app_released() noexcept { app_released_ = true; }
-
 bool QuicStream::ready_for_connection_release() const noexcept {
     if (!attached_to_connection_) {
         return false;
     }
-    return app_released_ && (closed_ || recv_queue_.finished() || recv_queue_.reset_received()) &&
-           send_queue_.empty() && !stream_send_pending_;
+    // send 侧排空条件（所有路径共用）：缓冲清空且无待打包帧。
+    const bool send_drained = send_queue_.empty() && !stream_send_pending_;
+
+    // 强制关闭逃生口：close() 已 reset 发送队列 → empty() 成立。
+    // 仍等 pending 帧排空，避免 retire 后 packet number space 残留 STREAM 帧误用。
+    if (closed_) {
+        return send_drained;
+    }
+
+    const bool recv_done = recv_queue_.finished() || recv_queue_.reset_received();
+    const bool send_done = send_queue_.send_closed() && send_drained;
+
+    if (bidirectional()) {
+        return recv_done && send_done;
+    }
+    // 单向流：只有适用方向需要结束。local 发起看 send，peer 发起看 recv。
+    return local_initiated_ ? send_done : recv_done;
 }
 
 bool QuicStream::ready_for_destruction() const noexcept { return !attached_to_connection_ && ref_count_ == 0; }
@@ -641,13 +645,14 @@ bool QuicStream::is_unidirectional_stream_id(std::uint64_t stream_id) noexcept {
 }
 
 void QuicStream::assign_conn_ctx(QuicConnection &conn, std::uint64_t stream_id,
-                                 QuicStreamRecvQueue::Options recv_options) noexcept {
+                                 QuicStreamRecvQueue::Options recv_options, bool local_initiated) noexcept {
     FIBER_ASSERT(!attached_to_connection_);
     FIBER_ASSERT(!stream_id_assigned());
     FIBER_ASSERT(!recv_queue_.initialized());
     FIBER_ASSERT(!send_queue_.initialized());
     stream_id_ = stream_id;
     conn_ = &conn;
+    local_initiated_ = local_initiated;
     recv_queue_.init(conn.recv_extent_pool(), recv_options);
     send_queue_.init(conn.recv_extent_pool());
     attached_to_connection_ = true;
@@ -659,6 +664,10 @@ void QuicStream::detach_from_connection() noexcept {
     attached_to_connection_ = false;
     stream_send_pending_ = false;
     stream_data_blocked_reported_ = false;
+    // 兜底：退役瞬间若发送侧尚未关闭，显式 reset 释放缓冲，避免悬挂。
+    if (send_queue_.initialized() && !send_queue_.reset_sent()) {
+        (void) send_queue_.reset(0);
+    }
 }
 
 void QuicStream::retain() noexcept { ++ref_count_; }

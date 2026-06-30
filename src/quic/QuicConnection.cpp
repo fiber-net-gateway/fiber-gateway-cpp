@@ -1074,7 +1074,8 @@ void QuicConnection::on_loss_detection_timer(QuicConnection *connection) noexcep
 
 
 common::IoResult<QuicStream *> QuicConnection::attach_stream(QuicStream::Lease &&lease, std::uint64_t stream_id,
-                                                             QuicStreamRecvQueue::Options recv_options) noexcept {
+                                                             QuicStreamRecvQueue::Options recv_options,
+                                                             bool local_initiated) noexcept {
     if (!lease) {
         return std::unexpected(common::IoErr::NoMem);
     }
@@ -1089,7 +1090,7 @@ common::IoResult<QuicStream *> QuicConnection::attach_stream(QuicStream::Lease &
     }
 
     QuicStream *stream = lease.get();
-    stream->assign_conn_ctx(*this, stream_id, recv_options);
+    stream->assign_conn_ctx(*this, stream_id, recv_options, local_initiated);
 
     if (!streams_.insert(std::move(lease))) {
         stream->detach_from_connection();
@@ -1133,7 +1134,7 @@ common::IoResult<QuicStream *> QuicConnection::try_attach_local_stream(QuicStrea
             .max_stream_data = options_.recv_flow.stream_buffer_limit,
     };
     const std::uint64_t id = next;
-    auto attached = attach_stream(std::move(stream), id, recv_options);
+    auto attached = attach_stream(std::move(stream), id, recv_options, /*local_initiated=*/true);
     if (!attached) {
         return std::unexpected(attached.error());
     }
@@ -1250,7 +1251,7 @@ common::IoResult<QuicStream *> QuicConnection::create_peer_stream(std::uint64_t 
             .max_stream_data = options_.recv_flow.stream_buffer_limit,
     };
     QuicStream::Lease lease = options_.ops.create_stream(options_.owner, stream_id);
-    auto attached = attach_stream(std::move(lease), stream_id, recv_options);
+    auto attached = attach_stream(std::move(lease), stream_id, recv_options, /*local_initiated=*/false);
     if (!attached) {
         return std::unexpected(attached.error());
     }
@@ -1537,10 +1538,6 @@ common::IoResult<void> QuicConnection::set_app_ops(void *owner, const Ops &ops) 
     options_.ops = ops;
     return {};
 }
-
-void QuicConnection::retain_stream_app(QuicStream &stream) noexcept { stream.retain_app(); }
-
-void QuicConnection::release_stream_app(QuicStream &stream) noexcept { stream.release_app(); }
 
 bool QuicConnection::is_local_stream(std::uint64_t stream_id) const noexcept {
     return (stream_id & kStreamInitiatorMask) == local_initiator_bit();
