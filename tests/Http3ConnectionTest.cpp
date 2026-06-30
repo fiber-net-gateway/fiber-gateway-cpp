@@ -15,12 +15,64 @@
 #include "quic/QuicCursor.h"
 #include "quic/QuicFrame.h"
 #include "quic/QuicTransportCodec.h"
+#include "quic/QuicTransportParamsCodec.h"
 
 #include "QuicTestLoop.h"
 
 namespace {
 
 using namespace std::chrono_literals;
+
+struct StartResult {
+    bool ok = false;
+    fiber::common::IoErr error = fiber::common::IoErr::None;
+};
+
+StartResult to_start_result(fiber::common::IoResult<void> result) noexcept {
+    if (result) {
+        return {.ok = true};
+    }
+    return {.ok = false, .error = result.error()};
+}
+
+fiber::quic::QuicTransportParams valid_peer_transport_params(const fiber::quic::QuicConnection::Options &options) {
+    fiber::quic::QuicTransportParams params{};
+    params.has_initial_source_connection_id = true;
+    params.initial_source_connection_id = options.remote_connection_id;
+    params.max_udp_payload_size = fiber::quic::kMinInitialDatagramSize;
+    params.active_connection_id_limit = 2;
+    params.initial_max_data = 4096;
+    params.initial_max_stream_data_uni = 1024;
+    params.initial_max_streams_uni = 8;
+    params.initial_max_streams_bidi = 8;
+    return params;
+}
+
+fiber::async::DetachedTask start_h3(fiber::http::Http3Connection *h3, std::promise<StartResult> *done) {
+    auto result = co_await h3->start();
+    done->set_value(to_start_result(result));
+}
+
+StartResult start_h3_on_loop(fiber::event::EventLoop &loop, fiber::quic::QuicConnection &quic,
+                             const fiber::quic::QuicConnection::Options &options, fiber::http::Http3Connection &h3) {
+    auto params = valid_peer_transport_params(options);
+    auto applied = quic.apply_peer_transport_params(params);
+    if (!applied) {
+        return {.ok = false, .error = applied.error()};
+    }
+    auto established = quic.mark_established();
+    if (!established) {
+        return {.ok = false, .error = established.error()};
+    }
+
+    std::promise<StartResult> done;
+    auto future = done.get_future();
+    fiber::async::spawn(loop, [&h3, &done]() -> fiber::async::DetachedTask { return start_h3(&h3, &done); });
+    if (future.wait_for(2s) != std::future_status::ready) {
+        return {.ok = false, .error = fiber::common::IoErr::TimedOut};
+    }
+    return future.get();
+}
 
 void append_varint(std::vector<std::uint8_t> &out, std::uint64_t value) {
     std::array<std::uint8_t, 8> buf{};
@@ -94,16 +146,23 @@ fiber::async::DetachedTask feed_two_streams_then_wait(fiber::quic::QuicConnectio
 } // namespace
 
 TEST(Http3ConnectionTest, StartsOverOpenQuicConnection) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &fiber::test::quic_loop();
+    quic_options.loop = &group.at(0);
     fiber::quic::QuicConnection quic(quic_options);
     fiber::http::Http3Connection h3(quic);
 
-    auto result = h3.start();
+    auto result = start_h3_on_loop(group.at(0), quic, quic_options, h3);
 
-    EXPECT_TRUE(result.has_value());
+    EXPECT_TRUE(result.ok) << static_cast<int>(result.error);
     EXPECT_EQ(h3.state(), fiber::http::Http3ConnectionState::Running);
     EXPECT_EQ(h3.role(), fiber::quic::QuicConnectionRole::Server);
+    EXPECT_NE(quic.find_stream(3), nullptr);
+
+    group.stop();
+    group.join();
 }
 
 TEST(Http3ConnectionTest, AppliesPeerSettingsOnce) {
@@ -131,7 +190,8 @@ TEST(Http3ConnectionTest, ReadsPeerControlSettingsStream) {
     quic_options.loop = &group.at(0);
     fiber::quic::QuicConnection quic(quic_options);
     fiber::http::Http3Connection h3(quic);
-    ASSERT_TRUE(h3.start().has_value());
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
 
     auto bytes = control_settings_stream(8);
     std::promise<void> done;
@@ -158,7 +218,8 @@ TEST(Http3ConnectionTest, RejectsSecondControlStream) {
     quic_options.loop = &group.at(0);
     fiber::quic::QuicConnection quic(quic_options);
     fiber::http::Http3Connection h3(quic);
-    ASSERT_TRUE(h3.start().has_value());
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
 
     auto first = control_settings_stream(0);
     auto second = control_settings_stream(0);
@@ -183,7 +244,8 @@ TEST(Http3ConnectionTest, ClosingControlStreamIsCriticalStreamError) {
     quic_options.loop = &group.at(0);
     fiber::quic::QuicConnection quic(quic_options);
     fiber::http::Http3Connection h3(quic);
-    ASSERT_TRUE(h3.start().has_value());
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
 
     auto control = uni_stream_type(fiber::http::Http3StreamType::Control);
     std::promise<void> done;
@@ -212,7 +274,8 @@ TEST(Http3ConnectionTest, ReadsQpackEncoderStreamCapacityZero) {
     quic_options.loop = &group.at(0);
     fiber::quic::QuicConnection quic(quic_options);
     fiber::http::Http3Connection h3(quic);
-    ASSERT_TRUE(h3.start().has_value());
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
 
     auto qpack = uni_stream_type(fiber::http::Http3StreamType::QpackEncoder);
     qpack.push_back(0x20); // Set Dynamic Table Capacity = 0.
@@ -238,7 +301,8 @@ TEST(Http3ConnectionTest, ReadsQpackDecoderStreamUntilShutdown) {
     quic_options.loop = &group.at(0);
     fiber::quic::QuicConnection quic(quic_options);
     fiber::http::Http3Connection h3(quic);
-    ASSERT_TRUE(h3.start().has_value());
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
 
     auto qpack = uni_stream_type(fiber::http::Http3StreamType::QpackDecoder);
     std::promise<void> done;
@@ -263,7 +327,8 @@ TEST(Http3ConnectionTest, ReadsQpackDecoderStreamCancellationUntilShutdown) {
     quic_options.loop = &group.at(0);
     fiber::quic::QuicConnection quic(quic_options);
     fiber::http::Http3Connection h3(quic);
-    ASSERT_TRUE(h3.start().has_value());
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
 
     auto qpack = uni_stream_type(fiber::http::Http3StreamType::QpackDecoder);
     qpack.push_back(0x40); // Stream Cancellation for stream 0.
@@ -289,7 +354,8 @@ TEST(Http3ConnectionTest, RejectsSecondQpackEncoderStream) {
     quic_options.loop = &group.at(0);
     fiber::quic::QuicConnection quic(quic_options);
     fiber::http::Http3Connection h3(quic);
-    ASSERT_TRUE(h3.start().has_value());
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
 
     auto first = uni_stream_type(fiber::http::Http3StreamType::QpackEncoder);
     auto second = uni_stream_type(fiber::http::Http3StreamType::QpackEncoder);

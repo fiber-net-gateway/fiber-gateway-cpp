@@ -60,7 +60,7 @@ public:
                state_ == Http3ConnectionState::Closed;
     }
 
-    common::IoResult<void> start() noexcept;
+    async::Task<common::IoResult<void>> start() noexcept;
     common::IoResult<void> apply_peer_settings(const Http3Settings &settings) noexcept;
     void graceful_shutdown(Http3ErrorCode error = Http3ErrorCode::NoError) noexcept;
     void close(Http3ErrorCode error = Http3ErrorCode::NoError) noexcept;
@@ -77,6 +77,7 @@ private:
     using PeerStreamReaderList = common::IntrusiveList<PeerStreamReader, offsetof(PeerStreamReader, link)>;
 
     [[nodiscard]] static const quic::QuicConnection::Ops &quic_ops() noexcept;
+    [[nodiscard]] static quic::QuicStream::Lease create_owned_stream() noexcept;
     [[nodiscard]] static quic::QuicStream::Lease create_peer_stream(void *owner, std::uint64_t stream_id) noexcept;
     static void on_peer_stream_attached(void *owner, quic::QuicStream &stream) noexcept;
     static void destroy_peer_stream(void *owner, quic::QuicStream &stream) noexcept;
@@ -93,6 +94,7 @@ private:
     quic::QuicConnection &quic_;
     Options options_{};
     Http3Settings peer_settings_{};
+    quic::QuicStream::Lease local_control_stream_{};
     quic::QuicStream *peer_control_stream_ = nullptr;
     quic::QuicStream *peer_qpack_encoder_stream_ = nullptr;
     quic::QuicStream *peer_qpack_decoder_stream_ = nullptr;
