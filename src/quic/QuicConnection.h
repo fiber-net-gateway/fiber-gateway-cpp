@@ -415,6 +415,7 @@ public:
     [[nodiscard]] event::EventLoop *loop() noexcept { return loop_; }
     [[nodiscard]] const event::EventLoop *loop() const noexcept { return loop_; }
     [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return loop_->io_buf_node_pool(); }
+    common::IoResult<void> set_app_ops(void *owner, const Ops &ops) noexcept;
     void release_stream_app(QuicStream &stream) noexcept;
     void drop_stream_send_ticket(std::uint64_t stream_id) noexcept;
     [[nodiscard]] std::uint64_t recv_data_consumed() const noexcept { return recv_data_consumed_; }
