@@ -245,6 +245,48 @@ TEST(IoBufChainTest, TakePrefixMovesWholeNodesAndAppendsToExistingDestination) {
     EXPECT_EQ(dst.writable_bytes(), 7u);
 }
 
+TEST(IoBufChainTest, TakePrefixBindsEmptyDestinationToSourcePool) {
+    IoBufNodePool pool;
+    IoBuf buf = IoBuf::allocate(4);
+    ASSERT_TRUE(buf);
+
+    std::memcpy(buf.writable_data(), "abc", 3);
+    buf.commit(3);
+
+    IoBufChain src(pool);
+    IoBufChain dst;
+    ASSERT_TRUE(src.append(std::move(buf)));
+    EXPECT_FALSE(dst.bound());
+
+    ASSERT_TRUE(src.take_prefix(2, dst));
+
+    EXPECT_TRUE(dst.bound());
+    EXPECT_EQ(&dst.node_pool(), &pool);
+    EXPECT_EQ(readable_string(src), "c");
+    EXPECT_EQ(readable_string(dst), "ab");
+}
+
+TEST(IoBufChainTest, RetainPrefixBindsEmptyOutputToSourcePool) {
+    IoBufNodePool pool;
+    IoBuf buf = IoBuf::allocate(8);
+    ASSERT_TRUE(buf);
+
+    std::memcpy(buf.writable_data(), "abcd", 4);
+    buf.commit(4);
+
+    IoBufChain src(pool);
+    IoBufChain out;
+    ASSERT_TRUE(src.append(std::move(buf)));
+    EXPECT_FALSE(out.bound());
+
+    ASSERT_TRUE(src.retain_prefix(3, out));
+
+    EXPECT_TRUE(out.bound());
+    EXPECT_EQ(&out.node_pool(), &pool);
+    EXPECT_EQ(readable_string(src), "abcd");
+    EXPECT_EQ(readable_string(out), "abc");
+}
+
 TEST(IoBufChainTest, TakePrefixSplitsBoundaryNodeUsingRetainedSlice) {
     IoBufNodePool pool;
     IoBuf buf = IoBuf::allocate(8);

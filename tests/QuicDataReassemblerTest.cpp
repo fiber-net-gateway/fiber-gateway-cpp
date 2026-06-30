@@ -33,10 +33,13 @@ TEST(QuicDataReassemblerTest, SequentialInsertCanBeTakenImmediately) {
     ASSERT_TRUE(inserted.has_value());
     EXPECT_EQ(*inserted, 3U);
 
-    fiber::mem::IoBufChain out(pool);
+    fiber::mem::IoBufChain out;
+    EXPECT_FALSE(out.bound());
     auto taken = reassembler.take_contiguous(out);
     ASSERT_TRUE(taken.has_value());
     EXPECT_EQ(*taken, 3U);
+    EXPECT_TRUE(out.bound());
+    EXPECT_EQ(&out.node_pool(), &pool);
     EXPECT_EQ(chain_to_string(out), "abc");
     EXPECT_EQ(reassembler.next_offset(), 3U);
     EXPECT_EQ(reassembler.buffered_bytes(), 0U);

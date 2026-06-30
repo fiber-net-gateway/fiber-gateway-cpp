@@ -119,6 +119,13 @@ void IoBufChain::bind_node_pool(IoBufNodePool &node_pool) noexcept {
     node_pool_ = &node_pool;
 }
 
+void IoBufChain::bind_unbound_destination(IoBufChain &dst) const noexcept {
+    if (node_pool_ == nullptr || dst.node_pool_ != nullptr) {
+        return;
+    }
+    dst.bind_node_pool(*node_pool_);
+}
+
 bool IoBufChain::append(IoBuf &&buf) noexcept {
     if (!buf) {
         return true;
@@ -190,6 +197,7 @@ bool IoBufChain::prepend_node(IoBufNode *node) noexcept {
 
 bool IoBufChain::retain_prefix(std::size_t bytes, IoBufChain &out) const noexcept {
     FIBER_ASSERT(bytes <= readable_bytes_);
+    bind_unbound_destination(out);
     FIBER_ASSERT(same_pool(out));
 
     std::size_t remaining = bytes;
@@ -222,6 +230,7 @@ bool IoBufChain::retain_prefix(std::size_t bytes, IoBufChain &out) const noexcep
 bool IoBufChain::take_prefix(std::size_t bytes, IoBufChain &dst) noexcept {
     FIBER_ASSERT(this != &dst);
     FIBER_ASSERT(bytes <= readable_bytes_);
+    bind_unbound_destination(dst);
     FIBER_ASSERT(same_pool(dst));
     const bool transfers_complete = bytes == readable_bytes_ && complete_;
 

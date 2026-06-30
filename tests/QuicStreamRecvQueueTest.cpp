@@ -126,10 +126,13 @@ TEST(QuicStreamRecvQueueTest, LowWaterSuggestsNextMaxStreamDataAfterApplicationT
     std::string payload(50 * 1024, 'd');
     ASSERT_TRUE(fiber::quic::QuicStreamRecvQueueTestAccess::recv_stream_data(queue, 0, slice_of(payload)).has_value());
 
-    fiber::mem::IoBufChain out(pool);
+    fiber::mem::IoBufChain out;
+    EXPECT_FALSE(out.bound());
     auto taken = queue.try_take(payload.size(), out);
     ASSERT_TRUE(taken.has_value());
     EXPECT_EQ(*taken, payload.size());
+    EXPECT_TRUE(out.bound());
+    EXPECT_EQ(&out.node_pool(), &pool);
 
     EXPECT_TRUE(queue.should_extend_max_stream_data());
     EXPECT_EQ(queue.next_max_stream_data_limit(), 114 * 1024U);
