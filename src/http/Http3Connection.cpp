@@ -158,8 +158,7 @@ async::DetachedTask Http3Connection::run_peer_uni_stream(quic::QuicStream::Lease
     };
     peer_readers_.push_back(reader);
     ReaderScope scope{*this, reader};
-    mem::IoBufNodePool &pool = quic_.recv_extent_pool();
-    mem::IoBufChain input(pool);
+    mem::IoBufChain input;
 
     Http3VarintParser stream_type_parser;
     for (;;) {
