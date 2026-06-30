@@ -4,11 +4,13 @@
 #include <cstdint>
 #include <expected>
 #include <new>
+#include <utility>
 
 #include "../common/Assert.h"
 #include "../common/mem/IoBufChain.h"
 #include "Http3Codec.h"
 #include "Http3ControlStreamDecoder.h"
+#include "Http3ControlStreamEncoder.h"
 #include "Http3QpackControlStreamDecoder.h"
 #include "ServerHttp3Request.h"
 
@@ -44,6 +46,11 @@ const quic::QuicConnection::Ops &Http3Connection::quic_ops() noexcept {
     return kOps;
 }
 
+quic::QuicStream::Lease Http3Connection::create_owned_stream() noexcept {
+    auto *stream = new (std::nothrow) quic::QuicStream(nullptr, &Http3Connection::destroy_peer_stream);
+    return quic::QuicStream::Lease::adopt(stream);
+}
+
 quic::QuicStream::Lease Http3Connection::create_peer_stream(void *owner, std::uint64_t stream_id) noexcept {
     auto *conn = static_cast<Http3Connection *>(owner);
     if (conn != nullptr && quic::QuicStream::is_bidirectional_stream_id(stream_id) &&
@@ -51,8 +58,7 @@ quic::QuicStream::Lease Http3Connection::create_peer_stream(void *owner, std::ui
         return conn->options_.ops.create_server_request(conn->options_.owner, stream_id, *conn);
     }
 
-    auto *stream = new (std::nothrow) quic::QuicStream(nullptr, &Http3Connection::destroy_peer_stream);
-    return quic::QuicStream::Lease::adopt(stream);
+    return create_owned_stream();
 }
 
 void Http3Connection::destroy_peer_stream(void *, quic::QuicStream &stream) noexcept { delete &stream; }
@@ -63,19 +69,52 @@ void Http3Connection::on_peer_stream_attached(void *owner, quic::QuicStream &str
     conn->handle_peer_stream_attached(stream);
 }
 
-common::IoResult<void> Http3Connection::start() noexcept {
+async::Task<common::IoResult<void>> Http3Connection::start() noexcept {
     if (state_ != Http3ConnectionState::Init) {
-        return std::unexpected(common::IoErr::Already);
+        co_return std::unexpected(common::IoErr::Already);
     }
     if (quic_.closing()) {
-        return std::unexpected(common::IoErr::Canceled);
+        co_return std::unexpected(common::IoErr::Canceled);
     }
+
+    auto preface = encode_http3_control_stream_preface(options_.local_settings, quic_.recv_extent_pool());
+    if (!preface) {
+        co_return std::unexpected(preface.error());
+    }
+
     auto ops_set = quic_.set_app_ops(this, quic_ops());
     if (!ops_set) {
-        return std::unexpected(ops_set.error());
+        co_return std::unexpected(ops_set.error());
     }
     state_ = Http3ConnectionState::Running;
-    return {};
+
+    quic::QuicStream::Lease control_stream = create_owned_stream();
+    if (!control_stream) {
+        close(Http3ErrorCode::InternalError);
+        co_return std::unexpected(common::IoErr::NoMem);
+    }
+
+    auto attached = co_await quic_.attach_local_stream(std::move(control_stream), quic::QuicStreamType::Unidirectional);
+    if (!attached) {
+        close(Http3ErrorCode::StreamCreationError);
+        co_return std::unexpected(attached.error());
+    }
+
+    local_control_stream_ = (*attached)->lease();
+    mem::IoBufChain control_preface = std::move(*preface);
+    while (!control_preface.empty()) {
+        auto written = co_await local_control_stream_->write(control_preface);
+        if (!written) {
+            close(Http3ErrorCode::ClosedCriticalStream);
+            co_return std::unexpected(written.error());
+        }
+        if (*written == 0 && !control_preface.empty()) {
+            close(Http3ErrorCode::ClosedCriticalStream);
+            co_return std::unexpected(common::IoErr::WouldBlock);
+        }
+    }
+
+    co_return common::IoResult<void>{};
 }
 
 common::IoResult<void> Http3Connection::apply_peer_settings(const Http3Settings &settings) noexcept {
