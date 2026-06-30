@@ -78,8 +78,9 @@ void mark_established_with_app_keys(fiber::quic::QuicConnection &conn) {
     conn.crypto().application_write.ready = true;
 }
 
-// Open a peer-initiated stream by feeding a STREAM frame with FIN, then drain
-// it. The stream stays attached until release_stream_app() is called.
+// Open a peer-initiated stream by feeding a STREAM frame with FIN. The data is
+// left buffered (not consumed), so the stream stays attached and active until
+// something retires it (close() / consuming the data / a RESET).
 fiber::quic::QuicStream *open_peer_stream(fiber::quic::QuicConnection &conn, std::uint64_t stream_id) {
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = stream_id;
@@ -89,16 +90,7 @@ fiber::quic::QuicStream *open_peer_stream(fiber::quic::QuicConnection &conn, std
     if (!received) {
         return nullptr;
     }
-    auto *stream = conn.find_stream(stream_id);
-    if (stream == nullptr) {
-        return nullptr;
-    }
-    fiber::mem::IoBufChain out(conn.recv_extent_pool());
-    auto taken = stream->try_read(3, out);
-    if (!taken || *taken != 3) {
-        return nullptr;
-    }
-    return stream;
+    return conn.find_stream(stream_id);
 }
 
 } // namespace
@@ -136,7 +128,7 @@ TEST(QuicConnectionShutdownTest, LastStreamRetirementFinalizesShutdown) {
     EXPECT_TRUE(conn.shutting_down());
     EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::GracefulClosing);
 
-    conn.release_stream_app(*stream);
+    stream->close();
 
     EXPECT_FALSE(conn.shutting_down());
     EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Closing);
@@ -441,7 +433,7 @@ TEST(QuicConnectionShutdownTest, RepeatedShutdownIsNoOp) {
     EXPECT_EQ(conn.close_error(), fiber::quic::QuicErrorCode::InternalError);
 
     // Finalize and verify the original error is what gets serialised.
-    conn.release_stream_app(*stream);
+    stream->close();
     EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Closing);
     const auto *frame = find_pending_frame_of_type(conn, fiber::quic::QuicEncryptionLevel::Application,
                                                    fiber::quic::QuicFrameType::ConnectionClose);

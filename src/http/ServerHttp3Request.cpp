@@ -67,17 +67,10 @@ void ServerHttp3Request::destroy_owner(void *owner, quic::QuicStream &) noexcept
 }
 
 async::DetachedTask ServerHttp3Request::run_read_loop(quic::QuicStream::Lease lease) noexcept {
-    struct RequestScope {
-        ServerHttp3Request &request;
-
-        ~RequestScope() { request.stream_.release_app(); }
-    };
-
     if (!lease) {
         co_return;
     }
 
-    RequestScope scope{*this};
     mem::IoBufChain input;
 
     for (;;) {

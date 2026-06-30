@@ -120,7 +120,6 @@ public:
     [[nodiscard]] bool stop_sending() const noexcept { return recv_queue_.stop_sending(); }
     [[nodiscard]] bool recv_closed() const noexcept { return recv_queue_.finished(); }
     [[nodiscard]] bool attached_to_connection() const noexcept { return attached_to_connection_; }
-    [[nodiscard]] bool app_released() const noexcept { return app_released_; }
     [[nodiscard]] std::uint32_t ref_count() const noexcept { return ref_count_; }
     [[nodiscard]] void *owner() noexcept { return destroy_owner_; }
     [[nodiscard]] const void *owner() const noexcept { return destroy_owner_; }
@@ -146,10 +145,6 @@ public:
     // notification name.
     void notify_connection_closing() noexcept { close(); }
 
-    void retain_app() noexcept;
-    void release_app() noexcept;
-    void mark_app_released() noexcept;
-
     [[nodiscard]] bool ready_for_connection_release() const noexcept;
     [[nodiscard]] bool ready_for_destruction() const noexcept;
 
@@ -160,8 +155,8 @@ public:
 private:
     class WriteAwaiter;
 
-    void assign_conn_ctx(QuicConnection &conn, std::uint64_t stream_id,
-                         QuicStreamRecvQueue::Options recv_options) noexcept;
+    void assign_conn_ctx(QuicConnection &conn, std::uint64_t stream_id, QuicStreamRecvQueue::Options recv_options,
+                         bool local_initiated) noexcept;
     void detach_from_connection() noexcept;
     [[nodiscard]] common::IoResult<std::uint64_t> on_stream_data_recv(const std::uint8_t *src, std::size_t length,
                                                                       std::uint64_t offset, bool fin) noexcept;
@@ -198,7 +193,7 @@ private:
     std::uint32_t ref_count_ = 1;
     common::IoErr terminal_error_ = common::IoErr::None;
     bool attached_to_connection_ = false;
-    bool app_released_ = true;
+    bool local_initiated_ = false;
     bool closed_ = false;
     bool stream_send_pending_ = false;
     bool stream_data_blocked_reported_ = false;
