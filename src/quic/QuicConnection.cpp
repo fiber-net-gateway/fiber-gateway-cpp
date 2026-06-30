@@ -1529,6 +1529,15 @@ common::IoResult<void> QuicConnection::recv_streams_blocked_frame(const QuicStre
     return {};
 }
 
+common::IoResult<void> QuicConnection::set_app_ops(void *owner, const Ops &ops) noexcept {
+    if (active_stream_count() != 0) {
+        return std::unexpected(common::IoErr::Busy);
+    }
+    options_.owner = owner;
+    options_.ops = ops;
+    return {};
+}
+
 void QuicConnection::release_stream_app(QuicStream &stream) noexcept {
     stream.mark_app_released();
     try_release_stream(stream);
