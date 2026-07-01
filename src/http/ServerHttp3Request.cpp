@@ -126,13 +126,13 @@ bool equals_ascii_ci(std::string_view left, std::string_view right) noexcept {
 
 bool is_forbidden_request_stream_frame(std::uint64_t type) noexcept {
     switch (static_cast<Http3FrameType>(type)) {
-        case Http3FrameType::Data:
         case Http3FrameType::CancelPush:
         case Http3FrameType::Settings:
         case Http3FrameType::PushPromise:
         case Http3FrameType::Goaway:
         case Http3FrameType::MaxPushId:
             return true;
+        case Http3FrameType::Data:
         case Http3FrameType::Headers:
             return false;
     }
@@ -141,12 +141,27 @@ bool is_forbidden_request_stream_frame(std::uint64_t type) noexcept {
 
 } // namespace
 
+enum class ServerHttp3Request::HeaderBlockTarget : std::uint8_t {
+    Request,
+    Trailer,
+};
+
+enum class ServerHttp3Request::BodyRecvState : std::uint8_t {
+    FrameHeader,
+    DataPayload,
+    TrailerPayload,
+    WaitFin,
+    Complete,
+    Error,
+};
+
 ServerHttp3Request::ServerHttp3Request(Http3Connection &conn, const HttpServerOptions &http_options,
                                        const HttpHandler &handler) noexcept :
     quic_lease_(conn.quic().lease()), stream_(this, &ServerHttp3Request::destroy_owner),
     inbound_buf_(conn.quic().recv_extent_pool()), exchange_(conn.quic().recv_extent_pool(), http_options),
     handler_(&handler), max_qpack_string_size_(static_cast<std::uint32_t>(std::min<std::size_t>(
-                                http_options.header_large_size, std::numeric_limits<std::uint32_t>::max()))) {}
+                                http_options.header_large_size, std::numeric_limits<std::uint32_t>::max()))),
+    body_timeout_(http_options.body_timeout), body_recv_state_(BodyRecvState::FrameHeader) {}
 
 quic::QuicStream::Lease ServerHttp3Request::create(std::uint64_t stream_id, Http3Connection &conn,
                                                    const HttpServerOptions &http_options,
@@ -193,20 +208,15 @@ void ServerHttp3Request::destroy_owner(void *owner, quic::QuicStream &) noexcept
     delete static_cast<ServerHttp3Request *>(owner);
 }
 
-class ServerHttp3Request::RequestHeaderParser final : public common::NonCopyable, public common::NonMovable {
+class ServerHttp3Request::HeaderBlockParser final : public common::NonCopyable, public common::NonMovable {
 public:
-    explicit RequestHeaderParser(ServerHttp3Request &request) noexcept : request_(request) {}
+    HeaderBlockParser(ServerHttp3Request &request, HeaderBlockTarget target) noexcept :
+        request_(request), target_(target) {}
 
-    [[nodiscard]] bool init() noexcept { return qpack_decoder_.init(request_.max_qpack_string_size_); }
-    [[nodiscard]] common::IoErr process_available_input() noexcept;
+    [[nodiscard]] bool init() noexcept;
+    [[nodiscard]] common::IoErr decode(const std::uint8_t *data, std::size_t len, bool end_block) noexcept;
 
 private:
-    enum class ParseState : std::uint8_t {
-        FrameHeader,
-        HeaderPayload,
-        SkipPayload,
-    };
-
     enum PseudoHeaderSeen : std::uint8_t {
         MethodSeen = 1U << 0U,
         PathSeen = 1U << 1U,
@@ -214,8 +224,8 @@ private:
         AuthoritySeen = 1U << 3U,
     };
 
-    using PseudoHeaderHandler = common::IoErr (RequestHeaderParser::*)(std::string_view value) noexcept;
-    using RegularHeaderHandler = common::IoErr (RequestHeaderParser::*)(std::string_view value) noexcept;
+    using PseudoHeaderHandler = common::IoErr (HeaderBlockParser::*)(std::string_view value) noexcept;
+    using RegularHeaderHandler = common::IoErr (HeaderBlockParser::*)(std::string_view value) noexcept;
 
     struct PseudoHeaderRule {
         std::uint8_t seen_bit = 0;
@@ -232,9 +242,7 @@ private:
     static common::IoErr on_value_raw(void *owner, const std::uint8_t *data, std::size_t len) noexcept;
     static common::IoErr on_value_huffman(void *owner, const std::uint8_t *data, std::size_t len) noexcept;
 
-    [[nodiscard]] common::IoErr begin_frame_payload(const Http3FrameHeader &header) noexcept;
-    [[nodiscard]] common::IoErr decode_header_payload() noexcept;
-    [[nodiscard]] common::IoErr complete_request_header_block() noexcept;
+    [[nodiscard]] common::IoErr complete_header_block() noexcept;
     [[nodiscard]] common::IoErr fail(Http3ErrorCode error, common::IoErr reason = common::IoErr::Invalid) noexcept;
     [[nodiscard]] common::IoErr qpack_decode_failed(common::IoErr reason) noexcept;
     [[nodiscard]] common::IoErr validate_field(std::string_view name, std::string_view value) noexcept;
@@ -265,11 +273,8 @@ private:
     [[nodiscard]] std::string_view copy_to_pool(std::string_view value) noexcept;
 
     ServerHttp3Request &request_;
-    Http3FrameHeaderParser frame_parser_;
-    Http3PayloadSkipParser skip_parser_;
+    HeaderBlockTarget target_ = HeaderBlockTarget::Request;
     Http3QpackDecoder qpack_decoder_;
-    ParseState parse_state_ = ParseState::FrameHeader;
-    std::uint64_t frame_payload_remaining_ = 0;
     std::string_view pending_name_;
     std::uint64_t pending_name_hash_ = 0;
     bool pending_name_owned_ = false;
@@ -281,166 +286,102 @@ private:
     HttpUriParseState uri_state_{};
 };
 
-const Http3QpackDecoder::Ops &ServerHttp3Request::RequestHeaderParser::decoder_ops() noexcept {
+const Http3QpackDecoder::Ops &ServerHttp3Request::HeaderBlockParser::decoder_ops() noexcept {
     static const Http3QpackDecoder::Ops kOps{
-            &RequestHeaderParser::on_indexed_field, &RequestHeaderParser::on_indexed_name,
-            &RequestHeaderParser::on_name_raw,      &RequestHeaderParser::on_name_huffman,
-            &RequestHeaderParser::on_value_raw,     &RequestHeaderParser::on_value_huffman,
+            &HeaderBlockParser::on_indexed_field, &HeaderBlockParser::on_indexed_name,
+            &HeaderBlockParser::on_name_raw,      &HeaderBlockParser::on_name_huffman,
+            &HeaderBlockParser::on_value_raw,     &HeaderBlockParser::on_value_huffman,
     };
     return kOps;
 }
 
-const HeaderMap<ServerHttp3Request::RequestHeaderParser::PseudoHeaderRule> &
-ServerHttp3Request::RequestHeaderParser::pseudo_header_map() noexcept {
+const HeaderMap<ServerHttp3Request::HeaderBlockParser::PseudoHeaderRule> &
+ServerHttp3Request::HeaderBlockParser::pseudo_header_map() noexcept {
     static HeaderMap<PseudoHeaderRule> handlers = []() {
         HeaderMap<PseudoHeaderRule> map;
-        map.insert(":method", PseudoHeaderRule{MethodSeen, &RequestHeaderParser::handle_method});
-        map.insert(":path", PseudoHeaderRule{PathSeen, &RequestHeaderParser::handle_path});
-        map.insert(":scheme", PseudoHeaderRule{SchemeSeen, &RequestHeaderParser::handle_scheme});
-        map.insert(":authority", PseudoHeaderRule{AuthoritySeen, &RequestHeaderParser::handle_authority});
+        map.insert(":method", PseudoHeaderRule{MethodSeen, &HeaderBlockParser::handle_method});
+        map.insert(":path", PseudoHeaderRule{PathSeen, &HeaderBlockParser::handle_path});
+        map.insert(":scheme", PseudoHeaderRule{SchemeSeen, &HeaderBlockParser::handle_scheme});
+        map.insert(":authority", PseudoHeaderRule{AuthoritySeen, &HeaderBlockParser::handle_authority});
         return map;
     }();
     return handlers;
 }
 
-const HeaderMap<ServerHttp3Request::RequestHeaderParser::RegularHeaderHandler> &
-ServerHttp3Request::RequestHeaderParser::regular_header_handler_map() noexcept {
+const HeaderMap<ServerHttp3Request::HeaderBlockParser::RegularHeaderHandler> &
+ServerHttp3Request::HeaderBlockParser::regular_header_handler_map() noexcept {
     static HeaderMap<RegularHeaderHandler> handlers = []() {
         HeaderMap<RegularHeaderHandler> map;
-        map.insert("content-length", &RequestHeaderParser::handle_content_length);
-        map.insert("connection", &RequestHeaderParser::handle_forbidden_regular_header);
-        map.insert("keep-alive", &RequestHeaderParser::handle_forbidden_regular_header);
-        map.insert("transfer-encoding", &RequestHeaderParser::handle_forbidden_regular_header);
-        map.insert("upgrade", &RequestHeaderParser::handle_forbidden_regular_header);
-        map.insert("te", &RequestHeaderParser::handle_te);
+        map.insert("content-length", &HeaderBlockParser::handle_content_length);
+        map.insert("connection", &HeaderBlockParser::handle_forbidden_regular_header);
+        map.insert("keep-alive", &HeaderBlockParser::handle_forbidden_regular_header);
+        map.insert("transfer-encoding", &HeaderBlockParser::handle_forbidden_regular_header);
+        map.insert("upgrade", &HeaderBlockParser::handle_forbidden_regular_header);
+        map.insert("te", &HeaderBlockParser::handle_te);
         return map;
     }();
     return handlers;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::process_available_input() noexcept {
-    for (;;) {
-        switch (parse_state_) {
-            case ParseState::FrameHeader: {
-                Http3ParseStatus status = frame_parser_.parse(request_.inbound_buf_);
-                if (status == Http3ParseStatus::NeedMore) {
-                    return common::IoErr::None;
-                }
-                if (status == Http3ParseStatus::Error) {
-                    return fail(frame_parser_.error().h3_error, frame_parser_.error().io_error);
-                }
-                Http3FrameHeader header = frame_parser_.header();
-                frame_parser_.reset();
-                common::IoErr err = begin_frame_payload(header);
-                if (err != common::IoErr::None || request_.request_head_received_) {
-                    return err;
-                }
-                break;
-            }
-            case ParseState::HeaderPayload: {
-                common::IoErr err = decode_header_payload();
-                if (err != common::IoErr::None || request_.request_head_received_ ||
-                    request_.inbound_buf_.readable_bytes() == 0) {
-                    return err;
-                }
-                break;
-            }
-            case ParseState::SkipPayload: {
-                Http3ParseStatus status = skip_parser_.parse(request_.inbound_buf_);
-                if (status == Http3ParseStatus::NeedMore) {
-                    return common::IoErr::None;
-                }
-                if (status == Http3ParseStatus::Error) {
-                    return fail(skip_parser_.error().h3_error, skip_parser_.error().io_error);
-                }
-                skip_parser_.reset();
-                parse_state_ = ParseState::FrameHeader;
-                break;
-            }
-        }
+bool ServerHttp3Request::HeaderBlockParser::init() noexcept {
+    if (!qpack_decoder_.init(request_.max_qpack_string_size_)) {
+        return false;
     }
+    pending_name_ = {};
+    pending_name_hash_ = 0;
+    pending_name_owned_ = false;
+    saw_regular_header_in_block_ = false;
+    qpack_decoder_.begin_block(this, &decoder_ops());
+    return true;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::begin_frame_payload(const Http3FrameHeader &header) noexcept {
-    if (header.type == static_cast<std::uint64_t>(Http3FrameType::Headers)) {
-        pending_name_ = {};
-        pending_name_hash_ = 0;
-        pending_name_owned_ = false;
-        saw_regular_header_in_block_ = false;
-        frame_payload_remaining_ = header.length;
-        qpack_decoder_.begin_block(this, &decoder_ops());
-        parse_state_ = ParseState::HeaderPayload;
-        return decode_header_payload();
+common::IoErr ServerHttp3Request::HeaderBlockParser::decode(const std::uint8_t *data, std::size_t len,
+                                                            bool end_block) noexcept {
+    common::IoErr err = qpack_decoder_.decode(data, len, end_block);
+    if (err != common::IoErr::None) {
+        return qpack_decode_failed(err);
     }
-
-    if (is_forbidden_request_stream_frame(header.type)) {
-        return fail(Http3ErrorCode::FrameUnexpected);
+    if (!end_block) {
+        return common::IoErr::None;
     }
-
-    skip_parser_.start(header.length);
-    parse_state_ = ParseState::SkipPayload;
-    return common::IoErr::None;
+    return complete_header_block();
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::decode_header_payload() noexcept {
-    if (frame_payload_remaining_ == 0) {
-        common::IoErr err = qpack_decoder_.decode(nullptr, 0, true);
-        if (err != common::IoErr::None) {
-            return qpack_decode_failed(err);
-        }
-        return complete_request_header_block();
+common::IoErr ServerHttp3Request::HeaderBlockParser::complete_header_block() noexcept {
+    if (pending_name_.data() != nullptr) {
+        return fail(Http3ErrorCode::MessageError);
+    }
+    if (target_ == HeaderBlockTarget::Trailer) {
+        request_.exchange_.request_trailers_complete_ = true;
+        return common::IoErr::None;
     }
 
-    while (frame_payload_remaining_ != 0) {
-        mem::IoBuf *buf = request_.inbound_buf_.first_readable();
-        if (buf == nullptr || buf->readable() == 0) {
-            return common::IoErr::None;
-        }
-
-        const std::size_t take = std::min<std::uint64_t>(buf->readable(), frame_payload_remaining_);
-        const bool end_block = static_cast<std::uint64_t>(take) == frame_payload_remaining_;
-        common::IoErr err = qpack_decoder_.decode(buf->readable_data(), take, end_block);
-        if (err != common::IoErr::None) {
-            return qpack_decode_failed(err);
-        }
-        request_.inbound_buf_.consume_and_compact(take);
-        frame_payload_remaining_ -= take;
-        if (end_block) {
-            return complete_request_header_block();
-        }
-    }
-
-    return common::IoErr::None;
-}
-
-common::IoErr ServerHttp3Request::RequestHeaderParser::complete_request_header_block() noexcept {
-    if (pending_name_.data() != nullptr || request_.request_head_received_) {
+    if (request_.request_head_received_) {
         return fail(Http3ErrorCode::MessageError);
     }
     common::IoErr err = finalize_pseudo_headers();
     if (err != common::IoErr::None) {
         return err;
     }
+
     request_.request_head_received_ = true;
-    parse_state_ = ParseState::FrameHeader;
-    frame_payload_remaining_ = 0;
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::fail(Http3ErrorCode error, common::IoErr reason) noexcept {
-    request_.header_parse_error_ = error;
+common::IoErr ServerHttp3Request::HeaderBlockParser::fail(Http3ErrorCode error, common::IoErr reason) noexcept {
+    request_.request_parse_error_ = error;
     return reason == common::IoErr::None ? common::IoErr::Invalid : reason;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::qpack_decode_failed(common::IoErr reason) noexcept {
-    if (request_.header_parse_error_ == Http3ErrorCode::GeneralProtocolError) {
+common::IoErr ServerHttp3Request::HeaderBlockParser::qpack_decode_failed(common::IoErr reason) noexcept {
+    if (request_.request_parse_error_ == Http3ErrorCode::GeneralProtocolError) {
         return fail(Http3ErrorCode::QpackDecompressionFailed, reason);
     }
     return reason == common::IoErr::None ? common::IoErr::Invalid : reason;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::validate_field(std::string_view name,
-                                                                      std::string_view value) noexcept {
+common::IoErr ServerHttp3Request::HeaderBlockParser::validate_field(std::string_view name,
+                                                                    std::string_view value) noexcept {
     if (name.empty()) {
         return fail(Http3ErrorCode::MessageError);
     }
@@ -461,7 +402,7 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::validate_field(std::strin
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::finalize_pseudo_headers() noexcept {
+common::IoErr ServerHttp3Request::HeaderBlockParser::finalize_pseudo_headers() noexcept {
     constexpr std::uint8_t kRequired = MethodSeen | PathSeen | SchemeSeen;
     if ((pseudo_seen_ & kRequired) != kRequired) {
         return fail(Http3ErrorCode::MessageError);
@@ -496,24 +437,23 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::finalize_pseudo_headers()
 }
 
 common::IoErr
-ServerHttp3Request::RequestHeaderParser::on_indexed_field(void *owner,
-                                                          Http3QpackDecoder::TableEntryView entry) noexcept {
-    auto *parser = static_cast<RequestHeaderParser *>(owner);
+ServerHttp3Request::HeaderBlockParser::on_indexed_field(void *owner, Http3QpackDecoder::TableEntryView entry) noexcept {
+    auto *parser = static_cast<HeaderBlockParser *>(owner);
     return parser->commit_field(entry.name, entry.name_hash, entry.value);
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::on_indexed_name(void *owner, std::string_view name,
-                                                                       std::uint64_t name_hash) noexcept {
-    auto *parser = static_cast<RequestHeaderParser *>(owner);
+common::IoErr ServerHttp3Request::HeaderBlockParser::on_indexed_name(void *owner, std::string_view name,
+                                                                     std::uint64_t name_hash) noexcept {
+    auto *parser = static_cast<HeaderBlockParser *>(owner);
     parser->pending_name_ = name;
     parser->pending_name_hash_ = name_hash;
     parser->pending_name_owned_ = false;
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::on_name_raw(void *owner, const std::uint8_t *data,
-                                                                   std::size_t len) noexcept {
-    auto *parser = static_cast<RequestHeaderParser *>(owner);
+common::IoErr ServerHttp3Request::HeaderBlockParser::on_name_raw(void *owner, const std::uint8_t *data,
+                                                                 std::size_t len) noexcept {
+    auto *parser = static_cast<HeaderBlockParser *>(owner);
     std::string_view name;
     std::uint64_t name_hash = 0;
     common::IoErr err = parser->materialize_name_raw(data, len, name, name_hash);
@@ -526,9 +466,9 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::on_name_raw(void *owner, 
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::on_name_huffman(void *owner, const std::uint8_t *data,
-                                                                       std::size_t len) noexcept {
-    auto *parser = static_cast<RequestHeaderParser *>(owner);
+common::IoErr ServerHttp3Request::HeaderBlockParser::on_name_huffman(void *owner, const std::uint8_t *data,
+                                                                     std::size_t len) noexcept {
+    auto *parser = static_cast<HeaderBlockParser *>(owner);
     std::string_view name;
     std::uint64_t name_hash = 0;
     common::IoErr err = parser->materialize_name_huffman(data, len, name, name_hash);
@@ -541,9 +481,9 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::on_name_huffman(void *own
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::on_value_raw(void *owner, const std::uint8_t *data,
-                                                                    std::size_t len) noexcept {
-    auto *parser = static_cast<RequestHeaderParser *>(owner);
+common::IoErr ServerHttp3Request::HeaderBlockParser::on_value_raw(void *owner, const std::uint8_t *data,
+                                                                  std::size_t len) noexcept {
+    auto *parser = static_cast<HeaderBlockParser *>(owner);
     std::string_view value;
     common::IoErr err = parser->materialize_value_raw(data, len, value);
     if (err != common::IoErr::None) {
@@ -561,9 +501,9 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::on_value_raw(void *owner,
     return parser->commit_field(pending_name, pending_name_hash, value, pending_name_owned);
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::on_value_huffman(void *owner, const std::uint8_t *data,
-                                                                        std::size_t len) noexcept {
-    auto *parser = static_cast<RequestHeaderParser *>(owner);
+common::IoErr ServerHttp3Request::HeaderBlockParser::on_value_huffman(void *owner, const std::uint8_t *data,
+                                                                      std::size_t len) noexcept {
+    auto *parser = static_cast<HeaderBlockParser *>(owner);
     std::string_view value;
     common::IoErr err = parser->materialize_value_huffman(data, len, value);
     if (err != common::IoErr::None) {
@@ -581,9 +521,9 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::on_value_huffman(void *ow
     return parser->commit_field(pending_name, pending_name_hash, value, pending_name_owned);
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::materialize_name_raw(const std::uint8_t *data, std::size_t len,
-                                                                            std::string_view &out,
-                                                                            std::uint64_t &name_hash) noexcept {
+common::IoErr ServerHttp3Request::HeaderBlockParser::materialize_name_raw(const std::uint8_t *data, std::size_t len,
+                                                                          std::string_view &out,
+                                                                          std::uint64_t &name_hash) noexcept {
     out = copy_to_pool(data, len);
     if (!out.data() && len != 0) {
         return common::IoErr::NoMem;
@@ -592,9 +532,9 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::materialize_name_raw(cons
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::materialize_name_huffman(const std::uint8_t *data,
-                                                                                std::size_t len, std::string_view &out,
-                                                                                std::uint64_t &name_hash) noexcept {
+common::IoErr ServerHttp3Request::HeaderBlockParser::materialize_name_huffman(const std::uint8_t *data, std::size_t len,
+                                                                              std::string_view &out,
+                                                                              std::uint64_t &name_hash) noexcept {
     out = {};
     bool ok = false;
     std::size_t decoded_len = hpack_huffman_decoded_length(data, len, &ok);
@@ -619,8 +559,8 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::materialize_name_huffman(
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::materialize_value_raw(const std::uint8_t *data, std::size_t len,
-                                                                             std::string_view &out) noexcept {
+common::IoErr ServerHttp3Request::HeaderBlockParser::materialize_value_raw(const std::uint8_t *data, std::size_t len,
+                                                                           std::string_view &out) noexcept {
     out = copy_to_pool(data, len);
     if (!out.data() && len != 0) {
         return common::IoErr::NoMem;
@@ -628,9 +568,9 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::materialize_value_raw(con
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::materialize_value_huffman(const std::uint8_t *data,
-                                                                                 std::size_t len,
-                                                                                 std::string_view &out) noexcept {
+common::IoErr ServerHttp3Request::HeaderBlockParser::materialize_value_huffman(const std::uint8_t *data,
+                                                                               std::size_t len,
+                                                                               std::string_view &out) noexcept {
     out = {};
     bool ok = false;
     std::size_t decoded_len = hpack_huffman_decoded_length(data, len, &ok);
@@ -657,15 +597,15 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::materialize_value_huffman
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::commit_field(std::string_view name, std::uint64_t name_hash,
-                                                                    std::string_view value, bool name_owned) noexcept {
+common::IoErr ServerHttp3Request::HeaderBlockParser::commit_field(std::string_view name, std::uint64_t name_hash,
+                                                                  std::string_view value, bool name_owned) noexcept {
     common::IoErr err = validate_field(name, value);
     if (err != common::IoErr::None) {
         return err;
     }
 
     if (is_pseudo_header(name)) {
-        if (saw_regular_header_in_block_) {
+        if (target_ == HeaderBlockTarget::Trailer || saw_regular_header_in_block_) {
             return fail(Http3ErrorCode::MessageError);
         }
         return handle_pseudo_header(name, value);
@@ -675,13 +615,15 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::commit_field(std::string_
     return commit_regular_header(name, name_hash, value, name_owned);
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::commit_regular_header(std::string_view name,
-                                                                             std::uint64_t name_hash,
-                                                                             std::string_view value,
-                                                                             bool name_owned) noexcept {
-    common::IoErr err = apply_regular_header_policy(name, name_hash, value);
-    if (err != common::IoErr::None) {
-        return err;
+common::IoErr ServerHttp3Request::HeaderBlockParser::commit_regular_header(std::string_view name,
+                                                                           std::uint64_t name_hash,
+                                                                           std::string_view value,
+                                                                           bool name_owned) noexcept {
+    if (target_ == HeaderBlockTarget::Request) {
+        common::IoErr err = apply_regular_header_policy(name, name_hash, value);
+        if (err != common::IoErr::None) {
+            return err;
+        }
     }
 
     std::string_view name_copy = name_owned ? name : copy_to_pool(name);
@@ -690,18 +632,22 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::commit_regular_header(std
         return common::IoErr::NoMem;
     }
 
+    HttpHeaders &target = target_ == HeaderBlockTarget::Trailer ? request_.exchange_.request_trailers_
+                                                                : request_.exchange_.request_headers_;
     char *lowcase_name = name_copy.empty() ? nullptr : const_cast<char *>(name_copy.data());
-    auto *field = request_.exchange_.request_headers_.add_view(name_copy, value_copy, lowcase_name, name_hash);
+    auto *field = target.add_view(name_copy, value_copy, lowcase_name, name_hash);
     if (!field) {
         return common::IoErr::NoMem;
     }
-    request_.exchange_.cache_request_header_field(*field);
+    if (target_ == HeaderBlockTarget::Request) {
+        request_.exchange_.cache_request_header_field(*field);
+    }
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::apply_regular_header_policy(std::string_view name,
-                                                                                   std::uint64_t name_hash,
-                                                                                   std::string_view value) noexcept {
+common::IoErr ServerHttp3Request::HeaderBlockParser::apply_regular_header_policy(std::string_view name,
+                                                                                 std::uint64_t name_hash,
+                                                                                 std::string_view value) noexcept {
     auto *handler = regular_header_handler_map().get(name, name_hash);
     if (handler == nullptr) {
         return common::IoErr::None;
@@ -709,8 +655,8 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::apply_regular_header_poli
     return (this->*(*handler))(value);
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::handle_pseudo_header(std::string_view name,
-                                                                            std::string_view value) noexcept {
+common::IoErr ServerHttp3Request::HeaderBlockParser::handle_pseudo_header(std::string_view name,
+                                                                          std::string_view value) noexcept {
     auto *rule = pseudo_header_map().get(name);
     if (rule == nullptr || rule->handler == nullptr) {
         return fail(Http3ErrorCode::MessageError);
@@ -722,7 +668,7 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::handle_pseudo_header(std:
     return (this->*rule->handler)(value);
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::handle_method(std::string_view value) noexcept {
+common::IoErr ServerHttp3Request::HeaderBlockParser::handle_method(std::string_view value) noexcept {
     if (value.empty()) {
         return fail(Http3ErrorCode::MessageError);
     }
@@ -740,7 +686,7 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::handle_method(std::string
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::handle_path(std::string_view value) noexcept {
+common::IoErr ServerHttp3Request::HeaderBlockParser::handle_path(std::string_view value) noexcept {
     if (value.empty()) {
         return fail(Http3ErrorCode::MessageError);
     }
@@ -758,14 +704,14 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::handle_path(std::string_v
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::handle_scheme(std::string_view value) noexcept {
+common::IoErr ServerHttp3Request::HeaderBlockParser::handle_scheme(std::string_view value) noexcept {
     if (!is_valid_scheme(value)) {
         return fail(Http3ErrorCode::MessageError);
     }
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::handle_authority(std::string_view value) noexcept {
+common::IoErr ServerHttp3Request::HeaderBlockParser::handle_authority(std::string_view value) noexcept {
     authority_ = copy_to_pool(value);
     if (authority_.data() == nullptr && !authority_.empty()) {
         return common::IoErr::NoMem;
@@ -773,7 +719,7 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::handle_authority(std::str
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::handle_content_length(std::string_view value) noexcept {
+common::IoErr ServerHttp3Request::HeaderBlockParser::handle_content_length(std::string_view value) noexcept {
     unsigned long long parsed = 0;
     const auto *first = value.data();
     const auto *last = value.data() + value.size();
@@ -793,11 +739,11 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::handle_content_length(std
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::handle_forbidden_regular_header(std::string_view) noexcept {
+common::IoErr ServerHttp3Request::HeaderBlockParser::handle_forbidden_regular_header(std::string_view) noexcept {
     return fail(Http3ErrorCode::MessageError);
 }
 
-common::IoErr ServerHttp3Request::RequestHeaderParser::handle_te(std::string_view value) noexcept {
+common::IoErr ServerHttp3Request::HeaderBlockParser::handle_te(std::string_view value) noexcept {
     if (te_seen_ || !equals_ascii_ci(value, "trailers")) {
         return fail(Http3ErrorCode::MessageError);
     }
@@ -805,8 +751,8 @@ common::IoErr ServerHttp3Request::RequestHeaderParser::handle_te(std::string_vie
     return common::IoErr::None;
 }
 
-std::string_view ServerHttp3Request::RequestHeaderParser::copy_to_pool(const std::uint8_t *data,
-                                                                       std::size_t len) noexcept {
+std::string_view ServerHttp3Request::HeaderBlockParser::copy_to_pool(const std::uint8_t *data,
+                                                                     std::size_t len) noexcept {
     if (len == 0) {
         return {};
     }
@@ -818,7 +764,7 @@ std::string_view ServerHttp3Request::RequestHeaderParser::copy_to_pool(const std
     return std::string_view(mem, len);
 }
 
-std::string_view ServerHttp3Request::RequestHeaderParser::copy_to_pool(std::string_view value) noexcept {
+std::string_view ServerHttp3Request::HeaderBlockParser::copy_to_pool(std::string_view value) noexcept {
     return copy_to_pool(reinterpret_cast<const std::uint8_t *>(value.data()), value.size());
 }
 
@@ -829,7 +775,7 @@ async::DetachedTask ServerHttp3Request::run_read_loop(quic::QuicStream::Lease le
 
     auto parsed = co_await parse_request_header();
     if (!parsed) {
-        stream_.close(error_value(header_parse_error_));
+        stream_.close(error_value(request_parse_error_));
         co_return;
     }
 
@@ -849,38 +795,365 @@ async::DetachedTask ServerHttp3Request::run_read_loop(quic::QuicStream::Lease le
     co_return;
 }
 
-async::Task<common::IoResult<void>> ServerHttp3Request::parse_request_header() noexcept {
-    RequestHeaderParser parser(*this);
+Http3ParseStatus ServerHttp3Request::parse_frame_header_once() noexcept {
+    const std::size_t before = inbound_buf_.readable_bytes();
+    Http3ParseStatus status = frame_parser_.parse(inbound_buf_);
+    if (before != inbound_buf_.readable_bytes()) {
+        frame_header_in_progress_ = true;
+    }
+    if (status == Http3ParseStatus::Done) {
+        current_frame_ = frame_parser_.header();
+        frame_parser_.reset();
+        frame_header_in_progress_ = false;
+    }
+    return status;
+}
+
+common::IoErr ServerHttp3Request::fail_request(Http3ErrorCode error, common::IoErr reason) noexcept {
+    request_parse_error_ = error;
+    body_recv_state_ = BodyRecvState::Error;
+    return reason == common::IoErr::None ? common::IoErr::Invalid : reason;
+}
+
+common::IoResult<mem::IoBufChain> ServerHttp3Request::fail_read_body(Http3ErrorCode error,
+                                                                     common::IoErr reason) noexcept {
+    const common::IoErr err = fail_request(error, reason);
+    stream_.close(error_value(error));
+    return std::unexpected(err);
+}
+
+async::Task<common::IoResult<void>> ServerHttp3Request::read_more_input(std::chrono::milliseconds timeout) noexcept {
+    if (inbound_buf_.complete()) {
+        co_return common::IoResult<void>{};
+    }
+    auto read = co_await stream_.read(kHttp3RequestReadChunkSize, inbound_buf_, timeout);
+    if (!read) {
+        co_return std::unexpected(read.error());
+    }
+    co_return common::IoResult<void>{};
+}
+
+async::Task<common::IoResult<void>> ServerHttp3Request::skip_frame_payload(std::uint64_t payload_length,
+                                                                           std::chrono::milliseconds timeout) noexcept {
+    std::uint64_t remaining = payload_length;
+    while (remaining != 0) {
+        const std::uint64_t available = static_cast<std::uint64_t>(inbound_buf_.readable_bytes());
+        if (available == 0) {
+            if (inbound_buf_.complete()) {
+                const common::IoErr err = fail_request(Http3ErrorCode::RequestIncomplete);
+                co_return std::unexpected(err);
+            }
+            auto read = co_await read_more_input(timeout);
+            if (!read) {
+                (void) fail_request(Http3ErrorCode::RequestIncomplete, read.error());
+                co_return std::unexpected(read.error());
+            }
+            continue;
+        }
+
+        const std::uint64_t take = std::min(available, remaining);
+        inbound_buf_.consume_and_compact(static_cast<std::size_t>(take));
+        remaining -= take;
+    }
+    co_return common::IoResult<void>{};
+}
+
+async::Task<common::IoResult<void>> ServerHttp3Request::parse_header_block(HeaderBlockTarget target,
+                                                                           std::uint64_t payload_length) noexcept {
+    HeaderBlockParser parser(*this, target);
     if (!parser.init()) {
-        header_parse_error_ = Http3ErrorCode::InternalError;
-        co_return std::unexpected(common::IoErr::NoMem);
+        const common::IoErr err = fail_request(Http3ErrorCode::InternalError, common::IoErr::NoMem);
+        co_return std::unexpected(err);
     }
 
-    while (!request_head_received_) {
-        common::IoErr err = parser.process_available_input();
+    std::uint64_t remaining = payload_length;
+    if (remaining == 0) {
+        common::IoErr err = parser.decode(nullptr, 0, true);
         if (err != common::IoErr::None) {
             co_return std::unexpected(err);
         }
-        if (request_head_received_) {
-            co_return common::IoResult<void>{};
-        }
-        if (inbound_buf_.complete()) {
-            header_parse_error_ = Http3ErrorCode::RequestIncomplete;
-            co_return std::unexpected(common::IoErr::Invalid);
+        co_return common::IoResult<void>{};
+    }
+
+    while (remaining != 0) {
+        mem::IoBuf *buf = inbound_buf_.first_readable();
+        if (buf == nullptr || buf->readable() == 0) {
+            if (inbound_buf_.complete()) {
+                const common::IoErr err = fail_request(Http3ErrorCode::RequestIncomplete);
+                co_return std::unexpected(err);
+            }
+            auto read = co_await read_more_input(target == HeaderBlockTarget::Request ? std::chrono::milliseconds::max()
+                                                                                      : body_timeout_);
+            if (!read) {
+                (void) fail_request(Http3ErrorCode::RequestIncomplete, read.error());
+                co_return std::unexpected(read.error());
+            }
+            continue;
         }
 
-        auto read = co_await stream_.read(kHttp3RequestReadChunkSize, inbound_buf_);
-        if (!read) {
-            header_parse_error_ = Http3ErrorCode::RequestIncomplete;
-            co_return std::unexpected(read.error());
+        const std::size_t take = std::min<std::uint64_t>(buf->readable(), remaining);
+        const bool end_block = static_cast<std::uint64_t>(take) == remaining;
+        common::IoErr err = parser.decode(buf->readable_data(), take, end_block);
+        if (err != common::IoErr::None) {
+            co_return std::unexpected(err);
+        }
+        inbound_buf_.consume_and_compact(take);
+        remaining -= take;
+    }
+
+    co_return common::IoResult<void>{};
+}
+
+common::IoResult<void> ServerHttp3Request::take_body_payload(mem::IoBufChain &out, std::size_t bytes) noexcept {
+    if (bytes == 0) {
+        return common::IoResult<void>{};
+    }
+
+    const bool input_complete = inbound_buf_.complete();
+    if (!inbound_buf_.take_prefix(bytes, out)) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    if (input_complete) {
+        inbound_buf_.mark_complete();
+        out.clear_complete();
+    }
+    return common::IoResult<void>{};
+}
+
+async::Task<common::IoResult<void>> ServerHttp3Request::parse_request_header() noexcept {
+    while (!request_head_received_) {
+        Http3ParseStatus status = parse_frame_header_once();
+        if (status == Http3ParseStatus::NeedMore) {
+            if (inbound_buf_.complete()) {
+                const common::IoErr err = fail_request(Http3ErrorCode::RequestIncomplete);
+                co_return std::unexpected(err);
+            }
+            auto read = co_await read_more_input(std::chrono::milliseconds::max());
+            if (!read) {
+                const common::IoErr err = fail_request(Http3ErrorCode::RequestIncomplete, read.error());
+                co_return std::unexpected(err);
+            }
+            continue;
+        }
+        if (status == Http3ParseStatus::Error) {
+            common::IoErr err = fail_request(frame_parser_.error().h3_error, frame_parser_.error().io_error);
+            co_return std::unexpected(err);
+        }
+
+        const Http3FrameHeader header = current_frame_;
+        if (header.type == static_cast<std::uint64_t>(Http3FrameType::Headers)) {
+            auto parsed = co_await parse_header_block(HeaderBlockTarget::Request, header.length);
+            if (!parsed) {
+                co_return std::unexpected(parsed.error());
+            }
+            body_recv_state_ = BodyRecvState::FrameHeader;
+            co_return common::IoResult<void>{};
+        }
+
+        if (header.type == static_cast<std::uint64_t>(Http3FrameType::Data) ||
+            is_forbidden_request_stream_frame(header.type)) {
+            const common::IoErr err = fail_request(Http3ErrorCode::FrameUnexpected);
+            co_return std::unexpected(err);
+        }
+
+        auto skipped = co_await skip_frame_payload(header.length, std::chrono::milliseconds::max());
+        if (!skipped) {
+            if (request_parse_error_ == Http3ErrorCode::GeneralProtocolError) {
+                (void) fail_request(Http3ErrorCode::RequestIncomplete, skipped.error());
+            }
+            co_return std::unexpected(skipped.error());
         }
     }
 
     co_return common::IoResult<void>{};
 }
 
-async::Task<common::IoResult<mem::IoBufChain>> ServerHttp3Request::read_body(HttpExchange &, std::size_t) noexcept {
-    co_return std::unexpected(common::IoErr::NotSupported);
+common::IoErr ServerHttp3Request::begin_body_frame(const Http3FrameHeader &header) noexcept {
+    if (header.type == static_cast<std::uint64_t>(Http3FrameType::Data)) {
+        if (exchange_.request_trailers_complete_) {
+            return fail_request(Http3ErrorCode::MessageError);
+        }
+        frame_payload_remaining_ = header.length;
+        body_recv_state_ = BodyRecvState::DataPayload;
+        return common::IoErr::None;
+    }
+
+    if (header.type == static_cast<std::uint64_t>(Http3FrameType::Headers)) {
+        if (exchange_.request_trailers_complete_) {
+            return fail_request(Http3ErrorCode::MessageError);
+        }
+        frame_payload_remaining_ = header.length;
+        body_recv_state_ = BodyRecvState::TrailerPayload;
+        return common::IoErr::None;
+    }
+
+    if (is_forbidden_request_stream_frame(header.type)) {
+        return fail_request(Http3ErrorCode::FrameUnexpected);
+    }
+
+    frame_payload_remaining_ = header.length;
+    return common::IoErr::None;
+}
+
+async::Task<common::IoResult<mem::IoBufChain>> ServerHttp3Request::read_body(HttpExchange &exchange,
+                                                                             std::size_t max_bytes) noexcept {
+    mem::IoBufChain out(inbound_buf_.node_pool());
+    if (&exchange != &exchange_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (body_recv_state_ == BodyRecvState::Error) {
+        co_return std::unexpected(common::IoErr::Canceled);
+    }
+    if (max_bytes == 0) {
+        if (body_recv_state_ == BodyRecvState::Complete) {
+            out.mark_complete();
+        }
+        co_return out;
+    }
+    if (body_recv_state_ == BodyRecvState::Complete) {
+        out.mark_complete();
+        co_return out;
+    }
+
+    for (;;) {
+        switch (body_recv_state_) {
+            case BodyRecvState::FrameHeader: {
+                Http3ParseStatus status = parse_frame_header_once();
+                if (status == Http3ParseStatus::NeedMore) {
+                    if (inbound_buf_.complete()) {
+                        if (frame_header_in_progress_) {
+                            co_return fail_read_body(Http3ErrorCode::RequestIncomplete);
+                        }
+                        exchange_.request_trailers_complete_ = true;
+                        body_recv_state_ = BodyRecvState::Complete;
+                        out.mark_complete();
+                        co_return out;
+                    }
+                    auto read = co_await read_more_input(body_timeout_);
+                    if (!read) {
+                        co_return std::unexpected(read.error());
+                    }
+                    continue;
+                }
+                if (status == Http3ParseStatus::Error) {
+                    co_return fail_read_body(frame_parser_.error().h3_error, frame_parser_.error().io_error);
+                }
+
+                common::IoErr err = begin_body_frame(current_frame_);
+                if (err != common::IoErr::None) {
+                    co_return fail_read_body(request_parse_error_, err);
+                }
+                if (body_recv_state_ == BodyRecvState::FrameHeader) {
+                    auto skipped = co_await skip_frame_payload(frame_payload_remaining_, body_timeout_);
+                    if (!skipped) {
+                        if (request_parse_error_ == Http3ErrorCode::GeneralProtocolError) {
+                            co_return std::unexpected(skipped.error());
+                        }
+                        co_return fail_read_body(request_parse_error_, skipped.error());
+                    }
+                }
+                break;
+            }
+
+            case BodyRecvState::DataPayload: {
+                if (frame_payload_remaining_ == 0) {
+                    body_recv_state_ = BodyRecvState::FrameHeader;
+                    continue;
+                }
+
+                const std::size_t readable = inbound_buf_.readable_bytes();
+                if (readable == 0) {
+                    if (inbound_buf_.complete()) {
+                        co_return fail_read_body(Http3ErrorCode::RequestIncomplete);
+                    }
+                    auto read = co_await read_more_input(body_timeout_);
+                    if (!read) {
+                        co_return std::unexpected(read.error());
+                    }
+                    continue;
+                }
+
+                const std::size_t take =
+                        std::min<std::size_t>(max_bytes, std::min<std::uint64_t>(readable, frame_payload_remaining_));
+                auto taken = take_body_payload(out, take);
+                if (!taken) {
+                    co_return std::unexpected(taken.error());
+                }
+                frame_payload_remaining_ -= take;
+                if (frame_payload_remaining_ == 0) {
+                    body_recv_state_ = BodyRecvState::FrameHeader;
+                }
+                if (out.readable_bytes() != 0) {
+                    co_return out;
+                }
+                break;
+            }
+
+            case BodyRecvState::TrailerPayload: {
+                auto parsed = co_await parse_header_block(HeaderBlockTarget::Trailer, frame_payload_remaining_);
+                if (!parsed) {
+                    if (request_parse_error_ == Http3ErrorCode::GeneralProtocolError) {
+                        co_return std::unexpected(parsed.error());
+                    }
+                    co_return fail_read_body(request_parse_error_, parsed.error());
+                }
+                frame_payload_remaining_ = 0;
+                body_recv_state_ = BodyRecvState::WaitFin;
+                break;
+            }
+
+            case BodyRecvState::WaitFin: {
+                if (inbound_buf_.readable_bytes() == 0 && inbound_buf_.complete() && !frame_header_in_progress_) {
+                    body_recv_state_ = BodyRecvState::Complete;
+                    out.mark_complete();
+                    co_return out;
+                }
+
+                Http3ParseStatus status = parse_frame_header_once();
+                if (status == Http3ParseStatus::NeedMore) {
+                    if (inbound_buf_.complete()) {
+                        if (frame_header_in_progress_) {
+                            co_return fail_read_body(Http3ErrorCode::RequestIncomplete);
+                        }
+                        body_recv_state_ = BodyRecvState::Complete;
+                        out.mark_complete();
+                        co_return out;
+                    }
+                    auto read = co_await read_more_input(body_timeout_);
+                    if (!read) {
+                        co_return std::unexpected(read.error());
+                    }
+                    continue;
+                }
+                if (status == Http3ParseStatus::Error) {
+                    co_return fail_read_body(frame_parser_.error().h3_error, frame_parser_.error().io_error);
+                }
+
+                const Http3FrameHeader header = current_frame_;
+                if (header.type == static_cast<std::uint64_t>(Http3FrameType::Data) ||
+                    header.type == static_cast<std::uint64_t>(Http3FrameType::Headers)) {
+                    co_return fail_read_body(Http3ErrorCode::MessageError);
+                }
+                if (is_forbidden_request_stream_frame(header.type)) {
+                    co_return fail_read_body(Http3ErrorCode::FrameUnexpected);
+                }
+                auto skipped = co_await skip_frame_payload(header.length, body_timeout_);
+                if (!skipped) {
+                    if (request_parse_error_ == Http3ErrorCode::GeneralProtocolError) {
+                        co_return std::unexpected(skipped.error());
+                    }
+                    co_return fail_read_body(request_parse_error_, skipped.error());
+                }
+                break;
+            }
+
+            case BodyRecvState::Complete:
+                out.mark_complete();
+                co_return out;
+            case BodyRecvState::Error:
+                co_return std::unexpected(common::IoErr::Canceled);
+        }
+    }
 }
 
 async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange &, const OutgoingHeaderBlockView &) {

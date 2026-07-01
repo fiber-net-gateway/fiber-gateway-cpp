@@ -1,6 +1,7 @@
 #ifndef FIBER_HTTP_SERVER_HTTP3_REQUEST_H
 #define FIBER_HTTP_SERVER_HTTP3_REQUEST_H
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 
@@ -9,6 +10,7 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../quic/QuicConnection.h"
+#include "Http3Codec.h"
 #include "Http3Protocol.h"
 #include "HttpExchange.h"
 #include "HttpExchangeIo.h"
@@ -47,7 +49,9 @@ public:
                                                                  std::size_t len, bool end) noexcept override;
 
 private:
-    class RequestHeaderParser;
+    enum class HeaderBlockTarget : std::uint8_t;
+    enum class BodyRecvState : std::uint8_t;
+    class HeaderBlockParser;
 
     ServerHttp3Request(Http3Connection &conn, const HttpServerOptions &http_options,
                        const HttpHandler &handler) noexcept;
@@ -56,6 +60,18 @@ private:
 
     async::DetachedTask run_read_loop(quic::QuicStream::Lease lease) noexcept;
     async::Task<common::IoResult<void>> parse_request_header() noexcept;
+    async::Task<common::IoResult<void>> parse_header_block(HeaderBlockTarget target,
+                                                           std::uint64_t payload_length) noexcept;
+    async::Task<common::IoResult<void>> skip_frame_payload(std::uint64_t payload_length,
+                                                           std::chrono::milliseconds timeout) noexcept;
+    async::Task<common::IoResult<void>> read_more_input(std::chrono::milliseconds timeout) noexcept;
+    [[nodiscard]] Http3ParseStatus parse_frame_header_once() noexcept;
+    [[nodiscard]] common::IoErr begin_body_frame(const Http3FrameHeader &header) noexcept;
+    [[nodiscard]] common::IoErr fail_request(Http3ErrorCode error,
+                                             common::IoErr reason = common::IoErr::Invalid) noexcept;
+    [[nodiscard]] common::IoResult<mem::IoBufChain>
+    fail_read_body(Http3ErrorCode error, common::IoErr reason = common::IoErr::Invalid) noexcept;
+    [[nodiscard]] common::IoResult<void> take_body_payload(mem::IoBufChain &out, std::size_t bytes) noexcept;
 
     quic::QuicConnection::Lease quic_lease_{};
     quic::QuicStream stream_;
@@ -63,11 +79,17 @@ private:
     HttpExchange exchange_;
     const HttpHandler *handler_ = nullptr;
     std::uint32_t max_qpack_string_size_ = 0;
-    Http3ErrorCode header_parse_error_ = Http3ErrorCode::GeneralProtocolError;
+    std::chrono::milliseconds body_timeout_{};
+    Http3FrameHeaderParser frame_parser_;
+    Http3FrameHeader current_frame_{};
+    std::uint64_t frame_payload_remaining_ = 0;
+    Http3ErrorCode request_parse_error_ = Http3ErrorCode::GeneralProtocolError;
+    BodyRecvState body_recv_state_{};
     bool read_loop_started_ = false;
     bool request_head_received_ = false;
     bool handler_started_ = false;
     bool handler_done_ = false;
+    bool frame_header_in_progress_ = false;
 };
 
 } // namespace fiber::http

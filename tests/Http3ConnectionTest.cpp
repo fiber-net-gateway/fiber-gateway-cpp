@@ -62,6 +62,17 @@ struct Http3RequestRunResult {
     CapturedHttp3Request snapshot{};
 };
 
+struct Http3BodyReadOutcome {
+    fiber::common::IoErr first_error = fiber::common::IoErr::None;
+    fiber::common::IoErr second_error = fiber::common::IoErr::None;
+    std::string first_body;
+    std::string second_body;
+    std::string trailer_value;
+    bool first_complete = false;
+    bool second_complete = false;
+    bool trailers_complete = false;
+};
+
 using HeaderList = std::vector<std::pair<std::string_view, std::string_view>>;
 
 StartResult to_start_result(fiber::common::IoResult<void> result) noexcept {
@@ -185,6 +196,18 @@ std::vector<std::uint8_t> headers_frame(const HeaderList &headers) {
     return out;
 }
 
+std::vector<std::uint8_t> data_frame(std::string_view body) {
+    std::vector<std::uint8_t> out;
+    append_varint(out, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Data));
+    append_varint(out, body.size());
+    out.insert(out.end(), body.begin(), body.end());
+    return out;
+}
+
+void append_frame(std::vector<std::uint8_t> &request, const std::vector<std::uint8_t> &frame) {
+    request.insert(request.end(), frame.begin(), frame.end());
+}
+
 std::vector<std::uint8_t> control_settings_stream(std::uint64_t blocked_streams = 0) {
     std::vector<std::uint8_t> out;
     append_varint(out, static_cast<std::uint64_t>(fiber::http::Http3StreamType::Control));
@@ -299,6 +322,76 @@ Http3RequestRunResult run_http3_request_headers(const HeaderList &headers, bool 
     group.stop();
     group.join();
     return result;
+}
+
+Http3BodyReadOutcome run_http3_request_body(const std::vector<std::uint8_t> &request) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicConnection::Options quic_options{};
+    quic_options.loop = &group.at(0);
+    ServerRequestContext ctx;
+    auto outcome_promise = std::make_shared<std::promise<Http3BodyReadOutcome>>();
+    auto outcome_future = outcome_promise->get_future();
+    ctx.handler = [outcome_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        Http3BodyReadOutcome outcome;
+        auto first = co_await exchange.read_body(64);
+        if (!first) {
+            outcome.first_error = first.error();
+            outcome_promise->set_value(std::move(outcome));
+            co_return;
+        }
+        outcome.first_complete = first->complete();
+        auto first_bytes = chain_to_bytes(std::move(*first));
+        outcome.first_body.assign(reinterpret_cast<const char *>(first_bytes.data()), first_bytes.size());
+
+        auto second = co_await exchange.read_body(64);
+        if (!second) {
+            outcome.second_error = second.error();
+            outcome.trailer_value = std::string(exchange.request_trailers().get("digest"));
+            outcome.trailers_complete = exchange.request_trailers_complete();
+            outcome_promise->set_value(std::move(outcome));
+            co_return;
+        }
+        outcome.second_complete = second->complete();
+        auto second_bytes = chain_to_bytes(std::move(*second));
+        outcome.second_body.assign(reinterpret_cast<const char *>(second_bytes.data()), second_bytes.size());
+        outcome.trailer_value = std::string(exchange.request_trailers().get("digest"));
+        outcome.trailers_complete = exchange.request_trailers_complete();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    };
+
+    fiber::http::Http3Connection::Options h3_options{};
+    h3_options.owner = &ctx;
+    h3_options.ops.create_server_request = &create_server_request;
+
+    fiber::quic::QuicConnection quic(quic_options);
+    fiber::http::Http3Connection h3(quic, h3_options);
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    EXPECT_TRUE(start.ok) << static_cast<int>(start.error);
+
+    std::promise<void> feed_done;
+    auto feed_future = feed_done.get_future();
+    fiber::async::spawn(group.at(0), [&quic, &request, &feed_done]() -> fiber::async::DetachedTask {
+        return feed_request_stream_then_wait(&quic, &request, &feed_done);
+    });
+
+    if (feed_future.wait_for(2s) != std::future_status::ready) {
+        ADD_FAILURE() << "HTTP/3 request feed did not complete";
+    }
+
+    Http3BodyReadOutcome outcome;
+    if (outcome_future.wait_for(2s) == std::future_status::ready) {
+        outcome = outcome_future.get();
+    } else {
+        ADD_FAILURE() << "HTTP/3 body handler did not complete";
+    }
+
+    h3.close();
+    group.stop();
+    group.join();
+    return outcome;
 }
 
 } // namespace
@@ -419,6 +512,102 @@ TEST(Http3ConnectionTest, ServerRequestRejectsInvalidTeHeader) {
     Http3RequestRunResult result = run_http3_request_headers(headers, false);
 
     EXPECT_EQ(result.handler_status, std::future_status::timeout);
+}
+
+TEST(Http3ConnectionTest, ServerReadBodyReturnsDataBeforeCompleteForFin) {
+    HeaderList request_headers{
+            {":method", "POST"},
+            {":scheme", "https"},
+            {":authority", "example.com"},
+            {":path", "/body"},
+    };
+
+    std::vector<std::uint8_t> request;
+    append_frame(request, headers_frame(request_headers));
+    append_frame(request, data_frame("hello"));
+
+    Http3BodyReadOutcome outcome = run_http3_request_body(request);
+
+    EXPECT_EQ(outcome.first_error, fiber::common::IoErr::None);
+    EXPECT_EQ(outcome.first_body, "hello");
+    EXPECT_FALSE(outcome.first_complete);
+    EXPECT_EQ(outcome.second_error, fiber::common::IoErr::None);
+    EXPECT_TRUE(outcome.second_body.empty());
+    EXPECT_TRUE(outcome.second_complete);
+    EXPECT_TRUE(outcome.trailers_complete);
+}
+
+TEST(Http3ConnectionTest, ServerReadBodyParsesTrailersBeforeComplete) {
+    HeaderList request_headers{
+            {":method", "POST"},
+            {":scheme", "https"},
+            {":authority", "example.com"},
+            {":path", "/trailers"},
+    };
+    HeaderList trailers{{"digest", "sha-256=xyz"}};
+
+    std::vector<std::uint8_t> request;
+    append_frame(request, headers_frame(request_headers));
+    append_frame(request, data_frame("hello"));
+    append_frame(request, headers_frame(trailers));
+
+    Http3BodyReadOutcome outcome = run_http3_request_body(request);
+
+    EXPECT_EQ(outcome.first_error, fiber::common::IoErr::None);
+    EXPECT_EQ(outcome.first_body, "hello");
+    EXPECT_FALSE(outcome.first_complete);
+    EXPECT_EQ(outcome.second_error, fiber::common::IoErr::None);
+    EXPECT_TRUE(outcome.second_body.empty());
+    EXPECT_TRUE(outcome.second_complete);
+    EXPECT_TRUE(outcome.trailers_complete);
+    EXPECT_EQ(outcome.trailer_value, "sha-256=xyz");
+}
+
+TEST(Http3ConnectionTest, ServerReadBodyCompletesEmptyBodyWithTrailers) {
+    HeaderList request_headers{
+            {":method", "POST"},
+            {":scheme", "https"},
+            {":authority", "example.com"},
+            {":path", "/empty-trailers"},
+    };
+    HeaderList trailers{{"digest", "sha-256=empty"}};
+
+    std::vector<std::uint8_t> request;
+    append_frame(request, headers_frame(request_headers));
+    append_frame(request, headers_frame(trailers));
+
+    Http3BodyReadOutcome outcome = run_http3_request_body(request);
+
+    EXPECT_EQ(outcome.first_error, fiber::common::IoErr::None);
+    EXPECT_TRUE(outcome.first_body.empty());
+    EXPECT_TRUE(outcome.first_complete);
+    EXPECT_EQ(outcome.second_error, fiber::common::IoErr::None);
+    EXPECT_TRUE(outcome.second_complete);
+    EXPECT_TRUE(outcome.trailers_complete);
+    EXPECT_EQ(outcome.trailer_value, "sha-256=empty");
+}
+
+TEST(Http3ConnectionTest, ServerReadBodyRejectsPseudoHeaderInTrailers) {
+    HeaderList request_headers{
+            {":method", "POST"},
+            {":scheme", "https"},
+            {":authority", "example.com"},
+            {":path", "/bad-trailer"},
+    };
+    HeaderList trailers{{":path", "/not-allowed"}};
+
+    std::vector<std::uint8_t> request;
+    append_frame(request, headers_frame(request_headers));
+    append_frame(request, data_frame("hello"));
+    append_frame(request, headers_frame(trailers));
+
+    Http3BodyReadOutcome outcome = run_http3_request_body(request);
+
+    EXPECT_EQ(outcome.first_error, fiber::common::IoErr::None);
+    EXPECT_EQ(outcome.first_body, "hello");
+    EXPECT_FALSE(outcome.first_complete);
+    EXPECT_EQ(outcome.second_error, fiber::common::IoErr::Invalid);
+    EXPECT_FALSE(outcome.trailers_complete);
 }
 
 TEST(Http3ConnectionTest, AppliesPeerSettingsOnce) {
