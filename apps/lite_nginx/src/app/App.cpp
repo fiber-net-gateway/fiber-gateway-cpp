@@ -76,9 +76,13 @@ bool parse_options(int argc, char **argv, Options &options) {
 
 void print_summary(const config::MainConfig &config, std::string_view path) {
     std::size_t tls_listeners = 0;
+    std::size_t http3_listeners = 0;
     for (const auto &listen: config.http.listens) {
         if (listen.tls) {
             ++tls_listeners;
+        }
+        if (listen.http3) {
+            ++http3_listeners;
         }
     }
 
@@ -86,6 +90,7 @@ void print_summary(const config::MainConfig &config, std::string_view path) {
     std::cout << "worker_processes=" << config.worker_processes << '\n';
     std::cout << "listeners=" << config.http.listens.size() << '\n';
     std::cout << "tls_listeners=" << tls_listeners << '\n';
+    std::cout << "http3_listeners=" << http3_listeners << '\n';
     std::cout << "upstreams=" << config.http.upstreams.size() << '\n';
     std::cout << "servers=" << config.http.servers.size() << '\n';
 }
@@ -126,6 +131,9 @@ int LiteNginxApp::run(int argc, char **argv) {
 
     for (const auto &listener: launcher.bound_listeners()) {
         std::cout << "listening on " << (listener.tls ? "https://" : "http://") << listener.address.to_string() << '\n';
+        if (listener.http3) {
+            std::cout << "listening on h3://" << listener.address.to_string() << '\n';
+        }
     }
 
     std::cout << "reverse proxy runtime started\n";

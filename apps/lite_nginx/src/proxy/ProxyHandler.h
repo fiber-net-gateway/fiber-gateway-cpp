@@ -20,6 +20,7 @@ public:
     explicit ProxyHandler(upstream::UpstreamRegistry &upstreams) noexcept : upstreams_(&upstreams) {}
 
     [[nodiscard]] fiber::async::Task<void> handle(fiber::http::HttpExchange &exchange,
+                                                  const runtime::ListenerRuntime &listener,
                                                   const runtime::LocationRuntime &location) const;
 
 private:

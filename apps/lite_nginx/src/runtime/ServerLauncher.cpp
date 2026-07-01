@@ -34,9 +34,12 @@ RuntimeError make_error(const config::SourceLocation &location, std::string mess
 }
 
 fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange, int status_code,
-                                             std::string_view body) {
+                                             std::string_view body, const ListenerRuntime *listener = nullptr) {
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("Content-Type", "text/plain");
+    if (listener != nullptr && listener->http3 && !listener->http3_alt_svc.empty()) {
+        headers.set("Alt-Svc", listener->http3_alt_svc);
+    }
 
     auto header_result = co_await exchange.send_header({
             .kind = fiber::http::OutgoingHeaderKind::Final,
@@ -93,6 +96,7 @@ fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
 fiber::http::HttpServerOptions make_server_options(const ListenerRuntime &listener) {
     fiber::http::HttpServerOptions options;
     options.drain_unread_body = true;
+    options.http3.enabled = listener.http3;
     if (!listener.tls) {
         return options;
     }
@@ -182,7 +186,7 @@ public:
 
         const std::uint32_t server_index = find_server_index(listener, host_name);
         if (server_index >= runtime_->servers.size()) {
-            co_await send_plain_response(exchange, 404, kNotFoundBody);
+            co_await send_plain_response(exchange, 404, kNotFoundBody, &listener);
             co_return;
         }
 
@@ -191,11 +195,11 @@ public:
         std::string_view path = exchange.uri().path.empty() ? std::string_view("/") : exchange.uri().path;
         if (!server.location_matcher.match_path(path, match_context) ||
             match_context.location_index >= server.locations.size()) {
-            co_await send_plain_response(exchange, 404, kNotFoundBody);
+            co_await send_plain_response(exchange, 404, kNotFoundBody, &listener);
             co_return;
         }
 
-        co_await proxy_.handle(exchange, server.locations[match_context.location_index]);
+        co_await proxy_.handle(exchange, listener, server.locations[match_context.location_index]);
     }
 
 private:
@@ -267,6 +271,7 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
         bound_listeners_.push_back({
                 .address = bound_address,
                 .tls = listener.tls,
+                .http3 = listener.http3,
         });
 
         auto *server_ptr = server.get();

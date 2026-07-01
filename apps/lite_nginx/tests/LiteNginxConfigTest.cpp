@@ -42,7 +42,7 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
 
         http {
             listen 8080;
-            listen 8443 ssl;
+            listen 8443 ssl http3;
 
             upstream backend {
                 server 127.0.0.1:9001;
@@ -79,8 +79,10 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
     ASSERT_EQ(config.http.listens.size(), 2u);
     EXPECT_EQ(config.http.listens[0].port, 8080);
     EXPECT_FALSE(config.http.listens[0].tls);
+    EXPECT_FALSE(config.http.listens[0].http3);
     EXPECT_EQ(config.http.listens[1].port, 8443);
     EXPECT_TRUE(config.http.listens[1].tls);
+    EXPECT_TRUE(config.http.listens[1].http3);
     ASSERT_EQ(config.http.upstreams.size(), 1u);
     EXPECT_EQ(config.http.upstreams[0].name, "backend");
     EXPECT_EQ(config.http.upstreams[0].servers[0].host, "127.0.0.1");
@@ -209,6 +211,46 @@ TEST(LiteNginxConfigTest, RejectsSslListenWithoutCertificates) {
 
     ASSERT_FALSE(config_result.has_value());
     EXPECT_NE(config_result.error().message.find("certificate and certificate_key"), std::string::npos);
+}
+
+TEST(LiteNginxConfigTest, RejectsHttp3ListenWithoutSsl) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8443 http3;
+            server {
+                server_name localhost;
+                location / {
+                    proxy_pass http://127.0.0.1:9001;
+                }
+            }
+        }
+    )",
+                                                        "inline.conf");
+
+    ASSERT_FALSE(config_result.has_value());
+    EXPECT_NE(config_result.error().message.find("http3 requires ssl"), std::string::npos);
+}
+
+TEST(LiteNginxConfigTest, AcceptsQuicListenAlias) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8443 ssl quic;
+            server {
+                server_name localhost;
+                certificate /tmp/localhost.crt;
+                certificate_key /tmp/localhost.key;
+                location / {
+                    proxy_pass http://127.0.0.1:9001;
+                }
+            }
+        }
+    )",
+                                                        "inline.conf");
+
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    ASSERT_EQ(config_result->http.listens.size(), 1u);
+    EXPECT_TRUE(config_result->http.listens[0].tls);
+    EXPECT_TRUE(config_result->http.listens[0].http3);
 }
 
 } // namespace

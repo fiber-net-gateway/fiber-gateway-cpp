@@ -36,6 +36,7 @@ struct ListenAddress {
     std::uint16_t port = 0;
     bool has_host = false;
     bool tls = false;
+    bool http3 = false;
 };
 
 struct UpstreamServerConfig {

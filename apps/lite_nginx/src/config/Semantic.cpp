@@ -145,8 +145,8 @@ std::expected<HostPort, ConfigError> parse_host_port(const DirectiveNode &direct
 }
 
 std::expected<ListenAddress, ConfigError> parse_listen_address(const DirectiveNode &directive) {
-    if (directive.args.empty() || directive.args.size() > 2) {
-        return std::unexpected(make_error(directive, "listen expects '<port>' or '<port> ssl'"));
+    if (directive.args.empty() || directive.args.size() > 3) {
+        return std::unexpected(make_error(directive, "listen expects '<port|ip:port> [ssl] [http3]'"));
     }
 
     for (const auto &arg: directive.args) {
@@ -157,11 +157,30 @@ std::expected<ListenAddress, ConfigError> parse_listen_address(const DirectiveNo
 
     ListenAddress listen;
     listen.location = directive.location;
-    if (directive.args.size() == 2) {
-        if (directive.args[1] != "ssl") {
-            return std::unexpected(make_error(directive, "listen only supports the optional 'ssl' flag"));
+    bool seen_ssl = false;
+    bool seen_http3 = false;
+    for (std::size_t i = 1; i < directive.args.size(); ++i) {
+        const std::string &arg = directive.args[i];
+        if (arg == "ssl") {
+            if (seen_ssl) {
+                return std::unexpected(make_error(directive, "listen ssl flag must not be repeated"));
+            }
+            seen_ssl = true;
+            listen.tls = true;
+            continue;
         }
-        listen.tls = true;
+        if (arg == "http3" || arg == "quic") {
+            if (seen_http3) {
+                return std::unexpected(make_error(directive, "listen http3 flag must not be repeated"));
+            }
+            seen_http3 = true;
+            listen.http3 = true;
+            continue;
+        }
+        return std::unexpected(make_error(directive, "listen only supports optional 'ssl' and 'http3' flags"));
+    }
+    if (listen.http3 && !listen.tls) {
+        return std::unexpected(make_error(directive, "listen http3 requires ssl"));
     }
 
     std::string_view value = directive.args[0];

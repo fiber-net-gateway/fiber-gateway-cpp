@@ -23,6 +23,7 @@ public:
     struct BoundListener {
         fiber::net::SocketAddress address;
         bool tls = false;
+        bool http3 = false;
     };
 
     explicit ServerLauncher(fiber::event::EventLoop &accept_loop);
