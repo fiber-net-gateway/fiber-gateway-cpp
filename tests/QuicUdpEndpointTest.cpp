@@ -18,6 +18,8 @@
 #include "common/IoError.h"
 #include "common/mem/IoBuf.h"
 #include "event/EventLoopGroup.h"
+#include "http/Http3Connection.h"
+#include "http/Http3Protocol.h"
 #include "net/IpAddress.h"
 #include "net/SocketAddress.h"
 #include "net/UdpSocket.h"
@@ -1049,6 +1051,129 @@ DetachedTask recv_application_stream_frame(fiber::event::EventLoop *loop, fiber:
     auto written = (*stream)->try_write(iobuf_of("stream"));
     if (!written) {
         done_promise->set_value(std::unexpected(written.error()));
+        co_return;
+    }
+
+    fiber::quic::QuicConnection::Options client_options{};
+    client_options.role = fiber::quic::QuicConnectionRole::Client;
+    fiber::quic::QuicConnection peer(client_options);
+    auto peer_secret = fiber::quic::quic_set_encryption_secret(
+            peer.crypto(), fiber::quic::QuicEncryptionLevel::Application, false, suite, app_secret.data(), 32);
+    if (!peer_secret) {
+        done_promise->set_value(std::unexpected(peer_secret.error()));
+        co_return;
+    }
+
+    endpoint->schedule_send(server);
+
+    auto readable = co_await client.wait_event(fiber::event::IoEvent::Read, std::chrono::milliseconds{500});
+    if (!readable) {
+        done_promise->set_value(std::unexpected(readable.error()));
+        co_return;
+    }
+
+    std::array<std::uint8_t, 1400> response{};
+    auto received = client.try_recv_from(response.data(), response.size());
+    if (!received) {
+        done_promise->set_value(std::unexpected(received.error()));
+        co_return;
+    }
+
+    std::array<std::uint8_t, 256> plaintext{};
+    auto decoded = fiber::quic::quic_decode_packet(peer, response.data(), received->size, client_cid.size(),
+                                                   plaintext.data(), plaintext.size());
+    if (!decoded) {
+        done_promise->set_value(std::unexpected(decoded.error()));
+        co_return;
+    }
+
+    fiber::quic::QuicReadCursor payload(decoded->payload.data, decoded->payload.len);
+    auto parsed = fiber::quic::quic_parse_frame_for_receiver(fiber::quic::QuicConnectionRole::Client,
+                                                             fiber::quic::QuicEncryptionLevel::Application, payload);
+    if (!parsed) {
+        done_promise->set_value(std::unexpected(parsed.error()));
+        co_return;
+    }
+    if (parsed->frame.type != fiber::quic::QuicFrameType::Stream || parsed->frame.data.len > 8) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+        co_return;
+    }
+
+    StreamPacketSummary summary{};
+    summary.decoded_frame_count = decoded->frame_count;
+    summary.stream_id = parsed->frame.u.stream.stream_id;
+    summary.stream_offset = parsed->frame.u.stream.offset;
+    summary.stream_length = parsed->frame.u.stream.length;
+    summary.has_length = parsed->frame.u.stream.has_length;
+    summary.fin = parsed->frame.u.stream.fin;
+    std::memcpy(summary.data.data(), parsed->frame.data.data, parsed->frame.data.len);
+    done_promise->set_value(summary);
+    client.close();
+}
+
+DetachedTask
+recv_http3_control_preface_frame(fiber::event::EventLoop *loop, fiber::quic::QuicUdpEndpoint *endpoint,
+                                 std::promise<fiber::common::IoResult<StreamPacketSummary>> *done_promise) {
+    fiber::net::UdpSocket client(*loop);
+    auto bound = client.bind(loopback(0), {});
+    if (!bound) {
+        done_promise->set_value(std::unexpected(bound.error()));
+        co_return;
+    }
+
+    const auto server_cid = cid_from_hex("c1c2c3c4c5c6c7c8");
+    const auto client_cid = cid_from_hex("d1d2d3d4d5d6d7d8");
+    constexpr fiber::quic::QuicCryptoSuite suite = fiber::quic::QuicCryptoSuite::Aes128GcmSha256;
+    std::array<std::uint8_t, fiber::quic::kQuicMaxSecretLength> app_secret{};
+    for (std::size_t i = 0; i < 32; ++i) {
+        app_secret[i] = static_cast<std::uint8_t>(0xb0U + i);
+    }
+
+    fiber::quic::QuicConnection::Options server_options{};
+    server_options.role = fiber::quic::QuicConnectionRole::Server;
+    server_options.local_addr = endpoint->local_addr();
+    server_options.remote_addr = client.local_addr();
+    server_options.local_connection_id = server_cid;
+    server_options.remote_connection_id = client_cid;
+    server_options.loop = loop;
+    fiber::quic::QuicConnection server(server_options);
+    auto *path = server.active_path();
+    if (path == nullptr) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+        co_return;
+    }
+    path->validated = true;
+
+    auto server_secret = fiber::quic::quic_set_encryption_secret(
+            server.crypto(), fiber::quic::QuicEncryptionLevel::Application, true, suite, app_secret.data(), 32);
+    if (!server_secret) {
+        done_promise->set_value(std::unexpected(server_secret.error()));
+        co_return;
+    }
+
+    fiber::quic::QuicTransportParams params{};
+    params.has_initial_source_connection_id = true;
+    params.initial_source_connection_id = server.remote_connection_id();
+    params.max_udp_payload_size = fiber::quic::kMinInitialDatagramSize;
+    params.active_connection_id_limit = 2;
+    params.initial_max_data = 1024;
+    params.initial_max_stream_data_uni = 1024;
+    params.initial_max_streams_uni = 8;
+    auto applied = server.apply_peer_transport_params(params);
+    if (!applied) {
+        done_promise->set_value(std::unexpected(applied.error()));
+        co_return;
+    }
+    auto established = server.mark_established();
+    if (!established) {
+        done_promise->set_value(std::unexpected(established.error()));
+        co_return;
+    }
+
+    fiber::http::Http3Connection h3(server);
+    auto started = co_await h3.start();
+    if (!started) {
+        done_promise->set_value(std::unexpected(started.error()));
         co_return;
     }
 
@@ -2235,6 +2360,38 @@ TEST(QuicUdpEndpointTest, EncodesApplicationStreamFrameFromSendQueue) {
     EXPECT_FALSE(response->fin);
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(response->data.data()), response->stream_length),
               "stream");
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, EncodesHttp3ControlStreamPrefaceFromScheduler) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    std::promise<fiber::common::IoResult<StreamPacketSummary>> response_promise;
+    auto response_future = response_promise.get_future();
+
+    fiber::async::spawn(group.at(0),
+                        [&]() { return recv_http3_control_preface_frame(&group.at(0), &endpoint, &response_promise); });
+
+    ASSERT_EQ(response_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto response = response_future.get();
+    ASSERT_TRUE(response.has_value()) << static_cast<int>(response.error());
+    EXPECT_EQ(response->decoded_frame_count, 1U);
+    EXPECT_EQ(response->stream_id, 3U);
+    EXPECT_EQ(response->stream_offset, 0U);
+    EXPECT_EQ(response->stream_length, 3U);
+    EXPECT_TRUE(response->has_length);
+    EXPECT_FALSE(response->fin);
+    EXPECT_EQ(response->data[0], 0x00U);
+    EXPECT_EQ(response->data[1], static_cast<std::uint8_t>(fiber::http::Http3FrameType::Settings));
+    EXPECT_EQ(response->data[2], 0x00U);
 
     close_endpoint_on_loop(group, endpoint);
     group.stop();
