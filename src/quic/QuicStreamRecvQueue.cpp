@@ -12,8 +12,6 @@ namespace fiber::quic {
 
 static constexpr std::size_t kQuicStreamRecvMaxActiveExtents = 4096;
 static constexpr std::size_t kQuicStreamRecvMaxActiveBlocks = 1024;
-static constexpr unsigned kBlockSizeShift = 14;
-static constexpr std::uint64_t kBlockOffsetMask = 16 * 1024 - 1;
 static constexpr std::uint64_t kQuicMaxFlowControlLimit = (1ULL << 62U) - 1U;
 
 class QuicStreamRecvQueue::ReadAwaiter {
@@ -612,14 +610,14 @@ void QuicStreamRecvQueue::clear_buffered_extents() noexcept {
     active_block_count_ = 0;
 }
 
-std::uint64_t QuicStreamRecvQueue::block_of(std::uint64_t offset) noexcept { return offset >> kBlockSizeShift; }
+std::uint64_t QuicStreamRecvQueue::block_of(std::uint64_t offset) noexcept { return offset >> kRecvBlockSizeShift; }
 
 std::size_t QuicStreamRecvQueue::block_offset(std::uint64_t offset) noexcept {
-    return static_cast<std::size_t>(offset & kBlockOffsetMask);
+    return static_cast<std::size_t>(offset & kRecvBlockOffsetMask);
 }
 
 std::uint64_t QuicStreamRecvQueue::block_end(std::uint64_t offset) noexcept {
-    return (offset & ~kBlockOffsetMask) + kRecvBlockSize;
+    return (offset & ~kRecvBlockOffsetMask) + kRecvBlockSize;
 }
 
 common::IoResult<mem::IoBufNode *> QuicStreamRecvQueue::create_extent(std::uint64_t offset, std::size_t len,

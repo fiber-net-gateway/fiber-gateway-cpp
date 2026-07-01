@@ -9,6 +9,7 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../quic/QuicConnection.h"
+#include "Http3Protocol.h"
 #include "HttpExchange.h"
 #include "HttpExchangeIo.h"
 
@@ -46,18 +47,27 @@ public:
                                                                  std::size_t len, bool end) noexcept override;
 
 private:
+    class RequestHeaderParser;
+
     ServerHttp3Request(Http3Connection &conn, const HttpServerOptions &http_options,
                        const HttpHandler &handler) noexcept;
 
     static void destroy_owner(void *owner, quic::QuicStream &stream) noexcept;
 
     async::DetachedTask run_read_loop(quic::QuicStream::Lease lease) noexcept;
+    async::Task<common::IoResult<void>> parse_request_header() noexcept;
 
     quic::QuicConnection::Lease quic_lease_{};
     quic::QuicStream stream_;
+    mem::IoBufChain inbound_buf_;
     HttpExchange exchange_;
     const HttpHandler *handler_ = nullptr;
+    std::uint32_t max_qpack_string_size_ = 0;
+    Http3ErrorCode header_parse_error_ = Http3ErrorCode::GeneralProtocolError;
     bool read_loop_started_ = false;
+    bool request_head_received_ = false;
+    bool handler_started_ = false;
+    bool handler_done_ = false;
 };
 
 } // namespace fiber::http
