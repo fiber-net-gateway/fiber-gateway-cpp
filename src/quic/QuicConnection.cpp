@@ -1489,7 +1489,19 @@ common::IoResult<void> QuicConnection::recv_max_stream_data_frame(const QuicMaxS
     }
     QuicStream *stream = find_stream(frame.id);
     if (stream == nullptr) {
-        return std::unexpected(common::IoErr::Invalid);
+        if (is_peer_stream(frame.id) && is_bidirectional_stream(frame.id)) {
+            if (peer_stream_exceeds_advertised_limit(frame.id)) {
+                close(QuicErrorCode::StreamLimitError, static_cast<std::uint64_t>(QuicFrameType::MaxStreamData));
+                return std::unexpected(common::IoErr::Busy);
+            }
+            auto created = get_or_create_peer_stream(frame.id);
+            if (!created) {
+                return std::unexpected(created.error());
+            }
+            stream = *created;
+        } else {
+            return std::unexpected(common::IoErr::Invalid);
+        }
     }
     stream->on_max_stream_data(frame.limit);
     return {};

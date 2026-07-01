@@ -1452,6 +1452,46 @@ TEST(QuicConnectionTest, MaxStreamDataUpdatesStreamWriteWindow) {
     EXPECT_EQ(*written, 3U);
 }
 
+TEST(QuicConnectionTest, MaxStreamDataCreatesPeerBidirectionalStream) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    grant_max_data(conn, 1024);
+
+    fiber::quic::QuicMaxStreamDataFrame max_stream_data{};
+    max_stream_data.id = 0;
+    max_stream_data.limit = 5;
+    auto updated = conn.recv_max_stream_data_frame(max_stream_data);
+
+    ASSERT_TRUE(updated.has_value());
+    auto *stream = conn.find_stream(0);
+    ASSERT_NE(stream, nullptr);
+    EXPECT_EQ(state.calls, 1U);
+    EXPECT_EQ(state.last_created_stream_id, 0U);
+    EXPECT_EQ(state.last_stream_id, 0U);
+
+    auto written = stream->try_write(iobuf_of("abc"));
+    ASSERT_TRUE(written.has_value());
+    EXPECT_EQ(*written, 3U);
+}
+
+TEST(QuicConnectionTest, MaxStreamDataBeyondAdvertisedPeerBidirectionalLimitClosesConnection) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    options.max_peer_bidirectional_streams = 1;
+    fiber::quic::QuicConnection conn(options);
+
+    fiber::quic::QuicMaxStreamDataFrame max_stream_data{};
+    max_stream_data.id = 4;
+    max_stream_data.limit = 5;
+    auto updated = conn.recv_max_stream_data_frame(max_stream_data);
+
+    ASSERT_FALSE(updated.has_value());
+    EXPECT_EQ(updated.error(), fiber::common::IoErr::Busy);
+    EXPECT_EQ(conn.close_error(), fiber::quic::QuicErrorCode::StreamLimitError);
+    EXPECT_EQ(state.calls, 0U);
+}
+
 TEST(QuicConnectionTest, StreamWriteShortWritesToStreamCredit) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
