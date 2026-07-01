@@ -51,6 +51,13 @@ std::string listener_key(const config::ListenAddress &listen) {
     return key;
 }
 
+std::string make_http3_alt_svc(std::uint16_t port) {
+    std::string value = "h3=\":";
+    value.append(std::to_string(port));
+    value.append("\"; ma=86400");
+    return value;
+}
+
 std::string direct_upstream_key(std::string_view host, std::uint16_t port) {
     std::string key(host);
     key.push_back(':');
@@ -298,6 +305,10 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
         runtime_listener.port = listen.port;
         runtime_listener.has_host = listen.has_host;
         runtime_listener.tls = listen.tls;
+        runtime_listener.http3 = listen.http3;
+        if (runtime_listener.http3) {
+            runtime_listener.http3_alt_svc = make_http3_alt_svc(runtime_listener.port);
+        }
         runtime_listener.default_server_index = 0;
         runtime_listener.server_names.reserve(seen_server_names.size());
 

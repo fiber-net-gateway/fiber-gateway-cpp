@@ -428,6 +428,33 @@ http {
     EXPECT_NE(runtime.error().message.find("duplicate server_name"), std::string::npos);
 }
 
+TEST(LiteNginxRuntimeTest, BuildsHttp3ListenerRuntime) {
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:8443 ssl http3;
+
+    server {
+        server_name localhost;
+        certificate /tmp/localhost.crt;
+        certificate_key /tmp/localhost.key;
+        location / {
+            proxy_pass http://127.0.0.1:9001;
+        }
+    }
+}
+)",
+                                                                            "http3_listener.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    ASSERT_EQ(runtime->listeners.size(), 1u);
+    EXPECT_TRUE(runtime->listeners[0].tls);
+    EXPECT_TRUE(runtime->listeners[0].http3);
+    EXPECT_EQ(runtime->listeners[0].http3_alt_svc, "h3=\":8443\"; ma=86400");
+}
+
 TEST(LiteNginxRuntimeTest, ProxiesDirectRouteMatcherLocation) {
     std::promise<std::string> upstream_request;
     auto upstream_future = upstream_request.get_future();

@@ -127,10 +127,17 @@ bool should_skip_response_header(const fiber::http::HttpHeaders &response_header
     return connection_declares_hop_by_hop(response_headers, field.lowcase_view());
 }
 
+void apply_http3_alt_svc(const runtime::ListenerRuntime &listener, fiber::http::HttpHeaders &headers) {
+    if (listener.http3 && !listener.http3_alt_svc.empty()) {
+        headers.set("Alt-Svc", listener.http3_alt_svc);
+    }
+}
+
 fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange, int status_code,
-                                             std::string_view body) {
+                                             std::string_view body, const runtime::ListenerRuntime &listener) {
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("Content-Type", "text/plain");
+    apply_http3_alt_svc(listener, headers);
 
     auto header_result = co_await exchange.send_header({
             .kind = fiber::http::OutgoingHeaderKind::Final,
@@ -219,7 +226,7 @@ void build_upstream_request_headers(const runtime::LocationRuntime &location, co
 }
 
 void build_downstream_response_headers(const fiber::http::Http1ResponseHead &upstream_head,
-                                       fiber::http::HttpHeaders &headers) {
+                                       fiber::http::HttpHeaders &headers, const runtime::ListenerRuntime &listener) {
     for (auto it = upstream_head.headers.begin(); it != upstream_head.headers.end(); ++it) {
         const auto &field = *it;
         if (field.name_len == 0 || should_skip_response_header(upstream_head.headers, field)) {
@@ -228,11 +235,13 @@ void build_downstream_response_headers(const fiber::http::Http1ResponseHead &ups
         headers.add_view(field.name_view(), field.value_view(), const_cast<char *>(field.lowcase_name),
                          field.name_hash);
     }
+    apply_http3_alt_svc(listener, headers);
 }
 
 fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchange,
                                                const runtime::LocationRuntime &location,
-                                               fiber::http::Http1ClientConnection &conn) {
+                                               fiber::http::Http1ClientConnection &conn,
+                                               const runtime::ListenerRuntime &listener) {
     fiber::http::Http1ClientExchangeOptions exchange_options;
     exchange_options.write_timeout = location.send_timeout;
     exchange_options.response_header_timeout = location.read_timeout;
@@ -255,7 +264,7 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
     auto send_header_result = co_await upstream_exchange.send_header(request_head, request_end_stream);
     if (!send_header_result) {
         co_await send_plain_response(exchange, map_upstream_error_status(send_header_result.error()),
-                                     map_upstream_error_body(send_header_result.error()));
+                                     map_upstream_error_body(send_header_result.error()), listener);
         co_return;
     }
 
@@ -269,7 +278,7 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
             auto write_result = co_await upstream_exchange.write_body(std::move(*body_result));
             if (!write_result) {
                 co_await send_plain_response(exchange, map_upstream_error_status(write_result.error()),
-                                             map_upstream_error_body(write_result.error()));
+                                             map_upstream_error_body(write_result.error()), listener);
                 co_return;
             }
             if (last) {
@@ -283,7 +292,7 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
         auto read_header_result = co_await upstream_exchange.read_header();
         if (!read_header_result) {
             co_await send_plain_response(exchange, map_upstream_error_status(read_header_result.error()),
-                                         map_upstream_error_body(read_header_result.error()));
+                                         map_upstream_error_body(read_header_result.error()), listener);
             co_return;
         }
         if (!(*read_header_result)->is_informational()) {
@@ -293,7 +302,7 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
     }
 
     fiber::http::HttpHeaders response_headers(exchange.pool());
-    build_downstream_response_headers(*upstream_head, response_headers);
+    build_downstream_response_headers(*upstream_head, response_headers, listener);
 
     const bool no_response_body = response_has_no_body(exchange.method(), upstream_head->status_code);
     std::size_t response_content_length = 0;
@@ -340,15 +349,16 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
 } // namespace
 
 fiber::async::Task<void> ProxyHandler::handle(fiber::http::HttpExchange &exchange,
+                                              const runtime::ListenerRuntime &listener,
                                               const runtime::LocationRuntime &location) const {
     if (!upstreams_) {
-        co_await send_plain_response(exchange, 502, kBadGatewayBody);
+        co_await send_plain_response(exchange, 502, kBadGatewayBody, listener);
         co_return;
     }
 
     auto handle = co_await upstreams_->acquire_connection(location.upstream_index);
     if (!handle.valid()) {
-        co_await send_plain_response(exchange, 502, kBadGatewayBody);
+        co_await send_plain_response(exchange, 502, kBadGatewayBody, listener);
         co_return;
     }
 
@@ -362,18 +372,18 @@ fiber::async::Task<void> ProxyHandler::handle(fiber::http::HttpExchange &exchang
             auto emplace_result = handle.lease.emplace_connection(std::move(connection_options));
             if (!emplace_result) {
                 co_await send_plain_response(exchange, map_upstream_error_status(emplace_result.error()),
-                                             map_upstream_error_body(emplace_result.error()));
+                                             map_upstream_error_body(emplace_result.error()), listener);
                 co_return;
             }
             conn = *emplace_result;
             auto connect_result = co_await conn->connect();
             if (!connect_result) {
                 co_await send_plain_response(exchange, map_upstream_error_status(connect_result.error()),
-                                             map_upstream_error_body(connect_result.error()));
+                                             map_upstream_error_body(connect_result.error()), listener);
                 co_return;
             }
         }
-        co_await proxy_over_connection(exchange, location, *conn);
+        co_await proxy_over_connection(exchange, location, *conn, listener);
         co_return;
     }
 
@@ -381,11 +391,11 @@ fiber::async::Task<void> ProxyHandler::handle(fiber::http::HttpExchange &exchang
     auto connect_result = co_await transient.connect();
     if (!connect_result) {
         co_await send_plain_response(exchange, map_upstream_error_status(connect_result.error()),
-                                     map_upstream_error_body(connect_result.error()));
+                                     map_upstream_error_body(connect_result.error()), listener);
         co_return;
     }
 
-    co_await proxy_over_connection(exchange, location, transient);
+    co_await proxy_over_connection(exchange, location, transient, listener);
 }
 
 } // namespace fiber::lite_nginx::proxy

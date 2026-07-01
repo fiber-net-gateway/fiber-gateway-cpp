@@ -93,6 +93,8 @@ struct ListenerRuntime {
     std::uint16_t port = 0;
     bool has_host = false;
     bool tls = false;
+    bool http3 = false;
+    std::string http3_alt_svc;
     std::string default_certificate;
     std::string default_certificate_key;
     std::vector<TlsIdentityRuntime> tls_identities;

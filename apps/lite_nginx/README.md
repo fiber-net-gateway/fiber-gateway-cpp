@@ -65,6 +65,7 @@ Validate a custom config file:
 - Accept downstream HTTP/1.1 requests on non-TLS listeners.
 - Accept downstream HTTPS requests on TLS listeners.
 - Negotiate HTTP/1.1 or HTTP/2 automatically on TLS listeners via ALPN.
+- Accept downstream HTTP/3 on TLS listeners configured with `http3`.
 - Proxy to upstream HTTP/1.1 backends.
 - Support multiple `server` blocks.
 - Support shared `http`-level listeners reused by all `server` blocks.
@@ -110,8 +111,12 @@ Top level:
 
 - `listen <port>;`
 - `listen <port> ssl;`
+- `listen <port> ssl http3;`
+- `listen <port> ssl quic;`
 - `listen <ip:port>;`
 - `listen <ip:port> ssl;`
+- `listen <ip:port> ssl http3;`
+- `listen <ip:port> ssl quic;`
 - `upstream <name> { ... }`
 - `server { ... }`
 
@@ -154,6 +159,10 @@ Top level:
 - `server` blocks must define at least one `server_name`.
 - `listen ... ssl` enables TLS; HTTP/2 is negotiated automatically and does not
   need a separate config switch.
+- `listen ... ssl http3` additionally binds UDP on the same address and port,
+  enables HTTP/3 ALPN, and advertises `Alt-Svc` on downstream HTTP/1.1 and
+  HTTP/2 responses.
+- `http3` and its `quic` alias require `ssl`.
 - If any `http` listener uses `ssl`, every `server` must define both
   `certificate` and `certificate_key`.
 - `server_name` uses exact match only.
@@ -193,6 +202,7 @@ rewrite ^/a/(.*)$ /b/$1 last;
 - Requests are first matched by the selected `http`-level listener.
 - Non-TLS listeners accept HTTP/1.1 only.
 - TLS listeners terminate HTTPS and negotiate HTTP/1.1 or HTTP/2 automatically.
+- TLS listeners configured with `http3` also accept HTTP/3 over QUIC on UDP.
 - Within a listener, `server_name` is matched by exact hostname after stripping
   any `:port` suffix from `Host`.
 - `location` matching uses only the URI path. Query strings are not part of the
@@ -298,6 +308,7 @@ worker_processes 1;
 
 http {
     listen 8080;
+    listen 8443 ssl http3;
 
     upstream backend {
         server 127.0.0.1:9001;
