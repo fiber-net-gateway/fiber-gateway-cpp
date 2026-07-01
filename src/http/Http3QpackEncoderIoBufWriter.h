@@ -18,6 +18,8 @@ public:
     explicit Http3QpackEncoderIoBufWriter(mem::IoBufNodePool &node_pool, std::size_t chunk_size = 512) noexcept;
     Http3QpackEncoderIoBufWriter(mem::IoBufNodePool &node_pool, Http3QpackEncoder::Options options,
                                  std::size_t chunk_size = 512) noexcept;
+    Http3QpackEncoderIoBufWriter(mem::IoBufNodePool &node_pool, Http3QpackEncoder::Options options,
+                                 std::size_t chunk_size, std::size_t prefix_reserve) noexcept;
 
     [[nodiscard]] common::IoErr encode_status(int status_code) noexcept;
     [[nodiscard]] common::IoErr encode_method(HttpMethod method) noexcept;
@@ -27,6 +29,8 @@ public:
     [[nodiscard]] common::IoErr encode_field(std::string_view name, std::uint64_t name_hash,
                                              std::string_view value) noexcept;
     [[nodiscard]] common::IoErr finish(mem::IoBufChain &out) noexcept;
+    [[nodiscard]] std::uint8_t *prefix_reserved_data() noexcept { return prefix_reserved_; }
+    [[nodiscard]] std::size_t prefix_reserved_size() const noexcept { return prefix_reserve_; }
     void abort() noexcept;
 
 private:
@@ -39,8 +43,11 @@ private:
     mem::IoBufChain block_;
     Http3QpackEncoder encoder_;
     mem::IoBuf *tail_ = nullptr;
+    std::uint8_t *prefix_reserved_ = nullptr;
     std::size_t chunk_size_ = 0;
+    std::size_t prefix_reserve_ = 0;
     bool finished_ = false;
+    bool prefix_reserved_done_ = false;
 };
 
 } // namespace fiber::http
