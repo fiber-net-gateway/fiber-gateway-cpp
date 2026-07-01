@@ -1376,8 +1376,8 @@ async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_body(HttpEx
 
     if (body_len != 0) {
         const std::uint64_t frame_type = static_cast<std::uint64_t>(Http3FrameType::Data);
-        const std::size_t frame_header_len = quic::quic_varint_len(frame_type) +
-                                             quic::quic_varint_len(static_cast<std::uint64_t>(body_len));
+        const std::size_t frame_header_len =
+                quic::quic_varint_len(frame_type) + quic::quic_varint_len(static_cast<std::uint64_t>(body_len));
         mem::IoBuf frame_header = mem::IoBuf::allocate(frame_header_len);
         if (!frame_header) {
             co_return std::unexpected(common::IoErr::NoMem);
@@ -1419,9 +1419,8 @@ async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_body(HttpEx
     co_return body_len;
 }
 
-async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_body(HttpExchange &exchange,
-                                                                          const std::uint8_t *buf, std::size_t len,
-                                                                          bool end) noexcept {
+async::Task<common::IoResult<std::size_t>>
+ServerHttp3Request::write_body(HttpExchange &exchange, const std::uint8_t *buf, std::size_t len, bool end) noexcept {
     if (len != 0 && buf == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
