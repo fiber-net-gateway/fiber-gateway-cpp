@@ -10,10 +10,12 @@
 
 #include "../async/Spawn.h"
 #include "../event/EventLoop.h"
+#include "../quic/QuicTransportCodec.h"
 #include "HeaderMap.h"
 #include "Http3Codec.h"
 #include "Http3Connection.h"
 #include "Http3QpackDecoder.h"
+#include "Http3QpackEncoderIoBufWriter.h"
 #include "HttpHeaderHash.h"
 #include "HttpUriParse.h"
 #include "Huffman.h"
@@ -23,6 +25,8 @@ namespace fiber::http {
 namespace {
 
 constexpr std::size_t kHttp3RequestReadChunkSize = 128 << 10;
+constexpr std::size_t kHttp3FrameHeaderReserve = 16;
+constexpr std::uint64_t kMaxHttp3FramePayloadLength = (1ULL << 62U) - 1U;
 
 [[nodiscard]] std::uint64_t error_value(Http3ErrorCode error) noexcept { return static_cast<std::uint64_t>(error); }
 
@@ -161,7 +165,8 @@ ServerHttp3Request::ServerHttp3Request(Http3Connection &conn, const HttpServerOp
     inbound_buf_(conn.quic().recv_extent_pool()), exchange_(conn.quic().recv_extent_pool(), http_options),
     handler_(&handler), max_qpack_string_size_(static_cast<std::uint32_t>(std::min<std::size_t>(
                                 http_options.header_large_size, std::numeric_limits<std::uint32_t>::max()))),
-    body_timeout_(http_options.body_timeout), body_recv_state_(BodyRecvState::FrameHeader) {}
+    body_timeout_(http_options.body_timeout), body_recv_state_(BodyRecvState::FrameHeader),
+    write_timeout_(http_options.write_timeout) {}
 
 quic::QuicStream::Lease ServerHttp3Request::create(std::uint64_t stream_id, Http3Connection &conn,
                                                    const HttpServerOptions &http_options,
@@ -790,7 +795,9 @@ async::DetachedTask ServerHttp3Request::run_read_loop(quic::QuicStream::Lease le
     handler_done_ = true;
     exchange_.set_io(nullptr);
 
-    stream_.close(error_value(Http3ErrorCode::RequestCancelled));
+    if (!response_finished_) {
+        stream_.close(error_value(Http3ErrorCode::RequestCancelled));
+    }
     (void) lease;
     co_return;
 }
@@ -1156,8 +1163,131 @@ async::Task<common::IoResult<mem::IoBufChain>> ServerHttp3Request::read_body(Htt
     }
 }
 
-async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange &, const OutgoingHeaderBlockView &) {
-    co_return std::unexpected(common::IoErr::NotSupported);
+async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange &exchange,
+                                                                    const OutgoingHeaderBlockView &header) {
+    if (&exchange != &exchange_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (!handler_started_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (response_finished_) {
+        co_return std::unexpected(common::IoErr::Already);
+    }
+
+    switch (header.kind) {
+        case OutgoingHeaderKind::Informational:
+            if (response_headers_sent_ || header.end_stream || header.status_code < 100 || header.status_code >= 200) {
+                co_return std::unexpected(common::IoErr::Invalid);
+            }
+            break;
+        case OutgoingHeaderKind::Final:
+            if (response_headers_sent_) {
+                co_return std::unexpected(common::IoErr::Already);
+            }
+            if (header.status_code < 200 || header.status_code > 999) {
+                co_return std::unexpected(common::IoErr::Invalid);
+            }
+            break;
+        case OutgoingHeaderKind::Trailer:
+            if (!response_headers_sent_ || !header.end_stream) {
+                co_return std::unexpected(common::IoErr::Invalid);
+            }
+            break;
+    }
+
+    Http3QpackEncoderIoBufWriter writer(inbound_buf_.node_pool(),
+                                        Http3QpackEncoder::Options{.max_string_size = max_qpack_string_size_}, 512,
+                                        kHttp3FrameHeaderReserve);
+
+    if (header.kind != OutgoingHeaderKind::Trailer) {
+        common::IoErr err = writer.encode_status(header.status_code);
+        if (err != common::IoErr::None) {
+            writer.abort();
+            co_return std::unexpected(err);
+        }
+    }
+
+    if (header.headers != nullptr) {
+        for (auto it = header.headers->begin(); it != header.headers->end(); ++it) {
+            const auto &field = *it;
+            if (field.name_len == 0) {
+                continue;
+            }
+            std::string_view name = field.lowcase_view();
+            if (name.empty()) {
+                name = field.name_view();
+            }
+            common::IoErr err = writer.encode_field(name, field.name_hash, field.value_view());
+            if (err != common::IoErr::None) {
+                writer.abort();
+                co_return std::unexpected(err);
+            }
+        }
+    }
+
+    mem::IoBufChain frame(inbound_buf_.node_pool());
+    common::IoErr err = writer.finish(frame);
+    if (err != common::IoErr::None) {
+        co_return std::unexpected(err);
+    }
+
+    const std::size_t total_len = frame.readable_bytes();
+    std::uint8_t *reserved = writer.prefix_reserved_data();
+    if (reserved == nullptr || writer.prefix_reserved_size() != kHttp3FrameHeaderReserve ||
+        total_len < kHttp3FrameHeaderReserve) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+
+    const std::size_t payload_len = total_len - kHttp3FrameHeaderReserve;
+    if (static_cast<std::uint64_t>(payload_len) > kMaxHttp3FramePayloadLength) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+
+    const std::size_t frame_header_len = quic::quic_varint_len(static_cast<std::uint64_t>(Http3FrameType::Headers)) +
+                                         quic::quic_varint_len(static_cast<std::uint64_t>(payload_len));
+    if (frame_header_len > kHttp3FrameHeaderReserve) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+
+    const std::size_t gap = kHttp3FrameHeaderReserve - frame_header_len;
+    quic::QuicWriteCursor out(reserved + gap, frame_header_len);
+    auto wrote = quic::quic_write_varint(out, static_cast<std::uint64_t>(Http3FrameType::Headers));
+    if (!wrote) {
+        co_return std::unexpected(wrote.error());
+    }
+    wrote = quic::quic_write_varint(out, static_cast<std::uint64_t>(payload_len));
+    if (!wrote) {
+        co_return std::unexpected(wrote.error());
+    }
+    if (out.offset() != frame_header_len) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+
+    if (gap != 0) {
+        frame.consume_and_compact(gap);
+    }
+    if (header.end_stream) {
+        frame.mark_complete();
+    }
+
+    while (!frame.empty()) {
+        auto written = co_await stream_.write(frame, write_timeout_);
+        if (!written) {
+            co_return std::unexpected(written.error());
+        }
+        if (*written == 0 && !frame.empty()) {
+            co_return std::unexpected(common::IoErr::WouldBlock);
+        }
+    }
+
+    if (header.kind == OutgoingHeaderKind::Final) {
+        response_headers_sent_ = true;
+    }
+    if (header.end_stream) {
+        response_finished_ = true;
+    }
+    co_return common::IoResult<void>{};
 }
 
 async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_body(HttpExchange &, mem::IoBufChain) noexcept {

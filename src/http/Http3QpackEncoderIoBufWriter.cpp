@@ -1,6 +1,7 @@
 #include "Http3QpackEncoderIoBufWriter.h"
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 #include "../common/Assert.h"
@@ -19,7 +20,12 @@ Http3QpackEncoderIoBufWriter::Http3QpackEncoderIoBufWriter(mem::IoBufNodePool &n
 Http3QpackEncoderIoBufWriter::Http3QpackEncoderIoBufWriter(mem::IoBufNodePool &node_pool,
                                                            Http3QpackEncoder::Options options,
                                                            std::size_t chunk_size) noexcept :
-    block_(node_pool), encoder_(this, kOutputOps, options), chunk_size_(chunk_size) {
+    Http3QpackEncoderIoBufWriter(node_pool, options, chunk_size, 0) {}
+
+Http3QpackEncoderIoBufWriter::Http3QpackEncoderIoBufWriter(mem::IoBufNodePool &node_pool,
+                                                           Http3QpackEncoder::Options options, std::size_t chunk_size,
+                                                           std::size_t prefix_reserve) noexcept :
+    block_(node_pool), encoder_(this, kOutputOps, options), chunk_size_(chunk_size), prefix_reserve_(prefix_reserve) {
     FIBER_ASSERT(chunk_size_ != 0);
 }
 
@@ -70,6 +76,7 @@ common::IoErr Http3QpackEncoderIoBufWriter::finish(mem::IoBufChain &out) noexcep
 void Http3QpackEncoderIoBufWriter::abort() noexcept {
     block_.clear();
     tail_ = nullptr;
+    prefix_reserved_ = nullptr;
     finished_ = true;
 }
 
@@ -83,7 +90,11 @@ common::IoErr Http3QpackEncoderIoBufWriter::acquire_output(void *ctx, std::size_
         return common::IoErr::None;
     }
 
-    const std::size_t cap = std::max(self->chunk_size_, min_bytes);
+    const std::size_t reserve = self->prefix_reserved_done_ ? 0 : self->prefix_reserve_;
+    if (reserve > std::numeric_limits<std::size_t>::max() - min_bytes) {
+        return common::IoErr::NoMem;
+    }
+    const std::size_t cap = std::max(self->chunk_size_, min_bytes + reserve);
     mem::IoBuf buf = mem::IoBuf::allocate(cap);
     if (!buf.valid()) {
         return common::IoErr::NoMem;
@@ -94,6 +105,20 @@ common::IoErr Http3QpackEncoderIoBufWriter::acquire_output(void *ctx, std::size_
     self->tail_ = self->block_.first_writable();
     if (self->tail_ == nullptr) {
         return common::IoErr::NoMem;
+    }
+    if (!self->prefix_reserved_done_) {
+        if (self->prefix_reserve_ != 0) {
+            if (self->tail_->writable() < self->prefix_reserve_) {
+                return common::IoErr::NoMem;
+            }
+            self->prefix_reserved_ = self->tail_->writable_data();
+            self->block_.commit(self->prefix_reserve_);
+            self->tail_ = self->block_.first_writable();
+            if (self->tail_ == nullptr || self->tail_->writable() < min_bytes) {
+                return common::IoErr::NoMem;
+            }
+        }
+        self->prefix_reserved_done_ = true;
     }
     dst = self->tail_->writable_data();
     len = self->tail_->writable();

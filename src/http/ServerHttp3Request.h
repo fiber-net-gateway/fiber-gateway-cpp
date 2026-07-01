@@ -85,11 +85,14 @@ private:
     std::uint64_t frame_payload_remaining_ = 0;
     Http3ErrorCode request_parse_error_ = Http3ErrorCode::GeneralProtocolError;
     BodyRecvState body_recv_state_{};
+    std::chrono::milliseconds write_timeout_{};
     bool read_loop_started_ = false;
     bool request_head_received_ = false;
     bool handler_started_ = false;
     bool handler_done_ = false;
     bool frame_header_in_progress_ = false;
+    bool response_headers_sent_ = false;
+    bool response_finished_ = false;
 };
 
 } // namespace fiber::http

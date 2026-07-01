@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -7,11 +8,14 @@
 
 #include "common/IoError.h"
 #include "common/mem/IoBuf.h"
+#include "http/Http3Protocol.h"
 #include "http/Http3QpackDecoder.h"
 #include "http/Http3QpackEncoder.h"
 #include "http/Http3QpackEncoderIoBufWriter.h"
 #include "http/HttpHeaderHash.h"
 #include "http/Huffman.h"
+#include "quic/QuicCursor.h"
+#include "quic/QuicTransportCodec.h"
 
 namespace {
 
@@ -257,6 +261,49 @@ TEST(Http3QpackEncoderTest, SupportsSmallWriterChunks) {
     decode_all(bytes, recorder);
     ASSERT_EQ(recorder.fields.size(), 1U);
     EXPECT_EQ(recorder.fields[0], "x-test=chunked");
+}
+
+TEST(Http3QpackEncoderTest, SupportsReservedPrefixForHttp3HeadersFrame) {
+    constexpr std::size_t kReserve = 16;
+    IoBufNodePool pool;
+    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024}, 4, kReserve);
+    ASSERT_EQ(writer.encode_status(204), IoErr::None);
+    ASSERT_EQ(writer.encode_field("server", fiber::http::http_header_name_hash("server"), "fiber"), IoErr::None);
+
+    IoBufChain frame(pool);
+    ASSERT_EQ(writer.finish(frame), IoErr::None);
+    ASSERT_NE(writer.prefix_reserved_data(), nullptr);
+    ASSERT_EQ(writer.prefix_reserved_size(), kReserve);
+    ASSERT_GE(frame.readable_bytes(), kReserve);
+
+    const std::size_t payload_len = frame.readable_bytes() - kReserve;
+    const std::size_t header_len =
+            fiber::quic::quic_varint_len(static_cast<std::uint64_t>(fiber::http::Http3FrameType::Headers)) +
+            fiber::quic::quic_varint_len(payload_len);
+    ASSERT_LE(header_len, kReserve);
+
+    const std::size_t gap = kReserve - header_len;
+    fiber::quic::QuicWriteCursor cursor(writer.prefix_reserved_data() + gap, header_len);
+    ASSERT_TRUE(fiber::quic::quic_write_varint(cursor, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Headers))
+                        .has_value());
+    ASSERT_TRUE(fiber::quic::quic_write_varint(cursor, payload_len).has_value());
+    ASSERT_EQ(cursor.offset(), header_len);
+    frame.consume_and_compact(gap);
+
+    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(frame));
+    ASSERT_EQ(bytes.size(), header_len + payload_len);
+    ASSERT_EQ(bytes[0], static_cast<std::uint8_t>(fiber::http::Http3FrameType::Headers));
+    ASSERT_EQ(bytes[1], payload_len);
+    ASSERT_GE(bytes.size(), header_len + 2U);
+    EXPECT_EQ(bytes[header_len], 0x00);
+    EXPECT_EQ(bytes[header_len + 1], 0x00);
+
+    std::vector<std::uint8_t> payload(bytes.begin() + static_cast<std::ptrdiff_t>(header_len), bytes.end());
+    DecodeRecorder recorder;
+    decode_all(payload, recorder);
+    ASSERT_EQ(recorder.fields.size(), 2U);
+    EXPECT_EQ(recorder.fields[0], ":status=204");
+    EXPECT_EQ(recorder.fields[1], "server=fiber");
 }
 
 TEST(Http3QpackEncoderTest, RejectsStringsAboveLimit) {

@@ -1,6 +1,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <expected>
 #include <future>
 #include <memory>
 #include <string>
@@ -19,6 +20,7 @@
 #include "http/Http3Protocol.h"
 #include "http/Http3QpackEncoderIoBufWriter.h"
 #include "http/HttpHeaderHash.h"
+#include "http/HttpHeaders.h"
 #include "http/ServerHttp3Request.h"
 #include "quic/QuicConnection.h"
 #include "quic/QuicCursor.h"
@@ -119,6 +121,8 @@ fiber::quic::QuicTransportParams valid_peer_transport_params(const fiber::quic::
     params.max_udp_payload_size = fiber::quic::kMinInitialDatagramSize;
     params.active_connection_id_limit = 2;
     params.initial_max_data = 4096;
+    params.initial_max_stream_data_bidi_local = 1024;
+    params.initial_max_stream_data_bidi_remote = 1024;
     params.initial_max_stream_data_uni = 1024;
     params.initial_max_streams_uni = 8;
     params.initial_max_streams_bidi = 8;
@@ -412,6 +416,63 @@ TEST(Http3ConnectionTest, StartsOverOpenQuicConnection) {
     EXPECT_EQ(h3.role(), fiber::quic::QuicConnectionRole::Server);
     EXPECT_NE(quic.find_stream(3), nullptr);
 
+    group.stop();
+    group.join();
+}
+
+TEST(Http3ConnectionTest, ServerCanSendFinalResponseHeader) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicConnection::Options quic_options{};
+    quic_options.loop = &group.at(0);
+    ServerRequestContext ctx;
+    auto header_promise = std::make_shared<std::promise<fiber::common::IoResult<void>>>();
+    auto header_future = header_promise->get_future();
+    ctx.handler = [header_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        fiber::http::HttpHeaders headers(exchange.pool());
+        if (headers.set("server", "fiber") == nullptr) {
+            header_promise->set_value(std::unexpected(fiber::common::IoErr::NoMem));
+            co_return;
+        }
+        auto result = co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = 204,
+                .headers = &headers,
+                .end_stream = true,
+        });
+        header_promise->set_value(result);
+        co_return;
+    };
+
+    fiber::http::Http3Connection::Options h3_options{};
+    h3_options.owner = &ctx;
+    h3_options.ops.create_server_request = &create_server_request;
+
+    fiber::quic::QuicConnection quic(quic_options);
+    fiber::http::Http3Connection h3(quic, h3_options);
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
+
+    HeaderList headers{
+            {":method", "GET"},
+            {":scheme", "https"},
+            {":authority", "example.com"},
+            {":path", "/"},
+    };
+    std::vector<std::uint8_t> request = headers_frame(headers);
+    std::promise<void> feed_done;
+    auto feed_future = feed_done.get_future();
+    fiber::async::spawn(group.at(0), [&quic, &request, &feed_done]() -> fiber::async::DetachedTask {
+        return feed_request_stream_then_wait(&quic, &request, &feed_done);
+    });
+
+    ASSERT_EQ(feed_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(header_future.wait_for(2s), std::future_status::ready);
+    auto result = header_future.get();
+    EXPECT_TRUE(result.has_value()) << static_cast<int>(result.error());
+
+    h3.close();
     group.stop();
     group.join();
 }
