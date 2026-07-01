@@ -2,15 +2,24 @@
 #include <chrono>
 #include <cstdint>
 #include <future>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#include "async/Sleep.h"
 #include "async/Spawn.h"
+#include "common/mem/IoBufChain.h"
 #include "event/EventLoop.h"
 #include "event/EventLoopGroup.h"
 #include "http/Http3Connection.h"
 #include "http/Http3Protocol.h"
+#include "http/Http3QpackEncoderIoBufWriter.h"
+#include "http/HttpHeaderHash.h"
+#include "http/ServerHttp3Request.h"
 #include "quic/QuicConnection.h"
 #include "quic/QuicCursor.h"
 #include "quic/QuicFrame.h"
@@ -28,11 +37,68 @@ struct StartResult {
     fiber::common::IoErr error = fiber::common::IoErr::None;
 };
 
+struct CapturedHttp3Request {
+    fiber::http::HttpMethod method = fiber::http::HttpMethod::Unknown;
+    fiber::http::HttpVersion version = fiber::http::HttpVersion::HTTP_0_9;
+    std::string method_view;
+    std::string unparsed_uri;
+    std::string path;
+    std::string query;
+    std::string exten;
+    std::string host;
+    std::string content_type;
+    std::string range;
+    std::string if_range;
+    std::string expect;
+};
+
+struct ServerRequestContext {
+    fiber::http::HttpServerOptions options{};
+    fiber::http::HttpHandler handler;
+};
+
+struct Http3RequestRunResult {
+    std::future_status handler_status = std::future_status::timeout;
+    CapturedHttp3Request snapshot{};
+};
+
+using HeaderList = std::vector<std::pair<std::string_view, std::string_view>>;
+
 StartResult to_start_result(fiber::common::IoResult<void> result) noexcept {
     if (result) {
         return {.ok = true};
     }
     return {.ok = false, .error = result.error()};
+}
+
+std::string field_value(const fiber::http::HttpHeaders::HeaderField *field) {
+    if (field == nullptr) {
+        return {};
+    }
+    return std::string(field->value_view());
+}
+
+CapturedHttp3Request capture_request(const fiber::http::HttpExchange &exchange) {
+    return CapturedHttp3Request{
+            .method = exchange.method(),
+            .version = exchange.version(),
+            .method_view = std::string(exchange.method_view()),
+            .unparsed_uri = std::string(exchange.uri().unparsed_uri),
+            .path = std::string(exchange.uri().path),
+            .query = std::string(exchange.uri().query),
+            .exten = std::string(exchange.uri().exten),
+            .host = field_value(exchange.host_header()),
+            .content_type = field_value(exchange.content_type_header()),
+            .range = field_value(exchange.range_header()),
+            .if_range = field_value(exchange.if_range_header()),
+            .expect = field_value(exchange.expect_header()),
+    };
+}
+
+fiber::quic::QuicStream::Lease create_server_request(void *owner, std::uint64_t stream_id,
+                                                     fiber::http::Http3Connection &conn) noexcept {
+    auto *ctx = static_cast<ServerRequestContext *>(owner);
+    return fiber::http::ServerHttp3Request::create(stream_id, conn, ctx->options, ctx->handler);
 }
 
 fiber::quic::QuicTransportParams valid_peer_transport_params(const fiber::quic::QuicConnection::Options &options) {
@@ -81,6 +147,44 @@ void append_varint(std::vector<std::uint8_t> &out, std::uint64_t value) {
     out.insert(out.end(), buf.data(), buf.data() + cursor.offset());
 }
 
+std::vector<std::uint8_t> chain_to_bytes(fiber::mem::IoBufChain chain) {
+    std::vector<std::uint8_t> out;
+    out.reserve(chain.readable_bytes());
+    while (auto *front = chain.front()) {
+        if (front->readable() == 0) {
+            chain.drop_empty_front();
+            continue;
+        }
+        const std::uint8_t *data = front->readable_data();
+        out.insert(out.end(), data, data + front->readable());
+        chain.consume_and_compact(front->readable());
+    }
+    return out;
+}
+
+std::vector<std::uint8_t> qpack_header_block(const HeaderList &headers) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::http::Http3QpackEncoderIoBufWriter writer(
+            pool, fiber::http::Http3QpackEncoder::Options{.huffman_threshold = 1024});
+    for (const auto &[name, value]: headers) {
+        EXPECT_EQ(writer.encode_field(name, fiber::http::http_header_name_hash(name), value),
+                  fiber::common::IoErr::None);
+    }
+
+    fiber::mem::IoBufChain block(pool);
+    EXPECT_EQ(writer.finish(block), fiber::common::IoErr::None);
+    return chain_to_bytes(std::move(block));
+}
+
+std::vector<std::uint8_t> headers_frame(const HeaderList &headers) {
+    std::vector<std::uint8_t> block = qpack_header_block(headers);
+    std::vector<std::uint8_t> out;
+    append_varint(out, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Headers));
+    append_varint(out, block.size());
+    out.insert(out.end(), block.begin(), block.end());
+    return out;
+}
+
 std::vector<std::uint8_t> control_settings_stream(std::uint64_t blocked_streams = 0) {
     std::vector<std::uint8_t> out;
     append_varint(out, static_cast<std::uint64_t>(fiber::http::Http3StreamType::Control));
@@ -119,6 +223,14 @@ fiber::async::DetachedTask close_and_wait(fiber::http::Http3Connection *h3, std:
     done->set_value();
 }
 
+fiber::async::DetachedTask feed_request_stream_then_wait(fiber::quic::QuicConnection *conn,
+                                                         const std::vector<std::uint8_t> *data,
+                                                         std::promise<void> *done) {
+    feed_stream(*conn, 0, *data, true);
+    co_await fiber::async::sleep(20ms);
+    done->set_value();
+}
+
 fiber::async::DetachedTask feed_one_stream_then_close(fiber::quic::QuicConnection *conn,
                                                       fiber::http::Http3Connection *h3,
                                                       const std::vector<std::uint8_t> *data, std::uint64_t stream_id,
@@ -143,6 +255,52 @@ fiber::async::DetachedTask feed_two_streams_then_wait(fiber::quic::QuicConnectio
     co_return;
 }
 
+Http3RequestRunResult run_http3_request_headers(const HeaderList &headers, bool expect_handler) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicConnection::Options quic_options{};
+    quic_options.loop = &group.at(0);
+    ServerRequestContext ctx;
+    auto snapshot_promise = std::make_shared<std::promise<CapturedHttp3Request>>();
+    auto snapshot_future = snapshot_promise->get_future();
+    ctx.handler = [snapshot_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        snapshot_promise->set_value(capture_request(exchange));
+        co_return;
+    };
+
+    fiber::http::Http3Connection::Options h3_options{};
+    h3_options.owner = &ctx;
+    h3_options.ops.create_server_request = &create_server_request;
+
+    fiber::quic::QuicConnection quic(quic_options);
+    fiber::http::Http3Connection h3(quic, h3_options);
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    EXPECT_TRUE(start.ok) << static_cast<int>(start.error);
+
+    std::vector<std::uint8_t> request = headers_frame(headers);
+    std::promise<void> feed_done;
+    auto feed_future = feed_done.get_future();
+    fiber::async::spawn(group.at(0), [&quic, &request, &feed_done]() -> fiber::async::DetachedTask {
+        return feed_request_stream_then_wait(&quic, &request, &feed_done);
+    });
+
+    if (feed_future.wait_for(2s) != std::future_status::ready) {
+        ADD_FAILURE() << "HTTP/3 request feed did not complete";
+    }
+
+    Http3RequestRunResult result;
+    result.handler_status = snapshot_future.wait_for(expect_handler ? 2s : 0ms);
+    if (result.handler_status == std::future_status::ready) {
+        result.snapshot = snapshot_future.get();
+    }
+
+    h3.close();
+    group.stop();
+    group.join();
+    return result;
+}
+
 } // namespace
 
 TEST(Http3ConnectionTest, StartsOverOpenQuicConnection) {
@@ -163,6 +321,104 @@ TEST(Http3ConnectionTest, StartsOverOpenQuicConnection) {
 
     group.stop();
     group.join();
+}
+
+TEST(Http3ConnectionTest, ServerRequestParsesPseudoHeadersUriAndCachesHeaderRefs) {
+    HeaderList headers{
+            {":method", "GET"},
+            {":scheme", "https"},
+            {":authority", "example.com"},
+            {":path", "/alpha//beta/../gamma/%64.txt?x=1#frag"},
+            {"content-type", "text/plain"},
+            {"range", "bytes=0-3"},
+            {"if-range", "\"abc\""},
+            {"expect", "100-continue"},
+    };
+
+    Http3RequestRunResult result = run_http3_request_headers(headers, true);
+
+    ASSERT_EQ(result.handler_status, std::future_status::ready);
+    EXPECT_EQ(result.snapshot.method, fiber::http::HttpMethod::Get);
+    EXPECT_EQ(result.snapshot.version, fiber::http::HttpVersion::HTTP_3_0);
+    EXPECT_EQ(result.snapshot.method_view, "GET");
+    EXPECT_EQ(result.snapshot.unparsed_uri, "/alpha//beta/../gamma/%64.txt?x=1#frag");
+    EXPECT_EQ(result.snapshot.path, "/alpha/gamma/d.txt");
+    EXPECT_EQ(result.snapshot.query, "x=1");
+    EXPECT_EQ(result.snapshot.exten, "txt");
+    EXPECT_EQ(result.snapshot.host, "example.com");
+    EXPECT_EQ(result.snapshot.content_type, "text/plain");
+    EXPECT_EQ(result.snapshot.range, "bytes=0-3");
+    EXPECT_EQ(result.snapshot.if_range, "\"abc\"");
+    EXPECT_EQ(result.snapshot.expect, "100-continue");
+}
+
+TEST(Http3ConnectionTest, ServerRequestAcceptsHostHeaderMatchingAuthority) {
+    HeaderList headers{
+            {":method", "GET"}, {":scheme", "https"},    {":authority", "example.com"},
+            {":path", "/"},     {"host", "example.com"},
+    };
+
+    Http3RequestRunResult result = run_http3_request_headers(headers, true);
+
+    ASSERT_EQ(result.handler_status, std::future_status::ready);
+    EXPECT_EQ(result.snapshot.host, "example.com");
+    EXPECT_EQ(result.snapshot.path, "/");
+}
+
+TEST(Http3ConnectionTest, ServerRequestRejectsHostAuthorityMismatch) {
+    HeaderList headers{
+            {":method", "GET"}, {":scheme", "https"},      {":authority", "example.com"},
+            {":path", "/"},     {"host", "other.example"},
+    };
+
+    Http3RequestRunResult result = run_http3_request_headers(headers, false);
+
+    EXPECT_EQ(result.handler_status, std::future_status::timeout);
+}
+
+TEST(Http3ConnectionTest, ServerRequestRejectsNonOriginFormPath) {
+    HeaderList headers{
+            {":method", "GET"},
+            {":scheme", "https"},
+            {":authority", "example.com"},
+            {":path", "?q=1"},
+    };
+
+    Http3RequestRunResult result = run_http3_request_headers(headers, false);
+
+    EXPECT_EQ(result.handler_status, std::future_status::timeout);
+}
+
+TEST(Http3ConnectionTest, ServerRequestRejectsDuplicatePseudoHeader) {
+    HeaderList headers{
+            {":method", "GET"}, {":scheme", "https"}, {":authority", "example.com"},
+            {":path", "/one"},  {":path", "/two"},
+    };
+
+    Http3RequestRunResult result = run_http3_request_headers(headers, false);
+
+    EXPECT_EQ(result.handler_status, std::future_status::timeout);
+}
+
+TEST(Http3ConnectionTest, ServerRequestRejectsForbiddenConnectionHeader) {
+    HeaderList headers{
+            {":method", "GET"}, {":scheme", "https"},    {":authority", "example.com"},
+            {":path", "/"},     {"connection", "close"},
+    };
+
+    Http3RequestRunResult result = run_http3_request_headers(headers, false);
+
+    EXPECT_EQ(result.handler_status, std::future_status::timeout);
+}
+
+TEST(Http3ConnectionTest, ServerRequestRejectsInvalidTeHeader) {
+    HeaderList headers{
+            {":method", "GET"}, {":scheme", "https"}, {":authority", "example.com"}, {":path", "/"}, {"te", "gzip"},
+    };
+
+    Http3RequestRunResult result = run_http3_request_headers(headers, false);
+
+    EXPECT_EQ(result.handler_status, std::future_status::timeout);
 }
 
 TEST(Http3ConnectionTest, AppliesPeerSettingsOnce) {
