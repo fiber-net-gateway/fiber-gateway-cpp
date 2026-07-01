@@ -12,8 +12,8 @@ namespace fiber::quic {
 
 static constexpr std::size_t kQuicStreamRecvMaxActiveExtents = 4096;
 static constexpr std::size_t kQuicStreamRecvMaxActiveBlocks = 1024;
-static constexpr unsigned kBlockSizeShift = 16;
-static constexpr std::uint64_t kBlockOffsetMask = 64 * 1024 - 1;
+static constexpr unsigned kBlockSizeShift = 14;
+static constexpr std::uint64_t kBlockOffsetMask = 16 * 1024 - 1;
 static constexpr std::uint64_t kQuicMaxFlowControlLimit = (1ULL << 62U) - 1U;
 
 class QuicStreamRecvQueue::ReadAwaiter {

@@ -12,7 +12,7 @@ namespace fiber::http {
 
 namespace {
 
-constexpr std::size_t kHttp3RequestReadChunkSize = 4096;
+constexpr std::size_t kHttp3RequestReadChunkSize = 128 << 10;
 
 } // namespace
 
