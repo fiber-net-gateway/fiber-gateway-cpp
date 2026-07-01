@@ -77,7 +77,9 @@ private:
 
     class ReadAwaiter;
 
-    static constexpr std::size_t kRecvBlockSize = 64 * 1024;
+    static constexpr unsigned kRecvBlockSizeShift = 14;
+    static constexpr std::size_t kRecvBlockSize = std::size_t{1} << kRecvBlockSizeShift;
+    static constexpr std::uint64_t kRecvBlockOffsetMask = kRecvBlockSize - 1;
 
     [[nodiscard]] common::IoResult<std::size_t> recv_stream_data(std::uint64_t offset, QuicSlice data,
                                                                  bool fin) noexcept;

@@ -33,7 +33,7 @@ namespace {
 
 using DetachedTask = fiber::async::DetachedTask;
 
-constexpr std::uint64_t kStreamRecvBlockSize = 64 * 1024;
+constexpr std::uint64_t kStreamRecvBlockSize = 16 * 1024;
 
 struct ReadResult {
     bool ok = false;
@@ -368,7 +368,7 @@ TEST(QuicStreamRecvQueueTest, FirstFrameCanCrossRecvBlockBoundary) {
 
     constexpr std::uint64_t half_k = 512;
     constexpr std::uint64_t start = kStreamRecvBlockSize - half_k;
-    std::string payload(kStreamRecvBlockSize / 64, 'x');
+    std::string payload(static_cast<std::size_t>(half_k * 2), 'x');
     payload.replace(0, 4, "head");
     payload.replace(payload.size() - 4, 4, "tail");
 
