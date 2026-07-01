@@ -86,6 +86,9 @@ private:
     Http3ErrorCode request_parse_error_ = Http3ErrorCode::GeneralProtocolError;
     BodyRecvState body_recv_state_{};
     std::chrono::milliseconds write_timeout_{};
+    HttpBodySpec response_body_spec_{HttpBodySpec::Auto()};
+    std::size_t response_content_length_ = 0;
+    std::size_t response_body_sent_ = 0;
     bool read_loop_started_ = false;
     bool request_head_received_ = false;
     bool handler_started_ = false;

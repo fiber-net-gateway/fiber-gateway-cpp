@@ -143,6 +143,11 @@ bool is_forbidden_request_stream_frame(std::uint64_t type) noexcept {
     return false;
 }
 
+bool response_must_not_have_body(const HttpExchange &exchange, int status_code) noexcept {
+    return exchange.method() == HttpMethod::Head || (status_code >= 100 && status_code < 200) || status_code == 204 ||
+           status_code == 304;
+}
+
 } // namespace
 
 enum class ServerHttp3Request::HeaderBlockTarget : std::uint8_t {
@@ -1175,6 +1180,7 @@ async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange
         co_return std::unexpected(common::IoErr::Already);
     }
 
+    HttpBodySpec final_body_spec = HttpBodySpec::Auto();
     switch (header.kind) {
         case OutgoingHeaderKind::Informational:
             if (response_headers_sent_ || header.end_stream || header.status_code < 100 || header.status_code >= 200) {
@@ -1188,9 +1194,32 @@ async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange
             if (header.status_code < 200 || header.status_code > 999) {
                 co_return std::unexpected(common::IoErr::Invalid);
             }
+            final_body_spec = header.body;
+            if (response_must_not_have_body(exchange, header.status_code)) {
+                if (!header.end_stream || final_body_spec.is_chunked() ||
+                    (final_body_spec.is_content_length() && final_body_spec.content_length() != 0)) {
+                    co_return std::unexpected(common::IoErr::Invalid);
+                }
+                final_body_spec = HttpBodySpec::None();
+            } else {
+                if (final_body_spec.is_none()) {
+                    co_return std::unexpected(common::IoErr::Invalid);
+                }
+                if (header.end_stream) {
+                    if (final_body_spec.is_content_length() && final_body_spec.content_length() != 0) {
+                        co_return std::unexpected(common::IoErr::Invalid);
+                    }
+                    if (final_body_spec.is_chunked()) {
+                        final_body_spec = HttpBodySpec::Auto();
+                    }
+                }
+            }
             break;
         case OutgoingHeaderKind::Trailer:
             if (!response_headers_sent_ || !header.end_stream) {
+                co_return std::unexpected(common::IoErr::Invalid);
+            }
+            if (response_body_spec_.is_content_length() && response_body_sent_ != response_content_length_) {
                 co_return std::unexpected(common::IoErr::Invalid);
             }
             break;
@@ -1283,6 +1312,9 @@ async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange
 
     if (header.kind == OutgoingHeaderKind::Final) {
         response_headers_sent_ = true;
+        response_body_spec_ = final_body_spec;
+        response_content_length_ = final_body_spec.is_content_length() ? final_body_spec.content_length() : 0;
+        response_body_sent_ = 0;
     }
     if (header.end_stream) {
         response_finished_ = true;
@@ -1290,13 +1322,127 @@ async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange
     co_return common::IoResult<void>{};
 }
 
-async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_body(HttpExchange &, mem::IoBufChain) noexcept {
-    co_return std::unexpected(common::IoErr::NotSupported);
+async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_body(HttpExchange &exchange,
+                                                                          mem::IoBufChain chunk) noexcept {
+    if (&exchange != &exchange_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (!handler_started_ || !response_headers_sent_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (response_finished_) {
+        co_return std::unexpected(common::IoErr::Already);
+    }
+
+    if (!chunk.bound()) {
+        if (!chunk.empty()) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        chunk.bind_node_pool(inbound_buf_.node_pool());
+    }
+    if (&chunk.node_pool() != &inbound_buf_.node_pool()) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+
+    const std::size_t body_len = chunk.readable_bytes();
+    const bool end_stream = chunk.complete();
+    if (static_cast<std::uint64_t>(body_len) > kMaxHttp3FramePayloadLength) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+
+    if (response_body_spec_.is_none()) {
+        if (body_len != 0 || end_stream) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        co_return body_len;
+    }
+
+    if (response_body_spec_.is_content_length()) {
+        if (response_body_sent_ > response_content_length_) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        const std::size_t remaining = response_content_length_ - response_body_sent_;
+        if (body_len > remaining) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        if (end_stream && body_len != remaining) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+
+    if (body_len == 0 && !end_stream) {
+        co_return body_len;
+    }
+
+    if (body_len != 0) {
+        const std::uint64_t frame_type = static_cast<std::uint64_t>(Http3FrameType::Data);
+        const std::size_t frame_header_len = quic::quic_varint_len(frame_type) +
+                                             quic::quic_varint_len(static_cast<std::uint64_t>(body_len));
+        mem::IoBuf frame_header = mem::IoBuf::allocate(frame_header_len);
+        if (!frame_header) {
+            co_return std::unexpected(common::IoErr::NoMem);
+        }
+
+        quic::QuicWriteCursor out(frame_header.writable_data(), frame_header_len);
+        auto wrote = quic::quic_write_varint(out, frame_type);
+        if (!wrote) {
+            co_return std::unexpected(wrote.error());
+        }
+        wrote = quic::quic_write_varint(out, static_cast<std::uint64_t>(body_len));
+        if (!wrote) {
+            co_return std::unexpected(wrote.error());
+        }
+        if (out.offset() != frame_header_len) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        frame_header.commit(frame_header_len);
+
+        if (!chunk.prepend(std::move(frame_header))) {
+            co_return std::unexpected(common::IoErr::NoMem);
+        }
+    }
+
+    while (chunk.readable_bytes() != 0 || chunk.complete()) {
+        auto written = co_await stream_.write(chunk, write_timeout_);
+        if (!written) {
+            co_return std::unexpected(written.error());
+        }
+        if (*written == 0 && (chunk.readable_bytes() != 0 || chunk.complete())) {
+            co_return std::unexpected(common::IoErr::WouldBlock);
+        }
+    }
+
+    response_body_sent_ += body_len;
+    if (end_stream) {
+        response_finished_ = true;
+    }
+    co_return body_len;
 }
 
-async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_body(HttpExchange &, const std::uint8_t *,
-                                                                          std::size_t, bool) noexcept {
-    co_return std::unexpected(common::IoErr::NotSupported);
+async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_body(HttpExchange &exchange,
+                                                                          const std::uint8_t *buf, std::size_t len,
+                                                                          bool end) noexcept {
+    if (len != 0 && buf == nullptr) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+
+    mem::IoBufChain chunk(inbound_buf_.node_pool());
+    if (end) {
+        chunk.mark_complete();
+    }
+    if (len != 0) {
+        mem::IoBuf owned = mem::IoBuf::allocate(len);
+        if (!owned) {
+            co_return std::unexpected(common::IoErr::NoMem);
+        }
+        std::memcpy(owned.writable_data(), buf, len);
+        owned.commit(len);
+        if (!chunk.append(std::move(owned))) {
+            co_return std::unexpected(common::IoErr::NoMem);
+        }
+    }
+
+    co_return co_await write_body(exchange, std::move(chunk));
 }
 
 } // namespace fiber::http

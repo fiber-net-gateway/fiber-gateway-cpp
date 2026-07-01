@@ -75,6 +75,14 @@ struct Http3BodyReadOutcome {
     bool trailers_complete = false;
 };
 
+struct Http3BodyWriteOutcome {
+    fiber::common::IoErr header_error = fiber::common::IoErr::None;
+    fiber::common::IoErr body_error = fiber::common::IoErr::None;
+    std::size_t written = 0;
+    bool header_ok = false;
+    bool body_ok = false;
+};
+
 using HeaderList = std::vector<std::pair<std::string_view, std::string_view>>;
 
 StartResult to_start_result(fiber::common::IoResult<void> result) noexcept {
@@ -471,6 +479,77 @@ TEST(Http3ConnectionTest, ServerCanSendFinalResponseHeader) {
     ASSERT_EQ(header_future.wait_for(2s), std::future_status::ready);
     auto result = header_future.get();
     EXPECT_TRUE(result.has_value()) << static_cast<int>(result.error());
+
+    h3.close();
+    group.stop();
+    group.join();
+}
+
+TEST(Http3ConnectionTest, ServerCanWriteFinalResponseBody) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicConnection::Options quic_options{};
+    quic_options.loop = &group.at(0);
+    ServerRequestContext ctx;
+    auto outcome_promise = std::make_shared<std::promise<Http3BodyWriteOutcome>>();
+    auto outcome_future = outcome_promise->get_future();
+    ctx.handler = [outcome_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        Http3BodyWriteOutcome outcome;
+        auto header = co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = 200,
+                .headers = nullptr,
+                .body = fiber::http::HttpBodySpec::ContentLength(5),
+                .end_stream = false,
+        });
+        if (!header) {
+            outcome.header_error = header.error();
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+        outcome.header_ok = true;
+
+        auto body = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
+        if (!body) {
+            outcome.body_error = body.error();
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+        outcome.body_ok = true;
+        outcome.written = *body;
+        outcome_promise->set_value(outcome);
+        co_return;
+    };
+
+    fiber::http::Http3Connection::Options h3_options{};
+    h3_options.owner = &ctx;
+    h3_options.ops.create_server_request = &create_server_request;
+
+    fiber::quic::QuicConnection quic(quic_options);
+    fiber::http::Http3Connection h3(quic, h3_options);
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
+
+    HeaderList headers{
+            {":method", "GET"},
+            {":scheme", "https"},
+            {":authority", "example.com"},
+            {":path", "/"},
+    };
+    std::vector<std::uint8_t> request = headers_frame(headers);
+    std::promise<void> feed_done;
+    auto feed_future = feed_done.get_future();
+    fiber::async::spawn(group.at(0), [&quic, &request, &feed_done]() -> fiber::async::DetachedTask {
+        return feed_request_stream_then_wait(&quic, &request, &feed_done);
+    });
+
+    ASSERT_EQ(feed_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(outcome_future.wait_for(2s), std::future_status::ready);
+    auto outcome = outcome_future.get();
+    EXPECT_TRUE(outcome.header_ok) << static_cast<int>(outcome.header_error);
+    EXPECT_TRUE(outcome.body_ok) << static_cast<int>(outcome.body_error);
+    EXPECT_EQ(outcome.written, 5U);
 
     h3.close();
     group.stop();
