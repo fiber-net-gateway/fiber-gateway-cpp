@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 
 #if defined(_WIN32)
 #include <malloc.h>
@@ -56,6 +57,14 @@ void system_free(void *ptr) {
 #endif
 }
 
+bool checked_add(size_t lhs, size_t rhs, size_t &out) noexcept {
+    if (lhs > std::numeric_limits<size_t>::max() - rhs) {
+        return false;
+    }
+    out = lhs + rhs;
+    return true;
+}
+
 } // namespace
 
 size_t BufPool::psz = page_size();
@@ -64,7 +73,6 @@ BufPool::BufPool(size_t block_size) : block_size_(block_size) {
     if (block_size_ <= sizeof(Block)) {
         block_size_ = 4096;
     }
-    max_ = std::min(psz - 1, block_size_ - sizeof(Block));
 }
 
 BufPool::~BufPool() {
@@ -100,8 +108,15 @@ void *BufPool::alloc(size_t size, size_t align) {
 }
 
 void *BufPool::alloc_from_blocks(size_t size, size_t align) {
+    size_t requested_cap = 0;
+    if (!checked_add(size, align, requested_cap)) {
+        return nullptr;
+    }
+    const size_t block_payload_cap = block_size_ - sizeof(Block);
+    const size_t payload_cap = std::max(block_payload_cap, requested_cap);
+
     if (!current_) {
-        if (!allocate_block(std::max(block_size_, size + align))) {
+        if (!allocate_block(payload_cap)) {
             return nullptr;
         }
     }
@@ -115,7 +130,7 @@ void *BufPool::alloc_from_blocks(size_t size, size_t align) {
             current_->used = used;
             return aligned;
         }
-        if (!allocate_block(std::max(block_size_, size + align))) {
+        if (!allocate_block(payload_cap)) {
             return nullptr;
         }
     }
@@ -137,13 +152,18 @@ void *BufPool::alloc_large(size_t size, size_t align) {
     return data;
 }
 
-BufPool::Block *BufPool::allocate_block(size_t size) {
-    auto *block = static_cast<Block *>(system_alloc(block_size_, alignof(Block)));
+BufPool::Block *BufPool::allocate_block(size_t payload_cap) {
+    size_t alloc_size = 0;
+    if (!checked_add(sizeof(Block), payload_cap, alloc_size)) {
+        return nullptr;
+    }
+
+    auto *block = static_cast<Block *>(system_alloc(alloc_size, alignof(std::max_align_t)));
     if (!block) {
         return nullptr;
     }
     block->data = reinterpret_cast<char *>(block) + sizeof(Block);
-    block->cap = size;
+    block->cap = payload_cap;
     block->used = 0;
     block->next = nullptr;
 
