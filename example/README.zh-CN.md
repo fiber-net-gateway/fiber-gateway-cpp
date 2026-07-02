@@ -16,7 +16,7 @@
 - `http1_echo.cpp`
   最小 HTTP/1.1 服务端示例，展示事件循环、请求体读取和响应写回。
 - `https_echo.cpp`
-  HTTPS 服务端示例，展示 TLS 接入和安全连接处理。
+  HTTPS 服务端示例，展示 TLS 接入、HTTP/1.1、HTTP/2 以及 QUIC 上的 HTTP/3。
 - `tcp_echo.cpp`
   TCP Echo 示例，展示基础流式读写行为。
 - `udp_echo.cpp`

@@ -16,7 +16,7 @@ These examples usually have the following characteristics:
 - `http1_echo.cpp`
   A minimal HTTP/1.1 server example showing the event loop, request-body reading, and response writing.
 - `https_echo.cpp`
-  An HTTPS server example showing TLS ingress and secure connection handling.
+  An HTTPS server example showing TLS ingress, HTTP/1.1, HTTP/2, and HTTP/3 over QUIC.
 - `tcp_echo.cpp`
   A TCP echo example showing basic stream read/write behavior.
 - `udp_echo.cpp`

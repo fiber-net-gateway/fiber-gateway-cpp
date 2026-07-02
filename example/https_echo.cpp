@@ -15,6 +15,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "async/Sleep.h"
 #include "async/Spawn.h"
 #include "async/Task.h"
 #include "common/IoError.h"
@@ -126,6 +127,23 @@ struct TempFile {
     }
 };
 
+struct ServerContext {
+    std::string http3_alt_svc;
+};
+
+std::string make_http3_alt_svc(std::uint16_t port) {
+    std::string value = "h3=\":";
+    value.append(std::to_string(port));
+    value.append("\"; ma=86400");
+    return value;
+}
+
+void set_common_response_headers(fiber::http::HttpHeaders &headers, const ServerContext &context) {
+    if (!context.http3_alt_svc.empty()) {
+        headers.set("Alt-Svc", context.http3_alt_svc);
+    }
+}
+
 fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     sockaddr_storage bound{};
     socklen_t len = sizeof(bound);
@@ -182,9 +200,11 @@ std::optional<std::size_t> parse_query_len(std::string_view query) {
     return std::nullopt;
 }
 
-fiber::async::Task<void> handle_generate(fiber::http::HttpExchange &exchange, std::size_t total_len) {
+fiber::async::Task<void> handle_generate(fiber::http::HttpExchange &exchange, const ServerContext &context,
+                                         std::size_t total_len) {
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("Content-Type", "application/octet-stream");
+    set_common_response_headers(headers, context);
     auto header_result = co_await send_final_header(exchange, 200, &headers,
                                                     fiber::http::HttpBodySpec::ContentLength(total_len), false);
     if (!header_result) {
@@ -209,23 +229,25 @@ fiber::async::Task<void> handle_generate(fiber::http::HttpExchange &exchange, st
     co_return;
 }
 
-fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange) {
+fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange, const ServerContext &context) {
     if (exchange.uri().path == "/gen") {
         std::optional<std::size_t> body_len = parse_query_len(exchange.uri().query);
         if (!body_len) {
             fiber::http::HttpHeaders headers(exchange.pool());
             headers.set("Content-Type", "text/plain");
+            set_common_response_headers(headers, context);
             auto header_result = co_await send_final_header(exchange, 400, &headers,
                                                             fiber::http::HttpBodySpec::ContentLength(0), true);
             (void) header_result;
             co_return;
         }
-        co_await handle_generate(exchange, *body_len);
+        co_await handle_generate(exchange, context, *body_len);
         co_return;
     }
 
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("Content-Type", "application/octet-stream");
+    set_common_response_headers(headers, context);
     auto header_result =
             co_await send_final_header(exchange, 200, &headers, fiber::http::HttpBodySpec::Chunked(), false);
     if (!header_result) {
@@ -254,25 +276,32 @@ fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange) {
     co_return;
 }
 
+fiber::async::Task<void> shutdown_demo(fiber::event::EventLoop *loop, fiber::http::HttpServer *server) {
+    if (server) {
+        server->close();
+    }
+    co_await fiber::async::sleep(std::chrono::milliseconds(1));
+    if (loop) {
+        loop->stop();
+    }
+    co_return;
+}
+
 fiber::async::DetachedTask run_demo_client(fiber::event::EventLoop *loop, fiber::http::HttpServer *server,
                                            std::uint16_t port, bool *ok) {
-    auto fail = [&](std::string_view message, fiber::common::IoErr err) {
+    auto fail = [&](std::string_view message, fiber::common::IoErr err) -> fiber::async::Task<void> {
         std::cerr << message << ": " << fiber::common::io_err_name(err) << '\n';
         if (ok) {
             *ok = false;
         }
-        if (server) {
-            server->close();
-        }
-        if (loop) {
-            loop->stop();
-        }
+        co_await shutdown_demo(loop, server);
+        co_return;
     };
 
     fiber::net::SocketAddress target(fiber::net::IpAddress::loopback_v4(), port);
     auto infant_result = co_await fiber::net::TcpStream::connect(*loop, target);
     if (!infant_result) {
-        fail("client connect failed", infant_result.error());
+        co_await fail("client connect failed", infant_result.error());
         co_return;
     }
 
@@ -283,26 +312,26 @@ fiber::async::DetachedTask run_demo_client(fiber::event::EventLoop *loop, fiber:
     fiber::net::TlsContext client_ctx(tls_options, false);
     auto ctx_result = client_ctx.init();
     if (!ctx_result) {
-        fail("tls context init failed", ctx_result.error());
+        co_await fail("tls context init failed", ctx_result.error());
         co_return;
     }
 
     int fd = stream->release_fd();
     if (fd < 0) {
-        fail("tls stream release fd failed", fiber::common::IoErr::BadFd);
+        co_await fail("tls stream release fd failed", fiber::common::IoErr::BadFd);
         co_return;
     }
     fiber::net::AcceptResult accept(fd, stream->remote_addr());
     auto transport_result = fiber::http::TlsTransport::create(stream->loop(), std::move(accept), client_ctx);
     if (!transport_result) {
-        fail("tls transport create failed", transport_result.error());
+        co_await fail("tls transport create failed", transport_result.error());
         co_return;
     }
     auto transport = std::move(*transport_result);
 
     auto hs_result = co_await transport->handshake(std::chrono::seconds(5));
     if (!hs_result) {
-        fail("tls handshake failed", hs_result.error());
+        co_await fail("tls handshake failed", hs_result.error());
         co_return;
     }
 
@@ -317,7 +346,7 @@ fiber::async::DetachedTask run_demo_client(fiber::event::EventLoop *loop, fiber:
                 co_await transport->write(request + write_offset, request_len - write_offset, std::chrono::seconds(5));
         if (!write_result || *write_result == 0) {
             auto err = write_result ? fiber::common::IoErr::BrokenPipe : write_result.error();
-            fail("client write failed", err);
+            co_await fail("client write failed", err);
             co_return;
         }
         write_offset += *write_result;
@@ -328,7 +357,7 @@ fiber::async::DetachedTask run_demo_client(fiber::event::EventLoop *loop, fiber:
     for (;;) {
         auto read_result = co_await transport->read(buffer.data(), buffer.size(), std::chrono::seconds(5));
         if (!read_result) {
-            fail("client read failed", read_result.error());
+            co_await fail("client read failed", read_result.error());
             co_return;
         }
         if (*read_result == 0) {
@@ -340,12 +369,7 @@ fiber::async::DetachedTask run_demo_client(fiber::event::EventLoop *loop, fiber:
     std::cout << "demo response:\n" << response << "\n";
 
     transport->close();
-    if (server) {
-        server->close();
-    }
-    if (loop) {
-        loop->stop();
-    }
+    co_await shutdown_demo(loop, server);
     co_return;
 }
 
@@ -382,8 +406,12 @@ int main(int argc, char **argv) {
     server_options.tls.enabled = true;
     server_options.tls.cert_file = cert_file.path;
     server_options.tls.key_file = key_file.path;
+    server_options.http3.enabled = true;
 
-    fiber::http::HttpServer server(loop, handle_echo, server_options);
+    ServerContext context;
+    fiber::http::HttpServer server(
+            loop, [&context](fiber::http::HttpExchange &exchange) { return handle_echo(exchange, context); },
+            server_options);
     fiber::net::ListenOptions options{};
     fiber::net::SocketAddress addr(fiber::net::IpAddress::any_v4(), port);
     auto bind_result = server.bind(addr, options);
@@ -394,10 +422,11 @@ int main(int argc, char **argv) {
 
     auto bound_port_result = resolve_port(server.fd());
     std::uint16_t effective_port = bound_port_result ? *bound_port_result : port;
+    context.http3_alt_svc = make_http3_alt_svc(effective_port);
     if (bound_port_result) {
-        std::cout << "listening on https://127.0.0.1:" << *bound_port_result << '\n';
+        std::cout << "listening on https://127.0.0.1:" << *bound_port_result << " (HTTP/1.1, HTTP/2, HTTP/3)\n";
     } else {
-        std::cout << "listening on https://127.0.0.1\n";
+        std::cout << "listening on https://127.0.0.1 (HTTP/1.1, HTTP/2, HTTP/3)\n";
     }
 
     fiber::async::spawn(loop, [&]() { return server.serve(); });
@@ -411,6 +440,7 @@ int main(int argc, char **argv) {
 
     std::cout << "try: curl -k --http1.1 https://127.0.0.1:" << effective_port << "/ -d 'hello'\n";
     std::cout << "try: curl -k --http2 https://127.0.0.1:" << effective_port << "/ -d 'hello'\n";
+    std::cout << "try: curl -k --http3 https://127.0.0.1:" << effective_port << "/ -d 'hello'\n";
     loop.run();
     return 0;
 }
