@@ -8,6 +8,7 @@
 #include <system_error>
 #include <utility>
 
+#include "../event/EventLoop.h"
 #include "HeaderMap.h"
 #include "Http1ClientConnection.h"
 #include "HttpHeaderHash.h"
@@ -1033,7 +1034,7 @@ fiber::async::Task<common::IoResult<const Http1ResponseHead *>> ClientHttp1Excha
     saw_connection_keep_alive_ = false;
     response_eof_delimited_ = false;
 
-    auto *header_node = new (*pool_) ResponseHeaderNode(*pool_, conn_->transport_->loop().io_buf_node_pool());
+    auto *header_node = new (*pool_) ResponseHeaderNode(*pool_, event::EventLoop::current().io_buf_node_pool());
     if (!header_node) {
         co_return std::unexpected(common::IoErr::NoMem);
     }
@@ -1268,7 +1269,7 @@ fiber::async::Task<common::IoResult<mem::IoBufChain>> ClientHttp1Exchange::read_
     if (!conn_ || !conn_->transport_ || !conn_->valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    mem::IoBufChain out(conn_->transport_->loop().io_buf_node_pool());
+    mem::IoBufChain out(event::EventLoop::current().io_buf_node_pool());
     if (!final_response_received_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }

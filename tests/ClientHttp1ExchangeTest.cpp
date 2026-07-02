@@ -9,6 +9,7 @@
 #include "async/Timeout.h"
 #include "common/IoError.h"
 #include "common/mem/BufPool.h"
+#include "event/EventLoop.h"
 #include "event/EventLoopGroup.h"
 #include "http/ClientHttp1Exchange.h"
 #include "http/Http1ClientConnection.h"
@@ -43,6 +44,8 @@ struct ReadBodyOutcome {
     std::string second_body;
     bool first_last = false;
     bool second_last = false;
+    bool first_pool_is_current = false;
+    bool second_pool_is_current = false;
     std::string trailer_value;
     bool response_complete = false;
     bool reusable_after_scope = false;
@@ -815,6 +818,8 @@ DetachedTask run_read_content_length_body_client(fiber::event::EventLoop *loop, 
             result_promise->set_value(std::move(outcome));
             co_return;
         }
+        outcome.first_pool_is_current =
+                &first_body_result->node_pool() == &fiber::event::EventLoop::current().io_buf_node_pool();
         outcome.first_body = flatten_body_chunk(*first_body_result);
         outcome.first_last = first_body_result->complete();
 
@@ -824,6 +829,8 @@ DetachedTask run_read_content_length_body_client(fiber::event::EventLoop *loop, 
             result_promise->set_value(std::move(outcome));
             co_return;
         }
+        outcome.second_pool_is_current =
+                &second_body_result->node_pool() == &fiber::event::EventLoop::current().io_buf_node_pool();
         outcome.second_body = flatten_body_chunk(*second_body_result);
         outcome.second_last = second_body_result->complete();
         outcome.response_complete = exchange.response_complete();
@@ -832,6 +839,69 @@ DetachedTask run_read_content_length_body_client(fiber::event::EventLoop *loop, 
 
     outcome.reusable_after_scope = connection.reusable();
     connection.close();
+    result_promise->set_value(std::move(outcome));
+}
+
+DetachedTask run_read_content_length_body_on_borrowed_connection_client(fiber::http::Http1ClientConnection *connection,
+                                                                        std::promise<ReadBodyOutcome> *result_promise) {
+    ReadBodyOutcome outcome;
+    if (connection == nullptr) {
+        outcome.err = fiber::common::IoErr::Invalid;
+        result_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    fiber::mem::BufPool pool;
+    fiber::http::HttpHeaders headers(pool);
+    headers.add_view("host", "example.com");
+
+    {
+        fiber::http::ClientHttp1Exchange exchange(*connection, pool);
+        fiber::http::Http1RequestHead head;
+        head.method = fiber::http::HttpMethod::Get;
+        head.target = "/body";
+        head.headers = &headers;
+
+        auto send_result = co_await exchange.send_header(head, true);
+        if (!send_result) {
+            outcome.err = send_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+
+        auto header_result = co_await exchange.read_header();
+        if (!header_result) {
+            outcome.err = header_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+
+        auto first_body_result = co_await exchange.read_body(3);
+        if (!first_body_result) {
+            outcome.err = first_body_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+        outcome.first_pool_is_current =
+                &first_body_result->node_pool() == &fiber::event::EventLoop::current().io_buf_node_pool();
+        outcome.first_body = flatten_body_chunk(*first_body_result);
+        outcome.first_last = first_body_result->complete();
+
+        auto second_body_result = co_await exchange.read_body(3);
+        if (!second_body_result) {
+            outcome.err = second_body_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+        outcome.second_pool_is_current =
+                &second_body_result->node_pool() == &fiber::event::EventLoop::current().io_buf_node_pool();
+        outcome.second_body = flatten_body_chunk(*second_body_result);
+        outcome.second_last = second_body_result->complete();
+        outcome.response_complete = exchange.response_complete();
+        outcome.err = fiber::common::IoErr::None;
+    }
+
+    outcome.reusable_after_scope = connection->reusable();
     result_promise->set_value(std::move(outcome));
 }
 
@@ -881,6 +951,8 @@ DetachedTask run_read_chunked_body_with_trailer_client(fiber::event::EventLoop *
             result_promise->set_value(std::move(outcome));
             co_return;
         }
+        outcome.first_pool_is_current =
+                &body_result->node_pool() == &fiber::event::EventLoop::current().io_buf_node_pool();
         outcome.first_body = flatten_body_chunk(*body_result);
         outcome.first_last = body_result->complete();
         outcome.trailer_value = std::string(exchange.response_trailers().get("x-checksum"));
@@ -1238,10 +1310,71 @@ TEST(ClientHttp1ExchangeTest, ReadContentLengthBodyReturnsLastOnFinalChunk) {
     EXPECT_EQ(outcome.err, fiber::common::IoErr::None);
     EXPECT_EQ(outcome.first_body, "hel");
     EXPECT_FALSE(outcome.first_last);
+    EXPECT_TRUE(outcome.first_pool_is_current);
     EXPECT_EQ(outcome.second_body, "lo");
     EXPECT_TRUE(outcome.second_last);
+    EXPECT_TRUE(outcome.second_pool_is_current);
     EXPECT_TRUE(outcome.response_complete);
     EXPECT_TRUE(outcome.reusable_after_scope);
+
+    EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);
+
+    group.stop();
+    group.join();
+}
+
+TEST(ClientHttp1ExchangeTest, ReadBodyUsesCurrentLoopNodePoolForBorrowedConnection) {
+    fiber::event::EventLoopGroup group(2);
+    group.start();
+
+    std::promise<std::uint16_t> port_promise;
+    auto port_future = port_promise.get_future();
+    std::promise<fiber::common::IoErr> server_result_promise;
+    auto server_result_future = server_result_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_content_length_response_server(&group.at(0), &port_promise, &server_result_promise);
+    });
+
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    fiber::http::Http1ClientConnectionOptions conn_options;
+    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    fiber::http::Http1ClientConnection connection(group.at(0), std::move(conn_options));
+
+    std::promise<fiber::common::IoErr> connect_promise;
+    auto connect_future = connect_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        auto connect_result = co_await connection.connect();
+        connect_promise.set_value(connect_result ? fiber::common::IoErr::None : connect_result.error());
+    });
+    ASSERT_EQ(connect_future.get(), fiber::common::IoErr::None);
+
+    std::promise<ReadBodyOutcome> client_result_promise;
+    auto client_result_future = client_result_promise.get_future();
+    fiber::async::spawn(group.at(1), [&]() {
+        return run_read_content_length_body_on_borrowed_connection_client(&connection, &client_result_promise);
+    });
+
+    ReadBodyOutcome outcome = client_result_future.get();
+    EXPECT_EQ(outcome.err, fiber::common::IoErr::None);
+    EXPECT_EQ(outcome.first_body, "hel");
+    EXPECT_FALSE(outcome.first_last);
+    EXPECT_TRUE(outcome.first_pool_is_current);
+    EXPECT_EQ(outcome.second_body, "lo");
+    EXPECT_TRUE(outcome.second_last);
+    EXPECT_TRUE(outcome.second_pool_is_current);
+    EXPECT_TRUE(outcome.response_complete);
+    EXPECT_TRUE(outcome.reusable_after_scope);
+
+    std::promise<void> close_promise;
+    auto close_future = close_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        connection.close();
+        close_promise.set_value();
+        co_return;
+    });
+    close_future.get();
 
     EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);
 
@@ -1274,6 +1407,7 @@ TEST(ClientHttp1ExchangeTest, ReadChunkedBodyWaitsForTrailersBeforeLastChunk) {
     EXPECT_EQ(outcome.err, fiber::common::IoErr::None);
     EXPECT_EQ(outcome.first_body, "hello");
     EXPECT_TRUE(outcome.first_last);
+    EXPECT_TRUE(outcome.first_pool_is_current);
     EXPECT_EQ(outcome.trailer_value, "123");
     EXPECT_TRUE(outcome.response_complete);
     EXPECT_TRUE(outcome.reusable_after_scope);

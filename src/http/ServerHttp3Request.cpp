@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "../async/Spawn.h"
+#include "../common/Assert.h"
 #include "../event/EventLoop.h"
 #include "../quic/QuicTransportCodec.h"
 #include "HeaderMap.h"
@@ -146,6 +147,35 @@ bool is_forbidden_request_stream_frame(std::uint64_t type) noexcept {
 bool response_must_not_have_body(const HttpExchange &exchange, int status_code) noexcept {
     return exchange.method() == HttpMethod::Head || (status_code >= 100 && status_code < 200) || status_code == 204 ||
            status_code == 304;
+}
+
+common::IoResult<void> bind_or_migrate_chain_nodes(mem::IoBufChain &chain, mem::IoBufNodePool &target_pool) noexcept {
+    if (!chain.bound()) {
+        if (!chain.empty()) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        chain.bind_node_pool(target_pool);
+        return {};
+    }
+    if (&chain.node_pool() == &target_pool) {
+        return {};
+    }
+
+    mem::IoBufChain migrated(target_pool);
+    if (chain.complete()) {
+        migrated.mark_complete();
+    }
+    for (;;) {
+        mem::IoBufNode *node = chain.pop_front_node();
+        if (node == nullptr) {
+            break;
+        }
+        const bool appended = migrated.append_node(node);
+        FIBER_ASSERT(appended);
+    }
+
+    chain = std::move(migrated);
+    return {};
 }
 
 } // namespace
@@ -1334,16 +1364,6 @@ async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_body(HttpEx
         co_return std::unexpected(common::IoErr::Already);
     }
 
-    if (!chunk.bound()) {
-        if (!chunk.empty()) {
-            co_return std::unexpected(common::IoErr::Invalid);
-        }
-        chunk.bind_node_pool(inbound_buf_.node_pool());
-    }
-    if (&chunk.node_pool() != &inbound_buf_.node_pool()) {
-        co_return std::unexpected(common::IoErr::Invalid);
-    }
-
     const std::size_t body_len = chunk.readable_bytes();
     const bool end_stream = chunk.complete();
     if (static_cast<std::uint64_t>(body_len) > kMaxHttp3FramePayloadLength) {
@@ -1372,6 +1392,11 @@ async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_body(HttpEx
 
     if (body_len == 0 && !end_stream) {
         co_return body_len;
+    }
+
+    auto chain_result = bind_or_migrate_chain_nodes(chunk, inbound_buf_.node_pool());
+    if (!chain_result) {
+        co_return std::unexpected(chain_result.error());
     }
 
     if (body_len != 0) {
