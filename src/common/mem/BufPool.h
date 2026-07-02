@@ -40,14 +40,13 @@ private:
     void *alloc_from_blocks(size_t size, size_t align);
     void *alloc_large(size_t size, size_t align);
 
-    Block *allocate_block(size_t size);
+    Block *allocate_block(size_t payload_cap);
 
     static size_t psz;
 
     Block *head_ = nullptr;
     Block *current_ = nullptr;
     LargeBlock *large_head_ = nullptr;
-    size_t max_;
     size_t block_size_ = 0;
 };
 
