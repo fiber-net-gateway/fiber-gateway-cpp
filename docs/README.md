@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 `Fiber` is a C++23 framework repository for high-performance gateway and server-side systems. It is not a project with a single main executable. Instead, it is built around a reusable core library `fiber_lib`, a set of single-file examples, a collection of multi-file applications, and a full test suite.
 
-The focus of this project is not just network I/O wrappers. It is a gateway-oriented framework with three primary capability areas: HTTP server-side ingress, HTTP client-side upstream access, and scripting support for more expressive and flexible gateway configuration. Under those gateway-facing capabilities, the framework is supported by lower-level building blocks such as event loops, coroutines, synchronization primitives, and high-performance buffer types.
+The focus of this project is not just network I/O wrappers. It is a gateway-oriented framework with three primary capability areas: HTTP server-side ingress, including QUIC/HTTP/3 ingress, HTTP client-side upstream access, and scripting support for more expressive and flexible gateway configuration. Under those gateway-facing capabilities, the framework is supported by lower-level building blocks such as event loops, coroutines, synchronization primitives, and high-performance buffer types.
 
 ## Project Positioning
 
@@ -25,9 +25,10 @@ The first responsibility of a gateway is to accept downstream traffic, so server
 
 - Supports HTTP/1.1 server request handling.
 - Supports HTTP/2 server request handling.
-- Supports TLS termination based on BoringSSL.
-- Supports ALPN negotiation between HTTP/1.1 and HTTP/2 on TLS listeners.
-- Provides `HttpServer`, `Http1Server`, request-exchange abstractions, and transport abstractions for assembling listeners, handlers, and protocol-processing logic.
+- Supports HTTP/3 server request handling over QUIC on UDP listeners.
+- Supports TLS termination based on BoringSSL, including QUIC TLS integration for HTTP/3.
+- Supports ALPN negotiation between HTTP/1.1 and HTTP/2 on TLS listeners, plus `h3` ALPN for HTTP/3.
+- Provides `HttpServer`, `Http1Server`, `Http3Server`, request-exchange abstractions, and transport abstractions for assembling listeners, handlers, and protocol-processing logic.
 
 This part of the framework corresponds to the gateway ingress layer: listening, accepting connections, negotiating protocols, reading requests, writing responses, and acting as the starting point of the forwarding pipeline.
 
@@ -66,6 +67,8 @@ Under the three gateway-facing capability areas above, `fiber_lib` also provides
   Buffer and buffer-chain abstractions used in hot-path I/O.
 - `net`
   TCP, UDP, Unix domain sockets, TLS streams, and address abstractions.
+- `quic`
+  QUIC v1 transport primitives, packet and frame codecs, TLS handshake integration, loss recovery, congestion control, stream management, address validation tokens, and UDP endpoint scheduling.
 - Other shared infrastructure
   Assertions, error modeling, route matching, memory helpers, and JSON/JS value encoding support.
 
@@ -79,10 +82,12 @@ The value of `fiber_lib` is composition and reuse. Whether the repository grows 
   Coroutine tasks, thread groups, mutexes, RW locks, signals, timeouts, and wait groups.
 - `src/net/`
   Addresses, listeners, streams, datagram sockets, TLS streams, and low-level fd wrappers.
+- `src/quic/`
+  QUIC v1 transport implementation, packet processing, crypto integration, congestion and loss handling, stream queues, connection IDs, tokens, and UDP endpoint dispatch.
 - `src/dns/`
   DNS messages, cache, resolvers, local resolver support, and address-resolution interfaces.
 - `src/http/`
-  HTTP/1.1, HTTP/2, HPACK, server-side and client-side exchange types, connection pools, and transport abstractions.
+  HTTP/1.1, HTTP/2, HTTP/3, HPACK, QPACK, server-side and client-side exchange types, connection pools, and transport abstractions.
 - `src/common/`
   Assertions, I/O errors, route matching, JSON helpers, memory helpers, and shared infrastructure.
 - `src/script/`
@@ -92,7 +97,7 @@ The value of `fiber_lib` is composition and reuse. Whether the repository grows 
 - `apps/`
   Multi-file runnable applications. It currently includes `lite_nginx`, and is intended to host future applications as well.
 - `tests/`
-  GoogleTest-based test coverage. The repository currently contains 64 `*Test.cpp` files.
+  GoogleTest-based test coverage. The repository currently contains 93 `*Test.cpp` files, including QUIC and HTTP/3 coverage.
 
 ## Repository Layout
 
@@ -151,7 +156,7 @@ This gives the repository a clear three-layer structure:
 ### Current Application
 
 - `apps/lite_nginx`
-  A lightweight reverse proxy with nginx-style configuration syntax and a deliberately smaller, explicit, non-fully-compatible V1 feature set.
+  A lightweight reverse proxy with nginx-style configuration syntax and a deliberately smaller, explicit, non-fully-compatible V1 feature set. TLS listeners can negotiate HTTP/1.1 or HTTP/2, and listeners configured with `http3`/`quic` also bind UDP for downstream HTTP/3 over QUIC and advertise `Alt-Svc`.
 
 ## Requirements
 
@@ -165,7 +170,7 @@ The project checks compiler capability during configuration.
 
 ### Default Dependency
 
-- BoringSSL: used for TLS and HTTPS-related features, and fetched automatically by default when needed.
+- BoringSSL: used for TLS, HTTPS, and QUIC/HTTP/3 crypto-related features, and fetched automatically by default when needed.
 
 ### Optional Dependencies
 
