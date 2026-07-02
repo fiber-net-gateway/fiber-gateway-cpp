@@ -1,6 +1,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <expected>
 #include <future>
 #include <memory>
@@ -79,6 +80,7 @@ struct Http3BodyWriteOutcome {
     fiber::common::IoErr header_error = fiber::common::IoErr::None;
     fiber::common::IoErr body_error = fiber::common::IoErr::None;
     std::size_t written = 0;
+    std::size_t foreign_pool_cached_after_write = 0;
     bool header_ok = false;
     bool body_ok = false;
 };
@@ -550,6 +552,96 @@ TEST(Http3ConnectionTest, ServerCanWriteFinalResponseBody) {
     EXPECT_TRUE(outcome.header_ok) << static_cast<int>(outcome.header_error);
     EXPECT_TRUE(outcome.body_ok) << static_cast<int>(outcome.body_error);
     EXPECT_EQ(outcome.written, 5U);
+
+    h3.close();
+    group.stop();
+    group.join();
+}
+
+TEST(Http3ConnectionTest, ServerCanWriteFinalResponseBodyFromForeignNodePool) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicConnection::Options quic_options{};
+    quic_options.loop = &group.at(0);
+    ServerRequestContext ctx;
+    auto outcome_promise = std::make_shared<std::promise<Http3BodyWriteOutcome>>();
+    auto outcome_future = outcome_promise->get_future();
+    ctx.handler = [outcome_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        Http3BodyWriteOutcome outcome;
+        auto header = co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = 200,
+                .headers = nullptr,
+                .body = fiber::http::HttpBodySpec::ContentLength(5),
+                .end_stream = false,
+        });
+        if (!header) {
+            outcome.header_error = header.error();
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+        outcome.header_ok = true;
+
+        fiber::mem::IoBufNodePool foreign_pool;
+        fiber::mem::IoBufChain chunk(foreign_pool);
+        fiber::mem::IoBuf body_buf = fiber::mem::IoBuf::allocate(5);
+        if (!body_buf) {
+            outcome.body_error = fiber::common::IoErr::NoMem;
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+        std::memcpy(body_buf.writable_data(), "hello", 5);
+        body_buf.commit(5);
+        if (!chunk.append(std::move(body_buf))) {
+            outcome.body_error = fiber::common::IoErr::NoMem;
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+        chunk.mark_complete();
+
+        auto body = co_await exchange.write_body(std::move(chunk));
+        if (!body) {
+            outcome.body_error = body.error();
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+        outcome.body_ok = true;
+        outcome.written = *body;
+        outcome.foreign_pool_cached_after_write = foreign_pool.cached_count();
+        outcome_promise->set_value(outcome);
+        co_return;
+    };
+
+    fiber::http::Http3Connection::Options h3_options{};
+    h3_options.owner = &ctx;
+    h3_options.ops.create_server_request = &create_server_request;
+
+    fiber::quic::QuicConnection quic(quic_options);
+    fiber::http::Http3Connection h3(quic, h3_options);
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
+
+    HeaderList headers{
+            {":method", "GET"},
+            {":scheme", "https"},
+            {":authority", "example.com"},
+            {":path", "/"},
+    };
+    std::vector<std::uint8_t> request = headers_frame(headers);
+    std::promise<void> feed_done;
+    auto feed_future = feed_done.get_future();
+    fiber::async::spawn(group.at(0), [&quic, &request, &feed_done]() -> fiber::async::DetachedTask {
+        return feed_request_stream_then_wait(&quic, &request, &feed_done);
+    });
+
+    ASSERT_EQ(feed_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(outcome_future.wait_for(2s), std::future_status::ready);
+    auto outcome = outcome_future.get();
+    EXPECT_TRUE(outcome.header_ok) << static_cast<int>(outcome.header_error);
+    EXPECT_TRUE(outcome.body_ok) << static_cast<int>(outcome.body_error);
+    EXPECT_EQ(outcome.written, 5U);
+    EXPECT_EQ(outcome.foreign_pool_cached_after_write, 0U);
 
     h3.close();
     group.stop();
