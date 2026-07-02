@@ -4,7 +4,7 @@
 
 `Fiber` 是一个面向高性能 gateway 与服务端场景的 C++23 框架仓库。它不是“只有一个主程序”的项目，而是由一套可复用的核心库 `fiber_lib`、一组单文件示例、一个多文件应用集合，以及完整测试集组成。
 
-这个项目的重点不只是网络 I/O 封装，而是围绕网关场景提供三类核心能力：服务端 HTTP 接入、面向上游的 HTTP Client 能力，以及用于增强配置灵活性和表达能力的脚本引擎支持。在这些网关能力之下，再由事件循环、协程、同步原语和高性能缓冲区等基础设施层提供支撑。
+这个项目的重点不只是网络 I/O 封装，而是围绕网关场景提供三类核心能力：包含 QUIC/HTTP/3 在内的服务端 HTTP 接入、面向上游的 HTTP Client 能力，以及用于增强配置灵活性和表达能力的脚本引擎支持。在这些网关能力之下，再由事件循环、协程、同步原语和高性能缓冲区等基础设施层提供支撑。
 
 ## 项目定位
 
@@ -25,9 +25,10 @@
 
 - 支持 HTTP/1.1 服务端处理链路。
 - 支持 HTTP/2 服务端处理链路。
-- 支持基于 BoringSSL 的 TLS 终止。
-- 支持在 TLS listener 上通过 ALPN 协商 HTTP/1.1 或 HTTP/2。
-- 提供 `HttpServer`、`Http1Server`、请求交换抽象和传输抽象，便于上层应用组装 listener、handler 和协议处理逻辑。
+- 支持基于 QUIC/UDP listener 的 HTTP/3 服务端处理链路。
+- 支持基于 BoringSSL 的 TLS 终止，并包含 HTTP/3 所需的 QUIC TLS 集成。
+- 支持在 TLS listener 上通过 ALPN 协商 HTTP/1.1 或 HTTP/2，也支持 HTTP/3 使用的 `h3` ALPN。
+- 提供 `HttpServer`、`Http1Server`、`Http3Server`、请求交换抽象和传输抽象，便于上层应用组装 listener、handler 和协议处理逻辑。
 
 这部分能力对应 gateway 的入口层，负责监听、接收连接、协议协商、请求读取、响应写回，并作为后续转发链路的起点。
 
@@ -66,6 +67,8 @@
   用于热点 I/O 路径的缓冲区和缓冲链抽象。
 - `net`
   TCP、UDP、Unix Domain Socket、TLS 流和地址抽象。
+- `quic`
+  QUIC v1 传输原语、packet/frame 编解码、TLS 握手集成、丢包恢复、拥塞控制、stream 管理、地址验证 token 和 UDP endpoint 调度。
 - 其他公共基础设施
   例如断言、错误模型、路由匹配、内存辅助组件和 JSON/JS 值编解码支持。
 
@@ -79,10 +82,12 @@
   协程任务、线程组、互斥锁、读写锁、信号、超时和等待组。
 - `src/net/`
   地址、listener、stream、datagram socket、TLS stream 和底层 fd 封装。
+- `src/quic/`
+  QUIC v1 传输实现、packet 处理、crypto 集成、拥塞与丢包处理、stream 队列、connection ID、token 和 UDP endpoint 分发。
 - `src/dns/`
   DNS 消息、缓存、解析器、本地 resolver 支持和地址解析接口。
 - `src/http/`
-  HTTP/1.1、HTTP/2、HPACK、服务端/客户端交换类型、连接池和传输抽象。
+  HTTP/1.1、HTTP/2、HTTP/3、HPACK、QPACK、服务端/客户端交换类型、连接池和传输抽象。
 - `src/common/`
   断言、I/O 错误、路由匹配、JSON、内存和通用基础设施。
 - `src/script/`
@@ -92,7 +97,7 @@
 - `apps/`
   多文件可运行应用目录。当前包含 `lite_nginx`，后续也用于承载新的应用。
 - `tests/`
-  基于 GoogleTest 的测试集合。当前仓库包含 64 个 `*Test.cpp` 文件。
+  基于 GoogleTest 的测试集合。当前仓库包含 93 个 `*Test.cpp` 文件，并包含 QUIC 和 HTTP/3 覆盖。
 
 ## 仓库结构
 
@@ -151,7 +156,7 @@
 ### 当前应用
 
 - `apps/lite_nginx`
-  一个轻量级反向代理，采用 nginx 风格配置语法，但 V1 特性集刻意保持更小、更明确，并不追求完全兼容。
+  一个轻量级反向代理，采用 nginx 风格配置语法，但 V1 特性集刻意保持更小、更明确，并不追求完全兼容。TLS listener 可以协商 HTTP/1.1 或 HTTP/2；配置了 `http3`/`quic` 的 listener 还会绑定 UDP，用于下游 HTTP/3 over QUIC，并通告 `Alt-Svc`。
 
 ## 环境要求
 
@@ -165,7 +170,7 @@
 
 ### 默认依赖
 
-- BoringSSL：用于 TLS 和 HTTPS 相关能力，默认会在需要时自动获取。
+- BoringSSL：用于 TLS、HTTPS 以及 QUIC/HTTP/3 crypto 相关能力，默认会在需要时自动获取。
 
 ### 可选依赖
 
