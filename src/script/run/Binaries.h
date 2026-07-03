@@ -2,32 +2,29 @@
 #define FIBER_SCRIPT_RUN_BINARIES_H
 
 #include "../../common/json/JsGc.h"
+#include "../Runtime.h"
 #include "../ScriptResult.h"
-
-namespace fiber::script {
-class ScriptRuntime;
-}
 
 namespace fiber::script::run {
 
 class Binaries {
 public:
-    static ScriptResult plus(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime);
-    static ScriptResult minus(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime);
-    static ScriptResult multiply(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime);
-    static ScriptResult divide(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime);
-    static ScriptResult modulo(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime);
+    static ScriptStatus plus(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept;
+    static ScriptStatus minus(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept;
+    static ScriptStatus multiply(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept;
+    static ScriptStatus divide(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept;
+    static ScriptStatus modulo(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept;
 
-    static ScriptResult matches(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime);
-    static ScriptResult lt(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime);
-    static ScriptResult lte(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime);
-    static ScriptResult gt(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime);
-    static ScriptResult gte(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime);
-    static ScriptResult eq(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime);
-    static ScriptResult seq(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime);
-    static ScriptResult ne(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime);
-    static ScriptResult sne(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime);
-    static ScriptResult in(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime);
+    static ScriptStatus matches(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept;
+    static ScriptStatus lt(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept;
+    static ScriptStatus lte(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept;
+    static ScriptStatus gt(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept;
+    static ScriptStatus gte(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept;
+    static ScriptStatus eq(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept;
+    static ScriptStatus seq(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept;
+    static ScriptStatus ne(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept;
+    static ScriptStatus sne(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept;
+    static ScriptStatus in(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept;
 };
 
 } // namespace fiber::script::run

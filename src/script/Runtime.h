@@ -2,21 +2,31 @@
 #define FIBER_SCRIPT_RUNTIME_H
 
 #include <cstddef>
-#include <utility>
 #include <vector>
 
 #include "../common/json/JsGc.h"
+#include "../common/mem/BufPool.h"
 
 namespace fiber::script {
 
-class ScriptRuntime {
+using ValueHandle = fiber::json::JsValue *;
+
+class ScriptRuntime final : public fiber::json::GcRootSource {
 public:
-    ScriptRuntime(fiber::json::GcHeap &heap, fiber::json::GcRootSet &roots);
+    class LocalMark;
+
+    explicit ScriptRuntime(fiber::json::GcHeap &heap);
+    ScriptRuntime(fiber::json::GcHeap &heap, fiber::mem::BufPool &pool);
 
     fiber::json::GcHeap &heap();
     const fiber::json::GcHeap &heap() const;
-    fiber::json::GcRootSet &roots();
-    const fiber::json::GcRootSet &roots() const;
+
+    [[nodiscard]] ValueHandle local_value();
+    [[nodiscard]] ValueHandle global_value();
+
+    void add_root_source(fiber::json::GcRootSource *source);
+    void remove_root_source(fiber::json::GcRootSource *source);
+    void visit_roots(fiber::json::GcRootVisitor &visitor) noexcept override;
 
     bool should_collect(std::size_t next_bytes = 0) const;
     void collect_now();
@@ -46,38 +56,58 @@ public:
     }
 
 private:
+    struct ValueBlock {
+        ValueBlock *next = nullptr;
+        fiber::json::JsValue slots[8];
+    };
+
+    struct LocalState {
+        ValueBlock *block = nullptr;
+        fiber::json::JsValue *top = nullptr;
+    };
+
+    friend class LocalMark;
+
+    [[nodiscard]] LocalState mark_local() const noexcept;
+    void restore_local(LocalState state) noexcept;
+    [[nodiscard]] ValueBlock *alloc_value_block();
+    [[nodiscard]] ValueBlock *acquire_local_block();
+    [[nodiscard]] ValueBlock *acquire_global_block();
+    static void reset_block(ValueBlock *block) noexcept;
+    void recycle_local_blocks(ValueBlock *first) noexcept;
+
     fiber::json::GcHeap *heap_ = nullptr;
-    fiber::json::GcRootSet *roots_ = nullptr;
+    fiber::mem::BufPool owned_pool_;
+    fiber::mem::BufPool *pool_ = nullptr;
+
+    ValueBlock *local_head_ = nullptr;
+    ValueBlock *local_current_ = nullptr;
+    ValueBlock *local_free_ = nullptr;
+    fiber::json::JsValue *local_top_ = nullptr;
+    fiber::json::JsValue *local_end_ = nullptr;
+
+    ValueBlock *global_head_ = nullptr;
+    ValueBlock *global_current_ = nullptr;
+    fiber::json::JsValue *global_top_ = nullptr;
+    fiber::json::JsValue *global_end_ = nullptr;
+
+    std::vector<fiber::json::GcRootSource *> root_sources_;
 };
 
-class GcRootGuard {
+class ScriptRuntime::LocalMark {
 public:
-    GcRootGuard(ScriptRuntime &runtime, fiber::json::JsValue *value);
-    GcRootGuard(const GcRootGuard &) = delete;
-    GcRootGuard &operator=(const GcRootGuard &) = delete;
-    GcRootGuard(GcRootGuard &&) noexcept = default;
-    GcRootGuard &operator=(GcRootGuard &&) noexcept = default;
-    ~GcRootGuard() = default;
+    explicit LocalMark(ScriptRuntime &runtime) noexcept;
+    LocalMark(const LocalMark &) = delete;
+    LocalMark &operator=(const LocalMark &) = delete;
+    LocalMark(LocalMark &&other) noexcept;
+    LocalMark &operator=(LocalMark &&other) noexcept;
+    ~LocalMark();
+
+    void reset() noexcept;
 
 private:
-    fiber::json::GcRootHandle handle_;
-};
-
-class TempRootScope {
-public:
-    explicit TempRootScope(ScriptRuntime &runtime);
-
-    TempRootScope(const TempRootScope &) = delete;
-    TempRootScope &operator=(const TempRootScope &) = delete;
-    TempRootScope(TempRootScope &&) noexcept = default;
-    TempRootScope &operator=(TempRootScope &&) noexcept = default;
-    ~TempRootScope() = default;
-
-    void add(fiber::json::JsValue *value);
-
-private:
-    fiber::json::GcRootSet *roots_ = nullptr;
-    std::vector<fiber::json::GcRootHandle> handles_;
+    ScriptRuntime *runtime_ = nullptr;
+    LocalState state_{};
 };
 
 } // namespace fiber::script

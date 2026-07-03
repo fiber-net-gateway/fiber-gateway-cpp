@@ -24,6 +24,16 @@ ScriptResult make_abort(ScriptAbortReason reason, std::int64_t position = -1) {
 
 ScriptResult make_oom(std::int64_t position) { return make_abort(ScriptAbortReason::OutOfMemory, position); }
 
+ScriptResult status_to_result(ScriptStatus status, const fiber::json::JsValue &value) {
+    if (status.is_success()) {
+        return ScriptResult::success(value);
+    }
+    if (status.is_exception()) {
+        return ScriptResult::exception(value);
+    }
+    return ScriptResult::abort(status.abort().reason, status.abort().position);
+}
+
 std::size_t estimate_iterator_next_bytes(const fiber::json::GcIterator *iter) {
     if (!iter) {
         return 0;
@@ -86,10 +96,10 @@ InterpreterVm::InterpreterVm(const ir::Compiled &compiled, const fiber::json::Js
     const_cache_.resize(compiled_.operands.size());
     const_cache_valid_.resize(compiled_.operands.size(), false);
     build_exception_index();
-    runtime_.roots().add_provider(this);
+    runtime_.add_root_source(this);
 }
 
-InterpreterVm::~InterpreterVm() { runtime_.roots().remove_provider(this); }
+InterpreterVm::~InterpreterVm() { runtime_.remove_root_source(this); }
 
 void InterpreterVm::iterate() {
     if (done()) {
@@ -101,7 +111,62 @@ void InterpreterVm::iterate() {
     if (async_task_.valid() && async_ready_ && !apply_async_ready()) {
         return;
     }
-    auto finish_error = [&](ScriptResult error) { handle_error(error, pc_ == 0 ? 0 : pc_ - 1); };
+    auto handle_status = [&](ScriptStatus status, fiber::json::JsValue *value, std::size_t epc) {
+        if (status) {
+            return true;
+        }
+        return handle_error(status_to_result(status, value ? *value : undefined_), epc);
+    };
+    using BinaryOp = ScriptStatus (*)(ScriptRuntime &, fiber::json::JsValue *, fiber::json::JsValue *,
+                                      fiber::json::JsValue *) noexcept;
+    auto apply_binary = [&](BinaryOp op, std::size_t epc) {
+        FIBER_ASSERT(sp_ >= 2);
+        fiber::json::JsValue *lhs = &stack_[sp_ - 2];
+        fiber::json::JsValue *rhs = &stack_[sp_ - 1];
+        ScriptStatus status = op(runtime_, lhs, lhs, rhs);
+        if (!handle_status(status, lhs, epc)) {
+            return false;
+        }
+        if (status) {
+            --sp_;
+        }
+        return true;
+    };
+    using UnaryOp = ScriptStatus (*)(fiber::json::JsValue *, fiber::json::JsValue *) noexcept;
+    auto apply_unary = [&](UnaryOp op, std::size_t epc) {
+        FIBER_ASSERT(sp_ >= 1);
+        fiber::json::JsValue *value = &stack_[sp_ - 1];
+        ScriptStatus status = op(value, value);
+        if (!handle_status(status, value, epc)) {
+            return false;
+        }
+        return true;
+    };
+    using RuntimeUnaryOp = ScriptStatus (*)(ScriptRuntime &, fiber::json::JsValue *, fiber::json::JsValue *) noexcept;
+    auto apply_runtime_unary = [&](RuntimeUnaryOp op, std::size_t epc) {
+        FIBER_ASSERT(sp_ >= 1);
+        fiber::json::JsValue *value = &stack_[sp_ - 1];
+        ScriptStatus status = op(runtime_, value, value);
+        if (!handle_status(status, value, epc)) {
+            return false;
+        }
+        return true;
+    };
+    using AccessBinaryOp = ScriptStatus (*)(ScriptRuntime &, fiber::json::JsValue *, fiber::json::JsValue *,
+                                            fiber::json::JsValue *) noexcept;
+    auto apply_access_binary = [&](AccessBinaryOp op, std::size_t epc) {
+        FIBER_ASSERT(sp_ >= 2);
+        fiber::json::JsValue *target = &stack_[sp_ - 2];
+        fiber::json::JsValue *addition = &stack_[sp_ - 1];
+        ScriptStatus status = op(runtime_, target, target, addition);
+        if (!handle_status(status, target, epc)) {
+            return false;
+        }
+        if (status) {
+            --sp_;
+        }
+        return true;
+    };
     const auto &codes = compiled_.codes;
     while (pc_ < codes.size()) {
         if (async_task_.valid() && async_ready_ && !apply_async_ready()) {
@@ -143,249 +208,99 @@ void InterpreterVm::iterate() {
                 vars_[static_cast<std::size_t>(instr >> 8)] = stack_[--sp_];
                 break;
             case ir::Code::BOP_PLUS:
-                --sp_;
-                {
-                    ScriptResult result = Binaries::plus(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_binary(&Binaries::plus, pc_ - 1)) {
+                    return;
                 }
                 break;
             case ir::Code::BOP_MINUS:
-                --sp_;
-                {
-                    ScriptResult result = Binaries::minus(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_binary(&Binaries::minus, pc_ - 1)) {
+                    return;
                 }
                 break;
             case ir::Code::BOP_MULTIPLY:
-                --sp_;
-                {
-                    ScriptResult result = Binaries::multiply(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_binary(&Binaries::multiply, pc_ - 1)) {
+                    return;
                 }
                 break;
             case ir::Code::BOP_DIVIDE:
-                --sp_;
-                {
-                    ScriptResult result = Binaries::divide(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_binary(&Binaries::divide, pc_ - 1)) {
+                    return;
                 }
                 break;
             case ir::Code::BOP_MOD:
-                --sp_;
-                {
-                    ScriptResult result = Binaries::modulo(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_binary(&Binaries::modulo, pc_ - 1)) {
+                    return;
                 }
                 break;
             case ir::Code::BOP_MATCH:
-                --sp_;
-                {
-                    ScriptResult result = Binaries::matches(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_binary(&Binaries::matches, pc_ - 1)) {
+                    return;
                 }
                 break;
             case ir::Code::BOP_LT:
-                --sp_;
-                {
-                    ScriptResult result = Binaries::lt(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_binary(&Binaries::lt, pc_ - 1)) {
+                    return;
                 }
                 break;
             case ir::Code::BOP_LTE:
-                --sp_;
-                {
-                    ScriptResult result = Binaries::lte(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_binary(&Binaries::lte, pc_ - 1)) {
+                    return;
                 }
                 break;
             case ir::Code::BOP_GT:
-                --sp_;
-                {
-                    ScriptResult result = Binaries::gt(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_binary(&Binaries::gt, pc_ - 1)) {
+                    return;
                 }
                 break;
             case ir::Code::BOP_GTE:
-                --sp_;
-                {
-                    ScriptResult result = Binaries::gte(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            finish_error(result);
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_binary(&Binaries::gte, pc_ - 1)) {
+                    return;
                 }
                 break;
             case ir::Code::BOP_EQ:
-                --sp_;
-                {
-                    ScriptResult result = Binaries::eq(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            finish_error(result);
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_binary(&Binaries::eq, pc_ - 1)) {
+                    return;
                 }
                 break;
             case ir::Code::BOP_SEQ:
-                --sp_;
-                {
-                    ScriptResult result = Binaries::seq(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            finish_error(result);
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_binary(&Binaries::seq, pc_ - 1)) {
+                    return;
                 }
                 break;
             case ir::Code::BOP_NE:
-                --sp_;
-                {
-                    ScriptResult result = Binaries::ne(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            finish_error(result);
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_binary(&Binaries::ne, pc_ - 1)) {
+                    return;
                 }
                 break;
             case ir::Code::BOP_SNE:
-                --sp_;
-                {
-                    ScriptResult result = Binaries::sne(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            finish_error(result);
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_binary(&Binaries::sne, pc_ - 1)) {
+                    return;
                 }
                 break;
             case ir::Code::BOP_IN:
-                --sp_;
-                {
-                    ScriptResult result = Binaries::in(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            finish_error(result);
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_binary(&Binaries::in, pc_ - 1)) {
+                    return;
                 }
                 break;
             case ir::Code::UNARY_PLUS: {
-                ScriptResult result = Unaries::plus(stack_[sp_ - 1]);
-                if (!result) {
-                    if (!handle_error(result, pc_ - 1)) {
-                        finish_error(result);
-                        return;
-                    }
-                    continue;
+                if (!apply_unary(&Unaries::plus, pc_ - 1)) {
+                    return;
                 }
-                stack_[sp_ - 1] = result.value();
             } break;
             case ir::Code::UNARY_MINUS: {
-                ScriptResult result = Unaries::minus(stack_[sp_ - 1]);
-                if (!result) {
-                    if (!handle_error(result, pc_ - 1)) {
-                        finish_error(result);
-                        return;
-                    }
-                    continue;
+                if (!apply_unary(&Unaries::minus, pc_ - 1)) {
+                    return;
                 }
-                stack_[sp_ - 1] = result.value();
             } break;
             case ir::Code::UNARY_NEG: {
-                ScriptResult result = Unaries::neg(stack_[sp_ - 1]);
-                if (!result) {
-                    if (!handle_error(result, pc_ - 1)) {
-                        finish_error(result);
-                        return;
-                    }
-                    continue;
+                if (!apply_unary(&Unaries::neg, pc_ - 1)) {
+                    return;
                 }
-                stack_[sp_ - 1] = result.value();
             } break;
             case ir::Code::UNARY_TYPEOF: {
-                ScriptResult result = Unaries::typeof_op(stack_[sp_ - 1], runtime_);
-                if (!result) {
-                    if (!handle_error(result, pc_ - 1)) {
-                        finish_error(result);
-                        return;
-                    }
-                    continue;
+                if (!apply_runtime_unary(&Unaries::typeof_op, pc_ - 1)) {
+                    return;
                 }
-                stack_[sp_ - 1] = result.value();
             } break;
             case ir::Code::NEW_OBJECT: {
                 fiber::json::JsValue obj = fiber::json::JsValue::make_undefined();
@@ -396,7 +311,6 @@ void InterpreterVm::iterate() {
                 if (fiber::json::js_value_type(obj) != fiber::json::JsNodeType::Object) {
                     ScriptResult error = make_oom(compiled_.positions[pc_ - 1]);
                     if (!handle_error(error, pc_ - 1)) {
-                        finish_error(error);
                         return;
                     }
                     continue;
@@ -413,7 +327,6 @@ void InterpreterVm::iterate() {
                 if (fiber::json::js_value_type(arr) != fiber::json::JsNodeType::Array) {
                     ScriptResult error = make_oom(compiled_.positions[pc_ - 1]);
                     if (!handle_error(error, pc_ - 1)) {
-                        finish_error(error);
                         return;
                     }
                     continue;
@@ -422,137 +335,123 @@ void InterpreterVm::iterate() {
                 break;
             }
             case ir::Code::EXP_OBJECT:
-                --sp_;
-                {
-                    ScriptResult result = Access::expand_object(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            finish_error(result);
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_access_binary(&Access::expand_object, pc_ - 1)) {
+                    return;
                 }
                 break;
             case ir::Code::EXP_ARRAY:
-                --sp_;
-                {
-                    ScriptResult result = Access::expand_array(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            finish_error(result);
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_access_binary(&Access::expand_array, pc_ - 1)) {
+                    return;
                 }
                 break;
             case ir::Code::PUSH_ARRAY:
-                --sp_;
-                {
-                    ScriptResult result = Access::push_array(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            finish_error(result);
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_access_binary(&Access::push_array, pc_ - 1)) {
+                    return;
                 }
                 break;
             case ir::Code::IDX_GET:
-                --sp_;
-                {
-                    ScriptResult result = Access::index_get(stack_[sp_ - 1], stack_[sp_], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            finish_error(result);
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+                if (!apply_access_binary(&Access::index_get, pc_ - 1)) {
+                    return;
                 }
                 break;
-            case ir::Code::IDX_SET:
-                sp_ -= 2;
-                {
-                    ScriptResult result = Access::index_set(stack_[sp_ - 1], stack_[sp_], stack_[sp_ + 1], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            finish_error(result);
-                            return;
-                        }
-                        continue;
-                    }
-                    stack_[sp_ - 1] = result.value();
+            case ir::Code::IDX_SET: {
+                FIBER_ASSERT(sp_ >= 3);
+                fiber::json::JsValue *parent = &stack_[sp_ - 3];
+                fiber::json::JsValue *key = &stack_[sp_ - 2];
+                fiber::json::JsValue *value = &stack_[sp_ - 1];
+                ScriptStatus status = Access::index_set(runtime_, parent, parent, key, value);
+                if (!handle_status(status, parent, pc_ - 1)) {
+                    return;
+                }
+                if (status) {
+                    sp_ -= 2;
                 }
                 break;
-            case ir::Code::IDX_SET_1:
-                sp_ -= 2;
-                {
-                    ScriptResult result = Access::index_set1(stack_[sp_ - 1], stack_[sp_], stack_[sp_ + 1], runtime_);
-                    if (!result) {
-                        if (!handle_error(result, pc_ - 1)) {
-                            finish_error(result);
-                            return;
-                        }
-                        continue;
-                    }
+            }
+            case ir::Code::IDX_SET_1: {
+                FIBER_ASSERT(sp_ >= 3);
+                fiber::json::JsValue *parent = &stack_[sp_ - 3];
+                fiber::json::JsValue *key = &stack_[sp_ - 2];
+                fiber::json::JsValue *value = &stack_[sp_ - 1];
+                ScriptStatus status = Access::index_set1(runtime_, parent, parent, key, value);
+                if (!handle_status(status, parent, pc_ - 1)) {
+                    return;
+                }
+                if (status) {
+                    sp_ -= 2;
                 }
                 break;
+            }
             case ir::Code::PROP_GET: {
                 std::size_t idx = static_cast<std::size_t>(instr >> 8);
                 const auto *name = compiled_.operand_string(idx);
                 FIBER_ASSERT(name);
-                fiber::json::JsValue key =
-                        fiber::json::JsValue::make_native_string(const_cast<char *>(name->data()), name->size());
-                ScriptResult result = Access::prop_get(stack_[sp_ - 1], key, runtime_);
-                if (!result) {
-                    if (!handle_error(result, pc_ - 1)) {
-                        finish_error(result);
+                ScriptRuntime::LocalMark mark(runtime_);
+                ValueHandle key = runtime_.local_value();
+                if (!key) {
+                    ScriptResult error = make_oom(compiled_.positions[pc_ - 1]);
+                    if (!handle_error(error, pc_ - 1)) {
                         return;
                     }
                     continue;
                 }
-                stack_[sp_ - 1] = result.value();
+                *key = fiber::json::JsValue::make_native_string(const_cast<char *>(name->data()), name->size());
+                fiber::json::JsValue *parent = &stack_[sp_ - 1];
+                ScriptStatus status = Access::prop_get(runtime_, parent, parent, key);
+                if (!handle_status(status, parent, pc_ - 1)) {
+                    return;
+                }
                 break;
             }
             case ir::Code::PROP_SET: {
                 std::size_t idx = static_cast<std::size_t>(instr >> 8);
                 const auto *name = compiled_.operand_string(idx);
                 FIBER_ASSERT(name);
-                fiber::json::JsValue key =
-                        fiber::json::JsValue::make_native_string(const_cast<char *>(name->data()), name->size());
-                --sp_;
-                ScriptResult result = Access::prop_set(stack_[sp_ - 1], stack_[sp_], key, runtime_);
-                if (!result) {
-                    if (!handle_error(result, pc_ - 1)) {
-                        finish_error(result);
+                ScriptRuntime::LocalMark mark(runtime_);
+                ValueHandle key = runtime_.local_value();
+                if (!key) {
+                    ScriptResult error = make_oom(compiled_.positions[pc_ - 1]);
+                    if (!handle_error(error, pc_ - 1)) {
                         return;
                     }
                     continue;
                 }
-                stack_[sp_ - 1] = result.value();
+                *key = fiber::json::JsValue::make_native_string(const_cast<char *>(name->data()), name->size());
+                FIBER_ASSERT(sp_ >= 2);
+                fiber::json::JsValue *parent = &stack_[sp_ - 2];
+                fiber::json::JsValue *value = &stack_[sp_ - 1];
+                ScriptStatus status = Access::prop_set(runtime_, parent, parent, value, key);
+                if (!handle_status(status, parent, pc_ - 1)) {
+                    return;
+                }
+                if (status) {
+                    --sp_;
+                }
                 break;
             }
             case ir::Code::PROP_SET_1: {
                 std::size_t idx = static_cast<std::size_t>(instr >> 8);
                 const auto *name = compiled_.operand_string(idx);
                 FIBER_ASSERT(name);
-                fiber::json::JsValue key =
-                        fiber::json::JsValue::make_native_string(const_cast<char *>(name->data()), name->size());
-                --sp_;
-                ScriptResult result = Access::prop_set1(stack_[sp_ - 1], stack_[sp_], key, runtime_);
-                if (!result) {
-                    if (!handle_error(result, pc_ - 1)) {
-                        finish_error(result);
+                ScriptRuntime::LocalMark mark(runtime_);
+                ValueHandle key = runtime_.local_value();
+                if (!key) {
+                    ScriptResult error = make_oom(compiled_.positions[pc_ - 1]);
+                    if (!handle_error(error, pc_ - 1)) {
                         return;
                     }
                     continue;
+                }
+                *key = fiber::json::JsValue::make_native_string(const_cast<char *>(name->data()), name->size());
+                FIBER_ASSERT(sp_ >= 2);
+                fiber::json::JsValue *parent = &stack_[sp_ - 2];
+                fiber::json::JsValue *value = &stack_[sp_ - 1];
+                ScriptStatus status = Access::prop_set1(runtime_, parent, parent, value, key);
+                if (!handle_status(status, parent, pc_ - 1)) {
+                    return;
+                }
+                if (status) {
+                    --sp_;
                 }
                 break;
             }
@@ -569,9 +468,6 @@ void InterpreterVm::iterate() {
                 const auto &symbol = compiled_.host_symbol_at(site.host_symbol_index);
                 FIBER_ASSERT(symbol.kind == expected_host_kind(op));
                 FIBER_ASSERT(is_spread == ((site.flags & ir::Compiled::CallSiteSpreadArgs) != 0));
-                if ((op == ir::Code::CALL_FUNC || op == ir::Code::CALL_ASYNC_FUNC) && !is_spread) {
-                    sp_ -= site.argc;
-                }
                 if (!dispatch_call_site(site, resume_kind)) {
                     return;
                 }
@@ -581,30 +477,31 @@ void InterpreterVm::iterate() {
                 pc_ = static_cast<std::size_t>(instr >> 8);
                 break;
             case ir::Code::JUMP_IF_FALSE: {
-                fiber::json::JsValue cond = stack_[--sp_];
+                fiber::json::JsValue *cond = &stack_[sp_ - 1];
                 if (!Compares::logic(cond)) {
                     pc_ = static_cast<std::size_t>(instr >> 8);
                 }
+                --sp_;
                 break;
             }
             case ir::Code::JUMP_IF_TRUE: {
-                fiber::json::JsValue cond = stack_[--sp_];
+                fiber::json::JsValue *cond = &stack_[sp_ - 1];
                 if (Compares::logic(cond)) {
                     pc_ = static_cast<std::size_t>(instr >> 8);
                 }
+                --sp_;
                 break;
             }
             case ir::Code::ITERATE_INTO: {
                 std::size_t idx = static_cast<std::size_t>(instr >> kInstrumentLen);
-                ScriptResult result = Unaries::iterate(stack_[--sp_], runtime_);
-                if (!result) {
-                    if (!handle_error(result, pc_ - 1)) {
-                        finish_error(result);
-                        return;
-                    }
-                    continue;
+                FIBER_ASSERT(sp_ >= 1);
+                ScriptStatus status = Unaries::iterate(runtime_, &vars_[idx], &stack_[sp_ - 1]);
+                if (!handle_status(status, &vars_[idx], pc_ - 1)) {
+                    return;
                 }
-                vars_[idx] = result.value();
+                if (status) {
+                    --sp_;
+                }
                 break;
             }
             case ir::Code::ITERATE_NEXT: {
@@ -663,7 +560,6 @@ void InterpreterVm::iterate() {
                 pending_value_kind_ = PendingValueKind::Thrown;
                 ScriptResult error = ScriptResult::exception(thrown);
                 if (!handle_error(error, pc_ - 1)) {
-                    finish_error(error);
                     return;
                 }
                 break;
@@ -671,17 +567,16 @@ void InterpreterVm::iterate() {
             default: {
                 ScriptResult error = make_abort(ScriptAbortReason::InvalidOpcode, compiled_.positions[pc_ - 1]);
                 if (!handle_error(error, pc_ - 1)) {
-                    finish_error(error);
                     return;
                 }
                 break;
             }
         }
     }
-    finish_error(make_abort(ScriptAbortReason::NoReturn, -1));
+    handle_error(make_abort(ScriptAbortReason::NoReturn, -1), pc_ == 0 ? 0 : pc_ - 1);
 }
 
-void InterpreterVm::async_complete(void *context, const ScriptResult &result) noexcept {
+void InterpreterVm::async_complete(void *context, ScriptStatus status) noexcept {
     auto *vm = static_cast<InterpreterVm *>(context);
     if (!vm || vm->done()) {
         return;
@@ -689,11 +584,11 @@ void InterpreterVm::async_complete(void *context, const ScriptResult &result) no
     if (!vm->async_task_.valid() || vm->async_ready_) {
         return;
     }
-    vm->async_result_ = result;
+    vm->async_status_ = status;
     vm->async_ready_ = true;
 }
 
-void InterpreterVm::visit_roots(fiber::json::GcRootSet::RootVisitor &visitor) {
+void InterpreterVm::visit_roots(fiber::json::GcRootVisitor &visitor) noexcept {
     visitor.visit(&root_);
     visitor.visit_range(stack_, sp_);
     visitor.visit_range(vars_, var_count_);
@@ -706,11 +601,9 @@ void InterpreterVm::visit_roots(fiber::json::GcRootSet::RootVisitor &visitor) {
         visitor.visit(&pending_value_);
     }
     if (async_ready_) {
-        if (async_result_.is_success()) {
-            visitor.visit(const_cast<fiber::json::JsValue *>(&async_result_.value()));
-        } else if (async_result_.is_exception()) {
-            visitor.visit(const_cast<fiber::json::JsValue *>(&async_result_.exception()));
-        }
+        visitor.visit(&async_value_);
+    } else if (async_task_.valid()) {
+        visitor.visit(&async_value_);
     }
     if (pending_value_kind_ == PendingValueKind::Return) {
         visitor.visit(&pending_value_);
@@ -720,14 +613,14 @@ void InterpreterVm::visit_roots(fiber::json::GcRootSet::RootVisitor &visitor) {
     }
 }
 
-const fiber::json::JsValue *InterpreterVm::prepare_call_args(std::size_t off, std::size_t count) {
+fiber::json::JsValue *InterpreterVm::prepare_call_args(std::size_t off, std::size_t count) {
     if (!stack_ || off >= stack_size_) {
         return &undefined_;
     }
     return stack_ + off;
 }
 
-const fiber::json::JsValue *InterpreterVm::prepare_spread_call_args(std::size_t slot, std::uint32_t &argc) {
+fiber::json::JsValue *InterpreterVm::prepare_spread_call_args(std::size_t slot, std::uint32_t &argc) {
     call_args_.clear();
     argc = 0;
     if (!stack_ || slot >= stack_size_) {
@@ -753,7 +646,7 @@ const fiber::json::JsValue *InterpreterVm::prepare_spread_call_args(std::size_t 
 Library::HostCallFrame InterpreterVm::make_call_frame() const {
     Library::HostCallFrame frame;
     frame.runtime = const_cast<ScriptRuntime *>(&runtime_);
-    frame.root = &root_;
+    frame.root = const_cast<fiber::json::JsValue *>(&root_);
     frame.attach = attach_;
     return frame;
 }
@@ -765,11 +658,14 @@ bool InterpreterVm::dispatch_call_site(const ir::Compiled::CallSite &site, Async
         call_args_.clear();
     }
     std::uint32_t argc = site.argc;
-    const fiber::json::JsValue *args = nullptr;
+    fiber::json::JsValue *args = nullptr;
+    std::size_t arg_base = sp_;
     if (is_spread) {
         args = prepare_spread_call_args(sp_ - 1, argc);
     } else if (argc > 0) {
-        args = prepare_call_args(sp_, argc);
+        FIBER_ASSERT(sp_ >= argc);
+        arg_base = sp_ - argc;
+        args = prepare_call_args(arg_base, argc);
     }
     const Library::HostCallFrame frame = make_call_frame();
     const Library::Arguments arguments{args, argc};
@@ -777,27 +673,48 @@ bool InterpreterVm::dispatch_call_site(const ir::Compiled::CallSite &site, Async
     switch (symbol.kind) {
         case Library::HostCallable::Kind::SyncFunction: {
             FIBER_ASSERT(symbol.callable->function);
-            ScriptResult result = symbol.callable->function(symbol.callable->userdata, frame, arguments);
+            ScriptRuntime::LocalMark mark(runtime_);
+            ValueHandle out = runtime_.local_value();
+            if (!out) {
+                if (is_spread) {
+                    call_args_.clear();
+                }
+                return handle_error(ScriptResult::abort(ScriptAbortReason::OutOfMemory), epc);
+            }
+            ScriptStatus status = symbol.callable->function(symbol.callable->userdata, frame, arguments, out);
+            fiber::json::JsValue value = *out;
             if (is_spread) {
                 call_args_.clear();
+            } else {
+                sp_ = arg_base;
             }
-            return apply_call_result(result, resume_kind, epc);
+            return apply_call_result(status, value, resume_kind, epc);
         }
         case Library::HostCallable::Kind::SyncConstant: {
             FIBER_ASSERT(symbol.callable->constant);
-            ScriptResult result = symbol.callable->constant(symbol.callable->userdata, frame);
+            ScriptRuntime::LocalMark mark(runtime_);
+            ValueHandle out = runtime_.local_value();
+            if (!out) {
+                if (is_spread) {
+                    call_args_.clear();
+                }
+                return handle_error(ScriptResult::abort(ScriptAbortReason::OutOfMemory), epc);
+            }
+            ScriptStatus status = symbol.callable->constant(symbol.callable->userdata, frame, out);
+            fiber::json::JsValue value = *out;
             if (is_spread) {
                 call_args_.clear();
             }
-            return apply_call_result(result, resume_kind, epc);
+            return apply_call_result(status, value, resume_kind, epc);
         }
         case Library::HostCallable::Kind::AsyncConstant: {
             FIBER_ASSERT(symbol.callable->async_constant);
             async_ready_ = false;
             async_resume_kind_ = resume_kind;
             async_resume_epc_ = epc;
-            async_result_ = ScriptResult{};
-            async_task_ = symbol.callable->async_constant(symbol.callable->userdata, frame);
+            async_status_ = ScriptStatus::abort(ScriptAbortReason::InvalidState);
+            async_value_ = fiber::json::JsValue::make_undefined();
+            async_task_ = symbol.callable->async_constant(symbol.callable->userdata, frame, &async_value_);
             if (is_spread) {
                 call_args_.clear();
             }
@@ -815,10 +732,13 @@ bool InterpreterVm::dispatch_call_site(const ir::Compiled::CallSite &site, Async
             async_ready_ = false;
             async_resume_kind_ = resume_kind;
             async_resume_epc_ = epc;
-            async_result_ = ScriptResult{};
-            async_task_ = symbol.callable->async_function(symbol.callable->userdata, frame, arguments);
+            async_status_ = ScriptStatus::abort(ScriptAbortReason::InvalidState);
+            async_value_ = fiber::json::JsValue::make_undefined();
+            async_task_ = symbol.callable->async_function(symbol.callable->userdata, frame, arguments, &async_value_);
             if (is_spread) {
                 call_args_.clear();
+            } else {
+                sp_ = arg_base;
             }
             if (!async_task_.valid()) {
                 return handle_error(ScriptResult::abort(async_task_.allocation_failed()
@@ -833,18 +753,19 @@ bool InterpreterVm::dispatch_call_site(const ir::Compiled::CallSite &site, Async
     return true;
 }
 
-bool InterpreterVm::apply_call_result(const ScriptResult &result, AsyncResumeKind resume_kind, std::size_t resume_epc) {
-    if (result.is_success()) {
+bool InterpreterVm::apply_call_result(ScriptStatus status, const fiber::json::JsValue &value,
+                                      AsyncResumeKind resume_kind, std::size_t resume_epc) {
+    if (status.is_success()) {
         switch (resume_kind) {
             case AsyncResumeKind::PushResult:
                 if (sp_ < stack_size_) {
-                    stack_[sp_] = result.value();
+                    stack_[sp_] = value;
                 }
                 ++sp_;
                 break;
             case AsyncResumeKind::ReplaceTop:
                 if (sp_ > 0 && sp_ - 1 < stack_size_) {
-                    stack_[sp_ - 1] = result.value();
+                    stack_[sp_ - 1] = value;
                 }
                 break;
             case AsyncResumeKind::None:
@@ -852,7 +773,7 @@ bool InterpreterVm::apply_call_result(const ScriptResult &result, AsyncResumeKin
         }
         return true;
     }
-    return handle_error(result, resume_epc);
+    return handle_error(status_to_result(status, value), resume_epc);
 }
 
 bool InterpreterVm::catch_for_exception(std::size_t epc) {
@@ -1005,15 +926,17 @@ bool InterpreterVm::apply_async_ready() {
     if (!async_task_.valid() || !async_ready_) {
         return true;
     }
-    ScriptResult result = async_result_;
+    ScriptStatus status = async_status_;
+    fiber::json::JsValue value = async_value_;
     AsyncResumeKind resume_kind = async_resume_kind_;
     std::size_t resume_epc = async_resume_epc_;
     async_task_.reset();
     async_ready_ = false;
     async_resume_kind_ = AsyncResumeKind::None;
     async_resume_epc_ = 0;
-    async_result_ = ScriptResult{};
-    return apply_call_result(result, resume_kind, resume_epc);
+    async_status_ = ScriptStatus::abort(ScriptAbortReason::InvalidState);
+    async_value_ = fiber::json::JsValue::make_undefined();
+    return apply_call_result(status, value, resume_kind, resume_epc);
 }
 
 } // namespace fiber::script::run

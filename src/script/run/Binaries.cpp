@@ -31,12 +31,15 @@ ScriptAbortReason map_error(fiber::json::JsOpError error) {
     return ScriptAbortReason::Internal;
 }
 
-ScriptResult from_js_result(const fiber::json::JsOpResult &result, std::string_view op) {
-    (void) op;
-    if (result.error == fiber::json::JsOpError::None) {
-        return result.value;
+ScriptStatus from_js_result(ValueHandle out, const fiber::json::JsOpResult &result) noexcept {
+    if (!out) {
+        return ScriptStatus::abort(ScriptAbortReason::OutOfMemory);
     }
-    return ScriptResult::abort(map_error(result.error));
+    if (result.error == fiber::json::JsOpError::None) {
+        *out = result.value;
+        return ScriptStatus::success();
+    }
+    return ScriptStatus::abort(map_error(result.error));
 }
 
 bool value_to_string(const fiber::json::JsValue &value, std::string &out) {
@@ -52,7 +55,13 @@ bool value_to_string(const fiber::json::JsValue &value, std::string &out) {
     return fiber::json::gc_string_to_utf8(str, out);
 }
 
-ScriptResult make_bool(bool value) { return fiber::json::JsValue::make_boolean(value); }
+ScriptStatus make_bool(ValueHandle out, bool value) noexcept {
+    if (!out) {
+        return ScriptStatus::abort(ScriptAbortReason::OutOfMemory);
+    }
+    *out = fiber::json::JsValue::make_boolean(value);
+    return ScriptStatus::success();
+}
 
 bool is_string_like(const fiber::json::JsValue &value) {
     return fiber::json::js_value_type(value) == fiber::json::JsNodeType::String;
@@ -126,72 +135,73 @@ std::size_t estimate_plus_alloc_bytes(const fiber::json::JsValue &lhs, const fib
 
 } // namespace
 
-ScriptResult Binaries::plus(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
+ScriptStatus Binaries::plus(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
     fiber::json::JsOpResult result;
-    runtime.run_with_gc_retry(estimate_plus_alloc_bytes(a, b), [&]() {
-        result = fiber::json::js_binary_op(fiber::json::JsBinaryOp::Add, a, b, &runtime.heap());
+    runtime.run_with_gc_retry(estimate_plus_alloc_bytes(*a, *b), [&]() {
+        result = fiber::json::js_binary_op(fiber::json::JsBinaryOp::Add, *a, *b, &runtime.heap());
         return result.error != fiber::json::JsOpError::OutOfMemory;
     });
-    return from_js_result(result, "+");
+    return from_js_result(out, result);
 }
 
-ScriptResult Binaries::minus(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Sub, a, b, &runtime.heap()), "-");
+ScriptStatus Binaries::minus(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+    return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::Sub, *a, *b, &runtime.heap()));
 }
 
-ScriptResult Binaries::multiply(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Mul, a, b, &runtime.heap()), "*");
+ScriptStatus Binaries::multiply(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+    return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::Mul, *a, *b, &runtime.heap()));
 }
 
-ScriptResult Binaries::divide(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Div, a, b, &runtime.heap()), "/");
+ScriptStatus Binaries::divide(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+    return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::Div, *a, *b, &runtime.heap()));
 }
 
-ScriptResult Binaries::modulo(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Mod, a, b, &runtime.heap()), "%");
+ScriptStatus Binaries::modulo(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+    return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::Mod, *a, *b, &runtime.heap()));
 }
 
-ScriptResult Binaries::matches(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
+ScriptStatus Binaries::matches(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
     (void) a;
     (void) b;
     (void) runtime;
-    return make_bool(false);
+    return make_bool(out, false);
 }
 
-ScriptResult Binaries::lt(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Lt, a, b, &runtime.heap()), "<");
+ScriptStatus Binaries::lt(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+    return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::Lt, *a, *b, &runtime.heap()));
 }
 
-ScriptResult Binaries::lte(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Le, a, b, &runtime.heap()), "<=");
+ScriptStatus Binaries::lte(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+    return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::Le, *a, *b, &runtime.heap()));
 }
 
-ScriptResult Binaries::gt(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Gt, a, b, &runtime.heap()), ">");
+ScriptStatus Binaries::gt(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+    return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::Gt, *a, *b, &runtime.heap()));
 }
 
-ScriptResult Binaries::gte(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Ge, a, b, &runtime.heap()), ">=");
+ScriptStatus Binaries::gte(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+    return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::Ge, *a, *b, &runtime.heap()));
 }
 
-ScriptResult Binaries::eq(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Eq, a, b, &runtime.heap()), "==");
+ScriptStatus Binaries::eq(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+    return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::Eq, *a, *b, &runtime.heap()));
 }
 
-ScriptResult Binaries::seq(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::StrictEq, a, b, &runtime.heap()), "===");
+ScriptStatus Binaries::seq(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+    return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::StrictEq, *a, *b, &runtime.heap()));
 }
 
-ScriptResult Binaries::ne(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::Ne, a, b, &runtime.heap()), "!=");
+ScriptStatus Binaries::ne(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+    return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::Ne, *a, *b, &runtime.heap()));
 }
 
-ScriptResult Binaries::sne(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
-    return from_js_result(fiber::json::js_binary_op(fiber::json::JsBinaryOp::StrictNe, a, b, &runtime.heap()), "!==");
+ScriptStatus Binaries::sne(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+    return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::StrictNe, *a, *b, &runtime.heap()));
 }
 
-ScriptResult Binaries::in(const fiber::json::JsValue &a, const fiber::json::JsValue &b, ScriptRuntime &runtime) {
-    return Compares::in(a, b);
+ScriptStatus Binaries::in(ScriptRuntime &runtime, ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+    (void) runtime;
+    return Compares::in(out, a, b);
 }
 
 } // namespace fiber::script::run

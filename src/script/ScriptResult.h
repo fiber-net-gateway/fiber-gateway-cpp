@@ -38,6 +38,53 @@ struct ScriptAbort {
     std::int64_t position = -1;
 };
 
+struct ScriptStatus {
+    constexpr ScriptStatus() noexcept = default;
+
+    static ScriptStatus success() noexcept {
+        ScriptStatus status;
+        status.kind = ScriptResultKind::Success;
+        return status;
+    }
+
+    static ScriptStatus exception() noexcept {
+        ScriptStatus status;
+        status.kind = ScriptResultKind::Exception;
+        return status;
+    }
+
+    static ScriptStatus abort(ScriptAbortReason reason, std::int64_t position = -1) noexcept {
+        ScriptStatus status;
+        status.kind = ScriptResultKind::Abort;
+        status.abort_payload = ScriptAbort{reason, position};
+        return status;
+    }
+
+    [[nodiscard]] bool is_success() const noexcept { return kind == ScriptResultKind::Success; }
+
+    [[nodiscard]] bool is_exception() const noexcept { return kind == ScriptResultKind::Exception; }
+
+    [[nodiscard]] bool is_abort() const noexcept { return kind == ScriptResultKind::Abort; }
+
+    [[nodiscard]] bool is_pending() const noexcept {
+        return kind == ScriptResultKind::Abort && abort_payload.reason == ScriptAbortReason::None;
+    }
+
+    [[nodiscard]] bool is_done() const noexcept { return !is_pending(); }
+
+    [[nodiscard]] const ScriptAbort &abort() const noexcept {
+        FIBER_ASSERT(is_abort());
+        return abort_payload;
+    }
+
+    [[nodiscard]] bool has_value() const noexcept { return is_success(); }
+
+    [[nodiscard]] explicit operator bool() const noexcept { return has_value(); }
+
+    ScriptResultKind kind = ScriptResultKind::Abort;
+    ScriptAbort abort_payload{};
+};
+
 struct alignas(16) ScriptResult {
     union Payload {
         constexpr Payload() : abort{} {}
@@ -116,6 +163,7 @@ struct alignas(16) ScriptResult {
 };
 
 static_assert(std::is_trivially_copyable_v<ScriptAbort>);
+static_assert(std::is_trivially_copyable_v<ScriptStatus>);
 static_assert(std::is_trivially_copyable_v<ScriptResult>);
 
 } // namespace fiber::script
