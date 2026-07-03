@@ -49,19 +49,19 @@ ScriptStatus make_typeof_value(ValueHandle out, const char *text) noexcept {
 
 } // namespace
 
-ScriptStatus Unaries::neg(ValueHandle out, ValueHandle value) noexcept {
+ScriptStatus Unaries::neg(ValueHandle out, ConstValueHandle value) noexcept {
     return from_js_result(out, fiber::json::js_unary_op(fiber::json::JsUnaryOp::LogicalNot, *value));
 }
 
-ScriptStatus Unaries::plus(ValueHandle out, ValueHandle value) noexcept {
+ScriptStatus Unaries::plus(ValueHandle out, ConstValueHandle value) noexcept {
     return from_js_result(out, fiber::json::js_unary_op(fiber::json::JsUnaryOp::Plus, *value));
 }
 
-ScriptStatus Unaries::minus(ValueHandle out, ValueHandle value) noexcept {
+ScriptStatus Unaries::minus(ValueHandle out, ConstValueHandle value) noexcept {
     return from_js_result(out, fiber::json::js_unary_op(fiber::json::JsUnaryOp::Negate, *value));
 }
 
-ScriptStatus Unaries::typeof_op(ScriptRuntime &runtime, ValueHandle out, ValueHandle value) noexcept {
+ScriptStatus Unaries::typeof_op(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle value) noexcept {
     (void) runtime;
     switch (fiber::json::js_value_type(*value)) {
         case fiber::json::JsNodeType::Undefined:
@@ -89,19 +89,23 @@ ScriptStatus Unaries::typeof_op(ScriptRuntime &runtime, ValueHandle out, ValueHa
     return make_typeof_value(out, "undefined");
 }
 
-ScriptStatus Unaries::iterate(ScriptRuntime &runtime, ValueHandle out, ValueHandle value) noexcept {
+ScriptStatus Unaries::iterate(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle value) noexcept {
     fiber::json::GcHeap *heap = &runtime.heap();
     fiber::json::GcIterator *iter = nullptr;
     iter = runtime.alloc_with_gc(fiber::json::gc_estimate_iterator_bytes(), [&]() {
         if (fiber::json::js_value_type(*value) == fiber::json::JsNodeType::Array) {
-            return fiber::json::gc_new_array_iterator(heap,
-                                                      fiber::json::js_value_heap_ptr<fiber::json::GcArray>(*value),
-                                                      fiber::json::GcIteratorMode::Values);
+            return fiber::json::gc_new_array_iterator(
+                    heap,
+                    const_cast<fiber::json::GcArray *>(
+                            fiber::json::js_value_heap_ptr<const fiber::json::GcArray>(*value)),
+                    fiber::json::GcIteratorMode::Values);
         }
         if (fiber::json::js_value_type(*value) == fiber::json::JsNodeType::Object) {
-            return fiber::json::gc_new_object_iterator(heap,
-                                                       fiber::json::js_value_heap_ptr<fiber::json::GcObject>(*value),
-                                                       fiber::json::GcIteratorMode::Values);
+            return fiber::json::gc_new_object_iterator(
+                    heap,
+                    const_cast<fiber::json::GcObject *>(
+                            fiber::json::js_value_heap_ptr<const fiber::json::GcObject>(*value)),
+                    fiber::json::GcIteratorMode::Values);
         }
         return fiber::json::gc_new_array_iterator(heap, nullptr, fiber::json::GcIteratorMode::Values);
     });

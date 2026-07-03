@@ -16,12 +16,12 @@ class Library {
 public:
     struct HostCallFrame {
         ScriptRuntime *runtime = nullptr;
-        ValueHandle root = nullptr;
+        ConstValueHandle root = nullptr;
         void *attach = nullptr;
     };
 
     struct Arguments {
-        ValueHandle args = nullptr;
+        ConstValueHandle args = nullptr;
         std::uint32_t argc = 0;
     };
 

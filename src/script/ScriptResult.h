@@ -16,6 +16,12 @@ enum class ScriptResultKind : std::uint8_t {
     Abort,
 };
 
+enum class CallResult : std::uint8_t {
+    Success,
+    Exception,
+    Abort,
+};
+
 enum class ScriptAbortReason : std::uint8_t {
     None,
     OutOfMemory,
@@ -83,6 +89,14 @@ struct ScriptStatus {
 
     ScriptResultKind kind = ScriptResultKind::Abort;
     ScriptAbort abort_payload{};
+};
+
+union ResultPayload {
+    constexpr ResultPayload() : value{} {}
+
+    fiber::json::JsValue value;
+    fiber::json::JsValue exception;
+    ScriptAbort abort;
 };
 
 struct alignas(16) ScriptResult {
@@ -164,6 +178,7 @@ struct alignas(16) ScriptResult {
 
 static_assert(std::is_trivially_copyable_v<ScriptAbort>);
 static_assert(std::is_trivially_copyable_v<ScriptStatus>);
+static_assert(std::is_trivially_copyable_v<ResultPayload>);
 static_assert(std::is_trivially_copyable_v<ScriptResult>);
 
 } // namespace fiber::script

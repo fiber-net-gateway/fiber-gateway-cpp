@@ -9,25 +9,26 @@ namespace fiber::script::run {
 
 class Access {
 public:
-    static ScriptStatus expand_object(ScriptRuntime &runtime, ValueHandle out, ValueHandle target,
-                                      ValueHandle addition) noexcept;
-    static ScriptStatus expand_array(ScriptRuntime &runtime, ValueHandle out, ValueHandle target,
-                                     ValueHandle addition) noexcept;
-    static ScriptStatus push_array(ScriptRuntime &runtime, ValueHandle out, ValueHandle target,
-                                   ValueHandle addition) noexcept;
+    static CallResult expand_object(ScriptRuntime &runtime, ConstValueHandle target, ConstValueHandle addition,
+                                    ResultPayload &result) noexcept;
+    static CallResult expand_array(ScriptRuntime &runtime, ConstValueHandle target, ConstValueHandle addition,
+                                   ResultPayload &result) noexcept;
+    static CallResult push_array(ScriptRuntime &runtime, ConstValueHandle target, ConstValueHandle addition,
+                                 ResultPayload &result) noexcept;
 
-    static ScriptStatus index_get(ScriptRuntime &runtime, ValueHandle out, ValueHandle parent,
-                                  ValueHandle key) noexcept;
-    static ScriptStatus index_set(ScriptRuntime &runtime, ValueHandle out, ValueHandle parent, ValueHandle key,
-                                  ValueHandle value) noexcept;
-    static ScriptStatus index_set1(ScriptRuntime &runtime, ValueHandle out, ValueHandle parent, ValueHandle key,
-                                   ValueHandle value) noexcept;
+    static CallResult index_get(ScriptRuntime &runtime, ConstValueHandle parent, ConstValueHandle key,
+                                ResultPayload &result) noexcept;
+    static CallResult index_set(ScriptRuntime &runtime, ConstValueHandle parent, ConstValueHandle key,
+                                ConstValueHandle value, ResultPayload &result) noexcept;
+    static CallResult index_set1(ScriptRuntime &runtime, ConstValueHandle parent, ConstValueHandle key,
+                                 ConstValueHandle value, ResultPayload &result) noexcept;
 
-    static ScriptStatus prop_get(ScriptRuntime &runtime, ValueHandle out, ValueHandle parent, ValueHandle key) noexcept;
-    static ScriptStatus prop_set(ScriptRuntime &runtime, ValueHandle out, ValueHandle parent, ValueHandle value,
-                                 ValueHandle key) noexcept;
-    static ScriptStatus prop_set1(ScriptRuntime &runtime, ValueHandle out, ValueHandle parent, ValueHandle value,
-                                  ValueHandle key) noexcept;
+    static CallResult prop_get(ScriptRuntime &runtime, ConstValueHandle parent, ConstValueHandle key,
+                               ResultPayload &result) noexcept;
+    static CallResult prop_set(ScriptRuntime &runtime, ConstValueHandle parent, ConstValueHandle value,
+                               ConstValueHandle key, ResultPayload &result) noexcept;
+    static CallResult prop_set1(ScriptRuntime &runtime, ConstValueHandle parent, ConstValueHandle value,
+                                ConstValueHandle key, ResultPayload &result) noexcept;
 };
 
 } // namespace fiber::script::run
