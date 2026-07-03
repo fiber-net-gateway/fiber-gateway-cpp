@@ -47,9 +47,9 @@ ScriptStatus make_bool(ValueHandle out, bool value) noexcept {
 
 } // namespace
 
-bool Compares::neg(ValueHandle value) noexcept { return !logic(value); }
+bool Compares::neg(ConstValueHandle value) noexcept { return !logic(value); }
 
-bool Compares::logic(ValueHandle value) noexcept {
+bool Compares::logic(ConstValueHandle value) noexcept {
     if (!value) {
         return false;
     }
@@ -60,45 +60,45 @@ bool Compares::logic(ValueHandle value) noexcept {
     return !fiber::json::js_value_bool(result.value);
 }
 
-ScriptStatus Compares::eq(ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+ScriptStatus Compares::eq(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::Eq, *a, *b, nullptr));
 }
 
-ScriptStatus Compares::seq(ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+ScriptStatus Compares::seq(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::StrictEq, *a, *b, nullptr));
 }
 
-ScriptStatus Compares::ne(ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+ScriptStatus Compares::ne(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::Ne, *a, *b, nullptr));
 }
 
-ScriptStatus Compares::sne(ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+ScriptStatus Compares::sne(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::StrictNe, *a, *b, nullptr));
 }
 
-ScriptStatus Compares::lt(ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+ScriptStatus Compares::lt(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::Lt, *a, *b, nullptr));
 }
 
-ScriptStatus Compares::lte(ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+ScriptStatus Compares::lte(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::Le, *a, *b, nullptr));
 }
 
-ScriptStatus Compares::gt(ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+ScriptStatus Compares::gt(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::Gt, *a, *b, nullptr));
 }
 
-ScriptStatus Compares::gte(ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+ScriptStatus Compares::gte(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     return from_js_result(out, fiber::json::js_binary_op(fiber::json::JsBinaryOp::Ge, *a, *b, nullptr));
 }
 
-ScriptStatus Compares::matches(ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+ScriptStatus Compares::matches(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     (void) a;
     (void) b;
     return make_bool(out, false);
 }
 
-ScriptStatus Compares::in(ValueHandle out, ValueHandle a, ValueHandle b) noexcept {
+ScriptStatus Compares::in(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     if (!a || !b) {
         return make_bool(out, false);
     }

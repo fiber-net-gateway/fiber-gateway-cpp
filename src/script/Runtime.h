@@ -9,7 +9,51 @@
 
 namespace fiber::script {
 
-using ValueHandle = fiber::json::JsValue *;
+class ConstValueHandle {
+public:
+    constexpr ConstValueHandle() noexcept = default;
+    constexpr ConstValueHandle(std::nullptr_t) noexcept {}
+    constexpr ConstValueHandle(fiber::json::JsValue *value) noexcept : value_(value) {}
+
+    [[nodiscard]] const fiber::json::JsValue *get() const noexcept { return value_; }
+    [[nodiscard]] const fiber::json::JsValue &operator*() const noexcept { return *value_; }
+    [[nodiscard]] const fiber::json::JsValue *operator->() const noexcept { return value_; }
+    [[nodiscard]] const fiber::json::JsValue &operator[](std::size_t index) const noexcept { return value_[index]; }
+    [[nodiscard]] constexpr explicit operator bool() const noexcept { return value_ != nullptr; }
+
+private:
+    fiber::json::JsValue *value_ = nullptr;
+};
+
+class ValueHandle {
+public:
+    constexpr ValueHandle() noexcept = default;
+    constexpr ValueHandle(std::nullptr_t) noexcept {}
+    constexpr ValueHandle(fiber::json::JsValue *value) noexcept : value_(value) {}
+
+    [[nodiscard]] fiber::json::JsValue *get() const noexcept { return value_; }
+    [[nodiscard]] fiber::json::JsValue &operator*() const noexcept { return *value_; }
+    [[nodiscard]] fiber::json::JsValue *operator->() const noexcept { return value_; }
+    [[nodiscard]] fiber::json::JsValue &operator[](std::size_t index) const noexcept { return value_[index]; }
+    [[nodiscard]] constexpr explicit operator bool() const noexcept { return value_ != nullptr; }
+    [[nodiscard]] ConstValueHandle as_constant() const noexcept { return ConstValueHandle(value_); }
+    [[nodiscard]] operator ConstValueHandle() const noexcept { return as_constant(); }
+
+private:
+    fiber::json::JsValue *value_ = nullptr;
+};
+
+static_assert(sizeof(ConstValueHandle) == sizeof(fiber::json::JsValue *));
+static_assert(sizeof(ValueHandle) == sizeof(fiber::json::JsValue *));
+
+constexpr bool operator==(ConstValueHandle handle, std::nullptr_t) noexcept { return !handle; }
+constexpr bool operator==(std::nullptr_t, ConstValueHandle handle) noexcept { return !handle; }
+constexpr bool operator!=(ConstValueHandle handle, std::nullptr_t) noexcept { return static_cast<bool>(handle); }
+constexpr bool operator!=(std::nullptr_t, ConstValueHandle handle) noexcept { return static_cast<bool>(handle); }
+constexpr bool operator==(ValueHandle handle, std::nullptr_t) noexcept { return !handle; }
+constexpr bool operator==(std::nullptr_t, ValueHandle handle) noexcept { return !handle; }
+constexpr bool operator!=(ValueHandle handle, std::nullptr_t) noexcept { return static_cast<bool>(handle); }
+constexpr bool operator!=(std::nullptr_t, ValueHandle handle) noexcept { return static_cast<bool>(handle); }
 
 class ScriptRuntime final : public fiber::json::GcRootSource {
 public:

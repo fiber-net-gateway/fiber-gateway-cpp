@@ -97,11 +97,10 @@ TEST(ScriptRuntimeOpsTest, AccessIndexSetInvalidKey) {
     char key_bytes[] = {'a'};
     auto key = handle(runtime, JsValue::make_native_string(key_bytes, sizeof(key_bytes)));
     auto value = handle(runtime, JsValue::make_integer(2));
-    auto out = handle(runtime, JsValue::make_undefined());
-    auto status = fiber::script::run::Access::index_set(runtime, out, arr, key, value);
-    ASSERT_FALSE(status.has_value());
-    ASSERT_TRUE(status.is_abort());
-    EXPECT_EQ(status.abort().reason, fiber::script::ScriptAbortReason::IndexError);
+    fiber::script::ResultPayload result;
+    auto status = fiber::script::run::Access::index_set(runtime, arr, key, value, result);
+    ASSERT_EQ(status, fiber::script::CallResult::Abort);
+    EXPECT_EQ(result.abort.reason, fiber::script::ScriptAbortReason::IndexError);
 }
 
 TEST(ScriptRuntimeOpsTest, AccessIndexSetOutOfBounds) {
@@ -112,11 +111,10 @@ TEST(ScriptRuntimeOpsTest, AccessIndexSetOutOfBounds) {
     ASSERT_TRUE(fiber::json::gc_array_push(&heap, arr_ptr, JsValue::make_integer(1)));
     auto key = handle(runtime, JsValue::make_integer(3));
     auto value = handle(runtime, JsValue::make_integer(2));
-    auto out = handle(runtime, JsValue::make_undefined());
-    auto status = fiber::script::run::Access::index_set(runtime, out, arr, key, value);
-    ASSERT_FALSE(status.has_value());
-    ASSERT_TRUE(status.is_abort());
-    EXPECT_EQ(status.abort().reason, fiber::script::ScriptAbortReason::IndexError);
+    fiber::script::ResultPayload result;
+    auto status = fiber::script::run::Access::index_set(runtime, arr, key, value, result);
+    ASSERT_EQ(status, fiber::script::CallResult::Abort);
+    EXPECT_EQ(result.abort.reason, fiber::script::ScriptAbortReason::IndexError);
 }
 
 TEST(ScriptRuntimeOpsTest, AccessPropSetNonObject) {
@@ -126,11 +124,10 @@ TEST(ScriptRuntimeOpsTest, AccessPropSetNonObject) {
     auto value = handle(runtime, JsValue::make_integer(2));
     char key_bytes[] = {'a'};
     auto key = handle(runtime, JsValue::make_native_string(key_bytes, sizeof(key_bytes)));
-    auto out = handle(runtime, JsValue::make_undefined());
-    auto status = fiber::script::run::Access::prop_set(runtime, out, parent, value, key);
-    ASSERT_FALSE(status.has_value());
-    ASSERT_TRUE(status.is_abort());
-    EXPECT_EQ(status.abort().reason, fiber::script::ScriptAbortReason::IndexError);
+    fiber::script::ResultPayload result;
+    auto status = fiber::script::run::Access::prop_set(runtime, parent, value, key, result);
+    ASSERT_EQ(status, fiber::script::CallResult::Abort);
+    EXPECT_EQ(result.abort.reason, fiber::script::ScriptAbortReason::IndexError);
 }
 
 TEST(ScriptRuntimeOpsTest, InSemanticsArray) {
