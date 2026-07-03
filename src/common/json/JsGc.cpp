@@ -1618,6 +1618,27 @@ void gc_collect(GcHeap &heap, GcRootSet &roots) {
     gc_sweep_unmarked(&heap);
 }
 
+void gc_collect(GcHeap &heap, GcRootSource &roots) {
+    class MarkingVisitor final : public GcRootVisitor {
+    public:
+        explicit MarkingVisitor(GcHeap &heap) : heap_(&heap) {}
+
+        void visit(JsValue *value) noexcept override {
+            if (value) {
+                gc_mark_value(heap_, *value);
+            }
+        }
+
+    private:
+        GcHeap *heap_ = nullptr;
+    };
+
+    heap.live_mark = flip_mark(heap.live_mark);
+    MarkingVisitor visitor(heap);
+    roots.visit_roots(visitor);
+    gc_sweep_unmarked(&heap);
+}
+
 GcRootHandle::GcRootHandle(GcRootSet &roots, JsValue *value) : roots_(&roots), value_(value) {
     if (roots_ && value_) {
         roots_->add_temp_root(value_);

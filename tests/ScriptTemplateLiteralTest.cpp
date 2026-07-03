@@ -8,7 +8,6 @@
 #include "script/std/StdLibrary.h"
 
 using fiber::json::GcHeap;
-using fiber::json::GcRootSet;
 using fiber::json::GcString;
 using fiber::json::JsNodeType;
 using fiber::json::JsValue;
@@ -28,21 +27,20 @@ std::string string_to_utf8(const JsValue &value) {
     return out;
 }
 
-ScriptResult run_script(std::string_view source, GcHeap &heap, GcRootSet &roots) {
+ScriptResult run_script(std::string_view source, GcHeap &heap) {
     auto compiled = fiber::script::compile_script(StdLibrary::instance(), source);
     EXPECT_TRUE(compiled.has_value()) << (compiled ? "" : compiled.error().message);
     if (!compiled) {
         return ScriptResult::abort(fiber::script::ScriptAbortReason::InvalidArgument);
     }
     JsValue root = JsValue::make_undefined();
-    auto run = compiled->exec_sync(root, nullptr, heap, roots);
+    auto run = compiled->exec_sync(root, nullptr, heap);
     return run();
 }
 
 void expect_script_string(std::string_view source, std::string_view expected) {
     GcHeap heap;
-    GcRootSet roots;
-    ScriptResult result = run_script(source, heap, roots);
+    ScriptResult result = run_script(source, heap);
     ASSERT_TRUE(result.is_success());
     ASSERT_EQ(js_value_type(result.value()), JsNodeType::String);
     EXPECT_EQ(string_to_utf8(result.value()), expected);

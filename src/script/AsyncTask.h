@@ -11,7 +11,7 @@
 namespace fiber::script {
 
 struct AsyncTaskCompletion {
-    void (*complete)(void *ctx, const ScriptResult &result) noexcept = nullptr;
+    void (*complete)(void *ctx, ScriptStatus status) noexcept = nullptr;
     void *ctx = nullptr;
 };
 
@@ -48,10 +48,10 @@ public:
 
         FinalAwaiter final_suspend() noexcept { return {}; }
 
-        void return_value(const ScriptResult &result) noexcept {
-            result_ = result;
+        void return_value(ScriptStatus status) noexcept {
+            status_ = status;
             if (completion_.complete) {
-                completion_.complete(completion_.ctx, result_);
+                completion_.complete(completion_.ctx, status_);
             }
         }
 
@@ -61,7 +61,7 @@ public:
 
         void set_completion(AsyncTaskCompletion completion) noexcept { completion_ = completion; }
 
-        ScriptResult result_ = ScriptResult::abort(ScriptAbortReason::InvalidState);
+        ScriptStatus status_ = ScriptStatus::abort(ScriptAbortReason::InvalidState);
         AsyncTaskCompletion completion_{};
         std::coroutine_handle<> continuation_ = nullptr;
     };

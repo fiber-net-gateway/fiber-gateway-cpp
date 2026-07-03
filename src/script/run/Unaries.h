@@ -2,21 +2,18 @@
 #define FIBER_SCRIPT_RUN_UNARIES_H
 
 #include "../../common/json/JsGc.h"
+#include "../Runtime.h"
 #include "../ScriptResult.h"
-
-namespace fiber::script {
-class ScriptRuntime;
-}
 
 namespace fiber::script::run {
 
 class Unaries {
 public:
-    static ScriptResult neg(const fiber::json::JsValue &value);
-    static ScriptResult plus(const fiber::json::JsValue &value);
-    static ScriptResult minus(const fiber::json::JsValue &value);
-    static ScriptResult typeof_op(const fiber::json::JsValue &value, ScriptRuntime &runtime);
-    static ScriptResult iterate(const fiber::json::JsValue &value, ScriptRuntime &runtime);
+    static ScriptStatus neg(ValueHandle out, ValueHandle value) noexcept;
+    static ScriptStatus plus(ValueHandle out, ValueHandle value) noexcept;
+    static ScriptStatus minus(ValueHandle out, ValueHandle value) noexcept;
+    static ScriptStatus typeof_op(ScriptRuntime &runtime, ValueHandle out, ValueHandle value) noexcept;
+    static ScriptStatus iterate(ScriptRuntime &runtime, ValueHandle out, ValueHandle value) noexcept;
 };
 
 } // namespace fiber::script::run

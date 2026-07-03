@@ -20,28 +20,33 @@ namespace {
 using fiber::json::JsValue;
 using fiber::script::Library;
 using fiber::script::ScriptResult;
+using fiber::script::ScriptStatus;
+using fiber::script::ValueHandle;
 
-ScriptResult test_function(void *userdata, const Library::HostCallFrame &frame,
-                           const Library::Arguments &arguments) noexcept {
+ScriptStatus test_function(void *userdata, const Library::HostCallFrame &frame, const Library::Arguments &arguments,
+                           ValueHandle out) noexcept {
     (void) userdata;
     (void) frame;
     (void) arguments;
-    return JsValue::make_integer(7);
+    *out = JsValue::make_integer(7);
+    return ScriptStatus::success();
 }
 
-ScriptResult throw_function(void *userdata, const Library::HostCallFrame &frame,
-                            const Library::Arguments &arguments) noexcept {
+ScriptStatus throw_function(void *userdata, const Library::HostCallFrame &frame, const Library::Arguments &arguments,
+                            ValueHandle out) noexcept {
     (void) userdata;
     (void) frame;
     (void) arguments;
     static char msg[] = "boom";
-    return ScriptResult::exception(JsValue::make_native_string(msg, 4));
+    *out = JsValue::make_native_string(msg, 4);
+    return ScriptStatus::exception();
 }
 
-ScriptResult test_constant(void *userdata, const Library::HostCallFrame &frame) noexcept {
+ScriptStatus test_constant(void *userdata, const Library::HostCallFrame &frame, ValueHandle out) noexcept {
     (void) userdata;
     (void) frame;
-    return JsValue::make_integer(41);
+    *out = JsValue::make_integer(41);
+    return ScriptStatus::success();
 }
 
 class DelayedAsyncFunction final {
@@ -79,20 +84,21 @@ private:
 };
 
 fiber::script::AsyncTask delayed_async_function(void *userdata, const Library::HostCallFrame &frame,
-                                                const Library::Arguments &arguments) noexcept {
+                                                const Library::Arguments &arguments, ValueHandle out) noexcept {
     (void) frame;
     (void) arguments;
     auto *func = static_cast<DelayedAsyncFunction *>(userdata);
     JsValue value = co_await func->awaiter();
-    co_return ScriptResult::success(value);
+    *out = value;
+    co_return ScriptStatus::success();
 }
 
 struct AddDefaultFunction {
     std::size_t observed_argc = 0;
 };
 
-ScriptResult add_default_function(void *userdata, const Library::HostCallFrame &frame,
-                                  const Library::Arguments &arguments) noexcept {
+ScriptStatus add_default_function(void *userdata, const Library::HostCallFrame &frame,
+                                  const Library::Arguments &arguments, ValueHandle out) noexcept {
     (void) frame;
     auto *func = static_cast<AddDefaultFunction *>(userdata);
     if (func) {
@@ -100,7 +106,8 @@ ScriptResult add_default_function(void *userdata, const Library::HostCallFrame &
     }
     std::int64_t a = arguments.argc > 0 ? js_value_int64(arguments.args[0]) : 0;
     std::int64_t b = arguments.argc > 1 ? js_value_int64(arguments.args[1]) : 0;
-    return JsValue::make_integer(a + b);
+    *out = JsValue::make_integer(a + b);
+    return ScriptStatus::success();
 }
 
 Library::HostCallable make_sync_function(Library::Function function, void *userdata = nullptr) noexcept {
@@ -284,8 +291,7 @@ TEST(ScriptExecutionTest, RunSimpleReturn) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::json::GcHeap heap;
-    fiber::json::GcRootSet roots;
-    fiber::script::ScriptRuntime runtime(heap, roots);
+    fiber::script::ScriptRuntime runtime(heap);
     auto run = script.exec_sync(fiber::json::JsValue::make_undefined(), nullptr, runtime);
     auto result = run();
     ASSERT_TRUE(result.has_value());
@@ -301,8 +307,7 @@ TEST(ScriptExecutionTest, RunThrowLiteral) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::json::GcHeap heap;
-    fiber::json::GcRootSet roots;
-    fiber::script::ScriptRuntime runtime(heap, roots);
+    fiber::script::ScriptRuntime runtime(heap);
     auto run = script.exec_sync(fiber::json::JsValue::make_undefined(), nullptr, runtime);
     auto result = run();
     ASSERT_FALSE(result.has_value());
@@ -317,8 +322,7 @@ TEST(ScriptExecutionTest, RunFunctionThrowCaught) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::json::GcHeap heap;
-    fiber::json::GcRootSet roots;
-    fiber::script::ScriptRuntime runtime(heap, roots);
+    fiber::script::ScriptRuntime runtime(heap);
     auto run = script.exec_sync(fiber::json::JsValue::make_undefined(), nullptr, runtime);
     auto result = run();
     ASSERT_TRUE(result.has_value());
@@ -332,8 +336,7 @@ TEST(ScriptExecutionTest, AsyncFunctionSuspendsAndResumes) {
     auto compiled = compile_script("return asyncFunc(1);", library);
 
     fiber::json::GcHeap heap;
-    fiber::json::GcRootSet roots;
-    fiber::script::ScriptRuntime runtime(heap, roots);
+    fiber::script::ScriptRuntime runtime(heap);
     fiber::script::run::InterpreterVm vm(compiled, fiber::json::JsValue::make_undefined(), nullptr, runtime);
 
     vm.iterate();
@@ -360,8 +363,7 @@ TEST(ScriptExecutionTest, FunctionDefaultArgumentIsAppendedBeforeHostCall) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::json::GcHeap heap;
-    fiber::json::GcRootSet roots;
-    fiber::script::ScriptRuntime runtime(heap, roots);
+    fiber::script::ScriptRuntime runtime(heap);
     auto run = script.exec_sync(fiber::json::JsValue::make_undefined(), nullptr, runtime);
     auto result = run();
     ASSERT_TRUE(result.has_value());

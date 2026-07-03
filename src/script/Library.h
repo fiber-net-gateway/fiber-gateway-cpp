@@ -7,31 +7,31 @@
 
 #include "../common/json/JsNode.h"
 #include "AsyncTask.h"
+#include "Runtime.h"
 #include "ScriptResult.h"
 
 namespace fiber::script {
-
-class ScriptRuntime;
 
 class Library {
 public:
     struct HostCallFrame {
         ScriptRuntime *runtime = nullptr;
-        const fiber::json::JsValue *root = nullptr;
+        ValueHandle root = nullptr;
         void *attach = nullptr;
     };
 
     struct Arguments {
-        const fiber::json::JsValue *args = nullptr;
+        ValueHandle args = nullptr;
         std::uint32_t argc = 0;
     };
 
-    using Function = ScriptResult (*)(void *userdata, const HostCallFrame &frame, const Arguments &arguments) noexcept;
-    using AsyncFunction = AsyncTask (*)(void *userdata, const HostCallFrame &frame,
-                                        const Arguments &arguments) noexcept;
+    using Function = ScriptStatus (*)(void *userdata, const HostCallFrame &frame, const Arguments &arguments,
+                                      ValueHandle out) noexcept;
+    using AsyncFunction = AsyncTask (*)(void *userdata, const HostCallFrame &frame, const Arguments &arguments,
+                                        ValueHandle out) noexcept;
 
-    using Constant = ScriptResult (*)(void *userdata, const HostCallFrame &frame) noexcept;
-    using AsyncConstant = AsyncTask (*)(void *userdata, const HostCallFrame &frame) noexcept;
+    using Constant = ScriptStatus (*)(void *userdata, const HostCallFrame &frame, ValueHandle out) noexcept;
+    using AsyncConstant = AsyncTask (*)(void *userdata, const HostCallFrame &frame, ValueHandle out) noexcept;
 
     struct HostCallable {
         enum class Kind : std::uint8_t {

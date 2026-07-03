@@ -178,6 +178,27 @@ bool gc_object_remove(GcObject *obj, const GcString *key);
 const GcObjectEntry *gc_object_entry_at(const GcObject *obj, std::size_t index);
 void gc_collect(GcHeap *heap, JsValue **roots, std::size_t root_count);
 
+class GcRootVisitor {
+public:
+    virtual ~GcRootVisitor() = default;
+    virtual void visit(JsValue *value) noexcept = 0;
+
+    void visit_range(JsValue *base, std::size_t count) noexcept {
+        if (!base || count == 0) {
+            return;
+        }
+        for (std::size_t i = 0; i < count; ++i) {
+            visit(base + i);
+        }
+    }
+};
+
+class GcRootSource {
+public:
+    virtual ~GcRootSource() = default;
+    virtual void visit_roots(GcRootVisitor &visitor) noexcept = 0;
+};
+
 class GcRootSet {
 public:
     void add_global(JsValue *value);
@@ -225,6 +246,7 @@ private:
 };
 
 void gc_collect(GcHeap &heap, GcRootSet &roots);
+void gc_collect(GcHeap &heap, GcRootSource &roots);
 
 class GcRootHandle {
 public:

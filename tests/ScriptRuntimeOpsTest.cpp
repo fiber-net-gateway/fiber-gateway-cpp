@@ -15,6 +15,15 @@ using fiber::json::JsValue;
 
 namespace {
 
+fiber::script::ValueHandle handle(fiber::script::ScriptRuntime &runtime, JsValue value) {
+    fiber::script::ValueHandle out = runtime.global_value();
+    EXPECT_NE(out, nullptr);
+    if (out) {
+        *out = value;
+    }
+    return out;
+}
+
 JsValue make_array(GcHeap &heap, std::initializer_list<JsValue> values) {
     JsValue arr = JsValue::make_array(heap, values.size());
     auto *arr_ptr = js_value_heap_ptr<GcArray>(arr);
@@ -45,118 +54,120 @@ JsValue make_object_with_key(GcHeap &heap, const char *key, std::size_t key_len,
 
 TEST(ScriptRuntimeOpsTest, BinaryPlusTypeError) {
     GcHeap heap;
-    fiber::json::GcRootSet roots;
-    fiber::script::ScriptRuntime runtime(heap, roots);
-    JsValue lhs = JsValue::make_object(heap, 0);
-    JsValue rhs = JsValue::make_integer(1);
-    fiber::script::GcRootGuard lhs_guard(runtime, &lhs);
-    fiber::script::GcRootGuard rhs_guard(runtime, &rhs);
-    auto result = fiber::script::run::Binaries::plus(lhs, rhs, runtime);
-    ASSERT_FALSE(result.has_value());
-    ASSERT_TRUE(result.is_abort());
-    EXPECT_EQ(result.abort().reason, fiber::script::ScriptAbortReason::TypeError);
+    fiber::script::ScriptRuntime runtime(heap);
+    auto lhs = handle(runtime, JsValue::make_object(heap, 0));
+    auto rhs = handle(runtime, JsValue::make_integer(1));
+    auto out = handle(runtime, JsValue::make_undefined());
+    auto status = fiber::script::run::Binaries::plus(runtime, out, lhs, rhs);
+    ASSERT_FALSE(status.has_value());
+    ASSERT_TRUE(status.is_abort());
+    EXPECT_EQ(status.abort().reason, fiber::script::ScriptAbortReason::TypeError);
 }
 
 TEST(ScriptRuntimeOpsTest, BinaryDivideByZero) {
     GcHeap heap;
-    fiber::json::GcRootSet roots;
-    fiber::script::ScriptRuntime runtime(heap, roots);
-    JsValue lhs = JsValue::make_integer(5);
-    JsValue rhs = JsValue::make_integer(0);
-    auto result = fiber::script::run::Binaries::divide(lhs, rhs, runtime);
-    ASSERT_FALSE(result.has_value());
-    ASSERT_TRUE(result.is_abort());
-    EXPECT_EQ(result.abort().reason, fiber::script::ScriptAbortReason::DivisionByZero);
+    fiber::script::ScriptRuntime runtime(heap);
+    auto lhs = handle(runtime, JsValue::make_integer(5));
+    auto rhs = handle(runtime, JsValue::make_integer(0));
+    auto out = handle(runtime, JsValue::make_undefined());
+    auto status = fiber::script::run::Binaries::divide(runtime, out, lhs, rhs);
+    ASSERT_FALSE(status.has_value());
+    ASSERT_TRUE(status.is_abort());
+    EXPECT_EQ(status.abort().reason, fiber::script::ScriptAbortReason::DivisionByZero);
 }
 
 TEST(ScriptRuntimeOpsTest, UnaryPlusTypeError) {
+    GcHeap heap;
+    fiber::script::ScriptRuntime runtime(heap);
     char data[] = {'a'};
-    JsValue value = JsValue::make_native_string(data, sizeof(data));
-    auto result = fiber::script::run::Unaries::plus(value);
-    ASSERT_FALSE(result.has_value());
-    ASSERT_TRUE(result.is_abort());
-    EXPECT_EQ(result.abort().reason, fiber::script::ScriptAbortReason::TypeError);
+    auto value = handle(runtime, JsValue::make_native_string(data, sizeof(data)));
+    auto out = handle(runtime, JsValue::make_undefined());
+    auto status = fiber::script::run::Unaries::plus(out, value);
+    ASSERT_FALSE(status.has_value());
+    ASSERT_TRUE(status.is_abort());
+    EXPECT_EQ(status.abort().reason, fiber::script::ScriptAbortReason::TypeError);
 }
 
 TEST(ScriptRuntimeOpsTest, AccessIndexSetInvalidKey) {
     GcHeap heap;
-    fiber::json::GcRootSet roots;
-    fiber::script::ScriptRuntime runtime(heap, roots);
-    JsValue arr = JsValue::make_array(heap, 0);
-    fiber::script::GcRootGuard arr_guard(runtime, &arr);
-    auto *arr_ptr = js_value_heap_ptr<GcArray>(arr);
+    fiber::script::ScriptRuntime runtime(heap);
+    auto arr = handle(runtime, JsValue::make_array(heap, 0));
+    auto *arr_ptr = js_value_heap_ptr<GcArray>(*arr);
     ASSERT_TRUE(fiber::json::gc_array_push(&heap, arr_ptr, JsValue::make_integer(1)));
     char key_bytes[] = {'a'};
-    JsValue key = JsValue::make_native_string(key_bytes, sizeof(key_bytes));
-    auto result = fiber::script::run::Access::index_set(arr, key, JsValue::make_integer(2), runtime);
-    ASSERT_FALSE(result.has_value());
-    ASSERT_TRUE(result.is_abort());
-    EXPECT_EQ(result.abort().reason, fiber::script::ScriptAbortReason::IndexError);
+    auto key = handle(runtime, JsValue::make_native_string(key_bytes, sizeof(key_bytes)));
+    auto value = handle(runtime, JsValue::make_integer(2));
+    auto out = handle(runtime, JsValue::make_undefined());
+    auto status = fiber::script::run::Access::index_set(runtime, out, arr, key, value);
+    ASSERT_FALSE(status.has_value());
+    ASSERT_TRUE(status.is_abort());
+    EXPECT_EQ(status.abort().reason, fiber::script::ScriptAbortReason::IndexError);
 }
 
 TEST(ScriptRuntimeOpsTest, AccessIndexSetOutOfBounds) {
     GcHeap heap;
-    fiber::json::GcRootSet roots;
-    fiber::script::ScriptRuntime runtime(heap, roots);
-    JsValue arr = JsValue::make_array(heap, 0);
-    fiber::script::GcRootGuard arr_guard(runtime, &arr);
-    auto *arr_ptr = js_value_heap_ptr<GcArray>(arr);
+    fiber::script::ScriptRuntime runtime(heap);
+    auto arr = handle(runtime, JsValue::make_array(heap, 0));
+    auto *arr_ptr = js_value_heap_ptr<GcArray>(*arr);
     ASSERT_TRUE(fiber::json::gc_array_push(&heap, arr_ptr, JsValue::make_integer(1)));
-    JsValue key = JsValue::make_integer(3);
-    auto result = fiber::script::run::Access::index_set(arr, key, JsValue::make_integer(2), runtime);
-    ASSERT_FALSE(result.has_value());
-    ASSERT_TRUE(result.is_abort());
-    EXPECT_EQ(result.abort().reason, fiber::script::ScriptAbortReason::IndexError);
+    auto key = handle(runtime, JsValue::make_integer(3));
+    auto value = handle(runtime, JsValue::make_integer(2));
+    auto out = handle(runtime, JsValue::make_undefined());
+    auto status = fiber::script::run::Access::index_set(runtime, out, arr, key, value);
+    ASSERT_FALSE(status.has_value());
+    ASSERT_TRUE(status.is_abort());
+    EXPECT_EQ(status.abort().reason, fiber::script::ScriptAbortReason::IndexError);
 }
 
 TEST(ScriptRuntimeOpsTest, AccessPropSetNonObject) {
     GcHeap heap;
-    fiber::json::GcRootSet roots;
-    fiber::script::ScriptRuntime runtime(heap, roots);
-    JsValue parent = JsValue::make_integer(1);
+    fiber::script::ScriptRuntime runtime(heap);
+    auto parent = handle(runtime, JsValue::make_integer(1));
+    auto value = handle(runtime, JsValue::make_integer(2));
     char key_bytes[] = {'a'};
-    JsValue key = JsValue::make_native_string(key_bytes, sizeof(key_bytes));
-    auto result = fiber::script::run::Access::prop_set(parent, JsValue::make_integer(2), key, runtime);
-    ASSERT_FALSE(result.has_value());
-    ASSERT_TRUE(result.is_abort());
-    EXPECT_EQ(result.abort().reason, fiber::script::ScriptAbortReason::IndexError);
+    auto key = handle(runtime, JsValue::make_native_string(key_bytes, sizeof(key_bytes)));
+    auto out = handle(runtime, JsValue::make_undefined());
+    auto status = fiber::script::run::Access::prop_set(runtime, out, parent, value, key);
+    ASSERT_FALSE(status.has_value());
+    ASSERT_TRUE(status.is_abort());
+    EXPECT_EQ(status.abort().reason, fiber::script::ScriptAbortReason::IndexError);
 }
 
 TEST(ScriptRuntimeOpsTest, InSemanticsArray) {
     GcHeap heap;
-    fiber::json::GcRootSet roots;
-    fiber::script::ScriptRuntime runtime(heap, roots);
-    JsValue arr = make_array(heap, {JsValue::make_integer(1), JsValue::make_integer(2)});
-    fiber::script::GcRootGuard arr_guard(runtime, &arr);
-    auto hit = fiber::script::run::Binaries::in(JsValue::make_integer(1), arr, runtime);
+    fiber::script::ScriptRuntime runtime(heap);
+    auto arr = handle(runtime, make_array(heap, {JsValue::make_integer(1), JsValue::make_integer(2)}));
+    auto key = handle(runtime, JsValue::make_integer(1));
+    auto out = handle(runtime, JsValue::make_undefined());
+    auto hit = fiber::script::run::Binaries::in(runtime, out, key, arr);
     ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(js_value_type(hit.value()), JsNodeType::Boolean);
-    EXPECT_TRUE(js_value_bool(hit.value()));
+    EXPECT_EQ(js_value_type(*out), JsNodeType::Boolean);
+    EXPECT_TRUE(js_value_bool(*out));
 
-    auto miss = fiber::script::run::Binaries::in(JsValue::make_integer(2), arr, runtime);
+    *key = JsValue::make_integer(2);
+    auto miss = fiber::script::run::Binaries::in(runtime, out, key, arr);
     ASSERT_TRUE(miss.has_value());
-    EXPECT_FALSE(js_value_bool(miss.value()));
+    EXPECT_FALSE(js_value_bool(*out));
 }
 
 TEST(ScriptRuntimeOpsTest, InSemanticsObject) {
     GcHeap heap;
-    fiber::json::GcRootSet roots;
-    fiber::script::ScriptRuntime runtime(heap, roots);
-    JsValue obj = make_object_with_key(heap, "a", 1, JsValue::make_integer(1));
-    JsValue heap_key = JsValue::make_string(heap, "a", 1);
-    fiber::script::GcRootGuard obj_guard(runtime, &obj);
-    fiber::script::GcRootGuard key_guard(runtime, &heap_key);
-    auto heap_hit = fiber::script::run::Binaries::in(heap_key, obj, runtime);
+    fiber::script::ScriptRuntime runtime(heap);
+    auto obj = handle(runtime, make_object_with_key(heap, "a", 1, JsValue::make_integer(1)));
+    auto heap_key = handle(runtime, JsValue::make_string(heap, "a", 1));
+    auto out = handle(runtime, JsValue::make_undefined());
+    auto heap_hit = fiber::script::run::Binaries::in(runtime, out, heap_key, obj);
     ASSERT_TRUE(heap_hit.has_value());
-    EXPECT_TRUE(js_value_bool(heap_hit.value()));
+    EXPECT_TRUE(js_value_bool(*out));
 
     char key_bytes[] = {'a'};
-    JsValue native_key = JsValue::make_native_string(key_bytes, sizeof(key_bytes));
-    auto native_hit = fiber::script::run::Binaries::in(native_key, obj, runtime);
+    auto native_key = handle(runtime, JsValue::make_native_string(key_bytes, sizeof(key_bytes)));
+    auto native_hit = fiber::script::run::Binaries::in(runtime, out, native_key, obj);
     ASSERT_TRUE(native_hit.has_value());
-    EXPECT_TRUE(js_value_bool(native_hit.value()));
+    EXPECT_TRUE(js_value_bool(*out));
 
-    auto miss = fiber::script::run::Binaries::in(JsValue::make_string(heap, "b", 1), obj, runtime);
+    auto missing_key = handle(runtime, JsValue::make_string(heap, "b", 1));
+    auto miss = fiber::script::run::Binaries::in(runtime, out, missing_key, obj);
     ASSERT_TRUE(miss.has_value());
-    EXPECT_FALSE(js_value_bool(miss.value()));
+    EXPECT_FALSE(js_value_bool(*out));
 }

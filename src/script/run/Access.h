@@ -2,36 +2,32 @@
 #define FIBER_SCRIPT_RUN_ACCESS_H
 
 #include "../../common/json/JsGc.h"
+#include "../Runtime.h"
 #include "../ScriptResult.h"
-
-namespace fiber::script {
-class ScriptRuntime;
-}
 
 namespace fiber::script::run {
 
 class Access {
 public:
-    static ScriptResult expand_object(const fiber::json::JsValue &target, const fiber::json::JsValue &addition,
-                                      ScriptRuntime &runtime);
-    static ScriptResult expand_array(const fiber::json::JsValue &target, const fiber::json::JsValue &addition,
-                                     ScriptRuntime &runtime);
-    static ScriptResult push_array(const fiber::json::JsValue &target, const fiber::json::JsValue &addition,
-                                   ScriptRuntime &runtime);
+    static ScriptStatus expand_object(ScriptRuntime &runtime, ValueHandle out, ValueHandle target,
+                                      ValueHandle addition) noexcept;
+    static ScriptStatus expand_array(ScriptRuntime &runtime, ValueHandle out, ValueHandle target,
+                                     ValueHandle addition) noexcept;
+    static ScriptStatus push_array(ScriptRuntime &runtime, ValueHandle out, ValueHandle target,
+                                   ValueHandle addition) noexcept;
 
-    static ScriptResult index_get(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
-                                  ScriptRuntime &runtime);
-    static ScriptResult index_set(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
-                                  const fiber::json::JsValue &value, ScriptRuntime &runtime);
-    static ScriptResult index_set1(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
-                                   const fiber::json::JsValue &value, ScriptRuntime &runtime);
+    static ScriptStatus index_get(ScriptRuntime &runtime, ValueHandle out, ValueHandle parent,
+                                  ValueHandle key) noexcept;
+    static ScriptStatus index_set(ScriptRuntime &runtime, ValueHandle out, ValueHandle parent, ValueHandle key,
+                                  ValueHandle value) noexcept;
+    static ScriptStatus index_set1(ScriptRuntime &runtime, ValueHandle out, ValueHandle parent, ValueHandle key,
+                                   ValueHandle value) noexcept;
 
-    static ScriptResult prop_get(const fiber::json::JsValue &parent, const fiber::json::JsValue &key,
-                                 ScriptRuntime &runtime);
-    static ScriptResult prop_set(const fiber::json::JsValue &parent, const fiber::json::JsValue &value,
-                                 const fiber::json::JsValue &key, ScriptRuntime &runtime);
-    static ScriptResult prop_set1(const fiber::json::JsValue &parent, const fiber::json::JsValue &value,
-                                  const fiber::json::JsValue &key, ScriptRuntime &runtime);
+    static ScriptStatus prop_get(ScriptRuntime &runtime, ValueHandle out, ValueHandle parent, ValueHandle key) noexcept;
+    static ScriptStatus prop_set(ScriptRuntime &runtime, ValueHandle out, ValueHandle parent, ValueHandle value,
+                                 ValueHandle key) noexcept;
+    static ScriptStatus prop_set1(ScriptRuntime &runtime, ValueHandle out, ValueHandle parent, ValueHandle value,
+                                  ValueHandle key) noexcept;
 };
 
 } // namespace fiber::script::run

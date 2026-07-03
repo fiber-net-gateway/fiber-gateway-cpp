@@ -13,7 +13,6 @@
 
 namespace fiber::json {
 class GcHeap;
-class GcRootSet;
 } // namespace fiber::json
 
 namespace fiber::script {
@@ -47,8 +46,7 @@ private:
 
     ScriptRun(const ir::Compiled &compiled, const fiber::json::JsValue &root, void *attach, ScriptRuntime &runtime);
 
-    ScriptRun(const ir::Compiled &compiled, const fiber::json::JsValue &root, void *attach, fiber::json::GcHeap &heap,
-              fiber::json::GcRootSet &roots);
+    ScriptRun(const ir::Compiled &compiled, const fiber::json::JsValue &root, void *attach, fiber::json::GcHeap &heap);
 
     AsyncTask run_async_task();
 
@@ -66,10 +64,10 @@ public:
     Result await_resume();
 
 private:
-    static void complete(void *context, const ScriptResult &result) noexcept;
+    static void complete(void *context, ScriptStatus status) noexcept;
 
     ScriptRun run_;
-    std::optional<Result> result_;
+    std::optional<ScriptStatus> status_;
     AsyncTask task_;
 };
 
@@ -123,13 +121,11 @@ public:
 
     ScriptAsyncRun exec_async(const fiber::json::JsValue &root, void *attach, ScriptRuntime &runtime);
 
-    ScriptAsyncRun exec_async(const fiber::json::JsValue &root, void *attach, fiber::json::GcHeap &heap,
-                              fiber::json::GcRootSet &roots);
+    ScriptAsyncRun exec_async(const fiber::json::JsValue &root, void *attach, fiber::json::GcHeap &heap);
 
     ScriptSyncRun exec_sync(const fiber::json::JsValue &root, void *attach, ScriptRuntime &runtime);
 
-    ScriptSyncRun exec_sync(const fiber::json::JsValue &root, void *attach, fiber::json::GcHeap &heap,
-                            fiber::json::GcRootSet &roots);
+    ScriptSyncRun exec_sync(const fiber::json::JsValue &root, void *attach, fiber::json::GcHeap &heap);
 
     bool contains_async() const;
 
