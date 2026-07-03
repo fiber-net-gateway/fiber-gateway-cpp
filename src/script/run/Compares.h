@@ -3,7 +3,6 @@
 
 #include "../../common/json/JsGc.h"
 #include "../Runtime.h"
-#include "../ScriptResult.h"
 
 namespace fiber::script::run {
 
@@ -12,18 +11,18 @@ public:
     static bool neg(ConstValueHandle value) noexcept;
     static bool logic(ConstValueHandle value) noexcept;
 
-    static ScriptStatus eq(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
-    static ScriptStatus seq(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
-    static ScriptStatus ne(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
-    static ScriptStatus sne(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
+    static bool eq(ConstValueHandle a, ConstValueHandle b) noexcept;
+    static bool seq(ConstValueHandle a, ConstValueHandle b) noexcept;
+    static bool ne(ConstValueHandle a, ConstValueHandle b) noexcept;
+    static bool sne(ConstValueHandle a, ConstValueHandle b) noexcept;
 
-    static ScriptStatus lt(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
-    static ScriptStatus lte(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
-    static ScriptStatus gt(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
-    static ScriptStatus gte(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
+    static bool lt(ConstValueHandle a, ConstValueHandle b) noexcept;
+    static bool lte(ConstValueHandle a, ConstValueHandle b) noexcept;
+    static bool gt(ConstValueHandle a, ConstValueHandle b) noexcept;
+    static bool gte(ConstValueHandle a, ConstValueHandle b) noexcept;
 
-    static ScriptStatus matches(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
-    static ScriptStatus in(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
+    static bool matches(ConstValueHandle a, ConstValueHandle b) noexcept;
+    static bool in(ConstValueHandle a, ConstValueHandle b) noexcept;
 };
 
 } // namespace fiber::script::run

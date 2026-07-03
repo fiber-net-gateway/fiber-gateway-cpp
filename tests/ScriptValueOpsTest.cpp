@@ -171,26 +171,13 @@ TEST(ScriptValueOpsTest, LooseAndStrictEquality) {
     char one_bytes[] = {'1'};
     auto str = handle(runtime, JsValue::make_native_string(one_bytes, sizeof(one_bytes)));
     auto num = handle(runtime, JsValue::make_integer(1));
-    auto out = handle(runtime, JsValue::make_undefined());
-
-    auto loose = fiber::script::run::Compares::eq(out, str, num);
-    ASSERT_TRUE(loose.has_value());
-    EXPECT_EQ(js_value_type(*out), JsNodeType::Boolean);
-    EXPECT_TRUE(js_value_bool(*out));
-
-    auto strict = fiber::script::run::Compares::seq(out, str, num);
-    ASSERT_TRUE(strict.has_value());
-    EXPECT_EQ(js_value_type(*out), JsNodeType::Boolean);
-    EXPECT_FALSE(js_value_bool(*out));
+    EXPECT_TRUE(fiber::script::run::Compares::eq(str, num));
+    EXPECT_FALSE(fiber::script::run::Compares::seq(str, num));
 
     auto null_value = handle(runtime, JsValue::make_null());
     auto undef_value = handle(runtime, JsValue::make_undefined());
-    auto loose_null = fiber::script::run::Compares::eq(out, null_value, undef_value);
-    ASSERT_TRUE(loose_null.has_value());
-    EXPECT_TRUE(js_value_bool(*out));
-    auto strict_null = fiber::script::run::Compares::seq(out, null_value, undef_value);
-    ASSERT_TRUE(strict_null.has_value());
-    EXPECT_FALSE(js_value_bool(*out));
+    EXPECT_TRUE(fiber::script::run::Compares::eq(null_value, undef_value));
+    EXPECT_FALSE(fiber::script::run::Compares::seq(null_value, undef_value));
 }
 
 TEST(ScriptValueOpsTest, CompareHeapByteStrings) {
@@ -198,15 +185,9 @@ TEST(ScriptValueOpsTest, CompareHeapByteStrings) {
     fiber::script::ScriptRuntime runtime(heap);
     auto lhs = handle(runtime, JsValue::make_string(heap, "ab", 2));
     auto rhs = handle(runtime, JsValue::make_string(heap, "aba", 3));
-    auto out = handle(runtime, JsValue::make_undefined());
 
-    auto lt = fiber::script::run::Compares::lt(out, lhs, rhs);
-    ASSERT_TRUE(lt.has_value());
-    EXPECT_TRUE(js_value_bool(*out));
-
-    auto gt = fiber::script::run::Compares::gt(out, lhs, rhs);
-    ASSERT_TRUE(gt.has_value());
-    EXPECT_FALSE(js_value_bool(*out));
+    EXPECT_TRUE(fiber::script::run::Compares::lt(lhs, rhs));
+    EXPECT_FALSE(fiber::script::run::Compares::gt(lhs, rhs));
 }
 
 TEST(ScriptValueOpsTest, CompareHeapUtf16Strings) {
@@ -216,15 +197,9 @@ TEST(ScriptValueOpsTest, CompareHeapUtf16Strings) {
     char euro_bytes[] = {static_cast<char>(0xE2), static_cast<char>(0x82), static_cast<char>(0xAC)};
     auto omega = handle(runtime, JsValue::make_string(heap, omega_bytes, sizeof(omega_bytes)));
     auto euro = handle(runtime, JsValue::make_string(heap, euro_bytes, sizeof(euro_bytes)));
-    auto out = handle(runtime, JsValue::make_undefined());
 
-    auto lt = fiber::script::run::Compares::lt(out, omega, euro);
-    ASSERT_TRUE(lt.has_value());
-    EXPECT_TRUE(js_value_bool(*out));
-
-    auto eq = fiber::script::run::Compares::eq(out, euro, euro);
-    ASSERT_TRUE(eq.has_value());
-    EXPECT_TRUE(js_value_bool(*out));
+    EXPECT_TRUE(fiber::script::run::Compares::lt(omega, euro));
+    EXPECT_TRUE(fiber::script::run::Compares::eq(euro, euro));
 }
 
 TEST(ScriptValueOpsTest, CompareHeapByteAndHeapUtf16) {
@@ -233,11 +208,8 @@ TEST(ScriptValueOpsTest, CompareHeapByteAndHeapUtf16) {
     auto ascii = handle(runtime, JsValue::make_string(heap, "A", 1));
     char euro_bytes[] = {static_cast<char>(0xE2), static_cast<char>(0x82), static_cast<char>(0xAC)};
     auto euro = handle(runtime, JsValue::make_string(heap, euro_bytes, sizeof(euro_bytes)));
-    auto out = handle(runtime, JsValue::make_undefined());
 
-    auto lt = fiber::script::run::Compares::lt(out, ascii, euro);
-    ASSERT_TRUE(lt.has_value());
-    EXPECT_TRUE(js_value_bool(*out));
+    EXPECT_TRUE(fiber::script::run::Compares::lt(ascii, euro));
 }
 
 TEST(ScriptValueOpsTest, CompareHeapAndNativeByte) {
@@ -246,11 +218,8 @@ TEST(ScriptValueOpsTest, CompareHeapAndNativeByte) {
     char cafe_bytes[] = {'c', 'a', 'f', static_cast<char>(0xC3), static_cast<char>(0xA9)};
     auto heap_value = handle(runtime, JsValue::make_string(heap, cafe_bytes, sizeof(cafe_bytes)));
     auto native_value = handle(runtime, JsValue::make_native_string(cafe_bytes, sizeof(cafe_bytes)));
-    auto out = handle(runtime, JsValue::make_undefined());
 
-    auto eq = fiber::script::run::Compares::seq(out, heap_value, native_value);
-    ASSERT_TRUE(eq.has_value());
-    EXPECT_TRUE(js_value_bool(*out));
+    EXPECT_TRUE(fiber::script::run::Compares::seq(heap_value, native_value));
 }
 
 TEST(ScriptValueOpsTest, CompareNativeWithSurrogatePair) {
@@ -260,16 +229,11 @@ TEST(ScriptValueOpsTest, CompareNativeWithSurrogatePair) {
                           static_cast<char>(0x80)};
     auto heap_smile = handle(runtime, JsValue::make_string(heap, smile_bytes, sizeof(smile_bytes)));
     auto native_smile = handle(runtime, JsValue::make_native_string(smile_bytes, sizeof(smile_bytes)));
-    auto out = handle(runtime, JsValue::make_undefined());
 
-    auto eq = fiber::script::run::Compares::eq(out, heap_smile, native_smile);
-    ASSERT_TRUE(eq.has_value());
-    EXPECT_TRUE(js_value_bool(*out));
+    EXPECT_TRUE(fiber::script::run::Compares::eq(heap_smile, native_smile));
 
     auto bang = handle(runtime, JsValue::make_string(heap, "!", 1));
-    auto gt = fiber::script::run::Compares::gt(out, heap_smile, bang);
-    ASSERT_TRUE(gt.has_value());
-    EXPECT_TRUE(js_value_bool(*out));
+    EXPECT_TRUE(fiber::script::run::Compares::gt(heap_smile, bang));
 }
 
 TEST(ScriptValueOpsTest, CompareInvalidUtf8) {
@@ -278,10 +242,9 @@ TEST(ScriptValueOpsTest, CompareInvalidUtf8) {
     char bad_bytes[] = {static_cast<char>(0xC3), static_cast<char>(0x28)};
     auto bad = handle(runtime, JsValue::make_native_string(bad_bytes, sizeof(bad_bytes)));
     auto good = handle(runtime, JsValue::make_native_string(bad_bytes + 1, 1));
-    auto out = handle(runtime, JsValue::make_undefined());
 
-    auto status = fiber::script::run::Compares::eq(out, bad, good);
-    ASSERT_FALSE(status.has_value());
-    ASSERT_TRUE(status.is_abort());
-    EXPECT_EQ(status.abort().reason, fiber::script::ScriptAbortReason::InvalidArgument);
+    // Malformed UTF-8 folds to false (no abort) for equality and relations.
+    EXPECT_FALSE(fiber::script::run::Compares::eq(bad, good));
+    EXPECT_FALSE(fiber::script::run::Compares::lt(bad, good));
+    EXPECT_FALSE(fiber::script::run::Compares::gt(bad, good));
 }

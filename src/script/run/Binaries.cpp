@@ -22,10 +22,6 @@ ScriptStatus store_value(ValueHandle out, const fiber::json::JsValue &value) noe
     return ScriptStatus::success();
 }
 
-ScriptStatus make_bool(ValueHandle out, bool value) noexcept {
-    return store_value(out, fiber::json::JsValue::make_boolean(value));
-}
-
 bool is_string_like(const fiber::json::JsValue &value) noexcept {
     return fiber::json::js_value_type(value) == fiber::json::JsNodeType::String;
 }
@@ -560,55 +556,53 @@ ScriptStatus Binaries::modulo(ScriptRuntime &runtime, ValueHandle out, ConstValu
 
 ScriptStatus Binaries::matches(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a,
                                ConstValueHandle b) noexcept {
-    (void) a;
-    (void) b;
     (void) runtime;
-    return make_bool(out, false);
+    return store_value(out, fiber::json::JsValue::make_boolean(Compares::matches(a, b)));
 }
 
 ScriptStatus Binaries::lt(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     (void) runtime;
-    return Compares::lt(out, a, b);
+    return store_value(out, fiber::json::JsValue::make_boolean(Compares::lt(a, b)));
 }
 
 ScriptStatus Binaries::lte(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     (void) runtime;
-    return Compares::lte(out, a, b);
+    return store_value(out, fiber::json::JsValue::make_boolean(Compares::lte(a, b)));
 }
 
 ScriptStatus Binaries::gt(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     (void) runtime;
-    return Compares::gt(out, a, b);
+    return store_value(out, fiber::json::JsValue::make_boolean(Compares::gt(a, b)));
 }
 
 ScriptStatus Binaries::gte(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     (void) runtime;
-    return Compares::gte(out, a, b);
+    return store_value(out, fiber::json::JsValue::make_boolean(Compares::gte(a, b)));
 }
 
 ScriptStatus Binaries::eq(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     (void) runtime;
-    return Compares::eq(out, a, b);
+    return store_value(out, fiber::json::JsValue::make_boolean(Compares::eq(a, b)));
 }
 
 ScriptStatus Binaries::seq(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     (void) runtime;
-    return Compares::seq(out, a, b);
+    return store_value(out, fiber::json::JsValue::make_boolean(Compares::seq(a, b)));
 }
 
 ScriptStatus Binaries::ne(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     (void) runtime;
-    return Compares::ne(out, a, b);
+    return store_value(out, fiber::json::JsValue::make_boolean(Compares::ne(a, b)));
 }
 
 ScriptStatus Binaries::sne(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     (void) runtime;
-    return Compares::sne(out, a, b);
+    return store_value(out, fiber::json::JsValue::make_boolean(Compares::sne(a, b)));
 }
 
 ScriptStatus Binaries::in(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
     (void) runtime;
-    return Compares::in(out, a, b);
+    return store_value(out, fiber::json::JsValue::make_boolean(Compares::in(a, b)));
 }
 
 } // namespace fiber::script::run
