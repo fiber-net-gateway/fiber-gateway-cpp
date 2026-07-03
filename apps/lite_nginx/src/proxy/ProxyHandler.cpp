@@ -346,6 +346,15 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
     }
 }
 
+struct TimeRec {
+    std::chrono::steady_clock::time_point s;
+    explicit TimeRec() noexcept { s = event::EventLoop::current().now(); }
+    ~TimeRec() {
+        const auto p = fiber::event::EventLoop::current().now() - s;
+        std::fprintf(stderr, "cost: %llu\n", std::chrono::duration_cast<std::chrono::nanoseconds>(p).count());
+    }
+};
+
 } // namespace
 
 fiber::async::Task<void> ProxyHandler::handle(fiber::http::HttpExchange &exchange,
@@ -355,6 +364,7 @@ fiber::async::Task<void> ProxyHandler::handle(fiber::http::HttpExchange &exchang
         co_await send_plain_response(exchange, 502, kBadGatewayBody, listener);
         co_return;
     }
+    TimeRec rec;
 
     auto handle = co_await upstreams_->acquire_connection(location.upstream_index);
     if (!handle.valid()) {
