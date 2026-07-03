@@ -78,30 +78,20 @@ bool is_truthy(const fiber::json::JsValue &value) noexcept {
     return false;
 }
 
-ScriptStatus make_bool(ValueHandle out, bool value) noexcept {
-    if (!out) {
-        return ScriptStatus::abort(ScriptAbortReason::OutOfMemory);
-    }
-    *out = fiber::json::JsValue::make_boolean(value);
-    return ScriptStatus::success();
-}
-
 enum class StringKind : std::uint8_t {
     HeapByte,
     HeapUtf16,
     NativeUtf8,
 };
 
-bool string_to_utf8_copy(const fiber::json::JsValue &value, std::string &out, ScriptAbortReason &error) {
+bool string_to_utf8_copy(const fiber::json::JsValue &value, std::string &out) {
     out.clear();
     if (fiber::json::js_value_type(value) != fiber::json::JsNodeType::String) {
-        error = ScriptAbortReason::TypeError;
         return false;
     }
     if (fiber::json::js_value_is_borrowed_string(value)) {
         fiber::json::NativeStr native = fiber::json::js_value_native_string(value);
         if (!fiber::json::utf8_validate(native.data, native.len)) {
-            error = ScriptAbortReason::InvalidArgument;
             return false;
         }
         if (native.len > 0) {
@@ -111,7 +101,6 @@ bool string_to_utf8_copy(const fiber::json::JsValue &value, std::string &out, Sc
     }
     auto *str = as_heap_string(value);
     if (!fiber::json::gc_string_to_utf8(str, out)) {
-        error = ScriptAbortReason::InvalidArgument;
         return false;
     }
     return true;
@@ -121,9 +110,9 @@ bool ascii_is_space(char ch) noexcept {
     return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v';
 }
 
-bool string_to_number(const fiber::json::JsValue &value, double &out, ScriptAbortReason &error) {
+bool string_to_number(const fiber::json::JsValue &value, double &out) {
     std::string buffer;
-    if (!string_to_utf8_copy(value, buffer, error)) {
+    if (!string_to_utf8_copy(value, buffer)) {
         return false;
     }
     std::size_t start = 0;
@@ -157,17 +146,16 @@ struct StringCursor {
     std::size_t pos = 0;
     bool has_pending = false;
     char16_t pending = 0;
+    bool malformed = false;
 };
 
-bool init_string_cursor(const fiber::json::JsValue &value, StringCursor &out, ScriptAbortReason &error) {
+bool init_string_cursor(const fiber::json::JsValue &value, StringCursor &out) {
     if (fiber::json::js_value_type(value) != fiber::json::JsNodeType::String) {
-        error = ScriptAbortReason::TypeError;
         return false;
     }
     if (!fiber::json::js_value_is_borrowed_string(value)) {
         auto *str = as_heap_string(value);
         if (!str) {
-            error = ScriptAbortReason::TypeError;
             return false;
         }
         if (str->encoding == fiber::json::GcStringEncoding::Byte) {
@@ -179,7 +167,6 @@ bool init_string_cursor(const fiber::json::JsValue &value, StringCursor &out, Sc
         }
         out.len = str->len;
         if (out.len > 0 && !out.bytes && !out.u16) {
-            error = ScriptAbortReason::TypeError;
             return false;
         }
         return true;
@@ -188,13 +175,12 @@ bool init_string_cursor(const fiber::json::JsValue &value, StringCursor &out, Sc
     out.utf8 = fiber::json::js_value_native_string(value).data;
     out.len = fiber::json::js_value_native_string(value).len;
     if (out.len > 0 && !out.utf8) {
-        error = ScriptAbortReason::InvalidArgument;
         return false;
     }
     return true;
 }
 
-bool cursor_next(StringCursor &cursor, char16_t &unit, ScriptAbortReason &error) {
+bool cursor_next(StringCursor &cursor, char16_t &unit) {
     if (cursor.has_pending) {
         unit = cursor.pending;
         cursor.has_pending = false;
@@ -219,7 +205,7 @@ bool cursor_next(StringCursor &cursor, char16_t &unit, ScriptAbortReason &error)
             }
             std::uint32_t codepoint = 0;
             if (!fiber::json::utf8_next_codepoint(cursor.utf8, cursor.len, cursor.pos, codepoint)) {
-                error = ScriptAbortReason::InvalidArgument;
+                cursor.malformed = true;
                 return false;
             }
             if (codepoint <= 0xFFFF) {
@@ -233,19 +219,16 @@ bool cursor_next(StringCursor &cursor, char16_t &unit, ScriptAbortReason &error)
             return true;
         }
     }
-    error = ScriptAbortReason::TypeError;
     return false;
 }
 
-bool compare_strings(const fiber::json::JsValue &lhs, const fiber::json::JsValue &rhs, int &result,
-                     ScriptAbortReason &error) {
+bool compare_strings(const fiber::json::JsValue &lhs, const fiber::json::JsValue &rhs, int &result) {
     if (!fiber::json::js_value_is_borrowed_string(lhs) && !fiber::json::js_value_is_borrowed_string(rhs) &&
         fiber::json::js_value_type(lhs) == fiber::json::JsNodeType::String &&
         fiber::json::js_value_type(rhs) == fiber::json::JsNodeType::String) {
         auto *lhs_str = as_heap_string(lhs);
         auto *rhs_str = as_heap_string(rhs);
         if (!lhs_str || !rhs_str) {
-            error = ScriptAbortReason::TypeError;
             return false;
         }
         if (lhs_str->encoding == fiber::json::GcStringEncoding::Byte &&
@@ -293,18 +276,15 @@ bool compare_strings(const fiber::json::JsValue &lhs, const fiber::json::JsValue
 
     StringCursor lhs_cursor;
     StringCursor rhs_cursor;
-    if (!init_string_cursor(lhs, lhs_cursor, error) || !init_string_cursor(rhs, rhs_cursor, error)) {
+    if (!init_string_cursor(lhs, lhs_cursor) || !init_string_cursor(rhs, rhs_cursor)) {
         return false;
     }
     while (true) {
         char16_t lhs_unit = 0;
         char16_t rhs_unit = 0;
-        bool lhs_has = cursor_next(lhs_cursor, lhs_unit, error);
-        if (error != ScriptAbortReason::None) {
-            return false;
-        }
-        bool rhs_has = cursor_next(rhs_cursor, rhs_unit, error);
-        if (error != ScriptAbortReason::None) {
+        bool lhs_has = cursor_next(lhs_cursor, lhs_unit);
+        bool rhs_has = cursor_next(rhs_cursor, rhs_unit);
+        if (lhs_cursor.malformed || rhs_cursor.malformed) {
             return false;
         }
         if (!lhs_has || !rhs_has) {
@@ -341,10 +321,10 @@ bool numbers_equal(double lhs, double rhs) noexcept {
     return lhs == rhs;
 }
 
-bool strict_equal(const fiber::json::JsValue &lhs, const fiber::json::JsValue &rhs, ScriptAbortReason &error) {
+bool strict_equal(const fiber::json::JsValue &lhs, const fiber::json::JsValue &rhs) {
     if (is_string_type(fiber::json::js_value_type(lhs)) && is_string_type(fiber::json::js_value_type(rhs))) {
         int cmp = 0;
-        if (!compare_strings(lhs, rhs, cmp, error)) {
+        if (!compare_strings(lhs, rhs, cmp)) {
             return false;
         }
         return cmp == 0;
@@ -383,13 +363,13 @@ bool strict_equal(const fiber::json::JsValue &lhs, const fiber::json::JsValue &r
     return false;
 }
 
-bool loose_equal_number(double number, const fiber::json::JsValue &other, ScriptAbortReason &error) {
+bool loose_equal_number(double number, const fiber::json::JsValue &other) {
     if (is_number_type(fiber::json::js_value_type(other))) {
         return numbers_equal(number, number_value(other));
     }
     if (is_string_type(fiber::json::js_value_type(other))) {
         double other_number = 0.0;
-        if (!string_to_number(other, other_number, error)) {
+        if (!string_to_number(other, other_number)) {
             return false;
         }
         return numbers_equal(number, other_number);
@@ -397,10 +377,10 @@ bool loose_equal_number(double number, const fiber::json::JsValue &other, Script
     return false;
 }
 
-bool loose_equal(const fiber::json::JsValue &lhs, const fiber::json::JsValue &rhs, ScriptAbortReason &error) {
+bool loose_equal(const fiber::json::JsValue &lhs, const fiber::json::JsValue &rhs) {
     if (is_string_type(fiber::json::js_value_type(lhs)) && is_string_type(fiber::json::js_value_type(rhs))) {
         int cmp = 0;
-        if (!compare_strings(lhs, rhs, cmp, error)) {
+        if (!compare_strings(lhs, rhs, cmp)) {
             return false;
         }
         return cmp == 0;
@@ -409,7 +389,7 @@ bool loose_equal(const fiber::json::JsValue &lhs, const fiber::json::JsValue &rh
         return numbers_equal(number_value(lhs), number_value(rhs));
     }
     if (fiber::json::js_value_type(lhs) == fiber::json::js_value_type(rhs)) {
-        return strict_equal(lhs, rhs, error);
+        return strict_equal(lhs, rhs);
     }
     if ((fiber::json::js_value_type(lhs) == fiber::json::JsNodeType::Null &&
          fiber::json::js_value_type(rhs) == fiber::json::JsNodeType::Undefined) ||
@@ -419,22 +399,22 @@ bool loose_equal(const fiber::json::JsValue &lhs, const fiber::json::JsValue &rh
     }
     if (fiber::json::js_value_type(lhs) == fiber::json::JsNodeType::Boolean) {
         double lhs_number = fiber::json::js_value_bool(lhs) ? 1.0 : 0.0;
-        return loose_equal_number(lhs_number, rhs, error);
+        return loose_equal_number(lhs_number, rhs);
     }
     if (fiber::json::js_value_type(rhs) == fiber::json::JsNodeType::Boolean) {
         double rhs_number = fiber::json::js_value_bool(rhs) ? 1.0 : 0.0;
-        return loose_equal_number(rhs_number, lhs, error);
+        return loose_equal_number(rhs_number, lhs);
     }
     if (is_number_type(fiber::json::js_value_type(lhs)) && is_string_type(fiber::json::js_value_type(rhs))) {
         double rhs_number = 0.0;
-        if (!string_to_number(rhs, rhs_number, error)) {
+        if (!string_to_number(rhs, rhs_number)) {
             return false;
         }
         return numbers_equal(number_value(lhs), rhs_number);
     }
     if (is_string_type(fiber::json::js_value_type(lhs)) && is_number_type(fiber::json::js_value_type(rhs))) {
         double lhs_number = 0.0;
-        if (!string_to_number(lhs, lhs_number, error)) {
+        if (!string_to_number(lhs, lhs_number)) {
             return false;
         }
         return numbers_equal(lhs_number, number_value(rhs));
@@ -442,17 +422,9 @@ bool loose_equal(const fiber::json::JsValue &lhs, const fiber::json::JsValue &rh
     return false;
 }
 
-ScriptStatus equality(ValueHandle out, ConstValueHandle a, ConstValueHandle b, bool strict, bool invert) {
-    if (!out) {
-        return ScriptStatus::abort(ScriptAbortReason::OutOfMemory);
-    }
-    ScriptAbortReason error = ScriptAbortReason::None;
-    bool equal = strict ? strict_equal(*a, *b, error) : loose_equal(*a, *b, error);
-    if (error != ScriptAbortReason::None) {
-        return ScriptStatus::abort(error);
-    }
-    *out = fiber::json::JsValue::make_boolean(invert ? !equal : equal);
-    return ScriptStatus::success();
+bool equality(ConstValueHandle a, ConstValueHandle b, bool strict, bool invert) noexcept {
+    bool equal = strict ? strict_equal(*a, *b) : loose_equal(*a, *b);
+    return invert ? !equal : equal;
 }
 
 bool relation_result(double lhs, double rhs, bool less_direction, bool allow_equal) noexcept {
@@ -472,29 +444,23 @@ bool relation_result(int cmp, bool less_direction, bool allow_equal) noexcept {
     return allow_equal ? cmp >= 0 : cmp > 0;
 }
 
-ScriptStatus relation(ValueHandle out, ConstValueHandle a, ConstValueHandle b, bool less_direction, bool allow_equal) {
-    if (!out) {
-        return ScriptStatus::abort(ScriptAbortReason::OutOfMemory);
-    }
+bool relation(ConstValueHandle a, ConstValueHandle b, bool less_direction, bool allow_equal) noexcept {
     if (is_string_type(fiber::json::js_value_type(*a)) && is_string_type(fiber::json::js_value_type(*b))) {
         int cmp = 0;
-        ScriptAbortReason error = ScriptAbortReason::None;
-        if (!compare_strings(*a, *b, cmp, error)) {
-            return ScriptStatus::abort(error);
+        if (!compare_strings(*a, *b, cmp)) {
+            return false;
         }
-        *out = fiber::json::JsValue::make_boolean(relation_result(cmp, less_direction, allow_equal));
-        return ScriptStatus::success();
+        return relation_result(cmp, less_direction, allow_equal);
     }
     if (!is_numeric_like(fiber::json::js_value_type(*a)) || !is_numeric_like(fiber::json::js_value_type(*b))) {
-        return ScriptStatus::abort(ScriptAbortReason::TypeError);
+        return false;
     }
     double lhs = 0.0;
     double rhs = 0.0;
     if (!to_number(*a, lhs) || !to_number(*b, rhs)) {
-        return ScriptStatus::abort(ScriptAbortReason::TypeError);
+        return false;
     }
-    *out = fiber::json::JsValue::make_boolean(relation_result(lhs, rhs, less_direction, allow_equal));
-    return ScriptStatus::success();
+    return relation_result(lhs, rhs, less_direction, allow_equal);
 }
 
 } // namespace
@@ -508,69 +474,69 @@ bool Compares::logic(ConstValueHandle value) noexcept {
     return is_truthy(*value);
 }
 
-ScriptStatus Compares::eq(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
-    return equality(out, a, b, false, false);
+bool Compares::eq(ConstValueHandle a, ConstValueHandle b) noexcept {
+    return equality(a, b, false, false);
 }
 
-ScriptStatus Compares::seq(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
-    return equality(out, a, b, true, false);
+bool Compares::seq(ConstValueHandle a, ConstValueHandle b) noexcept {
+    return equality(a, b, true, false);
 }
 
-ScriptStatus Compares::ne(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
-    return equality(out, a, b, false, true);
+bool Compares::ne(ConstValueHandle a, ConstValueHandle b) noexcept {
+    return equality(a, b, false, true);
 }
 
-ScriptStatus Compares::sne(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
-    return equality(out, a, b, true, true);
+bool Compares::sne(ConstValueHandle a, ConstValueHandle b) noexcept {
+    return equality(a, b, true, true);
 }
 
-ScriptStatus Compares::lt(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
-    return relation(out, a, b, true, false);
+bool Compares::lt(ConstValueHandle a, ConstValueHandle b) noexcept {
+    return relation(a, b, true, false);
 }
 
-ScriptStatus Compares::lte(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
-    return relation(out, a, b, true, true);
+bool Compares::lte(ConstValueHandle a, ConstValueHandle b) noexcept {
+    return relation(a, b, true, true);
 }
 
-ScriptStatus Compares::gt(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
-    return relation(out, a, b, false, false);
+bool Compares::gt(ConstValueHandle a, ConstValueHandle b) noexcept {
+    return relation(a, b, false, false);
 }
 
-ScriptStatus Compares::gte(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
-    return relation(out, a, b, false, true);
+bool Compares::gte(ConstValueHandle a, ConstValueHandle b) noexcept {
+    return relation(a, b, false, true);
 }
 
-ScriptStatus Compares::matches(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
+bool Compares::matches(ConstValueHandle a, ConstValueHandle b) noexcept {
     (void) a;
     (void) b;
-    return make_bool(out, false);
+    return false;
 }
 
-ScriptStatus Compares::in(ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
+bool Compares::in(ConstValueHandle a, ConstValueHandle b) noexcept {
     if (!a || !b) {
-        return make_bool(out, false);
+        return false;
     }
     if (fiber::json::js_value_type(*b) == fiber::json::JsNodeType::Array) {
         if (fiber::json::js_value_type(*a) != fiber::json::JsNodeType::Integer) {
-            return make_bool(out, false);
+            return false;
         }
         auto *arr = fiber::json::js_value_heap_ptr<const fiber::json::GcArray>(*b);
         std::int64_t index = fiber::json::js_value_int64(*a);
         if (!arr || index < 0) {
-            return make_bool(out, false);
+            return false;
         }
-        return make_bool(out, static_cast<std::size_t>(index) < arr->size);
+        return static_cast<std::size_t>(index) < arr->size;
     }
     if (fiber::json::js_value_type(*b) == fiber::json::JsNodeType::Object) {
         auto *obj = fiber::json::js_value_heap_ptr<const fiber::json::GcObject>(*b);
         if (!obj) {
-            return make_bool(out, false);
+            return false;
         }
         if (fiber::json::js_value_type(*a) == fiber::json::JsNodeType::String &&
             !fiber::json::js_value_is_borrowed_string(*a)) {
             auto *key_str = fiber::json::js_value_heap_ptr<const fiber::json::GcString>(*a);
             const fiber::json::JsValue *found = fiber::json::gc_object_get(obj, key_str);
-            return make_bool(out, found != nullptr);
+            return found != nullptr;
         }
         if (fiber::json::js_value_type(*a) == fiber::json::JsNodeType::String &&
             fiber::json::js_value_is_borrowed_string(*a)) {
@@ -583,13 +549,13 @@ ScriptStatus Compares::in(ValueHandle out, ConstValueHandle a, ConstValueHandle 
                 }
                 std::string entry_key;
                 if (fiber::json::gc_string_to_utf8(entry->key, entry_key) && entry_key == key) {
-                    return make_bool(out, true);
+                    return true;
                 }
             }
         }
-        return make_bool(out, false);
+        return false;
     }
-    return make_bool(out, false);
+    return false;
 }
 
 } // namespace fiber::script::run
