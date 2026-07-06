@@ -26,13 +26,7 @@ enum class ScriptAbortReason : std::uint8_t {
     None,
     OutOfMemory,
     InvalidState,
-    InvalidArgument,
-    TypeError,
-    IndexError,
-    DivisionByZero,
-    UnknownIdentifier,
     InvalidOpcode,
-    NoReturn,
     HostFault,
     Timeout,
     Cancelled,
@@ -180,6 +174,28 @@ static_assert(std::is_trivially_copyable_v<ScriptAbort>);
 static_assert(std::is_trivially_copyable_v<ScriptStatus>);
 static_assert(std::is_trivially_copyable_v<ResultPayload>);
 static_assert(std::is_trivially_copyable_v<ScriptResult>);
+
+// ResultPayload mutators — the single way op functions write their outcome. Ops never carry a
+// position (the dispatch layer recovers it from the current pc_), so set_abort takes only a reason.
+inline CallResult set_value(ResultPayload &result, const fiber::json::JsValue &value) noexcept {
+    result.value = value;
+    return CallResult::Success;
+}
+
+inline CallResult set_undefined(ResultPayload &result) noexcept {
+    result.value = fiber::json::JsValue::make_undefined();
+    return CallResult::Success;
+}
+
+inline CallResult set_exception(ResultPayload &result, fiber::json::ExceptionKind kind) noexcept {
+    result.exception = fiber::json::JsValue::make_exception(kind);
+    return CallResult::Exception;
+}
+
+inline CallResult set_abort(ResultPayload &result, ScriptAbortReason reason) noexcept {
+    result.abort = ScriptAbort{reason, -1};
+    return CallResult::Abort;
+}
 
 } // namespace fiber::script
 

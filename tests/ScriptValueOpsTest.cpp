@@ -3,6 +3,7 @@
 #include <type_traits>
 
 #include "script/Runtime.h"
+#include "script/ScriptResult.h"
 #include "script/run/Binaries.h"
 #include "script/run/Compares.h"
 #include "script/run/Unaries.h"
@@ -12,6 +13,8 @@ using fiber::json::GcString;
 using fiber::json::GcStringEncoding;
 using fiber::json::JsNodeType;
 using fiber::json::JsValue;
+using fiber::script::CallResult;
+using fiber::script::ResultPayload;
 
 namespace {
 
@@ -46,12 +49,11 @@ TEST(ScriptValueOpsTest, ConcatKeepsByteForNativeUtf8) {
     char right_bytes[] = {static_cast<char>(0xC3), static_cast<char>(0x9F)};
     auto lhs = handle(runtime, JsValue::make_native_string(left_bytes, sizeof(left_bytes)));
     auto rhs = handle(runtime, JsValue::make_native_string(right_bytes, sizeof(right_bytes)));
-    auto out = handle(runtime, JsValue::make_undefined());
-
-    auto status = fiber::script::run::Binaries::plus(runtime, out, lhs, rhs);
-    ASSERT_TRUE(status.has_value());
-    ASSERT_EQ(js_value_type(*out), JsNodeType::String);
-    auto *str = as_string(*out);
+    ResultPayload result;
+    auto status = fiber::script::run::Binaries::plus(runtime, lhs, rhs, result);
+    ASSERT_EQ(status, CallResult::Success);
+    ASSERT_EQ(js_value_type(result.value), JsNodeType::String);
+    auto *str = as_string(result.value);
     ASSERT_NE(str, nullptr);
     EXPECT_EQ(str->encoding, GcStringEncoding::Byte);
     EXPECT_EQ(str->len, 2u);
@@ -63,7 +65,7 @@ TEST(ScriptValueOpsTest, ConcatKeepsByteForNativeUtf8) {
             static_cast<char>(0x9F),
     };
     std::string expected(expected_bytes, sizeof(expected_bytes));
-    EXPECT_EQ(string_to_utf8(*out), expected);
+    EXPECT_EQ(string_to_utf8(result.value), expected);
 }
 
 TEST(ScriptValueOpsTest, ConcatUpgradesToUtf16ForWide) {
@@ -73,12 +75,11 @@ TEST(ScriptValueOpsTest, ConcatUpgradesToUtf16ForWide) {
     char ascii_bytes[] = {'A'};
     auto lhs = handle(runtime, JsValue::make_native_string(euro_bytes, sizeof(euro_bytes)));
     auto rhs = handle(runtime, JsValue::make_native_string(ascii_bytes, sizeof(ascii_bytes)));
-    auto out = handle(runtime, JsValue::make_undefined());
-
-    auto status = fiber::script::run::Binaries::plus(runtime, out, lhs, rhs);
-    ASSERT_TRUE(status.has_value());
-    ASSERT_EQ(js_value_type(*out), JsNodeType::String);
-    auto *str = as_string(*out);
+    ResultPayload result;
+    auto status = fiber::script::run::Binaries::plus(runtime, lhs, rhs, result);
+    ASSERT_EQ(status, CallResult::Success);
+    ASSERT_EQ(js_value_type(result.value), JsNodeType::String);
+    auto *str = as_string(result.value);
     ASSERT_NE(str, nullptr);
     EXPECT_EQ(str->encoding, GcStringEncoding::Utf16);
     EXPECT_EQ(str->len, 2u);
@@ -90,7 +91,7 @@ TEST(ScriptValueOpsTest, ConcatUpgradesToUtf16ForWide) {
             'A',
     };
     std::string expected(expected_bytes, sizeof(expected_bytes));
-    EXPECT_EQ(string_to_utf8(*out), expected);
+    EXPECT_EQ(string_to_utf8(result.value), expected);
 }
 
 TEST(ScriptValueOpsTest, ConcatHeapAndNative) {
@@ -99,19 +100,18 @@ TEST(ScriptValueOpsTest, ConcatHeapAndNative) {
     auto lhs = handle(runtime, JsValue::make_string(heap, "hi", 2));
     char right_bytes[] = {'!', '!'};
     auto rhs = handle(runtime, JsValue::make_native_string(right_bytes, sizeof(right_bytes)));
-    auto out = handle(runtime, JsValue::make_undefined());
-
-    auto status = fiber::script::run::Binaries::plus(runtime, out, lhs, rhs);
-    ASSERT_TRUE(status.has_value());
-    ASSERT_EQ(js_value_type(*out), JsNodeType::String);
-    auto *str = as_string(*out);
+    ResultPayload result;
+    auto status = fiber::script::run::Binaries::plus(runtime, lhs, rhs, result);
+    ASSERT_EQ(status, CallResult::Success);
+    ASSERT_EQ(js_value_type(result.value), JsNodeType::String);
+    auto *str = as_string(result.value);
     ASSERT_NE(str, nullptr);
     EXPECT_EQ(str->encoding, GcStringEncoding::Byte);
     EXPECT_EQ(str->len, 4u);
 
     const char expected_bytes[] = {'h', 'i', '!', '!'};
     std::string expected(expected_bytes, sizeof(expected_bytes));
-    EXPECT_EQ(string_to_utf8(*out), expected);
+    EXPECT_EQ(string_to_utf8(result.value), expected);
 }
 
 TEST(ScriptValueOpsTest, AddInteger) {
@@ -119,12 +119,11 @@ TEST(ScriptValueOpsTest, AddInteger) {
     fiber::script::ScriptRuntime runtime(heap);
     auto lhs = handle(runtime, JsValue::make_integer(3));
     auto rhs = handle(runtime, JsValue::make_integer(4));
-    auto out = handle(runtime, JsValue::make_undefined());
-
-    auto status = fiber::script::run::Binaries::plus(runtime, out, lhs, rhs);
-    ASSERT_TRUE(status.has_value());
-    EXPECT_EQ(js_value_type(*out), JsNodeType::Integer);
-    EXPECT_EQ(js_value_int64(*out), 7);
+    ResultPayload result;
+    auto status = fiber::script::run::Binaries::plus(runtime, lhs, rhs, result);
+    ASSERT_EQ(status, CallResult::Success);
+    EXPECT_EQ(js_value_type(result.value), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(result.value), 7);
 }
 
 TEST(ScriptValueOpsTest, AddStringAndNumberConcats) {
@@ -132,12 +131,11 @@ TEST(ScriptValueOpsTest, AddStringAndNumberConcats) {
     fiber::script::ScriptRuntime runtime(heap);
     auto lhs = handle(runtime, JsValue::make_string(heap, "hi", 2));
     auto rhs = handle(runtime, JsValue::make_integer(1));
-    auto out = handle(runtime, JsValue::make_undefined());
-
-    auto status = fiber::script::run::Binaries::plus(runtime, out, lhs, rhs);
-    ASSERT_TRUE(status.has_value());
-    ASSERT_EQ(js_value_type(*out), JsNodeType::String);
-    EXPECT_EQ(string_to_utf8(*out), "hi1");
+    ResultPayload result;
+    auto status = fiber::script::run::Binaries::plus(runtime, lhs, rhs, result);
+    ASSERT_EQ(status, CallResult::Success);
+    ASSERT_EQ(js_value_type(result.value), JsNodeType::String);
+    EXPECT_EQ(string_to_utf8(result.value), "hi1");
 }
 
 TEST(ScriptValueOpsTest, AddPrimitiveAndStringConcats) {
@@ -145,24 +143,22 @@ TEST(ScriptValueOpsTest, AddPrimitiveAndStringConcats) {
     fiber::script::ScriptRuntime runtime(heap);
     auto lhs = handle(runtime, JsValue::make_boolean(false));
     auto rhs = handle(runtime, JsValue::make_string(heap, " value", 6));
-    auto out = handle(runtime, JsValue::make_undefined());
-
-    auto status = fiber::script::run::Binaries::plus(runtime, out, lhs, rhs);
-    ASSERT_TRUE(status.has_value());
-    ASSERT_EQ(js_value_type(*out), JsNodeType::String);
-    EXPECT_EQ(string_to_utf8(*out), "false value");
+    ResultPayload result;
+    auto status = fiber::script::run::Binaries::plus(runtime, lhs, rhs, result);
+    ASSERT_EQ(status, CallResult::Success);
+    ASSERT_EQ(js_value_type(result.value), JsNodeType::String);
+    EXPECT_EQ(string_to_utf8(result.value), "false value");
 }
 
 TEST(ScriptValueOpsTest, UnaryLogicalNot) {
     GcHeap heap;
     fiber::script::ScriptRuntime runtime(heap);
     auto value = handle(runtime, JsValue::make_integer(0));
-    auto out = handle(runtime, JsValue::make_undefined());
-
-    auto status = fiber::script::run::Unaries::neg(out, value);
-    ASSERT_TRUE(status.has_value());
-    EXPECT_EQ(js_value_type(*out), JsNodeType::Boolean);
-    EXPECT_TRUE(js_value_bool(*out));
+    ResultPayload result;
+    auto status = fiber::script::run::Unaries::neg(runtime, value, result);
+    ASSERT_EQ(status, CallResult::Success);
+    EXPECT_EQ(js_value_type(result.value), JsNodeType::Boolean);
+    EXPECT_TRUE(js_value_bool(result.value));
 }
 
 TEST(ScriptValueOpsTest, LooseAndStrictEquality) {

@@ -69,95 +69,79 @@ bool is_truthy(const fiber::json::JsValue &value) noexcept {
     return false;
 }
 
-ScriptStatus make_typeof_value(ValueHandle out, const char *text) noexcept {
-    if (!out) {
-        return ScriptStatus::abort(ScriptAbortReason::OutOfMemory);
-    }
-    *out = fiber::json::JsValue::make_native_string(const_cast<char *>(text), std::strlen(text));
-    return ScriptStatus::success();
+CallResult make_typeof_value(ResultPayload &result, const char *text) noexcept {
+    return set_value(result, fiber::json::JsValue::make_native_string(const_cast<char *>(text), std::strlen(text)));
 }
 
 } // namespace
 
-ScriptStatus Unaries::neg(ValueHandle out, ConstValueHandle value) noexcept {
-    if (!out) {
-        return ScriptStatus::abort(ScriptAbortReason::OutOfMemory);
-    }
-    *out = fiber::json::JsValue::make_boolean(!is_truthy(*value));
-    return ScriptStatus::success();
+CallResult Unaries::neg(ScriptRuntime &runtime, ConstValueHandle value, ResultPayload &result) noexcept {
+    (void) runtime;
+    return set_value(result, fiber::json::JsValue::make_boolean(!is_truthy(*value)));
 }
 
-ScriptStatus Unaries::plus(ValueHandle out, ConstValueHandle value) noexcept {
-    if (!out) {
-        return ScriptStatus::abort(ScriptAbortReason::OutOfMemory);
-    }
+CallResult Unaries::plus(ScriptRuntime &runtime, ConstValueHandle value, ResultPayload &result) noexcept {
+    (void) runtime;
     if (!is_numeric_like(fiber::json::js_value_type(*value))) {
-        return ScriptStatus::abort(ScriptAbortReason::TypeError);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     if (fiber::json::js_value_type(*value) == fiber::json::JsNodeType::Float) {
-        *out = fiber::json::JsValue::make_float(fiber::json::js_value_double(*value));
-        return ScriptStatus::success();
+        return set_value(result, fiber::json::JsValue::make_float(fiber::json::js_value_double(*value)));
     }
     std::int64_t int_value = 0;
     if (!to_int64(*value, int_value)) {
-        return ScriptStatus::abort(ScriptAbortReason::TypeError);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
-    *out = fiber::json::JsValue::make_integer(int_value);
-    return ScriptStatus::success();
+    return set_value(result, fiber::json::JsValue::make_integer(int_value));
 }
 
-ScriptStatus Unaries::minus(ValueHandle out, ConstValueHandle value) noexcept {
-    if (!out) {
-        return ScriptStatus::abort(ScriptAbortReason::OutOfMemory);
-    }
+CallResult Unaries::minus(ScriptRuntime &runtime, ConstValueHandle value, ResultPayload &result) noexcept {
+    (void) runtime;
     if (!is_numeric_like(fiber::json::js_value_type(*value))) {
-        return ScriptStatus::abort(ScriptAbortReason::TypeError);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     if (fiber::json::js_value_type(*value) == fiber::json::JsNodeType::Float) {
-        *out = fiber::json::JsValue::make_float(-fiber::json::js_value_double(*value));
-        return ScriptStatus::success();
+        return set_value(result, fiber::json::JsValue::make_float(-fiber::json::js_value_double(*value)));
     }
     std::int64_t int_value = 0;
     if (!to_int64(*value, int_value)) {
-        return ScriptStatus::abort(ScriptAbortReason::TypeError);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     if (int_value == std::numeric_limits<std::int64_t>::min()) {
-        *out = fiber::json::JsValue::make_float(-static_cast<double>(int_value));
-        return ScriptStatus::success();
+        return set_value(result, fiber::json::JsValue::make_float(-static_cast<double>(int_value)));
     }
-    *out = fiber::json::JsValue::make_integer(-int_value);
-    return ScriptStatus::success();
+    return set_value(result, fiber::json::JsValue::make_integer(-int_value));
 }
 
-ScriptStatus Unaries::typeof_op(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle value) noexcept {
+CallResult Unaries::typeof_op(ScriptRuntime &runtime, ConstValueHandle value, ResultPayload &result) noexcept {
     (void) runtime;
     switch (fiber::json::js_value_type(*value)) {
         case fiber::json::JsNodeType::Undefined:
-            return make_typeof_value(out, "undefined");
+            return make_typeof_value(result, "undefined");
         case fiber::json::JsNodeType::Null:
-            return make_typeof_value(out, "null");
+            return make_typeof_value(result, "null");
         case fiber::json::JsNodeType::Boolean:
-            return make_typeof_value(out, "boolean");
+            return make_typeof_value(result, "boolean");
         case fiber::json::JsNodeType::Integer:
         case fiber::json::JsNodeType::Float:
-            return make_typeof_value(out, "number");
+            return make_typeof_value(result, "number");
         case fiber::json::JsNodeType::String:
-            return make_typeof_value(out, "string");
+            return make_typeof_value(result, "string");
         case fiber::json::JsNodeType::Array:
-            return make_typeof_value(out, "array");
+            return make_typeof_value(result, "array");
         case fiber::json::JsNodeType::Object:
-            return make_typeof_value(out, "object");
+            return make_typeof_value(result, "object");
         case fiber::json::JsNodeType::Interator:
-            return make_typeof_value(out, "iterator");
+            return make_typeof_value(result, "iterator");
         case fiber::json::JsNodeType::Exception:
-            return make_typeof_value(out, "exception");
+            return make_typeof_value(result, "exception");
         case fiber::json::JsNodeType::Binary:
-            return make_typeof_value(out, "binary");
+            return make_typeof_value(result, "binary");
     }
-    return make_typeof_value(out, "undefined");
+    return make_typeof_value(result, "undefined");
 }
 
-ScriptStatus Unaries::iterate(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle value) noexcept {
+CallResult Unaries::iterate(ScriptRuntime &runtime, ConstValueHandle value, ResultPayload &result) noexcept {
     fiber::json::GcHeap *heap = &runtime.heap();
     fiber::json::GcIterator *iter = nullptr;
     iter = runtime.alloc_with_gc(fiber::json::gc_estimate_iterator_bytes(), [&]() {
@@ -178,10 +162,9 @@ ScriptStatus Unaries::iterate(ScriptRuntime &runtime, ValueHandle out, ConstValu
         return fiber::json::gc_new_array_iterator(heap, nullptr, fiber::json::GcIteratorMode::Values);
     });
     if (!iter) {
-        return ScriptStatus::abort(ScriptAbortReason::OutOfMemory);
+        return set_abort(result, ScriptAbortReason::OutOfMemory);
     }
-    *out = fiber::json::js_make_heap_ref(&iter->hdr, fiber::json::JsHeapKind::Iterator);
-    return ScriptStatus::success();
+    return set_value(result, fiber::json::js_make_heap_ref(&iter->hdr, fiber::json::JsHeapKind::Iterator));
 }
 
 } // namespace fiber::script::run
