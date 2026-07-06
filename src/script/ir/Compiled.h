@@ -3,100 +3,86 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <memory>
-#include <string>
-#include <type_traits>
-#include <vector>
+#include <span>
 
+#include "../../common/json/JsNode.h"
 #include "../Library.h"
 #include "Code.h"
 
 namespace fiber::script::ir {
 
-struct Compiled {
-    struct ConstValue {
-        enum class Kind : std::uint8_t {
-            Undefined,
-            Null,
-            Boolean,
-            Integer,
-            Float,
-            String,
-            Binary,
+class Compiler;
+class CompilerImpl;
+
+class Compiled {
+public:
+    static constexpr std::uint32_t kNoPc = UINT32_MAX;
+
+    struct FuncConst {
+        void *user_data = nullptr;
+        union {
+            Library::Function sync_func = nullptr;
+            Library::AsyncFunction async_func;
+            Library::Constant sync_ct;
+            Library::AsyncConstant async_ct;
         };
-
-        Kind kind = Kind::Undefined;
-        bool bool_value = false;
-        std::int64_t int_value = 0;
-        double float_value = 0.0;
-        std::string text;
-        std::vector<std::uint8_t> bytes;
     };
 
-    enum class OperandKind : std::uint8_t {
-        ConstValue = 0,
-        InternedString,
+    Compiled() noexcept = default;
+    Compiled(const Compiled &) = delete;
+    Compiled &operator=(const Compiled &) = delete;
+    Compiled(Compiled &&other) noexcept;
+    Compiled &operator=(Compiled &&other) noexcept;
+    ~Compiled();
+
+    [[nodiscard]] std::size_t stack_size() const noexcept { return stack_size_; }
+    [[nodiscard]] std::size_t var_table_size() const noexcept { return var_table_size_; }
+    [[nodiscard]] const std::int32_t *codes() const noexcept { return codes_; }
+    [[nodiscard]] std::uint32_t code_size() const noexcept { return code_count_; }
+
+    [[nodiscard]] const FuncConst &func_const(std::uint32_t index) const noexcept;
+    [[nodiscard]] const fiber::json::JsValue &constant(std::uint32_t index) const noexcept;
+    [[nodiscard]] std::uint32_t find_catch(std::uint32_t epc) const noexcept;
+    [[nodiscard]] std::uint32_t find_position(std::uint32_t pc) const noexcept;
+    [[nodiscard]] bool contains_async() const noexcept;
+
+private:
+    friend class CompilerImpl;
+
+    static constexpr std::uint32_t kNoPayload = UINT32_MAX;
+
+    struct ConstantInit {
+        fiber::json::JsValue value = fiber::json::JsValue::make_undefined();
+        std::uint32_t payload_offset = kNoPayload;
     };
 
-    struct Operand {
-        OperandKind kind = OperandKind::ConstValue;
-        std::uint8_t reserved0 = 0;
-        std::uint16_t reserved1 = 0;
-        std::uint32_t aux = 0;
-        std::uintptr_t payload = 0;
-    };
+    static Compiled build(std::size_t stack_size, std::size_t var_table_size, std::span<const std::int32_t> codes,
+                          std::span<const std::int32_t> positions, std::span<const ConstantInit> constants,
+                          std::span<const FuncConst> func_consts, std::span<const std::uint32_t> exception_table,
+                          std::span<const std::byte> payload);
 
-    struct HostSymbol {
-        Library::HostCallable::Kind kind = Library::HostCallable::Kind::SyncFunction;
-        const Library::HostCallable *callable = nullptr;
-    };
+    void reset() noexcept;
+    void move_from(Compiled &other) noexcept;
 
-    enum CallSiteFlags : std::uint16_t {
-        CallSiteNone = 0,
-        CallSiteSpreadArgs = 1u << 0,
-    };
+    void *allocation_ = nullptr;
+    std::size_t allocation_size_ = 0;
+    std::size_t stack_size_ = 0;
+    std::size_t var_table_size_ = 0;
 
-    struct CallSite {
-        std::uint32_t host_symbol_index = 0;
-        std::uint16_t argc = 0;
-        std::uint16_t flags = CallSiteNone;
-        std::int64_t position = -1;
-    };
+    std::int32_t *codes_ = nullptr;
+    std::int32_t *positions_ = nullptr;
+    fiber::json::JsValue *constants_ = nullptr;
+    FuncConst *func_consts_ = nullptr;
+    std::uint32_t *catch_keys_ = nullptr;
+    std::uint32_t *catch_targets_ = nullptr;
+    std::byte *payload_ = nullptr;
 
-    std::size_t stack_size = 0;
-    std::size_t var_table_size = 0;
-    std::vector<std::int64_t> positions;
-    std::vector<std::int32_t> codes;
-    std::vector<Operand> operands;
-    std::vector<HostSymbol> host_symbols;
-    std::vector<CallSite> call_sites;
-    std::vector<std::unique_ptr<ConstValue>> const_pool;
-    std::vector<std::unique_ptr<std::string>> string_pool;
-    std::vector<std::int32_t> exception_table;
-
-    const Operand &operand_at(std::size_t index) const;
-    const ConstValue *operand_const(std::size_t index) const;
-    const std::string *operand_string(std::size_t index) const;
-    const HostSymbol &host_symbol_at(std::size_t index) const;
-    const CallSite &call_site_at(std::size_t index) const;
-    bool validate_operands() const;
-
-    bool contains_async() const {
-        for (std::int32_t code: codes) {
-            switch (code & 0xFF) {
-                case Code::CALL_ASYNC_CONST:
-                case Code::CALL_ASYNC_FUNC:
-                case Code::CALL_ASYNC_FUNC_SPREAD:
-                    return true;
-                default:
-                    break;
-            }
-        }
-        return false;
-    }
+    std::uint32_t code_count_ = 0;
+    std::uint32_t constant_count_ = 0;
+    std::uint32_t func_const_count_ = 0;
+    std::uint32_t catch_count_ = 0;
+    std::uint32_t payload_size_ = 0;
 };
-
-static_assert(std::is_trivially_copyable_v<Compiled::Operand>);
 
 } // namespace fiber::script::ir
 

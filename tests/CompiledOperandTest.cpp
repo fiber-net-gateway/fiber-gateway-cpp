@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "script/Library.h"
@@ -135,18 +136,32 @@ std::size_t operand_index_for_code(std::int32_t code) {
     return static_cast<std::size_t>(raw >> 8);
 }
 
+std::size_t func_index_for_call(std::int32_t code) {
+    const auto raw = static_cast<std::uint32_t>(code);
+    std::uint8_t op = static_cast<std::uint8_t>(raw & 0xFFu);
+    if (op == Code::CALL_FUNC || op == Code::CALL_ASYNC_FUNC) {
+        return static_cast<std::size_t>(raw >> 16u);
+    }
+    return static_cast<std::size_t>(raw >> 8u);
+}
+
+std::uint32_t argc_for_call(std::int32_t code) {
+    const auto raw = static_cast<std::uint32_t>(code);
+    return (raw >> 8u) & 0xFFu;
+}
+
 std::size_t find_first_opcode(const Compiled &compiled, std::uint8_t opcode) {
-    for (std::size_t i = 0; i < compiled.codes.size(); ++i) {
-        if (static_cast<std::uint8_t>(compiled.codes[i] & 0xFF) == opcode) {
+    for (std::size_t i = 0; i < compiled.code_size(); ++i) {
+        if (static_cast<std::uint8_t>(compiled.codes()[i] & 0xFF) == opcode) {
             return i;
         }
     }
-    return compiled.codes.size();
+    return compiled.code_size();
 }
 
 } // namespace
 
-TEST(CompiledOperandTest, CompilerEmitsTypedOperands) {
+TEST(CompiledOperandTest, CompilerEmitsDirectConstantsAndFuncConsts) {
     OperandLibrary library;
     Compiled compiled = compile_script("root.foo; syncFn(1); asyncFn(2); $env.value; $env.asyncValue;", library);
 
@@ -156,45 +171,40 @@ TEST(CompiledOperandTest, CompilerEmitsTypedOperands) {
     const std::size_t call_const = find_first_opcode(compiled, Code::CALL_CONST);
     const std::size_t call_async_const = find_first_opcode(compiled, Code::CALL_ASYNC_CONST);
 
-    ASSERT_LT(prop_get, compiled.codes.size());
-    ASSERT_LT(call_func, compiled.codes.size());
-    ASSERT_LT(call_async_func, compiled.codes.size());
-    ASSERT_LT(call_const, compiled.codes.size());
-    ASSERT_LT(call_async_const, compiled.codes.size());
+    ASSERT_LT(prop_get, compiled.code_size());
+    ASSERT_LT(call_func, compiled.code_size());
+    ASSERT_LT(call_async_func, compiled.code_size());
+    ASSERT_LT(call_const, compiled.code_size());
+    ASSERT_LT(call_async_const, compiled.code_size());
 
-    EXPECT_EQ(compiled.operand_at(operand_index_for_code(compiled.codes[prop_get])).kind,
-              Compiled::OperandKind::InternedString);
-    EXPECT_EQ(
-            compiled.host_symbol_at(
-                            compiled.call_site_at(operand_index_for_code(compiled.codes[call_func])).host_symbol_index)
-                    .kind,
-            Library::HostCallable::Kind::SyncFunction);
-    EXPECT_EQ(compiled.host_symbol_at(compiled.call_site_at(operand_index_for_code(compiled.codes[call_async_func]))
-                                              .host_symbol_index)
-                      .kind,
-              Library::HostCallable::Kind::AsyncFunction);
-    EXPECT_EQ(
-            compiled.host_symbol_at(
-                            compiled.call_site_at(operand_index_for_code(compiled.codes[call_const])).host_symbol_index)
-                    .kind,
-            Library::HostCallable::Kind::SyncConstant);
-    EXPECT_EQ(compiled.host_symbol_at(compiled.call_site_at(operand_index_for_code(compiled.codes[call_async_const]))
-                                              .host_symbol_index)
-                      .kind,
-              Library::HostCallable::Kind::AsyncConstant);
-    EXPECT_TRUE(compiled.validate_operands());
+    const JsValue &prop_name = compiled.constant(operand_index_for_code(compiled.codes()[prop_get]));
+    ASSERT_EQ(fiber::json::js_value_type(prop_name), fiber::json::JsNodeType::String);
+    fiber::json::NativeStr name = fiber::json::js_value_native_string(prop_name);
+    EXPECT_EQ(std::string_view(name.data, name.len), "foo");
+
+    std::int32_t sync_call_code = compiled.codes()[call_func];
+    EXPECT_EQ(argc_for_call(sync_call_code), 1u);
+    EXPECT_EQ(compiled.func_const(func_index_for_call(sync_call_code)).sync_func, &dummy_function);
+
+    std::int32_t async_call_code = compiled.codes()[call_async_func];
+    EXPECT_EQ(argc_for_call(async_call_code), 1u);
+    EXPECT_EQ(compiled.func_const(func_index_for_call(async_call_code)).async_func, &dummy_async_function);
+
+    EXPECT_EQ(compiled.func_const(func_index_for_call(compiled.codes()[call_const])).sync_ct, &dummy_constant);
+    EXPECT_EQ(compiled.func_const(func_index_for_call(compiled.codes()[call_async_const])).async_ct,
+              &dummy_async_constant);
 }
 
-TEST(CompiledOperandTest, ValidateOperandsRejectsKindMismatch) {
+TEST(CompiledOperandTest, MoveKeepsBorrowedConstantPayloadStable) {
     OperandLibrary library;
     Compiled compiled = compile_script("root.foo;", library);
+    Compiled moved = std::move(compiled);
 
-    const std::size_t prop_get = find_first_opcode(compiled, Code::PROP_GET);
-    ASSERT_LT(prop_get, compiled.codes.size());
+    const std::size_t prop_get = find_first_opcode(moved, Code::PROP_GET);
+    ASSERT_LT(prop_get, moved.code_size());
 
-    const std::size_t operand_index = operand_index_for_code(compiled.codes[prop_get]);
-    ASSERT_LT(operand_index, compiled.operands.size());
-    compiled.operands[operand_index].kind = Compiled::OperandKind::ConstValue;
-
-    EXPECT_FALSE(compiled.validate_operands());
+    const JsValue &prop_name = moved.constant(operand_index_for_code(moved.codes()[prop_get]));
+    ASSERT_EQ(fiber::json::js_value_type(prop_name), fiber::json::JsNodeType::String);
+    fiber::json::NativeStr name = fiber::json::js_value_native_string(prop_name);
+    EXPECT_EQ(std::string_view(name.data, name.len), "foo");
 }

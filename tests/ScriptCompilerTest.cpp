@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <string_view>
 #include <vector>
 
@@ -56,15 +57,16 @@ fiber::script::ir::Compiled compile_script(std::string_view script) {
 
 std::vector<std::uint8_t> extract_opcodes(const fiber::script::ir::Compiled &compiled) {
     std::vector<std::uint8_t> ops;
-    ops.reserve(compiled.codes.size());
-    for (std::int32_t code: compiled.codes) {
+    ops.reserve(compiled.code_size());
+    for (std::uint32_t i = 0; i < compiled.code_size(); ++i) {
+        std::int32_t code = compiled.codes()[i];
         ops.push_back(static_cast<std::uint8_t>(code & 0xFF));
     }
     return ops;
 }
 
 std::size_t operand_at(const fiber::script::ir::Compiled &compiled, std::size_t index) {
-    return static_cast<std::size_t>(compiled.codes[index] >> 8);
+    return static_cast<std::size_t>(static_cast<std::uint32_t>(compiled.codes()[index]) >> 8u);
 }
 
 } // namespace
@@ -119,7 +121,7 @@ TEST(ScriptCompilerTest, EmitsIfElseControlFlow) {
     std::size_t end_target = operand_at(compiled, else_jump);
     EXPECT_GT(else_target, if_jump);
     EXPECT_GT(end_target, else_jump);
-    EXPECT_LE(end_target, compiled.codes.size());
+    EXPECT_LE(end_target, compiled.code_size());
 }
 
 TEST(ScriptCompilerTest, EmitsForeachLoopWithBreakContinue) {
@@ -157,5 +159,5 @@ TEST(ScriptCompilerTest, EmitsForeachLoopWithBreakContinue) {
 
     EXPECT_TRUE(has_back_edge);
     EXPECT_TRUE(has_break_jump);
-    EXPECT_LE(loop_end, compiled.codes.size());
+    EXPECT_LE(loop_end, compiled.code_size());
 }
