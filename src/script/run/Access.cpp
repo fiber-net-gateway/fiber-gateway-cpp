@@ -10,25 +10,6 @@ namespace {
 
 ScriptAbortReason oom_error() { return ScriptAbortReason::OutOfMemory; }
 
-ScriptAbortReason index_error(std::string message) {
-    (void) message;
-    return ScriptAbortReason::IndexError;
-}
-
-CallResult set_value(ResultPayload &result, const fiber::json::JsValue &value) noexcept {
-    result.value = value;
-    return CallResult::Success;
-}
-
-CallResult set_undefined(ResultPayload &result) noexcept {
-    return set_value(result, fiber::json::JsValue::make_undefined());
-}
-
-CallResult set_abort(ResultPayload &result, ScriptAbortReason reason) noexcept {
-    result.abort = ScriptAbort{reason, -1};
-    return CallResult::Abort;
-}
-
 fiber::json::JsValue &mutable_value(ConstValueHandle value) noexcept {
     return *const_cast<fiber::json::JsValue *>(value.get());
 }
@@ -49,6 +30,9 @@ bool get_index(ConstValueHandle key, std::int64_t &out) noexcept {
     return false;
 }
 
+// OOM is the only abort this can signal (allocation failure while interning a borrowed string); a
+// non-string key returns nullptr with error left None and the caller decides undefined (read) vs
+// TypeError (write).
 fiber::json::GcString *ensure_heap_string(ScriptRuntime &runtime, ConstValueHandle value, ScriptAbortReason &error) {
     if (!value) {
         return nullptr;
@@ -77,7 +61,8 @@ fiber::json::JsValue make_heap_string_value(fiber::json::GcString *str) {
                : fiber::json::JsValue::make_undefined();
 }
 
-bool string_length(ConstValueHandle value, std::size_t &out, ScriptAbortReason &error) {
+// Malformed UTF-8 fails (returns false); the read caller folds that to undefined.
+bool string_length(ConstValueHandle value, std::size_t &out) {
     if (!value) {
         return false;
     }
@@ -92,7 +77,6 @@ bool string_length(ConstValueHandle value, std::size_t &out, ScriptAbortReason &
         fiber::json::NativeStr native = fiber::json::js_value_native_string(*value);
         fiber::json::Utf8ScanResult scan;
         if (!fiber::json::utf8_scan(native.data, native.len, scan)) {
-            error = ScriptAbortReason::InvalidArgument;
             return false;
         }
         out = scan.utf16_len;
@@ -154,13 +138,13 @@ CallResult Access::expand_object(ScriptRuntime &runtime, ConstValueHandle target
                                  ResultPayload &result) noexcept {
     if (!target || !addition || fiber::json::js_value_type(*target) != fiber::json::JsNodeType::Object ||
         fiber::json::js_value_type(*addition) != fiber::json::JsNodeType::Object) {
-        return set_value(result, target ? *target : fiber::json::JsValue::make_undefined());
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     fiber::json::GcHeap *heap = &runtime.heap();
     auto *target_obj = mutable_heap_ptr<fiber::json::GcObject>(target);
     auto *add_obj = fiber::json::js_value_heap_ptr<const fiber::json::GcObject>(*addition);
     if (!target_obj || !add_obj) {
-        return set_value(result, *target);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     std::size_t expected = target_obj->size + add_obj->size;
     if (!runtime.run_with_gc_retry(fiber::json::gc_estimate_object_growth_bytes(target_obj, expected),
@@ -182,21 +166,21 @@ CallResult Access::expand_object(ScriptRuntime &runtime, ConstValueHandle target
 CallResult Access::expand_array(ScriptRuntime &runtime, ConstValueHandle target, ConstValueHandle addition,
                                 ResultPayload &result) noexcept {
     if (!target || fiber::json::js_value_type(*target) != fiber::json::JsNodeType::Array) {
-        return set_value(result, target ? *target : fiber::json::JsValue::make_undefined());
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     if (!addition || (fiber::json::js_value_type(*addition) != fiber::json::JsNodeType::Array &&
                       fiber::json::js_value_type(*addition) != fiber::json::JsNodeType::Object)) {
-        return set_value(result, *target);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     fiber::json::GcHeap *heap = &runtime.heap();
     auto *target_arr = mutable_heap_ptr<fiber::json::GcArray>(target);
     if (!target_arr) {
-        return set_value(result, *target);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     if (fiber::json::js_value_type(*addition) == fiber::json::JsNodeType::Array) {
         auto *add_arr = fiber::json::js_value_heap_ptr<const fiber::json::GcArray>(*addition);
         if (!add_arr) {
-            return set_value(result, *target);
+            return set_exception(result, fiber::json::ExceptionKind::TypeError);
         }
         std::size_t expected = target_arr->size + add_arr->size;
         if (!runtime.run_with_gc_retry(fiber::json::gc_estimate_array_growth_bytes(target_arr, expected),
@@ -213,7 +197,7 @@ CallResult Access::expand_array(ScriptRuntime &runtime, ConstValueHandle target,
     }
     auto *add_obj = fiber::json::js_value_heap_ptr<const fiber::json::GcObject>(*addition);
     if (!add_obj) {
-        return set_value(result, *target);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     std::size_t expected = target_arr->size + add_obj->size;
     if (!runtime.run_with_gc_retry(fiber::json::gc_estimate_array_growth_bytes(target_arr, expected),
@@ -235,12 +219,12 @@ CallResult Access::expand_array(ScriptRuntime &runtime, ConstValueHandle target,
 CallResult Access::push_array(ScriptRuntime &runtime, ConstValueHandle target, ConstValueHandle addition,
                               ResultPayload &result) noexcept {
     if (!target || fiber::json::js_value_type(*target) != fiber::json::JsNodeType::Array) {
-        return set_value(result, target ? *target : fiber::json::JsValue::make_undefined());
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     fiber::json::GcHeap *heap = &runtime.heap();
     auto *arr = mutable_heap_ptr<fiber::json::GcArray>(target);
     if (!arr) {
-        return set_value(result, *target);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     if (!runtime.run_with_gc_retry(fiber::json::gc_estimate_array_growth_bytes(arr, arr->size + 1), [&]() {
             return fiber::json::gc_array_push(heap, arr, addition ? *addition : fiber::json::JsValue::make_undefined());
@@ -291,16 +275,16 @@ CallResult Access::index_get(ScriptRuntime &runtime, ConstValueHandle parent, Co
 CallResult Access::index_set(ScriptRuntime &runtime, ConstValueHandle parent, ConstValueHandle key,
                              ConstValueHandle value, ResultPayload &result) noexcept {
     if (!parent || !value) {
-        return set_abort(result, index_error("indexing not supported"));
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     if (fiber::json::js_value_type(*parent) == fiber::json::JsNodeType::Array) {
         std::int64_t idx = 0;
         if (!get_index(key, idx)) {
-            return set_abort(result, index_error("array index must be integer"));
+            return set_exception(result, fiber::json::ExceptionKind::TypeError);
         }
         auto *arr = mutable_heap_ptr<fiber::json::GcArray>(parent);
         if (!arr || idx < 0 || idx >= static_cast<std::int64_t>(arr->size)) {
-            return set_abort(result, index_error("array index out of bounds"));
+            return set_exception(result, fiber::json::ExceptionKind::RangeError);
         }
         fiber::json::GcHeap *heap = &runtime.heap();
         if (!runtime.run_with_gc_retry(
@@ -319,7 +303,7 @@ CallResult Access::index_set(ScriptRuntime &runtime, ConstValueHandle parent, Co
             return set_abort(result, error);
         }
         if (!key_str) {
-            return set_abort(result, index_error("object key must be string"));
+            return set_exception(result, fiber::json::ExceptionKind::TypeError);
         }
         ValueHandle rooted_key = runtime.local_value();
         if (!rooted_key) {
@@ -328,7 +312,7 @@ CallResult Access::index_set(ScriptRuntime &runtime, ConstValueHandle parent, Co
         *rooted_key = make_heap_string_value(key_str);
         auto *obj = mutable_heap_ptr<fiber::json::GcObject>(parent);
         if (!obj) {
-            return set_abort(result, index_error("indexing not supported"));
+            return set_exception(result, fiber::json::ExceptionKind::TypeError);
         }
         if (!runtime.run_with_gc_retry(fiber::json::gc_estimate_object_growth_bytes(obj, obj->size + 1),
                                        [&]() { return fiber::json::gc_object_set(heap, obj, key_str, *value); })) {
@@ -336,7 +320,7 @@ CallResult Access::index_set(ScriptRuntime &runtime, ConstValueHandle parent, Co
         }
         return set_value(result, *value);
     }
-    return set_abort(result, index_error("indexing not supported"));
+    return set_exception(result, fiber::json::ExceptionKind::TypeError);
 }
 
 CallResult Access::index_set1(ScriptRuntime &runtime, ConstValueHandle parent, ConstValueHandle key,
@@ -371,12 +355,11 @@ CallResult Access::prop_get(ScriptRuntime &runtime, ConstValueHandle parent, Con
     if (fiber::json::js_value_type(*parent) == fiber::json::JsNodeType::Array ||
         fiber::json::js_value_type(*parent) == fiber::json::JsNodeType::String) {
         std::size_t len = 0;
-        ScriptAbortReason error = ScriptAbortReason::None;
         if (fiber::json::js_value_type(*parent) == fiber::json::JsNodeType::Array) {
             auto *arr = fiber::json::js_value_heap_ptr<const fiber::json::GcArray>(*parent);
             len = arr ? arr->size : 0;
-        } else if (!string_length(parent, len, error)) {
-            return set_abort(result, error);
+        } else if (!string_length(parent, len)) {
+            return set_undefined(result);
         }
         return set_value(result, fiber::json::JsValue::make_integer(static_cast<std::int64_t>(len)));
     }
@@ -387,7 +370,7 @@ CallResult Access::prop_get(ScriptRuntime &runtime, ConstValueHandle parent, Con
 CallResult Access::prop_set(ScriptRuntime &runtime, ConstValueHandle parent, ConstValueHandle value,
                             ConstValueHandle key, ResultPayload &result) noexcept {
     if (!parent || fiber::json::js_value_type(*parent) != fiber::json::JsNodeType::Object) {
-        return set_abort(result, index_error("property set not supported"));
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     ScriptRuntime::LocalMark mark(runtime);
     fiber::json::GcHeap *heap = &runtime.heap();
@@ -397,7 +380,7 @@ CallResult Access::prop_set(ScriptRuntime &runtime, ConstValueHandle parent, Con
         return set_abort(result, error);
     }
     if (!key_str) {
-        return set_abort(result, index_error("property key must be string"));
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     ValueHandle rooted_key = runtime.local_value();
     if (!rooted_key) {
@@ -406,7 +389,7 @@ CallResult Access::prop_set(ScriptRuntime &runtime, ConstValueHandle parent, Con
     *rooted_key = make_heap_string_value(key_str);
     auto *obj = mutable_heap_ptr<fiber::json::GcObject>(parent);
     if (!obj) {
-        return set_abort(result, index_error("property set not supported"));
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     if (!runtime.run_with_gc_retry(fiber::json::gc_estimate_object_growth_bytes(obj, obj->size + 1),
                                    [&]() { return fiber::json::gc_object_set(heap, obj, key_str, *value); })) {

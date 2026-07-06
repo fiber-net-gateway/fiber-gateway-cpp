@@ -42,6 +42,13 @@ enum class JsTag : std::uint8_t {
     HeapRef,
     BorrowedString,
     BorrowedBinary,
+    Exception,
+};
+
+enum class ExceptionKind : std::uint8_t {
+    TypeError = 0,
+    RangeError,
+    ReferenceError,
 };
 
 enum class JsHeapKind : std::uint8_t {
@@ -82,6 +89,7 @@ struct alignas(16) JsValue {
     static JsValue make_binary(GcHeap &heap, const std::uint8_t *data, std::size_t len);
     static JsValue make_array(GcHeap &heap, std::size_t capacity);
     static JsValue make_object(GcHeap &heap, std::size_t capacity);
+    static JsValue make_exception(ExceptionKind kind);
 
     constexpr JsValue() = default;
     JsValue(const JsValue &) = default;
@@ -103,6 +111,7 @@ JsValue js_make_borrowed_binary(const std::uint8_t *data, std::size_t len);
 
 JsTag js_value_tag(const JsValue &value);
 JsNodeType js_value_type(const JsValue &value);
+ExceptionKind js_value_exception_kind(const JsValue &value);
 bool js_value_is_string(const JsValue &value);
 bool js_value_is_binary(const JsValue &value);
 bool js_value_is_heap_ref(const JsValue &value);

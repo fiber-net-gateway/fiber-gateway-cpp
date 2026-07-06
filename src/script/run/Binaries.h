@@ -9,26 +9,37 @@ namespace fiber::script::run {
 
 class Binaries {
 public:
-    static ScriptStatus plus(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
-    static ScriptStatus minus(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
-    static ScriptStatus multiply(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a,
-                                 ConstValueHandle b) noexcept;
-    static ScriptStatus divide(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a,
-                               ConstValueHandle b) noexcept;
-    static ScriptStatus modulo(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a,
-                               ConstValueHandle b) noexcept;
+    static CallResult plus(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                           ResultPayload &result) noexcept;
+    static CallResult minus(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                            ResultPayload &result) noexcept;
+    static CallResult multiply(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                               ResultPayload &result) noexcept;
+    static CallResult divide(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                             ResultPayload &result) noexcept;
+    static CallResult modulo(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                             ResultPayload &result) noexcept;
 
-    static ScriptStatus matches(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a,
-                                ConstValueHandle b) noexcept;
-    static ScriptStatus lt(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
-    static ScriptStatus lte(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
-    static ScriptStatus gt(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
-    static ScriptStatus gte(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
-    static ScriptStatus eq(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
-    static ScriptStatus seq(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
-    static ScriptStatus ne(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
-    static ScriptStatus sne(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
-    static ScriptStatus in(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept;
+    static CallResult matches(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                              ResultPayload &result) noexcept;
+    static CallResult lt(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                         ResultPayload &result) noexcept;
+    static CallResult lte(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                          ResultPayload &result) noexcept;
+    static CallResult gt(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                         ResultPayload &result) noexcept;
+    static CallResult gte(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                          ResultPayload &result) noexcept;
+    static CallResult eq(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                         ResultPayload &result) noexcept;
+    static CallResult seq(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                          ResultPayload &result) noexcept;
+    static CallResult ne(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                         ResultPayload &result) noexcept;
+    static CallResult sne(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                          ResultPayload &result) noexcept;
+    static CallResult in(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                         ResultPayload &result) noexcept;
 };
 
 } // namespace fiber::script::run

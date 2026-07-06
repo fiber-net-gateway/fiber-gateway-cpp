@@ -9,11 +9,11 @@ namespace fiber::script::run {
 
 class Unaries {
 public:
-    static ScriptStatus neg(ValueHandle out, ConstValueHandle value) noexcept;
-    static ScriptStatus plus(ValueHandle out, ConstValueHandle value) noexcept;
-    static ScriptStatus minus(ValueHandle out, ConstValueHandle value) noexcept;
-    static ScriptStatus typeof_op(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle value) noexcept;
-    static ScriptStatus iterate(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle value) noexcept;
+    static CallResult neg(ScriptRuntime &runtime, ConstValueHandle value, ResultPayload &result) noexcept;
+    static CallResult plus(ScriptRuntime &runtime, ConstValueHandle value, ResultPayload &result) noexcept;
+    static CallResult minus(ScriptRuntime &runtime, ConstValueHandle value, ResultPayload &result) noexcept;
+    static CallResult typeof_op(ScriptRuntime &runtime, ConstValueHandle value, ResultPayload &result) noexcept;
+    static CallResult iterate(ScriptRuntime &runtime, ConstValueHandle value, ResultPayload &result) noexcept;
 };
 
 } // namespace fiber::script::run

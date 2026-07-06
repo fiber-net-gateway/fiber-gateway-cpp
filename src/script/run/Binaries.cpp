@@ -14,14 +14,6 @@ namespace fiber::script::run {
 
 namespace {
 
-ScriptStatus store_value(ValueHandle out, const fiber::json::JsValue &value) noexcept {
-    if (!out) {
-        return ScriptStatus::abort(ScriptAbortReason::OutOfMemory);
-    }
-    *out = value;
-    return ScriptStatus::success();
-}
-
 bool is_string_like(const fiber::json::JsValue &value) noexcept {
     return fiber::json::js_value_type(value) == fiber::json::JsNodeType::String;
 }
@@ -164,15 +156,15 @@ void set_ascii_string_source(StringSource &out, const char *data, std::size_t le
     out.scan.utf16_len = len;
 }
 
-bool build_string_source(const fiber::json::JsValue &value, StringSource &out, ScriptAbortReason &error) {
+// Returns false on any non-string-coercible input; callers raise TypeError. Malformed UTF-8 in a
+// borrowed string also fails (coerces to TypeError), matching the operator exception policy.
+bool build_string_source(const fiber::json::JsValue &value, StringSource &out) noexcept {
     if (fiber::json::js_value_type(value) != fiber::json::JsNodeType::String) {
-        error = ScriptAbortReason::TypeError;
         return false;
     }
     if (!fiber::json::js_value_is_borrowed_string(value)) {
         auto *str = as_heap_string(value);
         if (!str) {
-            error = ScriptAbortReason::TypeError;
             return false;
         }
         if (str->encoding == fiber::json::GcStringEncoding::Byte) {
@@ -191,16 +183,15 @@ bool build_string_source(const fiber::json::JsValue &value, StringSource &out, S
     out.utf8 = native.data;
     out.len = native.len;
     if (!fiber::json::utf8_scan(out.utf8, out.len, out.scan)) {
-        error = ScriptAbortReason::InvalidArgument;
         return false;
     }
     return true;
 }
 
 bool primitive_to_string_source(const fiber::json::JsValue &value, StringSource &out, char *buffer,
-                                std::size_t buffer_len, ScriptAbortReason &error) {
+                                std::size_t buffer_len) {
     if (fiber::json::js_value_type(value) == fiber::json::JsNodeType::String) {
-        return build_string_source(value, out, error);
+        return build_string_source(value, out);
     }
     switch (fiber::json::js_value_type(value)) {
         case fiber::json::JsNodeType::Undefined:
@@ -219,7 +210,6 @@ bool primitive_to_string_source(const fiber::json::JsValue &value, StringSource 
         case fiber::json::JsNodeType::Integer: {
             auto converted = std::to_chars(buffer, buffer + buffer_len, fiber::json::js_value_int64(value));
             if (converted.ec != std::errc{}) {
-                error = ScriptAbortReason::TypeError;
                 return false;
             }
             set_ascii_string_source(out, buffer, static_cast<std::size_t>(converted.ptr - buffer));
@@ -241,28 +231,25 @@ bool primitive_to_string_source(const fiber::json::JsValue &value, StringSource 
             }
             auto converted = std::to_chars(buffer, buffer + buffer_len, number);
             if (converted.ec != std::errc{}) {
-                error = ScriptAbortReason::TypeError;
                 return false;
             }
             set_ascii_string_source(out, buffer, static_cast<std::size_t>(converted.ptr - buffer));
             return true;
         }
         case fiber::json::JsNodeType::String:
-            return build_string_source(value, out, error);
+            return build_string_source(value, out);
         case fiber::json::JsNodeType::Array:
         case fiber::json::JsNodeType::Object:
         case fiber::json::JsNodeType::Interator:
         case fiber::json::JsNodeType::Exception:
         case fiber::json::JsNodeType::Binary:
-            error = ScriptAbortReason::TypeError;
             return false;
     }
-    error = ScriptAbortReason::TypeError;
     return false;
 }
 
-ScriptStatus concat_strings(fiber::json::GcHeap &heap, const StringSource &lhs, const StringSource &rhs,
-                            fiber::json::JsValue &out) {
+CallResult concat_strings(fiber::json::GcHeap &heap, const StringSource &lhs, const StringSource &rhs,
+                          ResultPayload &result) {
     bool all_byte = true;
     std::size_t total_len = 0;
     auto add_part = [&](const StringSource &part) {
@@ -286,20 +273,20 @@ ScriptStatus concat_strings(fiber::json::GcHeap &heap, const StringSource &lhs, 
     add_part(rhs);
 
     if (total_len == 0) {
-        out = fiber::json::JsValue::make_string(heap, "", 0);
+        fiber::json::JsValue out = fiber::json::JsValue::make_string(heap, "", 0);
         if (fiber::json::js_value_type(out) != fiber::json::JsNodeType::String ||
             fiber::json::js_value_is_borrowed_string(out)) {
-            return ScriptStatus::abort(ScriptAbortReason::OutOfMemory);
+            return set_abort(result, ScriptAbortReason::OutOfMemory);
         }
-        return ScriptStatus::success();
+        return set_value(result, out);
     }
 
     if (all_byte) {
-        fiber::json::GcString *result = fiber::json::gc_new_string_bytes_uninit(&heap, total_len);
-        if (!result) {
-            return ScriptStatus::abort(ScriptAbortReason::OutOfMemory);
+        fiber::json::GcString *result_str = fiber::json::gc_new_string_bytes_uninit(&heap, total_len);
+        if (!result_str) {
+            return set_abort(result, ScriptAbortReason::OutOfMemory);
         }
-        std::uint8_t *dst = result->data8;
+        std::uint8_t *dst = result_str->data8;
         std::size_t offset = 0;
         auto append_part = [&](const StringSource &part) -> bool {
             switch (part.kind) {
@@ -321,17 +308,16 @@ ScriptStatus concat_strings(fiber::json::GcHeap &heap, const StringSource &lhs, 
             return false;
         };
         if (!append_part(lhs) || !append_part(rhs)) {
-            return ScriptStatus::abort(ScriptAbortReason::InvalidArgument);
+            return set_exception(result, fiber::json::ExceptionKind::TypeError);
         }
-        out = fiber::json::js_make_heap_ref(&result->hdr, fiber::json::JsHeapKind::String);
-        return ScriptStatus::success();
+        return set_value(result, fiber::json::js_make_heap_ref(&result_str->hdr, fiber::json::JsHeapKind::String));
     }
 
-    fiber::json::GcString *result = fiber::json::gc_new_string_utf16_uninit(&heap, total_len);
-    if (!result) {
-        return ScriptStatus::abort(ScriptAbortReason::OutOfMemory);
+    fiber::json::GcString *result_str = fiber::json::gc_new_string_utf16_uninit(&heap, total_len);
+    if (!result_str) {
+        return set_abort(result, ScriptAbortReason::OutOfMemory);
     }
-    char16_t *dst = result->data16;
+    char16_t *dst = result_str->data16;
     std::size_t offset = 0;
     auto append_part = [&](const StringSource &part) -> bool {
         switch (part.kind) {
@@ -356,253 +342,233 @@ ScriptStatus concat_strings(fiber::json::GcHeap &heap, const StringSource &lhs, 
         return false;
     };
     if (!append_part(lhs) || !append_part(rhs)) {
-        return ScriptStatus::abort(ScriptAbortReason::InvalidArgument);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
-    out = fiber::json::js_make_heap_ref(&result->hdr, fiber::json::JsHeapKind::String);
-    return ScriptStatus::success();
+    return set_value(result, fiber::json::js_make_heap_ref(&result_str->hdr, fiber::json::JsHeapKind::String));
 }
 
-ScriptStatus add_numeric(const fiber::json::JsValue &lhs, const fiber::json::JsValue &rhs,
-                         fiber::json::JsValue &out) noexcept {
+CallResult add_numeric(const fiber::json::JsValue &lhs, const fiber::json::JsValue &rhs,
+                       ResultPayload &result) noexcept {
     if (!is_numeric_like(fiber::json::js_value_type(lhs)) || !is_numeric_like(fiber::json::js_value_type(rhs))) {
-        return ScriptStatus::abort(ScriptAbortReason::TypeError);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     if (fiber::json::js_value_type(lhs) == fiber::json::JsNodeType::Float ||
         fiber::json::js_value_type(rhs) == fiber::json::JsNodeType::Float) {
         double a = 0.0;
         double b = 0.0;
         if (!to_number(lhs, a) || !to_number(rhs, b)) {
-            return ScriptStatus::abort(ScriptAbortReason::TypeError);
+            return set_exception(result, fiber::json::ExceptionKind::TypeError);
         }
-        out = fiber::json::JsValue::make_float(a + b);
-        return ScriptStatus::success();
+        return set_value(result, fiber::json::JsValue::make_float(a + b));
     }
     std::int64_t a = 0;
     std::int64_t b = 0;
     if (!to_int64(lhs, a) || !to_int64(rhs, b)) {
-        return ScriptStatus::abort(ScriptAbortReason::TypeError);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
-    std::int64_t result = 0;
-    if (!__builtin_add_overflow(a, b, &result)) {
-        out = fiber::json::JsValue::make_integer(result);
-        return ScriptStatus::success();
+    std::int64_t sum = 0;
+    if (!__builtin_add_overflow(a, b, &sum)) {
+        return set_value(result, fiber::json::JsValue::make_integer(sum));
     }
-    out = fiber::json::JsValue::make_float(static_cast<double>(a) + static_cast<double>(b));
-    return ScriptStatus::success();
+    return set_value(result, fiber::json::JsValue::make_float(static_cast<double>(a) + static_cast<double>(b)));
 }
 
-ScriptStatus sub_numeric(const fiber::json::JsValue &lhs, const fiber::json::JsValue &rhs,
-                         fiber::json::JsValue &out) noexcept {
+CallResult sub_numeric(const fiber::json::JsValue &lhs, const fiber::json::JsValue &rhs,
+                       ResultPayload &result) noexcept {
     if (!is_numeric_like(fiber::json::js_value_type(lhs)) || !is_numeric_like(fiber::json::js_value_type(rhs))) {
-        return ScriptStatus::abort(ScriptAbortReason::TypeError);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     if (fiber::json::js_value_type(lhs) == fiber::json::JsNodeType::Float ||
         fiber::json::js_value_type(rhs) == fiber::json::JsNodeType::Float) {
         double a = 0.0;
         double b = 0.0;
         if (!to_number(lhs, a) || !to_number(rhs, b)) {
-            return ScriptStatus::abort(ScriptAbortReason::TypeError);
+            return set_exception(result, fiber::json::ExceptionKind::TypeError);
         }
-        out = fiber::json::JsValue::make_float(a - b);
-        return ScriptStatus::success();
+        return set_value(result, fiber::json::JsValue::make_float(a - b));
     }
     std::int64_t a = 0;
     std::int64_t b = 0;
     if (!to_int64(lhs, a) || !to_int64(rhs, b)) {
-        return ScriptStatus::abort(ScriptAbortReason::TypeError);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
-    std::int64_t result = 0;
-    if (!__builtin_sub_overflow(a, b, &result)) {
-        out = fiber::json::JsValue::make_integer(result);
-        return ScriptStatus::success();
+    std::int64_t diff = 0;
+    if (!__builtin_sub_overflow(a, b, &diff)) {
+        return set_value(result, fiber::json::JsValue::make_integer(diff));
     }
-    out = fiber::json::JsValue::make_float(static_cast<double>(a) - static_cast<double>(b));
-    return ScriptStatus::success();
+    return set_value(result, fiber::json::JsValue::make_float(static_cast<double>(a) - static_cast<double>(b)));
 }
 
-ScriptStatus mul_numeric(const fiber::json::JsValue &lhs, const fiber::json::JsValue &rhs,
-                         fiber::json::JsValue &out) noexcept {
+CallResult mul_numeric(const fiber::json::JsValue &lhs, const fiber::json::JsValue &rhs,
+                       ResultPayload &result) noexcept {
     if (!is_numeric_like(fiber::json::js_value_type(lhs)) || !is_numeric_like(fiber::json::js_value_type(rhs))) {
-        return ScriptStatus::abort(ScriptAbortReason::TypeError);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     if (fiber::json::js_value_type(lhs) == fiber::json::JsNodeType::Float ||
         fiber::json::js_value_type(rhs) == fiber::json::JsNodeType::Float) {
         double a = 0.0;
         double b = 0.0;
         if (!to_number(lhs, a) || !to_number(rhs, b)) {
-            return ScriptStatus::abort(ScriptAbortReason::TypeError);
+            return set_exception(result, fiber::json::ExceptionKind::TypeError);
         }
-        out = fiber::json::JsValue::make_float(a * b);
-        return ScriptStatus::success();
+        return set_value(result, fiber::json::JsValue::make_float(a * b));
     }
     std::int64_t a = 0;
     std::int64_t b = 0;
     if (!to_int64(lhs, a) || !to_int64(rhs, b)) {
-        return ScriptStatus::abort(ScriptAbortReason::TypeError);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
-    std::int64_t result = 0;
-    if (!__builtin_mul_overflow(a, b, &result)) {
-        out = fiber::json::JsValue::make_integer(result);
-        return ScriptStatus::success();
+    std::int64_t product = 0;
+    if (!__builtin_mul_overflow(a, b, &product)) {
+        return set_value(result, fiber::json::JsValue::make_integer(product));
     }
-    out = fiber::json::JsValue::make_float(static_cast<double>(a) * static_cast<double>(b));
-    return ScriptStatus::success();
+    return set_value(result, fiber::json::JsValue::make_float(static_cast<double>(a) * static_cast<double>(b)));
 }
 
-ScriptStatus plus_impl(fiber::json::GcHeap &heap, const fiber::json::JsValue &lhs, const fiber::json::JsValue &rhs,
-                       fiber::json::JsValue &out) {
+CallResult plus_impl(fiber::json::GcHeap &heap, const fiber::json::JsValue &lhs, const fiber::json::JsValue &rhs,
+                     ResultPayload &result) {
     if (is_string_like(lhs) || is_string_like(rhs)) {
         StringSource lhs_src;
         StringSource rhs_src;
         char lhs_buf[64];
         char rhs_buf[64];
-        ScriptAbortReason error = ScriptAbortReason::None;
-        if (!primitive_to_string_source(lhs, lhs_src, lhs_buf, sizeof(lhs_buf), error)) {
-            return ScriptStatus::abort(error);
+        if (!primitive_to_string_source(lhs, lhs_src, lhs_buf, sizeof(lhs_buf)) ||
+            !primitive_to_string_source(rhs, rhs_src, rhs_buf, sizeof(rhs_buf))) {
+            return set_exception(result, fiber::json::ExceptionKind::TypeError);
         }
-        if (!primitive_to_string_source(rhs, rhs_src, rhs_buf, sizeof(rhs_buf), error)) {
-            return ScriptStatus::abort(error);
-        }
-        return concat_strings(heap, lhs_src, rhs_src, out);
+        return concat_strings(heap, lhs_src, rhs_src, result);
     }
-    return add_numeric(lhs, rhs, out);
+    return add_numeric(lhs, rhs, result);
 }
 
 } // namespace
 
-ScriptStatus Binaries::plus(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
-    if (!out) {
-        return ScriptStatus::abort(ScriptAbortReason::OutOfMemory);
-    }
-    fiber::json::JsValue result = fiber::json::JsValue::make_undefined();
-    ScriptStatus status = ScriptStatus::success();
+CallResult Binaries::plus(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                          ResultPayload &result) noexcept {
+    CallResult status = CallResult::Success;
     runtime.run_with_gc_retry(estimate_plus_alloc_bytes(*a, *b), [&]() {
         status = plus_impl(runtime.heap(), *a, *b, result);
-        return !status.is_abort() || status.abort().reason != ScriptAbortReason::OutOfMemory;
+        return status != CallResult::Abort;
     });
-    if (!status) {
-        return status;
-    }
-    *out = result;
-    return ScriptStatus::success();
+    return status;
 }
 
-ScriptStatus Binaries::minus(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
+CallResult Binaries::minus(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                           ResultPayload &result) noexcept {
     (void) runtime;
-    fiber::json::JsValue result = fiber::json::JsValue::make_undefined();
-    ScriptStatus status = sub_numeric(*a, *b, result);
-    if (!status) {
-        return status;
-    }
-    return store_value(out, result);
+    return sub_numeric(*a, *b, result);
 }
 
-ScriptStatus Binaries::multiply(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a,
-                                ConstValueHandle b) noexcept {
+CallResult Binaries::multiply(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                              ResultPayload &result) noexcept {
     (void) runtime;
-    fiber::json::JsValue result = fiber::json::JsValue::make_undefined();
-    ScriptStatus status = mul_numeric(*a, *b, result);
-    if (!status) {
-        return status;
-    }
-    return store_value(out, result);
+    return mul_numeric(*a, *b, result);
 }
 
-ScriptStatus Binaries::divide(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a,
-                              ConstValueHandle b) noexcept {
+CallResult Binaries::divide(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                            ResultPayload &result) noexcept {
     (void) runtime;
     if (!is_numeric_like(fiber::json::js_value_type(*a)) || !is_numeric_like(fiber::json::js_value_type(*b))) {
-        return ScriptStatus::abort(ScriptAbortReason::TypeError);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     double lhs = 0.0;
     double rhs = 0.0;
     if (!to_number(*a, lhs) || !to_number(*b, rhs)) {
-        return ScriptStatus::abort(ScriptAbortReason::TypeError);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     if (rhs == 0.0) {
-        return ScriptStatus::abort(ScriptAbortReason::DivisionByZero);
+        return set_exception(result, fiber::json::ExceptionKind::RangeError);
     }
-    return store_value(out, fiber::json::JsValue::make_float(lhs / rhs));
+    return set_value(result, fiber::json::JsValue::make_float(lhs / rhs));
 }
 
-ScriptStatus Binaries::modulo(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a,
-                              ConstValueHandle b) noexcept {
+CallResult Binaries::modulo(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                            ResultPayload &result) noexcept {
     (void) runtime;
     if (!is_numeric_like(fiber::json::js_value_type(*a)) || !is_numeric_like(fiber::json::js_value_type(*b))) {
-        return ScriptStatus::abort(ScriptAbortReason::TypeError);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     if (fiber::json::js_value_type(*a) == fiber::json::JsNodeType::Float ||
         fiber::json::js_value_type(*b) == fiber::json::JsNodeType::Float) {
         double lhs = 0.0;
         double rhs = 0.0;
         if (!to_number(*a, lhs) || !to_number(*b, rhs)) {
-            return ScriptStatus::abort(ScriptAbortReason::TypeError);
+            return set_exception(result, fiber::json::ExceptionKind::TypeError);
         }
         if (rhs == 0.0) {
-            return ScriptStatus::abort(ScriptAbortReason::DivisionByZero);
+            return set_exception(result, fiber::json::ExceptionKind::RangeError);
         }
-        return store_value(out, fiber::json::JsValue::make_float(std::fmod(lhs, rhs)));
+        return set_value(result, fiber::json::JsValue::make_float(std::fmod(lhs, rhs)));
     }
     std::int64_t lhs = 0;
     std::int64_t rhs = 0;
     if (!to_int64(*a, lhs) || !to_int64(*b, rhs)) {
-        return ScriptStatus::abort(ScriptAbortReason::TypeError);
+        return set_exception(result, fiber::json::ExceptionKind::TypeError);
     }
     if (rhs == 0) {
-        return ScriptStatus::abort(ScriptAbortReason::DivisionByZero);
+        return set_exception(result, fiber::json::ExceptionKind::RangeError);
     }
-    return store_value(out, fiber::json::JsValue::make_integer(lhs % rhs));
+    return set_value(result, fiber::json::JsValue::make_integer(lhs % rhs));
 }
 
-ScriptStatus Binaries::matches(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a,
-                               ConstValueHandle b) noexcept {
+CallResult Binaries::matches(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                             ResultPayload &result) noexcept {
     (void) runtime;
-    return store_value(out, fiber::json::JsValue::make_boolean(Compares::matches(a, b)));
+    return set_value(result, fiber::json::JsValue::make_boolean(Compares::matches(a, b)));
 }
 
-ScriptStatus Binaries::lt(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
+CallResult Binaries::lt(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                        ResultPayload &result) noexcept {
     (void) runtime;
-    return store_value(out, fiber::json::JsValue::make_boolean(Compares::lt(a, b)));
+    return set_value(result, fiber::json::JsValue::make_boolean(Compares::lt(a, b)));
 }
 
-ScriptStatus Binaries::lte(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
+CallResult Binaries::lte(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                         ResultPayload &result) noexcept {
     (void) runtime;
-    return store_value(out, fiber::json::JsValue::make_boolean(Compares::lte(a, b)));
+    return set_value(result, fiber::json::JsValue::make_boolean(Compares::lte(a, b)));
 }
 
-ScriptStatus Binaries::gt(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
+CallResult Binaries::gt(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                        ResultPayload &result) noexcept {
     (void) runtime;
-    return store_value(out, fiber::json::JsValue::make_boolean(Compares::gt(a, b)));
+    return set_value(result, fiber::json::JsValue::make_boolean(Compares::gt(a, b)));
 }
 
-ScriptStatus Binaries::gte(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
+CallResult Binaries::gte(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                         ResultPayload &result) noexcept {
     (void) runtime;
-    return store_value(out, fiber::json::JsValue::make_boolean(Compares::gte(a, b)));
+    return set_value(result, fiber::json::JsValue::make_boolean(Compares::gte(a, b)));
 }
 
-ScriptStatus Binaries::eq(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
+CallResult Binaries::eq(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                        ResultPayload &result) noexcept {
     (void) runtime;
-    return store_value(out, fiber::json::JsValue::make_boolean(Compares::eq(a, b)));
+    return set_value(result, fiber::json::JsValue::make_boolean(Compares::eq(a, b)));
 }
 
-ScriptStatus Binaries::seq(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
+CallResult Binaries::seq(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                         ResultPayload &result) noexcept {
     (void) runtime;
-    return store_value(out, fiber::json::JsValue::make_boolean(Compares::seq(a, b)));
+    return set_value(result, fiber::json::JsValue::make_boolean(Compares::seq(a, b)));
 }
 
-ScriptStatus Binaries::ne(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
+CallResult Binaries::ne(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                        ResultPayload &result) noexcept {
     (void) runtime;
-    return store_value(out, fiber::json::JsValue::make_boolean(Compares::ne(a, b)));
+    return set_value(result, fiber::json::JsValue::make_boolean(Compares::ne(a, b)));
 }
 
-ScriptStatus Binaries::sne(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
+CallResult Binaries::sne(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                         ResultPayload &result) noexcept {
     (void) runtime;
-    return store_value(out, fiber::json::JsValue::make_boolean(Compares::sne(a, b)));
+    return set_value(result, fiber::json::JsValue::make_boolean(Compares::sne(a, b)));
 }
 
-ScriptStatus Binaries::in(ScriptRuntime &runtime, ValueHandle out, ConstValueHandle a, ConstValueHandle b) noexcept {
+CallResult Binaries::in(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
+                        ResultPayload &result) noexcept {
     (void) runtime;
-    return store_value(out, fiber::json::JsValue::make_boolean(Compares::in(a, b)));
+    return set_value(result, fiber::json::JsValue::make_boolean(Compares::in(a, b)));
 }
 
 } // namespace fiber::script::run

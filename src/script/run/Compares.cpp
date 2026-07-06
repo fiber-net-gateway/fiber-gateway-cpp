@@ -474,37 +474,21 @@ bool Compares::logic(ConstValueHandle value) noexcept {
     return is_truthy(*value);
 }
 
-bool Compares::eq(ConstValueHandle a, ConstValueHandle b) noexcept {
-    return equality(a, b, false, false);
-}
+bool Compares::eq(ConstValueHandle a, ConstValueHandle b) noexcept { return equality(a, b, false, false); }
 
-bool Compares::seq(ConstValueHandle a, ConstValueHandle b) noexcept {
-    return equality(a, b, true, false);
-}
+bool Compares::seq(ConstValueHandle a, ConstValueHandle b) noexcept { return equality(a, b, true, false); }
 
-bool Compares::ne(ConstValueHandle a, ConstValueHandle b) noexcept {
-    return equality(a, b, false, true);
-}
+bool Compares::ne(ConstValueHandle a, ConstValueHandle b) noexcept { return equality(a, b, false, true); }
 
-bool Compares::sne(ConstValueHandle a, ConstValueHandle b) noexcept {
-    return equality(a, b, true, true);
-}
+bool Compares::sne(ConstValueHandle a, ConstValueHandle b) noexcept { return equality(a, b, true, true); }
 
-bool Compares::lt(ConstValueHandle a, ConstValueHandle b) noexcept {
-    return relation(a, b, true, false);
-}
+bool Compares::lt(ConstValueHandle a, ConstValueHandle b) noexcept { return relation(a, b, true, false); }
 
-bool Compares::lte(ConstValueHandle a, ConstValueHandle b) noexcept {
-    return relation(a, b, true, true);
-}
+bool Compares::lte(ConstValueHandle a, ConstValueHandle b) noexcept { return relation(a, b, true, true); }
 
-bool Compares::gt(ConstValueHandle a, ConstValueHandle b) noexcept {
-    return relation(a, b, false, false);
-}
+bool Compares::gt(ConstValueHandle a, ConstValueHandle b) noexcept { return relation(a, b, false, false); }
 
-bool Compares::gte(ConstValueHandle a, ConstValueHandle b) noexcept {
-    return relation(a, b, false, true);
-}
+bool Compares::gte(ConstValueHandle a, ConstValueHandle b) noexcept { return relation(a, b, false, true); }
 
 bool Compares::matches(ConstValueHandle a, ConstValueHandle b) noexcept {
     (void) a;

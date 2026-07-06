@@ -36,7 +36,7 @@ ScriptResult run_script(std::string_view source, GcHeap &heap) {
     auto compiled = fiber::script::compile_script(StdLibrary::instance(), source);
     EXPECT_TRUE(compiled.has_value()) << (compiled ? "" : compiled.error().message);
     if (!compiled) {
-        return ScriptResult::abort(fiber::script::ScriptAbortReason::InvalidArgument);
+        return ScriptResult::abort(fiber::script::ScriptAbortReason::Internal);
     }
     JsValue root = JsValue::make_undefined();
     auto run = compiled->exec_sync(root, nullptr, heap);

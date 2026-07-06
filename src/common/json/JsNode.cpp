@@ -105,6 +105,13 @@ JsValue JsValue::make_object(GcHeap &heap, std::size_t capacity) {
     return make_heap_value(&obj->hdr, JsHeapKind::Object);
 }
 
+JsValue JsValue::make_exception(ExceptionKind kind) {
+    JsValue result;
+    result.tag = to_u8(JsTag::Exception);
+    result.subtag = static_cast<std::uint8_t>(kind);
+    return result;
+}
+
 JsValue js_make_heap_ref(GcHeader *hdr, JsHeapKind kind) { return make_heap_value(hdr, kind); }
 
 JsValue js_make_borrowed_string(const char *data, std::size_t len, JsBorrowedEncoding encoding) {
@@ -142,6 +149,8 @@ JsNodeType js_value_type(const JsValue &value) {
             return JsNodeType::String;
         case JsTag::BorrowedBinary:
             return JsNodeType::Binary;
+        case JsTag::Exception:
+            return JsNodeType::Exception;
         case JsTag::HeapRef:
             switch (static_cast<JsHeapKind>(value.subtag)) {
                 case JsHeapKind::String:
@@ -161,6 +170,8 @@ JsNodeType js_value_type(const JsValue &value) {
     }
     return JsNodeType::Undefined;
 }
+
+ExceptionKind js_value_exception_kind(const JsValue &value) { return static_cast<ExceptionKind>(value.subtag); }
 
 bool js_value_is_string(const JsValue &value) { return js_value_type(value) == JsNodeType::String; }
 

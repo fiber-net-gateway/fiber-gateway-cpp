@@ -133,59 +133,31 @@ void InterpreterVm::iterate() {
         return;
     }
     state_ = State::Running;
-    auto handle_status = [&](ScriptStatus status, ConstValueHandle value, std::size_t epc) {
-        if (status) {
-            return true;
-        }
-        return handle_error(status_to_result(status, value ? *value : fiber::json::JsValue::make_undefined()), epc);
-    };
-    using BinaryOp = ScriptStatus (*)(ScriptRuntime &, ValueHandle, ConstValueHandle, ConstValueHandle) noexcept;
+    using BinaryOp = CallResult (*)(ScriptRuntime &, ConstValueHandle, ConstValueHandle, ResultPayload &) noexcept;
     auto apply_binary = [&](BinaryOp op, std::size_t epc) {
         FIBER_ASSERT(sp_ >= 2);
         fiber::json::JsValue *lhs = &stack_[sp_ - 2];
         fiber::json::JsValue *rhs = &stack_[sp_ - 1];
-        ScriptStatus status = op(runtime_, lhs, lhs, rhs);
-        if (!handle_status(status, lhs, epc)) {
-            return false;
-        }
-        if (status) {
-            --sp_;
-        }
-        return true;
-    };
-    using UnaryOp = ScriptStatus (*)(ValueHandle, ConstValueHandle) noexcept;
-    auto apply_unary = [&](UnaryOp op, std::size_t epc) {
-        FIBER_ASSERT(sp_ >= 1);
-        fiber::json::JsValue *value = &stack_[sp_ - 1];
-        ScriptStatus status = op(value, value);
-        if (!handle_status(status, value, epc)) {
-            return false;
-        }
-        return true;
-    };
-    using RuntimeUnaryOp = ScriptStatus (*)(ScriptRuntime &, ValueHandle, ConstValueHandle) noexcept;
-    auto apply_runtime_unary = [&](RuntimeUnaryOp op, std::size_t epc) {
-        FIBER_ASSERT(sp_ >= 1);
-        fiber::json::JsValue *value = &stack_[sp_ - 1];
-        ScriptStatus status = op(runtime_, value, value);
-        if (!handle_status(status, value, epc)) {
-            return false;
-        }
-        return true;
-    };
-    using AccessBinaryOp =
-            CallResult (*)(ScriptRuntime &, ConstValueHandle, ConstValueHandle, ResultPayload &) noexcept;
-    auto apply_access_binary = [&](AccessBinaryOp op, std::size_t epc) {
-        FIBER_ASSERT(sp_ >= 2);
-        fiber::json::JsValue *target = &stack_[sp_ - 2];
-        fiber::json::JsValue *addition = &stack_[sp_ - 1];
-        CallResult status = op(runtime_, target, addition, result_);
+        CallResult status = op(runtime_, lhs, rhs, result_);
         if (!handle_call_result(status, epc)) {
             return false;
         }
         if (status == CallResult::Success) {
-            *target = result_.value;
+            *lhs = result_.value;
             --sp_;
+        }
+        return true;
+    };
+    using UnaryOp = CallResult (*)(ScriptRuntime &, ConstValueHandle, ResultPayload &) noexcept;
+    auto apply_unary = [&](UnaryOp op, std::size_t epc) {
+        FIBER_ASSERT(sp_ >= 1);
+        fiber::json::JsValue *value = &stack_[sp_ - 1];
+        CallResult status = op(runtime_, value, result_);
+        if (!handle_call_result(status, epc)) {
+            return false;
+        }
+        if (status == CallResult::Success) {
+            *value = result_.value;
         }
         return true;
     };
@@ -313,7 +285,7 @@ void InterpreterVm::iterate() {
                 }
             } break;
             case ir::Code::UNARY_TYPEOF: {
-                if (!apply_runtime_unary(&Unaries::typeof_op, pc_ - 1)) {
+                if (!apply_unary(&Unaries::typeof_op, pc_ - 1)) {
                     return;
                 }
             } break;
@@ -350,22 +322,22 @@ void InterpreterVm::iterate() {
                 break;
             }
             case ir::Code::EXP_OBJECT:
-                if (!apply_access_binary(&Access::expand_object, pc_ - 1)) {
+                if (!apply_binary(&Access::expand_object, pc_ - 1)) {
                     return;
                 }
                 break;
             case ir::Code::EXP_ARRAY:
-                if (!apply_access_binary(&Access::expand_array, pc_ - 1)) {
+                if (!apply_binary(&Access::expand_array, pc_ - 1)) {
                     return;
                 }
                 break;
             case ir::Code::PUSH_ARRAY:
-                if (!apply_access_binary(&Access::push_array, pc_ - 1)) {
+                if (!apply_binary(&Access::push_array, pc_ - 1)) {
                     return;
                 }
                 break;
             case ir::Code::IDX_GET:
-                if (!apply_access_binary(&Access::index_get, pc_ - 1)) {
+                if (!apply_binary(&Access::index_get, pc_ - 1)) {
                     return;
                 }
                 break;
@@ -515,11 +487,12 @@ void InterpreterVm::iterate() {
             case ir::Code::ITERATE_INTO: {
                 std::size_t idx = static_cast<std::size_t>(instr >> kInstrumentLen);
                 FIBER_ASSERT(sp_ >= 1);
-                ScriptStatus status = Unaries::iterate(runtime_, &vars_[idx], &stack_[sp_ - 1]);
-                if (!handle_status(status, &vars_[idx], pc_ - 1)) {
+                CallResult status = Unaries::iterate(runtime_, &stack_[sp_ - 1], result_);
+                if (!handle_call_result(status, pc_ - 1)) {
                     return;
                 }
-                if (status) {
+                if (status == CallResult::Success) {
+                    vars_[idx] = result_.value;
                     --sp_;
                 }
                 break;
@@ -589,7 +562,8 @@ void InterpreterVm::iterate() {
             }
         }
     }
-    handle_error(make_abort(ScriptAbortReason::NoReturn, -1), pc_ == 0 ? 0 : pc_ - 1);
+    result_.value = fiber::json::JsValue::make_undefined();
+    state_ = State::Success;
 }
 
 void InterpreterVm::async_complete(void *context, ScriptStatus status) noexcept {

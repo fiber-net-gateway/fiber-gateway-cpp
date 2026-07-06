@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "script/Runtime.h"
+#include "script/ScriptResult.h"
 #include "script/run/Access.h"
 #include "script/run/Binaries.h"
 #include "script/run/Compares.h"
@@ -12,6 +13,8 @@ using fiber::json::GcObject;
 using fiber::json::GcString;
 using fiber::json::JsNodeType;
 using fiber::json::JsValue;
+using fiber::script::CallResult;
+using fiber::script::ResultPayload;
 
 namespace {
 
@@ -57,11 +60,10 @@ TEST(ScriptRuntimeOpsTest, BinaryPlusTypeError) {
     fiber::script::ScriptRuntime runtime(heap);
     auto lhs = handle(runtime, JsValue::make_object(heap, 0));
     auto rhs = handle(runtime, JsValue::make_integer(1));
-    auto out = handle(runtime, JsValue::make_undefined());
-    auto status = fiber::script::run::Binaries::plus(runtime, out, lhs, rhs);
-    ASSERT_FALSE(status.has_value());
-    ASSERT_TRUE(status.is_abort());
-    EXPECT_EQ(status.abort().reason, fiber::script::ScriptAbortReason::TypeError);
+    ResultPayload result;
+    auto status = fiber::script::run::Binaries::plus(runtime, lhs, rhs, result);
+    ASSERT_EQ(status, CallResult::Exception);
+    EXPECT_EQ(fiber::json::js_value_exception_kind(result.exception), fiber::json::ExceptionKind::TypeError);
 }
 
 TEST(ScriptRuntimeOpsTest, BinaryDivideByZero) {
@@ -69,11 +71,10 @@ TEST(ScriptRuntimeOpsTest, BinaryDivideByZero) {
     fiber::script::ScriptRuntime runtime(heap);
     auto lhs = handle(runtime, JsValue::make_integer(5));
     auto rhs = handle(runtime, JsValue::make_integer(0));
-    auto out = handle(runtime, JsValue::make_undefined());
-    auto status = fiber::script::run::Binaries::divide(runtime, out, lhs, rhs);
-    ASSERT_FALSE(status.has_value());
-    ASSERT_TRUE(status.is_abort());
-    EXPECT_EQ(status.abort().reason, fiber::script::ScriptAbortReason::DivisionByZero);
+    ResultPayload result;
+    auto status = fiber::script::run::Binaries::divide(runtime, lhs, rhs, result);
+    ASSERT_EQ(status, CallResult::Exception);
+    EXPECT_EQ(fiber::json::js_value_exception_kind(result.exception), fiber::json::ExceptionKind::RangeError);
 }
 
 TEST(ScriptRuntimeOpsTest, UnaryPlusTypeError) {
@@ -81,11 +82,10 @@ TEST(ScriptRuntimeOpsTest, UnaryPlusTypeError) {
     fiber::script::ScriptRuntime runtime(heap);
     char data[] = {'a'};
     auto value = handle(runtime, JsValue::make_native_string(data, sizeof(data)));
-    auto out = handle(runtime, JsValue::make_undefined());
-    auto status = fiber::script::run::Unaries::plus(out, value);
-    ASSERT_FALSE(status.has_value());
-    ASSERT_TRUE(status.is_abort());
-    EXPECT_EQ(status.abort().reason, fiber::script::ScriptAbortReason::TypeError);
+    ResultPayload result;
+    auto status = fiber::script::run::Unaries::plus(runtime, value, result);
+    ASSERT_EQ(status, CallResult::Exception);
+    EXPECT_EQ(fiber::json::js_value_exception_kind(result.exception), fiber::json::ExceptionKind::TypeError);
 }
 
 TEST(ScriptRuntimeOpsTest, AccessIndexSetInvalidKey) {
@@ -97,10 +97,10 @@ TEST(ScriptRuntimeOpsTest, AccessIndexSetInvalidKey) {
     char key_bytes[] = {'a'};
     auto key = handle(runtime, JsValue::make_native_string(key_bytes, sizeof(key_bytes)));
     auto value = handle(runtime, JsValue::make_integer(2));
-    fiber::script::ResultPayload result;
+    ResultPayload result;
     auto status = fiber::script::run::Access::index_set(runtime, arr, key, value, result);
-    ASSERT_EQ(status, fiber::script::CallResult::Abort);
-    EXPECT_EQ(result.abort.reason, fiber::script::ScriptAbortReason::IndexError);
+    ASSERT_EQ(status, CallResult::Exception);
+    EXPECT_EQ(fiber::json::js_value_exception_kind(result.exception), fiber::json::ExceptionKind::TypeError);
 }
 
 TEST(ScriptRuntimeOpsTest, AccessIndexSetOutOfBounds) {
@@ -111,10 +111,10 @@ TEST(ScriptRuntimeOpsTest, AccessIndexSetOutOfBounds) {
     ASSERT_TRUE(fiber::json::gc_array_push(&heap, arr_ptr, JsValue::make_integer(1)));
     auto key = handle(runtime, JsValue::make_integer(3));
     auto value = handle(runtime, JsValue::make_integer(2));
-    fiber::script::ResultPayload result;
+    ResultPayload result;
     auto status = fiber::script::run::Access::index_set(runtime, arr, key, value, result);
-    ASSERT_EQ(status, fiber::script::CallResult::Abort);
-    EXPECT_EQ(result.abort.reason, fiber::script::ScriptAbortReason::IndexError);
+    ASSERT_EQ(status, CallResult::Exception);
+    EXPECT_EQ(fiber::json::js_value_exception_kind(result.exception), fiber::json::ExceptionKind::RangeError);
 }
 
 TEST(ScriptRuntimeOpsTest, AccessPropSetNonObject) {
@@ -124,10 +124,10 @@ TEST(ScriptRuntimeOpsTest, AccessPropSetNonObject) {
     auto value = handle(runtime, JsValue::make_integer(2));
     char key_bytes[] = {'a'};
     auto key = handle(runtime, JsValue::make_native_string(key_bytes, sizeof(key_bytes)));
-    fiber::script::ResultPayload result;
+    ResultPayload result;
     auto status = fiber::script::run::Access::prop_set(runtime, parent, value, key, result);
-    ASSERT_EQ(status, fiber::script::CallResult::Abort);
-    EXPECT_EQ(result.abort.reason, fiber::script::ScriptAbortReason::IndexError);
+    ASSERT_EQ(status, CallResult::Exception);
+    EXPECT_EQ(fiber::json::js_value_exception_kind(result.exception), fiber::json::ExceptionKind::TypeError);
 }
 
 TEST(ScriptRuntimeOpsTest, InSemanticsArray) {
@@ -135,16 +135,16 @@ TEST(ScriptRuntimeOpsTest, InSemanticsArray) {
     fiber::script::ScriptRuntime runtime(heap);
     auto arr = handle(runtime, make_array(heap, {JsValue::make_integer(1), JsValue::make_integer(2)}));
     auto key = handle(runtime, JsValue::make_integer(1));
-    auto out = handle(runtime, JsValue::make_undefined());
-    auto hit = fiber::script::run::Binaries::in(runtime, out, key, arr);
-    ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(js_value_type(*out), JsNodeType::Boolean);
-    EXPECT_TRUE(js_value_bool(*out));
+    ResultPayload result;
+    auto hit = fiber::script::run::Binaries::in(runtime, key, arr, result);
+    ASSERT_EQ(hit, CallResult::Success);
+    EXPECT_EQ(js_value_type(result.value), JsNodeType::Boolean);
+    EXPECT_TRUE(js_value_bool(result.value));
 
     *key = JsValue::make_integer(2);
-    auto miss = fiber::script::run::Binaries::in(runtime, out, key, arr);
-    ASSERT_TRUE(miss.has_value());
-    EXPECT_FALSE(js_value_bool(*out));
+    auto miss = fiber::script::run::Binaries::in(runtime, key, arr, result);
+    ASSERT_EQ(miss, CallResult::Success);
+    EXPECT_FALSE(js_value_bool(result.value));
 }
 
 TEST(ScriptRuntimeOpsTest, InSemanticsObject) {
@@ -152,19 +152,19 @@ TEST(ScriptRuntimeOpsTest, InSemanticsObject) {
     fiber::script::ScriptRuntime runtime(heap);
     auto obj = handle(runtime, make_object_with_key(heap, "a", 1, JsValue::make_integer(1)));
     auto heap_key = handle(runtime, JsValue::make_string(heap, "a", 1));
-    auto out = handle(runtime, JsValue::make_undefined());
-    auto heap_hit = fiber::script::run::Binaries::in(runtime, out, heap_key, obj);
-    ASSERT_TRUE(heap_hit.has_value());
-    EXPECT_TRUE(js_value_bool(*out));
+    ResultPayload result;
+    auto heap_hit = fiber::script::run::Binaries::in(runtime, heap_key, obj, result);
+    ASSERT_EQ(heap_hit, CallResult::Success);
+    EXPECT_TRUE(js_value_bool(result.value));
 
     char key_bytes[] = {'a'};
     auto native_key = handle(runtime, JsValue::make_native_string(key_bytes, sizeof(key_bytes)));
-    auto native_hit = fiber::script::run::Binaries::in(runtime, out, native_key, obj);
-    ASSERT_TRUE(native_hit.has_value());
-    EXPECT_TRUE(js_value_bool(*out));
+    auto native_hit = fiber::script::run::Binaries::in(runtime, native_key, obj, result);
+    ASSERT_EQ(native_hit, CallResult::Success);
+    EXPECT_TRUE(js_value_bool(result.value));
 
     auto missing_key = handle(runtime, JsValue::make_string(heap, "b", 1));
-    auto miss = fiber::script::run::Binaries::in(runtime, out, missing_key, obj);
-    ASSERT_TRUE(miss.has_value());
-    EXPECT_FALSE(js_value_bool(*out));
+    auto miss = fiber::script::run::Binaries::in(runtime, missing_key, obj, result);
+    ASSERT_EQ(miss, CallResult::Success);
+    EXPECT_FALSE(js_value_bool(result.value));
 }
