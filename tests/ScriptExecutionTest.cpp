@@ -329,6 +329,23 @@ TEST(ScriptExecutionTest, RunFunctionThrowCaught) {
     EXPECT_EQ(value_to_string(result.value()), "boom");
 }
 
+TEST(ScriptExecutionTest, RethrowFromNestedCatchReachesOuterCatch) {
+    TestLibrary library;
+
+    auto compiled = compile_script("try { try { throw \"inner\"; } catch (e) { throw \"outer\"; } } "
+                                   "catch (e) { return e; }",
+                                   library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::json::GcHeap heap;
+    fiber::script::ScriptRuntime runtime(heap);
+    auto run = script.exec_sync(fiber::json::JsValue::make_undefined(), nullptr, runtime);
+    auto result = run();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(value_to_string(result.value()), "outer");
+}
+
 TEST(ScriptExecutionTest, AsyncFunctionSuspendsAndResumes) {
     DelayedAsyncFunction async_func;
     TestLibrary library(&async_func);

@@ -74,15 +74,14 @@ private:
     fiber::json::JsValue *prepare_call_args(std::size_t off, std::size_t count);
     fiber::json::JsValue *prepare_spread_call_args(std::size_t slot, std::uint32_t &argc);
     Library::HostCallFrame make_call_frame() const;
-    bool dispatch_call_site(const ir::Compiled::CallSite &site, AsyncResumeKind resume_kind);
+    bool dispatch_func_const(std::uint8_t op, const ir::Compiled::FuncConst &func_const, std::uint32_t encoded_argc,
+                             AsyncResumeKind resume_kind);
     bool apply_call_result(ScriptStatus status, const fiber::json::JsValue &value, AsyncResumeKind resume_kind,
                            std::size_t resume_epc);
     bool handle_call_result(CallResult status, std::size_t epc);
 
     bool catch_for_exception(std::size_t epc);
-    int search_catch(std::size_t epc) const;
     bool handle_error(ScriptResult error, std::size_t epc);
-    fiber::json::JsValue load_const(std::size_t operand_index) const noexcept;
     bool apply_async_ready();
 };
 

@@ -1,9 +1,11 @@
 #include "Compiler.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -39,8 +41,6 @@
 
 namespace fiber::script::ir {
 
-namespace {
-
 class CompilerImpl {
 public:
     Compiled compile(const ast::Node &node) {
@@ -56,9 +56,9 @@ public:
             emit_default_return(stmt->end_pos());
         }
         pop_scope();
-        compiled_.stack_size = max_stack_ > 0 ? static_cast<std::size_t>(max_stack_) : 1;
-        compiled_.var_table_size = next_var_index_;
-        return std::move(compiled_);
+        std::size_t stack_size = max_stack_ > 0 ? static_cast<std::size_t>(max_stack_) : 1;
+        return Compiled::build(stack_size, next_var_index_, codes_, positions_, constants_, func_consts_,
+                               exception_table_, payload_);
     }
 
 private:
@@ -76,12 +76,20 @@ private:
     static constexpr int kIteratorLen = 12;
     static constexpr int kIteratorOff = kInstrumentLen + kIteratorLen;
     static constexpr std::size_t kMaxIteratorVar = (1u << kIteratorLen) - 1u;
+    static constexpr std::uint32_t kMaxOperand24 = (1u << 24u) - 1u;
+    static constexpr std::uint32_t kMaxFuncIndex16 = (1u << 16u) - 1u;
+    static constexpr std::uint32_t kMaxArgCount8 = (1u << 8u) - 1u;
 
-    Compiled compiled_;
+    std::vector<std::int32_t> codes_;
+    std::vector<std::int32_t> positions_;
+    std::vector<Compiled::ConstantInit> constants_;
+    std::vector<Compiled::FuncConst> func_consts_;
+    std::vector<std::uint32_t> exception_table_;
+    std::vector<std::byte> payload_;
     std::vector<Scope> scopes_;
     std::vector<LoopContext> loops_;
-    std::unordered_map<const Library::HostCallable *, std::size_t> host_symbol_cache_;
-    std::unordered_map<std::string, std::size_t> string_operands_;
+    std::unordered_map<const Library::HostCallable *, std::size_t> func_const_cache_;
+    std::unordered_map<std::string, std::size_t> string_constants_;
     std::optional<std::size_t> undef_const_;
     std::optional<std::size_t> null_const_;
     std::optional<std::size_t> true_const_;
@@ -135,15 +143,24 @@ private:
     }
 
     std::size_t emit_raw(std::int32_t code, std::int32_t pos, int delta) {
-        compiled_.codes.push_back(code);
-        compiled_.positions.push_back(pos);
+        codes_.push_back(code);
+        positions_.push_back(pos);
         update_stack(delta);
-        return compiled_.codes.size() - 1;
+        return codes_.size() - 1;
     }
 
     std::size_t emit_op(std::uint8_t op, std::size_t operand, std::int32_t pos, int delta) {
-        std::int32_t code = static_cast<std::int32_t>(op) | (static_cast<std::int32_t>(operand) << 8);
-        return emit_raw(code, pos, delta);
+        FIBER_ASSERT(operand <= kMaxOperand24);
+        std::uint32_t code = static_cast<std::uint32_t>(op) | (static_cast<std::uint32_t>(operand) << 8u);
+        return emit_raw(static_cast<std::int32_t>(code), pos, delta);
+    }
+
+    std::size_t emit_func_call(std::uint8_t op, std::size_t func_index, std::size_t argc, std::int32_t pos, int delta) {
+        FIBER_ASSERT(func_index <= kMaxFuncIndex16);
+        FIBER_ASSERT(argc <= kMaxArgCount8);
+        std::uint32_t code = static_cast<std::uint32_t>(op) | (static_cast<std::uint32_t>(argc) << 8u) |
+                             (static_cast<std::uint32_t>(func_index) << 16u);
+        return emit_raw(static_cast<std::int32_t>(code), pos, delta);
     }
 
     std::size_t emit_jump(std::uint8_t op, std::size_t target, std::int32_t pos) {
@@ -155,69 +172,97 @@ private:
     }
 
     void patch_jump(std::size_t index, std::size_t target) {
-        std::int32_t code = compiled_.codes[index];
-        std::uint8_t op = static_cast<std::uint8_t>(code & 0xFF);
-        compiled_.codes[index] = static_cast<std::int32_t>(op) | (static_cast<std::int32_t>(target) << 8);
+        FIBER_ASSERT(target <= kMaxOperand24);
+        std::uint32_t code = static_cast<std::uint32_t>(codes_[index]);
+        std::uint8_t op = static_cast<std::uint8_t>(code & 0xFFu);
+        codes_[index] =
+                static_cast<std::int32_t>(static_cast<std::uint32_t>(op) | (static_cast<std::uint32_t>(target) << 8u));
     }
 
-    std::size_t add_host_symbol(const Library::HostCallable *callable) {
+    std::size_t add_func_const(const Library::HostCallable *callable) {
         FIBER_ASSERT(callable);
-        auto it = host_symbol_cache_.find(callable);
-        if (it != host_symbol_cache_.end()) {
+        auto it = func_const_cache_.find(callable);
+        if (it != func_const_cache_.end()) {
             return it->second;
         }
-        Compiled::HostSymbol symbol;
-        symbol.kind = callable->kind;
-        symbol.callable = callable;
-        compiled_.host_symbols.push_back(symbol);
-        std::size_t index = compiled_.host_symbols.size() - 1;
-        host_symbol_cache_.emplace(callable, index);
+        Compiled::FuncConst func;
+        func.user_data = callable->userdata;
+        switch (callable->kind) {
+            case Library::HostCallable::Kind::SyncFunction:
+                FIBER_ASSERT(callable->function);
+                func.sync_func = callable->function;
+                break;
+            case Library::HostCallable::Kind::AsyncFunction:
+                FIBER_ASSERT(callable->async_function);
+                func.async_func = callable->async_function;
+                break;
+            case Library::HostCallable::Kind::SyncConstant:
+                FIBER_ASSERT(callable->constant);
+                func.sync_ct = callable->constant;
+                break;
+            case Library::HostCallable::Kind::AsyncConstant:
+                FIBER_ASSERT(callable->async_constant);
+                func.async_ct = callable->async_constant;
+                break;
+        }
+        func_consts_.push_back(func);
+        std::size_t index = func_consts_.size() - 1;
+        func_const_cache_.emplace(callable, index);
         return index;
     }
 
-    std::size_t add_call_site(std::size_t host_symbol_index, std::uint16_t argc, std::uint16_t flags,
-                              std::int64_t position) {
-        Compiled::CallSite site;
-        site.host_symbol_index = static_cast<std::uint32_t>(host_symbol_index);
-        site.argc = argc;
-        site.flags = flags;
-        site.position = position;
-        compiled_.call_sites.push_back(site);
-        return compiled_.call_sites.size() - 1;
+    std::uint32_t append_payload(const void *data, std::size_t len) {
+        FIBER_ASSERT(len == 0 || data != nullptr);
+        FIBER_ASSERT(payload_.size() <= kMaxOperand24);
+        std::uint32_t offset = static_cast<std::uint32_t>(payload_.size());
+        if (len == 0) {
+            payload_.push_back(std::byte{0});
+            return offset;
+        }
+        const auto *bytes = static_cast<const std::byte *>(data);
+        payload_.insert(payload_.end(), bytes, bytes + len);
+        return offset;
     }
 
-    std::size_t add_string_operand(const std::string &value) {
-        auto it = string_operands_.find(value);
-        if (it != string_operands_.end()) {
+    std::size_t add_string_constant(std::string_view value) {
+        std::string key(value);
+        auto it = string_constants_.find(key);
+        if (it != string_constants_.end()) {
             return it->second;
         }
-        auto stored = std::make_unique<std::string>(value);
-        compiled_.string_pool.push_back(std::move(stored));
-        Compiled::Operand operand;
-        operand.kind = Compiled::OperandKind::InternedString;
-        operand.payload = compiled_.string_pool.size() - 1;
-        compiled_.operands.push_back(operand);
-        std::size_t index = compiled_.operands.size() - 1;
-        string_operands_.emplace(value, index);
+        Compiled::ConstantInit init;
+        init.value = fiber::json::JsValue::make_native_string(nullptr, value.size());
+        init.payload_offset = append_payload(value.data(), value.size());
+        constants_.push_back(init);
+        std::size_t index = constants_.size() - 1;
+        string_constants_.emplace(std::move(key), index);
         return index;
     }
 
-    std::size_t add_const_value(Compiled::ConstValue value) {
-        compiled_.const_pool.push_back(std::make_unique<Compiled::ConstValue>(std::move(value)));
-        Compiled::Operand operand;
-        operand.kind = Compiled::OperandKind::ConstValue;
-        operand.payload = compiled_.const_pool.size() - 1;
-        compiled_.operands.push_back(operand);
-        return compiled_.operands.size() - 1;
+    std::size_t add_const_value(const fiber::json::JsValue &value) {
+        Compiled::ConstantInit init;
+        init.value = value;
+        if (fiber::json::js_value_is_borrowed_string(value)) {
+            fiber::json::NativeStr text = fiber::json::js_value_native_string(value);
+            init.value = fiber::json::JsValue::make_native_string(nullptr, text.len);
+            init.payload_offset = append_payload(text.data, text.len);
+        } else if (fiber::json::js_value_is_borrowed_binary(value)) {
+            fiber::json::NativeBin bytes = fiber::json::js_value_native_binary(value);
+            init.value = fiber::json::JsValue::make_native_binary(nullptr, bytes.len);
+            init.payload_offset = append_payload(bytes.data, bytes.len);
+        } else {
+            FIBER_ASSERT(fiber::json::js_value_type(value) != fiber::json::JsNodeType::String);
+            FIBER_ASSERT(fiber::json::js_value_type(value) != fiber::json::JsNodeType::Binary);
+        }
+        constants_.push_back(init);
+        return constants_.size() - 1;
     }
 
     std::size_t const_undefined() {
         if (undef_const_) {
             return *undef_const_;
         }
-        Compiled::ConstValue cv;
-        cv.kind = Compiled::ConstValue::Kind::Undefined;
-        std::size_t idx = add_const_value(std::move(cv));
+        std::size_t idx = add_const_value(fiber::json::JsValue::make_undefined());
         undef_const_ = idx;
         return idx;
     }
@@ -226,9 +271,7 @@ private:
         if (null_const_) {
             return *null_const_;
         }
-        Compiled::ConstValue cv;
-        cv.kind = Compiled::ConstValue::Kind::Null;
-        std::size_t idx = add_const_value(std::move(cv));
+        std::size_t idx = add_const_value(fiber::json::JsValue::make_null());
         null_const_ = idx;
         return idx;
     }
@@ -240,10 +283,7 @@ private:
         if (!value && false_const_) {
             return *false_const_;
         }
-        Compiled::ConstValue cv;
-        cv.kind = Compiled::ConstValue::Kind::Boolean;
-        cv.bool_value = value;
-        std::size_t idx = add_const_value(std::move(cv));
+        std::size_t idx = add_const_value(fiber::json::JsValue::make_boolean(value));
         if (value) {
             true_const_ = idx;
         } else {
@@ -253,7 +293,6 @@ private:
     }
 
     std::size_t const_js_value(const fiber::json::JsValue &value) {
-        Compiled::ConstValue cv;
         switch (fiber::json::js_value_type(value)) {
             case fiber::json::JsNodeType::Undefined:
                 return const_undefined();
@@ -262,31 +301,10 @@ private:
             case fiber::json::JsNodeType::Boolean:
                 return const_bool(fiber::json::js_value_bool(value));
             case fiber::json::JsNodeType::Integer:
-                cv.kind = Compiled::ConstValue::Kind::Integer;
-                cv.int_value = fiber::json::js_value_int64(value);
-                break;
             case fiber::json::JsNodeType::Float:
-                cv.kind = Compiled::ConstValue::Kind::Float;
-                cv.float_value = fiber::json::js_value_double(value);
-                break;
-            case fiber::json::JsNodeType::String: {
-                FIBER_ASSERT(fiber::json::js_value_is_borrowed_string(value));
-                fiber::json::NativeStr text = fiber::json::js_value_native_string(value);
-                cv.kind = Compiled::ConstValue::Kind::String;
-                if (text.len > 0) {
-                    cv.text.assign(text.data, text.len);
-                }
-                break;
-            }
-            case fiber::json::JsNodeType::Binary: {
-                FIBER_ASSERT(fiber::json::js_value_is_borrowed_binary(value));
-                fiber::json::NativeBin bytes = fiber::json::js_value_native_binary(value);
-                cv.kind = Compiled::ConstValue::Kind::Binary;
-                if (bytes.len > 0) {
-                    cv.bytes.assign(bytes.data, bytes.data + bytes.len);
-                }
-                break;
-            }
+            case fiber::json::JsNodeType::String:
+            case fiber::json::JsNodeType::Binary:
+                return add_const_value(value);
             case fiber::json::JsNodeType::Array:
             case fiber::json::JsNodeType::Object:
             case fiber::json::JsNodeType::Interator:
@@ -294,7 +312,7 @@ private:
                 FIBER_ASSERT(false);
                 return const_undefined();
         }
-        return add_const_value(std::move(cv));
+        return const_undefined();
     }
 
     void emit_load_js_value(const fiber::json::JsValue &value, std::int32_t pos) {
@@ -372,13 +390,13 @@ private:
                 compile_statement(*if_stmt->then_branch());
             }
             std::size_t end_jump = emit_jump(Code::JUMP, 0, stmt.start_pos());
-            std::size_t else_target = compiled_.codes.size();
+            std::size_t else_target = codes_.size();
             patch_jump(else_jump, else_target);
             stack_depth_ = saved_depth;
             if (if_stmt->else_branch()) {
                 compile_statement(*if_stmt->else_branch());
             }
-            std::size_t end_target = compiled_.codes.size();
+            std::size_t end_target = codes_.size();
             patch_jump(end_jump, end_target);
             return;
         }
@@ -391,7 +409,7 @@ private:
             std::size_t key_idx = declare_var(foreach_stmt->key()->name());
             std::size_t value_idx = declare_var(foreach_stmt->value()->name());
 
-            std::size_t loop_start = compiled_.codes.size();
+            std::size_t loop_start = codes_.size();
             emit_op(Code::ITERATE_NEXT, iter_idx, stmt.start_pos(), 1);
             std::size_t exit_jump = emit_jump(Code::JUMP_IF_FALSE, 0, stmt.start_pos());
 
@@ -426,7 +444,7 @@ private:
             loops_.pop_back();
 
             emit_jump(Code::JUMP, loop_start, stmt.start_pos());
-            std::size_t loop_end = compiled_.codes.size();
+            std::size_t loop_end = codes_.size();
             patch_jump(exit_jump, loop_end);
             for (std::size_t jump_index: finished.break_jumps) {
                 patch_jump(jump_index, loop_end);
@@ -438,12 +456,12 @@ private:
             return;
         }
         if (auto *try_stmt = dynamic_cast<const ast::TryCatchStatement *>(&stmt)) {
-            std::size_t try_begin = compiled_.codes.size();
+            std::size_t try_begin = codes_.size();
             if (try_stmt->try_block()) {
                 compile_block(*try_stmt->try_block(), true);
             }
             std::size_t jump_over = emit_jump(Code::JUMP, 0, stmt.start_pos());
-            std::size_t catch_begin = compiled_.codes.size();
+            std::size_t catch_begin = codes_.size();
 
             push_scope();
             std::size_t catch_var = declare_var(try_stmt->identifier()->name());
@@ -454,12 +472,12 @@ private:
             }
             pop_scope();
 
-            std::size_t catch_end = compiled_.codes.size();
+            std::size_t catch_end = codes_.size();
             patch_jump(jump_over, catch_end);
 
-            compiled_.exception_table.push_back(static_cast<std::int32_t>(try_begin));
-            compiled_.exception_table.push_back(static_cast<std::int32_t>(catch_begin));
-            compiled_.exception_table.push_back(static_cast<std::int32_t>(catch_end));
+            exception_table_.push_back(static_cast<std::uint32_t>(try_begin));
+            exception_table_.push_back(static_cast<std::uint32_t>(catch_begin));
+            exception_table_.push_back(static_cast<std::uint32_t>(catch_end));
             return;
         }
         if (auto *break_stmt = dynamic_cast<const ast::BreakStatement *>(&stmt)) {
@@ -483,7 +501,7 @@ private:
 
     void compile_expression(const ast::Expression &expr) {
         if (auto *literal = dynamic_cast<const ast::Literal *>(&expr)) {
-            Compiled::ConstValue cv;
+            fiber::json::JsValue value = fiber::json::JsValue::make_undefined();
             switch (literal->kind()) {
                 case ast::Literal::Kind::NullValue:
                     emit_op(Code::LOAD_CONST, const_null(), expr.start_pos(), 1);
@@ -492,19 +510,17 @@ private:
                     emit_op(Code::LOAD_CONST, const_bool(literal->bool_value()), expr.start_pos(), 1);
                     return;
                 case ast::Literal::Kind::Integer:
-                    cv.kind = Compiled::ConstValue::Kind::Integer;
-                    cv.int_value = literal->int_value();
+                    value = fiber::json::JsValue::make_integer(literal->int_value());
                     break;
                 case ast::Literal::Kind::Float:
-                    cv.kind = Compiled::ConstValue::Kind::Float;
-                    cv.float_value = literal->float_value();
+                    value = fiber::json::JsValue::make_float(literal->float_value());
                     break;
                 case ast::Literal::Kind::String:
-                    cv.kind = Compiled::ConstValue::Kind::String;
-                    cv.text = literal->string_value();
+                    value = fiber::json::JsValue::make_native_string(literal->string_value().data(),
+                                                                     literal->string_value().size());
                     break;
             }
-            std::size_t idx = add_const_value(std::move(cv));
+            std::size_t idx = add_const_value(value);
             emit_op(Code::LOAD_CONST, idx, expr.start_pos(), 1);
             return;
         }
@@ -524,13 +540,13 @@ private:
         }
         if (auto *constant = dynamic_cast<const ast::ConstantVal *>(&expr)) {
             if (constant->is_async()) {
-                std::size_t symbol_idx = add_host_symbol(constant->async_constant());
-                std::size_t site_idx = add_call_site(symbol_idx, 0, Compiled::CallSiteNone, expr.start_pos());
-                emit_op(Code::CALL_ASYNC_CONST, site_idx, expr.start_pos(), 1);
+                FIBER_ASSERT(constant->async_constant()->kind == Library::HostCallable::Kind::AsyncConstant);
+                std::size_t func_idx = add_func_const(constant->async_constant());
+                emit_op(Code::CALL_ASYNC_CONST, func_idx, expr.start_pos(), 1);
             } else {
-                std::size_t symbol_idx = add_host_symbol(constant->constant());
-                std::size_t site_idx = add_call_site(symbol_idx, 0, Compiled::CallSiteNone, expr.start_pos());
-                emit_op(Code::CALL_CONST, site_idx, expr.start_pos(), 1);
+                FIBER_ASSERT(constant->constant()->kind == Library::HostCallable::Kind::SyncConstant);
+                std::size_t func_idx = add_func_const(constant->constant());
+                emit_op(Code::CALL_CONST, func_idx, expr.start_pos(), 1);
             }
             return;
         }
@@ -552,15 +568,13 @@ private:
                     emit_load_js_value(default_arg, expr.start_pos());
                 }
                 const Library::HostCallable *callable = call->is_async() ? call->async_func() : call->func();
-                std::size_t symbol_idx = add_host_symbol(callable);
+                FIBER_ASSERT(callable->kind == (call->is_async() ? Library::HostCallable::Kind::AsyncFunction
+                                                                 : Library::HostCallable::Kind::SyncFunction));
+                std::size_t func_idx = add_func_const(callable);
                 std::size_t arg_count = call->args().size() + call->default_args().size();
-                std::size_t site_idx = add_call_site(symbol_idx, static_cast<std::uint16_t>(arg_count),
-                                                     Compiled::CallSiteNone, expr.start_pos());
-                std::int32_t code =
-                        static_cast<std::int32_t>(call->is_async() ? Code::CALL_ASYNC_FUNC : Code::CALL_FUNC) |
-                        (static_cast<std::int32_t>(site_idx) << 8);
                 int delta = 1 - static_cast<int>(arg_count);
-                emit_raw(code, expr.start_pos(), delta);
+                emit_func_call(call->is_async() ? Code::CALL_ASYNC_FUNC : Code::CALL_FUNC, func_idx, arg_count,
+                               expr.start_pos(), delta);
                 return;
             }
             FIBER_ASSERT(call->default_args().empty());
@@ -580,9 +594,10 @@ private:
                 }
             }
             const Library::HostCallable *callable = call->is_async() ? call->async_func() : call->func();
-            std::size_t symbol_idx = add_host_symbol(callable);
-            std::size_t site_idx = add_call_site(symbol_idx, 0, Compiled::CallSiteSpreadArgs, expr.start_pos());
-            emit_op(call->is_async() ? Code::CALL_ASYNC_FUNC_SPREAD : Code::CALL_FUNC_SPREAD, site_idx,
+            FIBER_ASSERT(callable->kind == (call->is_async() ? Library::HostCallable::Kind::AsyncFunction
+                                                             : Library::HostCallable::Kind::SyncFunction));
+            std::size_t func_idx = add_func_const(callable);
+            emit_op(call->is_async() ? Code::CALL_ASYNC_FUNC_SPREAD : Code::CALL_FUNC_SPREAD, func_idx,
                     expr.start_pos(), 0);
             return;
         }
@@ -635,7 +650,7 @@ private:
                     emit_raw(static_cast<std::int32_t>(Code::IDX_SET_1), expr.start_pos(), -2);
                     continue;
                 }
-                std::size_t prop_idx = add_string_operand(entry.key.string_key);
+                std::size_t prop_idx = add_string_constant(entry.key.string_key);
                 if (entry.value) {
                     compile_expression(*entry.value);
                 } else {
@@ -653,7 +668,7 @@ private:
         }
         if (auto *prop = dynamic_cast<const ast::PropertyReference *>(&expr)) {
             compile_expression(*prop->parent());
-            std::size_t prop_idx = add_string_operand(prop->name());
+            std::size_t prop_idx = add_string_constant(prop->name());
             emit_op(Code::PROP_GET, prop_idx, expr.start_pos(), 0);
             return;
         }
@@ -728,7 +743,7 @@ private:
             }
             emit_raw(static_cast<std::int32_t>(Code::POP), expr.start_pos(), -1);
             compile_expression(*logic->right());
-            std::size_t end_target = compiled_.codes.size();
+            std::size_t end_target = codes_.size();
             patch_jump(end_jump, end_target);
             return;
         }
@@ -761,11 +776,11 @@ private:
             int saved_depth = stack_depth_;
             compile_expression(*ternary->if_true());
             std::size_t end_jump = emit_jump(Code::JUMP, 0, expr.start_pos());
-            std::size_t else_target = compiled_.codes.size();
+            std::size_t else_target = codes_.size();
             patch_jump(else_jump, else_target);
             stack_depth_ = saved_depth;
             compile_expression(*ternary->if_false());
-            std::size_t end_target = compiled_.codes.size();
+            std::size_t end_target = codes_.size();
             patch_jump(end_jump, end_target);
             return;
         }
@@ -798,7 +813,7 @@ private:
         if (auto *prop = dynamic_cast<const ast::PropertyReference *>(left)) {
             compile_expression(*prop->parent());
             compile_expression(*right);
-            std::size_t prop_idx = add_string_operand(prop->name());
+            std::size_t prop_idx = add_string_constant(prop->name());
             emit_op(Code::PROP_SET, prop_idx, assign.start_pos(), -1);
             return;
         }
@@ -813,13 +828,9 @@ private:
     }
 };
 
-} // namespace
-
 Compiled Compiler::compile(const ast::Node &node) {
     CompilerImpl compiler;
-    Compiled compiled = compiler.compile(node);
-    FIBER_ASSERT(compiled.validate_operands());
-    return compiled;
+    return compiler.compile(node);
 }
 
 } // namespace fiber::script::ir
