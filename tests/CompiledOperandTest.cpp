@@ -128,7 +128,12 @@ Compiled compile_script(std::string_view script, Library &library) {
     fiber::script::parse::Parser parser(library, true);
     auto parsed = parser.parse_script(script);
     EXPECT_TRUE(parsed.has_value()) << parsed.error().message;
-    return fiber::script::ir::Compiler::compile(*parsed.value());
+    auto compiled = fiber::script::ir::Compiler::compile(*parsed.value());
+    if (!compiled) {
+        ADD_FAILURE() << (compiled.error().message ? compiled.error().message : "compile failed");
+        return {};
+    }
+    return std::move(compiled.value());
 }
 
 std::size_t operand_index_for_code(std::int32_t code) {

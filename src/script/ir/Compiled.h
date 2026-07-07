@@ -8,6 +8,7 @@
 #include "../JsValue.h"
 #include "../Library.h"
 #include "Code.h"
+#include "CompileResult.h"
 
 namespace fiber::script::ir {
 
@@ -56,10 +57,12 @@ private:
         std::uint32_t payload_offset = kNoPayload;
     };
 
-    static Compiled build(std::size_t stack_size, std::size_t var_table_size, std::span<const std::int32_t> codes,
-                          std::span<const std::int32_t> positions, std::span<const ConstantInit> constants,
-                          std::span<const FuncConst> func_consts, std::span<const std::uint32_t> exception_table,
-                          std::span<const std::byte> payload);
+    static CompileResult<Compiled> build(std::size_t stack_size, std::size_t var_table_size,
+                                         std::span<const std::int32_t> codes, std::span<const std::int32_t> positions,
+                                         std::span<const ConstantInit> constants,
+                                         std::span<const FuncConst> func_consts,
+                                         std::span<const std::uint32_t> exception_table,
+                                         std::span<const std::byte> payload);
 
     void reset() noexcept;
     void move_from(Compiled &other) noexcept;

@@ -2,7 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "script/Library.h"
@@ -47,12 +49,89 @@ public:
     }
 };
 
+fiber::script::ScriptStatus compile_error_dummy(void *userdata, const fiber::script::Library::HostCallFrame &frame,
+                                                const fiber::script::Library::Arguments &arguments,
+                                                fiber::script::ValueHandle out) noexcept {
+    (void) userdata;
+    (void) frame;
+    (void) arguments;
+    *out = fiber::script::JsValue::make_undefined();
+    return fiber::script::ScriptStatus::success();
+}
+
+class CompileErrorLibrary final : public fiber::script::Library {
+public:
+    CompileErrorLibrary() {
+        func_.kind = HostCallable::Kind::SyncFunction;
+        func_.function = &compile_error_dummy;
+        unsupported_default_[0] = fiber::script::JsValue::make_exception(fiber::script::ExceptionKind::TypeError);
+    }
+
+    FunctionMatchResult resolve_func(std::string_view name, const FunctionMatchRequest &request) const override {
+        if (name == "variadic") {
+            FunctionSignature signature;
+            signature.required_argc = 0;
+            signature.fixed_argc = 0;
+            signature.variadic = true;
+            return FunctionMatchResult::found(&func_, signature, nullptr, 0);
+        }
+        if (name == "defaultException") {
+            if (request.has_spread || request.known_argc > 1) {
+                return FunctionMatchResult::arity_mismatch();
+            }
+            FunctionSignature signature;
+            signature.required_argc = 0;
+            signature.fixed_argc = 1;
+            signature.variadic = false;
+            const std::uint16_t default_count = request.known_argc == 0 ? 1 : 0;
+            const fiber::script::JsValue *defaults = default_count == 0 ? nullptr : unsupported_default_;
+            return FunctionMatchResult::found(&func_, signature, defaults, default_count);
+        }
+        return FunctionMatchResult::not_found();
+    }
+
+    FunctionMatchResult resolve_async_func(std::string_view name, const FunctionMatchRequest &request) const override {
+        (void) name;
+        (void) request;
+        return FunctionMatchResult::not_found();
+    }
+
+    const HostCallable *resolve_constant(std::string_view namespace_name, std::string_view key) const override {
+        (void) namespace_name;
+        (void) key;
+        return nullptr;
+    }
+
+    const HostCallable *resolve_async_constant(std::string_view namespace_name, std::string_view key) const override {
+        (void) namespace_name;
+        (void) key;
+        return nullptr;
+    }
+
+    DirectiveDef *resolve_directive_def(std::string_view type, std::string_view name,
+                                        const std::vector<fiber::script::JsValue> &literals) const override {
+        (void) type;
+        (void) name;
+        (void) literals;
+        return nullptr;
+    }
+
+private:
+    HostCallable func_{};
+    fiber::script::JsValue unsupported_default_[1]{};
+};
+
 fiber::script::ir::Compiled compile_script(std::string_view script) {
     TestLibrary library;
     fiber::script::parse::Parser parser(library, true);
     auto parsed = parser.parse_script(script);
     EXPECT_TRUE(parsed.has_value()) << parsed.error().message;
-    return fiber::script::ir::Compiler::compile(*parsed.value());
+    auto compiled = fiber::script::ir::Compiler::compile(*parsed.value());
+    if (!compiled) {
+        ADD_FAILURE() << (compiled.error().message ? compiled.error().message : "compile failed");
+        return {};
+    }
+    return std::move(compiled.value());
 }
 
 std::vector<std::uint8_t> extract_opcodes(const fiber::script::ir::Compiled &compiled) {
@@ -160,4 +239,35 @@ TEST(ScriptCompilerTest, EmitsForeachLoopWithBreakContinue) {
     EXPECT_TRUE(has_back_edge);
     EXPECT_TRUE(has_break_jump);
     EXPECT_LE(loop_end, compiled.code_size());
+}
+
+TEST(ScriptCompilerTest, ReportsTooManyDirectCallArguments) {
+    CompileErrorLibrary library;
+    std::string script = "variadic(";
+    for (std::size_t i = 0; i < 256; ++i) {
+        if (i != 0) {
+            script.push_back(',');
+        }
+        script.push_back('0');
+    }
+    script.append(");");
+
+    fiber::script::parse::Parser parser(library, true);
+    auto parsed = parser.parse_script(script);
+    ASSERT_TRUE(parsed.has_value()) << parsed.error().message;
+
+    auto compiled = fiber::script::ir::Compiler::compile(*parsed.value());
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().reason, fiber::script::ir::CompileErrorReason::TooManyArguments);
+}
+
+TEST(ScriptCompilerTest, ReportsUnsupportedDefaultConstantType) {
+    CompileErrorLibrary library;
+    fiber::script::parse::Parser parser(library, true);
+    auto parsed = parser.parse_script("defaultException();");
+    ASSERT_TRUE(parsed.has_value()) << parsed.error().message;
+
+    auto compiled = fiber::script::ir::Compiler::compile(*parsed.value());
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().reason, fiber::script::ir::CompileErrorReason::UnsupportedConstant);
 }

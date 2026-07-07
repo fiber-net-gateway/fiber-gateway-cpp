@@ -19,7 +19,15 @@ std::expected<Script, parse::ParseError> compile_script(Library &library, std::s
     if (!optimised) {
         return std::unexpected(parse::ParseError{"optimise failed", 0});
     }
-    ir::Compiled compiled = ir::Compiler::compile(*optimised);
+    auto compiled_result = ir::Compiler::compile(*optimised);
+    if (!compiled_result) {
+        const ir::CompileError &error = compiled_result.error();
+        return std::unexpected(parse::ParseError{
+                error.message ? error.message : "compile failed",
+                error.position < 0 ? 0 : static_cast<std::size_t>(error.position),
+        });
+    }
+    ir::Compiled compiled = std::move(compiled_result.value());
     return Script(std::make_shared<ir::Compiled>(std::move(compiled)));
 }
 

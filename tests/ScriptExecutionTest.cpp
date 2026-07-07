@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "script/JsGc.h"
 #include "script/Library.h"
@@ -262,7 +263,12 @@ fiber::script::ir::Compiled compile_script(std::string_view script, fiber::scrip
     fiber::script::parse::Parser parser(library, true);
     auto parsed = parser.parse_script(script);
     EXPECT_TRUE(parsed.has_value()) << parsed.error().message;
-    return fiber::script::ir::Compiler::compile(*parsed.value());
+    auto compiled = fiber::script::ir::Compiler::compile(*parsed.value());
+    if (!compiled) {
+        ADD_FAILURE() << (compiled.error().message ? compiled.error().message : "compile failed");
+        return {};
+    }
+    return std::move(compiled.value());
 }
 
 std::string value_to_string(const fiber::script::JsValue &value) {
