@@ -5,8 +5,8 @@
 #include <cstdint>
 #include <span>
 
-#include "../Library.h"
 #include "../JsValue.h"
+#include "../Library.h"
 #include "Code.h"
 
 namespace fiber::script::ir {

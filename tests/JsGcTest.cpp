@@ -63,7 +63,8 @@ TEST(JsGcTest, IteratorSnapshotBytesAreAccounted) {
     ASSERT_TRUE(fiber::script::gc_iterator_next(&heap, iter, out, done));
     ASSERT_FALSE(done);
 
-    EXPECT_EQ(fiber::script::gc_bytes_used(heap), before_snapshot + fiber::script::gc_estimate_object_snapshot_bytes(2));
+    EXPECT_EQ(fiber::script::gc_bytes_used(heap),
+              before_snapshot + fiber::script::gc_estimate_object_snapshot_bytes(2));
 }
 
 class SingleValueProvider final : public GcRootSet::RootProvider {

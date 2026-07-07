@@ -8,16 +8,16 @@
 #include "script/JsGc.h"
 #include "script/json/JsValueEncode.h"
 
+using fiber::json::Generator;
+using fiber::json::OutputSink;
 using fiber::script::GcArray;
 using fiber::script::GcException;
 using fiber::script::GcHeap;
 using fiber::script::GcObject;
 using fiber::script::GcString;
-using fiber::json::Generator;
 using fiber::script::JsHeapKind;
 using fiber::script::JsNodeType;
 using fiber::script::JsValue;
-using fiber::json::OutputSink;
 
 namespace {
 class StringSink final : public OutputSink {

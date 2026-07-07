@@ -7,13 +7,13 @@
 #include "script/run/Compares.h"
 #include "script/run/Unaries.h"
 
+using fiber::script::CallResult;
 using fiber::script::GcArray;
 using fiber::script::GcHeap;
 using fiber::script::GcObject;
 using fiber::script::GcString;
 using fiber::script::JsNodeType;
 using fiber::script::JsValue;
-using fiber::script::CallResult;
 using fiber::script::ResultPayload;
 
 namespace {

@@ -7,9 +7,9 @@
 
 #include "../async/Task.h"
 #include "AsyncTask.h"
+#include "JsValue.h"
 #include "ScriptResult.h"
 #include "ir/Compiled.h"
-#include "JsValue.h"
 
 namespace fiber::script {
 class GcHeap;
@@ -46,7 +46,8 @@ private:
 
     ScriptRun(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach, ScriptRuntime &runtime);
 
-    ScriptRun(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach, fiber::script::GcHeap &heap);
+    ScriptRun(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach,
+              fiber::script::GcHeap &heap);
 
     AsyncTask run_async_task();
 

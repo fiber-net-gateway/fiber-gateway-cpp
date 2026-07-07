@@ -199,8 +199,8 @@ void StdLibrary::register_async_func(std::string name, FunctionSignature signatu
 }
 
 void StdLibrary::register_async_func(std::string name, FunctionSignature signature,
-                                     std::vector<fiber::script::JsValue> defaults, AsyncFunction function, void *userdata,
-                                     const char *debug_name) {
+                                     std::vector<fiber::script::JsValue> defaults, AsyncFunction function,
+                                     void *userdata, const char *debug_name) {
     signature.default_count = static_cast<std::uint16_t>(defaults.size());
     signature.defaults = nullptr;
     FIBER_ASSERT(function != nullptr);

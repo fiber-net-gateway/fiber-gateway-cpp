@@ -27,8 +27,9 @@ public:
                        Function function, void *userdata = nullptr, const char *debug_name = nullptr);
     void register_async_func(std::string name, FunctionSignature signature, AsyncFunction function,
                              void *userdata = nullptr, const char *debug_name = nullptr);
-    void register_async_func(std::string name, FunctionSignature signature, std::vector<fiber::script::JsValue> defaults,
-                             AsyncFunction function, void *userdata = nullptr, const char *debug_name = nullptr);
+    void register_async_func(std::string name, FunctionSignature signature,
+                             std::vector<fiber::script::JsValue> defaults, AsyncFunction function,
+                             void *userdata = nullptr, const char *debug_name = nullptr);
     void register_constant(std::string name, Constant constant, void *userdata = nullptr,
                            const char *debug_name = nullptr);
     void register_async_constant(std::string name, AsyncConstant constant, void *userdata = nullptr,
