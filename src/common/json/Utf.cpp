@@ -6,7 +6,7 @@
 
 namespace fiber::json {
 
-bool utf8_next_codepoint(const char *data, std::size_t len, std::size_t &pos, std::uint32_t &codepoint) {
+bool utf8_next_codepoint(const char *data, std::size_t len, std::size_t &pos, std::uint32_t &codepoint) noexcept {
     unsigned char ch = static_cast<unsigned char>(data[pos]);
     if (ch < 0x80) {
         codepoint = ch;
@@ -31,7 +31,7 @@ bool utf8_next_codepoint(const char *data, std::size_t len, std::size_t &pos, st
     } else {
         return false;
     }
-    if (pos + static_cast<std::size_t>(needed) >= len) {
+    if (static_cast<std::size_t>(needed) >= len - pos) {
         return false;
     }
     for (int idx = 1; idx <= needed; ++idx) {
@@ -49,7 +49,7 @@ bool utf8_next_codepoint(const char *data, std::size_t len, std::size_t &pos, st
     return true;
 }
 
-bool utf8_scan(const char *data, std::size_t len, Utf8ScanResult &out) {
+bool utf8_scan(const char *data, std::size_t len, Utf8ScanResult &out) noexcept {
     out = {};
     if (len == 0) {
         return true;
@@ -71,12 +71,12 @@ bool utf8_scan(const char *data, std::size_t len, Utf8ScanResult &out) {
     return true;
 }
 
-bool utf8_validate(const char *data, std::size_t len) {
+bool utf8_validate(const char *data, std::size_t len) noexcept {
     Utf8ScanResult tmp;
     return utf8_scan(data, len, tmp);
 }
 
-bool utf8_write_bytes(const char *data, std::size_t len, std::uint8_t *dst, std::size_t dst_len) {
+bool utf8_write_bytes(const char *data, std::size_t len, std::uint8_t *dst, std::size_t dst_len) noexcept {
     if (len == 0) {
         return true;
     }
@@ -101,7 +101,7 @@ bool utf8_write_bytes(const char *data, std::size_t len, std::uint8_t *dst, std:
     return out_pos == dst_len;
 }
 
-bool utf8_write_utf16(const char *data, std::size_t len, char16_t *dst, std::size_t dst_len) {
+bool utf8_write_utf16(const char *data, std::size_t len, char16_t *dst, std::size_t dst_len) noexcept {
     if (len == 0) {
         return true;
     }

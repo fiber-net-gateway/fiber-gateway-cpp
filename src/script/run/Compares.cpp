@@ -3,11 +3,10 @@
 #include "../../common/json/Utf.h"
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
-#include <string>
 
 namespace fiber::script::run {
 
@@ -84,56 +83,51 @@ enum class StringKind : std::uint8_t {
     NativeUtf8,
 };
 
-bool string_to_utf8_copy(const fiber::script::JsValue &value, std::string &out) {
-    out.clear();
-    if (fiber::script::js_value_type(value) != fiber::script::JsNodeType::String) {
-        return false;
-    }
-    if (fiber::script::js_value_is_borrowed_string(value)) {
-        fiber::script::NativeStr native = fiber::script::js_value_native_string(value);
-        if (!fiber::json::utf8_validate(native.data, native.len)) {
-            return false;
-        }
-        if (native.len > 0) {
-            out.assign(native.data, native.len);
-        }
-        return true;
-    }
-    auto *str = as_heap_string(value);
-    if (!fiber::script::gc_string_to_utf8(str, out)) {
-        return false;
-    }
-    return true;
-}
-
-bool ascii_is_space(char ch) noexcept {
+bool ascii_is_space(char16_t ch) noexcept {
     return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v';
 }
 
-bool string_to_number(const fiber::script::JsValue &value, double &out) {
-    std::string buffer;
-    if (!string_to_utf8_copy(value, buffer)) {
-        return false;
+bool ascii_is_digit(char16_t ch) noexcept { return ch >= '0' && ch <= '9'; }
+
+int ascii_hex_digit(char16_t ch) noexcept {
+    if (ch >= '0' && ch <= '9') {
+        return static_cast<int>(ch - '0');
     }
-    std::size_t start = 0;
-    std::size_t end = buffer.size();
-    while (start < end && ascii_is_space(buffer[start])) {
-        start += 1;
+    if (ch >= 'a' && ch <= 'f') {
+        return static_cast<int>(ch - 'a') + 10;
     }
-    while (end > start && ascii_is_space(buffer[end - 1])) {
-        end -= 1;
+    if (ch >= 'A' && ch <= 'F') {
+        return static_cast<int>(ch - 'A') + 10;
     }
-    if (start == end) {
-        out = 0.0;
-        return true;
+    return -1;
+}
+
+bool ascii_eq_ci(char16_t lhs, char rhs) noexcept {
+    if (lhs >= 'A' && lhs <= 'Z') {
+        lhs = static_cast<char16_t>(lhs + ('a' - 'A'));
     }
-    std::string view = buffer.substr(start, end - start);
-    char *end_ptr = nullptr;
-    out = std::strtod(view.c_str(), &end_ptr);
-    if (end_ptr != view.c_str() + view.size()) {
-        out = std::numeric_limits<double>::quiet_NaN();
+    if (rhs >= 'A' && rhs <= 'Z') {
+        rhs = static_cast<char>(rhs + ('a' - 'A'));
     }
-    return true;
+    return lhs == static_cast<unsigned char>(rhs);
+}
+
+void clamp_exp_add(int &exp, int delta) noexcept {
+    constexpr int kExpCap = 100000;
+    if (delta > 0) {
+        exp = exp >= kExpCap ? kExpCap : exp + 1;
+    } else if (delta < 0) {
+        exp = exp <= -kExpCap ? -kExpCap : exp - 1;
+    }
+}
+
+void clamp_exp_add_many(int &exp, int delta) noexcept {
+    constexpr int kExpCap = 100000;
+    if (delta > 0) {
+        exp = exp > kExpCap - delta ? kExpCap : exp + delta;
+    } else if (delta < 0) {
+        exp = exp < -kExpCap - delta ? -kExpCap : exp + delta;
+    }
 }
 
 struct StringCursor {
@@ -149,38 +143,41 @@ struct StringCursor {
     bool malformed = false;
 };
 
-bool init_string_cursor(const fiber::script::JsValue &value, StringCursor &out) {
+bool init_heap_string_cursor(const fiber::script::GcString *str, StringCursor &out) noexcept {
+    out = {};
+    if (!str) {
+        return false;
+    }
+    if (str->encoding == fiber::script::GcStringEncoding::Byte) {
+        out.kind = StringKind::HeapByte;
+        out.bytes = str->data8;
+    } else {
+        out.kind = StringKind::HeapUtf16;
+        out.u16 = str->data16;
+    }
+    out.len = str->len;
+    return out.len == 0 || out.bytes || out.u16;
+}
+
+bool init_native_string_cursor(fiber::script::NativeStr native, StringCursor &out) noexcept {
+    out = {};
+    out.kind = StringKind::NativeUtf8;
+    out.utf8 = native.data;
+    out.len = native.len;
+    return out.len == 0 || out.utf8;
+}
+
+bool init_string_cursor(const fiber::script::JsValue &value, StringCursor &out) noexcept {
     if (fiber::script::js_value_type(value) != fiber::script::JsNodeType::String) {
         return false;
     }
     if (!fiber::script::js_value_is_borrowed_string(value)) {
-        auto *str = as_heap_string(value);
-        if (!str) {
-            return false;
-        }
-        if (str->encoding == fiber::script::GcStringEncoding::Byte) {
-            out.kind = StringKind::HeapByte;
-            out.bytes = str->data8;
-        } else {
-            out.kind = StringKind::HeapUtf16;
-            out.u16 = str->data16;
-        }
-        out.len = str->len;
-        if (out.len > 0 && !out.bytes && !out.u16) {
-            return false;
-        }
-        return true;
+        return init_heap_string_cursor(as_heap_string(value), out);
     }
-    out.kind = StringKind::NativeUtf8;
-    out.utf8 = fiber::script::js_value_native_string(value).data;
-    out.len = fiber::script::js_value_native_string(value).len;
-    if (out.len > 0 && !out.utf8) {
-        return false;
-    }
-    return true;
+    return init_native_string_cursor(fiber::script::js_value_native_string(value), out);
 }
 
-bool cursor_next(StringCursor &cursor, char16_t &unit) {
+bool cursor_next(StringCursor &cursor, char16_t &unit) noexcept {
     if (cursor.has_pending) {
         unit = cursor.pending;
         cursor.has_pending = false;
@@ -222,7 +219,414 @@ bool cursor_next(StringCursor &cursor, char16_t &unit) {
     return false;
 }
 
-bool compare_strings(const fiber::script::JsValue &lhs, const fiber::script::JsValue &rhs, int &result) {
+struct UnitReader {
+    StringCursor cursor;
+    bool has_saved = false;
+    char16_t saved = 0;
+};
+
+bool read_unit(UnitReader &reader, char16_t &unit) noexcept {
+    if (reader.has_saved) {
+        unit = reader.saved;
+        reader.has_saved = false;
+        return true;
+    }
+    return cursor_next(reader.cursor, unit);
+}
+
+void unread_unit(UnitReader &reader, char16_t unit) noexcept {
+    reader.saved = unit;
+    reader.has_saved = true;
+}
+
+bool read_next(UnitReader &reader, char16_t &unit, bool &has_unit) noexcept {
+    has_unit = read_unit(reader, unit);
+    return has_unit || !reader.cursor.malformed;
+}
+
+bool drain_remaining(UnitReader &reader) noexcept {
+    char16_t unit = 0;
+    while (read_unit(reader, unit)) {
+    }
+    return !reader.cursor.malformed;
+}
+
+bool finish_nan(UnitReader &reader, double &out) noexcept {
+    if (!drain_remaining(reader)) {
+        return false;
+    }
+    out = std::numeric_limits<double>::quiet_NaN();
+    return true;
+}
+
+bool trailing_spaces_only(UnitReader &reader, bool &only_spaces) noexcept {
+    only_spaces = true;
+    char16_t unit = 0;
+    while (read_unit(reader, unit)) {
+        if (!ascii_is_space(unit)) {
+            only_spaces = false;
+            return drain_remaining(reader);
+        }
+    }
+    return !reader.cursor.malformed;
+}
+
+bool read_ascii_ci(UnitReader &reader, char expected) noexcept {
+    char16_t unit = 0;
+    return read_unit(reader, unit) && ascii_eq_ci(unit, expected);
+}
+
+bool parse_nan(UnitReader &reader, double &out) noexcept {
+    if (!read_ascii_ci(reader, 'a') || !read_ascii_ci(reader, 'n')) {
+        return finish_nan(reader, out);
+    }
+    bool only_spaces = true;
+    if (!trailing_spaces_only(reader, only_spaces)) {
+        return false;
+    }
+    out = std::numeric_limits<double>::quiet_NaN();
+    return true;
+}
+
+bool parse_infinity(UnitReader &reader, double sign, double &out) noexcept {
+    if (!read_ascii_ci(reader, 'n') || !read_ascii_ci(reader, 'f')) {
+        return finish_nan(reader, out);
+    }
+    char16_t unit = 0;
+    bool has_unit = false;
+    if (!read_next(reader, unit, has_unit)) {
+        return false;
+    }
+    if (has_unit && ascii_eq_ci(unit, 'i')) {
+        if (!read_ascii_ci(reader, 'n') || !read_ascii_ci(reader, 'i') || !read_ascii_ci(reader, 't') ||
+            !read_ascii_ci(reader, 'y')) {
+            return finish_nan(reader, out);
+        }
+    } else if (has_unit) {
+        unread_unit(reader, unit);
+    }
+    bool only_spaces = true;
+    if (!trailing_spaces_only(reader, only_spaces)) {
+        return false;
+    }
+    if (!only_spaces) {
+        out = std::numeric_limits<double>::quiet_NaN();
+        return true;
+    }
+    out = sign * std::numeric_limits<double>::infinity();
+    return true;
+}
+
+double scale_decimal(double mantissa, int exp) noexcept {
+    if (mantissa == 0.0) {
+        return mantissa;
+    }
+    if (exp > 308) {
+        return std::numeric_limits<double>::infinity();
+    }
+    if (exp < -400) {
+        return 0.0;
+    }
+    return mantissa * std::pow(10.0, static_cast<double>(exp));
+}
+
+double scale_binary(double mantissa, int exp) noexcept {
+    if (mantissa == 0.0) {
+        return mantissa;
+    }
+    if (exp > 1024) {
+        return std::numeric_limits<double>::infinity();
+    }
+    if (exp < -1100) {
+        return 0.0;
+    }
+    return std::ldexp(mantissa, exp);
+}
+
+bool parse_hex_number(UnitReader &reader, double sign, double &out) noexcept {
+    constexpr int kMaxSignificantHexDigits = 13;
+    double mantissa = 0.0;
+    int significant_digits = 0;
+    int binary_exp = 0;
+    bool saw_digit = false;
+    bool saw_nonzero = false;
+    auto add_digit = [&](int digit, bool after_dot) noexcept {
+        saw_digit = true;
+        if (digit != 0 || saw_nonzero) {
+            saw_nonzero = true;
+            if (significant_digits < kMaxSignificantHexDigits) {
+                mantissa = mantissa * 16.0 + static_cast<double>(digit);
+                ++significant_digits;
+                if (after_dot) {
+                    clamp_exp_add_many(binary_exp, -4);
+                }
+            } else if (!after_dot) {
+                clamp_exp_add_many(binary_exp, 4);
+            }
+        } else if (after_dot) {
+            clamp_exp_add_many(binary_exp, -4);
+        }
+    };
+
+    char16_t unit = 0;
+    bool has_unit = false;
+    if (!read_next(reader, unit, has_unit)) {
+        return false;
+    }
+    while (has_unit) {
+        int digit = ascii_hex_digit(unit);
+        if (digit < 0) {
+            break;
+        }
+        add_digit(digit, false);
+        if (!read_next(reader, unit, has_unit)) {
+            return false;
+        }
+    }
+    if (has_unit && unit == '.') {
+        if (!read_next(reader, unit, has_unit)) {
+            return false;
+        }
+        while (has_unit) {
+            int digit = ascii_hex_digit(unit);
+            if (digit < 0) {
+                break;
+            }
+            add_digit(digit, true);
+            if (!read_next(reader, unit, has_unit)) {
+                return false;
+            }
+        }
+    }
+    if (!saw_digit) {
+        return finish_nan(reader, out);
+    }
+
+    int exponent = 0;
+    if (has_unit && (unit == 'p' || unit == 'P')) {
+        int exponent_sign = 1;
+        if (!read_next(reader, unit, has_unit)) {
+            return false;
+        }
+        if (has_unit && (unit == '+' || unit == '-')) {
+            exponent_sign = unit == '-' ? -1 : 1;
+            if (!read_next(reader, unit, has_unit)) {
+                return false;
+            }
+        }
+        if (!has_unit || !ascii_is_digit(unit)) {
+            return finish_nan(reader, out);
+        }
+        while (has_unit && ascii_is_digit(unit)) {
+            if (exponent < 100000) {
+                exponent = exponent * 10 + static_cast<int>(unit - '0');
+                if (exponent > 100000) {
+                    exponent = 100000;
+                }
+            }
+            if (!read_next(reader, unit, has_unit)) {
+                return false;
+            }
+        }
+        exponent *= exponent_sign;
+    }
+
+    if (has_unit) {
+        if (!ascii_is_space(unit)) {
+            return finish_nan(reader, out);
+        }
+        bool only_spaces = true;
+        if (!trailing_spaces_only(reader, only_spaces)) {
+            return false;
+        }
+        if (!only_spaces) {
+            out = std::numeric_limits<double>::quiet_NaN();
+            return true;
+        }
+    }
+    int total_exp = binary_exp;
+    clamp_exp_add_many(total_exp, exponent);
+    out = sign * scale_binary(mantissa, total_exp);
+    return true;
+}
+
+bool string_cursor_to_number(StringCursor cursor, double &out) noexcept {
+    constexpr int kMaxSignificantDigits = 18;
+    UnitReader reader{cursor};
+    char16_t unit = 0;
+    bool has_unit = false;
+    do {
+        if (!read_next(reader, unit, has_unit)) {
+            return false;
+        }
+        if (!has_unit) {
+            out = 0.0;
+            return true;
+        }
+    } while (ascii_is_space(unit));
+
+    double sign = 1.0;
+    if (unit == '+' || unit == '-') {
+        sign = unit == '-' ? -1.0 : 1.0;
+        if (!read_next(reader, unit, has_unit)) {
+            return false;
+        }
+        if (!has_unit) {
+            return finish_nan(reader, out);
+        }
+    }
+
+    if (ascii_eq_ci(unit, 'n')) {
+        return parse_nan(reader, out);
+    }
+    if (ascii_eq_ci(unit, 'i')) {
+        return parse_infinity(reader, sign, out);
+    }
+    if (unit == '0') {
+        char16_t next = 0;
+        bool has_next = false;
+        if (!read_next(reader, next, has_next)) {
+            return false;
+        }
+        if (has_next && (next == 'x' || next == 'X')) {
+            return parse_hex_number(reader, sign, out);
+        }
+        if (has_next) {
+            unread_unit(reader, next);
+        }
+    }
+
+    double mantissa = 0.0;
+    int significant_digits = 0;
+    int decimal_exp = 0;
+    bool saw_digit = false;
+    bool saw_nonzero = false;
+    auto add_digit = [&](int digit, bool after_dot) noexcept {
+        saw_digit = true;
+        if (digit != 0 || saw_nonzero) {
+            saw_nonzero = true;
+            if (significant_digits < kMaxSignificantDigits) {
+                mantissa = mantissa * 10.0 + static_cast<double>(digit);
+                ++significant_digits;
+                if (after_dot) {
+                    clamp_exp_add(decimal_exp, -1);
+                }
+            } else if (!after_dot) {
+                clamp_exp_add(decimal_exp, 1);
+            }
+        } else if (after_dot) {
+            clamp_exp_add(decimal_exp, -1);
+        }
+    };
+
+    while (has_unit && ascii_is_digit(unit)) {
+        add_digit(static_cast<int>(unit - '0'), false);
+        if (!read_next(reader, unit, has_unit)) {
+            return false;
+        }
+    }
+    if (has_unit && unit == '.') {
+        if (!read_next(reader, unit, has_unit)) {
+            return false;
+        }
+        while (has_unit && ascii_is_digit(unit)) {
+            add_digit(static_cast<int>(unit - '0'), true);
+            if (!read_next(reader, unit, has_unit)) {
+                return false;
+            }
+        }
+    }
+    if (!saw_digit) {
+        return finish_nan(reader, out);
+    }
+
+    int exponent = 0;
+    if (has_unit && (unit == 'e' || unit == 'E')) {
+        int exponent_sign = 1;
+        if (!read_next(reader, unit, has_unit)) {
+            return false;
+        }
+        if (has_unit && (unit == '+' || unit == '-')) {
+            exponent_sign = unit == '-' ? -1 : 1;
+            if (!read_next(reader, unit, has_unit)) {
+                return false;
+            }
+        }
+        if (!has_unit || !ascii_is_digit(unit)) {
+            return finish_nan(reader, out);
+        }
+        while (has_unit && ascii_is_digit(unit)) {
+            if (exponent < 100000) {
+                exponent = exponent * 10 + static_cast<int>(unit - '0');
+                if (exponent > 100000) {
+                    exponent = 100000;
+                }
+            }
+            if (!read_next(reader, unit, has_unit)) {
+                return false;
+            }
+        }
+        exponent *= exponent_sign;
+    }
+
+    if (has_unit) {
+        if (!ascii_is_space(unit)) {
+            return finish_nan(reader, out);
+        }
+        bool only_spaces = true;
+        if (!trailing_spaces_only(reader, only_spaces)) {
+            return false;
+        }
+        if (!only_spaces) {
+            out = std::numeric_limits<double>::quiet_NaN();
+            return true;
+        }
+    }
+    int total_exp = decimal_exp;
+    clamp_exp_add_many(total_exp, exponent);
+    out = sign * scale_decimal(mantissa, total_exp);
+    return true;
+}
+
+bool string_to_number(const fiber::script::JsValue &value, double &out) noexcept {
+    StringCursor cursor;
+    if (!init_string_cursor(value, cursor)) {
+        return false;
+    }
+    return string_cursor_to_number(cursor, out);
+}
+
+bool compare_string_cursors(StringCursor lhs_cursor, StringCursor rhs_cursor, int &result) noexcept {
+    while (true) {
+        char16_t lhs_unit = 0;
+        char16_t rhs_unit = 0;
+        bool lhs_has = cursor_next(lhs_cursor, lhs_unit);
+        bool rhs_has = cursor_next(rhs_cursor, rhs_unit);
+        if (lhs_cursor.malformed || rhs_cursor.malformed) {
+            return false;
+        }
+        if (!lhs_has || !rhs_has) {
+            if (lhs_has) {
+                result = 1;
+            } else if (rhs_has) {
+                result = -1;
+            } else {
+                result = 0;
+            }
+            return true;
+        }
+        if (lhs_unit < rhs_unit) {
+            result = -1;
+            return true;
+        }
+        if (lhs_unit > rhs_unit) {
+            result = 1;
+            return true;
+        }
+    }
+}
+
+bool compare_strings(const fiber::script::JsValue &lhs, const fiber::script::JsValue &rhs, int &result) noexcept {
     if (!fiber::script::js_value_is_borrowed_string(lhs) && !fiber::script::js_value_is_borrowed_string(rhs) &&
         fiber::script::js_value_type(lhs) == fiber::script::JsNodeType::String &&
         fiber::script::js_value_type(rhs) == fiber::script::JsNodeType::String) {
@@ -279,33 +683,17 @@ bool compare_strings(const fiber::script::JsValue &lhs, const fiber::script::JsV
     if (!init_string_cursor(lhs, lhs_cursor) || !init_string_cursor(rhs, rhs_cursor)) {
         return false;
     }
-    while (true) {
-        char16_t lhs_unit = 0;
-        char16_t rhs_unit = 0;
-        bool lhs_has = cursor_next(lhs_cursor, lhs_unit);
-        bool rhs_has = cursor_next(rhs_cursor, rhs_unit);
-        if (lhs_cursor.malformed || rhs_cursor.malformed) {
-            return false;
-        }
-        if (!lhs_has || !rhs_has) {
-            if (lhs_has) {
-                result = 1;
-            } else if (rhs_has) {
-                result = -1;
-            } else {
-                result = 0;
-            }
-            return true;
-        }
-        if (lhs_unit < rhs_unit) {
-            result = -1;
-            return true;
-        }
-        if (lhs_unit > rhs_unit) {
-            result = 1;
-            return true;
-        }
+    return compare_string_cursors(lhs_cursor, rhs_cursor, result);
+}
+
+bool heap_string_equals_native_utf8(const fiber::script::GcString *heap_str, fiber::script::NativeStr native) noexcept {
+    StringCursor lhs_cursor;
+    StringCursor rhs_cursor;
+    if (!init_heap_string_cursor(heap_str, lhs_cursor) || !init_native_string_cursor(native, rhs_cursor)) {
+        return false;
     }
+    int cmp = 0;
+    return compare_string_cursors(lhs_cursor, rhs_cursor, cmp) && cmp == 0;
 }
 
 double number_value(const fiber::script::JsValue &value) noexcept {
@@ -321,7 +709,7 @@ bool numbers_equal(double lhs, double rhs) noexcept {
     return lhs == rhs;
 }
 
-bool strict_equal(const fiber::script::JsValue &lhs, const fiber::script::JsValue &rhs) {
+bool strict_equal(const fiber::script::JsValue &lhs, const fiber::script::JsValue &rhs) noexcept {
     if (is_string_type(fiber::script::js_value_type(lhs)) && is_string_type(fiber::script::js_value_type(rhs))) {
         int cmp = 0;
         if (!compare_strings(lhs, rhs, cmp)) {
@@ -363,7 +751,7 @@ bool strict_equal(const fiber::script::JsValue &lhs, const fiber::script::JsValu
     return false;
 }
 
-bool loose_equal_number(double number, const fiber::script::JsValue &other) {
+bool loose_equal_number(double number, const fiber::script::JsValue &other) noexcept {
     if (is_number_type(fiber::script::js_value_type(other))) {
         return numbers_equal(number, number_value(other));
     }
@@ -377,7 +765,7 @@ bool loose_equal_number(double number, const fiber::script::JsValue &other) {
     return false;
 }
 
-bool loose_equal(const fiber::script::JsValue &lhs, const fiber::script::JsValue &rhs) {
+bool loose_equal(const fiber::script::JsValue &lhs, const fiber::script::JsValue &rhs) noexcept {
     if (is_string_type(fiber::script::js_value_type(lhs)) && is_string_type(fiber::script::js_value_type(rhs))) {
         int cmp = 0;
         if (!compare_strings(lhs, rhs, cmp)) {
@@ -525,14 +913,12 @@ bool Compares::in(ConstValueHandle a, ConstValueHandle b) noexcept {
         if (fiber::script::js_value_type(*a) == fiber::script::JsNodeType::String &&
             fiber::script::js_value_is_borrowed_string(*a)) {
             fiber::script::NativeStr native = fiber::script::js_value_native_string(*a);
-            std::string key(native.data, native.len);
             for (std::size_t i = 0; i < obj->size; ++i) {
                 const fiber::script::GcObjectEntry *entry = fiber::script::gc_object_entry_at(obj, i);
                 if (!entry || !entry->occupied || !entry->key) {
                     continue;
                 }
-                std::string entry_key;
-                if (fiber::script::gc_string_to_utf8(entry->key, entry_key) && entry_key == key) {
+                if (heap_string_equals_native_utf8(entry->key, native)) {
                     return true;
                 }
             }

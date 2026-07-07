@@ -160,3 +160,30 @@ TEST(ScriptRuntimeOpsTest, InSemanticsObject) {
     ASSERT_EQ(miss, CallResult::Success);
     EXPECT_FALSE(js_value_bool(result.value));
 }
+
+TEST(ScriptRuntimeOpsTest, InSemanticsObjectMatchesBorrowedUtf8KeysWithoutAllocation) {
+    GcHeap heap;
+    char latin1_bytes[] = {static_cast<char>(0xC3), static_cast<char>(0xA9)};
+    auto latin_obj =
+            handle(heap, make_object_with_key(heap, latin1_bytes, sizeof(latin1_bytes), JsValue::make_integer(1)));
+    auto latin_key = handle(heap, JsValue::make_native_string(latin1_bytes, sizeof(latin1_bytes)));
+    ResultPayload result;
+    auto latin_hit = fiber::script::run::Binaries::in(heap, latin_key, latin_obj, result);
+    ASSERT_EQ(latin_hit, CallResult::Success);
+    EXPECT_TRUE(js_value_bool(result.value));
+
+    char emoji_bytes[] = {static_cast<char>(0xF0), static_cast<char>(0x9F), static_cast<char>(0x98),
+                          static_cast<char>(0x80)};
+    auto emoji_obj =
+            handle(heap, make_object_with_key(heap, emoji_bytes, sizeof(emoji_bytes), JsValue::make_integer(2)));
+    auto emoji_key = handle(heap, JsValue::make_native_string(emoji_bytes, sizeof(emoji_bytes)));
+    auto emoji_hit = fiber::script::run::Binaries::in(heap, emoji_key, emoji_obj, result);
+    ASSERT_EQ(emoji_hit, CallResult::Success);
+    EXPECT_TRUE(js_value_bool(result.value));
+
+    char invalid_bytes[] = {static_cast<char>(0xC3), static_cast<char>(0x28)};
+    auto invalid_key = handle(heap, JsValue::make_native_string(invalid_bytes, sizeof(invalid_bytes)));
+    auto invalid_miss = fiber::script::run::Binaries::in(heap, invalid_key, latin_obj, result);
+    ASSERT_EQ(invalid_miss, CallResult::Success);
+    EXPECT_FALSE(js_value_bool(result.value));
+}
