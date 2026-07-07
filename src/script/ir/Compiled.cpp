@@ -29,6 +29,50 @@ std::size_t align_up(std::size_t value, std::size_t align) noexcept {
     return (value + mask) & ~mask;
 }
 
+CompileError make_compile_error(CompileErrorReason reason, const char *message) noexcept {
+    return CompileError{reason, -1, message};
+}
+
+bool checked_add(std::size_t lhs, std::size_t rhs, std::size_t &out) noexcept {
+    if (lhs > std::numeric_limits<std::size_t>::max() - rhs) {
+        return false;
+    }
+    out = lhs + rhs;
+    return true;
+}
+
+bool checked_mul(std::size_t lhs, std::size_t rhs, std::size_t &out) noexcept {
+    if (lhs != 0 && rhs > std::numeric_limits<std::size_t>::max() / lhs) {
+        return false;
+    }
+    out = lhs * rhs;
+    return true;
+}
+
+bool checked_align_up(std::size_t value, std::size_t align, std::size_t &out) noexcept {
+    const std::size_t mask = align - 1;
+    if (value > std::numeric_limits<std::size_t>::max() - mask) {
+        return false;
+    }
+    out = (value + mask) & ~mask;
+    return true;
+}
+
+bool add_region_size(std::size_t &total, std::size_t align, std::size_t element_size, std::size_t count) noexcept {
+    std::size_t aligned = 0;
+    if (!checked_align_up(total, align, aligned)) {
+        return false;
+    }
+    std::size_t bytes = 0;
+    if (!checked_mul(element_size, count, bytes)) {
+        return false;
+    }
+    if (!checked_add(aligned, bytes, total)) {
+        return false;
+    }
+    return true;
+}
+
 template<typename T>
 T *assign_region(std::byte *base, std::size_t &offset, std::uint32_t count) noexcept {
     if (count == 0) {
@@ -48,8 +92,10 @@ void copy_region(T *dst, std::span<const T> src) noexcept {
     std::memcpy(dst, src.data(), sizeof(T) * src.size());
 }
 
-std::uint32_t checked_count(std::size_t value) noexcept {
-    FIBER_ASSERT(value <= std::numeric_limits<std::uint32_t>::max());
+CompileResult<std::uint32_t> checked_count(std::size_t value, const char *message) noexcept {
+    if (value > std::numeric_limits<std::uint32_t>::max()) {
+        return std::unexpected(make_compile_error(CompileErrorReason::ProgramTooLarge, message));
+    }
     return static_cast<std::uint32_t>(value);
 }
 
@@ -177,32 +223,61 @@ bool Compiled::contains_async() const noexcept {
     return false;
 }
 
-Compiled Compiled::build(std::size_t stack_size, std::size_t var_table_size, std::span<const std::int32_t> codes,
-                         std::span<const std::int32_t> positions, std::span<const ConstantInit> constants,
-                         std::span<const FuncConst> func_consts, std::span<const std::uint32_t> exception_table,
-                         std::span<const std::byte> payload) {
-    FIBER_ASSERT(codes.size() == positions.size());
+CompileResult<Compiled> Compiled::build(std::size_t stack_size, std::size_t var_table_size,
+                                        std::span<const std::int32_t> codes, std::span<const std::int32_t> positions,
+                                        std::span<const ConstantInit> constants, std::span<const FuncConst> func_consts,
+                                        std::span<const std::uint32_t> exception_table,
+                                        std::span<const std::byte> payload) {
+    if (codes.size() != positions.size()) {
+        return std::unexpected(
+                make_compile_error(CompileErrorReason::Internal, "compiled code position table mismatch"));
+    }
 
     std::vector<std::uint32_t> catch_table = build_catch_table(exception_table);
-    const std::uint32_t catch_count = checked_count(catch_table.size() / 2);
+    auto catch_count_result = checked_count(catch_table.size() / 2, "compiled catch table is too large");
+    if (!catch_count_result) {
+        return std::unexpected(catch_count_result.error());
+    }
+    const std::uint32_t catch_count = catch_count_result.value();
 
     std::size_t total = 0;
-    total = align_up(total, alignof(std::int32_t)) + sizeof(std::int32_t) * codes.size();
-    total = align_up(total, alignof(std::int32_t)) + sizeof(std::int32_t) * positions.size();
-    total = align_up(total, alignof(fiber::script::JsValue)) + sizeof(fiber::script::JsValue) * constants.size();
-    total = align_up(total, alignof(FuncConst)) + sizeof(FuncConst) * func_consts.size();
-    total = align_up(total, alignof(std::uint32_t)) + sizeof(std::uint32_t) * catch_count;
-    total = align_up(total, alignof(std::uint32_t)) + sizeof(std::uint32_t) * catch_count;
-    total = align_up(total, alignof(std::byte)) + payload.size();
+    bool sized =
+            add_region_size(total, alignof(std::int32_t), sizeof(std::int32_t), codes.size()) &&
+            add_region_size(total, alignof(std::int32_t), sizeof(std::int32_t), positions.size()) &&
+            add_region_size(total, alignof(fiber::script::JsValue), sizeof(fiber::script::JsValue), constants.size()) &&
+            add_region_size(total, alignof(FuncConst), sizeof(FuncConst), func_consts.size()) &&
+            add_region_size(total, alignof(std::uint32_t), sizeof(std::uint32_t), catch_count) &&
+            add_region_size(total, alignof(std::uint32_t), sizeof(std::uint32_t), catch_count) &&
+            add_region_size(total, alignof(std::byte), sizeof(std::byte), payload.size());
+    if (!sized) {
+        return std::unexpected(
+                make_compile_error(CompileErrorReason::ProgramTooLarge, "compiled program is too large"));
+    }
 
     Compiled result;
     result.stack_size_ = stack_size;
     result.var_table_size_ = var_table_size;
-    result.code_count_ = checked_count(codes.size());
-    result.constant_count_ = checked_count(constants.size());
-    result.func_const_count_ = checked_count(func_consts.size());
+    auto code_count = checked_count(codes.size(), "compiled code table is too large");
+    auto constant_count = checked_count(constants.size(), "compiled constant table is too large");
+    auto func_const_count = checked_count(func_consts.size(), "compiled function table is too large");
+    auto payload_size = checked_count(payload.size(), "compiled payload is too large");
+    if (!code_count) {
+        return std::unexpected(code_count.error());
+    }
+    if (!constant_count) {
+        return std::unexpected(constant_count.error());
+    }
+    if (!func_const_count) {
+        return std::unexpected(func_const_count.error());
+    }
+    if (!payload_size) {
+        return std::unexpected(payload_size.error());
+    }
+    result.code_count_ = code_count.value();
+    result.constant_count_ = constant_count.value();
+    result.func_const_count_ = func_const_count.value();
     result.catch_count_ = catch_count;
-    result.payload_size_ = checked_count(payload.size());
+    result.payload_size_ = payload_size.value();
     if (total == 0) {
         return result;
     }
@@ -210,7 +285,7 @@ Compiled Compiled::build(std::size_t stack_size, std::size_t var_table_size, std
     result.allocation_ = ::operator new(total, std::align_val_t(kAllocationAlign), std::nothrow);
     if (!result.allocation_) {
         result.reset();
-        return result;
+        return std::unexpected(make_compile_error(CompileErrorReason::OutOfMemory, "compiled allocation failed"));
     }
     result.allocation_size_ = total;
 

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -43,19 +44,30 @@ namespace fiber::script::ir {
 
 class CompilerImpl {
 public:
-    Compiled compile(const ast::Node &node) {
+    CompileResult<Compiled> compile(const ast::Node &node) {
         push_scope();
         if (auto *block = dynamic_cast<const ast::Block *>(&node)) {
             compile_block(*block, false);
-            emit_default_return(block->end_pos());
+            if (!failed()) {
+                emit_default_return(block->end_pos());
+            }
         } else if (auto *expr = dynamic_cast<const ast::Expression *>(&node)) {
             compile_expression(*expr);
-            emit_end_return(expr->end_pos());
+            if (!failed()) {
+                emit_end_return(expr->end_pos());
+            }
         } else if (auto *stmt = dynamic_cast<const ast::Statement *>(&node)) {
             compile_statement(*stmt);
-            emit_default_return(stmt->end_pos());
+            if (!failed()) {
+                emit_default_return(stmt->end_pos());
+            }
+        } else {
+            fail(CompileErrorReason::Internal, node.start_pos(), "unsupported AST node");
         }
         pop_scope();
+        if (error_) {
+            return std::unexpected(*error_);
+        }
         std::size_t stack_size = max_stack_ > 0 ? static_cast<std::size_t>(max_stack_) : 1;
         return Compiled::build(stack_size, next_var_index_, codes_, positions_, constants_, func_consts_,
                                exception_table_, payload_);
@@ -94,9 +106,18 @@ private:
     std::optional<std::size_t> null_const_;
     std::optional<std::size_t> true_const_;
     std::optional<std::size_t> false_const_;
+    std::optional<CompileError> error_;
     std::size_t next_var_index_ = 0;
     int stack_depth_ = 0;
     int max_stack_ = 0;
+
+    [[nodiscard]] bool failed() const noexcept { return error_.has_value(); }
+
+    void fail(CompileErrorReason reason, std::int64_t position, const char *message) noexcept {
+        if (!error_) {
+            error_ = CompileError{reason, position, message};
+        }
+    }
 
     void push_scope() { scopes_.push_back(Scope{}); }
 
@@ -143,6 +164,9 @@ private:
     }
 
     std::size_t emit_raw(std::int32_t code, std::int32_t pos, int delta) {
+        if (failed()) {
+            return codes_.size();
+        }
         codes_.push_back(code);
         positions_.push_back(pos);
         update_stack(delta);
@@ -150,14 +174,29 @@ private:
     }
 
     std::size_t emit_op(std::uint8_t op, std::size_t operand, std::int32_t pos, int delta) {
-        FIBER_ASSERT(operand <= kMaxOperand24);
+        if (failed()) {
+            return codes_.size();
+        }
+        if (operand > kMaxOperand24) {
+            fail(CompileErrorReason::OperandOutOfRange, pos, "compiled operand is too large");
+            return codes_.size();
+        }
         std::uint32_t code = static_cast<std::uint32_t>(op) | (static_cast<std::uint32_t>(operand) << 8u);
         return emit_raw(static_cast<std::int32_t>(code), pos, delta);
     }
 
     std::size_t emit_func_call(std::uint8_t op, std::size_t func_index, std::size_t argc, std::int32_t pos, int delta) {
-        FIBER_ASSERT(func_index <= kMaxFuncIndex16);
-        FIBER_ASSERT(argc <= kMaxArgCount8);
+        if (failed()) {
+            return codes_.size();
+        }
+        if (func_index > kMaxFuncIndex16) {
+            fail(CompileErrorReason::TooManyFunctions, pos, "compiled function table is too large");
+            return codes_.size();
+        }
+        if (argc > kMaxArgCount8) {
+            fail(CompileErrorReason::TooManyArguments, pos, "function call has too many arguments");
+            return codes_.size();
+        }
         std::uint32_t code = static_cast<std::uint32_t>(op) | (static_cast<std::uint32_t>(argc) << 8u) |
                              (static_cast<std::uint32_t>(func_index) << 16u);
         return emit_raw(static_cast<std::int32_t>(code), pos, delta);
@@ -171,37 +210,85 @@ private:
         return emit_op(op, target, pos, delta);
     }
 
-    void patch_jump(std::size_t index, std::size_t target) {
-        FIBER_ASSERT(target <= kMaxOperand24);
+    void patch_jump(std::size_t index, std::size_t target, std::int32_t pos) {
+        if (failed()) {
+            return;
+        }
+        if (index >= codes_.size()) {
+            fail(CompileErrorReason::Internal, pos, "invalid jump patch index");
+            return;
+        }
+        if (target > kMaxOperand24) {
+            fail(CompileErrorReason::JumpTargetOutOfRange, pos, "compiled jump target is too large");
+            return;
+        }
         std::uint32_t code = static_cast<std::uint32_t>(codes_[index]);
         std::uint8_t op = static_cast<std::uint8_t>(code & 0xFFu);
         codes_[index] =
                 static_cast<std::int32_t>(static_cast<std::uint32_t>(op) | (static_cast<std::uint32_t>(target) << 8u));
     }
 
-    std::size_t add_func_const(const Library::HostCallable *callable) {
-        FIBER_ASSERT(callable);
+    void append_exception_range(std::size_t try_begin, std::size_t catch_begin, std::size_t catch_end,
+                                std::int32_t pos) {
+        if (failed()) {
+            return;
+        }
+        if (try_begin > std::numeric_limits<std::uint32_t>::max() ||
+            catch_begin > std::numeric_limits<std::uint32_t>::max() ||
+            catch_end > std::numeric_limits<std::uint32_t>::max()) {
+            fail(CompileErrorReason::ProgramTooLarge, pos, "compiled exception table is too large");
+            return;
+        }
+        exception_table_.push_back(static_cast<std::uint32_t>(try_begin));
+        exception_table_.push_back(static_cast<std::uint32_t>(catch_begin));
+        exception_table_.push_back(static_cast<std::uint32_t>(catch_end));
+    }
+
+    std::size_t add_func_const(const Library::HostCallable *callable, std::int32_t pos) {
+        if (failed()) {
+            return 0;
+        }
+        if (!callable) {
+            fail(CompileErrorReason::InvalidHostCallable, pos, "host callable is missing");
+            return 0;
+        }
         auto it = func_const_cache_.find(callable);
         if (it != func_const_cache_.end()) {
             return it->second;
+        }
+        if (func_consts_.size() > kMaxOperand24) {
+            fail(CompileErrorReason::TooManyFunctions, pos, "compiled function table is too large");
+            return 0;
         }
         Compiled::FuncConst func;
         func.user_data = callable->userdata;
         switch (callable->kind) {
             case Library::HostCallable::Kind::SyncFunction:
-                FIBER_ASSERT(callable->function);
+                if (!callable->function) {
+                    fail(CompileErrorReason::InvalidHostCallable, pos, "sync function callable is missing");
+                    return 0;
+                }
                 func.sync_func = callable->function;
                 break;
             case Library::HostCallable::Kind::AsyncFunction:
-                FIBER_ASSERT(callable->async_function);
+                if (!callable->async_function) {
+                    fail(CompileErrorReason::InvalidHostCallable, pos, "async function callable is missing");
+                    return 0;
+                }
                 func.async_func = callable->async_function;
                 break;
             case Library::HostCallable::Kind::SyncConstant:
-                FIBER_ASSERT(callable->constant);
+                if (!callable->constant) {
+                    fail(CompileErrorReason::InvalidHostCallable, pos, "sync constant callable is missing");
+                    return 0;
+                }
                 func.sync_ct = callable->constant;
                 break;
             case Library::HostCallable::Kind::AsyncConstant:
-                FIBER_ASSERT(callable->async_constant);
+                if (!callable->async_constant) {
+                    fail(CompileErrorReason::InvalidHostCallable, pos, "async constant callable is missing");
+                    return 0;
+                }
                 func.async_ct = callable->async_constant;
                 break;
         }
@@ -211,9 +298,58 @@ private:
         return index;
     }
 
-    std::uint32_t append_payload(const void *data, std::size_t len) {
-        FIBER_ASSERT(len == 0 || data != nullptr);
-        FIBER_ASSERT(payload_.size() <= kMaxOperand24);
+    bool validate_host_callable(const Library::HostCallable *callable, Library::HostCallable::Kind expected,
+                                std::int32_t pos) {
+        if (!callable) {
+            fail(CompileErrorReason::InvalidHostCallable, pos, "host callable is missing");
+            return false;
+        }
+        if (callable->kind != expected) {
+            fail(CompileErrorReason::InvalidHostCallable, pos, "host callable kind mismatch");
+            return false;
+        }
+        switch (expected) {
+            case Library::HostCallable::Kind::SyncFunction:
+                if (!callable->function) {
+                    fail(CompileErrorReason::InvalidHostCallable, pos, "sync function callable is missing");
+                    return false;
+                }
+                break;
+            case Library::HostCallable::Kind::AsyncFunction:
+                if (!callable->async_function) {
+                    fail(CompileErrorReason::InvalidHostCallable, pos, "async function callable is missing");
+                    return false;
+                }
+                break;
+            case Library::HostCallable::Kind::SyncConstant:
+                if (!callable->constant) {
+                    fail(CompileErrorReason::InvalidHostCallable, pos, "sync constant callable is missing");
+                    return false;
+                }
+                break;
+            case Library::HostCallable::Kind::AsyncConstant:
+                if (!callable->async_constant) {
+                    fail(CompileErrorReason::InvalidHostCallable, pos, "async constant callable is missing");
+                    return false;
+                }
+                break;
+        }
+        return true;
+    }
+
+    std::uint32_t append_payload(const void *data, std::size_t len, std::int32_t pos) {
+        if (failed()) {
+            return 0;
+        }
+        if (len != 0 && data == nullptr) {
+            fail(CompileErrorReason::Internal, pos, "constant payload is invalid");
+            return 0;
+        }
+        const std::size_t append_len = len == 0 ? 1 : len;
+        if (payload_.size() > kMaxOperand24 || append_len > kMaxOperand24 - payload_.size()) {
+            fail(CompileErrorReason::PayloadTooLarge, pos, "compiled constant payload is too large");
+            return 0;
+        }
         std::uint32_t offset = static_cast<std::uint32_t>(payload_.size());
         if (len == 0) {
             payload_.push_back(std::byte{0});
@@ -224,103 +360,139 @@ private:
         return offset;
     }
 
-    std::size_t add_string_constant(std::string_view value) {
+    bool ensure_constant_slot(std::int32_t pos) {
+        if (constants_.size() > kMaxOperand24) {
+            fail(CompileErrorReason::TooManyConstants, pos, "compiled constant table is too large");
+            return false;
+        }
+        return true;
+    }
+
+    std::size_t add_string_constant(std::string_view value, std::int32_t pos) {
+        if (failed()) {
+            return 0;
+        }
         std::string key(value);
         auto it = string_constants_.find(key);
         if (it != string_constants_.end()) {
             return it->second;
         }
+        if (!ensure_constant_slot(pos)) {
+            return 0;
+        }
         Compiled::ConstantInit init;
         init.value = fiber::script::JsValue::make_native_string(nullptr, value.size());
-        init.payload_offset = append_payload(value.data(), value.size());
+        init.payload_offset = append_payload(value.data(), value.size(), pos);
+        if (failed()) {
+            return 0;
+        }
         constants_.push_back(init);
         std::size_t index = constants_.size() - 1;
         string_constants_.emplace(std::move(key), index);
         return index;
     }
 
-    std::size_t add_const_value(const fiber::script::JsValue &value) {
+    std::size_t add_const_value(const fiber::script::JsValue &value, std::int32_t pos) {
+        if (failed()) {
+            return 0;
+        }
+        if (!ensure_constant_slot(pos)) {
+            return 0;
+        }
         Compiled::ConstantInit init;
         init.value = value;
         if (fiber::script::js_value_is_borrowed_string(value)) {
             fiber::script::NativeStr text = fiber::script::js_value_native_string(value);
             init.value = fiber::script::JsValue::make_native_string(nullptr, text.len);
-            init.payload_offset = append_payload(text.data, text.len);
+            init.payload_offset = append_payload(text.data, text.len, pos);
         } else if (fiber::script::js_value_is_borrowed_binary(value)) {
             fiber::script::NativeBin bytes = fiber::script::js_value_native_binary(value);
             init.value = fiber::script::JsValue::make_native_binary(nullptr, bytes.len);
-            init.payload_offset = append_payload(bytes.data, bytes.len);
+            init.payload_offset = append_payload(bytes.data, bytes.len, pos);
         } else {
-            FIBER_ASSERT(fiber::script::js_value_type(value) != fiber::script::JsNodeType::String);
-            FIBER_ASSERT(fiber::script::js_value_type(value) != fiber::script::JsNodeType::Binary);
+            const fiber::script::JsNodeType type = fiber::script::js_value_type(value);
+            if (type == fiber::script::JsNodeType::String || type == fiber::script::JsNodeType::Binary) {
+                fail(CompileErrorReason::UnsupportedConstant, pos, "unsupported heap-backed constant");
+                return 0;
+            }
+        }
+        if (failed()) {
+            return 0;
         }
         constants_.push_back(init);
         return constants_.size() - 1;
     }
 
-    std::size_t const_undefined() {
+    std::size_t const_undefined(std::int32_t pos) {
         if (undef_const_) {
             return *undef_const_;
         }
-        std::size_t idx = add_const_value(fiber::script::JsValue::make_undefined());
-        undef_const_ = idx;
+        std::size_t idx = add_const_value(fiber::script::JsValue::make_undefined(), pos);
+        if (!failed()) {
+            undef_const_ = idx;
+        }
         return idx;
     }
 
-    std::size_t const_null() {
+    std::size_t const_null(std::int32_t pos) {
         if (null_const_) {
             return *null_const_;
         }
-        std::size_t idx = add_const_value(fiber::script::JsValue::make_null());
-        null_const_ = idx;
+        std::size_t idx = add_const_value(fiber::script::JsValue::make_null(), pos);
+        if (!failed()) {
+            null_const_ = idx;
+        }
         return idx;
     }
 
-    std::size_t const_bool(bool value) {
+    std::size_t const_bool(bool value, std::int32_t pos) {
         if (value && true_const_) {
             return *true_const_;
         }
         if (!value && false_const_) {
             return *false_const_;
         }
-        std::size_t idx = add_const_value(fiber::script::JsValue::make_boolean(value));
-        if (value) {
-            true_const_ = idx;
-        } else {
-            false_const_ = idx;
+        std::size_t idx = add_const_value(fiber::script::JsValue::make_boolean(value), pos);
+        if (!failed()) {
+            if (value) {
+                true_const_ = idx;
+            } else {
+                false_const_ = idx;
+            }
         }
         return idx;
     }
 
-    std::size_t const_js_value(const fiber::script::JsValue &value) {
+    std::size_t const_js_value(const fiber::script::JsValue &value, std::int32_t pos) {
         switch (fiber::script::js_value_type(value)) {
             case fiber::script::JsNodeType::Undefined:
-                return const_undefined();
+                return const_undefined(pos);
             case fiber::script::JsNodeType::Null:
-                return const_null();
+                return const_null(pos);
             case fiber::script::JsNodeType::Boolean:
-                return const_bool(fiber::script::js_value_bool(value));
+                return const_bool(fiber::script::js_value_bool(value), pos);
             case fiber::script::JsNodeType::Integer:
             case fiber::script::JsNodeType::Float:
             case fiber::script::JsNodeType::String:
             case fiber::script::JsNodeType::Binary:
-                return add_const_value(value);
+                return add_const_value(value, pos);
             case fiber::script::JsNodeType::Array:
             case fiber::script::JsNodeType::Object:
             case fiber::script::JsNodeType::Interator:
             case fiber::script::JsNodeType::Exception:
-                FIBER_ASSERT(false);
-                return const_undefined();
+                fail(CompileErrorReason::UnsupportedConstant, pos, "unsupported constant type");
+                return 0;
         }
-        return const_undefined();
+        fail(CompileErrorReason::UnsupportedConstant, pos, "unsupported constant type");
+        return 0;
     }
 
     void emit_load_js_value(const fiber::script::JsValue &value, std::int32_t pos) {
-        emit_op(Code::LOAD_CONST, const_js_value(value), pos, 1);
+        emit_op(Code::LOAD_CONST, const_js_value(value, pos), pos, 1);
     }
 
     void emit_default_return(std::int32_t pos) {
-        emit_op(Code::LOAD_CONST, const_undefined(), pos, 1);
+        emit_op(Code::LOAD_CONST, const_undefined(pos), pos, 1);
         emit_end_return(pos);
     }
 
@@ -330,10 +502,16 @@ private:
     }
 
     void compile_block(const ast::Block &block, bool push_new_scope) {
+        if (failed()) {
+            return;
+        }
         if (push_new_scope) {
             push_scope();
         }
         for (const auto &stmt: block.statements()) {
+            if (failed()) {
+                break;
+            }
             if (stmt) {
                 compile_statement(*stmt);
             }
@@ -344,6 +522,9 @@ private:
     }
 
     void compile_statement(const ast::Statement &stmt) {
+        if (failed()) {
+            return;
+        }
         if (auto *block = dynamic_cast<const ast::Block *>(&stmt)) {
             compile_block(*block, true);
             return;
@@ -360,7 +541,7 @@ private:
             if (var_stmt->initializer()) {
                 compile_expression(*var_stmt->initializer());
             } else {
-                emit_op(Code::LOAD_CONST, const_undefined(), stmt.start_pos(), 1);
+                emit_op(Code::LOAD_CONST, const_undefined(stmt.start_pos()), stmt.start_pos(), 1);
             }
             emit_op(Code::STORE_VAR, var_idx, stmt.start_pos(), -1);
             return;
@@ -369,7 +550,7 @@ private:
             if (ret_stmt->value()) {
                 compile_expression(*ret_stmt->value());
             } else {
-                emit_op(Code::LOAD_CONST, const_undefined(), stmt.start_pos(), 1);
+                emit_op(Code::LOAD_CONST, const_undefined(stmt.start_pos()), stmt.start_pos(), 1);
             }
             emit_end_return(stmt.start_pos());
             return;
@@ -391,13 +572,13 @@ private:
             }
             std::size_t end_jump = emit_jump(Code::JUMP, 0, stmt.start_pos());
             std::size_t else_target = codes_.size();
-            patch_jump(else_jump, else_target);
+            patch_jump(else_jump, else_target, stmt.start_pos());
             stack_depth_ = saved_depth;
             if (if_stmt->else_branch()) {
                 compile_statement(*if_stmt->else_branch());
             }
             std::size_t end_target = codes_.size();
-            patch_jump(end_jump, end_target);
+            patch_jump(end_jump, end_target, stmt.start_pos());
             return;
         }
         if (auto *foreach_stmt = dynamic_cast<const ast::ForeachStatement *>(&stmt)) {
@@ -415,15 +596,11 @@ private:
 
             std::size_t key_target = key_idx;
             std::size_t val_target = value_idx;
-            if (key_target > kMaxIteratorVar) {
-                key_target = kMaxIteratorVar;
-            }
-            if (val_target > kMaxIteratorVar) {
-                val_target = kMaxIteratorVar;
-            }
             std::size_t iter_target = iter_idx;
-            if (iter_target > kMaxIteratorVar) {
-                iter_target = kMaxIteratorVar;
+            if (key_target > kMaxIteratorVar || val_target > kMaxIteratorVar || iter_target > kMaxIteratorVar) {
+                fail(CompileErrorReason::OperandOutOfRange, stmt.start_pos(), "foreach variable index is too large");
+                pop_scope();
+                return;
             }
             std::int32_t key_code = static_cast<std::int32_t>(Code::ITERATE_KEY) |
                                     (static_cast<std::int32_t>(key_target) << kInstrumentLen) |
@@ -445,12 +622,12 @@ private:
 
             emit_jump(Code::JUMP, loop_start, stmt.start_pos());
             std::size_t loop_end = codes_.size();
-            patch_jump(exit_jump, loop_end);
+            patch_jump(exit_jump, loop_end, stmt.start_pos());
             for (std::size_t jump_index: finished.break_jumps) {
-                patch_jump(jump_index, loop_end);
+                patch_jump(jump_index, loop_end, stmt.start_pos());
             }
             for (std::size_t jump_index: finished.continue_jumps) {
-                patch_jump(jump_index, finished.continue_target);
+                patch_jump(jump_index, finished.continue_target, stmt.start_pos());
             }
             pop_scope();
             return;
@@ -473,11 +650,9 @@ private:
             pop_scope();
 
             std::size_t catch_end = codes_.size();
-            patch_jump(jump_over, catch_end);
+            patch_jump(jump_over, catch_end, stmt.start_pos());
 
-            exception_table_.push_back(static_cast<std::uint32_t>(try_begin));
-            exception_table_.push_back(static_cast<std::uint32_t>(catch_begin));
-            exception_table_.push_back(static_cast<std::uint32_t>(catch_end));
+            append_exception_range(try_begin, catch_begin, catch_end, stmt.start_pos());
             return;
         }
         if (auto *break_stmt = dynamic_cast<const ast::BreakStatement *>(&stmt)) {
@@ -500,14 +675,17 @@ private:
     }
 
     void compile_expression(const ast::Expression &expr) {
+        if (failed()) {
+            return;
+        }
         if (auto *literal = dynamic_cast<const ast::Literal *>(&expr)) {
             fiber::script::JsValue value = fiber::script::JsValue::make_undefined();
             switch (literal->kind()) {
                 case ast::Literal::Kind::NullValue:
-                    emit_op(Code::LOAD_CONST, const_null(), expr.start_pos(), 1);
+                    emit_op(Code::LOAD_CONST, const_null(expr.start_pos()), expr.start_pos(), 1);
                     return;
                 case ast::Literal::Kind::Boolean:
-                    emit_op(Code::LOAD_CONST, const_bool(literal->bool_value()), expr.start_pos(), 1);
+                    emit_op(Code::LOAD_CONST, const_bool(literal->bool_value(), expr.start_pos()), expr.start_pos(), 1);
                     return;
                 case ast::Literal::Kind::Integer:
                     value = fiber::script::JsValue::make_integer(literal->int_value());
@@ -520,7 +698,7 @@ private:
                                                                        literal->string_value().size());
                     break;
             }
-            std::size_t idx = add_const_value(value);
+            std::size_t idx = add_const_value(value, expr.start_pos());
             emit_op(Code::LOAD_CONST, idx, expr.start_pos(), 1);
             return;
         }
@@ -540,12 +718,18 @@ private:
         }
         if (auto *constant = dynamic_cast<const ast::ConstantVal *>(&expr)) {
             if (constant->is_async()) {
-                FIBER_ASSERT(constant->async_constant()->kind == Library::HostCallable::Kind::AsyncConstant);
-                std::size_t func_idx = add_func_const(constant->async_constant());
+                if (!validate_host_callable(constant->async_constant(), Library::HostCallable::Kind::AsyncConstant,
+                                            expr.start_pos())) {
+                    return;
+                }
+                std::size_t func_idx = add_func_const(constant->async_constant(), expr.start_pos());
                 emit_op(Code::CALL_ASYNC_CONST, func_idx, expr.start_pos(), 1);
             } else {
-                FIBER_ASSERT(constant->constant()->kind == Library::HostCallable::Kind::SyncConstant);
-                std::size_t func_idx = add_func_const(constant->constant());
+                if (!validate_host_callable(constant->constant(), Library::HostCallable::Kind::SyncConstant,
+                                            expr.start_pos())) {
+                    return;
+                }
+                std::size_t func_idx = add_func_const(constant->constant(), expr.start_pos());
                 emit_op(Code::CALL_CONST, func_idx, expr.start_pos(), 1);
             }
             return;
@@ -568,16 +752,23 @@ private:
                     emit_load_js_value(default_arg, expr.start_pos());
                 }
                 const Library::HostCallable *callable = call->is_async() ? call->async_func() : call->func();
-                FIBER_ASSERT(callable->kind == (call->is_async() ? Library::HostCallable::Kind::AsyncFunction
-                                                                 : Library::HostCallable::Kind::SyncFunction));
-                std::size_t func_idx = add_func_const(callable);
+                const Library::HostCallable::Kind expected = call->is_async()
+                                                                     ? Library::HostCallable::Kind::AsyncFunction
+                                                                     : Library::HostCallable::Kind::SyncFunction;
+                if (!validate_host_callable(callable, expected, expr.start_pos())) {
+                    return;
+                }
+                std::size_t func_idx = add_func_const(callable, expr.start_pos());
                 std::size_t arg_count = call->args().size() + call->default_args().size();
                 int delta = 1 - static_cast<int>(arg_count);
                 emit_func_call(call->is_async() ? Code::CALL_ASYNC_FUNC : Code::CALL_FUNC, func_idx, arg_count,
                                expr.start_pos(), delta);
                 return;
             }
-            FIBER_ASSERT(call->default_args().empty());
+            if (!call->default_args().empty()) {
+                fail(CompileErrorReason::InvalidHostCallable, expr.start_pos(), "spread call cannot append defaults");
+                return;
+            }
             emit_raw(static_cast<std::int32_t>(Code::NEW_ARRAY), expr.start_pos(), 1);
             for (const auto &arg: call->args()) {
                 if (!arg) {
@@ -594,9 +785,12 @@ private:
                 }
             }
             const Library::HostCallable *callable = call->is_async() ? call->async_func() : call->func();
-            FIBER_ASSERT(callable->kind == (call->is_async() ? Library::HostCallable::Kind::AsyncFunction
-                                                             : Library::HostCallable::Kind::SyncFunction));
-            std::size_t func_idx = add_func_const(callable);
+            const Library::HostCallable::Kind expected = call->is_async() ? Library::HostCallable::Kind::AsyncFunction
+                                                                          : Library::HostCallable::Kind::SyncFunction;
+            if (!validate_host_callable(callable, expected, expr.start_pos())) {
+                return;
+            }
+            std::size_t func_idx = add_func_const(callable, expr.start_pos());
             emit_op(call->is_async() ? Code::CALL_ASYNC_FUNC_SPREAD : Code::CALL_FUNC_SPREAD, func_idx,
                     expr.start_pos(), 0);
             return;
@@ -640,21 +834,21 @@ private:
                     if (entry.key.expr_key) {
                         compile_expression(*entry.key.expr_key);
                     } else {
-                        emit_op(Code::LOAD_CONST, const_undefined(), expr.start_pos(), 1);
+                        emit_op(Code::LOAD_CONST, const_undefined(expr.start_pos()), expr.start_pos(), 1);
                     }
                     if (entry.value) {
                         compile_expression(*entry.value);
                     } else {
-                        emit_op(Code::LOAD_CONST, const_undefined(), expr.start_pos(), 1);
+                        emit_op(Code::LOAD_CONST, const_undefined(expr.start_pos()), expr.start_pos(), 1);
                     }
                     emit_raw(static_cast<std::int32_t>(Code::IDX_SET_1), expr.start_pos(), -2);
                     continue;
                 }
-                std::size_t prop_idx = add_string_constant(entry.key.string_key);
+                std::size_t prop_idx = add_string_constant(entry.key.string_key, expr.start_pos());
                 if (entry.value) {
                     compile_expression(*entry.value);
                 } else {
-                    emit_op(Code::LOAD_CONST, const_undefined(), expr.start_pos(), 1);
+                    emit_op(Code::LOAD_CONST, const_undefined(expr.start_pos()), expr.start_pos(), 1);
                 }
                 emit_op(Code::PROP_SET_1, prop_idx, expr.start_pos(), -1);
             }
@@ -668,7 +862,7 @@ private:
         }
         if (auto *prop = dynamic_cast<const ast::PropertyReference *>(&expr)) {
             compile_expression(*prop->parent());
-            std::size_t prop_idx = add_string_constant(prop->name());
+            std::size_t prop_idx = add_string_constant(prop->name(), expr.start_pos());
             emit_op(Code::PROP_GET, prop_idx, expr.start_pos(), 0);
             return;
         }
@@ -744,7 +938,7 @@ private:
             emit_raw(static_cast<std::int32_t>(Code::POP), expr.start_pos(), -1);
             compile_expression(*logic->right());
             std::size_t end_target = codes_.size();
-            patch_jump(end_jump, end_target);
+            patch_jump(end_jump, end_target, expr.start_pos());
             return;
         }
         if (auto *unary = dynamic_cast<const ast::UnaryOperator *>(&expr)) {
@@ -777,11 +971,11 @@ private:
             compile_expression(*ternary->if_true());
             std::size_t end_jump = emit_jump(Code::JUMP, 0, expr.start_pos());
             std::size_t else_target = codes_.size();
-            patch_jump(else_jump, else_target);
+            patch_jump(else_jump, else_target, expr.start_pos());
             stack_depth_ = saved_depth;
             compile_expression(*ternary->if_false());
             std::size_t end_target = codes_.size();
-            patch_jump(end_jump, end_target);
+            patch_jump(end_jump, end_target, expr.start_pos());
             return;
         }
         if (auto *assign = dynamic_cast<const ast::Assign *>(&expr)) {
@@ -797,10 +991,13 @@ private:
     }
 
     void compile_assign(const ast::Assign &assign) {
+        if (failed()) {
+            return;
+        }
         const ast::MaybeLValue *left = assign.left();
         const ast::Expression *right = assign.right();
         if (!left || !right) {
-            emit_op(Code::LOAD_CONST, const_undefined(), assign.start_pos(), 1);
+            emit_op(Code::LOAD_CONST, const_undefined(assign.start_pos()), assign.start_pos(), 1);
             return;
         }
         if (auto *var = dynamic_cast<const ast::VariableReference *>(left)) {
@@ -813,7 +1010,7 @@ private:
         if (auto *prop = dynamic_cast<const ast::PropertyReference *>(left)) {
             compile_expression(*prop->parent());
             compile_expression(*right);
-            std::size_t prop_idx = add_string_constant(prop->name());
+            std::size_t prop_idx = add_string_constant(prop->name(), assign.start_pos());
             emit_op(Code::PROP_SET, prop_idx, assign.start_pos(), -1);
             return;
         }
@@ -828,7 +1025,7 @@ private:
     }
 };
 
-Compiled Compiler::compile(const ast::Node &node) {
+CompileResult<Compiled> Compiler::compile(const ast::Node &node) {
     CompilerImpl compiler;
     return compiler.compile(node);
 }
