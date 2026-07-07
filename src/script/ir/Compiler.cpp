@@ -44,6 +44,8 @@ namespace fiber::script::ir {
 
 class CompilerImpl {
 public:
+    explicit CompilerImpl(std::size_t max_depth) : max_depth_(max_depth == 0 ? 1 : max_depth) {}
+
     CompileResult<Compiled> compile(const ast::Node &node) {
         push_scope();
         if (auto *block = dynamic_cast<const ast::Block *>(&node)) {
@@ -74,6 +76,20 @@ public:
     }
 
 private:
+    class DepthGuard {
+    public:
+        DepthGuard() noexcept = default;
+        explicit DepthGuard(CompilerImpl &compiler) noexcept;
+        DepthGuard(const DepthGuard &) = delete;
+        DepthGuard &operator=(const DepthGuard &) = delete;
+        DepthGuard(DepthGuard &&other) noexcept;
+        DepthGuard &operator=(DepthGuard &&other) noexcept;
+        ~DepthGuard();
+
+    private:
+        CompilerImpl *compiler_ = nullptr;
+    };
+
     struct Scope {
         std::unordered_map<std::string, std::size_t> vars;
     };
@@ -107,6 +123,8 @@ private:
     std::optional<std::size_t> true_const_;
     std::optional<std::size_t> false_const_;
     std::optional<CompileError> error_;
+    std::size_t max_depth_ = kDefaultScriptMaxDepth;
+    std::size_t compile_depth_ = 0;
     std::size_t next_var_index_ = 0;
     int stack_depth_ = 0;
     int max_stack_ = 0;
@@ -117,6 +135,14 @@ private:
         if (!error_) {
             error_ = CompileError{reason, position, message};
         }
+    }
+
+    CompileResult<DepthGuard> enter_compile_depth(std::int32_t position) {
+        if (compile_depth_ >= max_depth_) {
+            fail(CompileErrorReason::ProgramTooLarge, position, "maximum script compile depth exceeded");
+            return std::unexpected(*error_);
+        }
+        return DepthGuard(*this);
     }
 
     void push_scope() { scopes_.push_back(Scope{}); }
@@ -505,6 +531,11 @@ private:
         if (failed()) {
             return;
         }
+        auto guard_result = enter_compile_depth(block.start_pos());
+        if (!guard_result) {
+            return;
+        }
+        auto guard = std::move(guard_result.value());
         if (push_new_scope) {
             push_scope();
         }
@@ -525,6 +556,11 @@ private:
         if (failed()) {
             return;
         }
+        auto guard_result = enter_compile_depth(stmt.start_pos());
+        if (!guard_result) {
+            return;
+        }
+        auto guard = std::move(guard_result.value());
         if (auto *block = dynamic_cast<const ast::Block *>(&stmt)) {
             compile_block(*block, true);
             return;
@@ -678,6 +714,11 @@ private:
         if (failed()) {
             return;
         }
+        auto guard_result = enter_compile_depth(expr.start_pos());
+        if (!guard_result) {
+            return;
+        }
+        auto guard = std::move(guard_result.value());
         if (auto *literal = dynamic_cast<const ast::Literal *>(&expr)) {
             fiber::script::JsValue value = fiber::script::JsValue::make_undefined();
             switch (literal->kind()) {
@@ -1025,8 +1066,31 @@ private:
     }
 };
 
-CompileResult<Compiled> Compiler::compile(const ast::Node &node) {
-    CompilerImpl compiler;
+CompilerImpl::DepthGuard::DepthGuard(CompilerImpl &compiler) noexcept : compiler_(&compiler) {
+    ++compiler_->compile_depth_;
+}
+
+CompilerImpl::DepthGuard::DepthGuard(DepthGuard &&other) noexcept :
+    compiler_(std::exchange(other.compiler_, nullptr)) {}
+
+CompilerImpl::DepthGuard &CompilerImpl::DepthGuard::operator=(DepthGuard &&other) noexcept {
+    if (this != &other) {
+        if (compiler_) {
+            --compiler_->compile_depth_;
+        }
+        compiler_ = std::exchange(other.compiler_, nullptr);
+    }
+    return *this;
+}
+
+CompilerImpl::DepthGuard::~DepthGuard() {
+    if (compiler_) {
+        --compiler_->compile_depth_;
+    }
+}
+
+CompileResult<Compiled> Compiler::compile(const ast::Node &node, std::size_t max_depth) {
+    CompilerImpl compiler(max_depth);
     return compiler.compile(node);
 }
 

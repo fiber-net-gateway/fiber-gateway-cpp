@@ -6,6 +6,7 @@
 #include <limits>
 #include <optional>
 #include <unordered_set>
+#include <utility>
 
 namespace fiber::script::parse {
 
@@ -15,6 +16,13 @@ bool is_keyword(std::string_view text) {
     return text == "let" || text == "if" || text == "else" || text == "for" || text == "of" || text == "continue" ||
            text == "break" || text == "return" || text == "directive" || text == "try" || text == "catch" ||
            text == "throw";
+}
+
+ScriptLimits normalise_limits(ScriptLimits limits) noexcept {
+    if (limits.max_depth == 0) {
+        limits.max_depth = 1;
+    }
+    return limits;
 }
 
 void append_utf8(std::string &out, std::uint32_t codepoint) {
@@ -60,10 +68,15 @@ std::size_t js_line_terminator_length(std::string_view input, std::size_t pos) {
 }
 
 std::expected<std::size_t, ParseError> find_template_expression_end(std::string_view input, std::size_t pos,
-                                                                    std::size_t start_pos);
+                                                                    std::size_t start_pos, std::size_t max_depth,
+                                                                    std::size_t depth);
 
 std::expected<std::size_t, ParseError> find_template_literal_end(std::string_view input, std::size_t pos,
-                                                                 std::size_t start_pos) {
+                                                                 std::size_t start_pos, std::size_t max_depth,
+                                                                 std::size_t depth) {
+    if (depth >= max_depth) {
+        return std::unexpected(ParseError{"maximum template literal nesting depth exceeded", start_pos + pos});
+    }
     std::size_t p = pos + 1;
     while (p < input.size()) {
         char chr = input[p];
@@ -80,7 +93,7 @@ std::expected<std::size_t, ParseError> find_template_literal_end(std::string_vie
             continue;
         }
         if (chr == '$' && p + 1 < input.size() && input[p + 1] == '{') {
-            auto expr_end = find_template_expression_end(input, p + 2, start_pos);
+            auto expr_end = find_template_expression_end(input, p + 2, start_pos, max_depth, depth);
             if (!expr_end) {
                 return std::unexpected(expr_end.error());
             }
@@ -93,9 +106,10 @@ std::expected<std::size_t, ParseError> find_template_literal_end(std::string_vie
 }
 
 std::expected<std::size_t, ParseError> find_template_expression_end(std::string_view input, std::size_t pos,
-                                                                    std::size_t start_pos) {
+                                                                    std::size_t start_pos, std::size_t max_depth,
+                                                                    std::size_t depth) {
     std::size_t p = pos;
-    int curly_depth = 1;
+    std::size_t curly_depth = 1;
     while (p < input.size()) {
         char chr = input[p];
         if (chr == '\'' || chr == '"') {
@@ -128,7 +142,7 @@ std::expected<std::size_t, ParseError> find_template_expression_end(std::string_
             continue;
         }
         if (chr == '`') {
-            auto nested_end = find_template_literal_end(input, p, start_pos);
+            auto nested_end = find_template_literal_end(input, p, start_pos, max_depth, depth + 1);
             if (!nested_end) {
                 return std::unexpected(nested_end.error());
             }
@@ -156,6 +170,9 @@ std::expected<std::size_t, ParseError> find_template_expression_end(std::string_
             }
         }
         if (chr == '{') {
+            if (curly_depth >= max_depth) {
+                return std::unexpected(ParseError{"maximum template expression nesting depth exceeded", start_pos + p});
+            }
             ++curly_depth;
             ++p;
             continue;
@@ -175,10 +192,35 @@ std::expected<std::size_t, ParseError> find_template_expression_end(std::string_
 
 } // namespace
 
-Parser::Parser(Library &library, bool allow_assign) : library_(library), allow_assign_(allow_assign) {}
+Parser::DepthGuard::DepthGuard(Parser &parser) noexcept : parser_(&parser) { ++parser_->parse_depth_; }
+
+Parser::DepthGuard::DepthGuard(DepthGuard &&other) noexcept : parser_(std::exchange(other.parser_, nullptr)) {}
+
+Parser::DepthGuard &Parser::DepthGuard::operator=(DepthGuard &&other) noexcept {
+    if (this != &other) {
+        if (parser_) {
+            --parser_->parse_depth_;
+        }
+        parser_ = std::exchange(other.parser_, nullptr);
+    }
+    return *this;
+}
+
+Parser::DepthGuard::~DepthGuard() {
+    if (parser_) {
+        --parser_->parse_depth_;
+    }
+}
+
+Parser::Parser(Library &library, bool allow_assign, ScriptLimits limits) :
+    library_(library), limits_(normalise_limits(limits)), allow_assign_(allow_assign) {}
+
+Parser::Parser(Library &library, bool allow_assign, ScriptLimits limits, std::size_t parse_depth) :
+    library_(library), limits_(normalise_limits(limits)), allow_assign_(allow_assign),
+    parse_depth_(parse_depth > limits_.max_depth ? limits_.max_depth : parse_depth) {}
 
 std::expected<std::unique_ptr<ast::Block>, ParseError> Parser::parse_script(std::string_view script) {
-    Tokenizer tokenizer{std::string(script)};
+    Tokenizer tokenizer{std::string(script), limits_.max_depth};
     auto token_result = tokenizer.process();
     if (!token_result) {
         return std::unexpected(token_result.error());
@@ -202,7 +244,7 @@ std::expected<std::unique_ptr<ast::Block>, ParseError> Parser::parse_script(std:
 }
 
 std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_expression(std::string_view expression) {
-    Tokenizer tokenizer{std::string(expression)};
+    Tokenizer tokenizer{std::string(expression), limits_.max_depth};
     auto token_result = tokenizer.process();
     if (!token_result) {
         return std::unexpected(token_result.error());
@@ -386,6 +428,12 @@ std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_try_cat
 }
 
 std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_if_statement() {
+    auto guard_result = enter_depth(peek());
+    if (!guard_result) {
+        return std::unexpected(guard_result.error());
+    }
+    auto guard = std::move(guard_result.value());
+
     auto if_token = eat_keyword("if");
     if (!if_token) {
         return std::unexpected(if_token.error());
@@ -587,6 +635,15 @@ std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_directi
 }
 
 std::expected<std::unique_ptr<ast::Block>, ParseError> Parser::parse_block(bool must_curly, ast::BlockType type) {
+    std::expected<DepthGuard, ParseError> guard_result = DepthGuard{};
+    if (must_curly) {
+        guard_result = enter_depth(peek());
+        if (!guard_result) {
+            return std::unexpected(guard_result.error());
+        }
+    }
+    auto guard = std::move(guard_result.value());
+
     std::size_t start_pos = 0;
     if (must_curly) {
         auto token_result = eat(TokenKind::LCurly);
@@ -667,6 +724,11 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_expres
             return std::make_unique<ast::Assign>(start, end, std::move(left_ptr), std::move(rhs_result.value()));
         }
         if (peek(TokenKind::QMark)) {
+            auto depth_result = enter_depth(peek());
+            if (!depth_result) {
+                return std::unexpected(depth_result.error());
+            }
+            auto guard = std::move(depth_result.value());
             next();
             auto true_result = parse_expression_internal();
             if (!true_result) {
@@ -695,7 +757,13 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_logica
         return std::unexpected(expr_result.error());
     }
     auto expr = std::move(expr_result.value());
+    std::size_t chain_depth = 0;
     while (peek(TokenKind::SymbolicOr)) {
+        auto depth_result = check_depth_slot(chain_depth, peek());
+        if (!depth_result) {
+            return std::unexpected(depth_result.error());
+        }
+        ++chain_depth;
         auto token = next();
         auto rhs_result = parse_logical_and();
         if (!rhs_result) {
@@ -715,7 +783,13 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_logica
         return std::unexpected(expr_result.error());
     }
     auto expr = std::move(expr_result.value());
+    std::size_t chain_depth = 0;
     while (peek(TokenKind::SymbolicAnd)) {
+        auto depth_result = check_depth_slot(chain_depth, peek());
+        if (!depth_result) {
+            return std::unexpected(depth_result.error());
+        }
+        ++chain_depth;
         auto token = next();
         auto rhs_result = parse_relational();
         if (!rhs_result) {
@@ -771,7 +845,13 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_sum() 
         return std::unexpected(expr_result.error());
     }
     auto expr = std::move(expr_result.value());
+    std::size_t chain_depth = 0;
     while (peek(TokenKind::Plus, TokenKind::Minus)) {
+        auto depth_result = check_depth_slot(chain_depth, peek());
+        if (!depth_result) {
+            return std::unexpected(depth_result.error());
+        }
+        ++chain_depth;
         Token op_token = *next();
         auto rhs_result = parse_product();
         if (!rhs_result) {
@@ -795,7 +875,13 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_produc
         return std::unexpected(expr_result.error());
     }
     auto expr = std::move(expr_result.value());
+    std::size_t chain_depth = 0;
     while (peek(TokenKind::Star, TokenKind::Div, TokenKind::Mod)) {
+        auto depth_result = check_depth_slot(chain_depth, peek());
+        if (!depth_result) {
+            return std::unexpected(depth_result.error());
+        }
+        ++chain_depth;
         Token op_token = *next();
         auto rhs_result = parse_unary();
         if (!rhs_result) {
@@ -819,6 +905,11 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_unary(
     }
     const Token *token = peek();
     if (token->kind == TokenKind::Plus || token->kind == TokenKind::Minus || token->kind == TokenKind::Not) {
+        auto guard_result = enter_depth(token);
+        if (!guard_result) {
+            return std::unexpected(guard_result.error());
+        }
+        auto guard = std::move(guard_result.value());
         Token op_token = *next();
         auto rhs_result = parse_unary();
         if (!rhs_result) {
@@ -833,6 +924,11 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_unary(
         return std::make_unique<ast::UnaryOperator>(start, end, *mapped, std::move(rhs_result.value()));
     }
     if (token->kind == TokenKind::Identifier && token->text == "typeof") {
+        auto guard_result = enter_depth(token);
+        if (!guard_result) {
+            return std::unexpected(guard_result.error());
+        }
+        auto guard = std::move(guard_result.value());
         Token op_token = *next();
         auto rhs_result = parse_unary();
         if (!rhs_result) {
@@ -863,7 +959,13 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_primar
         }
     }
 
+    std::size_t member_depth = 0;
     while (peek(TokenKind::Dot) || peek(TokenKind::LSquare)) {
+        auto depth_result = check_depth_slot(member_depth, peek());
+        if (!depth_result) {
+            return std::unexpected(depth_result.error());
+        }
+        ++member_depth;
         auto node_result = parse_node(std::move(start));
         if (!node_result) {
             return std::unexpected(node_result.error());
@@ -878,21 +980,36 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_start_
     if (literal_result) {
         return literal_result;
     }
+    if (!literal_result.error().message.empty()) {
+        return std::unexpected(literal_result.error());
+    }
     auto template_result = parse_template_literal();
     if (template_result) {
         return template_result;
+    }
+    if (!template_result.error().message.empty()) {
+        return std::unexpected(template_result.error());
     }
     auto list_result = parse_inline_list();
     if (list_result) {
         return list_result;
     }
+    if (!list_result.error().message.empty()) {
+        return std::unexpected(list_result.error());
+    }
     auto obj_result = parse_inline_object();
     if (obj_result) {
         return obj_result;
     }
+    if (!obj_result.error().message.empty()) {
+        return std::unexpected(obj_result.error());
+    }
     auto paren_result = parse_paren_expression();
     if (paren_result) {
         return paren_result;
+    }
+    if (!paren_result.error().message.empty()) {
+        return std::unexpected(paren_result.error());
     }
     return parse_function_or_var();
 }
@@ -901,6 +1018,11 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_paren_
     if (!peek(TokenKind::LParen)) {
         return std::unexpected(ParseError{});
     }
+    auto guard_result = enter_depth(peek());
+    if (!guard_result) {
+        return std::unexpected(guard_result.error());
+    }
+    auto guard = std::move(guard_result.value());
     next();
     auto expr_result = parse_expression_internal();
     if (!expr_result) {
@@ -929,6 +1051,11 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_templa
     if (!token || token->kind != TokenKind::TemplateLiteral) {
         return std::unexpected(ParseError{});
     }
+    auto guard_result = enter_depth(token);
+    if (!guard_result) {
+        return std::unexpected(guard_result.error());
+    }
+    auto guard = std::move(guard_result.value());
     Token tpl = *next();
     if (tpl.text.size() < 2 || tpl.text.front() != '`' || tpl.text.back() != '`') {
         return std::unexpected(make_error("invalid template literal", &tpl));
@@ -952,6 +1079,7 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_templa
     std::size_t chunk_start = 1;
     std::size_t i = 1;
     const std::size_t last = tpl.text.size() - 1;
+    std::size_t part_depth = 0;
     while (i < last) {
         char ch = tpl.text[i];
         if (ch == '\\') {
@@ -970,25 +1098,40 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_templa
                 return std::unexpected(parsed_chunk.error());
             }
             if (!parsed_chunk->empty()) {
+                auto depth_result = check_depth_slot(part_depth, &tpl);
+                if (!depth_result) {
+                    return std::unexpected(depth_result.error());
+                }
+                ++part_depth;
                 append_string(std::move(parsed_chunk.value()), tpl.start + chunk_start, tpl.start + i);
             } else if (!expr) {
+                auto depth_result = check_depth_slot(part_depth, &tpl);
+                if (!depth_result) {
+                    return std::unexpected(depth_result.error());
+                }
+                ++part_depth;
                 append_string(std::string{}, tpl.start + chunk_start, tpl.start + chunk_start);
             }
 
-            auto expr_end = find_template_expression_end(tpl.text, i + 2, tpl.start);
+            auto expr_end = find_template_expression_end(tpl.text, i + 2, tpl.start, limits_.max_depth, 0);
             if (!expr_end) {
                 return std::unexpected(expr_end.error());
             }
             std::size_t inner_start = i + 2;
             std::size_t inner_end = expr_end.value() - 1;
             std::string_view inner = std::string_view(tpl.text).substr(inner_start, inner_end - inner_start);
-            Parser nested(library_, allow_assign_);
+            Parser nested(library_, allow_assign_, limits_, parse_depth_);
             auto inner_expr = nested.parse_expression(inner);
             if (!inner_expr) {
                 ParseError error = inner_expr.error();
                 error.position += tpl.start + inner_start;
                 return std::unexpected(std::move(error));
             }
+            auto depth_result = check_depth_slot(part_depth, &tpl);
+            if (!depth_result) {
+                return std::unexpected(depth_result.error());
+            }
+            ++part_depth;
             append_part(std::move(inner_expr.value()));
             i = expr_end.value();
             chunk_start = i;
@@ -1003,8 +1146,18 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_templa
         return std::unexpected(parsed_tail.error());
     }
     if (!parsed_tail->empty()) {
+        auto depth_result = check_depth_slot(part_depth, &tpl);
+        if (!depth_result) {
+            return std::unexpected(depth_result.error());
+        }
+        ++part_depth;
         append_string(std::move(parsed_tail.value()), tpl.start + chunk_start, tpl.start + last);
     } else if (!expr) {
+        auto depth_result = check_depth_slot(part_depth, &tpl);
+        if (!depth_result) {
+            return std::unexpected(depth_result.error());
+        }
+        ++part_depth;
         append_string(std::string{}, tpl.start + chunk_start, tpl.start + chunk_start);
     }
     return expr;
@@ -1048,6 +1201,11 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_inline
     if (!peek(TokenKind::LSquare)) {
         return std::unexpected(ParseError{});
     }
+    auto guard_result = enter_depth(peek());
+    if (!guard_result) {
+        return std::unexpected(guard_result.error());
+    }
+    auto guard = std::move(guard_result.value());
     Token start = *next();
     std::vector<std::unique_ptr<ast::Expression>> values;
     if (peek(TokenKind::RSquare, true)) {
@@ -1094,6 +1252,11 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_inline
     if (!peek(TokenKind::LCurly)) {
         return std::unexpected(ParseError{});
     }
+    auto guard_result = enter_depth(peek());
+    if (!guard_result) {
+        return std::unexpected(guard_result.error());
+    }
+    auto guard = std::move(guard_result.value());
     Token start = *next();
     std::vector<ast::InlineObject::Entry> entries;
     std::unordered_set<std::string> string_keys;
@@ -1278,6 +1441,11 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_functi
 
 std::expected<std::unique_ptr<ast::Expression>, ParseError>
 Parser::parse_indexer(std::unique_ptr<ast::Expression> parent) {
+    auto guard_result = enter_depth(peek());
+    if (!guard_result) {
+        return std::unexpected(guard_result.error());
+    }
+    auto guard = std::move(guard_result.value());
     auto start_token = eat(TokenKind::LSquare);
     if (!start_token) {
         return std::unexpected(start_token.error());
@@ -1337,9 +1505,14 @@ Parser::parse_property(std::unique_ptr<ast::Expression> parent) {
 std::expected<std::unique_ptr<ast::Expression>, ParseError>
 Parser::parse_function_call(ast::VariableReference &prefix) {
     std::size_t saved = pos_;
-    int dot_size = 0;
+    std::size_t dot_size = 0;
     std::string name = prefix.name();
     while (peek(TokenKind::Dot, true)) {
+        auto depth_result = check_depth_slot(dot_size, &tokens_[pos_ - 1]);
+        if (!depth_result) {
+            pos_ = saved;
+            return std::unexpected(depth_result.error());
+        }
         if (!peek(TokenKind::Identifier)) {
             pos_ = saved;
             return std::unexpected(ParseError{});
@@ -1417,6 +1590,11 @@ Parser::parse_function_call(ast::VariableReference &prefix) {
 }
 
 std::expected<std::vector<std::unique_ptr<ast::Expression>>, ParseError> Parser::parse_method_args() {
+    auto guard_result = enter_depth(peek());
+    if (!guard_result) {
+        return std::unexpected(guard_result.error());
+    }
+    auto guard = std::move(guard_result.value());
     std::vector<std::unique_ptr<ast::Expression>> args;
     auto lp_result = eat(TokenKind::LParen);
     if (!lp_result) {
@@ -1882,6 +2060,24 @@ std::expected<Token, ParseError> Parser::eat_keyword(std::string_view keyword) {
         return std::unexpected(make_error("keyword not matched", &token_result.value()));
     }
     return token_result;
+}
+
+std::expected<Parser::DepthGuard, ParseError> Parser::enter_depth(const Token *token) {
+    if (parse_depth_ >= limits_.max_depth) {
+        return std::unexpected(make_depth_error(token));
+    }
+    return DepthGuard(*this);
+}
+
+std::expected<void, ParseError> Parser::check_depth_slot(std::size_t depth, const Token *token) const {
+    if (depth < limits_.max_depth) {
+        return {};
+    }
+    return std::unexpected(make_depth_error(token));
+}
+
+ParseError Parser::make_depth_error(const Token *token) const {
+    return make_error("maximum script nesting depth exceeded", token);
 }
 
 ParseError Parser::make_error(const std::string &message, const Token *token) const {

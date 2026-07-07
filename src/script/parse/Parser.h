@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../ScriptLimits.h"
 #include "../ast/Assign.h"
 #include "../ast/BinaryOperator.h"
 #include "../ast/Block.h"
@@ -48,17 +49,33 @@ namespace fiber::script::parse {
 
 class Parser {
 public:
-    Parser(Library &library, bool allow_assign);
+    Parser(Library &library, bool allow_assign, ScriptLimits limits = {});
 
     std::expected<std::unique_ptr<ast::Block>, ParseError> parse_script(std::string_view script);
     std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_expression(std::string_view expression);
 
 private:
+    class DepthGuard {
+    public:
+        DepthGuard() noexcept = default;
+        explicit DepthGuard(Parser &parser) noexcept;
+        DepthGuard(const DepthGuard &) = delete;
+        DepthGuard &operator=(const DepthGuard &) = delete;
+        DepthGuard(DepthGuard &&other) noexcept;
+        DepthGuard &operator=(DepthGuard &&other) noexcept;
+        ~DepthGuard();
+
+    private:
+        Parser *parser_ = nullptr;
+    };
+
     struct ResolvedFunctionCall {
         const Library::HostCallable *func = nullptr;
         const Library::HostCallable *async_func = nullptr;
         std::vector<fiber::script::JsValue> default_args;
     };
+
+    Parser(Library &library, bool allow_assign, ScriptLimits limits, std::size_t parse_depth);
 
     std::expected<std::unique_ptr<ast::Statement>, ParseError> parse_statement();
     std::expected<std::unique_ptr<ast::Statement>, ParseError> parse_break_statement();
@@ -119,10 +136,15 @@ private:
     std::expected<Token, ParseError> eat(TokenKind expected_kind);
     std::expected<Token, ParseError> eat_keyword(std::string_view keyword);
 
+    std::expected<DepthGuard, ParseError> enter_depth(const Token *token);
+    std::expected<void, ParseError> check_depth_slot(std::size_t depth, const Token *token) const;
+    ParseError make_depth_error(const Token *token) const;
     ParseError make_error(const std::string &message, const Token *token) const;
 
     Library &library_;
+    ScriptLimits limits_;
     bool allow_assign_ = true;
+    std::size_t parse_depth_ = 0;
     std::vector<Token> tokens_;
     std::size_t pos_ = 0;
     std::unordered_map<std::string, ast::DirectiveStatement *> directive_map_;
