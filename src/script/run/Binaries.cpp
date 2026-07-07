@@ -7,7 +7,7 @@
 #include <limits>
 
 #include "../../common/json/Utf.h"
-#include "../Runtime.h"
+#include "../JsGc.h"
 #include "Compares.h"
 
 namespace fiber::script::run {
@@ -444,8 +444,7 @@ CallResult plus_impl(fiber::script::GcHeap &heap, const fiber::script::JsValue &
 
 } // namespace
 
-CallResult Binaries::plus(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
-                          ResultPayload &result) noexcept {
+CallResult Binaries::plus(GcHeap &runtime, ConstValueHandle a, ConstValueHandle b, ResultPayload &result) noexcept {
     CallResult status = CallResult::Success;
     runtime.run_with_gc_retry(estimate_plus_alloc_bytes(*a, *b), [&]() {
         status = plus_impl(runtime.heap(), *a, *b, result);
@@ -454,20 +453,17 @@ CallResult Binaries::plus(ScriptRuntime &runtime, ConstValueHandle a, ConstValue
     return status;
 }
 
-CallResult Binaries::minus(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
-                           ResultPayload &result) noexcept {
+CallResult Binaries::minus(GcHeap &runtime, ConstValueHandle a, ConstValueHandle b, ResultPayload &result) noexcept {
     (void) runtime;
     return sub_numeric(*a, *b, result);
 }
 
-CallResult Binaries::multiply(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
-                              ResultPayload &result) noexcept {
+CallResult Binaries::multiply(GcHeap &runtime, ConstValueHandle a, ConstValueHandle b, ResultPayload &result) noexcept {
     (void) runtime;
     return mul_numeric(*a, *b, result);
 }
 
-CallResult Binaries::divide(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
-                            ResultPayload &result) noexcept {
+CallResult Binaries::divide(GcHeap &runtime, ConstValueHandle a, ConstValueHandle b, ResultPayload &result) noexcept {
     (void) runtime;
     if (!is_numeric_like(fiber::script::js_value_type(*a)) || !is_numeric_like(fiber::script::js_value_type(*b))) {
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
@@ -483,8 +479,7 @@ CallResult Binaries::divide(ScriptRuntime &runtime, ConstValueHandle a, ConstVal
     return set_value(result, fiber::script::JsValue::make_float(lhs / rhs));
 }
 
-CallResult Binaries::modulo(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
-                            ResultPayload &result) noexcept {
+CallResult Binaries::modulo(GcHeap &runtime, ConstValueHandle a, ConstValueHandle b, ResultPayload &result) noexcept {
     (void) runtime;
     if (!is_numeric_like(fiber::script::js_value_type(*a)) || !is_numeric_like(fiber::script::js_value_type(*b))) {
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
@@ -512,62 +507,52 @@ CallResult Binaries::modulo(ScriptRuntime &runtime, ConstValueHandle a, ConstVal
     return set_value(result, fiber::script::JsValue::make_integer(lhs % rhs));
 }
 
-CallResult Binaries::matches(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
-                             ResultPayload &result) noexcept {
+CallResult Binaries::matches(GcHeap &runtime, ConstValueHandle a, ConstValueHandle b, ResultPayload &result) noexcept {
     (void) runtime;
     return set_value(result, fiber::script::JsValue::make_boolean(Compares::matches(a, b)));
 }
 
-CallResult Binaries::lt(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
-                        ResultPayload &result) noexcept {
+CallResult Binaries::lt(GcHeap &runtime, ConstValueHandle a, ConstValueHandle b, ResultPayload &result) noexcept {
     (void) runtime;
     return set_value(result, fiber::script::JsValue::make_boolean(Compares::lt(a, b)));
 }
 
-CallResult Binaries::lte(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
-                         ResultPayload &result) noexcept {
+CallResult Binaries::lte(GcHeap &runtime, ConstValueHandle a, ConstValueHandle b, ResultPayload &result) noexcept {
     (void) runtime;
     return set_value(result, fiber::script::JsValue::make_boolean(Compares::lte(a, b)));
 }
 
-CallResult Binaries::gt(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
-                        ResultPayload &result) noexcept {
+CallResult Binaries::gt(GcHeap &runtime, ConstValueHandle a, ConstValueHandle b, ResultPayload &result) noexcept {
     (void) runtime;
     return set_value(result, fiber::script::JsValue::make_boolean(Compares::gt(a, b)));
 }
 
-CallResult Binaries::gte(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
-                         ResultPayload &result) noexcept {
+CallResult Binaries::gte(GcHeap &runtime, ConstValueHandle a, ConstValueHandle b, ResultPayload &result) noexcept {
     (void) runtime;
     return set_value(result, fiber::script::JsValue::make_boolean(Compares::gte(a, b)));
 }
 
-CallResult Binaries::eq(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
-                        ResultPayload &result) noexcept {
+CallResult Binaries::eq(GcHeap &runtime, ConstValueHandle a, ConstValueHandle b, ResultPayload &result) noexcept {
     (void) runtime;
     return set_value(result, fiber::script::JsValue::make_boolean(Compares::eq(a, b)));
 }
 
-CallResult Binaries::seq(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
-                         ResultPayload &result) noexcept {
+CallResult Binaries::seq(GcHeap &runtime, ConstValueHandle a, ConstValueHandle b, ResultPayload &result) noexcept {
     (void) runtime;
     return set_value(result, fiber::script::JsValue::make_boolean(Compares::seq(a, b)));
 }
 
-CallResult Binaries::ne(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
-                        ResultPayload &result) noexcept {
+CallResult Binaries::ne(GcHeap &runtime, ConstValueHandle a, ConstValueHandle b, ResultPayload &result) noexcept {
     (void) runtime;
     return set_value(result, fiber::script::JsValue::make_boolean(Compares::ne(a, b)));
 }
 
-CallResult Binaries::sne(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
-                         ResultPayload &result) noexcept {
+CallResult Binaries::sne(GcHeap &runtime, ConstValueHandle a, ConstValueHandle b, ResultPayload &result) noexcept {
     (void) runtime;
     return set_value(result, fiber::script::JsValue::make_boolean(Compares::sne(a, b)));
 }
 
-CallResult Binaries::in(ScriptRuntime &runtime, ConstValueHandle a, ConstValueHandle b,
-                        ResultPayload &result) noexcept {
+CallResult Binaries::in(GcHeap &runtime, ConstValueHandle a, ConstValueHandle b, ResultPayload &result) noexcept {
     (void) runtime;
     return set_value(result, fiber::script::JsValue::make_boolean(Compares::in(a, b)));
 }

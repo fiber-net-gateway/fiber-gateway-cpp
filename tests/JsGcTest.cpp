@@ -10,11 +10,14 @@ using fiber::script::GcIterator;
 using fiber::script::GcIteratorMode;
 using fiber::script::GcObject;
 using fiber::script::GcRootSet;
+using fiber::script::GcRootSource;
+using fiber::script::GcRootVisitor;
 using fiber::script::GcString;
 using fiber::script::GcStringEncoding;
 using fiber::script::JsHeapKind;
 using fiber::script::JsNodeType;
 using fiber::script::JsValue;
+using fiber::script::ValueHandle;
 
 TEST(JsGcTest, BytesIncludeExternalBuffers) {
     GcHeap heap;
@@ -67,17 +70,17 @@ TEST(JsGcTest, IteratorSnapshotBytesAreAccounted) {
               before_snapshot + fiber::script::gc_estimate_object_snapshot_bytes(2));
 }
 
-class SingleValueProvider final : public GcRootSet::RootProvider {
+class SingleValueSource final : public GcRootSource {
 public:
-    explicit SingleValueProvider(JsValue &value) : value_(&value) {}
+    explicit SingleValueSource(JsValue &value) : value_(&value) {}
 
-    void visit_roots(GcRootSet::RootVisitor &visitor) override { visitor.visit(value_); }
+    void visit_roots(GcRootVisitor &visitor) noexcept override { visitor.visit(value_); }
 
 private:
     JsValue *value_ = nullptr;
 };
 
-TEST(JsGcTest, RootProvidersMarkValuesWithoutTemporaryRootVector) {
+TEST(JsGcTest, RootSourcesMarkValuesWithoutTemporaryRootVector) {
     GcHeap heap;
     GcRootSet roots;
 
@@ -88,8 +91,8 @@ TEST(JsGcTest, RootProvidersMarkValuesWithoutTemporaryRootVector) {
     ASSERT_NE(garbage, nullptr);
     rooted = js_make_heap_ref(&live->hdr, JsHeapKind::String);
 
-    SingleValueProvider provider(rooted);
-    roots.add_provider(&provider);
+    SingleValueSource source(rooted);
+    roots.add_source(&source);
 
     std::size_t before_collect = fiber::script::gc_bytes_used(heap);
     fiber::script::gc_collect(heap, roots);
@@ -100,6 +103,48 @@ TEST(JsGcTest, RootProvidersMarkValuesWithoutTemporaryRootVector) {
     EXPECT_EQ(js_value_heap_header(rooted), &live->hdr);
     EXPECT_LT(after_collect, before_collect);
     EXPECT_EQ(after_collect, fiber::script::gc_estimate_string_bytes(4, GcStringEncoding::Byte));
+}
+
+TEST(JsGcTest, GcHeapGlobalSlotsAreCollectedAsRoots) {
+    GcHeap heap;
+
+    GcString *live = fiber::script::gc_new_string(&heap, "live", 4);
+    GcString *garbage = fiber::script::gc_new_string(&heap, "dead", 4);
+    ASSERT_NE(live, nullptr);
+    ASSERT_NE(garbage, nullptr);
+
+    ValueHandle root = heap.global_value();
+    ASSERT_NE(root, nullptr);
+    *root = js_make_heap_ref(&live->hdr, JsHeapKind::String);
+
+    std::size_t before_collect = fiber::script::gc_bytes_used(heap);
+    heap.collect_now();
+    heap.collect_now();
+
+    EXPECT_EQ(js_value_heap_header(*root), &live->hdr);
+    EXPECT_LT(fiber::script::gc_bytes_used(heap), before_collect);
+    EXPECT_EQ(fiber::script::gc_bytes_used(heap), fiber::script::gc_estimate_string_bytes(4, GcStringEncoding::Byte));
+}
+
+TEST(JsGcTest, GcHeapLocalMarkReleasesLocalRoots) {
+    GcHeap heap;
+
+    {
+        GcHeap::LocalMark mark(heap);
+        GcString *live = fiber::script::gc_new_string(&heap, "live", 4);
+        ASSERT_NE(live, nullptr);
+        ValueHandle root = heap.local_value();
+        ASSERT_NE(root, nullptr);
+        *root = js_make_heap_ref(&live->hdr, JsHeapKind::String);
+
+        heap.collect_now();
+        EXPECT_EQ(js_value_heap_header(*root), &live->hdr);
+        EXPECT_EQ(fiber::script::gc_bytes_used(heap),
+                  fiber::script::gc_estimate_string_bytes(4, GcStringEncoding::Byte));
+    }
+
+    heap.collect_now();
+    EXPECT_EQ(fiber::script::gc_bytes_used(heap), 0u);
 }
 
 } // namespace

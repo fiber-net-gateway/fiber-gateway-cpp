@@ -7,13 +7,13 @@
 
 namespace fiber::script {
 
-class ScriptRuntime;
+class GcHeap;
 
 class ExecutionContext {
 public:
     virtual ~ExecutionContext() = default;
 
-    virtual ScriptRuntime &runtime() = 0;
+    virtual GcHeap &runtime() = 0;
     virtual const fiber::script::JsValue &root() const = 0;
     virtual void *attach() const = 0;
     virtual const fiber::script::JsValue &arg_value(std::size_t index) const = 0;

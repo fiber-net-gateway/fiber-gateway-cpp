@@ -12,15 +12,14 @@
 #include "../ir/Compiled.h"
 
 namespace fiber::script {
-class ScriptRuntime;
+class GcHeap;
 }
 
 namespace fiber::script::run {
 
 class InterpreterVm final : public fiber::script::GcRootSource {
 public:
-    InterpreterVm(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach,
-                  ScriptRuntime &runtime);
+    InterpreterVm(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach, GcHeap &runtime);
     ~InterpreterVm() override;
 
     void iterate();
@@ -60,7 +59,7 @@ private:
     const ir::Compiled &compile_;
     fiber::script::JsValue root_;
     void *attach_ = nullptr;
-    ScriptRuntime &runtime_;
+    GcHeap &runtime_;
 
     std::unique_ptr<fiber::script::JsValue[]> slots_;
     fiber::script::JsValue *stack_ = nullptr;

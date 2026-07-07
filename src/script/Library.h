@@ -6,8 +6,8 @@
 #include <vector>
 
 #include "AsyncTask.h"
+#include "JsGc.h"
 #include "JsValue.h"
-#include "Runtime.h"
 #include "ScriptResult.h"
 
 namespace fiber::script {
@@ -15,7 +15,7 @@ namespace fiber::script {
 class Library {
 public:
     struct HostCallFrame {
-        ScriptRuntime *runtime = nullptr;
+        GcHeap *runtime = nullptr;
         ConstValueHandle root = nullptr;
         void *attach = nullptr;
     };

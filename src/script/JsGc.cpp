@@ -8,6 +8,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
@@ -20,12 +21,24 @@ constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 constexpr std::size_t kMinBucketCount = 8;
 constexpr std::size_t kMaxLoadNumerator = 3;
 constexpr std::size_t kMaxLoadDenominator = 4;
+constexpr std::size_t kMinGcThreshold = 1 << 20;
+constexpr std::size_t kValueBlockSlots = 8;
 
 std::size_t saturating_add(std::size_t lhs, std::size_t rhs) {
     if (rhs > std::numeric_limits<std::size_t>::max() - lhs) {
         return std::numeric_limits<std::size_t>::max();
     }
     return lhs + rhs;
+}
+
+std::size_t next_threshold(std::size_t live_bytes) {
+    std::size_t grown = live_bytes;
+    if (grown <= (std::numeric_limits<std::size_t>::max() >> 1)) {
+        grown *= 2;
+    } else {
+        grown = std::numeric_limits<std::size_t>::max();
+    }
+    return grown < kMinGcThreshold ? kMinGcThreshold : grown;
 }
 
 GcMark flip_mark(GcMark mark) { return (mark == GcMark::GcMark_0) ? GcMark::GcMark_1 : GcMark::GcMark_0; }
@@ -607,6 +620,202 @@ void gc_free_obj(GcHeap *heap, GcHeader *obj) {
 }
 
 } // namespace
+
+GcHeap::GcHeap() : pool_(&owned_pool_) {}
+
+GcHeap::GcHeap(fiber::mem::BufPool &pool) : pool_(&pool) {}
+
+GcHeap::~GcHeap() {
+    while (head) {
+        GcHeader *obj = head;
+        head = obj->next;
+        gc_free_obj(this, obj);
+    }
+}
+
+ValueHandle GcHeap::local_value() {
+    if (!local_current_ || local_top_ == local_end_) {
+        ValueBlock *block = acquire_local_block();
+        if (!block) {
+            return nullptr;
+        }
+        if (!local_head_) {
+            local_head_ = block;
+        } else if (local_current_) {
+            local_current_->next = block;
+        }
+        local_current_ = block;
+        local_top_ = block->slots;
+        local_end_ = block->slots + kValueBlockSlots;
+    }
+    ValueHandle handle = local_top_++;
+    *handle = fiber::script::JsValue::make_undefined();
+    return handle;
+}
+
+ValueHandle GcHeap::global_value() {
+    if (!global_current_ || global_top_ == global_end_) {
+        ValueBlock *block = acquire_global_block();
+        if (!block) {
+            return nullptr;
+        }
+        if (!global_head_) {
+            global_head_ = block;
+        } else if (global_current_) {
+            global_current_->next = block;
+        }
+        global_current_ = block;
+        global_top_ = block->slots;
+        global_end_ = block->slots + kValueBlockSlots;
+    }
+    ValueHandle handle = global_top_++;
+    *handle = fiber::script::JsValue::make_undefined();
+    return handle;
+}
+
+void GcHeap::add_root_source(fiber::script::GcRootSource *source) { roots_.add_source(source); }
+
+void GcHeap::remove_root_source(fiber::script::GcRootSource *source) { roots_.remove_source(source); }
+
+void GcHeap::visit_roots(fiber::script::GcRootVisitor &visitor) noexcept {
+    for (ValueBlock *block = local_head_; block; block = block->next) {
+        const std::size_t count =
+                block == local_current_ ? static_cast<std::size_t>(local_top_ - block->slots) : kValueBlockSlots;
+        visitor.visit_range(block->slots, count);
+        if (block == local_current_) {
+            break;
+        }
+    }
+    for (ValueBlock *block = global_head_; block; block = block->next) {
+        const std::size_t count =
+                block == global_current_ ? static_cast<std::size_t>(global_top_ - block->slots) : kValueBlockSlots;
+        visitor.visit_range(block->slots, count);
+        if (block == global_current_) {
+            break;
+        }
+    }
+    roots_.visit_all(visitor);
+}
+
+bool GcHeap::should_collect(std::size_t next_bytes) const {
+    if (threshold == 0) {
+        return false;
+    }
+    return saturating_add(bytes, next_bytes) >= threshold;
+}
+
+void GcHeap::collect_now() {
+    gc_collect(*this, static_cast<GcRootSource &>(*this));
+    threshold = next_threshold(bytes);
+}
+
+void GcHeap::maybe_collect(std::size_t next_bytes) {
+    if (!should_collect(next_bytes)) {
+        return;
+    }
+    collect_now();
+}
+
+GcHeap::LocalState GcHeap::mark_local() const noexcept { return LocalState{local_current_, local_top_}; }
+
+void GcHeap::restore_local(LocalState state) noexcept {
+    if (!state.block) {
+        recycle_local_blocks(local_head_);
+        local_head_ = nullptr;
+        local_current_ = nullptr;
+        local_top_ = nullptr;
+        local_end_ = nullptr;
+        return;
+    }
+    ValueBlock *released = state.block->next;
+    state.block->next = nullptr;
+    recycle_local_blocks(released);
+    local_current_ = state.block;
+    local_top_ = state.top;
+    local_end_ = state.block->slots + kValueBlockSlots;
+}
+
+GcHeap::ValueBlock *GcHeap::alloc_value_block() {
+    if (!pool_) {
+        return nullptr;
+    }
+    void *mem = pool_->alloc(sizeof(ValueBlock), alignof(ValueBlock));
+    if (!mem) {
+        return nullptr;
+    }
+    auto *block = new (mem) ValueBlock();
+    reset_block(block);
+    return block;
+}
+
+GcHeap::ValueBlock *GcHeap::acquire_local_block() {
+    ValueBlock *block = local_free_;
+    if (block) {
+        local_free_ = block->next;
+        block->next = nullptr;
+        reset_block(block);
+        return block;
+    }
+    return alloc_value_block();
+}
+
+GcHeap::ValueBlock *GcHeap::acquire_global_block() {
+    ValueBlock *block = alloc_value_block();
+    if (block) {
+        block->next = nullptr;
+    }
+    return block;
+}
+
+void GcHeap::reset_block(ValueBlock *block) noexcept {
+    if (!block) {
+        return;
+    }
+    block->next = nullptr;
+    for (auto &slot: block->slots) {
+        slot = fiber::script::JsValue::make_undefined();
+    }
+}
+
+void GcHeap::recycle_local_blocks(ValueBlock *first) noexcept {
+    if (!first) {
+        return;
+    }
+    ValueBlock *tail = first;
+    while (tail->next) {
+        tail = tail->next;
+    }
+    tail->next = local_free_;
+    local_free_ = first;
+}
+
+GcHeap::LocalMark::LocalMark(GcHeap &heap) noexcept : heap_(&heap), state_(heap.mark_local()) {}
+
+GcHeap::LocalMark::LocalMark(LocalMark &&other) noexcept : heap_(other.heap_), state_(other.state_) {
+    other.heap_ = nullptr;
+    other.state_ = {};
+}
+
+GcHeap::LocalMark &GcHeap::LocalMark::operator=(LocalMark &&other) noexcept {
+    if (this != &other) {
+        reset();
+        heap_ = other.heap_;
+        state_ = other.state_;
+        other.heap_ = nullptr;
+        other.state_ = {};
+    }
+    return *this;
+}
+
+GcHeap::LocalMark::~LocalMark() { reset(); }
+
+void GcHeap::LocalMark::reset() noexcept {
+    if (heap_) {
+        heap_->restore_local(state_);
+    }
+    heap_ = nullptr;
+    state_ = {};
+}
 
 std::size_t gc_estimate_utf8_string_bytes(std::size_t utf8_len) {
     return sizeof(GcString) + string_storage_bytes(utf8_len, GcStringEncoding::Utf16);
@@ -1564,23 +1773,23 @@ void GcRootSet::remove_temp_root(JsValue *value) {
     }
 }
 
-void GcRootSet::add_provider(RootProvider *provider) {
-    if (provider) {
-        providers_.push_back(provider);
+void GcRootSet::add_source(GcRootSource *source) {
+    if (source) {
+        sources_.push_back(source);
     }
 }
 
-void GcRootSet::remove_provider(RootProvider *provider) {
-    for (std::size_t i = 0; i < providers_.size(); ++i) {
-        if (providers_[i] == provider) {
-            providers_[i] = providers_.back();
-            providers_.pop_back();
+void GcRootSet::remove_source(GcRootSource *source) {
+    for (std::size_t i = 0; i < sources_.size(); ++i) {
+        if (sources_[i] == source) {
+            sources_[i] = sources_.back();
+            sources_.pop_back();
             return;
         }
     }
 }
 
-void GcRootSet::visit_all(RootVisitor &visitor) {
+void GcRootSet::visit_all(GcRootVisitor &visitor) noexcept {
     for (auto *value: globals_) {
         visitor.visit(value);
     }
@@ -1590,19 +1799,19 @@ void GcRootSet::visit_all(RootVisitor &visitor) {
     for (auto *value: temps_) {
         visitor.visit(value);
     }
-    for (auto *provider: providers_) {
-        if (provider) {
-            provider->visit_roots(visitor);
+    for (auto *source: sources_) {
+        if (source) {
+            source->visit_roots(visitor);
         }
     }
 }
 
 void gc_collect(GcHeap &heap, GcRootSet &roots) {
-    class MarkingVisitor final : public GcRootSet::RootVisitor {
+    class MarkingVisitor final : public GcRootVisitor {
     public:
         explicit MarkingVisitor(GcHeap &heap) : heap_(&heap) {}
 
-        void visit(JsValue *value) override {
+        void visit(JsValue *value) noexcept override {
             if (value) {
                 gc_mark_value(heap_, *value);
             }

@@ -7,7 +7,6 @@
 #include "../../common/Assert.h"
 #include "../JsGc.h"
 #include "../Library.h"
-#include "../Runtime.h"
 #include "Access.h"
 #include "Binaries.h"
 #include "Compares.h"
@@ -74,8 +73,7 @@ std::int64_t position_at(const ir::Compiled &compiled, std::size_t pc) noexcept 
 } // namespace
 
 InterpreterVm::InterpreterVm(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach,
-                             ScriptRuntime &runtime) :
-    compile_(compiled), root_(root), attach_(attach), runtime_(runtime) {
+                             GcHeap &runtime) : compile_(compiled), root_(root), attach_(attach), runtime_(runtime) {
     std::size_t total = compile_.stack_size() + compile_.var_table_size();
     if (total > 0) {
         slots_.reset(new (std::nothrow) fiber::script::JsValue[total]);
@@ -125,7 +123,7 @@ void InterpreterVm::iterate() {
         return;
     }
     state_ = State::Running;
-    using BinaryOp = CallResult (*)(ScriptRuntime &, ConstValueHandle, ConstValueHandle, ResultPayload &) noexcept;
+    using BinaryOp = CallResult (*)(GcHeap &, ConstValueHandle, ConstValueHandle, ResultPayload &) noexcept;
     auto apply_binary = [&](BinaryOp op, std::size_t epc) {
         FIBER_ASSERT(sp_ >= 2);
         fiber::script::JsValue *lhs = &stack_[sp_ - 2];
@@ -140,7 +138,7 @@ void InterpreterVm::iterate() {
         }
         return true;
     };
-    using UnaryOp = CallResult (*)(ScriptRuntime &, ConstValueHandle, ResultPayload &) noexcept;
+    using UnaryOp = CallResult (*)(GcHeap &, ConstValueHandle, ResultPayload &) noexcept;
     auto apply_unary = [&](UnaryOp op, std::size_t epc) {
         FIBER_ASSERT(sp_ >= 1);
         fiber::script::JsValue *value = &stack_[sp_ - 1];
@@ -588,7 +586,7 @@ fiber::script::JsValue *InterpreterVm::prepare_spread_call_args(std::size_t slot
 
 Library::HostCallFrame InterpreterVm::make_call_frame() const {
     Library::HostCallFrame frame;
-    frame.runtime = const_cast<ScriptRuntime *>(&runtime_);
+    frame.runtime = const_cast<GcHeap *>(&runtime_);
     frame.root = const_cast<fiber::script::JsValue *>(&root_);
     frame.attach = attach_;
     return frame;
@@ -617,7 +615,7 @@ bool InterpreterVm::dispatch_func_const(std::uint8_t op, const ir::Compiled::Fun
         case ir::Code::CALL_FUNC:
         case ir::Code::CALL_FUNC_SPREAD: {
             FIBER_ASSERT(func_const.sync_func);
-            ScriptRuntime::LocalMark mark(runtime_);
+            GcHeap::LocalMark mark(runtime_);
             ValueHandle out = runtime_.local_value();
             if (!out) {
                 if (is_spread) {
@@ -636,7 +634,7 @@ bool InterpreterVm::dispatch_func_const(std::uint8_t op, const ir::Compiled::Fun
         }
         case ir::Code::CALL_CONST: {
             FIBER_ASSERT(func_const.sync_ct);
-            ScriptRuntime::LocalMark mark(runtime_);
+            GcHeap::LocalMark mark(runtime_);
             ValueHandle out = runtime_.local_value();
             if (!out) {
                 return handle_error(ScriptResult::abort(ScriptAbortReason::OutOfMemory), epc);
