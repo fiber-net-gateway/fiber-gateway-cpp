@@ -41,6 +41,11 @@ std::expected<void, ParseError> Tokenizer::process() {
             case '.':
                 if (pos_ + 2 < max_ && input_[pos_ + 1] == '.' && input_[pos_ + 2] == '.') {
                     push_three_token(TokenKind::Expand);
+                } else if (pos_ + 1 < max_ && is_digit(input_[pos_ + 1])) {
+                    auto result = lex_numeric_literal(false, true);
+                    if (!result) {
+                        return std::unexpected(result.error());
+                    }
                 } else {
                     push_char_token(TokenKind::Dot);
                 }
@@ -51,11 +56,16 @@ std::expected<void, ParseError> Tokenizer::process() {
             case '*':
                 push_char_token(TokenKind::Star);
                 break;
-            case '/':
-                if (!skip_comment()) {
+            case '/': {
+                auto comment_result = skip_comment();
+                if (!comment_result) {
+                    return std::unexpected(comment_result.error());
+                }
+                if (!comment_result.value()) {
                     push_char_token(TokenKind::Div);
                 }
                 break;
+            }
             case '%':
                 push_char_token(TokenKind::Mod);
                 break;
@@ -216,7 +226,7 @@ std::size_t Tokenizer::js_line_terminator_length(std::size_t pos) const {
     return 0;
 }
 
-bool Tokenizer::skip_comment() {
+std::expected<bool, ParseError> Tokenizer::skip_comment() {
     std::size_t p = pos_ + 1;
     if (p < max_) {
         char c = input_[p++];
@@ -229,11 +239,16 @@ bool Tokenizer::skip_comment() {
             return true;
         }
         if (c == '*') {
+            bool closed = false;
             while (p + 1 < max_) {
                 if (input_[p] == '*' && input_[p + 1] == '/') {
+                    closed = true;
                     break;
                 }
                 ++p;
+            }
+            if (!closed) {
+                return std::unexpected(ParseError{"unterminated comment", pos_});
             }
             pos_ = p + 2;
             return true;
@@ -426,10 +441,21 @@ std::expected<std::size_t, ParseError> Tokenizer::scan_escape(char quote) {
         case '4':
         case '5':
         case '6':
-        case '7':
-            length = 3;
-            base = 8;
-            break;
+        case '7': {
+            // octal escape: 1 to 3 octal digits, the first being this char (matches
+            // parse_string_literal, which also accepts 1-3 digits).
+            p = pos_;
+            int count = 1;
+            while (count < 3 && p + 1 < max_) {
+                char c = input_[p + 1];
+                if (c < '0' || c > '7') {
+                    break;
+                }
+                ++p;
+                ++count;
+            }
+            return p - pos_ + 1;
+        }
         case 'x':
             p = pos_ + 1;
             length = 2;
@@ -467,7 +493,7 @@ std::expected<std::size_t, ParseError> Tokenizer::scan_escape(char quote) {
     return p - pos_;
 }
 
-std::expected<void, ParseError> Tokenizer::lex_numeric_literal(bool first_char_zero) {
+std::expected<void, ParseError> Tokenizer::lex_numeric_literal(bool first_char_zero, bool leading_dot) {
     bool is_real = false;
     std::size_t start = pos_;
     char ch = pos_ + 1 < max_ ? input_[pos_ + 1] : '\0';
@@ -491,33 +517,29 @@ std::expected<void, ParseError> Tokenizer::lex_numeric_literal(bool first_char_z
         return {};
     }
 
-    do {
-        ++pos_;
-    } while (pos_ < max_ && is_digit(input_[pos_]));
-
-    if (pos_ >= max_) {
-        push_token(TokenKind::LiteralInt, start, pos_, input_.substr(start, pos_ - start));
-        return {};
-    }
-
-    ch = input_[pos_];
-    if (ch == '.') {
+    if (leading_dot) {
         is_real = true;
-        std::size_t dot_pos = pos_;
         ++pos_;
         while (pos_ < max_ && is_digit(input_[pos_])) {
             ++pos_;
         }
-        if (pos_ == dot_pos + 1) {
-            pos_ = dot_pos;
-            push_token(TokenKind::LiteralInt, start, pos_, input_.substr(start, pos_ - start));
-            return {};
+    } else {
+        do {
+            ++pos_;
+        } while (pos_ < max_ && is_digit(input_[pos_]));
+        if (pos_ < max_ && input_[pos_] == '.') {
+            is_real = true;
+            ++pos_;
+            while (pos_ < max_ && is_digit(input_[pos_])) {
+                ++pos_;
+            }
         }
     }
 
     std::size_t end_of_number = pos_;
     if (pos_ >= max_) {
-        push_token(TokenKind::LiteralReal, start, end_of_number, input_.substr(start, end_of_number - start));
+        push_token(is_real ? TokenKind::LiteralReal : TokenKind::LiteralInt, start, end_of_number,
+                   input_.substr(start, end_of_number - start));
         return {};
     }
 

@@ -10,8 +10,10 @@
 
 #include "script/Library.h"
 #include "script/ast/BinaryOperator.h"
+#include "script/ast/Expression.h"
 #include "script/ast/Literal.h"
 #include "script/ast/Operator.h"
+#include "script/ast/Statement.h"
 #include "script/ir/Code.h"
 #include "script/ir/Compiler.h"
 #include "script/parse/Parser.h"
@@ -296,4 +298,48 @@ TEST(ScriptCompilerTest, RejectsAstCompileDepthOverLimit) {
     EXPECT_EQ(compiled.error().reason, fiber::script::ir::CompileErrorReason::ProgramTooLarge);
     ASSERT_NE(compiled.error().message, nullptr);
     EXPECT_STREQ(compiled.error().message, "maximum script compile depth exceeded");
+}
+
+// #4: an unhandled AST node is reported instead of silently emitting nothing.
+namespace {
+class UnknownExpression final : public fiber::script::ast::Expression {
+public:
+    UnknownExpression() : fiber::script::ast::Expression(0, 0) {}
+};
+
+class UnknownStatement final : public fiber::script::ast::Statement {
+public:
+    UnknownStatement() : fiber::script::ast::Statement(0, 0) {}
+};
+} // namespace
+
+TEST(ScriptCompilerTest, RejectsUnhandledExpressionNode) {
+    UnknownExpression expr;
+    auto compiled = fiber::script::ir::Compiler::compile(expr);
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().reason, fiber::script::ir::CompileErrorReason::Internal);
+    ASSERT_NE(compiled.error().message, nullptr);
+    EXPECT_NE(std::string_view(compiled.error().message).find("unsupported expression node"), std::string_view::npos);
+}
+
+TEST(ScriptCompilerTest, RejectsUnhandledStatementNode) {
+    UnknownStatement stmt;
+    auto compiled = fiber::script::ir::Compiler::compile(stmt);
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().reason, fiber::script::ir::CompileErrorReason::Internal);
+    ASSERT_NE(compiled.error().message, nullptr);
+    EXPECT_NE(std::string_view(compiled.error().message).find("unsupported statement node"), std::string_view::npos);
+}
+
+// #10: the match operator (~) is not implemented and must not silently yield false.
+TEST(ScriptCompilerTest, RejectsMatchOperator) {
+    TestLibrary library;
+    fiber::script::parse::Parser parser(library, true);
+    auto parsed = parser.parse_script("1 ~ 2;");
+    ASSERT_TRUE(parsed.has_value()) << parsed.error().message;
+    auto compiled = fiber::script::ir::Compiler::compile(*parsed.value());
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().reason, fiber::script::ir::CompileErrorReason::Internal);
+    ASSERT_NE(compiled.error().message, nullptr);
+    EXPECT_NE(std::string_view(compiled.error().message).find("match operator"), std::string_view::npos);
 }

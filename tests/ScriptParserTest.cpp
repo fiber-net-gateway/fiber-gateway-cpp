@@ -4,6 +4,7 @@
 #include <string_view>
 
 #include "script/Library.h"
+#include "script/ast/Assign.h"
 #include "script/ast/BinaryOperator.h"
 #include "script/ast/Block.h"
 #include "script/ast/ExpressionStatement.h"
@@ -13,6 +14,7 @@
 #include "script/ast/Literal.h"
 #include "script/ast/Operator.h"
 #include "script/ast/ReturnStatement.h"
+#include "script/ast/Ternary.h"
 #include "script/ast/UnaryOperator.h"
 #include "script/ast/VariableReference.h"
 #include "script/parse/Parser.h"
@@ -388,4 +390,139 @@ TEST(ScriptParserTest, RejectsMemberChainOverLimit) {
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().message, "maximum script nesting depth exceeded");
+}
+
+// #5: assignment RHS is a full expression (right-associative, allows ternary).
+TEST(ScriptParserTest, ParseChainedAssignmentRightAssociative) {
+    TestLibrary library;
+    fiber::script::parse::Parser parser(library, true);
+
+    auto result = parser.parse_expression("a = b = c");
+    ASSERT_TRUE(result.has_value()) << result.error().message;
+
+    const auto *root = dynamic_cast<const fiber::script::ast::Assign *>(result.value().get());
+    ASSERT_NE(root, nullptr);
+    const auto *inner = dynamic_cast<const fiber::script::ast::Assign *>(root->right());
+    ASSERT_NE(inner, nullptr);
+}
+
+TEST(ScriptParserTest, ParseAssignmentRhsTernary) {
+    TestLibrary library;
+    fiber::script::parse::Parser parser(library, true);
+
+    auto result = parser.parse_expression("a = b ? c : d");
+    ASSERT_TRUE(result.has_value()) << result.error().message;
+
+    const auto *root = dynamic_cast<const fiber::script::ast::Assign *>(result.value().get());
+    ASSERT_NE(root, nullptr);
+    const auto *ternary = dynamic_cast<const fiber::script::ast::Ternary *>(root->right());
+    ASSERT_NE(ternary, nullptr);
+}
+
+// #6: relational/equality operators are left-associative.
+TEST(ScriptParserTest, ParseRelationalChainLeftAssociative) {
+    TestLibrary library;
+    fiber::script::parse::Parser parser(library, true);
+
+    auto result = parser.parse_expression("1 < 2 < 3");
+    ASSERT_TRUE(result.has_value()) << result.error().message;
+
+    const auto *root = as_binary(result.value().get());
+    ASSERT_NE(root, nullptr);
+    EXPECT_EQ(root->op(), fiber::script::ast::Operator::Lt);
+    const auto *left = as_binary(root->left());
+    ASSERT_NE(left, nullptr);
+    EXPECT_EQ(left->op(), fiber::script::ast::Operator::Lt);
+    const auto *right = as_literal(root->right());
+    ASSERT_NE(right, nullptr);
+    EXPECT_EQ(right->int_value(), 3);
+}
+
+TEST(ScriptParserTest, ParseEqualityChainLeftAssociative) {
+    TestLibrary library;
+    fiber::script::parse::Parser parser(library, true);
+
+    auto result = parser.parse_expression("1 == 1 == 1");
+    ASSERT_TRUE(result.has_value()) << result.error().message;
+
+    const auto *root = as_binary(result.value().get());
+    ASSERT_NE(root, nullptr);
+    EXPECT_EQ(root->op(), fiber::script::ast::Operator::Eq);
+    const auto *left = as_binary(root->left());
+    ASSERT_NE(left, nullptr);
+    EXPECT_EQ(left->op(), fiber::script::ast::Operator::Eq);
+}
+
+// #7: octal escapes accept 1-3 digits (matching the decoder).
+TEST(ScriptParserTest, ParseOctalEscapeShortForms) {
+    TestLibrary library;
+    fiber::script::parse::Parser parser(library, true);
+
+    auto r0 = parser.parse_expression("\"\\0\"");
+    ASSERT_TRUE(r0.has_value()) << r0.error().message;
+    const auto *lit0 = as_literal(r0.value().get());
+    ASSERT_NE(lit0, nullptr);
+    EXPECT_EQ(lit0->string_value(), std::string("\0", 1));
+
+    auto r1 = parser.parse_expression("\"\\12\"");
+    ASSERT_TRUE(r1.has_value()) << r1.error().message;
+    const auto *lit1 = as_literal(r1.value().get());
+    ASSERT_NE(lit1, nullptr);
+    EXPECT_EQ(lit1->string_value(), std::string("\n"));
+
+    auto r2 = parser.parse_expression("\"\\012\"");
+    ASSERT_TRUE(r2.has_value()) << r2.error().message;
+    const auto *lit2 = as_literal(r2.value().get());
+    ASSERT_NE(lit2, nullptr);
+    EXPECT_EQ(lit2->string_value(), std::string("\n"));
+
+    // \0 stops at one digit when followed by a non-octal char.
+    auto r3 = parser.parse_expression("\"\\0x\"");
+    ASSERT_TRUE(r3.has_value()) << r3.error().message;
+    const auto *lit3 = as_literal(r3.value().get());
+    ASSERT_NE(lit3, nullptr);
+    EXPECT_EQ(lit3->string_value(), std::string("\0x", 2));
+}
+
+// #8: leading-dot and trailing-dot number literals.
+TEST(ScriptParserTest, ParseLeadingDotNumber) {
+    TestLibrary library;
+    fiber::script::parse::Parser parser(library, true);
+
+    auto result = parser.parse_expression(".5");
+    ASSERT_TRUE(result.has_value()) << result.error().message;
+    const auto *literal = as_literal(result.value().get());
+    ASSERT_NE(literal, nullptr);
+    EXPECT_EQ(literal->kind(), fiber::script::ast::Literal::Kind::Float);
+    EXPECT_EQ(literal->float_value(), 0.5);
+}
+
+TEST(ScriptParserTest, ParseTrailingDotNumber) {
+    TestLibrary library;
+    fiber::script::parse::Parser parser(library, true);
+
+    auto result = parser.parse_expression("1.");
+    ASSERT_TRUE(result.has_value()) << result.error().message;
+    const auto *literal = as_literal(result.value().get());
+    ASSERT_NE(literal, nullptr);
+    EXPECT_EQ(literal->kind(), fiber::script::ast::Literal::Kind::Float);
+    EXPECT_EQ(literal->float_value(), 1.0);
+}
+
+// #9: unterminated block comment is a tokenizer error.
+TEST(ScriptParserTest, RejectsUnterminatedBlockComment) {
+    TestLibrary library;
+    fiber::script::parse::Parser parser(library, true);
+
+    auto result = parser.parse_script("/* not closed");
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().message, "unterminated comment");
+}
+
+TEST(ScriptParserTest, AcceptsClosedBlockComment) {
+    TestLibrary library;
+    fiber::script::parse::Parser parser(library, true);
+
+    auto result = parser.parse_script("/* closed */ return 1;");
+    ASSERT_TRUE(result.has_value()) << result.error().message;
 }

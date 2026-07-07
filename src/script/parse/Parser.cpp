@@ -701,8 +701,13 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_expres
 
     if (has_more()) {
         if (allow_assign_ && peek(TokenKind::Assign)) {
+            auto depth_result = enter_depth(peek());
+            if (!depth_result) {
+                return std::unexpected(depth_result.error());
+            }
+            auto guard = std::move(depth_result.value());
             next();
-            auto rhs_result = parse_logical_or();
+            auto rhs_result = parse_expression_internal();
             if (!rhs_result) {
                 return std::unexpected(rhs_result.error());
             }
@@ -802,12 +807,18 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_relati
         return std::unexpected(expr_result.error());
     }
     auto expr = std::move(expr_result.value());
-    const Token *token = peek();
-    if (!token) {
-        return expr;
-    }
-    if (token->is_numeric_relational_operator() || token->kind == TokenKind::Tilde ||
-        (token->kind == TokenKind::Identifier && token->text == "in")) {
+    std::size_t chain_depth = 0;
+    while (has_more()) {
+        const Token *token = peek();
+        if (!token->is_numeric_relational_operator() && token->kind != TokenKind::Tilde &&
+            !(token->kind == TokenKind::Identifier && token->text == "in")) {
+            return expr;
+        }
+        auto depth_result = check_depth_slot(chain_depth, token);
+        if (!depth_result) {
+            return std::unexpected(depth_result.error());
+        }
+        ++chain_depth;
         Token op_token = *next();
         auto rhs_result = parse_sum();
         if (!rhs_result) {
@@ -827,7 +838,7 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_relati
         }
         std::int32_t start = expr->start_pos();
         std::int32_t end = rhs_result.value()->end_pos();
-        return std::make_unique<ast::BinaryOperator>(start, end, op, std::move(expr), std::move(rhs_result.value()));
+        expr = std::make_unique<ast::BinaryOperator>(start, end, op, std::move(expr), std::move(rhs_result.value()));
     }
     return expr;
 }
