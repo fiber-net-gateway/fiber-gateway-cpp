@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <string>
+
 #include "script/JsGc.h"
 
 namespace {
@@ -17,6 +19,14 @@ using fiber::script::JsHeapKind;
 using fiber::script::JsNodeType;
 using fiber::script::JsValue;
 using fiber::script::ValueHandle;
+
+static_assert(noexcept(fiber::script::gc_new_string(nullptr, nullptr, 0)));
+
+std::string to_utf8(const GcString *str) {
+    std::string out;
+    EXPECT_TRUE(fiber::script::gc_string_to_utf8(str, out));
+    return out;
+}
 
 TEST(JsGcTest, BytesIncludeExternalBuffers) {
     GcHeap heap;
@@ -154,6 +164,49 @@ TEST(JsGcTest, GcHeapLocalMarkReleasesLocalRoots) {
     // Local roots are released when LocalMark drops; a collect now sweeps the live string.
     heap.collect();
     EXPECT_EQ(heap.bytes, 0u);
+}
+
+TEST(JsGcTest, NewStringDecodesUtf8IntoCompactStorage) {
+    GcHeap heap;
+
+    GcString *ascii = fiber::script::gc_new_string(&heap, "abc", 3);
+    ASSERT_NE(ascii, nullptr);
+    ASSERT_EQ(ascii->encoding, fiber::script::GcStringEncoding::Byte);
+    ASSERT_EQ(ascii->len, 3u);
+    EXPECT_EQ(to_utf8(ascii), "abc");
+
+    const char latin1[] = {static_cast<char>(0xC3), static_cast<char>(0xA9)};
+    GcString *latin1_str = fiber::script::gc_new_string(&heap, latin1, sizeof(latin1));
+    ASSERT_NE(latin1_str, nullptr);
+    ASSERT_EQ(latin1_str->encoding, fiber::script::GcStringEncoding::Byte);
+    ASSERT_EQ(latin1_str->len, 1u);
+    ASSERT_NE(latin1_str->data8, nullptr);
+    EXPECT_EQ(latin1_str->data8[0], 0xE9u);
+    EXPECT_EQ(to_utf8(latin1_str), std::string(latin1, sizeof(latin1)));
+
+    const char emoji[] = {static_cast<char>(0xF0), static_cast<char>(0x9F), static_cast<char>(0x98),
+                          static_cast<char>(0x80)};
+    GcString *emoji_str = fiber::script::gc_new_string(&heap, emoji, sizeof(emoji));
+    ASSERT_NE(emoji_str, nullptr);
+    ASSERT_EQ(emoji_str->encoding, fiber::script::GcStringEncoding::Utf16);
+    ASSERT_EQ(emoji_str->len, 2u);
+    ASSERT_NE(emoji_str->data16, nullptr);
+    EXPECT_EQ(emoji_str->data16[0], static_cast<char16_t>(0xD83D));
+    EXPECT_EQ(emoji_str->data16[1], static_cast<char16_t>(0xDE00));
+    EXPECT_EQ(to_utf8(emoji_str), std::string(emoji, sizeof(emoji)));
+}
+
+TEST(JsGcTest, NewStringRejectsMalformedUtf8) {
+    GcHeap heap;
+
+    const char overlong[] = {static_cast<char>(0xC0), static_cast<char>(0x80)};
+    EXPECT_EQ(fiber::script::gc_new_string(&heap, overlong, sizeof(overlong)), nullptr);
+
+    const char truncated[] = {static_cast<char>(0xE2), static_cast<char>(0x82)};
+    EXPECT_EQ(fiber::script::gc_new_string(&heap, truncated, sizeof(truncated)), nullptr);
+
+    const char surrogate[] = {static_cast<char>(0xED), static_cast<char>(0xA0), static_cast<char>(0x80)};
+    EXPECT_EQ(fiber::script::gc_new_string(&heap, surrogate, sizeof(surrogate)), nullptr);
 }
 
 } // namespace

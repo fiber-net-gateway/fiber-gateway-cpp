@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <type_traits>
 
 #include "script/JsGc.h"
@@ -166,6 +167,35 @@ TEST(ScriptValueOpsTest, LooseAndStrictEquality) {
     auto undef_value = handle(heap, JsValue::make_undefined());
     EXPECT_TRUE(fiber::script::run::Compares::eq(null_value, undef_value));
     EXPECT_FALSE(fiber::script::run::Compares::seq(null_value, undef_value));
+}
+
+TEST(ScriptValueOpsTest, LooseEqualityParsesNumericStringsWithoutAllocation) {
+    static_assert(noexcept(fiber::script::run::Compares::eq(nullptr, nullptr)));
+
+    GcHeap heap;
+    char decimal_bytes[] = {' ', '+', '1', '.', '2', '5', 'e', '2', ' '};
+    auto decimal = handle(heap, JsValue::make_native_string(decimal_bytes, sizeof(decimal_bytes)));
+    auto number = handle(heap, JsValue::make_integer(125));
+    EXPECT_TRUE(fiber::script::run::Compares::eq(decimal, number));
+    EXPECT_FALSE(fiber::script::run::Compares::seq(decimal, number));
+
+    char infinity_bytes[] = {'I', 'n', 'f', 'i', 'n', 'i', 't', 'y'};
+    auto infinity = handle(heap, JsValue::make_native_string(infinity_bytes, sizeof(infinity_bytes)));
+    auto inf_number = handle(heap, JsValue::make_float(std::numeric_limits<double>::infinity()));
+    EXPECT_TRUE(fiber::script::run::Compares::eq(infinity, inf_number));
+
+    char invalid_bytes[] = {'1', 'e'};
+    auto invalid = handle(heap, JsValue::make_native_string(invalid_bytes, sizeof(invalid_bytes)));
+    EXPECT_FALSE(fiber::script::run::Compares::eq(invalid, number));
+
+    char hex_bytes[] = {'0', 'x', '1', '0'};
+    auto hex = handle(heap, JsValue::make_native_string(hex_bytes, sizeof(hex_bytes)));
+    auto sixteen = handle(heap, JsValue::make_integer(16));
+    EXPECT_TRUE(fiber::script::run::Compares::eq(hex, sixteen));
+
+    char trailing_bytes[] = {'I', 'n', 'f', 'i', 'n', 'i', 't', 'y', 'x'};
+    auto trailing = handle(heap, JsValue::make_native_string(trailing_bytes, sizeof(trailing_bytes)));
+    EXPECT_FALSE(fiber::script::run::Compares::eq(trailing, inf_number));
 }
 
 TEST(ScriptValueOpsTest, CompareHeapByteStrings) {

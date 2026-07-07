@@ -15,11 +15,12 @@ struct Utf8ScanResult {
     bool all_byte = true;
 };
 
-[[nodiscard]] bool utf8_next_codepoint(const char *data, std::size_t len, std::size_t &pos, std::uint32_t &codepoint);
-[[nodiscard]] bool utf8_scan(const char *data, std::size_t len, Utf8ScanResult &out);
-[[nodiscard]] bool utf8_validate(const char *data, std::size_t len);
-[[nodiscard]] bool utf8_write_bytes(const char *data, std::size_t len, std::uint8_t *dst, std::size_t dst_len);
-[[nodiscard]] bool utf8_write_utf16(const char *data, std::size_t len, char16_t *dst, std::size_t dst_len);
+[[nodiscard]] bool utf8_next_codepoint(const char *data, std::size_t len, std::size_t &pos,
+                                       std::uint32_t &codepoint) noexcept;
+[[nodiscard]] bool utf8_scan(const char *data, std::size_t len, Utf8ScanResult &out) noexcept;
+[[nodiscard]] bool utf8_validate(const char *data, std::size_t len) noexcept;
+[[nodiscard]] bool utf8_write_bytes(const char *data, std::size_t len, std::uint8_t *dst, std::size_t dst_len) noexcept;
+[[nodiscard]] bool utf8_write_utf16(const char *data, std::size_t len, char16_t *dst, std::size_t dst_len) noexcept;
 
 } // namespace fiber::json
 
