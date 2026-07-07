@@ -73,23 +73,20 @@ std::int64_t position_at(const ir::Compiled &compiled, std::size_t pc) noexcept 
 } // namespace
 
 InterpreterVm::InterpreterVm(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach,
-                             GcHeap &runtime) : compile_(compiled), root_(root), attach_(attach), runtime_(runtime) {
+                             GcHeap &runtime) :
+    compile_(compiled), root_(root), attach_(attach), runtime_(runtime), reg_(runtime_.roots(), *this) {
     std::size_t total = compile_.stack_size() + compile_.var_table_size();
     if (total > 0) {
         slots_.reset(new (std::nothrow) fiber::script::JsValue[total]);
         if (!slots_) {
             state_ = State::Abort;
             result_.abort = ScriptAbort{ScriptAbortReason::OutOfMemory, -1};
-            runtime_.add_root_source(this);
             return;
         }
         stack_ = slots_.get();
         vars_ = stack_ + compile_.stack_size();
     }
-    runtime_.add_root_source(this);
 }
-
-InterpreterVm::~InterpreterVm() { runtime_.remove_root_source(this); }
 
 ScriptResult InterpreterVm::result() const noexcept {
     switch (state_) {

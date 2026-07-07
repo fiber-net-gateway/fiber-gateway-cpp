@@ -673,10 +673,6 @@ ValueHandle GcHeap::global_value() {
     return handle;
 }
 
-void GcHeap::add_root_source(fiber::script::GcRootSource *source) { roots_.add_source(source); }
-
-void GcHeap::remove_root_source(fiber::script::GcRootSource *source) { roots_.remove_source(source); }
-
 void GcHeap::visit_roots(fiber::script::GcRootVisitor &visitor) noexcept {
     for (ValueBlock *block = local_head_; block; block = block->next) {
         const std::size_t count =
@@ -1708,103 +1704,11 @@ void gc_sweep_unmarked(GcHeap *heap) {
     }
 }
 
-void gc_collect(GcHeap *heap, JsValue **roots, std::size_t root_count) {
-    heap->live_mark = flip_mark(heap->live_mark);
-    for (std::size_t i = 0; i < root_count; ++i) {
-        gc_mark_value(heap, *roots[i]);
-    }
-    gc_sweep_unmarked(heap);
-}
-
 std::size_t gc_bytes_used(const GcHeap &heap) { return heap.bytes; }
 
 std::size_t gc_threshold(const GcHeap &heap) { return heap.threshold; }
 
 void gc_set_threshold(GcHeap &heap, std::size_t value) { heap.threshold = value; }
-
-void GcRootSet::add_global(JsValue *value) {
-    if (value) {
-        globals_.push_back(value);
-    }
-}
-
-void GcRootSet::remove_global(JsValue *value) {
-    for (std::size_t i = 0; i < globals_.size(); ++i) {
-        if (globals_[i] == value) {
-            globals_[i] = globals_.back();
-            globals_.pop_back();
-            return;
-        }
-    }
-}
-
-void GcRootSet::push_frame() { frames_.push_back(stack_.size()); }
-
-void GcRootSet::pop_frame() {
-    if (frames_.empty()) {
-        return;
-    }
-    std::size_t size = frames_.back();
-    frames_.pop_back();
-    if (size < stack_.size()) {
-        stack_.resize(size);
-    }
-}
-
-void GcRootSet::add_stack_root(JsValue *value) {
-    if (value) {
-        stack_.push_back(value);
-    }
-}
-
-void GcRootSet::add_temp_root(JsValue *value) {
-    if (value) {
-        temps_.push_back(value);
-    }
-}
-
-void GcRootSet::remove_temp_root(JsValue *value) {
-    for (std::size_t i = 0; i < temps_.size(); ++i) {
-        if (temps_[i] == value) {
-            temps_[i] = temps_.back();
-            temps_.pop_back();
-            return;
-        }
-    }
-}
-
-void GcRootSet::add_source(GcRootSource *source) {
-    if (source) {
-        sources_.push_back(source);
-    }
-}
-
-void GcRootSet::remove_source(GcRootSource *source) {
-    for (std::size_t i = 0; i < sources_.size(); ++i) {
-        if (sources_[i] == source) {
-            sources_[i] = sources_.back();
-            sources_.pop_back();
-            return;
-        }
-    }
-}
-
-void GcRootSet::visit_all(GcRootVisitor &visitor) noexcept {
-    for (auto *value: globals_) {
-        visitor.visit(value);
-    }
-    for (auto *value: stack_) {
-        visitor.visit(value);
-    }
-    for (auto *value: temps_) {
-        visitor.visit(value);
-    }
-    for (auto *source: sources_) {
-        if (source) {
-            source->visit_roots(visitor);
-        }
-    }
-}
 
 void gc_collect(GcHeap &heap, GcRootSet &roots) {
     class MarkingVisitor final : public GcRootVisitor {
@@ -1846,38 +1750,6 @@ void gc_collect(GcHeap &heap, GcRootSource &roots) {
     MarkingVisitor visitor(heap);
     roots.visit_roots(visitor);
     gc_sweep_unmarked(&heap);
-}
-
-GcRootHandle::GcRootHandle(GcRootSet &roots, JsValue *value) : roots_(&roots), value_(value) {
-    if (roots_ && value_) {
-        roots_->add_temp_root(value_);
-    }
-}
-
-GcRootHandle::GcRootHandle(GcRootHandle &&other) noexcept : roots_(other.roots_), value_(other.value_) {
-    other.roots_ = nullptr;
-    other.value_ = nullptr;
-}
-
-GcRootHandle &GcRootHandle::operator=(GcRootHandle &&other) noexcept {
-    if (this != &other) {
-        reset();
-        roots_ = other.roots_;
-        value_ = other.value_;
-        other.roots_ = nullptr;
-        other.value_ = nullptr;
-    }
-    return *this;
-}
-
-GcRootHandle::~GcRootHandle() { reset(); }
-
-void GcRootHandle::reset() {
-    if (roots_ && value_) {
-        roots_->remove_temp_root(value_);
-    }
-    roots_ = nullptr;
-    value_ = nullptr;
 }
 
 } // namespace fiber::script

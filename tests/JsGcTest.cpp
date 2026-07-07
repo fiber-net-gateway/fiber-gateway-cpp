@@ -9,6 +9,7 @@ using fiber::script::GcHeap;
 using fiber::script::GcIterator;
 using fiber::script::GcIteratorMode;
 using fiber::script::GcObject;
+using fiber::script::GcRootRegistration;
 using fiber::script::GcRootSet;
 using fiber::script::GcRootSource;
 using fiber::script::GcRootVisitor;
@@ -92,7 +93,7 @@ TEST(JsGcTest, RootSourcesMarkValuesWithoutTemporaryRootVector) {
     rooted = js_make_heap_ref(&live->hdr, JsHeapKind::String);
 
     SingleValueSource source(rooted);
-    roots.add_source(&source);
+    GcRootRegistration reg(roots, source);
 
     std::size_t before_collect = fiber::script::gc_bytes_used(heap);
     fiber::script::gc_collect(heap, roots);

@@ -8,10 +8,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
-#include <vector>
 
 #include "../common/mem/Allocator.h"
 #include "../common/mem/BufPool.h"
+#include "GcRootSet.h"
 #include "JsValue.h"
 
 namespace fiber::script {
@@ -172,52 +172,6 @@ constexpr bool operator==(std::nullptr_t, ValueHandle handle) noexcept { return 
 constexpr bool operator!=(ValueHandle handle, std::nullptr_t) noexcept { return static_cast<bool>(handle); }
 constexpr bool operator!=(std::nullptr_t, ValueHandle handle) noexcept { return static_cast<bool>(handle); }
 
-class GcRootVisitor {
-public:
-    virtual ~GcRootVisitor() = default;
-    virtual void visit(JsValue *value) noexcept = 0;
-
-    void visit_range(JsValue *base, std::size_t count) noexcept {
-        if (!base || count == 0) {
-            return;
-        }
-        for (std::size_t i = 0; i < count; ++i) {
-            visit(base + i);
-        }
-    }
-};
-
-class GcRootSource {
-public:
-    virtual ~GcRootSource() = default;
-    virtual void visit_roots(GcRootVisitor &visitor) noexcept = 0;
-};
-
-class GcRootSet {
-public:
-    void add_global(JsValue *value);
-    void remove_global(JsValue *value);
-
-    void push_frame();
-    void pop_frame();
-    void add_stack_root(JsValue *value);
-
-    void add_temp_root(JsValue *value);
-    void remove_temp_root(JsValue *value);
-
-    void add_source(GcRootSource *source);
-    void remove_source(GcRootSource *source);
-
-    void visit_all(GcRootVisitor &visitor) noexcept;
-
-private:
-    std::vector<JsValue *> globals_;
-    std::vector<JsValue *> stack_;
-    std::vector<std::size_t> frames_;
-    std::vector<JsValue *> temps_;
-    std::vector<GcRootSource *> sources_;
-};
-
 class GcHeap final : public GcRootSource {
 public:
     class LocalMark;
@@ -238,8 +192,6 @@ public:
     [[nodiscard]] ValueHandle local_value();
     [[nodiscard]] ValueHandle global_value();
 
-    void add_root_source(fiber::script::GcRootSource *source);
-    void remove_root_source(fiber::script::GcRootSource *source);
     void visit_roots(fiber::script::GcRootVisitor &visitor) noexcept override;
 
     bool should_collect(std::size_t next_bytes = 0) const;
@@ -371,26 +323,8 @@ bool gc_object_set(GcHeap *heap, GcObject *obj, GcString *key, JsValue value);
 const JsValue *gc_object_get(const GcObject *obj, const GcString *key);
 bool gc_object_remove(GcObject *obj, const GcString *key);
 const GcObjectEntry *gc_object_entry_at(const GcObject *obj, std::size_t index);
-void gc_collect(GcHeap *heap, JsValue **roots, std::size_t root_count);
 void gc_collect(GcHeap &heap, GcRootSet &roots);
 void gc_collect(GcHeap &heap, GcRootSource &roots);
-
-class GcRootHandle {
-public:
-    GcRootHandle() = default;
-    GcRootHandle(GcRootSet &roots, JsValue *value);
-    GcRootHandle(const GcRootHandle &) = delete;
-    GcRootHandle &operator=(const GcRootHandle &) = delete;
-    GcRootHandle(GcRootHandle &&other) noexcept;
-    GcRootHandle &operator=(GcRootHandle &&other) noexcept;
-    ~GcRootHandle();
-
-    void reset();
-
-private:
-    GcRootSet *roots_ = nullptr;
-    JsValue *value_ = nullptr;
-};
 
 } // namespace fiber::script
 
