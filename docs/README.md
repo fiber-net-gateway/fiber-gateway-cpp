@@ -45,7 +45,7 @@ This part of the framework is designed for reverse proxying, forwarding, aggrega
 
 ### 3. Scripting Engine Capabilities
 
-Gateway systems often need more than static configuration. They need conditional logic, expression evaluation, and a programmable extension layer. `fiber_lib` provides parsing, IR, interpreter execution, and runtime support under `src/script/` and `src/common/json/` to serve as the foundation for more expressive configuration and policy logic.
+Gateway systems often need more than static configuration. They need conditional logic, expression evaluation, and a programmable extension layer. `fiber_lib` provides parsing, IR, interpreter execution, and runtime value support under `src/script/`, with common JSON codec support under `src/common/json/`, to serve as the foundation for more expressive configuration and policy logic.
 
 This capability matters because it enables:
 

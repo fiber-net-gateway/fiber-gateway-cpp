@@ -1,7 +1,5 @@
 #include "JsonEncode.h"
 
-#include "JsGc.h"
-
 #include <charconv>
 #include <cmath>
 #include <limits>
@@ -251,17 +249,6 @@ Generator::Result Generator::string(const char *str, size_t len) {
 }
 
 Generator::Result Generator::string(const std::string &str) { return string(str.data(), str.size()); }
-
-Generator::Result Generator::string(const GcString *str) {
-    if (!str) {
-        return set_error(Result::InvalidString);
-    }
-    std::string utf8;
-    if (!gc_string_to_utf8(str, utf8)) {
-        return set_error(Result::InvalidString);
-    }
-    return string(utf8);
-}
 
 Generator::Result Generator::binary(const std::uint8_t *data, size_t len) {
     if (!data && len > 0) {

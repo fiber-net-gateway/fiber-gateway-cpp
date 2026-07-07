@@ -4,9 +4,9 @@
 #include <string>
 #include <utility>
 
-#include "common/json/JsGc.h"
-#include "common/json/JsValueEncode.h"
 #include "common/json/JsonEncode.h"
+#include "script/json/JsGc.h"
+#include "script/json/JsValueEncode.h"
 
 using fiber::json::GcArray;
 using fiber::json::GcException;

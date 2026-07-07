@@ -1,8 +1,8 @@
 #ifndef FIBER_SCRIPT_RUN_COMPARES_H
 #define FIBER_SCRIPT_RUN_COMPARES_H
 
-#include "../../common/json/JsGc.h"
 #include "../Runtime.h"
+#include "../json/JsGc.h"
 
 namespace fiber::script::run {
 

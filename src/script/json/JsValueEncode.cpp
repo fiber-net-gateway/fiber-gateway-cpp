@@ -6,11 +6,24 @@
 
 #include "JsGc.h"
 
+#include <string>
+
 namespace fiber::json {
 namespace {
 
 Generator::Result encode_array(Generator &gen, const GcArray *arr);
 Generator::Result encode_object(Generator &gen, const GcObject *obj);
+
+Generator::Result encode_gc_string(Generator &gen, const GcString *str) {
+    if (!str) {
+        return Generator::Result::InvalidString;
+    }
+    std::string utf8;
+    if (!gc_string_to_utf8(str, utf8)) {
+        return Generator::Result::InvalidString;
+    }
+    return gen.string(utf8);
+}
 
 Generator::Result encode_array(Generator &gen, const GcArray *arr) {
     if (!arr) {
@@ -43,7 +56,7 @@ Generator::Result encode_object(Generator &gen, const GcObject *obj) {
         if (!entry.occupied || !entry.key) {
             return Generator::Result::InvalidValue;
         }
-        result = gen.string(entry.key);
+        result = encode_gc_string(gen, entry.key);
         if (result != Generator::Result::OK) {
             return result;
         }
@@ -77,7 +90,7 @@ Generator::Result encode_js_value(Generator &gen, const JsValue &value) {
                 if (!str) {
                     return Generator::Result::InvalidString;
                 }
-                return gen.string(str);
+                return encode_gc_string(gen, str);
             }
         case JsNodeType::Array:
             return encode_array(gen, js_value_heap_ptr<const GcArray>(value));
@@ -105,7 +118,7 @@ Generator::Result encode_js_value(Generator &gen, const JsValue &value) {
                 return result;
             }
             if (exc->name) {
-                result = gen.string(exc->name);
+                result = encode_gc_string(gen, exc->name);
             } else {
                 result = gen.null_value();
             }
@@ -117,7 +130,7 @@ Generator::Result encode_js_value(Generator &gen, const JsValue &value) {
                 return result;
             }
             if (exc->message) {
-                result = gen.string(exc->message);
+                result = encode_gc_string(gen, exc->message);
             } else {
                 result = gen.null_value();
             }

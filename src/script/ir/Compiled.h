@@ -5,8 +5,8 @@
 #include <cstdint>
 #include <span>
 
-#include "../../common/json/JsNode.h"
 #include "../Library.h"
+#include "../json/JsNode.h"
 #include "Code.h"
 
 namespace fiber::script::ir {

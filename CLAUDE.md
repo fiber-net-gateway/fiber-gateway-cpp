@@ -95,7 +95,7 @@ Embedded JavaScript-like language:
 - **parse/**: `Tokenizer` → `Parser` → AST (`ast/` node types)
 - **ir/**: `Compiler` transforms AST into `Compiled` bytecode
 - **run/**: `InterpreterVm` executes bytecode with `Binaries`, `Compares`, `Unaries`, `Access` dispatch
-- **json/**: `JsValue` tagged-POD value type with `JsGc` garbage collector, `JsNode` type hierarchy, `JsonDecode`/`JsonEncode`, `JsValueOps`/`JsValueEncode`
+- **json/**: `JsValue` tagged-POD value type with `JsGc` garbage collector, `JsNode` type hierarchy, and `JsValueEncode`
 - **std/**: `StdLibrary` — built-in functions for HTTP, DNS, async
 - **Script**/`ScriptRun`: Entry point; supports both synchronous and `co_await`-based async execution
 

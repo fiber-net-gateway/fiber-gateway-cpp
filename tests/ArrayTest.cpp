@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "common/json/JsGc.h"
+#include "script/json/JsGc.h"
 
 using fiber::json::GcArray;
 using fiber::json::GcHeap;

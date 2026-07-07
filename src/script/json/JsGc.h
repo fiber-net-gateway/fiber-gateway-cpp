@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-#include "../mem/Allocator.h"
+#include "../../common/mem/Allocator.h"
 #include "JsNode.h"
 
 namespace fiber::json {
