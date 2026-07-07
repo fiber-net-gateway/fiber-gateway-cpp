@@ -7,78 +7,67 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <memory>
-#include <string>
-#include <vector>
-
-#include "JsGc.h"
 
 namespace fiber::json {
 
 struct ParseError {
-    std::string message;
+    const char *message = nullptr;
     std::size_t offset = 0;
 };
 
-struct DecodedString {
-    bool is_byte = true;
-    std::vector<std::uint8_t> bytes;
-    std::vector<char16_t> u16;
-
-    void clear() {
-        is_byte = true;
-        bytes.clear();
-        u16.clear();
-    }
-
-    [[nodiscard]] std::size_t size() const { return is_byte ? bytes.size() : u16.size(); }
+enum class DecodeStatus {
+    Ok,
+    NeedMore,
+    Complete,
+    Error,
+    Canceled,
 };
 
-class Parser {
-public:
-    explicit Parser(GcHeap &heap);
-    Parser(const Parser &) = delete;
-    Parser &operator=(const Parser &) = delete;
-    Parser(Parser &&) = delete;
-    Parser &operator=(Parser &&) = delete;
+struct DecodeCallbacks {
+    void *ctx = nullptr;
 
-    [[nodiscard]] bool parse(const char *data, std::size_t len, JsValue &out);
-    [[nodiscard]] bool parse(const std::string &data, JsValue &out);
-    [[nodiscard]] const ParseError &error() const;
+    int (*on_null)(void *ctx) noexcept = nullptr;
+    int (*on_bool)(void *ctx, bool value) noexcept = nullptr;
 
-private:
-    GcHeap &heap_;
-    ParseError error_;
+    int (*on_number)(void *ctx, const char *data, std::size_t len) noexcept = nullptr;
+    int (*on_integer)(void *ctx, std::int64_t value) noexcept = nullptr;
+    int (*on_double)(void *ctx, double value) noexcept = nullptr;
+
+    int (*on_string)(void *ctx, const char *data, std::size_t len) noexcept = nullptr;
+    int (*on_object_key)(void *ctx, const char *data, std::size_t len) noexcept = nullptr;
+
+    int (*on_object_start)(void *ctx) noexcept = nullptr;
+    int (*on_object_end)(void *ctx) noexcept = nullptr;
+    int (*on_array_start)(void *ctx) noexcept = nullptr;
+    int (*on_array_end)(void *ctx) noexcept = nullptr;
 };
 
-class StreamParser {
+class Decoder {
 public:
-    enum class Status {
-        Ok,
-        NeedMore,
-        Complete,
-        Error,
-    };
+    explicit Decoder(const DecodeCallbacks &callbacks) noexcept;
+    ~Decoder() noexcept;
 
-    explicit StreamParser(GcHeap &heap);
-    ~StreamParser();
-    StreamParser(const StreamParser &) = delete;
-    StreamParser &operator=(const StreamParser &) = delete;
-    StreamParser(StreamParser &&) = delete;
-    StreamParser &operator=(StreamParser &&) = delete;
+    Decoder(const Decoder &) = delete;
+    Decoder &operator=(const Decoder &) = delete;
+    Decoder(Decoder &&) = delete;
+    Decoder &operator=(Decoder &&) = delete;
 
-    void reset();
-    [[nodiscard]] Status parse(const char *data, std::size_t len);
-    [[nodiscard]] Status finish();
-    [[nodiscard]] const ParseError &error() const;
-    [[nodiscard]] const JsValue &root() const;
-    [[nodiscard]] bool has_result() const;
+    void reset() noexcept;
+    [[nodiscard]] DecodeStatus parse(const char *data, std::size_t len) noexcept;
+    [[nodiscard]] DecodeStatus finish() noexcept;
+
+    [[nodiscard]] const ParseError &error() const noexcept;
+    [[nodiscard]] std::size_t bytes_consumed() const noexcept;
 
 private:
     struct Impl;
 
-    std::unique_ptr<Impl> impl_;
+    Impl *impl_ = nullptr;
+    ParseError init_error_;
 };
+
+[[nodiscard]] DecodeStatus decode(const char *data, std::size_t len, const DecodeCallbacks &callbacks,
+                                  ParseError *error = nullptr) noexcept;
 
 } // namespace fiber::json
 
