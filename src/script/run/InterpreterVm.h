@@ -7,9 +7,9 @@
 #include <vector>
 
 #include "../AsyncTask.h"
+#include "../JsGc.h"
 #include "../ScriptResult.h"
 #include "../ir/Compiled.h"
-#include "../JsGc.h"
 
 namespace fiber::script {
 class ScriptRuntime;
@@ -19,7 +19,8 @@ namespace fiber::script::run {
 
 class InterpreterVm final : public fiber::script::GcRootSource {
 public:
-    InterpreterVm(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach, ScriptRuntime &runtime);
+    InterpreterVm(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach,
+                  ScriptRuntime &runtime);
     ~InterpreterVm() override;
 
     void iterate();

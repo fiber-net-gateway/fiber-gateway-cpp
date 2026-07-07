@@ -1,9 +1,9 @@
 #ifndef FIBER_SCRIPT_RUN_BINARIES_H
 #define FIBER_SCRIPT_RUN_BINARIES_H
 
+#include "../JsGc.h"
 #include "../Runtime.h"
 #include "../ScriptResult.h"
-#include "../JsGc.h"
 
 namespace fiber::script::run {
 

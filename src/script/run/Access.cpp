@@ -39,16 +39,18 @@ fiber::script::GcString *ensure_heap_string(ScriptRuntime &runtime, ConstValueHa
     }
     if (fiber::script::js_value_type(*value) == fiber::script::JsNodeType::String &&
         !fiber::script::js_value_is_borrowed_string(*value)) {
-        return const_cast<fiber::script::GcString *>(fiber::script::js_value_heap_ptr<const fiber::script::GcString>(*value));
+        return const_cast<fiber::script::GcString *>(
+                fiber::script::js_value_heap_ptr<const fiber::script::GcString>(*value));
     }
     if (fiber::script::js_value_type(*value) != fiber::script::JsNodeType::String ||
         !fiber::script::js_value_is_borrowed_string(*value)) {
         return nullptr;
     }
     fiber::script::NativeStr native = fiber::script::js_value_native_string(*value);
-    fiber::script::GcString *str = runtime.alloc_with_gc(fiber::script::gc_estimate_utf8_string_bytes(native.len), [&]() {
-        return fiber::script::gc_new_string(&runtime.heap(), native.data, native.len);
-    });
+    fiber::script::GcString *str =
+            runtime.alloc_with_gc(fiber::script::gc_estimate_utf8_string_bytes(native.len), [&]() {
+                return fiber::script::gc_new_string(&runtime.heap(), native.data, native.len);
+            });
     if (!str) {
         error = oom_error();
         return nullptr;
@@ -93,7 +95,8 @@ CallResult string_char_at(ScriptRuntime &runtime, ResultPayload &result, ConstVa
     fiber::script::GcString *str = nullptr;
     if (value && fiber::script::js_value_type(*value) == fiber::script::JsNodeType::String &&
         !fiber::script::js_value_is_borrowed_string(*value)) {
-        str = const_cast<fiber::script::GcString *>(fiber::script::js_value_heap_ptr<const fiber::script::GcString>(*value));
+        str = const_cast<fiber::script::GcString *>(
+                fiber::script::js_value_heap_ptr<const fiber::script::GcString>(*value));
     } else if (value && fiber::script::js_value_type(*value) == fiber::script::JsNodeType::String &&
                fiber::script::js_value_is_borrowed_string(*value)) {
         fiber::script::NativeStr native = fiber::script::js_value_native_string(*value);
@@ -189,7 +192,8 @@ CallResult Access::expand_array(ScriptRuntime &runtime, ConstValueHandle target,
         }
         for (std::size_t i = 0; i < add_arr->size; ++i) {
             const fiber::script::JsValue *item = fiber::script::gc_array_get(add_arr, i);
-            if (!fiber::script::gc_array_push(heap, target_arr, item ? *item : fiber::script::JsValue::make_undefined())) {
+            if (!fiber::script::gc_array_push(heap, target_arr,
+                                              item ? *item : fiber::script::JsValue::make_undefined())) {
                 return set_abort(result, oom_error());
             }
         }
@@ -227,7 +231,8 @@ CallResult Access::push_array(ScriptRuntime &runtime, ConstValueHandle target, C
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
     }
     if (!runtime.run_with_gc_retry(fiber::script::gc_estimate_array_growth_bytes(arr, arr->size + 1), [&]() {
-            return fiber::script::gc_array_push(heap, arr, addition ? *addition : fiber::script::JsValue::make_undefined());
+            return fiber::script::gc_array_push(heap, arr,
+                                                addition ? *addition : fiber::script::JsValue::make_undefined());
         })) {
         return set_abort(result, oom_error());
     }

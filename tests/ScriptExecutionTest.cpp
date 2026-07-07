@@ -7,11 +7,11 @@
 #include <string>
 #include <string_view>
 
+#include "script/JsGc.h"
 #include "script/Library.h"
 #include "script/Runtime.h"
 #include "script/Script.h"
 #include "script/ir/Compiler.h"
-#include "script/JsGc.h"
 #include "script/parse/Parser.h"
 #include "script/run/InterpreterVm.h"
 

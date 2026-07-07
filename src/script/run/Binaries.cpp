@@ -122,7 +122,8 @@ std::size_t estimate_plus_alloc_bytes(const fiber::script::JsValue &lhs, const f
     std::size_t total_units = primitive_string_code_unit_upper_bound(lhs) + primitive_string_code_unit_upper_bound(rhs);
     bool all_byte = fiber::script::js_value_type(lhs) == fiber::script::JsNodeType::String &&
                     fiber::script::js_value_type(rhs) == fiber::script::JsNodeType::String &&
-                    !fiber::script::js_value_is_borrowed_string(lhs) && !fiber::script::js_value_is_borrowed_string(rhs);
+                    !fiber::script::js_value_is_borrowed_string(lhs) &&
+                    !fiber::script::js_value_is_borrowed_string(rhs);
     if (all_byte) {
         auto *lhs_str = fiber::script::js_value_heap_ptr<const fiber::script::GcString>(lhs);
         auto *rhs_str = fiber::script::js_value_heap_ptr<const fiber::script::GcString>(rhs);

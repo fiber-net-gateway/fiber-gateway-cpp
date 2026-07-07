@@ -517,7 +517,7 @@ private:
                     break;
                 case ast::Literal::Kind::String:
                     value = fiber::script::JsValue::make_native_string(literal->string_value().data(),
-                                                                     literal->string_value().size());
+                                                                       literal->string_value().size());
                     break;
             }
             std::size_t idx = add_const_value(value);
