@@ -67,73 +67,6 @@ const fiber::script::GcString *as_heap_string(const fiber::script::JsValue &valu
                    : nullptr;
 }
 
-std::size_t string_code_unit_upper_bound(const fiber::script::JsValue &value) noexcept {
-    if (fiber::script::js_value_type(value) != fiber::script::JsNodeType::String) {
-        return 0;
-    }
-    if (fiber::script::js_value_is_borrowed_string(value)) {
-        return fiber::script::js_value_native_string(value).len;
-    }
-    auto *str = fiber::script::js_value_heap_ptr<const fiber::script::GcString>(value);
-    return str ? str->len : 0;
-}
-
-std::size_t primitive_string_code_unit_upper_bound(const fiber::script::JsValue &value) {
-    switch (fiber::script::js_value_type(value)) {
-        case fiber::script::JsNodeType::String:
-            return string_code_unit_upper_bound(value);
-        case fiber::script::JsNodeType::Undefined:
-            return 9;
-        case fiber::script::JsNodeType::Null:
-            return 4;
-        case fiber::script::JsNodeType::Boolean:
-            return fiber::script::js_value_bool(value) ? 4 : 5;
-        case fiber::script::JsNodeType::Integer: {
-            char buffer[64];
-            auto converted = std::to_chars(buffer, buffer + sizeof(buffer), fiber::script::js_value_int64(value));
-            return converted.ec == std::errc{} ? static_cast<std::size_t>(converted.ptr - buffer) : 0;
-        }
-        case fiber::script::JsNodeType::Float: {
-            double number = fiber::script::js_value_double(value);
-            if (std::isnan(number)) {
-                return 3;
-            }
-            if (std::isinf(number)) {
-                return number < 0 ? 9 : 8;
-            }
-            char buffer[64];
-            auto converted = std::to_chars(buffer, buffer + sizeof(buffer), number);
-            return converted.ec == std::errc{} ? static_cast<std::size_t>(converted.ptr - buffer) : 0;
-        }
-        case fiber::script::JsNodeType::Array:
-        case fiber::script::JsNodeType::Object:
-        case fiber::script::JsNodeType::Interator:
-        case fiber::script::JsNodeType::Exception:
-        case fiber::script::JsNodeType::Binary:
-            return 0;
-    }
-    return 0;
-}
-
-std::size_t estimate_plus_alloc_bytes(const fiber::script::JsValue &lhs, const fiber::script::JsValue &rhs) {
-    if (!is_string_like(lhs) && !is_string_like(rhs)) {
-        return 0;
-    }
-    std::size_t total_units = primitive_string_code_unit_upper_bound(lhs) + primitive_string_code_unit_upper_bound(rhs);
-    bool all_byte = fiber::script::js_value_type(lhs) == fiber::script::JsNodeType::String &&
-                    fiber::script::js_value_type(rhs) == fiber::script::JsNodeType::String &&
-                    !fiber::script::js_value_is_borrowed_string(lhs) &&
-                    !fiber::script::js_value_is_borrowed_string(rhs);
-    if (all_byte) {
-        auto *lhs_str = fiber::script::js_value_heap_ptr<const fiber::script::GcString>(lhs);
-        auto *rhs_str = fiber::script::js_value_heap_ptr<const fiber::script::GcString>(rhs);
-        all_byte = lhs_str && rhs_str && lhs_str->encoding == fiber::script::GcStringEncoding::Byte &&
-                   rhs_str->encoding == fiber::script::GcStringEncoding::Byte;
-    }
-    return all_byte ? fiber::script::gc_estimate_string_bytes(total_units, fiber::script::GcStringEncoding::Byte)
-                    : fiber::script::gc_estimate_string_bytes(total_units, fiber::script::GcStringEncoding::Utf16);
-}
-
 enum class StringKind : std::uint8_t {
     HeapByte,
     HeapUtf16,
@@ -445,12 +378,7 @@ CallResult plus_impl(fiber::script::GcHeap &heap, const fiber::script::JsValue &
 } // namespace
 
 CallResult Binaries::plus(GcHeap &runtime, ConstValueHandle a, ConstValueHandle b, ResultPayload &result) noexcept {
-    CallResult status = CallResult::Success;
-    runtime.run_with_gc_retry(estimate_plus_alloc_bytes(*a, *b), [&]() {
-        status = plus_impl(runtime.heap(), *a, *b, result);
-        return status != CallResult::Abort;
-    });
-    return status;
+    return plus_impl(runtime.heap(), *a, *b, result);
 }
 
 CallResult Binaries::minus(GcHeap &runtime, ConstValueHandle a, ConstValueHandle b, ResultPayload &result) noexcept {

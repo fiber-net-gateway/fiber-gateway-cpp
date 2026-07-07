@@ -47,10 +47,7 @@ fiber::script::GcString *ensure_heap_string(GcHeap &runtime, ConstValueHandle va
         return nullptr;
     }
     fiber::script::NativeStr native = fiber::script::js_value_native_string(*value);
-    fiber::script::GcString *str =
-            runtime.alloc_with_gc(fiber::script::gc_estimate_utf8_string_bytes(native.len), [&]() {
-                return fiber::script::gc_new_string(&runtime.heap(), native.data, native.len);
-            });
+    fiber::script::GcString *str = fiber::script::gc_new_string(&runtime.heap(), native.data, native.len);
     if (!str) {
         error = oom_error();
         return nullptr;
@@ -100,9 +97,7 @@ CallResult string_char_at(GcHeap &runtime, ResultPayload &result, ConstValueHand
     } else if (value && fiber::script::js_value_type(*value) == fiber::script::JsNodeType::String &&
                fiber::script::js_value_is_borrowed_string(*value)) {
         fiber::script::NativeStr native = fiber::script::js_value_native_string(*value);
-        str = runtime.alloc_with_gc(fiber::script::gc_estimate_utf8_string_bytes(native.len), [&]() {
-            return fiber::script::gc_new_string(&runtime.heap(), native.data, native.len);
-        });
+        str = fiber::script::gc_new_string(&runtime.heap(), native.data, native.len);
     }
     if (!str) {
         return set_abort(result, oom_error());
@@ -117,18 +112,14 @@ CallResult string_char_at(GcHeap &runtime, ResultPayload &result, ConstValueHand
     }
     if (str->encoding == fiber::script::GcStringEncoding::Byte) {
         std::uint8_t byte = str->data8[index];
-        fiber::script::GcString *char_str =
-                runtime.alloc_with_gc(fiber::script::gc_estimate_string_bytes(1, fiber::script::GcStringEncoding::Byte),
-                                      [&]() { return fiber::script::gc_new_string_bytes(&runtime.heap(), &byte, 1); });
+        fiber::script::GcString *char_str = fiber::script::gc_new_string_bytes(&runtime.heap(), &byte, 1);
         if (!char_str) {
             return set_abort(result, oom_error());
         }
         return set_value(result, make_heap_string_value(char_str));
     }
     char16_t unit = str->data16[index];
-    fiber::script::GcString *char_str =
-            runtime.alloc_with_gc(fiber::script::gc_estimate_string_bytes(1, fiber::script::GcStringEncoding::Utf16),
-                                  [&]() { return fiber::script::gc_new_string_utf16(&runtime.heap(), &unit, 1); });
+    fiber::script::GcString *char_str = fiber::script::gc_new_string_utf16(&runtime.heap(), &unit, 1);
     if (!char_str) {
         return set_abort(result, oom_error());
     }
@@ -150,8 +141,7 @@ CallResult Access::expand_object(GcHeap &runtime, ConstValueHandle target, Const
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
     }
     std::size_t expected = target_obj->size + add_obj->size;
-    if (!runtime.run_with_gc_retry(fiber::script::gc_estimate_object_growth_bytes(target_obj, expected),
-                                   [&]() { return fiber::script::gc_object_reserve(heap, target_obj, expected); })) {
+    if (!fiber::script::gc_object_reserve(heap, target_obj, expected)) {
         return set_abort(result, oom_error());
     }
     for (std::size_t i = 0; i < add_obj->size; ++i) {
@@ -186,8 +176,7 @@ CallResult Access::expand_array(GcHeap &runtime, ConstValueHandle target, ConstV
             return set_exception(result, fiber::script::ExceptionKind::TypeError);
         }
         std::size_t expected = target_arr->size + add_arr->size;
-        if (!runtime.run_with_gc_retry(fiber::script::gc_estimate_array_growth_bytes(target_arr, expected),
-                                       [&]() { return fiber::script::gc_array_reserve(heap, target_arr, expected); })) {
+        if (!fiber::script::gc_array_reserve(heap, target_arr, expected)) {
             return set_abort(result, oom_error());
         }
         for (std::size_t i = 0; i < add_arr->size; ++i) {
@@ -204,8 +193,7 @@ CallResult Access::expand_array(GcHeap &runtime, ConstValueHandle target, ConstV
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
     }
     std::size_t expected = target_arr->size + add_obj->size;
-    if (!runtime.run_with_gc_retry(fiber::script::gc_estimate_array_growth_bytes(target_arr, expected),
-                                   [&]() { return fiber::script::gc_array_reserve(heap, target_arr, expected); })) {
+    if (!fiber::script::gc_array_reserve(heap, target_arr, expected)) {
         return set_abort(result, oom_error());
     }
     for (std::size_t i = 0; i < add_obj->size; ++i) {
@@ -230,10 +218,7 @@ CallResult Access::push_array(GcHeap &runtime, ConstValueHandle target, ConstVal
     if (!arr) {
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
     }
-    if (!runtime.run_with_gc_retry(fiber::script::gc_estimate_array_growth_bytes(arr, arr->size + 1), [&]() {
-            return fiber::script::gc_array_push(heap, arr,
-                                                addition ? *addition : fiber::script::JsValue::make_undefined());
-        })) {
+    if (!fiber::script::gc_array_push(heap, arr, addition ? *addition : fiber::script::JsValue::make_undefined())) {
         return set_abort(result, oom_error());
     }
     return set_value(result, *target);
@@ -292,9 +277,7 @@ CallResult Access::index_set(GcHeap &runtime, ConstValueHandle parent, ConstValu
             return set_exception(result, fiber::script::ExceptionKind::RangeError);
         }
         fiber::script::GcHeap *heap = &runtime.heap();
-        if (!runtime.run_with_gc_retry(
-                    fiber::script::gc_estimate_array_growth_bytes(arr, static_cast<std::size_t>(idx) + 1),
-                    [&]() { return fiber::script::gc_array_set(heap, arr, static_cast<std::size_t>(idx), *value); })) {
+        if (!fiber::script::gc_array_set(heap, arr, static_cast<std::size_t>(idx), *value)) {
             return set_abort(result, oom_error());
         }
         return set_value(result, *value);
@@ -319,8 +302,7 @@ CallResult Access::index_set(GcHeap &runtime, ConstValueHandle parent, ConstValu
         if (!obj) {
             return set_exception(result, fiber::script::ExceptionKind::TypeError);
         }
-        if (!runtime.run_with_gc_retry(fiber::script::gc_estimate_object_growth_bytes(obj, obj->size + 1),
-                                       [&]() { return fiber::script::gc_object_set(heap, obj, key_str, *value); })) {
+        if (!fiber::script::gc_object_set(heap, obj, key_str, *value)) {
             return set_abort(result, oom_error());
         }
         return set_value(result, *value);
@@ -396,8 +378,7 @@ CallResult Access::prop_set(GcHeap &runtime, ConstValueHandle parent, ConstValue
     if (!obj) {
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
     }
-    if (!runtime.run_with_gc_retry(fiber::script::gc_estimate_object_growth_bytes(obj, obj->size + 1),
-                                   [&]() { return fiber::script::gc_object_set(heap, obj, key_str, *value); })) {
+    if (!fiber::script::gc_object_set(heap, obj, key_str, *value)) {
         return set_abort(result, oom_error());
     }
     return set_value(result, *value);

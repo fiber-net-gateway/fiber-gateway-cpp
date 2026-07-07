@@ -172,6 +172,11 @@ constexpr bool operator==(std::nullptr_t, ValueHandle handle) noexcept { return 
 constexpr bool operator!=(ValueHandle handle, std::nullptr_t) noexcept { return static_cast<bool>(handle); }
 constexpr bool operator!=(std::nullptr_t, ValueHandle handle) noexcept { return static_cast<bool>(handle); }
 
+struct GcCollectStats {
+    std::size_t total = 0;
+    std::size_t freed = 0;
+};
+
 class GcHeap final : public GcRootSource {
 public:
     class LocalMark;
@@ -194,32 +199,7 @@ public:
 
     void visit_roots(fiber::script::GcRootVisitor &visitor) noexcept override;
 
-    bool should_collect(std::size_t next_bytes = 0) const;
-    void collect_now();
-    void maybe_collect(std::size_t next_bytes = 0);
-
-    template<typename AllocFn>
-    auto alloc_with_gc(std::size_t next_bytes, AllocFn &&fn) -> decltype(fn()) {
-        auto &&alloc_fn = fn;
-        maybe_collect(next_bytes);
-        auto result = alloc_fn();
-        if (result) {
-            return result;
-        }
-        collect_now();
-        return alloc_fn();
-    }
-
-    template<typename OpFn>
-    bool run_with_gc_retry(std::size_t next_bytes, OpFn &&fn) {
-        auto &&op_fn = fn;
-        maybe_collect(next_bytes);
-        if (op_fn()) {
-            return true;
-        }
-        collect_now();
-        return op_fn();
-    }
+    GcCollectStats collect();
 
     GcHeader *head = nullptr;
     std::size_t bytes = 0;
@@ -280,19 +260,6 @@ private:
     LocalState state_{};
 };
 
-std::size_t gc_bytes_used(const GcHeap &heap);
-std::size_t gc_threshold(const GcHeap &heap);
-void gc_set_threshold(GcHeap &heap, std::size_t value);
-std::size_t gc_estimate_utf8_string_bytes(std::size_t utf8_len);
-std::size_t gc_estimate_string_bytes(std::size_t len, GcStringEncoding encoding);
-std::size_t gc_estimate_binary_bytes(std::size_t len);
-std::size_t gc_estimate_array_bytes(std::size_t capacity);
-std::size_t gc_estimate_array_growth_bytes(const GcArray *arr, std::size_t expected);
-std::size_t gc_estimate_object_bytes(std::size_t capacity);
-std::size_t gc_estimate_object_growth_bytes(const GcObject *obj, std::size_t expected);
-std::size_t gc_estimate_iterator_bytes();
-std::size_t gc_estimate_object_snapshot_bytes(std::size_t entry_count);
-
 GcString *gc_new_string(GcHeap *heap, const char *data, std::size_t len);
 GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len);
 GcString *gc_new_string_bytes_uninit(GcHeap *heap, std::size_t len);
@@ -323,8 +290,6 @@ bool gc_object_set(GcHeap *heap, GcObject *obj, GcString *key, JsValue value);
 const JsValue *gc_object_get(const GcObject *obj, const GcString *key);
 bool gc_object_remove(GcObject *obj, const GcString *key);
 const GcObjectEntry *gc_object_entry_at(const GcObject *obj, std::size_t index);
-void gc_collect(GcHeap &heap, GcRootSet &roots);
-void gc_collect(GcHeap &heap, GcRootSource &roots);
 
 } // namespace fiber::script
 
