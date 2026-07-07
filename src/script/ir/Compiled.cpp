@@ -21,7 +21,7 @@ constexpr std::size_t max_align(std::size_t a, std::size_t b) noexcept { return 
 
 constexpr std::size_t kAllocationAlign =
         max_align(max_align(max_align(alignof(std::int32_t), alignof(std::uint32_t)),
-                            max_align(alignof(fiber::json::JsValue), alignof(Compiled::FuncConst))),
+                            max_align(alignof(fiber::script::JsValue), alignof(Compiled::FuncConst))),
                   alignof(std::max_align_t));
 
 std::size_t align_up(std::size_t value, std::size_t align) noexcept {
@@ -122,7 +122,7 @@ const Compiled::FuncConst &Compiled::func_const(std::uint32_t index) const noexc
     return func_consts_[index];
 }
 
-const fiber::json::JsValue &Compiled::constant(std::uint32_t index) const noexcept {
+const fiber::script::JsValue &Compiled::constant(std::uint32_t index) const noexcept {
     FIBER_ASSERT(index < constant_count_);
     return constants_[index];
 }
@@ -189,7 +189,7 @@ Compiled Compiled::build(std::size_t stack_size, std::size_t var_table_size, std
     std::size_t total = 0;
     total = align_up(total, alignof(std::int32_t)) + sizeof(std::int32_t) * codes.size();
     total = align_up(total, alignof(std::int32_t)) + sizeof(std::int32_t) * positions.size();
-    total = align_up(total, alignof(fiber::json::JsValue)) + sizeof(fiber::json::JsValue) * constants.size();
+    total = align_up(total, alignof(fiber::script::JsValue)) + sizeof(fiber::script::JsValue) * constants.size();
     total = align_up(total, alignof(FuncConst)) + sizeof(FuncConst) * func_consts.size();
     total = align_up(total, alignof(std::uint32_t)) + sizeof(std::uint32_t) * catch_count;
     total = align_up(total, alignof(std::uint32_t)) + sizeof(std::uint32_t) * catch_count;
@@ -218,7 +218,7 @@ Compiled Compiled::build(std::size_t stack_size, std::size_t var_table_size, std
     std::size_t offset = 0;
     result.codes_ = assign_region<std::int32_t>(base, offset, result.code_count_);
     result.positions_ = assign_region<std::int32_t>(base, offset, result.code_count_);
-    result.constants_ = assign_region<fiber::json::JsValue>(base, offset, result.constant_count_);
+    result.constants_ = assign_region<fiber::script::JsValue>(base, offset, result.constant_count_);
     result.func_consts_ = assign_region<FuncConst>(base, offset, result.func_const_count_);
     result.catch_keys_ = assign_region<std::uint32_t>(base, offset, result.catch_count_);
     result.catch_targets_ = assign_region<std::uint32_t>(base, offset, result.catch_count_);
@@ -236,13 +236,13 @@ Compiled Compiled::build(std::size_t stack_size, std::size_t var_table_size, std
         std::memcpy(result.payload_, payload.data(), result.payload_size_);
     }
     for (std::uint32_t i = 0; i < result.constant_count_; ++i) {
-        fiber::json::JsValue value = constants[i].value;
+        fiber::script::JsValue value = constants[i].value;
         if (constants[i].payload_offset != kNoPayload) {
             FIBER_ASSERT(constants[i].payload_offset <= result.payload_size_);
             const char *data = reinterpret_cast<const char *>(result.payload_ + constants[i].payload_offset);
-            if (fiber::json::js_value_is_borrowed_string(value)) {
+            if (fiber::script::js_value_is_borrowed_string(value)) {
                 value.payload = reinterpret_cast<std::uint64_t>(data);
-            } else if (fiber::json::js_value_is_borrowed_binary(value)) {
+            } else if (fiber::script::js_value_is_borrowed_binary(value)) {
                 value.payload = reinterpret_cast<std::uint64_t>(data);
             }
         }

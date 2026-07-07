@@ -6,12 +6,14 @@
 #define FIBER_JSVALUEENCODE_H
 
 #include "../../common/json/JsonEncode.h"
-#include "JsNode.h"
+#include "../JsValue.h"
 
-namespace fiber::json {
+namespace fiber::script::json {
+
+using fiber::json::Generator;
 
 Generator::Result encode_js_value(Generator &gen, const JsValue &value);
 
-} // namespace fiber::json
+} // namespace fiber::script::json
 
 #endif // FIBER_JSVALUEENCODE_H

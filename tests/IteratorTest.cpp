@@ -3,16 +3,16 @@
 #include <cstring>
 #include <string>
 
-#include "script/json/JsGc.h"
+#include "script/JsGc.h"
 
-using fiber::json::GcArray;
-using fiber::json::GcHeap;
-using fiber::json::GcIterator;
-using fiber::json::GcIteratorMode;
-using fiber::json::GcObject;
-using fiber::json::GcString;
-using fiber::json::JsNodeType;
-using fiber::json::JsValue;
+using fiber::script::GcArray;
+using fiber::script::GcHeap;
+using fiber::script::GcIterator;
+using fiber::script::GcIteratorMode;
+using fiber::script::GcObject;
+using fiber::script::GcString;
+using fiber::script::JsNodeType;
+using fiber::script::JsValue;
 
 namespace {
 
@@ -21,7 +21,7 @@ std::string to_string(const GcString *str) {
         return {};
     }
     std::string out;
-    if (!fiber::json::gc_string_to_utf8(str, out)) {
+    if (!fiber::script::gc_string_to_utf8(str, out)) {
         return {};
     }
     return out;
@@ -32,14 +32,14 @@ const GcString *as_string(const JsValue &value) { return js_value_heap_ptr<const
 const GcArray *as_array(const JsValue &value) { return js_value_heap_ptr<const GcArray>(value); }
 
 GcString *make_key(GcHeap &heap, const char *data) {
-    return fiber::json::gc_new_string(&heap, data, std::strlen(data));
+    return fiber::script::gc_new_string(&heap, data, std::strlen(data));
 }
 
 } // namespace
 
 TEST(IteratorTest, ArrayIteratorSeesAppends) {
     GcHeap heap;
-    GcArray *arr = fiber::json::gc_new_array(&heap, 4);
+    GcArray *arr = fiber::script::gc_new_array(&heap, 4);
     ASSERT_NE(arr, nullptr);
 
     arr->elems[0] = JsValue::make_integer(1);
@@ -49,12 +49,12 @@ TEST(IteratorTest, ArrayIteratorSeesAppends) {
     arr->size = 2;
     arr->version += 1;
 
-    GcIterator *iter = fiber::json::gc_new_array_iterator(&heap, arr, GcIteratorMode::Values);
+    GcIterator *iter = fiber::script::gc_new_array_iterator(&heap, arr, GcIteratorMode::Values);
     ASSERT_NE(iter, nullptr);
 
     JsValue out;
     bool done = false;
-    ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
+    ASSERT_TRUE(fiber::script::gc_iterator_next(&heap, iter, out, done));
     EXPECT_FALSE(done);
     EXPECT_EQ(js_value_type(out), JsNodeType::Integer);
     EXPECT_EQ(js_value_int64(out), 1);
@@ -63,23 +63,23 @@ TEST(IteratorTest, ArrayIteratorSeesAppends) {
     arr->size = 3;
     arr->version += 1;
 
-    ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
+    ASSERT_TRUE(fiber::script::gc_iterator_next(&heap, iter, out, done));
     EXPECT_FALSE(done);
     EXPECT_EQ(js_value_type(out), JsNodeType::Integer);
     EXPECT_EQ(js_value_int64(out), 2);
 
-    ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
+    ASSERT_TRUE(fiber::script::gc_iterator_next(&heap, iter, out, done));
     EXPECT_FALSE(done);
     EXPECT_EQ(js_value_type(out), JsNodeType::Integer);
     EXPECT_EQ(js_value_int64(out), 3);
 
-    ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
+    ASSERT_TRUE(fiber::script::gc_iterator_next(&heap, iter, out, done));
     EXPECT_TRUE(done);
 }
 
 TEST(IteratorTest, ObjectIteratorSnapshotOnMutation) {
     GcHeap heap;
-    GcObject *obj = fiber::json::gc_new_object(&heap, 4);
+    GcObject *obj = fiber::script::gc_new_object(&heap, 4);
     ASSERT_NE(obj, nullptr);
     GcString *key_a = make_key(heap, "a");
     GcString *key_b = make_key(heap, "b");
@@ -90,51 +90,51 @@ TEST(IteratorTest, ObjectIteratorSnapshotOnMutation) {
     ASSERT_NE(key_c, nullptr);
     ASSERT_NE(key_d, nullptr);
 
-    ASSERT_TRUE(fiber::json::gc_object_set(&heap, obj, key_a, JsValue::make_integer(1)));
-    ASSERT_TRUE(fiber::json::gc_object_set(&heap, obj, key_b, JsValue::make_integer(2)));
+    ASSERT_TRUE(fiber::script::gc_object_set(&heap, obj, key_a, JsValue::make_integer(1)));
+    ASSERT_TRUE(fiber::script::gc_object_set(&heap, obj, key_b, JsValue::make_integer(2)));
 
-    GcIterator *iter = fiber::json::gc_new_object_iterator(&heap, obj, GcIteratorMode::Keys);
+    GcIterator *iter = fiber::script::gc_new_object_iterator(&heap, obj, GcIteratorMode::Keys);
     ASSERT_NE(iter, nullptr);
 
     JsValue out;
     bool done = false;
-    ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
+    ASSERT_TRUE(fiber::script::gc_iterator_next(&heap, iter, out, done));
     EXPECT_FALSE(done);
     EXPECT_EQ(js_value_type(out), JsNodeType::String);
     EXPECT_EQ(to_string(as_string(out)), "a");
 
-    ASSERT_TRUE(fiber::json::gc_object_set(&heap, obj, key_c, JsValue::make_integer(3)));
+    ASSERT_TRUE(fiber::script::gc_object_set(&heap, obj, key_c, JsValue::make_integer(3)));
 
-    ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
+    ASSERT_TRUE(fiber::script::gc_iterator_next(&heap, iter, out, done));
     EXPECT_FALSE(done);
     EXPECT_EQ(js_value_type(out), JsNodeType::String);
     EXPECT_EQ(to_string(as_string(out)), "b");
 
-    ASSERT_TRUE(fiber::json::gc_object_set(&heap, obj, key_d, JsValue::make_integer(4)));
+    ASSERT_TRUE(fiber::script::gc_object_set(&heap, obj, key_d, JsValue::make_integer(4)));
 
-    ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
+    ASSERT_TRUE(fiber::script::gc_iterator_next(&heap, iter, out, done));
     EXPECT_FALSE(done);
     EXPECT_EQ(js_value_type(out), JsNodeType::String);
     EXPECT_EQ(to_string(as_string(out)), "c");
 
-    ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
+    ASSERT_TRUE(fiber::script::gc_iterator_next(&heap, iter, out, done));
     EXPECT_TRUE(done);
 }
 
 TEST(IteratorTest, ObjectIteratorEntries) {
     GcHeap heap;
-    GcObject *obj = fiber::json::gc_new_object(&heap, 2);
+    GcObject *obj = fiber::script::gc_new_object(&heap, 2);
     ASSERT_NE(obj, nullptr);
     GcString *key = make_key(heap, "k");
     ASSERT_NE(key, nullptr);
-    ASSERT_TRUE(fiber::json::gc_object_set(&heap, obj, key, JsValue::make_integer(9)));
+    ASSERT_TRUE(fiber::script::gc_object_set(&heap, obj, key, JsValue::make_integer(9)));
 
-    GcIterator *iter = fiber::json::gc_new_object_iterator(&heap, obj, GcIteratorMode::Entries);
+    GcIterator *iter = fiber::script::gc_new_object_iterator(&heap, obj, GcIteratorMode::Entries);
     ASSERT_NE(iter, nullptr);
 
     JsValue out;
     bool done = false;
-    ASSERT_TRUE(fiber::json::gc_iterator_next(&heap, iter, out, done));
+    ASSERT_TRUE(fiber::script::gc_iterator_next(&heap, iter, out, done));
     EXPECT_FALSE(done);
     ASSERT_EQ(js_value_type(out), JsNodeType::Array);
     const GcArray *arr = as_array(out);

@@ -10,10 +10,10 @@
 #include <string>
 #include <vector>
 
-#include "../../common/mem/Allocator.h"
-#include "JsNode.h"
+#include "../common/mem/Allocator.h"
+#include "JsValue.h"
 
-namespace fiber::json {
+namespace fiber::script {
 
 enum class GcKind : std::uint8_t {
     String,
@@ -265,6 +265,6 @@ private:
     JsValue *value_ = nullptr;
 };
 
-} // namespace fiber::json
+} // namespace fiber::script
 
 #endif // FIBER_JSGC_H

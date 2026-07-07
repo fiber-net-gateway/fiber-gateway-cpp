@@ -4,11 +4,11 @@
 
 #include "JsValueEncode.h"
 
-#include "JsGc.h"
+#include "../JsGc.h"
 
 #include <string>
 
-namespace fiber::json {
+namespace fiber::script::json {
 namespace {
 
 Generator::Result encode_array(Generator &gen, const GcArray *arr);
@@ -169,4 +169,4 @@ Generator::Result encode_js_value(Generator &gen, const JsValue &value) {
     return Generator::Result::InvalidValue;
 }
 
-} // namespace fiber::json
+} // namespace fiber::script::json

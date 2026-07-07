@@ -22,7 +22,7 @@ Library::FunctionMatchResult Library::FunctionMatchResult::ambiguous() noexcept 
 
 Library::FunctionMatchResult Library::FunctionMatchResult::found(const HostCallable *callable,
                                                                  FunctionSignature signature,
-                                                                 const fiber::json::JsValue *defaults,
+                                                                 const fiber::script::JsValue *defaults,
                                                                  std::uint16_t default_count) noexcept {
     FunctionMatchResult result;
     result.status = FunctionMatchStatus::Found;

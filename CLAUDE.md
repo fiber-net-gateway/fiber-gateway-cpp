@@ -95,7 +95,8 @@ Embedded JavaScript-like language:
 - **parse/**: `Tokenizer` → `Parser` → AST (`ast/` node types)
 - **ir/**: `Compiler` transforms AST into `Compiled` bytecode
 - **run/**: `InterpreterVm` executes bytecode with `Binaries`, `Compares`, `Unaries`, `Access` dispatch
-- **json/**: `JsValue` tagged-POD value type with `JsGc` garbage collector, `JsNode` type hierarchy, and `JsValueEncode`
+- **JsValue/JsGc** (top-level): the script runtime's core value type — `JsValue` tagged-POD (`fiber::script`) with `JsGc` garbage collector and heap (`GcHeap`/`GcRootSet`). Formerly `JsNode`.
+- **json/**: `JsValueEncode` — `JsValue` → JSON bridge (`fiber::script::json`, sits atop the `fiber::json` codec in `src/common/json/`)
 - **std/**: `StdLibrary` — built-in functions for HTTP, DNS, async
 - **Script**/`ScriptRun`: Entry point; supports both synchronous and `co_await`-based async execution
 

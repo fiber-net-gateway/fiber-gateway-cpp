@@ -32,12 +32,12 @@ ScriptRun &ScriptRun::operator=(ScriptRun &&) noexcept = default;
 
 ScriptRun::~ScriptRun() = default;
 
-ScriptRun::ScriptRun(const ir::Compiled &compiled, const fiber::json::JsValue &root, void *attach,
+ScriptRun::ScriptRun(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach,
                      ScriptRuntime &runtime) :
     runtime_(&runtime), vm_(std::make_unique<run::InterpreterVm>(compiled, root, attach, runtime)) {}
 
-ScriptRun::ScriptRun(const ir::Compiled &compiled, const fiber::json::JsValue &root, void *attach,
-                     fiber::json::GcHeap &heap) :
+ScriptRun::ScriptRun(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach,
+                     fiber::script::GcHeap &heap) :
     owned_runtime_(std::make_unique<ScriptRuntime>(heap)), runtime_(owned_runtime_.get()),
     vm_(std::make_unique<run::InterpreterVm>(compiled, root, attach, *runtime_)) {}
 
@@ -141,21 +141,21 @@ bool ScriptAsyncRun::valid() const { return run_.valid(); }
 
 Script::Script(std::shared_ptr<ir::Compiled> compiled) : compiled_(std::move(compiled)) {}
 
-ScriptAsyncRun Script::exec_async(const fiber::json::JsValue &root, void *attach, ScriptRuntime &runtime) {
+ScriptAsyncRun Script::exec_async(const fiber::script::JsValue &root, void *attach, ScriptRuntime &runtime) {
     if (!compiled_) {
         return {};
     }
     return ScriptAsyncRun(ScriptRun(*compiled_, root, attach, runtime));
 }
 
-ScriptAsyncRun Script::exec_async(const fiber::json::JsValue &root, void *attach, fiber::json::GcHeap &heap) {
+ScriptAsyncRun Script::exec_async(const fiber::script::JsValue &root, void *attach, fiber::script::GcHeap &heap) {
     if (!compiled_) {
         return {};
     }
     return ScriptAsyncRun(ScriptRun(*compiled_, root, attach, heap));
 }
 
-ScriptSyncRun Script::exec_sync(const fiber::json::JsValue &root, void *attach, ScriptRuntime &runtime) {
+ScriptSyncRun Script::exec_sync(const fiber::script::JsValue &root, void *attach, ScriptRuntime &runtime) {
     if (!compiled_) {
         return {};
     }
@@ -165,7 +165,7 @@ ScriptSyncRun Script::exec_sync(const fiber::json::JsValue &root, void *attach, 
     return ScriptSyncRun(ScriptRun(*compiled_, root, attach, runtime));
 }
 
-ScriptSyncRun Script::exec_sync(const fiber::json::JsValue &root, void *attach, fiber::json::GcHeap &heap) {
+ScriptSyncRun Script::exec_sync(const fiber::script::JsValue &root, void *attach, fiber::script::GcHeap &heap) {
     if (!compiled_) {
         return {};
     }

@@ -8,11 +8,11 @@
 #include "script/run/Compares.h"
 #include "script/run/Unaries.h"
 
-using fiber::json::GcHeap;
-using fiber::json::GcString;
-using fiber::json::GcStringEncoding;
-using fiber::json::JsNodeType;
-using fiber::json::JsValue;
+using fiber::script::GcHeap;
+using fiber::script::GcString;
+using fiber::script::GcStringEncoding;
+using fiber::script::JsNodeType;
+using fiber::script::JsValue;
 using fiber::script::CallResult;
 using fiber::script::ResultPayload;
 
@@ -33,7 +33,7 @@ std::string string_to_utf8(const JsValue &value) {
     std::string out;
     auto *str = as_string(value);
     if (str) {
-        EXPECT_TRUE(fiber::json::gc_string_to_utf8(str, out));
+        EXPECT_TRUE(fiber::script::gc_string_to_utf8(str, out));
     }
     return out;
 }

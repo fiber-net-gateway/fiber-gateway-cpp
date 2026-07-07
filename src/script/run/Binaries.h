@@ -3,7 +3,7 @@
 
 #include "../Runtime.h"
 #include "../ScriptResult.h"
-#include "../json/JsGc.h"
+#include "../JsGc.h"
 
 namespace fiber::script::run {
 

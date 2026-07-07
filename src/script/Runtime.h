@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "../common/mem/BufPool.h"
-#include "json/JsGc.h"
+#include "JsGc.h"
 
 namespace fiber::script {
 
@@ -13,38 +13,38 @@ class ConstValueHandle {
 public:
     constexpr ConstValueHandle() noexcept = default;
     constexpr ConstValueHandle(std::nullptr_t) noexcept {}
-    constexpr ConstValueHandle(fiber::json::JsValue *value) noexcept : value_(value) {}
+    constexpr ConstValueHandle(fiber::script::JsValue *value) noexcept : value_(value) {}
 
-    [[nodiscard]] const fiber::json::JsValue *get() const noexcept { return value_; }
-    [[nodiscard]] const fiber::json::JsValue &operator*() const noexcept { return *value_; }
-    [[nodiscard]] const fiber::json::JsValue *operator->() const noexcept { return value_; }
-    [[nodiscard]] const fiber::json::JsValue &operator[](std::size_t index) const noexcept { return value_[index]; }
+    [[nodiscard]] const fiber::script::JsValue *get() const noexcept { return value_; }
+    [[nodiscard]] const fiber::script::JsValue &operator*() const noexcept { return *value_; }
+    [[nodiscard]] const fiber::script::JsValue *operator->() const noexcept { return value_; }
+    [[nodiscard]] const fiber::script::JsValue &operator[](std::size_t index) const noexcept { return value_[index]; }
     [[nodiscard]] constexpr explicit operator bool() const noexcept { return value_ != nullptr; }
 
 private:
-    fiber::json::JsValue *value_ = nullptr;
+    fiber::script::JsValue *value_ = nullptr;
 };
 
 class ValueHandle {
 public:
     constexpr ValueHandle() noexcept = default;
     constexpr ValueHandle(std::nullptr_t) noexcept {}
-    constexpr ValueHandle(fiber::json::JsValue *value) noexcept : value_(value) {}
+    constexpr ValueHandle(fiber::script::JsValue *value) noexcept : value_(value) {}
 
-    [[nodiscard]] fiber::json::JsValue *get() const noexcept { return value_; }
-    [[nodiscard]] fiber::json::JsValue &operator*() const noexcept { return *value_; }
-    [[nodiscard]] fiber::json::JsValue *operator->() const noexcept { return value_; }
-    [[nodiscard]] fiber::json::JsValue &operator[](std::size_t index) const noexcept { return value_[index]; }
+    [[nodiscard]] fiber::script::JsValue *get() const noexcept { return value_; }
+    [[nodiscard]] fiber::script::JsValue &operator*() const noexcept { return *value_; }
+    [[nodiscard]] fiber::script::JsValue *operator->() const noexcept { return value_; }
+    [[nodiscard]] fiber::script::JsValue &operator[](std::size_t index) const noexcept { return value_[index]; }
     [[nodiscard]] constexpr explicit operator bool() const noexcept { return value_ != nullptr; }
     [[nodiscard]] ConstValueHandle as_constant() const noexcept { return ConstValueHandle(value_); }
     [[nodiscard]] operator ConstValueHandle() const noexcept { return as_constant(); }
 
 private:
-    fiber::json::JsValue *value_ = nullptr;
+    fiber::script::JsValue *value_ = nullptr;
 };
 
-static_assert(sizeof(ConstValueHandle) == sizeof(fiber::json::JsValue *));
-static_assert(sizeof(ValueHandle) == sizeof(fiber::json::JsValue *));
+static_assert(sizeof(ConstValueHandle) == sizeof(fiber::script::JsValue *));
+static_assert(sizeof(ValueHandle) == sizeof(fiber::script::JsValue *));
 
 constexpr bool operator==(ConstValueHandle handle, std::nullptr_t) noexcept { return !handle; }
 constexpr bool operator==(std::nullptr_t, ConstValueHandle handle) noexcept { return !handle; }
@@ -55,22 +55,22 @@ constexpr bool operator==(std::nullptr_t, ValueHandle handle) noexcept { return 
 constexpr bool operator!=(ValueHandle handle, std::nullptr_t) noexcept { return static_cast<bool>(handle); }
 constexpr bool operator!=(std::nullptr_t, ValueHandle handle) noexcept { return static_cast<bool>(handle); }
 
-class ScriptRuntime final : public fiber::json::GcRootSource {
+class ScriptRuntime final : public fiber::script::GcRootSource {
 public:
     class LocalMark;
 
-    explicit ScriptRuntime(fiber::json::GcHeap &heap);
-    ScriptRuntime(fiber::json::GcHeap &heap, fiber::mem::BufPool &pool);
+    explicit ScriptRuntime(fiber::script::GcHeap &heap);
+    ScriptRuntime(fiber::script::GcHeap &heap, fiber::mem::BufPool &pool);
 
-    fiber::json::GcHeap &heap();
-    const fiber::json::GcHeap &heap() const;
+    fiber::script::GcHeap &heap();
+    const fiber::script::GcHeap &heap() const;
 
     [[nodiscard]] ValueHandle local_value();
     [[nodiscard]] ValueHandle global_value();
 
-    void add_root_source(fiber::json::GcRootSource *source);
-    void remove_root_source(fiber::json::GcRootSource *source);
-    void visit_roots(fiber::json::GcRootVisitor &visitor) noexcept override;
+    void add_root_source(fiber::script::GcRootSource *source);
+    void remove_root_source(fiber::script::GcRootSource *source);
+    void visit_roots(fiber::script::GcRootVisitor &visitor) noexcept override;
 
     bool should_collect(std::size_t next_bytes = 0) const;
     void collect_now();
@@ -102,12 +102,12 @@ public:
 private:
     struct ValueBlock {
         ValueBlock *next = nullptr;
-        fiber::json::JsValue slots[8];
+        fiber::script::JsValue slots[8];
     };
 
     struct LocalState {
         ValueBlock *block = nullptr;
-        fiber::json::JsValue *top = nullptr;
+        fiber::script::JsValue *top = nullptr;
     };
 
     friend class LocalMark;
@@ -120,22 +120,22 @@ private:
     static void reset_block(ValueBlock *block) noexcept;
     void recycle_local_blocks(ValueBlock *first) noexcept;
 
-    fiber::json::GcHeap *heap_ = nullptr;
+    fiber::script::GcHeap *heap_ = nullptr;
     fiber::mem::BufPool owned_pool_;
     fiber::mem::BufPool *pool_ = nullptr;
 
     ValueBlock *local_head_ = nullptr;
     ValueBlock *local_current_ = nullptr;
     ValueBlock *local_free_ = nullptr;
-    fiber::json::JsValue *local_top_ = nullptr;
-    fiber::json::JsValue *local_end_ = nullptr;
+    fiber::script::JsValue *local_top_ = nullptr;
+    fiber::script::JsValue *local_end_ = nullptr;
 
     ValueBlock *global_head_ = nullptr;
     ValueBlock *global_current_ = nullptr;
-    fiber::json::JsValue *global_top_ = nullptr;
-    fiber::json::JsValue *global_end_ = nullptr;
+    fiber::script::JsValue *global_top_ = nullptr;
+    fiber::script::JsValue *global_end_ = nullptr;
 
-    std::vector<fiber::json::GcRootSource *> root_sources_;
+    std::vector<fiber::script::GcRootSource *> root_sources_;
 };
 
 class ScriptRuntime::LocalMark {

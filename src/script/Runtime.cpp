@@ -22,13 +22,13 @@ std::size_t next_threshold(std::size_t live_bytes) {
 
 } // namespace
 
-ScriptRuntime::ScriptRuntime(fiber::json::GcHeap &heap) : heap_(&heap), pool_(&owned_pool_) {}
+ScriptRuntime::ScriptRuntime(fiber::script::GcHeap &heap) : heap_(&heap), pool_(&owned_pool_) {}
 
-ScriptRuntime::ScriptRuntime(fiber::json::GcHeap &heap, fiber::mem::BufPool &pool) : heap_(&heap), pool_(&pool) {}
+ScriptRuntime::ScriptRuntime(fiber::script::GcHeap &heap, fiber::mem::BufPool &pool) : heap_(&heap), pool_(&pool) {}
 
-fiber::json::GcHeap &ScriptRuntime::heap() { return *heap_; }
+fiber::script::GcHeap &ScriptRuntime::heap() { return *heap_; }
 
-const fiber::json::GcHeap &ScriptRuntime::heap() const { return *heap_; }
+const fiber::script::GcHeap &ScriptRuntime::heap() const { return *heap_; }
 
 ValueHandle ScriptRuntime::local_value() {
     if (!local_current_ || local_top_ == local_end_) {
@@ -46,7 +46,7 @@ ValueHandle ScriptRuntime::local_value() {
         local_end_ = block->slots + kValueBlockSlots;
     }
     ValueHandle handle = local_top_++;
-    *handle = fiber::json::JsValue::make_undefined();
+    *handle = fiber::script::JsValue::make_undefined();
     return handle;
 }
 
@@ -66,17 +66,17 @@ ValueHandle ScriptRuntime::global_value() {
         global_end_ = block->slots + kValueBlockSlots;
     }
     ValueHandle handle = global_top_++;
-    *handle = fiber::json::JsValue::make_undefined();
+    *handle = fiber::script::JsValue::make_undefined();
     return handle;
 }
 
-void ScriptRuntime::add_root_source(fiber::json::GcRootSource *source) {
+void ScriptRuntime::add_root_source(fiber::script::GcRootSource *source) {
     if (source) {
         root_sources_.push_back(source);
     }
 }
 
-void ScriptRuntime::remove_root_source(fiber::json::GcRootSource *source) {
+void ScriptRuntime::remove_root_source(fiber::script::GcRootSource *source) {
     for (std::size_t i = 0; i < root_sources_.size(); ++i) {
         if (root_sources_[i] == source) {
             root_sources_[i] = root_sources_.back();
@@ -86,7 +86,7 @@ void ScriptRuntime::remove_root_source(fiber::json::GcRootSource *source) {
     }
 }
 
-void ScriptRuntime::visit_roots(fiber::json::GcRootVisitor &visitor) noexcept {
+void ScriptRuntime::visit_roots(fiber::script::GcRootVisitor &visitor) noexcept {
     for (ValueBlock *block = local_head_; block; block = block->next) {
         const std::size_t count =
                 block == local_current_ ? static_cast<std::size_t>(local_top_ - block->slots) : kValueBlockSlots;
@@ -103,7 +103,7 @@ void ScriptRuntime::visit_roots(fiber::json::GcRootVisitor &visitor) noexcept {
             break;
         }
     }
-    for (fiber::json::GcRootSource *source: root_sources_) {
+    for (fiber::script::GcRootSource *source: root_sources_) {
         if (source) {
             source->visit_roots(visitor);
         }
@@ -114,8 +114,8 @@ bool ScriptRuntime::should_collect(std::size_t next_bytes) const {
     if (!heap_) {
         return false;
     }
-    std::size_t used = fiber::json::gc_bytes_used(*heap_);
-    std::size_t threshold = fiber::json::gc_threshold(*heap_);
+    std::size_t used = fiber::script::gc_bytes_used(*heap_);
+    std::size_t threshold = fiber::script::gc_threshold(*heap_);
     if (threshold == 0) {
         return false;
     }
@@ -126,8 +126,8 @@ void ScriptRuntime::collect_now() {
     if (!heap_) {
         return;
     }
-    fiber::json::gc_collect(*heap_, *this);
-    fiber::json::gc_set_threshold(*heap_, next_threshold(fiber::json::gc_bytes_used(*heap_)));
+    fiber::script::gc_collect(*heap_, *this);
+    fiber::script::gc_set_threshold(*heap_, next_threshold(fiber::script::gc_bytes_used(*heap_)));
 }
 
 void ScriptRuntime::maybe_collect(std::size_t next_bytes) {
@@ -194,7 +194,7 @@ void ScriptRuntime::reset_block(ValueBlock *block) noexcept {
     }
     block->next = nullptr;
     for (auto &slot: block->slots) {
-        slot = fiber::json::JsValue::make_undefined();
+        slot = fiber::script::JsValue::make_undefined();
     }
 }
 
