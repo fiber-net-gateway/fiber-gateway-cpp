@@ -144,23 +144,21 @@ CallResult Unaries::typeof_op(GcHeap &runtime, ConstValueHandle value, ResultPay
 CallResult Unaries::iterate(GcHeap &runtime, ConstValueHandle value, ResultPayload &result) noexcept {
     fiber::script::GcHeap *heap = &runtime.heap();
     fiber::script::GcIterator *iter = nullptr;
-    iter = runtime.alloc_with_gc(fiber::script::gc_estimate_iterator_bytes(), [&]() {
-        if (fiber::script::js_value_type(*value) == fiber::script::JsNodeType::Array) {
-            return fiber::script::gc_new_array_iterator(
-                    heap,
-                    const_cast<fiber::script::GcArray *>(
-                            fiber::script::js_value_heap_ptr<const fiber::script::GcArray>(*value)),
-                    fiber::script::GcIteratorMode::Values);
-        }
-        if (fiber::script::js_value_type(*value) == fiber::script::JsNodeType::Object) {
-            return fiber::script::gc_new_object_iterator(
-                    heap,
-                    const_cast<fiber::script::GcObject *>(
-                            fiber::script::js_value_heap_ptr<const fiber::script::GcObject>(*value)),
-                    fiber::script::GcIteratorMode::Values);
-        }
-        return fiber::script::gc_new_array_iterator(heap, nullptr, fiber::script::GcIteratorMode::Values);
-    });
+    if (fiber::script::js_value_type(*value) == fiber::script::JsNodeType::Array) {
+        iter = fiber::script::gc_new_array_iterator(
+                heap,
+                const_cast<fiber::script::GcArray *>(
+                        fiber::script::js_value_heap_ptr<const fiber::script::GcArray>(*value)),
+                fiber::script::GcIteratorMode::Values);
+    } else if (fiber::script::js_value_type(*value) == fiber::script::JsNodeType::Object) {
+        iter = fiber::script::gc_new_object_iterator(
+                heap,
+                const_cast<fiber::script::GcObject *>(
+                        fiber::script::js_value_heap_ptr<const fiber::script::GcObject>(*value)),
+                fiber::script::GcIteratorMode::Values);
+    } else {
+        iter = fiber::script::gc_new_array_iterator(heap, nullptr, fiber::script::GcIteratorMode::Values);
+    }
     if (!iter) {
         return set_abort(result, ScriptAbortReason::OutOfMemory);
     }

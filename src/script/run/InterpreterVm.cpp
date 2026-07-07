@@ -32,26 +32,6 @@ ScriptResult status_to_result(ScriptStatus status, const fiber::script::JsValue 
     return ScriptResult::abort(status.abort().reason, status.abort().position);
 }
 
-std::size_t estimate_iterator_next_bytes(const fiber::script::GcIterator *iter) {
-    if (!iter) {
-        return 0;
-    }
-    std::size_t bytes = 0;
-    if (iter->kind == fiber::script::GcIteratorKind::Array) {
-        if (iter->mode == fiber::script::GcIteratorMode::Entries) {
-            bytes += fiber::script::gc_estimate_array_bytes(2);
-        }
-        return bytes;
-    }
-    if (iter->mode == fiber::script::GcIteratorMode::Entries) {
-        bytes += fiber::script::gc_estimate_array_bytes(2);
-    }
-    if (!iter->using_snapshot && iter->object && iter->expected_version != iter->object->version) {
-        bytes += fiber::script::gc_estimate_object_snapshot_bytes(iter->object->size);
-    }
-    return bytes;
-}
-
 bool opcode_uses_spread(std::uint8_t op) {
     return op == ir::Code::CALL_FUNC_SPREAD || op == ir::Code::CALL_ASYNC_FUNC_SPREAD;
 }
@@ -279,11 +259,7 @@ void InterpreterVm::iterate() {
                 }
             } break;
             case ir::Code::NEW_OBJECT: {
-                fiber::script::JsValue obj = fiber::script::JsValue::make_undefined();
-                runtime_.run_with_gc_retry(fiber::script::gc_estimate_object_bytes(0), [&]() {
-                    obj = fiber::script::JsValue::make_object(runtime_.heap(), 0);
-                    return fiber::script::js_value_type(obj) == fiber::script::JsNodeType::Object;
-                });
+                fiber::script::JsValue obj = fiber::script::JsValue::make_object(runtime_.heap(), 0);
                 if (fiber::script::js_value_type(obj) != fiber::script::JsNodeType::Object) {
                     ScriptResult error = make_oom(position_at(compile_, pc_ - 1));
                     if (!handle_error(error, pc_ - 1)) {
@@ -295,11 +271,7 @@ void InterpreterVm::iterate() {
                 break;
             }
             case ir::Code::NEW_ARRAY: {
-                fiber::script::JsValue arr = fiber::script::JsValue::make_undefined();
-                runtime_.run_with_gc_retry(fiber::script::gc_estimate_array_bytes(0), [&]() {
-                    arr = fiber::script::JsValue::make_array(runtime_.heap(), 0);
-                    return fiber::script::js_value_type(arr) == fiber::script::JsNodeType::Array;
-                });
+                fiber::script::JsValue arr = fiber::script::JsValue::make_array(runtime_.heap(), 0);
                 if (fiber::script::js_value_type(arr) != fiber::script::JsNodeType::Array) {
                     ScriptResult error = make_oom(position_at(compile_, pc_ - 1));
                     if (!handle_error(error, pc_ - 1)) {
@@ -456,9 +428,7 @@ void InterpreterVm::iterate() {
                 auto *iter = fiber::script::js_value_heap_ptr<fiber::script::GcIterator>(vars_[idx]);
                 fiber::script::JsValue out;
                 bool done = true;
-                bool ok = runtime_.run_with_gc_retry(estimate_iterator_next_bytes(iter), [&]() {
-                    return fiber::script::gc_iterator_next(&runtime_.heap(), iter, out, done);
-                });
+                bool ok = fiber::script::gc_iterator_next(&runtime_.heap(), iter, out, done);
                 stack_[sp_++] = fiber::script::JsValue::make_boolean(ok && !done);
                 break;
             }

@@ -145,34 +145,6 @@ std::size_t entry_storage_bytes(std::size_t capacity) { return sizeof(GcObjectEn
 
 std::size_t bucket_storage_bytes(std::size_t bucket_count) { return sizeof(std::int32_t) * bucket_count; }
 
-std::size_t next_array_capacity(const GcArray *arr, std::size_t expected) {
-    if (!arr || expected <= arr->capacity) {
-        return arr ? arr->capacity : 0;
-    }
-    std::size_t new_capacity = arr->capacity ? arr->capacity * 2 : 1;
-    while (new_capacity < expected) {
-        new_capacity *= 2;
-    }
-    return new_capacity;
-}
-
-std::size_t next_object_entry_capacity(const GcObject *obj, std::size_t expected) {
-    if (!obj) {
-        return 0;
-    }
-    std::size_t new_capacity = obj->entry_capacity ? obj->entry_capacity : 1;
-    if (expected > new_capacity) {
-        while (new_capacity < expected) {
-            new_capacity *= 2;
-        }
-        return new_capacity;
-    }
-    if (obj->entry_capacity == 0 && expected > 0) {
-        return expected;
-    }
-    return obj->entry_capacity;
-}
-
 void gc_account_add(GcHeap *heap, std::size_t bytes) {
     if (!heap || bytes == 0) {
         return;
@@ -190,6 +162,9 @@ void gc_account_sub(GcHeap *heap, std::size_t bytes) {
 void *gc_alloc_extra(GcHeap *heap, std::size_t bytes) {
     if (!heap || bytes == 0) {
         return nullptr;
+    }
+    if (heap->threshold && saturating_add(heap->bytes, bytes) >= heap->threshold) {
+        heap->collect();
     }
     void *mem = heap->alloc.alloc(bytes);
     if (!mem) {
@@ -467,12 +442,17 @@ bool build_object_snapshot(GcHeap *heap, GcIterator *iter, const GcObject *obj) 
 }
 
 GcHeader *gc_alloc_raw(GcHeap *heap, std::size_t size, GcKind kind) {
+    if (heap->threshold && saturating_add(heap->bytes, size) >= heap->threshold) {
+        heap->collect();
+    }
     void *mem = heap->alloc.alloc(size);
     if (!mem) {
         return nullptr;
     }
     auto *hdr = static_cast<GcHeader *>(mem);
     hdr->next = nullptr;
+    // Pre-mark with the next live mark so the object survives the first collect after allocation;
+    // this protects the gc_link->rooting window, since collect can trigger from the alloc chokepoints.
     hdr->mark_ = flip_mark(heap->live_mark);
     hdr->kind = kind;
     hdr->size_ = static_cast<std::uint32_t>(size);
@@ -693,23 +673,34 @@ void GcHeap::visit_roots(fiber::script::GcRootVisitor &visitor) noexcept {
     roots_.visit_all(visitor);
 }
 
-bool GcHeap::should_collect(std::size_t next_bytes) const {
-    if (threshold == 0) {
-        return false;
-    }
-    return saturating_add(bytes, next_bytes) >= threshold;
-}
+void gc_sweep_unmarked(GcHeap *heap); // defined below
 
-void GcHeap::collect_now() {
-    gc_collect(*this, static_cast<GcRootSource &>(*this));
+namespace {
+
+class MarkingVisitor final : public GcRootVisitor {
+public:
+    explicit MarkingVisitor(GcHeap &heap) noexcept : heap_(&heap) {}
+
+    void visit(JsValue *value) noexcept override {
+        if (value) {
+            gc_mark_value(heap_, *value);
+        }
+    }
+
+private:
+    GcHeap *heap_ = nullptr;
+};
+
+} // namespace
+
+GcCollectStats GcHeap::collect() {
+    std::size_t before = bytes;
+    live_mark = flip_mark(live_mark);
+    MarkingVisitor visitor(*this);
+    visit_roots(visitor);
+    gc_sweep_unmarked(this);
     threshold = next_threshold(bytes);
-}
-
-void GcHeap::maybe_collect(std::size_t next_bytes) {
-    if (!should_collect(next_bytes)) {
-        return;
-    }
-    collect_now();
+    return {bytes, before - bytes};
 }
 
 GcHeap::LocalState GcHeap::mark_local() const noexcept { return LocalState{local_current_, local_top_}; }
@@ -812,58 +803,6 @@ void GcHeap::LocalMark::reset() noexcept {
     heap_ = nullptr;
     state_ = {};
 }
-
-std::size_t gc_estimate_utf8_string_bytes(std::size_t utf8_len) {
-    return sizeof(GcString) + string_storage_bytes(utf8_len, GcStringEncoding::Utf16);
-}
-
-std::size_t gc_estimate_string_bytes(std::size_t len, GcStringEncoding encoding) {
-    return sizeof(GcString) + string_storage_bytes(len, encoding);
-}
-
-std::size_t gc_estimate_binary_bytes(std::size_t len) { return sizeof(GcBinary) + len; }
-
-std::size_t gc_estimate_array_bytes(std::size_t capacity) { return sizeof(GcArray) + array_storage_bytes(capacity); }
-
-std::size_t gc_estimate_array_growth_bytes(const GcArray *arr, std::size_t expected) {
-    if (!arr) {
-        return 0;
-    }
-    std::size_t new_capacity = next_array_capacity(arr, expected);
-    if (new_capacity <= arr->capacity) {
-        return 0;
-    }
-    return array_storage_bytes(new_capacity) - array_storage_bytes(arr->capacity);
-}
-
-std::size_t gc_estimate_object_bytes(std::size_t capacity) {
-    std::size_t bucket_count = bucket_count_for_entries(capacity);
-    return sizeof(GcObject) + entry_storage_bytes(capacity) + bucket_storage_bytes(bucket_count);
-}
-
-std::size_t gc_estimate_object_growth_bytes(const GcObject *obj, std::size_t expected) {
-    if (!obj) {
-        return 0;
-    }
-    std::size_t next_entries = next_object_entry_capacity(obj, expected);
-    std::size_t next_buckets = bucket_count_for_entries(std::max(expected, obj->size));
-    std::size_t current_entries = entry_storage_bytes(obj->entry_capacity);
-    std::size_t current_buckets = bucket_storage_bytes(obj->bucket_count);
-    std::size_t target_entries = entry_storage_bytes(next_entries);
-    std::size_t target_buckets = bucket_storage_bytes(next_buckets);
-    std::size_t delta = 0;
-    if (target_entries > current_entries) {
-        delta += target_entries - current_entries;
-    }
-    if (target_buckets > current_buckets) {
-        delta += target_buckets - current_buckets;
-    }
-    return delta;
-}
-
-std::size_t gc_estimate_iterator_bytes() { return sizeof(GcIterator); }
-
-std::size_t gc_estimate_object_snapshot_bytes(std::size_t entry_count) { return sizeof(GcString *) * entry_count; }
 
 GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len) {
     auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcKind::String);
@@ -1702,54 +1641,6 @@ void gc_sweep_unmarked(GcHeap *heap) {
             cursor = &obj->next;
         }
     }
-}
-
-std::size_t gc_bytes_used(const GcHeap &heap) { return heap.bytes; }
-
-std::size_t gc_threshold(const GcHeap &heap) { return heap.threshold; }
-
-void gc_set_threshold(GcHeap &heap, std::size_t value) { heap.threshold = value; }
-
-void gc_collect(GcHeap &heap, GcRootSet &roots) {
-    class MarkingVisitor final : public GcRootVisitor {
-    public:
-        explicit MarkingVisitor(GcHeap &heap) : heap_(&heap) {}
-
-        void visit(JsValue *value) noexcept override {
-            if (value) {
-                gc_mark_value(heap_, *value);
-            }
-        }
-
-    private:
-        GcHeap *heap_ = nullptr;
-    };
-
-    heap.live_mark = flip_mark(heap.live_mark);
-    MarkingVisitor visitor(heap);
-    roots.visit_all(visitor);
-    gc_sweep_unmarked(&heap);
-}
-
-void gc_collect(GcHeap &heap, GcRootSource &roots) {
-    class MarkingVisitor final : public GcRootVisitor {
-    public:
-        explicit MarkingVisitor(GcHeap &heap) : heap_(&heap) {}
-
-        void visit(JsValue *value) noexcept override {
-            if (value) {
-                gc_mark_value(heap_, *value);
-            }
-        }
-
-    private:
-        GcHeap *heap_ = nullptr;
-    };
-
-    heap.live_mark = flip_mark(heap.live_mark);
-    MarkingVisitor visitor(heap);
-    roots.visit_roots(visitor);
-    gc_sweep_unmarked(&heap);
 }
 
 } // namespace fiber::script

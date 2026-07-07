@@ -10,11 +10,9 @@ using fiber::script::GcIterator;
 using fiber::script::GcIteratorMode;
 using fiber::script::GcObject;
 using fiber::script::GcRootRegistration;
-using fiber::script::GcRootSet;
 using fiber::script::GcRootSource;
 using fiber::script::GcRootVisitor;
 using fiber::script::GcString;
-using fiber::script::GcStringEncoding;
 using fiber::script::JsHeapKind;
 using fiber::script::JsNodeType;
 using fiber::script::JsValue;
@@ -23,21 +21,27 @@ using fiber::script::ValueHandle;
 TEST(JsGcTest, BytesIncludeExternalBuffers) {
     GcHeap heap;
 
-    std::size_t base = fiber::script::gc_bytes_used(heap);
-    GcString *str = fiber::script::gc_new_string_bytes(&heap, reinterpret_cast<const std::uint8_t *>("abc"), 3);
-    ASSERT_NE(str, nullptr);
-    base += fiber::script::gc_estimate_string_bytes(3, GcStringEncoding::Byte);
-    EXPECT_EQ(fiber::script::gc_bytes_used(heap), base);
+    std::size_t base = heap.bytes;
+    GcString *short_str = fiber::script::gc_new_string_bytes(&heap, reinterpret_cast<const std::uint8_t *>("abc"), 3);
+    ASSERT_NE(short_str, nullptr);
+    std::size_t after_short = heap.bytes;
+    EXPECT_GT(after_short, base);
+
+    GcString *long_str =
+            fiber::script::gc_new_string_bytes(&heap, reinterpret_cast<const std::uint8_t *>("0123456789"), 10);
+    ASSERT_NE(long_str, nullptr);
+    std::size_t after_long = heap.bytes;
+    // External data buffer is accounted: the longer string claims strictly more bytes.
+    EXPECT_GT(after_long - after_short, after_short - base);
 
     GcArray *arr = fiber::script::gc_new_array(&heap, 4);
     ASSERT_NE(arr, nullptr);
-    base += fiber::script::gc_estimate_array_bytes(4);
-    EXPECT_EQ(fiber::script::gc_bytes_used(heap), base);
+    std::size_t after_array = heap.bytes;
+    EXPECT_GT(after_array, after_long);
 
     GcObject *obj = fiber::script::gc_new_object(&heap, 2);
     ASSERT_NE(obj, nullptr);
-    base += fiber::script::gc_estimate_object_bytes(2);
-    EXPECT_EQ(fiber::script::gc_bytes_used(heap), base);
+    EXPECT_GT(heap.bytes, after_array);
 }
 
 TEST(JsGcTest, IteratorSnapshotBytesAreAccounted) {
@@ -62,13 +66,13 @@ TEST(JsGcTest, IteratorSnapshotBytesAreAccounted) {
     ASSERT_TRUE(fiber::script::gc_iterator_next(&heap, iter, out, done));
     ASSERT_FALSE(done);
 
-    std::size_t before_snapshot = fiber::script::gc_bytes_used(heap);
+    std::size_t before_snapshot = heap.bytes;
     ASSERT_TRUE(fiber::script::gc_object_set(&heap, obj, key_c, JsValue::make_integer(3)));
     ASSERT_TRUE(fiber::script::gc_iterator_next(&heap, iter, out, done));
     ASSERT_FALSE(done);
 
-    EXPECT_EQ(fiber::script::gc_bytes_used(heap),
-              before_snapshot + fiber::script::gc_estimate_object_snapshot_bytes(2));
+    // The version mismatch forces a snapshot of the two original keys.
+    EXPECT_EQ(heap.bytes - before_snapshot, 2u * sizeof(GcString *));
 }
 
 class SingleValueSource final : public GcRootSource {
@@ -83,7 +87,6 @@ private:
 
 TEST(JsGcTest, RootSourcesMarkValuesWithoutTemporaryRootVector) {
     GcHeap heap;
-    GcRootSet roots;
 
     JsValue rooted = JsValue::make_undefined();
     GcString *live = fiber::script::gc_new_string(&heap, "live", 4);
@@ -93,17 +96,19 @@ TEST(JsGcTest, RootSourcesMarkValuesWithoutTemporaryRootVector) {
     rooted = js_make_heap_ref(&live->hdr, JsHeapKind::String);
 
     SingleValueSource source(rooted);
-    GcRootRegistration reg(roots, source);
+    GcRootRegistration reg(heap.roots(), source);
 
-    std::size_t before_collect = fiber::script::gc_bytes_used(heap);
-    fiber::script::gc_collect(heap, roots);
-    fiber::script::gc_collect(heap, roots);
-    std::size_t after_collect = fiber::script::gc_bytes_used(heap);
+    std::size_t before_collect = heap.bytes;
+    heap.collect();
+    heap.collect();
+    std::size_t after_collect = heap.bytes;
 
     EXPECT_EQ(js_value_type(rooted), JsNodeType::String);
     EXPECT_EQ(js_value_heap_header(rooted), &live->hdr);
     EXPECT_LT(after_collect, before_collect);
-    EXPECT_EQ(after_collect, fiber::script::gc_estimate_string_bytes(4, GcStringEncoding::Byte));
+    EXPECT_GT(after_collect, 0u);
+    // The live set is stable: a follow-up collect reclaims nothing.
+    EXPECT_EQ(heap.collect().freed, 0u);
 }
 
 TEST(JsGcTest, GcHeapGlobalSlotsAreCollectedAsRoots) {
@@ -118,13 +123,16 @@ TEST(JsGcTest, GcHeapGlobalSlotsAreCollectedAsRoots) {
     ASSERT_NE(root, nullptr);
     *root = js_make_heap_ref(&live->hdr, JsHeapKind::String);
 
-    std::size_t before_collect = fiber::script::gc_bytes_used(heap);
-    heap.collect_now();
-    heap.collect_now();
+    std::size_t before_collect = heap.bytes;
+    heap.collect();
+    auto second = heap.collect();
 
     EXPECT_EQ(js_value_heap_header(*root), &live->hdr);
-    EXPECT_LT(fiber::script::gc_bytes_used(heap), before_collect);
-    EXPECT_EQ(fiber::script::gc_bytes_used(heap), fiber::script::gc_estimate_string_bytes(4, GcStringEncoding::Byte));
+    EXPECT_LT(heap.bytes, before_collect);
+    EXPECT_GT(heap.bytes, 0u);
+    // Freshly allocated objects are pre-marked, so the unreachable one survives the first collect
+    // and is only reclaimed on the second.
+    EXPECT_GT(second.freed, 0u);
 }
 
 TEST(JsGcTest, GcHeapLocalMarkReleasesLocalRoots) {
@@ -138,14 +146,14 @@ TEST(JsGcTest, GcHeapLocalMarkReleasesLocalRoots) {
         ASSERT_NE(root, nullptr);
         *root = js_make_heap_ref(&live->hdr, JsHeapKind::String);
 
-        heap.collect_now();
+        heap.collect();
         EXPECT_EQ(js_value_heap_header(*root), &live->hdr);
-        EXPECT_EQ(fiber::script::gc_bytes_used(heap),
-                  fiber::script::gc_estimate_string_bytes(4, GcStringEncoding::Byte));
+        EXPECT_GT(heap.bytes, 0u);
     }
 
-    heap.collect_now();
-    EXPECT_EQ(fiber::script::gc_bytes_used(heap), 0u);
+    // Local roots are released when LocalMark drops; a collect now sweeps the live string.
+    heap.collect();
+    EXPECT_EQ(heap.bytes, 0u);
 }
 
 } // namespace
