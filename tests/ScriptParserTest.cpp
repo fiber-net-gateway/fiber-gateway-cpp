@@ -362,7 +362,7 @@ TEST(ScriptParserTest, ParseInvalidExpression) {
 
 TEST(ScriptParserTest, RejectsExpressionNestingOverLimit) {
     TestLibrary library;
-    fiber::script::parse::Parser parser(library, true, fiber::script::ScriptLimits{.max_depth = 8});
+    fiber::script::parse::Parser parser(library, true, 8);
 
     auto result = parser.parse_expression(nested_parenthesized_expression(16));
 
@@ -372,7 +372,7 @@ TEST(ScriptParserTest, RejectsExpressionNestingOverLimit) {
 
 TEST(ScriptParserTest, RejectsTemplateLiteralNestingOverLimit) {
     TestLibrary library;
-    fiber::script::parse::Parser parser(library, true, fiber::script::ScriptLimits{.max_depth = 4});
+    fiber::script::parse::Parser parser(library, true, 4);
 
     auto result = parser.parse_expression(nested_template_literal(8));
 
@@ -382,7 +382,7 @@ TEST(ScriptParserTest, RejectsTemplateLiteralNestingOverLimit) {
 
 TEST(ScriptParserTest, RejectsMemberChainOverLimit) {
     TestLibrary library;
-    fiber::script::parse::Parser parser(library, true, fiber::script::ScriptLimits{.max_depth = 8});
+    fiber::script::parse::Parser parser(library, true, 8);
 
     auto result = parser.parse_expression(dotted_expression(16));
 

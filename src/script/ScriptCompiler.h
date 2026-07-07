@@ -1,19 +1,21 @@
 #ifndef FIBER_SCRIPT_SCRIPT_COMPILER_H
 #define FIBER_SCRIPT_SCRIPT_COMPILER_H
 
+#include <cstddef>
 #include <expected>
 #include <memory>
 #include <string_view>
 
 #include "Library.h"
 #include "Script.h"
-#include "ScriptLimits.h"
+#include "ast/Node.h"
 #include "parse/ParseError.h"
 
 namespace fiber::script {
 
 std::expected<Script, parse::ParseError> compile_script(Library &library, std::string_view script,
-                                                        bool allow_assign = true, ScriptLimits limits = {});
+                                                        bool allow_assign = true,
+                                                        std::size_t max_depth = kDefaultScriptMaxDepth);
 
 } // namespace fiber::script
 

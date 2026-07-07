@@ -9,7 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "../ScriptLimits.h"
+#include "../ast/Node.h"
 #include "../ast/Assign.h"
 #include "../ast/BinaryOperator.h"
 #include "../ast/Block.h"
@@ -49,7 +49,7 @@ namespace fiber::script::parse {
 
 class Parser {
 public:
-    Parser(Library &library, bool allow_assign, ScriptLimits limits = {});
+    Parser(Library &library, bool allow_assign, std::size_t max_depth = kDefaultScriptMaxDepth);
 
     std::expected<std::unique_ptr<ast::Block>, ParseError> parse_script(std::string_view script);
     std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_expression(std::string_view expression);
@@ -75,7 +75,7 @@ private:
         std::vector<fiber::script::JsValue> default_args;
     };
 
-    Parser(Library &library, bool allow_assign, ScriptLimits limits, std::size_t parse_depth);
+    Parser(Library &library, bool allow_assign, std::size_t max_depth, std::size_t parse_depth);
 
     std::expected<std::unique_ptr<ast::Statement>, ParseError> parse_statement();
     std::expected<std::unique_ptr<ast::Statement>, ParseError> parse_break_statement();
@@ -142,7 +142,7 @@ private:
     ParseError make_error(const std::string &message, const Token *token) const;
 
     Library &library_;
-    ScriptLimits limits_;
+    std::size_t max_depth_ = 0;
     bool allow_assign_ = true;
     std::size_t parse_depth_ = 0;
     std::vector<Token> tokens_;
