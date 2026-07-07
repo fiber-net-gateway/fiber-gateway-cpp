@@ -4,11 +4,9 @@
 
 #include "JsonDecode.h"
 
-#include <cerrno>
 #include <charconv>
+#include <cmath>
 #include <cstdint>
-#include <cstdlib>
-#include <cstring>
 #include <memory>
 #include <string>
 #include <utility>
@@ -17,7 +15,79 @@
 namespace fiber::json {
 namespace {
 
-constexpr size_t kInitialContainerCapacity = 4;
+constexpr std::size_t kInitialContainerCapacity = 4;
+
+enum class TokenKind {
+    Eof,
+    Null,
+    Bool,
+    Integer,
+    Double,
+    String,
+    StringEscaped,
+    ObjectOpen,
+    ObjectClose,
+    ArrayOpen,
+    ArrayClose,
+    Colon,
+    Comma,
+};
+
+enum class LexStatus {
+    Ok,
+    NeedMore,
+    Error,
+};
+
+enum class ScanStatus {
+    Complete,
+    NeedMore,
+    Error,
+};
+
+enum class ParseState {
+    Start,
+    ParseComplete,
+    ParseError,
+    ObjectStart,
+    ObjectNeedKey,
+    ObjectSep,
+    ObjectNeedVal,
+    ObjectGotVal,
+    ArrayStart,
+    ArrayNeedVal,
+    ArrayGotVal,
+};
+
+struct Token {
+    TokenKind kind = TokenKind::Eof;
+    const char *data = nullptr;
+    std::size_t len = 0;
+    std::size_t offset = 0;
+};
+
+struct ScannedToken {
+    TokenKind kind = TokenKind::Eof;
+    std::size_t token_len = 0;
+    std::size_t data_offset = 0;
+    std::size_t data_len = 0;
+};
+
+bool set_parse_error(ParseError &error, const char *message, std::size_t offset) {
+    if (error.message.empty()) {
+        error.message = message;
+        error.offset = offset;
+    }
+    return false;
+}
+
+bool is_ws(char ch) { return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'; }
+
+bool is_number_delimiter(unsigned char ch) {
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == ',' || ch == ']' || ch == '}';
+}
+
+bool is_digit(unsigned char ch) { return ch >= '0' && ch <= '9'; }
 
 int hex_value(char ch) {
     if (ch >= '0' && ch <= '9') {
@@ -31,8 +101,6 @@ int hex_value(char ch) {
     }
     return -1;
 }
-
-bool set_parse_error(ParseError &error, const char *message, std::size_t offset);
 
 void append_code_unit(DecodedString &out, char16_t unit) {
     if (out.is_byte && unit <= 0xFF) {
@@ -56,33 +124,527 @@ void append_codepoint(DecodedString &out, std::uint32_t codepoint) {
         return;
     }
     std::uint32_t value = codepoint - 0x10000;
-    char16_t high = static_cast<char16_t>(0xD800 + (value >> 10));
-    char16_t low = static_cast<char16_t>(0xDC00 + (value & 0x3FF));
-    append_code_unit(out, high);
-    append_code_unit(out, low);
+    append_code_unit(out, static_cast<char16_t>(0xD800 + (value >> 10)));
+    append_code_unit(out, static_cast<char16_t>(0xDC00 + (value & 0x3FF)));
 }
 
-enum class Utf8DecodeResult {
+enum class Utf8Result {
     Ok,
     NeedMore,
     Error,
 };
 
-Utf8DecodeResult decode_utf8_codepoint(const char *data, std::size_t len, std::size_t &pos, bool final,
-                                       std::uint32_t &codepoint, ParseError &error, std::size_t offset_base) {
-    if (pos >= len) {
-        if (!final) {
-            return Utf8DecodeResult::NeedMore;
+class TokenReader {
+public:
+    TokenReader(const std::string *prefix, const char *data, std::size_t len, std::string *out) :
+        prefix_(prefix), data_(data), len_(len), out_(out) {}
+
+    [[nodiscard]] bool read(unsigned char &ch) {
+        if (prefix_ && prefix_pos_ < prefix_->size()) {
+            ch = static_cast<unsigned char>((*prefix_)[prefix_pos_++]);
+        } else if (data_pos_ < len_) {
+            ch = static_cast<unsigned char>(data_[data_pos_++]);
+        } else {
+            return false;
         }
+        if (out_) {
+            out_->push_back(static_cast<char>(ch));
+        }
+        return true;
+    }
+
+    void unread() {
+        if (out_ && !out_->empty()) {
+            out_->pop_back();
+        }
+        if (data_pos_ > 0) {
+            data_pos_ -= 1;
+            return;
+        }
+        if (prefix_pos_ > 0) {
+            prefix_pos_ -= 1;
+        }
+    }
+
+    [[nodiscard]] std::size_t input_consumed() const { return data_pos_; }
+    [[nodiscard]] std::size_t total_consumed() const { return prefix_pos_ + data_pos_; }
+
+private:
+    const std::string *prefix_ = nullptr;
+    const char *data_ = nullptr;
+    std::size_t len_ = 0;
+    std::string *out_ = nullptr;
+    std::size_t prefix_pos_ = 0;
+    std::size_t data_pos_ = 0;
+};
+
+Utf8Result scan_utf8_codepoint(TokenReader &reader, unsigned char first, bool final, ParseError &error,
+                               std::size_t token_offset) {
+    int needed = 0;
+    std::uint32_t code = 0;
+    std::uint32_t min_value = 0;
+    if ((first & 0xE0) == 0xC0) {
+        needed = 1;
+        code = first & 0x1F;
+        min_value = 0x80;
+    } else if ((first & 0xF0) == 0xE0) {
+        needed = 2;
+        code = first & 0x0F;
+        min_value = 0x800;
+    } else if ((first & 0xF8) == 0xF0) {
+        needed = 3;
+        code = first & 0x07;
+        min_value = 0x10000;
+    } else {
+        set_parse_error(error, "invalid utf-8 sequence", token_offset + reader.total_consumed() - 1);
+        return Utf8Result::Error;
+    }
+
+    for (int idx = 0; idx < needed; ++idx) {
+        unsigned char next = 0;
+        if (!reader.read(next)) {
+            if (!final) {
+                return Utf8Result::NeedMore;
+            }
+            set_parse_error(error, "invalid utf-8 sequence", token_offset + reader.total_consumed());
+            return Utf8Result::Error;
+        }
+        if ((next & 0xC0) != 0x80) {
+            set_parse_error(error, "invalid utf-8 sequence", token_offset + reader.total_consumed() - 1);
+            return Utf8Result::Error;
+        }
+        code = (code << 6) | (next & 0x3F);
+    }
+
+    if (code < min_value || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) {
+        set_parse_error(error, "invalid utf-8 sequence", token_offset + reader.total_consumed() - needed - 1);
+        return Utf8Result::Error;
+    }
+    return Utf8Result::Ok;
+}
+
+ScanStatus scan_string(TokenReader &reader, bool final, ParseError &error, std::size_t token_offset,
+                       ScannedToken &out) {
+    unsigned char ch = 0;
+    if (!reader.read(ch) || ch != '"') {
+        set_parse_error(error, "invalid string", token_offset);
+        return ScanStatus::Error;
+    }
+
+    bool has_escape = false;
+    while (true) {
+        if (!reader.read(ch)) {
+            if (!final) {
+                return ScanStatus::NeedMore;
+            }
+            set_parse_error(error, "unterminated string", token_offset + reader.total_consumed());
+            return ScanStatus::Error;
+        }
+        if (ch == '"') {
+            out.kind = has_escape ? TokenKind::StringEscaped : TokenKind::String;
+            out.token_len = reader.total_consumed();
+            out.data_offset = 1;
+            out.data_len = out.token_len - 2;
+            return ScanStatus::Complete;
+        }
+        if (ch == '\\') {
+            has_escape = true;
+            if (!reader.read(ch)) {
+                if (!final) {
+                    return ScanStatus::NeedMore;
+                }
+                set_parse_error(error, "unterminated escape sequence", token_offset + reader.total_consumed());
+                return ScanStatus::Error;
+            }
+            switch (ch) {
+                case '"':
+                case '\\':
+                case '/':
+                case 'b':
+                case 'f':
+                case 'n':
+                case 'r':
+                case 't':
+                    break;
+                case 'u':
+                    for (int idx = 0; idx < 4; ++idx) {
+                        if (!reader.read(ch)) {
+                            if (!final) {
+                                return ScanStatus::NeedMore;
+                            }
+                            set_parse_error(error, "invalid unicode escape", token_offset + reader.total_consumed());
+                            return ScanStatus::Error;
+                        }
+                        if (hex_value(static_cast<char>(ch)) < 0) {
+                            set_parse_error(error, "invalid unicode escape",
+                                            token_offset + reader.total_consumed() - 1);
+                            return ScanStatus::Error;
+                        }
+                    }
+                    break;
+                default:
+                    set_parse_error(error, "invalid escape sequence", token_offset + reader.total_consumed() - 1);
+                    return ScanStatus::Error;
+            }
+            continue;
+        }
+        if (ch < 0x20) {
+            set_parse_error(error, "invalid control character in string", token_offset + reader.total_consumed() - 1);
+            return ScanStatus::Error;
+        }
+        if (ch >= 0x80) {
+            Utf8Result result = scan_utf8_codepoint(reader, ch, final, error, token_offset);
+            if (result == Utf8Result::NeedMore) {
+                return ScanStatus::NeedMore;
+            }
+            if (result == Utf8Result::Error) {
+                return ScanStatus::Error;
+            }
+        }
+    }
+}
+
+ScanStatus scan_literal(TokenReader &reader, bool final, const char *literal, TokenKind kind, ParseError &error,
+                        std::size_t token_offset, ScannedToken &out) {
+    for (std::size_t idx = 0; literal[idx] != '\0'; ++idx) {
+        unsigned char ch = 0;
+        if (!reader.read(ch)) {
+            if (!final) {
+                return ScanStatus::NeedMore;
+            }
+            set_parse_error(error, "invalid literal", token_offset + reader.total_consumed());
+            return ScanStatus::Error;
+        }
+        if (ch != static_cast<unsigned char>(literal[idx])) {
+            set_parse_error(error, "invalid literal", token_offset + reader.total_consumed() - 1);
+            return ScanStatus::Error;
+        }
+    }
+    out.kind = kind;
+    out.token_len = reader.total_consumed();
+    out.data_offset = 0;
+    out.data_len = out.token_len;
+    return ScanStatus::Complete;
+}
+
+ScanStatus scan_number(TokenReader &reader, bool final, ParseError &error, std::size_t token_offset,
+                       ScannedToken &out) {
+    TokenKind kind = TokenKind::Integer;
+    unsigned char ch = 0;
+    if (!reader.read(ch)) {
+        if (!final) {
+            return ScanStatus::NeedMore;
+        }
+        set_parse_error(error, "invalid number", token_offset);
+        return ScanStatus::Error;
+    }
+
+    if (ch == '-') {
+        if (!reader.read(ch)) {
+            if (!final) {
+                return ScanStatus::NeedMore;
+            }
+            set_parse_error(error, "invalid number", token_offset);
+            return ScanStatus::Error;
+        }
+    }
+
+    if (ch == '0') {
+        if (!reader.read(ch)) {
+            if (!final) {
+                return ScanStatus::NeedMore;
+            }
+            out.kind = kind;
+            out.token_len = reader.total_consumed();
+            out.data_offset = 0;
+            out.data_len = out.token_len;
+            return ScanStatus::Complete;
+        }
+        if (is_digit(ch)) {
+            set_parse_error(error, "leading zero in number", token_offset);
+            return ScanStatus::Error;
+        }
+    } else if (ch >= '1' && ch <= '9') {
+        while (true) {
+            if (!reader.read(ch)) {
+                if (!final) {
+                    return ScanStatus::NeedMore;
+                }
+                out.kind = kind;
+                out.token_len = reader.total_consumed();
+                out.data_offset = 0;
+                out.data_len = out.token_len;
+                return ScanStatus::Complete;
+            }
+            if (!is_digit(ch)) {
+                break;
+            }
+        }
+    } else {
+        set_parse_error(error, "invalid number", token_offset);
+        return ScanStatus::Error;
+    }
+
+    if (ch == '.') {
+        kind = TokenKind::Double;
+        if (!reader.read(ch)) {
+            if (!final) {
+                return ScanStatus::NeedMore;
+            }
+            set_parse_error(error, "invalid number", token_offset);
+            return ScanStatus::Error;
+        }
+        if (!is_digit(ch)) {
+            set_parse_error(error, "invalid number", token_offset);
+            return ScanStatus::Error;
+        }
+        do {
+            if (!reader.read(ch)) {
+                if (!final) {
+                    return ScanStatus::NeedMore;
+                }
+                out.kind = kind;
+                out.token_len = reader.total_consumed();
+                out.data_offset = 0;
+                out.data_len = out.token_len;
+                return ScanStatus::Complete;
+            }
+        } while (is_digit(ch));
+    }
+
+    if (ch == 'e' || ch == 'E') {
+        kind = TokenKind::Double;
+        if (!reader.read(ch)) {
+            if (!final) {
+                return ScanStatus::NeedMore;
+            }
+            set_parse_error(error, "invalid number", token_offset);
+            return ScanStatus::Error;
+        }
+        if (ch == '+' || ch == '-') {
+            if (!reader.read(ch)) {
+                if (!final) {
+                    return ScanStatus::NeedMore;
+                }
+                set_parse_error(error, "invalid number", token_offset);
+                return ScanStatus::Error;
+            }
+        }
+        if (!is_digit(ch)) {
+            set_parse_error(error, "invalid number", token_offset);
+            return ScanStatus::Error;
+        }
+        do {
+            if (!reader.read(ch)) {
+                if (!final) {
+                    return ScanStatus::NeedMore;
+                }
+                out.kind = kind;
+                out.token_len = reader.total_consumed();
+                out.data_offset = 0;
+                out.data_len = out.token_len;
+                return ScanStatus::Complete;
+            }
+        } while (is_digit(ch));
+    }
+
+    if (!is_number_delimiter(ch)) {
+        set_parse_error(error, "invalid number", token_offset + reader.total_consumed() - 1);
+        return ScanStatus::Error;
+    }
+
+    reader.unread();
+    out.kind = kind;
+    out.token_len = reader.total_consumed();
+    out.data_offset = 0;
+    out.data_len = out.token_len;
+    return ScanStatus::Complete;
+}
+
+class JsonLexer {
+public:
+    void reset() {
+        stream_offset_ = 0;
+        partial_offset_ = 0;
+        partial_.clear();
+        token_storage_.clear();
+    }
+
+    [[nodiscard]] std::size_t absolute_offset(std::size_t offset) const { return stream_offset_ + offset; }
+
+    void finish_chunk(std::size_t consumed) { stream_offset_ += consumed; }
+
+    [[nodiscard]] LexStatus next(const char *data, std::size_t len, std::size_t &offset, bool final, Token &out,
+                                 ParseError &error) {
+        token_storage_.clear();
+        out = {};
+
+        if (!partial_.empty()) {
+            return continue_partial(data, len, offset, final, out, error);
+        }
+
+        while (offset < len && is_ws(data[offset])) {
+            offset += 1;
+        }
+        if (offset >= len) {
+            out.kind = TokenKind::Eof;
+            out.offset = stream_offset_ + offset;
+            return final ? LexStatus::Ok : LexStatus::NeedMore;
+        }
+
+        std::size_t start = offset;
+        std::size_t token_offset = stream_offset_ + start;
+        unsigned char ch = static_cast<unsigned char>(data[offset]);
+        switch (ch) {
+            case '{':
+                return single_char(TokenKind::ObjectOpen, data, offset, out);
+            case '}':
+                return single_char(TokenKind::ObjectClose, data, offset, out);
+            case '[':
+                return single_char(TokenKind::ArrayOpen, data, offset, out);
+            case ']':
+                return single_char(TokenKind::ArrayClose, data, offset, out);
+            case ':':
+                return single_char(TokenKind::Colon, data, offset, out);
+            case ',':
+                return single_char(TokenKind::Comma, data, offset, out);
+            case '"':
+                return scan_current(data, len, offset, final, token_offset, out, error, scan_string);
+            case 't':
+                return scan_current_literal(data, len, offset, final, token_offset, "true", TokenKind::Bool, out,
+                                            error);
+            case 'f':
+                return scan_current_literal(data, len, offset, final, token_offset, "false", TokenKind::Bool, out,
+                                            error);
+            case 'n':
+                return scan_current_literal(data, len, offset, final, token_offset, "null", TokenKind::Null, out,
+                                            error);
+            default:
+                if (ch == '-' || is_digit(ch)) {
+                    return scan_current(data, len, offset, final, token_offset, out, error, scan_number);
+                }
+                set_parse_error(error, "invalid token", token_offset);
+                return LexStatus::Error;
+        }
+    }
+
+private:
+    using Scanner = ScanStatus (*)(TokenReader &, bool, ParseError &, std::size_t, ScannedToken &);
+
+    [[nodiscard]] LexStatus single_char(TokenKind kind, const char *data, std::size_t &offset, Token &out) const {
+        out.kind = kind;
+        out.data = data + offset;
+        out.len = 1;
+        out.offset = stream_offset_ + offset;
+        offset += 1;
+        return LexStatus::Ok;
+    }
+
+    [[nodiscard]] LexStatus scan_current(const char *data, std::size_t len, std::size_t &offset, bool final,
+                                         std::size_t token_offset, Token &out, ParseError &error, Scanner scanner) {
+        std::size_t start = offset;
+        TokenReader reader(nullptr, data + start, len - start, nullptr);
+        ScannedToken scanned;
+        ScanStatus status = scanner(reader, final, error, token_offset, scanned);
+        if (status == ScanStatus::NeedMore) {
+            partial_.assign(data + start, len - start);
+            partial_offset_ = token_offset;
+            offset = len;
+            return LexStatus::NeedMore;
+        }
+        if (status == ScanStatus::Error) {
+            offset = start + reader.input_consumed();
+            return LexStatus::Error;
+        }
+        out.kind = scanned.kind;
+        out.data = data + start + scanned.data_offset;
+        out.len = scanned.data_len;
+        out.offset = token_offset;
+        offset = start + scanned.token_len;
+        return LexStatus::Ok;
+    }
+
+    [[nodiscard]] LexStatus scan_current_literal(const char *data, std::size_t len, std::size_t &offset, bool final,
+                                                 std::size_t token_offset, const char *literal, TokenKind kind,
+                                                 Token &out, ParseError &error) {
+        std::size_t start = offset;
+        TokenReader reader(nullptr, data + start, len - start, nullptr);
+        ScannedToken scanned;
+        ScanStatus status = scan_literal(reader, final, literal, kind, error, token_offset, scanned);
+        if (status == ScanStatus::NeedMore) {
+            partial_.assign(data + start, len - start);
+            partial_offset_ = token_offset;
+            offset = len;
+            return LexStatus::NeedMore;
+        }
+        if (status == ScanStatus::Error) {
+            offset = start + reader.input_consumed();
+            return LexStatus::Error;
+        }
+        out.kind = scanned.kind;
+        out.data = data + start + scanned.data_offset;
+        out.len = scanned.data_len;
+        out.offset = token_offset;
+        offset = start + scanned.token_len;
+        return LexStatus::Ok;
+    }
+
+    [[nodiscard]] LexStatus continue_partial(const char *data, std::size_t len, std::size_t &offset, bool final,
+                                             Token &out, ParseError &error) {
+        TokenReader reader(&partial_, data + offset, len - offset, &token_storage_);
+        ScannedToken scanned;
+        ScanStatus status = ScanStatus::Error;
+        unsigned char first = static_cast<unsigned char>(partial_[0]);
+        if (first == '"') {
+            status = scan_string(reader, final, error, partial_offset_, scanned);
+        } else if (first == 't') {
+            status = scan_literal(reader, final, "true", TokenKind::Bool, error, partial_offset_, scanned);
+        } else if (first == 'f') {
+            status = scan_literal(reader, final, "false", TokenKind::Bool, error, partial_offset_, scanned);
+        } else if (first == 'n') {
+            status = scan_literal(reader, final, "null", TokenKind::Null, error, partial_offset_, scanned);
+        } else {
+            status = scan_number(reader, final, error, partial_offset_, scanned);
+        }
+
+        offset += reader.input_consumed();
+        if (status == ScanStatus::NeedMore) {
+            partial_ = token_storage_;
+            token_storage_.clear();
+            return LexStatus::NeedMore;
+        }
+        if (status == ScanStatus::Error) {
+            return LexStatus::Error;
+        }
+
+        out.kind = scanned.kind;
+        out.data = token_storage_.data() + scanned.data_offset;
+        out.len = scanned.data_len;
+        out.offset = partial_offset_;
+        partial_.clear();
+        partial_offset_ = 0;
+        return LexStatus::Ok;
+    }
+
+    std::size_t stream_offset_ = 0;
+    std::size_t partial_offset_ = 0;
+    std::string partial_;
+    std::string token_storage_;
+};
+
+Utf8Result decode_utf8_codepoint(const char *data, std::size_t len, std::size_t &pos, std::uint32_t &codepoint,
+                                 ParseError &error, std::size_t offset_base) {
+    if (pos >= len) {
         set_parse_error(error, "invalid utf-8 sequence", offset_base + pos);
-        return Utf8DecodeResult::Error;
+        return Utf8Result::Error;
     }
     unsigned char ch = static_cast<unsigned char>(data[pos]);
     if (ch < 0x80) {
         codepoint = ch;
         pos += 1;
-        return Utf8DecodeResult::Ok;
+        return Utf8Result::Ok;
     }
+
     int needed = 0;
     std::uint32_t code = 0;
     std::uint32_t min_value = 0;
@@ -100,30 +662,142 @@ Utf8DecodeResult decode_utf8_codepoint(const char *data, std::size_t len, std::s
         min_value = 0x10000;
     } else {
         set_parse_error(error, "invalid utf-8 sequence", offset_base + pos);
-        return Utf8DecodeResult::Error;
+        return Utf8Result::Error;
     }
     if (pos + static_cast<std::size_t>(needed) >= len) {
-        if (!final) {
-            return Utf8DecodeResult::NeedMore;
-        }
         set_parse_error(error, "invalid utf-8 sequence", offset_base + pos);
-        return Utf8DecodeResult::Error;
+        return Utf8Result::Error;
     }
     for (int idx = 1; idx <= needed; ++idx) {
         unsigned char next = static_cast<unsigned char>(data[pos + idx]);
         if ((next & 0xC0) != 0x80) {
             set_parse_error(error, "invalid utf-8 sequence", offset_base + pos + idx);
-            return Utf8DecodeResult::Error;
+            return Utf8Result::Error;
         }
         code = (code << 6) | (next & 0x3F);
     }
     if (code < min_value || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) {
         set_parse_error(error, "invalid utf-8 sequence", offset_base + pos);
-        return Utf8DecodeResult::Error;
+        return Utf8Result::Error;
     }
-    codepoint = code;
     pos += static_cast<std::size_t>(needed) + 1;
-    return Utf8DecodeResult::Ok;
+    codepoint = code;
+    return Utf8Result::Ok;
+}
+
+bool decode_raw_string(const char *data, std::size_t len, DecodedString &out, ParseError &error, std::size_t offset) {
+    out.clear();
+    std::size_t pos = 0;
+    while (pos < len) {
+        std::uint32_t codepoint = 0;
+        if (decode_utf8_codepoint(data, len, pos, codepoint, error, offset) != Utf8Result::Ok) {
+            return false;
+        }
+        if (codepoint < 0x20) {
+            return set_parse_error(error, "invalid control character in string", offset + pos);
+        }
+        append_codepoint(out, codepoint);
+    }
+    return true;
+}
+
+bool decode_escaped_string(const char *data, std::size_t len, DecodedString &out, ParseError &error,
+                           std::size_t offset) {
+    out.clear();
+    std::size_t pos = 0;
+    while (pos < len) {
+        unsigned char ch = static_cast<unsigned char>(data[pos]);
+        if (ch == '\\') {
+            pos += 1;
+            if (pos >= len) {
+                return set_parse_error(error, "unterminated escape sequence", offset + pos);
+            }
+            char esc = data[pos++];
+            switch (esc) {
+                case '"':
+                    append_code_unit(out, '"');
+                    break;
+                case '\\':
+                    append_code_unit(out, '\\');
+                    break;
+                case '/':
+                    append_code_unit(out, '/');
+                    break;
+                case 'b':
+                    append_code_unit(out, '\b');
+                    break;
+                case 'f':
+                    append_code_unit(out, '\f');
+                    break;
+                case 'n':
+                    append_code_unit(out, '\n');
+                    break;
+                case 'r':
+                    append_code_unit(out, '\r');
+                    break;
+                case 't':
+                    append_code_unit(out, '\t');
+                    break;
+                case 'u': {
+                    if (pos + 4 > len) {
+                        return set_parse_error(error, "invalid unicode escape", offset + pos);
+                    }
+                    std::uint32_t code = 0;
+                    for (int idx = 0; idx < 4; ++idx) {
+                        int digit = hex_value(data[pos + idx]);
+                        if (digit < 0) {
+                            return set_parse_error(error, "invalid unicode escape", offset + pos + idx);
+                        }
+                        code = (code << 4) | static_cast<std::uint32_t>(digit);
+                    }
+                    pos += 4;
+                    if (code >= 0xD800 && code <= 0xDBFF) {
+                        if (pos + 6 > len || data[pos] != '\\' || data[pos + 1] != 'u') {
+                            return set_parse_error(error, "invalid unicode surrogate pair", offset + pos);
+                        }
+                        pos += 2;
+                        std::uint32_t low = 0;
+                        for (int idx = 0; idx < 4; ++idx) {
+                            int digit = hex_value(data[pos + idx]);
+                            if (digit < 0) {
+                                return set_parse_error(error, "invalid unicode escape", offset + pos + idx);
+                            }
+                            low = (low << 4) | static_cast<std::uint32_t>(digit);
+                        }
+                        pos += 4;
+                        if (low < 0xDC00 || low > 0xDFFF) {
+                            return set_parse_error(error, "invalid unicode surrogate pair", offset + pos);
+                        }
+                        code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+                        return set_parse_error(error, "invalid unicode surrogate pair", offset + pos);
+                    }
+                    append_codepoint(out, code);
+                    break;
+                }
+                default:
+                    return set_parse_error(error, "invalid escape sequence", offset + pos - 1);
+            }
+            continue;
+        }
+        if (ch < 0x20) {
+            return set_parse_error(error, "invalid control character in string", offset + pos);
+        }
+        std::uint32_t codepoint = 0;
+        if (decode_utf8_codepoint(data, len, pos, codepoint, error, offset) != Utf8Result::Ok) {
+            return false;
+        }
+        append_codepoint(out, codepoint);
+    }
+    return true;
+}
+
+bool decode_json_string(TokenKind kind, const char *data, std::size_t len, DecodedString &out, ParseError &error,
+                        std::size_t offset) {
+    if (kind == TokenKind::StringEscaped) {
+        return decode_escaped_string(data, len, out, error, offset);
+    }
+    return decode_raw_string(data, len, out, error, offset);
 }
 
 GcString *make_gc_string(GcHeap &heap, const DecodedString &decoded) {
@@ -133,819 +807,427 @@ GcString *make_gc_string(GcHeap &heap, const DecodedString &decoded) {
     return gc_new_string_utf16(&heap, decoded.u16.data(), decoded.u16.size());
 }
 
-bool ensure_array_capacity(GcHeap &heap, GcArray *arr, std::size_t needed) {
-    if (needed <= arr->capacity) {
-        return true;
-    }
-    std::size_t new_capacity = arr->capacity ? arr->capacity * 2 : kInitialContainerCapacity;
-    while (new_capacity < needed) {
-        new_capacity *= 2;
-    }
-    auto *new_elems = static_cast<JsValue *>(heap.alloc.alloc(sizeof(JsValue) * new_capacity));
-    if (!new_elems) {
-        return false;
-    }
-    for (std::size_t i = 0; i < new_capacity; ++i) {
-        std::construct_at(&new_elems[i]);
-    }
-    for (std::size_t i = 0; i < arr->size; ++i) {
-        new_elems[i] = std::move(arr->elems[i]);
-    }
-    if (arr->elems) {
-        for (std::size_t i = 0; i < arr->capacity; ++i) {
-            std::destroy_at(&arr->elems[i]);
-        }
-        heap.alloc.free(arr->elems);
-    }
-    arr->elems = new_elems;
-    arr->capacity = new_capacity;
-    return true;
-}
-
-bool set_parse_error(ParseError &error, const char *message, std::size_t offset) {
-    if (error.message.empty()) {
-        error.message = message;
-        error.offset = offset;
-    }
-    return false;
-}
-
-bool is_ws(char ch) { return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'; }
-
-enum class TokenType {
-    End,
-    String,
-    Number,
-    True,
-    False,
-    Null,
-    LeftBrace,
-    RightBrace,
-    LeftBracket,
-    RightBracket,
-    Colon,
-    Comma,
-};
-
-enum class LexResult {
-    Ok,
-    NeedMore,
-    Error,
-};
-
-struct LexToken {
-    TokenType type = TokenType::End;
-    DecodedString text;
-    JsValue value;
-    std::size_t offset = 0;
-    std::size_t end = 0;
-};
-
-bool is_delimiter(char ch) { return is_ws(ch) || ch == ',' || ch == ']' || ch == '}' || ch == ':'; }
-
-LexResult lex_string(const std::string &buffer, std::size_t start, bool final, LexToken &out, ParseError &error,
-                     std::size_t total_offset) {
-    std::size_t i = start + 1;
-    DecodedString decoded;
-    while (i < buffer.size()) {
-        unsigned char ch = static_cast<unsigned char>(buffer[i]);
-        if (ch == '\"') {
-            out.type = TokenType::String;
-            out.text = std::move(decoded);
-            out.offset = total_offset + start;
-            out.end = i + 1;
-            return LexResult::Ok;
-        }
-        if (ch == '\\') {
-            if (i + 1 >= buffer.size()) {
-                if (!final) {
-                    return LexResult::NeedMore;
-                }
-                set_parse_error(error, "unterminated escape sequence", total_offset + i);
-                return LexResult::Error;
-            }
-            char esc = buffer[i + 1];
-            i += 2;
-            switch (esc) {
-                case '\"':
-                    append_code_unit(decoded, '\"');
-                    break;
-                case '\\':
-                    append_code_unit(decoded, '\\');
-                    break;
-                case '/':
-                    append_code_unit(decoded, '/');
-                    break;
-                case 'b':
-                    append_code_unit(decoded, '\b');
-                    break;
-                case 'f':
-                    append_code_unit(decoded, '\f');
-                    break;
-                case 'n':
-                    append_code_unit(decoded, '\n');
-                    break;
-                case 'r':
-                    append_code_unit(decoded, '\r');
-                    break;
-                case 't':
-                    append_code_unit(decoded, '\t');
-                    break;
-                case 'u': {
-                    if (i + 4 > buffer.size()) {
-                        if (!final) {
-                            return LexResult::NeedMore;
-                        }
-                        set_parse_error(error, "invalid unicode escape", total_offset + i);
-                        return LexResult::Error;
-                    }
-                    uint32_t code = 0;
-                    for (int idx = 0; idx < 4; ++idx) {
-                        int digit = hex_value(buffer[i + idx]);
-                        if (digit < 0) {
-                            set_parse_error(error, "invalid unicode escape", total_offset + i + idx);
-                            return LexResult::Error;
-                        }
-                        code = (code << 4) | static_cast<uint32_t>(digit);
-                    }
-                    i += 4;
-                    if (code >= 0xD800 && code <= 0xDBFF) {
-                        if (i + 5 >= buffer.size()) {
-                            if (!final) {
-                                return LexResult::NeedMore;
-                            }
-                            set_parse_error(error, "invalid unicode surrogate pair", total_offset + i);
-                            return LexResult::Error;
-                        }
-                        if (buffer[i] != '\\' || buffer[i + 1] != 'u') {
-                            set_parse_error(error, "invalid unicode surrogate pair", total_offset + i);
-                            return LexResult::Error;
-                        }
-                        i += 2;
-                        uint32_t low = 0;
-                        for (int idx = 0; idx < 4; ++idx) {
-                            int digit = hex_value(buffer[i + idx]);
-                            if (digit < 0) {
-                                set_parse_error(error, "invalid unicode escape", total_offset + i + idx);
-                                return LexResult::Error;
-                            }
-                            low = (low << 4) | static_cast<uint32_t>(digit);
-                        }
-                        i += 4;
-                        if (low < 0xDC00 || low > 0xDFFF) {
-                            set_parse_error(error, "invalid unicode surrogate pair", total_offset + i);
-                            return LexResult::Error;
-                        }
-                        code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
-                    } else if (code >= 0xDC00 && code <= 0xDFFF) {
-                        set_parse_error(error, "invalid unicode surrogate pair", total_offset + i);
-                        return LexResult::Error;
-                    }
-                    if (code > 0x10FFFF) {
-                        set_parse_error(error, "invalid unicode codepoint", total_offset + i);
-                        return LexResult::Error;
-                    }
-                    append_codepoint(decoded, code);
-                    break;
-                }
-                default:
-                    set_parse_error(error, "invalid escape sequence", total_offset + i - 2);
-                    return LexResult::Error;
-            }
-            continue;
-        }
-        if (ch < 0x20) {
-            set_parse_error(error, "invalid control character in string", total_offset + i);
-            return LexResult::Error;
-        }
-        std::size_t cursor = i;
-        std::uint32_t codepoint = 0;
-        Utf8DecodeResult result =
-                decode_utf8_codepoint(buffer.data(), buffer.size(), cursor, final, codepoint, error, total_offset);
-        if (result == Utf8DecodeResult::NeedMore) {
-            return LexResult::NeedMore;
-        }
-        if (result == Utf8DecodeResult::Error) {
-            return LexResult::Error;
-        }
-        if (codepoint < 0x20) {
-            set_parse_error(error, "invalid control character in string", total_offset + i);
-            return LexResult::Error;
-        }
-        append_codepoint(decoded, codepoint);
-        i = cursor;
-        continue;
-    }
-    if (!final) {
-        return LexResult::NeedMore;
-    }
-    set_parse_error(error, "unterminated string", total_offset + buffer.size());
-    return LexResult::Error;
-}
-
-LexResult lex_literal(const std::string &buffer, std::size_t start, bool final, const char *literal, TokenType type,
-                      LexToken &out, ParseError &error, std::size_t total_offset) {
-    std::size_t len = std::strlen(literal);
-    if (start + len > buffer.size()) {
-        if (!final) {
-            return LexResult::NeedMore;
-        }
-        set_parse_error(error, "invalid literal", total_offset + start);
-        return LexResult::Error;
-    }
-    for (std::size_t i = 0; i < len; ++i) {
-        if (buffer[start + i] != literal[i]) {
-            set_parse_error(error, "invalid literal", total_offset + start + i);
-            return LexResult::Error;
-        }
-    }
-    out.type = type;
-    out.offset = total_offset + start;
-    out.end = start + len;
-    return LexResult::Ok;
-}
-
-LexResult lex_number(const std::string &buffer, std::size_t start, bool final, LexToken &out, ParseError &error,
-                     std::size_t total_offset) {
-    std::size_t i = start;
-    bool is_float = false;
-    if (buffer[i] == '-') {
-        i += 1;
-        if (i >= buffer.size()) {
-            return final ? (set_parse_error(error, "invalid number", total_offset + start), LexResult::Error)
-                         : LexResult::NeedMore;
-        }
-    }
-    if (buffer[i] == '0') {
-        i += 1;
-        if (i < buffer.size() && buffer[i] >= '0' && buffer[i] <= '9') {
-            set_parse_error(error, "leading zero in number", total_offset + start);
-            return LexResult::Error;
-        }
-    } else if (buffer[i] >= '1' && buffer[i] <= '9') {
-        while (i < buffer.size() && buffer[i] >= '0' && buffer[i] <= '9') {
-            i += 1;
-        }
-    } else {
-        set_parse_error(error, "invalid number", total_offset + start);
-        return LexResult::Error;
-    }
-    if (i < buffer.size() && buffer[i] == '.') {
-        is_float = true;
-        i += 1;
-        if (i >= buffer.size()) {
-            return final ? (set_parse_error(error, "invalid number", total_offset + start), LexResult::Error)
-                         : LexResult::NeedMore;
-        }
-        if (buffer[i] < '0' || buffer[i] > '9') {
-            set_parse_error(error, "invalid number", total_offset + start);
-            return LexResult::Error;
-        }
-        while (i < buffer.size() && buffer[i] >= '0' && buffer[i] <= '9') {
-            i += 1;
-        }
-    }
-    if (i < buffer.size() && (buffer[i] == 'e' || buffer[i] == 'E')) {
-        is_float = true;
-        i += 1;
-        if (i >= buffer.size()) {
-            return final ? (set_parse_error(error, "invalid number", total_offset + start), LexResult::Error)
-                         : LexResult::NeedMore;
-        }
-        if (buffer[i] == '+' || buffer[i] == '-') {
-            i += 1;
-            if (i >= buffer.size()) {
-                return final ? (set_parse_error(error, "invalid number", total_offset + start), LexResult::Error)
-                             : LexResult::NeedMore;
-            }
-        }
-        if (buffer[i] < '0' || buffer[i] > '9') {
-            set_parse_error(error, "invalid number", total_offset + start);
-            return LexResult::Error;
-        }
-        while (i < buffer.size() && buffer[i] >= '0' && buffer[i] <= '9') {
-            i += 1;
-        }
-    }
-    if (i == buffer.size()) {
-        if (!final) {
-            return LexResult::NeedMore;
-        }
-    } else if (!is_delimiter(buffer[i])) {
-        set_parse_error(error, "invalid number", total_offset + start);
-        return LexResult::Error;
-    }
-    const char *num_start = buffer.data() + start;
-    const char *num_end = buffer.data() + i;
-    if (is_float) {
-        std::string number(num_start, num_end);
-        errno = 0;
-        char *end_ptr = nullptr;
-        double value = std::strtod(number.c_str(), &end_ptr);
-        if (errno == ERANGE) {
-            set_parse_error(error, "floating point overflow", total_offset + start);
-            return LexResult::Error;
-        }
-        if (end_ptr != number.c_str() + number.size()) {
-            set_parse_error(error, "invalid number", total_offset + start);
-            return LexResult::Error;
-        }
-        out.type = TokenType::Number;
-        out.value = JsValue::make_float(value);
-    } else {
-        int64_t value = 0;
-        auto result = std::from_chars(num_start, num_end, value);
-        if (result.ec == std::errc::result_out_of_range) {
-            set_parse_error(error, "integer overflow", total_offset + start);
-            return LexResult::Error;
-        }
-        if (result.ec != std::errc()) {
-            set_parse_error(error, "invalid number", total_offset + start);
-            return LexResult::Error;
-        }
-        out.type = TokenType::Number;
-        out.value = JsValue::make_integer(value);
-    }
-    out.offset = total_offset + start;
-    out.end = i;
-    return LexResult::Ok;
-}
-
-LexResult lex_token(const std::string &buffer, std::size_t &pos, bool final, LexToken &out, ParseError &error,
-                    std::size_t total_offset) {
-    std::size_t i = pos;
-    while (i < buffer.size() && is_ws(buffer[i])) {
-        i += 1;
-    }
-    pos = i;
-    if (i >= buffer.size()) {
-        if (final) {
-            out.type = TokenType::End;
-            out.offset = total_offset + i;
-            return LexResult::Ok;
-        }
-        return LexResult::NeedMore;
-    }
-    char ch = buffer[i];
-    switch (ch) {
-        case '{':
-            out.type = TokenType::LeftBrace;
-            out.offset = total_offset + i;
-            out.end = i + 1;
-            pos = out.end;
-            return LexResult::Ok;
-        case '}':
-            out.type = TokenType::RightBrace;
-            out.offset = total_offset + i;
-            out.end = i + 1;
-            pos = out.end;
-            return LexResult::Ok;
-        case '[':
-            out.type = TokenType::LeftBracket;
-            out.offset = total_offset + i;
-            out.end = i + 1;
-            pos = out.end;
-            return LexResult::Ok;
-        case ']':
-            out.type = TokenType::RightBracket;
-            out.offset = total_offset + i;
-            out.end = i + 1;
-            pos = out.end;
-            return LexResult::Ok;
-        case ':':
-            out.type = TokenType::Colon;
-            out.offset = total_offset + i;
-            out.end = i + 1;
-            pos = out.end;
-            return LexResult::Ok;
-        case ',':
-            out.type = TokenType::Comma;
-            out.offset = total_offset + i;
-            out.end = i + 1;
-            pos = out.end;
-            return LexResult::Ok;
-        case '\"': {
-            LexResult result = lex_string(buffer, i, final, out, error, total_offset);
-            if (result == LexResult::Ok) {
-                pos = out.end;
-            }
-            return result;
-        }
-        case 't': {
-            LexResult result = lex_literal(buffer, i, final, "true", TokenType::True, out, error, total_offset);
-            if (result == LexResult::Ok) {
-                pos = out.end;
-            }
-            return result;
-        }
-        case 'f': {
-            LexResult result = lex_literal(buffer, i, final, "false", TokenType::False, out, error, total_offset);
-            if (result == LexResult::Ok) {
-                pos = out.end;
-            }
-            return result;
-        }
-        case 'n': {
-            LexResult result = lex_literal(buffer, i, final, "null", TokenType::Null, out, error, total_offset);
-            if (result == LexResult::Ok) {
-                pos = out.end;
-            }
-            return result;
-        }
-        default:
-            if (ch == '-' || (ch >= '0' && ch <= '9')) {
-                LexResult result = lex_number(buffer, i, final, out, error, total_offset);
-                if (result == LexResult::Ok) {
-                    pos = out.end;
-                }
-                return result;
-            }
-            set_parse_error(error, "invalid token", total_offset + i);
-            return LexResult::Error;
-    }
-}
-
-class ParserImpl {
+class JsonEventSink {
 public:
-    ParserImpl(GcHeap &heap, ParseError &error, const char *data, std::size_t len) :
-        heap_(heap), error_(error), data_(data), len_(len) {}
+    virtual ~JsonEventSink() = default;
+    [[nodiscard]] virtual bool null_value(std::size_t offset) = 0;
+    [[nodiscard]] virtual bool bool_value(bool value, std::size_t offset) = 0;
+    [[nodiscard]] virtual bool number_value(TokenKind kind, const char *data, std::size_t len, std::size_t offset) = 0;
+    [[nodiscard]] virtual bool string_value(TokenKind kind, const char *data, std::size_t len, std::size_t offset) = 0;
+    [[nodiscard]] virtual bool object_key(TokenKind kind, const char *data, std::size_t len, std::size_t offset) = 0;
+    [[nodiscard]] virtual bool start_object(std::size_t offset) = 0;
+    [[nodiscard]] virtual bool end_object(std::size_t offset) = 0;
+    [[nodiscard]] virtual bool start_array(std::size_t offset) = 0;
+    [[nodiscard]] virtual bool end_array(std::size_t offset) = 0;
+};
 
-    bool parse(JsValue &out) {
-        skip_ws();
-        if (!parse_value(out)) {
+class JsValueSink final : public JsonEventSink {
+public:
+    JsValueSink(GcHeap &heap, ParseError &error) : heap_(heap), error_(error) {}
+
+    void reset() {
+        root_ = JsValue();
+        has_result_ = false;
+        containers_.clear();
+    }
+
+    [[nodiscard]] const JsValue &root() const { return root_; }
+    [[nodiscard]] bool has_result() const { return has_result_; }
+
+    [[nodiscard]] bool null_value(std::size_t offset) override { return add_value(JsValue::make_null(), offset); }
+
+    [[nodiscard]] bool bool_value(bool value, std::size_t offset) override {
+        return add_value(JsValue::make_boolean(value), offset);
+    }
+
+    [[nodiscard]] bool number_value(TokenKind kind, const char *data, std::size_t len, std::size_t offset) override {
+        if (kind == TokenKind::Integer) {
+            std::int64_t value = 0;
+            auto result = std::from_chars(data, data + len, value);
+            if (result.ec == std::errc::result_out_of_range) {
+                return set_parse_error(error_, "integer overflow", offset);
+            }
+            if (result.ec != std::errc() || result.ptr != data + len) {
+                return set_parse_error(error_, "invalid number", offset);
+            }
+            return add_value(JsValue::make_integer(value), offset);
+        }
+
+        double value = 0.0;
+        auto result = std::from_chars(data, data + len, value);
+        if (result.ec == std::errc::result_out_of_range || !std::isfinite(value)) {
+            return set_parse_error(error_, "floating point overflow", offset);
+        }
+        if (result.ec != std::errc() || result.ptr != data + len) {
+            return set_parse_error(error_, "invalid number", offset);
+        }
+        return add_value(JsValue::make_float(value), offset);
+    }
+
+    [[nodiscard]] bool string_value(TokenKind kind, const char *data, std::size_t len, std::size_t offset) override {
+        DecodedString decoded;
+        if (!decode_json_string(kind, data, len, decoded, error_, offset)) {
             return false;
         }
-        skip_ws();
-        if (pos_ != len_) {
-            return set_error("trailing characters after JSON value", pos_);
+        GcString *str = make_gc_string(heap_, decoded);
+        if (!str) {
+            return set_parse_error(error_, "out of memory", offset);
         }
+        return add_value(js_make_heap_ref(&str->hdr, JsHeapKind::String), offset);
+    }
+
+    [[nodiscard]] bool object_key(TokenKind kind, const char *data, std::size_t len, std::size_t offset) override {
+        if (containers_.empty() || containers_.back().type != JsNodeType::Object) {
+            return set_parse_error(error_, "invalid object state", offset);
+        }
+        ContainerFrame &frame = containers_.back();
+        if (frame.has_key) {
+            return set_parse_error(error_, "object key already pending", offset);
+        }
+        if (!decode_json_string(kind, data, len, frame.key, error_, offset)) {
+            return false;
+        }
+        frame.has_key = true;
+        return true;
+    }
+
+    [[nodiscard]] bool start_object(std::size_t offset) override {
+        GcObject *obj = gc_new_object(&heap_, kInitialContainerCapacity);
+        if (!obj) {
+            return set_parse_error(error_, "out of memory", offset);
+        }
+        if (!add_value(js_make_heap_ref(&obj->hdr, JsHeapKind::Object), offset)) {
+            return false;
+        }
+        ContainerFrame frame;
+        frame.type = JsNodeType::Object;
+        frame.object = obj;
+        containers_.push_back(std::move(frame));
+        return true;
+    }
+
+    [[nodiscard]] bool end_object(std::size_t offset) override {
+        if (containers_.empty() || containers_.back().type != JsNodeType::Object) {
+            return set_parse_error(error_, "mismatched object close", offset);
+        }
+        if (containers_.back().has_key) {
+            return set_parse_error(error_, "object key missing value", offset);
+        }
+        containers_.pop_back();
+        return true;
+    }
+
+    [[nodiscard]] bool start_array(std::size_t offset) override {
+        GcArray *arr = gc_new_array(&heap_, kInitialContainerCapacity);
+        if (!arr) {
+            return set_parse_error(error_, "out of memory", offset);
+        }
+        if (!add_value(js_make_heap_ref(&arr->hdr, JsHeapKind::Array), offset)) {
+            return false;
+        }
+        ContainerFrame frame;
+        frame.type = JsNodeType::Array;
+        frame.array = arr;
+        containers_.push_back(std::move(frame));
+        return true;
+    }
+
+    [[nodiscard]] bool end_array(std::size_t offset) override {
+        if (containers_.empty() || containers_.back().type != JsNodeType::Array) {
+            return set_parse_error(error_, "mismatched array close", offset);
+        }
+        containers_.pop_back();
         return true;
     }
 
 private:
-    bool parse_value(JsValue &out) {
-        skip_ws();
-        if (pos_ >= len_) {
-            return set_error("unexpected end of input", pos_);
-        }
-        char ch = data_[pos_];
-        if (ch == '\"') {
-            DecodedString value;
-            if (!parse_string(value)) {
-                return false;
+    struct ContainerFrame {
+        JsNodeType type = JsNodeType::Undefined;
+        GcArray *array = nullptr;
+        GcObject *object = nullptr;
+        DecodedString key;
+        bool has_key = false;
+    };
+
+    [[nodiscard]] bool add_value(JsValue value, std::size_t offset) {
+        if (containers_.empty()) {
+            if (has_result_) {
+                return set_parse_error(error_, "multiple top-level values", offset);
             }
-            GcString *str = make_gc_string(heap_, value);
-            if (!str) {
-                return set_error("out of memory", pos_);
-            }
-            out = js_make_heap_ref(&str->hdr, JsHeapKind::String);
+            root_ = std::move(value);
+            has_result_ = true;
             return true;
         }
-        if (ch == '{') {
-            return parse_object(out);
-        }
-        if (ch == '[') {
-            return parse_array(out);
-        }
-        if (ch == 't') {
-            return parse_literal("true", out, JsValue::make_boolean(true));
-        }
-        if (ch == 'f') {
-            return parse_literal("false", out, JsValue::make_boolean(false));
-        }
-        if (ch == 'n') {
-            return parse_literal("null", out, JsValue::make_null());
-        }
-        if (ch == '-' || (ch >= '0' && ch <= '9')) {
-            return parse_number(out);
-        }
-        return set_error("invalid token", pos_);
-    }
 
-    bool parse_object(JsValue &out) {
-        if (data_[pos_] != '{') {
-            return set_error("expected '{'", pos_);
-        }
-        pos_ += 1;
-        skip_ws();
-        GcObject *obj = gc_new_object(&heap_, kInitialContainerCapacity);
-        if (!obj) {
-            return set_error("out of memory", pos_);
-        }
-        out = js_make_heap_ref(&obj->hdr, JsHeapKind::Object);
-        if (pos_ < len_ && data_[pos_] == '}') {
-            pos_ += 1;
+        ContainerFrame &frame = containers_.back();
+        if (frame.type == JsNodeType::Array) {
+            if (!gc_array_push(&heap_, frame.array, std::move(value))) {
+                return set_parse_error(error_, "out of memory", offset);
+            }
             return true;
         }
-        while (true) {
-            skip_ws();
-            if (pos_ >= len_) {
-                return set_error("unexpected end of input", pos_);
+        if (frame.type == JsNodeType::Object) {
+            if (!frame.has_key) {
+                return set_parse_error(error_, "object value missing key", offset);
             }
-            if (data_[pos_] != '\"') {
-                return set_error("object key must be a string", pos_);
+            GcString *key = make_gc_string(heap_, frame.key);
+            if (!key) {
+                return set_parse_error(error_, "out of memory", offset);
             }
-            DecodedString key;
-            if (!parse_string(key)) {
-                return false;
+            if (!gc_object_set(&heap_, frame.object, key, std::move(value))) {
+                return set_parse_error(error_, "out of memory", offset);
             }
-            skip_ws();
-            if (pos_ >= len_ || data_[pos_] != ':') {
-                return set_error("expected ':' after object key", pos_);
-            }
-            pos_ += 1;
-            JsValue value;
-            if (!parse_value(value)) {
-                return false;
-            }
-            GcString *key_str = make_gc_string(heap_, key);
-            if (!key_str) {
-                return set_error("out of memory", pos_);
-            }
-            if (!gc_object_set(&heap_, obj, key_str, std::move(value))) {
-                return set_error("out of memory", pos_);
-            }
-            skip_ws();
-            if (pos_ >= len_) {
-                return set_error("unexpected end of input", pos_);
-            }
-            if (data_[pos_] == ',') {
-                pos_ += 1;
-                continue;
-            }
-            if (data_[pos_] == '}') {
-                pos_ += 1;
-                return true;
-            }
-            return set_error("expected ',' or '}' after object value", pos_);
-        }
-    }
-
-    bool parse_array(JsValue &out) {
-        if (data_[pos_] != '[') {
-            return set_error("expected '['", pos_);
-        }
-        pos_ += 1;
-        skip_ws();
-        GcArray *arr = gc_new_array(&heap_, kInitialContainerCapacity);
-        if (!arr) {
-            return set_error("out of memory", pos_);
-        }
-        out = js_make_heap_ref(&arr->hdr, JsHeapKind::Array);
-        if (pos_ < len_ && data_[pos_] == ']') {
-            pos_ += 1;
+            frame.key.clear();
+            frame.has_key = false;
             return true;
         }
-        while (true) {
-            JsValue value;
-            if (!parse_value(value)) {
-                return false;
-            }
-            if (!ensure_array_capacity(heap_, arr, arr->size + 1)) {
-                return set_error("out of memory", pos_);
-            }
-            arr->elems[arr->size] = std::move(value);
-            arr->size += 1;
-            arr->version += 1;
-            skip_ws();
-            if (pos_ >= len_) {
-                return set_error("unexpected end of input", pos_);
-            }
-            if (data_[pos_] == ',') {
-                pos_ += 1;
-                continue;
-            }
-            if (data_[pos_] == ']') {
-                pos_ += 1;
-                return true;
-            }
-            return set_error("expected ',' or ']' after array value", pos_);
-        }
-    }
-
-    bool parse_string(DecodedString &out) {
-        if (data_[pos_] != '\"') {
-            return set_error("expected string", pos_);
-        }
-        pos_ += 1;
-        out.clear();
-        while (pos_ < len_) {
-            unsigned char ch = static_cast<unsigned char>(data_[pos_]);
-            if (ch == '\"') {
-                pos_ += 1;
-                return true;
-            }
-            if (ch == '\\') {
-                pos_ += 1;
-                if (pos_ >= len_) {
-                    return set_error("unterminated escape sequence", pos_);
-                }
-                char esc = data_[pos_];
-                pos_ += 1;
-                switch (esc) {
-                    case '\"':
-                        append_code_unit(out, '\"');
-                        break;
-                    case '\\':
-                        append_code_unit(out, '\\');
-                        break;
-                    case '/':
-                        append_code_unit(out, '/');
-                        break;
-                    case 'b':
-                        append_code_unit(out, '\b');
-                        break;
-                    case 'f':
-                        append_code_unit(out, '\f');
-                        break;
-                    case 'n':
-                        append_code_unit(out, '\n');
-                        break;
-                    case 'r':
-                        append_code_unit(out, '\r');
-                        break;
-                    case 't':
-                        append_code_unit(out, '\t');
-                        break;
-                    case 'u': {
-                        uint32_t code = 0;
-                        if (!parse_hex(code)) {
-                            return false;
-                        }
-                        if (code >= 0xD800 && code <= 0xDBFF) {
-                            if (pos_ + 1 >= len_ || data_[pos_] != '\\' || data_[pos_ + 1] != 'u') {
-                                return set_error("invalid unicode surrogate pair", pos_);
-                            }
-                            pos_ += 2;
-                            uint32_t low = 0;
-                            if (!parse_hex(low)) {
-                                return false;
-                            }
-                            if (low < 0xDC00 || low > 0xDFFF) {
-                                return set_error("invalid unicode surrogate pair", pos_);
-                            }
-                            code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
-                        } else if (code >= 0xDC00 && code <= 0xDFFF) {
-                            return set_error("invalid unicode surrogate pair", pos_);
-                        }
-                        if (code > 0x10FFFF) {
-                            return set_error("invalid unicode codepoint", pos_);
-                        }
-                        append_codepoint(out, code);
-                        break;
-                    }
-                    default:
-                        return set_error("invalid escape sequence", pos_ - 1);
-                }
-                continue;
-            }
-            if (ch < 0x20) {
-                return set_error("invalid control character in string", pos_);
-            }
-            std::size_t cursor = pos_;
-            std::uint32_t codepoint = 0;
-            Utf8DecodeResult result = decode_utf8_codepoint(data_, len_, cursor, true, codepoint, error_, 0);
-            if (result == Utf8DecodeResult::Error) {
-                return false;
-            }
-            if (codepoint < 0x20) {
-                return set_error("invalid control character in string", pos_);
-            }
-            append_codepoint(out, codepoint);
-            pos_ = cursor;
-        }
-        return set_error("unterminated string", pos_);
-    }
-
-    bool parse_number(JsValue &out) {
-        std::size_t start = pos_;
-        bool is_float = false;
-        if (data_[pos_] == '-') {
-            pos_ += 1;
-            if (pos_ >= len_) {
-                return set_error("invalid number", start);
-            }
-        }
-        if (data_[pos_] == '0') {
-            pos_ += 1;
-            if (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9') {
-                return set_error("leading zero in number", start);
-            }
-        } else if (data_[pos_] >= '1' && data_[pos_] <= '9') {
-            while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9') {
-                pos_ += 1;
-            }
-        } else {
-            return set_error("invalid number", start);
-        }
-        if (pos_ < len_ && data_[pos_] == '.') {
-            is_float = true;
-            pos_ += 1;
-            if (pos_ >= len_ || data_[pos_] < '0' || data_[pos_] > '9') {
-                return set_error("invalid number", start);
-            }
-            while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9') {
-                pos_ += 1;
-            }
-        }
-        if (pos_ < len_ && (data_[pos_] == 'e' || data_[pos_] == 'E')) {
-            is_float = true;
-            pos_ += 1;
-            if (pos_ < len_ && (data_[pos_] == '+' || data_[pos_] == '-')) {
-                pos_ += 1;
-            }
-            if (pos_ >= len_ || data_[pos_] < '0' || data_[pos_] > '9') {
-                return set_error("invalid number", start);
-            }
-            while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9') {
-                pos_ += 1;
-            }
-        }
-        const char *num_start = data_ + start;
-        const char *num_end = data_ + pos_;
-        if (is_float) {
-            std::string number(num_start, num_end);
-            errno = 0;
-            char *end_ptr = nullptr;
-            double value = std::strtod(number.c_str(), &end_ptr);
-            if (errno == ERANGE) {
-                return set_error("floating point overflow", start);
-            }
-            if (end_ptr != number.c_str() + number.size()) {
-                return set_error("invalid number", start);
-            }
-            out = JsValue::make_float(value);
-            return true;
-        }
-        int64_t value = 0;
-        auto result = std::from_chars(num_start, num_end, value);
-        if (result.ec == std::errc::result_out_of_range) {
-            return set_error("integer overflow", start);
-        }
-        if (result.ec != std::errc()) {
-            return set_error("invalid number", start);
-        }
-        out = JsValue::make_integer(value);
-        return true;
-    }
-
-    bool parse_hex(uint32_t &out) {
-        if (pos_ + 4 > len_) {
-            return set_error("invalid unicode escape", pos_);
-        }
-        uint32_t value = 0;
-        for (int i = 0; i < 4; ++i) {
-            int digit = hex_value(data_[pos_ + i]);
-            if (digit < 0) {
-                return set_error("invalid unicode escape", pos_ + i);
-            }
-            value = (value << 4) | static_cast<uint32_t>(digit);
-        }
-        pos_ += 4;
-        out = value;
-        return true;
-    }
-
-    bool parse_literal(const char *literal, JsValue &out, const JsValue &value) {
-        const char *cursor = data_ + pos_;
-        for (const char *p = literal; *p != '\0'; ++p) {
-            if (cursor >= data_ + len_ || *cursor != *p) {
-                return set_error("invalid literal", pos_);
-            }
-            cursor += 1;
-        }
-        pos_ += static_cast<std::size_t>(cursor - (data_ + pos_));
-        out = value;
-        return true;
-    }
-
-    void skip_ws() {
-        while (pos_ < len_) {
-            char ch = data_[pos_];
-            if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
-                pos_ += 1;
-                continue;
-            }
-            break;
-        }
-    }
-
-    bool set_error(const char *message, std::size_t offset) {
-        if (error_.message.empty()) {
-            error_.message = message;
-            error_.offset = offset;
-        }
-        return false;
+        return set_parse_error(error_, "invalid container state", offset);
     }
 
     GcHeap &heap_;
     ParseError &error_;
-    const char *data_ = nullptr;
-    std::size_t len_ = 0;
-    std::size_t pos_ = 0;
+    JsValue root_;
+    bool has_result_ = false;
+    std::vector<ContainerFrame> containers_;
+};
+
+class JsonParserCore {
+public:
+    void reset() {
+        lexer_.reset();
+        state_stack_.clear();
+        state_stack_.push_back(ParseState::Start);
+    }
+
+    [[nodiscard]] StreamParser::Status parse(const char *data, std::size_t len, bool final, JsonEventSink &sink,
+                                             ParseError &error) {
+        std::size_t offset = 0;
+        while (true) {
+            Token tok;
+            LexStatus lex_status = lexer_.next(data, len, offset, final, tok, error);
+            if (lex_status == LexStatus::NeedMore) {
+                lexer_.finish_chunk(offset);
+                if (current_state() == ParseState::ParseComplete) {
+                    return StreamParser::Status::Complete;
+                }
+                return StreamParser::Status::NeedMore;
+            }
+            if (lex_status == LexStatus::Error) {
+                set_state(ParseState::ParseError);
+                return StreamParser::Status::Error;
+            }
+            if (tok.kind == TokenKind::Eof) {
+                lexer_.finish_chunk(offset);
+                if (current_state() == ParseState::ParseComplete) {
+                    return StreamParser::Status::Complete;
+                }
+                if (final) {
+                    set_parse_error(error, "premature EOF", tok.offset);
+                    set_state(ParseState::ParseError);
+                    return StreamParser::Status::Error;
+                }
+                return StreamParser::Status::NeedMore;
+            }
+            if (current_state() == ParseState::ParseComplete) {
+                set_parse_error(error, "trailing garbage after JSON value", tok.offset);
+                set_state(ParseState::ParseError);
+                return StreamParser::Status::Error;
+            }
+            if (!process_token(tok, sink, error)) {
+                set_state(ParseState::ParseError);
+                return StreamParser::Status::Error;
+            }
+        }
+    }
+
+private:
+    [[nodiscard]] ParseState current_state() const { return state_stack_.back(); }
+
+    void set_state(ParseState state) { state_stack_.back() = state; }
+
+    [[nodiscard]] bool can_accept_value() const {
+        ParseState state = current_state();
+        return state == ParseState::Start || state == ParseState::ObjectNeedVal || state == ParseState::ArrayNeedVal ||
+               state == ParseState::ArrayStart;
+    }
+
+    [[nodiscard]] bool mark_value_started(std::size_t offset, ParseError &error) {
+        switch (current_state()) {
+            case ParseState::Start:
+                set_state(ParseState::ParseComplete);
+                return true;
+            case ParseState::ObjectNeedVal:
+                set_state(ParseState::ObjectGotVal);
+                return true;
+            case ParseState::ArrayNeedVal:
+            case ParseState::ArrayStart:
+                set_state(ParseState::ArrayGotVal);
+                return true;
+            default:
+                return set_parse_error(error, "unexpected value", offset);
+        }
+    }
+
+    [[nodiscard]] bool finish_sink_event(bool ok, ParseError &error, std::size_t offset) const {
+        if (ok) {
+            return true;
+        }
+        return set_parse_error(error, "event sink rejected token", offset);
+    }
+
+    [[nodiscard]] bool process_value_token(const Token &tok, JsonEventSink &sink, ParseError &error) {
+        if (!can_accept_value()) {
+            return set_parse_error(error, "unexpected token", tok.offset);
+        }
+
+        switch (tok.kind) {
+            case TokenKind::Null:
+                if (!finish_sink_event(sink.null_value(tok.offset), error, tok.offset)) {
+                    return false;
+                }
+                return mark_value_started(tok.offset, error);
+            case TokenKind::Bool:
+                if (!finish_sink_event(sink.bool_value(tok.len > 0 && tok.data[0] == 't', tok.offset), error,
+                                       tok.offset)) {
+                    return false;
+                }
+                return mark_value_started(tok.offset, error);
+            case TokenKind::Integer:
+            case TokenKind::Double:
+                if (!finish_sink_event(sink.number_value(tok.kind, tok.data, tok.len, tok.offset), error, tok.offset)) {
+                    return false;
+                }
+                return mark_value_started(tok.offset, error);
+            case TokenKind::String:
+            case TokenKind::StringEscaped:
+                if (!finish_sink_event(sink.string_value(tok.kind, tok.data, tok.len, tok.offset), error, tok.offset)) {
+                    return false;
+                }
+                return mark_value_started(tok.offset, error);
+            case TokenKind::ObjectOpen:
+                if (!finish_sink_event(sink.start_object(tok.offset), error, tok.offset)) {
+                    return false;
+                }
+                if (!mark_value_started(tok.offset, error)) {
+                    return false;
+                }
+                state_stack_.push_back(ParseState::ObjectStart);
+                return true;
+            case TokenKind::ArrayOpen:
+                if (!finish_sink_event(sink.start_array(tok.offset), error, tok.offset)) {
+                    return false;
+                }
+                if (!mark_value_started(tok.offset, error)) {
+                    return false;
+                }
+                state_stack_.push_back(ParseState::ArrayStart);
+                return true;
+            default:
+                return set_parse_error(error, "unallowed token at this point in JSON text", tok.offset);
+        }
+    }
+
+    [[nodiscard]] bool close_container(TokenKind kind, JsonEventSink &sink, ParseError &error, std::size_t offset) {
+        bool ok = false;
+        if (kind == TokenKind::ObjectClose) {
+            ok = sink.end_object(offset);
+        } else {
+            ok = sink.end_array(offset);
+        }
+        if (!finish_sink_event(ok, error, offset)) {
+            return false;
+        }
+        if (state_stack_.size() <= 1) {
+            return set_parse_error(error, "invalid parser state", offset);
+        }
+        state_stack_.pop_back();
+        return true;
+    }
+
+    [[nodiscard]] bool process_token(const Token &tok, JsonEventSink &sink, ParseError &error) {
+        switch (current_state()) {
+            case ParseState::ObjectStart:
+            case ParseState::ObjectNeedKey:
+                if (tok.kind == TokenKind::ObjectClose && current_state() == ParseState::ObjectStart) {
+                    return close_container(tok.kind, sink, error, tok.offset);
+                }
+                if (tok.kind != TokenKind::String && tok.kind != TokenKind::StringEscaped) {
+                    return set_parse_error(error, "object key must be a string", tok.offset);
+                }
+                if (!finish_sink_event(sink.object_key(tok.kind, tok.data, tok.len, tok.offset), error, tok.offset)) {
+                    return false;
+                }
+                set_state(ParseState::ObjectSep);
+                return true;
+            case ParseState::ObjectSep:
+                if (tok.kind != TokenKind::Colon) {
+                    return set_parse_error(error, "expected ':' after object key", tok.offset);
+                }
+                set_state(ParseState::ObjectNeedVal);
+                return true;
+            case ParseState::ObjectGotVal:
+                if (tok.kind == TokenKind::ObjectClose) {
+                    return close_container(tok.kind, sink, error, tok.offset);
+                }
+                if (tok.kind == TokenKind::Comma) {
+                    set_state(ParseState::ObjectNeedKey);
+                    return true;
+                }
+                return set_parse_error(error, "after object value, expected ',' or '}'", tok.offset);
+            case ParseState::ArrayStart:
+                if (tok.kind == TokenKind::ArrayClose) {
+                    return close_container(tok.kind, sink, error, tok.offset);
+                }
+                return process_value_token(tok, sink, error);
+            case ParseState::ArrayGotVal:
+                if (tok.kind == TokenKind::ArrayClose) {
+                    return close_container(tok.kind, sink, error, tok.offset);
+                }
+                if (tok.kind == TokenKind::Comma) {
+                    set_state(ParseState::ArrayNeedVal);
+                    return true;
+                }
+                return set_parse_error(error, "after array value, expected ',' or ']'", tok.offset);
+            case ParseState::Start:
+            case ParseState::ObjectNeedVal:
+            case ParseState::ArrayNeedVal:
+                return process_value_token(tok, sink, error);
+            case ParseState::ParseComplete:
+                return set_parse_error(error, "trailing garbage after JSON value", tok.offset);
+            case ParseState::ParseError:
+                return set_parse_error(error, "invalid parser state", tok.offset);
+        }
+        return set_parse_error(error, "invalid parser state", tok.offset);
+    }
+
+    JsonLexer lexer_;
+    std::vector<ParseState> state_stack_{ParseState::Start};
 };
 
 } // namespace
+
+struct StreamParser::Impl {
+    explicit Impl(GcHeap &heap) : heap(heap), sink(heap, error) { reset(); }
+
+    void reset() {
+        error = {};
+        core.reset();
+        sink.reset();
+    }
+
+    [[nodiscard]] Status parse(const char *data, std::size_t len, bool final) {
+        if (!data && len > 0) {
+            set_parse_error(error, "input is null", 0);
+            return Status::Error;
+        }
+        return core.parse(data ? data : "", len, final, sink, error);
+    }
+
+    GcHeap &heap;
+    ParseError error;
+    JsonParserCore core;
+    JsValueSink sink;
+};
 
 Parser::Parser(GcHeap &heap) : heap_(heap) {}
 
@@ -956,372 +1238,39 @@ bool Parser::parse(const char *data, std::size_t len, JsValue &out) {
         error_.offset = 0;
         return false;
     }
-    ParserImpl impl(heap_, error_, data ? data : "", len);
-    return impl.parse(out);
+
+    JsonParserCore core;
+    JsValueSink sink(heap_, error_);
+    StreamParser::Status status = core.parse(data ? data : "", len, true, sink, error_);
+    if (status != StreamParser::Status::Complete || !sink.has_result()) {
+        if (error_.message.empty()) {
+            error_.message = "no JSON value";
+            error_.offset = 0;
+        }
+        return false;
+    }
+    out = sink.root();
+    return true;
 }
 
 bool Parser::parse(const std::string &data, JsValue &out) { return parse(data.data(), data.size(), out); }
 
 const ParseError &Parser::error() const { return error_; }
 
-StreamParser::StreamParser(GcHeap &heap) : heap_(heap) { reset(); }
+StreamParser::StreamParser(GcHeap &heap) : impl_(std::make_unique<Impl>(heap)) {}
 
-void StreamParser::reset() {
-    clear_error();
-    root_ = JsValue();
-    has_result_ = false;
-    complete_ = false;
-    buffer_.clear();
-    pos_ = 0;
-    total_offset_ = 0;
-    state_stack_.clear();
-    state_stack_.push_back(ParseState::Start);
-    containers_.clear();
-}
+StreamParser::~StreamParser() = default;
 
-StreamParser::Status StreamParser::parse(const char *data, std::size_t len) {
-    if (!data && len > 0) {
-        (void) set_error("input is null", total_offset_ + pos_);
-        return Status::Error;
-    }
-    if (complete_) {
-        buffer_.append(data ? data : "", len);
-        return parse_internal(false);
-    }
-    buffer_.append(data ? data : "", len);
-    return parse_internal(false);
-}
+void StreamParser::reset() { impl_->reset(); }
 
-StreamParser::Status StreamParser::finish() { return parse_internal(true); }
+StreamParser::Status StreamParser::parse(const char *data, std::size_t len) { return impl_->parse(data, len, false); }
 
-const ParseError &StreamParser::error() const { return error_; }
+StreamParser::Status StreamParser::finish() { return impl_->parse("", 0, true); }
 
-const JsValue &StreamParser::root() const { return root_; }
+const ParseError &StreamParser::error() const { return impl_->error; }
 
-bool StreamParser::has_result() const { return has_result_; }
+const JsValue &StreamParser::root() const { return impl_->sink.root(); }
 
-StreamParser::Status StreamParser::parse_internal(bool final) {
-    auto current_state = [&]() -> ParseState & { return state_stack_.back(); };
-
-    auto can_accept_value = [&]() -> bool {
-        ParseState state = current_state();
-        return state == ParseState::Start || state == ParseState::MapNeedVal || state == ParseState::ArrayNeedVal ||
-               state == ParseState::ArrayStart;
-    };
-
-    auto value_complete = [&](std::size_t offset) -> bool {
-        ParseState &state = current_state();
-        switch (state) {
-            case ParseState::Start:
-                state = ParseState::ParseComplete;
-                return true;
-            case ParseState::MapNeedVal:
-                state = ParseState::MapGotVal;
-                return true;
-            case ParseState::ArrayNeedVal:
-            case ParseState::ArrayStart:
-                state = ParseState::ArrayGotVal;
-                return true;
-            default:
-                return set_error("unexpected value", offset);
-        }
-    };
-
-    auto add_value = [&](JsValue &&value, std::size_t offset) -> bool {
-        if (containers_.empty()) {
-            if (has_result_) {
-                return set_error("multiple top-level values", offset);
-            }
-            root_ = std::move(value);
-            has_result_ = true;
-            return true;
-        }
-        ContainerFrame &frame = containers_.back();
-        if (frame.type == JsNodeType::Array) {
-            if (!ensure_array_capacity(heap_, frame.array, frame.array->size + 1)) {
-                return set_error("out of memory", offset);
-            }
-            frame.array->elems[frame.array->size] = std::move(value);
-            frame.array->size += 1;
-            frame.array->version += 1;
-            return true;
-        }
-        if (frame.type == JsNodeType::Object) {
-            if (!frame.has_key) {
-                return set_error("object value missing key", offset);
-            }
-            GcString *key = make_gc_string(heap_, frame.key);
-            if (!key) {
-                return set_error("out of memory", offset);
-            }
-            if (!gc_object_set(&heap_, frame.object, key, std::move(value))) {
-                return set_error("out of memory", offset);
-            }
-            frame.key.clear();
-            frame.has_key = false;
-            return true;
-        }
-        return set_error("invalid container state", offset);
-    };
-
-    auto begin_object = [&](std::size_t offset) -> bool {
-        if (!can_accept_value()) {
-            return set_error("unexpected '{'", offset);
-        }
-        GcObject *obj = gc_new_object(&heap_, kInitialContainerCapacity);
-        if (!obj) {
-            return set_error("out of memory", offset);
-        }
-        JsValue value;
-        value = js_make_heap_ref(&obj->hdr, JsHeapKind::Object);
-        if (!add_value(std::move(value), offset)) {
-            return false;
-        }
-        ContainerFrame frame;
-        frame.type = JsNodeType::Object;
-        frame.object = obj;
-        containers_.push_back(frame);
-        state_stack_.push_back(ParseState::MapStart);
-        return true;
-    };
-
-    auto begin_array = [&](std::size_t offset) -> bool {
-        if (!can_accept_value()) {
-            return set_error("unexpected '['", offset);
-        }
-        GcArray *arr = gc_new_array(&heap_, kInitialContainerCapacity);
-        if (!arr) {
-            return set_error("out of memory", offset);
-        }
-        JsValue value;
-        value = js_make_heap_ref(&arr->hdr, JsHeapKind::Array);
-        if (!add_value(std::move(value), offset)) {
-            return false;
-        }
-        ContainerFrame frame;
-        frame.type = JsNodeType::Array;
-        frame.array = arr;
-        containers_.push_back(frame);
-        state_stack_.push_back(ParseState::ArrayStart);
-        return true;
-    };
-
-    auto close_container = [&](JsNodeType type, std::size_t offset) -> bool {
-        if (containers_.empty() || containers_.back().type != type) {
-            return set_error("mismatched container close", offset);
-        }
-        containers_.pop_back();
-        if (state_stack_.size() <= 1) {
-            return set_error("invalid parser state", offset);
-        }
-        state_stack_.pop_back();
-        return value_complete(offset);
-    };
-
-    auto value_from_token = [&](const LexToken &tok, JsValue &value) -> bool {
-        switch (tok.type) {
-            case TokenType::String: {
-                GcString *str = make_gc_string(heap_, tok.text);
-                if (!str) {
-                    return set_error("out of memory", tok.offset);
-                }
-                value = js_make_heap_ref(&str->hdr, JsHeapKind::String);
-                return true;
-            }
-            case TokenType::Number:
-                value = tok.value;
-                return true;
-            case TokenType::True:
-                value = JsValue::make_boolean(true);
-                return true;
-            case TokenType::False:
-                value = JsValue::make_boolean(false);
-                return true;
-            case TokenType::Null:
-                value = JsValue::make_null();
-                return true;
-            default:
-                return set_error("invalid value token", tok.offset);
-        }
-    };
-
-    while (true) {
-        if (current_state() == ParseState::ParseComplete) {
-            while (pos_ < buffer_.size() && is_ws(buffer_[pos_])) {
-                pos_ += 1;
-            }
-            if (pos_ == buffer_.size()) {
-                compact_buffer();
-                complete_ = true;
-                return Status::Complete;
-            }
-            LexToken extra;
-            LexResult extra_result = lex_token(buffer_, pos_, final, extra, error_, total_offset_);
-            if (extra_result == LexResult::NeedMore) {
-                compact_buffer();
-                complete_ = true;
-                return Status::Complete;
-            }
-            if (extra_result == LexResult::Error) {
-                current_state() = ParseState::ParseError;
-                return Status::Error;
-            }
-            (void) set_error("trailing garbage after JSON value", extra.offset);
-            current_state() = ParseState::ParseError;
-            return Status::Error;
-        }
-
-        LexToken tok;
-        LexResult result = lex_token(buffer_, pos_, final, tok, error_, total_offset_);
-        if (result == LexResult::NeedMore) {
-            compact_buffer();
-            return Status::NeedMore;
-        }
-        if (result == LexResult::Error) {
-            current_state() = ParseState::ParseError;
-            return Status::Error;
-        }
-        if (tok.type == TokenType::End) {
-            if (final) {
-                (void) set_error("premature EOF", total_offset_ + pos_);
-                current_state() = ParseState::ParseError;
-                return Status::Error;
-            }
-            compact_buffer();
-            return Status::NeedMore;
-        }
-
-        ParseState &state = current_state();
-        switch (state) {
-            case ParseState::MapStart:
-            case ParseState::MapNeedKey:
-                if (tok.type == TokenType::RightBrace && state == ParseState::MapStart) {
-                    if (!close_container(JsNodeType::Object, tok.offset)) {
-                        current_state() = ParseState::ParseError;
-                        return Status::Error;
-                    }
-                    break;
-                }
-                if (tok.type != TokenType::String) {
-                    (void) set_error("object key must be a string", tok.offset);
-                    current_state() = ParseState::ParseError;
-                    return Status::Error;
-                }
-                if (containers_.empty() || containers_.back().type != JsNodeType::Object) {
-                    (void) set_error("invalid object state", tok.offset);
-                    current_state() = ParseState::ParseError;
-                    return Status::Error;
-                }
-                containers_.back().key = tok.text;
-                containers_.back().has_key = true;
-                state = ParseState::MapSep;
-                break;
-            case ParseState::MapSep:
-                if (tok.type != TokenType::Colon) {
-                    (void) set_error("object key and value must be separated by ':'", tok.offset);
-                    current_state() = ParseState::ParseError;
-                    return Status::Error;
-                }
-                state = ParseState::MapNeedVal;
-                break;
-            case ParseState::MapGotVal:
-                if (tok.type == TokenType::RightBrace) {
-                    if (!close_container(JsNodeType::Object, tok.offset)) {
-                        current_state() = ParseState::ParseError;
-                        return Status::Error;
-                    }
-                    break;
-                }
-                if (tok.type == TokenType::Comma) {
-                    state = ParseState::MapNeedKey;
-                    break;
-                }
-                (void) set_error("after object value, expected ',' or '}'", tok.offset);
-                current_state() = ParseState::ParseError;
-                return Status::Error;
-            case ParseState::ArrayStart:
-                if (tok.type == TokenType::RightBracket) {
-                    if (!close_container(JsNodeType::Array, tok.offset)) {
-                        current_state() = ParseState::ParseError;
-                        return Status::Error;
-                    }
-                    break;
-                }
-                [[fallthrough]];
-            case ParseState::ArrayNeedVal:
-            case ParseState::MapNeedVal:
-            case ParseState::Start: {
-                if (!can_accept_value()) {
-                    (void) set_error("unexpected token", tok.offset);
-                    current_state() = ParseState::ParseError;
-                    return Status::Error;
-                }
-                if (tok.type == TokenType::LeftBrace) {
-                    if (!begin_object(tok.offset)) {
-                        current_state() = ParseState::ParseError;
-                        return Status::Error;
-                    }
-                    break;
-                }
-                if (tok.type == TokenType::LeftBracket) {
-                    if (!begin_array(tok.offset)) {
-                        current_state() = ParseState::ParseError;
-                        return Status::Error;
-                    }
-                    break;
-                }
-                JsValue value;
-                if (!value_from_token(tok, value)) {
-                    current_state() = ParseState::ParseError;
-                    return Status::Error;
-                }
-                if (!add_value(std::move(value), tok.offset)) {
-                    current_state() = ParseState::ParseError;
-                    return Status::Error;
-                }
-                if (!value_complete(tok.offset)) {
-                    current_state() = ParseState::ParseError;
-                    return Status::Error;
-                }
-                break;
-            }
-            case ParseState::ArrayGotVal:
-                if (tok.type == TokenType::RightBracket) {
-                    if (!close_container(JsNodeType::Array, tok.offset)) {
-                        current_state() = ParseState::ParseError;
-                        return Status::Error;
-                    }
-                    break;
-                }
-                if (tok.type == TokenType::Comma) {
-                    state = ParseState::ArrayNeedVal;
-                    break;
-                }
-                (void) set_error("after array value, expected ',' or ']'", tok.offset);
-                current_state() = ParseState::ParseError;
-                return Status::Error;
-            case ParseState::ParseComplete:
-            case ParseState::ParseError:
-                (void) set_error("invalid parser state", tok.offset);
-                current_state() = ParseState::ParseError;
-                return Status::Error;
-        }
-    }
-}
-
-void StreamParser::compact_buffer() {
-    if (pos_ == 0) {
-        return;
-    }
-    total_offset_ += pos_;
-    buffer_.erase(0, pos_);
-    pos_ = 0;
-}
-
-void StreamParser::clear_error() { error_ = {}; }
-
-bool StreamParser::set_error(const char *message, std::size_t offset) {
-    return set_parse_error(error_, message, offset);
-}
+bool StreamParser::has_result() const { return impl_->sink.has_result(); }
 
 } // namespace fiber::json

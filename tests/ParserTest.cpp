@@ -98,6 +98,28 @@ TEST(ParserTest, ParseStringEscapes) {
     EXPECT_EQ(to_string(as_string(u_entry->value)), expected);
 }
 
+TEST(ParserTest, ParseTopLevelScalarValues) {
+    GcHeap heap;
+    Parser parser(heap);
+    JsValue root;
+
+    ASSERT_TRUE(parser.parse("123", 3, root)) << parser.error().message;
+    ASSERT_EQ(js_value_type(root), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(root), 123);
+
+    ASSERT_TRUE(parser.parse("-2.5e2", 6, root)) << parser.error().message;
+    ASSERT_EQ(js_value_type(root), JsNodeType::Float);
+    EXPECT_NEAR(js_value_double(root), -250.0, 1e-9);
+
+    ASSERT_TRUE(parser.parse("true", 4, root)) << parser.error().message;
+    ASSERT_EQ(js_value_type(root), JsNodeType::Boolean);
+    EXPECT_TRUE(js_value_bool(root));
+
+    ASSERT_TRUE(parser.parse(R"("x")", 3, root)) << parser.error().message;
+    ASSERT_EQ(js_value_type(root), JsNodeType::String);
+    EXPECT_EQ(to_string(as_string(root)), "x");
+}
+
 TEST(ParserTest, RejectLeadingZero) {
     GcHeap heap;
     Parser parser(heap);
@@ -121,12 +143,64 @@ TEST(ParserTest, StreamParseChunks) {
     ASSERT_EQ(js_value_type(parser.root()), JsNodeType::Object);
 }
 
+TEST(ParserTest, StreamParseOneByteChunks) {
+    GcHeap heap;
+    StreamParser parser(heap);
+    const char *json = R"({"text":"line\n\uD83D\uDE00","nums":[-12,3.5e2,false,null]})";
+    const std::size_t len = std::strlen(json);
+
+    StreamParser::Status status = StreamParser::Status::NeedMore;
+    for (std::size_t i = 0; i < len; ++i) {
+        status = parser.parse(json + i, 1);
+        ASSERT_NE(status, StreamParser::Status::Error) << parser.error().message << " at byte " << i;
+    }
+    ASSERT_EQ(status, StreamParser::Status::Complete);
+    ASSERT_TRUE(parser.has_result());
+    ASSERT_EQ(js_value_type(parser.root()), JsNodeType::Object);
+
+    const GcObject *obj = as_object(parser.root());
+    ASSERT_EQ(obj->size, 2u);
+    const GcObjectEntry *text_entry = entry_at(obj, 0);
+    ASSERT_NE(text_entry, nullptr);
+    const std::string expected_text = std::string("line\n") + std::string("\xF0\x9F\x98\x80", 4);
+    EXPECT_EQ(to_string(as_string(text_entry->value)), expected_text);
+}
+
+TEST(ParserTest, StreamTopLevelNumberCompletesOnFinish) {
+    GcHeap heap;
+    StreamParser parser(heap);
+
+    EXPECT_EQ(parser.parse("1", 1), StreamParser::Status::NeedMore);
+    ASSERT_EQ(parser.finish(), StreamParser::Status::Complete) << parser.error().message;
+    ASSERT_TRUE(parser.has_result());
+    ASSERT_EQ(js_value_type(parser.root()), JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(parser.root()), 1);
+}
+
 TEST(ParserTest, StreamFinishPrematureEof) {
     GcHeap heap;
     StreamParser parser(heap);
     const char *chunk = "{\"a\":1";
     EXPECT_NE(parser.parse(chunk, std::strlen(chunk)), StreamParser::Status::Error);
     EXPECT_EQ(parser.finish(), StreamParser::Status::Error);
+}
+
+TEST(ParserTest, RejectTrailingGarbage) {
+    GcHeap heap;
+    Parser parser(heap);
+    JsValue root;
+
+    EXPECT_FALSE(parser.parse("true false", 10, root));
+    EXPECT_FALSE(parser.error().message.empty());
+}
+
+TEST(ParserTest, StreamRejectNumberWithInvalidContinuation) {
+    GcHeap heap;
+    StreamParser parser(heap);
+
+    EXPECT_EQ(parser.parse("1", 1), StreamParser::Status::NeedMore);
+    EXPECT_EQ(parser.parse("x", 1), StreamParser::Status::Error);
+    EXPECT_FALSE(parser.error().message.empty());
 }
 
 TEST(ParserTest, RejectInvalidUtf8) {

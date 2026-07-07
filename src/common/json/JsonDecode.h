@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -60,6 +61,7 @@ public:
     };
 
     explicit StreamParser(GcHeap &heap);
+    ~StreamParser();
     StreamParser(const StreamParser &) = delete;
     StreamParser &operator=(const StreamParser &) = delete;
     StreamParser(StreamParser &&) = delete;
@@ -73,43 +75,9 @@ public:
     [[nodiscard]] bool has_result() const;
 
 private:
-    enum class ParseState {
-        Start,
-        ParseComplete,
-        ParseError,
-        MapStart,
-        MapNeedKey,
-        MapSep,
-        MapNeedVal,
-        MapGotVal,
-        ArrayStart,
-        ArrayNeedVal,
-        ArrayGotVal,
-    };
+    struct Impl;
 
-    struct ContainerFrame {
-        JsNodeType type = JsNodeType::Undefined;
-        GcArray *array = nullptr;
-        GcObject *object = nullptr;
-        DecodedString key;
-        bool has_key = false;
-    };
-
-    GcHeap &heap_;
-    ParseError error_;
-    JsValue root_;
-    bool has_result_ = false;
-    bool complete_ = false;
-    std::string buffer_;
-    std::size_t pos_ = 0;
-    std::size_t total_offset_ = 0;
-    std::vector<ParseState> state_stack_;
-    std::vector<ContainerFrame> containers_;
-
-    Status parse_internal(bool final);
-    void compact_buffer();
-    void clear_error();
-    [[nodiscard]] bool set_error(const char *message, std::size_t offset);
+    std::unique_ptr<Impl> impl_;
 };
 
 } // namespace fiber::json
