@@ -3,8 +3,8 @@
 #include <cstring>
 #include <string>
 
-#include "common/json/JsGc.h"
 #include "script/ScriptCompiler.h"
+#include "script/json/JsGc.h"
 #include "script/std/StdLibrary.h"
 
 using fiber::json::GcHeap;

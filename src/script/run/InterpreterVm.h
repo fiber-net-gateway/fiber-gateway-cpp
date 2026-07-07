@@ -6,10 +6,10 @@
 #include <memory>
 #include <vector>
 
-#include "../../common/json/JsGc.h"
 #include "../AsyncTask.h"
 #include "../ScriptResult.h"
 #include "../ir/Compiled.h"
+#include "../json/JsGc.h"
 
 namespace fiber::script {
 class ScriptRuntime;

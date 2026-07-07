@@ -4,8 +4,8 @@
 #include <cstddef>
 #include <vector>
 
-#include "../common/json/JsGc.h"
 #include "../common/mem/BufPool.h"
+#include "json/JsGc.h"
 
 namespace fiber::script {
 

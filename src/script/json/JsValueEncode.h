@@ -5,8 +5,8 @@
 #ifndef FIBER_JSVALUEENCODE_H
 #define FIBER_JSVALUEENCODE_H
 
+#include "../../common/json/JsonEncode.h"
 #include "JsNode.h"
-#include "JsonEncode.h"
 
 namespace fiber::json {
 

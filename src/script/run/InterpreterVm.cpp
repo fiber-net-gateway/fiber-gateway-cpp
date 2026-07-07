@@ -5,9 +5,9 @@
 #include <utility>
 
 #include "../../common/Assert.h"
-#include "../../common/json/JsGc.h"
 #include "../Library.h"
 #include "../Runtime.h"
+#include "../json/JsGc.h"
 #include "Access.h"
 #include "Binaries.h"
 #include "Compares.h"

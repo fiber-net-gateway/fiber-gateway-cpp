@@ -131,10 +131,10 @@ With this model:
 
 ## Implementation Order In This Repository
 
-1. Refactor `src/common/json/JsNode.h` and `src/common/json/JsNode.cpp`
+1. Refactor `src/script/json/JsNode.h` and `src/script/json/JsNode.cpp`
    - make `JsValue` trivially copyable
    - keep compatibility helpers
-2. Update `src/common/json/JsGc.cpp`
+2. Update `src/script/json/JsGc.cpp`
    - use heap-ref predicates when scanning values
 3. Update `src/common/json/JsValueOps.cpp`
    - rely on borrowed-vs-heap helpers instead of ad hoc ownership assumptions

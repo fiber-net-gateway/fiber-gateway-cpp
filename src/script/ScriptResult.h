@@ -6,7 +6,7 @@
 #include <type_traits>
 
 #include "../common/Assert.h"
-#include "../common/json/JsNode.h"
+#include "json/JsNode.h"
 
 namespace fiber::script {
 

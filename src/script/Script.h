@@ -6,10 +6,10 @@
 #include <optional>
 
 #include "../async/Task.h"
-#include "../common/json/JsNode.h"
 #include "AsyncTask.h"
 #include "ScriptResult.h"
 #include "ir/Compiled.h"
+#include "json/JsNode.h"
 
 namespace fiber::json {
 class GcHeap;

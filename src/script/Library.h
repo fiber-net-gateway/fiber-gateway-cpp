@@ -5,10 +5,10 @@
 #include <string_view>
 #include <vector>
 
-#include "../common/json/JsNode.h"
 #include "AsyncTask.h"
 #include "Runtime.h"
 #include "ScriptResult.h"
+#include "json/JsNode.h"
 
 namespace fiber::script {
 

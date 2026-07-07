@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "common/json/JsGc.h"
+#include "script/json/JsGc.h"
 
 namespace {
 

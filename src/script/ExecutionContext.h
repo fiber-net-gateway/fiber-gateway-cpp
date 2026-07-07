@@ -3,7 +3,7 @@
 
 #include <cstddef>
 
-#include "../common/json/JsNode.h"
+#include "json/JsNode.h"
 
 namespace fiber::script {
 
