@@ -4,9 +4,11 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "JsonDecode.h"
+namespace fiber::json {
 
-namespace fiber::json::detail {
+struct ParseError;
+
+namespace detail {
 
 enum class TokenKind : std::uint8_t {
     Eof,
@@ -130,6 +132,7 @@ private:
 [[nodiscard]] bool decode_string(TokenKind kind, const char *data, std::size_t len, Buffer &scratch, const char *&out,
                                  std::size_t &out_len, ParseError &error, std::size_t offset) noexcept;
 
-} // namespace fiber::json::detail
+} // namespace detail
+} // namespace fiber::json
 
 #endif // FIBER_JSONLEX_H
