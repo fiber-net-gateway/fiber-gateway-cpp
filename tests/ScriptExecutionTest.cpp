@@ -386,3 +386,113 @@ TEST(ScriptExecutionTest, FunctionDefaultArgumentIsAppendedBeforeHostCall) {
     EXPECT_EQ(js_value_int64(result.value()), 4);
     EXPECT_EQ(func.observed_argc, 2u);
 }
+
+// #5: assignment RHS accepts a ternary and chains right-associatively.
+TEST(ScriptExecutionTest, AssignmentRhsAcceptsTernary) {
+    TestLibrary library;
+    auto compiled = compile_script("let x = 1; x = x == 1 ? 10 : 20; return x;", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::script::GcHeap heap;
+    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
+    auto result = run();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(js_value_int64(result.value()), 10);
+}
+
+TEST(ScriptExecutionTest, ChainedAssignmentIsRightAssociative) {
+    TestLibrary library;
+    auto compiled = compile_script("let a = 1; let b = 0; b = a = 5; return a + b;", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::script::GcHeap heap;
+    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
+    auto result = run();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(js_value_int64(result.value()), 10);
+}
+
+// #6: relational/equality chains are left-associative.
+TEST(ScriptExecutionTest, RelationalChainIsLeftAssociative) {
+    TestLibrary library;
+    auto compiled = compile_script("return (1 < 2 < 3) ? 7 : 9;", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::script::GcHeap heap;
+    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
+    auto result = run();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(js_value_int64(result.value()), 7);
+}
+
+TEST(ScriptExecutionTest, EqualityChainIsLeftAssociative) {
+    TestLibrary library;
+    auto compiled = compile_script("return (1 == 1 == 1) ? 7 : 9;", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::script::GcHeap heap;
+    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
+    auto result = run();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(js_value_int64(result.value()), 7);
+}
+
+// #7: octal escapes (\0, \12, \012) decode correctly.
+TEST(ScriptExecutionTest, OctalEscapeNulMatchesHexEscape) {
+    TestLibrary library;
+    auto compiled = compile_script("return (\"\\0\" === \"\\x00\") ? 7 : 9;", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::script::GcHeap heap;
+    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
+    auto result = run();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(js_value_int64(result.value()), 7);
+}
+
+TEST(ScriptExecutionTest, OctalEscapeTwoDigitsMatchesNewline) {
+    TestLibrary library;
+    auto compiled = compile_script("return (\"\\12\" === \"\\n\") ? 7 : 9;", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::script::GcHeap heap;
+    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
+    auto result = run();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(js_value_int64(result.value()), 7);
+}
+
+// #8: leading-dot and trailing-dot number literals evaluate correctly.
+TEST(ScriptExecutionTest, LeadingDotNumberLiteral) {
+    TestLibrary library;
+    auto compiled = compile_script("return .25 + .25;", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::script::GcHeap heap;
+    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
+    auto result = run();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(js_value_type(result.value()), fiber::script::JsNodeType::Float);
+    EXPECT_EQ(js_value_double(result.value()), 0.5);
+}
+
+TEST(ScriptExecutionTest, TrailingDotNumberLiteral) {
+    TestLibrary library;
+    auto compiled = compile_script("return 1. + .5;", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::script::GcHeap heap;
+    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
+    auto result = run();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(js_value_type(result.value()), fiber::script::JsNodeType::Float);
+    EXPECT_EQ(js_value_double(result.value()), 1.5);
+}

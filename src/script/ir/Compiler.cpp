@@ -708,6 +708,7 @@ private:
         if (dynamic_cast<const ast::DirectiveStatement *>(&stmt)) {
             return;
         }
+        fail(CompileErrorReason::Internal, stmt.start_pos(), "unsupported statement node");
     }
 
     void compile_expression(const ast::Expression &expr) {
@@ -908,6 +909,10 @@ private:
             return;
         }
         if (auto *binary = dynamic_cast<const ast::BinaryOperator *>(&expr)) {
+            if (binary->op() == ast::Operator::Match) {
+                fail(CompileErrorReason::Internal, expr.start_pos(), "match operator (~) is not supported");
+                return;
+            }
             compile_expression(*binary->left());
             compile_expression(*binary->right());
             std::uint8_t op = Code::BOP_PLUS;
@@ -1029,6 +1034,7 @@ private:
             }
             return;
         }
+        fail(CompileErrorReason::Internal, expr.start_pos(), "unsupported expression node");
     }
 
     void compile_assign(const ast::Assign &assign) {

@@ -26,12 +26,12 @@ private:
     std::size_t max_ = 0;
     std::size_t max_depth_ = kDefaultScriptMaxDepth;
 
-    bool skip_comment();
+    std::expected<bool, ParseError> skip_comment();
     std::expected<void, ParseError> scan_string();
     std::expected<void, ParseError> scan_template_literal();
     std::expected<std::size_t, ParseError> skip_template_literal(std::size_t pos, std::size_t depth) const;
     std::expected<std::size_t, ParseError> skip_template_expression(std::size_t pos, std::size_t depth) const;
-    std::expected<void, ParseError> lex_numeric_literal(bool first_char_zero);
+    std::expected<void, ParseError> lex_numeric_literal(bool first_char_zero, bool leading_dot = false);
     void lex_identifier();
     bool is_identifier(char ch) const;
     bool is_digit(char ch) const;
