@@ -20,7 +20,7 @@ namespace fiber::script::run {
 class InterpreterVm final : public fiber::script::GcRootSource {
 public:
     InterpreterVm(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach, GcHeap &runtime);
-    ~InterpreterVm() override;
+    ~InterpreterVm() override = default;
 
     void iterate();
     [[nodiscard]] ScriptResult result() const noexcept;
@@ -60,6 +60,7 @@ private:
     fiber::script::JsValue root_;
     void *attach_ = nullptr;
     GcHeap &runtime_;
+    fiber::script::GcRootRegistration reg_;
 
     std::unique_ptr<fiber::script::JsValue[]> slots_;
     fiber::script::JsValue *stack_ = nullptr;
