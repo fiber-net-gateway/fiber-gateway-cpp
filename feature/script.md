@@ -181,8 +181,9 @@ public:
 
 ### GC Integration (Scan VM Directly)
 - Single-coroutine execution allows GC at safe points (allocation sites or between opcodes).
-- `GcRootSet` owns globals/temps and a list of `RootProvider` instances.
-- `InterpreterVm` implements `RootProvider::visit_roots` and is registered for the VM lifetime.
+- `GcHeap` owns root slots, `GcRootSet`, and the GC trigger policy.
+- `GcRootSet` owns globals/temps and a list of `GcRootSource` instances.
+- `InterpreterVm` implements `GcRootSource::visit_roots` and is registered for the VM lifetime.
 - Roots exposed by VM:
   - `root_`
   - `stack_[0..sp_)`
@@ -193,18 +194,18 @@ public:
 - GC does not require per-push updates; it scans VM state only when collecting.
 - Temporary values not on the VM stack can use `GcRootHandle` sparingly.
 
-## GcRootSet + RootProvider Design
+## GcRootSet + GcRootSource Design
 ### Interfaces
 ```
-struct RootVisitor {
-    void visit(fiber::json::JsValue *value);
-    void visit_range(fiber::json::JsValue *base, std::size_t count);
+struct GcRootVisitor {
+    void visit(fiber::json::JsValue *value) noexcept;
+    void visit_range(fiber::json::JsValue *base, std::size_t count) noexcept;
 };
 
-class RootProvider {
+class GcRootSource {
 public:
-    virtual ~RootProvider() = default;
-    virtual void visit_roots(RootVisitor &visitor) = 0;
+    virtual ~GcRootSource() = default;
+    virtual void visit_roots(GcRootVisitor &visitor) noexcept = 0;
 };
 
 class GcRootSet {
@@ -213,17 +214,17 @@ public:
     void remove_global(fiber::json::JsValue *value);
     void add_temp_root(fiber::json::JsValue *value);
     void remove_temp_root(fiber::json::JsValue *value);
-    void add_provider(RootProvider *provider);
-    void remove_provider(RootProvider *provider);
-    void visit_all(RootVisitor &visitor);
+    void add_source(GcRootSource *source);
+    void remove_source(GcRootSource *source);
+    void visit_all(GcRootVisitor &visitor) noexcept;
 };
 ```
 
 ### Root Scanning Order
-- `globals_` -> `temps_` -> `providers_` (VMs and other runtime scopes).
-- `RootVisitor` internally stores a temporary root vector or calls `gc_mark_value` directly.
+- `globals_` -> `temps_` -> `sources_` (VMs and other runtime scopes).
+- `GcRootVisitor` internally stores a temporary root vector or calls `gc_mark_value` directly.
 
-### InterpreterVm RootProvider
+### InterpreterVm GcRootSource
 - `visit_roots` should include:
   - `root_`
   - `stack_[0..sp_)` using `visit_range`
@@ -534,37 +535,38 @@ public:
     void remove_global(fiber::json::JsValue *value);
     void add_temp_root(fiber::json::JsValue *value);
     void remove_temp_root(fiber::json::JsValue *value);
-    void add_provider(RootProvider *provider);
-    void remove_provider(RootProvider *provider);
-    void visit_all(RootVisitor &visitor);
+    void add_source(GcRootSource *source);
+    void remove_source(GcRootSource *source);
+    void visit_all(GcRootVisitor &visitor) noexcept;
 };
 ```
-- `GcRootSet` does not own `GcHeap`; it only aggregates roots and providers.
+- `GcRootSet` does not own `GcHeap`; it only aggregates roots and root sources.
 
-### Runtime (heap + roots owner, GC trigger)
+### GcHeap (heap + roots owner, GC trigger)
 ```
-class ScriptRuntime {
+class GcHeap {
 public:
-    ScriptRuntime(fiber::json::GcHeap &heap, fiber::json::GcRootSet &roots);
-
-    fiber::json::GcHeap &heap();
+    GcHeap();
     fiber::json::GcRootSet &roots();
 
+    ValueHandle local_value();
+    ValueHandle global_value();
     bool should_collect(std::size_t next_bytes = 0) const;
     void maybe_collect(std::size_t next_bytes = 0);
+    void collect_now();
 
     template <typename AllocFn>
     auto alloc_with_gc(std::size_t next_bytes, AllocFn &&fn) -> decltype(fn());
 };
 ```
-- `alloc_with_gc` performs: `if (should_collect(next_bytes)) gc_collect(heap_, roots_);` then runs `fn()`.
-- If `fn()` fails due to memory pressure, runtime may collect once and retry.
+- `alloc_with_gc` performs: `if (should_collect(next_bytes)) collect_now();` then runs `fn()`.
+- If `fn()` fails due to memory pressure, `GcHeap` may collect once and retry.
 
-### ScriptRuntime Temp Root Guards
+### GcHeap Temp Root Guards
 ```
 class GcRootGuard {
 public:
-    GcRootGuard(ScriptRuntime &runtime, fiber::json::JsValue *value);
+    GcRootGuard(GcRootSet &roots, fiber::json::JsValue *value);
     GcRootGuard(const GcRootGuard &) = delete;
     GcRootGuard &operator=(const GcRootGuard &) = delete;
     ~GcRootGuard();
@@ -575,14 +577,14 @@ private:
 
 class TempRootScope {
 public:
-    explicit TempRootScope(ScriptRuntime &runtime);
+    explicit TempRootScope(GcHeap &heap);
     void add(fiber::json::JsValue *value);
 private:
     fiber::json::GcRootSet *roots_ = nullptr;
 };
 ```
 - Use `GcRootGuard` for single temporary values in ops.
-- Use `TempRootScope` when multiple temporaries are created before they reach VM stack/vars.
+- Use `GcHeap::LocalMark` plus `GcHeap::local_value()` when multiple temporaries are created before they reach VM stack/vars.
 
 ## VmError and Error Object Conversion
 ### VmError Shape

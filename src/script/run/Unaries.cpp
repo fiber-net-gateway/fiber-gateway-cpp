@@ -1,6 +1,6 @@
 #include "Unaries.h"
 
-#include "../Runtime.h"
+#include "../JsGc.h"
 
 #include <cmath>
 #include <cstring>
@@ -75,12 +75,12 @@ CallResult make_typeof_value(ResultPayload &result, const char *text) noexcept {
 
 } // namespace
 
-CallResult Unaries::neg(ScriptRuntime &runtime, ConstValueHandle value, ResultPayload &result) noexcept {
+CallResult Unaries::neg(GcHeap &runtime, ConstValueHandle value, ResultPayload &result) noexcept {
     (void) runtime;
     return set_value(result, fiber::script::JsValue::make_boolean(!is_truthy(*value)));
 }
 
-CallResult Unaries::plus(ScriptRuntime &runtime, ConstValueHandle value, ResultPayload &result) noexcept {
+CallResult Unaries::plus(GcHeap &runtime, ConstValueHandle value, ResultPayload &result) noexcept {
     (void) runtime;
     if (!is_numeric_like(fiber::script::js_value_type(*value))) {
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
@@ -95,7 +95,7 @@ CallResult Unaries::plus(ScriptRuntime &runtime, ConstValueHandle value, ResultP
     return set_value(result, fiber::script::JsValue::make_integer(int_value));
 }
 
-CallResult Unaries::minus(ScriptRuntime &runtime, ConstValueHandle value, ResultPayload &result) noexcept {
+CallResult Unaries::minus(GcHeap &runtime, ConstValueHandle value, ResultPayload &result) noexcept {
     (void) runtime;
     if (!is_numeric_like(fiber::script::js_value_type(*value))) {
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
@@ -113,7 +113,7 @@ CallResult Unaries::minus(ScriptRuntime &runtime, ConstValueHandle value, Result
     return set_value(result, fiber::script::JsValue::make_integer(-int_value));
 }
 
-CallResult Unaries::typeof_op(ScriptRuntime &runtime, ConstValueHandle value, ResultPayload &result) noexcept {
+CallResult Unaries::typeof_op(GcHeap &runtime, ConstValueHandle value, ResultPayload &result) noexcept {
     (void) runtime;
     switch (fiber::script::js_value_type(*value)) {
         case fiber::script::JsNodeType::Undefined:
@@ -141,7 +141,7 @@ CallResult Unaries::typeof_op(ScriptRuntime &runtime, ConstValueHandle value, Re
     return make_typeof_value(result, "undefined");
 }
 
-CallResult Unaries::iterate(ScriptRuntime &runtime, ConstValueHandle value, ResultPayload &result) noexcept {
+CallResult Unaries::iterate(GcHeap &runtime, ConstValueHandle value, ResultPayload &result) noexcept {
     fiber::script::GcHeap *heap = &runtime.heap();
     fiber::script::GcIterator *iter = nullptr;
     iter = runtime.alloc_with_gc(fiber::script::gc_estimate_iterator_bytes(), [&]() {

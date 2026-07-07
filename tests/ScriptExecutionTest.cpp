@@ -9,7 +9,6 @@
 
 #include "script/JsGc.h"
 #include "script/Library.h"
-#include "script/Runtime.h"
 #include "script/Script.h"
 #include "script/ir/Compiler.h"
 #include "script/parse/Parser.h"
@@ -291,8 +290,7 @@ TEST(ScriptExecutionTest, RunSimpleReturn) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    fiber::script::ScriptRuntime runtime(heap);
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, runtime);
+    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     auto result = run();
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_type(result.value()), fiber::script::JsNodeType::Integer);
@@ -307,8 +305,7 @@ TEST(ScriptExecutionTest, RunThrowLiteral) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    fiber::script::ScriptRuntime runtime(heap);
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, runtime);
+    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     auto result = run();
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(value_to_string(result.error()), "oops");
@@ -322,8 +319,7 @@ TEST(ScriptExecutionTest, RunFunctionThrowCaught) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    fiber::script::ScriptRuntime runtime(heap);
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, runtime);
+    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     auto result = run();
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(value_to_string(result.value()), "boom");
@@ -339,8 +335,7 @@ TEST(ScriptExecutionTest, RethrowFromNestedCatchReachesOuterCatch) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    fiber::script::ScriptRuntime runtime(heap);
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, runtime);
+    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     auto result = run();
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(value_to_string(result.value()), "outer");
@@ -353,8 +348,7 @@ TEST(ScriptExecutionTest, AsyncFunctionSuspendsAndResumes) {
     auto compiled = compile_script("return asyncFunc(1);", library);
 
     fiber::script::GcHeap heap;
-    fiber::script::ScriptRuntime runtime(heap);
-    fiber::script::run::InterpreterVm vm(compiled, fiber::script::JsValue::make_undefined(), nullptr, runtime);
+    fiber::script::run::InterpreterVm vm(compiled, fiber::script::JsValue::make_undefined(), nullptr, heap);
 
     vm.iterate();
     ASSERT_FALSE(vm.done());
@@ -380,8 +374,7 @@ TEST(ScriptExecutionTest, FunctionDefaultArgumentIsAppendedBeforeHostCall) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    fiber::script::ScriptRuntime runtime(heap);
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, runtime);
+    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     auto result = run();
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_int64(result.value()), 4);

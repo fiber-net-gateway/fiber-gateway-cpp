@@ -3,7 +3,7 @@
 #include <utility>
 
 #include "../common/Assert.h"
-#include "Runtime.h"
+#include "JsGc.h"
 #include "run/InterpreterVm.h"
 
 namespace fiber::script {
@@ -33,16 +33,11 @@ ScriptRun &ScriptRun::operator=(ScriptRun &&) noexcept = default;
 ScriptRun::~ScriptRun() = default;
 
 ScriptRun::ScriptRun(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach,
-                     ScriptRuntime &runtime) :
-    runtime_(&runtime), vm_(std::make_unique<run::InterpreterVm>(compiled, root, attach, runtime)) {}
-
-ScriptRun::ScriptRun(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach,
                      fiber::script::GcHeap &heap) :
-    owned_runtime_(std::make_unique<ScriptRuntime>(heap)), runtime_(owned_runtime_.get()),
-    vm_(std::make_unique<run::InterpreterVm>(compiled, root, attach, *runtime_)) {}
+    heap_(&heap), vm_(std::make_unique<run::InterpreterVm>(compiled, root, attach, heap)) {}
 
 ScriptRun::Result ScriptRun::operator()() {
-    if (!vm_ || !runtime_) {
+    if (!vm_ || !heap_) {
         return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
     while (!vm_->done()) {
@@ -55,7 +50,7 @@ ScriptRun::Result ScriptRun::operator()() {
 }
 
 AsyncTask ScriptRun::run_async_task() {
-    if (!vm_ || !runtime_) {
+    if (!vm_ || !heap_) {
         co_return ScriptStatus::abort(ScriptAbortReason::InvalidState);
     }
     while (!vm_->done()) {
@@ -141,28 +136,11 @@ bool ScriptAsyncRun::valid() const { return run_.valid(); }
 
 Script::Script(std::shared_ptr<ir::Compiled> compiled) : compiled_(std::move(compiled)) {}
 
-ScriptAsyncRun Script::exec_async(const fiber::script::JsValue &root, void *attach, ScriptRuntime &runtime) {
-    if (!compiled_) {
-        return {};
-    }
-    return ScriptAsyncRun(ScriptRun(*compiled_, root, attach, runtime));
-}
-
 ScriptAsyncRun Script::exec_async(const fiber::script::JsValue &root, void *attach, fiber::script::GcHeap &heap) {
     if (!compiled_) {
         return {};
     }
     return ScriptAsyncRun(ScriptRun(*compiled_, root, attach, heap));
-}
-
-ScriptSyncRun Script::exec_sync(const fiber::script::JsValue &root, void *attach, ScriptRuntime &runtime) {
-    if (!compiled_) {
-        return {};
-    }
-    if (compiled_->contains_async()) {
-        FIBER_PANIC("async opcode encountered in exec_sync");
-    }
-    return ScriptSyncRun(ScriptRun(*compiled_, root, attach, runtime));
 }
 
 ScriptSyncRun Script::exec_sync(const fiber::script::JsValue &root, void *attach, fiber::script::GcHeap &heap) {

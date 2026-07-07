@@ -33,7 +33,7 @@ bool get_index(ConstValueHandle key, std::int64_t &out) noexcept {
 // OOM is the only abort this can signal (allocation failure while interning a borrowed string); a
 // non-string key returns nullptr with error left None and the caller decides undefined (read) vs
 // TypeError (write).
-fiber::script::GcString *ensure_heap_string(ScriptRuntime &runtime, ConstValueHandle value, ScriptAbortReason &error) {
+fiber::script::GcString *ensure_heap_string(GcHeap &runtime, ConstValueHandle value, ScriptAbortReason &error) {
     if (!value) {
         return nullptr;
     }
@@ -87,11 +87,11 @@ bool string_length(ConstValueHandle value, std::size_t &out) {
     return false;
 }
 
-CallResult string_char_at(ScriptRuntime &runtime, ResultPayload &result, ConstValueHandle value, std::int64_t index) {
+CallResult string_char_at(GcHeap &runtime, ResultPayload &result, ConstValueHandle value, std::int64_t index) {
     if (index < 0) {
         return set_undefined(result);
     }
-    ScriptRuntime::LocalMark mark(runtime);
+    GcHeap::LocalMark mark(runtime);
     fiber::script::GcString *str = nullptr;
     if (value && fiber::script::js_value_type(*value) == fiber::script::JsNodeType::String &&
         !fiber::script::js_value_is_borrowed_string(*value)) {
@@ -137,7 +137,7 @@ CallResult string_char_at(ScriptRuntime &runtime, ResultPayload &result, ConstVa
 
 } // namespace
 
-CallResult Access::expand_object(ScriptRuntime &runtime, ConstValueHandle target, ConstValueHandle addition,
+CallResult Access::expand_object(GcHeap &runtime, ConstValueHandle target, ConstValueHandle addition,
                                  ResultPayload &result) noexcept {
     if (!target || !addition || fiber::script::js_value_type(*target) != fiber::script::JsNodeType::Object ||
         fiber::script::js_value_type(*addition) != fiber::script::JsNodeType::Object) {
@@ -166,7 +166,7 @@ CallResult Access::expand_object(ScriptRuntime &runtime, ConstValueHandle target
     return set_value(result, *target);
 }
 
-CallResult Access::expand_array(ScriptRuntime &runtime, ConstValueHandle target, ConstValueHandle addition,
+CallResult Access::expand_array(GcHeap &runtime, ConstValueHandle target, ConstValueHandle addition,
                                 ResultPayload &result) noexcept {
     if (!target || fiber::script::js_value_type(*target) != fiber::script::JsNodeType::Array) {
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
@@ -220,7 +220,7 @@ CallResult Access::expand_array(ScriptRuntime &runtime, ConstValueHandle target,
     return set_value(result, *target);
 }
 
-CallResult Access::push_array(ScriptRuntime &runtime, ConstValueHandle target, ConstValueHandle addition,
+CallResult Access::push_array(GcHeap &runtime, ConstValueHandle target, ConstValueHandle addition,
                               ResultPayload &result) noexcept {
     if (!target || fiber::script::js_value_type(*target) != fiber::script::JsNodeType::Array) {
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
@@ -239,7 +239,7 @@ CallResult Access::push_array(ScriptRuntime &runtime, ConstValueHandle target, C
     return set_value(result, *target);
 }
 
-CallResult Access::index_get(ScriptRuntime &runtime, ConstValueHandle parent, ConstValueHandle key,
+CallResult Access::index_get(GcHeap &runtime, ConstValueHandle parent, ConstValueHandle key,
                              ResultPayload &result) noexcept {
     if (!parent) {
         return set_undefined(result);
@@ -277,8 +277,8 @@ CallResult Access::index_get(ScriptRuntime &runtime, ConstValueHandle parent, Co
     return set_undefined(result);
 }
 
-CallResult Access::index_set(ScriptRuntime &runtime, ConstValueHandle parent, ConstValueHandle key,
-                             ConstValueHandle value, ResultPayload &result) noexcept {
+CallResult Access::index_set(GcHeap &runtime, ConstValueHandle parent, ConstValueHandle key, ConstValueHandle value,
+                             ResultPayload &result) noexcept {
     if (!parent || !value) {
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
     }
@@ -300,7 +300,7 @@ CallResult Access::index_set(ScriptRuntime &runtime, ConstValueHandle parent, Co
         return set_value(result, *value);
     }
     if (fiber::script::js_value_type(*parent) == fiber::script::JsNodeType::Object) {
-        ScriptRuntime::LocalMark mark(runtime);
+        GcHeap::LocalMark mark(runtime);
         fiber::script::GcHeap *heap = &runtime.heap();
         ScriptAbortReason error = ScriptAbortReason::None;
         fiber::script::GcString *key_str = ensure_heap_string(runtime, key, error);
@@ -328,8 +328,8 @@ CallResult Access::index_set(ScriptRuntime &runtime, ConstValueHandle parent, Co
     return set_exception(result, fiber::script::ExceptionKind::TypeError);
 }
 
-CallResult Access::index_set1(ScriptRuntime &runtime, ConstValueHandle parent, ConstValueHandle key,
-                              ConstValueHandle value, ResultPayload &result) noexcept {
+CallResult Access::index_set1(GcHeap &runtime, ConstValueHandle parent, ConstValueHandle key, ConstValueHandle value,
+                              ResultPayload &result) noexcept {
     ResultPayload tmp;
     CallResult status = index_set(runtime, parent, key, value, tmp);
     if (status != CallResult::Success) {
@@ -339,7 +339,7 @@ CallResult Access::index_set1(ScriptRuntime &runtime, ConstValueHandle parent, C
     return set_value(result, parent ? *parent : fiber::script::JsValue::make_undefined());
 }
 
-CallResult Access::prop_get(ScriptRuntime &runtime, ConstValueHandle parent, ConstValueHandle key,
+CallResult Access::prop_get(GcHeap &runtime, ConstValueHandle parent, ConstValueHandle key,
                             ResultPayload &result) noexcept {
     if (!parent) {
         return set_undefined(result);
@@ -372,12 +372,12 @@ CallResult Access::prop_get(ScriptRuntime &runtime, ConstValueHandle parent, Con
     return set_undefined(result);
 }
 
-CallResult Access::prop_set(ScriptRuntime &runtime, ConstValueHandle parent, ConstValueHandle value,
-                            ConstValueHandle key, ResultPayload &result) noexcept {
+CallResult Access::prop_set(GcHeap &runtime, ConstValueHandle parent, ConstValueHandle value, ConstValueHandle key,
+                            ResultPayload &result) noexcept {
     if (!parent || fiber::script::js_value_type(*parent) != fiber::script::JsNodeType::Object) {
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
     }
-    ScriptRuntime::LocalMark mark(runtime);
+    GcHeap::LocalMark mark(runtime);
     fiber::script::GcHeap *heap = &runtime.heap();
     ScriptAbortReason error = ScriptAbortReason::None;
     fiber::script::GcString *key_str = ensure_heap_string(runtime, key, error);
@@ -403,8 +403,8 @@ CallResult Access::prop_set(ScriptRuntime &runtime, ConstValueHandle parent, Con
     return set_value(result, *value);
 }
 
-CallResult Access::prop_set1(ScriptRuntime &runtime, ConstValueHandle parent, ConstValueHandle value,
-                             ConstValueHandle key, ResultPayload &result) noexcept {
+CallResult Access::prop_set1(GcHeap &runtime, ConstValueHandle parent, ConstValueHandle value, ConstValueHandle key,
+                             ResultPayload &result) noexcept {
     ResultPayload tmp;
     CallResult status = prop_set(runtime, parent, value, key, tmp);
     if (status != CallResult::Success) {

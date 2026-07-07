@@ -17,7 +17,7 @@ enum class GcMark : std::uint8_t {
 };
 
 struct GcHeader;
-struct GcHeap;
+class GcHeap;
 
 enum class JsNodeType : std::uint8_t {
     Undefined = 0,

@@ -6,16 +6,19 @@ tails.
 
 ## Runtime ABI
 
-Host functions receive a flattened argument array through `Library::HostCallFrame`.
+Host functions receive execution context through `Library::HostCallFrame` and a
+flattened argument array through `Library::Arguments`.
 
 ```cpp
 struct HostCallFrame {
-    ScriptRuntime *runtime;
-    const JsValue *root;
+    GcHeap *runtime;
+    ConstValueHandle root;
     void *attach;
-    const JsValue *args;
+};
+
+struct Arguments {
+    ConstValueHandle args;
     std::uint32_t argc;
-    std::uint32_t flags;
 };
 ```
 

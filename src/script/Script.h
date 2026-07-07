@@ -12,12 +12,8 @@
 #include "ir/Compiled.h"
 
 namespace fiber::script {
+
 class GcHeap;
-} // namespace fiber::script
-
-namespace fiber::script {
-
-class ScriptRuntime;
 namespace run {
 class InterpreterVm;
 } // namespace run
@@ -44,15 +40,12 @@ public:
 private:
     friend class Script;
 
-    ScriptRun(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach, ScriptRuntime &runtime);
-
     ScriptRun(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach,
               fiber::script::GcHeap &heap);
 
     AsyncTask run_async_task();
 
-    std::unique_ptr<ScriptRuntime> owned_runtime_;
-    ScriptRuntime *runtime_ = nullptr;
+    GcHeap *heap_ = nullptr;
     std::unique_ptr<run::InterpreterVm> vm_;
 };
 
@@ -120,11 +113,7 @@ public:
     Script() = default;
     explicit Script(std::shared_ptr<ir::Compiled> compiled);
 
-    ScriptAsyncRun exec_async(const fiber::script::JsValue &root, void *attach, ScriptRuntime &runtime);
-
     ScriptAsyncRun exec_async(const fiber::script::JsValue &root, void *attach, fiber::script::GcHeap &heap);
-
-    ScriptSyncRun exec_sync(const fiber::script::JsValue &root, void *attach, ScriptRuntime &runtime);
 
     ScriptSyncRun exec_sync(const fiber::script::JsValue &root, void *attach, fiber::script::GcHeap &heap);
 
