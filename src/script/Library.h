@@ -8,7 +8,7 @@
 #include "AsyncTask.h"
 #include "Runtime.h"
 #include "ScriptResult.h"
-#include "json/JsNode.h"
+#include "JsValue.h"
 
 namespace fiber::script {
 
@@ -56,7 +56,7 @@ public:
         std::uint16_t required_argc = 0;
         std::uint16_t fixed_argc = 0;
         bool variadic = true;
-        const fiber::json::JsValue *defaults = nullptr;
+        const fiber::script::JsValue *defaults = nullptr;
         std::uint16_t default_count = 0;
     };
 
@@ -77,14 +77,14 @@ public:
         FunctionMatchStatus status = FunctionMatchStatus::NotFound;
         const HostCallable *callable = nullptr;
         FunctionSignature signature{};
-        const fiber::json::JsValue *defaults_to_append = nullptr;
+        const fiber::script::JsValue *defaults_to_append = nullptr;
         std::uint16_t default_count = 0;
 
         static FunctionMatchResult not_found() noexcept;
         static FunctionMatchResult arity_mismatch() noexcept;
         static FunctionMatchResult ambiguous() noexcept;
         static FunctionMatchResult found(const HostCallable *callable, FunctionSignature signature,
-                                         const fiber::json::JsValue *defaults, std::uint16_t default_count) noexcept;
+                                         const fiber::script::JsValue *defaults, std::uint16_t default_count) noexcept;
     };
 
     class DirectiveDef {
@@ -104,7 +104,7 @@ public:
     virtual const HostCallable *resolve_constant(std::string_view namespace_name, std::string_view key) const = 0;
     virtual const HostCallable *resolve_async_constant(std::string_view namespace_name, std::string_view key) const = 0;
     virtual DirectiveDef *resolve_directive_def(std::string_view type, std::string_view name,
-                                                const std::vector<fiber::json::JsValue> &literals) const = 0;
+                                                const std::vector<fiber::script::JsValue> &literals) const = 0;
 
     virtual FunctionMatchResult resolve_func(std::string_view name, const FunctionMatchRequest &request) const = 0;
     virtual FunctionMatchResult resolve_async_func(std::string_view name,

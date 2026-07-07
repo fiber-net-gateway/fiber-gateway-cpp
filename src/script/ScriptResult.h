@@ -6,7 +6,7 @@
 #include <type_traits>
 
 #include "../common/Assert.h"
-#include "json/JsNode.h"
+#include "JsValue.h"
 
 namespace fiber::script {
 
@@ -88,8 +88,8 @@ struct ScriptStatus {
 union ResultPayload {
     constexpr ResultPayload() : value{} {}
 
-    fiber::json::JsValue value;
-    fiber::json::JsValue exception;
+    fiber::script::JsValue value;
+    fiber::script::JsValue exception;
     ScriptAbort abort;
 };
 
@@ -97,29 +97,29 @@ struct alignas(16) ScriptResult {
     union Payload {
         constexpr Payload() : abort{} {}
 
-        fiber::json::JsValue value;
+        fiber::script::JsValue value;
         ScriptAbort abort;
     };
 
     constexpr ScriptResult() noexcept = default;
 
-    ScriptResult(const fiber::json::JsValue &value) noexcept : kind(ScriptResultKind::Success), payload{} {
+    ScriptResult(const fiber::script::JsValue &value) noexcept : kind(ScriptResultKind::Success), payload{} {
         payload.value = value;
     }
 
-    ScriptResult(std::unexpected<fiber::json::JsValue> unexpected) noexcept :
+    ScriptResult(std::unexpected<fiber::script::JsValue> unexpected) noexcept :
         kind(ScriptResultKind::Exception), payload{} {
         payload.value = unexpected.error();
     }
 
-    static ScriptResult success(const fiber::json::JsValue &value) noexcept {
+    static ScriptResult success(const fiber::script::JsValue &value) noexcept {
         ScriptResult result;
         result.kind = ScriptResultKind::Success;
         result.payload.value = value;
         return result;
     }
 
-    static ScriptResult exception(const fiber::json::JsValue &value) noexcept {
+    static ScriptResult exception(const fiber::script::JsValue &value) noexcept {
         ScriptResult result;
         result.kind = ScriptResultKind::Exception;
         result.payload.value = value;
@@ -145,12 +145,12 @@ struct alignas(16) ScriptResult {
 
     [[nodiscard]] bool is_done() const noexcept { return !is_pending(); }
 
-    [[nodiscard]] const fiber::json::JsValue &value() const noexcept {
+    [[nodiscard]] const fiber::script::JsValue &value() const noexcept {
         FIBER_ASSERT(is_success());
         return payload.value;
     }
 
-    [[nodiscard]] const fiber::json::JsValue &exception() const noexcept {
+    [[nodiscard]] const fiber::script::JsValue &exception() const noexcept {
         FIBER_ASSERT(is_exception());
         return payload.value;
     }
@@ -164,7 +164,7 @@ struct alignas(16) ScriptResult {
 
     [[nodiscard]] explicit operator bool() const noexcept { return has_value(); }
 
-    [[nodiscard]] const fiber::json::JsValue &error() const noexcept { return exception(); }
+    [[nodiscard]] const fiber::script::JsValue &error() const noexcept { return exception(); }
 
     ScriptResultKind kind = ScriptResultKind::Abort;
     Payload payload{};
@@ -177,18 +177,18 @@ static_assert(std::is_trivially_copyable_v<ScriptResult>);
 
 // ResultPayload mutators — the single way op functions write their outcome. Ops never carry a
 // position (the dispatch layer recovers it from the current pc_), so set_abort takes only a reason.
-inline CallResult set_value(ResultPayload &result, const fiber::json::JsValue &value) noexcept {
+inline CallResult set_value(ResultPayload &result, const fiber::script::JsValue &value) noexcept {
     result.value = value;
     return CallResult::Success;
 }
 
 inline CallResult set_undefined(ResultPayload &result) noexcept {
-    result.value = fiber::json::JsValue::make_undefined();
+    result.value = fiber::script::JsValue::make_undefined();
     return CallResult::Success;
 }
 
-inline CallResult set_exception(ResultPayload &result, fiber::json::ExceptionKind kind) noexcept {
-    result.exception = fiber::json::JsValue::make_exception(kind);
+inline CallResult set_exception(ResultPayload &result, fiber::script::ExceptionKind kind) noexcept {
+    result.exception = fiber::script::JsValue::make_exception(kind);
     return CallResult::Exception;
 }
 

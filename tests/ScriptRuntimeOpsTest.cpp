@@ -7,12 +7,12 @@
 #include "script/run/Compares.h"
 #include "script/run/Unaries.h"
 
-using fiber::json::GcArray;
-using fiber::json::GcHeap;
-using fiber::json::GcObject;
-using fiber::json::GcString;
-using fiber::json::JsNodeType;
-using fiber::json::JsValue;
+using fiber::script::GcArray;
+using fiber::script::GcHeap;
+using fiber::script::GcObject;
+using fiber::script::GcString;
+using fiber::script::JsNodeType;
+using fiber::script::JsValue;
 using fiber::script::CallResult;
 using fiber::script::ResultPayload;
 
@@ -31,7 +31,7 @@ JsValue make_array(GcHeap &heap, std::initializer_list<JsValue> values) {
     JsValue arr = JsValue::make_array(heap, values.size());
     auto *arr_ptr = js_value_heap_ptr<GcArray>(arr);
     for (const auto &value: values) {
-        if (!fiber::json::gc_array_push(&heap, arr_ptr, value)) {
+        if (!fiber::script::gc_array_push(&heap, arr_ptr, value)) {
             ADD_FAILURE() << "gc_array_push failed";
             break;
         }
@@ -42,12 +42,12 @@ JsValue make_array(GcHeap &heap, std::initializer_list<JsValue> values) {
 JsValue make_object_with_key(GcHeap &heap, const char *key, std::size_t key_len, const JsValue &value) {
     JsValue obj = JsValue::make_object(heap, 1);
     auto *obj_ptr = js_value_heap_ptr<GcObject>(obj);
-    GcString *key_str = fiber::json::gc_new_string(&heap, key, key_len);
+    GcString *key_str = fiber::script::gc_new_string(&heap, key, key_len);
     if (!key_str) {
         ADD_FAILURE() << "gc_new_string failed";
         return obj;
     }
-    if (!fiber::json::gc_object_set(&heap, obj_ptr, key_str, value)) {
+    if (!fiber::script::gc_object_set(&heap, obj_ptr, key_str, value)) {
         ADD_FAILURE() << "gc_object_set failed";
     }
     return obj;
@@ -63,7 +63,7 @@ TEST(ScriptRuntimeOpsTest, BinaryPlusTypeError) {
     ResultPayload result;
     auto status = fiber::script::run::Binaries::plus(runtime, lhs, rhs, result);
     ASSERT_EQ(status, CallResult::Exception);
-    EXPECT_EQ(fiber::json::js_value_exception_kind(result.exception), fiber::json::ExceptionKind::TypeError);
+    EXPECT_EQ(fiber::script::js_value_exception_kind(result.exception), fiber::script::ExceptionKind::TypeError);
 }
 
 TEST(ScriptRuntimeOpsTest, BinaryDivideByZero) {
@@ -74,7 +74,7 @@ TEST(ScriptRuntimeOpsTest, BinaryDivideByZero) {
     ResultPayload result;
     auto status = fiber::script::run::Binaries::divide(runtime, lhs, rhs, result);
     ASSERT_EQ(status, CallResult::Exception);
-    EXPECT_EQ(fiber::json::js_value_exception_kind(result.exception), fiber::json::ExceptionKind::RangeError);
+    EXPECT_EQ(fiber::script::js_value_exception_kind(result.exception), fiber::script::ExceptionKind::RangeError);
 }
 
 TEST(ScriptRuntimeOpsTest, UnaryPlusTypeError) {
@@ -85,7 +85,7 @@ TEST(ScriptRuntimeOpsTest, UnaryPlusTypeError) {
     ResultPayload result;
     auto status = fiber::script::run::Unaries::plus(runtime, value, result);
     ASSERT_EQ(status, CallResult::Exception);
-    EXPECT_EQ(fiber::json::js_value_exception_kind(result.exception), fiber::json::ExceptionKind::TypeError);
+    EXPECT_EQ(fiber::script::js_value_exception_kind(result.exception), fiber::script::ExceptionKind::TypeError);
 }
 
 TEST(ScriptRuntimeOpsTest, AccessIndexSetInvalidKey) {
@@ -93,14 +93,14 @@ TEST(ScriptRuntimeOpsTest, AccessIndexSetInvalidKey) {
     fiber::script::ScriptRuntime runtime(heap);
     auto arr = handle(runtime, JsValue::make_array(heap, 0));
     auto *arr_ptr = js_value_heap_ptr<GcArray>(*arr);
-    ASSERT_TRUE(fiber::json::gc_array_push(&heap, arr_ptr, JsValue::make_integer(1)));
+    ASSERT_TRUE(fiber::script::gc_array_push(&heap, arr_ptr, JsValue::make_integer(1)));
     char key_bytes[] = {'a'};
     auto key = handle(runtime, JsValue::make_native_string(key_bytes, sizeof(key_bytes)));
     auto value = handle(runtime, JsValue::make_integer(2));
     ResultPayload result;
     auto status = fiber::script::run::Access::index_set(runtime, arr, key, value, result);
     ASSERT_EQ(status, CallResult::Exception);
-    EXPECT_EQ(fiber::json::js_value_exception_kind(result.exception), fiber::json::ExceptionKind::TypeError);
+    EXPECT_EQ(fiber::script::js_value_exception_kind(result.exception), fiber::script::ExceptionKind::TypeError);
 }
 
 TEST(ScriptRuntimeOpsTest, AccessIndexSetOutOfBounds) {
@@ -108,13 +108,13 @@ TEST(ScriptRuntimeOpsTest, AccessIndexSetOutOfBounds) {
     fiber::script::ScriptRuntime runtime(heap);
     auto arr = handle(runtime, JsValue::make_array(heap, 0));
     auto *arr_ptr = js_value_heap_ptr<GcArray>(*arr);
-    ASSERT_TRUE(fiber::json::gc_array_push(&heap, arr_ptr, JsValue::make_integer(1)));
+    ASSERT_TRUE(fiber::script::gc_array_push(&heap, arr_ptr, JsValue::make_integer(1)));
     auto key = handle(runtime, JsValue::make_integer(3));
     auto value = handle(runtime, JsValue::make_integer(2));
     ResultPayload result;
     auto status = fiber::script::run::Access::index_set(runtime, arr, key, value, result);
     ASSERT_EQ(status, CallResult::Exception);
-    EXPECT_EQ(fiber::json::js_value_exception_kind(result.exception), fiber::json::ExceptionKind::RangeError);
+    EXPECT_EQ(fiber::script::js_value_exception_kind(result.exception), fiber::script::ExceptionKind::RangeError);
 }
 
 TEST(ScriptRuntimeOpsTest, AccessPropSetNonObject) {
@@ -127,7 +127,7 @@ TEST(ScriptRuntimeOpsTest, AccessPropSetNonObject) {
     ResultPayload result;
     auto status = fiber::script::run::Access::prop_set(runtime, parent, value, key, result);
     ASSERT_EQ(status, CallResult::Exception);
-    EXPECT_EQ(fiber::json::js_value_exception_kind(result.exception), fiber::json::ExceptionKind::TypeError);
+    EXPECT_EQ(fiber::script::js_value_exception_kind(result.exception), fiber::script::ExceptionKind::TypeError);
 }
 
 TEST(ScriptRuntimeOpsTest, InSemanticsArray) {

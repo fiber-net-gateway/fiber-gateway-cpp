@@ -13,7 +13,7 @@
 
 namespace {
 
-using fiber::json::JsValue;
+using fiber::script::JsValue;
 using fiber::script::Library;
 using fiber::script::ScriptResult;
 using fiber::script::ScriptStatus;
@@ -178,8 +178,8 @@ TEST(CompiledOperandTest, CompilerEmitsDirectConstantsAndFuncConsts) {
     ASSERT_LT(call_async_const, compiled.code_size());
 
     const JsValue &prop_name = compiled.constant(operand_index_for_code(compiled.codes()[prop_get]));
-    ASSERT_EQ(fiber::json::js_value_type(prop_name), fiber::json::JsNodeType::String);
-    fiber::json::NativeStr name = fiber::json::js_value_native_string(prop_name);
+    ASSERT_EQ(fiber::script::js_value_type(prop_name), fiber::script::JsNodeType::String);
+    fiber::script::NativeStr name = fiber::script::js_value_native_string(prop_name);
     EXPECT_EQ(std::string_view(name.data, name.len), "foo");
 
     std::int32_t sync_call_code = compiled.codes()[call_func];
@@ -204,7 +204,7 @@ TEST(CompiledOperandTest, MoveKeepsBorrowedConstantPayloadStable) {
     ASSERT_LT(prop_get, moved.code_size());
 
     const JsValue &prop_name = moved.constant(operand_index_for_code(moved.codes()[prop_get]));
-    ASSERT_EQ(fiber::json::js_value_type(prop_name), fiber::json::JsNodeType::String);
-    fiber::json::NativeStr name = fiber::json::js_value_native_string(prop_name);
+    ASSERT_EQ(fiber::script::js_value_type(prop_name), fiber::script::JsNodeType::String);
+    fiber::script::NativeStr name = fiber::script::js_value_native_string(prop_name);
     EXPECT_EQ(std::string_view(name.data, name.len), "foo");
 }

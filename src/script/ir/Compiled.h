@@ -6,7 +6,7 @@
 #include <span>
 
 #include "../Library.h"
-#include "../json/JsNode.h"
+#include "../JsValue.h"
 #include "Code.h"
 
 namespace fiber::script::ir {
@@ -41,7 +41,7 @@ public:
     [[nodiscard]] std::uint32_t code_size() const noexcept { return code_count_; }
 
     [[nodiscard]] const FuncConst &func_const(std::uint32_t index) const noexcept;
-    [[nodiscard]] const fiber::json::JsValue &constant(std::uint32_t index) const noexcept;
+    [[nodiscard]] const fiber::script::JsValue &constant(std::uint32_t index) const noexcept;
     [[nodiscard]] std::uint32_t find_catch(std::uint32_t epc) const noexcept;
     [[nodiscard]] std::uint32_t find_position(std::uint32_t pc) const noexcept;
     [[nodiscard]] bool contains_async() const noexcept;
@@ -52,7 +52,7 @@ private:
     static constexpr std::uint32_t kNoPayload = UINT32_MAX;
 
     struct ConstantInit {
-        fiber::json::JsValue value = fiber::json::JsValue::make_undefined();
+        fiber::script::JsValue value = fiber::script::JsValue::make_undefined();
         std::uint32_t payload_offset = kNoPayload;
     };
 
@@ -71,7 +71,7 @@ private:
 
     std::int32_t *codes_ = nullptr;
     std::int32_t *positions_ = nullptr;
-    fiber::json::JsValue *constants_ = nullptr;
+    fiber::script::JsValue *constants_ = nullptr;
     FuncConst *func_consts_ = nullptr;
     std::uint32_t *catch_keys_ = nullptr;
     std::uint32_t *catch_targets_ = nullptr;

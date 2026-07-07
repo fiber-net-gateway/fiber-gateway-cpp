@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-namespace fiber::json {
+namespace fiber::script {
 namespace {
 
 constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
@@ -1671,4 +1671,4 @@ void GcRootHandle::reset() {
     value_ = nullptr;
 }
 
-} // namespace fiber::json
+} // namespace fiber::script

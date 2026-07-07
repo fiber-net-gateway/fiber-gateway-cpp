@@ -3,7 +3,7 @@
 
 #include <cstddef>
 
-#include "json/JsNode.h"
+#include "JsValue.h"
 
 namespace fiber::script {
 
@@ -14,9 +14,9 @@ public:
     virtual ~ExecutionContext() = default;
 
     virtual ScriptRuntime &runtime() = 0;
-    virtual const fiber::json::JsValue &root() const = 0;
+    virtual const fiber::script::JsValue &root() const = 0;
     virtual void *attach() const = 0;
-    virtual const fiber::json::JsValue &arg_value(std::size_t index) const = 0;
+    virtual const fiber::script::JsValue &arg_value(std::size_t index) const = 0;
     virtual std::size_t arg_count() const = 0;
 };
 

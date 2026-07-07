@@ -551,23 +551,23 @@ std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_directi
         return std::unexpected(make_error("directive exists", directive_token ? &directive_token.value() : nullptr));
     }
 
-    std::vector<fiber::json::JsValue> literal_values;
+    std::vector<fiber::script::JsValue> literal_values;
     for (const auto &lit: literals) {
         switch (lit.kind()) {
             case ast::Literal::Kind::NullValue:
-                literal_values.push_back(fiber::json::JsValue::make_null());
+                literal_values.push_back(fiber::script::JsValue::make_null());
                 break;
             case ast::Literal::Kind::Boolean:
-                literal_values.push_back(fiber::json::JsValue::make_boolean(lit.bool_value()));
+                literal_values.push_back(fiber::script::JsValue::make_boolean(lit.bool_value()));
                 break;
             case ast::Literal::Kind::Integer:
-                literal_values.push_back(fiber::json::JsValue::make_integer(lit.int_value()));
+                literal_values.push_back(fiber::script::JsValue::make_integer(lit.int_value()));
                 break;
             case ast::Literal::Kind::Float:
-                literal_values.push_back(fiber::json::JsValue::make_float(lit.float_value()));
+                literal_values.push_back(fiber::script::JsValue::make_float(lit.float_value()));
                 break;
             case ast::Literal::Kind::String:
-                literal_values.push_back(fiber::json::JsValue::make_native_string(
+                literal_values.push_back(fiber::script::JsValue::make_native_string(
                         const_cast<char *>(lit.string_value().data()), lit.string_value().size()));
                 break;
         }

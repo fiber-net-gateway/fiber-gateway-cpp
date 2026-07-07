@@ -19,15 +19,15 @@ public:
     const HostCallable *resolve_constant(std::string_view namespace_name, std::string_view key) const override;
     const HostCallable *resolve_async_constant(std::string_view namespace_name, std::string_view key) const override;
     DirectiveDef *resolve_directive_def(std::string_view type, std::string_view name,
-                                        const std::vector<fiber::json::JsValue> &literals) const override;
+                                        const std::vector<fiber::script::JsValue> &literals) const override;
 
     void register_func(std::string name, FunctionSignature signature, Function function, void *userdata = nullptr,
                        const char *debug_name = nullptr);
-    void register_func(std::string name, FunctionSignature signature, std::vector<fiber::json::JsValue> defaults,
+    void register_func(std::string name, FunctionSignature signature, std::vector<fiber::script::JsValue> defaults,
                        Function function, void *userdata = nullptr, const char *debug_name = nullptr);
     void register_async_func(std::string name, FunctionSignature signature, AsyncFunction function,
                              void *userdata = nullptr, const char *debug_name = nullptr);
-    void register_async_func(std::string name, FunctionSignature signature, std::vector<fiber::json::JsValue> defaults,
+    void register_async_func(std::string name, FunctionSignature signature, std::vector<fiber::script::JsValue> defaults,
                              AsyncFunction function, void *userdata = nullptr, const char *debug_name = nullptr);
     void register_constant(std::string name, Constant constant, void *userdata = nullptr,
                            const char *debug_name = nullptr);
@@ -37,7 +37,7 @@ public:
 private:
     struct FunctionEntry {
         FunctionSignature signature{};
-        std::vector<fiber::json::JsValue> defaults;
+        std::vector<fiber::script::JsValue> defaults;
         HostCallable callable;
     };
 

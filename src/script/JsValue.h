@@ -2,14 +2,14 @@
 // Created by dear on 2025/12/30.
 //
 
-#ifndef FIBER_JSNODE_H
-#define FIBER_JSNODE_H
+#ifndef FIBER_JSVALUE_H
+#define FIBER_JSVALUE_H
 
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
 
-namespace fiber::json {
+namespace fiber::script {
 
 enum class GcMark : std::uint8_t {
     GcMark_0,
@@ -143,6 +143,6 @@ static_assert(std::is_trivially_copyable_v<NativeBin>);
 static_assert(sizeof(JsValue) == 16);
 static_assert(std::is_trivially_copyable_v<JsValue>);
 
-} // namespace fiber::json
+} // namespace fiber::script
 
-#endif // FIBER_JSNODE_H
+#endif // FIBER_JSVALUE_H

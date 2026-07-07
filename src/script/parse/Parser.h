@@ -57,7 +57,7 @@ private:
     struct ResolvedFunctionCall {
         const Library::HostCallable *func = nullptr;
         const Library::HostCallable *async_func = nullptr;
-        std::vector<fiber::json::JsValue> default_args;
+        std::vector<fiber::script::JsValue> default_args;
     };
 
     std::expected<std::unique_ptr<ast::Statement>, ParseError> parse_statement();

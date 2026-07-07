@@ -60,7 +60,7 @@ Library::FunctionMatchResult match_entries(const std::deque<Entry> &entries,
     }
     Library::FunctionSignature signature = matched->signature;
     signature.defaults = matched->defaults.empty() ? nullptr : matched->defaults.data();
-    const fiber::json::JsValue *defaults = nullptr;
+    const fiber::script::JsValue *defaults = nullptr;
     std::uint16_t default_count = 0;
     if (!signature.variadic && request.known_argc < signature.fixed_argc) {
         const std::uint16_t default_offset = static_cast<std::uint16_t>(request.known_argc - signature.required_argc);
@@ -163,7 +163,7 @@ const Library::HostCallable *StdLibrary::resolve_async_constant(std::string_view
 }
 
 Library::DirectiveDef *StdLibrary::resolve_directive_def(std::string_view type, std::string_view name,
-                                                         const std::vector<fiber::json::JsValue> &literals) const {
+                                                         const std::vector<fiber::script::JsValue> &literals) const {
     (void) type;
     (void) name;
     (void) literals;
@@ -176,7 +176,7 @@ void StdLibrary::register_func(std::string name, FunctionSignature signature, Fu
 }
 
 void StdLibrary::register_func(std::string name, FunctionSignature signature,
-                               std::vector<fiber::json::JsValue> defaults, Function function, void *userdata,
+                               std::vector<fiber::script::JsValue> defaults, Function function, void *userdata,
                                const char *debug_name) {
     signature.default_count = static_cast<std::uint16_t>(defaults.size());
     signature.defaults = nullptr;
@@ -199,7 +199,7 @@ void StdLibrary::register_async_func(std::string name, FunctionSignature signatu
 }
 
 void StdLibrary::register_async_func(std::string name, FunctionSignature signature,
-                                     std::vector<fiber::json::JsValue> defaults, AsyncFunction function, void *userdata,
+                                     std::vector<fiber::script::JsValue> defaults, AsyncFunction function, void *userdata,
                                      const char *debug_name) {
     signature.default_count = static_cast<std::uint16_t>(defaults.size());
     signature.defaults = nullptr;

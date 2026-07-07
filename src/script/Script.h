@@ -9,11 +9,11 @@
 #include "AsyncTask.h"
 #include "ScriptResult.h"
 #include "ir/Compiled.h"
-#include "json/JsNode.h"
+#include "JsValue.h"
 
-namespace fiber::json {
+namespace fiber::script {
 class GcHeap;
-} // namespace fiber::json
+} // namespace fiber::script
 
 namespace fiber::script {
 
@@ -44,9 +44,9 @@ public:
 private:
     friend class Script;
 
-    ScriptRun(const ir::Compiled &compiled, const fiber::json::JsValue &root, void *attach, ScriptRuntime &runtime);
+    ScriptRun(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach, ScriptRuntime &runtime);
 
-    ScriptRun(const ir::Compiled &compiled, const fiber::json::JsValue &root, void *attach, fiber::json::GcHeap &heap);
+    ScriptRun(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach, fiber::script::GcHeap &heap);
 
     AsyncTask run_async_task();
 
@@ -119,13 +119,13 @@ public:
     Script() = default;
     explicit Script(std::shared_ptr<ir::Compiled> compiled);
 
-    ScriptAsyncRun exec_async(const fiber::json::JsValue &root, void *attach, ScriptRuntime &runtime);
+    ScriptAsyncRun exec_async(const fiber::script::JsValue &root, void *attach, ScriptRuntime &runtime);
 
-    ScriptAsyncRun exec_async(const fiber::json::JsValue &root, void *attach, fiber::json::GcHeap &heap);
+    ScriptAsyncRun exec_async(const fiber::script::JsValue &root, void *attach, fiber::script::GcHeap &heap);
 
-    ScriptSyncRun exec_sync(const fiber::json::JsValue &root, void *attach, ScriptRuntime &runtime);
+    ScriptSyncRun exec_sync(const fiber::script::JsValue &root, void *attach, ScriptRuntime &runtime);
 
-    ScriptSyncRun exec_sync(const fiber::json::JsValue &root, void *attach, fiber::json::GcHeap &heap);
+    ScriptSyncRun exec_sync(const fiber::script::JsValue &root, void *attach, fiber::script::GcHeap &heap);
 
     bool contains_async() const;
 

@@ -9,7 +9,7 @@
 #include "../AsyncTask.h"
 #include "../ScriptResult.h"
 #include "../ir/Compiled.h"
-#include "../json/JsGc.h"
+#include "../JsGc.h"
 
 namespace fiber::script {
 class ScriptRuntime;
@@ -17,16 +17,16 @@ class ScriptRuntime;
 
 namespace fiber::script::run {
 
-class InterpreterVm final : public fiber::json::GcRootSource {
+class InterpreterVm final : public fiber::script::GcRootSource {
 public:
-    InterpreterVm(const ir::Compiled &compiled, const fiber::json::JsValue &root, void *attach, ScriptRuntime &runtime);
+    InterpreterVm(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach, ScriptRuntime &runtime);
     ~InterpreterVm() override;
 
     void iterate();
     [[nodiscard]] ScriptResult result() const noexcept;
     [[nodiscard]] bool done() const noexcept;
     [[nodiscard]] AsyncTask &async_task() noexcept { return async_.task; }
-    void visit_roots(fiber::json::GcRootVisitor &visitor) noexcept override;
+    void visit_roots(fiber::script::GcRootVisitor &visitor) noexcept override;
 
 private:
     static constexpr int kInstrumentLen = 8;
@@ -48,22 +48,22 @@ private:
     struct AsyncState {
         AsyncTask task;
         ScriptStatus status = ScriptStatus::abort(ScriptAbortReason::InvalidState);
-        fiber::json::JsValue value = fiber::json::JsValue::make_undefined();
+        fiber::script::JsValue value = fiber::script::JsValue::make_undefined();
         bool ready = false;
         AsyncResumeKind resume_kind = AsyncResumeKind::None;
         std::size_t resume_epc = 0;
-        std::vector<fiber::json::JsValue> args;
+        std::vector<fiber::script::JsValue> args;
         Library::Arguments arguments{};
     };
 
     const ir::Compiled &compile_;
-    fiber::json::JsValue root_;
+    fiber::script::JsValue root_;
     void *attach_ = nullptr;
     ScriptRuntime &runtime_;
 
-    std::unique_ptr<fiber::json::JsValue[]> slots_;
-    fiber::json::JsValue *stack_ = nullptr;
-    fiber::json::JsValue *vars_ = nullptr;
+    std::unique_ptr<fiber::script::JsValue[]> slots_;
+    fiber::script::JsValue *stack_ = nullptr;
+    fiber::script::JsValue *vars_ = nullptr;
     std::size_t sp_ = 0;
     std::size_t pc_ = 0;
     State state_ = State::Init;
@@ -71,12 +71,12 @@ private:
     AsyncState async_{};
 
     static void async_complete(void *context, ScriptStatus status) noexcept;
-    fiber::json::JsValue *prepare_call_args(std::size_t off, std::size_t count);
-    fiber::json::JsValue *prepare_spread_call_args(std::size_t slot, std::uint32_t &argc);
+    fiber::script::JsValue *prepare_call_args(std::size_t off, std::size_t count);
+    fiber::script::JsValue *prepare_spread_call_args(std::size_t slot, std::uint32_t &argc);
     Library::HostCallFrame make_call_frame() const;
     bool dispatch_func_const(std::uint8_t op, const ir::Compiled::FuncConst &func_const, std::uint32_t encoded_argc,
                              AsyncResumeKind resume_kind);
-    bool apply_call_result(ScriptStatus status, const fiber::json::JsValue &value, AsyncResumeKind resume_kind,
+    bool apply_call_result(ScriptStatus status, const fiber::script::JsValue &value, AsyncResumeKind resume_kind,
                            std::size_t resume_epc);
     bool handle_call_result(CallResult status, std::size_t epc);
 

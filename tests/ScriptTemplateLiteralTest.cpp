@@ -4,13 +4,13 @@
 #include <string>
 
 #include "script/ScriptCompiler.h"
-#include "script/json/JsGc.h"
+#include "script/JsGc.h"
 #include "script/std/StdLibrary.h"
 
-using fiber::json::GcHeap;
-using fiber::json::GcString;
-using fiber::json::JsNodeType;
-using fiber::json::JsValue;
+using fiber::script::GcHeap;
+using fiber::script::GcString;
+using fiber::script::JsNodeType;
+using fiber::script::JsValue;
 using fiber::script::ScriptResult;
 using fiber::script::std_lib::StdLibrary;
 
@@ -20,14 +20,14 @@ const GcString *as_string(const JsValue &value) { return js_value_heap_ptr<const
 
 std::string string_to_utf8(const JsValue &value) {
     std::string out;
-    if (fiber::json::js_value_is_borrowed_string(value)) {
-        fiber::json::NativeStr native = fiber::json::js_value_native_string(value);
+    if (fiber::script::js_value_is_borrowed_string(value)) {
+        fiber::script::NativeStr native = fiber::script::js_value_native_string(value);
         out.assign(native.data, native.len);
         return out;
     }
     auto *str = as_string(value);
     if (str) {
-        EXPECT_TRUE(fiber::json::gc_string_to_utf8(str, out));
+        EXPECT_TRUE(fiber::script::gc_string_to_utf8(str, out));
     }
     return out;
 }

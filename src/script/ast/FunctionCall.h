@@ -14,7 +14,7 @@ class FunctionCall : public Expression {
 public:
     FunctionCall(std::int32_t start, std::int32_t end, std::string name, const Library::HostCallable *func,
                  const Library::HostCallable *async_func, std::vector<std::unique_ptr<Expression>> args,
-                 std::vector<fiber::json::JsValue> default_args = {}) :
+                 std::vector<fiber::script::JsValue> default_args = {}) :
         Expression(start, end), name_(std::move(name)), func_(func), async_func_(async_func), args_(std::move(args)),
         default_args_(std::move(default_args)) {}
 
@@ -28,14 +28,14 @@ public:
 
     const std::vector<std::unique_ptr<Expression>> &args() const { return args_; }
 
-    const std::vector<fiber::json::JsValue> &default_args() const { return default_args_; }
+    const std::vector<fiber::script::JsValue> &default_args() const { return default_args_; }
 
 private:
     std::string name_;
     const Library::HostCallable *func_ = nullptr;
     const Library::HostCallable *async_func_ = nullptr;
     std::vector<std::unique_ptr<Expression>> args_;
-    std::vector<fiber::json::JsValue> default_args_;
+    std::vector<fiber::script::JsValue> default_args_;
 };
 
 } // namespace fiber::script::ast

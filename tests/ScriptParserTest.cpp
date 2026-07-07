@@ -45,7 +45,7 @@ public:
     }
 
     DirectiveDef *resolve_directive_def(std::string_view type, std::string_view name,
-                                        const std::vector<fiber::json::JsValue> &literals) const override {
+                                        const std::vector<fiber::script::JsValue> &literals) const override {
         (void) type;
         (void) name;
         (void) literals;

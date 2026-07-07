@@ -2,14 +2,14 @@
 // Created by dear on 2025/12/30.
 //
 
-#include "JsNode.h"
+#include "JsValue.h"
 
 #include "JsGc.h"
 
 #include <bit>
 #include <limits>
 
-namespace fiber::json {
+namespace fiber::script {
 
 namespace {
 
@@ -219,4 +219,4 @@ const GcHeader *js_value_heap_header(const JsValue &value) {
     return reinterpret_cast<const GcHeader *>(value.payload);
 }
 
-} // namespace fiber::json
+} // namespace fiber::script
