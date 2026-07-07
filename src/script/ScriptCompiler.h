@@ -7,12 +7,13 @@
 
 #include "Library.h"
 #include "Script.h"
+#include "ScriptLimits.h"
 #include "parse/ParseError.h"
 
 namespace fiber::script {
 
 std::expected<Script, parse::ParseError> compile_script(Library &library, std::string_view script,
-                                                        bool allow_assign = true);
+                                                        bool allow_assign = true, ScriptLimits limits = {});
 
 } // namespace fiber::script
 

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <string>
 #include <string_view>
 
 #include "script/Library.h"
@@ -75,6 +76,31 @@ const fiber::script::ast::InlineList *as_inline_list(const fiber::script::ast::E
 
 const fiber::script::ast::InlineObject *as_inline_object(const fiber::script::ast::Expression *expr) {
     return dynamic_cast<const fiber::script::ast::InlineObject *>(expr);
+}
+
+std::string nested_parenthesized_expression(std::size_t depth) {
+    std::string expression;
+    expression.reserve(depth * 2 + 1);
+    expression.append(depth, '(');
+    expression.push_back('1');
+    expression.append(depth, ')');
+    return expression;
+}
+
+std::string nested_template_literal(std::size_t depth) {
+    std::string expression = "`x`";
+    for (std::size_t i = 0; i < depth; ++i) {
+        expression = "`${" + expression + "}`";
+    }
+    return expression;
+}
+
+std::string dotted_expression(std::size_t depth) {
+    std::string expression = "root";
+    for (std::size_t i = 0; i < depth; ++i) {
+        expression.append(".value");
+    }
+    return expression;
 }
 
 } // namespace
@@ -332,4 +358,34 @@ TEST(ScriptParserTest, ParseInvalidExpression) {
     auto result = parser.parse_expression("1 +");
     ASSERT_FALSE(result.has_value());
     EXPECT_FALSE(result.error().message.empty());
+}
+
+TEST(ScriptParserTest, RejectsExpressionNestingOverLimit) {
+    TestLibrary library;
+    fiber::script::parse::Parser parser(library, true, fiber::script::ScriptLimits{.max_depth = 8});
+
+    auto result = parser.parse_expression(nested_parenthesized_expression(16));
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().message, "maximum script nesting depth exceeded");
+}
+
+TEST(ScriptParserTest, RejectsTemplateLiteralNestingOverLimit) {
+    TestLibrary library;
+    fiber::script::parse::Parser parser(library, true, fiber::script::ScriptLimits{.max_depth = 4});
+
+    auto result = parser.parse_expression(nested_template_literal(8));
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().message, "maximum template literal nesting depth exceeded");
+}
+
+TEST(ScriptParserTest, RejectsMemberChainOverLimit) {
+    TestLibrary library;
+    fiber::script::parse::Parser parser(library, true, fiber::script::ScriptLimits{.max_depth = 8});
+
+    auto result = parser.parse_expression(dotted_expression(16));
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().message, "maximum script nesting depth exceeded");
 }

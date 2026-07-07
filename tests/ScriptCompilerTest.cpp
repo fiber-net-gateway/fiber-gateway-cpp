@@ -2,12 +2,16 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include "script/Library.h"
+#include "script/ast/BinaryOperator.h"
+#include "script/ast/Literal.h"
+#include "script/ast/Operator.h"
 #include "script/ir/Code.h"
 #include "script/ir/Compiler.h"
 #include "script/parse/Parser.h"
@@ -148,6 +152,17 @@ std::size_t operand_at(const fiber::script::ir::Compiled &compiled, std::size_t 
     return static_cast<std::size_t>(static_cast<std::uint32_t>(compiled.codes()[index]) >> 8u);
 }
 
+std::unique_ptr<fiber::script::ast::Expression> binary_chain(std::size_t depth) {
+    std::unique_ptr<fiber::script::ast::Expression> expr =
+            std::make_unique<fiber::script::ast::Literal>(0, 0, static_cast<std::int64_t>(1));
+    for (std::size_t i = 0; i < depth; ++i) {
+        auto rhs = std::make_unique<fiber::script::ast::Literal>(0, 0, static_cast<std::int64_t>(1));
+        expr = std::make_unique<fiber::script::ast::BinaryOperator>(0, 0, fiber::script::ast::Operator::Add,
+                                                                    std::move(expr), std::move(rhs));
+    }
+    return expr;
+}
+
 } // namespace
 
 TEST(ScriptCompilerTest, EmitsArithmeticExpressionStatement) {
@@ -270,4 +285,15 @@ TEST(ScriptCompilerTest, ReportsUnsupportedDefaultConstantType) {
     auto compiled = fiber::script::ir::Compiler::compile(*parsed.value());
     ASSERT_FALSE(compiled.has_value());
     EXPECT_EQ(compiled.error().reason, fiber::script::ir::CompileErrorReason::UnsupportedConstant);
+}
+
+TEST(ScriptCompilerTest, RejectsAstCompileDepthOverLimit) {
+    auto expr = binary_chain(16);
+
+    auto compiled = fiber::script::ir::Compiler::compile(*expr, 8);
+
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().reason, fiber::script::ir::CompileErrorReason::ProgramTooLarge);
+    ASSERT_NE(compiled.error().message, nullptr);
+    EXPECT_STREQ(compiled.error().message, "maximum script compile depth exceeded");
 }

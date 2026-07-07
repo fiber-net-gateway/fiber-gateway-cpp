@@ -4,7 +4,10 @@
 
 namespace fiber::script::parse {
 
-Tokenizer::Tokenizer(std::string input) : input_(std::move(input)) { max_ = input_.size(); }
+Tokenizer::Tokenizer(std::string input, std::size_t max_depth) :
+    input_(std::move(input)), max_depth_(max_depth == 0 ? 1 : max_depth) {
+    max_ = input_.size();
+}
 
 std::expected<void, ParseError> Tokenizer::process() {
     tokens_.clear();
@@ -269,7 +272,7 @@ std::expected<void, ParseError> Tokenizer::scan_string() {
 
 std::expected<void, ParseError> Tokenizer::scan_template_literal() {
     std::size_t start = pos_;
-    auto end_result = skip_template_literal(pos_);
+    auto end_result = skip_template_literal(pos_, 0);
     if (!end_result) {
         return std::unexpected(end_result.error());
     }
@@ -278,7 +281,10 @@ std::expected<void, ParseError> Tokenizer::scan_template_literal() {
     return {};
 }
 
-std::expected<std::size_t, ParseError> Tokenizer::skip_template_literal(std::size_t pos) const {
+std::expected<std::size_t, ParseError> Tokenizer::skip_template_literal(std::size_t pos, std::size_t depth) const {
+    if (depth >= max_depth_) {
+        return std::unexpected(ParseError{"maximum template literal nesting depth exceeded", pos});
+    }
     std::size_t p = pos + 1;
     while (p < max_) {
         char chr = input_[p];
@@ -295,7 +301,7 @@ std::expected<std::size_t, ParseError> Tokenizer::skip_template_literal(std::siz
             continue;
         }
         if (chr == '$' && p + 1 < max_ && input_[p + 1] == '{') {
-            auto expr_end = skip_template_expression(p + 2);
+            auto expr_end = skip_template_expression(p + 2, depth);
             if (!expr_end) {
                 return std::unexpected(expr_end.error());
             }
@@ -307,9 +313,9 @@ std::expected<std::size_t, ParseError> Tokenizer::skip_template_literal(std::siz
     return std::unexpected(ParseError{"unterminated template literal", pos});
 }
 
-std::expected<std::size_t, ParseError> Tokenizer::skip_template_expression(std::size_t pos) const {
+std::expected<std::size_t, ParseError> Tokenizer::skip_template_expression(std::size_t pos, std::size_t depth) const {
     std::size_t p = pos;
-    int curly_depth = 1;
+    std::size_t curly_depth = 1;
     while (p < max_) {
         char chr = input_[p];
         if (chr == '\'' || chr == '"') {
@@ -340,7 +346,7 @@ std::expected<std::size_t, ParseError> Tokenizer::skip_template_expression(std::
             continue;
         }
         if (chr == '`') {
-            auto nested_end = skip_template_literal(p);
+            auto nested_end = skip_template_literal(p, depth + 1);
             if (!nested_end) {
                 return std::unexpected(nested_end.error());
             }
@@ -368,6 +374,9 @@ std::expected<std::size_t, ParseError> Tokenizer::skip_template_expression(std::
             }
         }
         if (chr == '{') {
+            if (curly_depth >= max_depth_) {
+                return std::unexpected(ParseError{"maximum template expression nesting depth exceeded", p});
+            }
             ++curly_depth;
             ++p;
             continue;
