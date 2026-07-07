@@ -10,8 +10,8 @@
 namespace fiber::script {
 
 std::expected<Script, parse::ParseError> compile_script(Library &library, std::string_view script, bool allow_assign,
-                                                        ScriptLimits limits) {
-    parse::Parser parser(library, allow_assign, limits);
+                                                        std::size_t max_depth) {
+    parse::Parser parser(library, allow_assign, max_depth);
     auto parsed = parser.parse_script(script);
     if (!parsed) {
         return std::unexpected(parsed.error());
@@ -20,7 +20,7 @@ std::expected<Script, parse::ParseError> compile_script(Library &library, std::s
     if (!optimised) {
         return std::unexpected(parse::ParseError{"optimise failed", 0});
     }
-    auto compiled_result = ir::Compiler::compile(*optimised, limits.max_depth);
+    auto compiled_result = ir::Compiler::compile(*optimised, max_depth);
     if (!compiled_result) {
         const ir::CompileError &error = compiled_result.error();
         return std::unexpected(parse::ParseError{

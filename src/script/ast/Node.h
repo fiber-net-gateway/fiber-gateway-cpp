@@ -1,7 +1,14 @@
 #ifndef FIBER_SCRIPT_AST_NODE_H
 #define FIBER_SCRIPT_AST_NODE_H
 
+#include <cstddef>
 #include <cstdint>
+
+namespace fiber::script {
+
+inline constexpr std::size_t kDefaultScriptMaxDepth = 128;
+
+} // namespace fiber::script
 
 namespace fiber::script::ast {
 

@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "../ScriptLimits.h"
+#include "../ast/Node.h"
 #include "ParseError.h"
 #include "Token.h"
 

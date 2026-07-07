@@ -18,13 +18,6 @@ bool is_keyword(std::string_view text) {
            text == "throw";
 }
 
-ScriptLimits normalise_limits(ScriptLimits limits) noexcept {
-    if (limits.max_depth == 0) {
-        limits.max_depth = 1;
-    }
-    return limits;
-}
-
 void append_utf8(std::string &out, std::uint32_t codepoint) {
     if (codepoint <= 0x7F) {
         out.push_back(static_cast<char>(codepoint));
@@ -212,15 +205,15 @@ Parser::DepthGuard::~DepthGuard() {
     }
 }
 
-Parser::Parser(Library &library, bool allow_assign, ScriptLimits limits) :
-    library_(library), limits_(normalise_limits(limits)), allow_assign_(allow_assign) {}
+Parser::Parser(Library &library, bool allow_assign, std::size_t max_depth) :
+    library_(library), max_depth_(max_depth == 0 ? 1 : max_depth), allow_assign_(allow_assign) {}
 
-Parser::Parser(Library &library, bool allow_assign, ScriptLimits limits, std::size_t parse_depth) :
-    library_(library), limits_(normalise_limits(limits)), allow_assign_(allow_assign),
-    parse_depth_(parse_depth > limits_.max_depth ? limits_.max_depth : parse_depth) {}
+Parser::Parser(Library &library, bool allow_assign, std::size_t max_depth, std::size_t parse_depth) :
+    library_(library), max_depth_(max_depth == 0 ? 1 : max_depth), allow_assign_(allow_assign),
+    parse_depth_(parse_depth > max_depth_ ? max_depth_ : parse_depth) {}
 
 std::expected<std::unique_ptr<ast::Block>, ParseError> Parser::parse_script(std::string_view script) {
-    Tokenizer tokenizer{std::string(script), limits_.max_depth};
+    Tokenizer tokenizer{std::string(script), max_depth_};
     auto token_result = tokenizer.process();
     if (!token_result) {
         return std::unexpected(token_result.error());
@@ -244,7 +237,7 @@ std::expected<std::unique_ptr<ast::Block>, ParseError> Parser::parse_script(std:
 }
 
 std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_expression(std::string_view expression) {
-    Tokenizer tokenizer{std::string(expression), limits_.max_depth};
+    Tokenizer tokenizer{std::string(expression), max_depth_};
     auto token_result = tokenizer.process();
     if (!token_result) {
         return std::unexpected(token_result.error());
@@ -1113,14 +1106,14 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_templa
                 append_string(std::string{}, tpl.start + chunk_start, tpl.start + chunk_start);
             }
 
-            auto expr_end = find_template_expression_end(tpl.text, i + 2, tpl.start, limits_.max_depth, 0);
+            auto expr_end = find_template_expression_end(tpl.text, i + 2, tpl.start, max_depth_, 0);
             if (!expr_end) {
                 return std::unexpected(expr_end.error());
             }
             std::size_t inner_start = i + 2;
             std::size_t inner_end = expr_end.value() - 1;
             std::string_view inner = std::string_view(tpl.text).substr(inner_start, inner_end - inner_start);
-            Parser nested(library_, allow_assign_, limits_, parse_depth_);
+            Parser nested(library_, allow_assign_, max_depth_, parse_depth_);
             auto inner_expr = nested.parse_expression(inner);
             if (!inner_expr) {
                 ParseError error = inner_expr.error();
@@ -2063,14 +2056,14 @@ std::expected<Token, ParseError> Parser::eat_keyword(std::string_view keyword) {
 }
 
 std::expected<Parser::DepthGuard, ParseError> Parser::enter_depth(const Token *token) {
-    if (parse_depth_ >= limits_.max_depth) {
+    if (parse_depth_ >= max_depth_) {
         return std::unexpected(make_depth_error(token));
     }
     return DepthGuard(*this);
 }
 
 std::expected<void, ParseError> Parser::check_depth_slot(std::size_t depth, const Token *token) const {
-    if (depth < limits_.max_depth) {
+    if (depth < max_depth_) {
         return {};
     }
     return std::unexpected(make_depth_error(token));

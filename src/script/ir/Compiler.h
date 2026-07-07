@@ -1,7 +1,8 @@
 #ifndef FIBER_SCRIPT_IR_COMPILER_H
 #define FIBER_SCRIPT_IR_COMPILER_H
 
-#include "../ScriptLimits.h"
+#include <cstddef>
+
 #include "../ast/Node.h"
 #include "CompileResult.h"
 #include "Compiled.h"
