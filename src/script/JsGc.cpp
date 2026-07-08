@@ -361,16 +361,18 @@ GcHeader *gc_alloc_raw(GcHeap *heap, std::size_t size, GcKind kind) {
     }
     auto *hdr = static_cast<GcHeader *>(mem);
     hdr->next = nullptr;
-    // Pre-mark with the next live mark and keep an explicit first-collect guard. The guard is consumed
-    // only after the object is linked, so pre-link extra allocations cannot spend this protection.
-    hdr->mark_ = flip_mark(heap->live_mark);
-    hdr->first_collect_protected = true;
+    hdr->mark_ = heap->live_mark;
+    hdr->first_collect_protected = false;
     hdr->kind = kind;
     hdr->size_ = static_cast<std::uint32_t>(size);
     return hdr;
 }
 
 void gc_link(GcHeap *heap, GcHeader *hdr) {
+    // Start the first-collect guard only when the object enters the GC list. Pre-link
+    // extra allocations can trigger collection, but they cannot spend this protection.
+    hdr->mark_ = flip_mark(heap->live_mark);
+    hdr->first_collect_protected = true;
     hdr->next = heap->head;
     heap->head = hdr;
     gc_account_add(heap, hdr->size_);
