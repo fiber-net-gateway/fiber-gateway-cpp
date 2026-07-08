@@ -4,7 +4,6 @@
 #include <utility>
 
 #include "../common/Assert.h"
-#include "JsGc.h"
 #include "run/InterpreterVm.h"
 
 namespace fiber::script {
