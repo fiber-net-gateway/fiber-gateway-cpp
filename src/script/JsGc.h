@@ -29,6 +29,7 @@ struct GcHeader {
     GcHeader *next = nullptr;
     GcMark mark_ = GcMark::GcMark_0;
     GcKind kind = GcKind::String;
+    bool first_collect_protected = false;
     std::uint32_t size_ = 0;
 };
 

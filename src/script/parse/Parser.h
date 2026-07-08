@@ -9,7 +9,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include "../ast/Node.h"
 #include "../ast/Assign.h"
 #include "../ast/BinaryOperator.h"
 #include "../ast/Block.h"
@@ -30,6 +29,7 @@
 #include "../ast/Literal.h"
 #include "../ast/LogicRelationalExpression.h"
 #include "../ast/MaybeLValue.h"
+#include "../ast/Node.h"
 #include "../ast/PropertyReference.h"
 #include "../ast/ReturnStatement.h"
 #include "../ast/Ternary.h"

@@ -7,6 +7,7 @@
 namespace {
 
 using fiber::script::GcArray;
+using fiber::script::GcException;
 using fiber::script::GcHeap;
 using fiber::script::GcIterator;
 using fiber::script::GcIteratorMode;
@@ -164,6 +165,105 @@ TEST(JsGcTest, GcHeapLocalMarkReleasesLocalRoots) {
     // Local roots are released when LocalMark drops; a collect now sweeps the live string.
     heap.collect();
     EXPECT_EQ(heap.bytes, 0u);
+}
+
+TEST(JsGcTest, NewStringSurvivesFirstCollectAfterInternalBufferCollection) {
+    GcHeap heap;
+    heap.threshold = 1;
+
+    std::string payload(1 << 20, 'x');
+    GcString *str = fiber::script::gc_new_string(&heap, payload.data(), payload.size());
+    ASSERT_NE(str, nullptr);
+    ASSERT_GT(heap.bytes, payload.size());
+
+    EXPECT_EQ(heap.collect().freed, 0u);
+    auto second = heap.collect();
+    EXPECT_GT(second.freed, 0u);
+    EXPECT_EQ(heap.bytes, 0u);
+}
+
+TEST(JsGcTest, NewExceptionRootsHeapInputsDuringAllocationCollection) {
+    GcHeap heap;
+
+    GcString *name = nullptr;
+    GcString *message = nullptr;
+    GcObject *meta_obj = nullptr;
+    std::size_t rooted_bytes = 0;
+    {
+        GcHeap::LocalMark mark(heap);
+        ValueHandle name_root = heap.local_value();
+        ValueHandle message_root = heap.local_value();
+        ValueHandle meta_root = heap.local_value();
+        ASSERT_NE(name_root, nullptr);
+        ASSERT_NE(message_root, nullptr);
+        ASSERT_NE(meta_root, nullptr);
+
+        name = fiber::script::gc_new_string(&heap, "TypeError", 9);
+        message = fiber::script::gc_new_string(&heap, "boom", 4);
+        meta_obj = fiber::script::gc_new_object(&heap, 0);
+        ASSERT_NE(name, nullptr);
+        ASSERT_NE(message, nullptr);
+        ASSERT_NE(meta_obj, nullptr);
+        *name_root = js_make_heap_ref(&name->hdr, JsHeapKind::String);
+        *message_root = js_make_heap_ref(&message->hdr, JsHeapKind::String);
+        *meta_root = js_make_heap_ref(&meta_obj->hdr, JsHeapKind::Object);
+
+        heap.collect();
+        rooted_bytes = heap.bytes;
+    }
+
+    heap.threshold = 1;
+    JsValue meta = js_make_heap_ref(&meta_obj->hdr, JsHeapKind::Object);
+    GcException *exc = fiber::script::gc_new_exception(&heap, 12, name, message, meta);
+    ASSERT_NE(exc, nullptr);
+    ASSERT_GE(heap.bytes, rooted_bytes + sizeof(GcException));
+    EXPECT_EQ(exc->name, name);
+    EXPECT_EQ(exc->message, message);
+    EXPECT_EQ(fiber::script::js_value_heap_header(exc->meta), &meta_obj->hdr);
+    EXPECT_EQ(to_utf8(exc->name), "TypeError");
+    EXPECT_EQ(to_utf8(exc->message), "boom");
+}
+
+TEST(JsGcTest, NewExceptionFromNativeMetaRootsMetaDuringAllocationCollection) {
+    GcHeap heap;
+
+    GcObject *meta_obj = nullptr;
+    std::size_t rooted_bytes = 0;
+    {
+        GcHeap::LocalMark mark(heap);
+        ValueHandle meta_root = heap.local_value();
+        ASSERT_NE(meta_root, nullptr);
+        meta_obj = fiber::script::gc_new_object(&heap, 0);
+        ASSERT_NE(meta_obj, nullptr);
+        *meta_root = js_make_heap_ref(&meta_obj->hdr, JsHeapKind::Object);
+        heap.collect();
+        rooted_bytes = heap.bytes;
+    }
+
+    heap.threshold = 1;
+    JsValue meta = js_make_heap_ref(&meta_obj->hdr, JsHeapKind::Object);
+    GcException *exc = fiber::script::gc_new_exception(&heap, 18, nullptr, 0, nullptr, 0, meta);
+    ASSERT_NE(exc, nullptr);
+    ASSERT_GE(heap.bytes, rooted_bytes + sizeof(GcException));
+    EXPECT_EQ(fiber::script::js_value_heap_header(exc->meta), &meta_obj->hdr);
+}
+
+TEST(JsGcTest, NewExceptionFromNativeStringsRootsTemporaryStrings) {
+    GcHeap heap;
+    heap.threshold = 1;
+
+    std::string name(1 << 20, 'n');
+    std::string message(1 << 20, 'm');
+    GcException *exc =
+            fiber::script::gc_new_exception(&heap, 21, name.data(), name.size(), message.data(), message.size());
+    ASSERT_NE(exc, nullptr);
+    ASSERT_GT(heap.bytes, name.size() + message.size());
+    ASSERT_NE(exc->name, nullptr);
+    ASSERT_NE(exc->message, nullptr);
+    EXPECT_EQ(exc->name->len, name.size());
+    EXPECT_EQ(exc->message->len, message.size());
+    EXPECT_EQ(exc->name->data8[0], static_cast<std::uint8_t>('n'));
+    EXPECT_EQ(exc->message->data8[0], static_cast<std::uint8_t>('m'));
 }
 
 TEST(JsGcTest, NewStringDecodesUtf8IntoCompactStorage) {
