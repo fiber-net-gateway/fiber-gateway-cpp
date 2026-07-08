@@ -58,10 +58,10 @@ public:
     Result await_resume();
 
 private:
-    static void complete(void *context, ScriptStatus status) noexcept;
+    static void complete(void *context, const ScriptResult &result) noexcept;
 
     ScriptRun run_;
-    std::optional<ScriptStatus> status_;
+    std::optional<ScriptResult> result_;
     AsyncTask task_;
 };
 

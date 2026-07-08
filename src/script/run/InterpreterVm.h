@@ -4,7 +4,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <vector>
 
 #include "../AsyncTask.h"
 #include "../JsGc.h"
@@ -25,7 +24,7 @@ public:
     void iterate();
     [[nodiscard]] ScriptResult result() const noexcept;
     [[nodiscard]] bool done() const noexcept;
-    [[nodiscard]] AsyncTask &async_task() noexcept { return async_.task; }
+    [[nodiscard]] AsyncTask &async_task() noexcept { return async_; }
     void visit_roots(fiber::script::GcRootVisitor &visitor) noexcept override;
 
 private:
@@ -38,22 +37,12 @@ private:
         Init,
         Running,
         Suspend,
+        AsyncRetSuc,
+        AsyncRetExp,
+        AsyncRetAbort,
         Success,
         Exception,
         Abort,
-    };
-
-    enum class AsyncResumeKind { None, PushResult, ReplaceTop };
-
-    struct AsyncState {
-        AsyncTask task;
-        ScriptStatus status = ScriptStatus::abort(ScriptAbortReason::InvalidState);
-        fiber::script::JsValue value = fiber::script::JsValue::make_undefined();
-        bool ready = false;
-        AsyncResumeKind resume_kind = AsyncResumeKind::None;
-        std::size_t resume_epc = 0;
-        std::vector<fiber::script::JsValue> args;
-        Library::Arguments arguments{};
     };
 
     const ir::Compiled &compile_;
@@ -69,21 +58,18 @@ private:
     std::size_t pc_ = 0;
     State state_ = State::Init;
     ResultPayload result_{};
-    AsyncState async_{};
+    AsyncTask async_{};
 
-    static void async_complete(void *context, ScriptStatus status) noexcept;
-    fiber::script::JsValue *prepare_call_args(std::size_t off, std::size_t count);
-    fiber::script::JsValue *prepare_spread_call_args(std::size_t slot, std::uint32_t &argc);
+    static void async_complete(void *context, const ScriptResult &result) noexcept;
     Library::HostCallFrame make_call_frame() const;
-    bool dispatch_func_const(std::uint8_t op, const ir::Compiled::FuncConst &func_const, std::uint32_t encoded_argc,
-                             AsyncResumeKind resume_kind);
-    bool apply_call_result(ScriptStatus status, const fiber::script::JsValue &value, AsyncResumeKind resume_kind,
-                           std::size_t resume_epc);
+    Library::Arguments make_call_arguments(std::uint8_t op, std::uint32_t encoded_argc, std::size_t &arg_base);
+    bool dispatch_func_const(std::uint8_t op, const ir::Compiled::FuncConst &func_const, std::uint32_t encoded_argc);
+    bool apply_call_result(const ScriptResult &result, std::uint8_t op, std::uint32_t argc, std::size_t epc);
     bool handle_call_result(CallResult status, std::size_t epc);
 
     bool catch_for_exception(std::size_t epc);
     bool handle_error(ScriptResult error, std::size_t epc);
-    bool apply_async_ready();
+    bool apply_async_result();
 };
 
 } // namespace fiber::script::run

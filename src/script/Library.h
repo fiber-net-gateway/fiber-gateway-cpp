@@ -25,13 +25,11 @@ public:
         std::uint32_t argc = 0;
     };
 
-    using Function = ScriptStatus (*)(void *userdata, const HostCallFrame &frame, const Arguments &arguments,
-                                      ValueHandle out) noexcept;
-    using AsyncFunction = AsyncTask (*)(void *userdata, const HostCallFrame &frame, const Arguments &arguments,
-                                        ValueHandle out) noexcept;
+    using Function = ScriptResult (*)(void *userdata, const HostCallFrame &frame, Arguments arguments) noexcept;
+    using AsyncFunction = AsyncTask (*)(void *userdata, const HostCallFrame &frame, Arguments arguments) noexcept;
 
-    using Constant = ScriptStatus (*)(void *userdata, const HostCallFrame &frame, ValueHandle out) noexcept;
-    using AsyncConstant = AsyncTask (*)(void *userdata, const HostCallFrame &frame, ValueHandle out) noexcept;
+    using Constant = ScriptResult (*)(void *userdata, const HostCallFrame &frame) noexcept;
+    using AsyncConstant = AsyncTask (*)(void *userdata, const HostCallFrame &frame) noexcept;
 
     struct HostCallable {
         enum class Kind : std::uint8_t {

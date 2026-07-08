@@ -16,42 +16,35 @@ namespace {
 using fiber::script::JsValue;
 using fiber::script::Library;
 using fiber::script::ScriptResult;
-using fiber::script::ScriptStatus;
-using fiber::script::ValueHandle;
 using fiber::script::ir::Code;
 using fiber::script::ir::Compiled;
 
-ScriptStatus dummy_function(void *userdata, const Library::HostCallFrame &frame, const Library::Arguments &arguments,
-                            ValueHandle out) noexcept {
+ScriptResult dummy_function(void *userdata, const Library::HostCallFrame &frame,
+                            Library::Arguments arguments) noexcept {
     (void) userdata;
     (void) frame;
     (void) arguments;
-    *out = JsValue::make_undefined();
-    return ScriptStatus::success();
+    return ScriptResult::success(JsValue::make_undefined());
 }
 
 fiber::script::AsyncTask dummy_async_function(void *userdata, const Library::HostCallFrame &frame,
-                                              const Library::Arguments &arguments, ValueHandle out) noexcept {
+                                              Library::Arguments arguments) noexcept {
     (void) userdata;
     (void) frame;
     (void) arguments;
-    *out = JsValue::make_undefined();
-    co_return ScriptStatus::success();
+    co_return ScriptResult::success(JsValue::make_undefined());
 }
 
-ScriptStatus dummy_constant(void *userdata, const Library::HostCallFrame &frame, ValueHandle out) noexcept {
+ScriptResult dummy_constant(void *userdata, const Library::HostCallFrame &frame) noexcept {
     (void) userdata;
     (void) frame;
-    *out = JsValue::make_undefined();
-    return ScriptStatus::success();
+    return ScriptResult::success(JsValue::make_undefined());
 }
 
-fiber::script::AsyncTask dummy_async_constant(void *userdata, const Library::HostCallFrame &frame,
-                                              ValueHandle out) noexcept {
+fiber::script::AsyncTask dummy_async_constant(void *userdata, const Library::HostCallFrame &frame) noexcept {
     (void) userdata;
     (void) frame;
-    *out = JsValue::make_undefined();
-    co_return ScriptStatus::success();
+    co_return ScriptResult::success(JsValue::make_undefined());
 }
 
 class OperandLibrary final : public Library {

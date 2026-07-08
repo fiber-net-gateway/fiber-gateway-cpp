@@ -20,33 +20,27 @@ namespace {
 using fiber::script::JsValue;
 using fiber::script::Library;
 using fiber::script::ScriptResult;
-using fiber::script::ScriptStatus;
-using fiber::script::ValueHandle;
 
-ScriptStatus test_function(void *userdata, const Library::HostCallFrame &frame, const Library::Arguments &arguments,
-                           ValueHandle out) noexcept {
+ScriptResult test_function(void *userdata, const Library::HostCallFrame &frame, Library::Arguments arguments) noexcept {
     (void) userdata;
     (void) frame;
     (void) arguments;
-    *out = JsValue::make_integer(7);
-    return ScriptStatus::success();
+    return ScriptResult::success(JsValue::make_integer(7));
 }
 
-ScriptStatus throw_function(void *userdata, const Library::HostCallFrame &frame, const Library::Arguments &arguments,
-                            ValueHandle out) noexcept {
+ScriptResult throw_function(void *userdata, const Library::HostCallFrame &frame,
+                            Library::Arguments arguments) noexcept {
     (void) userdata;
     (void) frame;
     (void) arguments;
     static char msg[] = "boom";
-    *out = JsValue::make_native_string(msg, 4);
-    return ScriptStatus::exception();
+    return ScriptResult::exception(JsValue::make_native_string(msg, 4));
 }
 
-ScriptStatus test_constant(void *userdata, const Library::HostCallFrame &frame, ValueHandle out) noexcept {
+ScriptResult test_constant(void *userdata, const Library::HostCallFrame &frame) noexcept {
     (void) userdata;
     (void) frame;
-    *out = JsValue::make_integer(41);
-    return ScriptStatus::success();
+    return ScriptResult::success(JsValue::make_integer(41));
 }
 
 class DelayedAsyncFunction final {
@@ -84,21 +78,35 @@ private:
 };
 
 fiber::script::AsyncTask delayed_async_function(void *userdata, const Library::HostCallFrame &frame,
-                                                const Library::Arguments &arguments, ValueHandle out) noexcept {
+                                                Library::Arguments arguments) noexcept {
     (void) frame;
     (void) arguments;
     auto *func = static_cast<DelayedAsyncFunction *>(userdata);
     JsValue value = co_await func->awaiter();
-    *out = value;
-    co_return ScriptStatus::success();
+    co_return ScriptResult::success(value);
+}
+
+fiber::script::AsyncTask delayed_async_arg_sum_function(void *userdata, const Library::HostCallFrame &frame,
+                                                        Library::Arguments arguments) noexcept {
+    (void) frame;
+    auto *func = static_cast<DelayedAsyncFunction *>(userdata);
+    JsValue ignored = co_await func->awaiter();
+    (void) ignored;
+    std::int64_t sum = 0;
+    for (std::uint32_t i = 0; i < arguments.argc; ++i) {
+        if (js_value_type(arguments.args[i]) == fiber::script::JsNodeType::Integer) {
+            sum += js_value_int64(arguments.args[i]);
+        }
+    }
+    co_return ScriptResult::success(JsValue::make_integer(sum));
 }
 
 struct AddDefaultFunction {
     std::size_t observed_argc = 0;
 };
 
-ScriptStatus add_default_function(void *userdata, const Library::HostCallFrame &frame,
-                                  const Library::Arguments &arguments, ValueHandle out) noexcept {
+ScriptResult add_default_function(void *userdata, const Library::HostCallFrame &frame,
+                                  Library::Arguments arguments) noexcept {
     (void) frame;
     auto *func = static_cast<AddDefaultFunction *>(userdata);
     if (func) {
@@ -106,8 +114,7 @@ ScriptStatus add_default_function(void *userdata, const Library::HostCallFrame &
     }
     std::int64_t a = arguments.argc > 0 ? js_value_int64(arguments.args[0]) : 0;
     std::int64_t b = arguments.argc > 1 ? js_value_int64(arguments.args[1]) : 0;
-    *out = JsValue::make_integer(a + b);
-    return ScriptStatus::success();
+    return ScriptResult::success(JsValue::make_integer(a + b));
 }
 
 Library::HostCallable make_sync_function(Library::Function function, void *userdata = nullptr) noexcept {
@@ -139,7 +146,9 @@ public:
     explicit TestLibrary(DelayedAsyncFunction *async_func = nullptr) :
         func_(make_sync_function(&test_function)), boom_(make_sync_function(&throw_function)),
         constant_(make_sync_constant(&test_constant)),
-        async_func_(make_async_function(&delayed_async_function, async_func)) {}
+        async_func_(make_async_function(&delayed_async_function, async_func)),
+        async_args_func_(make_async_function(&delayed_async_arg_sum_function, async_func)),
+        async_spread_func_(make_async_function(&delayed_async_arg_sum_function, async_func)) {}
 
     FunctionMatchResult resolve_func(std::string_view name, const FunctionMatchRequest &request) const override {
         const HostCallable *func = nullptr;
@@ -172,6 +181,26 @@ public:
             signature.variadic = false;
             return FunctionMatchResult::found(&async_func_, signature, nullptr, 0);
         }
+        if (name == "asyncArgs") {
+            if (request.has_spread || request.known_argc != 2) {
+                return FunctionMatchResult::arity_mismatch();
+            }
+            FunctionSignature signature;
+            signature.required_argc = 2;
+            signature.fixed_argc = 2;
+            signature.variadic = false;
+            return FunctionMatchResult::found(&async_args_func_, signature, nullptr, 0);
+        }
+        if (name == "asyncSpread") {
+            if (!request.has_spread) {
+                return FunctionMatchResult::arity_mismatch();
+            }
+            FunctionSignature signature;
+            signature.required_argc = 0;
+            signature.fixed_argc = 0;
+            signature.variadic = true;
+            return FunctionMatchResult::found(&async_spread_func_, signature, nullptr, 0);
+        }
         return FunctionMatchResult::not_found();
     }
 
@@ -201,6 +230,8 @@ private:
     HostCallable boom_{};
     HostCallable constant_{};
     HostCallable async_func_{};
+    HostCallable async_args_func_{};
+    HostCallable async_spread_func_{};
 };
 
 class SignatureTestLibrary final : public Library {
@@ -368,6 +399,52 @@ TEST(ScriptExecutionTest, AsyncFunctionSuspendsAndResumes) {
     ASSERT_TRUE(vm.done());
     ASSERT_TRUE(vm.result().has_value());
     EXPECT_EQ(js_value_type(vm.result().value()), fiber::script::JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(vm.result().value()), 9);
+}
+
+TEST(ScriptExecutionTest, AsyncFunctionReadsDirectArgumentsAfterSuspend) {
+    DelayedAsyncFunction async_func;
+    TestLibrary library(&async_func);
+
+    auto compiled = compile_script("return asyncArgs(4, 5);", library);
+
+    fiber::script::GcHeap heap;
+    fiber::script::run::InterpreterVm vm(compiled, fiber::script::JsValue::make_undefined(), nullptr, heap);
+
+    vm.iterate();
+    ASSERT_FALSE(vm.done());
+    ASSERT_TRUE(vm.async_task().valid());
+    std::coroutine_handle<> handle = vm.async_task().swap_coroutine_handle(std::noop_coroutine());
+    handle.resume();
+
+    async_func.complete_with(fiber::script::JsValue::make_undefined());
+
+    vm.iterate();
+    ASSERT_TRUE(vm.done());
+    ASSERT_TRUE(vm.result().has_value());
+    EXPECT_EQ(js_value_int64(vm.result().value()), 9);
+}
+
+TEST(ScriptExecutionTest, AsyncSpreadFunctionReadsTemporaryArrayAfterSuspend) {
+    DelayedAsyncFunction async_func;
+    TestLibrary library(&async_func);
+
+    auto compiled = compile_script("return asyncSpread(...[2, 3, 4]);", library);
+
+    fiber::script::GcHeap heap;
+    fiber::script::run::InterpreterVm vm(compiled, fiber::script::JsValue::make_undefined(), nullptr, heap);
+
+    vm.iterate();
+    ASSERT_FALSE(vm.done());
+    ASSERT_TRUE(vm.async_task().valid());
+    std::coroutine_handle<> handle = vm.async_task().swap_coroutine_handle(std::noop_coroutine());
+    handle.resume();
+
+    async_func.complete_with(fiber::script::JsValue::make_undefined());
+
+    vm.iterate();
+    ASSERT_TRUE(vm.done());
+    ASSERT_TRUE(vm.result().has_value());
     EXPECT_EQ(js_value_int64(vm.result().value()), 9);
 }
 

@@ -51,7 +51,7 @@ ScriptRun::Result ScriptRun::operator()() {
 
 AsyncTask ScriptRun::run_async_task() {
     if (!vm_ || !heap_) {
-        co_return ScriptStatus::abort(ScriptAbortReason::InvalidState);
+        co_return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
     while (!vm_->done()) {
         vm_->iterate();
@@ -59,17 +59,11 @@ AsyncTask ScriptRun::run_async_task() {
             break;
         }
         if (!vm_->async_task().valid()) {
-            co_return ScriptStatus::abort(ScriptAbortReason::InvalidState);
+            co_return ScriptResult::abort(ScriptAbortReason::InvalidState);
         }
         co_await VmTaskAwaiter{vm_->async_task()};
     }
-    if (vm_->result().is_success()) {
-        co_return ScriptStatus::success();
-    }
-    if (vm_->result().is_exception()) {
-        co_return ScriptStatus::exception();
-    }
-    co_return ScriptStatus::abort(vm_->result().abort().reason, vm_->result().abort().position);
+    co_return vm_->result();
 }
 
 ScriptRun::Awaiter::Awaiter(ScriptRun &&run) : run_(std::move(run)) {}
@@ -78,12 +72,12 @@ ScriptRun::Awaiter::~Awaiter() = default;
 
 bool ScriptRun::Awaiter::await_ready() {
     if (!run_.valid()) {
-        status_ = ScriptStatus::abort(ScriptAbortReason::InvalidState);
+        result_ = ScriptResult::abort(ScriptAbortReason::InvalidState);
         return true;
     }
     task_ = run_.run_async_task();
     if (!task_.valid()) {
-        status_ = ScriptStatus::abort(task_.allocation_failed() ? ScriptAbortReason::OutOfMemory
+        result_ = ScriptResult::abort(task_.allocation_failed() ? ScriptAbortReason::OutOfMemory
                                                                 : ScriptAbortReason::InvalidState);
         return true;
     }
@@ -96,24 +90,21 @@ std::coroutine_handle<> ScriptRun::Awaiter::await_suspend(std::coroutine_handle<
 }
 
 ScriptRun::Result ScriptRun::Awaiter::await_resume() {
-    if (!status_) {
+    if (!result_) {
         return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
     if (run_.vm_ && run_.vm_->done()) {
         return run_.vm_->result();
     }
-    if (status_->is_abort()) {
-        return ScriptResult::abort(status_->abort().reason, status_->abort().position);
-    }
-    return ScriptResult::abort(ScriptAbortReason::InvalidState);
+    return *result_;
 }
 
-void ScriptRun::Awaiter::complete(void *context, ScriptStatus status) noexcept {
+void ScriptRun::Awaiter::complete(void *context, const ScriptResult &result) noexcept {
     auto *self = static_cast<Awaiter *>(context);
     if (!self) {
         return;
     }
-    self->status_ = status;
+    self->result_ = result;
 }
 
 ScriptRun::Awaiter ScriptRun::operator co_await() && { return Awaiter(std::move(*this)); }
