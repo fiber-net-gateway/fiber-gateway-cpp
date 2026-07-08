@@ -3,7 +3,7 @@
 #include <cstring>
 #include <string>
 
-#include "script/JsGc.h"
+#include "script/gc/GcInternal.h"
 
 using fiber::script::GcArray;
 using fiber::script::GcHeap;
@@ -39,6 +39,7 @@ GcString *make_key(GcHeap &heap, const char *data) {
 
 TEST(IteratorTest, ArrayIteratorSeesAppends) {
     GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
     GcArray *arr = fiber::script::gc_new_array(&heap, 4);
     ASSERT_NE(arr, nullptr);
 
@@ -79,6 +80,7 @@ TEST(IteratorTest, ArrayIteratorSeesAppends) {
 
 TEST(IteratorTest, ObjectIteratorSnapshotOnMutation) {
     GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
     GcObject *obj = fiber::script::gc_new_object(&heap, 4);
     ASSERT_NE(obj, nullptr);
     GcString *key_a = make_key(heap, "a");
@@ -123,6 +125,7 @@ TEST(IteratorTest, ObjectIteratorSnapshotOnMutation) {
 
 TEST(IteratorTest, ObjectIteratorEntries) {
     GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
     GcObject *obj = fiber::script::gc_new_object(&heap, 2);
     ASSERT_NE(obj, nullptr);
     GcString *key = make_key(heap, "k");

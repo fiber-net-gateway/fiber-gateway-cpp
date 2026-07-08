@@ -1,6 +1,7 @@
 #include "Access.h"
 
 #include "../../common/json/Utf.h"
+#include "../gc/GcInternal.h"
 
 #include <string>
 
@@ -113,17 +114,20 @@ CallResult Access::expand_object(GcHeap &runtime, ConstValueHandle target, Const
     if (!target_obj || !add_obj) {
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
     }
-    std::size_t expected = target_obj->size + add_obj->size;
-    if (!fiber::script::gc_object_reserve(heap, target_obj, expected)) {
-        return set_abort(result, oom_error());
-    }
-    for (std::size_t i = 0; i < add_obj->size; ++i) {
-        const fiber::script::GcObjectEntry *entry = fiber::script::gc_object_entry_at(add_obj, i);
-        if (!entry || !entry->occupied || !entry->key) {
-            continue;
-        }
-        if (!fiber::script::gc_object_set_heap_key(heap, mutable_handle(target), entry->key, entry->value)) {
+    {
+        GcHeap::NoGcScope no_gc(*heap);
+        std::size_t expected = target_obj->size + add_obj->size;
+        if (!fiber::script::gc_object_reserve(heap, target_obj, expected)) {
             return set_abort(result, oom_error());
+        }
+        for (std::size_t i = 0; i < add_obj->size; ++i) {
+            const fiber::script::GcObjectEntry *entry = fiber::script::gc_object_entry_at(add_obj, i);
+            if (!entry || !entry->occupied || !entry->key) {
+                continue;
+            }
+            if (!fiber::script::gc_object_set_heap_key(heap, mutable_handle(target), entry->key, entry->value)) {
+                return set_abort(result, oom_error());
+            }
         }
     }
     return set_value(result, *target);
@@ -148,15 +152,18 @@ CallResult Access::expand_array(GcHeap &runtime, ConstValueHandle target, ConstV
         if (!add_arr) {
             return set_exception(result, fiber::script::ExceptionKind::TypeError);
         }
-        std::size_t expected = target_arr->size + add_arr->size;
-        if (!fiber::script::gc_array_reserve(heap, target_arr, expected)) {
-            return set_abort(result, oom_error());
-        }
-        for (std::size_t i = 0; i < add_arr->size; ++i) {
-            const fiber::script::JsValue *item = fiber::script::gc_array_get(add_arr, i);
-            if (!fiber::script::gc_array_push(heap, mutable_handle(target),
-                                              item ? *item : fiber::script::JsValue::make_undefined())) {
+        {
+            GcHeap::NoGcScope no_gc(*heap);
+            std::size_t expected = target_arr->size + add_arr->size;
+            if (!fiber::script::gc_array_reserve(heap, target_arr, expected)) {
                 return set_abort(result, oom_error());
+            }
+            for (std::size_t i = 0; i < add_arr->size; ++i) {
+                const fiber::script::JsValue *item = fiber::script::gc_array_get(add_arr, i);
+                if (!fiber::script::gc_array_push(heap, mutable_handle(target),
+                                                  item ? *item : fiber::script::JsValue::make_undefined())) {
+                    return set_abort(result, oom_error());
+                }
             }
         }
         return set_value(result, *target);
@@ -165,17 +172,20 @@ CallResult Access::expand_array(GcHeap &runtime, ConstValueHandle target, ConstV
     if (!add_obj) {
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
     }
-    std::size_t expected = target_arr->size + add_obj->size;
-    if (!fiber::script::gc_array_reserve(heap, target_arr, expected)) {
-        return set_abort(result, oom_error());
-    }
-    for (std::size_t i = 0; i < add_obj->size; ++i) {
-        const fiber::script::GcObjectEntry *entry = fiber::script::gc_object_entry_at(add_obj, i);
-        if (!entry || !entry->occupied) {
-            continue;
-        }
-        if (!fiber::script::gc_array_push(heap, mutable_handle(target), entry->value)) {
+    {
+        GcHeap::NoGcScope no_gc(*heap);
+        std::size_t expected = target_arr->size + add_obj->size;
+        if (!fiber::script::gc_array_reserve(heap, target_arr, expected)) {
             return set_abort(result, oom_error());
+        }
+        for (std::size_t i = 0; i < add_obj->size; ++i) {
+            const fiber::script::GcObjectEntry *entry = fiber::script::gc_object_entry_at(add_obj, i);
+            if (!entry || !entry->occupied) {
+                continue;
+            }
+            if (!fiber::script::gc_array_push(heap, mutable_handle(target), entry->value)) {
+                return set_abort(result, oom_error());
+            }
         }
     }
     return set_value(result, *target);

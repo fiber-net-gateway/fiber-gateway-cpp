@@ -5,7 +5,7 @@
 #include <utility>
 
 #include "common/json/JsonEncode.h"
-#include "script/JsGc.h"
+#include "script/gc/GcInternal.h"
 #include "script/json/JsValueEncode.h"
 
 using fiber::json::Generator;
@@ -13,9 +13,9 @@ using fiber::json::OutputSink;
 using fiber::script::GcArray;
 using fiber::script::GcException;
 using fiber::script::GcHeap;
+using fiber::script::GcHeapKind;
 using fiber::script::GcObject;
 using fiber::script::GcString;
-using fiber::script::JsHeapKind;
 using fiber::script::JsNodeType;
 using fiber::script::JsValue;
 
@@ -46,6 +46,7 @@ GcString *make_key(GcHeap &heap, const char *data) {
 
 TEST(JsValueEncodeTest, EncodeObjectOrderAndOverwrite) {
     GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
     GcObject *obj = fiber::script::gc_new_object(&heap, 4);
     ASSERT_NE(obj, nullptr);
 
@@ -60,7 +61,7 @@ TEST(JsValueEncodeTest, EncodeObjectOrderAndOverwrite) {
     ASSERT_TRUE(fiber::script::gc_object_set(&heap, obj, key_b, JsValue::make_integer(2)));
     ASSERT_TRUE(fiber::script::gc_object_set(&heap, obj, key_a2, JsValue::make_integer(3)));
 
-    JsValue root = js_make_heap_ref(&obj->hdr, JsHeapKind::Object);
+    JsValue root = js_make_heap_ref(&obj->hdr, GcHeapKind::Object);
 
     StringSink sink;
     Generator gen(sink);
@@ -70,6 +71,7 @@ TEST(JsValueEncodeTest, EncodeObjectOrderAndOverwrite) {
 
 TEST(JsValueEncodeTest, EncodeArrayWithStrings) {
     GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
     GcArray *arr = fiber::script::gc_new_array(&heap, 3);
     ASSERT_NE(arr, nullptr);
 
@@ -81,7 +83,7 @@ TEST(JsValueEncodeTest, EncodeArrayWithStrings) {
     arr->elems[2] = std::move(str);
     arr->size = 3;
 
-    JsValue root = js_make_heap_ref(&arr->hdr, JsHeapKind::Array);
+    JsValue root = js_make_heap_ref(&arr->hdr, GcHeapKind::Array);
 
     StringSink sink;
     Generator gen(sink);
@@ -91,12 +93,13 @@ TEST(JsValueEncodeTest, EncodeArrayWithStrings) {
 
 TEST(JsValueEncodeTest, EncodeExceptionObject) {
     GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
     GcObject *meta_obj = fiber::script::gc_new_object(&heap, 2);
     ASSERT_NE(meta_obj, nullptr);
     GcString *code_key = make_key(heap, "code");
     ASSERT_NE(code_key, nullptr);
     ASSERT_TRUE(fiber::script::gc_object_set(&heap, meta_obj, code_key, JsValue::make_integer(7)));
-    JsValue meta = js_make_heap_ref(&meta_obj->hdr, JsHeapKind::Object);
+    JsValue meta = js_make_heap_ref(&meta_obj->hdr, GcHeapKind::Object);
 
     const char *name = "TypeError";
     const char *message = "boom";
@@ -104,7 +107,7 @@ TEST(JsValueEncodeTest, EncodeExceptionObject) {
             fiber::script::gc_new_exception(&heap, 42, name, std::strlen(name), message, std::strlen(message), meta);
     ASSERT_NE(exc, nullptr);
 
-    JsValue root = js_make_heap_ref(&exc->hdr, JsHeapKind::Exception);
+    JsValue root = js_make_heap_ref(&exc->hdr, GcHeapKind::Exception);
 
     StringSink sink;
     Generator gen(sink);
@@ -114,11 +117,12 @@ TEST(JsValueEncodeTest, EncodeExceptionObject) {
 
 TEST(JsValueEncodeTest, EncodeExceptionDefaultMeta) {
     GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
     const char *name = "RangeError";
     GcException *exc = fiber::script::gc_new_exception(&heap, -1, name, std::strlen(name), nullptr, 0);
     ASSERT_NE(exc, nullptr);
 
-    JsValue root = js_make_heap_ref(&exc->hdr, JsHeapKind::Exception);
+    JsValue root = js_make_heap_ref(&exc->hdr, GcHeapKind::Exception);
 
     StringSink sink;
     Generator gen(sink);

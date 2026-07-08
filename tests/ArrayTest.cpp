@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "script/JsGc.h"
+#include "script/gc/GcInternal.h"
 
 using fiber::script::GcArray;
 using fiber::script::GcHeap;
@@ -9,6 +9,7 @@ using fiber::script::JsValue;
 
 TEST(ArrayTest, PushPopSetGet) {
     GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
     GcArray *arr = fiber::script::gc_new_array(&heap, 1);
     ASSERT_NE(arr, nullptr);
 
@@ -44,6 +45,7 @@ TEST(ArrayTest, PushPopSetGet) {
 
 TEST(ArrayTest, InsertRemove) {
     GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
     GcArray *arr = fiber::script::gc_new_array(&heap, 2);
     ASSERT_NE(arr, nullptr);
 

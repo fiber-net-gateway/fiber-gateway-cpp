@@ -4,6 +4,8 @@
 
 #include "GcInternal.h"
 
+#include "../../common/Assert.h"
+
 #include <cstring>
 #include <new>
 #include <utility>
@@ -13,7 +15,11 @@ namespace fiber::script {
 using namespace gc_detail;
 
 GcBinary *gc_new_binary(GcHeap *heap, const std::uint8_t *data, std::size_t len) {
-    auto *hdr = gc_alloc_raw(heap, sizeof(GcBinary), GcKind::Binary);
+    if (!heap) {
+        return nullptr;
+    }
+    FIBER_ASSERT(heap->no_gc_active());
+    auto *hdr = gc_alloc_raw(heap, sizeof(GcBinary), GcHeapKind::Binary);
     if (!hdr) {
         return nullptr;
     }
@@ -37,7 +43,11 @@ GcBinary *gc_new_binary(GcHeap *heap, const std::uint8_t *data, std::size_t len)
 }
 
 GcArray *gc_new_array(GcHeap *heap, std::size_t capacity) {
-    auto *hdr = gc_alloc_raw(heap, sizeof(GcArray), GcKind::Array);
+    if (!heap) {
+        return nullptr;
+    }
+    FIBER_ASSERT(heap->no_gc_active());
+    auto *hdr = gc_alloc_raw(heap, sizeof(GcArray), GcHeapKind::Array);
     if (!hdr) {
         return nullptr;
     }
@@ -64,6 +74,7 @@ bool gc_array_reserve(GcHeap *heap, GcArray *arr, std::size_t expected) {
     if (!heap || !arr) {
         return false;
     }
+    FIBER_ASSERT(heap->no_gc_active());
     if (expected <= arr->capacity) {
         return true;
     }
@@ -103,6 +114,7 @@ bool gc_array_set(GcHeap *heap, GcArray *arr, std::size_t index, JsValue value) 
     if (!heap || !arr) {
         return false;
     }
+    FIBER_ASSERT(heap->no_gc_active());
     if (index < arr->size) {
         arr->elems[index] = std::move(value);
         return true;
@@ -124,6 +136,7 @@ bool gc_array_push(GcHeap *heap, GcArray *arr, JsValue value) {
     if (!heap || !arr) {
         return false;
     }
+    FIBER_ASSERT(heap->no_gc_active());
     if (!gc_array_reserve(heap, arr, arr->size + 1)) {
         return false;
     }
@@ -152,6 +165,7 @@ bool gc_array_insert(GcHeap *heap, GcArray *arr, std::size_t index, JsValue valu
     if (!heap || !arr) {
         return false;
     }
+    FIBER_ASSERT(heap->no_gc_active());
     if (index > arr->size) {
         index = arr->size;
     }

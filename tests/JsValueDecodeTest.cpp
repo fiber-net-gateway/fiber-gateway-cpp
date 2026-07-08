@@ -4,7 +4,7 @@
 #include <string>
 
 #include "common/json/JsonEncode.h"
-#include "script/JsGc.h"
+#include "script/gc/GcInternal.h"
 #include "script/json/JsValueDecode.h"
 #include "script/json/JsValueEncode.h"
 
@@ -55,6 +55,7 @@ ValueHandle decode_ok(GcHeap &heap, const char *text) {
 GcString *make_key(GcHeap &heap, const char *key) { return fiber::script::gc_new_string(&heap, key, std::strlen(key)); }
 
 const JsValue *object_get(GcHeap &heap, const GcObject *obj, const char *key) {
+    GcHeap::NoGcScope no_gc(heap);
     GcString *key_str = make_key(heap, key);
     EXPECT_NE(key_str, nullptr);
     if (!key_str) {
