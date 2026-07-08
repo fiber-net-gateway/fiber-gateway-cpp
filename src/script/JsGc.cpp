@@ -361,9 +361,10 @@ GcHeader *gc_alloc_raw(GcHeap *heap, std::size_t size, GcKind kind) {
     }
     auto *hdr = static_cast<GcHeader *>(mem);
     hdr->next = nullptr;
-    // Pre-mark with the next live mark so the object survives the first collect after allocation;
-    // this protects the gc_link->rooting window, since collect can trigger from the alloc chokepoints.
+    // Pre-mark with the next live mark and keep an explicit first-collect guard. The guard is consumed
+    // only after the object is linked, so pre-link extra allocations cannot spend this protection.
     hdr->mark_ = flip_mark(heap->live_mark);
+    hdr->first_collect_protected = true;
     hdr->kind = kind;
     hdr->size_ = static_cast<std::uint32_t>(size);
     return hdr;
@@ -384,11 +385,7 @@ void gc_mark_value(GcHeap *heap, const JsValue &value) {
     }
 }
 
-void gc_mark_obj(GcHeap *heap, GcHeader *obj) {
-    if (!obj || obj->mark_ == heap->live_mark) {
-        return;
-    }
-    obj->mark_ = heap->live_mark;
+void gc_trace_children(GcHeap *heap, GcHeader *obj) {
     switch (obj->kind) {
         case GcKind::String:
             break;
@@ -445,6 +442,19 @@ void gc_mark_obj(GcHeap *heap, GcHeader *obj) {
             break;
         }
     }
+}
+
+void gc_mark_obj(GcHeap *heap, GcHeader *obj) {
+    if (!obj) {
+        return;
+    }
+    const bool force_trace = obj->first_collect_protected;
+    if (obj->mark_ == heap->live_mark && !force_trace) {
+        return;
+    }
+    obj->first_collect_protected = false;
+    obj->mark_ = heap->live_mark;
+    gc_trace_children(heap, obj);
 }
 
 void gc_free_obj(GcHeap *heap, GcHeader *obj) {
@@ -601,6 +611,17 @@ private:
     GcHeap *heap_ = nullptr;
 };
 
+void gc_mark_protected_new_objects(GcHeap *heap) noexcept {
+    if (!heap) {
+        return;
+    }
+    for (GcHeader *obj = heap->head; obj; obj = obj->next) {
+        if (obj->first_collect_protected) {
+            gc_mark_obj(heap, obj);
+        }
+    }
+}
+
 } // namespace
 
 GcCollectStats GcHeap::collect() {
@@ -608,6 +629,7 @@ GcCollectStats GcHeap::collect() {
     live_mark = flip_mark(live_mark);
     MarkingVisitor visitor(*this);
     visit_roots(visitor);
+    gc_mark_protected_new_objects(this);
     gc_sweep_unmarked(this);
     threshold = next_threshold(bytes);
     return {bytes, before - bytes};
@@ -1174,7 +1196,10 @@ GcObject *gc_new_object(GcHeap *heap, std::size_t capacity) {
     return obj;
 }
 
-GcException *gc_new_exception(GcHeap *heap, std::int64_t position, GcString *name, GcString *message, JsValue meta) {
+namespace {
+
+GcException *gc_new_exception_unchecked(GcHeap *heap, std::int64_t position, GcString *name, GcString *message,
+                                        const JsValue &meta) {
     auto *hdr = gc_alloc_raw(heap, sizeof(GcException), GcKind::Exception);
     if (!hdr) {
         return nullptr;
@@ -1184,9 +1209,28 @@ GcException *gc_new_exception(GcHeap *heap, std::int64_t position, GcString *nam
     exc->name = name;
     exc->message = message;
     std::construct_at(&exc->meta);
-    exc->meta = std::move(meta);
+    exc->meta = meta;
     gc_link(heap, hdr);
     return exc;
+}
+
+} // namespace
+
+GcException *gc_new_exception(GcHeap *heap, std::int64_t position, GcString *name, GcString *message, JsValue meta) {
+    if (!heap) {
+        return nullptr;
+    }
+    GcHeap::LocalMark mark(*heap);
+    ValueHandle name_root = heap->local_value();
+    ValueHandle message_root = heap->local_value();
+    ValueHandle meta_root = heap->local_value();
+    if (!name_root || !message_root || !meta_root) {
+        return nullptr;
+    }
+    *name_root = name ? js_make_heap_ref(&name->hdr, JsHeapKind::String) : JsValue::make_undefined();
+    *message_root = message ? js_make_heap_ref(&message->hdr, JsHeapKind::String) : JsValue::make_undefined();
+    *meta_root = meta;
+    return gc_new_exception_unchecked(heap, position, name, message, *meta_root);
 }
 
 GcException *gc_new_exception(GcHeap *heap, std::int64_t position, GcString *name, GcString *message) {
@@ -1195,6 +1239,20 @@ GcException *gc_new_exception(GcHeap *heap, std::int64_t position, GcString *nam
 
 GcException *gc_new_exception(GcHeap *heap, std::int64_t position, const char *name, std::size_t name_len,
                               const char *message, std::size_t message_len, JsValue meta) {
+    if (!heap) {
+        return nullptr;
+    }
+    GcHeap::LocalMark mark(*heap);
+    ValueHandle name_root = heap->local_value();
+    ValueHandle message_root = heap->local_value();
+    ValueHandle meta_root = heap->local_value();
+    if (!name_root || !message_root || !meta_root) {
+        return nullptr;
+    }
+    *name_root = JsValue::make_undefined();
+    *message_root = JsValue::make_undefined();
+    *meta_root = meta;
+
     GcString *name_str = nullptr;
     GcString *message_str = nullptr;
     if (name || name_len > 0) {
@@ -1205,6 +1263,7 @@ GcException *gc_new_exception(GcHeap *heap, std::int64_t position, const char *n
         if (!name_str) {
             return nullptr;
         }
+        *name_root = js_make_heap_ref(&name_str->hdr, JsHeapKind::String);
     }
     if (message || message_len > 0) {
         if (!message && message_len > 0) {
@@ -1214,8 +1273,9 @@ GcException *gc_new_exception(GcHeap *heap, std::int64_t position, const char *n
         if (!message_str) {
             return nullptr;
         }
+        *message_root = js_make_heap_ref(&message_str->hdr, JsHeapKind::String);
     }
-    return gc_new_exception(heap, position, name_str, message_str, std::move(meta));
+    return gc_new_exception_unchecked(heap, position, name_str, message_str, *meta_root);
 }
 
 GcException *gc_new_exception(GcHeap *heap, std::int64_t position, const char *name, std::size_t name_len,
