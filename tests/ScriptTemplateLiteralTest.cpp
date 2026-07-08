@@ -3,8 +3,8 @@
 #include <cstring>
 #include <string>
 
-#include "script/JsGc.h"
 #include "script/ScriptCompiler.h"
+#include "script/gc/GcInternal.h"
 #include "script/std/StdLibrary.h"
 
 using fiber::script::GcHeap;

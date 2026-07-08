@@ -4,7 +4,7 @@
 
 #include "JsValueEncode.h"
 
-#include "../JsGc.h"
+#include "../gc/GcInternal.h"
 
 #include <string>
 

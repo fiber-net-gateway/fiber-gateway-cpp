@@ -4,6 +4,8 @@
 
 #include "GcInternal.h"
 
+#include "../../common/Assert.h"
+
 #include <algorithm>
 #include <new>
 #include <utility>
@@ -13,7 +15,11 @@ namespace fiber::script {
 using namespace gc_detail;
 
 GcObject *gc_new_object(GcHeap *heap, std::size_t capacity) {
-    auto *hdr = gc_alloc_raw(heap, sizeof(GcObject), GcKind::Object);
+    if (!heap) {
+        return nullptr;
+    }
+    FIBER_ASSERT(heap->no_gc_active());
+    auto *hdr = gc_alloc_raw(heap, sizeof(GcObject), GcHeapKind::Object);
     if (!hdr) {
         return nullptr;
     }
@@ -76,6 +82,7 @@ bool gc_object_reserve(GcHeap *heap, GcObject *obj, std::size_t expected) {
     if (!heap || !obj) {
         return false;
     }
+    FIBER_ASSERT(heap->no_gc_active());
     std::size_t new_capacity = obj->entry_capacity ? obj->entry_capacity : 1;
     if (expected > new_capacity) {
         while (new_capacity < expected) {
@@ -103,9 +110,10 @@ bool gc_object_reserve(GcHeap *heap, GcObject *obj, std::size_t expected) {
 }
 
 bool gc_object_set(GcHeap *heap, GcObject *obj, GcString *key, JsValue value) {
-    if (!obj || !key) {
+    if (!heap || !obj || !key) {
         return false;
     }
+    FIBER_ASSERT(heap->no_gc_active());
     std::uint64_t hash = string_hash(key);
     int32_t existing = find_entry_index(obj, key, hash);
     if (existing != -1) {

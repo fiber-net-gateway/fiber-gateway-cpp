@@ -15,7 +15,7 @@ namespace {
 
 constexpr std::uint8_t to_u8(JsTag tag) { return static_cast<std::uint8_t>(tag); }
 
-constexpr std::uint8_t to_u8(JsHeapKind kind) { return static_cast<std::uint8_t>(kind); }
+constexpr std::uint8_t to_u8(GcHeapKind kind) { return static_cast<std::uint8_t>(kind); }
 
 constexpr std::uint8_t to_u8(JsBorrowedEncoding encoding) { return static_cast<std::uint8_t>(encoding); }
 
@@ -26,7 +26,7 @@ std::uint32_t clamp_len(std::size_t len) {
     return static_cast<std::uint32_t>(len);
 }
 
-JsValue make_heap_value(GcHeader *hdr, JsHeapKind kind) {
+JsValue make_heap_value(GcHeader *hdr, GcHeapKind kind) {
     JsValue result;
     result.tag = to_u8(JsTag::HeapRef);
     result.subtag = to_u8(kind);
@@ -116,7 +116,7 @@ JsValue JsValue::make_exception(ExceptionKind kind) {
     return result;
 }
 
-JsValue js_make_heap_ref(GcHeader *hdr, JsHeapKind kind) { return make_heap_value(hdr, kind); }
+JsValue js_make_heap_ref(GcHeader *hdr, GcHeapKind kind) { return make_heap_value(hdr, kind); }
 
 JsValue js_make_borrowed_string(const char *data, std::size_t len, JsBorrowedEncoding encoding) {
     JsValue result;
@@ -156,18 +156,18 @@ JsNodeType js_value_type(const JsValue &value) {
         case JsTag::Exception:
             return JsNodeType::Exception;
         case JsTag::HeapRef:
-            switch (static_cast<JsHeapKind>(value.subtag)) {
-                case JsHeapKind::String:
+            switch (static_cast<GcHeapKind>(value.subtag)) {
+                case GcHeapKind::String:
                     return JsNodeType::String;
-                case JsHeapKind::Binary:
+                case GcHeapKind::Binary:
                     return JsNodeType::Binary;
-                case JsHeapKind::Array:
+                case GcHeapKind::Array:
                     return JsNodeType::Array;
-                case JsHeapKind::Object:
+                case GcHeapKind::Object:
                     return JsNodeType::Object;
-                case JsHeapKind::Exception:
+                case GcHeapKind::Exception:
                     return JsNodeType::Exception;
-                case JsHeapKind::Iterator:
+                case GcHeapKind::Iterator:
                     return JsNodeType::Interator;
             }
             break;

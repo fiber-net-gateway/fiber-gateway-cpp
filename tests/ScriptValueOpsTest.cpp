@@ -3,8 +3,8 @@
 #include <limits>
 #include <type_traits>
 
-#include "script/JsGc.h"
 #include "script/ScriptResult.h"
+#include "script/gc/GcInternal.h"
 #include "script/run/Binaries.h"
 #include "script/run/Compares.h"
 #include "script/run/Unaries.h"

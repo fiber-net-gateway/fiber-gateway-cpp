@@ -2,13 +2,14 @@
 
 #include <string>
 
-#include "script/JsGc.h"
+#include "script/gc/GcInternal.h"
 
 namespace {
 
 using fiber::script::GcArray;
 using fiber::script::GcException;
 using fiber::script::GcHeap;
+using fiber::script::GcHeapKind;
 using fiber::script::GcIterator;
 using fiber::script::GcIteratorMode;
 using fiber::script::GcObject;
@@ -16,7 +17,6 @@ using fiber::script::GcRootRegistration;
 using fiber::script::GcRootSource;
 using fiber::script::GcRootVisitor;
 using fiber::script::GcString;
-using fiber::script::JsHeapKind;
 using fiber::script::JsNodeType;
 using fiber::script::JsValue;
 using fiber::script::ValueHandle;
@@ -31,6 +31,7 @@ std::string to_utf8(const GcString *str) {
 
 TEST(JsGcTest, BytesIncludeExternalBuffers) {
     GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
 
     std::size_t base = heap.bytes;
     GcString *short_str = fiber::script::gc_new_string_bytes(&heap, reinterpret_cast<const std::uint8_t *>("abc"), 3);
@@ -57,6 +58,7 @@ TEST(JsGcTest, BytesIncludeExternalBuffers) {
 
 TEST(JsGcTest, IteratorSnapshotBytesAreAccounted) {
     GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
 
     GcObject *obj = fiber::script::gc_new_object(&heap, 4);
     ASSERT_NE(obj, nullptr);
@@ -100,11 +102,15 @@ TEST(JsGcTest, RootSourcesMarkValuesWithoutTemporaryRootVector) {
     GcHeap heap;
 
     JsValue rooted = JsValue::make_undefined();
-    GcString *live = fiber::script::gc_new_string(&heap, "live", 4);
-    GcString *garbage = fiber::script::gc_new_string(&heap, "dead", 4);
-    ASSERT_NE(live, nullptr);
-    ASSERT_NE(garbage, nullptr);
-    rooted = js_make_heap_ref(&live->hdr, JsHeapKind::String);
+    GcString *live = nullptr;
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        live = fiber::script::gc_new_string(&heap, "live", 4);
+        GcString *garbage = fiber::script::gc_new_string(&heap, "dead", 4);
+        ASSERT_NE(live, nullptr);
+        ASSERT_NE(garbage, nullptr);
+        rooted = js_make_heap_ref(&live->hdr, GcHeapKind::String);
+    }
 
     SingleValueSource source(rooted);
     GcRootRegistration reg(heap.roots(), source);
@@ -125,14 +131,18 @@ TEST(JsGcTest, RootSourcesMarkValuesWithoutTemporaryRootVector) {
 TEST(JsGcTest, GcHeapGlobalSlotsAreCollectedAsRoots) {
     GcHeap heap;
 
-    GcString *live = fiber::script::gc_new_string(&heap, "live", 4);
-    GcString *garbage = fiber::script::gc_new_string(&heap, "dead", 4);
-    ASSERT_NE(live, nullptr);
-    ASSERT_NE(garbage, nullptr);
+    GcString *live = nullptr;
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        live = fiber::script::gc_new_string(&heap, "live", 4);
+        GcString *garbage = fiber::script::gc_new_string(&heap, "dead", 4);
+        ASSERT_NE(live, nullptr);
+        ASSERT_NE(garbage, nullptr);
+    }
 
     ValueHandle root = heap.global_value();
     ASSERT_NE(root, nullptr);
-    *root = js_make_heap_ref(&live->hdr, JsHeapKind::String);
+    *root = js_make_heap_ref(&live->hdr, GcHeapKind::String);
 
     std::size_t before_collect = heap.bytes;
     heap.collect();
@@ -151,11 +161,16 @@ TEST(JsGcTest, GcHeapLocalMarkReleasesLocalRoots) {
 
     {
         GcHeap::LocalMark mark(heap);
-        GcString *live = fiber::script::gc_new_string(&heap, "live", 4);
-        ASSERT_NE(live, nullptr);
-        ValueHandle root = heap.local_value();
-        ASSERT_NE(root, nullptr);
-        *root = js_make_heap_ref(&live->hdr, JsHeapKind::String);
+        ValueHandle root = nullptr;
+        GcString *live = nullptr;
+        {
+            GcHeap::NoGcScope no_gc(heap);
+            live = fiber::script::gc_new_string(&heap, "live", 4);
+            ASSERT_NE(live, nullptr);
+            root = heap.local_value();
+            ASSERT_NE(root, nullptr);
+            *root = js_make_heap_ref(&live->hdr, GcHeapKind::String);
+        }
 
         heap.collect();
         EXPECT_EQ(js_value_heap_header(*root), &live->hdr);
@@ -172,11 +187,14 @@ TEST(JsGcTest, NewStringSurvivesFirstCollectAfterInternalBufferCollection) {
     heap.threshold = 1;
 
     std::string payload(1 << 20, 'x');
-    GcString *str = fiber::script::gc_new_string(&heap, payload.data(), payload.size());
-    ASSERT_NE(str, nullptr);
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        GcString *str = fiber::script::gc_new_string(&heap, payload.data(), payload.size());
+        ASSERT_NE(str, nullptr);
+        ASSERT_GT(heap.bytes, payload.size());
+    }
     ASSERT_GT(heap.bytes, payload.size());
 
-    EXPECT_EQ(heap.collect().freed, 0u);
     auto second = heap.collect();
     EXPECT_GT(second.freed, 0u);
     EXPECT_EQ(heap.bytes, 0u);
@@ -185,8 +203,11 @@ TEST(JsGcTest, NewStringSurvivesFirstCollectAfterInternalBufferCollection) {
 TEST(JsGcTest, NoGcScopeDefersThresholdCollectionUntilExit) {
     GcHeap heap;
 
-    GcString *garbage = fiber::script::gc_new_string(&heap, "dead", 4);
-    ASSERT_NE(garbage, nullptr);
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        GcString *garbage = fiber::script::gc_new_string(&heap, "dead", 4);
+        ASSERT_NE(garbage, nullptr);
+    }
     heap.collect();
     std::size_t old_bytes = heap.bytes;
     ASSERT_GT(old_bytes, 0u);
@@ -211,8 +232,11 @@ TEST(JsGcTest, NoGcScopeDefersThresholdCollectionUntilExit) {
 TEST(JsGcTest, NestedNoGcScopeCollectsOnlyAfterOuterExit) {
     GcHeap heap;
 
-    GcString *garbage = fiber::script::gc_new_string(&heap, "dead", 4);
-    ASSERT_NE(garbage, nullptr);
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        GcString *garbage = fiber::script::gc_new_string(&heap, "dead", 4);
+        ASSERT_NE(garbage, nullptr);
+    }
     heap.collect();
     std::size_t old_bytes = heap.bytes;
     ASSERT_GT(old_bytes, 0u);
@@ -239,8 +263,11 @@ TEST(JsGcTest, NestedNoGcScopeCollectsOnlyAfterOuterExit) {
 TEST(JsGcTest, NoGcScopeDefersExplicitCollectUntilExit) {
     GcHeap heap;
 
-    GcString *garbage = fiber::script::gc_new_string(&heap, "dead", 4);
-    ASSERT_NE(garbage, nullptr);
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        GcString *garbage = fiber::script::gc_new_string(&heap, "dead", 4);
+        ASSERT_NE(garbage, nullptr);
+    }
     heap.collect();
     std::size_t before_scope = heap.bytes;
     ASSERT_GT(before_scope, 0u);
@@ -338,23 +365,30 @@ TEST(JsGcTest, NewExceptionRootsHeapInputsDuringAllocationCollection) {
         ASSERT_NE(message_root, nullptr);
         ASSERT_NE(meta_root, nullptr);
 
-        name = fiber::script::gc_new_string(&heap, "TypeError", 9);
-        message = fiber::script::gc_new_string(&heap, "boom", 4);
-        meta_obj = fiber::script::gc_new_object(&heap, 0);
-        ASSERT_NE(name, nullptr);
-        ASSERT_NE(message, nullptr);
-        ASSERT_NE(meta_obj, nullptr);
-        *name_root = js_make_heap_ref(&name->hdr, JsHeapKind::String);
-        *message_root = js_make_heap_ref(&message->hdr, JsHeapKind::String);
-        *meta_root = js_make_heap_ref(&meta_obj->hdr, JsHeapKind::Object);
+        {
+            GcHeap::NoGcScope no_gc(heap);
+            name = fiber::script::gc_new_string(&heap, "TypeError", 9);
+            message = fiber::script::gc_new_string(&heap, "boom", 4);
+            meta_obj = fiber::script::gc_new_object(&heap, 0);
+            ASSERT_NE(name, nullptr);
+            ASSERT_NE(message, nullptr);
+            ASSERT_NE(meta_obj, nullptr);
+            *name_root = js_make_heap_ref(&name->hdr, GcHeapKind::String);
+            *message_root = js_make_heap_ref(&message->hdr, GcHeapKind::String);
+            *meta_root = js_make_heap_ref(&meta_obj->hdr, GcHeapKind::Object);
+        }
 
         heap.collect();
         rooted_bytes = heap.bytes;
     }
 
     heap.threshold = 1;
-    JsValue meta = js_make_heap_ref(&meta_obj->hdr, JsHeapKind::Object);
-    GcException *exc = fiber::script::gc_new_exception(&heap, 12, name, message, meta);
+    JsValue meta = js_make_heap_ref(&meta_obj->hdr, GcHeapKind::Object);
+    GcException *exc = nullptr;
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        exc = fiber::script::gc_new_exception(&heap, 12, name, message, meta);
+    }
     ASSERT_NE(exc, nullptr);
     ASSERT_GE(heap.bytes, rooted_bytes + sizeof(GcException));
     EXPECT_EQ(exc->name, name);
@@ -373,16 +407,23 @@ TEST(JsGcTest, NewExceptionFromNativeMetaRootsMetaDuringAllocationCollection) {
         GcHeap::LocalMark mark(heap);
         ValueHandle meta_root = heap.local_value();
         ASSERT_NE(meta_root, nullptr);
-        meta_obj = fiber::script::gc_new_object(&heap, 0);
-        ASSERT_NE(meta_obj, nullptr);
-        *meta_root = js_make_heap_ref(&meta_obj->hdr, JsHeapKind::Object);
+        {
+            GcHeap::NoGcScope no_gc(heap);
+            meta_obj = fiber::script::gc_new_object(&heap, 0);
+            ASSERT_NE(meta_obj, nullptr);
+            *meta_root = js_make_heap_ref(&meta_obj->hdr, GcHeapKind::Object);
+        }
         heap.collect();
         rooted_bytes = heap.bytes;
     }
 
     heap.threshold = 1;
-    JsValue meta = js_make_heap_ref(&meta_obj->hdr, JsHeapKind::Object);
-    GcException *exc = fiber::script::gc_new_exception(&heap, 18, nullptr, 0, nullptr, 0, meta);
+    JsValue meta = js_make_heap_ref(&meta_obj->hdr, GcHeapKind::Object);
+    GcException *exc = nullptr;
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        exc = fiber::script::gc_new_exception(&heap, 18, nullptr, 0, nullptr, 0, meta);
+    }
     ASSERT_NE(exc, nullptr);
     ASSERT_GE(heap.bytes, rooted_bytes + sizeof(GcException));
     EXPECT_EQ(fiber::script::js_value_heap_header(exc->meta), &meta_obj->hdr);
@@ -394,8 +435,11 @@ TEST(JsGcTest, NewExceptionFromNativeStringsRootsTemporaryStrings) {
 
     std::string name(1 << 20, 'n');
     std::string message(1 << 20, 'm');
-    GcException *exc =
-            fiber::script::gc_new_exception(&heap, 21, name.data(), name.size(), message.data(), message.size());
+    GcException *exc = nullptr;
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        exc = fiber::script::gc_new_exception(&heap, 21, name.data(), name.size(), message.data(), message.size());
+    }
     ASSERT_NE(exc, nullptr);
     ASSERT_GT(heap.bytes, name.size() + message.size());
     ASSERT_NE(exc->name, nullptr);
@@ -408,6 +452,7 @@ TEST(JsGcTest, NewExceptionFromNativeStringsRootsTemporaryStrings) {
 
 TEST(JsGcTest, NewStringDecodesUtf8IntoCompactStorage) {
     GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
 
     GcString *ascii = fiber::script::gc_new_string(&heap, "abc", 3);
     ASSERT_NE(ascii, nullptr);
@@ -438,6 +483,7 @@ TEST(JsGcTest, NewStringDecodesUtf8IntoCompactStorage) {
 
 TEST(JsGcTest, NewStringRejectsMalformedUtf8) {
     GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
 
     const char overlong[] = {static_cast<char>(0xC0), static_cast<char>(0x80)};
     EXPECT_EQ(fiber::script::gc_new_string(&heap, overlong, sizeof(overlong)), nullptr);

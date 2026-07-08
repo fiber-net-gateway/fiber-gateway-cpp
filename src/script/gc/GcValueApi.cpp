@@ -33,7 +33,7 @@ GcString *heap_string_from_value(GcHeap *heap, const JsValue &value, ValueHandle
         str = gc_new_string(heap, native.data, native.len);
     }
     if (str && root) {
-        *root = js_make_heap_ref(&str->hdr, JsHeapKind::String);
+        *root = js_make_heap_ref(&str->hdr, GcHeapKind::String);
     }
     return str;
 }
@@ -102,7 +102,7 @@ bool gc_make_string(GcHeap *heap, ValueHandle out, const char *data, std::size_t
     if (!str) {
         return false;
     }
-    *out = js_make_heap_ref(&str->hdr, JsHeapKind::String);
+    *out = js_make_heap_ref(&str->hdr, GcHeapKind::String);
     return true;
 }
 
@@ -116,7 +116,7 @@ bool gc_make_string_bytes(GcHeap *heap, ValueHandle out, const std::uint8_t *dat
     if (!str) {
         return false;
     }
-    *out = js_make_heap_ref(&str->hdr, JsHeapKind::String);
+    *out = js_make_heap_ref(&str->hdr, GcHeapKind::String);
     return true;
 }
 
@@ -134,7 +134,7 @@ bool gc_make_string_bytes_uninit(GcHeap *heap, ValueHandle out, std::size_t len,
     if (!writer(str->data8, str->len, ctx)) {
         return false;
     }
-    *out = js_make_heap_ref(&str->hdr, JsHeapKind::String);
+    *out = js_make_heap_ref(&str->hdr, GcHeapKind::String);
     return true;
 }
 
@@ -148,7 +148,7 @@ bool gc_make_string_utf16(GcHeap *heap, ValueHandle out, const char16_t *data, s
     if (!str) {
         return false;
     }
-    *out = js_make_heap_ref(&str->hdr, JsHeapKind::String);
+    *out = js_make_heap_ref(&str->hdr, GcHeapKind::String);
     return true;
 }
 
@@ -166,7 +166,7 @@ bool gc_make_string_utf16_uninit(GcHeap *heap, ValueHandle out, std::size_t len,
     if (!writer(str->data16, str->len, ctx)) {
         return false;
     }
-    *out = js_make_heap_ref(&str->hdr, JsHeapKind::String);
+    *out = js_make_heap_ref(&str->hdr, GcHeapKind::String);
     return true;
 }
 
@@ -180,7 +180,7 @@ bool gc_make_binary(GcHeap *heap, ValueHandle out, const std::uint8_t *data, std
     if (!bin) {
         return false;
     }
-    *out = js_make_heap_ref(&bin->hdr, JsHeapKind::Binary);
+    *out = js_make_heap_ref(&bin->hdr, GcHeapKind::Binary);
     return true;
 }
 
@@ -194,7 +194,7 @@ bool gc_make_array(GcHeap *heap, ValueHandle out, std::size_t capacity) {
     if (!arr) {
         return false;
     }
-    *out = js_make_heap_ref(&arr->hdr, JsHeapKind::Array);
+    *out = js_make_heap_ref(&arr->hdr, GcHeapKind::Array);
     return true;
 }
 
@@ -208,7 +208,7 @@ bool gc_make_object(GcHeap *heap, ValueHandle out, std::size_t capacity) {
     if (!obj) {
         return false;
     }
-    *out = js_make_heap_ref(&obj->hdr, JsHeapKind::Object);
+    *out = js_make_heap_ref(&obj->hdr, GcHeapKind::Object);
     return true;
 }
 
@@ -229,7 +229,7 @@ bool gc_make_exception(GcHeap *heap, ValueHandle out, std::int64_t position, con
     if (!exc) {
         return false;
     }
-    *out = js_make_heap_ref(&exc->hdr, JsHeapKind::Exception);
+    *out = js_make_heap_ref(&exc->hdr, GcHeapKind::Exception);
     return true;
 }
 
@@ -248,7 +248,7 @@ bool gc_make_empty_iterator(GcHeap *heap, ValueHandle out, GcIteratorMode mode) 
     if (!iter) {
         return false;
     }
-    *out = js_make_heap_ref(&iter->hdr, JsHeapKind::Iterator);
+    *out = js_make_heap_ref(&iter->hdr, GcHeapKind::Iterator);
     return true;
 }
 
@@ -272,7 +272,7 @@ bool gc_make_array_iterator(GcHeap *heap, ValueHandle out, ConstValueHandle arra
     if (!iter) {
         return false;
     }
-    *out = js_make_heap_ref(&iter->hdr, JsHeapKind::Iterator);
+    *out = js_make_heap_ref(&iter->hdr, GcHeapKind::Iterator);
     return true;
 }
 
@@ -296,7 +296,7 @@ bool gc_make_object_iterator(GcHeap *heap, ValueHandle out, ConstValueHandle obj
     if (!iter) {
         return false;
     }
-    *out = js_make_heap_ref(&iter->hdr, JsHeapKind::Iterator);
+    *out = js_make_heap_ref(&iter->hdr, GcHeapKind::Iterator);
     return true;
 }
 

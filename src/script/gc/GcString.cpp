@@ -15,7 +15,11 @@ namespace fiber::script {
 using namespace gc_detail;
 
 GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len) noexcept {
-    auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcKind::String);
+    if (!heap) {
+        return nullptr;
+    }
+    FIBER_ASSERT(heap->no_gc_active());
+    auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcHeapKind::String);
     if (!hdr) {
         return nullptr;
     }
@@ -44,7 +48,11 @@ GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_
 }
 
 GcString *gc_new_string_bytes_uninit(GcHeap *heap, std::size_t len) noexcept {
-    auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcKind::String);
+    if (!heap) {
+        return nullptr;
+    }
+    FIBER_ASSERT(heap->no_gc_active());
+    auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcHeapKind::String);
     if (!hdr) {
         return nullptr;
     }
@@ -68,7 +76,11 @@ GcString *gc_new_string_bytes_uninit(GcHeap *heap, std::size_t len) noexcept {
 }
 
 GcString *gc_new_string_utf16(GcHeap *heap, const char16_t *data, std::size_t len) noexcept {
-    auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcKind::String);
+    if (!heap) {
+        return nullptr;
+    }
+    FIBER_ASSERT(heap->no_gc_active());
+    auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcHeapKind::String);
     if (!hdr) {
         return nullptr;
     }
@@ -96,7 +108,11 @@ GcString *gc_new_string_utf16(GcHeap *heap, const char16_t *data, std::size_t le
 }
 
 GcString *gc_new_string_utf16_uninit(GcHeap *heap, std::size_t len) noexcept {
-    auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcKind::String);
+    if (!heap) {
+        return nullptr;
+    }
+    FIBER_ASSERT(heap->no_gc_active());
+    auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcHeapKind::String);
     if (!hdr) {
         return nullptr;
     }
@@ -122,6 +138,7 @@ GcString *gc_new_string(GcHeap *heap, const char *data, std::size_t len) noexcep
     if (!heap || (len > 0 && !data)) {
         return nullptr;
     }
+    FIBER_ASSERT(heap->no_gc_active());
     fiber::json::Utf8ScanResult scan;
     if (!fiber::json::utf8_scan(data, len, scan)) {
         return nullptr;

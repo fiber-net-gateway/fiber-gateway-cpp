@@ -1,6 +1,7 @@
 #include "Compares.h"
 
 #include "../../common/json/Utf.h"
+#include "../gc/GcInternal.h"
 
 #include <cmath>
 #include <cstddef>

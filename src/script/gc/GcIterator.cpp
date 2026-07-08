@@ -4,6 +4,8 @@
 
 #include "GcInternal.h"
 
+#include "../../common/Assert.h"
+
 #include <new>
 #include <utility>
 
@@ -12,7 +14,11 @@ namespace fiber::script {
 using namespace gc_detail;
 
 GcIterator *gc_new_array_iterator(GcHeap *heap, GcArray *array, GcIteratorMode mode) {
-    auto *hdr = gc_alloc_raw(heap, sizeof(GcIterator), GcKind::Iterator);
+    if (!heap) {
+        return nullptr;
+    }
+    FIBER_ASSERT(heap->no_gc_active());
+    auto *hdr = gc_alloc_raw(heap, sizeof(GcIterator), GcHeapKind::Iterator);
     if (!hdr) {
         return nullptr;
     }
@@ -36,7 +42,11 @@ GcIterator *gc_new_array_iterator(GcHeap *heap, GcArray *array, GcIteratorMode m
 }
 
 GcIterator *gc_new_object_iterator(GcHeap *heap, GcObject *object, GcIteratorMode mode) {
-    auto *hdr = gc_alloc_raw(heap, sizeof(GcIterator), GcKind::Iterator);
+    if (!heap) {
+        return nullptr;
+    }
+    FIBER_ASSERT(heap->no_gc_active());
+    auto *hdr = gc_alloc_raw(heap, sizeof(GcIterator), GcHeapKind::Iterator);
     if (!hdr) {
         return nullptr;
     }
@@ -62,9 +72,10 @@ GcIterator *gc_new_object_iterator(GcHeap *heap, GcObject *object, GcIteratorMod
 bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done) {
     out = JsValue::make_undefined();
     done = true;
-    if (!iter) {
+    if (!heap || !iter) {
         return false;
     }
+    FIBER_ASSERT(heap->no_gc_active());
     iter->has_current = false;
     iter->current_key = JsValue::make_undefined();
     iter->current_value = JsValue::make_undefined();

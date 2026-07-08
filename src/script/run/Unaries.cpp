@@ -1,6 +1,6 @@
 #include "Unaries.h"
 
-#include "../JsGc.h"
+#include "../gc/GcInternal.h"
 
 #include <cmath>
 #include <cstring>

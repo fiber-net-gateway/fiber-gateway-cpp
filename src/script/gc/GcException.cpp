@@ -4,6 +4,8 @@
 
 #include "GcInternal.h"
 
+#include "../../common/Assert.h"
+
 #include <new>
 
 namespace fiber::script {
@@ -14,7 +16,11 @@ namespace {
 
 GcException *gc_new_exception_unchecked(GcHeap *heap, std::int64_t position, GcString *name, GcString *message,
                                         const JsValue &meta) {
-    auto *hdr = gc_alloc_raw(heap, sizeof(GcException), GcKind::Exception);
+    if (!heap) {
+        return nullptr;
+    }
+    FIBER_ASSERT(heap->no_gc_active());
+    auto *hdr = gc_alloc_raw(heap, sizeof(GcException), GcHeapKind::Exception);
     if (!hdr) {
         return nullptr;
     }
@@ -34,6 +40,7 @@ GcException *gc_new_exception(GcHeap *heap, std::int64_t position, GcString *nam
     if (!heap) {
         return nullptr;
     }
+    FIBER_ASSERT(heap->no_gc_active());
     GcHeap::LocalMark mark(*heap);
     ValueHandle name_root = heap->local_value();
     ValueHandle message_root = heap->local_value();
@@ -41,8 +48,8 @@ GcException *gc_new_exception(GcHeap *heap, std::int64_t position, GcString *nam
     if (!name_root || !message_root || !meta_root) {
         return nullptr;
     }
-    *name_root = name ? js_make_heap_ref(&name->hdr, JsHeapKind::String) : JsValue::make_undefined();
-    *message_root = message ? js_make_heap_ref(&message->hdr, JsHeapKind::String) : JsValue::make_undefined();
+    *name_root = name ? js_make_heap_ref(&name->hdr, GcHeapKind::String) : JsValue::make_undefined();
+    *message_root = message ? js_make_heap_ref(&message->hdr, GcHeapKind::String) : JsValue::make_undefined();
     *meta_root = meta;
     return gc_new_exception_unchecked(heap, position, name, message, *meta_root);
 }
@@ -56,6 +63,7 @@ GcException *gc_new_exception(GcHeap *heap, std::int64_t position, const char *n
     if (!heap) {
         return nullptr;
     }
+    FIBER_ASSERT(heap->no_gc_active());
     GcHeap::LocalMark mark(*heap);
     ValueHandle name_root = heap->local_value();
     ValueHandle message_root = heap->local_value();
@@ -77,7 +85,7 @@ GcException *gc_new_exception(GcHeap *heap, std::int64_t position, const char *n
         if (!name_str) {
             return nullptr;
         }
-        *name_root = js_make_heap_ref(&name_str->hdr, JsHeapKind::String);
+        *name_root = js_make_heap_ref(&name_str->hdr, GcHeapKind::String);
     }
     if (message || message_len > 0) {
         if (!message && message_len > 0) {
@@ -87,7 +95,7 @@ GcException *gc_new_exception(GcHeap *heap, std::int64_t position, const char *n
         if (!message_str) {
             return nullptr;
         }
-        *message_root = js_make_heap_ref(&message_str->hdr, JsHeapKind::String);
+        *message_root = js_make_heap_ref(&message_str->hdr, GcHeapKind::String);
     }
     return gc_new_exception_unchecked(heap, position, name_str, message_str, *meta_root);
 }

@@ -8,9 +8,9 @@
 #include <string_view>
 #include <utility>
 
-#include "script/JsGc.h"
 #include "script/Library.h"
 #include "script/Script.h"
+#include "script/gc/GcInternal.h"
 #include "script/ir/Compiler.h"
 #include "script/parse/Parser.h"
 #include "script/run/InterpreterVm.h"

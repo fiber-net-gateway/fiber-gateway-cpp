@@ -4,6 +4,8 @@
 
 #include "GcInternal.h"
 
+#include "../../common/Assert.h"
+
 #include <algorithm>
 #include <cstring>
 #include <limits>
@@ -165,6 +167,7 @@ void *gc_alloc_extra(GcHeap *heap, std::size_t bytes) {
     if (!heap || bytes == 0) {
         return nullptr;
     }
+    FIBER_ASSERT(heap->no_gc_active());
     heap->maybe_collect_for_alloc(bytes);
     void *mem = heap->alloc.alloc(bytes);
     if (!mem) {
@@ -289,7 +292,7 @@ int32_t allocate_entry(GcObject *obj) {
 }
 
 JsValue make_heap_string_value(GcString *str) {
-    return str ? js_make_heap_ref(&str->hdr, JsHeapKind::String) : JsValue::make_undefined();
+    return str ? js_make_heap_ref(&str->hdr, GcHeapKind::String) : JsValue::make_undefined();
 }
 
 bool build_entry_array(GcHeap *heap, const JsValue &key, const JsValue &value, JsValue &out) {
@@ -343,7 +346,11 @@ bool build_object_snapshot(GcHeap *heap, GcIterator *iter, const GcObject *obj) 
     return true;
 }
 
-GcHeader *gc_alloc_raw(GcHeap *heap, std::size_t size, GcKind kind) {
+GcHeader *gc_alloc_raw(GcHeap *heap, std::size_t size, GcHeapKind kind) {
+    if (!heap) {
+        return nullptr;
+    }
+    FIBER_ASSERT(heap->no_gc_active());
     heap->maybe_collect_for_alloc(size);
     void *mem = heap->alloc.alloc(size);
     if (!mem) {
@@ -379,18 +386,18 @@ void gc_mark_value(GcHeap *heap, const JsValue &value) {
 
 void gc_trace_children(GcHeap *heap, GcHeader *obj) {
     switch (obj->kind) {
-        case GcKind::String:
+        case GcHeapKind::String:
             break;
-        case GcKind::Binary:
+        case GcHeapKind::Binary:
             break;
-        case GcKind::Array: {
+        case GcHeapKind::Array: {
             auto *arr = reinterpret_cast<GcArray *>(obj);
             for (std::size_t i = 0; i < arr->size; ++i) {
                 gc_mark_value(heap, arr->elems[i]);
             }
             break;
         }
-        case GcKind::Object: {
+        case GcHeapKind::Object: {
             auto *objv = reinterpret_cast<GcObject *>(obj);
             int32_t cursor = objv->head;
             while (cursor != -1) {
@@ -403,7 +410,7 @@ void gc_trace_children(GcHeap *heap, GcHeader *obj) {
             }
             break;
         }
-        case GcKind::Exception: {
+        case GcHeapKind::Exception: {
             auto *exc = reinterpret_cast<GcException *>(obj);
             if (exc->name) {
                 gc_mark_obj(heap, &exc->name->hdr);
@@ -414,7 +421,7 @@ void gc_trace_children(GcHeap *heap, GcHeader *obj) {
             gc_mark_value(heap, exc->meta);
             break;
         }
-        case GcKind::Iterator: {
+        case GcHeapKind::Iterator: {
             auto *iter = reinterpret_cast<GcIterator *>(obj);
             if (iter->array) {
                 gc_mark_obj(heap, &iter->array->hdr);
@@ -451,7 +458,7 @@ void gc_mark_obj(GcHeap *heap, GcHeader *obj) {
 
 void gc_free_obj(GcHeap *heap, GcHeader *obj) {
     switch (obj->kind) {
-        case GcKind::String: {
+        case GcHeapKind::String: {
             auto *str = reinterpret_cast<GcString *>(obj);
             if (str->encoding == GcStringEncoding::Utf16) {
                 if (str->data16) {
@@ -462,14 +469,14 @@ void gc_free_obj(GcHeap *heap, GcHeader *obj) {
             }
             break;
         }
-        case GcKind::Binary: {
+        case GcHeapKind::Binary: {
             auto *bin = reinterpret_cast<GcBinary *>(obj);
             if (bin->data) {
                 gc_free_extra(heap, bin->data, bin->len);
             }
             break;
         }
-        case GcKind::Array: {
+        case GcHeapKind::Array: {
             auto *arr = reinterpret_cast<GcArray *>(obj);
             if (arr->elems) {
                 for (std::size_t i = 0; i < arr->capacity; ++i) {
@@ -479,7 +486,7 @@ void gc_free_obj(GcHeap *heap, GcHeader *obj) {
             }
             break;
         }
-        case GcKind::Object: {
+        case GcHeapKind::Object: {
             auto *objv = reinterpret_cast<GcObject *>(obj);
             if (objv->entries) {
                 for (std::size_t i = 0; i < objv->entry_capacity; ++i) {
@@ -492,12 +499,12 @@ void gc_free_obj(GcHeap *heap, GcHeader *obj) {
             }
             break;
         }
-        case GcKind::Exception: {
+        case GcHeapKind::Exception: {
             auto *exc = reinterpret_cast<GcException *>(obj);
             std::destroy_at(&exc->meta);
             break;
         }
-        case GcKind::Iterator: {
+        case GcHeapKind::Iterator: {
             auto *iter = reinterpret_cast<GcIterator *>(obj);
             if (iter->snapshot_keys) {
                 gc_free_extra(heap, iter->snapshot_keys, sizeof(GcString *) * iter->snapshot_size);

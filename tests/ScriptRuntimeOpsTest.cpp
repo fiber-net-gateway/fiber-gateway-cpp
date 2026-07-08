@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
-#include "script/JsGc.h"
 #include "script/ScriptResult.h"
+#include "script/gc/GcInternal.h"
 #include "script/run/Access.h"
 #include "script/run/Binaries.h"
 #include "script/run/Compares.h"
@@ -30,6 +30,7 @@ fiber::script::ValueHandle handle(fiber::script::GcHeap &heap, JsValue value) {
 JsValue make_array(GcHeap &heap, std::initializer_list<JsValue> values) {
     JsValue arr = JsValue::make_array(heap, values.size());
     auto *arr_ptr = js_value_heap_ptr<GcArray>(arr);
+    GcHeap::NoGcScope no_gc(heap);
     for (const auto &value: values) {
         if (!fiber::script::gc_array_push(&heap, arr_ptr, value)) {
             ADD_FAILURE() << "gc_array_push failed";
@@ -42,6 +43,7 @@ JsValue make_array(GcHeap &heap, std::initializer_list<JsValue> values) {
 JsValue make_object_with_key(GcHeap &heap, const char *key, std::size_t key_len, const JsValue &value) {
     JsValue obj = JsValue::make_object(heap, 1);
     auto *obj_ptr = js_value_heap_ptr<GcObject>(obj);
+    GcHeap::NoGcScope no_gc(heap);
     GcString *key_str = fiber::script::gc_new_string(&heap, key, key_len);
     if (!key_str) {
         ADD_FAILURE() << "gc_new_string failed";
@@ -89,7 +91,10 @@ TEST(ScriptRuntimeOpsTest, AccessIndexSetInvalidKey) {
     GcHeap heap;
     auto arr = handle(heap, JsValue::make_array(heap, 0));
     auto *arr_ptr = js_value_heap_ptr<GcArray>(*arr);
-    ASSERT_TRUE(fiber::script::gc_array_push(&heap, arr_ptr, JsValue::make_integer(1)));
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        ASSERT_TRUE(fiber::script::gc_array_push(&heap, arr_ptr, JsValue::make_integer(1)));
+    }
     char key_bytes[] = {'a'};
     auto key = handle(heap, JsValue::make_native_string(key_bytes, sizeof(key_bytes)));
     auto value = handle(heap, JsValue::make_integer(2));
@@ -103,7 +108,10 @@ TEST(ScriptRuntimeOpsTest, AccessIndexSetOutOfBounds) {
     GcHeap heap;
     auto arr = handle(heap, JsValue::make_array(heap, 0));
     auto *arr_ptr = js_value_heap_ptr<GcArray>(*arr);
-    ASSERT_TRUE(fiber::script::gc_array_push(&heap, arr_ptr, JsValue::make_integer(1)));
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        ASSERT_TRUE(fiber::script::gc_array_push(&heap, arr_ptr, JsValue::make_integer(1)));
+    }
     auto key = handle(heap, JsValue::make_integer(3));
     auto value = handle(heap, JsValue::make_integer(2));
     ResultPayload result;

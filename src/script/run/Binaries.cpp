@@ -7,7 +7,7 @@
 #include <limits>
 
 #include "../../common/json/Utf.h"
-#include "../JsGc.h"
+#include "../gc/GcInternal.h"
 #include "Compares.h"
 
 namespace fiber::script::run {

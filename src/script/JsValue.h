@@ -51,7 +51,7 @@ enum class ExceptionKind : std::uint8_t {
     ReferenceError,
 };
 
-enum class JsHeapKind : std::uint8_t {
+enum class GcHeapKind : std::uint8_t {
     String = 0,
     Binary,
     Array,
@@ -105,7 +105,7 @@ struct alignas(16) JsValue {
     std::uint8_t subtag = 0;
 };
 
-JsValue js_make_heap_ref(GcHeader *hdr, JsHeapKind kind);
+JsValue js_make_heap_ref(GcHeader *hdr, GcHeapKind kind);
 JsValue js_make_borrowed_string(const char *data, std::size_t len, JsBorrowedEncoding encoding);
 JsValue js_make_borrowed_binary(const std::uint8_t *data, std::size_t len);
 

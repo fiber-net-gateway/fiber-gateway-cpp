@@ -5,8 +5,8 @@
 #include <utility>
 
 #include "../../common/Assert.h"
-#include "../JsGc.h"
 #include "../Library.h"
+#include "../gc/GcInternal.h"
 #include "Access.h"
 #include "Binaries.h"
 #include "Compares.h"
