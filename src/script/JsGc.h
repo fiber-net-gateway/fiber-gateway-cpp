@@ -181,6 +181,7 @@ struct GcCollectStats {
 class GcHeap final : public GcRootSource {
 public:
     class LocalMark;
+    class NoGcScope;
 
     GcHeap();
     explicit GcHeap(fiber::mem::BufPool &pool);
@@ -201,6 +202,8 @@ public:
     void visit_roots(fiber::script::GcRootVisitor &visitor) noexcept override;
 
     GcCollectStats collect();
+    void maybe_collect_for_alloc(std::size_t bytes);
+    [[nodiscard]] bool no_gc_active() const noexcept { return no_gc_depth_ != 0; }
 
     GcHeader *head = nullptr;
     std::size_t bytes = 0;
@@ -223,6 +226,8 @@ private:
 
     [[nodiscard]] LocalState mark_local() const noexcept;
     void restore_local(LocalState state) noexcept;
+    void enter_no_gc() noexcept;
+    void leave_no_gc() noexcept;
     [[nodiscard]] ValueBlock *alloc_value_block();
     [[nodiscard]] ValueBlock *acquire_local_block();
     [[nodiscard]] ValueBlock *acquire_global_block();
@@ -243,6 +248,10 @@ private:
     ValueBlock *global_current_ = nullptr;
     fiber::script::JsValue *global_top_ = nullptr;
     fiber::script::JsValue *global_end_ = nullptr;
+
+    std::uint32_t no_gc_depth_ = 0;
+    bool gc_pending_ = false;
+    bool collecting_ = false;
 };
 
 class GcHeap::LocalMark {
@@ -260,6 +269,58 @@ private:
     GcHeap *heap_ = nullptr;
     LocalState state_{};
 };
+
+class GcHeap::NoGcScope {
+public:
+    explicit NoGcScope(GcHeap &heap) noexcept;
+    NoGcScope(const NoGcScope &) = delete;
+    NoGcScope &operator=(const NoGcScope &) = delete;
+    NoGcScope(NoGcScope &&other) noexcept;
+    NoGcScope &operator=(NoGcScope &&other) noexcept;
+    ~NoGcScope();
+
+    void reset() noexcept;
+
+private:
+    GcHeap *heap_ = nullptr;
+};
+
+using GcByteStringWriter = bool (*)(std::uint8_t *dst, std::size_t len, void *ctx) noexcept;
+using GcUtf16StringWriter = bool (*)(char16_t *dst, std::size_t len, void *ctx) noexcept;
+
+bool gc_make_string(GcHeap *heap, ValueHandle out, const char *data, std::size_t len) noexcept;
+bool gc_make_string_bytes(GcHeap *heap, ValueHandle out, const std::uint8_t *data, std::size_t len) noexcept;
+bool gc_make_string_bytes_uninit(GcHeap *heap, ValueHandle out, std::size_t len, GcByteStringWriter writer,
+                                 void *ctx) noexcept;
+bool gc_make_string_utf16(GcHeap *heap, ValueHandle out, const char16_t *data, std::size_t len) noexcept;
+bool gc_make_string_utf16_uninit(GcHeap *heap, ValueHandle out, std::size_t len, GcUtf16StringWriter writer,
+                                 void *ctx) noexcept;
+bool gc_make_binary(GcHeap *heap, ValueHandle out, const std::uint8_t *data, std::size_t len);
+bool gc_make_array(GcHeap *heap, ValueHandle out, std::size_t capacity);
+bool gc_make_object(GcHeap *heap, ValueHandle out, std::size_t capacity);
+bool gc_make_exception(GcHeap *heap, ValueHandle out, std::int64_t position, const char *name, std::size_t name_len,
+                       const char *message, std::size_t message_len, JsValue meta);
+bool gc_make_exception(GcHeap *heap, ValueHandle out, std::int64_t position, const char *name, std::size_t name_len,
+                       const char *message, std::size_t message_len);
+bool gc_make_empty_iterator(GcHeap *heap, ValueHandle out, GcIteratorMode mode);
+bool gc_make_array_iterator(GcHeap *heap, ValueHandle out, ConstValueHandle array, GcIteratorMode mode);
+bool gc_make_object_iterator(GcHeap *heap, ValueHandle out, ConstValueHandle object, GcIteratorMode mode);
+
+bool gc_string_to_utf8(ConstValueHandle value, std::string &out);
+bool gc_array_get(ConstValueHandle array, std::size_t index, ValueHandle out);
+bool gc_array_set(GcHeap *heap, ValueHandle array, std::size_t index, JsValue value);
+bool gc_array_push(GcHeap *heap, ValueHandle array, JsValue value);
+bool gc_array_pop(ValueHandle array, ValueHandle out);
+bool gc_array_insert(GcHeap *heap, ValueHandle array, std::size_t index, JsValue value);
+bool gc_array_remove(ValueHandle array, std::size_t index, ValueHandle out);
+bool gc_object_set(GcHeap *heap, ValueHandle object, JsValue key, JsValue value);
+bool gc_object_set_key(GcHeap *heap, ValueHandle object, const char *key, std::size_t key_len, JsValue value);
+bool gc_object_set_heap_key(GcHeap *heap, ValueHandle object, const GcString *key, JsValue value);
+bool gc_object_get(GcHeap *heap, ConstValueHandle object, JsValue key, ValueHandle out);
+bool gc_object_get_key(GcHeap *heap, ConstValueHandle object, const char *key, std::size_t key_len, ValueHandle out);
+bool gc_object_remove(GcHeap *heap, ValueHandle object, JsValue key);
+bool gc_object_remove_key(GcHeap *heap, ValueHandle object, const char *key, std::size_t key_len);
+bool gc_iterator_next(GcHeap *heap, ValueHandle iter, ValueHandle out, bool &done);
 
 GcString *gc_new_string(GcHeap *heap, const char *data, std::size_t len) noexcept;
 GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len) noexcept;

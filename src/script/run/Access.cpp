@@ -14,6 +14,10 @@ fiber::script::JsValue &mutable_value(ConstValueHandle value) noexcept {
     return *const_cast<fiber::script::JsValue *>(value.get());
 }
 
+ValueHandle mutable_handle(ConstValueHandle value) noexcept {
+    return ValueHandle(value ? const_cast<fiber::script::JsValue *>(value.get()) : nullptr);
+}
+
 template<typename T>
 T *mutable_heap_ptr(ConstValueHandle value) noexcept {
     if (!value) {
@@ -28,36 +32,6 @@ bool get_index(ConstValueHandle key, std::int64_t &out) noexcept {
         return true;
     }
     return false;
-}
-
-// OOM is the only abort this can signal (allocation failure while interning a borrowed string); a
-// non-string key returns nullptr with error left None and the caller decides undefined (read) vs
-// TypeError (write).
-fiber::script::GcString *ensure_heap_string(GcHeap &runtime, ConstValueHandle value, ScriptAbortReason &error) {
-    if (!value) {
-        return nullptr;
-    }
-    if (fiber::script::js_value_type(*value) == fiber::script::JsNodeType::String &&
-        !fiber::script::js_value_is_borrowed_string(*value)) {
-        return const_cast<fiber::script::GcString *>(
-                fiber::script::js_value_heap_ptr<const fiber::script::GcString>(*value));
-    }
-    if (fiber::script::js_value_type(*value) != fiber::script::JsNodeType::String ||
-        !fiber::script::js_value_is_borrowed_string(*value)) {
-        return nullptr;
-    }
-    fiber::script::NativeStr native = fiber::script::js_value_native_string(*value);
-    fiber::script::GcString *str = fiber::script::gc_new_string(&runtime.heap(), native.data, native.len);
-    if (!str) {
-        error = oom_error();
-        return nullptr;
-    }
-    return str;
-}
-
-fiber::script::JsValue make_heap_string_value(fiber::script::GcString *str) {
-    return str ? fiber::script::js_make_heap_ref(&str->hdr, fiber::script::JsHeapKind::String)
-               : fiber::script::JsValue::make_undefined();
 }
 
 // Malformed UTF-8 fails (returns false); the read caller folds that to undefined.
@@ -89,41 +63,40 @@ CallResult string_char_at(GcHeap &runtime, ResultPayload &result, ConstValueHand
         return set_undefined(result);
     }
     GcHeap::LocalMark mark(runtime);
-    fiber::script::GcString *str = nullptr;
+    ValueHandle rooted_str = runtime.local_value();
+    ValueHandle char_value = runtime.local_value();
+    if (!rooted_str || !char_value) {
+        return set_abort(result, oom_error());
+    }
     if (value && fiber::script::js_value_type(*value) == fiber::script::JsNodeType::String &&
         !fiber::script::js_value_is_borrowed_string(*value)) {
-        str = const_cast<fiber::script::GcString *>(
-                fiber::script::js_value_heap_ptr<const fiber::script::GcString>(*value));
+        *rooted_str = *value;
     } else if (value && fiber::script::js_value_type(*value) == fiber::script::JsNodeType::String &&
                fiber::script::js_value_is_borrowed_string(*value)) {
         fiber::script::NativeStr native = fiber::script::js_value_native_string(*value);
-        str = fiber::script::gc_new_string(&runtime.heap(), native.data, native.len);
+        if (!fiber::script::gc_make_string(&runtime.heap(), rooted_str, native.data, native.len)) {
+            return set_abort(result, oom_error());
+        }
     }
+    auto *str = fiber::script::js_value_heap_ptr<const fiber::script::GcString>(*rooted_str);
     if (!str) {
         return set_abort(result, oom_error());
     }
-    ValueHandle rooted_str = runtime.local_value();
-    if (!rooted_str) {
-        return set_abort(result, oom_error());
-    }
-    *rooted_str = make_heap_string_value(str);
     if (index >= static_cast<std::int64_t>(str->len)) {
         return set_undefined(result);
     }
     if (str->encoding == fiber::script::GcStringEncoding::Byte) {
         std::uint8_t byte = str->data8[index];
-        fiber::script::GcString *char_str = fiber::script::gc_new_string_bytes(&runtime.heap(), &byte, 1);
-        if (!char_str) {
+        if (!fiber::script::gc_make_string_bytes(&runtime.heap(), char_value, &byte, 1)) {
             return set_abort(result, oom_error());
         }
-        return set_value(result, make_heap_string_value(char_str));
+        return set_value(result, *char_value);
     }
     char16_t unit = str->data16[index];
-    fiber::script::GcString *char_str = fiber::script::gc_new_string_utf16(&runtime.heap(), &unit, 1);
-    if (!char_str) {
+    if (!fiber::script::gc_make_string_utf16(&runtime.heap(), char_value, &unit, 1)) {
         return set_abort(result, oom_error());
     }
-    return set_value(result, make_heap_string_value(char_str));
+    return set_value(result, *char_value);
 }
 
 } // namespace
@@ -149,7 +122,7 @@ CallResult Access::expand_object(GcHeap &runtime, ConstValueHandle target, Const
         if (!entry || !entry->occupied || !entry->key) {
             continue;
         }
-        if (!fiber::script::gc_object_set(heap, target_obj, entry->key, entry->value)) {
+        if (!fiber::script::gc_object_set_heap_key(heap, mutable_handle(target), entry->key, entry->value)) {
             return set_abort(result, oom_error());
         }
     }
@@ -181,7 +154,7 @@ CallResult Access::expand_array(GcHeap &runtime, ConstValueHandle target, ConstV
         }
         for (std::size_t i = 0; i < add_arr->size; ++i) {
             const fiber::script::JsValue *item = fiber::script::gc_array_get(add_arr, i);
-            if (!fiber::script::gc_array_push(heap, target_arr,
+            if (!fiber::script::gc_array_push(heap, mutable_handle(target),
                                               item ? *item : fiber::script::JsValue::make_undefined())) {
                 return set_abort(result, oom_error());
             }
@@ -201,7 +174,7 @@ CallResult Access::expand_array(GcHeap &runtime, ConstValueHandle target, ConstV
         if (!entry || !entry->occupied) {
             continue;
         }
-        if (!fiber::script::gc_array_push(heap, target_arr, entry->value)) {
+        if (!fiber::script::gc_array_push(heap, mutable_handle(target), entry->value)) {
             return set_abort(result, oom_error());
         }
     }
@@ -214,11 +187,8 @@ CallResult Access::push_array(GcHeap &runtime, ConstValueHandle target, ConstVal
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
     }
     fiber::script::GcHeap *heap = &runtime.heap();
-    auto *arr = mutable_heap_ptr<fiber::script::GcArray>(target);
-    if (!arr) {
-        return set_exception(result, fiber::script::ExceptionKind::TypeError);
-    }
-    if (!fiber::script::gc_array_push(heap, arr, addition ? *addition : fiber::script::JsValue::make_undefined())) {
+    if (!fiber::script::gc_array_push(heap, mutable_handle(target),
+                                      addition ? *addition : fiber::script::JsValue::make_undefined())) {
         return set_abort(result, oom_error());
     }
     return set_value(result, *target);
@@ -234,23 +204,29 @@ CallResult Access::index_get(GcHeap &runtime, ConstValueHandle parent, ConstValu
         if (!get_index(key, idx) || idx < 0) {
             return set_undefined(result);
         }
-        auto *arr = fiber::script::js_value_heap_ptr<const fiber::script::GcArray>(*parent);
-        const fiber::script::JsValue *found =
-                arr ? fiber::script::gc_array_get(arr, static_cast<std::size_t>(idx)) : nullptr;
-        return set_value(result, found ? *found : fiber::script::JsValue::make_undefined());
-    }
-    if (fiber::script::js_value_type(*parent) == fiber::script::JsNodeType::Object) {
-        ScriptAbortReason error = ScriptAbortReason::None;
-        fiber::script::GcString *key_str = ensure_heap_string(runtime, key, error);
-        if (!key_str && error != ScriptAbortReason::None) {
-            return set_abort(result, error);
+        GcHeap::LocalMark mark(runtime);
+        ValueHandle found = runtime.local_value();
+        if (!found) {
+            return set_abort(result, oom_error());
         }
-        if (!key_str) {
+        if (!fiber::script::gc_array_get(parent, static_cast<std::size_t>(idx), found)) {
             return set_undefined(result);
         }
-        auto *obj = fiber::script::js_value_heap_ptr<const fiber::script::GcObject>(*parent);
-        const fiber::script::JsValue *found = obj ? fiber::script::gc_object_get(obj, key_str) : nullptr;
-        return set_value(result, found ? *found : fiber::script::JsValue::make_undefined());
+        return set_value(result, *found);
+    }
+    if (fiber::script::js_value_type(*parent) == fiber::script::JsNodeType::Object) {
+        if (!key || fiber::script::js_value_type(*key) != fiber::script::JsNodeType::String) {
+            return set_undefined(result);
+        }
+        GcHeap::LocalMark mark(runtime);
+        ValueHandle found = runtime.local_value();
+        if (!found) {
+            return set_abort(result, oom_error());
+        }
+        if (!fiber::script::gc_object_get(&runtime.heap(), parent, *key, found)) {
+            return set_abort(result, oom_error());
+        }
+        return set_value(result, *found);
     }
     if (fiber::script::js_value_type(*parent) == fiber::script::JsNodeType::String) {
         std::int64_t idx = 0;
@@ -277,32 +253,17 @@ CallResult Access::index_set(GcHeap &runtime, ConstValueHandle parent, ConstValu
             return set_exception(result, fiber::script::ExceptionKind::RangeError);
         }
         fiber::script::GcHeap *heap = &runtime.heap();
-        if (!fiber::script::gc_array_set(heap, arr, static_cast<std::size_t>(idx), *value)) {
+        if (!fiber::script::gc_array_set(heap, mutable_handle(parent), static_cast<std::size_t>(idx), *value)) {
             return set_abort(result, oom_error());
         }
         return set_value(result, *value);
     }
     if (fiber::script::js_value_type(*parent) == fiber::script::JsNodeType::Object) {
-        GcHeap::LocalMark mark(runtime);
         fiber::script::GcHeap *heap = &runtime.heap();
-        ScriptAbortReason error = ScriptAbortReason::None;
-        fiber::script::GcString *key_str = ensure_heap_string(runtime, key, error);
-        if (!key_str && error != ScriptAbortReason::None) {
-            return set_abort(result, error);
-        }
-        if (!key_str) {
+        if (!key || fiber::script::js_value_type(*key) != fiber::script::JsNodeType::String) {
             return set_exception(result, fiber::script::ExceptionKind::TypeError);
         }
-        ValueHandle rooted_key = runtime.local_value();
-        if (!rooted_key) {
-            return set_abort(result, oom_error());
-        }
-        *rooted_key = make_heap_string_value(key_str);
-        auto *obj = mutable_heap_ptr<fiber::script::GcObject>(parent);
-        if (!obj) {
-            return set_exception(result, fiber::script::ExceptionKind::TypeError);
-        }
-        if (!fiber::script::gc_object_set(heap, obj, key_str, *value)) {
+        if (!fiber::script::gc_object_set(heap, mutable_handle(parent), *key, *value)) {
             return set_abort(result, oom_error());
         }
         return set_value(result, *value);
@@ -327,17 +288,18 @@ CallResult Access::prop_get(GcHeap &runtime, ConstValueHandle parent, ConstValue
         return set_undefined(result);
     }
     if (fiber::script::js_value_type(*parent) == fiber::script::JsNodeType::Object) {
-        ScriptAbortReason error = ScriptAbortReason::None;
-        fiber::script::GcString *key_str = ensure_heap_string(runtime, key, error);
-        if (!key_str && error != ScriptAbortReason::None) {
-            return set_abort(result, error);
-        }
-        if (!key_str) {
+        if (!key || fiber::script::js_value_type(*key) != fiber::script::JsNodeType::String) {
             return set_undefined(result);
         }
-        auto *obj = fiber::script::js_value_heap_ptr<const fiber::script::GcObject>(*parent);
-        const fiber::script::JsValue *found = obj ? fiber::script::gc_object_get(obj, key_str) : nullptr;
-        return set_value(result, found ? *found : fiber::script::JsValue::make_undefined());
+        GcHeap::LocalMark mark(runtime);
+        ValueHandle found = runtime.local_value();
+        if (!found) {
+            return set_abort(result, oom_error());
+        }
+        if (!fiber::script::gc_object_get(&runtime.heap(), parent, *key, found)) {
+            return set_abort(result, oom_error());
+        }
+        return set_value(result, *found);
     }
     if (fiber::script::js_value_type(*parent) == fiber::script::JsNodeType::Array ||
         fiber::script::js_value_type(*parent) == fiber::script::JsNodeType::String) {
@@ -359,26 +321,11 @@ CallResult Access::prop_set(GcHeap &runtime, ConstValueHandle parent, ConstValue
     if (!parent || fiber::script::js_value_type(*parent) != fiber::script::JsNodeType::Object) {
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
     }
-    GcHeap::LocalMark mark(runtime);
     fiber::script::GcHeap *heap = &runtime.heap();
-    ScriptAbortReason error = ScriptAbortReason::None;
-    fiber::script::GcString *key_str = ensure_heap_string(runtime, key, error);
-    if (!key_str && error != ScriptAbortReason::None) {
-        return set_abort(result, error);
-    }
-    if (!key_str) {
+    if (!key || fiber::script::js_value_type(*key) != fiber::script::JsNodeType::String) {
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
     }
-    ValueHandle rooted_key = runtime.local_value();
-    if (!rooted_key) {
-        return set_abort(result, oom_error());
-    }
-    *rooted_key = make_heap_string_value(key_str);
-    auto *obj = mutable_heap_ptr<fiber::script::GcObject>(parent);
-    if (!obj) {
-        return set_exception(result, fiber::script::ExceptionKind::TypeError);
-    }
-    if (!fiber::script::gc_object_set(heap, obj, key_str, *value)) {
+    if (!fiber::script::gc_object_set(heap, mutable_handle(parent), *key, *value)) {
         return set_abort(result, oom_error());
     }
     return set_value(result, *value);

@@ -143,26 +143,25 @@ CallResult Unaries::typeof_op(GcHeap &runtime, ConstValueHandle value, ResultPay
 
 CallResult Unaries::iterate(GcHeap &runtime, ConstValueHandle value, ResultPayload &result) noexcept {
     fiber::script::GcHeap *heap = &runtime.heap();
-    fiber::script::GcIterator *iter = nullptr;
-    if (fiber::script::js_value_type(*value) == fiber::script::JsNodeType::Array) {
-        iter = fiber::script::gc_new_array_iterator(
-                heap,
-                const_cast<fiber::script::GcArray *>(
-                        fiber::script::js_value_heap_ptr<const fiber::script::GcArray>(*value)),
-                fiber::script::GcIteratorMode::Values);
-    } else if (fiber::script::js_value_type(*value) == fiber::script::JsNodeType::Object) {
-        iter = fiber::script::gc_new_object_iterator(
-                heap,
-                const_cast<fiber::script::GcObject *>(
-                        fiber::script::js_value_heap_ptr<const fiber::script::GcObject>(*value)),
-                fiber::script::GcIteratorMode::Values);
-    } else {
-        iter = fiber::script::gc_new_array_iterator(heap, nullptr, fiber::script::GcIteratorMode::Values);
-    }
-    if (!iter) {
+    GcHeap::LocalMark mark(runtime);
+    ValueHandle out = runtime.local_value();
+    if (!out) {
         return set_abort(result, ScriptAbortReason::OutOfMemory);
     }
-    return set_value(result, fiber::script::js_make_heap_ref(&iter->hdr, fiber::script::JsHeapKind::Iterator));
+    if (fiber::script::js_value_type(*value) == fiber::script::JsNodeType::Array) {
+        if (!fiber::script::gc_make_array_iterator(heap, out, value, fiber::script::GcIteratorMode::Values)) {
+            return set_abort(result, ScriptAbortReason::OutOfMemory);
+        }
+    } else if (fiber::script::js_value_type(*value) == fiber::script::JsNodeType::Object) {
+        if (!fiber::script::gc_make_object_iterator(heap, out, value, fiber::script::GcIteratorMode::Values)) {
+            return set_abort(result, ScriptAbortReason::OutOfMemory);
+        }
+    } else {
+        if (!fiber::script::gc_make_empty_iterator(heap, out, fiber::script::GcIteratorMode::Values)) {
+            return set_abort(result, ScriptAbortReason::OutOfMemory);
+        }
+    }
+    return set_value(result, *out);
 }
 
 } // namespace fiber::script::run

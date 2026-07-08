@@ -89,8 +89,7 @@ private:
             if (js_value_type(*frame.container) != JsNodeType::Array) {
                 return set_error("invalid JSON builder state");
             }
-            auto *arr = js_value_heap_ptr<GcArray>(*frame.container);
-            if (!arr || !gc_array_push(&heap_, arr, *scratch_)) {
+            if (!gc_array_push(&heap_, frame.container, *scratch_)) {
                 return set_error("out of memory");
             }
             *scratch_ = JsValue::make_undefined();
@@ -104,9 +103,7 @@ private:
             js_value_type(*frame.pending_key) != JsNodeType::String) {
             return set_error("invalid JSON builder state");
         }
-        auto *obj = js_value_heap_ptr<GcObject>(*frame.container);
-        auto *key = js_value_heap_ptr<GcString>(*frame.pending_key);
-        if (!obj || !key || !gc_object_set(&heap_, obj, key, *scratch_)) {
+        if (!gc_object_set(&heap_, frame.container, *frame.pending_key, *scratch_)) {
             return set_error("out of memory");
         }
         *frame.pending_key = JsValue::make_undefined();
@@ -168,11 +165,10 @@ private:
     }
 
     [[nodiscard]] bool add_string(const char *data, std::size_t len) noexcept {
-        GcString *str = gc_new_string(&heap_, data, len);
-        if (!str) {
+        if (!gc_make_string(&heap_, scratch_, data, len)) {
             return set_error("out of memory");
         }
-        return attach_value(js_make_heap_ref(&str->hdr, JsHeapKind::String));
+        return attach_value(*scratch_);
     }
 
     [[nodiscard]] bool add_object_key(const char *data, std::size_t len) noexcept {
@@ -187,27 +183,25 @@ private:
             return set_error("invalid JSON builder state");
         }
 
-        GcString *str = gc_new_string(&heap_, data, len);
-        if (!str) {
+        if (!gc_make_string(&heap_, frame.pending_key, data, len)) {
             return set_error("out of memory");
         }
-        *frame.pending_key = js_make_heap_ref(&str->hdr, JsHeapKind::String);
         return true;
     }
 
     [[nodiscard]] bool start_array() noexcept {
-        JsValue value = JsValue::make_array(heap_, 0);
-        if (js_value_type(value) != JsNodeType::Array) {
+        if (!gc_make_array(&heap_, scratch_, 0)) {
             return set_error("out of memory");
         }
+        JsValue value = *scratch_;
         return attach_value(value) && push_frame(FrameKind::Array, value);
     }
 
     [[nodiscard]] bool start_object() noexcept {
-        JsValue value = JsValue::make_object(heap_, 0);
-        if (js_value_type(value) != JsNodeType::Object) {
+        if (!gc_make_object(&heap_, scratch_, 0)) {
             return set_error("out of memory");
         }
+        JsValue value = *scratch_;
         return attach_value(value) && push_frame(FrameKind::Object, value);
     }
 
