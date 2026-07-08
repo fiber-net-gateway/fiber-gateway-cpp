@@ -295,54 +295,6 @@ JsValue make_heap_string_value(GcString *str) {
     return str ? js_make_heap_ref(&str->hdr, GcHeapKind::String) : JsValue::make_undefined();
 }
 
-bool build_entry_array(GcHeap *heap, const JsValue &key, const JsValue &value, JsValue &out) {
-    JsValue result = JsValue::make_array(*heap, 2);
-    if (js_value_type(result) != JsNodeType::Array) {
-        return false;
-    }
-    auto *arr = js_value_heap_ptr<GcArray>(result);
-    arr->elems[0] = key;
-    arr->elems[1] = value;
-    arr->size = 2;
-    arr->version += 1;
-    out = std::move(result);
-    return true;
-}
-
-bool build_object_snapshot(GcHeap *heap, GcIterator *iter, const GcObject *obj) {
-    if (!iter || !obj) {
-        return false;
-    }
-    iter->snapshot_index = 0;
-    iter->snapshot_size = 0;
-    iter->snapshot_keys = nullptr;
-    std::size_t count = 0;
-    for (int32_t cursor = iter->cursor; cursor != -1; cursor = obj->entries[cursor].next_order) {
-        const GcObjectEntry &entry = obj->entries[cursor];
-        if (entry.occupied && entry.key) {
-            count += 1;
-        }
-    }
-    if (count == 0) {
-        return true;
-    }
-    auto **keys = static_cast<GcString **>(gc_alloc_extra(heap, sizeof(GcString *) * count));
-    if (!keys) {
-        return false;
-    }
-    std::size_t idx = 0;
-    for (int32_t cursor = iter->cursor; cursor != -1; cursor = obj->entries[cursor].next_order) {
-        const GcObjectEntry &entry = obj->entries[cursor];
-        if (entry.occupied && entry.key) {
-            keys[idx++] = entry.key;
-        }
-    }
-    iter->using_snapshot = true;
-    iter->snapshot_keys = keys;
-    iter->snapshot_size = idx;
-    return true;
-}
-
 GcHeader *gc_alloc_raw(GcHeap *heap, std::size_t size, GcHeapKind kind) {
     FIBER_ASSERT(heap->no_gc_active());
     heap->maybe_collect_for_alloc(size);
@@ -417,20 +369,16 @@ void gc_trace_children(GcHeap *heap, GcHeader *obj) {
         }
         case GcHeapKind::Iterator: {
             auto *iter = reinterpret_cast<GcIterator *>(obj);
-            if (iter->array) {
-                gc_mark_obj(heap, &iter->array->hdr);
-            }
-            if (iter->object) {
+            if (iter->kind == GcIteratorKind::Array) {
+                if (iter->array) {
+                    gc_mark_obj(heap, &iter->array->hdr);
+                }
+            } else if (iter->object) {
                 gc_mark_obj(heap, &iter->object->hdr);
             }
             if (iter->has_current) {
                 gc_mark_value(heap, iter->current_key);
                 gc_mark_value(heap, iter->current_value);
-            }
-            for (std::size_t i = 0; i < iter->snapshot_size; ++i) {
-                if (iter->snapshot_keys && iter->snapshot_keys[i]) {
-                    gc_mark_obj(heap, &iter->snapshot_keys[i]->hdr);
-                }
             }
             break;
         }
@@ -499,12 +447,8 @@ void gc_free_obj(GcHeap *heap, GcHeader *obj) {
             break;
         }
         case GcHeapKind::Iterator: {
-            auto *iter = reinterpret_cast<GcIterator *>(obj);
-            if (iter->snapshot_keys) {
-                gc_free_extra(heap, iter->snapshot_keys, sizeof(GcString *) * iter->snapshot_size);
-            }
-            std::destroy_at(&iter->current_key);
-            std::destroy_at(&iter->current_value);
+            // GcIterator holds only borrowed pointers into other GC objects and
+            // trivially-copyable JsValues; there is no extra storage to free.
             break;
         }
     }

@@ -18,6 +18,9 @@ public:
         GcHeap *runtime = nullptr;
         ConstValueHandle root = nullptr;
         void *attach = nullptr;
+        HostCallFrame() = default;
+        HostCallFrame(GcHeap *runtime, const ConstValueHandle &root, void *attach) noexcept :
+            runtime(runtime), root(root), attach(attach) {}
     };
 
     struct Arguments {
