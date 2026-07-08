@@ -22,21 +22,16 @@ ScriptResult make_abort(ScriptAbortReason reason, std::int64_t position = -1) {
 
 ScriptResult make_oom(std::int64_t position) { return make_abort(ScriptAbortReason::OutOfMemory, position); }
 
-ScriptResult status_to_result(ScriptStatus status, const fiber::script::JsValue &value) {
-    if (status.is_success()) {
-        return ScriptResult::success(value);
-    }
-    if (status.is_exception()) {
-        return ScriptResult::exception(value);
-    }
-    return ScriptResult::abort(status.abort().reason, status.abort().position);
-}
-
 bool opcode_uses_spread(std::uint8_t op) {
     return op == ir::Code::CALL_FUNC_SPREAD || op == ir::Code::CALL_ASYNC_FUNC_SPREAD;
 }
 
 bool opcode_is_function_call(std::uint8_t op) { return op == ir::Code::CALL_FUNC || op == ir::Code::CALL_ASYNC_FUNC; }
+
+bool opcode_is_async_call(std::uint8_t op) {
+    return op == ir::Code::CALL_ASYNC_FUNC || op == ir::Code::CALL_ASYNC_FUNC_SPREAD ||
+           op == ir::Code::CALL_ASYNC_CONST;
+}
 
 ConstValueHandle const_handle(const fiber::script::JsValue &value) noexcept {
     return ConstValueHandle(const_cast<fiber::script::JsValue *>(&value));
@@ -79,6 +74,9 @@ ScriptResult InterpreterVm::result() const noexcept {
         case State::Init:
         case State::Running:
         case State::Suspend:
+        case State::AsyncRetSuc:
+        case State::AsyncRetExp:
+        case State::AsyncRetAbort:
             return ScriptResult::abort(ScriptAbortReason::None);
     }
     return ScriptResult::abort(ScriptAbortReason::Internal);
@@ -92,11 +90,12 @@ void InterpreterVm::iterate() {
     if (done()) {
         return;
     }
-    if (async_.task.valid() && !async_.ready) {
-        state_ = State::Suspend;
-        return;
+    if (state_ == State::AsyncRetSuc || state_ == State::AsyncRetExp || state_ == State::AsyncRetAbort) {
+        if (!apply_async_result()) {
+            return;
+        }
     }
-    if (async_.task.valid() && async_.ready && !apply_async_ready()) {
+    if (state_ == State::Suspend) {
         return;
     }
     state_ = State::Running;
@@ -131,9 +130,6 @@ void InterpreterVm::iterate() {
     const std::int32_t *codes = compile_.codes();
     const std::uint32_t code_size = compile_.code_size();
     while (pc_ < code_size) {
-        if (async_.task.valid() && async_.ready && !apply_async_ready()) {
-            return;
-        }
         std::int32_t instr = codes[pc_++];
         std::uint32_t raw = static_cast<std::uint32_t>(instr);
         std::uint8_t op = static_cast<std::uint8_t>(raw & 0xFFu);
@@ -381,12 +377,9 @@ void InterpreterVm::iterate() {
             case ir::Code::CALL_ASYNC_FUNC_SPREAD:
             case ir::Code::CALL_CONST:
             case ir::Code::CALL_ASYNC_CONST: {
-                const bool is_spread = opcode_uses_spread(op);
-                const AsyncResumeKind resume_kind =
-                        is_spread ? AsyncResumeKind::ReplaceTop : AsyncResumeKind::PushResult;
                 std::uint32_t func_index = opcode_is_function_call(op) ? (raw >> 16u) : (raw >> 8u);
                 std::uint32_t argc = opcode_is_function_call(op) ? ((raw >> 8u) & 0xFFu) : 0;
-                if (!dispatch_func_const(op, compile_.func_const(func_index), argc, resume_kind)) {
+                if (!dispatch_func_const(op, compile_.func_const(func_index), argc)) {
                     return;
                 }
                 break;
@@ -495,65 +488,39 @@ void InterpreterVm::iterate() {
     state_ = State::Success;
 }
 
-void InterpreterVm::async_complete(void *context, ScriptStatus status) noexcept {
+void InterpreterVm::async_complete(void *context, const ScriptResult &result) noexcept {
     auto *vm = static_cast<InterpreterVm *>(context);
     if (!vm || vm->done()) {
         return;
     }
-    if (!vm->async_.task.valid() || vm->async_.ready) {
+    if (!vm->async_.valid() || vm->state_ != State::Suspend) {
         return;
     }
-    vm->async_.status = status;
-    vm->async_.ready = true;
+    if (result.is_success()) {
+        vm->result_.value = result.value();
+        vm->state_ = State::AsyncRetSuc;
+        return;
+    }
+    if (result.is_exception()) {
+        vm->result_.exception = result.exception();
+        vm->state_ = State::AsyncRetExp;
+        return;
+    }
+    vm->result_.abort = result.abort();
+    vm->state_ = State::AsyncRetAbort;
 }
 
 void InterpreterVm::visit_roots(fiber::script::GcRootVisitor &visitor) noexcept {
     visitor.visit(&root_);
     visitor.visit_range(stack_, sp_);
     visitor.visit_range(vars_, compile_.var_table_size());
-    if (state_ == State::Running || state_ == State::Suspend || state_ == State::Success) {
+    if (state_ == State::Running || state_ == State::Suspend || state_ == State::AsyncRetSuc ||
+        state_ == State::Success) {
         visitor.visit(&result_.value);
     }
-    if (state_ == State::Exception) {
+    if (state_ == State::AsyncRetExp || state_ == State::Exception) {
         visitor.visit(&result_.exception);
     }
-    if (async_.ready || async_.task.valid()) {
-        visitor.visit(&async_.value);
-    }
-    if (!async_.args.empty()) {
-        visitor.visit_range(async_.args.data(), async_.args.size());
-    }
-}
-
-fiber::script::JsValue *InterpreterVm::prepare_call_args(std::size_t off, std::size_t count) {
-    (void) count;
-    if (!stack_ || off >= compile_.stack_size()) {
-        return nullptr;
-    }
-    return stack_ + off;
-}
-
-fiber::script::JsValue *InterpreterVm::prepare_spread_call_args(std::size_t slot, std::uint32_t &argc) {
-    async_.args.clear();
-    argc = 0;
-    if (!stack_ || slot >= compile_.stack_size()) {
-        return nullptr;
-    }
-    const fiber::script::JsValue &args = stack_[slot];
-    if (fiber::script::js_value_type(args) != fiber::script::JsNodeType::Array) {
-        return nullptr;
-    }
-    auto *arr = fiber::script::js_value_heap_ptr<const fiber::script::GcArray>(args);
-    if (!arr || arr->size == 0) {
-        return nullptr;
-    }
-    async_.args.reserve(arr->size);
-    for (std::size_t i = 0; i < arr->size; ++i) {
-        const fiber::script::JsValue *value = fiber::script::gc_array_get(arr, i);
-        async_.args.push_back(value ? *value : fiber::script::JsValue::make_undefined());
-    }
-    argc = static_cast<std::uint32_t>(async_.args.size());
-    return async_.args.data();
 }
 
 Library::HostCallFrame InterpreterVm::make_call_frame() const {
@@ -564,104 +531,76 @@ Library::HostCallFrame InterpreterVm::make_call_frame() const {
     return frame;
 }
 
+Library::Arguments InterpreterVm::make_call_arguments(std::uint8_t op, std::uint32_t encoded_argc,
+                                                      std::size_t &arg_base) {
+    arg_base = sp_;
+    if (opcode_uses_spread(op)) {
+        if (!stack_ || sp_ == 0) {
+            return {};
+        }
+        const fiber::script::JsValue &args = stack_[sp_ - 1];
+        if (fiber::script::js_value_type(args) != fiber::script::JsNodeType::Array) {
+            return {};
+        }
+        auto *arr = fiber::script::js_value_heap_ptr<const fiber::script::GcArray>(args);
+        if (!arr || arr->size == 0) {
+            return {};
+        }
+        return Library::Arguments{fiber::script::ConstValueHandle(arr->elems), static_cast<std::uint32_t>(arr->size)};
+    }
+    if (opcode_is_function_call(op) && encoded_argc > 0) {
+        FIBER_ASSERT(sp_ >= encoded_argc);
+        arg_base = sp_ - encoded_argc;
+        return Library::Arguments{fiber::script::ConstValueHandle(stack_ + arg_base), encoded_argc};
+    }
+    return Library::Arguments{nullptr, encoded_argc};
+}
+
 bool InterpreterVm::dispatch_func_const(std::uint8_t op, const ir::Compiled::FuncConst &func_const,
-                                        std::uint32_t encoded_argc, AsyncResumeKind resume_kind) {
-    const bool is_spread = opcode_uses_spread(op);
-    if (!is_spread) {
-        async_.args.clear();
-    }
-    std::uint32_t argc = encoded_argc;
-    fiber::script::JsValue *args = nullptr;
+                                        std::uint32_t encoded_argc) {
     std::size_t arg_base = sp_;
-    if (is_spread) {
-        args = prepare_spread_call_args(sp_ - 1, argc);
-    } else if (opcode_is_function_call(op) && argc > 0) {
-        FIBER_ASSERT(sp_ >= argc);
-        arg_base = sp_ - argc;
-        args = prepare_call_args(arg_base, argc);
-    }
+    Library::Arguments arguments = make_call_arguments(op, encoded_argc, arg_base);
     const Library::HostCallFrame frame = make_call_frame();
-    const Library::Arguments arguments{args, argc};
     const std::size_t epc = pc_ - 1;
     switch (op) {
         case ir::Code::CALL_FUNC:
         case ir::Code::CALL_FUNC_SPREAD: {
             FIBER_ASSERT(func_const.sync_func);
             GcHeap::LocalMark mark(runtime_);
-            ValueHandle out = runtime_.local_value();
-            if (!out) {
-                if (is_spread) {
-                    async_.args.clear();
-                }
-                return handle_error(ScriptResult::abort(ScriptAbortReason::OutOfMemory), epc);
-            }
-            ScriptStatus status = func_const.sync_func(func_const.user_data, frame, arguments, out);
-            fiber::script::JsValue value = *out;
-            if (is_spread) {
-                async_.args.clear();
-            } else {
-                sp_ = arg_base;
-            }
-            return apply_call_result(status, value, resume_kind, epc);
+            ScriptResult result = func_const.sync_func(func_const.user_data, frame, arguments);
+            return apply_call_result(result, op, encoded_argc, epc);
         }
         case ir::Code::CALL_CONST: {
             FIBER_ASSERT(func_const.sync_ct);
             GcHeap::LocalMark mark(runtime_);
-            ValueHandle out = runtime_.local_value();
-            if (!out) {
-                return handle_error(ScriptResult::abort(ScriptAbortReason::OutOfMemory), epc);
-            }
-            ScriptStatus status = func_const.sync_ct(func_const.user_data, frame, out);
-            fiber::script::JsValue value = *out;
-            return apply_call_result(status, value, resume_kind, epc);
+            ScriptResult result = func_const.sync_ct(func_const.user_data, frame);
+            return apply_call_result(result, op, encoded_argc, epc);
         }
         case ir::Code::CALL_ASYNC_CONST: {
             FIBER_ASSERT(func_const.async_ct);
-            async_.ready = false;
-            async_.resume_kind = resume_kind;
-            async_.resume_epc = epc;
-            async_.status = ScriptStatus::abort(ScriptAbortReason::InvalidState);
-            async_.value = fiber::script::JsValue::make_undefined();
-            async_.task = func_const.async_ct(func_const.user_data, frame, &async_.value);
-            if (!async_.task.valid()) {
-                return handle_error(ScriptResult::abort(async_.task.allocation_failed()
-                                                                ? ScriptAbortReason::OutOfMemory
-                                                                : ScriptAbortReason::InvalidState),
+            async_ = func_const.async_ct(func_const.user_data, frame);
+            if (!async_.valid()) {
+                return handle_error(ScriptResult::abort(async_.allocation_failed() ? ScriptAbortReason::OutOfMemory
+                                                                                   : ScriptAbortReason::InvalidState),
                                     epc);
             }
-            async_.task.set_completion({&InterpreterVm::async_complete, this});
+            async_.set_completion({&InterpreterVm::async_complete, this});
             state_ = State::Suspend;
             return false;
         }
         case ir::Code::CALL_ASYNC_FUNC:
         case ir::Code::CALL_ASYNC_FUNC_SPREAD: {
             FIBER_ASSERT(func_const.async_func);
-            async_.ready = false;
-            async_.resume_kind = resume_kind;
-            async_.resume_epc = epc;
-            async_.status = ScriptStatus::abort(ScriptAbortReason::InvalidState);
-            async_.value = fiber::script::JsValue::make_undefined();
-            if (!is_spread && argc > 0) {
-                async_.args.clear();
-                async_.args.reserve(argc);
-                for (std::uint32_t i = 0; i < argc; ++i) {
-                    async_.args.push_back(args ? args[i] : fiber::script::JsValue::make_undefined());
+            async_ = func_const.async_func(func_const.user_data, frame, arguments);
+            if (!async_.valid()) {
+                if (op == ir::Code::CALL_ASYNC_FUNC) {
+                    sp_ = arg_base;
                 }
-                args = async_.args.data();
-            }
-            async_.arguments = Library::Arguments{args, argc};
-            async_.task = func_const.async_func(func_const.user_data, frame, async_.arguments, &async_.value);
-            if (!is_spread) {
-                sp_ = arg_base;
-            }
-            if (!async_.task.valid()) {
-                async_.args.clear();
-                return handle_error(ScriptResult::abort(async_.task.allocation_failed()
-                                                                ? ScriptAbortReason::OutOfMemory
-                                                                : ScriptAbortReason::InvalidState),
+                return handle_error(ScriptResult::abort(async_.allocation_failed() ? ScriptAbortReason::OutOfMemory
+                                                                                   : ScriptAbortReason::InvalidState),
                                     epc);
             }
-            async_.task.set_completion({&InterpreterVm::async_complete, this});
+            async_.set_completion({&InterpreterVm::async_complete, this});
             state_ = State::Suspend;
             return false;
         }
@@ -669,27 +608,38 @@ bool InterpreterVm::dispatch_func_const(std::uint8_t op, const ir::Compiled::Fun
     return true;
 }
 
-bool InterpreterVm::apply_call_result(ScriptStatus status, const fiber::script::JsValue &value,
-                                      AsyncResumeKind resume_kind, std::size_t resume_epc) {
-    if (status.is_success()) {
-        switch (resume_kind) {
-            case AsyncResumeKind::PushResult:
+bool InterpreterVm::apply_call_result(const ScriptResult &result, std::uint8_t op, std::uint32_t argc,
+                                      std::size_t epc) {
+    if (result.is_success()) {
+        switch (op) {
+            case ir::Code::CALL_FUNC:
+            case ir::Code::CALL_ASYNC_FUNC:
+                FIBER_ASSERT(sp_ >= argc);
+                sp_ -= argc;
+                [[fallthrough]];
+            case ir::Code::CALL_CONST:
+            case ir::Code::CALL_ASYNC_CONST:
                 if (sp_ < compile_.stack_size()) {
-                    stack_[sp_] = value;
+                    stack_[sp_] = result.value();
                 }
                 ++sp_;
                 break;
-            case AsyncResumeKind::ReplaceTop:
+            case ir::Code::CALL_FUNC_SPREAD:
+            case ir::Code::CALL_ASYNC_FUNC_SPREAD:
                 if (sp_ > 0 && sp_ - 1 < compile_.stack_size()) {
-                    stack_[sp_ - 1] = value;
+                    stack_[sp_ - 1] = result.value();
                 }
                 break;
-            case AsyncResumeKind::None:
-                break;
+            default:
+                return handle_error(ScriptResult::abort(ScriptAbortReason::InvalidOpcode), epc);
         }
         return true;
     }
-    return handle_error(status_to_result(status, value), resume_epc);
+    if (op == ir::Code::CALL_FUNC || op == ir::Code::CALL_ASYNC_FUNC) {
+        FIBER_ASSERT(sp_ >= argc);
+        sp_ -= argc;
+    }
+    return handle_error(result, epc);
 }
 
 bool InterpreterVm::handle_call_result(CallResult status, std::size_t epc) {
@@ -735,24 +685,42 @@ bool InterpreterVm::handle_error(ScriptResult error, std::size_t epc) {
     return false;
 }
 
-bool InterpreterVm::apply_async_ready() {
-    if (!async_.task.valid() || !async_.ready) {
+bool InterpreterVm::apply_async_result() {
+    if (state_ != State::AsyncRetSuc && state_ != State::AsyncRetExp && state_ != State::AsyncRetAbort) {
         return true;
     }
-    ScriptStatus status = async_.status;
-    fiber::script::JsValue value = async_.value;
-    AsyncResumeKind resume_kind = async_.resume_kind;
-    std::size_t resume_epc = async_.resume_epc;
-    async_.task.reset();
-    async_.ready = false;
-    async_.resume_kind = AsyncResumeKind::None;
-    async_.resume_epc = 0;
-    async_.status = ScriptStatus::abort(ScriptAbortReason::InvalidState);
-    async_.value = fiber::script::JsValue::make_undefined();
-    async_.args.clear();
-    async_.arguments = Library::Arguments{};
+    if (!async_.valid() || pc_ == 0 || pc_ - 1 >= compile_.code_size()) {
+        return handle_error(ScriptResult::abort(ScriptAbortReason::InvalidState), pc_ == 0 ? 0 : pc_ - 1);
+    }
+
+    const std::size_t epc = pc_ - 1;
+    const std::uint32_t raw = static_cast<std::uint32_t>(compile_.codes()[epc]);
+    const std::uint8_t op = static_cast<std::uint8_t>(raw & 0xFFu);
+    if (!opcode_is_async_call(op)) {
+        async_.reset();
+        state_ = State::Running;
+        return handle_error(ScriptResult::abort(ScriptAbortReason::InvalidOpcode), epc);
+    }
+
+    const std::uint32_t argc = opcode_is_function_call(op) ? ((raw >> 8u) & 0xFFu) : 0;
+    ScriptResult result;
+    switch (state_) {
+        case State::AsyncRetSuc:
+            result = ScriptResult::success(result_.value);
+            break;
+        case State::AsyncRetExp:
+            result = ScriptResult::exception(result_.exception);
+            break;
+        case State::AsyncRetAbort:
+            result = ScriptResult::abort(result_.abort.reason, result_.abort.position);
+            break;
+        default:
+            return handle_error(ScriptResult::abort(ScriptAbortReason::InvalidState), epc);
+    }
+
+    async_.reset();
     state_ = State::Running;
-    return apply_call_result(status, value, resume_kind, resume_epc);
+    return apply_call_result(result, op, argc, epc);
 }
 
 } // namespace fiber::script::run
