@@ -182,6 +182,146 @@ TEST(JsGcTest, NewStringSurvivesFirstCollectAfterInternalBufferCollection) {
     EXPECT_EQ(heap.bytes, 0u);
 }
 
+TEST(JsGcTest, NoGcScopeDefersThresholdCollectionUntilExit) {
+    GcHeap heap;
+
+    GcString *garbage = fiber::script::gc_new_string(&heap, "dead", 4);
+    ASSERT_NE(garbage, nullptr);
+    heap.collect();
+    std::size_t old_bytes = heap.bytes;
+    ASSERT_GT(old_bytes, 0u);
+
+    heap.threshold = 1;
+    std::size_t during_scope = 0;
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        std::string payload(1 << 20, 'x');
+        GcString *fresh = fiber::script::gc_new_string(&heap, payload.data(), payload.size());
+        ASSERT_NE(fresh, nullptr);
+        EXPECT_TRUE(heap.no_gc_active());
+        EXPECT_GT(heap.bytes, old_bytes);
+        during_scope = heap.bytes;
+    }
+
+    EXPECT_FALSE(heap.no_gc_active());
+    EXPECT_LT(heap.bytes, during_scope);
+    EXPECT_GT(heap.bytes, 0u);
+}
+
+TEST(JsGcTest, NestedNoGcScopeCollectsOnlyAfterOuterExit) {
+    GcHeap heap;
+
+    GcString *garbage = fiber::script::gc_new_string(&heap, "dead", 4);
+    ASSERT_NE(garbage, nullptr);
+    heap.collect();
+    std::size_t old_bytes = heap.bytes;
+    ASSERT_GT(old_bytes, 0u);
+
+    heap.threshold = 1;
+    std::size_t after_inner_exit = 0;
+    {
+        GcHeap::NoGcScope outer(heap);
+        {
+            GcHeap::NoGcScope inner(heap);
+            GcString *fresh = fiber::script::gc_new_string(&heap, "fresh", 5);
+            ASSERT_NE(fresh, nullptr);
+        }
+        EXPECT_TRUE(heap.no_gc_active());
+        after_inner_exit = heap.bytes;
+        EXPECT_GT(after_inner_exit, old_bytes);
+    }
+
+    EXPECT_FALSE(heap.no_gc_active());
+    EXPECT_LT(heap.bytes, after_inner_exit);
+    EXPECT_GT(heap.bytes, 0u);
+}
+
+TEST(JsGcTest, NoGcScopeDefersExplicitCollectUntilExit) {
+    GcHeap heap;
+
+    GcString *garbage = fiber::script::gc_new_string(&heap, "dead", 4);
+    ASSERT_NE(garbage, nullptr);
+    heap.collect();
+    std::size_t before_scope = heap.bytes;
+    ASSERT_GT(before_scope, 0u);
+
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        auto stats = heap.collect();
+        EXPECT_EQ(stats.total, before_scope);
+        EXPECT_EQ(stats.freed, 0u);
+        EXPECT_EQ(heap.bytes, before_scope);
+    }
+
+    EXPECT_EQ(heap.bytes, 0u);
+}
+
+TEST(JsGcTest, ValueApiBuildsObjectWithNativeKeyUnderLowThreshold) {
+    GcHeap heap;
+    heap.threshold = 1;
+
+    ValueHandle obj = heap.global_value();
+    ValueHandle out = heap.global_value();
+    ASSERT_NE(obj, nullptr);
+    ASSERT_NE(out, nullptr);
+
+    ASSERT_TRUE(fiber::script::gc_make_object(&heap, obj, 0));
+    ASSERT_TRUE(fiber::script::gc_object_set_key(&heap, obj, "answer", 6, JsValue::make_integer(42)));
+    ASSERT_TRUE(fiber::script::gc_object_get_key(&heap, obj, "answer", 6, out));
+
+    EXPECT_EQ(fiber::script::js_value_type(*out), JsNodeType::Integer);
+    EXPECT_EQ(fiber::script::js_value_int64(*out), 42);
+}
+
+TEST(JsGcTest, ValueApiArrayKeepsPushedHeapValueAlive) {
+    GcHeap heap;
+    heap.threshold = 1;
+
+    ValueHandle arr = heap.global_value();
+    ValueHandle str = heap.global_value();
+    ValueHandle out = heap.global_value();
+    ASSERT_NE(arr, nullptr);
+    ASSERT_NE(str, nullptr);
+    ASSERT_NE(out, nullptr);
+
+    ASSERT_TRUE(fiber::script::gc_make_array(&heap, arr, 0));
+    ASSERT_TRUE(fiber::script::gc_make_string(&heap, str, "value", 5));
+    ASSERT_TRUE(fiber::script::gc_array_push(&heap, arr, *str));
+    *str = JsValue::make_undefined();
+
+    heap.collect();
+    ASSERT_TRUE(fiber::script::gc_array_get(arr, 0, out));
+
+    std::string utf8;
+    ASSERT_TRUE(fiber::script::gc_string_to_utf8(out, utf8));
+    EXPECT_EQ(utf8, "value");
+}
+
+TEST(JsGcTest, ValueApiIteratorNextRootsEntryArray) {
+    GcHeap heap;
+    heap.threshold = 1;
+
+    ValueHandle arr = heap.global_value();
+    ValueHandle iter = heap.global_value();
+    ValueHandle entry = heap.global_value();
+    ValueHandle value = heap.global_value();
+    ASSERT_NE(arr, nullptr);
+    ASSERT_NE(iter, nullptr);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(value, nullptr);
+
+    ASSERT_TRUE(fiber::script::gc_make_array(&heap, arr, 0));
+    ASSERT_TRUE(fiber::script::gc_array_push(&heap, arr, JsValue::make_integer(9)));
+    ASSERT_TRUE(fiber::script::gc_make_array_iterator(&heap, iter, arr, GcIteratorMode::Entries));
+
+    bool done = true;
+    ASSERT_TRUE(fiber::script::gc_iterator_next(&heap, iter, entry, done));
+    ASSERT_FALSE(done);
+    ASSERT_EQ(fiber::script::js_value_type(*entry), JsNodeType::Array);
+    ASSERT_TRUE(fiber::script::gc_array_get(entry, 1, value));
+    EXPECT_EQ(fiber::script::js_value_int64(*value), 9);
+}
+
 TEST(JsGcTest, NewExceptionRootsHeapInputsDuringAllocationCollection) {
     GcHeap heap;
 

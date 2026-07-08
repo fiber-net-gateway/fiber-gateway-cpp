@@ -425,10 +425,15 @@ void InterpreterVm::iterate() {
             }
             case ir::Code::ITERATE_NEXT: {
                 std::size_t idx = static_cast<std::size_t>(raw >> kInstrumentLen);
-                auto *iter = fiber::script::js_value_heap_ptr<fiber::script::GcIterator>(vars_[idx]);
-                fiber::script::JsValue out;
+                fiber::script::GcHeap::LocalMark mark(runtime_);
+                fiber::script::ValueHandle out = runtime_.local_value();
+                if (!out) {
+                    result_.abort = fiber::script::ScriptAbort{fiber::script::ScriptAbortReason::OutOfMemory, -1};
+                    return;
+                }
                 bool done = true;
-                bool ok = fiber::script::gc_iterator_next(&runtime_.heap(), iter, out, done);
+                bool ok = fiber::script::gc_iterator_next(&runtime_.heap(), fiber::script::ValueHandle(&vars_[idx]),
+                                                          out, done);
                 stack_[sp_++] = fiber::script::JsValue::make_boolean(ok && !done);
                 break;
             }

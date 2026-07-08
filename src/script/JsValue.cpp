@@ -74,35 +74,39 @@ JsValue JsValue::make_native_binary(const std::uint8_t *data, std::size_t len) {
 }
 
 JsValue JsValue::make_string(GcHeap &heap, const char *data, std::size_t len) {
-    GcString *str = gc_new_string(&heap, data, len);
-    if (!str) {
+    GcHeap::LocalMark mark(heap);
+    ValueHandle out = heap.local_value();
+    if (!out || !gc_make_string(&heap, out, data, len)) {
         return make_undefined();
     }
-    return make_heap_value(&str->hdr, JsHeapKind::String);
+    return *out;
 }
 
 JsValue JsValue::make_binary(GcHeap &heap, const std::uint8_t *data, std::size_t len) {
-    GcBinary *bin = gc_new_binary(&heap, data, len);
-    if (!bin) {
+    GcHeap::LocalMark mark(heap);
+    ValueHandle out = heap.local_value();
+    if (!out || !gc_make_binary(&heap, out, data, len)) {
         return make_undefined();
     }
-    return make_heap_value(&bin->hdr, JsHeapKind::Binary);
+    return *out;
 }
 
 JsValue JsValue::make_array(GcHeap &heap, std::size_t capacity) {
-    GcArray *arr = gc_new_array(&heap, capacity);
-    if (!arr) {
+    GcHeap::LocalMark mark(heap);
+    ValueHandle out = heap.local_value();
+    if (!out || !gc_make_array(&heap, out, capacity)) {
         return make_undefined();
     }
-    return make_heap_value(&arr->hdr, JsHeapKind::Array);
+    return *out;
 }
 
 JsValue JsValue::make_object(GcHeap &heap, std::size_t capacity) {
-    GcObject *obj = gc_new_object(&heap, capacity);
-    if (!obj) {
+    GcHeap::LocalMark mark(heap);
+    ValueHandle out = heap.local_value();
+    if (!out || !gc_make_object(&heap, out, capacity)) {
         return make_undefined();
     }
-    return make_heap_value(&obj->hdr, JsHeapKind::Object);
+    return *out;
 }
 
 JsValue JsValue::make_exception(ExceptionKind kind) {

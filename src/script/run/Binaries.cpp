@@ -82,6 +82,12 @@ struct StringSource {
     fiber::json::Utf8ScanResult scan = {};
 };
 
+struct ConcatWriteContext {
+    const StringSource *lhs = nullptr;
+    const StringSource *rhs = nullptr;
+    bool failed = false;
+};
+
 void set_ascii_string_source(StringSource &out, const char *data, std::size_t len) noexcept {
     out.kind = StringKind::NativeUtf8;
     out.utf8 = data;
@@ -182,6 +188,92 @@ bool primitive_to_string_source(const fiber::script::JsValue &value, StringSourc
     return false;
 }
 
+bool append_byte_part(std::uint8_t *dst, std::size_t len, std::size_t &offset, const StringSource &part) noexcept {
+    switch (part.kind) {
+        case StringKind::HeapByte:
+            if (offset > len || part.len > len - offset || (part.len > 0 && !part.bytes)) {
+                return false;
+            }
+            if (part.len > 0) {
+                std::memcpy(dst + offset, part.bytes, part.len);
+            }
+            offset += part.len;
+            return true;
+        case StringKind::NativeUtf8:
+            if (offset > len || part.scan.utf16_len > len - offset || (part.len > 0 && !part.utf8)) {
+                return false;
+            }
+            if (!fiber::json::utf8_write_bytes(part.utf8, part.len, dst + offset, part.scan.utf16_len)) {
+                return false;
+            }
+            offset += part.scan.utf16_len;
+            return true;
+        case StringKind::HeapUtf16:
+            return false;
+    }
+    return false;
+}
+
+bool append_utf16_part(char16_t *dst, std::size_t len, std::size_t &offset, const StringSource &part) noexcept {
+    switch (part.kind) {
+        case StringKind::HeapUtf16:
+            if (offset > len || part.len > len - offset || (part.len > 0 && !part.u16)) {
+                return false;
+            }
+            if (part.len > 0) {
+                std::memcpy(dst + offset, part.u16, sizeof(char16_t) * part.len);
+            }
+            offset += part.len;
+            return true;
+        case StringKind::HeapByte:
+            if (offset > len || part.len > len - offset || (part.len > 0 && !part.bytes)) {
+                return false;
+            }
+            for (std::size_t i = 0; i < part.len; ++i) {
+                dst[offset++] = static_cast<char16_t>(part.bytes[i]);
+            }
+            return true;
+        case StringKind::NativeUtf8:
+            if (offset > len || part.scan.utf16_len > len - offset || (part.len > 0 && !part.utf8)) {
+                return false;
+            }
+            if (!fiber::json::utf8_write_utf16(part.utf8, part.len, dst + offset, part.scan.utf16_len)) {
+                return false;
+            }
+            offset += part.scan.utf16_len;
+            return true;
+    }
+    return false;
+}
+
+bool write_byte_concat(std::uint8_t *dst, std::size_t len, void *ctx) noexcept {
+    auto *context = static_cast<ConcatWriteContext *>(ctx);
+    if (!context || !context->lhs || !context->rhs) {
+        return false;
+    }
+    std::size_t offset = 0;
+    if (!append_byte_part(dst, len, offset, *context->lhs) || !append_byte_part(dst, len, offset, *context->rhs) ||
+        offset != len) {
+        context->failed = true;
+        return false;
+    }
+    return true;
+}
+
+bool write_utf16_concat(char16_t *dst, std::size_t len, void *ctx) noexcept {
+    auto *context = static_cast<ConcatWriteContext *>(ctx);
+    if (!context || !context->lhs || !context->rhs) {
+        return false;
+    }
+    std::size_t offset = 0;
+    if (!append_utf16_part(dst, len, offset, *context->lhs) || !append_utf16_part(dst, len, offset, *context->rhs) ||
+        offset != len) {
+        context->failed = true;
+        return false;
+    }
+    return true;
+}
+
 CallResult concat_strings(fiber::script::GcHeap &heap, const StringSource &lhs, const StringSource &rhs,
                           ResultPayload &result) {
     bool all_byte = true;
@@ -206,79 +298,37 @@ CallResult concat_strings(fiber::script::GcHeap &heap, const StringSource &lhs, 
     add_part(lhs);
     add_part(rhs);
 
-    if (total_len == 0) {
-        fiber::script::JsValue out = fiber::script::JsValue::make_string(heap, "", 0);
-        if (fiber::script::js_value_type(out) != fiber::script::JsNodeType::String ||
-            fiber::script::js_value_is_borrowed_string(out)) {
-            return set_abort(result, ScriptAbortReason::OutOfMemory);
-        }
-        return set_value(result, out);
-    }
-
-    if (all_byte) {
-        fiber::script::GcString *result_str = fiber::script::gc_new_string_bytes_uninit(&heap, total_len);
-        if (!result_str) {
-            return set_abort(result, ScriptAbortReason::OutOfMemory);
-        }
-        std::uint8_t *dst = result_str->data8;
-        std::size_t offset = 0;
-        auto append_part = [&](const StringSource &part) -> bool {
-            switch (part.kind) {
-                case StringKind::HeapByte:
-                    if (part.len > 0 && part.bytes) {
-                        std::memcpy(dst + offset, part.bytes, part.len);
-                    }
-                    offset += part.len;
-                    return true;
-                case StringKind::NativeUtf8:
-                    if (!fiber::json::utf8_write_bytes(part.utf8, part.len, dst + offset, part.scan.utf16_len)) {
-                        return false;
-                    }
-                    offset += part.scan.utf16_len;
-                    return true;
-                case StringKind::HeapUtf16:
-                    return false;
-            }
-            return false;
-        };
-        if (!append_part(lhs) || !append_part(rhs)) {
-            return set_exception(result, fiber::script::ExceptionKind::TypeError);
-        }
-        return set_value(result, fiber::script::js_make_heap_ref(&result_str->hdr, fiber::script::JsHeapKind::String));
-    }
-
-    fiber::script::GcString *result_str = fiber::script::gc_new_string_utf16_uninit(&heap, total_len);
-    if (!result_str) {
+    fiber::script::GcHeap::LocalMark mark(heap);
+    fiber::script::ValueHandle out = heap.local_value();
+    if (!out) {
         return set_abort(result, ScriptAbortReason::OutOfMemory);
     }
-    char16_t *dst = result_str->data16;
-    std::size_t offset = 0;
-    auto append_part = [&](const StringSource &part) -> bool {
-        switch (part.kind) {
-            case StringKind::HeapUtf16:
-                if (part.len > 0 && part.u16) {
-                    std::memcpy(dst + offset, part.u16, sizeof(char16_t) * part.len);
-                }
-                offset += part.len;
-                return true;
-            case StringKind::HeapByte:
-                for (std::size_t i = 0; i < part.len; ++i) {
-                    dst[offset++] = static_cast<char16_t>(part.bytes[i]);
-                }
-                return true;
-            case StringKind::NativeUtf8:
-                if (!fiber::json::utf8_write_utf16(part.utf8, part.len, dst + offset, part.scan.utf16_len)) {
-                    return false;
-                }
-                offset += part.scan.utf16_len;
-                return true;
+
+    if (total_len == 0) {
+        if (!fiber::script::gc_make_string(&heap, out, "", 0)) {
+            return set_abort(result, ScriptAbortReason::OutOfMemory);
         }
-        return false;
-    };
-    if (!append_part(lhs) || !append_part(rhs)) {
-        return set_exception(result, fiber::script::ExceptionKind::TypeError);
+        return set_value(result, *out);
     }
-    return set_value(result, fiber::script::js_make_heap_ref(&result_str->hdr, fiber::script::JsHeapKind::String));
+
+    ConcatWriteContext context{&lhs, &rhs, false};
+    if (all_byte) {
+        if (!fiber::script::gc_make_string_bytes_uninit(&heap, out, total_len, write_byte_concat, &context)) {
+            if (context.failed) {
+                return set_exception(result, fiber::script::ExceptionKind::TypeError);
+            }
+            return set_abort(result, ScriptAbortReason::OutOfMemory);
+        }
+        return set_value(result, *out);
+    }
+
+    if (!fiber::script::gc_make_string_utf16_uninit(&heap, out, total_len, write_utf16_concat, &context)) {
+        if (context.failed) {
+            return set_exception(result, fiber::script::ExceptionKind::TypeError);
+        }
+        return set_abort(result, ScriptAbortReason::OutOfMemory);
+    }
+    return set_value(result, *out);
 }
 
 CallResult add_numeric(const fiber::script::JsValue &lhs, const fiber::script::JsValue &rhs,
