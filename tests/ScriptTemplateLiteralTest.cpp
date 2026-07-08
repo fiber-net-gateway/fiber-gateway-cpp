@@ -39,8 +39,7 @@ ScriptResult run_script(std::string_view source, GcHeap &heap) {
         return ScriptResult::abort(fiber::script::ScriptAbortReason::Internal);
     }
     JsValue root = JsValue::make_undefined();
-    auto run = compiled->exec_sync(root, nullptr, heap);
-    return run();
+    return compiled->exec_sync(root, nullptr, heap);
 }
 
 void expect_script_string(std::string_view source, std::string_view expected) {

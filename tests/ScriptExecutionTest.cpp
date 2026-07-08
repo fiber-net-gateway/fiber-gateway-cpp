@@ -3,6 +3,7 @@
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -71,10 +72,65 @@ public:
 
     Awaiter awaiter() noexcept { return Awaiter{this}; }
 
+    bool suspended() const noexcept { return continuation_ != nullptr; }
+
 private:
     JsValue value_ = JsValue::make_undefined();
     std::coroutine_handle<> continuation_ = nullptr;
     bool ready_ = false;
+};
+
+class ManualTask final {
+public:
+    struct promise_type {
+        ManualTask get_return_object() { return ManualTask{handle_type::from_promise(*this)}; }
+
+        std::suspend_always initial_suspend() noexcept { return {}; }
+
+        std::suspend_always final_suspend() noexcept { return {}; }
+
+        void return_void() noexcept {}
+
+        void unhandled_exception() { std::terminate(); }
+    };
+
+    using handle_type = std::coroutine_handle<promise_type>;
+
+    explicit ManualTask(handle_type handle) : handle_(handle) {}
+
+    ManualTask(const ManualTask &) = delete;
+    ManualTask &operator=(const ManualTask &) = delete;
+
+    ManualTask(ManualTask &&other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
+
+    ManualTask &operator=(ManualTask &&other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+        if (handle_) {
+            handle_.destroy();
+        }
+        handle_ = other.handle_;
+        other.handle_ = nullptr;
+        return *this;
+    }
+
+    ~ManualTask() {
+        if (handle_) {
+            handle_.destroy();
+        }
+    }
+
+    void resume() {
+        if (handle_) {
+            handle_.resume();
+        }
+    }
+
+    bool done() const noexcept { return !handle_ || handle_.done(); }
+
+private:
+    handle_type handle_ = nullptr;
 };
 
 fiber::script::AsyncTask delayed_async_function(void *userdata, const Library::HostCallFrame &frame,
@@ -99,6 +155,12 @@ fiber::script::AsyncTask delayed_async_arg_sum_function(void *userdata, const Li
         }
     }
     co_return ScriptResult::success(JsValue::make_integer(sum));
+}
+
+ManualTask run_script_exec_async(fiber::script::Script *script, fiber::script::GcHeap *heap, ScriptResult *result,
+                                 bool *done) {
+    *result = co_await script->exec_async(JsValue::make_undefined(), nullptr, *heap);
+    *done = true;
 }
 
 struct AddDefaultFunction {
@@ -327,8 +389,7 @@ TEST(ScriptExecutionTest, RunSimpleReturn) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
-    auto result = run();
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_type(result.value()), fiber::script::JsNodeType::Integer);
     EXPECT_EQ(js_value_int64(result.value()), 7);
@@ -342,8 +403,7 @@ TEST(ScriptExecutionTest, RunThrowLiteral) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
-    auto result = run();
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(value_to_string(result.error()), "oops");
 }
@@ -356,8 +416,7 @@ TEST(ScriptExecutionTest, RunFunctionThrowCaught) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
-    auto result = run();
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(value_to_string(result.value()), "boom");
 }
@@ -372,8 +431,7 @@ TEST(ScriptExecutionTest, RethrowFromNestedCatchReachesOuterCatch) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
-    auto result = run();
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(value_to_string(result.value()), "outer");
 }
@@ -387,8 +445,7 @@ TEST(ScriptExecutionTest, ForEachVisitsValues) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
-    auto result = run();
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_type(result.value()), fiber::script::JsNodeType::Integer);
     EXPECT_EQ(js_value_int64(result.value()), 60);
@@ -407,8 +464,7 @@ TEST(ScriptExecutionTest, ForEachStructuralMutationRaisesCatchableIterationError
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
-    auto result = run();
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_type(result.value()), fiber::script::JsNodeType::Exception);
     EXPECT_EQ(fiber::script::js_value_exception_kind(result.value()), fiber::script::ExceptionKind::IterationError);
@@ -424,8 +480,7 @@ TEST(ScriptExecutionTest, ForEachInPlaceValueUpdateIsAllowed) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
-    auto result = run();
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_type(result.value()), fiber::script::JsNodeType::Integer);
     EXPECT_EQ(js_value_int64(result.value()), 99);
@@ -453,6 +508,33 @@ TEST(ScriptExecutionTest, AsyncFunctionSuspendsAndResumes) {
     ASSERT_TRUE(vm.result().has_value());
     EXPECT_EQ(js_value_type(vm.result().value()), fiber::script::JsNodeType::Integer);
     EXPECT_EQ(js_value_int64(vm.result().value()), 9);
+}
+
+TEST(ScriptExecutionTest, ExecAsyncAwaitsAsyncFunction) {
+    DelayedAsyncFunction async_func;
+    TestLibrary library(&async_func);
+
+    auto compiled = compile_script("return asyncFunc(1);", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::script::GcHeap heap;
+    ScriptResult result = ScriptResult::abort(fiber::script::ScriptAbortReason::InvalidState);
+    bool done = false;
+    ManualTask task = run_script_exec_async(&script, &heap, &result, &done);
+
+    task.resume();
+    ASSERT_FALSE(done);
+    ASSERT_FALSE(task.done());
+    ASSERT_TRUE(async_func.suspended());
+
+    async_func.complete_with(fiber::script::JsValue::make_integer(9));
+
+    ASSERT_TRUE(done);
+    ASSERT_TRUE(task.done());
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(js_value_type(result.value()), fiber::script::JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(result.value()), 9);
 }
 
 TEST(ScriptExecutionTest, AsyncFunctionReadsDirectArgumentsAfterSuspend) {
@@ -510,8 +592,7 @@ TEST(ScriptExecutionTest, FunctionDefaultArgumentIsAppendedBeforeHostCall) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
-    auto result = run();
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_int64(result.value()), 4);
     EXPECT_EQ(func.observed_argc, 2u);
@@ -525,8 +606,7 @@ TEST(ScriptExecutionTest, AssignmentRhsAcceptsTernary) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
-    auto result = run();
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_int64(result.value()), 10);
 }
@@ -538,8 +618,7 @@ TEST(ScriptExecutionTest, ChainedAssignmentIsRightAssociative) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
-    auto result = run();
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_int64(result.value()), 10);
 }
@@ -552,8 +631,7 @@ TEST(ScriptExecutionTest, RelationalChainIsLeftAssociative) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
-    auto result = run();
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_int64(result.value()), 7);
 }
@@ -565,8 +643,7 @@ TEST(ScriptExecutionTest, EqualityChainIsLeftAssociative) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
-    auto result = run();
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_int64(result.value()), 7);
 }
@@ -579,8 +656,7 @@ TEST(ScriptExecutionTest, OctalEscapeNulMatchesHexEscape) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
-    auto result = run();
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_int64(result.value()), 7);
 }
@@ -592,8 +668,7 @@ TEST(ScriptExecutionTest, OctalEscapeTwoDigitsMatchesNewline) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
-    auto result = run();
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_int64(result.value()), 7);
 }
@@ -606,8 +681,7 @@ TEST(ScriptExecutionTest, LeadingDotNumberLiteral) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
-    auto result = run();
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_type(result.value()), fiber::script::JsNodeType::Float);
     EXPECT_EQ(js_value_double(result.value()), 0.5);
@@ -620,8 +694,7 @@ TEST(ScriptExecutionTest, TrailingDotNumberLiteral) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
-    auto result = run();
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_type(result.value()), fiber::script::JsNodeType::Float);
     EXPECT_EQ(js_value_double(result.value()), 1.5);
