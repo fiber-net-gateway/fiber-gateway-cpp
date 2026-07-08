@@ -49,9 +49,8 @@ public:
         FinalAwaiter final_suspend() noexcept { return {}; }
 
         void return_value(const ScriptResult &result) noexcept {
-            result_ = result;
             if (completion_.complete) {
-                completion_.complete(completion_.ctx, result_);
+                completion_.complete(completion_.ctx, result);
             }
         }
 
@@ -61,7 +60,6 @@ public:
 
         void set_completion(AsyncTaskCompletion completion) noexcept { completion_ = completion; }
 
-        ScriptResult result_ = ScriptResult::abort(ScriptAbortReason::InvalidState);
         AsyncTaskCompletion completion_{};
         std::coroutine_handle<> continuation_ = nullptr;
     };
