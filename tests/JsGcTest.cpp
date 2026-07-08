@@ -11,7 +11,7 @@ using fiber::script::GcException;
 using fiber::script::GcHeap;
 using fiber::script::GcHeapKind;
 using fiber::script::GcIterator;
-using fiber::script::GcIteratorMode;
+using fiber::script::GcIterStep;
 using fiber::script::GcObject;
 using fiber::script::GcRootRegistration;
 using fiber::script::GcRootSource;
@@ -56,7 +56,7 @@ TEST(JsGcTest, BytesIncludeExternalBuffers) {
     EXPECT_GT(heap.bytes, after_array);
 }
 
-TEST(JsGcTest, IteratorSnapshotBytesAreAccounted) {
+TEST(JsGcTest, IteratorMutationIsDetectedWithoutAllocation) {
     GcHeap heap;
     GcHeap::NoGcScope no_gc(heap);
 
@@ -71,21 +71,17 @@ TEST(JsGcTest, IteratorSnapshotBytesAreAccounted) {
     ASSERT_TRUE(fiber::script::gc_object_set(&heap, obj, key_a, JsValue::make_integer(1)));
     ASSERT_TRUE(fiber::script::gc_object_set(&heap, obj, key_b, JsValue::make_integer(2)));
 
-    GcIterator *iter = fiber::script::gc_new_object_iterator(&heap, obj, GcIteratorMode::Keys);
+    GcIterator *iter = fiber::script::gc_new_object_iterator(&heap, obj);
     ASSERT_NE(iter, nullptr);
 
-    JsValue out;
-    bool done = false;
-    ASSERT_TRUE(fiber::script::gc_iterator_next(&heap, iter, out, done));
-    ASSERT_FALSE(done);
+    ASSERT_EQ(fiber::script::gc_iterator_next(&heap, iter), GcIterStep::Item);
 
-    std::size_t before_snapshot = heap.bytes;
+    std::size_t before_mutation = heap.bytes;
     ASSERT_TRUE(fiber::script::gc_object_set(&heap, obj, key_c, JsValue::make_integer(3)));
-    ASSERT_TRUE(fiber::script::gc_iterator_next(&heap, iter, out, done));
-    ASSERT_FALSE(done);
 
-    // The version mismatch forces a snapshot of the two original keys.
-    EXPECT_EQ(heap.bytes - before_snapshot, 2u * sizeof(GcString *));
+    // Fail-fast: mutation is detected and advancing never allocates (no snapshot).
+    EXPECT_EQ(fiber::script::gc_iterator_next(&heap, iter), GcIterStep::Mutated);
+    EXPECT_EQ(heap.bytes - before_mutation, 0u);
 }
 
 class SingleValueSource final : public GcRootSource {
@@ -324,29 +320,30 @@ TEST(JsGcTest, ValueApiArrayKeepsPushedHeapValueAlive) {
     EXPECT_EQ(utf8, "value");
 }
 
-TEST(JsGcTest, ValueApiIteratorNextRootsEntryArray) {
+TEST(JsGcTest, ValueApiIteratorNextExposesCurrentValueAcrossGc) {
     GcHeap heap;
     heap.threshold = 1;
 
     ValueHandle arr = heap.global_value();
     ValueHandle iter = heap.global_value();
-    ValueHandle entry = heap.global_value();
-    ValueHandle value = heap.global_value();
     ASSERT_NE(arr, nullptr);
     ASSERT_NE(iter, nullptr);
-    ASSERT_NE(entry, nullptr);
-    ASSERT_NE(value, nullptr);
 
     ASSERT_TRUE(fiber::script::gc_make_array(&heap, arr, 0));
     ASSERT_TRUE(fiber::script::gc_array_push(&heap, arr, JsValue::make_integer(9)));
-    ASSERT_TRUE(fiber::script::gc_make_array_iterator(&heap, iter, arr, GcIteratorMode::Entries));
+    ASSERT_TRUE(fiber::script::gc_make_array_iterator(&heap, iter, arr));
 
-    bool done = true;
-    ASSERT_TRUE(fiber::script::gc_iterator_next(&heap, iter, entry, done));
-    ASSERT_FALSE(done);
-    ASSERT_EQ(fiber::script::js_value_type(*entry), JsNodeType::Array);
-    ASSERT_TRUE(fiber::script::gc_array_get(entry, 1, value));
-    EXPECT_EQ(fiber::script::js_value_int64(*value), 9);
+    EXPECT_EQ(fiber::script::gc_iterator_next(&heap, iter), GcIterStep::Item);
+
+    // The iterator carries the current value inside its own GC object, so a forced
+    // collection between advancing and reading must not invalidate it.
+    heap.collect();
+    auto *raw = fiber::script::js_value_heap_ptr<fiber::script::GcIterator>(*iter);
+    ASSERT_NE(raw, nullptr);
+    ASSERT_TRUE(raw->has_current);
+    EXPECT_EQ(fiber::script::js_value_int64(raw->current_value), 9);
+
+    EXPECT_EQ(fiber::script::gc_iterator_next(&heap, iter), GcIterStep::Done);
 }
 
 TEST(JsGcTest, NewExceptionRootsHeapInputsDuringAllocationCollection) {

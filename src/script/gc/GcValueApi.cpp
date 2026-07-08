@@ -238,13 +238,13 @@ bool gc_make_exception(GcHeap *heap, ValueHandle out, std::int64_t position, con
     return gc_make_exception(heap, out, position, name, name_len, message, message_len, JsValue::make_undefined());
 }
 
-bool gc_make_empty_iterator(GcHeap *heap, ValueHandle out, GcIteratorMode mode) {
+bool gc_make_empty_iterator(GcHeap *heap, ValueHandle out) {
     if (!heap || !out) {
         return false;
     }
     *out = JsValue::make_undefined();
     GcHeap::NoGcScope no_gc(*heap);
-    GcIterator *iter = gc_new_array_iterator(heap, nullptr, mode);
+    GcIterator *iter = gc_new_array_iterator(heap, nullptr);
     if (!iter) {
         return false;
     }
@@ -252,7 +252,7 @@ bool gc_make_empty_iterator(GcHeap *heap, ValueHandle out, GcIteratorMode mode) 
     return true;
 }
 
-bool gc_make_array_iterator(GcHeap *heap, ValueHandle out, ConstValueHandle array, GcIteratorMode mode) {
+bool gc_make_array_iterator(GcHeap *heap, ValueHandle out, ConstValueHandle array) {
     if (!heap || !out || !array || js_value_type(*array) != JsNodeType::Array) {
         return false;
     }
@@ -268,7 +268,7 @@ bool gc_make_array_iterator(GcHeap *heap, ValueHandle out, ConstValueHandle arra
     if (!arr) {
         return false;
     }
-    GcIterator *iter = gc_new_array_iterator(heap, arr, mode);
+    GcIterator *iter = gc_new_array_iterator(heap, arr);
     if (!iter) {
         return false;
     }
@@ -276,7 +276,7 @@ bool gc_make_array_iterator(GcHeap *heap, ValueHandle out, ConstValueHandle arra
     return true;
 }
 
-bool gc_make_object_iterator(GcHeap *heap, ValueHandle out, ConstValueHandle object, GcIteratorMode mode) {
+bool gc_make_object_iterator(GcHeap *heap, ValueHandle out, ConstValueHandle object) {
     if (!heap || !out || !object || js_value_type(*object) != JsNodeType::Object) {
         return false;
     }
@@ -292,7 +292,7 @@ bool gc_make_object_iterator(GcHeap *heap, ValueHandle out, ConstValueHandle obj
     if (!obj) {
         return false;
     }
-    GcIterator *iter = gc_new_object_iterator(heap, obj, mode);
+    GcIterator *iter = gc_new_object_iterator(heap, obj);
     if (!iter) {
         return false;
     }
@@ -502,30 +502,16 @@ bool gc_object_remove_key(GcHeap *heap, ValueHandle object, const char *key, std
     return gc_object_remove(heap, object, JsValue::make_native_string(key, key_len));
 }
 
-bool gc_iterator_next(GcHeap *heap, ValueHandle iter, ValueHandle out, bool &done) {
-    done = true;
-    if (!heap || !iter || !out) {
-        return false;
+GcIterStep gc_iterator_next(GcHeap *heap, ValueHandle iter) {
+    if (!heap || !iter) {
+        return GcIterStep::Done;
     }
-    GcHeap::LocalMark mark(*heap);
-    ValueHandle iter_root = heap->local_value();
-    if (!iter_root) {
-        return false;
-    }
-    *iter_root = *iter;
-    set_undefined(out);
-
     GcHeap::NoGcScope no_gc(*heap);
-    GcIterator *raw_iter = mutable_iterator_from_value(*iter_root);
+    GcIterator *raw_iter = mutable_iterator_from_value(*iter);
     if (!raw_iter) {
-        return false;
+        return GcIterStep::Done;
     }
-    JsValue next = JsValue::make_undefined();
-    if (!gc_iterator_next(heap, raw_iter, next, done)) {
-        return false;
-    }
-    *out = next;
-    return true;
+    return gc_iterator_next(heap, raw_iter);
 }
 
 } // namespace fiber::script

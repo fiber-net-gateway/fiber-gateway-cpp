@@ -49,6 +49,7 @@ enum class ExceptionKind : std::uint8_t {
     TypeError = 0,
     RangeError,
     ReferenceError,
+    IterationError,
 };
 
 enum class GcHeapKind : std::uint8_t {

@@ -418,16 +418,17 @@ void InterpreterVm::iterate() {
             }
             case ir::Code::ITERATE_NEXT: {
                 std::size_t idx = static_cast<std::size_t>(raw >> kInstrumentLen);
-                fiber::script::GcHeap::LocalMark mark(runtime_);
-                fiber::script::ValueHandle out = runtime_.local_value();
-                if (!out) {
-                    result_.abort = fiber::script::ScriptAbort{fiber::script::ScriptAbortReason::OutOfMemory, -1};
-                    return;
+                fiber::script::GcIterStep step =
+                        fiber::script::gc_iterator_next(&runtime_.heap(), fiber::script::ValueHandle(&vars_[idx]));
+                if (step == fiber::script::GcIterStep::Mutated) {
+                    result_.exception =
+                            fiber::script::JsValue::make_exception(fiber::script::ExceptionKind::IterationError);
+                    if (!handle_call_result(fiber::script::CallResult::Exception, pc_ - 1)) {
+                        return;
+                    }
+                    break;
                 }
-                bool done = true;
-                bool ok = fiber::script::gc_iterator_next(&runtime_.heap(), fiber::script::ValueHandle(&vars_[idx]),
-                                                          out, done);
-                stack_[sp_++] = fiber::script::JsValue::make_boolean(ok && !done);
+                stack_[sp_++] = fiber::script::JsValue::make_boolean(step == fiber::script::GcIterStep::Item);
                 break;
             }
             case ir::Code::ITERATE_KEY: {

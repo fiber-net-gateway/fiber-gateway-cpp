@@ -18,10 +18,10 @@ namespace fiber::script {
 
 struct GcHeader;
 
-enum class GcIteratorMode : std::uint8_t {
-    Keys,
-    Values,
-    Entries,
+enum class GcIterStep : std::uint8_t {
+    Item,
+    Done,
+    Mutated,
 };
 
 class ConstValueHandle {
@@ -199,9 +199,9 @@ bool gc_make_exception(GcHeap *heap, ValueHandle out, std::int64_t position, con
                        const char *message, std::size_t message_len, JsValue meta);
 bool gc_make_exception(GcHeap *heap, ValueHandle out, std::int64_t position, const char *name, std::size_t name_len,
                        const char *message, std::size_t message_len);
-bool gc_make_empty_iterator(GcHeap *heap, ValueHandle out, GcIteratorMode mode);
-bool gc_make_array_iterator(GcHeap *heap, ValueHandle out, ConstValueHandle array, GcIteratorMode mode);
-bool gc_make_object_iterator(GcHeap *heap, ValueHandle out, ConstValueHandle object, GcIteratorMode mode);
+bool gc_make_empty_iterator(GcHeap *heap, ValueHandle out);
+bool gc_make_array_iterator(GcHeap *heap, ValueHandle out, ConstValueHandle array);
+bool gc_make_object_iterator(GcHeap *heap, ValueHandle out, ConstValueHandle object);
 
 bool gc_string_to_utf8(ConstValueHandle value, std::string &out);
 bool gc_array_get(ConstValueHandle array, std::size_t index, ValueHandle out);
@@ -216,7 +216,7 @@ bool gc_object_get(GcHeap *heap, ConstValueHandle object, JsValue key, ValueHand
 bool gc_object_get_key(GcHeap *heap, ConstValueHandle object, const char *key, std::size_t key_len, ValueHandle out);
 bool gc_object_remove(GcHeap *heap, ValueHandle object, JsValue key);
 bool gc_object_remove_key(GcHeap *heap, ValueHandle object, const char *key, std::size_t key_len);
-bool gc_iterator_next(GcHeap *heap, ValueHandle iter, ValueHandle out, bool &done);
+GcIterStep gc_iterator_next(GcHeap *heap, ValueHandle iter);
 
 } // namespace fiber::script
 

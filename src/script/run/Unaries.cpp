@@ -149,15 +149,15 @@ CallResult Unaries::iterate(GcHeap &runtime, ConstValueHandle value, ResultPaylo
         return set_abort(result, ScriptAbortReason::OutOfMemory);
     }
     if (fiber::script::js_value_type(*value) == fiber::script::JsNodeType::Array) {
-        if (!fiber::script::gc_make_array_iterator(heap, out, value, fiber::script::GcIteratorMode::Values)) {
+        if (!fiber::script::gc_make_array_iterator(heap, out, value)) {
             return set_abort(result, ScriptAbortReason::OutOfMemory);
         }
     } else if (fiber::script::js_value_type(*value) == fiber::script::JsNodeType::Object) {
-        if (!fiber::script::gc_make_object_iterator(heap, out, value, fiber::script::GcIteratorMode::Values)) {
+        if (!fiber::script::gc_make_object_iterator(heap, out, value)) {
             return set_abort(result, ScriptAbortReason::OutOfMemory);
         }
     } else {
-        if (!fiber::script::gc_make_empty_iterator(heap, out, fiber::script::GcIteratorMode::Values)) {
+        if (!fiber::script::gc_make_empty_iterator(heap, out)) {
             return set_abort(result, ScriptAbortReason::OutOfMemory);
         }
     }

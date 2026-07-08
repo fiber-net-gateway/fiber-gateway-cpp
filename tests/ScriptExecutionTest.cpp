@@ -378,6 +378,59 @@ TEST(ScriptExecutionTest, RethrowFromNestedCatchReachesOuterCatch) {
     EXPECT_EQ(value_to_string(result.value()), "outer");
 }
 
+TEST(ScriptExecutionTest, ForEachVisitsValues) {
+    TestLibrary library;
+
+    auto compiled =
+            compile_script("let sum = 0; for (let k, v of [10, 20, 30]) { sum = sum + v; } return sum;", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::script::GcHeap heap;
+    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
+    auto result = run();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(js_value_type(result.value()), fiber::script::JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(result.value()), 60);
+}
+
+TEST(ScriptExecutionTest, ForEachStructuralMutationRaisesCatchableIterationError) {
+    TestLibrary library;
+
+    // Inserting a new key during iteration is a structural mutation: it must raise
+    // an IterationError that scripts can catch.
+    auto compiled = compile_script("let o = {a: 1, b: 2}; "
+                                   "try { for (let k, v of o) { o.c = 3; } return 0; } "
+                                   "catch (e) { return e; }",
+                                   library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::script::GcHeap heap;
+    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
+    auto result = run();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(js_value_type(result.value()), fiber::script::JsNodeType::Exception);
+    EXPECT_EQ(fiber::script::js_value_exception_kind(result.value()), fiber::script::ExceptionKind::IterationError);
+}
+
+TEST(ScriptExecutionTest, ForEachInPlaceValueUpdateIsAllowed) {
+    TestLibrary library;
+
+    // Updating an existing entry's value is not a structural change; iteration must
+    // complete normally without raising.
+    auto compiled = compile_script("let o = {a: 1}; for (let k, v of o) { o.a = 99; } return o.a;", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::script::GcHeap heap;
+    auto run = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
+    auto result = run();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(js_value_type(result.value()), fiber::script::JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(result.value()), 99);
+}
+
 TEST(ScriptExecutionTest, AsyncFunctionSuspendsAndResumes) {
     DelayedAsyncFunction async_func;
     TestLibrary library(&async_func);

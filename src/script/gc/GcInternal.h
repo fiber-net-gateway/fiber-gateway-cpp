@@ -94,19 +94,18 @@ enum class GcIteratorKind : std::uint8_t {
 struct GcIterator {
     GcHeader hdr;
     GcIteratorKind kind = GcIteratorKind::Array;
-    GcIteratorMode mode = GcIteratorMode::Values;
-    std::uint64_t expected_version = 0;
-    bool using_snapshot = false;
-    GcArray *array = nullptr;
-    GcObject *object = nullptr;
-    std::size_t index = 0;
-    std::int32_t cursor = -1;
-    GcString **snapshot_keys = nullptr;
-    std::size_t snapshot_size = 0;
-    std::size_t snapshot_index = 0;
-    JsValue current_key;
-    JsValue current_value;
     bool has_current = false;
+    std::uint64_t expected_version = 0;
+    JsValue current_key{};
+    JsValue current_value{};
+    union {
+        GcArray *array;
+        GcObject *object;
+    };
+    union {
+        std::size_t index;
+        std::int32_t cursor;
+    };
 };
 
 GcString *gc_new_string(GcHeap *heap, const char *data, std::size_t len) noexcept;
@@ -131,9 +130,9 @@ GcException *gc_new_exception(GcHeap *heap, std::int64_t position, const char *n
                               const char *message, std::size_t message_len, JsValue meta);
 GcException *gc_new_exception(GcHeap *heap, std::int64_t position, const char *name, std::size_t name_len,
                               const char *message, std::size_t message_len);
-GcIterator *gc_new_array_iterator(GcHeap *heap, GcArray *array, GcIteratorMode mode);
-GcIterator *gc_new_object_iterator(GcHeap *heap, GcObject *object, GcIteratorMode mode);
-bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done);
+GcIterator *gc_new_array_iterator(GcHeap *heap, GcArray *array);
+GcIterator *gc_new_object_iterator(GcHeap *heap, GcObject *object);
+GcIterStep gc_iterator_next(GcHeap *heap, GcIterator *iter);
 bool gc_object_reserve(GcHeap *heap, GcObject *obj, std::size_t expected);
 bool gc_object_set(GcHeap *heap, GcObject *obj, GcString *key, JsValue value);
 bool gc_object_set_heap_key(GcHeap *heap, ValueHandle object, const GcString *key, JsValue value);
@@ -170,8 +169,6 @@ bool grow_entries(GcHeap *heap, GcObject *obj, std::size_t new_capacity);
 std::int32_t allocate_entry(GcObject *obj);
 
 JsValue make_heap_string_value(GcString *str);
-bool build_entry_array(GcHeap *heap, const JsValue &key, const JsValue &value, JsValue &out);
-bool build_object_snapshot(GcHeap *heap, GcIterator *iter, const GcObject *obj);
 
 GcHeader *gc_alloc_raw(GcHeap *heap, std::size_t size, GcHeapKind kind);
 void gc_link(GcHeap *heap, GcHeader *hdr);
