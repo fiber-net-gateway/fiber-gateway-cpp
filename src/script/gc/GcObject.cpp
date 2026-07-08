@@ -15,9 +15,6 @@ namespace fiber::script {
 using namespace gc_detail;
 
 GcObject *gc_new_object(GcHeap *heap, std::size_t capacity) {
-    if (!heap) {
-        return nullptr;
-    }
     FIBER_ASSERT(heap->no_gc_active());
     auto *hdr = gc_alloc_raw(heap, sizeof(GcObject), GcHeapKind::Object);
     if (!hdr) {
@@ -79,7 +76,7 @@ GcObject *gc_new_object(GcHeap *heap, std::size_t capacity) {
 }
 
 bool gc_object_reserve(GcHeap *heap, GcObject *obj, std::size_t expected) {
-    if (!heap || !obj) {
+    if (!obj) {
         return false;
     }
     FIBER_ASSERT(heap->no_gc_active());
@@ -110,7 +107,7 @@ bool gc_object_reserve(GcHeap *heap, GcObject *obj, std::size_t expected) {
 }
 
 bool gc_object_set(GcHeap *heap, GcObject *obj, GcString *key, JsValue value) {
-    if (!heap || !obj || !key) {
+    if (!obj || !key) {
         return false;
     }
     FIBER_ASSERT(heap->no_gc_active());

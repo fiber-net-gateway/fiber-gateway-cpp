@@ -14,9 +14,6 @@ namespace fiber::script {
 using namespace gc_detail;
 
 GcIterator *gc_new_array_iterator(GcHeap *heap, GcArray *array, GcIteratorMode mode) {
-    if (!heap) {
-        return nullptr;
-    }
     FIBER_ASSERT(heap->no_gc_active());
     auto *hdr = gc_alloc_raw(heap, sizeof(GcIterator), GcHeapKind::Iterator);
     if (!hdr) {
@@ -42,9 +39,6 @@ GcIterator *gc_new_array_iterator(GcHeap *heap, GcArray *array, GcIteratorMode m
 }
 
 GcIterator *gc_new_object_iterator(GcHeap *heap, GcObject *object, GcIteratorMode mode) {
-    if (!heap) {
-        return nullptr;
-    }
     FIBER_ASSERT(heap->no_gc_active());
     auto *hdr = gc_alloc_raw(heap, sizeof(GcIterator), GcHeapKind::Iterator);
     if (!hdr) {
@@ -72,7 +66,7 @@ GcIterator *gc_new_object_iterator(GcHeap *heap, GcObject *object, GcIteratorMod
 bool gc_iterator_next(GcHeap *heap, GcIterator *iter, JsValue &out, bool &done) {
     out = JsValue::make_undefined();
     done = true;
-    if (!heap || !iter) {
+    if (!iter) {
         return false;
     }
     FIBER_ASSERT(heap->no_gc_active());
