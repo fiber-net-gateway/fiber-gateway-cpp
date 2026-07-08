@@ -15,9 +15,6 @@ namespace fiber::script {
 using namespace gc_detail;
 
 GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len) noexcept {
-    if (!heap) {
-        return nullptr;
-    }
     FIBER_ASSERT(heap->no_gc_active());
     auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcHeapKind::String);
     if (!hdr) {
@@ -48,9 +45,6 @@ GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_
 }
 
 GcString *gc_new_string_bytes_uninit(GcHeap *heap, std::size_t len) noexcept {
-    if (!heap) {
-        return nullptr;
-    }
     FIBER_ASSERT(heap->no_gc_active());
     auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcHeapKind::String);
     if (!hdr) {
@@ -76,9 +70,6 @@ GcString *gc_new_string_bytes_uninit(GcHeap *heap, std::size_t len) noexcept {
 }
 
 GcString *gc_new_string_utf16(GcHeap *heap, const char16_t *data, std::size_t len) noexcept {
-    if (!heap) {
-        return nullptr;
-    }
     FIBER_ASSERT(heap->no_gc_active());
     auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcHeapKind::String);
     if (!hdr) {
@@ -108,9 +99,6 @@ GcString *gc_new_string_utf16(GcHeap *heap, const char16_t *data, std::size_t le
 }
 
 GcString *gc_new_string_utf16_uninit(GcHeap *heap, std::size_t len) noexcept {
-    if (!heap) {
-        return nullptr;
-    }
     FIBER_ASSERT(heap->no_gc_active());
     auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcHeapKind::String);
     if (!hdr) {
@@ -135,7 +123,7 @@ GcString *gc_new_string_utf16_uninit(GcHeap *heap, std::size_t len) noexcept {
 }
 
 GcString *gc_new_string(GcHeap *heap, const char *data, std::size_t len) noexcept {
-    if (!heap || (len > 0 && !data)) {
+    if (len > 0 && !data) {
         return nullptr;
     }
     FIBER_ASSERT(heap->no_gc_active());

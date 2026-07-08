@@ -15,9 +15,6 @@ namespace fiber::script {
 using namespace gc_detail;
 
 GcBinary *gc_new_binary(GcHeap *heap, const std::uint8_t *data, std::size_t len) {
-    if (!heap) {
-        return nullptr;
-    }
     FIBER_ASSERT(heap->no_gc_active());
     auto *hdr = gc_alloc_raw(heap, sizeof(GcBinary), GcHeapKind::Binary);
     if (!hdr) {
@@ -43,9 +40,6 @@ GcBinary *gc_new_binary(GcHeap *heap, const std::uint8_t *data, std::size_t len)
 }
 
 GcArray *gc_new_array(GcHeap *heap, std::size_t capacity) {
-    if (!heap) {
-        return nullptr;
-    }
     FIBER_ASSERT(heap->no_gc_active());
     auto *hdr = gc_alloc_raw(heap, sizeof(GcArray), GcHeapKind::Array);
     if (!hdr) {
@@ -71,7 +65,7 @@ GcArray *gc_new_array(GcHeap *heap, std::size_t capacity) {
 }
 
 bool gc_array_reserve(GcHeap *heap, GcArray *arr, std::size_t expected) {
-    if (!heap || !arr) {
+    if (!arr) {
         return false;
     }
     FIBER_ASSERT(heap->no_gc_active());
@@ -111,7 +105,7 @@ const JsValue *gc_array_get(const GcArray *arr, std::size_t index) {
 }
 
 bool gc_array_set(GcHeap *heap, GcArray *arr, std::size_t index, JsValue value) {
-    if (!heap || !arr) {
+    if (!arr) {
         return false;
     }
     FIBER_ASSERT(heap->no_gc_active());
@@ -133,7 +127,7 @@ bool gc_array_set(GcHeap *heap, GcArray *arr, std::size_t index, JsValue value) 
 }
 
 bool gc_array_push(GcHeap *heap, GcArray *arr, JsValue value) {
-    if (!heap || !arr) {
+    if (!arr) {
         return false;
     }
     FIBER_ASSERT(heap->no_gc_active());
@@ -162,7 +156,7 @@ bool gc_array_pop(GcArray *arr, JsValue *out) {
 }
 
 bool gc_array_insert(GcHeap *heap, GcArray *arr, std::size_t index, JsValue value) {
-    if (!heap || !arr) {
+    if (!arr) {
         return false;
     }
     FIBER_ASSERT(heap->no_gc_active());

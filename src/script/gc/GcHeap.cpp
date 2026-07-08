@@ -7,7 +7,6 @@
 #include "../../common/Assert.h"
 
 #include <limits>
-#include <new>
 #include <utility>
 
 namespace fiber::script {
@@ -103,9 +102,6 @@ private:
 };
 
 void gc_mark_protected_new_objects(GcHeap *heap) noexcept {
-    if (!heap) {
-        return;
-    }
     for (GcHeader *obj = heap->head; obj; obj = obj->next) {
         if (obj->first_collect_protected) {
             gc_mark_obj(heap, obj);

@@ -150,21 +150,21 @@ std::size_t entry_storage_bytes(std::size_t capacity) { return sizeof(GcObjectEn
 std::size_t bucket_storage_bytes(std::size_t bucket_count) { return sizeof(std::int32_t) * bucket_count; }
 
 void gc_account_add(GcHeap *heap, std::size_t bytes) {
-    if (!heap || bytes == 0) {
+    if (bytes == 0) {
         return;
     }
     heap->bytes = saturating_add(heap->bytes, bytes);
 }
 
 void gc_account_sub(GcHeap *heap, std::size_t bytes) {
-    if (!heap || bytes == 0) {
+    if (bytes == 0) {
         return;
     }
     heap->bytes = (bytes >= heap->bytes) ? 0 : (heap->bytes - bytes);
 }
 
 void *gc_alloc_extra(GcHeap *heap, std::size_t bytes) {
-    if (!heap || bytes == 0) {
+    if (bytes == 0) {
         return nullptr;
     }
     FIBER_ASSERT(heap->no_gc_active());
@@ -178,7 +178,7 @@ void *gc_alloc_extra(GcHeap *heap, std::size_t bytes) {
 }
 
 void gc_free_extra(GcHeap *heap, void *ptr, std::size_t bytes) {
-    if (!heap || !ptr) {
+    if (!ptr) {
         return;
     }
     heap->alloc.free(ptr);
@@ -202,7 +202,7 @@ int32_t find_entry_index(const GcObject *obj, const GcString *key, std::uint64_t
 }
 
 bool rehash_buckets(GcHeap *heap, GcObject *obj, std::size_t new_bucket_count) {
-    if (!heap || !obj) {
+    if (!obj) {
         return false;
     }
     if (new_bucket_count == 0) {
@@ -235,7 +235,7 @@ bool rehash_buckets(GcHeap *heap, GcObject *obj, std::size_t new_bucket_count) {
 }
 
 bool grow_entries(GcHeap *heap, GcObject *obj, std::size_t new_capacity) {
-    if (!heap || !obj || new_capacity == 0) {
+    if (!obj || new_capacity == 0) {
         return false;
     }
     auto *new_entries = static_cast<GcObjectEntry *>(gc_alloc_extra(heap, entry_storage_bytes(new_capacity)));
@@ -296,9 +296,6 @@ JsValue make_heap_string_value(GcString *str) {
 }
 
 bool build_entry_array(GcHeap *heap, const JsValue &key, const JsValue &value, JsValue &out) {
-    if (!heap) {
-        return false;
-    }
     JsValue result = JsValue::make_array(*heap, 2);
     if (js_value_type(result) != JsNodeType::Array) {
         return false;
@@ -313,7 +310,7 @@ bool build_entry_array(GcHeap *heap, const JsValue &key, const JsValue &value, J
 }
 
 bool build_object_snapshot(GcHeap *heap, GcIterator *iter, const GcObject *obj) {
-    if (!heap || !iter || !obj) {
+    if (!iter || !obj) {
         return false;
     }
     iter->snapshot_index = 0;
@@ -347,9 +344,6 @@ bool build_object_snapshot(GcHeap *heap, GcIterator *iter, const GcObject *obj) 
 }
 
 GcHeader *gc_alloc_raw(GcHeap *heap, std::size_t size, GcHeapKind kind) {
-    if (!heap) {
-        return nullptr;
-    }
     FIBER_ASSERT(heap->no_gc_active());
     heap->maybe_collect_for_alloc(size);
     void *mem = heap->alloc.alloc(size);
