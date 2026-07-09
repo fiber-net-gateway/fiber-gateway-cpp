@@ -33,13 +33,6 @@ std::int64_t string_utf16_length(const JsValue &value) noexcept {
     if (str == nullptr) {
         return 0;
     }
-    if (str->encoding == GcStringEncoding::Utf16) {
-        return static_cast<std::int64_t>(str->len);
-    }
-    fiber::json::Utf8ScanResult scan;
-    if (fiber::json::utf8_scan(reinterpret_cast<const char *>(str->data8), str->len, scan)) {
-        return static_cast<std::int64_t>(scan.utf16_len);
-    }
     return static_cast<std::int64_t>(str->len);
 }
 
