@@ -1,6 +1,7 @@
 #include "StdLibrary.h"
 
 #include "ArrayFuncs.h"
+#include "HashFuncs.h"
 #include "IncludesFunc.h"
 #include "LengthFunc.h"
 #include "MathFuncs.h"
@@ -137,6 +138,7 @@ StdLibrary::StdLibrary() {
     register_includes_func(*this);
     register_math_funcs(*this);
     register_rand_funcs(*this);
+    register_hash_funcs(*this);
 }
 
 Library::FunctionMatchResult StdLibrary::resolve_func(std::string_view name,
