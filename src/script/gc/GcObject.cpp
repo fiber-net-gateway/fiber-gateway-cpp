@@ -206,20 +206,22 @@ bool gc_object_remove(GcObject *obj, const GcString *key) {
     return false;
 }
 
-const GcObjectEntry *gc_object_entry_at(const GcObject *obj, std::size_t index) {
-    if (!obj || index >= obj->size) {
+// Insertion-order cursor over an object's entries. The order list (head / next_order)
+// only contains live entries, so first/next never surface freed slots; callers may still
+// guard on occupied/key defensively. Each step is O(1) - a full scan is O(n), unlike the
+// old by-index gc_object_entry_at which walked from head on every lookup (O(n^2) per scan).
+const GcObjectEntry *gc_object_first_entry(const GcObject *obj) {
+    if (!obj || obj->head < 0) {
         return nullptr;
     }
-    std::size_t current = 0;
-    int32_t cursor = obj->head;
-    while (cursor != -1) {
-        if (current == index) {
-            return &obj->entries[cursor];
-        }
-        cursor = obj->entries[cursor].next_order;
-        current += 1;
+    return &obj->entries[obj->head];
+}
+
+const GcObjectEntry *gc_object_next_entry(const GcObject *obj, const GcObjectEntry *entry) {
+    if (!obj || !entry || entry->next_order < 0) {
+        return nullptr;
     }
-    return nullptr;
+    return &obj->entries[entry->next_order];
 }
 
 } // namespace fiber::script

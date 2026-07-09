@@ -914,9 +914,9 @@ bool Compares::in(ConstValueHandle a, ConstValueHandle b) noexcept {
         if (fiber::script::js_value_type(*a) == fiber::script::JsNodeType::String &&
             fiber::script::js_value_is_borrowed_string(*a)) {
             fiber::script::NativeStr native = fiber::script::js_value_native_string(*a);
-            for (std::size_t i = 0; i < obj->size; ++i) {
-                const fiber::script::GcObjectEntry *entry = fiber::script::gc_object_entry_at(obj, i);
-                if (!entry || !entry->occupied || !entry->key) {
+            for (const fiber::script::GcObjectEntry *entry = fiber::script::gc_object_first_entry(obj);
+                 entry != nullptr; entry = fiber::script::gc_object_next_entry(obj, entry)) {
+                if (!entry->occupied || !entry->key) {
                     continue;
                 }
                 if (heap_string_equals_native_utf8(entry->key, native)) {

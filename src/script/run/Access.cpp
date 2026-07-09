@@ -120,9 +120,9 @@ CallResult Access::expand_object(GcHeap &runtime, ConstValueHandle target, Const
         if (!fiber::script::gc_object_reserve(heap, target_obj, expected)) {
             return set_abort(result, oom_error());
         }
-        for (std::size_t i = 0; i < add_obj->size; ++i) {
-            const fiber::script::GcObjectEntry *entry = fiber::script::gc_object_entry_at(add_obj, i);
-            if (!entry || !entry->occupied || !entry->key) {
+        for (const fiber::script::GcObjectEntry *entry = fiber::script::gc_object_first_entry(add_obj);
+             entry != nullptr; entry = fiber::script::gc_object_next_entry(add_obj, entry)) {
+            if (!entry->occupied || !entry->key) {
                 continue;
             }
             if (!fiber::script::gc_object_set_heap_key(heap, mutable_handle(target), entry->key, entry->value)) {
@@ -178,9 +178,9 @@ CallResult Access::expand_array(GcHeap &runtime, ConstValueHandle target, ConstV
         if (!fiber::script::gc_array_reserve(heap, target_arr, expected)) {
             return set_abort(result, oom_error());
         }
-        for (std::size_t i = 0; i < add_obj->size; ++i) {
-            const fiber::script::GcObjectEntry *entry = fiber::script::gc_object_entry_at(add_obj, i);
-            if (!entry || !entry->occupied) {
+        for (const fiber::script::GcObjectEntry *entry = fiber::script::gc_object_first_entry(add_obj);
+             entry != nullptr; entry = fiber::script::gc_object_next_entry(add_obj, entry)) {
+            if (!entry->occupied) {
                 continue;
             }
             if (!fiber::script::gc_array_push(heap, mutable_handle(target), entry->value)) {

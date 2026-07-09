@@ -699,3 +699,45 @@ TEST(ScriptExecutionTest, TrailingDotNumberLiteral) {
     EXPECT_EQ(js_value_type(result.value()), fiber::script::JsNodeType::Float);
     EXPECT_EQ(js_value_double(result.value()), 1.5);
 }
+
+TEST(ScriptExecutionTest, ObjectSpreadMergesAndOverwrites) {
+    TestLibrary library;
+    // b is overwritten in place by the second spread (keeps original position); c is appended.
+    auto compiled =
+            compile_script("let m = {...{a: 1, b: 2}, ...{b: 3, c: 4}}; return m.a + m.b * 10 + m.c * 100;", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::script::GcHeap heap;
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(js_value_type(result.value()), fiber::script::JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(result.value()), 431); // 1 + 30 + 400
+}
+
+TEST(ScriptExecutionTest, ArraySpreadFromObjectValues) {
+    TestLibrary library;
+    // Spreading an object into an array yields its values in insertion order.
+    auto compiled = compile_script("let a = [...{a: 10, b: 20}]; return a[0] + a[1];", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::script::GcHeap heap;
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(js_value_type(result.value()), fiber::script::JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(result.value()), 30);
+}
+
+TEST(ScriptExecutionTest, ArraySpreadFromArray) {
+    TestLibrary library;
+    auto compiled = compile_script("let a = [...[1, 2], ...[3, 4]]; return a[0] + a[1] + a[2] + a[3];", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::script::GcHeap heap;
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(js_value_type(result.value()), fiber::script::JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(result.value()), 10);
+}

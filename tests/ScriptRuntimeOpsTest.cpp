@@ -1,5 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 #include "script/ScriptResult.h"
 #include "script/gc/GcInternal.h"
 #include "script/run/Access.h"
@@ -51,6 +58,19 @@ JsValue make_object_with_key(GcHeap &heap, const char *key, std::size_t key_len,
     }
     if (!fiber::script::gc_object_set(&heap, obj_ptr, key_str, value)) {
         ADD_FAILURE() << "gc_object_set failed";
+    }
+    return obj;
+}
+
+JsValue make_object(GcHeap &heap, std::initializer_list<std::pair<std::string_view, JsValue>> entries) {
+    JsValue obj = JsValue::make_object(heap, entries.size());
+    auto *obj_ptr = js_value_heap_ptr<GcObject>(obj);
+    GcHeap::NoGcScope no_gc(heap);
+    for (const auto &entry: entries) {
+        GcString *key_str = fiber::script::gc_new_string(&heap, entry.first.data(), entry.first.size());
+        if (!key_str || !fiber::script::gc_object_set(&heap, obj_ptr, key_str, entry.second)) {
+            ADD_FAILURE() << "make_object set failed";
+        }
     }
     return obj;
 }
@@ -194,4 +214,66 @@ TEST(ScriptRuntimeOpsTest, InSemanticsObjectMatchesBorrowedUtf8KeysWithoutAlloca
     auto invalid_miss = fiber::script::run::Binaries::in(heap, invalid_key, latin_obj, result);
     ASSERT_EQ(invalid_miss, CallResult::Success);
     EXPECT_FALSE(js_value_bool(result.value));
+}
+
+TEST(ScriptRuntimeOpsTest, ExpandObjectMergesAndOverwritesInOrder) {
+    GcHeap heap;
+    auto target = handle(heap, make_object(heap, {{"a", JsValue::make_integer(1)}, {"b", JsValue::make_integer(2)}}));
+    auto addition = handle(heap, make_object(heap, {{"b", JsValue::make_integer(3)}, {"c", JsValue::make_integer(4)}}));
+    ResultPayload result;
+    auto status = fiber::script::run::Access::expand_object(heap, target, addition, result);
+    ASSERT_EQ(status, CallResult::Success);
+    ASSERT_EQ(js_value_type(result.value), JsNodeType::Object);
+    const GcObject *obj = js_value_heap_ptr<const GcObject>(result.value);
+    ASSERT_NE(obj, nullptr);
+
+    // Insertion order: a, b (overwritten in place, keeps position), c appended.
+    std::vector<std::string> keys;
+    std::vector<std::int64_t> values;
+    for (const fiber::script::GcObjectEntry *e = fiber::script::gc_object_first_entry(obj); e != nullptr;
+         e = fiber::script::gc_object_next_entry(obj, e)) {
+        std::string k;
+        fiber::script::gc_string_to_utf8(e->key, k);
+        keys.push_back(k);
+        values.push_back(js_value_int64(e->value));
+    }
+    ASSERT_EQ(keys.size(), 3u);
+    EXPECT_EQ(keys[0], "a");
+    EXPECT_EQ(keys[1], "b");
+    EXPECT_EQ(keys[2], "c");
+    EXPECT_EQ(values[0], 1);
+    EXPECT_EQ(values[1], 3); // overwritten by addition
+    EXPECT_EQ(values[2], 4);
+}
+
+TEST(ScriptRuntimeOpsTest, ExpandArrayFromObjectPreservesInsertionOrder) {
+    GcHeap heap;
+    auto target = handle(heap, JsValue::make_array(heap, 0));
+    auto addition =
+            handle(heap, make_object(heap, {{"a", JsValue::make_integer(10)}, {"b", JsValue::make_integer(20)}}));
+    ResultPayload result;
+    auto status = fiber::script::run::Access::expand_array(heap, target, addition, result);
+    ASSERT_EQ(status, CallResult::Success);
+    ASSERT_EQ(js_value_type(result.value), JsNodeType::Array);
+    const GcArray *arr = js_value_heap_ptr<const GcArray>(result.value);
+    ASSERT_NE(arr, nullptr);
+    ASSERT_EQ(arr->size, 2u);
+    EXPECT_EQ(js_value_int64(*fiber::script::gc_array_get(arr, 0)), 10);
+    EXPECT_EQ(js_value_int64(*fiber::script::gc_array_get(arr, 1)), 20);
+}
+
+TEST(ScriptRuntimeOpsTest, ExpandArrayFromArrayAppends) {
+    GcHeap heap;
+    auto target = handle(heap, make_array(heap, {JsValue::make_integer(1), JsValue::make_integer(2)}));
+    auto addition = handle(heap, make_array(heap, {JsValue::make_integer(3), JsValue::make_integer(4)}));
+    ResultPayload result;
+    auto status = fiber::script::run::Access::expand_array(heap, target, addition, result);
+    ASSERT_EQ(status, CallResult::Success);
+    const GcArray *arr = js_value_heap_ptr<const GcArray>(result.value);
+    ASSERT_NE(arr, nullptr);
+    ASSERT_EQ(arr->size, 4u);
+    EXPECT_EQ(js_value_int64(*fiber::script::gc_array_get(arr, 0)), 1);
+    EXPECT_EQ(js_value_int64(*fiber::script::gc_array_get(arr, 1)), 2);
+    EXPECT_EQ(js_value_int64(*fiber::script::gc_array_get(arr, 2)), 3);
+    EXPECT_EQ(js_value_int64(*fiber::script::gc_array_get(arr, 3)), 4);
 }
