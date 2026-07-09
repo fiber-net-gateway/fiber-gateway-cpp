@@ -1,18 +1,17 @@
 #include "RandFuncs.h"
 
+#include "Crc32.h"
+#include "NodeText.h"
 #include "StdLibrary.h"
 
 #include "../JsValue.h"
 #include "../Library.h"
-#include "../gc/GcInternal.h"
 
-#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <random>
 #include <string>
-#include <system_error>
 
 namespace fiber::script::std_lib {
 
@@ -74,104 +73,6 @@ std::int64_t next_bounded(std::uint64_t bound) noexcept {
         sample = next_u64() & mask;
     } while (sample >= bound);
     return static_cast<std::int64_t>(sample);
-}
-
-// ---- CRC-32 (java.util.zip.CRC32 parity) ----
-// Reflected poly 0xEDB88320, init 0xFFFFFFFF, final XOR 0xFFFFFFFF: the standard zlib/
-// Ethernet CRC-32 that java.util.zip.CRC32 implements (empty input -> 0, the canonical
-// check value "123456789" -> 0xCBF43926). Built once at compile time.
-
-constexpr std::uint32_t kCrc32Poly = 0xEDB88320u;
-
-constexpr std::uint32_t crc32_table_entry(std::uint32_t index) noexcept {
-    std::uint32_t c = index;
-    for (int k = 0; k < 8; ++k) {
-        c = (c & 1u) != 0u ? (kCrc32Poly ^ (c >> 1)) : (c >> 1);
-    }
-    return c;
-}
-
-struct Crc32Table {
-    std::uint32_t entries[256]{};
-    constexpr Crc32Table() noexcept {
-        for (std::uint32_t i = 0; i < 256u; ++i) {
-            entries[i] = crc32_table_entry(i);
-        }
-    }
-};
-constexpr Crc32Table kCrc32Table;
-
-void crc32_update(std::uint32_t &crc, const char *data, std::size_t len) noexcept {
-    for (std::size_t i = 0; i < len; ++i) {
-        std::uint32_t idx = (crc ^ static_cast<std::uint8_t>(data[i])) & 0xFFu;
-        crc = kCrc32Table.entries[idx] ^ (crc >> 8);
-    }
-}
-
-// ---- rand.canary key text (mirrors Jackson's JsonNode.asText(), no-arg) ----
-// Differs from asText("") on exactly one point: null renders to "null" rather than "".
-// Undefined/containers/binaries render to "" and are skipped by the caller's empty check.
-void canary_key_text(const JsValue &value, std::string &out) {
-    switch (js_value_type(value)) {
-        case JsNodeType::String: {
-            if (js_value_is_borrowed_string(value)) {
-                NativeStr native = js_value_native_string(value);
-                if (native.len > 0 && native.data != nullptr) {
-                    out.append(native.data, native.len);
-                }
-                return;
-            }
-            const GcString *str = js_value_heap_ptr<const GcString>(value);
-            if (str != nullptr) {
-                std::string tmp;
-                if (gc_string_to_utf8(str, tmp) && !tmp.empty()) {
-                    out.append(tmp);
-                }
-            }
-            return;
-        }
-        case JsNodeType::Integer: {
-            char buffer[32];
-            auto converted = std::to_chars(buffer, buffer + sizeof(buffer), js_value_int64(value));
-            if (converted.ec == std::errc{}) {
-                out.append(buffer, static_cast<std::size_t>(converted.ptr - buffer));
-            }
-            return;
-        }
-        case JsNodeType::Float: {
-            double number = js_value_double(value);
-            if (std::isnan(number)) {
-                out.append("NaN", 3);
-                return;
-            }
-            if (std::isinf(number)) {
-                out.append(number < 0 ? "-Infinity" : "Infinity", number < 0 ? 9 : 8);
-                return;
-            }
-            char buffer[64];
-            auto converted = std::to_chars(buffer, buffer + sizeof(buffer), number);
-            if (converted.ec == std::errc{}) {
-                out.append(buffer, static_cast<std::size_t>(converted.ptr - buffer));
-            }
-            return;
-        }
-        case JsNodeType::Boolean: {
-            bool b = js_value_bool(value);
-            out.append(b ? "true" : "false", b ? 4 : 5);
-            return;
-        }
-        case JsNodeType::Null:
-            out.append("null", 4);
-            return;
-        case JsNodeType::Undefined:
-        case JsNodeType::Array:
-        case JsNodeType::Object:
-        case JsNodeType::Interator:
-        case JsNodeType::Exception:
-        case JsNodeType::Binary:
-        default:
-            return;
-    }
 }
 
 // ---- rand.random(max) ----
@@ -246,11 +147,12 @@ ScriptResult canary_fn(void * /*userdata*/, const Library::HostCallFrame & /*fra
     }
 
     // With keys -> deterministic bucket from CRC-32 over the non-empty key texts. A single
-    // CRC instance is updated once per key in order (cumulative), matching Java.
+    // CRC instance is updated once per key in order (cumulative), matching Java. Key text
+    // mirrors Jackson's asText() via node_as_text (null -> "null"); see NodeText.h.
     std::uint32_t crc = 0xFFFFFFFFu;
     for (std::uint32_t i = 1; i < args.argc; ++i) {
         std::string text;
-        canary_key_text(args.args[i], text);
+        node_as_text(args.args[i], text);
         if (text.empty()) {
             continue;
         }
