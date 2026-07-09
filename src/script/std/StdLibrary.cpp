@@ -1,5 +1,7 @@
 #include "StdLibrary.h"
 
+#include "ArrayFuncs.h"
+
 #include "../../common/Assert.h"
 
 #include <cstdint>
@@ -125,7 +127,7 @@ StdLibrary &StdLibrary::instance() {
     return inst;
 }
 
-StdLibrary::StdLibrary() = default;
+StdLibrary::StdLibrary() { register_array_funcs(*this); }
 
 Library::FunctionMatchResult StdLibrary::resolve_func(std::string_view name,
                                                       const FunctionMatchRequest &request) const {
