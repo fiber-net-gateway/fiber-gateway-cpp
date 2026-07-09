@@ -91,6 +91,40 @@ TEST(JsValueEncodeTest, EncodeArrayWithStrings) {
     EXPECT_EQ(sink.output, "[1,false,\"hi\"]");
 }
 
+TEST(JsValueEncodeTest, EncodeUtf16HeapStringWithoutTemporaryUtf8String) {
+    GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
+
+    const char16_t text[] = {static_cast<char16_t>(0x4E2D)};
+    GcString *str = fiber::script::gc_new_string_utf16(&heap, text, 1);
+    ASSERT_NE(str, nullptr);
+    JsValue root = js_make_heap_ref(&str->hdr, GcHeapKind::String);
+
+    StringSink sink;
+    Generator gen(sink);
+    EXPECT_EQ(fiber::script::json::encode_js_value(gen, root), Generator::Result::OK);
+
+    std::string expected = "\"";
+    expected.append("\xE4\xB8\xAD", 3);
+    expected.push_back('"');
+    EXPECT_EQ(sink.output, expected);
+}
+
+TEST(JsValueEncodeTest, RejectsMalformedUtf16HeapStringBeforeWriting) {
+    GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
+
+    const char16_t bad[] = {static_cast<char16_t>(0xD800)};
+    GcString *str = fiber::script::gc_new_string_utf16(&heap, bad, 1);
+    ASSERT_NE(str, nullptr);
+    JsValue root = js_make_heap_ref(&str->hdr, GcHeapKind::String);
+
+    StringSink sink;
+    Generator gen(sink);
+    EXPECT_EQ(fiber::script::json::encode_js_value(gen, root), Generator::Result::InvalidString);
+    EXPECT_TRUE(sink.output.empty());
+}
+
 TEST(JsValueEncodeTest, EncodeExceptionObject) {
     GcHeap heap;
     GcHeap::NoGcScope no_gc(heap);
