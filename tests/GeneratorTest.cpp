@@ -86,6 +86,37 @@ TEST(GeneratorTest, ValidateUtf8) {
     EXPECT_EQ(gen.string(bad, sizeof(bad)), Generator::Result::InvalidString);
 }
 
+TEST(GeneratorTest, StringFromChunksEscapesAcrossChunks) {
+    struct ChunkCtx {
+        const char *chunks[2];
+        size_t lens[2];
+        size_t index = 0;
+    };
+    ChunkCtx ctx{{"a", "\"b"}, {1, 2}};
+    auto producer = [](void *raw, const char *&data, size_t &len, bool &done) noexcept -> bool {
+        auto *self = static_cast<ChunkCtx *>(raw);
+        if (!self || self->index > 2) {
+            return false;
+        }
+        if (self->index == 2) {
+            data = nullptr;
+            len = 0;
+            done = true;
+            return true;
+        }
+        data = self->chunks[self->index];
+        len = self->lens[self->index];
+        done = false;
+        self->index += 1;
+        return true;
+    };
+
+    StringSink sink;
+    Generator gen(sink);
+    EXPECT_EQ(gen.string_from_chunks(producer, &ctx), Generator::Result::OK);
+    EXPECT_EQ(sink.output, "\"a\\\"b\"");
+}
+
 TEST(GeneratorTest, InvalidDouble) {
     StringSink sink;
     Generator gen(sink);

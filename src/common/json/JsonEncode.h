@@ -31,6 +31,8 @@ private:
 
 class Generator {
 public:
+    using StringChunkProducer = bool (*)(void *ctx, const char *&data, size_t &len, bool &done) noexcept;
+
     enum class State { Start, MapStart, MapKey, MapValue, ArrayStart, InArray, Complete, Error };
     enum class Result {
         /** no error */
@@ -98,6 +100,7 @@ public:
 
     Result string(const char *str, size_t len);
     Result string(const std::string &str);
+    Result string_from_chunks(StringChunkProducer producer, void *ctx);
     // Binary values are encoded as base64 JSON strings.
     Result binary(const std::uint8_t *data, size_t len);
     Result integer(int64_t value);
@@ -116,6 +119,8 @@ private:
     [[nodiscard]] Result prefix_for_value();
     [[nodiscard]] Result prefix_for_key();
     [[nodiscard]] Result write_string(const char *str, size_t len);
+    [[nodiscard]] Result write_string_content(const char *str, size_t len);
+    [[nodiscard]] Result write_string_from_chunks(StringChunkProducer producer, void *ctx);
     [[nodiscard]] Result finish_value();
     [[nodiscard]] Result push(State state);
     [[nodiscard]] Result pop();

@@ -39,6 +39,35 @@ struct GcString {
     };
 };
 
+struct GcStringUtf8Buffer {
+    char *ptr = nullptr;
+    std::size_t capacity = 0;
+};
+
+enum class GcStringUtf8Boundary : std::uint8_t {
+    PreserveCodePoint,
+    AllowSplitCodePoint,
+};
+
+enum class GcStringUtf8Status : std::uint8_t {
+    Done,
+    NeedMore,
+    Invalid,
+};
+
+struct GcStringUtf8Cursor {
+    std::size_t index = 0;
+    std::uint8_t pending[4] = {};
+    std::uint8_t pending_offset = 0;
+    std::uint8_t pending_len = 0;
+};
+
+struct GcStringUtf8Result {
+    GcStringUtf8Status status = GcStringUtf8Status::Done;
+    std::size_t written = 0;
+    std::size_t needed = 0;
+};
+
 struct GcBinary {
     GcHeader hdr;
     std::size_t len = 0;
@@ -114,6 +143,9 @@ GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_
 GcString *gc_new_string_bytes_uninit(GcHeap *heap, std::size_t len) noexcept;
 GcString *gc_new_string_utf16(GcHeap *heap, const char16_t *data, std::size_t len) noexcept;
 GcString *gc_new_string_utf16_uninit(GcHeap *heap, std::size_t len) noexcept;
+bool gc_string_can_encode_utf8(const GcString *str) noexcept;
+GcStringUtf8Result gc_string_to_utf8(const GcString *str, GcStringUtf8Cursor &cursor, GcStringUtf8Buffer out,
+                                     GcStringUtf8Boundary boundary) noexcept;
 bool gc_string_to_utf8(const GcString *str, std::string &out);
 GcBinary *gc_new_binary(GcHeap *heap, const std::uint8_t *data, std::size_t len);
 GcArray *gc_new_array(GcHeap *heap, std::size_t capacity);

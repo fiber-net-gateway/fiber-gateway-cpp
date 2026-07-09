@@ -250,6 +250,42 @@ Generator::Result Generator::string(const char *str, size_t len) {
 
 Generator::Result Generator::string(const std::string &str) { return string(str.data(), str.size()); }
 
+Generator::Result Generator::string_from_chunks(StringChunkProducer producer, void *ctx) {
+    if (!producer) {
+        return set_error(Result::InvalidString);
+    }
+    State state = current_state();
+    if (state == State::MapStart || state == State::MapKey) {
+        Result result = prefix_for_key();
+        if (result != Result::OK) {
+            return result;
+        }
+        result = write_string_from_chunks(producer, ctx);
+        if (result != Result::OK) {
+            return result;
+        }
+        if (has_option(Option::Beauty)) {
+            result = append(": ", 2);
+        } else {
+            result = append(':');
+        }
+        if (result != Result::OK) {
+            return result;
+        }
+        current_state() = State::MapValue;
+        return Result::OK;
+    }
+    Result result = prefix_for_value();
+    if (result != Result::OK) {
+        return result;
+    }
+    result = write_string_from_chunks(producer, ctx);
+    if (result != Result::OK) {
+        return result;
+    }
+    return finish_value();
+}
+
 Generator::Result Generator::binary(const std::uint8_t *data, size_t len) {
     if (!data && len > 0) {
         return set_error(Result::InvalidString);
@@ -445,9 +481,21 @@ Generator::Result Generator::write_string(const char *str, size_t len) {
     if (result != Result::OK) {
         return result;
     }
+    result = write_string_content(str, len);
+    if (result != Result::OK) {
+        return result;
+    }
+    return append('\"');
+}
+
+Generator::Result Generator::write_string_content(const char *str, size_t len) {
+    if (!str && len > 0) {
+        return set_error(Result::InvalidString);
+    }
     const unsigned char *data = reinterpret_cast<const unsigned char *>(str);
     for (size_t i = 0; i < len; ++i) {
         unsigned char ch = data[i];
+        Result result = Result::OK;
         switch (ch) {
             case '\"':
                 result = append("\\\"", 2);
@@ -491,6 +539,44 @@ Generator::Result Generator::write_string(const char *str, size_t len) {
         }
         if (result != Result::OK) {
             return result;
+        }
+    }
+    return Result::OK;
+}
+
+Generator::Result Generator::write_string_from_chunks(StringChunkProducer producer, void *ctx) {
+    if (!producer) {
+        return set_error(Result::InvalidString);
+    }
+    Result result = append('\"');
+    if (result != Result::OK) {
+        return result;
+    }
+    while (true) {
+        const char *data = nullptr;
+        size_t len = 0;
+        bool done = false;
+        if (!producer(ctx, data, len, done)) {
+            return set_error(Result::InvalidString);
+        }
+        if (len > 0) {
+            if (!data) {
+                return set_error(Result::InvalidString);
+            }
+            if (has_option(Option::ValidateUtf8)) {
+                if (!is_valid_utf8(reinterpret_cast<const unsigned char *>(data), len)) {
+                    return set_error(Result::InvalidString);
+                }
+            }
+            result = write_string_content(data, len);
+            if (result != Result::OK) {
+                return result;
+            }
+        } else if (!done) {
+            return set_error(Result::InvalidString);
+        }
+        if (done) {
+            break;
         }
     }
     return append('\"');

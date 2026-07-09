@@ -17,6 +17,10 @@ using fiber::script::GcRootRegistration;
 using fiber::script::GcRootSource;
 using fiber::script::GcRootVisitor;
 using fiber::script::GcString;
+using fiber::script::GcStringUtf8Boundary;
+using fiber::script::GcStringUtf8Buffer;
+using fiber::script::GcStringUtf8Cursor;
+using fiber::script::GcStringUtf8Status;
 using fiber::script::JsNodeType;
 using fiber::script::JsValue;
 using fiber::script::ValueHandle;
@@ -572,6 +576,107 @@ TEST(JsGcTest, NewStringDecodesUtf8IntoCompactStorage) {
     EXPECT_EQ(emoji_str->data16[0], static_cast<char16_t>(0xD83D));
     EXPECT_EQ(emoji_str->data16[1], static_cast<char16_t>(0xDE00));
     EXPECT_EQ(to_utf8(emoji_str), std::string(emoji, sizeof(emoji)));
+}
+
+TEST(JsGcTest, StringUtf8CursorPreservesCodePointWhenBufferIsTooSmall) {
+    GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
+
+    const std::uint8_t byte = 0xE9u;
+    GcString *str = fiber::script::gc_new_string_bytes(&heap, &byte, 1);
+    ASSERT_NE(str, nullptr);
+
+    GcStringUtf8Cursor cursor;
+    char buf[2] = {};
+    auto result = fiber::script::gc_string_to_utf8(str, cursor, GcStringUtf8Buffer{.ptr = buf, .capacity = 1},
+                                                   GcStringUtf8Boundary::PreserveCodePoint);
+    EXPECT_EQ(result.status, GcStringUtf8Status::NeedMore);
+    EXPECT_EQ(result.written, 0u);
+    EXPECT_EQ(result.needed, 2u);
+    EXPECT_EQ(cursor.index, 0u);
+
+    result = fiber::script::gc_string_to_utf8(str, cursor, GcStringUtf8Buffer{.ptr = buf, .capacity = sizeof(buf)},
+                                              GcStringUtf8Boundary::PreserveCodePoint);
+    EXPECT_EQ(result.status, GcStringUtf8Status::Done);
+    EXPECT_EQ(result.written, 2u);
+    EXPECT_EQ(static_cast<unsigned char>(buf[0]), 0xC3u);
+    EXPECT_EQ(static_cast<unsigned char>(buf[1]), 0xA9u);
+}
+
+TEST(JsGcTest, StringUtf8CursorCanSplitCodePointWhenAllowed) {
+    GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
+
+    const char16_t data[] = {static_cast<char16_t>(0x4E2D)};
+    GcString *str = fiber::script::gc_new_string_utf16(&heap, data, 1);
+    ASSERT_NE(str, nullptr);
+
+    GcStringUtf8Cursor cursor;
+    char first[2] = {};
+    auto result = fiber::script::gc_string_to_utf8(str, cursor, GcStringUtf8Buffer{.ptr = first, .capacity = 2},
+                                                   GcStringUtf8Boundary::AllowSplitCodePoint);
+    EXPECT_EQ(result.status, GcStringUtf8Status::NeedMore);
+    EXPECT_EQ(result.written, 2u);
+    EXPECT_EQ(result.needed, 1u);
+    EXPECT_EQ(static_cast<unsigned char>(first[0]), 0xE4u);
+    EXPECT_EQ(static_cast<unsigned char>(first[1]), 0xB8u);
+
+    char second = 0;
+    result = fiber::script::gc_string_to_utf8(str, cursor, GcStringUtf8Buffer{.ptr = &second, .capacity = 1},
+                                              GcStringUtf8Boundary::AllowSplitCodePoint);
+    EXPECT_EQ(result.status, GcStringUtf8Status::Done);
+    EXPECT_EQ(result.written, 1u);
+    EXPECT_EQ(static_cast<unsigned char>(second), 0xADu);
+}
+
+TEST(JsGcTest, StringUtf8CursorPreservesSurrogatePair) {
+    GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
+
+    const char16_t emoji[] = {static_cast<char16_t>(0xD83D), static_cast<char16_t>(0xDE00)};
+    GcString *str = fiber::script::gc_new_string_utf16(&heap, emoji, 2);
+    ASSERT_NE(str, nullptr);
+
+    GcStringUtf8Cursor cursor;
+    char buf[4] = {};
+    auto result = fiber::script::gc_string_to_utf8(str, cursor, GcStringUtf8Buffer{.ptr = buf, .capacity = 3},
+                                                   GcStringUtf8Boundary::PreserveCodePoint);
+    EXPECT_EQ(result.status, GcStringUtf8Status::NeedMore);
+    EXPECT_EQ(result.written, 0u);
+    EXPECT_EQ(result.needed, 4u);
+    EXPECT_EQ(cursor.index, 0u);
+
+    result = fiber::script::gc_string_to_utf8(str, cursor, GcStringUtf8Buffer{.ptr = buf, .capacity = sizeof(buf)},
+                                              GcStringUtf8Boundary::PreserveCodePoint);
+    EXPECT_EQ(result.status, GcStringUtf8Status::Done);
+    EXPECT_EQ(result.written, 4u);
+    EXPECT_EQ(static_cast<unsigned char>(buf[0]), 0xF0u);
+    EXPECT_EQ(static_cast<unsigned char>(buf[1]), 0x9Fu);
+    EXPECT_EQ(static_cast<unsigned char>(buf[2]), 0x98u);
+    EXPECT_EQ(static_cast<unsigned char>(buf[3]), 0x80u);
+}
+
+TEST(JsGcTest, StringUtf8CursorRejectsMalformedUtf16) {
+    GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
+
+    const char16_t bad[] = {static_cast<char16_t>(0xD800)};
+    GcString *str = fiber::script::gc_new_string_utf16(&heap, bad, 1);
+    ASSERT_NE(str, nullptr);
+    EXPECT_FALSE(fiber::script::gc_string_can_encode_utf8(str));
+
+    GcStringUtf8Cursor cursor;
+    char buf[4] = {};
+    auto result = fiber::script::gc_string_to_utf8(str, cursor, GcStringUtf8Buffer{.ptr = buf, .capacity = sizeof(buf)},
+                                                   GcStringUtf8Boundary::PreserveCodePoint);
+    EXPECT_EQ(result.status, GcStringUtf8Status::Invalid);
+    EXPECT_EQ(result.written, 0u);
+
+    cursor = {};
+    cursor.index = 2;
+    result = fiber::script::gc_string_to_utf8(str, cursor, GcStringUtf8Buffer{.ptr = buf, .capacity = sizeof(buf)},
+                                              GcStringUtf8Boundary::PreserveCodePoint);
+    EXPECT_EQ(result.status, GcStringUtf8Status::Invalid);
 }
 
 TEST(JsGcTest, NewStringRejectsMalformedUtf8) {
