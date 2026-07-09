@@ -23,6 +23,7 @@ GcHeap::~GcHeap() {
         head = obj->next;
         gc_free_obj(this, obj);
     }
+    gc_string_intern_free_table(this);
 }
 
 ValueHandle GcHeap::local_value() {

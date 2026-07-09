@@ -17,6 +17,7 @@
 namespace fiber::script {
 
 struct GcHeader;
+struct GcString;
 
 enum class GcIterStep : std::uint8_t {
     Item,
@@ -107,6 +108,9 @@ public:
     std::size_t threshold = 1 << 20;
     GcMark live_mark = GcMark::GcMark_0;
     mem::Allocator alloc;
+    GcString **string_intern_buckets = nullptr;
+    std::size_t string_intern_bucket_count = 0;
+    std::size_t string_intern_size = 0;
 
 private:
     struct ValueBlock {

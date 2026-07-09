@@ -16,11 +16,20 @@ using namespace gc_detail;
 
 GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len) noexcept {
     FIBER_ASSERT(heap->no_gc_active());
+    std::uint64_t hash = 0;
+    const bool intern = len <= kMaxInternStringLen;
+    if (intern) {
+        hash = string_hash_bytes(data, len);
+        if (GcString *existing = gc_string_intern_lookup_bytes(heap, data, len, hash)) {
+            return existing;
+        }
+    }
     auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcHeapKind::String);
     if (!hdr) {
         return nullptr;
     }
     auto *str = reinterpret_cast<GcString *>(hdr);
+    str->intern_next = nullptr;
     str->len = len;
     str->encoding = GcStringEncoding::Byte;
     str->hash = 0;
@@ -41,6 +50,9 @@ GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_
         str->data8[len] = 0;
     }
     gc_link(heap, hdr);
+    if (intern) {
+        gc_string_intern_insert(heap, str, hash);
+    }
     return str;
 }
 
@@ -51,6 +63,7 @@ GcString *gc_new_string_bytes_uninit(GcHeap *heap, std::size_t len) noexcept {
         return nullptr;
     }
     auto *str = reinterpret_cast<GcString *>(hdr);
+    str->intern_next = nullptr;
     str->len = len;
     str->encoding = GcStringEncoding::Byte;
     str->hash = 0;
@@ -71,11 +84,20 @@ GcString *gc_new_string_bytes_uninit(GcHeap *heap, std::size_t len) noexcept {
 
 GcString *gc_new_string_utf16(GcHeap *heap, const char16_t *data, std::size_t len) noexcept {
     FIBER_ASSERT(heap->no_gc_active());
+    std::uint64_t hash = 0;
+    const bool intern = len <= kMaxInternStringLen;
+    if (intern) {
+        hash = string_hash_utf16(data, len);
+        if (GcString *existing = gc_string_intern_lookup_utf16(heap, data, len, hash)) {
+            return existing;
+        }
+    }
     auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcHeapKind::String);
     if (!hdr) {
         return nullptr;
     }
     auto *str = reinterpret_cast<GcString *>(hdr);
+    str->intern_next = nullptr;
     str->len = len;
     str->encoding = GcStringEncoding::Utf16;
     str->hash = 0;
@@ -95,6 +117,9 @@ GcString *gc_new_string_utf16(GcHeap *heap, const char16_t *data, std::size_t le
         str->data16[len] = 0;
     }
     gc_link(heap, hdr);
+    if (intern) {
+        gc_string_intern_insert(heap, str, hash);
+    }
     return str;
 }
 
@@ -105,6 +130,7 @@ GcString *gc_new_string_utf16_uninit(GcHeap *heap, std::size_t len) noexcept {
         return nullptr;
     }
     auto *str = reinterpret_cast<GcString *>(hdr);
+    str->intern_next = nullptr;
     str->len = len;
     str->encoding = GcStringEncoding::Utf16;
     str->hash = 0;
@@ -130,6 +156,45 @@ GcString *gc_new_string(GcHeap *heap, const char *data, std::size_t len) noexcep
     fiber::json::Utf8ScanResult scan;
     if (!fiber::json::utf8_scan(data, len, scan)) {
         return nullptr;
+    }
+    if (scan.utf16_len <= kMaxInternStringLen) {
+        if (scan.all_byte) {
+            std::uint8_t decoded[kMaxInternStringLen];
+            if (!fiber::json::utf8_write_bytes(data, len, decoded, scan.utf16_len)) {
+                return nullptr;
+            }
+            std::uint64_t hash = string_hash_bytes(decoded, scan.utf16_len);
+            if (GcString *existing = gc_string_intern_lookup_bytes(heap, decoded, scan.utf16_len, hash)) {
+                return existing;
+            }
+            GcString *str = gc_new_string_bytes_uninit(heap, scan.utf16_len);
+            if (!str) {
+                return nullptr;
+            }
+            if (scan.utf16_len > 0) {
+                std::memcpy(str->data8, decoded, scan.utf16_len);
+            }
+            gc_string_intern_insert(heap, str, hash);
+            return str;
+        }
+
+        char16_t decoded[kMaxInternStringLen];
+        if (!fiber::json::utf8_write_utf16(data, len, decoded, scan.utf16_len)) {
+            return nullptr;
+        }
+        std::uint64_t hash = string_hash_utf16(decoded, scan.utf16_len);
+        if (GcString *existing = gc_string_intern_lookup_utf16(heap, decoded, scan.utf16_len, hash)) {
+            return existing;
+        }
+        GcString *str = gc_new_string_utf16_uninit(heap, scan.utf16_len);
+        if (!str) {
+            return nullptr;
+        }
+        if (scan.utf16_len > 0) {
+            std::memcpy(str->data16, decoded, sizeof(char16_t) * scan.utf16_len);
+        }
+        gc_string_intern_insert(heap, str, hash);
+        return str;
     }
     if (scan.all_byte) {
         GcString *str = gc_new_string_bytes_uninit(heap, scan.utf16_len);
