@@ -1,6 +1,8 @@
 #include "StdLibrary.h"
 
 #include "ArrayFuncs.h"
+#include "IncludesFunc.h"
+#include "LengthFunc.h"
 
 #include "../../common/Assert.h"
 
@@ -127,7 +129,11 @@ StdLibrary &StdLibrary::instance() {
     return inst;
 }
 
-StdLibrary::StdLibrary() { register_array_funcs(*this); }
+StdLibrary::StdLibrary() {
+    register_array_funcs(*this);
+    register_length_func(*this);
+    register_includes_func(*this);
+}
 
 Library::FunctionMatchResult StdLibrary::resolve_func(std::string_view name,
                                                       const FunctionMatchRequest &request) const {
