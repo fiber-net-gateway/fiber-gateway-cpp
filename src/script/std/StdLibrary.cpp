@@ -3,6 +3,7 @@
 #include "ArrayFuncs.h"
 #include "IncludesFunc.h"
 #include "LengthFunc.h"
+#include "MathFuncs.h"
 
 #include "../../common/Assert.h"
 
@@ -133,6 +134,7 @@ StdLibrary::StdLibrary() {
     register_array_funcs(*this);
     register_length_func(*this);
     register_includes_func(*this);
+    register_math_funcs(*this);
 }
 
 Library::FunctionMatchResult StdLibrary::resolve_func(std::string_view name,
