@@ -28,6 +28,7 @@ enum class GcStringEncoding : std::uint8_t {
 
 struct GcString {
     GcHeader hdr;
+    GcString *intern_next = nullptr;
     std::size_t len = 0;
     std::uint64_t hash = 0;
     bool hash_valid = false;
@@ -145,6 +146,7 @@ const GcObjectEntry *gc_object_entry_at(const GcObject *obj, std::size_t index);
 namespace fiber::script::gc_detail {
 
 inline constexpr std::size_t kValueBlockSlots = 8;
+inline constexpr std::size_t kMaxInternStringLen = 64;
 
 std::size_t saturating_add(std::size_t lhs, std::size_t rhs);
 std::size_t next_threshold(std::size_t live_bytes);
@@ -162,7 +164,17 @@ void *gc_alloc_extra(GcHeap *heap, std::size_t bytes);
 void gc_free_extra(GcHeap *heap, void *ptr, std::size_t bytes);
 
 std::uint64_t string_hash(const GcString *str);
+std::uint64_t string_hash_bytes(const std::uint8_t *data, std::size_t len) noexcept;
+std::uint64_t string_hash_utf16(const char16_t *data, std::size_t len) noexcept;
 bool string_equals(const GcString *lhs, const GcString *rhs);
+GcString *gc_string_intern_lookup_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len,
+                                        std::uint64_t hash) noexcept;
+GcString *gc_string_intern_lookup_utf16(GcHeap *heap, const char16_t *data, std::size_t len,
+                                        std::uint64_t hash) noexcept;
+void gc_string_intern_insert(GcHeap *heap, GcString *str, std::uint64_t hash) noexcept;
+GcString *gc_string_intern_final(GcHeap *heap, GcString *str) noexcept;
+void gc_string_intern_remove(GcHeap *heap, GcString *str) noexcept;
+void gc_string_intern_free_table(GcHeap *heap) noexcept;
 std::int32_t find_entry_index(const GcObject *obj, const GcString *key, std::uint64_t hash);
 bool rehash_buckets(GcHeap *heap, GcObject *obj, std::size_t new_bucket_count);
 bool grow_entries(GcHeap *heap, GcObject *obj, std::size_t new_capacity);

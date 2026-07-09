@@ -134,6 +134,7 @@ bool gc_make_string_bytes_uninit(GcHeap *heap, ValueHandle out, std::size_t len,
     if (!writer(str->data8, str->len, ctx)) {
         return false;
     }
+    str = gc_detail::gc_string_intern_final(heap, str);
     *out = js_make_heap_ref(&str->hdr, GcHeapKind::String);
     return true;
 }
@@ -166,6 +167,7 @@ bool gc_make_string_utf16_uninit(GcHeap *heap, ValueHandle out, std::size_t len,
     if (!writer(str->data16, str->len, ctx)) {
         return false;
     }
+    str = gc_detail::gc_string_intern_final(heap, str);
     *out = js_make_heap_ref(&str->hdr, GcHeapKind::String);
     return true;
 }

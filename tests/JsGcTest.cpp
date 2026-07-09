@@ -56,6 +56,102 @@ TEST(JsGcTest, BytesIncludeExternalBuffers) {
     EXPECT_GT(heap.bytes, after_array);
 }
 
+TEST(JsGcTest, ShortStringsAreInternedInHeap) {
+    GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
+
+    GcString *first = fiber::script::gc_new_string(&heap, "repeat", 6);
+    GcString *second = fiber::script::gc_new_string(&heap, "repeat", 6);
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(first, second);
+    EXPECT_EQ(heap.string_intern_size, 1u);
+}
+
+TEST(JsGcTest, LongStringsBypassInternCache) {
+    GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
+
+    std::string payload(65, 'x');
+    GcString *first = fiber::script::gc_new_string(&heap, payload.data(), payload.size());
+    GcString *second = fiber::script::gc_new_string(&heap, payload.data(), payload.size());
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    EXPECT_NE(first, second);
+    EXPECT_EQ(heap.string_intern_size, 0u);
+}
+
+TEST(JsGcTest, InternCacheUsesStringCodeUnitSemantics) {
+    GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
+
+    const std::uint8_t byte = 0xE9u;
+    const char utf8[] = {static_cast<char>(0xC3), static_cast<char>(0xA9)};
+    GcString *byte_str = fiber::script::gc_new_string_bytes(&heap, &byte, 1);
+    GcString *utf8_str = fiber::script::gc_new_string(&heap, utf8, sizeof(utf8));
+    ASSERT_NE(byte_str, nullptr);
+    ASSERT_NE(utf8_str, nullptr);
+    EXPECT_EQ(byte_str, utf8_str);
+
+    const char16_t wide[] = {static_cast<char16_t>(0x20AC)};
+    GcString *wide_str = fiber::script::gc_new_string_utf16(&heap, wide, 1);
+    GcString *wide_str2 = fiber::script::gc_new_string(&heap, "\xE2\x82\xAC", 3);
+    ASSERT_NE(wide_str, nullptr);
+    ASSERT_NE(wide_str2, nullptr);
+    EXPECT_EQ(wide_str, wide_str2);
+}
+
+TEST(JsGcTest, InternCacheDropsSweptStrings) {
+    GcHeap heap;
+
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        GcString *str = fiber::script::gc_new_string(&heap, "gone", 4);
+        ASSERT_NE(str, nullptr);
+        EXPECT_EQ(heap.string_intern_size, 1u);
+    }
+
+    heap.collect();
+    heap.collect();
+    EXPECT_EQ(heap.bytes, 0u);
+    EXPECT_EQ(heap.string_intern_size, 0u);
+    EXPECT_EQ(heap.string_intern_buckets, nullptr);
+
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        GcString *fresh = fiber::script::gc_new_string(&heap, "gone", 4);
+        ASSERT_NE(fresh, nullptr);
+        EXPECT_EQ(to_utf8(fresh), "gone");
+        EXPECT_EQ(heap.string_intern_size, 1u);
+    }
+}
+
+TEST(JsGcTest, InternHitRefreshesFirstCollectProtection) {
+    GcHeap heap;
+    GcString *str = nullptr;
+
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        str = fiber::script::gc_new_string(&heap, "keep", 4);
+        ASSERT_NE(str, nullptr);
+    }
+
+    heap.collect();
+    ASSERT_EQ(heap.string_intern_size, 1u);
+
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        GcString *again = fiber::script::gc_new_string(&heap, "keep", 4);
+        ASSERT_NE(again, nullptr);
+        EXPECT_EQ(again, str);
+    }
+
+    heap.collect();
+    EXPECT_EQ(heap.string_intern_size, 1u);
+    heap.collect();
+    EXPECT_EQ(heap.string_intern_size, 0u);
+}
+
 TEST(JsGcTest, IteratorMutationIsDetectedWithoutAllocation) {
     GcHeap heap;
     GcHeap::NoGcScope no_gc(heap);

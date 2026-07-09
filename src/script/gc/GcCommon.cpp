@@ -18,6 +18,8 @@ namespace fiber::script::gc_detail {
 constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 constexpr std::size_t kMinBucketCount = 8;
+constexpr std::size_t kStringInternInitialBucketCount = 64;
+constexpr std::size_t kStringInternMaxLoad = 2;
 constexpr std::size_t kMaxLoadNumerator = 3;
 constexpr std::size_t kMaxLoadDenominator = 4;
 constexpr std::size_t kMinGcThreshold = 1 << 20;
@@ -42,19 +44,162 @@ std::size_t next_threshold(std::size_t live_bytes) {
 GcMark flip_mark(GcMark mark) { return (mark == GcMark::GcMark_0) ? GcMark::GcMark_1 : GcMark::GcMark_0; }
 
 std::uint64_t hash_code_units(const GcString *str) {
-    std::uint64_t hash = kFnvOffsetBasis;
     if (!str || str->len == 0) {
-        return hash;
+        return kFnvOffsetBasis;
     }
     if (str->encoding == GcStringEncoding::Byte) {
-        for (std::size_t i = 0; i < str->len; ++i) {
-            hash ^= static_cast<std::uint16_t>(str->data8[i]);
-            hash *= kFnvPrime;
+        return string_hash_bytes(str->data8, str->len);
+    }
+    return string_hash_utf16(str->data16, str->len);
+}
+
+bool string_equals_bytes(const GcString *str, const std::uint8_t *data, std::size_t len) noexcept {
+    if (!str || str->len != len) {
+        return false;
+    }
+    if (len == 0) {
+        return true;
+    }
+    if (!data) {
+        return false;
+    }
+    if (str->encoding == GcStringEncoding::Byte) {
+        return std::memcmp(str->data8, data, len) == 0;
+    }
+    for (std::size_t i = 0; i < len; ++i) {
+        if (str->data16[i] != static_cast<char16_t>(data[i])) {
+            return false;
         }
-        return hash;
+    }
+    return true;
+}
+
+bool string_equals_utf16(const GcString *str, const char16_t *data, std::size_t len) noexcept {
+    if (!str || str->len != len) {
+        return false;
+    }
+    if (len == 0) {
+        return true;
+    }
+    if (!data) {
+        return false;
+    }
+    if (str->encoding == GcStringEncoding::Utf16) {
+        return std::memcmp(str->data16, data, len * sizeof(char16_t)) == 0;
     }
     for (std::size_t i = 0; i < str->len; ++i) {
-        hash ^= static_cast<std::uint16_t>(str->data16[i]);
+        if (data[i] != static_cast<char16_t>(str->data8[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool intern_eligible(std::size_t len) noexcept { return len <= kMaxInternStringLen; }
+
+[[nodiscard]] std::size_t intern_bucket_bytes(std::size_t bucket_count) noexcept {
+    if (bucket_count > std::numeric_limits<std::size_t>::max() / sizeof(GcString *)) {
+        return 0;
+    }
+    return bucket_count * sizeof(GcString *);
+}
+
+[[nodiscard]] bool intern_ensure_buckets(GcHeap *heap, std::size_t desired_size) noexcept {
+    if (!heap) {
+        return false;
+    }
+    if (heap->string_intern_bucket_count != 0 &&
+        desired_size <= heap->string_intern_bucket_count * kStringInternMaxLoad) {
+        return true;
+    }
+
+    std::size_t new_count =
+            heap->string_intern_bucket_count ? heap->string_intern_bucket_count : kStringInternInitialBucketCount;
+    while (desired_size > new_count * kStringInternMaxLoad) {
+        if (new_count > std::numeric_limits<std::size_t>::max() / 2) {
+            return false;
+        }
+        new_count *= 2;
+    }
+
+    std::size_t bytes = intern_bucket_bytes(new_count);
+    if (bytes == 0) {
+        return false;
+    }
+    auto **new_buckets = static_cast<GcString **>(heap->alloc.alloc(bytes));
+    if (!new_buckets) {
+        return false;
+    }
+    for (std::size_t i = 0; i < new_count; ++i) {
+        new_buckets[i] = nullptr;
+    }
+
+    if (heap->string_intern_buckets) {
+        for (std::size_t i = 0; i < heap->string_intern_bucket_count; ++i) {
+            GcString *cursor = heap->string_intern_buckets[i];
+            while (cursor) {
+                GcString *next = cursor->intern_next;
+                std::size_t bucket = static_cast<std::size_t>(cursor->hash) & (new_count - 1);
+                cursor->intern_next = new_buckets[bucket];
+                new_buckets[bucket] = cursor;
+                cursor = next;
+            }
+        }
+        heap->alloc.free(heap->string_intern_buckets);
+    }
+
+    heap->string_intern_buckets = new_buckets;
+    heap->string_intern_bucket_count = new_count;
+    return true;
+}
+
+void intern_protect_hit(GcString *str) noexcept {
+    if (str) {
+        str->hdr.first_collect_protected = true;
+    }
+}
+
+bool unlink_heap_obj(GcHeap *heap, GcHeader *target) noexcept {
+    if (!heap || !target) {
+        return false;
+    }
+    GcHeader **cursor = &heap->head;
+    while (*cursor) {
+        if (*cursor == target) {
+            *cursor = target->next;
+            target->next = nullptr;
+            return true;
+        }
+        cursor = &(*cursor)->next;
+    }
+    return false;
+}
+
+std::uint64_t string_hash_bytes(const std::uint8_t *data, std::size_t len) noexcept {
+    std::uint64_t hash = kFnvOffsetBasis;
+    if (len == 0) {
+        return hash;
+    }
+    if (!data) {
+        return 0;
+    }
+    for (std::size_t i = 0; i < len; ++i) {
+        hash ^= static_cast<std::uint16_t>(data[i]);
+        hash *= kFnvPrime;
+    }
+    return hash;
+}
+
+std::uint64_t string_hash_utf16(const char16_t *data, std::size_t len) noexcept {
+    std::uint64_t hash = kFnvOffsetBasis;
+    if (len == 0) {
+        return hash;
+    }
+    if (!data) {
+        return 0;
+    }
+    for (std::size_t i = 0; i < len; ++i) {
+        hash ^= static_cast<std::uint16_t>(data[i]);
         hash *= kFnvPrime;
     }
     return hash;
@@ -106,6 +251,108 @@ bool string_equals(const GcString *lhs, const GcString *rhs) {
         }
     }
     return true;
+}
+
+GcString *gc_string_intern_lookup_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len,
+                                        std::uint64_t hash) noexcept {
+    if (!heap || !intern_eligible(len) || !heap->string_intern_buckets || heap->string_intern_bucket_count == 0) {
+        return nullptr;
+    }
+    std::size_t bucket = static_cast<std::size_t>(hash) & (heap->string_intern_bucket_count - 1);
+    for (GcString *cursor = heap->string_intern_buckets[bucket]; cursor; cursor = cursor->intern_next) {
+        if (cursor->hash == hash && string_equals_bytes(cursor, data, len)) {
+            intern_protect_hit(cursor);
+            return cursor;
+        }
+    }
+    return nullptr;
+}
+
+GcString *gc_string_intern_lookup_utf16(GcHeap *heap, const char16_t *data, std::size_t len,
+                                        std::uint64_t hash) noexcept {
+    if (!heap || !intern_eligible(len) || !heap->string_intern_buckets || heap->string_intern_bucket_count == 0) {
+        return nullptr;
+    }
+    std::size_t bucket = static_cast<std::size_t>(hash) & (heap->string_intern_bucket_count - 1);
+    for (GcString *cursor = heap->string_intern_buckets[bucket]; cursor; cursor = cursor->intern_next) {
+        if (cursor->hash == hash && string_equals_utf16(cursor, data, len)) {
+            intern_protect_hit(cursor);
+            return cursor;
+        }
+    }
+    return nullptr;
+}
+
+void gc_string_intern_insert(GcHeap *heap, GcString *str, std::uint64_t hash) noexcept {
+    if (!heap || !str || !intern_eligible(str->len)) {
+        return;
+    }
+    str->hash = hash;
+    str->hash_valid = true;
+    if (!intern_ensure_buckets(heap, heap->string_intern_size + 1) && !heap->string_intern_buckets) {
+        return;
+    }
+    std::size_t bucket = static_cast<std::size_t>(hash) & (heap->string_intern_bucket_count - 1);
+    str->intern_next = heap->string_intern_buckets[bucket];
+    heap->string_intern_buckets[bucket] = str;
+    heap->string_intern_size += 1;
+}
+
+GcString *gc_string_intern_final(GcHeap *heap, GcString *str) noexcept {
+    if (!heap || !str || !intern_eligible(str->len)) {
+        return str;
+    }
+
+    std::uint64_t hash = string_hash(str);
+    GcString *existing = nullptr;
+    if (str->encoding == GcStringEncoding::Byte) {
+        existing = gc_string_intern_lookup_bytes(heap, str->data8, str->len, hash);
+    } else {
+        existing = gc_string_intern_lookup_utf16(heap, str->data16, str->len, hash);
+    }
+    if (existing && existing != str) {
+        if (unlink_heap_obj(heap, &str->hdr)) {
+            gc_free_obj(heap, &str->hdr);
+        }
+        return existing;
+    }
+
+    gc_string_intern_insert(heap, str, hash);
+    return str;
+}
+
+void gc_string_intern_free_table(GcHeap *heap) noexcept {
+    if (!heap || !heap->string_intern_buckets) {
+        return;
+    }
+    heap->alloc.free(heap->string_intern_buckets);
+    heap->string_intern_buckets = nullptr;
+    heap->string_intern_bucket_count = 0;
+    heap->string_intern_size = 0;
+}
+
+void gc_string_intern_remove(GcHeap *heap, GcString *str) noexcept {
+    if (!heap || !str || !heap->string_intern_buckets || heap->string_intern_bucket_count == 0 ||
+        !intern_eligible(str->len) || !str->hash_valid) {
+        return;
+    }
+
+    std::size_t bucket = static_cast<std::size_t>(str->hash) & (heap->string_intern_bucket_count - 1);
+    GcString **cursor = &heap->string_intern_buckets[bucket];
+    while (*cursor) {
+        if (*cursor == str) {
+            *cursor = str->intern_next;
+            str->intern_next = nullptr;
+            if (heap->string_intern_size > 0) {
+                heap->string_intern_size -= 1;
+            }
+            if (heap->string_intern_size == 0) {
+                gc_string_intern_free_table(heap);
+            }
+            return;
+        }
+        cursor = &(*cursor)->intern_next;
+    }
 }
 
 std::size_t next_pow2(std::size_t value) {
@@ -402,6 +649,7 @@ void gc_free_obj(GcHeap *heap, GcHeader *obj) {
     switch (obj->kind) {
         case GcHeapKind::String: {
             auto *str = reinterpret_cast<GcString *>(obj);
+            gc_string_intern_remove(heap, str);
             if (str->encoding == GcStringEncoding::Utf16) {
                 if (str->data16) {
                     gc_free_extra(heap, str->data16, string_storage_bytes(str->len, GcStringEncoding::Utf16));
