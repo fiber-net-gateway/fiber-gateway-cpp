@@ -171,7 +171,8 @@ bool gc_object_set(GcHeap *heap, GcObject *obj, GcString *key, JsValue value);
 bool gc_object_set_heap_key(GcHeap *heap, ValueHandle object, const GcString *key, JsValue value);
 const JsValue *gc_object_get(const GcObject *obj, const GcString *key);
 bool gc_object_remove(GcObject *obj, const GcString *key);
-const GcObjectEntry *gc_object_entry_at(const GcObject *obj, std::size_t index);
+const GcObjectEntry *gc_object_first_entry(const GcObject *obj);
+const GcObjectEntry *gc_object_next_entry(const GcObject *obj, const GcObjectEntry *entry);
 
 } // namespace fiber::script
 
