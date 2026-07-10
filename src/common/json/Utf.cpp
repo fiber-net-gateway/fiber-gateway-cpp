@@ -134,4 +134,21 @@ bool utf8_write_utf16(const char *data, std::size_t len, char16_t *dst, std::siz
     return out_pos == dst_len;
 }
 
+void utf8_repair(std::string_view src, std::string &out) {
+    const char *data = src.data();
+    const std::size_t len = src.size();
+    std::size_t pos = 0;
+    while (pos < len) {
+        const std::size_t start = pos;
+        std::uint32_t codepoint = 0;
+        if (utf8_next_codepoint(data, len, pos, codepoint)) {
+            out.append(data + start, pos - start);
+        } else {
+            // Ill-formed byte: emit U+FFFD and skip a single byte.
+            out.append("\xEF\xBF\xBD", 3);
+            ++pos;
+        }
+    }
+}
+
 } // namespace fiber::json

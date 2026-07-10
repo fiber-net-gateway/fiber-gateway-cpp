@@ -81,6 +81,41 @@ inline void node_as_text(const JsValue &value, std::string &out) {
     }
 }
 
+// Mirrors Java JsonUtil.toString(JsonNode) (used by UrlFunc.buildQuery's value
+// rendering): identical to node_as_text for scalars and null, but overrides the
+// container/binary cases - Array -> "<ArrayNode>", Object -> "<ObjectNode>", Binary
+// -> the raw bytes (Java `new String(binaryValue())`, charset-dependent and treated
+// as best-effort for non-UTF-8 content). Internal helper; not a registered function.
+inline void node_json_to_string(const JsValue &value, std::string &out) {
+    switch (js_value_type(value)) {
+        case JsNodeType::Array:
+            out.append("<ArrayNode>", 11);
+            return;
+        case JsNodeType::Object:
+            out.append("<ObjectNode>", 12);
+            return;
+        case JsNodeType::Binary: {
+            if (js_value_is_borrowed_binary(value)) {
+                NativeBin native = js_value_native_binary(value);
+                if (native.len > 0 && native.data != nullptr) {
+                    out.append(reinterpret_cast<const char *>(native.data), native.len);
+                }
+                return;
+            }
+            const GcBinary *bin = js_value_heap_ptr<const GcBinary>(value);
+            if (bin != nullptr && bin->len > 0) {
+                out.append(reinterpret_cast<const char *>(bin->data), bin->len);
+            }
+            return;
+        }
+        default:
+            // String/Integer/Float/Boolean/Null (and Undefined/Iterator/Exception -> "")
+            // are exactly node_as_text's rendering.
+            node_as_text(value, out);
+            return;
+    }
+}
+
 } // namespace fiber::script::std_lib
 
 #endif // FIBER_SCRIPT_STD_NODE_TEXT_H
