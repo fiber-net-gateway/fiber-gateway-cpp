@@ -112,13 +112,13 @@ TEST(SleepTest, CancelOnDestroy) {
     std::atomic<int> hits{0};
 
     group.start();
-    fiber::async::spawn(group.at(0), [&ready, &hits]() {
+    fiber::async::spawn(group.at(0), [&ready, &hits]() -> DetachedTask {
         auto task = run_sleep_cancel(&hits, std::chrono::milliseconds(50));
         auto handle = task.release();
         handle.resume();
         handle.destroy();
         ready.set_value();
-        return DetachedTask{};
+        co_return;
     });
 
     if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {

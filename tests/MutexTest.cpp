@@ -123,11 +123,8 @@ TEST(MutexTest, ResumesWaiterAfterUnlock) {
     auto future = promise.get_future();
 
     group.start();
-    fiber::async::spawn(group.at(0), [&mutex, &state, &promise]() {
-        hold_lock(&mutex, &state);
-        wait_lock(&mutex, &state, &promise);
-        return DetachedTask{};
-    });
+    fiber::async::spawn(group.at(0), [&mutex, &state]() { return hold_lock(&mutex, &state); });
+    fiber::async::spawn(group.at(0), [&mutex, &state, &promise]() { return wait_lock(&mutex, &state, &promise); });
 
     if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
         group.stop();
@@ -148,14 +145,13 @@ TEST(MutexTest, CancelWaiterDoesNotResume) {
     auto future = done.get_future();
 
     group.start();
-    fiber::async::spawn(group.at(0), [&mutex, &hits, &done]() {
-        hold_and_finish(&mutex, &done);
-
+    fiber::async::spawn(group.at(0), [&mutex, &done]() { return hold_and_finish(&mutex, &done); });
+    fiber::async::spawn(group.at(0), [&mutex, &hits]() -> DetachedTask {
         auto waiter = wait_then_hit(&mutex, &hits);
         auto handle = waiter.release();
         handle.resume();
         handle.destroy();
-        return DetachedTask{};
+        co_return;
     });
 
     if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
@@ -182,13 +178,13 @@ TEST(MutexTest, ResumesOnWaiterLoopThread) {
     auto resumed_future = resumed.get_future();
 
     group.start();
-    fiber::async::spawn(group.at(0), [&loop0_id]() {
+    fiber::async::spawn(group.at(0), [&loop0_id]() -> DetachedTask {
         loop0_id.set_value(std::this_thread::get_id());
-        return DetachedTask{};
+        co_return;
     });
-    fiber::async::spawn(group.at(1), [&loop1_id]() {
+    fiber::async::spawn(group.at(1), [&loop1_id]() -> DetachedTask {
         loop1_id.set_value(std::this_thread::get_id());
-        return DetachedTask{};
+        co_return;
     });
 
     if (loop0_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready ||

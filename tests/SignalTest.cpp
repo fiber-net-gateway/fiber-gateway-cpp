@@ -15,6 +15,7 @@
 #include "async/CoroutinePromiseBase.h"
 #include "async/Signal.h"
 #include "async/Spawn.h"
+#include "async/Yield.h"
 #include "event/EventLoopGroup.h"
 #include "event/SignalService.h"
 
@@ -126,14 +127,17 @@ TEST(SignalTest, SingleWaiterReceivesSignal) {
     auto future = promise.get_future();
 
     group.start(mask);
-    fiber::async::spawn(group.at(0), [&]() {
+    fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
         bool ok = service.attach(mask);
         attached.set_value();
         if (!ok) {
             fiber::event::EventLoop::current().stop();
-            return DetachedTask{};
+            co_return;
         }
-        return wait_once(&promise, &service, SIGUSR1);
+        auto info = co_await fiber::async::wait_signal(SIGUSR1);
+        promise.set_value(info);
+        service.detach();
+        fiber::event::EventLoop::current().stop();
     });
 
     if (attached_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
@@ -167,14 +171,14 @@ TEST(SignalTest, PendingBeforeAwait) {
     auto future = promise.get_future();
 
     group.start(mask);
-    fiber::async::spawn(group.at(0), [&]() {
+    fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
         bool ok = service.attach(mask);
         attached.set_value();
         if (!ok) {
             fiber::event::EventLoop::current().stop();
-            return DetachedTask{};
+            co_return;
         }
-        return DetachedTask{};
+        co_return;
     });
 
     if (attached_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
@@ -214,17 +218,17 @@ TEST(SignalTest, FifoFairness) {
     std::array<int, 2> seen{0, 0};
 
     group.start(mask);
-    fiber::async::spawn(group.at(0), [&]() {
+    fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
         bool ok = service.attach(mask);
         attached.set_value();
         if (!ok) {
             fiber::event::EventLoop::current().stop();
-            return DetachedTask{};
+            co_return;
         }
-        wait_and_record(&order, &seen, 1, &first_ready, &service, false);
-        wait_and_record(&order, &seen, 2, &done, &service, true);
+        fiber::async::spawn([&]() { return wait_and_record(&order, &seen, 1, &first_ready, &service, false); });
+        fiber::async::spawn([&]() { return wait_and_record(&order, &seen, 2, &done, &service, true); });
+        co_await fiber::async::yield();
         ::kill(getpid(), SIGUSR1);
-        return DetachedTask{};
     });
 
     if (attached_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
@@ -266,19 +270,19 @@ TEST(SignalTest, CancelOnDestroy) {
     std::atomic<int> hits{0};
 
     group.start(mask);
-    fiber::async::spawn(group.at(0), [&]() {
+    fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
         bool ok = service.attach(mask);
         if (!ok) {
             ready.set_value();
             fiber::event::EventLoop::current().stop();
-            return DetachedTask{};
+            co_return;
         }
         auto task = wait_and_hit(&hits);
         auto handle = task.release();
         handle.resume();
         handle.destroy();
         ready.set_value();
-        return DetachedTask{};
+        co_return;
     });
 
     if (ready_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
@@ -290,11 +294,11 @@ TEST(SignalTest, CancelOnDestroy) {
 
     ::kill(getpid(), SIGUSR1);
 
-    fiber::async::spawn(group.at(0), [&]() {
+    fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
         service.detach();
         fiber::event::EventLoop::current().stop();
         stopped.set_value();
-        return DetachedTask{};
+        co_return;
     });
 
     if (stopped_future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
