@@ -139,4 +139,52 @@ TEST(GrpcProtoCodecTest, LargeMessageRoundTrip) {
     EXPECT_EQ(parsed.items(0), std::string(32 * 1024, 'y'));
 }
 
+// Exercises the IoBufChainInputStream heap-vector fallback (kMaxStackIov = 16):
+// the encoded bytes are split across 32 nodes, so the adapter must collect all
+// readable segments into a heap array and protobuf parses them in place.
+TEST(GrpcProtoCodecTest, DecodeAcrossManySegments) {
+    helloworld::HelloRequest req;
+    req.set_name("many-segments");
+    req.set_num(99);
+    req.add_items("aa");
+    req.add_items("bb");
+
+    IoBufNodePool node_pool;
+    auto enc = encode(node_pool, req);
+    ASSERT_TRUE(enc.has_value());
+    ASSERT_EQ(enc->size(), 1u);
+    const IoBuf *src = enc->front();
+    ASSERT_NE(src, nullptr);
+    const std::size_t total = src->readable();
+    ASSERT_GT(total, 0u);
+    const std::uint8_t *base = src->readable_data();
+
+    // Split into 32 nodes of (roughly) equal size, all sharing node_pool.
+    constexpr int kNodes = 32;
+    IoBufChain multi(node_pool);
+    for (int i = 0; i < kNodes; ++i) {
+        const std::size_t off = total * i / kNodes;
+        const std::size_t end = total * (i + 1) / kNodes;
+        const std::size_t len = end - off;
+        if (len == 0) {
+            continue;
+        }
+        IoBuf b = IoBuf::allocate(len);
+        ASSERT_TRUE(b);
+        std::memcpy(b.writable_data(), base + off, len);
+        b.commit(len);
+        ASSERT_TRUE(multi.append(std::move(b)));
+    }
+    ASSERT_GT(multi.size(), 16u); // forces the heap-array path in the adapter
+
+    helloworld::HelloRequest parsed;
+    auto dec = decode(multi, parsed);
+    ASSERT_TRUE(dec.has_value());
+    EXPECT_EQ(parsed.name(), "many-segments");
+    EXPECT_EQ(parsed.num(), 99);
+    ASSERT_EQ(parsed.items_size(), 2);
+    EXPECT_EQ(parsed.items(0), "aa");
+    EXPECT_EQ(parsed.items(1), "bb");
+}
+
 } // namespace
