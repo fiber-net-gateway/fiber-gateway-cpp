@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package helloworld;
+
+// LITE_RUNTIME so generated code depends only on libprotobuf-lite.
+option optimize_for = LITE_RUNTIME;
+
+message HelloRequest {
+  string name = 1;
+  int32 num = 2;
+  repeated string items = 3;
+}
+
+message HelloReply {
+  string message = 1;
+  int64 count = 2;
+}
