@@ -14,12 +14,8 @@ namespace fiber::script::std_lib {
 namespace {
 
 // Java's String.length() is the UTF-16 code-unit count (a JS-like length).
-// Runtime strings are stored as UTF-8 (borrowed/native strings and
-// Byte-encoded GcStrings) or as UTF-16 (Utf16-encoded GcStrings). utf8_scan
-// yields the UTF-16 unit count of a UTF-8 sequence in one pass (BMP codepoint
-// -> 1, supplementary -> 2). Malformed UTF-8 -- only reachable from
-// host-supplied byte strings, never JSON or literals -- falls back to the byte
-// count rather than aborting the call.
+// Heap strings cache this count beside canonical WTF-8 bytes. Borrowed strings
+// are scanned on demand; malformed host input falls back to its byte count.
 std::int64_t string_utf16_length(const JsValue &value) noexcept {
     if (js_value_is_borrowed_string(value)) {
         NativeStr native = js_value_native_string(value);
@@ -33,7 +29,7 @@ std::int64_t string_utf16_length(const JsValue &value) noexcept {
     if (str == nullptr) {
         return 0;
     }
-    return static_cast<std::int64_t>(str->len);
+    return static_cast<std::int64_t>(str->utf16_len);
 }
 
 std::int64_t binary_length(const JsValue &value) noexcept {

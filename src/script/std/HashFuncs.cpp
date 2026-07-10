@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace fiber::script::std_lib {
 
@@ -23,23 +24,26 @@ ScriptResult type_error() noexcept {
 
 // ---- byte extraction ----
 
-// UTF-8 bytes of a string value (borrowed/native already UTF-8; heap GcString normalized
-// via gc_string_to_utf8). Mirrors IncludesFunc's helper. Returns false when value is not a
-// string. Java hashes String.getBytes(); assuming a UTF-8 default charset this matches.
-bool string_to_utf8(const JsValue &value, std::string &out) noexcept {
+// Returns a borrowed UTF-8 view. Heap strings containing isolated UTF-16
+// surrogates have no strict UTF-8 view and are rejected.
+bool string_utf8_view(const JsValue &value, std::string_view &out) noexcept {
+    out = {};
     if (js_value_type(value) != JsNodeType::String) {
         return false;
     }
     if (js_value_is_borrowed_string(value)) {
         NativeStr native = js_value_native_string(value);
-        out.assign(native.data, native.len);
+        if (native.len > 0 && !native.data) {
+            return false;
+        }
+        out = native.len > 0 ? std::string_view(native.data, native.len) : std::string_view{};
         return true;
     }
     const GcString *str = js_value_heap_ptr<const GcString>(value);
     if (str == nullptr) {
         return false;
     }
-    return gc_string_to_utf8(str, out);
+    return gc_string_utf8_view(str, out);
 }
 
 // Raw bytes of a binary value (borrowed via NativeBin, heap via GcBinary). Returns false
@@ -102,11 +106,11 @@ ScriptResult crc32_fn(void * /*userdata*/, const Library::HostCallFrame & /*fram
 // Shared body: String (UTF-8) or Binary in -> lowercase hex out.
 ScriptResult digest_fn(const Library::HostCallFrame &frame, const JsValue &arg, const EVP_MD *md,
                        std::size_t digest_len) noexcept {
-    std::string text; // string path (UTF-8)
+    std::string_view text;
     const std::uint8_t *data = nullptr;
     std::size_t len = 0;
 
-    if (string_to_utf8(arg, text)) {
+    if (string_utf8_view(arg, text)) {
         data = reinterpret_cast<const std::uint8_t *>(text.data());
         len = text.size();
     } else if (binary_bytes(arg, data, len)) {

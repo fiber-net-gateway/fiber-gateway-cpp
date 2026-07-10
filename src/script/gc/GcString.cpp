@@ -3,12 +3,15 @@
 //
 
 #include "GcInternal.h"
+#include "Wtf8.h"
 
 #include "../../common/Assert.h"
 #include "../../common/json/Utf.h"
 
 #include <cstring>
+#include <limits>
 #include <string>
+#include <string_view>
 
 namespace fiber::script {
 
@@ -16,169 +19,58 @@ using namespace gc_detail;
 
 namespace {
 
-bool is_high_surrogate(char16_t unit) noexcept { return unit >= 0xD800 && unit <= 0xDBFF; }
-
-bool is_low_surrogate(char16_t unit) noexcept { return unit >= 0xDC00 && unit <= 0xDFFF; }
-
-std::uint8_t write_utf8_codepoint(std::uint32_t codepoint, char *out) noexcept {
-    if (codepoint < 0x80) {
-        out[0] = static_cast<char>(codepoint);
-        return 1;
-    }
-    if (codepoint < 0x800) {
-        out[0] = static_cast<char>(0xC0 | (codepoint >> 6));
-        out[1] = static_cast<char>(0x80 | (codepoint & 0x3F));
-        return 2;
-    }
-    if (codepoint < 0x10000) {
-        out[0] = static_cast<char>(0xE0 | (codepoint >> 12));
-        out[1] = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
-        out[2] = static_cast<char>(0x80 | (codepoint & 0x3F));
-        return 3;
-    }
-    out[0] = static_cast<char>(0xF0 | (codepoint >> 18));
-    out[1] = static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
-    out[2] = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
-    out[3] = static_cast<char>(0x80 | (codepoint & 0x3F));
-    return 4;
-}
-
 GcStringUtf8Result utf8_result(GcStringUtf8Status status, std::size_t written, std::size_t needed = 0) noexcept {
     return {.status = status, .written = written, .needed = needed};
 }
 
+GcString *new_wtf8_copy(GcHeap *heap, const char *data, std::size_t byte_len, std::size_t utf16_len,
+                        bool well_formed) noexcept {
+    if ((byte_len > 0 && !data) || utf16_len > std::numeric_limits<std::uint32_t>::max()) {
+        return nullptr;
+    }
+    const bool intern = utf16_len <= kMaxInternStringLen;
+    std::uint64_t hash = 0;
+    if (intern) {
+        hash = string_hash_wtf8(data, byte_len);
+        if (GcString *existing = gc_string_intern_lookup_wtf8(heap, data, byte_len, utf16_len, hash)) {
+            return existing;
+        }
+    }
+
+    GcString *str = gc_new_string_wtf8_uninit(heap, byte_len, utf16_len, well_formed);
+    if (!str) {
+        return nullptr;
+    }
+    if (byte_len > 0) {
+        std::memcpy(gc_string_wtf8_data(str), data, byte_len);
+    }
+    if (intern) {
+        gc_string_intern_insert(heap, str, hash);
+    }
+    return str;
+}
+
 } // namespace
 
-GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len) noexcept {
+GcString *gc_new_string_wtf8_uninit(GcHeap *heap, std::size_t byte_len, std::size_t utf16_len,
+                                    bool well_formed) noexcept {
     FIBER_ASSERT(heap->no_gc_active());
-    std::uint64_t hash = 0;
-    const bool intern = len <= kMaxInternStringLen;
-    if (intern) {
-        hash = string_hash_bytes(data, len);
-        if (GcString *existing = gc_string_intern_lookup_bytes(heap, data, len, hash)) {
-            return existing;
-        }
+    constexpr std::size_t overhead = sizeof(GcString) + 1;
+    if (utf16_len > std::numeric_limits<std::uint32_t>::max() || byte_len > std::numeric_limits<std::uint32_t>::max() ||
+        byte_len > std::numeric_limits<std::uint32_t>::max() - overhead) {
+        return nullptr;
     }
-    auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcHeapKind::String);
+    const std::size_t allocation_size = overhead + byte_len;
+    auto *hdr = gc_alloc_raw(heap, allocation_size, GcHeapKind::String);
     if (!hdr) {
         return nullptr;
     }
     auto *str = reinterpret_cast<GcString *>(hdr);
     str->intern_next = nullptr;
-    str->len = len;
-    str->encoding = GcStringEncoding::Byte;
     str->hash = 0;
-    str->hash_valid = false;
-    str->data8 = nullptr;
-    if (len > 0 && !data) {
-        heap->alloc.free(str);
-        return nullptr;
-    }
-    if (len > 0) {
-        str->data8 =
-                static_cast<std::uint8_t *>(gc_alloc_extra(heap, string_storage_bytes(len, GcStringEncoding::Byte)));
-        if (!str->data8) {
-            heap->alloc.free(str);
-            return nullptr;
-        }
-        std::memcpy(str->data8, data, len);
-        str->data8[len] = 0;
-    }
-    gc_link(heap, hdr);
-    if (intern) {
-        gc_string_intern_insert(heap, str, hash);
-    }
-    return str;
-}
-
-GcString *gc_new_string_bytes_uninit(GcHeap *heap, std::size_t len) noexcept {
-    FIBER_ASSERT(heap->no_gc_active());
-    auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcHeapKind::String);
-    if (!hdr) {
-        return nullptr;
-    }
-    auto *str = reinterpret_cast<GcString *>(hdr);
-    str->intern_next = nullptr;
-    str->len = len;
-    str->encoding = GcStringEncoding::Byte;
-    str->hash = 0;
-    str->hash_valid = false;
-    str->data8 = nullptr;
-    if (len > 0) {
-        str->data8 =
-                static_cast<std::uint8_t *>(gc_alloc_extra(heap, string_storage_bytes(len, GcStringEncoding::Byte)));
-        if (!str->data8) {
-            heap->alloc.free(str);
-            return nullptr;
-        }
-        str->data8[len] = 0;
-    }
-    gc_link(heap, hdr);
-    return str;
-}
-
-GcString *gc_new_string_utf16(GcHeap *heap, const char16_t *data, std::size_t len) noexcept {
-    FIBER_ASSERT(heap->no_gc_active());
-    std::uint64_t hash = 0;
-    const bool intern = len <= kMaxInternStringLen;
-    if (intern) {
-        hash = string_hash_utf16(data, len);
-        if (GcString *existing = gc_string_intern_lookup_utf16(heap, data, len, hash)) {
-            return existing;
-        }
-    }
-    auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcHeapKind::String);
-    if (!hdr) {
-        return nullptr;
-    }
-    auto *str = reinterpret_cast<GcString *>(hdr);
-    str->intern_next = nullptr;
-    str->len = len;
-    str->encoding = GcStringEncoding::Utf16;
-    str->hash = 0;
-    str->hash_valid = false;
-    str->data16 = nullptr;
-    if (len > 0 && !data) {
-        heap->alloc.free(str);
-        return nullptr;
-    }
-    if (len > 0) {
-        str->data16 = static_cast<char16_t *>(gc_alloc_extra(heap, string_storage_bytes(len, GcStringEncoding::Utf16)));
-        if (!str->data16) {
-            heap->alloc.free(str);
-            return nullptr;
-        }
-        std::memcpy(str->data16, data, sizeof(char16_t) * len);
-        str->data16[len] = 0;
-    }
-    gc_link(heap, hdr);
-    if (intern) {
-        gc_string_intern_insert(heap, str, hash);
-    }
-    return str;
-}
-
-GcString *gc_new_string_utf16_uninit(GcHeap *heap, std::size_t len) noexcept {
-    FIBER_ASSERT(heap->no_gc_active());
-    auto *hdr = gc_alloc_raw(heap, sizeof(GcString), GcHeapKind::String);
-    if (!hdr) {
-        return nullptr;
-    }
-    auto *str = reinterpret_cast<GcString *>(hdr);
-    str->intern_next = nullptr;
-    str->len = len;
-    str->encoding = GcStringEncoding::Utf16;
-    str->hash = 0;
-    str->hash_valid = false;
-    str->data16 = nullptr;
-    if (len > 0) {
-        str->data16 = static_cast<char16_t *>(gc_alloc_extra(heap, string_storage_bytes(len, GcStringEncoding::Utf16)));
-        if (!str->data16) {
-            heap->alloc.free(str);
-            return nullptr;
-        }
-        str->data16[len] = 0;
-    }
+    str->utf16_len = static_cast<std::uint32_t>(utf16_len);
+    str->flags = well_formed ? kGcStringWellFormed : 0;
+    gc_string_wtf8_data(str)[byte_len] = 0;
     gc_link(heap, hdr);
     return str;
 }
@@ -192,282 +84,162 @@ GcString *gc_new_string(GcHeap *heap, const char *data, std::size_t len) noexcep
     if (!fiber::json::utf8_scan(data, len, scan)) {
         return nullptr;
     }
-    if (scan.utf16_len <= kMaxInternStringLen) {
-        if (scan.all_byte) {
-            std::uint8_t decoded[kMaxInternStringLen];
-            if (!fiber::json::utf8_write_bytes(data, len, decoded, scan.utf16_len)) {
-                return nullptr;
-            }
-            std::uint64_t hash = string_hash_bytes(decoded, scan.utf16_len);
-            if (GcString *existing = gc_string_intern_lookup_bytes(heap, decoded, scan.utf16_len, hash)) {
-                return existing;
-            }
-            GcString *str = gc_new_string_bytes_uninit(heap, scan.utf16_len);
-            if (!str) {
-                return nullptr;
-            }
-            if (scan.utf16_len > 0) {
-                std::memcpy(str->data8, decoded, scan.utf16_len);
-            }
-            gc_string_intern_insert(heap, str, hash);
-            return str;
-        }
+    return new_wtf8_copy(heap, data, len, scan.utf16_len, true);
+}
 
-        char16_t decoded[kMaxInternStringLen];
-        if (!fiber::json::utf8_write_utf16(data, len, decoded, scan.utf16_len)) {
-            return nullptr;
-        }
-        std::uint64_t hash = string_hash_utf16(decoded, scan.utf16_len);
-        if (GcString *existing = gc_string_intern_lookup_utf16(heap, decoded, scan.utf16_len, hash)) {
-            return existing;
-        }
-        GcString *str = gc_new_string_utf16_uninit(heap, scan.utf16_len);
-        if (!str) {
-            return nullptr;
-        }
-        if (scan.utf16_len > 0) {
-            std::memcpy(str->data16, decoded, sizeof(char16_t) * scan.utf16_len);
-        }
-        gc_string_intern_insert(heap, str, hash);
-        return str;
-    }
-    if (scan.all_byte) {
-        GcString *str = gc_new_string_bytes_uninit(heap, scan.utf16_len);
-        if (!str) {
-            return nullptr;
-        }
-        bool written = fiber::json::utf8_write_bytes(data, len, str->data8, str->len);
-        FIBER_ASSERT(written);
-        (void) written;
-        return str;
-    }
-    GcString *str = gc_new_string_utf16_uninit(heap, scan.utf16_len);
-    if (!str) {
+GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len) noexcept {
+    FIBER_ASSERT(heap->no_gc_active());
+    std::size_t byte_len = 0;
+    if (!wtf8_measure_latin1(data, len, byte_len)) {
         return nullptr;
     }
-    bool written = fiber::json::utf8_write_utf16(data, len, str->data16, str->len);
-    FIBER_ASSERT(written);
-    (void) written;
+
+    if (len <= kMaxInternStringLen) {
+        char encoded[kMaxInternStringLen * 2];
+        if (!wtf8_write_latin1(data, len, encoded, byte_len)) {
+            return nullptr;
+        }
+        return new_wtf8_copy(heap, encoded, byte_len, len, true);
+    }
+
+    GcString *str = gc_new_string_wtf8_uninit(heap, byte_len, len, true);
+    if (!str || !wtf8_write_latin1(data, len, gc_string_wtf8_data(str), byte_len)) {
+        return nullptr;
+    }
     return str;
 }
 
-bool gc_string_can_encode_utf8(const GcString *str) noexcept {
+GcString *gc_new_string_utf16(GcHeap *heap, const char16_t *data, std::size_t len) noexcept {
+    FIBER_ASSERT(heap->no_gc_active());
+    Wtf8MeasureResult measure;
+    if (!wtf8_measure_utf16(data, len, measure)) {
+        return nullptr;
+    }
+
+    if (len <= kMaxInternStringLen) {
+        char encoded[kMaxInternStringLen * 3];
+        if (!wtf8_write_utf16(data, len, encoded, measure.byte_len)) {
+            return nullptr;
+        }
+        return new_wtf8_copy(heap, encoded, measure.byte_len, len, measure.well_formed);
+    }
+
+    GcString *str = gc_new_string_wtf8_uninit(heap, measure.byte_len, len, measure.well_formed);
+    if (!str || !wtf8_write_utf16(data, len, gc_string_wtf8_data(str), measure.byte_len)) {
+        return nullptr;
+    }
+    return str;
+}
+
+GcString *gc_new_string_substring_utf16(GcHeap *heap, const GcString *source, std::size_t begin,
+                                        std::size_t end) noexcept {
+    FIBER_ASSERT(heap->no_gc_active());
+    if (!source || begin > end || end > source->utf16_len) {
+        return nullptr;
+    }
+    if (begin == end) {
+        return gc_new_string(heap, "", 0);
+    }
+
+    const char *source_data = gc_string_wtf8_data(source);
+    if (gc_string_is_ascii(source)) {
+        return new_wtf8_copy(heap, source_data + begin, end - begin, end - begin, true);
+    }
+    const std::size_t source_len = gc_string_byte_len(source);
+    Wtf8SlicePlan plan;
+    if (!wtf8_plan_utf16_slice(source_data, source_len, source->utf16_len, begin, end, plan) ||
+        plan.copy_begin > plan.copy_end || plan.copy_end > source_len) {
+        return nullptr;
+    }
+
+    std::size_t byte_len = plan.copy_end - plan.copy_begin;
+    const std::size_t boundary_bytes =
+            (plan.leading_low_surrogate ? 3u : 0u) + (plan.trailing_high_surrogate ? 3u : 0u);
+    if (byte_len > std::numeric_limits<std::size_t>::max() - boundary_bytes) {
+        return nullptr;
+    }
+    byte_len += boundary_bytes;
+
+    GcString *str = gc_new_string_wtf8_uninit(heap, byte_len, end - begin, false);
     if (!str) {
+        return nullptr;
+    }
+    char *dst = gc_string_wtf8_data(str);
+    std::size_t offset = 0;
+    if (plan.leading_low_surrogate) {
+        offset += wtf8_write_codepoint(plan.leading_unit, dst + offset);
+    }
+    const std::size_t copy_len = plan.copy_end - plan.copy_begin;
+    if (copy_len > 0) {
+        std::memcpy(dst + offset, source_data + plan.copy_begin, copy_len);
+        offset += copy_len;
+    }
+    if (plan.trailing_high_surrogate) {
+        offset += wtf8_write_codepoint(plan.trailing_unit, dst + offset);
+    }
+    FIBER_ASSERT(offset == byte_len);
+    if (wtf8_is_well_formed(dst, byte_len)) {
+        str->flags |= kGcStringWellFormed;
+    }
+    return gc_string_intern_final(heap, str);
+}
+
+bool gc_string_can_encode_utf8(const GcString *str) noexcept { return gc_string_is_well_formed(str); }
+
+bool gc_string_utf8_view(const GcString *str, std::string_view &out) noexcept {
+    out = {};
+    if (!gc_string_is_well_formed(str)) {
         return false;
     }
-    if (str->len == 0) {
-        return true;
-    }
-    if (str->encoding == GcStringEncoding::Byte) {
-        return str->data8 != nullptr;
-    }
-    if (!str->data16) {
-        return false;
-    }
-    for (std::size_t i = 0; i < str->len; ++i) {
-        char16_t unit = str->data16[i];
-        if (is_high_surrogate(unit)) {
-            if (i + 1 >= str->len || !is_low_surrogate(str->data16[i + 1])) {
-                return false;
-            }
-            i += 1;
-            continue;
-        }
-        if (is_low_surrogate(unit)) {
-            return false;
-        }
-    }
+    out = std::string_view(gc_string_wtf8_data(str), gc_string_byte_len(str));
     return true;
 }
 
 GcStringUtf8Result gc_string_to_utf8(const GcString *str, GcStringUtf8Cursor &cursor, GcStringUtf8Buffer out,
                                      GcStringUtf8Boundary boundary) noexcept {
-    if (!str || (out.capacity > 0 && !out.ptr) || cursor.index > str->len ||
-        cursor.pending_offset > cursor.pending_len || cursor.pending_len > sizeof(cursor.pending)) {
+    if (!str || !gc_string_is_well_formed(str) || (out.capacity > 0 && !out.ptr) ||
+        cursor.index > gc_string_byte_len(str)) {
         return utf8_result(GcStringUtf8Status::Invalid, 0);
     }
-    if (str->len > 0) {
-        if (str->encoding == GcStringEncoding::Byte) {
-            if (!str->data8) {
-                return utf8_result(GcStringUtf8Status::Invalid, 0);
-            }
-        } else if (!str->data16) {
-            return utf8_result(GcStringUtf8Status::Invalid, 0);
+
+    const char *data = gc_string_wtf8_data(str);
+    const std::size_t len = gc_string_byte_len(str);
+    if (boundary == GcStringUtf8Boundary::AllowSplitCodePoint) {
+        const std::size_t remaining = len - cursor.index;
+        const std::size_t written = remaining < out.capacity ? remaining : out.capacity;
+        if (written > 0) {
+            std::memcpy(out.ptr, data + cursor.index, written);
+            cursor.index += written;
         }
+        return cursor.index == len ? utf8_result(GcStringUtf8Status::Done, written)
+                                   : utf8_result(GcStringUtf8Status::NeedMore, written, len - cursor.index);
     }
 
     std::size_t written = 0;
-    if (cursor.pending_offset < cursor.pending_len) {
-        const std::size_t remaining = cursor.pending_len - cursor.pending_offset;
-        const std::size_t space = out.capacity;
-        if (remaining > space) {
-            if (boundary == GcStringUtf8Boundary::PreserveCodePoint) {
-                return utf8_result(GcStringUtf8Status::NeedMore, 0, remaining);
-            }
-            if (space == 0) {
-                return utf8_result(GcStringUtf8Status::NeedMore, 0, remaining);
-            }
-            std::memcpy(out.ptr, cursor.pending + cursor.pending_offset, space);
-            cursor.pending_offset = static_cast<std::uint8_t>(cursor.pending_offset + space);
-            return utf8_result(GcStringUtf8Status::NeedMore, space, remaining - space);
+    while (cursor.index < len) {
+        std::size_t next = cursor.index;
+        std::uint32_t codepoint = 0;
+        if (!fiber::json::utf8_next_codepoint(data, len, next, codepoint)) {
+            return utf8_result(GcStringUtf8Status::Invalid, written);
         }
-        if (remaining > 0) {
-            std::memcpy(out.ptr, cursor.pending + cursor.pending_offset, remaining);
+        const std::size_t encoded_len = next - cursor.index;
+        if (encoded_len > out.capacity - written) {
+            return utf8_result(GcStringUtf8Status::NeedMore, written, encoded_len);
         }
-        written = remaining;
-        cursor.pending_offset = 0;
-        cursor.pending_len = 0;
-    }
-
-    while (cursor.index < str->len) {
-        char encoded[4];
-        std::uint8_t encoded_len = 0;
-        std::size_t consumed = 1;
-        if (str->encoding == GcStringEncoding::Byte) {
-            encoded_len = write_utf8_codepoint(str->data8[cursor.index], encoded);
-        } else {
-            char16_t unit = str->data16[cursor.index];
-            if (is_high_surrogate(unit)) {
-                if (cursor.index + 1 >= str->len) {
-                    return utf8_result(GcStringUtf8Status::Invalid, written);
-                }
-                char16_t low = str->data16[cursor.index + 1];
-                if (!is_low_surrogate(low)) {
-                    return utf8_result(GcStringUtf8Status::Invalid, written);
-                }
-                std::uint32_t codepoint = 0x10000 + ((static_cast<std::uint32_t>(unit) - 0xD800) << 10) +
-                                          (static_cast<std::uint32_t>(low) - 0xDC00);
-                encoded_len = write_utf8_codepoint(codepoint, encoded);
-                consumed = 2;
-            } else {
-                if (is_low_surrogate(unit)) {
-                    return utf8_result(GcStringUtf8Status::Invalid, written);
-                }
-                encoded_len = write_utf8_codepoint(unit, encoded);
-            }
-        }
-
-        const std::size_t space = out.capacity - written;
-        if (space < encoded_len) {
-            if (boundary == GcStringUtf8Boundary::PreserveCodePoint) {
-                return utf8_result(GcStringUtf8Status::NeedMore, written, encoded_len);
-            }
-            if (space == 0) {
-                return utf8_result(GcStringUtf8Status::NeedMore, written, encoded_len);
-            }
-            std::memcpy(out.ptr + written, encoded, space);
-            std::memcpy(cursor.pending, encoded, encoded_len);
-            cursor.pending_offset = static_cast<std::uint8_t>(space);
-            cursor.pending_len = encoded_len;
-            cursor.index += consumed;
-            written += space;
-            return utf8_result(GcStringUtf8Status::NeedMore, written, encoded_len - space);
-        }
-
-        if (encoded_len > 0) {
-            std::memcpy(out.ptr + written, encoded, encoded_len);
-        }
+        std::memcpy(out.ptr + written, data + cursor.index, encoded_len);
         written += encoded_len;
-        cursor.index += consumed;
+        cursor.index = next;
     }
-
     return utf8_result(GcStringUtf8Status::Done, written);
 }
 
 bool gc_string_to_utf8(const GcString *str, std::string &out) {
     out.clear();
-    if (!str) {
+    std::string_view view;
+    if (!gc_string_utf8_view(str, view)) {
         return false;
     }
-    if (str->len == 0) {
-        return true;
-    }
-    if (str->encoding == GcStringEncoding::Byte) {
-        std::size_t extra = 0;
-        for (std::size_t i = 0; i < str->len; ++i) {
-            if (str->data8[i] >= 0x80) {
-                extra += 1;
-            }
-        }
-        if (extra == 0) {
-            out.assign(reinterpret_cast<const char *>(str->data8), str->len);
-            return true;
-        }
-        out.resize(str->len + extra);
-        char *dst = out.data();
-        for (std::size_t i = 0; i < str->len; ++i) {
-            std::uint8_t byte = str->data8[i];
-            if (byte < 0x80) {
-                *dst++ = static_cast<char>(byte);
-            } else {
-                *dst++ = static_cast<char>(0xC0 | (byte >> 6));
-                *dst++ = static_cast<char>(0x80 | (byte & 0x3F));
-            }
-        }
-        return true;
-    }
-    std::size_t out_len = 0;
-    for (std::size_t i = 0; i < str->len; ++i) {
-        char16_t unit = str->data16[i];
-        if (unit >= 0xD800 && unit <= 0xDBFF) {
-            if (i + 1 >= str->len) {
-                return false;
-            }
-            char16_t low = str->data16[i + 1];
-            if (low < 0xDC00 || low > 0xDFFF) {
-                return false;
-            }
-            out_len += 4;
-            i += 1;
-            continue;
-        }
-        if (unit >= 0xDC00 && unit <= 0xDFFF) {
-            return false;
-        }
-        if (unit < 0x80) {
-            out_len += 1;
-        } else if (unit < 0x800) {
-            out_len += 2;
-        } else {
-            out_len += 3;
-        }
-    }
-    out.resize(out_len);
-    char *dst = out.data();
-    for (std::size_t i = 0; i < str->len; ++i) {
-        char16_t unit = str->data16[i];
-        if (unit >= 0xD800 && unit <= 0xDBFF) {
-            if (i + 1 >= str->len) {
-                return false;
-            }
-            char16_t low = str->data16[i + 1];
-            if (low < 0xDC00 || low > 0xDFFF) {
-                return false;
-            }
-            std::uint32_t codepoint = 0x10000 + ((static_cast<std::uint32_t>(unit) - 0xD800) << 10) +
-                                      (static_cast<std::uint32_t>(low) - 0xDC00);
-            *dst++ = static_cast<char>(0xF0 | (codepoint >> 18));
-            *dst++ = static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
-            *dst++ = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
-            *dst++ = static_cast<char>(0x80 | (codepoint & 0x3F));
-            i += 1;
-            continue;
-        }
-        if (unit >= 0xDC00 && unit <= 0xDFFF) {
-            return false;
-        }
-        std::uint32_t codepoint = unit;
-        if (codepoint < 0x80) {
-            *dst++ = static_cast<char>(codepoint);
-        } else if (codepoint < 0x800) {
-            *dst++ = static_cast<char>(0xC0 | (codepoint >> 6));
-            *dst++ = static_cast<char>(0x80 | (codepoint & 0x3F));
-        } else {
-            *dst++ = static_cast<char>(0xE0 | (codepoint >> 12));
-            *dst++ = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
-            *dst++ = static_cast<char>(0x80 | (codepoint & 0x3F));
-        }
-    }
+    out.assign(view.data(), view.size());
     return true;
 }
 

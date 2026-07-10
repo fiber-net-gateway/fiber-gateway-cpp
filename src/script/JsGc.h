@@ -190,9 +190,13 @@ using GcByteStringWriter = bool (*)(std::uint8_t *dst, std::size_t len, void *ct
 using GcUtf16StringWriter = bool (*)(char16_t *dst, std::size_t len, void *ctx) noexcept;
 
 bool gc_make_string(GcHeap *heap, ValueHandle out, const char *data, std::size_t len) noexcept;
+// Byte-string inputs are Latin-1 code units and are transcoded to the heap's
+// canonical WTF-8 representation.
 bool gc_make_string_bytes(GcHeap *heap, ValueHandle out, const std::uint8_t *data, std::size_t len) noexcept;
 bool gc_make_string_bytes_uninit(GcHeap *heap, ValueHandle out, std::size_t len, GcByteStringWriter writer,
                                  void *ctx) noexcept;
+// UTF-16 inputs preserve isolated surrogate code units internally; strict
+// UTF-8 output APIs reject strings that still contain them.
 bool gc_make_string_utf16(GcHeap *heap, ValueHandle out, const char16_t *data, std::size_t len) noexcept;
 bool gc_make_string_utf16_uninit(GcHeap *heap, ValueHandle out, std::size_t len, GcUtf16StringWriter writer,
                                  void *ctx) noexcept;

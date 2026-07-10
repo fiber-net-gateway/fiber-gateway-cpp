@@ -12,7 +12,6 @@
 using fiber::script::CallResult;
 using fiber::script::GcHeap;
 using fiber::script::GcString;
-using fiber::script::GcStringEncoding;
 using fiber::script::JsNodeType;
 using fiber::script::JsValue;
 using fiber::script::ResultPayload;
@@ -43,7 +42,7 @@ std::string string_to_utf8(const JsValue &value) {
 
 TEST(ScriptValueOpsTest, JsValueIsTriviallyCopyable) { EXPECT_TRUE(std::is_trivially_copyable_v<JsValue>); }
 
-TEST(ScriptValueOpsTest, ConcatKeepsByteForNativeUtf8) {
+TEST(ScriptValueOpsTest, ConcatKeepsCanonicalUtf8ForNativeUtf8) {
     GcHeap heap;
     char left_bytes[] = {static_cast<char>(0xC3), static_cast<char>(0xA9)};
     char right_bytes[] = {static_cast<char>(0xC3), static_cast<char>(0x9F)};
@@ -55,8 +54,8 @@ TEST(ScriptValueOpsTest, ConcatKeepsByteForNativeUtf8) {
     ASSERT_EQ(js_value_type(result.value), JsNodeType::String);
     auto *str = as_string(result.value);
     ASSERT_NE(str, nullptr);
-    EXPECT_EQ(str->encoding, GcStringEncoding::Byte);
-    EXPECT_EQ(str->len, 2u);
+    EXPECT_EQ(str->utf16_len, 2u);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(str), 4u);
 
     const char expected_bytes[] = {
             static_cast<char>(0xC3),
@@ -68,7 +67,7 @@ TEST(ScriptValueOpsTest, ConcatKeepsByteForNativeUtf8) {
     EXPECT_EQ(string_to_utf8(result.value), expected);
 }
 
-TEST(ScriptValueOpsTest, ConcatUpgradesToUtf16ForWide) {
+TEST(ScriptValueOpsTest, ConcatKeepsCanonicalUtf8ForWideCharacters) {
     GcHeap heap;
     char euro_bytes[] = {static_cast<char>(0xE2), static_cast<char>(0x82), static_cast<char>(0xAC)};
     char ascii_bytes[] = {'A'};
@@ -80,8 +79,8 @@ TEST(ScriptValueOpsTest, ConcatUpgradesToUtf16ForWide) {
     ASSERT_EQ(js_value_type(result.value), JsNodeType::String);
     auto *str = as_string(result.value);
     ASSERT_NE(str, nullptr);
-    EXPECT_EQ(str->encoding, GcStringEncoding::Utf16);
-    EXPECT_EQ(str->len, 2u);
+    EXPECT_EQ(str->utf16_len, 2u);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(str), 4u);
 
     const char expected_bytes[] = {
             static_cast<char>(0xE2),
@@ -104,12 +103,39 @@ TEST(ScriptValueOpsTest, ConcatHeapAndNative) {
     ASSERT_EQ(js_value_type(result.value), JsNodeType::String);
     auto *str = as_string(result.value);
     ASSERT_NE(str, nullptr);
-    EXPECT_EQ(str->encoding, GcStringEncoding::Byte);
-    EXPECT_EQ(str->len, 4u);
+    EXPECT_EQ(str->utf16_len, 4u);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(str), 4u);
 
     const char expected_bytes[] = {'h', 'i', '!', '!'};
     std::string expected(expected_bytes, sizeof(expected_bytes));
     EXPECT_EQ(string_to_utf8(result.value), expected);
+}
+
+TEST(ScriptValueOpsTest, ConcatCanonicalizesSurrogatePairBoundary) {
+    GcHeap heap;
+    GcString *high = nullptr;
+    GcString *low = nullptr;
+    GcString *emoji = nullptr;
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        const char16_t high_unit = static_cast<char16_t>(0xD83D);
+        const char16_t low_unit = static_cast<char16_t>(0xDE00);
+        high = fiber::script::gc_new_string_utf16(&heap, &high_unit, 1);
+        low = fiber::script::gc_new_string_utf16(&heap, &low_unit, 1);
+        emoji = fiber::script::gc_new_string(&heap, "\xF0\x9F\x98\x80", 4);
+    }
+    ASSERT_NE(high, nullptr);
+    ASSERT_NE(low, nullptr);
+    ASSERT_NE(emoji, nullptr);
+
+    auto lhs = handle(heap, fiber::script::js_make_heap_ref(&high->hdr, fiber::script::GcHeapKind::String));
+    auto rhs = handle(heap, fiber::script::js_make_heap_ref(&low->hdr, fiber::script::GcHeapKind::String));
+    auto expected = handle(heap, fiber::script::js_make_heap_ref(&emoji->hdr, fiber::script::GcHeapKind::String));
+    ResultPayload result;
+    ASSERT_EQ(fiber::script::run::Binaries::plus(heap, lhs, rhs, result), CallResult::Success);
+    EXPECT_EQ(as_string(result.value), as_string(*expected));
+    EXPECT_EQ(fiber::script::gc_string_byte_len(as_string(result.value)), 4u);
+    EXPECT_EQ(string_to_utf8(result.value), "\xF0\x9F\x98\x80");
 }
 
 TEST(ScriptValueOpsTest, AddInteger) {
@@ -198,7 +224,7 @@ TEST(ScriptValueOpsTest, LooseEqualityParsesNumericStringsWithoutAllocation) {
     EXPECT_FALSE(fiber::script::run::Compares::eq(trailing, inf_number));
 }
 
-TEST(ScriptValueOpsTest, CompareHeapByteStrings) {
+TEST(ScriptValueOpsTest, CompareHeapAsciiStrings) {
     GcHeap heap;
     auto lhs = handle(heap, JsValue::make_string(heap, "ab", 2));
     auto rhs = handle(heap, JsValue::make_string(heap, "aba", 3));
@@ -207,7 +233,7 @@ TEST(ScriptValueOpsTest, CompareHeapByteStrings) {
     EXPECT_FALSE(fiber::script::run::Compares::gt(lhs, rhs));
 }
 
-TEST(ScriptValueOpsTest, CompareHeapUtf16Strings) {
+TEST(ScriptValueOpsTest, CompareHeapNonAsciiStrings) {
     GcHeap heap;
     char omega_bytes[] = {static_cast<char>(0xCE), static_cast<char>(0xA9)};
     char euro_bytes[] = {static_cast<char>(0xE2), static_cast<char>(0x82), static_cast<char>(0xAC)};
@@ -218,7 +244,7 @@ TEST(ScriptValueOpsTest, CompareHeapUtf16Strings) {
     EXPECT_TRUE(fiber::script::run::Compares::eq(euro, euro));
 }
 
-TEST(ScriptValueOpsTest, CompareHeapByteAndHeapUtf16) {
+TEST(ScriptValueOpsTest, CompareHeapAsciiAndNonAscii) {
     GcHeap heap;
     auto ascii = handle(heap, JsValue::make_string(heap, "A", 1));
     char euro_bytes[] = {static_cast<char>(0xE2), static_cast<char>(0x82), static_cast<char>(0xAC)};
@@ -227,7 +253,7 @@ TEST(ScriptValueOpsTest, CompareHeapByteAndHeapUtf16) {
     EXPECT_TRUE(fiber::script::run::Compares::lt(ascii, euro));
 }
 
-TEST(ScriptValueOpsTest, CompareHeapAndNativeByte) {
+TEST(ScriptValueOpsTest, CompareHeapAndNativeUtf8) {
     GcHeap heap;
     char cafe_bytes[] = {'c', 'a', 'f', static_cast<char>(0xC3), static_cast<char>(0xA9)};
     auto heap_value = handle(heap, JsValue::make_string(heap, cafe_bytes, sizeof(cafe_bytes)));
@@ -247,6 +273,15 @@ TEST(ScriptValueOpsTest, CompareNativeWithSurrogatePair) {
 
     auto bang = handle(heap, JsValue::make_string(heap, "!", 1));
     EXPECT_TRUE(fiber::script::run::Compares::gt(heap_smile, bang));
+}
+
+TEST(ScriptValueOpsTest, ComparisonUsesUtf16CodeUnitOrder) {
+    GcHeap heap;
+    auto supplementary = handle(heap, JsValue::make_string(heap, "\xF0\x90\x80\x80", 4)); // U+10000
+    auto bmp_private = handle(heap, JsValue::make_string(heap, "\xEE\x80\x80", 3)); // U+E000
+
+    EXPECT_TRUE(fiber::script::run::Compares::lt(supplementary, bmp_private));
+    EXPECT_FALSE(fiber::script::run::Compares::gt(supplementary, bmp_private));
 }
 
 TEST(ScriptValueOpsTest, CompareInvalidUtf8) {

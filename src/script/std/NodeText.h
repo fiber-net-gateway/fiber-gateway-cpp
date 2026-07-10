@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <system_error>
 
 #include "../JsValue.h"
@@ -30,9 +31,9 @@ inline void node_as_text(const JsValue &value, std::string &out) {
             }
             const GcString *str = js_value_heap_ptr<const GcString>(value);
             if (str != nullptr) {
-                std::string tmp;
-                if (gc_string_to_utf8(str, tmp) && !tmp.empty()) {
-                    out.append(tmp);
+                std::string_view view;
+                if (gc_string_utf8_view(str, view) && !view.empty()) {
+                    out.append(view);
                 }
             }
             return;

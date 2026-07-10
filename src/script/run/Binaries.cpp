@@ -8,6 +8,7 @@
 
 #include "../../common/json/Utf.h"
 #include "../gc/GcInternal.h"
+#include "../gc/Wtf8.h"
 #include "Compares.h"
 
 namespace fiber::script::run {
@@ -67,33 +68,18 @@ const fiber::script::GcString *as_heap_string(const fiber::script::JsValue &valu
                    : nullptr;
 }
 
-enum class StringKind : std::uint8_t {
-    HeapByte,
-    HeapUtf16,
-    NativeUtf8,
-};
-
 struct StringSource {
-    StringKind kind = StringKind::NativeUtf8;
-    const std::uint8_t *bytes = nullptr;
-    const char16_t *u16 = nullptr;
-    const char *utf8 = nullptr;
-    std::size_t len = 0;
-    fiber::json::Utf8ScanResult scan = {};
-};
-
-struct ConcatWriteContext {
-    const StringSource *lhs = nullptr;
-    const StringSource *rhs = nullptr;
-    bool failed = false;
+    const char *data = nullptr;
+    std::size_t byte_len = 0;
+    std::size_t utf16_len = 0;
+    bool well_formed = true;
 };
 
 void set_ascii_string_source(StringSource &out, const char *data, std::size_t len) noexcept {
-    out.kind = StringKind::NativeUtf8;
-    out.utf8 = data;
-    out.len = len;
-    out.scan.all_byte = true;
-    out.scan.utf16_len = len;
+    out.data = data;
+    out.byte_len = len;
+    out.utf16_len = len;
+    out.well_formed = true;
 }
 
 // Returns false on any non-string-coercible input; callers raise TypeError. Malformed UTF-8 in a
@@ -107,24 +93,21 @@ bool build_string_source(const fiber::script::JsValue &value, StringSource &out)
         if (!str) {
             return false;
         }
-        if (str->encoding == fiber::script::GcStringEncoding::Byte) {
-            out.kind = StringKind::HeapByte;
-            out.bytes = str->data8;
-            out.len = str->len;
-        } else {
-            out.kind = StringKind::HeapUtf16;
-            out.u16 = str->data16;
-            out.len = str->len;
-        }
+        out.data = fiber::script::gc_string_wtf8_data(str);
+        out.byte_len = fiber::script::gc_string_byte_len(str);
+        out.utf16_len = str->utf16_len;
+        out.well_formed = fiber::script::gc_string_is_well_formed(str);
         return true;
     }
     fiber::script::NativeStr native = fiber::script::js_value_native_string(value);
-    out.kind = StringKind::NativeUtf8;
-    out.utf8 = native.data;
-    out.len = native.len;
-    if (!fiber::json::utf8_scan(out.utf8, out.len, out.scan)) {
+    fiber::json::Utf8ScanResult scan;
+    if (!fiber::json::utf8_scan(native.data, native.len, scan)) {
         return false;
     }
+    out.data = native.data;
+    out.byte_len = native.len;
+    out.utf16_len = scan.utf16_len;
+    out.well_formed = true;
     return true;
 }
 
@@ -188,115 +171,22 @@ bool primitive_to_string_source(const fiber::script::JsValue &value, StringSourc
     return false;
 }
 
-bool append_byte_part(std::uint8_t *dst, std::size_t len, std::size_t &offset, const StringSource &part) noexcept {
-    switch (part.kind) {
-        case StringKind::HeapByte:
-            if (offset > len || part.len > len - offset || (part.len > 0 && !part.bytes)) {
-                return false;
-            }
-            if (part.len > 0) {
-                std::memcpy(dst + offset, part.bytes, part.len);
-            }
-            offset += part.len;
-            return true;
-        case StringKind::NativeUtf8:
-            if (offset > len || part.scan.utf16_len > len - offset || (part.len > 0 && !part.utf8)) {
-                return false;
-            }
-            if (!fiber::json::utf8_write_bytes(part.utf8, part.len, dst + offset, part.scan.utf16_len)) {
-                return false;
-            }
-            offset += part.scan.utf16_len;
-            return true;
-        case StringKind::HeapUtf16:
-            return false;
-    }
-    return false;
-}
-
-bool append_utf16_part(char16_t *dst, std::size_t len, std::size_t &offset, const StringSource &part) noexcept {
-    switch (part.kind) {
-        case StringKind::HeapUtf16:
-            if (offset > len || part.len > len - offset || (part.len > 0 && !part.u16)) {
-                return false;
-            }
-            if (part.len > 0) {
-                std::memcpy(dst + offset, part.u16, sizeof(char16_t) * part.len);
-            }
-            offset += part.len;
-            return true;
-        case StringKind::HeapByte:
-            if (offset > len || part.len > len - offset || (part.len > 0 && !part.bytes)) {
-                return false;
-            }
-            for (std::size_t i = 0; i < part.len; ++i) {
-                dst[offset++] = static_cast<char16_t>(part.bytes[i]);
-            }
-            return true;
-        case StringKind::NativeUtf8:
-            if (offset > len || part.scan.utf16_len > len - offset || (part.len > 0 && !part.utf8)) {
-                return false;
-            }
-            if (!fiber::json::utf8_write_utf16(part.utf8, part.len, dst + offset, part.scan.utf16_len)) {
-                return false;
-            }
-            offset += part.scan.utf16_len;
-            return true;
-    }
-    return false;
-}
-
-bool write_byte_concat(std::uint8_t *dst, std::size_t len, void *ctx) noexcept {
-    auto *context = static_cast<ConcatWriteContext *>(ctx);
-    if (!context || !context->lhs || !context->rhs) {
-        return false;
-    }
-    std::size_t offset = 0;
-    if (!append_byte_part(dst, len, offset, *context->lhs) || !append_byte_part(dst, len, offset, *context->rhs) ||
-        offset != len) {
-        context->failed = true;
-        return false;
-    }
-    return true;
-}
-
-bool write_utf16_concat(char16_t *dst, std::size_t len, void *ctx) noexcept {
-    auto *context = static_cast<ConcatWriteContext *>(ctx);
-    if (!context || !context->lhs || !context->rhs) {
-        return false;
-    }
-    std::size_t offset = 0;
-    if (!append_utf16_part(dst, len, offset, *context->lhs) || !append_utf16_part(dst, len, offset, *context->rhs) ||
-        offset != len) {
-        context->failed = true;
-        return false;
-    }
-    return true;
-}
-
 CallResult concat_strings(fiber::script::GcHeap &heap, const StringSource &lhs, const StringSource &rhs,
                           ResultPayload &result) {
-    bool all_byte = true;
-    std::size_t total_len = 0;
-    auto add_part = [&](const StringSource &part) {
-        switch (part.kind) {
-            case StringKind::HeapByte:
-                total_len += part.len;
-                break;
-            case StringKind::HeapUtf16:
-                all_byte = false;
-                total_len += part.len;
-                break;
-            case StringKind::NativeUtf8:
-                if (!part.scan.all_byte) {
-                    all_byte = false;
-                }
-                total_len += part.scan.utf16_len;
-                break;
-        }
-    };
-    add_part(lhs);
-    add_part(rhs);
+    if (lhs.utf16_len > std::numeric_limits<std::uint32_t>::max() - rhs.utf16_len ||
+        lhs.byte_len > std::numeric_limits<std::size_t>::max() - rhs.byte_len) {
+        return set_abort(result, ScriptAbortReason::OutOfMemory);
+    }
+    const std::size_t utf16_len = lhs.utf16_len + rhs.utf16_len;
+    std::size_t byte_len = lhs.byte_len + rhs.byte_len;
+
+    char16_t high = 0;
+    char16_t low = 0;
+    const bool merge_boundary = fiber::script::gc_detail::wtf8_ends_with_high_surrogate(lhs.data, lhs.byte_len, high) &&
+                                fiber::script::gc_detail::wtf8_starts_with_low_surrogate(rhs.data, rhs.byte_len, low);
+    if (merge_boundary) {
+        byte_len -= 2;
+    }
 
     fiber::script::GcHeap::LocalMark mark(heap);
     fiber::script::ValueHandle out = heap.local_value();
@@ -304,30 +194,49 @@ CallResult concat_strings(fiber::script::GcHeap &heap, const StringSource &lhs, 
         return set_abort(result, ScriptAbortReason::OutOfMemory);
     }
 
-    if (total_len == 0) {
+    if (utf16_len == 0) {
         if (!fiber::script::gc_make_string(&heap, out, "", 0)) {
             return set_abort(result, ScriptAbortReason::OutOfMemory);
         }
         return set_value(result, *out);
     }
 
-    ConcatWriteContext context{&lhs, &rhs, false};
-    if (all_byte) {
-        if (!fiber::script::gc_make_string_bytes_uninit(&heap, out, total_len, write_byte_concat, &context)) {
-            if (context.failed) {
-                return set_exception(result, fiber::script::ExceptionKind::TypeError);
-            }
-            return set_abort(result, ScriptAbortReason::OutOfMemory);
-        }
-        return set_value(result, *out);
-    }
-
-    if (!fiber::script::gc_make_string_utf16_uninit(&heap, out, total_len, write_utf16_concat, &context)) {
-        if (context.failed) {
-            return set_exception(result, fiber::script::ExceptionKind::TypeError);
-        }
+    fiber::script::GcHeap::NoGcScope no_gc(heap);
+    const bool initially_well_formed = lhs.well_formed && rhs.well_formed;
+    fiber::script::GcString *str =
+            fiber::script::gc_new_string_wtf8_uninit(&heap, byte_len, utf16_len, initially_well_formed);
+    if (!str) {
         return set_abort(result, ScriptAbortReason::OutOfMemory);
     }
+    char *dst = fiber::script::gc_string_wtf8_data(str);
+    std::size_t offset = 0;
+    if (!merge_boundary) {
+        if (lhs.byte_len > 0) {
+            std::memcpy(dst, lhs.data, lhs.byte_len);
+        }
+        if (rhs.byte_len > 0) {
+            std::memcpy(dst + lhs.byte_len, rhs.data, rhs.byte_len);
+        }
+    } else {
+        const std::size_t lhs_copy = lhs.byte_len - 3;
+        if (lhs_copy > 0) {
+            std::memcpy(dst, lhs.data, lhs_copy);
+        }
+        offset = lhs_copy;
+        const std::uint32_t codepoint = 0x10000 + ((static_cast<std::uint32_t>(high) - 0xD800) << 10) +
+                                        (static_cast<std::uint32_t>(low) - 0xDC00);
+        offset += fiber::script::gc_detail::wtf8_write_codepoint(codepoint, dst + offset);
+        const std::size_t rhs_copy = rhs.byte_len - 3;
+        if (rhs_copy > 0) {
+            std::memcpy(dst + offset, rhs.data + 3, rhs_copy);
+            offset += rhs_copy;
+        }
+        if (!initially_well_formed && fiber::script::gc_detail::wtf8_is_well_formed(dst, byte_len)) {
+            str->flags |= fiber::script::kGcStringWellFormed;
+        }
+    }
+    fiber::script::GcString *interned = fiber::script::gc_detail::gc_string_intern_final(&heap, str);
+    *out = fiber::script::js_make_heap_ref(&interned->hdr, fiber::script::GcHeapKind::String);
     return set_value(result, *out);
 }
 

@@ -21,23 +21,26 @@ ScriptResult type_error() noexcept {
     return ScriptResult::exception(JsValue::make_exception(ExceptionKind::TypeError));
 }
 
-// UTF-8 bytes of a string value (borrowed/native already UTF-8; heap GcString via
-// gc_string_to_utf8). Returns false when value is not a string. Mirrors the helper in
-// HashFuncs/IncludesFunc.
-bool string_to_utf8(const JsValue &value, std::string &out) noexcept {
+// Returns a borrowed UTF-8 view. Heap strings containing isolated UTF-16
+// surrogates have no strict UTF-8 view and are rejected.
+bool string_utf8_view(const JsValue &value, std::string_view &out) noexcept {
+    out = {};
     if (js_value_type(value) != JsNodeType::String) {
         return false;
     }
     if (js_value_is_borrowed_string(value)) {
         NativeStr native = js_value_native_string(value);
-        out.assign(native.data, native.len);
+        if (native.len > 0 && !native.data) {
+            return false;
+        }
+        out = native.len > 0 ? std::string_view(native.data, native.len) : std::string_view{};
         return true;
     }
     const GcString *str = js_value_heap_ptr<const GcString>(value);
     if (str == nullptr) {
         return false;
     }
-    return gc_string_to_utf8(str, out);
+    return gc_string_utf8_view(str, out);
 }
 
 // Aggregates one decoded (key, value) pair into the object rooted at obj_root, mirroring
@@ -162,8 +165,8 @@ ScriptResult url_encode_component_fn(void * /*userdata*/, const Library::HostCal
     if (!args.args || args.argc < 1) {
         return type_error();
     }
-    std::string input;
-    if (!string_to_utf8(args.args[0], input)) {
+    std::string_view input;
+    if (!string_utf8_view(args.args[0], input)) {
         return type_error();
     }
     std::string out;
@@ -182,8 +185,8 @@ ScriptResult url_decode_component_fn(void * /*userdata*/, const Library::HostCal
     if (!args.args || args.argc < 1) {
         return type_error();
     }
-    std::string input;
-    if (!string_to_utf8(args.args[0], input)) {
+    std::string_view input;
+    if (!string_utf8_view(args.args[0], input)) {
         return type_error();
     }
     auto decoded = fiber::common::url::form_decode(input);
@@ -205,8 +208,8 @@ ScriptResult url_parse_query_fn(void * /*userdata*/, const Library::HostCallFram
     if (!args.args || args.argc < 1) {
         return type_error();
     }
-    std::string input;
-    if (!string_to_utf8(args.args[0], input)) {
+    std::string_view input;
+    if (!string_utf8_view(args.args[0], input)) {
         return type_error();
     }
     GcHeap *heap = frame.runtime;

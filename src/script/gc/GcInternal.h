@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace fiber::script {
 
@@ -21,23 +22,39 @@ struct GcHeader {
     std::uint32_t size_ = 0;
 };
 
-enum class GcStringEncoding : std::uint8_t {
-    Byte,
-    Utf16,
-};
+inline constexpr std::uint8_t kGcStringHashValid = 1u << 0;
+inline constexpr std::uint8_t kGcStringWellFormed = 1u << 1;
 
+// Canonical WTF-8 bytes plus a trailing NUL follow the fixed header. hdr.size_
+// covers both regions, so the byte length is derivable without a data pointer.
 struct GcString {
     GcHeader hdr;
     GcString *intern_next = nullptr;
-    std::size_t len = 0;
     std::uint64_t hash = 0;
-    bool hash_valid = false;
-    GcStringEncoding encoding = GcStringEncoding::Byte;
-    union {
-        std::uint8_t *data8;
-        char16_t *data16;
-    };
+    std::uint32_t utf16_len = 0;
+    std::uint8_t flags = 0;
 };
+
+static_assert(sizeof(void *) != 8 || sizeof(GcString) == 40);
+
+inline char *gc_string_wtf8_data(GcString *str) noexcept { return reinterpret_cast<char *>(str) + sizeof(GcString); }
+
+inline const char *gc_string_wtf8_data(const GcString *str) noexcept {
+    return reinterpret_cast<const char *>(str) + sizeof(GcString);
+}
+
+inline std::size_t gc_string_byte_len(const GcString *str) noexcept {
+    constexpr std::size_t overhead = sizeof(GcString) + 1;
+    return str && str->hdr.size_ >= overhead ? static_cast<std::size_t>(str->hdr.size_) - overhead : 0;
+}
+
+inline bool gc_string_is_ascii(const GcString *str) noexcept {
+    return str && gc_string_byte_len(str) == str->utf16_len;
+}
+
+inline bool gc_string_is_well_formed(const GcString *str) noexcept {
+    return str && (str->flags & kGcStringWellFormed) != 0;
+}
 
 struct GcStringUtf8Buffer {
     char *ptr = nullptr;
@@ -57,9 +74,6 @@ enum class GcStringUtf8Status : std::uint8_t {
 
 struct GcStringUtf8Cursor {
     std::size_t index = 0;
-    std::uint8_t pending[4] = {};
-    std::uint8_t pending_offset = 0;
-    std::uint8_t pending_len = 0;
 };
 
 struct GcStringUtf8Result {
@@ -140,10 +154,13 @@ struct GcIterator {
 
 GcString *gc_new_string(GcHeap *heap, const char *data, std::size_t len) noexcept;
 GcString *gc_new_string_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len) noexcept;
-GcString *gc_new_string_bytes_uninit(GcHeap *heap, std::size_t len) noexcept;
 GcString *gc_new_string_utf16(GcHeap *heap, const char16_t *data, std::size_t len) noexcept;
-GcString *gc_new_string_utf16_uninit(GcHeap *heap, std::size_t len) noexcept;
+GcString *gc_new_string_wtf8_uninit(GcHeap *heap, std::size_t byte_len, std::size_t utf16_len,
+                                    bool well_formed) noexcept;
+GcString *gc_new_string_substring_utf16(GcHeap *heap, const GcString *source, std::size_t begin,
+                                        std::size_t end) noexcept;
 bool gc_string_can_encode_utf8(const GcString *str) noexcept;
+bool gc_string_utf8_view(const GcString *str, std::string_view &out) noexcept;
 GcStringUtf8Result gc_string_to_utf8(const GcString *str, GcStringUtf8Cursor &cursor, GcStringUtf8Buffer out,
                                      GcStringUtf8Boundary boundary) noexcept;
 bool gc_string_to_utf8(const GcString *str, std::string &out);
@@ -185,7 +202,6 @@ std::size_t saturating_add(std::size_t lhs, std::size_t rhs);
 std::size_t next_threshold(std::size_t live_bytes);
 GcMark flip_mark(GcMark mark);
 
-std::size_t string_storage_bytes(std::size_t len, GcStringEncoding encoding);
 std::size_t array_storage_bytes(std::size_t capacity);
 std::size_t entry_storage_bytes(std::size_t capacity);
 std::size_t bucket_storage_bytes(std::size_t bucket_count);
@@ -197,13 +213,10 @@ void *gc_alloc_extra(GcHeap *heap, std::size_t bytes);
 void gc_free_extra(GcHeap *heap, void *ptr, std::size_t bytes);
 
 std::uint64_t string_hash(const GcString *str);
-std::uint64_t string_hash_bytes(const std::uint8_t *data, std::size_t len) noexcept;
-std::uint64_t string_hash_utf16(const char16_t *data, std::size_t len) noexcept;
+std::uint64_t string_hash_wtf8(const char *data, std::size_t len) noexcept;
 bool string_equals(const GcString *lhs, const GcString *rhs);
-GcString *gc_string_intern_lookup_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len,
-                                        std::uint64_t hash) noexcept;
-GcString *gc_string_intern_lookup_utf16(GcHeap *heap, const char16_t *data, std::size_t len,
-                                        std::uint64_t hash) noexcept;
+GcString *gc_string_intern_lookup_wtf8(GcHeap *heap, const char *data, std::size_t byte_len, std::size_t utf16_len,
+                                       std::uint64_t hash) noexcept;
 void gc_string_intern_insert(GcHeap *heap, GcString *str, std::uint64_t hash) noexcept;
 GcString *gc_string_intern_final(GcHeap *heap, GcString *str) noexcept;
 void gc_string_intern_remove(GcHeap *heap, GcString *str) noexcept;

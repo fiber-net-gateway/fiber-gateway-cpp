@@ -12,36 +12,12 @@ namespace {
 Generator::Result encode_array(Generator &gen, const GcArray *arr);
 Generator::Result encode_object(Generator &gen, const GcObject *obj);
 
-struct GcStringUtf8ChunkContext {
-    const GcString *str = nullptr;
-    GcStringUtf8Cursor cursor;
-    char buffer[512] = {};
-};
-
-bool gc_string_utf8_chunk(void *raw, const char *&data, std::size_t &len, bool &done) noexcept {
-    auto *ctx = static_cast<GcStringUtf8ChunkContext *>(raw);
-    if (!ctx || !ctx->str) {
-        return false;
-    }
-    GcStringUtf8Result result =
-            gc_string_to_utf8(ctx->str, ctx->cursor, {.ptr = ctx->buffer, .capacity = sizeof(ctx->buffer)},
-                              GcStringUtf8Boundary::PreserveCodePoint);
-    if (result.status == GcStringUtf8Status::Invalid) {
-        return false;
-    }
-    data = ctx->buffer;
-    len = result.written;
-    done = result.status == GcStringUtf8Status::Done;
-    return len > 0 || done;
-}
-
 Generator::Result encode_gc_string(Generator &gen, const GcString *str) {
-    if (!gc_string_can_encode_utf8(str)) {
+    std::string_view view;
+    if (!gc_string_utf8_view(str, view)) {
         return Generator::Result::InvalidString;
     }
-    GcStringUtf8ChunkContext ctx;
-    ctx.str = str;
-    return gen.string_from_chunks(gc_string_utf8_chunk, &ctx);
+    return gen.string(view.data(), view.size());
 }
 
 Generator::Result encode_array(Generator &gen, const GcArray *arr) {

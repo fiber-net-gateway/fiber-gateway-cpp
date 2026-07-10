@@ -49,6 +49,11 @@ TEST(LengthFuncTest, StringLengthIsUtf16CodeUnits) {
     expect_script_int("return length(\"abc\");", 3);
     expect_script_int("return length(\"héllo\");", 5); // é is one BMP code unit
     expect_script_int("return length(\"😀\");", 2); // supplementary -> surrogate pair
+    expect_script_int("return length(\"😀\"[0]);", 1);
+}
+
+TEST(LengthFuncTest, SplitSurrogatesConcatBackToCanonicalString) {
+    expect_script_bool("return \"😀\"[0] + \"😀\"[1] === \"😀\";", true);
 }
 
 TEST(LengthFuncTest, ContainerLength) {
