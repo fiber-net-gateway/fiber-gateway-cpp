@@ -1,8 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <sys/uio.h>
+#include <vector>
 
 #include "common/mem/IoBuf.h"
 #include "common/mem/IoBufChain.h"
@@ -41,6 +44,28 @@ IoBufChain make_multi_payload(IoBufNodePool &pool, std::string_view a, std::stri
     return chain;
 }
 
+// Coalesce a chain's readable bytes into a string for test assertions only.
+std::string flatten(const IoBufChain &chain) {
+    std::string out;
+    out.reserve(chain.readable_bytes());
+    std::array<iovec, 16> iov{};
+    int c = chain.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
+    std::size_t captured = 0;
+    for (int i = 0; i < c; ++i) {
+        out.append(static_cast<const char *>(iov[i].iov_base), iov[i].iov_len);
+        captured += iov[i].iov_len;
+    }
+    if (captured != chain.readable_bytes()) {
+        std::vector<iovec> wide(chain.size());
+        int n = chain.fill_write_iov(wide.data(), static_cast<int>(wide.size()));
+        out.clear();
+        for (int i = 0; i < n; ++i) {
+            out.append(static_cast<const char *>(wide[i].iov_base), wide[i].iov_len);
+        }
+    }
+    return out;
+}
+
 TEST(GrpcFramingTest, FrameHeaderIsCorrectBigEndian) {
     IoBufNodePool pool;
     const std::string payload(300, 'x'); // length needs 2 bytes
@@ -65,16 +90,17 @@ TEST(GrpcFramingTest, FrameAndDeframeRoundTrip) {
     ASSERT_TRUE(framed.has_value());
 
     GrpcFrameReader reader;
-    ASSERT_TRUE(reader.append(*framed).has_value());
+    ASSERT_TRUE(reader.append(std::move(*framed)).has_value());
     EXPECT_EQ(reader.buffered_bytes(), 5u + payload.size());
 
-    std::string out;
+    IoBufChain out;
     auto r = reader.next_payload(out);
     ASSERT_TRUE(r.has_value());
     EXPECT_TRUE(*r);
-    EXPECT_EQ(out, payload);
+    EXPECT_EQ(flatten(out), payload);
 
-    auto r2 = reader.next_payload(out);
+    IoBufChain out2;
+    auto r2 = reader.next_payload(out2);
     ASSERT_TRUE(r2.has_value());
     EXPECT_FALSE(*r2);
     EXPECT_EQ(reader.buffered_bytes(), 0u);
@@ -87,8 +113,8 @@ TEST(GrpcFramingTest, EmptyMessageFrame) {
     ASSERT_EQ(framed->readable_bytes(), 5u);
 
     GrpcFrameReader reader;
-    ASSERT_TRUE(reader.append(*framed).has_value());
-    std::string out;
+    ASSERT_TRUE(reader.append(std::move(*framed)).has_value());
+    IoBufChain out;
     auto r = reader.next_payload(out);
     ASSERT_TRUE(r.has_value());
     EXPECT_TRUE(*r);
@@ -98,7 +124,6 @@ TEST(GrpcFramingTest, EmptyMessageFrame) {
 TEST(GrpcFramingTest, MultiSegmentAppendDeframes) {
     IoBufNodePool pool;
     const std::string payload("the quick brown fox");
-    // Split the framed bytes across two nodes in one chain.
     // Build the full framed wire bytes (5-byte header + payload), then split
     // them across two nodes so the multi-segment append path is exercised.
     const std::uint32_t plen = static_cast<std::uint32_t>(payload.size());
@@ -126,11 +151,11 @@ TEST(GrpcFramingTest, MultiSegmentAppendDeframes) {
     ASSERT_NE(split.first_readable()->readable(), split.readable_bytes());
 
     GrpcFrameReader reader;
-    ASSERT_TRUE(reader.append(split).has_value());
-    std::string out;
+    ASSERT_TRUE(reader.append(std::move(split)).has_value());
+    IoBufChain out;
     auto r = reader.next_payload(out);
     ASSERT_TRUE(r.has_value() && *r);
-    EXPECT_EQ(out, payload);
+    EXPECT_EQ(flatten(out), payload);
 }
 
 TEST(GrpcFramingTest, MultipleFramesInOneBuffer) {
@@ -142,52 +167,58 @@ TEST(GrpcFramingTest, MultipleFramesInOneBuffer) {
     ASSERT_TRUE(reader.append(*frame(make_payload(pool, p1))).has_value());
     ASSERT_TRUE(reader.append(*frame(make_payload(pool, p2))).has_value());
 
-    std::string out;
-    auto r1 = reader.next_payload(out);
+    IoBufChain o1;
+    auto r1 = reader.next_payload(o1);
     ASSERT_TRUE(r1.has_value() && *r1);
-    EXPECT_EQ(out, p1);
-    auto r2 = reader.next_payload(out);
+    EXPECT_EQ(flatten(o1), p1);
+    IoBufChain o2;
+    auto r2 = reader.next_payload(o2);
     ASSERT_TRUE(r2.has_value() && *r2);
-    EXPECT_EQ(out, p2);
-    auto r3 = reader.next_payload(out);
+    EXPECT_EQ(flatten(o2), p2);
+    IoBufChain o3;
+    auto r3 = reader.next_payload(o3);
     ASSERT_TRUE(r3.has_value());
     EXPECT_FALSE(*r3);
 }
 
 TEST(GrpcFramingTest, PartialFrameNeedsMore) {
+    IoBufNodePool pool;
     GrpcFrameReader reader;
-    std::string out;
     // 3 bytes of header only.
-    ASSERT_TRUE(reader.append(std::string_view("\x00\x00\x00", 3)).has_value());
+    ASSERT_TRUE(reader.append(make_payload(pool, std::string_view("\x00\x00\x00", 3))).has_value());
+    IoBufChain out;
     auto r = reader.next_payload(out);
     ASSERT_TRUE(r.has_value());
     EXPECT_FALSE(*r);
 
     // Remaining header byte + length=2 + payload "hi".
-    ASSERT_TRUE(reader.append(std::string_view("\x00\x02hi", 4)).has_value());
-    auto r2 = reader.next_payload(out);
+    ASSERT_TRUE(reader.append(make_payload(pool, std::string_view("\x00\x02hi", 4))).has_value());
+    IoBufChain out2;
+    auto r2 = reader.next_payload(out2);
     ASSERT_TRUE(r2.has_value());
     EXPECT_TRUE(*r2);
-    EXPECT_EQ(out, "hi");
+    EXPECT_EQ(flatten(out2), "hi");
 }
 
 TEST(GrpcFramingTest, RejectsCompressedFlag) {
+    IoBufNodePool pool;
     GrpcFrameReader reader;
     std::string bad;
     bad.push_back('\x01'); // compressed
     bad.append("\x00\x00\x00\x00", 4);
-    ASSERT_TRUE(reader.append(bad).has_value());
-    std::string out;
+    ASSERT_TRUE(reader.append(make_payload(pool, bad)).has_value());
+    IoBufChain out;
     auto r = reader.next_payload(out);
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error(), IoErr::NotSupported);
 }
 
 TEST(GrpcFramingTest, OversizedLengthWaitsForBytes) {
+    IoBufNodePool pool;
     GrpcFrameReader reader;
     // flag=0, length=0x10 but no payload bytes yet.
-    ASSERT_TRUE(reader.append(std::string_view("\x00\x00\x00\x00\x10", 5)).has_value());
-    std::string out;
+    ASSERT_TRUE(reader.append(make_payload(pool, std::string_view("\x00\x00\x00\x00\x10", 5))).has_value());
+    IoBufChain out;
     auto r = reader.next_payload(out);
     ASSERT_TRUE(r.has_value());
     EXPECT_FALSE(*r); // need 16 payload bytes
@@ -210,11 +241,11 @@ TEST(GrpcFramingTest, FramePreservesMultiNodePayload) {
     EXPECT_EQ(framed->size(), 3u); // header + two payload nodes
 
     GrpcFrameReader reader;
-    ASSERT_TRUE(reader.append(*framed).has_value());
-    std::string out;
+    ASSERT_TRUE(reader.append(std::move(*framed)).has_value());
+    IoBufChain out;
     auto r = reader.next_payload(out);
     ASSERT_TRUE(r.has_value() && *r);
-    EXPECT_EQ(out, a + b);
+    EXPECT_EQ(flatten(out), a + b);
 }
 
 } // namespace

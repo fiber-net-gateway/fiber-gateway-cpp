@@ -147,21 +147,23 @@ GrpcClient::unary_call(std::string_view service, std::string_view method, const 
 
     // 5. read + deframe the body (expect exactly one message for unary)
     GrpcFrameReader reader;
-    std::string payload_bytes;
+    mem::IoBufChain payload_chain;
     bool got_message = false;
     for (;;) {
         auto body_result = co_await exchange.read_body(64 * 1024);
         if (!body_result) {
             co_return std::unexpected(body_result.error());
         }
+        // The chain is moved into the frame reader below; capture END_STREAM first.
+        const bool stream_end = body_result->complete();
         if (body_result->readable_bytes() > 0) {
-            auto append_result = reader.append(*body_result);
+            auto append_result = reader.append(std::move(*body_result));
             if (!append_result) {
                 co_return std::unexpected(append_result.error());
             }
         }
         for (;;) {
-            std::string frame_payload;
+            mem::IoBufChain frame_payload;
             auto extract_result = reader.next_payload(frame_payload);
             if (!extract_result) {
                 co_return std::unexpected(extract_result.error());
@@ -172,10 +174,10 @@ GrpcClient::unary_call(std::string_view service, std::string_view method, const 
             if (got_message) {
                 co_return std::unexpected(common::IoErr::Invalid); // unary: exactly one message
             }
-            payload_bytes = std::move(frame_payload);
+            payload_chain = std::move(frame_payload);
             got_message = true;
         }
-        if (body_result->complete()) {
+        if (stream_end) {
             break;
         }
     }
@@ -200,8 +202,8 @@ GrpcClient::unary_call(std::string_view service, std::string_view method, const 
         co_return std::unexpected(common::IoErr::Invalid); // OK status but no message
     }
 
-    // 7. decode the reply
-    auto decode_result = decode(std::string_view(payload_bytes), response);
+    // 7. decode the reply (zero-copy: parses directly off payload_chain)
+    auto decode_result = decode(payload_chain, response);
     if (!decode_result) {
         co_return std::unexpected(decode_result.error());
     }
