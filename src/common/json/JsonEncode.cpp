@@ -1,5 +1,7 @@
 #include "JsonEncode.h"
 
+#include "../base64/Base64.h"
+
 #include <charconv>
 #include <cmath>
 #include <limits>
@@ -71,37 +73,6 @@ bool is_valid_utf8(const unsigned char *data, size_t len) {
         return false;
     }
     return true;
-}
-
-std::string base64_encode(const std::uint8_t *data, size_t len) {
-    static constexpr char kTable[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve(((len + 2) / 3) * 4);
-    size_t i = 0;
-    while (i + 2 < len) {
-        uint32_t triple = (static_cast<uint32_t>(data[i]) << 16) | (static_cast<uint32_t>(data[i + 1]) << 8) |
-                          static_cast<uint32_t>(data[i + 2]);
-        out.push_back(kTable[(triple >> 18) & 0x3F]);
-        out.push_back(kTable[(triple >> 12) & 0x3F]);
-        out.push_back(kTable[(triple >> 6) & 0x3F]);
-        out.push_back(kTable[triple & 0x3F]);
-        i += 3;
-    }
-    if (i < len) {
-        uint32_t triple = static_cast<uint32_t>(data[i]) << 16;
-        out.push_back(kTable[(triple >> 18) & 0x3F]);
-        if (i + 1 < len) {
-            triple |= static_cast<uint32_t>(data[i + 1]) << 8;
-            out.push_back(kTable[(triple >> 12) & 0x3F]);
-            out.push_back(kTable[(triple >> 6) & 0x3F]);
-            out.push_back('=');
-        } else {
-            out.push_back(kTable[(triple >> 12) & 0x3F]);
-            out.push_back('=');
-            out.push_back('=');
-        }
-    }
-    return out;
 }
 
 } // namespace
@@ -294,7 +265,7 @@ Generator::Result Generator::binary(const std::uint8_t *data, size_t len) {
     if (result != Result::OK) {
         return result;
     }
-    std::string encoded = base64_encode(data, len);
+    std::string encoded = fiber::common::base64::base64_encode(data, len);
     result = write_string(encoded.data(), encoded.size());
     if (result != Result::OK) {
         return result;

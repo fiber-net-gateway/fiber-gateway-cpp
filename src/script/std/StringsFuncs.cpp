@@ -25,29 +25,6 @@ namespace {
 // depend on a regex-engine decision that is still open; add them alongside a
 // regex implementation when that choice is made.
 
-// Returns a borrowed UTF-8 view; heap strings with isolated UTF-16 surrogates
-// are rejected (matching IncludesFunc/UrlFuncs/HashFuncs). For well-formed
-// Unicode, byte-level substring search matches Java's UTF-16 String search.
-bool string_utf8_view(const JsValue &value, std::string_view &out) noexcept {
-    out = {};
-    if (js_value_type(value) != JsNodeType::String) {
-        return false;
-    }
-    if (js_value_is_borrowed_string(value)) {
-        NativeStr native = js_value_native_string(value);
-        if (native.len > 0 && !native.data) {
-            return false;
-        }
-        out = native.len > 0 ? std::string_view(native.data, native.len) : std::string_view{};
-        return true;
-    }
-    const GcString *str = js_value_heap_ptr<const GcString>(value);
-    if (str == nullptr) {
-        return false;
-    }
-    return gc_string_utf8_view(str, out);
-}
-
 JsValue empty_string() noexcept { return JsValue::make_native_string("", 0); }
 
 // Builds a heap string result from a view (empty -> borrowed empty string),

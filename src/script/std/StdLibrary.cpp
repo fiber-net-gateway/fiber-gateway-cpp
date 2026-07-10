@@ -1,6 +1,7 @@
 #include "StdLibrary.h"
 
 #include "ArrayFuncs.h"
+#include "BinaryFuncs.h"
 #include "HashFuncs.h"
 #include "IncludesFunc.h"
 #include "LengthFunc.h"
@@ -137,6 +138,7 @@ StdLibrary &StdLibrary::instance() {
 
 StdLibrary::StdLibrary() {
     register_array_funcs(*this);
+    register_binary_funcs(*this);
     register_length_func(*this);
     register_includes_func(*this);
     register_math_funcs(*this);

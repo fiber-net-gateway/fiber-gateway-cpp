@@ -22,67 +22,11 @@ ScriptResult type_error() noexcept {
     return ScriptResult::exception(JsValue::make_exception(ExceptionKind::TypeError));
 }
 
-// ---- byte extraction ----
-
-// Returns a borrowed UTF-8 view. Heap strings containing isolated UTF-16
-// surrogates have no strict UTF-8 view and are rejected.
-bool string_utf8_view(const JsValue &value, std::string_view &out) noexcept {
-    out = {};
-    if (js_value_type(value) != JsNodeType::String) {
-        return false;
-    }
-    if (js_value_is_borrowed_string(value)) {
-        NativeStr native = js_value_native_string(value);
-        if (native.len > 0 && !native.data) {
-            return false;
-        }
-        out = native.len > 0 ? std::string_view(native.data, native.len) : std::string_view{};
-        return true;
-    }
-    const GcString *str = js_value_heap_ptr<const GcString>(value);
-    if (str == nullptr) {
-        return false;
-    }
-    return gc_string_utf8_view(str, out);
-}
-
-// Raw bytes of a binary value (borrowed via NativeBin, heap via GcBinary). Returns false
-// when value is not a binary.
-bool binary_bytes(const JsValue &value, const std::uint8_t *&data, std::size_t &len) noexcept {
-    if (js_value_type(value) != JsNodeType::Binary) {
-        return false;
-    }
-    if (js_value_is_borrowed_binary(value)) {
-        NativeBin native = js_value_native_binary(value);
-        data = native.data;
-        len = native.len;
-        return true;
-    }
-    const GcBinary *bin = js_value_heap_ptr<const GcBinary>(value);
-    if (bin == nullptr) {
-        data = nullptr;
-        len = 0;
-        return false;
-    }
-    data = bin->data;
-    len = bin->len;
-    return true;
-}
-
 // ---- digest (BoringSSL EVP, one-shot) ----
 
 bool digest(const EVP_MD *md, const std::uint8_t *data, std::size_t len, std::uint8_t *out) noexcept {
     unsigned int out_len = 0;
     return EVP_Digest(data, len, out, &out_len, md, nullptr) == 1;
-}
-
-// Lowercase hex of [bytes, bytes+len) into buf (2 chars/byte). buf must hold len*2 chars.
-void hex_encode(const std::uint8_t *bytes, std::size_t len, char *buf) noexcept {
-    static constexpr char kHex[] = "0123456789abcdef";
-    for (std::size_t i = 0; i < len; ++i) {
-        buf[i * 2] = kHex[(bytes[i] >> 4) & 0x0F];
-        buf[i * 2 + 1] = kHex[bytes[i] & 0x0F];
-    }
 }
 
 // ---- hash.crc32 ----

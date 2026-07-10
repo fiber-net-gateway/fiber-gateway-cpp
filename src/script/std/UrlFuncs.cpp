@@ -21,28 +21,6 @@ ScriptResult type_error() noexcept {
     return ScriptResult::exception(JsValue::make_exception(ExceptionKind::TypeError));
 }
 
-// Returns a borrowed UTF-8 view. Heap strings containing isolated UTF-16
-// surrogates have no strict UTF-8 view and are rejected.
-bool string_utf8_view(const JsValue &value, std::string_view &out) noexcept {
-    out = {};
-    if (js_value_type(value) != JsNodeType::String) {
-        return false;
-    }
-    if (js_value_is_borrowed_string(value)) {
-        NativeStr native = js_value_native_string(value);
-        if (native.len > 0 && !native.data) {
-            return false;
-        }
-        out = native.len > 0 ? std::string_view(native.data, native.len) : std::string_view{};
-        return true;
-    }
-    const GcString *str = js_value_heap_ptr<const GcString>(value);
-    if (str == nullptr) {
-        return false;
-    }
-    return gc_string_utf8_view(str, out);
-}
-
 // Aggregates one decoded (key, value) pair into the object rooted at obj_root, mirroring
 // Java ObjectNode.has/get/put: missing key -> store the string value; existing array ->
 // append; existing scalar -> promote to [old, new]. All values are strings (matching
