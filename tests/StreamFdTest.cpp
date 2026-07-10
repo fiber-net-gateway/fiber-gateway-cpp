@@ -30,10 +30,14 @@ int run_broken_pipe_child(bool use_writev) {
         return 11;
     }
     if (pid == 0) {
-        (void) ::signal(SIGPIPE, SIG_DFL);
-
         fiber::event::EventLoopGroup group(1);
         group.start();
+
+        // Restore SIG_DFL *after* the loop is constructed: the framework ignores
+        // SIGPIPE globally (EventLoop ctor), so this child must opt back into the
+        // default disposition to keep the SIGPIPE tripwire (StreamFd must suppress
+        // it via MSG_NOSIGNAL and return BrokenPipe instead).
+        (void) ::signal(SIGPIPE, SIG_DFL);
 
         std::promise<fiber::common::IoErr> result_promise;
         auto result_future = result_promise.get_future();

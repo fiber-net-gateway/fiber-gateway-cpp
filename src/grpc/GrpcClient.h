@@ -22,19 +22,11 @@
 #include "../net/SocketAddress.h"
 #include "../net/TlsOptions.h"
 #include "GrpcFraming.h"
+#include "GrpcStatus.h"
+#include "GrpcStream.h"
 #include "ProtoCodec.h"
 
 namespace fiber::grpc {
-
-// gRPC call outcome. `code` is the grpc-status trailer value (0 == OK);
-// `message` is grpc-message (raw, not percent-decoded). Transport/protocol
-// failures are reported via IoErr on the IoResult instead.
-struct GrpcStatus {
-    int code = 0;
-    std::string message;
-
-    [[nodiscard]] bool ok() const noexcept { return code == 0; }
-};
 
 // Unary gRPC client over a single HTTP/2 connection (multiplexed: many
 // unary_call()s may share one connection). The caller owns the HPACK encode
@@ -68,6 +60,13 @@ public:
                                                                 const google::protobuf::MessageLite &request,
                                                                 google::protobuf::MessageLite &response,
                                                                 mem::BufPool &pool) noexcept;
+
+    // Open a full-duplex streaming call (server/client/bidi streaming are all
+    // usage patterns over the returned GrpcStream). Synchronous: constructs the
+    // stream; call open() on it next. The returned stream shares ownership of the
+    // connection, so it may outlive the GrpcClient. Must be called on the loop.
+    GrpcStream open_stream(std::string_view service, std::string_view method, mem::BufPool &pool,
+                           GrpcStream::Options options = {}) noexcept(false);
 
     [[nodiscard]] bool run_done() const noexcept;
 

@@ -4,7 +4,6 @@
 #include <utility>
 
 namespace fiber::grpc {
-namespace {
 
 int parse_grpc_status(std::string_view s) noexcept {
     int v = 0;
@@ -19,6 +18,8 @@ int parse_grpc_status(std::string_view s) noexcept {
     }
     return v;
 }
+
+namespace {
 
 void assign_view(std::string &dst, std::string_view src) { dst.assign(src.data(), src.size()); }
 
@@ -69,6 +70,11 @@ void GrpcClient::shutdown() noexcept {
 }
 
 bool GrpcClient::run_done() const noexcept { return run_state_ && run_state_->done.load(std::memory_order_acquire); }
+
+GrpcStream GrpcClient::open_stream(std::string_view service, std::string_view method, mem::BufPool &pool,
+                                   GrpcStream::Options options) noexcept(false) {
+    return GrpcStream(conn_, authority_, scheme_, service, method, pool, options);
+}
 
 fiber::async::Task<common::IoResult<GrpcStatus>>
 GrpcClient::unary_call(std::string_view service, std::string_view method, const google::protobuf::MessageLite &request,
