@@ -43,7 +43,7 @@ bool string_length(ConstValueHandle value, std::size_t &out) {
     if (fiber::script::js_value_type(*value) == fiber::script::JsNodeType::String &&
         !fiber::script::js_value_is_borrowed_string(*value)) {
         auto *str = fiber::script::js_value_heap_ptr<const fiber::script::GcString>(*value);
-        out = str ? str->len : 0;
+        out = str ? str->utf16_len : 0;
         return true;
     }
     if (fiber::script::js_value_type(*value) == fiber::script::JsNodeType::String &&
@@ -83,20 +83,16 @@ CallResult string_char_at(GcHeap &runtime, ResultPayload &result, ConstValueHand
     if (!str) {
         return set_abort(result, oom_error());
     }
-    if (index >= static_cast<std::int64_t>(str->len)) {
+    if (index >= static_cast<std::int64_t>(str->utf16_len)) {
         return set_undefined(result);
     }
-    if (str->encoding == fiber::script::GcStringEncoding::Byte) {
-        std::uint8_t byte = str->data8[index];
-        if (!fiber::script::gc_make_string_bytes(&runtime.heap(), char_value, &byte, 1)) {
-            return set_abort(result, oom_error());
-        }
-        return set_value(result, *char_value);
-    }
-    char16_t unit = str->data16[index];
-    if (!fiber::script::gc_make_string_utf16(&runtime.heap(), char_value, &unit, 1)) {
+    GcHeap::NoGcScope no_gc(runtime);
+    GcString *character = fiber::script::gc_new_string_substring_utf16(
+            &runtime.heap(), str, static_cast<std::size_t>(index), static_cast<std::size_t>(index) + 1);
+    if (!character) {
         return set_abort(result, oom_error());
     }
+    *char_value = fiber::script::js_make_heap_ref(&character->hdr, fiber::script::GcHeapKind::String);
     return set_value(result, *char_value);
 }
 

@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <cstring>
 #include <string>
+#include <string_view>
 
 #include "script/gc/GcInternal.h"
 
@@ -33,7 +35,21 @@ std::string to_utf8(const GcString *str) {
     return out;
 }
 
-TEST(JsGcTest, BytesIncludeExternalBuffers) {
+bool copy_byte_units(std::uint8_t *dst, std::size_t len, void *ctx) noexcept {
+    if (len > 0) {
+        std::memcpy(dst, ctx, len);
+    }
+    return true;
+}
+
+bool copy_utf16_units(char16_t *dst, std::size_t len, void *ctx) noexcept {
+    if (len > 0) {
+        std::memcpy(dst, ctx, len * sizeof(char16_t));
+    }
+    return true;
+}
+
+TEST(JsGcTest, BytesAccountForTailStringStorage) {
     GcHeap heap;
     GcHeap::NoGcScope no_gc(heap);
 
@@ -41,14 +57,13 @@ TEST(JsGcTest, BytesIncludeExternalBuffers) {
     GcString *short_str = fiber::script::gc_new_string_bytes(&heap, reinterpret_cast<const std::uint8_t *>("abc"), 3);
     ASSERT_NE(short_str, nullptr);
     std::size_t after_short = heap.bytes;
-    EXPECT_GT(after_short, base);
+    EXPECT_EQ(after_short - base, sizeof(GcString) + 4);
 
     GcString *long_str =
             fiber::script::gc_new_string_bytes(&heap, reinterpret_cast<const std::uint8_t *>("0123456789"), 10);
     ASSERT_NE(long_str, nullptr);
     std::size_t after_long = heap.bytes;
-    // External data buffer is accounted: the longer string claims strictly more bytes.
-    EXPECT_GT(after_long - after_short, after_short - base);
+    EXPECT_EQ(after_long - after_short, sizeof(GcString) + 11);
 
     GcArray *arr = fiber::script::gc_new_array(&heap, 4);
     ASSERT_NE(arr, nullptr);
@@ -103,6 +118,13 @@ TEST(JsGcTest, InternCacheUsesStringCodeUnitSemantics) {
     ASSERT_NE(wide_str, nullptr);
     ASSERT_NE(wide_str2, nullptr);
     EXPECT_EQ(wide_str, wide_str2);
+
+    const char16_t emoji_units[] = {static_cast<char16_t>(0xD83D), static_cast<char16_t>(0xDE00)};
+    GcString *emoji_utf16 = fiber::script::gc_new_string_utf16(&heap, emoji_units, 2);
+    GcString *emoji_utf8 = fiber::script::gc_new_string(&heap, "\xF0\x9F\x98\x80", 4);
+    ASSERT_NE(emoji_utf16, nullptr);
+    ASSERT_NE(emoji_utf8, nullptr);
+    EXPECT_EQ(emoji_utf16, emoji_utf8);
 }
 
 TEST(JsGcTest, InternCacheDropsSweptStrings) {
@@ -278,7 +300,7 @@ TEST(JsGcTest, GcHeapLocalMarkReleasesLocalRoots) {
     EXPECT_EQ(heap.bytes, 0u);
 }
 
-TEST(JsGcTest, NewStringSurvivesFirstCollectAfterInternalBufferCollection) {
+TEST(JsGcTest, NewStringSurvivesFirstCollectionWithTailStorage) {
     GcHeap heap;
     heap.threshold = 1;
 
@@ -541,41 +563,102 @@ TEST(JsGcTest, NewExceptionFromNativeStringsRootsTemporaryStrings) {
     ASSERT_GT(heap.bytes, name.size() + message.size());
     ASSERT_NE(exc->name, nullptr);
     ASSERT_NE(exc->message, nullptr);
-    EXPECT_EQ(exc->name->len, name.size());
-    EXPECT_EQ(exc->message->len, message.size());
-    EXPECT_EQ(exc->name->data8[0], static_cast<std::uint8_t>('n'));
-    EXPECT_EQ(exc->message->data8[0], static_cast<std::uint8_t>('m'));
+    EXPECT_EQ(exc->name->utf16_len, name.size());
+    EXPECT_EQ(exc->message->utf16_len, message.size());
+    EXPECT_EQ(fiber::script::gc_string_wtf8_data(exc->name)[0], 'n');
+    EXPECT_EQ(fiber::script::gc_string_wtf8_data(exc->message)[0], 'm');
 }
 
-TEST(JsGcTest, NewStringDecodesUtf8IntoCompactStorage) {
+TEST(JsGcTest, NewStringStoresCanonicalWtf8) {
     GcHeap heap;
     GcHeap::NoGcScope no_gc(heap);
 
     GcString *ascii = fiber::script::gc_new_string(&heap, "abc", 3);
     ASSERT_NE(ascii, nullptr);
-    ASSERT_EQ(ascii->encoding, fiber::script::GcStringEncoding::Byte);
-    ASSERT_EQ(ascii->len, 3u);
+    EXPECT_EQ(ascii->utf16_len, 3u);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(ascii), 3u);
+    EXPECT_TRUE(fiber::script::gc_string_is_ascii(ascii));
+    EXPECT_EQ(std::string_view(fiber::script::gc_string_wtf8_data(ascii), 3), "abc");
     EXPECT_EQ(to_utf8(ascii), "abc");
 
     const char latin1[] = {static_cast<char>(0xC3), static_cast<char>(0xA9)};
     GcString *latin1_str = fiber::script::gc_new_string(&heap, latin1, sizeof(latin1));
     ASSERT_NE(latin1_str, nullptr);
-    ASSERT_EQ(latin1_str->encoding, fiber::script::GcStringEncoding::Byte);
-    ASSERT_EQ(latin1_str->len, 1u);
-    ASSERT_NE(latin1_str->data8, nullptr);
-    EXPECT_EQ(latin1_str->data8[0], 0xE9u);
+    EXPECT_EQ(latin1_str->utf16_len, 1u);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(latin1_str), 2u);
+    EXPECT_FALSE(fiber::script::gc_string_is_ascii(latin1_str));
+    EXPECT_EQ(std::string_view(fiber::script::gc_string_wtf8_data(latin1_str), 2),
+              std::string_view(latin1, sizeof(latin1)));
     EXPECT_EQ(to_utf8(latin1_str), std::string(latin1, sizeof(latin1)));
 
     const char emoji[] = {static_cast<char>(0xF0), static_cast<char>(0x9F), static_cast<char>(0x98),
                           static_cast<char>(0x80)};
     GcString *emoji_str = fiber::script::gc_new_string(&heap, emoji, sizeof(emoji));
     ASSERT_NE(emoji_str, nullptr);
-    ASSERT_EQ(emoji_str->encoding, fiber::script::GcStringEncoding::Utf16);
-    ASSERT_EQ(emoji_str->len, 2u);
-    ASSERT_NE(emoji_str->data16, nullptr);
-    EXPECT_EQ(emoji_str->data16[0], static_cast<char16_t>(0xD83D));
-    EXPECT_EQ(emoji_str->data16[1], static_cast<char16_t>(0xDE00));
+    EXPECT_EQ(emoji_str->utf16_len, 2u);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(emoji_str), 4u);
+    EXPECT_EQ(std::string_view(fiber::script::gc_string_wtf8_data(emoji_str), 4),
+              std::string_view(emoji, sizeof(emoji)));
     EXPECT_EQ(to_utf8(emoji_str), std::string(emoji, sizeof(emoji)));
+
+    const char embedded_null[] = {'a', '\0', 'b'};
+    GcString *with_null = fiber::script::gc_new_string(&heap, embedded_null, sizeof(embedded_null));
+    ASSERT_NE(with_null, nullptr);
+    EXPECT_EQ(with_null->utf16_len, 3u);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(with_null), 3u);
+    EXPECT_EQ(to_utf8(with_null), std::string(embedded_null, sizeof(embedded_null)));
+}
+
+TEST(JsGcTest, Utf16SubstringCanSplitSurrogatePair) {
+    GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
+
+    GcString *emoji = fiber::script::gc_new_string(&heap, "\xF0\x9F\x98\x80", 4);
+    ASSERT_NE(emoji, nullptr);
+    GcString *high = fiber::script::gc_new_string_substring_utf16(&heap, emoji, 0, 1);
+    GcString *low = fiber::script::gc_new_string_substring_utf16(&heap, emoji, 1, 2);
+    ASSERT_NE(high, nullptr);
+    ASSERT_NE(low, nullptr);
+    EXPECT_EQ(high->utf16_len, 1u);
+    EXPECT_EQ(low->utf16_len, 1u);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(high), 3u);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(low), 3u);
+    EXPECT_FALSE(fiber::script::gc_string_can_encode_utf8(high));
+    EXPECT_FALSE(fiber::script::gc_string_can_encode_utf8(low));
+
+    const char16_t high_unit = static_cast<char16_t>(0xD83D);
+    const char16_t low_unit = static_cast<char16_t>(0xDE00);
+    EXPECT_EQ(high, fiber::script::gc_new_string_utf16(&heap, &high_unit, 1));
+    EXPECT_EQ(low, fiber::script::gc_new_string_utf16(&heap, &low_unit, 1));
+
+    const char16_t malformed[] = {high_unit, u'A'};
+    GcString *malformed_source = fiber::script::gc_new_string_utf16(&heap, malformed, 2);
+    ASSERT_NE(malformed_source, nullptr);
+    GcString *ascii_tail = fiber::script::gc_new_string_substring_utf16(&heap, malformed_source, 1, 2);
+    ASSERT_NE(ascii_tail, nullptr);
+    EXPECT_TRUE(fiber::script::gc_string_can_encode_utf8(ascii_tail));
+    EXPECT_EQ(to_utf8(ascii_tail), "A");
+}
+
+TEST(JsGcTest, UninitializedCompatibilityWritersProduceWtf8Strings) {
+    GcHeap heap;
+    GcHeap::LocalMark mark(heap);
+    ValueHandle latin_out = heap.local_value();
+    ValueHandle emoji_out = heap.local_value();
+    ASSERT_NE(latin_out, nullptr);
+    ASSERT_NE(emoji_out, nullptr);
+
+    std::uint8_t latin_unit = 0xE9;
+    ASSERT_TRUE(fiber::script::gc_make_string_bytes_uninit(&heap, latin_out, 1, copy_byte_units, &latin_unit));
+    const GcString *latin = fiber::script::js_value_heap_ptr<const GcString>(*latin_out);
+    ASSERT_NE(latin, nullptr);
+    EXPECT_EQ(to_utf8(latin), "\xC3\xA9");
+
+    char16_t emoji_units[] = {static_cast<char16_t>(0xD83D), static_cast<char16_t>(0xDE00)};
+    ASSERT_TRUE(fiber::script::gc_make_string_utf16_uninit(&heap, emoji_out, 2, copy_utf16_units, emoji_units));
+    const GcString *emoji = fiber::script::js_value_heap_ptr<const GcString>(*emoji_out);
+    ASSERT_NE(emoji, nullptr);
+    EXPECT_EQ(to_utf8(emoji), "\xF0\x9F\x98\x80");
 }
 
 TEST(JsGcTest, StringUtf8CursorPreservesCodePointWhenBufferIsTooSmall) {

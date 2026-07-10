@@ -56,7 +56,7 @@ bool is_truthy(const fiber::script::JsValue &value) noexcept {
                 return fiber::script::js_value_native_string(value).len > 0;
             }
             if (auto *str = as_heap_string(value)) {
-                return str->len > 0;
+                return str->utf16_len > 0;
             }
             return false;
         case fiber::script::JsNodeType::Binary:

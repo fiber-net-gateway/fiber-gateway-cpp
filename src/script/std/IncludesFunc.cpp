@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace fiber::script::std_lib {
 
@@ -18,25 +19,28 @@ namespace {
 // accessors yet is constructed from JsValue*, so a const_cast bridges the gap.
 ConstValueHandle const_handle(const JsValue &value) noexcept { return ConstValueHandle(const_cast<JsValue *>(&value)); }
 
-// Fills out with the UTF-8 bytes of a string value; returns false when value is
-// not a string. Borrowed/native strings are already UTF-8; Byte/Utf16 GcStrings
-// are normalized to UTF-8 via gc_string_to_utf8. For well-formed Unicode a
+// Returns a borrowed UTF-8 view; heap strings with isolated UTF-16 surrogates
+// are rejected. For well-formed Unicode a
 // UTF-8 byte-substring search matches Java's UTF-16 String.contains, since
 // containment of a codepoint sequence is encoding-independent.
-bool string_to_utf8(const JsValue &value, std::string &out) noexcept {
+bool string_utf8_view(const JsValue &value, std::string_view &out) noexcept {
+    out = {};
     if (js_value_type(value) != JsNodeType::String) {
         return false;
     }
     if (js_value_is_borrowed_string(value)) {
         NativeStr native = js_value_native_string(value);
-        out.assign(native.data, native.len);
+        if (native.len > 0 && !native.data) {
+            return false;
+        }
+        out = native.len > 0 ? std::string_view(native.data, native.len) : std::string_view{};
         return true;
     }
     const GcString *str = js_value_heap_ptr<const GcString>(value);
     if (str == nullptr) {
         return false;
     }
-    return gc_string_to_utf8(str, out);
+    return gc_string_utf8_view(str, out);
 }
 
 ScriptResult includes_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
@@ -49,13 +53,13 @@ ScriptResult includes_fn(void * /*userdata*/, const Library::HostCallFrame & /*f
     JsNodeType ctype = js_value_type(container);
 
     if (ctype == JsNodeType::String) {
-        std::string text;
-        if (!string_to_utf8(container, text)) {
+        std::string_view text;
+        if (!string_utf8_view(container, text)) {
             return ScriptResult::success(JsValue::make_boolean(false));
         }
         for (std::uint32_t i = 1; i < args.argc; ++i) {
-            std::string item;
-            if (!string_to_utf8(args.args[i], item)) {
+            std::string_view item;
+            if (!string_utf8_view(args.args[i], item)) {
                 // A non-text item cannot be a substring of a text container.
                 return ScriptResult::success(JsValue::make_boolean(false));
             }

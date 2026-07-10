@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <utility>
 
@@ -127,14 +128,19 @@ bool gc_make_string_bytes_uninit(GcHeap *heap, ValueHandle out, std::size_t len,
     }
     *out = JsValue::make_undefined();
     GcHeap::NoGcScope no_gc(*heap);
-    GcString *str = gc_new_string_bytes_uninit(heap, len);
+    auto *data = len > 0 ? static_cast<std::uint8_t *>(gc_detail::gc_alloc_extra(heap, len)) : nullptr;
+    if (len > 0 && !data) {
+        return false;
+    }
+    if (!writer(data, len, ctx)) {
+        gc_detail::gc_free_extra(heap, data, len);
+        return false;
+    }
+    GcString *str = gc_new_string_bytes(heap, data, len);
+    gc_detail::gc_free_extra(heap, data, len);
     if (!str) {
         return false;
     }
-    if (!writer(str->data8, str->len, ctx)) {
-        return false;
-    }
-    str = gc_detail::gc_string_intern_final(heap, str);
     *out = js_make_heap_ref(&str->hdr, GcHeapKind::String);
     return true;
 }
@@ -159,15 +165,24 @@ bool gc_make_string_utf16_uninit(GcHeap *heap, ValueHandle out, std::size_t len,
         return false;
     }
     *out = JsValue::make_undefined();
+    if (len > std::numeric_limits<std::size_t>::max() / sizeof(char16_t)) {
+        return false;
+    }
     GcHeap::NoGcScope no_gc(*heap);
-    GcString *str = gc_new_string_utf16_uninit(heap, len);
+    const std::size_t bytes = len * sizeof(char16_t);
+    auto *data = bytes > 0 ? static_cast<char16_t *>(gc_detail::gc_alloc_extra(heap, bytes)) : nullptr;
+    if (bytes > 0 && !data) {
+        return false;
+    }
+    if (!writer(data, len, ctx)) {
+        gc_detail::gc_free_extra(heap, data, bytes);
+        return false;
+    }
+    GcString *str = gc_new_string_utf16(heap, data, len);
+    gc_detail::gc_free_extra(heap, data, bytes);
     if (!str) {
         return false;
     }
-    if (!writer(str->data16, str->len, ctx)) {
-        return false;
-    }
-    str = gc_detail::gc_string_intern_final(heap, str);
     *out = js_make_heap_ref(&str->hdr, GcHeapKind::String);
     return true;
 }

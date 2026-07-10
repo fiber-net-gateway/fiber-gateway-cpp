@@ -43,58 +43,6 @@ std::size_t next_threshold(std::size_t live_bytes) {
 
 GcMark flip_mark(GcMark mark) { return (mark == GcMark::GcMark_0) ? GcMark::GcMark_1 : GcMark::GcMark_0; }
 
-std::uint64_t hash_code_units(const GcString *str) {
-    if (!str || str->len == 0) {
-        return kFnvOffsetBasis;
-    }
-    if (str->encoding == GcStringEncoding::Byte) {
-        return string_hash_bytes(str->data8, str->len);
-    }
-    return string_hash_utf16(str->data16, str->len);
-}
-
-bool string_equals_bytes(const GcString *str, const std::uint8_t *data, std::size_t len) noexcept {
-    if (!str || str->len != len) {
-        return false;
-    }
-    if (len == 0) {
-        return true;
-    }
-    if (!data) {
-        return false;
-    }
-    if (str->encoding == GcStringEncoding::Byte) {
-        return std::memcmp(str->data8, data, len) == 0;
-    }
-    for (std::size_t i = 0; i < len; ++i) {
-        if (str->data16[i] != static_cast<char16_t>(data[i])) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool string_equals_utf16(const GcString *str, const char16_t *data, std::size_t len) noexcept {
-    if (!str || str->len != len) {
-        return false;
-    }
-    if (len == 0) {
-        return true;
-    }
-    if (!data) {
-        return false;
-    }
-    if (str->encoding == GcStringEncoding::Utf16) {
-        return std::memcmp(str->data16, data, len * sizeof(char16_t)) == 0;
-    }
-    for (std::size_t i = 0; i < str->len; ++i) {
-        if (data[i] != static_cast<char16_t>(str->data8[i])) {
-            return false;
-        }
-    }
-    return true;
-}
-
 [[nodiscard]] bool intern_eligible(std::size_t len) noexcept { return len <= kMaxInternStringLen; }
 
 [[nodiscard]] std::size_t intern_bucket_bytes(std::size_t bucket_count) noexcept {
@@ -175,7 +123,7 @@ bool unlink_heap_obj(GcHeap *heap, GcHeader *target) noexcept {
     return false;
 }
 
-std::uint64_t string_hash_bytes(const std::uint8_t *data, std::size_t len) noexcept {
+std::uint64_t string_hash_wtf8(const char *data, std::size_t len) noexcept {
     std::uint64_t hash = kFnvOffsetBasis;
     if (len == 0) {
         return hash;
@@ -184,22 +132,7 @@ std::uint64_t string_hash_bytes(const std::uint8_t *data, std::size_t len) noexc
         return 0;
     }
     for (std::size_t i = 0; i < len; ++i) {
-        hash ^= static_cast<std::uint16_t>(data[i]);
-        hash *= kFnvPrime;
-    }
-    return hash;
-}
-
-std::uint64_t string_hash_utf16(const char16_t *data, std::size_t len) noexcept {
-    std::uint64_t hash = kFnvOffsetBasis;
-    if (len == 0) {
-        return hash;
-    }
-    if (!data) {
-        return 0;
-    }
-    for (std::size_t i = 0; i < len; ++i) {
-        hash ^= static_cast<std::uint16_t>(data[i]);
+        hash ^= static_cast<unsigned char>(data[i]);
         hash *= kFnvPrime;
     }
     return hash;
@@ -209,12 +142,12 @@ std::uint64_t string_hash(const GcString *str) {
     if (!str) {
         return 0;
     }
-    if (str->hash_valid) {
+    if ((str->flags & kGcStringHashValid) != 0) {
         return str->hash;
     }
     auto *mutable_str = const_cast<GcString *>(str);
-    mutable_str->hash = hash_code_units(str);
-    mutable_str->hash_valid = true;
+    mutable_str->hash = string_hash_wtf8(gc_string_wtf8_data(str), gc_string_byte_len(str));
+    mutable_str->flags |= kGcStringHashValid;
     return mutable_str->hash;
 }
 
@@ -225,57 +158,30 @@ bool string_equals(const GcString *lhs, const GcString *rhs) {
     if (!lhs || !rhs) {
         return false;
     }
-    if (lhs->len != rhs->len) {
+    if (lhs->utf16_len != rhs->utf16_len) {
         return false;
     }
-    if (lhs->len == 0) {
+    const std::size_t lhs_len = gc_string_byte_len(lhs);
+    const std::size_t rhs_len = gc_string_byte_len(rhs);
+    if (lhs_len != rhs_len) {
+        return false;
+    }
+    if (lhs_len == 0) {
         return true;
     }
-    if (lhs->encoding == rhs->encoding) {
-        if (lhs->encoding == GcStringEncoding::Byte) {
-            return std::memcmp(lhs->data8, rhs->data8, lhs->len) == 0;
-        }
-        return std::memcmp(lhs->data16, rhs->data16, lhs->len * sizeof(char16_t)) == 0;
-    }
-    if (lhs->encoding == GcStringEncoding::Byte) {
-        for (std::size_t i = 0; i < lhs->len; ++i) {
-            if (rhs->data16[i] != static_cast<char16_t>(lhs->data8[i])) {
-                return false;
-            }
-        }
-        return true;
-    }
-    for (std::size_t i = 0; i < lhs->len; ++i) {
-        if (lhs->data16[i] != static_cast<char16_t>(rhs->data8[i])) {
-            return false;
-        }
-    }
-    return true;
+    return std::memcmp(gc_string_wtf8_data(lhs), gc_string_wtf8_data(rhs), lhs_len) == 0;
 }
 
-GcString *gc_string_intern_lookup_bytes(GcHeap *heap, const std::uint8_t *data, std::size_t len,
-                                        std::uint64_t hash) noexcept {
-    if (!heap || !intern_eligible(len) || !heap->string_intern_buckets || heap->string_intern_bucket_count == 0) {
+GcString *gc_string_intern_lookup_wtf8(GcHeap *heap, const char *data, std::size_t byte_len, std::size_t utf16_len,
+                                       std::uint64_t hash) noexcept {
+    if (!heap || !intern_eligible(utf16_len) || (byte_len > 0 && !data) || !heap->string_intern_buckets ||
+        heap->string_intern_bucket_count == 0) {
         return nullptr;
     }
     std::size_t bucket = static_cast<std::size_t>(hash) & (heap->string_intern_bucket_count - 1);
     for (GcString *cursor = heap->string_intern_buckets[bucket]; cursor; cursor = cursor->intern_next) {
-        if (cursor->hash == hash && string_equals_bytes(cursor, data, len)) {
-            intern_protect_hit(cursor);
-            return cursor;
-        }
-    }
-    return nullptr;
-}
-
-GcString *gc_string_intern_lookup_utf16(GcHeap *heap, const char16_t *data, std::size_t len,
-                                        std::uint64_t hash) noexcept {
-    if (!heap || !intern_eligible(len) || !heap->string_intern_buckets || heap->string_intern_bucket_count == 0) {
-        return nullptr;
-    }
-    std::size_t bucket = static_cast<std::size_t>(hash) & (heap->string_intern_bucket_count - 1);
-    for (GcString *cursor = heap->string_intern_buckets[bucket]; cursor; cursor = cursor->intern_next) {
-        if (cursor->hash == hash && string_equals_utf16(cursor, data, len)) {
+        if (cursor->hash == hash && cursor->utf16_len == utf16_len && gc_string_byte_len(cursor) == byte_len &&
+            (byte_len == 0 || std::memcmp(gc_string_wtf8_data(cursor), data, byte_len) == 0)) {
             intern_protect_hit(cursor);
             return cursor;
         }
@@ -284,11 +190,11 @@ GcString *gc_string_intern_lookup_utf16(GcHeap *heap, const char16_t *data, std:
 }
 
 void gc_string_intern_insert(GcHeap *heap, GcString *str, std::uint64_t hash) noexcept {
-    if (!heap || !str || !intern_eligible(str->len)) {
+    if (!heap || !str || !intern_eligible(str->utf16_len)) {
         return;
     }
     str->hash = hash;
-    str->hash_valid = true;
+    str->flags |= kGcStringHashValid;
     if (!intern_ensure_buckets(heap, heap->string_intern_size + 1) && !heap->string_intern_buckets) {
         return;
     }
@@ -299,17 +205,13 @@ void gc_string_intern_insert(GcHeap *heap, GcString *str, std::uint64_t hash) no
 }
 
 GcString *gc_string_intern_final(GcHeap *heap, GcString *str) noexcept {
-    if (!heap || !str || !intern_eligible(str->len)) {
+    if (!heap || !str || !intern_eligible(str->utf16_len)) {
         return str;
     }
 
     std::uint64_t hash = string_hash(str);
-    GcString *existing = nullptr;
-    if (str->encoding == GcStringEncoding::Byte) {
-        existing = gc_string_intern_lookup_bytes(heap, str->data8, str->len, hash);
-    } else {
-        existing = gc_string_intern_lookup_utf16(heap, str->data16, str->len, hash);
-    }
+    GcString *existing =
+            gc_string_intern_lookup_wtf8(heap, gc_string_wtf8_data(str), gc_string_byte_len(str), str->utf16_len, hash);
     if (existing && existing != str) {
         if (unlink_heap_obj(heap, &str->hdr)) {
             gc_free_obj(heap, &str->hdr);
@@ -333,7 +235,7 @@ void gc_string_intern_free_table(GcHeap *heap) noexcept {
 
 void gc_string_intern_remove(GcHeap *heap, GcString *str) noexcept {
     if (!heap || !str || !heap->string_intern_buckets || heap->string_intern_bucket_count == 0 ||
-        !intern_eligible(str->len) || !str->hash_valid) {
+        !intern_eligible(str->utf16_len) || (str->flags & kGcStringHashValid) == 0) {
         return;
     }
 
@@ -375,19 +277,6 @@ std::size_t bucket_count_for_entries(std::size_t entry_capacity) {
         needed = kMinBucketCount;
     }
     return next_pow2(needed);
-}
-
-std::size_t string_storage_bytes(std::size_t len, GcStringEncoding encoding) {
-    if (encoding == GcStringEncoding::Utf16) {
-        if (len > (std::numeric_limits<std::size_t>::max() / sizeof(char16_t)) - 1) {
-            return 0;
-        }
-        return sizeof(char16_t) * (len + 1);
-    }
-    if (len == std::numeric_limits<std::size_t>::max()) {
-        return 0;
-    }
-    return len + 1;
 }
 
 std::size_t array_storage_bytes(std::size_t capacity) { return sizeof(JsValue) * capacity; }
@@ -544,6 +433,9 @@ JsValue make_heap_string_value(GcString *str) {
 
 GcHeader *gc_alloc_raw(GcHeap *heap, std::size_t size, GcHeapKind kind) {
     FIBER_ASSERT(heap->no_gc_active());
+    if (size > std::numeric_limits<std::uint32_t>::max()) {
+        return nullptr;
+    }
     heap->maybe_collect_for_alloc(size);
     void *mem = heap->alloc.alloc(size);
     if (!mem) {
@@ -650,13 +542,6 @@ void gc_free_obj(GcHeap *heap, GcHeader *obj) {
         case GcHeapKind::String: {
             auto *str = reinterpret_cast<GcString *>(obj);
             gc_string_intern_remove(heap, str);
-            if (str->encoding == GcStringEncoding::Utf16) {
-                if (str->data16) {
-                    gc_free_extra(heap, str->data16, string_storage_bytes(str->len, GcStringEncoding::Utf16));
-                }
-            } else if (str->data8) {
-                gc_free_extra(heap, str->data8, string_storage_bytes(str->len, GcStringEncoding::Byte));
-            }
             break;
         }
         case GcHeapKind::Binary: {

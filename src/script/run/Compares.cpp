@@ -2,6 +2,7 @@
 
 #include "../../common/json/Utf.h"
 #include "../gc/GcInternal.h"
+#include "../gc/Wtf8.h"
 
 #include <cmath>
 #include <cstddef>
@@ -65,7 +66,7 @@ bool is_truthy(const fiber::script::JsValue &value) noexcept {
                 return fiber::script::js_value_native_string(value).len > 0;
             }
             if (auto *str = as_heap_string(value)) {
-                return str->len > 0;
+                return str->utf16_len > 0;
             }
             return false;
         case fiber::script::JsNodeType::Binary:
@@ -79,8 +80,7 @@ bool is_truthy(const fiber::script::JsValue &value) noexcept {
 }
 
 enum class StringKind : std::uint8_t {
-    HeapByte,
-    HeapUtf16,
+    HeapWtf8,
     NativeUtf8,
 };
 
@@ -133,15 +133,13 @@ void clamp_exp_add_many(int &exp, int delta) noexcept {
 
 struct StringCursor {
     StringKind kind = StringKind::NativeUtf8;
-    const std::uint8_t *bytes = nullptr;
-    const char16_t *u16 = nullptr;
     const char *utf8 = nullptr;
     std::size_t len = 0;
-    std::size_t index = 0;
     std::size_t pos = 0;
     bool has_pending = false;
     char16_t pending = 0;
     bool malformed = false;
+    fiber::script::gc_detail::Wtf8Cursor wtf8;
 };
 
 bool init_heap_string_cursor(const fiber::script::GcString *str, StringCursor &out) noexcept {
@@ -149,15 +147,10 @@ bool init_heap_string_cursor(const fiber::script::GcString *str, StringCursor &o
     if (!str) {
         return false;
     }
-    if (str->encoding == fiber::script::GcStringEncoding::Byte) {
-        out.kind = StringKind::HeapByte;
-        out.bytes = str->data8;
-    } else {
-        out.kind = StringKind::HeapUtf16;
-        out.u16 = str->data16;
-    }
-    out.len = str->len;
-    return out.len == 0 || out.bytes || out.u16;
+    out.kind = StringKind::HeapWtf8;
+    out.wtf8.data = fiber::script::gc_string_wtf8_data(str);
+    out.wtf8.len = fiber::script::gc_string_byte_len(str);
+    return true;
 }
 
 bool init_native_string_cursor(fiber::script::NativeStr native, StringCursor &out) noexcept {
@@ -179,25 +172,18 @@ bool init_string_cursor(const fiber::script::JsValue &value, StringCursor &out) 
 }
 
 bool cursor_next(StringCursor &cursor, char16_t &unit) noexcept {
-    if (cursor.has_pending) {
-        unit = cursor.pending;
-        cursor.has_pending = false;
-        return true;
-    }
     switch (cursor.kind) {
-        case StringKind::HeapByte:
-            if (cursor.index >= cursor.len) {
-                return false;
-            }
-            unit = static_cast<char16_t>(cursor.bytes[cursor.index++]);
-            return true;
-        case StringKind::HeapUtf16:
-            if (cursor.index >= cursor.len) {
-                return false;
-            }
-            unit = cursor.u16[cursor.index++];
-            return true;
+        case StringKind::HeapWtf8: {
+            const bool has_unit = fiber::script::gc_detail::wtf8_next_utf16_unit(cursor.wtf8, unit);
+            cursor.malformed = cursor.wtf8.malformed;
+            return has_unit;
+        }
         case StringKind::NativeUtf8: {
+            if (cursor.has_pending) {
+                unit = cursor.pending;
+                cursor.has_pending = false;
+                return true;
+            }
             if (cursor.pos >= cursor.len) {
                 return false;
             }
@@ -636,45 +622,23 @@ bool compare_strings(const fiber::script::JsValue &lhs, const fiber::script::JsV
         if (!lhs_str || !rhs_str) {
             return false;
         }
-        if (lhs_str->encoding == fiber::script::GcStringEncoding::Byte &&
-            rhs_str->encoding == fiber::script::GcStringEncoding::Byte) {
-            std::size_t min_len = lhs_str->len < rhs_str->len ? lhs_str->len : rhs_str->len;
+        if (fiber::script::gc_string_is_ascii(lhs_str) && fiber::script::gc_string_is_ascii(rhs_str)) {
+            const std::size_t lhs_len = fiber::script::gc_string_byte_len(lhs_str);
+            const std::size_t rhs_len = fiber::script::gc_string_byte_len(rhs_str);
+            std::size_t min_len = lhs_len < rhs_len ? lhs_len : rhs_len;
             int cmp = 0;
             if (min_len > 0) {
-                cmp = std::memcmp(lhs_str->data8, rhs_str->data8, min_len);
+                cmp = std::memcmp(fiber::script::gc_string_wtf8_data(lhs_str),
+                                  fiber::script::gc_string_wtf8_data(rhs_str), min_len);
             }
             if (cmp == 0) {
-                if (lhs_str->len < rhs_str->len) {
+                if (lhs_len < rhs_len) {
                     cmp = -1;
-                } else if (lhs_str->len > rhs_str->len) {
+                } else if (lhs_len > rhs_len) {
                     cmp = 1;
                 }
             }
             result = cmp;
-            return true;
-        }
-        if (lhs_str->encoding == fiber::script::GcStringEncoding::Utf16 &&
-            rhs_str->encoding == fiber::script::GcStringEncoding::Utf16) {
-            std::size_t min_len = lhs_str->len < rhs_str->len ? lhs_str->len : rhs_str->len;
-            for (std::size_t i = 0; i < min_len; ++i) {
-                char16_t l_unit = lhs_str->data16[i];
-                char16_t r_unit = rhs_str->data16[i];
-                if (l_unit < r_unit) {
-                    result = -1;
-                    return true;
-                }
-                if (l_unit > r_unit) {
-                    result = 1;
-                    return true;
-                }
-            }
-            if (lhs_str->len < rhs_str->len) {
-                result = -1;
-            } else if (lhs_str->len > rhs_str->len) {
-                result = 1;
-            } else {
-                result = 0;
-            }
             return true;
         }
     }
