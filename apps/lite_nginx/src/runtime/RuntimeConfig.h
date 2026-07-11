@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "../config/Ast.h"
-#include "common/route/RoutePathMatcher.h"
+#include "common/util/RoutePathMatcher.h"
 #include "http/HeaderMap.h"
 #include "http/Http1ConnectionGroupKey.h"
 #include "net/IpAddress.h"
@@ -84,7 +84,7 @@ struct ServerRuntime {
     std::string certificate;
     std::string certificate_key;
     std::vector<LocationRuntime> locations;
-    fiber::common::route::RoutePathMatcher<std::uint32_t> location_matcher;
+    fiber::util::RoutePathMatcher<std::uint32_t> location_matcher;
 };
 
 struct ServerNameRuntime {

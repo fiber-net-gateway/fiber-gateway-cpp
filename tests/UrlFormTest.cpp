@@ -5,16 +5,16 @@
 #include <vector>
 
 #include "common/IoError.h"
-#include "common/url/UrlForm.h"
+#include "common/util/UrlForm.h"
 
 namespace {
 
 using fiber::common::IoErr;
-using fiber::common::url::form_build_query;
-using fiber::common::url::form_decode;
-using fiber::common::url::form_decode_into;
-using fiber::common::url::form_decode_query;
-using fiber::common::url::form_encode;
+using fiber::util::form_build_query;
+using fiber::util::form_decode;
+using fiber::util::form_decode_into;
+using fiber::util::form_decode_query;
+using fiber::util::form_encode;
 
 std::string encode(std::string_view in) {
     std::string out;

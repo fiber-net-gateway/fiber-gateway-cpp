@@ -1,5 +1,5 @@
-#ifndef FIBER_COMMON_URL_URL_FORM_H
-#define FIBER_COMMON_URL_URL_FORM_H
+#ifndef FIBER_UTIL_URL_FORM_H
+#define FIBER_UTIL_URL_FORM_H
 
 #include <cstddef>
 #include <expected>
@@ -9,7 +9,7 @@
 
 #include "../IoError.h"
 
-namespace fiber::common::url {
+namespace fiber::util {
 
 // application/x-www-form-urlencoded codec (Jetty UrlEncoded semantics), operating
 // entirely on UTF-8 byte strings. No JsValue/GcHeap dependency lives here; the
@@ -114,6 +114,6 @@ void form_build_query(std::string &out, Source &&source) {
     }
 }
 
-} // namespace fiber::common::url
+} // namespace fiber::util
 
-#endif // FIBER_COMMON_URL_URL_FORM_H
+#endif // FIBER_UTIL_URL_FORM_H

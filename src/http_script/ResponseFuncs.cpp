@@ -4,7 +4,7 @@
 
 #include "../async/Task.h"
 #include "../common/IoError.h"
-#include "../http/CookieCodec.h"
+#include "../common/util/CookieCodec.h"
 #include "../http/HttpExchange.h"
 #include "../script/AsyncTask.h"
 #include "../script/JsGc.h"
@@ -232,7 +232,7 @@ ScriptResult add_cookie_fn(void * /*userdata*/, const Library::HostCallFrame &fr
     bool http_only = js_value_type(http_only_v) == JsNodeType::Boolean && js_value_bool(http_only_v);
     std::string_view same_site = field_string(*heap, node, "sameSite", 8);
 
-    fiber::http::Cookie cookie{};
+    fiber::util::Cookie cookie{};
     cookie.name = name;
     cookie.value = value_buf;
     cookie.domain = domain;
@@ -241,17 +241,17 @@ ScriptResult add_cookie_fn(void * /*userdata*/, const Library::HostCallFrame &fr
     cookie.secure = secure;
     cookie.http_only = http_only;
     if (same_site == "Lax") {
-        cookie.same_site = fiber::http::CookieSameSite::Lax;
+        cookie.same_site = fiber::util::CookieSameSite::Lax;
     } else if (same_site == "Strict") {
-        cookie.same_site = fiber::http::CookieSameSite::Strict;
+        cookie.same_site = fiber::util::CookieSameSite::Strict;
     } else if (same_site == "None") {
-        cookie.same_site = fiber::http::CookieSameSite::None;
+        cookie.same_site = fiber::util::CookieSameSite::None;
     } else {
-        cookie.same_site = fiber::http::CookieSameSite::Unset;
+        cookie.same_site = fiber::util::CookieSameSite::Unset;
     }
 
     std::string encoded;
-    if (!fiber::http::encode_set_cookie(cookie, encoded)) {
+    if (!fiber::util::encode_set_cookie(cookie, encoded)) {
         return ScriptResult::success(JsValue::make_boolean(false));
     }
     ctx->add_response_header("Set-Cookie", encoded);

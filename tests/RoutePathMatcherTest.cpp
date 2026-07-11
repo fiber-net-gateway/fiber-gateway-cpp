@@ -7,12 +7,12 @@
 #include <utility>
 #include <vector>
 
-#include "common/route/RoutePathMatcher.h"
+#include "common/util/RoutePathMatcher.h"
 
 namespace {
 
-using fiber::common::route::RoutePathMatcher;
-using fiber::common::route::RoutePatternError;
+using fiber::util::RoutePathMatcher;
+using fiber::util::RoutePatternError;
 
 struct TestRoute {
     int token = -1;

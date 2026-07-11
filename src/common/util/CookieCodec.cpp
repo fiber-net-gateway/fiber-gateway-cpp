@@ -1,6 +1,6 @@
 #include "CookieCodec.h"
 
-namespace fiber::http {
+namespace fiber::util {
 
 namespace {
 
@@ -148,4 +148,4 @@ bool encode_set_cookie(const Cookie &cookie, std::string &out) {
     return true;
 }
 
-} // namespace fiber::http
+} // namespace fiber::util

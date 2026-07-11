@@ -1,5 +1,5 @@
-#ifndef FIBER_COMMON_ROUTE_ROUTE_PATH_MATCHER_H
-#define FIBER_COMMON_ROUTE_ROUTE_PATH_MATCHER_H
+#ifndef FIBER_UTIL_ROUTE_PATH_MATCHER_H
+#define FIBER_UTIL_ROUTE_PATH_MATCHER_H
 
 #include <algorithm>
 #include <cstdint>
@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-namespace fiber::common::route {
+namespace fiber::util {
 
 class RoutePatternError : public std::invalid_argument {
 public:
@@ -492,6 +492,6 @@ private:
     bool complete_{false};
 };
 
-} // namespace fiber::common::route
+} // namespace fiber::util
 
-#endif // FIBER_COMMON_ROUTE_ROUTE_PATH_MATCHER_H
+#endif // FIBER_UTIL_ROUTE_PATH_MATCHER_H

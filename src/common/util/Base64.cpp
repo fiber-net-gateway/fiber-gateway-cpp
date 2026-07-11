@@ -1,6 +1,6 @@
 #include "Base64.h"
 
-namespace fiber::common::base64 {
+namespace fiber::util {
 
 namespace {
 
@@ -110,4 +110,4 @@ bool base64_decode(std::string_view in, std::string &out) noexcept {
     return true;
 }
 
-} // namespace fiber::common::base64
+} // namespace fiber::util
