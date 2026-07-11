@@ -1039,4 +1039,97 @@ http {
     EXPECT_NE(config.error().message.find("only one of proxy_pass or script_file"), std::string::npos);
 }
 
+TEST(LiteNginxRuntimeTest, ScriptFileLocationResolvesPathVar) {
+    const std::string script_path = "/tmp/lite_nginx_path_var_resolve_test.js";
+    {
+        std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.good());
+        // $path.id is validated at compile time against the route pattern /users/:id, and
+        // resolved at request time from the matched path capture.
+        file << "resp.sendJson(200, {id: $path.id, uri: $req.uri, method: $req.method});";
+    }
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location /users/:id {
+            script_file SCRIPT_PATH;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_path);
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "path_var.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    ASSERT_TRUE(runtime->servers[0].locations[0].script != nullptr);
+    ASSERT_TRUE(runtime->servers[0].locations[0].route_lib != nullptr);
+
+    RuntimeHarness harness(*runtime);
+
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+
+    const char request[] = "GET /users/42 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+
+    std::string response = recv_http_response(client);
+    ::close(client);
+
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("\"id\":\"42\""), std::string::npos) << response;
+    EXPECT_NE(response.find("\"uri\":\"/users/42\""), std::string::npos) << response;
+    EXPECT_NE(response.find("\"method\":\"GET\""), std::string::npos) << response;
+
+    ::unlink(script_path.c_str());
+}
+
+TEST(LiteNginxRuntimeTest, ScriptFileLocationRejectsUnknownPathVar) {
+    // $path.missing is not a capture of /users/:id, so the script must fail to compile at
+    // runtime-build time with "constant not found".
+    const std::string script_path = "/tmp/lite_nginx_path_var_unknown_test.js";
+    {
+        std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.good());
+        file << "resp.sendJson(200, $path.missing);";
+    }
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location /users/:id {
+            script_file SCRIPT_PATH;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_path);
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "path_var_unknown.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_FALSE(runtime.has_value());
+    EXPECT_NE(runtime.error().message.find("constant not found"), std::string::npos) << runtime.error().message;
+
+    ::unlink(script_path.c_str());
+}
+
 } // namespace

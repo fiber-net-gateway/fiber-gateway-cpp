@@ -18,6 +18,10 @@
 #include "script/Script.h"
 #include "script/std/StdLibrary.h"
 
+namespace fiber::http_script {
+class RouteScriptLibrary;
+}
+
 namespace fiber::lite_nginx::runtime {
 
 enum class KeepaliveMode : unsigned char {
@@ -76,6 +80,9 @@ struct LocationRuntime {
     bool host_header_overridden = false;
     // Non-null when this location runs a script (kind == Script) instead of proxying.
     std::shared_ptr<fiber::script::Script> script;
+    // The per-location route-scoped library the script was compiled against. Outlives the
+    // script (HostCallable pointers are baked in); kept alive here alongside it.
+    std::shared_ptr<fiber::http_script::RouteScriptLibrary> route_lib;
 };
 
 struct ServerRuntime {

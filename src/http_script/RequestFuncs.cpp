@@ -130,22 +130,7 @@ ScriptResult get_query_all_fn(void * /*userdata*/, const Library::HostCallFrame 
 }
 
 ScriptResult lookup_key(GcHeap &heap, JsValue object, std::string_view key) noexcept {
-    if (js_value_type(object) != JsNodeType::Object) {
-        return ScriptResult::success(JsValue::make_undefined());
-    }
-    GcHeap::LocalMark mark(heap);
-    ValueHandle found = heap.local_value();
-    if (!found) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
-    }
-    *found = JsValue::make_undefined();
-    if (!fiber::script::gc_object_get_key(&heap, ConstValueHandle(&object), key.data(), key.size(), found)) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
-    }
-    if (js_value_type(*found) == JsNodeType::Undefined) {
-        return ScriptResult::success(JsValue::make_undefined()); // absent
-    }
-    return ScriptResult::success(*found);
+    return ScriptExchangeCtx::lookup_property(heap, object, key);
 }
 
 ScriptResult get_query_one_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
