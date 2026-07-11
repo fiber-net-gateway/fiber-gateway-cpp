@@ -21,18 +21,18 @@ public:
     DirectiveDef *resolve_directive_def(std::string_view type, std::string_view name,
                                         const std::vector<fiber::script::JsValue> &literals) const override;
 
-    void register_func(std::string name, FunctionSignature signature, Function function, void *userdata = nullptr,
+    void register_func(std::string_view name, FunctionSignature signature, Function function, void *userdata = nullptr,
                        const char *debug_name = nullptr);
-    void register_func(std::string name, FunctionSignature signature, std::vector<fiber::script::JsValue> defaults,
+    void register_func(std::string_view name, FunctionSignature signature, std::vector<fiber::script::JsValue> defaults,
                        Function function, void *userdata = nullptr, const char *debug_name = nullptr);
-    void register_async_func(std::string name, FunctionSignature signature, AsyncFunction function,
+    void register_async_func(std::string_view name, FunctionSignature signature, AsyncFunction function,
                              void *userdata = nullptr, const char *debug_name = nullptr);
-    void register_async_func(std::string name, FunctionSignature signature,
+    void register_async_func(std::string_view name, FunctionSignature signature,
                              std::vector<fiber::script::JsValue> defaults, AsyncFunction function,
                              void *userdata = nullptr, const char *debug_name = nullptr);
-    void register_constant(std::string name, Constant constant, void *userdata = nullptr,
+    void register_constant(std::string_view name, Constant constant, void *userdata = nullptr,
                            const char *debug_name = nullptr);
-    void register_async_constant(std::string name, AsyncConstant constant, void *userdata = nullptr,
+    void register_async_constant(std::string_view name, AsyncConstant constant, void *userdata = nullptr,
                                  const char *debug_name = nullptr);
 
 private:

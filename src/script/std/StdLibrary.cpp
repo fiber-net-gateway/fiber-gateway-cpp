@@ -192,19 +192,19 @@ Library::DirectiveDef *StdLibrary::resolve_directive_def(std::string_view type, 
     return nullptr;
 }
 
-void StdLibrary::register_func(std::string name, FunctionSignature signature, Function function, void *userdata,
+void StdLibrary::register_func(std::string_view name, FunctionSignature signature, Function function, void *userdata,
                                const char *debug_name) {
-    register_func(std::move(name), signature, {}, function, userdata, debug_name);
+    register_func(name, signature, {}, function, userdata, debug_name);
 }
 
-void StdLibrary::register_func(std::string name, FunctionSignature signature,
+void StdLibrary::register_func(std::string_view name, FunctionSignature signature,
                                std::vector<fiber::script::JsValue> defaults, Function function, void *userdata,
                                const char *debug_name) {
     signature.default_count = static_cast<std::uint16_t>(defaults.size());
     signature.defaults = nullptr;
     FIBER_ASSERT(function != nullptr);
     FIBER_ASSERT(signature_valid(signature, defaults.size()));
-    auto &entries = functions_[std::move(name)];
+    auto &entries = functions_[std::string(name)];
     for (const FunctionEntry &entry: entries) {
         FIBER_ASSERT(!signature_ranges_overlap(entry.signature, signature));
     }
@@ -215,19 +215,19 @@ void StdLibrary::register_func(std::string name, FunctionSignature signature,
     entries.push_back(std::move(entry));
 }
 
-void StdLibrary::register_async_func(std::string name, FunctionSignature signature, AsyncFunction function,
+void StdLibrary::register_async_func(std::string_view name, FunctionSignature signature, AsyncFunction function,
                                      void *userdata, const char *debug_name) {
-    register_async_func(std::move(name), signature, {}, function, userdata, debug_name);
+    register_async_func(name, signature, {}, function, userdata, debug_name);
 }
 
-void StdLibrary::register_async_func(std::string name, FunctionSignature signature,
+void StdLibrary::register_async_func(std::string_view name, FunctionSignature signature,
                                      std::vector<fiber::script::JsValue> defaults, AsyncFunction function,
                                      void *userdata, const char *debug_name) {
     signature.default_count = static_cast<std::uint16_t>(defaults.size());
     signature.defaults = nullptr;
     FIBER_ASSERT(function != nullptr);
     FIBER_ASSERT(signature_valid(signature, defaults.size()));
-    auto &entries = async_functions_[std::move(name)];
+    auto &entries = async_functions_[std::string(name)];
     for (const FunctionEntry &entry: entries) {
         FIBER_ASSERT(!signature_ranges_overlap(entry.signature, signature));
     }
@@ -238,18 +238,18 @@ void StdLibrary::register_async_func(std::string name, FunctionSignature signatu
     entries.push_back(std::move(entry));
 }
 
-void StdLibrary::register_constant(std::string name, Constant constant, void *userdata, const char *debug_name) {
+void StdLibrary::register_constant(std::string_view name, Constant constant, void *userdata, const char *debug_name) {
     FIBER_ASSERT(constant != nullptr);
     const bool inserted =
-            constants_.emplace(std::move(name), make_constant_callable(constant, userdata, debug_name)).second;
+            constants_.emplace(std::string(name), make_constant_callable(constant, userdata, debug_name)).second;
     FIBER_ASSERT(inserted);
 }
 
-void StdLibrary::register_async_constant(std::string name, AsyncConstant constant, void *userdata,
+void StdLibrary::register_async_constant(std::string_view name, AsyncConstant constant, void *userdata,
                                          const char *debug_name) {
     FIBER_ASSERT(constant != nullptr);
     const bool inserted =
-            async_constants_.emplace(std::move(name), make_async_constant_callable(constant, userdata, debug_name))
+            async_constants_.emplace(std::string(name), make_async_constant_callable(constant, userdata, debug_name))
                     .second;
     FIBER_ASSERT(inserted);
 }
