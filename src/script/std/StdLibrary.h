@@ -35,14 +35,18 @@ public:
     void register_async_constant(std::string_view name, AsyncConstant constant, void *userdata = nullptr,
                                  const char *debug_name = nullptr);
 
+    // Public so hosts (e.g. lite_nginx) can own a StdLibrary instance and register
+    // host-specific functions onto it via register_func/register_async_func, keeping the
+    // process-wide instance() pure. The default standard functions are registered in the
+    // constructor regardless of which instance is used.
+    StdLibrary();
+
 private:
     struct FunctionEntry {
         FunctionSignature signature{};
         std::vector<fiber::script::JsValue> defaults;
         HostCallable callable;
     };
-
-    StdLibrary();
 
     std::unordered_map<std::string, std::deque<FunctionEntry>> functions_;
     std::unordered_map<std::string, std::deque<FunctionEntry>> async_functions_;
