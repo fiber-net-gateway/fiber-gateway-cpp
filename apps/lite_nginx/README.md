@@ -123,7 +123,9 @@ Top level:
   back to transient connections), `keepalive_timeout <duration>;`, and `steal on|off|auto;`
   (cross-loop idle-connection sharing: `auto` = on when `worker_processes > 1`). `steal on` uses
   one pool whose idle connections can be borrowed across worker loops; `steal off` gives each
-  worker loop its own local pool (no cross-loop reuse).
+  worker loop its own local pool (no cross-loop reuse). `max_idle_total <n>;` caps the total
+  idle connections across all peer groups in one pool (0 or omitted => `keepalive_size * 64`);
+  `initial_group_capacity <n>;` seeds the per-group hash table (0 or omitted => 16).
 - `server { ... }`
 
 `upstream` block:

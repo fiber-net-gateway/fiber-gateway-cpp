@@ -13,8 +13,11 @@ fiber::http::Http1ConnectionPoolCore::Options
 make_pool_options(const fiber::lite_nginx::runtime::ConnectionPoolRuntime &cp) noexcept {
     fiber::http::Http1ConnectionPoolCore::Options options{};
     options.max_idle_per_group = cp.keepalive_size;
-    options.max_idle_total = cp.keepalive_size * 64;
-    options.initial_group_capacity = 16;
+    // 0 => derive the historical default (per-group cap * 64 peer groups). normalize_options
+    // treats a literal 0 as "disable pooling", so the derive must happen here, not at the pool.
+    options.max_idle_total =
+            cp.max_idle_total != 0 ? cp.max_idle_total : cp.keepalive_size * 64;
+    options.initial_group_capacity = cp.initial_group_capacity != 0 ? cp.initial_group_capacity : 16;
     options.idle_timeout = cp.keepalive_timeout;
     return options;
 }

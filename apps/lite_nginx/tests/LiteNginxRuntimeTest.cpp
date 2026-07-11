@@ -888,6 +888,37 @@ http {
     EXPECT_EQ(upstream.accept_count(), 1);
 }
 
+TEST(LiteNginxRuntimeTest, PropagatesConnectionPoolSizingToRuntime) {
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:8080;
+
+    connection_pool {
+        keepalive_size 4;
+        keepalive_timeout 30s;
+        max_idle_total 128;
+        initial_group_capacity 8;
+    }
+
+    server {
+        server_name localhost;
+        location / {
+            proxy_pass http://127.0.0.1:9001;
+        }
+    }
+}
+)";
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "runtime_sizing.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    EXPECT_EQ(runtime->connection_pool.keepalive_size, 4u);
+    EXPECT_EQ(runtime->connection_pool.max_idle_total, 128u);
+    EXPECT_EQ(runtime->connection_pool.initial_group_capacity, 8u);
+}
+
 TEST(LiteNginxRuntimeTest, DoesNotPoolDirectProxyPassTargets) {
     std::promise<std::string> first_upstream_request;
     std::promise<std::string> second_upstream_request;

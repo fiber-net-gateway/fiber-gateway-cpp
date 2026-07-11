@@ -711,6 +711,36 @@ std::expected<ConnectionPoolConfig, ConfigError> parse_connection_pool(const Dir
             }
             continue;
         }
+        if (child.name == "max_idle_total") {
+            if (child.args.size() != 1) {
+                return std::unexpected(make_error(child, "max_idle_total expects exactly one argument"));
+            }
+            if (contains_variable(child.args[0])) {
+                return std::unexpected(make_error(child, "max_idle_total does not support variables in V1"));
+            }
+            std::size_t sz = 0;
+            auto r = std::from_chars(child.args[0].data(), child.args[0].data() + child.args[0].size(), sz);
+            if (r.ec != std::errc() || r.ptr != child.args[0].data() + child.args[0].size()) {
+                return std::unexpected(make_error(child, "max_idle_total must be a non-negative integer"));
+            }
+            pool.max_idle_total = sz;
+            continue;
+        }
+        if (child.name == "initial_group_capacity") {
+            if (child.args.size() != 1) {
+                return std::unexpected(make_error(child, "initial_group_capacity expects exactly one argument"));
+            }
+            if (contains_variable(child.args[0])) {
+                return std::unexpected(make_error(child, "initial_group_capacity does not support variables in V1"));
+            }
+            std::size_t sz = 0;
+            auto r = std::from_chars(child.args[0].data(), child.args[0].data() + child.args[0].size(), sz);
+            if (r.ec != std::errc() || r.ptr != child.args[0].data() + child.args[0].size()) {
+                return std::unexpected(make_error(child, "initial_group_capacity must be a non-negative integer"));
+            }
+            pool.initial_group_capacity = sz;
+            continue;
+        }
         return std::unexpected(make_error(child, "unsupported directive in connection_pool block: " + child.name));
     }
     return pool;

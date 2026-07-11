@@ -37,6 +37,8 @@ struct ConnectionPoolRuntime {
     std::size_t keepalive_size = 0;
     std::chrono::milliseconds keepalive_timeout{30000};
     bool steal = false;
+    std::size_t max_idle_total = 0;          // 0 => derive (keepalive_size * 64)
+    std::size_t initial_group_capacity = 0;  // 0 => built-in default (16)
 };
 
 struct TlsIdentityRuntime {

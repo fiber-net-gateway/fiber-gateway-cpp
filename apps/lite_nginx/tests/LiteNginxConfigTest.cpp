@@ -48,6 +48,8 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
                 keepalive_size 32;
                 keepalive_timeout 30s;
                 steal auto;
+                max_idle_total 2048;
+                initial_group_capacity 32;
             }
 
             upstream backend {
@@ -106,6 +108,8 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
     EXPECT_EQ(config.http.connection_pool.keepalive_size, 32u);
     EXPECT_EQ(config.http.connection_pool.keepalive_timeout, std::chrono::seconds(30));
     EXPECT_EQ(config.http.connection_pool.steal, PoolSteal::Auto);
+    EXPECT_EQ(config.http.connection_pool.max_idle_total, 2048u);
+    EXPECT_EQ(config.http.connection_pool.initial_group_capacity, 32u);
     EXPECT_EQ(config.http.upstreams[0].connect_timeout, std::chrono::seconds(2));
 
     ASSERT_EQ(config.http.servers.size(), 1u);
@@ -189,6 +193,59 @@ TEST(LiteNginxConfigTest, ParsesConnectionPoolSteal) {
         auto config = load("maybe");
         EXPECT_FALSE(config.has_value());
         EXPECT_NE(config.error().message.find("steal"), std::string::npos);
+    }
+}
+
+TEST(LiteNginxConfigTest, ParsesConnectionPoolSizingDirectives) {
+    {
+        auto config_result = ConfigLoader::load_from_string(R"(
+            http {
+                listen 8080;
+                connection_pool {
+                    keepalive_size 8;
+                    keepalive_timeout 10s;
+                    max_idle_total 512;
+                    initial_group_capacity 64;
+                }
+                server { server_name localhost; location / { proxy_pass http://127.0.0.1:9001; } }
+            }
+        )",
+                                                            "sizing.conf");
+        ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+        EXPECT_EQ(config_result->http.connection_pool.max_idle_total, 512u);
+        EXPECT_EQ(config_result->http.connection_pool.initial_group_capacity, 64u);
+    }
+    {
+        // Omitted => 0, the "derive / use built-in default" sentinel consumed by make_pool_options.
+        auto config_result = ConfigLoader::load_from_string(R"(
+            http {
+                listen 8080;
+                connection_pool {
+                    keepalive_size 8;
+                    keepalive_timeout 10s;
+                }
+                server { server_name localhost; location / { proxy_pass http://127.0.0.1:9001; } }
+            }
+        )",
+                                                            "sizing_default.conf");
+        ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+        EXPECT_EQ(config_result->http.connection_pool.max_idle_total, 0u);
+        EXPECT_EQ(config_result->http.connection_pool.initial_group_capacity, 0u);
+    }
+    {
+        auto config_result = ConfigLoader::load_from_string(R"(
+            http {
+                listen 8080;
+                connection_pool {
+                    keepalive_size 8;
+                    max_idle_total not-a-number;
+                }
+                server { server_name localhost; location / { proxy_pass http://127.0.0.1:9001; } }
+            }
+        )",
+                                                            "sizing_bad.conf");
+        ASSERT_FALSE(config_result.has_value());
+        EXPECT_NE(config_result.error().message.find("max_idle_total"), std::string::npos);
     }
 }
 

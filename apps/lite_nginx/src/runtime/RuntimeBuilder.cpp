@@ -183,6 +183,8 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
     runtime.worker_processes = config.worker_processes;
     runtime.connection_pool.keepalive_size = config.http.connection_pool.keepalive_size;
     runtime.connection_pool.keepalive_timeout = config.http.connection_pool.keepalive_timeout;
+    runtime.connection_pool.max_idle_total = config.http.connection_pool.max_idle_total;
+    runtime.connection_pool.initial_group_capacity = config.http.connection_pool.initial_group_capacity;
     // Resolve PoolSteal::Auto to a concrete choice at build time: steal across worker loops only
     // when there is more than one worker (single-worker stealable is dead cross-loop code).
     switch (config.http.connection_pool.steal) {
