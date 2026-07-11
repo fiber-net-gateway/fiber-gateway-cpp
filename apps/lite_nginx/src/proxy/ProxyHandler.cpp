@@ -242,12 +242,7 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
                                                const runtime::LocationRuntime &location,
                                                fiber::http::Http1ClientConnection &conn,
                                                const runtime::ListenerRuntime &listener) {
-    fiber::http::Http1ClientExchangeOptions exchange_options;
-    exchange_options.write_timeout = location.send_timeout;
-    exchange_options.response_header_timeout = location.read_timeout;
-    exchange_options.response_body_timeout = location.read_timeout;
-
-    fiber::http::ClientHttp1Exchange upstream_exchange(conn, exchange.pool(), exchange_options);
+    fiber::http::ClientHttp1Exchange upstream_exchange(conn, exchange.pool());
     fiber::http::HttpHeaders request_headers(exchange.pool());
     build_upstream_request_headers(location, exchange, request_headers);
 
@@ -261,7 +256,8 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
     request_head.headers = &request_headers;
     request_head.body = request_body;
 
-    auto send_header_result = co_await upstream_exchange.send_header(request_head, request_end_stream);
+    auto send_header_result =
+            co_await upstream_exchange.send_header(request_head, request_end_stream, location.send_timeout);
     if (!send_header_result) {
         co_await send_plain_response(exchange, map_upstream_error_status(send_header_result.error()),
                                      map_upstream_error_body(send_header_result.error()), listener);
@@ -275,7 +271,7 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
                 co_return;
             }
             const bool last = body_result->complete();
-            auto write_result = co_await upstream_exchange.write_body(std::move(*body_result));
+            auto write_result = co_await upstream_exchange.write_body(std::move(*body_result), location.send_timeout);
             if (!write_result) {
                 co_await send_plain_response(exchange, map_upstream_error_status(write_result.error()),
                                              map_upstream_error_body(write_result.error()), listener);
@@ -289,7 +285,7 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
 
     const fiber::http::Http1ResponseHead *upstream_head = nullptr;
     while (true) {
-        auto read_header_result = co_await upstream_exchange.read_header();
+        auto read_header_result = co_await upstream_exchange.read_header(location.read_timeout);
         if (!read_header_result) {
             co_await send_plain_response(exchange, map_upstream_error_status(read_header_result.error()),
                                          map_upstream_error_body(read_header_result.error()), listener);
@@ -326,12 +322,12 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
     }
 
     if (no_response_body) {
-        (void) co_await upstream_exchange.discard_response_body();
+        (void) co_await upstream_exchange.discard_response_body(location.read_timeout);
         co_return;
     }
 
     while (true) {
-        auto body_result = co_await upstream_exchange.read_body(kBodyChunkSize);
+        auto body_result = co_await upstream_exchange.read_body(kBodyChunkSize, location.read_timeout);
         if (!body_result) {
             co_return;
         }

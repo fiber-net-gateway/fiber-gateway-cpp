@@ -120,8 +120,7 @@ const Http2HpackDecoder::Ops &ClientHttp2Request::decoder_ops() noexcept {
 
 ClientHttp2Request::ClientHttp2Request(Http2Connection &conn, mem::BufPool &pool) noexcept :
     conn_(&conn), stream_(this, stream_ops()), pool_(&pool),
-    response_body_recv_(conn.transport().loop().io_buf_node_pool(), conn.options_.read_timeout),
-    response_header_recv_(pool, conn.options_.read_timeout) {}
+    response_body_recv_(conn.transport().loop().io_buf_node_pool()), response_header_recv_(pool) {}
 
 ClientHttp2Request *ClientHttp2Request::create(Http2Connection &conn, mem::BufPool &pool) noexcept {
     return new (std::nothrow) ClientHttp2Request(conn, pool);
@@ -132,8 +131,9 @@ mem::IoBufNodePool &ClientHttp2Request::node_pool() noexcept {
     return conn_->transport().loop().io_buf_node_pool();
 }
 
-fiber::async::Task<common::IoResult<void>> ClientHttp2Request::send_request_header(const Http2RequestHead &head,
-                                                                                   bool end_stream) noexcept {
+fiber::async::Task<common::IoResult<void>>
+ClientHttp2Request::send_request_header(const Http2RequestHead &head, bool end_stream,
+                                        std::chrono::milliseconds timeout) noexcept {
     if (conn_ == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -147,7 +147,7 @@ fiber::async::Task<common::IoResult<void>> ClientHttp2Request::send_request_head
         co_return std::unexpected(common::IoErr::Canceled);
     }
 
-    HeaderSendAwaiter awaiter(*this, conn_->options_.write_timeout, head, end_stream);
+    HeaderSendAwaiter awaiter(*this, timeout, head, end_stream);
     if (!awaiter.try_arm()) {
         co_return std::unexpected(common::IoErr::Already);
     }
@@ -158,7 +158,8 @@ fiber::async::Task<common::IoResult<void>> ClientHttp2Request::send_request_head
     co_return co_await awaiter;
 }
 
-fiber::async::Task<common::IoResult<std::size_t>> ClientHttp2Request::write_body(mem::IoBufChain chunk) noexcept {
+fiber::async::Task<common::IoResult<std::size_t>>
+ClientHttp2Request::write_body(mem::IoBufChain chunk, std::chrono::milliseconds timeout) noexcept {
     if (conn_ == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -175,7 +176,7 @@ fiber::async::Task<common::IoResult<std::size_t>> ClientHttp2Request::write_body
         co_return std::unexpected(common::IoErr::Canceled);
     }
 
-    BodySendAwaiter awaiter(*this, conn_->options_.write_timeout, std::move(chunk));
+    BodySendAwaiter awaiter(*this, timeout, std::move(chunk));
     if (!awaiter.try_arm()) {
         co_return std::unexpected(common::IoErr::Already);
     }
@@ -186,7 +187,8 @@ fiber::async::Task<common::IoResult<std::size_t>> ClientHttp2Request::write_body
     co_return co_await awaiter;
 }
 
-fiber::async::Task<common::IoResult<void>> ClientHttp2Request::write_trailer(const HttpHeaders &headers) noexcept {
+fiber::async::Task<common::IoResult<void>>
+ClientHttp2Request::write_trailer(const HttpHeaders &headers, std::chrono::milliseconds timeout) noexcept {
     if (conn_ == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -203,7 +205,7 @@ fiber::async::Task<common::IoResult<void>> ClientHttp2Request::write_trailer(con
         co_return std::unexpected(common::IoErr::Canceled);
     }
 
-    TrailerSendAwaiter awaiter(*this, conn_->options_.write_timeout, headers);
+    TrailerSendAwaiter awaiter(*this, timeout, headers);
     if (!awaiter.try_arm()) {
         co_return std::unexpected(common::IoErr::Already);
     }
@@ -214,18 +216,20 @@ fiber::async::Task<common::IoResult<void>> ClientHttp2Request::write_trailer(con
     co_return co_await awaiter;
 }
 
-fiber::async::Task<common::IoResult<mem::IoBufChain>> ClientHttp2Request::read_body(std::size_t max_bytes) noexcept {
+fiber::async::Task<common::IoResult<mem::IoBufChain>>
+ClientHttp2Request::read_body(std::size_t max_bytes, std::chrono::milliseconds timeout) noexcept {
     if (conn_ == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    co_return co_await response_body_recv_.read_body(stream_, max_bytes);
+    co_return co_await response_body_recv_.read_body(stream_, max_bytes, timeout);
 }
 
-fiber::async::Task<common::IoResult<const Http2ResponseHead *>> ClientHttp2Request::read_header() noexcept {
+fiber::async::Task<common::IoResult<const Http2ResponseHead *>>
+ClientHttp2Request::read_header(std::chrono::milliseconds timeout) noexcept {
     if (conn_ == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    co_return co_await response_header_recv_.read_header();
+    co_return co_await response_header_recv_.read_header(timeout);
 }
 
 common::IoErr ClientHttp2Request::on_header_block_start(void *owner, Http2HpackDecoder::Sink &sink) noexcept {

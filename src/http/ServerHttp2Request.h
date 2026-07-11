@@ -32,14 +32,16 @@ public:
     [[nodiscard]] HttpExchange &exchange() noexcept { return exchange_; }
     [[nodiscard]] const HttpExchange &exchange() const noexcept { return exchange_; }
 
-    fiber::async::Task<common::IoResult<mem::IoBufChain>> read_body(HttpExchange &exchange,
-                                                                    std::size_t max_bytes) noexcept override;
+    fiber::async::Task<common::IoResult<mem::IoBufChain>>
+    read_body(HttpExchange &exchange, std::size_t max_bytes, std::chrono::milliseconds timeout) noexcept override;
     fiber::async::Task<common::IoResult<void>> send_header(HttpExchange &exchange,
-                                                           const OutgoingHeaderBlockView &header) override;
-    fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange,
-                                                            mem::IoBufChain chunk) noexcept override;
+                                                           const OutgoingHeaderBlockView &header,
+                                                           std::chrono::milliseconds timeout) override;
+    fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, mem::IoBufChain chunk,
+                                                            std::chrono::milliseconds timeout) noexcept override;
     fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, const std::uint8_t *buf,
-                                                            std::size_t len, bool end) noexcept override;
+                                                            std::size_t len, bool end,
+                                                            std::chrono::milliseconds timeout) noexcept override;
 
 private:
     using PseudoHeaderHandler = common::IoErr (*)(ServerHttp2Request &, std::string_view value) noexcept;
@@ -105,7 +107,6 @@ private:
     Http2Stream stream_;
     HttpExchange exchange_;
     detail::Http2BodyRecvState request_body_recv_;
-    std::chrono::milliseconds write_timeout_{};
     SendAwaiter *send_awaiter_ = nullptr;
     common::IoErr abort_reason_ = common::IoErr::None;
     bool reading_trailers_ = false;

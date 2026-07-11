@@ -1,6 +1,7 @@
 #ifndef FIBER_HTTP_CLIENT_HTTP1_EXCHANGE_H
 #define FIBER_HTTP_CLIENT_HTTP1_EXCHANGE_H
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <new>
@@ -26,15 +27,25 @@ public:
                         Http1ClientExchangeOptions options = {}) noexcept;
     ~ClientHttp1Exchange();
 
-    fiber::async::Task<common::IoResult<void>> send_header(const Http1RequestHead &head, bool end_stream) noexcept;
-    fiber::async::Task<common::IoResult<std::size_t>> write_body(mem::IoBufChain chunk) noexcept;
-    fiber::async::Task<common::IoResult<std::size_t>> write_body(const std::uint8_t *buf, std::size_t len,
-                                                                 bool end_stream) noexcept;
-    fiber::async::Task<common::IoResult<void>> send_trailer(const HttpHeaders &trailers) noexcept;
+    fiber::async::Task<common::IoResult<void>>
+    send_header(const Http1RequestHead &head, bool end_stream,
+                std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    fiber::async::Task<common::IoResult<std::size_t>>
+    write_body(mem::IoBufChain chunk, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    fiber::async::Task<common::IoResult<std::size_t>>
+    write_body(const std::uint8_t *buf, std::size_t len, bool end_stream,
+               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    fiber::async::Task<common::IoResult<void>>
+    send_trailer(const HttpHeaders &trailers,
+                 std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
 
-    fiber::async::Task<common::IoResult<const Http1ResponseHead *>> read_header() noexcept;
-    fiber::async::Task<common::IoResult<mem::IoBufChain>> read_body(std::size_t max_bytes = 64 * 1024) noexcept;
-    fiber::async::Task<common::IoResult<void>> discard_response_body() noexcept;
+    fiber::async::Task<common::IoResult<const Http1ResponseHead *>>
+    read_header(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    fiber::async::Task<common::IoResult<mem::IoBufChain>>
+    read_body(std::size_t max_bytes = 64 * 1024,
+              std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    fiber::async::Task<common::IoResult<void>>
+    discard_response_body(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
 
     [[nodiscard]] const HttpHeaders &response_trailers() const noexcept { return response_trailers_; }
     [[nodiscard]] const Http1ClientExchangeOptions &options() const noexcept { return options_; }
@@ -71,11 +82,13 @@ private:
     common::IoResult<void> take_prefix(mem::IoBuf &read_buf, mem::IoBufChain &out, std::size_t len) noexcept;
     common::IoResult<void> stash_pending_buf(mem::IoBuf &read_buf) noexcept;
     fiber::async::Task<common::IoResult<std::size_t>> read_more(mem::IoBuf &read_buf, std::size_t max_bytes,
-                                                                bool &read_call_used_io) noexcept;
+                                                                bool &read_call_used_io,
+                                                                std::chrono::milliseconds timeout) noexcept;
     fiber::async::Task<common::IoResult<ParseCode>> advance_chunked_body(mem::IoBuf &read_buf, std::size_t max_bytes,
-                                                                         bool allow_read,
-                                                                         bool &read_call_used_io) noexcept;
-    fiber::async::Task<common::IoResult<void>> read_response_trailers(mem::IoBuf &read_buf) noexcept;
+                                                                         bool allow_read, bool &read_call_used_io,
+                                                                         std::chrono::milliseconds timeout) noexcept;
+    fiber::async::Task<common::IoResult<void>> read_response_trailers(mem::IoBuf &read_buf,
+                                                                      std::chrono::milliseconds timeout) noexcept;
 
     Http1ClientConnection *conn_ = nullptr;
     mem::BufPool *pool_ = nullptr;

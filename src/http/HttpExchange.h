@@ -94,15 +94,24 @@ public:
     bool request_trailers_complete() const noexcept { return request_trailers_complete_; }
     mem::BufPool &pool() noexcept { return pool_; }
 
-    fiber::async::Task<common::IoResult<mem::IoBufChain>> read_body(std::size_t max_bytes) noexcept;
-    fiber::async::Task<common::IoResult<void>> discard_body() noexcept;
+    fiber::async::Task<common::IoResult<mem::IoBufChain>>
+    read_body(std::size_t max_bytes, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    fiber::async::Task<common::IoResult<void>>
+    discard_body(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
 
-    fiber::async::Task<common::IoResult<void>> send_header(const OutgoingHeaderBlockView &header);
-    fiber::async::Task<common::IoResult<void>> send_continue_header();
-    fiber::async::Task<common::IoResult<void>> send_informational_header(int status_code,
-                                                                         const HttpHeaders *headers = nullptr);
-    fiber::async::Task<common::IoResult<size_t>> write_body(mem::IoBufChain chunk) noexcept;
-    fiber::async::Task<common::IoResult<size_t>> write_body(const uint8_t *buf, size_t len, bool end) noexcept;
+    fiber::async::Task<common::IoResult<void>>
+    send_header(const OutgoingHeaderBlockView &header,
+                std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+    fiber::async::Task<common::IoResult<void>>
+    send_continue_header(std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+    fiber::async::Task<common::IoResult<void>>
+    send_informational_header(int status_code, const HttpHeaders *headers = nullptr,
+                              std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+    fiber::async::Task<common::IoResult<size_t>>
+    write_body(mem::IoBufChain chunk, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    fiber::async::Task<common::IoResult<size_t>>
+    write_body(const uint8_t *buf, size_t len, bool end,
+               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
 
 
 private:

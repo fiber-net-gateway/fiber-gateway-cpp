@@ -138,8 +138,7 @@ private:
     friend class Http2HeaderBlockQueue;
 };
 
-Http2HeaderBlockQueue::Http2HeaderBlockQueue(mem::BufPool &pool, std::chrono::milliseconds timeout) noexcept :
-    pool_(&pool), timeout_(timeout) {}
+Http2HeaderBlockQueue::Http2HeaderBlockQueue(mem::BufPool &pool) noexcept : pool_(&pool) {}
 
 Http2HeaderBlockQueue::HeaderNode *Http2HeaderBlockQueue::allocate_node() noexcept {
     if (!pool_) {
@@ -180,8 +179,9 @@ void Http2HeaderBlockQueue::abort(common::IoErr reason) noexcept {
     notify_waiter();
 }
 
-fiber::async::Task<common::IoResult<const Http2ResponseHead *>> Http2HeaderBlockQueue::read_header() noexcept {
-    PollResult state = co_await HeaderReadAwaiter(*this, timeout_);
+fiber::async::Task<common::IoResult<const Http2ResponseHead *>>
+Http2HeaderBlockQueue::read_header(std::chrono::milliseconds timeout) noexcept {
+    PollResult state = co_await HeaderReadAwaiter(*this, timeout);
     switch (state.kind) {
         case PollResult::Kind::Readable:
             break;

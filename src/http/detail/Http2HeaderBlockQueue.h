@@ -23,8 +23,7 @@ public:
         HeaderNode *next = nullptr;
     };
 
-    Http2HeaderBlockQueue(mem::BufPool &pool,
-                          std::chrono::milliseconds timeout = std::chrono::milliseconds::zero()) noexcept;
+    Http2HeaderBlockQueue(mem::BufPool &pool) noexcept;
     ~Http2HeaderBlockQueue() = default;
 
     [[nodiscard]] HeaderNode *allocate_node() noexcept;
@@ -32,7 +31,8 @@ public:
     void close_input() noexcept;
     void abort(common::IoErr reason) noexcept;
 
-    fiber::async::Task<common::IoResult<const Http2ResponseHead *>> read_header() noexcept;
+    fiber::async::Task<common::IoResult<const Http2ResponseHead *>>
+    read_header(std::chrono::milliseconds timeout) noexcept;
 
 private:
     struct PollResult;
@@ -46,7 +46,6 @@ private:
     mem::BufPool *pool_ = nullptr;
     HeaderNode *head_ = nullptr;
     HeaderNode *tail_ = nullptr;
-    std::chrono::milliseconds timeout_{};
     HeaderReadAwaiter *waiter_ = nullptr;
     common::IoErr abort_reason_ = common::IoErr::None;
     bool input_closed_ = false;
