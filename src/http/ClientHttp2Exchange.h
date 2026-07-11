@@ -1,6 +1,7 @@
 #ifndef FIBER_HTTP_CLIENT_HTTP2_EXCHANGE_H
 #define FIBER_HTTP_CLIENT_HTTP2_EXCHANGE_H
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 
@@ -32,15 +33,23 @@ public:
     ClientHttp2Exchange &operator=(ClientHttp2Exchange &&other) noexcept;
     ~ClientHttp2Exchange() = default;
 
-    fiber::async::Task<common::IoResult<void>> send_request_header(const Http2RequestHead &head,
-                                                                   bool end_stream) noexcept;
-    fiber::async::Task<common::IoResult<size_t>> write_body(mem::IoBufChain chunk) noexcept;
-    fiber::async::Task<common::IoResult<size_t>> write_body(const std::uint8_t *buf, std::size_t len,
-                                                            bool end_stream) noexcept;
-    fiber::async::Task<common::IoResult<void>> write_trailer(const HttpHeaders &headers) noexcept;
+    fiber::async::Task<common::IoResult<void>>
+    send_request_header(const Http2RequestHead &head, bool end_stream,
+                        std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    fiber::async::Task<common::IoResult<size_t>>
+    write_body(mem::IoBufChain chunk, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    fiber::async::Task<common::IoResult<size_t>>
+    write_body(const std::uint8_t *buf, std::size_t len, bool end_stream,
+               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    fiber::async::Task<common::IoResult<void>>
+    write_trailer(const HttpHeaders &headers,
+                  std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
 
-    fiber::async::Task<common::IoResult<const Http2ResponseHead *>> read_header() noexcept;
-    fiber::async::Task<common::IoResult<mem::IoBufChain>> read_body(std::size_t max_bytes = 64 * 1024) noexcept;
+    fiber::async::Task<common::IoResult<const Http2ResponseHead *>>
+    read_header(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    fiber::async::Task<common::IoResult<mem::IoBufChain>>
+    read_body(std::size_t max_bytes = 64 * 1024,
+              std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
 
     void cancel(common::IoErr reason = common::IoErr::Canceled) noexcept;
 

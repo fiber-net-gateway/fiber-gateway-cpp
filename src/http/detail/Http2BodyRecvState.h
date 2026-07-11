@@ -20,8 +20,7 @@ namespace detail {
 
 class Http2BodyRecvState : public common::NonCopyable, public common::NonMovable {
 public:
-    Http2BodyRecvState(mem::IoBufNodePool &node_pool,
-                       std::chrono::milliseconds timeout = std::chrono::milliseconds::zero()) noexcept;
+    Http2BodyRecvState(mem::IoBufNodePool &node_pool) noexcept;
     ~Http2BodyRecvState() = default;
 
     [[nodiscard]] common::IoErr push_body(mem::IoBuf &&buf, bool end_stream) noexcept;
@@ -29,8 +28,8 @@ public:
     void abort(common::IoErr reason) noexcept;
     [[nodiscard]] std::size_t queued_bytes() const noexcept { return queue_.readable_bytes(); }
 
-    fiber::async::Task<common::IoResult<mem::IoBufChain>> read_body(Http2Stream &stream,
-                                                                    std::size_t max_bytes) noexcept;
+    fiber::async::Task<common::IoResult<mem::IoBufChain>> read_body(Http2Stream &stream, std::size_t max_bytes,
+                                                                    std::chrono::milliseconds timeout) noexcept;
 
 private:
     struct PollResult;
@@ -42,7 +41,6 @@ private:
     void notify_waiter() noexcept;
 
     mem::IoBufChain queue_;
-    std::chrono::milliseconds timeout_{};
     BodyReadAwaiter *waiter_ = nullptr;
     common::IoErr abort_reason_ = common::IoErr::None;
     bool input_closed_ = false;

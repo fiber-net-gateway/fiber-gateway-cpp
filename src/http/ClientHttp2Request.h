@@ -33,12 +33,16 @@ public:
     [[nodiscard]] static const Http2StreamFactoryOps &factory_ops() noexcept;
     [[nodiscard]] static ClientHttp2Request *create(Http2Connection &conn, mem::BufPool &pool) noexcept;
 
-    fiber::async::Task<common::IoResult<void>> send_request_header(const Http2RequestHead &head,
-                                                                   bool end_stream) noexcept;
-    fiber::async::Task<common::IoResult<std::size_t>> write_body(mem::IoBufChain chunk) noexcept;
-    fiber::async::Task<common::IoResult<void>> write_trailer(const HttpHeaders &headers) noexcept;
-    fiber::async::Task<common::IoResult<const Http2ResponseHead *>> read_header() noexcept;
-    fiber::async::Task<common::IoResult<mem::IoBufChain>> read_body(std::size_t max_bytes) noexcept;
+    fiber::async::Task<common::IoResult<void>> send_request_header(const Http2RequestHead &head, bool end_stream,
+                                                                   std::chrono::milliseconds timeout) noexcept;
+    fiber::async::Task<common::IoResult<std::size_t>> write_body(mem::IoBufChain chunk,
+                                                                 std::chrono::milliseconds timeout) noexcept;
+    fiber::async::Task<common::IoResult<void>> write_trailer(const HttpHeaders &headers,
+                                                             std::chrono::milliseconds timeout) noexcept;
+    fiber::async::Task<common::IoResult<const Http2ResponseHead *>>
+    read_header(std::chrono::milliseconds timeout) noexcept;
+    fiber::async::Task<common::IoResult<mem::IoBufChain>> read_body(std::size_t max_bytes,
+                                                                    std::chrono::milliseconds timeout) noexcept;
 
     [[nodiscard]] Http2Stream &stream() noexcept { return stream_; }
     [[nodiscard]] const Http2Stream &stream() const noexcept { return stream_; }

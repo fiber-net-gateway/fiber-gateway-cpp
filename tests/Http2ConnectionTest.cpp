@@ -3623,11 +3623,10 @@ TEST(Http2ConnectionTest, ServerReadBodyTimesOutWhileWaitingForMoreBody) {
                                          false);
 
     fiber::http::HttpServerOptions http_options;
-    http_options.body_timeout = std::chrono::seconds(0);
 
     auto read_result = std::make_shared<fiber::common::IoResult<fiber::mem::IoBufChain>>();
     fiber::http::HttpHandler handler = [read_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-        *read_result = co_await exchange.read_body(64);
+        *read_result = co_await exchange.read_body(64, std::chrono::seconds(0));
         co_return;
     };
 

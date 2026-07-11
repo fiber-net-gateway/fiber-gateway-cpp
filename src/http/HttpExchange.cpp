@@ -79,16 +79,17 @@ void HttpExchange::cache_request_header_field(const HttpHeaders::HeaderField &fi
     }
 }
 
-fiber::async::Task<common::IoResult<mem::IoBufChain>> HttpExchange::read_body(std::size_t max_bytes) noexcept {
+fiber::async::Task<common::IoResult<mem::IoBufChain>>
+HttpExchange::read_body(std::size_t max_bytes, std::chrono::milliseconds timeout) noexcept {
     if (!io_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    co_return co_await io_->read_body(*this, max_bytes);
+    co_return co_await io_->read_body(*this, max_bytes, timeout);
 }
 
-fiber::async::Task<common::IoResult<void>> HttpExchange::discard_body() noexcept {
+fiber::async::Task<common::IoResult<void>> HttpExchange::discard_body(std::chrono::milliseconds timeout) noexcept {
     for (;;) {
-        auto result = co_await read_body(4096);
+        auto result = co_await read_body(4096, timeout);
         if (!result) {
             co_return std::unexpected(result.error());
         }
@@ -99,48 +100,55 @@ fiber::async::Task<common::IoResult<void>> HttpExchange::discard_body() noexcept
     co_return common::IoResult<void>{};
 }
 
-fiber::async::Task<common::IoResult<void>> HttpExchange::send_header(const OutgoingHeaderBlockView &header) {
+fiber::async::Task<common::IoResult<void>> HttpExchange::send_header(const OutgoingHeaderBlockView &header,
+                                                                     std::chrono::milliseconds timeout) {
     if (!io_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    co_return co_await io_->send_header(*this, header);
+    co_return co_await io_->send_header(*this, header, timeout);
 }
 
-fiber::async::Task<common::IoResult<void>> HttpExchange::send_continue_header() {
-    co_return co_await send_header({
-            .kind = OutgoingHeaderKind::Informational,
-            .status_code = 100,
-            .headers = nullptr,
-            .end_stream = false,
-    });
+fiber::async::Task<common::IoResult<void>> HttpExchange::send_continue_header(std::chrono::milliseconds timeout) {
+    co_return co_await send_header(
+            {
+                    .kind = OutgoingHeaderKind::Informational,
+                    .status_code = 100,
+                    .headers = nullptr,
+                    .end_stream = false,
+            },
+            timeout);
 }
 
 fiber::async::Task<common::IoResult<void>> HttpExchange::send_informational_header(int status_code,
-                                                                                   const HttpHeaders *headers) {
-    co_return co_await send_header({
-            .kind = OutgoingHeaderKind::Informational,
-            .status_code = status_code,
-            .reason = {},
-            .headers = headers,
-            .body = HttpBodySpec::Auto(),
-            .connection_mode = ResponseConnectionMode::Auto,
-            .end_stream = false,
-    });
+                                                                                   const HttpHeaders *headers,
+                                                                                   std::chrono::milliseconds timeout) {
+    co_return co_await send_header(
+            {
+                    .kind = OutgoingHeaderKind::Informational,
+                    .status_code = status_code,
+                    .reason = {},
+                    .headers = headers,
+                    .body = HttpBodySpec::Auto(),
+                    .connection_mode = ResponseConnectionMode::Auto,
+                    .end_stream = false,
+            },
+            timeout);
 }
 
-fiber::async::Task<common::IoResult<size_t>> HttpExchange::write_body(mem::IoBufChain chunk) noexcept {
+fiber::async::Task<common::IoResult<size_t>> HttpExchange::write_body(mem::IoBufChain chunk,
+                                                                      std::chrono::milliseconds timeout) noexcept {
     if (!io_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    co_return co_await io_->write_body(*this, std::move(chunk));
+    co_return co_await io_->write_body(*this, std::move(chunk), timeout);
 }
 
-fiber::async::Task<common::IoResult<size_t>> HttpExchange::write_body(const uint8_t *buf, size_t len,
-                                                                      bool end) noexcept {
+fiber::async::Task<common::IoResult<size_t>> HttpExchange::write_body(const uint8_t *buf, size_t len, bool end,
+                                                                      std::chrono::milliseconds timeout) noexcept {
     if (!io_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    co_return co_await io_->write_body(*this, buf, len, end);
+    co_return co_await io_->write_body(*this, buf, len, end, timeout);
 }
 
 } // namespace fiber::http

@@ -39,14 +39,16 @@ public:
 
     void start_read_loop(event::EventLoop &loop) noexcept;
 
-    fiber::async::Task<common::IoResult<mem::IoBufChain>> read_body(HttpExchange &exchange,
-                                                                    std::size_t max_bytes) noexcept override;
+    fiber::async::Task<common::IoResult<mem::IoBufChain>>
+    read_body(HttpExchange &exchange, std::size_t max_bytes, std::chrono::milliseconds timeout) noexcept override;
     fiber::async::Task<common::IoResult<void>> send_header(HttpExchange &exchange,
-                                                           const OutgoingHeaderBlockView &header) override;
-    fiber::async::Task<common::IoResult<std::size_t>> write_body(HttpExchange &exchange,
-                                                                 mem::IoBufChain chunk) noexcept override;
+                                                           const OutgoingHeaderBlockView &header,
+                                                           std::chrono::milliseconds timeout) override;
+    fiber::async::Task<common::IoResult<std::size_t>> write_body(HttpExchange &exchange, mem::IoBufChain chunk,
+                                                                 std::chrono::milliseconds timeout) noexcept override;
     fiber::async::Task<common::IoResult<std::size_t>> write_body(HttpExchange &exchange, const std::uint8_t *buf,
-                                                                 std::size_t len, bool end) noexcept override;
+                                                                 std::size_t len, bool end,
+                                                                 std::chrono::milliseconds timeout) noexcept override;
 
 private:
     enum class HeaderBlockTarget : std::uint8_t;
@@ -85,7 +87,6 @@ private:
     std::uint64_t frame_payload_remaining_ = 0;
     Http3ErrorCode request_parse_error_ = Http3ErrorCode::GeneralProtocolError;
     BodyRecvState body_recv_state_{};
-    std::chrono::milliseconds write_timeout_{};
     HttpBodySpec response_body_spec_{HttpBodySpec::Auto()};
     std::size_t response_content_length_ = 0;
     std::size_t response_body_sent_ = 0;

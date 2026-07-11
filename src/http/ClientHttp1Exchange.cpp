@@ -511,7 +511,8 @@ common::IoResult<void> ClientHttp1Exchange::stash_pending_buf(mem::IoBuf &read_b
 }
 
 fiber::async::Task<common::IoResult<std::size_t>>
-ClientHttp1Exchange::read_more(mem::IoBuf &read_buf, std::size_t max_bytes, bool &read_call_used_io) noexcept {
+ClientHttp1Exchange::read_more(mem::IoBuf &read_buf, std::size_t max_bytes, bool &read_call_used_io,
+                               std::chrono::milliseconds timeout) noexcept {
     if (!conn_ || !conn_->transport_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -526,8 +527,7 @@ ClientHttp1Exchange::read_more(mem::IoBuf &read_buf, std::size_t max_bytes, bool
         co_return std::unexpected(ensure_result.error());
     }
 
-    auto read_result =
-            co_await conn_->transport_->read(read_buf.writable_data(), read_size, options_.response_body_timeout);
+    auto read_result = co_await conn_->transport_->read(read_buf.writable_data(), read_size, timeout);
     if (!read_result) {
         co_return std::unexpected(read_result.error());
     }
@@ -538,13 +538,13 @@ ClientHttp1Exchange::read_more(mem::IoBuf &read_buf, std::size_t max_bytes, bool
 
 fiber::async::Task<common::IoResult<ParseCode>>
 ClientHttp1Exchange::advance_chunked_body(mem::IoBuf &read_buf, std::size_t max_bytes, bool allow_read,
-                                          bool &read_call_used_io) noexcept {
+                                          bool &read_call_used_io, std::chrono::milliseconds timeout) noexcept {
     for (;;) {
         if (read_buf.readable() == 0) {
             if (!allow_read) {
                 co_return ParseCode::Again;
             }
-            auto more = co_await read_more(read_buf, max_bytes, read_call_used_io);
+            auto more = co_await read_more(read_buf, max_bytes, read_call_used_io, timeout);
             if (!more) {
                 co_return std::unexpected(more.error());
             }
@@ -575,7 +575,8 @@ ClientHttp1Exchange::advance_chunked_body(mem::IoBuf &read_buf, std::size_t max_
     }
 }
 
-fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::read_response_trailers(mem::IoBuf &read_buf) noexcept {
+fiber::async::Task<common::IoResult<void>>
+ClientHttp1Exchange::read_response_trailers(mem::IoBuf &read_buf, std::chrono::milliseconds timeout) noexcept {
     if (!conn_ || !conn_->transport_ || pool_ == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -620,8 +621,7 @@ fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::read_response_tr
                 co_return std::unexpected(copied_result.error());
             }
             if (read_buf.readable() == 0) {
-                auto read_result =
-                        co_await conn_->transport_->read_into(header_buffer.buf(), options_.response_body_timeout);
+                auto read_result = co_await conn_->transport_->read_into(header_buffer.buf(), timeout);
                 if (!read_result) {
                     co_return std::unexpected(read_result.error());
                 }
@@ -669,8 +669,9 @@ fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::read_response_tr
     }
 }
 
-fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::send_header(const Http1RequestHead &head,
-                                                                            bool end_stream) noexcept {
+fiber::async::Task<common::IoResult<void>>
+ClientHttp1Exchange::send_header(const Http1RequestHead &head, bool end_stream,
+                                 std::chrono::milliseconds timeout) noexcept {
     if (!active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -703,8 +704,8 @@ fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::send_header(cons
         co_return std::unexpected(encode_result.error());
     }
 
-    auto write_result = co_await write_all(conn_->transport_.get(), header_buf.readable_data(), header_buf.readable(),
-                                           options_.write_timeout);
+    auto write_result =
+            co_await write_all(conn_->transport_.get(), header_buf.readable_data(), header_buf.readable(), timeout);
     if (!write_result) {
         request_state_ = RequestState::Failed;
         active_ = false;
@@ -714,8 +715,8 @@ fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::send_header(cons
     }
 
     if (head.body.is_chunked() && end_stream) {
-        auto final_result = co_await write_all(conn_->transport_.get(), kChunkedFinal.data(), kChunkedFinal.size(),
-                                               options_.write_timeout);
+        auto final_result =
+                co_await write_all(conn_->transport_.get(), kChunkedFinal.data(), kChunkedFinal.size(), timeout);
         if (!final_result) {
             request_state_ = RequestState::Failed;
             active_ = false;
@@ -743,7 +744,8 @@ fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::send_header(cons
     co_return common::IoResult<void>{};
 }
 
-fiber::async::Task<common::IoResult<std::size_t>> ClientHttp1Exchange::write_body(mem::IoBufChain chunk) noexcept {
+fiber::async::Task<common::IoResult<std::size_t>>
+ClientHttp1Exchange::write_body(mem::IoBufChain chunk, std::chrono::milliseconds timeout) noexcept {
     if (!active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -776,7 +778,7 @@ fiber::async::Task<common::IoResult<std::size_t>> ClientHttp1Exchange::write_bod
             if (chunk.complete() && body_sent_ + body_bytes != content_length_) {
                 co_return std::unexpected(common::IoErr::Invalid);
             }
-            auto write_result = co_await write_all(conn_->transport_.get(), chunk, options_.write_timeout);
+            auto write_result = co_await write_all(conn_->transport_.get(), chunk, timeout);
             if (!write_result) {
                 request_state_ = RequestState::Failed;
                 active_ = false;
@@ -803,8 +805,7 @@ fiber::async::Task<common::IoResult<std::size_t>> ClientHttp1Exchange::write_bod
                 *prefix_ptr++ = '\n';
 
                 auto prefix_result = co_await write_all(conn_->transport_.get(), prefix.data(),
-                                                        static_cast<std::size_t>(prefix_ptr - prefix.data()),
-                                                        options_.write_timeout);
+                                                        static_cast<std::size_t>(prefix_ptr - prefix.data()), timeout);
                 if (!prefix_result) {
                     request_state_ = RequestState::Failed;
                     active_ = false;
@@ -812,7 +813,7 @@ fiber::async::Task<common::IoResult<std::size_t>> ClientHttp1Exchange::write_bod
                     conn_ = nullptr;
                     co_return std::unexpected(prefix_result.error());
                 }
-                auto body_result = co_await write_all(conn_->transport_.get(), chunk, options_.write_timeout);
+                auto body_result = co_await write_all(conn_->transport_.get(), chunk, timeout);
                 if (!body_result) {
                     request_state_ = RequestState::Failed;
                     active_ = false;
@@ -821,7 +822,7 @@ fiber::async::Task<common::IoResult<std::size_t>> ClientHttp1Exchange::write_bod
                     co_return std::unexpected(body_result.error());
                 }
                 auto suffix_result = co_await write_all(conn_->transport_.get(), kLineTerminator.data(),
-                                                        kLineTerminator.size(), options_.write_timeout);
+                                                        kLineTerminator.size(), timeout);
                 if (!suffix_result) {
                     request_state_ = RequestState::Failed;
                     active_ = false;
@@ -834,7 +835,7 @@ fiber::async::Task<common::IoResult<std::size_t>> ClientHttp1Exchange::write_bod
 
             if (chunk.complete()) {
                 auto final_result = co_await write_all(conn_->transport_.get(), kChunkedFinal.data(),
-                                                       kChunkedFinal.size(), options_.write_timeout);
+                                                       kChunkedFinal.size(), timeout);
                 if (!final_result) {
                     request_state_ = RequestState::Failed;
                     active_ = false;
@@ -851,7 +852,8 @@ fiber::async::Task<common::IoResult<std::size_t>> ClientHttp1Exchange::write_bod
 }
 
 fiber::async::Task<common::IoResult<std::size_t>>
-ClientHttp1Exchange::write_body(const std::uint8_t *buf, std::size_t len, bool end_stream) noexcept {
+ClientHttp1Exchange::write_body(const std::uint8_t *buf, std::size_t len, bool end_stream,
+                                std::chrono::milliseconds timeout) noexcept {
     if (!active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -888,7 +890,7 @@ ClientHttp1Exchange::write_body(const std::uint8_t *buf, std::size_t len, bool e
                 co_return std::unexpected(common::IoErr::Invalid);
             }
             if (len != 0) {
-                auto write_result = co_await write_all(conn_->transport_.get(), buf, len, options_.write_timeout);
+                auto write_result = co_await write_all(conn_->transport_.get(), buf, len, timeout);
                 if (!write_result) {
                     request_state_ = RequestState::Failed;
                     active_ = false;
@@ -916,8 +918,7 @@ ClientHttp1Exchange::write_body(const std::uint8_t *buf, std::size_t len, bool e
                 *prefix_ptr++ = '\n';
 
                 auto prefix_result = co_await write_all(conn_->transport_.get(), prefix.data(),
-                                                        static_cast<std::size_t>(prefix_ptr - prefix.data()),
-                                                        options_.write_timeout);
+                                                        static_cast<std::size_t>(prefix_ptr - prefix.data()), timeout);
                 if (!prefix_result) {
                     request_state_ = RequestState::Failed;
                     active_ = false;
@@ -925,7 +926,7 @@ ClientHttp1Exchange::write_body(const std::uint8_t *buf, std::size_t len, bool e
                     conn_ = nullptr;
                     co_return std::unexpected(prefix_result.error());
                 }
-                auto body_result = co_await write_all(conn_->transport_.get(), buf, len, options_.write_timeout);
+                auto body_result = co_await write_all(conn_->transport_.get(), buf, len, timeout);
                 if (!body_result) {
                     request_state_ = RequestState::Failed;
                     active_ = false;
@@ -934,7 +935,7 @@ ClientHttp1Exchange::write_body(const std::uint8_t *buf, std::size_t len, bool e
                     co_return std::unexpected(body_result.error());
                 }
                 auto suffix_result = co_await write_all(conn_->transport_.get(), kLineTerminator.data(),
-                                                        kLineTerminator.size(), options_.write_timeout);
+                                                        kLineTerminator.size(), timeout);
                 if (!suffix_result) {
                     request_state_ = RequestState::Failed;
                     active_ = false;
@@ -947,7 +948,7 @@ ClientHttp1Exchange::write_body(const std::uint8_t *buf, std::size_t len, bool e
 
             if (end_stream) {
                 auto final_result = co_await write_all(conn_->transport_.get(), kChunkedFinal.data(),
-                                                       kChunkedFinal.size(), options_.write_timeout);
+                                                       kChunkedFinal.size(), timeout);
                 if (!final_result) {
                     request_state_ = RequestState::Failed;
                     active_ = false;
@@ -964,7 +965,8 @@ ClientHttp1Exchange::write_body(const std::uint8_t *buf, std::size_t len, bool e
     co_return std::unexpected(common::IoErr::Invalid);
 }
 
-fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::send_trailer(const HttpHeaders &trailers) noexcept {
+fiber::async::Task<common::IoResult<void>>
+ClientHttp1Exchange::send_trailer(const HttpHeaders &trailers, std::chrono::milliseconds timeout) noexcept {
     if (!active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -997,8 +999,8 @@ fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::send_trailer(con
         co_return std::unexpected(encode_result.error());
     }
 
-    auto write_result = co_await write_all(conn_->transport_.get(), trailer_buf.readable_data(), trailer_buf.readable(),
-                                           options_.write_timeout);
+    auto write_result =
+            co_await write_all(conn_->transport_.get(), trailer_buf.readable_data(), trailer_buf.readable(), timeout);
     if (!write_result) {
         request_state_ = RequestState::Failed;
         active_ = false;
@@ -1011,7 +1013,8 @@ fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::send_trailer(con
     co_return common::IoResult<void>{};
 }
 
-fiber::async::Task<common::IoResult<const Http1ResponseHead *>> ClientHttp1Exchange::read_header() noexcept {
+fiber::async::Task<common::IoResult<const Http1ResponseHead *>>
+ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
     if (!active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -1097,8 +1100,7 @@ fiber::async::Task<common::IoResult<const Http1ResponseHead *>> ClientHttp1Excha
     }
 
     auto read_more = [&]() -> fiber::async::Task<common::IoResult<void>> {
-        auto read_result =
-                co_await conn_->transport_->read_into(response_header_buffer.buf(), options_.response_header_timeout);
+        auto read_result = co_await conn_->transport_->read_into(response_header_buffer.buf(), timeout);
         if (!read_result) {
             co_return std::unexpected(read_result.error());
         }
@@ -1262,7 +1264,8 @@ fiber::async::Task<common::IoResult<const Http1ResponseHead *>> ClientHttp1Excha
     }
 }
 
-fiber::async::Task<common::IoResult<mem::IoBufChain>> ClientHttp1Exchange::read_body(std::size_t max_bytes) noexcept {
+fiber::async::Task<common::IoResult<mem::IoBufChain>>
+ClientHttp1Exchange::read_body(std::size_t max_bytes, std::chrono::milliseconds timeout) noexcept {
     if (!active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -1296,7 +1299,7 @@ fiber::async::Task<common::IoResult<mem::IoBufChain>> ClientHttp1Exchange::read_
             co_return out;
         }
         if (read_buf.readable() == 0) {
-            auto more = co_await read_more(read_buf, max_bytes, read_call_used_io);
+            auto more = co_await read_more(read_buf, max_bytes, read_call_used_io, timeout);
             if (!more) {
                 co_return fail_exchange(more.error());
             }
@@ -1325,7 +1328,7 @@ fiber::async::Task<common::IoResult<mem::IoBufChain>> ClientHttp1Exchange::read_
         }
         if (read_buf.readable() == 0) {
             auto more = co_await read_more(read_buf, std::min(max_bytes, response_body_parser_.remaining()),
-                                           read_call_used_io);
+                                           read_call_used_io, timeout);
             if (!more) {
                 co_return fail_exchange(more.error());
             }
@@ -1362,13 +1365,13 @@ fiber::async::Task<common::IoResult<mem::IoBufChain>> ClientHttp1Exchange::read_
     std::size_t remaining_budget = max_bytes;
     for (;;) {
         if (response_body_parser_.remaining() == 0) {
-            auto parse_result =
-                    co_await advance_chunked_body(read_buf, remaining_budget, !read_call_used_io, read_call_used_io);
+            auto parse_result = co_await advance_chunked_body(read_buf, remaining_budget, !read_call_used_io,
+                                                              read_call_used_io, timeout);
             if (!parse_result) {
                 co_return fail_exchange(parse_result.error());
             }
             if (*parse_result == ParseCode::BodyDone) {
-                auto trailer_result = co_await read_response_trailers(read_buf);
+                auto trailer_result = co_await read_response_trailers(read_buf, timeout);
                 if (!trailer_result) {
                     co_return fail_exchange(trailer_result.error());
                 }
@@ -1393,7 +1396,7 @@ fiber::async::Task<common::IoResult<mem::IoBufChain>> ClientHttp1Exchange::read_
                 co_return out;
             }
             auto more = co_await read_more(read_buf, std::min(remaining_budget, response_body_parser_.remaining()),
-                                           read_call_used_io);
+                                           read_call_used_io, timeout);
             if (!more) {
                 co_return fail_exchange(more.error());
             }
@@ -1420,12 +1423,13 @@ fiber::async::Task<common::IoResult<mem::IoBufChain>> ClientHttp1Exchange::read_
     }
 }
 
-fiber::async::Task<common::IoResult<void>> ClientHttp1Exchange::discard_response_body() noexcept {
+fiber::async::Task<common::IoResult<void>>
+ClientHttp1Exchange::discard_response_body(std::chrono::milliseconds timeout) noexcept {
     if (!active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
     for (;;) {
-        auto result = co_await read_body(4096);
+        auto result = co_await read_body(4096, timeout);
         if (!result) {
             co_return std::unexpected(result.error());
         }
