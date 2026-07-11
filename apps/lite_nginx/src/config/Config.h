@@ -25,6 +25,11 @@ struct ConnectionPoolConfig {
     std::size_t keepalive_size = 0; // max idle connections per peer group
     std::chrono::milliseconds keepalive_timeout{30000}; // idle timeout
     PoolSteal steal = PoolSteal::Auto;
+    // 0 => derive from keepalive_size (keepalive_size * 64, the historical default). Caps the
+    // total idle connections across all peer groups in one pool.
+    std::size_t max_idle_total = 0;
+    // 0 => use the built-in default (16). Initial slot capacity of the per-group hash table.
+    std::size_t initial_group_capacity = 0;
 };
 
 struct HeaderOverride {
