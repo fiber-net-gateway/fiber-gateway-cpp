@@ -332,11 +332,11 @@ std::optional<HttpTargetSpec> resolve_target(void *userdata, GcHeap &heap, const
     return HttpTargetSpec::parse(sv);
 }
 
-// Acquires an upstream connection and ensures it is connected. `holder` owns the pool lease for
-// the call's lifetime (pooled case); `transient` owns a non-pooled connection (transient case).
+// Acquires a connected upstream connection via the app's services. The returned holder owns the
+// pool lease (or transient connection) for the call's lifetime; services.acquire performs the
+// pool lookup + (DNS-on-miss) connect internally.
 struct AcquiredConnection {
     std::unique_ptr<HttpUpstreamConnection> holder;
-    std::unique_ptr<fiber::http::Http1ClientConnection> transient;
     fiber::http::Http1ClientConnection *conn = nullptr;
 };
 
@@ -344,39 +344,12 @@ fiber::async::Task<fiber::common::IoResult<AcquiredConnection>>
 acquire_and_connect(HttpScriptServices &services, const HttpTargetSpec &target,
                     std::chrono::milliseconds timeout) noexcept {
     AcquiredConnection out;
-    auto acquire_result = co_await services.acquire(target);
+    auto acquire_result = co_await services.acquire(target, timeout);
     if (!acquire_result) {
         co_return std::unexpected(acquire_result.error());
     }
     out.holder = std::move(*acquire_result);
-
-    fiber::http::Http1ClientConnectionOptions opts;
-    opts.peer_addr = out.holder->peer_addr();
-    opts.tls = out.holder->tls();
-    opts.connect_timeout = timeout;
-
-    if (out.holder->pooled()) {
-        fiber::http::Http1ClientConnection *conn = out.holder->connection();
-        if (conn == nullptr) {
-            auto emplace = out.holder->emplace_connection(opts);
-            if (!emplace) {
-                co_return std::unexpected(emplace.error());
-            }
-            conn = *emplace;
-            auto connect_result = co_await conn->connect();
-            if (!connect_result) {
-                co_return std::unexpected(connect_result.error());
-            }
-        }
-        out.conn = conn;
-    } else {
-        out.transient = std::make_unique<fiber::http::Http1ClientConnection>(fiber::event::EventLoop::current(), opts);
-        auto connect_result = co_await out.transient->connect();
-        if (!connect_result) {
-            co_return std::unexpected(connect_result.error());
-        }
-        out.conn = out.transient.get();
-    }
+    out.conn = &out.holder->connection();
     co_return out;
 }
 

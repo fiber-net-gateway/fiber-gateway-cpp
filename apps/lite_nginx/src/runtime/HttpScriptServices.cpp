@@ -2,84 +2,83 @@
 
 #include <utility>
 
+#include "http/Http1ClientConnection.h"
+#include "http_script/HttpScriptServices.h"
+#include "http_script/HttpTarget.h"
 #include "net/IpAddress.h"
 #include "net/SocketAddress.h"
 #include "net/TlsOptions.h"
 
+#include "../upstream/ConnectionPool.h"
+#include "../upstream/UpstreamConnection.h"
 #include "../upstream/UpstreamRegistry.h"
 
 namespace fiber::lite_nginx::runtime {
 namespace {
 
-// Wraps an UpstreamRegistry::ConnectionHandle as the script-layer HttpUpstreamConnection. The
-// handle (and its pool lease) is released when this object is destroyed.
-class LiteNginxHttpUpstreamConnection : public fiber::http_script::HttpUpstreamConnection {
+// Wraps the unified AcquiredUpstreamConnection as the script-layer HttpUpstreamConnection.
+// Holds the pool lease (and any transient connection); released when this object is destroyed.
+class ConnectedUpstreamConnection final : public fiber::http_script::HttpUpstreamConnection {
 public:
-    explicit LiteNginxHttpUpstreamConnection(upstream::UpstreamRegistry::ConnectionHandle handle) noexcept :
-        handle_(std::move(handle)) {}
+    explicit ConnectedUpstreamConnection(fiber::lite_nginx::upstream::AcquiredUpstreamConnection acquired) noexcept :
+        acquired_(std::move(acquired)) {}
 
-    [[nodiscard]] fiber::net::SocketAddress peer_addr() const noexcept override { return handle_.peer_addr; }
-    [[nodiscard]] fiber::net::TlsOptions tls() const noexcept override { return handle_.tls; }
-    [[nodiscard]] bool pooled() const noexcept override { return handle_.pooled(); }
-    [[nodiscard]] fiber::http::Http1ClientConnection *connection() noexcept override { return handle_.lease.get(); }
-    [[nodiscard]] fiber::common::IoResult<fiber::http::Http1ClientConnection *>
-    emplace_connection(fiber::http::Http1ClientConnectionOptions options) noexcept override {
-        if (!handle_.pooled()) {
-            return std::unexpected(fiber::common::IoErr::Invalid);
-        }
-        return handle_.lease.emplace_connection(std::move(options));
-    }
+    [[nodiscard]] fiber::http::Http1ClientConnection &connection() noexcept override { return *acquired_.conn; }
 
 private:
-    upstream::UpstreamRegistry::ConnectionHandle handle_;
+    fiber::lite_nginx::upstream::AcquiredUpstreamConnection acquired_;
 };
 
 } // namespace
 
-HttpScriptServicesImpl::HttpScriptServicesImpl(upstream::UpstreamRegistry &upstreams, DnsService &dns) noexcept :
-    upstreams_(&upstreams), dns_(&dns) {}
+HttpScriptServicesImpl::HttpScriptServicesImpl(upstream::UpstreamRegistry &upstreams, upstream::ConnectionPool &pool,
+                                               DnsService &dns) noexcept :
+    upstreams_(&upstreams), pool_(&pool), dns_(&dns) {}
 
 fiber::async::Task<fiber::common::IoResult<std::unique_ptr<fiber::http_script::HttpUpstreamConnection>>>
-HttpScriptServicesImpl::acquire(const fiber::http_script::HttpTargetSpec &target) noexcept {
+HttpScriptServicesImpl::acquire(const fiber::http_script::HttpTargetSpec &target,
+                                std::chrono::milliseconds connect_timeout) noexcept {
     using OutPtr = std::unique_ptr<fiber::http_script::HttpUpstreamConnection>;
 
     if (target.kind == fiber::http_script::HttpTargetSpec::Kind::Upstream) {
-        auto handle = co_await upstreams_->acquire_by_name(target.name);
-        if (!handle.valid()) {
+        const auto *peer = upstreams_->select_by_name(target.name);
+        if (peer == nullptr || !peer->connection_key.has_value()) {
             co_return std::unexpected(fiber::common::IoErr::NotFound);
         }
-        co_return OutPtr{new LiteNginxHttpUpstreamConnection(std::move(handle))};
+        // For HTTPS upstreams, SNI uses the configured host (IP-literal peers have no name to send).
+        const std::string_view sni =
+                peer->connection_key->is_name() ? peer->connection_key->host_name() : std::string_view{};
+        auto acquired = co_await fiber::lite_nginx::upstream::acquire_and_connect(*pool_, *dns_, *peer->connection_key,
+                                                                                  sni, connect_timeout);
+        if (!acquired) {
+            co_return std::unexpected(acquired.error());
+        }
+        co_return OutPtr{new ConnectedUpstreamConnection(std::move(*acquired))};
     }
 
-    // Url target.
+    // Url target: build a key from host:port:scheme. IP-literal host -> from_ip; hostname -> from_name.
     const std::uint16_t port = target.port != 0 ? target.port : static_cast<std::uint16_t>(target.tls ? 443 : 80);
     const auto scheme = target.tls ? fiber::http::Http1ConnectionGroupKey::Scheme::Https
                                    : fiber::http::Http1ConnectionGroupKey::Scheme::Http;
 
     fiber::net::IpAddress ip;
-    if (!fiber::net::IpAddress::parse(target.name, ip)) {
-        if (dns_ == nullptr) {
-            co_return std::unexpected(fiber::common::IoErr::NotFound);
+    std::optional<fiber::http::Http1ConnectionGroupKey> key;
+    if (fiber::net::IpAddress::parse(target.name, ip)) {
+        key = fiber::http::Http1ConnectionGroupKey::from_ip(ip, port, scheme);
+    } else {
+        key = fiber::http::Http1ConnectionGroupKey::from_name(target.name, port, scheme);
+        if (!key) {
+            co_return std::unexpected(fiber::common::IoErr::Invalid);
         }
-        auto resolved = co_await dns_->resolve(target.name);
-        if (!resolved) {
-            co_return std::unexpected(resolved.error());
-        }
-        ip = *resolved;
     }
 
-    const fiber::http::Http1ConnectionGroupKey key = fiber::http::Http1ConnectionGroupKey::from_ip(ip, port, scheme);
-    const fiber::net::SocketAddress peer_addr(ip, port);
-    fiber::net::TlsOptions tls_opts{};
-    if (target.tls) {
-        tls_opts.server_name = target.name;
+    // SNI = the host as given in the URL for HTTPS.
+    auto acquired = co_await fiber::lite_nginx::upstream::acquire_and_connect(*pool_, *dns_, *key, target.name,
+                                                                              connect_timeout);
+    if (!acquired) {
+        co_return std::unexpected(acquired.error());
     }
-
-    auto handle = co_await upstreams_->acquire_by_key(key, peer_addr, std::move(tls_opts));
-    if (!handle.valid()) {
-        co_return std::unexpected(fiber::common::IoErr::NotFound);
-    }
-    co_return OutPtr{new LiteNginxHttpUpstreamConnection(std::move(handle))};
+    co_return OutPtr{new ConnectedUpstreamConnection(std::move(*acquired))};
 }
 
 } // namespace fiber::lite_nginx::runtime

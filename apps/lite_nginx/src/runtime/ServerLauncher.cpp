@@ -23,6 +23,7 @@
 #include "script/JsValue.h"
 
 #include "../proxy/ProxyHandler.h"
+#include "../upstream/ConnectionPool.h"
 #include "../upstream/UpstreamRegistry.h"
 #include "DnsService.h"
 #include "HttpScriptServices.h"
@@ -206,9 +207,9 @@ struct LocationMatchContext {
 class RequestDispatcher {
 public:
     RequestDispatcher(std::shared_ptr<const RuntimeConfig> runtime,
-                      std::shared_ptr<upstream::UpstreamRegistry> upstreams,
-                      fiber::http_script::HttpScriptServices *script_services) noexcept :
-        runtime_(std::move(runtime)), upstreams_(std::move(upstreams)), proxy_(*upstreams_),
+                      std::shared_ptr<upstream::UpstreamRegistry> upstreams, upstream::ConnectionPool &connection_pool,
+                      DnsService &dns, fiber::http_script::HttpScriptServices *script_services) noexcept :
+        runtime_(std::move(runtime)), upstreams_(std::move(upstreams)), proxy_(*upstreams_, connection_pool, dns),
         script_services_(script_services) {}
 
     fiber::async::Task<void> handle(std::uint32_t listener_index, fiber::http::HttpExchange &exchange) const {
@@ -275,14 +276,21 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
         return std::unexpected(make_error({}, "failed to initialize upstream registry"));
     }
 
+    connection_pool_ = std::make_unique<upstream::ConnectionPool>(*worker_group_, runtime_->connection_pool);
+    if (!connection_pool_->init()) {
+        close();
+        return std::unexpected(make_error({}, "failed to initialize connection pool"));
+    }
+
     dns_ = std::make_unique<DnsService>();
     if (!dns_->init(*worker_group_)) {
         close();
         return std::unexpected(make_error({}, "failed to initialize DNS service"));
     }
-    script_services_ = std::make_unique<HttpScriptServicesImpl>(*upstreams_, *dns_);
+    script_services_ = std::make_unique<HttpScriptServicesImpl>(*upstreams_, *connection_pool_, *dns_);
 
-    auto dispatcher = std::make_shared<RequestDispatcher>(runtime_, upstreams_, script_services_.get());
+    auto dispatcher =
+            std::make_shared<RequestDispatcher>(runtime_, upstreams_, *connection_pool_, *dns_, script_services_.get());
 
     servers_.reserve(runtime_->listeners.size());
     bound_listeners_.reserve(runtime_->listeners.size());
@@ -351,6 +359,12 @@ void ServerLauncher::close() {
     if (dns_) {
         dns_->shutdown();
         dns_.reset();
+    }
+
+    // Connection pool shutdown dispatches to worker loops (must run before they stop/join).
+    if (connection_pool_) {
+        connection_pool_->shutdown();
+        connection_pool_.reset();
     }
 
     if (worker_group_) {

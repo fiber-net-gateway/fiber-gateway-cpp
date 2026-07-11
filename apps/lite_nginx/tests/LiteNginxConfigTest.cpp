@@ -12,6 +12,7 @@ namespace {
 using fiber::lite_nginx::config::ConfigLoader;
 using fiber::lite_nginx::config::Lexer;
 using fiber::lite_nginx::config::LocationMatchKind;
+using fiber::lite_nginx::config::PoolSteal;
 using fiber::lite_nginx::config::ProxyPassKind;
 using fiber::lite_nginx::config::TokenKind;
 
@@ -46,10 +47,13 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
             connection_pool {
                 keepalive_size 32;
                 keepalive_timeout 30s;
+                steal auto;
             }
 
             upstream backend {
                 server 127.0.0.1:9001 weight=3;
+                server https://baidu.com:443 weight=1;
+                server http://127.0.0.1:9002;
                 connect_timeout 2s;
             }
 
@@ -87,11 +91,21 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
     EXPECT_TRUE(config.http.listens[1].http3);
     ASSERT_EQ(config.http.upstreams.size(), 1u);
     EXPECT_EQ(config.http.upstreams[0].name, "backend");
+    ASSERT_EQ(config.http.upstreams[0].servers.size(), 3u);
     EXPECT_EQ(config.http.upstreams[0].servers[0].host, "127.0.0.1");
     EXPECT_EQ(config.http.upstreams[0].servers[0].port, 9001);
     EXPECT_EQ(config.http.upstreams[0].servers[0].weight, 3u);
+    EXPECT_FALSE(config.http.upstreams[0].servers[0].tls);
+    EXPECT_EQ(config.http.upstreams[0].servers[1].host, "baidu.com");
+    EXPECT_EQ(config.http.upstreams[0].servers[1].port, 443u);
+    EXPECT_EQ(config.http.upstreams[0].servers[1].weight, 1u);
+    EXPECT_TRUE(config.http.upstreams[0].servers[1].tls);
+    EXPECT_EQ(config.http.upstreams[0].servers[2].host, "127.0.0.1");
+    EXPECT_EQ(config.http.upstreams[0].servers[2].port, 9002u);
+    EXPECT_FALSE(config.http.upstreams[0].servers[2].tls);
     EXPECT_EQ(config.http.connection_pool.keepalive_size, 32u);
     EXPECT_EQ(config.http.connection_pool.keepalive_timeout, std::chrono::seconds(30));
+    EXPECT_EQ(config.http.connection_pool.steal, PoolSteal::Auto);
     EXPECT_EQ(config.http.upstreams[0].connect_timeout, std::chrono::seconds(2));
 
     ASSERT_EQ(config.http.servers.size(), 1u);
@@ -136,6 +150,76 @@ TEST(LiteNginxConfigTest, RejectsVariablesInV1) {
 
     ASSERT_FALSE(config_result.has_value());
     EXPECT_NE(config_result.error().message.find("does not support variables"), std::string::npos);
+}
+
+TEST(LiteNginxConfigTest, ParsesConnectionPoolSteal) {
+    auto load = [](std::string_view steal_value) {
+        std::string conf = R"(
+            http {
+                listen 8080;
+                connection_pool {
+                    keepalive_size 8;
+                    keepalive_timeout 10s;
+                    steal )";
+        conf += steal_value;
+        conf += R"(;
+                }
+                server { server_name localhost; location / { proxy_pass http://127.0.0.1:9001; } }
+            }
+        )";
+        return ConfigLoader::load_from_string(conf, "steal.conf");
+    };
+
+    {
+        auto config = load("auto");
+        ASSERT_TRUE(config.has_value()) << config.error().message;
+        EXPECT_EQ(config->http.connection_pool.steal, PoolSteal::Auto);
+    }
+    {
+        auto config = load("on");
+        ASSERT_TRUE(config.has_value()) << config.error().message;
+        EXPECT_EQ(config->http.connection_pool.steal, PoolSteal::On);
+    }
+    {
+        auto config = load("off");
+        ASSERT_TRUE(config.has_value()) << config.error().message;
+        EXPECT_EQ(config->http.connection_pool.steal, PoolSteal::Off);
+    }
+    {
+        auto config = load("maybe");
+        EXPECT_FALSE(config.has_value());
+        EXPECT_NE(config.error().message.find("steal"), std::string::npos);
+    }
+}
+
+TEST(LiteNginxConfigTest, ParsesUpstreamServerSchemePrefix) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8080;
+            upstream mixed {
+                server 127.0.0.1:9001 weight=2;
+                server https://example.com:443 weight=1;
+                server http://127.0.0.1:9002;
+            }
+            server { server_name localhost; location / { proxy_pass http://mixed; } }
+        }
+    )",
+                                                        "scheme.conf");
+
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    ASSERT_EQ(config_result->http.upstreams.size(), 1u);
+    ASSERT_EQ(config_result->http.upstreams[0].servers.size(), 3u);
+
+    EXPECT_FALSE(config_result->http.upstreams[0].servers[0].tls);
+    EXPECT_EQ(config_result->http.upstreams[0].servers[0].host, "127.0.0.1");
+
+    EXPECT_TRUE(config_result->http.upstreams[0].servers[1].tls);
+    EXPECT_EQ(config_result->http.upstreams[0].servers[1].host, "example.com");
+    EXPECT_EQ(config_result->http.upstreams[0].servers[1].port, 443u);
+
+    EXPECT_FALSE(config_result->http.upstreams[0].servers[2].tls);
+    EXPECT_EQ(config_result->http.upstreams[0].servers[2].host, "127.0.0.1");
+    EXPECT_EQ(config_result->http.upstreams[0].servers[2].port, 9002u);
 }
 
 TEST(LiteNginxConfigTest, RejectsUnsupportedDirective) {

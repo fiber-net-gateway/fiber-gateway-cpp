@@ -125,22 +125,33 @@ fiber::http::HeaderMap<std::uint8_t> make_default_skip_headers() {
     return headers;
 }
 
-std::expected<UpstreamPeerRuntime, RuntimeError>
-make_peer_runtime(const config::SourceLocation &location, std::string host, std::uint16_t port, std::uint32_t weight) {
-    fiber::net::IpAddress ip;
-    if (!fiber::net::IpAddress::parse(host, ip)) {
-        return std::unexpected(
-                make_error(location, "upstream host must be an IP literal in lite-nginx runtime: " + host));
-    }
+std::expected<UpstreamPeerRuntime, RuntimeError> make_peer_runtime(const config::SourceLocation &location,
+                                                                   std::string host, std::uint16_t port,
+                                                                   std::uint32_t weight, bool tls) {
+    const auto scheme = tls ? fiber::http::Http1ConnectionGroupKey::Scheme::Https
+                            : fiber::http::Http1ConnectionGroupKey::Scheme::Http;
 
     UpstreamPeerRuntime peer;
-    peer.host = std::move(host);
+    peer.host = host;
     peer.port = port;
     peer.weight = weight;
-    peer.ip = ip;
-    peer.address = fiber::net::SocketAddress(ip, port);
-    peer.connection_key =
-            fiber::http::Http1ConnectionGroupKey::from_ip(ip, port, fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+
+    fiber::net::IpAddress ip;
+    if (fiber::net::IpAddress::parse(host, ip)) {
+        // IP-literal peer: config-time dial target, no runtime DNS.
+        peer.ip = ip;
+        peer.address = fiber::net::SocketAddress(ip, port);
+        peer.connection_key = fiber::http::Http1ConnectionGroupKey::from_ip(ip, port, scheme);
+        return peer;
+    }
+
+    // Hostname peer: pool identity is the name; the dial target is resolved at runtime
+    // via DnsService on the worker loop that needs a fresh connection.
+    auto key = fiber::http::Http1ConnectionGroupKey::from_name(host, port, scheme);
+    if (!key) {
+        return std::unexpected(make_error(location, "upstream host name too long: " + host));
+    }
+    peer.connection_key = std::move(*key);
     return peer;
 }
 
@@ -172,6 +183,19 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
     runtime.worker_processes = config.worker_processes;
     runtime.connection_pool.keepalive_size = config.http.connection_pool.keepalive_size;
     runtime.connection_pool.keepalive_timeout = config.http.connection_pool.keepalive_timeout;
+    // Resolve PoolSteal::Auto to a concrete choice at build time: steal across worker loops only
+    // when there is more than one worker (single-worker stealable is dead cross-loop code).
+    switch (config.http.connection_pool.steal) {
+        case config::PoolSteal::On:
+            runtime.connection_pool.steal = true;
+            break;
+        case config::PoolSteal::Off:
+            runtime.connection_pool.steal = false;
+            break;
+        case config::PoolSteal::Auto:
+            runtime.connection_pool.steal = runtime.worker_processes > 1;
+            break;
+    }
     runtime.upstreams.reserve(config.http.upstreams.size());
     runtime.servers.reserve(config.http.servers.size());
     runtime.listeners.reserve(config.http.listens.size());
@@ -188,7 +212,8 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
         runtime_upstream.peers.reserve(upstream.servers.size());
 
         for (const auto &server: upstream.servers) {
-            auto peer_result = make_peer_runtime(config::SourceLocation{}, server.host, server.port, server.weight);
+            auto peer_result =
+                    make_peer_runtime(config::SourceLocation{}, server.host, server.port, server.weight, server.tls);
             if (!peer_result) {
                 return std::unexpected(peer_result.error());
             }
@@ -289,7 +314,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 auto it = direct_upstream_indices.find(key);
                 if (it == direct_upstream_indices.end()) {
                     auto peer_result = make_peer_runtime(location.proxy_pass.location, location.proxy_pass.host,
-                                                         location.proxy_pass.port, 1);
+                                                         location.proxy_pass.port, 1, false);
                     if (!peer_result) {
                         return std::unexpected(peer_result.error());
                     }
