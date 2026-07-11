@@ -120,14 +120,20 @@ Top level:
 - `upstream <name> { ... }`
 - `connection_pool { ... }` — global keepalive pool shared across all upstreams and script
   targets (keyed by peer). `keepalive_size <n>;` (idle per peer; 0 disables pooling, falling
-  back to transient connections) and `keepalive_timeout <duration>;`.
+  back to transient connections), `keepalive_timeout <duration>;`, and `steal on|off|auto;`
+  (cross-loop idle-connection sharing: `auto` = on when `worker_processes > 1`). `steal on` uses
+  one pool whose idle connections can be borrowed across worker loops; `steal off` gives each
+  worker loop its own local pool (no cross-loop reuse).
 - `server { ... }`
 
 `upstream` block:
 
-- `server <host:port> [weight=<n>];` — IP literal + port; `weight` drives smooth weighted
-  round-robin peer selection (default 1). Upstreams carry only peers + weight; pool sizing lives
-  in `connection_pool`.
+- `server [<scheme>://]<host:port> [weight=<n>];` — `scheme` is `http://` (default, may be
+  omitted) or `https://`; it selects TLS for the peer and is baked into the pool key. `host` may
+  be an IP literal (config-time dial target, no DNS) or a hostname (resolved via DNS at connect
+  time on the worker loop that needs a fresh connection; the pooled identity stays the host name).
+  `weight` drives smooth weighted round-robin peer selection (default 1). Upstreams carry only
+  peers + weight + scheme; pool sizing lives in `connection_pool`.
 - `connect_timeout <duration>;`
 - `read_timeout <duration>;`
 - `send_timeout <duration>;`

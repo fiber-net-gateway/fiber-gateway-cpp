@@ -12,9 +12,19 @@
 namespace fiber::lite_nginx::config {
 
 // Global keepalive connection pool shared across all upstreams (one pool, keyed by peer).
+// `steal` controls cross-loop connection sharing: Auto resolves at runtime-build time to
+// (worker_processes > 1); On uses the stealable pool (idle connections shared across worker
+// loops); Off uses per-loop local pools (no cross-loop reuse).
+enum class PoolSteal : unsigned char {
+    Auto,
+    On,
+    Off,
+};
+
 struct ConnectionPoolConfig {
     std::size_t keepalive_size = 0; // max idle connections per peer group
     std::chrono::milliseconds keepalive_timeout{30000}; // idle timeout
+    PoolSteal steal = PoolSteal::Auto;
 };
 
 struct HeaderOverride {
@@ -44,6 +54,7 @@ struct UpstreamServerConfig {
     std::string host;
     std::uint16_t port = 0;
     std::uint32_t weight = 1;
+    bool tls = false; // derived from the per-server scheme prefix (https:// = true)
 };
 
 struct UpstreamConfig {

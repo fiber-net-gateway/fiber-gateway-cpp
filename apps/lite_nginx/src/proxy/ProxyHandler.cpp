@@ -14,6 +14,9 @@
 #include "http/HttpHeaderHash.h"
 #include "http/HttpHeaders.h"
 
+#include "../runtime/DnsService.h"
+#include "../upstream/ConnectionPool.h"
+#include "../upstream/UpstreamConnection.h"
 #include "../upstream/UpstreamRegistry.h"
 #include "http/HttpProxyCore.h"
 
@@ -214,55 +217,36 @@ struct TimeRec {
 
 } // namespace
 
+ProxyHandler::ProxyHandler(upstream::UpstreamRegistry &upstreams, upstream::ConnectionPool &pool,
+                           runtime::DnsService &dns) noexcept : upstreams_(&upstreams), pool_(&pool), dns_(&dns) {}
+
 fiber::async::Task<void> ProxyHandler::handle(fiber::http::HttpExchange &exchange,
                                               const runtime::ListenerRuntime &listener,
                                               const runtime::LocationRuntime &location) const {
-    if (!upstreams_) {
+    if (!upstreams_ || !pool_) {
         co_await send_plain_response(exchange, 502, kBadGatewayBody, listener);
         co_return;
     }
     TimeRec rec;
 
-    auto handle = co_await upstreams_->acquire_connection(location.upstream_index);
-    if (!handle.valid()) {
+    const auto *peer = upstreams_->select_peer(location.upstream_index);
+    if (peer == nullptr || !peer->connection_key.has_value()) {
         co_await send_plain_response(exchange, 502, kBadGatewayBody, listener);
         co_return;
     }
 
-    fiber::http::Http1ClientConnectionOptions connection_options;
-    connection_options.peer_addr = handle.peer_addr;
-    connection_options.connect_timeout = location.connect_timeout;
-
-    if (handle.pooled()) {
-        fiber::http::Http1ClientConnection *conn = handle.lease.get();
-        if (!conn) {
-            auto emplace_result = handle.lease.emplace_connection(std::move(connection_options));
-            if (!emplace_result) {
-                co_await send_plain_response(exchange, map_upstream_error_status(emplace_result.error()),
-                                             map_upstream_error_body(emplace_result.error()), listener);
-                co_return;
-            }
-            conn = *emplace_result;
-            auto connect_result = co_await conn->connect();
-            if (!connect_result) {
-                co_await send_plain_response(exchange, map_upstream_error_status(connect_result.error()),
-                                             map_upstream_error_body(connect_result.error()), listener);
-                co_return;
-            }
-        }
-        co_await proxy_over_connection(exchange, location, *conn, listener);
+    // SNI uses the configured host name for HTTPS peers; IP-literal peers send nothing.
+    const std::string_view sni =
+            peer->connection_key->is_name() ? peer->connection_key->host_name() : std::string_view{};
+    auto acquired =
+            co_await upstream::acquire_and_connect(*pool_, *dns_, *peer->connection_key, sni, location.connect_timeout);
+    if (!acquired) {
+        co_await send_plain_response(exchange, map_upstream_error_status(acquired.error()),
+                                     map_upstream_error_body(acquired.error()), listener);
         co_return;
     }
 
-    fiber::http::Http1ClientConnection transient(fiber::event::EventLoop::current(), std::move(connection_options));
-    auto connect_result = co_await transient.connect();
-    if (!connect_result) {
-        co_await send_plain_response(exchange, map_upstream_error_status(connect_result.error()),
-                                     map_upstream_error_body(connect_result.error()), listener);
-        co_return;
-    }
-
-    co_await proxy_over_connection(exchange, location, transient, listener);
+    co_await proxy_over_connection(exchange, location, *acquired->conn, listener);
 }
 
 } // namespace fiber::lite_nginx::proxy

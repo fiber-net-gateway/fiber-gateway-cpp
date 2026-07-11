@@ -16,6 +16,8 @@ add_library(lite_nginx_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/HttpScriptServices.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/RuntimeBuilder.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/ServerLauncher.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/upstream/ConnectionPool.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/upstream/UpstreamConnection.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/upstream/UpstreamRegistry.cpp")
 target_include_directories(lite_nginx_core PUBLIC "${CMAKE_CURRENT_LIST_DIR}/src")
 target_link_libraries(lite_nginx_core PUBLIC fiber_lib lite_nginx_config)

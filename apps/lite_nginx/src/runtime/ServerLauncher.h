@@ -13,8 +13,9 @@
 #include "RuntimeConfig.h"
 
 namespace fiber::lite_nginx::upstream {
+class ConnectionPool;
 class UpstreamRegistry;
-}
+} // namespace fiber::lite_nginx::upstream
 
 namespace fiber::lite_nginx::runtime {
 
@@ -41,6 +42,7 @@ private:
     fiber::event::EventLoop &accept_loop_;
     std::shared_ptr<const RuntimeConfig> runtime_{};
     std::shared_ptr<upstream::UpstreamRegistry> upstreams_{};
+    std::unique_ptr<upstream::ConnectionPool> connection_pool_{};
     std::unique_ptr<DnsService> dns_{};
     std::unique_ptr<HttpScriptServicesImpl> script_services_{};
     std::unique_ptr<fiber::event::EventLoopGroup> worker_group_;

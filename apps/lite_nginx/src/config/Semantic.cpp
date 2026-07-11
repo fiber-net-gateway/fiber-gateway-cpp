@@ -13,6 +13,41 @@ struct HostPort {
     std::uint16_t port = 0;
 };
 
+// Strips an optional "http://" / "https://" scheme prefix from an upstream server address. When
+// present, tls is set from the scheme (https:// -> true). Absent prefix defaults to http (tls=false).
+// "http://" may be omitted entirely, matching nginx's per-server scheme syntax.
+struct StrippedScheme {
+    std::string_view rest;
+    bool tls = false;
+};
+
+std::optional<StrippedScheme> strip_server_scheme(std::string_view value) noexcept {
+    constexpr std::string_view kHttp = "http://";
+    constexpr std::string_view kHttps = "https://";
+    auto icase_prefix = [](std::string_view text, std::string_view prefix) noexcept {
+        if (text.size() < prefix.size()) {
+            return false;
+        }
+        for (std::size_t i = 0; i < prefix.size(); ++i) {
+            char c = text[i];
+            if (c >= 'A' && c <= 'Z') {
+                c = static_cast<char>(c - 'A' + 'a');
+            }
+            if (c != prefix[i]) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (icase_prefix(value, kHttps)) {
+        return StrippedScheme{value.substr(kHttps.size()), true};
+    }
+    if (icase_prefix(value, kHttp)) {
+        return StrippedScheme{value.substr(kHttp.size()), false};
+    }
+    return StrippedScheme{value, false};
+}
+
 struct ProxySettingsBuilder {
     std::optional<std::chrono::milliseconds> connect_timeout;
     std::optional<std::chrono::milliseconds> read_timeout;
@@ -353,13 +388,18 @@ std::expected<UpstreamConfig, ConfigError> parse_upstream(const DirectiveNode &d
             if (contains_variable(child.args[0])) {
                 return std::unexpected(make_error(child, "upstream server does not support variables in V1"));
             }
-            auto host_port = parse_host_port(child, child.args[0], "upstream server");
+            auto stripped = strip_server_scheme(child.args[0]);
+            if (!stripped) {
+                return std::unexpected(make_error(child, "upstream server has an invalid scheme prefix"));
+            }
+            auto host_port = parse_host_port(child, stripped->rest, "upstream server");
             if (!host_port) {
                 return std::unexpected(host_port.error());
             }
             UpstreamServerConfig server;
             server.host = std::move(host_port->host);
             server.port = host_port->port;
+            server.tls = stripped->tls;
             // server parameters are name=value triplets; the lexer splits '=' into its own token,
             // so args look like [host:port, "weight", "=", "3", ...].
             for (std::size_t i = 1; i < child.args.size(); ++i) {
@@ -650,6 +690,25 @@ std::expected<ConnectionPoolConfig, ConfigError> parse_connection_pool(const Dir
                 return std::unexpected(d.error());
             }
             pool.keepalive_timeout = *d;
+            continue;
+        }
+        if (child.name == "steal") {
+            if (child.args.size() != 1) {
+                return std::unexpected(make_error(child, "steal expects exactly one argument: on|off|auto"));
+            }
+            if (contains_variable(child.args[0])) {
+                return std::unexpected(make_error(child, "steal does not support variables in V1"));
+            }
+            const std::string_view val = child.args[0];
+            if (val == "auto") {
+                pool.steal = PoolSteal::Auto;
+            } else if (val == "on") {
+                pool.steal = PoolSteal::On;
+            } else if (val == "off") {
+                pool.steal = PoolSteal::Off;
+            } else {
+                return std::unexpected(make_error(child, "steal must be one of: on|off|auto"));
+            }
             continue;
         }
         return std::unexpected(make_error(child, "unsupported directive in connection_pool block: " + child.name));

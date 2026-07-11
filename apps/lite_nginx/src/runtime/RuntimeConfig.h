@@ -30,10 +30,13 @@ struct RuntimeError {
 };
 
 // Global keepalive connection pool shared across all upstreams. Configured once under
-// http.connection_pool; one StealableHttp1ConnectionPoolSet keyed by peer (Http1ConnectionGroupKey).
+// http.connection_pool; keyed by peer (Http1ConnectionGroupKey). `steal` is the build-time
+// resolution of PoolSteal::Auto (true when worker_processes > 1): true -> StealableHttp1ConnectionPoolSet
+// (idle connections shared across worker loops), false -> LocalHttp1ConnectionPoolSet (per-loop).
 struct ConnectionPoolRuntime {
     std::size_t keepalive_size = 0;
     std::chrono::milliseconds keepalive_timeout{30000};
+    bool steal = false;
 };
 
 struct TlsIdentityRuntime {
@@ -53,8 +56,8 @@ struct UpstreamPeerRuntime {
     std::string host;
     std::uint16_t port = 0;
     std::uint32_t weight = 1;
-    fiber::net::IpAddress ip{};
-    fiber::net::SocketAddress address{};
+    fiber::net::IpAddress ip{}; // valid only when connection_key.is_ip()
+    fiber::net::SocketAddress address{}; // IP peers: config-time dial target; name peers: filled at runtime after DNS
     std::optional<fiber::http::Http1ConnectionGroupKey> connection_key{};
 };
 
