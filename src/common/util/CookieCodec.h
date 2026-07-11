@@ -1,11 +1,11 @@
-#ifndef FIBER_HTTP_COOKIE_CODEC_H
-#define FIBER_HTTP_COOKIE_CODEC_H
+#ifndef FIBER_UTIL_COOKIE_CODEC_H
+#define FIBER_UTIL_COOKIE_CODEC_H
 
 #include <cstdint>
 #include <string>
 #include <string_view>
 
-namespace fiber::http {
+namespace fiber::util {
 
 // RFC 6265 SameSite attribute values. Unset mirrors Netty's null SameSite (attribute
 // omitted); None/Lax/Strict map to the literal "SameSite=None|Lax|Strict".
@@ -74,6 +74,6 @@ void decode_cookie_header(std::string_view header, Sink &&sink) {
 // then yields false). On success, out holds "name=value; Domain=...; ...".
 [[nodiscard]] bool encode_set_cookie(const Cookie &cookie, std::string &out);
 
-} // namespace fiber::http
+} // namespace fiber::util
 
-#endif // FIBER_HTTP_COOKIE_CODEC_H
+#endif // FIBER_UTIL_COOKIE_CODEC_H

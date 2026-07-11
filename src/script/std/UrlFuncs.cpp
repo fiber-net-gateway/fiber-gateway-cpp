@@ -7,7 +7,7 @@
 #include "../gc/GcInternal.h"
 #include "NodeText.h"
 
-#include "../../common/url/UrlForm.h"
+#include "../../common/util/UrlForm.h"
 
 #include <cstdint>
 #include <string>
@@ -148,7 +148,7 @@ ScriptResult url_encode_component_fn(void * /*userdata*/, const Library::HostCal
         return type_error();
     }
     std::string out;
-    fiber::common::url::form_encode(input, out);
+    fiber::util::form_encode(input, out);
     JsValue result = JsValue::make_string(*frame.runtime, out.data(), out.size());
     if (js_value_type(result) != JsNodeType::String) {
         return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
@@ -167,7 +167,7 @@ ScriptResult url_decode_component_fn(void * /*userdata*/, const Library::HostCal
     if (!string_utf8_view(args.args[0], input)) {
         return type_error();
     }
-    auto decoded = fiber::common::url::form_decode(input);
+    auto decoded = fiber::util::form_decode(input);
     if (!decoded) {
         // Malformed percent escape (Java IllegalArgumentException).
         return ScriptResult::exception(JsValue::make_exception(ExceptionKind::RangeError));
@@ -208,7 +208,7 @@ ScriptResult url_parse_query_fn(void * /*userdata*/, const Library::HostCallFram
     }
 
     bool oom = false;
-    auto io = fiber::common::url::form_decode_query(input, [&](std::string_view k, std::string_view v) -> bool {
+    auto io = fiber::util::form_decode_query(input, [&](std::string_view k, std::string_view v) -> bool {
         if (!aggregate_pair(heap, obj_root, k, v)) {
             oom = true;
             return false;
@@ -249,7 +249,7 @@ ScriptResult url_build_query_fn(void * /*userdata*/, const Library::HostCallFram
     }
     QueryPairSource src{obj, gc_object_first_entry(obj), nullptr, 0, std::string{}};
     std::string out;
-    fiber::common::url::form_build_query(out, src);
+    fiber::util::form_build_query(out, src);
     JsValue result = JsValue::make_string(*heap, out.data(), out.size());
     if (js_value_type(result) != JsNodeType::String) {
         return ScriptResult::abort(ScriptAbortReason::OutOfMemory);

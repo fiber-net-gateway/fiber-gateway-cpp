@@ -9,7 +9,7 @@
 #include <unordered_map>
 #include <utility>
 
-#include "common/route/RoutePathMatcher.h"
+#include "common/util/RoutePathMatcher.h"
 #include "http/HeaderMap.h"
 #include "http/HttpHeaderHash.h"
 #include "http_script/HttpScriptLib.h"
@@ -24,7 +24,7 @@ constexpr std::chrono::milliseconds kDefaultReadTimeout{30000};
 constexpr std::chrono::milliseconds kDefaultSendTimeout{30000};
 constexpr std::uint8_t kSkipHeaderValue = 1;
 
-using fiber::common::route::RoutePatternError;
+using fiber::util::RoutePatternError;
 
 KeepaliveMode to_runtime_keepalive_mode(config::KeepaliveMode mode) noexcept {
     switch (mode) {
@@ -214,7 +214,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
         runtime_server.locations.reserve(server.locations.size());
 
         LocationRouteDefiner route_definer;
-        fiber::common::route::RoutePathMatcher<std::uint32_t>::Builder<LocationRoutePayload, LocationRouteDefiner>
+        fiber::util::RoutePathMatcher<std::uint32_t>::Builder<LocationRoutePayload, LocationRouteDefiner>
                 matcher_builder(route_definer);
 
         for (const auto &name: server.server_names) {

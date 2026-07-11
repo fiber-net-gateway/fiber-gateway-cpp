@@ -1,8 +1,8 @@
 #include "ScriptExchangeCtx.h"
 
 #include "../common/json/JsonEncode.h"
-#include "../common/url/UrlForm.h"
-#include "../http/CookieCodec.h"
+#include "../common/util/CookieCodec.h"
+#include "../common/util/UrlForm.h"
 #include "../http/HttpBodySpec.h"
 #include "../http/HttpExchangeIo.h"
 #include "../script/JsValue.h"
@@ -67,7 +67,7 @@ fiber::script::JsValue ScriptExchangeCtx::query() noexcept {
         return fiber::script::JsValue::make_undefined(); // OOM; slot stays undefined, retries next call
     }
     std::string_view q = exchange_.uri().query;
-    auto query_io = fiber::common::url::form_decode_query(
+    auto query_io = fiber::util::form_decode_query(
             q, [&](std::string_view k, std::string_view v) -> bool { return put_string(heap_, query_root_, k, v); });
     (void) query_io; // malformed percent escapes leave the partial object (lenient)
     return *query_root_;
@@ -109,7 +109,7 @@ fiber::script::JsValue ScriptExchangeCtx::cookies() noexcept {
     }
     fiber::http::HttpHeaders::MatchRange cookie_headers = exchange_.request_headers().get_all("cookie");
     for (const fiber::http::HttpHeaders::HeaderField &field: cookie_headers) {
-        fiber::http::decode_cookie_header(field.value_view(), [&](std::string_view name, std::string_view value) {
+        fiber::util::decode_cookie_header(field.value_view(), [&](std::string_view name, std::string_view value) {
             put_string(heap_, cookies_root_, name, value);
         });
     }

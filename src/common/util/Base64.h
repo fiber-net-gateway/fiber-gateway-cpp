@@ -1,12 +1,12 @@
-#ifndef FIBER_COMMON_BASE64_BASE64_H
-#define FIBER_COMMON_BASE64_BASE64_H
+#ifndef FIBER_UTIL_BASE64_H
+#define FIBER_UTIL_BASE64_H
 
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
 
-namespace fiber::common::base64 {
+namespace fiber::util {
 
 // RFC 4648 §4 base64 encode: alphabet A-Za-z0-9+/, '=' padding, no line breaks.
 // Matches java.util.Base64.getEncoder() (basic encoder).
@@ -19,6 +19,6 @@ std::string base64_encode(const std::uint8_t *data, std::size_t len);
 // non-zero padding bits (matches Java's basic-decoder leniency there).
 bool base64_decode(std::string_view in, std::string &out) noexcept;
 
-} // namespace fiber::common::base64
+} // namespace fiber::util
 
-#endif // FIBER_COMMON_BASE64_BASE64_H
+#endif // FIBER_UTIL_BASE64_H

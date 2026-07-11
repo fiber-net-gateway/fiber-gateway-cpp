@@ -2,7 +2,7 @@
 
 #include "../json/Utf.h"
 
-namespace fiber::common::url {
+namespace fiber::util {
 
 namespace {
 
@@ -83,4 +83,4 @@ fiber::common::IoResult<std::string> form_decode(std::string_view in) {
     return out;
 }
 
-} // namespace fiber::common::url
+} // namespace fiber::util

@@ -3,7 +3,7 @@
 #include "NodeText.h"
 #include "StdLibrary.h"
 
-#include "../../common/base64/Base64.h"
+#include "../../common/util/Base64.h"
 #include "../JsValue.h"
 #include "../Library.h"
 #include "../gc/GcInternal.h"
@@ -82,7 +82,7 @@ ScriptResult base64_encode_fn(void * /*userdata*/, const Library::HostCallFrame 
     if (!binary_bytes(args.args[0], data, len)) {
         return ScriptResult::success(JsValue::make_undefined());
     }
-    std::string encoded = fiber::common::base64::base64_encode(data, len);
+    std::string encoded = fiber::util::base64_encode(data, len);
     return make_string_result(frame.runtime, encoded);
 }
 
@@ -98,7 +98,7 @@ ScriptResult base64_decode_fn(void * /*userdata*/, const Library::HostCallFrame 
         return ScriptResult::success(JsValue::make_undefined());
     }
     std::string out;
-    if (!fiber::common::base64::base64_decode(text, out)) {
+    if (!fiber::util::base64_decode(text, out)) {
         // Java Base64.getDecoder().decode throws IllegalArgumentException -> RangeError.
         return range_error();
     }

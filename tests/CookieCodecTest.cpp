@@ -4,12 +4,12 @@
 #include <string_view>
 #include <vector>
 
-#include "http/CookieCodec.h"
+#include "common/util/CookieCodec.h"
 
-using fiber::http::Cookie;
-using fiber::http::CookieSameSite;
-using fiber::http::decode_cookie_header;
-using fiber::http::encode_set_cookie;
+using fiber::util::Cookie;
+using fiber::util::CookieSameSite;
+using fiber::util::decode_cookie_header;
+using fiber::util::encode_set_cookie;
 
 namespace {
 

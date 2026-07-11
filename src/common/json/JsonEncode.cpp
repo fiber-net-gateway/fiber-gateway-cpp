@@ -1,6 +1,6 @@
 #include "JsonEncode.h"
 
-#include "../base64/Base64.h"
+#include "../util/Base64.h"
 
 #include <charconv>
 #include <cmath>
@@ -265,7 +265,7 @@ Generator::Result Generator::binary(const std::uint8_t *data, size_t len) {
     if (result != Result::OK) {
         return result;
     }
-    std::string encoded = fiber::common::base64::base64_encode(data, len);
+    std::string encoded = fiber::util::base64_encode(data, len);
     result = write_string(encoded.data(), encoded.size());
     if (result != Result::OK) {
         return result;
