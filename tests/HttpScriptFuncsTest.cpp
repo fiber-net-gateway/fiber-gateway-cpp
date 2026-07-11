@@ -31,7 +31,9 @@
 #include "net/IpAddress.h"
 #include "net/SocketAddress.h"
 
+#include "common/util/RoutePathMatcher.h"
 #include "http_script/HttpScriptLib.h"
+#include "http_script/RouteScriptLibrary.h"
 #include "http_script/ScriptExchangeCtx.h"
 #include "script/JsGc.h"
 #include "script/JsValue.h"
@@ -267,6 +269,88 @@ bool contains(std::string_view haystack, std::string_view needle) {
     return haystack.find(needle) != std::string_view::npos;
 }
 
+// ---- Route-variable ($path/$query/$header/$cookie/$req) test helpers ----
+
+// Compiles a script against a per-location RouteScriptLibrary seeded with path_var_names,
+// wrapping a fresh StdLibrary with the HTTP functions. Keeps the libraries alive alongside
+// the script (the compiled script bakes in their HostCallable pointers).
+struct CompiledRouteScript {
+    std::shared_ptr<fiber::script::Script> script; // nullptr on compile failure
+    std::shared_ptr<fiber::script::std_lib::StdLibrary> shared_lib;
+    std::shared_ptr<fiber::http_script::RouteScriptLibrary> route_lib;
+    bool ok = false;
+    std::string error;
+};
+
+CompiledRouteScript compile_route_script(std::string_view source, const std::vector<std::string> &path_var_names) {
+    CompiledRouteScript out;
+    out.shared_lib = std::make_shared<fiber::script::std_lib::StdLibrary>();
+    fiber::http_script::register_http_functions_to_lib(*out.shared_lib);
+    out.route_lib = std::make_shared<fiber::http_script::RouteScriptLibrary>(*out.shared_lib, path_var_names);
+    auto compiled = fiber::script::compile_script(*out.route_lib, source);
+    if (!compiled) {
+        out.error = std::string(compiled.error().message);
+        return out; // script stays nullptr, ok stays false
+    }
+    out.script = std::make_shared<fiber::script::Script>(std::move(*compiled));
+    out.ok = true;
+    return out;
+}
+
+// Route matcher context that collects path vars (mirrors lite_nginx LocationMatchContext).
+struct RouteMatchCollector {
+    bool matched(std::uint32_t, const std::uint32_t &) { return true; }
+    void add_path_var(std::string_view name, std::string_view value) { vars.emplace_back(name, value); }
+    void pop_path_var() {
+        if (!vars.empty()) {
+            vars.pop_back();
+        }
+    }
+    std::vector<std::pair<std::string_view, std::string_view>> vars;
+};
+
+struct TestRouteVarDefiner {
+    void add_path_var_definer(int &, std::string_view, std::uint32_t) {}
+    std::uint32_t on_route_mount(std::uint32_t, std::string_view, int &) { return 0; }
+};
+
+// Builds a handler that matches the request path against `pattern` (collecting path vars)
+// and feeds the captures to the script's ScriptExchangeCtx.
+fiber::http::HttpHandler make_route_script_handler(CompiledRouteScript compiled, std::string_view pattern) {
+    auto matcher = std::make_shared<fiber::util::RoutePathMatcher<std::uint32_t>>();
+    TestRouteVarDefiner definer;
+    fiber::util::RoutePathMatcher<std::uint32_t>::Builder<int, TestRouteVarDefiner> builder(definer);
+    builder.add_route(pattern, 0);
+    *matcher = builder.build();
+    auto script = compiled.script;
+    auto route_lib = compiled.route_lib;
+    auto shared_lib = compiled.shared_lib;
+    return [script, matcher, route_lib, shared_lib](fiber::http::HttpExchange &exchange) -> Task<void> {
+        fiber::script::GcHeap heap;
+        fiber::http_script::ScriptExchangeCtx ctx{exchange, heap};
+        RouteMatchCollector mc;
+        std::string_view path = exchange.uri().path;
+        (void) matcher->match_path(path, mc);
+        ctx.set_path_vars(mc.vars);
+        fiber::script::JsValue root = fiber::script::JsValue::make_undefined();
+        auto result = co_await script->exec_async(root, &ctx, heap);
+        (void) result;
+        if (!ctx.response_header_sent()) {
+            fiber::http::HttpHeaders headers(exchange.pool());
+            headers.set("Content-Type", "text/plain");
+            co_await exchange.send_header({
+                    .kind = fiber::http::OutgoingHeaderKind::Final,
+                    .status_code = 500,
+                    .headers = &headers,
+                    .body = fiber::http::HttpBodySpec::ContentLength(0),
+                    .connection_mode = fiber::http::ResponseConnectionMode::Auto,
+                    .end_stream = true,
+            });
+        }
+        co_return;
+    };
+}
+
 } // namespace
 
 TEST(HttpScriptFuncsTest, RequestViewsAndSendJson) {
@@ -375,5 +459,107 @@ TEST(HttpScriptFuncsTest, SetHeadersAndAddCookieAndSend) {
     EXPECT_TRUE(contains(set_cookie, "HttpOnly")) << set_cookie;
     EXPECT_TRUE(contains(set_cookie, "SameSite=Lax")) << set_cookie;
 
+    s.stop();
+}
+
+// ---- Route-variable ($path/$query/$header/$cookie/$req) tests ----
+
+TEST(RouteVarTest, PathVarCompileTimeExistence) {
+    // $path.id compiles when "id" is a declared path var; $path.missing does not.
+    auto ok = compile_route_script("resp.sendJson(200, $path.id);", {"id"});
+    EXPECT_TRUE(ok.ok) << ok.error;
+
+    auto missing = compile_route_script("resp.sendJson(200, $path.missing);", {"id"});
+    EXPECT_FALSE(missing.ok);
+    EXPECT_NE(missing.error.find("constant not found"), std::string::npos) << missing.error;
+
+    // An exact-match location (no path vars) rejects any $path reference at compile time.
+    auto none = compile_route_script("resp.sendJson(200, $path.id);", {});
+    EXPECT_FALSE(none.ok);
+}
+
+TEST(RouteVarTest, ReqFieldCompileTimeExistence) {
+    for (std::string_view field: {"uri", "method", "path", "query"}) {
+        std::string src = "resp.sendJson(200, $req.";
+        src += field;
+        src += ");";
+        auto compiled = compile_route_script(src, {});
+        EXPECT_TRUE(compiled.ok) << field << ": " << compiled.error;
+    }
+    auto bad = compile_route_script("resp.sendJson(200, $req.bogus);", {});
+    EXPECT_FALSE(bad.ok);
+    EXPECT_NE(bad.error.find("constant not found"), std::string::npos) << bad.error;
+}
+
+TEST(RouteVarTest, DynamicNamespacesAlwaysResolve) {
+    // $query/$header/$cookie always compile (slot exists; value resolved at request time).
+    auto compiled = compile_route_script(
+            "resp.sendJson(200, {q: $query.a, h: $header.x_forwarded_for, c: $cookie.session});", {});
+    EXPECT_TRUE(compiled.ok) << compiled.error;
+}
+
+TEST(RouteVarTest, PathVarResolvesCapturedValue) {
+    ServerFixture s;
+    auto compiled = compile_route_script(
+            "resp.sendJson(200, {id: $path.id, uri: $req.uri, method: $req.method, path: $req.path, q: $req.query});",
+            {"id"});
+    ASSERT_TRUE(compiled.ok) << compiled.error;
+    s.start(make_route_script_handler(std::move(compiled), "/users/:id"));
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/users/42?x=1";
+    ClientResult result = s.request(std::move(req));
+
+    EXPECT_EQ(result.status_code, 200) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"id\":\"42\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"uri\":\"/users/42?x=1\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"method\":\"GET\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"path\":\"/users/42\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"q\":\"x=1\"")) << result.body;
+    s.stop();
+}
+
+TEST(RouteVarTest, QueryHeaderCookieVars) {
+    ServerFixture s;
+    auto compiled = compile_route_script(
+            "resp.sendJson(200, {q: $query.a, h: $header.x_forwarded_for, c: $cookie.session});", {});
+    ASSERT_TRUE(compiled.ok) << compiled.error;
+    s.start(make_route_script_handler(std::move(compiled), "/*"));
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/?a=hello";
+    req.headers = {{"X-Forwarded-For", "1.2.3.4"}, {"cookie", "session=abc"}};
+    ClientResult result = s.request(std::move(req));
+
+    EXPECT_EQ(result.status_code, 200) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"q\":\"hello\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"h\":\"1.2.3.4\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"c\":\"abc\"")) << result.body;
+    s.stop();
+}
+
+TEST(RouteVarTest, AbsentVarsResolveToNull) {
+    ServerFixture s;
+    // No query param "a", no X-Forwarded-For header, no session cookie, and $path.id on a
+    // catch-all location (no capture) -> all null. ($path.id compiles because the
+    // RouteScriptLibrary is seeded with {"id"}, but the request matches /* which captures
+    // nothing, so path_var returns null rather than failing.) Mirrors Java NullNode.
+    auto compiled = compile_route_script(
+            "resp.sendJson(200, {p: $path.id, q: $query.a, h: $header.x_forwarded_for, c: $cookie.session});", {"id"});
+    ASSERT_TRUE(compiled.ok) << compiled.error;
+    s.start(make_route_script_handler(std::move(compiled), "/*"));
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/";
+    ClientResult result = s.request(std::move(req));
+
+    EXPECT_EQ(result.status_code, 200) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"p\":null")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"q\":null")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"h\":null")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"c\":null")) << result.body;
     s.stop();
 }

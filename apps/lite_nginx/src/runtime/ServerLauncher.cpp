@@ -7,6 +7,7 @@
 #include <string_view>
 #include <sys/socket.h>
 #include <utility>
+#include <vector>
 
 #include "async/Spawn.h"
 #include "async/Task.h"
@@ -66,10 +67,13 @@ fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange
 // Runs a compiled script against the request, wiring the HttpExchange via a
 // ScriptExchangeCtx attach payload. If the script completes without writing a response
 // header (e.g. it threw or aborted before calling resp.*), a 500 is sent so the client is
-// never left without a response.
-fiber::async::Task<void> run_script(fiber::http::HttpExchange &exchange, fiber::script::Script &script) {
+// never left without a response. path_vars are the route captures for this request
+// (name/value pairs borrowing the matcher text and request path buffer).
+fiber::async::Task<void> run_script(fiber::http::HttpExchange &exchange, fiber::script::Script &script,
+                                    const std::vector<std::pair<std::string_view, std::string_view>> &path_vars) {
     fiber::script::GcHeap heap;
     fiber::http_script::ScriptExchangeCtx ctx{exchange, heap};
+    ctx.set_path_vars(path_vars);
     fiber::script::JsValue root = fiber::script::JsValue::make_undefined();
     auto result = co_await script.exec_async(root, &ctx, heap);
     (void) result;
@@ -180,10 +184,19 @@ struct LocationMatchContext {
         return true;
     }
 
-    void add_path_var(std::string_view, std::string_view) {}
-    void pop_path_var() {}
+    // Collect path variables captured by the matcher (name/value pairs). The matcher uses
+    // push/pop with backtracking on mismatch; on a successful match the captures along the
+    // matched path remain (the success branches return without popping), so path_vars holds
+    // exactly the matched route's variables.
+    void add_path_var(std::string_view name, std::string_view value) { path_vars.emplace_back(name, value); }
+    void pop_path_var() {
+        if (!path_vars.empty()) {
+            path_vars.pop_back();
+        }
+    }
 
     std::uint32_t location_index = kInvalidIndex;
+    std::vector<std::pair<std::string_view, std::string_view>> path_vars;
 };
 
 class RequestDispatcher {
@@ -221,7 +234,7 @@ public:
 
         const LocationRuntime &location = server.locations[match_context.location_index];
         if (location.script) {
-            co_await run_script(exchange, *location.script);
+            co_await run_script(exchange, *location.script, match_context.path_vars);
         } else {
             co_await proxy_.handle(exchange, listener, location);
         }

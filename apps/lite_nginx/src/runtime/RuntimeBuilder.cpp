@@ -13,6 +13,7 @@
 #include "http/HeaderMap.h"
 #include "http/HttpHeaderHash.h"
 #include "http_script/HttpScriptLib.h"
+#include "http_script/RouteScriptLibrary.h"
 #include "net/IpAddress.h"
 #include "script/ScriptCompiler.h"
 
@@ -43,14 +44,14 @@ RuntimeError make_error(const config::SourceLocation &location, std::string mess
     };
 }
 
-// Reads a script file and compiles it against the shared script library (standard funcs +
-// HTTP req.*/resp.* registered). The compiled Script bakes in function pointers, so it is
-// independent of the library after compilation; the library is kept alive in RuntimeConfig
-// regardless. Returns a RuntimeError (with the location's source position) on I/O or
-// compile failure.
+// Reads a script file and compiles it against the given library (the per-location
+// RouteScriptLibrary wrapping the shared script_library with the shared StdLibrary's
+// req.*/resp.* and standard functions). The compiled Script bakes in function pointers, so
+// it is independent of the library after compilation; both the shared script_library and the
+// per-location route_lib are kept alive in RuntimeConfig/LocationRuntime regardless. Returns
+// a RuntimeError (with the location's source position) on I/O or compile failure.
 std::expected<std::shared_ptr<fiber::script::Script>, RuntimeError>
-compile_script_file(fiber::script::std_lib::StdLibrary &library, const std::string &path,
-                    const config::SourceLocation &loc) {
+compile_script_file(fiber::script::Library &library, const std::string &path, const config::SourceLocation &loc) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
         return std::unexpected(make_error(loc, "script_file not found: " + path));
@@ -157,7 +158,16 @@ struct LocationRoutePayload {
 };
 
 struct LocationRouteDefiner {
-    void add_path_var_definer(LocationRoutePayload &, std::string_view, std::uint32_t) {}
+    // When non-null, add_path_var_definer appends each path variable name here. Set per
+    // location before add_route so the definer (shared across locations) writes into the
+    // current location's name set; the matcher adds names in pattern order (idx 0,1,2,...).
+    std::vector<std::string> *path_var_names_out = nullptr;
+
+    void add_path_var_definer(LocationRoutePayload &, std::string_view name, std::uint32_t) {
+        if (path_var_names_out != nullptr) {
+            path_var_names_out->emplace_back(name);
+        }
+    }
 
     std::uint32_t on_route_mount(std::uint32_t, std::string_view, LocationRoutePayload &payload) {
         return payload.location_index;
@@ -231,22 +241,35 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                     runtime.script_library = std::make_shared<fiber::script::std_lib::StdLibrary>();
                     fiber::http_script::register_http_functions_to_lib(*runtime.script_library);
                 }
-                auto script = compile_script_file(*runtime.script_library, location.script_file, location.location);
-                if (!script) {
-                    return std::unexpected(script.error());
-                }
                 LocationRuntime runtime_location;
                 runtime_location.location = location.location;
                 runtime_location.pattern = location.pattern;
                 runtime_location.matcher_pattern = compile_location_pattern(location);
-                runtime_location.script = std::move(*script);
                 const std::uint32_t location_index = static_cast<std::uint32_t>(runtime_server.locations.size());
+
+                // Add the route first so the matcher extracts the pattern's path variable
+                // names (e.g. /api/:id -> ["id"]) into path_var_names; the script is then
+                // compiled against a RouteScriptLibrary seeded with those names, so $path
+                // references are validated at compile time.
+                std::vector<std::string> path_var_names;
+                route_definer.path_var_names_out = &path_var_names;
                 try {
                     matcher_builder.add_route(runtime_location.matcher_pattern,
                                               LocationRoutePayload{.location_index = location_index});
                 } catch (const RoutePatternError &error) {
+                    route_definer.path_var_names_out = nullptr;
                     return std::unexpected(make_error(location.location, error.what()));
                 }
+                route_definer.path_var_names_out = nullptr;
+
+                auto route_lib = std::make_shared<fiber::http_script::RouteScriptLibrary>(*runtime.script_library,
+                                                                                          path_var_names);
+                auto script = compile_script_file(*route_lib, location.script_file, location.location);
+                if (!script) {
+                    return std::unexpected(script.error());
+                }
+                runtime_location.script = std::move(*script);
+                runtime_location.route_lib = std::move(route_lib);
                 runtime_server.locations.push_back(std::move(runtime_location));
                 continue;
             }
