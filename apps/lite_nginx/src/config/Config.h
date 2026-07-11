@@ -11,9 +11,10 @@
 
 namespace fiber::lite_nginx::config {
 
-enum class KeepaliveMode : unsigned char {
-    Local,
-    Stealable,
+// Global keepalive connection pool shared across all upstreams (one pool, keyed by peer).
+struct ConnectionPoolConfig {
+    std::size_t keepalive_size = 0; // max idle connections per peer group
+    std::chrono::milliseconds keepalive_timeout{30000}; // idle timeout
 };
 
 struct HeaderOverride {
@@ -42,13 +43,12 @@ struct ListenAddress {
 struct UpstreamServerConfig {
     std::string host;
     std::uint16_t port = 0;
+    std::uint32_t weight = 1;
 };
 
 struct UpstreamConfig {
     std::string name;
     std::vector<UpstreamServerConfig> servers;
-    std::size_t keepalive = 0;
-    KeepaliveMode keepalive_mode = KeepaliveMode::Local;
     std::optional<std::chrono::milliseconds> connect_timeout;
     std::optional<std::chrono::milliseconds> read_timeout;
     std::optional<std::chrono::milliseconds> send_timeout;
@@ -101,6 +101,7 @@ struct HttpConfig {
     std::vector<ListenAddress> listens;
     std::vector<UpstreamConfig> upstreams;
     std::vector<ServerConfig> servers;
+    ConnectionPoolConfig connection_pool;
 };
 
 struct MainConfig {

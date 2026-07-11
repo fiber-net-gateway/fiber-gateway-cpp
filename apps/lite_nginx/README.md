@@ -118,12 +118,16 @@ Top level:
 - `listen <ip:port> ssl http3;`
 - `listen <ip:port> ssl quic;`
 - `upstream <name> { ... }`
+- `connection_pool { ... }` — global keepalive pool shared across all upstreams and script
+  targets (keyed by peer). `keepalive_size <n>;` (idle per peer; 0 disables pooling, falling
+  back to transient connections) and `keepalive_timeout <duration>;`.
 - `server { ... }`
 
 `upstream` block:
 
-- `server <host:port>;`
-- `keepalive <n>;`
+- `server <host:port> [weight=<n>];` — IP literal + port; `weight` drives smooth weighted
+  round-robin peer selection (default 1). Upstreams carry only peers + weight; pool sizing lives
+  in `connection_pool`.
 - `connect_timeout <duration>;`
 - `read_timeout <duration>;`
 - `send_timeout <duration>;`
@@ -149,6 +153,42 @@ Top level:
 - `proxy_send_timeout <duration>;`
 - `proxy_set_header <name> <literal>;`
 - `proxy_buffering off;`
+- `script_file <path>;` - handle the request with a compiled script instead of proxying
+  (mutually exclusive with `proxy_pass`).
+
+## Scripting
+
+A `script_file` location runs an embedded JS-like script per request. The script reaches the
+inbound request and the outbound response through host functions and can issue upstream HTTP
+calls. See `conf/scripts/` for examples (`echo.js`, `inspect.js`, `vars.js`, `proxy.js`).
+
+Request-side functions (sync unless noted): `req.getHeader([name])`, `req.getQuery([name])`,
+`req.getUri`, `req.getPath`, `req.getQueryStr`, `req.getMethod`, `req.getCookie([name])`,
+`req.readJson` (async), `req.readBinary` (async), `req.discardBody` (async).
+
+Response-side functions: `resp.setHeader(name, value)`, `resp.addHeader(name, value)`,
+`resp.sendJson(status, body)` (async), `resp.send(status[, body])` (async), `resp.addCookie(obj)`.
+
+Upstream HTTP (async, require a `connection_pool` block for keepalive reuse):
+
+- `http.request(options)` - issue an upstream request and return
+  `{status:int, headers?:object, body:binary}`. `options`: `upstream` (name, leading `@`
+  optional) or `url` (`http(s)://host[:port]`; hostnames are resolved via DNS, IP literals skip
+  DNS), `method`, `path`, `query` (string or object), `headers`, `body` (binary/string/object),
+  `timeout` (ms), `includeHeaders`.
+- `http.proxyPass(options)` - forward the inbound request to an upstream and stream its
+  response back to the client; returns the upstream status code. `options`: `upstream`/`url`,
+  `method`/`path`/`query` (default to the inbound values), `headers`, `responseHeaders`
+  (set on the downstream response; `null` removes), `timeout`. WebSocket/101 upgrade is not
+  supported.
+
+A target may be bound once with a directive so calls do not re-specify it:
+
+```
+directive svc = http "@backend";          // or http "http://1.2.3.4:8080"
+let r = svc.request({path: "/items"});    // target pre-bound
+let st = svc.proxyPass({});
+```
 
 ## Explicit V1 Restrictions
 
@@ -168,11 +208,13 @@ Top level:
 - `server_name` uses exact match only.
 - Non-exact `location` uses `RoutePathMatcher` syntax and semantics, not nginx
   `location` precedence rules.
-- Only `http://` upstream targets are supported in V1.
-- Upstream peers must be configured with IP literals in the current runtime.
+- Only `http://` upstream targets are supported in V1 (for `proxy_pass`).
+- Upstream peers must be configured with IP literals in the current runtime. Script
+  `url` targets accept hostnames (resolved via DNS) or IP literals.
 - `proxy_buffering` only accepts `off`.
-- Direct `proxy_pass http://<ip:port>` targets do not expose a separate
-  keepalive config knob in V1.
+- `http.proxyPass` does not support WebSocket / `101 Switching Protocols` upgrade tunnelling.
+- A single global keepalive pool is shared across all upstreams and script targets; per-upstream
+  `keepalive` sizing is not available (use `connection_pool { keepalive_size ...; }`).
 
 Examples that are valid in V1:
 

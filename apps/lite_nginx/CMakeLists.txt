@@ -12,6 +12,8 @@ endif()
 add_library(lite_nginx_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/app/App.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/proxy/ProxyHandler.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/DnsService.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/HttpScriptServices.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/RuntimeBuilder.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/ServerLauncher.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/upstream/UpstreamRegistry.cpp")

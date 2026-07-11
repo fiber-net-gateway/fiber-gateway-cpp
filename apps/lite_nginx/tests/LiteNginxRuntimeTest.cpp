@@ -740,7 +740,11 @@ http {
 
     upstream backend {
         server 127.0.0.1:UPSTREAM_PORT;
-        keepalive 2;
+    }
+
+    connection_pool {
+        keepalive_size 2;
+        keepalive_timeout 30s;
     }
 
     server {
@@ -893,8 +897,11 @@ http {
 
     upstream backend {
         server 127.0.0.1:UPSTREAM_PORT;
-        keepalive 2;
-        keepalive_mode stealable;
+    }
+
+    connection_pool {
+        keepalive_size 2;
+        keepalive_timeout 30s;
     }
 
     server {
@@ -1128,6 +1135,205 @@ http {
     auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
     ASSERT_FALSE(runtime.has_value());
     EXPECT_NE(runtime.error().message.find("constant not found"), std::string::npos) << runtime.error().message;
+
+    ::unlink(script_path.c_str());
+}
+
+// http.request({upstream:"@backend"}) issues an upstream request and returns {status, headers?, body}.
+TEST(LiteNginxRuntimeTest, HttpRequestFetchesUpstreamResponse) {
+    const std::string script_path = "/tmp/lite_nginx_http_request_test.js";
+    {
+        std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.good());
+        file << "let r = http.request({upstream: \"@backend\", path: \"/x\", includeHeaders: true});\n"
+                "resp.sendJson(200, {status: r.status, headers: r.headers});";
+    }
+
+    std::promise<std::string> upstream_request;
+    auto upstream_future = upstream_request.get_future();
+    SingleRequestUpstream upstream("HTTP/1.1 200 OK\r\nContent-Length: 7\r\nContent-Type: text/plain\r\n\r\nproxied",
+                                   &upstream_request);
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    connection_pool { keepalive_size 8; keepalive_timeout 30s; }
+    upstream backend { server 127.0.0.1:UPSTREAM_PORT; }
+    server {
+        server_name localhost;
+        location / { script_file SCRIPT_PATH; }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_path);
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "http_request.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+
+    const char request[] = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+
+    std::string response = recv_http_response(client);
+    ::close(client);
+
+    ASSERT_EQ(upstream_future.wait_for(3s), std::future_status::ready);
+    std::string proxied_request = upstream_future.get();
+
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("\"status\":200"), std::string::npos) << response;
+    EXPECT_NE(response.find("\"Content-Type\":\"text/plain\""), std::string::npos) << response;
+    EXPECT_NE(proxied_request.find("GET /x HTTP/1.1"), std::string::npos) << proxied_request;
+
+    ::unlink(script_path.c_str());
+}
+
+// http.proxyPass({upstream:"@backend"}) forwards the inbound request to the upstream and copies
+// the upstream response back to the client.
+TEST(LiteNginxRuntimeTest, HttpProxyPassForwardsRequestAndResponse) {
+    const std::string script_path = "/tmp/lite_nginx_http_proxy_pass_test.js";
+    {
+        std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.good());
+        file << "http.proxyPass({upstream: \"@backend\"});";
+    }
+
+    std::promise<std::string> upstream_request;
+    auto upstream_future = upstream_request.get_future();
+    SingleRequestUpstream upstream("HTTP/1.1 200 OK\r\nContent-Length: 7\r\nContent-Type: text/plain\r\n\r\nproxied",
+                                   &upstream_request);
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    connection_pool { keepalive_size 8; keepalive_timeout 30s; }
+    upstream backend { server 127.0.0.1:UPSTREAM_PORT; }
+    server {
+        server_name localhost;
+        location / { script_file SCRIPT_PATH; }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_path);
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "http_proxy_pass.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+
+    const char request[] = "GET /api/42 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+
+    std::string response = recv_http_response(client);
+    ::close(client);
+
+    ASSERT_EQ(upstream_future.wait_for(3s), std::future_status::ready);
+    std::string proxied_request = upstream_future.get();
+
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("proxied"), std::string::npos) << response;
+    EXPECT_NE(proxied_request.find("GET /api/42 HTTP/1.1"), std::string::npos) << proxied_request;
+
+    ::unlink(script_path.c_str());
+}
+
+// `directive svc = http "http://127.0.0.1:PORT";` binds a script handle to an ad-hoc IP-literal URL
+// target; svc.request then resolves to the bound target.
+TEST(LiteNginxRuntimeTest, HttpDirectiveBindsUrlTarget) {
+    const std::string script_path = "/tmp/lite_nginx_http_directive_test.js";
+    {
+        std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.good());
+        file << "directive svc = http \"http://127.0.0.1:UPSTREAM_PORT\";\n"
+                "let r = svc.request({path: \"/x\"});\n"
+                "resp.sendJson(200, {status: r.status});";
+    }
+
+    std::promise<std::string> upstream_request;
+    auto upstream_future = upstream_request.get_future();
+    SingleRequestUpstream upstream("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\n\r\nok",
+                                   &upstream_request);
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    connection_pool { keepalive_size 8; keepalive_timeout 30s; }
+    server {
+        server_name localhost;
+        location / { script_file SCRIPT_PATH; }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_path);
+
+    // Substitute the upstream port into the script (the directive binds to the URL literal).
+    {
+        std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.good());
+        file << "directive svc = http \"http://127.0.0.1:" << upstream.port()
+             << "\";\n"
+                "let r = svc.request({path: \"/x\"});\n"
+                "resp.sendJson(200, {status: r.status});";
+    }
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "http_directive.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+
+    const char request[] = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+
+    std::string response = recv_http_response(client);
+    ::close(client);
+
+    ASSERT_EQ(upstream_future.wait_for(3s), std::future_status::ready);
+    std::string proxied_request = upstream_future.get();
+
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("\"status\":200"), std::string::npos) << response;
+    EXPECT_NE(proxied_request.find("GET /x HTTP/1.1"), std::string::npos) << proxied_request;
 
     ::unlink(script_path.c_str());
 }
