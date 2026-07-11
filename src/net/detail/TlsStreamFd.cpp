@@ -1,9 +1,12 @@
 #include "TlsStreamFd.h"
 
 #include <cerrno>
+#include <cstdint>
+#include <sys/socket.h>
 
 #include "../../common/Assert.h"
 
+#include <openssl/bio.h>
 #include <openssl/ssl.h>
 
 namespace fiber::net::detail {
@@ -46,6 +49,107 @@ struct BusyResetGuard {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Custom TLS fd BIO.
+//
+// BoringSSL's built-in socket BIO (installed by SSL_set_fd) issues plain
+// write(2) syscalls without MSG_NOSIGNAL, so a TLS write to a peer that has
+// closed or reset the connection raises SIGPIPE and kills the process (e.g. the
+// GrpcStreamTest.CancelMidStream crash). This BIO mirrors the built-in socket
+// BIO exactly except its write callback uses ::send with MSG_NOSIGNAL, matching
+// StreamFd's send() path. SIGPIPE is suppressed at the write site and EPIPE is
+// returned instead, so every TLS caller (server+client, h2/h3/gRPC) is safe with
+// no process-wide signal disposition changes.
+//
+// The fd lives in the BIO's data slot as a pointer-encoded int (BIO exposes no
+// public fd field), avoiding any per-connection allocation. The BIO never owns
+// the fd (BIO_NOCLOSE); TlsStreamFd owns it via stream_fd_.
+//
+// The three I/O callbacks have C language linkage because bio.h declares the
+// BIO_meth_set_* parameters inside extern "C"; `static` keeps them TU-local.
+// ---------------------------------------------------------------------------
+
+// Mirrors BoringSSL's bio_errno_should_retry (crypto/bio/errno.cc): a -1 return
+// with a transient errno is reported as a retry so SSL_get_error surfaces
+// SSL_ERROR_WANT_READ/WRITE for the nonblocking event loop.
+int tls_bio_should_retry(int ret) noexcept {
+    if (ret != -1) {
+        return 0;
+    }
+    return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR || errno == ENOTCONN || errno == EPROTO ||
+           errno == EINPROGRESS || errno == EALREADY;
+}
+
+int tls_bio_fd(BIO *b) noexcept { return static_cast<int>(reinterpret_cast<intptr_t>(BIO_get_data(b))); }
+
+extern "C" {
+
+static int tls_bio_read(BIO *b, char *out, int outl) noexcept {
+    int ret = static_cast<int>(::recv(tls_bio_fd(b), out, static_cast<size_t>(outl), 0));
+    BIO_clear_retry_flags(b);
+    if (ret <= 0 && tls_bio_should_retry(ret) != 0) {
+        BIO_set_retry_read(b);
+    }
+    return ret;
+}
+
+static int tls_bio_write(BIO *b, const char *in, int inl) noexcept {
+    int ret = static_cast<int>(::send(tls_bio_fd(b), in, static_cast<size_t>(inl), MSG_NOSIGNAL));
+    BIO_clear_retry_flags(b);
+    if (ret <= 0 && tls_bio_should_retry(ret) != 0) {
+        BIO_set_retry_write(b);
+    }
+    return ret;
+}
+
+static long tls_bio_ctrl(BIO *b, int cmd, long num, void *ptr) noexcept {
+    switch (cmd) {
+        case BIO_C_SET_FD: {
+            int fd = *static_cast<int *>(ptr);
+            BIO_set_data(b, reinterpret_cast<void *>(static_cast<intptr_t>(fd)));
+            BIO_set_shutdown(b, static_cast<int>(num));
+            BIO_set_init(b, 1);
+            return 1;
+        }
+        case BIO_C_GET_FD: {
+            if (BIO_get_init(b) == 0) {
+                return -1;
+            }
+            int fd = tls_bio_fd(b);
+            int *out = static_cast<int *>(ptr);
+            if (out != nullptr) {
+                *out = fd;
+            }
+            return fd;
+        }
+        case BIO_CTRL_GET_CLOSE:
+            return BIO_get_shutdown(b);
+        case BIO_CTRL_SET_CLOSE:
+            BIO_set_shutdown(b, static_cast<int>(num));
+            return 1;
+        case BIO_CTRL_FLUSH:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+} // extern "C"
+
+const BIO_METHOD *tls_fd_bio_method() {
+    static const BIO_METHOD *method = []() -> const BIO_METHOD * {
+        BIO_METHOD *m = BIO_meth_new(BIO_TYPE_FD, "fiber tls fd");
+        if (m == nullptr) {
+            return nullptr;
+        }
+        BIO_meth_set_write(m, &tls_bio_write);
+        BIO_meth_set_read(m, &tls_bio_read);
+        BIO_meth_set_ctrl(m, &tls_bio_ctrl);
+        return m;
+    }();
+    return method;
+}
+
 } // namespace
 
 TlsStreamFd::TlsStreamFd(fiber::event::EventLoop &loop, int fd) : stream_fd_(loop, fd) {}
@@ -77,11 +181,18 @@ common::IoResult<void> TlsStreamFd::init(SSL_CTX *ctx, bool is_server, Configure
     if (!ssl_) {
         return std::unexpected(common::IoErr::NoMem);
     }
-    if (SSL_set_fd(ssl_, stream_fd_.fd()) != 1) {
+    // Install a custom fd BIO (instead of SSL_set_fd's built-in socket BIO) so
+    // TLS writes use ::send(MSG_NOSIGNAL) and never raise SIGPIPE on a closed
+    // peer. The BIO does not own the fd (BIO_NOCLOSE); stream_fd_ does.
+    const BIO_METHOD *bio_method = tls_fd_bio_method();
+    BIO *bio = (bio_method != nullptr) ? BIO_new(bio_method) : nullptr;
+    if (bio == nullptr) {
         SSL_free(ssl_);
         ssl_ = nullptr;
-        return std::unexpected(common::IoErr::Invalid);
+        return std::unexpected(common::IoErr::NoMem);
     }
+    BIO_set_fd(bio, stream_fd_.fd(), BIO_NOCLOSE);
+    SSL_set_bio(ssl_, bio, bio);
     if (is_server) {
         SSL_set_accept_state(ssl_);
     } else {
