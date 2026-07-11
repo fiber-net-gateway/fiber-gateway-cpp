@@ -73,10 +73,18 @@ enum class LocationMatchKind : unsigned char {
     Exact,
 };
 
+enum class LocationKind : unsigned char {
+    Proxy,
+    Script,
+};
+
 struct LocationConfig {
+    SourceLocation location;
     LocationMatchKind match_kind = LocationMatchKind::Prefix;
     std::string pattern;
+    LocationKind kind = LocationKind::Proxy;
     ProxyPassTarget proxy_pass;
+    std::string script_file;
     ProxySettings proxy;
 };
 

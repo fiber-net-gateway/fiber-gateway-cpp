@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <fstream>
+#include <iterator>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
@@ -10,7 +12,9 @@
 #include "common/route/RoutePathMatcher.h"
 #include "http/HeaderMap.h"
 #include "http/HttpHeaderHash.h"
+#include "http_script/HttpScriptLib.h"
 #include "net/IpAddress.h"
+#include "script/ScriptCompiler.h"
 
 namespace fiber::lite_nginx::runtime {
 namespace {
@@ -37,6 +41,26 @@ RuntimeError make_error(const config::SourceLocation &location, std::string mess
             .message = std::move(message),
             .location = location,
     };
+}
+
+// Reads a script file and compiles it against the shared script library (standard funcs +
+// HTTP req.*/resp.* registered). The compiled Script bakes in function pointers, so it is
+// independent of the library after compilation; the library is kept alive in RuntimeConfig
+// regardless. Returns a RuntimeError (with the location's source position) on I/O or
+// compile failure.
+std::expected<std::shared_ptr<fiber::script::Script>, RuntimeError>
+compile_script_file(fiber::script::std_lib::StdLibrary &library, const std::string &path,
+                    const config::SourceLocation &loc) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return std::unexpected(make_error(loc, "script_file not found: " + path));
+    }
+    std::string source((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    auto compiled = fiber::script::compile_script(library, source);
+    if (!compiled) {
+        return std::unexpected(make_error(loc, "script compile error: " + std::string(compiled.error().message)));
+    }
+    return std::make_shared<fiber::script::Script>(std::move(*compiled));
 }
 
 std::string listener_key(const config::ListenAddress &listen) {
@@ -202,6 +226,31 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
         }
 
         for (const auto &location: server.locations) {
+            if (location.kind == config::LocationKind::Script) {
+                if (!runtime.script_library) {
+                    runtime.script_library = std::make_shared<fiber::script::std_lib::StdLibrary>();
+                    fiber::http_script::register_http_functions_to_lib(*runtime.script_library);
+                }
+                auto script = compile_script_file(*runtime.script_library, location.script_file, location.location);
+                if (!script) {
+                    return std::unexpected(script.error());
+                }
+                LocationRuntime runtime_location;
+                runtime_location.location = location.location;
+                runtime_location.pattern = location.pattern;
+                runtime_location.matcher_pattern = compile_location_pattern(location);
+                runtime_location.script = std::move(*script);
+                const std::uint32_t location_index = static_cast<std::uint32_t>(runtime_server.locations.size());
+                try {
+                    matcher_builder.add_route(runtime_location.matcher_pattern,
+                                              LocationRoutePayload{.location_index = location_index});
+                } catch (const RoutePatternError &error) {
+                    return std::unexpected(make_error(location.location, error.what()));
+                }
+                runtime_server.locations.push_back(std::move(runtime_location));
+                continue;
+            }
+
             std::uint32_t upstream_index = 0;
             std::string default_host_header;
             std::chrono::milliseconds inherited_connect = kDefaultConnectTimeout;

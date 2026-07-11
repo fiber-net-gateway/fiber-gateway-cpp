@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <future>
 #include <netinet/in.h>
 #include <string>
@@ -943,6 +944,99 @@ http {
     EXPECT_NE(first_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
     EXPECT_NE(second_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
     EXPECT_EQ(upstream.accept_count(), 1);
+}
+
+TEST(LiteNginxRuntimeTest, ScriptFileLocationServesScriptResponse) {
+    const std::string script_path = "/tmp/lite_nginx_script_location_test.js";
+    {
+        std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.good());
+        file << "resp.sendJson(200, {msg: \"hello-script\", path: req.getPath()});";
+    }
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+
+    server {
+        server_name localhost;
+        location / {
+            script_file SCRIPT_PATH;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_path);
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "script_location.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    ASSERT_TRUE(runtime->script_library != nullptr);
+    ASSERT_EQ(runtime->servers[0].locations.size(), 1u);
+    ASSERT_TRUE(runtime->servers[0].locations[0].script != nullptr);
+
+    RuntimeHarness harness(*runtime);
+
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+
+    const char request[] = "GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+
+    std::string response = recv_http_response(client);
+    ::close(client);
+
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("application/json"), std::string::npos) << response;
+    EXPECT_NE(response.find("\"msg\":\"hello-script\""), std::string::npos) << response;
+    EXPECT_NE(response.find("\"path\":\"/hello\""), std::string::npos) << response;
+
+    ::unlink(script_path.c_str());
+}
+
+TEST(LiteNginxRuntimeTest, ScriptFileLocationRejectsMissingFile) {
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:8080;
+    server {
+        server_name localhost;
+        location / { script_file /tmp/lite_nginx_does_not_exist_999999.js; }
+    }
+}
+)",
+                                                                            "missing_script.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_FALSE(runtime.has_value());
+    EXPECT_NE(runtime.error().message.find("script_file not found"), std::string::npos);
+}
+
+TEST(LiteNginxRuntimeTest, ScriptFileAndProxyPassAreMutuallyExclusive) {
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:8080;
+    server {
+        server_name localhost;
+        location / {
+            proxy_pass http://127.0.0.1:9001;
+            script_file /tmp/x.js;
+        }
+    }
+}
+)",
+                                                                            "mutual_exclusive.conf");
+    ASSERT_FALSE(config.has_value());
+    EXPECT_NE(config.error().message.find("only one of proxy_pass or script_file"), std::string::npos);
 }
 
 } // namespace

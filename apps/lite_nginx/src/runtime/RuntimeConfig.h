@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -14,6 +15,8 @@
 #include "http/Http1ConnectionGroupKey.h"
 #include "net/IpAddress.h"
 #include "net/SocketAddress.h"
+#include "script/Script.h"
+#include "script/std/StdLibrary.h"
 
 namespace fiber::lite_nginx::runtime {
 
@@ -71,6 +74,8 @@ struct LocationRuntime {
     std::uint32_t upstream_index = 0;
     bool proxy_buffering = false;
     bool host_header_overridden = false;
+    // Non-null when this location runs a script (kind == Script) instead of proxying.
+    std::shared_ptr<fiber::script::Script> script;
 };
 
 struct ServerRuntime {
@@ -107,6 +112,9 @@ struct RuntimeConfig {
     std::vector<UpstreamRuntime> upstreams;
     std::vector<ServerRuntime> servers;
     std::vector<ListenerRuntime> listeners;
+    // Shared across all script locations (one StdLibrary with the HTTP functions registered),
+    // kept alive for the runtime's lifetime since compiled scripts bake in function pointers.
+    std::shared_ptr<fiber::script::std_lib::StdLibrary> script_library;
 };
 
 } // namespace fiber::lite_nginx::runtime
