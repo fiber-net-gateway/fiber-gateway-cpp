@@ -10,7 +10,6 @@
 namespace {
 
 using fiber::lite_nginx::config::ConfigLoader;
-using fiber::lite_nginx::config::KeepaliveMode;
 using fiber::lite_nginx::config::Lexer;
 using fiber::lite_nginx::config::LocationMatchKind;
 using fiber::lite_nginx::config::ProxyPassKind;
@@ -44,10 +43,13 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
             listen 8080;
             listen 8443 ssl http3;
 
+            connection_pool {
+                keepalive_size 32;
+                keepalive_timeout 30s;
+            }
+
             upstream backend {
-                server 127.0.0.1:9001;
-                keepalive 32;
-                keepalive_mode stealable;
+                server 127.0.0.1:9001 weight=3;
                 connect_timeout 2s;
             }
 
@@ -87,8 +89,9 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
     EXPECT_EQ(config.http.upstreams[0].name, "backend");
     EXPECT_EQ(config.http.upstreams[0].servers[0].host, "127.0.0.1");
     EXPECT_EQ(config.http.upstreams[0].servers[0].port, 9001);
-    EXPECT_EQ(config.http.upstreams[0].keepalive, 32u);
-    EXPECT_EQ(config.http.upstreams[0].keepalive_mode, KeepaliveMode::Stealable);
+    EXPECT_EQ(config.http.upstreams[0].servers[0].weight, 3u);
+    EXPECT_EQ(config.http.connection_pool.keepalive_size, 32u);
+    EXPECT_EQ(config.http.connection_pool.keepalive_timeout, std::chrono::seconds(30));
     EXPECT_EQ(config.http.upstreams[0].connect_timeout, std::chrono::seconds(2));
 
     ASSERT_EQ(config.http.servers.size(), 1u);
@@ -154,14 +157,15 @@ TEST(LiteNginxConfigTest, RejectsUnsupportedDirective) {
     EXPECT_NE(config_result.error().message.find("unsupported directive"), std::string::npos);
 }
 
-TEST(LiteNginxConfigTest, RejectsInvalidKeepaliveMode) {
+TEST(LiteNginxConfigTest, RejectsInvalidConnectionPoolSize) {
     auto config_result = ConfigLoader::load_from_string(R"(
         http {
             listen 8080;
+            connection_pool {
+                keepalive_size not-a-number;
+            }
             upstream backend {
                 server 127.0.0.1:9001;
-                keepalive 8;
-                keepalive_mode shared;
             }
             server {
                 server_name localhost;
@@ -174,7 +178,7 @@ TEST(LiteNginxConfigTest, RejectsInvalidKeepaliveMode) {
                                                         "inline.conf");
 
     ASSERT_FALSE(config_result.has_value());
-    EXPECT_NE(config_result.error().message.find("keepalive_mode"), std::string::npos);
+    EXPECT_NE(config_result.error().message.find("keepalive_size"), std::string::npos);
 }
 
 TEST(LiteNginxConfigTest, RejectsUnknownNamedUpstream) {

@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -10,6 +11,7 @@
 #include <vector>
 
 #include "../script/Library.h"
+#include "HttpClientFuncs.h"
 
 namespace fiber::script::std_lib {
 class StdLibrary;
@@ -69,6 +71,9 @@ private:
 
     fiber::script::std_lib::StdLibrary &shared_;
     std::unordered_set<std::string> path_var_names_;
+    // Owns HttpDirectiveDef instances created by `directive <name> = http "<target>";` in this
+    // location's script. Kept alive for the script's lifetime (HostCallables are baked in).
+    mutable std::vector<std::unique_ptr<HttpDirectiveDef>> directive_defs_;
 
     // Stable storage: deque elements keep their address across push_back; unordered_map
     // nodes keep their mapped value address across other inserts. Both are mutated lazily

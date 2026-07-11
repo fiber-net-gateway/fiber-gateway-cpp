@@ -18,6 +18,9 @@ class UpstreamRegistry;
 
 namespace fiber::lite_nginx::runtime {
 
+class DnsService;
+class HttpScriptServicesImpl;
+
 class ServerLauncher {
 public:
     struct BoundListener {
@@ -38,6 +41,8 @@ private:
     fiber::event::EventLoop &accept_loop_;
     std::shared_ptr<const RuntimeConfig> runtime_{};
     std::shared_ptr<upstream::UpstreamRegistry> upstreams_{};
+    std::unique_ptr<DnsService> dns_{};
+    std::unique_ptr<HttpScriptServicesImpl> script_services_{};
     std::unique_ptr<fiber::event::EventLoopGroup> worker_group_;
     std::vector<std::unique_ptr<fiber::http::HttpServer>> servers_;
     std::vector<BoundListener> bound_listeners_;

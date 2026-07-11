@@ -24,6 +24,8 @@
 
 #include "../proxy/ProxyHandler.h"
 #include "../upstream/UpstreamRegistry.h"
+#include "DnsService.h"
+#include "HttpScriptServices.h"
 
 namespace fiber::lite_nginx::runtime {
 namespace {
@@ -70,10 +72,12 @@ fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange
 // never left without a response. path_vars are the route captures for this request
 // (name/value pairs borrowing the matcher text and request path buffer).
 fiber::async::Task<void> run_script(fiber::http::HttpExchange &exchange, fiber::script::Script &script,
-                                    const std::vector<std::pair<std::string_view, std::string_view>> &path_vars) {
+                                    const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
+                                    fiber::http_script::HttpScriptServices *services) {
     fiber::script::GcHeap heap;
     fiber::http_script::ScriptExchangeCtx ctx{exchange, heap};
     ctx.set_path_vars(path_vars);
+    ctx.set_services(services);
     fiber::script::JsValue root = fiber::script::JsValue::make_undefined();
     auto result = co_await script.exec_async(root, &ctx, heap);
     (void) result;
@@ -202,8 +206,10 @@ struct LocationMatchContext {
 class RequestDispatcher {
 public:
     RequestDispatcher(std::shared_ptr<const RuntimeConfig> runtime,
-                      std::shared_ptr<upstream::UpstreamRegistry> upstreams) noexcept :
-        runtime_(std::move(runtime)), upstreams_(std::move(upstreams)), proxy_(*upstreams_) {}
+                      std::shared_ptr<upstream::UpstreamRegistry> upstreams,
+                      fiber::http_script::HttpScriptServices *script_services) noexcept :
+        runtime_(std::move(runtime)), upstreams_(std::move(upstreams)), proxy_(*upstreams_),
+        script_services_(script_services) {}
 
     fiber::async::Task<void> handle(std::uint32_t listener_index, fiber::http::HttpExchange &exchange) const {
         if (!runtime_ || listener_index >= runtime_->listeners.size()) {
@@ -234,7 +240,7 @@ public:
 
         const LocationRuntime &location = server.locations[match_context.location_index];
         if (location.script) {
-            co_await run_script(exchange, *location.script, match_context.path_vars);
+            co_await run_script(exchange, *location.script, match_context.path_vars, script_services_);
         } else {
             co_await proxy_.handle(exchange, listener, location);
         }
@@ -244,6 +250,7 @@ private:
     std::shared_ptr<const RuntimeConfig> runtime_;
     std::shared_ptr<upstream::UpstreamRegistry> upstreams_;
     proxy::ProxyHandler proxy_;
+    fiber::http_script::HttpScriptServices *script_services_;
 };
 
 } // namespace
@@ -268,7 +275,14 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
         return std::unexpected(make_error({}, "failed to initialize upstream registry"));
     }
 
-    auto dispatcher = std::make_shared<RequestDispatcher>(runtime_, upstreams_);
+    dns_ = std::make_unique<DnsService>();
+    if (!dns_->init(*worker_group_)) {
+        close();
+        return std::unexpected(make_error({}, "failed to initialize DNS service"));
+    }
+    script_services_ = std::make_unique<HttpScriptServicesImpl>(*upstreams_, *dns_);
+
+    auto dispatcher = std::make_shared<RequestDispatcher>(runtime_, upstreams_, script_services_.get());
 
     servers_.reserve(runtime_->listeners.size());
     bound_listeners_.reserve(runtime_->listeners.size());
@@ -331,6 +345,12 @@ void ServerLauncher::close() {
 
     if (upstreams_) {
         upstreams_->shutdown();
+    }
+
+    script_services_.reset();
+    if (dns_) {
+        dns_->shutdown();
+        dns_.reset();
     }
 
     if (worker_group_) {

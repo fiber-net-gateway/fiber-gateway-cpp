@@ -5,6 +5,7 @@
 #include "../script/JsValue.h"
 #include "../script/Library.h"
 #include "../script/ScriptResult.h"
+#include "../script/std/NodeText.h"
 #include "../script/std/StdLibrary.h"
 
 #include <string>
@@ -118,6 +119,19 @@ Library::FunctionMatchResult RouteScriptLibrary::resolve_async_func(std::string_
 Library::DirectiveDef *
 RouteScriptLibrary::resolve_directive_def(std::string_view type, std::string_view name,
                                           const std::vector<fiber::script::JsValue> &literals) const {
+    if (type == "http" && literals.size() == 1) {
+        // `directive <name> = http "<target>";` binds <name> to an upstream name or ad-hoc URL.
+        std::string_view target_sv;
+        if (!fiber::script::std_lib::string_utf8_view(literals[0], target_sv) || target_sv.empty()) {
+            return nullptr;
+        }
+        auto target = HttpTargetSpec::parse(target_sv);
+        if (!target) {
+            return nullptr;
+        }
+        directive_defs_.push_back(std::make_unique<HttpDirectiveDef>(std::move(*target)));
+        return directive_defs_.back().get();
+    }
     return shared_.resolve_directive_def(type, name, literals);
 }
 

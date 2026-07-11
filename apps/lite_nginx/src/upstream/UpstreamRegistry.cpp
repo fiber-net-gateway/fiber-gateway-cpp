@@ -1,7 +1,10 @@
 #include "UpstreamRegistry.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <future>
+#include <limits>
 #include <utility>
 
 #include "async/Spawn.h"
@@ -10,152 +13,83 @@
 namespace fiber::lite_nginx::upstream {
 namespace {
 
-fiber::http::LocalHttp1ConnectionPoolSet::Options make_pool_options(const runtime::UpstreamRuntime &upstream) noexcept {
-    fiber::http::LocalHttp1ConnectionPoolSet::Options options{};
-    options.max_idle_per_group = upstream.keepalive;
-    options.max_idle_total = upstream.keepalive;
-    options.initial_group_capacity = upstream.peers.size();
-    options.idle_timeout = std::chrono::milliseconds(30000);
+// One global pool serves all peers; cap idle per peer group and overall per core.
+fiber::http::StealableHttp1ConnectionPoolSet::Options
+make_pool_options(const runtime::ConnectionPoolRuntime &cp) noexcept {
+    fiber::http::StealableHttp1ConnectionPoolSet::Options options{};
+    options.max_idle_per_group = cp.keepalive_size;
+    options.max_idle_total = cp.keepalive_size * 64;
+    options.initial_group_capacity = 16;
+    options.idle_timeout = cp.keepalive_timeout;
     return options;
 }
 
-bool should_create_pool(const runtime::UpstreamRuntime &upstream) noexcept {
-    return !upstream.name.empty() && upstream.keepalive > 0;
+std::string_view strip_at(std::string_view name) noexcept {
+    if (!name.empty() && name.front() == '@') {
+        name.remove_prefix(1);
+    }
+    return name;
 }
 
 } // namespace
 
-UpstreamRegistry::PooledLease::PooledLease(fiber::http::LocalHttp1ConnectionPoolSet::Lease &&lease) noexcept :
-    kind_(Kind::Local), local_(std::move(lease)) {}
-
 UpstreamRegistry::PooledLease::PooledLease(fiber::http::StealableHttp1ConnectionPoolSet::Lease &&lease) noexcept :
-    kind_(Kind::Stealable), stealable_(std::move(lease)) {}
+    lease_(std::move(lease)) {}
 
-UpstreamRegistry::PooledLease::PooledLease(PooledLease &&other) noexcept :
-    kind_(other.kind_), local_(std::move(other.local_)), stealable_(std::move(other.stealable_)) {
-    other.kind_ = Kind::Empty;
-}
+UpstreamRegistry::PooledLease::PooledLease(PooledLease &&other) noexcept : lease_(std::move(other.lease_)) {}
 
 UpstreamRegistry::PooledLease &UpstreamRegistry::PooledLease::operator=(PooledLease &&other) noexcept {
     if (this == &other) {
         return *this;
     }
     reset();
-    kind_ = other.kind_;
-    local_ = std::move(other.local_);
-    stealable_ = std::move(other.stealable_);
-    other.kind_ = Kind::Empty;
+    lease_ = std::move(other.lease_);
     return *this;
 }
 
-bool UpstreamRegistry::PooledLease::valid() const noexcept {
-    switch (kind_) {
-        case Kind::Local:
-            return local_.valid();
-        case Kind::Stealable:
-            return stealable_.valid();
-        case Kind::Empty:
-            return false;
-    }
-    return false;
-}
+bool UpstreamRegistry::PooledLease::valid() const noexcept { return lease_.valid(); }
 
-fiber::http::Http1ClientConnection *UpstreamRegistry::PooledLease::get() noexcept {
-    switch (kind_) {
-        case Kind::Local:
-            return local_.get();
-        case Kind::Stealable:
-            return stealable_.get();
-        case Kind::Empty:
-            return nullptr;
-    }
-    return nullptr;
-}
+fiber::http::Http1ClientConnection *UpstreamRegistry::PooledLease::get() noexcept { return lease_.get(); }
 
 fiber::common::IoResult<fiber::http::Http1ClientConnection *>
 UpstreamRegistry::PooledLease::emplace_connection(fiber::http::Http1ClientConnectionOptions options) noexcept {
-    switch (kind_) {
-        case Kind::Local:
-            return local_.emplace_connection(std::move(options));
-        case Kind::Stealable:
-            return stealable_.emplace_connection(std::move(options));
-        case Kind::Empty:
-            return std::unexpected(fiber::common::IoErr::Invalid);
-    }
-    return std::unexpected(fiber::common::IoErr::Invalid);
+    return lease_.emplace_connection(std::move(options));
 }
 
-void UpstreamRegistry::PooledLease::reset() noexcept {
-    switch (kind_) {
-        case Kind::Local:
-            local_.reset();
-            break;
-        case Kind::Stealable:
-            stealable_.reset();
-            break;
-        case Kind::Empty:
-            break;
-    }
-    kind_ = Kind::Empty;
-}
+void UpstreamRegistry::PooledLease::reset() noexcept { lease_.reset(); }
 
 UpstreamRegistry::UpstreamRegistry(fiber::event::EventLoopGroup &group, const runtime::RuntimeConfig &runtime) noexcept
     :
     group_(&group), runtime_(&runtime),
     states_(runtime.upstreams.empty() ? nullptr : std::make_unique<UpstreamState[]>(runtime.upstreams.size())) {
     for (std::size_t i = 0; i < runtime.upstreams.size(); ++i) {
-        states_[i].cursor.store(0, std::memory_order_relaxed);
-        const auto &upstream = runtime.upstreams[i];
-        if (!should_create_pool(upstream)) {
-            continue;
-        }
-        auto options = make_pool_options(upstream);
-        if (upstream.keepalive_mode == runtime::KeepaliveMode::Stealable) {
-            states_[i].stealable_pool = std::make_unique<fiber::http::StealableHttp1ConnectionPoolSet>(group, options);
-        } else {
-            states_[i].local_pool = std::make_unique<fiber::http::LocalHttp1ConnectionPoolSet>(group, options);
-        }
+        states_[i].current_weights.assign(runtime.upstreams[i].peers.size(), 0);
+    }
+    if (runtime.connection_pool.keepalive_size > 0) {
+        pool_ = std::make_unique<fiber::http::StealableHttp1ConnectionPoolSet>(
+                group, make_pool_options(runtime.connection_pool));
     }
 }
 
 UpstreamRegistry::~UpstreamRegistry() = default;
 
 bool UpstreamRegistry::init() noexcept {
-    if (!runtime_ || !states_) {
-        return true;
-    }
-    for (std::size_t i = 0; i < runtime_->upstreams.size(); ++i) {
-        auto &state = states_[i];
-        if (state.local_pool && !state.local_pool->init()) {
-            return false;
-        }
-        if (state.stealable_pool && !state.stealable_pool->init()) {
-            return false;
-        }
+    if (pool_ && !pool_->init()) {
+        return false;
     }
     return true;
 }
 
 fiber::async::Task<void> UpstreamRegistry::shutdown_async() noexcept {
-    if (!runtime_ || !states_) {
-        co_return;
+    if (pool_) {
+        co_await pool_->shutdown_async();
     }
-    for (std::size_t i = 0; i < runtime_->upstreams.size(); ++i) {
-        auto &state = states_[i];
-        if (state.local_pool) {
-            co_await state.local_pool->shutdown_async();
-        }
-        if (state.stealable_pool) {
-            co_await state.stealable_pool->shutdown_async();
-        }
-    }
+    co_return;
 }
 
 void UpstreamRegistry::shutdown() noexcept {
-    if (!states_) {
-        return;
-    }
-    if (!group_ || group_->size() == 0 || !group_->running()) {
+    if (!pool_ || !group_ || group_->size() == 0 || !group_->running()) {
+        pool_.reset();
         states_.reset();
         return;
     }
@@ -167,7 +101,21 @@ void UpstreamRegistry::shutdown() noexcept {
         done->set_value();
     });
     future.wait();
+    pool_.reset();
     states_.reset();
+}
+
+const runtime::UpstreamRuntime *UpstreamRegistry::find_upstream(std::string_view name) const noexcept {
+    if (!runtime_) {
+        return nullptr;
+    }
+    const std::string_view key = strip_at(name);
+    for (const auto &upstream: runtime_->upstreams) {
+        if (upstream.name == key) {
+            return &upstream;
+        }
+    }
+    return nullptr;
 }
 
 const runtime::UpstreamPeerRuntime *UpstreamRegistry::select_peer(std::uint32_t upstream_index) noexcept {
@@ -182,8 +130,27 @@ const runtime::UpstreamPeerRuntime *UpstreamRegistry::select_peer(std::uint32_t 
         return &upstream.peers.front();
     }
 
-    const std::uint32_t cursor = states_[upstream_index].cursor.fetch_add(1, std::memory_order_relaxed);
-    return &upstream.peers[cursor % upstream.peers.size()];
+    // Smooth weighted round-robin (nginx algorithm), guarded per upstream.
+    auto &state = states_[upstream_index];
+    std::lock_guard<std::mutex> lock(state.mu);
+    auto &cw = state.current_weights;
+    if (cw.size() != upstream.peers.size()) {
+        cw.assign(upstream.peers.size(), 0);
+    }
+    std::int64_t total = 0;
+    std::size_t best = 0;
+    std::int64_t best_cw = std::numeric_limits<std::int64_t>::min();
+    for (std::size_t i = 0; i < upstream.peers.size(); ++i) {
+        const std::int64_t w = static_cast<std::int64_t>(upstream.peers[i].weight);
+        cw[i] += w;
+        total += w;
+        if (cw[i] > best_cw) {
+            best_cw = cw[i];
+            best = i;
+        }
+    }
+    cw[best] -= total;
+    return &upstream.peers[best];
 }
 
 fiber::async::Task<UpstreamRegistry::ConnectionHandle>
@@ -192,23 +159,40 @@ UpstreamRegistry::acquire_connection(std::uint32_t upstream_index) noexcept {
     if (!runtime_ || upstream_index >= runtime_->upstreams.size()) {
         co_return handle;
     }
-
-    handle.upstream = &runtime_->upstreams[upstream_index];
-    handle.peer = select_peer(upstream_index);
-    if (!handle.peer) {
-        handle.upstream = nullptr;
+    const auto *peer = select_peer(upstream_index);
+    if (!peer) {
         co_return handle;
     }
-
-    if (!states_) {
-        co_return handle;
+    handle.peer_addr = peer->address;
+    handle.valid_flag = true;
+    if (pool_ && peer->connection_key.has_value()) {
+        auto lease = co_await pool_->acquire(*peer->connection_key);
+        handle.lease = PooledLease(std::move(lease));
     }
+    co_return handle;
+}
 
-    auto &state = states_[upstream_index];
-    if (state.local_pool && handle.peer->connection_key.has_value()) {
-        handle.lease = PooledLease(state.local_pool->acquire(*handle.peer->connection_key));
-    } else if (state.stealable_pool && handle.peer->connection_key.has_value()) {
-        handle.lease = PooledLease(co_await state.stealable_pool->acquire(*handle.peer->connection_key));
+fiber::async::Task<UpstreamRegistry::ConnectionHandle>
+UpstreamRegistry::acquire_by_name(std::string_view name) noexcept {
+    const auto *upstream = find_upstream(name);
+    if (!upstream) {
+        co_return ConnectionHandle{};
+    }
+    // Locate the upstream index to drive weighted selection.
+    const std::uint32_t index = static_cast<std::uint32_t>(upstream - runtime_->upstreams.data());
+    co_return co_await acquire_connection(index);
+}
+
+fiber::async::Task<UpstreamRegistry::ConnectionHandle>
+UpstreamRegistry::acquire_by_key(const fiber::http::Http1ConnectionGroupKey &key, fiber::net::SocketAddress peer_addr,
+                                 fiber::net::TlsOptions tls) noexcept {
+    ConnectionHandle handle;
+    handle.peer_addr = peer_addr;
+    handle.tls = std::move(tls);
+    handle.valid_flag = true;
+    if (pool_) {
+        auto lease = co_await pool_->acquire(key);
+        handle.lease = PooledLease(std::move(lease));
     }
     co_return handle;
 }

@@ -24,14 +24,16 @@ class RouteScriptLibrary;
 
 namespace fiber::lite_nginx::runtime {
 
-enum class KeepaliveMode : unsigned char {
-    Local,
-    Stealable,
-};
-
 struct RuntimeError {
     std::string message;
     config::SourceLocation location;
+};
+
+// Global keepalive connection pool shared across all upstreams. Configured once under
+// http.connection_pool; one StealableHttp1ConnectionPoolSet keyed by peer (Http1ConnectionGroupKey).
+struct ConnectionPoolRuntime {
+    std::size_t keepalive_size = 0;
+    std::chrono::milliseconds keepalive_timeout{30000};
 };
 
 struct TlsIdentityRuntime {
@@ -50,6 +52,7 @@ struct ProxyHeaderRuntime {
 struct UpstreamPeerRuntime {
     std::string host;
     std::uint16_t port = 0;
+    std::uint32_t weight = 1;
     fiber::net::IpAddress ip{};
     fiber::net::SocketAddress address{};
     std::optional<fiber::http::Http1ConnectionGroupKey> connection_key{};
@@ -58,8 +61,6 @@ struct UpstreamPeerRuntime {
 struct UpstreamRuntime {
     std::string name;
     std::vector<UpstreamPeerRuntime> peers;
-    std::size_t keepalive = 0;
-    KeepaliveMode keepalive_mode = KeepaliveMode::Local;
     std::chrono::milliseconds connect_timeout{10000};
     std::chrono::milliseconds read_timeout{30000};
     std::chrono::milliseconds send_timeout{30000};
@@ -119,6 +120,7 @@ struct RuntimeConfig {
     std::vector<UpstreamRuntime> upstreams;
     std::vector<ServerRuntime> servers;
     std::vector<ListenerRuntime> listeners;
+    ConnectionPoolRuntime connection_pool;
     // Shared across all script locations (one StdLibrary with the HTTP functions registered),
     // kept alive for the runtime's lifetime since compiled scripts bake in function pointers.
     std::shared_ptr<fiber::script::std_lib::StdLibrary> script_library;

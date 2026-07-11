@@ -239,22 +239,6 @@ ProxySettings merge_proxy_settings(const ProxySettingsBuilder &base, const Proxy
     return settings;
 }
 
-std::expected<KeepaliveMode, ConfigError> parse_keepalive_mode(const DirectiveNode &directive) {
-    if (directive.args.size() != 1) {
-        return std::unexpected(make_error(directive, "keepalive_mode expects exactly one argument"));
-    }
-    if (contains_variable(directive.args[0])) {
-        return std::unexpected(make_error(directive, "keepalive_mode does not support variables in V1"));
-    }
-    if (directive.args[0] == "local") {
-        return KeepaliveMode::Local;
-    }
-    if (directive.args[0] == "stealable") {
-        return KeepaliveMode::Stealable;
-    }
-    return std::unexpected(make_error(directive, "keepalive_mode must be 'local' or 'stealable'"));
-}
-
 bool has_tls_identity(const ServerConfig &server) {
     return !server.certificate.empty() || !server.certificate_key.empty();
 }
@@ -356,7 +340,6 @@ std::expected<UpstreamConfig, ConfigError> parse_upstream(const DirectiveNode &d
 
     UpstreamConfig upstream;
     upstream.name = directive.args[0];
-    bool seen_keepalive_mode = false;
 
     for (const auto &child: directive.children) {
         if (child.has_block) {
@@ -364,8 +347,8 @@ std::expected<UpstreamConfig, ConfigError> parse_upstream(const DirectiveNode &d
         }
 
         if (child.name == "server") {
-            if (child.args.size() != 1) {
-                return std::unexpected(make_error(child, "upstream server expects exactly one host:port argument"));
+            if (child.args.empty()) {
+                return std::unexpected(make_error(child, "upstream server expects a host:port argument"));
             }
             if (contains_variable(child.args[0])) {
                 return std::unexpected(make_error(child, "upstream server does not support variables in V1"));
@@ -374,34 +357,33 @@ std::expected<UpstreamConfig, ConfigError> parse_upstream(const DirectiveNode &d
             if (!host_port) {
                 return std::unexpected(host_port.error());
             }
-            upstream.servers.push_back({
-                    .host = std::move(host_port->host),
-                    .port = host_port->port,
-            });
-            continue;
-        }
-
-        if (child.name == "keepalive") {
-            if (child.args.size() != 1) {
-                return std::unexpected(make_error(child, "keepalive expects exactly one argument"));
+            UpstreamServerConfig server;
+            server.host = std::move(host_port->host);
+            server.port = host_port->port;
+            // server parameters are name=value triplets; the lexer splits '=' into its own token,
+            // so args look like [host:port, "weight", "=", "3", ...].
+            for (std::size_t i = 1; i < child.args.size(); ++i) {
+                const std::string &param = child.args[i];
+                if (param == "=") {
+                    return std::unexpected(make_error(child, "server parameter missing a name"));
+                }
+                if (i + 2 >= child.args.size() || child.args[i + 1] != "=") {
+                    return std::unexpected(make_error(child, "server parameter must be name=value"));
+                }
+                const std::string &value = child.args[i + 2];
+                i += 2; // consume '=' and value (loop's ++ advances past the triplet)
+                if (param == "weight") {
+                    std::uint32_t w = 0;
+                    auto r = std::from_chars(value.data(), value.data() + value.size(), w);
+                    if (r.ec != std::errc() || r.ptr != value.data() + value.size() || w == 0) {
+                        return std::unexpected(make_error(child, "server weight must be a positive integer"));
+                    }
+                    server.weight = w;
+                } else {
+                    return std::unexpected(make_error(child, "unsupported server parameter: " + param));
+                }
             }
-            auto keepalive = parse_positive_size(child, child.args[0], "keepalive");
-            if (!keepalive) {
-                return std::unexpected(keepalive.error());
-            }
-            upstream.keepalive = *keepalive;
-            continue;
-        }
-        if (child.name == "keepalive_mode") {
-            if (seen_keepalive_mode) {
-                return std::unexpected(make_error(child, "keepalive_mode must not be repeated"));
-            }
-            auto keepalive_mode = parse_keepalive_mode(child);
-            if (!keepalive_mode) {
-                return std::unexpected(keepalive_mode.error());
-            }
-            upstream.keepalive_mode = *keepalive_mode;
-            seen_keepalive_mode = true;
+            upstream.servers.push_back(std::move(server));
             continue;
         }
 
@@ -635,6 +617,46 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
     return server;
 }
 
+std::expected<ConnectionPoolConfig, ConfigError> parse_connection_pool(const DirectiveNode &directive) {
+    if (!directive.has_block) {
+        return std::unexpected(make_error(directive, "connection_pool must be a block"));
+    }
+    ConnectionPoolConfig pool;
+    for (const auto &child: directive.children) {
+        if (child.has_block) {
+            return std::unexpected(make_error(child, "nested blocks are not allowed inside connection_pool"));
+        }
+        if (child.name == "keepalive_size") {
+            if (child.args.size() != 1) {
+                return std::unexpected(make_error(child, "keepalive_size expects exactly one argument"));
+            }
+            if (contains_variable(child.args[0])) {
+                return std::unexpected(make_error(child, "keepalive_size does not support variables in V1"));
+            }
+            std::size_t sz = 0;
+            auto r = std::from_chars(child.args[0].data(), child.args[0].data() + child.args[0].size(), sz);
+            if (r.ec != std::errc() || r.ptr != child.args[0].data() + child.args[0].size()) {
+                return std::unexpected(make_error(child, "keepalive_size must be a non-negative integer"));
+            }
+            pool.keepalive_size = sz;
+            continue;
+        }
+        if (child.name == "keepalive_timeout") {
+            if (child.args.size() != 1) {
+                return std::unexpected(make_error(child, "keepalive_timeout expects exactly one argument"));
+            }
+            auto d = parse_duration(child, child.args[0], "keepalive_timeout");
+            if (!d) {
+                return std::unexpected(d.error());
+            }
+            pool.keepalive_timeout = *d;
+            continue;
+        }
+        return std::unexpected(make_error(child, "unsupported directive in connection_pool block: " + child.name));
+    }
+    return pool;
+}
+
 std::expected<HttpConfig, ConfigError> parse_http(const DirectiveNode &directive) {
     if (!directive.has_block) {
         return std::unexpected(make_error(directive, "http must be a block"));
@@ -666,6 +688,14 @@ std::expected<HttpConfig, ConfigError> parse_http(const DirectiveNode &directive
                 return std::unexpected(make_error(child, "duplicate upstream name: " + upstream->name));
             }
             http.upstreams.push_back(std::move(*upstream));
+            continue;
+        }
+        if (child.name == "connection_pool") {
+            auto pool = parse_connection_pool(child);
+            if (!pool) {
+                return std::unexpected(pool.error());
+            }
+            http.connection_pool = std::move(*pool);
             continue;
         }
         if (child.name == "server") {

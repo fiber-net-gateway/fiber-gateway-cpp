@@ -14,6 +14,8 @@
 #include "../script/JsValue.h"
 #include "../script/ScriptResult.h"
 
+#include "HttpScriptServices.h"
+
 namespace fiber::http_script {
 
 // Per-request script attach payload. Bound to one HttpExchange and one script GcHeap for
@@ -41,6 +43,11 @@ public:
 
     [[nodiscard]] fiber::http::HttpExchange &exchange() const noexcept { return exchange_; }
     [[nodiscard]] fiber::script::GcHeap &heap() const noexcept { return heap_; }
+
+    // App-provided upstream-connection services (global pool + DNS). Set per request by the host
+    // before the script runs; null => http.request / http.proxyPass fail with InvalidState.
+    void set_services(HttpScriptServices *services) noexcept { services_ = services; }
+    [[nodiscard]] HttpScriptServices *services() const noexcept { return services_; }
 
     // ---- Request views (lazy, cached, GC-rooted) ----
     // Each returns the cached JsValue (Object) or, on allocation failure, Undefined.
@@ -83,6 +90,10 @@ public:
     void add_response_header(std::string_view name, std::string_view value) noexcept;
     [[nodiscard]] bool response_header_sent() const noexcept { return header_sent_; }
 
+    // Mark the response as already sent (e.g. http.proxyPass writes the response directly to the
+    // exchange, bypassing the ctx state machine). Prevents run_script from emitting a fallback 500.
+    void mark_response_sent() noexcept { header_sent_ = true; }
+
     // Flush the pending headers (status + body of known length) then write the body in a
     // single end-of-stream chunk. content-type is the caller's responsibility (set via the
     // set/add helpers above). Empty-body variants send a terminating empty chunk.
@@ -105,6 +116,7 @@ private:
 
     fiber::http::HttpExchange &exchange_;
     fiber::script::GcHeap &heap_;
+    HttpScriptServices *services_ = nullptr;
 
     // Persistent GC root slots (GcHeap::global_value) holding the cached request views.
     // nullptr until first access / until alloc succeeds.

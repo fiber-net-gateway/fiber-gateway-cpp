@@ -27,16 +27,6 @@ constexpr std::uint8_t kSkipHeaderValue = 1;
 
 using fiber::util::RoutePatternError;
 
-KeepaliveMode to_runtime_keepalive_mode(config::KeepaliveMode mode) noexcept {
-    switch (mode) {
-        case config::KeepaliveMode::Local:
-            return KeepaliveMode::Local;
-        case config::KeepaliveMode::Stealable:
-            return KeepaliveMode::Stealable;
-    }
-    return KeepaliveMode::Local;
-}
-
 RuntimeError make_error(const config::SourceLocation &location, std::string message) {
     return RuntimeError{
             .message = std::move(message),
@@ -135,8 +125,8 @@ fiber::http::HeaderMap<std::uint8_t> make_default_skip_headers() {
     return headers;
 }
 
-std::expected<UpstreamPeerRuntime, RuntimeError> make_peer_runtime(const config::SourceLocation &location,
-                                                                   std::string host, std::uint16_t port) {
+std::expected<UpstreamPeerRuntime, RuntimeError>
+make_peer_runtime(const config::SourceLocation &location, std::string host, std::uint16_t port, std::uint32_t weight) {
     fiber::net::IpAddress ip;
     if (!fiber::net::IpAddress::parse(host, ip)) {
         return std::unexpected(
@@ -146,6 +136,7 @@ std::expected<UpstreamPeerRuntime, RuntimeError> make_peer_runtime(const config:
     UpstreamPeerRuntime peer;
     peer.host = std::move(host);
     peer.port = port;
+    peer.weight = weight;
     peer.ip = ip;
     peer.address = fiber::net::SocketAddress(ip, port);
     peer.connection_key =
@@ -179,6 +170,8 @@ struct LocationRouteDefiner {
 std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::MainConfig &config) {
     RuntimeConfig runtime;
     runtime.worker_processes = config.worker_processes;
+    runtime.connection_pool.keepalive_size = config.http.connection_pool.keepalive_size;
+    runtime.connection_pool.keepalive_timeout = config.http.connection_pool.keepalive_timeout;
     runtime.upstreams.reserve(config.http.upstreams.size());
     runtime.servers.reserve(config.http.servers.size());
     runtime.listeners.reserve(config.http.listens.size());
@@ -189,15 +182,13 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
     for (const auto &upstream: config.http.upstreams) {
         UpstreamRuntime runtime_upstream;
         runtime_upstream.name = upstream.name;
-        runtime_upstream.keepalive = upstream.keepalive;
-        runtime_upstream.keepalive_mode = to_runtime_keepalive_mode(upstream.keepalive_mode);
         runtime_upstream.connect_timeout = upstream.connect_timeout.value_or(kDefaultConnectTimeout);
         runtime_upstream.read_timeout = upstream.read_timeout.value_or(kDefaultReadTimeout);
         runtime_upstream.send_timeout = upstream.send_timeout.value_or(kDefaultSendTimeout);
         runtime_upstream.peers.reserve(upstream.servers.size());
 
         for (const auto &server: upstream.servers) {
-            auto peer_result = make_peer_runtime(config::SourceLocation{}, server.host, server.port);
+            auto peer_result = make_peer_runtime(config::SourceLocation{}, server.host, server.port, server.weight);
             if (!peer_result) {
                 return std::unexpected(peer_result.error());
             }
@@ -298,7 +289,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 auto it = direct_upstream_indices.find(key);
                 if (it == direct_upstream_indices.end()) {
                     auto peer_result = make_peer_runtime(location.proxy_pass.location, location.proxy_pass.host,
-                                                         location.proxy_pass.port);
+                                                         location.proxy_pass.port, 1);
                     if (!peer_result) {
                         return std::unexpected(peer_result.error());
                     }
