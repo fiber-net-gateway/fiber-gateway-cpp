@@ -455,6 +455,7 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
     }
 
     LocationConfig location;
+    location.location = directive.location;
     if (directive.args.size() == 1) {
         location.match_kind = LocationMatchKind::Prefix;
         location.pattern = directive.args[0];
@@ -470,6 +471,7 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
 
     ProxySettingsBuilder location_proxy_defaults;
     bool has_proxy_pass = false;
+    bool has_script_file = false;
 
     for (const auto &child: directive.children) {
         if (child.has_block) {
@@ -483,6 +485,15 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
             }
             location.proxy_pass = std::move(*target);
             has_proxy_pass = true;
+            continue;
+        }
+        if (child.name == "script_file") {
+            if (child.args.size() != 1) {
+                return std::unexpected(make_error(child, "script_file expects exactly one argument"));
+            }
+            location.kind = LocationKind::Script;
+            location.script_file = child.args[0];
+            has_script_file = true;
             continue;
         }
         if (child.name == "proxy_connect_timeout" || child.name == "proxy_read_timeout" ||
@@ -512,8 +523,11 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
         return std::unexpected(make_error(child, "unsupported directive in location block: " + child.name));
     }
 
-    if (!has_proxy_pass) {
-        return std::unexpected(make_error(directive, "location must define proxy_pass"));
+    if (has_proxy_pass && has_script_file) {
+        return std::unexpected(make_error(directive, "location must define only one of proxy_pass or script_file"));
+    }
+    if (!has_proxy_pass && !has_script_file) {
+        return std::unexpected(make_error(directive, "location must define proxy_pass or script_file"));
     }
     location.proxy = merge_proxy_settings(server_proxy_defaults, location_proxy_defaults);
     return location;
@@ -686,6 +700,9 @@ std::expected<HttpConfig, ConfigError> parse_http(const DirectiveNode &directive
             });
         }
         for (const auto &location: server.locations) {
+            if (location.kind == LocationKind::Script) {
+                continue; // script locations do not proxy and have no upstream reference
+            }
             if (location.proxy_pass.kind == ProxyPassKind::NamedUpstream &&
                 !upstream_names.contains(location.proxy_pass.upstream_name)) {
                 return std::unexpected(ConfigError{

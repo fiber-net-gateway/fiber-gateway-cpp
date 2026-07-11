@@ -14,9 +14,12 @@
 #include "http/HttpExchange.h"
 #include "http/HttpExchangeIo.h"
 #include "http/HttpHeaders.h"
+#include "http_script/ScriptExchangeCtx.h"
 #include "net/IpAddress.h"
 #include "net/TcpListener.h"
 #include "net/TlsContext.h"
+#include "script/JsGc.h"
+#include "script/JsValue.h"
 
 #include "../proxy/ProxyHandler.h"
 #include "../upstream/UpstreamRegistry.h"
@@ -25,6 +28,7 @@ namespace fiber::lite_nginx::runtime {
 namespace {
 
 constexpr std::string_view kNotFoundBody = "404 Not Found\n";
+constexpr std::string_view kScriptErrorBody = "500 Script Error\n";
 
 RuntimeError make_error(const config::SourceLocation &location, std::string message) {
     return RuntimeError{
@@ -57,6 +61,22 @@ fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange
     }
 
     (void) co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
+}
+
+// Runs a compiled script against the request, wiring the HttpExchange via a
+// ScriptExchangeCtx attach payload. If the script completes without writing a response
+// header (e.g. it threw or aborted before calling resp.*), a 500 is sent so the client is
+// never left without a response.
+fiber::async::Task<void> run_script(fiber::http::HttpExchange &exchange, fiber::script::Script &script) {
+    fiber::script::GcHeap heap;
+    fiber::http_script::ScriptExchangeCtx ctx{exchange, heap};
+    fiber::script::JsValue root = fiber::script::JsValue::make_undefined();
+    auto result = co_await script.exec_async(root, &ctx, heap);
+    (void) result;
+    if (!ctx.response_header_sent()) {
+        co_await send_plain_response(exchange, 500, kScriptErrorBody);
+    }
+    co_return;
 }
 
 fiber::net::TlsContext *select_identity_by_server_name(void *,
@@ -199,7 +219,12 @@ public:
             co_return;
         }
 
-        co_await proxy_.handle(exchange, listener, server.locations[match_context.location_index]);
+        const LocationRuntime &location = server.locations[match_context.location_index];
+        if (location.script) {
+            co_await run_script(exchange, *location.script);
+        } else {
+            co_await proxy_.handle(exchange, listener, location);
+        }
     }
 
 private:
