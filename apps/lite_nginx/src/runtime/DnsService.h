@@ -34,9 +34,11 @@ public:
     [[nodiscard]] bool init(fiber::event::EventLoopGroup &group) noexcept;
     void shutdown() noexcept;
 
-    // Resolves host to an IP using the calling worker loop's resolver. Must be called from a
-    // worker loop that was part of the EventLoopGroup passed to init(). Returns the first record.
-    [[nodiscard]] fiber::async::Task<fiber::common::IoResult<fiber::net::IpAddress>>
+    // Resolves host to its A/AAAA addresses using the calling worker loop's resolver. Must be
+    // called from a worker loop that was part of the EventLoopGroup passed to init(). Returns all
+    // records ordered by the resolver policy (V6First: AAAA then A); callers should dial them in
+    // order and fall back to the next on connect failure.
+    [[nodiscard]] fiber::async::Task<fiber::common::IoResult<std::vector<fiber::net::IpAddress>>>
     resolve(std::string_view host) noexcept;
 
 private:

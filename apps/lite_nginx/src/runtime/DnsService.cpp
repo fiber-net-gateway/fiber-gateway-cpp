@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "async/Spawn.h"
 #include "async/Task.h"
@@ -126,7 +127,8 @@ void DnsService::shutdown() noexcept {
     initialized_ = false;
 }
 
-fiber::async::Task<fiber::common::IoResult<fiber::net::IpAddress>> DnsService::resolve(std::string_view host) noexcept {
+fiber::async::Task<fiber::common::IoResult<std::vector<fiber::net::IpAddress>>>
+DnsService::resolve(std::string_view host) noexcept {
     fiber::event::EventLoop *current = fiber::event::EventLoop::current_or_null();
     fiber::dns::DnsResolver *resolver = nullptr;
     for (const LoopEntry &entry: entries_) {
@@ -147,10 +149,16 @@ fiber::async::Task<fiber::common::IoResult<fiber::net::IpAddress>> DnsService::r
     if (!resolve_result) {
         co_return std::unexpected(resolve_result.error());
     }
-    if (result.record_count() == 0) {
+    const std::uint16_t count = result.record_count();
+    if (count == 0) {
         co_return std::unexpected(fiber::common::IoErr::NotFound);
     }
-    co_return result.records()[0];
+    std::vector<fiber::net::IpAddress> addresses;
+    addresses.reserve(count);
+    for (std::uint16_t i = 0; i < count; ++i) {
+        addresses.push_back(result.records()[i]);
+    }
+    co_return addresses;
 }
 
 } // namespace fiber::lite_nginx::runtime

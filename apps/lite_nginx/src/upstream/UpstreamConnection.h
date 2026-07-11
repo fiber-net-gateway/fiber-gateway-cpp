@@ -32,10 +32,12 @@ struct AcquiredUpstreamConnection {
 
 // Unified acquire + connect path. Resolves the peer identity to a connected Http1ClientConnection:
 //   1. pool.acquire(key) -> hit (has_connection) => reuse, zero DNS.
-//   2. miss => resolve the dial target: IP-key peers use the key's ip directly; name-key peers
-//      resolve via DnsService on the calling worker loop, then dial that IP.
+//   2. miss => resolve the dial target(s): IP-key peers use the key's ip directly; name-key peers
+//      resolve via DnsService on the calling worker loop (all A/AAAA records, V6First), then dial
+//      each address in turn, falling back to the next on connect failure.
 //   3. emplace_connection(opts) + connect() (pooled), or construct a transient connection + connect()
-//      when no pool is configured (keepalive_size == 0).
+//      when no pool is configured (keepalive_size == 0). On a pooled miss the failed lease is reset
+//      (park_entry recycles the non-reusable connection) and a fresh slot is acquired per retry.
 // `tls_server_name` is forwarded to TlsOptions.server_name for HTTPS keys (SNI); ignored for HTTP.
 [[nodiscard]] fiber::async::Task<fiber::common::IoResult<AcquiredUpstreamConnection>>
 acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService &dns,
