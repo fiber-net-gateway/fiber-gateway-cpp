@@ -72,7 +72,7 @@ ScriptResult digest_fn(const Library::HostCallFrame &frame, const JsValue &arg, 
 
     char hex[64]; // 32 digest bytes -> 64 hex chars.
     hex_encode(out, digest_len, hex);
-    JsValue result = JsValue::make_string(*frame.runtime, hex, digest_len * 2);
+    JsValue result = JsValue::make_string(frame.runtime, hex, digest_len * 2);
     if (js_value_type(result) != JsNodeType::String) {
         // make_string returns undefined on OOM; the hex string is never empty.
         return ScriptResult::abort(ScriptAbortReason::OutOfMemory);

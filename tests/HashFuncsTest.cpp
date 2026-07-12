@@ -85,7 +85,7 @@ std::string call_hash_binary(const char *name, const std::uint8_t *bytes, std::s
         match.callable->function == nullptr) {
         return {};
     }
-    Library::HostCallFrame frame(&heap, nullptr, nullptr);
+    Library::HostCallFrame frame(heap, JsValue::make_undefined(), nullptr);
     Library::Arguments args{ConstValueHandle(args_storage), 1};
     ScriptResult result = match.callable->function(match.callable->userdata, frame, args);
     EXPECT_TRUE(result.is_success()) << "hash did not succeed";

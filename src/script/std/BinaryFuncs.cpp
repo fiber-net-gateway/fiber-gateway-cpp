@@ -83,7 +83,7 @@ ScriptResult base64_encode_fn(void * /*userdata*/, const Library::HostCallFrame 
         return ScriptResult::success(JsValue::make_undefined());
     }
     std::string encoded = fiber::util::base64_encode(data, len);
-    return make_string_result(frame.runtime, encoded);
+    return make_string_result(&frame.runtime, encoded);
 }
 
 // ---- binary.base64Decode: String -> Binary; non-string -> undefined; invalid -> RangeError ----
@@ -102,7 +102,7 @@ ScriptResult base64_decode_fn(void * /*userdata*/, const Library::HostCallFrame 
         // Java Base64.getDecoder().decode throws IllegalArgumentException -> RangeError.
         return range_error();
     }
-    return make_binary_result(frame.runtime, reinterpret_cast<const std::uint8_t *>(out.data()), out.size());
+    return make_binary_result(&frame.runtime, reinterpret_cast<const std::uint8_t *>(out.data()), out.size());
 }
 
 // ---- binary.hex: Binary -> lowercase hex String; non-binary -> TypeError ----
@@ -120,7 +120,7 @@ ScriptResult hex_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Li
     std::string hex_str;
     hex_str.resize(len * 2);
     hex_encode(data, len, hex_str.data());
-    return make_string_result(frame.runtime, hex_str);
+    return make_string_result(&frame.runtime, hex_str);
 }
 
 // ---- binary.fromHex: String -> Binary; non-string -> TypeError; invalid hex -> RangeError ----
@@ -147,7 +147,7 @@ ScriptResult from_hex_fn(void * /*userdata*/, const Library::HostCallFrame &fram
         }
         out[i / 2] = static_cast<char>((hi << 4) | lo);
     }
-    return make_binary_result(frame.runtime, reinterpret_cast<const std::uint8_t *>(out.data()), out.size());
+    return make_binary_result(&frame.runtime, reinterpret_cast<const std::uint8_t *>(out.data()), out.size());
 }
 
 // ---- binary.getUtf8Bytes: any -> Binary = JsonUtil.toString(value) UTF-8 bytes ----
@@ -158,7 +158,7 @@ ScriptResult get_utf8_bytes_fn(void * /*userdata*/, const Library::HostCallFrame
     if (args.args && args.argc >= 1) {
         node_json_to_string(args.args[0], out);
     }
-    return make_binary_result(frame.runtime, reinterpret_cast<const std::uint8_t *>(out.data()), out.size());
+    return make_binary_result(&frame.runtime, reinterpret_cast<const std::uint8_t *>(out.data()), out.size());
 }
 
 } // namespace

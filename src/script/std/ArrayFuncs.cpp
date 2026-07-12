@@ -110,7 +110,7 @@ ScriptResult array_join_fn(void * /*userdata*/, const Library::HostCallFrame &fr
         }
         append_as_text(arr->elems[i], out);
     }
-    JsValue result = JsValue::make_string(*frame.runtime, out.data(), out.size());
+    JsValue result = JsValue::make_string(frame.runtime, out.data(), out.size());
     return ScriptResult::success(result);
 }
 
@@ -138,7 +138,7 @@ ScriptResult array_push_fn(void * /*userdata*/, const Library::HostCallFrame &fr
     if (js_value_type(arr_val) != JsNodeType::Array) {
         return type_error();
     }
-    GcHeap *heap = frame.runtime;
+    GcHeap *heap = &frame.runtime;
     if (heap == nullptr) {
         return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }

@@ -111,7 +111,7 @@ ScriptResult get_header_one_fn(void * /*userdata*/, const Library::HostCallFrame
         return ScriptResult::success(JsValue::make_undefined()); // Java MissingNode
     }
     std::string_view value = ctx->exchange().header(name_sv);
-    JsValue result = JsValue::make_string(*frame.runtime, value.data(), value.size());
+    JsValue result = JsValue::make_string(frame.runtime, value.data(), value.size());
     if (js_value_type(result) != JsNodeType::String) {
         return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
     }
@@ -144,14 +144,14 @@ ScriptResult get_query_one_fn(void * /*userdata*/, const Library::HostCallFrame 
     if (!string_utf8_view(name, name_sv) || name_sv.empty()) {
         return ScriptResult::success(JsValue::make_undefined()); // Java: empty name -> null
     }
-    return lookup_key(*frame.runtime, ctx->query(), name_sv);
+    return lookup_key(frame.runtime, ctx->query(), name_sv);
 }
 
 // ---- req.readJson() [async] ----
 
 AsyncTask read_json_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments /*args*/) noexcept {
     auto *ctx = ctx_of(frame);
-    GcHeap *heap = frame.runtime;
+    GcHeap *heap = &frame.runtime;
     if (ctx == nullptr || heap == nullptr) {
         co_return invalid_state();
     }
@@ -181,7 +181,7 @@ AsyncTask read_json_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
 AsyncTask read_binary_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
                          Library::Arguments /*args*/) noexcept {
     auto *ctx = ctx_of(frame);
-    GcHeap *heap = frame.runtime;
+    GcHeap *heap = &frame.runtime;
     if (ctx == nullptr || heap == nullptr) {
         co_return invalid_state();
     }
@@ -218,7 +218,7 @@ AsyncTask discard_body_fn(void * /*userdata*/, const Library::HostCallFrame &fra
 // ---- req.getUri / getPath / getQueryStr / getMethod ----
 
 ScriptResult make_text(const Library::HostCallFrame &frame, std::string_view text) noexcept {
-    JsValue result = JsValue::make_string(*frame.runtime, text.data(), text.size());
+    JsValue result = JsValue::make_string(frame.runtime, text.data(), text.size());
     if (js_value_type(result) != JsNodeType::String) {
         return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
     }
@@ -285,7 +285,7 @@ ScriptResult get_cookie_one_fn(void * /*userdata*/, const Library::HostCallFrame
     if (!string_utf8_view(name, name_sv) || name_sv.empty()) {
         return ScriptResult::success(JsValue::make_undefined());
     }
-    return lookup_key(*frame.runtime, ctx->cookies(), name_sv);
+    return lookup_key(frame.runtime, ctx->cookies(), name_sv);
 }
 
 } // namespace

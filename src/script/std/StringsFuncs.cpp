@@ -219,7 +219,7 @@ ScriptResult to_lower_fn(void * /*userdata*/, const Library::HostCallFrame &fram
     for (unsigned char b: text) {
         out.push_back((b >= 'A' && b <= 'Z') ? static_cast<char>(b + 32) : static_cast<char>(b));
     }
-    return make_string_result(frame.runtime, std::string_view(out));
+    return make_string_result(&frame.runtime, std::string_view(out));
 }
 
 ScriptResult to_upper_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
@@ -232,7 +232,7 @@ ScriptResult to_upper_fn(void * /*userdata*/, const Library::HostCallFrame &fram
     for (unsigned char b: text) {
         out.push_back((b >= 'a' && b <= 'z') ? static_cast<char>(b - 32) : static_cast<char>(b));
     }
-    return make_string_result(frame.runtime, std::string_view(out));
+    return make_string_result(&frame.runtime, std::string_view(out));
 }
 
 // ---- strings.trim(text, cutset=null) ----
@@ -278,7 +278,7 @@ ScriptResult trim_fn(void * /*userdata*/, const Library::HostCallFrame &frame, L
         }
         result = text.substr(static_cast<std::size_t>(s), static_cast<std::size_t>(e - s));
     }
-    return make_string_result(frame.runtime, result);
+    return make_string_result(&frame.runtime, result);
 }
 
 // ---- strings.trimLeft(text, cutset=null) ----
@@ -309,7 +309,7 @@ ScriptResult trim_left_fn(void * /*userdata*/, const Library::HostCallFrame &fra
         }
         result = text.substr(static_cast<std::size_t>(s));
     }
-    return make_string_result(frame.runtime, result);
+    return make_string_result(&frame.runtime, result);
 }
 
 // ---- strings.trimRight(text, cutset=null) ----
@@ -342,7 +342,7 @@ ScriptResult trim_right_fn(void * /*userdata*/, const Library::HostCallFrame &fr
         }
         result = text.substr(0, static_cast<std::size_t>(e));
     }
-    return make_string_result(frame.runtime, result);
+    return make_string_result(&frame.runtime, result);
 }
 
 // ---- strings.split(text, separator=null) ----
@@ -357,7 +357,7 @@ ScriptResult split_fn(void * /*userdata*/, const Library::HostCallFrame &frame, 
     if (!args.args || args.argc < 1 || !string_utf8_view(args.args[0], text)) {
         return ScriptResult::success(JsValue::make_null());
     }
-    GcHeap *heap = frame.runtime;
+    GcHeap *heap = &frame.runtime;
     if (heap == nullptr) {
         return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
@@ -588,7 +588,7 @@ ScriptResult repeat_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
     for (std::int32_t j = 0; j < i; ++j) {
         out.append(text.data(), len);
     }
-    return make_string_result(frame.runtime, std::string_view(out));
+    return make_string_result(&frame.runtime, std::string_view(out));
 }
 
 // ---- strings.substring(text, start=0, end=2147483647) ----
@@ -616,11 +616,11 @@ ScriptResult substring_fn(void * /*userdata*/, const Library::HostCallFrame &fra
             return ScriptResult::success(args.args[0]); // Java returns the original text node
         }
         std::size_t sb = u16_index_to_byte(text, static_cast<std::size_t>(i));
-        return make_string_result(frame.runtime, text.substr(sb));
+        return make_string_result(&frame.runtime, text.substr(sb));
     }
     std::size_t sb = u16_index_to_byte(text, static_cast<std::size_t>(i));
     std::size_t eb = u16_index_to_byte(text, static_cast<std::size_t>(j));
-    return make_string_result(frame.runtime, text.substr(sb, eb - sb));
+    return make_string_result(&frame.runtime, text.substr(sb, eb - sb));
 }
 
 // ---- strings.toString() ----
@@ -642,11 +642,11 @@ ScriptResult to_string1_fn(void * /*userdata*/, const Library::HostCallFrame &fr
     const JsValue &v = args.args[0];
     JsNodeType t = js_value_type(v);
     if (t == JsNodeType::Null || t == JsNodeType::Undefined) {
-        return make_string_result(frame.runtime, std::string_view("null", 4));
+        return make_string_result(&frame.runtime, std::string_view("null", 4));
     }
     std::string out;
     node_json_to_string(v, out);
-    return make_string_result(frame.runtime, std::string_view(out));
+    return make_string_result(&frame.runtime, std::string_view(out));
 }
 
 } // namespace

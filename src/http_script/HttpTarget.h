@@ -8,7 +8,9 @@
 
 namespace fiber::http_script {
 
-// Describes where an http.request / http.proxyPass call should send its upstream request.
+// Describes where an svc.request / svc.proxyPass call should send its upstream request. This is
+// the compile-time target of a `directive <name> = http "<target>";` binding -- it is NOT the
+// `url` option field of a call (that field is the request path?query).
 //   - Upstream: a named upstream block ("@backend" or "backend"). Peer selection + pooling are
 //     driven by UpstreamRegistry (weighted round-robin, connection_key from config-time IP).
 //   - Url: an ad-hoc "http(s)://host[:port]" target. host may be an IP literal (no DNS) or a

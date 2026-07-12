@@ -1257,13 +1257,15 @@ http {
     ::unlink(script_path.c_str());
 }
 
-// http.request({upstream:"@backend"}) issues an upstream request and returns {status, headers?, body}.
+// `directive svc = http "@backend"; svc.request({...})` issues an upstream request and returns
+// {status, headers?, body}.
 TEST(LiteNginxRuntimeTest, HttpRequestFetchesUpstreamResponse) {
     const std::string script_path = "/tmp/lite_nginx_http_request_test.js";
     {
         std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
         ASSERT_TRUE(file.good());
-        file << "let r = http.request({upstream: \"@backend\", path: \"/x\", includeHeaders: true});\n"
+        file << "directive svc = http \"@backend\";\n"
+                "let r = svc.request({path: \"/x\", includeHeaders: true});\n"
                 "resp.sendJson(200, {status: r.status, headers: r.headers});";
     }
 
@@ -1321,14 +1323,15 @@ http {
     ::unlink(script_path.c_str());
 }
 
-// http.proxyPass({upstream:"@backend"}) forwards the inbound request to the upstream and copies
-// the upstream response back to the client.
+// `directive svc = http "@backend"; svc.proxyPass({})` forwards the inbound request to the
+// upstream and copies the upstream response back to the client.
 TEST(LiteNginxRuntimeTest, HttpProxyPassForwardsRequestAndResponse) {
     const std::string script_path = "/tmp/lite_nginx_http_proxy_pass_test.js";
     {
         std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
         ASSERT_TRUE(file.good());
-        file << "http.proxyPass({upstream: \"@backend\"});";
+        file << "directive svc = http \"@backend\";\n"
+                "svc.proxyPass({});";
     }
 
     std::promise<std::string> upstream_request;

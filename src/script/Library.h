@@ -15,11 +15,14 @@ namespace fiber::script {
 class Library {
 public:
     struct HostCallFrame {
-        GcHeap *runtime = nullptr;
-        ConstValueHandle root = nullptr;
+        // runtime is a reference and root is held by value so a HostCallFrame is self-contained:
+        // the InterpreterVm owns one as a member (it lives for the whole exec_async coroutine, i.e.
+        // across async host-function suspend/resume), and passes `const HostCallFrame&` to host
+        // functions. A by-reference parameter then stays valid for the lazy AsyncTask's body.
+        GcHeap &runtime;
+        JsValue root;
         void *attach = nullptr;
-        HostCallFrame() = default;
-        HostCallFrame(GcHeap *runtime, const ConstValueHandle &root, void *attach) noexcept :
+        HostCallFrame(GcHeap &runtime, JsValue root, void *attach) noexcept :
             runtime(runtime), root(root), attach(attach) {}
     };
 

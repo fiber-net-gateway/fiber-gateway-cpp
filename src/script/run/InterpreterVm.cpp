@@ -49,7 +49,7 @@ std::int64_t position_at(const ir::Compiled &compiled, std::size_t pc) noexcept 
 
 InterpreterVm::InterpreterVm(const ir::Compiled &compiled, const fiber::script::JsValue &root, void *attach,
                              GcHeap &runtime) :
-    compile_(compiled), root_(root), attach_(attach), runtime_(runtime), reg_(runtime_.roots(), *this) {
+    compile_(compiled), frame_(runtime, root, attach), reg_(frame_.runtime.roots(), *this) {
     std::size_t total = compile_.stack_size() + compile_.var_table_size();
     if (total > 0) {
         slots_.reset(new (std::nothrow) fiber::script::JsValue[total]);
@@ -104,7 +104,7 @@ void InterpreterVm::iterate() {
         FIBER_ASSERT(sp_ >= 2);
         fiber::script::JsValue *lhs = &stack_[sp_ - 2];
         fiber::script::JsValue *rhs = &stack_[sp_ - 1];
-        CallResult status = op(runtime_, lhs, rhs, result_);
+        CallResult status = op(frame_.runtime, lhs, rhs, result_);
         if (!handle_call_result(status, epc)) {
             return false;
         }
@@ -118,7 +118,7 @@ void InterpreterVm::iterate() {
     auto apply_unary = [&](UnaryOp op, std::size_t epc) {
         FIBER_ASSERT(sp_ >= 1);
         fiber::script::JsValue *value = &stack_[sp_ - 1];
-        CallResult status = op(runtime_, value, result_);
+        CallResult status = op(frame_.runtime, value, result_);
         if (!handle_call_result(status, epc)) {
             return false;
         }
@@ -142,7 +142,7 @@ void InterpreterVm::iterate() {
                 break;
             }
             case ir::Code::LOAD_ROOT:
-                stack_[sp_++] = root_;
+                stack_[sp_++] = frame_.root;
                 break;
             case ir::Code::DUMP:
                 stack_[sp_] = stack_[sp_ - 1];
@@ -255,7 +255,7 @@ void InterpreterVm::iterate() {
                 }
             } break;
             case ir::Code::NEW_OBJECT: {
-                fiber::script::JsValue obj = fiber::script::JsValue::make_object(runtime_.heap(), 0);
+                fiber::script::JsValue obj = fiber::script::JsValue::make_object(frame_.runtime.heap(), 0);
                 if (fiber::script::js_value_type(obj) != fiber::script::JsNodeType::Object) {
                     ScriptResult error = make_oom(position_at(compile_, pc_ - 1));
                     if (!handle_error(error, pc_ - 1)) {
@@ -267,7 +267,7 @@ void InterpreterVm::iterate() {
                 break;
             }
             case ir::Code::NEW_ARRAY: {
-                fiber::script::JsValue arr = fiber::script::JsValue::make_array(runtime_.heap(), 0);
+                fiber::script::JsValue arr = fiber::script::JsValue::make_array(frame_.runtime.heap(), 0);
                 if (fiber::script::js_value_type(arr) != fiber::script::JsNodeType::Array) {
                     ScriptResult error = make_oom(position_at(compile_, pc_ - 1));
                     if (!handle_error(error, pc_ - 1)) {
@@ -303,7 +303,7 @@ void InterpreterVm::iterate() {
                 fiber::script::JsValue *parent = &stack_[sp_ - 3];
                 fiber::script::JsValue *key = &stack_[sp_ - 2];
                 fiber::script::JsValue *value = &stack_[sp_ - 1];
-                CallResult status = Access::index_set(runtime_, parent, key, value, result_);
+                CallResult status = Access::index_set(frame_.runtime, parent, key, value, result_);
                 if (!handle_call_result(status, pc_ - 1)) {
                     return;
                 }
@@ -318,7 +318,7 @@ void InterpreterVm::iterate() {
                 fiber::script::JsValue *parent = &stack_[sp_ - 3];
                 fiber::script::JsValue *key = &stack_[sp_ - 2];
                 fiber::script::JsValue *value = &stack_[sp_ - 1];
-                CallResult status = Access::index_set1(runtime_, parent, key, value, result_);
+                CallResult status = Access::index_set1(frame_.runtime, parent, key, value, result_);
                 if (!handle_call_result(status, pc_ - 1)) {
                     return;
                 }
@@ -332,7 +332,7 @@ void InterpreterVm::iterate() {
                 std::uint32_t idx = raw >> 8u;
                 ConstValueHandle key = const_handle(compile_.constant(idx));
                 fiber::script::JsValue *parent = &stack_[sp_ - 1];
-                CallResult status = Access::prop_get(runtime_, parent, key, result_);
+                CallResult status = Access::prop_get(frame_.runtime, parent, key, result_);
                 if (!handle_call_result(status, pc_ - 1)) {
                     return;
                 }
@@ -345,7 +345,7 @@ void InterpreterVm::iterate() {
                 FIBER_ASSERT(sp_ >= 2);
                 fiber::script::JsValue *parent = &stack_[sp_ - 2];
                 fiber::script::JsValue *value = &stack_[sp_ - 1];
-                CallResult status = Access::prop_set(runtime_, parent, value, key, result_);
+                CallResult status = Access::prop_set(frame_.runtime, parent, value, key, result_);
                 if (!handle_call_result(status, pc_ - 1)) {
                     return;
                 }
@@ -361,7 +361,7 @@ void InterpreterVm::iterate() {
                 FIBER_ASSERT(sp_ >= 2);
                 fiber::script::JsValue *parent = &stack_[sp_ - 2];
                 fiber::script::JsValue *value = &stack_[sp_ - 1];
-                CallResult status = Access::prop_set1(runtime_, parent, value, key, result_);
+                CallResult status = Access::prop_set1(frame_.runtime, parent, value, key, result_);
                 if (!handle_call_result(status, pc_ - 1)) {
                     return;
                 }
@@ -406,7 +406,7 @@ void InterpreterVm::iterate() {
             case ir::Code::ITERATE_INTO: {
                 std::size_t idx = static_cast<std::size_t>(raw >> kInstrumentLen);
                 FIBER_ASSERT(sp_ >= 1);
-                CallResult status = Unaries::iterate(runtime_, &stack_[sp_ - 1], result_);
+                CallResult status = Unaries::iterate(frame_.runtime, &stack_[sp_ - 1], result_);
                 if (!handle_call_result(status, pc_ - 1)) {
                     return;
                 }
@@ -418,8 +418,8 @@ void InterpreterVm::iterate() {
             }
             case ir::Code::ITERATE_NEXT: {
                 std::size_t idx = static_cast<std::size_t>(raw >> kInstrumentLen);
-                fiber::script::GcIterStep step =
-                        fiber::script::gc_iterator_next(&runtime_.heap(), fiber::script::ValueHandle(&vars_[idx]));
+                fiber::script::GcIterStep step = fiber::script::gc_iterator_next(
+                        &frame_.runtime.heap(), fiber::script::ValueHandle(&vars_[idx]));
                 if (step == fiber::script::GcIterStep::Mutated) {
                     result_.exception =
                             fiber::script::JsValue::make_exception(fiber::script::ExceptionKind::IterationError);
@@ -512,7 +512,7 @@ void InterpreterVm::async_complete(void *context, const ScriptResult &result) no
 }
 
 void InterpreterVm::visit_roots(fiber::script::GcRootVisitor &visitor) noexcept {
-    visitor.visit(&root_);
+    visitor.visit(&frame_.root);
     visitor.visit_range(stack_, sp_);
     visitor.visit_range(vars_, compile_.var_table_size());
     if (state_ == State::Running || state_ == State::Suspend || state_ == State::AsyncRetSuc ||
@@ -522,14 +522,6 @@ void InterpreterVm::visit_roots(fiber::script::GcRootVisitor &visitor) noexcept 
     if (state_ == State::AsyncRetExp || state_ == State::Exception) {
         visitor.visit(&result_.exception);
     }
-}
-
-Library::HostCallFrame InterpreterVm::make_call_frame() const {
-    Library::HostCallFrame frame;
-    frame.runtime = const_cast<GcHeap *>(&runtime_);
-    frame.root = const_cast<fiber::script::JsValue *>(&root_);
-    frame.attach = attach_;
-    return frame;
 }
 
 Library::Arguments InterpreterVm::make_call_arguments(std::uint8_t op, std::uint32_t encoded_argc,
@@ -561,19 +553,19 @@ bool InterpreterVm::dispatch_func_const(std::uint8_t op, const ir::Compiled::Fun
                                         std::uint32_t encoded_argc) {
     std::size_t arg_base = sp_;
     Library::Arguments arguments = make_call_arguments(op, encoded_argc, arg_base);
-    const Library::HostCallFrame frame = make_call_frame();
+    const Library::HostCallFrame &frame = frame_;
     const std::size_t epc = pc_ - 1;
     switch (op) {
         case ir::Code::CALL_FUNC:
         case ir::Code::CALL_FUNC_SPREAD: {
             FIBER_ASSERT(func_const.sync_func);
-            GcHeap::LocalMark mark(runtime_);
+            GcHeap::LocalMark mark(frame_.runtime);
             ScriptResult result = func_const.sync_func(func_const.user_data, frame, arguments);
             return apply_call_result(result, op, encoded_argc, epc);
         }
         case ir::Code::CALL_CONST: {
             FIBER_ASSERT(func_const.sync_ct);
-            GcHeap::LocalMark mark(runtime_);
+            GcHeap::LocalMark mark(frame_.runtime);
             ScriptResult result = func_const.sync_ct(func_const.user_data, frame);
             return apply_call_result(result, op, encoded_argc, epc);
         }
