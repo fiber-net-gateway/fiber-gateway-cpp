@@ -16,7 +16,7 @@
 
 ## 一、最高优先级（热路径，每次请求都付代价）
 
-### 1. HTTP/1 chunked `write_body` 每个 chunk 4 次 syscall
+### 1. HTTP/1 chunked `write_body` 每个 chunk 4 次 syscall ✅ 已修复
 - **位置**：`Http1ExchangeIo.cpp:982-994`（server）+ `ClientHttp1Exchange.cpp:807-824`（client，3 次）
 - **问题**：每个 chunk 独立 `co_await write_all(size)`、`write_all("\r\n")`、`write_all(chunk)`、`write_all("\r\n")`，结尾 `"0\r\n\r\n"` 还是单独一次（`:1004`）。而 `write_all(HttpTransport*, IoBufChain&)` 重载（`:178`）已存在——client 自己甚至已把 size+CRLF 合进一个前缀。注意 `:1070-1092` 是第二个 chunked 入口，同样 4 次。
 - **场景**：流式/SSE/代理响应每个 chunk ≥4 syscall 而非 1。
@@ -28,7 +28,7 @@
 - **修法**：按 `name_hash` 建桶 / 最小完美哈希；伪头用编译期 switch 直接 `append_indexed`，仅对无静态项的值回退 `find()`。
 - **落地（2026-07-12）**：方案 a+b 同时实现。`Http3QpackStaticTable::find()` 改为 separate-chaining hash 桶（`kBucketCap=256`，进程级 magic static 一次构建），仅遍历同名桶——`find()` 现最坏链长 `:status` 14 条（原 99）。五个伪头编码器抽 `dispatch(name,value,FindResult)` 共享派发，改用 RFC 9204 编译期 index 直查（`resolve_status/method/scheme/path/authority`）：in-table 值直接 `append_indexed`，否则 `append_literal_static_name` 回退首名下标（`status`=24/`method`=15/`scheme`=22/`path`=1/`authority`=0）。字节输出与原路径逐位等价。新增 7 例测试（500/502/POST/MKCOL/https/http/`/`），全量 1099 ctest 绿。
 
-### 3. Huffman 编码即使让字符串变长也照发（HPACK + QPACK 同一 bug）
+### 3. Huffman 编码即使让字符串变长也照发（HPACK + QPACK 同一 bug）✅ 已修复
 - **位置**：`Http2HpackEncoder.cpp:445`（`should_huffman_encode` 只判 `size >= huffman_threshold`）+ `Http2HpackEncoder.cpp:332-334`（`encoded_len` 只和 `max_string_size` 比）；`Http3QpackEncoder.cpp:330` + `:210-212` 同样
 - **问题**：`encoded_len` 算出来了却 **从不和 `value.size()` 比较**。大写为主、random token、base64、已压缩内容会被膨胀最多 5/4×，既费 CPU 又费带宽。RFC 7541 §6.2 本就建议 Huffman 仅在更小时用。
 - **修法**：算完 `encoded_len` 后 `if (encoded_len >= value.size()) 走 raw`。零成本，两个文件一起改。
