@@ -10,7 +10,9 @@
 
 namespace fiber::script {
 
-enum class ScriptResultKind : std::uint8_t {
+// Kind for the host-call ABI result (AbiResult). The script-exec return type ScriptResult
+// below has its own ScriptResultKind {Value, Void, Exception, Abort}.
+enum class AbiResultKind : std::uint8_t {
     Success,
     Exception,
     Abort,
@@ -43,31 +45,31 @@ struct ScriptStatus {
 
     static ScriptStatus success() noexcept {
         ScriptStatus status;
-        status.kind = ScriptResultKind::Success;
+        status.kind = AbiResultKind::Success;
         return status;
     }
 
     static ScriptStatus exception() noexcept {
         ScriptStatus status;
-        status.kind = ScriptResultKind::Exception;
+        status.kind = AbiResultKind::Exception;
         return status;
     }
 
     static ScriptStatus abort(ScriptAbortReason reason, std::int64_t position = -1) noexcept {
         ScriptStatus status;
-        status.kind = ScriptResultKind::Abort;
+        status.kind = AbiResultKind::Abort;
         status.abort_payload = ScriptAbort{reason, position};
         return status;
     }
 
-    [[nodiscard]] bool is_success() const noexcept { return kind == ScriptResultKind::Success; }
+    [[nodiscard]] bool is_success() const noexcept { return kind == AbiResultKind::Success; }
 
-    [[nodiscard]] bool is_exception() const noexcept { return kind == ScriptResultKind::Exception; }
+    [[nodiscard]] bool is_exception() const noexcept { return kind == AbiResultKind::Exception; }
 
-    [[nodiscard]] bool is_abort() const noexcept { return kind == ScriptResultKind::Abort; }
+    [[nodiscard]] bool is_abort() const noexcept { return kind == AbiResultKind::Abort; }
 
     [[nodiscard]] bool is_pending() const noexcept {
-        return kind == ScriptResultKind::Abort && abort_payload.reason == ScriptAbortReason::None;
+        return kind == AbiResultKind::Abort && abort_payload.reason == ScriptAbortReason::None;
     }
 
     [[nodiscard]] bool is_done() const noexcept { return !is_pending(); }
@@ -81,7 +83,7 @@ struct ScriptStatus {
 
     [[nodiscard]] explicit operator bool() const noexcept { return has_value(); }
 
-    ScriptResultKind kind = ScriptResultKind::Abort;
+    AbiResultKind kind = AbiResultKind::Abort;
     ScriptAbort abort_payload{};
 };
 
@@ -103,44 +105,44 @@ struct alignas(16) AbiResult {
 
     constexpr AbiResult() noexcept = default;
 
-    AbiResult(const fiber::script::JsValue &value) noexcept : kind(ScriptResultKind::Success), payload{} {
+    AbiResult(const fiber::script::JsValue &value) noexcept : kind(AbiResultKind::Success), payload{} {
         payload.value = value;
     }
 
     AbiResult(std::unexpected<fiber::script::JsValue> unexpected) noexcept :
-        kind(ScriptResultKind::Exception), payload{} {
+        kind(AbiResultKind::Exception), payload{} {
         payload.value = unexpected.error();
     }
 
     static AbiResult success(const fiber::script::JsValue &value) noexcept {
         AbiResult result;
-        result.kind = ScriptResultKind::Success;
+        result.kind = AbiResultKind::Success;
         result.payload.value = value;
         return result;
     }
 
     static AbiResult exception(const fiber::script::JsValue &value) noexcept {
         AbiResult result;
-        result.kind = ScriptResultKind::Exception;
+        result.kind = AbiResultKind::Exception;
         result.payload.value = value;
         return result;
     }
 
     static AbiResult abort(ScriptAbortReason reason, std::int64_t position = -1) noexcept {
         AbiResult result;
-        result.kind = ScriptResultKind::Abort;
+        result.kind = AbiResultKind::Abort;
         result.payload.abort = ScriptAbort{reason, position};
         return result;
     }
 
-    [[nodiscard]] bool is_success() const noexcept { return kind == ScriptResultKind::Success; }
+    [[nodiscard]] bool is_success() const noexcept { return kind == AbiResultKind::Success; }
 
-    [[nodiscard]] bool is_exception() const noexcept { return kind == ScriptResultKind::Exception; }
+    [[nodiscard]] bool is_exception() const noexcept { return kind == AbiResultKind::Exception; }
 
-    [[nodiscard]] bool is_abort() const noexcept { return kind == ScriptResultKind::Abort; }
+    [[nodiscard]] bool is_abort() const noexcept { return kind == AbiResultKind::Abort; }
 
     [[nodiscard]] bool is_pending() const noexcept {
-        return kind == ScriptResultKind::Abort && payload.abort.reason == ScriptAbortReason::None;
+        return kind == AbiResultKind::Abort && payload.abort.reason == ScriptAbortReason::None;
     }
 
     [[nodiscard]] bool is_done() const noexcept { return !is_pending(); }
@@ -166,7 +168,7 @@ struct alignas(16) AbiResult {
 
     [[nodiscard]] const fiber::script::JsValue &error() const noexcept { return exception(); }
 
-    ScriptResultKind kind = ScriptResultKind::Abort;
+    AbiResultKind kind = AbiResultKind::Abort;
     Payload payload{};
 };
 
@@ -174,6 +176,108 @@ static_assert(std::is_trivially_copyable_v<ScriptAbort>);
 static_assert(std::is_trivially_copyable_v<ScriptStatus>);
 static_assert(std::is_trivially_copyable_v<ResultPayload>);
 static_assert(std::is_trivially_copyable_v<AbiResult>);
+
+// Script-exec return type. Distinct from AbiResult (the host-call ABI): a script that ends
+// without producing a value (bare `return;` or falling off the end) yields Void rather than
+// Value(undefined). Value and Void both mean "ended correctly"; Exception/Abort are failures.
+// Void exists only here -- host functions still signal "no value" as AbiResult::success(undefined).
+enum class ScriptResultKind : std::uint8_t {
+    Value,
+    Void,
+    Exception,
+    Abort,
+};
+
+struct alignas(16) ScriptResult {
+    union Payload {
+        constexpr Payload() : abort{} {}
+
+        fiber::script::JsValue value;
+        ScriptAbort abort;
+    };
+
+    constexpr ScriptResult() noexcept = default;
+
+    ScriptResult(const fiber::script::JsValue &value) noexcept : kind(ScriptResultKind::Value), payload{} {
+        payload.value = value;
+    }
+
+    ScriptResult(std::unexpected<fiber::script::JsValue> unexpected) noexcept :
+        kind(ScriptResultKind::Exception), payload{} {
+        payload.value = unexpected.error();
+    }
+
+    static ScriptResult value(const fiber::script::JsValue &v) noexcept {
+        ScriptResult result;
+        result.kind = ScriptResultKind::Value;
+        result.payload.value = v;
+        return result;
+    }
+
+    static ScriptResult void_() noexcept {
+        ScriptResult result;
+        result.kind = ScriptResultKind::Void;
+        return result;
+    }
+
+    static ScriptResult exception(const fiber::script::JsValue &v) noexcept {
+        ScriptResult result;
+        result.kind = ScriptResultKind::Exception;
+        result.payload.value = v;
+        return result;
+    }
+
+    static ScriptResult abort(ScriptAbortReason reason, std::int64_t position = -1) noexcept {
+        ScriptResult result;
+        result.kind = ScriptResultKind::Abort;
+        result.payload.abort = ScriptAbort{reason, position};
+        return result;
+    }
+
+    [[nodiscard]] bool is_value() const noexcept { return kind == ScriptResultKind::Value; }
+
+    [[nodiscard]] bool is_void() const noexcept { return kind == ScriptResultKind::Void; }
+
+    [[nodiscard]] bool is_exception() const noexcept { return kind == ScriptResultKind::Exception; }
+
+    [[nodiscard]] bool is_abort() const noexcept { return kind == ScriptResultKind::Abort; }
+
+    // Value and Void are both "ended correctly".
+    [[nodiscard]] bool is_success() const noexcept { return is_value() || is_void(); }
+
+    [[nodiscard]] bool is_pending() const noexcept {
+        return kind == ScriptResultKind::Abort && payload.abort.reason == ScriptAbortReason::None;
+    }
+
+    [[nodiscard]] bool is_done() const noexcept { return !is_pending(); }
+
+    [[nodiscard]] const fiber::script::JsValue &value() const noexcept {
+        FIBER_ASSERT(is_value());
+        return payload.value;
+    }
+
+    [[nodiscard]] const fiber::script::JsValue &exception() const noexcept {
+        FIBER_ASSERT(is_exception());
+        return payload.value;
+    }
+
+    [[nodiscard]] const ScriptAbort &abort() const noexcept {
+        FIBER_ASSERT(is_abort());
+        return payload.abort;
+    }
+
+    // expected-style: only Value carries a value (Void does not).
+    [[nodiscard]] bool has_value() const noexcept { return is_value(); }
+
+    [[nodiscard]] explicit operator bool() const noexcept { return is_success(); }
+
+    [[nodiscard]] const fiber::script::JsValue &error() const noexcept { return exception(); }
+
+    ScriptResultKind kind = ScriptResultKind::Abort;
+    Payload payload{};
+};
+
+static_assert(std::is_trivially_copyable_v<ScriptResult>);
 
 // ResultPayload mutators — the single way op functions write their outcome. Ops never carry a
 // position (the dispatch layer recovers it from the current pc_), so set_abort takes only a reason.

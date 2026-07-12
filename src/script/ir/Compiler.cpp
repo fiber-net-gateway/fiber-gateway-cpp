@@ -519,7 +519,7 @@ private:
     }
 
     void emit_default_return(std::int32_t pos) {
-        emit_op(Code::LOAD_CONST, const_undefined(pos), pos, 1);
+        // Fall-through (no return): leave the stack empty so END_RETURN yields Void.
         emit_end_return(pos);
     }
 
@@ -586,9 +586,9 @@ private:
         if (auto *ret_stmt = dynamic_cast<const ast::ReturnStatement *>(&stmt)) {
             if (ret_stmt->value()) {
                 compile_expression(*ret_stmt->value());
-            } else {
-                emit_op(Code::LOAD_CONST, const_undefined(stmt.start_pos()), stmt.start_pos(), 1);
             }
+            // Bare `return;`: no value pushed -> END_RETURN yields Void (distinct from
+            // `return undefined;`, which pushes a value and yields Value(undefined)).
             emit_end_return(stmt.start_pos());
             return;
         }

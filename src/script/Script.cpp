@@ -26,11 +26,11 @@ struct SwitchAsyncAwaiter {
 
 Script::Script(std::shared_ptr<ir::Compiled> compiled) : compiled_(std::move(compiled)) {}
 
-fiber::async::Task<AbiResult> Script::exec_async(fiber::script::JsValue root, void *attach,
+fiber::async::Task<ScriptResult> Script::exec_async(fiber::script::JsValue root, void *attach,
                                                  fiber::script::GcHeap &heap) {
     auto compiled = compiled_;
     if (!compiled) {
-        co_return AbiResult::abort(ScriptAbortReason::InvalidState);
+        co_return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
     run::InterpreterVm vm(*compiled, root, attach, heap);
     while (!vm.done()) {
@@ -39,16 +39,16 @@ fiber::async::Task<AbiResult> Script::exec_async(fiber::script::JsValue root, vo
             break;
         }
         if (!vm.async_task().valid()) {
-            co_return AbiResult::abort(ScriptAbortReason::InvalidState);
+            co_return ScriptResult::abort(ScriptAbortReason::InvalidState);
         }
         co_await SwitchAsyncAwaiter{vm.async_task()};
     }
     co_return vm.result();
 }
 
-AbiResult Script::exec_sync(fiber::script::JsValue root, void *attach, fiber::script::GcHeap &heap) {
+ScriptResult Script::exec_sync(fiber::script::JsValue root, void *attach, fiber::script::GcHeap &heap) {
     if (!compiled_) {
-        return AbiResult::abort(ScriptAbortReason::InvalidState);
+        return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
     if (compiled_->contains_async()) {
         FIBER_PANIC("async opcode encountered in exec_sync");

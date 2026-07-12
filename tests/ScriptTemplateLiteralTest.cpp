@@ -8,6 +8,7 @@
 #include "script/std/StdLibrary.h"
 
 using fiber::script::AbiResult;
+using fiber::script::ScriptResult;
 using fiber::script::GcHeap;
 using fiber::script::GcString;
 using fiber::script::JsNodeType;
@@ -32,11 +33,11 @@ std::string string_to_utf8(const JsValue &value) {
     return out;
 }
 
-AbiResult run_script(std::string_view source, GcHeap &heap) {
+ScriptResult run_script(std::string_view source, GcHeap &heap) {
     auto compiled = fiber::script::compile_script(StdLibrary::instance(), source);
     EXPECT_TRUE(compiled.has_value()) << (compiled ? "" : compiled.error().message);
     if (!compiled) {
-        return AbiResult::abort(fiber::script::ScriptAbortReason::Internal);
+        return ScriptResult::abort(fiber::script::ScriptAbortReason::Internal);
     }
     JsValue root = JsValue::make_undefined();
     return compiled->exec_sync(root, nullptr, heap);
@@ -44,7 +45,7 @@ AbiResult run_script(std::string_view source, GcHeap &heap) {
 
 void expect_script_string(std::string_view source, std::string_view expected) {
     GcHeap heap;
-    AbiResult result = run_script(source, heap);
+    auto result = run_script(source, heap);
     ASSERT_TRUE(result.is_success());
     ASSERT_EQ(js_value_type(result.value()), JsNodeType::String);
     EXPECT_EQ(string_to_utf8(result.value()), expected);
@@ -81,11 +82,11 @@ TEST(ScriptTemplateLiteralTest, EscapesBacktickAndInterpolationStart) {
 
 // ---- compile_template_string: compile a template-literal BODY (no surrounding backticks) ----
 
-AbiResult run_template(std::string_view body, GcHeap &heap) {
+ScriptResult run_template(std::string_view body, GcHeap &heap) {
     auto compiled = fiber::script::compile_template_string(StdLibrary::instance(), body);
     EXPECT_TRUE(compiled.has_value()) << (compiled ? "" : compiled.error().message);
     if (!compiled) {
-        return AbiResult::abort(fiber::script::ScriptAbortReason::Internal);
+        return ScriptResult::abort(fiber::script::ScriptAbortReason::Internal);
     }
     JsValue root = JsValue::make_undefined();
     return compiled->exec_sync(root, nullptr, heap);
@@ -93,7 +94,7 @@ AbiResult run_template(std::string_view body, GcHeap &heap) {
 
 void expect_template_string(std::string_view body, std::string_view expected) {
     GcHeap heap;
-    AbiResult result = run_template(body, heap);
+    auto result = run_template(body, heap);
     ASSERT_TRUE(result.is_success());
     ASSERT_EQ(js_value_type(result.value()), JsNodeType::String);
     EXPECT_EQ(string_to_utf8(result.value()), expected);
