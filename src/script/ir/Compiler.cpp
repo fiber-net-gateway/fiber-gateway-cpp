@@ -33,6 +33,7 @@
 #include "../ast/PropertyReference.h"
 #include "../ast/ReturnStatement.h"
 #include "../ast/Statement.h"
+#include "../ast/TemplateString.h"
 #include "../ast/Ternary.h"
 #include "../ast/ThrowStatement.h"
 #include "../ast/TryCatchStatement.h"
@@ -970,6 +971,34 @@ private:
                     break;
             }
             emit_raw(static_cast<std::int32_t>(op), expr.start_pos(), -1);
+            return;
+        }
+        if (auto *tmpl = dynamic_cast<const ast::TemplateString *>(&expr)) {
+            // Lower a template literal to a left-associative operator(Add) chain:
+            // ((s0 + e0) + s1) + ... + s_n. Plain/empty templates emit a single
+            // string const with no BOP_PLUS.
+            const auto &strings = tmpl->strings();
+            const auto &expressions = tmpl->expressions();
+            bool started = false;
+            auto plus_if_needed = [&] {
+                if (started) {
+                    emit_raw(static_cast<std::int32_t>(Code::BOP_PLUS), expr.start_pos(), -1);
+                }
+                started = true;
+            };
+            auto emit_string_chunk = [&](const std::string &s) {
+                emit_load_js_value(fiber::script::JsValue::make_native_string(s.data(), s.size()), expr.start_pos());
+                plus_if_needed();
+            };
+            auto emit_expr_chunk = [&](const ast::Expression &e) {
+                compile_expression(e);
+                plus_if_needed();
+            };
+            emit_string_chunk(strings[0]);
+            for (std::size_t i = 0; i < expressions.size(); ++i) {
+                emit_expr_chunk(*expressions[i]);
+                emit_string_chunk(strings[i + 1]);
+            }
             return;
         }
         if (auto *logic = dynamic_cast<const ast::LogicRelationalExpression *>(&expr)) {

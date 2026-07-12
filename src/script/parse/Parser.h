@@ -32,6 +32,7 @@
 #include "../ast/Node.h"
 #include "../ast/PropertyReference.h"
 #include "../ast/ReturnStatement.h"
+#include "../ast/TemplateString.h"
 #include "../ast/Ternary.h"
 #include "../ast/ThrowStatement.h"
 #include "../ast/TryCatchStatement.h"
