@@ -55,12 +55,12 @@ public:
     }
 };
 
-fiber::script::ScriptResult compile_error_dummy(void *userdata, const fiber::script::Library::HostCallFrame &frame,
-                                                fiber::script::Library::Arguments arguments) noexcept {
+fiber::script::AbiResult compile_error_dummy(void *userdata, const fiber::script::Library::HostCallFrame &frame,
+                                             fiber::script::Library::Arguments arguments) noexcept {
     (void) userdata;
     (void) frame;
     (void) arguments;
-    return fiber::script::ScriptResult::success(fiber::script::JsValue::make_undefined());
+    return fiber::script::AbiResult::success(fiber::script::JsValue::make_undefined());
 }
 
 class CompileErrorLibrary final : public fiber::script::Library {

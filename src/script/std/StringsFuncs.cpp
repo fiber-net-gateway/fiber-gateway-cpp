@@ -29,18 +29,18 @@ JsValue empty_string() noexcept { return JsValue::make_native_string("", 0); }
 
 // Builds a heap string result from a view (empty -> borrowed empty string),
 // mapping make_string's OOM (returns undefined) to a graceful abort.
-ScriptResult make_string_result(GcHeap *heap, std::string_view sv) noexcept {
+AbiResult make_string_result(GcHeap *heap, std::string_view sv) noexcept {
     if (heap == nullptr) {
-        return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
     if (sv.empty()) {
-        return ScriptResult::success(empty_string());
+        return AbiResult::success(empty_string());
     }
     JsValue result = JsValue::make_string(*heap, sv.data(), sv.size());
     if (js_value_type(result) != JsNodeType::String) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
-    return ScriptResult::success(result);
+    return AbiResult::success(result);
 }
 
 // Character.isWhitespace ASCII subset: {0x09-0x0D, 0x1C-0x20}. Exotic Unicode
@@ -180,28 +180,28 @@ std::size_t last_u16_index_of_cp(std::string_view text, std::uint32_t cp) noexce
 
 // ---- strings.hasPrefix(text, prefix) ----
 
-ScriptResult has_prefix_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
-                           Library::Arguments args) noexcept {
+AbiResult has_prefix_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
+                        Library::Arguments args) noexcept {
     std::string_view text;
     std::string_view prefix;
     if (!args.args || args.argc < 2 || !string_utf8_view(args.args[0], text) ||
         !string_utf8_view(args.args[1], prefix)) {
-        return ScriptResult::success(JsValue::make_boolean(false));
+        return AbiResult::success(JsValue::make_boolean(false));
     }
-    return ScriptResult::success(JsValue::make_boolean(text.starts_with(prefix)));
+    return AbiResult::success(JsValue::make_boolean(text.starts_with(prefix)));
 }
 
 // ---- strings.hasSuffix(text, suffix) ----
 
-ScriptResult has_suffix_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
-                           Library::Arguments args) noexcept {
+AbiResult has_suffix_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
+                        Library::Arguments args) noexcept {
     std::string_view text;
     std::string_view suffix;
     if (!args.args || args.argc < 2 || !string_utf8_view(args.args[0], text) ||
         !string_utf8_view(args.args[1], suffix)) {
-        return ScriptResult::success(JsValue::make_boolean(false));
+        return AbiResult::success(JsValue::make_boolean(false));
     }
-    return ScriptResult::success(JsValue::make_boolean(text.ends_with(suffix)));
+    return AbiResult::success(JsValue::make_boolean(text.ends_with(suffix)));
 }
 
 // ---- strings.toLower(text) / strings.toUpper(text) ----
@@ -209,10 +209,10 @@ ScriptResult has_suffix_fn(void * /*userdata*/, const Library::HostCallFrame & /
 // multi-byte UTF-8 sequences) are copied verbatim, preserving UTF-8 structure.
 // Non-ASCII case mapping diverges from Java's locale-aware toLowerCase/UpperCase.
 
-ScriptResult to_lower_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult to_lower_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     std::string_view text;
     if (!args.args || args.argc < 1 || !string_utf8_view(args.args[0], text)) {
-        return ScriptResult::success(JsValue::make_null());
+        return AbiResult::success(JsValue::make_null());
     }
     std::string out;
     out.reserve(text.size());
@@ -222,10 +222,10 @@ ScriptResult to_lower_fn(void * /*userdata*/, const Library::HostCallFrame &fram
     return make_string_result(&frame.runtime, std::string_view(out));
 }
 
-ScriptResult to_upper_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult to_upper_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     std::string_view text;
     if (!args.args || args.argc < 1 || !string_utf8_view(args.args[0], text)) {
-        return ScriptResult::success(JsValue::make_null());
+        return AbiResult::success(JsValue::make_null());
     }
     std::string out;
     out.reserve(text.size());
@@ -241,10 +241,10 @@ ScriptResult to_upper_fn(void * /*userdata*/, const Library::HostCallFrame &fram
 // cutset textual -> StringUtils.trim: repeatedly strip the cutset SUBSTRING
 //   (regionMatches) from both ends; empty src/cutset returns src unchanged.
 
-ScriptResult trim_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult trim_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     std::string_view text;
     if (!args.args || args.argc < 1 || !string_utf8_view(args.args[0], text)) {
-        return ScriptResult::success(JsValue::make_null());
+        return AbiResult::success(JsValue::make_null());
     }
     std::string_view cutset;
     std::string_view result;
@@ -274,7 +274,7 @@ ScriptResult trim_fn(void * /*userdata*/, const Library::HostCallFrame &frame, L
         }
         e += len;
         if (s >= e) {
-            return ScriptResult::success(empty_string());
+            return AbiResult::success(empty_string());
         }
         result = text.substr(static_cast<std::size_t>(s), static_cast<std::size_t>(e - s));
     }
@@ -285,10 +285,10 @@ ScriptResult trim_fn(void * /*userdata*/, const Library::HostCallFrame &frame, L
 // cutset null -> StringUtils.trimLeftEmpty (Character.isWhitespace, ASCII subset).
 // cutset textual -> StringUtils.trimLeft (strip cutset substring from left).
 
-ScriptResult trim_left_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult trim_left_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     std::string_view text;
     if (!args.args || args.argc < 1 || !string_utf8_view(args.args[0], text)) {
-        return ScriptResult::success(JsValue::make_null());
+        return AbiResult::success(JsValue::make_null());
     }
     std::string_view cutset;
     std::string_view result;
@@ -314,10 +314,10 @@ ScriptResult trim_left_fn(void * /*userdata*/, const Library::HostCallFrame &fra
 
 // ---- strings.trimRight(text, cutset=null) ----
 
-ScriptResult trim_right_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult trim_right_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     std::string_view text;
     if (!args.args || args.argc < 1 || !string_utf8_view(args.args[0], text)) {
-        return ScriptResult::success(JsValue::make_null());
+        return AbiResult::success(JsValue::make_null());
     }
     std::string_view cutset;
     std::string_view result;
@@ -338,7 +338,7 @@ ScriptResult trim_right_fn(void * /*userdata*/, const Library::HostCallFrame &fr
         }
         e += len;
         if (e <= 0) {
-            return ScriptResult::success(empty_string());
+            return AbiResult::success(empty_string());
         }
         result = text.substr(0, static_cast<std::size_t>(e));
     }
@@ -352,14 +352,14 @@ ScriptResult trim_right_fn(void * /*userdata*/, const Library::HostCallFrame &fr
 // -> []. Result array grows via gc_array_push (GC-safe, internally rooted); the
 // source view stays valid because args are rooted for the host call's duration.
 
-ScriptResult split_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult split_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     std::string_view text;
     if (!args.args || args.argc < 1 || !string_utf8_view(args.args[0], text)) {
-        return ScriptResult::success(JsValue::make_null());
+        return AbiResult::success(JsValue::make_null());
     }
     GcHeap *heap = &frame.runtime;
     if (heap == nullptr) {
-        return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
 
     std::string_view sep;
@@ -368,26 +368,26 @@ ScriptResult split_fn(void * /*userdata*/, const Library::HostCallFrame &frame, 
         GcHeap::LocalMark mark(*heap);
         ValueHandle arr = heap->local_value();
         if (!arr) {
-            return ScriptResult::abort(ScriptAbortReason::InvalidState);
+            return AbiResult::abort(ScriptAbortReason::InvalidState);
         }
         *arr = JsValue::make_array(*heap, 1);
         if (js_value_type(*arr) != JsNodeType::Array) {
-            return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+            return AbiResult::abort(ScriptAbortReason::OutOfMemory);
         }
         if (!gc_array_push(heap, arr, args.args[0])) {
-            return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+            return AbiResult::abort(ScriptAbortReason::OutOfMemory);
         }
-        return ScriptResult::success(*arr);
+        return AbiResult::success(*arr);
     }
 
     GcHeap::LocalMark mark(*heap);
     ValueHandle arr = heap->local_value();
     if (!arr) {
-        return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
     *arr = JsValue::make_array(*heap, 0);
     if (js_value_type(*arr) != JsNodeType::Array) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
 
     auto emit = [&](std::size_t start, std::size_t len) -> bool {
@@ -413,7 +413,7 @@ ScriptResult split_fn(void * /*userdata*/, const Library::HostCallFrame &frame, 
         if (codepoint_set_contains(sep, cp)) {
             if (match) {
                 if (!emit(start, cp_start - start)) {
-                    return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+                    return AbiResult::abort(ScriptAbortReason::OutOfMemory);
                 }
                 match = false;
             }
@@ -424,98 +424,97 @@ ScriptResult split_fn(void * /*userdata*/, const Library::HostCallFrame &frame, 
     }
     if (match) {
         if (!emit(start, text.size() - start)) {
-            return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+            return AbiResult::abort(ScriptAbortReason::OutOfMemory);
         }
     }
-    return ScriptResult::success(*arr);
+    return AbiResult::success(*arr);
 }
 
 // ---- strings.contains(text, value) ----
 
-ScriptResult contains_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
-                         Library::Arguments args) noexcept {
+AbiResult contains_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/, Library::Arguments args) noexcept {
     std::string_view text;
     std::string_view value;
     if (!args.args || args.argc < 2 || !string_utf8_view(args.args[0], text) ||
         !string_utf8_view(args.args[1], value)) {
-        return ScriptResult::success(JsValue::make_null());
+        return AbiResult::success(JsValue::make_null());
     }
-    return ScriptResult::success(JsValue::make_boolean(text.find(value) != std::string_view::npos));
+    return AbiResult::success(JsValue::make_boolean(text.find(value) != std::string_view::npos));
 }
 
 // ---- strings.contains_any(text, chars) ----
 
-ScriptResult contains_any_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
-                             Library::Arguments args) noexcept {
-    std::string_view text;
-    std::string_view chars;
-    if (!args.args || args.argc < 2 || !string_utf8_view(args.args[0], text) ||
-        !string_utf8_view(args.args[1], chars)) {
-        return ScriptResult::success(JsValue::make_null());
-    }
-    std::size_t pos = 0;
-    std::uint32_t cp = 0;
-    while (pos < text.size() && fiber::json::utf8_next_codepoint(text.data(), text.size(), pos, cp)) {
-        if (codepoint_set_contains(chars, cp)) {
-            return ScriptResult::success(JsValue::make_boolean(true));
-        }
-    }
-    return ScriptResult::success(JsValue::make_boolean(false));
-}
-
-// ---- strings.index(text, value) ----
-
-ScriptResult index_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/, Library::Arguments args) noexcept {
-    std::string_view text;
-    std::string_view value;
-    if (!args.args || args.argc < 2 || !string_utf8_view(args.args[0], text) ||
-        !string_utf8_view(args.args[1], value)) {
-        return ScriptResult::success(JsValue::make_null());
-    }
-    auto p = text.find(value);
-    if (p == std::string_view::npos) {
-        return ScriptResult::success(JsValue::make_integer(-1));
-    }
-    return ScriptResult::success(JsValue::make_integer(static_cast<std::int64_t>(byte_to_u16_index(text, p))));
-}
-
-// ---- strings.indexAny(text, chars) ----
-
-ScriptResult index_any_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
+AbiResult contains_any_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
                           Library::Arguments args) noexcept {
     std::string_view text;
     std::string_view chars;
     if (!args.args || args.argc < 2 || !string_utf8_view(args.args[0], text) ||
         !string_utf8_view(args.args[1], chars)) {
-        return ScriptResult::success(JsValue::make_null());
+        return AbiResult::success(JsValue::make_null());
+    }
+    std::size_t pos = 0;
+    std::uint32_t cp = 0;
+    while (pos < text.size() && fiber::json::utf8_next_codepoint(text.data(), text.size(), pos, cp)) {
+        if (codepoint_set_contains(chars, cp)) {
+            return AbiResult::success(JsValue::make_boolean(true));
+        }
+    }
+    return AbiResult::success(JsValue::make_boolean(false));
+}
+
+// ---- strings.index(text, value) ----
+
+AbiResult index_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/, Library::Arguments args) noexcept {
+    std::string_view text;
+    std::string_view value;
+    if (!args.args || args.argc < 2 || !string_utf8_view(args.args[0], text) ||
+        !string_utf8_view(args.args[1], value)) {
+        return AbiResult::success(JsValue::make_null());
+    }
+    auto p = text.find(value);
+    if (p == std::string_view::npos) {
+        return AbiResult::success(JsValue::make_integer(-1));
+    }
+    return AbiResult::success(JsValue::make_integer(static_cast<std::int64_t>(byte_to_u16_index(text, p))));
+}
+
+// ---- strings.indexAny(text, chars) ----
+
+AbiResult index_any_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
+                       Library::Arguments args) noexcept {
+    std::string_view text;
+    std::string_view chars;
+    if (!args.args || args.argc < 2 || !string_utf8_view(args.args[0], text) ||
+        !string_utf8_view(args.args[1], chars)) {
+        return AbiResult::success(JsValue::make_null());
     }
     std::size_t pos = 0;
     std::size_t u16pos = 0;
     std::uint32_t cp = 0;
     while (pos < text.size() && fiber::json::utf8_next_codepoint(text.data(), text.size(), pos, cp)) {
         if (codepoint_set_contains(chars, cp)) {
-            return ScriptResult::success(JsValue::make_integer(static_cast<std::int64_t>(u16pos)));
+            return AbiResult::success(JsValue::make_integer(static_cast<std::int64_t>(u16pos)));
         }
         u16pos += (cp <= 0xFFFF) ? 1 : 2;
     }
-    return ScriptResult::success(JsValue::make_integer(-1));
+    return AbiResult::success(JsValue::make_integer(-1));
 }
 
 // ---- strings.lastIndex(text, value) ----
 
-ScriptResult last_index_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
-                           Library::Arguments args) noexcept {
+AbiResult last_index_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
+                        Library::Arguments args) noexcept {
     std::string_view text;
     std::string_view value;
     if (!args.args || args.argc < 2 || !string_utf8_view(args.args[0], text) ||
         !string_utf8_view(args.args[1], value)) {
-        return ScriptResult::success(JsValue::make_null());
+        return AbiResult::success(JsValue::make_null());
     }
     auto p = text.rfind(value);
     if (p == std::string_view::npos) {
-        return ScriptResult::success(JsValue::make_integer(-1));
+        return AbiResult::success(JsValue::make_integer(-1));
     }
-    return ScriptResult::success(JsValue::make_integer(static_cast<std::int64_t>(byte_to_u16_index(text, p))));
+    return AbiResult::success(JsValue::make_integer(static_cast<std::int64_t>(byte_to_u16_index(text, p))));
 }
 
 // ---- strings.lastIndexAny(text, chars) ----
@@ -523,23 +522,23 @@ ScriptResult last_index_fn(void * /*userdata*/, const Library::HostCallFrame & /
 // occurrence (UTF-16 index) of the FIRST cutset code point that appears, else -1.
 // (Not the global maximum index.)
 
-ScriptResult last_index_any_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
-                               Library::Arguments args) noexcept {
+AbiResult last_index_any_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
+                            Library::Arguments args) noexcept {
     std::string_view text;
     std::string_view chars;
     if (!args.args || args.argc < 2 || !string_utf8_view(args.args[0], text) ||
         !string_utf8_view(args.args[1], chars)) {
-        return ScriptResult::success(JsValue::make_null());
+        return AbiResult::success(JsValue::make_null());
     }
     std::size_t pos = 0;
     std::uint32_t cp = 0;
     while (pos < chars.size() && fiber::json::utf8_next_codepoint(chars.data(), chars.size(), pos, cp)) {
         std::size_t li = last_u16_index_of_cp(text, cp);
         if (li != static_cast<std::size_t>(-1)) {
-            return ScriptResult::success(JsValue::make_integer(static_cast<std::int64_t>(li)));
+            return AbiResult::success(JsValue::make_integer(static_cast<std::int64_t>(li)));
         }
     }
-    return ScriptResult::success(JsValue::make_integer(-1));
+    return AbiResult::success(JsValue::make_integer(-1));
 }
 
 // ---- strings.repeat(text, count) ----
@@ -548,10 +547,10 @@ ScriptResult last_index_any_fn(void * /*userdata*/, const Library::HostCallFrame
 // down (and to stay clear of std::string's throwing reserve under OOM). 16 MiB.
 constexpr std::uint64_t kMaxRepeatBytes = 1ull << 24;
 
-ScriptResult repeat_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult repeat_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     std::string_view text;
     if (!args.args || args.argc < 2 || !string_utf8_view(args.args[0], text)) {
-        return ScriptResult::success(JsValue::make_null());
+        return AbiResult::success(JsValue::make_null());
     }
     const JsValue &count_arg = args.args[1];
     JsNodeType ct = js_value_type(count_arg);
@@ -568,20 +567,20 @@ ScriptResult repeat_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
             i = static_cast<std::int32_t>(static_cast<std::int64_t>(d)); // truncate toward zero, narrow
         }
     } else {
-        return ScriptResult::success(JsValue::make_null());
+        return AbiResult::success(JsValue::make_null());
     }
     if (i < 0) {
-        return ScriptResult::success(JsValue::make_null());
+        return AbiResult::success(JsValue::make_null());
     }
     if (i == 0 || text.empty()) {
-        return ScriptResult::success(empty_string());
+        return AbiResult::success(empty_string());
     }
     if (i == 1) {
-        return ScriptResult::success(args.args[0]); // Java returns the original text node
+        return AbiResult::success(args.args[0]); // Java returns the original text node
     }
     std::size_t len = text.size();
     if (static_cast<std::uint64_t>(i) * len > kMaxRepeatBytes) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
     std::string out;
     out.reserve(static_cast<std::size_t>(i) * len);
@@ -594,26 +593,26 @@ ScriptResult repeat_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
 // ---- strings.substring(text, start=0, end=2147483647) ----
 // start/end are UTF-16 code-unit indices (matching Java String and length()).
 
-ScriptResult substring_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult substring_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     std::string_view text;
     if (!args.args || args.argc < 1 || !string_utf8_view(args.args[0], text)) {
-        return ScriptResult::success(JsValue::make_null());
+        return AbiResult::success(JsValue::make_null());
     }
     std::size_t u16len = utf16_len(text);
     std::int64_t i = (args.argc >= 2) ? as_int(args.args[1]) : 0; // start, default 0
     if (i >= static_cast<std::int64_t>(u16len)) {
-        return ScriptResult::success(empty_string());
+        return AbiResult::success(empty_string());
     }
     if (i < 0) {
         i = 0;
     }
     std::int64_t j = (args.argc >= 3) ? as_int(args.args[2]) : 2147483647; // end, default INT32_MAX
     if (j <= i) {
-        return ScriptResult::success(empty_string());
+        return AbiResult::success(empty_string());
     }
     if (j >= static_cast<std::int64_t>(u16len)) {
         if (i == 0) {
-            return ScriptResult::success(args.args[0]); // Java returns the original text node
+            return AbiResult::success(args.args[0]); // Java returns the original text node
         }
         std::size_t sb = u16_index_to_byte(text, static_cast<std::size_t>(i));
         return make_string_result(&frame.runtime, text.substr(sb));
@@ -625,9 +624,9 @@ ScriptResult substring_fn(void * /*userdata*/, const Library::HostCallFrame &fra
 
 // ---- strings.toString() ----
 
-ScriptResult to_string0_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
-                           Library::Arguments /*args*/) noexcept {
-    return ScriptResult::success(empty_string());
+AbiResult to_string0_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
+                        Library::Arguments /*args*/) noexcept {
+    return AbiResult::success(empty_string());
 }
 
 // ---- strings.toString(value) ----
@@ -635,9 +634,9 @@ ScriptResult to_string0_fn(void * /*userdata*/, const Library::HostCallFrame & /
 // node_json_to_string mirrors (Array -> "<ArrayNode>", Object -> "<ObjectNode>",
 // Binary -> raw bytes, scalars -> asText).
 
-ScriptResult to_string1_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult to_string1_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
-        return ScriptResult::success(empty_string());
+        return AbiResult::success(empty_string());
     }
     const JsValue &v = args.args[0];
     JsNodeType t = js_value_type(v);

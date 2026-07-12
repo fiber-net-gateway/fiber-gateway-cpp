@@ -36,6 +36,7 @@
 
 namespace fiber::http_script {
 
+using fiber::script::AbiResult;
 using fiber::script::AsyncTask;
 using fiber::script::ConstValueHandle;
 using fiber::script::GcHeap;
@@ -43,7 +44,6 @@ using fiber::script::JsNodeType;
 using fiber::script::JsValue;
 using fiber::script::Library;
 using fiber::script::ScriptAbortReason;
-using fiber::script::ScriptResult;
 using fiber::script::ValueHandle;
 using fiber::script::std_lib::binary_bytes;
 using fiber::script::std_lib::node_as_text;
@@ -71,21 +71,21 @@ ScriptExchangeCtx *ctx_of(const Library::HostCallFrame &frame) noexcept {
     return static_cast<ScriptExchangeCtx *>(frame.attach);
 }
 
-ScriptResult error_exn(GcHeap &heap, std::string_view message) noexcept {
+AbiResult error_exn(GcHeap &heap, std::string_view message) noexcept {
     static constexpr char kErrorName[] = "Error";
     GcHeap::LocalMark mark(heap);
     ValueHandle ex = heap.local_value();
     if (!ex) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
     if (!fiber::script::gc_make_exception(&heap, ex, -1, kErrorName, sizeof(kErrorName) - 1, message.data(),
                                           message.size())) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
-    return ScriptResult::exception(*ex);
+    return AbiResult::exception(*ex);
 }
 
-AsyncTask invalid_state_async() noexcept { co_return ScriptResult::abort(ScriptAbortReason::InvalidState); }
+AsyncTask invalid_state_async() noexcept { co_return AbiResult::abort(ScriptAbortReason::InvalidState); }
 
 JsValue get_field(GcHeap &heap, JsValue object, const char *key, std::size_t key_len) noexcept {
     if (js_value_type(object) != JsNodeType::Object) {
@@ -459,7 +459,7 @@ AsyncTask http_request_fn(void *userdata, const Library::HostCallFrame &frame, L
     auto *ctx = ctx_of(frame);
     GcHeap *heap = &frame.runtime;
     if (ctx == nullptr || heap == nullptr || ctx->services() == nullptr) {
-        co_return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        co_return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
     HttpScriptServices &services = *ctx->services();
     const JsValue options = (args.args != nullptr && args.argc > 0) ? args.args[0] : JsValue::make_undefined();
@@ -536,26 +536,26 @@ AsyncTask http_request_fn(void *userdata, const Library::HostCallFrame &frame, L
     GcHeap::LocalMark mark(*heap);
     ValueHandle obj_root = heap->local_value();
     if (!obj_root) {
-        co_return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        co_return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
     *obj_root = JsValue::make_object(*heap, 4);
     if (js_value_type(*obj_root) != JsNodeType::Object) {
-        co_return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        co_return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
 
     if (!gc_put_value(*heap, obj_root, "status", 6, JsValue::make_integer(resp_head->status_code))) {
-        co_return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        co_return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
 
     if (include_headers) {
         GcHeap::LocalMark m2(*heap);
         ValueHandle hs = heap->local_value();
         if (!hs) {
-            co_return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+            co_return AbiResult::abort(ScriptAbortReason::OutOfMemory);
         }
         *hs = JsValue::make_object(*heap, 8);
         if (js_value_type(*hs) != JsNodeType::Object) {
-            co_return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+            co_return AbiResult::abort(ScriptAbortReason::OutOfMemory);
         }
         for (const fiber::http::HttpHeaders::HeaderField &field: resp_head->headers) {
             if (field.name_len == 0) {
@@ -564,16 +564,16 @@ AsyncTask http_request_fn(void *userdata, const Library::HostCallFrame &frame, L
             gc_put_string(*heap, hs, field.name_view().data(), field.name_view().size(), field.value_view());
         }
         if (!gc_put_value(*heap, obj_root, "headers", 7, *hs)) {
-            co_return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+            co_return AbiResult::abort(ScriptAbortReason::OutOfMemory);
         }
     }
 
     if (!gc_put_binary(*heap, obj_root, "body", 4, reinterpret_cast<const std::uint8_t *>(body_out.data()),
                        body_out.size())) {
-        co_return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        co_return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
 
-    co_return ScriptResult::success(*obj_root);
+    co_return AbiResult::success(*obj_root);
 }
 
 // ---- http.proxyPass(options) -> upstream status int ----
@@ -582,7 +582,7 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
     auto *ctx = ctx_of(frame);
     GcHeap *heap = &frame.runtime;
     if (ctx == nullptr || heap == nullptr || ctx->services() == nullptr) {
-        co_return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        co_return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
     HttpScriptServices &services = *ctx->services();
     fiber::http::HttpExchange &exchange = ctx->exchange();
@@ -759,7 +759,7 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
 
     if (no_body) {
         (void) co_await upstream.discard_response_body(timeout);
-        co_return ScriptResult::success(JsValue::make_integer(resp_head->status_code));
+        co_return AbiResult::success(JsValue::make_integer(resp_head->status_code));
     }
 
     for (;;) {
@@ -776,7 +776,7 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
             break;
         }
     }
-    co_return ScriptResult::success(JsValue::make_integer(resp_head->status_code));
+    co_return AbiResult::success(JsValue::make_integer(resp_head->status_code));
 }
 
 // ---- HttpDirectiveDef ----

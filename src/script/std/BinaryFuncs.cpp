@@ -16,43 +16,39 @@ namespace fiber::script::std_lib {
 
 namespace {
 
-ScriptResult type_error() noexcept {
-    return ScriptResult::exception(JsValue::make_exception(ExceptionKind::TypeError));
-}
+AbiResult type_error() noexcept { return AbiResult::exception(JsValue::make_exception(ExceptionKind::TypeError)); }
 
-ScriptResult range_error() noexcept {
-    return ScriptResult::exception(JsValue::make_exception(ExceptionKind::RangeError));
-}
+AbiResult range_error() noexcept { return AbiResult::exception(JsValue::make_exception(ExceptionKind::RangeError)); }
 
 JsValue empty_string() noexcept { return JsValue::make_native_string("", 0); }
 
 // Builds a heap string result (empty -> borrowed empty string), mapping make_string's
 // OOM (returns undefined) to a graceful abort.
-ScriptResult make_string_result(GcHeap *heap, std::string_view sv) noexcept {
+AbiResult make_string_result(GcHeap *heap, std::string_view sv) noexcept {
     if (heap == nullptr) {
-        return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
     if (sv.empty()) {
-        return ScriptResult::success(empty_string());
+        return AbiResult::success(empty_string());
     }
     JsValue result = JsValue::make_string(*heap, sv.data(), sv.size());
     if (js_value_type(result) != JsNodeType::String) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
-    return ScriptResult::success(result);
+    return AbiResult::success(result);
 }
 
 // Builds a heap binary result. make_binary returns undefined on OOM (and otherwise handles
 // len == 0 without dereferencing data).
-ScriptResult make_binary_result(GcHeap *heap, const std::uint8_t *data, std::size_t len) noexcept {
+AbiResult make_binary_result(GcHeap *heap, const std::uint8_t *data, std::size_t len) noexcept {
     if (heap == nullptr) {
-        return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
     JsValue result = JsValue::make_binary(*heap, data, len);
     if (js_value_type(result) != JsNodeType::Binary) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
-    return ScriptResult::success(result);
+    return AbiResult::success(result);
 }
 
 // Hex digit value 0-15, or -1 for non-hex.
@@ -71,16 +67,15 @@ constexpr int hex_digit(unsigned char c) noexcept {
 
 // ---- binary.base64Encode: Binary -> base64 String; non-binary -> undefined ----
 
-ScriptResult base64_encode_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
-                              Library::Arguments args) noexcept {
+AbiResult base64_encode_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
         // Java MissingNode -> undefined.
-        return ScriptResult::success(JsValue::make_undefined());
+        return AbiResult::success(JsValue::make_undefined());
     }
     const std::uint8_t *data = nullptr;
     std::size_t len = 0;
     if (!binary_bytes(args.args[0], data, len)) {
-        return ScriptResult::success(JsValue::make_undefined());
+        return AbiResult::success(JsValue::make_undefined());
     }
     std::string encoded = fiber::util::base64_encode(data, len);
     return make_string_result(&frame.runtime, encoded);
@@ -88,14 +83,13 @@ ScriptResult base64_encode_fn(void * /*userdata*/, const Library::HostCallFrame 
 
 // ---- binary.base64Decode: String -> Binary; non-string -> undefined; invalid -> RangeError ----
 
-ScriptResult base64_decode_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
-                              Library::Arguments args) noexcept {
+AbiResult base64_decode_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
-        return ScriptResult::success(JsValue::make_undefined());
+        return AbiResult::success(JsValue::make_undefined());
     }
     std::string_view text;
     if (!string_utf8_view(args.args[0], text)) {
-        return ScriptResult::success(JsValue::make_undefined());
+        return AbiResult::success(JsValue::make_undefined());
     }
     std::string out;
     if (!fiber::util::base64_decode(text, out)) {
@@ -107,7 +101,7 @@ ScriptResult base64_decode_fn(void * /*userdata*/, const Library::HostCallFrame 
 
 // ---- binary.hex: Binary -> lowercase hex String; non-binary -> TypeError ----
 
-ScriptResult hex_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult hex_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
         return type_error();
     }
@@ -125,7 +119,7 @@ ScriptResult hex_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Li
 
 // ---- binary.fromHex: String -> Binary; non-string -> TypeError; invalid hex -> RangeError ----
 
-ScriptResult from_hex_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult from_hex_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
         return type_error();
     }
@@ -152,8 +146,8 @@ ScriptResult from_hex_fn(void * /*userdata*/, const Library::HostCallFrame &fram
 
 // ---- binary.getUtf8Bytes: any -> Binary = JsonUtil.toString(value) UTF-8 bytes ----
 
-ScriptResult get_utf8_bytes_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
-                               Library::Arguments args) noexcept {
+AbiResult get_utf8_bytes_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
+                            Library::Arguments args) noexcept {
     std::string out;
     if (args.args && args.argc >= 1) {
         node_json_to_string(args.args[0], out);

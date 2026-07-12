@@ -93,7 +93,7 @@ union ResultPayload {
     ScriptAbort abort;
 };
 
-struct alignas(16) ScriptResult {
+struct alignas(16) AbiResult {
     union Payload {
         constexpr Payload() : abort{} {}
 
@@ -101,33 +101,33 @@ struct alignas(16) ScriptResult {
         ScriptAbort abort;
     };
 
-    constexpr ScriptResult() noexcept = default;
+    constexpr AbiResult() noexcept = default;
 
-    ScriptResult(const fiber::script::JsValue &value) noexcept : kind(ScriptResultKind::Success), payload{} {
+    AbiResult(const fiber::script::JsValue &value) noexcept : kind(ScriptResultKind::Success), payload{} {
         payload.value = value;
     }
 
-    ScriptResult(std::unexpected<fiber::script::JsValue> unexpected) noexcept :
+    AbiResult(std::unexpected<fiber::script::JsValue> unexpected) noexcept :
         kind(ScriptResultKind::Exception), payload{} {
         payload.value = unexpected.error();
     }
 
-    static ScriptResult success(const fiber::script::JsValue &value) noexcept {
-        ScriptResult result;
+    static AbiResult success(const fiber::script::JsValue &value) noexcept {
+        AbiResult result;
         result.kind = ScriptResultKind::Success;
         result.payload.value = value;
         return result;
     }
 
-    static ScriptResult exception(const fiber::script::JsValue &value) noexcept {
-        ScriptResult result;
+    static AbiResult exception(const fiber::script::JsValue &value) noexcept {
+        AbiResult result;
         result.kind = ScriptResultKind::Exception;
         result.payload.value = value;
         return result;
     }
 
-    static ScriptResult abort(ScriptAbortReason reason, std::int64_t position = -1) noexcept {
-        ScriptResult result;
+    static AbiResult abort(ScriptAbortReason reason, std::int64_t position = -1) noexcept {
+        AbiResult result;
         result.kind = ScriptResultKind::Abort;
         result.payload.abort = ScriptAbort{reason, position};
         return result;
@@ -173,7 +173,7 @@ struct alignas(16) ScriptResult {
 static_assert(std::is_trivially_copyable_v<ScriptAbort>);
 static_assert(std::is_trivially_copyable_v<ScriptStatus>);
 static_assert(std::is_trivially_copyable_v<ResultPayload>);
-static_assert(std::is_trivially_copyable_v<ScriptResult>);
+static_assert(std::is_trivially_copyable_v<AbiResult>);
 
 // ResultPayload mutators — the single way op functions write their outcome. Ops never carry a
 // position (the dispatch layer recovers it from the current pc_), so set_abort takes only a reason.

@@ -10,6 +10,7 @@
 #include "script/gc/GcInternal.h"
 #include "script/std/StdLibrary.h"
 
+using fiber::script::AbiResult;
 using fiber::script::ConstValueHandle;
 using fiber::script::ExceptionKind;
 using fiber::script::GcHeap;
@@ -18,7 +19,6 @@ using fiber::script::JsNodeType;
 using fiber::script::JsValue;
 using fiber::script::Library;
 using fiber::script::ScriptAbortReason;
-using fiber::script::ScriptResult;
 using fiber::script::std_lib::StdLibrary;
 
 namespace {
@@ -39,11 +39,11 @@ std::string string_to_utf8(const JsValue &value) {
     return out;
 }
 
-ScriptResult run_script(std::string_view source, GcHeap &heap) {
+AbiResult run_script(std::string_view source, GcHeap &heap) {
     auto compiled = fiber::script::compile_script(StdLibrary::instance(), source);
     EXPECT_TRUE(compiled.has_value()) << (compiled ? "" : compiled.error().message);
     if (!compiled) {
-        return ScriptResult::abort(ScriptAbortReason::Internal);
+        return AbiResult::abort(ScriptAbortReason::Internal);
     }
     JsValue root = JsValue::make_undefined();
     return compiled->exec_sync(root, nullptr, heap);
@@ -51,7 +51,7 @@ ScriptResult run_script(std::string_view source, GcHeap &heap) {
 
 void expect_script_string(std::string_view source, std::string_view expected) {
     GcHeap heap;
-    ScriptResult result = run_script(source, heap);
+    AbiResult result = run_script(source, heap);
     ASSERT_TRUE(result.is_success()) << "script did not succeed";
     ASSERT_EQ(js_value_type(result.value()), JsNodeType::String);
     EXPECT_EQ(string_to_utf8(result.value()), expected);
@@ -59,7 +59,7 @@ void expect_script_string(std::string_view source, std::string_view expected) {
 
 void expect_caught(std::string_view source) {
     GcHeap heap;
-    ScriptResult result = run_script(source, heap);
+    AbiResult result = run_script(source, heap);
     ASSERT_TRUE(result.is_success()) << "script did not succeed";
     ASSERT_EQ(js_value_type(result.value()), JsNodeType::String);
     EXPECT_EQ(string_to_utf8(result.value()), "caught");
@@ -67,7 +67,7 @@ void expect_caught(std::string_view source) {
 
 // Resolves a host function and invokes it directly with one JsValue argument, mirroring how
 // the interpreter dispatches host calls. Used to assert undefined returns and exception kinds.
-ScriptResult call_host(const char *name, JsValue arg) {
+AbiResult call_host(const char *name, JsValue arg) {
     GcHeap heap;
     JsValue storage[1] = {arg};
     auto match = StdLibrary::instance().resolve_func(
@@ -75,7 +75,7 @@ ScriptResult call_host(const char *name, JsValue arg) {
     EXPECT_EQ(match.status, Library::FunctionMatchStatus::Found);
     if (match.status != Library::FunctionMatchStatus::Found || match.callable == nullptr ||
         match.callable->function == nullptr) {
-        return ScriptResult::abort(ScriptAbortReason::Internal);
+        return AbiResult::abort(ScriptAbortReason::Internal);
     }
     Library::HostCallFrame frame(heap, JsValue::make_undefined(), nullptr);
     Library::Arguments args{ConstValueHandle(storage), 1};
@@ -83,13 +83,13 @@ ScriptResult call_host(const char *name, JsValue arg) {
 }
 
 void expect_undefined(const char *name, JsValue arg) {
-    ScriptResult result = call_host(name, arg);
+    AbiResult result = call_host(name, arg);
     ASSERT_TRUE(result.is_success()) << name << " did not succeed";
     EXPECT_EQ(js_value_type(result.value()), JsNodeType::Undefined) << name;
 }
 
 void expect_exception_kind(const char *name, JsValue arg, ExceptionKind kind) {
-    ScriptResult result = call_host(name, arg);
+    AbiResult result = call_host(name, arg);
     ASSERT_TRUE(result.is_exception()) << name << " did not raise";
     EXPECT_EQ(js_value_exception_kind(result.exception()), kind) << name;
 }

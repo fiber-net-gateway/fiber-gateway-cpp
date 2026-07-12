@@ -18,30 +18,29 @@
 
 namespace {
 
+using fiber::script::AbiResult;
 using fiber::script::JsValue;
 using fiber::script::Library;
-using fiber::script::ScriptResult;
 
-ScriptResult test_function(void *userdata, const Library::HostCallFrame &frame, Library::Arguments arguments) noexcept {
+AbiResult test_function(void *userdata, const Library::HostCallFrame &frame, Library::Arguments arguments) noexcept {
     (void) userdata;
     (void) frame;
     (void) arguments;
-    return ScriptResult::success(JsValue::make_integer(7));
+    return AbiResult::success(JsValue::make_integer(7));
 }
 
-ScriptResult throw_function(void *userdata, const Library::HostCallFrame &frame,
-                            Library::Arguments arguments) noexcept {
+AbiResult throw_function(void *userdata, const Library::HostCallFrame &frame, Library::Arguments arguments) noexcept {
     (void) userdata;
     (void) frame;
     (void) arguments;
     static char msg[] = "boom";
-    return ScriptResult::exception(JsValue::make_native_string(msg, 4));
+    return AbiResult::exception(JsValue::make_native_string(msg, 4));
 }
 
-ScriptResult test_constant(void *userdata, const Library::HostCallFrame &frame) noexcept {
+AbiResult test_constant(void *userdata, const Library::HostCallFrame &frame) noexcept {
     (void) userdata;
     (void) frame;
-    return ScriptResult::success(JsValue::make_integer(41));
+    return AbiResult::success(JsValue::make_integer(41));
 }
 
 class DelayedAsyncFunction final {
@@ -139,7 +138,7 @@ fiber::script::AsyncTask delayed_async_function(void *userdata, const Library::H
     (void) arguments;
     auto *func = static_cast<DelayedAsyncFunction *>(userdata);
     JsValue value = co_await func->awaiter();
-    co_return ScriptResult::success(value);
+    co_return AbiResult::success(value);
 }
 
 fiber::script::AsyncTask delayed_async_arg_sum_function(void *userdata, const Library::HostCallFrame &frame,
@@ -154,10 +153,10 @@ fiber::script::AsyncTask delayed_async_arg_sum_function(void *userdata, const Li
             sum += js_value_int64(arguments.args[i]);
         }
     }
-    co_return ScriptResult::success(JsValue::make_integer(sum));
+    co_return AbiResult::success(JsValue::make_integer(sum));
 }
 
-ManualTask run_script_exec_async(fiber::script::Script *script, fiber::script::GcHeap *heap, ScriptResult *result,
+ManualTask run_script_exec_async(fiber::script::Script *script, fiber::script::GcHeap *heap, AbiResult *result,
                                  bool *done) {
     *result = co_await script->exec_async(JsValue::make_undefined(), nullptr, *heap);
     *done = true;
@@ -167,8 +166,8 @@ struct AddDefaultFunction {
     std::size_t observed_argc = 0;
 };
 
-ScriptResult add_default_function(void *userdata, const Library::HostCallFrame &frame,
-                                  Library::Arguments arguments) noexcept {
+AbiResult add_default_function(void *userdata, const Library::HostCallFrame &frame,
+                               Library::Arguments arguments) noexcept {
     (void) frame;
     auto *func = static_cast<AddDefaultFunction *>(userdata);
     if (func) {
@@ -176,7 +175,7 @@ ScriptResult add_default_function(void *userdata, const Library::HostCallFrame &
     }
     std::int64_t a = arguments.argc > 0 ? js_value_int64(arguments.args[0]) : 0;
     std::int64_t b = arguments.argc > 1 ? js_value_int64(arguments.args[1]) : 0;
-    return ScriptResult::success(JsValue::make_integer(a + b));
+    return AbiResult::success(JsValue::make_integer(a + b));
 }
 
 Library::HostCallable make_sync_function(Library::Function function, void *userdata = nullptr) noexcept {
@@ -519,7 +518,7 @@ TEST(ScriptExecutionTest, ExecAsyncAwaitsAsyncFunction) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    ScriptResult result = ScriptResult::abort(fiber::script::ScriptAbortReason::InvalidState);
+    AbiResult result = AbiResult::abort(fiber::script::ScriptAbortReason::InvalidState);
     bool done = false;
     ManualTask task = run_script_exec_async(&script, &heap, &result, &done);
 

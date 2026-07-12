@@ -77,9 +77,7 @@ void append_as_text(const JsValue &value, std::string &out) {
     }
 }
 
-ScriptResult type_error() noexcept {
-    return ScriptResult::exception(JsValue::make_exception(ExceptionKind::TypeError));
-}
+AbiResult type_error() noexcept { return AbiResult::exception(JsValue::make_exception(ExceptionKind::TypeError)); }
 
 const GcArray *as_array(ConstValueHandle handle) noexcept {
     if (!handle) {
@@ -92,7 +90,7 @@ const GcArray *as_array(ConstValueHandle handle) noexcept {
     return js_value_heap_ptr<const GcArray>(value);
 }
 
-ScriptResult array_join_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult array_join_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     const GcArray *arr = as_array(args.args);
     if (arr == nullptr) {
         return type_error();
@@ -111,11 +109,11 @@ ScriptResult array_join_fn(void * /*userdata*/, const Library::HostCallFrame &fr
         append_as_text(arr->elems[i], out);
     }
     JsValue result = JsValue::make_string(frame.runtime, out.data(), out.size());
-    return ScriptResult::success(result);
+    return AbiResult::success(result);
 }
 
-ScriptResult array_pop_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
-                          Library::Arguments args) noexcept {
+AbiResult array_pop_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
+                       Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
         return type_error();
     }
@@ -125,12 +123,12 @@ ScriptResult array_pop_fn(void * /*userdata*/, const Library::HostCallFrame & /*
     }
     JsValue popped;
     if (!gc_array_pop(ValueHandle(&arr_val), ValueHandle(&popped))) {
-        return ScriptResult::success(JsValue::make_null());
+        return AbiResult::success(JsValue::make_null());
     }
-    return ScriptResult::success(popped);
+    return AbiResult::success(popped);
 }
 
-ScriptResult array_push_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult array_push_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
         return type_error();
     }
@@ -140,14 +138,14 @@ ScriptResult array_push_fn(void * /*userdata*/, const Library::HostCallFrame &fr
     }
     GcHeap *heap = &frame.runtime;
     if (heap == nullptr) {
-        return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
     for (std::uint32_t i = 1; i < args.argc; ++i) {
         if (!gc_array_push(heap, ValueHandle(&arr_val), args.args[i])) {
-            return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+            return AbiResult::abort(ScriptAbortReason::OutOfMemory);
         }
     }
-    return ScriptResult::success(arr_val);
+    return AbiResult::success(arr_val);
 }
 
 } // namespace

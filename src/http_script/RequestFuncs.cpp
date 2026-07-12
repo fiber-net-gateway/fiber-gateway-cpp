@@ -25,6 +25,7 @@ namespace fiber::http_script {
 
 namespace {
 
+using fiber::script::AbiResult;
 using fiber::script::AsyncTask;
 using fiber::script::ConstValueHandle;
 using fiber::script::GcHeap;
@@ -33,7 +34,6 @@ using fiber::script::JsNodeType;
 using fiber::script::JsValue;
 using fiber::script::Library;
 using fiber::script::ScriptAbortReason;
-using fiber::script::ScriptResult;
 using fiber::script::ValueHandle;
 using fiber::script::std_lib::string_utf8_view;
 
@@ -43,21 +43,21 @@ ScriptExchangeCtx *ctx_of(const Library::HostCallFrame &frame) noexcept {
 
 // Builds a named+message exception JsValue (mirrors Java ScriptExecException(name, msg)).
 // Falls back to an OutOfMemory abort if the exception itself cannot be allocated.
-ScriptResult error_exn(GcHeap &heap, std::string_view message) noexcept {
+AbiResult error_exn(GcHeap &heap, std::string_view message) noexcept {
     static constexpr char kErrorName[] = "Error";
     GcHeap::LocalMark mark(heap);
     ValueHandle ex = heap.local_value();
     if (!ex) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
     if (!fiber::script::gc_make_exception(&heap, ex, -1, kErrorName, sizeof(kErrorName) - 1, message.data(),
                                           message.size())) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
-    return ScriptResult::exception(*ex);
+    return AbiResult::exception(*ex);
 }
 
-ScriptResult invalid_state() noexcept { return ScriptResult::abort(ScriptAbortReason::InvalidState); }
+AbiResult invalid_state() noexcept { return AbiResult::abort(ScriptAbortReason::InvalidState); }
 
 // Reads the entire request body into out, looping read_body until the chain is complete.
 // Mirrors the read loop in example/http1_echo.cpp. Returns the IoErr on failure.
@@ -87,17 +87,17 @@ fiber::async::Task<fiber::common::IoResult<void>> read_full_body(fiber::http::Ht
 
 // ---- req.getHeader() / req.getHeader(name) ----
 
-ScriptResult get_header_all_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
-                               Library::Arguments /*args*/) noexcept {
+AbiResult get_header_all_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
+                            Library::Arguments /*args*/) noexcept {
     auto *ctx = ctx_of(frame);
     if (ctx == nullptr) {
         return invalid_state();
     }
-    return ScriptResult::success(ctx->headers());
+    return AbiResult::success(ctx->headers());
 }
 
-ScriptResult get_header_one_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
-                               Library::Arguments args) noexcept {
+AbiResult get_header_one_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
+                            Library::Arguments args) noexcept {
     auto *ctx = ctx_of(frame);
     if (ctx == nullptr || args.args == nullptr || args.argc < 1) {
         return invalid_state();
@@ -105,36 +105,35 @@ ScriptResult get_header_one_fn(void * /*userdata*/, const Library::HostCallFrame
     const JsValue &name = args.args[0];
     std::string_view name_sv;
     if (!string_utf8_view(name, name_sv) || name_sv.empty()) {
-        return ScriptResult::success(JsValue::make_null()); // Java: empty/non-text name -> NullNode
+        return AbiResult::success(JsValue::make_null()); // Java: empty/non-text name -> NullNode
     }
     if (!ctx->exchange().request_headers().contains(name_sv)) {
-        return ScriptResult::success(JsValue::make_undefined()); // Java MissingNode
+        return AbiResult::success(JsValue::make_undefined()); // Java MissingNode
     }
     std::string_view value = ctx->exchange().header(name_sv);
     JsValue result = JsValue::make_string(frame.runtime, value.data(), value.size());
     if (js_value_type(result) != JsNodeType::String) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
-    return ScriptResult::success(result);
+    return AbiResult::success(result);
 }
 
 // ---- req.getQuery() / req.getQuery(name) ----
 
-ScriptResult get_query_all_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
-                              Library::Arguments /*args*/) noexcept {
+AbiResult get_query_all_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
+                           Library::Arguments /*args*/) noexcept {
     auto *ctx = ctx_of(frame);
     if (ctx == nullptr) {
         return invalid_state();
     }
-    return ScriptResult::success(ctx->query());
+    return AbiResult::success(ctx->query());
 }
 
-ScriptResult lookup_key(GcHeap &heap, JsValue object, std::string_view key) noexcept {
+AbiResult lookup_key(GcHeap &heap, JsValue object, std::string_view key) noexcept {
     return ScriptExchangeCtx::lookup_property(heap, object, key);
 }
 
-ScriptResult get_query_one_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
-                              Library::Arguments args) noexcept {
+AbiResult get_query_one_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     auto *ctx = ctx_of(frame);
     if (ctx == nullptr || args.args == nullptr || args.argc < 1) {
         return invalid_state();
@@ -142,7 +141,7 @@ ScriptResult get_query_one_fn(void * /*userdata*/, const Library::HostCallFrame 
     const JsValue &name = args.args[0];
     std::string_view name_sv;
     if (!string_utf8_view(name, name_sv) || name_sv.empty()) {
-        return ScriptResult::success(JsValue::make_undefined()); // Java: empty name -> null
+        return AbiResult::success(JsValue::make_undefined()); // Java: empty name -> null
     }
     return lookup_key(frame.runtime, ctx->query(), name_sv);
 }
@@ -166,14 +165,14 @@ AsyncTask read_json_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
     GcHeap::LocalMark mark(*heap);
     ValueHandle out = heap->local_value();
     if (!out) {
-        co_return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        co_return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
     fiber::json::ParseError parse_error;
     auto status = fiber::script::json::decode_js_value(*heap, body.data(), body.size(), out, &parse_error);
     if (status != fiber::json::DecodeStatus::Ok && status != fiber::json::DecodeStatus::Complete) {
         co_return error_exn(*heap, "invalid json body");
     }
-    co_return ScriptResult::success(*out);
+    co_return AbiResult::success(*out);
 }
 
 // ---- req.readBinary() [async] ----
@@ -193,13 +192,13 @@ AsyncTask read_binary_fn(void * /*userdata*/, const Library::HostCallFrame &fram
     if (body.empty()) {
         // Java: empty/absent body -> BinaryNode of EMPTY_BYTE_ARR (not an error).
         JsValue empty = JsValue::make_binary(*heap, nullptr, 0);
-        co_return ScriptResult::success(empty);
+        co_return AbiResult::success(empty);
     }
     JsValue bin = JsValue::make_binary(*heap, reinterpret_cast<const std::uint8_t *>(body.data()), body.size());
     if (js_value_type(bin) != JsNodeType::Binary) {
-        co_return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        co_return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
-    co_return ScriptResult::success(bin);
+    co_return AbiResult::success(bin);
 }
 
 // ---- req.discardBody() [async] ----
@@ -212,21 +211,20 @@ AsyncTask discard_body_fn(void * /*userdata*/, const Library::HostCallFrame &fra
     }
     auto result = co_await ctx->exchange().discard_body();
     (void) result; // Java fire-and-forget ignores drain errors
-    co_return ScriptResult::success(JsValue::make_null());
+    co_return AbiResult::success(JsValue::make_null());
 }
 
 // ---- req.getUri / getPath / getQueryStr / getMethod ----
 
-ScriptResult make_text(const Library::HostCallFrame &frame, std::string_view text) noexcept {
+AbiResult make_text(const Library::HostCallFrame &frame, std::string_view text) noexcept {
     JsValue result = JsValue::make_string(frame.runtime, text.data(), text.size());
     if (js_value_type(result) != JsNodeType::String) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
-    return ScriptResult::success(result);
+    return AbiResult::success(result);
 }
 
-ScriptResult get_uri_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
-                        Library::Arguments /*args*/) noexcept {
+AbiResult get_uri_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments /*args*/) noexcept {
     auto *ctx = ctx_of(frame);
     if (ctx == nullptr) {
         return invalid_state();
@@ -236,8 +234,7 @@ ScriptResult get_uri_fn(void * /*userdata*/, const Library::HostCallFrame &frame
     return make_text(frame, ctx->exchange().uri().unparsed_uri);
 }
 
-ScriptResult get_path_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
-                         Library::Arguments /*args*/) noexcept {
+AbiResult get_path_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments /*args*/) noexcept {
     auto *ctx = ctx_of(frame);
     if (ctx == nullptr) {
         return invalid_state();
@@ -245,8 +242,8 @@ ScriptResult get_path_fn(void * /*userdata*/, const Library::HostCallFrame &fram
     return make_text(frame, ctx->exchange().uri().path);
 }
 
-ScriptResult get_query_str_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
-                              Library::Arguments /*args*/) noexcept {
+AbiResult get_query_str_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
+                           Library::Arguments /*args*/) noexcept {
     auto *ctx = ctx_of(frame);
     if (ctx == nullptr) {
         return invalid_state();
@@ -254,8 +251,8 @@ ScriptResult get_query_str_fn(void * /*userdata*/, const Library::HostCallFrame 
     return make_text(frame, ctx->exchange().uri().query);
 }
 
-ScriptResult get_method_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
-                           Library::Arguments /*args*/) noexcept {
+AbiResult get_method_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
+                        Library::Arguments /*args*/) noexcept {
     auto *ctx = ctx_of(frame);
     if (ctx == nullptr) {
         return invalid_state();
@@ -265,17 +262,17 @@ ScriptResult get_method_fn(void * /*userdata*/, const Library::HostCallFrame &fr
 
 // ---- req.getCookie() / req.getCookie(name) ----
 
-ScriptResult get_cookie_all_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
-                               Library::Arguments /*args*/) noexcept {
+AbiResult get_cookie_all_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
+                            Library::Arguments /*args*/) noexcept {
     auto *ctx = ctx_of(frame);
     if (ctx == nullptr) {
         return invalid_state();
     }
-    return ScriptResult::success(ctx->cookies());
+    return AbiResult::success(ctx->cookies());
 }
 
-ScriptResult get_cookie_one_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
-                               Library::Arguments args) noexcept {
+AbiResult get_cookie_one_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
+                            Library::Arguments args) noexcept {
     auto *ctx = ctx_of(frame);
     if (ctx == nullptr || args.args == nullptr || args.argc < 1) {
         return invalid_state();
@@ -283,7 +280,7 @@ ScriptResult get_cookie_one_fn(void * /*userdata*/, const Library::HostCallFrame
     const JsValue &name = args.args[0];
     std::string_view name_sv;
     if (!string_utf8_view(name, name_sv) || name_sv.empty()) {
-        return ScriptResult::success(JsValue::make_undefined());
+        return AbiResult::success(JsValue::make_undefined());
     }
     return lookup_key(frame.runtime, ctx->cookies(), name_sv);
 }

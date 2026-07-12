@@ -65,22 +65,21 @@ public:
     void set_path_vars(const std::vector<std::pair<std::string_view, std::string_view>> &path_vars) noexcept {
         path_vars_ = path_vars;
     }
-    [[nodiscard]] fiber::script::ScriptResult path_var(fiber::script::GcHeap &heap,
-                                                       std::string_view name) const noexcept;
-    [[nodiscard]] fiber::script::ScriptResult query_var(fiber::script::GcHeap &heap, std::string_view name) noexcept;
+    [[nodiscard]] fiber::script::AbiResult path_var(fiber::script::GcHeap &heap, std::string_view name) const noexcept;
+    [[nodiscard]] fiber::script::AbiResult query_var(fiber::script::GcHeap &heap, std::string_view name) noexcept;
     // norm_key is already lowercased with '-' folded to '_' (RouteScriptLibrary normalizes at
     // compile time); header/cookie names are matched under the same rule.
-    [[nodiscard]] fiber::script::ScriptResult header_var(fiber::script::GcHeap &heap,
-                                                         std::string_view norm_key) const noexcept;
-    [[nodiscard]] fiber::script::ScriptResult cookie_var(fiber::script::GcHeap &heap,
-                                                         std::string_view norm_key) const noexcept;
+    [[nodiscard]] fiber::script::AbiResult header_var(fiber::script::GcHeap &heap,
+                                                      std::string_view norm_key) const noexcept;
+    [[nodiscard]] fiber::script::AbiResult cookie_var(fiber::script::GcHeap &heap,
+                                                      std::string_view norm_key) const noexcept;
     // field is one of "uri" / "method" / "path" / "query".
-    [[nodiscard]] fiber::script::ScriptResult req_field(fiber::script::GcHeap &heap,
-                                                        std::string_view field) const noexcept;
+    [[nodiscard]] fiber::script::AbiResult req_field(fiber::script::GcHeap &heap,
+                                                     std::string_view field) const noexcept;
 
     // Looks up key on a GC object (the cached query/headers/cookies views). Returns Undefined
     // when the object is absent or the key is not present; aborts only on allocation failure.
-    [[nodiscard]] static fiber::script::ScriptResult
+    [[nodiscard]] static fiber::script::AbiResult
     lookup_property(fiber::script::GcHeap &heap, fiber::script::JsValue object, std::string_view key) noexcept;
 
 
