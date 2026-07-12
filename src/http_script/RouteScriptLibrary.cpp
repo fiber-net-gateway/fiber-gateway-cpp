@@ -18,10 +18,10 @@ namespace {
 
 using fiber::script::GcHeap;
 using HostCallFrame = fiber::script::Library::HostCallFrame;
+using fiber::script::AbiResult;
 using fiber::script::JsValue;
 using fiber::script::Library;
 using fiber::script::ScriptAbortReason;
-using fiber::script::ScriptResult;
 
 ScriptExchangeCtx *ctx_of(const HostCallFrame &frame) noexcept {
     return static_cast<ScriptExchangeCtx *>(frame.attach);
@@ -55,47 +55,47 @@ std::string make_cache_key(std::string_view ns, std::string_view key) {
 
 } // namespace
 
-ScriptResult RouteScriptLibrary::path_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
+AbiResult RouteScriptLibrary::path_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
     auto *ref = static_cast<const VarRef *>(userdata);
     auto *ctx = ctx_of(frame);
     if (ref == nullptr || ctx == nullptr) {
-        return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
     return ctx->path_var(frame.runtime, ref->name);
 }
 
-ScriptResult RouteScriptLibrary::query_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
+AbiResult RouteScriptLibrary::query_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
     auto *ref = static_cast<const VarRef *>(userdata);
     auto *ctx = ctx_of(frame);
     if (ref == nullptr || ctx == nullptr) {
-        return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
     return ctx->query_var(frame.runtime, ref->name);
 }
 
-ScriptResult RouteScriptLibrary::header_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
+AbiResult RouteScriptLibrary::header_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
     auto *ref = static_cast<const VarRef *>(userdata);
     auto *ctx = ctx_of(frame);
     if (ref == nullptr || ctx == nullptr) {
-        return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
     return ctx->header_var(frame.runtime, ref->name);
 }
 
-ScriptResult RouteScriptLibrary::cookie_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
+AbiResult RouteScriptLibrary::cookie_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
     auto *ref = static_cast<const VarRef *>(userdata);
     auto *ctx = ctx_of(frame);
     if (ref == nullptr || ctx == nullptr) {
-        return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
     return ctx->cookie_var(frame.runtime, ref->name);
 }
 
-ScriptResult RouteScriptLibrary::req_field_fn(void *userdata, const HostCallFrame &frame) noexcept {
+AbiResult RouteScriptLibrary::req_field_fn(void *userdata, const HostCallFrame &frame) noexcept {
     auto *ref = static_cast<const VarRef *>(userdata);
     auto *ctx = ctx_of(frame);
     if (ref == nullptr || ctx == nullptr) {
-        return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
     return ctx->req_field(frame.runtime, ref->name);
 }

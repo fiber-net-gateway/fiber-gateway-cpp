@@ -16,11 +16,11 @@ namespace fiber::script::run {
 
 namespace {
 
-ScriptResult make_abort(ScriptAbortReason reason, std::int64_t position = -1) {
-    return ScriptResult::abort(reason, position);
+AbiResult make_abort(ScriptAbortReason reason, std::int64_t position = -1) {
+    return AbiResult::abort(reason, position);
 }
 
-ScriptResult make_oom(std::int64_t position) { return make_abort(ScriptAbortReason::OutOfMemory, position); }
+AbiResult make_oom(std::int64_t position) { return make_abort(ScriptAbortReason::OutOfMemory, position); }
 
 bool opcode_uses_spread(std::uint8_t op) {
     return op == ir::Code::CALL_FUNC_SPREAD || op == ir::Code::CALL_ASYNC_FUNC_SPREAD;
@@ -63,23 +63,23 @@ InterpreterVm::InterpreterVm(const ir::Compiled &compiled, const fiber::script::
     }
 }
 
-ScriptResult InterpreterVm::result() const noexcept {
+AbiResult InterpreterVm::result() const noexcept {
     switch (state_) {
         case State::Success:
-            return ScriptResult::success(result_.value);
+            return AbiResult::success(result_.value);
         case State::Exception:
-            return ScriptResult::exception(result_.exception);
+            return AbiResult::exception(result_.exception);
         case State::Abort:
-            return ScriptResult::abort(result_.abort.reason, result_.abort.position);
+            return AbiResult::abort(result_.abort.reason, result_.abort.position);
         case State::Init:
         case State::Running:
         case State::Suspend:
         case State::AsyncRetSuc:
         case State::AsyncRetExp:
         case State::AsyncRetAbort:
-            return ScriptResult::abort(ScriptAbortReason::None);
+            return AbiResult::abort(ScriptAbortReason::None);
     }
-    return ScriptResult::abort(ScriptAbortReason::Internal);
+    return AbiResult::abort(ScriptAbortReason::Internal);
 }
 
 bool InterpreterVm::done() const noexcept {
@@ -257,7 +257,7 @@ void InterpreterVm::iterate() {
             case ir::Code::NEW_OBJECT: {
                 fiber::script::JsValue obj = fiber::script::JsValue::make_object(frame_.runtime.heap(), 0);
                 if (fiber::script::js_value_type(obj) != fiber::script::JsNodeType::Object) {
-                    ScriptResult error = make_oom(position_at(compile_, pc_ - 1));
+                    AbiResult error = make_oom(position_at(compile_, pc_ - 1));
                     if (!handle_error(error, pc_ - 1)) {
                         return;
                     }
@@ -269,7 +269,7 @@ void InterpreterVm::iterate() {
             case ir::Code::NEW_ARRAY: {
                 fiber::script::JsValue arr = fiber::script::JsValue::make_array(frame_.runtime.heap(), 0);
                 if (fiber::script::js_value_type(arr) != fiber::script::JsNodeType::Array) {
-                    ScriptResult error = make_oom(position_at(compile_, pc_ - 1));
+                    AbiResult error = make_oom(position_at(compile_, pc_ - 1));
                     if (!handle_error(error, pc_ - 1)) {
                         return;
                     }
@@ -470,14 +470,14 @@ void InterpreterVm::iterate() {
             }
             case ir::Code::THROW_EXP: {
                 fiber::script::JsValue thrown = stack_[--sp_];
-                ScriptResult error = ScriptResult::exception(thrown);
+                AbiResult error = AbiResult::exception(thrown);
                 if (!handle_error(error, pc_ - 1)) {
                     return;
                 }
                 break;
             }
             default: {
-                ScriptResult error = make_abort(ScriptAbortReason::InvalidOpcode, position_at(compile_, pc_ - 1));
+                AbiResult error = make_abort(ScriptAbortReason::InvalidOpcode, position_at(compile_, pc_ - 1));
                 if (!handle_error(error, pc_ - 1)) {
                     return;
                 }
@@ -489,7 +489,7 @@ void InterpreterVm::iterate() {
     state_ = State::Success;
 }
 
-void InterpreterVm::async_complete(void *context, const ScriptResult &result) noexcept {
+void InterpreterVm::async_complete(void *context, const AbiResult &result) noexcept {
     auto *vm = static_cast<InterpreterVm *>(context);
     if (!vm || vm->done()) {
         return;
@@ -560,21 +560,21 @@ bool InterpreterVm::dispatch_func_const(std::uint8_t op, const ir::Compiled::Fun
         case ir::Code::CALL_FUNC_SPREAD: {
             FIBER_ASSERT(func_const.sync_func);
             GcHeap::LocalMark mark(frame_.runtime);
-            ScriptResult result = func_const.sync_func(func_const.user_data, frame, arguments);
+            AbiResult result = func_const.sync_func(func_const.user_data, frame, arguments);
             return apply_call_result(result, op, encoded_argc, epc);
         }
         case ir::Code::CALL_CONST: {
             FIBER_ASSERT(func_const.sync_ct);
             GcHeap::LocalMark mark(frame_.runtime);
-            ScriptResult result = func_const.sync_ct(func_const.user_data, frame);
+            AbiResult result = func_const.sync_ct(func_const.user_data, frame);
             return apply_call_result(result, op, encoded_argc, epc);
         }
         case ir::Code::CALL_ASYNC_CONST: {
             FIBER_ASSERT(func_const.async_ct);
             async_ = func_const.async_ct(func_const.user_data, frame);
             if (!async_.valid()) {
-                return handle_error(ScriptResult::abort(async_.allocation_failed() ? ScriptAbortReason::OutOfMemory
-                                                                                   : ScriptAbortReason::InvalidState),
+                return handle_error(AbiResult::abort(async_.allocation_failed() ? ScriptAbortReason::OutOfMemory
+                                                                                : ScriptAbortReason::InvalidState),
                                     epc);
             }
             async_.set_completion({&InterpreterVm::async_complete, this});
@@ -589,8 +589,8 @@ bool InterpreterVm::dispatch_func_const(std::uint8_t op, const ir::Compiled::Fun
                 if (op == ir::Code::CALL_ASYNC_FUNC) {
                     sp_ = arg_base;
                 }
-                return handle_error(ScriptResult::abort(async_.allocation_failed() ? ScriptAbortReason::OutOfMemory
-                                                                                   : ScriptAbortReason::InvalidState),
+                return handle_error(AbiResult::abort(async_.allocation_failed() ? ScriptAbortReason::OutOfMemory
+                                                                                : ScriptAbortReason::InvalidState),
                                     epc);
             }
             async_.set_completion({&InterpreterVm::async_complete, this});
@@ -601,8 +601,7 @@ bool InterpreterVm::dispatch_func_const(std::uint8_t op, const ir::Compiled::Fun
     return true;
 }
 
-bool InterpreterVm::apply_call_result(const ScriptResult &result, std::uint8_t op, std::uint32_t argc,
-                                      std::size_t epc) {
+bool InterpreterVm::apply_call_result(const AbiResult &result, std::uint8_t op, std::uint32_t argc, std::size_t epc) {
     if (result.is_success()) {
         switch (op) {
             case ir::Code::CALL_FUNC:
@@ -624,7 +623,7 @@ bool InterpreterVm::apply_call_result(const ScriptResult &result, std::uint8_t o
                 }
                 break;
             default:
-                return handle_error(ScriptResult::abort(ScriptAbortReason::InvalidOpcode), epc);
+                return handle_error(AbiResult::abort(ScriptAbortReason::InvalidOpcode), epc);
         }
         return true;
     }
@@ -640,11 +639,11 @@ bool InterpreterVm::handle_call_result(CallResult status, std::size_t epc) {
         case CallResult::Success:
             return true;
         case CallResult::Exception:
-            return handle_error(ScriptResult::exception(result_.exception), epc);
+            return handle_error(AbiResult::exception(result_.exception), epc);
         case CallResult::Abort:
-            return handle_error(ScriptResult::abort(result_.abort.reason, result_.abort.position), epc);
+            return handle_error(AbiResult::abort(result_.abort.reason, result_.abort.position), epc);
     }
-    return handle_error(ScriptResult::abort(ScriptAbortReason::Internal), epc);
+    return handle_error(AbiResult::abort(ScriptAbortReason::Internal), epc);
 }
 
 bool InterpreterVm::catch_for_exception(std::size_t epc) {
@@ -659,7 +658,7 @@ bool InterpreterVm::catch_for_exception(std::size_t epc) {
     return true;
 }
 
-bool InterpreterVm::handle_error(ScriptResult error, std::size_t epc) {
+bool InterpreterVm::handle_error(AbiResult error, std::size_t epc) {
     if (error.is_exception()) {
         result_.exception = error.exception();
         if (catch_for_exception(epc)) {
@@ -683,7 +682,7 @@ bool InterpreterVm::apply_async_result() {
         return true;
     }
     if (!async_.valid() || pc_ == 0 || pc_ - 1 >= compile_.code_size()) {
-        return handle_error(ScriptResult::abort(ScriptAbortReason::InvalidState), pc_ == 0 ? 0 : pc_ - 1);
+        return handle_error(AbiResult::abort(ScriptAbortReason::InvalidState), pc_ == 0 ? 0 : pc_ - 1);
     }
 
     const std::size_t epc = pc_ - 1;
@@ -692,23 +691,23 @@ bool InterpreterVm::apply_async_result() {
     if (!opcode_is_async_call(op)) {
         async_.reset();
         state_ = State::Running;
-        return handle_error(ScriptResult::abort(ScriptAbortReason::InvalidOpcode), epc);
+        return handle_error(AbiResult::abort(ScriptAbortReason::InvalidOpcode), epc);
     }
 
     const std::uint32_t argc = opcode_is_function_call(op) ? ((raw >> 8u) & 0xFFu) : 0;
-    ScriptResult result;
+    AbiResult result;
     switch (state_) {
         case State::AsyncRetSuc:
-            result = ScriptResult::success(result_.value);
+            result = AbiResult::success(result_.value);
             break;
         case State::AsyncRetExp:
-            result = ScriptResult::exception(result_.exception);
+            result = AbiResult::exception(result_.exception);
             break;
         case State::AsyncRetAbort:
-            result = ScriptResult::abort(result_.abort.reason, result_.abort.position);
+            result = AbiResult::abort(result_.abort.reason, result_.abort.position);
             break;
         default:
-            return handle_error(ScriptResult::abort(ScriptAbortReason::InvalidState), epc);
+            return handle_error(AbiResult::abort(ScriptAbortReason::InvalidState), epc);
     }
 
     async_.reset();

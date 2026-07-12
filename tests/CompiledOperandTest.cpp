@@ -13,18 +13,17 @@
 
 namespace {
 
+using fiber::script::AbiResult;
 using fiber::script::JsValue;
 using fiber::script::Library;
-using fiber::script::ScriptResult;
 using fiber::script::ir::Code;
 using fiber::script::ir::Compiled;
 
-ScriptResult dummy_function(void *userdata, const Library::HostCallFrame &frame,
-                            Library::Arguments arguments) noexcept {
+AbiResult dummy_function(void *userdata, const Library::HostCallFrame &frame, Library::Arguments arguments) noexcept {
     (void) userdata;
     (void) frame;
     (void) arguments;
-    return ScriptResult::success(JsValue::make_undefined());
+    return AbiResult::success(JsValue::make_undefined());
 }
 
 fiber::script::AsyncTask dummy_async_function(void *userdata, const Library::HostCallFrame &frame,
@@ -32,19 +31,19 @@ fiber::script::AsyncTask dummy_async_function(void *userdata, const Library::Hos
     (void) userdata;
     (void) frame;
     (void) arguments;
-    co_return ScriptResult::success(JsValue::make_undefined());
+    co_return AbiResult::success(JsValue::make_undefined());
 }
 
-ScriptResult dummy_constant(void *userdata, const Library::HostCallFrame &frame) noexcept {
+AbiResult dummy_constant(void *userdata, const Library::HostCallFrame &frame) noexcept {
     (void) userdata;
     (void) frame;
-    return ScriptResult::success(JsValue::make_undefined());
+    return AbiResult::success(JsValue::make_undefined());
 }
 
 fiber::script::AsyncTask dummy_async_constant(void *userdata, const Library::HostCallFrame &frame) noexcept {
     (void) userdata;
     (void) frame;
-    co_return ScriptResult::success(JsValue::make_undefined());
+    co_return AbiResult::success(JsValue::make_undefined());
 }
 
 class OperandLibrary final : public Library {

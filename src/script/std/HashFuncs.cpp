@@ -18,9 +18,7 @@ namespace fiber::script::std_lib {
 
 namespace {
 
-ScriptResult type_error() noexcept {
-    return ScriptResult::exception(JsValue::make_exception(ExceptionKind::TypeError));
-}
+AbiResult type_error() noexcept { return AbiResult::exception(JsValue::make_exception(ExceptionKind::TypeError)); }
 
 // ---- digest (BoringSSL EVP, one-shot) ----
 
@@ -31,25 +29,24 @@ bool digest(const EVP_MD *md, const std::uint8_t *data, std::size_t len, std::ui
 
 // ---- hash.crc32 ----
 
-ScriptResult crc32_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/, Library::Arguments args) noexcept {
+AbiResult crc32_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
         // No value: Java's asText(null) on missing -> empty -> 0.
-        return ScriptResult::success(JsValue::make_integer(0));
+        return AbiResult::success(JsValue::make_integer(0));
     }
     std::string text;
     node_as_text(args.args[0], text);
     if (text.empty()) {
-        return ScriptResult::success(JsValue::make_integer(0));
+        return AbiResult::success(JsValue::make_integer(0));
     }
-    return ScriptResult::success(
-            JsValue::make_integer(static_cast<std::int64_t>(crc32_bytes(text.data(), text.size()))));
+    return AbiResult::success(JsValue::make_integer(static_cast<std::int64_t>(crc32_bytes(text.data(), text.size()))));
 }
 
 // ---- hash.md5 / sha1 / sha256 ----
 
 // Shared body: String (UTF-8) or Binary in -> lowercase hex out.
-ScriptResult digest_fn(const Library::HostCallFrame &frame, const JsValue &arg, const EVP_MD *md,
-                       std::size_t digest_len) noexcept {
+AbiResult digest_fn(const Library::HostCallFrame &frame, const JsValue &arg, const EVP_MD *md,
+                    std::size_t digest_len) noexcept {
     std::string_view text;
     const std::uint8_t *data = nullptr;
     std::size_t len = 0;
@@ -67,7 +64,7 @@ ScriptResult digest_fn(const Library::HostCallFrame &frame, const JsValue &arg, 
     std::uint8_t out[32]; // SHA-256 is the largest at 32 bytes.
     if (digest_len > sizeof(out) || !digest(md, data, len, out)) {
         // Unreachable for valid MD5/SHA-1/SHA-256 inputs.
-        return ScriptResult::abort(ScriptAbortReason::HostFault);
+        return AbiResult::abort(ScriptAbortReason::HostFault);
     }
 
     char hex[64]; // 32 digest bytes -> 64 hex chars.
@@ -75,26 +72,26 @@ ScriptResult digest_fn(const Library::HostCallFrame &frame, const JsValue &arg, 
     JsValue result = JsValue::make_string(frame.runtime, hex, digest_len * 2);
     if (js_value_type(result) != JsNodeType::String) {
         // make_string returns undefined on OOM; the hex string is never empty.
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
-    return ScriptResult::success(result);
+    return AbiResult::success(result);
 }
 
-ScriptResult md5_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult md5_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
         return type_error();
     }
     return digest_fn(frame, args.args[0], EVP_md5(), 16);
 }
 
-ScriptResult sha1_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult sha1_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
         return type_error();
     }
     return digest_fn(frame, args.args[0], EVP_sha1(), 20);
 }
 
-ScriptResult sha256_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult sha256_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
         return type_error();
     }

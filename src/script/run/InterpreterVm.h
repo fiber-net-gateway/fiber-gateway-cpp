@@ -23,7 +23,7 @@ public:
     ~InterpreterVm() override = default;
 
     void iterate();
-    [[nodiscard]] ScriptResult result() const noexcept;
+    [[nodiscard]] AbiResult result() const noexcept;
     [[nodiscard]] bool done() const noexcept;
     [[nodiscard]] AsyncTask &async_task() noexcept { return async_; }
     void visit_roots(fiber::script::GcRootVisitor &visitor) noexcept override;
@@ -62,14 +62,14 @@ private:
     ResultPayload result_{};
     AsyncTask async_{};
 
-    static void async_complete(void *context, const ScriptResult &result) noexcept;
+    static void async_complete(void *context, const AbiResult &result) noexcept;
     Library::Arguments make_call_arguments(std::uint8_t op, std::uint32_t encoded_argc, std::size_t &arg_base);
     bool dispatch_func_const(std::uint8_t op, const ir::Compiled::FuncConst &func_const, std::uint32_t encoded_argc);
-    bool apply_call_result(const ScriptResult &result, std::uint8_t op, std::uint32_t argc, std::size_t epc);
+    bool apply_call_result(const AbiResult &result, std::uint8_t op, std::uint32_t argc, std::size_t epc);
     bool handle_call_result(CallResult status, std::size_t epc);
 
     bool catch_for_exception(std::size_t epc);
-    bool handle_error(ScriptResult error, std::size_t epc);
+    bool handle_error(AbiResult error, std::size_t epc);
     bool apply_async_result();
 };
 

@@ -43,11 +43,10 @@ bool string_utf8_view(const JsValue &value, std::string_view &out) noexcept {
     return gc_string_utf8_view(str, out);
 }
 
-ScriptResult includes_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
-                         Library::Arguments args) noexcept {
+AbiResult includes_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
         // No container argument: neither a text nor array container.
-        return ScriptResult::success(JsValue::make_boolean(false));
+        return AbiResult::success(JsValue::make_boolean(false));
     }
     const JsValue &container = args.args[0];
     JsNodeType ctype = js_value_type(container);
@@ -55,25 +54,25 @@ ScriptResult includes_fn(void * /*userdata*/, const Library::HostCallFrame & /*f
     if (ctype == JsNodeType::String) {
         std::string_view text;
         if (!string_utf8_view(container, text)) {
-            return ScriptResult::success(JsValue::make_boolean(false));
+            return AbiResult::success(JsValue::make_boolean(false));
         }
         for (std::uint32_t i = 1; i < args.argc; ++i) {
             std::string_view item;
             if (!string_utf8_view(args.args[i], item)) {
                 // A non-text item cannot be a substring of a text container.
-                return ScriptResult::success(JsValue::make_boolean(false));
+                return AbiResult::success(JsValue::make_boolean(false));
             }
             if (text.find(item) == std::string::npos) {
-                return ScriptResult::success(JsValue::make_boolean(false));
+                return AbiResult::success(JsValue::make_boolean(false));
             }
         }
-        return ScriptResult::success(JsValue::make_boolean(true));
+        return AbiResult::success(JsValue::make_boolean(true));
     }
 
     if (ctype == JsNodeType::Array) {
         const GcArray *arr = js_value_heap_ptr<const GcArray>(container);
         if (arr == nullptr) {
-            return ScriptResult::success(JsValue::make_boolean(false));
+            return AbiResult::success(JsValue::make_boolean(false));
         }
         for (std::uint32_t i = 1; i < args.argc; ++i) {
             ConstValueHandle item = const_handle(args.args[i]);
@@ -87,14 +86,14 @@ ScriptResult includes_fn(void * /*userdata*/, const Library::HostCallFrame & /*f
                 }
             }
             if (!found) {
-                return ScriptResult::success(JsValue::make_boolean(false));
+                return AbiResult::success(JsValue::make_boolean(false));
             }
         }
-        return ScriptResult::success(JsValue::make_boolean(true));
+        return AbiResult::success(JsValue::make_boolean(true));
     }
 
     // Container is neither string nor array.
-    return ScriptResult::success(JsValue::make_boolean(false));
+    return AbiResult::success(JsValue::make_boolean(false));
 }
 
 } // namespace

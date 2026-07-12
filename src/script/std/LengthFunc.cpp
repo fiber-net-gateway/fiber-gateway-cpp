@@ -44,31 +44,30 @@ std::int64_t binary_length(const JsValue &value) noexcept {
     return static_cast<std::int64_t>(bin->len);
 }
 
-ScriptResult length_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
-                       Library::Arguments args) noexcept {
+AbiResult length_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
         // The single parameter defaults to null; length(null) == 0.
-        return ScriptResult::success(JsValue::make_integer(0));
+        return AbiResult::success(JsValue::make_integer(0));
     }
     const JsValue &value = args.args[0];
     switch (js_value_type(value)) {
         case JsNodeType::Undefined:
         case JsNodeType::Null:
-            return ScriptResult::success(JsValue::make_integer(0));
+            return AbiResult::success(JsValue::make_integer(0));
         case JsNodeType::String:
-            return ScriptResult::success(JsValue::make_integer(string_utf16_length(value)));
+            return AbiResult::success(JsValue::make_integer(string_utf16_length(value)));
         case JsNodeType::Binary:
-            return ScriptResult::success(JsValue::make_integer(binary_length(value)));
+            return AbiResult::success(JsValue::make_integer(binary_length(value)));
         case JsNodeType::Array:
             if (const GcArray *arr = js_value_heap_ptr<const GcArray>(value)) {
-                return ScriptResult::success(JsValue::make_integer(static_cast<std::int64_t>(arr->size)));
+                return AbiResult::success(JsValue::make_integer(static_cast<std::int64_t>(arr->size)));
             }
-            return ScriptResult::success(JsValue::make_integer(0));
+            return AbiResult::success(JsValue::make_integer(0));
         case JsNodeType::Object:
             if (const GcObject *obj = js_value_heap_ptr<const GcObject>(value)) {
-                return ScriptResult::success(JsValue::make_integer(static_cast<std::int64_t>(obj->size)));
+                return AbiResult::success(JsValue::make_integer(static_cast<std::int64_t>(obj->size)));
             }
-            return ScriptResult::success(JsValue::make_integer(0));
+            return AbiResult::success(JsValue::make_integer(0));
         case JsNodeType::Boolean:
         case JsNodeType::Integer:
         case JsNodeType::Float:
@@ -77,7 +76,7 @@ ScriptResult length_fn(void * /*userdata*/, const Library::HostCallFrame & /*fra
         default:
             // Jackson's JsonNode.size() is 0 for scalar value nodes; the
             // iterator/exception types have no Jackson analogue and also map to 0.
-            return ScriptResult::success(JsValue::make_integer(0));
+            return AbiResult::success(JsValue::make_integer(0));
     }
 }
 

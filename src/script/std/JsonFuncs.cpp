@@ -39,15 +39,15 @@ private:
 
 // Materializes a view as a heap String result, mapping make_string's OOM (returns
 // undefined) to a graceful abort. Mirrors StringsFuncs' make_string_result.
-ScriptResult make_string_result(GcHeap &heap, std::string_view sv) noexcept {
+AbiResult make_string_result(GcHeap &heap, std::string_view sv) noexcept {
     if (sv.empty()) {
-        return ScriptResult::success(JsValue::make_native_string("", 0));
+        return AbiResult::success(JsValue::make_native_string("", 0));
     }
     JsValue result = JsValue::make_string(heap, sv.data(), sv.size());
     if (js_value_type(result) != JsNodeType::String) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
-    return ScriptResult::success(result);
+    return AbiResult::success(result);
 }
 
 // ---- JSON.parse(text) ----
@@ -56,19 +56,19 @@ ScriptResult make_string_result(GcHeap &heap, std::string_view sv) noexcept {
 // SyntaxError carrying the decoder's message and byte offset (mirrors JS JSON.parse,
 // which throws SyntaxError). OOM while building that exception aborts.
 
-ScriptResult parse_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult parse_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     GcHeap &heap = frame.runtime;
 
     JsValue arg = (args.args && args.argc >= 1) ? args.args[0] : JsValue::make_undefined();
     std::string_view text;
     if (!string_utf8_view(arg, text)) {
-        return ScriptResult::exception(JsValue::make_exception(ExceptionKind::TypeError));
+        return AbiResult::exception(JsValue::make_exception(ExceptionKind::TypeError));
     }
 
     GcHeap::LocalMark mark(heap);
     ValueHandle out = heap.local_value();
     if (!out) {
-        return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
     *out = JsValue::make_undefined();
 
@@ -83,20 +83,20 @@ ScriptResult parse_fn(void * /*userdata*/, const Library::HostCallFrame &frame, 
     fiber::json::ParseError error{};
     fiber::json::DecodeStatus status = fiber::script::json::decode_js_value(heap, data, text.size(), out, &error);
     if (status == fiber::json::DecodeStatus::Complete || status == fiber::json::DecodeStatus::Ok) {
-        return ScriptResult::success(*out);
+        return AbiResult::success(*out);
     }
 
     // Parse failure: build a catchable SyntaxError with the decoder's message/offset.
     ValueHandle exc = heap.local_value();
     if (!exc) {
-        return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
     const char *msg = error.message ? error.message : "invalid json";
     std::size_t msg_len = std::strlen(msg);
     if (!gc_make_exception(&heap, exc, static_cast<std::int64_t>(error.offset), "SyntaxError", 11, msg, msg_len)) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
-    return ScriptResult::exception(*exc);
+    return AbiResult::exception(*exc);
 }
 
 // ---- JSON.stringify(value) ----
@@ -107,14 +107,14 @@ ScriptResult parse_fn(void * /*userdata*/, const Library::HostCallFrame &frame, 
 // encode failure (InvalidValue/InvalidString/MaxDepthExceeded) raises a catchable
 // TypeError. OOM on the result string aborts.
 
-ScriptResult stringify_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult stringify_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     GcHeap &heap = frame.runtime;
 
     JsValue value = (args.args && args.argc >= 1) ? args.args[0] : JsValue::make_undefined();
     JsNodeType type = js_value_type(value);
 
     if (type == JsNodeType::Undefined) {
-        return ScriptResult::success(JsValue::make_undefined());
+        return AbiResult::success(JsValue::make_undefined());
     }
 
     if (type == JsNodeType::Float) {
@@ -130,7 +130,7 @@ ScriptResult stringify_fn(void * /*userdata*/, const Library::HostCallFrame &fra
     fiber::json::Generator gen(sink);
     fiber::json::Generator::Result result = fiber::script::json::encode_js_value(gen, value);
     if (result != fiber::json::Generator::Result::OK) {
-        return ScriptResult::exception(JsValue::make_exception(ExceptionKind::TypeError));
+        return AbiResult::exception(JsValue::make_exception(ExceptionKind::TypeError));
     }
     return make_string_result(heap, std::string_view(out));
 }

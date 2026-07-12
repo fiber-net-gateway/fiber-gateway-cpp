@@ -49,12 +49,12 @@ bool put_string(fiber::script::GcHeap &heap, fiber::script::ValueHandle obj_root
 
 // Builds a String JsValue; aborts on allocation failure. Used by the route-variable
 // accessors to materialize a borrowed name/value view into the GC heap.
-fiber::script::ScriptResult make_string_value(fiber::script::GcHeap &heap, std::string_view text) noexcept {
+fiber::script::AbiResult make_string_value(fiber::script::GcHeap &heap, std::string_view text) noexcept {
     fiber::script::JsValue v = fiber::script::JsValue::make_string(heap, text.data(), text.size());
     if (fiber::script::js_value_type(v) != fiber::script::JsNodeType::String) {
-        return fiber::script::ScriptResult::abort(fiber::script::ScriptAbortReason::OutOfMemory);
+        return fiber::script::AbiResult::abort(fiber::script::ScriptAbortReason::OutOfMemory);
     }
-    return fiber::script::ScriptResult::success(v);
+    return fiber::script::AbiResult::success(v);
 }
 
 // Compares a header/cookie name against a pre-normalized key (lowercase, '-' folded to '_').
@@ -147,59 +147,58 @@ fiber::script::JsValue ScriptExchangeCtx::cookies() noexcept {
     return *cookies_root_;
 }
 
-fiber::script::ScriptResult ScriptExchangeCtx::lookup_property(fiber::script::GcHeap &heap,
-                                                               fiber::script::JsValue object,
-                                                               std::string_view key) noexcept {
+fiber::script::AbiResult ScriptExchangeCtx::lookup_property(fiber::script::GcHeap &heap, fiber::script::JsValue object,
+                                                            std::string_view key) noexcept {
     using namespace fiber::script;
     if (js_value_type(object) != JsNodeType::Object) {
-        return ScriptResult::success(JsValue::make_undefined());
+        return AbiResult::success(JsValue::make_undefined());
     }
     GcHeap::LocalMark mark(heap);
     ValueHandle found = heap.local_value();
     if (!found) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
     *found = JsValue::make_undefined();
     if (!gc_object_get_key(&heap, ConstValueHandle(&object), key.data(), key.size(), found)) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
     if (js_value_type(*found) == JsNodeType::Undefined) {
-        return ScriptResult::success(JsValue::make_undefined()); // absent
+        return AbiResult::success(JsValue::make_undefined()); // absent
     }
-    return ScriptResult::success(*found);
+    return AbiResult::success(*found);
 }
 
-fiber::script::ScriptResult ScriptExchangeCtx::path_var(fiber::script::GcHeap &heap,
-                                                        std::string_view name) const noexcept {
+fiber::script::AbiResult ScriptExchangeCtx::path_var(fiber::script::GcHeap &heap,
+                                                     std::string_view name) const noexcept {
     for (const auto &pv: path_vars_) {
         if (pv.first == name) {
             return make_string_value(heap, pv.second);
         }
     }
     // Absent -> null (mirrors Java NullNode; undefined is not JSON-encodable here).
-    return fiber::script::ScriptResult::success(fiber::script::JsValue::make_null());
+    return fiber::script::AbiResult::success(fiber::script::JsValue::make_null());
 }
 
-fiber::script::ScriptResult ScriptExchangeCtx::query_var(fiber::script::GcHeap &heap, std::string_view name) noexcept {
-    fiber::script::ScriptResult result = lookup_property(heap, query(), name);
+fiber::script::AbiResult ScriptExchangeCtx::query_var(fiber::script::GcHeap &heap, std::string_view name) noexcept {
+    fiber::script::AbiResult result = lookup_property(heap, query(), name);
     if (result.is_success() && fiber::script::js_value_type(result.value()) == fiber::script::JsNodeType::Undefined) {
-        return fiber::script::ScriptResult::success(fiber::script::JsValue::make_null());
+        return fiber::script::AbiResult::success(fiber::script::JsValue::make_null());
     }
     return result;
 }
 
-fiber::script::ScriptResult ScriptExchangeCtx::header_var(fiber::script::GcHeap &heap,
-                                                          std::string_view norm_key) const noexcept {
+fiber::script::AbiResult ScriptExchangeCtx::header_var(fiber::script::GcHeap &heap,
+                                                       std::string_view norm_key) const noexcept {
     for (const fiber::http::HttpHeaders::HeaderField &field: exchange_.request_headers()) {
         if (name_matches_normalized(field.lowcase_view(), norm_key)) {
             return make_string_value(heap, field.value_view());
         }
     }
-    return fiber::script::ScriptResult::success(fiber::script::JsValue::make_null());
+    return fiber::script::AbiResult::success(fiber::script::JsValue::make_null());
 }
 
-fiber::script::ScriptResult ScriptExchangeCtx::cookie_var(fiber::script::GcHeap &heap,
-                                                          std::string_view norm_key) const noexcept {
+fiber::script::AbiResult ScriptExchangeCtx::cookie_var(fiber::script::GcHeap &heap,
+                                                       std::string_view norm_key) const noexcept {
     fiber::http::HttpHeaders::MatchRange cookie_headers = exchange_.request_headers().get_all("cookie");
     for (const fiber::http::HttpHeaders::HeaderField &field: cookie_headers) {
         std::string_view matched;
@@ -214,11 +213,11 @@ fiber::script::ScriptResult ScriptExchangeCtx::cookie_var(fiber::script::GcHeap 
             return make_string_value(heap, matched);
         }
     }
-    return fiber::script::ScriptResult::success(fiber::script::JsValue::make_null());
+    return fiber::script::AbiResult::success(fiber::script::JsValue::make_null());
 }
 
-fiber::script::ScriptResult ScriptExchangeCtx::req_field(fiber::script::GcHeap &heap,
-                                                         std::string_view field) const noexcept {
+fiber::script::AbiResult ScriptExchangeCtx::req_field(fiber::script::GcHeap &heap,
+                                                      std::string_view field) const noexcept {
     if (field == "uri") {
         return make_string_value(heap, exchange_.uri().unparsed_uri);
     }
@@ -231,7 +230,7 @@ fiber::script::ScriptResult ScriptExchangeCtx::req_field(fiber::script::GcHeap &
     if (field == "query") {
         return make_string_value(heap, exchange_.uri().query);
     }
-    return fiber::script::ScriptResult::success(fiber::script::JsValue::make_undefined());
+    return fiber::script::AbiResult::success(fiber::script::JsValue::make_undefined());
 }
 
 void ScriptExchangeCtx::set_response_header(std::string_view name, std::string_view value) noexcept {

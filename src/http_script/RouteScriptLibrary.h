@@ -61,11 +61,11 @@ private:
 
     // Constant implementations (static so their addresses match Library::Constant). userdata
     // points at a VarRef owned by *this.
-    static fiber::script::ScriptResult path_var_fn(void *userdata, const HostCallFrame &frame) noexcept;
-    static fiber::script::ScriptResult query_var_fn(void *userdata, const HostCallFrame &frame) noexcept;
-    static fiber::script::ScriptResult header_var_fn(void *userdata, const HostCallFrame &frame) noexcept;
-    static fiber::script::ScriptResult cookie_var_fn(void *userdata, const HostCallFrame &frame) noexcept;
-    static fiber::script::ScriptResult req_field_fn(void *userdata, const HostCallFrame &frame) noexcept;
+    static fiber::script::AbiResult path_var_fn(void *userdata, const HostCallFrame &frame) noexcept;
+    static fiber::script::AbiResult query_var_fn(void *userdata, const HostCallFrame &frame) noexcept;
+    static fiber::script::AbiResult header_var_fn(void *userdata, const HostCallFrame &frame) noexcept;
+    static fiber::script::AbiResult cookie_var_fn(void *userdata, const HostCallFrame &frame) noexcept;
+    static fiber::script::AbiResult req_field_fn(void *userdata, const HostCallFrame &frame) noexcept;
 
     const HostCallable *get_or_create(VarKind kind, std::string_view namespace_name, std::string_view key) const;
 

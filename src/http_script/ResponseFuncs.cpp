@@ -23,6 +23,7 @@ namespace fiber::http_script {
 
 namespace {
 
+using fiber::script::AbiResult;
 using fiber::script::AsyncTask;
 using fiber::script::ConstValueHandle;
 using fiber::script::GcHeap;
@@ -33,7 +34,6 @@ using fiber::script::JsNodeType;
 using fiber::script::JsValue;
 using fiber::script::Library;
 using fiber::script::ScriptAbortReason;
-using fiber::script::ScriptResult;
 using fiber::script::ValueHandle;
 using fiber::script::std_lib::binary_bytes;
 using fiber::script::std_lib::node_as_text;
@@ -43,21 +43,21 @@ ScriptExchangeCtx *ctx_of(const Library::HostCallFrame &frame) noexcept {
     return static_cast<ScriptExchangeCtx *>(frame.attach);
 }
 
-ScriptResult error_exn(GcHeap &heap, std::string_view message) noexcept {
+AbiResult error_exn(GcHeap &heap, std::string_view message) noexcept {
     static constexpr char kErrorName[] = "Error";
     GcHeap::LocalMark mark(heap);
     ValueHandle ex = heap.local_value();
     if (!ex) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
     if (!fiber::script::gc_make_exception(&heap, ex, -1, kErrorName, sizeof(kErrorName) - 1, message.data(),
                                           message.size())) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
-    return ScriptResult::exception(*ex);
+    return AbiResult::exception(*ex);
 }
 
-ScriptResult invalid_state() noexcept { return ScriptResult::abort(ScriptAbortReason::InvalidState); }
+AbiResult invalid_state() noexcept { return AbiResult::abort(ScriptAbortReason::InvalidState); }
 
 // Reads a named field off an Object as a JsValue (Undefined when absent or non-object).
 // gc_object_get_key is a pure hash read (no allocation, no GC), so the returned heap ref
@@ -83,7 +83,7 @@ int as_int(const JsValue &v, int def) noexcept {
 
 // ---- resp.setHeader / resp.addHeader (sync) ----
 
-ScriptResult set_header_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult set_header_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     auto *ctx = ctx_of(frame);
     if (ctx == nullptr || args.args == nullptr || args.argc < 2) {
         return invalid_state();
@@ -98,10 +98,10 @@ ScriptResult set_header_fn(void * /*userdata*/, const Library::HostCallFrame &fr
         return error_exn(frame.runtime, "set header require string key value");
     }
     ctx->set_response_header(name, value_buf);
-    return ScriptResult::success(JsValue::make_null());
+    return AbiResult::success(JsValue::make_null());
 }
 
-ScriptResult add_header_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult add_header_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     auto *ctx = ctx_of(frame);
     if (ctx == nullptr || args.args == nullptr || args.argc < 2) {
         return invalid_state();
@@ -116,7 +116,7 @@ ScriptResult add_header_fn(void * /*userdata*/, const Library::HostCallFrame &fr
         return error_exn(frame.runtime, "add header require string key value");
     }
     ctx->add_response_header(name, value_buf);
-    return ScriptResult::success(JsValue::make_null());
+    return AbiResult::success(JsValue::make_null());
 }
 
 // ---- resp.sendJson(status, body) [async] ----
@@ -133,7 +133,7 @@ AsyncTask send_json_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
     if (!result) {
         co_return error_exn(*heap, "error send json");
     }
-    co_return ScriptResult::success(JsValue::make_null());
+    co_return AbiResult::success(JsValue::make_null());
 }
 
 // ---- resp.send(status) [async] ----
@@ -149,7 +149,7 @@ AsyncTask send_one_fn(void * /*userdata*/, const Library::HostCallFrame &frame, 
     if (!result) {
         co_return error_exn(*heap, "error send");
     }
-    co_return ScriptResult::success(JsValue::make_null());
+    co_return AbiResult::success(JsValue::make_null());
 }
 
 // ---- resp.send(status, body) [async] ----
@@ -174,7 +174,7 @@ AsyncTask send_two_fn(void * /*userdata*/, const Library::HostCallFrame &frame, 
         if (!result) {
             co_return error_exn(*heap, "error write binary response");
         }
-        co_return ScriptResult::success(JsValue::make_null());
+        co_return AbiResult::success(JsValue::make_null());
     }
 
     if (kind == JsNodeType::String) {
@@ -192,7 +192,7 @@ AsyncTask send_two_fn(void * /*userdata*/, const Library::HostCallFrame &frame, 
         if (!result) {
             co_return error_exn(*heap, "error textual response");
         }
-        co_return ScriptResult::success(JsValue::make_null());
+        co_return AbiResult::success(JsValue::make_null());
     }
 
     // Numbers / objects / arrays / null / boolean -> JSON.
@@ -200,12 +200,12 @@ AsyncTask send_two_fn(void * /*userdata*/, const Library::HostCallFrame &frame, 
     if (!result) {
         co_return error_exn(*heap, "error send json");
     }
-    co_return ScriptResult::success(JsValue::make_null());
+    co_return AbiResult::success(JsValue::make_null());
 }
 
 // ---- resp.addCookie(cookie) (sync) ----
 
-ScriptResult add_cookie_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult add_cookie_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     auto *ctx = ctx_of(frame);
     GcHeap *heap = &frame.runtime;
     if (ctx == nullptr || heap == nullptr || args.args == nullptr || args.argc < 1) {
@@ -213,12 +213,12 @@ ScriptResult add_cookie_fn(void * /*userdata*/, const Library::HostCallFrame &fr
     }
     const JsValue &node = args.args[0];
     if (js_value_type(node) != JsNodeType::Object) {
-        return ScriptResult::success(JsValue::make_boolean(false));
+        return AbiResult::success(JsValue::make_boolean(false));
     }
 
     std::string_view name = field_string(*heap, node, "name", 4);
     if (name.empty()) {
-        return ScriptResult::success(JsValue::make_boolean(false));
+        return AbiResult::success(JsValue::make_boolean(false));
     }
     std::string value_buf;
     node_as_text(get_field(*heap, node, "value", 5), value_buf);
@@ -252,10 +252,10 @@ ScriptResult add_cookie_fn(void * /*userdata*/, const Library::HostCallFrame &fr
 
     std::string encoded;
     if (!fiber::util::encode_set_cookie(cookie, encoded)) {
-        return ScriptResult::success(JsValue::make_boolean(false));
+        return AbiResult::success(JsValue::make_boolean(false));
     }
     ctx->add_response_header("Set-Cookie", encoded);
-    return ScriptResult::success(JsValue::make_boolean(true));
+    return AbiResult::success(JsValue::make_boolean(true));
 }
 
 } // namespace

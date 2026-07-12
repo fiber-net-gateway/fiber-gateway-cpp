@@ -31,10 +31,10 @@ public:
         std::uint32_t argc = 0;
     };
 
-    using Function = ScriptResult (*)(void *userdata, const HostCallFrame &frame, Arguments arguments) noexcept;
+    using Function = AbiResult (*)(void *userdata, const HostCallFrame &frame, Arguments arguments) noexcept;
     using AsyncFunction = AsyncTask (*)(void *userdata, const HostCallFrame &frame, Arguments arguments) noexcept;
 
-    using Constant = ScriptResult (*)(void *userdata, const HostCallFrame &frame) noexcept;
+    using Constant = AbiResult (*)(void *userdata, const HostCallFrame &frame) noexcept;
     using AsyncConstant = AsyncTask (*)(void *userdata, const HostCallFrame &frame) noexcept;
 
     struct HostCallable {

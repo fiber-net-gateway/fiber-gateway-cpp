@@ -12,9 +12,7 @@ namespace fiber::script::std_lib {
 
 namespace {
 
-ScriptResult type_error() noexcept {
-    return ScriptResult::exception(JsValue::make_exception(ExceptionKind::TypeError));
-}
+AbiResult type_error() noexcept { return AbiResult::exception(JsValue::make_exception(ExceptionKind::TypeError)); }
 
 // Mirrors Java ObjectsFuncs.firstObj: the primary object argument must be an Object,
 // otherwise a catchable TypeError (Java ScriptExecException). Returns the GcObject on
@@ -83,8 +81,7 @@ bool collect_object_entries(GcHeap *heap, const GcObject *obj, bool keys, JsValu
 
 // ---- Object.assign(target, source, ...sources) ----
 
-ScriptResult object_assign_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
-                              Library::Arguments args) noexcept {
+AbiResult object_assign_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 2) {
         return type_error();
     }
@@ -94,20 +91,19 @@ ScriptResult object_assign_fn(void * /*userdata*/, const Library::HostCallFrame 
     }
     GcHeap *heap = &frame.runtime;
     if (heap == nullptr) {
-        return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
     for (std::uint32_t i = 1; i < args.argc; ++i) {
         if (!copy_object(heap, target_val, args.args[i])) {
-            return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+            return AbiResult::abort(ScriptAbortReason::OutOfMemory);
         }
     }
-    return ScriptResult::success(target_val);
+    return AbiResult::success(target_val);
 }
 
 // ---- Object.keys(obj) / Object.values(obj) ----
 
-ScriptResult object_keys_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
-                            Library::Arguments args) noexcept {
+AbiResult object_keys_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
         return type_error();
     }
@@ -117,17 +113,16 @@ ScriptResult object_keys_fn(void * /*userdata*/, const Library::HostCallFrame &f
     }
     GcHeap *heap = &frame.runtime;
     if (heap == nullptr) {
-        return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
     JsValue result;
     if (!collect_object_entries(heap, obj, /*keys=*/true, result)) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
-    return ScriptResult::success(result);
+    return AbiResult::success(result);
 }
 
-ScriptResult object_values_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
-                              Library::Arguments args) noexcept {
+AbiResult object_values_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
         return type_error();
     }
@@ -137,19 +132,19 @@ ScriptResult object_values_fn(void * /*userdata*/, const Library::HostCallFrame 
     }
     GcHeap *heap = &frame.runtime;
     if (heap == nullptr) {
-        return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
     JsValue result;
     if (!collect_object_entries(heap, obj, /*keys=*/false, result)) {
-        return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
-    return ScriptResult::success(result);
+    return AbiResult::success(result);
 }
 
 // ---- Object.deleteProperties(obj, key, ...keys) ----
 
-ScriptResult object_delete_properties_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
-                                         Library::Arguments args) noexcept {
+AbiResult object_delete_properties_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
+                                      Library::Arguments args) noexcept {
     if (!args.args || args.argc < 2) {
         return type_error();
     }
@@ -159,7 +154,7 @@ ScriptResult object_delete_properties_fn(void * /*userdata*/, const Library::Hos
     }
     GcHeap *heap = &frame.runtime;
     if (heap == nullptr) {
-        return ScriptResult::abort(ScriptAbortReason::InvalidState);
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
     // Java remove() only acts on textual keys (isTextual guard); non-string keys are
     // silently skipped. gc_object_remove returns false for both "not found" and OOM;
@@ -172,7 +167,7 @@ ScriptResult object_delete_properties_fn(void * /*userdata*/, const Library::Hos
         }
         (void) gc_object_remove(heap, ValueHandle(&target_val), key);
     }
-    return ScriptResult::success(target_val);
+    return AbiResult::success(target_val);
 }
 
 } // namespace

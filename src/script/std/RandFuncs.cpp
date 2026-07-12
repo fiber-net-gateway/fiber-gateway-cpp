@@ -19,13 +19,9 @@ namespace {
 
 // ---- catchable errors (mirror Java's ScriptExecException / IllegalArgumentException) ----
 
-ScriptResult type_error() noexcept {
-    return ScriptResult::exception(JsValue::make_exception(ExceptionKind::TypeError));
-}
+AbiResult type_error() noexcept { return AbiResult::exception(JsValue::make_exception(ExceptionKind::TypeError)); }
 
-ScriptResult range_error() noexcept {
-    return ScriptResult::exception(JsValue::make_exception(ExceptionKind::RangeError));
-}
+AbiResult range_error() noexcept { return AbiResult::exception(JsValue::make_exception(ExceptionKind::RangeError)); }
 
 // ---- numeric coercion helpers ----
 
@@ -77,8 +73,7 @@ std::int64_t next_bounded(std::uint64_t bound) noexcept {
 
 // ---- rand.random(max) ----
 
-ScriptResult random_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
-                       Library::Arguments args) noexcept {
+AbiResult random_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
         return type_error();
     }
@@ -102,16 +97,15 @@ ScriptResult random_fn(void * /*userdata*/, const Library::HostCallFrame & /*fra
     if (bound <= 0) {
         return range_error();
     }
-    return ScriptResult::success(JsValue::make_integer(next_bounded(static_cast<std::uint64_t>(bound))));
+    return AbiResult::success(JsValue::make_integer(next_bounded(static_cast<std::uint64_t>(bound))));
 }
 
 // ---- rand.canary(ratio, ...keys) ----
 
-ScriptResult canary_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,
-                       Library::Arguments args) noexcept {
+AbiResult canary_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
         // ratio is required; the resolver rejects arity < 1, but guard defensively.
-        return ScriptResult::success(JsValue::make_boolean(false));
+        return AbiResult::success(JsValue::make_boolean(false));
     }
     const JsValue &ratio_val = args.args[0];
 
@@ -134,16 +128,16 @@ ScriptResult canary_fn(void * /*userdata*/, const Library::HostCallFrame & /*fra
     }
 
     if (ratio <= 0) {
-        return ScriptResult::success(JsValue::make_boolean(false));
+        return AbiResult::success(JsValue::make_boolean(false));
     }
     if (ratio >= 100) {
-        return ScriptResult::success(JsValue::make_boolean(true));
+        return AbiResult::success(JsValue::make_boolean(true));
     }
 
     // No keys -> random bucket, as in Java (non-deterministic).
     if (args.argc == 1) {
         bool hit = static_cast<std::int64_t>(next_bounded(100)) < ratio;
-        return ScriptResult::success(JsValue::make_boolean(hit));
+        return AbiResult::success(JsValue::make_boolean(hit));
     }
 
     // With keys -> deterministic bucket from CRC-32 over the non-empty key texts. A single
@@ -160,7 +154,7 @@ ScriptResult canary_fn(void * /*userdata*/, const Library::HostCallFrame & /*fra
     }
     crc ^= 0xFFFFFFFFu;
     bool hit = (static_cast<std::uint64_t>(crc) % 100u) < static_cast<std::uint64_t>(ratio);
-    return ScriptResult::success(JsValue::make_boolean(hit));
+    return AbiResult::success(JsValue::make_boolean(hit));
 }
 
 } // namespace

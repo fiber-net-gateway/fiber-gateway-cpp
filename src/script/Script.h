@@ -17,9 +17,9 @@ public:
     Script() = default;
     explicit Script(std::shared_ptr<ir::Compiled> compiled);
 
-    fiber::async::Task<ScriptResult> exec_async(fiber::script::JsValue root, void *attach, fiber::script::GcHeap &heap);
+    fiber::async::Task<AbiResult> exec_async(fiber::script::JsValue root, void *attach, fiber::script::GcHeap &heap);
 
-    ScriptResult exec_sync(fiber::script::JsValue root, void *attach, fiber::script::GcHeap &heap);
+    AbiResult exec_sync(fiber::script::JsValue root, void *attach, fiber::script::GcHeap &heap);
 
     bool contains_async() const;
 

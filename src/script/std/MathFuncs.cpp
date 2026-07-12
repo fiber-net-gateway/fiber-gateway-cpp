@@ -22,11 +22,9 @@ namespace {
 // math.abs likewise has only the integer/double cases. Non-numeric input
 // raises a catchable TypeError, mirroring Java's ScriptExecException.
 
-ScriptResult type_error() noexcept {
-    return ScriptResult::exception(JsValue::make_exception(ExceptionKind::TypeError));
-}
+AbiResult type_error() noexcept { return AbiResult::exception(JsValue::make_exception(ExceptionKind::TypeError)); }
 
-ScriptResult floor_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/, Library::Arguments args) noexcept {
+AbiResult floor_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
         return type_error();
     }
@@ -34,16 +32,16 @@ ScriptResult floor_fn(void * /*userdata*/, const Library::HostCallFrame & /*fram
     switch (js_value_type(value)) {
         case JsNodeType::Integer:
             // Integral input is returned unchanged, as in Java.
-            return ScriptResult::success(value);
+            return AbiResult::success(value);
         case JsNodeType::Float:
-            return ScriptResult::success(
+            return AbiResult::success(
                     JsValue::make_integer(static_cast<std::int64_t>(std::floor(js_value_double(value)))));
         default:
             return type_error();
     }
 }
 
-ScriptResult abs_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/, Library::Arguments args) noexcept {
+AbiResult abs_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
         return type_error();
     }
@@ -54,12 +52,12 @@ ScriptResult abs_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*
             // std::abs(INT64_MIN) is undefined; Java's Math.abs(Long.MIN_VALUE)
             // returns Long.MIN_VALUE unchanged, so preserve that behavior.
             if (v == std::numeric_limits<std::int64_t>::min()) {
-                return ScriptResult::success(value);
+                return AbiResult::success(value);
             }
-            return ScriptResult::success(JsValue::make_integer(std::abs(v)));
+            return AbiResult::success(JsValue::make_integer(std::abs(v)));
         }
         case JsNodeType::Float:
-            return ScriptResult::success(JsValue::make_float(std::fabs(js_value_double(value))));
+            return AbiResult::success(JsValue::make_float(std::fabs(js_value_double(value))));
         default:
             return type_error();
     }
