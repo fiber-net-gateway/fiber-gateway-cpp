@@ -55,7 +55,7 @@ Validate a custom config file:
 
 - Full nginx compatibility.
 - Variable support such as `$host`, `$remote_addr`, or `$request_uri`.
-- `rewrite`, `if`, regex `location`, `include`, or dynamic config reload.
+- `rewrite`, `if`, regex `location`, or dynamic config reload.
 - DNS-based upstream resolution.
 - WebSocket proxying, cache, gzip, upstream HTTP/2, or active health checks.
 - Full logging subsystem compatibility with nginx.
@@ -100,12 +100,32 @@ Supported lexical rules:
 - Unquoted words are allowed for normal directive arguments.
 - Braces and semicolons follow nginx-style layout.
 
+### File Paths and `include`
+
+Paths referenced by a config directive - `script_file`, `certificate`,
+`certificate_key`, and the target of `include` - are resolved as:
+
+- **Absolute** paths (leading `/`) are used as-is.
+- **Relative** paths are resolved against the directory of the config file that
+  contains the directive, **not** the process working directory. The bundled
+  `conf/lite_nginx.conf` therefore uses paths like `scripts/health.js` (next to
+  the conf) regardless of where the binary is launched from.
+
+`include <path>;` splices another config file's top-level directives in place of
+the directive, anywhere a directive list is valid (top-level, or inside `http`,
+`server`, `location`, `upstream`, `connection_pool`). An included file's own
+paths and nested `include`s resolve relative to the included file, and include
+cycles are detected and rejected.
+
 ## Supported Directives In V1
 
 Top level:
 
 - `worker_processes <n>;`
 - `http { ... }`
+- `include <path>;` - splice another config file's top-level directives here (valid
+  in any directive-list context: top-level, `http`, `server`, `location`, `upstream`,
+  `connection_pool`). See "File Paths and `include`" above.
 
 `http` block:
 

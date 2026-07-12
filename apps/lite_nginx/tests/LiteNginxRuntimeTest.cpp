@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <future>
 #include <netinet/in.h>
@@ -1143,6 +1144,45 @@ http {
     auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
     ASSERT_FALSE(runtime.has_value());
     EXPECT_NE(runtime.error().message.find("script_file not found"), std::string::npos);
+}
+
+// A relative script_file (resolved against the config file's directory at parse time) is
+// opened and compiled by RuntimeBuilder regardless of the process pwd. This exercises the
+// full path-resolution + open + compile pipeline end to end via load_from_file.
+TEST(LiteNginxRuntimeTest, RelativeScriptFileCompilesAfterResolution) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "lite_nginx_rel_script_e2e";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "scripts", ec);
+    {
+        std::ofstream f(dir / "scripts" / "x.js", std::ios::binary | std::ios::trunc);
+        f << "resp.sendJson(200, {msg: \"hello-relative\", path: req.getPath()});";
+    }
+    {
+        std::ofstream f(dir / "main.conf", std::ios::binary | std::ios::trunc);
+        f << R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:8080;
+    server { server_name localhost; location /* { script_file scripts/x.js; } }
+}
+)";
+    }
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_file((dir / "main.conf").string());
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    // Resolved to an absolute path under the config directory (not the bare "scripts/x.js").
+    const auto &script_file = config->http.servers[0].locations[0].script_file;
+    EXPECT_EQ(script_file.front(), '/') << script_file;
+    EXPECT_NE(script_file.find("scripts/x.js"), std::string::npos) << script_file;
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    ASSERT_EQ(runtime->servers[0].locations.size(), 1u);
+    EXPECT_TRUE(runtime->servers[0].locations[0].script != nullptr);
+
+    fs::remove_all(dir, ec);
 }
 
 TEST(LiteNginxRuntimeTest, ScriptFileAndProxyPassAreMutuallyExclusive) {
