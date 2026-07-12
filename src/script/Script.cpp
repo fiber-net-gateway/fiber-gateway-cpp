@@ -27,7 +27,7 @@ struct SwitchAsyncAwaiter {
 Script::Script(std::shared_ptr<ir::Compiled> compiled) : compiled_(std::move(compiled)) {}
 
 fiber::async::Task<ScriptResult> Script::exec_async(fiber::script::JsValue root, void *attach,
-                                                 fiber::script::GcHeap &heap) {
+                                                    fiber::script::GcHeap &heap) {
     auto compiled = compiled_;
     if (!compiled) {
         co_return ScriptResult::abort(ScriptAbortReason::InvalidState);

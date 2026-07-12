@@ -109,8 +109,7 @@ struct alignas(16) AbiResult {
         payload.value = value;
     }
 
-    AbiResult(std::unexpected<fiber::script::JsValue> unexpected) noexcept :
-        kind(AbiResultKind::Exception), payload{} {
+    AbiResult(std::unexpected<fiber::script::JsValue> unexpected) noexcept : kind(AbiResultKind::Exception), payload{} {
         payload.value = unexpected.error();
     }
 
