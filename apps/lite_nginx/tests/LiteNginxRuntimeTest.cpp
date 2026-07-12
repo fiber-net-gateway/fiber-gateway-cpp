@@ -1127,6 +1127,94 @@ http {
     ::unlink(script_path.c_str());
 }
 
+// Drives a single GET /x through a script_file location whose script is `script_body`, and
+// returns the raw HTTP/1.1 response. Used to check how run_script synthesizes a response from
+// the script outcome (Value -> 200+json, Void -> 204, Exception -> 500+json, Abort -> 500+json)
+// when the script never called resp.* / http.proxyPass itself.
+std::string run_script_result_response(std::string_view script_body) {
+    const std::string script_path = "/tmp/lite_nginx_script_result_test.js";
+    {
+        std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
+        if (!file.good()) {
+            return {};
+        }
+        file << script_body;
+    }
+
+    std::uint16_t port = reserve_loopback_port();
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location /* {
+            script_file SCRIPT_PATH;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_path);
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "script_result.conf");
+    if (!config.has_value()) {
+        ::unlink(script_path.c_str());
+        return {};
+    }
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    if (!runtime.has_value()) {
+        ::unlink(script_path.c_str());
+        return {};
+    }
+    RuntimeHarness harness(*runtime);
+
+    int client = connect_client(harness.port());
+    const char request[] = "GET /x HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    (void) ::send(client, request, sizeof(request) - 1, 0);
+    std::string response = recv_http_response(client);
+    ::close(client);
+    ::unlink(script_path.c_str());
+    return response;
+}
+
+// A script that returns a Value is served as 200 + a JSON body encoding that value.
+TEST(LiteNginxRuntimeTest, ScriptReturnValueServes200Json) {
+    std::string response = run_script_result_response("return {a: 1, b: [2, 3]};");
+    ASSERT_FALSE(response.empty()) << "no response";
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("application/json"), std::string::npos) << response;
+    EXPECT_NE(response.find("\"a\":1"), std::string::npos) << response;
+    EXPECT_NE(response.find("\"b\":[2,3]"), std::string::npos) << response;
+}
+
+// A script that ends without producing a value (bare `return;` / fall-through) is Void and
+// served as 204 No Content.
+TEST(LiteNginxRuntimeTest, ScriptReturnVoidServes204) {
+    std::string response = run_script_result_response("var x = 42;");
+    ASSERT_FALSE(response.empty()) << "no response";
+    EXPECT_NE(response.find("HTTP/1.1 204 No Content\r\n"), std::string::npos) << response;
+}
+
+// An uncaught tagged TypeError (no heap payload) is served as 500 + {"error":"TypeError"}.
+TEST(LiteNginxRuntimeTest, ScriptTaggedExceptionServes500JsonErrorName) {
+    std::string response = run_script_result_response("hash.md5(123);");
+    ASSERT_FALSE(response.empty()) << "no response";
+    EXPECT_NE(response.find("HTTP/1.1 500"), std::string::npos) << response;
+    EXPECT_NE(response.find("application/json"), std::string::npos) << response;
+    EXPECT_NE(response.find("\"error\":\"TypeError\""), std::string::npos) << response;
+}
+
+// An uncaught heap exception (JSON.parse failure -> SyntaxError) is served as 500 + the
+// exception's serialized form, which carries its name.
+TEST(LiteNginxRuntimeTest, ScriptHeapExceptionServes500JsonWithName) {
+    std::string response = run_script_result_response("JSON.parse(\"{bad\");");
+    ASSERT_FALSE(response.empty()) << "no response";
+    EXPECT_NE(response.find("HTTP/1.1 500"), std::string::npos) << response;
+    EXPECT_NE(response.find("application/json"), std::string::npos) << response;
+    EXPECT_NE(response.find("\"name\":\"SyntaxError\""), std::string::npos) << response;
+}
+
 TEST(LiteNginxRuntimeTest, ScriptFileLocationRejectsMissingFile) {
     auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(R"(
 worker_processes 1;

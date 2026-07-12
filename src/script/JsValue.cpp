@@ -177,6 +177,20 @@ JsNodeType js_value_type(const JsValue &value) {
 
 ExceptionKind js_value_exception_kind(const JsValue &value) { return static_cast<ExceptionKind>(value.subtag); }
 
+std::string_view exception_kind_name(ExceptionKind kind) noexcept {
+    switch (kind) {
+        case ExceptionKind::TypeError:
+            return "TypeError";
+        case ExceptionKind::RangeError:
+            return "RangeError";
+        case ExceptionKind::ReferenceError:
+            return "ReferenceError";
+        case ExceptionKind::IterationError:
+            return "IterationError";
+    }
+    return "Error";
+}
+
 bool js_value_is_string(const JsValue &value) { return js_value_type(value) == JsNodeType::String; }
 
 bool js_value_is_binary(const JsValue &value) { return js_value_type(value) == JsNodeType::Binary; }
