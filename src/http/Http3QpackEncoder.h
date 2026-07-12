@@ -8,6 +8,7 @@
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
+#include "Http3QpackStaticTable.h"
 #include "HttpCommon.h"
 
 namespace fiber::http {
@@ -39,6 +40,8 @@ public:
 
 private:
     [[nodiscard]] common::IoErr ensure_prefix() noexcept;
+    [[nodiscard]] common::IoErr dispatch(std::string_view name, std::string_view value,
+                                         const Http3QpackStaticTable::FindResult &result) noexcept;
     [[nodiscard]] common::IoErr append_indexed(std::uint32_t index) noexcept;
     [[nodiscard]] common::IoErr append_literal_static_name(std::uint32_t name_index, std::string_view value) noexcept;
     [[nodiscard]] common::IoErr append_literal_name(std::string_view name, std::string_view value) noexcept;

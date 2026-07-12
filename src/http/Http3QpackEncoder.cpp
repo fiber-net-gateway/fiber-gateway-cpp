@@ -19,11 +19,6 @@ constexpr std::string_view kMethodName = ":method";
 constexpr std::string_view kSchemeName = ":scheme";
 constexpr std::string_view kAuthorityName = ":authority";
 constexpr std::string_view kPathName = ":path";
-constexpr std::uint64_t kStatusNameHash = http_header_name_hash(kStatusName);
-constexpr std::uint64_t kMethodNameHash = http_header_name_hash(kMethodName);
-constexpr std::uint64_t kSchemeNameHash = http_header_name_hash(kSchemeName);
-constexpr std::uint64_t kAuthorityNameHash = http_header_name_hash(kAuthorityName);
-constexpr std::uint64_t kPathNameHash = http_header_name_hash(kPathName);
 
 [[nodiscard]] std::string_view format_status_value(int status_code, std::array<char, 3> &scratch) noexcept {
     if (status_code < 100 || status_code > 999) {
@@ -75,6 +70,132 @@ constexpr std::uint64_t kPathNameHash = http_header_name_hash(kPathName);
     }
 }
 
+// Pseudo-header static-table indices (RFC 9204). The QPACK static table is fixed
+// by spec; these mirror the order in Http3QpackStaticTable.cpp. Used to resolve
+// pseudo-headers in O(1) without scanning the table.
+namespace pseudo_index {
+constexpr std::uint32_t kAuthority = 0; // :authority ""
+constexpr std::uint32_t kPath = 1; // :path "/"
+constexpr std::uint32_t kMethodFirst = 15; // first :method entry (CONNECT)
+constexpr std::uint32_t kSchemeFirst = 22; // first :scheme entry (http)
+constexpr std::uint32_t kStatusFirst = 24; // first :status entry (103)
+} // namespace pseudo_index
+
+// Each resolver returns the FindResult the general find() would produce for the
+// given pseudo-header value, but in O(1). Exact (name,value) matches map to the
+// unique static index; anything else falls back to the first same-name index
+// (NameMatch), exactly as the linear find() would.
+
+[[nodiscard]] Http3QpackStaticTable::FindResult resolve_status(int status_code) noexcept {
+    using K = Http3QpackStaticTable::FindKind;
+    std::uint32_t idx;
+    switch (status_code) {
+        case 103:
+            idx = 24;
+            break;
+        case 200:
+            idx = 25;
+            break;
+        case 304:
+            idx = 26;
+            break;
+        case 404:
+            idx = 27;
+            break;
+        case 503:
+            idx = 28;
+            break;
+        case 100:
+            idx = 63;
+            break;
+        case 204:
+            idx = 64;
+            break;
+        case 206:
+            idx = 65;
+            break;
+        case 302:
+            idx = 66;
+            break;
+        case 400:
+            idx = 67;
+            break;
+        case 403:
+            idx = 68;
+            break;
+        case 421:
+            idx = 69;
+            break;
+        case 425:
+            idx = 70;
+            break;
+        case 500:
+            idx = 71;
+            break;
+        default:
+            return {.kind = K::NameMatch, .index = pseudo_index::kStatusFirst};
+    }
+    return {.kind = K::EntryMatch, .index = idx};
+}
+
+[[nodiscard]] Http3QpackStaticTable::FindResult resolve_method(HttpMethod method) noexcept {
+    using K = Http3QpackStaticTable::FindKind;
+    std::uint32_t idx;
+    switch (method) {
+        case HttpMethod::Connect:
+            idx = 15;
+            break;
+        case HttpMethod::Delete:
+            idx = 16;
+            break;
+        case HttpMethod::Get:
+            idx = 17;
+            break;
+        case HttpMethod::Head:
+            idx = 18;
+            break;
+        case HttpMethod::Options:
+            idx = 19;
+            break;
+        case HttpMethod::Post:
+            idx = 20;
+            break;
+        case HttpMethod::Put:
+            idx = 21;
+            break;
+        default:
+            return {.kind = K::NameMatch, .index = pseudo_index::kMethodFirst};
+    }
+    return {.kind = K::EntryMatch, .index = idx};
+}
+
+[[nodiscard]] Http3QpackStaticTable::FindResult resolve_scheme(std::string_view scheme) noexcept {
+    using K = Http3QpackStaticTable::FindKind;
+    if (scheme == "https") {
+        return {.kind = K::EntryMatch, .index = 23};
+    }
+    if (scheme == "http") {
+        return {.kind = K::EntryMatch, .index = 22};
+    }
+    return {.kind = K::NameMatch, .index = pseudo_index::kSchemeFirst};
+}
+
+[[nodiscard]] Http3QpackStaticTable::FindResult resolve_path(std::string_view path) noexcept {
+    using K = Http3QpackStaticTable::FindKind;
+    if (path == "/") {
+        return {.kind = K::EntryMatch, .index = pseudo_index::kPath};
+    }
+    return {.kind = K::NameMatch, .index = pseudo_index::kPath};
+}
+
+[[nodiscard]] Http3QpackStaticTable::FindResult resolve_authority(std::string_view authority) noexcept {
+    using K = Http3QpackStaticTable::FindKind;
+    if (authority.empty()) {
+        return {.kind = K::EntryMatch, .index = pseudo_index::kAuthority};
+    }
+    return {.kind = K::NameMatch, .index = pseudo_index::kAuthority};
+}
+
 } // namespace
 
 Http3QpackEncoder::Http3QpackEncoder(void *output_ctx, OutputOps output_ops) noexcept :
@@ -93,7 +214,7 @@ common::IoErr Http3QpackEncoder::encode_status(int status_code) noexcept {
     if (value.empty()) {
         return common::IoErr::Invalid;
     }
-    return encode_field(kStatusName, kStatusNameHash, value);
+    return dispatch(kStatusName, value, resolve_status(status_code));
 }
 
 common::IoErr Http3QpackEncoder::encode_method(HttpMethod method) noexcept {
@@ -101,23 +222,29 @@ common::IoErr Http3QpackEncoder::encode_method(HttpMethod method) noexcept {
     if (value.empty()) {
         return common::IoErr::Invalid;
     }
-    return encode_field(kMethodName, kMethodNameHash, value);
+    return dispatch(kMethodName, value, resolve_method(method));
 }
 
 common::IoErr Http3QpackEncoder::encode_scheme(std::string_view scheme) noexcept {
-    return encode_field(kSchemeName, kSchemeNameHash, scheme);
+    return dispatch(kSchemeName, scheme, resolve_scheme(scheme));
 }
 
 common::IoErr Http3QpackEncoder::encode_authority(std::string_view authority) noexcept {
-    return encode_field(kAuthorityName, kAuthorityNameHash, authority);
+    return dispatch(kAuthorityName, authority, resolve_authority(authority));
 }
 
 common::IoErr Http3QpackEncoder::encode_path(std::string_view path) noexcept {
-    return encode_field(kPathName, kPathNameHash, path);
+    return dispatch(kPathName, path, resolve_path(path));
 }
 
 common::IoErr Http3QpackEncoder::encode_field(std::string_view name, std::uint64_t name_hash,
                                               std::string_view value) noexcept {
+    const std::uint64_t effective_name_hash = name_hash != 0 ? name_hash : http_header_name_hash(name);
+    return dispatch(name, value, Http3QpackStaticTable::find(name, effective_name_hash, value));
+}
+
+common::IoErr Http3QpackEncoder::dispatch(std::string_view name, std::string_view value,
+                                          const Http3QpackStaticTable::FindResult &result) noexcept {
     FIBER_ASSERT(!finished_);
     if (name.empty() || name.size() > options_.max_string_size || value.size() > options_.max_string_size) {
         return common::IoErr::Invalid;
@@ -128,8 +255,6 @@ common::IoErr Http3QpackEncoder::encode_field(std::string_view name, std::uint64
         return err;
     }
 
-    const std::uint64_t effective_name_hash = name_hash != 0 ? name_hash : http_header_name_hash(name);
-    const Http3QpackStaticTable::FindResult result = Http3QpackStaticTable::find(name, effective_name_hash, value);
     if (result.kind == Http3QpackStaticTable::FindKind::EntryMatch) {
         return append_indexed(result.index);
     }
