@@ -4,18 +4,26 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <future>
+#include <memory>
 #include <signal.h>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <vector>
 
 #include "async/Spawn.h"
 #include "async/Task.h"
 #include "common/IoError.h"
+#include "common/mem/IoBuf.h"
+#include "common/mem/IoBufChain.h"
 #include "event/EventLoopGroup.h"
+#include "http/HttpTransport.h"
+#include "net/SocketAddress.h"
+#include "net/TcpListener.h"
 #include "net/TlsContext.h"
 #include "net/TlsOptions.h"
 #include "net/detail/TlsStreamFd.h"
@@ -241,6 +249,153 @@ TEST(TlsStreamFdTest, CrossLoopHandshakeAndReadWriteUseOwnerPoller) {
     auto close_future = close_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() { return close_tls_streams(server_stream, client_stream, &close_promise); });
     ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
+
+    group.stop();
+    group.join();
+}
+
+// Build an IoBufChain of segments with the given sizes. Each segment i is filled
+// with a distinct byte (0x40 + i) so that reordering, drops, or duplication in the
+// coalesce path show up as a mismatched byte. Returns the expected concatenation.
+std::string build_distinct_chain(fiber::mem::IoBufNodePool &pool, fiber::mem::IoBufChain &chain,
+                                  const std::vector<std::size_t> &sizes) {
+    std::string expected;
+    for (std::size_t i = 0; i < sizes.size(); ++i) {
+        std::size_t n = sizes[i];
+        fiber::mem::IoBuf buf = fiber::mem::IoBuf::allocate(n);
+        std::memset(buf.writable_data(), static_cast<int>(0x40 + (i & 0x3f)), n);
+        buf.commit(n);
+        chain.append(std::move(buf));
+        expected.append(static_cast<std::size_t>(n), static_cast<char>(0x40 + (i & 0x3f)));
+    }
+    return expected;
+}
+
+DetachedTask run_transport_server(fiber::http::TlsTransport *transport,
+                                  std::promise<fiber::common::IoResult<std::string>> *done) {
+    auto handshake_result = co_await transport->handshake(5s);
+    if (!handshake_result) {
+        done->set_value(std::unexpected(handshake_result.error()));
+        co_return;
+    }
+
+    std::string received;
+    std::array<char, 8192> read_buf{};
+    for (;;) {
+        auto read_result = co_await transport->read(read_buf.data(), read_buf.size(), 5s);
+        if (!read_result) {
+            done->set_value(std::unexpected(read_result.error()));
+            co_return;
+        }
+        if (*read_result == 0) {
+            break;
+        }
+        received.append(read_buf.data(), *read_result);
+    }
+    done->set_value(std::move(received));
+    co_return;
+}
+
+DetachedTask run_transport_client(fiber::http::TlsTransport *transport, fiber::mem::IoBufChain chain,
+                                  std::promise<fiber::common::IoResult<std::size_t>> *done) {
+    auto handshake_result = co_await transport->handshake(5s);
+    if (!handshake_result) {
+        done->set_value(std::unexpected(handshake_result.error()));
+        co_return;
+    }
+
+    auto write_result = co_await transport->writev(chain, 5s);
+    if (!write_result) {
+        done->set_value(std::unexpected(write_result.error()));
+        co_return;
+    }
+
+    // Close-notify so the server sees EOF after the payload.
+    (void) co_await transport->shutdown(5s);
+    done->set_value(*write_result);
+    co_return;
+}
+
+DetachedTask close_transport(fiber::http::TlsTransport *transport, std::promise<void> *done) {
+    if (transport) {
+        transport->close();
+        delete transport;
+    }
+    done->set_value();
+    co_return;
+}
+
+// Exercises TlsTransport::writev coalescing over a real TLS pair. The chain mixes
+// small nodes (coalesced into <=8k groups), a >8k node (solo, zero-copy), and
+// enough nodes to exceed the 16-iovec snapshot cap (forces a re-snapshot).
+TEST(TlsStreamFdTest, TlsTransportWritevCoalescesMultiNodeChain) {
+    SigpipeGuard sigpipe_guard;
+    TempFile cert("cert", kSelfSignedCertPem);
+    TempFile key("key", kSelfSignedKeyPem);
+    ASSERT_TRUE(cert.ok);
+    ASSERT_TRUE(key.ok);
+
+    fiber::net::TlsOptions server_options{};
+    server_options.cert_file = cert.path;
+    server_options.key_file = key.path;
+    fiber::net::TlsContext server_ctx(std::move(server_options), true);
+    ASSERT_TRUE(server_ctx.init());
+
+    fiber::net::TlsOptions client_options{};
+    fiber::net::TlsContext client_ctx(std::move(client_options), false);
+    ASSERT_TRUE(client_ctx.init());
+
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+
+    fiber::event::EventLoopGroup group(2);
+    group.start();
+
+    fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
+    auto server_transport_result =
+            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer), server_ctx);
+    auto client_transport_result =
+            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer), client_ctx);
+    ASSERT_TRUE(server_transport_result);
+    ASSERT_TRUE(client_transport_result);
+    auto *server_transport = server_transport_result->release();
+    auto *client_transport = client_transport_result->release();
+
+    fiber::mem::IoBufNodePool pool;
+    fiber::mem::IoBufChain chain(pool);
+    // [1k][2k][3k][7k][4k][2k] + oversized [20k] + 20x[100B] (27 nodes, >16 iov cap).
+    std::vector<std::size_t> sizes = {1024, 2048, 3072, 7168, 4096, 2048, 20480};
+    for (int i = 0; i < 20; ++i) {
+        sizes.push_back(100);
+    }
+    std::string expected = build_distinct_chain(pool, chain, sizes);
+
+    std::promise<fiber::common::IoResult<std::string>> server_promise;
+    std::promise<fiber::common::IoResult<std::size_t>> client_promise;
+    auto server_future = server_promise.get_future();
+    auto client_future = client_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() { return run_transport_server(server_transport, &server_promise); });
+    fiber::async::spawn(group.at(1), [&]() { return run_transport_client(client_transport, std::move(chain), &client_promise); });
+
+    ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
+    ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
+
+    auto client_result = client_future.get();
+    auto server_result = server_future.get();
+    ASSERT_TRUE(client_result);
+    ASSERT_TRUE(server_result);
+    EXPECT_EQ(*client_result, expected.size());
+    EXPECT_EQ(*server_result, expected);
+
+    std::promise<void> close_promise;
+    auto close_future = close_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return close_transport(server_transport, &close_promise); });
+    ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
+    std::promise<void> close_promise2;
+    auto close_future2 = close_promise2.get_future();
+    fiber::async::spawn(group.at(1), [&]() { return close_transport(client_transport, &close_promise2); });
+    ASSERT_EQ(close_future2.wait_for(2s), std::future_status::ready);
 
     group.stop();
     group.join();

@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
+#include <memory>
 #include <sys/uio.h>
 
 #include <openssl/ssl.h>
@@ -15,6 +17,16 @@ namespace fiber::http {
 namespace {
 
 constexpr int kMaxIov = 16;
+
+// TLS writes go through SSL_write, which encrypts a contiguous input buffer into
+// one record. Unlike sendmsg, BoringSSL has no scatter-gather API, so multi-node
+// chains would otherwise produce one record per IoBuf. To collapse small adjacent
+// nodes into a single record we coalesce them into a scratch buffer before the
+// SSL_write call. Groups are kept <= kTlsCoalesceMax so each coalesced write fits
+// in a single TLS record (default max fragment 16384). A group that is a single
+// node -- including any oversized node -- is passed through to SSL_write with the
+// node's own pointer (zero copy), so large bodies never touch the scratch buffer.
+constexpr std::size_t kTlsCoalesceMax = 8192;
 
 common::IoResult<std::chrono::milliseconds> remaining_timeout(event::EventLoop &loop,
                                                               std::chrono::steady_clock::time_point deadline) {
@@ -389,20 +401,64 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChai
     auto deadline = (timeout == std::chrono::milliseconds::max()) ? std::chrono::steady_clock::time_point::max()
                                                                   : stream_.loop().now() + timeout;
     std::size_t total_written = 0;
+
+    // Per-call coalesce scratch. Lazily allocated the first time a multi-node group
+    // is formed, then reused for every subsequent group in this writev call and freed
+    // when the coroutine frame is destroyed. Lives across WouldBlock suspensions
+    // (coroutine frame); safe from concurrent writers because TlsStreamFd serializes
+    // read/write via busy_. Never used by single-node groups (including oversized
+    // nodes), so large bodies stay zero-copy.
+    std::unique_ptr<std::uint8_t[]> scratch;
+    std::array<iovec, kMaxIov> iov{};
+
     for (;;) {
         buf.drop_empty_front();
-        mem::IoBuf *target = buf.first_readable();
-        if (!target) {
+        if (buf.readable_bytes() == 0) {
             co_return total_written;
+        }
+        int count = buf.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
+
+        // Greedily accumulate a group of adjacent nodes whose total fits in one
+        // coalesced record. Nodes are taken from the front of the snapshot; a node
+        // that would overflow the budget flushes the current group first.
+        int group_end = 0;
+        std::size_t group_len = 0;
+        while (group_end < count && group_len + iov[group_end].iov_len <= kTlsCoalesceMax) {
+            group_len += iov[group_end].iov_len;
+            ++group_end;
+        }
+        if (group_end == 0) {
+            // First node alone exceeds the budget: write it solo (zero copy). This
+            // also guarantees forward progress for oversized nodes.
+            group_end = 1;
+            group_len = iov[0].iov_len;
+        }
+
+        const std::uint8_t *write_buf = nullptr;
+        if (group_end == 1) {
+            // Single node: pass its own pointer straight to SSL_write. No copy.
+            write_buf = static_cast<const std::uint8_t *>(iov[0].iov_base);
+        } else {
+            if (!scratch) {
+                scratch = std::make_unique<std::uint8_t[]>(kTlsCoalesceMax);
+            }
+            std::uint8_t *dst = scratch.get();
+            for (int i = 0; i < group_end; ++i) {
+                std::memcpy(dst, iov[i].iov_base, iov[i].iov_len);
+                dst += iov[i].iov_len;
+            }
+            write_buf = scratch.get();
         }
 
         std::size_t out = 0;
         event::IoEvent wait_event = event::IoEvent::None;
-        common::IoErr err = stream_.poll_write(target->readable_data(), target->readable(), out, wait_event);
+        common::IoErr err = stream_.poll_write(write_buf, group_len, out, wait_event);
         if (err == common::IoErr::None) {
             if (out == 0) {
                 co_return total_written;
             }
+            // With default SSL_write semantics (no PARTIAL_WRITE) out == group_len;
+            // consume_and_compact handles any partial advance correctly regardless.
             buf.consume_and_compact(out);
             total_written += out;
             continue;
@@ -421,6 +477,8 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChai
             }
             co_return std::unexpected(wait_result.error());
         }
+        // Retry the same group: write_buf (scratch or node pointer) and the chain
+        // are unchanged because nothing was consumed while suspended.
     }
 }
 

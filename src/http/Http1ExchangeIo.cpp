@@ -973,34 +973,51 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
 
     if (response_body_spec_.is_chunked()) {
         if (len > 0) {
-            std::array<char, 32> size_buf{};
-            auto [ptr, ec] = std::to_chars(size_buf.data(), size_buf.data() + size_buf.size(), len, 16);
-            if (ec != std::errc()) {
-                co_return std::unexpected(common::IoErr::Invalid);
+            // Build [prefix][body][suffix] as one chain and issue a single writev.
+            // Prefix: hex(len) + CRLF. Suffix: trailing CRLF, folded into the final
+            // terminator when this is the last chunk ("\r\n0\r\n\r\n") so it is one node.
+            std::array<char, kMaxChunkSizeHexDigits + 2> prefix_buf{};
+            char *prefix_ptr = prefix_buf.data();
+            prefix_ptr += append_hex(prefix_ptr, len);
+            *prefix_ptr++ = '\r';
+            *prefix_ptr++ = '\n';
+            std::size_t prefix_len = static_cast<std::size_t>(prefix_ptr - prefix_buf.data());
+
+            mem::IoBuf prefix = mem::IoBuf::allocate(prefix_len);
+            if (!prefix) {
+                co_return std::unexpected(common::IoErr::NoMem);
             }
-            std::string_view size_view(size_buf.data(), static_cast<size_t>(ptr - size_buf.data()));
-            auto res = co_await write_all(&connection_->transport(), size_view.data(), size_view.size(), timeout);
+            std::memcpy(prefix.writable_data(), prefix_buf.data(), prefix_len);
+            prefix.commit(prefix_len);
+            if (!chunk.prepend(std::move(prefix))) {
+                co_return std::unexpected(common::IoErr::NoMem);
+            }
+
+            bool last = chunk.complete();
+            std::string_view suffix = last ? std::string_view("\r\n0\r\n\r\n", 7) : std::string_view("\r\n", 2);
+            mem::IoBuf suffix_buf = mem::IoBuf::allocate(suffix.size());
+            if (!suffix_buf) {
+                co_return std::unexpected(common::IoErr::NoMem);
+            }
+            std::memcpy(suffix_buf.writable_data(), suffix.data(), suffix.size());
+            suffix_buf.commit(suffix.size());
+            if (!chunk.append(std::move(suffix_buf))) {
+                co_return std::unexpected(common::IoErr::NoMem);
+            }
+
+            auto res = co_await write_all(&connection_->transport(), chunk, timeout);
             if (!res) {
                 co_return std::unexpected(res.error());
             }
-            res = co_await write_all(&connection_->transport(), "\r\n", 2, timeout);
-            if (!res) {
-                co_return std::unexpected(res.error());
+            response_body_sent_ += len;
+            if (len > 0) {
+                response_phase_ = ResponsePhase::BodyStreaming;
             }
-            res = co_await write_all(&connection_->transport(), chunk, timeout);
-            if (!res) {
-                co_return std::unexpected(res.error());
+            if (last) {
+                response_phase_ = ResponsePhase::Finished;
             }
-            res = co_await write_all(&connection_->transport(), "\r\n", 2, timeout);
-            if (!res) {
-                co_return std::unexpected(res.error());
-            }
-        }
-        response_body_sent_ += len;
-        if (len > 0) {
-            response_phase_ = ResponsePhase::BodyStreaming;
-        }
-        if (chunk.complete()) {
+        } else if (chunk.complete()) {
+            // Empty final chunk: just the terminator.
             auto zero_result = co_await write_all(&connection_->transport(), "0\r\n\r\n", 5, timeout);
             if (!zero_result) {
                 co_return std::unexpected(zero_result.error());
