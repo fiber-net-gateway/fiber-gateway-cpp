@@ -1,5 +1,6 @@
 // Example: issue upstream HTTP requests from a script.
-// Demonstrates http.request, http.proxyPass, and the `directive svc = http "<target>";` binding.
+// Demonstrates the `directive svc = http "<target>";` binding and its svc.request / svc.proxyPass
+// calls (the host is bound once at compile time; the call options only carry path/query/headers).
 //
 // Requires an upstream block named `backend` (or a reachable ad-hoc URL) and a
 // `connection_pool { keepalive_size N; ... }` block under `http` for keepalive reuse.
@@ -12,7 +13,7 @@ directive svc = http "@backend";
 // POST /proxy  ->  proxy the inbound request body to the `backend` upstream and stream its
 // response back to the client. Returns the upstream status code.
 if (req.getMethod() == "POST") {
-    return http.proxyPass({upstream: "@backend", responseHeaders: {"X-Proxied-By": "script"}});
+    return svc.proxyPass({responseHeaders: {"X-Proxied-By": "script"}});
 }
 
 // Otherwise: issue a fresh upstream GET and surface {status, headers, body} to the caller.

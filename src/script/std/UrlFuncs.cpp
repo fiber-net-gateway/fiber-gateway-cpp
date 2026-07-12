@@ -149,7 +149,7 @@ ScriptResult url_encode_component_fn(void * /*userdata*/, const Library::HostCal
     }
     std::string out;
     fiber::util::form_encode(input, out);
-    JsValue result = JsValue::make_string(*frame.runtime, out.data(), out.size());
+    JsValue result = JsValue::make_string(frame.runtime, out.data(), out.size());
     if (js_value_type(result) != JsNodeType::String) {
         return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
     }
@@ -172,7 +172,7 @@ ScriptResult url_decode_component_fn(void * /*userdata*/, const Library::HostCal
         // Malformed percent escape (Java IllegalArgumentException).
         return ScriptResult::exception(JsValue::make_exception(ExceptionKind::RangeError));
     }
-    JsValue result = JsValue::make_string(*frame.runtime, decoded->data(), decoded->size());
+    JsValue result = JsValue::make_string(frame.runtime, decoded->data(), decoded->size());
     if (js_value_type(result) != JsNodeType::String) {
         return ScriptResult::abort(ScriptAbortReason::OutOfMemory);
     }
@@ -190,7 +190,7 @@ ScriptResult url_parse_query_fn(void * /*userdata*/, const Library::HostCallFram
     if (!string_utf8_view(args.args[0], input)) {
         return type_error();
     }
-    GcHeap *heap = frame.runtime;
+    GcHeap *heap = &frame.runtime;
     if (heap == nullptr) {
         return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
@@ -243,7 +243,7 @@ ScriptResult url_build_query_fn(void * /*userdata*/, const Library::HostCallFram
     if (obj == nullptr) {
         return type_error();
     }
-    GcHeap *heap = frame.runtime;
+    GcHeap *heap = &frame.runtime;
     if (heap == nullptr) {
         return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }

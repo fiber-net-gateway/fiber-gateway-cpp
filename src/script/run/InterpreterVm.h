@@ -7,6 +7,7 @@
 
 #include "../AsyncTask.h"
 #include "../JsGc.h"
+#include "../Library.h"
 #include "../ScriptResult.h"
 #include "../ir/Compiled.h"
 
@@ -46,9 +47,10 @@ private:
     };
 
     const ir::Compiled &compile_;
-    fiber::script::JsValue root_;
-    void *attach_ = nullptr;
-    GcHeap &runtime_;
+    // Single self-contained frame: holds runtime (GcHeap&), root (JsValue), attach. Lives for the
+    // whole exec_async coroutine, so a `const HostCallFrame&` passed to a lazy AsyncTask stays valid
+    // across suspend/resume (no dangling stack local).
+    Library::HostCallFrame frame_;
     fiber::script::GcRootRegistration reg_;
 
     std::unique_ptr<fiber::script::JsValue[]> slots_;
@@ -61,7 +63,6 @@ private:
     AsyncTask async_{};
 
     static void async_complete(void *context, const ScriptResult &result) noexcept;
-    Library::HostCallFrame make_call_frame() const;
     Library::Arguments make_call_arguments(std::uint8_t op, std::uint32_t encoded_argc, std::size_t &arg_base);
     bool dispatch_func_const(std::uint8_t op, const ir::Compiled::FuncConst &func_const, std::uint32_t encoded_argc);
     bool apply_call_result(const ScriptResult &result, std::uint8_t op, std::uint32_t argc, std::size_t epc);

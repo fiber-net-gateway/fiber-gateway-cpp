@@ -15,17 +15,14 @@ class StdLibrary;
 
 namespace fiber::http_script {
 
-// Async host functions backing http.request / http.proxyPass. When userdata is non-null it
-// points at an HttpDirectiveDef whose target() is pre-bound (directive svc = http "@backend");
-// otherwise the target is read from the options object (the "upstream" or "url" field).
+// Async host functions backing svc.request / svc.proxyPass, invoked via a `directive <name> =
+// http "<target>";` binding. userdata is the HttpDirectiveDef carrying the compile-time-bound
+// upstream host target; the host never comes from the options object. options.url is the request
+// path?query, not a host.
 fiber::script::AsyncTask http_request_fn(void *userdata, const fiber::script::Library::HostCallFrame &frame,
                                          fiber::script::Library::Arguments args) noexcept;
 fiber::script::AsyncTask http_proxy_pass_fn(void *userdata, const fiber::script::Library::HostCallFrame &frame,
                                             fiber::script::Library::Arguments args) noexcept;
-
-// Registers http.request / http.proxyPass (flat async, target resolved from options) on the shared
-// StdLibrary. Called by register_http_functions_to_lib.
-void register_http_client_funcs(fiber::script::std_lib::StdLibrary &lib);
 
 // Directive def for `directive <name> = http "<target>";`. Binds a named script handle to a fixed
 // upstream/URL target; svc.request / svc.proxyPass then resolve to the bound target via userdata.

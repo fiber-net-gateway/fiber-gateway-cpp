@@ -177,26 +177,27 @@ Request-side functions (sync unless noted): `req.getHeader([name])`, `req.getQue
 Response-side functions: `resp.setHeader(name, value)`, `resp.addHeader(name, value)`,
 `resp.sendJson(status, body)` (async), `resp.send(status[, body])` (async), `resp.addCookie(obj)`.
 
-Upstream HTTP (async, require a `connection_pool` block for keepalive reuse):
-
-- `http.request(options)` - issue an upstream request and return
-  `{status:int, headers?:object, body:binary}`. `options`: `upstream` (name, leading `@`
-  optional) or `url` (`http(s)://host[:port]`; hostnames are resolved via DNS, IP literals skip
-  DNS), `method`, `path`, `query` (string or object), `headers`, `body` (binary/string/object),
-  `timeout` (ms), `includeHeaders`.
-- `http.proxyPass(options)` - forward the inbound request to an upstream and stream its
-  response back to the client; returns the upstream status code. `options`: `upstream`/`url`,
-  `method`/`path`/`query` (default to the inbound values), `headers`, `responseHeaders`
-  (set on the downstream response; `null` removes), `timeout`. WebSocket/101 upgrade is not
-  supported.
-
-A target may be bound once with a directive so calls do not re-specify it:
+Upstream HTTP (async, require a `connection_pool` block for keepalive reuse). The upstream host
+is bound once at compile time with a directive; `svc.request` / `svc.proxyPass` are the only
+entry points (flat `http.request` / `http.proxyPass` are not available):
 
 ```
 directive svc = http "@backend";          // or http "http://1.2.3.4:8080"
 let r = svc.request({path: "/items"});    // target pre-bound
 let st = svc.proxyPass({});
 ```
+
+- `svc.request(options)` - issue an upstream request and return
+  `{status:int, headers?:object, body:binary}`. `options`: `url` (request path?query, e.g.
+  `/items?q=1`; not a host) or `path` + `query` (string or object), `method`, `headers`, `body`
+  (binary/string/object), `timeout` (ms), `includeHeaders`.
+- `svc.proxyPass(options)` - forward the inbound request to the bound upstream and stream its
+  response back to the client; returns the upstream status code. `options`: `url` or
+  `method`/`path`/`query` (default to the inbound values), `headers`, `responseHeaders` (set on
+  the downstream response; `null` removes), `timeout`. WebSocket/101 upgrade is not supported.
+
+The directive target is either a named upstream (`@backend` / `backend`) or an ad-hoc
+`http(s)://host[:port]` URL; hostnames are resolved via DNS (IP literals skip DNS).
 
 ## Explicit V1 Restrictions
 
@@ -218,9 +219,10 @@ let st = svc.proxyPass({});
   `location` precedence rules.
 - Only `http://` upstream targets are supported in V1 (for `proxy_pass`).
 - Upstream peers must be configured with IP literals in the current runtime. Script
-  `url` targets accept hostnames (resolved via DNS) or IP literals.
+  directive `http(s)://host` targets accept hostnames (resolved via DNS) or IP literals; the
+  `url` call option is the request path?query, not a host.
 - `proxy_buffering` only accepts `off`.
-- `http.proxyPass` does not support WebSocket / `101 Switching Protocols` upgrade tunnelling.
+- `svc.proxyPass` does not support WebSocket / `101 Switching Protocols` upgrade tunnelling.
 - A single global keepalive pool is shared across all upstreams and script targets; per-upstream
   `keepalive` sizing is not available (use `connection_pool { keepalive_size ...; }`).
 

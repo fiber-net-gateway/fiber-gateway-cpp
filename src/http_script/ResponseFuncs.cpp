@@ -90,12 +90,12 @@ ScriptResult set_header_fn(void * /*userdata*/, const Library::HostCallFrame &fr
     }
     std::string_view name;
     if (!string_utf8_view(args.args[0], name)) {
-        return error_exn(*frame.runtime, "set header require string key value");
+        return error_exn(frame.runtime, "set header require string key value");
     }
     std::string value_buf;
     node_as_text(args.args[1], value_buf);
     if (name.empty() || value_buf.empty()) {
-        return error_exn(*frame.runtime, "set header require string key value");
+        return error_exn(frame.runtime, "set header require string key value");
     }
     ctx->set_response_header(name, value_buf);
     return ScriptResult::success(JsValue::make_null());
@@ -108,12 +108,12 @@ ScriptResult add_header_fn(void * /*userdata*/, const Library::HostCallFrame &fr
     }
     std::string_view name;
     if (!string_utf8_view(args.args[0], name)) {
-        return error_exn(*frame.runtime, "add header require string key value");
+        return error_exn(frame.runtime, "add header require string key value");
     }
     std::string value_buf;
     node_as_text(args.args[1], value_buf);
     if (name.empty() || value_buf.empty()) {
-        return error_exn(*frame.runtime, "add header require string key value");
+        return error_exn(frame.runtime, "add header require string key value");
     }
     ctx->add_response_header(name, value_buf);
     return ScriptResult::success(JsValue::make_null());
@@ -123,7 +123,7 @@ ScriptResult add_header_fn(void * /*userdata*/, const Library::HostCallFrame &fr
 
 AsyncTask send_json_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     auto *ctx = ctx_of(frame);
-    GcHeap *heap = frame.runtime;
+    GcHeap *heap = &frame.runtime;
     if (ctx == nullptr || heap == nullptr || args.args == nullptr || args.argc < 2) {
         co_return invalid_state();
     }
@@ -140,7 +140,7 @@ AsyncTask send_json_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
 
 AsyncTask send_one_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     auto *ctx = ctx_of(frame);
-    GcHeap *heap = frame.runtime;
+    GcHeap *heap = &frame.runtime;
     if (ctx == nullptr || heap == nullptr || args.args == nullptr || args.argc < 1) {
         co_return invalid_state();
     }
@@ -156,7 +156,7 @@ AsyncTask send_one_fn(void * /*userdata*/, const Library::HostCallFrame &frame, 
 
 AsyncTask send_two_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     auto *ctx = ctx_of(frame);
-    GcHeap *heap = frame.runtime;
+    GcHeap *heap = &frame.runtime;
     if (ctx == nullptr || heap == nullptr || args.args == nullptr || args.argc < 2) {
         co_return invalid_state();
     }
@@ -207,7 +207,7 @@ AsyncTask send_two_fn(void * /*userdata*/, const Library::HostCallFrame &frame, 
 
 ScriptResult add_cookie_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     auto *ctx = ctx_of(frame);
-    GcHeap *heap = frame.runtime;
+    GcHeap *heap = &frame.runtime;
     if (ctx == nullptr || heap == nullptr || args.args == nullptr || args.argc < 1) {
         return invalid_state();
     }

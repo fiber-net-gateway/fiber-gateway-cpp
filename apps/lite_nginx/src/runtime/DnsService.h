@@ -22,7 +22,7 @@ namespace fiber::lite_nginx::runtime {
 
 // Per-worker-loop DNS resolver stack sharing one cache (with singleflight). Each worker loop
 // gets its own DnsResolverLocal + DnsResolver (resolve_host asserts it runs on its own loop),
-// so http.request({url:"http://host"}) calls resolve on the calling worker's resolver.
+// so a directive-bound http(s)://host target resolves host on the calling worker's resolver.
 //
 // The upstream nameserver is read from /etc/resolv.conf (first nameserver line), defaulting to
 // 8.8.8.8:53 when absent or unparseable.

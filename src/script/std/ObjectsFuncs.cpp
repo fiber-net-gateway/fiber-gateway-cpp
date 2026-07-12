@@ -92,7 +92,7 @@ ScriptResult object_assign_fn(void * /*userdata*/, const Library::HostCallFrame 
     if (require_object(target_val) == nullptr) {
         return type_error();
     }
-    GcHeap *heap = frame.runtime;
+    GcHeap *heap = &frame.runtime;
     if (heap == nullptr) {
         return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
@@ -115,7 +115,7 @@ ScriptResult object_keys_fn(void * /*userdata*/, const Library::HostCallFrame &f
     if (obj == nullptr) {
         return type_error();
     }
-    GcHeap *heap = frame.runtime;
+    GcHeap *heap = &frame.runtime;
     if (heap == nullptr) {
         return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
@@ -135,7 +135,7 @@ ScriptResult object_values_fn(void * /*userdata*/, const Library::HostCallFrame 
     if (obj == nullptr) {
         return type_error();
     }
-    GcHeap *heap = frame.runtime;
+    GcHeap *heap = &frame.runtime;
     if (heap == nullptr) {
         return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
@@ -157,7 +157,7 @@ ScriptResult object_delete_properties_fn(void * /*userdata*/, const Library::Hos
     if (require_object(target_val) == nullptr) {
         return type_error();
     }
-    GcHeap *heap = frame.runtime;
+    GcHeap *heap = &frame.runtime;
     if (heap == nullptr) {
         return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }

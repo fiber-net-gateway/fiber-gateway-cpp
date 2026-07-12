@@ -77,7 +77,7 @@ ScriptResult call_host(const char *name, JsValue arg) {
         match.callable->function == nullptr) {
         return ScriptResult::abort(ScriptAbortReason::Internal);
     }
-    Library::HostCallFrame frame(&heap, nullptr, nullptr);
+    Library::HostCallFrame frame(heap, JsValue::make_undefined(), nullptr);
     Library::Arguments args{ConstValueHandle(storage), 1};
     return match.callable->function(match.callable->userdata, frame, args);
 }

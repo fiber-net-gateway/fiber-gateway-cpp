@@ -26,6 +26,7 @@
 #include "../script/std/NodeText.h"
 #include "../script/std/StdLibrary.h"
 
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -53,6 +54,18 @@ using namespace fiber::http::proxy_core;
 namespace {
 
 constexpr std::chrono::milliseconds kDefaultTimeout{30000};
+
+bool icase_starts_with(std::string_view text, std::string_view prefix) noexcept {
+    if (text.size() < prefix.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < prefix.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(text[i])) != prefix[i]) {
+            return false;
+        }
+    }
+    return true;
+}
 
 ScriptExchangeCtx *ctx_of(const Library::HostCallFrame &frame) noexcept {
     return static_cast<ScriptExchangeCtx *>(frame.attach);
@@ -183,8 +196,13 @@ void object_pairs_to_form(GcHeap &heap, const JsValue &obj, std::string &out) no
     }
 }
 
-// Builds the request-target (path[?query]) for http.request. query may be a string or an Object.
+// Builds the request-target (path[?query]) for http.request. `url` (if present) is the full
+// path?query and takes precedence; otherwise `path` + `query` (string or Object) are used.
 std::string build_request_target(GcHeap &heap, const JsValue &options, std::string_view default_path) {
+    const std::string_view url_sv = field_string(heap, options, "url", 3);
+    if (!url_sv.empty()) {
+        return std::string(url_sv);
+    }
     std::string path(default_path);
     const std::string_view pv = field_string(heap, options, "path", 4);
     if (!pv.empty()) {
@@ -317,19 +335,33 @@ fiber::http::HttpBodySpec build_request_body(GcHeap &heap, const JsValue &option
     return fiber::http::HttpBodySpec::ContentLength(body_bytes.size());
 }
 
-// Resolves the target: directive-bound (userdata) or from options (url/upstream).
-std::optional<HttpTargetSpec> resolve_target(void *userdata, GcHeap &heap, const JsValue &options) noexcept {
-    if (userdata != nullptr) {
-        return static_cast<const HttpDirectiveDef *>(userdata)->target();
+// The upstream host target is bound once at compile time via `directive <name> = http "<target>";`
+// and reaches the call as userdata (the HttpDirectiveDef). There is no runtime target resolution
+// from the options object -- the host never comes from options.
+std::optional<HttpTargetSpec> resolve_target(void *userdata) noexcept {
+    if (userdata == nullptr) {
+        return std::nullopt;
     }
-    std::string_view sv = field_string(heap, options, "url", 3);
-    if (sv.empty()) {
-        sv = field_string(heap, options, "upstream", 8);
-    }
+    return static_cast<const HttpDirectiveDef *>(userdata)->target();
+}
+
+// options.url is the request path?query (e.g. "/items?q=1"), never a host. Reject the common
+// mistake of putting a full http(s)://host URL there -- the host must come from the directive
+// binding. Returns an error message when url is a disallowed host-form URL, otherwise nullopt.
+std::optional<std::string> url_field_error(std::string_view call, GcHeap &heap, const JsValue &options) noexcept {
+    const std::string_view sv = field_string(heap, options, "url", 3);
     if (sv.empty()) {
         return std::nullopt;
     }
-    return HttpTargetSpec::parse(sv);
+    if (icase_starts_with(sv, "http://") || icase_starts_with(sv, "https://")) {
+        std::string msg;
+        msg.reserve(call.size() + 128);
+        msg.append(call);
+        msg.append(": 'url' is the request path?query (e.g. \"/items?q=1\"), not a host; "
+                   "bind the upstream host with: directive svc = http \"<host>\";");
+        return msg;
+    }
+    return std::nullopt;
 }
 
 // Acquires a connected upstream connection via the app's services. The returned holder owns the
@@ -425,16 +457,19 @@ fiber::async::Task<fiber::common::IoResult<void>> read_full_response_body(fiber:
 
 AsyncTask http_request_fn(void *userdata, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     auto *ctx = ctx_of(frame);
-    GcHeap *heap = frame.runtime;
+    GcHeap *heap = &frame.runtime;
     if (ctx == nullptr || heap == nullptr || ctx->services() == nullptr) {
         co_return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
     HttpScriptServices &services = *ctx->services();
     const JsValue options = (args.args != nullptr && args.argc > 0) ? args.args[0] : JsValue::make_undefined();
 
-    auto target_opt = resolve_target(userdata, *heap, options);
+    auto target_opt = resolve_target(userdata);
     if (!target_opt) {
-        co_return error_exn(*heap, "http.request: no upstream/url target");
+        co_return error_exn(*heap, "http.request: missing directive-bound target");
+    }
+    if (auto url_err = url_field_error("http.request", *heap, options)) {
+        co_return error_exn(*heap, *url_err);
     }
     const std::chrono::milliseconds timeout = resolve_timeout(*heap, options);
 
@@ -545,7 +580,7 @@ AsyncTask http_request_fn(void *userdata, const Library::HostCallFrame &frame, L
 
 AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     auto *ctx = ctx_of(frame);
-    GcHeap *heap = frame.runtime;
+    GcHeap *heap = &frame.runtime;
     if (ctx == nullptr || heap == nullptr || ctx->services() == nullptr) {
         co_return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
@@ -557,9 +592,12 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
         co_return error_exn(*heap, "http.proxyPass: websocket upgrade is not supported");
     }
 
-    auto target_opt = resolve_target(userdata, *heap, options);
+    auto target_opt = resolve_target(userdata);
     if (!target_opt) {
-        co_return error_exn(*heap, "http.proxyPass: no upstream/url target");
+        co_return error_exn(*heap, "http.proxyPass: missing directive-bound target");
+    }
+    if (auto url_err = url_field_error("http.proxyPass", *heap, options)) {
+        co_return error_exn(*heap, *url_err);
     }
     const std::chrono::milliseconds timeout = resolve_timeout(*heap, options);
 
@@ -587,26 +625,32 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
 
     std::string target;
     {
-        std::string_view path = field_string(*heap, options, "path", 4);
-        if (path.empty()) {
-            path = exchange.uri().path;
-        }
-        target.assign(path);
-        JsValue qv = get_field(*heap, options, "query", 5);
-        std::string_view qsv;
-        if (string_utf8_view(qv, qsv) && !qsv.empty()) {
-            target.push_back('?');
-            target.append(qsv);
-        } else if (js_value_type(qv) == JsNodeType::Object) {
-            std::string qs;
-            object_pairs_to_form(*heap, qv, qs);
-            if (!qs.empty()) {
-                target.push_back('?');
-                target.append(qs);
+        std::string_view url_sv = field_string(*heap, options, "url", 3);
+        if (!url_sv.empty()) {
+            // `url` is the full request path?query; it overrides path/query.
+            target.assign(url_sv);
+        } else {
+            std::string_view path = field_string(*heap, options, "path", 4);
+            if (path.empty()) {
+                path = exchange.uri().path;
             }
-        } else if (!exchange.uri().query.empty()) {
-            target.push_back('?');
-            target.append(exchange.uri().query);
+            target.assign(path);
+            JsValue qv = get_field(*heap, options, "query", 5);
+            std::string_view qsv;
+            if (string_utf8_view(qv, qsv) && !qsv.empty()) {
+                target.push_back('?');
+                target.append(qsv);
+            } else if (js_value_type(qv) == JsNodeType::Object) {
+                std::string qs;
+                object_pairs_to_form(*heap, qv, qs);
+                if (!qs.empty()) {
+                    target.push_back('?');
+                    target.append(qs);
+                }
+            } else if (!exchange.uri().query.empty()) {
+                target.push_back('?');
+                target.append(exchange.uri().query);
+            }
         }
     }
 
@@ -733,19 +777,6 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
         }
     }
     co_return ScriptResult::success(JsValue::make_integer(resp_head->status_code));
-}
-
-void register_http_client_funcs(fiber::script::std_lib::StdLibrary &lib) {
-    using Sig = Library::FunctionSignature;
-    // 0-arg (defaults) and 1-arg (options object) overloads, both resolving the target from options.
-    lib.register_async_func("http.request", Sig{.required_argc = 0, .fixed_argc = 0, .variadic = false},
-                            &http_request_fn, nullptr, "http.request");
-    lib.register_async_func("http.request", Sig{.required_argc = 1, .fixed_argc = 1, .variadic = false},
-                            &http_request_fn, nullptr, "http.request");
-    lib.register_async_func("http.proxyPass", Sig{.required_argc = 0, .fixed_argc = 0, .variadic = false},
-                            &http_proxy_pass_fn, nullptr, "http.proxyPass");
-    lib.register_async_func("http.proxyPass", Sig{.required_argc = 1, .fixed_argc = 1, .variadic = false},
-                            &http_proxy_pass_fn, nullptr, "http.proxyPass");
 }
 
 // ---- HttpDirectiveDef ----

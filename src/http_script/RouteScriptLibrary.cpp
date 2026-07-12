@@ -58,46 +58,46 @@ std::string make_cache_key(std::string_view ns, std::string_view key) {
 ScriptResult RouteScriptLibrary::path_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
     auto *ref = static_cast<const VarRef *>(userdata);
     auto *ctx = ctx_of(frame);
-    if (ref == nullptr || ctx == nullptr || frame.runtime == nullptr) {
+    if (ref == nullptr || ctx == nullptr) {
         return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
-    return ctx->path_var(*frame.runtime, ref->name);
+    return ctx->path_var(frame.runtime, ref->name);
 }
 
 ScriptResult RouteScriptLibrary::query_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
     auto *ref = static_cast<const VarRef *>(userdata);
     auto *ctx = ctx_of(frame);
-    if (ref == nullptr || ctx == nullptr || frame.runtime == nullptr) {
+    if (ref == nullptr || ctx == nullptr) {
         return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
-    return ctx->query_var(*frame.runtime, ref->name);
+    return ctx->query_var(frame.runtime, ref->name);
 }
 
 ScriptResult RouteScriptLibrary::header_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
     auto *ref = static_cast<const VarRef *>(userdata);
     auto *ctx = ctx_of(frame);
-    if (ref == nullptr || ctx == nullptr || frame.runtime == nullptr) {
+    if (ref == nullptr || ctx == nullptr) {
         return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
-    return ctx->header_var(*frame.runtime, ref->name);
+    return ctx->header_var(frame.runtime, ref->name);
 }
 
 ScriptResult RouteScriptLibrary::cookie_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
     auto *ref = static_cast<const VarRef *>(userdata);
     auto *ctx = ctx_of(frame);
-    if (ref == nullptr || ctx == nullptr || frame.runtime == nullptr) {
+    if (ref == nullptr || ctx == nullptr) {
         return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
-    return ctx->cookie_var(*frame.runtime, ref->name);
+    return ctx->cookie_var(frame.runtime, ref->name);
 }
 
 ScriptResult RouteScriptLibrary::req_field_fn(void *userdata, const HostCallFrame &frame) noexcept {
     auto *ref = static_cast<const VarRef *>(userdata);
     auto *ctx = ctx_of(frame);
-    if (ref == nullptr || ctx == nullptr || frame.runtime == nullptr) {
+    if (ref == nullptr || ctx == nullptr) {
         return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
-    return ctx->req_field(*frame.runtime, ref->name);
+    return ctx->req_field(frame.runtime, ref->name);
 }
 
 RouteScriptLibrary::RouteScriptLibrary(fiber::script::std_lib::StdLibrary &shared,
