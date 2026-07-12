@@ -271,6 +271,15 @@ DecodeStatus decode_js_value(GcHeap &heap, const char *data, std::size_t len, Va
         *error = {};
     }
 
+    // Every object built during decoding stays rooted via out_/scratch_/frame
+    // handles, and backing-store growth (array elems, object buckets/entries) is
+    // freed eagerly, so a collection in/after the decode reclaims nothing. Wrap
+    // the whole decode in one deferred NoGcScope: the per-primitive NoGcScopes
+    // inside gc_make_*/gc_array_push/gc_object_set would otherwise return to
+    // depth 0 after each primitive and fire a full collect() every time `bytes`
+    // crosses the threshold. defer_collect drops the pending request at exit;
+    // the next threshold-driven allocation re-evaluates naturally.
+    GcHeap::NoGcScope no_gc(heap, /*defer_collect=*/true);
     GcHeap::LocalMark mark(heap);
     DecodeBuilder builder(heap, out);
     if (!builder.init()) {

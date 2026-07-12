@@ -401,6 +401,32 @@ TEST(JsGcTest, NoGcScopeDefersExplicitCollectUntilExit) {
     EXPECT_EQ(heap.bytes, 0u);
 }
 
+TEST(JsGcTest, NoGcScopeDeferCollectSkipsExitCollection) {
+    GcHeap heap;
+
+    // With threshold=1, any allocation crosses the limit and requests a
+    // collection. defer_collect=true must drop that request on exit instead of
+    // running it. A collection raises threshold to >= 1MiB (next_threshold), so
+    // observing threshold still at 1 proves the exit collect was skipped.
+    heap.threshold = 1;
+    std::size_t bytes_in_scope = 0;
+    {
+        GcHeap::NoGcScope no_gc(heap, /*defer_collect=*/true);
+        ASSERT_NE(fiber::script::gc_new_string(&heap, "x", 1), nullptr);
+        EXPECT_GT(heap.bytes, heap.threshold);
+        bytes_in_scope = heap.bytes;
+    }
+
+    EXPECT_FALSE(heap.no_gc_active());
+    EXPECT_EQ(heap.threshold, 1u);
+    EXPECT_EQ(heap.bytes, bytes_in_scope);
+
+    // The dropped request does not linger: a later explicit collect still runs
+    // and raises the threshold.
+    heap.collect();
+    EXPECT_GE(heap.threshold, 1u << 20);
+}
+
 TEST(JsGcTest, ValueApiBuildsObjectWithNativeKeyUnderLowThreshold) {
     GcHeap heap;
     heap.threshold = 1;

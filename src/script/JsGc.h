@@ -128,7 +128,7 @@ private:
     [[nodiscard]] LocalState mark_local() const noexcept;
     void restore_local(LocalState state) noexcept;
     void enter_no_gc() noexcept;
-    void leave_no_gc() noexcept;
+    void leave_no_gc(bool defer_collect) noexcept;
     [[nodiscard]] ValueBlock *alloc_value_block();
     [[nodiscard]] ValueBlock *acquire_local_block();
     [[nodiscard]] ValueBlock *acquire_global_block();
@@ -173,7 +173,12 @@ private:
 
 class GcHeap::NoGcScope {
 public:
-    explicit NoGcScope(GcHeap &heap) noexcept;
+    // defer_collect: when exiting the outermost scope, drop a pending collection
+    // instead of running it. Use for regions whose allocations are guaranteed to
+    // stay rooted (so a collection in/after the region reclaims nothing); the next
+    // threshold-driven allocation re-evaluates naturally. Default keeps the
+    // historical "collect on exit if pending" behavior.
+    explicit NoGcScope(GcHeap &heap, bool defer_collect = false) noexcept;
     NoGcScope(const NoGcScope &) = delete;
     NoGcScope &operator=(const NoGcScope &) = delete;
     NoGcScope(NoGcScope &&other) noexcept;
@@ -184,6 +189,7 @@ public:
 
 private:
     GcHeap *heap_ = nullptr;
+    bool defer_collect_ = false;
 };
 
 using GcByteStringWriter = bool (*)(std::uint8_t *dst, std::size_t len, void *ctx) noexcept;

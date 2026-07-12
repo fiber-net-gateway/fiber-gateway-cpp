@@ -231,6 +231,30 @@ TEST(JsValueDecodeTest, SurvivesCollectionDuringBuild) {
     EXPECT_TRUE(fiber::script::js_value_bool(*ok));
 }
 
+TEST(JsValueDecodeTest, DoesNotCollectDuringDecodeWhenThresholdCrossed) {
+    GcHeap heap;
+    // threshold=1 forces every decoded allocation to request a collection.
+    heap.threshold = 1;
+    ValueHandle out = heap.global_value();
+    ASSERT_NE(out, nullptr);
+
+    const char *json = "{\"items\":[1,2,3],\"name\":\"hello\"}";
+    ParseError error;
+    DecodeStatus status = fiber::script::json::decode_js_value(heap, json, std::strlen(json), out, &error);
+    ASSERT_EQ(status, DecodeStatus::Complete) << (error.message ? error.message : "");
+
+    // Decoding crossed the limit repeatedly, but the deferred NoGcScope wrapped
+    // around decode suppressed every collection (without it, the per-primitive
+    // NoGcScopes inside gc_make_*/gc_array_push/gc_object_set would each fire a
+    // full collect as depth returned to 0). A collect raises threshold to
+    // >= 1MiB; observing it still at 1 proves none ran during decode.
+    EXPECT_EQ(heap.threshold, 1u);
+
+    // The decoded result stays rooted and intact through a post-decode collect.
+    heap.collect();
+    ASSERT_EQ(fiber::script::js_value_type(*out), JsNodeType::Object);
+}
+
 TEST(JsValueDecodeTest, RoundTripsThroughEncoder) {
     GcHeap heap;
     ValueHandle out = decode_ok(heap, "{\"n\":1,\"arr\":[true,null,\"x\"]}");
