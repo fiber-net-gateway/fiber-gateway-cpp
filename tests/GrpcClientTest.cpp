@@ -259,6 +259,16 @@ struct ClientResult {
     bool got_result = false;
 };
 
+struct TwoCallResult {
+    fiber::common::IoErr err = fiber::common::IoErr::None;
+    fiber::grpc::GrpcStatus status1{};
+    fiber::grpc::GrpcStatus status2{};
+    helloworld::HelloReply reply1{};
+    helloworld::HelloReply reply2{};
+    bool got1 = false;
+    bool got2 = false;
+};
+
 DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, std::string_view service,
                         std::string_view method, const helloworld::HelloRequest &request,
                         std::shared_ptr<std::promise<ClientResult>> promise) {
@@ -289,6 +299,56 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, std::
         result.status = std::move(*call_result);
         result.reply = std::move(reply);
         result.got_result = true;
+    }
+
+    client.shutdown();
+    for (int i = 0; i < 500 && !client.run_done(); ++i) {
+        co_await fiber::async::sleep(1ms);
+    }
+
+    promise->set_value(std::move(result));
+}
+
+DetachedTask run_client_two_calls(fiber::event::EventLoop *loop, std::uint16_t port,
+                                  const helloworld::HelloRequest &request,
+                                  std::shared_ptr<std::promise<TwoCallResult>> promise) {
+    TwoCallResult result;
+    fiber::grpc::GrpcClient::Options options;
+    options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    options.tls.enabled = true;
+    options.tls.server_name = "localhost";
+    // Deliberately leave options.h2.outbound_hpack_catalog null: exercise
+    // GrpcClient's built-in catalog, which indexes content-type/te/grpc-encoding
+    // into the HPACK dynamic table. The second call reuses the warmed table.
+    options.authority = "localhost";
+    options.scheme = "https";
+
+    fiber::grpc::GrpcClient client(*loop, options);
+    auto connect_result = co_await client.connect();
+    if (!connect_result) {
+        result.err = connect_result.error();
+        promise->set_value(std::move(result));
+        co_return;
+    }
+
+    fiber::mem::BufPool pool;
+    helloworld::HelloRequest req = request;
+    for (int call = 0; call < 2; ++call) {
+        helloworld::HelloReply reply;
+        auto call_result = co_await client.unary_call("helloworld.Greeter", "SayHello", req, reply, pool);
+        if (!call_result) {
+            result.err = call_result.error();
+            break;
+        }
+        if (call == 0) {
+            result.status1 = std::move(*call_result);
+            result.reply1 = std::move(reply);
+            result.got1 = true;
+        } else {
+            result.status2 = std::move(*call_result);
+            result.reply2 = std::move(reply);
+            result.got2 = true;
+        }
     }
 
     client.shutdown();
@@ -396,6 +456,64 @@ TEST(GrpcClientTest, UnaryCallReturnsGrpcError) {
     EXPECT_FALSE(result.status.ok());
     EXPECT_EQ(result.status.code, 5);
     EXPECT_EQ(result.status.message, "intentional failure");
+
+    std::promise<void> close_promise;
+    auto close_future = close_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return close_server_on_loop(server, &close_promise); });
+    close_future.get();
+    group.stop();
+    group.join();
+    delete server;
+}
+
+TEST(GrpcClientTest, UnaryCallUsesDefaultHpackCatalog) {
+    TlsCert cert;
+    ASSERT_TRUE(cert.ok) << "openssl cert generation failed";
+
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::http::HttpServerOptions server_options;
+    server_options.tls.enabled = true;
+    server_options.tls.cert_file = cert.cert_path;
+    server_options.tls.key_file = cert.key_path;
+    server_options.tls.alpn = {"h2"};
+
+    std::promise<std::uint16_t> port_promise;
+    std::promise<fiber::http::HttpServer *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return start_http_server(&group.at(0), make_grpc_handler(), std::move(server_options), &port_promise,
+                                 &server_promise);
+    });
+
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    helloworld::HelloRequest request;
+    request.set_name("fiber");
+    request.add_items("a");
+    request.add_items("bb");
+
+    auto promise = std::make_shared<std::promise<TwoCallResult>>();
+    auto future = promise->get_future();
+    fiber::async::spawn(group.at(0), [&]() { return run_client_two_calls(&group.at(0), port, request, promise); });
+
+    TwoCallResult result = future.get();
+    ASSERT_EQ(result.err, fiber::common::IoErr::None) << "transport error";
+    ASSERT_TRUE(result.got1);
+    ASSERT_TRUE(result.got2);
+    EXPECT_TRUE(result.status1.ok()) << "grpc code=" << result.status1.code;
+    EXPECT_EQ(result.status1.code, 0);
+    EXPECT_EQ(result.reply1.message(), "Hello, fiber");
+    EXPECT_EQ(result.reply1.count(), 2);
+    EXPECT_TRUE(result.status2.ok()) << "grpc code=" << result.status2.code;
+    EXPECT_EQ(result.status2.code, 0);
+    EXPECT_EQ(result.reply2.message(), "Hello, fiber");
+    EXPECT_EQ(result.reply2.count(), 2);
 
     std::promise<void> close_promise;
     auto close_future = close_promise.get_future();

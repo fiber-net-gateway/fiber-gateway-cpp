@@ -10,6 +10,7 @@
 
 #include "../async/Spawn.h"
 #include "../async/Task.h"
+#include "../common/Assert.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
@@ -18,6 +19,7 @@
 #include "../http/ClientHttp2Exchange.h"
 #include "../http/Http2ClientConnection.h"
 #include "../http/Http2Connection.h"
+#include "../http/Http2HpackEncodeCatalog.h"
 #include "../http/HttpCommon.h"
 #include "../net/SocketAddress.h"
 #include "../net/TlsOptions.h"
@@ -29,9 +31,13 @@
 namespace fiber::grpc {
 
 // Unary gRPC client over a single HTTP/2 connection (multiplexed: many
-// unary_call()s may share one connection). The caller owns the HPACK encode
-// catalog referenced by Options::h2.outbound_hpack_catalog and must keep it
-// alive for the lifetime of the client.
+// unary_call()s may share one connection). If Options::h2.outbound_hpack_catalog
+// is left null, the client supplies a built-in catalog that incrementally
+// indexes the common gRPC request headers (content-type, te, grpc-encoding)
+// into the HPACK dynamic table, so repeated calls on one connection encode
+// them as 1-byte indexed fields instead of full literals. If the caller
+// supplies its own catalog, it is used as-is and must be kept alive for the
+// lifetime of the client.
 class GrpcClient : public common::NonCopyable, public common::NonMovable {
 public:
     struct Options {
@@ -82,6 +88,7 @@ private:
                                                std::shared_ptr<RunState> state) noexcept;
 
     event::EventLoop *loop_;
+    http::Http2HpackEncodeCatalog grpc_catalog_;
     std::shared_ptr<http::Http2ClientConnection> conn_;
     std::shared_ptr<RunState> run_state_;
     std::string authority_;
