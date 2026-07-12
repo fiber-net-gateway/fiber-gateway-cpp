@@ -86,6 +86,7 @@ struct DecodeRecorder {
         self->fields.emplace_back(self->pending_name + "=" + std::string(reinterpret_cast<const char *>(data), len));
         self->pending_name.clear();
         self->pending_name_hash = 0;
+        self->raw_value_count++;
         return IoErr::None;
     }
 
@@ -106,6 +107,7 @@ struct DecodeRecorder {
         self->fields.emplace_back(self->pending_name + "=" + value);
         self->pending_name.clear();
         self->pending_name_hash = 0;
+        self->huff_value_count++;
         return IoErr::None;
     }
 
@@ -120,6 +122,8 @@ struct DecodeRecorder {
     std::vector<std::string> fields;
     std::string pending_name;
     std::uint64_t pending_name_hash = 0;
+    std::size_t raw_value_count = 0;
+    std::size_t huff_value_count = 0;
 };
 
 void decode_all(const std::vector<std::uint8_t> &bytes, DecodeRecorder &recorder) {
@@ -246,6 +250,26 @@ TEST(Http3QpackEncoderTest, EncodesHuffmanNameAndValue) {
     decode_all(bytes, recorder);
     ASSERT_EQ(recorder.fields.size(), 1U);
     EXPECT_EQ(recorder.fields[0], "x-test=ok");
+}
+
+TEST(Http3QpackEncoderTest, DoesNotHuffmanEncodeValueThatWouldExpand) {
+    // RFC 9204 §4.5: Huffman must only be used when it shortens the string.
+    // "!!!" expands under Huffman (3 -> 4 bytes), so it must be sent raw even
+    // though the threshold gate (here 1) would otherwise permit Huffman.
+    IoBufNodePool pool;
+    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1});
+    ASSERT_EQ(writer.encode_field("content-type", fiber::http::http_header_name_hash("content-type"), "!!!"),
+              IoErr::None);
+    IoBufChain block(pool);
+    ASSERT_EQ(writer.finish(block), IoErr::None);
+    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+
+    DecodeRecorder recorder;
+    decode_all(bytes, recorder);
+    ASSERT_EQ(recorder.fields.size(), 1U);
+    EXPECT_EQ(recorder.fields[0], "content-type=!!!");
+    EXPECT_EQ(recorder.huff_value_count, 0U);
+    EXPECT_EQ(recorder.raw_value_count, 1U);
 }
 
 TEST(Http3QpackEncoderTest, SupportsSmallWriterChunks) {
