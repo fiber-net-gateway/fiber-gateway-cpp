@@ -478,15 +478,10 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
 
     LocationConfig location;
     location.location = directive.location;
-    if (directive.args.size() == 1) {
-        location.match_kind = LocationMatchKind::Prefix;
-        location.pattern = directive.args[0];
-    } else if (directive.args.size() == 2 && directive.args[0] == "=") {
-        location.match_kind = LocationMatchKind::Exact;
-        location.pattern = directive.args[1];
-    } else {
-        return std::unexpected(make_error(directive, "location expects '<pattern>' or '= <pattern>'"));
+    if (directive.args.size() != 1) {
+        return std::unexpected(make_error(directive, "location expects exactly one pattern argument"));
     }
+    location.pattern = directive.args[0];
     if (contains_variable(location.pattern)) {
         return std::unexpected(make_error(directive, "location does not support variables in V1"));
     }

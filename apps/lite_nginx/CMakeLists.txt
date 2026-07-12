@@ -42,6 +42,8 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/LiteNginxRuntimeTest.cpp")
     target_link_libraries(lite_nginx_tests PRIVATE lite_nginx_core GTest::gtest_main)
     target_include_directories(lite_nginx_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src")
+    target_compile_definitions(lite_nginx_tests PRIVATE
+        FIBER_LITE_NGINX_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}")
     set_target_properties(lite_nginx_tests PROPERTIES FOLDER "apps/lite_nginx")
     fiber_link_runtime_allocator(lite_nginx_tests)
     if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
