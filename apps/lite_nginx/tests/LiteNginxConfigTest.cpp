@@ -134,15 +134,16 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
     EXPECT_EQ(api.proxy.set_headers[1].name, "X-Forwarded-Proto");
 }
 
-TEST(LiteNginxConfigTest, RejectsVariablesInV1) {
+TEST(LiteNginxConfigTest, RejectsVariableInHeaderName) {
+    // The header NAME must be static; a $ in the name is rejected.
     auto config_result = ConfigLoader::load_from_string(R"(
         http {
             listen 8080;
             server {
                 server_name localhost;
                 location / {
-                    proxy_pass http://backend;
-                    proxy_set_header Host $host;
+                    proxy_pass http://127.0.0.1:9001;
+                    proxy_set_header $host value;
                 }
             }
         }
@@ -150,7 +151,56 @@ TEST(LiteNginxConfigTest, RejectsVariablesInV1) {
                                                         "inline.conf");
 
     ASSERT_FALSE(config_result.has_value());
-    EXPECT_NE(config_result.error().message.find("does not support variables"), std::string::npos);
+    EXPECT_NE(config_result.error().message.find("name must not contain variables"), std::string::npos);
+}
+
+TEST(LiteNginxConfigTest, BareDollarValueIsLiteral) {
+    // A bare $ without ${ is a literal value (no interpolation), not a template.
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8080;
+            server {
+                server_name localhost;
+                location / {
+                    proxy_pass http://127.0.0.1:9001;
+                    proxy_set_header Host $host;
+                }
+            }
+        }
+    )",
+                                                        "inline.conf");
+
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    const auto &loc = config_result->http.servers[0].locations[0];
+    ASSERT_EQ(loc.proxy.set_headers.size(), 1u);
+    EXPECT_EQ(loc.proxy.set_headers[0].name, "Host");
+    EXPECT_EQ(loc.proxy.set_headers[0].value, "$host");
+    EXPECT_FALSE(loc.proxy.set_headers[0].is_template);
+}
+
+TEST(LiteNginxConfigTest, TemplateHeaderValue) {
+    // A value containing ${...} is parsed as a template (compiled at runtime-build, evaluated
+    // per request).
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8080;
+            server {
+                server_name localhost;
+                location / {
+                    proxy_pass http://127.0.0.1:9001;
+                    proxy_set_header X-Original-Host "${$header.host}";
+                }
+            }
+        }
+    )",
+                                                        "inline.conf");
+
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    const auto &loc = config_result->http.servers[0].locations[0];
+    ASSERT_EQ(loc.proxy.set_headers.size(), 1u);
+    EXPECT_EQ(loc.proxy.set_headers[0].name, "X-Original-Host");
+    EXPECT_EQ(loc.proxy.set_headers[0].value, "${$header.host}");
+    EXPECT_TRUE(loc.proxy.set_headers[0].is_template);
 }
 
 TEST(LiteNginxConfigTest, ParsesConnectionPoolSteal) {

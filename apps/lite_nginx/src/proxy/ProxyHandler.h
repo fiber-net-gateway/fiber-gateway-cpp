@@ -1,12 +1,20 @@
 #ifndef FIBER_LITE_NGINX_PROXY_PROXY_HANDLER_H
 #define FIBER_LITE_NGINX_PROXY_PROXY_HANDLER_H
 
+#include <string_view>
+#include <utility>
+#include <vector>
+
 #include "async/Task.h"
 
 #include "../runtime/RuntimeConfig.h"
 
 namespace fiber::http {
 class HttpExchange;
+}
+
+namespace fiber::http_script {
+class HttpScriptServices;
 }
 
 namespace fiber::lite_nginx::runtime {
@@ -25,9 +33,14 @@ public:
     ProxyHandler(upstream::UpstreamRegistry &upstreams, upstream::ConnectionPool &pool,
                  runtime::DnsService &dns) noexcept;
 
-    [[nodiscard]] fiber::async::Task<void> handle(fiber::http::HttpExchange &exchange,
-                                                  const runtime::ListenerRuntime &listener,
-                                                  const runtime::LocationRuntime &location) const;
+    // path_vars: route captures for this request (name/value pairs borrowing matcher text).
+    // services: app-provided upstream services, attached to a per-request ScriptExchangeCtx so
+    // template header values ($header.host etc.) resolve. Unused for static-header locations.
+    [[nodiscard]] fiber::async::Task<void>
+    handle(fiber::http::HttpExchange &exchange, const runtime::ListenerRuntime &listener,
+           const runtime::LocationRuntime &location,
+           const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
+           fiber::http_script::HttpScriptServices *services) const;
 
 private:
     upstream::UpstreamRegistry *upstreams_ = nullptr;

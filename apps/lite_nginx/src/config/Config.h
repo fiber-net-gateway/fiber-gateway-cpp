@@ -36,6 +36,9 @@ struct HeaderOverride {
     std::string name;
     std::string lowercase_name;
     std::string value;
+    // True when `value` contains ${...} and is compiled to a template script at runtime-build
+    // (evaluated per request). False => `value` is a literal copied as-is.
+    bool is_template = false;
 };
 
 struct ProxySettings {
