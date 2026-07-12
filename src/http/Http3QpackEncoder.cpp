@@ -324,18 +324,23 @@ common::IoErr Http3QpackEncoder::append_prefixed_string(std::string_view value, 
         return common::IoErr::Invalid;
     }
 
-    if (!should_huffman_encode(value)) {
+    // Huffman only helps when it shortens the string; the H bit (RFC 9204 §4.5)
+    // is set only then. should_huffman_encode() is a cheap O(1) threshold gate
+    // that skips the O(n) length scan for short strings; when it passes we still
+    // compare the real encoded length against the raw size before committing.
+    std::size_t encoded_len = 0;
+    bool use_huffman = should_huffman_encode(value);
+    if (use_huffman) {
+        encoded_len = hpack_huffman_encoded_length(reinterpret_cast<const std::uint8_t *>(value.data()), value.size());
+        use_huffman = encoded_len < value.size();
+    }
+
+    if (!use_huffman) {
         common::IoErr err = append_integer(first_byte_mask, prefix_bits, value.size());
         if (err != common::IoErr::None) {
             return err;
         }
         return append_bytes(reinterpret_cast<const std::uint8_t *>(value.data()), value.size());
-    }
-
-    const std::size_t encoded_len =
-            hpack_huffman_encoded_length(reinterpret_cast<const std::uint8_t *>(value.data()), value.size());
-    if (encoded_len > options_.max_string_size) {
-        return common::IoErr::Invalid;
     }
 
     common::IoErr err =
@@ -453,6 +458,8 @@ common::IoErr Http3QpackEncoder::ensure_output(std::size_t min_bytes) noexcept {
 }
 
 bool Http3QpackEncoder::should_huffman_encode(std::string_view value) const noexcept {
+    // Cheap O(1) threshold gate only; the encoded-vs-raw benefit check lives in
+    // append_prefixed_string, which falls back to raw when Huffman would not shorten.
     return !value.empty() && value.size() >= options_.huffman_threshold;
 }
 
