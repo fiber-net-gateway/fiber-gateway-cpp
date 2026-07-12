@@ -23,7 +23,7 @@ public:
     ~InterpreterVm() override = default;
 
     void iterate();
-    [[nodiscard]] AbiResult result() const noexcept;
+    [[nodiscard]] ScriptResult result() const noexcept;
     [[nodiscard]] bool done() const noexcept;
     [[nodiscard]] AsyncTask &async_task() noexcept { return async_; }
     void visit_roots(fiber::script::GcRootVisitor &visitor) noexcept override;
@@ -42,6 +42,7 @@ private:
         AsyncRetExp,
         AsyncRetAbort,
         Success,
+        SuccessVoid,
         Exception,
         Abort,
     };

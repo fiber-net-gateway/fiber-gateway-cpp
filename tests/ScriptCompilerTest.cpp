@@ -168,20 +168,21 @@ std::unique_ptr<fiber::script::ast::Expression> binary_chain(std::size_t depth) 
 TEST(ScriptCompilerTest, EmitsArithmeticExpressionStatement) {
     auto compiled = compile_script("1 + 2;");
     auto ops = extract_opcodes(compiled);
-    ASSERT_GE(ops.size(), 6u);
+    ASSERT_GE(ops.size(), 5u);
 
     EXPECT_EQ(ops[0], fiber::script::ir::Code::LOAD_CONST);
     EXPECT_EQ(ops[1], fiber::script::ir::Code::LOAD_CONST);
     EXPECT_EQ(ops[2], fiber::script::ir::Code::BOP_PLUS);
     EXPECT_EQ(ops[3], fiber::script::ir::Code::POP);
-    EXPECT_EQ(ops[4], fiber::script::ir::Code::LOAD_CONST);
-    EXPECT_EQ(ops[5], fiber::script::ir::Code::END_RETURN);
+    // Fall-through (no return) emits END_RETURN with no preceding LOAD_CONST: the script
+    // yields Void, not Value(undefined).
+    EXPECT_EQ(ops[4], fiber::script::ir::Code::END_RETURN);
 }
 
 TEST(ScriptCompilerTest, EmitsShortCircuitAnd) {
     auto compiled = compile_script("1 && 2;");
     auto ops = extract_opcodes(compiled);
-    ASSERT_GE(ops.size(), 8u);
+    ASSERT_GE(ops.size(), 7u);
 
     EXPECT_EQ(ops[0], fiber::script::ir::Code::LOAD_CONST);
     EXPECT_EQ(ops[1], fiber::script::ir::Code::DUMP);
@@ -189,6 +190,8 @@ TEST(ScriptCompilerTest, EmitsShortCircuitAnd) {
     EXPECT_EQ(ops[3], fiber::script::ir::Code::POP);
     EXPECT_EQ(ops[4], fiber::script::ir::Code::LOAD_CONST);
     EXPECT_EQ(ops[5], fiber::script::ir::Code::POP);
+    // Fall-through yields Void (END_RETURN with no preceding LOAD_CONST).
+    EXPECT_EQ(ops[6], fiber::script::ir::Code::END_RETURN);
 }
 
 TEST(ScriptCompilerTest, EmitsIfElseControlFlow) {

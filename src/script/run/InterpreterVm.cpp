@@ -63,27 +63,30 @@ InterpreterVm::InterpreterVm(const ir::Compiled &compiled, const fiber::script::
     }
 }
 
-AbiResult InterpreterVm::result() const noexcept {
+ScriptResult InterpreterVm::result() const noexcept {
     switch (state_) {
         case State::Success:
-            return AbiResult::success(result_.value);
+            return ScriptResult::value(result_.value);
+        case State::SuccessVoid:
+            return ScriptResult::void_();
         case State::Exception:
-            return AbiResult::exception(result_.exception);
+            return ScriptResult::exception(result_.exception);
         case State::Abort:
-            return AbiResult::abort(result_.abort.reason, result_.abort.position);
+            return ScriptResult::abort(result_.abort.reason, result_.abort.position);
         case State::Init:
         case State::Running:
         case State::Suspend:
         case State::AsyncRetSuc:
         case State::AsyncRetExp:
         case State::AsyncRetAbort:
-            return AbiResult::abort(ScriptAbortReason::None);
+            return ScriptResult::abort(ScriptAbortReason::None);
     }
-    return AbiResult::abort(ScriptAbortReason::Internal);
+    return ScriptResult::abort(ScriptAbortReason::Internal);
 }
 
 bool InterpreterVm::done() const noexcept {
-    return state_ == State::Success || state_ == State::Exception || state_ == State::Abort;
+    return state_ == State::Success || state_ == State::SuccessVoid || state_ == State::Exception ||
+           state_ == State::Abort;
 }
 
 void InterpreterVm::iterate() {
@@ -460,12 +463,15 @@ void InterpreterVm::iterate() {
                 break;
             }
             case ir::Code::END_RETURN: {
+                // sp_ == 1: a value was pushed (explicit `return expr;`) -> Value.
+                // sp_ == 0: nothing pushed (bare `return;` or fall-through) -> Void.
+                FIBER_ASSERT(sp_ <= 1);
                 if (sp_ > 0) {
                     result_.value = stack_[sp_ - 1];
+                    state_ = State::Success;
                 } else {
-                    result_.value = fiber::script::JsValue::make_undefined();
+                    state_ = State::SuccessVoid;
                 }
-                state_ = State::Success;
                 return;
             }
             case ir::Code::THROW_EXP: {
@@ -485,8 +491,9 @@ void InterpreterVm::iterate() {
             }
         }
     }
-    result_.value = fiber::script::JsValue::make_undefined();
-    state_ = State::Success;
+    // Unreachable for well-formed scripts (every compiled script ends in END_RETURN, which
+    // returns above). If ever hit, treat as fall-through -> Void.
+    state_ = State::SuccessVoid;
 }
 
 void InterpreterVm::async_complete(void *context, const AbiResult &result) noexcept {

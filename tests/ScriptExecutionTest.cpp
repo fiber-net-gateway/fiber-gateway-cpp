@@ -19,6 +19,7 @@
 namespace {
 
 using fiber::script::AbiResult;
+using fiber::script::ScriptResult;
 using fiber::script::JsValue;
 using fiber::script::Library;
 
@@ -156,7 +157,7 @@ fiber::script::AsyncTask delayed_async_arg_sum_function(void *userdata, const Li
     co_return AbiResult::success(JsValue::make_integer(sum));
 }
 
-ManualTask run_script_exec_async(fiber::script::Script *script, fiber::script::GcHeap *heap, AbiResult *result,
+ManualTask run_script_exec_async(fiber::script::Script *script, fiber::script::GcHeap *heap, ScriptResult *result,
                                  bool *done) {
     *result = co_await script->exec_async(JsValue::make_undefined(), nullptr, *heap);
     *done = true;
@@ -394,6 +395,50 @@ TEST(ScriptExecutionTest, RunSimpleReturn) {
     EXPECT_EQ(js_value_int64(result.value()), 7);
 }
 
+TEST(ScriptExecutionTest, BareReturnYieldsVoid) {
+    TestLibrary library;
+
+    auto compiled = compile_script("return;", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::script::GcHeap heap;
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
+    EXPECT_TRUE(result.is_void());
+    EXPECT_TRUE(result.is_success()); // Value and Void both mean "ended correctly".
+    EXPECT_FALSE(result.has_value()); // Void carries no value.
+}
+
+TEST(ScriptExecutionTest, FallThroughYieldsVoid) {
+    TestLibrary library;
+
+    auto compiled = compile_script("let a = 1; a = a + 1;", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::script::GcHeap heap;
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
+    EXPECT_TRUE(result.is_void());
+    EXPECT_TRUE(result.is_success());
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST(ScriptExecutionTest, ReturnUninitializedVarYieldsValue) {
+    TestLibrary library;
+
+    // `let a; return a;` -- a is undefined, but the return has an expression -> Value(undefined),
+    // not Void. Value/Void is decided by whether an expression was returned, not by its value.
+    auto compiled = compile_script("let a; return a;", library);
+    auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
+    fiber::script::Script script(compiled_ptr);
+
+    fiber::script::GcHeap heap;
+    auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
+    EXPECT_TRUE(result.is_value());
+    EXPECT_FALSE(result.is_void());
+    EXPECT_EQ(js_value_type(result.value()), fiber::script::JsNodeType::Undefined);
+}
+
 TEST(ScriptExecutionTest, RunThrowLiteral) {
     TestLibrary library;
 
@@ -518,7 +563,7 @@ TEST(ScriptExecutionTest, ExecAsyncAwaitsAsyncFunction) {
     fiber::script::Script script(compiled_ptr);
 
     fiber::script::GcHeap heap;
-    AbiResult result = AbiResult::abort(fiber::script::ScriptAbortReason::InvalidState);
+    ScriptResult result = ScriptResult::abort(fiber::script::ScriptAbortReason::InvalidState);
     bool done = false;
     ManualTask task = run_script_exec_async(&script, &heap, &result, &done);
 
