@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <string_view>
 #include <type_traits>
 
 #include "../common/Assert.h"
@@ -34,6 +35,10 @@ enum class ScriptAbortReason : std::uint8_t {
     Cancelled,
     Internal,
 };
+
+// Display name for a script abort reason ("OutOfMemory", "Timeout", ...). Used by hosts that
+// surface a script abort as a JSON error body. Returns a stable ASCII identifier; never null.
+std::string_view abort_reason_name(ScriptAbortReason reason) noexcept;
 
 struct ScriptAbort {
     ScriptAbortReason reason = ScriptAbortReason::None;

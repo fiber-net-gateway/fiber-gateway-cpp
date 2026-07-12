@@ -102,6 +102,13 @@ public:
                                                                       std::size_t len) noexcept;
     fiber::async::Task<fiber::common::IoResult<void>> write_empty(int status) noexcept;
 
+    // Synthesize a JSON error body {"error":"<error_name>"} for hosts that surface a tagged
+    // exception (no heap GcException) or a script abort as a 500. error_name must be a stable
+    // ASCII identifier (no escaping). Does not touch the GC heap, so it is safe to call after
+    // an out-of-memory abort.
+    fiber::async::Task<fiber::common::IoResult<void>> write_error_json(int status,
+                                                                       std::string_view error_name) noexcept;
+
 private:
     // Builds the cached object into its root slot on first access. Returns the cached
     // JsValue (or Undefined on failure). Idempotent: a failed build leaves the slot empty

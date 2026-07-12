@@ -293,4 +293,27 @@ fiber::async::Task<fiber::common::IoResult<void>> ScriptExchangeCtx::write_empty
     co_return co_await send_final_with_body(status, 0, nullptr);
 }
 
+fiber::async::Task<fiber::common::IoResult<void>>
+ScriptExchangeCtx::write_error_json(int status, std::string_view error_name) noexcept {
+    std::string json;
+    StringSink sink(json);
+    fiber::json::Generator gen(sink);
+    using R = fiber::json::Generator::Result;
+    if (gen.map_open() != R::OK) {
+        co_return std::unexpected(fiber::common::IoErr::Invalid);
+    }
+    if (gen.string("error", 5) != R::OK) {
+        co_return std::unexpected(fiber::common::IoErr::Invalid);
+    }
+    if (gen.string(error_name.data(), error_name.size()) != R::OK) {
+        co_return std::unexpected(fiber::common::IoErr::Invalid);
+    }
+    const R close_result = gen.map_close();
+    if (close_result != R::OK && close_result != R::GenerateComplete) {
+        co_return std::unexpected(fiber::common::IoErr::Invalid);
+    }
+    set_response_header("Content-Type", "application/json");
+    co_return co_await send_final_with_body(status, json.size(), reinterpret_cast<const std::uint8_t *>(json.data()));
+}
+
 } // namespace fiber::http_script

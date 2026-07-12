@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 #include <type_traits>
 
 namespace fiber::script {
@@ -51,6 +52,11 @@ enum class ExceptionKind : std::uint8_t {
     ReferenceError,
     IterationError,
 };
+
+// Display name for an exception kind ("TypeError", "RangeError", ...). Used by hosts that
+// surface a tagged exception (one built by make_exception, with no heap GcException carrying a
+// name/message) as a JSON error body.
+std::string_view exception_kind_name(ExceptionKind kind) noexcept;
 
 enum class GcHeapKind : std::uint8_t {
     String = 0,

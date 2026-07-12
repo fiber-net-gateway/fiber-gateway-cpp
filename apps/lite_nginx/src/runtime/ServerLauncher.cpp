@@ -21,6 +21,7 @@
 #include "net/TlsContext.h"
 #include "script/JsGc.h"
 #include "script/JsValue.h"
+#include "script/ScriptResult.h"
 
 #include "../proxy/ProxyHandler.h"
 #include "../upstream/ConnectionPool.h"
@@ -32,7 +33,6 @@ namespace fiber::lite_nginx::runtime {
 namespace {
 
 constexpr std::string_view kNotFoundBody = "404 Not Found\n";
-constexpr std::string_view kScriptErrorBody = "500 Script Error\n";
 
 RuntimeError make_error(const config::SourceLocation &location, std::string message) {
     return RuntimeError{
@@ -68,10 +68,16 @@ fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange
 }
 
 // Runs a compiled script against the request, wiring the HttpExchange via a
-// ScriptExchangeCtx attach payload. If the script completes without writing a response
-// header (e.g. it threw or aborted before calling resp.*), a 500 is sent so the client is
-// never left without a response. path_vars are the route captures for this request
-// (name/value pairs borrowing the matcher text and request path buffer).
+// ScriptExchangeCtx attach payload. If the script (or a directive such as http.proxyPass)
+// already wrote a response and marked it sent, that response is left as-is. Otherwise a
+// response is synthesized from the script's outcome:
+//   Value      -> 200 + JSON body (undefined renders as null)
+//   Void       -> 204 No Content
+//   Exception  -> 500 + JSON {"error": ...}; a heap GcException serializes its name/message,
+//                 a tagged exception (no heap payload) renders its kind name.
+//   Abort      -> 500 + JSON {"error": "<AbortReason>"}
+// path_vars are the route captures for this request (name/value pairs borrowing the matcher
+// text and request path buffer).
 fiber::async::Task<void> run_script(fiber::http::HttpExchange &exchange, fiber::script::Script &script,
                                     const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
                                     fiber::http_script::HttpScriptServices *services) {
@@ -81,9 +87,39 @@ fiber::async::Task<void> run_script(fiber::http::HttpExchange &exchange, fiber::
     ctx.set_services(services);
     fiber::script::JsValue root = fiber::script::JsValue::make_undefined();
     auto result = co_await script.exec_async(root, &ctx, heap);
-    (void) result;
-    if (!ctx.response_header_sent()) {
-        co_await send_plain_response(exchange, 500, kScriptErrorBody);
+
+    if (ctx.response_header_sent()) {
+        co_return; // script/directive already wrote the full response
+    }
+
+    using fiber::script::js_value_exception_kind;
+    using fiber::script::js_value_is_heap_ref;
+    using fiber::script::js_value_type;
+    using fiber::script::JsNodeType;
+    using fiber::script::ScriptResultKind;
+
+    switch (result.kind) {
+        case ScriptResultKind::Void: {
+            co_await ctx.write_empty(204);
+            break;
+        }
+        case ScriptResultKind::Value: {
+            co_await ctx.write_json(200, result.value());
+            break;
+        }
+        case ScriptResultKind::Exception: {
+            const fiber::script::JsValue &exc = result.exception();
+            if (js_value_is_heap_ref(exc) && js_value_type(exc) == JsNodeType::Exception) {
+                co_await ctx.write_json(500, exc);
+            } else {
+                co_await ctx.write_error_json(500, fiber::script::exception_kind_name(js_value_exception_kind(exc)));
+            }
+            break;
+        }
+        case ScriptResultKind::Abort: {
+            co_await ctx.write_error_json(500, fiber::script::abort_reason_name(result.abort().reason));
+            break;
+        }
     }
     co_return;
 }
