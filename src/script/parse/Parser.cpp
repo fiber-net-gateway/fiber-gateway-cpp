@@ -1065,25 +1065,32 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_templa
         return std::unexpected(make_error("invalid template literal", &tpl));
     }
 
-    std::unique_ptr<ast::Expression> expr;
-    auto append_part = [&](std::unique_ptr<ast::Expression> part) {
-        if (!expr) {
-            expr = std::move(part);
-            return;
+    std::vector<std::string> strings;
+    std::vector<std::unique_ptr<ast::Expression>> expressions;
+    std::size_t part_depth = 0;
+
+    auto push_string = [&](std::string value) -> std::expected<void, ParseError> {
+        auto depth_result = check_depth_slot(part_depth, &tpl);
+        if (!depth_result) {
+            return std::unexpected(depth_result.error());
         }
-        std::int32_t start = expr->start_pos();
-        std::int32_t end = part->end_pos();
-        expr = std::make_unique<ast::BinaryOperator>(start, end, ast::Operator::Add, std::move(expr), std::move(part));
+        ++part_depth;
+        strings.push_back(std::move(value));
+        return {};
     };
-    auto append_string = [&](std::string value, std::size_t start, std::size_t end) {
-        append_part(std::make_unique<ast::Literal>(static_cast<std::int32_t>(start), static_cast<std::int32_t>(end),
-                                                   std::move(value)));
+    auto push_expr = [&](std::unique_ptr<ast::Expression> value) -> std::expected<void, ParseError> {
+        auto depth_result = check_depth_slot(part_depth, &tpl);
+        if (!depth_result) {
+            return std::unexpected(depth_result.error());
+        }
+        ++part_depth;
+        expressions.push_back(std::move(value));
+        return {};
     };
 
     std::size_t chunk_start = 1;
     std::size_t i = 1;
     const std::size_t last = tpl.text.size() - 1;
-    std::size_t part_depth = 0;
     while (i < last) {
         char ch = tpl.text[i];
         if (ch == '\\') {
@@ -1101,20 +1108,9 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_templa
             if (!parsed_chunk) {
                 return std::unexpected(parsed_chunk.error());
             }
-            if (!parsed_chunk->empty()) {
-                auto depth_result = check_depth_slot(part_depth, &tpl);
-                if (!depth_result) {
-                    return std::unexpected(depth_result.error());
-                }
-                ++part_depth;
-                append_string(std::move(parsed_chunk.value()), tpl.start + chunk_start, tpl.start + i);
-            } else if (!expr) {
-                auto depth_result = check_depth_slot(part_depth, &tpl);
-                if (!depth_result) {
-                    return std::unexpected(depth_result.error());
-                }
-                ++part_depth;
-                append_string(std::string{}, tpl.start + chunk_start, tpl.start + chunk_start);
+            auto pushed_chunk = push_string(std::move(parsed_chunk.value()));
+            if (!pushed_chunk) {
+                return std::unexpected(pushed_chunk.error());
             }
 
             auto expr_end = find_template_expression_end(tpl.text, i + 2, tpl.start, max_depth_, 0);
@@ -1131,12 +1127,10 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_templa
                 error.position += tpl.start + inner_start;
                 return std::unexpected(std::move(error));
             }
-            auto depth_result = check_depth_slot(part_depth, &tpl);
-            if (!depth_result) {
-                return std::unexpected(depth_result.error());
+            auto pushed_expr = push_expr(std::move(inner_expr.value()));
+            if (!pushed_expr) {
+                return std::unexpected(pushed_expr.error());
             }
-            ++part_depth;
-            append_part(std::move(inner_expr.value()));
             i = expr_end.value();
             chunk_start = i;
             continue;
@@ -1149,22 +1143,14 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_templa
     if (!parsed_tail) {
         return std::unexpected(parsed_tail.error());
     }
-    if (!parsed_tail->empty()) {
-        auto depth_result = check_depth_slot(part_depth, &tpl);
-        if (!depth_result) {
-            return std::unexpected(depth_result.error());
-        }
-        ++part_depth;
-        append_string(std::move(parsed_tail.value()), tpl.start + chunk_start, tpl.start + last);
-    } else if (!expr) {
-        auto depth_result = check_depth_slot(part_depth, &tpl);
-        if (!depth_result) {
-            return std::unexpected(depth_result.error());
-        }
-        ++part_depth;
-        append_string(std::string{}, tpl.start + chunk_start, tpl.start + chunk_start);
+    auto pushed_tail = push_string(std::move(parsed_tail.value()));
+    if (!pushed_tail) {
+        return std::unexpected(pushed_tail.error());
     }
-    return expr;
+
+    return std::make_unique<ast::TemplateString>(static_cast<std::int32_t>(tpl.start),
+                                                 static_cast<std::int32_t>(tpl.start + tpl.text.size()),
+                                                 std::move(strings), std::move(expressions));
 }
 
 std::expected<std::optional<ast::Literal>, ParseError> Parser::parse_optional_literal() {
