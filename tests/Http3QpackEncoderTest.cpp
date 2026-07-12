@@ -313,3 +313,110 @@ TEST(Http3QpackEncoderTest, RejectsStringsAboveLimit) {
     EXPECT_EQ(writer.encode_field("x", fiber::http::http_header_name_hash("x"), "abc"), IoErr::Invalid);
     writer.abort();
 }
+
+// The following cases exercise the O(1) pseudo-header fast path (scheme a): an
+// in-table value must emit a single indexed byte for its exact static index, and a
+// non-in-table value must fall back to a static name reference at the first
+// same-name index. Both paths must stay byte-identical to the general find() route.
+
+TEST(Http3QpackEncoderTest, EncodesStatus500AsIndexedField) {
+    IoBufNodePool pool;
+    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
+    ASSERT_EQ(writer.encode_status(500), IoErr::None);
+
+    IoBufChain block(pool);
+    ASSERT_EQ(writer.finish(block), IoErr::None);
+    // 500 -> QPACK static index 71; 71 >= 6-bit prefix max (63) -> 0xff, 71-63=8 -> 0x08.
+    EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x00, 0x00, 0xff, 0x08}));
+}
+
+TEST(Http3QpackEncoderTest, EncodesStatus502UsingStaticNameReference) {
+    IoBufNodePool pool;
+    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
+    ASSERT_EQ(writer.encode_status(502), IoErr::None);
+
+    IoBufChain block(pool);
+    ASSERT_EQ(writer.finish(block), IoErr::None);
+    // 502 not in static table -> name ref @24 (first :status), literal "502".
+    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+    EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0x5f, 0x09, 0x03, '5', '0', '2'}));
+
+    DecodeRecorder recorder;
+    decode_all(bytes, recorder);
+    ASSERT_EQ(recorder.fields.size(), 1U);
+    EXPECT_EQ(recorder.fields[0], ":status=502");
+}
+
+TEST(Http3QpackEncoderTest, EncodesPostAsIndexedField) {
+    IoBufNodePool pool;
+    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
+    ASSERT_EQ(writer.encode_method(HttpMethod::Post), IoErr::None);
+
+    IoBufChain block(pool);
+    ASSERT_EQ(writer.finish(block), IoErr::None);
+    // POST -> QPACK static index 20; 0xc0 | 20 = 0xd4.
+    EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x00, 0x00, 0xd4}));
+}
+
+TEST(Http3QpackEncoderTest, EncodesNonStaticMethodUsingStaticNameReference) {
+    IoBufNodePool pool;
+    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
+    ASSERT_EQ(writer.encode_method(HttpMethod::MKCOL), IoErr::None);
+
+    IoBufChain block(pool);
+    ASSERT_EQ(writer.finish(block), IoErr::None);
+    // MKCOL not in static table -> name ref @15 (first :method); 15 == 4-bit prefix
+    // max -> 0x5f, 15-15=0 -> 0x00, then literal "MKCOL".
+    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+    EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0x5f, 0x00, 0x05, 'M', 'K', 'C', 'O', 'L'}));
+
+    DecodeRecorder recorder;
+    decode_all(bytes, recorder);
+    ASSERT_EQ(recorder.fields.size(), 1U);
+    EXPECT_EQ(recorder.fields[0], ":method=MKCOL");
+}
+
+TEST(Http3QpackEncoderTest, EncodesSchemeHttpsAndHttpAsIndexedField) {
+    IoBufNodePool pool;
+    Http3QpackEncoderIoBufWriter w_https(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
+    ASSERT_EQ(w_https.encode_scheme("https"), IoErr::None);
+    IoBufChain b_https(pool);
+    ASSERT_EQ(w_https.finish(b_https), IoErr::None);
+    // https -> index 23; 0xc0 | 23 = 0xd7.
+    EXPECT_EQ(chain_to_bytes(std::move(b_https)), (std::vector<std::uint8_t>{0x00, 0x00, 0xd7}));
+
+    Http3QpackEncoderIoBufWriter w_http(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
+    ASSERT_EQ(w_http.encode_scheme("http"), IoErr::None);
+    IoBufChain b_http(pool);
+    ASSERT_EQ(w_http.finish(b_http), IoErr::None);
+    // http -> index 22; 0xc0 | 22 = 0xd6.
+    EXPECT_EQ(chain_to_bytes(std::move(b_http)), (std::vector<std::uint8_t>{0x00, 0x00, 0xd6}));
+}
+
+TEST(Http3QpackEncoderTest, EncodesNonStaticSchemeUsingStaticNameReference) {
+    IoBufNodePool pool;
+    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
+    ASSERT_EQ(writer.encode_scheme("ftp"), IoErr::None);
+
+    IoBufChain block(pool);
+    ASSERT_EQ(writer.finish(block), IoErr::None);
+    // ftp not in static table -> name ref @22; 22 >= 15 -> 0x5f, 22-15=7 -> 0x07, "ftp".
+    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+    EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0x5f, 0x07, 0x03, 'f', 't', 'p'}));
+
+    DecodeRecorder recorder;
+    decode_all(bytes, recorder);
+    ASSERT_EQ(recorder.fields.size(), 1U);
+    EXPECT_EQ(recorder.fields[0], ":scheme=ftp");
+}
+
+TEST(Http3QpackEncoderTest, EncodesRootPathAsIndexedField) {
+    IoBufNodePool pool;
+    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
+    ASSERT_EQ(writer.encode_path("/"), IoErr::None);
+
+    IoBufChain block(pool);
+    ASSERT_EQ(writer.finish(block), IoErr::None);
+    // "/" -> QPACK static index 1; 0xc0 | 1 = 0xc1.
+    EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x00, 0x00, 0xc1}));
+}

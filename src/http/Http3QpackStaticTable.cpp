@@ -134,11 +134,30 @@ bool Http3QpackStaticTable::get_by_index(std::uint32_t index, TableEntryView &vi
     return true;
 }
 
+const Http3QpackStaticTable::BucketIndex &Http3QpackStaticTable::bucket_index() noexcept {
+    // Process-lifetime magic static: built once, thread-safe on first use.
+    static const BucketIndex kIndex = []() noexcept {
+        BucketIndex idx{};
+        idx.head.fill(kEmptySlot);
+        idx.next.fill(kEmptySlot);
+        for (std::uint32_t i = 0; i < kEntryCount; ++i) {
+            const std::uint32_t bucket = static_cast<std::uint32_t>(kEntries_[i].name_hash) & (kBucketCap - 1);
+            idx.next[i] = idx.head[bucket];
+            idx.head[bucket] = i;
+        }
+        return idx;
+    }();
+    return kIndex;
+}
+
 Http3QpackStaticTable::FindResult Http3QpackStaticTable::find(std::string_view name, std::uint64_t name_hash,
                                                               std::string_view value) noexcept {
+    const BucketIndex &idx = bucket_index();
+    const std::uint32_t bucket = static_cast<std::uint32_t>(name_hash) & (kBucketCap - 1);
+
     FindResult name_match;
-    for (std::uint32_t i = 0; i < kEntryCount; ++i) {
-        const StaticEntry &entry = kEntries_[i];
+    for (std::uint32_t id = idx.head[bucket]; id != kEmptySlot; id = idx.next[id]) {
+        const StaticEntry &entry = kEntries_[id];
         if (entry.name_hash != name_hash || entry.name_len != name.size()) {
             continue;
         }
@@ -151,14 +170,16 @@ Http3QpackStaticTable::FindResult Http3QpackStaticTable::find(std::string_view n
         if (entry.value_len == value.size() && same_bytes(value, entry_value)) {
             return {
                     .kind = FindKind::EntryMatch,
-                    .index = i,
+                    .index = id,
                     .entry = {.name = entry_name, .value = entry_value, .name_hash = entry.name_hash},
             };
         }
 
-        if (name_match.kind == FindKind::NoMatch) {
+        // Chains are LIFO (descending id); keep the lowest-index name match, matching
+        // the linear scan's "first match" semantics.
+        if (name_match.kind == FindKind::NoMatch || id < name_match.index) {
             name_match.kind = FindKind::NameMatch;
-            name_match.index = i;
+            name_match.index = id;
             name_match.entry.name = entry_name;
             name_match.entry.value = entry_value;
             name_match.entry.name_hash = entry.name_hash;
