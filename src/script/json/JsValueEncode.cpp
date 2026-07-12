@@ -158,6 +158,7 @@ Generator::Result encode_js_value(Generator &gen, const JsValue &value) {
                 return gen.binary(bin->data, bin->len);
             }
         case JsNodeType::Undefined:
+            return gen.null_value();
         case JsNodeType::Interator:
             return Generator::Result::InvalidValue;
     }
