@@ -12,7 +12,6 @@
 #include "script/std/StdLibrary.h"
 
 using fiber::script::AbiResult;
-using fiber::script::ScriptResult;
 using fiber::script::ConstValueHandle;
 using fiber::script::ExceptionKind;
 using fiber::script::GcHeap;
@@ -21,6 +20,7 @@ using fiber::script::JsNodeType;
 using fiber::script::JsValue;
 using fiber::script::Library;
 using fiber::script::ScriptAbortReason;
+using fiber::script::ScriptResult;
 using fiber::script::std_lib::StdLibrary;
 
 namespace {

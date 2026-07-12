@@ -19,9 +19,9 @@
 namespace {
 
 using fiber::script::AbiResult;
-using fiber::script::ScriptResult;
 using fiber::script::JsValue;
 using fiber::script::Library;
+using fiber::script::ScriptResult;
 
 AbiResult test_function(void *userdata, const Library::HostCallFrame &frame, Library::Arguments arguments) noexcept {
     (void) userdata;

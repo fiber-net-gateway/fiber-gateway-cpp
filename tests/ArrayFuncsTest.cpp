@@ -8,11 +8,11 @@
 #include "script/std/StdLibrary.h"
 
 using fiber::script::AbiResult;
-using fiber::script::ScriptResult;
 using fiber::script::GcHeap;
 using fiber::script::GcString;
 using fiber::script::JsNodeType;
 using fiber::script::JsValue;
+using fiber::script::ScriptResult;
 using fiber::script::std_lib::StdLibrary;
 
 namespace {
