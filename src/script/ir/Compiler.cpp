@@ -1129,4 +1129,10 @@ CompileResult<Compiled> Compiler::compile(const ast::Node &node, std::size_t max
     return compiler.compile(node);
 }
 
+CompileResult<Compiled> Compiler::compile_expression(const ast::Expression &expr, std::size_t max_depth) {
+    // compile()'s Expression branch emits compile_expression(expr) + emit_end_return, producing
+    // a value-returning script whose result is the evaluated expression. Forward to it.
+    return compile(expr, max_depth);
+}
+
 } // namespace fiber::script::ir

@@ -264,6 +264,18 @@ std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_expres
     return expr_result;
 }
 
+std::expected<std::unique_ptr<ast::Expression>, ParseError> Parser::parse_template(std::string_view template_string) {
+    // Wrap the body as a template literal so the existing template-literal tokenizer/parser
+    // handles ${...} interpolation, escape decoding, and nested expressions. The input is the
+    // verbatim body between backticks (no surrounding backticks).
+    std::string source;
+    source.reserve(template_string.size() + 2);
+    source.push_back('`');
+    source.append(template_string);
+    source.push_back('`');
+    return parse_expression(source);
+}
+
 std::expected<std::unique_ptr<ast::Statement>, ParseError> Parser::parse_statement() {
     if (!has_more()) {
         return std::unexpected(make_error("unexpected end of input", nullptr));

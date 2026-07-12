@@ -78,3 +78,59 @@ TEST(ScriptTemplateLiteralTest, HandlesNestedBracesAndTemplatesInExpression) {
 TEST(ScriptTemplateLiteralTest, EscapesBacktickAndInterpolationStart) {
     expect_script_string("return `\\`${1}\\${2}`;", "`1${2}");
 }
+
+// ---- compile_template_string: compile a template-literal BODY (no surrounding backticks) ----
+
+ScriptResult run_template(std::string_view body, GcHeap &heap) {
+    auto compiled = fiber::script::compile_template_string(StdLibrary::instance(), body);
+    EXPECT_TRUE(compiled.has_value()) << (compiled ? "" : compiled.error().message);
+    if (!compiled) {
+        return ScriptResult::abort(fiber::script::ScriptAbortReason::Internal);
+    }
+    JsValue root = JsValue::make_undefined();
+    return compiled->exec_sync(root, nullptr, heap);
+}
+
+void expect_template_string(std::string_view body, std::string_view expected) {
+    GcHeap heap;
+    ScriptResult result = run_template(body, heap);
+    ASSERT_TRUE(result.is_success());
+    ASSERT_EQ(js_value_type(result.value()), JsNodeType::String);
+    EXPECT_EQ(string_to_utf8(result.value()), expected);
+}
+
+TEST(ScriptTemplateLiteralTest, TemplateValueLiteralBody) {
+    // No ${...}: body compiles to a constant string.
+    expect_template_string("abc", "abc");
+    expect_template_string("", "");
+}
+
+TEST(ScriptTemplateLiteralTest, TemplateValueInterpolation) {
+    expect_template_string("pre-${1 + 2}-post", "pre-3-post");
+    expect_template_string("${1 + 2}", "3");
+    expect_template_string("v=${true}", "v=true");
+    expect_template_string("v=${null}", "v=null");
+}
+
+TEST(ScriptTemplateLiteralTest, TemplateValueNestedExpressions) {
+    expect_template_string("${{a: 1}.a}", "1");
+    expect_template_string("outer-${`x${1 + 1}`}-end", "outer-x2-end");
+}
+
+TEST(ScriptTemplateLiteralTest, TemplateValueIsSynchronous) {
+    auto compiled = fiber::script::compile_template_string(StdLibrary::instance(), "${1 + 2}");
+    ASSERT_TRUE(compiled.has_value());
+    EXPECT_FALSE(compiled->contains_async());
+}
+
+TEST(ScriptTemplateLiteralTest, TemplateValueMalformedBodyFails) {
+    // Unterminated ${ : the backtick-wrapped body is an invalid template literal.
+    auto compiled = fiber::script::compile_template_string(StdLibrary::instance(), "pre-${unclosed");
+    EXPECT_FALSE(compiled.has_value());
+}
+
+TEST(ScriptTemplateLiteralTest, TemplateValueRejectsAssignmentByDefault) {
+    // allow_assign defaults to false; a bare assignment in an interpolation is a compile error.
+    auto compiled = fiber::script::compile_template_string(StdLibrary::instance(), "${(a = 1)}");
+    EXPECT_FALSE(compiled.has_value());
+}

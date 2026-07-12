@@ -55,6 +55,13 @@ public:
     std::expected<std::unique_ptr<ast::Block>, ParseError> parse_script(std::string_view script);
     std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_expression(std::string_view expression);
 
+    // Parses a template-literal BODY (without surrounding backticks) into a TemplateString
+    // expression. The body's ${...} interpolations, escapes, and nested expressions are handled
+    // by the existing template-literal parser (the body is wrapped in backticks internally and
+    // run through parse_expression). allow_assign/max_depth are inherited from this Parser, so
+    // they propagate to the interpolated expressions as well.
+    std::expected<std::unique_ptr<ast::Expression>, ParseError> parse_template(std::string_view template_string);
+
 private:
     class DepthGuard {
     public:
