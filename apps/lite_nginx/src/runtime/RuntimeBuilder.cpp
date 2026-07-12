@@ -329,28 +329,70 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
             runtime_location.upstream_index = upstream_index;
             runtime_location.proxy_buffering = location.proxy.proxy_buffering;
             runtime_location.skip_headers = make_default_skip_headers();
-            runtime_location.set_headers.reserve(location.proxy.set_headers.size());
+            // Add the route first so the matcher extracts the pattern's path variable names
+            // (e.g. /api/:id -> ["id"]) into path_var_names; template header values are then
+            // compiled against a RouteScriptLibrary seeded with those names, so $path
+            // references validate at compile time. Mirrors the script-location flow.
+            const std::uint32_t location_index = static_cast<std::uint32_t>(runtime_server.locations.size());
+            std::vector<std::string> path_var_names;
+            route_definer.path_var_names_out = &path_var_names;
+            try {
+                matcher_builder.add_route(runtime_location.pattern,
+                                          LocationRoutePayload{.location_index = location_index});
+            } catch (const RoutePatternError &error) {
+                route_definer.path_var_names_out = nullptr;
+                return std::unexpected(make_error(location.proxy_pass.location, error.what()));
+            }
+            route_definer.path_var_names_out = nullptr;
 
+            // Compile ${...} template header values against a per-location RouteScriptLibrary.
+            // Only construct route_lib when this location actually has a template header, so
+            // static-only locations pay zero script cost.
+            bool has_template_header = false;
+            for (const auto &header: location.proxy.set_headers) {
+                if (header.is_template) {
+                    has_template_header = true;
+                    break;
+                }
+            }
+            std::shared_ptr<fiber::http_script::RouteScriptLibrary> route_lib;
+            if (has_template_header) {
+                if (!runtime.script_library) {
+                    runtime.script_library = std::make_shared<fiber::script::std_lib::StdLibrary>();
+                    fiber::http_script::register_http_functions_to_lib(*runtime.script_library);
+                }
+                route_lib = std::make_shared<fiber::http_script::RouteScriptLibrary>(*runtime.script_library,
+                                                                                     path_var_names);
+            }
+
+            runtime_location.set_headers.reserve(location.proxy.set_headers.size());
             for (const auto &header: location.proxy.set_headers) {
                 ProxyHeaderRuntime runtime_header;
                 runtime_header.name = header.name;
                 runtime_header.lowercase_name = header.lowercase_name;
-                runtime_header.value = header.value;
                 runtime_header.name_hash = fiber::http::http_header_name_hash(runtime_header.lowercase_name);
                 runtime_location.host_header_overridden =
                         runtime_location.host_header_overridden || runtime_header.lowercase_name == "host";
                 runtime_location.skip_headers.insert(runtime_header.lowercase_name, runtime_header.name_hash,
                                                      kSkipHeaderValue);
+                if (header.is_template) {
+                    auto compiled = fiber::script::compile_template_string(*route_lib, header.value);
+                    if (!compiled) {
+                        return std::unexpected(
+                                make_error(location.location,
+                                           "proxy_set_header template compile error: " + compiled.error().message));
+                    }
+                    if (compiled->contains_async()) {
+                        return std::unexpected(make_error(
+                                location.location, "proxy_set_header template must be synchronous: " + header.name));
+                    }
+                    runtime_header.template_script = std::make_shared<fiber::script::Script>(std::move(*compiled));
+                }
+                runtime_header.value = header.value; // literal value, or template source (diagnostics)
                 runtime_location.set_headers.push_back(std::move(runtime_header));
             }
+            runtime_location.route_lib = std::move(route_lib);
 
-            const std::uint32_t location_index = static_cast<std::uint32_t>(runtime_server.locations.size());
-            try {
-                matcher_builder.add_route(runtime_location.pattern,
-                                          LocationRoutePayload{.location_index = location_index});
-            } catch (const RoutePatternError &error) {
-                return std::unexpected(make_error(location.proxy_pass.location, error.what()));
-            }
             runtime_server.locations.push_back(std::move(runtime_location));
         }
 

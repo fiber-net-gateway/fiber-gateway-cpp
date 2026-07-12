@@ -243,7 +243,7 @@ public:
         if (location.script) {
             co_await run_script(exchange, *location.script, match_context.path_vars, script_services_);
         } else {
-            co_await proxy_.handle(exchange, listener, location);
+            co_await proxy_.handle(exchange, listener, location, match_context.path_vars, script_services_);
         }
     }
 

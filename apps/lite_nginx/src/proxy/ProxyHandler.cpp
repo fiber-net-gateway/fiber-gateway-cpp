@@ -3,6 +3,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "common/IoError.h"
 #include "event/EventLoop.h"
@@ -13,6 +14,10 @@
 #include "http/HttpExchangeIo.h"
 #include "http/HttpHeaderHash.h"
 #include "http/HttpHeaders.h"
+#include "http_script/ScriptExchangeCtx.h"
+#include "script/JsValue.h"
+#include "script/Script.h"
+#include "script/std/NodeText.h"
 
 #include "../runtime/DnsService.h"
 #include "../upstream/ConnectionPool.h"
@@ -28,6 +33,46 @@ namespace {
 using namespace fiber::http::proxy_core;
 
 constexpr std::string_view kNotFoundBody = "404 Not Found\n";
+constexpr std::string_view kScriptErrorBody = "500 Internal Server Error\n";
+
+bool location_has_template_headers(const runtime::LocationRuntime &location) noexcept {
+    for (const auto &header: location.set_headers) {
+        if (header.template_script) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Evaluates all ${...} template header values for this request into `resolved` (index-aligned
+// with location.set_headers; only template entries are filled). Returns false on abort /
+// exception / non-String so the caller can respond 500. Builds a per-request GcHeap +
+// ScriptExchangeCtx (route vars + services attached) only when the location has templates.
+bool evaluate_template_headers(fiber::http::HttpExchange &exchange, const runtime::LocationRuntime &location,
+                               const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
+                               fiber::http_script::HttpScriptServices *services, std::vector<std::string> &resolved) {
+    fiber::script::GcHeap heap;
+    fiber::http_script::ScriptExchangeCtx ctx{exchange, heap};
+    ctx.set_path_vars(path_vars);
+    ctx.set_services(services);
+    resolved.resize(location.set_headers.size());
+    for (std::size_t i = 0; i < location.set_headers.size(); ++i) {
+        const auto &header = location.set_headers[i];
+        if (!header.template_script) {
+            continue;
+        }
+        auto result = header.template_script->exec_sync(fiber::script::JsValue::make_undefined(), &ctx, heap);
+        if (!result.is_success()) {
+            return false;
+        }
+        std::string_view view;
+        if (!fiber::script::std_lib::string_utf8_view(result.value(), view)) {
+            return false; // non-String result
+        }
+        resolved[i].assign(view.data(), view.size());
+    }
+    return true;
+}
 
 bool should_skip_request_header(const runtime::LocationRuntime &location,
                                 const fiber::http::HttpHeaders &request_headers,
@@ -69,7 +114,8 @@ fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange
 }
 
 void build_upstream_request_headers(const runtime::LocationRuntime &location, const fiber::http::HttpExchange &exchange,
-                                    fiber::http::HttpHeaders &headers) {
+                                    fiber::http::HttpHeaders &headers,
+                                    const std::vector<std::string> &resolved_template_values) {
     for (auto it = exchange.request_headers().begin(); it != exchange.request_headers().end(); ++it) {
         const auto &field = *it;
         if (field.name_len == 0 || should_skip_request_header(location, exchange.request_headers(), field)) {
@@ -84,8 +130,13 @@ void build_upstream_request_headers(const runtime::LocationRuntime &location, co
         headers.set_view("Host", location.default_host_header, const_cast<char *>("host"), kHostHash);
     }
 
-    for (const auto &header: location.set_headers) {
-        headers.set_view(header.name, header.value, const_cast<char *>(header.lowercase_name.data()), header.name_hash);
+    for (std::size_t i = 0; i < location.set_headers.size(); ++i) {
+        const auto &header = location.set_headers[i];
+        // Templates are pre-evaluated per request (resolved_template_values[i]); literals are
+        // copied as-is. The ternary short-circuits, so resolved_template_values[i] is only
+        // accessed for template entries (which are always filled when the location has templates).
+        std::string_view value = header.template_script ? std::string_view(resolved_template_values[i]) : header.value;
+        headers.set_view(header.name, value, const_cast<char *>(header.lowercase_name.data()), header.name_hash);
     }
 }
 
@@ -105,10 +156,11 @@ void build_downstream_response_headers(const fiber::http::Http1ResponseHead &ups
 fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchange,
                                                const runtime::LocationRuntime &location,
                                                fiber::http::Http1ClientConnection &conn,
-                                               const runtime::ListenerRuntime &listener) {
+                                               const runtime::ListenerRuntime &listener,
+                                               const std::vector<std::string> &resolved_template_values) {
     fiber::http::ClientHttp1Exchange upstream_exchange(conn, exchange.pool());
     fiber::http::HttpHeaders request_headers(exchange.pool());
-    build_upstream_request_headers(location, exchange, request_headers);
+    build_upstream_request_headers(location, exchange, request_headers, resolved_template_values);
 
     bool request_end_stream = true;
     const fiber::http::HttpBodySpec request_body = detect_request_body(exchange, request_end_stream);
@@ -220,9 +272,11 @@ struct TimeRec {
 ProxyHandler::ProxyHandler(upstream::UpstreamRegistry &upstreams, upstream::ConnectionPool &pool,
                            runtime::DnsService &dns) noexcept : upstreams_(&upstreams), pool_(&pool), dns_(&dns) {}
 
-fiber::async::Task<void> ProxyHandler::handle(fiber::http::HttpExchange &exchange,
-                                              const runtime::ListenerRuntime &listener,
-                                              const runtime::LocationRuntime &location) const {
+fiber::async::Task<void>
+ProxyHandler::handle(fiber::http::HttpExchange &exchange, const runtime::ListenerRuntime &listener,
+                     const runtime::LocationRuntime &location,
+                     const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
+                     fiber::http_script::HttpScriptServices *services) const {
     if (!upstreams_ || !pool_) {
         co_await send_plain_response(exchange, 502, kBadGatewayBody, listener);
         co_return;
@@ -233,6 +287,17 @@ fiber::async::Task<void> ProxyHandler::handle(fiber::http::HttpExchange &exchang
     if (peer == nullptr || !peer->connection_key.has_value()) {
         co_await send_plain_response(exchange, 502, kBadGatewayBody, listener);
         co_return;
+    }
+
+    // Evaluate ${...} template header values before acquiring the upstream connection so a
+    // template failure returns 500 without wasting a connection checkout. Static-header
+    // locations skip this entirely (no GcHeap / ScriptExchangeCtx).
+    std::vector<std::string> resolved_template_values;
+    if (location_has_template_headers(location)) {
+        if (!evaluate_template_headers(exchange, location, path_vars, services, resolved_template_values)) {
+            co_await send_plain_response(exchange, 500, kScriptErrorBody, listener);
+            co_return;
+        }
     }
 
     // SNI uses the configured host name for HTTPS peers; IP-literal peers send nothing.
@@ -246,7 +311,7 @@ fiber::async::Task<void> ProxyHandler::handle(fiber::http::HttpExchange &exchang
         co_return;
     }
 
-    co_await proxy_over_connection(exchange, location, *acquired->conn, listener);
+    co_await proxy_over_connection(exchange, location, *acquired->conn, listener, resolved_template_values);
 }
 
 } // namespace fiber::lite_nginx::proxy

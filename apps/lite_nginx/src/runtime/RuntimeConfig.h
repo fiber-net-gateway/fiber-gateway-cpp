@@ -50,8 +50,11 @@ struct TlsIdentityRuntime {
 struct ProxyHeaderRuntime {
     std::string name;
     std::string lowercase_name;
-    std::string value;
+    std::string value; // literal value (used when template_script == nullptr)
     std::uint64_t name_hash = 0;
+    // Non-null when `value` is a ${...} template compiled at runtime-build; evaluated per
+    // request against a ScriptExchangeCtx to produce the header value. Null => use `value`.
+    std::shared_ptr<fiber::script::Script> template_script;
 };
 
 struct UpstreamPeerRuntime {

@@ -1659,4 +1659,121 @@ http {
     ::unlink(script_path.c_str());
 }
 
+// ${...} proxy_set_header values compile against the location's RouteScriptLibrary.
+TEST(LiteNginxRuntimeTest, ProxySetHeaderTemplateCompiles) {
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location / {
+            proxy_pass http://127.0.0.1:9001;
+            proxy_set_header X-Original-Host "${$header.host}";
+            proxy_set_header X-Static "literal";
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "tmpl_compile.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    const auto &loc = runtime->servers[0].locations[0];
+    ASSERT_EQ(loc.set_headers.size(), 2u);
+    EXPECT_EQ(loc.set_headers[0].name, "X-Original-Host");
+    EXPECT_EQ(loc.set_headers[1].name, "X-Static");
+    // Template header has a compiled script; static header does not.
+    EXPECT_TRUE(loc.set_headers[0].template_script != nullptr);
+    EXPECT_TRUE(loc.set_headers[1].template_script == nullptr);
+    EXPECT_FALSE(loc.set_headers[0].template_script->contains_async());
+}
+
+// $path.<unknown> in a template is a compile-time error (the name is not a route capture).
+TEST(LiteNginxRuntimeTest, ProxySetHeaderTemplateRejectsUnknownPathVar) {
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location /users/:id {
+            proxy_pass http://127.0.0.1:9001;
+            proxy_set_header X "${$path.missing}";
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "tmpl_bad_path.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_FALSE(runtime.has_value());
+    EXPECT_NE(runtime.error().message.find("constant not found"), std::string::npos) << runtime.error().message;
+}
+
+// End-to-end: ${$header.host} evaluates per request from the inbound Host header and is sent
+// to the upstream as the templated header value.
+TEST(LiteNginxRuntimeTest, ProxySetHeaderTemplateEvaluatesPerRequest) {
+    std::promise<std::string> upstream_request;
+    auto upstream_future = upstream_request.get_future();
+    SingleRequestUpstream upstream("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", &upstream_request);
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location / {
+            proxy_pass http://127.0.0.1:UPSTREAM_PORT;
+            proxy_set_header X-Original-Host "${$header.host}";
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "tmpl_eval.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+
+    const char request[] = "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+
+    std::string response = recv_http_response(client);
+    ::close(client);
+
+    ASSERT_EQ(upstream_future.wait_for(3s), std::future_status::ready);
+    std::string proxied_request = upstream_future.get();
+
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_NE(proxied_request.find("X-Original-Host: example.com\r\n"), std::string::npos) << proxied_request;
+}
+
 } // namespace

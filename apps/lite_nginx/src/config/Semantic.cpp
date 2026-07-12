@@ -282,14 +282,20 @@ std::expected<HeaderOverride, ConfigError> parse_proxy_set_header(const Directiv
     if (directive.args.size() != 2) {
         return std::unexpected(make_error(directive, "proxy_set_header expects exactly two arguments"));
     }
-    if (contains_variable(directive.args[0]) || contains_variable(directive.args[1])) {
-        return std::unexpected(make_error(directive, "proxy_set_header does not support variables in V1"));
+    if (contains_variable(directive.args[0])) {
+        return std::unexpected(make_error(directive, "proxy_set_header name must not contain variables"));
     }
+    // The value may be a template: any ${...} is compiled at runtime-build and evaluated per
+    // request (route vars like $header.host resolve via the location's RouteScriptLibrary). A
+    // bare $ without ${ is treated as a literal (no interpolation).
+    const std::string &value = directive.args[1];
+    const bool is_template = value.find("${") != std::string::npos;
 
     return HeaderOverride{
             .name = directive.args[0],
             .lowercase_name = to_lowercase(directive.args[0]),
-            .value = directive.args[1],
+            .value = value,
+            .is_template = is_template,
     };
 }
 
