@@ -55,9 +55,8 @@ acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService
     if (!out.lease.valid()) {
         // No pool configured (keepalive_size == 0): open a transient connection per attempt.
         for (std::size_t i = 0; i < addresses.size(); ++i) {
-            out.transient =
-                    std::make_unique<fiber::http::Http1ClientConnection>(fiber::event::EventLoop::current(),
-                                                                          build_opts(addresses[i]));
+            out.transient = std::make_unique<fiber::http::Http1ClientConnection>(fiber::event::EventLoop::current(),
+                                                                                 build_opts(addresses[i]));
             auto connect_result = co_await out.transient->connect();
             if (connect_result) {
                 out.conn = out.transient.get();

@@ -220,10 +220,20 @@ void GcHeap::enter_no_gc() noexcept {
     no_gc_depth_ += 1;
 }
 
-void GcHeap::leave_no_gc() noexcept {
+void GcHeap::leave_no_gc(bool defer_collect) noexcept {
     FIBER_ASSERT(no_gc_depth_ != 0);
     no_gc_depth_ -= 1;
-    if (no_gc_depth_ == 0 && gc_pending_ && !collecting_) {
+    if (no_gc_depth_ != 0) {
+        return;
+    }
+    if (defer_collect) {
+        // The region's allocations are expected to stay rooted, so a collection
+        // here would reclaim nothing. Drop the pending request and let the next
+        // threshold-driven allocation re-evaluate.
+        gc_pending_ = false;
+        return;
+    }
+    if (gc_pending_ && !collecting_) {
         collect();
     }
 }
@@ -256,14 +266,19 @@ void GcHeap::LocalMark::reset() noexcept {
     state_ = {};
 }
 
-GcHeap::NoGcScope::NoGcScope(GcHeap &heap) noexcept : heap_(&heap) { heap_->enter_no_gc(); }
+GcHeap::NoGcScope::NoGcScope(GcHeap &heap, bool defer_collect) noexcept : heap_(&heap), defer_collect_(defer_collect) {
+    heap_->enter_no_gc();
+}
 
-GcHeap::NoGcScope::NoGcScope(NoGcScope &&other) noexcept : heap_(other.heap_) { other.heap_ = nullptr; }
+GcHeap::NoGcScope::NoGcScope(NoGcScope &&other) noexcept : heap_(other.heap_), defer_collect_(other.defer_collect_) {
+    other.heap_ = nullptr;
+}
 
 GcHeap::NoGcScope &GcHeap::NoGcScope::operator=(NoGcScope &&other) noexcept {
     if (this != &other) {
         reset();
         heap_ = other.heap_;
+        defer_collect_ = other.defer_collect_;
         other.heap_ = nullptr;
     }
     return *this;
@@ -274,8 +289,9 @@ GcHeap::NoGcScope::~NoGcScope() { reset(); }
 void GcHeap::NoGcScope::reset() noexcept {
     if (heap_) {
         GcHeap *heap = heap_;
+        bool defer = defer_collect_;
         heap_ = nullptr;
-        heap->leave_no_gc();
+        heap->leave_no_gc(defer);
     }
 }
 
