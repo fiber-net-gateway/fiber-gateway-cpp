@@ -1,11 +1,17 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <string>
 #include <string_view>
+#include <system_error>
 
 #include "config/Config.h"
 #include "config/ConfigLoader.h"
 #include "config/Lexer.h"
+
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -14,6 +20,45 @@ using fiber::lite_nginx::config::Lexer;
 using fiber::lite_nginx::config::PoolSteal;
 using fiber::lite_nginx::config::ProxyPassKind;
 using fiber::lite_nginx::config::TokenKind;
+
+// RAII temp directory under the system temp dir; removed on destruction.
+struct TempDir {
+    fs::path path;
+    explicit TempDir(std::string name) {
+        path = fs::temp_directory_path() / std::move(name);
+        std::error_code ec;
+        fs::remove_all(path, ec);
+        fs::create_directories(path, ec);
+    }
+    ~TempDir() {
+        std::error_code ec;
+        fs::remove_all(path, ec);
+    }
+    TempDir(const TempDir &) = delete;
+    TempDir &operator=(const TempDir &) = delete;
+};
+
+// Saves the cwd on construction and restores it on destruction (best-effort), so a test
+// that chdir's into a TempDir cannot leave subsequent tests in a deleted directory.
+struct ScopedCwd {
+    fs::path saved;
+    ScopedCwd() : saved(fs::current_path()) {}
+    ~ScopedCwd() {
+        std::error_code ec;
+        fs::current_path(saved, ec);
+    }
+    ScopedCwd(const ScopedCwd &) = delete;
+    ScopedCwd &operator=(const ScopedCwd &) = delete;
+};
+
+void write_file(const fs::path &p, std::string_view content) {
+    std::error_code ec;
+    fs::create_directories(p.parent_path(), ec);
+    std::ofstream f(p, std::ios::binary | std::ios::trunc);
+    f << content;
+    f.close();
+    ASSERT_TRUE(f.good()) << "failed to write " << p;
+}
 
 TEST(LiteNginxConfigTest, LexerHandlesCommentsAndQuotedStrings) {
     Lexer lexer(R"(
@@ -443,6 +488,221 @@ TEST(LiteNginxConfigTest, AcceptsQuicListenAlias) {
     ASSERT_EQ(config_result->http.listens.size(), 1u);
     EXPECT_TRUE(config_result->http.listens[0].tls);
     EXPECT_TRUE(config_result->http.listens[0].http3);
+}
+
+// ---- File-path resolution (absolute or relative-to-containing-config-file) ----
+
+// A relative script_file resolves against the directory of the file that contains the
+// directive (the source_name), never the process pwd. Source_name here is an absolute
+// path with a directory, so the result is absolute.
+TEST(LiteNginxConfigTest, RelativeScriptFileResolvesAgainstConfigDir) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8080;
+            server {
+                server_name localhost;
+                location / { script_file sub/x.js; }
+            }
+        }
+    )",
+                                                        "/etc/nginx/main.conf");
+
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    EXPECT_EQ(config_result->http.servers[0].locations[0].script_file, "/etc/nginx/sub/x.js");
+}
+
+// An absolute script_file passes through unchanged.
+TEST(LiteNginxConfigTest, AbsoluteScriptFilePassesThrough) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8080;
+            server {
+                server_name localhost;
+                location / { script_file /abs/x.js; }
+            }
+        }
+    )",
+                                                        "/etc/nginx/main.conf");
+
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    EXPECT_EQ(config_result->http.servers[0].locations[0].script_file, "/abs/x.js");
+}
+
+// Relative certificate / certificate_key resolve against the config directory too.
+TEST(LiteNginxConfigTest, RelativeCertificateResolvesAgainstConfigDir) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8443 ssl;
+            server {
+                server_name localhost;
+                certificate certs/a.crt;
+                certificate_key certs/a.key;
+                location / { proxy_pass http://127.0.0.1:9001; }
+            }
+        }
+    )",
+                                                        "/etc/nginx/main.conf");
+
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    const auto &server = config_result->http.servers[0];
+    EXPECT_EQ(server.certificate, "/etc/nginx/certs/a.crt");
+    EXPECT_EQ(server.certificate_key, "/etc/nginx/certs/a.key");
+}
+
+// When source_name has no directory (a bare name, e.g. inline test configs), a relative
+// path stays as-is -- preserving the historical pwd-relative behavior for those callers.
+TEST(LiteNginxConfigTest, BareSourceNameKeepsRelativeScriptFile) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8080;
+            server { server_name localhost; location / { script_file sub/x.js; } }
+        }
+    )",
+                                                        "inline.conf");
+
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    EXPECT_EQ(config_result->http.servers[0].locations[0].script_file, "sub/x.js");
+}
+
+// load_from_file anchors the entry path to its absolute, symlink-resolved location, so a
+// relative `--config` argument still makes downstream paths resolve against the config's
+// real directory rather than the process pwd.
+TEST(LiteNginxConfigTest, LoadFromFileAnchorsRelativeConfigPath) {
+    TempDir dir("lite_nginx_rel_entry");
+    write_file(dir.path / "scripts" / "x.js", "resp.sendJson(200, {ok: true});");
+    write_file(dir.path / "main.conf", R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:8080;
+    server { server_name localhost; location /* { script_file scripts/x.js; } }
+}
+)");
+
+    // Load the config by a path relative to a cwd inside the temp dir, so the entry path
+    // itself is pwd-relative; the resolved script_file must still be absolute and anchored
+    // to the config file's directory.
+    ScopedCwd cwd_guard;
+    std::error_code chdir_ec;
+    fs::current_path(dir.path, chdir_ec);
+    ASSERT_FALSE(chdir_ec) << chdir_ec.message();
+    auto config_result = ConfigLoader::load_from_file("main.conf");
+
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    const auto &script_file = config_result->http.servers[0].locations[0].script_file;
+    EXPECT_FALSE(script_file.empty());
+    EXPECT_EQ(script_file.front(), '/') << script_file;
+    EXPECT_NE(script_file.find("scripts/x.js"), std::string::npos) << script_file;
+}
+
+// ---- include directive ----
+
+TEST(LiteNginxConfigTest, IncludeSplicesUpstreamFromAnotherFile) {
+    TempDir dir("lite_nginx_inc_upstream");
+    write_file(dir.path / "upstreams.conf", R"(
+        upstream backend {
+            server 127.0.0.1:9001;
+        }
+    )");
+    write_file(dir.path / "main.conf", R"(
+worker_processes 1;
+http {
+    listen 8080;
+    include upstreams.conf;
+    server { server_name localhost; location / { proxy_pass http://backend; } }
+}
+)");
+
+    auto config_result = ConfigLoader::load_from_file((dir.path / "main.conf").string());
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    ASSERT_EQ(config_result->http.upstreams.size(), 1u);
+    EXPECT_EQ(config_result->http.upstreams[0].name, "backend");
+}
+
+TEST(LiteNginxConfigTest, IncludeResolvesRelativeToIncludingFile) {
+    TempDir dir("lite_nginx_inc_rel");
+    // main.conf in dir/ includes "sub/inner.conf"; inner.conf lives in dir/sub/.
+    write_file(dir.path / "sub" / "inner.conf", R"(
+        upstream inner { server 127.0.0.1:9002; }
+    )");
+    write_file(dir.path / "main.conf", R"(
+http {
+    listen 8080;
+    include sub/inner.conf;
+    server { server_name localhost; location / { proxy_pass http://inner; } }
+}
+)");
+
+    auto config_result = ConfigLoader::load_from_file((dir.path / "main.conf").string());
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    ASSERT_EQ(config_result->http.upstreams.size(), 1u);
+    EXPECT_EQ(config_result->http.upstreams[0].name, "inner");
+}
+
+TEST(LiteNginxConfigTest, NestedIncludeResolvesRelativeToIncluder) {
+    TempDir dir("lite_nginx_inc_nested");
+    // a.conf includes b/b.conf; b/b.conf includes c/c.conf relative to b/.
+    write_file(dir.path / "b" / "b.conf", "include c/c.conf;\n");
+    write_file(dir.path / "b" / "c" / "c.conf", R"(
+        upstream deep { server 127.0.0.1:9003; }
+    )");
+    write_file(dir.path / "a.conf", R"(
+http {
+    listen 8080;
+    include b/b.conf;
+    server { server_name localhost; location / { proxy_pass http://deep; } }
+}
+)");
+
+    auto config_result = ConfigLoader::load_from_file((dir.path / "a.conf").string());
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    ASSERT_EQ(config_result->http.upstreams.size(), 1u);
+    EXPECT_EQ(config_result->http.upstreams[0].name, "deep");
+}
+
+TEST(LiteNginxConfigTest, IncludeInsideServerBlockSplicesLocation) {
+    TempDir dir("lite_nginx_inc_block");
+    write_file(dir.path / "locs.conf", "location /ready { proxy_pass http://127.0.0.1:9001; }\n");
+    write_file(dir.path / "main.conf", R"(
+http {
+    listen 8080;
+    server {
+        server_name localhost;
+        include locs.conf;
+    }
+}
+)");
+
+    auto config_result = ConfigLoader::load_from_file((dir.path / "main.conf").string());
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    ASSERT_EQ(config_result->http.servers[0].locations.size(), 1u);
+    EXPECT_EQ(config_result->http.servers[0].locations[0].pattern, "/ready");
+}
+
+TEST(LiteNginxConfigTest, IncludeCycleDetected) {
+    TempDir dir("lite_nginx_inc_cycle");
+    write_file(dir.path / "a.conf", "include b.conf;\n");
+    write_file(dir.path / "b.conf", "include a.conf;\n");
+
+    auto config_result = ConfigLoader::load_from_file((dir.path / "a.conf").string());
+    ASSERT_FALSE(config_result.has_value());
+    EXPECT_NE(config_result.error().message.find("include cycle"), std::string::npos);
+}
+
+TEST(LiteNginxConfigTest, MissingIncludeFileErrors) {
+    TempDir dir("lite_nginx_inc_missing");
+    write_file(dir.path / "main.conf", R"(
+http {
+    listen 8080;
+    include does_not_exist.conf;
+    server { server_name localhost; location / { proxy_pass http://127.0.0.1:9001; } }
+}
+)");
+
+    auto config_result = ConfigLoader::load_from_file((dir.path / "main.conf").string());
+    ASSERT_FALSE(config_result.has_value());
+    EXPECT_NE(config_result.error().message.find("include file not found"), std::string::npos);
+    // The error location is the missing included file path.
+    EXPECT_NE(config_result.error().location.source_name.find("does_not_exist.conf"), std::string::npos);
 }
 
 } // namespace

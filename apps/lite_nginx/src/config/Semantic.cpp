@@ -5,6 +5,8 @@
 #include <string_view>
 #include <unordered_set>
 
+#include "PathResolve.h"
+
 namespace fiber::lite_nginx::config {
 namespace {
 
@@ -515,7 +517,10 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
                 return std::unexpected(make_error(child, "script_file expects exactly one argument"));
             }
             location.kind = LocationKind::Script;
-            location.script_file = child.args[0];
+            // Resolve against the file that contains this directive (absolute paths pass
+            // through); the stored path is absolute/canonical so RuntimeBuilder opens it
+            // regardless of the process working directory.
+            location.script_file = resolve_config_path(child.location.source_name, child.args[0]);
             has_script_file = true;
             continue;
         }
@@ -594,7 +599,9 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
             if (seen_certificate) {
                 return std::unexpected(make_error(child, "certificate must not be repeated"));
             }
-            server.certificate = child.args[0];
+            // Resolve against the file that contains this directive (absolute paths pass
+            // through); stored absolute so TLS loads it regardless of process pwd.
+            server.certificate = resolve_config_path(child.location.source_name, child.args[0]);
             seen_certificate = true;
             continue;
         }
@@ -609,7 +616,7 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
             if (seen_certificate_key) {
                 return std::unexpected(make_error(child, "certificate_key must not be repeated"));
             }
-            server.certificate_key = child.args[0];
+            server.certificate_key = resolve_config_path(child.location.source_name, child.args[0]);
             seen_certificate_key = true;
             continue;
         }

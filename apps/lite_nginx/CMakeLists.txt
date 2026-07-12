@@ -2,6 +2,7 @@ add_library(lite_nginx_config STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/config/ConfigLoader.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/Lexer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/Parser.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/config/PathResolve.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/Semantic.cpp")
 target_include_directories(lite_nginx_config PUBLIC "${CMAKE_CURRENT_LIST_DIR}/src")
 set_target_properties(lite_nginx_config PROPERTIES FOLDER "apps/lite_nginx")
