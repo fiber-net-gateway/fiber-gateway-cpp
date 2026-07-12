@@ -4,6 +4,7 @@
 #include "BinaryFuncs.h"
 #include "HashFuncs.h"
 #include "IncludesFunc.h"
+#include "JsonFuncs.h"
 #include "LengthFunc.h"
 #include "MathFuncs.h"
 #include "ObjectsFuncs.h"
@@ -144,6 +145,7 @@ StdLibrary::StdLibrary() {
     register_math_funcs(*this);
     register_rand_funcs(*this);
     register_hash_funcs(*this);
+    register_json_funcs(*this);
     register_objects_funcs(*this);
     register_strings_funcs(*this);
     register_url_funcs(*this);
