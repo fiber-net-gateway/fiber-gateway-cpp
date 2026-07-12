@@ -373,4 +373,150 @@ TEST(HttpServerTlsDynamicCertTest, DefaultIdentityCanServeWithoutCustomSelector)
     delete server;
 }
 
+// TLS HTTP/1 client that POSTs a request body and reads the entire response
+// (headers + body) until EOF. Used to verify chunked response framing over TLS.
+DetachedTask run_tls_http1_client_post_and_read_all(fiber::event::EventLoop *loop, std::uint16_t port,
+                                                     std::string_view server_name, std::string_view request_body,
+                                                     std::promise<ClientResult> *result_promise) {
+    ClientResult result;
+
+    fiber::net::SocketAddress target(fiber::net::IpAddress::loopback_v4(), port);
+    auto connect_result = co_await fiber::net::TcpStream::connect(*loop, target);
+    if (!connect_result) {
+        result.err = connect_result.error();
+        result_promise->set_value(std::move(result));
+        co_return;
+    }
+
+    auto stream = std::make_unique<fiber::net::TcpStream>(std::move(*connect_result));
+    fiber::net::TlsOptions tls_options{};
+    tls_options.alpn = {"http/1.1"};
+    tls_options.server_name.assign(server_name.data(), server_name.size());
+    fiber::net::TlsContext client_ctx(std::move(tls_options), false);
+    auto init_result = client_ctx.init();
+    if (!init_result) {
+        result.err = init_result.error();
+        result_promise->set_value(std::move(result));
+        co_return;
+    }
+
+    int fd = stream->release_fd();
+    fiber::net::AcceptResult accept(fd, stream->remote_addr());
+    auto transport_result = fiber::http::TlsTransport::create(stream->loop(), std::move(accept), client_ctx);
+    if (!transport_result) {
+        result.err = transport_result.error();
+        result_promise->set_value(std::move(result));
+        co_return;
+    }
+    auto transport = std::move(*transport_result);
+
+    auto hs_result = co_await transport->handshake(5s);
+    if (!hs_result) {
+        result.err = hs_result.error();
+        result_promise->set_value(std::move(result));
+        co_return;
+    }
+    result.negotiated_alpn = transport->negotiated_alpn();
+
+    std::string request = "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: " +
+                           std::to_string(request_body.size()) +
+                           "\r\nConnection: close\r\n\r\n" + std::string(request_body);
+    std::size_t offset = 0;
+    while (offset < request.size()) {
+        auto write_result = co_await transport->write(request.data() + offset, request.size() - offset, 5s);
+        if (!write_result || *write_result == 0) {
+            result.err = write_result ? fiber::common::IoErr::BrokenPipe : write_result.error();
+            result_promise->set_value(std::move(result));
+            co_return;
+        }
+        offset += *write_result;
+    }
+
+    std::array<char, 4096> buf{};
+    for (;;) {
+        auto read_result = co_await transport->read(buf.data(), buf.size(), 5s);
+        if (!read_result) {
+            result.err = read_result.error();
+            result_promise->set_value(std::move(result));
+            co_return;
+        }
+        if (*read_result == 0) {
+            break;
+        }
+        result.response.append(buf.data(), *read_result);
+    }
+    result_promise->set_value(std::move(result));
+    co_return;
+}
+
+// End-to-end over TLS: server sends a chunked response via write_body(IoBufChain),
+// which builds [prefix][body][suffix] and feeds TlsTransport::writev (the coalesce
+// path). The client verifies the exact chunked wire framing survives, proving the
+// two parts compose correctly on the real HTTPS path.
+TEST(HttpServerTlsDynamicCertTest, ChunkedResponseEchoedOverTls) {
+    TempFile cert("cert", kSelfSignedCertPem);
+    TempFile key("key", kSelfSignedKeyPem);
+    ASSERT_TRUE(cert.ok);
+    ASSERT_TRUE(key.ok);
+
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::http::HttpServerOptions server_options;
+    server_options.tls.enabled = true;
+    server_options.tls.cert_file = cert.path;
+    server_options.tls.key_file = key.path;
+
+    const std::string body = "Hello, TLS chunked world!"; // 25 bytes = 0x19
+    auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        auto read_result = co_await exchange.read_body(8192);
+        if (!read_result) {
+            co_return;
+        }
+        auto header_result = co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = 200,
+                .body = fiber::http::ResponseBodySpec::Chunked(),
+                .end_stream = false,
+        });
+        if (!header_result) {
+            co_return;
+        }
+        co_await exchange.write_body(std::move(*read_result));
+        co_return;
+    };
+
+    std::promise<std::uint16_t> port_promise;
+    std::promise<fiber::http::HttpServer *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+
+    fiber::async::spawn(group.at(0),
+                        [&]() { return start_http_server(&group.at(0), handler, server_options, &port_promise, &server_promise); });
+
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+    std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    std::promise<ClientResult> client_promise;
+    auto client_future = client_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_tls_http1_client_post_and_read_all(&group.at(0), port, "bar.b.com", body, &client_promise);
+    });
+
+    ClientResult client = client_future.get();
+    EXPECT_EQ(client.err, fiber::common::IoErr::None) << "TLS client error";
+    // One chunk (hex size + CRLF + body) + folded final terminator, unmodified by
+    // coalescing:  "19\r\n" + body + "\r\n0\r\n\r\n".
+    std::string expected_body_section = "19\r\n" + body + "\r\n0\r\n\r\n";
+    EXPECT_NE(client.response.find("200"), std::string::npos) << client.response;
+    EXPECT_NE(client.response.find("Transfer-Encoding: chunked"), std::string::npos) << client.response;
+    EXPECT_NE(client.response.find(expected_body_section), std::string::npos) << client.response;
+
+    fiber::async::spawn(group.at(0), [&]() { return stop_http_server(&group.at(0), server); });
+    group.join();
+    delete server;
+}
+
 } // namespace

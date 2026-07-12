@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <future>
 #include <string>
 
@@ -504,6 +505,71 @@ DetachedTask run_chunked_client(fiber::event::EventLoop *loop, std::uint16_t por
             result = header_result.error();
         } else {
             auto body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, false);
+            if (!body_result) {
+                result = body_result.error();
+            } else {
+                auto trailer_result = co_await exchange.send_trailer(trailers);
+                if (!trailer_result) {
+                    result = trailer_result.error();
+                } else {
+                    result = fiber::common::IoErr::None;
+                    request_done = exchange.request_complete();
+                }
+            }
+        }
+    }
+
+    connection.close();
+    result_promise->set_value(result);
+    request_done_promise->set_value(request_done);
+}
+
+// Like run_chunked_client but exercises the write_body(IoBufChain) chunked path
+// (ClientHttp1Exchange merges [prefix][body][suffix] into a single writev).
+DetachedTask run_chunked_client_iobufchain(fiber::event::EventLoop *loop, std::uint16_t port,
+                                           std::promise<fiber::common::IoErr> *result_promise,
+                                           std::promise<bool> *request_done_promise) {
+    fiber::http::Http1ClientConnectionOptions conn_options;
+    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+
+    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
+    auto connect_result = co_await connection.connect();
+    if (!connect_result) {
+        result_promise->set_value(connect_result.error());
+        request_done_promise->set_value(false);
+        co_return;
+    }
+
+    fiber::common::IoErr result = fiber::common::IoErr::Unknown;
+    bool request_done = false;
+    {
+        fiber::mem::BufPool pool;
+        fiber::http::HttpHeaders headers(pool);
+        headers.add_view("host", "example.com");
+        headers.add_view("x-test", "1");
+        fiber::http::HttpHeaders trailers(pool);
+        trailers.add_view("x-checksum", "123");
+
+        fiber::http::ClientHttp1Exchange exchange(connection, pool);
+        fiber::http::Http1RequestHead head;
+        head.method = fiber::http::HttpMethod::Post;
+        head.target = "/upload";
+        head.headers = &headers;
+        head.body = fiber::http::HttpBodySpec::Chunked();
+
+        auto header_result = co_await exchange.send_header(head, false);
+        if (!header_result) {
+            result = header_result.error();
+        } else {
+            fiber::mem::IoBufNodePool node_pool;
+            fiber::mem::IoBufChain body_chain(node_pool);
+            fiber::mem::IoBuf body_buf = fiber::mem::IoBuf::allocate(5);
+            std::memcpy(body_buf.writable_data(), "hello", 5);
+            body_buf.commit(5);
+            body_chain.append(std::move(body_buf));
+            // chain.complete() == false -> trailing CRLF only, no terminator (trailer follows).
+
+            auto body_result = co_await exchange.write_body(std::move(body_chain));
             if (!body_result) {
                 result = body_result.error();
             } else {
@@ -1095,6 +1161,53 @@ TEST(ClientHttp1ExchangeTest, SendChunkedBodyAndTrailerWriteRawHttp1Request) {
     auto request_done_future = request_done_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() {
         return run_chunked_client(&group.at(0), port, &result_promise, &request_done_promise);
+    });
+
+    EXPECT_EQ(result_future.get(), fiber::common::IoErr::None);
+    EXPECT_TRUE(request_done_future.get());
+
+    CaptureOutcome capture = capture_future.get();
+    EXPECT_EQ(capture.err, fiber::common::IoErr::None);
+    EXPECT_EQ(capture.bytes, expected);
+
+    group.stop();
+    group.join();
+}
+
+TEST(ClientHttp1ExchangeTest, SendChunkedBodyIoBufChainWriteRawHttp1Request) {
+    // Same wire output as SendChunkedBodyAndTrailerWriteRawHttp1Request, but the
+    // body is sent via write_body(IoBufChain) -> single coalesced writev.
+    const std::string expected = "POST /upload HTTP/1.1\r\n"
+                                 "Transfer-Encoding: chunked\r\n"
+                                 "host: example.com\r\n"
+                                 "x-test: 1\r\n"
+                                 "\r\n"
+                                 "5\r\n"
+                                 "hello\r\n"
+                                 "0\r\n"
+                                 "x-checksum: 123\r\n"
+                                 "\r\n";
+
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<std::uint16_t> port_promise;
+    auto port_future = port_promise.get_future();
+    std::promise<CaptureOutcome> capture_promise;
+    auto capture_future = capture_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_capture_server(&group.at(0), &port_promise, expected.size(), &capture_promise);
+    });
+
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    std::promise<fiber::common::IoErr> result_promise;
+    auto result_future = result_promise.get_future();
+    std::promise<bool> request_done_promise;
+    auto request_done_future = request_done_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_chunked_client_iobufchain(&group.at(0), port, &result_promise, &request_done_promise);
     });
 
     EXPECT_EQ(result_future.get(), fiber::common::IoErr::None);

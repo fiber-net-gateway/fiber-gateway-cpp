@@ -798,53 +798,64 @@ ClientHttp1Exchange::write_body(mem::IoBufChain chunk, std::chrono::milliseconds
             }
 
             if (body_bytes != 0) {
+                // Build [prefix][body][suffix] as one chain and issue a single writev.
+                // Suffix folds the trailing CRLF into the final terminator when this is
+                // the last chunk ("\r\n0\r\n\r\n"), so the whole chunk is one write.
+                bool last = chunk.complete();
                 std::array<char, kMaxChunkSizeHexDigits + 2> prefix{};
                 char *prefix_ptr = prefix.data();
                 prefix_ptr += append_hex(prefix_ptr, body_bytes);
                 *prefix_ptr++ = '\r';
                 *prefix_ptr++ = '\n';
+                std::size_t prefix_len = static_cast<std::size_t>(prefix_ptr - prefix.data());
 
-                auto prefix_result = co_await write_all(conn_->transport_.get(), prefix.data(),
-                                                        static_cast<std::size_t>(prefix_ptr - prefix.data()), timeout);
-                if (!prefix_result) {
-                    request_state_ = RequestState::Failed;
-                    active_ = false;
-                    conn_->fail_exchange(this);
-                    conn_ = nullptr;
-                    co_return std::unexpected(prefix_result.error());
+                mem::IoBuf prefix_buf = mem::IoBuf::allocate(prefix_len);
+                if (!prefix_buf) {
+                    co_return std::unexpected(common::IoErr::NoMem);
                 }
-                auto body_result = co_await write_all(conn_->transport_.get(), chunk, timeout);
-                if (!body_result) {
-                    request_state_ = RequestState::Failed;
-                    active_ = false;
-                    conn_->fail_exchange(this);
-                    conn_ = nullptr;
-                    co_return std::unexpected(body_result.error());
+                std::memcpy(prefix_buf.writable_data(), prefix.data(), prefix_len);
+                prefix_buf.commit(prefix_len);
+                if (!chunk.prepend(std::move(prefix_buf))) {
+                    co_return std::unexpected(common::IoErr::NoMem);
                 }
-                auto suffix_result = co_await write_all(conn_->transport_.get(), kLineTerminator.data(),
-                                                        kLineTerminator.size(), timeout);
-                if (!suffix_result) {
+
+                std::string_view suffix = last ? std::string_view("\r\n0\r\n\r\n", 7) : std::string_view("\r\n", 2);
+                mem::IoBuf suffix_buf = mem::IoBuf::allocate(suffix.size());
+                if (!suffix_buf) {
+                    co_return std::unexpected(common::IoErr::NoMem);
+                }
+                std::memcpy(suffix_buf.writable_data(), suffix.data(), suffix.size());
+                suffix_buf.commit(suffix.size());
+                if (!chunk.append(std::move(suffix_buf))) {
+                    co_return std::unexpected(common::IoErr::NoMem);
+                }
+
+                auto write_result = co_await write_all(conn_->transport_.get(), chunk, timeout);
+                if (!write_result) {
                     request_state_ = RequestState::Failed;
                     active_ = false;
                     conn_->fail_exchange(this);
                     conn_ = nullptr;
-                    co_return std::unexpected(suffix_result.error());
+                    co_return std::unexpected(write_result.error());
                 }
                 body_sent_ += body_bytes;
+                if (last) {
+                    request_state_ = RequestState::RequestDone;
+                }
+                co_return body_bytes;
             }
 
-            if (chunk.complete()) {
-                auto final_result = co_await write_all(conn_->transport_.get(), kChunkedFinal.data(),
-                                                       kChunkedFinal.size(), timeout);
-                if (!final_result) {
-                    request_state_ = RequestState::Failed;
-                    active_ = false;
-                    conn_->fail_exchange(this);
-                    conn_ = nullptr;
-                    co_return std::unexpected(final_result.error());
-                }
-                request_state_ = RequestState::RequestDone;
+            // body_bytes == 0 && chunk.complete(): empty final chunk, just the terminator.
+            auto final_result = co_await write_all(conn_->transport_.get(), kChunkedFinal.data(),
+                                                   kChunkedFinal.size(), timeout);
+            if (!final_result) {
+                request_state_ = RequestState::Failed;
+                active_ = false;
+                conn_->fail_exchange(this);
+                conn_ = nullptr;
+                co_return std::unexpected(final_result.error());
             }
+            request_state_ = RequestState::RequestDone;
             co_return body_bytes;
         }
     }
