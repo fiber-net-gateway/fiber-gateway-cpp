@@ -84,11 +84,6 @@ struct ProxyPassTarget {
     SourceLocation location;
 };
 
-enum class LocationMatchKind : unsigned char {
-    Prefix,
-    Exact,
-};
-
 enum class LocationKind : unsigned char {
     Proxy,
     Script,
@@ -96,7 +91,9 @@ enum class LocationKind : unsigned char {
 
 struct LocationConfig {
     SourceLocation location;
-    LocationMatchKind match_kind = LocationMatchKind::Prefix;
+    // The url pattern handed verbatim to RoutePathMatcher: a bare static pattern matches
+    // exactly that path; `:name` captures one segment; `*name`/`*` is a trailing wildcard.
+    // No `=` exact modifier and no auto prefix-shorthand -- the pattern is the match spec.
     std::string pattern;
     LocationKind kind = LocationKind::Proxy;
     ProxyPassTarget proxy_pass;

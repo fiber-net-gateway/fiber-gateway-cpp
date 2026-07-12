@@ -73,8 +73,10 @@ struct UpstreamRuntime {
 
 struct LocationRuntime {
     config::SourceLocation location;
+    // The location pattern, fed verbatim to RoutePathMatcher: a bare pattern matches exactly
+    // that path, `:name` captures one segment, and `*name`/`*` is a trailing wildcard (so `/*`
+    // is the catch-all and `/` matches only the root path).
     std::string pattern;
-    std::string matcher_pattern;
     std::string default_host_header;
     fiber::http::HeaderMap<std::uint8_t> skip_headers;
     std::vector<ProxyHeaderRuntime> set_headers;

@@ -11,7 +11,6 @@ namespace {
 
 using fiber::lite_nginx::config::ConfigLoader;
 using fiber::lite_nginx::config::Lexer;
-using fiber::lite_nginx::config::LocationMatchKind;
 using fiber::lite_nginx::config::PoolSteal;
 using fiber::lite_nginx::config::ProxyPassKind;
 using fiber::lite_nginx::config::TokenKind;
@@ -66,7 +65,7 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
                 proxy_read_timeout 10s;
                 proxy_set_header Host backend.internal;
 
-                location = /ready {
+                location /ready {
                     proxy_pass http://127.0.0.1:9009;
                     proxy_buffering off;
                 }
@@ -122,14 +121,12 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
     ASSERT_EQ(server.locations.size(), 2u);
 
     const auto &ready = server.locations[0];
-    EXPECT_EQ(ready.match_kind, LocationMatchKind::Exact);
     EXPECT_EQ(ready.pattern, "/ready");
     EXPECT_EQ(ready.proxy_pass.kind, ProxyPassKind::Direct);
     EXPECT_EQ(ready.proxy_pass.host, "127.0.0.1");
     EXPECT_EQ(ready.proxy_pass.port, 9009);
 
     const auto &api = server.locations[1];
-    EXPECT_EQ(api.match_kind, LocationMatchKind::Prefix);
     EXPECT_EQ(api.proxy_pass.kind, ProxyPassKind::NamedUpstream);
     EXPECT_EQ(api.proxy_pass.upstream_name, "backend");
     ASSERT_EQ(api.proxy.set_headers.size(), 2u);

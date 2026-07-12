@@ -408,14 +408,14 @@ http {
 
     server {
         server_name same.test;
-        location / {
+        location /* {
             proxy_pass http://127.0.0.1:9001;
         }
     }
 
     server {
         server_name same.test;
-        location / {
+        location /* {
             proxy_pass http://127.0.0.1:9002;
         }
     }
@@ -439,7 +439,7 @@ http {
         server_name localhost;
         certificate /tmp/localhost.crt;
         certificate_key /tmp/localhost.key;
-        location / {
+        location /* {
             proxy_pass http://127.0.0.1:9001;
         }
     }
@@ -532,7 +532,7 @@ http {
 
     server {
         server_name localhost;
-        location / {
+        location /* {
             proxy_pass http://127.0.0.1:UPSTREAM_PORT;
             proxy_set_header Host backend.internal;
             proxy_set_header X-Test replaced;
@@ -618,7 +618,7 @@ http {
 
     server {
         server_name other.local;
-        location / {
+        location /* {
             proxy_pass http://127.0.0.1:OTHER_UPSTREAM_PORT;
         }
     }
@@ -749,7 +749,7 @@ http {
 
     server {
         server_name localhost;
-        location / {
+        location /* {
             proxy_pass http://backend;
         }
     }
@@ -839,7 +839,7 @@ http {
 
     server {
         server_name localhost;
-        location / {
+        location /* {
             proxy_pass http://backend;
         }
     }
@@ -903,7 +903,7 @@ http {
 
     server {
         server_name localhost;
-        location / {
+        location /* {
             proxy_pass http://127.0.0.1:9001;
         }
     }
@@ -944,7 +944,7 @@ http {
 
     server {
         server_name localhost;
-        location / {
+        location /* {
             proxy_pass http://127.0.0.1:UPSTREAM_PORT;
         }
     }
@@ -1024,7 +1024,7 @@ http {
 
     server {
         server_name localhost;
-        location / {
+        location /* {
             proxy_pass http://backend;
         }
     }
@@ -1089,7 +1089,7 @@ http {
 
     server {
         server_name localhost;
-        location / {
+        location /* {
             script_file SCRIPT_PATH;
         }
     }
@@ -1133,7 +1133,7 @@ http {
     listen 127.0.0.1:8080;
     server {
         server_name localhost;
-        location / { script_file /tmp/lite_nginx_does_not_exist_999999.js; }
+        location /* { script_file /tmp/lite_nginx_does_not_exist_999999.js; }
     }
 }
 )",
@@ -1152,7 +1152,7 @@ http {
     listen 127.0.0.1:8080;
     server {
         server_name localhost;
-        location / {
+        location /* {
             proxy_pass http://127.0.0.1:9001;
             script_file /tmp/x.js;
         }
@@ -1257,6 +1257,211 @@ http {
     ::unlink(script_path.c_str());
 }
 
+// A bare `location /foo` (no `:param`/`*`) matches exactly that path -- it is NOT a prefix.
+// `/foo` hits the script; `/foo/bar` matches no location and returns 404.
+TEST(LiteNginxRuntimeTest, ScriptFileLocationBarePatternMatchesExactly) {
+    const std::string script_path = "/tmp/lite_nginx_bare_pattern_exact_test.js";
+    {
+        std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.good());
+        file << "resp.sendJson(200, {hit: \"foo\"});";
+    }
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location /foo {
+            script_file SCRIPT_PATH;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_path);
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "bare_pattern.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+
+    // /foo matches the bare static location exactly.
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const char foo_request[] = "GET /foo HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, foo_request, sizeof(foo_request) - 1, 0),
+              static_cast<ssize_t>(sizeof(foo_request) - 1));
+    std::string foo_response = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(foo_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << foo_response;
+    EXPECT_NE(foo_response.find("\"hit\":\"foo\""), std::string::npos) << foo_response;
+
+    // /foo/bar does not match /foo (exact, not prefix) and there is no catch-all -> 404.
+    client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const char sub_request[] = "GET /foo/bar HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, sub_request, sizeof(sub_request) - 1, 0),
+              static_cast<ssize_t>(sizeof(sub_request) - 1));
+    std::string sub_response = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(sub_response.find("HTTP/1.1 404"), std::string::npos) << sub_response;
+
+    ::unlink(script_path.c_str());
+}
+
+// `location /` matches only the root path `/` -- it is NOT a catch-all (use `/*` for
+// that). Locks the absence of the old `/` -> `/*` rewrite.
+TEST(LiteNginxRuntimeTest, LocationRootPatternMatchesOnlyRoot) {
+    const std::string script_path = "/tmp/lite_nginx_root_pattern_exact_test.js";
+    {
+        std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.good());
+        file << "resp.sendJson(200, {hit: \"root\"});";
+    }
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location / {
+            script_file SCRIPT_PATH;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_path);
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "root_pattern.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+
+    // / matches the root location exactly.
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const char root_request[] = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, root_request, sizeof(root_request) - 1, 0),
+              static_cast<ssize_t>(sizeof(root_request) - 1));
+    std::string root_response = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(root_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << root_response;
+    EXPECT_NE(root_response.find("\"hit\":\"root\""), std::string::npos) << root_response;
+
+    // /anything does not match / (exact, not catch-all) -> 404.
+    client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const char sub_request[] = "GET /anything HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, sub_request, sizeof(sub_request) - 1, 0),
+              static_cast<ssize_t>(sizeof(sub_request) - 1));
+    std::string sub_response = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(sub_response.find("HTTP/1.1 404"), std::string::npos) << sub_response;
+
+    ::unlink(script_path.c_str());
+}
+
+// vars.js (shipped under conf/scripts/) demonstrates all five route-variable constants
+// ($path/$query/$header/$cookie/$req) on a /api/:id route. This loads the actual shipped
+// file -- not a /tmp copy -- so it cannot bit-rot, and asserts every namespace end to end
+// including the absent -> null contract.
+TEST(LiteNginxRuntimeTest, ScriptFileVarsJsRouteVariables) {
+    const std::string vars_js = std::string(FIBER_LITE_NGINX_SOURCE_DIR) + "/conf/scripts/vars.js";
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location /api/:id {
+            script_file VARS_JS;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("VARS_JS"), sizeof("VARS_JS") - 1, vars_js);
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "vars_js.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+
+    // Present values across all five namespaces.
+    {
+        int client = connect_client(harness.port());
+        ASSERT_GE(client, 0);
+        const char request[] =
+                "GET /api/42?src=web HTTP/1.1\r\n"
+                "Host: localhost\r\n"
+                "X-Forwarded-For: 1.2.3.4\r\n"
+                "Cookie: session=abc\r\n"
+                "Connection: close\r\n"
+                "\r\n";
+        ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+        std::string response = recv_http_response(client);
+        ::close(client);
+
+        EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+        EXPECT_NE(response.find("\"id\":\"42\""), std::string::npos) << response;          // $path
+        EXPECT_NE(response.find("\"src\":\"web\""), std::string::npos) << response;        // $query
+        EXPECT_NE(response.find("\"clientIp\":\"1.2.3.4\""), std::string::npos) << response; // $header (-/_ fold)
+        EXPECT_NE(response.find("\"session\":\"abc\""), std::string::npos) << response;    // $cookie
+        EXPECT_NE(response.find("\"uri\":\"/api/42?src=web\""), std::string::npos) << response;  // $req.uri
+        EXPECT_NE(response.find("\"method\":\"GET\""), std::string::npos) << response;    // $req.method
+        EXPECT_NE(response.find("\"path\":\"/api/42\""), std::string::npos) << response;   // $req.path
+        EXPECT_NE(response.find("\"queryStr\":\"src=web\""), std::string::npos) << response; // $req.query
+    }
+
+    // Absent -> null (not error, not undefined): $query/$header/$cookie missing; $req.query
+    // is the empty raw query string.
+    {
+        int client = connect_client(harness.port());
+        ASSERT_GE(client, 0);
+        const char request[] =
+                "GET /api/7 HTTP/1.1\r\n"
+                "Host: localhost\r\n"
+                "Connection: close\r\n"
+                "\r\n";
+        ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+        std::string response = recv_http_response(client);
+        ::close(client);
+
+        EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+        EXPECT_NE(response.find("\"id\":\"7\""), std::string::npos) << response;
+        EXPECT_NE(response.find("\"src\":null"), std::string::npos) << response;
+        EXPECT_NE(response.find("\"clientIp\":null"), std::string::npos) << response;
+        EXPECT_NE(response.find("\"session\":null"), std::string::npos) << response;
+        EXPECT_NE(response.find("\"uri\":\"/api/7\""), std::string::npos) << response;
+        EXPECT_NE(response.find("\"method\":\"GET\""), std::string::npos) << response;
+        EXPECT_NE(response.find("\"path\":\"/api/7\""), std::string::npos) << response;
+        EXPECT_NE(response.find("\"queryStr\":\"\""), std::string::npos) << response;
+    }
+}
+
 // `directive svc = http "@backend"; svc.request({...})` issues an upstream request and returns
 // {status, headers?, body}.
 TEST(LiteNginxRuntimeTest, HttpRequestFetchesUpstreamResponse) {
@@ -1286,7 +1491,7 @@ http {
     upstream backend { server 127.0.0.1:UPSTREAM_PORT; }
     server {
         server_name localhost;
-        location / { script_file SCRIPT_PATH; }
+        location /* { script_file SCRIPT_PATH; }
     }
 }
 )";
@@ -1351,7 +1556,7 @@ http {
     upstream backend { server 127.0.0.1:UPSTREAM_PORT; }
     server {
         server_name localhost;
-        location / { script_file SCRIPT_PATH; }
+        location /* { script_file SCRIPT_PATH; }
     }
 }
 )";
@@ -1415,7 +1620,7 @@ http {
     connection_pool { keepalive_size 8; keepalive_timeout 30s; }
     server {
         server_name localhost;
-        location / { script_file SCRIPT_PATH; }
+        location /* { script_file SCRIPT_PATH; }
     }
 }
 )";

@@ -70,9 +70,9 @@ Validate a custom config file:
 - Support multiple `server` blocks.
 - Support shared `http`-level listeners reused by all `server` blocks.
 - Support `server_name` exact matching.
-- Support `location =` exact match.
-- Support non-exact `location` patterns through `RoutePathMatcher`, including
-  `:name`, `*name`, and plain prefix shorthand.
+- Support `location` patterns through `RoutePathMatcher`: a bare pattern matches
+  exactly that path, `:name` captures one segment, and `*name`/`*` is a trailing
+  wildcard.
 - Support upstream groups with round-robin selection.
 - Support direct static upstream targets such as `http://127.0.0.1:9001`.
 - Support named upstream targets such as `http://backend`.
@@ -146,7 +146,6 @@ Top level:
 - `certificate <path>;`
 - `certificate_key <path>;`
 - `location <pattern> { ... }`
-- `location = <pattern> { ... }`
 - `proxy_connect_timeout <duration>;`
 - `proxy_read_timeout <duration>;`
 - `proxy_send_timeout <duration>;`
@@ -176,6 +175,22 @@ Request-side functions (sync unless noted): `req.getHeader([name])`, `req.getQue
 
 Response-side functions: `resp.setHeader(name, value)`, `resp.addHeader(name, value)`,
 `resp.sendJson(status, body)` (async), `resp.send(status[, body])` (async), `resp.addCookie(obj)`.
+
+Route-variable constants (`$namespace.key`, resolved at compile time and read from the request
+at runtime -- see `conf/scripts/vars.js`):
+
+- `$path.<name>` - a path variable captured by the location's pattern (e.g. `/api/:id` makes
+  `$path.id` available). Referencing a name the pattern does not capture is a compile-time
+  error (the script fails to load).
+- `$query.<key>` - a query parameter (case-sensitive).
+- `$header.<key>` - a request header, matched case-insensitively with `-` folded to `_`
+  (e.g. `$header.x_forwarded_for` reads `X-Forwarded-For`).
+- `$cookie.<key>` - a request cookie, same normalization as `$header`.
+- `$req.<field>` - one of `uri` / `method` / `path` / `query` (fixed set; unknown = compile
+  error). `query` is the raw query string (empty when absent).
+
+Absent `$query`/`$header`/`$cookie` values resolve to `null` (not an error). `$path.<name>`
+is always present for a matched route (the pattern captured it).
 
 Upstream HTTP (async, require a `connection_pool` block for keepalive reuse). The upstream host
 is bound once at compile time with a directive; `svc.request` / `svc.proxyPass` are the only
@@ -215,8 +230,8 @@ The directive target is either a named upstream (`@backend` / `backend`) or an a
 - If any `http` listener uses `ssl`, every `server` must define both
   `certificate` and `certificate_key`.
 - `server_name` uses exact match only.
-- Non-exact `location` uses `RoutePathMatcher` syntax and semantics, not nginx
-  `location` precedence rules.
+- `location` uses `RoutePathMatcher` syntax and semantics (a bare pattern matches
+  exactly; `:name`/`*` are matched as written), not nginx `location` precedence rules.
 - Only `http://` upstream targets are supported in V1 (for `proxy_pass`).
 - Upstream peers must be configured with IP literals in the current runtime. Script
   directive `http(s)://host` targets accept hostnames (resolved via DNS) or IP literals; the
@@ -229,10 +244,10 @@ The directive target is either a named upstream (`@backend` / `backend`) or an a
 Examples that are valid in V1:
 
 ```nginx
-location = /ready { ... }
+location /ready { ... }
 location /api/:id { ... }
 location /files/*tail { ... }
-location /api/ { ... }
+location /api/* { ... }
 proxy_pass http://backend;
 proxy_pass http://127.0.0.1:9001;
 proxy_set_header Host backend.internal;
@@ -259,13 +274,12 @@ rewrite ^/a/(.*)$ /b/$1 last;
   any `:port` suffix from `Host`.
 - `location` matching uses only the URI path. Query strings are not part of the
   route key and are proxied upstream unchanged.
-- `location = /path` matches the path exactly.
-- Non-exact `location` patterns are compiled into `RoutePathMatcher` routes:
-  `/api/:id` matches one path segment, `/files/*tail` matches a tail segment,
-  and `/` behaves like a catch-all.
-- A plain non-exact pattern without `:` or `*` is treated as prefix shorthand.
-  For example, `location /api/ { ... }` is compiled like `/api/*`.
-- When multiple non-exact routes overlap, matcher priority follows
+- A `location` pattern is compiled into a `RoutePathMatcher` route verbatim: a bare
+  pattern like `/ready` matches exactly that path; `:name` captures one path segment;
+  `*name`/`*` is a trailing wildcard. `/` matches only the root path; `/*` is the
+  catch-all. Prefix matching requires an explicit `*` (e.g. `/api/*`) -- a bare pattern
+  is not a prefix.
+- When multiple routes overlap, matcher priority follows
   `static > :placeholder > *wildcard`.
 - If no location matches, the request returns `404 Not Found`.
 
@@ -371,7 +385,7 @@ http {
     server {
         server_name localhost;
 
-        location = /ready {
+        location /ready {
             proxy_pass http://127.0.0.1:9009;
         }
 

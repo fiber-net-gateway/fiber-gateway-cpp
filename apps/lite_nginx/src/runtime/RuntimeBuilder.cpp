@@ -80,25 +80,6 @@ std::string direct_upstream_key(std::string_view host, std::uint16_t port) {
     return key;
 }
 
-std::string compile_location_pattern(const config::LocationConfig &location) {
-    if (location.match_kind == config::LocationMatchKind::Exact) {
-        return location.pattern;
-    }
-    if (location.pattern.find(':') != std::string::npos || location.pattern.find('*') != std::string::npos) {
-        return location.pattern;
-    }
-    if (location.pattern == "/") {
-        return "/*";
-    }
-
-    std::string compiled = location.pattern;
-    if (!compiled.empty() && compiled.back() != '/') {
-        compiled.push_back('/');
-    }
-    compiled.push_back('*');
-    return compiled;
-}
-
 std::chrono::milliseconds resolve_timeout(const std::optional<std::chrono::milliseconds> &override_value,
                                           std::chrono::milliseconds inherited, std::chrono::milliseconds fallback) {
     if (override_value.has_value()) {
@@ -262,7 +243,6 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 LocationRuntime runtime_location;
                 runtime_location.location = location.location;
                 runtime_location.pattern = location.pattern;
-                runtime_location.matcher_pattern = compile_location_pattern(location);
                 const std::uint32_t location_index = static_cast<std::uint32_t>(runtime_server.locations.size());
 
                 // Add the route first so the matcher extracts the pattern's path variable
@@ -272,7 +252,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 std::vector<std::string> path_var_names;
                 route_definer.path_var_names_out = &path_var_names;
                 try {
-                    matcher_builder.add_route(runtime_location.matcher_pattern,
+                    matcher_builder.add_route(runtime_location.pattern,
                                               LocationRoutePayload{.location_index = location_index});
                 } catch (const RoutePatternError &error) {
                     route_definer.path_var_names_out = nullptr;
@@ -339,7 +319,6 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
             LocationRuntime runtime_location;
             runtime_location.location = location.proxy_pass.location;
             runtime_location.pattern = location.pattern;
-            runtime_location.matcher_pattern = compile_location_pattern(location);
             runtime_location.default_host_header = std::move(default_host_header);
             runtime_location.connect_timeout =
                     resolve_timeout(location.proxy.connect_timeout, inherited_connect, kDefaultConnectTimeout);
@@ -367,7 +346,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
 
             const std::uint32_t location_index = static_cast<std::uint32_t>(runtime_server.locations.size());
             try {
-                matcher_builder.add_route(runtime_location.matcher_pattern,
+                matcher_builder.add_route(runtime_location.pattern,
                                           LocationRoutePayload{.location_index = location_index});
             } catch (const RoutePatternError &error) {
                 return std::unexpected(make_error(location.proxy_pass.location, error.what()));
