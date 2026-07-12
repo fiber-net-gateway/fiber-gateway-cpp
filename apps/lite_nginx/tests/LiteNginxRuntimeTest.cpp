@@ -1297,8 +1297,7 @@ http {
     int client = connect_client(harness.port());
     ASSERT_GE(client, 0);
     const char foo_request[] = "GET /foo HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    ASSERT_EQ(::send(client, foo_request, sizeof(foo_request) - 1, 0),
-              static_cast<ssize_t>(sizeof(foo_request) - 1));
+    ASSERT_EQ(::send(client, foo_request, sizeof(foo_request) - 1, 0), static_cast<ssize_t>(sizeof(foo_request) - 1));
     std::string foo_response = recv_http_response(client);
     ::close(client);
     EXPECT_NE(foo_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << foo_response;
@@ -1308,8 +1307,7 @@ http {
     client = connect_client(harness.port());
     ASSERT_GE(client, 0);
     const char sub_request[] = "GET /foo/bar HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    ASSERT_EQ(::send(client, sub_request, sizeof(sub_request) - 1, 0),
-              static_cast<ssize_t>(sizeof(sub_request) - 1));
+    ASSERT_EQ(::send(client, sub_request, sizeof(sub_request) - 1, 0), static_cast<ssize_t>(sizeof(sub_request) - 1));
     std::string sub_response = recv_http_response(client);
     ::close(client);
     EXPECT_NE(sub_response.find("HTTP/1.1 404"), std::string::npos) << sub_response;
@@ -1368,8 +1366,7 @@ http {
     client = connect_client(harness.port());
     ASSERT_GE(client, 0);
     const char sub_request[] = "GET /anything HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    ASSERT_EQ(::send(client, sub_request, sizeof(sub_request) - 1, 0),
-              static_cast<ssize_t>(sizeof(sub_request) - 1));
+    ASSERT_EQ(::send(client, sub_request, sizeof(sub_request) - 1, 0), static_cast<ssize_t>(sizeof(sub_request) - 1));
     std::string sub_response = recv_http_response(client);
     ::close(client);
     EXPECT_NE(sub_response.find("HTTP/1.1 404"), std::string::npos) << sub_response;
@@ -1414,25 +1411,24 @@ http {
     {
         int client = connect_client(harness.port());
         ASSERT_GE(client, 0);
-        const char request[] =
-                "GET /api/42?src=web HTTP/1.1\r\n"
-                "Host: localhost\r\n"
-                "X-Forwarded-For: 1.2.3.4\r\n"
-                "Cookie: session=abc\r\n"
-                "Connection: close\r\n"
-                "\r\n";
+        const char request[] = "GET /api/42?src=web HTTP/1.1\r\n"
+                               "Host: localhost\r\n"
+                               "X-Forwarded-For: 1.2.3.4\r\n"
+                               "Cookie: session=abc\r\n"
+                               "Connection: close\r\n"
+                               "\r\n";
         ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
         std::string response = recv_http_response(client);
         ::close(client);
 
         EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
-        EXPECT_NE(response.find("\"id\":\"42\""), std::string::npos) << response;          // $path
-        EXPECT_NE(response.find("\"src\":\"web\""), std::string::npos) << response;        // $query
+        EXPECT_NE(response.find("\"id\":\"42\""), std::string::npos) << response; // $path
+        EXPECT_NE(response.find("\"src\":\"web\""), std::string::npos) << response; // $query
         EXPECT_NE(response.find("\"clientIp\":\"1.2.3.4\""), std::string::npos) << response; // $header (-/_ fold)
-        EXPECT_NE(response.find("\"session\":\"abc\""), std::string::npos) << response;    // $cookie
-        EXPECT_NE(response.find("\"uri\":\"/api/42?src=web\""), std::string::npos) << response;  // $req.uri
-        EXPECT_NE(response.find("\"method\":\"GET\""), std::string::npos) << response;    // $req.method
-        EXPECT_NE(response.find("\"path\":\"/api/42\""), std::string::npos) << response;   // $req.path
+        EXPECT_NE(response.find("\"session\":\"abc\""), std::string::npos) << response; // $cookie
+        EXPECT_NE(response.find("\"uri\":\"/api/42?src=web\""), std::string::npos) << response; // $req.uri
+        EXPECT_NE(response.find("\"method\":\"GET\""), std::string::npos) << response; // $req.method
+        EXPECT_NE(response.find("\"path\":\"/api/42\""), std::string::npos) << response; // $req.path
         EXPECT_NE(response.find("\"queryStr\":\"src=web\""), std::string::npos) << response; // $req.query
     }
 
@@ -1441,11 +1437,10 @@ http {
     {
         int client = connect_client(harness.port());
         ASSERT_GE(client, 0);
-        const char request[] =
-                "GET /api/7 HTTP/1.1\r\n"
-                "Host: localhost\r\n"
-                "Connection: close\r\n"
-                "\r\n";
+        const char request[] = "GET /api/7 HTTP/1.1\r\n"
+                               "Host: localhost\r\n"
+                               "Connection: close\r\n"
+                               "\r\n";
         ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
         std::string response = recv_http_response(client);
         ::close(client);
