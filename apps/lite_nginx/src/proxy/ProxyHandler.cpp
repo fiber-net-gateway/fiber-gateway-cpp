@@ -121,13 +121,12 @@ void build_upstream_request_headers(const runtime::LocationRuntime &location, co
         if (field.name_len == 0 || should_skip_request_header(location, exchange.request_headers(), field)) {
             continue;
         }
-        headers.add_view(field.name_view(), field.value_view(), const_cast<char *>(field.lowcase_name),
-                         field.name_hash);
+        headers.add_view(field.name_view(), field.value_view(), field.lowcase_name, field.name_hash);
     }
 
     if (!location.host_header_overridden) {
         static constexpr std::uint64_t kHostHash = fiber::http::http_header_name_hash("host");
-        headers.set_view("Host", location.default_host_header, const_cast<char *>("host"), kHostHash);
+        headers.set_view("Host", location.default_host_header, "host", kHostHash);
     }
 
     for (std::size_t i = 0; i < location.set_headers.size(); ++i) {
@@ -136,7 +135,7 @@ void build_upstream_request_headers(const runtime::LocationRuntime &location, co
         // copied as-is. The ternary short-circuits, so resolved_template_values[i] is only
         // accessed for template entries (which are always filled when the location has templates).
         std::string_view value = header.template_script ? std::string_view(resolved_template_values[i]) : header.value;
-        headers.set_view(header.name, value, const_cast<char *>(header.lowercase_name.data()), header.name_hash);
+        headers.set_view(header.name, value, header.lowercase_name.data(), header.name_hash);
     }
     remove_request_framing_headers(headers);
 }
@@ -148,8 +147,7 @@ void build_downstream_response_headers(const fiber::http::Http1ResponseHead &ups
         if (field.name_len == 0 || should_skip_hop_by_hop_header(upstream_head.headers, field)) {
             continue;
         }
-        headers.add_view(field.name_view(), field.value_view(), const_cast<char *>(field.lowcase_name),
-                         field.name_hash);
+        headers.add_view(field.name_view(), field.value_view(), field.lowcase_name, field.name_hash);
     }
     apply_http3_alt_svc(listener, headers);
 }

@@ -620,8 +620,7 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
             should_skip_hop_by_hop_header(exchange.request_headers(), field)) {
             continue;
         }
-        req_headers.add_view(field.name_view(), field.value_view(), const_cast<char *>(field.lowcase_name),
-                             field.name_hash);
+        req_headers.add_view(field.name_view(), field.value_view(), field.lowcase_name, field.name_hash);
     }
     apply_options_headers(*heap, options, req_headers);
     remove_request_framing_headers(req_headers);
@@ -709,8 +708,7 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
         if (field.name_len == 0 || should_skip_hop_by_hop_header(resp_head->headers, field)) {
             continue;
         }
-        resp_headers.add_view(field.name_view(), field.value_view(), const_cast<char *>(field.lowcase_name),
-                              field.name_hash);
+        resp_headers.add_view(field.name_view(), field.value_view(), field.lowcase_name, field.name_hash);
     }
     {
         JsValue rhv = get_field(*heap, options, "responseHeaders", 15);
