@@ -215,7 +215,7 @@ DetachedTask run_tls_http1_client(fiber::event::EventLoop *loop, std::uint16_t p
         result_promise->set_value(std::move(result));
         co_return;
     }
-    result.negotiated_alpn = transport->negotiated_alpn();
+    result.negotiated_alpn = std::string(transport->negotiated_alpn());
 
     const char *request = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     size_t request_len = std::strlen(request);
@@ -416,7 +416,7 @@ DetachedTask run_tls_http1_client_post_and_read_all(fiber::event::EventLoop *loo
         result_promise->set_value(std::move(result));
         co_return;
     }
-    result.negotiated_alpn = transport->negotiated_alpn();
+    result.negotiated_alpn = std::string(transport->negotiated_alpn());
 
     std::string request =
             "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: " + std::to_string(request_body.size()) +

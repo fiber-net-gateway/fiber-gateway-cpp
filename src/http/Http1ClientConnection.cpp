@@ -17,6 +17,8 @@ namespace {
 
 constexpr std::string_view kHttp11Alpn = "http/1.1";
 
+bool supports_http1_alpn(std::string_view alpn) noexcept { return alpn.empty() || alpn == kHttp11Alpn; }
+
 } // namespace
 
 Http1ClientConnectionOptions Http1ClientConnection::normalize_options(Http1ClientConnectionOptions options) noexcept {
@@ -77,8 +79,7 @@ fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect() noex
             co_return std::unexpected(handshake_result.error());
         }
 
-        std::string negotiated_alpn = transport->negotiated_alpn();
-        if (!negotiated_alpn.empty() && negotiated_alpn != kHttp11Alpn) {
+        if (!supports_http1_alpn(transport->negotiated_alpn())) {
             transport->close();
             co_return std::unexpected(common::IoErr::NotSupported);
         }

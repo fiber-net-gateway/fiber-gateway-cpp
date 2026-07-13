@@ -2,7 +2,7 @@
 #define FIBER_NET_TLS_TCP_STREAM_H
 
 #include <cstddef>
-#include <string>
+#include <string_view>
 #include <utility>
 
 #include "../async/Task.h"
@@ -39,7 +39,7 @@ public:
     [[nodiscard]] int fd() const noexcept;
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept;
     [[nodiscard]] const SocketAddress &remote_addr() const noexcept;
-    [[nodiscard]] std::string selected_alpn() const noexcept;
+    [[nodiscard]] std::string_view selected_alpn() const noexcept;
     [[nodiscard]] bool handshake_done() const noexcept;
     [[nodiscard]] bool has_pending_read() const noexcept;
     void close();

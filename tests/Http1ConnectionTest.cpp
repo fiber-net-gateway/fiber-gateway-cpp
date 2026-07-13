@@ -6,6 +6,7 @@
 #include <future>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -119,7 +120,7 @@ public:
 
     [[nodiscard]] bool valid() const noexcept override { return !closed_; }
     [[nodiscard]] int fd() const noexcept override { return -1; }
-    [[nodiscard]] std::string negotiated_alpn() const noexcept override { return {}; }
+    [[nodiscard]] std::string_view negotiated_alpn() const noexcept override { return {}; }
     [[nodiscard]] const fiber::net::SocketAddress &remote_addr() const noexcept override { return remote_addr_; }
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept override { return loop_; }
 

@@ -88,8 +88,8 @@
 | `HttpHeaders.cpp` | ✅ 已修复：lowercase 预哈希查找对已小写两侧仍走逐字节大小写折叠 | 预哈希 API 收紧为 lowercase 契约并走 `string_view::operator==`；普通 API 保留大小写不敏感路径 |
 | `Http1ExchangeIo.cpp` / `ClientHttp1Exchange.cpp` | ✅ 已修复：trailer 解析忽略 parser 已算的 `line.header_hash`/`line.lowcase_header` | server request 与 client response trailer 均复用 parser hash；短名称复用 lowercase cache，长名称只补 lowercase |
 | `HttpHeaders.cpp` | ✅ 已修复：`rebuild_buckets()` 死代码，桶固定 32 从不扩容 | 桶改为 pool 裸指针数组；`link_field` 在负载因子达到 1 时 best-effort 倍增 rehash，失败继续使用原桶 |
-| `Http1Connection.cpp:99-115` | `read_into_inbound` 死代码 | 删除 |
-| `HttpTransport.cpp:433` | `negotiated_alpn()` 返回 `std::string`，每 TLS 连接一次 alloc | 返 `string_view`（ALPN 字节存活于 SSL 对象内）；`TlsStreamFd::selected_alpn` 对应改 |
+| `Http1Connection.cpp:99-115` | ✅ 已修复：`read_into_inbound` 死代码 | 删除 |
+| `HttpTransport.cpp:433` | ✅ 已修复：`negotiated_alpn()` 返回 `std::string`，存在不必要的拥有型复制 | 返 `string_view`（ALPN 字节存活于 SSL 对象内）；`TlsStreamFd::selected_alpn` 对应改 |
 | `HttpHeaderHash.h:20` | 哈希乘子 31、32 位截断，分布偏弱 | 换 FNV-1a 64（`0x100000001b3ull`，初值 `0xcbf29ce484222325ull`）；32 桶下影响有限 |
 | `Http2Connection.cpp:1172,1395` | teardown 用 `new Http2Stream*[n]` 收集指针，而 `owned_stream_list_`（`:240`）已是侵入式链 | 直接遍历 `owned_stream_list_` |
 | `Http2Connection.cpp:852-865` | `apply_peer_initial_stream_window` 两次全表 `for_each` | validate+apply 合并成单遍（delta 均匀，无需回滚） |

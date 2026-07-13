@@ -211,7 +211,7 @@ int TlsStreamFd::fd() const noexcept { return stream_fd_.fd(); }
 
 fiber::event::EventLoop &TlsStreamFd::loop() const noexcept { return stream_fd_.loop(); }
 
-std::string TlsStreamFd::selected_alpn() const noexcept {
+std::string_view TlsStreamFd::selected_alpn() const noexcept {
     if (!ssl_) {
         return {};
     }
@@ -221,7 +221,7 @@ std::string TlsStreamFd::selected_alpn() const noexcept {
     if (!proto || proto_len == 0) {
         return {};
     }
-    return std::string(reinterpret_cast<const char *>(proto), proto_len);
+    return {reinterpret_cast<const char *>(proto), static_cast<std::size_t>(proto_len)};
 }
 
 bool TlsStreamFd::handshake_done() const noexcept { return handshake_done_; }

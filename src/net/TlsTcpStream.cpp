@@ -20,7 +20,7 @@ fiber::event::EventLoop &TlsTcpStream::loop() const noexcept { return stream_.lo
 
 const SocketAddress &TlsTcpStream::remote_addr() const noexcept { return remote_addr_; }
 
-std::string TlsTcpStream::selected_alpn() const noexcept { return stream_.selected_alpn(); }
+std::string_view TlsTcpStream::selected_alpn() const noexcept { return stream_.selected_alpn(); }
 
 bool TlsTcpStream::handshake_done() const noexcept { return stream_.handshake_done(); }
 

@@ -4,7 +4,7 @@
 #include <coroutine>
 #include <cstddef>
 #include <optional>
-#include <string>
+#include <string_view>
 
 #include "../../async/Task.h"
 #include "../../common/IoError.h"
@@ -37,7 +37,8 @@ public:
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] int fd() const noexcept;
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept;
-    [[nodiscard]] std::string selected_alpn() const noexcept;
+    // Borrowed view into ssl_. Invalidated by close(), init(), or destruction.
+    [[nodiscard]] std::string_view selected_alpn() const noexcept;
     [[nodiscard]] bool handshake_done() const noexcept;
     [[nodiscard]] bool has_pending_read() const noexcept;
     void close();
