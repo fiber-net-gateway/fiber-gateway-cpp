@@ -563,7 +563,14 @@ Http1ExchangeIo::read_request_trailers(HttpExchange &exchange, std::chrono::mill
                 value = std::string_view(reinterpret_cast<char *>(line.header_start), value_len);
             }
 
-            if (!exchange.request_trailers_.add(name, value)) {
+            const char *lowcase_name = nullptr;
+            if (line.lowcase_index == name_len) {
+                lowcase_name = reinterpret_cast<const char *>(line.lowcase_header);
+            }
+            HttpHeaders::HeaderField *field =
+                    lowcase_name ? exchange.request_trailers_.add(name, value, lowcase_name, line.header_hash)
+                                 : exchange.request_trailers_.add_prehashed(name, value, line.header_hash);
+            if (!field) {
                 co_return std::unexpected(common::IoErr::NoMem);
             }
             continue;

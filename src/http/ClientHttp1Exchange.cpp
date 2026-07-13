@@ -646,7 +646,14 @@ ClientHttp1Exchange::read_response_trailers(mem::IoBuf &read_buf, std::chrono::m
                                          static_cast<std::size_t>(line.header_end - line.header_start));
             }
 
-            if (!response_trailers_.add(name, value)) {
+            const char *lowcase_name = nullptr;
+            if (line.lowcase_index == name_len) {
+                lowcase_name = reinterpret_cast<const char *>(line.lowcase_header);
+            }
+            HttpHeaders::HeaderField *field =
+                    lowcase_name ? response_trailers_.add(name, value, lowcase_name, line.header_hash)
+                                 : response_trailers_.add_prehashed(name, value, line.header_hash);
+            if (!field) {
                 co_return std::unexpected(common::IoErr::NoMem);
             }
             continue;

@@ -416,7 +416,9 @@ DetachedTask run_chunked_response_with_trailer_server(fiber::event::EventLoop *l
         co_return;
     }
 
-    auto second_write = co_await write_all(stream, "x-checksum: 123\r\n\r\n");
+    auto second_write = co_await write_all(stream, "x-checksum: 123\r\n"
+                                                   "X-Very-Long-Trailer-Name-That-Exceeds-Parser-Cache: 456\r\n"
+                                                   "\r\n");
     stream.close();
     result_promise->set_value(second_write ? fiber::common::IoErr::None : second_write.error());
 }
@@ -1022,6 +1024,9 @@ DetachedTask run_read_chunked_body_with_trailer_client(fiber::event::EventLoop *
         outcome.first_body = flatten_body_chunk(*body_result);
         outcome.first_last = body_result->complete();
         outcome.trailer_value = std::string(exchange.response_trailers().get("x-checksum"));
+        outcome.trailer_value.push_back('|');
+        outcome.trailer_value.append(
+                exchange.response_trailers().get("x-very-long-trailer-name-that-exceeds-parser-cache"));
         outcome.response_complete = exchange.response_complete();
         outcome.err = fiber::common::IoErr::None;
     }
@@ -1079,6 +1084,9 @@ DetachedTask run_discard_chunked_body_with_trailer_client(fiber::event::EventLoo
         }
 
         outcome.trailer_value = std::string(exchange.response_trailers().get("x-checksum"));
+        outcome.trailer_value.push_back('|');
+        outcome.trailer_value.append(
+                exchange.response_trailers().get("x-very-long-trailer-name-that-exceeds-parser-cache"));
         outcome.response_complete = exchange.response_complete();
         outcome.err = fiber::common::IoErr::None;
     }
@@ -1521,7 +1529,7 @@ TEST(ClientHttp1ExchangeTest, ReadChunkedBodyWaitsForTrailersBeforeLastChunk) {
     EXPECT_EQ(outcome.first_body, "hello");
     EXPECT_TRUE(outcome.first_last);
     EXPECT_TRUE(outcome.first_pool_is_current);
-    EXPECT_EQ(outcome.trailer_value, "123");
+    EXPECT_EQ(outcome.trailer_value, "123|456");
     EXPECT_TRUE(outcome.response_complete);
     EXPECT_TRUE(outcome.reusable_after_scope);
 
@@ -1554,7 +1562,7 @@ TEST(ClientHttp1ExchangeTest, DiscardResponseBodyConsumesChunkedTrailers) {
 
     ReadBodyOutcome outcome = client_result_future.get();
     EXPECT_EQ(outcome.err, fiber::common::IoErr::None);
-    EXPECT_EQ(outcome.trailer_value, "123");
+    EXPECT_EQ(outcome.trailer_value, "123|456");
     EXPECT_TRUE(outcome.response_complete);
     EXPECT_TRUE(outcome.reusable_after_scope);
 

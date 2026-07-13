@@ -804,8 +804,7 @@ common::IoErr ClientHttp2Request::commit_regular_header(std::string_view name, s
     if (!value_copy.data() && !value.empty()) {
         return common::IoErr::NoMem;
     }
-    if (current_header_node_->head.headers.add_view(name_copy, value_copy, const_cast<char *>(name_copy.data()),
-                                                    name_hash) == nullptr) {
+    if (current_header_node_->head.headers.add_view(name_copy, value_copy, name_copy.data(), name_hash) == nullptr) {
         return common::IoErr::NoMem;
     }
     saw_regular_header_in_block_ = true;

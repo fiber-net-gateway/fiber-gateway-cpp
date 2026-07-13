@@ -83,11 +83,11 @@
 | `Http2HpackEncoderIoBufWriter.cpp:110` | `commit_output` 每次 `first_writable()` O(n) 遍历链，缓存了 `tail_` 却不用 | `if (tail_==nullptr \|\| tail_->writable()==0) tail_=block_.first_writable();` 否则跳过（3 行） |
 | `Http2HpackDecoder.cpp:224` / `Http3QpackDecoder.cpp:250-265,306` | 解码器原始字面量双重拷贝：数据->scratch->pool | 单 chunk 整串（`take==remaining && string_received_==0 && !huffman`）时直接把源指针传回调，省第二次 memcpy |
 | `Http2HpackDecodeTable.cpp:125` | `insert` 重算 name hash，上游 `FieldView::name_hash` 已有 | `insert` 加 `name_hash` 参数透传 |
-| `HttpHeaders.cpp:60-65` | `add()` 对 name 做两次 pool 分配（original + lowercase，各 `name.size()` 字节） | 单次分配 `2*name_len` 缓冲，original 在 `[0,len)`、lowercase 在 `[len,2*len)`；H1/H2/H3 请求头热路径走 `add_view` 不受影响，主要惠及 trailer 与 `set()` |
-| `HttpHeaders.cpp:119-122` | `set()` 哈希 name 两次（`remove` 一次 + `add` 一次） | 用已有 `set(name,value,lowcase_name,hash)` 重载 |
-| `HttpHeaders.cpp:389,404` | `find_first_node_lowcase`/`next_match_node` 对已小写两侧仍走逐字节大小写折叠 | 改 `node->lowcase_view() == lowcase_key`（memcmp） |
-| `Http1ExchangeIo.cpp:545-561` | trailer 解析忽略 parser 已算的 `line.header_hash`/`line.lowcase_header`，走会分配的 `add(name,value)` | 仿 `Http1Connection.cpp:305-315` 提取 hash/lowercase 调 `add(name,value,lowcase,hash)` |
-| `HttpHeaders.cpp:353` | `rebuild_buckets()` 死代码，桶固定 32 从不扩容 | 删死代码 或 在 `link_field` 按负载因子接入扩容 |
+| `HttpHeaders.cpp` | ✅ 已修复：`add()` 对 name 做两次 pool 分配（original + lowercase，各 `name.size()` 字节） | 单次分配 `2*name_len` 缓冲，original 在 `[0,len)`、lowercase 在 `[len,2*len)`；H1/H2/H3 请求头热路径走 `add_view` 不受影响，主要惠及 trailer 与 `set()` |
+| `HttpHeaders.cpp` | ✅ 已修复：`set()` 哈希 name 两次（`remove` 一次 + `add` 一次） | 先准备完整 owned field，再用其中的 lowercase/hash 删除旧字段并挂链；分配失败保留旧值 |
+| `HttpHeaders.cpp` | ✅ 已修复：lowercase 预哈希查找对已小写两侧仍走逐字节大小写折叠 | 预哈希 API 收紧为 lowercase 契约并走 `string_view::operator==`；普通 API 保留大小写不敏感路径 |
+| `Http1ExchangeIo.cpp` / `ClientHttp1Exchange.cpp` | ✅ 已修复：trailer 解析忽略 parser 已算的 `line.header_hash`/`line.lowcase_header` | server request 与 client response trailer 均复用 parser hash；短名称复用 lowercase cache，长名称只补 lowercase |
+| `HttpHeaders.cpp` | ✅ 已修复：`rebuild_buckets()` 死代码，桶固定 32 从不扩容 | 桶改为 pool 裸指针数组；`link_field` 在负载因子达到 1 时 best-effort 倍增 rehash，失败继续使用原桶 |
 | `Http1Connection.cpp:99-115` | `read_into_inbound` 死代码 | 删除 |
 | `HttpTransport.cpp:433` | `negotiated_alpn()` 返回 `std::string`，每 TLS 连接一次 alloc | 返 `string_view`（ALPN 字节存活于 SSL 对象内）；`TlsStreamFd::selected_alpn` 对应改 |
 | `HttpHeaderHash.h:20` | 哈希乘子 31、32 位截断，分布偏弱 | 换 FNV-1a 64（`0x100000001b3ull`，初值 `0xcbf29ce484222325ull`）；32 桶下影响有限 |

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -10,6 +11,99 @@
 namespace {
 
 using fiber::http::HttpHeaders;
+
+TEST(HttpHeadersTest, OwnedNameStoresOriginalAndLowercaseInOneBuffer) {
+    fiber::mem::BufPool pool;
+    HttpHeaders headers(pool);
+
+    HttpHeaders::HeaderField *field = headers.add("Content-Type", "text/plain");
+    ASSERT_NE(field, nullptr);
+    EXPECT_EQ(field->name_view(), "Content-Type");
+    EXPECT_EQ(field->lowcase_view(), "content-type");
+    EXPECT_EQ(field->lowcase_name, field->name + field->name_len);
+}
+
+TEST(HttpHeadersTest, SetReusesPreparedLowercaseKeyToReplaceAllCaseVariants) {
+    fiber::mem::BufPool pool;
+    HttpHeaders headers(pool);
+    ASSERT_NE(headers.add("Content-Type", "first"), nullptr);
+    ASSERT_NE(headers.add("content-type", "second"), nullptr);
+    ASSERT_NE(headers.add("other", "kept"), nullptr);
+
+    HttpHeaders::HeaderField *field = headers.set("CONTENT-TYPE", "replacement");
+    ASSERT_NE(field, nullptr);
+    EXPECT_EQ(field->name_view(), "CONTENT-TYPE");
+    EXPECT_EQ(field->lowcase_view(), "content-type");
+    EXPECT_EQ(headers.get("content-type"), "replacement");
+    EXPECT_EQ(headers.get("other"), "kept");
+    EXPECT_EQ(headers.size(), 2u);
+}
+
+TEST(HttpHeadersTest, ConvenienceGetAllRemainsCaseInsensitive) {
+    fiber::mem::BufPool pool;
+    HttpHeaders headers(pool);
+    ASSERT_NE(headers.add("X-Test", "1"), nullptr);
+    ASSERT_NE(headers.add("x-test", "2"), nullptr);
+    ASSERT_NE(headers.add("other", "3"), nullptr);
+
+    std::vector<std::string_view> values;
+    for (const auto &field: headers.get_all("X-TEST")) {
+        values.push_back(field.value_view());
+    }
+
+    EXPECT_EQ((std::vector<std::string_view>{"2", "1"}), values);
+}
+
+TEST(HttpHeadersTest, PrehashedOwnedAddBuildsLongLowercaseName) {
+    fiber::mem::BufPool pool;
+    HttpHeaders headers(pool);
+    const std::string name = "X-Very-Long-Trailer-Name-That-Exceeds-Parser-Cache";
+    std::string lowcase(name.size(), '\0');
+    fiber::http::to_lowercase(name, lowcase.data());
+    const uint64_t hash = fiber::http::http_header_name_hash(name);
+
+    HttpHeaders::HeaderField *field = headers.add_prehashed(name, "value", hash);
+    ASSERT_NE(field, nullptr);
+    EXPECT_EQ(field->name_view(), name);
+    EXPECT_EQ(field->lowcase_view(), lowcase);
+    EXPECT_EQ(field->name_hash, hash);
+    EXPECT_EQ(headers.get(lowcase, hash), "value");
+}
+
+TEST(HttpHeadersTest, RehashPreservesBucketAndInsertionOrderLinks) {
+    fiber::mem::BufPool pool;
+    HttpHeaders headers(pool);
+    constexpr size_t kFieldCount = 96;
+
+    for (size_t i = 0; i < kFieldCount; ++i) {
+        const std::string name = "X-Field-" + std::to_string(i);
+        const std::string value = std::to_string(i);
+        ASSERT_NE(headers.add(name, value), nullptr);
+    }
+
+    EXPECT_EQ(headers.size(), kFieldCount);
+    size_t index = 0;
+    for (const auto &field: headers) {
+        EXPECT_EQ(field.name_view(), "X-Field-" + std::to_string(index));
+        ++index;
+    }
+    EXPECT_EQ(index, kFieldCount);
+
+    for (size_t i = 0; i < kFieldCount; ++i) {
+        const std::string name = "x-field-" + std::to_string(i);
+        EXPECT_EQ(headers.get(name), std::to_string(i));
+    }
+
+    headers.clear();
+    EXPECT_EQ(headers.size(), 0u);
+    ASSERT_NE(headers.add("after-clear", "1"), nullptr);
+    EXPECT_EQ(headers.get("after-clear"), "1");
+
+    headers.release();
+    EXPECT_EQ(headers.size(), 0u);
+    ASSERT_NE(headers.add("after-release", "2"), nullptr);
+    EXPECT_EQ(headers.get("after-release"), "2");
+}
 
 TEST(HttpHeadersTest, EraseConstIteratorSupportsRemovalDuringFullTraversal) {
     fiber::mem::BufPool pool;

@@ -714,7 +714,7 @@ TEST(Http1ServerTest, ChunkedPostTrailersAreAvailableAfterBody) {
 
             std::string response = body;
             response.push_back('|');
-            response.append(exchange.request_trailers().get("digest"));
+            response.append(exchange.request_trailers().get("x-very-long-trailer-name-that-exceeds-parser-cache"));
 
             auto header_result = co_await send_final_header(
                     exchange, 200, nullptr, fiber::http::ResponseBodySpec::ContentLength(response.size()), {}, false);
@@ -743,7 +743,7 @@ TEST(Http1ServerTest, ChunkedPostTrailersAreAvailableAfterBody) {
                           "4\r\nWiki\r\n"
                           "5\r\npedia\r\n"
                           "0\r\n"
-                          "Digest: sha-256=xyz\r\n"
+                          "X-Very-Long-Trailer-Name-That-Exceeds-Parser-Cache: sha-256=xyz\r\n"
                           "\r\n";
     ASSERT_EQ(::send(client, request, std::strlen(request), 0), static_cast<ssize_t>(std::strlen(request)));
 
