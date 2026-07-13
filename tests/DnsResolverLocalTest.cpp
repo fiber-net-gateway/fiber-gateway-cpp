@@ -3,6 +3,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <future>
 #include <string>
 #include <vector>
@@ -93,6 +94,34 @@ void push_be32(std::vector<std::uint8_t> &out, std::uint32_t value) {
 
 std::uint16_t read_be16(const std::uint8_t *data) {
     return static_cast<std::uint16_t>((static_cast<std::uint16_t>(data[0]) << 8U) | data[1]);
+}
+
+bool echo_question_name(const std::uint8_t *query, std::size_t query_len, std::vector<std::uint8_t> &response) {
+    const auto name_end = [](const std::uint8_t *packet, std::size_t packet_len) -> std::size_t {
+        if (packet == nullptr || packet_len < 12) {
+            return 0;
+        }
+        std::size_t offset = 12;
+        while (offset < packet_len) {
+            const std::uint8_t label_len = packet[offset++];
+            if (label_len == 0) {
+                return offset;
+            }
+            if (label_len > 63 || static_cast<std::size_t>(label_len) > packet_len - offset) {
+                return 0;
+            }
+            offset += label_len;
+        }
+        return 0;
+    };
+
+    const std::size_t query_name_end = name_end(query, query_len);
+    const std::size_t response_name_end = name_end(response.data(), response.size());
+    if (query_name_end == 0 || response_name_end == 0 || query_name_end != response_name_end) {
+        return false;
+    }
+    std::memcpy(response.data() + 12, query + 12, query_name_end - 12);
+    return true;
 }
 
 std::vector<std::uint8_t> make_a_response(std::uint16_t id, std::string_view qname, std::array<std::uint8_t, 4> addr,
@@ -230,6 +259,11 @@ DetachedTask run_single_response_server(fiber::event::EventLoop *loop, std::prom
     ++outcome.recv_count;
     response[0] = buf[0];
     response[1] = buf[1];
+    if (!echo_question_name(buf.data(), recv_result->size, response)) {
+        outcome.err = IoErr::Invalid;
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
 
     if (delay > 0ms) {
         co_await fiber::async::sleep(delay);

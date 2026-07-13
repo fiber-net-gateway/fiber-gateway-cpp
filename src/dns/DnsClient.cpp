@@ -1,13 +1,17 @@
 #include "DnsClient.h"
 
 #include "DnsMessage.h"
+#include "detail/DnsQuerySecurity.h"
 
 #include <algorithm>
 #include <array>
 #include <cstring>
 #include <expected>
 #include <limits>
+#include <span>
 #include <utility>
+
+#include <openssl/rand.h>
 
 #include "../async/Spawn.h"
 #include "../async/Timeout.h"
@@ -130,7 +134,6 @@ bool DnsClient::init(event::EventLoop &loop, Options options) noexcept {
     options_ = options;
     loop_ = &loop;
     closing_ = false;
-    next_id_ = 0;
 
     socket_ = std::make_unique<net::UdpSocket>(loop);
     if (!socket_) {
@@ -214,13 +217,6 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_raw(const QuestionSp
 
     common::IoErr final_err = common::IoErr::TimedOut;
     for (std::uint8_t attempt = 0; attempt < options_.attempts; ++attempt) {
-        auto id_result = allocate_query_id();
-        if (!id_result) {
-            final_err = id_result.error();
-            break;
-        }
-
-        slot.id = *id_result;
         slot.request_size = 0;
         slot.response_size = 0;
         slot.completion_err = common::IoErr::None;
@@ -228,15 +224,12 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_raw(const QuestionSp
         slot.need_tcp_fallback = false;
         slot.waiter = {};
 
-        QueryOptions query_options = options_.query_options;
-        query_options.id = slot.id;
-        auto encoded = encode_query(query_options, question, slot.request_buf, options_.max_udp_packet_size);
-        if (!encoded) {
-            final_err = encoded.error();
-            clear_query_id(slot.id, slot_index);
+        auto prepared = prepare_request(slot, question);
+        if (!prepared) {
+            final_err = prepared.error();
             break;
         }
-        slot.request_size = *encoded;
+        slot.request_size = *prepared;
         id_to_slot_[slot.id] = slot_index;
 
         auto send_result = co_await socket_->send_to(slot.request_buf, slot.request_size, options_.server);
@@ -390,6 +383,11 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(std::uint16_t sl
         total_read += *payload_result;
     }
 
+    if (!detail::response_matches_query(slot.request_buf, slot.request_size, slot.response_dst, response_len,
+                                        options_.enable_0x20)) {
+        close_stream();
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
     close_stream();
     co_return response_len;
 }
@@ -417,11 +415,43 @@ bool DnsClient::init_storage() noexcept {
     return true;
 }
 
+common::IoResult<std::size_t> DnsClient::prepare_request(InflightSlot &slot, const QuestionSpec &question) noexcept {
+    constexpr std::size_t kIdRandomBytes = 4;
+    std::array<std::uint8_t, kIdRandomBytes + detail::kDns0x20RandomBytes> random{};
+    const std::size_t random_size = options_.enable_0x20 ? random.size() : kIdRandomBytes;
+    if (RAND_bytes(random.data(), random_size) != 1) {
+        return std::unexpected(common::IoErr::Unknown);
+    }
+
+    auto id_result = allocate_query_id(read_be16(random.data()), read_be16(random.data() + 2));
+    if (!id_result) {
+        return std::unexpected(id_result.error());
+    }
+    slot.id = *id_result;
+
+    QueryOptions query_options = options_.query_options;
+    query_options.id = slot.id;
+    auto encoded = encode_query(query_options, question, slot.request_buf, options_.max_udp_packet_size);
+    if (!encoded) {
+        return std::unexpected(encoded.error());
+    }
+    if (!options_.enable_0x20) {
+        return *encoded;
+    }
+
+    const auto case_random = std::span<const std::uint8_t, detail::kDns0x20RandomBytes>(random.data() + kIdRandomBytes,
+                                                                                        detail::kDns0x20RandomBytes);
+    const common::IoErr randomize_err = detail::apply_query_name_0x20(slot.request_buf, *encoded, case_random);
+    if (randomize_err != common::IoErr::None) {
+        return std::unexpected(randomize_err);
+    }
+    return *encoded;
+}
+
 void DnsClient::reset_state() noexcept {
     loop_ = nullptr;
     options_ = {};
     free_head_ = kInvalidSlot;
-    next_id_ = 0;
     closing_ = false;
 }
 
@@ -497,14 +527,8 @@ void DnsClient::release_slot(std::uint16_t slot_index) noexcept {
     free_head_ = slot_index;
 }
 
-common::IoResult<std::uint16_t> DnsClient::allocate_query_id() noexcept {
-    for (std::size_t i = 0; i <= std::numeric_limits<std::uint16_t>::max(); ++i) {
-        const std::uint16_t candidate = next_id_++;
-        if (id_to_slot_[candidate] == kInvalidIdMapping) {
-            return candidate;
-        }
-    }
-    return std::unexpected(common::IoErr::Busy);
+common::IoResult<std::uint16_t> DnsClient::allocate_query_id(std::uint16_t start, std::uint16_t stride) noexcept {
+    return detail::select_query_id(id_to_slot_.get(), kInvalidIdMapping, start, stride);
 }
 
 void DnsClient::clear_query_id(std::uint16_t id, std::uint16_t slot_index) noexcept {
@@ -597,10 +621,6 @@ void DnsClient::handle_udp_packet(const std::uint8_t *packet, std::size_t packet
     }
 
     const std::uint16_t id = read_be16(packet);
-    const std::uint16_t flags = read_be16(packet + 2);
-    if ((flags & 0x8000U) == 0) {
-        return;
-    }
     const std::uint16_t slot_index = id_to_slot_[id];
     if (slot_index == kInvalidIdMapping || slot_index >= options_.max_inflight) {
         return;
@@ -610,12 +630,17 @@ void DnsClient::handle_udp_packet(const std::uint8_t *packet, std::size_t packet
     if (!slot.active || slot.id != id) {
         return;
     }
+    if (!detail::response_matches_query(slot.request_buf, slot.request_size, packet, packet_len,
+                                        options_.enable_0x20)) {
+        return;
+    }
     if (packet_len > slot.response_cap) {
         complete_slot(slot_index, common::IoErr::NoMem, 0, false);
         return;
     }
 
     std::memcpy(slot.response_dst, packet, packet_len);
+    const std::uint16_t flags = read_be16(packet + 2);
     const bool truncated = (flags & 0x0200U) != 0;
     complete_slot(slot_index, common::IoErr::None, packet_len, truncated && options_.enable_tcp_fallback);
 }

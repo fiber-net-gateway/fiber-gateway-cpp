@@ -30,6 +30,7 @@ public:
         std::chrono::milliseconds timeout{2000};
         std::uint8_t attempts = 2;
         bool enable_tcp_fallback = true;
+        bool enable_0x20 = true;
         std::uint16_t max_inflight = 128;
         std::uint16_t max_udp_packet_size = 1232;
         QueryOptions query_options{};
@@ -91,12 +92,14 @@ private:
     async::Task<common::IoResult<std::size_t>> query_tcp(std::uint16_t slot_index) noexcept;
 
     [[nodiscard]] bool init_storage() noexcept;
+    [[nodiscard]] common::IoResult<std::size_t> prepare_request(InflightSlot &slot,
+                                                                const QuestionSpec &question) noexcept;
     void reset_state() noexcept;
     void cancel_all_inflight(common::IoErr err) noexcept;
 
     [[nodiscard]] std::uint16_t allocate_slot() noexcept;
     void release_slot(std::uint16_t slot_index) noexcept;
-    [[nodiscard]] common::IoResult<std::uint16_t> allocate_query_id() noexcept;
+    [[nodiscard]] common::IoResult<std::uint16_t> allocate_query_id(std::uint16_t start, std::uint16_t stride) noexcept;
     void clear_query_id(std::uint16_t id, std::uint16_t slot_index) noexcept;
 
     [[nodiscard]] bool response_ready(std::uint16_t slot_index) const noexcept;
@@ -118,7 +121,6 @@ private:
     std::unique_ptr<std::uint8_t[]> request_buffers_{};
     std::unique_ptr<std::uint8_t[]> recv_buffer_{};
     std::uint16_t free_head_ = kInvalidSlot;
-    std::uint16_t next_id_ = 0;
     bool closing_ = false;
 };
 
