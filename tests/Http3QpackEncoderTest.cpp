@@ -287,6 +287,24 @@ TEST(Http3QpackEncoderTest, SupportsSmallWriterChunks) {
     EXPECT_EQ(recorder.fields[0], "x-test=chunked");
 }
 
+TEST(Http3QpackEncoderTest, UsesNewTailWhenContiguousHuffmanOutputDoesNotFit) {
+    IoBufNodePool pool;
+    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1}, 4);
+    ASSERT_EQ(writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "abc"), IoErr::None);
+
+    IoBufChain block(pool);
+    ASSERT_EQ(writer.finish(block), IoErr::None);
+    ASSERT_GT(block.size(), 1U);
+    ASSERT_NE(block.front(), nullptr);
+    EXPECT_GT(block.front()->writable(), 0U);
+
+    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+    DecodeRecorder recorder;
+    decode_all(bytes, recorder);
+    ASSERT_EQ(recorder.fields.size(), 1U);
+    EXPECT_EQ(recorder.fields[0], "x-test=abc");
+}
+
 TEST(Http3QpackEncoderTest, SupportsReservedPrefixForHttp3HeadersFrame) {
     constexpr std::size_t kReserve = 16;
     IoBufNodePool pool;

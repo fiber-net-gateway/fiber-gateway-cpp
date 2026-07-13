@@ -102,7 +102,7 @@ common::IoErr Http3QpackEncoderIoBufWriter::acquire_output(void *ctx, std::size_
     if (!self->block_.append(std::move(buf))) {
         return common::IoErr::NoMem;
     }
-    self->tail_ = self->block_.first_writable();
+    self->tail_ = self->block_.back();
     if (self->tail_ == nullptr) {
         return common::IoErr::NoMem;
     }
@@ -112,9 +112,8 @@ common::IoErr Http3QpackEncoderIoBufWriter::acquire_output(void *ctx, std::size_
                 return common::IoErr::NoMem;
             }
             self->prefix_reserved_ = self->tail_->writable_data();
-            self->block_.commit(self->prefix_reserve_);
-            self->tail_ = self->block_.first_writable();
-            if (self->tail_ == nullptr || self->tail_->writable() < min_bytes) {
+            self->block_.commit_back(self->prefix_reserve_);
+            if (self->tail_->writable() < min_bytes) {
                 return common::IoErr::NoMem;
             }
         }
@@ -128,8 +127,9 @@ common::IoErr Http3QpackEncoderIoBufWriter::acquire_output(void *ctx, std::size_
 void Http3QpackEncoderIoBufWriter::commit_output(void *ctx, std::size_t written) noexcept {
     auto *self = static_cast<Http3QpackEncoderIoBufWriter *>(ctx);
     FIBER_ASSERT(self != nullptr);
-    self->block_.commit(written);
-    self->tail_ = self->block_.first_writable();
+    FIBER_ASSERT(self->tail_ != nullptr);
+    FIBER_ASSERT(written <= self->tail_->writable());
+    self->block_.commit_back(written);
 }
 
 } // namespace fiber::http

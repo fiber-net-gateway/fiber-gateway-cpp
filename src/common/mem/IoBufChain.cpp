@@ -420,6 +420,14 @@ void IoBufChain::commit(std::size_t bytes) noexcept {
     }
 }
 
+void IoBufChain::commit_back(std::size_t bytes) noexcept {
+    FIBER_ASSERT(tail_ != nullptr);
+    FIBER_ASSERT(bytes <= tail_->buf.writable());
+    tail_->buf.commit(bytes);
+    writable_bytes_ -= bytes;
+    readable_bytes_ += bytes;
+}
+
 void IoBufChain::mark_complete() noexcept { complete_ = true; }
 
 void IoBufChain::clear_complete() noexcept { complete_ = false; }
@@ -484,6 +492,10 @@ int IoBufChain::fill_read_iov(struct iovec *iov, int max_iov) const noexcept {
 IoBuf *IoBufChain::front() noexcept { return head_ ? &head_->buf : nullptr; }
 
 const IoBuf *IoBufChain::front() const noexcept { return head_ ? &head_->buf : nullptr; }
+
+IoBuf *IoBufChain::back() noexcept { return tail_ ? &tail_->buf : nullptr; }
+
+const IoBuf *IoBufChain::back() const noexcept { return tail_ ? &tail_->buf : nullptr; }
 
 IoBuf *IoBufChain::first_readable() noexcept {
     for (IoBufNode *node = head_; node; node = node->next) {

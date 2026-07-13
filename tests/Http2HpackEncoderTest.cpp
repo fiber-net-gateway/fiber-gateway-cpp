@@ -282,6 +282,33 @@ TEST(Http2HpackEncoderTest, DoesNotHuffmanEncodeValueThatWouldExpand) {
     EXPECT_EQ(recorder.raw_value_count, 1U);
 }
 
+TEST(Http2HpackEncoderTest, UsesNewTailWhenContiguousHuffmanOutputDoesNotFit) {
+    IoBufNodePool pool;
+    Http2HpackEncodeCatalog catalog;
+    ASSERT_TRUE(catalog.init({}));
+
+    Http2HpackEncoder encoder({.catalog = &catalog, .huffman_threshold = 1});
+    ASSERT_TRUE(encoder.init());
+    Http2HpackEncoderIoBufWriter writer(encoder, pool, 4);
+    ASSERT_EQ(writer.begin(), IoErr::None);
+    ASSERT_EQ(writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "abc"), IoErr::None);
+
+    IoBufChain block(pool);
+    ASSERT_EQ(writer.finish(block), IoErr::None);
+    ASSERT_GT(block.size(), 1U);
+    ASSERT_NE(block.front(), nullptr);
+    EXPECT_GT(block.front()->writable(), 0U);
+
+    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+    Http2HpackDecoder decoder;
+    ASSERT_TRUE(decoder.init());
+    DecodeRecorder recorder;
+    decoder.begin_block(&recorder, &DecodeRecorder::ops());
+    ASSERT_EQ(decoder.decode(bytes.data(), bytes.size(), true), IoErr::None);
+    ASSERT_EQ(recorder.fields.size(), 1U);
+    EXPECT_EQ(recorder.fields[0], "x-test=abc");
+}
+
 TEST(Http2HpackEncoderTest, EmitsTableSizeUpdateAtStartOfNextBlock) {
     IoBufNodePool pool;
     Http2HpackEncodeCatalog catalog;
