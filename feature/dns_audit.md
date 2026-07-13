@@ -11,7 +11,6 @@
 ## 总体评价
 
 wire codec（`DnsName`/`DnsMessage`）边界检查、指针压缩循环检测（强制向后指 + 跳数上界）、open-addressing 哈希不变量、SOA 负 TTL 解析（RFC 2308）、pending 合并等均正确。原始审计发现的三个高危问题及缓存 LRU/tombstone 退化均已修复；当前剩余工作主要是分配开销及若干合规问题。按严重度排列如下，均给出 `file:line` 与触发场景。
-
 ---
 
 ## 🔴 HIGH
@@ -73,6 +72,8 @@ wire codec（`DnsName`/`DnsMessage`）边界检查、指针压缩循环检测（
 - UDP 在 response capacity 检查、`memcpy` 和 `complete_slot` 前执行 matcher；不匹配或畸形报文被静默丢弃，slot 继续等待合法响应（`DnsClient.cpp:617-645`）。TCP 读取完整响应后调用同一 matcher，不匹配返回 `Invalid`，同时修复 LOW #13（`DnsClient.cpp:367-392`）。
 - 随机缓冲位于普通非协程 `prepare_request` 栈上，slot 未增加字段或域名副本；生产热路径未新增堆分配。
 - 回归测试覆盖 ID 碰撞/环回/完整空间探查、0x20 原地变换、错误 ID/qname/qtype/qclass/大小写、关闭严格 0x20、TCP 错误 ID/question，以及原有 fallback/cancel 行为（`DnsQuerySecurityTest.cpp`，`DnsClientTest.cpp:737-872`）。
+
+---
 
 ## 🟠 MEDIUM
 
