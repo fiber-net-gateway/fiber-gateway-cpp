@@ -33,8 +33,8 @@ TEST(Http2HpackStaticTableTest, FindNameReturnsSmallestMatchingIndex) {
     ASSERT_TRUE(Http2HpackStaticTable::find_name(":Method", index));
     EXPECT_EQ(index, 2u);
 
-    const std::uint64_t name_hash = fiber::http::http_header_name_hash("content-type");
-    ASSERT_TRUE(Http2HpackStaticTable::find_name("content-type", name_hash, index));
+    const std::uint64_t name_hash = fiber::http::http_header_name_hash("Content-Type");
+    ASSERT_TRUE(Http2HpackStaticTable::find_name("Content-Type", name_hash, index));
     EXPECT_EQ(index, 31u);
 
     EXPECT_FALSE(Http2HpackStaticTable::find_name("x-not-found", index));

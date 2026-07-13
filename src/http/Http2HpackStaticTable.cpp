@@ -1,7 +1,5 @@
 #include "Http2HpackStaticTable.h"
 
-#include <cstring>
-
 #include "HttpHeaderHash.h"
 
 namespace fiber::http {
@@ -11,10 +9,6 @@ namespace {
 #define FIBER_HTTP2_STATIC_ENTRY(name_literal, value_literal)                                                          \
     {name_literal, value_literal, fiber::http::http_header_name_hash(name_literal),                                    \
      static_cast<std::uint16_t>(sizeof(name_literal) - 1), static_cast<std::uint16_t>(sizeof(value_literal) - 1)}
-
-inline bool same_bytes(std::string_view left, const char *right, std::size_t right_len) noexcept {
-    return left.size() == right_len && std::memcmp(left.data(), right, right_len) == 0;
-}
 
 } // namespace
 
@@ -110,14 +104,13 @@ bool Http2HpackStaticTable::find_name(std::string_view name, std::uint32_t &inde
     return false;
 }
 
-bool Http2HpackStaticTable::find_name(std::string_view lowcase_name, std::uint64_t name_hash,
-                                      std::uint32_t &index) noexcept {
+bool Http2HpackStaticTable::find_name(std::string_view name, std::uint64_t name_hash, std::uint32_t &index) noexcept {
     for (std::uint32_t i = 0; i < kEntryCount; ++i) {
         const StaticEntry &entry = kEntries_[i];
-        if (entry.name_hash != name_hash || entry.name_len != lowcase_name.size()) {
+        if (entry.name_hash != name_hash || entry.name_len != name.size()) {
             continue;
         }
-        if (same_bytes(lowcase_name, entry.name, entry.name_len)) {
+        if (http_header_name_equals_ci(name, std::string_view(entry.name, entry.name_len))) {
             index = i + 1;
             return true;
         }
