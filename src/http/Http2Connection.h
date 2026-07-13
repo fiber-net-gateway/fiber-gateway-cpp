@@ -57,6 +57,9 @@ public:
         const Http2HpackEncodeCatalog *outbound_hpack_catalog = nullptr;
         std::size_t read_buffer_size = 64 * 1024;
         std::chrono::milliseconds read_timeout = std::chrono::seconds(30);
+        // Retain an empty unique read buffer for this long after the last
+        // successful inbound read. Zero disables idle buffer release.
+        std::chrono::milliseconds read_buffer_idle_release_timeout = std::chrono::milliseconds::zero();
         std::chrono::milliseconds write_timeout = std::chrono::seconds(30);
         std::chrono::milliseconds keepalive_ping_interval = std::chrono::milliseconds::zero();
         std::uint32_t max_frame_size = 16384;
@@ -182,6 +185,9 @@ private:
                                                     Http2OutboundEncodeFn encode, void *ctx) noexcept;
     [[nodiscard]] bool cancel_queued_stream_send(Http2Stream &stream) noexcept;
     void cancel_stream_send(Http2Stream &stream) noexcept;
+    fiber::async::Task<common::IoResult<std::size_t>>
+    read_more(mem::IoBuf &read_buf, std::size_t capacity,
+              std::chrono::steady_clock::time_point last_inbound_at) noexcept;
     [[nodiscard]] std::chrono::milliseconds current_read_timeout() const noexcept;
     common::IoErr handle_read_timeout() noexcept;
     common::IoErr send_keepalive_ping() noexcept;
