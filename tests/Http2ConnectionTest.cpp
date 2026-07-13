@@ -3458,6 +3458,7 @@ TEST(Http2ConnectionTest, ServerHandlerCanReadBufferedRequestBodyAcrossMultipleD
                                                  {":scheme", "https"},
                                                  {":path", "/upload"},
                                                  {":authority", "example.com"},
+                                                 {"content-length", "11"},
                                          },
                                          false);
     request += make_frame(6, 0x0, 0x0, 1, "hello ");
@@ -3467,8 +3468,11 @@ TEST(Http2ConnectionTest, ServerHandlerCanReadBufferedRequestBodyAcrossMultipleD
     auto last_flags = std::make_shared<std::vector<bool>>();
     auto read_result = std::make_shared<fiber::common::IoResult<void>>();
     auto header_result = std::make_shared<fiber::common::IoResult<void>>();
-    fiber::http::HttpHandler handler = [observed_body, last_flags, read_result, header_result](
-                                               fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+    auto framing_ok = std::make_shared<bool>(false);
+    fiber::http::HttpHandler handler = [observed_body, last_flags, read_result, header_result,
+                                        framing_ok](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        const auto body_spec = exchange.request_body_spec();
+        *framing_ok = body_spec.is_content_length() && body_spec.content_length() == 11;
         co_await fiber::async::sleep(std::chrono::milliseconds(2));
 
         for (;;) {
@@ -3504,6 +3508,7 @@ TEST(Http2ConnectionTest, ServerHandlerCanReadBufferedRequestBodyAcrossMultipleD
     ASSERT_TRUE(outcome.result.has_value());
     ASSERT_TRUE(read_result->has_value());
     ASSERT_TRUE(header_result->has_value());
+    EXPECT_TRUE(*framing_ok);
     EXPECT_EQ(*observed_body, "hello world");
     ASSERT_EQ(last_flags->size(), 3U);
     EXPECT_FALSE((*last_flags)[0]);
@@ -3597,7 +3602,10 @@ TEST(Http2ConnectionTest, ServerReadBodyReturnsLastWhenRequestEndsAtHeaders) {
                                          true);
 
     auto read_result = std::make_shared<fiber::common::IoResult<fiber::mem::IoBufChain>>();
-    fiber::http::HttpHandler handler = [read_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+    auto framing_is_none = std::make_shared<bool>(false);
+    fiber::http::HttpHandler handler =
+            [read_result, framing_is_none](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        *framing_is_none = exchange.request_body_spec().is_none();
         *read_result = co_await exchange.read_body(64);
         co_return;
     };
@@ -3606,6 +3614,7 @@ TEST(Http2ConnectionTest, ServerReadBodyReturnsLastWhenRequestEndsAtHeaders) {
 
     ASSERT_TRUE(outcome.result.has_value());
     ASSERT_TRUE(read_result->has_value());
+    EXPECT_TRUE(*framing_is_none);
     EXPECT_EQ(read_result->value().readable_bytes(), 0u);
     EXPECT_TRUE(read_result->value().complete());
 }

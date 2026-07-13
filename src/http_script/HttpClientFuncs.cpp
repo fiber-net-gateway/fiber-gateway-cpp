@@ -616,13 +616,15 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
     fiber::http::HttpHeaders req_headers(exchange.pool());
     // Copy inbound request headers (hop-by-hop filtered), then apply options.headers overrides.
     for (const fiber::http::HttpHeaders::HeaderField &field: exchange.request_headers()) {
-        if (field.name_len == 0 || should_skip_hop_by_hop_header(exchange.request_headers(), field)) {
+        if (field.name_len == 0 || is_request_framing_header(field) ||
+            should_skip_hop_by_hop_header(exchange.request_headers(), field)) {
             continue;
         }
         req_headers.add_view(field.name_view(), field.value_view(), const_cast<char *>(field.lowcase_name),
                              field.name_hash);
     }
     apply_options_headers(*heap, options, req_headers);
+    remove_request_framing_headers(req_headers);
 
     const std::string method_str = std::string(field_string(*heap, options, "method", 6));
     const fiber::http::HttpMethod method =
@@ -744,7 +746,7 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
     const fiber::http::HttpBodySpec response_body =
             no_body ? fiber::http::HttpBodySpec::None()
                     : (has_content_length ? fiber::http::HttpBodySpec::ContentLength(response_content_length)
-                                          : fiber::http::HttpBodySpec::Chunked());
+                                          : fiber::http::HttpBodySpec::Stream());
 
     // flush is parsed for API parity; C++ write_body already writes through (no buffering to skip).
     (void) field_bool(*heap, options, "flush", 5, false);

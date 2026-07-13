@@ -91,6 +91,7 @@ public:
     const HttpHeaders::HeaderField *expect_header() const noexcept { return request_header_refs_.expect; }
     const HttpHeaders &request_headers() const noexcept { return request_headers_; };
     const HttpHeaders &request_trailers() const noexcept { return request_trailers_; };
+    [[nodiscard]] HttpBodySpec request_body_spec() const noexcept { return request_body_spec_; }
     bool request_trailers_complete() const noexcept { return request_trailers_complete_; }
     mem::BufPool &pool() noexcept { return pool_; }
 
@@ -137,9 +138,7 @@ private:
     HttpHeaders request_trailers_;
     bool request_trailers_complete_ = false;
     RequestHeaderRefs request_header_refs_;
-    bool request_chunked_ = false;
-    bool request_content_length_set_ = false;
-    size_t request_content_length_ = 0;
+    HttpBodySpec request_body_spec_{HttpBodySpec::None()};
     bool request_close_ = false;
     bool request_keep_alive_ = false;
     HttpExchangeIo *io_ = nullptr;

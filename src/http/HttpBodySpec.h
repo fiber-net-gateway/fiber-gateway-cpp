@@ -9,10 +9,10 @@ namespace fiber::http {
 class HttpBodySpec {
 public:
     enum class Kind : std::uint8_t {
-        Auto,
+        Auto, // Outgoing framing is inferred when the first body write is available.
         None,
         ContentLength,
-        Chunked,
+        Stream, // Length is unknown and the protocol stream boundary terminates the body.
     };
 
     constexpr HttpBodySpec() noexcept = default;
@@ -22,13 +22,13 @@ public:
     [[nodiscard]] static constexpr HttpBodySpec ContentLength(std::size_t length) noexcept {
         return HttpBodySpec(Kind::ContentLength, length);
     }
-    [[nodiscard]] static constexpr HttpBodySpec Chunked() noexcept { return HttpBodySpec(Kind::Chunked, 0); }
+    [[nodiscard]] static constexpr HttpBodySpec Stream() noexcept { return HttpBodySpec(Kind::Stream, 0); }
 
     [[nodiscard]] constexpr Kind kind() const noexcept { return kind_; }
     [[nodiscard]] constexpr bool is_auto() const noexcept { return kind_ == Kind::Auto; }
     [[nodiscard]] constexpr bool is_none() const noexcept { return kind_ == Kind::None; }
     [[nodiscard]] constexpr bool is_content_length() const noexcept { return kind_ == Kind::ContentLength; }
-    [[nodiscard]] constexpr bool is_chunked() const noexcept { return kind_ == Kind::Chunked; }
+    [[nodiscard]] constexpr bool is_stream() const noexcept { return kind_ == Kind::Stream; }
     [[nodiscard]] constexpr std::size_t content_length() const noexcept { return content_length_; }
 
 private:

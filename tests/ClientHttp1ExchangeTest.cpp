@@ -469,9 +469,9 @@ DetachedTask run_content_length_client(fiber::event::EventLoop *loop, std::uint1
     request_done_promise->set_value(request_done);
 }
 
-DetachedTask run_chunked_client(fiber::event::EventLoop *loop, std::uint16_t port,
-                                std::promise<fiber::common::IoErr> *result_promise,
-                                std::promise<bool> *request_done_promise) {
+DetachedTask run_stream_client(fiber::event::EventLoop *loop, std::uint16_t port,
+                               std::promise<fiber::common::IoErr> *result_promise,
+                               std::promise<bool> *request_done_promise) {
     fiber::http::Http1ClientConnectionOptions conn_options;
     conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
 
@@ -498,7 +498,7 @@ DetachedTask run_chunked_client(fiber::event::EventLoop *loop, std::uint16_t por
         head.method = fiber::http::HttpMethod::Post;
         head.target = "/upload";
         head.headers = &headers;
-        head.body = fiber::http::HttpBodySpec::Chunked();
+        head.body = fiber::http::HttpBodySpec::Stream();
 
         auto header_result = co_await exchange.send_header(head, false);
         if (!header_result) {
@@ -524,7 +524,7 @@ DetachedTask run_chunked_client(fiber::event::EventLoop *loop, std::uint16_t por
     request_done_promise->set_value(request_done);
 }
 
-// Like run_chunked_client but exercises the write_body(IoBufChain) chunked path
+// Exercises the explicit Chunked write_body(IoBufChain) path.
 // (ClientHttp1Exchange merges [prefix][body][suffix] into a single writev).
 DetachedTask run_chunked_client_iobufchain(fiber::event::EventLoop *loop, std::uint16_t port,
                                            std::promise<fiber::common::IoErr> *result_promise,
@@ -555,7 +555,7 @@ DetachedTask run_chunked_client_iobufchain(fiber::event::EventLoop *loop, std::u
         head.method = fiber::http::HttpMethod::Post;
         head.target = "/upload";
         head.headers = &headers;
-        head.body = fiber::http::HttpBodySpec::Chunked();
+        head.body = fiber::http::HttpBodySpec::Stream();
 
         auto header_result = co_await exchange.send_header(head, false);
         if (!header_result) {
@@ -616,7 +616,7 @@ DetachedTask run_empty_chunked_client(fiber::event::EventLoop *loop, std::uint16
         head.method = fiber::http::HttpMethod::Post;
         head.target = "/empty";
         head.headers = &headers;
-        head.body = fiber::http::HttpBodySpec::Chunked();
+        head.body = fiber::http::HttpBodySpec::Stream();
 
         auto header_result = co_await exchange.send_header(head, true);
         if (!header_result) {
@@ -1129,7 +1129,7 @@ TEST(ClientHttp1ExchangeTest, SendHeaderAndContentLengthBodyWriteRawHttp1Request
     group.join();
 }
 
-TEST(ClientHttp1ExchangeTest, SendChunkedBodyAndTrailerWriteRawHttp1Request) {
+TEST(ClientHttp1ExchangeTest, SendStreamBodyAndTrailerAsChunkedHttp1Request) {
     const std::string expected = "POST /upload HTTP/1.1\r\n"
                                  "Transfer-Encoding: chunked\r\n"
                                  "host: example.com\r\n"
@@ -1160,7 +1160,7 @@ TEST(ClientHttp1ExchangeTest, SendChunkedBodyAndTrailerWriteRawHttp1Request) {
     std::promise<bool> request_done_promise;
     auto request_done_future = request_done_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() {
-        return run_chunked_client(&group.at(0), port, &result_promise, &request_done_promise);
+        return run_stream_client(&group.at(0), port, &result_promise, &request_done_promise);
     });
 
     EXPECT_EQ(result_future.get(), fiber::common::IoErr::None);

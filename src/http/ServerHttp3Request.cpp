@@ -200,7 +200,10 @@ ServerHttp3Request::ServerHttp3Request(Http3Connection &conn, const HttpServerOp
     inbound_buf_(conn.quic().recv_extent_pool()), exchange_(conn.quic().recv_extent_pool(), http_options),
     handler_(&handler), max_qpack_string_size_(static_cast<std::uint32_t>(std::min<std::size_t>(
                                 http_options.header_large_size, std::numeric_limits<std::uint32_t>::max()))),
-    body_timeout_(http_options.body_timeout), body_recv_state_(BodyRecvState::FrameHeader) {}
+    body_timeout_(http_options.body_timeout), body_recv_state_(BodyRecvState::FrameHeader) {
+    // HTTP/3 request bodies are stream-delimited when Content-Length is absent.
+    exchange_.request_body_spec_ = HttpBodySpec::Stream();
+}
 
 quic::QuicStream::Lease ServerHttp3Request::create(std::uint64_t stream_id, Http3Connection &conn,
                                                    const HttpServerOptions &http_options,
@@ -770,11 +773,10 @@ common::IoErr ServerHttp3Request::HeaderBlockParser::handle_content_length(std::
 
     const std::size_t length = static_cast<std::size_t>(parsed);
     HttpExchange &exchange = request_.exchange_;
-    if (exchange.request_content_length_set_ && exchange.request_content_length_ != length) {
+    if (exchange.request_body_spec_.is_content_length() && exchange.request_body_spec_.content_length() != length) {
         return fail(Http3ErrorCode::MessageError);
     }
-    exchange.request_content_length_set_ = true;
-    exchange.request_content_length_ = length;
+    exchange.request_body_spec_ = HttpBodySpec::ContentLength(length);
     return common::IoErr::None;
 }
 
@@ -816,6 +818,9 @@ async::DetachedTask ServerHttp3Request::run_read_loop(quic::QuicStream::Lease le
     if (!parsed) {
         stream_.close(error_value(request_parse_error_));
         co_return;
+    }
+    if (exchange_.request_body_spec_.is_stream() && inbound_buf_.complete() && inbound_buf_.readable_bytes() == 0) {
+        exchange_.request_body_spec_ = HttpBodySpec::None();
     }
 
     if (handler_ == nullptr) {
@@ -1227,7 +1232,7 @@ async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange
             }
             final_body_spec = header.body;
             if (response_must_not_have_body(exchange, header.status_code)) {
-                if (!header.end_stream || final_body_spec.is_chunked() ||
+                if (!header.end_stream || final_body_spec.is_stream() ||
                     (final_body_spec.is_content_length() && final_body_spec.content_length() != 0)) {
                     co_return std::unexpected(common::IoErr::Invalid);
                 }
@@ -1240,7 +1245,7 @@ async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange
                     if (final_body_spec.is_content_length() && final_body_spec.content_length() != 0) {
                         co_return std::unexpected(common::IoErr::Invalid);
                     }
-                    if (final_body_spec.is_chunked()) {
+                    if (final_body_spec.is_stream()) {
                         final_body_spec = HttpBodySpec::Auto();
                     }
                 }
