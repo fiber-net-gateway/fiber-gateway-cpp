@@ -47,7 +47,7 @@
 
 ## 二、中优先级（根因类，修一处惠及多处）
 
-### 6. `HttpHeaders` 缺 `get(name,hash)` / `contains(name,hash)` 重载 ⭐ 根因
+### 6. `HttpHeaders` 缺 `get(name,hash)` / `contains(name,hash)` 重载 ⭐ 根因 ✅ 已修复
 - **位置**：`HttpHeaders.h:57-58`（只有 `get/contains(string_view)`）；`HttpHeaders.cpp:203`（`get_all(string_view)` 额外堆分配 `std::string owned_key_`）
 - **问题**：每次调用现算 `http_header_name_hash` 并逐字节大小写折叠。调用点遍布各协议热路径：`GrpcClient` 的 `grpc-status`、`GrpcStream` 的 `grpc-message`、`HttpClientFuncs` 的 `content-type`、`Http1ExchangeIo.cpp:705-709` 每响应查 `Content-Length/Transfer-Encoding/Connection` 三个字面量。代码库已有 `constexpr` 哈希习惯（`HttpProxyCore.h:97`、`ProxyHandler.cpp:129`、`Http2HpackEncoder.cpp:21-25`），但 `get/contains` 没开放重载去吃它。`get_all(string_view)` 还每请求 malloc/free（`ScriptExchangeCtx.cpp:141/202` 的 `get_all("cookie")`）。
 - **修法**：补 `get/contains(name,hash)` 与 `get_all(string_view)` 内部走 hash 路径（`MatchRange.owned_key_` 在 pre-hashed 路径下成死字段）；调用点用 `static constexpr uint64_t kXHash = http_header_name_hash("...")`。

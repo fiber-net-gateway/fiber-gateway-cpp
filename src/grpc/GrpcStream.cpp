@@ -2,8 +2,14 @@
 
 #include <utility>
 
+#include "../http/HttpHeaderHash.h"
+
 namespace fiber::grpc {
 namespace {
+
+// Pre-hashed trailer/header names for per-response gRPC status extraction.
+constexpr std::uint64_t kGrpcStatusHash = http::http_header_name_hash("grpc-status");
+constexpr std::uint64_t kGrpcMessageHash = http::http_header_name_hash("grpc-message");
 
 // Encode a duration as a gRPC timeout header value: <digits><unit>, choosing the
 // largest unit (H/M/S/m) that divides the value evenly. Input is milliseconds.
@@ -164,10 +170,10 @@ fiber::async::Task<common::IoResult<void>> GrpcStream::ensure_response_header() 
     if (resp->status_code != 200) {
         co_return std::unexpected(common::IoErr::Unknown);
     }
-    if (auto s = resp->headers.get("grpc-status"); !s.empty()) {
+    if (auto s = resp->headers.get("grpc-status", kGrpcStatusHash); !s.empty()) {
         grpc_code_ = parse_grpc_status(s);
     }
-    if (auto m = resp->headers.get("grpc-message"); !m.empty()) {
+    if (auto m = resp->headers.get("grpc-message", kGrpcMessageHash); !m.empty()) {
         grpc_message_.assign(m.data(), m.size());
     }
     response_head_read_ = true;
@@ -296,10 +302,10 @@ fiber::async::Task<common::IoResult<GrpcStatus>> GrpcStream::finish() noexcept {
                 co_return std::unexpected(trailer_result.error());
             }
             const http::Http2ResponseHead *trailer = *trailer_result;
-            if (auto s = trailer->headers.get("grpc-status"); !s.empty()) {
+            if (auto s = trailer->headers.get("grpc-status", kGrpcStatusHash); !s.empty()) {
                 grpc_code_ = parse_grpc_status(s);
             }
-            if (auto m = trailer->headers.get("grpc-message"); !m.empty()) {
+            if (auto m = trailer->headers.get("grpc-message", kGrpcMessageHash); !m.empty()) {
                 grpc_message_.assign(m.data(), m.size());
             }
         }

@@ -218,8 +218,10 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
 
     const bool no_response_body = response_has_no_body(exchange.method(), upstream_head->status_code);
     std::size_t response_content_length = 0;
+    static constexpr std::uint64_t kContentLengthHash = fiber::http::http_header_name_hash("content-length");
     const bool has_content_length =
-            !no_response_body && parse_decimal(upstream_head->headers.get("content-length"), response_content_length);
+            !no_response_body &&
+            parse_decimal(upstream_head->headers.get("content-length", kContentLengthHash), response_content_length);
     const fiber::http::HttpBodySpec response_body =
             no_response_body ? fiber::http::HttpBodySpec::None()
                              : (has_content_length ? fiber::http::HttpBodySpec::ContentLength(response_content_length)

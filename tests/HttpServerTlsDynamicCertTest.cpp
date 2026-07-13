@@ -376,8 +376,8 @@ TEST(HttpServerTlsDynamicCertTest, DefaultIdentityCanServeWithoutCustomSelector)
 // TLS HTTP/1 client that POSTs a request body and reads the entire response
 // (headers + body) until EOF. Used to verify chunked response framing over TLS.
 DetachedTask run_tls_http1_client_post_and_read_all(fiber::event::EventLoop *loop, std::uint16_t port,
-                                                     std::string_view server_name, std::string_view request_body,
-                                                     std::promise<ClientResult> *result_promise) {
+                                                    std::string_view server_name, std::string_view request_body,
+                                                    std::promise<ClientResult> *result_promise) {
     ClientResult result;
 
     fiber::net::SocketAddress target(fiber::net::IpAddress::loopback_v4(), port);
@@ -418,9 +418,9 @@ DetachedTask run_tls_http1_client_post_and_read_all(fiber::event::EventLoop *loo
     }
     result.negotiated_alpn = transport->negotiated_alpn();
 
-    std::string request = "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: " +
-                           std::to_string(request_body.size()) +
-                           "\r\nConnection: close\r\n\r\n" + std::string(request_body);
+    std::string request =
+            "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: " + std::to_string(request_body.size()) +
+            "\r\nConnection: close\r\n\r\n" + std::string(request_body);
     std::size_t offset = 0;
     while (offset < request.size()) {
         auto write_result = co_await transport->write(request.data() + offset, request.size() - offset, 5s);
@@ -491,8 +491,9 @@ TEST(HttpServerTlsDynamicCertTest, ChunkedResponseEchoedOverTls) {
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
 
-    fiber::async::spawn(group.at(0),
-                        [&]() { return start_http_server(&group.at(0), handler, server_options, &port_promise, &server_promise); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return start_http_server(&group.at(0), handler, server_options, &port_promise, &server_promise);
+    });
 
     auto *server = server_future.get();
     ASSERT_NE(server, nullptr);
