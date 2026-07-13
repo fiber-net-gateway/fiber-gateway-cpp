@@ -1,6 +1,7 @@
 #ifndef FIBER_DNS_DNS_CACHE_H
 #define FIBER_DNS_DNS_CACHE_H
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -101,7 +102,6 @@ public:
                                           std::chrono::steady_clock::time_point now, NameSnapshot &out) const noexcept;
     [[nodiscard]] common::IoErr lookup_name(std::string_view qname, std::uint16_t qclass,
                                             std::chrono::steady_clock::time_point now, NameSnapshot &out) noexcept;
-    [[nodiscard]] common::IoErr note_name_access(std::string_view qname, std::uint16_t qclass) noexcept;
 
     [[nodiscard]] common::IoErr upsert_a(std::string_view qname, std::uint16_t qclass, const net::IpAddress *records,
                                          std::uint16_t count, std::chrono::steady_clock::time_point expire_at) noexcept;
@@ -116,9 +116,18 @@ public:
                                                        std::uint16_t qtype,
                                                        std::chrono::steady_clock::time_point expire_at) noexcept;
     [[nodiscard]] common::IoErr erase(std::string_view qname, std::uint16_t qclass) noexcept;
-    [[nodiscard]] std::size_t sweep_expired(std::chrono::steady_clock::time_point now, std::size_t budget) noexcept;
+    [[nodiscard]] std::size_t sweep_expired(std::chrono::steady_clock::time_point now,
+                                            std::size_t scan_budget) noexcept;
 
 private:
+    friend class SharedDnsCache;
+
+    enum class SharedLookupState : std::uint8_t {
+        Miss,
+        Hit,
+        Expired,
+    };
+
     enum class SlotState : std::uint8_t {
         Empty,
         Positive,
@@ -149,7 +158,7 @@ private:
         AddressSlot aaaa{};
         CnameSlot cname{};
         std::chrono::steady_clock::time_point nxdomain_expire_at{};
-        std::uint64_t approx_last_access = 0;
+        mutable std::atomic<std::uint64_t> approx_last_access{0};
         std::uint32_t next_free = 0;
         bool occupied = false;
     };
@@ -195,6 +204,9 @@ private:
     [[nodiscard]] std::string_view cname_target(const NameEntry &entry) const noexcept;
     [[nodiscard]] common::IoErr fill_snapshot(const NameEntry &entry, std::chrono::steady_clock::time_point now,
                                               NameSnapshot &out) const noexcept;
+    [[nodiscard]] common::IoErr lookup_name_shared(std::string_view qname, std::uint16_t qclass,
+                                                   std::chrono::steady_clock::time_point now, NameSnapshot &out,
+                                                   SharedLookupState &state) const noexcept;
 
     void clear_address_slot(AddressSlot &slot) noexcept;
     void clear_cname_slot(CnameSlot &slot) noexcept;
@@ -207,8 +219,10 @@ private:
     [[nodiscard]] std::uint32_t allocate_entry() noexcept;
     void recycle_entry(std::uint32_t index) noexcept;
     void erase_entry(std::uint32_t index) noexcept;
+    void rebuild_index() noexcept;
+    void maybe_rebuild_index() noexcept;
     [[nodiscard]] std::uint32_t select_eviction_candidate(std::uint32_t protected_index) noexcept;
-    void touch_entry(NameEntry &entry) noexcept;
+    void touch_entry(const NameEntry &entry) const noexcept;
 
     Options options_{};
     std::unique_ptr<std::uint32_t[]> buckets_{};
@@ -216,10 +230,11 @@ private:
     std::size_t bucket_count_ = 0;
     std::size_t entry_count_ = 0;
     std::size_t bytes_used_ = 0;
+    std::size_t tombstone_count_ = 0;
     std::uint32_t free_head_ = kInvalidIndex;
     std::uint32_t eviction_cursor_ = 0;
     std::uint32_t sweep_cursor_ = 0;
-    std::uint64_t access_clock_ = 0;
+    mutable std::atomic<std::uint64_t> access_clock_{0};
 };
 
 class SharedDnsCache : public common::NonCopyable, public common::NonMovable {
@@ -256,7 +271,7 @@ public:
                            std::chrono::steady_clock::time_point expire_at) noexcept;
     [[nodiscard]] async::Task<common::IoErr> erase(std::string_view qname, std::uint16_t qclass) noexcept;
     [[nodiscard]] async::Task<std::size_t> sweep_expired(std::chrono::steady_clock::time_point now,
-                                                         std::size_t budget) noexcept;
+                                                         std::size_t scan_budget) noexcept;
 
 private:
     DnsCache cache_{};

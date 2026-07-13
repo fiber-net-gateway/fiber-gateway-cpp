@@ -4,13 +4,13 @@
 >
 > 核验事实：`RWMutex::ReadLockAwaiter::await_ready` 在无写锁竞争时 `try_lock_shared()` 返回 true、`co_await lock_shared()` 不挂起（`src/async/RWMutex.cpp:153-162,200-207`）；`RWFd::close()` 同步 `resume()` 挂起的读等待者并置 `Canceled`（`src/net/detail/RWFd.cpp:38-71`），故 `~DnsClient`->`close()`->`socket_->close()` 会在析构成员前同步排空 `recv_loop`，recv_loop 无 UAF；open-addressing 的 tombstone/探查不变量正确；`NameSnapshot` 自包含拷贝、无悬空指针。
 >
-> 状态（2026-07-13 复核）：HIGH #1、#2、#3 均已修复；LOW #1、#13 已随对应 HIGH 项修复，其余排期。
+> 状态（2026-07-13 复核）：HIGH #1、#2、#3 及 MEDIUM #4、#5 均已修复；MEDIUM #6 已确认是符合 NXDOMAIN 语义的有意行为；LOW #1、#13 已随对应 HIGH 项修复，其余排期。
 >
-> 复核验证：`cmake --build build --target fiber_tests -j2`；DNS 定向测试 26/26 通过；`ctest --test-dir build --output-on-failure`，1141/1141 通过。
+> 复核验证：`cmake --build build --target fiber_tests -j2`；DNS 定向测试 44/44 通过；`ctest --test-dir build --output-on-failure`，1147/1147 通过。
 
 ## 总体评价
 
-wire codec（`DnsName`/`DnsMessage`）边界检查、指针压缩循环检测（强制向后指 + 跳数上界）、open-addressing 哈希不变量、SOA 负 TTL 解析（RFC 2308）、pending 合并等均正确。原始审计发现的三个高危问题均已修复；当前剩余工作主要是缓存并发/退化、分配开销及若干合规问题。按严重度排列如下，均给出 `file:line` 与触发场景。
+wire codec（`DnsName`/`DnsMessage`）边界检查、指针压缩循环检测（强制向后指 + 跳数上界）、open-addressing 哈希不变量、SOA 负 TTL 解析（RFC 2308）、pending 合并等均正确。原始审计发现的三个高危问题及缓存 LRU/tombstone 退化均已修复；当前剩余工作主要是分配开销及若干合规问题。按严重度排列如下，均给出 `file:line` 与触发场景。
 
 ---
 
@@ -78,26 +78,37 @@ wire codec（`DnsName`/`DnsMessage`）边界检查、指针压缩循环检测（
 
 ## 🟠 MEDIUM
 
-### 4. `SharedDnsCache::lookup_name`：peek + try_lock，写竞争下丢失 LRU 更新且不清理过期
+### 4. ✅ 已修复：`SharedDnsCache::lookup_name` 的 LRU 更新丢失及过期条目不清理
 `DnsCache.cpp:994-1013`(lookup 用 peek + try_lock touch) / `581-602`(peek 不调 cleanup) / `639-656`(note_name_access 触摸已过期条目)
 
 读锁下 `peek_name`（const，不清理、不 touch），再 `try_lock` 升级写锁做 `note_name_access`。upsert 繁忙时 `try_lock` 持续失败 -> LRU 永不更新，退化为 FIFO，热条目被先淘汰、命中率崩溃。`peek` 不调 `cleanup_entry`，过期条目只靠后台 `sweep_expired` 回收。`note_name_access` 还会给已过期条目续 `access_clock_`，污染淘汰决策。
 
 **修复**：`access_clock_`/`approx_last_access` 改 atomic，读锁下直接 touch（近似 LRU 允许 lost update）；或读锁下做幂等的 cleanup+touch；提高 sweep 频率。
 
-### 5. `DnsCache` tombstone 累积、无 rehash
+**当前实现**：
+- `access_clock_` 和每个 entry 的 `approx_last_access` 使用 relaxed atomic；共享读锁内确认快照命中后直接 touch，不再使用 `try_lock` 升级写锁。
+- 共享查询区分真正 Miss 与全部 slot 已过期的 entry；后者释放读锁后获取写锁并重新 lookup，在锁内复核并删除，普通 hit/miss 不增加写锁竞争。
+- `sweep_expired` 的 budget 改为扫描预算，避免小 budget 仍扫描完整缓存；共享写路径在已有写锁下顺带执行固定小预算增量 sweep。
+- 回归测试覆盖共享查询回收过期 entry 及共享命中刷新淘汰年龄。
+
+### 5. ✅ 已修复：`DnsCache` tombstone 累积、无 rehash
 `DnsCache.cpp:377-391`(erase 置 tombstone，仅靠插入复用)
 
 短 TTL + sweep 频繁 erase 产生大量 tombstone，无回收/重哈希机制，探查链逐步退化到接近 O(bucket_count)。
 
 **修复**：统计 tombstone 密度，超阈值重哈希压缩；或采用 backward-shift 删除。
 
-### 6. `upsert_negative_nxdomain` 未 `load_entry_state`，与其它 upsert 不一致
+**当前实现**：
+- 维护 `tombstone_count_`，删除时增加、插入复用时减少；达到 bucket 数量 1/4 时，在现有 bucket 数组内清空并重新索引所有 occupied entry，不产生新分配。
+- 显式配置的 `index_capacity` 也强制不低于 `2 * max_entries`，将最大装载率限制为 0.5。
+- lookup 过期删除、显式 erase、容量淘汰和 sweep 后都会在安全边界检查重建阈值；回归测试覆盖反复 erase/reinsert 后的索引可用性。
+
+### 6. ✅ 已确认非缺陷：`upsert_negative_nxdomain` 有意替换同名所有 RRset
 `DnsCache.cpp:847-850`（对比 `699`/`786`/`909` 都先 load）
 
 其它 upsert 都先 `load_entry_state` 保留同条目其它类型记录，唯独 NxDomain 不 load，会清掉同名未过期的 A/AAAA/CNAME。NxDomain 语义上"名字不存在"清空也说得通（RFC），但不一致更像遗漏。
 
-**修复**：为一致性加上 `load_entry_state`；若刻意清空，加注释说明。
+**结论**：NXDOMAIN 按 `<QNAME,QCLASS>` 表示名字不存在，而 NODATA 才按 `<QNAME,QTYPE,QCLASS>` 表示特定 RRset 不存在。保留 A/AAAA/CNAME 会使单个快照同时包含 positive/CNAME 和 NXDOMAIN；当前清空同名 RRset 的行为是合理策略。实现已补充意图注释，并新增 positive/CNAME -> NXDOMAIN 以及 NXDOMAIN -> positive 的双向回归测试，不添加 `load_entry_state`。
 
 ### 7. 每次 resolve 的堆分配 churn
 `DnsResolverLocal.cpp:659`(每响应 `make_unique<IpAddress[]>`) / `DnsResolver.cpp:326-327,389-400,495-498`(FamilyQueryState×2 + merged + AddressResolveResult)
@@ -141,7 +152,7 @@ V6First 也会同时发 A 查询并等齐两者才合并，上游查询量翻倍
 | P0 | ✅ 已修复 | HIGH #1（pending 完成顺序 + 防重复上游查询 + answer/CNAME 链校验） | - |
 | P0 | ✅ 已修复 | HIGH #2（TCP fallback 取消） | - |
 | P0 | ✅ 已修复 | HIGH #3（随机 ID + 0x20 + 客户端 UDP/TCP question 校验） | - |
-| P1 | ⏳ 待修复 | MEDIUM #4/#5/#6（缓存 LRU/清理/tombstone/NxDomain 一致性） | 中 |
+| P1 | ✅ 已修复/确认 | MEDIUM #4/#5/#6（缓存 LRU/清理/tombstone/NXDOMAIN 语义） | - |
 | P1 | ⏳ 待修复 | MEDIUM #7（堆分配 churn） | 中 |
 | P2 | ⏳ 待修复 | MEDIUM #8 + 其余未修复 LOW | 排期 |
 
@@ -151,7 +162,7 @@ V6First 也会同时发 A 查询并等齐两者才合并，上游查询量翻倍
 - `encode_name` 标签长度 1..63 校验、空标签拒绝、根处理（`DnsName.cpp:35-58`）。
 - `MessageParser::parse` 记录总数 uint32 累加无溢出、与 max_records 比较（`DnsMessage.cpp:157-162`）。
 - `encode_query` EDNS OPT 记录格式正确（root 名、type=OPT、class=payload size、TTL=version+DO、RDLENGTH=0）（`DnsMessage.cpp:244-253`）。
-- `DnsCache` open-addressing tombstone 语义：find 跨过 tombstone、insert 复用首个 tombstone、erase 置 tombstone 保可达性（`DnsCache.cpp:255-301,377-391`）。
+- `DnsCache` open-addressing tombstone 语义：find 跨过 tombstone、insert 复用首个 tombstone、erase 置 tombstone 保可达性；tombstone 达阈值后原地重建索引压缩探查链。
 - `ensure_capacity` 字节记账：`bytes_used_ - old_blob_size + new_blob_size`，old 来自 entry 当前 blob_size，无下溢（`DnsCache.cpp:441,486,514`）。
 - blob 对齐：地址记录区 `align_up(., alignof(IpAddress))`，`new char[]` 默认对齐 >= alignof(IpAddress)（`DnsCache.cpp:472,491`）。
 - `handle_response` 校验响应 question 段匹配 qname/qtype/qclass（`DnsResolverLocal.cpp:732-747`）。

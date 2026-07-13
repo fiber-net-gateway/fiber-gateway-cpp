@@ -23,6 +23,20 @@ struct LookupResult {
     IpAddress address{};
 };
 
+struct ExpiredCleanupResult {
+    IoErr err = IoErr::Invalid;
+    std::size_t count_before = 0;
+    std::size_t count_after = 0;
+    bool found = true;
+};
+
+struct EvictionResult {
+    IoErr err = IoErr::Invalid;
+    bool first_found = true;
+    bool second_found = false;
+    bool third_found = false;
+};
+
 DetachedTask write_a_record(SharedDnsCache *cache, std::promise<IoErr> *done) {
     auto now = std::chrono::steady_clock::now();
     IpAddress address = IpAddress::v4({9, 9, 9, 9});
@@ -47,6 +61,79 @@ DetachedTask read_name(SharedDnsCache *cache, std::promise<LookupResult> *done) 
     result.a_negative = snapshot.a().negative;
     if (snapshot.a().present && snapshot.a().count != 0) {
         result.address = snapshot.a().records[0];
+    }
+    done->set_value(result);
+    co_return;
+}
+
+DetachedTask exercise_expired_cleanup(SharedDnsCache *cache, std::promise<ExpiredCleanupResult> *done) {
+    ExpiredCleanupResult result;
+    fiber::dns::NameSnapshot snapshot;
+    if (!snapshot.init()) {
+        done->set_value(result);
+        co_return;
+    }
+
+    auto now = fiber::event::EventLoop::current().now();
+    IpAddress address = IpAddress::v4({10, 0, 0, 2});
+    result.err = co_await cache->upsert_a("expired.shared", static_cast<std::uint16_t>(RecordClass::IN), &address, 1,
+                                          now - std::chrono::seconds(1));
+    if (result.err != IoErr::None) {
+        done->set_value(result);
+        co_return;
+    }
+    result.count_before = co_await cache->entry_count();
+    result.err =
+            co_await cache->lookup_name("expired.shared", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot);
+    result.found = snapshot.found();
+    result.count_after = co_await cache->entry_count();
+    done->set_value(result);
+    co_return;
+}
+
+DetachedTask exercise_shared_eviction(SharedDnsCache *cache, std::promise<EvictionResult> *done) {
+    EvictionResult result;
+    fiber::dns::NameSnapshot snapshot;
+    if (!snapshot.init()) {
+        done->set_value(result);
+        co_return;
+    }
+
+    auto now = fiber::event::EventLoop::current().now();
+    IpAddress first = IpAddress::v4({1, 1, 1, 1});
+    IpAddress second = IpAddress::v4({2, 2, 2, 2});
+    IpAddress third = IpAddress::v4({3, 3, 3, 3});
+    result.err = co_await cache->upsert_a("first.shared", static_cast<std::uint16_t>(RecordClass::IN), &first, 1,
+                                          now + std::chrono::seconds(60));
+    if (result.err == IoErr::None) {
+        result.err = co_await cache->upsert_a("second.shared", static_cast<std::uint16_t>(RecordClass::IN), &second, 1,
+                                              now + std::chrono::seconds(60));
+    }
+    if (result.err == IoErr::None) {
+        result.err = co_await cache->lookup_name("second.shared", static_cast<std::uint16_t>(RecordClass::IN), now,
+                                                 snapshot);
+    }
+    if (result.err == IoErr::None) {
+        result.err = co_await cache->upsert_a("third.shared", static_cast<std::uint16_t>(RecordClass::IN), &third, 1,
+                                              now + std::chrono::seconds(60));
+    }
+    if (result.err != IoErr::None) {
+        done->set_value(result);
+        co_return;
+    }
+
+    result.err =
+            co_await cache->lookup_name("first.shared", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot);
+    result.first_found = snapshot.found();
+    if (result.err == IoErr::None) {
+        result.err = co_await cache->lookup_name("second.shared", static_cast<std::uint16_t>(RecordClass::IN), now,
+                                                 snapshot);
+        result.second_found = snapshot.found();
+    }
+    if (result.err == IoErr::None) {
+        result.err =
+                co_await cache->lookup_name("third.shared", static_cast<std::uint16_t>(RecordClass::IN), now, snapshot);
+        result.third_found = snapshot.found();
     }
     done->set_value(result);
     co_return;
@@ -94,4 +181,60 @@ TEST(SharedDnsCacheTest, SupportsCrossLoopReadAndWrite) {
 
     group.stop();
     group.join();
+}
+
+TEST(SharedDnsCacheTest, LookupReclaimsExpiredEntry) {
+    fiber::event::EventLoopGroup group(1);
+    SharedDnsCache cache;
+    ASSERT_TRUE(cache.init());
+
+    std::promise<ExpiredCleanupResult> done;
+    auto future = done.get_future();
+    group.start();
+    fiber::async::spawn(group.at(0), [&cache, &done]() { return exercise_expired_cleanup(&cache, &done); });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "shared cache expired lookup did not complete in time";
+        return;
+    }
+    ExpiredCleanupResult result = future.get();
+    group.stop();
+    group.join();
+
+    EXPECT_EQ(result.err, IoErr::None);
+    EXPECT_EQ(result.count_before, 1u);
+    EXPECT_FALSE(result.found);
+    EXPECT_EQ(result.count_after, 0u);
+}
+
+TEST(SharedDnsCacheTest, LookupRefreshesEvictionAge) {
+    fiber::event::EventLoopGroup group(1);
+    SharedDnsCache cache;
+    SharedDnsCache::Options options;
+    options.max_entries = 2;
+    options.max_bytes = 4096;
+    options.eviction_sample = 2;
+    ASSERT_TRUE(cache.init(options));
+
+    std::promise<EvictionResult> done;
+    auto future = done.get_future();
+    group.start();
+    fiber::async::spawn(group.at(0), [&cache, &done]() { return exercise_shared_eviction(&cache, &done); });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "shared cache eviction exercise did not complete in time";
+        return;
+    }
+    EvictionResult result = future.get();
+    group.stop();
+    group.join();
+
+    EXPECT_EQ(result.err, IoErr::None);
+    EXPECT_FALSE(result.first_found);
+    EXPECT_TRUE(result.second_found);
+    EXPECT_TRUE(result.third_found);
 }
