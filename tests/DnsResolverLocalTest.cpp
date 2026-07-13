@@ -42,6 +42,11 @@ struct ServerOutcome {
     std::size_t recv_count = 0;
 };
 
+struct CacheLookupOutcome {
+    IoErr err = IoErr::Unknown;
+    bool found = false;
+};
+
 fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     sockaddr_storage bound{};
     socklen_t len = sizeof(bound);
@@ -90,7 +95,8 @@ std::uint16_t read_be16(const std::uint8_t *data) {
     return static_cast<std::uint16_t>((static_cast<std::uint16_t>(data[0]) << 8U) | data[1]);
 }
 
-std::vector<std::uint8_t> make_a_response(std::uint16_t id, std::string_view qname, std::array<std::uint8_t, 4> addr) {
+std::vector<std::uint8_t> make_a_response(std::uint16_t id, std::string_view qname, std::array<std::uint8_t, 4> addr,
+                                          std::string_view answer_owner = {}, std::uint32_t ttl = 60) {
     std::vector<std::uint8_t> packet;
     push_be16(packet, id);
     push_be16(packet, 0x8180U);
@@ -104,22 +110,58 @@ std::vector<std::uint8_t> make_a_response(std::uint16_t id, std::string_view qna
     push_be16(packet, static_cast<std::uint16_t>(RecordType::A));
     push_be16(packet, static_cast<std::uint16_t>(RecordClass::IN));
 
-    push_be16(packet, 0xc00cU);
+    if (answer_owner.empty() || answer_owner == qname) {
+        push_be16(packet, 0xc00cU);
+    } else {
+        auto owner_wire = encode_dns_name(answer_owner);
+        packet.insert(packet.end(), owner_wire.begin(), owner_wire.end());
+    }
     push_be16(packet, static_cast<std::uint16_t>(RecordType::A));
     push_be16(packet, static_cast<std::uint16_t>(RecordClass::IN));
-    push_be32(packet, 60);
+    push_be32(packet, ttl);
     push_be16(packet, 4);
     packet.insert(packet.end(), addr.begin(), addr.end());
     return packet;
 }
 
-std::vector<std::uint8_t> make_cname_a_response(std::uint16_t id, std::string_view qname, std::string_view target,
-                                                std::array<std::uint8_t, 4> addr) {
+std::vector<std::uint8_t> make_conflicting_cname_response(std::uint16_t id, std::string_view qname,
+                                                          std::string_view first_target,
+                                                          std::string_view second_target) {
     std::vector<std::uint8_t> packet;
     push_be16(packet, id);
     push_be16(packet, 0x8180U);
     push_be16(packet, 1);
     push_be16(packet, 2);
+    push_be16(packet, 0);
+    push_be16(packet, 0);
+
+    auto qname_wire = encode_dns_name(qname);
+    packet.insert(packet.end(), qname_wire.begin(), qname_wire.end());
+    push_be16(packet, static_cast<std::uint16_t>(RecordType::A));
+    push_be16(packet, static_cast<std::uint16_t>(RecordClass::IN));
+
+    const auto append_cname = [&](std::string_view target) {
+        auto target_wire = encode_dns_name(target);
+        push_be16(packet, 0xc00cU);
+        push_be16(packet, static_cast<std::uint16_t>(RecordType::CNAME));
+        push_be16(packet, static_cast<std::uint16_t>(RecordClass::IN));
+        push_be32(packet, 60);
+        push_be16(packet, static_cast<std::uint16_t>(target_wire.size()));
+        packet.insert(packet.end(), target_wire.begin(), target_wire.end());
+    };
+    append_cname(first_target);
+    append_cname(second_target);
+    return packet;
+}
+
+std::vector<std::uint8_t> make_cname_a_response(std::uint16_t id, std::string_view qname, std::string_view target,
+                                                std::array<std::uint8_t, 4> addr, std::string_view unrelated_owner = {},
+                                                std::array<std::uint8_t, 4> unrelated_addr = {}) {
+    std::vector<std::uint8_t> packet;
+    push_be16(packet, id);
+    push_be16(packet, 0x8180U);
+    push_be16(packet, 1);
+    push_be16(packet, unrelated_owner.empty() ? 2 : 3);
     push_be16(packet, 0);
     push_be16(packet, 0);
 
@@ -142,12 +184,23 @@ std::vector<std::uint8_t> make_cname_a_response(std::uint16_t id, std::string_vi
     push_be32(packet, 60);
     push_be16(packet, 4);
     packet.insert(packet.end(), addr.begin(), addr.end());
+
+    if (!unrelated_owner.empty()) {
+        auto unrelated_wire = encode_dns_name(unrelated_owner);
+        packet.insert(packet.end(), unrelated_wire.begin(), unrelated_wire.end());
+        push_be16(packet, static_cast<std::uint16_t>(RecordType::A));
+        push_be16(packet, static_cast<std::uint16_t>(RecordClass::IN));
+        push_be32(packet, 60);
+        push_be16(packet, 4);
+        packet.insert(packet.end(), unrelated_addr.begin(), unrelated_addr.end());
+    }
     return packet;
 }
 
 DetachedTask run_single_response_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
                                         std::promise<ServerOutcome> *outcome_promise,
-                                        std::vector<std::uint8_t> response, std::chrono::milliseconds delay = 0ms) {
+                                        std::vector<std::uint8_t> response, std::chrono::milliseconds delay = 0ms,
+                                        std::chrono::milliseconds observe_after_response = 0ms) {
     ServerOutcome outcome;
     fiber::net::UdpSocket socket(*loop);
     auto bind_result = socket.bind(fiber::net::SocketAddress::any_v4(), {});
@@ -185,6 +238,15 @@ DetachedTask run_single_response_server(fiber::event::EventLoop *loop, std::prom
     auto send_result = co_await fiber::async::timeout_for(
             [&]() { return socket.send_to(response.data(), response.size(), recv_result->peer); }, 2s);
     outcome.err = send_result ? IoErr::None : send_result.error();
+    if (send_result && observe_after_response > 0ms) {
+        auto extra = co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); },
+                                                        observe_after_response);
+        if (extra) {
+            ++outcome.recv_count;
+        } else if (extra.error() != IoErr::TimedOut) {
+            outcome.err = extra.error();
+        }
+    }
     socket.close();
     outcome_promise->set_value(std::move(outcome));
 }
@@ -288,9 +350,50 @@ DetachedTask run_double_resolve(fiber::event::EventLoop *loop, fiber::dns::Share
     promise->set_value(std::move(outcome));
 }
 
+DetachedTask run_single_resolve(fiber::event::EventLoop *loop, fiber::dns::SharedDnsCache *cache, std::uint16_t port,
+                                std::string_view qname, DnsResolverLocal::Options resolver_options,
+                                std::promise<ResolveOutcome> *promise) {
+    ResolveOutcome outcome;
+    DnsResolverLocal resolver;
+    DnsClient::Options client_options{};
+    client_options.server = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    client_options.timeout = 200ms;
+    client_options.attempts = 1;
+    if (!resolver.init(*loop, *cache, client_options, resolver_options)) {
+        outcome.err = IoErr::Invalid;
+        promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    ResolveResult result;
+    if (!result.init()) {
+        outcome.err = IoErr::NoMem;
+        resolver.release();
+        promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    QuestionSpec question;
+    question.name = qname;
+    question.type = static_cast<std::uint16_t>(RecordType::A);
+    question.dns_class = static_cast<std::uint16_t>(RecordClass::IN);
+    auto resolve_result = co_await resolver.resolve(question, result);
+    outcome.err = resolve_result ? IoErr::None : resolve_result.error();
+    if (resolve_result) {
+        outcome.status = *resolve_result;
+        outcome.canonical = std::string(result.canonical_name());
+        for (std::uint16_t i = 0; i < result.record_count(); ++i) {
+            outcome.records.push_back(result.records()[i].to_string());
+        }
+    }
+    resolver.release();
+    promise->set_value(std::move(outcome));
+}
+
 DetachedTask run_singleflight_resolve(fiber::event::EventLoop *loop, fiber::dns::SharedDnsCache *cache,
                                       std::uint16_t port, std::promise<ResolveOutcome> *first_promise,
-                                      std::promise<ResolveOutcome> *second_promise) {
+                                      std::promise<ResolveOutcome> *second_promise,
+                                      std::string_view qname = "singleflight.example") {
     DnsResolverLocal resolver;
     DnsClient::Options client_options{};
     client_options.server = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
@@ -319,7 +422,7 @@ DetachedTask run_singleflight_resolve(fiber::event::EventLoop *loop, fiber::dns:
         }
 
         QuestionSpec question;
-        question.name = "singleflight.example";
+        question.name = qname;
         question.type = static_cast<std::uint16_t>(RecordType::A);
         question.dns_class = static_cast<std::uint16_t>(RecordClass::IN);
         auto resolve_result = co_await resolver.resolve(question, result);
@@ -340,6 +443,22 @@ DetachedTask run_singleflight_resolve(fiber::event::EventLoop *loop, fiber::dns:
     co_await pending.join();
     resolver.release();
     co_return;
+}
+
+DetachedTask run_cache_lookup(fiber::event::EventLoop *loop, fiber::dns::SharedDnsCache *cache, std::string_view qname,
+                              std::promise<CacheLookupOutcome> *promise) {
+    CacheLookupOutcome outcome;
+    fiber::dns::NameSnapshot snapshot;
+    if (!snapshot.init()) {
+        outcome.err = IoErr::NoMem;
+        promise->set_value(outcome);
+        co_return;
+    }
+
+    outcome.err =
+            co_await cache->lookup_name(qname, static_cast<std::uint16_t>(RecordClass::IN), loop->now(), snapshot);
+    outcome.found = outcome.err == IoErr::None && snapshot.found();
+    promise->set_value(outcome);
 }
 
 TEST(DnsResolverLocalTest, ResolvesFromCacheWithoutUpstreamQuery) {
@@ -398,6 +517,171 @@ TEST(DnsResolverLocalTest, ResolvesCnameAndUsesCacheOnSecondLookup) {
     ASSERT_EQ(outcome.canonical, "edge.example.net");
     ASSERT_EQ(outcome.records.size(), 1u);
     EXPECT_EQ(outcome.records[0], "7.7.7.7");
+}
+
+TEST(DnsResolverLocalTest, CachesOnlyReachableCnameAnswers) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::dns::SharedDnsCache cache;
+    ASSERT_TRUE(cache.init());
+
+    std::promise<std::uint16_t> port_promise;
+    std::promise<ServerOutcome> server_promise;
+    std::promise<ResolveOutcome> resolve_promise;
+
+    auto response = make_cname_a_response(0, "www.example.com", "edge.example.net", {7, 7, 7, 7}, "unrelated.example",
+                                          {6, 6, 6, 6});
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_single_response_server(&group.at(0), &port_promise, &server_promise, response);
+    });
+    const auto port = port_promise.get_future().get();
+    ASSERT_NE(port, 0);
+
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_double_resolve(&group.at(0), &cache, port, &resolve_promise); });
+
+    const auto outcome = resolve_promise.get_future().get();
+    const auto server = server_promise.get_future().get();
+    std::promise<CacheLookupOutcome> cache_promise;
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_cache_lookup(&group.at(0), &cache, "unrelated.example", &cache_promise); });
+    const auto cache_outcome = cache_promise.get_future().get();
+    group.stop();
+    group.join();
+    cache.release();
+
+    ASSERT_EQ(server.err, IoErr::None);
+    ASSERT_EQ(server.recv_count, 1u);
+    ASSERT_EQ(outcome.err, IoErr::None);
+    ASSERT_EQ(outcome.status, ResolveStatus::Success);
+    ASSERT_EQ(outcome.records.size(), 1u);
+    EXPECT_EQ(outcome.records[0], "7.7.7.7");
+    ASSERT_EQ(cache_outcome.err, IoErr::None);
+    EXPECT_FALSE(cache_outcome.found);
+}
+
+TEST(DnsResolverLocalTest, RejectsUnrelatedAnswerWithoutRetryingOrOrphaningWaiters) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::dns::SharedDnsCache cache;
+    ASSERT_TRUE(cache.init());
+
+    std::promise<std::uint16_t> port_promise;
+    std::promise<ServerOutcome> server_promise;
+    std::promise<ResolveOutcome> first_promise;
+    std::promise<ResolveOutcome> second_promise;
+
+    auto response = make_a_response(0, "poison.example", {6, 6, 6, 6}, "unrelated.example");
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_single_response_server(&group.at(0), &port_promise, &server_promise, response, 50ms);
+    });
+    const auto port = port_promise.get_future().get();
+    ASSERT_NE(port, 0);
+
+    auto first_future = first_promise.get_future();
+    auto second_future = second_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_singleflight_resolve(&group.at(0), &cache, port, &first_promise, &second_promise, "poison.example");
+    });
+
+    const bool first_ready = first_future.wait_for(2s) == std::future_status::ready;
+    const bool second_ready = second_future.wait_for(2s) == std::future_status::ready;
+    if (!first_ready || !second_ready) {
+        group.stop();
+        group.join();
+        cache.release();
+        FAIL() << "concurrent malformed-response lookups did not both complete";
+    }
+
+    const auto first = first_future.get();
+    const auto second = second_future.get();
+    const auto server = server_promise.get_future().get();
+    std::promise<CacheLookupOutcome> cache_promise;
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_cache_lookup(&group.at(0), &cache, "unrelated.example", &cache_promise); });
+    const auto cache_outcome = cache_promise.get_future().get();
+    group.stop();
+    group.join();
+    cache.release();
+
+    ASSERT_EQ(server.err, IoErr::None);
+    ASSERT_EQ(server.recv_count, 1u);
+    EXPECT_EQ(first.err, IoErr::Invalid);
+    EXPECT_EQ(second.err, IoErr::Invalid);
+    ASSERT_EQ(cache_outcome.err, IoErr::None);
+    EXPECT_FALSE(cache_outcome.found);
+}
+
+TEST(DnsResolverLocalTest, RejectsConflictingCnameTargetsBeforeCaching) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::dns::SharedDnsCache cache;
+    ASSERT_TRUE(cache.init());
+
+    std::promise<std::uint16_t> port_promise;
+    std::promise<ServerOutcome> server_promise;
+    std::promise<ResolveOutcome> resolve_promise;
+    auto response = make_conflicting_cname_response(0, "conflict.example", "first.example", "second.example");
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_single_response_server(&group.at(0), &port_promise, &server_promise, response);
+    });
+    const auto port = port_promise.get_future().get();
+    ASSERT_NE(port, 0);
+
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_single_resolve(&group.at(0), &cache, port, "conflict.example", {}, &resolve_promise);
+    });
+    const auto outcome = resolve_promise.get_future().get();
+    const auto server = server_promise.get_future().get();
+    std::promise<CacheLookupOutcome> cache_promise;
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_cache_lookup(&group.at(0), &cache, "conflict.example", &cache_promise); });
+    const auto cache_outcome = cache_promise.get_future().get();
+    group.stop();
+    group.join();
+    cache.release();
+
+    ASSERT_EQ(server.err, IoErr::None);
+    ASSERT_EQ(server.recv_count, 1u);
+    EXPECT_EQ(outcome.err, IoErr::Invalid);
+    ASSERT_EQ(cache_outcome.err, IoErr::None);
+    EXPECT_FALSE(cache_outcome.found);
+}
+
+TEST(DnsResolverLocalTest, DoesNotRequeryWhenExpectedCacheEntryIsMissing) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::dns::SharedDnsCache cache;
+    ASSERT_TRUE(cache.init());
+
+    std::promise<std::uint16_t> port_promise;
+    std::promise<ServerOutcome> server_promise;
+    std::promise<ResolveOutcome> resolve_promise;
+    auto response = make_a_response(0, "expired.example", {1, 2, 3, 4}, {}, 0);
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_single_response_server(&group.at(0), &port_promise, &server_promise, response, 0ms, 300ms);
+    });
+    const auto port = port_promise.get_future().get();
+    ASSERT_NE(port, 0);
+
+    DnsResolverLocal::Options resolver_options{};
+    resolver_options.min_positive_ttl = 0s;
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_single_resolve(&group.at(0), &cache, port, "expired.example", resolver_options, &resolve_promise);
+    });
+    const auto outcome = resolve_promise.get_future().get();
+    const auto server = server_promise.get_future().get();
+    group.stop();
+    group.join();
+    cache.release();
+
+    ASSERT_EQ(server.err, IoErr::None);
+    EXPECT_EQ(server.recv_count, 1u);
+    EXPECT_EQ(outcome.err, IoErr::Invalid);
 }
 
 TEST(DnsResolverLocalTest, ConcurrentLookupsShareSingleUpstreamQuery) {

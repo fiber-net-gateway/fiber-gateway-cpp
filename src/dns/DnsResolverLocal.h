@@ -103,11 +103,15 @@ private:
     static constexpr std::uint16_t kInvalidPending = 0xffffU;
     static constexpr std::size_t kMaxNormalizedNameLen = 255;
 
+    enum class PendingAction : std::uint8_t {
+        ReturnStatus,
+        RetryFromCache,
+    };
+
     struct PendingOutcome {
         common::IoErr err = common::IoErr::None;
-        bool retry_from_cache = false;
-        bool has_status = false;
-        ResolveStatus status = ResolveStatus::Success;
+        PendingAction action = PendingAction::ReturnStatus;
+        ResolveStatus status = ResolveStatus::ServerFailure;
     };
 
     struct PendingWaiter {
@@ -174,7 +178,7 @@ private:
     void release_pending(std::uint16_t index) noexcept;
     [[nodiscard]] bool enqueue_waiter(std::uint16_t index, PendingWaiter *waiter) noexcept;
     void cancel_waiter(std::uint16_t index, PendingWaiter *waiter) noexcept;
-    void complete_pending(std::uint16_t index, PendingOutcome outcome) noexcept;
+    void finish_pending(std::uint16_t index, PendingOutcome outcome) noexcept;
 
     [[nodiscard]] CacheLookup lookup_snapshot(const NameSnapshot &snapshot, std::uint16_t qtype) const noexcept;
     [[nodiscard]] common::IoResult<ResolveStatus>

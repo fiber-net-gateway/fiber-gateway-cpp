@@ -121,6 +121,108 @@ common::IoResult<std::uint32_t> find_negative_ttl(const MessageParser::MessageVi
     return std::unexpected(common::IoErr::NotFound);
 }
 
+enum class AnswerSetKind : std::uint8_t {
+    None,
+    Address,
+    Cname,
+};
+
+struct AnswerSetView {
+    AnswerSetKind kind = AnswerSetKind::None;
+    std::uint16_t address_count = 0;
+    std::uint32_t ttl = 0;
+    std::string_view cname_target{};
+};
+
+common::IoErr inspect_answer_set(const MessageParser::MessageView &message, std::string_view owner, std::uint16_t qtype,
+                                 std::uint16_t qclass, char *target_storage, std::size_t target_storage_cap,
+                                 AnswerSetView &out) noexcept {
+    out = {};
+    std::array<char, kMaxDnsNameLen + 1> owner_buf{};
+    std::array<char, kMaxDnsNameLen + 1> decoded_target_buf{};
+    std::array<char, kMaxDnsNameLen + 1> other_target_buf{};
+    bool saw_qtype = false;
+    bool saw_cname = false;
+    bool target_set = false;
+    std::uint32_t address_ttl = std::numeric_limits<std::uint32_t>::max();
+    std::uint32_t cname_ttl = std::numeric_limits<std::uint32_t>::max();
+
+    for (std::uint16_t i = 0; i < message.answer_count; ++i) {
+        const MessageParser::ResourceRecord &record = message.answers[i];
+        if (record.dns_class != qclass) {
+            continue;
+        }
+
+        std::string_view normalized_owner;
+        common::IoErr err = normalize_name(record.name, owner_buf.data(), owner_buf.size(), normalized_owner);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+        if (normalized_owner != owner) {
+            continue;
+        }
+
+        if (record.type == qtype) {
+            saw_qtype = true;
+            net::IpAddress address;
+            const bool parsed = qtype == static_cast<std::uint16_t>(RecordType::A) ? parse_ipv4(record, address)
+                                                                                   : parse_ipv6(record, address);
+            if (parsed) {
+                ++out.address_count;
+                address_ttl = std::min(address_ttl, record.ttl);
+            }
+            continue;
+        }
+
+        if (record.type != static_cast<std::uint16_t>(RecordType::CNAME)) {
+            continue;
+        }
+
+        saw_cname = true;
+        auto decoded = decode_name(message.packet_data, message.packet_len, record.rdata_offset,
+                                   decoded_target_buf.data(), decoded_target_buf.size());
+        if (!decoded || decoded->next_offset != record.rdata_offset + record.rdata_len) {
+            return common::IoErr::Invalid;
+        }
+
+        std::string_view normalized_target;
+        char *storage = target_set ? other_target_buf.data() : target_storage;
+        const std::size_t storage_cap = target_set ? other_target_buf.size() : target_storage_cap;
+        err = normalize_name(decoded->name, storage, storage_cap, normalized_target);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+        if (target_set && normalized_target != out.cname_target) {
+            return common::IoErr::Invalid;
+        }
+        if (!target_set) {
+            out.cname_target = normalized_target;
+            target_set = true;
+        }
+        cname_ttl = std::min(cname_ttl, record.ttl);
+    }
+
+    if (saw_qtype && saw_cname) {
+        return common::IoErr::Invalid;
+    }
+    if (saw_qtype) {
+        if (out.address_count == 0) {
+            return common::IoErr::Invalid;
+        }
+        out.kind = AnswerSetKind::Address;
+        out.ttl = address_ttl;
+        return common::IoErr::None;
+    }
+    if (saw_cname) {
+        if (!target_set || out.cname_target == owner) {
+            return common::IoErr::Invalid;
+        }
+        out.kind = AnswerSetKind::Cname;
+        out.ttl = cname_ttl;
+    }
+    return common::IoErr::None;
+}
+
 } // namespace
 
 bool ResolveResult::init(Options options) noexcept {
@@ -327,7 +429,7 @@ void DnsResolverLocal::cancel_all_pending(common::IoErr err) noexcept {
         }
         PendingOutcome outcome{};
         outcome.err = err;
-        complete_pending(static_cast<std::uint16_t>(i), outcome);
+        finish_pending(static_cast<std::uint16_t>(i), outcome);
     }
 }
 
@@ -415,13 +517,18 @@ void DnsResolverLocal::cancel_waiter(std::uint16_t index, PendingWaiter *waiter)
     }
 }
 
-void DnsResolverLocal::complete_pending(std::uint16_t index, PendingOutcome outcome) noexcept {
+void DnsResolverLocal::finish_pending(std::uint16_t index, PendingOutcome outcome) noexcept {
     if (!pending_ || index >= options_.max_pending) {
         return;
     }
     PendingEntry &entry = pending_[index];
+    FIBER_ASSERT(entry.active);
     PendingWaiter *waiter = entry.waiters;
     entry.waiters = nullptr;
+
+    // A resumed waiter may immediately reuse this slot, so do not access entry after releasing it.
+    release_pending(index);
+
     while (waiter) {
         PendingWaiter *next = waiter->next;
         waiter->next = nullptr;
@@ -520,7 +627,9 @@ async::Task<common::IoResult<ResolveStatus>> DnsResolverLocal::resolve(const Que
         co_return std::unexpected(err);
     }
 
-    for (std::uint16_t hop = 0;; ++hop) {
+    std::uint16_t cname_hops = 0;
+    bool expect_cache_hit = false;
+    for (;;) {
         snapshot.clear();
         auto cache_err = co_await cache_->lookup_name(current_name, question.dns_class, loop_->now(), snapshot);
         if (cache_err != common::IoErr::None) {
@@ -534,14 +643,20 @@ async::Task<common::IoResult<ResolveStatus>> DnsResolverLocal::resolve(const Que
         }
 
         if (lookup.kind == CacheLookupKind::Cname) {
-            if (hop + 1 >= options_.max_cname_hops) {
+            if (cname_hops >= options_.max_cname_hops) {
                 co_return std::unexpected(common::IoErr::Invalid);
             }
+            ++cname_hops;
             err = normalize_name(lookup.cname_target, next_name_buf.data(), next_name_buf.size(), current_name);
             if (err != common::IoErr::None) {
                 co_return std::unexpected(err);
             }
+            expect_cache_hit = false;
             continue;
+        }
+
+        if (expect_cache_hit) {
+            co_return std::unexpected(common::IoErr::Invalid);
         }
 
         const std::uint16_t existing_pending = find_pending(current_name, question.type, question.dns_class);
@@ -550,13 +665,14 @@ async::Task<common::IoResult<ResolveStatus>> DnsResolverLocal::resolve(const Que
             if (outcome.err != common::IoErr::None) {
                 co_return std::unexpected(outcome.err);
             }
-            if (outcome.has_status) {
+            if (outcome.action == PendingAction::ReturnStatus) {
                 err = out.assign_canonical(current_name);
                 if (err != common::IoErr::None) {
                     co_return std::unexpected(err);
                 }
                 co_return outcome.status;
             }
+            expect_cache_hit = true;
             continue;
         }
 
@@ -573,19 +689,19 @@ async::Task<common::IoResult<ResolveStatus>> DnsResolverLocal::resolve(const Que
         } else {
             outcome = *upstream;
         }
-        complete_pending(pending_index, outcome);
-        release_pending(pending_index);
+        finish_pending(pending_index, outcome);
 
         if (outcome.err != common::IoErr::None) {
             co_return std::unexpected(outcome.err);
         }
-        if (outcome.has_status) {
+        if (outcome.action == PendingAction::ReturnStatus) {
             err = out.assign_canonical(current_name);
             if (err != common::IoErr::None) {
                 co_return std::unexpected(err);
             }
             co_return outcome.status;
         }
+        expect_cache_hit = true;
     }
 }
 
@@ -633,7 +749,6 @@ DnsResolverLocal::handle_response(std::string_view qname, std::uint16_t qtype, s
     PendingOutcome outcome{};
     const RCode rcode = message.header.rcode();
     if (rcode != RCode::NoError && rcode != RCode::NxDomain) {
-        outcome.has_status = true;
         outcome.status = map_error_rcode(rcode);
         co_return outcome;
     }
@@ -647,153 +762,51 @@ DnsResolverLocal::handle_response(std::string_view qname, std::uint16_t qtype, s
             if (err != common::IoErr::None) {
                 co_return std::unexpected(err);
             }
-            outcome.retry_from_cache = true;
+            outcome.action = PendingAction::RetryFromCache;
             co_return outcome;
         }
-        outcome.has_status = true;
         outcome.status = ResolveStatus::NxDomain;
         co_return outcome;
     }
 
-    bool cache_updated = false;
-    auto temp_records = std::make_unique<net::IpAddress[]>(message.answer_count == 0 ? 1 : message.answer_count);
-    if (!temp_records) {
-        co_return std::unexpected(common::IoErr::NoMem);
-    }
+    std::array<char, kMaxDnsNameLen + 1> first_chain_name_buf{};
+    std::array<char, kMaxDnsNameLen + 1> second_chain_name_buf{};
+    std::string_view chain_owner = qname;
+    bool use_first_chain_buf = true;
+    bool has_relevant_answer = false;
+    bool has_terminal_address = false;
+    std::uint16_t response_cname_hops = 0;
 
-    std::array<char, kMaxDnsNameLen + 1> owner_buf{};
-    std::array<char, kMaxDnsNameLen + 1> other_owner_buf{};
-    std::array<char, kMaxDnsNameLen + 1> target_buf{};
-    bool has_current_type_answer = false;
-    bool has_current_cname = false;
-
-    for (std::uint16_t i = 0; i < message.answer_count; ++i) {
-        const auto &record = message.answers[i];
-        if (record.dns_class != qclass) {
-            continue;
-        }
-
-        std::string_view owner_name;
-        err = normalize_name(record.name, owner_buf.data(), owner_buf.size(), owner_name);
+    for (;;) {
+        char *target_storage = use_first_chain_buf ? first_chain_name_buf.data() : second_chain_name_buf.data();
+        const std::size_t target_storage_cap =
+                use_first_chain_buf ? first_chain_name_buf.size() : second_chain_name_buf.size();
+        AnswerSetView answer_set;
+        err = inspect_answer_set(message, chain_owner, qtype, qclass, target_storage, target_storage_cap, answer_set);
         if (err != common::IoErr::None) {
             co_return std::unexpected(err);
         }
-
-        if (owner_name == qname) {
-            if (record.type == qtype) {
-                has_current_type_answer = true;
-            } else if (record.type == static_cast<std::uint16_t>(RecordType::CNAME)) {
-                has_current_cname = true;
-            }
+        if (answer_set.kind == AnswerSetKind::Address) {
+            has_relevant_answer = true;
+            has_terminal_address = true;
+            break;
         }
-
-        if (record.type != static_cast<std::uint16_t>(RecordType::A) &&
-            record.type != static_cast<std::uint16_t>(RecordType::AAAA) &&
-            record.type != static_cast<std::uint16_t>(RecordType::CNAME)) {
-            continue;
+        if (answer_set.kind != AnswerSetKind::Cname) {
+            break;
         }
-
-        bool seen_before = false;
-        for (std::uint16_t j = 0; j < i; ++j) {
-            const auto &prev = message.answers[j];
-            if (prev.type != record.type || prev.dns_class != qclass) {
-                continue;
-            }
-            std::string_view prev_owner_name;
-            err = normalize_name(prev.name, other_owner_buf.data(), other_owner_buf.size(), prev_owner_name);
-            if (err != common::IoErr::None) {
-                co_return std::unexpected(err);
-            }
-            if (prev_owner_name == owner_name) {
-                seen_before = true;
-                break;
-            }
+        if (response_cname_hops >= options_.max_cname_hops) {
+            co_return std::unexpected(common::IoErr::Invalid);
         }
-        if (seen_before) {
-            continue;
-        }
-
-        if (record.type == static_cast<std::uint16_t>(RecordType::CNAME)) {
-            auto cname = decode_name(message.packet_data, message.packet_len, record.rdata_offset, target_buf.data(),
-                                     target_buf.size());
-            if (!cname) {
-                co_return std::unexpected(cname.error());
-            }
-
-            std::uint32_t ttl = record.ttl;
-            for (std::uint16_t j = i + 1; j < message.answer_count; ++j) {
-                const auto &other = message.answers[j];
-                if (other.type != record.type || other.dns_class != qclass) {
-                    continue;
-                }
-                std::string_view other_owner_name;
-                err = normalize_name(other.name, other_owner_buf.data(), other_owner_buf.size(), other_owner_name);
-                if (err != common::IoErr::None) {
-                    co_return std::unexpected(err);
-                }
-                if (other_owner_name == owner_name) {
-                    ttl = std::min(ttl, other.ttl);
-                }
-            }
-
-            err = co_await cache_->upsert_cname(
-                    owner_name, qclass, cname->name,
-                    ttl_deadline(now, ttl, options_.min_positive_ttl, options_.max_positive_ttl));
-            if (err != common::IoErr::None) {
-                co_return std::unexpected(err);
-            }
-            cache_updated = true;
-            continue;
-        }
-
-        std::uint16_t count = 0;
-        std::uint32_t ttl = std::numeric_limits<std::uint32_t>::max();
-        for (std::uint16_t j = i; j < message.answer_count; ++j) {
-            const auto &other = message.answers[j];
-            if (other.type != record.type || other.dns_class != qclass) {
-                continue;
-            }
-            std::string_view other_owner_name;
-            err = normalize_name(other.name, other_owner_buf.data(), other_owner_buf.size(), other_owner_name);
-            if (err != common::IoErr::None) {
-                co_return std::unexpected(err);
-            }
-            if (other_owner_name != owner_name) {
-                continue;
-            }
-
-            net::IpAddress address;
-            bool parsed_ok = record.type == static_cast<std::uint16_t>(RecordType::A) ? parse_ipv4(other, address)
-                                                                                      : parse_ipv6(other, address);
-            if (!parsed_ok) {
-                continue;
-            }
-            temp_records[count++] = address;
-            ttl = std::min(ttl, other.ttl);
-        }
-
-        if (count == 0) {
-            continue;
-        }
-
-        const auto expire_at = ttl_deadline(now, ttl, options_.min_positive_ttl, options_.max_positive_ttl);
-        if (record.type == static_cast<std::uint16_t>(RecordType::A)) {
-            err = co_await cache_->upsert_a(owner_name, qclass, temp_records.get(), count, expire_at);
-        } else {
-            err = co_await cache_->upsert_aaaa(owner_name, qclass, temp_records.get(), count, expire_at);
-        }
-        if (err != common::IoErr::None) {
-            co_return std::unexpected(err);
-        }
-        cache_updated = true;
+        ++response_cname_hops;
+        has_relevant_answer = true;
+        chain_owner = answer_set.cname_target;
+        use_first_chain_buf = !use_first_chain_buf;
     }
 
-    if (cache_updated) {
-        outcome.retry_from_cache = true;
-        co_return outcome;
-    }
-
-    if (!has_current_type_answer && !has_current_cname) {
+    if (!has_relevant_answer) {
+        if (message.answer_count != 0) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
         auto neg_ttl = find_negative_ttl(message, qclass);
         if (neg_ttl) {
             err = co_await cache_->upsert_negative_nodata(
@@ -802,13 +815,93 @@ DnsResolverLocal::handle_response(std::string_view qname, std::uint16_t qtype, s
             if (err != common::IoErr::None) {
                 co_return std::unexpected(err);
             }
-            outcome.retry_from_cache = true;
+            outcome.action = PendingAction::RetryFromCache;
             co_return outcome;
+        }
+        outcome.status = ResolveStatus::NoData;
+        co_return outcome;
+    }
+
+    std::unique_ptr<net::IpAddress[]> temp_records;
+    if (has_terminal_address) {
+        temp_records = std::make_unique<net::IpAddress[]>(message.answer_count);
+        if (!temp_records) {
+            co_return std::unexpected(common::IoErr::NoMem);
         }
     }
 
-    outcome.has_status = true;
-    outcome.status = ResolveStatus::NoData;
+    chain_owner = qname;
+    use_first_chain_buf = true;
+    std::uint16_t applied_cname_hops = 0;
+    for (;;) {
+        char *target_storage = use_first_chain_buf ? first_chain_name_buf.data() : second_chain_name_buf.data();
+        const std::size_t target_storage_cap =
+                use_first_chain_buf ? first_chain_name_buf.size() : second_chain_name_buf.size();
+        AnswerSetView answer_set;
+        err = inspect_answer_set(message, chain_owner, qtype, qclass, target_storage, target_storage_cap, answer_set);
+        if (err != common::IoErr::None) {
+            co_return std::unexpected(err);
+        }
+
+        if (answer_set.kind == AnswerSetKind::Cname) {
+            if (applied_cname_hops >= response_cname_hops) {
+                co_return std::unexpected(common::IoErr::Invalid);
+            }
+            err = co_await cache_->upsert_cname(
+                    chain_owner, qclass, answer_set.cname_target,
+                    ttl_deadline(now, answer_set.ttl, options_.min_positive_ttl, options_.max_positive_ttl));
+            if (err != common::IoErr::None) {
+                co_return std::unexpected(err);
+            }
+            ++applied_cname_hops;
+            chain_owner = answer_set.cname_target;
+            use_first_chain_buf = !use_first_chain_buf;
+            continue;
+        }
+
+        if (answer_set.kind == AnswerSetKind::Address) {
+            std::array<char, kMaxDnsNameLen + 1> owner_buf{};
+            std::uint16_t count = 0;
+            for (std::uint16_t i = 0; i < message.answer_count; ++i) {
+                const MessageParser::ResourceRecord &record = message.answers[i];
+                if (record.type != qtype || record.dns_class != qclass) {
+                    continue;
+                }
+                std::string_view normalized_owner;
+                err = normalize_name(record.name, owner_buf.data(), owner_buf.size(), normalized_owner);
+                if (err != common::IoErr::None) {
+                    co_return std::unexpected(err);
+                }
+                if (normalized_owner != chain_owner) {
+                    continue;
+                }
+
+                net::IpAddress address;
+                const bool parsed = qtype == static_cast<std::uint16_t>(RecordType::A) ? parse_ipv4(record, address)
+                                                                                       : parse_ipv6(record, address);
+                if (parsed) {
+                    temp_records[count++] = address;
+                }
+            }
+            if (count != answer_set.address_count) {
+                co_return std::unexpected(common::IoErr::Invalid);
+            }
+
+            const auto expire_at =
+                    ttl_deadline(now, answer_set.ttl, options_.min_positive_ttl, options_.max_positive_ttl);
+            if (qtype == static_cast<std::uint16_t>(RecordType::A)) {
+                err = co_await cache_->upsert_a(chain_owner, qclass, temp_records.get(), count, expire_at);
+            } else {
+                err = co_await cache_->upsert_aaaa(chain_owner, qclass, temp_records.get(), count, expire_at);
+            }
+            if (err != common::IoErr::None) {
+                co_return std::unexpected(err);
+            }
+        }
+        break;
+    }
+
+    outcome.action = PendingAction::RetryFromCache;
     co_return outcome;
 }
 
