@@ -74,8 +74,6 @@ wire codec（`DnsName`/`DnsMessage`）边界检查、指针压缩循环检测（
 - 随机缓冲位于普通非协程 `prepare_request` 栈上，slot 未增加字段或域名副本；生产热路径未新增堆分配。
 - 回归测试覆盖 ID 碰撞/环回/完整空间探查、0x20 原地变换、错误 ID/qname/qtype/qclass/大小写、关闭严格 0x20、TCP 错误 ID/question，以及原有 fallback/cancel 行为（`DnsQuerySecurityTest.cpp`，`DnsClientTest.cpp:737-872`）。
 
----
-
 ## 🟠 MEDIUM
 
 ### 4. ✅ 已修复：`SharedDnsCache::lookup_name` 的 LRU 更新丢失及过期条目不清理
