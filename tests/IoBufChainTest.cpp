@@ -206,6 +206,32 @@ TEST(IoBufChainTest, ChainCommitBuildsWritableIovecs) {
     EXPECT_EQ(std::string_view(static_cast<const char *>(iov[1].iov_base), iov[1].iov_len), "12");
 }
 
+TEST(IoBufChainTest, CommitBackOnlyCommitsPhysicalTail) {
+    IoBufNodePool pool;
+    IoBuf first = IoBuf::allocate(4);
+    IoBuf last = IoBuf::allocate(4);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(last);
+
+    IoBufChain chain(pool);
+    ASSERT_TRUE(chain.append(std::move(first)));
+    ASSERT_TRUE(chain.append(std::move(last)));
+    ASSERT_NE(chain.front(), nullptr);
+    ASSERT_NE(chain.back(), nullptr);
+    ASSERT_NE(chain.front(), chain.back());
+
+    std::memcpy(chain.back()->writable_data(), "xy", 2);
+    chain.commit_back(2);
+
+    EXPECT_EQ(chain.front()->readable(), 0u);
+    EXPECT_EQ(chain.front()->writable(), 4u);
+    EXPECT_EQ(chain.back()->readable(), 2u);
+    EXPECT_EQ(chain.back()->writable(), 2u);
+    EXPECT_EQ(chain.readable_bytes(), 2u);
+    EXPECT_EQ(chain.writable_bytes(), 6u);
+    EXPECT_EQ(readable_string(chain), "xy");
+}
+
 TEST(IoBufChainTest, TakePrefixMovesWholeNodesAndAppendsToExistingDestination) {
     IoBufNodePool pool;
     IoBuf a = IoBuf::allocate(4);

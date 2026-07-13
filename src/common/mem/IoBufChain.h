@@ -73,6 +73,7 @@ public:
     void drop_empty_front() noexcept;
     void consume_and_compact(std::size_t bytes) noexcept;
     void commit(std::size_t bytes) noexcept;
+    void commit_back(std::size_t bytes) noexcept;
     void mark_complete() noexcept;
     void clear_complete() noexcept;
     [[nodiscard]] IoBufNode *pop_front_node() noexcept;
@@ -82,6 +83,8 @@ public:
 
     [[nodiscard]] IoBuf *front() noexcept;
     [[nodiscard]] const IoBuf *front() const noexcept;
+    [[nodiscard]] IoBuf *back() noexcept;
+    [[nodiscard]] const IoBuf *back() const noexcept;
     [[nodiscard]] IoBuf *first_readable() noexcept;
     [[nodiscard]] const IoBuf *first_readable() const noexcept;
     [[nodiscard]] IoBuf *first_writable() noexcept;

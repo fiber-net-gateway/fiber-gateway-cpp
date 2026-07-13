@@ -94,7 +94,7 @@ common::IoErr Http2HpackEncoderIoBufWriter::acquire_output(void *ctx, std::size_
     if (!self->block_.append(std::move(buf))) {
         return common::IoErr::NoMem;
     }
-    self->tail_ = self->block_.first_writable();
+    self->tail_ = self->block_.back();
     if (self->tail_ == nullptr) {
         return common::IoErr::NoMem;
     }
@@ -106,8 +106,9 @@ common::IoErr Http2HpackEncoderIoBufWriter::acquire_output(void *ctx, std::size_
 void Http2HpackEncoderIoBufWriter::commit_output(void *ctx, std::size_t written) noexcept {
     auto *self = static_cast<Http2HpackEncoderIoBufWriter *>(ctx);
     FIBER_ASSERT(self != nullptr);
-    self->block_.commit(written);
-    self->tail_ = self->block_.first_writable();
+    FIBER_ASSERT(self->tail_ != nullptr);
+    FIBER_ASSERT(written <= self->tail_->writable());
+    self->block_.commit_back(written);
 }
 
 } // namespace fiber::http
