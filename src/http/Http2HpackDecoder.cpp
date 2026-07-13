@@ -244,7 +244,7 @@ common::IoErr Http2HpackDecoder::handle_indexed_name(std::uint32_t index) noexce
         return common::IoErr::Invalid;
     }
     have_literal_name_ = true;
-    common::IoErr err = ops_->on_indexed_name(ctx_, entry.name, entry.name_hash);
+    common::IoErr err = ops_->on_indexed_name(ctx_, entry);
     if (err != common::IoErr::None) {
         return err;
     }
@@ -324,6 +324,7 @@ bool Http2HpackDecoder::resolve_index(std::uint32_t index, TableEntryView &entry
         entry.name = static_entry.name;
         entry.value = static_entry.value;
         entry.name_hash = static_entry.name_hash;
+        entry.storage = Http2HpackEntryStorage::Static;
         return true;
     }
 
@@ -334,6 +335,7 @@ bool Http2HpackDecoder::resolve_index(std::uint32_t index, TableEntryView &entry
     entry.name = dynamic_entry.name;
     entry.value = dynamic_entry.value;
     entry.name_hash = dynamic_entry.name_hash;
+    entry.storage = Http2HpackEntryStorage::Dynamic;
     return true;
 }
 

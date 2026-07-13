@@ -66,7 +66,7 @@ private:
     static common::IoErr on_header_block_complete(void *owner, bool end_stream) noexcept;
     static common::IoErr on_body(void *owner, mem::IoBuf &&buf, bool end_stream) noexcept;
     static common::IoErr on_indexed_field(void *owner, Http2HpackDecoder::TableEntryView entry) noexcept;
-    static common::IoErr on_indexed_name(void *owner, std::string_view name, std::uint64_t name_hash) noexcept;
+    static common::IoErr on_indexed_name(void *owner, Http2HpackDecoder::TableEntryView entry) noexcept;
     static common::IoErr on_name_raw(void *owner, const std::uint8_t *data, std::size_t len) noexcept;
     static common::IoErr on_name_huffman(void *owner, const std::uint8_t *data, std::size_t len) noexcept;
     static common::IoErr on_value_raw(void *owner, const std::uint8_t *data, std::size_t len,
@@ -94,9 +94,10 @@ private:
     void on_stream_aborted(common::IoErr reason) noexcept;
     [[nodiscard]] common::IoErr handle_status(std::string_view value) noexcept;
     [[nodiscard]] common::IoErr commit_field(std::string_view name, std::uint64_t name_hash, std::string_view value,
-                                             bool name_owned = false) noexcept;
+                                             bool name_stable, bool value_stable) noexcept;
     [[nodiscard]] common::IoErr commit_regular_header(std::string_view name, std::uint64_t name_hash,
-                                                      std::string_view value, bool name_owned = false) noexcept;
+                                                      std::string_view value, bool name_stable,
+                                                      bool value_stable) noexcept;
     [[nodiscard]] common::IoErr materialize_name_raw(const std::uint8_t *data, std::size_t len, std::string_view &out,
                                                      std::uint64_t &name_hash) noexcept;
     [[nodiscard]] common::IoErr materialize_name_huffman(const std::uint8_t *data, std::size_t len,
@@ -123,7 +124,7 @@ private:
     detail::Http2HeaderBlockQueue::HeaderNode *current_header_node_ = nullptr;
     std::string_view pending_name_{};
     std::uint64_t pending_name_hash_ = 0;
-    bool pending_name_owned_ = false;
+    bool pending_name_stable_ = false;
 
     template<class>
     friend class detail::SendAwaiterBase;

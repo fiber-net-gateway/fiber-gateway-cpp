@@ -31,6 +31,7 @@
 #include "http/Http2HpackDecoder.h"
 #include "http/Http2HpackEncodeCatalog.h"
 #include "http/Http2HpackEncoder.h"
+#include "http/Http2HpackStaticTable.h"
 #include "http/Http2Stream.h"
 #include "http/Huffman.h"
 #include "http/ServerRequestFactory.h"
@@ -659,10 +660,11 @@ struct DecodedHeaderBlock {
         return fiber::common::IoErr::None;
     }
 
-    static fiber::common::IoErr on_indexed_name(void *ctx, std::string_view name, std::uint64_t name_hash) noexcept {
+    static fiber::common::IoErr on_indexed_name(void *ctx,
+                                                fiber::http::Http2HpackDecoder::TableEntryView entry) noexcept {
         auto *self = static_cast<DecodedHeaderBlock *>(ctx);
-        self->pending_name.assign(name.data(), name.size());
-        self->pending_name_hash = name_hash;
+        self->pending_name.assign(entry.name.data(), entry.name.size());
+        self->pending_name_hash = entry.name_hash;
         return fiber::common::IoErr::None;
     }
 
@@ -2704,6 +2706,124 @@ TEST(Http2ConnectionTest, ServerParsesPathQueryAndExtensionFromPseudoPath) {
     EXPECT_EQ(snapshot.path, "/assets/app.js");
     EXPECT_EQ(snapshot.query, "v=42");
     EXPECT_EQ(snapshot.exten, "js");
+}
+
+TEST(Http2ConnectionTest, ServerBorrowsHpackStaticStorage) {
+    struct StorageSnapshot {
+        bool method = false;
+        bool header_name = false;
+        bool header_value = false;
+    };
+
+    std::string request = std::string(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0x0, 0, {});
+    request += build_headers_frame_bytes(1,
+                                         {
+                                                 {":method", "GET"},
+                                                 {":scheme", "https"},
+                                                 {":path", "/"},
+                                                 {":authority", "example.com"},
+                                                 {"accept-encoding", "gzip, deflate"},
+                                         },
+                                         true);
+
+    auto snapshot_promise = std::make_shared<std::promise<StorageSnapshot>>();
+    auto snapshot_future = snapshot_promise->get_future();
+    fiber::http::HttpHandler handler =
+            [snapshot_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        fiber::http::Http2HpackStaticTable::TableEntryView method_entry;
+        fiber::http::Http2HpackStaticTable::TableEntryView encoding_entry;
+        const bool have_method = fiber::http::Http2HpackStaticTable::get_by_index(2, method_entry);
+        const bool have_encoding = fiber::http::Http2HpackStaticTable::get_by_index(16, encoding_entry);
+
+        StorageSnapshot snapshot;
+        snapshot.method = have_method && exchange.method_view().data() == method_entry.value.data();
+        for (const auto &field: exchange.request_headers()) {
+            if (field.name_view() == "accept-encoding") {
+                snapshot.header_name = have_encoding && field.name == encoding_entry.name.data();
+                snapshot.header_value = have_encoding && field.value == encoding_entry.value.data();
+                break;
+            }
+        }
+        snapshot_promise->set_value(snapshot);
+        co_return;
+    };
+
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, std::move(handler));
+
+    ASSERT_TRUE(outcome.result.has_value());
+    StorageSnapshot snapshot = snapshot_future.get();
+    EXPECT_TRUE(snapshot.method);
+    EXPECT_TRUE(snapshot.header_name);
+    EXPECT_TRUE(snapshot.header_value);
+}
+
+TEST(Http2ConnectionTest, ServerCopiesHpackDynamicStorageBeforeTableMutation) {
+    auto append_integer = [](std::string &out, std::uint32_t value, std::uint8_t prefix_mask, std::uint8_t first_bits) {
+        if (value < prefix_mask) {
+            out.push_back(static_cast<char>(first_bits | value));
+            return;
+        }
+        out.push_back(static_cast<char>(first_bits | prefix_mask));
+        value -= prefix_mask;
+        while (value >= 128U) {
+            out.push_back(static_cast<char>((value & 0x7fU) | 0x80U));
+            value >>= 7U;
+        }
+        out.push_back(static_cast<char>(value));
+    };
+    auto append_string = [&append_integer](std::string &out, std::string_view value) {
+        append_integer(out, static_cast<std::uint32_t>(value.size()), 0x7fU, 0);
+        out.append(value);
+    };
+    auto append_literal = [&append_integer, &append_string](std::string &out, std::string_view name,
+                                                            std::string_view value) {
+        append_integer(out, 0, 0x3fU, 0x40U);
+        append_string(out, name);
+        append_string(out, value);
+    };
+    auto append_authority = [&append_integer, &append_string](std::string &out) {
+        append_integer(out, 1, 0x0fU, 0);
+        append_string(out, "example.com");
+    };
+
+    std::string first_block;
+    first_block.push_back(static_cast<char>(0x82U)); // :method GET
+    first_block.push_back(static_cast<char>(0x87U)); // :scheme https
+    first_block.push_back(static_cast<char>(0x84U)); // :path /
+    append_authority(first_block);
+    append_literal(first_block, "x-test", "first");
+
+    std::string second_block;
+    second_block.push_back(static_cast<char>(0x82U));
+    second_block.push_back(static_cast<char>(0x87U));
+    append_integer(second_block, 4, 0x0fU, 0); // literal :path
+    append_string(second_block, "/check");
+    append_authority(second_block);
+    append_integer(second_block, 62, 0x7fU, 0x80U); // dynamic x-test: first
+    append_literal(second_block, "x-large", std::string(4060, 'a')); // clears the dynamic table
+    append_literal(second_block, "x-new", "overwritten"); // overwrites the old table bytes
+
+    std::string request = std::string(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0x0, 0, {});
+    request += make_frame(static_cast<std::uint32_t>(first_block.size()), 0x1, 0x5, 1, first_block);
+    request += make_frame(static_cast<std::uint32_t>(second_block.size()), 0x1, 0x5, 3, second_block);
+
+    auto value_promise = std::make_shared<std::promise<std::string>>();
+    auto value_future = value_promise->get_future();
+    fiber::http::HttpHandler handler =
+            [value_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        if (exchange.uri().path == "/check") {
+            value_promise->set_value(std::string(exchange.request_headers().get("x-test")));
+        }
+        co_return;
+    };
+
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, std::move(handler));
+
+    ASSERT_TRUE(outcome.result.has_value());
+    ASSERT_EQ(value_future.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_EQ(value_future.get(), "first");
 }
 
 TEST(Http2ConnectionTest, ServerRejectsPseudoPathWithoutLeadingSlash) {

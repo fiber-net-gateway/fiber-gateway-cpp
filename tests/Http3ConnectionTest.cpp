@@ -20,6 +20,7 @@
 #include "http/Http3Connection.h"
 #include "http/Http3Protocol.h"
 #include "http/Http3QpackEncoderIoBufWriter.h"
+#include "http/Http3QpackStaticTable.h"
 #include "http/HttpHeaderHash.h"
 #include "http/HttpHeaders.h"
 #include "http/ServerHttp3Request.h"
@@ -53,6 +54,11 @@ struct CapturedHttp3Request {
     std::string range;
     std::string if_range;
     std::string expect;
+    std::string accept_encoding;
+    std::string accept_language;
+    bool method_uses_static_storage = false;
+    bool accept_encoding_uses_static_storage = false;
+    bool accept_language_name_uses_static_storage = false;
     fiber::http::HttpBodySpec body_spec{fiber::http::HttpBodySpec::None()};
 };
 
@@ -103,7 +109,29 @@ std::string field_value(const fiber::http::HttpHeaders::HeaderField *field) {
     return std::string(field->value_view());
 }
 
+const fiber::http::HttpHeaders::HeaderField *find_field(const fiber::http::HttpExchange &exchange,
+                                                        std::string_view name) {
+    for (const auto &field: exchange.request_headers()) {
+        if (field.name_view() == name) {
+            return &field;
+        }
+    }
+    return nullptr;
+}
+
+bool field_uses_static_storage(const fiber::http::HttpExchange &exchange, std::string_view name,
+                               std::uint32_t static_index, bool check_value) {
+    fiber::http::Http3QpackStaticTable::TableEntryView entry;
+    if (!fiber::http::Http3QpackStaticTable::get_by_index(static_index, entry)) {
+        return false;
+    }
+    const auto *field = find_field(exchange, name);
+    return field != nullptr && field->name == entry.name.data() && (!check_value || field->value == entry.value.data());
+}
+
 CapturedHttp3Request capture_request(const fiber::http::HttpExchange &exchange) {
+    fiber::http::Http3QpackStaticTable::TableEntryView method_entry;
+    const bool have_method_entry = fiber::http::Http3QpackStaticTable::get_by_index(17, method_entry);
     return CapturedHttp3Request{
             .method = exchange.method(),
             .version = exchange.version(),
@@ -117,6 +145,13 @@ CapturedHttp3Request capture_request(const fiber::http::HttpExchange &exchange) 
             .range = field_value(exchange.range_header()),
             .if_range = field_value(exchange.if_range_header()),
             .expect = field_value(exchange.expect_header()),
+            .accept_encoding = std::string(exchange.request_headers().get("accept-encoding")),
+            .accept_language = std::string(exchange.request_headers().get("accept-language")),
+            .method_uses_static_storage =
+                    have_method_entry && exchange.method_view().data() == method_entry.value.data(),
+            .accept_encoding_uses_static_storage = field_uses_static_storage(exchange, "accept-encoding", 31, true),
+            .accept_language_name_uses_static_storage =
+                    field_uses_static_storage(exchange, "accept-language", 72, false),
             .body_spec = exchange.request_body_spec(),
     };
 }
@@ -679,6 +714,26 @@ TEST(Http3ConnectionTest, ServerRequestParsesPseudoHeadersUriAndCachesHeaderRefs
     EXPECT_EQ(result.snapshot.range, "bytes=0-3");
     EXPECT_EQ(result.snapshot.if_range, "\"abc\"");
     EXPECT_EQ(result.snapshot.expect, "100-continue");
+}
+
+TEST(Http3ConnectionTest, ServerRequestBorrowsQpackStaticStorage) {
+    HeaderList headers{
+            {":method", "GET"},
+            {":scheme", "https"},
+            {":authority", "example.com"},
+            {":path", "/"},
+            {"accept-encoding", "gzip, deflate, br"},
+            {"accept-language", "zh-CN"},
+    };
+
+    Http3RequestRunResult result = run_http3_request_headers(headers, true);
+
+    ASSERT_EQ(result.handler_status, std::future_status::ready);
+    EXPECT_EQ(result.snapshot.accept_encoding, "gzip, deflate, br");
+    EXPECT_EQ(result.snapshot.accept_language, "zh-CN");
+    EXPECT_TRUE(result.snapshot.method_uses_static_storage);
+    EXPECT_TRUE(result.snapshot.accept_encoding_uses_static_storage);
+    EXPECT_TRUE(result.snapshot.accept_language_name_uses_static_storage);
 }
 
 TEST(Http3ConnectionTest, ServerRequestAcceptsHostHeaderMatchingAuthority) {

@@ -254,7 +254,7 @@ common::IoErr ClientHttp2Request::on_header_block_start(void *owner, Http2HpackD
     }
     request->pending_name_ = {};
     request->pending_name_hash_ = 0;
-    request->pending_name_owned_ = false;
+    request->pending_name_stable_ = false;
     request->current_block_has_status_ = false;
     request->saw_regular_header_in_block_ = false;
     sink.ctx = request;
@@ -282,7 +282,7 @@ common::IoErr ClientHttp2Request::on_header_block_complete(void *owner, bool end
         request->current_header_node_ = nullptr;
         request->pending_name_ = {};
         request->pending_name_hash_ = 0;
-        request->pending_name_owned_ = false;
+        request->pending_name_stable_ = false;
         if (err != common::IoErr::None) {
             return err;
         }
@@ -306,7 +306,7 @@ common::IoErr ClientHttp2Request::on_header_block_complete(void *owner, bool end
     request->current_header_node_ = nullptr;
     request->pending_name_ = {};
     request->pending_name_hash_ = 0;
-    request->pending_name_owned_ = false;
+    request->pending_name_stable_ = false;
     if (err != common::IoErr::None) {
         return err;
     }
@@ -343,18 +343,18 @@ common::IoErr ClientHttp2Request::on_indexed_field(void *owner, Http2HpackDecode
         return common::IoErr::Invalid;
     }
     auto *request = static_cast<ClientHttp2Request *>(owner);
-    return request->commit_field(entry.name, entry.name_hash, entry.value);
+    const bool stable = entry.stable_for_exchange();
+    return request->commit_field(entry.name, entry.name_hash, entry.value, stable, stable);
 }
 
-common::IoErr ClientHttp2Request::on_indexed_name(void *owner, std::string_view name,
-                                                  std::uint64_t name_hash) noexcept {
+common::IoErr ClientHttp2Request::on_indexed_name(void *owner, Http2HpackDecoder::TableEntryView entry) noexcept {
     if (!owner) {
         return common::IoErr::Invalid;
     }
     auto *request = static_cast<ClientHttp2Request *>(owner);
-    request->pending_name_ = name;
-    request->pending_name_hash_ = name_hash;
-    request->pending_name_owned_ = false;
+    request->pending_name_ = entry.name;
+    request->pending_name_hash_ = entry.name_hash;
+    request->pending_name_stable_ = entry.stable_for_exchange();
     return common::IoErr::None;
 }
 
@@ -371,7 +371,7 @@ common::IoErr ClientHttp2Request::on_name_raw(void *owner, const std::uint8_t *d
     }
     request->pending_name_ = name;
     request->pending_name_hash_ = name_hash;
-    request->pending_name_owned_ = true;
+    request->pending_name_stable_ = true;
     return common::IoErr::None;
 }
 
@@ -388,7 +388,7 @@ common::IoErr ClientHttp2Request::on_name_huffman(void *owner, const std::uint8_
     }
     request->pending_name_ = name;
     request->pending_name_hash_ = name_hash;
-    request->pending_name_owned_ = true;
+    request->pending_name_stable_ = true;
     return common::IoErr::None;
 }
 
@@ -408,13 +408,13 @@ common::IoErr ClientHttp2Request::on_value_raw(void *owner, const std::uint8_t *
     }
     std::uint64_t pending_name_hash = request->pending_name_hash_;
     std::string_view pending_name = request->pending_name_;
-    bool pending_name_owned = request->pending_name_owned_;
-    if (out != nullptr && !pending_name_owned) {
+    bool pending_name_stable = request->pending_name_stable_;
+    if (out != nullptr && !pending_name_stable) {
         pending_name = request->copy_to_pool(pending_name);
         if (!pending_name.data() && !request->pending_name_.empty()) {
             return common::IoErr::NoMem;
         }
-        pending_name_owned = true;
+        pending_name_stable = true;
         out->name = pending_name;
         out->name_hash = pending_name_hash;
         out->value = value;
@@ -425,8 +425,8 @@ common::IoErr ClientHttp2Request::on_value_raw(void *owner, const std::uint8_t *
     }
     request->pending_name_ = {};
     request->pending_name_hash_ = 0;
-    request->pending_name_owned_ = false;
-    return request->commit_field(pending_name, pending_name_hash, value, pending_name_owned);
+    request->pending_name_stable_ = false;
+    return request->commit_field(pending_name, pending_name_hash, value, pending_name_stable, true);
 }
 
 common::IoErr ClientHttp2Request::on_value_huffman(void *owner, const std::uint8_t *data, std::size_t len,
@@ -445,13 +445,13 @@ common::IoErr ClientHttp2Request::on_value_huffman(void *owner, const std::uint8
     }
     std::uint64_t pending_name_hash = request->pending_name_hash_;
     std::string_view pending_name = request->pending_name_;
-    bool pending_name_owned = request->pending_name_owned_;
-    if (out != nullptr && !pending_name_owned) {
+    bool pending_name_stable = request->pending_name_stable_;
+    if (out != nullptr && !pending_name_stable) {
         pending_name = request->copy_to_pool(pending_name);
         if (!pending_name.data() && !request->pending_name_.empty()) {
             return common::IoErr::NoMem;
         }
-        pending_name_owned = true;
+        pending_name_stable = true;
         out->name = pending_name;
         out->name_hash = pending_name_hash;
         out->value = value;
@@ -462,8 +462,8 @@ common::IoErr ClientHttp2Request::on_value_huffman(void *owner, const std::uint8
     }
     request->pending_name_ = {};
     request->pending_name_hash_ = 0;
-    request->pending_name_owned_ = false;
-    return request->commit_field(pending_name, pending_name_hash, value, pending_name_owned);
+    request->pending_name_stable_ = false;
+    return request->commit_field(pending_name, pending_name_hash, value, pending_name_stable, true);
 }
 
 common::IoErr ClientHttp2Request::encode_request_frames(Http2Stream &stream, void *ctx,
@@ -777,7 +777,7 @@ common::IoErr ClientHttp2Request::handle_status(std::string_view value) noexcept
 }
 
 common::IoErr ClientHttp2Request::commit_field(std::string_view name, std::uint64_t name_hash, std::string_view value,
-                                               bool name_owned) noexcept {
+                                               bool name_stable, bool value_stable) noexcept {
     if (current_header_node_ == nullptr) {
         return common::IoErr::Invalid;
     }
@@ -787,19 +787,20 @@ common::IoErr ClientHttp2Request::commit_field(std::string_view name, std::uint6
         }
         return common::IoErr::Invalid;
     }
-    return commit_regular_header(name, name_hash, value, name_owned);
+    return commit_regular_header(name, name_hash, value, name_stable, value_stable);
 }
 
 common::IoErr ClientHttp2Request::commit_regular_header(std::string_view name, std::uint64_t name_hash,
-                                                        std::string_view value, bool name_owned) noexcept {
+                                                        std::string_view value, bool name_stable,
+                                                        bool value_stable) noexcept {
     if (!current_header_node_) {
         return common::IoErr::Invalid;
     }
-    std::string_view name_copy = name_owned ? name : copy_to_pool(name);
+    std::string_view name_copy = name_stable ? name : copy_to_pool(name);
     if (!name_copy.data() && !name.empty()) {
         return common::IoErr::NoMem;
     }
-    std::string_view value_copy = copy_to_pool(value);
+    std::string_view value_copy = value_stable ? value : copy_to_pool(value);
     if (!value_copy.data() && !value.empty()) {
         return common::IoErr::NoMem;
     }

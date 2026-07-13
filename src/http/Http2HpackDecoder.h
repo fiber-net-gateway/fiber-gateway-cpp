@@ -27,7 +27,7 @@ public:
 
     struct Ops {
         common::IoErr (*on_indexed_field)(void *ctx, TableEntryView entry) noexcept = nullptr;
-        common::IoErr (*on_indexed_name)(void *ctx, std::string_view name, std::uint64_t name_hash) noexcept = nullptr;
+        common::IoErr (*on_indexed_name)(void *ctx, TableEntryView entry) noexcept = nullptr;
         common::IoErr (*on_name_raw)(void *ctx, const std::uint8_t *data, std::size_t len) noexcept = nullptr;
         common::IoErr (*on_name_huffman)(void *ctx, const std::uint8_t *data, std::size_t len) noexcept = nullptr;
         common::IoErr (*on_value_raw)(void *ctx, const std::uint8_t *data, std::size_t len,

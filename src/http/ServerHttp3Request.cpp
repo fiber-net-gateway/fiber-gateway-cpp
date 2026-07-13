@@ -297,10 +297,12 @@ private:
                                                       std::string_view &out) noexcept;
     [[nodiscard]] common::IoErr materialize_value_huffman(const std::uint8_t *data, std::size_t len,
                                                           std::string_view &out) noexcept;
-    [[nodiscard]] common::IoErr commit_field(std::string_view name, std::uint64_t name_hash, std::string_view value,
-                                             bool name_owned = false) noexcept;
+    // name/value must remain valid for the HttpExchange lifetime. They either
+    // reference static storage or memory owned by exchange_.pool_.
+    [[nodiscard]] common::IoErr commit_field(std::string_view name, std::uint64_t name_hash,
+                                             std::string_view value) noexcept;
     [[nodiscard]] common::IoErr commit_regular_header(std::string_view name, std::uint64_t name_hash,
-                                                      std::string_view value, bool name_owned = false) noexcept;
+                                                      std::string_view value) noexcept;
     [[nodiscard]] common::IoErr apply_regular_header_policy(std::string_view name, std::uint64_t name_hash,
                                                             std::string_view value) noexcept;
     [[nodiscard]] common::IoErr handle_pseudo_header(std::string_view name, std::string_view value) noexcept;
@@ -312,14 +314,12 @@ private:
     [[nodiscard]] common::IoErr handle_forbidden_regular_header(std::string_view value) noexcept;
     [[nodiscard]] common::IoErr handle_te(std::string_view value) noexcept;
     [[nodiscard]] std::string_view copy_to_pool(const std::uint8_t *data, std::size_t len) noexcept;
-    [[nodiscard]] std::string_view copy_to_pool(std::string_view value) noexcept;
 
     ServerHttp3Request &request_;
     HeaderBlockTarget target_ = HeaderBlockTarget::Request;
     Http3QpackDecoder qpack_decoder_;
     std::string_view pending_name_;
     std::uint64_t pending_name_hash_ = 0;
-    bool pending_name_owned_ = false;
     bool saw_regular_header_in_block_ = false;
     bool te_seen_ = false;
     std::uint8_t pseudo_seen_ = 0;
@@ -371,7 +371,6 @@ bool ServerHttp3Request::HeaderBlockParser::init() noexcept {
     }
     pending_name_ = {};
     pending_name_hash_ = 0;
-    pending_name_owned_ = false;
     saw_regular_header_in_block_ = false;
     qpack_decoder_.begin_block(this, &decoder_ops());
     return true;
@@ -489,7 +488,6 @@ common::IoErr ServerHttp3Request::HeaderBlockParser::on_indexed_name(void *owner
     auto *parser = static_cast<HeaderBlockParser *>(owner);
     parser->pending_name_ = name;
     parser->pending_name_hash_ = name_hash;
-    parser->pending_name_owned_ = false;
     return common::IoErr::None;
 }
 
@@ -504,7 +502,6 @@ common::IoErr ServerHttp3Request::HeaderBlockParser::on_name_raw(void *owner, co
     }
     parser->pending_name_ = name;
     parser->pending_name_hash_ = name_hash;
-    parser->pending_name_owned_ = true;
     return common::IoErr::None;
 }
 
@@ -519,7 +516,6 @@ common::IoErr ServerHttp3Request::HeaderBlockParser::on_name_huffman(void *owner
     }
     parser->pending_name_ = name;
     parser->pending_name_hash_ = name_hash;
-    parser->pending_name_owned_ = true;
     return common::IoErr::None;
 }
 
@@ -536,11 +532,9 @@ common::IoErr ServerHttp3Request::HeaderBlockParser::on_value_raw(void *owner, c
     }
     std::string_view pending_name = parser->pending_name_;
     std::uint64_t pending_name_hash = parser->pending_name_hash_;
-    bool pending_name_owned = parser->pending_name_owned_;
     parser->pending_name_ = {};
     parser->pending_name_hash_ = 0;
-    parser->pending_name_owned_ = false;
-    return parser->commit_field(pending_name, pending_name_hash, value, pending_name_owned);
+    return parser->commit_field(pending_name, pending_name_hash, value);
 }
 
 common::IoErr ServerHttp3Request::HeaderBlockParser::on_value_huffman(void *owner, const std::uint8_t *data,
@@ -556,11 +550,9 @@ common::IoErr ServerHttp3Request::HeaderBlockParser::on_value_huffman(void *owne
     }
     std::string_view pending_name = parser->pending_name_;
     std::uint64_t pending_name_hash = parser->pending_name_hash_;
-    bool pending_name_owned = parser->pending_name_owned_;
     parser->pending_name_ = {};
     parser->pending_name_hash_ = 0;
-    parser->pending_name_owned_ = false;
-    return parser->commit_field(pending_name, pending_name_hash, value, pending_name_owned);
+    return parser->commit_field(pending_name, pending_name_hash, value);
 }
 
 common::IoErr ServerHttp3Request::HeaderBlockParser::materialize_name_raw(const std::uint8_t *data, std::size_t len,
@@ -640,7 +632,7 @@ common::IoErr ServerHttp3Request::HeaderBlockParser::materialize_value_huffman(c
 }
 
 common::IoErr ServerHttp3Request::HeaderBlockParser::commit_field(std::string_view name, std::uint64_t name_hash,
-                                                                  std::string_view value, bool name_owned) noexcept {
+                                                                  std::string_view value) noexcept {
     common::IoErr err = validate_field(name, value);
     if (err != common::IoErr::None) {
         return err;
@@ -654,13 +646,12 @@ common::IoErr ServerHttp3Request::HeaderBlockParser::commit_field(std::string_vi
     }
 
     saw_regular_header_in_block_ = true;
-    return commit_regular_header(name, name_hash, value, name_owned);
+    return commit_regular_header(name, name_hash, value);
 }
 
 common::IoErr ServerHttp3Request::HeaderBlockParser::commit_regular_header(std::string_view name,
                                                                            std::uint64_t name_hash,
-                                                                           std::string_view value,
-                                                                           bool name_owned) noexcept {
+                                                                           std::string_view value) noexcept {
     if (target_ == HeaderBlockTarget::Request) {
         common::IoErr err = apply_regular_header_policy(name, name_hash, value);
         if (err != common::IoErr::None) {
@@ -668,16 +659,10 @@ common::IoErr ServerHttp3Request::HeaderBlockParser::commit_regular_header(std::
         }
     }
 
-    std::string_view name_copy = name_owned ? name : copy_to_pool(name);
-    std::string_view value_copy = copy_to_pool(value);
-    if ((!name_copy.data() && !name.empty()) || (!value_copy.data() && !value.empty())) {
-        return common::IoErr::NoMem;
-    }
-
     HttpHeaders &target = target_ == HeaderBlockTarget::Trailer ? request_.exchange_.request_trailers_
                                                                 : request_.exchange_.request_headers_;
-    char *lowcase_name = name_copy.empty() ? nullptr : const_cast<char *>(name_copy.data());
-    auto *field = target.add_view(name_copy, value_copy, lowcase_name, name_hash);
+    char *lowcase_name = name.empty() ? nullptr : const_cast<char *>(name.data());
+    auto *field = target.add_view(name, value, lowcase_name, name_hash);
     if (!field) {
         return common::IoErr::NoMem;
     }
@@ -719,12 +704,8 @@ common::IoErr ServerHttp3Request::HeaderBlockParser::handle_method(std::string_v
             return fail(Http3ErrorCode::MessageError);
         }
     }
-    std::string_view method = copy_to_pool(value);
-    if (method.data() == nullptr && !method.empty()) {
-        return common::IoErr::NoMem;
-    }
-    request_.exchange_.method_view_ = method;
-    request_.exchange_.method_ = parse_method(method);
+    request_.exchange_.method_view_ = value;
+    request_.exchange_.method_ = parse_method(value);
     return common::IoErr::None;
 }
 
@@ -732,16 +713,12 @@ common::IoErr ServerHttp3Request::HeaderBlockParser::handle_path(std::string_vie
     if (value.empty()) {
         return fail(Http3ErrorCode::MessageError);
     }
-    std::string_view path = copy_to_pool(value);
-    if (path.data() == nullptr && !path.empty()) {
-        return common::IoErr::NoMem;
-    }
     HttpUriParseState uri_state{};
-    common::IoErr err = http_parse_uri(path, uri_state);
+    common::IoErr err = http_parse_uri(value, uri_state);
     if (err != common::IoErr::None) {
         return fail(Http3ErrorCode::MessageError, err);
     }
-    path_ = path;
+    path_ = value;
     uri_state_ = uri_state;
     return common::IoErr::None;
 }
@@ -754,10 +731,7 @@ common::IoErr ServerHttp3Request::HeaderBlockParser::handle_scheme(std::string_v
 }
 
 common::IoErr ServerHttp3Request::HeaderBlockParser::handle_authority(std::string_view value) noexcept {
-    authority_ = copy_to_pool(value);
-    if (authority_.data() == nullptr && !authority_.empty()) {
-        return common::IoErr::NoMem;
-    }
+    authority_ = value;
     return common::IoErr::None;
 }
 
@@ -803,10 +777,6 @@ std::string_view ServerHttp3Request::HeaderBlockParser::copy_to_pool(const std::
     }
     std::memcpy(mem, data, len);
     return std::string_view(mem, len);
-}
-
-std::string_view ServerHttp3Request::HeaderBlockParser::copy_to_pool(std::string_view value) noexcept {
-    return copy_to_pool(reinterpret_cast<const std::uint8_t *>(value.data()), value.size());
 }
 
 async::DetachedTask ServerHttp3Request::run_read_loop(quic::QuicStream::Lease lease) noexcept {
