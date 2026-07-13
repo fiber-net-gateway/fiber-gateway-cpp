@@ -27,6 +27,18 @@ std::string encode_grpc_timeout(std::chrono::milliseconds d) {
     return std::to_string(ms) + "m";
 }
 
+// Bound the untrusted grpc-message allocation: a server may send a value of
+// arbitrary length, so cap it before copying into the std::string member to
+// keep the allocation bounded under this noexcept path. The grpc-status code is
+// authoritative - the message is advisory - so truncation is safe.
+constexpr std::size_t kMaxGrpcMessage = 8 * 1024;
+void assign_grpc_message(std::string &dst, std::string_view src) {
+    if (src.size() > kMaxGrpcMessage) {
+        src = src.substr(0, kMaxGrpcMessage);
+    }
+    dst.assign(src.data(), src.size());
+}
+
 } // namespace
 
 GrpcStream::GrpcStream(std::shared_ptr<http::Http2ClientConnection> conn, std::string_view authority,
@@ -41,6 +53,8 @@ GrpcStream::GrpcStream(std::shared_ptr<http::Http2ClientConnection> conn, std::s
     path_.append(method.data(), method.size());
     if (options.deadline.count() > 0) {
         grpc_timeout_ = encode_grpc_timeout(options.deadline);
+        has_deadline_ = true;
+        deadline_abs_ = conn_->loop().now() + options.deadline;
     }
 }
 
@@ -63,6 +77,17 @@ void GrpcStream::fail(common::IoErr reason) noexcept {
 }
 
 void GrpcStream::cancel(common::IoErr reason) noexcept { fail(reason); }
+
+std::chrono::milliseconds GrpcStream::remaining_timeout() const noexcept {
+    if (!has_deadline_) {
+        return std::chrono::milliseconds::max();
+    }
+    const auto now = conn_->loop().now();
+    if (now >= deadline_abs_) {
+        return std::chrono::milliseconds(0);
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(deadline_abs_ - now);
+}
 
 fiber::async::Task<common::IoResult<void>> GrpcStream::open() noexcept {
     if (!conn_) {
@@ -91,7 +116,7 @@ fiber::async::Task<common::IoResult<void>> GrpcStream::open() noexcept {
             .headers = &headers,
     };
 
-    auto send_result = co_await exchange_.send_request_header(head, false);
+    auto send_result = co_await exchange_.send_request_header(head, false, remaining_timeout());
     if (!send_result) {
         fail(send_result.error());
         co_return std::unexpected(send_result.error());
@@ -125,7 +150,7 @@ fiber::async::Task<common::IoResult<void>> GrpcStream::write(const google::proto
         co_return std::unexpected(framed.error());
     }
 
-    auto write_result = co_await exchange_.write_body(std::move(*framed));
+    auto write_result = co_await exchange_.write_body(std::move(*framed), remaining_timeout());
     if (!write_result) {
         // Any write failure (including TimedOut) fails the call: a timed-out
         // partial flush may have left a truncated frame on the wire.
@@ -152,7 +177,7 @@ fiber::async::Task<common::IoResult<void>> GrpcStream::writes_done() noexcept {
     // Empty chain marked complete -> an empty DATA frame with END_STREAM.
     mem::IoBufChain empty(conn_->loop().io_buf_node_pool());
     empty.mark_complete();
-    auto write_result = co_await exchange_.write_body(std::move(empty));
+    auto write_result = co_await exchange_.write_body(std::move(empty), remaining_timeout());
     if (!write_result) {
         fail(write_result.error());
         co_return std::unexpected(write_result.error());
@@ -162,7 +187,7 @@ fiber::async::Task<common::IoResult<void>> GrpcStream::writes_done() noexcept {
 }
 
 fiber::async::Task<common::IoResult<void>> GrpcStream::ensure_response_header() noexcept {
-    auto header_result = co_await exchange_.read_header();
+    auto header_result = co_await exchange_.read_header(remaining_timeout());
     if (!header_result) {
         co_return std::unexpected(header_result.error());
     }
@@ -174,7 +199,7 @@ fiber::async::Task<common::IoResult<void>> GrpcStream::ensure_response_header() 
         grpc_code_ = parse_grpc_status(s);
     }
     if (auto m = resp->headers.get("grpc-message", kGrpcMessageHash); !m.empty()) {
-        grpc_message_.assign(m.data(), m.size());
+        assign_grpc_message(grpc_message_, m);
     }
     response_head_read_ = true;
     if (resp->end_stream) {
@@ -198,9 +223,7 @@ GrpcStream::read(google::protobuf::MessageLite &response) noexcept {
     if (!response_head_read_) {
         auto hr = co_await ensure_response_header();
         if (!hr) {
-            if (hr.error() != common::IoErr::TimedOut) {
-                fail(hr.error());
-            }
+            fail(hr.error());
             co_return std::unexpected(hr.error());
         }
         if (trailers_only_) {
@@ -235,11 +258,9 @@ GrpcStream::read(google::protobuf::MessageLite &response) noexcept {
             co_return std::unexpected(common::IoErr::Invalid);
         }
 
-        auto body_result = co_await exchange_.read_body(kReadChunk);
+        auto body_result = co_await exchange_.read_body(kReadChunk, remaining_timeout());
         if (!body_result) {
-            if (body_result.error() != common::IoErr::TimedOut) {
-                fail(body_result.error());
-            }
+            fail(body_result.error());
             co_return std::unexpected(body_result.error());
         }
         const bool stream_end = body_result->complete();
@@ -270,9 +291,7 @@ fiber::async::Task<common::IoResult<GrpcStatus>> GrpcStream::finish() noexcept {
     if (!response_head_read_) {
         auto hr = co_await ensure_response_header();
         if (!hr) {
-            if (hr.error() != common::IoErr::TimedOut) {
-                fail(hr.error());
-            }
+            fail(hr.error());
             co_return std::unexpected(hr.error());
         }
     }
@@ -281,24 +300,19 @@ fiber::async::Task<common::IoResult<GrpcStatus>> GrpcStream::finish() noexcept {
         if (!trailers_only_) {
             // Drain any unread body to END_STREAM so the trailer block can follow.
             while (!body_ended_) {
-                auto body_result = co_await exchange_.read_body(kReadChunk);
+                auto body_result = co_await exchange_.read_body(kReadChunk, remaining_timeout());
                 if (!body_result) {
-                    if (body_result.error() != common::IoErr::TimedOut) {
-                        fail(body_result.error());
-                        co_return std::unexpected(body_result.error());
-                    }
-                    continue; // read timeout is retryable
+                    fail(body_result.error());
+                    co_return std::unexpected(body_result.error());
                 }
                 if (body_result->complete()) {
                     body_ended_ = true;
                 }
             }
 
-            auto trailer_result = co_await exchange_.read_header();
+            auto trailer_result = co_await exchange_.read_header(remaining_timeout());
             if (!trailer_result) {
-                if (trailer_result.error() != common::IoErr::TimedOut) {
-                    fail(trailer_result.error());
-                }
+                fail(trailer_result.error());
                 co_return std::unexpected(trailer_result.error());
             }
             const http::Http2ResponseHead *trailer = *trailer_result;
@@ -306,7 +320,7 @@ fiber::async::Task<common::IoResult<GrpcStatus>> GrpcStream::finish() noexcept {
                 grpc_code_ = parse_grpc_status(s);
             }
             if (auto m = trailer->headers.get("grpc-message", kGrpcMessageHash); !m.empty()) {
-                grpc_message_.assign(m.data(), m.size());
+                assign_grpc_message(grpc_message_, m);
             }
         }
         // trailers_only_ case: status was captured in ensure_response_header().

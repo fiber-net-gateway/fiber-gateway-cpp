@@ -319,6 +319,28 @@ Task<void> stall_handler(fiber::http::HttpExchange &exchange) {
     }
 }
 
+// Trailers-only error carrying an oversized grpc-message, to verify the client
+// caps the untrusted value instead of copying it whole into a std::string.
+Task<void> oversize_fail_handler(fiber::http::HttpExchange &exchange) {
+    for (;;) {
+        auto chunk = co_await exchange.read_body(64 * 1024);
+        if (!chunk || chunk->complete()) {
+            break;
+        }
+    }
+    fiber::http::HttpHeaders headers(exchange.pool());
+    headers.set("content-type", "application/grpc");
+    headers.set("grpc-status", "5");
+    headers.set("grpc-message", std::string(16 * 1024, 'x'));
+    (void) co_await exchange.send_header({
+            .kind = fiber::http::OutgoingHeaderKind::Final,
+            .status_code = 200,
+            .headers = &headers,
+            .body = fiber::http::HttpBodySpec::None(),
+            .end_stream = true,
+    });
+}
+
 fiber::http::HttpHandler make_grpc_handler() {
     return [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         const std::string_view path = exchange.uri().path;
@@ -330,6 +352,8 @@ fiber::http::HttpHandler make_grpc_handler() {
             co_await chat_handler(exchange);
         } else if (path == "/helloworld.Greeter/StreamFail") {
             co_await stream_fail_handler(exchange);
+        } else if (path == "/helloworld.Greeter/OversizeFail") {
+            co_await oversize_fail_handler(exchange);
         } else if (path == "/helloworld.Greeter/Stall") {
             co_await stall_handler(exchange);
         }
@@ -373,6 +397,8 @@ enum class Scenario {
     Bidi,
     TrailersOnlyError,
     Cancel,
+    Deadline,
+    OversizeMessage,
 };
 
 struct Result {
@@ -571,6 +597,63 @@ Task<Result> drive(fiber::grpc::GrpcStream &s, Scenario sc) {
             }
             break;
         }
+        case Scenario::Deadline: {
+            // The server stalls after sending 200 headers (it blocks reading the
+            // request body, which the client never half-closes). The client's
+            // read() must hit the call deadline and fail with TimedOut instead
+            // of blocking indefinitely.
+            auto open_result = co_await s.open();
+            if (!open_result) {
+                r.err = open_result.error();
+                break;
+            }
+            helloworld::HelloRequest req;
+            req.set_name("x");
+            if (auto w = co_await s.write(req); !w) {
+                r.err = w.error();
+                break;
+            }
+            helloworld::HelloReply reply;
+            if (auto rr = co_await s.read(reply); !rr) {
+                r.err = rr.error();
+                break;
+            }
+            // Not expected: the read should time out before any message arrives.
+            r.finish_ok = false;
+            break;
+        }
+        case Scenario::OversizeMessage: {
+            // Server returns a trailers-only error whose grpc-message is far
+            // larger than the client's cap. The call must still succeed and the
+            // message must be truncated, not copied whole.
+            auto open_result = co_await s.open();
+            if (!open_result) {
+                r.err = open_result.error();
+                break;
+            }
+            helloworld::HelloRequest req;
+            req.set_name("big");
+            if (auto w = co_await s.write(req); !w) {
+                r.err = w.error();
+                break;
+            }
+            if (auto wd = co_await s.writes_done(); !wd) {
+                r.err = wd.error();
+                break;
+            }
+            helloworld::HelloReply reply;
+            if (auto rr = co_await s.read(reply); !rr) {
+                r.err = rr.error();
+                break;
+            }
+            if (auto f = co_await s.finish(); f) {
+                r.finish_ok = true;
+                r.status = std::move(*f);
+            } else {
+                r.err = f.error();
+            }
+            break;
+        }
     }
 
     co_return r;
@@ -611,8 +694,18 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, Scena
             case Scenario::Cancel:
                 method = "Stall";
                 break;
+            case Scenario::Deadline:
+                method = "Stall";
+                break;
+            case Scenario::OversizeMessage:
+                method = "OversizeFail";
+                break;
         }
-        fiber::grpc::GrpcStream stream = client.open_stream(service, method, pool);
+        fiber::grpc::GrpcStream::Options stream_opts;
+        if (sc == Scenario::Deadline) {
+            stream_opts.deadline = 100ms;
+        }
+        fiber::grpc::GrpcStream stream = client.open_stream(service, method, pool, stream_opts);
         result = co_await drive(stream, sc);
     }
 
@@ -736,6 +829,26 @@ TEST(GrpcStreamTest, CancelMidStream) {
     const Result r = run_scenario(Scenario::Cancel);
     EXPECT_EQ(r.err, fiber::common::IoErr::Canceled);
     EXPECT_FALSE(r.finish_ok);
+}
+
+TEST(GrpcStreamTest, DeadlineEnforcedLocally) {
+    // With Options::deadline set, a stalled server must cause read() to fail with
+    // TimedOut (the deadline is enforced locally, not just sent to the server).
+    const Result r = run_scenario(Scenario::Deadline);
+    EXPECT_EQ(r.err, fiber::common::IoErr::TimedOut);
+    EXPECT_FALSE(r.finish_ok);
+}
+
+TEST(GrpcStreamTest, OversizeGrpcMessageTruncated) {
+    // An untrusted grpc-message larger than the client cap must be truncated
+    // rather than copied whole (bounds the allocation on a noexcept path).
+    const Result r = run_scenario(Scenario::OversizeMessage);
+    ASSERT_EQ(r.err, fiber::common::IoErr::None);
+    ASSERT_TRUE(r.finish_ok);
+    EXPECT_EQ(r.status.code, 5);
+    constexpr std::size_t kCap = 8 * 1024;
+    EXPECT_EQ(r.status.message.size(), kCap);
+    EXPECT_EQ(r.status.message, std::string(kCap, 'x'));
 }
 
 } // namespace
