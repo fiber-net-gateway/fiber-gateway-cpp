@@ -2,7 +2,6 @@
 #define FIBER_HTTP_HTTP1_CONNECTION_H
 
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <memory>
 
@@ -36,8 +35,6 @@ public:
     [[nodiscard]] const HttpServerOptions &options() const noexcept { return options_; }
     [[nodiscard]] mem::IoBufChain &inbound_bufs() noexcept { return inbound_bufs_; }
     [[nodiscard]] bool stopping() const noexcept;
-
-    fiber::async::Task<common::IoResult<size_t>> read_into_inbound(std::chrono::milliseconds timeout) noexcept;
 
 private:
     using HeaderHandler = bool (*)(HttpExchange &exchange, const HttpHeaders::HeaderField &field);
