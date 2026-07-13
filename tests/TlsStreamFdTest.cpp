@@ -331,6 +331,132 @@ DetachedTask close_transport(fiber::http::TlsTransport *transport, std::promise<
     co_return;
 }
 
+DetachedTask read_tls_pending_payload(fiber::http::TlsTransport *transport,
+                                      std::promise<fiber::common::IoResult<std::string>> *done) {
+    auto handshake_result = co_await transport->handshake(5s);
+    if (!handshake_result) {
+        done->set_value(std::unexpected(handshake_result.error()));
+        co_return;
+    }
+
+    auto ready_result = co_await transport->wait_readable(5s);
+    if (!ready_result) {
+        done->set_value(std::unexpected(ready_result.error()));
+        co_return;
+    }
+
+    std::array<char, 1024> first{};
+    auto first_result = co_await transport->read(first.data(), first.size(), 5s);
+    if (!first_result) {
+        done->set_value(std::unexpected(first_result.error()));
+        co_return;
+    }
+    if (*first_result != first.size()) {
+        done->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+        co_return;
+    }
+
+    // The peer sends exactly one application-data record. The first short read
+    // leaves decrypted bytes inside BoringSSL while the socket itself has no new
+    // data. A zero-timeout wait can only succeed through SSL_has_pending().
+    auto pending_result = co_await transport->wait_readable(0ms);
+    if (!pending_result) {
+        done->set_value(std::unexpected(pending_result.error()));
+        co_return;
+    }
+
+    std::array<char, 4096> rest{};
+    auto rest_result = co_await transport->read(rest.data(), rest.size(), 5s);
+    if (!rest_result) {
+        done->set_value(std::unexpected(rest_result.error()));
+        co_return;
+    }
+
+    std::string received(first.data(), *first_result);
+    received.append(rest.data(), *rest_result);
+    done->set_value(std::move(received));
+    co_return;
+}
+
+DetachedTask write_tls_pending_payload(fiber::http::TlsTransport *transport, std::string payload,
+                                       std::promise<fiber::common::IoResult<std::size_t>> *done) {
+    auto handshake_result = co_await transport->handshake(5s);
+    if (!handshake_result) {
+        done->set_value(std::unexpected(handshake_result.error()));
+        co_return;
+    }
+
+    auto write_result = co_await transport->write(payload.data(), payload.size(), 5s);
+    done->set_value(std::move(write_result));
+    co_return;
+}
+
+TEST(TlsStreamFdTest, TlsTransportWaitReadableSeesPendingDecryptedData) {
+    SigpipeGuard sigpipe_guard;
+    TempFile cert("cert", kSelfSignedCertPem);
+    TempFile key("key", kSelfSignedKeyPem);
+    ASSERT_TRUE(cert.ok);
+    ASSERT_TRUE(key.ok);
+
+    fiber::net::TlsOptions server_options{};
+    server_options.cert_file = cert.path;
+    server_options.key_file = key.path;
+    fiber::net::TlsContext server_ctx(std::move(server_options), true);
+    ASSERT_TRUE(server_ctx.init());
+
+    fiber::net::TlsOptions client_options{};
+    fiber::net::TlsContext client_ctx(std::move(client_options), false);
+    ASSERT_TRUE(client_ctx.init());
+
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+
+    fiber::event::EventLoopGroup group(2);
+    group.start();
+
+    fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
+    auto server_transport_result =
+            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer), server_ctx);
+    auto client_transport_result =
+            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer), client_ctx);
+    ASSERT_TRUE(server_transport_result);
+    ASSERT_TRUE(client_transport_result);
+    auto *server_transport = server_transport_result->release();
+    auto *client_transport = client_transport_result->release();
+
+    std::string payload(4096, 'p');
+    std::promise<fiber::common::IoResult<std::string>> server_promise;
+    std::promise<fiber::common::IoResult<std::size_t>> client_promise;
+    auto server_future = server_promise.get_future();
+    auto client_future = client_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() { return read_tls_pending_payload(server_transport, &server_promise); });
+    fiber::async::spawn(group.at(1),
+                        [&]() { return write_tls_pending_payload(client_transport, payload, &client_promise); });
+
+    ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
+    ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
+    auto client_result = client_future.get();
+    auto server_result = server_future.get();
+
+    std::promise<void> server_close_promise;
+    std::promise<void> client_close_promise;
+    auto server_close_future = server_close_promise.get_future();
+    auto client_close_future = client_close_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return close_transport(server_transport, &server_close_promise); });
+    fiber::async::spawn(group.at(1), [&]() { return close_transport(client_transport, &client_close_promise); });
+    ASSERT_EQ(server_close_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(client_close_future.wait_for(2s), std::future_status::ready);
+
+    group.stop();
+    group.join();
+
+    ASSERT_TRUE(client_result);
+    ASSERT_TRUE(server_result);
+    EXPECT_EQ(*client_result, payload.size());
+    EXPECT_EQ(*server_result, payload);
+}
+
 // Exercises TlsTransport::writev coalescing over a real TLS pair. The chain mixes
 // small nodes (coalesced into <=8k groups), a >8k node (solo, zero-copy), and
 // enough nodes to exceed the 16-iovec snapshot cap (forces a re-snapshot).
