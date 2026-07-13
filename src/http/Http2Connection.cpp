@@ -44,6 +44,32 @@ enum class ParsePhase : std::uint8_t {
     FramePayload,
 };
 
+using TimePoint = std::chrono::steady_clock::time_point;
+
+TimePoint deadline_after(TimePoint now, std::chrono::milliseconds timeout) noexcept {
+    if (timeout == std::chrono::milliseconds::max()) {
+        return TimePoint::max();
+    }
+    return now + timeout;
+}
+
+common::IoResult<std::chrono::milliseconds> remaining_timeout(event::EventLoop &loop, TimePoint deadline) noexcept {
+    if (deadline == TimePoint::max()) {
+        return std::chrono::milliseconds::max();
+    }
+
+    const auto now = loop.now();
+    if (now >= deadline) {
+        return std::unexpected(common::IoErr::TimedOut);
+    }
+
+    auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+    if (remaining <= std::chrono::milliseconds::zero()) {
+        remaining = std::chrono::milliseconds(1);
+    }
+    return remaining;
+}
+
 std::uint32_t parse_frame_length(const std::uint8_t *pos) noexcept {
     return (static_cast<std::uint32_t>(pos[0]) << 16) | (static_cast<std::uint32_t>(pos[1]) << 8) |
            static_cast<std::uint32_t>(pos[2]);
@@ -196,11 +222,9 @@ fiber::async::Task<Http2Connection::RunResult> Http2Connection::run() noexcept {
         state_ = State::Running;
     }
 
-    std::size_t read_buffer_capacity = std::max(options_.read_buffer_size, kClientPreface.size());
-    mem::IoBuf read_buf = mem::IoBuf::allocate(read_buffer_capacity);
-    if (!read_buf) {
-        co_return co_await finalize_run(std::unexpected(common::IoErr::NoMem));
-    }
+    const std::size_t read_buffer_capacity = std::max(options_.read_buffer_size, kClientPreface.size());
+    mem::IoBuf read_buf;
+    auto last_inbound_at = transport_->loop().now();
 
     ParsePhase phase = options_.role == ConnectionRole::Server ? ParsePhase::Preface : ParsePhase::FrameHeader;
     FrameHeader current_header{};
@@ -286,12 +310,7 @@ fiber::async::Task<Http2Connection::RunResult> Http2Connection::run() noexcept {
             }
         }
 
-        common::IoErr prepare_err = prepare_read_buffer(read_buf, read_buffer_capacity);
-        if (prepare_err != common::IoErr::None) {
-            co_return co_await finalize_run(std::unexpected(prepare_err));
-        }
-
-        auto read_result = co_await transport_->read_into(read_buf, current_read_timeout());
+        auto read_result = co_await read_more(read_buf, read_buffer_capacity, last_inbound_at);
         if (!read_result) {
             if (read_result.error() == common::IoErr::TimedOut) {
                 common::IoErr timeout_err = handle_read_timeout();
@@ -315,6 +334,81 @@ fiber::async::Task<Http2Connection::RunResult> Http2Connection::run() noexcept {
             }
             co_return co_await finalize_run(std::unexpected(common::IoErr::ConnReset));
         }
+
+        last_inbound_at = transport_->loop().now();
+    }
+}
+
+fiber::async::Task<common::IoResult<std::size_t>> Http2Connection::read_more(mem::IoBuf &read_buf, std::size_t capacity,
+                                                                             TimePoint last_inbound_at) noexcept {
+    event::EventLoop &loop = transport_->loop();
+    const TimePoint read_deadline = deadline_after(loop.now(), current_read_timeout());
+
+    for (;;) {
+        if (!read_buf || !read_buf.unique()) {
+            auto timeout = remaining_timeout(loop, read_deadline);
+            if (!timeout) {
+                co_return std::unexpected(timeout.error());
+            }
+
+            auto wait_result = co_await transport_->wait_readable(*timeout);
+            if (!wait_result) {
+                co_return std::unexpected(wait_result.error());
+            }
+
+            common::IoErr prepare_err = prepare_read_buffer(read_buf, capacity);
+            if (prepare_err != common::IoErr::None) {
+                co_return std::unexpected(prepare_err);
+            }
+
+            timeout = remaining_timeout(loop, read_deadline);
+            if (!timeout) {
+                co_return std::unexpected(timeout.error());
+            }
+            co_return co_await transport_->read_into(read_buf, *timeout);
+        }
+
+        const auto idle_release_timeout = options_.read_buffer_idle_release_timeout;
+        const bool can_release_idle =
+                read_buf.readable() == 0 && idle_release_timeout > std::chrono::milliseconds::zero();
+        if (can_release_idle) {
+            const TimePoint release_deadline = deadline_after(last_inbound_at, idle_release_timeout);
+            if (release_deadline < read_deadline) {
+                if (loop.now() >= release_deadline) {
+                    read_buf = {};
+                    continue;
+                }
+
+                common::IoErr prepare_err = prepare_read_buffer(read_buf, capacity);
+                if (prepare_err != common::IoErr::None) {
+                    co_return std::unexpected(prepare_err);
+                }
+
+                auto timeout = remaining_timeout(loop, release_deadline);
+                if (!timeout) {
+                    read_buf = {};
+                    continue;
+                }
+
+                auto read_result = co_await transport_->read_into(read_buf, *timeout);
+                if (!read_result && read_result.error() == common::IoErr::TimedOut) {
+                    read_buf = {};
+                    continue;
+                }
+                co_return read_result;
+            }
+        }
+
+        common::IoErr prepare_err = prepare_read_buffer(read_buf, capacity);
+        if (prepare_err != common::IoErr::None) {
+            co_return std::unexpected(prepare_err);
+        }
+
+        auto timeout = remaining_timeout(loop, read_deadline);
+        if (!timeout) {
+            co_return std::unexpected(timeout.error());
+        }
+        co_return co_await transport_->read_into(read_buf, *timeout);
     }
 }
 
