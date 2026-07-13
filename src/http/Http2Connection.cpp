@@ -1024,48 +1024,27 @@ common::IoErr Http2Connection::send_window_update(std::uint32_t stream_id, std::
         return common::IoErr::Invalid;
     }
 
-    std::uint8_t payload[kWindowUpdatePayloadSize];
-    payload[0] = static_cast<std::uint8_t>((increment >> 24) & 0x7fU);
-    payload[1] = static_cast<std::uint8_t>((increment >> 16) & 0xffU);
-    payload[2] = static_cast<std::uint8_t>((increment >> 8) & 0xffU);
-    payload[3] = static_cast<std::uint8_t>(increment & 0xffU);
     return outbound_scheduler_.alloc_and_enqueue_control(
-            kFrameHeaderSize + sizeof(payload), [&](std::uint8_t *dst) noexcept {
-                encode_http2_frame_header(dst, sizeof(payload), Http2FrameType::WindowUpdate, 0, stream_id);
-                std::memcpy(dst + kFrameHeaderSize, payload, sizeof(payload));
+            kFrameHeaderSize + kWindowUpdatePayloadSize, [&](std::uint8_t *dst) noexcept {
+                encode_http2_frame_header(dst, kWindowUpdatePayloadSize, Http2FrameType::WindowUpdate, 0, stream_id);
+                append_u32(dst + kFrameHeaderSize, increment);
             });
 }
 
 common::IoErr Http2Connection::send_rst_stream(std::uint32_t stream_id, Http2ErrorCode error_code) noexcept {
-    std::uint8_t payload[kRstStreamPayloadSize];
-    std::uint32_t value = static_cast<std::uint32_t>(error_code);
-    payload[0] = static_cast<std::uint8_t>((value >> 24) & 0xffU);
-    payload[1] = static_cast<std::uint8_t>((value >> 16) & 0xffU);
-    payload[2] = static_cast<std::uint8_t>((value >> 8) & 0xffU);
-    payload[3] = static_cast<std::uint8_t>(value & 0xffU);
     return outbound_scheduler_.alloc_and_enqueue_control(
-            kFrameHeaderSize + sizeof(payload), [&](std::uint8_t *dst) noexcept {
-                encode_http2_frame_header(dst, sizeof(payload), Http2FrameType::RstStream, 0, stream_id);
-                std::memcpy(dst + kFrameHeaderSize, payload, sizeof(payload));
+            kFrameHeaderSize + kRstStreamPayloadSize, [&](std::uint8_t *dst) noexcept {
+                encode_http2_frame_header(dst, kRstStreamPayloadSize, Http2FrameType::RstStream, 0, stream_id);
+                append_u32(dst + kFrameHeaderSize, static_cast<std::uint32_t>(error_code));
             });
 }
 
 common::IoErr Http2Connection::send_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept {
-    std::uint8_t payload[kGoawayMinimumPayloadSize]{};
-    payload[0] = static_cast<std::uint8_t>((last_stream_id >> 24) & 0x7fU);
-    payload[1] = static_cast<std::uint8_t>((last_stream_id >> 16) & 0xffU);
-    payload[2] = static_cast<std::uint8_t>((last_stream_id >> 8) & 0xffU);
-    payload[3] = static_cast<std::uint8_t>(last_stream_id & 0xffU);
-
-    std::uint32_t value = static_cast<std::uint32_t>(error_code);
-    payload[4] = static_cast<std::uint8_t>((value >> 24) & 0xffU);
-    payload[5] = static_cast<std::uint8_t>((value >> 16) & 0xffU);
-    payload[6] = static_cast<std::uint8_t>((value >> 8) & 0xffU);
-    payload[7] = static_cast<std::uint8_t>(value & 0xffU);
     return outbound_scheduler_.alloc_and_enqueue_control(
-            kFrameHeaderSize + sizeof(payload), [&](std::uint8_t *dst) noexcept {
-                encode_http2_frame_header(dst, sizeof(payload), Http2FrameType::Goaway, 0, 0);
-                std::memcpy(dst + kFrameHeaderSize, payload, sizeof(payload));
+            kFrameHeaderSize + kGoawayMinimumPayloadSize, [&](std::uint8_t *dst) noexcept {
+                encode_http2_frame_header(dst, kGoawayMinimumPayloadSize, Http2FrameType::Goaway, 0, 0);
+                std::uint8_t *out = append_u32(dst + kFrameHeaderSize, last_stream_id & 0x7fffffffU);
+                append_u32(out, static_cast<std::uint32_t>(error_code));
             });
 }
 
