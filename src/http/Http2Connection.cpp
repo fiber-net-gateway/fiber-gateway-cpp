@@ -950,13 +950,15 @@ common::IoErr Http2Connection::apply_peer_initial_stream_window(std::uint32_t va
             std::int64_t next_window = static_cast<std::int64_t>(stream.send_window()) + delta;
             if (next_window > kMaxFlowControlWindow || next_window < -kMaxFlowControlWindow - 1) {
                 err = common::IoErr::Invalid;
+                return;
             }
+            stream.update_send_window(static_cast<std::int32_t>(delta));
         });
         if (err != common::IoErr::None) {
+            // A SETTINGS flow-control error is connection-fatal, so streams already
+            // updated during this pass are torn down and do not need rollback.
             return err;
         }
-
-        streams_.for_each([&](Http2Stream &stream) { stream.update_send_window(static_cast<std::int32_t>(delta)); });
     }
 
     peer_initial_stream_send_window_ = static_cast<std::int32_t>(value);
@@ -1263,22 +1265,14 @@ void Http2Connection::handle_peer_goaway(std::uint32_t last_stream_id, Http2Erro
 }
 
 void Http2Connection::close_streams_after_goaway(std::uint32_t last_stream_id) noexcept {
-    std::unique_ptr<Http2Stream *[]> to_close(new (std::nothrow) Http2Stream *[streams_.size()]);
-    if (!to_close) {
-        enter_closing(common::IoErr::NoMem);
-        return;
-    }
-
-    std::size_t count = 0;
-    streams_.for_each([&](Http2Stream &stream) {
-        if (is_local_stream_id(stream.stream_id_) && stream.stream_id_ > last_stream_id) {
-            to_close[count++] = &stream;
+    for (Http2Stream *stream = owned_stream_list_.front(); stream != nullptr;) {
+        Http2Stream *next = owned_stream_list_.next_of(*stream);
+        if (is_local_stream_id(stream->stream_id_) && stream->stream_id_ > last_stream_id) {
+            Http2Stream::Lease held = stream->lease();
+            stream->close(common::IoErr::Canceled);
+            try_release_stream(*stream);
         }
-    });
-
-    for (std::size_t i = 0; i < count; ++i) {
-        to_close[i]->close(common::IoErr::Canceled);
-        try_release_stream(*to_close[i]);
+        stream = next;
     }
 }
 
@@ -1486,16 +1480,12 @@ Http2Stream::Lease Http2Connection::alloc_peer_stream(std::uint32_t stream_id) n
 }
 
 void Http2Connection::close_all_streams(common::IoErr result) noexcept {
-    std::unique_ptr<Http2Stream *[]> to_close(new (std::nothrow) Http2Stream *[streams_.size()]);
-    if (!to_close) {
-        return;
-    }
-
-    std::size_t count = 0;
-    streams_.for_each([&](Http2Stream &stream) { to_close[count++] = &stream; });
-    for (std::size_t i = 0; i < count; ++i) {
-        to_close[i]->close(result);
-        try_release_stream(*to_close[i]);
+    for (Http2Stream *stream = owned_stream_list_.front(); stream != nullptr;) {
+        Http2Stream *next = owned_stream_list_.next_of(*stream);
+        Http2Stream::Lease held = stream->lease();
+        stream->close(result);
+        try_release_stream(*stream);
+        stream = next;
     }
 }
 
