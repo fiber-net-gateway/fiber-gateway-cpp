@@ -17,8 +17,7 @@ public:
     [[nodiscard]] static bool get_by_index(std::uint32_t index, TableEntryView &view) noexcept;
 
     [[nodiscard]] static bool find_name(std::string_view name, std::uint32_t &index) noexcept;
-    [[nodiscard]] static bool find_name(std::string_view lowcase_name, std::uint64_t name_hash,
-                                        std::uint32_t &index) noexcept;
+    [[nodiscard]] static bool find_name(std::string_view name, std::uint64_t name_hash, std::uint32_t &index) noexcept;
 
 private:
     struct StaticEntry {

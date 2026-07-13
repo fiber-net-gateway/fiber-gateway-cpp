@@ -249,7 +249,7 @@ fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange, const 
     headers.set("Content-Type", "application/octet-stream");
     set_common_response_headers(headers, context);
     auto header_result =
-            co_await send_final_header(exchange, 200, &headers, fiber::http::HttpBodySpec::Chunked(), false);
+            co_await send_final_header(exchange, 200, &headers, fiber::http::HttpBodySpec::Stream(), false);
     if (!header_result) {
         co_return;
     }

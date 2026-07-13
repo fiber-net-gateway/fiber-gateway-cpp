@@ -108,10 +108,7 @@ Http2HpackEncodeCatalog::FindResult Http2HpackEncodeCatalog::find(std::string_vi
         return {};
     }
 
-    FindResult name_result;
-    FindResult exact_result;
-    const EntryView *name_entry = nullptr;
-    const EntryView *exact_entry = nullptr;
+    FindResult result;
     const std::uint32_t bucket = name_hash & (bucket_cap_ - 1);
     for (std::uint32_t id = bucket_head_[bucket]; id != kInvalidId; id = next_bucket_[id]) {
         const EntryView &entry = entries_[id];
@@ -122,22 +119,16 @@ Http2HpackEncodeCatalog::FindResult Http2HpackEncodeCatalog::find(std::string_vi
             continue;
         }
 
-        if (!name_entry || prefer_entry(entry, *name_entry)) {
-            name_result.entry = &entry;
-            name_entry = &entry;
+        if (result.name_entry == nullptr || prefer_entry(entry, *result.name_entry)) {
+            result.name_entry = &entry;
         }
 
-        if (same_bytes(value, entry.value) && (!exact_entry || prefer_entry(entry, *exact_entry))) {
-            exact_result.entry = &entry;
-            exact_result.exact = true;
-            exact_entry = &entry;
+        if (same_bytes(value, entry.value) &&
+            (result.exact_entry == nullptr || prefer_entry(entry, *result.exact_entry))) {
+            result.exact_entry = &entry;
         }
     }
-
-    if (exact_result.entry != nullptr) {
-        return exact_result;
-    }
-    return name_result;
+    return result;
 }
 
 std::uint32_t Http2HpackEncodeCatalog::next_pow2(std::uint32_t value) noexcept {

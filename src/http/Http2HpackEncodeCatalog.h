@@ -38,8 +38,10 @@ public:
     };
 
     struct FindResult {
-        const EntryView *entry = nullptr;
-        bool exact = false;
+        // Preferred entry for referencing the field name, regardless of value.
+        const EntryView *name_entry = nullptr;
+        // Preferred entry whose name and value both match.
+        const EntryView *exact_entry = nullptr;
     };
 
     Http2HpackEncodeCatalog() noexcept = default;

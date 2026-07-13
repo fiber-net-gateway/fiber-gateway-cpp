@@ -65,8 +65,6 @@ private:
     [[nodiscard]] common::IoErr ensure_output(std::size_t min_bytes) noexcept;
     [[nodiscard]] bool should_huffman_encode(std::string_view value) const noexcept;
     [[nodiscard]] bool can_incrementally_index(const Http2HpackEncodeCatalog::EntryView &entry) const noexcept;
-    [[nodiscard]] bool resolve_name_index(std::string_view name, std::uint64_t name_hash,
-                                          std::uint32_t &index) const noexcept;
 
     const Options options_;
     Http2HpackEncodeTable table_;

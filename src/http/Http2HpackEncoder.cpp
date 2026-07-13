@@ -4,7 +4,6 @@
 #include <array>
 #include <cstring>
 
-#include "Http2HpackStaticTable.h"
 #include "HttpHeaderHash.h"
 #include "Huffman.h"
 
@@ -233,20 +232,22 @@ common::IoErr Http2HpackEncoder::encode_field(std::string_view name, std::uint64
     }
 
     const Http2HpackEncodeCatalog::FindResult result = options_.catalog->find(name, name_hash, value);
-    if (result.entry != nullptr && result.exact) {
+    if (result.exact_entry != nullptr) {
         std::uint32_t index = 0;
-        if (table_.resolve_index(result.entry, index)) {
+        if (table_.resolve_index(result.exact_entry, index)) {
             return append_indexed(index);
         }
 
-        if (can_incrementally_index(*result.entry)) {
+        if (can_incrementally_index(*result.exact_entry)) {
             std::uint32_t name_index = 0;
-            (void) resolve_name_index(name, name_hash, name_index);
+            if (result.name_entry != nullptr) {
+                (void) table_.resolve_index(result.name_entry, name_index);
+            }
             common::IoErr err = append_literal(name_index, name, value, LiteralMode::IncrementalIndexing);
             if (err != common::IoErr::None) {
                 return err;
             }
-            const auto activate_result = table_.activate(result.entry);
+            const auto activate_result = table_.activate(result.exact_entry);
             if (activate_result == Http2HpackEncodeTable::ActivateResult::Rejected ||
                 activate_result == Http2HpackEncodeTable::ActivateResult::InvalidId) {
                 return common::IoErr::Invalid;
@@ -256,7 +257,7 @@ common::IoErr Http2HpackEncoder::encode_field(std::string_view name, std::uint64
     }
 
     std::uint32_t name_index = 0;
-    if (resolve_name_index(name, name_hash, name_index)) {
+    if (result.name_entry != nullptr && table_.resolve_index(result.name_entry, name_index)) {
         return append_literal(name_index, {}, value, LiteralMode::WithoutIndexing);
     }
     return append_literal(0, name, value, LiteralMode::WithoutIndexing);
@@ -455,22 +456,6 @@ bool Http2HpackEncoder::should_huffman_encode(std::string_view value) const noex
 bool Http2HpackEncoder::can_incrementally_index(const Http2HpackEncodeCatalog::EntryView &entry) const noexcept {
     return entry.kind == Http2HpackEncodeCatalog::EntryKind::Policy &&
            entry.entry_size <= table_.max_dynamic_table_size() && table_.max_dynamic_table_size() != 0;
-}
-
-bool Http2HpackEncoder::resolve_name_index(std::string_view name, std::uint64_t name_hash,
-                                           std::uint32_t &index) const noexcept {
-    index = 0;
-    if (Http2HpackStaticTable::find_name(name, name_hash, index)) {
-        return true;
-    }
-    if (options_.catalog == nullptr) {
-        return false;
-    }
-    const Http2HpackEncodeCatalog::FindResult name_result = options_.catalog->find(name, name_hash, {});
-    if (name_result.entry == nullptr) {
-        return false;
-    }
-    return table_.resolve_index(name_result.entry, index);
 }
 
 } // namespace fiber::http
