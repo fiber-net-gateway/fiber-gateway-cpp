@@ -55,10 +55,11 @@ struct OwnedStreamHolder {
         return fiber::common::IoErr::None;
     }
 
-    static fiber::common::IoErr on_indexed_name(void *owner, std::string_view name, std::uint64_t name_hash) noexcept {
+    static fiber::common::IoErr on_indexed_name(void *owner,
+                                                fiber::http::Http2HpackDecoder::TableEntryView entry) noexcept {
         auto *self = static_cast<OwnedStreamHolder *>(owner);
-        self->pending_name_storage.assign(name.data(), name.size());
-        self->pending_name_hash = name_hash;
+        self->pending_name_storage.assign(entry.name.data(), entry.name.size());
+        self->pending_name_hash = entry.name_hash;
         return fiber::common::IoErr::None;
     }
 

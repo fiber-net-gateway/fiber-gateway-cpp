@@ -46,10 +46,10 @@ struct DecodeRecorder {
         return IoErr::None;
     }
 
-    static IoErr on_indexed_name(void *ctx, std::string_view name, std::uint64_t name_hash) noexcept {
+    static IoErr on_indexed_name(void *ctx, Http2HpackDecoder::TableEntryView entry) noexcept {
         auto *self = static_cast<DecodeRecorder *>(ctx);
-        self->pending_name = std::string(name);
-        self->pending_name_hash = name_hash;
+        self->pending_name = std::string(entry.name);
+        self->pending_name_hash = entry.name_hash;
         return IoErr::None;
     }
 

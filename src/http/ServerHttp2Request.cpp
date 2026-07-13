@@ -158,7 +158,7 @@ common::IoErr ServerHttp2Request::on_header_block_start(void *owner, Http2HpackD
     }
     request->pending_name_ = {};
     request->pending_name_hash_ = 0;
-    request->pending_name_owned_ = false;
+    request->pending_name_stable_ = false;
     request->saw_regular_header_in_block_ = false;
     if (request->request_head_received_) {
         request->reading_trailers_ = true;
@@ -592,15 +592,15 @@ void ServerHttp2Request::on_body_send_complete(BodySendAwaiter *awaiter, common:
 
 common::IoErr ServerHttp2Request::on_indexed_field(void *owner, Http2HpackDecoder::TableEntryView entry) noexcept {
     auto *request = static_cast<ServerHttp2Request *>(owner);
-    return request->commit_field(entry.name, entry.name_hash, entry.value);
+    const bool stable = entry.stable_for_exchange();
+    return request->commit_field(entry.name, entry.name_hash, entry.value, stable, stable);
 }
 
-common::IoErr ServerHttp2Request::on_indexed_name(void *owner, std::string_view name,
-                                                  std::uint64_t name_hash) noexcept {
+common::IoErr ServerHttp2Request::on_indexed_name(void *owner, Http2HpackDecoder::TableEntryView entry) noexcept {
     auto *request = static_cast<ServerHttp2Request *>(owner);
-    request->pending_name_ = name;
-    request->pending_name_hash_ = name_hash;
-    request->pending_name_owned_ = false;
+    request->pending_name_ = entry.name;
+    request->pending_name_hash_ = entry.name_hash;
+    request->pending_name_stable_ = entry.stable_for_exchange();
     return common::IoErr::None;
 }
 
@@ -614,7 +614,7 @@ common::IoErr ServerHttp2Request::on_name_raw(void *owner, const std::uint8_t *d
     }
     request->pending_name_ = name;
     request->pending_name_hash_ = name_hash;
-    request->pending_name_owned_ = true;
+    request->pending_name_stable_ = true;
     return common::IoErr::None;
 }
 
@@ -628,7 +628,7 @@ common::IoErr ServerHttp2Request::on_name_huffman(void *owner, const std::uint8_
     }
     request->pending_name_ = name;
     request->pending_name_hash_ = name_hash;
-    request->pending_name_owned_ = true;
+    request->pending_name_stable_ = true;
     return common::IoErr::None;
 }
 
@@ -645,13 +645,13 @@ common::IoErr ServerHttp2Request::on_value_raw(void *owner, const std::uint8_t *
     }
     std::uint64_t pending_name_hash = request->pending_name_hash_;
     std::string_view pending_name = request->pending_name_;
-    bool pending_name_owned = request->pending_name_owned_;
-    if (out != nullptr && !pending_name_owned) {
+    bool pending_name_stable = request->pending_name_stable_;
+    if (out != nullptr && !pending_name_stable) {
         pending_name = request->copy_to_pool(pending_name);
         if (!pending_name.data() && !request->pending_name_.empty()) {
             return common::IoErr::NoMem;
         }
-        pending_name_owned = true;
+        pending_name_stable = true;
         out->name = pending_name;
         out->name_hash = pending_name_hash;
         out->value = value;
@@ -662,8 +662,8 @@ common::IoErr ServerHttp2Request::on_value_raw(void *owner, const std::uint8_t *
     }
     request->pending_name_ = {};
     request->pending_name_hash_ = 0;
-    request->pending_name_owned_ = false;
-    return request->commit_field(pending_name, pending_name_hash, value, pending_name_owned);
+    request->pending_name_stable_ = false;
+    return request->commit_field(pending_name, pending_name_hash, value, pending_name_stable, true);
 }
 
 common::IoErr ServerHttp2Request::on_value_huffman(void *owner, const std::uint8_t *data, std::size_t len,
@@ -679,13 +679,13 @@ common::IoErr ServerHttp2Request::on_value_huffman(void *owner, const std::uint8
     }
     std::uint64_t pending_name_hash = request->pending_name_hash_;
     std::string_view pending_name = request->pending_name_;
-    bool pending_name_owned = request->pending_name_owned_;
-    if (out != nullptr && !pending_name_owned) {
+    bool pending_name_stable = request->pending_name_stable_;
+    if (out != nullptr && !pending_name_stable) {
         pending_name = request->copy_to_pool(pending_name);
         if (!pending_name.data() && !request->pending_name_.empty()) {
             return common::IoErr::NoMem;
         }
-        pending_name_owned = true;
+        pending_name_stable = true;
         out->name = pending_name;
         out->name_hash = pending_name_hash;
         out->value = value;
@@ -696,8 +696,8 @@ common::IoErr ServerHttp2Request::on_value_huffman(void *owner, const std::uint8
     }
     request->pending_name_ = {};
     request->pending_name_hash_ = 0;
-    request->pending_name_owned_ = false;
-    return request->commit_field(pending_name, pending_name_hash, value, pending_name_owned);
+    request->pending_name_stable_ = false;
+    return request->commit_field(pending_name, pending_name_hash, value, pending_name_stable, true);
 }
 
 common::IoErr ServerHttp2Request::materialize_name_raw(const std::uint8_t *data, std::size_t len, std::string_view &out,
@@ -776,7 +776,7 @@ common::IoErr ServerHttp2Request::materialize_value_huffman(const std::uint8_t *
 }
 
 common::IoErr ServerHttp2Request::commit_field(std::string_view name, std::uint64_t name_hash, std::string_view value,
-                                               bool name_owned) noexcept {
+                                               bool name_stable, bool value_stable) noexcept {
     if (is_pseudo_header(name)) {
         if (reading_trailers_ || saw_regular_header_in_block_) {
             return common::IoErr::Invalid;
@@ -786,15 +786,16 @@ common::IoErr ServerHttp2Request::commit_field(std::string_view name, std::uint6
         if (!handler) {
             return common::IoErr::Invalid;
         }
-        return (*handler)(*this, value);
+        return (*handler)(*this, value, value_stable);
     }
 
     saw_regular_header_in_block_ = true;
-    return commit_regular_header(name, name_hash, value, name_owned);
+    return commit_regular_header(name, name_hash, value, name_stable, value_stable);
 }
 
 common::IoErr ServerHttp2Request::commit_regular_header(std::string_view name, std::uint64_t name_hash,
-                                                        std::string_view value, bool name_owned) noexcept {
+                                                        std::string_view value, bool name_stable,
+                                                        bool value_stable) noexcept {
     if (!reading_trailers_) {
         common::IoErr err = apply_regular_header_policy(name, name_hash, value);
         if (err != common::IoErr::None) {
@@ -802,8 +803,8 @@ common::IoErr ServerHttp2Request::commit_regular_header(std::string_view name, s
         }
     }
 
-    std::string_view name_copy = name_owned ? name : copy_to_pool(name);
-    std::string_view value_copy = copy_to_pool(value);
+    std::string_view name_copy = name_stable ? name : copy_to_pool(name);
+    std::string_view value_copy = value_stable ? value : copy_to_pool(value);
     if ((!name_copy.data() && !name.empty()) || (!value_copy.data() && !value.empty())) {
         return common::IoErr::NoMem;
     }
@@ -848,8 +849,9 @@ common::IoErr ServerHttp2Request::apply_regular_header_policy(std::string_view n
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp2Request::handle_method(ServerHttp2Request &request, std::string_view value) noexcept {
-    std::string_view method = request.copy_to_pool(value);
+common::IoErr ServerHttp2Request::handle_method(ServerHttp2Request &request, std::string_view value,
+                                                bool value_stable) noexcept {
+    std::string_view method = value_stable ? value : request.copy_to_pool(value);
     if (method.data() == nullptr && !method.empty()) {
         return common::IoErr::NoMem;
     }
@@ -859,8 +861,9 @@ common::IoErr ServerHttp2Request::handle_method(ServerHttp2Request &request, std
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp2Request::handle_path(ServerHttp2Request &request, std::string_view value) noexcept {
-    std::string_view path = request.copy_to_pool(value);
+common::IoErr ServerHttp2Request::handle_path(ServerHttp2Request &request, std::string_view value,
+                                              bool value_stable) noexcept {
+    std::string_view path = value_stable ? value : request.copy_to_pool(value);
     if (path.data() == nullptr && !path.empty()) {
         return common::IoErr::NoMem;
     }
@@ -877,13 +880,14 @@ common::IoErr ServerHttp2Request::handle_path(ServerHttp2Request &request, std::
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp2Request::handle_scheme(ServerHttp2Request &request, std::string_view) noexcept {
+common::IoErr ServerHttp2Request::handle_scheme(ServerHttp2Request &request, std::string_view, bool) noexcept {
     request.exchange_.version_ = HttpVersion::HTTP_2_0;
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp2Request::handle_authority(ServerHttp2Request &request, std::string_view value) noexcept {
-    return request.commit_regular_header("host", http_header_name_hash("host"), value);
+common::IoErr ServerHttp2Request::handle_authority(ServerHttp2Request &request, std::string_view value,
+                                                   bool value_stable) noexcept {
+    return request.commit_regular_header("host", http_header_name_hash("host"), value, true, value_stable);
 }
 
 std::string_view ServerHttp2Request::copy_to_pool(const std::uint8_t *data, std::size_t len) noexcept {

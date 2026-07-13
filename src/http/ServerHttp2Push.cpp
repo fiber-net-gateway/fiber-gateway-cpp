@@ -10,7 +10,7 @@ namespace {
 
 common::IoErr noop_indexed_field(void *, Http2HpackDecoder::TableEntryView) noexcept { return common::IoErr::None; }
 
-common::IoErr noop_indexed_name(void *, std::string_view, std::uint64_t) noexcept { return common::IoErr::None; }
+common::IoErr noop_indexed_name(void *, Http2HpackDecoder::TableEntryView) noexcept { return common::IoErr::None; }
 
 common::IoErr noop_name_raw(void *, const std::uint8_t *, std::size_t) noexcept { return common::IoErr::None; }
 

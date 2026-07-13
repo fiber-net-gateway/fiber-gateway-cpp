@@ -86,6 +86,7 @@ bool Http2HpackStaticTable::get_by_index(std::uint32_t index, TableEntryView &vi
     view.name = std::string_view(entry.name, entry.name_len);
     view.value = std::string_view(entry.value, entry.value_len);
     view.name_hash = entry.name_hash;
+    view.storage = Http2HpackEntryStorage::Static;
     return true;
 }
 

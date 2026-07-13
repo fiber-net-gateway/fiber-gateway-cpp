@@ -27,23 +27,26 @@ struct DecodedEvent {
     std::string name;
     std::string value;
     std::uint64_t name_hash = 0;
+    fiber::http::Http2HpackEntryStorage storage = fiber::http::Http2HpackEntryStorage::Dynamic;
 };
 
 struct DecoderRecorder {
     static fiber::common::IoErr on_indexed_field(void *ctx,
                                                  fiber::http::Http2HpackDecoder::TableEntryView entry) noexcept {
         auto *self = static_cast<DecoderRecorder *>(ctx);
-        self->events.push_back(
-                {DecodedEvent::Kind::IndexedField, std::string(entry.name), std::string(entry.value), entry.name_hash});
+        self->events.push_back({DecodedEvent::Kind::IndexedField, std::string(entry.name), std::string(entry.value),
+                                entry.name_hash, entry.storage});
         return fiber::common::IoErr::None;
     }
 
-    static fiber::common::IoErr on_indexed_name(void *ctx, std::string_view name, std::uint64_t name_hash) noexcept {
+    static fiber::common::IoErr on_indexed_name(void *ctx,
+                                                fiber::http::Http2HpackDecoder::TableEntryView entry) noexcept {
         auto *self = static_cast<DecoderRecorder *>(ctx);
-        self->names.emplace_back(name);
+        self->names.emplace_back(entry.name);
         self->pending_name = self->names.back();
-        self->pending_name_hash = name_hash;
-        self->events.push_back({DecodedEvent::Kind::IndexedName, std::string(name), {}, name_hash});
+        self->pending_name_hash = entry.name_hash;
+        self->events.push_back(
+                {DecodedEvent::Kind::IndexedName, std::string(entry.name), {}, entry.name_hash, entry.storage});
         return fiber::common::IoErr::None;
     }
 
@@ -152,6 +155,7 @@ TEST(Http2HpackDecoderTest, DecodesIndexedFieldFromStaticTable) {
     EXPECT_EQ(recorder.events[0].kind, DecodedEvent::Kind::IndexedField);
     EXPECT_EQ(recorder.events[0].name, ":method");
     EXPECT_EQ(recorder.events[0].value, "GET");
+    EXPECT_EQ(recorder.events[0].storage, fiber::http::Http2HpackEntryStorage::Static);
 }
 
 TEST(Http2HpackDecoderTest, DecodesLiteralFieldAcrossFragmentsAndReusesDynamicTableEntry) {
@@ -182,6 +186,35 @@ TEST(Http2HpackDecoderTest, DecodesLiteralFieldAcrossFragmentsAndReusesDynamicTa
     EXPECT_EQ(recorder.events[0].kind, DecodedEvent::Kind::IndexedField);
     EXPECT_EQ(recorder.events[0].name, "foo");
     EXPECT_EQ(recorder.events[0].value, "bar");
+    EXPECT_EQ(recorder.events[0].storage, fiber::http::Http2HpackEntryStorage::Dynamic);
+}
+
+TEST(Http2HpackDecoderTest, ReportsStorageForIndexedNames) {
+    fiber::http::Http2HpackDecoder decoder;
+    ASSERT_TRUE(decoder.init());
+
+    DecoderRecorder recorder;
+    decoder.begin_block(&recorder, &DecoderRecorder::ops());
+    const std::uint8_t static_name_block[] = {0x02, 0x03, 'P', 'U', 'T'};
+    ASSERT_EQ(decoder.decode(static_name_block, sizeof(static_name_block), true), fiber::common::IoErr::None);
+    ASSERT_EQ(recorder.events.size(), 2U);
+    EXPECT_EQ(recorder.events[0].kind, DecodedEvent::Kind::IndexedName);
+    EXPECT_EQ(recorder.events[0].name, ":method");
+    EXPECT_EQ(recorder.events[0].storage, fiber::http::Http2HpackEntryStorage::Static);
+
+    recorder.events.clear();
+    decoder.begin_block(&recorder, &DecoderRecorder::ops());
+    const std::uint8_t inserted_field[] = {0x40, 0x03, 'f', 'o', 'o', 0x03, 'b', 'a', 'r'};
+    ASSERT_EQ(decoder.decode(inserted_field, sizeof(inserted_field), true), fiber::common::IoErr::None);
+
+    recorder.events.clear();
+    decoder.begin_block(&recorder, &DecoderRecorder::ops());
+    const std::uint8_t dynamic_name_block[] = {0x0f, 0x2f, 0x01, 'x'};
+    ASSERT_EQ(decoder.decode(dynamic_name_block, sizeof(dynamic_name_block), true), fiber::common::IoErr::None);
+    ASSERT_EQ(recorder.events.size(), 2U);
+    EXPECT_EQ(recorder.events[0].kind, DecodedEvent::Kind::IndexedName);
+    EXPECT_EQ(recorder.events[0].name, "foo");
+    EXPECT_EQ(recorder.events[0].storage, fiber::http::Http2HpackEntryStorage::Dynamic);
 }
 
 TEST(Http2HpackDecoderTest, DecodesHuffmanLiteralFieldViaOwnerCallbacks) {
