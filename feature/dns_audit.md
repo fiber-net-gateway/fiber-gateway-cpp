@@ -11,6 +11,7 @@
 ## 总体评价
 
 wire codec（`DnsName`/`DnsMessage`）边界检查、指针压缩循环检测（强制向后指 + 跳数上界）、open-addressing 哈希不变量、SOA 负 TTL 解析（RFC 2308）、pending 合并等均正确。原始审计发现的三个高危问题及缓存 LRU/tombstone 退化均已修复；当前剩余工作主要是分配开销及若干合规问题。按严重度排列如下，均给出 `file:line` 与触发场景。
+
 ---
 
 ## 🔴 HIGH
