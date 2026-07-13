@@ -150,10 +150,12 @@ inline std::string_view map_upstream_error_body(fiber::common::IoErr err) noexce
 // Detects the inbound request body framing (Content-Length / chunked / none) for forwarding.
 // end_stream=true when there is no body to forward (so send_header can close the request).
 inline fiber::http::HttpBodySpec detect_request_body(const fiber::http::HttpExchange &exchange, bool &end_stream) {
+    static constexpr std::uint64_t kContentLengthHash = fiber::http::http_header_name_hash("content-length");
+    static constexpr std::uint64_t kTransferEncodingHash = fiber::http::http_header_name_hash("transfer-encoding");
     std::size_t content_length = 0;
     end_stream = true;
 
-    const std::string_view content_length_value = exchange.request_headers().get("content-length");
+    const std::string_view content_length_value = exchange.request_headers().get("content-length", kContentLengthHash);
     if (!content_length_value.empty()) {
         if (!parse_decimal(content_length_value, content_length)) {
             content_length = 0;
@@ -161,7 +163,7 @@ inline fiber::http::HttpBodySpec detect_request_body(const fiber::http::HttpExch
         end_stream = content_length == 0;
         return fiber::http::HttpBodySpec::ContentLength(content_length);
     }
-    if (exchange.request_headers().contains("transfer-encoding")) {
+    if (exchange.request_headers().contains("transfer-encoding", kTransferEncodingHash)) {
         end_stream = false;
         return fiber::http::HttpBodySpec::Chunked();
     }

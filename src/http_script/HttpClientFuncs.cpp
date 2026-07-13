@@ -14,6 +14,7 @@
 #include "../http/HttpCommon.h"
 #include "../http/HttpExchange.h"
 #include "../http/HttpExchangeIo.h"
+#include "../http/HttpHeaderHash.h"
 #include "../http/HttpHeaders.h"
 #include "../http/HttpProxyCore.h"
 #include "../script/AsyncTask.h"
@@ -54,6 +55,10 @@ using namespace fiber::http::proxy_core;
 namespace {
 
 constexpr std::chrono::milliseconds kDefaultTimeout{30000};
+
+// Pre-hashed header names for per-response lookups.
+constexpr std::uint64_t kContentTypeHash = fiber::http::http_header_name_hash("content-type");
+constexpr std::uint64_t kContentLengthHash = fiber::http::http_header_name_hash("content-length");
 
 bool icase_starts_with(std::string_view text, std::string_view prefix) noexcept {
     if (text.size() < prefix.size()) {
@@ -278,7 +283,7 @@ fiber::http::HttpBodySpec build_request_body(GcHeap &heap, const JsValue &option
     if (bt == JsNodeType::Undefined || bt == JsNodeType::Null) {
         return fiber::http::HttpBodySpec::None();
     }
-    const bool has_ct = !headers.get("content-type").empty();
+    const bool has_ct = !headers.get("content-type", kContentTypeHash).empty();
 
     if (bt == JsNodeType::Binary) {
         const std::uint8_t *d = nullptr;
@@ -304,7 +309,7 @@ fiber::http::HttpBodySpec build_request_body(GcHeap &heap, const JsValue &option
             headers.set("Content-Type", "text/plain;charset=utf-8");
         }
     } else if (bt == JsNodeType::Object) {
-        const std::string_view ct = headers.get("content-type");
+        const std::string_view ct = headers.get("content-type", kContentTypeHash);
         if (ct.find("application/x-www-form-urlencoded") != std::string_view::npos) {
             object_pairs_to_form(heap, body, body_bytes);
             if (!has_ct) {
@@ -734,7 +739,8 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
     const bool no_body = response_has_no_body(method, resp_head->status_code);
     std::size_t response_content_length = 0;
     const bool has_content_length =
-            !no_body && parse_decimal(resp_head->headers.get("content-length"), response_content_length);
+            !no_body &&
+            parse_decimal(resp_head->headers.get("content-length", kContentLengthHash), response_content_length);
     const fiber::http::HttpBodySpec response_body =
             no_body ? fiber::http::HttpBodySpec::None()
                     : (has_content_length ? fiber::http::HttpBodySpec::ContentLength(response_content_length)

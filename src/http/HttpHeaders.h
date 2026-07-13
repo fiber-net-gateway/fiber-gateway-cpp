@@ -56,6 +56,12 @@ public:
     HeaderField *set_view(std::string_view name, std::string_view value, char *lowcase_name, uint64_t hash);
     std::string_view get(std::string_view name) const noexcept;
     bool contains(std::string_view name) const noexcept;
+    // Pre-hashed lookups: caller supplies the lowercase name and its http_header_name_hash().
+    // Pair with a `static constexpr` hash constant on hot paths to skip per-call re-hashing.
+    // The name need not be pre-lowercased (matching is case-insensitive), but a lowercase
+    // literal is the convention.
+    std::string_view get(std::string_view lowcase_name, uint64_t hash) const noexcept;
+    bool contains(std::string_view lowcase_name, uint64_t hash) const noexcept;
     size_t remove(std::string_view name) noexcept;
     size_t remove(std::string_view lowcase_name, uint64_t hash) noexcept;
     bool remove(const HeaderField &field) noexcept;
@@ -116,13 +122,15 @@ public:
         friend class HttpHeaders;
 
         const HttpHeaders *headers_ = nullptr;
-        std::string owned_key_;
         std::string_view key_;
         uint64_t hash_ = 0;
     };
 
     MatchRange get_all(std::string_view lowcase_key, uint64_t hash) const noexcept;
-    MatchRange get_all(std::string_view name) const;
+    // Convenience overload: hashes `name` (case-insensitively) and borrows it for the
+    // MatchRange lifetime (no allocation). Caller must keep `name` alive across iteration.
+    // Prefer the (lowcase_key, hash) form on hot paths with a `static constexpr` hash.
+    MatchRange get_all(std::string_view name) const noexcept;
 
     class ConstIterator {
     public:

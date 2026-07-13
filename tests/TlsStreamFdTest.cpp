@@ -258,7 +258,7 @@ TEST(TlsStreamFdTest, CrossLoopHandshakeAndReadWriteUseOwnerPoller) {
 // with a distinct byte (0x40 + i) so that reordering, drops, or duplication in the
 // coalesce path show up as a mismatched byte. Returns the expected concatenation.
 std::string build_distinct_chain(fiber::mem::IoBufNodePool &pool, fiber::mem::IoBufChain &chain,
-                                  const std::vector<std::size_t> &sizes) {
+                                 const std::vector<std::size_t> &sizes) {
     std::string expected;
     for (std::size_t i = 0; i < sizes.size(); ++i) {
         std::size_t n = sizes[i];
@@ -376,7 +376,8 @@ TEST(TlsStreamFdTest, TlsTransportWritevCoalescesMultiNodeChain) {
     auto client_future = client_promise.get_future();
 
     fiber::async::spawn(group.at(0), [&]() { return run_transport_server(server_transport, &server_promise); });
-    fiber::async::spawn(group.at(1), [&]() { return run_transport_client(client_transport, std::move(chain), &client_promise); });
+    fiber::async::spawn(group.at(1),
+                        [&]() { return run_transport_client(client_transport, std::move(chain), &client_promise); });
 
     ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
     ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);

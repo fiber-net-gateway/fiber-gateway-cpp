@@ -5,6 +5,7 @@
 #include "../common/util/UrlForm.h"
 #include "../http/HttpBodySpec.h"
 #include "../http/HttpExchangeIo.h"
+#include "../http/HttpHeaderHash.h"
 #include "../script/JsValue.h"
 #include "../script/gc/GcInternal.h"
 #include "../script/json/JsValueEncode.h"
@@ -15,6 +16,9 @@
 namespace fiber::http_script {
 
 namespace {
+
+// Pre-hashed Cookie header name for per-request cookie parsing.
+constexpr std::uint64_t kCookieHash = fiber::http::http_header_name_hash("cookie");
 
 // Writes generated JSON into a std::string buffer. Used by write_json to materialize a
 // JsValue as bytes before handing them to HttpExchange::write_body.
@@ -138,7 +142,7 @@ fiber::script::JsValue ScriptExchangeCtx::cookies() noexcept {
     if (fiber::script::js_value_type(*cookies_root_) != fiber::script::JsNodeType::Object) {
         return fiber::script::JsValue::make_undefined();
     }
-    fiber::http::HttpHeaders::MatchRange cookie_headers = exchange_.request_headers().get_all("cookie");
+    fiber::http::HttpHeaders::MatchRange cookie_headers = exchange_.request_headers().get_all("cookie", kCookieHash);
     for (const fiber::http::HttpHeaders::HeaderField &field: cookie_headers) {
         fiber::util::decode_cookie_header(field.value_view(), [&](std::string_view name, std::string_view value) {
             put_string(heap_, cookies_root_, name, value);
@@ -199,7 +203,7 @@ fiber::script::AbiResult ScriptExchangeCtx::header_var(fiber::script::GcHeap &he
 
 fiber::script::AbiResult ScriptExchangeCtx::cookie_var(fiber::script::GcHeap &heap,
                                                        std::string_view norm_key) const noexcept {
-    fiber::http::HttpHeaders::MatchRange cookie_headers = exchange_.request_headers().get_all("cookie");
+    fiber::http::HttpHeaders::MatchRange cookie_headers = exchange_.request_headers().get_all("cookie", kCookieHash);
     for (const fiber::http::HttpHeaders::HeaderField &field: cookie_headers) {
         std::string_view matched;
         bool found = false;

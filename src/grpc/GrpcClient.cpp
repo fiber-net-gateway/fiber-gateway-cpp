@@ -26,6 +26,10 @@ namespace {
 
 void assign_view(std::string &dst, std::string_view src) { dst.assign(src.data(), src.size()); }
 
+// Pre-hashed trailer/header names for per-response gRPC status extraction.
+constexpr std::uint64_t kGrpcStatusHash = http::http_header_name_hash("grpc-status");
+constexpr std::uint64_t kGrpcMessageHash = http::http_header_name_hash("grpc-message");
+
 // Common gRPC request headers that are identical on every call: index them in
 // the HPACK dynamic table so repeated calls on one connection encode them as
 // 1-byte indexed fields. All string_views point at string literals (static
@@ -155,10 +159,10 @@ GrpcClient::unary_call(std::string_view service, std::string_view method, const 
 
     int grpc_code = 0;
     std::string grpc_message;
-    if (auto s = resp->headers.get("grpc-status"); !s.empty()) {
+    if (auto s = resp->headers.get("grpc-status", kGrpcStatusHash); !s.empty()) {
         grpc_code = parse_grpc_status(s);
     }
-    if (auto m = resp->headers.get("grpc-message"); !m.empty()) {
+    if (auto m = resp->headers.get("grpc-message", kGrpcMessageHash); !m.empty()) {
         assign_view(grpc_message, m);
     }
 
@@ -211,10 +215,10 @@ GrpcClient::unary_call(std::string_view service, std::string_view method, const 
         co_return std::unexpected(trailer_result.error());
     }
     const http::Http2ResponseHead *trailer = *trailer_result;
-    if (auto s = trailer->headers.get("grpc-status"); !s.empty()) {
+    if (auto s = trailer->headers.get("grpc-status", kGrpcStatusHash); !s.empty()) {
         grpc_code = parse_grpc_status(s);
     }
-    if (auto m = trailer->headers.get("grpc-message"); !m.empty()) {
+    if (auto m = trailer->headers.get("grpc-message", kGrpcMessageHash); !m.empty()) {
         assign_view(grpc_message, m);
     }
 

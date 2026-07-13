@@ -846,8 +846,8 @@ ClientHttp1Exchange::write_body(mem::IoBufChain chunk, std::chrono::milliseconds
             }
 
             // body_bytes == 0 && chunk.complete(): empty final chunk, just the terminator.
-            auto final_result = co_await write_all(conn_->transport_.get(), kChunkedFinal.data(),
-                                                   kChunkedFinal.size(), timeout);
+            auto final_result =
+                    co_await write_all(conn_->transport_.get(), kChunkedFinal.data(), kChunkedFinal.size(), timeout);
             if (!final_result) {
                 request_state_ = RequestState::Failed;
                 active_ = false;

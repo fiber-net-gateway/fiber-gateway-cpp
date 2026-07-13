@@ -27,11 +27,6 @@ size_t next_pow2(size_t value) {
     return value + 1;
 }
 
-void to_lowcase_and_hash(std::string_view name, std::string &out, uint64_t &hash_out) {
-    out.resize(name.size());
-    hash_out = http_header_name_to_lowercase_and_hash(name, out.data());
-}
-
 void init_field(HttpHeaders::HeaderField *field, const char *name_ptr, uint32_t name_len, const char *lowcase_ptr,
                 const char *value_ptr, uint32_t value_len, uint64_t hash) {
     field->name = name_ptr;
@@ -196,16 +191,24 @@ std::string_view HttpHeaders::get(std::string_view name) const noexcept {
 
 bool HttpHeaders::contains(std::string_view name) const noexcept { return find_first_node(name) != nullptr; }
 
+std::string_view HttpHeaders::get(std::string_view lowcase_name, uint64_t hash) const noexcept {
+    const HeaderField *node = find_first_node_lowcase(lowcase_name, hash);
+    if (!node) {
+        return {};
+    }
+    return node->value_view();
+}
+
+bool HttpHeaders::contains(std::string_view lowcase_name, uint64_t hash) const noexcept {
+    return find_first_node_lowcase(lowcase_name, hash) != nullptr;
+}
+
 HttpHeaders::MatchRange HttpHeaders::get_all(std::string_view lowcase_key, uint64_t hash) const noexcept {
     return MatchRange(this, lowcase_key, hash);
 }
 
-HttpHeaders::MatchRange HttpHeaders::get_all(std::string_view name) const {
-    MatchRange range;
-    range.headers_ = this;
-    to_lowcase_and_hash(name, range.owned_key_, range.hash_);
-    range.key_ = range.owned_key_;
-    return range;
+HttpHeaders::MatchRange HttpHeaders::get_all(std::string_view name) const noexcept {
+    return MatchRange(this, name, http_header_name_hash(name));
 }
 
 size_t HttpHeaders::remove(std::string_view name) noexcept {

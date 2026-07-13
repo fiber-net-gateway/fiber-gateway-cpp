@@ -11,6 +11,7 @@
 #include "Http1Connection.h"
 #include "Http1HeaderParseBuffer.h"
 #include "HttpExchange.h"
+#include "HttpHeaderHash.h"
 #include "HttpTransport.h"
 
 namespace fiber::http {
@@ -31,6 +32,11 @@ constexpr std::string_view kChunkedHeader = "Transfer-Encoding: chunked\r\n";
 constexpr std::string_view kConnectionCloseHeader = "Connection: close\r\n";
 constexpr std::string_view kChunkedFinalPrefix = "0\r\n";
 constexpr std::string_view kChunkedFinal = "0\r\n\r\n";
+
+// Pre-hashed header names for response-header presence checks (per-response hot path).
+constexpr std::uint64_t kContentLengthNameHash = http_header_name_hash("content-length");
+constexpr std::uint64_t kTransferEncodingNameHash = http_header_name_hash("transfer-encoding");
+constexpr std::uint64_t kConnectionNameHash = http_header_name_hash("connection");
 
 std::string_view default_reason_phrase(int status) noexcept {
     switch (status) {
@@ -701,12 +707,14 @@ common::IoResult<mem::IoBuf> Http1ExchangeIo::build_response_header(HttpExchange
                                                        : std::string_view(response_reason_);
     std::string_view version = exchange.version_ == HttpVersion::HTTP_1_0 ? kHttp10Prefix : kHttp11Prefix;
 
-    bool write_content_length = body_spec.is_content_length() &&
-                                (response_headers_ == nullptr || !response_headers_->contains("Content-Length"));
-    bool write_transfer_encoding = body_spec.is_chunked() &&
-                                   (response_headers_ == nullptr || !response_headers_->contains("Transfer-Encoding"));
-    bool write_connection_close =
-            close_conn && (response_headers_ == nullptr || !response_headers_->contains("Connection"));
+    bool write_content_length =
+            body_spec.is_content_length() &&
+            (response_headers_ == nullptr || !response_headers_->contains("content-length", kContentLengthNameHash));
+    bool write_transfer_encoding =
+            body_spec.is_chunked() && (response_headers_ == nullptr ||
+                                       !response_headers_->contains("transfer-encoding", kTransferEncodingNameHash));
+    bool write_connection_close = close_conn && (response_headers_ == nullptr ||
+                                                 !response_headers_->contains("connection", kConnectionNameHash));
 
     std::size_t header_len = 0;
     if (!checked_add(header_len, version.size()) || !checked_add(header_len, kHttpStatusDigits) ||
