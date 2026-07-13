@@ -74,6 +74,8 @@ TcpStream::WritevAwaiter TcpStream::writev(const struct iovec *iov, int iovcnt) 
     return stream_.writev(iov, iovcnt);
 }
 
+TcpStream::WaitReadableAwaiter TcpStream::wait_readable() noexcept { return stream_.wait_readable(); }
+
 fiber::common::IoResult<size_t> TcpStream::try_read(void *buf, size_t len) noexcept {
     return stream_.try_read(buf, len);
 }

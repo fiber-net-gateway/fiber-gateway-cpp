@@ -25,6 +25,7 @@ public:
 
     virtual fiber::async::Task<common::IoResult<void>> handshake(std::chrono::milliseconds timeout) = 0;
     virtual fiber::async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds timeout) = 0;
+    virtual fiber::async::Task<common::IoResult<void>> wait_readable(std::chrono::milliseconds timeout) = 0;
     virtual fiber::async::Task<common::IoResult<size_t>> read(void *buf, size_t len,
                                                               std::chrono::milliseconds timeout) = 0;
     virtual fiber::async::Task<common::IoResult<size_t>> read_into(mem::IoBuf &buf,
@@ -50,6 +51,7 @@ public:
 
     fiber::async::Task<common::IoResult<void>> handshake(std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds timeout) override;
+    fiber::async::Task<common::IoResult<void>> wait_readable(std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<size_t>> read(void *buf, size_t len,
                                                       std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<size_t>> read_into(mem::IoBuf &buf, std::chrono::milliseconds timeout) override;
@@ -83,6 +85,7 @@ public:
 
     fiber::async::Task<common::IoResult<void>> handshake(std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds timeout) override;
+    fiber::async::Task<common::IoResult<void>> wait_readable(std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<size_t>> read(void *buf, size_t len,
                                                       std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<size_t>> read_into(mem::IoBuf &buf, std::chrono::milliseconds timeout) override;

@@ -73,6 +73,10 @@ public:
         co_return fiber::common::IoResult<void>{};
     }
 
+    fiber::async::Task<fiber::common::IoResult<void>> wait_readable(std::chrono::milliseconds) override {
+        co_return fiber::common::IoResult<void>{};
+    }
+
     fiber::async::Task<fiber::common::IoResult<size_t>> read(void *buf, size_t len,
                                                              std::chrono::milliseconds) override {
         while (reads_blocked_ && !closed_) {
@@ -218,6 +222,10 @@ public:
 
     fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds) override {
         ++shutdown_count_;
+        co_return fiber::common::IoResult<void>{};
+    }
+
+    fiber::async::Task<fiber::common::IoResult<void>> wait_readable(std::chrono::milliseconds) override {
         co_return fiber::common::IoResult<void>{};
     }
 

@@ -171,6 +171,12 @@ DetachedTask read_write_server(fiber::event::EventLoop *loop, std::promise<uint1
     std::unique_ptr<fiber::net::TcpStream> stream = std::make_unique<fiber::net::TcpStream>(*loop, accepted_fd);
     accepted_fd = -1;
 
+    auto ready_result = co_await stream->wait_readable();
+    if (!ready_result) {
+        fail(ready_result.error(), stream, accepted_fd);
+        co_return;
+    }
+
     std::string buffer(request.size(), '\0');
     size_t offset = 0;
     while (offset < buffer.size()) {

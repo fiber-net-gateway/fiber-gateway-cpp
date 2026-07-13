@@ -226,6 +226,8 @@ std::string TlsStreamFd::selected_alpn() const noexcept {
 
 bool TlsStreamFd::handshake_done() const noexcept { return handshake_done_; }
 
+bool TlsStreamFd::has_pending_read() const noexcept { return ssl_ != nullptr && SSL_has_pending(ssl_) != 0; }
+
 void TlsStreamFd::close() {
     FIBER_ASSERT(loop().in_loop());
     if (ssl_) {

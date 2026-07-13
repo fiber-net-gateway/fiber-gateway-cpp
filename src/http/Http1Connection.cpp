@@ -210,9 +210,7 @@ fiber::async::Task<fiber::common::IoResult<ParseCode>> Http1Connection::parse_re
                 }
                 std::size_t copied = drain_inbound(header_buffer.buf());
                 if (copied == 0) {
-                    auto timeout =
-                            header_buffer.buf().readable() == 0 ? options_.keep_alive_timeout : options_.header_timeout;
-                    auto result = co_await transport_->read_into(header_buffer.buf(), timeout);
+                    auto result = co_await transport_->read_into(header_buffer.buf(), options_.header_timeout);
                     if (!result) {
                         co_return std::unexpected(result.error());
                     }
@@ -275,9 +273,7 @@ fiber::async::Task<fiber::common::IoResult<ParseCode>> Http1Connection::parse_re
                 }
                 std::size_t copied = drain_inbound(header_buffer.buf());
                 if (copied == 0) {
-                    auto timeout =
-                            header_buffer.buf().readable() == 0 ? options_.keep_alive_timeout : options_.header_timeout;
-                    auto result = co_await transport_->read_into(header_buffer.buf(), timeout);
+                    auto result = co_await transport_->read_into(header_buffer.buf(), options_.header_timeout);
                     if (!result) {
                         co_return std::unexpected(result.error());
                     }
@@ -369,6 +365,13 @@ fiber::async::Task<void> Http1Connection::run() {
     for (;;) {
         if (server_ && server_->shutting_down()) {
             break;
+        }
+
+        if (inbound_bufs_.readable_bytes() == 0) {
+            auto wait_result = co_await transport_->wait_readable(options_.keep_alive_timeout);
+            if (!wait_result) {
+                break;
+            }
         }
 
         HttpExchange exchange(loop_.io_buf_node_pool(), options_);
