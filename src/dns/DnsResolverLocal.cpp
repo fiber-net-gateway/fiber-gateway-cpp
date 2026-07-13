@@ -352,8 +352,8 @@ void DnsResolverLocal::close() noexcept {
         return;
     }
     closing_ = true;
-    cancel_all_pending(common::IoErr::Canceled);
     client_.close();
+    cancel_all_pending(common::IoErr::Canceled);
 }
 
 void DnsResolverLocal::release() noexcept {

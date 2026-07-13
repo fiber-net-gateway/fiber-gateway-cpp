@@ -119,6 +119,7 @@ public:
             static_assert(std::is_void_v<SuspendReturn> || std::is_same_v<SuspendReturn, bool>,
                           "await_suspend must return void or bool");
         }
+        waiting_ = true;
         if (has_timer()) {
             auto when = deadline_for_timer();
             loop_->post_at<TimeoutAwaiter, &TimeoutAwaiter::timer_entry_, &TimeoutAwaiter::on_timeout>(when, *this);
@@ -127,6 +128,7 @@ public:
     }
 
     ReturnResult await_resume() {
+        waiting_ = false;
         if (timed_out_) {
             return std::unexpected(fiber::common::IoErr::TimedOut);
         }
@@ -144,8 +146,24 @@ public:
         }
     }
 
+    void cancel() noexcept
+        requires requires(InnerAwaiter &awaiter) {
+            { awaiter.cancel() } noexcept;
+        }
+    {
+        if (!waiting_) {
+            return;
+        }
+        waiting_ = false;
+        if (loop_ && timer_entry_.is_in_heap()) {
+            loop_->cancel<TimeoutAwaiter, &TimeoutAwaiter::timer_entry_>(*this);
+        }
+        awaiter_.cancel();
+    }
+
 private:
     static void on_timeout(TimeoutAwaiter *awaiter) noexcept {
+        awaiter->waiting_ = false;
         awaiter->timed_out_ = true;
         awaiter->handle_.resume();
     }
@@ -161,6 +179,7 @@ private:
     fiber::event::EventLoop *loop_ = nullptr;
     std::coroutine_handle<> handle_{};
     fiber::event::EventLoop::TimerEntry timer_entry_{};
+    bool waiting_ = false;
     bool timed_out_ = false;
 };
 

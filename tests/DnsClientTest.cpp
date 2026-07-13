@@ -342,6 +342,94 @@ DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop, std::pro
     outcome_promise->set_value(std::move(outcome));
 }
 
+DetachedTask run_udp_tcp_cancel_server(fiber::event::EventLoop *loop, DnsClient *client,
+                                       std::promise<std::uint16_t> *port_promise,
+                                       std::promise<ServerOutcome> *outcome_promise) {
+    ServerOutcome outcome;
+    fiber::net::UdpSocket udp(*loop);
+    auto udp_bind = udp.bind(fiber::net::SocketAddress::any_v4(), {});
+    if (!udp_bind) {
+        port_promise->set_value(0);
+        outcome.err = udp_bind.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    auto port_result = resolve_port(udp.fd());
+    if (!port_result) {
+        port_promise->set_value(0);
+        outcome.err = port_result.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    fiber::net::TcpListener listener(*loop);
+    auto bind_result = listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), *port_result), {});
+    port_promise->set_value(bind_result ? *port_result : 0);
+    if (!bind_result) {
+        outcome.err = bind_result.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    std::array<std::uint8_t, 512> buf{};
+    auto recv_result = co_await fiber::async::timeout_for([&]() { return udp.recv_from(buf.data(), buf.size()); }, 2s);
+    if (!recv_result) {
+        outcome.err = recv_result.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+    ++outcome.recv_count;
+
+    auto truncated = make_truncated_response(read_be16(buf.data()), "www.example.com");
+    auto udp_send = co_await fiber::async::timeout_for(
+            [&]() { return udp.send_to(truncated.data(), truncated.size(), recv_result->peer); }, 2s);
+    if (!udp_send) {
+        outcome.err = udp_send.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    auto accept_result = co_await fiber::async::timeout_for([&]() { return listener.accept(); }, 2s);
+    if (!accept_result) {
+        outcome.err = accept_result.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    fiber::net::TcpStream stream(*loop, accept_result->release_fd(), accept_result->take_peer());
+    std::array<std::uint8_t, 2> prefix{};
+    auto prefix_read = co_await read_exact(stream, prefix.data(), prefix.size());
+    if (!prefix_read) {
+        outcome.err = prefix_read.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    std::vector<std::uint8_t> tcp_query(read_be16(prefix.data()));
+    auto query_read = co_await read_exact(stream, tcp_query.data(), tcp_query.size());
+    if (!query_read) {
+        outcome.err = query_read.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    client->close();
+    client->release();
+
+    std::uint8_t byte = 0;
+    auto close_result = co_await fiber::async::timeout_for([&]() { return stream.read(&byte, 1); }, 2s);
+    if (!close_result) {
+        outcome.err = close_result.error();
+    } else {
+        outcome.err = *close_result == 0 ? IoErr::None : IoErr::Unknown;
+    }
+    udp.close();
+    listener.close();
+    stream.close();
+    outcome_promise->set_value(std::move(outcome));
+}
+
 DetachedTask run_client_query(fiber::event::EventLoop *loop, std::uint16_t port, std::chrono::milliseconds timeout,
                               std::uint8_t attempts, bool enable_tcp_fallback,
                               std::promise<ClientOutcome> *outcome_promise) {
@@ -402,6 +490,30 @@ DetachedTask run_client_close_while_waiting(fiber::event::EventLoop *loop,
     auto result = co_await client.query_raw(question, packet.data(), packet.size());
     outcome.err = result ? IoErr::None : result.error();
     client.release();
+    outcome_promise->set_value(std::move(outcome));
+}
+
+DetachedTask run_client_query_until_canceled(fiber::event::EventLoop *loop, DnsClient *client, std::uint16_t port,
+                                             std::promise<ClientOutcome> *outcome_promise) {
+    ClientOutcome outcome;
+    DnsClient::Options options{};
+    options.server = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    options.timeout = 5s;
+    options.attempts = 1;
+    if (!client->init(*loop, options)) {
+        outcome.err = IoErr::Invalid;
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    QuestionSpec question;
+    question.name = "www.example.com";
+    question.type = static_cast<std::uint16_t>(RecordType::A);
+    question.dns_class = static_cast<std::uint16_t>(RecordClass::IN);
+
+    std::array<std::uint8_t, 512> packet{};
+    auto result = co_await client->query_raw(question, packet.data(), packet.size());
+    outcome.err = result ? IoErr::None : result.error();
     outcome_promise->set_value(std::move(outcome));
 }
 
@@ -514,6 +626,35 @@ TEST(DnsClientTest, CloseCancelsPendingQuery) {
     group.join();
 
     EXPECT_EQ(client.err, IoErr::Canceled);
+}
+
+TEST(DnsClientTest, CloseAndReleaseCancelPendingTcpFallback) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    DnsClient dns_client;
+    std::promise<std::uint16_t> port_promise;
+    std::promise<ServerOutcome> server_promise;
+    std::promise<ClientOutcome> client_promise;
+
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_udp_tcp_cancel_server(&group.at(0), &dns_client, &port_promise, &server_promise);
+    });
+    const auto port = port_promise.get_future().get();
+    ASSERT_NE(port, 0);
+
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_client_query_until_canceled(&group.at(0), &dns_client, port, &client_promise);
+    });
+
+    const auto client = client_promise.get_future().get();
+    const auto server = server_promise.get_future().get();
+    group.stop();
+    group.join();
+
+    EXPECT_EQ(client.err, IoErr::Canceled);
+    EXPECT_EQ(server.err, IoErr::None);
+    EXPECT_EQ(server.recv_count, 1u);
 }
 
 } // namespace
