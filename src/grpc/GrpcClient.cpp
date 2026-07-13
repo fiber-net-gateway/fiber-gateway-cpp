@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <new>
 #include <utility>
 
 #include "../http/HttpHeaderHash.h"
@@ -9,26 +10,30 @@
 namespace fiber::grpc {
 
 int parse_grpc_status(std::string_view s) noexcept {
-    int v = 0;
+    // An empty value is treated as OK (0) - matches a missing grpc-status.
+    if (s.empty()) {
+        return 0;
+    }
+    // Accumulate in unsigned so the multiply/add never triggers signed-overflow
+    // UB. Reject any non-digit character (the whole value must be decimal) and
+    // any value exceeding INT_MAX, both as -1 per the documented contract.
+    unsigned v = 0;
     for (char c: s) {
         if (c < '0' || c > '9') {
-            break;
-        }
-        v = v * 10 + (c - '0');
-        if (v > 0x7fffffff) {
             return -1;
         }
+        const unsigned digit = static_cast<unsigned>(c - '0');
+        if (v > (0x7fffffffu - digit) / 10u) {
+            return -1;
+        }
+        v = v * 10u + digit;
     }
-    return v;
+    return static_cast<int>(v);
 }
 
 namespace {
 
 void assign_view(std::string &dst, std::string_view src) { dst.assign(src.data(), src.size()); }
-
-// Pre-hashed trailer/header names for per-response gRPC status extraction.
-constexpr std::uint64_t kGrpcStatusHash = http::http_header_name_hash("grpc-status");
-constexpr std::uint64_t kGrpcMessageHash = http::http_header_name_hash("grpc-message");
 
 // Common gRPC request headers that are identical on every call: index them in
 // the HPACK dynamic table so repeated calls on one connection encode them as
@@ -104,138 +109,57 @@ GrpcClient::unary_call(std::string_view service, std::string_view method, const 
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    // 1. encode + frame the request message
-    auto payload = encode(loop_->io_buf_node_pool(), request);
-    if (!payload) {
-        co_return std::unexpected(payload.error());
-    }
-    auto framed = frame(std::move(*payload));
-    if (!framed) {
-        co_return std::unexpected(framed.error());
-    }
-
-    // 2. request headers: POST /{service}/{method}
-    http::HttpHeaders headers(pool);
-    headers.set("content-type", "application/grpc");
-    headers.set("te", "trailers");
-    headers.set("grpc-encoding", "identity");
-
-    std::string path;
-    path.reserve(service.size() + method.size() + 2);
-    path.push_back('/');
-    path.append(service.data(), service.size());
-    path.push_back('/');
-    path.append(method.data(), method.size());
-
-    const http::Http2RequestHead head{
-            .method = http::HttpMethod::Post,
-            .scheme = std::string_view(scheme_),
-            .authority = std::string_view(authority_),
-            .path = std::string_view(path),
-            .headers = &headers,
-    };
-
-    // 3. open exchange, send headers, then the framed body (END_STREAM)
-    http::ClientHttp2Exchange exchange(*conn_, pool);
-    auto send_result = co_await exchange.send_request_header(head, false);
-    if (!send_result) {
-        co_return std::unexpected(send_result.error());
-    }
-    framed->mark_complete(); // END_STREAM travels with this write
-    auto write_result = co_await exchange.write_body(std::move(*framed));
-    if (!write_result) {
-        co_return std::unexpected(write_result.error());
+    // Unary is just a constrained streaming call: open, send exactly one request
+    // (half-close), read exactly one response, then finish for the gRPC status.
+    // Delegating to GrpcStream avoids a second copy of the framing/read/trailer
+    // logic and keeps the two paths from diverging.
+    GrpcStream stream;
+    try {
+        stream = open_stream(service, method, pool, {});
+    } catch (const std::bad_alloc &) {
+        // open_stream (GrpcStream ctor) allocates the authority/path strings; a
+        // bad_alloc there is reported as IoErr::NoMem rather than terminating
+        // this noexcept coroutine. Matches ScriptCompiler's bad_alloc handling.
+        co_return std::unexpected(common::IoErr::NoMem);
     }
 
-    // 4. response headers
-    auto header_result = co_await exchange.read_header();
-    if (!header_result) {
-        co_return std::unexpected(header_result.error());
+    if (auto r = co_await stream.open(); !r) {
+        co_return std::unexpected(r.error());
     }
-    const http::Http2ResponseHead *resp = *header_result;
-    if (resp->status_code != 200) {
-        co_return std::unexpected(common::IoErr::Unknown);
+    if (auto r = co_await stream.write(request); !r) {
+        co_return std::unexpected(r.error());
     }
-
-    int grpc_code = 0;
-    std::string grpc_message;
-    if (auto s = resp->headers.get("grpc-status", kGrpcStatusHash); !s.empty()) {
-        grpc_code = parse_grpc_status(s);
-    }
-    if (auto m = resp->headers.get("grpc-message", kGrpcMessageHash); !m.empty()) {
-        assign_view(grpc_message, m);
+    if (auto r = co_await stream.writes_done(); !r) {
+        co_return std::unexpected(r.error());
     }
 
-    // grpc-status may ride the response headers with END_STREAM (no body / no
-    // separate trailer block) - e.g. immediate errors.
-    if (resp->end_stream) {
-        co_return GrpcStatus{grpc_code, std::move(grpc_message)};
+    // A trailers-only response (immediate error) carries no message and yields End.
+    const auto first = co_await stream.read(response);
+    if (!first) {
+        co_return std::unexpected(first.error());
     }
-
-    // 5. read + deframe the body (expect exactly one message for unary)
-    GrpcFrameReader reader;
-    mem::IoBufChain payload_chain;
-    bool got_message = false;
-    for (;;) {
-        auto body_result = co_await exchange.read_body(64 * 1024);
-        if (!body_result) {
-            co_return std::unexpected(body_result.error());
+    // Unary permits exactly one response message; a second is a protocol violation.
+    if (*first == GrpcReadOutcome::Message) {
+        const auto second = co_await stream.read(response);
+        if (!second) {
+            co_return std::unexpected(second.error());
         }
-        // The chain is moved into the frame reader below; capture END_STREAM first.
-        const bool stream_end = body_result->complete();
-        if (body_result->readable_bytes() > 0) {
-            auto append_result = reader.append(std::move(*body_result));
-            if (!append_result) {
-                co_return std::unexpected(append_result.error());
-            }
-        }
-        for (;;) {
-            mem::IoBufChain frame_payload;
-            auto extract_result = reader.next_payload(frame_payload);
-            if (!extract_result) {
-                co_return std::unexpected(extract_result.error());
-            }
-            if (!*extract_result) {
-                break; // need more bytes
-            }
-            if (got_message) {
-                co_return std::unexpected(common::IoErr::Invalid); // unary: exactly one message
-            }
-            payload_chain = std::move(frame_payload);
-            got_message = true;
-        }
-        if (stream_end) {
-            break;
+        if (*second == GrpcReadOutcome::Message) {
+            co_return std::unexpected(common::IoErr::Invalid);
         }
     }
 
-    // 6. trailers (grpc-status / grpc-message normally live here)
-    auto trailer_result = co_await exchange.read_header();
-    if (!trailer_result) {
-        co_return std::unexpected(trailer_result.error());
+    auto finish_result = co_await stream.finish();
+    if (!finish_result) {
+        co_return std::unexpected(finish_result.error());
     }
-    const http::Http2ResponseHead *trailer = *trailer_result;
-    if (auto s = trailer->headers.get("grpc-status", kGrpcStatusHash); !s.empty()) {
-        grpc_code = parse_grpc_status(s);
+    if (!finish_result->ok()) {
+        co_return *finish_result; // gRPC-level error; do not trust the response
     }
-    if (auto m = trailer->headers.get("grpc-message", kGrpcMessageHash); !m.empty()) {
-        assign_view(grpc_message, m);
-    }
-
-    if (grpc_code != 0) {
-        co_return GrpcStatus{grpc_code, std::move(grpc_message)};
-    }
-    if (!got_message) {
+    if (*first != GrpcReadOutcome::Message) {
         co_return std::unexpected(common::IoErr::Invalid); // OK status but no message
     }
-
-    // 7. decode the reply (zero-copy: parses directly off payload_chain)
-    auto decode_result = decode(payload_chain, response);
-    if (!decode_result) {
-        co_return std::unexpected(decode_result.error());
-    }
-
-    co_return GrpcStatus{0, std::string{}};
+    co_return *finish_result;
 }
 
 } // namespace fiber::grpc

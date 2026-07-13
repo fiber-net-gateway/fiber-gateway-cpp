@@ -41,21 +41,19 @@ enum class GrpcReadOutcome : std::uint8_t {
 // send and receive).
 //
 // Failure handling:
-//   - A read that returns an error other than TimedOut fails the call: the
-//     stream is cancelled (RST_STREAM) and further calls return the abort
-//     reason. A read timeout (IoErr::TimedOut) is harmless - the stream stays
-//     open and read() may be retried.
-//   - Any write failure (including TimedOut) fails the call, because a timed-out
-//     partial flush may have left a truncated frame on the wire.
+//   - Any error from a read or write (including IoErr::TimedOut, which signals
+//     the Options::deadline has elapsed) fails the call: the stream is
+//     cancelled (RST_STREAM) and further calls return the abort reason.
 //   - cancel() is synchronous, idempotent, and safe from any coroutine driving
 //     the stream; it wakes a blocked read/write with Canceled.
 class GrpcStream {
 public:
     struct Options {
-        // Absolute call deadline, sent as the grpc-timeout header (server-enforced).
-        // 0 = no deadline. The client does not enforce this locally; a hung call is
-        // bounded by the connection's read_timeout / keepalive, or an external
-        // timer that calls cancel().
+        // Call deadline. Sent as the grpc-timeout header (server-enforced) AND
+        // enforced locally: each read/write on the stream is bounded by the time
+        // remaining until the deadline, so a hung call fails with TimedOut
+        // instead of blocking indefinitely. 0 = no deadline (wait indefinitely,
+        // bounded only by the connection's keepalive or an external cancel()).
         std::chrono::milliseconds deadline{0};
     };
 
@@ -82,8 +80,8 @@ public:
 
     // Read one response message into `response`. Returns Message (decoded) or End
     // (response stream finished; call finish() for the gRPC status). On a
-    // transport/protocol error returns unexpected; a TimedOut error leaves the
-    // stream open for retry, any other error fails the call.
+    // transport/protocol error (including TimedOut when the deadline elapses)
+    // returns unexpected and fails the call.
     fiber::async::Task<common::IoResult<GrpcReadOutcome>> read(google::protobuf::MessageLite &response) noexcept;
 
     // Finish the call: read trailers (if any) and return the gRPC status. After
@@ -100,6 +98,11 @@ private:
     // Reads the response HEADERS (lazily, on first read()/finish()) and captures
     // any grpc-status present (trailers-only responses carry it here).
     fiber::async::Task<common::IoResult<void>> ensure_response_header() noexcept;
+
+    // Time remaining until Options::deadline, or milliseconds::max() if no
+    // deadline is set. Used as the per-call timeout for every exchange op so the
+    // deadline is enforced locally without a background timer.
+    [[nodiscard]] std::chrono::milliseconds remaining_timeout() const noexcept;
 
     // Mark the call failed and RST the stream. Idempotent.
     void fail(common::IoErr reason) noexcept;
@@ -129,6 +132,10 @@ private:
     bool finished_ = false;
     bool failed_ = false;
     common::IoErr abort_reason_ = common::IoErr::None;
+
+    // local deadline (Options::deadline). has_deadline_ = false => infinite.
+    bool has_deadline_ = false;
+    std::chrono::steady_clock::time_point deadline_abs_{};
 };
 
 } // namespace fiber::grpc
