@@ -6,7 +6,6 @@
 #include <vector>
 
 #include "common/IoError.h"
-#include "event/EventLoop.h"
 #include "http/ClientHttp1Exchange.h"
 #include "http/Http1ClientConnection.h"
 #include "http/HttpCommon.h"
@@ -259,15 +258,6 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
     }
 }
 
-struct TimeRec {
-    std::chrono::steady_clock::time_point s;
-    explicit TimeRec() noexcept { s = event::EventLoop::current().now(); }
-    ~TimeRec() {
-        const auto p = fiber::event::EventLoop::current().now() - s;
-        std::fprintf(stderr, "cost: %llu\n", std::chrono::duration_cast<std::chrono::nanoseconds>(p).count());
-    }
-};
-
 } // namespace
 
 ProxyHandler::ProxyHandler(upstream::UpstreamRegistry &upstreams, upstream::ConnectionPool &pool,
@@ -282,7 +272,6 @@ ProxyHandler::handle(fiber::http::HttpExchange &exchange, const runtime::Listene
         co_await send_plain_response(exchange, 502, kBadGatewayBody, listener);
         co_return;
     }
-    TimeRec rec;
 
     const auto *peer = upstreams_->select_peer(location.upstream_index);
     if (peer == nullptr || !peer->connection_key.has_value()) {

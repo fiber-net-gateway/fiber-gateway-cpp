@@ -16,14 +16,16 @@ using fiber::util::form_decode_into;
 using fiber::util::form_decode_query;
 using fiber::util::form_encode;
 
+using QueryPair = std::pair<std::string, std::string>;
+
 std::string encode(std::string_view in) {
     std::string out;
     form_encode(in, out);
     return out;
 }
 
-std::vector<std::pair<std::string, std::string>> decode_query(std::string_view in) {
-    std::vector<std::pair<std::string, std::string>> pairs;
+std::vector<QueryPair> decode_query(std::string_view in) {
+    std::vector<QueryPair> pairs;
     auto io = form_decode_query(in, [&](std::string_view k, std::string_view v) {
         pairs.emplace_back(std::string(k), std::string(v));
         return true;
@@ -33,7 +35,7 @@ std::vector<std::pair<std::string, std::string>> decode_query(std::string_view i
 }
 
 struct VecSource {
-    const std::vector<std::pair<std::string, std::string>> &pairs;
+    const std::vector<QueryPair> &pairs;
     std::size_t i = 0;
     bool operator()(std::string &key, std::string &value) {
         if (i >= pairs.size()) {
@@ -46,7 +48,7 @@ struct VecSource {
     }
 };
 
-std::string build_query(const std::vector<std::pair<std::string, std::string>> &pairs) {
+std::string build_query(const std::vector<QueryPair> &pairs) {
     std::string out;
     VecSource src{pairs, 0};
     form_build_query(out, src);
@@ -111,46 +113,46 @@ TEST(UrlFormTest, DecodeIntoReturnsFalseOnMalformed) {
 TEST(UrlFormTest, ParseQueryRepeatedKeyAggregatesInOrder) {
     auto pairs = decode_query("a=1&a=2&b=x");
     ASSERT_EQ(pairs.size(), 3u);
-    EXPECT_EQ(pairs[0], (std::pair{"a", "1"}));
-    EXPECT_EQ(pairs[1], (std::pair{"a", "2"}));
-    EXPECT_EQ(pairs[2], (std::pair{"b", "x"}));
+    EXPECT_EQ(pairs[0], (QueryPair{"a", "1"}));
+    EXPECT_EQ(pairs[1], (QueryPair{"a", "2"}));
+    EXPECT_EQ(pairs[2], (QueryPair{"b", "x"}));
 }
 
 TEST(UrlFormTest, ParseQueryEdgeSegments) {
     EXPECT_TRUE(decode_query("").empty());
     auto noEq = decode_query("a");
     ASSERT_EQ(noEq.size(), 1u);
-    EXPECT_EQ(noEq[0], (std::pair{"a", ""}));
+    EXPECT_EQ(noEq[0], (QueryPair{"a", ""}));
     auto trailingEq = decode_query("a=");
     ASSERT_EQ(trailingEq.size(), 1u);
-    EXPECT_EQ(trailingEq[0], (std::pair{"a", ""}));
+    EXPECT_EQ(trailingEq[0], (QueryPair{"a", ""}));
     auto leadingEq = decode_query("=x");
     ASSERT_EQ(leadingEq.size(), 1u);
-    EXPECT_EQ(leadingEq[0], (std::pair{"", "x"}));
+    EXPECT_EQ(leadingEq[0], (QueryPair{"", "x"}));
     // '=' after the first is part of the value.
     auto eqInValue = decode_query("a=b=c");
     ASSERT_EQ(eqInValue.size(), 1u);
-    EXPECT_EQ(eqInValue[0], (std::pair{"a", "b=c"}));
+    EXPECT_EQ(eqInValue[0], (QueryPair{"a", "b=c"}));
     // Empty segments are skipped.
     auto emptySegs = decode_query("a=1&&b=2");
     ASSERT_EQ(emptySegs.size(), 2u);
-    EXPECT_EQ(emptySegs[0], (std::pair{"a", "1"}));
-    EXPECT_EQ(emptySegs[1], (std::pair{"b", "2"}));
+    EXPECT_EQ(emptySegs[0], (QueryPair{"a", "1"}));
+    EXPECT_EQ(emptySegs[1], (QueryPair{"b", "2"}));
 }
 
 TEST(UrlFormTest, ParseQueryDecodesKeysAndValues) {
     auto pairs = decode_query("%C3%A9=x&k=a+b");
     ASSERT_EQ(pairs.size(), 2u);
-    EXPECT_EQ(pairs[0], (std::pair{"\xc3\xa9", "x"}));
-    EXPECT_EQ(pairs[1], (std::pair{"k", "a b"}));
+    EXPECT_EQ(pairs[0], (QueryPair{"\xc3\xa9", "x"}));
+    EXPECT_EQ(pairs[1], (QueryPair{"k", "a b"}));
     // Malformed UTF-8 in a value is replaced.
     auto repaired = decode_query("a=%FF");
     ASSERT_EQ(repaired.size(), 1u);
-    EXPECT_EQ(repaired[0], (std::pair{"a", "\xef\xbf\xbd"}));
+    EXPECT_EQ(repaired[0], (QueryPair{"a", "\xef\xbf\xbd"}));
     // A lone '+' decodes to a space key with empty value.
     auto plus = decode_query("+");
     ASSERT_EQ(plus.size(), 1u);
-    EXPECT_EQ(plus[0], (std::pair{" ", ""}));
+    EXPECT_EQ(plus[0], (QueryPair{" ", ""}));
 }
 
 TEST(UrlFormTest, ParseQueryMalformedEscapeIsInvalid) {
