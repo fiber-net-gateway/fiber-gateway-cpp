@@ -4,7 +4,7 @@
 >
 > 核验事实：`IoBuf::allocate` 是裸 `::operator new`（无池，见 `src/common/mem/IoBuf.cpp`）；`HttpHeaders` 仅有 `get/contains(string_view)` 无 hash 重载（`HttpHeaders.h:57-58`）；HPACK/QPACK 两个编码器都有同一 Huffman-size bug（`encoded_len` 算了却从不和 `value.size()` 比较）。
 >
-> 状态：未动工。按下方建议顺序逐条优化即可。
+> 状态：持续推进中；标记为 ✅ 已修复的条目已经落地，其余按下方建议顺序继续优化。
 
 ---
 
@@ -91,8 +91,8 @@
 | `Http1Connection.cpp:99-115` | ✅ 已修复：`read_into_inbound` 死代码 | 删除 |
 | `HttpTransport.cpp:433` | ✅ 已修复：`negotiated_alpn()` 返回 `std::string`，存在不必要的拥有型复制 | 返 `string_view`（ALPN 字节存活于 SSL 对象内）；`TlsStreamFd::selected_alpn` 对应改 |
 | `HttpHeaderHash.h:20` | 哈希乘子 31、32 位截断，分布偏弱 | 换 FNV-1a 64（`0x100000001b3ull`，初值 `0xcbf29ce484222325ull`）；32 桶下影响有限 |
-| `Http2Connection.cpp:1172,1395` | teardown 用 `new Http2Stream*[n]` 收集指针，而 `owned_stream_list_`（`:240`）已是侵入式链 | 直接遍历 `owned_stream_list_` |
-| `Http2Connection.cpp:852-865` | `apply_peer_initial_stream_window` 两次全表 `for_each` | validate+apply 合并成单遍（delta 均匀，无需回滚） |
+| `Http2Connection.cpp:1267-1276,1482-1489` | ✅ 已修复：GOAWAY 选择性关闭和全量 teardown 原先用 `new Http2Stream*[n]` 收集指针 | 直接遍历 `owned_stream_list_`；操作当前 stream 前预取 `next`，用 `Lease` 固定当前对象生命周期，删除两处分配及 `NoMem` 分支 |
+| `Http2Connection.cpp:938-965` | ✅ 已修复：`apply_peer_initial_stream_window` 原先两次全表 `for_each` | 在同一次遍历中用 64 位值校验并立即更新；越界错误由 SETTINGS 路径作为连接级致命错误传播，无需回滚已更新 stream，且仅在全遍成功后提交 `peer_initial_stream_send_window_`。新增多 stream 增减、溢出和摘链遍历测试；2026-07-13 全量 1126 ctest 通过 |
 | `Http2Connection.cpp:926-974` | 控制帧（WINDOW_UPDATE/RST/GOAWAY）先编码进栈数组再 memcpy 进 slab | 直接编码进 `dst + kFrameHeaderSize`，省双写 |
 | `Http2DataFrameEncoder.cpp:58-61` | 9 字节帧头过栈数组 + `append_copy` | `reserve_slot(9)` + `encode_http2_frame_header` + `commit_slot(9)` |
 | `HttpExchange.h:148` | `HttpHandler = std::function<...>` | 每连接一次（非每请求），低优先；可换带 SBO 的类型擦除 callable |

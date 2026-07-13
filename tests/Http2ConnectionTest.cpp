@@ -509,6 +509,7 @@ struct ControlRunOutcome {
     std::uint32_t peer_max_concurrent_streams = 0;
     bool peer_enable_push = true;
     std::int32_t stream1_send_window = 0;
+    std::int32_t stream3_send_window = 0;
     bool stream1_registered = false;
     bool stream1_remote_end_stream = false;
     bool stream1_remote_rst = false;
@@ -1754,6 +1755,7 @@ void capture_control_outcome(const ControlSetupContext &ctx) {
     outcome.stream2_registered = ctx.connection->current_has_stream(2);
     outcome.stream2_remote_end_stream = ctx.connection->current_stream_remote_end_stream(2);
     if (*ctx.stream3_id != 0) {
+        outcome.stream3_send_window = ctx.connection->current_stream_send_window(*ctx.stream3_id);
         outcome.stream3_registered = ctx.connection->current_has_stream(*ctx.stream3_id);
     }
 }
@@ -2362,12 +2364,29 @@ TEST(Http2ConnectionTest, SettingsFrameUpdatesPeerStateAndSendsAck) {
     ASSERT_TRUE(outcome.result.has_value());
     EXPECT_EQ(outcome.peer_max_frame_size, 32768U);
     EXPECT_EQ(outcome.stream1_send_window, 70000);
+    EXPECT_EQ(outcome.stream3_send_window, 70000);
     std::vector<EncodedFrame> frames = parse_frames(outcome.written);
     ASSERT_EQ(frames.size(), 1U) << describe_frames(frames);
     EXPECT_EQ(frames[0].type, 0x4);
     EXPECT_EQ(frames[0].flags, 0x1);
     EXPECT_EQ(frames[0].stream_id, 0U);
     EXPECT_TRUE(frames[0].payload.empty());
+}
+
+TEST(Http2ConnectionTest, InitialStreamWindowOverflowIsConnectionFatal) {
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+
+    std::string payload("\0\x04\x7f\xff\xff\xff", 6);
+    ControlRunOutcome outcome = execute_control_connection(
+            {make_frame(6, 0x4, 0x0, 0, payload)},
+            [](ControlHttp2Connection &, fiber::http::Http2Stream &stream1, fiber::http::Http2Stream &) {
+                stream1.send_window_ = 0x7fffffff;
+            },
+            options);
+
+    ASSERT_FALSE(outcome.result.has_value());
+    EXPECT_EQ(outcome.result.error(), fiber::common::IoErr::Invalid);
 }
 
 TEST(Http2ConnectionTest, PingFrameRepliesWithAckAndSamePayload) {
@@ -2633,6 +2652,98 @@ TEST(Http2ConnectionTest, GoawayClosesOnlyLocalStreamsAfterLastStreamId) {
     EXPECT_EQ(static_cast<unsigned char>(frames[0].payload[3]), 0x0U);
     EXPECT_EQ(outcome.state, fiber::http::Http2Connection::State::Draining);
     EXPECT_EQ(outcome.transport_close_count, 0U);
+}
+
+TEST(Http2ConnectionTest, CloseAllStreamsTraversesOwnedListWhileDetaching) {
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+    fiber::http::Http2Connection connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
+                                            TestHttp2StreamFactory::ops());
+    connection.state_ = fiber::http::Http2Connection::State::Running;
+
+    auto *owner1 = TestHttp2StreamOwner::create_owner();
+    auto *owner3 = TestHttp2StreamOwner::create_owner();
+    auto *owner5 = TestHttp2StreamOwner::create_owner();
+    ASSERT_NE(owner1, nullptr);
+    ASSERT_NE(owner3, nullptr);
+    ASSERT_NE(owner5, nullptr);
+
+    auto stream1 = connection.attach_local_stream(owner1->stream);
+    auto stream3 = connection.attach_local_stream(owner3->stream);
+    auto stream5 = connection.attach_local_stream(owner5->stream);
+    ASSERT_TRUE(stream1.has_value());
+    ASSERT_TRUE(stream3.has_value());
+    ASSERT_TRUE(stream5.has_value());
+
+    connection.close_all_streams(fiber::common::IoErr::NoMem);
+
+    EXPECT_TRUE(connection.streams_.empty());
+    EXPECT_TRUE(connection.owned_stream_list_.empty());
+    EXPECT_EQ((*stream1)->close_reason(), fiber::common::IoErr::NoMem);
+    EXPECT_EQ((*stream3)->close_reason(), fiber::common::IoErr::NoMem);
+    EXPECT_EQ((*stream5)->close_reason(), fiber::common::IoErr::NoMem);
+    EXPECT_FALSE((*stream1)->attached_to_connection());
+    EXPECT_FALSE((*stream3)->attached_to_connection());
+    EXPECT_FALSE((*stream5)->attached_to_connection());
+}
+
+TEST(Http2ConnectionTest, CloseStreamsAfterGoawayDoesNotSkipAdjacentOwnedStreams) {
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+    fiber::http::Http2Connection connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
+                                            TestHttp2StreamFactory::ops());
+    connection.state_ = fiber::http::Http2Connection::State::Running;
+
+    auto *owner1 = TestHttp2StreamOwner::create_owner();
+    auto *owner3 = TestHttp2StreamOwner::create_owner();
+    auto *owner5 = TestHttp2StreamOwner::create_owner();
+    ASSERT_NE(owner1, nullptr);
+    ASSERT_NE(owner3, nullptr);
+    ASSERT_NE(owner5, nullptr);
+
+    auto stream1 = connection.attach_local_stream(owner1->stream);
+    auto stream3 = connection.attach_local_stream(owner3->stream);
+    auto stream5 = connection.attach_local_stream(owner5->stream);
+    ASSERT_TRUE(stream1.has_value());
+    ASSERT_TRUE(stream3.has_value());
+    ASSERT_TRUE(stream5.has_value());
+
+    connection.close_streams_after_goaway(1);
+
+    EXPECT_NE(connection.streams_.find(1), nullptr);
+    EXPECT_EQ(connection.streams_.find(3), nullptr);
+    EXPECT_EQ(connection.streams_.find(5), nullptr);
+    EXPECT_EQ((*stream1)->close_reason(), fiber::common::IoErr::None);
+    EXPECT_EQ((*stream3)->close_reason(), fiber::common::IoErr::Canceled);
+    EXPECT_EQ((*stream5)->close_reason(), fiber::common::IoErr::Canceled);
+
+    connection.close_all_streams(fiber::common::IoErr::Canceled);
+}
+
+TEST(Http2ConnectionTest, InitialStreamWindowDecreaseUpdatesEveryStream) {
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+    fiber::http::Http2Connection connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
+                                            TestHttp2StreamFactory::ops());
+    connection.state_ = fiber::http::Http2Connection::State::Running;
+
+    auto *owner1 = TestHttp2StreamOwner::create_owner();
+    auto *owner3 = TestHttp2StreamOwner::create_owner();
+    ASSERT_NE(owner1, nullptr);
+    ASSERT_NE(owner3, nullptr);
+
+    auto stream1 = connection.attach_local_stream(owner1->stream);
+    auto stream3 = connection.attach_local_stream(owner3->stream);
+    ASSERT_TRUE(stream1.has_value());
+    ASSERT_TRUE(stream3.has_value());
+    (*stream3)->send_window_ = 1000;
+
+    EXPECT_EQ(connection.apply_peer_initial_stream_window(32768), fiber::common::IoErr::None);
+    EXPECT_EQ((*stream1)->send_window(), 32768);
+    EXPECT_EQ((*stream3)->send_window(), -31767);
+    EXPECT_EQ(connection.peer_initial_stream_send_window_, 32768);
+
+    connection.close_all_streams(fiber::common::IoErr::Canceled);
 }
 
 TEST(Http2ConnectionTest, RejectsInvalidPingLengthAsConnectionError) {
