@@ -52,6 +52,7 @@ public:
 private:
     static constexpr std::uint16_t kInvalidSlot = 0xffffU;
     static constexpr std::uint16_t kInvalidIdMapping = 0xffffU;
+    using InflightCancelFn = void (*)(void *) noexcept;
 
     struct InflightSlot {
         bool active = false;
@@ -66,6 +67,8 @@ private:
         std::size_t response_cap = 0;
         std::size_t response_size = 0;
         common::IoErr completion_err = common::IoErr::None;
+        void *cancel_context = nullptr;
+        InflightCancelFn cancel = nullptr;
     };
 
     class ResponseAwaiter {
@@ -85,7 +88,7 @@ private:
     };
 
     async::Task<void> recv_loop() noexcept;
-    async::Task<common::IoResult<std::size_t>> query_tcp(const InflightSlot &slot) noexcept;
+    async::Task<common::IoResult<std::size_t>> query_tcp(std::uint16_t slot_index) noexcept;
 
     [[nodiscard]] bool init_storage() noexcept;
     void reset_state() noexcept;
@@ -100,6 +103,8 @@ private:
     [[nodiscard]] bool arm_waiter(std::uint16_t slot_index, std::coroutine_handle<> handle) noexcept;
     void cancel_waiter(std::uint16_t slot_index, std::coroutine_handle<> handle) noexcept;
     [[nodiscard]] common::IoResult<std::size_t> wait_result(std::uint16_t slot_index) noexcept;
+    void arm_inflight_cancel(std::uint16_t slot_index, void *context, InflightCancelFn cancel) noexcept;
+    void disarm_inflight_cancel(std::uint16_t slot_index, void *context) noexcept;
 
     void complete_slot(std::uint16_t slot_index, common::IoErr err, std::size_t response_size,
                        bool need_tcp_fallback) noexcept;

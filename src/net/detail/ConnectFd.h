@@ -153,6 +153,22 @@ public:
 
     fiber::common::IoResult<ConnectResult> await_resume() noexcept { return std::move(result_); }
 
+    void cancel() noexcept {
+        if (!waiting_) {
+            return;
+        }
+        FIBER_ASSERT(efd_.loop().in_loop());
+        waiting_ = false;
+        (void) efd_.watch_del(fiber::event::IoEvent::Write);
+        result_ = std::unexpected(fiber::common::IoErr::Canceled);
+        auto handle = handle_;
+        handle_ = {};
+        close_fd();
+        if (handle) {
+            handle.resume();
+        }
+    }
+
 private:
     void close_fd() noexcept { efd_.close_fd(); }
 

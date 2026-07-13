@@ -58,6 +58,18 @@ common::IoResult<std::size_t> consume_stream_read(fiber::common::IoResult<std::s
     return result;
 }
 
+template<typename Awaiter>
+void cancel_awaiter(void *context) noexcept {
+    static_cast<Awaiter *>(context)->cancel();
+}
+
+void cancel_tcp_stream(void *context) noexcept {
+    auto *stream = static_cast<net::TcpStream *>(context);
+    if (stream->valid()) {
+        stream->close();
+    }
+}
+
 } // namespace
 
 DnsClient::DnsClient() noexcept = default;
@@ -249,7 +261,7 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_raw(const QuestionSp
         }
 
         if (slot.need_tcp_fallback) {
-            auto tcp_result = co_await query_tcp(slot);
+            auto tcp_result = co_await query_tcp(slot_index);
             release_slot(slot_index);
             co_return tcp_result;
         }
@@ -282,15 +294,28 @@ async::Task<void> DnsClient::recv_loop() noexcept {
     co_return;
 }
 
-async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(const InflightSlot &slot) noexcept {
+async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(std::uint16_t slot_index) noexcept {
     FIBER_ASSERT(loop_ != nullptr);
-    auto connect_result = co_await async::timeout_for(
-            [this]() { return net::TcpStream::connect(*loop_, options_.server); }, options_.timeout);
+    FIBER_ASSERT(slot_index < options_.max_inflight);
+    InflightSlot &slot = slots_[slot_index];
+
+    auto connect_operation =
+            async::timeout_for([this]() { return net::TcpStream::connect(*loop_, options_.server); }, options_.timeout);
+    arm_inflight_cancel(slot_index, &connect_operation, &cancel_awaiter<decltype(connect_operation)>);
+    auto connect_result = co_await connect_operation;
+    disarm_inflight_cancel(slot_index, &connect_operation);
     if (!connect_result) {
         co_return std::unexpected(connect_result.error());
     }
 
     net::TcpStream stream(std::move(*connect_result));
+    arm_inflight_cancel(slot_index, &stream, &cancel_tcp_stream);
+    auto close_stream = [this, slot_index, &stream]() noexcept {
+        disarm_inflight_cancel(slot_index, &stream);
+        if (stream.valid()) {
+            stream.close();
+        }
+    };
     std::array<std::uint8_t, 2> len_prefix{};
     write_be16(len_prefix.data(), static_cast<std::uint16_t>(slot.request_size));
 
@@ -300,11 +325,11 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(const InflightSl
                 [&]() { return stream.write(len_prefix.data() + prefix_written, len_prefix.size() - prefix_written); },
                 options_.timeout);
         if (!write_prefix) {
-            stream.close();
+            close_stream();
             co_return std::unexpected(write_prefix.error());
         }
         if (*write_prefix == 0) {
-            stream.close();
+            close_stream();
             co_return std::unexpected(common::IoErr::ConnReset);
         }
         prefix_written += *write_prefix;
@@ -316,11 +341,11 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(const InflightSl
                 [&]() { return stream.write(slot.request_buf + written, slot.request_size - written); },
                 options_.timeout);
         if (!write_result) {
-            stream.close();
+            close_stream();
             co_return std::unexpected(write_result.error());
         }
         if (*write_result == 0) {
-            stream.close();
+            close_stream();
             co_return std::unexpected(common::IoErr::ConnReset);
         }
         written += *write_result;
@@ -330,7 +355,7 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(const InflightSl
                                                    options_.timeout);
     auto prefix_result = consume_stream_read(read_prefix);
     if (!prefix_result) {
-        stream.close();
+        close_stream();
         co_return std::unexpected(prefix_result.error());
     }
     std::size_t prefix_read = *prefix_result;
@@ -340,7 +365,7 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(const InflightSl
                 options_.timeout);
         auto more_result = consume_stream_read(more);
         if (!more_result) {
-            stream.close();
+            close_stream();
             co_return std::unexpected(more_result.error());
         }
         prefix_read += *more_result;
@@ -348,7 +373,7 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(const InflightSl
 
     const std::size_t response_len = read_be16(len_prefix.data());
     if (response_len > slot.response_cap) {
-        stream.close();
+        close_stream();
         co_return std::unexpected(common::IoErr::NoMem);
     }
 
@@ -359,13 +384,13 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(const InflightSl
                 options_.timeout);
         auto payload_result = consume_stream_read(read_result);
         if (!payload_result) {
-            stream.close();
+            close_stream();
             co_return std::unexpected(payload_result.error());
         }
         total_read += *payload_result;
     }
 
-    stream.close();
+    close_stream();
     co_return response_len;
 }
 
@@ -404,8 +429,14 @@ void DnsClient::cancel_all_inflight(common::IoErr err) noexcept {
     if (!slots_) {
         return;
     }
-    auto resumes = std::make_unique<std::coroutine_handle<>[]>(options_.max_inflight);
-    std::size_t resume_count = 0;
+    struct CancelAction {
+        void *context = nullptr;
+        InflightCancelFn cancel = nullptr;
+        std::coroutine_handle<> waiter{};
+    };
+
+    auto actions = std::make_unique<CancelAction[]>(options_.max_inflight);
+    std::size_t action_count = 0;
     for (std::size_t i = 0; i < options_.max_inflight; ++i) {
         InflightSlot &slot = slots_[i];
         if (!slot.active) {
@@ -416,14 +447,23 @@ void DnsClient::cancel_all_inflight(common::IoErr err) noexcept {
         slot.response_size = 0;
         slot.need_tcp_fallback = false;
         slot.completed = true;
-        if (slot.waiter) {
-            resumes[resume_count++] = slot.waiter;
+        FIBER_ASSERT(slot.cancel == nullptr || !slot.waiter);
+        if (slot.cancel) {
+            actions[action_count].context = slot.cancel_context;
+            actions[action_count].cancel = slot.cancel;
+            slot.cancel_context = nullptr;
+            slot.cancel = nullptr;
+            ++action_count;
+        } else if (slot.waiter) {
+            actions[action_count++].waiter = slot.waiter;
             slot.waiter = {};
         }
     }
-    for (std::size_t i = 0; i < resume_count; ++i) {
-        if (resumes[i]) {
-            resumes[i].resume();
+    for (std::size_t i = 0; i < action_count; ++i) {
+        if (actions[i].cancel) {
+            actions[i].cancel(actions[i].context);
+        } else if (actions[i].waiter) {
+            actions[i].waiter.resume();
         }
     }
 }
@@ -451,6 +491,8 @@ void DnsClient::release_slot(std::uint16_t slot_index) noexcept {
     slot.response_cap = 0;
     slot.response_size = 0;
     slot.completion_err = common::IoErr::None;
+    slot.cancel_context = nullptr;
+    slot.cancel = nullptr;
     slot.next_free = free_head_;
     free_head_ = slot_index;
 }
@@ -509,6 +551,28 @@ common::IoResult<std::size_t> DnsClient::wait_result(std::uint16_t slot_index) n
         return std::unexpected(slot.completion_err);
     }
     return slot.response_size;
+}
+
+void DnsClient::arm_inflight_cancel(std::uint16_t slot_index, void *context, InflightCancelFn cancel) noexcept {
+    FIBER_ASSERT(slot_index < options_.max_inflight);
+    FIBER_ASSERT(context != nullptr);
+    FIBER_ASSERT(cancel != nullptr);
+    InflightSlot &slot = slots_[slot_index];
+    FIBER_ASSERT(slot.active);
+    FIBER_ASSERT(slot.cancel_context == nullptr);
+    FIBER_ASSERT(slot.cancel == nullptr);
+    slot.cancel_context = context;
+    slot.cancel = cancel;
+}
+
+void DnsClient::disarm_inflight_cancel(std::uint16_t slot_index, void *context) noexcept {
+    FIBER_ASSERT(slot_index < options_.max_inflight);
+    InflightSlot &slot = slots_[slot_index];
+    if (slot.cancel_context != context) {
+        return;
+    }
+    slot.cancel_context = nullptr;
+    slot.cancel = nullptr;
 }
 
 void DnsClient::complete_slot(std::uint16_t slot_index, common::IoErr err, std::size_t response_size,
