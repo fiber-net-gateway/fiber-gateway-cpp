@@ -91,6 +91,8 @@ private:
                                                           std::string_view &out) noexcept;
     [[nodiscard]] common::IoErr commit_field(std::string_view name, std::uint64_t name_hash, std::string_view value,
                                              bool name_owned = false) noexcept;
+    [[nodiscard]] common::IoErr apply_regular_header_policy(std::string_view name, std::uint64_t name_hash,
+                                                            std::string_view value) noexcept;
     [[nodiscard]] common::IoErr commit_regular_header(std::string_view name, std::uint64_t name_hash,
                                                       std::string_view value, bool name_owned = false) noexcept;
     [[nodiscard]] std::string_view copy_to_pool(const std::uint8_t *data, std::size_t len) noexcept;

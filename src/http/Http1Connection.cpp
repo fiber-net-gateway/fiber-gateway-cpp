@@ -125,12 +125,11 @@ bool Http1Connection::handle_content_length(HttpExchange &exchange, const HttpHe
         return false;
     }
     size_t length = static_cast<size_t>(parsed);
-    if (exchange.request_content_length_set_ && exchange.request_content_length_ != length) {
+    if (exchange.request_body_spec_.is_content_length() && exchange.request_body_spec_.content_length() != length) {
         return false;
     }
-    if (!exchange.request_chunked_) {
-        exchange.request_content_length_set_ = true;
-        exchange.request_content_length_ = length;
+    if (!exchange.request_body_spec_.is_stream()) {
+        exchange.request_body_spec_ = HttpBodySpec::ContentLength(length);
     }
     return true;
 }
@@ -144,9 +143,7 @@ bool Http1Connection::handle_transfer_encoding(HttpExchange &exchange, const Htt
         }
     });
     if (chunked) {
-        exchange.request_chunked_ = true;
-        exchange.request_content_length_set_ = false;
-        exchange.request_content_length_ = 0;
+        exchange.request_body_spec_ = HttpBodySpec::Stream();
     }
     return true;
 }

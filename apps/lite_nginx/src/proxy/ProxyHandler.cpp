@@ -77,7 +77,7 @@ bool evaluate_template_headers(fiber::http::HttpExchange &exchange, const runtim
 bool should_skip_request_header(const runtime::LocationRuntime &location,
                                 const fiber::http::HttpHeaders &request_headers,
                                 const fiber::http::HttpHeaders::HeaderField &field) noexcept {
-    if (location.skip_headers.get(field.lowcase_view(), field.name_hash)) {
+    if (is_request_framing_header(field) || location.skip_headers.get(field.lowcase_view(), field.name_hash)) {
         return true;
     }
     return connection_declares_hop_by_hop(request_headers, field.lowcase_view());
@@ -138,6 +138,7 @@ void build_upstream_request_headers(const runtime::LocationRuntime &location, co
         std::string_view value = header.template_script ? std::string_view(resolved_template_values[i]) : header.value;
         headers.set_view(header.name, value, const_cast<char *>(header.lowercase_name.data()), header.name_hash);
     }
+    remove_request_framing_headers(headers);
 }
 
 void build_downstream_response_headers(const fiber::http::Http1ResponseHead &upstream_head,
@@ -225,7 +226,7 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
     const fiber::http::HttpBodySpec response_body =
             no_response_body ? fiber::http::HttpBodySpec::None()
                              : (has_content_length ? fiber::http::HttpBodySpec::ContentLength(response_content_length)
-                                                   : fiber::http::HttpBodySpec::Chunked());
+                                                   : fiber::http::HttpBodySpec::Stream());
     auto response_header_result = co_await exchange.send_header({
             .kind = fiber::http::OutgoingHeaderKind::Final,
             .status_code = upstream_head->status_code,

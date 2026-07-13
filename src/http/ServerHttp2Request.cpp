@@ -1,6 +1,7 @@
 #include "ServerHttp2Request.h"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstring>
 #include <limits>
@@ -137,6 +138,7 @@ ServerHttp2Request::ServerHttp2Request(std::uint32_t stream_id, Http2Connection 
     request_body_recv_(conn.transport().loop().io_buf_node_pool()) {
     (void) stream_id;
     FIBER_ASSERT(handler_ != nullptr);
+    exchange_.request_body_spec_ = HttpBodySpec::Stream();
 }
 
 Http2Stream::Lease ServerHttp2Request::create(std::uint32_t stream_id, Http2Connection &conn,
@@ -170,6 +172,9 @@ common::IoErr ServerHttp2Request::on_header_block_complete(void *owner, bool end
     auto *request = static_cast<ServerHttp2Request *>(owner);
     if (!request->request_head_received_) {
         request->request_head_received_ = true;
+        if (end_stream && request->exchange_.request_body_spec_.is_stream()) {
+            request->exchange_.request_body_spec_ = HttpBodySpec::None();
+        }
         if (!request->handler_started_) {
             request->exchange_.set_io(request);
             request->handler_started_ = true;
@@ -790,6 +795,13 @@ common::IoErr ServerHttp2Request::commit_field(std::string_view name, std::uint6
 
 common::IoErr ServerHttp2Request::commit_regular_header(std::string_view name, std::uint64_t name_hash,
                                                         std::string_view value, bool name_owned) noexcept {
+    if (!reading_trailers_) {
+        common::IoErr err = apply_regular_header_policy(name, name_hash, value);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+    }
+
     std::string_view name_copy = name_owned ? name : copy_to_pool(name);
     std::string_view value_copy = copy_to_pool(value);
     if ((!name_copy.data() && !name.empty()) || (!value_copy.data() && !value.empty())) {
@@ -805,6 +817,34 @@ common::IoErr ServerHttp2Request::commit_regular_header(std::string_view name, s
     if (!reading_trailers_) {
         exchange_.cache_request_header_field(*field);
     }
+    return common::IoErr::None;
+}
+
+common::IoErr ServerHttp2Request::apply_regular_header_policy(std::string_view name, std::uint64_t name_hash,
+                                                              std::string_view value) noexcept {
+    static constexpr std::uint64_t kContentLengthHash = http_header_name_hash("content-length");
+    static constexpr std::uint64_t kTransferEncodingHash = http_header_name_hash("transfer-encoding");
+    if (name_hash == kTransferEncodingHash && name == "transfer-encoding") {
+        return common::IoErr::Invalid;
+    }
+    if (name_hash != kContentLengthHash || name != "content-length") {
+        return common::IoErr::None;
+    }
+
+    unsigned long long parsed = 0;
+    const char *first = value.data();
+    const char *last = value.data() + value.size();
+    const auto result = std::from_chars(first, last, parsed, 10);
+    if (result.ec != std::errc() || result.ptr != last ||
+        parsed > static_cast<unsigned long long>(std::numeric_limits<std::size_t>::max())) {
+        return common::IoErr::Invalid;
+    }
+
+    const std::size_t length = static_cast<std::size_t>(parsed);
+    if (exchange_.request_body_spec_.is_content_length() && exchange_.request_body_spec_.content_length() != length) {
+        return common::IoErr::Invalid;
+    }
+    exchange_.request_body_spec_ = HttpBodySpec::ContentLength(length);
     return common::IoErr::None;
 }
 

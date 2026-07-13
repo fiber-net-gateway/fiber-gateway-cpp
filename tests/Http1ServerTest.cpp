@@ -438,7 +438,7 @@ TEST(Http1ServerTest, WriteBodyWithoutExplicitHeaderAutoUsesChunkedForStreaming)
     fiber::async::spawn(group.at(0), [&]() {
         auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
             auto header_result = co_await send_final_header(exchange, 200, nullptr,
-                                                            fiber::http::ResponseBodySpec::Chunked(), {}, false);
+                                                            fiber::http::ResponseBodySpec::Stream(), {}, false);
             if (!header_result) {
                 co_return;
             }
@@ -535,6 +535,11 @@ TEST(Http1ServerTest, ChunkedPost) {
 
     fiber::async::spawn(group.at(0), [&]() {
         auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            if (!exchange.request_body_spec().is_stream()) {
+                co_await send_final_header(exchange, 500, nullptr, fiber::http::ResponseBodySpec::ContentLength(0),
+                                           fiber::http::ResponseConnectionMode::Close, true);
+                co_return;
+            }
             std::string body;
             for (;;) {
                 auto read_result = co_await exchange.read_body(64);
@@ -613,6 +618,12 @@ TEST(Http1ServerTest, WriteBodyAcceptsIoBufChain) {
 
     fiber::async::spawn(group.at(0), [&]() {
         auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            const auto request_body = exchange.request_body_spec();
+            if (!request_body.is_content_length() || request_body.content_length() != 9) {
+                co_await send_final_header(exchange, 500, nullptr, fiber::http::ResponseBodySpec::ContentLength(0),
+                                           fiber::http::ResponseConnectionMode::Close, true);
+                co_return;
+            }
             std::vector<fiber::mem::IoBufChain> chunks;
 
             for (;;) {
@@ -897,7 +908,7 @@ TEST(Http1ServerTest, ChunkedResponseCanSendTrailers) {
             fiber::http::HttpHeaders headers(exchange.pool());
             headers.set("Trailer", "digest, x-md5");
             auto header_result = co_await send_final_header(exchange, 200, &headers,
-                                                            fiber::http::ResponseBodySpec::Chunked(), {}, false);
+                                                            fiber::http::ResponseBodySpec::Stream(), {}, false);
             if (!header_result) {
                 co_return;
             }

@@ -53,6 +53,7 @@ struct CapturedHttp3Request {
     std::string range;
     std::string if_range;
     std::string expect;
+    fiber::http::HttpBodySpec body_spec{fiber::http::HttpBodySpec::None()};
 };
 
 struct ServerRequestContext {
@@ -74,6 +75,7 @@ struct Http3BodyReadOutcome {
     bool first_complete = false;
     bool second_complete = false;
     bool trailers_complete = false;
+    fiber::http::HttpBodySpec body_spec{fiber::http::HttpBodySpec::None()};
 };
 
 struct Http3BodyWriteOutcome {
@@ -115,6 +117,7 @@ CapturedHttp3Request capture_request(const fiber::http::HttpExchange &exchange) 
             .range = field_value(exchange.range_header()),
             .if_range = field_value(exchange.if_range_header()),
             .expect = field_value(exchange.expect_header()),
+            .body_spec = exchange.request_body_spec(),
     };
 }
 
@@ -349,6 +352,7 @@ Http3BodyReadOutcome run_http3_request_body(const std::vector<std::uint8_t> &req
     auto outcome_future = outcome_promise->get_future();
     ctx.handler = [outcome_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         Http3BodyReadOutcome outcome;
+        outcome.body_spec = exchange.request_body_spec();
         auto first = co_await exchange.read_body(64);
         if (!first) {
             outcome.first_error = first.error();
@@ -688,6 +692,20 @@ TEST(Http3ConnectionTest, ServerRequestAcceptsHostHeaderMatchingAuthority) {
     ASSERT_EQ(result.handler_status, std::future_status::ready);
     EXPECT_EQ(result.snapshot.host, "example.com");
     EXPECT_EQ(result.snapshot.path, "/");
+    EXPECT_TRUE(result.snapshot.body_spec.is_none());
+}
+
+TEST(Http3ConnectionTest, ServerRequestExposesParsedContentLength) {
+    HeaderList headers{
+            {":method", "POST"}, {":scheme", "https"},    {":authority", "example.com"},
+            {":path", "/body"},  {"content-length", "5"},
+    };
+
+    Http3RequestRunResult result = run_http3_request_headers(headers, true);
+
+    ASSERT_EQ(result.handler_status, std::future_status::ready);
+    ASSERT_TRUE(result.snapshot.body_spec.is_content_length());
+    EXPECT_EQ(result.snapshot.body_spec.content_length(), 5u);
 }
 
 TEST(Http3ConnectionTest, ServerRequestRejectsHostAuthorityMismatch) {
@@ -760,6 +778,7 @@ TEST(Http3ConnectionTest, ServerReadBodyReturnsDataBeforeCompleteForFin) {
 
     Http3BodyReadOutcome outcome = run_http3_request_body(request);
 
+    EXPECT_TRUE(outcome.body_spec.is_stream());
     EXPECT_EQ(outcome.first_error, fiber::common::IoErr::None);
     EXPECT_EQ(outcome.first_body, "hello");
     EXPECT_FALSE(outcome.first_complete);

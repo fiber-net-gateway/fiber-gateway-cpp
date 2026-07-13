@@ -119,6 +119,20 @@ inline bool should_skip_hop_by_hop_header(const fiber::http::HttpHeaders &header
     return connection_declares_hop_by_hop(headers, field.lowcase_view());
 }
 
+inline bool is_request_framing_header(const fiber::http::HttpHeaders::HeaderField &field) noexcept {
+    static constexpr std::uint64_t kContentLengthHash = fiber::http::http_header_name_hash("content-length");
+    static constexpr std::uint64_t kTransferEncodingHash = fiber::http::http_header_name_hash("transfer-encoding");
+    return (field.name_hash == kContentLengthHash && field.lowcase_view() == "content-length") ||
+           (field.name_hash == kTransferEncodingHash && field.lowcase_view() == "transfer-encoding");
+}
+
+inline void remove_request_framing_headers(fiber::http::HttpHeaders &headers) noexcept {
+    static constexpr std::uint64_t kContentLengthHash = fiber::http::http_header_name_hash("content-length");
+    static constexpr std::uint64_t kTransferEncodingHash = fiber::http::http_header_name_hash("transfer-encoding");
+    headers.remove("content-length", kContentLengthHash);
+    headers.remove("transfer-encoding", kTransferEncodingHash);
+}
+
 inline bool response_has_no_body(fiber::http::HttpMethod request_method, int status_code) noexcept {
     if (request_method == fiber::http::HttpMethod::Head) {
         return true;
@@ -147,27 +161,22 @@ inline std::string_view map_upstream_error_body(fiber::common::IoErr err) noexce
     return err == fiber::common::IoErr::TimedOut ? kGatewayTimeoutBody : kBadGatewayBody;
 }
 
-// Detects the inbound request body framing (Content-Length / chunked / none) for forwarding.
+// Returns the normalized inbound request body semantics for forwarding.
 // end_stream=true when there is no body to forward (so send_header can close the request).
-inline fiber::http::HttpBodySpec detect_request_body(const fiber::http::HttpExchange &exchange, bool &end_stream) {
-    static constexpr std::uint64_t kContentLengthHash = fiber::http::http_header_name_hash("content-length");
-    static constexpr std::uint64_t kTransferEncodingHash = fiber::http::http_header_name_hash("transfer-encoding");
-    std::size_t content_length = 0;
-    end_stream = true;
-
-    const std::string_view content_length_value = exchange.request_headers().get("content-length", kContentLengthHash);
-    if (!content_length_value.empty()) {
-        if (!parse_decimal(content_length_value, content_length)) {
-            content_length = 0;
-        }
-        end_stream = content_length == 0;
-        return fiber::http::HttpBodySpec::ContentLength(content_length);
+inline fiber::http::HttpBodySpec detect_request_body(const fiber::http::HttpExchange &exchange,
+                                                     bool &end_stream) noexcept {
+    const fiber::http::HttpBodySpec body = exchange.request_body_spec();
+    if (body.is_content_length()) {
+        end_stream = body.content_length() == 0;
+        return fiber::http::HttpBodySpec::ContentLength(body.content_length());
     }
-    if (exchange.request_headers().contains("transfer-encoding", kTransferEncodingHash)) {
-        end_stream = false;
-        return fiber::http::HttpBodySpec::Chunked();
+    if (body.is_none()) {
+        end_stream = true;
+        return fiber::http::HttpBodySpec::None();
     }
-    return fiber::http::HttpBodySpec::None();
+    // HTTP/1 encodes Stream as chunked; HTTP/2 and HTTP/3 use their native stream boundary.
+    end_stream = false;
+    return fiber::http::HttpBodySpec::Stream();
 }
 
 } // namespace fiber::http::proxy_core
