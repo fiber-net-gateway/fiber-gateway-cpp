@@ -24,6 +24,8 @@ std::string TlsTcpStream::selected_alpn() const noexcept { return stream_.select
 
 bool TlsTcpStream::handshake_done() const noexcept { return stream_.handshake_done(); }
 
+bool TlsTcpStream::has_pending_read() const noexcept { return stream_.has_pending_read(); }
+
 void TlsTcpStream::close() { stream_.close(); }
 
 TlsTcpStream::ReadAwaiter TlsTcpStream::read(void *buf, size_t len) noexcept { return stream_.read(buf, len); }

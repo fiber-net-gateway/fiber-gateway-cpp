@@ -41,6 +41,7 @@ public:
     [[nodiscard]] const SocketAddress &remote_addr() const noexcept;
     [[nodiscard]] std::string selected_alpn() const noexcept;
     [[nodiscard]] bool handshake_done() const noexcept;
+    [[nodiscard]] bool has_pending_read() const noexcept;
     void close();
 
     [[nodiscard]] ReadAwaiter read(void *buf, size_t len) noexcept;

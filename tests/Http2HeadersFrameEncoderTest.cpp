@@ -38,6 +38,10 @@ public:
         co_return fiber::common::IoResult<void>{};
     }
 
+    fiber::async::Task<fiber::common::IoResult<void>> wait_readable(std::chrono::milliseconds) override {
+        co_return fiber::common::IoResult<void>{};
+    }
+
     fiber::async::Task<fiber::common::IoResult<size_t>> read(void *, size_t, std::chrono::milliseconds) override {
         co_return std::unexpected(fiber::common::IoErr::NotSupported);
     }

@@ -39,6 +39,7 @@ public:
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept;
     [[nodiscard]] std::string selected_alpn() const noexcept;
     [[nodiscard]] bool handshake_done() const noexcept;
+    [[nodiscard]] bool has_pending_read() const noexcept;
     void close();
 
     [[nodiscard]] ReadAwaiter read(void *buf, size_t len) noexcept;

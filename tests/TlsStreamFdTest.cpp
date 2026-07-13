@@ -282,6 +282,12 @@ DetachedTask run_transport_server(fiber::http::TlsTransport *transport,
     std::string received;
     std::array<char, 8192> read_buf{};
     for (;;) {
+        auto ready_result = co_await transport->wait_readable(5s);
+        if (!ready_result) {
+            done->set_value(std::unexpected(ready_result.error()));
+            co_return;
+        }
+
         auto read_result = co_await transport->read(read_buf.data(), read_buf.size(), 5s);
         if (!read_result) {
             done->set_value(std::unexpected(read_result.error()));

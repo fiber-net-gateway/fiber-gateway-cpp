@@ -30,6 +30,7 @@ public:
     using WriteAwaiter = detail::StreamFd::WriteAwaiter;
     using ReadvAwaiter = detail::StreamFd::ReadvAwaiter;
     using WritevAwaiter = detail::StreamFd::WritevAwaiter;
+    using WaitReadableAwaiter = detail::StreamFd::WaitReadableAwaiter;
     using ConnectAwaiter = detail::ConnectFd<TcpConnectTraits>::ConnectAwaiter;
     using ConnectInfant = detail::StreamInfant<TcpConnectTraits>;
 
@@ -50,6 +51,7 @@ public:
     [[nodiscard]] WriteAwaiter write(const void *buf, size_t len) noexcept;
     [[nodiscard]] ReadvAwaiter readv(const struct iovec *iov, int iovcnt) noexcept;
     [[nodiscard]] WritevAwaiter writev(const struct iovec *iov, int iovcnt) noexcept;
+    [[nodiscard]] WaitReadableAwaiter wait_readable() noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_read(void *buf, size_t len) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_write(const void *buf, size_t len) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_readv(const struct iovec *iov, int iovcnt) noexcept;

@@ -85,6 +85,14 @@ fiber::async::Task<common::IoResult<void>> TcpTransport::shutdown(std::chrono::m
     co_return common::IoResult<void>{};
 }
 
+fiber::async::Task<common::IoResult<void>> TcpTransport::wait_readable(std::chrono::milliseconds timeout) {
+    auto result = co_await fiber::async::timeout_for([&]() { return stream_.wait_readable(); }, timeout);
+    if (!result) {
+        co_return std::unexpected(result.error());
+    }
+    co_return common::IoResult<void>{};
+}
+
 fiber::async::Task<common::IoResult<size_t>> TcpTransport::read(void *buf, size_t len,
                                                                 std::chrono::milliseconds timeout) {
     auto result = co_await fiber::async::timeout_for([&]() { return stream_.read(buf, len); }, timeout);
@@ -210,6 +218,19 @@ TlsTransport::TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress re
     stream_(loop, fd, std::move(remote_addr)), server_context_(&context) {}
 
 TlsTransport::~TlsTransport() = default;
+
+fiber::async::Task<common::IoResult<void>> TlsTransport::wait_readable(std::chrono::milliseconds timeout) {
+    FIBER_ASSERT(handshake_done());
+    if (stream_.has_pending_read()) {
+        co_return common::IoResult<void>{};
+    }
+
+    auto result = co_await fiber::async::timeout_for([&]() { return stream_.wait_readable(); }, timeout);
+    if (!result) {
+        co_return std::unexpected(result.error());
+    }
+    co_return common::IoResult<void>{};
+}
 
 common::IoResult<void> TlsTransport::init() {
     SSL_CTX *ctx = nullptr;
