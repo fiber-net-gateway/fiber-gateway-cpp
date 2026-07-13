@@ -7,11 +7,14 @@
 #include <new>
 #include <type_traits>
 
+#include "../common/Assert.h"
+
 namespace fiber::dns {
 
 namespace {
 
 constexpr std::size_t kMaxDnsNameLen = 255;
+constexpr std::size_t kWriteSweepBudget = 4;
 
 std::size_t next_power_of_two(std::size_t value) noexcept {
     if (value <= 1) {
@@ -19,6 +22,9 @@ std::size_t next_power_of_two(std::size_t value) noexcept {
     }
     std::size_t out = 1;
     while (out < value) {
+        if (out > std::numeric_limits<std::size_t>::max() / 2U) {
+            return 0;
+        }
         out <<= 1U;
     }
     return out;
@@ -152,17 +158,17 @@ void NameSnapshot::assign_nxdomain(std::chrono::steady_clock::time_point expire_
 
 bool DnsCache::init(Options options) noexcept {
     release();
-    if (options.max_entries == 0 || options.max_bytes == 0) {
+    if (options.max_entries == 0 || options.max_entries > static_cast<std::size_t>(kTombstoneIndex) ||
+        options.max_bytes == 0 || options.max_entries > std::numeric_limits<std::size_t>::max() / 2U) {
         return false;
     }
-    if (options.index_capacity == 0) {
-        options.index_capacity = next_power_of_two(options.max_entries * 2);
-    } else {
-        options.index_capacity = next_power_of_two(options.index_capacity);
+    const std::size_t min_index_capacity = next_power_of_two(options.max_entries * 2U);
+    const std::size_t requested_index_capacity =
+            options.index_capacity == 0 ? min_index_capacity : next_power_of_two(options.index_capacity);
+    if (min_index_capacity == 0 || requested_index_capacity == 0) {
+        return false;
     }
-    if (options.index_capacity < options.max_entries) {
-        options.index_capacity = next_power_of_two(options.max_entries * 2);
-    }
+    options.index_capacity = std::max(min_index_capacity, requested_index_capacity);
     if (options.eviction_sample == 0) {
         options.eviction_sample = 1;
     }
@@ -203,10 +209,11 @@ void DnsCache::release() noexcept {
     bucket_count_ = 0;
     entry_count_ = 0;
     bytes_used_ = 0;
+    tombstone_count_ = 0;
     free_head_ = kInvalidIndex;
     eviction_cursor_ = 0;
     sweep_cursor_ = 0;
-    access_clock_ = 0;
+    access_clock_.store(0, std::memory_order_relaxed);
 }
 
 std::size_t DnsCache::entry_count() const noexcept { return entry_count_; }
@@ -368,7 +375,16 @@ void DnsCache::recycle_entry(std::uint32_t index) noexcept {
     delete[] entry.blob;
     entry.blob = nullptr;
     bytes_used_ -= entry.blob_size;
-    entry = {};
+    entry.hash = 0;
+    entry.qclass = 0;
+    entry.owner_len = 0;
+    entry.blob_size = 0;
+    entry.a = {};
+    entry.aaaa = {};
+    entry.cname = {};
+    entry.nxdomain_expire_at = {};
+    entry.approx_last_access.store(0, std::memory_order_relaxed);
+    entry.occupied = false;
     entry.next_free = free_head_;
     free_head_ = index;
     --entry_count_;
@@ -380,17 +396,63 @@ void DnsCache::erase_entry(std::uint32_t index) noexcept {
     }
     std::size_t mask = bucket_count_ - 1U;
     std::size_t bucket = static_cast<std::size_t>(entries_[index].hash) & mask;
+    bool erased = false;
     for (std::size_t probes = 0; probes < bucket_count_; ++probes) {
         if (buckets_[bucket] == index) {
             buckets_[bucket] = kTombstoneIndex;
+            ++tombstone_count_;
+            erased = true;
             break;
         }
         bucket = (bucket + 1U) & mask;
     }
+    FIBER_ASSERT(erased);
     recycle_entry(index);
 }
 
-void DnsCache::touch_entry(NameEntry &entry) noexcept { entry.approx_last_access = ++access_clock_; }
+void DnsCache::rebuild_index() noexcept {
+    if (!buckets_ || bucket_count_ == 0) {
+        return;
+    }
+    for (std::size_t i = 0; i < bucket_count_; ++i) {
+        buckets_[i] = kInvalidIndex;
+    }
+
+    const std::size_t mask = bucket_count_ - 1U;
+    for (std::size_t i = 0; i < options_.max_entries; ++i) {
+        const NameEntry &entry = entries_[i];
+        if (!entry.occupied || entry.blob == nullptr || entry.owner_len == 0) {
+            continue;
+        }
+        std::size_t bucket = static_cast<std::size_t>(entry.hash) & mask;
+        bool inserted = false;
+        for (std::size_t probes = 0; probes < bucket_count_; ++probes) {
+            if (buckets_[bucket] == kInvalidIndex) {
+                buckets_[bucket] = static_cast<std::uint32_t>(i);
+                inserted = true;
+                break;
+            }
+            bucket = (bucket + 1U) & mask;
+        }
+        FIBER_ASSERT(inserted);
+    }
+    tombstone_count_ = 0;
+}
+
+void DnsCache::maybe_rebuild_index() noexcept {
+    if (tombstone_count_ == 0 || bucket_count_ == 0) {
+        return;
+    }
+    const std::size_t threshold = std::max<std::size_t>(1, bucket_count_ / 4U);
+    if (tombstone_count_ >= threshold) {
+        rebuild_index();
+    }
+}
+
+void DnsCache::touch_entry(const NameEntry &entry) const noexcept {
+    const std::uint64_t next = access_clock_.fetch_add(1, std::memory_order_relaxed) + 1U;
+    entry.approx_last_access.store(next, std::memory_order_relaxed);
+}
 
 std::uint32_t DnsCache::select_eviction_candidate(std::uint32_t protected_index) noexcept {
     if (entry_count_ == 0) {
@@ -407,8 +469,9 @@ std::uint32_t DnsCache::select_eviction_candidate(std::uint32_t protected_index)
             continue;
         }
         ++sampled;
-        if (entry.approx_last_access < best_access) {
-            best_access = entry.approx_last_access;
+        const std::uint64_t last_access = entry.approx_last_access.load(std::memory_order_relaxed);
+        if (last_access < best_access) {
+            best_access = last_access;
             best = index;
         }
     }
@@ -422,9 +485,10 @@ std::uint32_t DnsCache::select_eviction_candidate(std::uint32_t protected_index)
         if (!entry.occupied || static_cast<std::uint32_t>(i) == protected_index) {
             continue;
         }
-        if (best == kInvalidIndex || entry.approx_last_access < best_access) {
+        const std::uint64_t last_access = entry.approx_last_access.load(std::memory_order_relaxed);
+        if (best == kInvalidIndex || last_access < best_access) {
             best = static_cast<std::uint32_t>(i);
-            best_access = entry.approx_last_access;
+            best_access = last_access;
         }
     }
     return best;
@@ -601,6 +665,43 @@ common::IoErr DnsCache::peek_name(std::string_view qname, std::uint16_t qclass,
     return fill_snapshot(entries_[index], now, out);
 }
 
+common::IoErr DnsCache::lookup_name_shared(std::string_view qname, std::uint16_t qclass,
+                                           std::chrono::steady_clock::time_point now, NameSnapshot &out,
+                                           SharedLookupState &state) const noexcept {
+    out.clear();
+    state = SharedLookupState::Miss;
+    if (!out.valid() || qclass == 0) {
+        return common::IoErr::Invalid;
+    }
+
+    char normalized_buf[kMaxDnsNameLen + 1];
+    std::string_view normalized;
+    common::IoErr err = normalize_name(qname, normalized_buf, sizeof(normalized_buf), normalized);
+    if (err != common::IoErr::None) {
+        return err;
+    }
+
+    const std::uint64_t hash = hash_key(normalized, qclass);
+    const std::uint32_t index = find_entry_index(normalized, qclass, hash);
+    if (index == kInvalidIndex) {
+        return common::IoErr::None;
+    }
+
+    const NameEntry &entry = entries_[index];
+    err = fill_snapshot(entry, now, out);
+    if (err != common::IoErr::None) {
+        return err;
+    }
+    if (!out.found()) {
+        state = SharedLookupState::Expired;
+        return common::IoErr::None;
+    }
+
+    touch_entry(entry);
+    state = SharedLookupState::Hit;
+    return common::IoErr::None;
+}
+
 common::IoErr DnsCache::lookup_name(std::string_view qname, std::uint16_t qclass,
                                     std::chrono::steady_clock::time_point now, NameSnapshot &out) noexcept {
     out.clear();
@@ -625,6 +726,7 @@ common::IoErr DnsCache::lookup_name(std::string_view qname, std::uint16_t qclass
     cleanup_entry(entry, now);
     if (entry_empty(entry)) {
         erase_entry(index);
+        maybe_rebuild_index();
         return common::IoErr::None;
     }
 
@@ -633,25 +735,6 @@ common::IoErr DnsCache::lookup_name(std::string_view qname, std::uint16_t qclass
         return err;
     }
     touch_entry(entry);
-    return common::IoErr::None;
-}
-
-common::IoErr DnsCache::note_name_access(std::string_view qname, std::uint16_t qclass) noexcept {
-    if (qclass == 0) {
-        return common::IoErr::Invalid;
-    }
-    char normalized_buf[kMaxDnsNameLen + 1];
-    std::string_view normalized;
-    common::IoErr err = normalize_name(qname, normalized_buf, sizeof(normalized_buf), normalized);
-    if (err != common::IoErr::None) {
-        return err;
-    }
-
-    std::uint64_t hash = hash_key(normalized, qclass);
-    std::uint32_t index = find_entry_index(normalized, qclass, hash);
-    if (index != kInvalidIndex) {
-        touch_entry(entries_[index]);
-    }
     return common::IoErr::None;
 }
 
@@ -719,15 +802,19 @@ common::IoErr DnsCache::upsert_address(std::string_view qname, std::uint16_t qcl
         }
         return err;
     }
-
     if (is_new) {
         std::uint32_t bucket = find_insert_bucket(normalized, qclass, hash);
         if (bucket == kInvalidIndex) {
             recycle_entry(index);
             return common::IoErr::NoMem;
         }
+        if (buckets_[bucket] == kTombstoneIndex) {
+            FIBER_ASSERT(tombstone_count_ != 0);
+            --tombstone_count_;
+        }
         buckets_[bucket] = index;
     }
+    maybe_rebuild_index();
     return common::IoErr::None;
 }
 
@@ -798,15 +885,19 @@ common::IoErr DnsCache::upsert_cname(std::string_view qname, std::uint16_t qclas
         }
         return err;
     }
-
     if (is_new) {
         std::uint32_t bucket = find_insert_bucket(normalized, qclass, hash);
         if (bucket == kInvalidIndex) {
             recycle_entry(index);
             return common::IoErr::NoMem;
         }
+        if (buckets_[bucket] == kTombstoneIndex) {
+            FIBER_ASSERT(tombstone_count_ != 0);
+            --tombstone_count_;
+        }
         buckets_[bucket] = index;
     }
+    maybe_rebuild_index();
     return common::IoErr::None;
 }
 
@@ -844,6 +935,9 @@ common::IoErr DnsCache::upsert_negative_nxdomain(std::string_view qname, std::ui
         is_new = true;
     }
 
+    // NXDOMAIN is keyed by (qname, qclass), unlike NODATA, which is keyed by
+    // (qname, qtype, qclass). Replace all RRsets for this owner so a snapshot
+    // never contains contradictory positive/CNAME and NXDOMAIN state.
     EntryState state;
     state.owner = normalized;
     state.has_nxdomain = true;
@@ -856,15 +950,19 @@ common::IoErr DnsCache::upsert_negative_nxdomain(std::string_view qname, std::ui
         }
         return err;
     }
-
     if (is_new) {
         std::uint32_t bucket = find_insert_bucket(normalized, qclass, hash);
         if (bucket == kInvalidIndex) {
             recycle_entry(index);
             return common::IoErr::NoMem;
         }
+        if (buckets_[bucket] == kTombstoneIndex) {
+            FIBER_ASSERT(tombstone_count_ != 0);
+            --tombstone_count_;
+        }
         buckets_[bucket] = index;
     }
+    maybe_rebuild_index();
     return common::IoErr::None;
 }
 
@@ -929,15 +1027,19 @@ common::IoErr DnsCache::upsert_negative_nodata(std::string_view qname, std::uint
         }
         return err;
     }
-
     if (is_new) {
         std::uint32_t bucket = find_insert_bucket(normalized, qclass, hash);
         if (bucket == kInvalidIndex) {
             recycle_entry(index);
             return common::IoErr::NoMem;
         }
+        if (buckets_[bucket] == kTombstoneIndex) {
+            FIBER_ASSERT(tombstone_count_ != 0);
+            --tombstone_count_;
+        }
         buckets_[bucket] = index;
     }
+    maybe_rebuild_index();
     return common::IoErr::None;
 }
 
@@ -954,17 +1056,18 @@ common::IoErr DnsCache::erase(std::string_view qname, std::uint16_t qclass) noex
     std::uint32_t index = find_entry_index(normalized, qclass, hash_key(normalized, qclass));
     if (index != kInvalidIndex) {
         erase_entry(index);
+        maybe_rebuild_index();
     }
     return common::IoErr::None;
 }
 
-std::size_t DnsCache::sweep_expired(std::chrono::steady_clock::time_point now, std::size_t budget) noexcept {
-    if (budget == 0 || options_.max_entries == 0) {
+std::size_t DnsCache::sweep_expired(std::chrono::steady_clock::time_point now, std::size_t scan_budget) noexcept {
+    if (scan_budget == 0 || options_.max_entries == 0) {
         return 0;
     }
     std::size_t removed = 0;
     std::size_t scanned = 0;
-    while (scanned < options_.max_entries && removed < budget) {
+    while (scanned < options_.max_entries && scanned < scan_budget) {
         std::uint32_t index = sweep_cursor_ % options_.max_entries;
         sweep_cursor_ = static_cast<std::uint32_t>((sweep_cursor_ + 1U) % options_.max_entries);
         ++scanned;
@@ -978,6 +1081,7 @@ std::size_t DnsCache::sweep_expired(std::chrono::steady_clock::time_point now, s
             ++removed;
         }
     }
+    maybe_rebuild_index();
     return removed;
 }
 
@@ -994,28 +1098,26 @@ async::Task<std::size_t> SharedDnsCache::bytes_used() noexcept {
 async::Task<common::IoErr> SharedDnsCache::lookup_name(std::string_view qname, std::uint16_t qclass,
                                                        std::chrono::steady_clock::time_point now,
                                                        NameSnapshot &out) noexcept {
-    common::IoErr err = common::IoErr::None;
-    bool found = false;
+    common::IoErr err;
+    DnsCache::SharedLookupState state;
     {
         auto guard = co_await mutex_.lock_shared();
-        err = cache_.peek_name(qname, qclass, now, out);
-        found = err == common::IoErr::None && out.found();
+        err = cache_.lookup_name_shared(qname, qclass, now, out, state);
     }
 
-    if (found && mutex_.try_lock()) {
-        auto guard = async::RWMutex::WriteLockGuard(&mutex_);
-        common::IoErr touch_err = cache_.note_name_access(qname, qclass);
-        if (touch_err != common::IoErr::None) {
-            err = touch_err;
-        }
+    if (err != common::IoErr::None || state != DnsCache::SharedLookupState::Expired) {
+        co_return err;
     }
-    co_return err;
+
+    auto guard = co_await mutex_.lock();
+    co_return cache_.lookup_name(qname, qclass, now, out);
 }
 
 async::Task<common::IoErr> SharedDnsCache::upsert_a(std::string_view qname, std::uint16_t qclass,
                                                     const net::IpAddress *records, std::uint16_t count,
                                                     std::chrono::steady_clock::time_point expire_at) noexcept {
     auto guard = co_await mutex_.lock();
+    (void) cache_.sweep_expired(event::EventLoop::current().now(), kWriteSweepBudget);
     co_return cache_.upsert_a(qname, qclass, records, count, expire_at);
 }
 
@@ -1023,6 +1125,7 @@ async::Task<common::IoErr> SharedDnsCache::upsert_aaaa(std::string_view qname, s
                                                        const net::IpAddress *records, std::uint16_t count,
                                                        std::chrono::steady_clock::time_point expire_at) noexcept {
     auto guard = co_await mutex_.lock();
+    (void) cache_.sweep_expired(event::EventLoop::current().now(), kWriteSweepBudget);
     co_return cache_.upsert_aaaa(qname, qclass, records, count, expire_at);
 }
 
@@ -1030,6 +1133,7 @@ async::Task<common::IoErr> SharedDnsCache::upsert_cname(std::string_view qname, 
                                                         std::string_view target,
                                                         std::chrono::steady_clock::time_point expire_at) noexcept {
     auto guard = co_await mutex_.lock();
+    (void) cache_.sweep_expired(event::EventLoop::current().now(), kWriteSweepBudget);
     co_return cache_.upsert_cname(qname, qclass, target, expire_at);
 }
 
@@ -1037,6 +1141,7 @@ async::Task<common::IoErr>
 SharedDnsCache::upsert_negative_nxdomain(std::string_view qname, std::uint16_t qclass,
                                          std::chrono::steady_clock::time_point expire_at) noexcept {
     auto guard = co_await mutex_.lock();
+    (void) cache_.sweep_expired(event::EventLoop::current().now(), kWriteSweepBudget);
     co_return cache_.upsert_negative_nxdomain(qname, qclass, expire_at);
 }
 
@@ -1044,6 +1149,7 @@ async::Task<common::IoErr>
 SharedDnsCache::upsert_negative_nodata(std::string_view qname, std::uint16_t qclass, std::uint16_t qtype,
                                        std::chrono::steady_clock::time_point expire_at) noexcept {
     auto guard = co_await mutex_.lock();
+    (void) cache_.sweep_expired(event::EventLoop::current().now(), kWriteSweepBudget);
     co_return cache_.upsert_negative_nodata(qname, qclass, qtype, expire_at);
 }
 
@@ -1053,9 +1159,9 @@ async::Task<common::IoErr> SharedDnsCache::erase(std::string_view qname, std::ui
 }
 
 async::Task<std::size_t> SharedDnsCache::sweep_expired(std::chrono::steady_clock::time_point now,
-                                                       std::size_t budget) noexcept {
+                                                       std::size_t scan_budget) noexcept {
     auto guard = co_await mutex_.lock();
-    co_return cache_.sweep_expired(now, budget);
+    co_return cache_.sweep_expired(now, scan_budget);
 }
 
 } // namespace fiber::dns
