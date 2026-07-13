@@ -3,6 +3,7 @@
 #include <cerrno>
 #include <chrono>
 #include <memory>
+#include <string_view>
 #include <sys/socket.h>
 #include <utility>
 
@@ -17,6 +18,22 @@
 namespace fiber::http {
 
 namespace {
+
+enum class SelectedProtocol {
+    Http1,
+    Http2,
+    Unsupported,
+};
+
+SelectedProtocol select_protocol(std::string_view alpn) noexcept {
+    if (alpn.empty() || alpn == "http/1.1") {
+        return SelectedProtocol::Http1;
+    }
+    if (alpn == "h2") {
+        return SelectedProtocol::Http2;
+    }
+    return SelectedProtocol::Unsupported;
+}
 
 common::IoResult<net::SocketAddress> resolve_local_addr(int fd) noexcept {
     sockaddr_storage storage{};
@@ -152,18 +169,17 @@ fiber::async::DetachedTask HttpServer::handle_connection(net::AcceptResult accep
         co_return;
     }
 
-    std::string negotiated_alpn = transport->negotiated_alpn();
-    if (negotiated_alpn.empty() || negotiated_alpn == "http/1.1") {
-        co_await serve_http1(std::move(transport));
-        co_return;
+    switch (select_protocol(transport->negotiated_alpn())) {
+        case SelectedProtocol::Http1:
+            co_await serve_http1(std::move(transport));
+            co_return;
+        case SelectedProtocol::Http2:
+            co_await serve_http2(std::move(transport));
+            co_return;
+        case SelectedProtocol::Unsupported:
+            transport->close();
+            co_return;
     }
-    if (negotiated_alpn == "h2") {
-        co_await serve_http2(std::move(transport));
-        co_return;
-    }
-
-    transport->close();
-    co_return;
 }
 
 fiber::async::Task<void> HttpServer::serve_http1(std::unique_ptr<HttpTransport> transport) {

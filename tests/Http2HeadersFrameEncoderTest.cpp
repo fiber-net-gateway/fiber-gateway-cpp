@@ -91,7 +91,7 @@ public:
     void close() override { closed_ = true; }
     [[nodiscard]] bool valid() const noexcept override { return !closed_; }
     [[nodiscard]] int fd() const noexcept override { return -1; }
-    [[nodiscard]] std::string negotiated_alpn() const noexcept override { return "h2"; }
+    [[nodiscard]] std::string_view negotiated_alpn() const noexcept override { return "h2"; }
     [[nodiscard]] const fiber::net::SocketAddress &remote_addr() const noexcept override { return remote_addr_; }
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept override { return loop_ ? *loop_ : fallback_loop_; }
     [[nodiscard]] const std::vector<std::uint8_t> &written() const noexcept { return written_; }

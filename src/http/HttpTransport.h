@@ -4,7 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <memory>
-#include <string>
+#include <string_view>
 
 #include "../async/Task.h"
 #include "../common/IoError.h"
@@ -40,7 +40,8 @@ public:
     virtual void close() = 0;
     [[nodiscard]] virtual bool valid() const noexcept = 0;
     [[nodiscard]] virtual int fd() const noexcept = 0;
-    [[nodiscard]] virtual std::string negotiated_alpn() const noexcept = 0;
+    // Borrowed view into the transport. Invalidated by close() or destruction.
+    [[nodiscard]] virtual std::string_view negotiated_alpn() const noexcept = 0;
     [[nodiscard]] virtual const net::SocketAddress &remote_addr() const noexcept = 0;
     [[nodiscard]] virtual event::EventLoop &loop() const noexcept = 0;
 };
@@ -65,7 +66,7 @@ public:
     void close() override;
     [[nodiscard]] bool valid() const noexcept override;
     [[nodiscard]] int fd() const noexcept override;
-    [[nodiscard]] std::string negotiated_alpn() const noexcept override;
+    [[nodiscard]] std::string_view negotiated_alpn() const noexcept override;
     [[nodiscard]] const net::SocketAddress &remote_addr() const noexcept override;
     [[nodiscard]] event::EventLoop &loop() const noexcept override;
 
@@ -99,7 +100,7 @@ public:
     void close() override;
     [[nodiscard]] bool valid() const noexcept override;
     [[nodiscard]] int fd() const noexcept override;
-    [[nodiscard]] std::string negotiated_alpn() const noexcept override;
+    [[nodiscard]] std::string_view negotiated_alpn() const noexcept override;
     [[nodiscard]] const net::SocketAddress &remote_addr() const noexcept override;
     [[nodiscard]] event::EventLoop &loop() const noexcept override;
 
