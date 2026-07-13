@@ -52,17 +52,17 @@
 - **问题**：每次调用现算 `http_header_name_hash` 并逐字节大小写折叠。调用点遍布各协议热路径：`GrpcClient` 的 `grpc-status`、`GrpcStream` 的 `grpc-message`、`HttpClientFuncs` 的 `content-type`、`Http1ExchangeIo.cpp:705-709` 每响应查 `Content-Length/Transfer-Encoding/Connection` 三个字面量。代码库已有 `constexpr` 哈希习惯（`HttpProxyCore.h:97`、`ProxyHandler.cpp:129`、`Http2HpackEncoder.cpp:21-25`），但 `get/contains` 没开放重载去吃它。`get_all(string_view)` 还每请求 malloc/free（`ScriptExchangeCtx.cpp:141/202` 的 `get_all("cookie")`）。
 - **修法**：补 `get/contains(name,hash)` 与 `get_all(string_view)` 内部走 hash 路径（`MatchRange.owned_key_` 在 pre-hashed 路径下成死字段）；调用点用 `static constexpr uint64_t kXHash = http_header_name_hash("...")`。
 
-### 7. `HttpExchange` 不暴露已解析的 content-length / chunked ⭐ 根因
+### 7. `HttpExchange` 不暴露已解析的 content-length / chunked ⭐ 根因 ✅ 已修复
 - **位置**：`HttpExchange.h:140-142`（`request_chunked_/request_content_length_*` 私有无 accessor）；`HttpProxyCore.h:152-169`（`detect_request_body`）
 - **问题**：H1/H3 请求头处理时早已解析过（`Http1Connection.cpp:128-149`、`ServerHttp3Request.cpp:773-777`），但 `detect_request_body` 每个代理请求重新 `get("content-length")` + `contains("transfer-encoding")`——重复 2 次哈希+扫描。
 - **修法**：加 `request_chunked()` / `bool request_content_length_set()` / `size_t request_content_length()` public accessor，`detect_request_body` 直接读。零每请求开销。
 
-### 8. HPACK `resolve_name_index` 冗余 O(61) 扫描 + catalog 重复查找
+### 8. HPACK `resolve_name_index` 冗余 O(61) 扫描 + catalog 重复查找 ✅ 已修复
 - **位置**：`Http2HpackEncoder.cpp:456`（`resolve_name_index` 调 `Http2HpackStaticTable::find_name` 线性扫）；`:235` 已查过 catalog，`:244/259` 又查一次
 - **问题**：catalog 里已有全部 61 条静态项的哈希表（`Http2HpackEncodeCatalog.cpp:42-57`）。`resolve_name_index` 在每个未命中索引表示的 header 上调用（常见情况），先做无谓的 61 条线性扫；`encode_field` 内还重复查 catalog。另：`Http2HpackStaticTable::find_name`（hash 版，`Http2HpackStaticTable.cpp:113-126`）用 `same_bytes`（精确 memcmp），对大小写混合的名字总是失败，纯浪费。
 - **修法**：删掉静态表扫描直接用 catalog（`resolve_name_index` 内 `catalog->find(name,name_hash,{})`）；`encode_field:258-262` 复用 `:235` 的 `result.entry`。
 
-### 9. H3 索引静态表字段无谓拷贝到 pool
+### 9. H3 索引静态表字段无谓拷贝到 pool ✅ 已修复
 - **位置**：`ServerHttp3Request.cpp:479-481,657-669`（`on_indexed_field` -> `commit_field` -> `commit_regular_header` 把 name/value `copy_to_pool`）
 - **问题**：`entry.name/value` 指向 `kEntries_` 字面量（永久存储、已小写），而 `HttpHeaders::add_view`（`HttpHeaders.cpp:153-174`）本就是零拷贝。EntryMatch 是 QPACK 快路径（`accept-encoding: gzip,deflate,br`、`:method GET` 等很常见），却都做 2 次无谓 memcpy 进 arena。
 - **修法**：静态存储字段直接 `add_view` 传指针（`lowcase_name = entry.name`），跳过 `copy_to_pool`。用 `name_owned`/`value_owned` 标志或"指向静态存储"谓词门控。
@@ -80,7 +80,7 @@
 |------|------|------|
 | `Http2OutboundScheduler.cpp:803-812` | slot 剩余字节 + tail_chain 分两次 syscall，前面 ~9 字节帧头可并进首个 iov 一次 writev | slot 未尽且 tail 非空时构造 iovec 首项 = 剩余 slot span，一次 writev；partial-write 处理需先记消费的 slot 字节数 |
 | `Http2HeadersFrameEncoder.cpp:199-208` | 大 header block 拆 N 个 CONTINUATION 帧时每帧 `IoBuf::allocate` | overflow 缓冲改从 IoBufNodePool 缓存取，避免全局分配器 |
-| `Http2HpackEncoderIoBufWriter.cpp:110` | `commit_output` 每次 `first_writable()` O(n) 遍历链，缓存了 `tail_` 却不用 | `if (tail_==nullptr \|\| tail_->writable()==0) tail_=block_.first_writable();` 否则跳过（3 行） |
+| `Http2HpackEncoderIoBufWriter.cpp:110` | ✅ 已修复：`commit_output` 每次 `first_writable()` O(n) 遍历链，缓存了 `tail_` 却不用 | `if (tail_==nullptr \|\| tail_->writable()==0) tail_=block_.first_writable();` 否则跳过（3 行） |
 | `Http2HpackDecoder.cpp:224` / `Http3QpackDecoder.cpp:250-265,306` | 解码器原始字面量双重拷贝：数据->scratch->pool | 单 chunk 整串（`take==remaining && string_received_==0 && !huffman`）时直接把源指针传回调，省第二次 memcpy |
 | `Http2HpackDecodeTable.cpp:125` | `insert` 重算 name hash，上游 `FieldView::name_hash` 已有 | `insert` 加 `name_hash` 参数透传 |
 | `HttpHeaders.cpp` | ✅ 已修复：`add()` 对 name 做两次 pool 分配（original + lowercase，各 `name.size()` 字节） | 单次分配 `2*name_len` 缓冲，original 在 `[0,len)`、lowercase 在 `[len,2*len)`；H1/H2/H3 请求头热路径走 `add_view` 不受影响，主要惠及 trailer 与 `set()` |
@@ -93,10 +93,10 @@
 | `HttpHeaderHash.h:20` | 哈希乘子 31、32 位截断，分布偏弱 | 换 FNV-1a 64（`0x100000001b3ull`，初值 `0xcbf29ce484222325ull`）；32 桶下影响有限 |
 | `Http2Connection.cpp:1267-1276,1482-1489` | ✅ 已修复：GOAWAY 选择性关闭和全量 teardown 原先用 `new Http2Stream*[n]` 收集指针 | 直接遍历 `owned_stream_list_`；操作当前 stream 前预取 `next`，用 `Lease` 固定当前对象生命周期，删除两处分配及 `NoMem` 分支 |
 | `Http2Connection.cpp:938-965` | ✅ 已修复：`apply_peer_initial_stream_window` 原先两次全表 `for_each` | 在同一次遍历中用 64 位值校验并立即更新；越界错误由 SETTINGS 路径作为连接级致命错误传播，无需回滚已更新 stream，且仅在全遍成功后提交 `peer_initial_stream_send_window_`。新增多 stream 增减、溢出和摘链遍历测试；2026-07-13 全量 1126 ctest 通过 |
-| `Http2Connection.cpp:926-974` | 控制帧（WINDOW_UPDATE/RST/GOAWAY）先编码进栈数组再 memcpy 进 slab | 直接编码进 `dst + kFrameHeaderSize`，省双写 |
+| `Http2Connection.cpp:926-974` | ✅ 已修复：控制帧（WINDOW_UPDATE/RST/GOAWAY）先编码进栈数组再 memcpy 进 slab | 直接编码进 `dst + kFrameHeaderSize`，省双写 |
 | `Http2DataFrameEncoder.cpp:58-61` | ⏸ 已核查，暂不处理：9 字节帧头确实经栈数组再由 `append_copy` 写入输出，但 payload 是外部 `IoBufChain`；为保持 payload 零拷贝，帧头仍需独立且存活到异步发送完成。多帧时首帧 payload 进入 `tail_chain` 后，后续 `reserve_slot(9)` 会返回 `Invalid`，而 `append_copy` 还承担分配小 `IoBuf` 的回退语义 | 不能直接替换为 `reserve_slot(9)` + 原地编码。单次 9 字节复制收益很低；若 profiling 显示瓶颈，优先考虑 header slab/小对象池，或增加保留 fallback 语义的直接写入 API，优化后续帧头的小额分配 |
 | `HttpExchange.h:148` | `HttpHandler = std::function<...>` | 每连接一次（非每请求），低优先；可换带 SBO 的类型擦除 callable |
-| `Http3QpackEncoder.cpp:90-117` | 伪头编码器走通用 `find()` 而非直接静态下标（见 #2） | 同 #2 |
+| `Http3QpackEncoder.cpp:90-117` | ✅ 已修复：伪头编码器走通用 `find()` 而非直接静态下标（见 #2） | 同 #2 |
 | `Http3QpackEncoderIoBufWriter` / `Http2HpackEncodeCatalog.cpp:121` | catalog `find` 对已小写名走逐字节 ci 比较 | policy 项 init 时存小写，全用 `same_bytes`；或保证 `add_view` 层 name 已小写 |
 
 ---
