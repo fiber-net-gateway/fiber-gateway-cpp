@@ -18,8 +18,6 @@ namespace fiber::http {
 
 namespace {
 
-constexpr std::size_t kBodyReadChunk = 4096;
-
 unsigned char ascii_lower(unsigned char ch) {
     if (ch >= 'A' && ch <= 'Z') {
         return static_cast<unsigned char>(ch + ('a' - 'A'));
@@ -93,25 +91,6 @@ Http1Connection::~Http1Connection() {
     if (transport_ && transport_->valid() && loop_.in_loop()) {
         transport_->close();
     }
-}
-
-fiber::async::Task<common::IoResult<size_t>>
-Http1Connection::read_into_inbound(std::chrono::milliseconds timeout) noexcept {
-    mem::IoBuf buf = mem::IoBuf::allocate(kBodyReadChunk);
-    if (!buf) {
-        co_return std::unexpected(common::IoErr::NoMem);
-    }
-    auto result = co_await transport_->read_into(buf, timeout);
-    if (!result) {
-        co_return std::unexpected(result.error());
-    }
-    if (*result == 0) {
-        co_return static_cast<size_t>(0);
-    }
-    if (!inbound_bufs_.append(std::move(buf))) {
-        co_return std::unexpected(common::IoErr::NoMem);
-    }
-    co_return *result;
 }
 
 bool Http1Connection::handle_content_length(HttpExchange &exchange, const HttpHeaders::HeaderField &header) {
