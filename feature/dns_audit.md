@@ -1,16 +1,16 @@
 # `src/dns/` 模块审计
 
-> 审计范围：`src/dns/` 全部 14 个文件（约 4300 行），按传输与报文编解码（`DnsClient`/`DnsName`/`DnsMessage`）、缓存（`DnsCache`/`SharedDnsCache`）、解析器（`DnsResolverLocal`/`DnsResolver`）三个域并行评审后整合。所有结论均经直接读码 + 交叉验证。
+> 审计范围：`src/dns/` 全部 16 个文件（约 4500 行），按传输与报文编解码（`DnsClient`/`DnsName`/`DnsMessage`）、缓存（`DnsCache`/`SharedDnsCache`）、解析器（`DnsResolverLocal`/`DnsResolver`）三个域并行评审后整合。所有结论均经直接读码 + 交叉验证。
 >
 > 核验事实：`RWMutex::ReadLockAwaiter::await_ready` 在无写锁竞争时 `try_lock_shared()` 返回 true、`co_await lock_shared()` 不挂起（`src/async/RWMutex.cpp:153-162,200-207`）；`RWFd::close()` 同步 `resume()` 挂起的读等待者并置 `Canceled`（`src/net/detail/RWFd.cpp:38-71`），故 `~DnsClient`->`close()`->`socket_->close()` 会在析构成员前同步排空 `recv_loop`，recv_loop 无 UAF；open-addressing 的 tombstone/探查不变量正确；`NameSnapshot` 自包含拷贝、无悬空指针。
 >
-> 状态（2026-07-13 复核）：HIGH #1、#2 已修复；HIGH #3 尚未修复，但主解析路径已有 question/answer 语义校验缓解；LOW #1 随 HIGH #1 一并修复，其余排期。
+> 状态（2026-07-13 复核）：HIGH #1、#2、#3 均已修复；LOW #1、#13 已随对应 HIGH 项修复，其余排期。
 >
-> 复核验证：`cmake --build build --target fiber_tests -j2`；`./build/fiber_tests --gtest_filter='DnsClientTest.*:DnsResolverLocalTest.*'`，12/12 通过。
+> 复核验证：`cmake --build build --target fiber_tests -j2`；DNS 定向测试 26/26 通过；`ctest --test-dir build --output-on-failure`，1141/1141 通过。
 
 ## 总体评价
 
-wire codec（`DnsName`/`DnsMessage`）边界检查、指针压缩循环检测（强制向后指 + 跳数上界）、open-addressing 哈希不变量、SOA 负 TTL 解析（RFC 2308）、pending 合并等均正确。原始审计发现的两个内存/活性高危问题（HIGH #1/#2）已经修复；当前仍需优先处理 HIGH #3 的 DNS 响应匹配与随机化加固，以及若干中危的并发/性能/合规问题。按严重度排列如下，均给出 `file:line` 与触发场景。
+wire codec（`DnsName`/`DnsMessage`）边界检查、指针压缩循环检测（强制向后指 + 跳数上界）、open-addressing 哈希不变量、SOA 负 TTL 解析（RFC 2308）、pending 合并等均正确。原始审计发现的三个高危问题均已修复；当前剩余工作主要是缓存并发/退化、分配开销及若干合规问题。按严重度排列如下，均给出 `file:line` 与触发场景。
 
 ---
 
@@ -49,50 +49,30 @@ wire codec（`DnsName`/`DnsMessage`）边界检查、指针压缩循环检测（
 **原修复建议**：把 in-flight `TcpStream`（或取消令牌）记入 slot，在 `cancel_all_inflight` 里 close 它，使 `query_tcp` 立即以错误返回；或在 `query_tcp` 每个挂起点后检查 `closing_` 并要求调用方 await 静默。
 
 **当前实现（commit `2e44ea1`）**：
-- slot 保存无分配的 `cancel_context + InflightCancelFn`，TCP connect 阶段取消 timeout awaiter，连接建立后取消 `TcpStream`（`DnsClient.h:55-71`，`DnsClient.cpp:297-318`）。
-- `cancel_all_inflight` 先收集 cancel/resume 动作、清空 slot 内指针，再执行取消，避免同步重入破坏遍历（`DnsClient.cpp:428-469`）。
-- `CloseAndReleaseCancelPendingTcpFallback` 覆盖 fallback 挂起时 `close()+release()`，验证查询被取消且对端连接关闭（`DnsClientTest.cpp:631-658`）。
+- slot 保存无分配的 `cancel_context + InflightCancelFn`，TCP connect 阶段取消 timeout awaiter，连接建立后取消 `TcpStream`（`DnsClient.h:58-72`，`DnsClient.cpp:290-313`）。
+- `cancel_all_inflight` 先收集 cancel/resume 动作、清空 slot 内指针，再执行取消，避免同步重入破坏遍历（`DnsClient.cpp:458-499`）。
+- `CloseAndReleaseCancelPendingTcpFallback` 覆盖 fallback 挂起时 `close()+release()`，验证查询被取消且对端连接关闭（`DnsClientTest.cpp:888-915`）。
 
-### 3. ⏳ 未修复（主路径部分缓解）：可预测的顺序事务 ID + 无 0x20 + 客户端不校验响应 question
-`DnsClient.cpp:130-133,500-507`（`next_id_++` 从 0 线性递增）/ `593-620`（`handle_udp_packet` 仅按 ID+源地址匹配）/ `DnsMessage.cpp:223-228`、`DnsName.cpp:42-44`（查询名原样编码，无 0x20）
+### 3. ✅ 已修复：可预测的顺序事务 ID + 无 0x20 + 客户端不校验响应 question
+原始位置：`DnsClient.cpp:130-133,500-507`（`next_id_++` 从 0 线性递增）/ `593-620`（`handle_udp_packet` 仅按 ID+源地址匹配）/ `DnsMessage.cpp:223-228`、`DnsName.cpp:42-44`（查询名原样编码，无 0x20）
 
-16 位顺序 ID 易于预测（RFC 5452），查询名没有 0x20 大小写随机化。客户端 `handle_udp_packet` 在解析层校验前就把来源和 ID 匹配的包 memcpy 进 slot。默认本地端口为 0、由内核选择临时端口，且客户端会校验响应源 IP/端口，这提供了额外熵，但 socket 在整个 `DnsClient` 生命周期内复用，不能替代随机事务 ID 和完整 question 匹配。
+**原始问题（修复前）**：16 位顺序 ID 易于预测（RFC 5452），查询名没有 0x20 大小写随机化。客户端 `handle_udp_packet` 在解析层校验前就把来源和 ID 匹配的包 memcpy 进 slot。默认本地端口为 0、由内核选择临时端口，且客户端会校验响应源 IP/端口，这提供了额外熵，但 socket 在整个 `DnsClient` 生命周期内复用，不能替代随机事务 ID 和完整 question 匹配。
 
-当前主解析路径有两层缓解：`DnsResolverLocal::handle_response` 校验 question 的规范化 name/type/class（`DnsResolverLocal.cpp:732-747`），并且 HIGH #1 的修复已拒绝不属于 qname/CNAME 可达链的 answer。因此旧审计中“可直接借此触发 HIGH #1 并污染缓存”的链路已经断开。不过：
+修复前主解析路径已有两层缓解：`DnsResolverLocal::handle_response` 校验 question 的规范化 name/type/class（`DnsResolverLocal.cpp:732-747`），并且 HIGH #1 的修复已拒绝不属于 qname/CNAME 可达链的 answer。因此旧审计中“可直接借此触发 HIGH #1 并污染缓存”的链路已经断开。不过当时仍存在：
 - `DnsClient::query_raw` 的直接调用者仍会接受 question 不匹配的包；
 - 伪造包若先到达，`DnsResolverLocal` 会收到它并返回 `Invalid`，合法响应随后因 slot 已完成而被丢弃，可形成查询级 DoS；
 - 若攻击者猜中源端口和顺序 ID，并伪造正确 question 与合法 answer 链，当前非 DNSSEC 校验路径仍可能接受响应。
 
 `dnssec_ok` 只控制 EDNS DO bit，开启它也不等于执行 DNSSEC 验证，不能作为本问题的修复。
 
-#### 代码修复方案
-
-1. **每次分配事务 ID 都使用 CSPRNG（必须）**
-   - 在 `DnsClient.cpp` 使用项目已经链接的 BoringSSL `RAND_bytes`，不使用 `std::random_device`、`std::mt19937`，也不新增堆分配。
-   - `allocate_query_id()` 每次读取 32 位随机数：低 16 位作为随机起点，高 16 位强制置奇数后作为探查步长；按 `candidate = start + i * odd_step` 在 16 位空间探查。奇数步长可遍历完整 65536 个 ID，既保证首选 ID 不可预测，也能在高占用时找到任意空闲 ID。
-   - `RAND_bytes` 失败时 fail closed，返回错误，不回退到可预测的顺序 ID。删除 `next_id_` 成员以及 `init/reset` 中对它的初始化。
-
-2. **在发送缓冲区内原地实现 0x20（建议默认开启、允许显式关闭）**
-   - 给 `DnsClient::Options` 增加 `enable_0x20 = true`。`encode_query` 完成后，遍历从 DNS header 后开始的未压缩 QNAME，仅对 ASCII 字母用 CSPRNG bit 随机选择大小写；label 长度、QTYPE/QCLASS 和 name 长度保持不变。
-   - 最多 253 个名称字节，只需固定大小栈缓冲保存随机 bit；不得引入 `std::string`/`std::vector`。发出的随机大小写 query 已保存在 slot 的 `request_buf` 中，可直接作为后续精确匹配基准。
-   - 关闭 0x20 时，question 名按 DNS ASCII 大小写不敏感规则比较；开启时必须逐字符精确比较大小写，否则 0x20 不提供额外熵。
-
-3. **`DnsClient` 在完成 slot 前校验完整 question（必须）**
-   - 增加无分配 helper，例如 `response_matches_request(const InflightSlot&, const uint8_t*, size_t)`：要求 QR=1、opcode=QUERY、QDCOUNT=1，使用现有 `decode_name()` 将 request/response QNAME 解码到两个固定栈数组，再比较 name、QTYPE、QCLASS。
-   - UDP 中应在 `memcpy`/`complete_slot` 之前调用。来源或 ID 匹配但 question 不匹配/报文畸形时只丢弃该包，继续等待合法响应；不能用错误结束 slot，否则攻击者仍可制造提前失败。
-   - 保留现有源 IP/端口和 ID 检查。question 校验放在 response-capacity 错误之前，避免一个 question 不匹配的大包把合法查询提前完成为 `NoMem`。
-
-4. **UDP/TCP 共用同一响应匹配 helper（必须）**
-   - `query_tcp` 读完 length-prefixed 响应后，同样校验响应 ID 和完整 question；失败返回 `Invalid`。这会同时修复 LOW #13。
-   - TCP 是一问一连接，匹配失败可以结束查询；UDP 则必须忽略不匹配包并继续等待。
-
-5. **回归测试**
-   - UDP server 先发送“同源、同 ID、错误 qname/qtype/qclass”的响应，再发送正确响应；断言客户端忽略前者并返回后者。
-   - server 读取实际随机化后的 QNAME，先返回一个翻转大小写的 question，再精确回显；开启 0x20 时只接受精确回显。
-   - 并发查询断言所有 active ID 唯一；对 ID 生成器用可注入的固定随机字节或独立小组件测试碰撞与完整空间探查，避免用概率断言测试“看起来随机”。
-   - TCP 分别覆盖错误 ID、错误 question，并保留现有 truncated fallback 与 close/cancel 测试。
-
-推荐落地顺序：先做“随机 ID + 客户端 question 校验 + TCP 共用校验”，这是安全边界；随后启用 0x20。两步均完成后再将本项标记为已修复。
+**当前实现**：
+- `prepare_request` 每个 attempt 只调用一次 BoringSSL `RAND_bytes`，前 32 bit 生成随机 ID 起点和奇数探查步长，后 256 bit 原地随机化 QNAME ASCII 字母；失败时返回 `Unknown`，不会回退到顺序 ID（`DnsClient.cpp:418-448`）。
+- `next_id_` 已删除；`select_query_id` 的奇数步长可遍历完整 65536 ID 空间，并继续使用 `id_to_slot_` 保证 active ID 唯一（`DnsQuerySecurity.cpp:66-80`）。
+- `DnsClient::Options::enable_0x20` 默认开启；关闭时不随机化 QNAME，并使用 ASCII 大小写不敏感匹配（`DnsClient.h:27-36`，`DnsQuerySecurity.cpp:83-120`）。
+- 无分配 `response_matches_query` 要求 ID、QR、QUERY opcode、QDCOUNT、QNAME、QTYPE、QCLASS 全部匹配，名称解码只使用两个固定 255-byte 栈数组（`DnsQuerySecurity.cpp:122-152`）。
+- UDP 在 response capacity 检查、`memcpy` 和 `complete_slot` 前执行 matcher；不匹配或畸形报文被静默丢弃，slot 继续等待合法响应（`DnsClient.cpp:617-645`）。TCP 读取完整响应后调用同一 matcher，不匹配返回 `Invalid`，同时修复 LOW #13（`DnsClient.cpp:367-392`）。
+- 随机缓冲位于普通非协程 `prepare_request` 栈上，slot 未增加字段或域名副本；生产热路径未新增堆分配。
+- 回归测试覆盖 ID 碰撞/环回/完整空间探查、0x20 原地变换、错误 ID/qname/qtype/qclass/大小写、关闭严格 0x20、TCP 错误 ID/question，以及原有 fallback/cancel 行为（`DnsQuerySecurityTest.cpp`，`DnsClientTest.cpp:737-872`）。
 
 ---
 
@@ -149,8 +129,8 @@ V6First 也会同时发 A 查询并等齐两者才合并，上游查询量翻倍
 10. **`ensure_capacity` 两次估算（粗->精）**：`DnsCache.cpp:683` vs `486`。先算完整 blob size 再调。
 11. **`NameSnapshot` 同时 NonCopyable+NonMovable**：`DnsCache.h:20`。强制按出参传递或堆间接，去掉 NonMovable 即可移动。
 12. **`pick_status_family` 双失败时返回更严重的状态**：`DnsResolver.cpp:72-86`。NxDomain(确定) vs ServerFailure(瞬时)，返回 NxDomain 更利于调用方缓存负结果。
-13. **`query_tcp` 未校验响应 ID**：TCP 响应未比对事务 ID，仅靠连接匹配。RFC 合规缺口。
-14. **`recv_loop` 对非 Canceled/BadFd 错误不 yield**：`DnsClient.cpp:274-279`。UDP ICMP 错误单次会被 recvmsg 消费，但错误洪流下可能短时忙等。
+13. **✅ 已修复：`query_tcp` 未校验响应 ID**。UDP/TCP 现共用 `response_matches_query`，校验 ID 和完整 question；TCP 不匹配返回 `Invalid`（`DnsClient.cpp:367-392`）。
+14. **`recv_loop` 对非 Canceled/BadFd 错误不 yield**：`DnsClient.cpp:276-285`。UDP ICMP 错误单次会被 recvmsg 消费，但错误洪流下可能短时忙等。
 
 ---
 
@@ -160,7 +140,7 @@ V6First 也会同时发 A 查询并等齐两者才合并，上游查询量翻倍
 |--------|------|------|--------|
 | P0 | ✅ 已修复 | HIGH #1（pending 完成顺序 + 防重复上游查询 + answer/CNAME 链校验） | - |
 | P0 | ✅ 已修复 | HIGH #2（TCP fallback 取消） | - |
-| P0 | ⏳ 待修复 | HIGH #3（随机 ID + 0x20 + 客户端 UDP/TCP question 校验） | 中 |
+| P0 | ✅ 已修复 | HIGH #3（随机 ID + 0x20 + 客户端 UDP/TCP question 校验） | - |
 | P1 | ⏳ 待修复 | MEDIUM #4/#5/#6（缓存 LRU/清理/tombstone/NxDomain 一致性） | 中 |
 | P1 | ⏳ 待修复 | MEDIUM #7（堆分配 churn） | 中 |
 | P2 | ⏳ 待修复 | MEDIUM #8 + 其余未修复 LOW | 排期 |

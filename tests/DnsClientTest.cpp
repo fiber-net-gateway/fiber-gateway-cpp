@@ -13,6 +13,7 @@
 #include "common/IoError.h"
 #include "dns/DnsClient.h"
 #include "dns/DnsMessage.h"
+#include "dns/DnsName.h"
 #include "event/EventLoopGroup.h"
 #include "net/TcpListener.h"
 #include "net/TcpStream.h"
@@ -37,6 +38,18 @@ struct ClientOutcome {
 struct ServerOutcome {
     IoErr err = IoErr::Unknown;
     std::size_t recv_count = 0;
+};
+
+enum class TcpResponseMode : std::uint8_t {
+    Correct,
+    WrongId,
+    WrongQuestion,
+};
+
+struct CapturedQuestion {
+    std::string name;
+    std::uint16_t type = 0;
+    std::uint16_t dns_class = 0;
 };
 
 fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
@@ -128,6 +141,34 @@ std::uint16_t read_be16(const std::uint8_t *data) {
     return static_cast<std::uint16_t>((static_cast<std::uint16_t>(data[0]) << 8U) | data[1]);
 }
 
+fiber::common::IoResult<CapturedQuestion> parse_question(const std::uint8_t *packet, std::size_t packet_len) {
+    std::array<char, 255> name_storage{};
+    auto decoded = fiber::dns::decode_name(packet, packet_len, 12, name_storage.data(), name_storage.size());
+    if (!decoded || decoded->next_offset > packet_len || packet_len - decoded->next_offset < 4) {
+        return std::unexpected(IoErr::Invalid);
+    }
+    return CapturedQuestion{std::string(decoded->name), read_be16(packet + decoded->next_offset),
+                            read_be16(packet + decoded->next_offset + 2)};
+}
+
+std::vector<std::uint8_t> make_empty_response(std::uint16_t id, std::string_view qname, std::uint16_t type,
+                                              std::uint16_t dns_class) {
+    std::vector<std::uint8_t> packet;
+    packet.reserve(48);
+    push_be16(packet, id);
+    push_be16(packet, 0x8180U);
+    push_be16(packet, 1);
+    push_be16(packet, 0);
+    push_be16(packet, 0);
+    push_be16(packet, 0);
+
+    auto qname_wire = encode_dns_name(qname);
+    packet.insert(packet.end(), qname_wire.begin(), qname_wire.end());
+    push_be16(packet, type);
+    push_be16(packet, dns_class);
+    return packet;
+}
+
 fiber::async::Task<fiber::common::IoResult<void>> read_exact(fiber::net::TcpStream &stream, std::uint8_t *buf,
                                                              std::size_t len) {
     std::size_t total = 0;
@@ -193,7 +234,13 @@ DetachedTask run_udp_success_server(fiber::event::EventLoop *loop, std::promise<
     }
 
     ++outcome.recv_count;
-    auto response = make_a_response(read_be16(buf.data()), "www.example.com", {1, 2, 3, 4});
+    auto question = parse_question(buf.data(), recv_result->size);
+    if (!question) {
+        outcome.err = question.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+    auto response = make_a_response(read_be16(buf.data()), question->name, {1, 2, 3, 4});
     auto send_result = co_await fiber::async::timeout_for(
             [&]() { return socket.send_to(response.data(), response.size(), recv_result->peer); }, 2s);
     outcome.err = send_result ? IoErr::None : send_result.error();
@@ -236,7 +283,13 @@ DetachedTask run_udp_retry_server(fiber::event::EventLoop *loop, std::promise<st
         if (attempt == 0) {
             continue;
         }
-        auto response = make_a_response(read_be16(buf.data()), "www.example.com", {5, 6, 7, 8});
+        auto question = parse_question(buf.data(), recv_result->size);
+        if (!question) {
+            outcome.err = question.error();
+            outcome_promise->set_value(std::move(outcome));
+            co_return;
+        }
+        auto response = make_a_response(read_be16(buf.data()), question->name, {5, 6, 7, 8});
         auto send_result = co_await fiber::async::timeout_for(
                 [&]() { return socket.send_to(response.data(), response.size(), peer); }, 2s);
         outcome.err = send_result ? IoErr::None : send_result.error();
@@ -250,8 +303,84 @@ DetachedTask run_udp_retry_server(fiber::event::EventLoop *loop, std::promise<st
     outcome_promise->set_value(std::move(outcome));
 }
 
+DetachedTask run_udp_validation_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
+                                       std::promise<ServerOutcome> *outcome_promise) {
+    ServerOutcome outcome;
+    fiber::net::UdpSocket socket(*loop);
+    auto bind_result = socket.bind(fiber::net::SocketAddress::any_v4(), {});
+    if (!bind_result) {
+        port_promise->set_value(0);
+        outcome.err = bind_result.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    auto port_result = resolve_port(socket.fd());
+    port_promise->set_value(port_result ? *port_result : 0);
+    if (!port_result) {
+        outcome.err = port_result.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    std::array<std::uint8_t, 512> buf{};
+    auto recv_result =
+            co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
+    if (!recv_result) {
+        outcome.err = recv_result.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+    ++outcome.recv_count;
+
+    auto question = parse_question(buf.data(), recv_result->size);
+    if (!question) {
+        outcome.err = question.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    const std::uint16_t id = read_be16(buf.data());
+    std::string wrong_case = question->name;
+    for (char &ch: wrong_case) {
+        if (ch >= 'a' && ch <= 'z') {
+            ch = static_cast<char>(ch - ('a' - 'A'));
+            break;
+        }
+        if (ch >= 'A' && ch <= 'Z') {
+            ch = static_cast<char>(ch + ('a' - 'A'));
+            break;
+        }
+    }
+
+    std::array<std::vector<std::uint8_t>, 6> responses{
+            make_empty_response(static_cast<std::uint16_t>(id + 1), question->name, question->type,
+                                question->dns_class),
+            make_empty_response(id, "wrong.example", question->type, question->dns_class),
+            make_empty_response(id, question->name, static_cast<std::uint16_t>(RecordType::AAAA), question->dns_class),
+            make_empty_response(id, question->name, question->type, 2),
+            make_a_response(id, wrong_case, {8, 8, 8, 8}),
+            make_a_response(id, question->name, {4, 3, 2, 1}),
+    };
+    for (auto &response: responses) {
+        auto send_result = co_await fiber::async::timeout_for(
+                [&]() { return socket.send_to(response.data(), response.size(), recv_result->peer); }, 2s);
+        if (!send_result) {
+            outcome.err = send_result.error();
+            socket.close();
+            outcome_promise->set_value(std::move(outcome));
+            co_return;
+        }
+    }
+
+    outcome.err = IoErr::None;
+    socket.close();
+    outcome_promise->set_value(std::move(outcome));
+}
+
 DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
-                                         std::promise<ServerOutcome> *outcome_promise) {
+                                         std::promise<ServerOutcome> *outcome_promise,
+                                         TcpResponseMode response_mode = TcpResponseMode::Correct) {
     ServerOutcome outcome;
     fiber::net::UdpSocket udp(*loop);
     auto udp_bind = udp.bind(fiber::net::SocketAddress::any_v4(), {});
@@ -290,7 +419,13 @@ DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop, std::pro
     }
     ++outcome.recv_count;
 
-    auto truncated = make_truncated_response(read_be16(buf.data()), "www.example.com");
+    auto udp_question = parse_question(buf.data(), recv_result->size);
+    if (!udp_question) {
+        outcome.err = udp_question.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+    auto truncated = make_truncated_response(read_be16(buf.data()), udp_question->name);
     auto udp_send = co_await fiber::async::timeout_for(
             [&]() { return udp.send_to(truncated.data(), truncated.size(), recv_result->peer); }, 2s);
     if (!udp_send) {
@@ -324,7 +459,20 @@ DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop, std::pro
         co_return;
     }
 
-    auto response = make_a_response(read_be16(tcp_query.data()), "www.example.com", {9, 9, 9, 9});
+    auto tcp_question = parse_question(tcp_query.data(), tcp_query.size());
+    if (!tcp_question) {
+        outcome.err = tcp_question.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+    std::uint16_t response_id = read_be16(tcp_query.data());
+    std::string response_name = tcp_question->name;
+    if (response_mode == TcpResponseMode::WrongId) {
+        response_id = static_cast<std::uint16_t>(response_id + 1);
+    } else if (response_mode == TcpResponseMode::WrongQuestion) {
+        response_name = "wrong.example";
+    }
+    auto response = make_a_response(response_id, response_name, {9, 9, 9, 9});
     std::array<std::uint8_t, 2> response_prefix{};
     response_prefix[0] = static_cast<std::uint8_t>(response.size() >> 8U);
     response_prefix[1] = static_cast<std::uint8_t>(response.size() & 0xffU);
@@ -381,7 +529,13 @@ DetachedTask run_udp_tcp_cancel_server(fiber::event::EventLoop *loop, DnsClient 
     }
     ++outcome.recv_count;
 
-    auto truncated = make_truncated_response(read_be16(buf.data()), "www.example.com");
+    auto question = parse_question(buf.data(), recv_result->size);
+    if (!question) {
+        outcome.err = question.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+    auto truncated = make_truncated_response(read_be16(buf.data()), question->name);
     auto udp_send = co_await fiber::async::timeout_for(
             [&]() { return udp.send_to(truncated.data(), truncated.size(), recv_result->peer); }, 2s);
     if (!udp_send) {
@@ -432,7 +586,7 @@ DetachedTask run_udp_tcp_cancel_server(fiber::event::EventLoop *loop, DnsClient 
 
 DetachedTask run_client_query(fiber::event::EventLoop *loop, std::uint16_t port, std::chrono::milliseconds timeout,
                               std::uint8_t attempts, bool enable_tcp_fallback,
-                              std::promise<ClientOutcome> *outcome_promise) {
+                              std::promise<ClientOutcome> *outcome_promise, bool enable_0x20 = true) {
     ClientOutcome outcome;
     DnsClient client;
     DnsClient::Options options{};
@@ -440,6 +594,7 @@ DetachedTask run_client_query(fiber::event::EventLoop *loop, std::uint16_t port,
     options.timeout = timeout;
     options.attempts = attempts;
     options.enable_tcp_fallback = enable_tcp_fallback;
+    options.enable_0x20 = enable_0x20;
     if (!client.init(*loop, options)) {
         outcome.err = IoErr::Invalid;
         outcome_promise->set_value(std::move(outcome));
@@ -517,6 +672,32 @@ DetachedTask run_client_query_until_canceled(fiber::event::EventLoop *loop, DnsC
     outcome_promise->set_value(std::move(outcome));
 }
 
+void expect_tcp_response_rejected(TcpResponseMode response_mode) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<std::uint16_t> port_promise;
+    std::promise<ServerOutcome> server_promise;
+    std::promise<ClientOutcome> client_promise;
+
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_udp_tcp_fallback_server(&group.at(0), &port_promise, &server_promise, response_mode);
+    });
+    const auto port = port_promise.get_future().get();
+    ASSERT_NE(port, 0);
+
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_client_query(&group.at(0), port, 200ms, 1, true, &client_promise); });
+
+    const auto client = client_promise.get_future().get();
+    const auto server = server_promise.get_future().get();
+    group.stop();
+    group.join();
+
+    EXPECT_EQ(server.err, IoErr::None);
+    EXPECT_EQ(client.err, IoErr::Invalid);
+}
+
 TEST(DnsClientTest, QueryRawReturnsUdpResponse) {
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -552,6 +733,78 @@ TEST(DnsClientTest, QueryRawReturnsUdpResponse) {
     EXPECT_EQ(parsed->answers[0].rdata[1], 2u);
     EXPECT_EQ(parsed->answers[0].rdata[2], 3u);
     EXPECT_EQ(parsed->answers[0].rdata[3], 4u);
+}
+
+TEST(DnsClientTest, QueryRawIgnoresWrongIdQuestionAnd0x20Case) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<std::uint16_t> port_promise;
+    std::promise<ServerOutcome> server_promise;
+    std::promise<ClientOutcome> client_promise;
+
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_udp_validation_server(&group.at(0), &port_promise, &server_promise); });
+    const auto port = port_promise.get_future().get();
+    ASSERT_NE(port, 0);
+
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_client_query(&group.at(0), port, 200ms, 1, true, &client_promise); });
+
+    const auto client = client_promise.get_future().get();
+    const auto server = server_promise.get_future().get();
+    group.stop();
+    group.join();
+
+    ASSERT_EQ(server.err, IoErr::None);
+    ASSERT_EQ(client.err, IoErr::None);
+
+    MessageParser parser;
+    ASSERT_TRUE(parser.init());
+    auto parsed = parser.parse(client.packet.data(), client.packet.size());
+    ASSERT_TRUE(parsed.has_value()) << fiber::common::io_err_name(parsed.error());
+    ASSERT_EQ(parsed->answer_count, 1u);
+    ASSERT_EQ(parsed->answers[0].rdata_len, 4u);
+    EXPECT_EQ(parsed->answers[0].rdata[0], 4u);
+    EXPECT_EQ(parsed->answers[0].rdata[1], 3u);
+    EXPECT_EQ(parsed->answers[0].rdata[2], 2u);
+    EXPECT_EQ(parsed->answers[0].rdata[3], 1u);
+}
+
+TEST(DnsClientTest, QueryRawCanDisableStrict0x20Echo) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<std::uint16_t> port_promise;
+    std::promise<ServerOutcome> server_promise;
+    std::promise<ClientOutcome> client_promise;
+
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_udp_validation_server(&group.at(0), &port_promise, &server_promise); });
+    const auto port = port_promise.get_future().get();
+    ASSERT_NE(port, 0);
+
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_client_query(&group.at(0), port, 200ms, 1, true, &client_promise, false); });
+
+    const auto client = client_promise.get_future().get();
+    const auto server = server_promise.get_future().get();
+    group.stop();
+    group.join();
+
+    ASSERT_EQ(server.err, IoErr::None);
+    ASSERT_EQ(client.err, IoErr::None);
+
+    MessageParser parser;
+    ASSERT_TRUE(parser.init());
+    auto parsed = parser.parse(client.packet.data(), client.packet.size());
+    ASSERT_TRUE(parsed.has_value()) << fiber::common::io_err_name(parsed.error());
+    ASSERT_EQ(parsed->answer_count, 1u);
+    ASSERT_EQ(parsed->answers[0].rdata_len, 4u);
+    EXPECT_EQ(parsed->answers[0].rdata[0], 8u);
+    EXPECT_EQ(parsed->answers[0].rdata[1], 8u);
+    EXPECT_EQ(parsed->answers[0].rdata[2], 8u);
+    EXPECT_EQ(parsed->answers[0].rdata[3], 8u);
 }
 
 TEST(DnsClientTest, QueryRawRetriesAfterTimeout) {
@@ -613,6 +866,10 @@ TEST(DnsClientTest, QueryRawFallsBackToTcpOnTruncatedUdpResponse) {
     ASSERT_EQ(parsed->answers[0].rdata[2], 9u);
     ASSERT_EQ(parsed->answers[0].rdata[3], 9u);
 }
+
+TEST(DnsClientTest, TcpFallbackRejectsWrongResponseId) { expect_tcp_response_rejected(TcpResponseMode::WrongId); }
+
+TEST(DnsClientTest, TcpFallbackRejectsWrongQuestion) { expect_tcp_response_rejected(TcpResponseMode::WrongQuestion); }
 
 TEST(DnsClientTest, CloseCancelsPendingQuery) {
     fiber::event::EventLoopGroup group(1);
