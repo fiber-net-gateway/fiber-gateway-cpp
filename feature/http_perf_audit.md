@@ -94,7 +94,7 @@
 | `Http2Connection.cpp:1267-1276,1482-1489` | ✅ 已修复：GOAWAY 选择性关闭和全量 teardown 原先用 `new Http2Stream*[n]` 收集指针 | 直接遍历 `owned_stream_list_`；操作当前 stream 前预取 `next`，用 `Lease` 固定当前对象生命周期，删除两处分配及 `NoMem` 分支 |
 | `Http2Connection.cpp:938-965` | ✅ 已修复：`apply_peer_initial_stream_window` 原先两次全表 `for_each` | 在同一次遍历中用 64 位值校验并立即更新；越界错误由 SETTINGS 路径作为连接级致命错误传播，无需回滚已更新 stream，且仅在全遍成功后提交 `peer_initial_stream_send_window_`。新增多 stream 增减、溢出和摘链遍历测试；2026-07-13 全量 1126 ctest 通过 |
 | `Http2Connection.cpp:926-974` | 控制帧（WINDOW_UPDATE/RST/GOAWAY）先编码进栈数组再 memcpy 进 slab | 直接编码进 `dst + kFrameHeaderSize`，省双写 |
-| `Http2DataFrameEncoder.cpp:58-61` | 9 字节帧头过栈数组 + `append_copy` | `reserve_slot(9)` + `encode_http2_frame_header` + `commit_slot(9)` |
+| `Http2DataFrameEncoder.cpp:58-61` | ⏸ 已核查，暂不处理：9 字节帧头确实经栈数组再由 `append_copy` 写入输出，但 payload 是外部 `IoBufChain`；为保持 payload 零拷贝，帧头仍需独立且存活到异步发送完成。多帧时首帧 payload 进入 `tail_chain` 后，后续 `reserve_slot(9)` 会返回 `Invalid`，而 `append_copy` 还承担分配小 `IoBuf` 的回退语义 | 不能直接替换为 `reserve_slot(9)` + 原地编码。单次 9 字节复制收益很低；若 profiling 显示瓶颈，优先考虑 header slab/小对象池，或增加保留 fallback 语义的直接写入 API，优化后续帧头的小额分配 |
 | `HttpExchange.h:148` | `HttpHandler = std::function<...>` | 每连接一次（非每请求），低优先；可换带 SBO 的类型擦除 callable |
 | `Http3QpackEncoder.cpp:90-117` | 伪头编码器走通用 `find()` 而非直接静态下标（见 #2） | 同 #2 |
 | `Http3QpackEncoderIoBufWriter` / `Http2HpackEncodeCatalog.cpp:121` | catalog `find` 对已小写名走逐字节 ci 比较 | policy 项 init 时存小写，全用 `same_bytes`；或保证 `add_view` 层 name 已小写 |
