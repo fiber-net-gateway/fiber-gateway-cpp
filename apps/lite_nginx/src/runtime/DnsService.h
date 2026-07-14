@@ -9,7 +9,7 @@
 #include "common/IoError.h"
 #include "common/NonCopyable.h"
 #include "common/NonMovable.h"
-#include "dns/DnsCache.h"
+#include "dns/DnsCache2.h"
 #include "dns/DnsResolver.h"
 #include "net/IpAddress.h"
 
@@ -48,7 +48,8 @@ private:
         std::unique_ptr<fiber::dns::DnsResolver> resolver;
     };
 
-    fiber::dns::SharedDnsCache cache_{};
+    fiber::dns::SharedDnsCache2 cache_{};
+    fiber::event::EventLoop *cache_loop_ = nullptr;
     std::vector<LoopEntry> entries_{};
     bool initialized_ = false;
 };

@@ -2,6 +2,8 @@
 
 > 审计范围：`src/dns/` 全部 16 个文件（约 4500 行），按传输与报文编解码（`DnsClient`/`DnsName`/`DnsMessage`）、缓存（`DnsCache`/`SharedDnsCache`）、解析器（`DnsResolverLocal`/`DnsResolver`）三个域并行评审后整合。所有结论均经直接读码 + 交叉验证。
 >
+> 后续状态：旧 `DnsCache`/`SharedDnsCache` 与 `NameSnapshot` 已由 `DnsCache2`/`SharedDnsCache2` 和固定容量 `DnsAddressSet` 替代；下文涉及旧缓存实现的行号与结论保留为历史审计记录。
+>
 > 核验事实：`RWMutex::ReadLockAwaiter::await_ready` 在无写锁竞争时 `try_lock_shared()` 返回 true、`co_await lock_shared()` 不挂起（`src/async/RWMutex.cpp:153-162,200-207`）；`RWFd::close()` 同步 `resume()` 挂起的读等待者并置 `Canceled`（`src/net/detail/RWFd.cpp:38-71`），故 `~DnsClient`->`close()`->`socket_->close()` 会在析构成员前同步排空 `recv_loop`，recv_loop 无 UAF；open-addressing 的 tombstone/探查不变量正确；`NameSnapshot` 自包含拷贝、无悬空指针。
 >
 > 状态（2026-07-13 复核）：HIGH #1、#2、#3 及 MEDIUM #4、#5 均已修复；MEDIUM #6 已确认是符合 NXDOMAIN 语义的有意行为；LOW #1、#13 已随对应 HIGH 项修复，其余排期。

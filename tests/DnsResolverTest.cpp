@@ -12,7 +12,7 @@
 #include "async/Spawn.h"
 #include "async/Timeout.h"
 #include "common/IoError.h"
-#include "dns/DnsCache.h"
+#include "dns/DnsCache2.h"
 #include "dns/DnsResolver.h"
 #include "dns/DnsResolverLocal.h"
 #include "event/EventLoopGroup.h"
@@ -56,6 +56,17 @@ struct EndpointOutcome {
     std::string canonical;
     std::vector<std::string> endpoints;
 };
+
+void shutdown_cache(fiber::event::EventLoop &loop, fiber::dns::SharedDnsCache2 &cache) {
+    std::promise<void> done;
+    auto future = done.get_future();
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        cache.shutdown();
+        done.set_value();
+        co_return;
+    });
+    future.get();
+}
 
 fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     sockaddr_storage bound{};
@@ -273,7 +284,7 @@ DetachedTask run_dual_stack_server(fiber::event::EventLoop *loop, std::promise<s
     outcome_promise->set_value(std::move(outcome));
 }
 
-DetachedTask run_policy_resolve(fiber::event::EventLoop *loop, fiber::dns::SharedDnsCache *cache, std::uint16_t port,
+DetachedTask run_policy_resolve(fiber::event::EventLoop *loop, fiber::dns::SharedDnsCache2 *cache, std::uint16_t port,
                                 AddressPolicy policy, std::string_view host, std::promise<AddressOutcome> *promise) {
     AddressOutcome outcome;
     DnsResolverLocal local;
@@ -317,7 +328,7 @@ DetachedTask run_policy_resolve(fiber::event::EventLoop *loop, fiber::dns::Share
     promise->set_value(std::move(outcome));
 }
 
-DetachedTask run_dual_policy_resolve(fiber::event::EventLoop *loop, fiber::dns::SharedDnsCache *cache,
+DetachedTask run_dual_policy_resolve(fiber::event::EventLoop *loop, fiber::dns::SharedDnsCache2 *cache,
                                      std::uint16_t port, std::string_view host,
                                      std::promise<DualAddressOutcome> *promise) {
     DualAddressOutcome dual_outcome;
@@ -377,7 +388,7 @@ DetachedTask run_dual_policy_resolve(fiber::event::EventLoop *loop, fiber::dns::
     promise->set_value(std::move(dual_outcome));
 }
 
-DetachedTask run_literal_endpoint_resolve(fiber::event::EventLoop *loop, fiber::dns::SharedDnsCache *cache,
+DetachedTask run_literal_endpoint_resolve(fiber::event::EventLoop *loop, fiber::dns::SharedDnsCache2 *cache,
                                           std::promise<EndpointOutcome> *promise) {
     EndpointOutcome outcome;
     DnsResolverLocal local;
@@ -508,8 +519,8 @@ TEST(DnsResolverTest, ResolvesDualStackInPreferredOrder) {
     fiber::event::EventLoopGroup group(2);
     group.start();
 
-    fiber::dns::SharedDnsCache cache;
-    ASSERT_TRUE(cache.init());
+    fiber::dns::SharedDnsCache2 cache;
+    ASSERT_TRUE(cache.init(group.at(0)));
 
     std::promise<std::uint16_t> port_promise;
     std::promise<ServerOutcome> server_promise;
@@ -549,16 +560,17 @@ TEST(DnsResolverTest, ResolvesDualStackInPreferredOrder) {
     EXPECT_EQ(server_outcome.err, IoErr::None);
     EXPECT_EQ(server_outcome.recv_count, 2u);
 
-    cache.release();
+    shutdown_cache(group.at(0), cache);
     group.stop();
+    group.join();
 }
 
 TEST(DnsResolverTest, ReturnsSuccessWhenOneFamilyHasNoData) {
     fiber::event::EventLoopGroup group(2);
     group.start();
 
-    fiber::dns::SharedDnsCache cache;
-    ASSERT_TRUE(cache.init());
+    fiber::dns::SharedDnsCache2 cache;
+    ASSERT_TRUE(cache.init(group.at(0)));
 
     std::promise<std::uint16_t> port_promise;
     std::promise<ServerOutcome> server_promise;
@@ -590,16 +602,17 @@ TEST(DnsResolverTest, ReturnsSuccessWhenOneFamilyHasNoData) {
     EXPECT_EQ(server_outcome.err, IoErr::None);
     EXPECT_EQ(server_outcome.recv_count, 2u);
 
-    cache.release();
+    shutdown_cache(group.at(0), cache);
     group.stop();
+    group.join();
 }
 
 TEST(DnsResolverTest, ResolvesMoreThanEightRecordsInSingleFamily) {
     fiber::event::EventLoopGroup group(2);
     group.start();
 
-    fiber::dns::SharedDnsCache cache;
-    ASSERT_TRUE(cache.init());
+    fiber::dns::SharedDnsCache2 cache;
+    ASSERT_TRUE(cache.init(group.at(0)));
 
     std::promise<std::uint16_t> port_promise;
     std::promise<ServerOutcome> server_promise;
@@ -634,16 +647,17 @@ TEST(DnsResolverTest, ResolvesMoreThanEightRecordsInSingleFamily) {
     EXPECT_EQ(server_outcome.err, IoErr::None);
     EXPECT_EQ(server_outcome.recv_count, 1u);
 
-    cache.release();
+    shutdown_cache(group.at(0), cache);
     group.stop();
+    group.join();
 }
 
 TEST(DnsResolverTest, LiteralBypassAndEndpointPortMapping) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::dns::SharedDnsCache cache;
-    ASSERT_TRUE(cache.init());
+    fiber::dns::SharedDnsCache2 cache;
+    ASSERT_TRUE(cache.init(group.at(0)));
 
     std::promise<EndpointOutcome> promise;
     auto future = promise.get_future();
@@ -656,6 +670,7 @@ TEST(DnsResolverTest, LiteralBypassAndEndpointPortMapping) {
     ASSERT_EQ(outcome.endpoints.size(), 1u);
     EXPECT_EQ(outcome.endpoints[0], "127.0.0.1:8443");
 
-    cache.release();
+    shutdown_cache(group.at(0), cache);
     group.stop();
+    group.join();
 }
