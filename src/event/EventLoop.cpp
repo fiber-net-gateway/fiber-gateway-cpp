@@ -37,7 +37,6 @@ EventLoop::NotifyEntry::NotifyEntry() : node(this) {}
 
 EventLoop::EventLoop(EventLoopGroup *group, std::size_t group_index) : group_(group), group_index_(group_index) {
     detail::queue_init(&local_queue_);
-    timers_.init();
     wakeup_entry_.loop = this;
     wakeup_entry_.callback = &EventLoop::on_wakeup;
     event_fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -59,16 +58,6 @@ EventLoop::~EventLoop() {
     if (event_fd_ >= 0) {
         ::close(event_fd_);
     }
-}
-
-EventLoop::TimerEntry *EventLoop::timer_from_node(TimerQueue::Node *node) noexcept {
-    return reinterpret_cast<TimerEntry *>(reinterpret_cast<char *>(node) - offsetof(TimerEntry, node));
-}
-
-bool operator<(const TimerQueue::Node &a, const TimerQueue::Node &b) noexcept {
-    const auto *left = EventLoop::timer_from_node(const_cast<TimerQueue::Node *>(&a));
-    const auto *right = EventLoop::timer_from_node(const_cast<TimerQueue::Node *>(&b));
-    return *left < *right;
 }
 
 void EventLoop::notify_wakeup() {
@@ -119,15 +108,11 @@ void EventLoop::drain_wakeup() {
 
 void EventLoop::run_due_timers(std::chrono::steady_clock::time_point now) {
     for (;;) {
-        TimerQueue::Node *node = timers_.min();
-        if (!node) {
-            break;
-        }
-        TimerEntry *entry = timer_from_node(node);
+        TimerEntry *entry = timers_.min();
         if (!entry || entry->deadline > now) {
             break;
         }
-        timers_.remove(&entry->node);
+        timers_.remove(*entry);
         entry->in_heap_ = false;
         if (entry->callback) {
             entry->callback(entry);
@@ -136,11 +121,7 @@ void EventLoop::run_due_timers(std::chrono::steady_clock::time_point now) {
 }
 
 int EventLoop::next_timeout_ms(std::chrono::steady_clock::time_point now) const {
-    TimerQueue::Node *node = timers_.min();
-    if (!node) {
-        return -1;
-    }
-    const TimerEntry *entry = timer_from_node(const_cast<TimerQueue::Node *>(node));
+    const TimerEntry *entry = timers_.min();
     if (!entry) {
         return -1;
     }
@@ -217,7 +198,7 @@ void EventLoop::post_at(std::chrono::steady_clock::time_point when, TimerEntry &
     FIBER_ASSERT(entry.callback != nullptr);
 
     entry.deadline = when;
-    timers_.insert(&entry.node);
+    timers_.insert(entry);
     entry.in_heap_ = true;
 }
 
@@ -226,7 +207,7 @@ void EventLoop::cancel(TimerEntry &entry) {
     if (!entry.in_heap_) {
         return;
     }
-    timers_.remove(&entry.node);
+    timers_.remove(entry);
     entry.in_heap_ = false;
 }
 
@@ -236,7 +217,7 @@ void EventLoop::cancel_quiesced(TimerEntry &entry) {
     if (!entry.in_heap_) {
         return;
     }
-    timers_.remove(&entry.node);
+    timers_.remove(entry);
     entry.in_heap_ = false;
 }
 

@@ -56,27 +56,30 @@ Callers choose a loop via `at(index)`.
 - Cross-thread notifications use `NotifyEntry` and must not capture awaiter
   pointers; callbacks must observe canceled state and drop work if needed.
 
-## TimerQueue (Heap)
-`TimerQueue` is a C++ translation of `libuv`'s `heap-inl.h`, used as an intrusive
-min-heap for timer nodes. It provides heap primitives and does not own timer data.
+## BinaryHeap (Heap)
+`BinaryHeap` (in `fiber::common`, see `src/common/BinaryHeap.h`) is a C++
+translation of `libuv`'s `heap-inl.h`, generalised as an intrusive min-heap
+template. The comparison is a template parameter (`Compare`, invoked on owner
+pointers); the heap never owns nodes and never touches owner state beyond the
+`BinaryHeapNode` hook.
 
 ```cpp
-class TimerQueue {
-public:
-    struct Node {
-        Node *left;
-        Node *right;
-        Node *parent;
-    };
+struct BinaryHeapNode {
+    BinaryHeapNode *left;
+    BinaryHeapNode *right;
+    BinaryHeapNode *parent;
+};
 
-    void init();
-    Node *min() const;
+template<typename T, std::size_t Offset, typename Compare>
+class BinaryHeap {
+public:
+    T *min();
+    const T *min() const;
     std::size_t size() const;
     bool empty() const;
 
-    void insert(Node *node);
-    void remove(Node *node);
-    void dequeue();
+    void insert(T &owner);
+    void remove(T &owner);
 };
 ```
 
@@ -130,7 +133,7 @@ public:
 ## File Layout
 - `src/event/EventLoop.h|.cpp`
 - `src/event/Poller.h|.cpp`
-- `src/event/TimerQueue.h|.cpp` (libuv heap translation)
+- `src/common/BinaryHeap.h` (header-only intrusive min-heap template; libuv heap translation)
 - `src/event/MpscQueue.h` (header-only)
 - `src/async/Scheduler.h`
 - `src/async/Coroutine.h|.cpp`

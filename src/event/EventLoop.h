@@ -8,10 +8,10 @@
 #include <cstdint>
 #include <type_traits>
 
+#include "../common/BinaryHeap.h"
 #include "../common/mem/IoBufChain.h"
 #include "MpscQueue.h"
 #include "Poller.h"
-#include "TimerQueue.h"
 
 namespace fiber::event {
 
@@ -150,9 +150,13 @@ public:
     private:
         Callback callback = nullptr;
         std::chrono::steady_clock::time_point deadline{};
-        TimerQueue::Node node{};
+        common::BinaryHeapNode node{};
         bool in_heap_ = false;
         std::ptrdiff_t handle_offset = 0;
+    };
+
+    struct TimerEntryCompare {
+        bool operator()(const TimerEntry *a, const TimerEntry *b) const noexcept { return *a < *b; }
     };
 
     struct DeferEntry {
@@ -261,9 +265,6 @@ private:
     };
     using NotifyNode = MpscQueue<NotifyEntry *>::Node;
 
-    static TimerEntry *timer_from_node(TimerQueue::Node *node) noexcept;
-    friend bool operator<(const TimerQueue::Node &a, const TimerQueue::Node &b) noexcept;
-
     static void on_wakeup(Poller::Item *item, int fd, IoEvent events);
 
     template<typename Handle, auto EntryMember, auto Cb>
@@ -340,7 +341,7 @@ private:
     MpscQueue<NotifyEntry *> notify_queue_;
     // Loop-thread only: timer heap operations.
     detail::Queue local_queue_;
-    TimerQueue timers_;
+    common::BinaryHeap<TimerEntry, offsetof(TimerEntry, node), TimerEntryCompare> timers_;
     Poller poller_;
     int event_fd_ = -1;
     WakeupEntry wakeup_entry_{};
