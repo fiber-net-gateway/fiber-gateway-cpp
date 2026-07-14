@@ -78,6 +78,8 @@ public:
     struct Options {
         std::size_t max_entries = 1024;
         std::size_t max_bytes = 4 * 1024 * 1024;
+        // Zero selects a fixed bucket array sized for a maximum load factor of 0.5.
+        // A nonzero value is a fixed override, rounded up to a power of two.
         std::size_t bucket_count = 0;
     };
 
