@@ -51,7 +51,7 @@ Build outputs: `fiber_lib` (static library), `fiber_tests`, examples (e.g., `htt
 
 Built on **C++20 coroutines** with an epoll-based event loop.
 
-- **EventLoop** (`src/event/EventLoop.h`): Thread-local singleton (`EventLoop::current()`). Integrates `Poller` (epoll), `TimerQueue` (min-heap timers), and `MpscQueue` (lock-free cross-thread notifications). Provides `post()`, `post_local()`, `post_at()` template methods for type-safe handle-based callbacks using intrusive entries and static trampoline functions. Use `EventLoop::current().now()` as the time source in request paths.
+- **EventLoop** (`src/event/EventLoop.h`): Thread-local singleton (`EventLoop::current()`). Integrates `Poller` (epoll), `BinaryHeap` (min-heap timers, `src/common/BinaryHeap.h`), and `MpscQueue` (lock-free cross-thread notifications). Provides `post()`, `post_local()`, `post_at()` template methods for type-safe handle-based callbacks using intrusive entries and static trampoline functions. Use `EventLoop::current().now()` as the time source in request paths.
 - **Task\<T\>** (`src/async/Task.h`): Main coroutine return type. Lazy (initial_suspend = suspend_always). Supports `co_await` and return values.
 - **DetachedTask / spawn()** (`src/async/Spawn.h`): Fire-and-forget coroutines. `spawn(loop, factory)` schedules a coroutine on the event loop via `NotifyEntry`.
 - **EventLoopGroup** (`src/event/EventLoopGroup.h`): Multi-threaded event loop pool backed by `ThreadGroup`. Used by `HttpServer` for worker threads.
