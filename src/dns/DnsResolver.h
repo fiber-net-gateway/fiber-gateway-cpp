@@ -104,8 +104,6 @@ class DnsResolver : public common::NonCopyable, public common::NonMovable {
 public:
     struct Options {
         AddressPolicy default_policy = AddressPolicy::V6First;
-        ResolveResult::Options family_result_options{AddressResolveResult::Options{}.max_records,
-                                                     AddressResolveResult::Options{}.max_name_storage};
     };
 
     DnsResolver() noexcept = default;

@@ -63,9 +63,15 @@ bool DnsService::init(fiber::event::EventLoopGroup &group) noexcept {
     if (initialized_) {
         return true;
     }
-    if (!cache_.init()) {
+    if (group.size() == 0) {
         return false;
     }
+    cache_loop_ = &group.at(0);
+    if (!cache_.init(*cache_loop_)) {
+        cache_loop_ = nullptr;
+        return false;
+    }
+    initialized_ = true;
 
     const fiber::net::SocketAddress nameserver = read_nameserver();
     const std::size_t n = group.size();
@@ -80,18 +86,24 @@ bool DnsService::init(fiber::event::EventLoopGroup &group) noexcept {
         client_options.timeout = std::chrono::milliseconds(2000);
         client_options.attempts = 2;
         if (!entry.local->init(*entry.loop, cache_, client_options)) {
+            shutdown();
             return false;
         }
 
         entry.resolver = std::make_unique<fiber::dns::DnsResolver>();
         if (!entry.resolver->init(*entry.local)) {
+            entries_.push_back(std::move(entry));
+            shutdown();
             return false;
         }
 
         entries_.push_back(std::move(entry));
     }
-    initialized_ = !entries_.empty();
-    return initialized_;
+    if (entries_.empty()) {
+        shutdown();
+        return false;
+    }
+    return true;
 }
 
 void DnsService::shutdown() noexcept {
@@ -123,7 +135,17 @@ void DnsService::shutdown() noexcept {
         future.wait();
     }
     entries_.clear();
-    cache_.release();
+    if (cache_loop_ != nullptr) {
+        auto done = std::make_shared<std::promise<void>>();
+        auto future = done->get_future();
+        fiber::async::spawn(*cache_loop_, [this, done]() -> fiber::async::DetachedTask {
+            cache_.shutdown();
+            done->set_value();
+            co_return;
+        });
+        future.wait();
+    }
+    cache_loop_ = nullptr;
     initialized_ = false;
 }
 

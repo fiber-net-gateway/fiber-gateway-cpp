@@ -225,7 +225,7 @@ common::IoErr EndpointResolveResult::assign_canonical(std::string_view canonical
 
 bool DnsResolver::init(DnsResolverLocal &local, Options options) noexcept {
     release();
-    if (!local.valid() || options.family_result_options.max_name_storage == 0) {
+    if (!local.valid()) {
         return false;
     }
     local_ = &local;
@@ -325,24 +325,6 @@ async::Task<common::IoResult<ResolveStatus>> DnsResolver::resolve_host(std::stri
 
     FamilyQueryState v4{};
     FamilyQueryState v6{};
-
-    if ((policy == AddressPolicy::V4Only || policy == AddressPolicy::V4First) &&
-        !v4.result.init(options_.family_result_options)) {
-        co_return std::unexpected(common::IoErr::NoMem);
-    }
-    if ((policy == AddressPolicy::V6Only || policy == AddressPolicy::V6First) &&
-        !v6.result.init(options_.family_result_options)) {
-        co_return std::unexpected(common::IoErr::NoMem);
-    }
-    if ((policy == AddressPolicy::V4First || policy == AddressPolicy::V6First) &&
-        (!v4.result.valid() || !v6.result.valid())) {
-        if (!v4.result.valid() && !v4.result.init(options_.family_result_options)) {
-            co_return std::unexpected(common::IoErr::NoMem);
-        }
-        if (!v6.result.valid() && !v6.result.init(options_.family_result_options)) {
-            co_return std::unexpected(common::IoErr::NoMem);
-        }
-    }
 
     if (policy == AddressPolicy::V4Only) {
         QuestionSpec question{};
