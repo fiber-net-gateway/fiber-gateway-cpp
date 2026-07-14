@@ -265,7 +265,7 @@ fiber::async::DetachedTask run_idle_timeout_during_shutdown(fiber::quic::QuicCon
                                                             std::chrono::milliseconds wait,
                                                             std::promise<fiber::quic::QuicConnectionState> *done) {
     conn->shutdown(fiber::quic::QuicErrorCode::NoError, /*frame_type=*/0, std::chrono::seconds(5));
-    conn->arm_idle_timer(fiber::event::EventLoop::current());
+    conn->arm_idle_timer();
     co_await fiber::async::sleep(wait);
     done->set_value(conn->state());
     fiber::event::EventLoop::current().stop();
@@ -354,7 +354,7 @@ fiber::async::DetachedTask run_keepalive_during_shutdown(fiber::quic::QuicConnec
                                                          std::chrono::milliseconds wait,
                                                          std::promise<std::size_t> *done) {
     conn->shutdown(fiber::quic::QuicErrorCode::NoError);
-    conn->arm_keepalive_timer(fiber::event::EventLoop::current());
+    conn->arm_keepalive_timer();
     co_await fiber::async::sleep(wait);
     done->set_value(count_pending_frame_type(*conn, fiber::quic::QuicEncryptionLevel::Application,
                                              fiber::quic::QuicFrameType::Ping));

@@ -210,15 +210,15 @@ fiber::async::DetachedTask grant_max_data_after_delay(fiber::quic::QuicConnectio
 fiber::async::DetachedTask record_idle_timer_lifecycle(fiber::quic::QuicConnection *conn,
                                                        std::promise<IdleTimerSnapshot> *done) {
     fiber::event::EventLoop &loop = fiber::event::EventLoop::current();
-    conn->on_ack_eliciting_packet_sent(loop);
+    conn->on_ack_eliciting_packet_sent();
     IdleTimerSnapshot snapshot{};
     snapshot.send_timer_after_send = conn->idle_send_timer_set();
     snapshot.idle_armed_after_send = conn->idle_timer_armed();
-    conn->on_packet_processed(loop);
+    conn->on_packet_processed();
     snapshot.send_timer_after_receive = conn->idle_send_timer_set();
     snapshot.idle_armed_after_receive = conn->idle_timer_armed();
-    conn->cancel_idle_timer(loop);
-    conn->cancel_keepalive_timer(loop);
+    conn->cancel_idle_timer();
+    conn->cancel_keepalive_timer();
     done->set_value(snapshot);
     loop.stop();
     co_return;
@@ -226,7 +226,7 @@ fiber::async::DetachedTask record_idle_timer_lifecycle(fiber::quic::QuicConnecti
 
 fiber::async::DetachedTask run_idle_timeout(fiber::quic::QuicConnection *conn, std::chrono::milliseconds delay,
                                             std::promise<fiber::quic::QuicConnectionState> *done) {
-    conn->arm_idle_timer(fiber::event::EventLoop::current());
+    conn->arm_idle_timer();
     co_await fiber::async::sleep(delay);
     done->set_value(conn->state());
     fiber::event::EventLoop::current().stop();
@@ -234,7 +234,7 @@ fiber::async::DetachedTask run_idle_timeout(fiber::quic::QuicConnection *conn, s
 
 fiber::async::DetachedTask run_keepalive_timer(fiber::quic::QuicConnection *conn, std::chrono::milliseconds delay,
                                                std::promise<KeepaliveTimerSnapshot> *done) {
-    conn->arm_keepalive_timer(fiber::event::EventLoop::current());
+    conn->arm_keepalive_timer();
     co_await fiber::async::sleep(delay);
     KeepaliveTimerSnapshot snapshot{};
     snapshot.pending_ping_count = count_pending_frame_type(*conn, fiber::quic::QuicFrameType::Ping);

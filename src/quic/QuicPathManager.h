@@ -80,8 +80,9 @@ public:
                                                         std::uint64_t max_packet_number, QuicTime now) noexcept;
     [[nodiscard]] common::IoResult<bool> handle_mtu_probe_send_failed(QuicPath &path, QuicTime now) noexcept;
 
-    void arm_validation_timer(event::EventLoop &loop) noexcept;
-    void cancel_validation_timer(event::EventLoop &loop) noexcept;
+    void arm_validation_timer() noexcept;
+    void cancel_validation_timer() noexcept;
+    void cancel_validation_timer_quiesced() noexcept;
     [[nodiscard]] bool validation_timer_armed() const noexcept { return validation_timer_entry_.is_in_heap(); }
 
     [[nodiscard]] QuicTime validation_delay() const noexcept;

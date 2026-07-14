@@ -211,6 +211,9 @@ enum class QuicLossTimerMode : std::uint8_t {
     Pto,
 };
 
+// Loop-affine connection state: once constructed, all state transitions and
+// timer heap operations run on Options::loop. A quiesced owner loop is handled
+// separately during destruction.
 class QuicConnection : public common::NonCopyable, public common::NonMovable {
 public:
     using DestroyCallback = void (*)(void *owner, QuicConnection &connection) noexcept;
@@ -450,22 +453,23 @@ public:
     [[nodiscard]] bool key_phase() const noexcept { return key_phase_; }
     [[nodiscard]] bool next_keys_ready() const noexcept { return crypto_.next_application_keys_ready; }
     void flip_key_phase() noexcept { key_phase_ = !key_phase_; }
-    void arm_key_update_discard_timer(event::EventLoop &loop) noexcept;
-    void cancel_key_update_discard_timer(event::EventLoop &loop) noexcept;
-    void on_packet_processed(event::EventLoop &loop) noexcept;
-    void on_ack_eliciting_packet_sent(event::EventLoop &loop) noexcept;
+    void arm_key_update_discard_timer() noexcept;
+    void cancel_key_update_discard_timer() noexcept;
+    void on_packet_processed() noexcept;
+    void on_ack_eliciting_packet_sent() noexcept;
     [[nodiscard]] std::chrono::milliseconds effective_idle_timeout() const noexcept;
     [[nodiscard]] bool idle_timer_armed() const noexcept { return idle_timer_entry_.is_in_heap(); }
     [[nodiscard]] bool close_timer_armed() const noexcept { return close_timer_entry_.is_in_heap(); }
     [[nodiscard]] bool keepalive_timer_armed() const noexcept { return keepalive_timer_entry_.is_in_heap(); }
     [[nodiscard]] bool idle_send_timer_set() const noexcept { return idle_send_timer_set_; }
-    void arm_idle_timer(event::EventLoop &loop) noexcept;
-    void cancel_idle_timer(event::EventLoop &loop) noexcept;
-    void arm_close_timer(event::EventLoop &loop) noexcept;
-    void arm_close_timer_immediate(event::EventLoop &loop) noexcept;
-    void cancel_close_timer(event::EventLoop &loop) noexcept;
-    void arm_keepalive_timer(event::EventLoop &loop) noexcept;
-    void cancel_keepalive_timer(event::EventLoop &loop) noexcept;
+    void arm_idle_timer() noexcept;
+    void cancel_idle_timer() noexcept;
+    void arm_close_timer() noexcept;
+    void arm_close_timer_immediate() noexcept;
+    void cancel_close_timer() noexcept;
+    void arm_keepalive_timer() noexcept;
+    void cancel_keepalive_timer() noexcept;
+    void cancel_all_timers() noexcept;
     [[nodiscard]] QuicCongestionState &congestion() noexcept { return congestion_; }
     [[nodiscard]] const QuicCongestionState &congestion() const noexcept { return congestion_; }
     [[nodiscard]] QuicRttState &rtt() noexcept { return rtt_; }
@@ -475,16 +479,16 @@ public:
     [[nodiscard]] QuicLossTimerMode loss_timer_mode() const noexcept { return loss_timer_mode_; }
     [[nodiscard]] bool loss_timer_armed() const noexcept { return loss_timer_entry_.is_in_heap(); }
     void reset_pto_count() noexcept { pto_count_ = 0; }
-    void arm_loss_detection_timer(event::EventLoop &loop) noexcept;
-    void cancel_loss_detection_timer(event::EventLoop &loop) noexcept;
+    void arm_loss_detection_timer() noexcept;
+    void cancel_loss_detection_timer() noexcept;
     void reset_congestion_for_path(QuicTime now) noexcept;
 
     [[nodiscard]] QuicPathManager &paths() noexcept { return path_manager_; }
     [[nodiscard]] const QuicPathManager &paths() const noexcept { return path_manager_; }
 
     // Thin forwarders preserved for external callers.
-    void arm_path_validation_timer(event::EventLoop &loop) noexcept { path_manager_.arm_validation_timer(loop); }
-    void cancel_path_validation_timer(event::EventLoop &loop) noexcept { path_manager_.cancel_validation_timer(loop); }
+    void arm_path_validation_timer() noexcept { path_manager_.arm_validation_timer(); }
+    void cancel_path_validation_timer() noexcept { path_manager_.cancel_validation_timer(); }
     [[nodiscard]] QuicPath *active_path() noexcept { return path_manager_.active(); }
     [[nodiscard]] const QuicPath *active_path() const noexcept { return path_manager_.active(); }
     [[nodiscard]] std::size_t path_count() const noexcept { return path_manager_.count(); }
@@ -656,6 +660,9 @@ private:
     void enter_draining(QuicCloseInfo info) noexcept;
     void enter_closed() noexcept;
     void maybe_finish_graceful_close() noexcept;
+    void assert_loop_affinity() const noexcept;
+    [[nodiscard]] event::EventLoop *active_timer_loop() const noexcept;
+    void cancel_all_timers_quiesced() noexcept;
     [[nodiscard]] bool has_pending_send_work() const noexcept;
     [[nodiscard]] std::chrono::milliseconds keepalive_delay() const noexcept;
     [[nodiscard]] bool reserve_peer_data(std::uint64_t bytes) noexcept;

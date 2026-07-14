@@ -40,9 +40,7 @@ namespace {
 QuicPathManager::QuicPathManager(QuicConnection &connection) noexcept : connection_(connection) {}
 
 QuicPathManager::~QuicPathManager() {
-    if (auto *loop = event::EventLoop::current_or_null()) {
-        cancel_validation_timer(*loop);
-    }
+    FIBER_ASSERT(!validation_timer_entry_.is_in_heap());
     for (QuicPath &path: paths_) {
         clear_frames(path);
     }
@@ -392,9 +390,7 @@ common::IoResult<QuicPath *> QuicPathManager::recv_path_response_frame_with_path
             }
         }
 
-        if (auto *loop = event::EventLoop::current_or_null()) {
-            arm_validation_timer(*loop);
-        }
+        arm_validation_timer();
         return &path;
     }
 
@@ -428,9 +424,7 @@ common::IoResult<void> QuicPathManager::start_validation(QuicPath &path, QuicTim
     path.expires = now + validation_delay();
     path.state = QuicPathState::Validating;
 
-    if (auto *loop = event::EventLoop::current_or_null()) {
-        arm_validation_timer(*loop);
-    }
+    arm_validation_timer();
     return {};
 }
 
@@ -509,9 +503,7 @@ common::IoResult<void> QuicPathManager::discover_path_mtu(QuicPath &path, QuicTi
     path.state = QuicPathState::WaitingMtuProbe;
     path.expires = now + kQuicPathMtuDelay;
 
-    if (auto *loop = event::EventLoop::current_or_null()) {
-        arm_validation_timer(*loop);
-    }
+    arm_validation_timer();
     return {};
 }
 
@@ -682,15 +674,18 @@ common::IoResult<void> QuicPathManager::handle_migration(QuicPath &path, bool re
     return {};
 }
 
-void QuicPathManager::arm_validation_timer(event::EventLoop &loop) noexcept {
+void QuicPathManager::arm_validation_timer() noexcept {
+    if (connection_.active_timer_loop() == nullptr) {
+        return;
+    }
     if (validation_timer_entry_.is_in_heap()) {
-        loop.cancel<QuicPathManager, &QuicPathManager::validation_timer_entry_>(*this);
+        connection_.loop_->cancel<QuicPathManager, &QuicPathManager::validation_timer_entry_>(*this);
     }
     if (connection_.closing()) {
         return;
     }
 
-    const QuicTime now = quic_time_ms(loop.now());
+    const QuicTime now = quic_time_ms(connection_.loop_->now());
     bool found = false;
     QuicTime delay{0};
     for (const QuicPath &path: paths_) {
@@ -712,14 +707,22 @@ void QuicPathManager::arm_validation_timer(event::EventLoop &loop) noexcept {
         return;
     }
 
-    loop.post_at<QuicPathManager, &QuicPathManager::validation_timer_entry_, &QuicPathManager::on_validation_timer>(
-            loop.now() + delay, *this);
+    connection_.loop_->post_at<QuicPathManager, &QuicPathManager::validation_timer_entry_,
+                               &QuicPathManager::on_validation_timer>(connection_.loop_->now() + delay, *this);
 }
 
-void QuicPathManager::cancel_validation_timer(event::EventLoop &loop) noexcept {
-    if (validation_timer_entry_.is_in_heap()) {
-        loop.cancel<QuicPathManager, &QuicPathManager::validation_timer_entry_>(*this);
+void QuicPathManager::cancel_validation_timer() noexcept {
+    if (connection_.active_timer_loop() == nullptr) {
+        return;
     }
+    if (validation_timer_entry_.is_in_heap()) {
+        connection_.loop_->cancel<QuicPathManager, &QuicPathManager::validation_timer_entry_>(*this);
+    }
+}
+
+void QuicPathManager::cancel_validation_timer_quiesced() noexcept {
+    FIBER_ASSERT(connection_.loop_ != nullptr);
+    connection_.loop_->cancel_quiesced<QuicPathManager, &QuicPathManager::validation_timer_entry_>(*this);
 }
 
 void QuicPathManager::on_validation_timer(QuicPathManager *manager) noexcept {
@@ -727,12 +730,13 @@ void QuicPathManager::on_validation_timer(QuicPathManager *manager) noexcept {
         return;
     }
 
-    event::EventLoop *loop = event::EventLoop::current_or_null();
-    if (loop == nullptr || manager->connection_.closing()) {
+    FIBER_ASSERT(manager->connection_.loop_ != nullptr && manager->connection_.loop_->in_loop());
+    if (manager->connection_.loop_ == nullptr || !manager->connection_.loop_->in_loop() ||
+        manager->connection_.closing()) {
         return;
     }
 
-    const QuicTime now = quic_time_ms(loop->now());
+    const QuicTime now = quic_time_ms(manager->connection_.loop_->now());
     bool send_output = false;
     for (QuicPath &path: manager->paths_) {
         if (!path.allocated || path.state == QuicPathState::Idle || path.expires > now) {
@@ -765,7 +769,7 @@ void QuicPathManager::on_validation_timer(QuicPathManager *manager) noexcept {
         manager->connection_.schedule_send();
     }
 
-    manager->arm_validation_timer(*loop);
+    manager->arm_validation_timer();
 }
 
 QuicTime QuicPathManager::validation_delay() const noexcept {
