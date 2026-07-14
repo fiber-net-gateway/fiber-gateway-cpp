@@ -1063,8 +1063,13 @@ void QuicConnection::on_loss_detection_timer(QuicConnection *connection) noexcep
             return;
         }
 
+        // RFC 9002 Appendix A.7 (OnLossDetectionTimer): pto_count is incremented
+        // unconditionally, not only when a probe was queued. If every level was
+        // skipped (e.g. invariant drift where back->PN <= largest_acked), keeping
+        // the backoff advancing makes the next arm's delay grow instead of spinning
+        // at delay 0. Mirrors nginx ngx_quic_pto_handler (ngx_event_quic_ack.c).
+        ++connection->pto_count_;
         if (*queued) {
-            ++connection->pto_count_;
             connection->schedule_send();
         }
     }

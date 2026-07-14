@@ -6,7 +6,7 @@
 >
 > 测试覆盖：约 9,700 行测试，但可靠性核心（`QuicAckHandler`/`QuicLossRecovery`/`QuicSendScheduler`/`QuicPathManager`）缺专门单测；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
 >
-> 状态：未动工。优先修 P0（#2 PTO 忙循环、#4/#5 DoS 向量、#1 key-update、#3 re-entrancy、#7 UAF、#9 GSO、#8 接收零拷贝），其余排期。
+> 状态：部分动工。#2 PTO 忙循环已修复（2026-07-14，见下）。待修 P0：#4/#5 DoS 向量、#1 key-update、#3 re-entrancy、#7 UAF、#9 GSO、#8 接收零拷贝，其余排期。
 
 ## 总体评价
 
@@ -29,6 +29,8 @@ codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝�
 `quic_loss_detection_timer` 对任何非空 `sent_frames` 都 arm PTO，但 `quic_queue_pto_probe_frames` 跳过 `back->packet_number <= largest_acked_packet_number` 的 level。当 `largest_acked` 之下还有未确认包（带 gap 的部分 ACK 常见）时：PTO 以 delay 0 触发 -> 不排探针 -> `pto_count` 不增 -> 重新 arm 同样 delay -> **忙循环**。且跳过条件本身逻辑反了：`sent_frames` 里的包定义上就是未确认的（已确认的会被移除），`back->PN <= largest_acked` 说明**确有**未确认包需要探针，而非反之。可致虚假忙循环与丢包后无探针的死锁。
 
 **修复**：去掉 `quic_queue_pto_probe_frames` 的 skip 条件（或换 `in_flight==0` 守卫），并/或在 `quic_loss_detection_timer` 加同样守卫，使二者一致。
+
+> ✅ **已修复 2026-07-14**。复核结论：上述"忙循环"分析对触发场景的判定有误--`back->PN <= largest_acked` 意味着 `front->PN <= largest_acked`，该 level 命中 **Lost 模式**而非 Pto 模式（`quic_loss_detection_timer` 中 Lost 优先且 `front->PN <= largest_acked` 才算 has_lost），故 skip 在保序不变量下是死代码，正常路径不发病。与 nginx `ngx_event_quic_ack.c` 逐行对照，skip 条件两端**逐字节相同**（timer arm 用 `back` 无守卫、probe skip 用 `back->PN <= largest_ack`），nginx 同样如此。真正的本质差异与隐患在于：**nginx 的 `pto_count++` 在 PTO handler 末尾无条件执行（`:1164`，for 循环之后），本项目原为条件执行**（仅 `*queued` 为真时）。一旦保序不变量被破坏（失序/漏 re-arm 等），条件版会进入 `delay 0 -> 全 skip -> pto_count 不增 -> re-arm delay 0` 的忙循环，而无条件版靠 backoff 翻倍使 delay 转正、自终止。修复方式：`QuicConnection::on_loss_detection_timer` 中将 `++pto_count_` 提为无条件（与 `schedule_send` 解耦），对齐 RFC 9002 Appendix A.7 与 nginx。skip 条件本身未动（保序下为死代码，留作无害；若后续想彻底对齐 RFC "ack-eliciting in flight 才 arm PTO" 可另案处理，见 #10）。
 
 ### 3. `enter_closing` 在帧循环中途触发 -> re-entrancy
 `QuicConnection.cpp:1404`（`maybe_finish_graceful_close`）/ `:2252`；`QuicPacketProcessor.cpp:289,301`（守卫仅包入口）
