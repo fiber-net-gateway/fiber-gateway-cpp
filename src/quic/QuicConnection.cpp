@@ -1609,6 +1609,16 @@ common::IoResult<void> QuicConnection::init_initial_crypto(const QuicConnectionI
     return quic_init_initial_crypto(crypto_, options_.role, original_dcid);
 }
 
+common::IoResult<void> QuicConnection::ensure_server_tls() noexcept {
+    if (tls_.initialized()) {
+        return {};
+    }
+    if (options_.tls_context == nullptr) {
+        return {};
+    }
+    return tls_.init_server(*options_.tls_context, *this);
+}
+
 common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTransportParams &params) noexcept {
     if (peer_transport_.received) {
         return std::unexpected(common::IoErr::Already);
