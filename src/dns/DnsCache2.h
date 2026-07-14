@@ -10,17 +10,18 @@
 #include <string_view>
 #include <type_traits>
 
+#include "../common/BinaryHeap.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../event/EventLoop.h"
-#include "../net/IpAddress.h"
+#include "DnsAddress.h"
 
 namespace fiber::dns {
 
-inline constexpr std::uint16_t kDnsCacheMaxAddressesPerFamily = 16;
-inline constexpr std::uint16_t kDnsCacheOutAddressSize = kDnsCacheMaxAddressesPerFamily * 2;
 inline constexpr std::uint16_t kDnsCacheCnameOutSize = 256;
+inline constexpr std::uint8_t kDnsCacheV4FamilyMask = 1U << 0U;
+inline constexpr std::uint8_t kDnsCacheV6FamilyMask = 1U << 1U;
 
 struct DnsCacheKey {
     std::string_view normalized_name{};
@@ -33,18 +34,18 @@ enum class DnsCacheOutKind : std::uint8_t {
     Miss = 0,
     Addresses,
     Cname,
-    Negative,
-};
-
-enum class DnsNegativeKind : std::uint8_t {
-    NxDomain = 0,
-    NoAddress,
+    NxDomain,
 };
 
 struct DnsCacheAddressOut {
-    net::IpAddress records[kDnsCacheOutAddressSize];
-    std::uint16_t count;
-    std::uint16_t v4_count;
+    DnsAddressSet address_set;
+    // An expiry is meaningful only when the corresponding family is cached.
+    std::chrono::steady_clock::time_point v4_expire_at;
+    std::chrono::steady_clock::time_point v6_expire_at;
+    std::uint8_t cached_family_mask;
+
+    [[nodiscard]] bool has_v4() const noexcept { return (cached_family_mask & kDnsCacheV4FamilyMask) != 0; }
+    [[nodiscard]] bool has_v6() const noexcept { return (cached_family_mask & kDnsCacheV6FamilyMask) != 0; }
 };
 
 struct DnsCacheCnameOut {
@@ -55,17 +56,18 @@ struct DnsCacheCnameOut {
 union DnsCacheOutValue {
     DnsCacheAddressOut addresses;
     DnsCacheCnameOut cname;
-    DnsNegativeKind negative;
 };
 
 struct DnsCacheOut {
+    DnsCacheOut() noexcept : kind(DnsCacheOutKind::Miss), value{} {}
+
     DnsCacheOutKind kind;
     DnsCacheOutValue value;
 };
 
-static_assert(std::is_trivially_default_constructible_v<DnsCacheAddressOut>);
 static_assert(std::is_trivially_copyable_v<DnsCacheAddressOut>);
-static_assert(std::is_trivially_default_constructible_v<DnsCacheOut>);
+static_assert(std::is_trivially_destructible_v<DnsCacheAddressOut>);
+static_assert(std::is_nothrow_default_constructible_v<DnsCacheOut>);
 static_assert(std::is_trivially_copyable_v<DnsCacheOut>);
 static_assert(std::is_trivially_destructible_v<DnsCacheOut>);
 
@@ -92,12 +94,13 @@ public:
     [[nodiscard]] std::size_t bucket_count() const noexcept { return bucket_count_; }
 
     [[nodiscard]] common::IoErr lookup(DnsCacheKey key, TimePoint now, DnsCacheOut &out) noexcept;
-    [[nodiscard]] common::IoErr upsert_address_set(DnsCacheKey key, const net::IpAddress *addresses,
-                                                   std::uint16_t count, TimePoint expire_at) noexcept;
+    // A zero count stores NoData for the selected family; addresses may then be null.
+    [[nodiscard]] common::IoErr upsert_address_set(DnsCacheKey key, net::IpFamily family,
+                                                   const net::IpAddress *addresses, std::uint16_t count,
+                                                   TimePoint expire_at) noexcept;
     [[nodiscard]] common::IoErr upsert_cname(DnsCacheKey key, std::string_view normalized_target,
                                              TimePoint expire_at) noexcept;
-    [[nodiscard]] common::IoErr upsert_negative(DnsCacheKey key, DnsNegativeKind negative,
-                                                TimePoint expire_at) noexcept;
+    [[nodiscard]] common::IoErr upsert_nxdomain(DnsCacheKey key, TimePoint expire_at) noexcept;
     [[nodiscard]] common::IoErr erase(DnsCacheKey key) noexcept;
 
 private:
@@ -106,13 +109,31 @@ private:
     enum class EntryKind : std::uint8_t {
         Address,
         Cname,
-        Negative,
+        NxDomain,
     };
 
     struct AddressSet;
     struct CnameValue;
-    struct CacheEntry;
-    struct ExpiryHeap;
+    struct CacheEntry {
+        CacheEntry *bucket_next = nullptr;
+        common::BinaryHeapNode expiry_node{};
+        AddressSet *a = nullptr;
+        AddressSet *aaaa = nullptr;
+        CnameValue *cname = nullptr;
+        TimePoint next_expire_at{};
+        TimePoint nxdomain_expire_at{};
+        std::uint64_t hash = 0;
+        std::uint32_t allocation_size = 0;
+        std::uint16_t name_length = 0;
+        EntryKind kind = EntryKind::Address;
+        bool in_expiry_heap = false;
+    };
+
+    struct ExpiryCompare {
+        bool operator()(const CacheEntry *left, const CacheEntry *right) const noexcept;
+    };
+
+    using ExpiryHeap = common::BinaryHeap<CacheEntry, offsetof(CacheEntry, expiry_node), ExpiryCompare>;
 
     [[nodiscard]] static bool valid_key(DnsCacheKey key) noexcept;
     [[nodiscard]] static std::size_t next_power_of_two(std::size_t value) noexcept;
@@ -146,7 +167,7 @@ private:
 
     Options options_{};
     std::unique_ptr<CacheEntry *[]> buckets_{};
-    std::unique_ptr<ExpiryHeap> expiry_heap_{};
+    ExpiryHeap expiry_heap_{};
     std::size_t bucket_count_ = 0;
     std::size_t bucket_bytes_ = 0;
     std::size_t entry_count_ = 0;
@@ -170,12 +191,12 @@ public:
     [[nodiscard]] std::size_t entry_count() noexcept;
     [[nodiscard]] std::size_t bytes_used() noexcept;
     [[nodiscard]] common::IoErr lookup(DnsCacheKey key, TimePoint now, DnsCacheOut &out) noexcept;
-    [[nodiscard]] common::IoErr upsert_address_set(DnsCacheKey key, const net::IpAddress *addresses,
-                                                   std::uint16_t count, TimePoint expire_at) noexcept;
+    [[nodiscard]] common::IoErr upsert_address_set(DnsCacheKey key, net::IpFamily family,
+                                                   const net::IpAddress *addresses, std::uint16_t count,
+                                                   TimePoint expire_at) noexcept;
     [[nodiscard]] common::IoErr upsert_cname(DnsCacheKey key, std::string_view normalized_target,
                                              TimePoint expire_at) noexcept;
-    [[nodiscard]] common::IoErr upsert_negative(DnsCacheKey key, DnsNegativeKind negative,
-                                                TimePoint expire_at) noexcept;
+    [[nodiscard]] common::IoErr upsert_nxdomain(DnsCacheKey key, TimePoint expire_at) noexcept;
     [[nodiscard]] common::IoErr erase(DnsCacheKey key) noexcept;
 
 private:

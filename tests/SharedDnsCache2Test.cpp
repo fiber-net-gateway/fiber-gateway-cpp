@@ -26,7 +26,8 @@ DnsCacheKey shared_key() {
 DetachedTask write_record(SharedDnsCache2 *cache, std::promise<IoErr> *done) {
     const auto now = fiber::event::EventLoop::current().now();
     const IpAddress address = IpAddress::v4({9, 9, 9, 9});
-    done->set_value(cache->upsert_address_set(shared_key(), &address, 1, now + std::chrono::seconds(30)));
+    done->set_value(cache->upsert_address_set(shared_key(), fiber::net::IpFamily::V4, &address, 1,
+                                              now + std::chrono::seconds(30)));
     co_return;
 }
 
@@ -45,7 +46,8 @@ DetachedTask read_record(SharedDnsCache2 *cache, std::promise<LookupResult> *don
 DetachedTask write_short_lived_record(SharedDnsCache2 *cache, std::promise<IoErr> *done) {
     const auto now = fiber::event::EventLoop::current().now();
     const IpAddress address = IpAddress::v4({1, 1, 1, 1});
-    done->set_value(cache->upsert_address_set(shared_key(), &address, 1, now + std::chrono::milliseconds(25)));
+    done->set_value(cache->upsert_address_set(shared_key(), fiber::net::IpFamily::V4, &address, 1,
+                                              now + std::chrono::milliseconds(25)));
     co_return;
 }
 
@@ -91,8 +93,8 @@ TEST(SharedDnsCache2Test, CopiesResultsAcrossEventLoops) {
 
     ASSERT_EQ(result.err, IoErr::None);
     ASSERT_EQ(result.out.kind, DnsCacheOutKind::Addresses);
-    ASSERT_EQ(result.out.value.addresses.count, 1);
-    EXPECT_EQ(result.out.value.addresses.records[0], IpAddress::v4({9, 9, 9, 9}));
+    ASSERT_EQ(result.out.value.addresses.address_set.count, 1);
+    EXPECT_EQ(result.out.value.addresses.address_set.records[0], IpAddress::v4({9, 9, 9, 9}));
 }
 
 TEST(SharedDnsCache2Test, BoundEventLoopRemovesExpiredEntries) {
