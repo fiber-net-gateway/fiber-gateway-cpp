@@ -1485,9 +1485,11 @@ void build_long_header_handshake_datagram(std::array<std::uint8_t, 50> &datagram
     datagram[7 + dcid.size()] = 0; // length varint 0
 }
 
-void build_unsupported_version_long_datagram(std::array<std::uint8_t, 64> &datagram,
+template<std::size_t N>
+void build_unsupported_version_long_datagram(std::array<std::uint8_t, N> &datagram,
                                              const fiber::quic::QuicConnectionId &dcid,
                                              const fiber::quic::QuicConnectionId &scid, std::uint32_t version) {
+    static_assert(N >= 7 + 2 * fiber::quic::kMaxConnectionIdLength);
     datagram = {};
     datagram[0] = fiber::quic::kPacketFlagLong | fiber::quic::kPacketFlagFixed | fiber::quic::kLongPacketTypeInitial;
     datagram[1] = static_cast<std::uint8_t>((version >> 24U) & 0xffU);
@@ -1969,6 +1971,128 @@ TEST(QuicUdpEndpointTest, RetryEnabledSendsRetryWithoutCreatingConnection) {
     EXPECT_FALSE(retry->token.empty());
     EXPECT_EQ(endpoint.active_connection_count(), 0U);
     EXPECT_EQ(endpoint.find_connection(dcid), nullptr);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, RetryResponsesAreRateLimited) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
+    options.retry = true;
+    options.stateless_response_limits.retry = {2, 1};
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("1020304050607080");
+    const auto scid = cid_from_hex("a1a2a3a4");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
+    build_initial_datagram(datagram, dcid, scid);
+
+    constexpr std::size_t flood = 50;
+    std::promise<void> recv_done;
+    std::promise<std::size_t> count_promise;
+    auto recv_future = recv_done.get_future();
+    auto count_future = count_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() { return recv_endpoint_n_times(&endpoint, flood, &recv_done); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return send_flood_and_count_responses(&group.at(0), endpoint.local_addr().port(), datagram.data(),
+                                              datagram.size(), flood, &count_promise);
+    });
+
+    ASSERT_EQ(count_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    ASSERT_EQ(recv_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    recv_future.get();
+
+    const std::size_t responses = count_future.get();
+    EXPECT_GE(responses, 1U);
+    EXPECT_LE(responses, 2U);
+    EXPECT_GT(endpoint.rate_limited_stateless_response_count(), 0U);
+    EXPECT_EQ(endpoint.active_connection_count(), 0U);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, GarbageInitialTokenIsAcceptedAsUnvalidatedWithoutRetry) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
+    options.address_validation_key_set = true;
+    for (std::size_t i = 0; i < options.address_validation_key.size(); ++i) {
+        options.address_validation_key[i] = static_cast<std::uint8_t>(0x40U + i);
+    }
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("2021222324252627");
+    const auto scid = cid_from_hex("31323334");
+    std::array<std::uint8_t, 8> garbage_token{0xde, 0xad, 0xbe, 0xef, 0x10, 0x20, 0x30, 0x40};
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
+    build_initial_datagram(datagram, dcid, scid, 1, fiber::quic::QuicSlice{garbage_token.data(), garbage_token.size()});
+
+    auto result = recv_after_send(group, endpoint, datagram.data(), datagram.size());
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    ASSERT_NE(result->connection, nullptr);
+    EXPECT_TRUE(result->created);
+    EXPECT_FALSE(result->connection->active_path()->validated);
+    EXPECT_EQ(endpoint.active_connection_count(), 1U);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, InvalidRetryTokenCloseResponsesAreRateLimited) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
+    options.address_validation_key_set = true;
+    for (std::size_t i = 0; i < options.address_validation_key.size(); ++i) {
+        options.address_validation_key[i] = static_cast<std::uint8_t>(0x60U + i);
+    }
+    options.stateless_response_limits.invalid_token_close = {2, 1};
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("4041424344454647");
+    const auto scid = cid_from_hex("51525354");
+    auto token = fiber::quic::quic_create_address_token(options.address_validation_key, loopback(1),
+                                                        fiber::quic::quic_unix_seconds_now() + 60,
+                                                        fiber::quic::QuicAddressTokenKind::Retry, &dcid);
+    ASSERT_TRUE(token.has_value()) << static_cast<int>(token.error());
+
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
+    build_initial_datagram(datagram, dcid, scid, 1, token->slice());
+
+    constexpr std::size_t flood = 50;
+    std::promise<void> recv_done;
+    std::promise<std::size_t> count_promise;
+    auto recv_future = recv_done.get_future();
+    auto count_future = count_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() { return recv_endpoint_n_times(&endpoint, flood, &recv_done); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return send_flood_and_count_responses(&group.at(0), endpoint.local_addr().port(), datagram.data(),
+                                              datagram.size(), flood, &count_promise);
+    });
+
+    ASSERT_EQ(count_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    ASSERT_EQ(recv_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    recv_future.get();
+
+    const std::size_t responses = count_future.get();
+    EXPECT_GE(responses, 1U);
+    EXPECT_LE(responses, 2U);
+    EXPECT_GT(endpoint.rate_limited_stateless_response_count(), 0U);
+    EXPECT_EQ(endpoint.active_connection_count(), 0U);
 
     close_endpoint_on_loop(group, endpoint);
     group.stop();
@@ -2663,7 +2787,7 @@ TEST(QuicUdpEndpointTest, SendsVersionNegotiationForUnsupportedVersionLongHeader
 
     const auto dcid = cid_from_hex("0102030405060708");
     const auto scid = cid_from_hex("11223344");
-    std::array<std::uint8_t, 64> datagram{};
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
     build_unsupported_version_long_datagram(datagram, dcid, scid, 0xfaceb00cU);
 
     std::array<std::uint8_t, 512> response{};
@@ -2707,6 +2831,90 @@ TEST(QuicUdpEndpointTest, SendsVersionNegotiationForUnsupportedVersionLongHeader
     EXPECT_EQ(endpoint.active_connection_count(), 0U);
     EXPECT_EQ(endpoint.find_connection(dcid), nullptr);
     EXPECT_EQ(endpoint.dropped_datagram_count(), 0U);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, DoesNotRespondToUndersizedUnsupportedVersionDatagram) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("0102030405060708");
+    const auto scid = cid_from_hex("11223344");
+    std::array<std::uint8_t, 64> datagram{};
+    build_unsupported_version_long_datagram(datagram, dcid, scid, 0xfaceb00cU);
+
+    std::promise<EndpointResult> recv_promise;
+    std::promise<fiber::common::IoResult<bool>> response_promise;
+    auto recv_future = recv_promise.get_future();
+    auto response_future = response_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() { return recv_endpoint_once(&endpoint, &recv_promise); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return send_datagram_and_check_no_response(&group.at(0), endpoint.local_addr().port(), datagram.data(),
+                                                   datagram.size(), &response_promise);
+    });
+
+    ASSERT_EQ(recv_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(response_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+    auto recv_result = recv_future.get();
+    EXPECT_FALSE(recv_result.has_value());
+    EXPECT_EQ(recv_result.error(), fiber::common::IoErr::Invalid);
+    EXPECT_EQ(endpoint.dropped_datagram_count(), 1U);
+    EXPECT_EQ(endpoint.active_connection_count(), 0U);
+
+    auto response = response_future.get();
+    ASSERT_TRUE(response.has_value()) << static_cast<int>(response.error());
+    EXPECT_FALSE(*response);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, VersionNegotiationResponsesAreRateLimited) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
+    options.stateless_response_limits.version_negotiation = {2, 1};
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("0102030405060708");
+    const auto scid = cid_from_hex("11223344");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
+    build_unsupported_version_long_datagram(datagram, dcid, scid, 0xfaceb00cU);
+
+    constexpr std::size_t flood = 50;
+    std::promise<void> recv_done;
+    std::promise<std::size_t> count_promise;
+    auto recv_future = recv_done.get_future();
+    auto count_future = count_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() { return recv_endpoint_n_times(&endpoint, flood, &recv_done); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return send_flood_and_count_responses(&group.at(0), endpoint.local_addr().port(), datagram.data(),
+                                              datagram.size(), flood, &count_promise);
+    });
+
+    ASSERT_EQ(count_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    ASSERT_EQ(recv_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    recv_future.get();
+
+    const std::size_t responses = count_future.get();
+    EXPECT_GE(responses, 1U);
+    // A flood can straddle one fixed one-second window boundary, so a peer
+    // limit of one permits at most two responses during this test.
+    EXPECT_LE(responses, 2U);
+    EXPECT_GT(endpoint.rate_limited_stateless_response_count(), 0U);
 
     close_endpoint_on_loop(group, endpoint);
     group.stop();
@@ -2833,6 +3041,7 @@ TEST(QuicUdpEndpointTest, StatelessResetIsRateLimited) {
     // A flood far larger than the capacity produces a bounded number of resets.
     EXPECT_GE(resets, 1u);
     EXPECT_LE(resets, fiber::quic::kQuicStatelessResetRateLimitCapacity);
+    EXPECT_GT(endpoint.rate_limited_stateless_response_count(), 0U);
 
     close_endpoint_on_loop(group, endpoint);
     group.stop();

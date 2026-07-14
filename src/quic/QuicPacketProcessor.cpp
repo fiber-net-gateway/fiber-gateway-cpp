@@ -48,7 +48,7 @@ namespace {
 // "previous" generation (kept for a 3×PTO grace period), next_application_read/write
 // become the new current keys, and the next-next pair is immediately pre-derived.
 // RFC 9001 §6.1, §6.5.
-[[nodiscard]] common::IoResult<void> apply_key_update(QuicConnection &conn, event::EventLoop &loop) noexcept {
+[[nodiscard]] common::IoResult<void> apply_key_update(QuicConnection &conn) noexcept {
     QuicCryptoState &crypto = conn.crypto();
 
     // 1. Save current application_read as previous (grace period).
@@ -83,7 +83,7 @@ namespace {
     }
 
     // 6. Arm the grace-period timer to discard the previous application keys.
-    conn.arm_key_update_discard_timer(loop);
+    conn.arm_key_update_discard_timer();
 
     return {};
 }
@@ -517,11 +517,7 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
     // (frames parsed, no protocol violations). Doing this last guarantees we
     // never rotate keys for a packet that ends up being rejected.
     if (decoded.key_update) {
-        event::EventLoop *loop = event::EventLoop::current_or_null();
-        if (loop == nullptr) {
-            return std::unexpected(common::IoErr::Invalid);
-        }
-        auto applied = apply_key_update(conn, *loop);
+        auto applied = apply_key_update(conn);
         if (!applied) {
             return std::unexpected(applied.error());
         }

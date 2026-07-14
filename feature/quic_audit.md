@@ -6,7 +6,7 @@
 >
 > 测试覆盖：约 9,700 行测试，但可靠性核心（`QuicAckHandler`/`QuicLossRecovery`/`QuicSendScheduler`/`QuicPathManager`）缺专门单测；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
 >
-> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）已修复（2026-07-14，见下）。待修 P0：#5 DoS 向量、#1 key-update、#7 UAF、#9 GSO、#8 接收零拷贝，其余排期。
+> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）。待修 P0：#1 key-update、#7 UAF、#9 GSO、#8 接收零拷贝，其余排期。
 
 ## 总体评价
 
@@ -87,19 +87,23 @@ codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝�
 > - **方案 B（贵那一半，nginx 未做）**：endpoint 层先派生临时 Initial key + `quic_decode_packet` 认证首包，认证成功才 `create_connection` + 注册 CID。需在 `QuicUdpEndpoint` 持临时 crypto 状态、处理 DCID 路由前认证，重构大、风险高，列远期。
 > - **方案 C（廉价叠加，与 A 正交）**：默认 `retry=true`（未验证源发 Retry，永不触达 create_connection）+ per-source 建连 token bucket（与 #5 的 stateless 限速同框架）。可同做。
 
-### 5. Retry / VN / invalid-token-close 无速率限制
+### 5. ✅ Retry / VN / invalid-token-close 无速率限制
 `QuicUdpEndpoint.cpp:1087`（VN）/ `:1143`（Retry）/ `:1160`（invalid-token close）/ `:715`（仅 stateless_reset 有 token bucket）
 
 只有 `send_stateless_reset` 受 `allow_stateless_reset` token bucket（8/s）约束。其余三个 stateless 路径 1:1 无上限放大。`encode_invalid_token_close_packet`（`:67-97`）每包还新建 `QuicConnection temp` + `init_initial_crypto` HKDF——每伪造包一份 crypto 工作。伪造源洪泛可驱动等量无限制出口流量。
 
 **修复**：token bucket 覆盖全部 stateless 响应（最好 per-peer，nginx 风格）；预派生/缓存 Initial keys。
 
-### 6. 计时器操作系统性用 `EventLoop::current_or_null()` 而非 `loop_`
+> ✅ **已修复 2026-07-14**。`QuicUdpEndpoint` 现在用固定内存、按响应类型独立计数的 endpoint + peer 双层限速覆盖 Stateless Reset、Version Negotiation、Retry 和 INVALID_TOKEN close；IPv4 按地址、IPv6 按 /64 聚合，peer 表固定 256 桶，不允许网络流量驱动动态分配。配置通过 `Options::stateless_response_limits` 暴露，`0` 表示关闭相应维度的上限，并增加统一的限速丢弃计数。VN 另补 RFC 9000 §5.2.2 的 1200 字节门槛，避免对不足以承载 v1 Initial 的未知版本小包响应；无法认证、无法识别用途的 garbage token 改为未验证地址（启用 Retry 时重新发 Retry），只对已识别为 Retry 且失效/过期的 token 发送 INVALID_TOKEN。Initial key 预派生/缓存尚未实施，可作为后续纯 CPU 优化独立处理。
+
+### 6. ✅ 计时器操作系统性用 `EventLoop::current_or_null()` 而非 `loop_`
 `QuicConnection.cpp` 约 20 处（356,460,615,632,639,652,667,679,689,721,958,1009,1032…）
 
 每个计时器 arm/cancel 与状态过渡路径用 `event::EventLoop::current_or_null()` 而非成员 `loop_`。单 loop 不变量只在 `LocalStreamAttachAwaiter`/`attach_local_stream`（`:156,1114,1167`）assert，核心方法（`enter_closing`/`arm_idle_timer`/`on_idle_timer`）不 assert。若 `Lease` 释放或 `close()` 从别的 loop 调用（如 H3 在另一 worker），计时器被 arm/cancel 到错误的堆，`~QuicConnection`（`:356`）经 `current_or_null()` 取到的可能是错的 loop，留下 armed timer 在已释放内存上触发。
 
 **修复**：连接方法内一律用 `loop_`；公开方法入口 assert `EventLoop::current()==loop_`。
+
+> ✅ **已修复 2026-07-14**。所有 connection/path timer API 删除外部 `EventLoop&` 参数，arm/cancel、回调取时与重排统一使用 `QuicConnection::loop_`；状态迁移入口增加 loop-affinity 断言，回调同时断言正在 owner loop 上运行。析构时仅在 owner loop 内正常 cancel；若所属 `EventLoopGroup` 已 stop+join，则走 `cancel_quiesced` 从 owner loop 的 intrusive heap 清理，运行中的其他线程绝不跨 loop 修改 timer heap。`QuicUdpEndpoint::detach_connection` 同样断言 endpoint loop 与 connection owner loop 一致后统一取消全部 connection/path timers。
 
 ### 7. `~QuicConnection` 不通知 peer-data waiter -> 潜在 UAF
 `QuicConnection.cpp:354-363`（析构）/ `:2147`（`detach_from_endpoint` 两边都通知）

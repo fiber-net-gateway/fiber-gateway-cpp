@@ -408,6 +408,8 @@ common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Optio
     active_connection_count_ = 0;
     dropped_datagram_count_ = 0;
     rejected_connection_count_ = 0;
+    rate_limited_stateless_response_count_ = 0;
+    stateless_rate_ = {};
 
     socket_ = std::make_unique<net::UdpSocket>(loop);
     read_buffer_ = std::make_unique<std::uint8_t[]>(kQuicUdpDefaultReadBufferSize);
@@ -454,6 +456,7 @@ void QuicUdpEndpoint::close() noexcept {
     plaintext_buffer_.reset();
     send_buffer_.reset();
     active_connection_count_ = 0;
+    stateless_rate_ = {};
     loop_ = nullptr;
     initialized_ = false;
 }
@@ -544,6 +547,23 @@ std::uint64_t QuicUdpEndpoint::hash_connection_id(const QuicConnectionId &id) no
     return hash;
 }
 
+std::uint64_t QuicUdpEndpoint::hash_stateless_peer(const net::SocketAddress &peer) noexcept {
+    const net::IpAddress &ip = peer.ip();
+    std::uint64_t hash = kFnvOffset;
+    hash ^= ip.is_v4() ? 4U : 6U;
+    hash *= kFnvPrime;
+
+    // IPv4 is limited per address. IPv6 is limited per /64 so temporary
+    // interface identifiers cannot trivially bypass the peer ceiling.
+    const std::size_t len = ip.is_v4() ? net::IpAddress::kV4Size : net::IpAddress::kV6Size / 2;
+    const std::uint8_t *bytes = ip.data();
+    for (std::size_t i = 0; i < len; ++i) {
+        hash ^= bytes[i];
+        hash *= kFnvPrime;
+    }
+    return hash;
+}
+
 int QuicUdpEndpoint::compare_connection_id(const QuicConnectionId &left, const QuicConnectionId &right) noexcept {
     const std::size_t common_len = std::min(left.size(), right.size());
     if (common_len != 0) {
@@ -609,12 +629,8 @@ const QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &d
 
 void QuicUdpEndpoint::detach_connection(QuicConnection &connection) noexcept {
     if (loop_ != nullptr) {
-        connection.cancel_idle_timer(*loop_);
-        connection.cancel_close_timer(*loop_);
-        connection.cancel_keepalive_timer(*loop_);
-        connection.cancel_loss_detection_timer(*loop_);
-        connection.cancel_key_update_discard_timer(*loop_);
-        connection.paths().cancel_validation_timer(*loop_);
+        FIBER_ASSERT(connection.loop() == loop_);
+        connection.cancel_all_timers();
     }
     send_scheduler_.remove(connection);
     QuicConnection::EndpointIndex &index = connection.endpoint_index;
@@ -712,15 +728,71 @@ QuicUdpEndpoint::create_stateless_reset_token(const QuicConnectionId &cid,
     return {};
 }
 
-bool QuicUdpEndpoint::allow_stateless_reset(std::chrono::steady_clock::time_point now) noexcept {
-    if (now - stateless_reset_window_start_ >= std::chrono::seconds(1)) {
-        stateless_reset_window_start_ = now;
-        stateless_reset_tokens_ = kQuicStatelessResetRateLimitCapacity;
+const QuicUdpEndpoint::StatelessResponseLimit &
+QuicUdpEndpoint::stateless_response_limit(QuicStatelessResponseKind kind) const noexcept {
+    switch (kind) {
+        case QuicStatelessResponseKind::StatelessReset:
+            return options_.stateless_response_limits.stateless_reset;
+        case QuicStatelessResponseKind::VersionNegotiation:
+            return options_.stateless_response_limits.version_negotiation;
+        case QuicStatelessResponseKind::Retry:
+            return options_.stateless_response_limits.retry;
+        case QuicStatelessResponseKind::InvalidTokenClose:
+            return options_.stateless_response_limits.invalid_token_close;
+        case QuicStatelessResponseKind::Count:
+            break;
     }
-    if (stateless_reset_tokens_ == 0) {
+    FIBER_ASSERT(false);
+    return options_.stateless_response_limits.stateless_reset;
+}
+
+bool QuicUdpEndpoint::allow_stateless_response(QuicStatelessResponseKind kind, const net::SocketAddress &peer,
+                                               std::chrono::steady_clock::time_point now) noexcept {
+    const std::size_t kind_index = static_cast<std::size_t>(kind);
+    if (kind_index >= kStatelessResponseKindCount) {
+        FIBER_ASSERT(false);
         return false;
     }
-    --stateless_reset_tokens_;
+
+    const StatelessResponseLimit &limit = stateless_response_limit(kind);
+    if (limit.endpoint_per_second == 0 && limit.peer_per_second == 0) {
+        return true;
+    }
+
+    const auto epoch_count = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+    const std::uint64_t epoch = static_cast<std::uint64_t>(epoch_count);
+    if (!stateless_rate_.global_initialized || stateless_rate_.global_epoch != epoch) {
+        stateless_rate_.global_epoch = epoch;
+        stateless_rate_.global_used = {};
+        stateless_rate_.global_initialized = true;
+    }
+
+    QuicStatelessPeerBucket *peer_bucket = nullptr;
+    if (limit.peer_per_second != 0) {
+        const std::uint64_t peer_hash = hash_stateless_peer(peer);
+        QuicStatelessPeerBucket &bucket = stateless_rate_.peers[peer_hash % kQuicStatelessPeerBucketCount];
+        if (!bucket.occupied || bucket.peer_hash != peer_hash || bucket.epoch != epoch) {
+            bucket = {};
+            bucket.peer_hash = peer_hash;
+            bucket.epoch = epoch;
+            bucket.occupied = true;
+        }
+        if (bucket.used[kind_index] >= limit.peer_per_second) {
+            return false;
+        }
+        peer_bucket = &bucket;
+    }
+
+    if (limit.endpoint_per_second != 0 && stateless_rate_.global_used[kind_index] >= limit.endpoint_per_second) {
+        return false;
+    }
+
+    if (peer_bucket != nullptr) {
+        ++peer_bucket->used[kind_index];
+    }
+    if (limit.endpoint_per_second != 0) {
+        ++stateless_rate_.global_used[kind_index];
+    }
     return true;
 }
 
@@ -885,8 +957,13 @@ QuicUdpEndpoint::validate_initial_address(const QuicPacketHeader &packet,
             return validation;
 
         case QuicAddressTokenValidationStatus::Garbage: {
-            validation.action = QuicInitialValidationAction::SendInvalidTokenClose;
-            validation.close_reason = kInvalidAddressValidationTokenReason;
+            // The token could not be authenticated, so its purpose is unknown.
+            // RFC 9000 §8.1.3 requires an unrecognized token to be treated as
+            // an unvalidated address; only an authenticated Retry token can be
+            // rejected with INVALID_TOKEN under the stricter §8.1.2 rule.
+            if (options_.retry) {
+                validation.action = QuicInitialValidationAction::SendRetry;
+            }
             return validation;
         }
 
@@ -1051,7 +1128,12 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
         // headers (Initial/Handshake/0-RTT/Retry/VN) are NOT reset triggers and
         // keep their existing handling below.
         if (packet && !packet->long_header) {
-            if (packet->packet_len > kQuicStatelessResetMinTriggerSize && allow_stateless_reset(now)) {
+            if (packet->packet_len > kQuicStatelessResetMinTriggerSize) {
+                if (!allow_stateless_response(QuicStatelessResponseKind::StatelessReset, datagram.peer, now)) {
+                    ++dropped_datagram_count_;
+                    ++rate_limited_stateless_response_count_;
+                    return std::unexpected(common::IoErr::Invalid);
+                }
                 std::array<std::uint8_t, kQuicStatelessResponseBufferSize> out{};
                 auto sent = send_stateless_reset(*packet, out.data(), out.size(), datagram);
                 if (!sent) {
@@ -1066,6 +1148,19 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
             return std::unexpected(common::IoErr::Invalid);
         }
         if (packet && packet->type == QuicPacketType::UnsupportedVersion) {
+            // RFC 9000 §5.2.2: an unsupported-version datagram that is too
+            // small to initiate a connection in any supported version MUST be
+            // dropped. This endpoint currently supports QUIC v1, whose minimum
+            // Initial datagram size is 1200 bytes.
+            if (recv.size < kMinInitialDatagramSize) {
+                ++dropped_datagram_count_;
+                return std::unexpected(common::IoErr::Invalid);
+            }
+            if (!allow_stateless_response(QuicStatelessResponseKind::VersionNegotiation, datagram.peer, now)) {
+                ++dropped_datagram_count_;
+                ++rate_limited_stateless_response_count_;
+                return std::unexpected(common::IoErr::Invalid);
+            }
             QuicPacketHeader response{};
             response.long_header = true;
             response.type = QuicPacketType::VersionNegotiation;
@@ -1100,6 +1195,11 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
         }
 
         if (validation->action == QuicInitialValidationAction::SendRetry) {
+            if (!allow_stateless_response(QuicStatelessResponseKind::Retry, datagram.peer, now)) {
+                ++dropped_datagram_count_;
+                ++rate_limited_stateless_response_count_;
+                return std::unexpected(common::IoErr::Invalid);
+            }
             QuicConnectionId retry_scid{};
             bool generated_unique_cid = false;
             for (std::uint8_t attempt = 0; attempt < 8; ++attempt) {
@@ -1145,6 +1245,11 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
         }
 
         if (validation->action == QuicInitialValidationAction::SendInvalidTokenClose) {
+            if (!allow_stateless_response(QuicStatelessResponseKind::InvalidTokenClose, datagram.peer, now)) {
+                ++dropped_datagram_count_;
+                ++rate_limited_stateless_response_count_;
+                return std::unexpected(common::IoErr::Invalid);
+            }
             std::array<std::uint8_t, kQuicStatelessResponseBufferSize> out{};
             QuicPacketPlaintext plaintext{plaintext_buffer_.get(), kQuicUdpDefaultPlaintextBufferSize};
             auto written = encode_invalid_token_close_packet(*packet, datagram, validation->close_reason, out.data(),
@@ -1223,11 +1328,11 @@ void QuicUdpEndpoint::handle_receive_result(QuicConnection &connection,
             // arm_close_timer is idempotent; this is a safety net in case close() was
             // called without an EventLoop context (the 3*PTO timer must be armed before
             // we let the connection idle).
-            connection.arm_close_timer(*loop_);
+            connection.arm_close_timer();
         } else {
-            connection.on_packet_processed(*loop_);
-            connection.arm_loss_detection_timer(*loop_);
-            connection.paths().arm_validation_timer(*loop_);
+            connection.on_packet_processed();
+            connection.arm_loss_detection_timer();
+            connection.paths().arm_validation_timer();
         }
     }
 
@@ -1722,8 +1827,8 @@ void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const Qui
     has_send_work = has_send_work || connection_has_send_work(connection);
     quic_congestion_on_idle(connection.congestion(), !has_send_work, now);
     if (sent_ack_eliciting && loop_ != nullptr) {
-        connection.on_ack_eliciting_packet_sent(*loop_);
-        connection.arm_loss_detection_timer(*loop_);
+        connection.on_ack_eliciting_packet_sent();
+        connection.arm_loss_detection_timer();
     }
 }
 
