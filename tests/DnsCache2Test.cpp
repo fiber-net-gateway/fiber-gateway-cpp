@@ -127,7 +127,7 @@ TEST(DnsCache2Test, ExpiresNegativeEntries) {
     EXPECT_EQ(cache.entry_count(), 0u);
 }
 
-TEST(DnsCache2Test, UsesExactLruEviction) {
+TEST(DnsCache2Test, EvictsEntryWithNearestExpirationAtEntryLimit) {
     DnsCache2 cache;
     DnsCache2::Options options;
     options.max_entries = 2;
@@ -139,8 +139,8 @@ TEST(DnsCache2Test, UsesExactLruEviction) {
     const IpAddress first = IpAddress::v4({1, 0, 0, 1});
     const IpAddress second = IpAddress::v4({2, 0, 0, 2});
     const IpAddress third = IpAddress::v4({3, 0, 0, 3});
-    ASSERT_EQ(cache.upsert_address_set(key("first.example"), &first, 1, now + std::chrono::seconds(60)), IoErr::None);
-    ASSERT_EQ(cache.upsert_address_set(key("second.example"), &second, 1, now + std::chrono::seconds(60)), IoErr::None);
+    ASSERT_EQ(cache.upsert_address_set(key("first.example"), &first, 1, now + std::chrono::seconds(120)), IoErr::None);
+    ASSERT_EQ(cache.upsert_address_set(key("second.example"), &second, 1, now + std::chrono::seconds(30)), IoErr::None);
 
     DnsCacheOut out{};
     ASSERT_EQ(cache.lookup(key("first.example"), now, out), IoErr::None);
@@ -155,7 +155,33 @@ TEST(DnsCache2Test, UsesExactLruEviction) {
     EXPECT_EQ(out.kind, DnsCacheOutKind::Addresses);
 }
 
-TEST(DnsCache2Test, EvictsLeastRecentlyUsedEntryToHonorByteLimit) {
+TEST(DnsCache2Test, UpdatingExpirationChangesEvictionPriority) {
+    DnsCache2 cache;
+    DnsCache2::Options options;
+    options.max_entries = 2;
+    options.max_bytes = 4096;
+    options.bucket_count = 2;
+    ASSERT_TRUE(cache.init(options));
+
+    const auto now = std::chrono::steady_clock::now();
+    const IpAddress first = IpAddress::v4({1, 0, 0, 1});
+    const IpAddress second = IpAddress::v4({2, 0, 0, 2});
+    const IpAddress third = IpAddress::v4({3, 0, 0, 3});
+    ASSERT_EQ(cache.upsert_address_set(key("first.example"), &first, 1, now + std::chrono::seconds(10)), IoErr::None);
+    ASSERT_EQ(cache.upsert_address_set(key("second.example"), &second, 1, now + std::chrono::seconds(20)), IoErr::None);
+    ASSERT_EQ(cache.upsert_address_set(key("first.example"), &first, 1, now + std::chrono::seconds(30)), IoErr::None);
+    ASSERT_EQ(cache.upsert_address_set(key("third.example"), &third, 1, now + std::chrono::seconds(40)), IoErr::None);
+
+    DnsCacheOut out{};
+    ASSERT_EQ(cache.lookup(key("first.example"), now, out), IoErr::None);
+    EXPECT_EQ(out.kind, DnsCacheOutKind::Addresses);
+    ASSERT_EQ(cache.lookup(key("second.example"), now, out), IoErr::None);
+    EXPECT_EQ(out.kind, DnsCacheOutKind::Miss);
+    ASSERT_EQ(cache.lookup(key("third.example"), now, out), IoErr::None);
+    EXPECT_EQ(out.kind, DnsCacheOutKind::Addresses);
+}
+
+TEST(DnsCache2Test, EvictsEntryWithNearestExpirationToHonorByteLimit) {
     const auto now = std::chrono::steady_clock::now();
     const IpAddress address = IpAddress::v4({192, 0, 2, 1});
 
@@ -165,8 +191,8 @@ TEST(DnsCache2Test, EvictsLeastRecentlyUsedEntryToHonorByteLimit) {
     probe_options.max_bytes = 4096;
     probe_options.bucket_count = 1;
     ASSERT_TRUE(probe.init(probe_options));
-    ASSERT_EQ(probe.upsert_address_set(key("one.example"), &address, 1, now + std::chrono::seconds(60)), IoErr::None);
-    ASSERT_EQ(probe.upsert_address_set(key("two.example"), &address, 1, now + std::chrono::seconds(60)), IoErr::None);
+    ASSERT_EQ(probe.upsert_address_set(key("one.example"), &address, 1, now + std::chrono::seconds(10)), IoErr::None);
+    ASSERT_EQ(probe.upsert_address_set(key("two.example"), &address, 1, now + std::chrono::seconds(20)), IoErr::None);
     const std::size_t two_entry_bytes = probe.bytes_used();
 
     DnsCache2 cache;
@@ -175,10 +201,10 @@ TEST(DnsCache2Test, EvictsLeastRecentlyUsedEntryToHonorByteLimit) {
     options.max_bytes = two_entry_bytes;
     options.bucket_count = 1;
     ASSERT_TRUE(cache.init(options));
-    ASSERT_EQ(cache.upsert_address_set(key("one.example"), &address, 1, now + std::chrono::seconds(60)), IoErr::None);
-    ASSERT_EQ(cache.upsert_address_set(key("two.example"), &address, 1, now + std::chrono::seconds(60)), IoErr::None);
+    ASSERT_EQ(cache.upsert_address_set(key("one.example"), &address, 1, now + std::chrono::seconds(10)), IoErr::None);
+    ASSERT_EQ(cache.upsert_address_set(key("two.example"), &address, 1, now + std::chrono::seconds(20)), IoErr::None);
     ASSERT_EQ(cache.bytes_used(), two_entry_bytes);
-    ASSERT_EQ(cache.upsert_address_set(key("six.example"), &address, 1, now + std::chrono::seconds(60)), IoErr::None);
+    ASSERT_EQ(cache.upsert_address_set(key("six.example"), &address, 1, now + std::chrono::seconds(30)), IoErr::None);
     EXPECT_LE(cache.bytes_used(), options.max_bytes);
 
     DnsCacheOut out{};

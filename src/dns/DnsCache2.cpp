@@ -6,6 +6,7 @@
 #include <new>
 
 #include "../common/Assert.h"
+#include "../common/BinaryHeap.h"
 
 namespace fiber::dns {
 
@@ -42,18 +43,31 @@ struct DnsCache2::CnameValue {
 
 struct DnsCache2::CacheEntry {
     CacheEntry *bucket_next = nullptr;
-    CacheEntry *lru_prev = nullptr;
-    CacheEntry *lru_next = nullptr;
+    common::BinaryHeapNode expiry_node{};
     AddressSet *a = nullptr;
     AddressSet *aaaa = nullptr;
     CnameValue *cname = nullptr;
+    TimePoint next_expire_at{};
     TimePoint negative_expire_at{};
     std::uint64_t hash = 0;
     std::uint32_t allocation_size = 0;
     std::uint16_t name_length = 0;
     EntryKind kind = EntryKind::Address;
     DnsNegativeKind negative = DnsNegativeKind::NxDomain;
+    bool in_expiry_heap = false;
 };
+
+struct DnsCache2::ExpiryHeap {
+    struct Compare {
+        bool operator()(const CacheEntry *left, const CacheEntry *right) const noexcept {
+            return left->next_expire_at < right->next_expire_at;
+        }
+    };
+
+    common::BinaryHeap<CacheEntry, offsetof(CacheEntry, expiry_node), Compare> entries{};
+};
+
+DnsCache2::DnsCache2() noexcept = default;
 
 std::uint64_t dns_cache_hash(std::string_view normalized_name) noexcept {
     std::uint64_t hash = 14695981039346656037ULL;
@@ -91,10 +105,15 @@ bool DnsCache2::init(Options options) noexcept {
     if (!buckets) {
         return false;
     }
+    std::unique_ptr<ExpiryHeap> expiry_heap(new (std::nothrow) ExpiryHeap{});
+    if (!expiry_heap) {
+        return false;
+    }
 
     options.bucket_count = bucket_count;
     options_ = options;
     buckets_ = std::move(buckets);
+    expiry_heap_ = std::move(expiry_heap);
     bucket_count_ = bucket_count;
     bucket_bytes_ = bucket_bytes;
     bytes_used_ = bucket_bytes;
@@ -102,26 +121,21 @@ bool DnsCache2::init(Options options) noexcept {
 }
 
 void DnsCache2::clear() noexcept {
-    CacheEntry *entry = lru_head_;
-    while (entry != nullptr) {
-        CacheEntry *next = entry->lru_next;
-        clear_value(*entry);
-        FIBER_ASSERT(bytes_used_ >= entry->allocation_size);
-        bytes_used_ -= entry->allocation_size;
-        free_entry(entry);
-        entry = next;
+    while (expiry_heap_ && !expiry_heap_->entries.empty()) {
+        CacheEntry *entry = expiry_heap_->entries.min();
+        FIBER_ASSERT(entry != nullptr);
+        erase_entry(*entry);
     }
     if (buckets_) {
         std::fill_n(buckets_.get(), bucket_count_, nullptr);
     }
     entry_count_ = 0;
     bytes_used_ = buckets_ ? bucket_bytes_ : 0;
-    lru_head_ = nullptr;
-    lru_tail_ = nullptr;
 }
 
 void DnsCache2::release() noexcept {
     clear();
+    expiry_heap_.reset();
     buckets_.reset();
     options_ = {};
     bucket_count_ = 0;
@@ -298,7 +312,7 @@ void DnsCache2::insert_entry(CacheEntry &entry) noexcept {
     buckets_[bucket] = &entry;
     ++entry_count_;
     bytes_used_ += entry.allocation_size;
-    touch_lru(entry);
+    refresh_expiry(entry);
 }
 
 void DnsCache2::erase_entry(CacheEntry &entry) noexcept {
@@ -310,7 +324,7 @@ void DnsCache2::erase_entry(CacheEntry &entry) noexcept {
     FIBER_ASSERT(*link == &entry);
     *link = entry.bucket_next;
 
-    unlink_lru(entry);
+    unlink_expiry(entry);
     clear_value(entry);
     FIBER_ASSERT(bytes_used_ >= entry.allocation_size);
     bytes_used_ -= entry.allocation_size;
@@ -319,34 +333,50 @@ void DnsCache2::erase_entry(CacheEntry &entry) noexcept {
     free_entry(&entry);
 }
 
-void DnsCache2::unlink_lru(CacheEntry &entry) noexcept {
-    if (entry.lru_prev != nullptr) {
-        entry.lru_prev->lru_next = entry.lru_next;
-    } else if (lru_head_ == &entry) {
-        lru_head_ = entry.lru_next;
+DnsCache2::TimePoint DnsCache2::entry_expire_at(const CacheEntry &entry) const noexcept {
+    TimePoint deadline{};
+    auto include = [&deadline](TimePoint candidate) noexcept {
+        if (has_deadline(candidate) && (!has_deadline(deadline) || candidate < deadline)) {
+            deadline = candidate;
+        }
+    };
+
+    if (entry.kind == EntryKind::Address) {
+        if (entry.a != nullptr) {
+            include(entry.a->expire_at);
+        }
+        if (entry.aaaa != nullptr) {
+            include(entry.aaaa->expire_at);
+        }
+        return deadline;
     }
-    if (entry.lru_next != nullptr) {
-        entry.lru_next->lru_prev = entry.lru_prev;
-    } else if (lru_tail_ == &entry) {
-        lru_tail_ = entry.lru_prev;
+    if (entry.kind == EntryKind::Cname && entry.cname != nullptr) {
+        return entry.cname->expire_at;
     }
-    entry.lru_prev = nullptr;
-    entry.lru_next = nullptr;
+    if (entry.kind == EntryKind::Negative) {
+        return entry.negative_expire_at;
+    }
+    return {};
 }
 
-void DnsCache2::touch_lru(CacheEntry &entry) noexcept {
-    if (lru_head_ == &entry) {
+void DnsCache2::unlink_expiry(CacheEntry &entry) noexcept {
+    if (!entry.in_expiry_heap) {
         return;
     }
-    unlink_lru(entry);
-    entry.lru_prev = nullptr;
-    entry.lru_next = lru_head_;
-    if (lru_head_ != nullptr) {
-        lru_head_->lru_prev = &entry;
-    } else {
-        lru_tail_ = &entry;
-    }
-    lru_head_ = &entry;
+    FIBER_ASSERT(expiry_heap_ != nullptr);
+    expiry_heap_->entries.remove(entry);
+    entry.in_expiry_heap = false;
+    entry.next_expire_at = {};
+}
+
+void DnsCache2::refresh_expiry(CacheEntry &entry) noexcept {
+    unlink_expiry(entry);
+    const TimePoint deadline = entry_expire_at(entry);
+    FIBER_ASSERT(has_deadline(deadline));
+    FIBER_ASSERT(expiry_heap_ != nullptr);
+    entry.next_expire_at = deadline;
+    expiry_heap_->entries.insert(entry);
+    entry.in_expiry_heap = true;
 }
 
 void DnsCache2::cleanup_expired(CacheEntry &entry, TimePoint now) noexcept {
@@ -377,6 +407,37 @@ void DnsCache2::cleanup_expired(CacheEntry &entry, TimePoint now) noexcept {
     }
 }
 
+void DnsCache2::expire_due(TimePoint now) noexcept {
+    if (!expiry_heap_) {
+        return;
+    }
+    for (;;) {
+        CacheEntry *entry = expiry_heap_->entries.min();
+        if (entry == nullptr || entry->next_expire_at > now) {
+            return;
+        }
+
+        unlink_expiry(*entry);
+        cleanup_expired(*entry, now);
+        const bool empty = (entry->kind == EntryKind::Address && entry->a == nullptr && entry->aaaa == nullptr) ||
+                           (entry->kind == EntryKind::Cname && entry->cname == nullptr) ||
+                           (entry->kind == EntryKind::Negative && !has_deadline(entry->negative_expire_at));
+        if (empty) {
+            erase_entry(*entry);
+        } else {
+            refresh_expiry(*entry);
+        }
+    }
+}
+
+DnsCache2::TimePoint DnsCache2::next_expire_at() const noexcept {
+    if (!expiry_heap_) {
+        return {};
+    }
+    const CacheEntry *entry = expiry_heap_->entries.min();
+    return entry == nullptr ? TimePoint{} : entry->next_expire_at;
+}
+
 bool DnsCache2::ensure_capacity(std::size_t add_bytes, std::size_t replace_bytes, bool add_entry,
                                 const CacheEntry *protected_entry) noexcept {
     if (replace_bytes > bytes_used_ || add_bytes > options_.max_bytes - bucket_bytes_) {
@@ -397,10 +458,7 @@ bool DnsCache2::ensure_capacity(std::size_t add_bytes, std::size_t replace_bytes
 
     while (bytes_used_ - replace_bytes > options_.max_bytes - add_bytes ||
            entry_count_ + (add_entry ? 1U : 0U) > options_.max_entries) {
-        CacheEntry *candidate = lru_tail_;
-        if (candidate == protected_entry) {
-            candidate = candidate->lru_prev;
-        }
+        CacheEntry *candidate = expiry_heap_->entries.min();
         if (candidate == nullptr) {
             return false;
         }
@@ -419,7 +477,10 @@ common::IoErr DnsCache2::lookup(DnsCacheKey key, TimePoint now, DnsCacheOut &out
         return common::IoErr::None;
     }
 
-    cleanup_expired(*entry, now);
+    if (entry->next_expire_at <= now) {
+        unlink_expiry(*entry);
+        cleanup_expired(*entry, now);
+    }
     const bool empty = (entry->kind == EntryKind::Address && entry->a == nullptr && entry->aaaa == nullptr) ||
                        (entry->kind == EntryKind::Cname && entry->cname == nullptr) ||
                        (entry->kind == EntryKind::Negative && !has_deadline(entry->negative_expire_at));
@@ -427,8 +488,10 @@ common::IoErr DnsCache2::lookup(DnsCacheKey key, TimePoint now, DnsCacheOut &out
         erase_entry(*entry);
         return common::IoErr::None;
     }
+    if (!entry->in_expiry_heap) {
+        refresh_expiry(*entry);
+    }
 
-    touch_lru(*entry);
     if (entry->kind == EntryKind::Address) {
         auto append_set = [&out](AddressSet &set) noexcept {
             const net::IpAddress *records = address_records(set);
@@ -514,7 +577,9 @@ common::IoErr DnsCache2::upsert_address_set(DnsCacheKey key, const net::IpAddres
     } else {
         replace_bytes = value_bytes(*entry);
     }
+    unlink_expiry(*entry);
     if (!ensure_capacity(new_set->allocation_size, replace_bytes, false, entry)) {
+        refresh_expiry(*entry);
         free_address_set(new_set);
         return common::IoErr::NoMem;
     }
@@ -529,7 +594,7 @@ common::IoErr DnsCache2::upsert_address_set(DnsCacheKey key, const net::IpAddres
     }
     (family == net::IpFamily::V4 ? entry->a : entry->aaaa) = new_set;
     bytes_used_ += new_set->allocation_size;
-    touch_lru(*entry);
+    refresh_expiry(*entry);
     return common::IoErr::None;
 }
 
@@ -565,7 +630,9 @@ common::IoErr DnsCache2::upsert_cname(DnsCacheKey key, std::string_view normaliz
     }
 
     const std::size_t replace_bytes = value_bytes(*entry);
+    unlink_expiry(*entry);
     if (!ensure_capacity(new_value->allocation_size, replace_bytes, false, entry)) {
+        refresh_expiry(*entry);
         free_cname(new_value);
         return common::IoErr::NoMem;
     }
@@ -573,7 +640,7 @@ common::IoErr DnsCache2::upsert_cname(DnsCacheKey key, std::string_view normaliz
     entry->kind = EntryKind::Cname;
     entry->cname = new_value;
     bytes_used_ += new_value->allocation_size;
-    touch_lru(*entry);
+    refresh_expiry(*entry);
     return common::IoErr::None;
 }
 
@@ -600,11 +667,12 @@ common::IoErr DnsCache2::upsert_negative(DnsCacheKey key, DnsNegativeKind negati
         return common::IoErr::None;
     }
 
+    unlink_expiry(*entry);
     clear_value(*entry);
     entry->kind = EntryKind::Negative;
     entry->negative = negative;
     entry->negative_expire_at = expire_at;
-    touch_lru(*entry);
+    refresh_expiry(*entry);
     return common::IoErr::None;
 }
 
@@ -619,42 +687,181 @@ common::IoErr DnsCache2::erase(DnsCacheKey key) noexcept {
     return common::IoErr::None;
 }
 
-async::Task<std::size_t> SharedDnsCache2::entry_count() noexcept {
-    auto guard = co_await mutex_.lock();
-    co_return cache_.entry_count();
+SharedDnsCache2::~SharedDnsCache2() {
+    FIBER_ASSERT(owner_loop_ == nullptr);
+    FIBER_ASSERT(!rearm_pending_.load(std::memory_order_relaxed));
+    FIBER_ASSERT(!expiry_timer_.is_in_heap());
 }
 
-async::Task<std::size_t> SharedDnsCache2::bytes_used() noexcept {
-    auto guard = co_await mutex_.lock();
-    co_return cache_.bytes_used();
+bool SharedDnsCache2::init(event::EventLoop &owner_loop, Options options) noexcept {
+    if (owner_loop_ != nullptr || !stopping_.load(std::memory_order_relaxed)) {
+        return false;
+    }
+    if (!cache_.init(options)) {
+        return false;
+    }
+    owner_loop_ = &owner_loop;
+    rearm_pending_.store(false, std::memory_order_relaxed);
+    stopping_.store(false, std::memory_order_release);
+    return true;
 }
 
-async::Task<common::IoErr> SharedDnsCache2::lookup(DnsCacheKey key, TimePoint now, DnsCacheOut &out) noexcept {
-    auto guard = co_await mutex_.lock();
-    co_return cache_.lookup(key, now, out);
+void SharedDnsCache2::shutdown() noexcept {
+    FIBER_ASSERT(owner_loop_ != nullptr);
+    FIBER_ASSERT(owner_loop_->in_loop());
+    FIBER_ASSERT(!rearm_pending_.load(std::memory_order_acquire));
+
+    stopping_.store(true, std::memory_order_release);
+    owner_loop_->cancel<SharedDnsCache2, &SharedDnsCache2::expiry_timer_>(*this);
+
+    {
+        std::lock_guard guard(mutex_);
+        cache_.release();
+    }
+    owner_loop_ = nullptr;
 }
 
-async::Task<common::IoErr> SharedDnsCache2::upsert_address_set(DnsCacheKey key, const net::IpAddress *addresses,
-                                                               std::uint16_t count, TimePoint expire_at) noexcept {
-    auto guard = co_await mutex_.lock();
-    co_return cache_.upsert_address_set(key, addresses, count, expire_at);
+void SharedDnsCache2::request_timer_rearm() noexcept {
+    if (stopping_.load(std::memory_order_acquire)) {
+        return;
+    }
+    bool expected = false;
+    if (!rearm_pending_.compare_exchange_strong(expected, true, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+        return;
+    }
+    event::EventLoop *owner_loop = owner_loop_;
+    FIBER_ASSERT(owner_loop != nullptr);
+    owner_loop->post<SharedDnsCache2, &SharedDnsCache2::rearm_entry_, &SharedDnsCache2::on_rearm>(*this);
 }
 
-async::Task<common::IoErr> SharedDnsCache2::upsert_cname(DnsCacheKey key, std::string_view normalized_target,
-                                                         TimePoint expire_at) noexcept {
-    auto guard = co_await mutex_.lock();
-    co_return cache_.upsert_cname(key, normalized_target, expire_at);
+void SharedDnsCache2::arm_timer(TimePoint deadline) noexcept {
+    FIBER_ASSERT(owner_loop_ != nullptr);
+    FIBER_ASSERT(owner_loop_->in_loop());
+    owner_loop_->cancel<SharedDnsCache2, &SharedDnsCache2::expiry_timer_>(*this);
+    if (!stopping_.load(std::memory_order_acquire) && has_deadline(deadline)) {
+        owner_loop_->post_at<SharedDnsCache2, &SharedDnsCache2::expiry_timer_, &SharedDnsCache2::on_expiry_timer>(
+                deadline, *this);
+    }
 }
 
-async::Task<common::IoErr> SharedDnsCache2::upsert_negative(DnsCacheKey key, DnsNegativeKind negative,
-                                                            TimePoint expire_at) noexcept {
-    auto guard = co_await mutex_.lock();
-    co_return cache_.upsert_negative(key, negative, expire_at);
+void SharedDnsCache2::maintain_and_rearm() noexcept {
+    FIBER_ASSERT(owner_loop_ != nullptr);
+    FIBER_ASSERT(owner_loop_->in_loop());
+    if (stopping_.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    std::unique_lock guard(mutex_, std::try_to_lock);
+    if (!guard.owns_lock()) {
+        arm_timer(owner_loop_->now() + kMaintenanceRetryDelay);
+        return;
+    }
+    cache_.expire_due(owner_loop_->now());
+    const TimePoint deadline = cache_.next_expire_at();
+    guard.unlock();
+    arm_timer(deadline);
 }
 
-async::Task<common::IoErr> SharedDnsCache2::erase(DnsCacheKey key) noexcept {
-    auto guard = co_await mutex_.lock();
-    co_return cache_.erase(key);
+void SharedDnsCache2::on_rearm(SharedDnsCache2 *cache) noexcept {
+    FIBER_ASSERT(cache != nullptr);
+    cache->rearm_pending_.store(false, std::memory_order_release);
+    if (cache->stopping_.load(std::memory_order_acquire)) {
+        return;
+    }
+    cache->maintain_and_rearm();
+}
+
+void SharedDnsCache2::on_expiry_timer(SharedDnsCache2 *cache) noexcept {
+    FIBER_ASSERT(cache != nullptr);
+    cache->maintain_and_rearm();
+}
+
+std::size_t SharedDnsCache2::entry_count() noexcept {
+    if (stopping_.load(std::memory_order_acquire)) {
+        return 0;
+    }
+    std::lock_guard guard(mutex_);
+    return cache_.entry_count();
+}
+
+std::size_t SharedDnsCache2::bytes_used() noexcept {
+    if (stopping_.load(std::memory_order_acquire)) {
+        return 0;
+    }
+    std::lock_guard guard(mutex_);
+    return cache_.bytes_used();
+}
+
+common::IoErr SharedDnsCache2::lookup(DnsCacheKey key, TimePoint now, DnsCacheOut &out) noexcept {
+    if (stopping_.load(std::memory_order_acquire)) {
+        out = {};
+        return common::IoErr::Invalid;
+    }
+    common::IoErr err;
+    {
+        std::lock_guard guard(mutex_);
+        err = cache_.lookup(key, now, out);
+    }
+    request_timer_rearm();
+    return err;
+}
+
+common::IoErr SharedDnsCache2::upsert_address_set(DnsCacheKey key, const net::IpAddress *addresses, std::uint16_t count,
+                                                  TimePoint expire_at) noexcept {
+    if (stopping_.load(std::memory_order_acquire)) {
+        return common::IoErr::Invalid;
+    }
+    common::IoErr err;
+    {
+        std::lock_guard guard(mutex_);
+        cache_.expire_due(event::EventLoop::current().now());
+        err = cache_.upsert_address_set(key, addresses, count, expire_at);
+    }
+    request_timer_rearm();
+    return err;
+}
+
+common::IoErr SharedDnsCache2::upsert_cname(DnsCacheKey key, std::string_view normalized_target,
+                                            TimePoint expire_at) noexcept {
+    if (stopping_.load(std::memory_order_acquire)) {
+        return common::IoErr::Invalid;
+    }
+    common::IoErr err;
+    {
+        std::lock_guard guard(mutex_);
+        cache_.expire_due(event::EventLoop::current().now());
+        err = cache_.upsert_cname(key, normalized_target, expire_at);
+    }
+    request_timer_rearm();
+    return err;
+}
+
+common::IoErr SharedDnsCache2::upsert_negative(DnsCacheKey key, DnsNegativeKind negative,
+                                               TimePoint expire_at) noexcept {
+    if (stopping_.load(std::memory_order_acquire)) {
+        return common::IoErr::Invalid;
+    }
+    common::IoErr err;
+    {
+        std::lock_guard guard(mutex_);
+        cache_.expire_due(event::EventLoop::current().now());
+        err = cache_.upsert_negative(key, negative, expire_at);
+    }
+    request_timer_rearm();
+    return err;
+}
+
+common::IoErr SharedDnsCache2::erase(DnsCacheKey key) noexcept {
+    if (stopping_.load(std::memory_order_acquire)) {
+        return common::IoErr::Invalid;
+    }
+    common::IoErr err;
+    {
+        std::lock_guard guard(mutex_);
+        err = cache_.erase(key);
+    }
+    request_timer_rearm();
+    return err;
 }
 
 } // namespace fiber::dns

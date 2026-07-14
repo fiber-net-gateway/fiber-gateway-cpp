@@ -1,18 +1,19 @@
 #ifndef FIBER_DNS_DNS_CACHE2_H
 #define FIBER_DNS_DNS_CACHE2_H
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string_view>
 #include <type_traits>
 
-#include "../async/Mutex.h"
-#include "../async/Task.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
+#include "../event/EventLoop.h"
 #include "../net/IpAddress.h"
 
 namespace fiber::dns {
@@ -78,7 +79,7 @@ public:
         std::size_t bucket_count = 0;
     };
 
-    DnsCache2() noexcept = default;
+    DnsCache2() noexcept;
     ~DnsCache2();
 
     [[nodiscard]] bool init() noexcept { return init(Options{}); }
@@ -100,6 +101,8 @@ public:
     [[nodiscard]] common::IoErr erase(DnsCacheKey key) noexcept;
 
 private:
+    friend class SharedDnsCache2;
+
     enum class EntryKind : std::uint8_t {
         Address,
         Cname,
@@ -109,6 +112,7 @@ private:
     struct AddressSet;
     struct CnameValue;
     struct CacheEntry;
+    struct ExpiryHeap;
 
     [[nodiscard]] static bool valid_key(DnsCacheKey key) noexcept;
     [[nodiscard]] static std::size_t next_power_of_two(std::size_t value) noexcept;
@@ -131,20 +135,22 @@ private:
     void clear_value(CacheEntry &entry) noexcept;
     void insert_entry(CacheEntry &entry) noexcept;
     void erase_entry(CacheEntry &entry) noexcept;
-    void unlink_lru(CacheEntry &entry) noexcept;
-    void touch_lru(CacheEntry &entry) noexcept;
+    [[nodiscard]] TimePoint entry_expire_at(const CacheEntry &entry) const noexcept;
+    void unlink_expiry(CacheEntry &entry) noexcept;
+    void refresh_expiry(CacheEntry &entry) noexcept;
     void cleanup_expired(CacheEntry &entry, TimePoint now) noexcept;
+    void expire_due(TimePoint now) noexcept;
+    [[nodiscard]] TimePoint next_expire_at() const noexcept;
     [[nodiscard]] bool ensure_capacity(std::size_t add_bytes, std::size_t replace_bytes, bool add_entry,
                                        const CacheEntry *protected_entry) noexcept;
 
     Options options_{};
     std::unique_ptr<CacheEntry *[]> buckets_{};
+    std::unique_ptr<ExpiryHeap> expiry_heap_{};
     std::size_t bucket_count_ = 0;
     std::size_t bucket_bytes_ = 0;
     std::size_t entry_count_ = 0;
     std::size_t bytes_used_ = 0;
-    CacheEntry *lru_head_ = nullptr;
-    CacheEntry *lru_tail_ = nullptr;
 };
 
 class SharedDnsCache2 : public common::NonCopyable, public common::NonMovable {
@@ -153,25 +159,41 @@ public:
     using TimePoint = DnsCache2::TimePoint;
 
     SharedDnsCache2() noexcept = default;
+    ~SharedDnsCache2();
 
-    [[nodiscard]] bool init() noexcept { return cache_.init(); }
-    [[nodiscard]] bool init(Options options) noexcept { return cache_.init(options); }
-    void release() noexcept { cache_.release(); }
+    [[nodiscard]] bool init(event::EventLoop &owner_loop) noexcept { return init(owner_loop, Options{}); }
+    [[nodiscard]] bool init(event::EventLoop &owner_loop, Options options) noexcept;
 
-    [[nodiscard]] async::Task<std::size_t> entry_count() noexcept;
-    [[nodiscard]] async::Task<std::size_t> bytes_used() noexcept;
-    [[nodiscard]] async::Task<common::IoErr> lookup(DnsCacheKey key, TimePoint now, DnsCacheOut &out) noexcept;
-    [[nodiscard]] async::Task<common::IoErr> upsert_address_set(DnsCacheKey key, const net::IpAddress *addresses,
-                                                                std::uint16_t count, TimePoint expire_at) noexcept;
-    [[nodiscard]] async::Task<common::IoErr> upsert_cname(DnsCacheKey key, std::string_view normalized_target,
-                                                          TimePoint expire_at) noexcept;
-    [[nodiscard]] async::Task<common::IoErr> upsert_negative(DnsCacheKey key, DnsNegativeKind negative,
-                                                             TimePoint expire_at) noexcept;
-    [[nodiscard]] async::Task<common::IoErr> erase(DnsCacheKey key) noexcept;
+    // Must be posted to the bound EventLoop after callers have stopped issuing cache operations.
+    void shutdown() noexcept;
+
+    [[nodiscard]] std::size_t entry_count() noexcept;
+    [[nodiscard]] std::size_t bytes_used() noexcept;
+    [[nodiscard]] common::IoErr lookup(DnsCacheKey key, TimePoint now, DnsCacheOut &out) noexcept;
+    [[nodiscard]] common::IoErr upsert_address_set(DnsCacheKey key, const net::IpAddress *addresses,
+                                                   std::uint16_t count, TimePoint expire_at) noexcept;
+    [[nodiscard]] common::IoErr upsert_cname(DnsCacheKey key, std::string_view normalized_target,
+                                             TimePoint expire_at) noexcept;
+    [[nodiscard]] common::IoErr upsert_negative(DnsCacheKey key, DnsNegativeKind negative,
+                                                TimePoint expire_at) noexcept;
+    [[nodiscard]] common::IoErr erase(DnsCacheKey key) noexcept;
 
 private:
+    static constexpr std::chrono::milliseconds kMaintenanceRetryDelay{1};
+
+    void request_timer_rearm() noexcept;
+    void maintain_and_rearm() noexcept;
+    void arm_timer(TimePoint deadline) noexcept;
+    static void on_rearm(SharedDnsCache2 *cache) noexcept;
+    static void on_expiry_timer(SharedDnsCache2 *cache) noexcept;
+
     DnsCache2 cache_{};
-    async::Mutex mutex_{};
+    std::mutex mutex_{};
+    event::EventLoop *owner_loop_ = nullptr;
+    event::EventLoop::NotifyEntry rearm_entry_{};
+    event::EventLoop::TimerEntry expiry_timer_{};
+    std::atomic<bool> rearm_pending_{false};
+    std::atomic<bool> stopping_{true};
 };
 
 } // namespace fiber::dns
