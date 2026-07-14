@@ -6,7 +6,7 @@
 >
 > 测试覆盖：约 9,700 行测试，但可靠性核心（`QuicAckHandler`/`QuicLossRecovery`/`QuicSendScheduler`/`QuicPathManager`）缺专门单测；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
 >
-> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy 已修复（2026-07-14，见下）。待修 P0：#4/#5 DoS 向量、#1 key-update、#7 UAF、#9 GSO、#8 接收零拷贝，其余排期。
+> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）已修复（2026-07-14，见下）。待修 P0：#5 DoS 向量、#1 key-update、#7 UAF、#9 GSO、#8 接收零拷贝，其余排期。
 
 ## 总体评价
 
@@ -47,12 +47,45 @@ codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝�
 
 > ✅ **已修复 2026-07-14**（采用上述第二方案）。`QuicConnection::maybe_finish_graceful_close` 不再同步调 `enter_closing(close_info_)`，改为：当 `EventLoop::current_or_null()` 非空（即处于连接自身事件循环、帧循环进行中）时调 `arm_close_timer_immediate(*loop)`，把 close timer arm 到 `loop.now()`，由下一个 tick 的 `on_close_timer` 执行 `enter_closing(close_info_)`（`on_close_timer` 的 GracefulClosing 分支本就走这条路径）；`current_or_null()` 为空（同步直调、无循环）时仍 inline 完成（无帧循环可重入）。逐行对照 nginx：`ngx_quic_finalize_connection` 一律 `ngx_post_event(&qc->close, &ngx_posted_events)`，`qc->closing` 只在延后的 `ngx_quic_close_connection` 内置位，帧循环内绝不中途进入 closing——本修复与之同构。安全性要点：(1) 复用既有 `close_timer_entry_`（TimerEntry），其 cancel 不 `assert(in_loop())`，`~QuicConnection::cancel_close_timer` 已覆盖生命周期（区别于不可从 MpscQueue 安全摘除的 NotifyEntry，故未用 `post`）；(2) GracefulClosing 下 `accepting_new_streams()` 为假，`active_stream_count()` 一旦归零不会再升，故 fire 时无需重检；(3) 过渡延后期间状态仍为 GracefulClosing，同包后续帧按 GracefulClosing 正常处理（仅不再被 inline `enter_closing` 丢弃已入队 ACK/流控帧），待 `enter_closing` 在包处理结束后清空并改发 CC，符合 RFC 9000 §10.2。回归测试：`QuicConnectionShutdownTest.GracefulCloseCompletionDeferredOnRunningLoop`（运行循环上 retire 末流后断言 state 仍为 GracefulClosing 且 close_timer 已 arm，pump 后才转 Closing；回退到同步实现时该测试 FAIL）。全 1177 ctest + 56 lite_nginx 测试绿。
 
-### 4. 连接对象在 Initial 认证前分配 -> DoS 向量
+### 4. ✅ 连接对象在 Initial 认证前分配 -> DoS 向量（SSL_new 延后已修，方案 A）
 `QuicUdpEndpoint.cpp:1168`（`create_connection`）/ `:1177`（`quic_process_datagram` 内 AEAD 认证）
 
 `create_connection`（含 `tls().init_server(*tls_context,…)` + CID 注册）发生在 `quic_process_datagram`（AEAD 认证）**之前**。`retry=false`（默认）下，伪造源地址 + 语法合法 header + 垃圾 payload 的 Initial 每包都触发完整连接分配 + TLS ctx 初始化 + CID 注册，无一校验。这是经典 QUIC DoS 向量。`retry=true` 缓解，但 create-before-auth 顺序独立于 Retry。
 
 **修复**：先解 header protection + AEAD 认证再分配；或默认 `retry=true`；或加 per-source 建连速率限制。
+
+> 📌 **nginx 对照（2026-07-14）**：create-before-auth 的**顺序在 nginx 中同样存在**，默认 `retry` 配置也一致，但 nginx 已把最贵的 `SSL_new` 延后到认证之后，故每伪造包成本显著低于本项目。逐行对照结论：
+> - 首包入口 `ngx_quic_run`（`ngx_event_quic.c:200`，由 `ngx_http_v3_request.c:75` 调用）-> `ngx_quic_handle_datagram` -> `ngx_quic_handle_packet` -> **`ngx_quic_new_connection()`（`:948`，分配 `ngx_quic_connection_t`+`ngx_quic_keys_t`+经 `ngx_quic_keys_set_initial_secret` 做 HKDF Initial 密钥派生）发生在 `ngx_quic_decrypt()`（`:996`，AEAD 认证）之前**--与本项目 `create_connection` -> `quic_process_datagram`（AEAD）顺序逐字节同构。
+> - 默认 **`retry=0`（off）**：`ngx_http_v3_module.c:244` `ngx_conf_merge_value(conf->quic.retry, prev->quic.retry, 0)`，与本项目 `retry=false` 默认一致。故默认配置下伪造源 + 合法 header + 垃圾 payload 的 Initial 同样在 AEAD 拒绝前到达 `ngx_quic_new_connection`。
+> - **关键差异（nginx 已做的便宜那一半）**：`ngx_quic_new_connection` **不**创建 SSL 对象；`SSL_new`+`SSL_set_quic_method`+transport params 编码全在 `ngx_quic_init_connection()`（`:1015`），而它**只在 `ngx_quic_decrypt` 成功后**（`:1014 if (c->ssl == NULL)`）才执行。本项目 `create_connection` 在认证前就 `tls().init_server()` -> `SSL_new()`（`QuicTlsSession.cpp:238`，含 `SSL_set_quic_method`/TP 编码/early-data 设置，`QuicUdpEndpoint.cpp:1015`）--这是本项目每伪造包多付的最大一块成本。
+> - 无连接堆积：decrypt 失败返 `NGX_DECLINED`/`NGX_DONE` -> `ngx_quic_run:209-211` 立即 `ngx_quic_close_connection()`，伪造包不累积活连接，仅每包 CPU（分配+HKDF+失败解密+释放）。本项目失败时 `force_detach_connection`，同样不堆积--差异仅在每包成本量级。
+> - `ssl_retry on` 时，`ngx_quic_validate_token`（`:904`）/`ngx_quic_send_retry`（`:931`）在 `ngx_quic_new_connection` **之前**，未验证源永不分配连接。本项目有同等 Retry 机制但默认关。
+> - **方针**：本项目修复**优先对齐 nginx 已做的便宜那一半**--把 `init_server`（`SSL_new`+QUIC method+TP 编码+early-data）从 `create_connection` 延后到 `quic_process_datagram` AEAD 认证成功之后（对齐 nginx `ngx_quic_init_connection` 的位置与触发条件）；更进一步再做 nginx 未做的贵那一半（先解 header protection + AEAD 再分配连接结构体，需更大重构，须重排 `create_connection` 与认证的先后）；并/或默认 `retry=true`、加 per-source 建连限速。
+>
+> **修改方案（✅ 已实施 2026-07-14，方案 A）**：把 `init_server` 从 `create_connection` 延后到 `quic_process_datagram` 的 AEAD 认证成功（`quic_decode_packet`，`QuicPacketProcessor.cpp:706`）之后、`process_decoded_packet`（`:738`，处理 CRYPTO 帧）之前，对齐 nginx `ngx_quic_init_connection`（`ngx_event_quic.c:1015`，decrypt 成功后 `if (c->ssl == NULL)` 触发）。
+>
+> 核心收益：伪造源 + 合法 header + 垃圾 payload 的 Initial 在 `quic_decode_packet`（AEAD）处即被拒，**不再付出 `SSL_new`**（当前每伪造包一份，`QuicTlsSession.cpp:238`）。认证失败 -> `recv_once` 既有 `force_detach_connection`（`QuicUdpEndpoint.cpp:1183`）清理，路径不变。
+>
+> 改动清单：
+> 1. `QuicConnection.h`：`Options`（`:277`）加 `net::TlsServerContext *tls_context = nullptr;`（前向声明 `net::TlsServerContext`，与 `QuicUdpEndpoint::Options:55` 同型）；新增 `[[nodiscard]] common::IoResult<void> ensure_server_tls() noexcept;`
+> 2. `QuicConnection.cpp`：实现 `ensure_server_tls()` = `if (tls_.initialized()) return {}; if (options_.tls_context == nullptr) return {}; return tls_.init_server(*options_.tls_context, *this);`（双重幂等：`QuicTlsSession::init_server` 开头 `if (ssl_!=nullptr) return Already`，`QuicTlsSession.cpp:241`）
+> 3. `QuicUdpEndpoint.cpp::create_connection`（`:1010-1021`）：加 `conn_options.tls_context = options_.tls_context;` 填指针；**删除** `if (options_.tls_context != nullptr) { tls().init_server(...) }` 整块（其 cleanup 分支随之删除）；`attach_to_endpoint`/push_back/`++active_connection_count_` 不变
+> 4. `QuicPacketProcessor.cpp::quic_process_datagram`：在 `quic_decode_packet` 成功（`:735`）后、`process_decoded_packet`（`:738`）前插 `if (conn.role()==Server && !conn.tls().initialized()) { auto ok=conn.ensure_server_tls(); if (!ok) { if (has_good_packet) return aggregate; return std::unexpected(ok.error()); } }`；`quic_process_initial_datagram`（test-only，`:599` 帧循环前）同步加
+>
+> 不变量验证（已逐项读码确认）：
+> - `init_server` 全仓唯一调用点即 `create_connection:1015`，延后不影响他处。
+> - `~QuicTlsSession`（`QuicTlsSession.cpp:231-233`）`if (ssl_!=nullptr) SSL_free`，未初始化时安全 -> 认证失败 force_detach 析构无 UAF。
+> - `attach_to_endpoint`（`QuicConnection.cpp:2162`）只设 `endpoint_`+标志，不碰 TLS -> create_connection 内 init_server 移除后 attach 安全。
+> - `detach_from_endpoint`/`force_detach_connection` 不碰 TLS -> 认证失败清理路径不变。
+> - 首包 CRYPTO 帧不丢：`init_server` 在 `process_decoded_packet` 前完成；`provide_crypto_data`（`:170`）/`handle_crypto_frame`（`:208`）的 `!tls().initialized()` 守卫不再命中（生产）；测试（tls_context==nullptr）仍命中跳过，行为与现状一致。
+> - coalesced Initial+0-RTT：while 循环按 offset 顺序，Initial 先认证触发 init_server，0-RTT 后处理时已初始化（early_data key 依赖 SSL 对象），时机与原"create_connection 内 init"等价。
+> - client role 不受影响（全仓无 `init_client`，client 连接不经此路径）。
+>
+> 测试兼容性：`QuicUdpEndpointTest`/`QuicPacketProcessorTest` 均不设 `tls_context`（`make_endpoint_options` 默认 nullptr），`ensure_server_tls` 直接 `return {}` 跳过，行为不变。**回归已验证全绿：1167 ctest 通过，QUIC+H3 子集 196 全过。** 建议补一条计量测试（mock `TlsServerContext` 计数 `init_server` 调用，断言认证失败的伪造 Initial 不触发 `SSL_new`）。
+>
+> 备选/远期：
+> - **方案 B（贵那一半，nginx 未做）**：endpoint 层先派生临时 Initial key + `quic_decode_packet` 认证首包，认证成功才 `create_connection` + 注册 CID。需在 `QuicUdpEndpoint` 持临时 crypto 状态、处理 DCID 路由前认证，重构大、风险高，列远期。
+> - **方案 C（廉价叠加，与 A 正交）**：默认 `retry=true`（未验证源发 Retry，永不触达 create_connection）+ per-source 建连 token bucket（与 #5 的 stateless 限速同框架）。可同做。
 
 ### 5. Retry / VN / invalid-token-close 无速率限制
 `QuicUdpEndpoint.cpp:1087`（VN）/ `:1143`（Retry）/ `:1160`（invalid-token close）/ `:715`（仅 stateless_reset 有 token bucket）
@@ -390,7 +423,7 @@ deadline 检查、单写者 `Busy`、`post_at` 计时器、`post` resume、`comp
 
 | 优先级 | 项 | 工作量 |
 |---|---|---|
-| P0 | #2 PTO 忙循环✅、#3 re-entrancy✅、#4/#5 DoS 向量、#1 key-update、#7 UAF | 中 |
+| P0 | #2 PTO 忙循环✅、#3 re-entrancy✅、#4 create-before-auth✅(方案A)、#5 DoS 向量、#1 key-update、#7 UAF | 中 |
 | P0 | #9 GSO/sendmmsg、#8 接收零拷贝 | 大 |
 | P1 | #11 loss 减窗基准、#22 `reset()` FIN'd 流、#23 `write()` 短写丢 FIN、#19 重复 TP 拒绝、#27 HKDF 溢出、#16 ack_delay skip | 小（多为一行） |
 | P1 | 给 #13/#14/#15 + AckHandler/LossRecovery/SendScheduler/PathManager 补单测 | 中 |

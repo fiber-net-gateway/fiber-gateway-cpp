@@ -303,6 +303,10 @@ public:
         bool has_retry_source_connection_id = false;
         bool initial_path_validated = false;
         bool enable_early_data = false;
+        // Server TLS context used to lazily create the SSL object only after
+        // the first Initial packet passes AEAD authentication (mirrors nginx
+        // ngx_quic_init_connection, which runs after ngx_quic_decrypt).
+        net::TlsServerContext *tls_context = nullptr;
     };
 
     explicit QuicConnection(const Options &options) noexcept;
@@ -524,6 +528,11 @@ public:
     [[nodiscard]] QuicTlsSession &tls() noexcept { return tls_; }
     [[nodiscard]] const QuicTlsSession &tls() const noexcept { return tls_; }
     common::IoResult<void> init_initial_crypto(const QuicConnectionId &original_dcid) noexcept;
+    // Lazily create the server SSL object the first time an Initial packet
+    // is authenticated. Idempotent; no-op when no TLS context is configured
+    // (e.g. tests). Deferring SSL_new past AEAD auth avoids per-forged-packet
+    // TLS setup cost (DoS hardening, audit #4).
+    [[nodiscard]] common::IoResult<void> ensure_server_tls() noexcept;
     common::IoResult<void> apply_peer_transport_params(const QuicTransportParams &params) noexcept;
     [[nodiscard]] common::IoResult<bool> recv_retire_connection_id_frame(const QuicRetireConnectionIdFrame &frame,
                                                                          const QuicConnectionId &packet_dcid) noexcept;

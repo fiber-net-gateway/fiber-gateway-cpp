@@ -581,6 +581,13 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
         return std::unexpected(opened.error());
     }
 
+    if (conn.role() == QuicConnectionRole::Server && !conn.tls().initialized()) {
+        auto tls_ok = conn.ensure_server_tls();
+        if (!tls_ok) {
+            return std::unexpected(tls_ok.error());
+        }
+    }
+
     auto bound_path = bind_datagram_path(conn, datagram, *packet, datagram.len);
     if (!bound_path) {
         return std::unexpected(bound_path.error());
@@ -732,6 +739,21 @@ common::IoResult<QuicPacketProcessResult> quic_process_datagram(QuicConnection &
                 return aggregate;
             }
             return std::unexpected(decoded.error());
+        }
+
+        // AEAD authentication just succeeded for this packet. Now is the
+        // earliest safe point to create the server SSL object (mirrors nginx
+        // ngx_quic_init_connection after ngx_quic_decrypt). Forged packets
+        // fail quic_decode_packet above and never reach here, so they no
+        // longer pay the SSL_new cost.
+        if (conn.role() == QuicConnectionRole::Server && !conn.tls().initialized()) {
+            auto tls_ok = conn.ensure_server_tls();
+            if (!tls_ok) {
+                if (has_good_packet) {
+                    return aggregate;
+                }
+                return std::unexpected(tls_ok.error());
+            }
         }
 
         const std::size_t received_len = recorded_datagram_bytes ? 0 : datagram.len;

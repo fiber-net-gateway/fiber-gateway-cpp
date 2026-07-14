@@ -992,6 +992,7 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     conn_options.has_retry_source_connection_id = validation.retried;
     conn_options.initial_path_validated = validation.address_validated;
     conn_options.enable_early_data = options_.enable_early_data;
+    conn_options.tls_context = options_.tls_context;
 
     QuicConnection::Lease lease = options_.create_connection(options_.connection_owner, conn_options);
     QuicConnection *connection = lease.get();
@@ -1011,14 +1012,9 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
         unregister_connection_id(connection->original_dcid_index);
         return std::unexpected(registered.error());
     }
-    if (options_.tls_context != nullptr) {
-        auto tls_initialized = connection->tls().init_server(*options_.tls_context, *connection);
-        if (!tls_initialized) {
-            unregister_connection_id(connection->original_dcid_index);
-            unregister_connection_id(connection->local_cids_[0].endpoint_index);
-            return std::unexpected(tls_initialized.error());
-        }
-    }
+    // TLS (SSL_new) is deferred to QuicConnection::ensure_server_tls(),
+    // invoked from quic_process_datagram after the first Initial packet is
+    // authenticated. This avoids per-forged-packet SSL_new cost.
     connection->attach_to_endpoint(*this);
     connection->endpoint_index.lease = std::move(lease);
     connections_.push_back(connection->endpoint_index);
