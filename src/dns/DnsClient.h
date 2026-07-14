@@ -15,6 +15,7 @@
 #include "../event/EventLoop.h"
 #include "../net/SocketAddress.h"
 #include "DnsProtocol.h"
+#include "detail/DnsUdpSendQueue.h"
 
 namespace fiber::net {
 class UdpSocket;
@@ -120,6 +121,7 @@ private:
     std::unique_ptr<std::uint16_t[]> id_to_slot_{};
     std::unique_ptr<std::uint8_t[]> request_buffers_{};
     std::unique_ptr<std::uint8_t[]> recv_buffer_{};
+    detail::DnsUdpSendQueue udp_send_queue_{};
     std::uint16_t free_head_ = kInvalidSlot;
     bool closing_ = false;
 };
