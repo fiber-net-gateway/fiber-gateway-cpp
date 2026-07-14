@@ -1,0 +1,73 @@
+#include <gtest/gtest.h>
+
+#include <chrono>
+#include <future>
+
+#include "async/Spawn.h"
+#include "dns/DnsCache2.h"
+#include "event/EventLoopGroup.h"
+
+namespace {
+
+using DetachedTask = fiber::async::DetachedTask;
+using fiber::common::IoErr;
+using fiber::dns::DnsCacheKey;
+using fiber::dns::DnsCacheOut;
+using fiber::dns::DnsCacheOutKind;
+using fiber::dns::SharedDnsCache2;
+using fiber::net::IpAddress;
+
+DnsCacheKey shared_key() {
+    constexpr std::string_view name = "shared-cache2.example";
+    return {name, fiber::dns::dns_cache_hash(name)};
+}
+
+DetachedTask write_record(SharedDnsCache2 *cache, std::promise<IoErr> *done) {
+    const auto now = fiber::event::EventLoop::current().now();
+    const IpAddress address = IpAddress::v4({9, 9, 9, 9});
+    done->set_value(co_await cache->upsert_address_set(shared_key(), &address, 1, now + std::chrono::seconds(30)));
+    co_return;
+}
+
+struct LookupResult {
+    IoErr err = IoErr::Invalid;
+    DnsCacheOut out{};
+};
+
+DetachedTask read_record(SharedDnsCache2 *cache, std::promise<LookupResult> *done) {
+    LookupResult result;
+    result.err = co_await cache->lookup(shared_key(), fiber::event::EventLoop::current().now(), result.out);
+    done->set_value(result);
+    co_return;
+}
+
+} // namespace
+
+TEST(SharedDnsCache2Test, CopiesResultsAcrossEventLoops) {
+    fiber::event::EventLoopGroup group(2);
+    SharedDnsCache2 cache;
+    ASSERT_TRUE(cache.init());
+
+    std::promise<IoErr> write_done;
+    auto write_future = write_done.get_future();
+    std::promise<LookupResult> read_done;
+    auto read_future = read_done.get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() { return write_record(&cache, &write_done); });
+    ASSERT_EQ(write_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(write_future.get(), IoErr::None);
+
+    fiber::async::spawn(group.at(1), [&]() { return read_record(&cache, &read_done); });
+    ASSERT_EQ(read_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    const LookupResult result = read_future.get();
+
+    group.stop();
+    group.join();
+    cache.release();
+
+    ASSERT_EQ(result.err, IoErr::None);
+    ASSERT_EQ(result.out.kind, DnsCacheOutKind::Addresses);
+    ASSERT_EQ(result.out.value.addresses.count, 1);
+    EXPECT_EQ(result.out.value.addresses.records[0], IpAddress::v4({9, 9, 9, 9}));
+}
