@@ -40,6 +40,11 @@ struct ServerOutcome {
     std::size_t recv_count = 0;
 };
 
+struct ConcurrentClientOutcome {
+    std::array<IoErr, 2> errors{IoErr::Unknown, IoErr::Unknown};
+    std::array<std::size_t, 2> packet_sizes{};
+};
+
 enum class TcpResponseMode : std::uint8_t {
     Correct,
     WrongId,
@@ -246,6 +251,109 @@ DetachedTask run_udp_success_server(fiber::event::EventLoop *loop, std::promise<
     outcome.err = send_result ? IoErr::None : send_result.error();
     socket.close();
     outcome_promise->set_value(std::move(outcome));
+}
+
+DetachedTask run_udp_concurrent_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
+                                       std::promise<ServerOutcome> *outcome_promise) {
+    ServerOutcome outcome;
+    fiber::net::UdpSocket socket(*loop);
+    auto bind_result = socket.bind(fiber::net::SocketAddress::any_v4(), {});
+    if (!bind_result) {
+        port_promise->set_value(0);
+        outcome.err = bind_result.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    auto port_result = resolve_port(socket.fd());
+    port_promise->set_value(port_result ? *port_result : 0);
+    if (!port_result) {
+        outcome.err = port_result.error();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    struct Request {
+        std::uint16_t id = 0;
+        CapturedQuestion question{};
+        fiber::net::SocketAddress peer{};
+    };
+    std::array<Request, 2> requests{};
+    std::array<std::uint8_t, 512> buf{};
+    for (std::size_t i = 0; i < requests.size(); ++i) {
+        auto recv_result =
+                co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
+        if (!recv_result) {
+            outcome.err = recv_result.error();
+            outcome_promise->set_value(std::move(outcome));
+            co_return;
+        }
+        auto question = parse_question(buf.data(), recv_result->size);
+        if (!question) {
+            outcome.err = question.error();
+            outcome_promise->set_value(std::move(outcome));
+            co_return;
+        }
+        requests[i].id = read_be16(buf.data());
+        requests[i].question = std::move(*question);
+        requests[i].peer = recv_result->peer;
+        ++outcome.recv_count;
+    }
+
+    for (std::size_t i = requests.size(); i > 0; --i) {
+        const Request &request = requests[i - 1];
+        auto response = make_a_response(request.id, request.question.name, {static_cast<std::uint8_t>(i), 2, 3, 4});
+        auto send_result = co_await fiber::async::timeout_for(
+                [&]() { return socket.send_to(response.data(), response.size(), request.peer); }, 2s);
+        if (!send_result) {
+            outcome.err = send_result.error();
+            outcome_promise->set_value(std::move(outcome));
+            co_return;
+        }
+    }
+
+    outcome.err = IoErr::None;
+    socket.close();
+    outcome_promise->set_value(std::move(outcome));
+}
+
+DetachedTask run_concurrent_client_queries(fiber::event::EventLoop *loop, std::uint16_t port,
+                                           std::promise<ConcurrentClientOutcome> *outcome_promise) {
+    ConcurrentClientOutcome outcome;
+    DnsClient client;
+    DnsClient::Options options{};
+    options.server = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    options.timeout = 200ms;
+    options.attempts = 1;
+    if (!client.init(*loop, options)) {
+        outcome.errors = {IoErr::Invalid, IoErr::Invalid};
+        outcome_promise->set_value(outcome);
+        co_return;
+    }
+
+    std::array<std::array<std::uint8_t, 512>, 2> packets{};
+    std::size_t completed = 0;
+    auto run_one = [&](std::size_t index, std::string_view name) -> DetachedTask {
+        QuestionSpec question;
+        question.name = name;
+        question.type = static_cast<std::uint16_t>(RecordType::A);
+        question.dns_class = static_cast<std::uint16_t>(RecordClass::IN);
+        auto result = co_await client.query_raw(question, packets[index].data(), packets[index].size());
+        outcome.errors[index] = result ? IoErr::None : result.error();
+        outcome.packet_sizes[index] = result ? *result : 0;
+        ++completed;
+        co_return;
+    };
+
+    fiber::async::spawn(*loop, [&]() { return run_one(0, "one.example"); });
+    fiber::async::spawn(*loop, [&]() { return run_one(1, "two.example"); });
+    while (completed != 2) {
+        co_await fiber::async::sleep(1ms);
+    }
+
+    client.close();
+    client.release();
+    outcome_promise->set_value(outcome);
 }
 
 DetachedTask run_udp_retry_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
@@ -733,6 +841,44 @@ TEST(DnsClientTest, QueryRawReturnsUdpResponse) {
     EXPECT_EQ(parsed->answers[0].rdata[1], 2u);
     EXPECT_EQ(parsed->answers[0].rdata[2], 3u);
     EXPECT_EQ(parsed->answers[0].rdata[3], 4u);
+}
+
+TEST(DnsClientTest, ConcurrentQueriesAcceptResponsesInReverseOrder) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<std::uint16_t> port_promise;
+    std::promise<ServerOutcome> server_promise;
+    std::promise<ConcurrentClientOutcome> client_promise;
+
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_udp_concurrent_server(&group.at(0), &port_promise, &server_promise); });
+    const auto port = port_promise.get_future().get();
+    ASSERT_NE(port, 0);
+
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_concurrent_client_queries(&group.at(0), port, &client_promise); });
+
+    auto client_future = client_promise.get_future();
+    auto server_future = server_promise.get_future();
+    if (client_future.wait_for(2s) != std::future_status::ready ||
+        server_future.wait_for(2s) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "concurrent DNS queries did not complete in time";
+        return;
+    }
+    const auto client = client_future.get();
+    const auto server = server_future.get();
+    group.stop();
+    group.join();
+
+    EXPECT_EQ(server.err, IoErr::None);
+    EXPECT_EQ(server.recv_count, 2u);
+    EXPECT_EQ(client.errors[0], IoErr::None);
+    EXPECT_EQ(client.errors[1], IoErr::None);
+    EXPECT_GT(client.packet_sizes[0], 0u);
+    EXPECT_GT(client.packet_sizes[1], 0u);
 }
 
 TEST(DnsClientTest, QueryRawIgnoresWrongIdQuestionAnd0x20Case) {

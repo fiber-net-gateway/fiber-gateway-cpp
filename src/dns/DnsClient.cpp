@@ -134,6 +134,7 @@ bool DnsClient::init(event::EventLoop &loop, Options options) noexcept {
     options_ = options;
     loop_ = &loop;
     closing_ = false;
+    udp_send_queue_.init(loop);
 
     socket_ = std::make_unique<net::UdpSocket>(loop);
     if (!socket_) {
@@ -165,6 +166,7 @@ void DnsClient::close() noexcept {
         return;
     }
     closing_ = true;
+    udp_send_queue_.close();
     if (socket_ && socket_->valid()) {
         socket_->close();
     }
@@ -182,6 +184,7 @@ void DnsClient::release() noexcept {
     request_buffers_.reset();
     id_to_slot_.reset();
     slots_.reset();
+    udp_send_queue_.reset();
     reset_state();
 }
 
@@ -232,7 +235,30 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_raw(const QuestionSp
         slot.request_size = *prepared;
         id_to_slot_[slot.id] = slot_index;
 
-        auto send_result = co_await socket_->send_to(slot.request_buf, slot.request_size, options_.server);
+        common::IoResult<std::size_t> send_result = std::unexpected(common::IoErr::Unknown);
+        detail::DnsUdpSendQueue::Owner send_owner;
+        if (udp_send_queue_.fast_path_available()) {
+            send_result = socket_->try_send_to(slot.request_buf, slot.request_size, options_.server);
+            if (!send_result && send_result.error() == common::IoErr::WouldBlock) {
+                send_owner = udp_send_queue_.take_ownership_after_would_block();
+            }
+        } else {
+            auto owner_result = co_await udp_send_queue_.acquire();
+            if (owner_result) {
+                send_owner = std::move(*owner_result);
+            } else {
+                send_result = std::unexpected(owner_result.error());
+            }
+        }
+
+        if (send_owner.owns()) {
+            if (!valid() || closing_) {
+                send_result = std::unexpected(common::IoErr::Canceled);
+            } else {
+                send_result = co_await socket_->send_to(slot.request_buf, slot.request_size, options_.server);
+            }
+            send_owner.release();
+        }
         if (!send_result) {
             final_err = send_result.error();
             clear_query_id(slot.id, slot_index);
