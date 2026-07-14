@@ -710,7 +710,32 @@ void QuicConnection::maybe_finish_graceful_close() noexcept {
     if (state_ != QuicConnectionState::GracefulClosing || active_stream_count() > 0) {
         return;
     }
-    enter_closing(close_info_);
+    // Defer the GracefulClosing -> Closing transition out of the packet-
+    // processing frame loop (audit #3 re-entrancy). This is reached from inside
+    // process_decoded_packet's frame loop via recv_stream_frame /
+    // on_stream_send_acked -> try_release_stream -> retire_stream. Running
+    // enter_closing inline would clear_pending_frames_all_levels() and
+    // close_all_streams() while the loop still has frames to process for this
+    // packet, silently dropping already-queued ACK/flow-control frames and then
+    // handling the packet's later frames on a Closing connection (RFC 9000
+    // §10.2: Closing only emits CONNECTION_CLOSE). nginx defers equivalently via
+    // ngx_post_event(&qc->close, &ngx_posted_events) -- qc->closing is only set
+    // in the deferred close handler, never mid-frame-loop.
+    //
+    // When running on the connection's event loop, arm the close timer for
+    // "now" so on_close_timer performs the transition on the next tick, after
+    // this turn's packet processing completes. active_stream_count() cannot rise
+    // again in GracefulClosing (accepting_new_streams() is false), so no re-check
+    // is needed at fire time, and ~QuicConnection's cancel_close_timer covers
+    // lifetime safety. When invoked off-loop (synchronous direct calls in
+    // tests, where current_or_null() is null), there is no frame loop to
+    // re-enter, so complete the transition inline.
+    event::EventLoop *loop = event::EventLoop::current_or_null();
+    if (loop == nullptr) {
+        enter_closing(close_info_);
+        return;
+    }
+    arm_close_timer_immediate(*loop);
 }
 
 void QuicConnection::requeue_close_frame(QuicEncryptionLevel level) noexcept {
