@@ -1,6 +1,32 @@
 #include <gtest/gtest.h>
 
+#include <type_traits>
+
 #include "net/IpAddress.h"
+
+static_assert(std::is_trivially_default_constructible_v<fiber::net::IpAddress>);
+static_assert(std::is_trivially_copyable_v<fiber::net::IpAddress>);
+static_assert(std::is_trivially_destructible_v<fiber::net::IpAddress>);
+static_assert(std::is_standard_layout_v<fiber::net::IpAddress>);
+
+TEST(IpAddressTest, ValueInitializationProducesAnyIpv4) {
+    fiber::net::IpAddress address{};
+    EXPECT_TRUE(address.is_v4());
+    EXPECT_TRUE(address.is_unspecified());
+    EXPECT_EQ(address.scope_id(), 0u);
+    EXPECT_EQ(address, fiber::net::IpAddress::any_v4());
+}
+
+TEST(IpAddressTest, ParsesWithoutChangingOutputOnFailure) {
+    fiber::net::IpAddress address = fiber::net::IpAddress::loopback_v4();
+    ASSERT_TRUE(fiber::net::IpAddress::parse("[2001:db8::1]", address));
+    EXPECT_TRUE(address.is_v6());
+    EXPECT_EQ(address.to_string(), "2001:db8::1");
+
+    const fiber::net::IpAddress previous = address;
+    EXPECT_FALSE(fiber::net::IpAddress::parse("not-an-address", address));
+    EXPECT_EQ(address, previous);
+}
 
 TEST(IpAddressTest, LoopbackDetection) {
     auto v4 = fiber::net::IpAddress::loopback_v4();
