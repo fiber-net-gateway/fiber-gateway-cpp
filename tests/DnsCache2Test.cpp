@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <limits>
 #include <string_view>
 
 #include "dns/DnsCache2.h"
@@ -328,6 +329,27 @@ TEST(DnsCache2Test, RejectsOperationsBeforeInitialization) {
     EXPECT_EQ(cache.upsert_cname(key("uninitialized.example"), "target.example", expire_at), IoErr::Invalid);
     EXPECT_EQ(cache.upsert_nxdomain(key("uninitialized.example"), expire_at), IoErr::Invalid);
     EXPECT_EQ(cache.erase(key("uninitialized.example")), IoErr::Invalid);
+}
+
+TEST(DnsCache2Test, SizesDefaultBucketsForHalfMaximumLoad) {
+    DnsCache2 cache;
+    DnsCache2::Options options;
+    options.max_entries = 3;
+    options.max_bytes = 4096;
+    ASSERT_TRUE(cache.init(options));
+
+    EXPECT_EQ(cache.bucket_count(), 8u);
+}
+
+TEST(DnsCache2Test, RejectsOverflowInDefaultBucketSizing) {
+    DnsCache2 cache;
+    DnsCache2::Options options;
+    options.max_entries = std::numeric_limits<std::size_t>::max();
+    options.max_bytes = std::numeric_limits<std::size_t>::max();
+
+    EXPECT_FALSE(cache.init(options));
+    EXPECT_EQ(cache.bucket_count(), 0u);
+    EXPECT_EQ(cache.bytes_used(), 0u);
 }
 
 TEST(DnsCache2Test, ComparesNamesWhenHashesCollide) {

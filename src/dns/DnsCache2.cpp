@@ -68,7 +68,13 @@ bool DnsCache2::init(Options options) noexcept {
         return false;
     }
 
-    const std::size_t requested_buckets = options.bucket_count == 0 ? options.max_entries : options.bucket_count;
+    std::size_t requested_buckets = options.bucket_count;
+    if (requested_buckets == 0) {
+        if (options.max_entries > std::numeric_limits<std::size_t>::max() / 2U) {
+            return false;
+        }
+        requested_buckets = options.max_entries * 2U;
+    }
     const std::size_t bucket_count = next_power_of_two(requested_buckets);
     if (bucket_count == 0 || bucket_count > std::numeric_limits<std::size_t>::max() / sizeof(CacheEntry *)) {
         return false;
