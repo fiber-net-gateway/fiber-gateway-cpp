@@ -363,6 +363,78 @@ fiber::async::DetachedTask run_keepalive_during_shutdown(fiber::quic::QuicConnec
 
 } // namespace
 
+namespace {
+
+// Snapshot of connection state taken synchronously after retiring the last
+// stream, before the loop is pumped. Used to prove the GracefulClosing ->
+// Closing transition is deferred out of the frame loop (audit #3).
+struct DeferredCloseSnapshot {
+    fiber::quic::QuicConnectionState state{};
+    bool close_timer_armed = false;
+};
+
+fiber::async::DetachedTask run_graceful_close_completion(fiber::quic::QuicConnection *conn,
+                                                         fiber::quic::QuicStream *stream,
+                                                         std::promise<DeferredCloseSnapshot> *before_pump,
+                                                         std::promise<fiber::quic::QuicConnectionState> *after_pump) {
+    // Retiring the last stream from the running loop reaches
+    // maybe_finish_graceful_close() with current_or_null() == loop, so the
+    // Closing transition must be deferred (audit #3): state stays GracefulClosing
+    // and the close timer is armed for "now".
+    stream->close();
+    before_pump->set_value(DeferredCloseSnapshot{conn->state(), conn->close_timer_armed()});
+    // Pump the loop so the deferred on_close_timer fires enter_closing().
+    co_await fiber::async::sleep(std::chrono::milliseconds(2));
+    after_pump->set_value(conn->state());
+    fiber::event::EventLoop::current().stop();
+}
+
+} // namespace
+
+// Test - Retiring the last in-flight stream from the running event loop defers
+// the GracefulClosing -> Closing transition to the next tick (audit #3
+// re-entrancy fix). Before the fix, enter_closing() ran inline mid-frame-loop,
+// transitioning to Closing synchronously; nginx defers equivalently via
+// ngx_post_event(&qc->close, ...).
+TEST(QuicConnectionShutdownTest, GracefulCloseCompletionDeferredOnRunningLoop) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    ShutdownCallbackState state{};
+    auto options = established_server_options(state);
+    options.loop = &group.at(0);
+    fiber::quic::QuicConnection conn(options);
+    mark_established_with_app_keys(conn);
+
+    auto *stream = open_peer_stream(conn, 0);
+    ASSERT_NE(stream, nullptr);
+    conn.shutdown(fiber::quic::QuicErrorCode::NoError);
+    ASSERT_EQ(conn.state(), fiber::quic::QuicConnectionState::GracefulClosing);
+
+    std::promise<DeferredCloseSnapshot> before_pump;
+    std::promise<fiber::quic::QuicConnectionState> after_pump;
+    auto before_future = before_pump.get_future();
+    auto after_future = after_pump.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_graceful_close_completion(&conn, stream, &before_pump, &after_pump); });
+
+    ASSERT_EQ(before_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    const DeferredCloseSnapshot before = before_future.get();
+    // Deferred: retiring the last stream did NOT synchronously enter Closing.
+    EXPECT_EQ(before.state, fiber::quic::QuicConnectionState::GracefulClosing);
+    EXPECT_TRUE(before.close_timer_armed);
+
+    ASSERT_EQ(after_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    // After pumping the loop, the deferred transition fires.
+    EXPECT_EQ(after_future.get(), fiber::quic::QuicConnectionState::Closing);
+    EXPECT_FALSE(conn.shutting_down());
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicEncryptionLevel::Application,
+                                       fiber::quic::QuicFrameType::ConnectionClose),
+              1U);
+
+    group.join();
+}
+
 // Test 9 — arm_keepalive_timer() while GracefulClosing is a no-op; even if the
 // timer were already in flight, on_keepalive_timer suppresses the PING.
 TEST(QuicConnectionShutdownTest, KeepaliveSuppressedDuringShutdown) {

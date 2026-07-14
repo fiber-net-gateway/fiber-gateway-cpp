@@ -6,7 +6,7 @@
 >
 > 测试覆盖：约 9,700 行测试，但可靠性核心（`QuicAckHandler`/`QuicLossRecovery`/`QuicSendScheduler`/`QuicPathManager`）缺专门单测；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
 >
-> 状态：部分动工。#2 PTO 忙循环已修复（2026-07-14，见下）。待修 P0：#4/#5 DoS 向量、#1 key-update、#3 re-entrancy、#7 UAF、#9 GSO、#8 接收零拷贝，其余排期。
+> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy 已修复（2026-07-14，见下）。待修 P0：#4/#5 DoS 向量、#1 key-update、#7 UAF、#9 GSO、#8 接收零拷贝，其余排期。
 
 ## 总体评价
 
@@ -23,6 +23,12 @@ codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝�
 
 **修复**：按 key generation 计收发/收包数，在接近机密性上限时主动 `apply_key_update`。
 
+> 📌 **nginx 对照（2026-07-14）**：本问题在 nginx 中**同样存在**，修复时应尽可能参考 nginx 的 key-update 框架，仅在其上补计数+主动发起。逐行对照结论：
+> - 翻转同样只由对端发起触发：`ngx_event_quic.c:1080` `qc->key_phase ^= 1` 仅当 `pkt->key_update`，而 `pkt->key_update` 由 `ngx_event_quic_protection.c:1169-1174` 检测对端 KPHASE 变化置位（`key_phase = (pkt->flags & NGX_QUIC_PKT_KPHASE) != 0`）——与本项目 `flip_key_phase` 经 `apply_key_update`/`decoded.key_update` 触发**逐字节同构**。
+> - nginx **无 per-generation 包计数**：`ngx_event_quic_connection.h:301` key 相关字段只有 `unsigned key_phase:1` 一个 1-bit 标志，全模块 grep `count/usage/generation/rotate/proactive/confidential/limit` 在 key phase 上下文零命中。发送侧 `ngx_event_quic_output.c:698` 只读 `qc->key_phase` 贴到出包，从不主动翻转。
+> - nginx 唯一额外做的事是 `ngx_event_quic_ssl.c:768` 在 TLS 握手完成后 `ngx_post_event(&qc->key_update, …)`（注释引用 RFC 9001 §9.5）——这是**预派生 next key 消除 timing side channel**，使收到对端 key update 时能常数时间解密，**不是**主动发起一次 key update。
+> - **方针**：key-update 子系统（HKDF `tls13 quic ku/key/iv` 派生、`keys_switch` 翻转、next_key 预派生、§9.5 timing 防护）一律对齐 nginx `ngx_event_quic_protection.c:769-862`/`ngx_event_quic_ssl.c:762-768`/`ngx_event_quic.c:288-290,1074-1090`；本项目在此基础上**新增** per-generation 收发/收包计数 + 接近 2²³ 上限时主动 `apply_key_update`（nginx 与本项目都缺的部分）。
+
 ### 2. PTO 定时器/probe 判定不一致 -> 忙循环 + 漏探针
 `QuicLossRecovery.cpp:237-238`（timer arm）vs `:270-273`（probe skip）
 
@@ -38,6 +44,8 @@ codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝�
 `recv_stream_frame -> try_release_stream -> retire_stream -> maybe_finish_graceful_close -> enter_closing` 在 `process_decoded_packet` 的帧循环内触发。`enter_closing` 调 `close_all_streams()` + `clear_pending_frames_all_levels()`，改动全局连接状态，而同包内后续帧仍在迭代。Closing 状态守卫只在包入口（`QuicPacketProcessor.cpp:289`）查，帧间不查。后果：同包内先前入队的帧（ACK/流控）被静默丢弃，后续帧在 Closing 连接上处理（违反 RFC：Closing 只应发 CC 帧）。
 
 **修复**：`try_release_stream` 后检查 `closing()` 跳出帧循环；或把 `enter_closing` 过渡用 `loop_->post()` 延迟到包处理结束后。
+
+> ✅ **已修复 2026-07-14**（采用上述第二方案）。`QuicConnection::maybe_finish_graceful_close` 不再同步调 `enter_closing(close_info_)`，改为：当 `EventLoop::current_or_null()` 非空（即处于连接自身事件循环、帧循环进行中）时调 `arm_close_timer_immediate(*loop)`，把 close timer arm 到 `loop.now()`，由下一个 tick 的 `on_close_timer` 执行 `enter_closing(close_info_)`（`on_close_timer` 的 GracefulClosing 分支本就走这条路径）；`current_or_null()` 为空（同步直调、无循环）时仍 inline 完成（无帧循环可重入）。逐行对照 nginx：`ngx_quic_finalize_connection` 一律 `ngx_post_event(&qc->close, &ngx_posted_events)`，`qc->closing` 只在延后的 `ngx_quic_close_connection` 内置位，帧循环内绝不中途进入 closing——本修复与之同构。安全性要点：(1) 复用既有 `close_timer_entry_`（TimerEntry），其 cancel 不 `assert(in_loop())`，`~QuicConnection::cancel_close_timer` 已覆盖生命周期（区别于不可从 MpscQueue 安全摘除的 NotifyEntry，故未用 `post`）；(2) GracefulClosing 下 `accepting_new_streams()` 为假，`active_stream_count()` 一旦归零不会再升，故 fire 时无需重检；(3) 过渡延后期间状态仍为 GracefulClosing，同包后续帧按 GracefulClosing 正常处理（仅不再被 inline `enter_closing` 丢弃已入队 ACK/流控帧），待 `enter_closing` 在包处理结束后清空并改发 CC，符合 RFC 9000 §10.2。回归测试：`QuicConnectionShutdownTest.GracefulCloseCompletionDeferredOnRunningLoop`（运行循环上 retire 末流后断言 state 仍为 GracefulClosing 且 close_timer 已 arm，pump 后才转 Closing；回退到同步实现时该测试 FAIL）。全 1177 ctest + 56 lite_nginx 测试绿。
 
 ### 4. 连接对象在 Initial 认证前分配 -> DoS 向量
 `QuicUdpEndpoint.cpp:1168`（`create_connection`）/ `:1177`（`quic_process_datagram` 内 AEAD 认证）
@@ -382,7 +390,7 @@ deadline 检查、单写者 `Busy`、`post_at` 计时器、`post` resume、`comp
 
 | 优先级 | 项 | 工作量 |
 |---|---|---|
-| P0 | #2 PTO 忙循环、#4/#5 DoS 向量、#1 key-update、#3 re-entrancy、#7 UAF | 中 |
+| P0 | #2 PTO 忙循环✅、#3 re-entrancy✅、#4/#5 DoS 向量、#1 key-update、#7 UAF | 中 |
 | P0 | #9 GSO/sendmmsg、#8 接收零拷贝 | 大 |
 | P1 | #11 loss 减窗基准、#22 `reset()` FIN'd 流、#23 `write()` 短写丢 FIN、#19 重复 TP 拒绝、#27 HKDF 溢出、#16 ack_delay skip | 小（多为一行） |
 | P1 | 给 #13/#14/#15 + AckHandler/LossRecovery/SendScheduler/PathManager 补单测 | 中 |
