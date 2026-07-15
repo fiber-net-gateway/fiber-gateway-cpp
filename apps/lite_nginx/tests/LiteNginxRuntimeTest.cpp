@@ -986,6 +986,89 @@ http {
     ::close(client);
 }
 
+TEST(LiteNginxRuntimeTest, ScriptProxyPassProxiesHttp1WebSocketWhenEnabled) {
+    const std::string script_path = "/tmp/lite_nginx_http1_websocket_script_proxy_test.js";
+    {
+        std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.good());
+        file << "directive svc = http \"@backend\";\n"
+                "svc.proxyPass({websocket: true, "
+                "headers: {Connection: null, Upgrade: \"broken\", \"Sec-WebSocket-Key\": \"broken\"}, "
+                "responseHeaders: {Connection: null, Upgrade: \"broken\", "
+                "\"Sec-WebSocket-Accept\": \"broken\", \"X-Script-Proxy\": \"yes\"}});";
+    }
+
+    std::promise<std::string> upstream_request;
+    std::promise<std::string> upstream_body;
+    auto request_future = upstream_request.get_future();
+    auto body_future = upstream_body.get_future();
+    WebSocketUpstream upstream(&upstream_request, &upstream_body);
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    connection_pool { keepalive_size 8; keepalive_timeout 30s; }
+    upstream backend { server 127.0.0.1:UPSTREAM_PORT; }
+    server {
+        server_name localhost;
+        location /* { script_file SCRIPT_PATH; }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_path);
+
+    auto config =
+            fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "http1_websocket_script_proxy.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+
+    static constexpr std::string_view kRequest = "GET /chat HTTP/1.1\r\n"
+                                                 "Host: localhost\r\n"
+                                                 "Connection: keep-alive, Upgrade\r\n"
+                                                 "Upgrade: WebSocket\r\n"
+                                                 "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                                                 "Sec-WebSocket-Version: 13\r\n"
+                                                 "Sec-WebSocket-Protocol: chat\r\n"
+                                                 "\r\n";
+    ASSERT_TRUE(send_all(client, kRequest));
+
+    std::string response = recv_until_contains(client, "server-frame");
+    EXPECT_NE(response.find("HTTP/1.1 101 Switching Protocols\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("Connection: Upgrade\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("Upgrade: websocket\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("X-Script-Proxy: yes\r\n"), std::string::npos) << response;
+
+    ASSERT_TRUE(send_all(client, "client-frame"));
+    ASSERT_EQ(::shutdown(client, SHUT_WR), 0);
+
+    ASSERT_EQ(request_future.wait_for(3s), std::future_status::ready);
+    ASSERT_EQ(body_future.wait_for(3s), std::future_status::ready);
+    const std::string proxied_request = request_future.get();
+    EXPECT_EQ(body_future.get(), "client-frame");
+    EXPECT_NE(proxied_request.find("GET /chat HTTP/1.1\r\n"), std::string::npos) << proxied_request;
+    EXPECT_NE(proxied_request.find("Connection: Upgrade\r\n"), std::string::npos) << proxied_request;
+    EXPECT_NE(proxied_request.find("Upgrade: websocket\r\n"), std::string::npos) << proxied_request;
+    EXPECT_NE(proxied_request.find("Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"), std::string::npos)
+            << proxied_request;
+    EXPECT_EQ(proxied_request.find("Upgrade: broken\r\n"), std::string::npos) << proxied_request;
+
+    ::close(client);
+    ::unlink(script_path.c_str());
+}
+
 TEST(LiteNginxRuntimeTest, ProxiesHttp2WebSocketExtendedConnectByDefault) {
     TestPemFile cert("cert", kSelfSignedCertPem);
     TestPemFile key("key", kSelfSignedKeyPem);
@@ -1064,6 +1147,99 @@ http {
     EXPECT_NE(proxied_request.find("Sec-WebSocket-Version: 13\r\n"), std::string::npos) << proxied_request;
     const std::string generated_key = http_header_value(proxied_request, "Sec-WebSocket-Key");
     EXPECT_EQ(generated_key.size(), 24U) << proxied_request;
+}
+
+TEST(LiteNginxRuntimeTest, ScriptProxyPassTranslatesHttp2WebSocketExtendedConnectWhenEnabled) {
+    const std::string script_path = "/tmp/lite_nginx_http2_websocket_script_proxy_test.js";
+    {
+        std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.good());
+        file << "directive svc = http \"@backend\";\n"
+                "svc.proxyPass({websocket: true, "
+                "responseHeaders: {Connection: \"broken\", Upgrade: \"broken\", "
+                "\"Sec-WebSocket-Accept\": \"broken\"}});";
+    }
+
+    TestPemFile cert("cert", kSelfSignedCertPem);
+    TestPemFile key("key", kSelfSignedKeyPem);
+    ASSERT_TRUE(cert.ok());
+    ASSERT_TRUE(key.ok());
+
+    std::promise<std::string> upstream_request;
+    std::promise<std::string> upstream_body;
+    auto request_future = upstream_request.get_future();
+    auto body_future = upstream_body.get_future();
+    WebSocketUpstream upstream(&upstream_request, &upstream_body);
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT ssl;
+    connection_pool { keepalive_size 8; keepalive_timeout 30s; }
+    upstream backend { server 127.0.0.1:UPSTREAM_PORT; }
+    server {
+        server_name localhost;
+        certificate CERT_FILE;
+        certificate_key KEY_FILE;
+        location /* { script_file SCRIPT_PATH; }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+    config_text.replace(config_text.find("CERT_FILE"), sizeof("CERT_FILE") - 1, cert.path());
+    config_text.replace(config_text.find("KEY_FILE"), sizeof("KEY_FILE") - 1, key.path());
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_path);
+
+    auto config =
+            fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "http2_websocket_script_proxy.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+    fiber::event::EventLoopGroup client_group(1);
+    client_group.start();
+    std::promise<Http2WebSocketOutcome> client_promise;
+    auto client_future = client_promise.get_future();
+    fiber::async::spawn(client_group.at(0), [&]() {
+        return run_http2_websocket_client(&client_group.at(0), harness.port(), &client_promise);
+    });
+
+    const std::future_status client_status = client_future.wait_for(5s);
+    EXPECT_EQ(client_status, std::future_status::ready);
+    Http2WebSocketOutcome outcome;
+    if (client_status == std::future_status::ready) {
+        outcome = client_future.get();
+    }
+    client_group.stop();
+    client_group.join();
+
+    ASSERT_EQ(client_status, std::future_status::ready);
+    EXPECT_EQ(outcome.error, fiber::common::IoErr::None);
+    EXPECT_TRUE(outcome.extended_connect_enabled);
+    EXPECT_EQ(outcome.status_code, 200);
+    EXPECT_TRUE(outcome.connection.empty());
+    EXPECT_TRUE(outcome.upgrade.empty());
+    EXPECT_TRUE(outcome.accept.empty());
+    EXPECT_EQ(outcome.protocol, "chat");
+    EXPECT_EQ(outcome.body, "server-frame");
+
+    ASSERT_EQ(request_future.wait_for(3s), std::future_status::ready);
+    ASSERT_EQ(body_future.wait_for(3s), std::future_status::ready);
+    const std::string proxied_request = request_future.get();
+    EXPECT_EQ(body_future.get(), "client-frame");
+    EXPECT_NE(proxied_request.find("GET /chat HTTP/1.1\r\n"), std::string::npos) << proxied_request;
+    EXPECT_NE(proxied_request.find("Connection: Upgrade\r\n"), std::string::npos) << proxied_request;
+    EXPECT_NE(proxied_request.find("Upgrade: websocket\r\n"), std::string::npos) << proxied_request;
+    EXPECT_NE(proxied_request.find("Sec-WebSocket-Version: 13\r\n"), std::string::npos) << proxied_request;
+    EXPECT_EQ(http_header_value(proxied_request, "Sec-WebSocket-Key").size(), 24U) << proxied_request;
+
+    ::unlink(script_path.c_str());
 }
 
 TEST(LiteNginxRuntimeTest, ProxyRegeneratesRequestContentLength) {

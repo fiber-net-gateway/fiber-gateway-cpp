@@ -18,7 +18,9 @@ namespace fiber::http_script {
 // Async host functions backing svc.request / svc.proxyPass, invoked via a `directive <name> =
 // http "<target>";` binding. userdata is the HttpDirectiveDef carrying the compile-time-bound
 // upstream host target; the host never comes from the options object. options.url is the request
-// path?query, not a host.
+// path?query, not a host. proxyPass({websocket:true}) translates an inbound HTTP/1.1
+// WebSocket Upgrade or HTTP/2/3 Extended CONNECT to an upstream HTTP/1.1 Upgrade and
+// holds the async host call until the bidirectional tunnel closes.
 fiber::script::AsyncTask http_request_fn(void *userdata, const fiber::script::Library::HostCallFrame &frame,
                                          fiber::script::Library::Arguments args) noexcept;
 fiber::script::AsyncTask http_proxy_pass_fn(void *userdata, const fiber::script::Library::HostCallFrame &frame,
