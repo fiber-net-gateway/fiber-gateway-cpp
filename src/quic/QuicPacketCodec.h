@@ -42,8 +42,6 @@ struct QuicPacketPlaintext {
 struct QuicPacketDecodeResult {
     QuicPacketHeader header{};
     QuicSlice payload{};
-    std::uint32_t frame_count = 0;
-    bool ack_eliciting = false;
     // Set to true when this packet's key_phase bit differs from the connection's
     // current key_phase and we successfully decrypted with next_application_read.
     // The processor uses this signal to swap keys and arm the discard timer.
@@ -71,6 +69,10 @@ quic_get_packet_dcid(const std::uint8_t *datagram, std::size_t datagram_len, std
 quic_encode_packet(QuicConnection &connection, const QuicPacketEncodeSpec &spec, QuicPacketPlaintext plaintext,
                    std::uint8_t *out, std::size_t out_cap) noexcept;
 
+// Removes packet protection and returns the plaintext payload. Initial payloads
+// are fully frame-validated so callers can discard malformed unauthenticated
+// packets without side effects; strongly protected payloads are intentionally
+// left for the packet processor to parse exactly once.
 [[nodiscard]] common::IoResult<QuicPacketDecodeResult>
 quic_decode_packet(QuicConnection &connection, std::uint8_t *datagram, std::size_t datagram_len,
                    std::uint8_t short_dcid_len, std::uint8_t *plaintext, std::size_t plaintext_cap) noexcept;
