@@ -150,12 +150,21 @@ codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝�
 
 ## 🟠 MEDIUM — 可靠性与拥塞控制（无单测，风险最高）
 
-### 10. PTO 基于 non-ack-eliciting 包，违反 RFC 9002
+### 10. ✅ PTO 基于 non-ack-eliciting 包（复核为误报）
 `QuicLossRecovery.cpp:213-238`
 
-`quic_loss_detection_timer` 只查 `sent_frames.empty()`，不查帧是否 ack-eliciting（`packet_len!=0`）。ACK-only 包（non-ack-eliciting，`packet_len=0`）也记入 `sent_frames`，PTO 会基于其 `send_time` arm。RFC 9002 §6.2.1 要求仅当有 ack-eliciting 包在飞时 arm PTO，且基于最近 ack-eliciting 包。后果：仅发了 ACK 也发多余 PING 探针。
+RFC 9002 §6.2.1 确实要求 PTO 基于在飞的 ack-eliciting 包，但原分析把
+`packet_len == 0` 误当成了 non-ack-eliciting 标志。实际上，编码后同一包的所有帧都会复制
+`encoded->ack_eliciting` 到 `packet_ack_eliciting`；`packet_len` 只记在该包的第一个帧上，用于避免
+bytes-in-flight 重复计账，同一 ack-eliciting 包内的其余帧也会是 `packet_len == 0`。
 
-**修复**：arm 前查 `in_flight>0`（或反向扫到首个 `packet_len!=0` 的帧）。
+> ✅ **复核 2026-07-15**。`QuicUdpEndpoint::commit_send_datagram` 只在
+> `frame->packet_ack_eliciting` 为真时把帧放入 `sent_frames`；ACK-only 包的 ACK 帧走
+> `release_frame` 分支。全部生产代码中也只有这一处向 `sent_frames` 插入帧，因此
+> `sent_frames` 非空已隐含“该 packet number space 存在未确认的 ack-eliciting 包”；队尾
+> `send_time` 也就是最近 ack-eliciting 包的发送时间。当前 PTO 计算符合 RFC 9002，
+> 无需加 `in_flight > 0` 或扫描 `packet_len`。回归测试现直接验证 ACK-only 发送后
+> `sent_frames.empty()` 且 `quic_loss_detection_timer` 返回 `None`。
 
 ### 11. loss 减窗基准用 `in_flight`（减后）而非 `window`
 `QuicCongestion.cpp:166-172`（`quic_congestion_on_loss` 先 `subtract_in_flight` 再传 `cg.in_flight`）/ 对比 `:184`（ECN CE 路径正确用 `cg.window`）
