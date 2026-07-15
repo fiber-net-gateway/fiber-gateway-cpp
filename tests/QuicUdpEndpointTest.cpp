@@ -25,6 +25,7 @@
 #include "net/SocketAddress.h"
 #include "net/UdpSocket.h"
 #include "quic/QuicCrypto.h"
+#include "quic/QuicLossRecovery.h"
 #include "quic/QuicPacketCodec.h"
 #include "quic/QuicToken.h"
 #include "quic/QuicTransportCodec.h"
@@ -76,6 +77,8 @@ struct AckOnlyPacketSummary {
     bool ack_eliciting = true;
     bool data_pending = false;
     bool sending_empty = false;
+    bool sent_empty = false;
+    bool loss_timer_none = false;
     std::size_t in_flight = 0;
 };
 
@@ -1041,9 +1044,18 @@ DetachedTask recv_handshake_ack_only_when_congestion_full(
         co_return;
     }
 
-    done_promise->set_value(AckOnlyPacketSummary{received->size, decoded->frame_count, decoded->ack_eliciting,
-                                                 space.pending_frames.front() == ping, space.sending_frames.empty(),
-                                                 server.congestion().in_flight});
+    const auto loss_timer = fiber::quic::quic_loss_detection_timer(server, fiber::quic::QuicTime{0},
+                                                                   server.pto_count());
+    done_promise->set_value(AckOnlyPacketSummary{
+            received->size,
+            decoded->frame_count,
+            decoded->ack_eliciting,
+            space.pending_frames.front() == ping,
+            space.sending_frames.empty(),
+            space.sent_frames.empty(),
+            loss_timer.mode == fiber::quic::QuicLossTimerMode::None,
+            server.congestion().in_flight,
+    });
     client.close();
 }
 
@@ -1365,9 +1377,18 @@ DetachedTask recv_initial_ack_only_without_min_initial_padding(
         co_return;
     }
 
-    done_promise->set_value(AckOnlyPacketSummary{received->size, decoded->frame_count, decoded->ack_eliciting,
-                                                 !space.pending_frames.empty(), space.sending_frames.empty(),
-                                                 server.congestion().in_flight});
+    const auto loss_timer = fiber::quic::quic_loss_detection_timer(server, fiber::quic::QuicTime{0},
+                                                                   server.pto_count());
+    done_promise->set_value(AckOnlyPacketSummary{
+            received->size,
+            decoded->frame_count,
+            decoded->ack_eliciting,
+            !space.pending_frames.empty(),
+            space.sending_frames.empty(),
+            space.sent_frames.empty(),
+            loss_timer.mode == fiber::quic::QuicLossTimerMode::None,
+            server.congestion().in_flight,
+    });
     client.close();
 }
 
@@ -2563,6 +2584,8 @@ TEST(QuicUdpEndpointTest, SendsOnlyAckWhenCongestionWindowIsFull) {
     EXPECT_FALSE(response->ack_eliciting);
     EXPECT_TRUE(response->data_pending);
     EXPECT_TRUE(response->sending_empty);
+    EXPECT_TRUE(response->sent_empty);
+    EXPECT_TRUE(response->loss_timer_none);
     EXPECT_EQ(response->in_flight, fiber::quic::kQuicCongestionMinInitialSize);
 
     close_endpoint_on_loop(group, endpoint);
@@ -2655,6 +2678,8 @@ TEST(QuicUdpEndpointTest, DoesNotPadInitialAckOnlyPacketToMinInitialSize) {
     EXPECT_EQ(response->decoded_frame_count, 1U);
     EXPECT_FALSE(response->ack_eliciting);
     EXPECT_TRUE(response->sending_empty);
+    EXPECT_TRUE(response->sent_empty);
+    EXPECT_TRUE(response->loss_timer_none);
     EXPECT_EQ(response->in_flight, fiber::quic::kQuicCongestionMinInitialSize);
 
     close_endpoint_on_loop(group, endpoint);
