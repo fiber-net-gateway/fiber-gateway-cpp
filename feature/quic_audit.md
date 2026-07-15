@@ -6,7 +6,7 @@
 >
 > 测试覆盖：约 10,600 行 QUIC 测试；`QuicPacer` 已有确定性算法单测及 scheduler/endpoint 集成回归，`QuicAckHandler`/`QuicLossRecovery`/`QuicPathManager` 的专项覆盖仍然薄弱；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
 >
-> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化；#12 pacing、#13 ACK range 扫描、#15 ACK-of-ACK 阈值已于 2026-07-15 修复；#14 于 2026-07-15 复核为方向误判不存在，并已补齐三类区间回归测试。待修 P0：#1 key-update、#9 GSO，其余排期。
+> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化；#12 pacing、#13 ACK range 扫描、#15 ACK-of-ACK 阈值已于 2026-07-15 修复；#14 于 2026-07-15 复核为方向误判不存在，并已补齐三类区间回归测试；#16 于 2026-07-15 复核为 RFC 要求的 clamp 行为，并修复相邻的 RTT 扣减等号边界。待修 P0：#1 key-update、#9 GSO，其余排期。
 
 ## 总体评价
 
@@ -226,15 +226,14 @@ bytes-in-flight 重复计账，同一 ack-eliciting 包内的其余帧也会是 
 
 > ✅ **已修复 2026-07-15**。ACK-of-ACK 处理改为将已发送 ACK/ACK_ECN 帧保存的 `u.ack.largest` 传给 `drop_ack_ranges`，并将其参数重命名为 `largest_acknowledged`、修正范围方向注释。修复不增加成员、分配或热路径分支。回归测试 `QuicAckHandlerTest.AckOfAckDropsRangesThroughSentAckLargest` 构造本地发送 PN 100 承载 `largest=10` 的 ACK、随后收到对端 PN 11，再确认本地 PN 100，验证仅丢弃到 10 且 PN 11 的 range 与 `pending_ack` 均保留。
 
-### 16. `ack_delay` 被 clamp 而非 skip
+### 16. ⚪ 复核排除：`ack_delay` clamp 符合 RFC；相邻等号边界已修复
 `QuicCongestion.cpp:77-79`
 
-```cpp
-if (handshake_confirmed) { ack_delay = std::min(ack_delay, max_ack_delay); }
-```
-RFC 9002 §A.1：若 `ack_delay > max_ack_delay`，**不**减（`adjusted_rtt = latest_rtt`）。代码 clamp 后减 `max_ack_delay`，轻微低估 `smoothed_rtt`。下游 `min_rtt + ack_delay < latest` 守卫限制损害。
-
-**修复**：`if (ack_delay <= max_ack_delay) adjusted -= ack_delay;`。
+> ⚪ **复核 2026-07-15**。原结论对 RFC 9002 的解读相反：§5.3 明确要求握手确认后 **MUST use the lesser of** 对端报告的 `ack_delay` 与 `max_ack_delay`，附录 A.7 的 `UpdateRtt` 伪代码也先执行 `ack_delay = min(ack_delay, max_ack_delay)`，再在调整结果不低于 `min_rtt` 时扣减。原文引用的 A.1 是 sent-packet 状态跟踪，并非 RTT 更新。因此当前 clamp 是正确行为，改成超限时完全 skip 会高估 `smoothed_rtt`、`rttvar` 和 PTO，不应实施。
+>
+> 复核时发现相邻但独立的精确边界问题：RFC 的条件是 `latest_rtt >= min_rtt + ack_delay`，原实现使用严格 `<`，在 `latest_rtt == min_rtt + ack_delay` 时不会扣减，虽然扣减结果恰好等于 `min_rtt`，属于规范允许的边界。现改为等价且避免加法溢出的 `ack_delay <= latest_rtt - min_rtt`。
+>
+> 回归测试：`QuicCongestionTest.RttSampleClampsAckDelayAfterHandshakeConfirmation` 固定超限 ACK delay 仍按 `max_ack_delay` 扣减；`QuicCongestionTest.RttSampleSubtractsAckDelayAtMinRttBoundary` 覆盖调整结果恰好等于 `min_rtt` 的等号边界。
 
 ### 17. CUBIC `k` 在 ACK 处理中误偏移；recovery_start future-time fixup 是绷带
 `QuicCongestion.cpp:206`（`quic_congestion_cubic_window` 每 ACK 调 `quic_congestion_on_idle(cg, cg.idle, now)`）/ `:124-126`（`now < recovery_start` fixup）
