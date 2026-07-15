@@ -83,6 +83,8 @@ private:
     static common::IoErr handle_scheme(ServerHttp2Request &request, std::string_view value, bool value_stable) noexcept;
     static common::IoErr handle_authority(ServerHttp2Request &request, std::string_view value,
                                           bool value_stable) noexcept;
+    static common::IoErr handle_protocol(ServerHttp2Request &request, std::string_view value,
+                                         bool value_stable) noexcept;
     [[nodiscard]] common::IoErr materialize_name_raw(const std::uint8_t *data, std::size_t len, std::string_view &out,
                                                      std::uint64_t &name_hash) noexcept;
     [[nodiscard]] common::IoErr materialize_name_huffman(const std::uint8_t *data, std::size_t len,
@@ -121,6 +123,7 @@ private:
     bool handler_done_ = false;
     bool response_headers_sent_ = false;
     bool response_finished_ = false;
+    bool protocol_seen_ = false;
     int response_status_code_ = 0;
     std::string_view response_reason_;
     const HttpHeaders *response_headers_ = nullptr;

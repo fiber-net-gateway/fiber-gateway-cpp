@@ -2906,6 +2906,86 @@ TEST(Http2ConnectionTest, ServerParsesPathQueryAndExtensionFromPseudoPath) {
     EXPECT_EQ(snapshot.exten, "js");
 }
 
+TEST(Http2ConnectionTest, ServerExposesExtendedConnectProtocolWhenEnabled) {
+    struct ExtendedConnectSnapshot {
+        fiber::http::HttpMethod method = fiber::http::HttpMethod::Unknown;
+        std::string scheme;
+        std::string protocol;
+    };
+
+    std::string request = std::string(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0x0, 0, {});
+    request += build_headers_frame_bytes(1,
+                                         {
+                                                 {":method", "CONNECT"},
+                                                 {":scheme", "https"},
+                                                 {":path", "/chat"},
+                                                 {":authority", "example.com"},
+                                                 {":protocol", "websocket"},
+                                         },
+                                         true);
+
+    auto snapshot_promise = std::make_shared<std::promise<ExtendedConnectSnapshot>>();
+    auto snapshot_future = snapshot_promise->get_future();
+    fiber::http::HttpHandler handler =
+            [snapshot_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        snapshot_promise->set_value({
+                .method = exchange.method(),
+                .scheme = std::string(exchange.scheme()),
+                .protocol = std::string(exchange.protocol()),
+        });
+        (void) co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = 204,
+                .end_stream = true,
+        });
+        co_return;
+    };
+
+    fiber::http::Http2Connection::Options options;
+    options.enable_connect_protocol = true;
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, std::move(handler), options);
+
+    ASSERT_TRUE(outcome.result.has_value());
+    ASSERT_EQ(snapshot_future.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    ExtendedConnectSnapshot snapshot = snapshot_future.get();
+    EXPECT_EQ(snapshot.method, fiber::http::HttpMethod::Connect);
+    EXPECT_EQ(snapshot.scheme, "https");
+    EXPECT_EQ(snapshot.protocol, "websocket");
+
+    std::vector<EncodedFrame> frames = parse_frames(outcome.written);
+    auto settings = std::find_if(frames.begin(), frames.end(),
+                                 [](const EncodedFrame &frame) { return frame.type == 0x4 && frame.flags == 0; });
+    ASSERT_NE(settings, frames.end()) << describe_frames(frames);
+    ASSERT_TRUE(parse_settings_parameter(*settings, 0x8).has_value());
+    EXPECT_EQ(*parse_settings_parameter(*settings, 0x8), 1U);
+}
+
+TEST(Http2ConnectionTest, ServerRejectsExtendedConnectProtocolWhenDisabled) {
+    std::string request = std::string(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0x0, 0, {});
+    request += build_headers_frame_bytes(1,
+                                         {
+                                                 {":method", "CONNECT"},
+                                                 {":scheme", "https"},
+                                                 {":path", "/chat"},
+                                                 {":authority", "example.com"},
+                                                 {":protocol", "websocket"},
+                                         },
+                                         true);
+
+    auto handler_called = std::make_shared<std::atomic<bool>>(false);
+    fiber::http::HttpHandler handler = [handler_called](fiber::http::HttpExchange &) -> fiber::async::Task<void> {
+        handler_called->store(true, std::memory_order_release);
+        co_return;
+    };
+    fiber::http::Http2Connection::Options options;
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, std::move(handler), options, false);
+
+    EXPECT_TRUE(outcome.result.has_value());
+    EXPECT_FALSE(handler_called->load(std::memory_order_acquire));
+}
+
 TEST(Http2ConnectionTest, ServerBorrowsHpackStaticStorage) {
     struct StorageSnapshot {
         bool method = false;

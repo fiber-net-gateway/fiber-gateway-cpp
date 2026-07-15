@@ -223,7 +223,7 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
     const fiber::http::HttpBodySpec response_body =
             no_response_body ? fiber::http::HttpBodySpec::None()
                              : (has_content_length ? fiber::http::HttpBodySpec::ContentLength(response_content_length)
-                                                   : fiber::http::HttpBodySpec::Stream());
+                                                   : fiber::http::HttpBodySpec::Auto());
     auto response_header_result = co_await exchange.send_header({
             .kind = fiber::http::OutgoingHeaderKind::Final,
             .status_code = upstream_head->status_code,

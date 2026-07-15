@@ -97,6 +97,7 @@ private:
     bool frame_header_in_progress_ = false;
     bool response_headers_sent_ = false;
     bool response_finished_ = false;
+    bool extended_connect_enabled_ = false;
 };
 
 } // namespace fiber::http

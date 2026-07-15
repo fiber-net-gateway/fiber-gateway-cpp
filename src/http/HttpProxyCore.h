@@ -174,9 +174,10 @@ inline fiber::http::HttpBodySpec detect_request_body(const fiber::http::HttpExch
         end_stream = true;
         return fiber::http::HttpBodySpec::None();
     }
-    // HTTP/1 encodes Stream as chunked; HTTP/2 and HTTP/3 use their native stream boundary.
+    // The current proxy upstream is HTTP/1, so any inbound body without a known
+    // length is forwarded with HTTP/1 chunked transfer coding.
     end_stream = false;
-    return fiber::http::HttpBodySpec::Stream();
+    return fiber::http::HttpBodySpec::Chunked();
 }
 
 } // namespace fiber::http::proxy_core

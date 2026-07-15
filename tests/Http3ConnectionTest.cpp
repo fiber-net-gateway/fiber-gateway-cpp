@@ -45,6 +45,8 @@ struct CapturedHttp3Request {
     fiber::http::HttpMethod method = fiber::http::HttpMethod::Unknown;
     fiber::http::HttpVersion version = fiber::http::HttpVersion::HTTP_0_9;
     std::string method_view;
+    std::string scheme;
+    std::string protocol;
     std::string unparsed_uri;
     std::string path;
     std::string query;
@@ -136,6 +138,8 @@ CapturedHttp3Request capture_request(const fiber::http::HttpExchange &exchange) 
             .method = exchange.method(),
             .version = exchange.version(),
             .method_view = std::string(exchange.method_view()),
+            .scheme = std::string(exchange.scheme()),
+            .protocol = std::string(exchange.protocol()),
             .unparsed_uri = std::string(exchange.uri().unparsed_uri),
             .path = std::string(exchange.uri().path),
             .query = std::string(exchange.uri().query),
@@ -330,7 +334,8 @@ fiber::async::DetachedTask feed_two_streams_then_wait(fiber::quic::QuicConnectio
     co_return;
 }
 
-Http3RequestRunResult run_http3_request_headers(const HeaderList &headers, bool expect_handler) {
+Http3RequestRunResult run_http3_request_headers(const HeaderList &headers, bool expect_handler,
+                                                bool enable_extended_connect = false) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
@@ -345,6 +350,7 @@ Http3RequestRunResult run_http3_request_headers(const HeaderList &headers, bool 
     };
 
     fiber::http::Http3Connection::Options h3_options{};
+    h3_options.local_settings.enable_connect_protocol = enable_extended_connect;
     h3_options.owner = &ctx;
     h3_options.ops.create_server_request = &create_server_request;
 
@@ -705,6 +711,8 @@ TEST(Http3ConnectionTest, ServerRequestParsesPseudoHeadersUriAndCachesHeaderRefs
     EXPECT_EQ(result.snapshot.method, fiber::http::HttpMethod::Get);
     EXPECT_EQ(result.snapshot.version, fiber::http::HttpVersion::HTTP_3_0);
     EXPECT_EQ(result.snapshot.method_view, "GET");
+    EXPECT_EQ(result.snapshot.scheme, "https");
+    EXPECT_TRUE(result.snapshot.protocol.empty());
     EXPECT_EQ(result.snapshot.unparsed_uri, "/alpha//beta/../gamma/%64.txt?x=1#frag");
     EXPECT_EQ(result.snapshot.path, "/alpha/gamma/d.txt");
     EXPECT_EQ(result.snapshot.query, "x=1");
@@ -714,6 +722,31 @@ TEST(Http3ConnectionTest, ServerRequestParsesPseudoHeadersUriAndCachesHeaderRefs
     EXPECT_EQ(result.snapshot.range, "bytes=0-3");
     EXPECT_EQ(result.snapshot.if_range, "\"abc\"");
     EXPECT_EQ(result.snapshot.expect, "100-continue");
+}
+
+TEST(Http3ConnectionTest, ServerRequestExposesExtendedConnectProtocolWhenEnabled) {
+    HeaderList headers{
+            {":method", "CONNECT"}, {":scheme", "https"},       {":authority", "example.com"},
+            {":path", "/chat"},     {":protocol", "websocket"},
+    };
+
+    Http3RequestRunResult result = run_http3_request_headers(headers, true, true);
+
+    ASSERT_EQ(result.handler_status, std::future_status::ready);
+    EXPECT_EQ(result.snapshot.method, fiber::http::HttpMethod::Connect);
+    EXPECT_EQ(result.snapshot.scheme, "https");
+    EXPECT_EQ(result.snapshot.protocol, "websocket");
+}
+
+TEST(Http3ConnectionTest, ServerRequestRejectsExtendedConnectProtocolWhenDisabled) {
+    HeaderList headers{
+            {":method", "CONNECT"}, {":scheme", "https"},       {":authority", "example.com"},
+            {":path", "/chat"},     {":protocol", "websocket"},
+    };
+
+    Http3RequestRunResult result = run_http3_request_headers(headers, false);
+
+    EXPECT_EQ(result.handler_status, std::future_status::timeout);
 }
 
 TEST(Http3ConnectionTest, ServerRequestBorrowsQpackStaticStorage) {
