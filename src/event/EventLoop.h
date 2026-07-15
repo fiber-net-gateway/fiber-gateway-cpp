@@ -258,6 +258,8 @@ public:
     }
 
 private:
+    friend class EventLoopGroup;
+
     static thread_local EventLoop *current_;
 
     struct WakeupEntry : Poller::Item {
@@ -266,6 +268,9 @@ private:
     using NotifyNode = MpscQueue<NotifyEntry *>::Node;
 
     static void on_wakeup(Poller::Item *item, int fd, IoEvent events);
+
+    void prepare_run() noexcept;
+    void run_prepared();
 
     template<typename Handle, auto EntryMember, auto Cb>
     static void notify_trampoline(NotifyEntry *entry) {

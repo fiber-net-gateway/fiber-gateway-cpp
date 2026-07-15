@@ -26,6 +26,9 @@ void EventLoopGroup::start() { start_with_mask(nullptr); }
 void EventLoopGroup::start(const fiber::async::SignalSet &mask) { start_with_mask(&mask); }
 
 void EventLoopGroup::start_with_mask(const fiber::async::SignalSet *mask) {
+    for (auto &loop: loops_) {
+        loop->prepare_run();
+    }
     running_.store(true, std::memory_order_release);
     if (mask) {
         fiber::async::SignalSet copy = *mask;
@@ -33,14 +36,14 @@ void EventLoopGroup::start_with_mask(const fiber::async::SignalSet *mask) {
             pthread_sigmask(SIG_BLOCK, &copy.native(), nullptr);
             const auto index = thread.index();
             EventLoop &loop = *loops_[index];
-            loop.run();
+            loop.run_prepared();
         });
         return;
     }
     threads_.start([this](fiber::async::ThreadGroup::Thread &thread) {
         const auto index = thread.index();
         EventLoop &loop = *loops_[index];
-        loop.run();
+        loop.run_prepared();
     });
 }
 
