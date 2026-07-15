@@ -6,11 +6,11 @@
 >
 > 测试覆盖：约 9,700 行测试，但可靠性核心（`QuicAckHandler`/`QuicLossRecovery`/`QuicSendScheduler`/`QuicPathManager`）缺专门单测；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
 >
-> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0。待修 P0：#1 key-update、#9 GSO、#8 接收零拷贝，其余排期。
+> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化。待修 P0：#1 key-update、#9 GSO，其余排期。
 
 ## 总体评价
 
-codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝视图（`QuicSlice`）、`write_or_count_*` 模式、crypto 核心、anti-amplification、ECN、稳态零分配均正确。原审计列出 **9 个高危**；其中 #7 经生命周期调用链复核，不构成正常路径可达的独立 UAF，改列为不变量防御项。其余问题包括 key 用量越界、PTO 忙循环、re-entrancy、DoS 向量、缺 GSO/接收零拷贝，以及若干中危的可靠性与性能问题。可靠性与拥塞控制域问题最集中且无单测，风险最高。按严重度排列如下，均给出 `file:line` 与触发场景。
+codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝视图（`QuicSlice`）、`write_or_count_*` 模式、crypto 核心、anti-amplification、ECN、稳态零分配均正确。原审计列出 **9 个高危**；其中 #7 经生命周期调用链复核，不构成正常路径可达的独立 UAF，改列为不变量防御项；#8 经缓冲区所有权与异步消费路径复核，确认是当前架构下必要的生命周期复制，降为后续架构性能优化，不再列为 P0/HIGH。其余问题包括 key 用量越界、PTO 忙循环、re-entrancy、DoS 向量、缺 GSO，以及若干中危的可靠性与性能问题。可靠性与拥塞控制域问题最集中且无单测，风险最高。按严重度排列如下，均给出 `file:line` 与触发场景。
 
 ---
 
@@ -124,12 +124,20 @@ codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝�
 
 > ✅ **不变量加固已实施 2026-07-15**。`~QuicConnection` 现在断言 peer-data waiter 的 head/tail 均为空；`notify_peer_data_waiters` 增加链表入口一致性与清空后置断言。新增 `QuicConnectionTest.AsyncWriteCanceledWhileBlockedByConnectionWindow` 和 `QuicUdpEndpointTest.DetachCancelsPeerDataWaiterBeforeDestroy`：前者验证 connection-level flow-control waiter 在连接关闭时以 `Canceled` 恢复，后者验证 endpoint detach 先取消 waiter、最后一份 connection lease 释放后才执行 destroy callback。定向 2 测试通过，完整 CTest **1179/1179** 通过。上述第 2 项 awaiter self-retain 属可选的 API 生命周期扩展，本次未实施。
 
-### 8. 接收路径无零拷贝：STREAM 数据 memcpy 进 16KB 堆块
+## ⏸ DEFERRED — 架构性能优化
+
+### 8. ⏸ 接收路径未实现零拷贝（当前架构必要复制，后续优化）
 `QuicStreamRecvQueue.cpp:648-661`（`create_extent`）/ `QuicStream.cpp:519-522`（`on_stream_data_recv`）/ `QuicFrame.h:65-70`（`QuicSlice`）
 
-`QuicSlice` 是裸 `{const uint8_t*, size_t}` 指向包 payload（`QuicTransportCodec.cpp:725-731` 经 `payload.read_slice` 设置），没 retain refcounted IoBuf。`create_extent` 只能 `IoBuf::allocate(kRecvBlockSize)`（16KB）+ `std::memcpy`。发送侧是零拷贝（`QuicStreamSendQueue.cpp:55,270` 用 `retain_slice`），接收侧不是——明显不对称。
+`QuicSlice` 是裸 `{const uint8_t*, size_t}` 指向包 payload（`QuicTransportCodec.cpp:725-731` 经 `payload.read_slice` 设置），没 retain refcounted IoBuf。`create_extent` 只能 `IoBuf::allocate(kRecvBlockSize)`（16KB）+ `std::memcpy`。发送队列可以对调用方传入的持久 `IoBuf` 使用 `retain_slice`（`QuicStreamSendQueue.cpp:55,270`）；接收侧的来源是临时复用明文缓冲区，所有权模型不同。
 
-**修复**：frame 层穿透 `IoBuf` view 而非裸指针，in-order 数据 `retain_slice()` 跳过拷贝。
+> ⏸ **复核 2026-07-15**。上述复制确实存在，但在当前架构下是 correctness 所必需，并非独立缺陷：`QuicUdpEndpoint::plaintext_buffer_` 是 endpoint 级复用的 `unique_ptr<uint8_t[]>`，AEAD 解密结果和 `QuicSlice` 都只临时指向它；后续 coalesced packet 或下一 datagram 会覆盖该缓冲区，而 STREAM 数据可能长期留在乱序重组队列并由应用异步读取。即使数据 in-order，读取协程也不是在帧处理栈内同步消费，不能安全保留裸 view。因此本项不再作为 P0/HIGH correctness 问题，保留为后续架构级性能优化。
+>
+> “每个 STREAM 帧分配 16KB”也不是准确描述：首次触及一个逻辑 16KB stream block 时分配 16KB，同一活动 block 内的后续 extent 会复用该 storage；不过所有首次接收且非重复的字节仍会执行一次 `memcpy`。
+
+**后续优化方向**：不能只把 frame 改为 `IoBuf` view 或直接调用 `retain_slice()`；必须先把 AEAD 明文目标改成可转移所有权、引用计数且可池化的 packet buffer，再让 decode result、frame 和 recv queue 贯穿持有其 slice，所有引用释放后整包缓冲区才可回池。设计时还需权衡小 STREAM frame 长期钉住整个 packet buffer、乱序 extent 数量以及缓冲池容量压力。
+
+## 🔴 HIGH（续）
 
 ### 9. 无 GSO / sendmmsg / recvmmsg / GRO
 `src/net/detail/DatagramFd.cpp:440,499`；`QuicSendScheduler.cpp:248`（`flush_connection` 逐包 `try_send_packet`）
