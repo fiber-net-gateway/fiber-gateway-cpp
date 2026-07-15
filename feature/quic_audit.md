@@ -6,7 +6,7 @@
 >
 > 测试覆盖：约 10,600 行 QUIC 测试；`QuicPacer` 已有确定性算法单测及 scheduler/endpoint 集成回归，`QuicAckHandler`/`QuicLossRecovery`/`QuicPathManager` 的专项覆盖仍然薄弱；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
 >
-> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化；#12 pacing、#13 ACK range 扫描、#15 ACK-of-ACK 阈值已于 2026-07-15 修复；#14 于 2026-07-15 复核为方向误判不存在，并已补齐三类区间回归测试；#16 于 2026-07-15 复核为 RFC 要求的 clamp 行为，并修复相邻的 RTT 扣减等号边界；#17 于 2026-07-15 复核为调用链误判，idle ACK 在进入 CUBIC window 前已返回，路径重置也已显式重置拥塞状态；#18 强保护包双解析已于 2026-07-15 消除，Initial 为无副作用静默丢弃而有意保留预校验；#19 当前定义的重复 transport parameter 已于 2026-07-15 拒绝。待修 P0：#1 key-update、#9 GSO，其余排期。
+> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化；#12 pacing、#13 ACK range 扫描、#15 ACK-of-ACK 阈值已于 2026-07-15 修复；#14 于 2026-07-15 复核为方向误判不存在，并已补齐三类区间回归测试；#16 于 2026-07-15 复核为 RFC 要求的 clamp 行为，并修复相邻的 RTT 扣减等号边界；#17 于 2026-07-15 复核为调用链误判，idle ACK 在进入 CUBIC window 前已返回，路径重置也已显式重置拥塞状态；#18 强保护包双解析已于 2026-07-15 消除，Initial 为无副作用静默丢弃而有意保留预校验；#19 当前定义的重复 transport parameter 已于 2026-07-15 拒绝；#20 PADDING 扫描及 #21 Frame Type、NEW_CONNECTION_ID、TP 边界已于 2026-07-15 修复，#21 通用 varint 长编码经复核为 RFC 允许而保留。待修 P0：#1 key-update、#9 GSO，其余排期。
 
 ## 总体评价
 
@@ -317,12 +317,46 @@ PADDING case 对每零字节 `payload.skip(1)` 循环。Initial 包 pad 到 1200
 
 **修复**：`memchr` 找下一非零字节批量 skip。
 
+> ✅ **已优化 2026-07-15**。原性能现象存在，但修复建议不准确：`memchr` 只能查找一个
+> 指定字节，不能直接查找“首个非零字节”；简单改成“指针逐字节扫描 + 最后一次 skip”在优化编译下
+> 也没有稳定收益。现实现用 `memcpy` 安全加载未对齐 `uint64_t`，整字检查连续 8 个零，再用字节尾扫
+> 精确停在下一帧，最后只更新一次 cursor；不越过 `payload.end()`，不依赖对齐或端序。隔离扫描
+> microbenchmark 中，约 1100 字节全零 run 比原循环快 **4.5–5.5 倍**。
+>
+> Initial 的两遍解析仍有意保留：第一遍在 `quic_decode_packet` 中完成无副作用预校验，第二遍才在
+> `process_decoded_packet` 执行帧副作用，避免可自行派生 Initial key 的攻击者用“前部合法帧 + 后部坏帧”
+> 部分推进连接状态。回归测试 `QuicTransportCodecTest.CoalescesPaddingAcrossWordChunks` 覆盖整字零块、
+> 含非零字的回退尾扫和下一帧边界。
+
 ### 21. varint 接受非规范编码；NewConnectionId encode 不校验 cid_len；TP 范围校验推迟
 `QuicTransportCodec.cpp:307-327`（非规范 varint）/ `:1224-1229`（encode 不校验 `cid_len≤kMaxConnectionIdLength`，decode 校验）/ `QuicTransportParamsCodec.cpp:148-231`（`ack_delay_exponent`/`max_ack_delay`/`active_connection_id_limit`/`max_udp_payload_size` 不在 codec 校验，推迟到 `QuicConnection.cpp:1615-1616`）
 
 非规范 varint（如 `\x40\x00` 解出 0）允许指纹并掩盖协议 bug（RFC 9000 §16 MAY 拒）。encode 路径 `cid_len>20` 会读越 `cid[20]` 数组入 `stateless_reset_token` 及以远（现调用方设自校验过的 `QuicConnectionId`，潜在）。TP 范围消费方（如 `QuicPacketNumberSpace.cpp:185` 的 `ack_delay_us >>= ack_delay_exponent`）仅因连接层先校验才安全。
 
 **修复**：varint 读后验最小编码；encode 前校验 `cid_len`；TP 在 codec 层拒越界范围（defense-in-depth）。
+
+> ✅ **拆分复核并修复 2026-07-15**。
+>
+> - **通用 varint：原结论不成立，不修改。** RFC 9000 §16 明确允许数值使用非最短的 1/2/4/8
+>   字节编码，唯一例外是 Frame Type。因此 `quic_parse_varint` 继续接受 `0x40 0x00 -> 0`，避免拒绝
+>   合法 packet/frame 字段和 transport parameter；回归测试
+>   `QuicTransportCodecTest.AcceptsNonMinimalVarintOutsideFrameType` 固化该互操作行为。
+> - **Frame Type：真实协议缺陷，已修复。** `quic_parse_frame_for_receiver` 现比较 Frame Type 实际
+>   消耗长度与 `quic_varint_len(value)`，拒绝非最短编码；测试
+>   `RejectsNonMinimalFrameTypeEncoding` 覆盖 2/4/8 字节编码。
+> - **NEW_CONNECTION_ID encode：真实潜在越界，已修复。** 在长度预计算和实际写入之前统一要求
+>   `1 <= cid_len <= 20` 且 `retire_prior_to <= sequence_number`，使 `cid_len > 20` 不再越过
+>   `cid[20]` 读取 token/相邻对象；测试 `ValidatesNewConnectionIdBeforeEncoding` 同时覆盖零长度、过长、
+>   retire 倒置和 20 字节合法边界。生产入队路径原有 `QuicConnectionId` 校验继续作为上游不变量。
+> - **TP 范围：当前调用链安全，但 codec 边界已补齐。** TLS 回调原本就是 parse 成功后立即调用
+>   `apply_peer_transport_params`，并在发布 `peer_transport_` 前校验；原文引用的
+>   `QuicPacketNumberSpace::generate_forced_ack` 移位也只使用默认 exponent 3，不消费对端 TP，故不存在
+>   校验前 UB。现 `quic_parse_transport_params` 与 `quic_create_transport_params` 共用固定范围检查：
+>   `1200 <= max_udp_payload_size <= 65527`、`ack_delay_exponent <= 20`、
+>   `max_ack_delay < 2^14`、`active_connection_id_limit >= 2`；连接层校验保留，保护直接构造参数对象的
+>   调用方。解析、生成与合法边界分别由三个 `QuicTransportParamsCodecTest` 回归测试覆盖。
+>
+> 完整 CTest **1226/1226** 通过。
 
 ---
 
