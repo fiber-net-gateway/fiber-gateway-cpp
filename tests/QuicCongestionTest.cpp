@@ -107,6 +107,36 @@ TEST(QuicCongestionTest, RttSampleMatchesQuicEstimatorShape) {
     EXPECT_EQ(rtt.rttvar, fiber::quic::QuicTime{40});
 }
 
+TEST(QuicCongestionTest, RttSampleClampsAckDelayAfterHandshakeConfirmation) {
+    fiber::quic::QuicRttState rtt{};
+    fiber::quic::quic_rtt_init(rtt);
+
+    fiber::quic::quic_rtt_sample(rtt, fiber::quic::QuicTime{40}, fiber::quic::QuicTime{0}, 0, 3,
+                                 fiber::quic::QuicTime{25}, false);
+    fiber::quic::quic_rtt_sample(rtt, fiber::quic::QuicTime{100}, fiber::quic::QuicTime{0}, 60000, 0,
+                                 fiber::quic::QuicTime{25}, true);
+
+    EXPECT_EQ(rtt.latest_rtt, fiber::quic::QuicTime{100});
+    EXPECT_EQ(rtt.min_rtt, fiber::quic::QuicTime{40});
+    EXPECT_EQ(rtt.avg_rtt, fiber::quic::QuicTime{44});
+    EXPECT_EQ(rtt.rttvar, fiber::quic::QuicTime{23});
+}
+
+TEST(QuicCongestionTest, RttSampleSubtractsAckDelayAtMinRttBoundary) {
+    fiber::quic::QuicRttState rtt{};
+    fiber::quic::quic_rtt_init(rtt);
+
+    fiber::quic::quic_rtt_sample(rtt, fiber::quic::QuicTime{40}, fiber::quic::QuicTime{0}, 0, 3,
+                                 fiber::quic::QuicTime{25}, false);
+    fiber::quic::quic_rtt_sample(rtt, fiber::quic::QuicTime{65}, fiber::quic::QuicTime{0}, 25000, 0,
+                                 fiber::quic::QuicTime{25}, true);
+
+    EXPECT_EQ(rtt.latest_rtt, fiber::quic::QuicTime{65});
+    EXPECT_EQ(rtt.min_rtt, fiber::quic::QuicTime{40});
+    EXPECT_EQ(rtt.avg_rtt, fiber::quic::QuicTime{40});
+    EXPECT_EQ(rtt.rttvar, fiber::quic::QuicTime{15});
+}
+
 TEST(QuicOutputFrameQueueTest, MaintainsReverseLinksAcrossMutations) {
     fiber::quic::QuicOutputFrame first{};
     fiber::quic::QuicOutputFrame second{};

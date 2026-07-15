@@ -79,7 +79,7 @@ void quic_rtt_sample(QuicRttState &rtt, QuicTime now, QuicTime send_time, std::u
     }
 
     QuicTime adjusted = latest;
-    if (rtt.min_rtt + ack_delay < latest) {
+    if (ack_delay <= latest - rtt.min_rtt) {
         adjusted -= ack_delay;
     }
 
