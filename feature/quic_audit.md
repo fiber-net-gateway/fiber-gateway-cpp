@@ -6,7 +6,7 @@
 >
 > 测试覆盖：约 10,600 行 QUIC 测试；`QuicPacer` 已有确定性算法单测及 scheduler/endpoint 集成回归，`QuicAckHandler`/`QuicLossRecovery`/`QuicPathManager` 的专项覆盖仍然薄弱；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
 >
-> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化；#12 pacing、#13 ACK range 扫描、#15 ACK-of-ACK 阈值已于 2026-07-15 修复；#14 于 2026-07-15 复核为方向误判不存在，并已补齐三类区间回归测试；#16 于 2026-07-15 复核为 RFC 要求的 clamp 行为，并修复相邻的 RTT 扣减等号边界；#17 于 2026-07-15 复核为调用链误判，idle ACK 在进入 CUBIC window 前已返回，路径重置也已显式重置拥塞状态。待修 P0：#1 key-update、#9 GSO，其余排期。
+> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化；#12 pacing、#13 ACK range 扫描、#15 ACK-of-ACK 阈值已于 2026-07-15 修复；#14 于 2026-07-15 复核为方向误判不存在，并已补齐三类区间回归测试；#16 于 2026-07-15 复核为 RFC 要求的 clamp 行为，并修复相邻的 RTT 扣减等号边界；#17 于 2026-07-15 复核为调用链误判，idle ACK 在进入 CUBIC window 前已返回，路径重置也已显式重置拥塞状态；#18 强保护包双解析已于 2026-07-15 消除，Initial 为无副作用静默丢弃而有意保留预校验。待修 P0：#1 key-update、#9 GSO，其余排期。
 
 ## 总体评价
 
@@ -263,12 +263,30 @@ bytes-in-flight 重复计账，同一 ack-eliciting 包内的其余帧也会是 
 
 ## 🟠 MEDIUM — Codec
 
-### 18. 每包双解析（死字段）
-`QuicPacketCodec.cpp:424-433` + `QuicPacketProcessor.cpp:300-305`
+### 18. ✅ 强保护包双解析已消除；Initial 有意保留预校验
+`QuicPacketCodec.cpp:423-431` + `QuicPacketProcessor.cpp:323-337`
 
-`quic_decode_packet` 走完整 decrypted payload 调 `quic_parse_frame_for_receiver` 纯为填 `result.frame_count`/`result.ack_eliciting`，然后 `process_decoded_packet` 重新解析同字节。grep 确认无调用方读 `decoded.frame_count`/`decoded.ack_eliciting`（**死字段**），只读 `key_update`/`header`/`payload`。每包帧解析 CPU 翻倍。
+原性能现象确认存在：`quic_decode_packet` 原先遍历完整 decrypted payload，随后
+`process_decoded_packet` 再解析并分发相同字节；`decoded.frame_count`/`decoded.ack_eliciting`
+在生产路径无人消费。不过第一次遍历并非纯死代码：它还保证在尾部坏帧时，前置帧尚未产生副作用，
+并恢复解密时预先更新的 `largest_received_packet_number`。
 
-**修复**：删死字段，或从 decode 返回已解析帧数组，或把校验循环移入 processor 带 rollback-on-failure。
+> ✅ **修复 2026-07-15**。删除 `QuicPacketDecodeResult::frame_count`/`ack_eliciting`，Handshake、
+> 0-RTT 和 1-RTT 的 decode 阶段不再解析帧，只在 `process_decoded_packet` 中解析并提交一次。
+> 强保护包遇到未知/坏编码帧时以 `FRAME_ENCODING_ERROR` 关闭；已知帧出现在禁止的加密级别或
+> 接收方向时以 `PROTOCOL_VIOLATION` 关闭，并在错误路径重新读取一次 frame type 填入
+> CONNECTION_CLOSE，不给正常热路径增加分支成本之外的额外解析。
+>
+> Initial 仍在 AEAD 成功后、TLS 初始化和任何帧副作用之前完整预校验。这是有意保留：Initial
+> 保护不认证发送者，RFC 9000 允许静默丢弃无效 Initial 的前提是未处理其中帧或完整回滚；保留
+> 只读预校验还避免 AEAD 合法但帧格式错误的伪造 Initial 触发 `SSL_new`。因此稳态强保护流量从
+> 两次帧解析降为一次，握手 Initial 的双遍历属于安全边界，不再追求用帧数组消除（最坏 64KB
+> payload 可含数万单字节帧，缓存会引入大块栈内存或动态分配）。Closing/Draining 的强保护包
+> 也不再在 decode 阶段扫描 payload。
+>
+> 回归测试覆盖：坏尾帧 Initial 在 PN/TLS/连接状态提交前被拒；1-RTT 未知帧映射
+> `FRAME_ENCODING_ERROR`；方向非法的 HANDSHAKE_DONE 映射 `PROTOCOL_VIOLATION`；坏尾帧
+> key update 不翻转密钥；Closing 连接跳过坏 payload 的帧分发。
 
 ### 19. 重复 transport param 静默接受
 `QuicTransportParamsCodec.cpp:113-277`

@@ -45,6 +45,27 @@ struct DecodedPacketSummary {
     bool ack_eliciting = false;
 };
 
+struct DecodedPayloadSummary {
+    std::uint32_t frame_count = 0;
+    bool ack_eliciting = false;
+};
+
+fiber::common::IoResult<DecodedPayloadSummary>
+summarize_decoded_payload(fiber::quic::QuicConnectionRole receiver_role,
+                          const fiber::quic::QuicPacketDecodeResult &decoded) noexcept {
+    DecodedPayloadSummary summary{};
+    fiber::quic::QuicReadCursor payload(decoded.payload.data, decoded.payload.len);
+    while (!payload.empty()) {
+        auto parsed = fiber::quic::quic_parse_frame_for_receiver(receiver_role, decoded.header.level, payload);
+        if (!parsed) {
+            return std::unexpected(parsed.error());
+        }
+        ++summary.frame_count;
+        summary.ack_eliciting = summary.ack_eliciting || parsed->frame.ack_eliciting;
+    }
+    return summary;
+}
+
 struct CoalescedPacketSummary {
     std::size_t datagram_len = 0;
     std::size_t first_packet_len = 0;
@@ -819,6 +840,11 @@ recv_coalesced_initial_handshake(fiber::event::EventLoop *loop, fiber::quic::Qui
         done_promise->set_value(std::unexpected(first.error()));
         co_return;
     }
+    auto first_summary = summarize_decoded_payload(fiber::quic::QuicConnectionRole::Client, *first);
+    if (!first_summary) {
+        done_promise->set_value(std::unexpected(first_summary.error()));
+        co_return;
+    }
 
     const std::size_t second_offset = first->header.packet_len;
     if (second_offset >= received->size) {
@@ -832,9 +858,15 @@ recv_coalesced_initial_handshake(fiber::event::EventLoop *loop, fiber::quic::Qui
         done_promise->set_value(std::unexpected(second.error()));
         co_return;
     }
+    auto second_summary = summarize_decoded_payload(fiber::quic::QuicConnectionRole::Client, *second);
+    if (!second_summary) {
+        done_promise->set_value(std::unexpected(second_summary.error()));
+        co_return;
+    }
 
     done_promise->set_value(CoalescedPacketSummary{received->size, first->header.packet_len, first->header.type,
-                                                   second->header.type, first->ack_eliciting, second->ack_eliciting});
+                                                   second->header.type, first_summary->ack_eliciting,
+                                                   second_summary->ack_eliciting});
     client.close();
 }
 
@@ -922,6 +954,11 @@ recv_handshake_packet_with_many_frames(fiber::event::EventLoop *loop, fiber::qui
         done_promise->set_value(std::unexpected(decoded.error()));
         co_return;
     }
+    auto decoded_summary = summarize_decoded_payload(fiber::quic::QuicConnectionRole::Client, *decoded);
+    if (!decoded_summary) {
+        done_promise->set_value(std::unexpected(decoded_summary.error()));
+        co_return;
+    }
 
     std::size_t sent_count = 0;
     for (fiber::quic::QuicOutputFrame *frame = space.sent_frames.front(); frame != nullptr;
@@ -929,7 +966,7 @@ recv_handshake_packet_with_many_frames(fiber::event::EventLoop *loop, fiber::qui
         ++sent_count;
     }
 
-    done_promise->set_value(ManyFramePacketSummary{decoded->frame_count, sent_count, received->ecn,
+    done_promise->set_value(ManyFramePacketSummary{decoded_summary->frame_count, sent_count, received->ecn,
                                                    space.pending_frames.empty(), space.sending_frames.empty()});
     client.close();
 }
@@ -1026,11 +1063,16 @@ recv_split_handshake_crypto_frame(fiber::event::EventLoop *loop, fiber::quic::Qu
         done_promise->set_value(std::unexpected(decoded.error()));
         co_return;
     }
+    auto decoded_summary = summarize_decoded_payload(fiber::quic::QuicConnectionRole::Client, *decoded);
+    if (!decoded_summary) {
+        done_promise->set_value(std::unexpected(decoded_summary.error()));
+        co_return;
+    }
 
     const fiber::quic::QuicOutputFrame *sent = space.sent_frames.front();
     const fiber::quic::QuicOutputFrame *pending = space.pending_frames.front();
     done_promise->set_value(SplitFramePacketSummary{
-            decoded->frame_count,
+            decoded_summary->frame_count,
             sent != nullptr && sent->u.crypto.data != nullptr ? sent->u.crypto.data->readable() : 0,
             pending != nullptr && pending->u.crypto.data != nullptr ? pending->u.crypto.data->readable() : 0,
             pending != nullptr && pending->u.crypto.data != nullptr,
@@ -1126,13 +1168,18 @@ DetachedTask recv_handshake_ack_only_when_congestion_full(
         done_promise->set_value(std::unexpected(decoded.error()));
         co_return;
     }
+    auto decoded_summary = summarize_decoded_payload(fiber::quic::QuicConnectionRole::Client, *decoded);
+    if (!decoded_summary) {
+        done_promise->set_value(std::unexpected(decoded_summary.error()));
+        co_return;
+    }
 
     const auto loss_timer =
             fiber::quic::quic_loss_detection_timer(server, fiber::quic::QuicTime{0}, server.pto_count());
     done_promise->set_value(AckOnlyPacketSummary{
             received->size,
-            decoded->frame_count,
-            decoded->ack_eliciting,
+            decoded_summary->frame_count,
+            decoded_summary->ack_eliciting,
             space.pending_frames.front() == ping,
             space.sending_frames.empty(),
             space.sent_frames.empty(),
@@ -1239,6 +1286,11 @@ DetachedTask recv_application_stream_frame(fiber::event::EventLoop *loop, fiber:
         done_promise->set_value(std::unexpected(decoded.error()));
         co_return;
     }
+    auto decoded_summary = summarize_decoded_payload(fiber::quic::QuicConnectionRole::Client, *decoded);
+    if (!decoded_summary) {
+        done_promise->set_value(std::unexpected(decoded_summary.error()));
+        co_return;
+    }
 
     fiber::quic::QuicReadCursor payload(decoded->payload.data, decoded->payload.len);
     auto parsed = fiber::quic::quic_parse_frame_for_receiver(fiber::quic::QuicConnectionRole::Client,
@@ -1253,7 +1305,7 @@ DetachedTask recv_application_stream_frame(fiber::event::EventLoop *loop, fiber:
     }
 
     StreamPacketSummary summary{};
-    summary.decoded_frame_count = decoded->frame_count;
+    summary.decoded_frame_count = decoded_summary->frame_count;
     summary.stream_id = parsed->frame.u.stream.stream_id;
     summary.stream_offset = parsed->frame.u.stream.offset;
     summary.stream_length = parsed->frame.u.stream.length;
@@ -1362,6 +1414,11 @@ recv_http3_control_preface_frame(fiber::event::EventLoop *loop, fiber::quic::Qui
         done_promise->set_value(std::unexpected(decoded.error()));
         co_return;
     }
+    auto decoded_summary = summarize_decoded_payload(fiber::quic::QuicConnectionRole::Client, *decoded);
+    if (!decoded_summary) {
+        done_promise->set_value(std::unexpected(decoded_summary.error()));
+        co_return;
+    }
 
     fiber::quic::QuicReadCursor payload(decoded->payload.data, decoded->payload.len);
     auto parsed = fiber::quic::quic_parse_frame_for_receiver(fiber::quic::QuicConnectionRole::Client,
@@ -1376,7 +1433,7 @@ recv_http3_control_preface_frame(fiber::event::EventLoop *loop, fiber::quic::Qui
     }
 
     StreamPacketSummary summary{};
-    summary.decoded_frame_count = decoded->frame_count;
+    summary.decoded_frame_count = decoded_summary->frame_count;
     summary.stream_id = parsed->frame.u.stream.stream_id;
     summary.stream_offset = parsed->frame.u.stream.offset;
     summary.stream_length = parsed->frame.u.stream.length;
@@ -1459,13 +1516,18 @@ DetachedTask recv_initial_ack_only_without_min_initial_padding(
         done_promise->set_value(std::unexpected(decoded.error()));
         co_return;
     }
+    auto decoded_summary = summarize_decoded_payload(fiber::quic::QuicConnectionRole::Client, *decoded);
+    if (!decoded_summary) {
+        done_promise->set_value(std::unexpected(decoded_summary.error()));
+        co_return;
+    }
 
     const auto loss_timer =
             fiber::quic::quic_loss_detection_timer(server, fiber::quic::QuicTime{0}, server.pto_count());
     done_promise->set_value(AckOnlyPacketSummary{
             received->size,
-            decoded->frame_count,
-            decoded->ack_eliciting,
+            decoded_summary->frame_count,
+            decoded_summary->ack_eliciting,
             !space.pending_frames.empty(),
             space.sending_frames.empty(),
             space.sent_frames.empty(),
@@ -2782,8 +2844,10 @@ TEST(QuicUdpEndpointTest, SendsInitialAckAfterProcessingAckElicitingInitial) {
 
     ASSERT_TRUE(decoded.has_value()) << static_cast<int>(decoded.error());
     EXPECT_EQ(decoded->header.type, fiber::quic::QuicPacketType::Initial);
-    EXPECT_FALSE(decoded->ack_eliciting);
-    EXPECT_GE(decoded->frame_count, 1U);
+    auto decoded_summary = summarize_decoded_payload(fiber::quic::QuicConnectionRole::Client, *decoded);
+    ASSERT_TRUE(decoded_summary.has_value()) << static_cast<int>(decoded_summary.error());
+    EXPECT_FALSE(decoded_summary->ack_eliciting);
+    EXPECT_GE(decoded_summary->frame_count, 1U);
 
     close_endpoint_on_loop(group, endpoint);
     group.stop();

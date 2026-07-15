@@ -338,16 +338,8 @@ common::IoResult<QuicPacketDecodeResult> quic_decode_packet(QuicConnection &conn
 
     auto &space = connection.packet_number_space(packet->level);
     const std::uint64_t saved_largest_received = space.largest_received_packet_number;
-    const std::uint64_t saved_pending_ack = space.pending_ack;
-    const std::uint32_t saved_send_ack_count = space.send_ack_count;
-    const bool saved_send_ack = space.send_ack;
 
-    auto restore_space = [&]() noexcept {
-        space.largest_received_packet_number = saved_largest_received;
-        space.pending_ack = saved_pending_ack;
-        space.send_ack_count = saved_send_ack_count;
-        space.send_ack = saved_send_ack;
-    };
+    auto restore_space = [&]() noexcept { space.largest_received_packet_number = saved_largest_received; };
 
     bool key_update = false;
     QuicSlice opened_payload{};
@@ -421,15 +413,20 @@ common::IoResult<QuicPacketDecodeResult> quic_decode_packet(QuicConnection &conn
     result.payload = opened_payload;
     result.key_update = key_update;
 
-    QuicReadCursor payload_reader(opened_payload.data, opened_payload.len);
-    while (!payload_reader.empty()) {
-        auto parsed = quic_parse_frame_for_receiver(connection.role(), packet->level, payload_reader);
-        if (!parsed) {
-            restore_space();
-            return std::unexpected(parsed.error());
+    // Initial protection does not authenticate the sender. Validate the entire
+    // payload before any frame has side effects so a malformed Initial can be
+    // discarded without letting an attacker partially advance connection state.
+    // Strongly protected packets are parsed once by process_decoded_packet;
+    // malformed frames there terminate the authenticated connection.
+    if (packet->level == QuicEncryptionLevel::Initial) {
+        QuicReadCursor payload_reader(opened_payload.data, opened_payload.len);
+        while (!payload_reader.empty()) {
+            auto parsed = quic_parse_frame_for_receiver(connection.role(), packet->level, payload_reader);
+            if (!parsed) {
+                restore_space();
+                return std::unexpected(parsed.error());
+            }
         }
-        ++result.frame_count;
-        result.ack_eliciting = result.ack_eliciting || parsed->frame.ack_eliciting;
     }
 
     return result;

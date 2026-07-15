@@ -43,6 +43,29 @@ namespace {
            type == QuicFrameType::PathResponse || type == QuicFrameType::NewConnectionId;
 }
 
+struct FrameParseClose {
+    QuicErrorCode error = QuicErrorCode::FrameEncodingError;
+    std::uint64_t frame_type = 0;
+};
+
+[[nodiscard]] FrameParseClose classify_frame_parse_failure(QuicConnectionRole role, QuicEncryptionLevel level,
+                                                           const std::uint8_t *frame_data,
+                                                           std::size_t frame_len) noexcept {
+    QuicReadCursor type_reader(frame_data, frame_len);
+    auto type_value = quic_parse_varint(type_reader);
+    if (!type_value) {
+        return {};
+    }
+
+    FrameParseClose close{};
+    close.frame_type = *type_value;
+    if (*type_value <= kLastFrameType &&
+        !quic_frame_allowed_for_receiver(role, level, static_cast<QuicFrameType>(*type_value))) {
+        close.error = QuicErrorCode::ProtocolViolation;
+    }
+    return close;
+}
+
 // Apply a peer-initiated key update after a packet was successfully decrypted
 // with next_application_read. The current application_read/write become the
 // "previous" generation (kept for a 3×PTO grace period), next_application_read/write
@@ -299,8 +322,17 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
     bool path_challenged = false;
     QuicReadCursor payload(decoded.payload.data, decoded.payload.len);
     while (!payload.empty()) {
+        const std::uint8_t *frame_data = payload.pos();
+        const std::size_t frame_len = payload.remaining();
         auto parsed = quic_parse_frame_for_receiver(conn.role(), packet.level, payload);
         if (!parsed) {
+            // Initial payloads were fully prevalidated by quic_decode_packet so
+            // this branch is reached only for strongly protected packets in
+            // normal operation. The peer authenticated the malformed frame;
+            // terminate the connection instead of silently discarding it.
+            const FrameParseClose close =
+                    classify_frame_parse_failure(conn.role(), packet.level, frame_data, frame_len);
+            conn.close(close.error, close.frame_type);
             return std::unexpected(parsed.error());
         }
 

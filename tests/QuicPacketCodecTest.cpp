@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <expected>
 #include <string_view>
 #include <vector>
 
@@ -12,6 +13,27 @@
 #include "QuicTestLoop.h"
 
 namespace {
+
+struct DecodedPayloadSummary {
+    std::uint32_t frame_count = 0;
+    bool ack_eliciting = false;
+};
+
+fiber::common::IoResult<DecodedPayloadSummary>
+summarize_decoded_payload(fiber::quic::QuicConnectionRole receiver_role,
+                          const fiber::quic::QuicPacketDecodeResult &decoded) noexcept {
+    DecodedPayloadSummary summary{};
+    fiber::quic::QuicReadCursor payload(decoded.payload.data, decoded.payload.len);
+    while (!payload.empty()) {
+        auto parsed = fiber::quic::quic_parse_frame_for_receiver(receiver_role, decoded.header.level, payload);
+        if (!parsed) {
+            return std::unexpected(parsed.error());
+        }
+        ++summary.frame_count;
+        summary.ack_eliciting = summary.ack_eliciting || parsed->frame.ack_eliciting;
+    }
+    return summary;
+}
 
 int hex_value(char c) {
     if (c >= '0' && c <= '9') {
@@ -96,8 +118,10 @@ TEST(QuicPacketCodecTest, EncodesAndDecodesProtectedInitialPacket) {
     ASSERT_TRUE(decoded.has_value()) << static_cast<int>(decoded.error());
     EXPECT_EQ(decoded->header.type, fiber::quic::QuicPacketType::Initial);
     EXPECT_EQ(decoded->header.packet_number, 0U);
-    EXPECT_EQ(decoded->frame_count, 2U);
-    EXPECT_TRUE(decoded->ack_eliciting);
+    auto decoded_summary = summarize_decoded_payload(fiber::quic::QuicConnectionRole::Client, *decoded);
+    ASSERT_TRUE(decoded_summary.has_value()) << static_cast<int>(decoded_summary.error());
+    EXPECT_EQ(decoded_summary->frame_count, 2U);
+    EXPECT_TRUE(decoded_summary->ack_eliciting);
     EXPECT_EQ(client.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial).largest_received_packet_number, 0U);
 }
 
@@ -226,8 +250,10 @@ TEST_P(QuicPacketCodecSuiteTest, EncodesAndDecodesApplicationPacket) {
     ASSERT_TRUE(decoded.has_value()) << static_cast<int>(decoded.error());
     EXPECT_EQ(decoded->header.type, fiber::quic::QuicPacketType::Short);
     EXPECT_EQ(decoded->header.packet_number, 0U);
-    EXPECT_EQ(decoded->frame_count, 2U);
-    EXPECT_TRUE(decoded->ack_eliciting);
+    auto decoded_summary = summarize_decoded_payload(fiber::quic::QuicConnectionRole::Client, *decoded);
+    ASSERT_TRUE(decoded_summary.has_value()) << static_cast<int>(decoded_summary.error());
+    EXPECT_EQ(decoded_summary->frame_count, 2U);
+    EXPECT_TRUE(decoded_summary->ack_eliciting);
 }
 
 INSTANTIATE_TEST_SUITE_P(All, QuicPacketCodecSuiteTest,
