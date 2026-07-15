@@ -58,9 +58,9 @@ struct QuicPacketNumberSpace {
 
     void record_ecn(net::UdpEcn ecn) noexcept;
 
-    // Drop ACK ranges up to and including pn (nginx's ngx_quic_drop_ack_ranges).
+    // Drop ACK ranges up to and including largest_acknowledged (nginx's ngx_quic_drop_ack_ranges).
     // Called when an ACK frame we previously sent is itself acknowledged.
-    void drop_ack_ranges(std::uint64_t pn) noexcept;
+    void drop_ack_ranges(std::uint64_t largest_acknowledged) noexcept;
 
     [[nodiscard]] QuicOutputFrame *alloc_frame() noexcept;
     void release_frame(QuicOutputFrame &frame) noexcept;

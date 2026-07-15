@@ -226,7 +226,7 @@ void validate_ecn_feedback(QuicConnection &connection, QuicPacketNumberSpace &sp
         // When an ACK frame we sent is acknowledged, drop ranges up to
         // that point to prevent generating ACKs for already-ACKed data.
         if (frame->type == QuicFrameType::Ack || frame->type == QuicFrameType::AckEcn) {
-            space.drop_ack_ranges(frame->packet_number);
+            space.drop_ack_ranges(frame->u.ack.largest);
         }
 
         if (frame->type == QuicFrameType::Stream) {

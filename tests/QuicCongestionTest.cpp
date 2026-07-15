@@ -194,6 +194,49 @@ TEST(QuicAckHandlerTest, AckedSentFrameUpdatesCongestionAndRtt) {
     EXPECT_EQ(connection.rtt().latest_rtt, fiber::quic::QuicTime{80});
 }
 
+TEST(QuicAckHandlerTest, AckOfAckDropsRangesThroughSentAckLargest) {
+    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
+
+    space.on_packet_received(10, fiber::quic::QuicTime{1}, true);
+
+    fiber::quic::QuicOutputFrame *sent_ack = space.alloc_frame();
+    ASSERT_NE(sent_ack, nullptr);
+    sent_ack->type = fiber::quic::QuicFrameType::Ack;
+    sent_ack->u.ack.largest = 10;
+    sent_ack->packet_number = 100;
+    sent_ack->send_time = fiber::quic::QuicTime{10};
+    // ACK is not ack-eliciting by itself, but the packet carrying it can be
+    // ack-eliciting when another frame is coalesced into the same packet.
+    sent_ack->packet_ack_eliciting = true;
+    space.sent_frames.push_back(*sent_ack);
+    space.next_packet_number = 101;
+
+    // This packet arrived after the ACK above was sent and must remain tracked
+    // when the peer acknowledges local packet 100.
+    space.on_packet_received(11, fiber::quic::QuicTime{2}, true);
+    space.send_ack = true;
+    ASSERT_EQ(space.largest_range, 11U);
+    ASSERT_EQ(space.first_range, 1U);
+    ASSERT_EQ(space.pending_ack, 11U);
+
+    fiber::quic::QuicInputFrame ack_of_ack{};
+    ack_of_ack.type = fiber::quic::QuicFrameType::Ack;
+    ack_of_ack.level = fiber::quic::QuicEncryptionLevel::Initial;
+    ack_of_ack.u.ack.largest = 100;
+    ack_of_ack.u.ack.first_range = 0;
+
+    auto result = fiber::quic::quic_handle_ack_frame(connection, fiber::quic::QuicEncryptionLevel::Initial, ack_of_ack,
+                                                     fiber::quic::QuicTime{20});
+
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_TRUE(result->acked_frames);
+    EXPECT_EQ(space.largest_range, 11U);
+    EXPECT_EQ(space.first_range, 0U);
+    EXPECT_EQ(space.ack_range_count, 0U);
+    EXPECT_EQ(space.pending_ack, 11U);
+}
+
 TEST(QuicAckHandlerTest, HandlesDescendingAckRangesWithSingleReverseScan) {
     fiber::quic::QuicConnection connection(fiber::test::quic_options());
     auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
