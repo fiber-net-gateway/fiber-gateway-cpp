@@ -42,6 +42,7 @@ public:
     [[nodiscard]] common::IoErr encode_scheme(std::string_view scheme) noexcept;
     [[nodiscard]] common::IoErr encode_authority(std::string_view authority) noexcept;
     [[nodiscard]] common::IoErr encode_path(std::string_view path) noexcept;
+    [[nodiscard]] common::IoErr encode_protocol(std::string_view protocol) noexcept;
     [[nodiscard]] common::IoErr encode_field(std::string_view name, std::uint64_t name_hash,
                                              std::string_view value) noexcept;
     void cancel_block() noexcept;

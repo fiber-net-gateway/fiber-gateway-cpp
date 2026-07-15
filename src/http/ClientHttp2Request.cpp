@@ -29,7 +29,7 @@ struct ClientHttp2Request::SendRequestHeaderOp {
 
     SendRequestHeaderOp(const Http2RequestHead &head, bool end_stream) noexcept :
         method_(head.method), scheme_(head.scheme), authority_(head.authority), path_(head.path),
-        headers_(head.headers), end_stream_(end_stream) {}
+        protocol_(head.protocol), headers_(head.headers), end_stream_(end_stream) {}
 
     [[nodiscard]] common::IoErr submit(ClientHttp2Request &request, HeaderSendAwaiter &awaiter) noexcept {
         return request.conn_->request_stream_send(request.stream_, Http2OutboundNextKind::Headers,
@@ -40,6 +40,7 @@ struct ClientHttp2Request::SendRequestHeaderOp {
     std::string_view scheme_{};
     std::string_view authority_{};
     std::string_view path_{};
+    std::string_view protocol_{};
     const HttpHeaders *headers_ = nullptr;
     bool end_stream_ = false;
 };
@@ -129,6 +130,14 @@ ClientHttp2Request *ClientHttp2Request::create(Http2Connection &conn, mem::BufPo
 mem::IoBufNodePool &ClientHttp2Request::node_pool() noexcept {
     FIBER_ASSERT(conn_ != nullptr);
     return conn_->transport().loop().io_buf_node_pool();
+}
+
+Http2ExtendedConnectSupport ClientHttp2Request::extended_connect_support() const noexcept {
+    if (!conn_ || !conn_->peer_settings_received()) {
+        return Http2ExtendedConnectSupport::Unknown;
+    }
+    return conn_->peer_enable_connect_protocol() ? Http2ExtendedConnectSupport::Enabled
+                                                 : Http2ExtendedConnectSupport::Disabled;
 }
 
 fiber::async::Task<common::IoResult<void>>
@@ -512,6 +521,9 @@ common::IoErr ClientHttp2Request::encode_request_frames(Http2Stream &stream, voi
     }
     if (err == common::IoErr::None && !awaiter->op_.path_.empty()) {
         err = frame_encoder.encode_path(awaiter->op_.path_);
+    }
+    if (err == common::IoErr::None && !awaiter->op_.protocol_.empty()) {
+        err = frame_encoder.encode_protocol(awaiter->op_.protocol_);
     }
     if (err != common::IoErr::None) {
         frame_encoder.abort();

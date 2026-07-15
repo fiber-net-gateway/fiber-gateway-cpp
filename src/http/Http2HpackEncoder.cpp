@@ -17,11 +17,13 @@ constexpr std::string_view kMethodName = ":method";
 constexpr std::string_view kSchemeName = ":scheme";
 constexpr std::string_view kAuthorityName = ":authority";
 constexpr std::string_view kPathName = ":path";
+constexpr std::string_view kProtocolName = ":protocol";
 constexpr std::uint64_t kStatusNameHash = http_header_name_hash(kStatusName);
 constexpr std::uint64_t kMethodNameHash = http_header_name_hash(kMethodName);
 constexpr std::uint64_t kSchemeNameHash = http_header_name_hash(kSchemeName);
 constexpr std::uint64_t kAuthorityNameHash = http_header_name_hash(kAuthorityName);
 constexpr std::uint64_t kPathNameHash = http_header_name_hash(kPathName);
+constexpr std::uint64_t kProtocolNameHash = http_header_name_hash(kProtocolName);
 
 [[nodiscard]] std::string_view common_status_value(int status_code) noexcept {
     switch (status_code) {
@@ -220,6 +222,10 @@ common::IoErr Http2HpackEncoder::encode_authority(std::string_view authority) no
 
 common::IoErr Http2HpackEncoder::encode_path(std::string_view path) noexcept {
     return encode_field(kPathName, kPathNameHash, path);
+}
+
+common::IoErr Http2HpackEncoder::encode_protocol(std::string_view protocol) noexcept {
+    return encode_field(kProtocolName, kProtocolNameHash, protocol);
 }
 
 common::IoErr Http2HpackEncoder::encode_field(std::string_view name, std::uint64_t name_hash,

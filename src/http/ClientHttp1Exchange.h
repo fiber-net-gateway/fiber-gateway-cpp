@@ -47,9 +47,12 @@ public:
     fiber::async::Task<common::IoResult<void>>
     discard_response_body(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
 
+    common::IoResult<void> switch_to_raw_stream() noexcept;
+
     [[nodiscard]] const HttpHeaders &response_trailers() const noexcept { return response_trailers_; }
     [[nodiscard]] const Http1ClientExchangeOptions &options() const noexcept { return options_; }
     [[nodiscard]] bool valid() const noexcept { return active_; }
+    [[nodiscard]] bool raw_stream_active() const noexcept { return raw_stream_active_; }
     [[nodiscard]] bool request_complete() const noexcept { return request_state_ == RequestState::RequestDone; }
     [[nodiscard]] bool response_complete() const noexcept { return response_complete_; }
     [[nodiscard]] bool done() const noexcept { return request_complete() && response_complete_; }
@@ -104,6 +107,8 @@ private:
     bool saw_connection_close_ = false;
     bool saw_connection_keep_alive_ = false;
     bool response_eof_delimited_ = false;
+    bool raw_stream_active_ = false;
+    bool raw_stream_write_complete_ = false;
     RequestState request_state_ = RequestState::Init;
     HttpMethod request_method_ = HttpMethod::Unknown;
     HttpBodySpec body_spec_ = HttpBodySpec::None();

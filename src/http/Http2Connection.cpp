@@ -764,6 +764,7 @@ common::IoErr Http2Connection::handle_settings_payload(const FrameHeader &fhr, c
         if (settings_scratch_used_ != 0) {
             return common::IoErr::Invalid;
         }
+        peer_settings_received_ = true;
         return send_settings_ack();
     }
 

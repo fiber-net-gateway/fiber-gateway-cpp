@@ -1,6 +1,7 @@
 #ifndef FIBER_HTTP_CLIENT_HTTP2_TYPES_H
 #define FIBER_HTTP_CLIENT_HTTP2_TYPES_H
 
+#include <cstdint>
 #include <string_view>
 
 #include "HttpCommon.h"
@@ -9,11 +10,18 @@
 
 namespace fiber::http {
 
+enum class Http2ExtendedConnectSupport : std::uint8_t {
+    Unknown,
+    Disabled,
+    Enabled,
+};
+
 struct Http2RequestHead {
     HttpMethod method = HttpMethod::Unknown;
     std::string_view scheme{};
     std::string_view authority{};
     std::string_view path{};
+    std::string_view protocol{};
     const HttpHeaders *headers = nullptr;
 };
 

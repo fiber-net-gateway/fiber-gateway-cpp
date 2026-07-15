@@ -92,6 +92,13 @@ common::IoErr Http2HeadersFrameEncoder::encode_path(std::string_view path) noexc
     return encoder_.encode_path(path);
 }
 
+common::IoErr Http2HeadersFrameEncoder::encode_protocol(std::string_view protocol) noexcept {
+    if (!begun_ || finished_) {
+        return common::IoErr::Invalid;
+    }
+    return encoder_.encode_protocol(protocol);
+}
+
 common::IoErr Http2HeadersFrameEncoder::encode_field(std::string_view name, std::uint64_t name_hash,
                                                      std::string_view value) noexcept {
     if (!begun_ || finished_) {
