@@ -11,6 +11,48 @@
 
 #include "QuicTestLoop.h"
 
+namespace {
+
+void prepare_persistent_congestion_loss(fiber::quic::QuicConnection &connection) {
+    fiber::quic::QuicRttState &rtt = connection.rtt();
+    rtt.latest_rtt = fiber::quic::QuicTime{10};
+    rtt.avg_rtt = fiber::quic::QuicTime{10};
+    rtt.min_rtt = fiber::quic::QuicTime{10};
+    rtt.rttvar = fiber::quic::QuicTime{1};
+    rtt.first_rtt = fiber::quic::QuicTime{50};
+
+    auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+    constexpr std::array send_times{fiber::quic::QuicTime{100}, fiber::quic::QuicTime{300}};
+    for (std::size_t i = 0; i < send_times.size(); ++i) {
+        fiber::quic::QuicOutputFrame *frame = space.alloc_frame();
+        ASSERT_NE(frame, nullptr);
+        frame->type = fiber::quic::QuicFrameType::Ping;
+        frame->packet_number = i;
+        frame->packet_len = 1200;
+        frame->send_time = send_times[i];
+        frame->packet_ack_eliciting = true;
+        space.sent_frames.push_back(*frame);
+    }
+    space.next_packet_number = 5;
+    space.largest_acked_packet_number = 4;
+
+    // Keep the ordinary CUBIC loss response above the minimum window so the
+    // tests can distinguish it from persistent-congestion collapse.
+    connection.congestion().in_flight = 12000;
+}
+
+void detect_loss_with_ack_interval(fiber::quic::QuicConnection &connection, fiber::quic::QuicTime oldest_acked,
+                                   fiber::quic::QuicTime newest_acked) {
+    const fiber::quic::QuicLossAckStat stat{
+            .oldest = oldest_acked,
+            .newest = newest_acked,
+    };
+    auto lost = fiber::quic::quic_detect_lost(connection, fiber::quic::QuicTime{500}, &stat);
+    ASSERT_TRUE(lost.has_value()) << static_cast<int>(lost.error());
+}
+
+} // namespace
+
 TEST(QuicCongestionTest, InitializesLikeNginx) {
     fiber::quic::QuicCongestionState cg{};
     fiber::quic::quic_congestion_init(cg, fiber::quic::QuicTime{0});
@@ -346,6 +388,33 @@ TEST(QuicLossRecoveryTest, LostEcnValidationProbeDisablesPathEcn) {
 
     ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
     EXPECT_EQ(path->ecn_state, fiber::quic::QuicEcnState::Failed);
+}
+
+TEST(QuicLossRecoveryTest, AckedIntervalBeforeLostIntervalCanEstablishPersistentCongestion) {
+    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    prepare_persistent_congestion_loss(connection);
+
+    detect_loss_with_ack_interval(connection, fiber::quic::QuicTime{10}, fiber::quic::QuicTime{20});
+
+    EXPECT_EQ(connection.congestion().window, 2 * connection.congestion().mtu);
+}
+
+TEST(QuicLossRecoveryTest, AckedIntervalAfterLostIntervalCanEstablishPersistentCongestion) {
+    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    prepare_persistent_congestion_loss(connection);
+
+    detect_loss_with_ack_interval(connection, fiber::quic::QuicTime{400}, fiber::quic::QuicTime{450});
+
+    EXPECT_EQ(connection.congestion().window, 2 * connection.congestion().mtu);
+}
+
+TEST(QuicLossRecoveryTest, AckedPacketInsideLostIntervalPreventsPersistentCongestion) {
+    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    prepare_persistent_congestion_loss(connection);
+
+    detect_loss_with_ack_interval(connection, fiber::quic::QuicTime{200}, fiber::quic::QuicTime{200});
+
+    EXPECT_GT(connection.congestion().window, 2 * connection.congestion().mtu);
 }
 
 TEST(QuicLossRecoveryTest, SelectsPtoTimerFromLatestSentPacket) {
