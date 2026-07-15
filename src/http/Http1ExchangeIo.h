@@ -34,6 +34,7 @@ public:
     fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, const uint8_t *buf, size_t len,
                                                             bool end,
                                                             std::chrono::milliseconds timeout) noexcept override;
+    common::IoResult<void> abort(HttpExchange &exchange, common::IoErr reason) noexcept override;
 
     [[nodiscard]] bool request_body_complete() const noexcept { return body_parser_.done(); }
     [[nodiscard]] bool response_complete() const noexcept { return response_phase_ == ResponsePhase::Finished; }

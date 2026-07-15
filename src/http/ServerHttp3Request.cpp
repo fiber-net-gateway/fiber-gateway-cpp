@@ -1463,4 +1463,13 @@ async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_body(HttpEx
     co_return co_await write_body(exchange, std::move(chunk), timeout);
 }
 
+common::IoResult<void> ServerHttp3Request::abort(HttpExchange &exchange, common::IoErr) noexcept {
+    if (&exchange != &exchange_ || !handler_started_) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    stream_.close(error_value(Http3ErrorCode::RequestCancelled));
+    response_finished_ = true;
+    return {};
+}
+
 } // namespace fiber::http

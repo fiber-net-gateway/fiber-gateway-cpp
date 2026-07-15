@@ -584,6 +584,7 @@ ClientHttp1Exchange::read_response_trailers(mem::IoBuf &read_buf, std::chrono::m
     if (!conn_ || !conn_->transport_ || pool_ == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
+    HttpTransport *transport = conn_->transport_.get();
 
     Http1HeaderParseBuffer header_buffer(response_header_buffer_options(options_));
     auto init_result = header_buffer.ensure_init();
@@ -625,7 +626,7 @@ ClientHttp1Exchange::read_response_trailers(mem::IoBuf &read_buf, std::chrono::m
                 co_return std::unexpected(copied_result.error());
             }
             if (read_buf.readable() == 0) {
-                auto read_result = co_await conn_->transport_->read_into(header_buffer.buf(), timeout);
+                auto read_result = co_await transport->read_into(header_buffer.buf(), timeout);
                 if (!read_result) {
                     co_return std::unexpected(read_result.error());
                 }
@@ -689,6 +690,7 @@ ClientHttp1Exchange::send_header(const Http1RequestHead &head, bool end_stream,
     if (!conn_ || !conn_->transport_ || !conn_->valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
+    HttpTransport *transport = conn_->transport_.get();
     if (request_state_ != RequestState::Init) {
         co_return std::unexpected(common::IoErr::Already);
     }
@@ -715,24 +717,16 @@ ClientHttp1Exchange::send_header(const Http1RequestHead &head, bool end_stream,
         co_return std::unexpected(encode_result.error());
     }
 
-    auto write_result =
-            co_await write_all(conn_->transport_.get(), header_buf.readable_data(), header_buf.readable(), timeout);
+    auto write_result = co_await write_all(transport, header_buf.readable_data(), header_buf.readable(), timeout);
     if (!write_result) {
-        request_state_ = RequestState::Failed;
-        active_ = false;
-        conn_->fail_exchange(this);
-        conn_ = nullptr;
+        fail_active_exchange();
         co_return std::unexpected(write_result.error());
     }
 
     if (head.body.is_chunked() && end_stream) {
-        auto final_result =
-                co_await write_all(conn_->transport_.get(), kChunkedFinal.data(), kChunkedFinal.size(), timeout);
+        auto final_result = co_await write_all(transport, kChunkedFinal.data(), kChunkedFinal.size(), timeout);
         if (!final_result) {
-            request_state_ = RequestState::Failed;
-            active_ = false;
-            conn_->fail_exchange(this);
-            conn_ = nullptr;
+            fail_active_exchange();
             co_return std::unexpected(final_result.error());
         }
     }
@@ -765,6 +759,7 @@ ClientHttp1Exchange::write_body(mem::IoBufChain chunk, std::chrono::milliseconds
     if (!conn_ || !conn_->transport_ || !conn_->valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
+    HttpTransport *transport = conn_->transport_.get();
     if (raw_stream_active_) {
         if (raw_stream_write_complete_) {
             co_return std::unexpected(common::IoErr::Already);
@@ -773,7 +768,7 @@ ClientHttp1Exchange::write_body(mem::IoBufChain chunk, std::chrono::milliseconds
         const std::size_t body_bytes = chunk.readable_bytes();
         const bool end_stream = chunk.complete();
         if (body_bytes != 0) {
-            auto write_result = co_await write_all(conn_->transport_.get(), chunk, timeout);
+            auto write_result = co_await write_all(transport, chunk, timeout);
             if (!write_result) {
                 fail_active_exchange();
                 co_return std::unexpected(write_result.error());
@@ -810,12 +805,9 @@ ClientHttp1Exchange::write_body(mem::IoBufChain chunk, std::chrono::milliseconds
             if (chunk.complete() && body_sent_ + body_bytes != content_length_) {
                 co_return std::unexpected(common::IoErr::Invalid);
             }
-            auto write_result = co_await write_all(conn_->transport_.get(), chunk, timeout);
+            auto write_result = co_await write_all(transport, chunk, timeout);
             if (!write_result) {
-                request_state_ = RequestState::Failed;
-                active_ = false;
-                conn_->fail_exchange(this);
-                conn_ = nullptr;
+                fail_active_exchange();
                 co_return std::unexpected(write_result.error());
             }
             body_sent_ += body_bytes;
@@ -862,12 +854,9 @@ ClientHttp1Exchange::write_body(mem::IoBufChain chunk, std::chrono::milliseconds
                     co_return std::unexpected(common::IoErr::NoMem);
                 }
 
-                auto write_result = co_await write_all(conn_->transport_.get(), chunk, timeout);
+                auto write_result = co_await write_all(transport, chunk, timeout);
                 if (!write_result) {
-                    request_state_ = RequestState::Failed;
-                    active_ = false;
-                    conn_->fail_exchange(this);
-                    conn_ = nullptr;
+                    fail_active_exchange();
                     co_return std::unexpected(write_result.error());
                 }
                 body_sent_ += body_bytes;
@@ -878,13 +867,9 @@ ClientHttp1Exchange::write_body(mem::IoBufChain chunk, std::chrono::milliseconds
             }
 
             // body_bytes == 0 && chunk.complete(): empty final chunk, just the terminator.
-            auto final_result =
-                    co_await write_all(conn_->transport_.get(), kChunkedFinal.data(), kChunkedFinal.size(), timeout);
+            auto final_result = co_await write_all(transport, kChunkedFinal.data(), kChunkedFinal.size(), timeout);
             if (!final_result) {
-                request_state_ = RequestState::Failed;
-                active_ = false;
-                conn_->fail_exchange(this);
-                conn_ = nullptr;
+                fail_active_exchange();
                 co_return std::unexpected(final_result.error());
             }
             request_state_ = RequestState::RequestDone;
@@ -909,13 +894,14 @@ ClientHttp1Exchange::write_body(const std::uint8_t *buf, std::size_t len, bool e
     if (!conn_ || !conn_->transport_ || !conn_->valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
+    HttpTransport *transport = conn_->transport_.get();
     if (raw_stream_active_) {
         if (raw_stream_write_complete_) {
             co_return std::unexpected(common::IoErr::Already);
         }
 
         if (len != 0) {
-            auto write_result = co_await write_all(conn_->transport_.get(), buf, len, timeout);
+            auto write_result = co_await write_all(transport, buf, len, timeout);
             if (!write_result) {
                 fail_active_exchange();
                 co_return std::unexpected(write_result.error());
@@ -952,12 +938,9 @@ ClientHttp1Exchange::write_body(const std::uint8_t *buf, std::size_t len, bool e
                 co_return std::unexpected(common::IoErr::Invalid);
             }
             if (len != 0) {
-                auto write_result = co_await write_all(conn_->transport_.get(), buf, len, timeout);
+                auto write_result = co_await write_all(transport, buf, len, timeout);
                 if (!write_result) {
-                    request_state_ = RequestState::Failed;
-                    active_ = false;
-                    conn_->fail_exchange(this);
-                    conn_ = nullptr;
+                    fail_active_exchange();
                     co_return std::unexpected(write_result.error());
                 }
                 body_sent_ += len;
@@ -979,43 +962,30 @@ ClientHttp1Exchange::write_body(const std::uint8_t *buf, std::size_t len, bool e
                 *prefix_ptr++ = '\r';
                 *prefix_ptr++ = '\n';
 
-                auto prefix_result = co_await write_all(conn_->transport_.get(), prefix.data(),
+                auto prefix_result = co_await write_all(transport, prefix.data(),
                                                         static_cast<std::size_t>(prefix_ptr - prefix.data()), timeout);
                 if (!prefix_result) {
-                    request_state_ = RequestState::Failed;
-                    active_ = false;
-                    conn_->fail_exchange(this);
-                    conn_ = nullptr;
+                    fail_active_exchange();
                     co_return std::unexpected(prefix_result.error());
                 }
-                auto body_result = co_await write_all(conn_->transport_.get(), buf, len, timeout);
+                auto body_result = co_await write_all(transport, buf, len, timeout);
                 if (!body_result) {
-                    request_state_ = RequestState::Failed;
-                    active_ = false;
-                    conn_->fail_exchange(this);
-                    conn_ = nullptr;
+                    fail_active_exchange();
                     co_return std::unexpected(body_result.error());
                 }
-                auto suffix_result = co_await write_all(conn_->transport_.get(), kLineTerminator.data(),
-                                                        kLineTerminator.size(), timeout);
+                auto suffix_result =
+                        co_await write_all(transport, kLineTerminator.data(), kLineTerminator.size(), timeout);
                 if (!suffix_result) {
-                    request_state_ = RequestState::Failed;
-                    active_ = false;
-                    conn_->fail_exchange(this);
-                    conn_ = nullptr;
+                    fail_active_exchange();
                     co_return std::unexpected(suffix_result.error());
                 }
                 body_sent_ += len;
             }
 
             if (end_stream) {
-                auto final_result = co_await write_all(conn_->transport_.get(), kChunkedFinal.data(),
-                                                       kChunkedFinal.size(), timeout);
+                auto final_result = co_await write_all(transport, kChunkedFinal.data(), kChunkedFinal.size(), timeout);
                 if (!final_result) {
-                    request_state_ = RequestState::Failed;
-                    active_ = false;
-                    conn_->fail_exchange(this);
-                    conn_ = nullptr;
+                    fail_active_exchange();
                     co_return std::unexpected(final_result.error());
                 }
                 request_state_ = RequestState::RequestDone;
@@ -1037,6 +1007,7 @@ ClientHttp1Exchange::send_trailer(const HttpHeaders &trailers, std::chrono::mill
     if (!conn_ || !conn_->transport_ || !conn_->valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
+    HttpTransport *transport = conn_->transport_.get();
     if (raw_stream_active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -1066,13 +1037,9 @@ ClientHttp1Exchange::send_trailer(const HttpHeaders &trailers, std::chrono::mill
         co_return std::unexpected(encode_result.error());
     }
 
-    auto write_result =
-            co_await write_all(conn_->transport_.get(), trailer_buf.readable_data(), trailer_buf.readable(), timeout);
+    auto write_result = co_await write_all(transport, trailer_buf.readable_data(), trailer_buf.readable(), timeout);
     if (!write_result) {
-        request_state_ = RequestState::Failed;
-        active_ = false;
-        conn_->fail_exchange(this);
-        conn_ = nullptr;
+        fail_active_exchange();
         co_return std::unexpected(write_result.error());
     }
 
@@ -1091,6 +1058,7 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
     if (!conn_ || !conn_->transport_ || !conn_->valid() || pool_ == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
+    HttpTransport *transport = conn_->transport_.get();
     if (request_state_ == RequestState::Init || request_state_ == RequestState::Failed) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -1121,10 +1089,7 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
     auto fail_exchange = [&](common::IoErr err) -> common::IoResult<const Http1ResponseHead *> {
         header_node->~ResponseHeaderNode();
         ResponseHeaderNode::operator delete(header_node);
-        request_state_ = RequestState::Failed;
-        active_ = false;
-        conn_->fail_exchange(this);
-        conn_ = nullptr;
+        fail_active_exchange();
         return std::unexpected(err);
     };
 
@@ -1170,7 +1135,7 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
     }
 
     auto read_more = [&]() -> fiber::async::Task<common::IoResult<void>> {
-        auto read_result = co_await conn_->transport_->read_into(response_header_buffer.buf(), timeout);
+        auto read_result = co_await transport->read_into(response_header_buffer.buf(), timeout);
         if (!read_result) {
             co_return std::unexpected(read_result.error());
         }
@@ -1511,6 +1476,17 @@ ClientHttp1Exchange::discard_response_body(std::chrono::milliseconds timeout) no
         }
     }
     co_return common::IoResult<void>{};
+}
+
+common::IoResult<void> ClientHttp1Exchange::abort(common::IoErr) noexcept {
+    if (!active_ || !conn_ || !conn_->transport_) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    Http1ClientConnection *connection = conn_;
+    connection->transport_->close();
+    fail_active_exchange();
+    return {};
 }
 
 common::IoResult<void> ClientHttp1Exchange::switch_to_raw_stream() noexcept {

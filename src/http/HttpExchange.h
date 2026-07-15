@@ -116,6 +116,7 @@ public:
     fiber::async::Task<common::IoResult<size_t>>
     write_body(const uint8_t *buf, size_t len, bool end,
                std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    common::IoResult<void> abort(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
 
 private:

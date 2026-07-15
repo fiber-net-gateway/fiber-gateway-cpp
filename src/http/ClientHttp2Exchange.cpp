@@ -131,13 +131,19 @@ ClientHttp2Exchange::read_body(std::size_t max_bytes, std::chrono::milliseconds 
     co_return co_await req->read_body(max_bytes, timeout);
 }
 
-void ClientHttp2Exchange::cancel(common::IoErr reason) noexcept {
+common::IoResult<void> ClientHttp2Exchange::abort(common::IoErr reason) noexcept {
     if (!stream_) {
         conn_ = nullptr;
-        return;
+        return std::unexpected(common::IoErr::Invalid);
     }
-    stream_->close(reason);
+    const common::IoErr err = stream_->close_rst(Http2ErrorCode::Cancel, reason);
+    if (err != common::IoErr::None && err != common::IoErr::Canceled) {
+        return std::unexpected(err);
+    }
+    return {};
 }
+
+void ClientHttp2Exchange::cancel(common::IoErr reason) noexcept { (void) abort(reason); }
 
 Http2ExtendedConnectSupport ClientHttp2Exchange::extended_connect_support() const noexcept {
     if (const ClientHttp2Request *req = request()) {
