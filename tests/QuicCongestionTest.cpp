@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <array>
+#include <cstdint>
 #include <limits>
 
 #include "quic/QuicAckHandler.h"
@@ -63,6 +65,57 @@ TEST(QuicCongestionTest, RttSampleMatchesQuicEstimatorShape) {
     EXPECT_EQ(rtt.rttvar, fiber::quic::QuicTime{40});
 }
 
+TEST(QuicOutputFrameQueueTest, MaintainsReverseLinksAcrossMutations) {
+    fiber::quic::QuicOutputFrame first{};
+    fiber::quic::QuicOutputFrame second{};
+    fiber::quic::QuicOutputFrame third{};
+    fiber::quic::QuicOutputFrame fourth{};
+    fiber::quic::QuicOutputFrame fifth{};
+    fiber::quic::QuicOutputFrameQueue queue{};
+
+    queue.push_back(first);
+    queue.push_back(second);
+    queue.push_front(third);
+    queue.insert_after(first, fourth);
+    queue.erase_after(&first, fourth);
+
+    fiber::quic::QuicOutputFrameQueue prefix{};
+    prefix.push_back(fourth);
+    prefix.push_back(fifth);
+    queue.prepend_all(prefix);
+
+    const std::array expected{&fourth, &fifth, &third, &first, &second};
+    fiber::quic::QuicOutputFrame *previous = nullptr;
+    fiber::quic::QuicOutputFrame *frame = queue.front();
+    for (fiber::quic::QuicOutputFrame *item: expected) {
+        ASSERT_EQ(frame, item);
+        EXPECT_EQ(queue.prev_of(*frame), previous);
+        previous = frame;
+        frame = queue.next_of(*frame);
+    }
+    EXPECT_EQ(frame, nullptr);
+    EXPECT_EQ(queue.back(), expected.back());
+
+    fiber::quic::QuicOutputFrame *next = nullptr;
+    frame = queue.back();
+    for (auto it = expected.rbegin(); it != expected.rend(); ++it) {
+        ASSERT_EQ(frame, *it);
+        EXPECT_EQ(queue.next_of(*frame), next);
+        next = frame;
+        frame = queue.prev_of(*frame);
+    }
+    EXPECT_EQ(frame, nullptr);
+
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        fiber::quic::QuicOutputFrame *removed = queue.pop_front();
+        ASSERT_EQ(removed, expected[i]);
+        EXPECT_EQ(removed->next, nullptr);
+        EXPECT_EQ(removed->prev, nullptr);
+        EXPECT_FALSE(removed->queued);
+    }
+    EXPECT_TRUE(queue.empty());
+}
+
 TEST(QuicAckHandlerTest, AckedSentFrameUpdatesCongestionAndRtt) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
@@ -97,6 +150,56 @@ TEST(QuicAckHandlerTest, AckedSentFrameUpdatesCongestionAndRtt) {
     EXPECT_EQ(connection.congestion().in_flight, 0U);
     EXPECT_EQ(connection.congestion().window, 13200U);
     EXPECT_EQ(connection.rtt().latest_rtt, fiber::quic::QuicTime{80});
+}
+
+TEST(QuicAckHandlerTest, HandlesDescendingAckRangesWithSingleReverseScan) {
+    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
+
+    for (std::uint64_t packet_number = 0; packet_number <= 6; ++packet_number) {
+        fiber::quic::QuicOutputFrame *frame = space.alloc_frame();
+        ASSERT_NE(frame, nullptr);
+        frame->type = fiber::quic::QuicFrameType::Ping;
+        frame->packet_number = packet_number;
+        frame->packet_len = 100;
+        frame->send_time = fiber::quic::QuicTime{10 + static_cast<std::int64_t>(packet_number)};
+        frame->packet_ack_eliciting = true;
+        space.sent_frames.push_back(*frame);
+        fiber::quic::quic_congestion_on_packet_sent(connection.congestion(), frame->packet_len, true, false);
+    }
+    // Model a long-lived packet number space so the interleaved unacknowledged
+    // packets are not immediately declared lost by the packet threshold.
+    space.next_packet_number = 100;
+
+    constexpr std::uint8_t ranges[]{0, 0, 0, 0}; // ACK singleton packet ranges 4 and 2 after 6.
+    fiber::quic::QuicInputFrame ack{};
+    ack.type = fiber::quic::QuicFrameType::Ack;
+    ack.level = fiber::quic::QuicEncryptionLevel::Initial;
+    ack.u.ack.largest = 6;
+    ack.u.ack.range_count = 2;
+    ack.u.ack.first_range = 0;
+    ack.data = {ranges, sizeof(ranges)};
+
+    auto result = fiber::quic::quic_handle_ack_frame(connection, fiber::quic::QuicEncryptionLevel::Initial, ack,
+                                                     fiber::quic::QuicTime{100});
+
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_TRUE(result->acked_frames);
+    EXPECT_EQ(connection.congestion().in_flight, 400U);
+
+    constexpr std::array<std::uint64_t, 4> remaining{0, 1, 3, 5};
+    fiber::quic::QuicOutputFrame *previous = nullptr;
+    fiber::quic::QuicOutputFrame *frame = space.sent_frames.front();
+    for (std::uint64_t packet_number: remaining) {
+        ASSERT_NE(frame, nullptr);
+        EXPECT_EQ(frame->packet_number, packet_number);
+        EXPECT_EQ(space.sent_frames.prev_of(*frame), previous);
+        previous = frame;
+        frame = space.sent_frames.next_of(*frame);
+    }
+    EXPECT_EQ(frame, nullptr);
+    ASSERT_NE(space.sent_frames.back(), nullptr);
+    EXPECT_EQ(space.sent_frames.back()->packet_number, 5U);
 }
 
 TEST(QuicAckHandlerTest, MissingAckEcnDisablesPathEcn) {

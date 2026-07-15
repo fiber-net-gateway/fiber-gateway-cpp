@@ -11,7 +11,11 @@ void QuicOutputFrameQueue::push_front(QuicOutputFrame &frame) noexcept {
         return;
     }
     frame.next = head_;
+    frame.prev = nullptr;
     frame.queued = true;
+    if (head_ != nullptr) {
+        head_->prev = &frame;
+    }
     head_ = &frame;
     if (tail_ == nullptr) {
         tail_ = &frame;
@@ -23,6 +27,7 @@ void QuicOutputFrameQueue::push_back(QuicOutputFrame &frame) noexcept {
         return;
     }
     frame.next = nullptr;
+    frame.prev = tail_;
     frame.queued = true;
     if (tail_ != nullptr) {
         tail_->next = &frame;
@@ -37,7 +42,11 @@ void QuicOutputFrameQueue::insert_after(QuicOutputFrame &position, QuicOutputFra
         return;
     }
     frame.next = position.next;
+    frame.prev = &position;
     frame.queued = true;
+    if (frame.next != nullptr) {
+        frame.next->prev = &frame;
+    }
     position.next = &frame;
     if (tail_ == &position) {
         tail_ = &frame;
@@ -58,7 +67,7 @@ void QuicOutputFrameQueue::erase(QuicOutputFrame &frame) noexcept {
 }
 
 void QuicOutputFrameQueue::erase_after(QuicOutputFrame *prev, QuicOutputFrame &frame) noexcept {
-    if (!frame.queued) {
+    if (!frame.queued || frame.prev != prev) {
         return;
     }
     if (prev != nullptr) {
@@ -72,10 +81,14 @@ void QuicOutputFrameQueue::erase_after(QuicOutputFrame *prev, QuicOutputFrame &f
         }
         head_ = frame.next;
     }
+    if (frame.next != nullptr) {
+        frame.next->prev = prev;
+    }
     if (tail_ == &frame) {
         tail_ = prev;
     }
     frame.next = nullptr;
+    frame.prev = nullptr;
     frame.queued = false;
 }
 
@@ -93,6 +106,9 @@ void QuicOutputFrameQueue::prepend_all(QuicOutputFrameQueue &source) noexcept {
         return;
     }
     source.tail_->next = head_;
+    if (head_ != nullptr) {
+        head_->prev = source.tail_;
+    }
     head_ = source.head_;
     if (tail_ == nullptr) {
         tail_ = source.tail_;

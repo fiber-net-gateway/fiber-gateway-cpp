@@ -180,64 +180,67 @@ void validate_ecn_feedback(QuicConnection &connection, QuicPacketNumberSpace &sp
 [[nodiscard]] common::IoResult<void> handle_ack_range(QuicConnection &connection, QuicPacketNumberSpace &space,
                                                       std::uint64_t min_packet_number, std::uint64_t max_packet_number,
                                                       QuicTime now, QuicLossAckStat &stat, QuicAckProcessResult &result,
-                                                      QuicAckedEcnStats &ecn_stats) noexcept {
+                                                      QuicAckedEcnStats &ecn_stats,
+                                                      QuicOutputFrame *&scan_cursor) noexcept {
     bool found = false;
-    QuicOutputFrame *prev = nullptr;
-    QuicOutputFrame *frame = space.sent_frames.front();
-    while (frame != nullptr) {
+
+    // ACK ranges arrive in descending packet-number order while sent_frames is
+    // ordered ascending. Walk backward once to find this range, then preserve
+    // the existing low-to-high processing order within the range.
+    while (scan_cursor != nullptr && scan_cursor->packet_number > max_packet_number) {
+        scan_cursor = space.sent_frames.prev_of(*scan_cursor);
+    }
+    QuicOutputFrame *prev = scan_cursor;
+    while (prev != nullptr && prev->packet_number >= min_packet_number) {
+        prev = space.sent_frames.prev_of(*prev);
+    }
+    scan_cursor = prev;
+
+    QuicOutputFrame *frame = prev != nullptr ? space.sent_frames.next_of(*prev) : space.sent_frames.front();
+    while (frame != nullptr && frame->packet_number <= max_packet_number) {
         QuicOutputFrame *next = space.sent_frames.next_of(*frame);
-        if (frame->packet_number > max_packet_number) {
-            break;
+        if (frame->packet_len != 0) {
+            record_acked_ecn_packet(*frame, ecn_stats);
+            const bool unblocked = quic_congestion_on_ack(
+                    connection.congestion(), QuicAckSample{frame->packet_len, frame->packet_number, frame->send_time},
+                    connection.reset_packet_number(), now, quic_oldest_sent_time(connection));
+            result.unblocked = result.unblocked || unblocked;
         }
 
-        if (frame->packet_number >= min_packet_number) {
-            if (frame->packet_len != 0) {
-                record_acked_ecn_packet(*frame, ecn_stats);
-                const bool unblocked = quic_congestion_on_ack(
-                        connection.congestion(),
-                        QuicAckSample{frame->packet_len, frame->packet_number, frame->send_time},
-                        connection.reset_packet_number(), now, quic_oldest_sent_time(connection));
-                result.unblocked = result.unblocked || unblocked;
-            }
-
-            if (frame->packet_number == max_packet_number && frame->packet_ack_eliciting) {
-                stat.max_packet_send_time = frame->send_time;
-                stat.max_packet_ack_eliciting = true;
-            }
-            if (stat.oldest == QuicTime::max() || frame->send_time < stat.oldest) {
-                stat.oldest = frame->send_time;
-            }
-            if (stat.newest == QuicTime::max() || frame->send_time > stat.newest) {
-                stat.newest = frame->send_time;
-            }
-
-            space.sent_frames.erase_after(prev, *frame);
-            frame->packet_len = 0;
-            frame->packet_ack_eliciting = false;
-
-            // RFC 9000, 13.2.4: Limiting Ranges by Tracking ACK Frames.
-            // When an ACK frame we sent is acknowledged, drop ranges up to
-            // that point to prevent generating ACKs for already-ACKed data.
-            if (frame->type == QuicFrameType::Ack || frame->type == QuicFrameType::AckEcn) {
-                space.drop_ack_ranges(frame->packet_number);
-            }
-
-            if (frame->type == QuicFrameType::Stream) {
-                auto acked = connection.on_stream_send_acked(frame->u.stream.stream_id,
-                                                             static_cast<std::size_t>(frame->u.stream.offset),
-                                                             frame->u.stream.length, frame->u.stream.fin);
-                if (!acked) {
-                    return std::unexpected(acked.error());
-                }
-            }
-
-            space.release_frame(*frame);
-            found = true;
-            result.acked_frames = true;
-        } else {
-            prev = frame;
+        if (frame->packet_number == max_packet_number && frame->packet_ack_eliciting) {
+            stat.max_packet_send_time = frame->send_time;
+            stat.max_packet_ack_eliciting = true;
+        }
+        if (stat.oldest == QuicTime::max() || frame->send_time < stat.oldest) {
+            stat.oldest = frame->send_time;
+        }
+        if (stat.newest == QuicTime::max() || frame->send_time > stat.newest) {
+            stat.newest = frame->send_time;
         }
 
+        space.sent_frames.erase_after(prev, *frame);
+        frame->packet_len = 0;
+        frame->packet_ack_eliciting = false;
+
+        // RFC 9000, 13.2.4: Limiting Ranges by Tracking ACK Frames.
+        // When an ACK frame we sent is acknowledged, drop ranges up to
+        // that point to prevent generating ACKs for already-ACKed data.
+        if (frame->type == QuicFrameType::Ack || frame->type == QuicFrameType::AckEcn) {
+            space.drop_ack_ranges(frame->packet_number);
+        }
+
+        if (frame->type == QuicFrameType::Stream) {
+            auto acked = connection.on_stream_send_acked(frame->u.stream.stream_id,
+                                                         static_cast<std::size_t>(frame->u.stream.offset),
+                                                         frame->u.stream.length, frame->u.stream.fin);
+            if (!acked) {
+                return std::unexpected(acked.error());
+            }
+        }
+
+        space.release_frame(*frame);
+        found = true;
+        result.acked_frames = true;
         frame = next;
     }
 
@@ -276,8 +279,9 @@ common::IoResult<QuicAckProcessResult> quic_handle_ack_frame(QuicConnection &con
     std::uint64_t min_packet_number = frame.u.ack.largest - frame.u.ack.first_range;
     std::uint64_t max_packet_number = frame.u.ack.largest;
     QuicAckedEcnStats ecn_stats{};
-    auto handled =
-            handle_ack_range(connection, space, min_packet_number, max_packet_number, now, stat, result, ecn_stats);
+    QuicOutputFrame *scan_cursor = space.sent_frames.back();
+    auto handled = handle_ack_range(connection, space, min_packet_number, max_packet_number, now, stat, result,
+                                    ecn_stats, scan_cursor);
     if (!handled) {
         return std::unexpected(handled.error());
     }
@@ -307,8 +311,8 @@ common::IoResult<QuicAckProcessResult> quic_handle_ack_frame(QuicConnection &con
             return std::unexpected(common::IoErr::Invalid);
         }
         min_packet_number = max_packet_number - *range;
-        handled =
-                handle_ack_range(connection, space, min_packet_number, max_packet_number, now, stat, result, ecn_stats);
+        handled = handle_ack_range(connection, space, min_packet_number, max_packet_number, now, stat, result,
+                                   ecn_stats, scan_cursor);
         if (!handled) {
             return std::unexpected(handled.error());
         }
