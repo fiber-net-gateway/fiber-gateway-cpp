@@ -6,7 +6,7 @@
 >
 > 测试覆盖：约 10,600 行 QUIC 测试；`QuicPacer` 已有确定性算法单测及 scheduler/endpoint 集成回归，`QuicAckHandler`/`QuicLossRecovery`/`QuicPathManager` 的专项覆盖仍然薄弱；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
 >
-> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化；#12 pacing、#13 ACK range 扫描、#15 ACK-of-ACK 阈值已于 2026-07-15 修复；#14 于 2026-07-15 复核为方向误判不存在，并已补齐三类区间回归测试；#16 于 2026-07-15 复核为 RFC 要求的 clamp 行为，并修复相邻的 RTT 扣减等号边界。待修 P0：#1 key-update、#9 GSO，其余排期。
+> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化；#12 pacing、#13 ACK range 扫描、#15 ACK-of-ACK 阈值已于 2026-07-15 修复；#14 于 2026-07-15 复核为方向误判不存在，并已补齐三类区间回归测试；#16 于 2026-07-15 复核为 RFC 要求的 clamp 行为，并修复相邻的 RTT 扣减等号边界；#17 于 2026-07-15 复核为调用链误判，idle ACK 在进入 CUBIC window 前已返回，路径重置也已显式重置拥塞状态。待修 P0：#1 key-update、#9 GSO，其余排期。
 
 ## 总体评价
 
@@ -235,12 +235,29 @@ bytes-in-flight 重复计账，同一 ack-eliciting 包内的其余帧也会是 
 >
 > 回归测试：`QuicCongestionTest.RttSampleClampsAckDelayAfterHandshakeConfirmation` 固定超限 ACK delay 仍按 `max_ack_delay` 扣减；`QuicCongestionTest.RttSampleSubtractsAckDelayAtMinRttBoundary` 覆盖调整结果恰好等于 `min_rtt` 的等号边界。
 
-### 17. CUBIC `k` 在 ACK 处理中误偏移；recovery_start future-time fixup 是绷带
-`QuicCongestion.cpp:206`（`quic_congestion_cubic_window` 每 ACK 调 `quic_congestion_on_idle(cg, cg.idle, now)`）/ `:124-126`（`now < recovery_start` fixup）
+### 17. ⚪ 复核排除：idle ACK 不会进入 CUBIC window，路径重置已显式处理
+`QuicCongestion.cpp:115-137,195-206` / `QuicConnection.cpp:2181-2185`
 
-若 `cg.idle` 被 `QuicUdpEndpoint:1744` 置 true 但 ACK 到达时未清，CUBIC `k` epoch 起点 spurious 前移 `now - idle_start`。影响可忽略（亚毫秒 `k` 偏移）但逻辑错。`recovery_start` future-time fixup 在单调时钟下不应发生，掩盖路径重置问题。
-
-**修复**：ACK 处理前清 `cg.idle`，或仅外部 `quic_congestion_on_idle` 调用路径应用 idle 偏移；路径重置显式处理 `recovery_start`。
+> ⚪ **复核 2026-07-15**。原结论遗漏了 `quic_congestion_on_ack` 的控制流：完成
+> `in_flight` 扣减后，函数在 `sample.send_time <= recovery_start || cg.idle` 时直接返回；只有
+> `cg.idle == false` 且已进入 congestion avoidance 的 ACK 才会调用
+> `quic_congestion_cubic_window`。因此 ACK 路径不可能在 `cg.idle == true` 时经
+> `quic_congestion_on_idle(cg, cg.idle, now)` 平移 `k`，所述 spurious epoch 偏移不可达。
+>
+> `QuicUdpEndpoint::commit_send_datagram` 根据是否仍有发送工作调用
+> `quic_congestion_on_idle`。从 application-limited 状态恢复且仍有连续发送工作时，外部调用以
+> `idle=false` 将 `k` 一次性平移实际 idle 时长；若发送后再次立即耗尽工作，状态保持 idle，随后 ACK
+> 不增长拥塞窗口。这符合 RFC 9438 §4.2/§5.8：CUBIC 时间 `t` 不得包含 application-limited
+> 期间，且 application-limited 流不增长 `cwnd`。在 ACK 前无条件清 `cg.idle` 反而会破坏该行为。
+>
+> `now < recovery_start` 分支在本项目的 signed `std::chrono::milliseconds` 单调时钟模型下确实是
+> 防御性死分支，但没有证据表明它掩盖路径重置问题：普通 recovery 将 `recovery_start` 设为当前
+> `now`，persistent congestion 将其设为最旧在途包时间之前，路径重置则经
+> `QuicConnection::reset_congestion_for_path` 调用 `quic_congestion_reset_for_path`，明确将其设为
+> reset `now - 1ms`，同时用 `reset_packet_number_` 排除重置前的旧包。该 fixup 源自 nginx 对无符号
+> `ngx_msec_t` 回绕的防御，在当前类型下冗余但无害，不值得单独修改。
+>
+> **结论**：不实施“ACK 前清 `cg.idle`”，不单独修改 `recovery_start` 防御分支，本项不作为缺陷追踪。
 
 ---
 
