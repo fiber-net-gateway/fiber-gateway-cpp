@@ -17,6 +17,7 @@
 #include "../http/HttpHeaderHash.h"
 #include "../http/HttpHeaders.h"
 #include "../http/HttpProxyCore.h"
+#include "../http/HttpWebSocketProxy.h"
 #include "../script/AsyncTask.h"
 #include "../script/JsGc.h"
 #include "../script/JsValue.h"
@@ -254,6 +255,35 @@ void apply_options_headers(GcHeap &heap, const JsValue &options, fiber::http::Ht
             continue;
         }
         headers.set(key, value);
+    }
+}
+
+// Applies options.responseHeaders (Object: name -> string|null; null removes) onto a
+// downstream response header block.
+void apply_options_response_headers(GcHeap &heap, const JsValue &options, fiber::http::HttpHeaders &headers) noexcept {
+    JsValue rhv = get_field(heap, options, "responseHeaders", 15);
+    if (js_value_type(rhv) != JsNodeType::Object) {
+        return;
+    }
+    const fiber::script::GcObject *object = fiber::script::js_value_heap_ptr<fiber::script::GcObject>(rhv);
+    std::string key;
+    std::string value;
+    for (const fiber::script::GcObjectEntry *entry = fiber::script::gc_object_first_entry(object); entry != nullptr;
+         entry = fiber::script::gc_object_next_entry(object, entry)) {
+        if (!entry->occupied || !entry->key) {
+            continue;
+        }
+        fiber::script::gc_string_to_utf8(entry->key, key);
+        const JsValue &item = entry->value;
+        if (js_value_type(item) == JsNodeType::Null || js_value_type(item) == JsNodeType::Undefined) {
+            headers.remove(key);
+            continue;
+        }
+        value.clear();
+        fiber::script::std_lib::node_json_to_string(item, value);
+        if (!value.empty()) {
+            headers.set(key, value);
+        }
     }
 }
 
@@ -593,8 +623,16 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
     fiber::http::HttpExchange &exchange = ctx->exchange();
     const JsValue options = (args.args != nullptr && args.argc > 0) ? args.args[0] : JsValue::make_undefined();
 
-    if (field_bool(*heap, options, "websocket", 9, false)) {
-        co_return error_exn(*heap, "http.proxyPass: websocket upgrade is not supported");
+    const bool websocket_requested = field_bool(*heap, options, "websocket", 9, false);
+    WebSocketHandshake websocket;
+    if (websocket_requested) {
+        websocket.downstream = detect_websocket_downstream(exchange);
+        if (!websocket.active()) {
+            co_return error_exn(*heap, "http.proxyPass: websocket=true requires a WebSocket downstream request");
+        }
+        if (!prepare_websocket_handshake(websocket)) {
+            co_return error_exn(*heap, "http.proxyPass: prepare websocket handshake failed");
+        }
     }
 
     auto target_opt = resolve_target(userdata);
@@ -606,13 +644,6 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
     }
     const std::chrono::milliseconds timeout = resolve_timeout(*heap, options);
 
-    auto acq = co_await acquire_and_connect(services, *target_opt, timeout);
-    if (!acq) {
-        co_return error_exn(*heap, "http.proxyPass: acquire upstream connection failed");
-    }
-    AcquiredConnection &ac = *acq;
-
-    fiber::http::ClientHttp1Exchange upstream(*ac.conn, exchange.pool());
     fiber::http::HttpHeaders req_headers(exchange.pool());
     // Copy inbound request headers (hop-by-hop filtered), then apply options.headers overrides.
     for (const fiber::http::HttpHeaders::HeaderField &field: exchange.request_headers()) {
@@ -624,10 +655,19 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
     }
     apply_options_headers(*heap, options, req_headers);
     remove_request_framing_headers(req_headers);
+    if (websocket.active() && !prepare_upstream_websocket_headers(exchange, websocket, req_headers)) {
+        co_return error_exn(*heap, "http.proxyPass: invalid websocket handshake headers");
+    }
 
     const std::string method_str = std::string(field_string(*heap, options, "method", 6));
+    if (websocket.active() && !method_str.empty() &&
+        resolve_http_method(method_str, fiber::http::HttpMethod::Unknown) != fiber::http::HttpMethod::Get) {
+        co_return error_exn(*heap, "http.proxyPass: websocket method must be GET");
+    }
     const fiber::http::HttpMethod method =
-            method_str.empty() ? exchange.method() : resolve_http_method(method_str, exchange.method());
+            websocket.active()
+                    ? fiber::http::HttpMethod::Get
+                    : (method_str.empty() ? exchange.method() : resolve_http_method(method_str, exchange.method()));
 
     std::string target;
     {
@@ -661,13 +701,24 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
     }
 
     bool req_end_stream = true;
-    const fiber::http::HttpBodySpec req_body = detect_request_body(exchange, req_end_stream);
+    const fiber::http::HttpBodySpec req_body =
+            websocket.active() ? fiber::http::HttpBodySpec::None() : detect_request_body(exchange, req_end_stream);
+    if (websocket.active()) {
+        req_end_stream = true;
+    }
 
     fiber::http::Http1RequestHead head;
     head.method = method;
     head.target = target;
     head.headers = &req_headers;
     head.body = req_body;
+
+    auto acq = co_await acquire_and_connect(services, *target_opt, timeout);
+    if (!acq) {
+        co_return error_exn(*heap, "http.proxyPass: acquire upstream connection failed");
+    }
+    AcquiredConnection &ac = *acq;
+    fiber::http::ClientHttp1Exchange upstream(*ac.conn, exchange.pool());
 
     auto send_result = co_await upstream.send_header(head, req_end_stream, timeout);
     if (!send_result) {
@@ -696,10 +747,43 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
         if (!read_result) {
             co_return error_exn(*heap, "http.proxyPass: read response header failed");
         }
-        if (!(*read_result)->is_informational()) {
+        if ((*read_result)->status_code == 101 || !(*read_result)->is_informational()) {
             resp_head = *read_result;
             break;
         }
+    }
+
+    if (resp_head->status_code == 101) {
+        if (!valid_websocket_upgrade_response(*resp_head, websocket)) {
+            co_return error_exn(*heap, "http.proxyPass: invalid websocket upgrade response");
+        }
+        auto switch_result = upstream.switch_to_raw_stream();
+        if (!switch_result) {
+            co_return error_exn(*heap, "http.proxyPass: switch websocket stream failed");
+        }
+
+        fiber::http::HttpHeaders resp_headers(exchange.pool());
+        build_downstream_websocket_headers(*resp_head, resp_headers, websocket);
+        apply_options_response_headers(*heap, options, resp_headers);
+        finalize_downstream_websocket_headers(resp_headers, websocket);
+
+        auto response_header_result = co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = websocket.extended_connect() ? 200 : 101,
+                .reason = websocket.extended_connect() ? std::string_view{} : resp_head->reason,
+                .headers = &resp_headers,
+                .body = fiber::http::HttpBodySpec::Stream(),
+                .connection_mode = fiber::http::ResponseConnectionMode::Auto,
+                .end_stream = false,
+        });
+        if (!response_header_result) {
+            (void) upstream.abort(response_header_result.error());
+            co_return error_exn(*heap, "http.proxyPass: send websocket response header failed");
+        }
+        ctx->mark_response_sent();
+
+        co_await relay_websocket_tunnel(exchange, upstream, timeout, timeout);
+        co_return AbiResult::success(JsValue::make_integer(resp_head->status_code));
     }
 
     // Build downstream response headers (hop-by-hop filtered) + responseHeaders overrides.
@@ -710,31 +794,7 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
         }
         resp_headers.add_view(field.name_view(), field.value_view(), field.lowcase_name, field.name_hash);
     }
-    {
-        JsValue rhv = get_field(*heap, options, "responseHeaders", 15);
-        if (js_value_type(rhv) == JsNodeType::Object) {
-            const fiber::script::GcObject *o = fiber::script::js_value_heap_ptr<fiber::script::GcObject>(rhv);
-            std::string key, value;
-            for (const fiber::script::GcObjectEntry *e = fiber::script::gc_object_first_entry(o); e != nullptr;
-                 e = fiber::script::gc_object_next_entry(o, e)) {
-                if (!e->occupied || !e->key) {
-                    continue;
-                }
-                fiber::script::gc_string_to_utf8(e->key, key);
-                const JsValue &v = e->value;
-                if (js_value_type(v) == JsNodeType::Null || js_value_type(v) == JsNodeType::Undefined) {
-                    resp_headers.remove(key);
-                    continue;
-                }
-                value.clear();
-                fiber::script::std_lib::node_json_to_string(v, value);
-                if (value.empty()) {
-                    continue;
-                }
-                resp_headers.set(key, value);
-            }
-        }
-    }
+    apply_options_response_headers(*heap, options, resp_headers);
 
     const bool no_body = response_has_no_body(method, resp_head->status_code);
     std::size_t response_content_length = 0;

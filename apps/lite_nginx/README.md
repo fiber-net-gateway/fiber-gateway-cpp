@@ -231,7 +231,12 @@ let st = svc.proxyPass({});
 - `svc.proxyPass(options)` - forward the inbound request to the bound upstream and stream its
   response back to the client; returns the upstream status code. `options`: `url` or
   `method`/`path`/`query` (default to the inbound values), `headers`, `responseHeaders` (set on
-  the downstream response; `null` removes), `timeout`. WebSocket/101 upgrade is not supported.
+  the downstream response; `null` removes), `timeout`, and `websocket`. Set `websocket: true`
+  to proxy an inbound HTTP/1.1 WebSocket Upgrade or HTTP/2/3 Extended CONNECT as a bidirectional
+  tunnel. WebSocket mode always uses an upstream HTTP/1.1 GET Upgrade, rejects an explicit
+  non-GET `method`, and uses `timeout` as the per-operation tunnel read/write timeout. Required
+  handshake fields (`Connection`, `Upgrade`, and `Sec-WebSocket-Key`/`Sec-WebSocket-Accept`) are
+  reasserted after `headers`/`responseHeaders` overrides.
 
 The directive target is either a named upstream (`@backend` / `backend`) or an ad-hoc
 `http(s)://host[:port]` URL; hostnames are resolved via DNS (IP literals skip DNS).
@@ -259,7 +264,6 @@ The directive target is either a named upstream (`@backend` / `backend`) or an a
   directive `http(s)://host` targets accept hostnames (resolved via DNS) or IP literals; the
   `url` call option is the request path?query, not a host.
 - `proxy_buffering` only accepts `off`.
-- `svc.proxyPass` does not support WebSocket / `101 Switching Protocols` upgrade tunnelling.
 - A single global keepalive pool is shared across all upstreams and script targets; per-upstream
   `keepalive` sizing is not available (use `connection_pool { keepalive_size ...; }`).
 
