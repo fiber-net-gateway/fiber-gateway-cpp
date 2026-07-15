@@ -139,13 +139,19 @@ int EventLoop::next_timeout_ms(std::chrono::steady_clock::time_point now) const 
     return static_cast<int>(ms);
 }
 
+void EventLoop::prepare_run() noexcept { stop_requested_.store(false, std::memory_order_release); }
+
 void EventLoop::run() {
+    prepare_run();
+    run_prepared();
+}
+
+void EventLoop::run_prepared() {
     if (event_fd_ < 0 || !poller_.valid()) {
         return;
     }
     EventLoop *prev = current_;
     current_ = this;
-    stop_requested_.store(false, std::memory_order_release);
     now_ = std::chrono::steady_clock::now();
     drain_notify<false>();
     do {

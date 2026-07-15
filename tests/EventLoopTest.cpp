@@ -22,3 +22,12 @@ TEST(EventLoopTest, StandaloneLoopHasNoGroupIndex) {
     EXPECT_EQ(loop.group(), nullptr);
     EXPECT_FALSE(loop.has_group_index());
 }
+
+TEST(EventLoopTest, ImmediateStopDoesNotLoseStopRequest) {
+    for (int i = 0; i < 500; ++i) {
+        fiber::event::EventLoopGroup group(2);
+        group.start();
+        group.stop();
+        group.join();
+    }
+}
