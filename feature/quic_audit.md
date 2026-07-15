@@ -6,11 +6,11 @@
 >
 > 测试覆盖：约 10,600 行 QUIC 测试；`QuicPacer` 已有确定性算法单测及 scheduler/endpoint 集成回归，`QuicAckHandler`/`QuicLossRecovery`/`QuicPathManager` 的专项覆盖仍然薄弱；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
 >
-> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化；#12 pacing 已于 2026-07-15 修复。待修 P0：#1 key-update、#9 GSO，其余排期。
+> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化；#12 pacing、#13 ACK range 扫描已于 2026-07-15 修复。待修 P0：#1 key-update、#9 GSO，其余排期。
 
 ## 总体评价
 
-codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝视图（`QuicSlice`）、`write_or_count_*` 模式、crypto 核心、anti-amplification、ECN、稳态零分配均正确。原审计列出 **9 个高危**；其中 #7 经生命周期调用链复核，不构成正常路径可达的独立 UAF，改列为不变量防御项；#8 经缓冲区所有权与异步消费路径复核，确认是当前架构下必要的生命周期复制，降为后续架构性能优化，不再列为 P0/HIGH。其余问题包括 key 用量越界、PTO 忙循环、re-entrancy、DoS 向量、缺 GSO，以及若干中危的可靠性与性能问题。可靠性与拥塞控制域问题最集中且无单测，风险最高。按严重度排列如下，均给出 `file:line` 与触发场景。
+codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝视图（`QuicSlice`）、`write_or_count_*` 模式、crypto 核心、anti-amplification、ECN、稳态零分配均正确。原审计列出 **9 个高危**；其中 #7 经生命周期调用链复核，不构成正常路径可达的独立 UAF，改列为不变量防御项；#8 经缓冲区所有权与异步消费路径复核，确认是当前架构下必要的生命周期复制，降为后续架构性能优化，不再列为 P0/HIGH。其余问题包括 key 用量越界、PTO 忙循环、re-entrancy、DoS 向量、缺 GSO，以及若干中危的可靠性与性能问题。可靠性与拥塞控制域问题最集中且专项覆盖仍然薄弱，风险最高。按严重度排列如下，均给出 `file:line` 与触发场景。
 
 ---
 
@@ -197,12 +197,14 @@ bytes-in-flight 重复计账，同一 ack-eliciting 包内的其余帧也会是 
 > 单测和 3 个 endpoint 集成测试，覆盖速率/容量/粒度/高频 refill、scheduler 移除与 timer 重入队、ACK/
 > CONNECTION_CLOSE bypass、detach 前取消 timer。
 
-### 13. `handle_ack_range` O(R×N)
-`QuicAckHandler.cpp:186-242`
+### 13. ✅ `handle_ack_range` O(R×N)
+`QuicAckHandler.cpp:180-259`
 
-每个 ACK range 从 `sent_frames.front()` 重扫。R 个 range 按 PN 降序处理，`sent_frames` 升序，front 的小 PN 包被越过 R 次。最坏 32 ranges（`kQuicMaxAckRanges`）× 数千 in-flight 包 = O(32×N)。
+每个 ACK range 从 `sent_frames.front()` 重扫。R 个 range 按 PN 降序处理，`sent_frames` 升序，front 的小 PN 包被越过 R 次。原审计称最坏为 32 ranges，但 `kQuicMaxAckRanges` 只限制本端生成 ACK 时保存的 ranges；入站 `ACK Range Count` 是 varint，解析器未以 32 封顶，实际 R 仅受合法 packet 大小和包号范围约束，最坏复杂度确为 O(R×N)，且 `sent_frames` 按 frame 而非 packet 计数。
 
 **修复**：range 按 PN 降序、list 升序，从上一 range 停止处续扫；或用有序/索引结构 O(log n)。
+
+> ✅ **已修复 2026-07-15**。`QuicOutputFrameQueue` 增加侵入式 `prev` 链并在 `push_front`/`push_back`/`insert_after`/`erase_after`/`prepend_all` 中统一维护；`quic_handle_ack_frame` 从 `sent_frames.back()` 建立反向 scan cursor，各 ACK range 复用上一 range 的停止位置。查找 range 时向低 PN 移动，range 内仍按原来的低 PN 到高 PN 顺序处理，避免改变拥塞更新和 stream ACK 回调顺序。所有 gap frame 最多被反向越过一次，acked frame 仅多一次反向定位和一次正向处理，总复杂度降为 O(N+R)，稳态无动态分配。回归测试 `QuicOutputFrameQueueTest.MaintainsReverseLinksAcrossMutations` 覆盖双向链不变量，`QuicAckHandlerTest.HandlesDescendingAckRangesWithSingleReverseScan` 覆盖交错 singleton ranges 后保留队列的顺序与反向链。
 
 ### 14. persistent congestion 误判
 `QuicLossRecovery.cpp:193-199`
@@ -465,7 +467,7 @@ deadline 检查、单写者 `Busy`、`post_at` 计时器、`post` resume、`comp
 
 - `FIBER_ENABLE_HTTP3` CMake 选项是**死选项**（`CMakeLists.txt:11` 声明后全仓无引用，QUIC 源码经 `GLOB_RECURSE` 无条件全编）。要么用起来要么删掉。
 - 全 `src/quic/` **0 个 `TODO/FIXME`**——可能是真干净，也可能是 marker 被清；上述若干问题值得补标记追踪。
-- **测试缺口**：`QuicAckHandler`/`QuicLossRecovery`/`QuicSendScheduler`/`QuicPathManager` 无专门单测，正是可靠性 bug 最易藏处。建议优先补。
+- **测试缺口**：`QuicAckHandler` 已补交错 range 回归，但与 `QuicLossRecovery`/`QuicSendScheduler`/`QuicPathManager` 的专项覆盖仍不充分，正是可靠性 bug 最易藏处。建议继续优先补。
 
 ---
 
@@ -476,6 +478,6 @@ deadline 检查、单写者 `Busy`、`post_at` 计时器、`post` resume、`comp
 | P0 | #2 PTO 忙循环✅、#3 re-entrancy✅、#4 create-before-auth✅(方案A)、#5 DoS 向量、#1 key-update | 中 |
 | P0 | #9 GSO/sendmmsg、#8 接收零拷贝 | 大 |
 | P1 | #11 loss 减窗基准、#22 `reset()` FIN'd 流、#23 `write()` 短写丢 FIN、#19 重复 TP 拒绝、#27 HKDF 溢出、#16 ack_delay skip | 小（多为一行） |
-| P1 | 给 #13/#14/#15 + AckHandler/LossRecovery/SendScheduler/PathManager 补单测 | 中 |
+| P1 | #13✅；给 #14/#15 + AckHandler/LossRecovery/SendScheduler/PathManager 补单测 | 中 |
 | P2 | #7 detach-before-destroy 不变量断言✅；若要支持挂起 awaiter 下被动销毁，再做 awaiter self-retain | 小 / 中 |
 | P2 | #35 拆 QuicConnection god object、#31 拆 QuicUdpEndpoint、#25 去重 reassembly、#44 去重 awaiter | 大 |

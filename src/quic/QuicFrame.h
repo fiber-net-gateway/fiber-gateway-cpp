@@ -287,6 +287,7 @@ struct QuicOutputFrame {
     } u;
 
     QuicOutputFrame *next = nullptr;
+    QuicOutputFrame *prev = nullptr;
     bool queued = false;
 };
 
@@ -299,6 +300,8 @@ public:
     [[nodiscard]] const QuicOutputFrame *back() const noexcept { return tail_; }
     [[nodiscard]] QuicOutputFrame *next_of(QuicOutputFrame &frame) noexcept { return frame.next; }
     [[nodiscard]] const QuicOutputFrame *next_of(const QuicOutputFrame &frame) const noexcept { return frame.next; }
+    [[nodiscard]] QuicOutputFrame *prev_of(QuicOutputFrame &frame) noexcept { return frame.prev; }
+    [[nodiscard]] const QuicOutputFrame *prev_of(const QuicOutputFrame &frame) const noexcept { return frame.prev; }
 
     void push_front(QuicOutputFrame &frame) noexcept;
     void push_back(QuicOutputFrame &frame) noexcept;
