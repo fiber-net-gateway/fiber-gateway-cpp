@@ -275,9 +275,11 @@ common::IoResult<std::size_t> estimate_header_bytes(const Http1RequestHead &head
             }
             total += kContentLengthPrefix.size() + kMaxContentLengthDigits + kLineTerminator.size();
             break;
-        case HttpBodySpec::Kind::Stream:
+        case HttpBodySpec::Kind::Chunked:
             total += kChunkedHeader.size();
             break;
+        case HttpBodySpec::Kind::Stream:
+            return std::unexpected(common::IoErr::NotSupported);
     }
 
     if (head.headers) {
@@ -319,9 +321,11 @@ common::IoResult<void> encode_request_header(mem::IoBuf &buf, const Http1Request
             ptr += append_decimal(ptr, head.body.content_length());
             append_bytes(ptr, kLineTerminator);
             break;
-        case HttpBodySpec::Kind::Stream:
+        case HttpBodySpec::Kind::Chunked:
             append_bytes(ptr, kChunkedHeader);
             break;
+        case HttpBodySpec::Kind::Stream:
+            return std::unexpected(common::IoErr::NotSupported);
     }
 
     if (head.headers) {
@@ -721,7 +725,7 @@ ClientHttp1Exchange::send_header(const Http1RequestHead &head, bool end_stream,
         co_return std::unexpected(write_result.error());
     }
 
-    if (head.body.is_stream() && end_stream) {
+    if (head.body.is_chunked() && end_stream) {
         auto final_result =
                 co_await write_all(conn_->transport_.get(), kChunkedFinal.data(), kChunkedFinal.size(), timeout);
         if (!final_result) {
@@ -799,7 +803,7 @@ ClientHttp1Exchange::write_body(mem::IoBufChain chunk, std::chrono::milliseconds
             }
             co_return body_bytes;
         }
-        case HttpBodySpec::Kind::Stream: {
+        case HttpBodySpec::Kind::Chunked: {
             if (body_bytes == 0 && !chunk.complete()) {
                 co_return static_cast<std::size_t>(0);
             }
@@ -865,6 +869,8 @@ ClientHttp1Exchange::write_body(mem::IoBufChain chunk, std::chrono::milliseconds
             request_state_ = RequestState::RequestDone;
             co_return body_bytes;
         }
+        case HttpBodySpec::Kind::Stream:
+            co_return std::unexpected(common::IoErr::NotSupported);
     }
     co_return std::unexpected(common::IoErr::Invalid);
 }
@@ -923,7 +929,7 @@ ClientHttp1Exchange::write_body(const std::uint8_t *buf, std::size_t len, bool e
             }
             co_return len;
         }
-        case HttpBodySpec::Kind::Stream: {
+        case HttpBodySpec::Kind::Chunked: {
             if (len == 0 && !end_stream) {
                 co_return static_cast<std::size_t>(0);
             }
@@ -978,6 +984,8 @@ ClientHttp1Exchange::write_body(const std::uint8_t *buf, std::size_t len, bool e
             }
             co_return len;
         }
+        case HttpBodySpec::Kind::Stream:
+            co_return std::unexpected(common::IoErr::NotSupported);
     }
 
     co_return std::unexpected(common::IoErr::Invalid);
@@ -997,7 +1005,7 @@ ClientHttp1Exchange::send_trailer(const HttpHeaders &trailers, std::chrono::mill
     if (request_state_ == RequestState::RequestDone) {
         co_return std::unexpected(common::IoErr::Already);
     }
-    if (request_state_ == RequestState::Failed || !body_spec_.is_stream()) {
+    if (request_state_ == RequestState::Failed || !body_spec_.is_chunked()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
     if (final_response_received_) {

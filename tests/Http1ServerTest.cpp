@@ -438,7 +438,7 @@ TEST(Http1ServerTest, WriteBodyWithoutExplicitHeaderAutoUsesChunkedForStreaming)
     fiber::async::spawn(group.at(0), [&]() {
         auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
             auto header_result = co_await send_final_header(exchange, 200, nullptr,
-                                                            fiber::http::ResponseBodySpec::Stream(), {}, false);
+                                                            fiber::http::ResponseBodySpec::Auto(), {}, false);
             if (!header_result) {
                 co_return;
             }
@@ -524,6 +524,79 @@ TEST(Http1ServerTest, WriteBodyWithoutExplicitHeaderAutoUsesContentLengthForLarg
     delete server;
 }
 
+TEST(Http1ServerTest, StreamResponseSwitchesToRawBidirectionalIo) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<uint16_t> port_promise;
+    std::promise<fiber::http::Http1Server *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            if (!exchange.request_body_spec().is_none()) {
+                co_return;
+            }
+
+            fiber::http::HttpHeaders headers(exchange.pool());
+            headers.set("Upgrade", "websocket");
+            headers.set("Connection", "Upgrade");
+            auto header_result = co_await send_final_header(exchange, 101, &headers,
+                                                            fiber::http::ResponseBodySpec::Stream(), {}, false);
+            if (!header_result) {
+                co_return;
+            }
+
+            auto read_result = co_await exchange.read_body(64);
+            if (!read_result || read_result->complete()) {
+                co_return;
+            }
+            std::string response = "server:";
+            response.append(chain_to_string(std::move(*read_result)));
+            auto eof_result = co_await exchange.read_body(64);
+            if (!eof_result || !eof_result->complete()) {
+                co_return;
+            }
+            response.append(chain_to_string(std::move(*eof_result)));
+            (void) co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(response.data()),
+                                                response.size(), true);
+            co_return;
+        };
+        return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
+    });
+
+    uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+
+    int client = connect_client(port);
+    ASSERT_GE(client, 0);
+    const char *request = "GET /chat HTTP/1.1\r\n"
+                          "Host: localhost\r\n"
+                          "Upgrade: websocket\r\n"
+                          "Connection: Upgrade\r\n"
+                          "\r\n"
+                          "client-data";
+    ASSERT_EQ(::send(client, request, std::strlen(request), 0), static_cast<ssize_t>(std::strlen(request)));
+    ASSERT_EQ(::shutdown(client, SHUT_WR), 0);
+
+    std::string response = recv_all(client);
+    ::close(client);
+
+    EXPECT_NE(response.find("HTTP/1.1 101 Switching Protocols\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("Upgrade: websocket\r\n"), std::string::npos) << response;
+    EXPECT_EQ(response.find("Content-Length:"), std::string::npos) << response;
+    EXPECT_EQ(response.find("Transfer-Encoding:"), std::string::npos) << response;
+    EXPECT_EQ(response.find("Connection: close"), std::string::npos) << response;
+    EXPECT_NE(response.find("\r\n\r\nserver:client-data"), std::string::npos) << response;
+
+    fiber::async::spawn(group.at(0), [&]() { return stop_server(&group.at(0), server); });
+    group.join();
+    delete server;
+}
+
 TEST(Http1ServerTest, ChunkedPost) {
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -535,7 +608,7 @@ TEST(Http1ServerTest, ChunkedPost) {
 
     fiber::async::spawn(group.at(0), [&]() {
         auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-            if (!exchange.request_body_spec().is_stream()) {
+            if (!exchange.request_body_spec().is_chunked()) {
                 co_await send_final_header(exchange, 500, nullptr, fiber::http::ResponseBodySpec::ContentLength(0),
                                            fiber::http::ResponseConnectionMode::Close, true);
                 co_return;
@@ -908,7 +981,7 @@ TEST(Http1ServerTest, ChunkedResponseCanSendTrailers) {
             fiber::http::HttpHeaders headers(exchange.pool());
             headers.set("Trailer", "digest, x-md5");
             auto header_result = co_await send_final_header(exchange, 200, &headers,
-                                                            fiber::http::ResponseBodySpec::Stream(), {}, false);
+                                                            fiber::http::ResponseBodySpec::Chunked(), {}, false);
             if (!header_result) {
                 co_return;
             }

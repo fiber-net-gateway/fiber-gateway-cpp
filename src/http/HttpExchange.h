@@ -51,6 +51,7 @@ struct HttpServerOptions {
     std::size_t header_large_size = 32 * 1024;
     std::size_t header_large_num = 4;
     bool drain_unread_body = false;
+    bool enable_extended_connect = false;
     net::TlsOptions tls{};
     Http3Options http3{};
 };
@@ -82,6 +83,8 @@ public:
     [[nodiscard]] const HttpUri &uri() const noexcept { return uri_; }
     std::string_view version_view() const noexcept { return version_view_; }
     std::string_view method_view() const noexcept { return method_view_; }
+    std::string_view scheme() const noexcept { return scheme_view_; }
+    std::string_view protocol() const noexcept { return protocol_view_; }
     std::string_view header(std::string_view name) const noexcept;
     const RequestHeaderRefs &request_header_refs() const noexcept { return request_header_refs_; }
     const HttpHeaders::HeaderField *host_header() const noexcept { return request_header_refs_.host; }
@@ -134,6 +137,8 @@ private:
     HttpUri uri_;
     std::string_view method_view_;
     std::string_view version_view_;
+    std::string_view scheme_view_;
+    std::string_view protocol_view_;
     HttpHeaders request_headers_;
     HttpHeaders request_trailers_;
     bool request_trailers_complete_ = false;

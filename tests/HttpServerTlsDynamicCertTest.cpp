@@ -476,7 +476,7 @@ TEST(HttpServerTlsDynamicCertTest, ChunkedResponseEchoedOverTls) {
         auto header_result = co_await exchange.send_header({
                 .kind = fiber::http::OutgoingHeaderKind::Final,
                 .status_code = 200,
-                .body = fiber::http::ResponseBodySpec::Stream(),
+                .body = fiber::http::ResponseBodySpec::Chunked(),
                 .end_stream = false,
         });
         if (!header_result) {

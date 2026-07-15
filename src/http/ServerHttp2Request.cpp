@@ -126,6 +126,7 @@ const HeaderMap<ServerHttp2Request::PseudoHeaderHandler> &ServerHttp2Request::ps
         map.insert(":path", &ServerHttp2Request::handle_path);
         map.insert(":scheme", &ServerHttp2Request::handle_scheme);
         map.insert(":authority", &ServerHttp2Request::handle_authority);
+        map.insert(":protocol", &ServerHttp2Request::handle_protocol);
         return map;
     }();
     return handlers;
@@ -507,6 +508,9 @@ fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_header(HttpE
         if (!informational && header.status_code >= 100 && header.status_code < 200) {
             co_return std::unexpected(common::IoErr::Invalid);
         }
+        if (!informational && header.body.is_chunked()) {
+            co_return std::unexpected(common::IoErr::NotSupported);
+        }
     }
 
     HeaderSendAwaiter awaiter(*this, timeout, header);
@@ -880,7 +884,13 @@ common::IoErr ServerHttp2Request::handle_path(ServerHttp2Request &request, std::
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp2Request::handle_scheme(ServerHttp2Request &request, std::string_view, bool) noexcept {
+common::IoErr ServerHttp2Request::handle_scheme(ServerHttp2Request &request, std::string_view value,
+                                                bool value_stable) noexcept {
+    std::string_view scheme = value_stable ? value : request.copy_to_pool(value);
+    if (scheme.data() == nullptr && !scheme.empty()) {
+        return common::IoErr::NoMem;
+    }
+    request.exchange_.scheme_view_ = scheme;
     request.exchange_.version_ = HttpVersion::HTTP_2_0;
     return common::IoErr::None;
 }
@@ -888,6 +898,21 @@ common::IoErr ServerHttp2Request::handle_scheme(ServerHttp2Request &request, std
 common::IoErr ServerHttp2Request::handle_authority(ServerHttp2Request &request, std::string_view value,
                                                    bool value_stable) noexcept {
     return request.commit_regular_header("host", http_header_name_hash("host"), value, true, value_stable);
+}
+
+common::IoErr ServerHttp2Request::handle_protocol(ServerHttp2Request &request, std::string_view value,
+                                                  bool value_stable) noexcept {
+    if (request.protocol_seen_ || request.conn_ == nullptr || !request.conn_->local_enable_connect_protocol()) {
+        return common::IoErr::Invalid;
+    }
+    std::string_view protocol = value_stable ? value : request.copy_to_pool(value);
+    if (protocol.data() == nullptr && !protocol.empty()) {
+        return common::IoErr::NoMem;
+    }
+    request.protocol_seen_ = true;
+    request.exchange_.protocol_view_ = protocol;
+    request.exchange_.version_ = HttpVersion::HTTP_2_0;
+    return common::IoErr::None;
 }
 
 std::string_view ServerHttp2Request::copy_to_pool(const std::uint8_t *data, std::size_t len) noexcept {

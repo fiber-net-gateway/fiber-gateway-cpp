@@ -25,6 +25,7 @@ constexpr std::uint16_t kSettingsMaxConcurrentStreams = 0x3;
 constexpr std::uint16_t kSettingsInitialWindowSize = 0x4;
 constexpr std::uint16_t kSettingsMaxFrameSize = 0x5;
 constexpr std::uint16_t kSettingsMaxHeaderListSize = 0x6;
+constexpr std::uint16_t kSettingsEnableConnectProtocol = 0x8;
 constexpr std::uint8_t kFlagAck = 0x1;
 constexpr std::uint8_t kFlagSettingsAck = 0x1;
 constexpr std::uint8_t kFlagEndStream = 0x1;
@@ -930,6 +931,12 @@ common::IoErr Http2Connection::apply_settings_parameter(std::uint16_t id, std::u
         case kSettingsMaxHeaderListSize:
             peer_max_header_list_size_ = value;
             return common::IoErr::None;
+        case kSettingsEnableConnectProtocol:
+            if (value > 1) {
+                return common::IoErr::Invalid;
+            }
+            peer_enable_connect_protocol_ = value != 0;
+            return common::IoErr::None;
         default:
             return common::IoErr::None;
     }
@@ -966,12 +973,12 @@ common::IoErr Http2Connection::apply_peer_initial_stream_window(std::uint32_t va
 }
 
 common::IoErr Http2Connection::send_initial_flight() noexcept {
-    constexpr std::size_t kSettingsCount = 3;
-    constexpr std::size_t kSettingsPayloadSize = kSettingsCount * kSettingsParameterSize;
+    const std::size_t settings_count = options_.enable_connect_protocol ? 4 : 3;
+    const std::size_t settings_payload_size = settings_count * kSettingsParameterSize;
     bool send_client_preface = options_.role == ConnectionRole::Client;
     bool send_conn_window_update =
             options_.initial_connection_recv_window > static_cast<std::uint32_t>(kInitialFlowControlWindow);
-    std::size_t total_size = kFrameHeaderSize + kSettingsPayloadSize;
+    std::size_t total_size = kFrameHeaderSize + settings_payload_size;
     if (send_client_preface) {
         total_size += kClientPreface.size();
     }
@@ -985,7 +992,7 @@ common::IoErr Http2Connection::send_initial_flight() noexcept {
             out += kClientPreface.size();
         }
 
-        encode_http2_frame_header(out, static_cast<std::uint32_t>(kSettingsPayloadSize), Http2FrameType::Settings, 0,
+        encode_http2_frame_header(out, static_cast<std::uint32_t>(settings_payload_size), Http2FrameType::Settings, 0,
                                   0);
         out += kFrameHeaderSize;
         out = append_u16(out, kSettingsMaxConcurrentStreams);
@@ -994,6 +1001,10 @@ common::IoErr Http2Connection::send_initial_flight() noexcept {
         out = append_u32(out, configured_initial_stream_recv_window());
         out = append_u16(out, kSettingsMaxFrameSize);
         out = append_u32(out, options_.max_frame_size);
+        if (options_.enable_connect_protocol) {
+            out = append_u16(out, kSettingsEnableConnectProtocol);
+            out = append_u32(out, 1);
+        }
 
         if (send_conn_window_update) {
             std::uint32_t increment =

@@ -211,6 +211,7 @@ Http2Connection::Options HttpServer::make_http2_options() const noexcept {
     options.write_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(options_.write_timeout);
     options.keepalive_ping_interval =
             std::chrono::duration_cast<std::chrono::milliseconds>(options_.keep_alive_timeout);
+    options.enable_connect_protocol = options_.enable_extended_connect;
     return options;
 }
 

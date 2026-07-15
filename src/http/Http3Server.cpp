@@ -40,6 +40,8 @@ private:
     [[nodiscard]] static Http3Connection::Options make_http3_options(ServerConnection *owner) noexcept {
         Http3Connection::Options options{};
         options.local_settings = owner->http_options_.http3.settings;
+        options.local_settings.enable_connect_protocol =
+                options.local_settings.enable_connect_protocol || owner->http_options_.enable_extended_connect;
         options.owner = owner;
         options.ops.create_server_request = &ServerConnection::create_server_request;
         return options;

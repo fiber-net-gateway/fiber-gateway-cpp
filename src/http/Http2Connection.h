@@ -78,6 +78,7 @@ public:
         std::uint32_t stream_recv_window_low_watermark = 16 * 1024;
         std::int32_t initial_connection_send_window = 65535;
         std::int32_t initial_stream_send_window = 65535;
+        bool enable_connect_protocol = false;
     };
 
     virtual ~Http2Connection();
@@ -121,6 +122,8 @@ protected:
     }
     [[nodiscard]] ConnectionRole role() const noexcept { return options_.role; }
     [[nodiscard]] bool peer_enable_push() const noexcept { return peer_enable_push_; }
+    [[nodiscard]] bool local_enable_connect_protocol() const noexcept { return options_.enable_connect_protocol; }
+    [[nodiscard]] bool peer_enable_connect_protocol() const noexcept { return peer_enable_connect_protocol_; }
     [[nodiscard]] bool has_stream(std::uint32_t stream_id) const noexcept {
         return streams_.find(stream_id) != nullptr;
     }
@@ -228,6 +231,7 @@ private:
     std::uint32_t peer_max_outbound_frame_size_ = 16384;
     std::uint32_t peer_max_header_list_size_ = 0xffffffffU;
     bool peer_enable_push_ = true;
+    bool peer_enable_connect_protocol_ = false;
     bool local_goaway_sent_ = false;
     std::uint32_t local_goaway_last_stream_id_ = 0;
     bool peer_goaway_received_ = false;

@@ -893,7 +893,7 @@ fiber::async::Task<IoResult<void>> forward_backend_response(fiber::http::HttpExc
 
     fiber::http::HttpBodySpec body = response.content_length
                                              ? fiber::http::HttpBodySpec::ContentLength(*response.content_length)
-                                             : fiber::http::HttpBodySpec::Stream();
+                                             : fiber::http::HttpBodySpec::Auto();
     bool header_end_stream = response.content_length && *response.content_length == 0;
 
     auto header_result = co_await send_final_header(exchange, response.status_code, &headers, body,

@@ -37,6 +37,9 @@ public:
 
     [[nodiscard]] bool request_body_complete() const noexcept { return body_parser_.done(); }
     [[nodiscard]] bool response_complete() const noexcept { return response_phase_ == ResponsePhase::Finished; }
+    [[nodiscard]] bool raw_stream_active() const noexcept {
+        return response_phase_ != ResponsePhase::Init && response_body_spec_.is_stream();
+    }
     [[nodiscard]] bool should_keep_alive(const HttpExchange &exchange) const noexcept;
 
 private:

@@ -744,7 +744,7 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
     const fiber::http::HttpBodySpec response_body =
             no_body ? fiber::http::HttpBodySpec::None()
                     : (has_content_length ? fiber::http::HttpBodySpec::ContentLength(response_content_length)
-                                          : fiber::http::HttpBodySpec::Stream());
+                                          : fiber::http::HttpBodySpec::Auto());
 
     // flush is parsed for API parity; C++ write_body already writes through (no buffering to skip).
     (void) field_bool(*heap, options, "flush", 5, false);

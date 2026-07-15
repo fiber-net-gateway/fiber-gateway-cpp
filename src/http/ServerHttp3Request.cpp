@@ -200,7 +200,8 @@ ServerHttp3Request::ServerHttp3Request(Http3Connection &conn, const HttpServerOp
     inbound_buf_(conn.quic().recv_extent_pool()), exchange_(conn.quic().recv_extent_pool(), http_options),
     handler_(&handler), max_qpack_string_size_(static_cast<std::uint32_t>(std::min<std::size_t>(
                                 http_options.header_large_size, std::numeric_limits<std::uint32_t>::max()))),
-    body_timeout_(http_options.body_timeout), body_recv_state_(BodyRecvState::FrameHeader) {
+    body_timeout_(http_options.body_timeout), body_recv_state_(BodyRecvState::FrameHeader),
+    extended_connect_enabled_(conn.local_settings().enable_connect_protocol) {
     // HTTP/3 request bodies are stream-delimited when Content-Length is absent.
     exchange_.request_body_spec_ = HttpBodySpec::Stream();
 }
@@ -264,6 +265,7 @@ private:
         PathSeen = 1U << 1U,
         SchemeSeen = 1U << 2U,
         AuthoritySeen = 1U << 3U,
+        ProtocolSeen = 1U << 4U,
     };
 
     using PseudoHeaderHandler = common::IoErr (HeaderBlockParser::*)(std::string_view value) noexcept;
@@ -310,6 +312,7 @@ private:
     [[nodiscard]] common::IoErr handle_path(std::string_view value) noexcept;
     [[nodiscard]] common::IoErr handle_scheme(std::string_view value) noexcept;
     [[nodiscard]] common::IoErr handle_authority(std::string_view value) noexcept;
+    [[nodiscard]] common::IoErr handle_protocol(std::string_view value) noexcept;
     [[nodiscard]] common::IoErr handle_content_length(std::string_view value) noexcept;
     [[nodiscard]] common::IoErr handle_forbidden_regular_header(std::string_view value) noexcept;
     [[nodiscard]] common::IoErr handle_te(std::string_view value) noexcept;
@@ -345,6 +348,7 @@ ServerHttp3Request::HeaderBlockParser::pseudo_header_map() noexcept {
         map.insert(":path", PseudoHeaderRule{PathSeen, &HeaderBlockParser::handle_path});
         map.insert(":scheme", PseudoHeaderRule{SchemeSeen, &HeaderBlockParser::handle_scheme});
         map.insert(":authority", PseudoHeaderRule{AuthoritySeen, &HeaderBlockParser::handle_authority});
+        map.insert(":protocol", PseudoHeaderRule{ProtocolSeen, &HeaderBlockParser::handle_protocol});
         return map;
     }();
     return handlers;
@@ -727,11 +731,20 @@ common::IoErr ServerHttp3Request::HeaderBlockParser::handle_scheme(std::string_v
     if (!is_valid_scheme(value)) {
         return fail(Http3ErrorCode::MessageError);
     }
+    request_.exchange_.scheme_view_ = value;
     return common::IoErr::None;
 }
 
 common::IoErr ServerHttp3Request::HeaderBlockParser::handle_authority(std::string_view value) noexcept {
     authority_ = value;
+    return common::IoErr::None;
+}
+
+common::IoErr ServerHttp3Request::HeaderBlockParser::handle_protocol(std::string_view value) noexcept {
+    if (!request_.extended_connect_enabled_) {
+        return fail(Http3ErrorCode::MessageError);
+    }
+    request_.exchange_.protocol_view_ = value;
     return common::IoErr::None;
 }
 
@@ -1201,6 +1214,9 @@ async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange
                 co_return std::unexpected(common::IoErr::Invalid);
             }
             final_body_spec = header.body;
+            if (final_body_spec.is_chunked()) {
+                co_return std::unexpected(common::IoErr::NotSupported);
+            }
             if (response_must_not_have_body(exchange, header.status_code)) {
                 if (!header.end_stream || final_body_spec.is_stream() ||
                     (final_body_spec.is_content_length() && final_body_spec.content_length() != 0)) {
