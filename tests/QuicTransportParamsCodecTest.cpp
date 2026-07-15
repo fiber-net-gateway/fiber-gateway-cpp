@@ -132,6 +132,39 @@ TEST(QuicTransportParamsCodecTest, SkipsUnknownTransportParam) {
     EXPECT_TRUE(read.has_value());
 }
 
+TEST(QuicTransportParamsCodecTest, RejectsDuplicateValueParam) {
+    std::array<std::uint8_t, 16> buf{};
+    fiber::quic::QuicWriteCursor out(buf.data(), buf.size());
+    for (const std::uint64_t value: {1U, 2U}) {
+        ASSERT_TRUE(fiber::quic::quic_write_varint(out, fiber::quic::kQuicTpInitialMaxData).has_value());
+        ASSERT_TRUE(fiber::quic::quic_write_varint(out, 1).has_value());
+        ASSERT_TRUE(fiber::quic::quic_write_varint(out, value).has_value());
+    }
+
+    fiber::quic::QuicReadCursor in(buf.data(), out.offset());
+    fiber::quic::QuicTransportParams parsed{};
+    auto read = fiber::quic::quic_parse_transport_params(fiber::quic::QuicTransportParamOwner::Client, in, parsed);
+
+    EXPECT_FALSE(read.has_value());
+    EXPECT_EQ(read.error(), fiber::common::IoErr::Invalid);
+}
+
+TEST(QuicTransportParamsCodecTest, RejectsDuplicateEmptyParam) {
+    const std::array<std::uint8_t, 4> bytes{
+            static_cast<std::uint8_t>(fiber::quic::kQuicTpDisableActiveMigration),
+            0,
+            static_cast<std::uint8_t>(fiber::quic::kQuicTpDisableActiveMigration),
+            0,
+    };
+    fiber::quic::QuicReadCursor in(bytes.data(), bytes.size());
+    fiber::quic::QuicTransportParams parsed{};
+
+    auto read = fiber::quic::quic_parse_transport_params(fiber::quic::QuicTransportParamOwner::Client, in, parsed);
+
+    EXPECT_FALSE(read.has_value());
+    EXPECT_EQ(read.error(), fiber::common::IoErr::Invalid);
+}
+
 TEST(QuicTransportParamsCodecTest, RejectsInitialMaxStreamsAboveProtocolLimit) {
     fiber::quic::QuicTransportParams params{};
     params.initial_max_streams_bidi = fiber::quic::kQuicMaxStreamLimit + 1;

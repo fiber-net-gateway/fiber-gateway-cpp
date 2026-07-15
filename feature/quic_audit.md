@@ -6,7 +6,7 @@
 >
 > 测试覆盖：约 10,600 行 QUIC 测试；`QuicPacer` 已有确定性算法单测及 scheduler/endpoint 集成回归，`QuicAckHandler`/`QuicLossRecovery`/`QuicPathManager` 的专项覆盖仍然薄弱；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
 >
-> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化；#12 pacing、#13 ACK range 扫描、#15 ACK-of-ACK 阈值已于 2026-07-15 修复；#14 于 2026-07-15 复核为方向误判不存在，并已补齐三类区间回归测试；#16 于 2026-07-15 复核为 RFC 要求的 clamp 行为，并修复相邻的 RTT 扣减等号边界；#17 于 2026-07-15 复核为调用链误判，idle ACK 在进入 CUBIC window 前已返回，路径重置也已显式重置拥塞状态；#18 强保护包双解析已于 2026-07-15 消除，Initial 为无副作用静默丢弃而有意保留预校验。待修 P0：#1 key-update、#9 GSO，其余排期。
+> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化；#12 pacing、#13 ACK range 扫描、#15 ACK-of-ACK 阈值已于 2026-07-15 修复；#14 于 2026-07-15 复核为方向误判不存在，并已补齐三类区间回归测试；#16 于 2026-07-15 复核为 RFC 要求的 clamp 行为，并修复相邻的 RTT 扣减等号边界；#17 于 2026-07-15 复核为调用链误判，idle ACK 在进入 CUBIC window 前已返回，路径重置也已显式重置拥塞状态；#18 强保护包双解析已于 2026-07-15 消除，Initial 为无副作用静默丢弃而有意保留预校验；#19 当前定义的重复 transport parameter 已于 2026-07-15 拒绝。待修 P0：#1 key-update、#9 GSO，其余排期。
 
 ## 总体评价
 
@@ -288,12 +288,27 @@ bytes-in-flight 重复计账，同一 ack-eliciting 包内的其余帧也会是 
 > `FRAME_ENCODING_ERROR`；方向非法的 HANDSHAKE_DONE 映射 `PROTOCOL_VIOLATION`；坏尾帧
 > key update 不翻转密钥；Closing 连接跳过坏 payload 的帧分发。
 
-### 19. 重复 transport param 静默接受
-`QuicTransportParamsCodec.cpp:113-277`
+### 19. ✅ 重复 transport param 静默接受
+`QuicTransportParamsCodec.cpp:114-286`
 
-`quic_parse_transport_params` 循环无 seen-set，重复 `initial_max_data` 后值胜出。RFC 9000 §18 要求 PROTOCOL_VIOLATION。
+`quic_parse_transport_params` 循环原先无 seen-set，重复 `initial_max_data` 后值胜出。RFC 9000 §7.4
+规定发送方 MUST NOT 重复参数，并建议接收方以 `TRANSPORT_PARAMETER_ERROR` 拒绝。
 
 **修复**：维护小 seen-set（如 17 个已知 param ID 的 bitset）拒重复。
+
+> ✅ **已修复 2026-07-15**。同时纠正原审计的规范定性：重复参数规则位于 RFC 9000
+> §7.4；发送方 **MUST NOT** 重复发送参数，接收方 **SHOULD** 将重复参数作为
+> `TRANSPORT_PARAMETER_ERROR`，并非要求 `PROTOCOL_VIOLATION`。
+>
+> `quic_parse_transport_params` 现用栈上 `uint32_t` 位图跟踪 RFC 9000 当前定义的连续参数 ID
+> `0x00`–`0x10`，在语义解析和写入 `QuicTransportParams` 前拒绝第二次出现并返回
+> `IoErr::Invalid`；TLS 回调既有错误路径会把它映射为 `TransportParameterError`。实现每个参数仅增加
+> 一次范围判断和位运算，无动态分配。未知参数仍按 RFC 要求忽略；其重复项没有本地语义，不为接收侧
+> `SHOULD` 要求引入无界 ID 集合或攻击者可驱动的动态分配。
+>
+> 回归测试 `QuicTransportParamsCodecTest.RejectsDuplicateValueParam` 与
+> `RejectsDuplicateEmptyParam` 分别覆盖原来的后值覆盖路径和幂等空参数重复路径；完整 CTest
+> **1219/1219** 通过。
 
 ### 20. PADDING 逐字节 skip
 `QuicTransportCodec.cpp:667-675`
@@ -517,7 +532,7 @@ deadline 检查、单写者 `Busy`、`post_at` 计时器、`post` resume、`comp
 |---|---|---|
 | P0 | #2 PTO 忙循环✅、#3 re-entrancy✅、#4 create-before-auth✅(方案A)、#5 DoS 向量、#1 key-update | 中 |
 | P0 | #9 GSO/sendmmsg、#8 接收零拷贝 | 大 |
-| P1 | #11 loss 减窗基准、#22 `reset()` FIN'd 流、#23 `write()` 短写丢 FIN、#19 重复 TP 拒绝、#27 HKDF 溢出、#16 ack_delay skip | 小（多为一行） |
+| P1 | #11 loss 减窗基准、#22 `reset()` FIN'd 流、#23 `write()` 短写丢 FIN、#19 重复 TP 拒绝✅、#27 HKDF 溢出、#16 ack_delay skip | 小（多为一行） |
 | P1 | #13✅/#14⚪/#15✅；继续给 AckHandler/LossRecovery/SendScheduler/PathManager 补单测 | 中 |
 | P2 | #7 detach-before-destroy 不变量断言✅；若要支持挂起 awaiter 下被动销毁，再做 awaiter self-retain | 小 / 中 |
 | P2 | #14 可选的严格跨空间 persistent-congestion 状态跟踪 | 中 |
