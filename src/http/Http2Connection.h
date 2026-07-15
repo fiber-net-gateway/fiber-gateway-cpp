@@ -93,6 +93,8 @@ public:
     void shutdown(common::IoErr reason = common::IoErr::Canceled) noexcept;
     void graceful_shutdown() noexcept;
     [[nodiscard]] State state() const noexcept { return state_; }
+    [[nodiscard]] bool peer_settings_received() const noexcept { return peer_settings_received_; }
+    [[nodiscard]] bool peer_enable_connect_protocol() const noexcept { return peer_enable_connect_protocol_; }
     [[nodiscard]] HttpTransport &transport() noexcept {
         FIBER_ASSERT(transport_ != nullptr);
         return *transport_;
@@ -123,7 +125,6 @@ protected:
     [[nodiscard]] ConnectionRole role() const noexcept { return options_.role; }
     [[nodiscard]] bool peer_enable_push() const noexcept { return peer_enable_push_; }
     [[nodiscard]] bool local_enable_connect_protocol() const noexcept { return options_.enable_connect_protocol; }
-    [[nodiscard]] bool peer_enable_connect_protocol() const noexcept { return peer_enable_connect_protocol_; }
     [[nodiscard]] bool has_stream(std::uint32_t stream_id) const noexcept {
         return streams_.find(stream_id) != nullptr;
     }
@@ -231,6 +232,7 @@ private:
     std::uint32_t peer_max_outbound_frame_size_ = 16384;
     std::uint32_t peer_max_header_list_size_ = 0xffffffffU;
     bool peer_enable_push_ = true;
+    bool peer_settings_received_ = false;
     bool peer_enable_connect_protocol_ = false;
     bool local_goaway_sent_ = false;
     std::uint32_t local_goaway_last_stream_id_ = 0;

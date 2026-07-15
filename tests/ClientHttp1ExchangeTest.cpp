@@ -52,6 +52,16 @@ struct ReadBodyOutcome {
     bool reusable_after_scope = false;
 };
 
+struct RawStreamOutcome {
+    fiber::common::IoErr err = fiber::common::IoErr::Unknown;
+    int status = 0;
+    std::string first_body;
+    bool first_body_complete = false;
+    bool eof_complete = false;
+    bool raw_stream_active = false;
+    bool reusable_after_scope = false;
+};
+
 fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     sockaddr_storage bound{};
     socklen_t len = sizeof(bound);
@@ -421,6 +431,63 @@ DetachedTask run_chunked_response_with_trailer_server(fiber::event::EventLoop *l
                                                    "\r\n");
     stream.close();
     result_promise->set_value(second_write ? fiber::common::IoErr::None : second_write.error());
+}
+
+DetachedTask run_raw_stream_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
+                                   std::promise<CaptureOutcome> *result_promise) {
+    CaptureOutcome outcome;
+    fiber::net::TcpListener listener(*loop);
+    fiber::net::ListenOptions listen_options{};
+    auto bind_result =
+            listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
+    if (!bind_result) {
+        port_promise->set_value(0);
+        outcome.err = bind_result.error();
+        result_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    auto port_result = resolve_port(listener.fd());
+    port_promise->set_value(port_result ? *port_result : 0);
+    if (!port_result) {
+        outcome.err = port_result.error();
+        result_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    auto accept_result = co_await listener.accept();
+    listener.close();
+    if (!accept_result) {
+        outcome.err = accept_result.error();
+        result_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    fiber::net::TcpStream stream(*loop, accept_result->release_fd(), accept_result->take_peer());
+    std::string request;
+    auto header_result = co_await read_until_header_end(stream, request);
+    if (!header_result) {
+        outcome.err = header_result.error();
+        result_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    auto response_result = co_await write_all(stream, "HTTP/1.1 101 Switching Protocols\r\n"
+                                                      "Upgrade: websocket\r\n"
+                                                      "Connection: Upgrade\r\n"
+                                                      "\r\n"
+                                                      "server-first");
+    if (!response_result) {
+        stream.close();
+        outcome.err = response_result.error();
+        result_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    auto body_result = co_await read_exact(stream, std::string_view("client-frame").size(), outcome.bytes);
+    stream.close();
+    outcome.err = body_result ? fiber::common::IoErr::None : body_result.error();
+    result_promise->set_value(std::move(outcome));
 }
 
 DetachedTask run_content_length_client(fiber::event::EventLoop *loop, std::uint16_t port,
@@ -1096,6 +1163,88 @@ DetachedTask run_discard_chunked_body_with_trailer_client(fiber::event::EventLoo
     result_promise->set_value(std::move(outcome));
 }
 
+DetachedTask run_raw_stream_client(fiber::event::EventLoop *loop, std::uint16_t port,
+                                   std::promise<RawStreamOutcome> *result_promise) {
+    RawStreamOutcome outcome;
+    fiber::http::Http1ClientConnectionOptions conn_options;
+    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
+    auto connect_result = co_await connection.connect();
+    if (!connect_result) {
+        outcome.err = connect_result.error();
+        result_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    {
+        fiber::mem::BufPool pool;
+        fiber::http::HttpHeaders headers(pool);
+        headers.add_view("host", "example.com");
+        headers.add_view("upgrade", "websocket");
+        headers.add_view("connection", "Upgrade");
+
+        fiber::http::ClientHttp1Exchange exchange(connection, pool);
+        auto send_result = co_await exchange.send_header(
+                {
+                        .method = fiber::http::HttpMethod::Get,
+                        .target = "/chat",
+                        .headers = &headers,
+                },
+                true);
+        if (!send_result) {
+            outcome.err = send_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+
+        auto header_result = co_await exchange.read_header();
+        if (!header_result) {
+            outcome.err = header_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+        outcome.status = (*header_result)->status_code;
+
+        auto switch_result = exchange.switch_to_raw_stream();
+        if (!switch_result) {
+            outcome.err = switch_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+        outcome.raw_stream_active = exchange.raw_stream_active();
+
+        auto first_body_result = co_await exchange.read_body(64);
+        if (!first_body_result) {
+            outcome.err = first_body_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+        outcome.first_body_complete = first_body_result->complete();
+        outcome.first_body = flatten_body_chunk(*first_body_result);
+
+        auto write_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("client-frame"),
+                                                         std::string_view("client-frame").size(), true);
+        if (!write_result) {
+            outcome.err = write_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+
+        auto eof_result = co_await exchange.read_body(64);
+        if (!eof_result) {
+            outcome.err = eof_result.error();
+            result_promise->set_value(std::move(outcome));
+            co_return;
+        }
+        outcome.eof_complete = eof_result->complete();
+        outcome.err = fiber::common::IoErr::None;
+    }
+
+    outcome.reusable_after_scope = connection.reusable();
+    connection.close();
+    result_promise->set_value(std::move(outcome));
+}
+
 TEST(ClientHttp1ExchangeTest, SendHeaderAndContentLengthBodyWriteRawHttp1Request) {
     const std::string expected = "POST /submit HTTP/1.1\r\n"
                                  "Content-Length: 5\r\n"
@@ -1567,6 +1716,41 @@ TEST(ClientHttp1ExchangeTest, DiscardResponseBodyConsumesChunkedTrailers) {
     EXPECT_TRUE(outcome.reusable_after_scope);
 
     EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);
+
+    group.stop();
+    group.join();
+}
+
+TEST(ClientHttp1ExchangeTest, SwitchToRawStreamPreservesPendingBytesAndWritesWithoutFraming) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<std::uint16_t> port_promise;
+    auto port_future = port_promise.get_future();
+    std::promise<CaptureOutcome> server_result_promise;
+    auto server_result_future = server_result_promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_raw_stream_server(&group.at(0), &port_promise, &server_result_promise); });
+
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    std::promise<RawStreamOutcome> client_result_promise;
+    auto client_result_future = client_result_promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_raw_stream_client(&group.at(0), port, &client_result_promise); });
+
+    RawStreamOutcome client = client_result_future.get();
+    CaptureOutcome server = server_result_future.get();
+    EXPECT_EQ(client.err, fiber::common::IoErr::None);
+    EXPECT_EQ(client.status, 101);
+    EXPECT_TRUE(client.raw_stream_active);
+    EXPECT_EQ(client.first_body, "server-first");
+    EXPECT_FALSE(client.first_body_complete);
+    EXPECT_TRUE(client.eof_complete);
+    EXPECT_FALSE(client.reusable_after_scope);
+    EXPECT_EQ(server.err, fiber::common::IoErr::None);
+    EXPECT_EQ(server.bytes, "client-frame");
 
     group.stop();
     group.join();

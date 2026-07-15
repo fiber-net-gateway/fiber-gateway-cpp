@@ -424,6 +424,15 @@ struct ClientRequestHeaderRunOutcome {
     std::uint32_t stream_id = 0;
 };
 
+struct ClientExtendedConnectRunOutcome {
+    fiber::common::IoResult<void> header_result;
+    fiber::common::IoResult<void> run_result;
+    fiber::http::Http2ExtendedConnectSupport support_before = fiber::http::Http2ExtendedConnectSupport::Unknown;
+    fiber::http::Http2ExtendedConnectSupport support_after = fiber::http::Http2ExtendedConnectSupport::Unknown;
+    std::string written;
+    std::uint32_t stream_id = 0;
+};
+
 struct ClientRequestBodyRunOutcome {
     fiber::common::IoResult<void> header_result;
     fiber::common::IoResult<std::size_t> body_result;
@@ -1261,6 +1270,60 @@ DetachedTask run_client_request_header_send(std::shared_ptr<std::promise<ClientR
     outcome.stream_id = exchange.stream_id();
 
     connection.request_stop();
+    co_await connection.stop_and_join();
+    outcome.written = fake_transport_ptr->written();
+    promise->set_value(std::move(outcome));
+    fiber::event::EventLoop::current().stop();
+    co_return;
+}
+
+DetachedTask
+run_client_extended_connect_header_send(std::shared_ptr<std::promise<ClientExtendedConnectRunOutcome>> promise,
+                                        bool peer_enabled) {
+    ClientExtendedConnectRunOutcome outcome;
+    std::string settings_payload;
+    if (peer_enabled) {
+        settings_payload.assign(6, '\0');
+        settings_payload[1] = '\x08';
+        settings_payload[5] = '\x01';
+    }
+    auto fake_transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{
+            make_frame(static_cast<std::uint32_t>(settings_payload.size()), 0x4, 0x0, 0, settings_payload)});
+    auto *fake_transport_ptr = fake_transport.get();
+
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+    SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
+
+    fiber::mem::BufPool pool;
+    fiber::http::ClientHttp2Exchange exchange(connection, pool);
+    fiber::http::HttpHeaders headers(pool);
+    if (headers.set("sec-websocket-version", "13") == nullptr) {
+        outcome.header_result = std::unexpected(fiber::common::IoErr::NoMem);
+        connection.request_stop();
+        co_await connection.stop_and_join();
+        promise->set_value(std::move(outcome));
+        fiber::event::EventLoop::current().stop();
+        co_return;
+    }
+
+    outcome.support_before = exchange.extended_connect_support();
+    outcome.header_result = co_await exchange.send_request_header(
+            {
+                    .method = fiber::http::HttpMethod::Connect,
+                    .scheme = "https",
+                    .authority = "example.com",
+                    .path = "/chat",
+                    .protocol = "websocket",
+                    .headers = &headers,
+            },
+            false);
+    outcome.stream_id = exchange.stream_id();
+    if (outcome.header_result) {
+        outcome.run_result = co_await connection.run();
+        outcome.support_after = exchange.extended_connect_support();
+    }
+
     co_await connection.stop_and_join();
     outcome.written = fake_transport_ptr->written();
     promise->set_value(std::move(outcome));
@@ -3204,6 +3267,61 @@ TEST(Http2ConnectionTest, ClientExchangeSendRequestHeaderEncodesRequestHeaders) 
         }
     }
     EXPECT_TRUE(found_user_agent);
+}
+
+TEST(Http2ConnectionTest, ClientExchangeEncodesExtendedConnectProtocolBeforeRegularHeaders) {
+    fiber::event::EventLoopGroup group(1);
+    auto promise = std::make_shared<std::promise<ClientExtendedConnectRunOutcome>>();
+    auto future = promise->get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [promise]() mutable {
+        return run_client_extended_connect_header_send(std::move(promise), true);
+    });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ClientExtendedConnectRunOutcome outcome = future.get();
+    group.join();
+
+    ASSERT_TRUE(outcome.header_result.has_value());
+    ASSERT_TRUE(outcome.run_result.has_value());
+    EXPECT_EQ(outcome.stream_id, 1U);
+    EXPECT_EQ(outcome.support_before, fiber::http::Http2ExtendedConnectSupport::Unknown);
+    EXPECT_EQ(outcome.support_after, fiber::http::Http2ExtendedConnectSupport::Enabled);
+
+    std::string payload = strip_client_initial_flight(outcome.written);
+    ParsedHeadersFrames parsed = collect_stream_headers_frames(payload, 1);
+    ASSERT_FALSE(parsed.header_block.empty());
+    EXPECT_EQ(parsed.first_flags & 0x1U, 0x0U);
+
+    const auto fields = decode_header_block(parsed.header_block);
+    ASSERT_EQ(fields.size(), 6U);
+    EXPECT_EQ(fields[0], std::make_pair(std::string(":method"), std::string("CONNECT")));
+    EXPECT_EQ(fields[1], std::make_pair(std::string(":scheme"), std::string("https")));
+    EXPECT_EQ(fields[2], std::make_pair(std::string(":authority"), std::string("example.com")));
+    EXPECT_EQ(fields[3], std::make_pair(std::string(":path"), std::string("/chat")));
+    EXPECT_EQ(fields[4], std::make_pair(std::string(":protocol"), std::string("websocket")));
+    EXPECT_EQ(fields[5], std::make_pair(std::string("sec-websocket-version"), std::string("13")));
+}
+
+TEST(Http2ConnectionTest, ClientExchangeReportsDisabledExtendedConnectAfterPeerSettings) {
+    fiber::event::EventLoopGroup group(1);
+    auto promise = std::make_shared<std::promise<ClientExtendedConnectRunOutcome>>();
+    auto future = promise->get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [promise]() mutable {
+        return run_client_extended_connect_header_send(std::move(promise), false);
+    });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ClientExtendedConnectRunOutcome outcome = future.get();
+    group.join();
+
+    ASSERT_TRUE(outcome.header_result.has_value());
+    ASSERT_TRUE(outcome.run_result.has_value());
+    EXPECT_EQ(outcome.support_before, fiber::http::Http2ExtendedConnectSupport::Unknown);
+    EXPECT_EQ(outcome.support_after, fiber::http::Http2ExtendedConnectSupport::Disabled);
 }
 
 TEST(Http2ConnectionTest, ClientExchangeWriteBodyEncodesDataFrames) {

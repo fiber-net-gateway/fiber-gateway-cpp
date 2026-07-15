@@ -747,6 +747,8 @@ ClientHttp1Exchange::send_header(const Http1RequestHead &head, bool end_stream,
     saw_connection_close_ = false;
     saw_connection_keep_alive_ = false;
     response_eof_delimited_ = false;
+    raw_stream_active_ = false;
+    raw_stream_write_complete_ = false;
     pending_buf_ = {};
     clear_response_header_nodes();
     response_trailers_.clear();
@@ -762,6 +764,25 @@ ClientHttp1Exchange::write_body(mem::IoBufChain chunk, std::chrono::milliseconds
     }
     if (!conn_ || !conn_->transport_ || !conn_->valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (raw_stream_active_) {
+        if (raw_stream_write_complete_) {
+            co_return std::unexpected(common::IoErr::Already);
+        }
+
+        const std::size_t body_bytes = chunk.readable_bytes();
+        const bool end_stream = chunk.complete();
+        if (body_bytes != 0) {
+            auto write_result = co_await write_all(conn_->transport_.get(), chunk, timeout);
+            if (!write_result) {
+                fail_active_exchange();
+                co_return std::unexpected(write_result.error());
+            }
+        }
+        if (end_stream) {
+            raw_stream_write_complete_ = true;
+        }
+        co_return body_bytes;
     }
     if (request_state_ == RequestState::Init) {
         co_return std::unexpected(common::IoErr::Invalid);
@@ -888,6 +909,23 @@ ClientHttp1Exchange::write_body(const std::uint8_t *buf, std::size_t len, bool e
     if (!conn_ || !conn_->transport_ || !conn_->valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
+    if (raw_stream_active_) {
+        if (raw_stream_write_complete_) {
+            co_return std::unexpected(common::IoErr::Already);
+        }
+
+        if (len != 0) {
+            auto write_result = co_await write_all(conn_->transport_.get(), buf, len, timeout);
+            if (!write_result) {
+                fail_active_exchange();
+                co_return std::unexpected(write_result.error());
+            }
+        }
+        if (end_stream) {
+            raw_stream_write_complete_ = true;
+        }
+        co_return len;
+    }
     if (request_state_ == RequestState::Init) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -999,6 +1037,9 @@ ClientHttp1Exchange::send_trailer(const HttpHeaders &trailers, std::chrono::mill
     if (!conn_ || !conn_->transport_ || !conn_->valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
+    if (raw_stream_active_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
     if (request_state_ == RequestState::Init) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -1043,6 +1084,9 @@ fiber::async::Task<common::IoResult<const Http1ResponseHead *>>
 ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
     if (!active_) {
         co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (raw_stream_active_) {
+        co_return std::unexpected(common::IoErr::Already);
     }
     if (!conn_ || !conn_->transport_ || !conn_->valid() || pool_ == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
@@ -1454,6 +1498,9 @@ ClientHttp1Exchange::discard_response_body(std::chrono::milliseconds timeout) no
     if (!active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
+    if (raw_stream_active_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
     for (;;) {
         auto result = co_await read_body(4096, timeout);
         if (!result) {
@@ -1464,6 +1511,29 @@ ClientHttp1Exchange::discard_response_body(std::chrono::milliseconds timeout) no
         }
     }
     co_return common::IoResult<void>{};
+}
+
+common::IoResult<void> ClientHttp1Exchange::switch_to_raw_stream() noexcept {
+    if (!active_ || !conn_ || !conn_->transport_ || !conn_->valid()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (raw_stream_active_) {
+        return std::unexpected(common::IoErr::Already);
+    }
+    if (request_state_ == RequestState::Init || request_state_ == RequestState::Failed ||
+        response_headers_head_ == nullptr) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    final_response_received_ = true;
+    response_complete_ = false;
+    response_eof_delimited_ = true;
+    keepalive_on_release_ = false;
+    response_body_parser_.reset();
+    response_trailers_.clear();
+    raw_stream_active_ = true;
+    raw_stream_write_complete_ = false;
+    return {};
 }
 
 } // namespace fiber::http

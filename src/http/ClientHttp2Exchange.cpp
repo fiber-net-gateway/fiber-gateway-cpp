@@ -139,6 +139,17 @@ void ClientHttp2Exchange::cancel(common::IoErr reason) noexcept {
     stream_->close(reason);
 }
 
+Http2ExtendedConnectSupport ClientHttp2Exchange::extended_connect_support() const noexcept {
+    if (const ClientHttp2Request *req = request()) {
+        return req->extended_connect_support();
+    }
+    if (!conn_ || !conn_->peer_settings_received()) {
+        return Http2ExtendedConnectSupport::Unknown;
+    }
+    return conn_->peer_enable_connect_protocol() ? Http2ExtendedConnectSupport::Enabled
+                                                 : Http2ExtendedConnectSupport::Disabled;
+}
+
 common::IoResult<ClientHttp2Request *> ClientHttp2Exchange::ensure_request_opened() noexcept {
     if (stream_) {
         ClientHttp2Request *req = request();

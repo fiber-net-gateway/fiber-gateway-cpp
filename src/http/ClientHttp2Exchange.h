@@ -54,6 +54,7 @@ public:
     void cancel(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
     [[nodiscard]] bool valid() const noexcept { return conn_ != nullptr || static_cast<bool>(stream_); }
+    [[nodiscard]] Http2ExtendedConnectSupport extended_connect_support() const noexcept;
     [[nodiscard]] std::uint32_t stream_id() const noexcept { return stream_ ? stream_->stream_id() : 0; }
     [[nodiscard]] Http2Stream *stream() noexcept { return stream_.get(); }
     [[nodiscard]] const Http2Stream *stream() const noexcept { return stream_.get(); }

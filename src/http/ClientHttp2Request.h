@@ -46,6 +46,7 @@ public:
 
     [[nodiscard]] Http2Stream &stream() noexcept { return stream_; }
     [[nodiscard]] const Http2Stream &stream() const noexcept { return stream_; }
+    [[nodiscard]] Http2ExtendedConnectSupport extended_connect_support() const noexcept;
     [[nodiscard]] mem::IoBufNodePool &node_pool() noexcept;
 
 private:
