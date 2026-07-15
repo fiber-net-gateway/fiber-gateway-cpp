@@ -6,7 +6,7 @@
 >
 > 测试覆盖：约 10,600 行 QUIC 测试；`QuicPacer` 已有确定性算法单测及 scheduler/endpoint 集成回归，`QuicAckHandler`/`QuicLossRecovery`/`QuicPathManager` 的专项覆盖仍然薄弱；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
 >
-> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化；#12 pacing、#13 ACK range 扫描已于 2026-07-15 修复；#14 于 2026-07-15 复核为方向误判不存在，并已补齐三类区间回归测试。待修 P0：#1 key-update、#9 GSO，其余排期。
+> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化；#12 pacing、#13 ACK range 扫描、#15 ACK-of-ACK 阈值已于 2026-07-15 修复；#14 于 2026-07-15 复核为方向误判不存在，并已补齐三类区间回归测试。待修 P0：#1 key-update、#9 GSO，其余排期。
 
 ## 总体评价
 
@@ -217,12 +217,14 @@ bytes-in-flight 重复计账，同一 ack-eliciting 包内的其余帧也会是 
 >
 > 回归测试：`QuicLossRecoveryTest.AckedIntervalBeforeLostIntervalCanEstablishPersistentCongestion`、`AckedIntervalAfterLostIntervalCanEstablishPersistentCongestion` 和 `AckedPacketInsideLostIntervalPreventsPersistentCongestion` 分别覆盖 ACK 全在 loss 之前、全在 loss 之后和落在 loss 区间内的三种边界。
 
-### 15. `drop_ack_ranges` 用发送 PN 阈值接收 PN range
-`QuicAckHandler.cpp:221-223`
+### 15. ✅ `drop_ack_ranges` 用发送 PN 阈值接收 PN range
+`QuicAckHandler.cpp:225-229`
 
-收到的 ACK 帧被 ack 时，`drop_ack_ranges(frame->packet_number)` 用发送包 PN 调，但 `drop_ack_ranges` 阈值 `largest_range`/`ack_ranges` 跟踪的是**接收** PN。发送/接收 PN 是独立序列，比较无意义。发送 PN 超前接收 PN（数据密集服务端常见）时，所有接收 ACK range 被过早丢弃，致冗余重 ACK。非正确性问题（重复 ACK 无害），但浪费带宽。
+收到的 ACK 帧被 ack 时，`drop_ack_ranges(frame->packet_number)` 用发送包 PN 调，但 `drop_ack_ranges` 阈值 `largest_range`/`ack_ranges` 跟踪的是**接收** PN。发送/接收 PN 是独立序列，比较无意义。发送 PN 超前接收 PN（数据密集服务端常见）时，会过早丢弃该 ACK 发出后新收到的 range，造成漏 ACK、对端虚假判丢、无谓重传与减窗；发送 PN 落后时则删除不足，产生冗余 ACK。
 
 **修复**：存并传该 ACK 帧覆盖的最大接收 PN（`frame->u.ack.largest`）而非 `frame->packet_number`。
+
+> ✅ **已修复 2026-07-15**。ACK-of-ACK 处理改为将已发送 ACK/ACK_ECN 帧保存的 `u.ack.largest` 传给 `drop_ack_ranges`，并将其参数重命名为 `largest_acknowledged`、修正范围方向注释。修复不增加成员、分配或热路径分支。回归测试 `QuicAckHandlerTest.AckOfAckDropsRangesThroughSentAckLargest` 构造本地发送 PN 100 承载 `largest=10` 的 ACK、随后收到对端 PN 11，再确认本地 PN 100，验证仅丢弃到 10 且 PN 11 的 range 与 `pending_ack` 均保留。
 
 ### 16. `ack_delay` 被 clamp 而非 skip
 `QuicCongestion.cpp:77-79`
@@ -482,7 +484,7 @@ deadline 检查、单写者 `Busy`、`post_at` 计时器、`post` resume、`comp
 | P0 | #2 PTO 忙循环✅、#3 re-entrancy✅、#4 create-before-auth✅(方案A)、#5 DoS 向量、#1 key-update | 中 |
 | P0 | #9 GSO/sendmmsg、#8 接收零拷贝 | 大 |
 | P1 | #11 loss 减窗基准、#22 `reset()` FIN'd 流、#23 `write()` 短写丢 FIN、#19 重复 TP 拒绝、#27 HKDF 溢出、#16 ack_delay skip | 小（多为一行） |
-| P1 | #13✅/#14⚪；给 #15 + AckHandler/LossRecovery/SendScheduler/PathManager 补单测 | 中 |
+| P1 | #13✅/#14⚪/#15✅；继续给 AckHandler/LossRecovery/SendScheduler/PathManager 补单测 | 中 |
 | P2 | #7 detach-before-destroy 不变量断言✅；若要支持挂起 awaiter 下被动销毁，再做 awaiter self-retain | 小 / 中 |
 | P2 | #14 可选的严格跨空间 persistent-congestion 状态跟踪 | 中 |
 | P2 | #35 拆 QuicConnection god object、#31 拆 QuicUdpEndpoint、#25 去重 reassembly、#44 去重 awaiter | 大 |

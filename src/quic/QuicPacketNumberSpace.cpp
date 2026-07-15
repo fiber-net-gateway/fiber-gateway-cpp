@@ -439,10 +439,10 @@ void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime receiv
 }
 
 // ---------------------------------------------------------------------------
-// drop_ack_ranges — discard ACK ranges ≥ pn.
+// drop_ack_ranges — discard ACK ranges <= largest_acknowledged.
 // Ported from nginx's ngx_quic_drop_ack_ranges (ngx_event_quic_ack.c).
 // ---------------------------------------------------------------------------
-void QuicPacketNumberSpace::drop_ack_ranges(std::uint64_t pn) noexcept {
+void QuicPacketNumberSpace::drop_ack_ranges(std::uint64_t largest_acknowledged) noexcept {
     const std::uint64_t base = largest_range;
 
     if (base == kUnsetPacketNumber) {
@@ -450,7 +450,7 @@ void QuicPacketNumberSpace::drop_ack_ranges(std::uint64_t pn) noexcept {
     }
 
     // Clear pending_ack if it is covered by the drop.
-    if (pending_ack != kUnsetPacketNumber && pn >= pending_ack) {
+    if (pending_ack != kUnsetPacketNumber && largest_acknowledged >= pending_ack) {
         pending_ack = kUnsetPacketNumber;
     }
 
@@ -458,7 +458,7 @@ void QuicPacketNumberSpace::drop_ack_ranges(std::uint64_t pn) noexcept {
     std::uint64_t smallest = largest - first_range;
 
     // If PN covers everything — reset all range state.
-    if (pn >= largest) {
+    if (largest_acknowledged >= largest) {
         largest_range = kUnsetPacketNumber;
         first_range = 0;
         ack_range_count = 0;
@@ -466,8 +466,8 @@ void QuicPacketNumberSpace::drop_ack_ranges(std::uint64_t pn) noexcept {
     }
 
     // If PN is inside the first range — truncate it.
-    if (pn >= smallest) {
-        first_range = largest - pn - 1;
+    if (largest_acknowledged >= smallest) {
+        first_range = largest - largest_acknowledged - 1;
         ack_range_count = 0;
         return;
     }
@@ -479,12 +479,12 @@ void QuicPacketNumberSpace::drop_ack_ranges(std::uint64_t pn) noexcept {
         largest = smallest - r.gap - 2;
         smallest = largest - r.range;
 
-        if (pn >= largest) {
+        if (largest_acknowledged >= largest) {
             ack_range_count = i;
             return;
         }
-        if (pn >= smallest) {
-            r.range = largest - pn - 1;
+        if (largest_acknowledged >= smallest) {
+            r.range = largest - largest_acknowledged - 1;
             ack_range_count = i + 1;
             return;
         }
