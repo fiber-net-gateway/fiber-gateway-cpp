@@ -648,7 +648,7 @@ common::IoResult<QuicInputFrameParseResult> quic_parse_frame_for_receiver(QuicCo
                                                                           QuicReadCursor &payload) noexcept {
     const std::size_t start = payload.offset();
     auto type_value = quic_parse_varint(payload);
-    if (!type_value || *type_value > kLastFrameType) {
+    if (!type_value || payload.offset() - start != quic_varint_len(*type_value) || *type_value > kLastFrameType) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -664,15 +664,26 @@ common::IoResult<QuicInputFrameParseResult> quic_parse_frame_for_receiver(QuicCo
     }
 
     switch (frame.type) {
-        case QuicFrameType::Padding:
-            while (!payload.empty() && *payload.pos() == 0) {
-                auto skipped = payload.skip(1);
-                if (!skipped) {
-                    return std::unexpected(skipped.error());
+        case QuicFrameType::Padding: {
+            const std::uint8_t *padding_end = payload.pos();
+            while (static_cast<std::size_t>(payload.end() - padding_end) >= sizeof(std::uint64_t)) {
+                std::uint64_t padding_word = 0;
+                std::memcpy(&padding_word, padding_end, sizeof(padding_word));
+                if (padding_word != 0) {
+                    break;
                 }
+                padding_end += sizeof(padding_word);
+            }
+            while (padding_end != payload.end() && *padding_end == 0) {
+                ++padding_end;
+            }
+            auto skipped = payload.skip(static_cast<std::size_t>(padding_end - payload.pos()));
+            if (!skipped) {
+                return std::unexpected(skipped.error());
             }
             frame.u.padding.length = payload.offset() - start;
             break;
+        }
 
         case QuicFrameType::Ping:
             break;
@@ -1207,31 +1218,35 @@ common::IoResult<std::size_t> quic_create_output_frame(QuicWriteCursor *out, Qui
         }
 
         case QuicFrameType::NewConnectionId: {
+            const QuicNewConnectionIdFrame &new_connection_id = frame.u.new_connection_id;
+            if (new_connection_id.cid_len == 0 || new_connection_id.cid_len > kMaxConnectionIdLength ||
+                new_connection_id.retire_prior_to > new_connection_id.sequence_number) {
+                return std::unexpected(common::IoErr::Invalid);
+            }
             auto wrote = write_or_count_varint(out, static_cast<std::uint64_t>(QuicFrameType::NewConnectionId), len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
-            wrote = write_or_count_varint(out, frame.u.new_connection_id.sequence_number, len);
+            wrote = write_or_count_varint(out, new_connection_id.sequence_number, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
-            wrote = write_or_count_varint(out, frame.u.new_connection_id.retire_prior_to, len);
+            wrote = write_or_count_varint(out, new_connection_id.retire_prior_to, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
             ++len;
             if (out != nullptr) {
-                wrote = out->write_u8(frame.u.new_connection_id.cid_len);
+                wrote = out->write_u8(new_connection_id.cid_len);
                 if (!wrote) {
                     return std::unexpected(wrote.error());
                 }
             }
-            wrote = write_or_count_bytes(out, frame.u.new_connection_id.cid, frame.u.new_connection_id.cid_len, len);
+            wrote = write_or_count_bytes(out, new_connection_id.cid, new_connection_id.cid_len, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }
-            wrote = write_or_count_bytes(out, frame.u.new_connection_id.stateless_reset_token,
-                                         kStatelessResetTokenLength, len);
+            wrote = write_or_count_bytes(out, new_connection_id.stateless_reset_token, kStatelessResetTokenLength, len);
             if (!wrote) {
                 return std::unexpected(wrote.error());
             }

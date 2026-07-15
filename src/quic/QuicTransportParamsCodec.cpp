@@ -14,6 +14,12 @@ namespace {
            id == kQuicTpStatelessResetToken || id == kQuicTpRetrySourceConnectionId;
 }
 
+[[nodiscard]] bool constrained_transport_params_valid(const QuicTransportParams &params) noexcept {
+    return params.max_udp_payload_size >= kMinInitialDatagramSize &&
+           params.max_udp_payload_size <= kQuicMaxUdpPayloadSize && params.ack_delay_exponent <= 20 &&
+           params.max_ack_delay < (1ULL << 14U) && params.active_connection_id_limit >= 2;
+}
+
 [[nodiscard]] common::IoResult<std::uint64_t> parse_exact_varint(QuicReadCursor &in) noexcept {
     auto value = quic_parse_varint(in);
     if (!value) {
@@ -285,6 +291,9 @@ common::IoResult<void> quic_parse_transport_params(QuicTransportParamOwner owner
         }
     }
 
+    if (!constrained_transport_params_valid(out)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
     return {};
 }
 
@@ -296,7 +305,8 @@ common::IoResult<std::size_t> quic_create_transport_params(QuicTransportParamOwn
          params.has_stateless_reset_token)) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    if (params.initial_max_streams_bidi > kQuicMaxStreamLimit || params.initial_max_streams_uni > kQuicMaxStreamLimit) {
+    if (!constrained_transport_params_valid(params) || params.initial_max_streams_bidi > kQuicMaxStreamLimit ||
+        params.initial_max_streams_uni > kQuicMaxStreamLimit) {
         return std::unexpected(common::IoErr::Invalid);
     }
 

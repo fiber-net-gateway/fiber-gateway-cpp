@@ -49,6 +49,35 @@ TEST(QuicTransportCodecTest, RejectsTruncatedVarint) {
     EXPECT_FALSE(parsed.has_value());
 }
 
+TEST(QuicTransportCodecTest, AcceptsNonMinimalVarintOutsideFrameType) {
+    const std::array<std::uint8_t, 2> buf{0x40, 0x00};
+    fiber::quic::QuicReadCursor in(buf.data(), buf.size());
+
+    auto parsed = fiber::quic::quic_parse_varint(in);
+
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(*parsed, 0U);
+    EXPECT_TRUE(in.empty());
+}
+
+TEST(QuicTransportCodecTest, RejectsNonMinimalFrameTypeEncoding) {
+    {
+        const std::array<std::uint8_t, 2> bytes{0x40, 0x01};
+        fiber::quic::QuicReadCursor in(bytes.data(), bytes.size());
+        EXPECT_FALSE(fiber::quic::quic_parse_frame(fiber::quic::QuicEncryptionLevel::Application, in).has_value());
+    }
+    {
+        const std::array<std::uint8_t, 4> bytes{0x80, 0x00, 0x00, 0x01};
+        fiber::quic::QuicReadCursor in(bytes.data(), bytes.size());
+        EXPECT_FALSE(fiber::quic::quic_parse_frame(fiber::quic::QuicEncryptionLevel::Application, in).has_value());
+    }
+    {
+        const std::array<std::uint8_t, 8> bytes{0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+        fiber::quic::QuicReadCursor in(bytes.data(), bytes.size());
+        EXPECT_FALSE(fiber::quic::quic_parse_frame(fiber::quic::QuicEncryptionLevel::Application, in).has_value());
+    }
+}
+
 TEST(QuicTransportCodecTest, ParsesInitialLongHeaderAndPacketLength) {
     std::vector<std::uint8_t> datagram(fiber::quic::kMinInitialDatagramSize);
     fiber::quic::QuicWriteCursor out(datagram.data(), datagram.size());
@@ -281,6 +310,24 @@ TEST(QuicTransportCodecTest, ParsesStreamFrameWithOffsetLengthAndFin) {
     EXPECT_EQ(parsed->frame.data.data[0], 'a');
 }
 
+TEST(QuicTransportCodecTest, CoalescesPaddingAcrossWordChunks) {
+    std::array<std::uint8_t, 24> bytes{};
+    bytes[11] = static_cast<std::uint8_t>(fiber::quic::QuicFrameType::Ping);
+    fiber::quic::QuicReadCursor in(bytes.data(), bytes.size());
+
+    auto padding = fiber::quic::quic_parse_frame(fiber::quic::QuicEncryptionLevel::Application, in);
+
+    ASSERT_TRUE(padding.has_value());
+    EXPECT_EQ(padding->frame.type, fiber::quic::QuicFrameType::Padding);
+    EXPECT_EQ(padding->frame.u.padding.length, 11U);
+    EXPECT_EQ(padding->consumed, 11U);
+
+    auto ping = fiber::quic::quic_parse_frame(fiber::quic::QuicEncryptionLevel::Application, in);
+    ASSERT_TRUE(ping.has_value());
+    EXPECT_EQ(ping->frame.type, fiber::quic::QuicFrameType::Ping);
+    EXPECT_EQ(ping->consumed, 1U);
+}
+
 TEST(QuicTransportCodecTest, CreatesAndParsesCryptoFrame) {
     const std::array<std::uint8_t, 3> payload{0xde, 0xad, 0xbe};
     fiber::quic::QuicOutputFrame frame{};
@@ -363,6 +410,36 @@ TEST(QuicTransportCodecTest, CreatesAndClientParsesNewTokenFrame) {
     EXPECT_EQ(client_parsed->frame.type, fiber::quic::QuicFrameType::NewToken);
     EXPECT_EQ(client_parsed->frame.u.new_token.length, token.size());
     EXPECT_EQ(client_parsed->frame.data.data[2], 'c');
+}
+
+TEST(QuicTransportCodecTest, ValidatesNewConnectionIdBeforeEncoding) {
+    fiber::quic::QuicOutputFrame frame{};
+    frame.type = fiber::quic::QuicFrameType::NewConnectionId;
+    frame.u.new_connection_id.sequence_number = 3;
+    frame.u.new_connection_id.retire_prior_to = 2;
+
+    frame.u.new_connection_id.cid_len = 0;
+    EXPECT_FALSE(fiber::quic::quic_create_output_frame(nullptr, frame).has_value());
+
+    frame.u.new_connection_id.cid_len = fiber::quic::kMaxConnectionIdLength + 1;
+    EXPECT_FALSE(fiber::quic::quic_create_output_frame(nullptr, frame).has_value());
+
+    frame.u.new_connection_id.cid_len = fiber::quic::kMaxConnectionIdLength;
+    frame.u.new_connection_id.retire_prior_to = frame.u.new_connection_id.sequence_number + 1;
+    EXPECT_FALSE(fiber::quic::quic_create_output_frame(nullptr, frame).has_value());
+
+    frame.u.new_connection_id.retire_prior_to = frame.u.new_connection_id.sequence_number;
+    std::array<std::uint8_t, 64> buf{};
+    fiber::quic::QuicWriteCursor out(buf.data(), buf.size());
+    auto written = fiber::quic::quic_create_output_frame(&out, frame);
+    ASSERT_TRUE(written.has_value());
+
+    fiber::quic::QuicReadCursor in(buf.data(), out.offset());
+    auto parsed = fiber::quic::quic_parse_frame(fiber::quic::QuicEncryptionLevel::Application, in);
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed->frame.type, fiber::quic::QuicFrameType::NewConnectionId);
+    EXPECT_EQ(parsed->frame.u.new_connection_id.cid_len, fiber::quic::kMaxConnectionIdLength);
+    EXPECT_EQ(parsed->frame.u.new_connection_id.retire_prior_to, parsed->frame.u.new_connection_id.sequence_number);
 }
 
 TEST(QuicTransportCodecTest, ClientParsesHandshakeDoneFrame) {

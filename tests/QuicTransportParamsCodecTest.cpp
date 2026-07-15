@@ -188,3 +188,85 @@ TEST(QuicTransportParamsCodecTest, RejectsInitialMaxStreamsAboveProtocolLimit) {
 
     EXPECT_FALSE(read.has_value());
 }
+
+TEST(QuicTransportParamsCodecTest, RejectsInvalidConstrainedParamsOnParse) {
+    struct InvalidParam {
+        std::uint64_t id;
+        std::uint64_t value;
+    };
+    constexpr std::array<InvalidParam, 5> invalid_params{{
+            {fiber::quic::kQuicTpMaxUdpPayloadSize, fiber::quic::kMinInitialDatagramSize - 1},
+            {fiber::quic::kQuicTpMaxUdpPayloadSize, fiber::quic::kQuicMaxUdpPayloadSize + 1},
+            {fiber::quic::kQuicTpAckDelayExponent, 21},
+            {fiber::quic::kQuicTpMaxAckDelay, 1ULL << 14U},
+            {fiber::quic::kQuicTpActiveConnectionIdLimit, 1},
+    }};
+
+    for (const InvalidParam invalid: invalid_params) {
+        std::array<std::uint8_t, 32> buf{};
+        fiber::quic::QuicWriteCursor out(buf.data(), buf.size());
+        ASSERT_TRUE(fiber::quic::quic_write_varint(out, invalid.id).has_value());
+        ASSERT_TRUE(fiber::quic::quic_write_varint(out, fiber::quic::quic_varint_len(invalid.value)).has_value());
+        ASSERT_TRUE(fiber::quic::quic_write_varint(out, invalid.value).has_value());
+
+        fiber::quic::QuicReadCursor in(buf.data(), out.offset());
+        fiber::quic::QuicTransportParams parsed{};
+        auto read = fiber::quic::quic_parse_transport_params(fiber::quic::QuicTransportParamOwner::Client, in, parsed);
+
+        EXPECT_FALSE(read.has_value()) << "transport parameter id=" << invalid.id << " value=" << invalid.value;
+    }
+}
+
+TEST(QuicTransportParamsCodecTest, RejectsInvalidConstrainedParamsOnCreate) {
+    const auto expect_invalid = [](const fiber::quic::QuicTransportParams &params) {
+        std::array<std::uint8_t, 256> buf{};
+        fiber::quic::QuicWriteCursor out(buf.data(), buf.size());
+        auto written =
+                fiber::quic::quic_create_transport_params(fiber::quic::QuicTransportParamOwner::Client, &out, params);
+        EXPECT_FALSE(written.has_value());
+    };
+
+    fiber::quic::QuicTransportParams params{};
+    params.max_udp_payload_size = fiber::quic::kMinInitialDatagramSize - 1;
+    expect_invalid(params);
+
+    params = {};
+    params.max_udp_payload_size = fiber::quic::kQuicMaxUdpPayloadSize + 1;
+    expect_invalid(params);
+
+    params = {};
+    params.ack_delay_exponent = 21;
+    expect_invalid(params);
+
+    params = {};
+    params.max_ack_delay = 1ULL << 14U;
+    expect_invalid(params);
+
+    params = {};
+    params.active_connection_id_limit = 1;
+    expect_invalid(params);
+}
+
+TEST(QuicTransportParamsCodecTest, AcceptsConstrainedParamBoundaries) {
+    fiber::quic::QuicTransportParams params{};
+    params.max_udp_payload_size = fiber::quic::kMinInitialDatagramSize;
+    params.ack_delay_exponent = 20;
+    params.max_ack_delay = (1ULL << 14U) - 1;
+    params.active_connection_id_limit = 2;
+
+    std::array<std::uint8_t, 256> buf{};
+    fiber::quic::QuicWriteCursor out(buf.data(), buf.size());
+    auto written =
+            fiber::quic::quic_create_transport_params(fiber::quic::QuicTransportParamOwner::Client, &out, params);
+    ASSERT_TRUE(written.has_value());
+
+    fiber::quic::QuicReadCursor in(buf.data(), out.offset());
+    fiber::quic::QuicTransportParams parsed{};
+    auto read = fiber::quic::quic_parse_transport_params(fiber::quic::QuicTransportParamOwner::Client, in, parsed);
+
+    ASSERT_TRUE(read.has_value());
+    EXPECT_EQ(parsed.max_udp_payload_size, params.max_udp_payload_size);
+    EXPECT_EQ(parsed.ack_delay_exponent, params.ack_delay_exponent);
+    EXPECT_EQ(parsed.max_ack_delay, params.max_ack_delay);
+    EXPECT_EQ(parsed.active_connection_id_limit, params.active_connection_id_limit);
+}
