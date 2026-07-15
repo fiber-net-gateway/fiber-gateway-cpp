@@ -6,7 +6,7 @@
 >
 > 测试覆盖：约 9,700 行测试，但可靠性核心（`QuicAckHandler`/`QuicLossRecovery`/`QuicSendScheduler`/`QuicPathManager`）缺专门单测；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
 >
-> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化。待修 P0：#1 key-update、#9 GSO，其余排期。
+> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化。待修 P0：#1 key-update、#9 GSO，其余排期。
 
 ## 总体评价
 
@@ -166,12 +166,14 @@ bytes-in-flight 重复计账，同一 ack-eliciting 包内的其余帧也会是 
 > 无需加 `in_flight > 0` 或扫描 `packet_len`。回归测试现直接验证 ACK-only 发送后
 > `sent_frames.empty()` 且 `quic_loss_detection_timer` 返回 `None`。
 
-### 11. loss 减窗基准用 `in_flight`（减后）而非 `window`
+### 11. ✅ 复核：loss 减窗基准用 `in_flight`（减后）而非 `window`
 `QuicCongestion.cpp:166-172`（`quic_congestion_on_loss` 先 `subtract_in_flight` 再传 `cg.in_flight`）/ 对比 `:184`（ECN CE 路径正确用 `cg.window`）
 
-`quic_congestion_on_loss` 先 `subtract_in_flight(cg, sample.packet_len)`，再把已减小的 `cg.in_flight` 作 `reduction_basis` 传 `enter_recovery`。app-limited（`in_flight<window`）时 `ssthresh=(in_flight-pkt_len)*0.7` 而非 `window*0.7`，过度减窗，拖慢恢复。ECN CE 路径正确。RFC 9438 §4.1 与 Linux `tcp_cubic.c` 均按 `cwnd` 减。**一行修**。
+`quic_congestion_on_loss` 先 `subtract_in_flight(cg, sample.packet_len)`，再把已减小的 `cg.in_flight` 作 `reduction_basis` 传 `enter_recovery`。因此 app-limited（`in_flight<window`）时会按较小的 flight size 减窗，可能比按 `window` 减窗更保守、拖慢恢复。ECN CE 路径则使用 `cg.window`。
 
-**修复**：`quic_congestion_on_loss` 传 `cg.window` 作 `reduction_basis`。
+> ✅ **复核 2026-07-15**。上述代码行为存在，但不构成协议错误。RFC 9438 §4.6 Figure 5 的主公式正是 `ssthresh = flight_size * beta_cubic`，并明确说明 rate/application-limited 时该公式可能把 `cwnd` 降得过低；规范建议可用 RFC 7661 的 congestion-window validation 改善。RFC 9438 也允许改用 `cwnd`，但要求同时采取措施，防止 bytes-in-flight 小于 `cwnd` 时窗口继续虚增。RFC 9002 中按 `congestion_window` 减窗的是其 NewReno 控制器示例，不能据此判定 CUBIC 的 flight-size 方案错误；nginx 当前 QUIC CUBIC 实现也同样先扣 `in_flight`，再按剩余值乘 `beta`。
+>
+> **结论**：不再作为确定缺陷或“一行修”追踪。保留为后续性能优化项：若要改善 application-limited 场景，应实现 RFC 7661 风格的窗口验证及专项测试，不能只把 `cg.in_flight` 改成 `cg.window`。
 
 ### 12. 无 pacing
 `QuicSendScheduler.cpp:226-286`（`flush_connection` 紧 for 循环）
