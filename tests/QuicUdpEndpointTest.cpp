@@ -82,6 +82,36 @@ struct AckOnlyPacketSummary {
     std::size_t in_flight = 0;
 };
 
+struct PacingTimerSummary {
+    std::size_t sent_before_deadline = 0;
+    std::size_t sent_after_deadline = 0;
+    bool timer_armed = false;
+    bool removed_while_delayed = false;
+    bool normal_submit_suppressed = false;
+    bool timer_stayed_armed_after_submit = false;
+    bool timer_expired = false;
+    bool pending_empty = false;
+    bool removed_after_send = false;
+};
+
+struct PacingAckSummary {
+    std::size_t sent_before_ack = 0;
+    std::size_t sent_after_ack = 0;
+    bool timer_armed_before_ack = false;
+    bool ack_sent = false;
+    bool data_still_pending = false;
+    bool timer_rearmed = false;
+    bool removed_while_delayed = false;
+    bool close_sent = false;
+    bool pacing_timer_canceled_on_close = false;
+};
+
+struct PacingDetachSummary {
+    fiber::common::IoErr remove_error = fiber::common::IoErr::None;
+    bool timer_was_armed = false;
+    bool removed_while_delayed = false;
+};
+
 struct StreamPacketSummary {
     std::uint32_t decoded_frame_count = 0;
     std::uint64_t stream_id = 0;
@@ -217,6 +247,58 @@ void fill_new_token_test_secret(std::array<std::uint8_t, fiber::quic::kQuicMaxSe
     for (std::size_t i = 0; i < 32; ++i) {
         secret[i] = static_cast<std::uint8_t>(0x90U + i);
     }
+}
+
+std::size_t sent_frame_count(const fiber::quic::QuicPacketNumberSpace &space) noexcept {
+    std::size_t count = 0;
+    for (const fiber::quic::QuicOutputFrame *frame = space.sent_frames.front(); frame != nullptr;
+         frame = space.sent_frames.next_of(*frame)) {
+        ++count;
+    }
+    return count;
+}
+
+fiber::common::IoResult<void> prepare_paced_handshake_output(fiber::quic::QuicConnection &connection) noexcept {
+    auto *path = connection.active_path();
+    if (path == nullptr) {
+        return std::unexpected(fiber::common::IoErr::Invalid);
+    }
+    path->validated = true;
+    path->mtu = fiber::quic::kQuicCongestionMinInitialSize;
+    connection.congestion().window = fiber::quic::kQuicCongestionMinInitialSize * 10;
+    connection.congestion().in_flight = 0;
+    connection.rtt().avg_rtt = fiber::quic::QuicTime{100};
+    connection.rtt().rttvar = fiber::quic::QuicTime{1000};
+
+    constexpr fiber::quic::QuicCryptoSuite suite = fiber::quic::QuicCryptoSuite::Aes128GcmSha256;
+    std::array<std::uint8_t, fiber::quic::kQuicMaxSecretLength> handshake_secret{};
+    for (std::size_t i = 0; i < 32; ++i) {
+        handshake_secret[i] = static_cast<std::uint8_t>(0xc0U + i);
+    }
+    auto write_secret = fiber::quic::quic_set_encryption_secret(
+            connection.crypto(), fiber::quic::QuicEncryptionLevel::Handshake, true, suite, handshake_secret.data(), 32);
+    if (!write_secret) {
+        return std::unexpected(write_secret.error());
+    }
+
+    std::array<std::uint8_t, 3000> crypto_data{};
+    for (std::size_t i = 0; i < crypto_data.size(); ++i) {
+        crypto_data[i] = static_cast<std::uint8_t>(i);
+    }
+    auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Handshake);
+    fiber::quic::QuicOutputFrame *crypto = space.alloc_frame();
+    if (crypto == nullptr) {
+        return std::unexpected(fiber::common::IoErr::NoMem);
+    }
+    crypto->type = fiber::quic::QuicFrameType::Crypto;
+    crypto->u.crypto.offset = 0;
+    auto owned = fiber::quic::quic_output_frame_set_owned_data(*crypto, crypto_data.data(), crypto_data.size());
+    if (!owned) {
+        space.release_frame(*crypto);
+        return std::unexpected(owned.error());
+    }
+    space.pending_frames.push_back(*crypto);
+    return {};
 }
 
 void build_initial_datagram(std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> &datagram,
@@ -623,7 +705,8 @@ DetachedTask prepare_connection_for_new_token(fiber::quic::QuicConnection *conne
         co_return;
     }
 
-    auto validating = connection->paths().start_validation(*path, fiber::quic::QuicTime{100});
+    const auto now = fiber::quic::quic_time_ms(fiber::event::EventLoop::current().now());
+    auto validating = connection->paths().start_validation(*path, now);
     if (!validating) {
         done_promise->set_value(std::unexpected(validating.error()));
         co_return;
@@ -1044,8 +1127,8 @@ DetachedTask recv_handshake_ack_only_when_congestion_full(
         co_return;
     }
 
-    const auto loss_timer = fiber::quic::quic_loss_detection_timer(server, fiber::quic::QuicTime{0},
-                                                                   server.pto_count());
+    const auto loss_timer =
+            fiber::quic::quic_loss_detection_timer(server, fiber::quic::QuicTime{0}, server.pto_count());
     done_promise->set_value(AckOnlyPacketSummary{
             received->size,
             decoded->frame_count,
@@ -1377,8 +1460,8 @@ DetachedTask recv_initial_ack_only_without_min_initial_padding(
         co_return;
     }
 
-    const auto loss_timer = fiber::quic::quic_loss_detection_timer(server, fiber::quic::QuicTime{0},
-                                                                   server.pto_count());
+    const auto loss_timer =
+            fiber::quic::quic_loss_detection_timer(server, fiber::quic::QuicTime{0}, server.pto_count());
     done_promise->set_value(AckOnlyPacketSummary{
             received->size,
             decoded->frame_count,
@@ -1645,6 +1728,112 @@ DetachedTask send_flood_and_count_responses(fiber::event::EventLoop *loop, std::
     done_promise->set_value(got);
 }
 
+DetachedTask observe_pacing_timer(fiber::quic::QuicUdpEndpoint *endpoint, fiber::quic::QuicConnection *connection,
+                                  std::promise<fiber::common::IoResult<PacingTimerSummary>> *done_promise) {
+    if (endpoint == nullptr || connection == nullptr) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+        co_return;
+    }
+    auto prepared = prepare_paced_handshake_output(*connection);
+    if (!prepared) {
+        done_promise->set_value(std::unexpected(prepared.error()));
+        co_return;
+    }
+
+    auto &space = connection->packet_number_space(fiber::quic::QuicEncryptionLevel::Handshake);
+    endpoint->schedule_send(*connection);
+    co_await fiber::async::sleep(std::chrono::milliseconds(20));
+
+    PacingTimerSummary summary{};
+    summary.sent_before_deadline = sent_frame_count(space);
+    summary.timer_armed = connection->pacing_timer_armed();
+    summary.removed_while_delayed = !connection->send_queue_entry.link.linked();
+
+    fiber::quic::QuicOutputFrame *ping = space.alloc_frame();
+    if (ping == nullptr) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::NoMem));
+        co_return;
+    }
+    ping->type = fiber::quic::QuicFrameType::Ping;
+    space.pending_frames.push_back(*ping);
+    endpoint->schedule_send(*connection);
+    summary.normal_submit_suppressed = !connection->send_queue_entry.link.linked();
+    summary.timer_stayed_armed_after_submit = connection->pacing_timer_armed();
+
+    co_await fiber::async::sleep(std::chrono::milliseconds(250));
+    summary.sent_after_deadline = sent_frame_count(space);
+    summary.timer_expired = !connection->pacing_timer_armed();
+    summary.pending_empty = space.pending_frames.empty();
+    summary.removed_after_send = !connection->send_queue_entry.link.linked();
+    done_promise->set_value(summary);
+}
+
+DetachedTask observe_ack_bypasses_pacing(fiber::quic::QuicUdpEndpoint *endpoint,
+                                         fiber::quic::QuicConnection *connection,
+                                         std::promise<fiber::common::IoResult<PacingAckSummary>> *done_promise) {
+    if (endpoint == nullptr || connection == nullptr) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+        co_return;
+    }
+    auto prepared = prepare_paced_handshake_output(*connection);
+    if (!prepared) {
+        done_promise->set_value(std::unexpected(prepared.error()));
+        co_return;
+    }
+
+    auto &space = connection->packet_number_space(fiber::quic::QuicEncryptionLevel::Handshake);
+    endpoint->schedule_send(*connection);
+    co_await fiber::async::sleep(std::chrono::milliseconds(20));
+
+    PacingAckSummary summary{};
+    summary.sent_before_ack = sent_frame_count(space);
+    summary.timer_armed_before_ack = connection->pacing_timer_armed();
+
+    space.send_ack = true;
+    space.pending_ack = 9;
+    space.largest_received_packet_number = 9;
+    endpoint->schedule_send(*connection);
+    co_await fiber::async::sleep(std::chrono::milliseconds(20));
+
+    summary.sent_after_ack = sent_frame_count(space);
+    summary.ack_sent = !space.send_ack;
+    summary.data_still_pending = !space.pending_frames.empty();
+    summary.timer_rearmed = connection->pacing_timer_armed();
+    summary.removed_while_delayed = !connection->send_queue_entry.link.linked();
+
+    const auto *path = connection->active_path();
+    const std::uint64_t sent_before_close = path != nullptr ? path->sent : 0;
+    connection->close();
+    co_await fiber::async::sleep(std::chrono::milliseconds(20));
+    summary.close_sent = path != nullptr && path->sent > sent_before_close;
+    summary.pacing_timer_canceled_on_close = !connection->pacing_timer_armed();
+    done_promise->set_value(summary);
+}
+
+DetachedTask detach_while_pacing_delayed(fiber::quic::QuicUdpEndpoint *endpoint,
+                                         fiber::quic::QuicConnection *connection, fiber::quic::QuicConnectionId dcid,
+                                         std::promise<fiber::common::IoResult<PacingDetachSummary>> *done_promise) {
+    if (endpoint == nullptr || connection == nullptr) {
+        done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+        co_return;
+    }
+    auto prepared = prepare_paced_handshake_output(*connection);
+    if (!prepared) {
+        done_promise->set_value(std::unexpected(prepared.error()));
+        co_return;
+    }
+
+    endpoint->schedule_send(*connection);
+    co_await fiber::async::sleep(std::chrono::milliseconds(20));
+
+    PacingDetachSummary summary{};
+    summary.timer_was_armed = connection->pacing_timer_armed();
+    summary.removed_while_delayed = !connection->send_queue_entry.link.linked();
+    auto removed = endpoint->remove_connection(dcid);
+    summary.remove_error = removed ? fiber::common::IoErr::None : removed.error();
+    done_promise->set_value(summary);
+}
+
 } // namespace
 
 TEST(QuicUdpEndpointTest, InitRejectsMissingConnectionFactory) {
@@ -1762,6 +1951,134 @@ TEST(QuicUdpEndpointTest, ConnectionDestroyWaitsForLastLeaseAfterEndpointDetach)
     EXPECT_EQ(state.destroy_calls, 1U);
     EXPECT_EQ(state.connection, nullptr);
 
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, PacingRemovesConnectionUntilTimerRequeuesIt) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
+    options.send.pacing.rate_numerator = 1;
+    options.send.pacing.rate_denominator = 10;
+    options.send.pacing.max_burst_packets = 1;
+    options.send.pacing.timer_granularity = std::chrono::milliseconds(1);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("8394c8f03e515708");
+    const auto scid = cid_from_hex("11223344");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
+    build_initial_datagram(datagram, dcid, scid);
+    auto received = recv_after_send(group, endpoint, datagram.data(), datagram.size());
+    ASSERT_TRUE(received.has_value()) << static_cast<int>(received.error());
+    ASSERT_NE(received->connection, nullptr);
+
+    std::promise<fiber::common::IoResult<PacingTimerSummary>> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return observe_pacing_timer(&endpoint, received->connection, &promise); });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto summary = future.get();
+    ASSERT_TRUE(summary.has_value()) << static_cast<int>(summary.error());
+    EXPECT_EQ(summary->sent_before_deadline, 1U);
+    EXPECT_TRUE(summary->timer_armed);
+    EXPECT_TRUE(summary->removed_while_delayed);
+    EXPECT_TRUE(summary->normal_submit_suppressed);
+    EXPECT_TRUE(summary->timer_stayed_armed_after_submit);
+    EXPECT_GE(summary->sent_after_deadline, 3U);
+    EXPECT_TRUE(summary->timer_expired);
+    EXPECT_TRUE(summary->pending_empty);
+    EXPECT_TRUE(summary->removed_after_send);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, AckAndConnectionCloseBypassPacingWithoutConsumingDataBudget) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
+    options.send.pacing.rate_numerator = 1;
+    options.send.pacing.rate_denominator = 10;
+    options.send.pacing.max_burst_packets = 1;
+    options.send.pacing.timer_granularity = std::chrono::milliseconds(1);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("8394c8f03e515708");
+    const auto scid = cid_from_hex("11223344");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
+    build_initial_datagram(datagram, dcid, scid);
+    auto received = recv_after_send(group, endpoint, datagram.data(), datagram.size());
+    ASSERT_TRUE(received.has_value()) << static_cast<int>(received.error());
+    ASSERT_NE(received->connection, nullptr);
+
+    std::promise<fiber::common::IoResult<PacingAckSummary>> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return observe_ack_bypasses_pacing(&endpoint, received->connection, &promise); });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto summary = future.get();
+    ASSERT_TRUE(summary.has_value()) << static_cast<int>(summary.error());
+    EXPECT_EQ(summary->sent_before_ack, 1U);
+    EXPECT_TRUE(summary->timer_armed_before_ack);
+    EXPECT_TRUE(summary->ack_sent);
+    EXPECT_EQ(summary->sent_after_ack, summary->sent_before_ack);
+    EXPECT_TRUE(summary->data_still_pending);
+    EXPECT_TRUE(summary->timer_rearmed);
+    EXPECT_TRUE(summary->removed_while_delayed);
+    EXPECT_TRUE(summary->close_sent);
+    EXPECT_TRUE(summary->pacing_timer_canceled_on_close);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, DetachCancelsArmedPacingTimerBeforeDestroy) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    EmbeddedConnectionFactoryState state{};
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
+    options.connection_owner = &state;
+    options.create_connection = create_embedded_connection;
+    options.send.pacing.rate_numerator = 1;
+    options.send.pacing.rate_denominator = 10;
+    options.send.pacing.max_burst_packets = 1;
+    options.send.pacing.timer_granularity = std::chrono::milliseconds(1);
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("8394c8f03e515708");
+    const auto scid = cid_from_hex("11223344");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
+    build_initial_datagram(datagram, dcid, scid);
+    auto received = recv_after_send(group, endpoint, datagram.data(), datagram.size());
+    ASSERT_TRUE(received.has_value()) << static_cast<int>(received.error());
+    ASSERT_NE(received->connection, nullptr);
+
+    std::promise<fiber::common::IoResult<PacingDetachSummary>> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return detach_while_pacing_delayed(&endpoint, received->connection, dcid, &promise); });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto summary = future.get();
+    ASSERT_TRUE(summary.has_value()) << static_cast<int>(summary.error());
+    EXPECT_TRUE(summary->timer_was_armed);
+    EXPECT_TRUE(summary->removed_while_delayed);
+    EXPECT_EQ(summary->remove_error, fiber::common::IoErr::None);
+    EXPECT_EQ(endpoint.active_connection_count(), 0U);
+    EXPECT_EQ(state.destroy_calls, 1U);
+    EXPECT_EQ(state.connection, nullptr);
+
+    close_endpoint_on_loop(group, endpoint);
     group.stop();
     group.join();
 }

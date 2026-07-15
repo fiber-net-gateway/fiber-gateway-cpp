@@ -21,6 +21,11 @@ class QuicUdpEndpoint;
 inline constexpr std::size_t kQuicSendDefaultBufferSize = 65536;
 inline constexpr std::size_t kQuicSendLevelCount = 3;
 
+enum class QuicBuildMode : std::uint8_t {
+    Normal,
+    PacingExemptOnly,
+};
+
 enum class QuicBuildSendStatus : std::uint8_t {
     Encoded,
     NoWork,
@@ -53,6 +58,7 @@ struct QuicSendDatagram {
     QuicSendPacketRecord packets[kQuicSendLevelCount]{};
     std::size_t packet_count = 0;
     bool mtu_probe = false;
+    bool pacing_controlled = false;
 };
 
 class QuicSendScheduler : public common::NonCopyable, public common::NonMovable {
@@ -61,6 +67,7 @@ public:
         std::size_t send_buffer_size = kQuicSendDefaultBufferSize;
         std::size_t max_packets_per_wakeup = 64;
         std::size_t max_packets_per_connection = 64;
+        QuicPacingOptions pacing{};
     };
 
     QuicSendScheduler() noexcept;
@@ -81,6 +88,11 @@ public:
 private:
     class WaitForWorkAwaiter;
 
+    struct FlushResult {
+        common::IoErr error = common::IoErr::None;
+        std::size_t packets_sent = 0;
+    };
+
     using ReadyList =
             common::IntrusiveList<QuicConnection::SendQueueEntry, offsetof(QuicConnection::SendQueueEntry, link)>;
 
@@ -93,7 +105,7 @@ private:
     void rotate_front_to_back(QuicConnection &connection) noexcept;
     [[nodiscard]] QuicConnection *front_ready() noexcept;
     void clear_ready() noexcept;
-    [[nodiscard]] async::Task<common::IoErr> flush_connection(QuicConnection &connection) noexcept;
+    [[nodiscard]] async::Task<FlushResult> flush_connection(QuicConnection &connection) noexcept;
 
     event::EventLoop *loop_ = nullptr;
     net::UdpSocket *socket_ = nullptr;

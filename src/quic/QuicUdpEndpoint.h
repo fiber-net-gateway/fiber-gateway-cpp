@@ -213,8 +213,9 @@ private:
                       const QuicInitialValidation &validation) noexcept;
     [[nodiscard]] common::IoResult<QuicUdpReceiveResult>
     process_datagram(net::UdpPacketRecvResult recv, std::chrono::steady_clock::time_point now) noexcept;
-    [[nodiscard]] common::IoResult<QuicBuildSendResult> build_send_datagram(QuicConnection &connection,
-                                                                            QuicSendDatagram &datagram) noexcept;
+    [[nodiscard]] common::IoResult<QuicBuildSendResult>
+    build_send_datagram(QuicConnection &connection, QuicSendDatagram &datagram,
+                        QuicBuildMode mode = QuicBuildMode::Normal) noexcept;
     [[nodiscard]] common::IoResult<QuicBuildSendResult>
     build_path_control_datagram(QuicConnection &connection, QuicSendDatagram &datagram) noexcept;
     [[nodiscard]] static common::IoResult<QuicStreamFrameEncodeStatus>
