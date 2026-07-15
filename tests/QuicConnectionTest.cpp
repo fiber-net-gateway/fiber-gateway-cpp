@@ -181,11 +181,23 @@ fiber::async::DetachedTask write_one(fiber::quic::QuicStream *stream, std::promi
     fiber::event::EventLoop::current().stop();
 }
 
+fiber::async::DetachedTask write_one_retained(fiber::quic::QuicStream::Lease stream, std::promise<WriteResult> *done) {
+    auto result = co_await stream->write(iobuf_of("!"));
+    done->set_value(to_write_result(result));
+    fiber::event::EventLoop::current().stop();
+}
+
 fiber::async::DetachedTask write_one_with_timeout(fiber::quic::QuicStream *stream, std::chrono::milliseconds timeout,
                                                   std::promise<WriteResult> *done) {
     auto result = co_await stream->write(iobuf_of("!"), false, timeout);
     done->set_value(to_write_result(result));
     fiber::event::EventLoop::current().stop();
+}
+
+fiber::async::DetachedTask mark_closed_after_delay(fiber::quic::QuicConnection *conn, std::atomic<bool> *closed) {
+    co_await fiber::async::sleep(std::chrono::milliseconds(20));
+    conn->mark_closed();
+    closed->store(true, std::memory_order_relaxed);
 }
 
 fiber::async::DetachedTask grant_max_stream_data_after_delay(fiber::quic::QuicConnection *conn, std::uint64_t stream_id,
@@ -1845,6 +1857,40 @@ TEST(QuicConnectionTest, AsyncWriteTimeoutUnlinksConnectionWindowWaiter) {
 
     grant_max_data(conn, 1);
     EXPECT_EQ(conn.peer_data_reserved(), 0U);
+}
+
+TEST(QuicConnectionTest, AsyncWriteCanceledWhileBlockedByConnectionWindow) {
+    StreamCallbackState state{};
+    fiber::event::EventLoopGroup group(1);
+    auto options = server_options_with_factory(state);
+    options.loop = &group.at(0);
+    fiber::quic::QuicConnection conn(options);
+    auto stream = conn.get_or_create_peer_stream(0);
+    ASSERT_TRUE(stream.has_value());
+    grant_max_stream_data(conn, 0, 1);
+
+    std::promise<WriteResult> done;
+    auto future = done.get_future();
+    std::atomic<bool> closed{false};
+
+    group.start();
+    fiber::async::spawn(group.at(0), [stream = (*stream)->lease(), &done]() mutable {
+        return write_one_retained(std::move(stream), &done);
+    });
+    fiber::async::spawn(group.at(0), [&conn, &closed]() { return mark_closed_after_delay(&conn, &closed); });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "write was not canceled when the connection closed";
+        return;
+    }
+
+    WriteResult result = future.get();
+    EXPECT_TRUE(closed.load(std::memory_order_relaxed));
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.error, fiber::common::IoErr::Canceled);
+    group.join();
 }
 
 TEST(QuicConnectionTest, ResetStreamCreatesAndRetiresPeerStream) {

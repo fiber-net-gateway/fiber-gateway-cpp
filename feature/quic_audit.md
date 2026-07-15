@@ -6,11 +6,11 @@
 >
 > 测试覆盖：约 9,700 行测试，但可靠性核心（`QuicAckHandler`/`QuicLossRecovery`/`QuicSendScheduler`/`QuicPathManager`）缺专门单测；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
 >
-> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）。待修 P0：#1 key-update、#7 UAF、#9 GSO、#8 接收零拷贝，其余排期。
+> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0。待修 P0：#1 key-update、#9 GSO、#8 接收零拷贝，其余排期。
 
 ## 总体评价
 
-codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝视图（`QuicSlice`）、`write_or_count_*` 模式、crypto 核心、anti-amplification、ECN、稳态零分配均正确。存在 **9 个高危**（含 key 用量越界、PTO 忙循环、re-entrancy、DoS 向量、UAF、缺 GSO/接收零拷贝）、若干中危的可靠性与性能问题。可靠性与拥塞控制域问题最集中且无单测，风险最高。按严重度排列如下，均给出 `file:line` 与触发场景。
+codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝视图（`QuicSlice`）、`write_or_count_*` 模式、crypto 核心、anti-amplification、ECN、稳态零分配均正确。原审计列出 **9 个高危**；其中 #7 经生命周期调用链复核，不构成正常路径可达的独立 UAF，改列为不变量防御项。其余问题包括 key 用量越界、PTO 忙循环、re-entrancy、DoS 向量、缺 GSO/接收零拷贝，以及若干中危的可靠性与性能问题。可靠性与拥塞控制域问题最集中且无单测，风险最高。按严重度排列如下，均给出 `file:line` 与触发场景。
 
 ---
 
@@ -105,12 +105,24 @@ codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝�
 
 > ✅ **已修复 2026-07-14**。所有 connection/path timer API 删除外部 `EventLoop&` 参数，arm/cancel、回调取时与重排统一使用 `QuicConnection::loop_`；状态迁移入口增加 loop-affinity 断言，回调同时断言正在 owner loop 上运行。析构时仅在 owner loop 内正常 cancel；若所属 `EventLoopGroup` 已 stop+join，则走 `cancel_quiesced` 从 owner loop 的 intrusive heap 清理，运行中的其他线程绝不跨 loop 修改 timer heap。`QuicUdpEndpoint::detach_connection` 同样断言 endpoint loop 与 connection owner loop 一致后统一取消全部 connection/path timers。
 
-### 7. `~QuicConnection` 不通知 peer-data waiter -> 潜在 UAF
-`QuicConnection.cpp:354-363`（析构）/ `:2147`（`detach_from_endpoint` 两边都通知）
+### 7. ⚪ 复核排除：析构少通知是生命周期不变量防御缺口，非独立 UAF
+`QuicConnection.cpp:376-393`（析构）/ `:2268-2299`（detach、release 与销毁门槛）/ `QuicUdpEndpoint.cpp:630-655`（先 detach、后释放 endpoint lease）
 
-析构只 `notify_all_local_stream_attach_waiters(Canceled)`，**未** `notify_peer_data_waiters(Canceled)`。`detach_from_endpoint`（`:2147`）两边都通知，正常路径安全；但任何不经 `detach_from_endpoint` 就到析构的生命周期 bug，会留下挂起的 `WriteAwaiter` 持有指向已释放连接的悬空 `peer_data_wait_link_`。
+析构确实只调用 `notify_all_local_stream_attach_waiters(Canceled)`，没有调用 `notify_peer_data_waiters(Canceled)`；但原结论把这个不对称直接推导成可达 UAF，并不成立。
 
-**修复**：析构补 `notify_peer_data_waiters(common::IoErr::Canceled);`。
+> ⚪ **复核 2026-07-15**。endpoint 管理的连接仅在 `!attached_to_endpoint_ && ref_count_ == 0` 时经 `on_destroy_` 销毁。`QuicUdpEndpoint::detach_connection` 在释放 endpoint 持有的最后一份 lease 之前，必先调用 `QuicConnection::detach_from_endpoint`；后者先通知 local-stream 与 peer-data 两类 waiter，再关闭/清空 stream。endpoint 关闭、主动移除连接和新建连接后的收包失败均走这条 detach 路径。attach 之前的建连失败可以直接析构，但新对象此时尚无 stream，也不可能已有 peer-data waiter。因此在仓库当前所有生产销毁入口中，析构开始时 peer-data waiter 链表已经为空。
+>
+> `WriteAwaiter` 也不直接保存 `QuicConnection *`；它通过 `stream_->conn_` 回到连接，`peer_data_wait_link_` 本身是 awaiter 内的 intrusive hook，并不是指向连接的指针。`QuicStreamTable::clear` 会先执行 `stream.detach_from_connection()` 把 `conn_` 置空，再释放 table 持有的 stream lease。因此在 stream 另有合法 lease 保活时，残留 hook 本身不会使 awaiter 解引用已析构的 connection。
+>
+> 只有调用者绕过 intrusive ownership，直接销毁一个仍有挂起异步操作的栈/堆连接，或先引入另一个破坏 detach-before-destroy 不变量的生命周期 bug，才能进入原条目假设的状态。这不应作为一个独立 HIGH 问题计算。若 stream table 又是 stream 的唯一所有者，还可能在异步 resume 前释放 stream；那是 awaiter/stream 自身的保活问题，且仅在析构中补一行通知并不能解决。
+
+**代码修改方案**：
+
+1. **推荐的当前契约方案（小改）**：保持 `detach_from_endpoint()` 为唯一运行时清理边界；在 `~QuicConnection` 增加 `FIBER_ASSERT(peer_data_wait_head_ == nullptr)` 与 `FIBER_ASSERT(peer_data_wait_tail_ == nullptr)`，把 detach-before-destroy 明确为可执行不变量。不要在析构中无条件补 `notify_peer_data_waiters()`：`complete()` 会取消 awaiter timer 并异步 post resume，若析构发生在已 stop/join 的 loop 外线程，普通 `EventLoop::cancel()` 违反 loop-affinity；若 stream 随后的 table clear 是最后一份 lease，异步恢复前仍可能先释放 stream。
+2. **若产品要求支持“连接被动销毁时仍有挂起 awaiter”（中改）**：让 `QuicStream::WriteAwaiter` 在成功 suspend 后持有一份 `QuicStream::Lease`，在 `await_resume`/析构完成 unlink、清 `write_waiter_` 后最后释放，确保 `notify -> post resume -> await_resume` 全程 stream 存活；`LocalStreamAttachAwaiter` 同理持有 `QuicConnection::Lease`。连接销毁仍限定在 owner loop，owner-loop 上可在 stream table 清理前通知 waiter；quiesced 的 off-loop 析构只允许 waiter 链表为空，不跨线程操作 timer heap。
+3. **回归测试**：新增 endpoint 生命周期测试，建立“stream credit 有余、connection MAX_DATA 为 0”的写阻塞，使 `WriteAwaiter` 确实挂入 peer-data 链表；随后在 owner loop 调 `remove_connection()`/`close()`，断言写协程以 `Canceled` 恢复、destroy callback 只在最后一份 lease 释放后执行。另加 debug death/assert 测试覆盖绕过 detach 的非法析构；保活方案若实施，应在 ASan 下覆盖“detach 后立即释放 table lease、下一 tick 才 resume”。
+
+> ✅ **不变量加固已实施 2026-07-15**。`~QuicConnection` 现在断言 peer-data waiter 的 head/tail 均为空；`notify_peer_data_waiters` 增加链表入口一致性与清空后置断言。新增 `QuicConnectionTest.AsyncWriteCanceledWhileBlockedByConnectionWindow` 和 `QuicUdpEndpointTest.DetachCancelsPeerDataWaiterBeforeDestroy`：前者验证 connection-level flow-control waiter 在连接关闭时以 `Canceled` 恢复，后者验证 endpoint detach 先取消 waiter、最后一份 connection lease 释放后才执行 destroy callback。定向 2 测试通过，完整 CTest **1179/1179** 通过。上述第 2 项 awaiter self-retain 属可选的 API 生命周期扩展，本次未实施。
 
 ### 8. 接收路径无零拷贝：STREAM 数据 memcpy 进 16KB 堆块
 `QuicStreamRecvQueue.cpp:648-661`（`create_extent`）/ `QuicStream.cpp:519-522`（`on_stream_data_recv`）/ `QuicFrame.h:65-70`（`QuicSlice`）
@@ -427,8 +439,9 @@ deadline 检查、单写者 `Busy`、`post_at` 计时器、`post` resume、`comp
 
 | 优先级 | 项 | 工作量 |
 |---|---|---|
-| P0 | #2 PTO 忙循环✅、#3 re-entrancy✅、#4 create-before-auth✅(方案A)、#5 DoS 向量、#1 key-update、#7 UAF | 中 |
+| P0 | #2 PTO 忙循环✅、#3 re-entrancy✅、#4 create-before-auth✅(方案A)、#5 DoS 向量、#1 key-update | 中 |
 | P0 | #9 GSO/sendmmsg、#8 接收零拷贝 | 大 |
 | P1 | #11 loss 减窗基准、#22 `reset()` FIN'd 流、#23 `write()` 短写丢 FIN、#19 重复 TP 拒绝、#27 HKDF 溢出、#16 ack_delay skip | 小（多为一行） |
 | P1 | 给 #13/#14/#15 + AckHandler/LossRecovery/SendScheduler/PathManager 补单测 | 中 |
+| P2 | #7 detach-before-destroy 不变量断言✅；若要支持挂起 awaiter 下被动销毁，再做 awaiter self-retain | 小 / 中 |
 | P2 | #35 拆 QuicConnection god object、#31 拆 QuicUdpEndpoint、#25 去重 reassembly、#44 去重 awaiter | 大 |

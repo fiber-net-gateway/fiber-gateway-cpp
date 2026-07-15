@@ -233,11 +233,14 @@ void QuicConnection::cancel_peer_data_wait(QuicStream::WriteAwaiter &awaiter) no
 }
 
 void QuicConnection::notify_peer_data_waiters(common::IoErr result) noexcept {
+    FIBER_ASSERT((peer_data_wait_head_ == nullptr) == (peer_data_wait_tail_ == nullptr));
     while (peer_data_wait_head_ != nullptr) {
         QuicStream::WriteAwaiter *awaiter = QuicStream::WriteAwaiter::from_peer_data_wait_link(peer_data_wait_head_);
         cancel_peer_data_wait(*awaiter);
         awaiter->complete(result);
     }
+    FIBER_ASSERT(peer_data_wait_head_ == nullptr);
+    FIBER_ASSERT(peer_data_wait_tail_ == nullptr);
 }
 
 void QuicStream::Lease::reset() noexcept {
