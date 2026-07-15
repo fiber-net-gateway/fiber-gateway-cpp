@@ -109,6 +109,7 @@ bool quic_is_reserved_transport_param(std::uint64_t id) noexcept { return id % 3
 common::IoResult<void> quic_parse_transport_params(QuicTransportParamOwner owner, QuicReadCursor &in,
                                                    QuicTransportParams &out) noexcept {
     out = QuicTransportParams{};
+    std::uint32_t seen_params = 0;
 
     while (!in.empty()) {
         auto id = quic_parse_varint(in);
@@ -122,6 +123,14 @@ common::IoResult<void> quic_parse_transport_params(QuicTransportParamOwner owner
         auto value = in.read_slice(static_cast<std::size_t>(*len));
         if (!value) {
             return std::unexpected(value.error());
+        }
+
+        if (*id <= kQuicTpRetrySourceConnectionId) {
+            const std::uint32_t param_bit = std::uint32_t{1} << static_cast<std::uint32_t>(*id);
+            if ((seen_params & param_bit) != 0) {
+                return std::unexpected(common::IoErr::Invalid);
+            }
+            seen_params |= param_bit;
         }
 
         if (owner == QuicTransportParamOwner::Client && server_only_transport_param(*id)) {
