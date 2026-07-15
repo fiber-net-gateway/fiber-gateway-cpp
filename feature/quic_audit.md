@@ -6,7 +6,7 @@
 >
 > 测试覆盖：约 10,600 行 QUIC 测试；`QuicPacer` 已有确定性算法单测及 scheduler/endpoint 集成回归，`QuicAckHandler`/`QuicLossRecovery`/`QuicPathManager` 的专项覆盖仍然薄弱；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
 >
-> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化；#12 pacing、#13 ACK range 扫描已于 2026-07-15 修复。待修 P0：#1 key-update、#9 GSO，其余排期。
+> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化；#12 pacing、#13 ACK range 扫描已于 2026-07-15 修复；#14 于 2026-07-15 复核为方向误判不存在，并已补齐三类区间回归测试。待修 P0：#1 key-update、#9 GSO，其余排期。
 
 ## 总体评价
 
@@ -206,12 +206,16 @@ bytes-in-flight 重复计账，同一 ack-eliciting 包内的其余帧也会是 
 
 > ✅ **已修复 2026-07-15**。`QuicOutputFrameQueue` 增加侵入式 `prev` 链并在 `push_front`/`push_back`/`insert_after`/`erase_after`/`prepend_all` 中统一维护；`quic_handle_ack_frame` 从 `sent_frames.back()` 建立反向 scan cursor，各 ACK range 复用上一 range 的停止位置。查找 range 时向低 PN 移动，range 内仍按原来的低 PN 到高 PN 顺序处理，避免改变拥塞更新和 stream ACK 回调顺序。所有 gap frame 最多被反向越过一次，acked frame 仅多一次反向定位和一次正向处理，总复杂度降为 O(N+R)，稳态无动态分配。回归测试 `QuicOutputFrameQueueTest.MaintainsReverseLinksAcrossMutations` 覆盖双向链不变量，`QuicAckHandlerTest.HandlesDescendingAckRangesWithSingleReverseScan` 覆盖交错 singleton ranges 后保留队列的顺序与反向链。
 
-### 14. persistent congestion 误判
+### 14. ⚪ 复核排除：persistent congestion 区间判定无方向误判
 `QuicLossRecovery.cpp:193-199`
 
-条件 `(stat->newest < oldest_lost || stat->oldest > newest_lost)` 把"所有 acked 包发在所有 lost 包之前"（`stat->newest < oldest_lost`）当作 PC 触发。但此时 lost 包发在 largest newly acked 包**之后**。RFC 9002 §7.6.2 只计发在 largest newly acked 包**之前**的 lost 包。`stat->oldest > newest_lost` 分支正确，`stat->newest < oldest_lost` 分支错。
-
-**修复**：去掉 `stat->newest < oldest_lost` 分支，或整条件换 `stat->oldest > oldest_lost`。
+> ⚪ **复核 2026-07-15**。RFC 9002 §7.6.2 要求两个 ack-eliciting lost 包的发送时间之间没有任何已确认包，并未要求 lost 区间必须位于 largest newly acknowledged packet 之前。当前条件实际表达的是“本次 newly-acked 时间区间与 newly-lost 时间区间完全不相交”：`stat->newest < oldest_lost` 表示 ACK 全在 loss 之前，`stat->oldest > newest_lost` 表示 ACK 全在 loss 之后，两者都没有 ACK 落在 lost 窗口内，均可合法触发 persistent congestion。
+>
+> 第一个分支在跨 packet-number space 检测中尤其必要：`quic_detect_lost` 遍历 Initial、Handshake 和 Application 三个空间，而 `stat` 只来自当前 ACK 所属空间；当前 ACK 所确认包的发送时间完全早于另一空间的 lost 区间是可达且合法的。nginx 上游也使用相同的两个分支。删除第一分支会造成漏报；改为 `stat->oldest > oldest_lost` 则会在 ACK 位于 lost 区间内时误报。
+>
+> 当前实现仍是 nginx 式近似：`QuicLossAckStat` 只保存当前 ACK 的最早/最晚发送时间，且旧 ACK 历史会随 sent frame 释放而丢失，无法严格重建跨空间的完整 ACK/loss 时间序列。这可能导致更宽泛的漏报或误报，但不能通过原建议的一行修改解决；若要严格对齐 RFC，需单独设计固定内存的跨空间状态跟踪，按 P2/Medium 后续项处理。
+>
+> 回归测试：`QuicLossRecoveryTest.AckedIntervalBeforeLostIntervalCanEstablishPersistentCongestion`、`AckedIntervalAfterLostIntervalCanEstablishPersistentCongestion` 和 `AckedPacketInsideLostIntervalPreventsPersistentCongestion` 分别覆盖 ACK 全在 loss 之前、全在 loss 之后和落在 loss 区间内的三种边界。
 
 ### 15. `drop_ack_ranges` 用发送 PN 阈值接收 PN range
 `QuicAckHandler.cpp:221-223`
@@ -478,6 +482,7 @@ deadline 检查、单写者 `Busy`、`post_at` 计时器、`post` resume、`comp
 | P0 | #2 PTO 忙循环✅、#3 re-entrancy✅、#4 create-before-auth✅(方案A)、#5 DoS 向量、#1 key-update | 中 |
 | P0 | #9 GSO/sendmmsg、#8 接收零拷贝 | 大 |
 | P1 | #11 loss 减窗基准、#22 `reset()` FIN'd 流、#23 `write()` 短写丢 FIN、#19 重复 TP 拒绝、#27 HKDF 溢出、#16 ack_delay skip | 小（多为一行） |
-| P1 | #13✅；给 #14/#15 + AckHandler/LossRecovery/SendScheduler/PathManager 补单测 | 中 |
+| P1 | #13✅/#14⚪；给 #15 + AckHandler/LossRecovery/SendScheduler/PathManager 补单测 | 中 |
 | P2 | #7 detach-before-destroy 不变量断言✅；若要支持挂起 awaiter 下被动销毁，再做 awaiter self-retain | 小 / 中 |
+| P2 | #14 可选的严格跨空间 persistent-congestion 状态跟踪 | 中 |
 | P2 | #35 拆 QuicConnection god object、#31 拆 QuicUdpEndpoint、#25 去重 reassembly、#44 去重 awaiter | 大 |
