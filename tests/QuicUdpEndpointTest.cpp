@@ -9,6 +9,7 @@
 #include <future>
 #include <new>
 #include <string_view>
+#include <utility>
 
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -489,6 +490,63 @@ DetachedTask close_endpoint(fiber::quic::QuicUdpEndpoint *endpoint, std::promise
     endpoint->close();
     done_promise->set_value();
     co_return;
+}
+
+DetachedTask write_stream_once(fiber::quic::QuicStream::Lease stream,
+                               std::promise<fiber::common::IoResult<std::size_t>> *done_promise) {
+    done_promise->set_value(co_await stream->write(iobuf_of("!")));
+}
+
+DetachedTask
+close_endpoint_with_blocked_peer_data_write(fiber::quic::QuicUdpEndpoint *endpoint,
+                                            fiber::quic::QuicConnection *connection,
+                                            std::promise<fiber::common::IoResult<std::size_t>> *write_promise,
+                                            std::promise<fiber::common::IoResult<void>> *close_promise) {
+    auto fail = [endpoint, write_promise, close_promise](fiber::common::IoErr error) noexcept {
+        write_promise->set_value(std::unexpected(error));
+        endpoint->close();
+        close_promise->set_value(std::unexpected(error));
+    };
+
+    if (connection == nullptr) {
+        fail(fiber::common::IoErr::Invalid);
+        co_return;
+    }
+
+    fiber::quic::QuicConnection::Ops ops{};
+    ops.create_stream = make_test_stream;
+    auto ops_set = connection->set_app_ops(nullptr, ops);
+    if (!ops_set) {
+        fail(ops_set.error());
+        co_return;
+    }
+
+    fiber::quic::QuicMaxStreamDataFrame stream_credit{};
+    stream_credit.id = 0;
+    stream_credit.limit = 1;
+    auto granted = connection->recv_max_stream_data_frame(stream_credit);
+    if (!granted) {
+        fail(granted.error());
+        co_return;
+    }
+
+    fiber::quic::QuicStream *stream = connection->find_stream(0);
+    if (stream == nullptr) {
+        fail(fiber::common::IoErr::NotFound);
+        co_return;
+    }
+
+    fiber::event::EventLoop &loop = fiber::event::EventLoop::current();
+    fiber::async::spawn(loop, [stream = stream->lease(), write_promise]() mutable {
+        return write_stream_once(std::move(stream), write_promise);
+    });
+
+    // Let the writer run first and link its WriteAwaiter into the connection's
+    // peer-data list. Stream credit is available, while connection MAX_DATA is
+    // intentionally still zero, so this can only block on that list.
+    co_await fiber::async::sleep(std::chrono::milliseconds(20));
+    endpoint->close();
+    close_promise->set_value({});
 }
 
 DetachedTask establish_connection(fiber::quic::QuicConnection *connection, std::uint64_t active_connection_id_limit,
@@ -1678,6 +1736,59 @@ TEST(QuicUdpEndpointTest, ConnectionDestroyWaitsForLastLeaseAfterEndpointDetach)
     EXPECT_EQ(state.destroy_calls, 0U);
     EXPECT_EQ(state.connection, lease.get());
     EXPECT_TRUE(lease->detached_from_endpoint());
+
+    lease.reset();
+    EXPECT_EQ(state.destroy_calls, 1U);
+    EXPECT_EQ(state.connection, nullptr);
+
+    group.stop();
+    group.join();
+}
+
+TEST(QuicUdpEndpointTest, DetachCancelsPeerDataWaiterBeforeDestroy) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    EmbeddedConnectionFactoryState state{};
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
+    options.connection_owner = &state;
+    options.create_connection = create_embedded_connection;
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    const auto dcid = cid_from_hex("8394c8f03e515708");
+    const auto scid = cid_from_hex("11223344");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
+    build_initial_datagram(datagram, dcid, scid);
+
+    auto received = recv_after_send(group, endpoint, datagram.data(), datagram.size());
+    ASSERT_TRUE(received.has_value()) << static_cast<int>(received.error());
+    ASSERT_NE(received->connection, nullptr);
+
+    auto lease = received->connection->lease();
+    std::promise<fiber::common::IoResult<std::size_t>> write_promise;
+    std::promise<fiber::common::IoResult<void>> close_promise;
+    auto write_future = write_promise.get_future();
+    auto close_future = close_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        return close_endpoint_with_blocked_peer_data_write(&endpoint, lease.get(), &write_promise, &close_promise);
+    });
+
+    ASSERT_EQ(close_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto closed = close_future.get();
+    ASSERT_TRUE(closed.has_value()) << static_cast<int>(closed.error());
+    ASSERT_EQ(write_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto written = write_future.get();
+
+    ASSERT_FALSE(written.has_value());
+    EXPECT_EQ(written.error(), fiber::common::IoErr::Canceled);
+    EXPECT_EQ(endpoint.active_connection_count(), 0U);
+    EXPECT_TRUE(lease->closed());
+    EXPECT_FALSE(lease->attached_to_endpoint());
+    EXPECT_TRUE(lease->detached_from_endpoint());
+    EXPECT_EQ(state.destroy_calls, 0U);
+    EXPECT_EQ(state.connection, lease.get());
 
     lease.reset();
     EXPECT_EQ(state.destroy_calls, 1U);

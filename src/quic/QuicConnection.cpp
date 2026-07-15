@@ -374,6 +374,13 @@ event::EventLoop *QuicConnection::active_timer_loop() const noexcept {
 }
 
 QuicConnection::~QuicConnection() {
+    // Endpoint-owned connections must drain the connection-flow-control
+    // waiters in detach_from_endpoint() before the last lease can destroy the
+    // connection. Do not notify here: waiter completion cancels loop-affine
+    // timers and posts an asynchronous resume, neither of which is safe to
+    // initiate from a possibly quiesced off-loop destructor.
+    FIBER_ASSERT(peer_data_wait_head_ == nullptr);
+    FIBER_ASSERT(peer_data_wait_tail_ == nullptr);
     notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
     if (loop_ != nullptr && loop_->in_loop()) {
         cancel_all_timers();
