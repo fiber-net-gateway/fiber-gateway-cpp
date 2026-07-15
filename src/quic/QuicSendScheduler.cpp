@@ -76,7 +76,10 @@ QuicSendScheduler::~QuicSendScheduler() {
 
 common::IoResult<void> QuicSendScheduler::init(event::EventLoop &loop, net::UdpSocket &socket,
                                                QuicUdpEndpoint &endpoint, const Options &options) noexcept {
-    if (initialized_ || options.max_packets_per_wakeup == 0 || options.max_packets_per_connection == 0) {
+    if (initialized_ || options.max_packets_per_wakeup == 0 || options.max_packets_per_connection == 0 ||
+        (options.pacing.enabled && (options.pacing.rate_numerator == 0 || options.pacing.rate_denominator == 0 ||
+                                    options.pacing.max_burst_packets == 0 || options.pacing.max_burst_packets > 64 ||
+                                    options.pacing.timer_granularity.count() < 0))) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -96,6 +99,11 @@ void QuicSendScheduler::submit(QuicConnection &connection) noexcept {
     }
     FIBER_ASSERT(loop_ != nullptr);
     FIBER_ASSERT(loop_->in_loop());
+    // Ordinary work remains pending until the existing pacing timer fires. Only frames that are exempt from pacing
+    // may requeue the connection early.
+    if (connection.pacing_timer_armed() && !connection.has_pacing_exempt_send_work()) {
+        return;
+    }
     enqueue_ready(connection);
     notify_waiter();
 }
@@ -140,13 +148,13 @@ async::Task<void> QuicSendScheduler::run() noexcept {
                 break;
             }
 
-            common::IoErr err = co_await flush_connection(*connection);
-            if (err != common::IoErr::None && err != common::IoErr::WouldBlock) {
+            FlushResult result = co_await flush_connection(*connection);
+            if (result.error != common::IoErr::None && result.error != common::IoErr::WouldBlock) {
                 connection->close(QuicErrorCode::InternalError);
                 remove(*connection);
             }
 
-            ++packets_this_wakeup;
+            packets_this_wakeup += result.packets_sent;
             if (packets_this_wakeup >= options_.max_packets_per_wakeup) {
                 co_await async::yield();
                 packets_this_wakeup = 0;
@@ -223,27 +231,43 @@ void QuicSendScheduler::clear_ready() noexcept {
     }
 }
 
-async::Task<common::IoErr> QuicSendScheduler::flush_connection(QuicConnection &connection) noexcept {
+async::Task<QuicSendScheduler::FlushResult> QuicSendScheduler::flush_connection(QuicConnection &connection) noexcept {
     FIBER_ASSERT(endpoint_ != nullptr);
     FIBER_ASSERT(socket_ != nullptr);
     FIBER_ASSERT(connection.send_queue_entry.link.linked());
 
-    std::size_t packets_for_connection = 0;
+    FlushResult result{};
+    connection.cancel_pacing_timer();
     for (;;) {
+        const QuicPath *active_path = connection.active_path();
+        const std::size_t path_mtu = active_path != nullptr ? active_path->mtu : kQuicCongestionMinInitialSize;
+        const auto pacing = quic_pacer_check(connection.pacer_, options_.pacing, connection.congestion(),
+                                             connection.rtt(), path_mtu, loop_->now());
+        const QuicBuildMode mode = pacing.ready ? QuicBuildMode::Normal : QuicBuildMode::PacingExemptOnly;
+
         QuicSendDatagram datagram{};
         datagram.data = endpoint_->send_buffer_.get();
         datagram.capacity = options_.send_buffer_size;
 
-        auto built = endpoint_->build_send_datagram(connection, datagram);
+        auto built = endpoint_->build_send_datagram(connection, datagram, mode);
         if (!built) {
-            co_return built.error();
+            result.error = built.error();
+            co_return result;
         }
 
-        if (built->status == QuicBuildSendStatus::NoWork || built->status == QuicBuildSendStatus::Closed ||
-            built->status == QuicBuildSendStatus::Blocked) {
+        if (built->status == QuicBuildSendStatus::NoWork) {
             remove(connection);
-            co_return common::IoErr::None;
+            if (!pacing.ready && endpoint_->connection_has_send_work(connection)) {
+                connection.arm_pacing_timer(pacing.deadline);
+            }
+            co_return result;
         }
+        if (built->status == QuicBuildSendStatus::Closed || built->status == QuicBuildSendStatus::Blocked) {
+            remove(connection);
+            co_return result;
+        }
+
+        FIBER_ASSERT(mode == QuicBuildMode::Normal || !datagram.pacing_controlled);
 
         auto sent = socket_->try_send_packet(datagram.spec);
         if (!sent) {
@@ -252,7 +276,8 @@ async::Task<common::IoErr> QuicSendScheduler::flush_connection(QuicConnection &c
                 const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
                 auto handled = connection.paths().handle_mtu_probe_send_failed(*datagram.path, now);
                 if (!handled) {
-                    co_return handled.error();
+                    result.error = handled.error();
+                    co_return result;
                 }
                 if (*handled) {
                     continue;
@@ -261,26 +286,31 @@ async::Task<common::IoErr> QuicSendScheduler::flush_connection(QuicConnection &c
             if (sent.error() == common::IoErr::WouldBlock) {
                 auto writable = co_await socket_->wait_writable();
                 if (!writable) {
-                    co_return writable.error();
+                    result.error = writable.error();
+                    co_return result;
                 }
                 continue;
             }
-            co_return sent.error();
+            result.error = sent.error();
+            co_return result;
         }
 
+        if (datagram.pacing_controlled) {
+            quic_pacer_on_datagram_sent(connection.pacer_, datagram.length);
+        }
         endpoint_->commit_send_datagram(connection, datagram);
-        packets_for_connection += datagram.packet_count;
-        if (packets_for_connection >= options_.max_packets_per_connection) {
+        result.packets_sent += datagram.packet_count;
+        if (result.packets_sent >= options_.max_packets_per_connection) {
             if (endpoint_->connection_has_send_work(connection)) {
                 rotate_front_to_back(connection);
             } else {
                 remove(connection);
             }
-            co_return common::IoErr::None;
+            co_return result;
         }
         if (!endpoint_->connection_has_send_work(connection)) {
             remove(connection);
-            co_return common::IoErr::None;
+            co_return result;
         }
     }
 }

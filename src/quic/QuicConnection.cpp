@@ -396,6 +396,7 @@ QuicConnection::~QuicConnection() {
     FIBER_ASSERT(!idle_timer_entry_.is_in_heap());
     FIBER_ASSERT(!close_timer_entry_.is_in_heap());
     FIBER_ASSERT(!keepalive_timer_entry_.is_in_heap());
+    FIBER_ASSERT(!pacing_timer_entry_.is_in_heap());
     FIBER_ASSERT(!path_manager_.validation_timer_armed());
 }
 
@@ -864,6 +865,7 @@ void QuicConnection::arm_close_timer() noexcept {
     cancel_loss_detection_timer();
     cancel_key_update_discard_timer();
     cancel_keepalive_timer();
+    cancel_pacing_timer();
     path_manager_.cancel_validation_timer();
 
     QuicTime pto = quic_pto(rtt_, peer_transport_.params.max_ack_delay, state_ == QuicConnectionState::Established,
@@ -894,6 +896,7 @@ void QuicConnection::arm_close_timer_immediate() noexcept {
     cancel_loss_detection_timer();
     cancel_key_update_discard_timer();
     cancel_keepalive_timer();
+    cancel_pacing_timer();
     path_manager_.cancel_validation_timer();
 
     loop_->post_at<QuicConnection, &QuicConnection::close_timer_entry_, &QuicConnection::on_close_timer>(loop_->now(),
@@ -951,6 +954,30 @@ void QuicConnection::cancel_keepalive_timer() noexcept {
     }
     if (keepalive_timer_entry_.is_in_heap()) {
         loop_->cancel<QuicConnection, &QuicConnection::keepalive_timer_entry_>(*this);
+    }
+}
+
+void QuicConnection::arm_pacing_timer(std::chrono::steady_clock::time_point deadline) noexcept {
+    if (active_timer_loop() == nullptr) {
+        return;
+    }
+    if (pacing_timer_entry_.is_in_heap()) {
+        loop_->cancel<QuicConnection, &QuicConnection::pacing_timer_entry_>(*this);
+    }
+    if (state_ == QuicConnectionState::Draining || state_ == QuicConnectionState::Closed || endpoint_ == nullptr) {
+        return;
+    }
+
+    loop_->post_at<QuicConnection, &QuicConnection::pacing_timer_entry_, &QuicConnection::on_pacing_timer>(
+            std::max(deadline, loop_->now()), *this);
+}
+
+void QuicConnection::cancel_pacing_timer() noexcept {
+    if (active_timer_loop() == nullptr) {
+        return;
+    }
+    if (pacing_timer_entry_.is_in_heap()) {
+        loop_->cancel<QuicConnection, &QuicConnection::pacing_timer_entry_>(*this);
     }
 }
 
@@ -1046,6 +1073,7 @@ void QuicConnection::cancel_all_timers() noexcept {
     cancel_idle_timer();
     cancel_close_timer();
     cancel_keepalive_timer();
+    cancel_pacing_timer();
     path_manager_.cancel_validation_timer();
 }
 
@@ -1057,6 +1085,7 @@ void QuicConnection::cancel_all_timers_quiesced() noexcept {
     loop_->cancel_quiesced<QuicConnection, &QuicConnection::idle_timer_entry_>(*this);
     loop_->cancel_quiesced<QuicConnection, &QuicConnection::close_timer_entry_>(*this);
     loop_->cancel_quiesced<QuicConnection, &QuicConnection::keepalive_timer_entry_>(*this);
+    loop_->cancel_quiesced<QuicConnection, &QuicConnection::pacing_timer_entry_>(*this);
     path_manager_.cancel_validation_timer_quiesced();
     loss_timer_mode_ = QuicLossTimerMode::None;
     idle_send_timer_set_ = false;
@@ -1072,6 +1101,19 @@ void QuicConnection::on_key_update_discard_timer(QuicConnection *connection) noe
     }
     connection->crypto_.previous_application_read.reset();
     connection->crypto_.previous_application_keys_ready = false;
+}
+
+void QuicConnection::on_pacing_timer(QuicConnection *connection) noexcept {
+    if (connection == nullptr) {
+        return;
+    }
+    FIBER_ASSERT(connection->loop_ != nullptr && connection->loop_->in_loop());
+    if (connection->loop_ == nullptr || !connection->loop_->in_loop() || connection->endpoint_ == nullptr ||
+        connection->state_ == QuicConnectionState::Draining || connection->state_ == QuicConnectionState::Closed ||
+        !connection->has_pending_send_work()) {
+        return;
+    }
+    connection->schedule_send();
 }
 
 void QuicConnection::on_idle_timer(QuicConnection *connection) noexcept {
@@ -2140,8 +2182,14 @@ void QuicConnection::reset_congestion_for_path(QuicTime now) noexcept {
     auto &space = packet_number_space(QuicEncryptionLevel::Application);
     reset_packet_number_ = space.next_packet_number;
     quic_congestion_reset_for_path(congestion_, rtt_, now);
+    quic_pacer_reset(pacer_);
+    if (active_timer_loop() != nullptr) {
+        cancel_pacing_timer();
+        if (has_pending_send_work()) {
+            schedule_send();
+        }
+    }
 }
-
 
 std::size_t QuicConnection::packet_number_space_index(QuicEncryptionLevel level) noexcept {
     switch (level) {
@@ -2457,6 +2505,18 @@ bool QuicConnection::has_pending_send_work() const noexcept {
     }
     for (const QuicPacketNumberSpace &space: packet_number_spaces_) {
         if ((space.send_ack && space.pending_ack != kUnsetPacketNumber) || !space.pending_frames.empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool QuicConnection::has_pacing_exempt_send_work() const noexcept {
+    if (state_ == QuicConnectionState::Closing) {
+        return has_pending_send_work();
+    }
+    for (const QuicPacketNumberSpace &space: packet_number_spaces_) {
+        if (space.ack_frame.queued || (space.send_ack && space.pending_ack != kUnsetPacketNumber)) {
             return true;
         }
     }

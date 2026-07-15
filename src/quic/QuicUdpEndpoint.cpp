@@ -264,6 +264,10 @@ split_crypto_frame(QuicPacketNumberSpace &space, QuicOutputFrame &frame, std::si
     return type == QuicFrameType::Ack || type == QuicFrameType::AckEcn;
 }
 
+[[nodiscard]] bool pacing_exempt_frame_type(QuicFrameType type) noexcept {
+    return ack_frame_type(type) || type == QuicFrameType::ConnectionClose || type == QuicFrameType::ConnectionCloseApp;
+}
+
 [[nodiscard]] bool datagram_ecn_trackable(const QuicSendDatagram &datagram) noexcept {
     if (datagram.packet_count == 0) {
         return false;
@@ -1478,6 +1482,7 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
 
         datagram.length = encoded->packet_len;
         datagram.packet_count = 1;
+        datagram.pacing_controlled = encoded->ack_eliciting || frame->type == QuicFrameType::Padding;
         datagram.spec.buf = datagram.data;
         datagram.spec.len = datagram.length;
         datagram.spec.peer = candidate.remote;
@@ -1491,7 +1496,8 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
 }
 
 common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicConnection &connection,
-                                                                           QuicSendDatagram &datagram) noexcept {
+                                                                           QuicSendDatagram &datagram,
+                                                                           QuicBuildMode mode) noexcept {
     // In Closing state the connection has CC frames queued; the only way those
     // frames reach the wire is through this function. Draining and Closed never
     // send anything (RFC §10.2.2).
@@ -1502,7 +1508,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
 
     // Path-control frames (PATH_CHALLENGE / PATH_RESPONSE / NEW_CONNECTION_ID) are
     // suppressed once the connection is Closing — only the CC frame is allowed out.
-    if (!connection.closing() && connection.has_path_send_work()) {
+    if (mode == QuicBuildMode::Normal && !connection.closing() && connection.has_path_send_work()) {
         auto path_control = build_path_control_datagram(connection, datagram);
         if (!path_control) {
             return std::unexpected(path_control.error());
@@ -1616,7 +1622,11 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         const bool ack_only = connection.congestion().in_flight >= connection.congestion().window;
         std::size_t payload_len = 0;
         bool payload_ack_eliciting = false;
+        bool payload_has_padding = false;
         while (QuicOutputFrame *source = space.pending_frames.front()) {
+            if (mode == QuicBuildMode::PacingExemptOnly && !pacing_exempt_frame_type(source->type)) {
+                break;
+            }
             if (ack_only && !ack_frame_type(source->type) && !source->ignore_congestion) {
                 break;
             }
@@ -1693,6 +1703,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
             space.sending_frames.push_back(*frame);
             packet.sends_ack = packet.sends_ack || frame == &space.ack_frame;
             payload_ack_eliciting = payload_ack_eliciting || quic_output_frame_ack_eliciting(frame->type);
+            payload_has_padding = payload_has_padding || frame->type == QuicFrameType::Padding;
 
             QuicWriteCursor payload_writer(packet_payload + payload_len, max_payload - payload_len);
             auto written = quic_create_output_frame(&payload_writer, *frame);
@@ -1708,6 +1719,9 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         if (packet.frame_count == 0) {
             packet = QuicSendPacketRecord{};
             if (!space.pending_frames.empty()) {
+                if (mode == QuicBuildMode::PacingExemptOnly) {
+                    continue;
+                }
                 if (datagram.packet_count != 0) {
                     break;
                 }
@@ -1745,6 +1759,8 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         packet.length = encoded->packet_len;
         packet.packet_number = encoded->packet_number;
         packet.ack_eliciting = encoded->ack_eliciting;
+        datagram.pacing_controlled = datagram.pacing_controlled ||
+                                     (mode == QuicBuildMode::Normal && (encoded->ack_eliciting || payload_has_padding));
 
         bool accounted_packet = false;
         for (QuicOutputFrame *frame = space.sending_frames.front(); frame != nullptr;

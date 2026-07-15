@@ -1,12 +1,12 @@
 # `src/quic/` 模块审计
 
-> 审计范围：`src/quic/` 全部 46 个文件（约 17,200 行），按连接核心（`QuicConnection`/`QuicPacketProcessor`/`QuicPathManager`）、packet/frame codec（`QuicPacketCodec`/`QuicFrame`/`QuicTransportCodec`/`QuicTransportParamsCodec`）、stream 层（`QuicStream`/`QuicStreamTable`/`QuicStreamSendQueue`/`QuicStreamRecvQueue`/`QuicDataReassembler`）、可靠性与拥塞（`QuicAckHandler`/`QuicCongestion`/`QuicLossRecovery`/`QuicPacketNumberSpace`/`QuicSendScheduler`）、crypto/token（`QuicCrypto`/`QuicTlsSession`/`QuicToken`/`QuicConnectionId`）、UDP endpoint（`QuicUdpEndpoint`）六个域并行评审后整合。所有结论均经直接读码 + 交叉验证。
+> 审计范围：`src/quic/` 全部 49 个文件（约 17,900 行），按连接核心（`QuicConnection`/`QuicPacketProcessor`/`QuicPathManager`）、packet/frame codec（`QuicPacketCodec`/`QuicFrame`/`QuicTransportCodec`/`QuicTransportParamsCodec`）、stream 层（`QuicStream`/`QuicStreamTable`/`QuicStreamSendQueue`/`QuicStreamRecvQueue`/`QuicDataReassembler`）、可靠性与拥塞（`QuicAckHandler`/`QuicCongestion`/`QuicLossRecovery`/`QuicPacketNumberSpace`/`QuicSendScheduler`/`QuicPacer`）、crypto/token（`QuicCrypto`/`QuicTlsSession`/`QuicToken`/`QuicConnectionId`）、UDP endpoint（`QuicUdpEndpoint`）六个域并行评审后整合。所有结论均经直接读码 + 交叉验证。
 >
 > 核验事实：Initial key 派生（salt `0x38762cf7…` + DCID）、AEAD nonce（IV XOR PN）、header protection（AES-ECB/ChaCha20 双路径）、Retry integrity tag、stateless reset（HMAC-SHA256 + 常时比较）、CID 用 `RAND_bytes` CSPRNG + 重试去重均符合 RFC 9001；anti-amplification（3×）按 path `received*3` 正确封顶（`QuicPathManager.cpp:244-260`）；ECN `IP_RECVTOS`/`IP_TOS`/`IPV6_TCLASS` 设置与解析齐全；稳态 recv 零堆分配（`read_buffer_`/`plaintext_buffer_` 复用）；endpoint 单线程 per-socket，`dcid_tree_` 无锁；全 `src/quic/` `std::string/vector/function/shared_ptr` 仅 4 处（全在 `QuicUdpEndpoint.cpp`），性能纪律真执行。
 >
-> 测试覆盖：约 9,700 行测试，但可靠性核心（`QuicAckHandler`/`QuicLossRecovery`/`QuicSendScheduler`/`QuicPathManager`）缺专门单测；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
+> 测试覆盖：约 10,600 行 QUIC 测试；`QuicPacer` 已有确定性算法单测及 scheduler/endpoint 集成回归，`QuicAckHandler`/`QuicLossRecovery`/`QuicPathManager` 的专项覆盖仍然薄弱；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
 >
-> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化。待修 P0：#1 key-update、#9 GSO，其余排期。
+> 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化；#12 pacing 已于 2026-07-15 修复。待修 P0：#1 key-update、#9 GSO，其余排期。
 
 ## 总体评价
 
@@ -148,7 +148,7 @@ codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝�
 
 ---
 
-## 🟠 MEDIUM — 可靠性与拥塞控制（无单测，风险最高）
+## 🟠 MEDIUM — 可靠性与拥塞控制（专项覆盖仍薄弱）
 
 ### 10. ✅ PTO 基于 non-ack-eliciting 包（复核为误报）
 `QuicLossRecovery.cpp:213-238`
@@ -175,12 +175,27 @@ bytes-in-flight 重复计账，同一 ack-eliciting 包内的其余帧也会是 
 >
 > **结论**：不再作为确定缺陷或“一行修”追踪。保留为后续性能优化项：若要改善 application-limited 场景，应实现 RFC 7661 风格的窗口验证及专项测试，不能只把 `cg.in_flight` 改成 `cg.window`。
 
-### 12. 无 pacing
-`QuicSendScheduler.cpp:226-286`（`flush_connection` 紧 for 循环）
+### 12. ✅ 已实现 pacing
+`QuicPacer.cpp` / `QuicSendScheduler.cpp:230-314` / `QuicConnection.cpp:960-982,1106-1118`
 
-`flush_connection` 紧 for 循环到 `max_packets_per_connection`（默认 64）包或 socket 阻塞。无 inter-packet delay、无 token bucket、无 pacing rate 计算（全 `src/quic/` 搜 `pacing/pacer/PacingRate` 无结果）。单连接一次唤醒可突发 64 包，在共享瓶颈上致微突发、提高丢包概率。RFC 9002 §7.8 建议 pacing。跨连接有 round-robin 公平（`rotate_front_to_back`），但连接内无 pacing。
+原问题确认存在：旧 `flush_connection` 会紧循环到 `max_packets_per_connection`（默认 64）包或 socket 阻塞，连接内没有 pacing。RFC 9002 §7.7 建议发送方根据拥塞窗口和 RTT 对拥塞控制包进行 pacing。
 
-**修复**：实现简单 token-bucket pacer，速率键 `window/smoothed_rtt`。
+> ✅ **修复 2026-07-15**。新增无动态分配的 byte token-bucket `QuicPacer`，默认速率为
+> `5/4 * congestion_window / smoothed_rtt`，burst credit 默认上限为 10 个 path MTU，并按成功发送的
+> UDP datagram 实际长度扣减预算；idle credit 有上限，亚字节 refill 余量跨检查保留。
+>
+> scheduler 在预算不足时只尝试发送 ACK/ACK_ECN/CONNECTION_CLOSE；若没有这类豁免帧，立即把连接
+> 从 ready list 移除并在连接 owner EventLoop 上设置 pacing timer。定时器到期且仍有待发工作时重新
+> `schedule_send`。ACK 或 CONNECTION_CLOSE 提前唤醒连接时会先取消旧 timer、重新核算预算，避免重复入队
+> 与悬挂回调。
+> ACK-only/close 不扣 pacing 预算，混有 ack-eliciting 数据或 PADDING 的 datagram 仍受 pacing 控制。
+> pacing timer 已 armed 时，新的普通数据 frame 只进入 pending queue，不再重复唤醒 scheduler 或
+> cancel/rearm timer；只有 ACK 或 CONNECTION_CLOSE 可以提前重新提交连接。
+>
+> 连接 close、detach、endpoint close、析构和 path congestion reset 均清理或重置 pacing 状态；同时把
+> `max_packets_per_wakeup` 的计数从“每次 flush 调用 +1”修正为真实发送 packet 数。新增 7 个确定性 pacer
+> 单测和 3 个 endpoint 集成测试，覆盖速率/容量/粒度/高频 refill、scheduler 移除与 timer 重入队、ACK/
+> CONNECTION_CLOSE bypass、detach 前取消 timer。
 
 ### 13. `handle_ack_range` O(R×N)
 `QuicAckHandler.cpp:186-242`
