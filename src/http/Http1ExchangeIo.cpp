@@ -1226,4 +1226,14 @@ bool Http1ExchangeIo::should_keep_alive(const HttpExchange &) const noexcept {
     return response_phase_ == ResponsePhase::Finished && !response_body_spec_.is_stream() && !close_after_response_;
 }
 
+common::IoResult<void> Http1ExchangeIo::abort(HttpExchange &exchange, common::IoErr) noexcept {
+    if (!connection_ || exchange.io_ != this) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    connection_->transport().close();
+    response_phase_ = ResponsePhase::Finished;
+    close_after_response_ = true;
+    return {};
+}
+
 } // namespace fiber::http

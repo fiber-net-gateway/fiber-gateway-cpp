@@ -51,6 +51,7 @@ public:
     read_body(std::size_t max_bytes = 64 * 1024,
               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
 
+    common::IoResult<void> abort(common::IoErr reason = common::IoErr::Canceled) noexcept;
     void cancel(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
     [[nodiscard]] bool valid() const noexcept { return conn_ != nullptr || static_cast<bool>(stream_); }

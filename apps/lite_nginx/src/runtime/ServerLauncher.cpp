@@ -161,6 +161,7 @@ fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
 fiber::http::HttpServerOptions make_server_options(const ListenerRuntime &listener) {
     fiber::http::HttpServerOptions options;
     options.drain_unread_body = true;
+    options.enable_extended_connect = true;
     options.http3.enabled = listener.http3;
     if (!listener.tls) {
         return options;

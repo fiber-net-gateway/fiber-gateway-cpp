@@ -151,4 +151,11 @@ fiber::async::Task<common::IoResult<size_t>> HttpExchange::write_body(const uint
     co_return co_await io_->write_body(*this, buf, len, end, timeout);
 }
 
+common::IoResult<void> HttpExchange::abort(common::IoErr reason) noexcept {
+    if (!io_) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return io_->abort(*this, reason);
+}
+
 } // namespace fiber::http

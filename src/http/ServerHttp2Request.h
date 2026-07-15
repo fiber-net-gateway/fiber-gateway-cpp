@@ -42,6 +42,7 @@ public:
     fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, const std::uint8_t *buf,
                                                             std::size_t len, bool end,
                                                             std::chrono::milliseconds timeout) noexcept override;
+    common::IoResult<void> abort(HttpExchange &exchange, common::IoErr reason) noexcept override;
 
 private:
     using PseudoHeaderHandler = common::IoErr (*)(ServerHttp2Request &, std::string_view value,

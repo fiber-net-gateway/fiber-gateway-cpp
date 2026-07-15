@@ -579,6 +579,17 @@ ServerHttp2Request::write_body(HttpExchange &exchange, const std::uint8_t *buf, 
     co_return co_await write_body(exchange, std::move(chunk), timeout);
 }
 
+common::IoResult<void> ServerHttp2Request::abort(HttpExchange &exchange, common::IoErr reason) noexcept {
+    if (&exchange != &exchange_ || conn_ == nullptr) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const common::IoErr err = stream_.close_rst(Http2ErrorCode::Cancel, reason);
+    if (err != common::IoErr::None && err != common::IoErr::Canceled) {
+        return std::unexpected(err);
+    }
+    return {};
+}
+
 void ServerHttp2Request::on_send_complete(SendAwaiter *awaiter, common::IoErr result) noexcept {
     if (!awaiter || send_awaiter_ != awaiter) {
         return;

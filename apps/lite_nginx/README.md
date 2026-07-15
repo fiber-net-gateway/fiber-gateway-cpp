@@ -57,7 +57,7 @@ Validate a custom config file:
 - Variable support such as `$host`, `$remote_addr`, or `$request_uri`.
 - `rewrite`, `if`, regex `location`, or dynamic config reload.
 - DNS-based upstream resolution.
-- WebSocket proxying, cache, gzip, upstream HTTP/2, or active health checks.
+- Cache, gzip, upstream HTTP/2, or active health checks.
 - Full logging subsystem compatibility with nginx.
 
 ## V1 Functional Scope
@@ -67,6 +67,8 @@ Validate a custom config file:
 - Negotiate HTTP/1.1 or HTTP/2 automatically on TLS listeners via ALPN.
 - Accept downstream HTTP/3 on TLS listeners configured with `http3`.
 - Proxy to upstream HTTP/1.1 backends.
+- Proxy WebSocket tunnels automatically through `proxy_pass`, accepting HTTP/1.1
+  Upgrade and HTTP/2 or HTTP/3 Extended CONNECT downstream requests.
 - Support multiple `server` blocks.
 - Support shared `http`-level listeners reused by all `server` blocks.
 - Support `server_name` exact matching.
@@ -311,6 +313,10 @@ rewrite ^/a/(.*)$ /b/$1 last;
 - Response bodies are streamed back to downstream.
 - Hop-by-hop headers are filtered and never forwarded upstream or downstream.
 - If `proxy_set_header` overrides a header, the configured literal value wins.
+- WebSocket requests need no extra directives: HTTP/1.1 Upgrade is forwarded as an
+  upstream HTTP/1.1 Upgrade, while HTTP/2 and HTTP/3 Extended CONNECT are translated
+  to an upstream HTTP/1.1 Upgrade. A successful upstream `101` becomes downstream
+  `101` for HTTP/1.1 and `200` for HTTP/2 or HTTP/3 before bidirectional tunnelling starts.
 
 Headers that must be filtered as hop-by-hop:
 
@@ -321,6 +327,12 @@ Headers that must be filtered as hop-by-hop:
 - `upgrade`
 - `te`
 - `trailer`
+
+For a WebSocket handshake, `proxy_pass` synthesizes the required upstream
+`Connection: Upgrade` and `Upgrade: websocket` fields after normal hop-by-hop filtering.
+For Extended CONNECT it also generates the HTTP/1.1 WebSocket key, validates the
+upstream `Sec-WebSocket-Accept`, and omits HTTP/1.1-only handshake fields from the
+HTTP/2 or HTTP/3 response.
 
 Default behavior in V1:
 

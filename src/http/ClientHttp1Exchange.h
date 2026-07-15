@@ -47,6 +47,7 @@ public:
     fiber::async::Task<common::IoResult<void>>
     discard_response_body(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
 
+    common::IoResult<void> abort(common::IoErr reason = common::IoErr::Canceled) noexcept;
     common::IoResult<void> switch_to_raw_stream() noexcept;
 
     [[nodiscard]] const HttpHeaders &response_trailers() const noexcept { return response_trailers_; }

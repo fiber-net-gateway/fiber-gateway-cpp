@@ -50,6 +50,8 @@ public:
     virtual fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, const uint8_t *buf,
                                                                     size_t len, bool end,
                                                                     std::chrono::milliseconds timeout) noexcept = 0;
+    virtual common::IoResult<void> abort(HttpExchange &exchange,
+                                         common::IoErr reason = common::IoErr::Canceled) noexcept = 0;
 };
 
 } // namespace fiber::http
