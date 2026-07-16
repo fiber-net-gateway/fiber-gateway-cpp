@@ -5,10 +5,13 @@
 `apps/nacos` provides a reusable Nacos client library for applications under
 `apps/`. It is a library module rather than a runnable application.
 
-The current implementation is only a build-system scaffold. It exposes a small
-`hello()` function and a unit test so that target discovery, public headers,
-linking, allocator setup, LTO, and CTest registration can be verified before
-the Nacos protocol implementation is added.
+The module currently contains the original `hello()` build-system smoke API
+and the first Nacos wire DTOs with pool-backed JSON codecs:
+
+- `ConfigQueryRequest`
+- `NotifySubscriberResponse`
+
+Further client, transport, and DTO implementation will be added incrementally.
 
 ## Targets
 
@@ -29,10 +32,20 @@ apps/nacos/
 ├── include/
 │   └── fiber/
 │       └── nacos/
-│           └── NacosClient.h
+│           ├── NacosClient.h
+│           └── dto/
+│               ├── Base.h
+│               ├── ConfigQueryRequest.h
+│               ├── JsonCodec.h
+│               └── NotifySubscriberResponse.h
 ├── src/
-│   └── NacosClient.cpp
+│   ├── NacosClient.cpp
+│   └── dto/
+│       ├── ConfigQueryRequestJson.cpp
+│       ├── JsonCodecSupport.h
+│       └── NotifySubscriberResponseJson.cpp
 └── tests/
+    ├── DtoJsonTest.cpp
     └── NacosClientTest.cpp
 ```
 
@@ -53,7 +66,7 @@ Build and run its tests:
 
 ```bash
 cmake --build build --target fiber_nacos_tests
-ctest --test-dir build -R '^NacosClientTest\.'
+ctest --test-dir build -R '^(NacosClientTest|NacosDtoJsonTest)\.'
 ```
 
 The top-level `apps/CMakeLists.txt` discovers this directory automatically when
@@ -78,7 +91,24 @@ Public headers are then included as:
 Use `PUBLIC fiber::nacos` instead of `PRIVATE` only when the consuming target's
 public headers expose types declared by this library.
 
-## Current Smoke API
+## DTO JSON API
+
+DTO headers live under `fiber/nacos/dto/`. JSON decoding uses
+`fiber::json::JsonParser` and stores decoded strings in the supplied
+`fiber::mem::BufPool`. DTO string views must not outlive that pool. String views
+assigned by callers remain borrowed and must stay valid through encoding.
+
+Reference fields use `fiber::json::Nullable<T>`:
+
+- `Absent` fields are omitted during encoding.
+- `Null` fields are encoded as JSON `null`.
+- `Present` fields are encoded with their value.
+
+Unknown JSON fields are skipped. Known fields use strict JSON type checking,
+and decoding is transactional: the output DTO is changed only after the full
+object parses successfully.
+
+## Smoke API
 
 The temporary scaffold exports:
 
@@ -86,9 +116,8 @@ The temporary scaffold exports:
 fiber::nacos::hello();
 ```
 
-It writes `hello` followed by a newline to standard output. This API exists only
-to verify the module wiring and can be replaced when the real client API is
-introduced.
+It writes `hello` followed by a newline to standard output. This API remains
+only as a module wiring smoke test.
 
 ## Planned Build Boundaries
 
