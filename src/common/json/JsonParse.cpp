@@ -116,6 +116,69 @@ ParseStatus parse_double(JsonParser &parser, mem::BufPool & /*pool*/, double &ou
     return ParseStatus::Done;
 }
 
+ParseStatus parse_any(JsonParser &parser, mem::BufPool &pool, JsonAny &out) noexcept {
+    if (detail::require_finished(parser) != ParseStatus::Done) {
+        return ParseStatus::Error;
+    }
+
+    const Token *token = parser.current_token();
+    if (!token || token->role != TokenRole::Value) {
+        return detail::fail(parser, "expected JSON value");
+    }
+
+    JsonAny result;
+    switch (token->kind) {
+        case TokenKind::Null:
+            result.set_null();
+            break;
+        case TokenKind::Bool:
+            result.set_bool(token->bval);
+            break;
+        case TokenKind::Integer:
+            result.set_integer(token->inum);
+            break;
+        case TokenKind::Double:
+        case TokenKind::BigNumber: {
+            double value = 0.0;
+            if (parse_double(parser, pool, value) != ParseStatus::Done) {
+                return ParseStatus::Error;
+            }
+            result.set_double(value);
+            break;
+        }
+        case TokenKind::Text: {
+            std::string_view value;
+            if (parse_text(parser, pool, value) != ParseStatus::Done) {
+                return ParseStatus::Error;
+            }
+            result.set_text(value);
+            break;
+        }
+        case TokenKind::StartArr: {
+            JsonArray<JsonAny> value;
+            if (parse_array<parse_any>(parser, pool, value) != ParseStatus::Done) {
+                return ParseStatus::Error;
+            }
+            result.set_array(value);
+            break;
+        }
+        case TokenKind::StartObj: {
+            JsonObject<JsonAny> value;
+            if (parse_object<parse_any>(parser, pool, value) != ParseStatus::Done) {
+                return ParseStatus::Error;
+            }
+            result.set_object(value);
+            break;
+        }
+        case TokenKind::EndObj:
+        case TokenKind::EndArr:
+            return detail::fail(parser, "expected JSON value");
+    }
+
+    out = result;
+    return ParseStatus::Done;
+}
+
 ParseStatus skip_value(JsonParser &parser, mem::BufPool &pool, std::nullptr_t &out) noexcept {
     out = nullptr;
     return skip_value(parser, pool);
