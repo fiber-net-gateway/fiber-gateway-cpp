@@ -80,9 +80,9 @@ if (!start_result) {
     // Handle the lifecycle error.
 }
 
-auto snapshot = co_await auth.next();
-if (snapshot->ready()) {
-    use_token(snapshot->access_token);
+auto snapshot = co_await auth.next(0);
+if (snapshot.value && snapshot.value->ready()) {
+    use_token(snapshot.value->access_token);
 }
 
 co_await (*client)->shutdown();
@@ -120,15 +120,18 @@ Each attempt starts with the previously successful server, then walks the
 configured IP list in order. Authentication requests use
 `application/x-www-form-urlencoded` and `Connection: close`.
 
-Subscribers observe `NacosAuthSnapshot` states:
+Before the first authentication result, `AuthSubscriber::current()` returns an
+empty Watch snapshot with version `0`. Call `next(0)` to wait for the first
+published authentication result. Published `NacosAuthSnapshot` states are:
 
-- `Pending`: no attempt result has been published yet.
 - `Ready`: a non-expired token is available.
 - `Unavailable`: no valid token is available.
 - `Stopped`: the client has completed shutdown.
 
-`generation` increments after each successful login or refresh. Consumers can
-use it to cheaply detect token replacement.
+Each Watch snapshot also carries its Watch version. Pass that version to the
+next `next(version)` call. `NacosAuthSnapshot::generation` increments after each
+successful login or refresh; consumers can use it to cheaply detect token
+replacement.
 
 ## Build and Test
 

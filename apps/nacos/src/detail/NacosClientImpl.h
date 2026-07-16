@@ -53,7 +53,7 @@ private:
     async::WaitGroup task_group_;
     async::Watch<bool> shutdown_watch_{false};
     std::optional<async::Watch<bool>::Publisher> shutdown_publisher_;
-    async::Watch<NacosAuthSnapshot> auth_watch_{NacosAuthSnapshot{}};
+    async::Watch<NacosAuthSnapshot> auth_watch_;
     std::optional<async::Watch<NacosAuthSnapshot>::Publisher> auth_publisher_;
     std::unique_ptr<NacosAuthenticator> authenticator_;
 };

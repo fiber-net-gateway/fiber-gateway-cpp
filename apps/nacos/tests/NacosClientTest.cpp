@@ -311,6 +311,7 @@ DetachedTask collect_states_and_shutdown(NacosClient *client, NacosClient::AuthS
                                          std::vector<NacosAuthState> expected_states,
                                          std::promise<SnapshotOutcome> *promise) {
     SnapshotOutcome outcome;
+    std::uint64_t received_version = 0;
     auto start = client->start();
     if (!start) {
         outcome.error = start.error();
@@ -320,16 +321,18 @@ DetachedTask collect_states_and_shutdown(NacosClient *client, NacosClient::AuthS
     }
 
     for (const NacosAuthState expected: expected_states) {
-        auto next = co_await fiber::async::timeout_for([subscriber]() { return subscriber->next(); }, 4s);
-        if (!next || !*next) {
+        auto next = co_await fiber::async::timeout_for(
+                [subscriber, received_version]() { return subscriber->next(received_version); }, 4s);
+        if (!next || !next->value) {
             outcome.error = next ? fiber::common::IoErr::Invalid : next.error();
             co_await client->shutdown();
             promise->set_value(std::move(outcome));
             fiber::event::EventLoop::current().stop();
             co_return;
         }
-        outcome.snapshots.push_back(**next);
-        if ((*next)->state != expected) {
+        received_version = next->version;
+        outcome.snapshots.push_back(*next->value);
+        if (next->value->state != expected) {
             outcome.error = fiber::common::IoErr::Invalid;
             co_await client->shutdown();
             promise->set_value(std::move(outcome));
@@ -340,11 +343,12 @@ DetachedTask collect_states_and_shutdown(NacosClient *client, NacosClient::AuthS
 
     co_await client->shutdown();
     co_await client->shutdown();
-    auto stopped = co_await fiber::async::timeout_for([subscriber]() { return subscriber->next(); }, 1s);
-    if (!stopped || !*stopped || (*stopped)->state != NacosAuthState::Stopped) {
+    auto stopped = co_await fiber::async::timeout_for(
+            [subscriber, received_version]() { return subscriber->next(received_version); }, 1s);
+    if (!stopped || !stopped->value || stopped->value->state != NacosAuthState::Stopped) {
         outcome.error = stopped ? fiber::common::IoErr::Invalid : stopped.error();
     } else {
-        outcome.snapshots.push_back(**stopped);
+        outcome.snapshots.push_back(*stopped->value);
         outcome.error = fiber::common::IoErr::None;
     }
     promise->set_value(std::move(outcome));
@@ -362,16 +366,27 @@ DetachedTask shutdown_client(NacosClient *client, NacosClient::AuthSubscriber *s
     SnapshotOutcome outcome;
     co_await client->shutdown();
     co_await client->shutdown();
-    auto stopped = co_await fiber::async::timeout_for([subscriber]() { return subscriber->next(); }, 1s);
-    if (!stopped || !*stopped) {
+    auto stopped = co_await fiber::async::timeout_for([subscriber]() { return subscriber->next(0); }, 1s);
+    if (!stopped || !stopped->value) {
         outcome.error = stopped ? fiber::common::IoErr::Invalid : stopped.error();
     } else {
-        outcome.snapshots.push_back(**stopped);
-        outcome.error = (*stopped)->state == NacosAuthState::Stopped ? fiber::common::IoErr::None
-                                                                     : fiber::common::IoErr::Invalid;
+        outcome.snapshots.push_back(*stopped->value);
+        outcome.error = stopped->value->state == NacosAuthState::Stopped ? fiber::common::IoErr::None
+                                                                         : fiber::common::IoErr::Invalid;
     }
     promise->set_value(std::move(outcome));
     fiber::event::EventLoop::current().stop();
+}
+
+TEST(NacosClientTest, AuthSubscriberStartsWithoutPublishedSnapshot) {
+    fiber::event::EventLoop loop;
+    auto client_result = NacosClient::create(loop, make_config(8848));
+    ASSERT_TRUE(client_result.has_value());
+
+    auto subscriber = (*client_result)->subscribe_auth();
+    auto snapshot = subscriber.current();
+    EXPECT_EQ(snapshot.value, nullptr);
+    EXPECT_EQ(snapshot.version, 0u);
 }
 
 TEST(NacosClientTest, LogsInWithV3AndBroadcastsReadyThenStopped) {

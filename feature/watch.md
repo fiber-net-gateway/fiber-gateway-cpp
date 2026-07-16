@@ -4,8 +4,9 @@
 
 - 提供只保留最新状态的异步通知组件，不提供消息队列或历史事件语义。
 - 一个 `Watch<T>` 生命周期内最多创建一个 `Publisher`。
-- 支持任意数量、观察进度相互独立的 `Subscriber`。
-- 支持通过 `co_await subscriber.next()` 异步等待新版本。
+- 支持任意数量的 `Subscriber`，消费进度由调用方通过版本号显式管理。
+- 支持通过 `co_await subscriber.next(received_version)` 异步等待新版本。
+- 同时返回不可变值和与其原子对应的版本号。
 - `publish()` 可以从其它线程调用，Subscriber 必须回到发起等待的 `EventLoop` 恢复。
 - 发布、读取和等待注册之间不存在丢失唤醒。
 - 等待协程销毁或超时时，可以安全取消等待节点。
@@ -17,7 +18,6 @@
 - 不保存历史版本，也不保证 Subscriber 观察到每一次 `publish()`。
 - 不提供消息队列、背压或逐消息确认。
 - 不提供 `close()` 或 Publisher 销毁通知。
-- 不允许同一个 Subscriber 同时执行多个 `next()`。
 - 不提供线程阻塞式等待接口。
 
 ## Public API
@@ -30,6 +30,11 @@ namespace fiber::async {
 template<typename T>
 class Watch {
 public:
+    struct Snapshot {
+        std::shared_ptr<const T> value;
+        std::uint64_t version = 0;
+    };
+
     class Publisher;
     class Subscriber;
 
@@ -66,8 +71,8 @@ public:
     Subscriber(Subscriber &&) noexcept;
     Subscriber &operator=(Subscriber &&) noexcept;
 
-    [[nodiscard]] std::shared_ptr<const T> current();
-    [[nodiscard]] NextAwaiter next() noexcept;
+    [[nodiscard]] Snapshot current() const;
+    [[nodiscard]] NextAwaiter next(std::uint64_t received_version) const noexcept;
 };
 
 } // namespace fiber::async
@@ -85,26 +90,34 @@ public:
 - 不要求 `T` 提供相等比较。
 - 版本溢出是不可恢复的使用周期错误，通过 `FIBER_ASSERT` 检查。
 
-每个 Subscriber 保存自己的 `observed_version`：
+`Subscriber` 不保存消费版本。调用方持有最后已经处理的
+`received_version`：
 
-- `subscribe()` 将创建时的当前版本设为已观察基线。
-- `current()` 返回最新快照，并将该快照版本标记为已观察。
-- `next()` 只等待严格晚于 `observed_version` 的版本。
+- `current()` 返回最新的 `{value, version}`，没有消费游标副作用。
+- `next(0)` 在空 Watch 上等待第一次发布。
+- 当前版本大于 `received_version` 时，`next()` 立即返回最新快照。
+- 当前版本等于 `received_version` 时，`next()` 等待后续发布。
+- `received_version` 大于当前版本属于调用方游标错误，通过 `FIBER_ASSERT` 检查。
 - `next()` 恢复时读取当时的最新快照，而不是触发唤醒的那个历史快照。
 
 例如：
 
 ```text
-Subscriber observed_version = 0
+Caller received_version = 0
 
 publish(A)  // version 1，唤醒 Subscriber
 publish(B)  // version 2
 publish(C)  // version 3
 
-Subscriber 恢复并读取 version 3，只观察到 C。
+next(0) 恢复并返回 {C, 3}
+Caller 将 received_version 更新为 3
+next(3) 等待 version > 3
 ```
 
 `std::shared_ptr<const T>` 保证快照内容不可通过 Watch API 修改。Subscriber 可以继续持有旧快照；Watch 自身始终只保存最新快照，这不构成历史队列。
+
+`next()` 不提供默认版本参数，避免循环重复调用 `next()` 时不断以版本
+`0` 立即取得同一个已发布快照。
 
 ## 生命周期
 
@@ -115,7 +128,9 @@ Subscriber 恢复并读取 version 3，只观察到 C。
 - Subscriber 销毁不影响 Publisher 或其它 Subscriber。
 - 最后一个句柄和等待 Awaiter 释放后，共享状态才被销毁。
 
-Publisher 和 Subscriber 都是 move-only 对象。Subscriber 存在活动 `next()` 时禁止移动或销毁；Awaiter 析构会先取消等待，因此正常销毁协程帧是安全的。
+Publisher 和 Subscriber 都是 move-only 对象。`NextAwaiter` 独立持有共享状态，
+不借用 Subscriber；创建 Awaiter 后移动或销毁 Subscriber 不影响该等待。
+Awaiter 析构会取消等待，因此正常销毁协程帧是安全的。
 
 ## 数据模型
 
@@ -129,8 +144,6 @@ Watch<T>::SharedState
 
 Subscriber
   state: shared_ptr<SharedState>
-  observed_version: uint64_t
-  next_active: bool
 
 Waiter
   loop: EventLoop*
@@ -176,15 +189,17 @@ true  -> true：返回 nullopt
 
 ### await_ready
 
-在共享锁内比较 `SharedState::version` 和 Subscriber 的 `observed_version`。存在新版本时立即完成，不分配 Waiter。
+在共享锁内比较 `SharedState::version` 和调用方传入的
+`received_version`。当前版本更大时立即完成，不分配 Waiter；传入未来
+版本时触发断言。
 
 ### await_suspend
 
 1. 要求当前线程已经安装 `EventLoop`。
 2. 创建一个堆上 Waiter，保存 coroutine handle 和当前 EventLoop。
-3. 在共享锁内再次比较版本。
-4. 如果版本已变化，释放 Waiter 并返回 `false`。
-5. 如果版本未变化，将 Waiter 加入链表并挂起协程。
+3. 在共享锁内再次比较当前版本和 `received_version`。
+4. 如果当前版本更大，释放 Waiter 并返回 `false`。
+5. 如果版本相等，将 Waiter 加入链表并挂起协程。
 
 第二次版本检查用于关闭以下丢失唤醒窗口：
 
@@ -200,7 +215,8 @@ await_suspend() 尝试入队
 
 ### await_resume
 
-在共享锁内读取最新值和版本，将版本写入 Subscriber 的 `observed_version`，然后返回 `std::shared_ptr<const T>`。
+在共享锁内读取最新值和版本，确认版本严格大于 `received_version`，然后
+返回 `Snapshot`。消费进度由调用方在处理成功后更新。
 
 发布通知与实际恢复之间可以发生更多发布；`await_resume()` 总是返回恢复时的最新状态，从而自然实现更新合并。
 
@@ -221,12 +237,14 @@ Waiting --publish--> Notified --EventLoop callback--> Resumed
 
 ## 线程规则
 
-- `subscribe()` 和 `acquire_publisher()` 由共享锁保护，可以与其它共享状态操作并发。
+- `subscribe()` 只复制共享状态句柄；`acquire_publisher()` 的唯一性检查由
+  共享锁保护，两者都可以与其它共享状态操作并发。
 - `publish()` 可以从任意线程调用，通知会返回各 Subscriber 的原始 EventLoop。
 - 唯一 Publisher 可以在线程之间移动，但调用者不应并发重叠调用同一个 Publisher 的 `publish()`。
 - 不同 Subscriber 可以在不同线程和 EventLoop 中独立使用。
-- 同一个 Subscriber 必须由一个协程串行使用。
-- 同一个 Subscriber 最多允许一个活动 `next()`；违反时触发 `FIBER_ASSERT`。
+- 同一个 Subscriber 可以创建多个独立 Awaiter；每个 Awaiter 使用自己
+  捕获的 `received_version`。
+- 调用方负责避免错误地回退或混用其它 Watch 的版本号。
 - `next()` 只能在 EventLoop 协程内调用；`current()` 是同步非阻塞接口。
 
 ## Shutdown 语义
@@ -243,14 +261,15 @@ Publisher 不提供 `close()`，Publisher 析构也不唤醒等待者。因此�
 
 ```cpp
 auto result = co_await fiber::async::timeout_for(
-        [&subscriber]() { return subscriber.next(); },
+        [&subscriber, received_version]() { return subscriber.next(received_version); },
         std::chrono::seconds(5));
 
 if (!result) {
     co_return;
 }
 
-std::shared_ptr<const Config> config = std::move(*result);
+received_version = result->version;
+std::shared_ptr<const Config> config = std::move(result->value);
 ```
 
 使用 factory 形式可以直接构造不可移动的 `NextAwaiter`。
@@ -278,12 +297,14 @@ Waiter 使用独立堆对象，是因为跨线程 `EventLoop::NotifyEntry` 一�
 1. 空状态和初始值的 `current()`。
 2. Publisher 只能获取一次，销毁后也不能重新获取。
 3. Publisher 和 Subscriber 可以超过 Watch 对象生命周期。
-4. 多次发布只返回最新合并值。
-5. 已挂起的 `next()` 在发布后恢复，并合并恢复前的连续发布。
-6. 不同 Subscriber 的观察版本相互独立。
-7. 多 EventLoop Subscriber 回到各自线程恢复。
-8. 销毁挂起协程会取消 Waiter，不会被后续发布恢复。
-9. `timeout_for()` 后 Subscriber 可以继续等待下一版本。
+4. `current()` 同时返回不可变值和版本，且不推进隐藏游标。
+5. `next(0)` 可以立即取得已经存在的初始值或最新发布值。
+6. 多次发布只返回最新合并值和对应版本。
+7. 已挂起的 `next(version)` 在发布后恢复，并合并恢复前的连续发布。
+8. 同一个 Subscriber 可以按显式版本创建独立等待。
+9. 多 EventLoop Subscriber 回到各自线程恢复。
+10. 销毁挂起协程会取消 Waiter，不会被后续发布恢复。
+11. `timeout_for()` 后可以继续使用原版本等待。
 
 验证命令：
 
