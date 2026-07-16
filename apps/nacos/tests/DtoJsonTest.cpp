@@ -15,6 +15,7 @@ using fiber::json::OutputSink;
 using fiber::json::ParseStatus;
 using fiber::mem::BufPool;
 using fiber::nacos::dto::req::ConfigQueryRequest;
+using fiber::nacos::dto::resp::AuthTokenResponse;
 using fiber::nacos::dto::resp::NotifySubscriberResponse;
 
 class StringSink final : public OutputSink {
@@ -38,6 +39,10 @@ ParseStatus parse_config_query_request(JsonParser &parser, BufPool &pool, Config
 
 ParseStatus parse_notify_subscriber_response(JsonParser &parser, BufPool &pool,
                                              NotifySubscriberResponse &out) noexcept {
+    return fiber::nacos::dto::parse_json(parser, pool, out);
+}
+
+ParseStatus parse_auth_token_response(JsonParser &parser, BufPool &pool, AuthTokenResponse &out) noexcept {
     return fiber::nacos::dto::parse_json(parser, pool, out);
 }
 
@@ -192,6 +197,51 @@ TEST(NacosDtoJsonTest, NotifySubscriberResponseRejectsInvalidFieldTypesTransacti
     ASSERT_TRUE(value.message.is_present());
     EXPECT_EQ(value.message.value(), "unchanged");
     EXPECT_STREQ(parser.error().message, "integer out of range");
+}
+
+TEST(NacosDtoJsonTest, AuthTokenResponseParsesLoginPayload) {
+    constexpr std::string_view Input =
+            R"({"accessToken":"token-value","tokenTtl":18000,"globalAdmin":true,"username":"nacos","future":1})";
+
+    BufPool pool;
+    JsonParser parser;
+    std::string input(Input);
+    AuthTokenResponse value;
+    ASSERT_EQ(parse_complete<parse_auth_token_response>(input, pool, value, parser), ParseStatus::Done);
+    std::fill(input.begin(), input.end(), '!');
+
+    ASSERT_TRUE(value.access_token.is_present());
+    EXPECT_EQ(value.access_token.value(), "token-value");
+    EXPECT_EQ(value.token_ttl, 18000);
+    EXPECT_TRUE(value.global_admin);
+    ASSERT_TRUE(value.username.is_present());
+    EXPECT_EQ(value.username.value(), "nacos");
+}
+
+TEST(NacosDtoJsonTest, AuthTokenResponseTracksMissingNullableFields) {
+    BufPool pool;
+    JsonParser parser;
+    AuthTokenResponse value;
+    ASSERT_EQ(parse_complete<parse_auth_token_response>(R"({"tokenTtl":10})", pool, value, parser), ParseStatus::Done);
+    EXPECT_TRUE(value.access_token.is_absent());
+    EXPECT_TRUE(value.username.is_absent());
+    EXPECT_EQ(value.token_ttl, 10);
+    EXPECT_FALSE(value.global_admin);
+}
+
+TEST(NacosDtoJsonTest, AuthTokenResponseRejectsWrongTypesTransactionally) {
+    BufPool pool;
+    JsonParser parser;
+    AuthTokenResponse value;
+    value.access_token.set_present("old-token");
+    value.token_ttl = 15;
+
+    EXPECT_EQ(parse_complete<parse_auth_token_response>(R"({"tokenTtl":"bad"})", pool, value, parser),
+              ParseStatus::Error);
+    ASSERT_TRUE(value.access_token.is_present());
+    EXPECT_EQ(value.access_token.value(), "old-token");
+    EXPECT_EQ(value.token_ttl, 15);
+    EXPECT_STREQ(parser.error().message, "expected integer");
 }
 
 } // namespace
