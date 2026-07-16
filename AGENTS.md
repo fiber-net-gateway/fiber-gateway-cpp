@@ -21,6 +21,8 @@ ctest --test-dir build
 ## Coding Style & Naming Conventions
 Follow existing C++23 style: 4-space indentation, braces on the same line, and namespaces under `fiber::...`. Class and type names use PascalCase (e.g., `Buffer`, `Generator`). Header guards follow `FIBER_<NAME>_H`. Keep includes local and explicit (e.g., `#include "../mem/Buffer.h"`). Prefer small, focused headers and keep implementations in `.cpp` files.
 
+Do not spend time repeatedly formatting code while implementing a task. Once the task is complete, run `./format_code.sh` to apply the repository-wide formatting rules.
+
 Design state and member variables to be minimal and explicit. Prefer establishing required invariants at construction or initialization boundaries and assert there, instead of carrying nullable members and repeatedly checking `!= nullptr` at every use site. Push nullability checks to the edges when possible, and keep steady-state execution paths simple.
 
 Do not use C++ exceptions in this project. Do not write `throw`, and prefer `noexcept` for internal callback-style functions and other code paths that are required to be non-throwing by design.
