@@ -82,7 +82,7 @@ struct NacosClientOptions {
     std::size_t max_auth_response_bytes = 64 * 1024;
     std::chrono::milliseconds retry_initial_delay{1000};
     std::chrono::milliseconds retry_max_delay{30000};
-    std::uint8_t refresh_percent = 80;
+    std::uint8_t refresh_percent = 90;
     std::chrono::milliseconds min_refresh_delay{1000};
 };
 

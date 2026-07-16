@@ -11,6 +11,8 @@ The current implementation covers authentication:
 - URL-form encoding of credentials.
 - Token state broadcast through `async::Watch<NacosAuthSnapshot>`.
 - Timed token refresh, bounded exponential retry, and server failover.
+- A single long-lived authentication coroutine; HTTP objects remain local to
+  each login attempt.
 - A fixed `EventLoop` for every Nacos timer, coroutine, and network operation.
 - Graceful shutdown through an internal `Watch<bool>` and `WaitGroup`.
 
@@ -63,7 +65,7 @@ removed while preserving order. The context path must be absolute and defaults
 to `/nacos`.
 
 `NacosClientOptions` controls connect/request timeouts, response size, retry
-backoff, and refresh timing. A token is normally refreshed at
+backoff, and refresh timing. By default, a token is refreshed at
 `refresh_percent` of its TTL. A refresh failure is broadcast in
 `last_error`, but an unexpired token remains usable until its actual expiry.
 
@@ -94,15 +96,17 @@ The lifecycle is:
 Created -> Running -> Stopping -> Stopped
 ```
 
-During shutdown, the client first publishes its internal shutdown signal,
-cancels authentication timers and active HTTP exchange work, then awaits its
-`WaitGroup`. `shutdown()` returns only after all tracked Nacos coroutines have
-exited. It is idempotent. The final auth snapshot has state `Stopped`.
+During shutdown, the client publishes its internal shutdown signal, then awaits
+its authentication coroutine through the `WaitGroup`. An idle authentication
+coroutine wakes immediately. If a login HTTP operation is in progress, shutdown
+waits only for that current connect or request operation's configured timeout;
+the coroutine checks shutdown before starting another HTTP step, fallback, or
+server attempt. `shutdown()` is idempotent. The final auth snapshot has state
+`Stopped`.
 
-An active HTTP exchange is aborted immediately. If shutdown begins while the
-underlying TCP connection is still being established, the current transport API
-has no external connect-cancel handle, so completion is bounded by
-`connect_timeout`.
+During refresh, each HTTP timeout is also capped by the old token's remaining
+lifetime. The same coroutine therefore handles refresh, retry, token expiry, and
+shutdown without persistent authentication timer objects.
 
 Destroy a client only before it has started or after `shutdown()` completes.
 The destructor asserts this invariant.
@@ -147,5 +151,5 @@ not require an external Nacos installation.
 ## Layout
 
 Public headers live under `include/fiber/nacos/`. Authentication transport and
-lifecycle implementation details remain private under `src/auth/` and
-`src/detail/`. DTO JSON codecs live under `src/dto/`.
+lifecycle implementation details remain private in `src/detail/`. DTO JSON
+codecs live under `src/dto/`.

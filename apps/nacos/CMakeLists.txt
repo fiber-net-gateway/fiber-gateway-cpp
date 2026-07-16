@@ -1,8 +1,6 @@
 add_library(fiber_nacos STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/NacosClient.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/NacosClientConfig.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/auth/AuthHttpOperation.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/auth/NacosAuthenticator.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/detail/NacosClientImpl.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/dto/AuthTokenResponseJson.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/dto/ConfigQueryRequestJson.cpp"
