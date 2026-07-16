@@ -123,6 +123,13 @@ std::size_t JsonParser::current_offset() const noexcept { return current_offset_
 
 const ParseError &JsonParser::error() const noexcept { return error_; }
 
+bool JsonParser::fail(const char *message) noexcept {
+    const std::size_t offset = has_current_token_ ? current_offset_ : lexer_.stream_offset() + input_offset_;
+    return set_error(message, offset);
+}
+
+bool JsonParser::fail(const char *message, std::size_t offset) noexcept { return set_error(message, offset); }
+
 bool JsonParser::set_error(const char *message, std::size_t offset) noexcept {
     failed_ = true;
     if (!error_.message) {
