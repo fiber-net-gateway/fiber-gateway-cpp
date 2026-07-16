@@ -4,10 +4,9 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "JsonTypes.h"
+
 namespace fiber::json {
-
-struct ParseError;
-
 namespace detail {
 
 enum class TokenKind : std::uint8_t {
