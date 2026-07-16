@@ -73,6 +73,8 @@ public:
     // Complete or Error.
     void finish() noexcept;
 
+    [[nodiscard]] bool input_finished() const noexcept { return final_; }
+
     [[nodiscard]] Status next() noexcept;
 
     // The token and any view it contains remain valid until the next call to
@@ -84,6 +86,11 @@ public:
     [[nodiscard]] std::size_t current_offset() const noexcept;
 
     [[nodiscard]] const ParseError &error() const noexcept;
+
+    // Records a semantic error discovered by a typed parser. The first error
+    // wins, and subsequent calls to next() return Error until reset().
+    [[nodiscard]] bool fail(const char *message) noexcept;
+    [[nodiscard]] bool fail(const char *message, std::size_t offset) noexcept;
 
 private:
     static constexpr std::size_t MaxDepth = 128;
