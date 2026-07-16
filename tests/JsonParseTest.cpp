@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -9,13 +11,13 @@
 
 namespace {
 
+using fiber::json::JsonAny;
 using fiber::json::JsonArray;
 using fiber::json::JsonObject;
 using fiber::json::JsonParser;
 using fiber::json::Nullable;
+using fiber::json::ObjectFieldStatus;
 using fiber::json::ParseStatus;
-using fiber::json::TokenKind;
-using fiber::json::TokenRole;
 using fiber::mem::BufPool;
 
 ParseStatus parse_integer_array(JsonParser &parser, BufPool &pool, JsonArray<std::int64_t> &out) noexcept {
@@ -50,108 +52,25 @@ struct Config {
     bool limit_present = false;
 };
 
-ParseStatus next_config_token(JsonParser &parser, const char *message) noexcept {
-    switch (parser.next()) {
-        case JsonParser::Status::Token:
-            return ParseStatus::Done;
-        case JsonParser::Status::Error:
-            return ParseStatus::Error;
-        case JsonParser::Status::NeedMore:
-            (void) parser.fail("typed JSON parse requires finished input");
-            return ParseStatus::Error;
-        case JsonParser::Status::Complete:
-            (void) parser.fail(message);
-            return ParseStatus::Error;
+ObjectFieldStatus parse_config_field(std::string_view field, JsonParser &parser, BufPool &pool, Config &out) noexcept {
+    if (field == "name") {
+        return fiber::json::to_object_field_status(
+                fiber::json::parse_nullable<fiber::json::parse_text>(parser, pool, out.name));
     }
-    (void) parser.fail("invalid parser state");
-    return ParseStatus::Error;
+    if (field == "timeout") {
+        return fiber::json::to_object_field_status(
+                fiber::json::parse_nullable<fiber::json::parse_integer>(parser, pool, out.timeout));
+    }
+    if (field == "limit") {
+        out.limit_present = true;
+        return fiber::json::to_object_field_status(
+                fiber::json::parse_optional<fiber::json::parse_integer>(parser, pool, out.limit));
+    }
+    return ObjectFieldStatus::Unknown;
 }
 
 ParseStatus parse_config(JsonParser &parser, BufPool &pool, Config &out) noexcept {
-    const fiber::json::Token *token = parser.current_token();
-    if (!token || token->role != TokenRole::Value || token->kind != TokenKind::StartObj) {
-        (void) parser.fail("expected config object");
-        return ParseStatus::Error;
-    }
-
-    Config result;
-    if (next_config_token(parser, "unexpected end of config object") != ParseStatus::Done) {
-        return ParseStatus::Error;
-    }
-    if (parser.current_token()->kind == TokenKind::EndObj) {
-        out = result;
-        return ParseStatus::Done;
-    }
-
-    while (true) {
-        token = parser.current_token();
-        if (token->kind != TokenKind::Text || token->role != TokenRole::ObjectKey) {
-            (void) parser.fail("expected config field");
-            return ParseStatus::Error;
-        }
-
-        enum class Field : std::uint8_t {
-            Name,
-            Timeout,
-            Limit,
-            Unknown,
-        };
-
-        Field field = Field::Unknown;
-        if (token->view == "name") {
-            field = Field::Name;
-        } else if (token->view == "timeout") {
-            field = Field::Timeout;
-        } else if (token->view == "limit") {
-            field = Field::Limit;
-        }
-
-        if (next_config_token(parser, "config field without value") != ParseStatus::Done) {
-            return ParseStatus::Error;
-        }
-
-        ParseStatus status = ParseStatus::Error;
-        switch (field) {
-            case Field::Name:
-                if (!result.name.is_absent()) {
-                    (void) parser.fail("duplicate config field");
-                    return ParseStatus::Error;
-                }
-                status = fiber::json::parse_nullable<fiber::json::parse_text>(parser, pool, result.name);
-                break;
-            case Field::Timeout:
-                if (!result.timeout.is_absent()) {
-                    (void) parser.fail("duplicate config field");
-                    return ParseStatus::Error;
-                }
-                status = fiber::json::parse_nullable<fiber::json::parse_integer>(parser, pool, result.timeout);
-                break;
-            case Field::Limit:
-                if (result.limit_present) {
-                    (void) parser.fail("duplicate config field");
-                    return ParseStatus::Error;
-                }
-                result.limit_present = true;
-                status = fiber::json::parse_optional<fiber::json::parse_integer>(parser, pool, result.limit);
-                break;
-            case Field::Unknown: {
-                std::nullptr_t skipped = nullptr;
-                status = fiber::json::skip_value(parser, pool, skipped);
-                break;
-            }
-        }
-        if (status != ParseStatus::Done) {
-            return ParseStatus::Error;
-        }
-
-        if (next_config_token(parser, "unexpected end of config object") != ParseStatus::Done) {
-            return ParseStatus::Error;
-        }
-        if (parser.current_token()->kind == TokenKind::EndObj) {
-            out = result;
-            return ParseStatus::Done;
-        }
-    }
+    return fiber::json::parse_object_fields<parse_config_field>(parser, pool, out);
 }
 
 template<auto VP, typename T>
@@ -203,6 +122,76 @@ TEST(JsonParseTest, ParsesAndOwnsBasicValues) {
         ASSERT_EQ(parse_complete<fiber::json::parse_double>("9223372036854775808", pool, number, parser),
                   ParseStatus::Done);
         EXPECT_GT(number, 9.0e18);
+    }
+}
+
+TEST(JsonParseTest, ParsesCheckedIntegralTargets) {
+    BufPool pool;
+
+    {
+        JsonParser parser;
+        std::int32_t value = 0;
+        ASSERT_EQ(parse_complete<fiber::json::parse_integral<std::int32_t>>("2147483647", pool, value, parser),
+                  ParseStatus::Done);
+        EXPECT_EQ(value, std::numeric_limits<std::int32_t>::max());
+    }
+
+    {
+        JsonParser parser;
+        std::uint16_t value = 0;
+        ASSERT_EQ(parse_complete<fiber::json::parse_integral<std::uint16_t>>("65535", pool, value, parser),
+                  ParseStatus::Done);
+        EXPECT_EQ(value, std::numeric_limits<std::uint16_t>::max());
+    }
+
+    {
+        JsonParser parser;
+        std::uint64_t value = 0;
+        ASSERT_EQ(
+                parse_complete<fiber::json::parse_integral<std::uint64_t>>("18446744073709551615", pool, value, parser),
+                ParseStatus::Done);
+        EXPECT_EQ(value, std::numeric_limits<std::uint64_t>::max());
+    }
+}
+
+TEST(JsonParseTest, CheckedIntegralRejectsTypeMismatchAndOverflow) {
+    BufPool pool;
+
+    {
+        JsonParser parser;
+        std::int32_t value = 7;
+        EXPECT_EQ(parse_complete<fiber::json::parse_integral<std::int32_t>>("2147483648", pool, value, parser),
+                  ParseStatus::Error);
+        EXPECT_EQ(value, 7);
+        EXPECT_STREQ(parser.error().message, "integer out of range");
+    }
+
+    {
+        JsonParser parser;
+        std::uint16_t value = 7;
+        EXPECT_EQ(parse_complete<fiber::json::parse_integral<std::uint16_t>>("-1", pool, value, parser),
+                  ParseStatus::Error);
+        EXPECT_EQ(value, 7);
+        EXPECT_STREQ(parser.error().message, "integer out of range");
+    }
+
+    {
+        JsonParser parser;
+        std::uint64_t value = 7;
+        EXPECT_EQ(
+                parse_complete<fiber::json::parse_integral<std::uint64_t>>("18446744073709551616", pool, value, parser),
+                ParseStatus::Error);
+        EXPECT_EQ(value, 7u);
+        EXPECT_STREQ(parser.error().message, "integer out of range");
+    }
+
+    {
+        JsonParser parser;
+        std::int32_t value = 7;
+        EXPECT_EQ(parse_complete<fiber::json::parse_integral<std::int32_t>>("1.0", pool, value, parser),
+                  ParseStatus::Error);
+        EXPECT_EQ(value, 7);
+        EXPECT_STREQ(parser.error().message, "expected integer");
     }
 }
 
@@ -305,7 +294,8 @@ TEST(JsonParseTest, CustomStructDistinguishesAbsentNullAndPresent) {
     BufPool pool;
     JsonParser parser;
     Config config;
-    const std::string json = R"({"name":"gateway","timeout":null,"limit":null,"ignored":{"nested":[1,2,3]}})";
+    const std::string json =
+            R"({"na\u006de":"gate\u0077ay","timeout":1,"timeout":null,"limit":null,"ignored":{"nested":[1,2,3]}})";
     ASSERT_EQ(parse_complete<parse_config>(json, pool, config, parser), ParseStatus::Done);
 
     ASSERT_TRUE(config.name.is_present());
@@ -320,6 +310,84 @@ TEST(JsonParseTest, CustomStructDistinguishesAbsentNullAndPresent) {
     EXPECT_TRUE(absent_config.name.is_absent());
     EXPECT_TRUE(absent_config.timeout.is_absent());
     EXPECT_FALSE(absent_config.limit_present);
+}
+
+TEST(JsonParseTest, ObjectFieldParserSkipsUnknownFieldsAndCommitsTransactionally) {
+    BufPool pool;
+    Config config;
+    config.name.set_present("unchanged");
+    config.timeout.set_present(9);
+
+    std::string long_field(160, 'x');
+    const std::string json = "{\"" + long_field + "\":[{\"nested\":true}],\"name\":{}}";
+    JsonParser parser;
+    EXPECT_EQ(parse_complete<parse_config>(json, pool, config, parser), ParseStatus::Error);
+
+    ASSERT_TRUE(config.name.is_present());
+    EXPECT_EQ(config.name.value(), "unchanged");
+    ASSERT_TRUE(config.timeout.is_present());
+    EXPECT_EQ(config.timeout.value(), 9);
+    ASSERT_NE(parser.error().message, nullptr);
+    EXPECT_STREQ(parser.error().message, "expected string");
+}
+
+TEST(JsonParseTest, ParsesArbitraryJsonIntoPoolBackedTree) {
+    BufPool pool;
+    JsonParser parser;
+    std::string json = R"({"null":null,"bool":true,"integer":7,"double":1.5,"\u0074ext":"x\u0000y",)"
+                       R"("array":[1,{"nested":"ok"}],"big":18446744073709551615})";
+
+    JsonAny value;
+    ASSERT_EQ(parse_complete<fiber::json::parse_any>(json, pool, value, parser), ParseStatus::Done);
+    std::fill(json.begin(), json.end(), '!');
+
+    ASSERT_TRUE(value.is_object());
+    const JsonObject<JsonAny> &object = value.as_object();
+    ASSERT_EQ(object.size(), 7u);
+
+    ASSERT_NE(object.find("null"), nullptr);
+    EXPECT_TRUE(object.find("null")->value.is_null());
+    ASSERT_NE(object.find("bool"), nullptr);
+    EXPECT_TRUE(object.find("bool")->value.as_bool());
+    ASSERT_NE(object.find("integer"), nullptr);
+    EXPECT_EQ(object.find("integer")->value.as_integer(), 7);
+    ASSERT_NE(object.find("double"), nullptr);
+    EXPECT_DOUBLE_EQ(object.find("double")->value.as_double(), 1.5);
+
+    const auto *text = object.find("text");
+    ASSERT_NE(text, nullptr);
+    ASSERT_TRUE(text->value.is_text());
+    ASSERT_EQ(text->value.as_text().size(), 3u);
+    EXPECT_EQ(text->value.as_text()[0], 'x');
+    EXPECT_EQ(text->value.as_text()[1], '\0');
+    EXPECT_EQ(text->value.as_text()[2], 'y');
+
+    const auto *array = object.find("array");
+    ASSERT_NE(array, nullptr);
+    ASSERT_TRUE(array->value.is_array());
+    ASSERT_EQ(array->value.as_array().size(), 2u);
+    EXPECT_EQ(array->value.as_array()[0].as_integer(), 1);
+    ASSERT_TRUE(array->value.as_array()[1].is_object());
+    const auto *nested = array->value.as_array()[1].as_object().find("nested");
+    ASSERT_NE(nested, nullptr);
+    EXPECT_EQ(nested->value.as_text(), "ok");
+
+    const auto *big = object.find("big");
+    ASSERT_NE(big, nullptr);
+    ASSERT_TRUE(big->value.is_double());
+    EXPECT_GT(big->value.as_double(), 1.8e19);
+}
+
+TEST(JsonParseTest, ArbitraryJsonParseLeavesOutputUnchangedOnError) {
+    BufPool pool;
+    JsonParser parser;
+    JsonAny value;
+    value.set_bool(true);
+
+    EXPECT_EQ(parse_complete<fiber::json::parse_any>("1e9999", pool, value, parser), ParseStatus::Error);
+    ASSERT_TRUE(value.is_bool());
+    EXPECT_TRUE(value.as_bool());
+    EXPECT_STREQ(parser.error().message, "floating point out of range");
 }
 
 TEST(JsonParseTest, ReportsSemanticErrorsAndLeavesOutputUnchanged) {

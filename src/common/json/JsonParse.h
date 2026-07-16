@@ -1,6 +1,7 @@
 #ifndef FIBER_JSONPARSE_H
 #define FIBER_JSONPARSE_H
 
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -22,6 +23,16 @@ enum class ParseStatus : std::uint8_t {
     Error,
 };
 
+enum class ObjectFieldStatus : std::uint8_t {
+    Parsed,
+    Unknown,
+    Error,
+};
+
+[[nodiscard]] constexpr ObjectFieldStatus to_object_field_status(ParseStatus status) noexcept {
+    return status == ParseStatus::Done ? ObjectFieldStatus::Parsed : ObjectFieldStatus::Error;
+}
+
 // Typed parsers require finish() to have been called. On success, scalar
 // parsers remain on their token, while container parsers remain on the matching
 // EndArr or EndObj token. Text and container storage is owned by pool.
@@ -30,6 +41,7 @@ enum class ParseStatus : std::uint8_t {
 [[nodiscard]] ParseStatus parse_text(JsonParser &parser, mem::BufPool &pool, std::string_view &out) noexcept;
 [[nodiscard]] ParseStatus parse_integer(JsonParser &parser, mem::BufPool &pool, std::int64_t &out) noexcept;
 [[nodiscard]] ParseStatus parse_double(JsonParser &parser, mem::BufPool &pool, double &out) noexcept;
+[[nodiscard]] ParseStatus parse_any(JsonParser &parser, mem::BufPool &pool, JsonAny &out) noexcept;
 [[nodiscard]] ParseStatus skip_value(JsonParser &parser, mem::BufPool &pool, std::nullptr_t &out) noexcept;
 [[nodiscard]] ParseStatus skip_value(JsonParser &parser, mem::BufPool &pool) noexcept;
 
@@ -66,6 +78,15 @@ template<typename ParserFn, typename T>
     static_assert(std::is_nothrow_invocable_r_v<ParseStatus, ParserFn, JsonParser &, mem::BufPool &, T &>,
                   "JSON value parser must be noexcept and return ParseStatus");
     return std::invoke(std::forward<ParserFn>(parser_fn), parser, pool, out);
+}
+
+template<typename FieldParser, typename T>
+[[nodiscard]] ObjectFieldStatus invoke_field_parser(FieldParser &field_parser, std::string_view field,
+                                                    JsonParser &parser, mem::BufPool &pool, T &out) noexcept {
+    static_assert(std::is_nothrow_invocable_r_v<ObjectFieldStatus, FieldParser &, std::string_view, JsonParser &,
+                                                mem::BufPool &, T &>,
+                  "JSON object field parser must be noexcept and return ObjectFieldStatus");
+    return std::invoke(field_parser, field, parser, pool, out);
 }
 
 template<typename T>
@@ -146,6 +167,65 @@ private:
 };
 
 } // namespace detail
+
+template<typename T>
+[[nodiscard]] ParseStatus parse_integral(JsonParser &parser, mem::BufPool & /*pool*/, T &out) noexcept {
+    static_assert(std::is_integral_v<T>, "JSON integral target must be an integral type");
+    static_assert(!std::is_same_v<std::remove_cv_t<T>, bool>, "use parse_bool() for boolean values");
+    static_assert(sizeof(T) <= sizeof(std::uint64_t), "JSON integral target must not exceed 64 bits");
+
+    if (detail::require_finished(parser) != ParseStatus::Done) {
+        return ParseStatus::Error;
+    }
+
+    const Token *token = parser.current_token();
+    if (!token || token->role != TokenRole::Value) {
+        return detail::fail(parser, "expected integer");
+    }
+
+    T result{};
+    if (token->kind == TokenKind::Integer) {
+        const std::int64_t value = token->inum;
+        if constexpr (std::is_signed_v<T>) {
+            if (value < static_cast<std::int64_t>(std::numeric_limits<T>::lowest()) ||
+                value > static_cast<std::int64_t>(std::numeric_limits<T>::max())) {
+                return detail::fail(parser, "integer out of range");
+            }
+        } else {
+            if (value < 0 || static_cast<std::uint64_t>(value) > std::numeric_limits<T>::max()) {
+                return detail::fail(parser, "integer out of range");
+            }
+        }
+        result = static_cast<T>(value);
+    } else if (token->kind == TokenKind::BigNumber) {
+        if (token->view.find_first_of(".eE") != std::string_view::npos) {
+            return detail::fail(parser, "expected integer");
+        }
+        if constexpr (std::is_signed_v<T>) {
+            return detail::fail(parser, "integer out of range");
+        } else {
+            if (!token->view.empty() && token->view.front() == '-') {
+                return detail::fail(parser, "integer out of range");
+            }
+
+            std::uint64_t wide_result = 0;
+            const auto conversion =
+                    std::from_chars(token->view.data(), token->view.data() + token->view.size(), wide_result);
+            if (conversion.ec == std::errc::result_out_of_range || wide_result > std::numeric_limits<T>::max()) {
+                return detail::fail(parser, "integer out of range");
+            }
+            if (conversion.ec != std::errc() || conversion.ptr != token->view.data() + token->view.size()) {
+                return detail::fail(parser, "invalid integer");
+            }
+            result = static_cast<T>(wide_result);
+        }
+    } else {
+        return detail::fail(parser, "expected integer");
+    }
+
+    out = result;
+    return ParseStatus::Done;
+}
 
 template<typename T, typename EP>
 [[nodiscard]] ParseStatus parse_array(JsonParser &parser, mem::BufPool &pool, JsonArray<T> &out,
@@ -287,6 +367,94 @@ template<typename P, typename EP>
 template<auto EP, typename P>
 [[nodiscard]] ParseStatus parse_object(JsonParser &parser, mem::BufPool &pool, JsonObject<P> &out) noexcept {
     return parse_object(parser, pool, out, EP);
+}
+
+// The field parser is invoked with parser positioned on the field value. The
+// field view is valid only for the duration of the callback and must not be
+// retained. Returning Unknown must leave the value untouched and asks this
+// helper to skip it.
+template<typename T, typename FP>
+[[nodiscard]] ParseStatus parse_object_fields(JsonParser &parser, mem::BufPool &pool, T &out,
+                                              FP &&field_parser) noexcept {
+    static_assert(std::is_nothrow_default_constructible_v<T>,
+                  "JSON object target must be nothrow default constructible");
+    static_assert(std::is_nothrow_move_assignable_v<T>, "JSON object target must be nothrow move assignable");
+
+    if (detail::require_finished(parser) != ParseStatus::Done) {
+        return ParseStatus::Error;
+    }
+
+    const Token *token = parser.current_token();
+    if (!token || token->role != TokenRole::Value || token->kind != TokenKind::StartObj) {
+        return detail::fail(parser, "expected object");
+    }
+
+    T result{};
+    if (detail::next_token(parser, "unexpected end of JSON object") != ParseStatus::Done) {
+        return ParseStatus::Error;
+    }
+    token = parser.current_token();
+    if (token->kind == TokenKind::EndObj) {
+        out = std::move(result);
+        return ParseStatus::Done;
+    }
+
+    while (true) {
+        token = parser.current_token();
+        if (token->kind != TokenKind::Text || token->role != TokenRole::ObjectKey) {
+            return detail::fail(parser, "expected object key");
+        }
+
+        constexpr std::size_t InlineFieldNameSize = 128;
+        char inline_field_name[InlineFieldNameSize];
+        std::string_view field;
+        if (token->view.size() <= InlineFieldNameSize) {
+            if (!token->view.empty()) {
+                std::memcpy(inline_field_name, token->view.data(), token->view.size());
+            }
+            field = std::string_view(inline_field_name, token->view.size());
+        } else {
+            auto *field_data = static_cast<char *>(pool.alloc(token->view.size(), alignof(char)));
+            if (!field_data) {
+                return detail::fail(parser, "out of memory");
+            }
+            std::memcpy(field_data, token->view.data(), token->view.size());
+            field = std::string_view(field_data, token->view.size());
+        }
+
+        if (detail::next_token(parser, "object key without value") != ParseStatus::Done) {
+            return ParseStatus::Error;
+        }
+
+        switch (detail::invoke_field_parser(field_parser, field, parser, pool, result)) {
+            case ObjectFieldStatus::Parsed:
+                break;
+            case ObjectFieldStatus::Unknown:
+                if (skip_value(parser, pool) != ParseStatus::Done) {
+                    return ParseStatus::Error;
+                }
+                break;
+            case ObjectFieldStatus::Error:
+                if (!parser.error().message) {
+                    return detail::fail(parser, "object field parser failed");
+                }
+                return ParseStatus::Error;
+        }
+
+        if (detail::next_token(parser, "unexpected end of JSON object") != ParseStatus::Done) {
+            return ParseStatus::Error;
+        }
+        token = parser.current_token();
+        if (token->kind == TokenKind::EndObj) {
+            out = std::move(result);
+            return ParseStatus::Done;
+        }
+    }
+}
+
+template<auto FP, typename T>
+[[nodiscard]] ParseStatus parse_object_fields(JsonParser &parser, mem::BufPool &pool, T &out) noexcept {
+    return parse_object_fields(parser, pool, out, FP);
 }
 
 template<typename T, typename VP>

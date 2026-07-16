@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string_view>
 #include <type_traits>
@@ -166,6 +167,123 @@ private:
     Entry *entries_ = nullptr;
     std::size_t size_ = 0;
 };
+
+enum class JsonAnyKind : std::uint8_t {
+    Null,
+    Bool,
+    Integer,
+    Double,
+    Text,
+    Array,
+    Object,
+};
+
+class JsonAny {
+public:
+    constexpr JsonAny() noexcept = default;
+
+    [[nodiscard]] constexpr JsonAnyKind kind() const noexcept { return kind_; }
+    [[nodiscard]] constexpr bool is_null() const noexcept { return kind_ == JsonAnyKind::Null; }
+    [[nodiscard]] constexpr bool is_bool() const noexcept { return kind_ == JsonAnyKind::Bool; }
+    [[nodiscard]] constexpr bool is_integer() const noexcept { return kind_ == JsonAnyKind::Integer; }
+    [[nodiscard]] constexpr bool is_double() const noexcept { return kind_ == JsonAnyKind::Double; }
+    [[nodiscard]] constexpr bool is_number() const noexcept { return is_integer() || is_double(); }
+    [[nodiscard]] constexpr bool is_text() const noexcept { return kind_ == JsonAnyKind::Text; }
+    [[nodiscard]] constexpr bool is_array() const noexcept { return kind_ == JsonAnyKind::Array; }
+    [[nodiscard]] constexpr bool is_object() const noexcept { return kind_ == JsonAnyKind::Object; }
+
+    [[nodiscard]] constexpr bool as_bool() const noexcept {
+        assert(is_bool());
+        return value_.boolean;
+    }
+
+    [[nodiscard]] constexpr std::int64_t as_integer() const noexcept {
+        assert(is_integer());
+        return value_.integer;
+    }
+
+    [[nodiscard]] constexpr double as_double() const noexcept {
+        assert(is_double());
+        return value_.number;
+    }
+
+    [[nodiscard]] constexpr std::string_view as_text() const noexcept {
+        assert(is_text());
+        return value_.text;
+    }
+
+    [[nodiscard]] constexpr JsonArray<JsonAny> &as_array() noexcept {
+        assert(is_array());
+        return value_.array;
+    }
+
+    [[nodiscard]] constexpr const JsonArray<JsonAny> &as_array() const noexcept {
+        assert(is_array());
+        return value_.array;
+    }
+
+    [[nodiscard]] constexpr JsonObject<JsonAny> &as_object() noexcept {
+        assert(is_object());
+        return value_.object;
+    }
+
+    [[nodiscard]] constexpr const JsonObject<JsonAny> &as_object() const noexcept {
+        assert(is_object());
+        return value_.object;
+    }
+
+    constexpr void set_null() noexcept {
+        value_.integer = 0;
+        kind_ = JsonAnyKind::Null;
+    }
+
+    constexpr void set_bool(bool value) noexcept {
+        value_.boolean = value;
+        kind_ = JsonAnyKind::Bool;
+    }
+
+    constexpr void set_integer(std::int64_t value) noexcept {
+        value_.integer = value;
+        kind_ = JsonAnyKind::Integer;
+    }
+
+    constexpr void set_double(double value) noexcept {
+        value_.number = value;
+        kind_ = JsonAnyKind::Double;
+    }
+
+    constexpr void set_text(std::string_view value) noexcept {
+        std::construct_at(&value_.text, value);
+        kind_ = JsonAnyKind::Text;
+    }
+
+    constexpr void set_array(JsonArray<JsonAny> value) noexcept {
+        std::construct_at(&value_.array, value);
+        kind_ = JsonAnyKind::Array;
+    }
+
+    constexpr void set_object(JsonObject<JsonAny> value) noexcept {
+        std::construct_at(&value_.object, value);
+        kind_ = JsonAnyKind::Object;
+    }
+
+private:
+    union Value {
+        bool boolean;
+        std::int64_t integer;
+        double number;
+        std::string_view text;
+        JsonArray<JsonAny> array;
+        JsonObject<JsonAny> object;
+
+        constexpr Value() noexcept : integer(0) {}
+    };
+
+    JsonAnyKind kind_ = JsonAnyKind::Null;
+    Value value_;
+};
+
+static_assert(std::is_trivially_copyable_v<JsonAny>);
 
 } // namespace fiber::json
 
