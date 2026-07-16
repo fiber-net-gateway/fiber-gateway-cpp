@@ -138,6 +138,7 @@ Design state and member variables to be minimal and explicit. Establish required
 ## Coding Style
 
 - C++23, 4-space indentation, braces on same line
+- Do not spend time repeatedly formatting code during implementation; run `./format_code.sh` once the task is complete
 - PascalCase for types (`TcpStream`, `Task`), `FIBER_` prefix for macros
 - Header guards: `FIBER_<MODULE>_<NAME>_H`
 - Local includes with relative paths: `#include "../event/EventLoop.h"`
