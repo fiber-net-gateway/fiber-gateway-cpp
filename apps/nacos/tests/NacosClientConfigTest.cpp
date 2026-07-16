@@ -40,6 +40,11 @@ TEST(NacosClientConfigTest, AppliesDefaultsAndOwnsValues) {
     EXPECT_EQ(result->auth_api_version(), fiber::nacos::NacosAuthApiVersion::Auto);
 }
 
+TEST(NacosClientConfigTest, ClientOptionsRefreshAtNinetyPercentByDefault) {
+    fiber::nacos::NacosClientOptions options;
+    EXPECT_EQ(options.refresh_percent, 90);
+}
+
 TEST(NacosClientConfigTest, RejectsInvalidRequiredFields) {
     {
         auto params = valid_params();

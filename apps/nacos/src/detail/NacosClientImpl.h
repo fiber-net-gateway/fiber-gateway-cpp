@@ -1,10 +1,15 @@
 #ifndef FIBER_NACOS_DETAIL_NACOS_CLIENT_IMPL_H
 #define FIBER_NACOS_DETAIL_NACOS_CLIENT_IMPL_H
 
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
-#include <memory>
+#include <expected>
 #include <optional>
+#include <string>
+#include <string_view>
 
+#include <async/Spawn.h>
 #include <async/Task.h>
 #include <async/WaitGroup.h>
 #include <async/Watch.h>
@@ -15,8 +20,6 @@
 #include <fiber/nacos/NacosClientConfig.h>
 
 namespace fiber::nacos::detail {
-
-class NacosAuthenticator;
 
 enum class NacosClientState : std::uint8_t {
     Created,
@@ -34,18 +37,29 @@ public:
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] async::Watch<NacosAuthSnapshot>::Subscriber subscribe_auth();
-    [[nodiscard]] async::Watch<bool>::Subscriber subscribe_shutdown();
 
     [[nodiscard]] event::EventLoop &loop() const noexcept { return *loop_; }
     [[nodiscard]] const NacosClientConfig &config() const noexcept { return config_; }
-    [[nodiscard]] const NacosClientOptions &options() const noexcept { return options_; }
-    [[nodiscard]] bool running() const noexcept { return state_ == NacosClientState::Running; }
-
-    [[nodiscard]] bool try_begin_task() noexcept;
-    void end_task() noexcept;
-    void publish_auth(NacosAuthSnapshot snapshot);
 
 private:
+    struct AuthLoginSuccess {
+        std::string access_token;
+        std::string username;
+        std::int64_t token_ttl = 0;
+        bool global_admin = false;
+    };
+
+    [[nodiscard]] async::DetachedTask run_auth() noexcept;
+    [[nodiscard]] async::Task<std::expected<AuthLoginSuccess, NacosAuthError>>
+    login(std::size_t server_index, std::string_view target, std::string_view auth_body,
+          std::chrono::steady_clock::time_point deadline) noexcept;
+
+    [[nodiscard]] async::Watch<bool>::Subscriber subscribe_shutdown();
+    [[nodiscard]] bool running() const noexcept { return state_ == NacosClientState::Running; }
+    void end_task() noexcept;
+    void publish_auth(NacosAuthSnapshot snapshot);
+    void publish_stopped();
+
     event::EventLoop *loop_ = nullptr;
     NacosClientConfig config_;
     NacosClientOptions options_;
@@ -55,7 +69,6 @@ private:
     std::optional<async::Watch<bool>::Publisher> shutdown_publisher_;
     async::Watch<NacosAuthSnapshot> auth_watch_;
     std::optional<async::Watch<NacosAuthSnapshot>::Publisher> auth_publisher_;
-    std::unique_ptr<NacosAuthenticator> authenticator_;
 };
 
 } // namespace fiber::nacos::detail
