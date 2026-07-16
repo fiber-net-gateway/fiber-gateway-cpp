@@ -17,6 +17,12 @@ namespace fiber::async {
 
 template<typename T>
 class Watch {
+public:
+    struct Snapshot {
+        std::shared_ptr<const T> value;
+        std::uint64_t version = 0;
+    };
+
 private:
     enum class WaiterState : std::uint8_t { Waiting, Notified, Resumed, Canceled };
 
@@ -51,11 +57,6 @@ private:
         event::EventLoop::NotifyEntry notify_entry{};
     };
 
-    struct Snapshot {
-        std::shared_ptr<const T> value;
-        std::uint64_t version = 0;
-    };
-
     struct SharedState {
         SharedState() = default;
 
@@ -78,26 +79,29 @@ private:
             return true;
         }
 
-        std::uint64_t subscribe_version() const noexcept {
-            std::lock_guard guard(mutex_);
-            return version_;
-        }
-
         Snapshot snapshot() const {
             std::lock_guard guard(mutex_);
             return Snapshot{latest_, version_};
         }
 
-        bool version_changed(std::uint64_t observed_version) const noexcept {
+        Snapshot snapshot_after(std::uint64_t received_version) const {
             std::lock_guard guard(mutex_);
-            return version_ != observed_version;
+            FIBER_ASSERT(received_version < version_);
+            return Snapshot{latest_, version_};
         }
 
-        bool enqueue_if_unchanged(Waiter *waiter, std::uint64_t observed_version) noexcept {
+        bool has_newer_version(std::uint64_t received_version) const noexcept {
+            std::lock_guard guard(mutex_);
+            FIBER_ASSERT(received_version <= version_);
+            return received_version < version_;
+        }
+
+        bool enqueue_if_current(Waiter *waiter, std::uint64_t received_version) noexcept {
             FIBER_ASSERT(waiter != nullptr);
 
             std::lock_guard guard(mutex_);
-            if (version_ != observed_version) {
+            FIBER_ASSERT(received_version <= version_);
+            if (received_version < version_) {
                 return false;
             }
 
@@ -228,11 +232,9 @@ public:
     public:
         class NextAwaiter {
         public:
-            explicit NextAwaiter(Subscriber &subscriber) noexcept :
-                subscriber_(&subscriber), state_(subscriber.state_) {
+            NextAwaiter(std::shared_ptr<SharedState> state, std::uint64_t received_version) noexcept :
+                state_(std::move(state)), received_version_(received_version) {
                 FIBER_ASSERT(state_ != nullptr);
-                FIBER_ASSERT(!subscriber_->next_active_);
-                subscriber_->next_active_ = true;
             }
 
             NextAwaiter(const NextAwaiter &) = delete;
@@ -240,19 +242,16 @@ public:
             NextAwaiter(NextAwaiter &&) = delete;
             NextAwaiter &operator=(NextAwaiter &&) = delete;
 
-            ~NextAwaiter() {
-                cancel();
-                subscriber_->next_active_ = false;
-            }
+            ~NextAwaiter() { cancel(); }
 
-            bool await_ready() const noexcept { return state_->version_changed(subscriber_->observed_version_); }
+            bool await_ready() const noexcept { return state_->has_newer_version(received_version_); }
 
             bool await_suspend(std::coroutine_handle<> handle) {
                 auto *loop = event::EventLoop::current_or_null();
                 FIBER_ASSERT(loop != nullptr);
 
                 waiter_ = new Waiter(loop, handle);
-                if (!state_->enqueue_if_unchanged(waiter_, subscriber_->observed_version_)) {
+                if (!state_->enqueue_if_current(waiter_, received_version_)) {
                     delete waiter_;
                     waiter_ = nullptr;
                     return false;
@@ -260,11 +259,9 @@ public:
                 return true;
             }
 
-            std::shared_ptr<const T> await_resume() {
+            Snapshot await_resume() {
                 waiter_ = nullptr;
-                Snapshot snapshot = state_->snapshot();
-                subscriber_->observed_version_ = snapshot.version;
-                return std::move(snapshot.value);
+                return state_->snapshot_after(received_version_);
             }
 
             void cancel() noexcept {
@@ -276,58 +273,34 @@ public:
             }
 
         private:
-            Subscriber *subscriber_ = nullptr;
             std::shared_ptr<SharedState> state_;
+            std::uint64_t received_version_ = 0;
             Waiter *waiter_ = nullptr;
         };
 
         Subscriber(const Subscriber &) = delete;
         Subscriber &operator=(const Subscriber &) = delete;
+        Subscriber(Subscriber &&) noexcept = default;
+        Subscriber &operator=(Subscriber &&) noexcept = default;
 
-        Subscriber(Subscriber &&other) noexcept :
-            state_(std::move(other.state_)), observed_version_(other.observed_version_) {
-            FIBER_ASSERT(!other.next_active_);
-            other.observed_version_ = 0;
-        }
-
-        Subscriber &operator=(Subscriber &&other) noexcept {
-            if (this == &other) {
-                return *this;
-            }
-            FIBER_ASSERT(!next_active_);
-            FIBER_ASSERT(!other.next_active_);
-            state_ = std::move(other.state_);
-            observed_version_ = other.observed_version_;
-            other.observed_version_ = 0;
-            return *this;
-        }
-
-        [[nodiscard]] std::shared_ptr<const T> current() {
+        [[nodiscard]] Snapshot current() const {
             FIBER_ASSERT(state_ != nullptr);
-            FIBER_ASSERT(!next_active_);
-
-            Snapshot snapshot = state_->snapshot();
-            observed_version_ = snapshot.version;
-            return std::move(snapshot.value);
+            return state_->snapshot();
         }
 
-        [[nodiscard]] NextAwaiter next() noexcept {
+        [[nodiscard]] NextAwaiter next(std::uint64_t received_version) const noexcept {
             FIBER_ASSERT(state_ != nullptr);
-            FIBER_ASSERT(!next_active_);
-            return NextAwaiter(*this);
+            return NextAwaiter(state_, received_version);
         }
 
     private:
         friend class Watch;
 
-        Subscriber(std::shared_ptr<SharedState> state, std::uint64_t observed_version) noexcept :
-            state_(std::move(state)), observed_version_(observed_version) {
+        explicit Subscriber(std::shared_ptr<SharedState> state) noexcept : state_(std::move(state)) {
             FIBER_ASSERT(state_ != nullptr);
         }
 
         std::shared_ptr<SharedState> state_;
-        std::uint64_t observed_version_ = 0;
-        bool next_active_ = false;
     };
 
     Watch() : state_(std::make_shared<SharedState>()) {}
@@ -349,7 +322,7 @@ public:
 
     [[nodiscard]] Subscriber subscribe() {
         FIBER_ASSERT(state_ != nullptr);
-        return Subscriber(state_, state_->subscribe_version());
+        return Subscriber(state_);
     }
 
 private:

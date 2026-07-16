@@ -19,6 +19,7 @@ namespace {
 
 using DetachedTask = fiber::async::DetachedTask;
 using IntWatch = fiber::async::Watch<int>;
+using IntSnapshot = IntWatch::Snapshot;
 
 class ManualTask {
 public:
@@ -49,9 +50,10 @@ private:
     handle_type handle_{};
 };
 
-DetachedTask await_next_and_stop(IntWatch::Subscriber *subscriber, std::promise<int> *result) {
-    auto value = co_await subscriber->next();
-    result->set_value(value ? *value : -1);
+DetachedTask await_next_and_stop(IntWatch::Subscriber *subscriber, std::uint64_t received_version,
+                                 std::promise<IntSnapshot> *result) {
+    auto snapshot = co_await subscriber->next(received_version);
+    result->set_value(std::move(snapshot));
     fiber::event::EventLoop::current().stop();
     co_return;
 }
@@ -63,18 +65,18 @@ DetachedTask publish_two_values(IntWatch::Publisher *publisher) {
 }
 
 DetachedTask suspend_next_then_publish(IntWatch::Subscriber *subscriber, IntWatch::Publisher *publisher,
-                                       std::promise<int> *result) {
+                                       std::promise<IntSnapshot> *result) {
     fiber::async::spawn([publisher]() { return publish_two_values(publisher); });
-    auto value = co_await subscriber->next();
-    result->set_value(value ? *value : -1);
+    auto snapshot = co_await subscriber->next(0);
+    result->set_value(std::move(snapshot));
     fiber::event::EventLoop::current().stop();
     co_return;
 }
 
-DetachedTask await_next_and_record_thread(IntWatch::Subscriber *subscriber, std::promise<int> *value_result,
+DetachedTask await_next_and_record_thread(IntWatch::Subscriber *subscriber, std::promise<IntSnapshot> *value_result,
                                           std::promise<std::thread::id> *thread_result) {
-    auto value = co_await subscriber->next();
-    value_result->set_value(value ? *value : -1);
+    auto snapshot = co_await subscriber->next(0);
+    value_result->set_value(std::move(snapshot));
     thread_result->set_value(std::this_thread::get_id());
     co_return;
 }
@@ -85,7 +87,7 @@ DetachedTask record_thread(std::promise<std::thread::id> *result) {
 }
 
 ManualTask await_next_then_increment(IntWatch::Subscriber *subscriber, std::atomic<int> *hits) {
-    co_await subscriber->next();
+    co_await subscriber->next(0);
     hits->fetch_add(1, std::memory_order_relaxed);
     co_return;
 }
@@ -105,7 +107,7 @@ DetachedTask cancel_pending_next(IntWatch::Subscriber *subscriber, IntWatch::Pub
 
 DetachedTask timeout_then_observe_next(IntWatch::Subscriber *subscriber, IntWatch::Publisher *publisher,
                                        std::promise<int> *result) {
-    auto timeout_result = co_await fiber::async::timeout_for([subscriber]() { return subscriber->next(); },
+    auto timeout_result = co_await fiber::async::timeout_for([subscriber]() { return subscriber->next(0); },
                                                              std::chrono::milliseconds(1));
     if (timeout_result || timeout_result.error() != fiber::common::IoErr::TimedOut) {
         result->set_value(-1);
@@ -114,8 +116,8 @@ DetachedTask timeout_then_observe_next(IntWatch::Subscriber *subscriber, IntWatc
     }
 
     publisher->publish(12);
-    auto value = co_await subscriber->next();
-    result->set_value(value ? *value : -1);
+    auto snapshot = co_await subscriber->next(0);
+    result->set_value(snapshot.value ? *snapshot.value : -1);
     fiber::event::EventLoop::current().stop();
     co_return;
 }
@@ -125,13 +127,16 @@ DetachedTask timeout_then_observe_next(IntWatch::Subscriber *subscriber, IntWatc
 TEST(WatchTest, EmptyAndInitialCurrentValues) {
     IntWatch empty_watch;
     auto empty_subscriber = empty_watch.subscribe();
-    EXPECT_EQ(empty_subscriber.current(), nullptr);
+    auto empty = empty_subscriber.current();
+    EXPECT_EQ(empty.value, nullptr);
+    EXPECT_EQ(empty.version, 0u);
 
     IntWatch initialized_watch(42);
     auto initialized_subscriber = initialized_watch.subscribe();
-    auto value = initialized_subscriber.current();
-    ASSERT_NE(value, nullptr);
-    EXPECT_EQ(*value, 42);
+    auto initialized = initialized_subscriber.current();
+    ASSERT_NE(initialized.value, nullptr);
+    EXPECT_EQ(*initialized.value, 42);
+    EXPECT_EQ(initialized.version, 1u);
 }
 
 TEST(WatchTest, PublisherCanOnlyBeAcquiredOnce) {
@@ -156,9 +161,35 @@ TEST(WatchTest, HandlesOutliveWatchObject) {
         publisher->publish(7);
     }
 
-    auto value = subscriber->current();
-    ASSERT_NE(value, nullptr);
-    EXPECT_EQ(*value, 7);
+    auto snapshot = subscriber->current();
+    ASSERT_NE(snapshot.value, nullptr);
+    EXPECT_EQ(*snapshot.value, 7);
+    EXPECT_EQ(snapshot.version, 1u);
+}
+
+TEST(WatchTest, NextZeroReturnsExistingInitialSnapshot) {
+    IntWatch watch(42);
+    auto subscriber = watch.subscribe();
+
+    fiber::event::EventLoopGroup group(1);
+    std::promise<IntSnapshot> result;
+    auto future = result.get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [&subscriber, &result]() { return await_next_and_stop(&subscriber, 0, &result); });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "next(0) did not return the initial snapshot in time";
+        return;
+    }
+
+    IntSnapshot snapshot = future.get();
+    ASSERT_NE(snapshot.value, nullptr);
+    EXPECT_EQ(*snapshot.value, 42);
+    EXPECT_EQ(snapshot.version, 1u);
+    group.join();
 }
 
 TEST(WatchTest, NextReturnsLatestCoalescedValue) {
@@ -172,11 +203,11 @@ TEST(WatchTest, NextReturnsLatestCoalescedValue) {
     publisher->publish(3);
 
     fiber::event::EventLoopGroup group(1);
-    std::promise<int> result;
+    std::promise<IntSnapshot> result;
     auto future = result.get_future();
 
     group.start();
-    fiber::async::spawn(group.at(0), [&subscriber, &result]() { return await_next_and_stop(&subscriber, &result); });
+    fiber::async::spawn(group.at(0), [&subscriber, &result]() { return await_next_and_stop(&subscriber, 0, &result); });
 
     if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
         group.stop();
@@ -185,7 +216,10 @@ TEST(WatchTest, NextReturnsLatestCoalescedValue) {
         return;
     }
 
-    EXPECT_EQ(future.get(), 3);
+    IntSnapshot snapshot = future.get();
+    ASSERT_NE(snapshot.value, nullptr);
+    EXPECT_EQ(*snapshot.value, 3);
+    EXPECT_EQ(snapshot.version, 3u);
     group.join();
 }
 
@@ -196,7 +230,7 @@ TEST(WatchTest, PendingNextResumesAfterPublish) {
     auto subscriber = watch.subscribe();
 
     fiber::event::EventLoopGroup group(1);
-    std::promise<int> result;
+    std::promise<IntSnapshot> result;
     auto future = result.get_future();
 
     group.start();
@@ -209,11 +243,14 @@ TEST(WatchTest, PendingNextResumesAfterPublish) {
         return;
     }
 
-    EXPECT_EQ(future.get(), 11);
+    IntSnapshot snapshot = future.get();
+    ASSERT_NE(snapshot.value, nullptr);
+    EXPECT_EQ(*snapshot.value, 11);
+    EXPECT_EQ(snapshot.version, 2u);
     group.join();
 }
 
-TEST(WatchTest, CurrentAdvancesOnlyItsSubscriber) {
+TEST(WatchTest, CurrentDoesNotAffectExplicitNextVersion) {
     IntWatch watch;
     auto publisher = watch.acquire_publisher();
     ASSERT_TRUE(publisher.has_value());
@@ -221,22 +258,25 @@ TEST(WatchTest, CurrentAdvancesOnlyItsSubscriber) {
     auto subscriber_b = watch.subscribe();
 
     publisher->publish(1);
-    auto value_a = subscriber_a.current();
-    ASSERT_NE(value_a, nullptr);
-    EXPECT_EQ(*value_a, 1);
+    auto snapshot_a = subscriber_a.current();
+    ASSERT_NE(snapshot_a.value, nullptr);
+    EXPECT_EQ(*snapshot_a.value, 1);
+    EXPECT_EQ(snapshot_a.version, 1u);
 
     publisher->publish(2);
-    auto value_b = subscriber_b.current();
-    ASSERT_NE(value_b, nullptr);
-    EXPECT_EQ(*value_b, 2);
+    auto snapshot_b = subscriber_b.current();
+    ASSERT_NE(snapshot_b.value, nullptr);
+    EXPECT_EQ(*snapshot_b.value, 2);
+    EXPECT_EQ(snapshot_b.version, 2u);
 
     fiber::event::EventLoopGroup group(1);
-    std::promise<int> result;
+    std::promise<IntSnapshot> result;
     auto future = result.get_future();
 
     group.start();
-    fiber::async::spawn(group.at(0),
-                        [&subscriber_a, &result]() { return await_next_and_stop(&subscriber_a, &result); });
+    fiber::async::spawn(group.at(0), [&subscriber_a, &result, version = snapshot_a.version]() {
+        return await_next_and_stop(&subscriber_a, version, &result);
+    });
 
     if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
         group.stop();
@@ -245,16 +285,18 @@ TEST(WatchTest, CurrentAdvancesOnlyItsSubscriber) {
         return;
     }
 
-    EXPECT_EQ(future.get(), 2);
+    IntSnapshot next = future.get();
+    ASSERT_NE(next.value, nullptr);
+    EXPECT_EQ(*next.value, 2);
+    EXPECT_EQ(next.version, 2u);
     group.join();
 }
 
-TEST(WatchTest, PendingSubscribersResumeOnOwningLoops) {
+TEST(WatchTest, PendingWaitersFromSameSubscriberResumeOnOwningLoops) {
     IntWatch watch;
     auto publisher = watch.acquire_publisher();
     ASSERT_TRUE(publisher.has_value());
-    auto subscriber_a = watch.subscribe();
-    auto subscriber_b = watch.subscribe();
+    auto subscriber = watch.subscribe();
 
     fiber::event::EventLoopGroup group(2);
     std::promise<std::thread::id> loop_a_id;
@@ -262,8 +304,8 @@ TEST(WatchTest, PendingSubscribersResumeOnOwningLoops) {
     auto loop_a_future = loop_a_id.get_future();
     auto loop_b_future = loop_b_id.get_future();
 
-    std::promise<int> value_a;
-    std::promise<int> value_b;
+    std::promise<IntSnapshot> value_a;
+    std::promise<IntSnapshot> value_b;
     auto value_a_future = value_a.get_future();
     auto value_b_future = value_b.get_future();
     std::promise<std::thread::id> resumed_a_id;
@@ -287,9 +329,9 @@ TEST(WatchTest, PendingSubscribersResumeOnOwningLoops) {
     const std::thread::id expected_b = loop_b_future.get();
 
     fiber::async::spawn(group.at(0),
-                        [&]() { return await_next_and_record_thread(&subscriber_a, &value_a, &resumed_a_id); });
+                        [&]() { return await_next_and_record_thread(&subscriber, &value_a, &resumed_a_id); });
     fiber::async::spawn(group.at(1),
-                        [&]() { return await_next_and_record_thread(&subscriber_b, &value_b, &resumed_b_id); });
+                        [&]() { return await_next_and_record_thread(&subscriber, &value_b, &resumed_b_id); });
 
     publisher->publish(9);
 
@@ -301,8 +343,14 @@ TEST(WatchTest, PendingSubscribersResumeOnOwningLoops) {
     group.join();
 
     ASSERT_TRUE(completed);
-    EXPECT_EQ(value_a_future.get(), 9);
-    EXPECT_EQ(value_b_future.get(), 9);
+    IntSnapshot snapshot_a = value_a_future.get();
+    IntSnapshot snapshot_b = value_b_future.get();
+    ASSERT_NE(snapshot_a.value, nullptr);
+    ASSERT_NE(snapshot_b.value, nullptr);
+    EXPECT_EQ(*snapshot_a.value, 9);
+    EXPECT_EQ(*snapshot_b.value, 9);
+    EXPECT_EQ(snapshot_a.version, 1u);
+    EXPECT_EQ(snapshot_b.version, 1u);
     EXPECT_EQ(resumed_a_future.get(), expected_a);
     EXPECT_EQ(resumed_b_future.get(), expected_b);
 }

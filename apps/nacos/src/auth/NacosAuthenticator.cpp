@@ -216,8 +216,9 @@ bool NacosAuthenticator::token_valid(std::chrono::steady_clock::time_point now) 
 }
 
 bool NacosAuthenticator::shutdown_requested() {
-    const std::shared_ptr<const bool> shutdown = shutdown_subscriber_.current();
-    return stopping_ || *shutdown;
+    const auto shutdown = shutdown_subscriber_.current();
+    FIBER_ASSERT(shutdown.value != nullptr);
+    return stopping_ || *shutdown.value;
 }
 
 void NacosAuthenticator::handle_success(AuthHttpSuccess success, std::size_t server_index) {
