@@ -163,4 +163,55 @@ TEST(NacosDtoJsonTest, RpcDtoParsingIsTransactionalAndRejectsWrongTypes) {
     EXPECT_TRUE(response.support_ability_negotiation);
 }
 
+TEST(NacosDtoJsonTest, ReflectionDecoderHandlesNestedWireContainers) {
+    BufPool pool;
+
+    {
+        JsonParser parser;
+        dto::req::ConnectionSetupRequest request;
+        ASSERT_EQ(parse(R"({"requestId":null,"clientVersion":"client","tenant":"tenant",)"
+                        R"("labels":{"source":"sdk"},"abilityTable":{"config":true},"module":"internal"})",
+                        pool, request, parser),
+                  ParseStatus::Done);
+        EXPECT_TRUE(request.request_id.is_null());
+        ASSERT_TRUE(request.client_version.is_present());
+        EXPECT_EQ(request.client_version.value(), "client");
+        ASSERT_TRUE(request.labels.is_present());
+        ASSERT_NE(request.labels.value().find("source"), nullptr);
+        EXPECT_EQ(request.labels.value().find("source")->value, "sdk");
+        ASSERT_TRUE(request.ability_table.is_present());
+        ASSERT_NE(request.ability_table.value().find("config"), nullptr);
+        EXPECT_TRUE(request.ability_table.value().find("config")->value);
+    }
+
+    {
+        JsonParser parser;
+        dto::req::ConfigBatchListenRequest request;
+        ASSERT_EQ(parse(R"({"listen":false,"configListenContexts":[{"group":"g","md5":null,)"
+                        R"("dataId":"d","tenant":"t"}],"module":"config"})",
+                        pool, request, parser),
+                  ParseStatus::Done);
+        EXPECT_FALSE(request.listen);
+        ASSERT_EQ(request.config_listen_contexts.size(), 1u);
+        const auto &context = request.config_listen_contexts[0];
+        ASSERT_TRUE(context.group.is_present());
+        EXPECT_EQ(context.group.value(), "g");
+        EXPECT_TRUE(context.md5.is_null());
+        ASSERT_TRUE(context.data_id.is_present());
+        EXPECT_EQ(context.data_id.value(), "d");
+    }
+
+    {
+        JsonParser parser;
+        dto::resp::ConfigChangeBatchListenResponse response;
+        ASSERT_EQ(parse(R"({"resultCode":200,"changedConfigs":[{"group":"g","dataId":"d",)"
+                        R"("tenant":"t"}],"success":true})",
+                        pool, response, parser),
+                  ParseStatus::Done);
+        ASSERT_EQ(response.changed_configs.size(), 1u);
+        ASSERT_TRUE(response.changed_configs[0].tenant.is_present());
+        EXPECT_EQ(response.changed_configs[0].tenant.value(), "t");
+    }
+}
+
 } // namespace

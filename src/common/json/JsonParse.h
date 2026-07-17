@@ -89,6 +89,14 @@ template<typename FieldParser, typename T>
     return std::invoke(field_parser, field, parser, pool, out);
 }
 
+template<typename Finalizer, typename T>
+[[nodiscard]] ParseStatus invoke_object_finalizer(Finalizer &finalizer, JsonParser &parser, mem::BufPool &pool,
+                                                  T &out) noexcept {
+    static_assert(std::is_nothrow_invocable_r_v<ParseStatus, Finalizer &, JsonParser &, mem::BufPool &, T &>,
+                  "JSON object finalizer must be noexcept and return ParseStatus");
+    return std::invoke(finalizer, parser, pool, out);
+}
+
 template<typename T>
 class PoolArrayBuilder {
     static_assert(std::is_trivially_copyable_v<T>, "pool-backed JSON values must be trivially copyable");
@@ -373,9 +381,9 @@ template<auto EP, typename P>
 // field view is valid only for the duration of the callback and must not be
 // retained. Returning Unknown must leave the value untouched and asks this
 // helper to skip it.
-template<typename T, typename FP>
-[[nodiscard]] ParseStatus parse_object_fields(JsonParser &parser, mem::BufPool &pool, T &out,
-                                              FP &&field_parser) noexcept {
+template<typename T, typename FP, typename FF>
+[[nodiscard]] ParseStatus parse_object_fields(JsonParser &parser, mem::BufPool &pool, T &out, FP &&field_parser,
+                                              FF &&finalizer) noexcept {
     static_assert(std::is_nothrow_default_constructible_v<T>,
                   "JSON object target must be nothrow default constructible");
     static_assert(std::is_nothrow_move_assignable_v<T>, "JSON object target must be nothrow move assignable");
@@ -395,6 +403,9 @@ template<typename T, typename FP>
     }
     token = parser.current_token();
     if (token->kind == TokenKind::EndObj) {
+        if (detail::invoke_object_finalizer(finalizer, parser, pool, result) != ParseStatus::Done) {
+            return ParseStatus::Error;
+        }
         out = std::move(result);
         return ParseStatus::Done;
     }
@@ -446,10 +457,22 @@ template<typename T, typename FP>
         }
         token = parser.current_token();
         if (token->kind == TokenKind::EndObj) {
+            if (detail::invoke_object_finalizer(finalizer, parser, pool, result) != ParseStatus::Done) {
+                return ParseStatus::Error;
+            }
             out = std::move(result);
             return ParseStatus::Done;
         }
     }
+}
+
+template<typename T, typename FP>
+[[nodiscard]] ParseStatus parse_object_fields(JsonParser &parser, mem::BufPool &pool, T &out,
+                                              FP &&field_parser) noexcept {
+    auto finalizer = [](JsonParser & /*parser*/, mem::BufPool & /*pool*/, T & /*value*/) noexcept {
+        return ParseStatus::Done;
+    };
+    return parse_object_fields(parser, pool, out, std::forward<FP>(field_parser), finalizer);
 }
 
 template<auto FP, typename T>
