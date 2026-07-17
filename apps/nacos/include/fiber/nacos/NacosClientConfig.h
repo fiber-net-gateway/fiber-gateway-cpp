@@ -95,6 +95,11 @@ struct NacosClientOptions {
     std::size_t max_inbound_grpc_message_bytes = 10 * 1024 * 1024;
     std::size_t max_push_response_queue = 64;
     std::size_t max_push_response_bytes = 1024 * 1024;
+    std::chrono::milliseconds config_subscription_redo_interval{180000};
+    std::size_t max_config_content_bytes = 10 * 1024 * 1024;
+    std::size_t max_config_data_id_bytes = 1024;
+    std::size_t max_config_group_bytes = 1024;
+    std::size_t max_listen_contexts_per_request = 100;
     std::string client_ip_override;
 };
 

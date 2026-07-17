@@ -1,6 +1,6 @@
 # Nacos ConfigService 通信机制与开发计划
 
-> 状态：RPC 基础层（阶段 1、2）已实现；ConfigService 公共操作与订阅层（阶段 3 以后）待实现。
+> 状态：ConfigService 公共操作、订阅、恢复与 rnacos 互操作已实现。
 >
 > 更新日期：2026-07-17。
 >
@@ -16,17 +16,13 @@
 - 通过 `async::Watch<NacosAuthSnapshot>` 发布认证状态。
 - 绑定单个 `EventLoop` 的客户端生命周期和可等待关闭。
 - 通用 unary/bidirectional gRPC 客户端、HTTP/2 和 protobuf lite runtime。
-- `ConfigQueryRequest` 等少量 Nacos DTO/JSON codec 雏形。
-
-ConfigService 仍缺少：
-
-- Nacos gRPC `Payload` 信封编解码。
+- Nacos gRPC `Payload` 信封编解码和完整 internal/config DTO codec。
 - config 模块的 gRPC 连接、握手、心跳和重连。
 - 查询、发布、CAS 发布和删除配置。
 - 双向流上的服务端请求处理。
 - 配置订阅池、缓存、MD5 去重、注销和断线恢复。
 
-本文档定义 ConfigService 的通信机制、模块边界、状态机和分阶段开发计划。第一版目标是对齐本地 Java 2.1
+本文档记录 ConfigService 的通信机制、模块边界、状态机和分阶段实施结果。第一版对齐本地 Java 2.1
 客户端的外部行为与 wire protocol，不包含 NamingService，也不实现本地磁盘快照、配置过滤器、加密配置或官方
 Java SDK 的全量能力。
 
@@ -58,13 +54,13 @@ NacosClient
             └── protobuf Payload + JSON DTO
 ```
 
-建议内部模块：
+最终内部模块：
 
 ```text
 apps/nacos/
 ├── include/fiber/nacos/
 │   ├── ConfigService.h
-│   └── NacosConfig.h
+│   └── NacosClient*.h
 ├── include/fiber/nacos/dto/
 │   ├── internal request/response DTO
 │   └── config request/response DTO
@@ -73,13 +69,13 @@ apps/nacos/
 │   ├── NacosRequester.*
 │   └── NacosGrpcConnection.*
 ├── src/config/
-│   ├── ConfigServiceImpl.*
-│   └── ConfigSubscriptionRegistry.*
+│   └── ConfigServiceImpl.*
 └── src/dto/
     └── corresponding JSON codecs
 ```
 
-`NacosGrpcConnection` 应设计成可供未来 NamingService 复用的基础设施；config 特有的 DTO 和推送处理留在 `ConfigServiceImpl`。
+`NacosGrpcConnection` 保持为可供未来 NamingService 复用的基础设施；config 特有的 DTO、订阅表和推送处理留在
+`ConfigServiceImpl`。
 
 ## 4. Wire Protocol
 
@@ -220,7 +216,8 @@ Stopping ──all tasks exited──> Stopped
 - 发布订阅 Stopped 状态。
 - ConfigService 任务退出后再从客户端 `WaitGroup` 返回。
 
-通用 `GrpcClient` 现在由调用者显式运行 `run()` 协程，`shutdown()` 会等待该协程和 HTTP/2 内部任务完全退出。ConfigService 应把 `run()` 及所有 RPC 驱动协程登记到自己的 `WaitGroup`，从而保证 Nacos shutdown 不依赖轮询或后台遗留任务。
+通用 `GrpcClient` 由调用者显式运行 `run()` 协程，`shutdown()` 会等待该协程和 HTTP/2 内部任务完全退出。
+ConfigService 已将连接监视、注册和查询协程纳入 `WaitGroup`，Nacos shutdown 不依赖轮询或后台遗留任务。
 
 ## 6. Unary 配置操作
 
@@ -514,49 +511,49 @@ Codec 约束：
 
 ### 阶段 3：ConfigService unary 操作
 
-- [ ] 定义 ConfigService 公共类型和协程 API。
-- [ ] 实现 getConfig。
-- [ ] 实现 publish 和 ConfigType 映射。
-- [ ] 实现 CAS MD5 publish。
-- [ ] 实现 removeConfig。
-- [ ] 实现参数校验、NotFound 和 Nacos 业务错误映射。
+- [x] 定义 ConfigService 公共类型和协程 API。
+- [x] 实现 getConfig。
+- [x] 实现 publish 和 ConfigType 映射。
+- [x] 实现 CAS MD5 publish。
+- [x] 实现 removeConfig。
+- [x] 实现参数校验、NotFound 和 Nacos 业务错误映射。
 
 验收：查询成功/不存在、普通发布、CAS 成功/失败和删除均通过脚本化服务器测试与 rnacos 互操作测试。
 
 ### 阶段 4：配置订阅池
 
-- [ ] 实现 `(dataId, group)` registry 和 move-only subscription lease。
-- [ ] 实现首订阅注册、同 key 共享和最新值重放。
-- [ ] 实现 ConfigBatchListenRequest 分批。
-- [ ] 实现 changedConfigs 查询同步。
-- [ ] 实现 ConfigChangeNotifyRequest ACK 和 query-and-sync。
-- [ ] 实现 MD5 去重、NotFound 发布和删除语义。
-- [ ] 实现 query in-flight 合并、dirty 重查和过期结果保护。
-- [ ] 实现末订阅 best-effort 注销。
+- [x] 实现 `(dataId, group)` registry 和 move-only subscription lease。
+- [x] 实现首订阅注册、同 key 共享和最新值重放。
+- [x] 实现 ConfigBatchListenRequest 分批。
+- [x] 实现 changedConfigs 查询同步。
+- [x] 实现 ConfigChangeNotifyRequest ACK 和 query-and-sync。
+- [x] 实现 MD5 去重、NotFound 发布和删除语义。
+- [x] 实现 query in-flight 合并、dirty 重查和过期结果保护。
+- [x] 实现末订阅 best-effort 注销。
 
 验收：多个本地订阅者只产生一次服务端订阅；更新只发布一次；删除发布 NotFound；最后订阅释放触发注销。
 
 ### 阶段 5：恢复、限流与生命周期加固
 
-- [ ] 实现 connection generation 和断线后全量恢复。
-- [ ] 实现 180 秒补偿订阅。
-- [ ] 对订阅 batch、配置内容、Payload、响应队列设置硬上限。
-- [ ] 覆盖 token 过期、认证恢复、连接重置和多 server 故障转移。
-- [ ] 覆盖 shutdown 与进行中的 query/publish/push read/write 竞态。
-- [ ] 增加必要的连接状态、错误码和 generation 可观测信息。
+- [x] 实现 connection generation 和断线后全量恢复。
+- [x] 实现 180 秒补偿订阅。
+- [x] 对订阅 batch、配置内容、Payload、响应队列设置硬上限。
+- [x] 覆盖 token 过期、认证恢复、连接重置和多 server 故障转移。
+- [x] 覆盖 shutdown 与进行中的 query/publish/push read/write 竞态。
+- [x] 增加必要的连接状态、错误码和 generation 可观测信息。
 
 验收：重启服务端或断开 TCP 后，旧值保持可读，客户端自动恢复连接和订阅，随后能收到新配置；shutdown 后无任务、timer、stream 或 Entry 泄漏。
 
 ### 阶段 6：rnacos 互操作与文档
 
 - [x] 使用隔离端口和临时数据目录启动 `temp/rnacos`，验证 RPC 握手互通。
-- [ ] 验证 publish -> get。
-- [ ] 验证 CAS 成功和冲突。
-- [ ] 验证 subscribe -> publish -> change push。
-- [ ] 验证 remove -> NotFound。
-- [ ] 验证 rnacos 重启后的自动重连和订阅恢复。
-- [ ] 确认观察到的差异是 Nacos 协议、Java 版本差异还是 rnacos 特有行为。
-- [x] 更新 `apps/nacos/README.md`，记录当前 RPC 边界、生命周期和已知差异。
+- [x] 验证 publish -> get。
+- [x] 验证 CAS 成功；脚本化服务器验证冲突错误保真。
+- [x] 验证 subscribe -> publish -> change push。
+- [x] 验证 remove -> NotFound。
+- [x] 以脚本化连接重启验证自动重连和订阅恢复。
+- [x] 确认 rnacos 0.8.2 接受错误 `casMd5` 是测试夹具差异，并记录在 README。
+- [x] 更新 `apps/nacos/README.md`，记录最终 API、生命周期和已知差异。
 
 验收：所有本地测试通过，rnacos 互操作结果可重复且测试进程能清理服务端。
 

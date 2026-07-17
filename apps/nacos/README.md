@@ -3,8 +3,8 @@
 `apps/nacos` is the reusable Nacos client library for applications under
 `apps/`. Consumers should link the `fiber::nacos` target.
 
-The current implementation covers authentication and the reusable Nacos gRPC
-transport layer:
+The current implementation covers authentication, the reusable Nacos gRPC
+transport layer, and ConfigService:
 
 - Immutable, validated client configuration with multiple server IPs.
 - Nacos v3 login and optional fallback to the legacy v1 login endpoint.
@@ -26,11 +26,13 @@ transport layer:
   connection generations, and bounded inbound/queued messages.
 - Dynamic access-token metadata: token refresh does not rebuild a healthy gRPC
   connection, while unavailable authentication stops it until recovery.
-
-The public ConfigService API, unary get/publish/CAS/remove operations, and the
-configuration subscription registry are not implemented yet. The RPC layer is
-private infrastructure for those next stages; this library does not currently
-expose raw Nacos RPC calls as public API.
+- Coroutine-based get, publish, CAS publish, and remove operations with bounded
+  owned results and structured errors.
+- Shared configuration subscriptions with explicit Pending, Present, NotFound,
+  and Stopped states.
+- Batched registration, MD5 deduplication, single-flight query synchronization,
+  best-effort unregistration, reconnect recovery, and periodic compensating
+  registration.
 
 ## Targets
 
@@ -49,6 +51,7 @@ The main headers are:
 #include <fiber/nacos/NacosAuth.h>
 #include <fiber/nacos/NacosClient.h>
 #include <fiber/nacos/NacosClientConfig.h>
+#include <fiber/nacos/ConfigService.h>
 ```
 
 Configuration is created through a validation boundary:
@@ -76,12 +79,62 @@ if (!client) {
 removed while preserving order. The context path must be absolute and defaults
 to `/nacos`.
 
+`NacosClient::config_service()` returns the ConfigService instance owned by the
+client. Configuration operations run on the client's EventLoop:
+
+```cpp
+auto &configs = (*client)->config_service();
+
+auto published = co_await configs.publish("routes", "DEFAULT_GROUP", route_json,
+                                          fiber::nacos::ConfigType::Json);
+auto queried = co_await configs.get_config("routes", "DEFAULT_GROUP");
+if (queried && *queried) {
+    use((*queried)->content, (*queried)->md5);
+}
+
+auto subscribed = configs.subscribe("routes", "DEFAULT_GROUP");
+if (subscribed) {
+    auto subscription = std::move(*subscribed);
+    auto snapshot = subscription.current();
+    while (snapshot.value && snapshot.value->state != fiber::nacos::ConfigState::Stopped) {
+        snapshot = co_await subscription.next(snapshot.version);
+        if (snapshot.value->state == fiber::nacos::ConfigState::Present) {
+            reload(snapshot.value->data.content);
+        } else if (snapshot.value->state == fiber::nacos::ConfigState::NotFound) {
+            remove_local_config();
+        }
+    }
+}
+```
+
+`get_config()` returns an empty optional for a confirmed NotFound response.
+`publish()` accepts all six Java-compatible types and an optional CAS MD5; an
+empty CAS value is omitted from the wire request. Successful publish and remove
+calls do not mutate the local subscription cache optimistically. The cache
+changes only after a server notification or registration response causes a
+query.
+
+Each `(dataId, group)` has one internal entry regardless of the number of local
+subscriptions. A new subscription starts in Pending unless the entry already
+has a Present or NotFound value. Every subscription snapshot includes the Watch
+version; pass that version back to `next(version)`. Destroy or explicitly close
+subscriptions on the client EventLoop, before destroying the client.
+
+Transient connection and query failures retain the last Present or NotFound
+value. A new connection generation re-registers all live entries, and a
+periodic compensating registration covers lost server-side listener state.
+During shutdown every live subscription receives Stopped, config operations
+reject new work, and all registration/query tasks finish before shutdown
+returns.
+
 `NacosClientOptions` controls authentication and gRPC connect/request/handshake
-timeouts, heartbeat timing, retry backoff, message/response queue limits, and
-refresh timing. `client_ip_override` can replace the local gRPC socket address
-used in Payload metadata. By default, a token is refreshed at
-`refresh_percent` of its TTL. A refresh failure is broadcast in
-`last_error`, but an unexpired token remains usable until its actual expiry.
+timeouts, heartbeat timing, retry backoff, message/response queue limits,
+configuration content/key limits, maximum listen contexts per batch, the
+subscription redo interval, and refresh timing. `client_ip_override` can
+replace the local gRPC socket address used in Payload metadata. By default, a
+token is refreshed at `refresh_percent` of its TTL. A refresh failure is
+broadcast in `last_error`, but an unexpired token remains usable until its
+actual expiry.
 
 ## Event Loop and Lifecycle
 
@@ -157,16 +210,24 @@ replacement.
 ```bash
 cmake -S . -B build
 cmake --build build --target fiber_nacos_tests
-ctest --test-dir build -R '^(NacosClientTest|NacosClientConfigTest|NacosDtoJsonTest|NacosPayloadTest|NacosGrpcConnectionTest)\.'
+ctest --test-dir build -R '^(NacosClientTest|NacosClientConfigTest|NacosDtoJsonTest|NacosPayloadTest|NacosGrpcConnectionTest|NacosConfigServiceTest)\.'
 ```
 
 Authentication and gRPC tests use local scripted HTTP/HTTP2 servers. The optional
 `NacosGrpcConnectionTest.RnacosInteropWhenEnabled` test performs a real RPC
 handshake when `FIBER_NACOS_TEST_GRPC_PORT` points to an rnacos gRPC listener.
+`NacosConfigServiceTest.RnacosInteropWhenEnabled` additionally verifies real
+publish, get, subscribe/push, CAS update, and remove/NotFound behavior.
+
+The repository's rnacos 0.8.2 fixture accepts a publish with a mismatched
+`casMd5` instead of returning a conflict. Scripted protocol tests therefore
+verify that ConfigService preserves a real server CAS error code, while the
+rnacos interoperability test records the fixture-specific acceptance behavior.
 
 ## Layout
 
 Public headers live under `include/fiber/nacos/`. Authentication transport and
-lifecycle implementation details remain private in `src/detail/`. Nacos gRPC
-infrastructure is private in `src/rpc/`. DTO JSON codecs live under `src/dto/`,
-and the wire Payload schema lives under `proto/`.
+lifecycle implementation details remain private in `src/detail/`. ConfigService
+state and subscription logic live under `src/config/`, and Nacos gRPC
+infrastructure remains private in `src/rpc/`. DTO JSON codecs live under
+`src/dto/`, and the wire Payload schema lives under `proto/`.
