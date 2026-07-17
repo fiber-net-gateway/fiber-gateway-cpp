@@ -41,9 +41,9 @@ void assign_grpc_message(std::string &dst, std::string_view src) {
 
 } // namespace
 
-GrpcStream::GrpcStream(std::shared_ptr<http::Http2ClientConnection> conn, std::string_view authority,
-                       std::string_view scheme, std::string_view service, std::string_view method, mem::BufPool &pool,
-                       Options options) : conn_(std::move(conn)), pool_(&pool), exchange_(*conn_, *pool_) {
+GrpcStream::GrpcStream(http::Http2ClientConnection &conn, std::string_view authority, std::string_view scheme,
+                       std::string_view service, std::string_view method, mem::BufPool &pool, Options options) :
+    conn_(&conn), pool_(&pool), exchange_(conn, pool) {
     authority_.assign(authority.data(), authority.size());
     scheme_.assign(scheme.data(), scheme.size());
     path_.reserve(service.size() + method.size() + 2);
@@ -58,8 +58,41 @@ GrpcStream::GrpcStream(std::shared_ptr<http::Http2ClientConnection> conn, std::s
     }
 }
 
-GrpcStream::GrpcStream(GrpcStream &&) noexcept = default;
-GrpcStream &GrpcStream::operator=(GrpcStream &&) noexcept = default;
+GrpcStream::GrpcStream(GrpcStream &&other) noexcept { *this = std::move(other); }
+
+GrpcStream &GrpcStream::operator=(GrpcStream &&other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    if (exchange_.valid() && !finished_) {
+        exchange_.cancel(common::IoErr::Canceled);
+    }
+
+    conn_ = std::exchange(other.conn_, nullptr);
+    pool_ = std::exchange(other.pool_, nullptr);
+    exchange_ = std::move(other.exchange_);
+    reader_ = std::move(other.reader_);
+    authority_ = std::move(other.authority_);
+    scheme_ = std::move(other.scheme_);
+    path_ = std::move(other.path_);
+    grpc_timeout_ = std::move(other.grpc_timeout_);
+
+    response_head_read_ = std::exchange(other.response_head_read_, false);
+    trailers_only_ = std::exchange(other.trailers_only_, false);
+    body_ended_ = std::exchange(other.body_ended_, false);
+    trailers_read_ = std::exchange(other.trailers_read_, false);
+    grpc_code_ = std::exchange(other.grpc_code_, 0);
+    grpc_message_ = std::move(other.grpc_message_);
+
+    opened_ = std::exchange(other.opened_, false);
+    writes_done_ = std::exchange(other.writes_done_, false);
+    finished_ = std::exchange(other.finished_, false);
+    failed_ = std::exchange(other.failed_, false);
+    abort_reason_ = std::exchange(other.abort_reason_, common::IoErr::None);
+    has_deadline_ = std::exchange(other.has_deadline_, false);
+    deadline_abs_ = std::exchange(other.deadline_abs_, std::chrono::steady_clock::time_point{});
+    return *this;
+}
 
 GrpcStream::~GrpcStream() {
     if (exchange_.valid() && !finished_) {

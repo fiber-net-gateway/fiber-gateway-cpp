@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 
-#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -659,6 +658,8 @@ Task<Result> drive(fiber::grpc::GrpcStream &s, Scenario sc) {
     co_return r;
 }
 
+DetachedTask drive_client_connection(fiber::grpc::GrpcClient *client) { (void) co_await client->run(); }
+
 DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, Scenario sc,
                         std::shared_ptr<std::promise<Result>> promise) {
     Result result;
@@ -675,6 +676,7 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, Scena
     if (!connect_result) {
         result.err = connect_result.error();
     } else {
+        fiber::async::spawn(*loop, [&client]() { return drive_client_connection(&client); });
         fiber::mem::BufPool pool;
         const char *service = "helloworld.Greeter";
         const char *method = nullptr;
@@ -709,10 +711,7 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, Scena
         result = co_await drive(stream, sc);
     }
 
-    client.shutdown();
-    for (int i = 0; i < 500 && !client.run_done(); ++i) {
-        co_await fiber::async::sleep(1ms);
-    }
+    co_await client.shutdown();
     promise->set_value(std::move(result));
     co_return;
 }
