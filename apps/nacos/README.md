@@ -95,15 +95,17 @@ if (queried && *queried) {
 auto subscribed = configs.subscribe("routes", "DEFAULT_GROUP");
 if (subscribed) {
     auto subscription = std::move(*subscribed);
-    auto snapshot = subscription.current();
+    auto &sub = subscription.subscriber();
+    auto snapshot = sub.current();
     std::uint64_t version = snapshot.version;
     for (;;) {
-        auto result = co_await subscription.next(version);
+        snapshot = co_await sub.next(version);
+        const auto &result = *snapshot.value;
         if (result.kind == fiber::nacos::ResultKind::Closed) {
             break; // service shutdown
         }
-        version = result.snapshot.version;
-        const auto &value = *result.snapshot.value;
+        version = snapshot.version;
+        const auto &value = *result.data;
         if (value.state == fiber::nacos::ConfigState::Present) {
             reload(value.content);
         } else if (value.state == fiber::nacos::ConfigState::NotFound) {
@@ -121,9 +123,12 @@ changes only after a server notification or registration response causes a
 query.
 
 Each `(dataId, group)` has one internal entry regardless of the number of local
-subscriptions. `current()` returns a null snapshot until the first server value
-arrives; `next(version)` blocks until then. Each result carries the Watch
-version; pass that version back to the next `next(version)`. Destroy or
+subscriptions. `subscription.subscriber().current()` returns a null snapshot
+until the first server value arrives; `next(version)` blocks until then. The
+watched value is a `SubscriptionResult<ConfigData>`: `kind == Success` carries
+the latest `ConfigData` in `data`; `kind == Closed` marks end-of-subscription
+(service shutdown), with no `data`. Each snapshot carries the Watch version;
+pass that version back to the next `next(version)`. Destroy or
 explicitly close subscriptions on the client EventLoop, before destroying the
 client.
 
