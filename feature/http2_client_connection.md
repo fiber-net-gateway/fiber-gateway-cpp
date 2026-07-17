@@ -11,7 +11,7 @@
 ## Scope
 - Single thread only.
 - One `EventLoop` owns the whole connection lifecycle.
-- `connect()` establishes transport and starts the HTTP/2 session.
+- `connect(timeout)` establishes transport and starts the HTTP/2 session.
 - `run()` drives the read loop.
 - Request stream creation is done through `http2()`.
 
@@ -25,17 +25,19 @@
 
 ## Lifecycle
 1. Construct `Http2ClientConnection` on the target loop.
-2. `co_await connect()`.
+2. `co_await connect(timeout)`.
 3. Start `run()` on the same loop.
 4. Use `http2()` to create local streams.
 5. Shutdown through `shutdown()` or `graceful_shutdown()`.
 
 ## Important Semantics
-- `connect()` is a member function, not a static factory.
-- `connect()` may only be called once.
-- After `connect()` succeeds, `Http2Connection::start(transport)` has already run.
+- `connect(timeout)` is a member function, not a static factory.
+- `connect(timeout)` may only be called once.
+- `timeout` only bounds the TCP connect phase; TLS uses `TlsOptions::handshake_timeout`.
+- `std::chrono::milliseconds::max()` means an unlimited TCP connect wait.
+- After `connect(timeout)` succeeds, `Http2Connection::start(transport)` has already run.
 - For client role, initial preface + SETTINGS are already queued during `start()`.
-- Because of that, local streams may be created after `connect()` succeeds, even before `run()` begins polling reads.
+- Because of that, local streams may be created after `connect(timeout)` succeeds, even before `run()` begins polling reads.
 
 ## Transport Selection
 - If `tls.enabled == false`, `connect()` creates a `TcpTransport`.
@@ -51,7 +53,7 @@ options.h2.outbound_hpack_catalog = &catalog;
 
 fiber::http::Http2ClientConnection conn(loop, std::move(options));
 
-auto connect_result = co_await conn.connect();
+auto connect_result = co_await conn.connect(std::chrono::seconds(5));
 if (!connect_result) {
     co_return std::unexpected(connect_result.error());
 }

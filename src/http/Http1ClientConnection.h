@@ -1,6 +1,7 @@
 #ifndef FIBER_HTTP_HTTP1_CLIENT_CONNECTION_H
 #define FIBER_HTTP_HTTP1_CLIENT_CONNECTION_H
 
+#include <chrono>
 #include <memory>
 
 #include "../async/Task.h"
@@ -19,7 +20,6 @@ class HttpTransport;
 struct Http1ClientConnectionOptions {
     net::SocketAddress peer_addr{};
     net::TlsOptions tls{};
-    std::chrono::milliseconds connect_timeout{10000};
 };
 
 class Http1ClientConnection : public common::NonCopyable, public common::NonMovable {
@@ -27,7 +27,8 @@ public:
     Http1ClientConnection(event::EventLoop &loop, Http1ClientConnectionOptions options) noexcept;
     ~Http1ClientConnection();
 
-    fiber::async::Task<common::IoResult<void>> connect() noexcept;
+    // timeout applies to the TCP connect phase. TLS handshake timeout is configured separately.
+    fiber::async::Task<common::IoResult<void>> connect(std::chrono::milliseconds timeout) noexcept;
     void close() noexcept;
 
     [[nodiscard]] bool valid() const noexcept;

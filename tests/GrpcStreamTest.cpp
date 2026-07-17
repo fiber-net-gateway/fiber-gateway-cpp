@@ -672,7 +672,7 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, Scena
     options.scheme = "https";
 
     fiber::grpc::GrpcClient client(*loop, options);
-    auto connect_result = co_await client.connect();
+    auto connect_result = co_await client.connect(5s);
     if (!connect_result) {
         result.err = connect_result.error();
     } else {

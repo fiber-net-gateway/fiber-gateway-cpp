@@ -1,6 +1,7 @@
 #ifndef FIBER_NET_TCP_STREAM_H
 #define FIBER_NET_TCP_STREAM_H
 
+#include <chrono>
 #include <cstddef>
 #include <sys/uio.h>
 #include <utility>
@@ -39,7 +40,10 @@ public:
     TcpStream(ConnectInfant &&infant);
     ~TcpStream();
 
-    [[nodiscard]] static ConnectAwaiter connect(fiber::event::EventLoop &loop, const SocketAddress &peer) noexcept;
+    // timeout bounds the asynchronous wait after connect(2) returns EINPROGRESS.
+    // A non-positive timeout does not wait; milliseconds::max() waits indefinitely.
+    [[nodiscard]] static ConnectAwaiter connect(fiber::event::EventLoop &loop, const SocketAddress &peer,
+                                                std::chrono::milliseconds timeout) noexcept;
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] int fd() const noexcept;
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept;

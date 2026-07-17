@@ -5,8 +5,9 @@
 
 namespace fiber::net {
 
-TcpStream::ConnectAwaiter TcpStream::connect(fiber::event::EventLoop &loop, const SocketAddress &peer) noexcept {
-    return detail::ConnectFd<TcpConnectTraits>::connect(loop, peer);
+TcpStream::ConnectAwaiter TcpStream::connect(fiber::event::EventLoop &loop, const SocketAddress &peer,
+                                             std::chrono::milliseconds timeout) noexcept {
+    return detail::ConnectFd<TcpConnectTraits>::connect(loop, peer, timeout);
 }
 
 fiber::common::IoResult<int> TcpConnectTraits::create_socket(const SocketAddress &peer) {

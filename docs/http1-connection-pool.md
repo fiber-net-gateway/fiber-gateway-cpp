@@ -210,7 +210,7 @@ if (!lease.hit()) {
     }
 
     auto &conn = **conn_result;
-    auto connect_result = co_await conn.connect();
+    auto connect_result = co_await conn.connect(std::chrono::seconds(5));
     if (!connect_result) {
         // 处理 connect 失败
     }
@@ -221,7 +221,8 @@ auto &conn = lease.connection();
 
 注意：
 
-- `Http1ClientConnection::connect()` 只能在连接所属 loop 上调用
+- `Http1ClientConnection::connect(timeout)` 只能在连接所属 loop 上调用
+- `timeout` 只限制 TCP connect 阶段；TLS 握手继续使用 `TlsOptions::handshake_timeout`
 - `lease.emplace_connection()` 只负责在 entry 中构造连接对象，不会自动 `connect()`
 - 如果 connect 失败，连接对象仍会随 lease 生命周期被清理
 
@@ -321,7 +322,7 @@ fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
             co_return;
         }
 
-        auto connect_result = co_await lease.connection().connect();
+        auto connect_result = co_await lease.connection().connect(std::chrono::seconds(5));
         if (!connect_result) {
             co_return;
         }
@@ -429,7 +430,7 @@ fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
             co_return;
         }
 
-        auto connect_result = co_await lease.connection().connect();
+        auto connect_result = co_await lease.connection().connect(std::chrono::seconds(5));
         if (!connect_result) {
             co_return;
         }

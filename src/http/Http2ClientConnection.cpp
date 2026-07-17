@@ -5,7 +5,6 @@
 #include <string_view>
 #include <sys/socket.h>
 
-#include "../async/Timeout.h"
 #include "../net/TcpListener.h"
 #include "../net/TcpStream.h"
 #include "ClientHttp2Exchange.h"
@@ -33,11 +32,11 @@ Http2Connection::Options Http2ClientConnection::normalize_h2_options(Http2Connec
 }
 
 Http2ClientConnection::Http2ClientConnection(event::EventLoop &loop, Options options) noexcept :
-    loop_(&loop), peer_addr_(std::move(options.peer_addr)), connect_timeout_(options.connect_timeout),
+    loop_(&loop), peer_addr_(std::move(options.peer_addr)),
     tls_ctx_(normalize_tls_options(std::move(options.tls)), false, false),
     conn_(normalize_h2_options(std::move(options.h2)), nullptr, ClientHttp2Request::factory_ops()) {}
 
-fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect() noexcept {
+fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect(std::chrono::milliseconds timeout) noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     if (!loop_->in_loop()) {
         co_return std::unexpected(common::IoErr::NotSupported);
@@ -53,13 +52,7 @@ fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect() noex
         }
     }
 
-    common::IoResult<net::TcpStream::ConnectInfant> connect_result = std::unexpected(common::IoErr::Unknown);
-    if (connect_timeout_ > std::chrono::milliseconds::zero()) {
-        connect_result = co_await async::timeout_for([this]() { return net::TcpStream::connect(*loop_, peer_addr_); },
-                                                     connect_timeout_);
-    } else {
-        connect_result = co_await net::TcpStream::connect(*loop_, peer_addr_);
-    }
+    auto connect_result = co_await net::TcpStream::connect(*loop_, peer_addr_, timeout);
     if (!connect_result) {
         co_return std::unexpected(connect_result.error());
     }

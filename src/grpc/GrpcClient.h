@@ -39,7 +39,6 @@ public:
         net::SocketAddress peer_addr{};
         net::TlsOptions tls{};
         http::Http2Connection::Options h2{};
-        std::chrono::milliseconds connect_timeout{0};
         std::string_view authority{};
         std::string_view scheme{"https"};
     };
@@ -47,10 +46,11 @@ public:
     GrpcClient(event::EventLoop &loop, Options options) noexcept;
     ~GrpcClient();
 
-    // Establish the TCP+TLS+h2 connection. A successful connect() creates an
-    // obligation for the caller to drive run() exactly once. Must be co_awaited
-    // on the client's event loop.
-    fiber::async::Task<common::IoResult<void>> connect() noexcept;
+    // Establish the TCP+TLS+h2 connection. timeout applies to the TCP connect
+    // phase; TLS handshake timeout is configured separately. A successful
+    // connect() creates an obligation for the caller to drive run() exactly
+    // once. Must be co_awaited on the client's event loop.
+    fiber::async::Task<common::IoResult<void>> connect(std::chrono::milliseconds timeout) noexcept;
 
     // Drive the HTTP/2 connection until it closes. The caller must schedule and
     // retain this coroutine; only one run() invocation is accepted.

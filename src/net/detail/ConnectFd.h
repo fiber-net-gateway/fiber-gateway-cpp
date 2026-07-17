@@ -2,6 +2,7 @@
 #define FIBER_NET_DETAIL_CONNECT_FD_H
 
 #include <cerrno>
+#include <chrono>
 #include <coroutine>
 #include <expected>
 #include <sys/socket.h>
@@ -86,16 +87,17 @@ public:
 
     class ConnectAwaiter;
 
-    [[nodiscard]] static ConnectAwaiter connect(fiber::event::EventLoop &loop, Address peer) noexcept {
-        return ConnectAwaiter(loop, std::move(peer));
+    [[nodiscard]] static ConnectAwaiter connect(fiber::event::EventLoop &loop, Address peer,
+                                                std::chrono::milliseconds timeout) noexcept {
+        return ConnectAwaiter(loop, std::move(peer), timeout);
     }
 };
 
 template<typename Traits>
 class ConnectFd<Traits>::ConnectAwaiter {
 public:
-    ConnectAwaiter(fiber::event::EventLoop &loop, Address peer) noexcept :
-        efd_(loop, this, &ConnectAwaiter::on_efd_events), peer_(std::move(peer)) {}
+    ConnectAwaiter(fiber::event::EventLoop &loop, Address peer, std::chrono::milliseconds timeout) noexcept :
+        efd_(loop, this, &ConnectAwaiter::on_efd_events), peer_(std::move(peer)), timeout_(timeout) {}
 
     ConnectAwaiter(const ConnectAwaiter &) = delete;
     ConnectAwaiter &operator=(const ConnectAwaiter &) = delete;
@@ -104,6 +106,7 @@ public:
 
     ~ConnectAwaiter() {
         if (!waiting_) {
+            FIBER_ASSERT(!timer_entry_.is_in_heap());
             close_fd();
             return;
         }
@@ -141,6 +144,11 @@ public:
             close_fd();
             return false;
         }
+        if (timeout_ <= std::chrono::milliseconds::zero()) {
+            result_ = std::unexpected(fiber::common::IoErr::TimedOut);
+            close_fd();
+            return false;
+        }
 
         fiber::common::IoErr watch_err = efd_.watch_add(fiber::event::IoEvent::Write);
         if (watch_err != fiber::common::IoErr::None) {
@@ -149,6 +157,10 @@ public:
             return false;
         }
         waiting_ = true;
+        if (has_timer()) {
+            efd_.loop().post_at<ConnectAwaiter, &ConnectAwaiter::timer_entry_, &ConnectAwaiter::on_timeout>(
+                    efd_.loop().now() + timeout_, *this);
+        }
         return true;
     }
 
@@ -161,6 +173,7 @@ public:
         FIBER_ASSERT(efd_.loop().in_loop());
         waiting_ = false;
         (void) efd_.watch_del(fiber::event::IoEvent::Write);
+        cancel_timer();
         result_ = std::unexpected(fiber::common::IoErr::Canceled);
         auto handle = handle_;
         handle_ = {};
@@ -172,6 +185,14 @@ public:
 
 private:
     void close_fd() noexcept { efd_.close_fd(); }
+
+    [[nodiscard]] bool has_timer() const noexcept { return timeout_ != std::chrono::milliseconds::max(); }
+
+    void cancel_timer() noexcept {
+        if (timer_entry_.is_in_heap()) {
+            efd_.loop().cancel<ConnectAwaiter, &ConnectAwaiter::timer_entry_>(*this);
+        }
+    }
 
     fiber::common::IoErr finish_connect() noexcept {
         int socket_fd = efd_.fd();
@@ -201,11 +222,12 @@ private:
         }
         waiting_ = false;
         (void) efd_.watch_del(fiber::event::IoEvent::Write);
+        cancel_timer();
         handle_ = {};
         close_fd();
     }
 
-    void handle_connected(fiber::event::IoEvent events) {
+    void handle_connected(fiber::event::IoEvent events) noexcept {
         FIBER_ASSERT(efd_.loop().in_loop());
         if (!waiting_) {
             return;
@@ -215,6 +237,7 @@ private:
         }
         waiting_ = false;
         (void) efd_.watch_del(fiber::event::IoEvent::Write);
+        cancel_timer();
 
         fiber::common::IoErr err = finish_connect();
         if (err == fiber::common::IoErr::None) {
@@ -232,7 +255,7 @@ private:
         }
     }
 
-    static void on_efd_events(void *owner, fiber::event::IoEvent events) {
+    static void on_efd_events(void *owner, fiber::event::IoEvent events) noexcept {
         auto *awaiter = static_cast<ConnectAwaiter *>(owner);
         if (!awaiter) {
             return;
@@ -240,9 +263,26 @@ private:
         awaiter->handle_connected(events);
     }
 
+    static void on_timeout(ConnectAwaiter *awaiter) noexcept {
+        if (!awaiter || !awaiter->waiting_) {
+            return;
+        }
+        awaiter->waiting_ = false;
+        (void) awaiter->efd_.watch_del(fiber::event::IoEvent::Write);
+        awaiter->result_ = std::unexpected(fiber::common::IoErr::TimedOut);
+        auto handle = awaiter->handle_;
+        awaiter->handle_ = {};
+        awaiter->close_fd();
+        if (handle) {
+            handle.resume();
+        }
+    }
+
     Efd efd_;
     Address peer_{};
+    std::chrono::milliseconds timeout_{};
     std::coroutine_handle<> handle_{};
+    fiber::event::EventLoop::TimerEntry timer_entry_{};
     fiber::common::IoResult<ConnectResult> result_{std::unexpected(fiber::common::IoErr::Unknown)};
     bool waiting_ = false;
 };

@@ -103,7 +103,7 @@ ensure_connected(fiber::http::Http1ConnectionPoolCore::Lease &lease, std::uint16
             co_return std::unexpected(conn_result.error());
         }
         auto &conn = **conn_result;
-        auto connect_result = co_await conn.connect();
+        auto connect_result = co_await conn.connect(5s);
         if (!connect_result) {
             co_return std::unexpected(connect_result.error());
         }

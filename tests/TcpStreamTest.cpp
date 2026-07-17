@@ -336,7 +336,7 @@ DetachedTask readv_writev_server(fiber::event::EventLoop *loop, std::promise<uin
 DetachedTask connect_client(fiber::event::EventLoop *loop, fiber::net::SocketAddress target,
                             std::promise<fiber::common::IoResult<std::string>> *response_promise, std::string request,
                             std::string expected_response) {
-    auto infant_result = co_await fiber::net::TcpStream::connect(*loop, target);
+    auto infant_result = co_await fiber::net::TcpStream::connect(*loop, target, std::chrono::seconds(5));
     if (!infant_result) {
         response_promise->set_value(std::unexpected(infant_result.error()));
         fiber::event::EventLoop::current().stop();

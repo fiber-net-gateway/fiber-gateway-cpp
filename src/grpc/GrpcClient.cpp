@@ -56,7 +56,6 @@ http::Http2ClientConnection::Options make_connection_options(GrpcClient::Options
     conn_options.peer_addr = std::move(options.peer_addr);
     conn_options.tls = std::move(options.tls);
     conn_options.h2 = std::move(options.h2);
-    conn_options.connect_timeout = options.connect_timeout;
     if (conn_options.h2.outbound_hpack_catalog == nullptr) {
         conn_options.h2.outbound_hpack_catalog = &grpc_header_catalog();
     }
@@ -77,12 +76,12 @@ GrpcClient::~GrpcClient() {
     FIBER_ASSERT(run_finished_wg_.empty());
 }
 
-fiber::async::Task<common::IoResult<void>> GrpcClient::connect() noexcept {
+fiber::async::Task<common::IoResult<void>> GrpcClient::connect(std::chrono::milliseconds timeout) noexcept {
     FIBER_ASSERT(loop_->in_loop());
     if (state_ != State::Created) {
         co_return std::unexpected(common::IoErr::Busy);
     }
-    auto connect_result = co_await conn_.connect();
+    auto connect_result = co_await conn_.connect(timeout);
     if (!connect_result) {
         if (conn_.http2().state() != http::Http2Connection::State::Init) {
             state_ = State::Stopped;

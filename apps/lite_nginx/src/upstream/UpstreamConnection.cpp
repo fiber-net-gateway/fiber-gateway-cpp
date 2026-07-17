@@ -43,7 +43,6 @@ acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService
     auto build_opts = [&](const fiber::net::IpAddress &ip) {
         fiber::http::Http1ClientConnectionOptions opts;
         opts.peer_addr = fiber::net::SocketAddress(ip, key.port());
-        opts.connect_timeout = connect_timeout;
         if (key.scheme() == fiber::http::Http1ConnectionGroupKey::Scheme::Https) {
             opts.tls.server_name = std::string(tls_server_name);
         }
@@ -57,7 +56,7 @@ acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService
         for (std::size_t i = 0; i < addresses.size(); ++i) {
             out.transient = std::make_unique<fiber::http::Http1ClientConnection>(fiber::event::EventLoop::current(),
                                                                                  build_opts(addresses[i]));
-            auto connect_result = co_await out.transient->connect();
+            auto connect_result = co_await out.transient->connect(connect_timeout);
             if (connect_result) {
                 out.conn = out.transient.get();
                 co_return out;
@@ -88,7 +87,7 @@ acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService
             out.lease.reset();
             continue;
         }
-        auto connect_result = co_await (*emplace)->connect();
+        auto connect_result = co_await (*emplace)->connect(connect_timeout);
         if (connect_result) {
             out.conn = *emplace;
             co_return out;

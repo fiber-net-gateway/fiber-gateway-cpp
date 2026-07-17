@@ -56,7 +56,7 @@ DetachedTask run_client_connect(fiber::event::EventLoop *loop, std::uint16_t por
     options.tls.enabled = false;
 
     fiber::http::Http1ClientConnection connection(*loop, std::move(options));
-    auto connect_result = co_await connection.connect();
+    auto connect_result = co_await connection.connect(5s);
     connected_promise->set_value(connect_result.has_value() && connection.connected() && connection.idle() &&
                                  connection.reusable() && !connection.busy());
     result_promise->set_value(connect_result ? fiber::common::IoErr::None : connect_result.error());

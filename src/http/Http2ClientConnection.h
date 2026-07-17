@@ -25,12 +25,12 @@ public:
         net::SocketAddress peer_addr{};
         net::TlsOptions tls{};
         Http2Connection::Options h2{};
-        std::chrono::milliseconds connect_timeout{0};
     };
 
     Http2ClientConnection(event::EventLoop &loop, Options options) noexcept;
 
-    fiber::async::Task<common::IoResult<void>> connect() noexcept;
+    // timeout applies to the TCP connect phase. TLS handshake timeout is configured separately.
+    fiber::async::Task<common::IoResult<void>> connect(std::chrono::milliseconds timeout) noexcept;
     fiber::async::Task<Http2Connection::RunResult> run() noexcept;
 
     [[nodiscard]] ClientHttp2Exchange open_exchange(mem::BufPool &pool) noexcept;
@@ -49,7 +49,6 @@ private:
 
     event::EventLoop *loop_ = nullptr;
     net::SocketAddress peer_addr_{};
-    std::chrono::milliseconds connect_timeout_{};
     std::optional<net::SocketAddress> local_addr_;
     net::TlsContext tls_ctx_;
     Http2Connection conn_;

@@ -1,6 +1,7 @@
 #ifndef FIBER_NET_UNIX_STREAM_H
 #define FIBER_NET_UNIX_STREAM_H
 
+#include <chrono>
 #include <cstddef>
 #include <sys/uio.h>
 #include <utility>
@@ -38,7 +39,10 @@ public:
     UnixStream(ConnectInfant &&infant);
     ~UnixStream();
 
-    [[nodiscard]] static ConnectAwaiter connect(fiber::event::EventLoop &loop, const UnixAddress &peer) noexcept;
+    // timeout bounds the asynchronous wait after connect(2) returns EINPROGRESS.
+    // A non-positive timeout does not wait; milliseconds::max() waits indefinitely.
+    [[nodiscard]] static ConnectAwaiter connect(fiber::event::EventLoop &loop, const UnixAddress &peer,
+                                                std::chrono::milliseconds timeout) noexcept;
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] int fd() const noexcept;
     [[nodiscard]] const UnixAddress &remote_addr() const noexcept;

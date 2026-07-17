@@ -306,7 +306,7 @@ DetachedTask run_http1_client_no_body(fiber::event::EventLoop *loop, std::uint16
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
 
     fiber::http::Http1ClientConnection connection(*loop, options);
-    auto connect_result = co_await connection.connect();
+    auto connect_result = co_await connection.connect(5s);
     if (!connect_result) {
         result.err = connect_result.error();
         promise->set_value(std::move(result));
@@ -359,7 +359,7 @@ DetachedTask run_http1_client_no_body_target(fiber::event::EventLoop *loop, std:
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
 
     fiber::http::Http1ClientConnection connection(*loop, options);
-    auto connect_result = co_await connection.connect();
+    auto connect_result = co_await connection.connect(5s);
     if (!connect_result) {
         result.err = connect_result.error();
         promise->set_value(std::move(result));
@@ -412,7 +412,7 @@ DetachedTask run_http1_client_with_body(fiber::event::EventLoop *loop, std::uint
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
 
     fiber::http::Http1ClientConnection connection(*loop, options);
-    auto connect_result = co_await connection.connect();
+    auto connect_result = co_await connection.connect(5s);
     if (!connect_result) {
         result.err = connect_result.error();
         promise->set_value(std::move(result));
@@ -475,7 +475,7 @@ DetachedTask run_http2_client_no_body(fiber::event::EventLoop *loop, std::uint16
     options.h2.outbound_hpack_catalog = &test_http2_encode_catalog();
 
     fiber::http::Http2ClientConnection connection(*loop, std::move(options));
-    auto connect_result = co_await connection.connect();
+    auto connect_result = co_await connection.connect(5s);
     if (!connect_result) {
         result.err = connect_result.error();
         promise->set_value(std::move(result));
@@ -544,7 +544,7 @@ DetachedTask run_http2_client_with_body(fiber::event::EventLoop *loop, std::uint
     options.h2.outbound_hpack_catalog = &test_http2_encode_catalog();
 
     fiber::http::Http2ClientConnection connection(*loop, std::move(options));
-    auto connect_result = co_await connection.connect();
+    auto connect_result = co_await connection.connect(5s);
     if (!connect_result) {
         result.err = connect_result.error();
         promise->set_value(std::move(result));

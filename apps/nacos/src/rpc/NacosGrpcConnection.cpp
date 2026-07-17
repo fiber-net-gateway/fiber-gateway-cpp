@@ -506,13 +506,12 @@ async::Task<NacosGrpcConnection::AttemptResult> NacosGrpcConnection::run_generat
     publish_state(NacosGrpcConnectionState::Connecting, std::nullopt, state_server_index);
     grpc::GrpcClient::Options client_options;
     client_options.peer_addr = net::SocketAddress(endpoint.ip, endpoint.port);
-    client_options.connect_timeout = options_->grpc_connect_timeout;
     const std::string endpoint_authority = authority(endpoint);
     client_options.authority = endpoint_authority;
     client_options.scheme = "http";
     generation.client = std::make_unique<grpc::GrpcClient>(*loop_, std::move(client_options));
 
-    auto connected = co_await generation.client->connect();
+    auto connected = co_await generation.client->connect(options_->grpc_connect_timeout);
     if (!connected) {
         const AttemptResult result{.error = transport_error(connected.error())};
         co_await cleanup();
