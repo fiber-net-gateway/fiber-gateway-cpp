@@ -19,6 +19,7 @@
 #include <fiber/nacos/NacosClient.h>
 #include <fiber/nacos/NacosClientConfig.h>
 
+#include "../config/ConfigServiceImpl.h"
 #include "../rpc/NacosGrpcConnection.h"
 
 namespace fiber::nacos::detail {
@@ -39,6 +40,7 @@ public:
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] async::Watch<NacosAuthSnapshot>::Subscriber subscribe_auth();
+    [[nodiscard]] ConfigService &config_service() noexcept { return config_service_; }
 
     [[nodiscard]] event::EventLoop &loop() const noexcept { return *loop_; }
     [[nodiscard]] const NacosClientConfig &config() const noexcept { return config_; }
@@ -53,6 +55,7 @@ private:
 
     [[nodiscard]] async::DetachedTask run_auth() noexcept;
     [[nodiscard]] async::DetachedTask run_grpc() noexcept;
+    [[nodiscard]] async::DetachedTask run_config() noexcept;
     [[nodiscard]] async::Task<std::expected<AuthLoginSuccess, NacosAuthError>>
     login(std::size_t server_index, std::string_view target, std::string_view auth_body,
           std::chrono::steady_clock::time_point deadline) noexcept;
@@ -67,6 +70,7 @@ private:
     NacosClientConfig config_;
     NacosClientOptions options_;
     NacosGrpcConnection grpc_connection_;
+    ConfigServiceImpl config_service_;
     NacosClientState state_ = NacosClientState::Created;
     async::WaitGroup task_group_;
     async::Watch<bool> shutdown_watch_{false};

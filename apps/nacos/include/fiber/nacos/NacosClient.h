@@ -12,6 +12,7 @@
 #include <common/NonMovable.h>
 #include <event/EventLoop.h>
 
+#include "ConfigService.h"
 #include "NacosAuth.h"
 #include "NacosClientConfig.h"
 
@@ -42,6 +43,7 @@ public:
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] AuthSubscriber subscribe_auth();
+    [[nodiscard]] ConfigService &config_service() noexcept;
     [[nodiscard]] event::EventLoop &loop() const noexcept;
     [[nodiscard]] const NacosClientConfig &config() const noexcept;
 

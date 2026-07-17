@@ -78,9 +78,16 @@ public:
         FIBER_ASSERT(loop_->in_loop());
         auto lease = acquire_requester();
         if (!lease) {
+            const NacosRpcErrorCode code = control_.stopping
+                                                   ? NacosRpcErrorCode::Shutdown
+                                                   : (!auth_ready() ? NacosRpcErrorCode::AuthenticationUnavailable
+                                                                    : NacosRpcErrorCode::Transport);
             co_return std::unexpected(NacosRpcError{
-                    .code = control_.stopping ? NacosRpcErrorCode::Shutdown : NacosRpcErrorCode::Transport,
-                    .io_error = control_.stopping ? common::IoErr::Canceled : common::IoErr::NotConnected,
+                    .code = code,
+                    .io_error = control_.stopping ? common::IoErr::Canceled
+                                                  : (code == NacosRpcErrorCode::AuthenticationUnavailable
+                                                             ? common::IoErr::Permission
+                                                             : common::IoErr::NotConnected),
             });
         }
         auto metadata = current_metadata();

@@ -24,7 +24,12 @@ bool valid_options(const NacosClientOptions &options) noexcept {
            options.grpc_reconnect_max_delay >= options.grpc_reconnect_initial_delay &&
            options.max_inbound_grpc_message_bytes > 0 && options.max_push_response_queue > 0 &&
            options.max_push_response_bytes > 0 &&
-           options.max_push_response_bytes <= options.max_inbound_grpc_message_bytes;
+           options.max_push_response_bytes <= options.max_inbound_grpc_message_bytes &&
+           options.config_subscription_redo_interval > std::chrono::milliseconds::zero() &&
+           options.max_config_content_bytes > 0 &&
+           options.max_config_content_bytes <= options.max_inbound_grpc_message_bytes &&
+           options.max_config_data_id_bytes > 0 && options.max_config_group_bytes > 0 &&
+           options.max_listen_contexts_per_request > 0;
 }
 
 } // namespace
@@ -56,6 +61,8 @@ common::IoResult<void> NacosClient::start() noexcept { return impl_->start(); }
 async::Task<void> NacosClient::shutdown() noexcept { co_await impl_->shutdown(); }
 
 NacosClient::AuthSubscriber NacosClient::subscribe_auth() { return impl_->subscribe_auth(); }
+
+ConfigService &NacosClient::config_service() noexcept { return impl_->config_service(); }
 
 event::EventLoop &NacosClient::loop() const noexcept { return impl_->loop(); }
 
