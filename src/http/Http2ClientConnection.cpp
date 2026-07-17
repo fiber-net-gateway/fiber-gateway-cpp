@@ -1,8 +1,11 @@
 #include "Http2ClientConnection.h"
 
+#include <cerrno>
 #include <memory>
 #include <string_view>
+#include <sys/socket.h>
 
+#include "../async/Timeout.h"
 #include "../net/TcpListener.h"
 #include "../net/TcpStream.h"
 #include "ClientHttp2Exchange.h"
@@ -30,7 +33,7 @@ Http2Connection::Options Http2ClientConnection::normalize_h2_options(Http2Connec
 }
 
 Http2ClientConnection::Http2ClientConnection(event::EventLoop &loop, Options options) noexcept :
-    loop_(&loop), peer_addr_(std::move(options.peer_addr)),
+    loop_(&loop), peer_addr_(std::move(options.peer_addr)), connect_timeout_(options.connect_timeout),
     tls_ctx_(normalize_tls_options(std::move(options.tls)), false, false),
     conn_(normalize_h2_options(std::move(options.h2)), nullptr, ClientHttp2Request::factory_ops()) {}
 
@@ -50,10 +53,27 @@ fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect() noex
         }
     }
 
-    auto connect_result = co_await net::TcpStream::connect(*loop_, peer_addr_);
+    common::IoResult<net::TcpStream::ConnectInfant> connect_result = std::unexpected(common::IoErr::Unknown);
+    if (connect_timeout_ > std::chrono::milliseconds::zero()) {
+        connect_result = co_await async::timeout_for([this]() { return net::TcpStream::connect(*loop_, peer_addr_); },
+                                                     connect_timeout_);
+    } else {
+        connect_result = co_await net::TcpStream::connect(*loop_, peer_addr_);
+    }
     if (!connect_result) {
         co_return std::unexpected(connect_result.error());
     }
+
+    sockaddr_storage local_storage{};
+    socklen_t local_len = sizeof(local_storage);
+    if (::getsockname(connect_result->fd(), reinterpret_cast<sockaddr *>(&local_storage), &local_len) != 0) {
+        co_return std::unexpected(common::io_err_from_errno(errno));
+    }
+    net::SocketAddress local;
+    if (!net::SocketAddress::from_sockaddr(reinterpret_cast<const sockaddr *>(&local_storage), local_len, local)) {
+        co_return std::unexpected(common::IoErr::NotSupported);
+    }
+    local_addr_ = local;
 
     net::AcceptResult accept(connect_result->release_fd(), connect_result->take_peer());
     std::unique_ptr<HttpTransport> transport;

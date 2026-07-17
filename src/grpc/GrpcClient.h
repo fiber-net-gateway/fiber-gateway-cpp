@@ -1,7 +1,9 @@
 #ifndef FIBER_GRPC_GRPC_CLIENT_H
 #define FIBER_GRPC_GRPC_CLIENT_H
 
+#include <chrono>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -37,6 +39,7 @@ public:
         net::SocketAddress peer_addr{};
         net::TlsOptions tls{};
         http::Http2Connection::Options h2{};
+        std::chrono::milliseconds connect_timeout{0};
         std::string_view authority{};
         std::string_view scheme{"https"};
     };
@@ -64,6 +67,8 @@ public:
     // shutdown begins.
     GrpcStream open_stream(std::string_view service, std::string_view method, mem::BufPool &pool,
                            GrpcStream::Options options = {}) noexcept(false);
+
+    [[nodiscard]] const std::optional<net::SocketAddress> &local_addr() const noexcept { return conn_.local_addr(); }
 
 private:
     enum class State : std::uint8_t {

@@ -1,6 +1,6 @@
 # Nacos ConfigService 通信机制与开发计划
 
-> 状态：设计阶段，尚未实现。
+> 状态：RPC 基础层（阶段 1、2）已实现；ConfigService 公共操作与订阅层（阶段 3 以后）待实现。
 >
 > 更新日期：2026-07-17。
 >
@@ -108,6 +108,10 @@ message Payload {
   google.protobuf.Any body = 3;
 }
 ```
+
+当前 C++ 实现为保持 protobuf lite-only 链接，使用了与 `google.protobuf.Any` 字段号完全相同的本地
+wire-equivalent `Any`（`type_url = 1`、`value = 2`）。它不会改变线上字节格式，也避免 Nacos 库额外引入 full
+protobuf runtime。
 
 兼容性要求：
 
@@ -476,35 +480,35 @@ Codec 约束：
 
 ### 阶段 0：稳定当前认证基线
 
-- [ ] 完成当前未提交认证重构的评审和测试。
-- [ ] 确认认证 Watch 的 Ready/Unavailable/Stopped 语义稳定。
-- [ ] 确认 token 刷新、过期、server failover 和 shutdown 可供 config 复用。
-- [ ] 冻结 ConfigService 所依赖的 `NacosClientConfig`/`NacosClientOptions` 基线。
+- [x] 完成当前未提交认证重构的评审和测试。
+- [x] 确认认证 Watch 的 Ready/Unavailable/Stopped 语义稳定。
+- [x] 确认 token 刷新、过期、server failover 和 shutdown 可供 config 复用。
+- [x] 冻结 ConfigService 所依赖的 `NacosClientConfig`/`NacosClientOptions` 基线。
 
 验收：现有 Nacos 定向测试和完整 CTest 通过，工作区中的认证行为与 README 一致。
 
 ### 阶段 1：Payload 和 DTO wire compatibility
 
-- [ ] 添加 Nacos Payload proto 和 protobuf lite CMake target。
-- [ ] 实现 Payload metadata/body 构造与解析。
-- [ ] 补齐 internal/config DTO 和 JSON codec。
-- [ ] 从 Java 2.1 生成或固定 golden JSON/serialized Payload fixtures。
-- [ ] 定义统一的 protocol/server/transport error 模型。
+- [x] 添加 Nacos Payload proto 和 protobuf lite CMake target。
+- [x] 实现 Payload metadata/body 构造与解析。
+- [x] 补齐 internal/config DTO 和 JSON codec。
+- [x] 从 Java 2.1 生成或固定 golden JSON/serialized Payload fixtures。
+- [x] 定义统一的 protocol/server/transport error 模型。
 
 验收：所有 DTO 与 Java fixture 双向兼容；类型不匹配、ErrorResponse、非法 protobuf/JSON 和超限输入均有测试。
 
 ### 阶段 2：通用 Nacos gRPC 连接
 
-- [ ] 实现 `NacosRequester` unary 调用封装。
-- [ ] 实现 ServerCheck 和双向流 ConnectionSetup。
-- [ ] 实现 SetupAck/兼容延迟和握手超时。
-- [ ] 实现单写者 push response queue。
-- [ ] 实现 ClientDetection、ConnectReset 和 unknown request 策略。
-- [ ] 实现 heartbeat、server failover、backoff 和 jitter。
-- [ ] 监听 Auth Watch，动态更新 token metadata。
+- [x] 实现 `NacosRequester` unary 调用封装。
+- [x] 实现 ServerCheck 和双向流 ConnectionSetup。
+- [x] 实现 SetupAck/兼容延迟和握手超时。
+- [x] 实现单写者 push response queue。
+- [x] 实现 ClientDetection、ConnectReset 和 unknown request 策略。
+- [x] 实现 heartbeat、server failover、backoff 和 jitter。
+- [x] 监听 Auth Watch，动态更新 token metadata。
 - [x] 为通用 GrpcClient 增加外部驱动的 `run()` 和可等待的 `shutdown()`。
-- [ ] 必要时暴露连接本地地址。
-- [ ] 接入 NacosClient `WaitGroup` 和 shutdown。
+- [x] 暴露连接本地地址并支持显式 client IP 覆盖。
+- [x] 接入 NacosClient `WaitGroup` 和 shutdown。
 
 验收：脚本化 gRPC 测试服务器可验证完整握手、双向请求/响应、token 更新、重连和干净关闭。
 
@@ -545,14 +549,14 @@ Codec 约束：
 
 ### 阶段 6：rnacos 互操作与文档
 
-- [ ] 使用隔离端口和临时数据目录启动 `temp/rnacos`。
+- [x] 使用隔离端口和临时数据目录启动 `temp/rnacos`，验证 RPC 握手互通。
 - [ ] 验证 publish -> get。
 - [ ] 验证 CAS 成功和冲突。
 - [ ] 验证 subscribe -> publish -> change push。
 - [ ] 验证 remove -> NotFound。
 - [ ] 验证 rnacos 重启后的自动重连和订阅恢复。
 - [ ] 确认观察到的差异是 Nacos 协议、Java 版本差异还是 rnacos 特有行为。
-- [ ] 更新 `apps/nacos/README.md`，记录公共 API、生命周期和已知差异。
+- [x] 更新 `apps/nacos/README.md`，记录当前 RPC 边界、生命周期和已知差异。
 
 验收：所有本地测试通过，rnacos 互操作结果可重复且测试进程能清理服务端。
 

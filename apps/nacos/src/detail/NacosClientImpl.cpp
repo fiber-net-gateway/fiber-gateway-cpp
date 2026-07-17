@@ -145,7 +145,7 @@ void append_chunk(mem::IoBufChain &chunk, std::string &out) {
 } // namespace
 
 NacosClientImpl::NacosClientImpl(event::EventLoop &loop, NacosClientConfig config, NacosClientOptions options) :
-    loop_(&loop), config_(std::move(config)), options_(options) {
+    loop_(&loop), config_(std::move(config)), options_(std::move(options)), grpc_connection_(loop, config_, options_) {
     shutdown_publisher_ = shutdown_watch_.acquire_publisher();
     auth_publisher_ = auth_watch_.acquire_publisher();
     FIBER_ASSERT(shutdown_publisher_.has_value());
@@ -167,6 +167,8 @@ common::IoResult<void> NacosClientImpl::start() noexcept {
     state_ = NacosClientState::Running;
     task_group_.add();
     async::spawn(*loop_, [this]() { return run_auth(); });
+    task_group_.add();
+    async::spawn(*loop_, [this]() { return run_grpc(); });
     return {};
 }
 
@@ -178,6 +180,7 @@ async::Task<void> NacosClientImpl::shutdown() noexcept {
     }
     if (state_ == NacosClientState::Created || state_ == NacosClientState::Running) {
         state_ = NacosClientState::Stopping;
+        grpc_connection_.shutdown();
         shutdown_publisher_->publish(true);
     }
 
@@ -199,6 +202,7 @@ void NacosClientImpl::end_task() noexcept {
 
 void NacosClientImpl::publish_auth(NacosAuthSnapshot snapshot) {
     FIBER_ASSERT(loop_->in_loop());
+    grpc_connection_.notify_auth(snapshot);
     auth_publisher_->publish(std::move(snapshot));
 }
 
@@ -431,6 +435,11 @@ async::DetachedTask NacosClientImpl::run_auth() noexcept {
 
     end_task();
     co_return;
+}
+
+async::DetachedTask NacosClientImpl::run_grpc() noexcept {
+    co_await grpc_connection_.run();
+    end_task();
 }
 
 async::Task<std::expected<NacosClientImpl::AuthLoginSuccess, NacosAuthError>>

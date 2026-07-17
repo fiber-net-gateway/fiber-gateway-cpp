@@ -84,6 +84,18 @@ struct NacosClientOptions {
     std::chrono::milliseconds retry_max_delay{30000};
     std::uint8_t refresh_percent = 90;
     std::chrono::milliseconds min_refresh_delay{1000};
+
+    std::chrono::milliseconds grpc_connect_timeout{3000};
+    std::chrono::milliseconds grpc_request_timeout{3000};
+    std::chrono::milliseconds grpc_handshake_timeout{5000};
+    std::chrono::milliseconds grpc_compatibility_setup_delay{1000};
+    std::chrono::milliseconds grpc_heartbeat_interval{10000};
+    std::chrono::milliseconds grpc_reconnect_initial_delay{1000};
+    std::chrono::milliseconds grpc_reconnect_max_delay{60000};
+    std::size_t max_inbound_grpc_message_bytes = 10 * 1024 * 1024;
+    std::size_t max_push_response_queue = 64;
+    std::size_t max_push_response_bytes = 1024 * 1024;
+    std::string client_ip_override;
 };
 
 } // namespace fiber::nacos

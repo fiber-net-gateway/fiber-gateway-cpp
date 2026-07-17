@@ -10,6 +10,8 @@ namespace fiber::nacos::dto {
 
 inline constexpr std::int32_t kResponseSuccess = 200;
 inline constexpr std::int32_t kResponseFail = 500;
+inline constexpr std::string_view kInternalModule = "internal";
+inline constexpr std::string_view kConfigModule = "config";
 
 struct RequestBase {
     RequestBase() noexcept { request_id.set_null(); }
@@ -28,6 +30,8 @@ struct ConfigRequestBase : RequestBase {
     json::Nullable<std::string_view> group;
     json::Nullable<std::string_view> tenant;
 };
+
+struct InternalRequestBase : RequestBase {};
 
 struct ResponseBase {
     ResponseBase() noexcept {

@@ -2,6 +2,8 @@
 #define FIBER_GRPC_GRPC_FRAMING_H
 
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 
 #include "../common/IoError.h"
 #include "../common/mem/IoBufChain.h"
@@ -25,7 +27,8 @@ common::IoResult<mem::IoBufChain> frame(mem::IoBufChain payload) noexcept;
 // payload bytes stay in the original IoBuf storage all the way to the caller.
 class GrpcFrameReader {
 public:
-    GrpcFrameReader() noexcept = default;
+    explicit GrpcFrameReader(std::size_t max_message_bytes = std::numeric_limits<std::uint32_t>::max()) noexcept :
+        max_message_bytes_(max_message_bytes) {}
 
     // Append a body chunk. Moves the chunk's nodes into the internal buffer
     // (zero-copy). The first chunk fixes the node-pool binding; every chunk
@@ -43,6 +46,7 @@ public:
 
 private:
     mem::IoBufChain buffer_;
+    std::size_t max_message_bytes_ = std::numeric_limits<std::uint32_t>::max();
 };
 
 } // namespace fiber::grpc

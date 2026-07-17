@@ -9,7 +9,7 @@ namespace fiber::nacos::dto::req {
 
 struct ConfigQueryRequest : ConfigRequestBase {
     static constexpr std::string_view kTypeName = "ConfigQueryRequest";
-    static constexpr std::string_view kModule = "config";
+    static constexpr std::string_view kModule = kConfigModule;
 
     ConfigQueryRequest() noexcept { tag.set_null(); }
 

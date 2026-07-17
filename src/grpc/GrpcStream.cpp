@@ -43,7 +43,7 @@ void assign_grpc_message(std::string &dst, std::string_view src) {
 
 GrpcStream::GrpcStream(http::Http2ClientConnection &conn, std::string_view authority, std::string_view scheme,
                        std::string_view service, std::string_view method, mem::BufPool &pool, Options options) :
-    conn_(&conn), pool_(&pool), exchange_(conn, pool) {
+    conn_(&conn), pool_(&pool), exchange_(conn, pool), reader_(options.max_inbound_message_bytes) {
     authority_.assign(authority.data(), authority.size());
     scheme_.assign(scheme.data(), scheme.size());
     path_.reserve(service.size() + method.size() + 2);
@@ -110,6 +110,21 @@ void GrpcStream::fail(common::IoErr reason) noexcept {
 }
 
 void GrpcStream::cancel(common::IoErr reason) noexcept { fail(reason); }
+
+void GrpcStream::set_local_deadline(std::chrono::milliseconds timeout) noexcept {
+    FIBER_ASSERT(conn_ != nullptr);
+    if (timeout <= std::chrono::milliseconds::zero()) {
+        deadline_abs_ = conn_->loop().now();
+    } else {
+        deadline_abs_ = conn_->loop().now() + timeout;
+    }
+    has_deadline_ = true;
+}
+
+void GrpcStream::clear_local_deadline() noexcept {
+    has_deadline_ = false;
+    deadline_abs_ = {};
+}
 
 std::chrono::milliseconds GrpcStream::remaining_timeout() const noexcept {
     if (!has_deadline_) {
