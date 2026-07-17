@@ -2,56 +2,12 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
-#include <cstring>
-#include <new>
 #include <string>
 #include <utility>
 
 #include <async/Timeout.h>
 #include <common/Assert.h>
 #include <fiber/nacos/dto/Config.h>
-
-namespace fiber::nacos {
-
-ConfigSubscription::ConfigSubscription(std::shared_ptr<detail::ConfigSubscriptionLease> lease,
-                                       Subscriber subscriber) noexcept :
-    lease_(std::move(lease)), subscriber_(std::move(subscriber)) {}
-
-ConfigSubscription::ConfigSubscription(ConfigSubscription &&other) noexcept = default;
-
-ConfigSubscription &ConfigSubscription::operator=(ConfigSubscription &&other) noexcept {
-    if (this != &other) {
-        close();
-        lease_ = std::move(other.lease_);
-        subscriber_ = std::move(other.subscriber_);
-    }
-    return *this;
-}
-
-ConfigSubscription::~ConfigSubscription() { close(); }
-
-ConfigSubscription::Snapshot ConfigSubscription::current() const {
-    FIBER_ASSERT(subscriber_.has_value());
-    return subscriber_->current();
-}
-
-ConfigSubscription::NextAwaiter ConfigSubscription::next(std::uint64_t received_version) const noexcept {
-    FIBER_ASSERT(subscriber_.has_value());
-    return subscriber_->next(received_version);
-}
-
-void ConfigSubscription::close() noexcept {
-    if (lease_) {
-        lease_->close();
-        lease_.reset();
-    }
-    subscriber_.reset();
-}
-
-bool ConfigSubscription::valid() const noexcept { return lease_ != nullptr && subscriber_.has_value(); }
-
-} // namespace fiber::nacos
 
 namespace fiber::nacos::detail {
 namespace {
@@ -76,78 +32,17 @@ NacosRpcError protocol_error(std::string message, common::IoErr io_error = commo
     };
 }
 
-[[nodiscard]] int compare_config_key(std::string_view a_data_id, std::string_view a_group, std::string_view b_data_id,
-                                     std::string_view b_group) noexcept {
-    if (int cmp = a_data_id.compare(b_data_id)) {
-        return cmp < 0 ? -1 : 1;
-    }
-    if (int cmp = a_group.compare(b_group)) {
-        return cmp < 0 ? -1 : 1;
-    }
-    return 0;
-}
-
-// Allocates a ConfigEntry together with its data_id/group bytes in a single
-// malloc block: [ConfigEntry][data_id]['\0'][group]['\0']. The entry's
-// string_views point into the tail, so no std::string / ConfigKey allocation is
-// needed. The returned ConfigEntryPtr owns the single initial reference; the
-// registry adds a second reference on insert.
-[[nodiscard]] ConfigEntryPtr make_config_entry(std::string_view data_id, std::string_view group) {
-    static_assert(alignof(ConfigEntry) <= alignof(std::max_align_t),
-                  "ConfigEntry alignment exceeds malloc's guarantee; use aligned allocation");
-    const std::size_t total = sizeof(ConfigEntry) + data_id.size() + group.size() + 2;
-    void *mem = std::malloc(total);
-    FIBER_ASSERT(mem != nullptr);
-    auto *entry = new (mem) ConfigEntry();
-    char *tail = reinterpret_cast<char *>(entry) + sizeof(ConfigEntry);
-    if (data_id.size() != 0) {
-        std::memcpy(tail, data_id.data(), data_id.size());
-    }
-    tail[data_id.size()] = '\0';
-    char *group_tail = tail + data_id.size() + 1;
-    if (group.size() != 0) {
-        std::memcpy(group_tail, group.data(), group.size());
-    }
-    group_tail[group.size()] = '\0';
-    entry->data_id = std::string_view(tail, data_id.size());
-    entry->group = std::string_view(group_tail, group.size());
-    return ConfigEntryPtr(entry);
+ConfigServiceError shutdown_error() {
+    return ConfigServiceError{.code = ConfigServiceErrorCode::Shutdown, .io_error = common::IoErr::Canceled};
 }
 
 } // namespace
 
-bool ConfigEntryCompare::operator()(const ConfigEntry *lhs, const ConfigEntry *rhs) const noexcept {
-    return compare_config_key(lhs->data_id, lhs->group, rhs->data_id, rhs->group) < 0;
-}
-
-ConfigEntry::ConfigEntry() {
-    publisher = watch.acquire_publisher();
-    FIBER_ASSERT(publisher.has_value());
-}
-
-ConfigSubscriptionLease::ConfigSubscriptionLease(std::shared_ptr<ConfigServiceLifetime> lifetime_value,
-                                                 ConfigEntryPtr entry_value) noexcept :
-    lifetime(std::move(lifetime_value)), entry(std::move(entry_value)) {}
-
-ConfigSubscriptionLease::~ConfigSubscriptionLease() { close(); }
-
-void ConfigSubscriptionLease::close() noexcept {
-    if (closed) {
-        return;
-    }
-    closed = true;
-    if (lifetime && lifetime->owner) {
-        lifetime->owner->release_subscription(entry);
-    }
-    entry.reset();
-    lifetime.reset();
-}
-
 ConfigServiceImpl::ConfigServiceImpl(event::EventLoop &loop, const NacosClientConfig &config,
                                      const NacosClientOptions &options, NacosGrpcConnection &connection) :
     loop_(&loop), config_(&config), options_(&options), connection_(&connection),
-    lifetime_(std::make_shared<ConfigServiceLifetime>()) {
-    lifetime_->owner = this;
+    pool_([this](EntryPtr entry) { on_subscription_add(std::move(entry)); },
+          [this](EntryPtr entry) { return on_subscription_remove(std::move(entry)); }) {
     connection_->set_push_handler(NacosPushHandler{
             .context = this,
             .callback = &ConfigServiceImpl::handle_push,
@@ -155,7 +50,6 @@ ConfigServiceImpl::ConfigServiceImpl(event::EventLoop &loop, const NacosClientCo
 }
 
 ConfigServiceImpl::~ConfigServiceImpl() {
-    lifetime_->owner = nullptr;
     FIBER_ASSERT(!run_active_);
     FIBER_ASSERT(tasks_.empty());
 }
@@ -228,50 +122,26 @@ bool ConfigServiceImpl::response_content_valid(const dto::resp::ConfigQueryRespo
            response.content.value().size() <= options_->max_config_content_bytes;
 }
 
-ConfigEntry *ConfigServiceImpl::entry_from_hook(common::IntrusiveRbTreeHook *hook) noexcept {
-    if (hook == nullptr || !hook->linked()) {
-        return nullptr;
-    }
-    return reinterpret_cast<ConfigEntry *>(reinterpret_cast<std::uint8_t *>(hook) - offsetof(ConfigEntry, tree_hook));
-}
-
-ConfigServiceImpl::EntryPtr ConfigServiceImpl::find_entry(std::string_view data_id, std::string_view group) {
-    ConfigEntry *node = entries_.root();
-    while (node != nullptr) {
-        const int cmp = compare_config_key(node->data_id, node->group, data_id, group);
-        if (cmp == 0) {
-            return EntryPtr(node);
-        }
-        node = cmp < 0 ? entry_from_hook(node->tree_hook.left) : entry_from_hook(node->tree_hook.right);
-    }
-    return EntryPtr{};
-}
-
-void ConfigServiceImpl::unlink_entry(ConfigEntry &entry) noexcept {
-    if (entry.tree_hook.linked()) {
-        entries_.erase(entry);
-        entry.release();
-    }
-}
-
 async::Task<std::expected<std::optional<ConfigData>, ConfigServiceError>>
 ConfigServiceImpl::get_config(std::string data_id, std::string group) noexcept {
     FIBER_ASSERT(loop_->in_loop());
     if (stopping_) {
-        co_return std::unexpected(
-                ConfigServiceError{.code = ConfigServiceErrorCode::Shutdown, .io_error = common::IoErr::Canceled});
+        co_return std::unexpected(shutdown_error());
     }
     if (!valid_key(data_id, group)) {
         co_return std::unexpected(validate_key(data_id, group));
     }
 
-    if (auto entry = find_entry(data_id, group)) {
+    // Serve from a synced subscription cache if present.
+    if (auto entry = pool_.find(data_id, group)) {
         const auto snapshot = entry->watch.current();
-        if (snapshot.value->state == ConfigState::Present) {
-            co_return std::optional<ConfigData>(snapshot.value->data);
-        }
-        if (snapshot.value->state == ConfigState::NotFound) {
-            co_return std::optional<ConfigData>{};
+        if (snapshot.value != nullptr) {
+            if (snapshot.value->state == ConfigState::Present) {
+                co_return std::optional<ConfigData>(*snapshot.value);
+            }
+            if (snapshot.value->state == ConfigState::NotFound) {
+                co_return std::optional<ConfigData>{};
+            }
         }
     }
 
@@ -303,6 +173,7 @@ ConfigServiceImpl::get_config(std::string data_id, std::string group) noexcept {
         });
     }
     co_return std::optional<ConfigData>(ConfigData{
+            .state = ConfigState::Present,
             .md5 = std::string(response.md5.value()),
             .content = std::string(response.content.value()),
     });
@@ -313,8 +184,7 @@ ConfigServiceImpl::publish(std::string data_id, std::string group, std::string c
                            std::optional<std::string> cas_md5) noexcept {
     FIBER_ASSERT(loop_->in_loop());
     if (stopping_) {
-        co_return std::unexpected(
-                ConfigServiceError{.code = ConfigServiceErrorCode::Shutdown, .io_error = common::IoErr::Canceled});
+        co_return std::unexpected(shutdown_error());
     }
     if (!valid_key(data_id, group)) {
         co_return std::unexpected(validate_key(data_id, group));
@@ -360,8 +230,7 @@ async::Task<std::expected<void, ConfigServiceError>> ConfigServiceImpl::remove_c
                                                                                       std::string group) noexcept {
     FIBER_ASSERT(loop_->in_loop());
     if (stopping_) {
-        co_return std::unexpected(
-                ConfigServiceError{.code = ConfigServiceErrorCode::Shutdown, .io_error = common::IoErr::Canceled});
+        co_return std::unexpected(shutdown_error());
     }
     if (!valid_key(data_id, group)) {
         co_return std::unexpected(validate_key(data_id, group));
@@ -383,116 +252,110 @@ async::Task<std::expected<void, ConfigServiceError>> ConfigServiceImpl::remove_c
     co_return std::expected<void, ConfigServiceError>{};
 }
 
-std::expected<ConfigSubscription, ConfigServiceError> ConfigServiceImpl::subscribe(std::string_view data_id,
-                                                                                   std::string_view group) {
+std::expected<Subscription<ConfigData>, ConfigServiceError> ConfigServiceImpl::subscribe(std::string_view data_id,
+                                                                                         std::string_view group) {
     FIBER_ASSERT(loop_->in_loop());
-    if (stopping_) {
-        return std::unexpected(
-                ConfigServiceError{.code = ConfigServiceErrorCode::Shutdown, .io_error = common::IoErr::Canceled});
+    if (stopping_ || !pool_.active()) {
+        return std::unexpected(shutdown_error());
     }
     if (!valid_key(data_id, group)) {
         return std::unexpected(validate_key(data_id, group));
     }
-
-    EntryPtr entry = find_entry(data_id, group);
-    const bool first = entry == nullptr;
-    const bool reactivating = static_cast<bool>(entry) && entry->closing;
-    if (first) {
-        entry = make_config_entry(data_id, group);
-        entry->retain();
-        entries_.insert(*entry);
+    auto subscription = pool_.subscribe(data_id, group);
+    if (!subscription) {
+        return std::unexpected(shutdown_error());
     }
-    entry->closing = false;
-    ++entry->subscribers;
-    auto lease = std::make_shared<ConfigSubscriptionLease>(lifetime_, entry);
-    ConfigSubscription subscription(lease, entry->watch.subscribe());
-    if ((first || reactivating) && active_generation_ != 0) {
-        schedule_registration({entry}, true, active_generation_);
-    }
-    return subscription;
+    return std::move(*subscription);
 }
 
-void ConfigServiceImpl::release_subscription(const EntryPtr &entry) noexcept {
+void ConfigServiceImpl::on_subscription_add(EntryPtr entry) {
+    if (active_generation_ != 0) {
+        schedule_registration({std::move(entry)}, true, active_generation_);
+    }
+}
+
+RemoveDecision ConfigServiceImpl::on_subscription_remove(EntryPtr entry) {
     FIBER_ASSERT(loop_->in_loop());
-    if (!entry || entry->subscribers == 0) {
-        return;
-    }
-    --entry->subscribers;
-    if (entry->subscribers != 0) {
-        return;
-    }
-    entry->closing = true;
+    entry->proto.draining = true;
     const std::uint64_t generation = active_generation_;
     if (!stopping_ && generation != 0 &&
-        (entry->registered_generation == generation || entry->registration_in_flight)) {
-        schedule_registration({entry}, false, generation);
+        (entry->proto.registered_generation == generation || entry->proto.registration_in_flight)) {
+        // Registered or mid-registration: defer the free. The pool has already
+        // unlinked the entry from the tree; this owning EntryPtr keeps it alive
+        // while an async listen=false runs, and releases it to 0 on completion.
+        schedule_registration({std::move(entry)}, false, generation);
+        return RemoveDecision::Defer;
     }
-    if (!entry->registration_in_flight &&
-        (generation == 0 || entry->registered_generation == 0 || entry->registered_generation != generation)) {
-        unlink_entry(*entry);
-    }
+    // Never registered (no connection / generation 0) or shutting down: free now.
+    return RemoveDecision::UnlinkNow;
 }
 
-void ConfigServiceImpl::publish_snapshot(ConfigEntry &entry, ConfigSnapshot snapshot) {
+void ConfigServiceImpl::publish_value(ConfigEntry &entry, ConfigData value) {
     FIBER_ASSERT(loop_->in_loop());
-    entry.publisher->publish(std::move(snapshot));
+    pool_.publish(entry, std::move(value));
 }
 
 void ConfigServiceImpl::schedule_query(const EntryPtr &entry, std::uint64_t generation) {
     FIBER_ASSERT(loop_->in_loop());
-    if (stopping_ || generation == 0 || generation != active_generation_ || entry->subscribers == 0 || entry->closing) {
+    if (stopping_ || generation == 0 || generation != active_generation_ || entry->proto.draining) {
         return;
     }
-    if (entry->query_in_flight) {
-        entry->dirty = true;
+    if (entry->proto.query_in_flight) {
+        entry->proto.dirty = true;
         return;
     }
-    entry->query_in_flight = true;
-    entry->dirty = false;
-    const std::uint64_t sequence = ++entry->query_sequence;
+    entry->proto.query_in_flight = true;
+    entry->proto.dirty = false;
+    const std::uint64_t sequence = ++entry->proto.query_sequence;
     tasks_.add();
     async::spawn(*loop_, [this, entry, generation, sequence]() { return query_and_sync(entry, generation, sequence); });
 }
 
 async::DetachedTask ConfigServiceImpl::query_and_sync(EntryPtr entry, std::uint64_t generation,
                                                       std::uint64_t sequence) noexcept {
-    while (!stopping_ && generation != 0 && entry->subscribers > 0 && !entry->closing) {
+    while (!stopping_ && generation != 0 && !entry->proto.draining) {
+        // Stop once the entry is detached from the pool tree (last subscriber
+        // gone -> on_subscription_remove set draining and the pool detached it).
+        // The watch/publisher outlive tree membership, so reads above are safe.
+        if (entry->pool == nullptr) {
+            break;
+        }
         dto::req::ConfigQueryRequest request =
                 dto::req::ConfigQueryRequest::build(entry->data_id, entry->group, config_->tenant());
         dto::resp::ConfigQueryResponse response;
         mem::BufPool pool;
         auto result = co_await connection_->request(request, pool, response);
 
-        if (!stopping_ && entry->subscribers > 0 && !entry->closing && generation == active_generation_ &&
-            sequence == entry->query_sequence && result) {
+        if (!stopping_ && !entry->proto.draining && generation == active_generation_ &&
+            sequence == entry->proto.query_sequence && result) {
+            const auto snapshot = entry->watch.current();
             if (response.error_code == dto::resp::ConfigQueryResponse::kConfigNotFound) {
-                if (entry->watch.current().value->state != ConfigState::NotFound) {
-                    publish_snapshot(*entry, ConfigSnapshot{.state = ConfigState::NotFound});
+                const bool was_not_found = snapshot.value != nullptr && snapshot.value->state == ConfigState::NotFound;
+                if (!was_not_found) {
+                    publish_value(*entry, ConfigData{.state = ConfigState::NotFound});
                 }
             } else if (response.success() && response_content_valid(response)) {
                 const std::string_view md5 = response.md5.value();
-                const auto snapshot = entry->watch.current();
-                if (snapshot.value->state != ConfigState::Present || snapshot.value->data.md5 != md5) {
-                    publish_snapshot(*entry, ConfigSnapshot{
-                                                     .state = ConfigState::Present,
-                                                     .data =
-                                                             ConfigData{
-                                                                     .md5 = std::string(md5),
-                                                                     .content = std::string(response.content.value()),
-                                                             },
-                                             });
+                const bool stale = snapshot.value == nullptr || snapshot.value->state != ConfigState::Present ||
+                                   snapshot.value->md5 != md5;
+                if (stale) {
+                    publish_value(*entry, ConfigData{
+                                                  .state = ConfigState::Present,
+                                                  .md5 = std::string(md5),
+                                                  .content = std::string(response.content.value()),
+                                          });
                 }
             }
         }
 
-        if (!entry->dirty || stopping_ || entry->subscribers == 0 || entry->closing || active_generation_ == 0) {
+        if (!entry->proto.dirty || stopping_ || entry->proto.draining || active_generation_ == 0) {
             break;
         }
-        entry->dirty = false;
+        entry->proto.dirty = false;
         generation = active_generation_;
-        sequence = ++entry->query_sequence;
+        sequence = ++entry->proto.query_sequence;
     }
-    entry->query_in_flight = false;
+    entry->proto.query_in_flight = false;
     task_done();
 }
 
@@ -504,11 +367,11 @@ void ConfigServiceImpl::schedule_registration(std::vector<EntryPtr> entries, boo
     std::vector<EntryPtr> scheduled;
     scheduled.reserve(entries.size());
     for (EntryPtr &entry: entries) {
-        if (entry->registration_in_flight) {
-            entry->registration_dirty = true;
+        if (entry->proto.registration_in_flight) {
+            entry->proto.registration_dirty = true;
             continue;
         }
-        entry->registration_in_flight = true;
+        entry->proto.registration_in_flight = true;
         scheduled.push_back(std::move(entry));
     }
     if (scheduled.empty()) {
@@ -522,33 +385,41 @@ void ConfigServiceImpl::schedule_registration(std::vector<EntryPtr> entries, boo
 
 void ConfigServiceImpl::complete_registration(const EntryPtr &entry, bool listen, std::uint64_t generation,
                                               bool success) {
-    FIBER_ASSERT(entry->registration_in_flight);
-    entry->registration_in_flight = false;
+    FIBER_ASSERT(entry->proto.registration_in_flight);
+    entry->proto.registration_in_flight = false;
     if (success) {
         if (listen) {
-            entry->registered_generation = generation;
-        } else if (entry->registered_generation == generation) {
-            entry->registered_generation = 0;
+            entry->proto.registered_generation = generation;
+        } else if (entry->proto.registered_generation == generation) {
+            entry->proto.registered_generation = 0;
         }
     }
-    const bool dirty = std::exchange(entry->registration_dirty, false);
+    const bool dirty = std::exchange(entry->proto.registration_dirty, false);
     if (stopping_) {
         return;
     }
 
-    const bool wants_listen = entry->subscribers > 0 && !entry->closing && active_generation_ != 0;
+    // Only entries still in the tree (live subscribers) take further action. A
+    // detached draining entry has no subscribers and is just awaiting its async
+    // unregistration to release the owning EntryPtr to 0.
+    if (entry->pool == nullptr) {
+        return;
+    }
+    const bool wants_listen = !entry->proto.draining && active_generation_ != 0;
     if (wants_listen) {
         if ((!success && (!listen || dirty)) ||
-            (success && (entry->registered_generation != active_generation_ || dirty || !listen))) {
+            (success && (entry->proto.registered_generation != active_generation_ || dirty || !listen))) {
             schedule_registration({entry}, true, active_generation_);
         }
         return;
     }
-    if (active_generation_ != 0 && entry->registered_generation == active_generation_ && (success || dirty || listen)) {
+    if (active_generation_ != 0 && entry->proto.registered_generation == active_generation_ &&
+        (success || dirty || listen)) {
         schedule_registration({entry}, false, active_generation_);
         return;
     }
-    unlink_entry(*entry);
+    // No further registration needed; if this entry is draining with no live
+    // subscribers the pool already detached it - nothing to do here.
 }
 
 async::DetachedTask ConfigServiceImpl::register_entries(std::vector<EntryPtr> entries, bool listen,
@@ -562,9 +433,8 @@ async::DetachedTask ConfigServiceImpl::register_entries(std::vector<EntryPtr> en
         contexts.reserve(limit - offset);
         for (; offset < limit; ++offset) {
             const EntryPtr &entry = entries[offset];
-            if (stopping_ || generation != active_generation_ ||
-                (listen && (entry->subscribers == 0 || entry->closing)) ||
-                (!listen && entry->registered_generation != generation)) {
+            if (stopping_ || generation != active_generation_ || (listen && entry->proto.draining) ||
+                (!listen && entry->proto.registered_generation != generation)) {
                 complete_registration(entry, listen, generation, false);
                 continue;
             }
@@ -573,11 +443,14 @@ async::DetachedTask ConfigServiceImpl::register_entries(std::vector<EntryPtr> en
             context.data_id.set_present(entry->data_id);
             context.tenant.set_present(config_->tenant());
             const auto snapshot = entry->watch.current();
-            if (snapshot.value->state == ConfigState::Present) {
-                context.md5.set_present(snapshot.value->data.md5);
-            } else if (snapshot.value->state == ConfigState::NotFound) {
-                context.md5.set_present("");
+            if (snapshot.value != nullptr) {
+                if (snapshot.value->state == ConfigState::Present) {
+                    context.md5.set_present(snapshot.value->md5);
+                } else if (snapshot.value->state == ConfigState::NotFound) {
+                    context.md5.set_present("");
+                }
             }
+            // never-synced: omit md5 (matches Java: data != null ? md5 : null)
             contexts.push_back(context);
             included.push_back(entry);
         }
@@ -611,11 +484,11 @@ async::DetachedTask ConfigServiceImpl::register_entries(std::vector<EntryPtr> en
 
 void ConfigServiceImpl::register_all(std::uint64_t generation) {
     std::vector<EntryPtr> entries;
-    for (ConfigEntry *entry = entries_.minimum(); entry != nullptr; entry = entries_.next_of(*entry)) {
-        if (entry->subscribers > 0 && !entry->closing) {
-            entries.push_back(EntryPtr(entry));
+    pool_.for_each([&entries](ConfigEntry &entry) {
+        if (!entry.proto.draining) {
+            entries.push_back(EntryPtr(&entry));
         }
-    }
+    });
     schedule_registration(std::move(entries), true, generation);
 }
 
@@ -628,7 +501,7 @@ void ConfigServiceImpl::process_changed(const dto::resp::ConfigChangeBatchListen
         if (changed.tenant.is_present() && changed.tenant.value() != config_->tenant()) {
             continue;
         }
-        if (auto entry = find_entry(changed.data_id.value(), changed.group.value())) {
+        if (auto entry = pool_.find(changed.data_id.value(), changed.group.value())) {
             schedule_query(entry, generation);
         }
     }
@@ -661,7 +534,7 @@ std::expected<proto::Payload, NacosRpcError> ConfigServiceImpl::handle_push(cons
         }
         const bool tenant_matches = !notify.tenant.is_present() || notify.tenant.value() == config_->tenant();
         if (!stopping_ && tenant_matches && active_generation_ != 0) {
-            if (auto entry = find_entry(notify.data_id.value(), notify.group.value())) {
+            if (auto entry = pool_.find(notify.data_id.value(), notify.group.value())) {
                 schedule_query(entry, active_generation_);
             }
         }
@@ -730,18 +603,13 @@ async::Task<void> ConfigServiceImpl::run() noexcept {
     }
 
     active_generation_ = 0;
+    // Let every in-flight registration/query task (including deferred
+    // unregistrations holding owning EntryPtrs) finish or short-circuit before
+    // we close live subscriptions.
     co_await tasks_.join();
-    for (ConfigEntry *entry = entries_.minimum(); entry != nullptr;) {
-        ConfigEntry *next = entries_.next_of(*entry);
-        const auto snapshot = entry->watch.current();
-        if (snapshot.value->state != ConfigState::Stopped) {
-            ConfigSnapshot stopped = *snapshot.value;
-            stopped.state = ConfigState::Stopped;
-            publish_snapshot(*entry, std::move(stopped));
-        }
-        unlink_entry(*entry);
-        entry = next;
-    }
+    // Close every still-live entry exactly once and wake its waiters with
+    // ResultKind::Closed.
+    pool_.close_all();
     run_active_ = false;
 }
 
@@ -751,14 +619,8 @@ void ConfigServiceImpl::shutdown() noexcept {
         return;
     }
     stopping_ = true;
-    for (ConfigEntry *entry = entries_.minimum(); entry != nullptr; entry = entries_.next_of(*entry)) {
-        const auto snapshot = entry->watch.current();
-        if (snapshot.value->state != ConfigState::Stopped) {
-            ConfigSnapshot stopped = *snapshot.value;
-            stopped.state = ConfigState::Stopped;
-            publish_snapshot(*entry, std::move(stopped));
-        }
-    }
+    pool_.disable();
+    pool_.close_all();
 }
 
 void ConfigServiceImpl::task_done() noexcept {

@@ -503,7 +503,7 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
     ConfigCaseResult result;
     nacos_detail::NacosGrpcConnection connection(*loop, config, options);
     nacos_detail::ConfigServiceImpl service(*loop, config, options, connection);
-    std::vector<fiber::nacos::ConfigSubscription> batched_subscriptions;
+    std::vector<fiber::nacos::Subscription<fiber::nacos::ConfigData>> batched_subscriptions;
     if (!reconnect) {
         for (int i = 0; i < 5; ++i) {
             auto subscription = service.subscribe("batch-" + std::to_string(i), "group");
@@ -557,9 +557,10 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
             auto initial = subscription.current();
             auto next = co_await fiber::async::timeout_for(
                     [&subscription, version = initial.version]() { return subscription.next(version); }, 2s);
-            result.initial_present = next && next->value->state == fiber::nacos::ConfigState::Present &&
-                                     next->value->data.content == "type-5";
-            std::uint64_t version = next ? next->version : initial.version;
+            result.initial_present = next && next->kind == fiber::nacos::ResultKind::Success && next->snapshot.value &&
+                                     next->snapshot.value->state == fiber::nacos::ConfigState::Present &&
+                                     next->snapshot.value->content == "type-5";
+            std::uint64_t version = next ? next->snapshot.version : initial.version;
 
             auto cached = co_await service.get_config("data", "group");
             result.cached_get = cached && cached->has_value() && (*cached)->content == "type-5";
@@ -571,7 +572,7 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
                 const auto replay = shared_subscription.current();
                 result.shared_subscription =
                         replay.value && replay.value->state == fiber::nacos::ConfigState::Present &&
-                        replay.value->data.content == "type-5" && server->listen_count() == listen_before_shared;
+                        replay.value->content == "type-5" && server->listen_count() == listen_before_shared;
 
                 const std::size_t query_before = server->query_count();
                 auto first = co_await service.publish("data", "group", "first", fiber::nacos::ConfigType::Text,
@@ -586,9 +587,10 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
                     if (!updated) {
                         break;
                     }
-                    version = updated->version;
-                    if (updated->value->state == fiber::nacos::ConfigState::Present &&
-                        updated->value->data.content == "second") {
+                    version = updated->snapshot.version;
+                    if (updated->kind == fiber::nacos::ResultKind::Success && updated->snapshot.value &&
+                        updated->snapshot.value->state == fiber::nacos::ConfigState::Present &&
+                        updated->snapshot.value->content == "second") {
                         result.dirty_requery_reached_latest = first.has_value() && second.has_value();
                         break;
                     }
@@ -610,8 +612,8 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
                 auto removed = co_await service.remove_config("data", "group");
                 auto deleted = co_await fiber::async::timeout_for(
                         [&subscription, version]() { return subscription.next(version); }, 2s);
-                result.removed =
-                        removed.has_value() && deleted && deleted->value->state == fiber::nacos::ConfigState::NotFound;
+                result.removed = removed.has_value() && deleted && deleted->snapshot.value &&
+                                 deleted->snapshot.value->state == fiber::nacos::ConfigState::NotFound;
 
                 subscription.close();
                 co_await fiber::async::sleep(20ms);
@@ -624,8 +626,9 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
             }
 
             service.shutdown();
-            const auto stopped = stopped_subscription->current();
-            result.stopped_published = stopped.value && stopped.value->state == fiber::nacos::ConfigState::Stopped;
+            // "stopped" was never synced: shutdown closes it without a value, so
+            // the subscription reports closed() and next() would return Closed.
+            result.stopped_published = stopped_subscription->closed();
             stopped_subscription->close();
         } else {
             service.shutdown();
@@ -637,8 +640,8 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
             auto current = subscription.current();
             auto initial = co_await fiber::async::timeout_for(
                     [&subscription, version = current.version]() { return subscription.next(version); }, 2s);
-            if (initial) {
-                const std::uint64_t version = initial->version;
+            if (initial && initial->kind == fiber::nacos::ResultKind::Success) {
+                const std::uint64_t version = initial->snapshot.version;
                 result.reconnected = co_await wait_ready(connection, 2);
                 for (int i = 0; i < 100 && server->listen_count() < 2; ++i) {
                     co_await fiber::async::sleep(2ms);
@@ -649,8 +652,10 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
                 auto updated = co_await fiber::async::timeout_for(
                         [&subscription, version]() { return subscription.next(version); }, 2s);
                 result.update_after_reconnect = published.has_value() && updated &&
-                                                updated->value->state == fiber::nacos::ConfigState::Present &&
-                                                updated->value->data.content == "after-reconnect";
+                                                updated->kind == fiber::nacos::ResultKind::Success &&
+                                                updated->snapshot.value &&
+                                                updated->snapshot.value->state == fiber::nacos::ConfigState::Present &&
+                                                updated->snapshot.value->content == "after-reconnect";
             }
             subscription.close();
         }
@@ -806,17 +811,22 @@ DetachedTask run_rnacos_config_case(fiber::event::EventLoop *loop, fiber::nacos:
             auto current = subscription.current();
             auto initial = co_await fiber::async::timeout_for(
                     [&subscription, version = current.version]() { return subscription.next(version); }, 3s);
-            result.subscribed = initial && initial->value->state == fiber::nacos::ConfigState::Present &&
-                                initial->value->data.content == "first";
-            if (initial) {
+            result.subscribed = initial && initial->kind == fiber::nacos::ResultKind::Success &&
+                                initial->snapshot.value &&
+                                initial->snapshot.value->state == fiber::nacos::ConfigState::Present &&
+                                initial->snapshot.value->content == "first";
+            if (initial && initial->snapshot.value) {
                 auto updated = co_await service.publish(std::string(kDataId), std::string(kGroup), "second",
                                                         fiber::nacos::ConfigType::Text,
-                                                        std::optional<std::string>(initial->value->data.md5));
+                                                        std::optional<std::string>(initial->snapshot.value->md5));
                 auto update_snapshot = co_await fiber::async::timeout_for(
-                        [&subscription, version = initial->version]() { return subscription.next(version); }, 3s);
+                        [&subscription, version = initial->snapshot.version]() { return subscription.next(version); },
+                        3s);
                 result.cas_updated = updated.has_value() && update_snapshot &&
-                                     update_snapshot->value->state == fiber::nacos::ConfigState::Present &&
-                                     update_snapshot->value->data.content == "second";
+                                     update_snapshot->kind == fiber::nacos::ResultKind::Success &&
+                                     update_snapshot->snapshot.value &&
+                                     update_snapshot->snapshot.value->state == fiber::nacos::ConfigState::Present &&
+                                     update_snapshot->snapshot.value->content == "second";
                 auto conflict = co_await service.publish(std::string(kDataId), std::string(kGroup), "bad",
                                                          fiber::nacos::ConfigType::Text,
                                                          std::optional<std::string>("wrong-md5"));
@@ -842,8 +852,9 @@ DetachedTask run_rnacos_config_case(fiber::event::EventLoop *loop, fiber::nacos:
                     if (!removed_snapshot) {
                         break;
                     }
-                    version = removed_snapshot->version;
-                    if (removed_snapshot->value->state == fiber::nacos::ConfigState::NotFound) {
+                    version = removed_snapshot->snapshot.version;
+                    if (removed_snapshot->snapshot.value &&
+                        removed_snapshot->snapshot.value->state == fiber::nacos::ConfigState::NotFound) {
                         result.removed = removed.has_value();
                         break;
                     }

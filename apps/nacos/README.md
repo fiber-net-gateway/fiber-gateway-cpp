@@ -28,8 +28,8 @@ transport layer, and ConfigService:
   connection, while unavailable authentication stops it until recovery.
 - Coroutine-based get, publish, CAS publish, and remove operations with bounded
   owned results and structured errors.
-- Shared configuration subscriptions with explicit Pending, Present, NotFound,
-  and Stopped states.
+- Shared configuration subscriptions with Present/NotFound values, a null
+  snapshot while never-synced, and a `Closed` result on shutdown.
 - Batched registration, MD5 deduplication, single-flight query synchronization,
   best-effort unregistration, reconnect recovery, and periodic compensating
   registration.
@@ -96,11 +96,17 @@ auto subscribed = configs.subscribe("routes", "DEFAULT_GROUP");
 if (subscribed) {
     auto subscription = std::move(*subscribed);
     auto snapshot = subscription.current();
-    while (snapshot.value && snapshot.value->state != fiber::nacos::ConfigState::Stopped) {
-        snapshot = co_await subscription.next(snapshot.version);
-        if (snapshot.value->state == fiber::nacos::ConfigState::Present) {
-            reload(snapshot.value->data.content);
-        } else if (snapshot.value->state == fiber::nacos::ConfigState::NotFound) {
+    std::uint64_t version = snapshot.version;
+    for (;;) {
+        auto result = co_await subscription.next(version);
+        if (result.kind == fiber::nacos::ResultKind::Closed) {
+            break; // service shutdown
+        }
+        version = result.snapshot.version;
+        const auto &value = *result.snapshot.value;
+        if (value.state == fiber::nacos::ConfigState::Present) {
+            reload(value.content);
+        } else if (value.state == fiber::nacos::ConfigState::NotFound) {
             remove_local_config();
         }
     }
@@ -115,16 +121,18 @@ changes only after a server notification or registration response causes a
 query.
 
 Each `(dataId, group)` has one internal entry regardless of the number of local
-subscriptions. A new subscription starts in Pending unless the entry already
-has a Present or NotFound value. Every subscription snapshot includes the Watch
-version; pass that version back to `next(version)`. Destroy or explicitly close
-subscriptions on the client EventLoop, before destroying the client.
+subscriptions. `current()` returns a null snapshot until the first server value
+arrives; `next(version)` blocks until then. Each result carries the Watch
+version; pass that version back to the next `next(version)`. Destroy or
+explicitly close subscriptions on the client EventLoop, before destroying the
+client.
 
 Transient connection and query failures retain the last Present or NotFound
 value. A new connection generation re-registers all live entries, and a
 periodic compensating registration covers lost server-side listener state.
-During shutdown every live subscription receives Stopped, config operations
-reject new work, and all registration/query tasks finish before shutdown
+During shutdown every live subscription is closed: `next()` resumes with
+`ResultKind::Closed` (or `closed()` returns true) and config operations reject
+new work. All registration/query tasks finish before shutdown
 returns.
 
 `NacosClientOptions` controls authentication and gRPC connect/request/handshake
