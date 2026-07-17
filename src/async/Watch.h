@@ -312,6 +312,11 @@ public:
     Watch(Watch &&) noexcept = default;
     Watch &operator=(Watch &&) noexcept = default;
 
+    [[nodiscard]] Snapshot current() const {
+        FIBER_ASSERT(state_ != nullptr);
+        return state_->snapshot();
+    }
+
     [[nodiscard]] std::optional<Publisher> acquire_publisher() noexcept {
         FIBER_ASSERT(state_ != nullptr);
         if (!state_->try_acquire_publisher()) {

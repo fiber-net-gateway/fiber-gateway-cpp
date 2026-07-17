@@ -218,10 +218,11 @@ ConfigServiceImpl::get_config(std::string data_id, std::string group) noexcept {
     }
 
     if (auto entry = find_entry(data_id, group)) {
-        if (entry->snapshot.state == ConfigState::Present) {
-            co_return std::optional<ConfigData>(entry->snapshot.data);
+        const auto snapshot = entry->watch.current();
+        if (snapshot.value->state == ConfigState::Present) {
+            co_return std::optional<ConfigData>(snapshot.value->data);
         }
-        if (entry->snapshot.state == ConfigState::NotFound) {
+        if (snapshot.value->state == ConfigState::NotFound) {
             co_return std::optional<ConfigData>{};
         }
     }
@@ -391,7 +392,6 @@ void ConfigServiceImpl::release_subscription(const EntryPtr &entry) noexcept {
 
 void ConfigServiceImpl::publish_snapshot(const EntryPtr &entry, ConfigSnapshot snapshot) {
     FIBER_ASSERT(loop_->in_loop());
-    entry->snapshot = snapshot;
     entry->publisher->publish(std::move(snapshot));
 }
 
@@ -423,12 +423,13 @@ async::DetachedTask ConfigServiceImpl::query_and_sync(EntryPtr entry, std::uint6
         if (!stopping_ && entry->subscribers > 0 && !entry->closing && generation == active_generation_ &&
             sequence == entry->query_sequence && result) {
             if (response.error_code == dto::resp::ConfigQueryResponse::kConfigNotFound) {
-                if (entry->snapshot.state != ConfigState::NotFound) {
+                if (entry->watch.current().value->state != ConfigState::NotFound) {
                     publish_snapshot(entry, ConfigSnapshot{.state = ConfigState::NotFound});
                 }
             } else if (response.success() && response_content_valid(response)) {
                 const std::string_view md5 = response.md5.value();
-                if (entry->snapshot.state != ConfigState::Present || entry->snapshot.data.md5 != md5) {
+                const auto snapshot = entry->watch.current();
+                if (snapshot.value->state != ConfigState::Present || snapshot.value->data.md5 != md5) {
                     publish_snapshot(entry, ConfigSnapshot{
                                                     .state = ConfigState::Present,
                                                     .data =
@@ -531,9 +532,10 @@ async::DetachedTask ConfigServiceImpl::register_entries(std::vector<EntryPtr> en
             context.group.set_present(entry->key.group);
             context.data_id.set_present(entry->key.data_id);
             context.tenant.set_present(config_->tenant());
-            if (entry->snapshot.state == ConfigState::Present) {
-                context.md5.set_present(entry->snapshot.data.md5);
-            } else if (entry->snapshot.state == ConfigState::NotFound) {
+            const auto snapshot = entry->watch.current();
+            if (snapshot.value->state == ConfigState::Present) {
+                context.md5.set_present(snapshot.value->data.md5);
+            } else if (snapshot.value->state == ConfigState::NotFound) {
                 context.md5.set_present("");
             }
             contexts.push_back(context);
@@ -693,8 +695,9 @@ async::Task<void> ConfigServiceImpl::run() noexcept {
     co_await tasks_.join();
     for (auto &[key, entry]: entries_) {
         (void) key;
-        if (entry->snapshot.state != ConfigState::Stopped) {
-            ConfigSnapshot stopped = entry->snapshot;
+        const auto snapshot = entry->watch.current();
+        if (snapshot.value->state != ConfigState::Stopped) {
+            ConfigSnapshot stopped = *snapshot.value;
             stopped.state = ConfigState::Stopped;
             publish_snapshot(entry, std::move(stopped));
         }
@@ -711,8 +714,9 @@ void ConfigServiceImpl::shutdown() noexcept {
     stopping_ = true;
     for (auto &[key, entry]: entries_) {
         (void) key;
-        if (entry->snapshot.state != ConfigState::Stopped) {
-            ConfigSnapshot stopped = entry->snapshot;
+        const auto snapshot = entry->watch.current();
+        if (snapshot.value->state != ConfigState::Stopped) {
+            ConfigSnapshot stopped = *snapshot.value;
             stopped.state = ConfigState::Stopped;
             publish_snapshot(entry, std::move(stopped));
         }
