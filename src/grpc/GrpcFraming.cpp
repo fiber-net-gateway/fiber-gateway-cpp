@@ -80,6 +80,9 @@ common::IoResult<bool> GrpcFrameReader::next_payload(mem::IoBufChain &out) noexc
     }
     const std::uint32_t len = (static_cast<std::uint32_t>(hdr[1]) << 24) | (static_cast<std::uint32_t>(hdr[2]) << 16) |
                               (static_cast<std::uint32_t>(hdr[3]) << 8) | static_cast<std::uint32_t>(hdr[4]);
+    if (len > max_message_bytes_) {
+        return std::unexpected(common::IoErr::MessageTooLarge);
+    }
     if (buffer_.readable_bytes() < kFrameHeaderSize + len) {
         return false; // need more bytes for the payload
     }

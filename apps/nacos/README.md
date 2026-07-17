@@ -3,7 +3,8 @@
 `apps/nacos` is the reusable Nacos client library for applications under
 `apps/`. Consumers should link the `fiber::nacos` target.
 
-The current implementation covers authentication:
+The current implementation covers authentication and the reusable Nacos gRPC
+transport layer:
 
 - Immutable, validated client configuration with multiple server IPs.
 - Nacos v3 login and optional fallback to the legacy v1 login endpoint.
@@ -15,10 +16,21 @@ The current implementation covers authentication:
   each login attempt.
 - A fixed `EventLoop` for every Nacos timer, coroutine, and network operation.
 - Graceful shutdown through an internal `Watch<bool>` and `WaitGroup`.
+- Wire-compatible protobuf `Payload` framing and Java-compatible internal/config
+  JSON DTO codecs.
+- Plaintext HTTP/2 ServerCheck and bidirectional ConnectionSetup handshakes.
+- SetupAck negotiation and the legacy compatibility-delay handshake path.
+- Serialized push responses for ClientDetection, ConnectReset, and unknown
+  server requests.
+- Heartbeats, bounded retry with jitter, server failover, redirect handling,
+  connection generations, and bounded inbound/queued messages.
+- Dynamic access-token metadata: token refresh does not rebuild a healthy gRPC
+  connection, while unavailable authentication stops it until recovery.
 
-The configured gRPC port, namespace, tenant, and client version are retained for
-the later naming/config implementation. Authentication currently uses only the
-HTTP port and credentials.
+The public ConfigService API, unary get/publish/CAS/remove operations, and the
+configuration subscription registry are not implemented yet. The RPC layer is
+private infrastructure for those next stages; this library does not currently
+expose raw Nacos RPC calls as public API.
 
 ## Targets
 
@@ -64,8 +76,10 @@ if (!client) {
 removed while preserving order. The context path must be absolute and defaults
 to `/nacos`.
 
-`NacosClientOptions` controls connect/request timeouts, response size, retry
-backoff, and refresh timing. By default, a token is refreshed at
+`NacosClientOptions` controls authentication and gRPC connect/request/handshake
+timeouts, heartbeat timing, retry backoff, message/response queue limits, and
+refresh timing. `client_ip_override` can replace the local gRPC socket address
+used in Payload metadata. By default, a token is refreshed at
 `refresh_percent` of its TTL. A refresh failure is broadcast in
 `last_error`, but an unexpired token remains usable until its actual expiry.
 
@@ -96,13 +110,14 @@ The lifecycle is:
 Created -> Running -> Stopping -> Stopped
 ```
 
-During shutdown, the client publishes its internal shutdown signal, then awaits
-its authentication coroutine through the `WaitGroup`. An idle authentication
-coroutine wakes immediately. If a login HTTP operation is in progress, shutdown
-waits only for that current connect or request operation's configured timeout;
-the coroutine checks shutdown before starting another HTTP step, fallback, or
-server attempt. `shutdown()` is idempotent. The final auth snapshot has state
-`Stopped`.
+During shutdown, the client publishes its internal shutdown signal, stops the
+gRPC connection and all generation-local stream/heartbeat/writer tasks, then
+awaits both the RPC and authentication coroutines through the `WaitGroup`. An
+idle authentication coroutine wakes immediately. If a login HTTP operation is
+in progress, shutdown waits only for that current connect or request operation's
+configured timeout; the coroutine checks shutdown before starting another HTTP
+step, fallback, or server attempt. `shutdown()` is idempotent. The final auth
+snapshot has state `Stopped`.
 
 During refresh, each HTTP timeout is also capped by the old token's remaining
 lifetime. The same coroutine therefore handles refresh, retry, token expiry, and
@@ -142,14 +157,16 @@ replacement.
 ```bash
 cmake -S . -B build
 cmake --build build --target fiber_nacos_tests
-ctest --test-dir build -R '^(NacosClientTest|NacosClientConfigTest|NacosDtoJsonTest)\.'
+ctest --test-dir build -R '^(NacosClientTest|NacosClientConfigTest|NacosDtoJsonTest|NacosPayloadTest|NacosGrpcConnectionTest)\.'
 ```
 
-The authentication integration tests use a local scripted HTTP server; they do
-not require an external Nacos installation.
+Authentication and gRPC tests use local scripted HTTP/HTTP2 servers. The optional
+`NacosGrpcConnectionTest.RnacosInteropWhenEnabled` test performs a real RPC
+handshake when `FIBER_NACOS_TEST_GRPC_PORT` points to an rnacos gRPC listener.
 
 ## Layout
 
 Public headers live under `include/fiber/nacos/`. Authentication transport and
-lifecycle implementation details remain private in `src/detail/`. DTO JSON
-codecs live under `src/dto/`.
+lifecycle implementation details remain private in `src/detail/`. Nacos gRPC
+infrastructure is private in `src/rpc/`. DTO JSON codecs live under `src/dto/`,
+and the wire Payload schema lives under `proto/`.

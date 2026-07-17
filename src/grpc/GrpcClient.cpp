@@ -56,6 +56,7 @@ http::Http2ClientConnection::Options make_connection_options(GrpcClient::Options
     conn_options.peer_addr = std::move(options.peer_addr);
     conn_options.tls = std::move(options.tls);
     conn_options.h2 = std::move(options.h2);
+    conn_options.connect_timeout = options.connect_timeout;
     if (conn_options.h2.outbound_hpack_catalog == nullptr) {
         conn_options.h2.outbound_hpack_catalog = &grpc_header_catalog();
     }

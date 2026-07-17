@@ -47,6 +47,7 @@ public:
     ~StreamInfant() { close_fd(); }
 
     [[nodiscard]] bool valid() const noexcept { return fd_ >= 0; }
+    [[nodiscard]] int fd() const noexcept { return fd_; }
 
     fiber::event::EventLoop &loop() const noexcept {
         FIBER_ASSERT(loop_ != nullptr);

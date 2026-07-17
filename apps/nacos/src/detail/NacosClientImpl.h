@@ -19,6 +19,8 @@
 #include <fiber/nacos/NacosClient.h>
 #include <fiber/nacos/NacosClientConfig.h>
 
+#include "../rpc/NacosGrpcConnection.h"
+
 namespace fiber::nacos::detail {
 
 enum class NacosClientState : std::uint8_t {
@@ -50,6 +52,7 @@ private:
     };
 
     [[nodiscard]] async::DetachedTask run_auth() noexcept;
+    [[nodiscard]] async::DetachedTask run_grpc() noexcept;
     [[nodiscard]] async::Task<std::expected<AuthLoginSuccess, NacosAuthError>>
     login(std::size_t server_index, std::string_view target, std::string_view auth_body,
           std::chrono::steady_clock::time_point deadline) noexcept;
@@ -63,6 +66,7 @@ private:
     event::EventLoop *loop_ = nullptr;
     NacosClientConfig config_;
     NacosClientOptions options_;
+    NacosGrpcConnection grpc_connection_;
     NacosClientState state_ = NacosClientState::Created;
     async::WaitGroup task_group_;
     async::Watch<bool> shutdown_watch_{false};

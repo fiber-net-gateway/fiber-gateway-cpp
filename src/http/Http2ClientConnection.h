@@ -1,7 +1,9 @@
 #ifndef FIBER_HTTP_HTTP2_CLIENT_CONNECTION_H
 #define FIBER_HTTP_HTTP2_CLIENT_CONNECTION_H
 
+#include <chrono>
 #include <memory>
+#include <optional>
 
 #include "../async/Task.h"
 #include "../common/IoError.h"
@@ -23,6 +25,7 @@ public:
         net::SocketAddress peer_addr{};
         net::TlsOptions tls{};
         Http2Connection::Options h2{};
+        std::chrono::milliseconds connect_timeout{0};
     };
 
     Http2ClientConnection(event::EventLoop &loop, Options options) noexcept;
@@ -38,6 +41,7 @@ public:
     [[nodiscard]] event::EventLoop &loop() const noexcept;
     [[nodiscard]] Http2Connection &http2() noexcept;
     [[nodiscard]] const Http2Connection &http2() const noexcept;
+    [[nodiscard]] const std::optional<net::SocketAddress> &local_addr() const noexcept { return local_addr_; }
 
 private:
     static net::TlsOptions normalize_tls_options(net::TlsOptions options) noexcept;
@@ -45,6 +49,8 @@ private:
 
     event::EventLoop *loop_ = nullptr;
     net::SocketAddress peer_addr_{};
+    std::chrono::milliseconds connect_timeout_{};
+    std::optional<net::SocketAddress> local_addr_;
     net::TlsContext tls_ctx_;
     Http2Connection conn_;
 };

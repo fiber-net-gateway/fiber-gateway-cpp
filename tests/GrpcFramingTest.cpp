@@ -224,6 +224,16 @@ TEST(GrpcFramingTest, OversizedLengthWaitsForBytes) {
     EXPECT_FALSE(*r); // need 16 payload bytes
 }
 
+TEST(GrpcFramingTest, RejectsDeclaredMessageAboveConfiguredLimitBeforeBufferingBody) {
+    IoBufNodePool pool;
+    GrpcFrameReader reader(15);
+    ASSERT_TRUE(reader.append(make_payload(pool, std::string_view("\x00\x00\x00\x00\x10", 5))).has_value());
+    IoBufChain out;
+    auto result = reader.next_payload(out);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), IoErr::MessageTooLarge);
+}
+
 TEST(GrpcFramingTest, FrameRequiresBoundChain) {
     IoBufChain unbound; // default-constructed, not bound to a node pool
     auto r = frame(std::move(unbound));

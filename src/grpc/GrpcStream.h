@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -56,6 +57,7 @@ public:
         // instead of blocking indefinitely. 0 = no deadline (wait indefinitely,
         // bounded only by the connection's keepalive or an external cancel()).
         std::chrono::milliseconds deadline{0};
+        std::size_t max_inbound_message_bytes = std::numeric_limits<std::uint32_t>::max();
     };
 
     GrpcStream() noexcept = default;
@@ -92,6 +94,12 @@ public:
 
     // Cancel the call (RST_STREAM). Synchronous and idempotent.
     void cancel(common::IoErr reason = common::IoErr::Canceled) noexcept;
+
+    // Apply or clear a client-side-only deadline after the stream is open. This
+    // is useful for bounded handshakes on otherwise long-lived streams and does
+    // not alter the grpc-timeout header already sent by open().
+    void set_local_deadline(std::chrono::milliseconds timeout) noexcept;
+    void clear_local_deadline() noexcept;
 
     [[nodiscard]] bool valid() const noexcept { return conn_ != nullptr; }
 

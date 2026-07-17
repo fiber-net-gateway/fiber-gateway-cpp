@@ -13,7 +13,18 @@ bool valid_options(const NacosClientOptions &options) noexcept {
            options.request_timeout > std::chrono::milliseconds::zero() && options.max_auth_response_bytes > 0 &&
            options.retry_initial_delay > std::chrono::milliseconds::zero() &&
            options.retry_max_delay >= options.retry_initial_delay && options.refresh_percent > 0 &&
-           options.refresh_percent < 100 && options.min_refresh_delay > std::chrono::milliseconds::zero();
+           options.refresh_percent < 100 && options.min_refresh_delay > std::chrono::milliseconds::zero() &&
+           options.grpc_connect_timeout > std::chrono::milliseconds::zero() &&
+           options.grpc_request_timeout > std::chrono::milliseconds::zero() &&
+           options.grpc_handshake_timeout >= options.grpc_request_timeout &&
+           options.grpc_compatibility_setup_delay > std::chrono::milliseconds::zero() &&
+           options.grpc_compatibility_setup_delay <= options.grpc_handshake_timeout &&
+           options.grpc_heartbeat_interval > std::chrono::milliseconds::zero() &&
+           options.grpc_reconnect_initial_delay > std::chrono::milliseconds::zero() &&
+           options.grpc_reconnect_max_delay >= options.grpc_reconnect_initial_delay &&
+           options.max_inbound_grpc_message_bytes > 0 && options.max_push_response_queue > 0 &&
+           options.max_push_response_bytes > 0 &&
+           options.max_push_response_bytes <= options.max_inbound_grpc_message_bytes;
 }
 
 } // namespace
