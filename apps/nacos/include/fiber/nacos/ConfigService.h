@@ -9,15 +9,12 @@
 #include <string_view>
 
 #include <async/Task.h>
-#include <async/Watch.h>
 #include <common/IoError.h>
 #include <common/NonCopyable.h>
 
+#include "Subscription.h"
+
 namespace fiber::nacos {
-namespace detail {
-class ConfigServiceImpl;
-struct ConfigSubscriptionLease;
-} // namespace detail
 
 enum class ConfigType : std::uint8_t {
     Json,
@@ -28,21 +25,19 @@ enum class ConfigType : std::uint8_t {
     Html,
 };
 
-struct ConfigData {
-    std::string md5;
-    std::string content;
-};
-
 enum class ConfigState : std::uint8_t {
-    Pending,
     Present,
     NotFound,
-    Stopped,
 };
 
-struct ConfigSnapshot {
-    ConfigState state = ConfigState::Pending;
-    ConfigData data;
+// Published configuration value. state is Present for a real config and NotFound
+// for a confirmed-absent config; there is no Pending/Stopped - "never synced" is
+// expressed by Subscription::current() returning a null snapshot, and shutdown
+// by Subscription::next() returning ResultKind::Closed.
+struct ConfigData {
+    ConfigState state = ConfigState::Present;
+    std::string md5;
+    std::string content;
 };
 
 enum class ConfigServiceErrorCode : std::uint8_t {
@@ -65,32 +60,6 @@ struct ConfigServiceError {
     std::string message;
 };
 
-class ConfigSubscription {
-public:
-    using Subscriber = async::Watch<ConfigSnapshot>::Subscriber;
-    using Snapshot = async::Watch<ConfigSnapshot>::Snapshot;
-    using NextAwaiter = Subscriber::NextAwaiter;
-
-    ConfigSubscription(const ConfigSubscription &) = delete;
-    ConfigSubscription &operator=(const ConfigSubscription &) = delete;
-    ConfigSubscription(ConfigSubscription &&other) noexcept;
-    ConfigSubscription &operator=(ConfigSubscription &&other) noexcept;
-    ~ConfigSubscription();
-
-    [[nodiscard]] Snapshot current() const;
-    [[nodiscard]] NextAwaiter next(std::uint64_t received_version) const noexcept;
-    void close() noexcept;
-    [[nodiscard]] bool valid() const noexcept;
-
-private:
-    friend class detail::ConfigServiceImpl;
-
-    ConfigSubscription(std::shared_ptr<detail::ConfigSubscriptionLease> lease, Subscriber subscriber) noexcept;
-
-    std::shared_ptr<detail::ConfigSubscriptionLease> lease_;
-    std::optional<Subscriber> subscriber_;
-};
-
 class ConfigService : public common::NonCopyable {
 public:
     virtual ~ConfigService() = default;
@@ -105,8 +74,11 @@ public:
     [[nodiscard]] virtual async::Task<std::expected<void, ConfigServiceError>>
     remove_config(std::string data_id, std::string group) noexcept = 0;
 
-    [[nodiscard]] virtual std::expected<ConfigSubscription, ConfigServiceError> subscribe(std::string_view data_id,
-                                                                                          std::string_view group) = 0;
+    // Subscribe to (data_id, group). Synchronous. Returns Shutdown error when
+    // the service is stopping. The returned Subscription is move-only and must
+    // be closed/destroyed on the client EventLoop.
+    [[nodiscard]] virtual std::expected<Subscription<ConfigData>, ConfigServiceError>
+    subscribe(std::string_view data_id, std::string_view group) = 0;
 
 protected:
     ConfigService() = default;
