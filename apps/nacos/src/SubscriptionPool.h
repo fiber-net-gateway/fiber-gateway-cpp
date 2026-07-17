@@ -17,9 +17,6 @@
 
 namespace fiber::nacos::detail {
 
-template<typename EntryT>
-class SubscriptionEntryLease;
-
 // Shared-subscription registry. Owns the RB tree of entries keyed by
 // (data_id, group), the intrusive refcount lifecycle, and the Close fan-out.
 // Deliberately free of any transport/loop/task concern: it only manages
@@ -35,8 +32,9 @@ class SubscriptionPool {
 public:
     using value_type = typename EntryT::value_type;
     using EntryPtrT = EntryPtr<EntryT>;
-    using Snapshot = typename async::Watch<value_type>::Snapshot;
-    using Subscriber = typename async::Watch<value_type>::Subscriber;
+    using Result = typename EntryT::Result;
+    using Snapshot = typename async::Watch<Result>::Snapshot;
+    using Subscriber = typename async::Watch<Result>::Subscriber;
 
     // Called when an entry gains its first subscriber (ref_count goes 1->2).
     // Receives an owning EntryPtr so the owner can move it into an async
@@ -84,43 +82,43 @@ public:
         }
         // subscriber reference (entry stays alive at least until lease close)
         entry->retain();
-        auto lease = std::make_unique<SubscriptionEntryLease<EntryT>>(entry.get());
-        ::fiber::nacos::Subscription<value_type> subscription(std::move(lease), entry->watch.subscribe(),
-                                                              &entry->closed);
+        // Stateless release trampoline erases EntryT so the public lease never
+        // names it. Defined here (inside a member function) so it can reach the
+        // pool's private release(); entry->pool is nulled once the entry leaves
+        // the tree, making a dangling lease a no-op rather than a use-after-free.
+        auto release_fn = +[](void *ctx) noexcept {
+            auto *e = static_cast<EntryT *>(ctx);
+            if (e->pool != nullptr) {
+                e->pool->release(*e);
+            }
+        };
+        typename ::fiber::nacos::Subscription<value_type>::Lease lease(entry.get(), release_fn);
+        ::fiber::nacos::Subscription<value_type> subscription(std::move(lease), entry->watch.subscribe());
         if (first) {
             on_add_(EntryPtrT(entry.get())); // owning copy for the owner
         }
         return subscription;
     }
 
-    // Publish a new value to an entry's watchers. No protocol logic here.
-    void publish(EntryT &entry, value_type value) {
+    // Publish a new value to an entry's watchers. No protocol logic here. The
+    // owner wraps its protocol value into a Result (kind=Success) before calling.
+    void publish(EntryT &entry, Result value) {
         FIBER_ASSERT(entry.publisher.has_value());
         entry.publisher->publish(std::move(value));
     }
 
-    // Close every still-linked entry exactly once: set closed and publish a
-    // final snapshot to wake next() awaiters. Synced entries replay their last
-    // value; never-synced entries (current() == null) get a default sentinel
-    // purely to bump the version and resume awaiters - the value is ignored
-    // because closed is true, so await_resume returns ResultKind::Close.
-    // Idempotent. Does not unlink (the owner tears the tree down after).
+    // Close every still-linked entry exactly once: publish Result{Closed} so
+    // next() awaiters wake and see kind == Closed. Idempotent. Does not unlink
+    // (the owner tears the tree down after). Single-threaded: close_all runs to
+    // completion without interleaving other publishes, so there is no
+    // revive-after-close race.
     void close_all() noexcept {
         if (closed_all_) {
             return;
         }
         closed_all_ = true;
         for (EntryT *entry = entries_.minimum(); entry != nullptr; entry = entries_.next_of(*entry)) {
-            if (entry->closed.exchange(true, std::memory_order_acq_rel)) {
-                continue;
-            }
-            const Snapshot current = entry->watch.current();
-            if (current.value != nullptr) {
-                value_type copy = *current.value;
-                publish(*entry, std::move(copy));
-            } else {
-                publish(*entry, value_type{});
-            }
+            publish(*entry, Result{.kind = ResultKind::Closed, .data = std::nullopt});
         }
     }
 
@@ -148,8 +146,6 @@ public:
     [[nodiscard]] bool empty() const noexcept { return entries_.empty(); }
 
 private:
-    friend class SubscriptionEntryLease<EntryT>;
-
     using Registry = common::IntrusiveRbTree<EntryT, offsetof(EntryT, tree_hook), EntryKeyCompare<EntryT>>;
 
     // Lease->close path: drop one subscriber reference. When ref_count falls to
@@ -206,43 +202,6 @@ private:
     Registry entries_;
     bool active_ = true;
     bool closed_all_ = false;
-};
-
-} // namespace fiber::nacos::detail
-
-// Defined after SubscriptionPool so close() can call pool->release(). Lives in
-// the header because it is a template.
-namespace fiber::nacos::detail {
-
-// RAII lease for one subscriber. Holds a bare entry pointer - the subscriber
-// reference it represents was already counted into ref_count by subscribe().
-// On close()/destruction it asks the owning pool to drop that reference.
-// Owner-loop-only; idempotent.
-template<typename EntryT>
-class SubscriptionEntryLease final : public SubscriptionLeaseBase {
-public:
-    explicit SubscriptionEntryLease(EntryT *entry) noexcept : entry_(entry) {}
-    ~SubscriptionEntryLease() override { close(); }
-
-    SubscriptionEntryLease(const SubscriptionEntryLease &) = delete;
-    SubscriptionEntryLease &operator=(const SubscriptionEntryLease &) = delete;
-    SubscriptionEntryLease(SubscriptionEntryLease &&) = delete;
-    SubscriptionEntryLease &operator=(SubscriptionEntryLease &&) = delete;
-
-    void close() noexcept override {
-        if (closed_) {
-            return;
-        }
-        closed_ = true;
-        EntryT *entry = std::exchange(entry_, nullptr);
-        if (entry != nullptr && entry->pool != nullptr) {
-            entry->pool->release(*entry);
-        }
-    }
-
-private:
-    EntryT *entry_ = nullptr;
-    bool closed_ = false;
 };
 
 } // namespace fiber::nacos::detail

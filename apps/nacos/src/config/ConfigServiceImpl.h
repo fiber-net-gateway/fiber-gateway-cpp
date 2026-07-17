@@ -35,6 +35,7 @@ struct ConfigProtocolState {
 
 using ConfigEntry = SubscriptionEntry<ConfigData, ConfigProtocolState>;
 using ConfigEntryPtr = EntryPtr<ConfigEntry>;
+using ConfigResult = SubscriptionResult<ConfigData>;
 
 class ConfigServiceImpl final : public ConfigService {
 public:

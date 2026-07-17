@@ -13,6 +13,7 @@
 #include <async/Watch.h>
 #include <common/Assert.h>
 #include <common/IntrusiveRbTree.h>
+#include <fiber/nacos/Subscription.h>
 
 namespace fiber::nacos::detail {
 
@@ -36,17 +37,23 @@ enum class RemoveDecision : std::uint8_t { UnlinkNow, Defer };
 // each in-flight task holding an EntryPtr adds one more. ref_count==1 means
 // only the tree still owns it, i.e. it should be torn down.
 //
+// The Watch carries SubscriptionResult<T>, not bare T: that way end-of-
+// subscription (Closed) is delivered as an ordinary published value, with no
+// separate closed flag or custom awaiter. T stays free of lifecycle state.
+//
 // This is a plain (standard-layout) struct by design: IntrusiveRbTree requires
 // standard-layout owners because it does container_of via offsetof(tree_hook).
 // Protocol-specific fields live in ProtocolState; nothing here may grow a base
 // class or virtuals.
 //
 // Single-threaded contract: all entry mutation happens on the owner EventLoop.
-// closed is atomic because Subscription::next() may resume on a subscriber's
-// loop and read it; everything else is owner-loop-exclusive.
+// ref_count is atomic only because it is manipulated via EntryPtr which may be
+// destroyed on a different loop than the one that created it in pathological
+// cases; the owner-loop code paths are single-threaded.
 template<typename T, typename ProtocolState>
 struct SubscriptionEntry {
     using value_type = T;
+    using Result = SubscriptionResult<T>;
 
     // Owning pool (owner-loop pointer). Nulled when the entry leaves the tree so
     // a dangling lease becomes a no-op rather than a use-after-free.
@@ -56,11 +63,10 @@ struct SubscriptionEntry {
     std::uint64_t key_hash = 0;
     std::string_view data_id; // points into the tail-malloc block
     std::string_view group;
-    async::Watch<T> watch; // no initial value; current() is null until first publish
-    std::optional<typename async::Watch<T>::Publisher> publisher;
+    async::Watch<Result> watch; // no initial value; current() is null until first publish
+    std::optional<typename async::Watch<Result>::Publisher> publisher;
     common::IntrusiveRbTreeHook tree_hook{};
     std::atomic<std::uint32_t> ref_count{0};
-    std::atomic<bool> closed{false}; // Close signal (ResultKind::Close carrier)
     ProtocolState proto{};
 
     SubscriptionEntry() {
@@ -229,10 +235,9 @@ struct EntryKeyCompare {
     }
 };
 
-// Polymorphic lease base. Declared in the public header (Subscription.h) so the
-// public Subscription<T> can hold/destroy a unique_ptr to it without pulling in
-// detail headers. The concrete templated SubscriptionEntryLease<EntryT> derives
-// from it and lives here in detail.
+// (The public SubscriptionLease<T> lives in Subscription.h and type-erases the
+// entry via a void* context + release function pointer, so no detail lease type
+// is needed here. SubscriptionPool::subscribe installs the trampoline.)
 
 } // namespace fiber::nacos::detail
 

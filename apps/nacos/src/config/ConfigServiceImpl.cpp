@@ -135,11 +135,12 @@ ConfigServiceImpl::get_config(std::string data_id, std::string group) noexcept {
     // Serve from a synced subscription cache if present.
     if (auto entry = pool_.find(data_id, group)) {
         const auto snapshot = entry->watch.current();
-        if (snapshot.value != nullptr) {
-            if (snapshot.value->state == ConfigState::Present) {
-                co_return std::optional<ConfigData>(*snapshot.value);
+        if (snapshot.value != nullptr && snapshot.value->kind == ResultKind::Success &&
+            snapshot.value->data.has_value()) {
+            if (snapshot.value->data->state == ConfigState::Present) {
+                co_return std::optional<ConfigData>(*snapshot.value->data);
             }
-            if (snapshot.value->state == ConfigState::NotFound) {
+            if (snapshot.value->data->state == ConfigState::NotFound) {
                 co_return std::optional<ConfigData>{};
             }
         }
@@ -292,7 +293,7 @@ RemoveDecision ConfigServiceImpl::on_subscription_remove(EntryPtr entry) {
 
 void ConfigServiceImpl::publish_value(ConfigEntry &entry, ConfigData value) {
     FIBER_ASSERT(loop_->in_loop());
-    pool_.publish(entry, std::move(value));
+    pool_.publish(entry, ConfigResult{.kind = ResultKind::Success, .data = std::move(value)});
 }
 
 void ConfigServiceImpl::schedule_query(const EntryPtr &entry, std::uint64_t generation) {
@@ -329,15 +330,16 @@ async::DetachedTask ConfigServiceImpl::query_and_sync(EntryPtr entry, std::uint6
         if (!stopping_ && !entry->proto.draining && generation == active_generation_ &&
             sequence == entry->proto.query_sequence && result) {
             const auto snapshot = entry->watch.current();
+            const ConfigData *current =
+                    (snapshot.value != nullptr && snapshot.value->data.has_value()) ? &*snapshot.value->data : nullptr;
             if (response.error_code == dto::resp::ConfigQueryResponse::kConfigNotFound) {
-                const bool was_not_found = snapshot.value != nullptr && snapshot.value->state == ConfigState::NotFound;
+                const bool was_not_found = current != nullptr && current->state == ConfigState::NotFound;
                 if (!was_not_found) {
                     publish_value(*entry, ConfigData{.state = ConfigState::NotFound});
                 }
             } else if (response.success() && response_content_valid(response)) {
                 const std::string_view md5 = response.md5.value();
-                const bool stale = snapshot.value == nullptr || snapshot.value->state != ConfigState::Present ||
-                                   snapshot.value->md5 != md5;
+                const bool stale = current == nullptr || current->state != ConfigState::Present || current->md5 != md5;
                 if (stale) {
                     publish_value(*entry, ConfigData{
                                                   .state = ConfigState::Present,
@@ -443,10 +445,12 @@ async::DetachedTask ConfigServiceImpl::register_entries(std::vector<EntryPtr> en
             context.data_id.set_present(entry->data_id);
             context.tenant.set_present(config_->tenant());
             const auto snapshot = entry->watch.current();
-            if (snapshot.value != nullptr) {
-                if (snapshot.value->state == ConfigState::Present) {
-                    context.md5.set_present(snapshot.value->md5);
-                } else if (snapshot.value->state == ConfigState::NotFound) {
+            if (snapshot.value != nullptr && snapshot.value->kind == ResultKind::Success &&
+                snapshot.value->data.has_value()) {
+                const ConfigData &data = *snapshot.value->data;
+                if (data.state == ConfigState::Present) {
+                    context.md5.set_present(data.md5);
+                } else if (data.state == ConfigState::NotFound) {
                     context.md5.set_present("");
                 }
             }

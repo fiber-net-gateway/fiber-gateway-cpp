@@ -1,13 +1,8 @@
 #ifndef FIBER_NACOS_SUBSCRIPTION_H
 #define FIBER_NACOS_SUBSCRIPTION_H
 
-#include <atomic>
-#include <concepts>
 #include <cstdint>
-#include <functional>
-#include <memory>
 #include <optional>
-#include <type_traits>
 #include <utility>
 
 #include <async/Task.h>
@@ -15,79 +10,95 @@
 
 namespace fiber::nacos {
 
-// Polymorphic lease base. Public so Subscription<T> can hold/destroy one
-// without depending on detail headers; the concrete templated lease derives
-// from it in detail. close() is idempotent and owner-loop-only.
-struct SubscriptionLeaseBase {
-    virtual ~SubscriptionLeaseBase() = default;
-    virtual void close() noexcept = 0;
-};
-
-enum class ResultKind : std::uint8_t { Closed, Success };
+// The value carried by a subscription Watch. kind distinguishes a real data
+// push (Success, with the latest T) from end-of-subscription (Closed, no data).
+// This keeps T itself free of any lifecycle state: ConfigData stays pure
+// (Present/NotFound), and ServiceInfo need not invent a Closed variant. Closed
+// is the moral equivalent of Java Observable.onComplete.
+enum class ResultKind : std::uint8_t { Success, Closed };
 
 template<typename T>
 struct SubscriptionResult {
     ResultKind kind = ResultKind::Success;
-    typename async::Watch<T>::Snapshot snapshot;
+    std::optional<T> data;
 };
 
-// Zero-allocation awaiter wrapping Watch::Subscriber::NextAwaiter. On resume it
-// checks the entry's closed flag: if the subscription was closed (pool
-// shutdown) the result kind is Closed and the snapshot value is ignored.
+// RAII handle for one subscriber's reference into a pool entry. Holds a bare
+// context pointer plus a type-erased release function: the entry type (which
+// carries the protocol-specific state) is erased so the public Subscription<T>
+// never names it. The subscriber reference it represents was already counted
+// into the entry's ref_count by SubscriptionPool::subscribe; close() drops it.
 //
-// Like Watch::NextAwaiter it is non-movable: the inner NextAwaiter is
-// non-movable, so it is direct-initialized (copy-elided) in the member init
-// list from a factory that returns the NextAwaiter prvalue. The whole awaiter
-// is only ever a prvalue (returned from Subscription::next).
+// This is an inline value member of Subscription<T> (no heap allocation, no
+// virtual base). The context pointer is the entry; the release function is a
+// stateless trampoline the pool installs at subscribe time. Owner-loop-only;
+// idempotent.
 template<typename T>
-class SubscriptionNextAwaiter {
+class SubscriptionLease {
 public:
-    template<typename Factory>
-        requires std::invocable<Factory &> && std::same_as<std::remove_cvref_t<std::invoke_result_t<Factory &>>,
-                                                           typename async::Watch<T>::Subscriber::NextAwaiter>
-    SubscriptionNextAwaiter(Factory &&factory, const std::atomic<bool> *closed) noexcept :
-        inner_(std::invoke(factory)), closed_(closed) {}
+    using ReleaseFn = void (*)(void *ctx) noexcept;
 
-    SubscriptionNextAwaiter(const SubscriptionNextAwaiter &) = delete;
-    SubscriptionNextAwaiter &operator=(const SubscriptionNextAwaiter &) = delete;
-    SubscriptionNextAwaiter(SubscriptionNextAwaiter &&) = delete;
-    SubscriptionNextAwaiter &operator=(SubscriptionNextAwaiter &&) = delete;
+    SubscriptionLease() noexcept = default;
+    SubscriptionLease(void *ctx, ReleaseFn release) noexcept : ctx_(ctx), release_(release) {}
 
-    ~SubscriptionNextAwaiter() { inner_.cancel(); }
+    SubscriptionLease(const SubscriptionLease &) = delete;
+    SubscriptionLease &operator=(const SubscriptionLease &) = delete;
 
-    [[nodiscard]] bool await_ready() const noexcept { return inner_.await_ready(); }
+    SubscriptionLease(SubscriptionLease &&other) noexcept : ctx_(other.ctx_), release_(other.release_) {
+        other.ctx_ = nullptr;
+        other.release_ = nullptr;
+    }
+    SubscriptionLease &operator=(SubscriptionLease &&other) noexcept {
+        if (this != &other) {
+            close();
+            ctx_ = other.ctx_;
+            release_ = other.release_;
+            other.ctx_ = nullptr;
+            other.release_ = nullptr;
+        }
+        return *this;
+    }
+    ~SubscriptionLease() { close(); }
 
-    bool await_suspend(std::coroutine_handle<> handle) { return inner_.await_suspend(handle); }
-
-    SubscriptionResult<T> await_resume() {
-        auto snapshot = inner_.await_resume();
-        const bool closed = closed_ != nullptr && closed_->load(std::memory_order_acquire);
-        return SubscriptionResult<T>{
-                .kind = closed ? ResultKind::Closed : ResultKind::Success,
-                .snapshot = std::move(snapshot),
-        };
+    // Drop the subscriber reference. Idempotent.
+    void close() noexcept {
+        if (release_ != nullptr) {
+            ReleaseFn fn = release_;
+            void *ctx = ctx_;
+            ctx_ = nullptr;
+            release_ = nullptr;
+            fn(ctx);
+        }
     }
 
+    [[nodiscard]] explicit operator bool() const noexcept { return release_ != nullptr; }
+
 private:
-    typename async::Watch<T>::Subscriber::NextAwaiter inner_;
-    const std::atomic<bool> *closed_;
+    void *ctx_ = nullptr;
+    ReleaseFn release_ = nullptr;
 };
 
-// Public subscription handle. Template on the value type only; the entry type
-// is erased behind the lease. Move-only. close()/destruction is owner-loop-only
-// (the lease must not be touched from another loop). next() may be awaited from
-// any loop.
+// Public subscription handle. The watched value type is SubscriptionResult<T>,
+// so Close is delivered as an ordinary published value (no separate channel,
+// no closed flag, no custom awaiter). Subscription is a thin RAII owner: it
+// holds a lease (subscriber reference count) and a Watch subscriber. Users
+// drive the stream directly through subscriber().current() / .next(version).
+//
+// Move-only. close()/destruction is owner-loop-only (the lease must not be
+// touched from another loop). next() may be awaited from any loop.
 template<typename T>
 class Subscription {
 public:
-    using Snapshot = typename async::Watch<T>::Snapshot;
+    using Result = SubscriptionResult<T>;
+    using Subscriber = typename async::Watch<Result>::Subscriber;
+    using Snapshot = typename async::Watch<Result>::Snapshot;
+    using Lease = SubscriptionLease<T>;
 
     // Public only because the templated constructor cannot be hidden behind a
     // friend without leaking detail types; callers cannot construct one without
-    // the internal lease + closed flag, which only the pool produces.
-    Subscription(std::unique_ptr<SubscriptionLeaseBase> lease, typename async::Watch<T>::Subscriber subscriber,
-                 const std::atomic<bool> *closed_flag) noexcept :
-        lease_(std::move(lease)), subscriber_(std::move(subscriber)), closed_flag_(closed_flag) {}
+    // the internal lease, which only the pool produces.
+    Subscription(Lease lease, Subscriber subscriber) noexcept :
+        lease_(std::move(lease)), subscriber_(std::move(subscriber)) {}
 
     Subscription(Subscription &&other) noexcept = default;
     Subscription &operator=(Subscription &&other) noexcept {
@@ -95,8 +106,6 @@ public:
             close();
             lease_ = std::move(other.lease_);
             subscriber_ = std::move(other.subscriber_);
-            closed_flag_ = other.closed_flag_;
-            other.closed_flag_ = nullptr;
         }
         return *this;
     }
@@ -105,42 +114,29 @@ public:
     Subscription(const Subscription &) = delete;
     Subscription &operator=(const Subscription &) = delete;
 
-    // Last published value, or null if nothing has been published yet
-    // (never-synced). Does not carry the Close signal.
-    [[nodiscard]] Snapshot current() const noexcept {
-        FIBER_ASSERT(subscriber_.has_value());
-        return subscriber_->current();
-    }
+    // The underlying Watch subscriber. current() is null until the first push;
+    // next(version) blocks for the next push. A push with kind == Closed marks
+    // end-of-subscription (after which no further values arrive).
+    [[nodiscard]] Subscriber &subscriber() noexcept { return *subscriber_; }
+    [[nodiscard]] const Subscriber &subscriber() const noexcept { return *subscriber_; }
 
-    // True once the pool has closed this subscription (shutdown). Readable from
-    // any loop.
+    // True once the pool has published Closed for this subscription. Readable
+    // from any loop. Convenience over inspecting current().
     [[nodiscard]] bool closed() const noexcept {
-        return closed_flag_ != nullptr && closed_flag_->load(std::memory_order_acquire);
+        const auto snapshot = subscriber_->current();
+        return snapshot.value != nullptr && snapshot.value->kind == ResultKind::Closed;
     }
 
-    // Block (co_await) until a value newer than received_version is published.
-    // Returns a Result; kind is Closed when the pool shut the subscription down.
-    [[nodiscard]] SubscriptionNextAwaiter<T> next(std::uint64_t received_version) const noexcept {
-        FIBER_ASSERT(subscriber_.has_value());
-        return SubscriptionNextAwaiter<T>(
-                [&subscriber = *subscriber_, received_version]() { return subscriber.next(received_version); },
-                closed_flag_);
-    }
-
-    // Release the subscriber reference. Idempotent.
+    // Release the subscriber reference. Idempotent. After close(), subscriber()
+    // must not be used.
     void close() noexcept {
-        if (lease_) {
-            lease_->close();
-            lease_.reset();
-        }
+        lease_.close();
         subscriber_.reset();
-        closed_flag_ = nullptr;
     }
 
 private:
-    std::unique_ptr<SubscriptionLeaseBase> lease_;
-    std::optional<typename async::Watch<T>::Subscriber> subscriber_;
-    const std::atomic<bool> *closed_flag_ = nullptr;
+    Lease lease_;
+    std::optional<Subscriber> subscriber_;
 };
 
 } // namespace fiber::nacos
