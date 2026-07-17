@@ -52,7 +52,6 @@ struct ConfigEntry {
     ConfigKey key;
     async::Watch<ConfigSnapshot> watch{ConfigSnapshot{}};
     std::optional<async::Watch<ConfigSnapshot>::Publisher> publisher;
-    ConfigSnapshot snapshot;
     std::size_t subscribers = 0;
     std::uint64_t registered_generation = 0;
     std::uint64_t query_sequence = 0;
