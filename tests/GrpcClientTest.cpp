@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 
-#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -14,7 +13,6 @@
 
 #include <google/protobuf/message_lite.h>
 
-#include "async/Sleep.h"
 #include "async/Spawn.h"
 #include "async/Task.h"
 #include "common/IoError.h"
@@ -269,6 +267,55 @@ struct TwoCallResult {
     bool got2 = false;
 };
 
+DetachedTask drive_client_connection(fiber::grpc::GrpcClient *client, bool *returned = nullptr) {
+    (void) co_await client->run();
+    if (returned) {
+        *returned = true;
+    }
+}
+
+fiber::async::Task<fiber::common::IoResult<fiber::grpc::GrpcStatus>>
+call_unary(fiber::grpc::GrpcClient &client, std::string_view service, std::string_view method,
+           const google::protobuf::MessageLite &request, google::protobuf::MessageLite &response,
+           fiber::mem::BufPool &pool) {
+    fiber::grpc::GrpcStream stream = client.open_stream(service, method, pool);
+    if (auto result = co_await stream.open(); !result) {
+        co_return std::unexpected(result.error());
+    }
+    if (auto result = co_await stream.write(request); !result) {
+        co_return std::unexpected(result.error());
+    }
+    if (auto result = co_await stream.writes_done(); !result) {
+        co_return std::unexpected(result.error());
+    }
+
+    const auto first = co_await stream.read(response);
+    if (!first) {
+        co_return std::unexpected(first.error());
+    }
+    if (*first == fiber::grpc::GrpcReadOutcome::Message) {
+        const auto second = co_await stream.read(response);
+        if (!second) {
+            co_return std::unexpected(second.error());
+        }
+        if (*second == fiber::grpc::GrpcReadOutcome::Message) {
+            co_return std::unexpected(fiber::common::IoErr::Invalid);
+        }
+    }
+
+    auto finish_result = co_await stream.finish();
+    if (!finish_result) {
+        co_return std::unexpected(finish_result.error());
+    }
+    if (!finish_result->ok()) {
+        co_return *finish_result;
+    }
+    if (*first != fiber::grpc::GrpcReadOutcome::Message) {
+        co_return std::unexpected(fiber::common::IoErr::Invalid);
+    }
+    co_return *finish_result;
+}
+
 DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, std::string_view service,
                         std::string_view method, const helloworld::HelloRequest &request,
                         std::shared_ptr<std::promise<ClientResult>> promise) {
@@ -288,11 +335,12 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, std::
         promise->set_value(std::move(result));
         co_return;
     }
+    fiber::async::spawn(*loop, [&client]() { return drive_client_connection(&client); });
 
     fiber::mem::BufPool pool;
     helloworld::HelloRequest req = request;
     helloworld::HelloReply reply;
-    auto call_result = co_await client.unary_call(service, method, req, reply, pool);
+    auto call_result = co_await call_unary(client, service, method, req, reply, pool);
     if (!call_result) {
         result.err = call_result.error();
     } else {
@@ -301,10 +349,7 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, std::
         result.got_result = true;
     }
 
-    client.shutdown();
-    for (int i = 0; i < 500 && !client.run_done(); ++i) {
-        co_await fiber::async::sleep(1ms);
-    }
+    co_await client.shutdown();
 
     promise->set_value(std::move(result));
 }
@@ -330,12 +375,13 @@ DetachedTask run_client_two_calls(fiber::event::EventLoop *loop, std::uint16_t p
         promise->set_value(std::move(result));
         co_return;
     }
+    fiber::async::spawn(*loop, [&client]() { return drive_client_connection(&client); });
 
     fiber::mem::BufPool pool;
     helloworld::HelloRequest req = request;
     for (int call = 0; call < 2; ++call) {
         helloworld::HelloReply reply;
-        auto call_result = co_await client.unary_call("helloworld.Greeter", "SayHello", req, reply, pool);
+        auto call_result = co_await call_unary(client, "helloworld.Greeter", "SayHello", req, reply, pool);
         if (!call_result) {
             result.err = call_result.error();
             break;
@@ -351,15 +397,58 @@ DetachedTask run_client_two_calls(fiber::event::EventLoop *loop, std::uint16_t p
         }
     }
 
-    client.shutdown();
-    for (int i = 0; i < 500 && !client.run_done(); ++i) {
-        co_await fiber::async::sleep(1ms);
-    }
+    co_await client.shutdown();
 
     promise->set_value(std::move(result));
 }
 
-TEST(GrpcClientTest, UnaryCallRoundTrip) {
+struct LifecycleResult {
+    fiber::common::IoErr err = fiber::common::IoErr::None;
+    bool moved_from_invalid = false;
+    bool run_returned = false;
+    bool repeated_shutdown_completed = false;
+    bool second_run_busy = false;
+};
+
+DetachedTask run_client_lifecycle(fiber::event::EventLoop *loop, std::uint16_t port,
+                                  std::shared_ptr<std::promise<LifecycleResult>> promise) {
+    LifecycleResult result;
+    fiber::grpc::GrpcClient::Options options;
+    options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    options.tls.enabled = true;
+    options.tls.server_name = "localhost";
+    options.h2.outbound_hpack_catalog = &test_catalog();
+    options.authority = "localhost";
+    options.scheme = "https";
+
+    fiber::grpc::GrpcClient client(*loop, options);
+    auto connect_result = co_await client.connect();
+    if (!connect_result) {
+        result.err = connect_result.error();
+        promise->set_value(std::move(result));
+        co_return;
+    }
+
+    fiber::async::spawn(*loop, [&client, &result]() { return drive_client_connection(&client, &result.run_returned); });
+    {
+        fiber::mem::BufPool pool;
+        fiber::grpc::GrpcStream original = client.open_stream("helloworld.Greeter", "SayHello", pool);
+        fiber::grpc::GrpcStream moved = std::move(original);
+        result.moved_from_invalid = !original.valid() && moved.valid();
+    }
+
+    // shutdown() starts before the posted run task enters. It must wait for the
+    // run-start barrier, stop the connection, and return only after run() exits.
+    co_await client.shutdown();
+    co_await client.shutdown();
+    result.repeated_shutdown_completed = true;
+
+    auto second_run = co_await client.run();
+    result.second_run_busy = !second_run && second_run.error() == fiber::common::IoErr::Busy;
+    promise->set_value(std::move(result));
+}
+
+TEST(GrpcClientTest, StreamUnaryRoundTrip) {
     TlsCert cert;
     ASSERT_TRUE(cert.ok) << "openssl cert generation failed";
 
@@ -414,7 +503,7 @@ TEST(GrpcClientTest, UnaryCallRoundTrip) {
     delete server;
 }
 
-TEST(GrpcClientTest, UnaryCallReturnsGrpcError) {
+TEST(GrpcClientTest, StreamUnaryReturnsGrpcError) {
     TlsCert cert;
     ASSERT_TRUE(cert.ok) << "openssl cert generation failed";
 
@@ -466,7 +555,7 @@ TEST(GrpcClientTest, UnaryCallReturnsGrpcError) {
     delete server;
 }
 
-TEST(GrpcClientTest, UnaryCallUsesDefaultHpackCatalog) {
+TEST(GrpcClientTest, StreamUnaryUsesDefaultHpackCatalog) {
     TlsCert cert;
     ASSERT_TRUE(cert.ok) << "openssl cert generation failed";
 
@@ -514,6 +603,53 @@ TEST(GrpcClientTest, UnaryCallUsesDefaultHpackCatalog) {
     EXPECT_EQ(result.status2.code, 0);
     EXPECT_EQ(result.reply2.message(), "Hello, fiber");
     EXPECT_EQ(result.reply2.count(), 2);
+
+    std::promise<void> close_promise;
+    auto close_future = close_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return close_server_on_loop(server, &close_promise); });
+    close_future.get();
+    group.stop();
+    group.join();
+    delete server;
+}
+
+TEST(GrpcClientTest, ImmediateShutdownWaitsForExternallyDrivenRun) {
+    TlsCert cert;
+    ASSERT_TRUE(cert.ok) << "openssl cert generation failed";
+
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::http::HttpServerOptions server_options;
+    server_options.tls.enabled = true;
+    server_options.tls.cert_file = cert.cert_path;
+    server_options.tls.key_file = cert.key_path;
+    server_options.tls.alpn = {"h2"};
+
+    std::promise<std::uint16_t> port_promise;
+    std::promise<fiber::http::HttpServer *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return start_http_server(&group.at(0), make_grpc_handler(), std::move(server_options), &port_promise,
+                                 &server_promise);
+    });
+
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    auto promise = std::make_shared<std::promise<LifecycleResult>>();
+    auto future = promise->get_future();
+    fiber::async::spawn(group.at(0), [&]() { return run_client_lifecycle(&group.at(0), port, promise); });
+
+    LifecycleResult result = future.get();
+    ASSERT_EQ(result.err, fiber::common::IoErr::None);
+    EXPECT_TRUE(result.moved_from_invalid);
+    EXPECT_TRUE(result.run_returned);
+    EXPECT_TRUE(result.repeated_shutdown_completed);
+    EXPECT_TRUE(result.second_run_busy);
 
     std::promise<void> close_promise;
     auto close_future = close_promise.get_future();

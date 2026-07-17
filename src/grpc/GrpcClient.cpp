@@ -1,10 +1,9 @@
 #include "GrpcClient.h"
 
 #include <array>
-#include <cstdint>
-#include <new>
 #include <utility>
 
+#include "../common/Assert.h"
 #include "../http/HttpHeaderHash.h"
 
 namespace fiber::grpc {
@@ -45,121 +44,103 @@ constexpr std::array<http::Http2HpackEncodeCatalog::PolicyEntry, 3> kGrpcHeaderP
         {"grpc-encoding", http::http_header_name_hash("grpc-encoding"), "identity"},
 }};
 
+const http::Http2HpackEncodeCatalog &grpc_header_catalog() noexcept {
+    static http::Http2HpackEncodeCatalog catalog;
+    static const bool initialized = catalog.init(kGrpcHeaderPolicy);
+    FIBER_ASSERT(initialized);
+    return catalog;
+}
+
+http::Http2ClientConnection::Options make_connection_options(GrpcClient::Options &options) noexcept {
+    http::Http2ClientConnection::Options conn_options;
+    conn_options.peer_addr = std::move(options.peer_addr);
+    conn_options.tls = std::move(options.tls);
+    conn_options.h2 = std::move(options.h2);
+    if (conn_options.h2.outbound_hpack_catalog == nullptr) {
+        conn_options.h2.outbound_hpack_catalog = &grpc_header_catalog();
+    }
+    return conn_options;
+}
+
 } // namespace
 
-GrpcClient::GrpcClient(event::EventLoop &loop, Options options) noexcept : loop_(&loop) {
-    FIBER_ASSERT(grpc_catalog_.init(kGrpcHeaderPolicy));
-    http::Http2ClientConnection::Options conn_options;
-    conn_options.peer_addr = options.peer_addr;
-    conn_options.tls = std::move(options.tls);
-    conn_options.h2 = options.h2;
-    if (conn_options.h2.outbound_hpack_catalog == nullptr) {
-        conn_options.h2.outbound_hpack_catalog = &grpc_catalog_;
-    }
-    conn_ = std::make_shared<http::Http2ClientConnection>(loop, std::move(conn_options));
+GrpcClient::GrpcClient(event::EventLoop &loop, Options options) noexcept :
+    loop_(&loop), conn_(loop, make_connection_options(options)) {
     assign_view(authority_, options.authority);
     assign_view(scheme_, options.scheme);
 }
 
 GrpcClient::~GrpcClient() {
-    if (conn_) {
-        conn_->shutdown(); // best-effort; callers should shutdown() on-loop first
-    }
+    FIBER_ASSERT(state_ == State::Created || state_ == State::Stopped);
+    FIBER_ASSERT(run_started_wg_.empty());
+    FIBER_ASSERT(run_finished_wg_.empty());
 }
 
 fiber::async::Task<common::IoResult<void>> GrpcClient::connect() noexcept {
-    if (!conn_) {
-        co_return std::unexpected(common::IoErr::Invalid);
+    FIBER_ASSERT(loop_->in_loop());
+    if (state_ != State::Created) {
+        co_return std::unexpected(common::IoErr::Busy);
     }
-    auto connect_result = co_await conn_->connect();
+    auto connect_result = co_await conn_.connect();
     if (!connect_result) {
+        if (conn_.http2().state() != http::Http2Connection::State::Init) {
+            state_ = State::Stopped;
+        }
         co_return std::unexpected(connect_result.error());
     }
 
-    run_state_ = std::make_shared<RunState>();
-    fiber::async::spawn(*loop_, [conn = conn_, state = run_state_]() { return run_loop(conn, state); });
+    state_ = State::Connected;
+    run_started_wg_.add();
+    run_finished_wg_.add();
     co_return common::IoResult<void>{};
 }
 
-fiber::async::DetachedTask GrpcClient::run_loop(std::shared_ptr<http::Http2ClientConnection> conn,
-                                                std::shared_ptr<RunState> state) noexcept {
-    auto run_result = co_await conn->run();
-    state->err.store(run_result ? common::IoErr::None : run_result.error(), std::memory_order_release);
-    state->done.store(true, std::memory_order_release);
-    co_return;
-}
-
-void GrpcClient::shutdown() noexcept {
-    if (conn_) {
-        conn_->shutdown();
+fiber::async::Task<GrpcClient::RunResult> GrpcClient::run() noexcept {
+    FIBER_ASSERT(loop_->in_loop());
+    if (state_ != State::Connected && state_ != State::StopPending) {
+        co_return std::unexpected(common::IoErr::Busy);
     }
+
+    state_ = state_ == State::StopPending ? State::Stopping : State::Running;
+    run_started_wg_.done();
+
+    auto run_result = co_await conn_.run();
+    state_ = State::Stopped;
+    run_finished_wg_.done();
+    co_return run_result;
 }
 
-bool GrpcClient::run_done() const noexcept { return run_state_ && run_state_->done.load(std::memory_order_acquire); }
+fiber::async::Task<void> GrpcClient::shutdown() noexcept {
+    FIBER_ASSERT(loop_->in_loop());
+    if (state_ == State::Created) {
+        state_ = State::Stopped;
+        co_return;
+    }
+    if (state_ == State::Stopped) {
+        co_return;
+    }
+    if (state_ == State::Connected) {
+        state_ = State::StopPending;
+    }
+    if (state_ == State::StopPending) {
+        co_await run_started_wg_.join();
+    }
+    if (state_ == State::Stopped) {
+        co_return;
+    }
+
+    FIBER_ASSERT(state_ == State::Running || state_ == State::Stopping);
+    state_ = State::Stopping;
+    conn_.shutdown();
+    co_await run_finished_wg_.join();
+    FIBER_ASSERT(state_ == State::Stopped);
+}
 
 GrpcStream GrpcClient::open_stream(std::string_view service, std::string_view method, mem::BufPool &pool,
                                    GrpcStream::Options options) noexcept(false) {
+    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(state_ == State::Connected || state_ == State::Running);
     return GrpcStream(conn_, authority_, scheme_, service, method, pool, options);
-}
-
-fiber::async::Task<common::IoResult<GrpcStatus>>
-GrpcClient::unary_call(std::string_view service, std::string_view method, const google::protobuf::MessageLite &request,
-                       google::protobuf::MessageLite &response, mem::BufPool &pool) noexcept {
-    if (!conn_) {
-        co_return std::unexpected(common::IoErr::Invalid);
-    }
-
-    // Unary is just a constrained streaming call: open, send exactly one request
-    // (half-close), read exactly one response, then finish for the gRPC status.
-    // Delegating to GrpcStream avoids a second copy of the framing/read/trailer
-    // logic and keeps the two paths from diverging.
-    GrpcStream stream;
-    try {
-        stream = open_stream(service, method, pool, {});
-    } catch (const std::bad_alloc &) {
-        // open_stream (GrpcStream ctor) allocates the authority/path strings; a
-        // bad_alloc there is reported as IoErr::NoMem rather than terminating
-        // this noexcept coroutine. Matches ScriptCompiler's bad_alloc handling.
-        co_return std::unexpected(common::IoErr::NoMem);
-    }
-
-    if (auto r = co_await stream.open(); !r) {
-        co_return std::unexpected(r.error());
-    }
-    if (auto r = co_await stream.write(request); !r) {
-        co_return std::unexpected(r.error());
-    }
-    if (auto r = co_await stream.writes_done(); !r) {
-        co_return std::unexpected(r.error());
-    }
-
-    // A trailers-only response (immediate error) carries no message and yields End.
-    const auto first = co_await stream.read(response);
-    if (!first) {
-        co_return std::unexpected(first.error());
-    }
-    // Unary permits exactly one response message; a second is a protocol violation.
-    if (*first == GrpcReadOutcome::Message) {
-        const auto second = co_await stream.read(response);
-        if (!second) {
-            co_return std::unexpected(second.error());
-        }
-        if (*second == GrpcReadOutcome::Message) {
-            co_return std::unexpected(common::IoErr::Invalid);
-        }
-    }
-
-    auto finish_result = co_await stream.finish();
-    if (!finish_result) {
-        co_return std::unexpected(finish_result.error());
-    }
-    if (!finish_result->ok()) {
-        co_return *finish_result; // gRPC-level error; do not trust the response
-    }
-    if (*first != GrpcReadOutcome::Message) {
-        co_return std::unexpected(common::IoErr::Invalid); // OK status but no message
-    }
-    co_return *finish_result;
 }
 
 } // namespace fiber::grpc

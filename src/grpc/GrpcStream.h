@@ -3,7 +3,6 @@
 
 #include <chrono>
 #include <cstdint>
-#include <memory>
 #include <string>
 #include <string_view>
 
@@ -32,7 +31,9 @@ enum class GrpcReadOutcome : std::uint8_t {
 };
 
 // One full-duplex gRPC call over a single HTTP/2 stream. Owns the underlying
-// ClientHttp2Exchange (and thus the stream lease) for the lifetime of the call.
+// ClientHttp2Exchange (and thus the stream lease) for the lifetime of the call,
+// but only borrows its Http2ClientConnection. The GrpcClient that created this
+// stream must outlive the stream and every coroutine driving it.
 //
 // The methods are coroutines driven by the caller on the client's event loop;
 // no internal coroutines are spawned. The caller must keep at most one
@@ -58,7 +59,7 @@ public:
     };
 
     GrpcStream() noexcept = default;
-    GrpcStream(std::shared_ptr<http::Http2ClientConnection> conn, std::string_view authority, std::string_view scheme,
+    GrpcStream(http::Http2ClientConnection &conn, std::string_view authority, std::string_view scheme,
                std::string_view service, std::string_view method, mem::BufPool &pool, Options options);
 
     GrpcStream(const GrpcStream &) = delete;
@@ -109,7 +110,7 @@ private:
 
     static constexpr std::size_t kReadChunk = 64 * 1024;
 
-    std::shared_ptr<http::Http2ClientConnection> conn_;
+    http::Http2ClientConnection *conn_ = nullptr;
     mem::BufPool *pool_ = nullptr;
     http::ClientHttp2Exchange exchange_;
     GrpcFrameReader reader_;

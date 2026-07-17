@@ -188,11 +188,13 @@ common::IoErr Http2Connection::start(std::unique_ptr<HttpTransport> transport) n
     outbound_scheduler_.set_transport(transport_.get());
     outbound_scheduler_.set_write_timeout(options_.write_timeout);
     outbound_scheduler_.set_peer_max_frame_size(peer_max_outbound_frame_size_);
-    start_send_loop();
-    if (options_.role == ConnectionRole::Client) {
-        return start_client_session();
+    const common::IoErr start_err =
+            options_.role == ConnectionRole::Client ? start_client_session() : start_server_session();
+    if (start_err != common::IoErr::None) {
+        return start_err;
     }
-    return start_server_session();
+    start_send_loop();
+    return common::IoErr::None;
 }
 
 Http2Connection::~Http2Connection() {

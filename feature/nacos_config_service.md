@@ -216,7 +216,7 @@ Stopping ──all tasks exited──> Stopped
 - 发布订阅 Stopped 状态。
 - ConfigService 任务退出后再从客户端 `WaitGroup` 返回。
 
-通用 `GrpcClient` 当前只提供 `run_done()` 轮询。实现 ConfigService 前应增加可等待的连接关闭结果，保证 Nacos shutdown 不依赖轮询或后台遗留任务。
+通用 `GrpcClient` 现在由调用者显式运行 `run()` 协程，`shutdown()` 会等待该协程和 HTTP/2 内部任务完全退出。ConfigService 应把 `run()` 及所有 RPC 驱动协程登记到自己的 `WaitGroup`，从而保证 Nacos shutdown 不依赖轮询或后台遗留任务。
 
 ## 6. Unary 配置操作
 
@@ -502,7 +502,8 @@ Codec 约束：
 - [ ] 实现 ClientDetection、ConnectReset 和 unknown request 策略。
 - [ ] 实现 heartbeat、server failover、backoff 和 jitter。
 - [ ] 监听 Auth Watch，动态更新 token metadata。
-- [ ] 为通用 GrpcClient 增加可等待关闭结果；必要时暴露连接本地地址。
+- [x] 为通用 GrpcClient 增加外部驱动的 `run()` 和可等待的 `shutdown()`。
+- [ ] 必要时暴露连接本地地址。
 - [ ] 接入 NacosClient `WaitGroup` 和 shutdown。
 
 验收：脚本化 gRPC 测试服务器可验证完整握手、双向请求/响应、token 更新、重连和干净关闭。
