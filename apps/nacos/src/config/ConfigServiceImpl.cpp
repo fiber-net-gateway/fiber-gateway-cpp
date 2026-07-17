@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <chrono>
-#include <functional>
+#include <cstdlib>
+#include <cstring>
+#include <new>
+#include <string>
 #include <utility>
 
 #include <async/Timeout.h>
@@ -73,33 +76,57 @@ NacosRpcError protocol_error(std::string message, common::IoErr io_error = commo
     };
 }
 
-std::size_t hash_key(std::string_view data_id, std::string_view group) noexcept {
-    const std::size_t first = std::hash<std::string_view>{}(data_id);
-    const std::size_t second = std::hash<std::string_view>{}(group);
-    return first ^ (second + 0x9e3779b9u + (first << 6u) + (first >> 2u));
+[[nodiscard]] int compare_config_key(std::string_view a_data_id, std::string_view a_group, std::string_view b_data_id,
+                                     std::string_view b_group) noexcept {
+    if (int cmp = a_data_id.compare(b_data_id)) {
+        return cmp < 0 ? -1 : 1;
+    }
+    if (int cmp = a_group.compare(b_group)) {
+        return cmp < 0 ? -1 : 1;
+    }
+    return 0;
+}
+
+// Allocates a ConfigEntry together with its data_id/group bytes in a single
+// malloc block: [ConfigEntry][data_id]['\0'][group]['\0']. The entry's
+// string_views point into the tail, so no std::string / ConfigKey allocation is
+// needed. The returned ConfigEntryPtr owns the single initial reference; the
+// registry adds a second reference on insert.
+[[nodiscard]] ConfigEntryPtr make_config_entry(std::string_view data_id, std::string_view group) {
+    static_assert(alignof(ConfigEntry) <= alignof(std::max_align_t),
+                  "ConfigEntry alignment exceeds malloc's guarantee; use aligned allocation");
+    const std::size_t total = sizeof(ConfigEntry) + data_id.size() + group.size() + 2;
+    void *mem = std::malloc(total);
+    FIBER_ASSERT(mem != nullptr);
+    auto *entry = new (mem) ConfigEntry();
+    char *tail = reinterpret_cast<char *>(entry) + sizeof(ConfigEntry);
+    if (data_id.size() != 0) {
+        std::memcpy(tail, data_id.data(), data_id.size());
+    }
+    tail[data_id.size()] = '\0';
+    char *group_tail = tail + data_id.size() + 1;
+    if (group.size() != 0) {
+        std::memcpy(group_tail, group.data(), group.size());
+    }
+    group_tail[group.size()] = '\0';
+    entry->data_id = std::string_view(tail, data_id.size());
+    entry->group = std::string_view(group_tail, group.size());
+    return ConfigEntryPtr(entry);
 }
 
 } // namespace
 
-std::size_t ConfigKeyHash::operator()(const ConfigKey &key) const noexcept { return hash_key(key.data_id, key.group); }
-
-std::size_t ConfigKeyHash::operator()(ConfigKeyView key) const noexcept { return hash_key(key.data_id, key.group); }
-
-bool ConfigKeyEqual::operator()(const ConfigKey &lhs, const ConfigKey &rhs) const noexcept { return lhs == rhs; }
-
-bool ConfigKeyEqual::operator()(const ConfigKey &lhs, ConfigKeyView rhs) const noexcept {
-    return lhs.data_id == rhs.data_id && lhs.group == rhs.group;
+bool ConfigEntryCompare::operator()(const ConfigEntry *lhs, const ConfigEntry *rhs) const noexcept {
+    return compare_config_key(lhs->data_id, lhs->group, rhs->data_id, rhs->group) < 0;
 }
 
-bool ConfigKeyEqual::operator()(ConfigKeyView lhs, const ConfigKey &rhs) const noexcept { return (*this)(rhs, lhs); }
-
-ConfigEntry::ConfigEntry(ConfigKey key_value) : key(std::move(key_value)) {
+ConfigEntry::ConfigEntry() {
     publisher = watch.acquire_publisher();
     FIBER_ASSERT(publisher.has_value());
 }
 
 ConfigSubscriptionLease::ConfigSubscriptionLease(std::shared_ptr<ConfigServiceLifetime> lifetime_value,
-                                                 std::shared_ptr<ConfigEntry> entry_value) noexcept :
+                                                 ConfigEntryPtr entry_value) noexcept :
     lifetime(std::move(lifetime_value)), entry(std::move(entry_value)) {}
 
 ConfigSubscriptionLease::~ConfigSubscriptionLease() { close(); }
@@ -201,9 +228,30 @@ bool ConfigServiceImpl::response_content_valid(const dto::resp::ConfigQueryRespo
            response.content.value().size() <= options_->max_config_content_bytes;
 }
 
+ConfigEntry *ConfigServiceImpl::entry_from_hook(common::IntrusiveRbTreeHook *hook) noexcept {
+    if (hook == nullptr || !hook->linked()) {
+        return nullptr;
+    }
+    return reinterpret_cast<ConfigEntry *>(reinterpret_cast<std::uint8_t *>(hook) - offsetof(ConfigEntry, tree_hook));
+}
+
 ConfigServiceImpl::EntryPtr ConfigServiceImpl::find_entry(std::string_view data_id, std::string_view group) {
-    auto it = entries_.find(ConfigKeyView{.data_id = data_id, .group = group});
-    return it == entries_.end() ? nullptr : it->second;
+    ConfigEntry *node = entries_.root();
+    while (node != nullptr) {
+        const int cmp = compare_config_key(node->data_id, node->group, data_id, group);
+        if (cmp == 0) {
+            return EntryPtr(node);
+        }
+        node = cmp < 0 ? entry_from_hook(node->tree_hook.left) : entry_from_hook(node->tree_hook.right);
+    }
+    return EntryPtr{};
+}
+
+void ConfigServiceImpl::unlink_entry(ConfigEntry &entry) noexcept {
+    if (entry.tree_hook.linked()) {
+        entries_.erase(entry);
+        entry.release();
+    }
 }
 
 async::Task<std::expected<std::optional<ConfigData>, ConfigServiceError>>
@@ -348,13 +396,11 @@ std::expected<ConfigSubscription, ConfigServiceError> ConfigServiceImpl::subscri
 
     EntryPtr entry = find_entry(data_id, group);
     const bool first = entry == nullptr;
-    const bool reactivating = entry && entry->closing;
+    const bool reactivating = static_cast<bool>(entry) && entry->closing;
     if (first) {
-        entry = std::make_shared<ConfigEntry>(ConfigKey{
-                .data_id = std::string(data_id),
-                .group = std::string(group),
-        });
-        entries_.emplace(entry->key, entry);
+        entry = make_config_entry(data_id, group);
+        entry->retain();
+        entries_.insert(*entry);
     }
     entry->closing = false;
     ++entry->subscribers;
@@ -383,16 +429,13 @@ void ConfigServiceImpl::release_subscription(const EntryPtr &entry) noexcept {
     }
     if (!entry->registration_in_flight &&
         (generation == 0 || entry->registered_generation == 0 || entry->registered_generation != generation)) {
-        auto it = entries_.find(entry->key);
-        if (it != entries_.end() && it->second == entry) {
-            entries_.erase(it);
-        }
+        unlink_entry(*entry);
     }
 }
 
-void ConfigServiceImpl::publish_snapshot(const EntryPtr &entry, ConfigSnapshot snapshot) {
+void ConfigServiceImpl::publish_snapshot(ConfigEntry &entry, ConfigSnapshot snapshot) {
     FIBER_ASSERT(loop_->in_loop());
-    entry->publisher->publish(std::move(snapshot));
+    entry.publisher->publish(std::move(snapshot));
 }
 
 void ConfigServiceImpl::schedule_query(const EntryPtr &entry, std::uint64_t generation) {
@@ -415,7 +458,7 @@ async::DetachedTask ConfigServiceImpl::query_and_sync(EntryPtr entry, std::uint6
                                                       std::uint64_t sequence) noexcept {
     while (!stopping_ && generation != 0 && entry->subscribers > 0 && !entry->closing) {
         dto::req::ConfigQueryRequest request =
-                dto::req::ConfigQueryRequest::build(entry->key.data_id, entry->key.group, config_->tenant());
+                dto::req::ConfigQueryRequest::build(entry->data_id, entry->group, config_->tenant());
         dto::resp::ConfigQueryResponse response;
         mem::BufPool pool;
         auto result = co_await connection_->request(request, pool, response);
@@ -424,20 +467,20 @@ async::DetachedTask ConfigServiceImpl::query_and_sync(EntryPtr entry, std::uint6
             sequence == entry->query_sequence && result) {
             if (response.error_code == dto::resp::ConfigQueryResponse::kConfigNotFound) {
                 if (entry->watch.current().value->state != ConfigState::NotFound) {
-                    publish_snapshot(entry, ConfigSnapshot{.state = ConfigState::NotFound});
+                    publish_snapshot(*entry, ConfigSnapshot{.state = ConfigState::NotFound});
                 }
             } else if (response.success() && response_content_valid(response)) {
                 const std::string_view md5 = response.md5.value();
                 const auto snapshot = entry->watch.current();
                 if (snapshot.value->state != ConfigState::Present || snapshot.value->data.md5 != md5) {
-                    publish_snapshot(entry, ConfigSnapshot{
-                                                    .state = ConfigState::Present,
-                                                    .data =
-                                                            ConfigData{
-                                                                    .md5 = std::string(md5),
-                                                                    .content = std::string(response.content.value()),
-                                                            },
-                                            });
+                    publish_snapshot(*entry, ConfigSnapshot{
+                                                     .state = ConfigState::Present,
+                                                     .data =
+                                                             ConfigData{
+                                                                     .md5 = std::string(md5),
+                                                                     .content = std::string(response.content.value()),
+                                                             },
+                                             });
                 }
             }
         }
@@ -505,10 +548,7 @@ void ConfigServiceImpl::complete_registration(const EntryPtr &entry, bool listen
         schedule_registration({entry}, false, active_generation_);
         return;
     }
-    auto it = entries_.find(entry->key);
-    if (it != entries_.end() && it->second == entry) {
-        entries_.erase(it);
-    }
+    unlink_entry(*entry);
 }
 
 async::DetachedTask ConfigServiceImpl::register_entries(std::vector<EntryPtr> entries, bool listen,
@@ -529,8 +569,8 @@ async::DetachedTask ConfigServiceImpl::register_entries(std::vector<EntryPtr> en
                 continue;
             }
             dto::req::ConfigListenContext context;
-            context.group.set_present(entry->key.group);
-            context.data_id.set_present(entry->key.data_id);
+            context.group.set_present(entry->group);
+            context.data_id.set_present(entry->data_id);
             context.tenant.set_present(config_->tenant());
             const auto snapshot = entry->watch.current();
             if (snapshot.value->state == ConfigState::Present) {
@@ -571,11 +611,9 @@ async::DetachedTask ConfigServiceImpl::register_entries(std::vector<EntryPtr> en
 
 void ConfigServiceImpl::register_all(std::uint64_t generation) {
     std::vector<EntryPtr> entries;
-    entries.reserve(entries_.size());
-    for (const auto &[key, entry]: entries_) {
-        (void) key;
+    for (ConfigEntry *entry = entries_.minimum(); entry != nullptr; entry = entries_.next_of(*entry)) {
         if (entry->subscribers > 0 && !entry->closing) {
-            entries.push_back(entry);
+            entries.push_back(EntryPtr(entry));
         }
     }
     schedule_registration(std::move(entries), true, generation);
@@ -693,16 +731,17 @@ async::Task<void> ConfigServiceImpl::run() noexcept {
 
     active_generation_ = 0;
     co_await tasks_.join();
-    for (auto &[key, entry]: entries_) {
-        (void) key;
+    for (ConfigEntry *entry = entries_.minimum(); entry != nullptr;) {
+        ConfigEntry *next = entries_.next_of(*entry);
         const auto snapshot = entry->watch.current();
         if (snapshot.value->state != ConfigState::Stopped) {
             ConfigSnapshot stopped = *snapshot.value;
             stopped.state = ConfigState::Stopped;
-            publish_snapshot(entry, std::move(stopped));
+            publish_snapshot(*entry, std::move(stopped));
         }
+        unlink_entry(*entry);
+        entry = next;
     }
-    entries_.clear();
     run_active_ = false;
 }
 
@@ -712,13 +751,12 @@ void ConfigServiceImpl::shutdown() noexcept {
         return;
     }
     stopping_ = true;
-    for (auto &[key, entry]: entries_) {
-        (void) key;
+    for (ConfigEntry *entry = entries_.minimum(); entry != nullptr; entry = entries_.next_of(*entry)) {
         const auto snapshot = entry->watch.current();
         if (snapshot.value->state != ConfigState::Stopped) {
             ConfigSnapshot stopped = *snapshot.value;
             stopped.state = ConfigState::Stopped;
-            publish_snapshot(entry, std::move(stopped));
+            publish_snapshot(*entry, std::move(stopped));
         }
     }
 }
