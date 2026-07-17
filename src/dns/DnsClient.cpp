@@ -318,8 +318,7 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(std::uint16_t sl
     FIBER_ASSERT(slot_index < options_.max_inflight);
     InflightSlot &slot = slots_[slot_index];
 
-    auto connect_operation =
-            async::timeout_for([this]() { return net::TcpStream::connect(*loop_, options_.server); }, options_.timeout);
+    auto connect_operation = net::TcpStream::connect(*loop_, options_.server, options_.timeout);
     arm_inflight_cancel(slot_index, &connect_operation, &cancel_awaiter<decltype(connect_operation)>);
     auto connect_result = co_await connect_operation;
     disarm_inflight_cancel(slot_index, &connect_operation);

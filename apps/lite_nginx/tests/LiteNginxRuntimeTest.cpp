@@ -682,7 +682,7 @@ fiber::async::DetachedTask run_http2_websocket_client(fiber::event::EventLoop *l
     options.h2.outbound_hpack_catalog = &websocket_hpack_catalog();
 
     auto connection = std::make_shared<fiber::http::Http2ClientConnection>(*loop, std::move(options));
-    auto connect_result = co_await connection->connect();
+    auto connect_result = co_await connection->connect(5s);
     if (!connect_result) {
         outcome.error = connect_result.error();
         promise->set_value(std::move(outcome));

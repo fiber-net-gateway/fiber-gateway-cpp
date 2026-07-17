@@ -180,7 +180,7 @@ DetachedTask run_tls_http1_client(fiber::event::EventLoop *loop, std::uint16_t p
     ClientResult result;
 
     fiber::net::SocketAddress target(fiber::net::IpAddress::loopback_v4(), port);
-    auto connect_result = co_await fiber::net::TcpStream::connect(*loop, target);
+    auto connect_result = co_await fiber::net::TcpStream::connect(*loop, target, 5s);
     if (!connect_result) {
         result.err = connect_result.error();
         result_promise->set_value(std::move(result));
@@ -381,7 +381,7 @@ DetachedTask run_tls_http1_client_post_and_read_all(fiber::event::EventLoop *loo
     ClientResult result;
 
     fiber::net::SocketAddress target(fiber::net::IpAddress::loopback_v4(), port);
-    auto connect_result = co_await fiber::net::TcpStream::connect(*loop, target);
+    auto connect_result = co_await fiber::net::TcpStream::connect(*loop, target, 5s);
     if (!connect_result) {
         result.err = connect_result.error();
         result_promise->set_value(std::move(result));

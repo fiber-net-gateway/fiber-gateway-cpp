@@ -3,7 +3,6 @@
 #include <memory>
 #include <utility>
 
-#include "../async/Timeout.h"
 #include "../common/Assert.h"
 #include "../net/TcpListener.h"
 #include "../net/TcpStream.h"
@@ -42,7 +41,7 @@ Http1ClientConnection::~Http1ClientConnection() {
     FIBER_ASSERT(false);
 }
 
-fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect() noexcept {
+fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect(std::chrono::milliseconds timeout) noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     if (!loop_->in_loop()) {
         co_return std::unexpected(common::IoErr::NotSupported);
@@ -58,8 +57,7 @@ fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect() noex
         }
     }
 
-    auto connect_result = co_await fiber::async::timeout_for(
-            [&]() { return net::TcpStream::connect(*loop_, options_.peer_addr); }, options_.connect_timeout);
+    auto connect_result = co_await net::TcpStream::connect(*loop_, options_.peer_addr, timeout);
     if (!connect_result) {
         co_return std::unexpected(connect_result.error());
     }

@@ -76,7 +76,7 @@ DetachedTask run_client_connect_and_shutdown(fiber::event::EventLoop *loop, std:
     options.h2.outbound_hpack_catalog = &test_http2_encode_catalog();
 
     fiber::http::Http2ClientConnection connection(*loop, std::move(options));
-    auto connect_result = co_await connection.connect();
+    auto connect_result = co_await connection.connect(5s);
     if (!connect_result) {
         opened_promise->set_value(false);
         result_promise->set_value(connect_result.error());

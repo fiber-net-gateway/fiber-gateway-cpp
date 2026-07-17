@@ -5,8 +5,9 @@
 
 namespace fiber::net {
 
-UnixStream::ConnectAwaiter UnixStream::connect(fiber::event::EventLoop &loop, const UnixAddress &peer) noexcept {
-    return detail::ConnectFd<UnixConnectTraits>::connect(loop, peer);
+UnixStream::ConnectAwaiter UnixStream::connect(fiber::event::EventLoop &loop, const UnixAddress &peer,
+                                               std::chrono::milliseconds timeout) noexcept {
+    return detail::ConnectFd<UnixConnectTraits>::connect(loop, peer, timeout);
 }
 
 fiber::common::IoResult<int> UnixConnectTraits::create_socket(const UnixAddress &peer) {

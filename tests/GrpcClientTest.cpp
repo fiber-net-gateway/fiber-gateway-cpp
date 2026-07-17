@@ -329,7 +329,7 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, std::
     options.scheme = "https";
 
     fiber::grpc::GrpcClient client(*loop, options);
-    auto connect_result = co_await client.connect();
+    auto connect_result = co_await client.connect(5s);
     if (!connect_result) {
         result.err = connect_result.error();
         promise->set_value(std::move(result));
@@ -369,7 +369,7 @@ DetachedTask run_client_two_calls(fiber::event::EventLoop *loop, std::uint16_t p
     options.scheme = "https";
 
     fiber::grpc::GrpcClient client(*loop, options);
-    auto connect_result = co_await client.connect();
+    auto connect_result = co_await client.connect(5s);
     if (!connect_result) {
         result.err = connect_result.error();
         promise->set_value(std::move(result));
@@ -422,7 +422,7 @@ DetachedTask run_client_lifecycle(fiber::event::EventLoop *loop, std::uint16_t p
     options.scheme = "https";
 
     fiber::grpc::GrpcClient client(*loop, options);
-    auto connect_result = co_await client.connect();
+    auto connect_result = co_await client.connect(5s);
     if (!connect_result) {
         result.err = connect_result.error();
         promise->set_value(std::move(result));

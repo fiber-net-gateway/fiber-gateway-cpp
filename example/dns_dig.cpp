@@ -543,8 +543,8 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> query_via_tcp(fiber::ev
         co_return std::unexpected(encoded.error());
     }
 
-    auto connect_result = co_await fiber::async::timeout_for(
-            [&]() { return fiber::net::TcpStream::connect(loop, options.server); }, std::chrono::milliseconds(2000));
+    auto connect_result =
+            co_await fiber::net::TcpStream::connect(loop, options.server, std::chrono::milliseconds(2000));
     if (!connect_result) {
         co_return std::unexpected(connect_result.error());
     }

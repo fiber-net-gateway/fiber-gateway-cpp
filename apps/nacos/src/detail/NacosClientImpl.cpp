@@ -59,11 +59,9 @@ NacosAuthError make_error(NacosAuthErrorCode code, std::size_t server_index) noe
     return NacosAuthError{.code = code, .server_index = server_index};
 }
 
-http::Http1ClientConnectionOptions make_connection_options(const NacosClientConfig &config, std::size_t server_index,
-                                                           std::chrono::milliseconds connect_timeout) {
+http::Http1ClientConnectionOptions make_connection_options(const NacosClientConfig &config, std::size_t server_index) {
     http::Http1ClientConnectionOptions result;
     result.peer_addr = net::SocketAddress(config.server_ips()[server_index], config.http_port());
-    result.connect_timeout = connect_timeout;
     return result;
 }
 
@@ -454,8 +452,8 @@ NacosClientImpl::login(std::size_t server_index, std::string_view target, std::s
         co_return std::unexpected(token_expired_error(server_index));
     }
 
-    http::Http1ClientConnection connection(*loop_, make_connection_options(config_, server_index, *connect_timeout));
-    auto connect_result = co_await connection.connect();
+    http::Http1ClientConnection connection(*loop_, make_connection_options(config_, server_index));
+    auto connect_result = co_await connection.connect(*connect_timeout);
     if (!running()) {
         co_return std::unexpected(canceled_error(server_index));
     }

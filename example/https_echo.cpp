@@ -298,7 +298,7 @@ fiber::async::DetachedTask run_demo_client(fiber::event::EventLoop *loop, fiber:
     };
 
     fiber::net::SocketAddress target(fiber::net::IpAddress::loopback_v4(), port);
-    auto infant_result = co_await fiber::net::TcpStream::connect(*loop, target);
+    auto infant_result = co_await fiber::net::TcpStream::connect(*loop, target, std::chrono::seconds(10));
     if (!infant_result) {
         co_await fail("client connect failed", infant_result.error());
         co_return;

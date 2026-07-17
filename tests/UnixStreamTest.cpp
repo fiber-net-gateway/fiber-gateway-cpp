@@ -58,7 +58,7 @@ DetachedTask accept_once(fiber::event::EventLoop *loop, fiber::net::UnixAddress 
 
 DetachedTask connect_client(fiber::event::EventLoop *loop, fiber::net::UnixAddress address,
                             std::promise<fiber::common::IoResult<void>> *connect_promise) {
-    auto infant_result = co_await fiber::net::UnixStream::connect(*loop, address);
+    auto infant_result = co_await fiber::net::UnixStream::connect(*loop, address, std::chrono::seconds(5));
     if (!infant_result) {
         connect_promise->set_value(std::unexpected(infant_result.error()));
         fiber::event::EventLoop::current().stop();
