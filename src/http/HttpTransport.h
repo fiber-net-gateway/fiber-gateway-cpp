@@ -78,7 +78,8 @@ public:
 
 class TcpTransport final : public HttpTransport {
 public:
-    static common::IoResult<std::unique_ptr<TcpTransport>> create(event::EventLoop &loop, net::AcceptResult &&accept);
+    static common::IoResult<std::unique_ptr<TcpTransport>> create(event::EventLoop &loop, net::AcceptResult &&accept,
+                                                                  net::TcpSocketOptions tcp_options = {});
 
     fiber::async::Task<common::IoResult<void>> handshake(std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds timeout) override;
@@ -121,9 +122,11 @@ class TlsTransport final : public HttpTransport {
 public:
     ~TlsTransport() override;
     static common::IoResult<std::unique_ptr<TlsTransport>> create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                  net::TlsContext &context);
+                                                                  net::TlsContext &context,
+                                                                  net::TcpSocketOptions tcp_options = {});
     static common::IoResult<std::unique_ptr<TlsTransport>> create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                  net::TlsServerContext &context);
+                                                                  net::TlsServerContext &context,
+                                                                  net::TcpSocketOptions tcp_options = {});
 
     fiber::async::Task<common::IoResult<void>> handshake(std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds timeout) override;

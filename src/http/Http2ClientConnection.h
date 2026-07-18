@@ -11,6 +11,7 @@
 #include "../common/NonMovable.h"
 #include "../event/EventLoop.h"
 #include "../net/SocketAddress.h"
+#include "../net/TcpSocketOptions.h"
 #include "../net/TlsContext.h"
 #include "ClientHttp2Request.h"
 #include "Http2Connection.h"
@@ -23,6 +24,7 @@ class Http2ClientConnection : public common::NonCopyable, public common::NonMova
 public:
     struct Options {
         net::SocketAddress peer_addr{};
+        net::TcpSocketOptions tcp{.no_delay = net::TcpOptionMode::Enabled};
         net::TlsOptions tls{};
         Http2Connection::Options h2{};
     };
@@ -53,6 +55,7 @@ private:
 
     event::EventLoop *loop_ = nullptr;
     net::SocketAddress peer_addr_{};
+    net::TcpSocketOptions tcp_options_{};
     std::optional<net::SocketAddress> local_addr_;
     net::TlsContext tls_ctx_;
     Http2Connection conn_;

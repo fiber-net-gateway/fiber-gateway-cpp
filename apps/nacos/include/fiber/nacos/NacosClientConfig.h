@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <net/IpAddress.h>
+#include <net/TcpSocketOptions.h>
 
 namespace fiber::nacos {
 
@@ -86,6 +87,7 @@ struct NacosClientOptions {
     std::chrono::milliseconds min_refresh_delay{1000};
 
     std::chrono::milliseconds grpc_connect_timeout{3000};
+    net::TcpSocketOptions grpc_tcp{.no_delay = net::TcpOptionMode::Enabled};
     std::chrono::milliseconds grpc_request_timeout{3000};
     std::chrono::milliseconds grpc_handshake_timeout{5000};
     std::chrono::milliseconds grpc_compatibility_setup_delay{1000};

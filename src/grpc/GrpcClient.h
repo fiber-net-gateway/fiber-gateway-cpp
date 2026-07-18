@@ -18,6 +18,7 @@
 #include "../http/Http2ClientConnection.h"
 #include "../http/Http2Connection.h"
 #include "../net/SocketAddress.h"
+#include "../net/TcpSocketOptions.h"
 #include "../net/TlsOptions.h"
 #include "GrpcStream.h"
 
@@ -37,6 +38,7 @@ public:
 
     struct Options {
         net::SocketAddress peer_addr{};
+        net::TcpSocketOptions tcp{.no_delay = net::TcpOptionMode::Enabled};
         net::TlsOptions tls{};
         http::Http2Connection::Options h2{};
         std::string_view authority{};

@@ -13,6 +13,7 @@
 #include "../event/EventLoop.h"
 #include "../event/Poller.h"
 #include "SocketAddress.h"
+#include "TcpSocketOptions.h"
 #include "detail/TlsStreamFd.h"
 
 struct ssl_ctx_st;
@@ -43,6 +44,7 @@ public:
     [[nodiscard]] std::string_view selected_alpn() const noexcept;
     [[nodiscard]] bool handshake_done() const noexcept;
     [[nodiscard]] bool has_pending_read() const noexcept;
+    [[nodiscard]] fiber::common::IoErr apply_socket_options(const TcpSocketOptions &options) noexcept;
     void close();
 
     fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;

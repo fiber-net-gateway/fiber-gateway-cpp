@@ -506,6 +506,7 @@ async::Task<NacosGrpcConnection::AttemptResult> NacosGrpcConnection::run_generat
     publish_state(NacosGrpcConnectionState::Connecting, std::nullopt, state_server_index);
     grpc::GrpcClient::Options client_options;
     client_options.peer_addr = net::SocketAddress(endpoint.ip, endpoint.port);
+    client_options.tcp = options_->grpc_tcp;
     const std::string endpoint_authority = authority(endpoint);
     client_options.authority = endpoint_authority;
     client_options.scheme = "http";

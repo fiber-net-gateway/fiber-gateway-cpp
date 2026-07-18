@@ -11,6 +11,7 @@
 #include "../common/NonMovable.h"
 #include "../event/EventLoop.h"
 #include "SocketAddress.h"
+#include "TcpSocketOptions.h"
 #include "detail/ConnectFd.h"
 #include "detail/StreamFd.h"
 
@@ -47,6 +48,7 @@ public:
     [[nodiscard]] int fd() const noexcept;
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept;
     [[nodiscard]] const SocketAddress &remote_addr() const noexcept;
+    [[nodiscard]] fiber::common::IoErr apply_socket_options(const TcpSocketOptions &options) noexcept;
     int release_fd() noexcept;
     void close();
 

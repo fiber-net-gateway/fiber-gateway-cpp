@@ -176,7 +176,7 @@ public:
             if (!accepted) {
                 break;
             }
-            auto transport = fiber::http::TcpTransport::create(*loop_, std::move(*accepted));
+            auto transport = fiber::http::TcpTransport::create(*loop_, std::move(*accepted), http_options_.tcp);
             if (!transport) {
                 break;
             }
@@ -525,7 +525,8 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
     result.ready = co_await wait_ready(connection);
 
     if (result.ready && !reconnect) {
-        for (int i = 0; i < 100 && server->listen_count() < 3; ++i) {
+        const auto listen_deadline = fiber::event::EventLoop::current().now() + 2s;
+        while (server->listen_count() < 3 && fiber::event::EventLoop::current().now() < listen_deadline) {
             co_await fiber::async::sleep(2ms);
         }
         result.listen_batches_bounded = server->listen_count() >= 3 && server->max_listen_contexts() <= 2;

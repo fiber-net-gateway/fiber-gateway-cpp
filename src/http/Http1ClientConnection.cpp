@@ -65,7 +65,7 @@ fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect(std::c
     net::AcceptResult accept(connect_result->release_fd(), connect_result->take_peer());
     std::unique_ptr<HttpTransport> transport;
     if (options_.tls.enabled) {
-        auto transport_result = TlsTransport::create(*loop_, std::move(accept), tls_ctx_);
+        auto transport_result = TlsTransport::create(*loop_, std::move(accept), tls_ctx_, options_.tcp);
         if (!transport_result) {
             co_return std::unexpected(transport_result.error());
         }
@@ -82,7 +82,7 @@ fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect(std::c
             co_return std::unexpected(common::IoErr::NotSupported);
         }
     } else {
-        auto transport_result = TcpTransport::create(*loop_, std::move(accept));
+        auto transport_result = TcpTransport::create(*loop_, std::move(accept), options_.tcp);
         if (!transport_result) {
             co_return std::unexpected(transport_result.error());
         }

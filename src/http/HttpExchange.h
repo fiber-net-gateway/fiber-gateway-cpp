@@ -15,6 +15,7 @@
 #include "../common/NonMovable.h"
 #include "../common/mem/BufPool.h"
 #include "../common/mem/IoBufChain.h"
+#include "../net/TcpSocketOptions.h"
 #include "../net/TlsOptions.h"
 #include "../net/UdpSocket.h"
 #include "../quic/QuicConnection.h"
@@ -43,6 +44,7 @@ struct HttpServerOptions {
         bool enable_early_data = false;
     };
 
+    net::TcpSocketOptions tcp{.no_delay = net::TcpOptionMode::Enabled};
     std::chrono::seconds keep_alive_timeout{70};
     std::chrono::seconds header_timeout{10};
     std::chrono::seconds body_timeout{60};

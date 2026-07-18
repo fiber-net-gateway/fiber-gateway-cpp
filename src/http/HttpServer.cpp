@@ -143,7 +143,7 @@ fiber::async::DetachedTask HttpServer::handle_connection(net::AcceptResult accep
         if (!tls_ctx_) {
             co_return;
         }
-        auto tls_result = TlsTransport::create(event::EventLoop::current(), std::move(accept), *tls_ctx_);
+        auto tls_result = TlsTransport::create(event::EventLoop::current(), std::move(accept), *tls_ctx_, options_.tcp);
         if (!tls_result) {
             co_return;
         }
@@ -154,7 +154,7 @@ fiber::async::DetachedTask HttpServer::handle_connection(net::AcceptResult accep
             co_return;
         }
     } else {
-        auto tcp_result = TcpTransport::create(event::EventLoop::current(), std::move(accept));
+        auto tcp_result = TcpTransport::create(event::EventLoop::current(), std::move(accept), options_.tcp);
         if (!tcp_result) {
             co_return;
         }

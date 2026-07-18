@@ -59,6 +59,10 @@ fiber::event::EventLoop &TcpStream::loop() const noexcept { return stream_.loop(
 
 const SocketAddress &TcpStream::remote_addr() const noexcept { return remote_addr_; }
 
+fiber::common::IoErr TcpStream::apply_socket_options(const TcpSocketOptions &options) noexcept {
+    return detail::apply_tcp_socket_options(fd(), options);
+}
+
 int TcpStream::release_fd() noexcept { return stream_.release_fd(); }
 
 void TcpStream::close() { stream_.close(); }
