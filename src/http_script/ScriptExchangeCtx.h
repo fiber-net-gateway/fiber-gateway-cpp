@@ -64,7 +64,7 @@ public:
     [[nodiscard]] fiber::script::JsValue cookies() noexcept;
 
     // ---- Route-variable constant accessors ($namespace.key) ----
-    // Back the $path/$query/$header/$cookie/$req constants resolved by RouteScriptLibrary.
+    // Back the $path/$query/$header/$cookie/$req constants resolved by RouteScriptExtension.
     // Each returns a String JsValue, or Undefined when the named value is absent.
 
     // Path variables captured by the route matcher for this request. name/value pairs borrow
@@ -75,7 +75,7 @@ public:
     }
     [[nodiscard]] fiber::script::AbiResult path_var(fiber::script::GcHeap &heap, std::string_view name) const noexcept;
     [[nodiscard]] fiber::script::AbiResult query_var(fiber::script::GcHeap &heap, std::string_view name) noexcept;
-    // norm_key is already lowercased with '-' folded to '_' (RouteScriptLibrary normalizes at
+    // norm_key is already lowercased with '-' folded to '_' (RouteScriptExtension normalizes at
     // compile time); header/cookie names are matched under the same rule.
     [[nodiscard]] fiber::script::AbiResult header_var(fiber::script::GcHeap &heap,
                                                       std::string_view norm_key) const noexcept;

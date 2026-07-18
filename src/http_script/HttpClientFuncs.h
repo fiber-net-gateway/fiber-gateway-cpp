@@ -28,7 +28,7 @@ fiber::script::AsyncTask http_proxy_pass_fn(void *userdata, const fiber::script:
 
 // Directive def for `directive <name> = http "<target>";`. Binds a named script handle to a fixed
 // upstream/URL target; svc.request / svc.proxyPass then resolve to the bound target via userdata.
-// Owned by RouteScriptLibrary (which keeps it alive for the compiled script's lifetime).
+// Owned by RouteScriptExtension, which outlives the compiled script.
 class HttpDirectiveDef : public fiber::script::Library::DirectiveDef {
 public:
     explicit HttpDirectiveDef(HttpTargetSpec target) noexcept;

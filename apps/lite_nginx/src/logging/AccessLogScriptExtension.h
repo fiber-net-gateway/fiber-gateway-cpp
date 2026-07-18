@@ -1,19 +1,14 @@
-#ifndef FIBER_LITE_NGINX_LOGGING_ACCESS_LOG_SCRIPT_LIBRARY_H
-#define FIBER_LITE_NGINX_LOGGING_ACCESS_LOG_SCRIPT_LIBRARY_H
+#ifndef FIBER_LITE_NGINX_LOGGING_ACCESS_LOG_SCRIPT_EXTENSION_H
+#define FIBER_LITE_NGINX_LOGGING_ACCESS_LOG_SCRIPT_EXTENSION_H
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
-#include <vector>
 
 #include "common/IoError.h"
-#include "http_script/RouteScriptLibrary.h"
 #include "http_script/ScriptExchangeCtx.h"
-
-namespace fiber::script::std_lib {
-class StdLibrary;
-}
+#include "script/std/StdLibrary.h"
 
 namespace fiber::lite_nginx::logging {
 
@@ -45,11 +40,17 @@ private:
     const AccessLogScriptData *data_;
 };
 
-class AccessLogScriptLibrary final : public fiber::http_script::RouteScriptLibrary {
+class AccessLogScriptExtension final {
 public:
-    AccessLogScriptLibrary(fiber::script::std_lib::StdLibrary &shared, const std::vector<std::string> &path_var_names);
+    using Library = fiber::script::Library;
+    using HostCallable = Library::HostCallable;
+    using HostCallFrame = Library::HostCallFrame;
 
-    const HostCallable *resolve_constant(std::string_view namespace_name, std::string_view key) const override;
+    AccessLogScriptExtension() noexcept;
+
+    [[nodiscard]] static const fiber::script::std_lib::StdLibrary::ExtOps &ops() noexcept;
+
+    void set_compile_enabled(bool enabled) noexcept { compile_enabled_ = enabled; }
 
 private:
     enum class Field : std::uint8_t {
@@ -73,11 +74,15 @@ private:
     };
 
     static fiber::script::AbiResult field_fn(void *userdata, const HostCallFrame &frame) noexcept;
+    static const HostCallable *resolve_constant_op(void *ctx, std::string_view namespace_name, std::string_view key);
 
+    const HostCallable *resolve_constant(std::string_view namespace_name, std::string_view key) const;
+
+    bool compile_enabled_ = false;
     std::array<FieldRef, static_cast<std::size_t>(Field::Count)> fields_{};
     std::array<HostCallable, static_cast<std::size_t>(Field::Count)> callables_{};
 };
 
 } // namespace fiber::lite_nginx::logging
 
-#endif // FIBER_LITE_NGINX_LOGGING_ACCESS_LOG_SCRIPT_LIBRARY_H
+#endif // FIBER_LITE_NGINX_LOGGING_ACCESS_LOG_SCRIPT_EXTENSION_H

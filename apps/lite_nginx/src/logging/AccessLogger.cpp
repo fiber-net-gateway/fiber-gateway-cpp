@@ -10,7 +10,7 @@
 #include "script/Script.h"
 #include "script/std/NodeText.h"
 
-#include "AccessLogScriptLibrary.h"
+#include "AccessLogScriptExtension.h"
 
 namespace fiber::lite_nginx::logging {
 namespace {

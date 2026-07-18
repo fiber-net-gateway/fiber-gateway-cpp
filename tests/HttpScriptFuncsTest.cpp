@@ -33,7 +33,7 @@
 
 #include "common/util/RoutePathMatcher.h"
 #include "http_script/HttpScriptLib.h"
-#include "http_script/RouteScriptLibrary.h"
+#include "http_script/RouteScriptExtension.h"
 #include "http_script/ScriptExchangeCtx.h"
 #include "script/JsGc.h"
 #include "script/JsValue.h"
@@ -271,13 +271,13 @@ bool contains(std::string_view haystack, std::string_view needle) {
 
 // ---- Route-variable ($path/$query/$header/$cookie/$req) test helpers ----
 
-// Compiles a script against a per-location RouteScriptLibrary seeded with path_var_names,
-// wrapping a fresh StdLibrary with the HTTP functions. Keeps the libraries alive alongside
-// the script (the compiled script bakes in their HostCallable pointers).
+// Compiles a script against a per-location route extension seeded with path_var_names and a
+// fresh StdLibrary with the HTTP functions. The extension outlives the compiled script because
+// its state is referenced through the compiled host-call userdata.
 struct CompiledRouteScript {
     std::shared_ptr<fiber::script::Script> script; // nullptr on compile failure
     std::shared_ptr<fiber::script::std_lib::StdLibrary> shared_lib;
-    std::shared_ptr<fiber::http_script::RouteScriptLibrary> route_lib;
+    std::shared_ptr<fiber::http_script::RouteScriptExtension> route_extension;
     bool ok = false;
     std::string error;
 };
@@ -286,8 +286,11 @@ CompiledRouteScript compile_route_script(std::string_view source, const std::vec
     CompiledRouteScript out;
     out.shared_lib = std::make_shared<fiber::script::std_lib::StdLibrary>();
     fiber::http_script::register_http_functions_to_lib(*out.shared_lib);
-    out.route_lib = std::make_shared<fiber::http_script::RouteScriptLibrary>(*out.shared_lib, path_var_names);
-    auto compiled = fiber::script::compile_script(*out.route_lib, source);
+    out.route_extension = std::make_shared<fiber::http_script::RouteScriptExtension>();
+    out.shared_lib->add_ext_ops(out.route_extension.get(), fiber::http_script::RouteScriptExtension::ops());
+    out.route_extension->set_compile_path_vars(path_var_names);
+    out.route_extension->set_http_directives_enabled(true);
+    auto compiled = fiber::script::compile_script(*out.shared_lib, source);
     if (!compiled) {
         out.error = std::string(compiled.error().message);
         return out; // script stays nullptr, ok stays false
@@ -323,9 +326,9 @@ fiber::http::HttpHandler make_route_script_handler(CompiledRouteScript compiled,
     builder.add_route(pattern, 0);
     *matcher = builder.build();
     auto script = compiled.script;
-    auto route_lib = compiled.route_lib;
+    auto route_extension = compiled.route_extension;
     auto shared_lib = compiled.shared_lib;
-    return [script, matcher, route_lib, shared_lib](fiber::http::HttpExchange &exchange) -> Task<void> {
+    return [script, matcher, route_extension, shared_lib](fiber::http::HttpExchange &exchange) -> Task<void> {
         fiber::script::GcHeap heap;
         fiber::http_script::ScriptExchangeCtx ctx{
                 exchange, heap, fiber::http_script::ScriptConnectionInfo{.scheme = "http", .tls = false}};
@@ -479,6 +482,23 @@ TEST(RouteVarTest, PathVarCompileTimeExistence) {
     EXPECT_FALSE(none.ok);
 }
 
+TEST(RouteVarTest, SharedExtensionUsesCurrentRouteInfoBeforeCallableCache) {
+    fiber::script::std_lib::StdLibrary library;
+    fiber::http_script::register_http_functions_to_lib(library);
+    fiber::http_script::RouteScriptExtension route_extension;
+    library.add_ext_ops(&route_extension, fiber::http_script::RouteScriptExtension::ops());
+
+    route_extension.set_compile_path_vars({"id"});
+    auto first = fiber::script::compile_script(library, "resp.sendJson(200, $path.id);");
+    ASSERT_TRUE(first.has_value()) << first.error().message;
+
+    route_extension.set_compile_path_vars({"slug"});
+    auto stale = fiber::script::compile_script(library, "resp.sendJson(200, $path.id);");
+    EXPECT_FALSE(stale.has_value());
+    auto current = fiber::script::compile_script(library, "resp.sendJson(200, $path.slug);");
+    EXPECT_TRUE(current.has_value()) << current.error().message;
+}
+
 TEST(RouteVarTest, ReqFieldCompileTimeExistence) {
     for (std::string_view field: {"uri", "method", "path", "query"}) {
         std::string src = "resp.sendJson(200, $req.";
@@ -579,8 +599,8 @@ TEST(RouteVarTest, QueryHeaderCookieVars) {
 TEST(RouteVarTest, AbsentVarsResolveToNull) {
     ServerFixture s;
     // No query param "a", no X-Forwarded-For header, no session cookie, and $path.id on a
-    // catch-all location (no capture) -> all null. ($path.id compiles because the
-    // RouteScriptLibrary is seeded with {"id"}, but the request matches /* which captures
+    // catch-all location (no capture) -> all null. ($path.id compiles because the route
+    // extension is configured with {"id"}, but the request matches /* which captures
     // nothing, so path_var returns null rather than failing.) Mirrors Java NullNode.
     auto compiled = compile_route_script(
             "resp.sendJson(200, {p: $path.id, q: $query.a, h: $header.x_forwarded_for, c: $cookie.session});", {"id"});

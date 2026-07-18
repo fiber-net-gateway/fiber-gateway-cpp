@@ -20,11 +20,11 @@
 #include "script/std/StdLibrary.h"
 
 namespace fiber::http_script {
-class RouteScriptLibrary;
+class RouteScriptExtension;
 }
 
-namespace fiber::script {
-class Library;
+namespace fiber::lite_nginx::logging {
+class AccessLogScriptExtension;
 }
 
 namespace fiber::lite_nginx::runtime {
@@ -40,11 +40,9 @@ struct RuntimeError {
 struct AccessLogRuntime {
     config::SourceLocation location;
     std::string logger_name;
-    // A source without interpolation uses literal_message directly. Interpolated
-    // templates keep both their compiled Script and the Library owning baked HostCallables.
+    // A source without interpolation uses literal_message directly.
     std::string literal_message;
     std::shared_ptr<fiber::script::Script> template_script;
-    std::shared_ptr<fiber::script::Library> template_library;
 };
 
 // Global keepalive connection pool shared across all upstreams. Configured once under
@@ -110,9 +108,6 @@ struct LocationRuntime {
     bool host_header_overridden = false;
     // Non-null when this location runs a script (kind == Script) instead of proxying.
     std::shared_ptr<fiber::script::Script> script;
-    // The per-location route-scoped library the script was compiled against. Outlives the
-    // script (HostCallable pointers are baked in); kept alive here alongside it.
-    std::shared_ptr<fiber::http_script::RouteScriptLibrary> route_lib;
 };
 
 struct ServerRuntime {
@@ -153,9 +148,11 @@ struct RuntimeConfig {
     std::vector<ServerRuntime> servers;
     std::vector<ListenerRuntime> listeners;
     ConnectionPoolRuntime connection_pool;
-    // Shared across all script locations (one StdLibrary with the HTTP functions registered),
-    // kept alive for the runtime's lifetime since compiled scripts bake in function pointers.
+    // Shared across all script compilation in this runtime. Extension contexts are configured
+    // before each serial compile and own userdata referenced by the compiled scripts.
     std::shared_ptr<fiber::script::std_lib::StdLibrary> script_library;
+    std::shared_ptr<fiber::http_script::RouteScriptExtension> route_script_extension;
+    std::shared_ptr<fiber::lite_nginx::logging::AccessLogScriptExtension> access_log_script_extension;
 };
 
 } // namespace fiber::lite_nginx::runtime

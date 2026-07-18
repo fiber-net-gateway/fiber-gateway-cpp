@@ -407,7 +407,7 @@ std::expected<HeaderOverride, ConfigError> parse_proxy_set_header(const Directiv
         return std::unexpected(make_error(directive, "proxy_set_header name must not contain variables"));
     }
     // The value may be a template: any ${...} is compiled at runtime-build and evaluated per
-    // request (route vars like $header.host resolve via the location's RouteScriptLibrary). A
+    // request (route vars like $header.host resolve through the runtime's route extension). A
     // bare $ without ${ is treated as a literal (no interpolation).
     const std::string &value = directive.args[1];
     const bool is_template = value.find("${") != std::string::npos;
