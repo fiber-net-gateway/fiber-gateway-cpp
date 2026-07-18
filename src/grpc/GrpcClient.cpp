@@ -54,6 +54,7 @@ const http::Http2HpackEncodeCatalog &grpc_header_catalog() noexcept {
 http::Http2ClientConnection::Options make_connection_options(GrpcClient::Options &options) noexcept {
     http::Http2ClientConnection::Options conn_options;
     conn_options.peer_addr = std::move(options.peer_addr);
+    conn_options.tcp = options.tcp;
     conn_options.tls = std::move(options.tls);
     conn_options.h2 = std::move(options.h2);
     if (conn_options.h2.outbound_hpack_catalog == nullptr) {

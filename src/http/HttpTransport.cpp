@@ -67,10 +67,14 @@ fiber::async::Task<common::IoResult<void>> wait_tls_event(net::TlsTcpStream &str
 
 } // namespace
 
-common::IoResult<std::unique_ptr<TcpTransport>> TcpTransport::create(event::EventLoop &loop,
-                                                                     net::AcceptResult &&accept) {
+common::IoResult<std::unique_ptr<TcpTransport>> TcpTransport::create(event::EventLoop &loop, net::AcceptResult &&accept,
+                                                                     net::TcpSocketOptions tcp_options) {
     if (!accept.valid()) {
         return std::unexpected(common::IoErr::Invalid);
+    }
+    const common::IoErr option_err = net::detail::apply_tcp_socket_options(accept.fd(), tcp_options);
+    if (option_err != common::IoErr::None) {
+        return std::unexpected(option_err);
     }
     return std::unique_ptr<TcpTransport>(new TcpTransport(loop, accept.release_fd(), accept.take_peer()));
 }
@@ -282,9 +286,14 @@ const net::SocketAddress &TcpTransport::remote_addr() const noexcept { return st
 event::EventLoop &TcpTransport::loop() const noexcept { return stream_.loop(); }
 
 common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                     net::TlsContext &context) {
+                                                                     net::TlsContext &context,
+                                                                     net::TcpSocketOptions tcp_options) {
     if (!accept.valid()) {
         return std::unexpected(common::IoErr::Invalid);
+    }
+    const common::IoErr option_err = net::detail::apply_tcp_socket_options(accept.fd(), tcp_options);
+    if (option_err != common::IoErr::None) {
+        return std::unexpected(option_err);
     }
     auto transport =
             std::unique_ptr<TlsTransport>(new TlsTransport(loop, accept.release_fd(), accept.take_peer(), context));
@@ -296,9 +305,14 @@ common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::Even
 }
 
 common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                     net::TlsServerContext &context) {
+                                                                     net::TlsServerContext &context,
+                                                                     net::TcpSocketOptions tcp_options) {
     if (!accept.valid()) {
         return std::unexpected(common::IoErr::Invalid);
+    }
+    const common::IoErr option_err = net::detail::apply_tcp_socket_options(accept.fd(), tcp_options);
+    if (option_err != common::IoErr::None) {
+        return std::unexpected(option_err);
     }
     auto transport =
             std::unique_ptr<TlsTransport>(new TlsTransport(loop, accept.release_fd(), accept.take_peer(), context));
