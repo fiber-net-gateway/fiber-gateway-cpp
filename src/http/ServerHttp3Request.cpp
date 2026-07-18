@@ -197,9 +197,10 @@ enum class ServerHttp3Request::BodyRecvState : std::uint8_t {
 ServerHttp3Request::ServerHttp3Request(Http3Connection &conn, const HttpServerOptions &http_options,
                                        const HttpHandler &handler) noexcept :
     quic_lease_(conn.quic().lease()), stream_(this, &ServerHttp3Request::destroy_owner),
-    inbound_buf_(conn.quic().recv_extent_pool()), exchange_(conn.quic().recv_extent_pool(), http_options),
-    handler_(&handler), max_qpack_string_size_(static_cast<std::uint32_t>(std::min<std::size_t>(
-                                http_options.header_large_size, std::numeric_limits<std::uint32_t>::max()))),
+    inbound_buf_(conn.quic().recv_extent_pool()),
+    exchange_(conn.quic().recv_extent_pool(), http_options, conn.quic().remote_addr()), handler_(&handler),
+    max_qpack_string_size_(static_cast<std::uint32_t>(
+            std::min<std::size_t>(http_options.header_large_size, std::numeric_limits<std::uint32_t>::max()))),
     body_timeout_(http_options.body_timeout), body_recv_state_(BodyRecvState::FrameHeader),
     extended_connect_enabled_(conn.local_settings().enable_connect_protocol) {
     // HTTP/3 request bodies are stream-delimited when Content-Length is absent.

@@ -137,6 +137,22 @@ StdLibrary &StdLibrary::instance() {
     return inst;
 }
 
+void StdLibrary::add_ext_ops(void *ctx, ExtOps ops) {
+    FIBER_ASSERT(ctx != nullptr);
+    FIBER_ASSERT(ops.mark_root_prop != nullptr || ops.resolve_func != nullptr || ops.resolve_async_func != nullptr ||
+                 ops.resolve_constant != nullptr || ops.resolve_async_constant != nullptr ||
+                 ops.resolve_directive_def != nullptr);
+    extensions_.push_back(Extension{.ctx = ctx, .ops = ops});
+}
+
+void StdLibrary::mark_root_prop(std::string_view prop_name) {
+    for (const Extension &extension: extensions_) {
+        if (extension.ops.mark_root_prop != nullptr) {
+            extension.ops.mark_root_prop(extension.ctx, prop_name);
+        }
+    }
+}
+
 StdLibrary::StdLibrary() {
     register_array_funcs(*this);
     register_binary_funcs(*this);
@@ -154,43 +170,84 @@ StdLibrary::StdLibrary() {
 Library::FunctionMatchResult StdLibrary::resolve_func(std::string_view name,
                                                       const FunctionMatchRequest &request) const {
     auto it = functions_.find(std::string(name));
-    if (it == functions_.end()) {
-        return FunctionMatchResult::not_found();
+    if (it != functions_.end()) {
+        return match_entries(it->second, request);
     }
-    return match_entries(it->second, request);
+    FunctionMatchResult result = FunctionMatchResult::not_found();
+    for (const Extension &extension: extensions_) {
+        if (extension.ops.resolve_func == nullptr) {
+            continue;
+        }
+        result = extension.ops.resolve_func(extension.ctx, name, request);
+        if (result.status != FunctionMatchStatus::NotFound) {
+            return result;
+        }
+    }
+    return result;
 }
 
 Library::FunctionMatchResult StdLibrary::resolve_async_func(std::string_view name,
                                                             const FunctionMatchRequest &request) const {
     auto it = async_functions_.find(std::string(name));
-    if (it == async_functions_.end()) {
-        return FunctionMatchResult::not_found();
+    if (it != async_functions_.end()) {
+        return match_entries(it->second, request);
     }
-    return match_entries(it->second, request);
+    FunctionMatchResult result = FunctionMatchResult::not_found();
+    for (const Extension &extension: extensions_) {
+        if (extension.ops.resolve_async_func == nullptr) {
+            continue;
+        }
+        result = extension.ops.resolve_async_func(extension.ctx, name, request);
+        if (result.status != FunctionMatchStatus::NotFound) {
+            return result;
+        }
+    }
+    return result;
 }
 
 const Library::HostCallable *StdLibrary::resolve_constant(std::string_view namespace_name, std::string_view key) const {
     auto it = constants_.find(make_constant_key(namespace_name, key));
-    if (it == constants_.end()) {
-        return nullptr;
+    if (it != constants_.end()) {
+        return &it->second;
     }
-    return &it->second;
+    for (const Extension &extension: extensions_) {
+        if (extension.ops.resolve_constant == nullptr) {
+            continue;
+        }
+        if (const HostCallable *callable = extension.ops.resolve_constant(extension.ctx, namespace_name, key)) {
+            return callable;
+        }
+    }
+    return nullptr;
 }
 
 const Library::HostCallable *StdLibrary::resolve_async_constant(std::string_view namespace_name,
                                                                 std::string_view key) const {
     auto it = async_constants_.find(make_constant_key(namespace_name, key));
-    if (it == async_constants_.end()) {
-        return nullptr;
+    if (it != async_constants_.end()) {
+        return &it->second;
     }
-    return &it->second;
+    for (const Extension &extension: extensions_) {
+        if (extension.ops.resolve_async_constant == nullptr) {
+            continue;
+        }
+        if (const HostCallable *callable = extension.ops.resolve_async_constant(extension.ctx, namespace_name, key)) {
+            return callable;
+        }
+    }
+    return nullptr;
 }
 
 Library::DirectiveDef *StdLibrary::resolve_directive_def(std::string_view type, std::string_view name,
                                                          const std::vector<fiber::script::JsValue> &literals) const {
-    (void) type;
-    (void) name;
-    (void) literals;
+    for (const Extension &extension: extensions_) {
+        if (extension.ops.resolve_directive_def == nullptr) {
+            continue;
+        }
+        if (DirectiveDef *def = extension.ops.resolve_directive_def(extension.ctx, type, name, literals)) {
+            return def;
+        }
+    }
     return nullptr;
 }
 

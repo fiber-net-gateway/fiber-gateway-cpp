@@ -135,7 +135,7 @@ const HeaderMap<ServerHttp2Request::PseudoHeaderHandler> &ServerHttp2Request::ps
 ServerHttp2Request::ServerHttp2Request(std::uint32_t stream_id, Http2Connection &conn,
                                        const HttpServerOptions &http_options, const HttpHandler &handler) noexcept :
     conn_(&conn), handler_(&handler), stream_(this, stream_ops()),
-    exchange_(conn.transport().loop().io_buf_node_pool(), http_options),
+    exchange_(conn.transport().loop().io_buf_node_pool(), http_options, conn.transport().remote_addr()),
     request_body_recv_(conn.transport().loop().io_buf_node_pool()) {
     (void) stream_id;
     FIBER_ASSERT(handler_ != nullptr);

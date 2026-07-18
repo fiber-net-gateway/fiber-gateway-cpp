@@ -21,6 +21,10 @@ namespace fiber::lite_nginx::runtime {
 class DnsService;
 }
 
+namespace fiber::lite_nginx::logging {
+struct RequestLogContext;
+}
+
 namespace fiber::lite_nginx::upstream {
 class ConnectionPool;
 class UpstreamRegistry;
@@ -40,7 +44,7 @@ public:
     handle(fiber::http::HttpExchange &exchange, const runtime::ListenerRuntime &listener,
            const runtime::LocationRuntime &location,
            const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
-           fiber::http_script::HttpScriptServices *services) const;
+           fiber::http_script::HttpScriptServices *services, logging::RequestLogContext &log_context) const;
 
 private:
     upstream::UpstreamRegistry *upstreams_ = nullptr;

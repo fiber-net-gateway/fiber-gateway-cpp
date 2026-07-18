@@ -1,5 +1,7 @@
 #include "ScriptExchangeCtx.h"
 
+#include <arpa/inet.h>
+
 #include "../common/json/JsonEncode.h"
 #include "../common/util/CookieCodec.h"
 #include "../common/util/UrlForm.h"
@@ -10,6 +12,7 @@
 #include "../script/gc/GcInternal.h"
 #include "../script/json/JsValueEncode.h"
 
+#include <array>
 #include <string>
 #include <string_view>
 
@@ -85,7 +88,15 @@ bool name_matches_normalized(std::string_view name, std::string_view norm_key) n
 } // namespace
 
 ScriptExchangeCtx::ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber::script::GcHeap &heap) noexcept :
-    exchange_(exchange), heap_(heap), pending_headers_(exchange.pool()) {}
+    ScriptExchangeCtx(exchange, heap,
+                      ScriptConnectionInfo{
+                              .scheme = exchange.scheme(),
+                              .tls = exchange.scheme() == "https",
+                      }) {}
+
+ScriptExchangeCtx::ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber::script::GcHeap &heap,
+                                     ScriptConnectionInfo connection) noexcept :
+    exchange_(exchange), heap_(heap), connection_(connection), pending_headers_(exchange.pool()) {}
 
 fiber::script::JsValue ScriptExchangeCtx::query() noexcept {
     if (query_root_ && fiber::script::js_value_type(*query_root_) == fiber::script::JsNodeType::Object) {
@@ -233,6 +244,58 @@ fiber::script::AbiResult ScriptExchangeCtx::req_field(fiber::script::GcHeap &hea
     }
     if (field == "query") {
         return make_string_value(heap, exchange_.uri().query);
+    }
+    return fiber::script::AbiResult::success(fiber::script::JsValue::make_undefined());
+}
+
+fiber::script::AbiResult ScriptExchangeCtx::conn_field(fiber::script::GcHeap &heap,
+                                                       std::string_view field) const noexcept {
+    if (field == "remote_port") {
+        return fiber::script::AbiResult::success(fiber::script::JsValue::make_integer(exchange_.remote_addr().port()));
+    }
+    if (field == "tls") {
+        return fiber::script::AbiResult::success(fiber::script::JsValue::make_boolean(connection_.tls));
+    }
+    if (field == "scheme") {
+        return make_string_value(heap, connection_.scheme);
+    }
+    if (field == "http_version") {
+        std::string_view value;
+        switch (exchange_.version()) {
+            case fiber::http::HttpVersion::HTTP_0_9:
+                value = "HTTP/0.9";
+                break;
+            case fiber::http::HttpVersion::HTTP_1_0:
+                value = "HTTP/1.0";
+                break;
+            case fiber::http::HttpVersion::HTTP_1_1:
+                value = "HTTP/1.1";
+                break;
+            case fiber::http::HttpVersion::HTTP_2_0:
+                value = "HTTP/2";
+                break;
+            case fiber::http::HttpVersion::HTTP_3_0:
+                value = "HTTP/3";
+                break;
+        }
+        return make_string_value(heap, value);
+    }
+    if (field == "remote_addr") {
+        std::array<char, INET6_ADDRSTRLEN> buffer{};
+        const auto &ip = exchange_.remote_addr().ip();
+        const void *source = nullptr;
+        int family = AF_INET;
+        std::array<std::uint8_t, fiber::net::IpAddress::kV4Size> v4{};
+        if (ip.is_v4()) {
+            v4 = ip.v4_bytes();
+            source = v4.data();
+        } else {
+            family = AF_INET6;
+            source = ip.v6_bytes().data();
+        }
+        const char *result = ::inet_ntop(family, source, buffer.data(), static_cast<socklen_t>(buffer.size()));
+        return result ? make_string_value(heap, result)
+                      : fiber::script::AbiResult::success(fiber::script::JsValue::make_null());
     }
     return fiber::script::AbiResult::success(fiber::script::JsValue::make_undefined());
 }

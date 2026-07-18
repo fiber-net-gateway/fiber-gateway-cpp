@@ -124,6 +124,7 @@ cycles are detected and rejected.
 Top level:
 
 - `worker_processes <n>;`
+- `logging { ... }` - configure console/file appenders and hierarchical loggers.
 - `http { ... }`
 - `include <path>;` - splice another config file's top-level directives here (valid
   in any directive-list context: top-level, `http`, `server`, `location`, `upstream`,
@@ -131,6 +132,8 @@ Top level:
 
 `http` block:
 
+- `access_log <logger-name> "<script-template>";` or `access_log off;` - select the logger
+  category and synchronous message template; inherited by `server` and `location`.
 - `listen <port>;`
 - `listen <port> ssl;`
 - `listen <port> ssl http3;`
@@ -164,6 +167,7 @@ Top level:
 
 `server` block:
 
+- `access_log <logger-name> "<script-template>";` or `access_log off;`
 - `server_name <name> [name ...];`
 - `certificate <path>;`
 - `certificate_key <path>;`
@@ -175,6 +179,7 @@ Top level:
 
 `location` block:
 
+- `access_log <logger-name> "<script-template>";` or `access_log off;`
 - `proxy_pass http://<upstream_name>;`
 - `proxy_pass http://<host:port>;`
 - `proxy_connect_timeout <duration>;`
@@ -184,6 +189,72 @@ Top level:
 - `proxy_buffering off;`
 - `script_file <path>;` - handle the request with a compiled script instead of proxying
   (mutually exclusive with `proxy_pass`).
+
+## Logging
+
+When `logging` is omitted, operational logs go to stderr and access logging is off by default.
+File paths are resolved relative to the file containing the directive. `--check-config` validates
+logging syntax and references without opening or creating the configured files.
+
+```nginx
+logging {
+    appender access_file {
+        type file;
+        path logs/access.log;
+        mode 0644;
+        buffer_size 64k;
+        flush_interval 200ms;
+        rotate_size 256m;
+        archive_name "{base}.{utc}.{seq}";
+        rotate_keep 14;
+        min_level info;
+        max_level info;
+    }
+
+    appender stderr {
+        type console;
+        stream stderr;
+        min_level warn;
+    }
+
+    logger lite_nginx.access {
+        level info;
+        appender access_file;
+        additive off;
+    }
+
+    root_logger {
+        level info;
+        appender stderr;
+    }
+}
+```
+
+An `appender` supports `type file|console`, `min_level`, and `max_level`. File appenders support
+`path`, octal `mode`, and an optional `buffer_size` + `flush_interval` pair. Size-based rotation is
+enabled by configuring `rotate_size`, `archive_name`, and `rotate_keep` together. Archive names are
+created next to the active file; the pattern must contain `{base}` and `{seq}`, and may contain
+`{utc}` for a `YYYYMMDDTHHMMSSZ` timestamp. `{seq}` is a monotonically increasing, zero-padded
+sequence. Console appenders support `stream stdout|stderr`. A `logger` supports `level`,
+`verbosity`, repeated `appender` references, and `additive on|off`; `root_logger` supports `level`,
+`verbosity`, and appenders.
+
+`access_log` takes a logger category followed by a script template string. For example:
+
+```nginx
+access_log lite_nginx.access "request_id=${$access.request_id} remote_addr=${$conn.remote_addr} method=${$req.method} path=${$req.path} status=${$access.status}";
+```
+
+The category is resolved through the normal hierarchical logging configuration. The template is
+compiled while the runtime configuration is built and must be synchronous; use of an async
+function such as `req.readJson()` rejects the configuration. It can use the regular request
+constants plus `$conn.remote_addr`, `$conn.remote_port`, `$conn.http_version`, `$conn.scheme`, and
+`$conn.tls`; access-only fields are `$access.request_id`, `$access.server`, `$access.location`,
+`$access.status`, `$access.body_bytes_sent`, `$access.request_time_us`, and `$access.outcome`.
+Upstream fields are `$upstream.host`, `$upstream.port`, `$upstream.status`, `$upstream.time_us`,
+and `$upstream.error`, and resolve to `null` when no upstream value is available. `access_log`
+inherits from `http` to `server` to `location`; an explicit pair replaces the inherited pair and
+`off` disables it.
 
 ## Scripting
 
@@ -210,6 +281,9 @@ at runtime -- see `conf/scripts/vars.js`):
 - `$cookie.<key>` - a request cookie, same normalization as `$header`.
 - `$req.<field>` - one of `uri` / `method` / `path` / `query` (fixed set; unknown = compile
   error). `query` is the raw query string (empty when absent).
+- `$conn.<field>` - one of `remote_addr` / `remote_port` / `http_version` / `scheme` / `tls`.
+  These values describe the accepted downstream connection and are also available to access-log
+  templates.
 
 Absent `$query`/`$header`/`$cookie` values resolve to `null` (not an error). `$path.<name>`
 is always present for a matched route (the pattern captured it).
@@ -243,9 +317,10 @@ The directive target is either a named upstream (`@backend` / `backend`) or an a
 
 ## Explicit V1 Restrictions
 
-- `proxy_set_header` accepts only literal values.
+- `proxy_set_header` accepts literal values or synchronous `${...}` templates.
 - `proxy_pass` accepts only static targets.
-- No nginx variables are supported in any directive.
+- Script constants in `${...}` are supported only by directives documented as templates; nginx
+  variables are not interpreted.
 - `listen` is only valid in the `http` block.
 - `server` blocks must define at least one `server_name`.
 - `listen ... ssl` enables TLS; HTTP/2 is negotiated automatically and does not

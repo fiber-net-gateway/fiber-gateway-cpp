@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <charconv>
+#include <limits>
 #include <string_view>
 #include <unordered_set>
 
 #include "PathResolve.h"
+#include "log/LogConfig.h"
 
 namespace fiber::lite_nginx::config {
 namespace {
@@ -145,6 +147,123 @@ std::expected<std::chrono::milliseconds, ConfigError> parse_duration(const Direc
     }
 
     return std::chrono::milliseconds(base * multiplier);
+}
+
+std::expected<std::size_t, ConfigError> parse_size(const DirectiveNode &directive, std::string_view value,
+                                                   const char *field_name) {
+    if (value.empty()) {
+        return std::unexpected(make_error(directive, std::string(field_name) + " must not be empty"));
+    }
+
+    std::size_t multiplier = 1;
+    const char suffix = value.back();
+    if (suffix == 'k' || suffix == 'K') {
+        multiplier = 1024;
+        value.remove_suffix(1);
+    } else if (suffix == 'm' || suffix == 'M') {
+        multiplier = 1024 * 1024;
+        value.remove_suffix(1);
+    }
+    if (value.empty()) {
+        return std::unexpected(make_error(directive, std::string(field_name) + " has invalid size"));
+    }
+
+    std::size_t parsed = 0;
+    auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+    if (result.ec != std::errc() || result.ptr != value.data() + value.size() ||
+        parsed > std::numeric_limits<std::size_t>::max() / multiplier) {
+        return std::unexpected(make_error(directive, std::string(field_name) + " has invalid size"));
+    }
+    return parsed * multiplier;
+}
+
+std::expected<unsigned, ConfigError> parse_non_negative_unsigned(const DirectiveNode &directive, std::string_view value,
+                                                                 const char *field_name) {
+    unsigned parsed = 0;
+    auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+    if (value.empty() || result.ec != std::errc() || result.ptr != value.data() + value.size()) {
+        return std::unexpected(make_error(directive, std::string(field_name) + " must be a non-negative integer"));
+    }
+    return parsed;
+}
+
+std::expected<bool, ConfigError> parse_on_off(const DirectiveNode &directive, const char *field_name) {
+    if (directive.has_block || directive.args.size() != 1 ||
+        (directive.args[0] != "on" && directive.args[0] != "off")) {
+        return std::unexpected(make_error(directive, std::string(field_name) + " expects 'on' or 'off'"));
+    }
+    return directive.args[0] == "on";
+}
+
+std::expected<AccessLogConfig, ConfigError> parse_access_log(const DirectiveNode &directive) {
+    if (directive.has_block) {
+        return std::unexpected(make_error(directive, "access_log must not be a block"));
+    }
+    if (directive.args.size() == 1 && directive.args[0] == "off") {
+        return AccessLogConfig{
+                .location = directive.location,
+                .kind = AccessLogKind::Off,
+        };
+    }
+    if (directive.args.size() != 2) {
+        return std::unexpected(make_error(directive, "access_log expects '<logger-name> <message-template>' or 'off'"));
+    }
+    if (!fiber::log::valid_logger_name(directive.args[0])) {
+        return std::unexpected(make_error(directive, "access_log logger name is invalid"));
+    }
+    return AccessLogConfig{
+            .location = directive.location,
+            .kind = AccessLogKind::Template,
+            .logger_name = directive.args[0],
+            .message_template = directive.args[1],
+    };
+}
+
+std::expected<LoggingLevel, ConfigError> parse_logging_level(const DirectiveNode &directive, std::string_view value,
+                                                             const char *field_name) {
+    if (value == "trace") {
+        return LoggingLevel::Trace;
+    }
+    if (value == "debug") {
+        return LoggingLevel::Debug;
+    }
+    if (value == "info") {
+        return LoggingLevel::Info;
+    }
+    if (value == "warn" || value == "warning") {
+        return LoggingLevel::Warn;
+    }
+    if (value == "error") {
+        return LoggingLevel::Error;
+    }
+    if (value == "fatal") {
+        return LoggingLevel::Fatal;
+    }
+    return std::unexpected(
+            make_error(directive, std::string(field_name) + " has invalid log level: " + std::string(value)));
+}
+
+bool valid_log_name(std::string_view name) noexcept {
+    if (name.empty() || name.size() > 255 || name.front() == '.' || name.back() == '.') {
+        return false;
+    }
+    bool previous_dot = false;
+    for (char ch: name) {
+        if (ch == '.') {
+            if (previous_dot) {
+                return false;
+            }
+            previous_dot = true;
+            continue;
+        }
+        previous_dot = false;
+        const bool alpha = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+        const bool digit = ch >= '0' && ch <= '9';
+        if (!alpha && !digit && ch != '_' && ch != '-') {
+            return false;
+        }
+    }
+    return true;
 }
 
 std::expected<HostPort, ConfigError> parse_host_port(const DirectiveNode &directive, std::string_view value,
@@ -288,7 +407,7 @@ std::expected<HeaderOverride, ConfigError> parse_proxy_set_header(const Directiv
         return std::unexpected(make_error(directive, "proxy_set_header name must not contain variables"));
     }
     // The value may be a template: any ${...} is compiled at runtime-build and evaluated per
-    // request (route vars like $header.host resolve via the location's RouteScriptLibrary). A
+    // request (route vars like $header.host resolve through the runtime's route extension). A
     // bare $ without ${ is treated as a literal (no interpolation).
     const std::string &value = directive.args[1];
     const bool is_template = value.find("${") != std::string::npos;
@@ -478,6 +597,376 @@ std::expected<UpstreamConfig, ConfigError> parse_upstream(const DirectiveNode &d
     return upstream;
 }
 
+std::expected<LogAppenderConfig, ConfigError> parse_log_appender(const DirectiveNode &directive) {
+    if (!directive.has_block || directive.args.size() != 1) {
+        return std::unexpected(make_error(directive, "appender expects one name and a block"));
+    }
+    if (!valid_log_name(directive.args[0])) {
+        return std::unexpected(make_error(directive, "appender has an invalid name"));
+    }
+
+    LogAppenderConfig appender;
+    appender.location = directive.location;
+    appender.name = directive.args[0];
+    bool seen_type = false;
+    bool seen_path = false;
+    bool seen_mode = false;
+    bool seen_buffer_size = false;
+    bool seen_flush_interval = false;
+    bool seen_rotate_size = false;
+    bool seen_archive_name = false;
+    bool seen_rotate_keep = false;
+    bool seen_min_level = false;
+    bool seen_max_level = false;
+    bool seen_stream = false;
+
+    for (const auto &child: directive.children) {
+        if (child.has_block || child.args.size() != 1) {
+            return std::unexpected(make_error(child, child.name + " expects exactly one argument"));
+        }
+        const std::string &value = child.args[0];
+        if (child.name == "type") {
+            if (seen_type || (value != "file" && value != "console")) {
+                return std::unexpected(make_error(child, "appender type must be specified once as file or console"));
+            }
+            appender.kind = value == "file" ? LogAppenderKind::File : LogAppenderKind::Console;
+            seen_type = true;
+            continue;
+        }
+        if (child.name == "path") {
+            if (seen_path || value.empty() || contains_variable(value)) {
+                return std::unexpected(make_error(child, "appender path must be a single non-empty static path"));
+            }
+            appender.path = resolve_config_path(child.location.source_name, value);
+            seen_path = true;
+            continue;
+        }
+        if (child.name == "mode") {
+            if (seen_mode || value.empty()) {
+                return std::unexpected(make_error(child, "appender mode must not be repeated"));
+            }
+            std::uint32_t mode = 0;
+            auto parsed = std::from_chars(value.data(), value.data() + value.size(), mode, 8);
+            if (parsed.ec != std::errc() || parsed.ptr != value.data() + value.size() || mode > 0777) {
+                return std::unexpected(make_error(child, "appender mode must be an octal value in range 0000..0777"));
+            }
+            appender.file_mode = mode;
+            seen_mode = true;
+            continue;
+        }
+        if (child.name == "buffer_size") {
+            if (seen_buffer_size) {
+                return std::unexpected(make_error(child, "buffer_size must not be repeated"));
+            }
+            auto size = parse_size(child, value, "buffer_size");
+            if (!size) {
+                return std::unexpected(size.error());
+            }
+            appender.buffer_size = *size;
+            seen_buffer_size = true;
+            continue;
+        }
+        if (child.name == "flush_interval") {
+            if (seen_flush_interval) {
+                return std::unexpected(make_error(child, "flush_interval must not be repeated"));
+            }
+            auto duration = parse_duration(child, value, "flush_interval");
+            if (!duration) {
+                return std::unexpected(duration.error());
+            }
+            appender.flush_interval = *duration;
+            seen_flush_interval = true;
+            continue;
+        }
+        if (child.name == "rotate_size") {
+            if (seen_rotate_size) {
+                return std::unexpected(make_error(child, "rotate_size must not be repeated"));
+            }
+            auto size = parse_size(child, value, "rotate_size");
+            if (!size || *size == 0) {
+                return std::unexpected(size ? make_error(child, "rotate_size must be greater than zero")
+                                            : size.error());
+            }
+            if (!appender.rotation) {
+                appender.rotation.emplace();
+            }
+            appender.rotation->max_file_size = *size;
+            seen_rotate_size = true;
+            continue;
+        }
+        if (child.name == "archive_name") {
+            if (seen_archive_name || !fiber::log::valid_archive_name_pattern(value)) {
+                return std::unexpected(make_error(child, "archive_name has an invalid pattern"));
+            }
+            if (!appender.rotation) {
+                appender.rotation.emplace();
+            }
+            appender.rotation->archive_name = value;
+            seen_archive_name = true;
+            continue;
+        }
+        if (child.name == "rotate_keep") {
+            if (seen_rotate_keep) {
+                return std::unexpected(make_error(child, "rotate_keep must not be repeated"));
+            }
+            auto count = parse_positive_size(child, value, "rotate_keep");
+            if (!count || *count > fiber::log::kMaxRetainedLogArchives) {
+                return std::unexpected(count ? make_error(child, "rotate_keep is too large") : count.error());
+            }
+            if (!appender.rotation) {
+                appender.rotation.emplace();
+            }
+            appender.rotation->max_archives = static_cast<std::uint32_t>(*count);
+            seen_rotate_keep = true;
+            continue;
+        }
+        if (child.name == "min_level" || child.name == "max_level") {
+            bool &seen = child.name == "min_level" ? seen_min_level : seen_max_level;
+            if (seen) {
+                return std::unexpected(make_error(child, child.name + " must not be repeated"));
+            }
+            auto level = parse_logging_level(child, value, child.name.c_str());
+            if (!level) {
+                return std::unexpected(level.error());
+            }
+            if (child.name == "min_level") {
+                appender.min_level = *level;
+            } else {
+                appender.max_level = *level;
+            }
+            seen = true;
+            continue;
+        }
+        if (child.name == "stream") {
+            if (seen_stream || (value != "stdout" && value != "stderr")) {
+                return std::unexpected(make_error(child, "console stream must be specified once as stdout or stderr"));
+            }
+            appender.stream = value == "stdout" ? LogConsoleStream::Stdout : LogConsoleStream::Stderr;
+            seen_stream = true;
+            continue;
+        }
+        return std::unexpected(make_error(child, "unsupported directive in appender block: " + child.name));
+    }
+
+    if (!seen_type) {
+        return std::unexpected(make_error(directive, "appender must define type"));
+    }
+    if (static_cast<unsigned char>(appender.min_level) > static_cast<unsigned char>(appender.max_level)) {
+        return std::unexpected(make_error(directive, "appender min_level must not exceed max_level"));
+    }
+    if ((appender.buffer_size == 0) != (appender.flush_interval.count() == 0)) {
+        return std::unexpected(
+                make_error(directive, "buffer_size and flush_interval must both be zero or both be non-zero"));
+    }
+    const bool has_rotation_option = seen_rotate_size || seen_archive_name || seen_rotate_keep;
+    if (has_rotation_option && !(seen_rotate_size && seen_archive_name && seen_rotate_keep)) {
+        return std::unexpected(
+                make_error(directive, "rotate_size, archive_name, and rotate_keep must be configured together"));
+    }
+    if (has_rotation_option && (appender.rotation->max_file_size < fiber::log::kMaxFormattedLogLineSize ||
+                                appender.rotation->max_file_size < appender.buffer_size)) {
+        return std::unexpected(
+                make_error(directive, "rotate_size must not be smaller than the buffer or maximum log line"));
+    }
+    if (appender.kind == LogAppenderKind::File) {
+        if (!seen_path) {
+            return std::unexpected(make_error(directive, "file appender must define path"));
+        }
+        if (seen_stream) {
+            return std::unexpected(make_error(directive, "file appender does not support stream"));
+        }
+    } else if (seen_path || seen_mode || seen_buffer_size || seen_flush_interval || has_rotation_option) {
+        return std::unexpected(make_error(directive, "console appender does not support file options"));
+    }
+    return appender;
+}
+
+std::expected<LoggerRuleConfig, ConfigError> parse_logger_rule(const DirectiveNode &directive) {
+    if (!directive.has_block || directive.args.size() != 1 || !valid_log_name(directive.args[0])) {
+        return std::unexpected(make_error(directive, "logger expects one valid name and a block"));
+    }
+
+    LoggerRuleConfig logger;
+    logger.location = directive.location;
+    logger.name = directive.args[0];
+    bool seen_level = false;
+    bool seen_verbosity = false;
+    bool seen_additive = false;
+    std::unordered_set<std::string> appender_names;
+    for (const auto &child: directive.children) {
+        if (child.has_block || child.args.size() != 1) {
+            return std::unexpected(make_error(child, child.name + " expects exactly one argument"));
+        }
+        if (child.name == "level") {
+            if (seen_level) {
+                return std::unexpected(make_error(child, "logger level must not be repeated"));
+            }
+            auto level = parse_logging_level(child, child.args[0], "logger level");
+            if (!level) {
+                return std::unexpected(level.error());
+            }
+            logger.level = *level;
+            seen_level = true;
+            continue;
+        }
+        if (child.name == "verbosity") {
+            if (seen_verbosity) {
+                return std::unexpected(make_error(child, "logger verbosity must not be repeated"));
+            }
+            auto verbosity = parse_non_negative_unsigned(child, child.args[0], "logger verbosity");
+            if (!verbosity) {
+                return std::unexpected(verbosity.error());
+            }
+            logger.verbosity = *verbosity;
+            seen_verbosity = true;
+            continue;
+        }
+        if (child.name == "additive") {
+            if (seen_additive) {
+                return std::unexpected(make_error(child, "logger additive must not be repeated"));
+            }
+            auto additive = parse_on_off(child, "logger additive");
+            if (!additive) {
+                return std::unexpected(additive.error());
+            }
+            logger.additive = *additive;
+            seen_additive = true;
+            continue;
+        }
+        if (child.name == "appender") {
+            if (!appender_names.insert(child.args[0]).second) {
+                return std::unexpected(make_error(child, "logger appender must not be repeated"));
+            }
+            logger.appenders.push_back(child.args[0]);
+            continue;
+        }
+        return std::unexpected(make_error(child, "unsupported directive in logger block: " + child.name));
+    }
+    return logger;
+}
+
+std::expected<RootLoggerConfig, ConfigError> parse_root_logger(const DirectiveNode &directive) {
+    if (!directive.has_block || !directive.args.empty()) {
+        return std::unexpected(make_error(directive, "root_logger expects a block without arguments"));
+    }
+
+    RootLoggerConfig root;
+    root.location = directive.location;
+    bool seen_level = false;
+    bool seen_verbosity = false;
+    std::unordered_set<std::string> appender_names;
+    for (const auto &child: directive.children) {
+        if (child.has_block || child.args.size() != 1) {
+            return std::unexpected(make_error(child, child.name + " expects exactly one argument"));
+        }
+        if (child.name == "level") {
+            if (seen_level) {
+                return std::unexpected(make_error(child, "root_logger level must not be repeated"));
+            }
+            auto level = parse_logging_level(child, child.args[0], "root_logger level");
+            if (!level) {
+                return std::unexpected(level.error());
+            }
+            root.level = *level;
+            seen_level = true;
+            continue;
+        }
+        if (child.name == "verbosity") {
+            if (seen_verbosity) {
+                return std::unexpected(make_error(child, "root_logger verbosity must not be repeated"));
+            }
+            auto verbosity = parse_non_negative_unsigned(child, child.args[0], "root_logger verbosity");
+            if (!verbosity) {
+                return std::unexpected(verbosity.error());
+            }
+            root.verbosity = *verbosity;
+            seen_verbosity = true;
+            continue;
+        }
+        if (child.name == "appender") {
+            if (!appender_names.insert(child.args[0]).second) {
+                return std::unexpected(make_error(child, "root_logger appender must not be repeated"));
+            }
+            root.appenders.push_back(child.args[0]);
+            continue;
+        }
+        return std::unexpected(make_error(child, "unsupported directive in root_logger block: " + child.name));
+    }
+    return root;
+}
+
+std::expected<LoggingConfig, ConfigError> parse_logging(const DirectiveNode &directive) {
+    if (!directive.has_block || !directive.args.empty()) {
+        return std::unexpected(make_error(directive, "logging expects a block without arguments"));
+    }
+
+    LoggingConfig logging;
+    logging.location = directive.location;
+    logging.configured = true;
+    std::unordered_set<std::string> appender_names;
+    std::unordered_set<std::string> logger_names;
+    bool seen_root = false;
+    for (const auto &child: directive.children) {
+        if (child.name == "appender") {
+            auto appender = parse_log_appender(child);
+            if (!appender) {
+                return std::unexpected(appender.error());
+            }
+            if (!appender_names.insert(appender->name).second) {
+                return std::unexpected(make_error(child, "duplicate appender name: " + appender->name));
+            }
+            logging.appenders.push_back(std::move(*appender));
+            continue;
+        }
+        if (child.name == "logger") {
+            auto logger = parse_logger_rule(child);
+            if (!logger) {
+                return std::unexpected(logger.error());
+            }
+            if (!logger_names.insert(logger->name).second) {
+                return std::unexpected(make_error(child, "duplicate logger name: " + logger->name));
+            }
+            logging.loggers.push_back(std::move(*logger));
+            continue;
+        }
+        if (child.name == "root_logger") {
+            if (seen_root) {
+                return std::unexpected(make_error(child, "root_logger must not be repeated"));
+            }
+            auto root = parse_root_logger(child);
+            if (!root) {
+                return std::unexpected(root.error());
+            }
+            logging.root = std::move(*root);
+            seen_root = true;
+            continue;
+        }
+        return std::unexpected(make_error(child, "unsupported directive in logging block: " + child.name));
+    }
+    if (!seen_root) {
+        return std::unexpected(make_error(directive, "logging must define root_logger"));
+    }
+    for (const auto &logger: logging.loggers) {
+        for (const auto &name: logger.appenders) {
+            if (!appender_names.contains(name)) {
+                return std::unexpected(ConfigError{
+                        .message = "logger references unknown appender: " + name,
+                        .location = logger.location,
+                });
+            }
+        }
+    }
+    for (const auto &name: logging.root.appenders) {
+        if (!appender_names.contains(name)) {
+            return std::unexpected(ConfigError{
+                    .message = "root_logger references unknown appender: " + name,
+                    .location = logging.root.location,
+            });
+        }
+    }
+    return logging;
+}
+
 std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &directive,
                                                           const ProxySettingsBuilder &server_proxy_defaults) {
     if (!directive.has_block) {
@@ -497,6 +986,7 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
     ProxySettingsBuilder location_proxy_defaults;
     bool has_proxy_pass = false;
     bool has_script_file = false;
+    bool seen_access_log = false;
 
     for (const auto &child: directive.children) {
         if (child.has_block) {
@@ -547,6 +1037,18 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
             location_proxy_defaults.proxy_buffering = false;
             continue;
         }
+        if (child.name == "access_log") {
+            if (seen_access_log) {
+                return std::unexpected(make_error(child, "access_log must not be repeated in location"));
+            }
+            auto access_log = parse_access_log(child);
+            if (!access_log) {
+                return std::unexpected(access_log.error());
+            }
+            location.access_log = std::move(*access_log);
+            seen_access_log = true;
+            continue;
+        }
 
         return std::unexpected(make_error(child, "unsupported directive in location block: " + child.name));
     }
@@ -574,6 +1076,7 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
     ProxySettingsBuilder proxy_defaults;
     bool seen_certificate = false;
     bool seen_certificate_key = false;
+    bool seen_access_log = false;
 
     for (const auto &child: directive.children) {
         if (child.name == "server_name") {
@@ -636,6 +1139,19 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
                 return std::unexpected(header.error());
             }
             upsert_header(proxy_defaults.set_headers, std::move(*header));
+            continue;
+        }
+
+        if (child.name == "access_log") {
+            if (seen_access_log) {
+                return std::unexpected(make_error(child, "access_log must not be repeated in server"));
+            }
+            auto access_log = parse_access_log(child);
+            if (!access_log) {
+                return std::unexpected(access_log.error());
+            }
+            server.access_log = std::move(*access_log);
+            seen_access_log = true;
             continue;
         }
 
@@ -765,6 +1281,7 @@ std::expected<HttpConfig, ConfigError> parse_http(const DirectiveNode &directive
     HttpConfig http;
     std::unordered_set<std::string> upstream_names;
     bool has_tls_listen = false;
+    bool seen_access_log = false;
 
     for (const auto &child: directive.children) {
         if (child.name == "listen") {
@@ -793,6 +1310,18 @@ std::expected<HttpConfig, ConfigError> parse_http(const DirectiveNode &directive
                 return std::unexpected(pool.error());
             }
             http.connection_pool = std::move(*pool);
+            continue;
+        }
+        if (child.name == "access_log") {
+            if (seen_access_log) {
+                return std::unexpected(make_error(child, "access_log must not be repeated in http"));
+            }
+            auto access_log = parse_access_log(child);
+            if (!access_log) {
+                return std::unexpected(access_log.error());
+            }
+            http.access_log = std::move(*access_log);
+            seen_access_log = true;
             continue;
         }
         if (child.name == "server") {
@@ -849,6 +1378,7 @@ std::expected<MainConfig, ConfigError> SemanticAnalyzer::analyze(const Document 
     MainConfig config;
     bool seen_http = false;
     bool seen_worker_processes = false;
+    bool seen_logging = false;
 
     for (const auto &directive: document.directives) {
         if (directive.name == "worker_processes") {
@@ -877,6 +1407,19 @@ std::expected<MainConfig, ConfigError> SemanticAnalyzer::analyze(const Document 
             }
             config.http = std::move(*http_result);
             seen_http = true;
+            continue;
+        }
+
+        if (directive.name == "logging") {
+            if (seen_logging) {
+                return std::unexpected(make_error(directive, "logging block must not be repeated"));
+            }
+            auto logging = parse_logging(directive);
+            if (!logging) {
+                return std::unexpected(logging.error());
+            }
+            config.logging = std::move(*logging);
+            seen_logging = true;
             continue;
         }
 
