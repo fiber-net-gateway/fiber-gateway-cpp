@@ -187,6 +187,7 @@ public:
     [[nodiscard]] static EventLoop *current_or_null() noexcept { return current_; }
 
     [[nodiscard]] bool in_loop() const noexcept { return current_or_null() == this; }
+    [[nodiscard]] bool running() const noexcept { return running_.load(std::memory_order_acquire); }
     [[nodiscard]] std::chrono::steady_clock::time_point now() const noexcept { return now_; }
 
 
@@ -352,6 +353,7 @@ private:
     WakeupEntry wakeup_entry_{};
     std::atomic<bool> wakeup_pending_{false};
     std::atomic<bool> stop_requested_{false};
+    std::atomic<bool> running_{false};
     std::chrono::steady_clock::time_point now_{};
     mem::IoBufNodePool io_buf_node_pool_{};
     EventLoopGroup *group_ = nullptr;
