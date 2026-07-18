@@ -19,6 +19,8 @@ namespace fiber::log {
 using AppenderId = std::uint16_t;
 inline constexpr AppenderId kInvalidAppenderId = static_cast<AppenderId>(-1);
 inline constexpr std::size_t kMaxLoggerNameLength = 255;
+inline constexpr std::size_t kMaxFormattedLogLineSize = 9216;
+inline constexpr std::uint32_t kMaxRetainedLogArchives = 10000;
 
 enum class ConsoleStream : std::uint8_t {
     Stdout,
@@ -34,6 +36,8 @@ enum class LogConfigErrorCode : std::uint8_t {
     InvalidLevelRange,
     InvalidBufferOptions,
     InvalidFilePath,
+    InvalidRotationOptions,
+    InvalidArchiveName,
     DuplicateFilePath,
     MissingRootLogger,
     AlreadyFinished,
@@ -54,6 +58,12 @@ struct LogConfigError {
 template<typename T>
 using LogConfigResult = std::expected<T, LogConfigError>;
 
+struct FileRotationOptions {
+    std::uint64_t max_file_size = 0;
+    std::string archive_name;
+    std::uint32_t max_archives = 0;
+};
+
 struct FileAppenderOptions {
     std::string name;
     std::string path;
@@ -62,6 +72,7 @@ struct FileAppenderOptions {
     std::chrono::milliseconds flush_interval{0};
     LogLevel min_level = LogLevel::Trace;
     LogLevel max_level = LogLevel::Fatal;
+    std::optional<FileRotationOptions> rotation;
 };
 
 struct ConsoleAppenderOptions {
@@ -150,6 +161,7 @@ private:
 };
 
 [[nodiscard]] bool valid_logger_name(std::string_view name) noexcept;
+[[nodiscard]] bool valid_archive_name_pattern(std::string_view pattern) noexcept;
 
 } // namespace fiber::log
 

@@ -98,7 +98,7 @@ std::expected<fiber::log::LogConfig, runtime::RuntimeError> LoggingBuilder::buil
     for (const auto &appender: config.logging.appenders) {
         fiber::log::LogConfigResult<fiber::log::AppenderId> added = std::unexpected(fiber::log::LogConfigError{});
         if (appender.kind == config::LogAppenderKind::File) {
-            added = builder.add_file_appender({
+            fiber::log::FileAppenderOptions options{
                     .name = appender.name,
                     .path = appender.path,
                     .file_mode = static_cast<mode_t>(appender.file_mode),
@@ -106,7 +106,15 @@ std::expected<fiber::log::LogConfig, runtime::RuntimeError> LoggingBuilder::buil
                     .flush_interval = appender.flush_interval,
                     .min_level = to_log_level(appender.min_level),
                     .max_level = to_log_level(appender.max_level),
-            });
+            };
+            if (appender.rotation) {
+                options.rotation = fiber::log::FileRotationOptions{
+                        .max_file_size = appender.rotation->max_file_size,
+                        .archive_name = appender.rotation->archive_name,
+                        .max_archives = appender.rotation->max_archives,
+                };
+            }
+            added = builder.add_file_appender(std::move(options));
         } else {
             added = builder.add_console_appender({
                     .name = appender.name,

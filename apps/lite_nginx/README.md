@@ -204,6 +204,9 @@ logging {
         mode 0644;
         buffer_size 64k;
         flush_interval 200ms;
+        rotate_size 256m;
+        archive_name "{base}.{utc}.{seq}";
+        rotate_keep 14;
         min_level info;
         max_level info;
     }
@@ -228,9 +231,13 @@ logging {
 ```
 
 An `appender` supports `type file|console`, `min_level`, and `max_level`. File appenders support
-`path`, octal `mode`, and an optional `buffer_size` + `flush_interval` pair. Console appenders
-support `stream stdout|stderr`. A `logger` supports `level`, `verbosity`, repeated `appender`
-references, and `additive on|off`; `root_logger` supports `level`, `verbosity`, and appenders.
+`path`, octal `mode`, and an optional `buffer_size` + `flush_interval` pair. Size-based rotation is
+enabled by configuring `rotate_size`, `archive_name`, and `rotate_keep` together. Archive names are
+created next to the active file; the pattern must contain `{base}` and `{seq}`, and may contain
+`{utc}` for a `YYYYMMDDTHHMMSSZ` timestamp. `{seq}` is a monotonically increasing, zero-padded
+sequence. Console appenders support `stream stdout|stderr`. A `logger` supports `level`,
+`verbosity`, repeated `appender` references, and `additive on|off`; `root_logger` supports `level`,
+`verbosity`, and appenders.
 
 `access_log` takes a logger category followed by a script template string. For example:
 

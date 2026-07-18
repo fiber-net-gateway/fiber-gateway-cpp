@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <future>
 #include <initializer_list>
@@ -37,6 +38,8 @@ DEFINE_LOGGER(LOG_TEST_REOPEN, "test.reopen");
 DEFINE_LOGGER(LOG_TEST_CONCURRENT, "test.concurrent");
 
 namespace {
+
+namespace fs = std::filesystem;
 
 class TempLogFile {
 public:
@@ -72,6 +75,35 @@ private:
     std::string rotated_path_;
 };
 
+class TempLogDirectory {
+public:
+    TempLogDirectory() {
+        char pattern[] = "/tmp/fiber_log_rotation_test_XXXXXX";
+        if (char *path = ::mkdtemp(pattern)) {
+            path_ = path;
+            log_path_ = path_ + "/output.log";
+        }
+    }
+
+    ~TempLogDirectory() {
+        if (!path_.empty()) {
+            std::error_code error;
+            fs::remove_all(path_, error);
+        }
+    }
+
+    TempLogDirectory(const TempLogDirectory &) = delete;
+    TempLogDirectory &operator=(const TempLogDirectory &) = delete;
+
+    [[nodiscard]] bool valid() const noexcept { return !path_.empty(); }
+    [[nodiscard]] const std::string &path() const noexcept { return path_; }
+    [[nodiscard]] const std::string &log_path() const noexcept { return log_path_; }
+
+private:
+    std::string path_;
+    std::string log_path_;
+};
+
 std::string read_file(const std::string &path) {
     std::ifstream input(path, std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
@@ -85,6 +117,26 @@ std::size_t count_occurrences(std::string_view text, std::string_view needle) {
         position += needle.size();
     }
     return count;
+}
+
+std::vector<std::string> list_output_log_files(const TempLogDirectory &directory) {
+    std::vector<std::string> files;
+    std::error_code error;
+    for (fs::directory_iterator it(directory.path(), error), end; !error && it != end; it.increment(error)) {
+        if (it->is_regular_file(error) && it->path().filename().string().starts_with("output.log")) {
+            files.push_back(it->path().string());
+        }
+    }
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+std::string read_files(const std::vector<std::string> &paths) {
+    std::string content;
+    for (const auto &path: paths) {
+        content.append(read_file(path));
+    }
+    return content;
 }
 
 class LoggingScope {
@@ -111,6 +163,20 @@ TEST(LogConfigTest, RejectsInvalidAppenderAndMissingRoot) {
     auto finish = builder.finish();
     ASSERT_FALSE(finish);
     EXPECT_EQ(finish.error().code, fiber::log::LogConfigErrorCode::MissingRootLogger);
+
+    fiber::log::LogConfigBuilder rotation_builder;
+    auto bad_rotation = rotation_builder.add_file_appender({
+            .name = "bad_rotation",
+            .path = "/tmp/bad_rotation.log",
+            .rotation =
+                    fiber::log::FileRotationOptions{
+                            .max_file_size = fiber::log::kMaxFormattedLogLineSize,
+                            .archive_name = "{base}",
+                            .max_archives = 4,
+                    },
+    });
+    ASSERT_FALSE(bad_rotation);
+    EXPECT_EQ(bad_rotation.error().code, fiber::log::LogConfigErrorCode::InvalidArchiveName);
 }
 
 TEST(LogSystemTest, MaterializesLoggerRequestedByRuntimeName) {
@@ -414,6 +480,105 @@ TEST(LogSystemTest, ReopenSwitchesStableFileDescriptorToNewFile) {
     EXPECT_NE(old_content.find("before-reopen"), std::string::npos);
     EXPECT_EQ(old_content.find("after-reopen"), std::string::npos);
     EXPECT_NE(new_content.find("after-reopen"), std::string::npos);
+}
+
+TEST(LogSystemTest, RollsBySizeAndRetainsNewestArchives) {
+    LoggingScope scope;
+    TempLogDirectory output;
+    ASSERT_TRUE(output.valid());
+
+    fiber::log::LogConfigBuilder builder;
+    auto output_id = builder.add_file_appender({
+            .name = "rolling_output",
+            .path = output.log_path(),
+            .rotation =
+                    fiber::log::FileRotationOptions{
+                            .max_file_size = fiber::log::kMaxFormattedLogLineSize,
+                            .archive_name = "{base}.{utc}.{seq}",
+                            .max_archives = 2,
+                    },
+    });
+    ASSERT_TRUE(output_id);
+    ASSERT_TRUE(builder.set_root_logger({.level = fiber::log::LogLevel::Info}, {*output_id}));
+    auto config = builder.finish();
+    ASSERT_TRUE(config);
+    ASSERT_TRUE(fiber::log::LoggerManager::global().initialize(std::move(*config)));
+
+    for (int record = 0; record < 4; ++record) {
+        LOG(LOG_TEST_REOPEN, INFO) << "roll-record=[" << record << "] " << std::string(7800, 'a' + record);
+    }
+
+    const fiber::log::AppenderStats stats = fiber::log::LoggerManager::global().appender_stats(*output_id);
+    EXPECT_EQ(stats.rotations, 3u);
+    EXPECT_GT(stats.active_file_bytes, 0u);
+    EXPECT_EQ(stats.rotation_errors, 0u);
+    EXPECT_EQ(stats.retention_errors, 0u);
+    fiber::log::LoggerManager::global().shutdown();
+
+    const std::vector<std::string> files = list_output_log_files(output);
+    ASSERT_EQ(files.size(), 3u);
+    EXPECT_NE(std::find(files.begin(), files.end(), output.log_path()), files.end());
+    EXPECT_NE(
+            std::find_if(files.begin(), files.end(), [](const std::string &path) { return path.ends_with(".000002"); }),
+            files.end());
+    EXPECT_NE(
+            std::find_if(files.begin(), files.end(), [](const std::string &path) { return path.ends_with(".000003"); }),
+            files.end());
+
+    const std::string content = read_files(files);
+    EXPECT_EQ(content.find("roll-record=[0]"), std::string::npos);
+    EXPECT_EQ(count_occurrences(content, "roll-record=[1]"), 1u);
+    EXPECT_EQ(count_occurrences(content, "roll-record=[2]"), 1u);
+    EXPECT_EQ(count_occurrences(content, "roll-record=[3]"), 1u);
+}
+
+TEST(LogSystemTest, ConcurrentRotationPreservesCompleteRecords) {
+    LoggingScope scope;
+    TempLogDirectory output;
+    ASSERT_TRUE(output.valid());
+
+    fiber::log::LogConfigBuilder builder;
+    auto output_id = builder.add_file_appender({
+            .name = "concurrent_rolling_output",
+            .path = output.log_path(),
+            .rotation =
+                    fiber::log::FileRotationOptions{
+                            .max_file_size = 16 * 1024,
+                            .archive_name = "{base}.{seq}",
+                            .max_archives = 64,
+                    },
+    });
+    ASSERT_TRUE(output_id);
+    ASSERT_TRUE(builder.set_root_logger({.level = fiber::log::LogLevel::Info}, {*output_id}));
+    auto config = builder.finish();
+    ASSERT_TRUE(config);
+    ASSERT_TRUE(fiber::log::LoggerManager::global().initialize(std::move(*config)));
+
+    constexpr int kThreads = 4;
+    constexpr int kRecordsPerThread = 50;
+    std::vector<std::thread> threads;
+    for (int thread = 0; thread < kThreads; ++thread) {
+        threads.emplace_back([thread]() {
+            for (int record = 0; record < kRecordsPerThread; ++record) {
+                LOG(LOG_TEST_CONCURRENT, INFO)
+                        << "[thread=" << thread << ";record=" << record << "] " << std::string(192, 'x');
+            }
+        });
+    }
+    for (auto &thread: threads) {
+        thread.join();
+    }
+    EXPECT_GT(fiber::log::LoggerManager::global().appender_stats(*output_id).rotations, 0u);
+    fiber::log::LoggerManager::global().shutdown();
+
+    const std::string content = read_files(list_output_log_files(output));
+    EXPECT_EQ(std::count(content.begin(), content.end(), '\n'), kThreads * kRecordsPerThread);
+    for (int thread = 0; thread < kThreads; ++thread) {
+        for (int record = 0; record < kRecordsPerThread; ++record) {
+            const std::string marker = "[thread=" + std::to_string(thread) + ";record=" + std::to_string(record) + "]";
+            EXPECT_EQ(count_occurrences(content, marker), 1u) << marker;
+        }
+    }
 }
 
 TEST(LogSystemTest, MultipleThreadsAppendCompleteRecordsToSharedFile) {
