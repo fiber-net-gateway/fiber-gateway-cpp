@@ -25,6 +25,7 @@ public:
     using HandshakeTask = fiber::async::Task<fiber::common::IoResult<void>>;
     using ShutdownTask = fiber::async::Task<fiber::common::IoResult<void>>;
     using IoTask = fiber::async::Task<fiber::common::IoResult<size_t>>;
+    using ReadyCallback = StreamFd::ReadyCallback;
 
     TlsStreamFd(fiber::event::EventLoop &loop, int fd);
     ~TlsStreamFd();
@@ -40,6 +41,11 @@ public:
     [[nodiscard]] bool handshake_done() const noexcept;
     [[nodiscard]] bool has_pending_read() const noexcept;
     void close();
+
+    fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept;
 
     [[nodiscard]] IoTask read(void *buf, size_t len,
                               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;

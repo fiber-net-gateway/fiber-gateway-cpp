@@ -63,6 +63,22 @@ int TcpStream::release_fd() noexcept { return stream_.release_fd(); }
 
 void TcpStream::close() { stream_.close(); }
 
+fiber::common::IoErr TcpStream::set_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.set_read_callback(callback, ctx);
+}
+
+fiber::common::IoErr TcpStream::set_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.set_write_callback(callback, ctx);
+}
+
+fiber::common::IoErr TcpStream::clear_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.clear_read_callback(callback, ctx);
+}
+
+fiber::common::IoErr TcpStream::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.clear_write_callback(callback, ctx);
+}
+
 TcpStream::IoTask TcpStream::read(void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
     return stream_.read(buf, len, timeout);
 }

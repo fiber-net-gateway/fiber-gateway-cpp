@@ -27,6 +27,7 @@ public:
     using IoTask = detail::TlsStreamFd::IoTask;
     using HandshakeTask = detail::TlsStreamFd::HandshakeTask;
     using ShutdownTask = detail::TlsStreamFd::ShutdownTask;
+    using ReadyCallback = detail::TlsStreamFd::ReadyCallback;
 
     TlsTcpStream(fiber::event::EventLoop &loop, int fd, SocketAddress remote_addr);
     ~TlsTcpStream();
@@ -43,6 +44,11 @@ public:
     [[nodiscard]] bool handshake_done() const noexcept;
     [[nodiscard]] bool has_pending_read() const noexcept;
     void close();
+
+    fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept;
 
     [[nodiscard]] IoTask read(void *buf, size_t len,
                               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;

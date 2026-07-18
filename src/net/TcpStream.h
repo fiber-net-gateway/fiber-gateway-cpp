@@ -28,6 +28,7 @@ struct TcpConnectTraits {
 class TcpStream : public common::NonCopyable, public common::NonMovable {
 public:
     using IoTask = detail::StreamFd::IoTask;
+    using ReadyCallback = detail::StreamFd::ReadyCallback;
     using WaitReadableAwaiter = detail::StreamFd::WaitReadableAwaiter;
     using WaitWritableAwaiter = detail::StreamFd::WaitWritableAwaiter;
     using ConnectAwaiter = detail::ConnectFd<TcpConnectTraits>::ConnectAwaiter;
@@ -48,6 +49,11 @@ public:
     [[nodiscard]] const SocketAddress &remote_addr() const noexcept;
     int release_fd() noexcept;
     void close();
+
+    fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept;
 
     [[nodiscard]] IoTask read(void *buf, size_t len,
                               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;

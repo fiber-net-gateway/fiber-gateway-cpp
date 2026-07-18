@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <vector>
 
+#include "async/Sleep.h"
 #include "async/Spawn.h"
 #include "async/Task.h"
 #include "common/IoError.h"
@@ -269,6 +270,90 @@ std::string build_distinct_chain(fiber::mem::IoBufNodePool &pool, fiber::mem::Io
         expected.append(static_cast<std::size_t>(n), static_cast<char>(0x40 + (i & 0x3f)));
     }
     return expected;
+}
+
+struct PollWriteStats {
+    std::size_t written = 0;
+    std::size_t would_block_count = 0;
+};
+
+DetachedTask run_poll_transport_server(fiber::http::TlsTransport *transport, std::size_t expected_size,
+                                       std::promise<fiber::common::IoResult<std::string>> *done) {
+    auto handshake_result = co_await transport->handshake(5s);
+    if (!handshake_result) {
+        done->set_value(std::unexpected(handshake_result.error()));
+        co_return;
+    }
+
+    // Let the client fill its small send buffer so poll_writev must retain and
+    // retry a coalesced TLS group after WouldBlock.
+    co_await fiber::async::sleep(50ms);
+
+    std::string received;
+    received.reserve(expected_size);
+    std::array<char, 16384> read_buf{};
+    while (received.size() < expected_size) {
+        std::size_t out = 0;
+        fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
+        fiber::common::IoErr err = transport->poll_read(read_buf.data(), read_buf.size(), out, wait_event);
+        if (err == fiber::common::IoErr::WouldBlock) {
+            if (wait_event != fiber::event::IoEvent::Read && wait_event != fiber::event::IoEvent::Write) {
+                done->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+                co_return;
+            }
+            co_await fiber::async::sleep(1ms);
+            continue;
+        }
+        if (err != fiber::common::IoErr::None) {
+            done->set_value(std::unexpected(err));
+            co_return;
+        }
+        if (out == 0) {
+            done->set_value(std::unexpected(fiber::common::IoErr::ConnReset));
+            co_return;
+        }
+        received.append(read_buf.data(), out);
+    }
+
+    done->set_value(std::move(received));
+    co_return;
+}
+
+DetachedTask run_poll_transport_client(fiber::http::TlsTransport *transport, fiber::mem::IoBufChain chain,
+                                       std::promise<fiber::common::IoResult<PollWriteStats>> *done) {
+    auto handshake_result = co_await transport->handshake(5s);
+    if (!handshake_result) {
+        done->set_value(std::unexpected(handshake_result.error()));
+        co_return;
+    }
+
+    PollWriteStats stats;
+    while (chain.readable_bytes() > 0) {
+        std::size_t out = 0;
+        fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
+        fiber::common::IoErr err = transport->poll_writev(chain, out, wait_event);
+        if (err == fiber::common::IoErr::WouldBlock) {
+            if (wait_event != fiber::event::IoEvent::Read && wait_event != fiber::event::IoEvent::Write) {
+                done->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+                co_return;
+            }
+            ++stats.would_block_count;
+            co_await fiber::async::sleep(1ms);
+            continue;
+        }
+        if (err != fiber::common::IoErr::None) {
+            done->set_value(std::unexpected(err));
+            co_return;
+        }
+        if (out == 0) {
+            done->set_value(std::unexpected(fiber::common::IoErr::ConnReset));
+            co_return;
+        }
+        stats.written += out;
+    }
+
+    done->set_value(stats);
+    co_return;
 }
 
 DetachedTask run_transport_server(fiber::http::TlsTransport *transport,
@@ -532,6 +617,82 @@ TEST(TlsStreamFdTest, TlsTransportWritevCoalescesMultiNodeChain) {
 
     group.stop();
     group.join();
+}
+
+TEST(TlsStreamFdTest, TlsTransportPollWritevRetainsCoalescedGroupAcrossWouldBlock) {
+    SigpipeGuard sigpipe_guard;
+    TempFile cert("cert", kSelfSignedCertPem);
+    TempFile key("key", kSelfSignedKeyPem);
+    ASSERT_TRUE(cert.ok);
+    ASSERT_TRUE(key.ok);
+
+    fiber::net::TlsOptions server_options{};
+    server_options.cert_file = cert.path;
+    server_options.key_file = key.path;
+    fiber::net::TlsContext server_ctx(std::move(server_options), true);
+    ASSERT_TRUE(server_ctx.init());
+
+    fiber::net::TlsOptions client_options{};
+    fiber::net::TlsContext client_ctx(std::move(client_options), false);
+    ASSERT_TRUE(client_ctx.init());
+
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+    int send_buffer_size = 4096;
+    ASSERT_EQ(::setsockopt(fds[1], SOL_SOCKET, SO_SNDBUF, &send_buffer_size, sizeof(send_buffer_size)), 0);
+
+    fiber::event::EventLoopGroup group(2);
+    group.start();
+
+    fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
+    auto server_transport_result =
+            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer), server_ctx);
+    auto client_transport_result =
+            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer), client_ctx);
+    ASSERT_TRUE(server_transport_result);
+    ASSERT_TRUE(client_transport_result);
+    auto *server_transport = server_transport_result->release();
+    auto *client_transport = client_transport_result->release();
+
+    fiber::mem::IoBufNodePool pool;
+    fiber::mem::IoBufChain chain(pool);
+    std::vector<std::size_t> sizes(64, 4096);
+    std::string expected = build_distinct_chain(pool, chain, sizes);
+
+    std::promise<fiber::common::IoResult<std::string>> server_promise;
+    std::promise<fiber::common::IoResult<PollWriteStats>> client_promise;
+    auto server_future = server_promise.get_future();
+    auto client_future = client_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_poll_transport_server(server_transport, expected.size(), &server_promise);
+    });
+    fiber::async::spawn(group.at(1), [&]() {
+        return run_poll_transport_client(client_transport, std::move(chain), &client_promise);
+    });
+
+    ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
+    ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
+    auto client_result = client_future.get();
+    auto server_result = server_future.get();
+
+    std::promise<void> server_close_promise;
+    std::promise<void> client_close_promise;
+    auto server_close_future = server_close_promise.get_future();
+    auto client_close_future = client_close_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return close_transport(server_transport, &server_close_promise); });
+    fiber::async::spawn(group.at(1), [&]() { return close_transport(client_transport, &client_close_promise); });
+    ASSERT_EQ(server_close_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(client_close_future.wait_for(2s), std::future_status::ready);
+
+    group.stop();
+    group.join();
+
+    ASSERT_TRUE(client_result);
+    ASSERT_TRUE(server_result);
+    EXPECT_EQ(client_result->written, expected.size());
+    EXPECT_GT(client_result->would_block_count, 0U);
+    EXPECT_EQ(*server_result, expected);
 }
 
 } // namespace

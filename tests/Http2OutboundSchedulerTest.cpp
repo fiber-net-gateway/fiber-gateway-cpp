@@ -17,11 +17,13 @@
 #include "http/HttpTransport.h"
 #undef private
 
+#include "HttpTransportStub.h"
+
 namespace {
 
 using fiber::async::DetachedTask;
 
-class RecordingTransport final : public fiber::http::HttpTransport {
+class RecordingTransport final : public fiber::test::HttpTransportStub {
 public:
     explicit RecordingTransport(std::vector<std::size_t> write_steps = {},
                                 fiber::common::IoErr write_error = fiber::common::IoErr::None) :
