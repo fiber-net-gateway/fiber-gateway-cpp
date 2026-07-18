@@ -29,6 +29,10 @@ public:
     virtual fiber::async::Task<common::IoResult<void>> handshake(std::chrono::milliseconds timeout) = 0;
     virtual fiber::async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds timeout) = 0;
     virtual fiber::async::Task<common::IoResult<void>> wait_readable(std::chrono::milliseconds timeout) = 0;
+    [[nodiscard]] virtual bool has_pending_read() const noexcept { return false; }
+    // Some stateful transports require a WouldBlock read to be retried with
+    // the same destination buffer and length.
+    [[nodiscard]] virtual bool requires_stable_read_buffer_on_retry() const noexcept { return false; }
 
     // Readiness callbacks are persistent and run on loop(). close() completes
     // registered callbacks with Canceled. Callers may update registration from
@@ -79,6 +83,7 @@ public:
     fiber::async::Task<common::IoResult<void>> handshake(std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<void>> wait_readable(std::chrono::milliseconds timeout) override;
+    [[nodiscard]] bool has_pending_read() const noexcept override { return false; }
     common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept override;
@@ -123,6 +128,8 @@ public:
     fiber::async::Task<common::IoResult<void>> handshake(std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<void>> wait_readable(std::chrono::milliseconds timeout) override;
+    [[nodiscard]] bool has_pending_read() const noexcept override;
+    [[nodiscard]] bool requires_stable_read_buffer_on_retry() const noexcept override { return true; }
     common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept override;

@@ -44,6 +44,35 @@ public:
         co_return fiber::common::IoResult<void>{};
     }
 
+    fiber::common::IoErr poll_write(const void *buf, size_t len, size_t &out,
+                                    fiber::event::IoEvent &wait_event) noexcept override {
+        out = 0;
+        wait_event = fiber::event::IoEvent::None;
+        if (closed_) {
+            return fiber::common::IoErr::ConnReset;
+        }
+        const auto *ptr = static_cast<const std::uint8_t *>(buf);
+        written_.insert(written_.end(), ptr, ptr + len);
+        out = len;
+        return fiber::common::IoErr::None;
+    }
+
+    fiber::common::IoErr poll_writev(fiber::mem::IoBufChain &buf, size_t &out,
+                                     fiber::event::IoEvent &wait_event) noexcept override {
+        out = 0;
+        wait_event = fiber::event::IoEvent::None;
+        while (auto *front = buf.first_readable()) {
+            size_t written = 0;
+            fiber::common::IoErr err = poll_write(front->readable_data(), front->readable(), written, wait_event);
+            if (err != fiber::common::IoErr::None) {
+                return err;
+            }
+            buf.consume_and_compact(written);
+            out += written;
+        }
+        return fiber::common::IoErr::None;
+    }
+
     fiber::async::Task<fiber::common::IoResult<size_t>> read(void *, size_t, std::chrono::milliseconds) override {
         co_return std::unexpected(fiber::common::IoErr::NotSupported);
     }
@@ -187,8 +216,7 @@ std::vector<std::uint8_t> encode_headers_bytes_in_place(EncodeCase &test_case) {
     group.start();
     fiber::async::spawn(group.at(0), [promise, &test_case, &group]() mutable -> fiber::async::DetachedTask {
         RecordingTransport transport;
-        fiber::http::Http2OutboundScheduler scheduler(&transport, 1024, std::chrono::seconds(30),
-                                                      test_case.options.max_frame_size);
+        fiber::http::Http2OutboundScheduler scheduler(1024, test_case.options.max_frame_size);
         int owner = 0;
         fiber::http::Http2Stream stream(&owner, kStreamOps);
         stream.stream_id_ = test_case.options.stream_id;
@@ -197,7 +225,12 @@ std::vector<std::uint8_t> encode_headers_bytes_in_place(EncodeCase &test_case) {
                                                           &encode_headers_to_target, &test_case);
         if (err == fiber::common::IoErr::None) {
             scheduler.close();
-            co_await scheduler.send_loop();
+            while (!scheduler.stopped()) {
+                auto result = scheduler.pump_write(transport, 64, 256 * 1024);
+                if (!result) {
+                    break;
+                }
+            }
             err = scheduler.stop_reason();
         }
 

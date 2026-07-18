@@ -3,9 +3,8 @@
 #include <algorithm>
 #include <cstring>
 #include <string_view>
+#include <utility>
 
-#include "../async/Sleep.h"
-#include "../async/Spawn.h"
 #include "../common/Assert.h"
 
 namespace fiber::http {
@@ -38,12 +37,8 @@ constexpr std::uint32_t kDefaultMaxFrameSize = 16384;
 constexpr std::uint32_t kMaxFrameSizeLimit = 16777215;
 constexpr std::int64_t kMaxFlowControlWindow = 0x7fffffffLL;
 constexpr std::int32_t kInitialFlowControlWindow = 65535;
-
-enum class ParsePhase : std::uint8_t {
-    Preface,
-    FrameHeader,
-    FramePayload,
-};
+constexpr std::size_t kIoPumpOperationBudget = 64;
+constexpr std::size_t kIoPumpByteBudget = 256 * 1024;
 
 using TimePoint = std::chrono::steady_clock::time_point;
 
@@ -52,23 +47,6 @@ TimePoint deadline_after(TimePoint now, std::chrono::milliseconds timeout) noexc
         return TimePoint::max();
     }
     return now + timeout;
-}
-
-common::IoResult<std::chrono::milliseconds> remaining_timeout(event::EventLoop &loop, TimePoint deadline) noexcept {
-    if (deadline == TimePoint::max()) {
-        return std::chrono::milliseconds::max();
-    }
-
-    const auto now = loop.now();
-    if (now >= deadline) {
-        return std::unexpected(common::IoErr::TimedOut);
-    }
-
-    auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
-    if (remaining <= std::chrono::milliseconds::zero()) {
-        remaining = std::chrono::milliseconds(1);
-    }
-    return remaining;
 }
 
 std::uint32_t parse_frame_length(const std::uint8_t *pos) noexcept {
@@ -161,7 +139,7 @@ Http2Connection::Http2Connection(Options options, void *peer_stream_factory_ctx,
                                                                .max_dynamic_table_size = kDefaultHeaderTableSize,
                                                                .max_string_size = options_.max_hpack_string_size,
                                                        }),
-    outbound_scheduler_(nullptr, 1024, options_.write_timeout, options_.max_frame_size) {
+    outbound_scheduler_(1024, options_.max_frame_size) {
     FIBER_ASSERT(options_.outbound_hpack_catalog != nullptr);
     FIBER_ASSERT(peer_stream_factory_ops_.create_peer_stream != nullptr);
     peer_advertised_max_concurrent_streams_ = options_.max_peer_concurrent_streams;
@@ -178,29 +156,56 @@ Http2Connection::Http2Connection(Options options, void *peer_stream_factory_ctx,
     FIBER_ASSERT(outbound_hpack_encoder_.init());
 }
 
-common::IoErr Http2Connection::start(std::unique_ptr<HttpTransport> transport) noexcept {
+common::IoErr Http2Connection::start(std::unique_ptr<HttpTransport> transport, ClosedCallback on_closed,
+                                     void *closed_ctx) noexcept {
     FIBER_ASSERT(state_ == State::Init);
     FIBER_ASSERT(transport_ == nullptr);
     if (!transport || !transport->valid()) {
         return common::IoErr::Invalid;
     }
+    if (!transport->loop().in_loop()) {
+        return common::IoErr::NotSupported;
+    }
+
     transport_ = std::move(transport);
-    outbound_scheduler_.set_transport(transport_.get());
-    outbound_scheduler_.set_write_timeout(options_.write_timeout);
+    on_closed_ = on_closed;
+    closed_ctx_ = on_closed ? closed_ctx : nullptr;
     outbound_scheduler_.set_peer_max_frame_size(peer_max_outbound_frame_size_);
+    inbound_io_.phase = options_.role == ConnectionRole::Server ? ParsePhase::Preface : ParsePhase::FrameHeader;
+    inbound_io_.last_inbound_at = transport_->loop().now();
+    prefer_write_ = options_.role == ConnectionRole::Client;
     const common::IoErr start_err =
             options_.role == ConnectionRole::Client ? start_client_session() : start_server_session();
     if (start_err != common::IoErr::None) {
+        terminal_error_ = start_err;
+        outbound_scheduler_.abort(start_err);
+        transport_->close();
+        state_ = State::Closed;
+        close_finished_ = true;
+        close_completion_dispatched_ = true;
+        on_closed_ = nullptr;
+        closed_ctx_ = nullptr;
         return start_err;
     }
-    start_send_loop();
+
+    outbound_scheduler_.set_wake_callback(&Http2Connection::on_outbound_work, this);
+    schedule_io_pump();
     return common::IoErr::None;
 }
 
 Http2Connection::~Http2Connection() {
+    FIBER_ASSERT(!io_pump_running_);
+    FIBER_ASSERT(!io_pump_posted_);
+    on_closed_ = nullptr;
+    closed_ctx_ = nullptr;
+    if (transport_ && transport_->loop().in_loop()) {
+        cancel_io_timers();
+        clear_transport_callbacks();
+    }
     clear_inbound_stream();
     state_ = State::Closed;
     stop_sending_requested_ = true;
+    outbound_scheduler_.set_wake_callback(nullptr, nullptr);
     outbound_scheduler_.abort(common::IoErr::Canceled);
     close_all_streams(common::IoErr::Canceled);
     while (Http2Stream *stream = owned_stream_list_.front()) {
@@ -211,255 +216,602 @@ Http2Connection::~Http2Connection() {
         stream->active_ = false;
         (void) streams_.erase(stream_id);
     }
+    inbound_io_.read_buf = {};
+    if (transport_ && transport_->valid()) {
+        transport_->close();
+    }
+    close_finished_ = true;
+    FIBER_ASSERT(!closed_waiter_);
+    FIBER_ASSERT(!close_completion_posted_);
 }
 
-fiber::async::Task<Http2Connection::RunResult> Http2Connection::run() noexcept {
-    if (!transport_ || !transport_->valid()) {
+fiber::async::Task<Http2Connection::RunResult> Http2Connection::run() noexcept { co_return co_await wait_closed(); }
+
+fiber::async::Task<Http2Connection::RunResult> Http2Connection::wait_closed() noexcept {
+    if (state_ == State::Init) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (state_ != State::Start) {
+    if (closed_waiter_ || on_closed_) {
         co_return std::unexpected(common::IoErr::Busy);
     }
-
-    if (options_.role == ConnectionRole::Client) {
-        state_ = State::Running;
+    co_await ClosedAwaiter{this};
+    if (terminal_error_ != common::IoErr::None) {
+        co_return std::unexpected(terminal_error_);
     }
+    co_return RunResult{};
+}
 
-    const std::size_t read_buffer_capacity = std::max(options_.read_buffer_size, kClientPreface.size());
-    mem::IoBuf read_buf;
-    auto last_inbound_at = transport_->loop().now();
+Http2Connection::ClosedAwaiter::~ClosedAwaiter() {
+    if (connection && handle && connection->closed_waiter_ == handle) {
+        connection->closed_waiter_ = {};
+    }
+}
 
-    ParsePhase phase = options_.role == ConnectionRole::Server ? ParsePhase::Preface : ParsePhase::FrameHeader;
-    FrameHeader current_header{};
-    std::uint32_t payload_remaining = 0;
-    std::size_t payload_offset = 0;
+bool Http2Connection::ClosedAwaiter::await_suspend(std::coroutine_handle<> continuation) noexcept {
+    FIBER_ASSERT(connection != nullptr);
+    FIBER_ASSERT(!connection->closed_waiter_);
+    if (connection->close_completion_dispatched_) {
+        return false;
+    }
+    handle = continuation;
+    connection->closed_waiter_ = continuation;
+    return true;
+}
 
-    for (;;) {
-        if (state_ == State::Closing) {
-            co_return co_await finalize_run(RunResult{});
-        }
+void Http2Connection::ClosedAwaiter::await_resume() noexcept {
+    connection = nullptr;
+    handle = {};
+}
 
-        for (;;) {
-            if (phase == ParsePhase::Preface) {
-                if (read_buf.readable() < kClientPreface.size()) {
-                    break;
-                }
-                if (std::memcmp(read_buf.readable_data(), kClientPreface.data(), kClientPreface.size()) != 0) {
-                    co_return co_await finalize_run(std::unexpected(common::IoErr::Invalid));
-                }
-                read_buf.consume(kClientPreface.size());
-                common::IoErr err = send_initial_flight();
-                if (err != common::IoErr::None) {
-                    co_return co_await finalize_run(std::unexpected(err));
-                }
-                state_ = State::Running;
-                phase = ParsePhase::FrameHeader;
-                continue;
+common::IoErr Http2Connection::consume_read_buffer(std::size_t &operation_budget, std::size_t &byte_budget) noexcept {
+    mem::IoBuf &read_buf = inbound_io_.read_buf;
+    while (operation_budget != 0 && byte_budget != 0) {
+        if (inbound_io_.phase == ParsePhase::Preface) {
+            if (read_buf.readable() < kClientPreface.size()) {
+                return common::IoErr::None;
             }
-
-            if (phase == ParsePhase::FrameHeader) {
-                if (read_buf.readable() < kFrameHeaderSize) {
-                    break;
-                }
-
-                const std::uint8_t *header = read_buf.readable_data();
-                current_header.length = parse_frame_length(header);
-                current_header.type = static_cast<Http2FrameType>(header[3]);
-                current_header.flags = header[4];
-                current_header.stream_id = parse_stream_id(header + 5);
-
-                if (current_header.length > options_.max_frame_size) {
-                    co_return co_await finalize_run(std::unexpected(common::IoErr::Invalid));
-                }
-
-                read_buf.consume(kFrameHeaderSize);
-                payload_remaining = current_header.length;
-                payload_offset = 0;
-
-                if (payload_remaining == 0) {
-                    common::IoErr err = consume_incoming_frame_payload(current_header, read_buf, 0, 0);
-                    if (err != common::IoErr::None) {
-                        co_return co_await finalize_run(std::unexpected(err));
-                    }
-                    if (state_ == State::Closing) {
-                        co_return co_await finalize_run(RunResult{});
-                    }
-                    continue;
-                }
-
-                phase = ParsePhase::FramePayload;
-                continue;
+            if (std::memcmp(read_buf.readable_data(), kClientPreface.data(), kClientPreface.size()) != 0) {
+                return common::IoErr::Invalid;
             }
-
-            if (read_buf.readable() == 0) {
-                break;
-            }
-
-            std::size_t chunk_len = std::min<std::size_t>(read_buf.readable(), payload_remaining);
-            common::IoErr err = consume_incoming_frame_payload(current_header, read_buf, payload_offset, chunk_len);
+            read_buf.consume(kClientPreface.size());
+            --operation_budget;
+            byte_budget -= std::min(byte_budget, kClientPreface.size());
+            common::IoErr err = send_initial_flight();
             if (err != common::IoErr::None) {
-                co_return co_await finalize_run(std::unexpected(err));
+                return err;
             }
-
-            read_buf.consume(chunk_len);
-            payload_remaining -= static_cast<std::uint32_t>(chunk_len);
-            payload_offset += chunk_len;
-
-            if (payload_remaining == 0) {
-                phase = ParsePhase::FrameHeader;
-            }
-            if (state_ == State::Closing) {
-                co_return co_await finalize_run(RunResult{});
-            }
+            state_ = State::Running;
+            inbound_io_.phase = ParsePhase::FrameHeader;
+            continue;
         }
 
-        auto read_result = co_await read_more(read_buf, read_buffer_capacity, last_inbound_at);
-        if (!read_result) {
-            if (read_result.error() == common::IoErr::TimedOut) {
-                common::IoErr timeout_err = handle_read_timeout();
-                if (timeout_err == common::IoErr::None) {
-                    continue;
+        if (inbound_io_.phase == ParsePhase::FrameHeader) {
+            if (read_buf.readable() < kFrameHeaderSize) {
+                return common::IoErr::None;
+            }
+
+            const std::uint8_t *header = read_buf.readable_data();
+            FrameHeader &current_header = inbound_io_.current_header;
+            current_header.length = parse_frame_length(header);
+            current_header.type = static_cast<Http2FrameType>(header[3]);
+            current_header.flags = header[4];
+            current_header.stream_id = parse_stream_id(header + 5);
+            if (current_header.length > options_.max_frame_size) {
+                return common::IoErr::Invalid;
+            }
+
+            read_buf.consume(kFrameHeaderSize);
+            --operation_budget;
+            byte_budget -= std::min(byte_budget, kFrameHeaderSize);
+            inbound_io_.payload_remaining = current_header.length;
+            inbound_io_.payload_offset = 0;
+            if (inbound_io_.payload_remaining == 0) {
+                common::IoErr err = consume_incoming_frame_payload(current_header, read_buf, 0, 0);
+                if (err != common::IoErr::None || state_ == State::Closing || state_ == State::Closed) {
+                    return err;
                 }
-                co_return co_await finalize_run(std::unexpected(timeout_err));
+                continue;
             }
-            if (state_ == State::Closing && !stop_sending_requested_) {
-                co_return co_await finalize_run(RunResult{});
-            }
-            co_return co_await finalize_run(std::unexpected(read_result.error()));
+            inbound_io_.phase = ParsePhase::FramePayload;
+            continue;
         }
 
-        if (*read_result == 0) {
-            if (state_ == State::Closing && !stop_sending_requested_) {
-                co_return co_await finalize_run(RunResult{});
-            }
-            if (phase == ParsePhase::FrameHeader && read_buf.readable() == 0) {
-                co_return co_await finalize_run(RunResult{});
-            }
-            co_return co_await finalize_run(std::unexpected(common::IoErr::ConnReset));
+        if (read_buf.readable() == 0) {
+            return common::IoErr::None;
         }
 
-        last_inbound_at = transport_->loop().now();
+        const std::size_t chunk_len =
+                std::min({read_buf.readable(), static_cast<std::size_t>(inbound_io_.payload_remaining), byte_budget});
+        common::IoErr err = consume_incoming_frame_payload(inbound_io_.current_header, read_buf,
+                                                           inbound_io_.payload_offset, chunk_len);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+        read_buf.consume(chunk_len);
+        inbound_io_.payload_remaining -= static_cast<std::uint32_t>(chunk_len);
+        inbound_io_.payload_offset += chunk_len;
+        --operation_budget;
+        byte_budget -= chunk_len;
+        if (inbound_io_.payload_remaining == 0) {
+            inbound_io_.phase = ParsePhase::FrameHeader;
+        }
+        if (state_ == State::Closing || state_ == State::Closed) {
+            return common::IoErr::None;
+        }
     }
+    return common::IoErr::None;
 }
 
-fiber::async::Task<common::IoResult<std::size_t>> Http2Connection::read_more(mem::IoBuf &read_buf, std::size_t capacity,
-                                                                             TimePoint last_inbound_at) noexcept {
-    event::EventLoop &loop = transport_->loop();
-    const TimePoint read_deadline = deadline_after(loop.now(), current_read_timeout());
+common::IoResult<Http2Connection::ReadPumpResult> Http2Connection::pump_read(std::size_t operation_budget,
+                                                                             std::size_t byte_budget) noexcept {
+    operation_budget = std::max<std::size_t>(operation_budget, 1);
+    byte_budget = std::max<std::size_t>(byte_budget, 1);
+    ReadPumpResult result;
+    if (inbound_eof_) {
+        return result;
+    }
+    const std::size_t read_buffer_capacity = std::max(options_.read_buffer_size, kClientPreface.size());
 
-    for (;;) {
-        if (!read_buf || !read_buf.unique()) {
-            auto timeout = remaining_timeout(loop, read_deadline);
-            if (!timeout) {
-                co_return std::unexpected(timeout.error());
-            }
-
-            auto wait_result = co_await transport_->wait_readable(*timeout);
-            if (!wait_result) {
-                co_return std::unexpected(wait_result.error());
-            }
-
-            common::IoErr prepare_err = prepare_read_buffer(read_buf, capacity);
-            if (prepare_err != common::IoErr::None) {
-                co_return std::unexpected(prepare_err);
-            }
-
-            timeout = remaining_timeout(loop, read_deadline);
-            if (!timeout) {
-                co_return std::unexpected(timeout.error());
-            }
-            co_return co_await transport_->read_into(read_buf, *timeout);
+    while (state_ == State::Start || state_ == State::Running || state_ == State::Draining) {
+        common::IoErr consume_err = consume_read_buffer(operation_budget, byte_budget);
+        if (consume_err != common::IoErr::None) {
+            return std::unexpected(consume_err);
+        }
+        if (state_ == State::Closing || state_ == State::Closed) {
+            return result;
+        }
+        if (operation_budget == 0 || byte_budget == 0) {
+            result.needs_reschedule = true;
+            return result;
         }
 
-        const auto idle_release_timeout = options_.read_buffer_idle_release_timeout;
-        const bool can_release_idle =
-                read_buf.readable() == 0 && idle_release_timeout > std::chrono::milliseconds::zero();
-        if (can_release_idle) {
-            const TimePoint release_deadline = deadline_after(last_inbound_at, idle_release_timeout);
-            if (release_deadline < read_deadline) {
-                if (loop.now() >= release_deadline) {
-                    read_buf = {};
-                    continue;
-                }
-
-                common::IoErr prepare_err = prepare_read_buffer(read_buf, capacity);
-                if (prepare_err != common::IoErr::None) {
-                    co_return std::unexpected(prepare_err);
-                }
-
-                auto timeout = remaining_timeout(loop, release_deadline);
-                if (!timeout) {
-                    read_buf = {};
-                    continue;
-                }
-
-                auto read_result = co_await transport_->read_into(read_buf, *timeout);
-                if (!read_result && read_result.error() == common::IoErr::TimedOut) {
-                    read_buf = {};
-                    continue;
-                }
-                co_return read_result;
-            }
+        const bool buffered_read_ready = transport_->has_pending_read();
+        if (!inbound_io_.ready_hint && !buffered_read_ready) {
+            result.wait_event = inbound_io_.operation_pending ? inbound_io_.wait_event : event::IoEvent::Read;
+            return result;
         }
-
-        common::IoErr prepare_err = prepare_read_buffer(read_buf, capacity);
+        common::IoErr prepare_err = prepare_read_buffer(inbound_io_.read_buf, read_buffer_capacity);
         if (prepare_err != common::IoErr::None) {
-            co_return std::unexpected(prepare_err);
+            return std::unexpected(prepare_err);
         }
 
-        auto timeout = remaining_timeout(loop, read_deadline);
-        if (!timeout) {
-            co_return std::unexpected(timeout.error());
+        std::size_t bytes_read = 0;
+        event::IoEvent wait_event = event::IoEvent::None;
+        common::IoErr read_err = transport_->poll_read_into(inbound_io_.read_buf, bytes_read, wait_event);
+        inbound_io_.ready_hint = false;
+        --operation_budget;
+        if (read_err == common::IoErr::WouldBlock) {
+            if (wait_event != event::IoEvent::Read && wait_event != event::IoEvent::Write) {
+                return std::unexpected(common::IoErr::Invalid);
+            }
+            inbound_io_.operation_pending = true;
+            result.wait_event = wait_event;
+            return result;
         }
-        co_return co_await transport_->read_into(read_buf, *timeout);
+        inbound_io_.operation_pending = false;
+        if (read_err != common::IoErr::None) {
+            return std::unexpected(read_err);
+        }
+        if (bytes_read == 0) {
+            handle_read_eof();
+            return result;
+        }
+
+        // A readiness notification permits draining the nonblocking transport
+        // until it reports WouldBlock. This also consumes any TLS plaintext
+        // that became available from the same socket event without waiting for
+        // another physical readiness edge.
+        inbound_io_.ready_hint = true;
+        result.bytes_read += bytes_read;
+        byte_budget -= std::min(byte_budget, bytes_read);
+        inbound_io_.last_inbound_at = transport_->loop().now();
+        if (operation_budget == 0 || byte_budget == 0) {
+            result.needs_reschedule = true;
+            return result;
+        }
+    }
+    return result;
+}
+
+void Http2Connection::handle_read_eof() noexcept {
+    if (inbound_io_.phase != ParsePhase::FrameHeader || inbound_io_.read_buf.readable() != 0) {
+        enter_closing(common::IoErr::ConnReset);
+        return;
+    }
+    if (state_ == State::Closed || state_ == State::Closing || inbound_eof_) {
+        return;
+    }
+    inbound_eof_ = true;
+    inbound_io_.operation_pending = false;
+    inbound_io_.wait_event = event::IoEvent::None;
+    state_ = State::Closing;
+    close_flush_outbound_ = true;
+    outbound_scheduler_.close();
+}
+
+void Http2Connection::on_transport_read_ready(void *ctx, common::IoErr err) noexcept {
+    auto *connection = static_cast<Http2Connection *>(ctx);
+    FIBER_ASSERT(connection != nullptr);
+    connection->handle_transport_ready(event::IoEvent::Read, err);
+}
+
+void Http2Connection::on_transport_write_ready(void *ctx, common::IoErr err) noexcept {
+    auto *connection = static_cast<Http2Connection *>(ctx);
+    FIBER_ASSERT(connection != nullptr);
+    connection->handle_transport_ready(event::IoEvent::Write, err);
+}
+
+void Http2Connection::on_outbound_work(void *ctx) noexcept {
+    auto *connection = static_cast<Http2Connection *>(ctx);
+    FIBER_ASSERT(connection != nullptr);
+    connection->schedule_io_pump();
+}
+
+void Http2Connection::on_io_pump(Http2Connection *connection) noexcept {
+    FIBER_ASSERT(connection != nullptr);
+    connection->io_pump_posted_ = false;
+    connection->drive_io();
+}
+
+void Http2Connection::handle_transport_ready(event::IoEvent event, common::IoErr err) noexcept {
+    if (state_ == State::Closed) {
+        return;
+    }
+    if (err != common::IoErr::None) {
+        if (state_ == State::Closing && err == common::IoErr::Canceled) {
+            return;
+        }
+        enter_closing(err);
+        return;
+    }
+    const bool wakes_inbound = event::any(inbound_io_.wait_event & event);
+    const bool wakes_outbound = event::any(outbound_wait_event_ & event);
+    inbound_io_.ready_hint = inbound_io_.ready_hint || wakes_inbound;
+    outbound_ready_hint_ = outbound_ready_hint_ || wakes_outbound;
+    if (wakes_inbound != wakes_outbound) {
+        prefer_write_ = wakes_outbound;
+    }
+    drive_io();
+}
+
+void Http2Connection::schedule_io_pump() noexcept {
+    if (!transport_ || state_ == State::Closed) {
+        return;
+    }
+    if (io_pump_running_) {
+        io_pump_again_ = true;
+        return;
+    }
+    if (io_pump_posted_) {
+        return;
+    }
+    FIBER_ASSERT(transport_->loop().in_loop());
+    io_pump_posted_ = true;
+    transport_->loop().post<Http2Connection, &Http2Connection::io_pump_entry_, &Http2Connection::on_io_pump>(*this);
+}
+
+void Http2Connection::drive_io() noexcept {
+    if (!transport_ || state_ == State::Closed) {
+        return;
+    }
+    FIBER_ASSERT(transport_->loop().in_loop());
+    if (io_pump_running_) {
+        io_pump_again_ = true;
+        return;
+    }
+
+    io_pump_running_ = true;
+    io_pump_again_ = false;
+    ReadPumpResult read_result;
+    Http2OutboundPumpResult write_result;
+    bool write_progress = false;
+
+    auto pump_inbound = [&]() noexcept -> bool {
+        if (state_ != State::Start && state_ != State::Running && state_ != State::Draining) {
+            inbound_io_.wait_event = event::IoEvent::None;
+            return true;
+        }
+        auto result = pump_read(kIoPumpOperationBudget, kIoPumpByteBudget);
+        if (!result) {
+            enter_closing(result.error());
+            return false;
+        }
+        read_result = *result;
+        inbound_io_.wait_event = read_result.wait_event;
+        return state_ != State::Closed;
+    };
+
+    auto pump_outbound = [&]() noexcept -> bool {
+        if (outbound_scheduler_.stopped()) {
+            outbound_wait_event_ = event::IoEvent::None;
+            outbound_ready_hint_ = false;
+            return true;
+        }
+        if (outbound_wait_event_ != event::IoEvent::None && !outbound_ready_hint_) {
+            return true;
+        }
+        outbound_ready_hint_ = false;
+        auto result = outbound_scheduler_.pump_write(*transport_, kIoPumpOperationBudget, kIoPumpByteBudget);
+        if (!result) {
+            enter_closing(result.error());
+            return false;
+        }
+        write_result = *result;
+        write_progress = write_result.bytes_written != 0;
+        outbound_wait_event_ = write_result.wait_event;
+        return state_ != State::Closed;
+    };
+
+    if (prefer_write_) {
+        (void) pump_outbound();
+        if (state_ != State::Closed) {
+            (void) pump_inbound();
+        }
+    } else {
+        (void) pump_inbound();
+        if (state_ != State::Closed) {
+            (void) pump_outbound();
+        }
+    }
+    prefer_write_ = !prefer_write_;
+
+    if (state_ != State::Closed) {
+        common::IoErr callback_err = sync_transport_callbacks();
+        if (callback_err != common::IoErr::None) {
+            enter_closing(callback_err);
+        }
+    }
+    if (state_ != State::Closed) {
+        arm_read_timer();
+        arm_write_timer(write_progress);
+        arm_read_buffer_idle_timer();
+        if (read_result.needs_reschedule || write_result.needs_reschedule || io_pump_again_) {
+            io_pump_again_ = true;
+        }
+        if (state_ == State::Closing) {
+            finish_connection();
+        }
+    }
+
+    io_pump_running_ = false;
+    if (state_ == State::Closed) {
+        schedule_closed_completion();
+        return;
+    }
+    if (state_ != State::Closed && io_pump_again_) {
+        io_pump_again_ = false;
+        schedule_io_pump();
     }
 }
 
-fiber::async::Task<Http2Connection::RunResult> Http2Connection::finalize_run(RunResult result) noexcept {
-    if (!result.has_value() && state_ != State::Closed) {
-        enter_closing(result.error());
-    }
+common::IoErr Http2Connection::sync_transport_callbacks() noexcept {
+    event::IoEvent wanted = inbound_io_.wait_event | outbound_wait_event_;
+    const bool want_read = event::any(wanted & event::IoEvent::Read);
+    const bool want_write = event::any(wanted & event::IoEvent::Write);
 
-    if (result.has_value() && state_ != State::Closed) {
-        if (state_ != State::Closing) {
-            state_ = State::Closing;
+    if (want_read && !physical_read_registered_) {
+        common::IoErr err = transport_->set_read_callback(&Http2Connection::on_transport_read_ready, this);
+        if (err != common::IoErr::None) {
+            return err;
         }
-        outbound_scheduler_.close();
+        physical_read_registered_ = true;
+    }
+    if (want_write && !physical_write_registered_) {
+        common::IoErr err = transport_->set_write_callback(&Http2Connection::on_transport_write_ready, this);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+        physical_write_registered_ = true;
+    }
+    if (!want_read && physical_read_registered_) {
+        common::IoErr err = transport_->clear_read_callback(&Http2Connection::on_transport_read_ready, this);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+        physical_read_registered_ = false;
+    }
+    if (!want_write && physical_write_registered_) {
+        common::IoErr err = transport_->clear_write_callback(&Http2Connection::on_transport_write_ready, this);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+        physical_write_registered_ = false;
+    }
+    return common::IoErr::None;
+}
+
+void Http2Connection::clear_transport_callbacks() noexcept {
+    if (!transport_) {
+        return;
+    }
+    if (physical_read_registered_) {
+        (void) transport_->clear_read_callback(&Http2Connection::on_transport_read_ready, this);
+        physical_read_registered_ = false;
+    }
+    if (physical_write_registered_) {
+        (void) transport_->clear_write_callback(&Http2Connection::on_transport_write_ready, this);
+        physical_write_registered_ = false;
+    }
+}
+
+void Http2Connection::on_read_timer(Http2Connection *connection) noexcept {
+    FIBER_ASSERT(connection != nullptr);
+    common::IoErr err = connection->handle_read_timeout();
+    if (err != common::IoErr::None) {
+        connection->enter_closing(err);
+        return;
+    }
+    connection->inbound_io_.ping_sent_at = connection->transport_->loop().now();
+    connection->arm_read_timer();
+    connection->schedule_io_pump();
+}
+
+void Http2Connection::on_write_timer(Http2Connection *connection) noexcept {
+    FIBER_ASSERT(connection != nullptr);
+    connection->enter_closing(common::IoErr::TimedOut);
+}
+
+void Http2Connection::on_read_buffer_idle_timer(Http2Connection *connection) noexcept {
+    FIBER_ASSERT(connection != nullptr);
+    const bool retry_buffer_pinned =
+            connection->inbound_io_.operation_pending && connection->transport_->requires_stable_read_buffer_on_retry();
+    if (!retry_buffer_pinned && connection->inbound_io_.read_buf && connection->inbound_io_.read_buf.unique() &&
+        connection->inbound_io_.read_buf.readable() == 0) {
+        connection->inbound_io_.read_buf = {};
+    }
+    if (connection->transport_ && connection->transport_->has_pending_read()) {
+        connection->schedule_io_pump();
+    }
+}
+
+void Http2Connection::arm_read_timer() noexcept {
+    if (!transport_) {
+        return;
+    }
+    event::EventLoop &event_loop = transport_->loop();
+    event_loop.cancel<Http2Connection, &Http2Connection::read_timer_entry_>(*this);
+    if (inbound_eof_ || (state_ != State::Start && state_ != State::Running && state_ != State::Draining)) {
+        return;
+    }
+    const std::chrono::milliseconds timeout = current_read_timeout();
+    if (timeout == std::chrono::milliseconds::max()) {
+        return;
+    }
+    TimePoint base = keepalive_ping_outstanding_ ? inbound_io_.ping_sent_at : inbound_io_.last_inbound_at;
+    if (base == TimePoint{}) {
+        base = event_loop.now();
+    }
+    event_loop.post_at<Http2Connection, &Http2Connection::read_timer_entry_, &Http2Connection::on_read_timer>(
+            deadline_after(base, timeout), *this);
+}
+
+void Http2Connection::arm_write_timer(bool made_progress) noexcept {
+    if (!transport_) {
+        return;
+    }
+    event::EventLoop &event_loop = transport_->loop();
+    event_loop.cancel<Http2Connection, &Http2Connection::write_timer_entry_>(*this);
+    if (outbound_wait_event_ == event::IoEvent::None || options_.write_timeout == std::chrono::milliseconds::max() ||
+        state_ == State::Closed) {
+        write_blocked_at_ = {};
+        return;
+    }
+    if (made_progress || write_blocked_at_ == TimePoint{}) {
+        write_blocked_at_ = event_loop.now();
+    }
+    event_loop.post_at<Http2Connection, &Http2Connection::write_timer_entry_, &Http2Connection::on_write_timer>(
+            deadline_after(write_blocked_at_, options_.write_timeout), *this);
+}
+
+void Http2Connection::arm_read_buffer_idle_timer() noexcept {
+    if (!transport_) {
+        return;
+    }
+    event::EventLoop &event_loop = transport_->loop();
+    event_loop.cancel<Http2Connection, &Http2Connection::read_buffer_idle_timer_entry_>(*this);
+    const bool retry_buffer_pinned =
+            inbound_io_.operation_pending && transport_->requires_stable_read_buffer_on_retry();
+    if (options_.read_buffer_idle_release_timeout <= std::chrono::milliseconds::zero() || !inbound_io_.read_buf ||
+        !inbound_io_.read_buf.unique() || inbound_io_.read_buf.readable() != 0 || retry_buffer_pinned ||
+        state_ == State::Closed) {
+        return;
+    }
+    event_loop.post_at<Http2Connection, &Http2Connection::read_buffer_idle_timer_entry_,
+                       &Http2Connection::on_read_buffer_idle_timer>(
+            deadline_after(inbound_io_.last_inbound_at, options_.read_buffer_idle_release_timeout), *this);
+}
+
+void Http2Connection::cancel_io_timers() noexcept {
+    if (!transport_) {
+        return;
+    }
+    event::EventLoop &event_loop = transport_->loop();
+    event_loop.cancel<Http2Connection, &Http2Connection::read_timer_entry_>(*this);
+    event_loop.cancel<Http2Connection, &Http2Connection::write_timer_entry_>(*this);
+    event_loop.cancel<Http2Connection, &Http2Connection::read_buffer_idle_timer_entry_>(*this);
+}
+
+void Http2Connection::finish_connection() noexcept {
+    if (state_ == State::Closed) {
+        return;
+    }
+    if (state_ != State::Closing) {
+        return;
+    }
+    if (close_flush_outbound_ && !outbound_scheduler_.stopped()) {
+        return;
     }
 
-    close_all_streams(stop_sending_requested_ ? stop_sending_reason_ : common::IoErr::Canceled);
-    co_await lifetime_wg_.join();
-    if (transport_ && transport_->valid()) {
-        transport_->close();
+    if (!close_finished_) {
+        close_finished_ = true;
+        clear_inbound_stream();
+        inbound_io_.read_buf = {};
+        const common::IoErr stream_close_reason = stop_sending_requested_ && stop_sending_reason_ != common::IoErr::None
+                                                          ? stop_sending_reason_
+                                                          : common::IoErr::Canceled;
+        close_all_streams(stream_close_reason);
+        clear_transport_callbacks();
+        cancel_io_timers();
+        outbound_scheduler_.set_wake_callback(nullptr, nullptr);
+        if (transport_->valid()) {
+            transport_->close();
+        }
+    }
+    if (streams_.size() != 0) {
+        return;
     }
     state_ = State::Closed;
-    co_return result;
-}
-
-fiber::async::Task<void> Http2Connection::close_transport_after_send_loop() noexcept {
-    if (transport_ && transport_->valid()) {
-        transport_->close();
-    }
-    co_return;
-}
-
-fiber::async::DetachedTask Http2Connection::close_transport_after_send_loop_task(Http2Connection *connection) noexcept {
-    if (!connection) {
-        co_return;
-    }
-    co_await connection->close_transport_after_send_loop();
-}
-
-fiber::async::Task<void> Http2Connection::stop_and_join_send_loop(common::IoErr reason) noexcept {
-    if (!stop_sending_requested_ && send_loop_running_) {
-        stop_sending(reason);
-    }
-    while (send_loop_running_) {
-        co_await fiber::async::sleep(std::chrono::milliseconds(1));
+    if (!io_pump_running_) {
+        schedule_closed_completion();
     }
 }
 
-void Http2Connection::shutdown(common::IoErr reason) noexcept { enter_closing(reason); }
+void Http2Connection::on_closed_completion(Http2Connection *connection) noexcept {
+    FIBER_ASSERT(connection != nullptr);
+    connection->close_completion_posted_ = false;
+    connection->dispatch_closed_completion();
+}
+
+void Http2Connection::schedule_closed_completion() noexcept {
+    if (close_completion_posted_ || close_completion_dispatched_) {
+        return;
+    }
+    close_completion_posted_ = true;
+    transport_->loop()
+            .post<Http2Connection, &Http2Connection::close_completion_entry_, &Http2Connection::on_closed_completion>(
+                    *this);
+}
+
+void Http2Connection::dispatch_closed_completion() noexcept {
+    if (close_completion_dispatched_) {
+        return;
+    }
+    close_completion_dispatched_ = true;
+    std::coroutine_handle<> waiter = std::exchange(closed_waiter_, {});
+    if (waiter) {
+        FIBER_ASSERT(on_closed_ == nullptr);
+        waiter.resume();
+        return;
+    }
+    ClosedCallback callback = std::exchange(on_closed_, nullptr);
+    void *callback_ctx = std::exchange(closed_ctx_, nullptr);
+    if (callback) {
+        RunResult result =
+                terminal_error_ == common::IoErr::None ? RunResult{} : RunResult(std::unexpected(terminal_error_));
+        callback(callback_ctx, *this, std::move(result));
+    }
+}
+
+fiber::async::Task<void> Http2Connection::stop_and_wait_closed(common::IoErr reason) noexcept {
+    if (state_ != State::Init && state_ != State::Closed) {
+        enter_closing(reason, false);
+    }
+    if (state_ != State::Init) {
+        (void) co_await wait_closed();
+    }
+}
+
+void Http2Connection::shutdown(common::IoErr reason) noexcept { enter_closing(reason, false); }
 
 void Http2Connection::graceful_shutdown() noexcept {
     common::IoErr err = start_draining();
@@ -1111,7 +1463,6 @@ Http2Stream *Http2Connection::create_peer_stream(std::uint32_t stream_id) noexce
         return nullptr;
     }
 
-    bool track_stream_lifetime = streams_.size() == 0;
     Http2Stream::Lease stream = alloc_peer_stream(stream_id);
     if (!stream) {
         return nullptr;
@@ -1132,9 +1483,6 @@ Http2Stream *Http2Connection::create_peer_stream(std::uint32_t stream_id) noexce
         return nullptr;
     }
     owned_stream_list_.push_back(*stream_ptr);
-    if (track_stream_lifetime) {
-        lifetime_wg_.add(1);
-    }
 
     last_peer_stream_id_ = stream_id;
     ++peer_active_stream_count_;
@@ -1154,7 +1502,6 @@ common::IoResult<Http2Stream::Lease> Http2Connection::attach_local_stream(Http2S
         return std::unexpected(common::IoErr::Already);
     }
 
-    const bool track_stream_lifetime = streams_.size() == 0;
     stream.attach_to_connection(*this, stream_id);
     stream.active_ = true;
     stream.send_window_ = peer_initial_stream_send_window_;
@@ -1172,9 +1519,6 @@ common::IoResult<Http2Stream::Lease> Http2Connection::attach_local_stream(Http2S
         return std::unexpected(common::IoErr::NoMem);
     }
     owned_stream_list_.push_back(stream);
-    if (track_stream_lifetime) {
-        lifetime_wg_.add(1);
-    }
 
     last_local_stream_id_ = stream_id;
     next_local_stream_id_ += 2U;
@@ -1198,8 +1542,9 @@ void Http2Connection::detach_stream(Http2Stream &stream) noexcept {
     stream.attached_to_connection_ = false;
     stream.conn_ = nullptr;
     stream.active_ = false;
-    if (streams_.size() == 0) {
-        lifetime_wg_.done();
+    if (state_ == State::Closing) {
+        finish_connection();
+        return;
     }
     maybe_enter_closing_from_draining();
 }
@@ -1300,23 +1645,6 @@ bool Http2Connection::is_peer_stream_id(std::uint32_t stream_id) const noexcept 
     return !is_local_stream_id(stream_id);
 }
 
-fiber::async::DetachedTask Http2Connection::run_send_loop() noexcept {
-    co_await outbound_scheduler_.send_loop();
-    send_loop_running_ = false;
-    lifetime_wg_.done();
-}
-
-void Http2Connection::start_send_loop() noexcept {
-    if (send_loop_running_ || stop_sending_requested_) {
-        return;
-    }
-    FIBER_ASSERT(transport_ != nullptr);
-    lifetime_wg_.add(1);
-    send_loop_running_ = true;
-    fiber::async::spawn(transport_->loop(),
-                        [connection = this]() -> async::DetachedTask { return connection->run_send_loop(); });
-}
-
 std::chrono::milliseconds Http2Connection::current_read_timeout() const noexcept {
     if (keepalive_ping_outstanding_) {
         return options_.read_timeout;
@@ -1357,6 +1685,9 @@ common::IoErr Http2Connection::send_keepalive_ping() noexcept {
             });
     if (err == common::IoErr::None) {
         keepalive_ping_outstanding_ = true;
+        if (transport_) {
+            inbound_io_.ping_sent_at = transport_->loop().now();
+        }
     }
     return err;
 }
@@ -1370,7 +1701,7 @@ common::IoErr Http2Connection::start_client_session() noexcept {
         state_ = State::Closing;
         return err;
     }
-    state_ = State::Start;
+    state_ = State::Running;
     return common::IoErr::None;
 }
 
@@ -1408,30 +1739,36 @@ common::IoErr Http2Connection::start_draining() noexcept {
     return common::IoErr::None;
 }
 
-void Http2Connection::enter_closing(common::IoErr reason, bool abortive) noexcept {
+void Http2Connection::enter_closing(common::IoErr reason, bool report_error) noexcept {
     if (state_ == State::Closed) {
         return;
     }
-    if (stop_sending_requested_) {
-        if (transport_ && transport_->valid()) {
-            transport_->close();
+    if (state_ == State::Init) {
+        stop_sending_requested_ = true;
+        stop_sending_reason_ = reason;
+        if (report_error && reason != common::IoErr::None) {
+            terminal_error_ = reason;
         }
-        state_ = State::Closing;
+        outbound_scheduler_.abort(reason);
+        close_finished_ = true;
+        close_completion_dispatched_ = true;
+        state_ = State::Closed;
         return;
     }
-
     state_ = State::Closing;
     stop_sending_requested_ = true;
     stop_sending_reason_ = reason;
-    if (abortive) {
-        outbound_scheduler_.abort(reason);
-    } else {
-        outbound_scheduler_.close();
+    if (report_error && reason != common::IoErr::None) {
+        terminal_error_ = reason;
     }
-
-    if (abortive && transport_) {
-        transport_->close();
-    }
+    close_flush_outbound_ = false;
+    clear_inbound_stream();
+    inbound_io_.wait_event = event::IoEvent::None;
+    inbound_io_.operation_pending = false;
+    outbound_ready_hint_ = false;
+    outbound_scheduler_.abort(reason);
+    outbound_wait_event_ = event::IoEvent::None;
+    finish_connection();
 }
 
 std::size_t Http2Connection::configured_max_active_streams() const noexcept {
@@ -1494,10 +1831,13 @@ void Http2Connection::maybe_enter_closing_from_draining() noexcept {
     }
 
     state_ = State::Closing;
+    close_flush_outbound_ = true;
+    stop_sending_requested_ = true;
+    stop_sending_reason_ = common::IoErr::Canceled;
+    clear_inbound_stream();
+    close_all_streams(common::IoErr::Canceled);
     outbound_scheduler_.close();
-    fiber::async::spawn(transport_->loop(), [connection = this]() {
-        return Http2Connection::close_transport_after_send_loop_task(connection);
-    });
+    schedule_io_pump();
 }
 
 } // namespace fiber::http
