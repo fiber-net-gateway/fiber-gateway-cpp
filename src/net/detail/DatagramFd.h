@@ -30,7 +30,6 @@ public:
     using RecvPacketTask = fiber::async::Task<fiber::common::IoResult<UdpPacketRecvResult>>;
     using WaitReadableAwaiter = RWFd::WaitReadableAwaiter;
     using WaitWritableAwaiter = RWFd::WaitWritableAwaiter;
-    using WaitTask = RWFd::WaitTask;
 
     explicit DatagramFd(fiber::event::EventLoop &loop);
     ~DatagramFd();
@@ -55,10 +54,10 @@ public:
                                        std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] fiber::common::IoResult<UdpPacketRecvResult> try_recv_packet(void *buf, size_t len) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_send_packet(const UdpPacketSendSpec &spec) noexcept;
-    [[nodiscard]] WaitReadableAwaiter wait_readable() noexcept;
-    [[nodiscard]] WaitWritableAwaiter wait_writable() noexcept;
-    [[nodiscard]] WaitTask wait_readable(std::chrono::milliseconds timeout) noexcept;
-    [[nodiscard]] WaitTask wait_writable(std::chrono::milliseconds timeout) noexcept;
+    [[nodiscard]] WaitReadableAwaiter
+    wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    [[nodiscard]] WaitWritableAwaiter
+    wait_writable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
 
 private:
     fiber::common::IoResult<void> refresh_local_addr() noexcept;

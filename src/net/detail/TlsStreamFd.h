@@ -49,10 +49,10 @@ public:
     [[nodiscard]] fiber::common::IoResult<size_t> try_write(const void *buf, size_t len) noexcept;
     [[nodiscard]] HandshakeTask handshake();
     [[nodiscard]] ShutdownTask shutdown();
-    [[nodiscard]] StreamFd::WaitReadableAwaiter wait_readable() noexcept;
-    [[nodiscard]] StreamFd::WaitWritableAwaiter wait_writable() noexcept;
-    [[nodiscard]] StreamFd::WaitTask wait_readable(std::chrono::milliseconds timeout) noexcept;
-    [[nodiscard]] StreamFd::WaitTask wait_writable(std::chrono::milliseconds timeout) noexcept;
+    [[nodiscard]] StreamFd::WaitReadableAwaiter
+    wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    [[nodiscard]] StreamFd::WaitWritableAwaiter
+    wait_writable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     fiber::common::IoErr poll_handshake(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr poll_shutdown(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr poll_read(void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;

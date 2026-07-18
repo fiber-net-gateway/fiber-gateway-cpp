@@ -48,15 +48,11 @@ TlsTcpStream::HandshakeTask TlsTcpStream::handshake() { return stream_.handshake
 
 TlsTcpStream::ShutdownTask TlsTcpStream::shutdown() { return stream_.shutdown(); }
 
-detail::StreamFd::WaitReadableAwaiter TlsTcpStream::wait_readable() noexcept { return stream_.wait_readable(); }
-
-detail::StreamFd::WaitWritableAwaiter TlsTcpStream::wait_writable() noexcept { return stream_.wait_writable(); }
-
-detail::StreamFd::WaitTask TlsTcpStream::wait_readable(std::chrono::milliseconds timeout) noexcept {
+detail::StreamFd::WaitReadableAwaiter TlsTcpStream::wait_readable(std::chrono::milliseconds timeout) noexcept {
     return stream_.wait_readable(timeout);
 }
 
-detail::StreamFd::WaitTask TlsTcpStream::wait_writable(std::chrono::milliseconds timeout) noexcept {
+detail::StreamFd::WaitWritableAwaiter TlsTcpStream::wait_writable(std::chrono::milliseconds timeout) noexcept {
     return stream_.wait_writable(timeout);
 }
 

@@ -455,15 +455,11 @@ DatagramFd::SendTask DatagramFd::send_packet(UdpPacketSendSpec spec, std::chrono
     }
 }
 
-DatagramFd::WaitReadableAwaiter DatagramFd::wait_readable() noexcept { return rwfd_.wait_readable(); }
-
-DatagramFd::WaitWritableAwaiter DatagramFd::wait_writable() noexcept { return rwfd_.wait_writable(); }
-
-DatagramFd::WaitTask DatagramFd::wait_readable(std::chrono::milliseconds timeout) noexcept {
+DatagramFd::WaitReadableAwaiter DatagramFd::wait_readable(std::chrono::milliseconds timeout) noexcept {
     return rwfd_.wait_readable(timeout);
 }
 
-DatagramFd::WaitTask DatagramFd::wait_writable(std::chrono::milliseconds timeout) noexcept {
+DatagramFd::WaitWritableAwaiter DatagramFd::wait_writable(std::chrono::milliseconds timeout) noexcept {
     return rwfd_.wait_writable(timeout);
 }
 

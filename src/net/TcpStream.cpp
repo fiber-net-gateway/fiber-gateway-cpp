@@ -79,15 +79,11 @@ TcpStream::IoTask TcpStream::writev(const struct iovec *iov, int iovcnt, std::ch
     return stream_.writev(iov, iovcnt, timeout);
 }
 
-TcpStream::WaitReadableAwaiter TcpStream::wait_readable() noexcept { return stream_.wait_readable(); }
-
-TcpStream::WaitWritableAwaiter TcpStream::wait_writable() noexcept { return stream_.wait_writable(); }
-
-TcpStream::WaitTask TcpStream::wait_readable(std::chrono::milliseconds timeout) noexcept {
+TcpStream::WaitReadableAwaiter TcpStream::wait_readable(std::chrono::milliseconds timeout) noexcept {
     return stream_.wait_readable(timeout);
 }
 
-TcpStream::WaitTask TcpStream::wait_writable(std::chrono::milliseconds timeout) noexcept {
+TcpStream::WaitWritableAwaiter TcpStream::wait_writable(std::chrono::milliseconds timeout) noexcept {
     return stream_.wait_writable(timeout);
 }
 

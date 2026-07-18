@@ -421,15 +421,11 @@ TlsStreamFd::ShutdownTask TlsStreamFd::shutdown() {
     }
 }
 
-StreamFd::WaitReadableAwaiter TlsStreamFd::wait_readable() noexcept { return stream_fd_.wait_readable(); }
-
-StreamFd::WaitWritableAwaiter TlsStreamFd::wait_writable() noexcept { return stream_fd_.wait_writable(); }
-
-StreamFd::WaitTask TlsStreamFd::wait_readable(std::chrono::milliseconds timeout) noexcept {
+StreamFd::WaitReadableAwaiter TlsStreamFd::wait_readable(std::chrono::milliseconds timeout) noexcept {
     return stream_fd_.wait_readable(timeout);
 }
 
-StreamFd::WaitTask TlsStreamFd::wait_writable(std::chrono::milliseconds timeout) noexcept {
+StreamFd::WaitWritableAwaiter TlsStreamFd::wait_writable(std::chrono::milliseconds timeout) noexcept {
     return stream_fd_.wait_writable(timeout);
 }
 

@@ -30,7 +30,6 @@ public:
     using IoTask = detail::StreamFd::IoTask;
     using WaitReadableAwaiter = detail::StreamFd::WaitReadableAwaiter;
     using WaitWritableAwaiter = detail::StreamFd::WaitWritableAwaiter;
-    using WaitTask = detail::StreamFd::WaitTask;
     using ConnectAwaiter = detail::ConnectFd<UnixConnectTraits>::ConnectAwaiter;
     using ConnectInfant = detail::StreamInfant<UnixConnectTraits>;
 
@@ -56,10 +55,10 @@ public:
                                std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] IoTask writev(const struct iovec *iov, int iovcnt,
                                 std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
-    [[nodiscard]] WaitReadableAwaiter wait_readable() noexcept;
-    [[nodiscard]] WaitWritableAwaiter wait_writable() noexcept;
-    [[nodiscard]] WaitTask wait_readable(std::chrono::milliseconds timeout) noexcept;
-    [[nodiscard]] WaitTask wait_writable(std::chrono::milliseconds timeout) noexcept;
+    [[nodiscard]] WaitReadableAwaiter
+    wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    [[nodiscard]] WaitWritableAwaiter
+    wait_writable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_read(void *buf, size_t len) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_write(const void *buf, size_t len) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_readv(const struct iovec *iov, int iovcnt) noexcept;

@@ -77,15 +77,11 @@ UnixStream::IoTask UnixStream::writev(const struct iovec *iov, int iovcnt, std::
     return stream_.writev(iov, iovcnt, timeout);
 }
 
-UnixStream::WaitReadableAwaiter UnixStream::wait_readable() noexcept { return stream_.wait_readable(); }
-
-UnixStream::WaitWritableAwaiter UnixStream::wait_writable() noexcept { return stream_.wait_writable(); }
-
-UnixStream::WaitTask UnixStream::wait_readable(std::chrono::milliseconds timeout) noexcept {
+UnixStream::WaitReadableAwaiter UnixStream::wait_readable(std::chrono::milliseconds timeout) noexcept {
     return stream_.wait_readable(timeout);
 }
 
-UnixStream::WaitTask UnixStream::wait_writable(std::chrono::milliseconds timeout) noexcept {
+UnixStream::WaitWritableAwaiter UnixStream::wait_writable(std::chrono::milliseconds timeout) noexcept {
     return stream_.wait_writable(timeout);
 }
 
