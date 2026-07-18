@@ -12,6 +12,7 @@
 #include "../common/IoError.h"
 #include "../common/mem/IoBufChain.h"
 #include "../event/EventLoop.h"
+#include "Http2Outbound.h"
 #include "Http2OutboundHook.h"
 #include "Http2Stream.h"
 
@@ -19,12 +20,6 @@ namespace fiber::http {
 
 class HttpTransport;
 
-struct Http2OutboundEncodeRequest {
-    std::uint32_t max_frame_size = 0;
-    std::int32_t conn_window_budget = 0;
-};
-
-using Http2OutboundDoneFn = void (*)(void *ctx, common::IoErr result) noexcept;
 using Http2OutboundWakeFn = void (*)(void *ctx) noexcept;
 
 struct Http2OutboundPumpResult {
@@ -32,43 +27,6 @@ struct Http2OutboundPumpResult {
     std::size_t bytes_written = 0;
     bool needs_reschedule = false;
     bool stopped = false;
-};
-
-struct Http2OutboundEncodeResult {
-    enum class Status : std::uint8_t {
-        Encoded = 0,
-        NoWork,
-        BlockedConnWindow,
-        BlockedStreamWindow,
-        Closed,
-    };
-
-    Status status = Status::NoWork;
-    Http2OutboundNextKind next_kind = Http2OutboundNextKind::None;
-    std::uint32_t consumed_conn_window = 0;
-};
-
-class Http2OutboundEncodeTarget {
-public:
-    [[nodiscard]] bool empty() const noexcept;
-    [[nodiscard]] std::size_t total_bytes() const noexcept;
-
-    [[nodiscard]] common::IoErr append_copy(const void *src, std::size_t bytes) noexcept;
-    [[nodiscard]] common::IoErr append_buffer(mem::IoBuf &&buf) noexcept;
-    [[nodiscard]] common::IoErr append_chain(mem::IoBufChain &&chain) noexcept;
-    void set_on_done(Http2OutboundDoneFn fn, void *ctx) noexcept;
-
-private:
-    void reset(mem::IoBufNodePool &node_pool) noexcept;
-    [[nodiscard]] mem::IoBufChain take_chain() noexcept { return std::move(chain_); }
-    [[nodiscard]] Http2OutboundDoneFn done_fn() const noexcept { return done_fn_; }
-    [[nodiscard]] void *done_ctx() const noexcept { return done_ctx_; }
-
-    mem::IoBufChain chain_{};
-    Http2OutboundDoneFn done_fn_ = nullptr;
-    void *done_ctx_ = nullptr;
-
-    friend class Http2OutboundScheduler;
 };
 
 class Http2OutboundScheduler {
@@ -116,8 +74,7 @@ public:
         return common::IoErr::None;
     }
 
-    [[nodiscard]] common::IoErr request_send(Http2Stream &stream, Http2OutboundNextKind next_kind,
-                                             Http2OutboundEncodeFn encode, void *ctx) noexcept;
+    [[nodiscard]] common::IoErr request_send(Http2Stream &stream, Http2OutboundNextKind next_kind) noexcept;
     [[nodiscard]] bool cancel_queued_send(Http2Stream &stream) noexcept;
     void cancel_stream(Http2Stream &stream) noexcept;
     void on_connection_window_available() noexcept;
@@ -155,16 +112,10 @@ private:
 
     struct InflightStreamWrite {
         mem::IoBufChain chain{};
-        Http2OutboundDoneFn done = nullptr;
-        void *done_ctx = nullptr;
 
         [[nodiscard]] bool empty() const noexcept { return chain.readable_bytes() == 0; }
 
-        void clear() noexcept {
-            chain.clear();
-            done = nullptr;
-            done_ctx = nullptr;
-        }
+        void clear() noexcept { chain.clear(); }
     };
 
     template<typename T>
@@ -219,7 +170,6 @@ private:
     void classify_stream(Http2Stream &stream, bool notify) noexcept;
     [[nodiscard]] Http2Stream *pop_ready_stream() noexcept;
     [[nodiscard]] Http2Stream *pop_waiting_conn_window_stream() noexcept;
-    void notify_inflight_done(common::IoErr result) noexcept;
     void finish_inflight_stream_write() noexcept;
 
     std::uint32_t peer_max_frame_size_ = 0;

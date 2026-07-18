@@ -1557,8 +1557,7 @@ void Http2Connection::try_release_stream(Http2Stream &stream) noexcept {
     if (!stream.attached_to_connection_) {
         return;
     }
-    if (stream.outbound_hook_.queue_state_ != 0 || stream.outbound_hook_.encode_ != nullptr ||
-        stream.outbound_hook_.next_kind_ != Http2OutboundNextKind::None) {
+    if (stream.outbound_hook_.queue_state_ != 0 || stream.outbound_hook_.next_kind_ != Http2OutboundNextKind::None) {
         return;
     }
     if (inbound_stream_.header_block_open && inbound_stream_.lease.get() == &stream) {
@@ -1778,15 +1777,14 @@ std::size_t Http2Connection::configured_max_active_streams() const noexcept {
                     static_cast<std::size_t>(options_.max_local_push_streams));
 }
 
-common::IoErr Http2Connection::request_stream_send(Http2Stream &stream, Http2OutboundNextKind next_kind,
-                                                   Http2OutboundEncodeFn encode, void *ctx) noexcept {
+common::IoErr Http2Connection::request_stream_send(Http2Stream &stream, Http2OutboundNextKind next_kind) noexcept {
     if (state_ == State::Init || state_ == State::Closed || !transport_ || !transport_->valid()) {
         return common::IoErr::Invalid;
     }
     if (stop_sending_requested_) {
         return stop_sending_reason_;
     }
-    return outbound_scheduler_.request_send(stream, next_kind, encode, ctx);
+    return outbound_scheduler_.request_send(stream, next_kind);
 }
 
 bool Http2Connection::cancel_queued_stream_send(Http2Stream &stream) noexcept {

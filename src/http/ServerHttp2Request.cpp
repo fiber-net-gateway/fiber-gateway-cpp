@@ -62,10 +62,13 @@ struct ServerHttp2Request::SendResponseHeaderOp {
         kind_(header.kind), headers_(header.headers), status_code_(header.status_code), reason_(header.reason),
         end_stream_(header.end_stream), informational_(header.kind == OutgoingHeaderKind::Informational) {}
 
-    [[nodiscard]] common::IoErr submit(ServerHttp2Request &request, HeaderSendAwaiter &awaiter) noexcept {
-        return request.conn_->request_stream_send(request.stream_, Http2OutboundNextKind::Headers,
-                                                  &ServerHttp2Request::encode_response_frames, &awaiter);
+    [[nodiscard]] common::IoErr submit(ServerHttp2Request &request, HeaderSendAwaiter &) noexcept {
+        return request.conn_->request_stream_send(request.stream_, Http2OutboundNextKind::Headers);
     }
+
+    common::IoErr encode_outbound_batch(ServerHttp2Request &request, HeaderSendAwaiter &awaiter, Http2Stream &stream,
+                                        const Http2OutboundEncodeRequest &req, Http2OutboundEncodeTarget &target,
+                                        Http2OutboundEncodeResult &result) noexcept;
 
     OutgoingHeaderKind kind_ = OutgoingHeaderKind::Final;
     const HttpHeaders *headers_ = nullptr;
@@ -87,10 +90,13 @@ struct ServerHttp2Request::SendResponseBodyOp {
 
     [[nodiscard]] bool needs_stream_window() const noexcept { return chunk_.readable_bytes() != 0; }
 
-    [[nodiscard]] common::IoErr submit(ServerHttp2Request &request, BodySendAwaiter &awaiter) noexcept {
-        return request.conn_->request_stream_send(request.stream_, Http2OutboundNextKind::Data,
-                                                  &ServerHttp2Request::encode_body_frames, &awaiter);
+    [[nodiscard]] common::IoErr submit(ServerHttp2Request &request, BodySendAwaiter &) noexcept {
+        return request.conn_->request_stream_send(request.stream_, Http2OutboundNextKind::Data);
     }
+
+    common::IoErr encode_outbound_batch(ServerHttp2Request &request, BodySendAwaiter &awaiter, Http2Stream &stream,
+                                        const Http2OutboundEncodeRequest &req, Http2OutboundEncodeTarget &target,
+                                        Http2OutboundEncodeResult &result) noexcept;
 
     [[nodiscard]] std::size_t success_result(const BodySendAwaiter &) const noexcept { return total_bytes_; }
 
@@ -105,7 +111,6 @@ const Http2Stream::Ops &ServerHttp2Request::stream_ops() noexcept {
             &ServerHttp2Request::on_header_block_complete,
             &ServerHttp2Request::on_body,
             &ServerHttp2Request::on_stream_abort,
-            &ServerHttp2Request::on_stream_send_window_available,
     };
     return kOps;
 }
@@ -221,11 +226,6 @@ void ServerHttp2Request::on_stream_abort(void *owner, common::IoErr reason) noex
     request->on_stream_aborted(reason);
 }
 
-void ServerHttp2Request::on_stream_send_window_available(void *owner) noexcept {
-    auto *request = static_cast<ServerHttp2Request *>(owner);
-    request->on_stream_send_window_available();
-}
-
 void ServerHttp2Request::destroy_owner(void *owner) noexcept { delete static_cast<ServerHttp2Request *>(owner); }
 
 fiber::async::DetachedTask ServerHttp2Request::run_handler_task(ServerHttp2Request *request,
@@ -247,48 +247,41 @@ fiber::async::DetachedTask ServerHttp2Request::run_handler_task(ServerHttp2Reque
     co_return;
 }
 
-common::IoErr ServerHttp2Request::encode_response_frames(Http2Stream &stream, void *ctx,
-                                                         const Http2OutboundEncodeRequest &req,
-                                                         Http2OutboundEncodeTarget &target,
-                                                         Http2OutboundEncodeResult &result) noexcept {
-    auto *awaiter = static_cast<HeaderSendAwaiter *>(ctx);
-    if (!awaiter || !awaiter->owner()) {
-        return common::IoErr::Invalid;
-    }
-    auto *request = awaiter->owner();
-    if (request->abort_reason_ != common::IoErr::None || request->stream_.local_rst() ||
-        request->stream_.remote_rst()) {
-        request->on_header_send_complete(awaiter, request->abort_reason_ != common::IoErr::None
-                                                          ? request->abort_reason_
-                                                          : common::IoErr::Canceled);
+common::IoErr ServerHttp2Request::SendResponseHeaderOp::encode_outbound_batch(
+        ServerHttp2Request &request, HeaderSendAwaiter &awaiter, Http2Stream &stream,
+        const Http2OutboundEncodeRequest &req, Http2OutboundEncodeTarget &target,
+        Http2OutboundEncodeResult &result) noexcept {
+    if (request.abort_reason_ != common::IoErr::None || request.stream_.local_rst() || request.stream_.remote_rst()) {
+        awaiter.complete(request.abort_reason_ != common::IoErr::None ? request.abort_reason_
+                                                                      : common::IoErr::Canceled);
         result.status = Http2OutboundEncodeResult::Status::Closed;
         result.next_kind = Http2OutboundNextKind::None;
         return common::IoErr::None;
     }
 
-    Http2HeadersFrameEncoder frame_encoder(request->conn_->outbound_hpack_encoder(),
+    Http2HeadersFrameEncoder frame_encoder(request.conn_->outbound_hpack_encoder(),
                                            {
                                                    .stream_id = stream.stream_id(),
                                                    .max_frame_size = req.max_frame_size,
-                                                   .end_stream = awaiter->op_.end_stream_,
+                                                   .end_stream = awaiter.op_.end_stream_,
                                            });
     common::IoErr err = frame_encoder.begin(target);
     if (err != common::IoErr::None) {
-        request->on_header_send_complete(awaiter, err);
+        awaiter.complete(err);
         return err;
     }
 
-    if (awaiter->op_.kind_ != OutgoingHeaderKind::Trailer) {
-        err = frame_encoder.encode_status(awaiter->op_.status_code_);
+    if (awaiter.op_.kind_ != OutgoingHeaderKind::Trailer) {
+        err = frame_encoder.encode_status(awaiter.op_.status_code_);
         if (err != common::IoErr::None) {
             frame_encoder.abort();
-            request->on_header_send_complete(awaiter, err);
+            awaiter.complete(err);
             return err;
         }
     }
 
-    if (awaiter->op_.headers_ != nullptr) {
-        for (auto it = awaiter->op_.headers_->begin(); it != awaiter->op_.headers_->end(); ++it) {
+    if (awaiter.op_.headers_ != nullptr) {
+        for (auto it = awaiter.op_.headers_->begin(); it != awaiter.op_.headers_->end(); ++it) {
             const auto &field = *it;
             if (field.name_len == 0) {
                 continue;
@@ -300,7 +293,7 @@ common::IoErr ServerHttp2Request::encode_response_frames(Http2Stream &stream, vo
             err = frame_encoder.encode_field(lowcase_name, field.name_hash, field.value_view());
             if (err != common::IoErr::None) {
                 frame_encoder.abort();
-                request->on_header_send_complete(awaiter, err);
+                awaiter.complete(err);
                 return err;
             }
         }
@@ -308,62 +301,52 @@ common::IoErr ServerHttp2Request::encode_response_frames(Http2Stream &stream, vo
 
     err = frame_encoder.finish();
     if (err != common::IoErr::None) {
-        request->on_header_send_complete(awaiter, err);
+        awaiter.complete(err);
         return err;
     }
 
-    if (awaiter->op_.end_stream_) {
-        request->stream_.local_end_stream_ = true;
-        request->response_finished_ = true;
-        request->conn_->try_release_stream(request->stream_);
+    if (awaiter.op_.end_stream_) {
+        request.stream_.local_end_stream_ = true;
+        request.response_finished_ = true;
+        request.conn_->try_release_stream(request.stream_);
     }
 
-    if (awaiter->op_.kind_ == OutgoingHeaderKind::Final) {
-        request->response_headers_sent_ = true;
-        request->response_finished_ = awaiter->op_.end_stream_;
-        request->response_status_code_ = awaiter->op_.status_code_;
-        request->response_reason_ = awaiter->op_.reason_;
-        request->response_headers_ = awaiter->op_.headers_;
+    if (awaiter.op_.kind_ == OutgoingHeaderKind::Final) {
+        request.response_headers_sent_ = true;
+        request.response_finished_ = awaiter.op_.end_stream_;
+        request.response_status_code_ = awaiter.op_.status_code_;
+        request.response_reason_ = awaiter.op_.reason_;
+        request.response_headers_ = awaiter.op_.headers_;
     }
 
-    request->on_header_send_complete(awaiter, common::IoErr::None);
+    awaiter.complete(common::IoErr::None);
     result.status = Http2OutboundEncodeResult::Status::Encoded;
     result.next_kind = Http2OutboundNextKind::None;
-    result.consumed_conn_window = 0;
+    result.flow_controlled_bytes = 0;
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp2Request::encode_body_frames(Http2Stream &stream, void *ctx,
-                                                     const Http2OutboundEncodeRequest &req,
-                                                     Http2OutboundEncodeTarget &target,
-                                                     Http2OutboundEncodeResult &result) noexcept {
-    auto *awaiter = static_cast<BodySendAwaiter *>(ctx);
-    if (!awaiter || !awaiter->owner()) {
-        return common::IoErr::Invalid;
-    }
-
-    auto *request = awaiter->owner();
-    if (request->abort_reason_ != common::IoErr::None || request->stream_.local_rst() ||
-        request->stream_.remote_rst()) {
-        request->on_body_send_complete(awaiter, request->abort_reason_ != common::IoErr::None
-                                                        ? request->abort_reason_
-                                                        : common::IoErr::Canceled);
+common::IoErr ServerHttp2Request::SendResponseBodyOp::encode_outbound_batch(
+        ServerHttp2Request &request, BodySendAwaiter &awaiter, Http2Stream &stream,
+        const Http2OutboundEncodeRequest &req, Http2OutboundEncodeTarget &target,
+        Http2OutboundEncodeResult &result) noexcept {
+    if (request.abort_reason_ != common::IoErr::None || request.stream_.local_rst() || request.stream_.remote_rst()) {
+        awaiter.complete(request.abort_reason_ != common::IoErr::None ? request.abort_reason_
+                                                                      : common::IoErr::Canceled);
         result.status = Http2OutboundEncodeResult::Status::Closed;
         result.next_kind = Http2OutboundNextKind::None;
         return common::IoErr::None;
     }
 
-    awaiter->clear_waiting_stream_window();
+    awaiter.clear_waiting_stream_window();
 
-    const std::size_t remaining = awaiter->op_.chunk_.readable_bytes();
-    const std::int32_t stream_window = stream.send_window();
-    const std::uint32_t stream_budget = stream_window > 0 ? static_cast<std::uint32_t>(stream_window) : 0U;
-    const std::uint32_t conn_budget =
-            req.conn_window_budget > 0 ? static_cast<std::uint32_t>(req.conn_window_budget) : 0U;
+    const std::size_t remaining = awaiter.op_.chunk_.readable_bytes();
+    const std::uint32_t stream_budget = req.stream_window_budget;
+    const std::uint32_t conn_budget = req.conn_window_budget;
 
     if (remaining == 0) {
-        if (!awaiter->op_.chunk_.complete()) {
-            request->on_body_send_complete(awaiter, common::IoErr::None);
+        if (!awaiter.op_.chunk_.complete()) {
+            awaiter.complete(common::IoErr::None);
             result.status = Http2OutboundEncodeResult::Status::NoWork;
             result.next_kind = Http2OutboundNextKind::None;
             return common::IoErr::None;
@@ -374,24 +357,24 @@ common::IoErr ServerHttp2Request::encode_body_frames(Http2Stream &stream, void *
                 .max_frame_size = req.max_frame_size,
                 .end_stream = true,
         });
-        common::IoErr err = frame_encoder.encode(target, awaiter->op_.chunk_, 0);
+        common::IoErr err = frame_encoder.encode(target, awaiter.op_.chunk_, 0);
         if (err != common::IoErr::None) {
-            request->on_body_send_complete(awaiter, err);
+            awaiter.complete(err);
             return err;
         }
 
-        request->stream_.local_end_stream_ = true;
-        request->response_finished_ = true;
-        request->conn_->try_release_stream(request->stream_);
-        request->on_body_send_complete(awaiter, common::IoErr::None);
+        request.stream_.local_end_stream_ = true;
+        request.response_finished_ = true;
+        request.conn_->try_release_stream(request.stream_);
+        awaiter.complete(common::IoErr::None);
         result.status = Http2OutboundEncodeResult::Status::Encoded;
         result.next_kind = Http2OutboundNextKind::None;
-        result.consumed_conn_window = 0;
+        result.flow_controlled_bytes = 0;
         return common::IoErr::None;
     }
 
     if (stream_budget == 0) {
-        awaiter->mark_waiting_stream_window();
+        awaiter.mark_waiting_stream_window();
         result.status = Http2OutboundEncodeResult::Status::NoWork;
         result.next_kind = Http2OutboundNextKind::None;
         return common::IoErr::None;
@@ -408,27 +391,27 @@ common::IoErr ServerHttp2Request::encode_body_frames(Http2Stream &stream, void *
     Http2DataFrameEncoder frame_encoder({
             .stream_id = stream.stream_id(),
             .max_frame_size = req.max_frame_size,
-            .end_stream = awaiter->op_.chunk_.complete() && payload_budget == remaining,
+            .end_stream = awaiter.op_.chunk_.complete() && payload_budget == remaining,
     });
-    common::IoErr err = frame_encoder.encode(target, awaiter->op_.chunk_, payload_budget);
+    common::IoErr err = frame_encoder.encode(target, awaiter.op_.chunk_, payload_budget);
     if (err != common::IoErr::None) {
-        request->on_body_send_complete(awaiter, err);
+        awaiter.complete(err);
         return err;
     }
 
-    request->response_body_sent_ += payload_budget;
-    const std::size_t after_remaining = awaiter->op_.chunk_.readable_bytes();
+    request.response_body_sent_ += payload_budget;
+    const std::size_t after_remaining = awaiter.op_.chunk_.readable_bytes();
     result.status = Http2OutboundEncodeResult::Status::Encoded;
-    result.consumed_conn_window = static_cast<std::uint32_t>(payload_budget);
+    result.flow_controlled_bytes = static_cast<std::uint32_t>(payload_budget);
 
     if (after_remaining == 0) {
-        if (awaiter->op_.chunk_.complete()) {
-            request->stream_.local_end_stream_ = true;
-            request->response_finished_ = true;
-            request->conn_->try_release_stream(request->stream_);
+        if (awaiter.op_.chunk_.complete()) {
+            request.stream_.local_end_stream_ = true;
+            request.response_finished_ = true;
+            request.conn_->try_release_stream(request.stream_);
         }
         result.next_kind = Http2OutboundNextKind::None;
-        request->on_body_send_complete(awaiter, common::IoErr::None);
+        awaiter.complete(common::IoErr::None);
         return common::IoErr::None;
     }
 
@@ -437,7 +420,7 @@ common::IoErr ServerHttp2Request::encode_body_frames(Http2Stream &stream, void *
         return common::IoErr::None;
     }
 
-    awaiter->mark_waiting_stream_window();
+    awaiter.mark_waiting_stream_window();
     result.next_kind = Http2OutboundNextKind::None;
     return common::IoErr::None;
 }
@@ -452,18 +435,9 @@ bool ServerHttp2Request::cancel_queued_send() noexcept {
     return conn_->cancel_queued_stream_send(stream_);
 }
 
-void ServerHttp2Request::on_stream_send_window_available() noexcept {
-    if (send_awaiter_ != nullptr) {
-        send_awaiter_->on_stream_send_window_available();
-    }
-}
-
 void ServerHttp2Request::on_stream_aborted(common::IoErr reason) noexcept {
     if (abort_reason_ == common::IoErr::None) {
         abort_reason_ = reason;
-    }
-    if (send_awaiter_ != nullptr) {
-        send_awaiter_->on_abort(abort_reason_);
     }
     request_body_recv_.abort(abort_reason_);
 }
@@ -582,21 +556,6 @@ common::IoResult<void> ServerHttp2Request::abort(HttpExchange &exchange, common:
         return std::unexpected(err);
     }
     return {};
-}
-
-void ServerHttp2Request::on_send_complete(SendAwaiter *awaiter, common::IoErr result) noexcept {
-    if (!awaiter || send_awaiter_ != awaiter) {
-        return;
-    }
-    awaiter->complete(result);
-}
-
-void ServerHttp2Request::on_header_send_complete(HeaderSendAwaiter *awaiter, common::IoErr result) noexcept {
-    on_send_complete(awaiter, result);
-}
-
-void ServerHttp2Request::on_body_send_complete(BodySendAwaiter *awaiter, common::IoErr result) noexcept {
-    on_send_complete(awaiter, result);
 }
 
 common::IoErr ServerHttp2Request::on_indexed_field(void *owner, Http2HpackDecoder::TableEntryView entry) noexcept {
