@@ -2,6 +2,7 @@
 #define FIBER_HTTP_SCRIPT_EXCHANGE_CTX_H
 
 #include <cstdint>
+#include <span>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -17,6 +18,11 @@
 #include "HttpScriptServices.h"
 
 namespace fiber::http_script {
+
+struct ScriptConnectionInfo {
+    std::string_view scheme;
+    bool tls = false;
+};
 
 // Per-request script attach payload. Bound to one HttpExchange and one script GcHeap for
 // the lifetime of a script invocation; the host constructs it and passes `&ctx` as the
@@ -34,6 +40,8 @@ namespace fiber::http_script {
 class ScriptExchangeCtx {
 public:
     ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber::script::GcHeap &heap) noexcept;
+    ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber::script::GcHeap &heap,
+                      ScriptConnectionInfo connection) noexcept;
     ~ScriptExchangeCtx() = default;
 
     ScriptExchangeCtx(const ScriptExchangeCtx &) = delete;
@@ -76,6 +84,9 @@ public:
     // field is one of "uri" / "method" / "path" / "query".
     [[nodiscard]] fiber::script::AbiResult req_field(fiber::script::GcHeap &heap,
                                                      std::string_view field) const noexcept;
+    // field is one of remote_addr / remote_port / http_version / scheme / tls.
+    [[nodiscard]] fiber::script::AbiResult conn_field(fiber::script::GcHeap &heap,
+                                                      std::string_view field) const noexcept;
 
     // Looks up key on a GC object (the cached query/headers/cookies views). Returns Undefined
     // when the object is absent or the key is not present; aborts only on allocation failure.
@@ -122,6 +133,7 @@ private:
 
     fiber::http::HttpExchange &exchange_;
     fiber::script::GcHeap &heap_;
+    ScriptConnectionInfo connection_{};
     HttpScriptServices *services_ = nullptr;
 
     // Persistent GC root slots (GcHeap::global_value) holding the cached request views.
@@ -132,7 +144,7 @@ private:
 
     // Path variables captured by the route matcher for the current request (non-owning
     // views; populated by set_path_vars before the script runs).
-    std::vector<std::pair<std::string_view, std::string_view>> path_vars_;
+    std::span<const std::pair<std::string_view, std::string_view>> path_vars_;
 
     fiber::http::HttpHeaders pending_headers_;
     bool header_sent_ = false;

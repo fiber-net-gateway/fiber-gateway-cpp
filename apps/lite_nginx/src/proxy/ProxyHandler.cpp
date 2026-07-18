@@ -68,9 +68,11 @@ bool location_has_template_headers(const runtime::LocationRuntime &location) noe
 // ScriptExchangeCtx (route vars + services attached) only when the location has templates.
 bool evaluate_template_headers(fiber::http::HttpExchange &exchange, const runtime::LocationRuntime &location,
                                const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
-                               fiber::http_script::HttpScriptServices *services, std::vector<std::string> &resolved) {
+                               fiber::http_script::HttpScriptServices *services,
+                               fiber::http_script::ScriptConnectionInfo connection,
+                               std::vector<std::string> &resolved) {
     fiber::script::GcHeap heap;
-    fiber::http_script::ScriptExchangeCtx ctx{exchange, heap};
+    fiber::http_script::ScriptExchangeCtx ctx{exchange, heap, connection};
     ctx.set_path_vars(path_vars);
     ctx.set_services(services);
     resolved.resize(location.set_headers.size());
@@ -378,7 +380,8 @@ ProxyHandler::handle(fiber::http::HttpExchange &exchange, const runtime::Listene
     // locations skip this entirely (no GcHeap / ScriptExchangeCtx).
     std::vector<std::string> resolved_template_values;
     if (location_has_template_headers(location)) {
-        if (!evaluate_template_headers(exchange, location, path_vars, services, resolved_template_values)) {
+        if (!evaluate_template_headers(exchange, location, path_vars, services, log_context.connection,
+                                       resolved_template_values)) {
             co_await send_plain_response(exchange, 500, kScriptErrorBody, listener);
             co_return;
         }

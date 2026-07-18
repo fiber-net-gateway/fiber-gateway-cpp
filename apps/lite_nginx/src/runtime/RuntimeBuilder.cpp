@@ -14,6 +14,7 @@
 #include "http/HttpHeaderHash.h"
 #include "http_script/HttpScriptLib.h"
 #include "http_script/RouteScriptLibrary.h"
+#include "logging/AccessLogScriptLibrary.h"
 #include "net/IpAddress.h"
 #include "script/ScriptCompiler.h"
 
@@ -52,6 +53,53 @@ compile_script_file(fiber::script::Library &library, const std::string &path, co
         return std::unexpected(make_error(loc, "script compile error: " + std::string(compiled.error().message)));
     }
     return std::make_shared<fiber::script::Script>(std::move(*compiled));
+}
+
+void ensure_script_library(RuntimeConfig &runtime) {
+    if (runtime.script_library) {
+        return;
+    }
+    runtime.script_library = std::make_shared<fiber::script::std_lib::StdLibrary>();
+    fiber::http_script::register_http_functions_to_lib(*runtime.script_library);
+}
+
+std::expected<AccessLogId, RuntimeError> compile_access_log(RuntimeConfig &runtime,
+                                                            const std::optional<config::AccessLogConfig> &access_log,
+                                                            AccessLogId inherited,
+                                                            const std::vector<std::string> &path_var_names) {
+    if (!access_log) {
+        return inherited;
+    }
+    if (access_log->kind == config::AccessLogKind::Off) {
+        return kDisabledAccessLog;
+    }
+    if (runtime.access_logs.size() >= kDisabledAccessLog) {
+        return std::unexpected(make_error(access_log->location, "too many access_log definitions"));
+    }
+
+    AccessLogRuntime compiled_log;
+    compiled_log.location = access_log->location;
+    compiled_log.logger_name = access_log->logger_name;
+    if (access_log->message_template.find("${") == std::string::npos) {
+        compiled_log.literal_message = access_log->message_template;
+    } else {
+        ensure_script_library(runtime);
+        auto library = std::make_shared<logging::AccessLogScriptLibrary>(*runtime.script_library, path_var_names);
+        auto compiled = fiber::script::compile_template_string(*library, access_log->message_template);
+        if (!compiled) {
+            return std::unexpected(
+                    make_error(access_log->location, "access_log template compile error: " + compiled.error().message));
+        }
+        if (compiled->contains_async()) {
+            return std::unexpected(make_error(access_log->location, "access_log template must be synchronous"));
+        }
+        compiled_log.template_script = std::make_shared<fiber::script::Script>(std::move(*compiled));
+        compiled_log.template_library = std::move(library);
+    }
+
+    const AccessLogId id = static_cast<AccessLogId>(runtime.access_logs.size());
+    runtime.access_logs.push_back(std::move(compiled_log));
+    return id;
 }
 
 std::string listener_key(const config::ListenAddress &listen) {
@@ -162,7 +210,12 @@ struct LocationRouteDefiner {
 std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::MainConfig &config) {
     RuntimeConfig runtime;
     runtime.worker_processes = config.worker_processes;
-    runtime.access_log = config.http.access_log;
+    const std::vector<std::string> no_path_vars;
+    auto http_access_log = compile_access_log(runtime, config.http.access_log, kDisabledAccessLog, no_path_vars);
+    if (!http_access_log) {
+        return std::unexpected(http_access_log.error());
+    }
+    runtime.access_log = *http_access_log;
     runtime.connection_pool.keepalive_size = config.http.connection_pool.keepalive_size;
     runtime.connection_pool.keepalive_timeout = config.http.connection_pool.keepalive_timeout;
     runtime.connection_pool.max_idle_total = config.http.connection_pool.max_idle_total;
@@ -221,7 +274,11 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
         runtime_server.server_names = server.server_names;
         runtime_server.certificate = server.certificate;
         runtime_server.certificate_key = server.certificate_key;
-        runtime_server.access_log = server.access_log.value_or(runtime.access_log);
+        auto server_access_log = compile_access_log(runtime, server.access_log, runtime.access_log, no_path_vars);
+        if (!server_access_log) {
+            return std::unexpected(server_access_log.error());
+        }
+        runtime_server.access_log = *server_access_log;
         runtime_server.locations.reserve(server.locations.size());
 
         LocationRouteDefiner route_definer;
@@ -238,14 +295,10 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
 
         for (const auto &location: server.locations) {
             if (location.kind == config::LocationKind::Script) {
-                if (!runtime.script_library) {
-                    runtime.script_library = std::make_shared<fiber::script::std_lib::StdLibrary>();
-                    fiber::http_script::register_http_functions_to_lib(*runtime.script_library);
-                }
+                ensure_script_library(runtime);
                 LocationRuntime runtime_location;
                 runtime_location.location = location.location;
                 runtime_location.pattern = location.pattern;
-                runtime_location.access_log = location.access_log.value_or(runtime_server.access_log);
                 const std::uint32_t location_index = static_cast<std::uint32_t>(runtime_server.locations.size());
 
                 // Add the route first so the matcher extracts the pattern's path variable
@@ -262,6 +315,13 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                     return std::unexpected(make_error(location.location, error.what()));
                 }
                 route_definer.path_var_names_out = nullptr;
+
+                auto location_access_log =
+                        compile_access_log(runtime, location.access_log, runtime_server.access_log, path_var_names);
+                if (!location_access_log) {
+                    return std::unexpected(location_access_log.error());
+                }
+                runtime_location.access_log = *location_access_log;
 
                 auto route_lib = std::make_shared<fiber::http_script::RouteScriptLibrary>(*runtime.script_library,
                                                                                           path_var_names);
@@ -330,7 +390,6 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
             runtime_location.send_timeout =
                     resolve_timeout(location.proxy.send_timeout, inherited_send, kDefaultSendTimeout);
             runtime_location.upstream_index = upstream_index;
-            runtime_location.access_log = location.access_log.value_or(runtime_server.access_log);
             runtime_location.proxy_buffering = location.proxy.proxy_buffering;
             runtime_location.skip_headers = make_default_skip_headers();
             // Add the route first so the matcher extracts the pattern's path variable names
@@ -349,6 +408,13 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
             }
             route_definer.path_var_names_out = nullptr;
 
+            auto location_access_log =
+                    compile_access_log(runtime, location.access_log, runtime_server.access_log, path_var_names);
+            if (!location_access_log) {
+                return std::unexpected(location_access_log.error());
+            }
+            runtime_location.access_log = *location_access_log;
+
             // Compile ${...} template header values against a per-location RouteScriptLibrary.
             // Only construct route_lib when this location actually has a template header, so
             // static-only locations pay zero script cost.
@@ -361,10 +427,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
             }
             std::shared_ptr<fiber::http_script::RouteScriptLibrary> route_lib;
             if (has_template_header) {
-                if (!runtime.script_library) {
-                    runtime.script_library = std::make_shared<fiber::script::std_lib::StdLibrary>();
-                    fiber::http_script::register_http_functions_to_lib(*runtime.script_library);
-                }
+                ensure_script_library(runtime);
                 route_lib = std::make_shared<fiber::http_script::RouteScriptLibrary>(*runtime.script_library,
                                                                                      path_var_names);
             }

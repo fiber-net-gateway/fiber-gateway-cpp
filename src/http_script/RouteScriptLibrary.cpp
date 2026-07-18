@@ -100,6 +100,15 @@ AbiResult RouteScriptLibrary::req_field_fn(void *userdata, const HostCallFrame &
     return ctx->req_field(frame.runtime, ref->name);
 }
 
+AbiResult RouteScriptLibrary::conn_field_fn(void *userdata, const HostCallFrame &frame) noexcept {
+    auto *ref = static_cast<const VarRef *>(userdata);
+    auto *ctx = ctx_of(frame);
+    if (ref == nullptr || ctx == nullptr) {
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
+    }
+    return ctx->conn_field(frame.runtime, ref->name);
+}
+
 RouteScriptLibrary::RouteScriptLibrary(fiber::script::std_lib::StdLibrary &shared,
                                        const std::vector<std::string> &path_var_names) :
     shared_(shared), path_var_names_(path_var_names.begin(), path_var_names.end()) {}
@@ -161,6 +170,12 @@ const Library::HostCallable *RouteScriptLibrary::resolve_constant(std::string_vi
         }
         return get_or_create(VarKind::ReqField, namespace_name, key);
     }
+    if (namespace_name == "$conn") {
+        if (key != "remote_addr" && key != "remote_port" && key != "http_version" && key != "scheme" && key != "tls") {
+            return nullptr;
+        }
+        return get_or_create(VarKind::ConnField, namespace_name, key);
+    }
     return shared_.resolve_constant(namespace_name, key);
 }
 
@@ -208,6 +223,10 @@ const Library::HostCallable *RouteScriptLibrary::get_or_create(VarKind kind, std
         case VarKind::ReqField:
             callable.constant = &RouteScriptLibrary::req_field_fn;
             callable.debug_name = "$req";
+            break;
+        case VarKind::ConnField:
+            callable.constant = &RouteScriptLibrary::conn_field_fn;
+            callable.debug_name = "$conn";
             break;
     }
 

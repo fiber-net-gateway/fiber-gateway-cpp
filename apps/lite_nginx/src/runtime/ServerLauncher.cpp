@@ -87,7 +87,7 @@ fiber::async::Task<void> run_script(fiber::http::HttpExchange &exchange, fiber::
                                     fiber::http_script::HttpScriptServices *services,
                                     const logging::RequestLogContext &log_context) {
     fiber::script::GcHeap heap;
-    fiber::http_script::ScriptExchangeCtx ctx{exchange, heap};
+    fiber::http_script::ScriptExchangeCtx ctx{exchange, heap, log_context.connection};
     ctx.set_path_vars(path_vars);
     ctx.set_services(services);
     fiber::script::JsValue root = fiber::script::JsValue::make_undefined();
@@ -255,18 +255,19 @@ class RequestDispatcher {
 public:
     RequestDispatcher(std::shared_ptr<const RuntimeConfig> runtime,
                       std::shared_ptr<upstream::UpstreamRegistry> upstreams, upstream::ConnectionPool &connection_pool,
-                      DnsService &dns, fiber::http_script::HttpScriptServices *script_services) noexcept :
+                      DnsService &dns, fiber::http_script::HttpScriptServices *script_services,
+                      logging::AccessLogger access_logger) noexcept :
         runtime_(std::move(runtime)), upstreams_(std::move(upstreams)), proxy_(*upstreams_, connection_pool, dns),
-        script_services_(script_services) {}
+        script_services_(script_services), access_logger_(std::move(access_logger)) {}
 
     fiber::async::Task<void> handle(std::uint32_t listener_index, fiber::http::HttpExchange &exchange) const {
         logging::RequestLogContext log_context{
                 .started_at = fiber::event::EventLoop::current().now(),
                 .request_id = logging::next_request_id(),
-                .access_log = runtime_ && runtime_->access_log,
+                .access_log = runtime_ ? runtime_->access_log : kDisabledAccessLog,
         };
         co_await handle_inner(listener_index, exchange, log_context);
-        logging::write_access_log(exchange, log_context, fiber::event::EventLoop::current().now());
+        access_logger_.write(exchange, log_context, fiber::event::EventLoop::current().now());
     }
 
 private:
@@ -278,6 +279,10 @@ private:
         }
 
         const ListenerRuntime &listener = runtime_->listeners[listener_index];
+        log_context.connection = {
+                .scheme = listener.tls ? std::string_view("https") : std::string_view("http"),
+                .tls = listener.tls,
+        };
         std::string_view host_name;
         if (const auto *host = exchange.host_header(); host != nullptr) {
             host_name = strip_host_port(host->value_view());
@@ -305,11 +310,11 @@ private:
         const LocationRuntime &location = server.locations[match_context.location_index];
         log_context.access_log = location.access_log;
         log_context.location_pattern = location.pattern;
+        log_context.path_vars = std::move(match_context.path_vars);
         if (location.script) {
-            co_await run_script(exchange, *location.script, match_context.path_vars, script_services_, log_context);
+            co_await run_script(exchange, *location.script, log_context.path_vars, script_services_, log_context);
         } else {
-            co_await proxy_.handle(exchange, listener, location, match_context.path_vars, script_services_,
-                                   log_context);
+            co_await proxy_.handle(exchange, listener, location, log_context.path_vars, script_services_, log_context);
         }
     }
 
@@ -317,6 +322,7 @@ private:
     std::shared_ptr<upstream::UpstreamRegistry> upstreams_;
     proxy::ProxyHandler proxy_;
     fiber::http_script::HttpScriptServices *script_services_;
+    logging::AccessLogger access_logger_;
 };
 
 } // namespace
@@ -331,6 +337,12 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
     }
 
     runtime_ = std::make_shared<RuntimeConfig>(runtime);
+    logging::AccessLogger access_logger;
+    auto access_log_result = access_logger.bind(*runtime_);
+    if (!access_log_result) {
+        close();
+        return std::unexpected(access_log_result.error());
+    }
     worker_group_ =
             std::make_unique<fiber::event::EventLoopGroup>(std::max<std::size_t>(runtime_->worker_processes, 1));
     worker_group_->start();
@@ -354,8 +366,8 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
     }
     script_services_ = std::make_unique<HttpScriptServicesImpl>(*upstreams_, *connection_pool_, *dns_);
 
-    auto dispatcher =
-            std::make_shared<RequestDispatcher>(runtime_, upstreams_, *connection_pool_, *dns_, script_services_.get());
+    auto dispatcher = std::make_shared<RequestDispatcher>(runtime_, upstreams_, *connection_pool_, *dns_,
+                                                          script_services_.get(), std::move(access_logger));
 
     servers_.reserve(runtime_->listeners.size());
     bound_listeners_.reserve(runtime_->listeners.size());

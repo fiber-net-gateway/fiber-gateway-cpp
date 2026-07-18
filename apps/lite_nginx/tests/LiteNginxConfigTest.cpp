@@ -15,6 +15,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
+using fiber::lite_nginx::config::AccessLogKind;
 using fiber::lite_nginx::config::ConfigLoader;
 using fiber::lite_nginx::config::Lexer;
 using fiber::lite_nginx::config::LogAppenderKind;
@@ -739,12 +740,12 @@ logging {
 }
 http {
     listen 8080;
-    access_log on;
+    access_log lite_nginx.access "http ${$req.method}";
     server {
         server_name localhost;
         access_log off;
         location /health {
-            access_log on;
+            access_log location.access "location ${$req.path}";
             proxy_pass http://127.0.0.1:9001;
         }
     }
@@ -767,11 +768,39 @@ http {
     ASSERT_EQ(config->logging.loggers.size(), 1u);
     EXPECT_FALSE(config->logging.loggers[0].additive);
     EXPECT_EQ(config->logging.root.verbosity, 2u);
-    EXPECT_TRUE(config->http.access_log);
+    ASSERT_TRUE(config->http.access_log.has_value());
+    EXPECT_EQ(config->http.access_log->kind, AccessLogKind::Template);
+    EXPECT_EQ(config->http.access_log->logger_name, "lite_nginx.access");
+    EXPECT_EQ(config->http.access_log->message_template, "http ${$req.method}");
     ASSERT_TRUE(config->http.servers[0].access_log.has_value());
-    EXPECT_FALSE(*config->http.servers[0].access_log);
+    EXPECT_EQ(config->http.servers[0].access_log->kind, AccessLogKind::Off);
     ASSERT_TRUE(config->http.servers[0].locations[0].access_log.has_value());
-    EXPECT_TRUE(*config->http.servers[0].locations[0].access_log);
+    EXPECT_EQ(config->http.servers[0].locations[0].access_log->kind, AccessLogKind::Template);
+    EXPECT_EQ(config->http.servers[0].locations[0].access_log->logger_name, "location.access");
+}
+
+TEST(LiteNginxConfigTest, RejectsInvalidAccessLogShapeAndLoggerName) {
+    auto old_on = ConfigLoader::load_from_string(R"(
+http {
+    listen 8080;
+    access_log on;
+    server { server_name localhost; location / { proxy_pass http://127.0.0.1:9001; } }
+}
+)",
+                                                 "old_access_log.conf");
+    ASSERT_FALSE(old_on.has_value());
+    EXPECT_NE(old_on.error().message.find("expects '<logger-name> <message-template>' or 'off'"), std::string::npos);
+
+    auto invalid_name = ConfigLoader::load_from_string(R"(
+http {
+    listen 8080;
+    access_log bad..name "message";
+    server { server_name localhost; location / { proxy_pass http://127.0.0.1:9001; } }
+}
+)",
+                                                       "invalid_access_logger.conf");
+    ASSERT_FALSE(invalid_name.has_value());
+    EXPECT_NE(invalid_name.error().message.find("logger name is invalid"), std::string::npos);
 }
 
 TEST(LiteNginxConfigTest, RejectsInvalidLoggingConfiguration) {

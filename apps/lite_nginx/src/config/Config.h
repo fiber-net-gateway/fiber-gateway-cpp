@@ -143,6 +143,18 @@ struct ProxyPassTarget {
     SourceLocation location;
 };
 
+enum class AccessLogKind : unsigned char {
+    Off,
+    Template,
+};
+
+struct AccessLogConfig {
+    SourceLocation location;
+    AccessLogKind kind = AccessLogKind::Off;
+    std::string logger_name;
+    std::string message_template;
+};
+
 enum class LocationKind : unsigned char {
     Proxy,
     Script,
@@ -158,7 +170,8 @@ struct LocationConfig {
     ProxyPassTarget proxy_pass;
     std::string script_file;
     ProxySettings proxy;
-    std::optional<bool> access_log;
+    // nullopt inherits the enclosing server; Off explicitly disables an inherited log.
+    std::optional<AccessLogConfig> access_log;
 };
 
 struct ServerConfig {
@@ -168,7 +181,8 @@ struct ServerConfig {
     std::string certificate_key;
     ProxySettings proxy_defaults;
     std::vector<LocationConfig> locations;
-    std::optional<bool> access_log;
+    // nullopt inherits the enclosing http block; Off explicitly disables an inherited log.
+    std::optional<AccessLogConfig> access_log;
 };
 
 struct HttpConfig {
@@ -176,7 +190,8 @@ struct HttpConfig {
     std::vector<UpstreamConfig> upstreams;
     std::vector<ServerConfig> servers;
     ConnectionPoolConfig connection_pool;
-    bool access_log = false;
+    // nullopt and Off both resolve to disabled at the root http scope.
+    std::optional<AccessLogConfig> access_log;
 };
 
 struct MainConfig {

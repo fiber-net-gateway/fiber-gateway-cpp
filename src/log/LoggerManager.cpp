@@ -3,12 +3,14 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "../common/Assert.h"
 #include "../common/mem/BufPool.h"
 #include "Logger.h"
 
@@ -38,8 +40,14 @@ LogContext &thread_log_context() noexcept {
 struct LoggerManager::Runtime {
     explicit Runtime(std::uint64_t value) : generation(value) {}
 
+    struct NamedLogger {
+        std::string_view name;
+        const Logger *logger = nullptr;
+    };
+
     std::vector<std::unique_ptr<Appender>> appenders;
     std::vector<LoggerHandle *> handles;
+    std::vector<NamedLogger> named_loggers;
     mem::BufPool logger_arena{4096};
     std::uint64_t generation = 0;
     std::uint16_t buffer_count = 0;
@@ -126,21 +134,19 @@ LogConfigResult<void> LoggerManager::initialize(LogConfig config) {
     std::sort(handles.begin(), handles.end(),
               [](const LoggerHandle *lhs, const LoggerHandle *rhs) { return lhs->name() < rhs->name(); });
 
-    struct PendingBinding {
-        Logger *logger = nullptr;
-        std::size_t begin = 0;
-        std::size_t end = 0;
-    };
-    std::vector<PendingBinding> pending;
-    pending.reserve(handles.size());
+    std::vector<std::string_view> logger_names;
+    logger_names.reserve(handles.size() + config.requested_loggers_.size());
+    for (const LoggerHandle *handle: handles) {
+        logger_names.push_back(handle->name());
+    }
+    for (const std::string &name: config.requested_loggers_) {
+        logger_names.push_back(name);
+    }
+    std::sort(logger_names.begin(), logger_names.end());
+    logger_names.erase(std::unique(logger_names.begin(), logger_names.end()), logger_names.end());
+    candidate->named_loggers.reserve(logger_names.size());
 
-    std::size_t group_begin = 0;
-    while (group_begin < handles.size()) {
-        std::size_t group_end = group_begin + 1;
-        while (group_end < handles.size() && handles[group_end]->name() == handles[group_begin]->name()) {
-            ++group_end;
-        }
-        const std::string_view logger_name = handles[group_begin]->name();
+    for (std::string_view logger_name: logger_names) {
 
         std::vector<const LogConfig::LoggerDefinition *> matching_rules;
         for (const auto &rule: config.loggers_) {
@@ -224,7 +230,14 @@ LogConfigResult<void> LoggerManager::initialize(LogConfig config) {
             return std::unexpected(make_error(LogConfigErrorCode::OutOfMemory, "failed to allocate logger"));
         }
 
-        auto *logger = new (memory) Logger(logger_name);
+        void *name_memory = candidate->logger_arena.alloc(logger_name.size(), alignof(char));
+        if (!name_memory) {
+            return std::unexpected(make_error(LogConfigErrorCode::OutOfMemory, "failed to allocate logger name"));
+        }
+        std::memcpy(name_memory, logger_name.data(), logger_name.size());
+        const std::string_view owned_name(static_cast<const char *>(name_memory), logger_name.size());
+
+        auto *logger = new (memory) Logger(owned_name);
         logger->verbosity_ = effective_verbosity;
         auto **storage = reinterpret_cast<Appender **>(static_cast<char *>(memory) + logger_size);
         Appender **current = storage;
@@ -241,17 +254,16 @@ LogConfigResult<void> LoggerManager::initialize(LogConfig config) {
                 *current++ = appender;
             }
         }
-        pending.push_back({.logger = logger, .begin = group_begin, .end = group_end});
-        group_begin = group_end;
+        candidate->named_loggers.push_back({.name = owned_name, .logger = logger});
     }
 
     candidate->handles = handles;
     runtime_ = std::move(candidate);
     ++next_generation_;
-    for (const PendingBinding &binding: pending) {
-        for (std::size_t index = binding.begin; index < binding.end; ++index) {
-            handles[index]->logger_ = binding.logger;
-        }
+    for (LoggerHandle *handle: handles) {
+        const Logger *logger = find_logger(handle->name());
+        FIBER_ASSERT(logger != nullptr);
+        handle->logger_ = logger;
     }
     return {};
 }
@@ -270,6 +282,17 @@ void LoggerManager::shutdown() noexcept {
 }
 
 bool LoggerManager::running() const noexcept { return runtime_ != nullptr; }
+
+const Logger *LoggerManager::find_logger(std::string_view name) const noexcept {
+    if (!runtime_) {
+        return nullptr;
+    }
+    const auto &loggers = runtime_->named_loggers;
+    auto it =
+            std::lower_bound(loggers.begin(), loggers.end(), name,
+                             [](const Runtime::NamedLogger &entry, std::string_view key) { return entry.name < key; });
+    return it != loggers.end() && it->name == name ? it->logger : nullptr;
+}
 
 bool LoggerManager::reopen_all() noexcept {
     if (!runtime_) {

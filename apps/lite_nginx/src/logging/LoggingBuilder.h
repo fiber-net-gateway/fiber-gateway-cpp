@@ -13,7 +13,7 @@ namespace fiber::lite_nginx::logging {
 class LoggingBuilder {
 public:
     [[nodiscard]] static std::expected<fiber::log::LogConfig, runtime::RuntimeError>
-    build(const config::LoggingConfig &config);
+    build(const config::MainConfig &config);
 };
 
 } // namespace fiber::lite_nginx::logging

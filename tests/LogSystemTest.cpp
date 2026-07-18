@@ -113,6 +113,29 @@ TEST(LogConfigTest, RejectsInvalidAppenderAndMissingRoot) {
     EXPECT_EQ(finish.error().code, fiber::log::LogConfigErrorCode::MissingRootLogger);
 }
 
+TEST(LogSystemTest, MaterializesLoggerRequestedByRuntimeName) {
+    LoggingScope scope;
+    TempLogFile output;
+    ASSERT_TRUE(output.valid());
+
+    fiber::log::LogConfigBuilder builder;
+    auto output_id = builder.add_file_appender({.name = "dynamic_output", .path = output.path()});
+    ASSERT_TRUE(output_id);
+    ASSERT_TRUE(builder.set_root_logger({.level = fiber::log::LogLevel::Info}, {*output_id}));
+    ASSERT_TRUE(builder.request_logger("runtime.access"));
+    auto config = builder.finish();
+    ASSERT_TRUE(config);
+    auto initialized = fiber::log::LoggerManager::global().initialize(std::move(*config));
+    ASSERT_TRUE(initialized) << initialized.error().message;
+
+    const fiber::log::Logger *logger = fiber::log::LoggerManager::global().find_logger("runtime.access");
+    ASSERT_NE(logger, nullptr);
+    fiber::log::LogLine(*logger, fiber::log::LogLevel::Info, __FILE__, __LINE__, __func__) << "dynamic-message";
+
+    fiber::log::LoggerManager::global().shutdown();
+    EXPECT_NE(read_file(output.path()).find("dynamic-message"), std::string::npos);
+}
+
 TEST(LogSystemTest, CompilesHierarchyIntoPerLevelAppenderArrays) {
     LoggingScope scope;
     TempLogFile all;

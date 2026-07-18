@@ -158,6 +158,20 @@ LogConfigResult<void> LogConfigBuilder::add_logger(LoggerOptions options, std::v
     return {};
 }
 
+LogConfigResult<void> LogConfigBuilder::request_logger(std::string name) {
+    if (auto result = ensure_building(); !result) {
+        return result;
+    }
+    if (!valid_logger_name(name)) {
+        return std::unexpected(make_error(LogConfigErrorCode::InvalidName, "invalid requested logger name"));
+    }
+    if (std::find(config_.requested_loggers_.begin(), config_.requested_loggers_.end(), name) ==
+        config_.requested_loggers_.end()) {
+        config_.requested_loggers_.push_back(std::move(name));
+    }
+    return {};
+}
+
 LogConfigResult<void> LogConfigBuilder::set_root_logger(RootLoggerOptions options,
                                                         std::initializer_list<AppenderId> appenders) {
     return set_root_logger(options, std::vector<AppenderId>(appenders));
