@@ -27,10 +27,9 @@ struct UnixConnectTraits {
 
 class UnixStream : public common::NonCopyable, public common::NonMovable {
 public:
-    using ReadAwaiter = detail::StreamFd::ReadAwaiter;
-    using WriteAwaiter = detail::StreamFd::WriteAwaiter;
-    using ReadvAwaiter = detail::StreamFd::ReadvAwaiter;
-    using WritevAwaiter = detail::StreamFd::WritevAwaiter;
+    using IoTask = detail::StreamFd::IoTask;
+    using WaitReadableAwaiter = detail::StreamFd::WaitReadableAwaiter;
+    using WaitWritableAwaiter = detail::StreamFd::WaitWritableAwaiter;
     using ConnectAwaiter = detail::ConnectFd<UnixConnectTraits>::ConnectAwaiter;
     using ConnectInfant = detail::StreamInfant<UnixConnectTraits>;
 
@@ -48,10 +47,18 @@ public:
     [[nodiscard]] const UnixAddress &remote_addr() const noexcept;
     void close();
 
-    [[nodiscard]] ReadAwaiter read(void *buf, size_t len) noexcept;
-    [[nodiscard]] WriteAwaiter write(const void *buf, size_t len) noexcept;
-    [[nodiscard]] ReadvAwaiter readv(const struct iovec *iov, int iovcnt) noexcept;
-    [[nodiscard]] WritevAwaiter writev(const struct iovec *iov, int iovcnt) noexcept;
+    [[nodiscard]] IoTask read(void *buf, size_t len,
+                              std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    [[nodiscard]] IoTask write(const void *buf, size_t len,
+                               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    [[nodiscard]] IoTask readv(const struct iovec *iov, int iovcnt,
+                               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    [[nodiscard]] IoTask writev(const struct iovec *iov, int iovcnt,
+                                std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    [[nodiscard]] WaitReadableAwaiter
+    wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    [[nodiscard]] WaitWritableAwaiter
+    wait_writable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_read(void *buf, size_t len) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_write(const void *buf, size_t len) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_readv(const struct iovec *iov, int iovcnt) noexcept;

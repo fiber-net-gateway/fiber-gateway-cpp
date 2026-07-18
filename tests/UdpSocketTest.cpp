@@ -294,20 +294,13 @@ DetachedTask server_wait_readable_then_recv(fiber::event::EventLoop *loop, std::
 
     port_promise->set_value(server->local_addr().port());
 
-    auto wait_result = co_await server->wait_event(fiber::event::IoEvent::Read, std::chrono::seconds(2));
+    auto wait_result = co_await server->wait_readable(std::chrono::seconds(2));
     if (!wait_result) {
         done_promise->set_value(wait_result.error());
         server->close();
         delete server;
         co_return;
     }
-    if (!fiber::event::any(*wait_result & fiber::event::IoEvent::Read)) {
-        done_promise->set_value(fiber::common::IoErr::Unknown);
-        server->close();
-        delete server;
-        co_return;
-    }
-
     std::array<char, 16> buf{};
     auto recv_result = co_await server->recv_from(buf.data(), buf.size());
     done_promise->set_value(recv_result ? fiber::common::IoErr::None : recv_result.error());
@@ -335,9 +328,8 @@ DetachedTask client_sleep_then_send(fiber::event::EventLoop *loop, uint16_t port
     delete client;
 }
 
-DetachedTask
-wait_read_or_write_reports_writable(fiber::event::EventLoop *loop,
-                                    std::promise<fiber::common::IoResult<fiber::event::IoEvent>> *done_promise) {
+DetachedTask wait_writable_succeeds(fiber::event::EventLoop *loop,
+                                    std::promise<fiber::common::IoResult<void>> *done_promise) {
     auto *socket = new fiber::net::UdpSocket(*loop);
     auto bind_result = socket->bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
     if (!bind_result) {
@@ -346,8 +338,7 @@ wait_read_or_write_reports_writable(fiber::event::EventLoop *loop,
         co_return;
     }
 
-    auto result = co_await socket->wait_event(fiber::event::IoEvent::Read | fiber::event::IoEvent::Write,
-                                              std::chrono::seconds(1));
+    auto result = co_await socket->wait_writable(std::chrono::seconds(1));
     socket->close();
     delete socket;
     done_promise->set_value(result);
@@ -494,7 +485,7 @@ TEST(UdpSocketTest, TrySendPacketsSendsWholeBatch) {
     group.join();
 }
 
-TEST(UdpSocketTest, WaitEventReadWakesOnIncomingPacket) {
+TEST(UdpSocketTest, WaitReadableWakesOnIncomingPacket) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
@@ -523,20 +514,18 @@ TEST(UdpSocketTest, WaitEventReadWakesOnIncomingPacket) {
     group.join();
 }
 
-TEST(UdpSocketTest, WaitEventMaskReportsWritable) {
+TEST(UdpSocketTest, WaitWritableSucceeds) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    std::promise<fiber::common::IoResult<fiber::event::IoEvent>> result_promise;
+    std::promise<fiber::common::IoResult<void>> result_promise;
     auto result_future = result_promise.get_future();
 
-    fiber::async::spawn(group.at(0),
-                        [&]() { return wait_read_or_write_reports_writable(&group.at(0), &result_promise); });
+    fiber::async::spawn(group.at(0), [&]() { return wait_writable_succeeds(&group.at(0), &result_promise); });
 
     ASSERT_EQ(result_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     auto result = result_future.get();
     ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
-    EXPECT_TRUE(fiber::event::any(*result & fiber::event::IoEvent::Write));
 
     group.stop();
     group.join();

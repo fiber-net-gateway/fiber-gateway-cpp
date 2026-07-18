@@ -178,8 +178,7 @@ fiber::async::Task<fiber::common::IoResult<void>> read_exact(fiber::net::TcpStre
                                                              std::size_t len) {
     std::size_t total = 0;
     while (total < len) {
-        auto read_result =
-                co_await fiber::async::timeout_for([&]() { return stream.read(buf + total, len - total); }, 2s);
+        auto read_result = co_await stream.read(buf + total, len - total, 2s);
         if (!read_result) {
             co_return std::unexpected(read_result.error());
         }
@@ -195,8 +194,7 @@ fiber::async::Task<fiber::common::IoResult<void>> write_all(fiber::net::TcpStrea
                                                             std::size_t len) {
     std::size_t total = 0;
     while (total < len) {
-        auto write_result =
-                co_await fiber::async::timeout_for([&]() { return stream.write(buf + total, len - total); }, 2s);
+        auto write_result = co_await stream.write(buf + total, len - total, 2s);
         if (!write_result) {
             co_return std::unexpected(write_result.error());
         }
@@ -230,8 +228,7 @@ DetachedTask run_udp_success_server(fiber::event::EventLoop *loop, std::promise<
     }
 
     std::array<std::uint8_t, 512> buf{};
-    auto recv_result =
-            co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
+    auto recv_result = co_await socket.recv_from(buf.data(), buf.size(), 2s);
     if (!recv_result) {
         outcome.err = recv_result.error();
         outcome_promise->set_value(std::move(outcome));
@@ -246,8 +243,7 @@ DetachedTask run_udp_success_server(fiber::event::EventLoop *loop, std::promise<
         co_return;
     }
     auto response = make_a_response(read_be16(buf.data()), question->name, {1, 2, 3, 4});
-    auto send_result = co_await fiber::async::timeout_for(
-            [&]() { return socket.send_to(response.data(), response.size(), recv_result->peer); }, 2s);
+    auto send_result = co_await socket.send_to(response.data(), response.size(), recv_result->peer, 2s);
     outcome.err = send_result ? IoErr::None : send_result.error();
     socket.close();
     outcome_promise->set_value(std::move(outcome));
@@ -281,8 +277,7 @@ DetachedTask run_udp_concurrent_server(fiber::event::EventLoop *loop, std::promi
     std::array<Request, 2> requests{};
     std::array<std::uint8_t, 512> buf{};
     for (std::size_t i = 0; i < requests.size(); ++i) {
-        auto recv_result =
-                co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
+        auto recv_result = co_await socket.recv_from(buf.data(), buf.size(), 2s);
         if (!recv_result) {
             outcome.err = recv_result.error();
             outcome_promise->set_value(std::move(outcome));
@@ -303,8 +298,7 @@ DetachedTask run_udp_concurrent_server(fiber::event::EventLoop *loop, std::promi
     for (std::size_t i = requests.size(); i > 0; --i) {
         const Request &request = requests[i - 1];
         auto response = make_a_response(request.id, request.question.name, {static_cast<std::uint8_t>(i), 2, 3, 4});
-        auto send_result = co_await fiber::async::timeout_for(
-                [&]() { return socket.send_to(response.data(), response.size(), request.peer); }, 2s);
+        auto send_result = co_await socket.send_to(response.data(), response.size(), request.peer, 2s);
         if (!send_result) {
             outcome.err = send_result.error();
             outcome_promise->set_value(std::move(outcome));
@@ -379,8 +373,7 @@ DetachedTask run_udp_retry_server(fiber::event::EventLoop *loop, std::promise<st
     std::array<std::uint8_t, 512> buf{};
     fiber::net::SocketAddress peer;
     for (std::size_t attempt = 0; attempt < 2; ++attempt) {
-        auto recv_result =
-                co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
+        auto recv_result = co_await socket.recv_from(buf.data(), buf.size(), 2s);
         if (!recv_result) {
             outcome.err = recv_result.error();
             outcome_promise->set_value(std::move(outcome));
@@ -398,8 +391,7 @@ DetachedTask run_udp_retry_server(fiber::event::EventLoop *loop, std::promise<st
             co_return;
         }
         auto response = make_a_response(read_be16(buf.data()), question->name, {5, 6, 7, 8});
-        auto send_result = co_await fiber::async::timeout_for(
-                [&]() { return socket.send_to(response.data(), response.size(), peer); }, 2s);
+        auto send_result = co_await socket.send_to(response.data(), response.size(), peer, 2s);
         outcome.err = send_result ? IoErr::None : send_result.error();
         socket.close();
         outcome_promise->set_value(std::move(outcome));
@@ -432,8 +424,7 @@ DetachedTask run_udp_validation_server(fiber::event::EventLoop *loop, std::promi
     }
 
     std::array<std::uint8_t, 512> buf{};
-    auto recv_result =
-            co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
+    auto recv_result = co_await socket.recv_from(buf.data(), buf.size(), 2s);
     if (!recv_result) {
         outcome.err = recv_result.error();
         outcome_promise->set_value(std::move(outcome));
@@ -471,8 +462,7 @@ DetachedTask run_udp_validation_server(fiber::event::EventLoop *loop, std::promi
             make_a_response(id, question->name, {4, 3, 2, 1}),
     };
     for (auto &response: responses) {
-        auto send_result = co_await fiber::async::timeout_for(
-                [&]() { return socket.send_to(response.data(), response.size(), recv_result->peer); }, 2s);
+        auto send_result = co_await socket.send_to(response.data(), response.size(), recv_result->peer, 2s);
         if (!send_result) {
             outcome.err = send_result.error();
             socket.close();
@@ -519,7 +509,7 @@ DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop, std::pro
     }
 
     std::array<std::uint8_t, 512> buf{};
-    auto recv_result = co_await fiber::async::timeout_for([&]() { return udp.recv_from(buf.data(), buf.size()); }, 2s);
+    auto recv_result = co_await udp.recv_from(buf.data(), buf.size(), 2s);
     if (!recv_result) {
         outcome.err = recv_result.error();
         outcome_promise->set_value(std::move(outcome));
@@ -534,8 +524,7 @@ DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop, std::pro
         co_return;
     }
     auto truncated = make_truncated_response(read_be16(buf.data()), udp_question->name);
-    auto udp_send = co_await fiber::async::timeout_for(
-            [&]() { return udp.send_to(truncated.data(), truncated.size(), recv_result->peer); }, 2s);
+    auto udp_send = co_await udp.send_to(truncated.data(), truncated.size(), recv_result->peer, 2s);
     if (!udp_send) {
         outcome.err = udp_send.error();
         outcome_promise->set_value(std::move(outcome));
@@ -629,7 +618,7 @@ DetachedTask run_udp_tcp_cancel_server(fiber::event::EventLoop *loop, DnsClient 
     }
 
     std::array<std::uint8_t, 512> buf{};
-    auto recv_result = co_await fiber::async::timeout_for([&]() { return udp.recv_from(buf.data(), buf.size()); }, 2s);
+    auto recv_result = co_await udp.recv_from(buf.data(), buf.size(), 2s);
     if (!recv_result) {
         outcome.err = recv_result.error();
         outcome_promise->set_value(std::move(outcome));
@@ -644,8 +633,7 @@ DetachedTask run_udp_tcp_cancel_server(fiber::event::EventLoop *loop, DnsClient 
         co_return;
     }
     auto truncated = make_truncated_response(read_be16(buf.data()), question->name);
-    auto udp_send = co_await fiber::async::timeout_for(
-            [&]() { return udp.send_to(truncated.data(), truncated.size(), recv_result->peer); }, 2s);
+    auto udp_send = co_await udp.send_to(truncated.data(), truncated.size(), recv_result->peer, 2s);
     if (!udp_send) {
         outcome.err = udp_send.error();
         outcome_promise->set_value(std::move(outcome));
@@ -680,7 +668,7 @@ DetachedTask run_udp_tcp_cancel_server(fiber::event::EventLoop *loop, DnsClient 
     client->release();
 
     std::uint8_t byte = 0;
-    auto close_result = co_await fiber::async::timeout_for([&]() { return stream.read(&byte, 1); }, 2s);
+    auto close_result = co_await stream.read(&byte, 1, 2s);
     if (!close_result) {
         outcome.err = close_result.error();
     } else {

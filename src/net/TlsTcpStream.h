@@ -1,6 +1,7 @@
 #ifndef FIBER_NET_TLS_TCP_STREAM_H
 #define FIBER_NET_TLS_TCP_STREAM_H
 
+#include <chrono>
 #include <cstddef>
 #include <string_view>
 #include <utility>
@@ -12,6 +13,7 @@
 #include "../event/EventLoop.h"
 #include "../event/Poller.h"
 #include "SocketAddress.h"
+#include "TcpSocketOptions.h"
 #include "detail/TlsStreamFd.h"
 
 struct ssl_ctx_st;
@@ -23,10 +25,10 @@ namespace fiber::net {
 
 class TlsTcpStream : public common::NonCopyable, public common::NonMovable {
 public:
-    using ReadAwaiter = detail::TlsStreamFd::ReadAwaiter;
-    using WriteAwaiter = detail::TlsStreamFd::WriteAwaiter;
+    using IoTask = detail::TlsStreamFd::IoTask;
     using HandshakeTask = detail::TlsStreamFd::HandshakeTask;
     using ShutdownTask = detail::TlsStreamFd::ShutdownTask;
+    using ReadyCallback = detail::TlsStreamFd::ReadyCallback;
 
     TlsTcpStream(fiber::event::EventLoop &loop, int fd, SocketAddress remote_addr);
     ~TlsTcpStream();
@@ -42,16 +44,26 @@ public:
     [[nodiscard]] std::string_view selected_alpn() const noexcept;
     [[nodiscard]] bool handshake_done() const noexcept;
     [[nodiscard]] bool has_pending_read() const noexcept;
+    [[nodiscard]] fiber::common::IoErr apply_socket_options(const TcpSocketOptions &options) noexcept;
     void close();
 
-    [[nodiscard]] ReadAwaiter read(void *buf, size_t len) noexcept;
-    [[nodiscard]] WriteAwaiter write(const void *buf, size_t len) noexcept;
+    fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept;
+
+    [[nodiscard]] IoTask read(void *buf, size_t len,
+                              std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    [[nodiscard]] IoTask write(const void *buf, size_t len,
+                               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_read(void *buf, size_t len) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_write(const void *buf, size_t len) noexcept;
     [[nodiscard]] HandshakeTask handshake();
     [[nodiscard]] ShutdownTask shutdown();
-    [[nodiscard]] detail::StreamFd::WaitReadableAwaiter wait_readable() noexcept;
-    [[nodiscard]] detail::StreamFd::WaitWritableAwaiter wait_writable() noexcept;
+    [[nodiscard]] detail::StreamFd::WaitReadableAwaiter
+    wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    [[nodiscard]] detail::StreamFd::WaitWritableAwaiter
+    wait_writable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     fiber::common::IoErr poll_handshake(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr poll_shutdown(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr poll_read(void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;

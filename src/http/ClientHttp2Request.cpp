@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <coroutine>
-#include <limits>
 #include <new>
 
 #include "../common/Assert.h"
@@ -494,18 +493,12 @@ common::IoErr ClientHttp2Request::encode_request_frames(Http2Stream &stream, voi
         return common::IoErr::None;
     }
 
-    Http2HeadersFrameEncoder frame_encoder(
-            request->conn_->outbound_hpack_encoder(),
-            {
-                    .stream_id = stream.stream_id(),
-                    .max_frame_size = req.max_frame_size,
-                    .first_frame_payload_cap = static_cast<std::uint16_t>(std::min<std::uint32_t>(
-                            req.max_frame_size,
-                            static_cast<std::uint32_t>(std::min<std::size_t>(
-                                    target.slot_available() > 9 ? target.slot_available() - 9 : 0,
-                                    static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()))))),
-                    .end_stream = awaiter->op_.end_stream_,
-            });
+    Http2HeadersFrameEncoder frame_encoder(request->conn_->outbound_hpack_encoder(),
+                                           {
+                                                   .stream_id = stream.stream_id(),
+                                                   .max_frame_size = req.max_frame_size,
+                                                   .end_stream = awaiter->op_.end_stream_,
+                                           });
     common::IoErr err = frame_encoder.begin(target);
     if (err != common::IoErr::None) {
         request->on_header_send_complete(awaiter, err);
@@ -698,18 +691,12 @@ common::IoErr ClientHttp2Request::encode_trailer_frames(Http2Stream &stream, voi
         return common::IoErr::None;
     }
 
-    Http2HeadersFrameEncoder frame_encoder(
-            request->conn_->outbound_hpack_encoder(),
-            {
-                    .stream_id = stream.stream_id(),
-                    .max_frame_size = req.max_frame_size,
-                    .first_frame_payload_cap = static_cast<std::uint16_t>(std::min<std::uint32_t>(
-                            req.max_frame_size,
-                            static_cast<std::uint32_t>(std::min<std::size_t>(
-                                    target.slot_available() > 9 ? target.slot_available() - 9 : 0,
-                                    static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()))))),
-                    .end_stream = true,
-            });
+    Http2HeadersFrameEncoder frame_encoder(request->conn_->outbound_hpack_encoder(),
+                                           {
+                                                   .stream_id = stream.stream_id(),
+                                                   .max_frame_size = req.max_frame_size,
+                                                   .end_stream = true,
+                                           });
     common::IoErr err = frame_encoder.begin(target);
     if (err != common::IoErr::None) {
         request->on_trailer_send_complete(awaiter, err);

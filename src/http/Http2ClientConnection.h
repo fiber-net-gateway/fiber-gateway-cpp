@@ -11,6 +11,7 @@
 #include "../common/NonMovable.h"
 #include "../event/EventLoop.h"
 #include "../net/SocketAddress.h"
+#include "../net/TcpSocketOptions.h"
 #include "../net/TlsContext.h"
 #include "ClientHttp2Request.h"
 #include "Http2Connection.h"
@@ -23,6 +24,7 @@ class Http2ClientConnection : public common::NonCopyable, public common::NonMova
 public:
     struct Options {
         net::SocketAddress peer_addr{};
+        net::TcpSocketOptions tcp{.no_delay = net::TcpOptionMode::Enabled};
         net::TlsOptions tls{};
         Http2Connection::Options h2{};
     };
@@ -30,7 +32,11 @@ public:
     Http2ClientConnection(event::EventLoop &loop, Options options) noexcept;
 
     // timeout applies to the TCP connect phase. TLS handshake timeout is configured separately.
-    fiber::async::Task<common::IoResult<void>> connect(std::chrono::milliseconds timeout) noexcept;
+    // A successful connect starts HTTP/2 I/O immediately; run() only remains as
+    // a compatibility wrapper for waiting until the connection closes.
+    fiber::async::Task<common::IoResult<void>> connect(std::chrono::milliseconds timeout,
+                                                       Http2Connection::ClosedCallback on_closed = nullptr,
+                                                       void *closed_ctx = nullptr) noexcept;
     fiber::async::Task<Http2Connection::RunResult> run() noexcept;
 
     [[nodiscard]] ClientHttp2Exchange open_exchange(mem::BufPool &pool) noexcept;
@@ -49,6 +55,7 @@ private:
 
     event::EventLoop *loop_ = nullptr;
     net::SocketAddress peer_addr_{};
+    net::TcpSocketOptions tcp_options_{};
     std::optional<net::SocketAddress> local_addr_;
     net::TlsContext tls_ctx_;
     Http2Connection conn_;

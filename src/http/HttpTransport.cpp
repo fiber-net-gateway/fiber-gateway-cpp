@@ -4,6 +4,7 @@
 #include <array>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <sys/uio.h>
 
 #include <openssl/ssl.h>
@@ -66,10 +67,14 @@ fiber::async::Task<common::IoResult<void>> wait_tls_event(net::TlsTcpStream &str
 
 } // namespace
 
-common::IoResult<std::unique_ptr<TcpTransport>> TcpTransport::create(event::EventLoop &loop,
-                                                                     net::AcceptResult &&accept) {
+common::IoResult<std::unique_ptr<TcpTransport>> TcpTransport::create(event::EventLoop &loop, net::AcceptResult &&accept,
+                                                                     net::TcpSocketOptions tcp_options) {
     if (!accept.valid()) {
         return std::unexpected(common::IoErr::Invalid);
+    }
+    const common::IoErr option_err = net::detail::apply_tcp_socket_options(accept.fd(), tcp_options);
+    if (option_err != common::IoErr::None) {
+        return std::unexpected(option_err);
     }
     return std::unique_ptr<TcpTransport>(new TcpTransport(loop, accept.release_fd(), accept.take_peer()));
 }
@@ -93,9 +98,109 @@ fiber::async::Task<common::IoResult<void>> TcpTransport::wait_readable(std::chro
     co_return common::IoResult<void>{};
 }
 
+common::IoErr TcpTransport::set_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.set_read_callback(callback, ctx);
+}
+
+common::IoErr TcpTransport::set_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.set_write_callback(callback, ctx);
+}
+
+common::IoErr TcpTransport::clear_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.clear_read_callback(callback, ctx);
+}
+
+common::IoErr TcpTransport::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.clear_write_callback(callback, ctx);
+}
+
+common::IoErr TcpTransport::poll_read(void *buf, size_t len, size_t &out, event::IoEvent &wait_event) noexcept {
+    out = 0;
+    wait_event = event::IoEvent::None;
+    auto result = stream_.try_read(buf, len);
+    if (result) {
+        out = *result;
+        return common::IoErr::None;
+    }
+    if (result.error() == common::IoErr::WouldBlock) {
+        wait_event = event::IoEvent::Read;
+    }
+    return result.error();
+}
+
+common::IoErr TcpTransport::poll_read_into(mem::IoBuf &buf, size_t &out, event::IoEvent &wait_event) noexcept {
+    common::IoErr err = poll_read(buf.writable_data(), buf.writable(), out, wait_event);
+    if (err == common::IoErr::None) {
+        buf.commit(out);
+    }
+    return err;
+}
+
+common::IoErr TcpTransport::poll_readv_into(mem::IoBufChain &bufs, size_t &out, event::IoEvent &wait_event) noexcept {
+    out = 0;
+    wait_event = event::IoEvent::None;
+    std::array<iovec, kMaxIov> iov{};
+    int count = bufs.fill_read_iov(iov.data(), static_cast<int>(iov.size()));
+    if (count == 0) {
+        return common::IoErr::None;
+    }
+    auto result = stream_.try_readv(iov.data(), count);
+    if (result) {
+        out = *result;
+        bufs.commit(out);
+        return common::IoErr::None;
+    }
+    if (result.error() == common::IoErr::WouldBlock) {
+        wait_event = event::IoEvent::Read;
+    }
+    return result.error();
+}
+
+common::IoErr TcpTransport::poll_write(const void *buf, size_t len, size_t &out, event::IoEvent &wait_event) noexcept {
+    out = 0;
+    wait_event = event::IoEvent::None;
+    auto result = stream_.try_write(buf, len);
+    if (result) {
+        out = *result;
+        return common::IoErr::None;
+    }
+    if (result.error() == common::IoErr::WouldBlock) {
+        wait_event = event::IoEvent::Write;
+    }
+    return result.error();
+}
+
+common::IoErr TcpTransport::poll_write(mem::IoBuf &buf, size_t &out, event::IoEvent &wait_event) noexcept {
+    common::IoErr err = poll_write(buf.readable_data(), buf.readable(), out, wait_event);
+    if (err == common::IoErr::None) {
+        buf.consume(out);
+    }
+    return err;
+}
+
+common::IoErr TcpTransport::poll_writev(mem::IoBufChain &buf, size_t &out, event::IoEvent &wait_event) noexcept {
+    out = 0;
+    wait_event = event::IoEvent::None;
+    std::array<iovec, kMaxIov> iov{};
+    int count = buf.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
+    if (count == 0) {
+        return common::IoErr::None;
+    }
+    auto result = stream_.try_writev(iov.data(), count);
+    if (result) {
+        out = *result;
+        buf.consume_and_compact(out);
+        return common::IoErr::None;
+    }
+    if (result.error() == common::IoErr::WouldBlock) {
+        wait_event = event::IoEvent::Write;
+    }
+    return result.error();
+}
+
 fiber::async::Task<common::IoResult<size_t>> TcpTransport::read(void *buf, size_t len,
                                                                 std::chrono::milliseconds timeout) {
-    auto result = co_await fiber::async::timeout_for([&]() { return stream_.read(buf, len); }, timeout);
+    auto result = co_await stream_.read(buf, len, timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
@@ -108,8 +213,7 @@ fiber::async::Task<common::IoResult<size_t>> TcpTransport::read_into(mem::IoBuf 
     if (writable == 0) {
         co_return static_cast<size_t>(0);
     }
-    auto result =
-            co_await fiber::async::timeout_for([&]() { return stream_.read(buf.writable_data(), writable); }, timeout);
+    auto result = co_await stream_.read(buf.writable_data(), writable, timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
@@ -124,7 +228,7 @@ fiber::async::Task<common::IoResult<size_t>> TcpTransport::readv_into(mem::IoBuf
     if (count == 0) {
         co_return static_cast<size_t>(0);
     }
-    auto result = co_await fiber::async::timeout_for([&]() { return stream_.readv(iov.data(), count); }, timeout);
+    auto result = co_await stream_.readv(iov.data(), count, timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
@@ -134,7 +238,7 @@ fiber::async::Task<common::IoResult<size_t>> TcpTransport::readv_into(mem::IoBuf
 
 fiber::async::Task<common::IoResult<size_t>> TcpTransport::write(const void *buf, size_t len,
                                                                  std::chrono::milliseconds timeout) {
-    auto result = co_await fiber::async::timeout_for([&]() { return stream_.write(buf, len); }, timeout);
+    auto result = co_await stream_.write(buf, len, timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
@@ -146,8 +250,7 @@ fiber::async::Task<common::IoResult<size_t>> TcpTransport::write(mem::IoBuf &buf
     if (readable == 0) {
         co_return static_cast<size_t>(0);
     }
-    auto result =
-            co_await fiber::async::timeout_for([&]() { return stream_.write(buf.readable_data(), readable); }, timeout);
+    auto result = co_await stream_.write(buf.readable_data(), readable, timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
@@ -162,7 +265,7 @@ fiber::async::Task<common::IoResult<size_t>> TcpTransport::writev(mem::IoBufChai
     if (count == 0) {
         co_return static_cast<size_t>(0);
     }
-    auto result = co_await fiber::async::timeout_for([&]() { return stream_.writev(iov.data(), count); }, timeout);
+    auto result = co_await stream_.writev(iov.data(), count, timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
@@ -183,9 +286,14 @@ const net::SocketAddress &TcpTransport::remote_addr() const noexcept { return st
 event::EventLoop &TcpTransport::loop() const noexcept { return stream_.loop(); }
 
 common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                     net::TlsContext &context) {
+                                                                     net::TlsContext &context,
+                                                                     net::TcpSocketOptions tcp_options) {
     if (!accept.valid()) {
         return std::unexpected(common::IoErr::Invalid);
+    }
+    const common::IoErr option_err = net::detail::apply_tcp_socket_options(accept.fd(), tcp_options);
+    if (option_err != common::IoErr::None) {
+        return std::unexpected(option_err);
     }
     auto transport =
             std::unique_ptr<TlsTransport>(new TlsTransport(loop, accept.release_fd(), accept.take_peer(), context));
@@ -197,9 +305,14 @@ common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::Even
 }
 
 common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                     net::TlsServerContext &context) {
+                                                                     net::TlsServerContext &context,
+                                                                     net::TcpSocketOptions tcp_options) {
     if (!accept.valid()) {
         return std::unexpected(common::IoErr::Invalid);
+    }
+    const common::IoErr option_err = net::detail::apply_tcp_socket_options(accept.fd(), tcp_options);
+    if (option_err != common::IoErr::None) {
+        return std::unexpected(option_err);
     }
     auto transport =
             std::unique_ptr<TlsTransport>(new TlsTransport(loop, accept.release_fd(), accept.take_peer(), context));
@@ -232,7 +345,152 @@ fiber::async::Task<common::IoResult<void>> TlsTransport::wait_readable(std::chro
     co_return common::IoResult<void>{};
 }
 
+common::IoErr TlsTransport::set_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.set_read_callback(callback, ctx);
+}
+
+common::IoErr TlsTransport::set_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.set_write_callback(callback, ctx);
+}
+
+common::IoErr TlsTransport::clear_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.clear_read_callback(callback, ctx);
+}
+
+common::IoErr TlsTransport::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.clear_write_callback(callback, ctx);
+}
+
+common::IoErr TlsTransport::poll_read(void *buf, size_t len, size_t &out, event::IoEvent &wait_event) noexcept {
+    out = 0;
+    wait_event = event::IoEvent::None;
+    FIBER_ASSERT(handshake_done());
+    if (len == 0) {
+        return common::IoErr::None;
+    }
+    return stream_.poll_read(buf, len, out, wait_event);
+}
+
+common::IoErr TlsTransport::poll_read_into(mem::IoBuf &buf, size_t &out, event::IoEvent &wait_event) noexcept {
+    common::IoErr err = poll_read(buf.writable_data(), buf.writable(), out, wait_event);
+    if (err == common::IoErr::None) {
+        buf.commit(out);
+    }
+    return err;
+}
+
+common::IoErr TlsTransport::poll_readv_into(mem::IoBufChain &bufs, size_t &out, event::IoEvent &wait_event) noexcept {
+    mem::IoBuf *target = bufs.first_writable();
+    if (!target) {
+        out = 0;
+        wait_event = event::IoEvent::None;
+        return common::IoErr::None;
+    }
+    return poll_read_into(*target, out, wait_event);
+}
+
+common::IoErr TlsTransport::poll_write(const void *buf, size_t len, size_t &out, event::IoEvent &wait_event) noexcept {
+    out = 0;
+    wait_event = event::IoEvent::None;
+    FIBER_ASSERT(handshake_done());
+    if (len == 0) {
+        return common::IoErr::None;
+    }
+    if (pending_write_kind_ == PendingWriteKind::Chain) {
+        return common::IoErr::Busy;
+    }
+    if (pending_write_kind_ == PendingWriteKind::Contiguous &&
+        (pending_write_data_ != buf || pending_write_len_ != len)) {
+        return common::IoErr::Busy;
+    }
+
+    common::IoErr err = stream_.poll_write(buf, len, out, wait_event);
+    if (err == common::IoErr::WouldBlock) {
+        pending_write_kind_ = PendingWriteKind::Contiguous;
+        pending_write_data_ = buf;
+        pending_write_len_ = len;
+        return err;
+    }
+    clear_pending_write();
+    return err;
+}
+
+common::IoErr TlsTransport::poll_write(mem::IoBuf &buf, size_t &out, event::IoEvent &wait_event) noexcept {
+    common::IoErr err = poll_write(buf.readable_data(), buf.readable(), out, wait_event);
+    if (err == common::IoErr::None) {
+        buf.consume(out);
+    }
+    return err;
+}
+
+common::IoErr TlsTransport::poll_writev(mem::IoBufChain &buf, size_t &out, event::IoEvent &wait_event) noexcept {
+    out = 0;
+    wait_event = event::IoEvent::None;
+    FIBER_ASSERT(handshake_done());
+
+    if (pending_write_kind_ == PendingWriteKind::Contiguous) {
+        return common::IoErr::Busy;
+    }
+    if (pending_write_kind_ == PendingWriteKind::Chain && pending_write_chain_ != &buf) {
+        return common::IoErr::Busy;
+    }
+
+    const void *write_data = pending_write_data_;
+    std::size_t write_len = pending_write_len_;
+    if (pending_write_kind_ == PendingWriteKind::None) {
+        std::array<iovec, kMaxIov> iov{};
+        int count = buf.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
+        if (count == 0) {
+            return common::IoErr::None;
+        }
+
+        int group_end = 0;
+        std::size_t group_len = 0;
+        while (group_end < count && group_len + iov[group_end].iov_len <= kTlsCoalesceMax) {
+            group_len += iov[group_end].iov_len;
+            ++group_end;
+        }
+        if (group_end == 0) {
+            group_end = 1;
+            group_len = iov[0].iov_len;
+        }
+
+        if (group_end == 1) {
+            write_data = iov[0].iov_base;
+        } else {
+            if (!writev_scratch_) {
+                writev_scratch_.reset(new (std::nothrow) std::uint8_t[kTlsCoalesceMax]);
+                if (!writev_scratch_) {
+                    return common::IoErr::NoMem;
+                }
+            }
+            std::uint8_t *dst = writev_scratch_.get();
+            for (int i = 0; i < group_end; ++i) {
+                std::memcpy(dst, iov[i].iov_base, iov[i].iov_len);
+                dst += iov[i].iov_len;
+            }
+            write_data = writev_scratch_.get();
+        }
+        write_len = group_len;
+    }
+
+    common::IoErr err = stream_.poll_write(write_data, write_len, out, wait_event);
+    if (err == common::IoErr::WouldBlock) {
+        pending_write_kind_ = PendingWriteKind::Chain;
+        pending_write_data_ = write_data;
+        pending_write_len_ = write_len;
+        pending_write_chain_ = &buf;
+        return err;
+    }
+    clear_pending_write();
+    if (err == common::IoErr::None) {
+        buf.consume_and_compact(out);
+    }
+    return err;
+}
+
 common::IoResult<void> TlsTransport::init() {
+    clear_pending_write();
     SSL_CTX *ctx = nullptr;
     bool is_server = false;
     if (server_context_) {
@@ -270,6 +528,13 @@ void TlsTransport::configure_ssl(SSL *ssl, void *ctx) noexcept {
 }
 
 bool TlsTransport::handshake_done() const noexcept { return stream_.handshake_done(); }
+
+void TlsTransport::clear_pending_write() noexcept {
+    pending_write_kind_ = PendingWriteKind::None;
+    pending_write_data_ = nullptr;
+    pending_write_len_ = 0;
+    pending_write_chain_ = nullptr;
+}
 
 fiber::async::Task<common::IoResult<void>> TlsTransport::handshake(std::chrono::milliseconds timeout) {
     auto deadline = (timeout == std::chrono::milliseconds::max()) ? std::chrono::steady_clock::time_point::max()
@@ -317,7 +582,7 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::read(void *buf, size_
     for (;;) {
         size_t out = 0;
         event::IoEvent wait_event = event::IoEvent::None;
-        common::IoErr err = stream_.poll_read(buf, len, out, wait_event);
+        common::IoErr err = poll_read(buf, len, out, wait_event);
         if (err == common::IoErr::None) {
             co_return out;
         }
@@ -343,9 +608,8 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::read_into(mem::IoBuf 
     for (;;) {
         size_t out = 0;
         event::IoEvent wait_event = event::IoEvent::None;
-        common::IoErr err = stream_.poll_read(buf.writable_data(), writable, out, wait_event);
+        common::IoErr err = poll_read_into(buf, out, wait_event);
         if (err == common::IoErr::None) {
-            buf.commit(out);
             co_return out;
         }
         if (err != common::IoErr::WouldBlock) {
@@ -375,7 +639,7 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::write(const void *buf
     for (;;) {
         size_t out = 0;
         event::IoEvent wait_event = event::IoEvent::None;
-        common::IoErr err = stream_.poll_write(buf, len, out, wait_event);
+        common::IoErr err = poll_write(buf, len, out, wait_event);
         if (err == common::IoErr::None) {
             co_return out;
         }
@@ -400,9 +664,8 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::write(mem::IoBuf &buf
     for (;;) {
         size_t out = 0;
         event::IoEvent wait_event = event::IoEvent::None;
-        common::IoErr err = stream_.poll_write(buf.readable_data(), readable, out, wait_event);
+        common::IoErr err = poll_write(buf, out, wait_event);
         if (err == common::IoErr::None) {
-            buf.consume(out);
             co_return out;
         }
         if (err != common::IoErr::WouldBlock) {
@@ -423,64 +686,18 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChai
                                                                   : stream_.loop().now() + timeout;
     std::size_t total_written = 0;
 
-    // Per-call coalesce scratch. Lazily allocated the first time a multi-node group
-    // is formed, then reused for every subsequent group in this writev call and freed
-    // when the coroutine frame is destroyed. Lives across WouldBlock suspensions
-    // (coroutine frame); safe from concurrent writers because TlsStreamFd serializes
-    // read/write via busy_. Never used by single-node groups (including oversized
-    // nodes), so large bodies stay zero-copy.
-    std::unique_ptr<std::uint8_t[]> scratch;
-    std::array<iovec, kMaxIov> iov{};
-
     for (;;) {
-        buf.drop_empty_front();
         if (buf.readable_bytes() == 0) {
             co_return total_written;
-        }
-        int count = buf.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
-
-        // Greedily accumulate a group of adjacent nodes whose total fits in one
-        // coalesced record. Nodes are taken from the front of the snapshot; a node
-        // that would overflow the budget flushes the current group first.
-        int group_end = 0;
-        std::size_t group_len = 0;
-        while (group_end < count && group_len + iov[group_end].iov_len <= kTlsCoalesceMax) {
-            group_len += iov[group_end].iov_len;
-            ++group_end;
-        }
-        if (group_end == 0) {
-            // First node alone exceeds the budget: write it solo (zero copy). This
-            // also guarantees forward progress for oversized nodes.
-            group_end = 1;
-            group_len = iov[0].iov_len;
-        }
-
-        const std::uint8_t *write_buf = nullptr;
-        if (group_end == 1) {
-            // Single node: pass its own pointer straight to SSL_write. No copy.
-            write_buf = static_cast<const std::uint8_t *>(iov[0].iov_base);
-        } else {
-            if (!scratch) {
-                scratch = std::make_unique<std::uint8_t[]>(kTlsCoalesceMax);
-            }
-            std::uint8_t *dst = scratch.get();
-            for (int i = 0; i < group_end; ++i) {
-                std::memcpy(dst, iov[i].iov_base, iov[i].iov_len);
-                dst += iov[i].iov_len;
-            }
-            write_buf = scratch.get();
         }
 
         std::size_t out = 0;
         event::IoEvent wait_event = event::IoEvent::None;
-        common::IoErr err = stream_.poll_write(write_buf, group_len, out, wait_event);
+        common::IoErr err = poll_writev(buf, out, wait_event);
         if (err == common::IoErr::None) {
             if (out == 0) {
                 co_return total_written;
             }
-            // With default SSL_write semantics (no PARTIAL_WRITE) out == group_len;
-            // consume_and_compact handles any partial advance correctly regardless.
-            buf.consume_and_compact(out);
             total_written += out;
             continue;
         }
@@ -498,14 +715,18 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChai
             }
             co_return std::unexpected(wait_result.error());
         }
-        // Retry the same group: write_buf (scratch or node pointer) and the chain
-        // are unchanged because nothing was consumed while suspended.
     }
 }
 
-void TlsTransport::close() { stream_.close(); }
+void TlsTransport::close() {
+    clear_pending_write();
+    writev_scratch_.reset();
+    stream_.close();
+}
 
 bool TlsTransport::valid() const noexcept { return stream_.valid(); }
+
+bool TlsTransport::has_pending_read() const noexcept { return stream_.has_pending_read(); }
 
 int TlsTransport::fd() const noexcept { return stream_.fd(); }
 

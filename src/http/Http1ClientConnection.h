@@ -10,6 +10,7 @@
 #include "../common/NonMovable.h"
 #include "../event/EventLoop.h"
 #include "../net/SocketAddress.h"
+#include "../net/TcpSocketOptions.h"
 #include "../net/TlsContext.h"
 
 namespace fiber::http {
@@ -19,6 +20,7 @@ class HttpTransport;
 
 struct Http1ClientConnectionOptions {
     net::SocketAddress peer_addr{};
+    net::TcpSocketOptions tcp{.no_delay = net::TcpOptionMode::Enabled};
     net::TlsOptions tls{};
 };
 

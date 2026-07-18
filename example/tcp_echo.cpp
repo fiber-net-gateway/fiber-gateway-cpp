@@ -11,7 +11,6 @@
 #include <sys/socket.h>
 
 #include "async/Spawn.h"
-#include "async/Timeout.h"
 #include "common/IoError.h"
 #include "event/EventLoop.h"
 #include "net/SocketAddress.h"
@@ -52,8 +51,7 @@ DetachedTask echo_session(std::unique_ptr<fiber::net::TcpStream> stream) {
     std::array<char, 4096> buffer{};
     const std::string peer = stream->remote_addr().to_string();
     for (;;) {
-        auto read_result = co_await fiber::async::timeout_for(
-                [&]() { return stream->read(buffer.data(), buffer.size()); }, std::chrono::minutes(1));
+        auto read_result = co_await stream->read(buffer.data(), buffer.size(), std::chrono::minutes(1));
         if (!read_result) {
             if (read_result.error() == IoErr::TimedOut) {
                 std::cerr << "idle timeout from " << peer << '\n';

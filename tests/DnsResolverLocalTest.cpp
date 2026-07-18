@@ -260,8 +260,7 @@ DetachedTask run_single_response_server(fiber::event::EventLoop *loop, std::prom
     }
 
     std::array<std::uint8_t, 512> buf{};
-    auto recv_result =
-            co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
+    auto recv_result = co_await socket.recv_from(buf.data(), buf.size(), 2s);
     if (!recv_result) {
         outcome.err = recv_result.error();
         outcome_promise->set_value(std::move(outcome));
@@ -280,12 +279,10 @@ DetachedTask run_single_response_server(fiber::event::EventLoop *loop, std::prom
         co_await fiber::async::sleep(delay);
     }
 
-    auto send_result = co_await fiber::async::timeout_for(
-            [&]() { return socket.send_to(response.data(), response.size(), recv_result->peer); }, 2s);
+    auto send_result = co_await socket.send_to(response.data(), response.size(), recv_result->peer, 2s);
     outcome.err = send_result ? IoErr::None : send_result.error();
     if (send_result && observe_after_response > 0ms) {
-        auto extra = co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); },
-                                                        observe_after_response);
+        auto extra = co_await socket.recv_from(buf.data(), buf.size(), observe_after_response);
         if (extra) {
             ++outcome.recv_count;
         } else if (extra.error() != IoErr::TimedOut) {

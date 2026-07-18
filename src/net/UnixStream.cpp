@@ -61,16 +61,28 @@ const UnixAddress &UnixStream::remote_addr() const noexcept { return remote_addr
 
 void UnixStream::close() { stream_.close(); }
 
-UnixStream::ReadAwaiter UnixStream::read(void *buf, size_t len) noexcept { return stream_.read(buf, len); }
-
-UnixStream::WriteAwaiter UnixStream::write(const void *buf, size_t len) noexcept { return stream_.write(buf, len); }
-
-UnixStream::ReadvAwaiter UnixStream::readv(const struct iovec *iov, int iovcnt) noexcept {
-    return stream_.readv(iov, iovcnt);
+UnixStream::IoTask UnixStream::read(void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
+    return stream_.read(buf, len, timeout);
 }
 
-UnixStream::WritevAwaiter UnixStream::writev(const struct iovec *iov, int iovcnt) noexcept {
-    return stream_.writev(iov, iovcnt);
+UnixStream::IoTask UnixStream::write(const void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
+    return stream_.write(buf, len, timeout);
+}
+
+UnixStream::IoTask UnixStream::readv(const struct iovec *iov, int iovcnt, std::chrono::milliseconds timeout) noexcept {
+    return stream_.readv(iov, iovcnt, timeout);
+}
+
+UnixStream::IoTask UnixStream::writev(const struct iovec *iov, int iovcnt, std::chrono::milliseconds timeout) noexcept {
+    return stream_.writev(iov, iovcnt, timeout);
+}
+
+UnixStream::WaitReadableAwaiter UnixStream::wait_readable(std::chrono::milliseconds timeout) noexcept {
+    return stream_.wait_readable(timeout);
+}
+
+UnixStream::WaitWritableAwaiter UnixStream::wait_writable(std::chrono::milliseconds timeout) noexcept {
+    return stream_.wait_writable(timeout);
 }
 
 fiber::common::IoResult<size_t> UnixStream::try_read(void *buf, size_t len) noexcept {
