@@ -18,6 +18,7 @@
 namespace fiber::log {
 
 class LogContext;
+class LoggerManager;
 struct LogBuffer;
 
 struct AppenderStats {
@@ -51,7 +52,6 @@ public:
 
     virtual void append(FormattedLogLine line, LogContext &context) noexcept = 0;
     virtual void flush(LogContext &context) noexcept = 0;
-    virtual void flush_due(LogContext &context, std::chrono::steady_clock::time_point now) noexcept = 0;
     [[nodiscard]] virtual bool reopen() noexcept = 0;
 
 protected:
@@ -88,7 +88,6 @@ public:
 
     void append(FormattedLogLine line, LogContext &context) noexcept override;
     void flush(LogContext &context) noexcept override;
-    void flush_due(LogContext &context, std::chrono::steady_clock::time_point now) noexcept override;
     [[nodiscard]] bool reopen() noexcept override;
 
 private:
@@ -106,13 +105,14 @@ public:
 
     void append(FormattedLogLine line, LogContext &context) noexcept override;
     void flush(LogContext &context) noexcept override;
-    void flush_due(LogContext &context, std::chrono::steady_clock::time_point now) noexcept override;
     [[nodiscard]] bool reopen() noexcept override;
 
     [[nodiscard]] bool buffered() const noexcept { return buffer_slot_ != kNoBufferSlot; }
     [[nodiscard]] std::uint16_t buffer_slot() const noexcept { return buffer_slot_; }
 
 private:
+    friend class LoggerManager;
+
     struct ArchiveEntry {
         std::uint64_t sequence = 0;
         std::string path;

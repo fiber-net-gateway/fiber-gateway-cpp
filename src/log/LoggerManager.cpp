@@ -51,7 +51,6 @@ struct LoggerManager::Runtime {
     mem::BufPool logger_arena{4096};
     std::uint64_t generation = 0;
     std::uint16_t buffer_count = 0;
-    std::chrono::milliseconds min_flush_interval{0};
 };
 
 LoggerManager::LoggerManager() noexcept { g_logger_manager = this; }
@@ -107,10 +106,6 @@ LogConfigResult<void> LoggerManager::initialize(LogConfig config) {
                 return std::unexpected(make_error(LogConfigErrorCode::SizeOverflow, "too many buffered appenders"));
             }
             buffer_slot = candidate->buffer_count++;
-            if (candidate->min_flush_interval.count() == 0 ||
-                definition.file.flush_interval < candidate->min_flush_interval) {
-                candidate->min_flush_interval = definition.file.flush_interval;
-            }
         }
         auto *raw = new (std::nothrow) FileAppender(id, std::move(definition.file), buffer_slot);
         if (!raw) {
@@ -321,11 +316,6 @@ LogContext &LoggerManager::current_context() noexcept {
         return context;
     }
     (void) context.prepare(runtime_->generation, runtime_->buffer_count);
-    if (runtime_->min_flush_interval.count() > 0) {
-        if (auto *loop = event::EventLoop::current_or_null()) {
-            context.attach_loop(*loop, runtime_->min_flush_interval);
-        }
-    }
     return context;
 }
 
@@ -336,6 +326,7 @@ void LoggerManager::flush_context(LogContext &context) noexcept {
     for (auto &appender: runtime_->appenders) {
         appender->flush(context);
     }
+    context.cancel_flush_schedule();
 }
 
 void LoggerManager::destroy_context(LogContext &context) noexcept {
@@ -345,13 +336,20 @@ void LoggerManager::destroy_context(LogContext &context) noexcept {
 
 void LoggerManager::on_context_timer(LogContext &context) noexcept {
     if (!runtime_ || context.generation_ != runtime_->generation || !context.loop_) {
+        context.cancel_flush_schedule();
         return;
     }
-    const auto now = context.loop_->now();
-    for (auto &appender: runtime_->appenders) {
-        appender->flush_due(context, now);
+    FIBER_ASSERT(context.loop_->in_loop());
+    const auto now = event::EventLoop::current().now();
+    for (std::uint16_t i = 0; i < context.buffer_count_; ++i) {
+        LogBuffer &buffer = context.buffers_[i];
+        if (buffer.size == 0 || now < buffer.flush_at) {
+            continue;
+        }
+        FIBER_ASSERT(buffer.owner != nullptr);
+        buffer.owner->flush_buffer(buffer);
     }
-    context.arm_timer(runtime_->min_flush_interval);
+    context.rebuild_flush_schedule();
 }
 
 AppenderStats LoggerManager::appender_stats(AppenderId id) const noexcept {
