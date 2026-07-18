@@ -139,7 +139,7 @@ Http2Connection::Http2Connection(Options options, void *peer_stream_factory_ctx,
                                                                .max_dynamic_table_size = kDefaultHeaderTableSize,
                                                                .max_string_size = options_.max_hpack_string_size,
                                                        }),
-    outbound_scheduler_(1024, options_.max_frame_size) {
+    outbound_scheduler_(options_.max_frame_size) {
     FIBER_ASSERT(options_.outbound_hpack_catalog != nullptr);
     FIBER_ASSERT(peer_stream_factory_ops_.create_peer_stream != nullptr);
     peer_advertised_max_concurrent_streams_ = options_.max_peer_concurrent_streams;
@@ -168,6 +168,7 @@ common::IoErr Http2Connection::start(std::unique_ptr<HttpTransport> transport, C
     }
 
     transport_ = std::move(transport);
+    outbound_scheduler_.bind_owner_loop(transport_->loop());
     on_closed_ = on_closed;
     closed_ctx_ = on_closed ? closed_ctx : nullptr;
     outbound_scheduler_.set_peer_max_frame_size(peer_max_outbound_frame_size_);
@@ -1004,7 +1005,7 @@ common::IoErr Http2Connection::handle_headers_payload(const FrameHeader &fhr, co
             return common::IoErr::NoMem;
         }
         common::IoErr err =
-                stream->on_headers_payload_recv(deliver_len != 0 ? payload : buf, true, end_headers, end_stream);
+                stream->on_headers_payload_recv(deliver_len != 0 ? payload : buf, offset == 0, end_headers, end_stream);
         if (err != common::IoErr::None) {
             handle_stream_error(fhr.stream_id, Http2ErrorCode::ProtocolError, err);
             clear_inbound_stream();

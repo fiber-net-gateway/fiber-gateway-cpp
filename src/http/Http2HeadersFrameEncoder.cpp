@@ -138,7 +138,6 @@ common::IoErr Http2HeadersFrameEncoder::open_frame(bool first_frame) noexcept {
     current_first_frame_ = first_frame;
     current_frame_payload_limit_ = options_.max_frame_size;
     current_payload_written_ = 0;
-    current_prefix_len_ = 0;
     current_suffix_len_ = 0;
     current_buf_storage_ = {};
     current_frame_header_ = nullptr;
@@ -149,12 +148,11 @@ common::IoErr Http2HeadersFrameEncoder::open_frame(bool first_frame) noexcept {
     }
 
     if (first_frame && options_.pad_length != 0) {
-        *current_writable_data() = options_.pad_length;
+        *current_buf_storage_.writable_data() = options_.pad_length;
         commit_to_output(1);
-        current_prefix_len_ += 1;
     }
     if (first_frame && options_.has_priority) {
-        std::uint8_t *priority = current_writable_data();
+        std::uint8_t *priority = current_buf_storage_.writable_data();
         std::uint32_t dependency = options_.stream_dependency & 0x7fffffffU;
         if (options_.exclusive) {
             dependency |= 0x80000000U;
@@ -165,7 +163,6 @@ common::IoErr Http2HeadersFrameEncoder::open_frame(bool first_frame) noexcept {
         priority[3] = static_cast<std::uint8_t>(dependency & 0xffU);
         priority[4] = options_.weight;
         commit_to_output(5);
-        current_prefix_len_ += 5;
     }
 
     current_suffix_len_ = first_frame ? options_.pad_length : 0;
@@ -180,29 +177,6 @@ common::IoErr Http2HeadersFrameEncoder::append_payload_buf(std::uint32_t payload
     }
 
     const std::size_t capacity = static_cast<std::size_t>(payload_cap) + (reserve_frame_header ? kFrameHeaderSize : 0U);
-    if (target_ != nullptr) {
-        const std::size_t min_capacity = reserve_frame_header ? kFrameHeaderSize + 1U : 1U;
-        const std::size_t slot_capacity = std::min<std::size_t>(capacity, target_->slot_available());
-        std::uint8_t *dst = nullptr;
-        if (slot_capacity >= min_capacity) {
-            err = target_->reserve_slot(slot_capacity, dst);
-        } else {
-            err = common::IoErr::NoMem;
-        }
-        if (err == common::IoErr::None) {
-            current_slot_data_ = dst;
-            current_slot_capacity_ = slot_capacity;
-            current_slot_used_ = reserve_frame_header ? kFrameHeaderSize : 0U;
-            if (reserve_frame_header) {
-                current_frame_header_ = dst;
-            }
-            return common::IoErr::None;
-        }
-        if (err != common::IoErr::NoMem && err != common::IoErr::Invalid) {
-            return err;
-        }
-    }
-
     mem::IoBuf buf = mem::IoBuf::allocate(capacity);
     if (!buf.valid()) {
         return common::IoErr::NoMem;
@@ -221,10 +195,10 @@ common::IoErr Http2HeadersFrameEncoder::seal_current_frame(bool end_headers) noe
     }
 
     if (current_suffix_len_ != 0) {
-        if (!current_buf_storage_ && !using_target_slot()) {
+        if (!current_buf_storage_) {
             return common::IoErr::Invalid;
         }
-        std::memset(current_writable_data(), 0, current_suffix_len_);
+        std::memset(current_buf_storage_.writable_data(), 0, current_suffix_len_);
         commit_to_output(current_suffix_len_);
     }
 
@@ -253,7 +227,6 @@ common::IoErr Http2HeadersFrameEncoder::seal_current_frame(bool end_headers) noe
     current_frame_header_ = nullptr;
     current_frame_payload_limit_ = 0;
     current_payload_written_ = 0;
-    current_prefix_len_ = 0;
     current_suffix_len_ = 0;
     current_first_frame_ = false;
     return common::IoErr::None;
@@ -273,11 +246,11 @@ common::IoErr Http2HeadersFrameEncoder::validate_options() const noexcept {
 }
 
 std::size_t Http2HeadersFrameEncoder::current_hpack_writable() const noexcept {
-    if (!current_buf_storage_ && !using_target_slot()) {
+    if (!current_buf_storage_) {
         return 0;
     }
     const std::size_t frame_remaining = current_frame_hpack_remaining();
-    return std::min<std::size_t>(frame_remaining, current_writable_bytes());
+    return std::min<std::size_t>(frame_remaining, current_buf_storage_.writable());
 }
 
 std::size_t Http2HeadersFrameEncoder::current_frame_hpack_remaining() const noexcept {
@@ -297,37 +270,17 @@ std::uint32_t Http2HeadersFrameEncoder::first_frame_buf_payload_cap() const noex
 std::uint32_t Http2HeadersFrameEncoder::next_buf_payload_cap() const noexcept { return options_.max_frame_size; }
 
 void Http2HeadersFrameEncoder::reset_state() noexcept {
-    if (using_target_slot() && target_ != nullptr) {
-        target_->rollback_slot();
-    }
     target_ = nullptr;
     current_buf_storage_ = {};
-    current_slot_data_ = nullptr;
-    current_slot_capacity_ = 0;
-    current_slot_used_ = 0;
     current_frame_header_ = nullptr;
     current_frame_payload_limit_ = 0;
     current_payload_written_ = 0;
-    current_prefix_len_ = 0;
     current_suffix_len_ = 0;
     current_first_frame_ = false;
     begun_ = false;
 }
 
 common::IoErr Http2HeadersFrameEncoder::flush_current_buf() noexcept {
-    if (using_target_slot()) {
-        FIBER_ASSERT(target_ != nullptr);
-        if (current_slot_used_ == 0) {
-            target_->rollback_slot();
-        } else {
-            target_->commit_slot(current_slot_used_);
-        }
-        current_slot_data_ = nullptr;
-        current_slot_capacity_ = 0;
-        current_slot_used_ = 0;
-        return common::IoErr::None;
-    }
-
     if (!current_buf_storage_ || current_buf_storage_.readable() == 0) {
         current_buf_storage_ = {};
         return common::IoErr::None;
@@ -338,26 +291,8 @@ common::IoErr Http2HeadersFrameEncoder::flush_current_buf() noexcept {
 }
 
 void Http2HeadersFrameEncoder::commit_to_output(std::size_t bytes) noexcept {
-    if (using_target_slot()) {
-        current_slot_used_ += bytes;
-    } else {
-        current_buf_storage_.commit(bytes);
-    }
+    current_buf_storage_.commit(bytes);
     current_payload_written_ += static_cast<std::uint32_t>(bytes);
-}
-
-std::uint8_t *Http2HeadersFrameEncoder::current_writable_data() noexcept {
-    if (using_target_slot()) {
-        return current_slot_data_ + current_slot_used_;
-    }
-    return current_buf_storage_.writable_data();
-}
-
-std::size_t Http2HeadersFrameEncoder::current_writable_bytes() const noexcept {
-    if (using_target_slot()) {
-        return current_slot_capacity_ - current_slot_used_;
-    }
-    return current_buf_storage_.writable();
 }
 
 common::IoErr Http2HeadersFrameEncoder::acquire_output(void *ctx, std::size_t min_bytes, std::uint8_t *&dst,
@@ -376,7 +311,7 @@ common::IoErr Http2HeadersFrameEncoder::acquire_output(void *ctx, std::size_t mi
             if (err != common::IoErr::None) {
                 return err;
             }
-        } else if ((!self->current_buf_storage_ && !self->using_target_slot()) || self->current_writable_bytes() == 0) {
+        } else if (writable == 0 || min_bytes <= frame_remaining) {
             const std::uint32_t next_payload_cap =
                     static_cast<std::uint32_t>(std::min<std::size_t>(frame_remaining, self->next_buf_payload_cap()));
             common::IoErr err = self->append_payload_buf(next_payload_cap, false);
@@ -386,11 +321,11 @@ common::IoErr Http2HeadersFrameEncoder::acquire_output(void *ctx, std::size_t mi
         }
         writable = self->current_hpack_writable();
     }
-    if ((!self->current_buf_storage_ && !self->using_target_slot()) || writable == 0) {
+    if (!self->current_buf_storage_ || writable == 0) {
         return common::IoErr::Invalid;
     }
 
-    dst = self->current_writable_data();
+    dst = self->current_buf_storage_.writable_data();
     len = writable;
     return len != 0 ? common::IoErr::None : common::IoErr::Invalid;
 }

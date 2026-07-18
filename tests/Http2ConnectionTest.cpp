@@ -822,7 +822,7 @@ std::string build_headers_frame_bytes(std::uint32_t stream_id,
     fiber::async::spawn(
             group.at(0), [promise, test_case = std::move(test_case), &group]() mutable -> fiber::async::DetachedTask {
                 FakeHttpTransport transport({}, {});
-                fiber::http::Http2OutboundScheduler scheduler(1024, 16384);
+                fiber::http::Http2OutboundScheduler scheduler(16384);
                 int owner = 0;
                 fiber::http::Http2Stream stream(&owner, kHeaderEncodeStreamOps);
                 stream.stream_id_ = test_case.stream_id;
@@ -1616,7 +1616,11 @@ DetachedTask run_client_response_body_read(std::shared_ptr<std::promise<ClientRe
                                           false);
     response += make_frame(5, 0x0, 0x1, 1, "hello");
 
-    auto fake_transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{std::move(response)});
+    constexpr std::size_t kSettingsFrameSize = 9;
+    constexpr std::size_t kHeadersFrameHeaderSize = 9;
+    const std::size_t split = kSettingsFrameSize + kHeadersFrameHeaderSize + 1;
+    auto fake_transport = std::make_unique<FakeHttpTransport>(
+            std::vector<std::string>{response.substr(0, split), response.substr(split)});
     auto *fake_transport_ptr = fake_transport.get();
 
     fiber::http::Http2Connection::Options options;
