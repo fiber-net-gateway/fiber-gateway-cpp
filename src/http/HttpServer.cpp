@@ -3,6 +3,7 @@
 #include <cerrno>
 #include <chrono>
 #include <memory>
+#include <new>
 #include <string_view>
 #include <sys/socket.h>
 #include <utility>
@@ -195,11 +196,17 @@ fiber::async::Task<void> HttpServer::serve_http2(std::unique_ptr<HttpTransport> 
     if (!transport) {
         co_return;
     }
-    Http2Connection connection(make_http2_options(), &http2_request_factory_, ServerRequestFactory::ops());
-    if (connection.start(std::move(transport)) != common::IoErr::None) {
+    auto *connection = new (std::nothrow)
+            Http2Connection(make_http2_options(), &http2_request_factory_, ServerRequestFactory::ops());
+    if (!connection) {
         co_return;
     }
-    (void) co_await connection.run();
+    auto on_closed = [](void *, Http2Connection &closed_connection, Http2Connection::RunResult) noexcept {
+        delete &closed_connection;
+    };
+    if (connection->start(std::move(transport), on_closed) != common::IoErr::None) {
+        delete connection;
+    }
     co_return;
 }
 

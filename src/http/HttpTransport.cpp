@@ -712,6 +712,8 @@ void TlsTransport::close() {
 
 bool TlsTransport::valid() const noexcept { return stream_.valid(); }
 
+bool TlsTransport::has_pending_read() const noexcept { return stream_.has_pending_read(); }
+
 int TlsTransport::fd() const noexcept { return stream_.fd(); }
 
 std::string_view TlsTransport::negotiated_alpn() const noexcept { return stream_.selected_alpn(); }

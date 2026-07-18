@@ -1,16 +1,13 @@
 #ifndef FIBER_HTTP_HTTP2_OUTBOUND_SCHEDULER_H
 #define FIBER_HTTP_HTTP2_OUTBOUND_SCHEDULER_H
 
-#include <chrono>
 #include <concepts>
-#include <coroutine>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <type_traits>
 #include <utility>
 
-#include "../async/Task.h"
 #include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
 #include "../common/mem/IoBufChain.h"
@@ -28,6 +25,14 @@ struct Http2OutboundEncodeRequest {
 };
 
 using Http2OutboundDoneFn = void (*)(void *ctx, common::IoErr result) noexcept;
+using Http2OutboundWakeFn = void (*)(void *ctx) noexcept;
+
+struct Http2OutboundPumpResult {
+    event::IoEvent wait_event = event::IoEvent::None;
+    std::size_t bytes_written = 0;
+    bool needs_reschedule = false;
+    bool stopped = false;
+};
 
 struct Http2OutboundEncodeResult {
     enum class Status : std::uint8_t {
@@ -82,18 +87,11 @@ class Http2OutboundScheduler {
 public:
     static constexpr std::size_t kPrimarySlabCapacity = 16 * 1024;
 
-    explicit Http2OutboundScheduler(HttpTransport *transport = nullptr, std::size_t slab_capacity = 1024,
-                                    std::chrono::milliseconds write_timeout = std::chrono::seconds(30),
+    explicit Http2OutboundScheduler(std::size_t slab_capacity = 1024,
                                     std::uint32_t peer_max_frame_size = 16384) noexcept;
     Http2OutboundScheduler(const Http2OutboundScheduler &) = delete;
     Http2OutboundScheduler &operator=(const Http2OutboundScheduler &) = delete;
     ~Http2OutboundScheduler();
-
-    void set_transport(HttpTransport *transport) noexcept { transport_ = transport; }
-    [[nodiscard]] HttpTransport *transport() const noexcept { return transport_; }
-
-    void set_write_timeout(std::chrono::milliseconds timeout) noexcept { write_timeout_ = timeout; }
-    [[nodiscard]] std::chrono::milliseconds write_timeout() const noexcept { return write_timeout_; }
 
     void set_peer_max_frame_size(std::uint32_t value) noexcept { peer_max_frame_size_ = value; }
     [[nodiscard]] std::uint32_t peer_max_frame_size() const noexcept { return peer_max_frame_size_; }
@@ -118,7 +116,7 @@ public:
         }
 
         commit_reservation(reservation);
-        notify_waiter();
+        notify_work();
         return common::IoErr::None;
     }
 
@@ -128,14 +126,20 @@ public:
     void cancel_stream(Http2Stream &stream) noexcept;
     void on_connection_window_available() noexcept;
 
-    fiber::async::Task<void> send_loop() noexcept;
+    void set_wake_callback(Http2OutboundWakeFn callback, void *ctx) noexcept {
+        wake_callback_ = callback;
+        wake_ctx_ = callback ? ctx : nullptr;
+    }
+
+    [[nodiscard]] common::IoResult<Http2OutboundPumpResult>
+    pump_write(HttpTransport &transport, std::size_t operation_budget, std::size_t byte_budget) noexcept;
 
     void close() noexcept;
     void abort(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
     [[nodiscard]] bool closed() const noexcept { return closed_; }
     [[nodiscard]] bool aborting() const noexcept { return aborting_; }
-    [[nodiscard]] bool send_loop_running() const noexcept { return send_loop_running_; }
+    [[nodiscard]] bool stopped() const noexcept { return stopped_; }
     [[nodiscard]] bool idle() const noexcept;
     [[nodiscard]] std::size_t pending_control_bytes() const noexcept { return pending_control_bytes_; }
     [[nodiscard]] std::size_t slab_capacity() const noexcept { return slab_capacity_; }
@@ -152,32 +156,6 @@ public:
 
 private:
     struct Slab;
-
-    class WaitForWorkAwaiter {
-    public:
-        explicit WaitForWorkAwaiter(Http2OutboundScheduler &queue) noexcept : queue_(&queue) {}
-        WaitForWorkAwaiter(const WaitForWorkAwaiter &) = delete;
-        WaitForWorkAwaiter &operator=(const WaitForWorkAwaiter &) = delete;
-        WaitForWorkAwaiter(WaitForWorkAwaiter &&) = delete;
-        WaitForWorkAwaiter &operator=(WaitForWorkAwaiter &&) = delete;
-        ~WaitForWorkAwaiter();
-
-        bool await_ready() const noexcept;
-        bool await_suspend(std::coroutine_handle<> handle) noexcept;
-        void await_resume() noexcept;
-
-    private:
-        static void on_notify(WaitForWorkAwaiter *awaiter) noexcept;
-        void resume() noexcept;
-
-        Http2OutboundScheduler *queue_ = nullptr;
-        fiber::event::EventLoop *loop_ = nullptr;
-        std::coroutine_handle<> handle_{};
-        fiber::event::EventLoop::NotifyEntry notify_entry_{};
-        bool resume_posted_ = false;
-
-        friend class Http2OutboundScheduler;
-    };
 
     enum class QueueState : std::uint8_t {
         None = 0,
@@ -267,11 +245,7 @@ private:
     [[nodiscard]] common::IoErr reserve_tail(std::size_t bytes, Reservation &reservation) noexcept;
     void rollback_reservation(const Reservation &reservation) noexcept;
     void commit_reservation(const Reservation &reservation) noexcept;
-    [[nodiscard]] WaitForWorkAwaiter wait_for_work() noexcept { return WaitForWorkAwaiter(*this); }
-    [[nodiscard]] bool arm_waiter(WaitForWorkAwaiter *awaiter) noexcept;
-    void cancel_waiter(WaitForWorkAwaiter *awaiter) noexcept;
-    void notify_waiter() noexcept;
-    [[nodiscard]] bool should_wake_waiter() const noexcept;
+    void notify_work() noexcept;
     [[nodiscard]] Slab *acquire_slab() noexcept;
     void recycle_slab(Slab *slab) noexcept;
     [[nodiscard]] Slab *borrow_primary_slab() noexcept;
@@ -280,6 +254,7 @@ private:
     void discard_empty_head_slabs() noexcept;
     [[nodiscard]] SendSpan current_send_span() noexcept;
     void consume_written_control_bytes(std::size_t bytes) noexcept;
+    void clear_control_state() noexcept;
     void fail(common::IoErr reason) noexcept;
     void clear_ready_streams() noexcept;
     void clear_waiting_conn_window_streams() noexcept;
@@ -294,8 +269,6 @@ private:
     void notify_inflight_done(common::IoErr result) noexcept;
     void finish_inflight_stream_write() noexcept;
 
-    HttpTransport *transport_ = nullptr;
-    std::chrono::milliseconds write_timeout_{};
     std::size_t slab_capacity_ = 0;
     std::uint32_t peer_max_frame_size_ = 0;
     std::int32_t conn_send_window_ = 0;
@@ -309,11 +282,12 @@ private:
     std::size_t ready_stream_count_ = 0;
     std::size_t waiting_conn_window_stream_count_ = 0;
     InflightStreamWrite inflight_stream_write_{};
-    WaitForWorkAwaiter *waiter_ = nullptr;
     fiber::event::EventLoop *owner_loop_ = nullptr;
+    Http2OutboundWakeFn wake_callback_ = nullptr;
+    void *wake_ctx_ = nullptr;
     bool closed_ = false;
     bool aborting_ = false;
-    bool send_loop_running_ = false;
+    bool stopped_ = false;
     bool primary_slab_attached_ = false;
     bool primary_slab_borrowed_ = false;
     common::IoErr stop_reason_ = common::IoErr::None;

@@ -1,5 +1,6 @@
 #include "Http2OutboundScheduler.h"
 
+#include <algorithm>
 #include <cstring>
 #include <new>
 
@@ -39,15 +40,10 @@ struct Http2OutboundScheduler::Slab {
     std::size_t capacity = 0;
 };
 
-Http2OutboundScheduler::Http2OutboundScheduler(HttpTransport *transport, std::size_t slab_capacity,
-                                               std::chrono::milliseconds write_timeout,
-                                               std::uint32_t peer_max_frame_size) noexcept :
-    transport_(transport), write_timeout_(write_timeout), slab_capacity_(slab_capacity),
-    peer_max_frame_size_(peer_max_frame_size) {}
+Http2OutboundScheduler::Http2OutboundScheduler(std::size_t slab_capacity, std::uint32_t peer_max_frame_size) noexcept :
+    slab_capacity_(slab_capacity), peer_max_frame_size_(peer_max_frame_size) {}
 
 Http2OutboundScheduler::~Http2OutboundScheduler() {
-    FIBER_ASSERT(!send_loop_running_);
-
     clear_all_stream_state();
 
     while (head_slab_) {
@@ -167,57 +163,6 @@ void Http2OutboundEncodeTarget::clear() noexcept {
     clear_done();
 }
 
-Http2OutboundScheduler::WaitForWorkAwaiter::~WaitForWorkAwaiter() {
-    if (!queue_) {
-        return;
-    }
-    queue_->cancel_waiter(this);
-}
-
-bool Http2OutboundScheduler::WaitForWorkAwaiter::await_ready() const noexcept {
-    return queue_ == nullptr || queue_->should_wake_waiter();
-}
-
-bool Http2OutboundScheduler::WaitForWorkAwaiter::await_suspend(std::coroutine_handle<> handle) noexcept {
-    if (!queue_) {
-        return false;
-    }
-
-    loop_ = fiber::event::EventLoop::current_or_null();
-    FIBER_ASSERT(loop_ != nullptr);
-    handle_ = handle;
-    return queue_->arm_waiter(this);
-}
-
-void Http2OutboundScheduler::WaitForWorkAwaiter::await_resume() noexcept {
-    if (!queue_) {
-        return;
-    }
-    if (queue_->waiter_ == this) {
-        queue_->waiter_ = nullptr;
-    }
-    queue_ = nullptr;
-    loop_ = nullptr;
-    handle_ = {};
-    resume_posted_ = false;
-}
-
-void Http2OutboundScheduler::WaitForWorkAwaiter::on_notify(WaitForWorkAwaiter *awaiter) noexcept {
-    if (!awaiter) {
-        return;
-    }
-    awaiter->resume_posted_ = false;
-    awaiter->resume();
-}
-
-void Http2OutboundScheduler::WaitForWorkAwaiter::resume() noexcept {
-    auto handle = handle_;
-    handle_ = {};
-    if (handle) {
-        handle.resume();
-    }
-}
-
 bool Http2OutboundScheduler::idle() const noexcept {
     return pending_control_bytes_ == 0 && ready_stream_count_ == 0 && waiting_conn_window_stream_count_ == 0 &&
            inflight_stream_ == nullptr;
@@ -279,35 +224,10 @@ void Http2OutboundScheduler::commit_reservation(const Reservation &reservation) 
     pending_control_bytes_ += reservation.bytes;
 }
 
-bool Http2OutboundScheduler::arm_waiter(WaitForWorkAwaiter *awaiter) noexcept {
-    if (!awaiter || should_wake_waiter()) {
-        return false;
+void Http2OutboundScheduler::notify_work() noexcept {
+    if (wake_callback_) {
+        wake_callback_(wake_ctx_);
     }
-
-    FIBER_ASSERT(waiter_ == nullptr);
-    waiter_ = awaiter;
-    return true;
-}
-
-void Http2OutboundScheduler::cancel_waiter(WaitForWorkAwaiter *awaiter) noexcept {
-    if (waiter_ == awaiter) {
-        waiter_ = nullptr;
-    }
-}
-
-void Http2OutboundScheduler::notify_waiter() noexcept {
-    if (!waiter_ || waiter_->resume_posted_ || waiter_->loop_ == nullptr) {
-        return;
-    }
-
-    waiter_->resume_posted_ = true;
-    waiter_->loop_->post<WaitForWorkAwaiter, &WaitForWorkAwaiter::notify_entry_, &WaitForWorkAwaiter::on_notify>(
-            *waiter_);
-}
-
-bool Http2OutboundScheduler::should_wake_waiter() const noexcept {
-    return pending_control_bytes_ != 0 || ready_stream_count_ != 0 || waiting_conn_window_stream_count_ != 0 ||
-           inflight_stream_ != nullptr || closed_ || aborting_ || stop_reason_ != common::IoErr::None;
 }
 
 Http2OutboundScheduler::Slab *Http2OutboundScheduler::acquire_slab() noexcept {
@@ -422,13 +342,23 @@ void Http2OutboundScheduler::consume_written_control_bytes(std::size_t bytes) no
     discard_empty_head_slabs();
 }
 
+void Http2OutboundScheduler::clear_control_state() noexcept {
+    while (head_slab_) {
+        Slab *next = head_slab_->next;
+        recycle_slab(head_slab_);
+        head_slab_ = next;
+    }
+    tail_slab_ = nullptr;
+    pending_control_bytes_ = 0;
+    sending_end_ = 0;
+}
+
 void Http2OutboundScheduler::fail(common::IoErr reason) noexcept {
     if (stop_reason_ == common::IoErr::None) {
         stop_reason_ = reason;
     }
     aborting_ = true;
     closed_ = true;
-    notify_waiter();
 }
 
 void Http2OutboundScheduler::clear_ready_streams() noexcept {
@@ -528,7 +458,7 @@ void Http2OutboundScheduler::classify_stream(Http2Stream &stream, bool notify) n
 
     enqueue_ready(stream);
     if (notify) {
-        notify_waiter();
+        notify_work();
     }
 }
 
@@ -615,7 +545,7 @@ void Http2OutboundScheduler::on_connection_window_available() noexcept {
     bind_owner_loop_if_needed();
 
     if (conn_send_window_ > 0 && waiting_conn_window_stream_count_ != 0) {
-        notify_waiter();
+        notify_work();
     }
 }
 
@@ -655,15 +585,29 @@ void Http2OutboundScheduler::finish_inflight_stream_write() noexcept {
     stream->on_outbound_send_complete();
 }
 
-fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
-    fiber::event::EventLoop *loop = fiber::event::EventLoop::current_or_null();
-    FIBER_ASSERT(loop != nullptr);
+common::IoResult<Http2OutboundPumpResult> Http2OutboundScheduler::pump_write(HttpTransport &transport,
+                                                                             std::size_t operation_budget,
+                                                                             std::size_t byte_budget) noexcept {
+    event::EventLoop &loop = transport.loop();
+    FIBER_ASSERT(loop.in_loop());
     if (!owner_loop_) {
-        owner_loop_ = loop;
+        owner_loop_ = &loop;
     } else {
-        FIBER_ASSERT(owner_loop_ == loop);
+        FIBER_ASSERT(owner_loop_ == &loop);
     }
-    FIBER_ASSERT(!send_loop_running_);
+
+    operation_budget = std::max<std::size_t>(operation_budget, 1);
+    byte_budget = std::max<std::size_t>(byte_budget, 1);
+    Http2OutboundPumpResult pump_result;
+    std::size_t operations = 0;
+
+    auto fail_pump = [&](common::IoErr reason) noexcept -> common::IoResult<Http2OutboundPumpResult> {
+        fail(reason);
+        clear_all_stream_state();
+        clear_control_state();
+        stopped_ = true;
+        return std::unexpected(stop_reason_);
+    };
 
     auto try_begin_stream_write = [&](Http2Stream *stream) noexcept -> bool {
         if (!stream) {
@@ -694,7 +638,7 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
         inflight_stream_write_.slot = slot_slab->data();
         inflight_stream_write_.slot_capacity = slot_slab->capacity;
         Http2OutboundEncodeTarget target;
-        target.reset(loop->io_buf_node_pool(), inflight_stream_write_.slot, inflight_stream_write_.slot_capacity);
+        target.reset(loop.io_buf_node_pool(), inflight_stream_write_.slot, inflight_stream_write_.slot_capacity);
         Http2OutboundEncodeResult result;
         common::IoErr err = hook.encode_(*stream, hook.encode_ctx_, req, target, result);
         if (err != common::IoErr::None) {
@@ -782,42 +726,60 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
         return false;
     };
 
-    send_loop_running_ = true;
     for (;;) {
         discard_empty_head_slabs();
 
         if (aborting_) {
-            break;
+            return fail_pump(stop_reason_ != common::IoErr::None ? stop_reason_ : common::IoErr::Canceled);
+        }
+        if (closed_ && !has_ready_work()) {
+            clear_all_stream_state();
+            stopped_ = true;
+            pump_result.stopped = true;
+            return pump_result;
+        }
+        if (operations >= operation_budget || pump_result.bytes_written >= byte_budget) {
+            pump_result.needs_reschedule = has_ready_work();
+            return pump_result;
         }
 
         if (inflight_stream_) {
             if (inflight_stream_write_.empty()) {
                 finish_inflight_stream_write();
+                ++operations;
                 continue;
             }
-            if (!transport_ || !transport_->valid()) {
-                fail(common::IoErr::Invalid);
-                break;
+            if (!transport.valid()) {
+                return fail_pump(common::IoErr::Invalid);
             }
-            common::IoResult<size_t> result;
+            std::size_t written = 0;
+            event::IoEvent wait_event = event::IoEvent::None;
+            common::IoErr err = common::IoErr::None;
             if (!inflight_stream_write_.slot_done()) {
                 const std::size_t remaining = inflight_stream_write_.slot_size - inflight_stream_write_.slot_written;
-                result = co_await transport_->write(inflight_stream_write_.slot + inflight_stream_write_.slot_written,
-                                                    remaining, write_timeout_);
-                if (result) {
-                    inflight_stream_write_.slot_written += *result;
-                }
+                err = transport.poll_write(inflight_stream_write_.slot + inflight_stream_write_.slot_written, remaining,
+                                           written, wait_event);
             } else {
-                result = co_await transport_->writev(inflight_stream_write_.tail_chain, write_timeout_);
+                err = transport.poll_writev(inflight_stream_write_.tail_chain, written, wait_event);
             }
-            if (!result) {
-                fail(result.error());
-                break;
+            ++operations;
+            if (err == common::IoErr::WouldBlock) {
+                if (wait_event != event::IoEvent::Read && wait_event != event::IoEvent::Write) {
+                    return fail_pump(common::IoErr::Invalid);
+                }
+                pump_result.wait_event = wait_event;
+                return pump_result;
             }
-            if (*result == 0) {
-                fail(common::IoErr::ConnReset);
-                break;
+            if (err != common::IoErr::None) {
+                return fail_pump(err);
             }
+            if (written == 0) {
+                return fail_pump(common::IoErr::ConnReset);
+            }
+            if (!inflight_stream_write_.slot_done()) {
+                inflight_stream_write_.slot_written += written;
+            }
+            pump_result.bytes_written += written;
             if (inflight_stream_write_.empty()) {
                 finish_inflight_stream_write();
             }
@@ -825,65 +787,75 @@ fiber::async::Task<void> Http2OutboundScheduler::send_loop() noexcept {
         }
 
         if (pending_control_bytes_ != 0) {
-            if (!transport_ || !transport_->valid()) {
-                fail(common::IoErr::Invalid);
-                break;
+            if (!transport.valid()) {
+                return fail_pump(common::IoErr::Invalid);
             }
             SendSpan span = current_send_span();
-            common::IoResult<size_t> result = co_await transport_->write(span.data, span.length, write_timeout_);
-            if (!result) {
-                fail(result.error());
-                break;
+            std::size_t written = 0;
+            event::IoEvent wait_event = event::IoEvent::None;
+            common::IoErr err = transport.poll_write(span.data, span.length, written, wait_event);
+            ++operations;
+            if (err == common::IoErr::WouldBlock) {
+                if (wait_event != event::IoEvent::Read && wait_event != event::IoEvent::Write) {
+                    return fail_pump(common::IoErr::Invalid);
+                }
+                pump_result.wait_event = wait_event;
+                return pump_result;
             }
-            if (*result == 0) {
-                fail(common::IoErr::ConnReset);
-                break;
+            if (err != common::IoErr::None) {
+                return fail_pump(err);
             }
-            consume_written_control_bytes(*result);
+            if (written == 0) {
+                return fail_pump(common::IoErr::ConnReset);
+            }
+            consume_written_control_bytes(written);
+            pump_result.bytes_written += written;
             continue;
         }
 
         if (ready_stream_count_ != 0) {
+            ++operations;
             if (try_begin_stream_write(pop_ready_stream())) {
                 continue;
             }
             if (aborting_ || stop_reason_ != common::IoErr::None) {
-                break;
+                return fail_pump(stop_reason_ != common::IoErr::None ? stop_reason_ : common::IoErr::Invalid);
             }
             continue;
         }
 
         if (conn_send_window_ > 0 && waiting_conn_window_stream_count_ != 0) {
+            ++operations;
             if (try_begin_stream_write(pop_waiting_conn_window_stream())) {
                 continue;
             }
             if (aborting_ || stop_reason_ != common::IoErr::None) {
-                break;
+                return fail_pump(stop_reason_ != common::IoErr::None ? stop_reason_ : common::IoErr::Invalid);
             }
             continue;
         }
 
-        if (closed_ && !has_ready_work()) {
-            break;
-        }
-
-        co_await wait_for_work();
+        return pump_result;
     }
-
-    send_loop_running_ = false;
-    if (aborting_) {
-        clear_all_stream_state();
-    } else if (closed_ && !has_ready_work()) {
-        clear_all_stream_state();
-    }
-    co_return;
 }
 
 void Http2OutboundScheduler::close() noexcept {
+    if (closed_) {
+        return;
+    }
     closed_ = true;
-    notify_waiter();
+    notify_work();
 }
 
-void Http2OutboundScheduler::abort(common::IoErr reason) noexcept { fail(reason); }
+void Http2OutboundScheduler::abort(common::IoErr reason) noexcept {
+    if (stopped_) {
+        return;
+    }
+    fail(reason);
+    clear_all_stream_state();
+    clear_control_state();
+    stopped_ = true;
+    notify_work();
+}
 
 } // namespace fiber::http

@@ -30,7 +30,11 @@ public:
     Http2ClientConnection(event::EventLoop &loop, Options options) noexcept;
 
     // timeout applies to the TCP connect phase. TLS handshake timeout is configured separately.
-    fiber::async::Task<common::IoResult<void>> connect(std::chrono::milliseconds timeout) noexcept;
+    // A successful connect starts HTTP/2 I/O immediately; run() only remains as
+    // a compatibility wrapper for waiting until the connection closes.
+    fiber::async::Task<common::IoResult<void>> connect(std::chrono::milliseconds timeout,
+                                                       Http2Connection::ClosedCallback on_closed = nullptr,
+                                                       void *closed_ctx = nullptr) noexcept;
     fiber::async::Task<Http2Connection::RunResult> run() noexcept;
 
     [[nodiscard]] ClientHttp2Exchange open_exchange(mem::BufPool &pool) noexcept;
