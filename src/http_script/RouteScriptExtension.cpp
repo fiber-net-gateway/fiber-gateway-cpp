@@ -1,4 +1,4 @@
-#include "RouteScriptLibrary.h"
+#include "RouteScriptExtension.h"
 
 #include "ScriptExchangeCtx.h"
 
@@ -55,7 +55,7 @@ std::string make_cache_key(std::string_view ns, std::string_view key) {
 
 } // namespace
 
-AbiResult RouteScriptLibrary::path_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
+AbiResult RouteScriptExtension::path_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
     auto *ref = static_cast<const VarRef *>(userdata);
     auto *ctx = ctx_of(frame);
     if (ref == nullptr || ctx == nullptr) {
@@ -64,7 +64,7 @@ AbiResult RouteScriptLibrary::path_var_fn(void *userdata, const HostCallFrame &f
     return ctx->path_var(frame.runtime, ref->name);
 }
 
-AbiResult RouteScriptLibrary::query_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
+AbiResult RouteScriptExtension::query_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
     auto *ref = static_cast<const VarRef *>(userdata);
     auto *ctx = ctx_of(frame);
     if (ref == nullptr || ctx == nullptr) {
@@ -73,7 +73,7 @@ AbiResult RouteScriptLibrary::query_var_fn(void *userdata, const HostCallFrame &
     return ctx->query_var(frame.runtime, ref->name);
 }
 
-AbiResult RouteScriptLibrary::header_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
+AbiResult RouteScriptExtension::header_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
     auto *ref = static_cast<const VarRef *>(userdata);
     auto *ctx = ctx_of(frame);
     if (ref == nullptr || ctx == nullptr) {
@@ -82,7 +82,7 @@ AbiResult RouteScriptLibrary::header_var_fn(void *userdata, const HostCallFrame 
     return ctx->header_var(frame.runtime, ref->name);
 }
 
-AbiResult RouteScriptLibrary::cookie_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
+AbiResult RouteScriptExtension::cookie_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
     auto *ref = static_cast<const VarRef *>(userdata);
     auto *ctx = ctx_of(frame);
     if (ref == nullptr || ctx == nullptr) {
@@ -91,7 +91,7 @@ AbiResult RouteScriptLibrary::cookie_var_fn(void *userdata, const HostCallFrame 
     return ctx->cookie_var(frame.runtime, ref->name);
 }
 
-AbiResult RouteScriptLibrary::req_field_fn(void *userdata, const HostCallFrame &frame) noexcept {
+AbiResult RouteScriptExtension::req_field_fn(void *userdata, const HostCallFrame &frame) noexcept {
     auto *ref = static_cast<const VarRef *>(userdata);
     auto *ctx = ctx_of(frame);
     if (ref == nullptr || ctx == nullptr) {
@@ -100,7 +100,7 @@ AbiResult RouteScriptLibrary::req_field_fn(void *userdata, const HostCallFrame &
     return ctx->req_field(frame.runtime, ref->name);
 }
 
-AbiResult RouteScriptLibrary::conn_field_fn(void *userdata, const HostCallFrame &frame) noexcept {
+AbiResult RouteScriptExtension::conn_field_fn(void *userdata, const HostCallFrame &frame) noexcept {
     auto *ref = static_cast<const VarRef *>(userdata);
     auto *ctx = ctx_of(frame);
     if (ref == nullptr || ctx == nullptr) {
@@ -109,25 +109,38 @@ AbiResult RouteScriptLibrary::conn_field_fn(void *userdata, const HostCallFrame 
     return ctx->conn_field(frame.runtime, ref->name);
 }
 
-RouteScriptLibrary::RouteScriptLibrary(fiber::script::std_lib::StdLibrary &shared,
-                                       const std::vector<std::string> &path_var_names) :
-    shared_(shared), path_var_names_(path_var_names.begin(), path_var_names.end()) {}
-
-void RouteScriptLibrary::mark_root_prop(std::string_view prop_name) { shared_.mark_root_prop(prop_name); }
-
-Library::FunctionMatchResult RouteScriptLibrary::resolve_func(std::string_view name,
-                                                              const FunctionMatchRequest &request) const {
-    return shared_.resolve_func(name, request);
+const fiber::script::std_lib::StdLibrary::ExtOps &RouteScriptExtension::ops() noexcept {
+    static const fiber::script::std_lib::StdLibrary::ExtOps kOps{
+            .resolve_constant = &RouteScriptExtension::resolve_constant_op,
+            .resolve_directive_def = &RouteScriptExtension::resolve_directive_def_op,
+    };
+    return kOps;
 }
 
-Library::FunctionMatchResult RouteScriptLibrary::resolve_async_func(std::string_view name,
-                                                                    const FunctionMatchRequest &request) const {
-    return shared_.resolve_async_func(name, request);
+void RouteScriptExtension::set_compile_path_vars(const std::vector<std::string> &path_var_names) {
+    current_path_var_names_.clear();
+    current_path_var_names_.reserve(path_var_names.size());
+    current_path_var_names_.insert(path_var_names.begin(), path_var_names.end());
+    has_current_route_info_ = true;
 }
 
-Library::DirectiveDef *
-RouteScriptLibrary::resolve_directive_def(std::string_view type, std::string_view name,
-                                          const std::vector<fiber::script::JsValue> &literals) const {
+const RouteScriptExtension::HostCallable *
+RouteScriptExtension::resolve_constant_op(void *ctx, std::string_view namespace_name, std::string_view key) {
+    return static_cast<RouteScriptExtension *>(ctx)->resolve_constant(namespace_name, key);
+}
+
+RouteScriptExtension::DirectiveDef *
+RouteScriptExtension::resolve_directive_def_op(void *ctx, std::string_view type, std::string_view name,
+                                               const std::vector<fiber::script::JsValue> &literals) {
+    return static_cast<RouteScriptExtension *>(ctx)->resolve_directive_def(type, name, literals);
+}
+
+RouteScriptExtension::DirectiveDef *
+RouteScriptExtension::resolve_directive_def(std::string_view type, std::string_view name,
+                                            const std::vector<fiber::script::JsValue> &literals) {
+    if (!allow_http_directives_) {
+        return nullptr;
+    }
     if (type == "http" && literals.size() == 1) {
         // `directive <name> = http "<target>";` binds <name> to an upstream name or ad-hoc URL.
         std::string_view target_sv;
@@ -141,15 +154,18 @@ RouteScriptLibrary::resolve_directive_def(std::string_view type, std::string_vie
         directive_defs_.push_back(std::make_unique<HttpDirectiveDef>(std::move(*target)));
         return directive_defs_.back().get();
     }
-    return shared_.resolve_directive_def(type, name, literals);
+    return nullptr;
 }
 
-const Library::HostCallable *RouteScriptLibrary::resolve_constant(std::string_view namespace_name,
-                                                                  std::string_view key) const {
+const RouteScriptExtension::HostCallable *RouteScriptExtension::resolve_constant(std::string_view namespace_name,
+                                                                                 std::string_view key) {
+    if (!has_current_route_info_) {
+        return nullptr;
+    }
     if (namespace_name == "$path") {
         // Compile-time existence check: the name must be a path variable captured by this
         // location's route pattern.
-        if (path_var_names_.find(std::string(key)) == path_var_names_.end()) {
+        if (current_path_var_names_.find(std::string(key)) == current_path_var_names_.end()) {
             return nullptr;
         }
         return get_or_create(VarKind::Path, namespace_name, key);
@@ -176,16 +192,11 @@ const Library::HostCallable *RouteScriptLibrary::resolve_constant(std::string_vi
         }
         return get_or_create(VarKind::ConnField, namespace_name, key);
     }
-    return shared_.resolve_constant(namespace_name, key);
+    return nullptr;
 }
 
-const Library::HostCallable *RouteScriptLibrary::resolve_async_constant(std::string_view /*namespace_name*/,
-                                                                        std::string_view /*key*/) const {
-    return nullptr; // no async route constants
-}
-
-const Library::HostCallable *RouteScriptLibrary::get_or_create(VarKind kind, std::string_view namespace_name,
-                                                               std::string_view key) const {
+const RouteScriptExtension::HostCallable *
+RouteScriptExtension::get_or_create(VarKind kind, std::string_view namespace_name, std::string_view key) {
     const std::string cache_key = make_cache_key(namespace_name, key);
     auto it = cache_.find(cache_key);
     if (it != cache_.end()) {
@@ -205,27 +216,27 @@ const Library::HostCallable *RouteScriptLibrary::get_or_create(VarKind kind, std
     callable.userdata = &refs_.back();
     switch (kind) {
         case VarKind::Path:
-            callable.constant = &RouteScriptLibrary::path_var_fn;
+            callable.constant = &RouteScriptExtension::path_var_fn;
             callable.debug_name = "$path";
             break;
         case VarKind::Query:
-            callable.constant = &RouteScriptLibrary::query_var_fn;
+            callable.constant = &RouteScriptExtension::query_var_fn;
             callable.debug_name = "$query";
             break;
         case VarKind::Header:
-            callable.constant = &RouteScriptLibrary::header_var_fn;
+            callable.constant = &RouteScriptExtension::header_var_fn;
             callable.debug_name = "$header";
             break;
         case VarKind::Cookie:
-            callable.constant = &RouteScriptLibrary::cookie_var_fn;
+            callable.constant = &RouteScriptExtension::cookie_var_fn;
             callable.debug_name = "$cookie";
             break;
         case VarKind::ReqField:
-            callable.constant = &RouteScriptLibrary::req_field_fn;
+            callable.constant = &RouteScriptExtension::req_field_fn;
             callable.debug_name = "$req";
             break;
         case VarKind::ConnField:
-            callable.constant = &RouteScriptLibrary::conn_field_fn;
+            callable.constant = &RouteScriptExtension::conn_field_fn;
             callable.debug_name = "$conn";
             break;
     }

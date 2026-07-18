@@ -2276,7 +2276,7 @@ http {
     auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
     ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
     ASSERT_TRUE(runtime->servers[0].locations[0].script != nullptr);
-    ASSERT_TRUE(runtime->servers[0].locations[0].route_lib != nullptr);
+    ASSERT_TRUE(runtime->route_script_extension != nullptr);
 
     RuntimeHarness harness(*runtime);
 
@@ -2331,6 +2331,35 @@ http {
     auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
     ASSERT_FALSE(runtime.has_value());
     EXPECT_NE(runtime.error().message.find("constant not found"), std::string::npos) << runtime.error().message;
+
+    ::unlink(script_path.c_str());
+}
+
+TEST(LiteNginxRuntimeTest, AccessLogConstantsDoNotLeakIntoRouteScripts) {
+    const std::string script_path = "/tmp/lite_nginx_access_scope_test.js";
+    {
+        std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.good());
+        file << "resp.sendJson(200, $access.status);";
+    }
+
+    std::string config_text = R"(
+http {
+    listen 127.0.0.1:8080;
+    access_log test.access "status=${$access.status}";
+    server {
+        server_name localhost;
+        location /* { script_file SCRIPT_PATH; }
+    }
+}
+)";
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_path);
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "access_scope.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_FALSE(runtime.has_value());
+    EXPECT_NE(runtime.error().message.find("constant not found"), std::string::npos);
 
     ::unlink(script_path.c_str());
 }
@@ -2737,7 +2766,7 @@ http {
     ::unlink(script_path.c_str());
 }
 
-// ${...} proxy_set_header values compile against the location's RouteScriptLibrary.
+// ${...} proxy_set_header values compile with the runtime's route extension.
 TEST(LiteNginxRuntimeTest, ProxySetHeaderTemplateCompiles) {
     std::uint16_t port = reserve_loopback_port();
     ASSERT_NE(port, 0);

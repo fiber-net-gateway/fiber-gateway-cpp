@@ -13,8 +13,8 @@
 #include "http/HeaderMap.h"
 #include "http/HttpHeaderHash.h"
 #include "http_script/HttpScriptLib.h"
-#include "http_script/RouteScriptLibrary.h"
-#include "logging/AccessLogScriptLibrary.h"
+#include "http_script/RouteScriptExtension.h"
+#include "logging/AccessLogScriptExtension.h"
 #include "net/IpAddress.h"
 #include "script/ScriptCompiler.h"
 
@@ -26,6 +26,12 @@ constexpr std::chrono::milliseconds kDefaultReadTimeout{30000};
 constexpr std::chrono::milliseconds kDefaultSendTimeout{30000};
 constexpr std::uint8_t kSkipHeaderValue = 1;
 
+enum class ScriptCompileScope : std::uint8_t {
+    RouteScript,
+    ProxyHeaderTemplate,
+    AccessLogTemplate,
+};
+
 using fiber::util::RoutePatternError;
 
 RuntimeError make_error(const config::SourceLocation &location, std::string message) {
@@ -35,12 +41,9 @@ RuntimeError make_error(const config::SourceLocation &location, std::string mess
     };
 }
 
-// Reads a script file and compiles it against the given library (the per-location
-// RouteScriptLibrary wrapping the shared script_library with the shared StdLibrary's
-// req.*/resp.* and standard functions). The compiled Script bakes in function pointers, so
-// it is independent of the library after compilation; both the shared script_library and the
-// per-location route_lib are kept alive in RuntimeConfig/LocationRuntime regardless. Returns
-// a RuntimeError (with the location's source position) on I/O or compile failure.
+// Reads a script file and compiles it against the runtime's StdLibrary. Host-call function
+// pointers and userdata are copied into the compiled script; extension userdata is owned by
+// RuntimeConfig's shared extension contexts.
 std::expected<std::shared_ptr<fiber::script::Script>, RuntimeError>
 compile_script_file(fiber::script::Library &library, const std::string &path, const config::SourceLocation &loc) {
     std::ifstream file(path, std::ios::binary);
@@ -61,6 +64,19 @@ void ensure_script_library(RuntimeConfig &runtime) {
     }
     runtime.script_library = std::make_shared<fiber::script::std_lib::StdLibrary>();
     fiber::http_script::register_http_functions_to_lib(*runtime.script_library);
+    runtime.route_script_extension = std::make_shared<fiber::http_script::RouteScriptExtension>();
+    runtime.access_log_script_extension = std::make_shared<logging::AccessLogScriptExtension>();
+    runtime.script_library->add_ext_ops(runtime.access_log_script_extension.get(),
+                                        logging::AccessLogScriptExtension::ops());
+    runtime.script_library->add_ext_ops(runtime.route_script_extension.get(),
+                                        fiber::http_script::RouteScriptExtension::ops());
+}
+
+void set_script_compile_context(RuntimeConfig &runtime, const std::vector<std::string> &path_var_names,
+                                ScriptCompileScope scope) {
+    runtime.route_script_extension->set_compile_path_vars(path_var_names);
+    runtime.route_script_extension->set_http_directives_enabled(scope == ScriptCompileScope::RouteScript);
+    runtime.access_log_script_extension->set_compile_enabled(scope == ScriptCompileScope::AccessLogTemplate);
 }
 
 std::expected<AccessLogId, RuntimeError> compile_access_log(RuntimeConfig &runtime,
@@ -84,8 +100,8 @@ std::expected<AccessLogId, RuntimeError> compile_access_log(RuntimeConfig &runti
         compiled_log.literal_message = access_log->message_template;
     } else {
         ensure_script_library(runtime);
-        auto library = std::make_shared<logging::AccessLogScriptLibrary>(*runtime.script_library, path_var_names);
-        auto compiled = fiber::script::compile_template_string(*library, access_log->message_template);
+        set_script_compile_context(runtime, path_var_names, ScriptCompileScope::AccessLogTemplate);
+        auto compiled = fiber::script::compile_template_string(*runtime.script_library, access_log->message_template);
         if (!compiled) {
             return std::unexpected(
                     make_error(access_log->location, "access_log template compile error: " + compiled.error().message));
@@ -94,7 +110,6 @@ std::expected<AccessLogId, RuntimeError> compile_access_log(RuntimeConfig &runti
             return std::unexpected(make_error(access_log->location, "access_log template must be synchronous"));
         }
         compiled_log.template_script = std::make_shared<fiber::script::Script>(std::move(*compiled));
-        compiled_log.template_library = std::move(library);
     }
 
     const AccessLogId id = static_cast<AccessLogId>(runtime.access_logs.size());
@@ -303,7 +318,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
 
                 // Add the route first so the matcher extracts the pattern's path variable
                 // names (e.g. /api/:id -> ["id"]) into path_var_names; the script is then
-                // compiled against a RouteScriptLibrary seeded with those names, so $path
+                // compiled with the shared route extension set to those names, so $path
                 // references are validated at compile time.
                 std::vector<std::string> path_var_names;
                 route_definer.path_var_names_out = &path_var_names;
@@ -323,14 +338,12 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 }
                 runtime_location.access_log = *location_access_log;
 
-                auto route_lib = std::make_shared<fiber::http_script::RouteScriptLibrary>(*runtime.script_library,
-                                                                                          path_var_names);
-                auto script = compile_script_file(*route_lib, location.script_file, location.location);
+                set_script_compile_context(runtime, path_var_names, ScriptCompileScope::RouteScript);
+                auto script = compile_script_file(*runtime.script_library, location.script_file, location.location);
                 if (!script) {
                     return std::unexpected(script.error());
                 }
                 runtime_location.script = std::move(*script);
-                runtime_location.route_lib = std::move(route_lib);
                 runtime_server.locations.push_back(std::move(runtime_location));
                 continue;
             }
@@ -394,8 +407,8 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
             runtime_location.skip_headers = make_default_skip_headers();
             // Add the route first so the matcher extracts the pattern's path variable names
             // (e.g. /api/:id -> ["id"]) into path_var_names; template header values are then
-            // compiled against a RouteScriptLibrary seeded with those names, so $path
-            // references validate at compile time. Mirrors the script-location flow.
+            // compiled with the shared route extension set to those names, so $path references
+            // validate at compile time. Mirrors the script-location flow.
             const std::uint32_t location_index = static_cast<std::uint32_t>(runtime_server.locations.size());
             std::vector<std::string> path_var_names;
             route_definer.path_var_names_out = &path_var_names;
@@ -415,9 +428,8 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
             }
             runtime_location.access_log = *location_access_log;
 
-            // Compile ${...} template header values against a per-location RouteScriptLibrary.
-            // Only construct route_lib when this location actually has a template header, so
-            // static-only locations pay zero script cost.
+            // Compile ${...} template header values with the shared route extension. Static-only
+            // locations pay no script compilation cost.
             bool has_template_header = false;
             for (const auto &header: location.proxy.set_headers) {
                 if (header.is_template) {
@@ -425,11 +437,9 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                     break;
                 }
             }
-            std::shared_ptr<fiber::http_script::RouteScriptLibrary> route_lib;
             if (has_template_header) {
                 ensure_script_library(runtime);
-                route_lib = std::make_shared<fiber::http_script::RouteScriptLibrary>(*runtime.script_library,
-                                                                                     path_var_names);
+                set_script_compile_context(runtime, path_var_names, ScriptCompileScope::ProxyHeaderTemplate);
             }
 
             runtime_location.set_headers.reserve(location.proxy.set_headers.size());
@@ -443,7 +453,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 runtime_location.skip_headers.insert(runtime_header.lowercase_name, runtime_header.name_hash,
                                                      kSkipHeaderValue);
                 if (header.is_template) {
-                    auto compiled = fiber::script::compile_template_string(*route_lib, header.value);
+                    auto compiled = fiber::script::compile_template_string(*runtime.script_library, header.value);
                     if (!compiled) {
                         return std::unexpected(
                                 make_error(location.location,
@@ -458,8 +468,6 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 runtime_header.value = header.value; // literal value, or template source (diagnostics)
                 runtime_location.set_headers.push_back(std::move(runtime_header));
             }
-            runtime_location.route_lib = std::move(route_lib);
-
             runtime_server.locations.push_back(std::move(runtime_location));
         }
 

@@ -1,4 +1,4 @@
-#include "AccessLogScriptLibrary.h"
+#include "AccessLogScriptExtension.h"
 
 #include <algorithm>
 #include <limits>
@@ -34,20 +34,33 @@ JsValue make_uint(std::uint64_t value) noexcept {
 
 } // namespace
 
-AccessLogScriptLibrary::AccessLogScriptLibrary(fiber::script::std_lib::StdLibrary &shared,
-                                               const std::vector<std::string> &path_var_names) :
-    RouteScriptLibrary(shared, path_var_names) {
+AccessLogScriptExtension::AccessLogScriptExtension() noexcept {
     for (std::size_t i = 0; i < fields_.size(); ++i) {
         fields_[i].field = static_cast<Field>(i);
         callables_[i].kind = HostCallable::Kind::SyncConstant;
         callables_[i].userdata = &fields_[i];
-        callables_[i].constant = &AccessLogScriptLibrary::field_fn;
+        callables_[i].constant = &AccessLogScriptExtension::field_fn;
         callables_[i].debug_name = "$access_log";
     }
 }
 
-const fiber::script::Library::HostCallable *AccessLogScriptLibrary::resolve_constant(std::string_view namespace_name,
-                                                                                     std::string_view key) const {
+const fiber::script::std_lib::StdLibrary::ExtOps &AccessLogScriptExtension::ops() noexcept {
+    static const fiber::script::std_lib::StdLibrary::ExtOps kOps{
+            .resolve_constant = &AccessLogScriptExtension::resolve_constant_op,
+    };
+    return kOps;
+}
+
+const AccessLogScriptExtension::HostCallable *
+AccessLogScriptExtension::resolve_constant_op(void *ctx, std::string_view namespace_name, std::string_view key) {
+    return static_cast<AccessLogScriptExtension *>(ctx)->resolve_constant(namespace_name, key);
+}
+
+const AccessLogScriptExtension::HostCallable *
+AccessLogScriptExtension::resolve_constant(std::string_view namespace_name, std::string_view key) const {
+    if (!compile_enabled_) {
+        return nullptr;
+    }
     Field field;
     if (namespace_name == "$access") {
         if (key == "request_id") {
@@ -82,12 +95,12 @@ const fiber::script::Library::HostCallable *AccessLogScriptLibrary::resolve_cons
             return nullptr;
         }
     } else {
-        return RouteScriptLibrary::resolve_constant(namespace_name, key);
+        return nullptr;
     }
     return &callables_[static_cast<std::size_t>(field)];
 }
 
-AbiResult AccessLogScriptLibrary::field_fn(void *userdata, const HostCallFrame &frame) noexcept {
+AbiResult AccessLogScriptExtension::field_fn(void *userdata, const HostCallFrame &frame) noexcept {
     auto *field = static_cast<const FieldRef *>(userdata);
     auto *base = static_cast<fiber::http_script::ScriptExchangeCtx *>(frame.attach);
     auto *ctx = static_cast<AccessLogEvalContext *>(base);
