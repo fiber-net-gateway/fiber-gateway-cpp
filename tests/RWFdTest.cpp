@@ -22,7 +22,18 @@ namespace {
 using fiber::async::DetachedTask;
 using namespace std::chrono_literals;
 
-void noop_ready_callback(void *) noexcept {}
+void noop_ready_callback(void *, fiber::common::IoErr) noexcept {}
+
+struct CallbackResult {
+    int calls = 0;
+    fiber::common::IoErr err = fiber::common::IoErr::Invalid;
+};
+
+void record_callback(void *raw_ctx, fiber::common::IoErr err) noexcept {
+    auto *ctx = static_cast<CallbackResult *>(raw_ctx);
+    ++ctx->calls;
+    ctx->err = err;
+}
 
 struct PersistentReadCallbackCtx {
     fiber::net::detail::RWFd *rwfd = nullptr;
@@ -33,16 +44,22 @@ struct PersistentReadCallbackCtx {
     fiber::common::IoErr clear_err = fiber::common::IoErr::Invalid;
 };
 
+void on_persistent_read(void *raw_ctx, fiber::common::IoErr err) noexcept;
+
 void finish_persistent_read_callback(PersistentReadCallbackCtx *ctx) noexcept {
-    ctx->clear_err = ctx->rwfd->clear_read_callback();
+    ctx->clear_err = ctx->rwfd->clear_read_callback(&on_persistent_read, ctx);
     ctx->rwfd->close();
     (void) ::close(ctx->peer_fd);
     ctx->peer_fd = -1;
     ctx->loop->stop();
 }
 
-void on_persistent_read(void *raw_ctx) noexcept {
+void on_persistent_read(void *raw_ctx, fiber::common::IoErr err) noexcept {
     auto *ctx = static_cast<PersistentReadCallbackCtx *>(raw_ctx);
+    if (err != fiber::common::IoErr::None) {
+        ctx->io_ok = false;
+        return;
+    }
     char byte = 0;
     if (::read(ctx->rwfd->fd(), &byte, 1) != 1) {
         ctx->io_ok = false;
@@ -114,6 +131,63 @@ TEST(RWFdTest, RearmsPersistentReadCallbackAfterOneShotEvent) {
     EXPECT_TRUE(ctx.io_ok);
     EXPECT_EQ(ctx.calls, 2);
     EXPECT_EQ(ctx.clear_err, fiber::common::IoErr::None);
+}
+
+TEST(RWFdTest, CloseCancelsRegisteredCallbacks) {
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+
+    fiber::event::EventLoop loop;
+    fiber::net::detail::RWFd rwfd(loop, fds[0]);
+    CallbackResult read_result;
+    CallbackResult write_result;
+    fiber::common::IoErr set_read_err = fiber::common::IoErr::Invalid;
+    fiber::common::IoErr set_write_err = fiber::common::IoErr::Invalid;
+
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        set_read_err = rwfd.set_read_callback(&record_callback, &read_result);
+        set_write_err = rwfd.set_write_callback(&record_callback, &write_result);
+        rwfd.close();
+        (void) ::close(fds[1]);
+        loop.stop();
+        co_return;
+    });
+
+    loop.run();
+    EXPECT_EQ(set_read_err, fiber::common::IoErr::None);
+    EXPECT_EQ(set_write_err, fiber::common::IoErr::None);
+    EXPECT_EQ(read_result.calls, 1);
+    EXPECT_EQ(read_result.err, fiber::common::IoErr::Canceled);
+    EXPECT_EQ(write_result.calls, 1);
+    EXPECT_EQ(write_result.err, fiber::common::IoErr::Canceled);
+}
+
+TEST(RWFdTest, ClearCallbackRequiresMatchingPair) {
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+
+    fiber::event::EventLoop loop;
+    fiber::net::detail::RWFd rwfd(loop, fds[0]);
+    CallbackResult registered_result;
+    CallbackResult other_result;
+    fiber::common::IoErr set_err = fiber::common::IoErr::Invalid;
+    fiber::common::IoErr clear_other_err = fiber::common::IoErr::Invalid;
+
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        set_err = rwfd.set_read_callback(&record_callback, &registered_result);
+        clear_other_err = rwfd.clear_read_callback(&record_callback, &other_result);
+        rwfd.close();
+        (void) ::close(fds[1]);
+        loop.stop();
+        co_return;
+    });
+
+    loop.run();
+    EXPECT_EQ(set_err, fiber::common::IoErr::None);
+    EXPECT_EQ(clear_other_err, fiber::common::IoErr::None);
+    EXPECT_EQ(registered_result.calls, 1);
+    EXPECT_EQ(registered_result.err, fiber::common::IoErr::Canceled);
+    EXPECT_EQ(other_result.calls, 0);
 }
 
 DetachedTask wait_readable_task(fiber::net::detail::RWFd *rwfd, std::promise<fiber::common::IoResult<void>> *done) {
@@ -404,7 +478,7 @@ TEST(RWFdTest, RejectsSameDirectionCallbackAndWaiterCoexistence) {
     fiber::async::spawn(loop, [&]() -> DetachedTask {
         set_read_err = rwfd.set_read_callback(&noop_ready_callback, nullptr);
         wait_while_callback = co_await rwfd.wait_readable();
-        (void) rwfd.clear_read_callback();
+        (void) rwfd.clear_read_callback(&noop_ready_callback, nullptr);
 
         fiber::async::spawn([&]() -> DetachedTask {
             active_wait_result = co_await rwfd.wait_readable();
@@ -417,7 +491,7 @@ TEST(RWFdTest, RejectsSameDirectionCallbackAndWaiterCoexistence) {
 
         set_read_while_waiting_err = rwfd.set_read_callback(&noop_ready_callback, nullptr);
         set_write_while_reading_err = rwfd.set_write_callback(&noop_ready_callback, nullptr);
-        (void) rwfd.clear_write_callback();
+        (void) rwfd.clear_write_callback(&noop_ready_callback, nullptr);
         rwfd.close();
         (void) ::close(fds[1]);
         loop.stop();
