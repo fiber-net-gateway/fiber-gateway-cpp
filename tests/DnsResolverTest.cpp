@@ -238,8 +238,7 @@ DetachedTask run_dual_stack_server(fiber::event::EventLoop *loop, std::promise<s
 
     std::array<std::uint8_t, 512> buf{};
     for (std::size_t i = 0; i < expected_queries; ++i) {
-        auto recv_result =
-                co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
+        auto recv_result = co_await socket.recv_from(buf.data(), buf.size(), 2s);
         if (!recv_result) {
             outcome.err = recv_result.error();
             outcome_promise->set_value(std::move(outcome));
@@ -270,8 +269,7 @@ DetachedTask run_dual_stack_server(fiber::event::EventLoop *loop, std::promise<s
             co_return;
         }
 
-        auto send_result = co_await fiber::async::timeout_for(
-                [&]() { return socket.send_to(response.data(), response.size(), recv_result->peer); }, 2s);
+        auto send_result = co_await socket.send_to(response.data(), response.size(), recv_result->peer, 2s);
         if (!send_result) {
             outcome.err = send_result.error();
             outcome_promise->set_value(std::move(outcome));
@@ -463,8 +461,7 @@ DetachedTask run_multi_v4_server(fiber::event::EventLoop *loop, std::promise<std
     }
 
     std::array<std::uint8_t, 512> buf{};
-    auto recv_result =
-            co_await fiber::async::timeout_for([&]() { return socket.recv_from(buf.data(), buf.size()); }, 2s);
+    auto recv_result = co_await socket.recv_from(buf.data(), buf.size(), 2s);
     if (!recv_result) {
         outcome.err = recv_result.error();
         outcome_promise->set_value(std::move(outcome));
@@ -500,8 +497,7 @@ DetachedTask run_multi_v4_server(fiber::event::EventLoop *loop, std::promise<std
         co_return;
     }
 
-    auto send_result = co_await fiber::async::timeout_for(
-            [&]() { return socket.send_to(response.data(), response.size(), recv_result->peer); }, 2s);
+    auto send_result = co_await socket.send_to(response.data(), response.size(), recv_result->peer, 2s);
     if (!send_result) {
         outcome.err = send_result.error();
         outcome_promise->set_value(std::move(outcome));

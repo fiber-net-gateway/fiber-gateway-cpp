@@ -95,7 +95,7 @@ fiber::async::Task<common::IoResult<void>> TcpTransport::wait_readable(std::chro
 
 fiber::async::Task<common::IoResult<size_t>> TcpTransport::read(void *buf, size_t len,
                                                                 std::chrono::milliseconds timeout) {
-    auto result = co_await fiber::async::timeout_for([&]() { return stream_.read(buf, len); }, timeout);
+    auto result = co_await stream_.read(buf, len, timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
@@ -108,8 +108,7 @@ fiber::async::Task<common::IoResult<size_t>> TcpTransport::read_into(mem::IoBuf 
     if (writable == 0) {
         co_return static_cast<size_t>(0);
     }
-    auto result =
-            co_await fiber::async::timeout_for([&]() { return stream_.read(buf.writable_data(), writable); }, timeout);
+    auto result = co_await stream_.read(buf.writable_data(), writable, timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
@@ -124,7 +123,7 @@ fiber::async::Task<common::IoResult<size_t>> TcpTransport::readv_into(mem::IoBuf
     if (count == 0) {
         co_return static_cast<size_t>(0);
     }
-    auto result = co_await fiber::async::timeout_for([&]() { return stream_.readv(iov.data(), count); }, timeout);
+    auto result = co_await stream_.readv(iov.data(), count, timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
@@ -134,7 +133,7 @@ fiber::async::Task<common::IoResult<size_t>> TcpTransport::readv_into(mem::IoBuf
 
 fiber::async::Task<common::IoResult<size_t>> TcpTransport::write(const void *buf, size_t len,
                                                                  std::chrono::milliseconds timeout) {
-    auto result = co_await fiber::async::timeout_for([&]() { return stream_.write(buf, len); }, timeout);
+    auto result = co_await stream_.write(buf, len, timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
@@ -146,8 +145,7 @@ fiber::async::Task<common::IoResult<size_t>> TcpTransport::write(mem::IoBuf &buf
     if (readable == 0) {
         co_return static_cast<size_t>(0);
     }
-    auto result =
-            co_await fiber::async::timeout_for([&]() { return stream_.write(buf.readable_data(), readable); }, timeout);
+    auto result = co_await stream_.write(buf.readable_data(), readable, timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
@@ -162,7 +160,7 @@ fiber::async::Task<common::IoResult<size_t>> TcpTransport::writev(mem::IoBufChai
     if (count == 0) {
         co_return static_cast<size_t>(0);
     }
-    auto result = co_await fiber::async::timeout_for([&]() { return stream_.writev(iov.data(), count); }, timeout);
+    auto result = co_await stream_.writev(iov.data(), count, timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }

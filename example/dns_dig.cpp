@@ -555,9 +555,8 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> query_via_tcp(fiber::ev
 
     std::size_t prefix_written = 0;
     while (prefix_written < len_prefix.size()) {
-        auto write_result = co_await fiber::async::timeout_for(
-                [&]() { return stream.write(len_prefix.data() + prefix_written, len_prefix.size() - prefix_written); },
-                std::chrono::milliseconds(2000));
+        auto write_result = co_await stream.write(len_prefix.data() + prefix_written,
+                                                  len_prefix.size() - prefix_written, std::chrono::milliseconds(2000));
         if (!write_result) {
             stream.close();
             co_return std::unexpected(write_result.error());
@@ -571,9 +570,8 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> query_via_tcp(fiber::ev
 
     std::size_t body_written = 0;
     while (body_written < *encoded) {
-        auto write_result = co_await fiber::async::timeout_for(
-                [&]() { return stream.write(request.data() + body_written, *encoded - body_written); },
-                std::chrono::milliseconds(2000));
+        auto write_result = co_await stream.write(request.data() + body_written, *encoded - body_written,
+                                                  std::chrono::milliseconds(2000));
         if (!write_result) {
             stream.close();
             co_return std::unexpected(write_result.error());
@@ -587,9 +585,8 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> query_via_tcp(fiber::ev
 
     std::size_t prefix_read = 0;
     while (prefix_read < len_prefix.size()) {
-        auto read_result = co_await fiber::async::timeout_for(
-                [&]() { return stream.read(len_prefix.data() + prefix_read, len_prefix.size() - prefix_read); },
-                std::chrono::milliseconds(2000));
+        auto read_result = co_await stream.read(len_prefix.data() + prefix_read, len_prefix.size() - prefix_read,
+                                                std::chrono::milliseconds(2000));
         auto consumed = consume_stream_read(read_result);
         if (!consumed) {
             stream.close();
@@ -606,9 +603,8 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> query_via_tcp(fiber::ev
 
     std::size_t total_read = 0;
     while (total_read < response_len) {
-        auto read_result = co_await fiber::async::timeout_for(
-                [&]() { return stream.read(dst + total_read, response_len - total_read); },
-                std::chrono::milliseconds(2000));
+        auto read_result =
+                co_await stream.read(dst + total_read, response_len - total_read, std::chrono::milliseconds(2000));
         auto consumed = consume_stream_read(read_result);
         if (!consumed) {
             stream.close();

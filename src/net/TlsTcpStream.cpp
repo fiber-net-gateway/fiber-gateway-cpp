@@ -28,9 +28,13 @@ bool TlsTcpStream::has_pending_read() const noexcept { return stream_.has_pendin
 
 void TlsTcpStream::close() { stream_.close(); }
 
-TlsTcpStream::ReadAwaiter TlsTcpStream::read(void *buf, size_t len) noexcept { return stream_.read(buf, len); }
+TlsTcpStream::IoTask TlsTcpStream::read(void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
+    return stream_.read(buf, len, timeout);
+}
 
-TlsTcpStream::WriteAwaiter TlsTcpStream::write(const void *buf, size_t len) noexcept { return stream_.write(buf, len); }
+TlsTcpStream::IoTask TlsTcpStream::write(const void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
+    return stream_.write(buf, len, timeout);
+}
 
 fiber::common::IoResult<size_t> TlsTcpStream::try_read(void *buf, size_t len) noexcept {
     return stream_.try_read(buf, len);
@@ -47,6 +51,14 @@ TlsTcpStream::ShutdownTask TlsTcpStream::shutdown() { return stream_.shutdown();
 detail::StreamFd::WaitReadableAwaiter TlsTcpStream::wait_readable() noexcept { return stream_.wait_readable(); }
 
 detail::StreamFd::WaitWritableAwaiter TlsTcpStream::wait_writable() noexcept { return stream_.wait_writable(); }
+
+detail::StreamFd::WaitTask TlsTcpStream::wait_readable(std::chrono::milliseconds timeout) noexcept {
+    return stream_.wait_readable(timeout);
+}
+
+detail::StreamFd::WaitTask TlsTcpStream::wait_writable(std::chrono::milliseconds timeout) noexcept {
+    return stream_.wait_writable(timeout);
+}
 
 fiber::common::IoErr TlsTcpStream::poll_handshake(fiber::event::IoEvent &event) noexcept {
     return stream_.poll_handshake(event);

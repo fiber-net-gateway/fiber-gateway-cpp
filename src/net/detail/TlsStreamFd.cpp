@@ -13,25 +13,28 @@ namespace fiber::net::detail {
 
 namespace {
 
-template<typename ReadWaiter, typename WriteWaiter>
-fiber::common::IoResult<void> resume_waiter(ReadWaiter &read_waiter, WriteWaiter &write_waiter) noexcept {
-    if (read_waiter) {
-        auto result = read_waiter->await_resume();
-        read_waiter.reset();
-        return result;
+using Deadline = std::chrono::steady_clock::time_point;
+
+Deadline make_deadline(std::chrono::milliseconds timeout) noexcept {
+    if (timeout == std::chrono::milliseconds::max()) {
+        return Deadline::max();
     }
-    if (write_waiter) {
-        auto result = write_waiter->await_resume();
-        write_waiter.reset();
-        return result;
-    }
-    return std::unexpected(fiber::common::IoErr::Invalid);
+    return fiber::event::EventLoop::current().now() + timeout;
 }
 
-template<typename ReadWaiter, typename WriteWaiter>
-void cancel_waiter(ReadWaiter &read_waiter, WriteWaiter &write_waiter) noexcept {
-    read_waiter.reset();
-    write_waiter.reset();
+fiber::common::IoResult<std::chrono::milliseconds> remaining_timeout(Deadline deadline) noexcept {
+    if (deadline == Deadline::max()) {
+        return std::chrono::milliseconds::max();
+    }
+    auto now = fiber::event::EventLoop::current().now();
+    if (deadline <= now) {
+        return std::unexpected(fiber::common::IoErr::TimedOut);
+    }
+    auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+    if (remaining <= std::chrono::milliseconds::zero()) {
+        remaining = std::chrono::milliseconds(1);
+    }
+    return remaining;
 }
 
 struct BusyResetGuard {
@@ -242,9 +245,77 @@ void TlsStreamFd::close() {
     busy_ = false;
 }
 
-TlsStreamFd::ReadAwaiter TlsStreamFd::read(void *buf, size_t len) noexcept { return {*this, buf, len}; }
+TlsStreamFd::IoTask TlsStreamFd::read(void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
+    if (busy_) {
+        co_return std::unexpected(fiber::common::IoErr::Busy);
+    }
 
-TlsStreamFd::WriteAwaiter TlsStreamFd::write(const void *buf, size_t len) noexcept { return {*this, buf, len}; }
+    busy_ = true;
+    BusyResetGuard busy_reset(&busy_);
+    Deadline deadline = make_deadline(timeout);
+    for (;;) {
+        size_t out = 0;
+        fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
+        fiber::common::IoErr err = read_once(buf, len, out, wait_event);
+        if (err == fiber::common::IoErr::None) {
+            co_return out;
+        }
+        if (err != fiber::common::IoErr::WouldBlock) {
+            co_return std::unexpected(err);
+        }
+        auto remaining = remaining_timeout(deadline);
+        if (!remaining) {
+            co_return std::unexpected(remaining.error());
+        }
+        fiber::common::IoResult<void> wait_result;
+        if (wait_event == fiber::event::IoEvent::Read) {
+            wait_result = co_await stream_fd_.wait_readable(*remaining);
+        } else if (wait_event == fiber::event::IoEvent::Write) {
+            wait_result = co_await stream_fd_.wait_writable(*remaining);
+        } else {
+            co_return std::unexpected(fiber::common::IoErr::Invalid);
+        }
+        if (!wait_result) {
+            co_return std::unexpected(wait_result.error());
+        }
+    }
+}
+
+TlsStreamFd::IoTask TlsStreamFd::write(const void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
+    if (busy_) {
+        co_return std::unexpected(fiber::common::IoErr::Busy);
+    }
+
+    busy_ = true;
+    BusyResetGuard busy_reset(&busy_);
+    Deadline deadline = make_deadline(timeout);
+    for (;;) {
+        size_t out = 0;
+        fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
+        fiber::common::IoErr err = write_once(buf, len, out, wait_event);
+        if (err == fiber::common::IoErr::None) {
+            co_return out;
+        }
+        if (err != fiber::common::IoErr::WouldBlock) {
+            co_return std::unexpected(err);
+        }
+        auto remaining = remaining_timeout(deadline);
+        if (!remaining) {
+            co_return std::unexpected(remaining.error());
+        }
+        fiber::common::IoResult<void> wait_result;
+        if (wait_event == fiber::event::IoEvent::Read) {
+            wait_result = co_await stream_fd_.wait_readable(*remaining);
+        } else if (wait_event == fiber::event::IoEvent::Write) {
+            wait_result = co_await stream_fd_.wait_writable(*remaining);
+        } else {
+            co_return std::unexpected(fiber::common::IoErr::Invalid);
+        }
+        if (!wait_result) {
+            co_return std::unexpected(wait_result.error());
+        }
+    }
+}
 
 fiber::common::IoResult<size_t> TlsStreamFd::try_read(void *buf, size_t len) noexcept {
     if (busy_) {
@@ -353,6 +424,14 @@ TlsStreamFd::ShutdownTask TlsStreamFd::shutdown() {
 StreamFd::WaitReadableAwaiter TlsStreamFd::wait_readable() noexcept { return stream_fd_.wait_readable(); }
 
 StreamFd::WaitWritableAwaiter TlsStreamFd::wait_writable() noexcept { return stream_fd_.wait_writable(); }
+
+StreamFd::WaitTask TlsStreamFd::wait_readable(std::chrono::milliseconds timeout) noexcept {
+    return stream_fd_.wait_readable(timeout);
+}
+
+StreamFd::WaitTask TlsStreamFd::wait_writable(std::chrono::milliseconds timeout) noexcept {
+    return stream_fd_.wait_writable(timeout);
+}
 
 fiber::common::IoErr TlsStreamFd::poll_handshake(fiber::event::IoEvent &event) noexcept {
     return handshake_once(event);
@@ -519,172 +598,6 @@ fiber::common::IoErr TlsStreamFd::write_once(const void *buf, size_t len, size_t
         }
         return fiber::common::IoErr::Invalid;
     }
-}
-
-TlsStreamFd::ReadAwaiter::ReadAwaiter(TlsStreamFd &stream, void *buf, size_t len) noexcept :
-    stream_(&stream), buf_(buf), len_(len) {}
-
-TlsStreamFd::ReadAwaiter::~ReadAwaiter() {
-    if (!waiting_) {
-        return;
-    }
-    cancel_waiter(read_waiter_, write_waiter_);
-    waiting_ = false;
-    stream_->busy_ = false;
-}
-
-bool TlsStreamFd::ReadAwaiter::await_suspend(std::coroutine_handle<> handle) {
-    err_ = fiber::common::IoErr::None;
-    completed_ = false;
-    if (stream_->busy_) {
-        err_ = fiber::common::IoErr::Busy;
-        completed_ = true;
-        return false;
-    }
-
-    stream_->busy_ = true;
-    size_t out = 0;
-    fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
-    fiber::common::IoErr err = stream_->read_once(buf_, len_, out, wait_event);
-    result_ = out;
-    if (err == fiber::common::IoErr::None) {
-        stream_->busy_ = false;
-        completed_ = true;
-        return false;
-    }
-    if (err != fiber::common::IoErr::WouldBlock) {
-        stream_->busy_ = false;
-        err_ = err;
-        completed_ = true;
-        return false;
-    }
-    waiting_ = true;
-    if (wait_event == fiber::event::IoEvent::Read) {
-        read_waiter_.emplace(stream_->stream_fd_.rwfd());
-        return read_waiter_->await_suspend(handle);
-    }
-    if (wait_event == fiber::event::IoEvent::Write) {
-        write_waiter_.emplace(stream_->stream_fd_.rwfd());
-        return write_waiter_->await_suspend(handle);
-    }
-
-    waiting_ = false;
-    stream_->busy_ = false;
-    err_ = fiber::common::IoErr::Invalid;
-    completed_ = true;
-    return false;
-}
-
-fiber::common::IoResult<size_t> TlsStreamFd::ReadAwaiter::await_resume() noexcept {
-    if (completed_) {
-        completed_ = false;
-        if (err_ == fiber::common::IoErr::None) {
-            return result_;
-        }
-        return std::unexpected(err_);
-    }
-
-    waiting_ = false;
-    fiber::common::IoResult<void> wait_result = resume_waiter(read_waiter_, write_waiter_);
-    if (!wait_result) {
-        stream_->busy_ = false;
-        return std::unexpected(wait_result.error());
-    }
-
-    size_t out = 0;
-    fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
-    fiber::common::IoErr err = stream_->read_once(buf_, len_, out, wait_event);
-    stream_->busy_ = false;
-    if (err == fiber::common::IoErr::None) {
-        return out;
-    }
-    if (err == fiber::common::IoErr::WouldBlock && wait_event == fiber::event::IoEvent::None) {
-        return std::unexpected(fiber::common::IoErr::Invalid);
-    }
-    return std::unexpected(err);
-}
-
-TlsStreamFd::WriteAwaiter::WriteAwaiter(TlsStreamFd &stream, const void *buf, size_t len) noexcept :
-    stream_(&stream), buf_(buf), len_(len) {}
-
-TlsStreamFd::WriteAwaiter::~WriteAwaiter() {
-    if (!waiting_) {
-        return;
-    }
-    cancel_waiter(read_waiter_, write_waiter_);
-    waiting_ = false;
-    stream_->busy_ = false;
-}
-
-bool TlsStreamFd::WriteAwaiter::await_suspend(std::coroutine_handle<> handle) {
-    err_ = fiber::common::IoErr::None;
-    completed_ = false;
-    if (stream_->busy_) {
-        err_ = fiber::common::IoErr::Busy;
-        completed_ = true;
-        return false;
-    }
-
-    stream_->busy_ = true;
-    size_t out = 0;
-    fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
-    fiber::common::IoErr err = stream_->write_once(buf_, len_, out, wait_event);
-    result_ = out;
-    if (err == fiber::common::IoErr::None) {
-        stream_->busy_ = false;
-        completed_ = true;
-        return false;
-    }
-    if (err != fiber::common::IoErr::WouldBlock) {
-        stream_->busy_ = false;
-        err_ = err;
-        completed_ = true;
-        return false;
-    }
-    waiting_ = true;
-    if (wait_event == fiber::event::IoEvent::Read) {
-        read_waiter_.emplace(stream_->stream_fd_.rwfd());
-        return read_waiter_->await_suspend(handle);
-    }
-    if (wait_event == fiber::event::IoEvent::Write) {
-        write_waiter_.emplace(stream_->stream_fd_.rwfd());
-        return write_waiter_->await_suspend(handle);
-    }
-
-    waiting_ = false;
-    stream_->busy_ = false;
-    err_ = fiber::common::IoErr::Invalid;
-    completed_ = true;
-    return false;
-}
-
-fiber::common::IoResult<size_t> TlsStreamFd::WriteAwaiter::await_resume() noexcept {
-    if (completed_) {
-        completed_ = false;
-        if (err_ == fiber::common::IoErr::None) {
-            return result_;
-        }
-        return std::unexpected(err_);
-    }
-
-    waiting_ = false;
-    fiber::common::IoResult<void> wait_result = resume_waiter(read_waiter_, write_waiter_);
-    if (!wait_result) {
-        stream_->busy_ = false;
-        return std::unexpected(wait_result.error());
-    }
-
-    size_t out = 0;
-    fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
-    fiber::common::IoErr err = stream_->write_once(buf_, len_, out, wait_event);
-    stream_->busy_ = false;
-    if (err == fiber::common::IoErr::None) {
-        return out;
-    }
-    if (err == fiber::common::IoErr::WouldBlock && wait_event == fiber::event::IoEvent::None) {
-        return std::unexpected(fiber::common::IoErr::Invalid);
-    }
-    return std::unexpected(err);
 }
 
 } // namespace fiber::net::detail

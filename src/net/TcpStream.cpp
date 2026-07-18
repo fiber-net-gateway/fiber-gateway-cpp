@@ -63,19 +63,33 @@ int TcpStream::release_fd() noexcept { return stream_.release_fd(); }
 
 void TcpStream::close() { stream_.close(); }
 
-TcpStream::ReadAwaiter TcpStream::read(void *buf, size_t len) noexcept { return stream_.read(buf, len); }
-
-TcpStream::WriteAwaiter TcpStream::write(const void *buf, size_t len) noexcept { return stream_.write(buf, len); }
-
-TcpStream::ReadvAwaiter TcpStream::readv(const struct iovec *iov, int iovcnt) noexcept {
-    return stream_.readv(iov, iovcnt);
+TcpStream::IoTask TcpStream::read(void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
+    return stream_.read(buf, len, timeout);
 }
 
-TcpStream::WritevAwaiter TcpStream::writev(const struct iovec *iov, int iovcnt) noexcept {
-    return stream_.writev(iov, iovcnt);
+TcpStream::IoTask TcpStream::write(const void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
+    return stream_.write(buf, len, timeout);
+}
+
+TcpStream::IoTask TcpStream::readv(const struct iovec *iov, int iovcnt, std::chrono::milliseconds timeout) noexcept {
+    return stream_.readv(iov, iovcnt, timeout);
+}
+
+TcpStream::IoTask TcpStream::writev(const struct iovec *iov, int iovcnt, std::chrono::milliseconds timeout) noexcept {
+    return stream_.writev(iov, iovcnt, timeout);
 }
 
 TcpStream::WaitReadableAwaiter TcpStream::wait_readable() noexcept { return stream_.wait_readable(); }
+
+TcpStream::WaitWritableAwaiter TcpStream::wait_writable() noexcept { return stream_.wait_writable(); }
+
+TcpStream::WaitTask TcpStream::wait_readable(std::chrono::milliseconds timeout) noexcept {
+    return stream_.wait_readable(timeout);
+}
+
+TcpStream::WaitTask TcpStream::wait_writable(std::chrono::milliseconds timeout) noexcept {
+    return stream_.wait_writable(timeout);
+}
 
 fiber::common::IoResult<size_t> TcpStream::try_read(void *buf, size_t len) noexcept {
     return stream_.try_read(buf, len);
