@@ -16,6 +16,7 @@
 #include "http/HttpExchangeIo.h"
 #include "http/HttpHeaders.h"
 #include "http_script/ScriptExchangeCtx.h"
+#include "log/Log.h"
 #include "net/IpAddress.h"
 #include "net/TcpListener.h"
 #include "net/TlsContext.h"
@@ -23,6 +24,7 @@
 #include "script/JsValue.h"
 #include "script/ScriptResult.h"
 
+#include "../logging/AccessLogger.h"
 #include "../proxy/ProxyHandler.h"
 #include "../upstream/ConnectionPool.h"
 #include "../upstream/UpstreamRegistry.h"
@@ -33,6 +35,8 @@ namespace fiber::lite_nginx::runtime {
 namespace {
 
 constexpr std::string_view kNotFoundBody = "404 Not Found\n";
+
+DEFINE_LOGGER(LOG_SCRIPT, "lite_nginx.script");
 
 RuntimeError make_error(const config::SourceLocation &location, std::string message) {
     return RuntimeError{
@@ -80,9 +84,10 @@ fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange
 // text and request path buffer).
 fiber::async::Task<void> run_script(fiber::http::HttpExchange &exchange, fiber::script::Script &script,
                                     const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
-                                    fiber::http_script::HttpScriptServices *services) {
+                                    fiber::http_script::HttpScriptServices *services,
+                                    const logging::RequestLogContext &log_context) {
     fiber::script::GcHeap heap;
-    fiber::http_script::ScriptExchangeCtx ctx{exchange, heap};
+    fiber::http_script::ScriptExchangeCtx ctx{exchange, heap, log_context.connection};
     ctx.set_path_vars(path_vars);
     ctx.set_services(services);
     fiber::script::JsValue root = fiber::script::JsValue::make_undefined();
@@ -110,13 +115,18 @@ fiber::async::Task<void> run_script(fiber::http::HttpExchange &exchange, fiber::
         case ScriptResultKind::Exception: {
             const fiber::script::JsValue &exc = result.exception();
             if (js_value_is_heap_ref(exc) && js_value_type(exc) == JsNodeType::Exception) {
+                LOG(LOG_SCRIPT, ERROR) << "request_id=" << log_context.request_id << " script exception kind=heap";
                 co_await ctx.write_json(500, exc);
             } else {
+                LOG(LOG_SCRIPT, ERROR) << "request_id=" << log_context.request_id << " script exception kind="
+                                       << fiber::script::exception_kind_name(js_value_exception_kind(exc));
                 co_await ctx.write_error_json(500, fiber::script::exception_kind_name(js_value_exception_kind(exc)));
             }
             break;
         }
         case ScriptResultKind::Abort: {
+            LOG(LOG_SCRIPT, ERROR) << "request_id=" << log_context.request_id << " script abort reason="
+                                   << fiber::script::abort_reason_name(result.abort().reason);
             co_await ctx.write_error_json(500, fiber::script::abort_reason_name(result.abort().reason));
             break;
         }
@@ -245,17 +255,34 @@ class RequestDispatcher {
 public:
     RequestDispatcher(std::shared_ptr<const RuntimeConfig> runtime,
                       std::shared_ptr<upstream::UpstreamRegistry> upstreams, upstream::ConnectionPool &connection_pool,
-                      DnsService &dns, fiber::http_script::HttpScriptServices *script_services) noexcept :
+                      DnsService &dns, fiber::http_script::HttpScriptServices *script_services,
+                      logging::AccessLogger access_logger) noexcept :
         runtime_(std::move(runtime)), upstreams_(std::move(upstreams)), proxy_(*upstreams_, connection_pool, dns),
-        script_services_(script_services) {}
+        script_services_(script_services), access_logger_(std::move(access_logger)) {}
 
     fiber::async::Task<void> handle(std::uint32_t listener_index, fiber::http::HttpExchange &exchange) const {
+        logging::RequestLogContext log_context{
+                .started_at = fiber::event::EventLoop::current().now(),
+                .request_id = logging::next_request_id(),
+                .access_log = runtime_ ? runtime_->access_log : kDisabledAccessLog,
+        };
+        co_await handle_inner(listener_index, exchange, log_context);
+        access_logger_.write(exchange, log_context, fiber::event::EventLoop::current().now());
+    }
+
+private:
+    fiber::async::Task<void> handle_inner(std::uint32_t listener_index, fiber::http::HttpExchange &exchange,
+                                          logging::RequestLogContext &log_context) const {
         if (!runtime_ || listener_index >= runtime_->listeners.size()) {
             co_await send_plain_response(exchange, 404, kNotFoundBody);
             co_return;
         }
 
         const ListenerRuntime &listener = runtime_->listeners[listener_index];
+        log_context.connection = {
+                .scheme = listener.tls ? std::string_view("https") : std::string_view("http"),
+                .tls = listener.tls,
+        };
         std::string_view host_name;
         if (const auto *host = exchange.host_header(); host != nullptr) {
             host_name = strip_host_port(host->value_view());
@@ -268,6 +295,10 @@ public:
         }
 
         const ServerRuntime &server = runtime_->servers[server_index];
+        log_context.access_log = server.access_log;
+        if (!server.server_names.empty()) {
+            log_context.server_name = server.server_names.front();
+        }
         LocationMatchContext match_context;
         std::string_view path = exchange.uri().path.empty() ? std::string_view("/") : exchange.uri().path;
         if (!server.location_matcher.match_path(path, match_context) ||
@@ -277,18 +308,21 @@ public:
         }
 
         const LocationRuntime &location = server.locations[match_context.location_index];
+        log_context.access_log = location.access_log;
+        log_context.location_pattern = location.pattern;
+        log_context.path_vars = std::move(match_context.path_vars);
         if (location.script) {
-            co_await run_script(exchange, *location.script, match_context.path_vars, script_services_);
+            co_await run_script(exchange, *location.script, log_context.path_vars, script_services_, log_context);
         } else {
-            co_await proxy_.handle(exchange, listener, location, match_context.path_vars, script_services_);
+            co_await proxy_.handle(exchange, listener, location, log_context.path_vars, script_services_, log_context);
         }
     }
 
-private:
     std::shared_ptr<const RuntimeConfig> runtime_;
     std::shared_ptr<upstream::UpstreamRegistry> upstreams_;
     proxy::ProxyHandler proxy_;
     fiber::http_script::HttpScriptServices *script_services_;
+    logging::AccessLogger access_logger_;
 };
 
 } // namespace
@@ -303,6 +337,12 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
     }
 
     runtime_ = std::make_shared<RuntimeConfig>(runtime);
+    logging::AccessLogger access_logger;
+    auto access_log_result = access_logger.bind(*runtime_);
+    if (!access_log_result) {
+        close();
+        return std::unexpected(access_log_result.error());
+    }
     worker_group_ =
             std::make_unique<fiber::event::EventLoopGroup>(std::max<std::size_t>(runtime_->worker_processes, 1));
     worker_group_->start();
@@ -326,8 +366,8 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
     }
     script_services_ = std::make_unique<HttpScriptServicesImpl>(*upstreams_, *connection_pool_, *dns_);
 
-    auto dispatcher =
-            std::make_shared<RequestDispatcher>(runtime_, upstreams_, *connection_pool_, *dns_, script_services_.get());
+    auto dispatcher = std::make_shared<RequestDispatcher>(runtime_, upstreams_, *connection_pool_, *dns_,
+                                                          script_services_.get(), std::move(access_logger));
 
     servers_.reserve(runtime_->listeners.size());
     bound_listeners_.reserve(runtime_->listeners.size());

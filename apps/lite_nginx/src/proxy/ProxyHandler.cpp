@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "common/IoError.h"
+#include "event/EventLoop.h"
 #include "http/ClientHttp1Exchange.h"
 #include "http/Http1ClientConnection.h"
 #include "http/HttpCommon.h"
@@ -15,10 +16,12 @@
 #include "http/HttpHeaders.h"
 #include "http/HttpWebSocketProxy.h"
 #include "http_script/ScriptExchangeCtx.h"
+#include "log/Log.h"
 #include "script/JsValue.h"
 #include "script/Script.h"
 #include "script/std/NodeText.h"
 
+#include "../logging/AccessLogger.h"
 #include "../runtime/DnsService.h"
 #include "../upstream/ConnectionPool.h"
 #include "../upstream/UpstreamConnection.h"
@@ -36,6 +39,20 @@ constexpr std::string_view kNotFoundBody = "404 Not Found\n";
 constexpr std::string_view kScriptErrorBody = "500 Internal Server Error\n";
 constexpr std::string_view kNotImplementedBody = "501 Not Implemented\n";
 
+DEFINE_LOGGER(LOG_PROXY, "lite_nginx.proxy");
+
+void record_upstream_error(logging::RequestLogContext &context, fiber::common::IoErr error,
+                           std::string_view phase) noexcept {
+    if (context.upstream_error == fiber::common::IoErr::None) {
+        context.upstream_error = error;
+    }
+    LOG(LOG_PROXY, WARN) << "request_id=" << context.request_id << " upstream="
+                         << fiber::log::quoted(context.upstream_host.empty() ? std::string_view("-")
+                                                                             : context.upstream_host)
+                         << " port=" << context.upstream_port << " phase=" << phase
+                         << " error=" << fiber::common::io_err_name(error);
+}
+
 bool location_has_template_headers(const runtime::LocationRuntime &location) noexcept {
     for (const auto &header: location.set_headers) {
         if (header.template_script) {
@@ -51,9 +68,11 @@ bool location_has_template_headers(const runtime::LocationRuntime &location) noe
 // ScriptExchangeCtx (route vars + services attached) only when the location has templates.
 bool evaluate_template_headers(fiber::http::HttpExchange &exchange, const runtime::LocationRuntime &location,
                                const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
-                               fiber::http_script::HttpScriptServices *services, std::vector<std::string> &resolved) {
+                               fiber::http_script::HttpScriptServices *services,
+                               fiber::http_script::ScriptConnectionInfo connection,
+                               std::vector<std::string> &resolved) {
     fiber::script::GcHeap heap;
-    fiber::http_script::ScriptExchangeCtx ctx{exchange, heap};
+    fiber::http_script::ScriptExchangeCtx ctx{exchange, heap, connection};
     ctx.set_path_vars(path_vars);
     ctx.set_services(services);
     resolved.resize(location.set_headers.size());
@@ -159,11 +178,13 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
                                                const runtime::LocationRuntime &location,
                                                fiber::http::Http1ClientConnection &conn,
                                                const runtime::ListenerRuntime &listener,
-                                               const std::vector<std::string> &resolved_template_values) {
+                                               const std::vector<std::string> &resolved_template_values,
+                                               logging::RequestLogContext &log_context) {
     WebSocketHandshake websocket{
             .downstream = detect_websocket_downstream(exchange),
     };
     if (!prepare_websocket_handshake(websocket)) {
+        record_upstream_error(log_context, fiber::common::IoErr::Invalid, "websocket_request");
         co_await send_plain_response(exchange, 500, kScriptErrorBody, listener);
         co_return;
     }
@@ -192,6 +213,7 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
     auto send_header_result =
             co_await upstream_exchange.send_header(request_head, request_end_stream, location.send_timeout);
     if (!send_header_result) {
+        record_upstream_error(log_context, send_header_result.error(), "send_header");
         co_await send_plain_response(exchange, map_upstream_error_status(send_header_result.error()),
                                      map_upstream_error_body(send_header_result.error()), listener);
         co_return;
@@ -207,6 +229,7 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
             const bool last = body_result->complete();
             auto write_result = co_await upstream_exchange.write_body(std::move(*body_result), location.send_timeout);
             if (!write_result) {
+                record_upstream_error(log_context, write_result.error(), "send_body");
                 co_await send_plain_response(exchange, map_upstream_error_status(write_result.error()),
                                              map_upstream_error_body(write_result.error()), listener);
                 co_return;
@@ -221,6 +244,7 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
     while (true) {
         auto read_header_result = co_await upstream_exchange.read_header(location.read_timeout);
         if (!read_header_result) {
+            record_upstream_error(log_context, read_header_result.error(), "read_header");
             co_await send_plain_response(exchange, map_upstream_error_status(read_header_result.error()),
                                          map_upstream_error_body(read_header_result.error()), listener);
             co_return;
@@ -231,13 +255,17 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
         }
     }
 
+    log_context.upstream_status = upstream_head->status_code;
+
     if (upstream_head->status_code == 101) {
         if (!valid_websocket_upgrade_response(*upstream_head, websocket)) {
+            record_upstream_error(log_context, fiber::common::IoErr::Invalid, "websocket_response");
             co_await send_plain_response(exchange, 502, kBadGatewayBody, listener);
             co_return;
         }
         auto switch_result = upstream_exchange.switch_to_raw_stream();
         if (!switch_result) {
+            record_upstream_error(log_context, switch_result.error(), "websocket_switch");
             co_await send_plain_response(exchange, 502, kBadGatewayBody, listener);
             co_return;
         }
@@ -298,6 +326,7 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
     while (true) {
         auto body_result = co_await upstream_exchange.read_body(kBodyChunkSize, location.read_timeout);
         if (!body_result) {
+            record_upstream_error(log_context, body_result.error(), "read_body");
             (void) exchange.abort(body_result.error());
             co_return;
         }
@@ -322,7 +351,7 @@ fiber::async::Task<void>
 ProxyHandler::handle(fiber::http::HttpExchange &exchange, const runtime::ListenerRuntime &listener,
                      const runtime::LocationRuntime &location,
                      const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
-                     fiber::http_script::HttpScriptServices *services) const {
+                     fiber::http_script::HttpScriptServices *services, logging::RequestLogContext &log_context) const {
     if (!exchange.protocol().empty() && (exchange.method() != fiber::http::HttpMethod::Connect ||
                                          !fiber::http::http_header_name_equals_ci(exchange.protocol(), "websocket"))) {
         co_await send_plain_response(exchange, 501, kNotImplementedBody, listener);
@@ -330,22 +359,29 @@ ProxyHandler::handle(fiber::http::HttpExchange &exchange, const runtime::Listene
     }
 
     if (!upstreams_ || !pool_) {
+        record_upstream_error(log_context, fiber::common::IoErr::Invalid, "runtime");
         co_await send_plain_response(exchange, 502, kBadGatewayBody, listener);
         co_return;
     }
 
     const auto *peer = upstreams_->select_peer(location.upstream_index);
     if (peer == nullptr || !peer->connection_key.has_value()) {
+        record_upstream_error(log_context, fiber::common::IoErr::NotFound, "select_peer");
         co_await send_plain_response(exchange, 502, kBadGatewayBody, listener);
         co_return;
     }
+    log_context.upstream_host = peer->host;
+    log_context.upstream_port = peer->port;
+    log_context.upstream_started_at = fiber::event::EventLoop::current().now();
+    log_context.upstream_started = true;
 
     // Evaluate ${...} template header values before acquiring the upstream connection so a
     // template failure returns 500 without wasting a connection checkout. Static-header
     // locations skip this entirely (no GcHeap / ScriptExchangeCtx).
     std::vector<std::string> resolved_template_values;
     if (location_has_template_headers(location)) {
-        if (!evaluate_template_headers(exchange, location, path_vars, services, resolved_template_values)) {
+        if (!evaluate_template_headers(exchange, location, path_vars, services, log_context.connection,
+                                       resolved_template_values)) {
             co_await send_plain_response(exchange, 500, kScriptErrorBody, listener);
             co_return;
         }
@@ -357,12 +393,14 @@ ProxyHandler::handle(fiber::http::HttpExchange &exchange, const runtime::Listene
     auto acquired =
             co_await upstream::acquire_and_connect(*pool_, *dns_, *peer->connection_key, sni, location.connect_timeout);
     if (!acquired) {
+        record_upstream_error(log_context, acquired.error(), "connect");
         co_await send_plain_response(exchange, map_upstream_error_status(acquired.error()),
                                      map_upstream_error_body(acquired.error()), listener);
         co_return;
     }
 
-    co_await proxy_over_connection(exchange, location, *acquired->conn, listener, resolved_template_values);
+    co_await proxy_over_connection(exchange, location, *acquired->conn, listener, resolved_template_values,
+                                   log_context);
 }
 
 } // namespace fiber::lite_nginx::proxy

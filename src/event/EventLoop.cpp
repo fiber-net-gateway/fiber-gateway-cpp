@@ -150,6 +150,7 @@ void EventLoop::run_prepared() {
     if (event_fd_ < 0 || !poller_.valid()) {
         return;
     }
+    running_.store(true, std::memory_order_release);
     EventLoop *prev = current_;
     current_ = this;
     now_ = std::chrono::steady_clock::now();
@@ -158,6 +159,7 @@ void EventLoop::run_prepared() {
         run_once();
     } while (!stop_requested_.load(std::memory_order_acquire));
     current_ = prev;
+    running_.store(false, std::memory_order_release);
 }
 
 void EventLoop::run_once() {
@@ -218,8 +220,7 @@ void EventLoop::cancel(TimerEntry &entry) {
 }
 
 void EventLoop::cancel_quiesced(TimerEntry &entry) {
-    FIBER_ASSERT(group_ != nullptr);
-    FIBER_ASSERT(!group_->running());
+    FIBER_ASSERT(!running());
     if (!entry.in_heap_) {
         return;
     }

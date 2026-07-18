@@ -1,5 +1,6 @@
 #include "App.h"
 
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -7,11 +8,15 @@
 #include "config/Config.h"
 #include "config/ConfigLoader.h"
 #include "event/EventLoop.h"
+#include "log/Log.h"
+#include "logging/LoggingBuilder.h"
 #include "runtime/RuntimeBuilder.h"
 #include "runtime/ServerLauncher.h"
 
 namespace fiber::lite_nginx::app {
 namespace {
+
+DEFINE_LOGGER(LOG_LIFECYCLE, "lite_nginx.lifecycle");
 
 struct Options {
     std::string config_path;
@@ -95,6 +100,20 @@ void print_summary(const config::MainConfig &config, std::string_view path) {
     std::cout << "servers=" << config.http.servers.size() << '\n';
 }
 
+std::string format_log_init_error(const fiber::log::LogConfigError &error) {
+    std::string formatted = error.message;
+    if (error.system_error != 0) {
+        formatted.append(": ");
+        formatted.append(std::strerror(error.system_error));
+    }
+    return formatted;
+}
+
+class LoggingShutdownGuard {
+public:
+    ~LoggingShutdownGuard() { fiber::log::LoggerManager::global().shutdown(); }
+};
+
 } // namespace
 
 int LiteNginxApp::run(int argc, char **argv) {
@@ -110,9 +129,10 @@ int LiteNginxApp::run(int argc, char **argv) {
         return 1;
     }
 
-    print_summary(*config_result, options.config_path);
-    if (options.check_config) {
-        return 0;
+    auto log_config_result = logging::LoggingBuilder::build(*config_result);
+    if (!log_config_result) {
+        std::cerr << format_runtime_error(log_config_result.error()) << '\n';
+        return 1;
     }
 
     auto runtime_result = runtime::RuntimeBuilder::build(*config_result);
@@ -121,23 +141,44 @@ int LiteNginxApp::run(int argc, char **argv) {
         return 1;
     }
 
+    if (options.check_config) {
+        print_summary(*config_result, options.config_path);
+        return 0;
+    }
+
+    auto log_init_result = fiber::log::LoggerManager::global().initialize(std::move(*log_config_result));
+    if (!log_init_result) {
+        std::cerr << "failed to initialize logging: " << format_log_init_error(log_init_result.error()) << '\n';
+        return 1;
+    }
+    LoggingShutdownGuard logging_guard;
+    LOG(LOG_LIFECYCLE, INFO) << "configuration loaded path=" << fiber::log::quoted(options.config_path)
+                             << " workers=" << config_result->worker_processes
+                             << " listeners=" << config_result->http.listens.size()
+                             << " upstreams=" << config_result->http.upstreams.size()
+                             << " servers=" << config_result->http.servers.size();
+
     fiber::event::EventLoop loop;
     runtime::ServerLauncher launcher(loop);
     auto start_result = launcher.start(*runtime_result);
     if (!start_result) {
-        std::cerr << format_runtime_error(start_result.error()) << '\n';
+        LOG(LOG_LIFECYCLE, ERROR) << format_runtime_error(start_result.error());
         return 1;
     }
 
     for (const auto &listener: launcher.bound_listeners()) {
-        std::cout << "listening on " << (listener.tls ? "https://" : "http://") << listener.address.to_string() << '\n';
+        LOG(LOG_LIFECYCLE, INFO) << "listening scheme=" << (listener.tls ? "https" : "http")
+                                 << " address=" << fiber::log::quoted(listener.address.to_string());
         if (listener.http3) {
-            std::cout << "listening on h3://" << listener.address.to_string() << '\n';
+            LOG(LOG_LIFECYCLE, INFO) << "listening scheme=h3 address="
+                                     << fiber::log::quoted(listener.address.to_string());
         }
     }
 
-    std::cout << "reverse proxy runtime started\n";
+    LOG(LOG_LIFECYCLE, INFO) << "reverse proxy runtime started";
     loop.run();
+    launcher.close();
+    LOG(LOG_LIFECYCLE, INFO) << "reverse proxy runtime stopped";
     return 0;
 }
 

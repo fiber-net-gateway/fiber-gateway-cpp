@@ -11,6 +11,69 @@
 
 namespace fiber::lite_nginx::config {
 
+enum class LoggingLevel : unsigned char {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+    Fatal,
+};
+
+enum class LogAppenderKind : unsigned char {
+    File,
+    Console,
+};
+
+enum class LogConsoleStream : unsigned char {
+    Stdout,
+    Stderr,
+};
+
+struct LogRotationConfig {
+    std::uint64_t max_file_size = 0;
+    std::string archive_name;
+    std::uint32_t max_archives = 0;
+};
+
+struct LogAppenderConfig {
+    SourceLocation location;
+    std::string name;
+    LogAppenderKind kind = LogAppenderKind::File;
+    std::string path;
+    std::uint32_t file_mode = 0644;
+    std::size_t buffer_size = 0;
+    std::chrono::milliseconds flush_interval{0};
+    LoggingLevel min_level = LoggingLevel::Trace;
+    LoggingLevel max_level = LoggingLevel::Fatal;
+    LogConsoleStream stream = LogConsoleStream::Stderr;
+    std::optional<LogRotationConfig> rotation;
+};
+
+struct LoggerRuleConfig {
+    SourceLocation location;
+    std::string name;
+    std::optional<LoggingLevel> level;
+    std::optional<unsigned> verbosity;
+    std::vector<std::string> appenders;
+    bool additive = true;
+};
+
+struct RootLoggerConfig {
+    SourceLocation location;
+    LoggingLevel level = LoggingLevel::Info;
+    unsigned verbosity = 0;
+    std::vector<std::string> appenders;
+};
+
+struct LoggingConfig {
+    SourceLocation location;
+    std::vector<LogAppenderConfig> appenders;
+    std::vector<LoggerRuleConfig> loggers;
+    RootLoggerConfig root;
+    bool configured = false;
+};
+
 // Global keepalive connection pool shared across all upstreams (one pool, keyed by peer).
 // `steal` controls cross-loop connection sharing: Auto resolves at runtime-build time to
 // (worker_processes > 1); On uses the stealable pool (idle connections shared across worker
@@ -87,6 +150,18 @@ struct ProxyPassTarget {
     SourceLocation location;
 };
 
+enum class AccessLogKind : unsigned char {
+    Off,
+    Template,
+};
+
+struct AccessLogConfig {
+    SourceLocation location;
+    AccessLogKind kind = AccessLogKind::Off;
+    std::string logger_name;
+    std::string message_template;
+};
+
 enum class LocationKind : unsigned char {
     Proxy,
     Script,
@@ -102,6 +177,8 @@ struct LocationConfig {
     ProxyPassTarget proxy_pass;
     std::string script_file;
     ProxySettings proxy;
+    // nullopt inherits the enclosing server; Off explicitly disables an inherited log.
+    std::optional<AccessLogConfig> access_log;
 };
 
 struct ServerConfig {
@@ -111,6 +188,8 @@ struct ServerConfig {
     std::string certificate_key;
     ProxySettings proxy_defaults;
     std::vector<LocationConfig> locations;
+    // nullopt inherits the enclosing http block; Off explicitly disables an inherited log.
+    std::optional<AccessLogConfig> access_log;
 };
 
 struct HttpConfig {
@@ -118,10 +197,13 @@ struct HttpConfig {
     std::vector<UpstreamConfig> upstreams;
     std::vector<ServerConfig> servers;
     ConnectionPoolConfig connection_pool;
+    // nullopt and Off both resolve to disabled at the root http scope.
+    std::optional<AccessLogConfig> access_log;
 };
 
 struct MainConfig {
     std::size_t worker_processes = 1;
+    LoggingConfig logging;
     HttpConfig http;
 };
 

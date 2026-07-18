@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -19,14 +20,29 @@
 #include "script/std/StdLibrary.h"
 
 namespace fiber::http_script {
-class RouteScriptLibrary;
+class RouteScriptExtension;
+}
+
+namespace fiber::lite_nginx::logging {
+class AccessLogScriptExtension;
 }
 
 namespace fiber::lite_nginx::runtime {
 
+using AccessLogId = std::uint32_t;
+inline constexpr AccessLogId kDisabledAccessLog = std::numeric_limits<AccessLogId>::max();
+
 struct RuntimeError {
     std::string message;
     config::SourceLocation location;
+};
+
+struct AccessLogRuntime {
+    config::SourceLocation location;
+    std::string logger_name;
+    // A source without interpolation uses literal_message directly.
+    std::string literal_message;
+    std::shared_ptr<fiber::script::Script> template_script;
 };
 
 // Global keepalive connection pool shared across all upstreams. Configured once under
@@ -87,13 +103,11 @@ struct LocationRuntime {
     std::chrono::milliseconds read_timeout{30000};
     std::chrono::milliseconds send_timeout{30000};
     std::uint32_t upstream_index = 0;
+    AccessLogId access_log = kDisabledAccessLog;
     bool proxy_buffering = false;
     bool host_header_overridden = false;
     // Non-null when this location runs a script (kind == Script) instead of proxying.
     std::shared_ptr<fiber::script::Script> script;
-    // The per-location route-scoped library the script was compiled against. Outlives the
-    // script (HostCallable pointers are baked in); kept alive here alongside it.
-    std::shared_ptr<fiber::http_script::RouteScriptLibrary> route_lib;
 };
 
 struct ServerRuntime {
@@ -103,6 +117,7 @@ struct ServerRuntime {
     std::string certificate_key;
     std::vector<LocationRuntime> locations;
     fiber::util::RoutePathMatcher<std::uint32_t> location_matcher;
+    AccessLogId access_log = kDisabledAccessLog;
 };
 
 struct ServerNameRuntime {
@@ -127,13 +142,17 @@ struct ListenerRuntime {
 
 struct RuntimeConfig {
     std::size_t worker_processes = 1;
+    AccessLogId access_log = kDisabledAccessLog;
+    std::vector<AccessLogRuntime> access_logs;
     std::vector<UpstreamRuntime> upstreams;
     std::vector<ServerRuntime> servers;
     std::vector<ListenerRuntime> listeners;
     ConnectionPoolRuntime connection_pool;
-    // Shared across all script locations (one StdLibrary with the HTTP functions registered),
-    // kept alive for the runtime's lifetime since compiled scripts bake in function pointers.
+    // Shared across all script compilation in this runtime. Extension contexts are configured
+    // before each serial compile and own userdata referenced by the compiled scripts.
     std::shared_ptr<fiber::script::std_lib::StdLibrary> script_library;
+    std::shared_ptr<fiber::http_script::RouteScriptExtension> route_script_extension;
+    std::shared_ptr<fiber::lite_nginx::logging::AccessLogScriptExtension> access_log_script_extension;
 };
 
 } // namespace fiber::lite_nginx::runtime
