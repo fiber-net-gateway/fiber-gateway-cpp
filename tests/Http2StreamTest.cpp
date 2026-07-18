@@ -152,7 +152,7 @@ struct OwnedStreamHolder {
     std::uint64_t pending_name_hash = 0;
 };
 
-struct SendWindowNotifyOwner {
+struct SendWindowNotifyOwner final : fiber::http::Http2OutboundOperation {
     explicit SendWindowNotifyOwner(int *notify_count) : notify_count_ptr(notify_count), stream(this, ops()) {}
 
     static const fiber::http::Http2Stream::Ops &ops() noexcept {
@@ -162,7 +162,6 @@ struct SendWindowNotifyOwner {
                 &SendWindowNotifyOwner::on_header_block_complete,
                 &SendWindowNotifyOwner::on_body,
                 &SendWindowNotifyOwner::on_abort,
-                &SendWindowNotifyOwner::on_send_window_available,
         };
         return kOps;
     }
@@ -176,10 +175,17 @@ struct SendWindowNotifyOwner {
         return fiber::common::IoErr::None;
     }
     static void on_abort(void *, fiber::common::IoErr) noexcept {}
-    static void on_send_window_available(void *owner) noexcept {
-        auto *self = static_cast<SendWindowNotifyOwner *>(owner);
-        if (self->notify_count_ptr) {
-            ++(*self->notify_count_ptr);
+    fiber::common::IoErr encode_outbound_batch(fiber::http::Http2Stream &,
+                                               const fiber::http::Http2OutboundEncodeRequest &,
+                                               fiber::http::Http2OutboundEncodeTarget &,
+                                               fiber::http::Http2OutboundEncodeResult &result) noexcept override {
+        result.status = fiber::http::Http2OutboundEncodeResult::Status::NoWork;
+        return fiber::common::IoErr::None;
+    }
+    void on_outbound_abort(fiber::common::IoErr) noexcept override {}
+    void on_stream_send_window_available() noexcept override {
+        if (notify_count_ptr) {
+            ++(*notify_count_ptr);
         }
     }
 
@@ -281,6 +287,7 @@ TEST(Http2StreamTest, UpdateSendWindowNotifiesWhenCrossingIntoPositiveRange) {
     auto *owner = new SendWindowNotifyOwner(&notify_count);
     fiber::http::Http2Stream::Lease stream = fiber::http::Http2Stream::Lease::adopt(&owner->stream);
     ASSERT_TRUE(stream);
+    ASSERT_TRUE(stream->try_arm_outbound(*owner));
 
     stream->send_window_ = 0;
     stream->update_send_window(3);

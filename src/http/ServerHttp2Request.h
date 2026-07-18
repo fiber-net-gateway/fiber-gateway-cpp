@@ -49,7 +49,6 @@ private:
                                                   bool value_stable) noexcept;
     struct SendResponseHeaderOp;
     struct SendResponseBodyOp;
-    using SendAwaiter = detail::SendAwaiterBase<ServerHttp2Request>;
     using HeaderSendAwaiter = detail::HeaderSendAwaiter<ServerHttp2Request, SendResponseHeaderOp>;
     using BodySendAwaiter = detail::BodySendAwaiter<ServerHttp2Request, SendResponseBodyOp>;
 
@@ -62,15 +61,8 @@ private:
     static common::IoErr on_header_block_complete(void *owner, bool end_stream) noexcept;
     static common::IoErr on_body(void *owner, mem::IoBuf &&buf, bool end_stream) noexcept;
     static void on_stream_abort(void *owner, common::IoErr reason) noexcept;
-    static void on_stream_send_window_available(void *owner) noexcept;
     static void destroy_owner(void *owner) noexcept;
     static fiber::async::DetachedTask run_handler_task(ServerHttp2Request *request, Http2Stream::Lease lease) noexcept;
-    static common::IoErr encode_response_frames(Http2Stream &stream, void *ctx, const Http2OutboundEncodeRequest &req,
-                                                Http2OutboundEncodeTarget &target,
-                                                Http2OutboundEncodeResult &result) noexcept;
-    static common::IoErr encode_body_frames(Http2Stream &stream, void *ctx, const Http2OutboundEncodeRequest &req,
-                                            Http2OutboundEncodeTarget &target,
-                                            Http2OutboundEncodeResult &result) noexcept;
     static common::IoErr on_indexed_field(void *owner, Http2HpackDecoder::TableEntryView entry) noexcept;
     static common::IoErr on_indexed_name(void *owner, Http2HpackDecoder::TableEntryView entry) noexcept;
     static common::IoErr on_name_raw(void *owner, const std::uint8_t *data, std::size_t len) noexcept;
@@ -104,10 +96,6 @@ private:
     [[nodiscard]] std::string_view copy_to_pool(const std::uint8_t *data, std::size_t len) noexcept;
     [[nodiscard]] std::string_view copy_to_pool(std::string_view value) noexcept;
     [[nodiscard]] bool cancel_queued_send() noexcept;
-    void on_send_complete(SendAwaiter *awaiter, common::IoErr result) noexcept;
-    void on_header_send_complete(HeaderSendAwaiter *awaiter, common::IoErr result) noexcept;
-    void on_body_send_complete(BodySendAwaiter *awaiter, common::IoErr result) noexcept;
-    void on_stream_send_window_available() noexcept;
     void on_stream_aborted(common::IoErr reason) noexcept;
 
     [[maybe_unused]] Http2Connection *conn_ = nullptr;
@@ -115,7 +103,6 @@ private:
     Http2Stream stream_;
     HttpExchange exchange_;
     detail::Http2BodyRecvState request_body_recv_;
-    SendAwaiter *send_awaiter_ = nullptr;
     common::IoErr abort_reason_ = common::IoErr::None;
     bool reading_trailers_ = false;
     bool saw_regular_header_in_block_ = false;

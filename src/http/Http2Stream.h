@@ -17,6 +17,13 @@ namespace fiber::http {
 class Http2Connection;
 class ServerHttp2Request;
 
+namespace detail {
+
+template<class Owner>
+class SendAwaiterBase;
+
+} // namespace detail
+
 class Http2Stream {
 public:
     struct Ops {
@@ -25,7 +32,6 @@ public:
         common::IoErr (*on_header_block_complete)(void *owner, bool end_stream) noexcept = nullptr;
         common::IoErr (*on_body)(void *owner, mem::IoBuf &&buf, bool end_stream) noexcept = nullptr;
         void (*on_abort)(void *owner, common::IoErr reason) noexcept = nullptr;
-        void (*on_send_window_available)(void *owner) noexcept = nullptr;
     };
 
     class Lease {
@@ -123,6 +129,11 @@ public:
     void close(common::IoErr result = common::IoErr::Canceled) noexcept;
 
 private:
+    [[nodiscard]] bool try_arm_outbound(Http2OutboundOperation &operation) noexcept;
+    void disarm_outbound(Http2OutboundOperation &operation) noexcept;
+    [[nodiscard]] common::IoErr encode_outbound_batch(const Http2OutboundEncodeRequest &req,
+                                                      Http2OutboundEncodeTarget &target,
+                                                      Http2OutboundEncodeResult &result) noexcept;
     void on_outbound_send_complete() noexcept;
     [[nodiscard]] bool ready_for_connection_release() const noexcept;
     [[nodiscard]] bool ready_for_destruction() const noexcept;
@@ -143,6 +154,7 @@ private:
     std::int32_t recv_window_remaining_ = 65535;
     std::uint32_t recv_window_target_ = 65535;
     std::uint32_t recv_window_low_watermark_ = 0;
+    Http2OutboundOperation *outbound_operation_ = nullptr;
     Http2OutboundHook outbound_hook_{};
     common::IntrusiveListHook owned_hook_{};
     void *owner_ = nullptr;
@@ -155,6 +167,8 @@ private:
     friend class Http2OutboundScheduler;
     friend class ServerHttp2Request;
     friend class ClientHttp2Request;
+    template<class Owner>
+    friend class detail::SendAwaiterBase;
 };
 
 } // namespace fiber::http

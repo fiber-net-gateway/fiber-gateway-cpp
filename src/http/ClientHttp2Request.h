@@ -53,7 +53,6 @@ private:
     struct SendRequestHeaderOp;
     struct SendRequestBodyOp;
     struct SendRequestTrailerOp;
-    using SendAwaiter = detail::SendAwaiterBase<ClientHttp2Request>;
     using HeaderSendAwaiter = detail::HeaderSendAwaiter<ClientHttp2Request, SendRequestHeaderOp>;
     using BodySendAwaiter = detail::BodySendAwaiter<ClientHttp2Request, SendRequestBodyOp>;
     using TrailerSendAwaiter = detail::HeaderSendAwaiter<ClientHttp2Request, SendRequestTrailerOp>;
@@ -74,24 +73,9 @@ private:
                                       Http2HpackDecoder::FieldView *out) noexcept;
     static common::IoErr on_value_huffman(void *owner, const std::uint8_t *data, std::size_t len,
                                           Http2HpackDecoder::FieldView *out) noexcept;
-    static common::IoErr encode_request_frames(Http2Stream &stream, void *ctx, const Http2OutboundEncodeRequest &req,
-                                               Http2OutboundEncodeTarget &target,
-                                               Http2OutboundEncodeResult &result) noexcept;
-    static common::IoErr encode_body_frames(Http2Stream &stream, void *ctx, const Http2OutboundEncodeRequest &req,
-                                            Http2OutboundEncodeTarget &target,
-                                            Http2OutboundEncodeResult &result) noexcept;
-    static common::IoErr encode_trailer_frames(Http2Stream &stream, void *ctx, const Http2OutboundEncodeRequest &req,
-                                               Http2OutboundEncodeTarget &target,
-                                               Http2OutboundEncodeResult &result) noexcept;
     static void on_stream_abort(void *owner, common::IoErr reason) noexcept;
-    static void on_stream_send_window_available(void *owner) noexcept;
     static void destroy_owner(void *owner) noexcept;
     [[nodiscard]] bool cancel_queued_send() noexcept;
-    void on_send_complete(SendAwaiter *awaiter, common::IoErr result) noexcept;
-    void on_header_send_complete(HeaderSendAwaiter *awaiter, common::IoErr result) noexcept;
-    void on_body_send_complete(BodySendAwaiter *awaiter, common::IoErr result) noexcept;
-    void on_trailer_send_complete(TrailerSendAwaiter *awaiter, common::IoErr result) noexcept;
-    void on_stream_send_window_available() noexcept;
     void on_stream_aborted(common::IoErr reason) noexcept;
     [[nodiscard]] common::IoErr handle_status(std::string_view value) noexcept;
     [[nodiscard]] common::IoErr commit_field(std::string_view name, std::uint64_t name_hash, std::string_view value,
@@ -114,7 +98,6 @@ private:
     mem::BufPool *pool_ = nullptr;
     detail::Http2BodyRecvState response_body_recv_;
     detail::Http2HeaderBlockQueue response_header_recv_;
-    SendAwaiter *send_awaiter_ = nullptr;
     common::IoErr abort_reason_ = common::IoErr::None;
     bool request_headers_sent_ = false;
     bool request_finished_ = false;

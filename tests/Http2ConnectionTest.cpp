@@ -753,21 +753,22 @@ const fiber::http::Http2Stream::Ops kHeaderEncodeStreamOps{
         &noop_test_abort,
 };
 
-struct HeaderEncodeCase {
+struct HeaderEncodeCase final : fiber::http::Http2OutboundOperation {
     std::uint32_t stream_id = 0;
     bool end_stream = false;
     std::vector<std::pair<std::string_view, std::string_view>> headers;
+
+    fiber::common::IoErr encode_outbound_batch(fiber::http::Http2Stream &stream,
+                                               const fiber::http::Http2OutboundEncodeRequest &req,
+                                               fiber::http::Http2OutboundEncodeTarget &target,
+                                               fiber::http::Http2OutboundEncodeResult &result) noexcept override;
+    void on_outbound_abort(fiber::common::IoErr) noexcept override {}
 };
 
-fiber::common::IoErr encode_headers_frame_for_test(fiber::http::Http2Stream &, void *ctx,
-                                                   const fiber::http::Http2OutboundEncodeRequest &req,
-                                                   fiber::http::Http2OutboundEncodeTarget &target,
-                                                   fiber::http::Http2OutboundEncodeResult &result) noexcept {
-    auto *test_case = static_cast<HeaderEncodeCase *>(ctx);
-    if (!test_case) {
-        return fiber::common::IoErr::Invalid;
-    }
-
+fiber::common::IoErr HeaderEncodeCase::encode_outbound_batch(fiber::http::Http2Stream &,
+                                                             const fiber::http::Http2OutboundEncodeRequest &req,
+                                                             fiber::http::Http2OutboundEncodeTarget &target,
+                                                             fiber::http::Http2OutboundEncodeResult &result) noexcept {
     fiber::http::Http2HpackEncodeCatalog catalog;
     if (!catalog.init({})) {
         return fiber::common::IoErr::Invalid;
@@ -779,16 +780,16 @@ fiber::common::IoErr encode_headers_frame_for_test(fiber::http::Http2Stream &, v
     }
 
     fiber::http::Http2HeadersFrameEncoder frame_encoder(encoder, {
-                                                                         .stream_id = test_case->stream_id,
+                                                                         .stream_id = stream_id,
                                                                          .max_frame_size = req.max_frame_size,
                                                                          .first_frame_payload_cap = 1024,
-                                                                         .end_stream = test_case->end_stream,
+                                                                         .end_stream = end_stream,
                                                                  });
     fiber::common::IoErr err = frame_encoder.begin(target);
     if (err != fiber::common::IoErr::None) {
         return err;
     }
-    for (const auto &[name, value]: test_case->headers) {
+    for (const auto &[name, value]: headers) {
         err = frame_encoder.encode_field(name, fiber::http::http_header_name_hash(name), value);
         if (err != fiber::common::IoErr::None) {
             frame_encoder.abort();
@@ -802,7 +803,7 @@ fiber::common::IoErr encode_headers_frame_for_test(fiber::http::Http2Stream &, v
 
     result.status = fiber::http::Http2OutboundEncodeResult::Status::Encoded;
     result.next_kind = fiber::http::Http2OutboundNextKind::None;
-    result.consumed_conn_window = 0;
+    result.flow_controlled_bytes = 0;
     return fiber::common::IoErr::None;
 }
 
@@ -823,12 +824,13 @@ std::string build_headers_frame_bytes(std::uint32_t stream_id,
             group.at(0), [promise, test_case = std::move(test_case), &group]() mutable -> fiber::async::DetachedTask {
                 FakeHttpTransport transport({}, {});
                 fiber::http::Http2OutboundScheduler scheduler(16384);
-                int owner = 0;
-                fiber::http::Http2Stream stream(&owner, kHeaderEncodeStreamOps);
+                fiber::http::Http2Stream stream(&test_case, kHeaderEncodeStreamOps);
                 stream.stream_id_ = test_case.stream_id;
 
-                fiber::common::IoErr err = scheduler.request_send(stream, fiber::http::Http2OutboundNextKind::Headers,
-                                                                  &encode_headers_frame_for_test, &test_case);
+                fiber::common::IoErr err =
+                        stream.try_arm_outbound(test_case)
+                                ? scheduler.request_send(stream, fiber::http::Http2OutboundNextKind::Headers)
+                                : fiber::common::IoErr::Already;
                 if (err == fiber::common::IoErr::None) {
                     scheduler.close();
                     while (!scheduler.stopped()) {

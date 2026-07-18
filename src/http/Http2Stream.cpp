@@ -106,8 +106,8 @@ common::IoErr Http2Stream::close_rst(Http2ErrorCode code, common::IoErr result) 
 void Http2Stream::update_send_window(std::int32_t delta) noexcept {
     const std::int32_t before = send_window_;
     send_window_ += delta;
-    if (before <= 0 && send_window_ > 0 && ops_ && ops_->on_send_window_available) {
-        ops_->on_send_window_available(owner_);
+    if (before <= 0 && send_window_ > 0 && outbound_operation_) {
+        outbound_operation_->on_stream_send_window_available();
     }
 }
 
@@ -161,12 +161,36 @@ void Http2Stream::close(common::IoErr result) noexcept {
     }
     outbound_hook_.closed_ = true;
     outbound_hook_.next_kind_ = static_cast<Http2OutboundNextKind>(0);
-    outbound_hook_.encode_ = nullptr;
-    outbound_hook_.encode_ctx_ = nullptr;
     active_ = false;
     if (first_abort && ops_ && ops_->on_abort) {
         ops_->on_abort(owner_, close_reason_);
     }
+    if (first_abort && outbound_operation_) {
+        outbound_operation_->on_outbound_abort(close_reason_);
+    }
+}
+
+bool Http2Stream::try_arm_outbound(Http2OutboundOperation &operation) noexcept {
+    if (outbound_operation_) {
+        return false;
+    }
+    outbound_operation_ = &operation;
+    return true;
+}
+
+void Http2Stream::disarm_outbound(Http2OutboundOperation &operation) noexcept {
+    if (outbound_operation_ != &operation) {
+        return;
+    }
+    FIBER_ASSERT(outbound_hook_.next_kind_ == Http2OutboundNextKind::None || outbound_hook_.closed_);
+    outbound_operation_ = nullptr;
+}
+
+common::IoErr Http2Stream::encode_outbound_batch(const Http2OutboundEncodeRequest &req,
+                                                 Http2OutboundEncodeTarget &target,
+                                                 Http2OutboundEncodeResult &result) noexcept {
+    FIBER_ASSERT(outbound_operation_ != nullptr);
+    return outbound_operation_->encode_outbound_batch(*this, req, target, result);
 }
 
 void Http2Stream::on_outbound_send_complete() noexcept {

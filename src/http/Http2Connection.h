@@ -235,8 +235,7 @@ private:
     [[nodiscard]] bool is_local_stream_id(std::uint32_t stream_id) const noexcept;
     [[nodiscard]] bool is_peer_stream_id(std::uint32_t stream_id) const noexcept;
     [[nodiscard]] std::size_t configured_max_active_streams() const noexcept;
-    [[nodiscard]] common::IoErr request_stream_send(Http2Stream &stream, Http2OutboundNextKind next_kind,
-                                                    Http2OutboundEncodeFn encode, void *ctx) noexcept;
+    [[nodiscard]] common::IoErr request_stream_send(Http2Stream &stream, Http2OutboundNextKind next_kind) noexcept;
     [[nodiscard]] bool cancel_queued_stream_send(Http2Stream &stream) noexcept;
     void cancel_stream_send(Http2Stream &stream) noexcept;
     [[nodiscard]] common::IoResult<ReadPumpResult> pump_read(std::size_t operation_budget,

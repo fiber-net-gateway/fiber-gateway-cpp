@@ -7,11 +7,12 @@
 
 #include "../../common/IoError.h"
 #include "../../event/EventLoop.h"
+#include "../Http2Outbound.h"
 
 namespace fiber::http::detail {
 
 template<class Owner>
-class SendAwaiterBase {
+class SendAwaiterBase : public Http2OutboundOperation {
 public:
     SendAwaiterBase(Owner &owner, std::chrono::milliseconds timeout) noexcept : owner_(&owner), timeout_(timeout) {}
 
@@ -27,19 +28,11 @@ public:
         if (loop_ && timer_entry_.is_in_heap()) {
             loop_->template cancel<SendAwaiterBase, &SendAwaiterBase::timer_entry_>(*this);
         }
-        if (owner_->send_awaiter_ == this) {
-            owner_->send_awaiter_ = nullptr;
-        }
+        owner_->stream().disarm_outbound(*this);
         owner_ = nullptr;
     }
 
-    [[nodiscard]] bool try_arm() noexcept {
-        if (!owner_ || owner_->send_awaiter_ != nullptr) {
-            return false;
-        }
-        owner_->send_awaiter_ = this;
-        return true;
-    }
+    [[nodiscard]] bool try_arm() noexcept { return owner_ && owner_->stream().try_arm_outbound(*this); }
 
     [[nodiscard]] Owner *owner() const noexcept { return owner_; }
 
@@ -72,8 +65,8 @@ public:
         if (loop_ && timer_entry_.is_in_heap()) {
             loop_->template cancel<SendAwaiterBase, &SendAwaiterBase::timer_entry_>(*this);
         }
-        if (owner_ && owner_->send_awaiter_ == this) {
-            owner_->send_awaiter_ = nullptr;
+        if (owner_) {
+            owner_->stream().disarm_outbound(*this);
         }
         owner_ = nullptr;
         loop_ = nullptr;
@@ -84,8 +77,7 @@ public:
         return result;
     }
 
-    virtual void on_abort(common::IoErr result) noexcept { complete(result); }
-    virtual void on_stream_send_window_available() noexcept {}
+    void on_outbound_abort(common::IoErr result) noexcept override { complete(result); }
     void complete(common::IoErr result) noexcept {
         if (completed_) {
             return;
@@ -167,6 +159,15 @@ public:
         return op_.submit(*this->owner_, *this);
     }
 
+    common::IoErr encode_outbound_batch(Http2Stream &stream, const Http2OutboundEncodeRequest &req,
+                                        Http2OutboundEncodeTarget &target,
+                                        Http2OutboundEncodeResult &result) noexcept override {
+        if (!this->owner_) {
+            return common::IoErr::Invalid;
+        }
+        return op_.encode_outbound_batch(*this->owner_, *this, stream, req, target, result);
+    }
+
     AwaitResult await_resume() noexcept {
         common::IoErr result = this->take_result();
         if (result != common::IoErr::None) {
@@ -232,6 +233,15 @@ public:
         return request_submit();
     }
 
+    common::IoErr encode_outbound_batch(Http2Stream &stream, const Http2OutboundEncodeRequest &req,
+                                        Http2OutboundEncodeTarget &target,
+                                        Http2OutboundEncodeResult &result) noexcept override {
+        if (!this->owner_) {
+            return common::IoErr::Invalid;
+        }
+        return op_.encode_outbound_batch(*this->owner_, *this, stream, req, target, result);
+    }
+
     AwaitResult await_resume() noexcept {
         common::IoErr result = this->take_result();
         if (result != common::IoErr::None) {
@@ -244,7 +254,7 @@ public:
         }
     }
 
-    void on_abort(common::IoErr result) noexcept override {
+    void on_outbound_abort(common::IoErr result) noexcept override {
         if (this->owner_) {
             (void) this->owner_->cancel_queued_send();
         }
