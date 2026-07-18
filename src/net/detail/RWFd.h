@@ -27,7 +27,7 @@ struct RWFdWaiterBase {
     std::coroutine_handle<> coro_ = nullptr;
     CompleteCallback complete_callback_ = nullptr;
 
-    static void on_ready(void *ctx) noexcept;
+    static void on_event(void *ctx, fiber::common::IoErr err) noexcept;
     void complete(fiber::common::IoErr err) noexcept;
 };
 
@@ -45,7 +45,7 @@ enum class RWFdWaiterState : std::uint8_t {
 
 class RWFd : public common::NonCopyable, public common::NonMovable {
 public:
-    using ReadyCallback = void (*)(void *ctx) noexcept;
+    using ReadyCallback = void (*)(void *ctx, fiber::common::IoErr err) noexcept;
 
     template<fiber::event::IoEvent Event>
     class WaitAwaiter;
@@ -65,12 +65,13 @@ public:
     int release_fd() noexcept;
     void close();
 
-    // Callbacks may update callback registration, but must keep this RWFd alive
-    // until event dispatch returns.
+    // Callbacks receive None on readiness and Canceled when the fd is closed. They
+    // may update callback registration, but must keep this RWFd alive until event
+    // dispatch returns. Clear operations only remove the matching callback and ctx.
     fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;
-    fiber::common::IoErr clear_read_callback() noexcept;
-    fiber::common::IoErr clear_write_callback() noexcept;
+    fiber::common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept;
 
     [[nodiscard]] WaitReadableAwaiter
     wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
@@ -78,6 +79,7 @@ public:
     wait_writable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
 
 private:
+    friend struct RWFdWaiterBase;
     friend struct RWFdCrossThreadWaiter;
 
     template<fiber::event::IoEvent Event>
@@ -85,6 +87,7 @@ private:
 
     fiber::common::IoErr begin_wait(RWFdWaiterBase *waiter) noexcept;
     fiber::common::IoErr cancel_wait(RWFdWaiterBase *waiter) noexcept;
+    bool remove_callback(fiber::event::IoEvent event, ReadyCallback callback, void *ctx) noexcept;
 
     static void on_efd_events(void *owner, fiber::event::IoEvent events);
     void handle_events(fiber::event::IoEvent events);

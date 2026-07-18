@@ -2,16 +2,14 @@
 
 namespace fiber::net::detail {
 
-namespace {
-
-bool is_waiter_callback(RWFd::ReadyCallback callback) noexcept { return callback == &RWFdWaiterBase::on_ready; }
-
-} // namespace
-
-void RWFdWaiterBase::on_ready(void *ctx) noexcept {
+void RWFdWaiterBase::on_event(void *ctx, fiber::common::IoErr err) noexcept {
     auto *waiter = static_cast<RWFdWaiterBase *>(ctx);
     FIBER_ASSERT(waiter != nullptr);
-    waiter->complete(fiber::common::IoErr::None);
+    fiber::common::IoErr clear_err = waiter->rwfd_->cancel_wait(waiter);
+    if (err == fiber::common::IoErr::None && clear_err != fiber::common::IoErr::None) {
+        err = clear_err;
+    }
+    waiter->complete(err);
 }
 
 void RWFdWaiterBase::complete(fiber::common::IoErr err) noexcept {
@@ -75,16 +73,12 @@ void RWFd::close() {
     write_callback_ctx_ = nullptr;
     efd_.close_fd();
 
-    auto cancel_waiter = [](ReadyCallback callback, void *ctx) noexcept {
-        if (!is_waiter_callback(callback)) {
-            return;
-        }
-        auto *waiter = static_cast<RWFdWaiterBase *>(ctx);
-        FIBER_ASSERT(waiter != nullptr);
-        waiter->complete(fiber::common::IoErr::Canceled);
-    };
-    cancel_waiter(read_callback, read_callback_ctx);
-    cancel_waiter(write_callback, write_callback_ctx);
+    if (read_callback) {
+        read_callback(read_callback_ctx, fiber::common::IoErr::Canceled);
+    }
+    if (write_callback) {
+        write_callback(write_callback_ctx, fiber::common::IoErr::Canceled);
+    }
 }
 
 fiber::common::IoErr RWFd::set_read_callback(ReadyCallback callback, void *ctx) noexcept {
@@ -93,7 +87,7 @@ fiber::common::IoErr RWFd::set_read_callback(ReadyCallback callback, void *ctx) 
         return fiber::common::IoErr::Invalid;
     }
     if (read_callback_) {
-        return is_waiter_callback(read_callback_) ? fiber::common::IoErr::Busy : fiber::common::IoErr::Already;
+        return fiber::common::IoErr::Busy;
     }
     read_callback_ = callback;
     read_callback_ctx_ = ctx;
@@ -111,7 +105,7 @@ fiber::common::IoErr RWFd::set_write_callback(ReadyCallback callback, void *ctx)
         return fiber::common::IoErr::Invalid;
     }
     if (write_callback_) {
-        return is_waiter_callback(write_callback_) ? fiber::common::IoErr::Busy : fiber::common::IoErr::Already;
+        return fiber::common::IoErr::Busy;
     }
     write_callback_ = callback;
     write_callback_ctx_ = ctx;
@@ -123,15 +117,14 @@ fiber::common::IoErr RWFd::set_write_callback(ReadyCallback callback, void *ctx)
     return err;
 }
 
-fiber::common::IoErr RWFd::clear_read_callback() noexcept {
+fiber::common::IoErr RWFd::clear_read_callback(ReadyCallback callback, void *ctx) noexcept {
     FIBER_ASSERT(loop().in_loop());
-    if (!read_callback_ || is_waiter_callback(read_callback_)) {
+    if (!callback) {
+        return fiber::common::IoErr::Invalid;
+    }
+    if (!remove_callback(fiber::event::IoEvent::Read, callback, ctx)) {
         return fiber::common::IoErr::None;
     }
-    ReadyCallback callback = read_callback_;
-    void *ctx = read_callback_ctx_;
-    read_callback_ = nullptr;
-    read_callback_ctx_ = nullptr;
     fiber::common::IoErr err = sync_interest();
     if (err != fiber::common::IoErr::None) {
         read_callback_ = callback;
@@ -140,15 +133,14 @@ fiber::common::IoErr RWFd::clear_read_callback() noexcept {
     return err;
 }
 
-fiber::common::IoErr RWFd::clear_write_callback() noexcept {
+fiber::common::IoErr RWFd::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
     FIBER_ASSERT(loop().in_loop());
-    if (!write_callback_ || is_waiter_callback(write_callback_)) {
+    if (!callback) {
+        return fiber::common::IoErr::Invalid;
+    }
+    if (!remove_callback(fiber::event::IoEvent::Write, callback, ctx)) {
         return fiber::common::IoErr::None;
     }
-    ReadyCallback callback = write_callback_;
-    void *ctx = write_callback_ctx_;
-    write_callback_ = nullptr;
-    write_callback_ctx_ = nullptr;
     fiber::common::IoErr err = sync_interest();
     if (err != fiber::common::IoErr::None) {
         write_callback_ = callback;
@@ -186,7 +178,7 @@ fiber::common::IoErr RWFd::begin_wait(RWFdWaiterBase *waiter) noexcept {
         return fiber::common::IoErr::Busy;
     }
 
-    *callback_slot = &RWFdWaiterBase::on_ready;
+    *callback_slot = &RWFdWaiterBase::on_event;
     *ctx_slot = waiter;
     fiber::common::IoErr err = sync_interest();
     if (err != fiber::common::IoErr::None) {
@@ -200,21 +192,29 @@ fiber::common::IoErr RWFd::cancel_wait(RWFdWaiterBase *waiter) noexcept {
     FIBER_ASSERT(loop().in_loop());
     FIBER_ASSERT(waiter != nullptr);
 
-    bool removed = false;
-    if (read_callback_ == &RWFdWaiterBase::on_ready && read_callback_ctx_ == waiter) {
-        read_callback_ = nullptr;
-        read_callback_ctx_ = nullptr;
-        removed = true;
-    }
-    if (write_callback_ == &RWFdWaiterBase::on_ready && write_callback_ctx_ == waiter) {
-        write_callback_ = nullptr;
-        write_callback_ctx_ = nullptr;
-        removed = true;
-    }
-    if (!removed) {
+    if (!remove_callback(waiter->event_, &RWFdWaiterBase::on_event, waiter)) {
         return fiber::common::IoErr::None;
     }
     return sync_interest();
+}
+
+bool RWFd::remove_callback(fiber::event::IoEvent event, ReadyCallback callback, void *ctx) noexcept {
+    ReadyCallback *callback_slot = nullptr;
+    void **ctx_slot = nullptr;
+    if (event == fiber::event::IoEvent::Read) {
+        callback_slot = &read_callback_;
+        ctx_slot = &read_callback_ctx_;
+    } else {
+        FIBER_ASSERT(event == fiber::event::IoEvent::Write);
+        callback_slot = &write_callback_;
+        ctx_slot = &write_callback_ctx_;
+    }
+    if (*callback_slot != callback || *ctx_slot != ctx) {
+        return false;
+    }
+    *callback_slot = nullptr;
+    *ctx_slot = nullptr;
+    return true;
 }
 
 void RWFd::on_efd_events(void *owner, fiber::event::IoEvent events) {
@@ -249,49 +249,23 @@ void RWFd::handle_events(fiber::event::IoEvent events) {
     fiber::common::IoErr consume_err = efd_.consume_ready(old_watching);
     FIBER_ASSERT(consume_err == fiber::common::IoErr::None);
 
-    if (read_callback && !is_waiter_callback(read_callback)) {
-        read_callback(read_callback_ctx);
+    if (read_callback && read_callback_ == read_callback && read_callback_ctx_ == read_callback_ctx) {
+        read_callback(read_callback_ctx, fiber::common::IoErr::None);
         if (!valid()) {
             return;
         }
     }
-    if (write_callback && !is_waiter_callback(write_callback) && write_callback_ == write_callback &&
-        write_callback_ctx_ == write_callback_ctx) {
-        write_callback(write_callback_ctx);
+    if (write_callback && write_callback_ == write_callback && write_callback_ctx_ == write_callback_ctx) {
+        write_callback(write_callback_ctx, fiber::common::IoErr::None);
         if (!valid()) {
             return;
         }
     }
 
-    bool notify_read_waiter = false;
-    bool notify_write_waiter = false;
-    if (is_waiter_callback(read_callback) && read_callback_ == read_callback &&
-        read_callback_ctx_ == read_callback_ctx) {
-        read_callback_ = nullptr;
-        read_callback_ctx_ = nullptr;
-        notify_read_waiter = true;
-    }
-    if (is_waiter_callback(write_callback) && write_callback_ == write_callback &&
-        write_callback_ctx_ == write_callback_ctx) {
-        write_callback_ = nullptr;
-        write_callback_ctx_ = nullptr;
-        notify_write_waiter = true;
-    }
-
-    fiber::common::IoErr rearm_err = fiber::common::IoErr::None;
     fiber::event::IoEvent active = active_events();
     if (fiber::event::any(active)) {
-        rearm_err = efd_.watch_set(active);
-    }
-    FIBER_ASSERT(rearm_err == fiber::common::IoErr::None);
-
-    if (notify_read_waiter) {
-        auto *waiter = static_cast<RWFdWaiterBase *>(read_callback_ctx);
-        waiter->complete(rearm_err);
-    }
-    if (notify_write_waiter) {
-        auto *waiter = static_cast<RWFdWaiterBase *>(write_callback_ctx);
-        waiter->complete(rearm_err);
+        fiber::common::IoErr rearm_err = efd_.watch_set(active);
+        FIBER_ASSERT(rearm_err == fiber::common::IoErr::None);
     }
 }
 
