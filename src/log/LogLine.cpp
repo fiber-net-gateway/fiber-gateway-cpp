@@ -21,11 +21,14 @@ std::uint32_t current_thread_id() noexcept {
     if (auto *loop = fiber::event::EventLoop::current_or_null(); loop && loop->has_group_index()) {
         return static_cast<std::uint32_t>(loop->group_index());
     }
+    static thread_local const std::uint32_t cached_thread_id = []() noexcept {
 #if defined(SYS_gettid)
-    return static_cast<std::uint32_t>(::syscall(SYS_gettid));
+        return static_cast<std::uint32_t>(::syscall(SYS_gettid));
 #else
-    return static_cast<std::uint32_t>(::getpid());
+        return static_cast<std::uint32_t>(::getpid());
 #endif
+    }();
+    return cached_thread_id;
 }
 
 char hex_digit(unsigned value) noexcept { return static_cast<char>(value < 10 ? '0' + value : 'A' + value - 10); }

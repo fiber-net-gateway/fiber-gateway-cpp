@@ -4,9 +4,16 @@
 #include <new>
 
 #include "../common/Assert.h"
+#include "LogConfig.h"
 #include "LoggerManager.h"
 
 namespace fiber::log {
+
+LogContext::FormatScratchLease::~FormatScratchLease() noexcept {
+    if (context_) {
+        context_->release_format_scratch();
+    }
+}
 
 LogContext::~LogContext() {
     if (auto *manager = LoggerManager::try_global()) {
@@ -14,6 +21,7 @@ LogContext::~LogContext() {
     } else {
         reset();
     }
+    std::free(format_scratch_);
 }
 
 bool LogContext::prepare(std::uint64_t generation, std::uint16_t buffer_count) noexcept {
@@ -35,6 +43,7 @@ bool LogContext::prepare(std::uint64_t generation, std::uint16_t buffer_count) n
 }
 
 void LogContext::reset() noexcept {
+    FIBER_ASSERT(!format_scratch_in_use_);
     detach_loop();
     if (buffers_) {
         for (std::uint16_t i = 0; i < buffer_count_; ++i) {
@@ -45,6 +54,31 @@ void LogContext::reset() noexcept {
     buffers_ = nullptr;
     buffer_count_ = 0;
     generation_ = 0;
+    if (!format_scratch_) {
+        format_scratch_allocation_failed_ = false;
+    }
+}
+
+LogContext::FormatScratchLease LogContext::acquire_format_scratch() noexcept {
+    if (format_scratch_in_use_) {
+        return FormatScratchLease();
+    }
+    if (!format_scratch_ && !format_scratch_allocation_failed_) {
+        format_scratch_ = static_cast<char *>(std::malloc(kMaxFormattedLogLineSize));
+        if (!format_scratch_) {
+            format_scratch_allocation_failed_ = true;
+        }
+    }
+    if (!format_scratch_) {
+        return FormatScratchLease();
+    }
+    format_scratch_in_use_ = true;
+    return FormatScratchLease(*this, format_scratch_);
+}
+
+void LogContext::release_format_scratch() noexcept {
+    FIBER_ASSERT(format_scratch_in_use_);
+    format_scratch_in_use_ = false;
 }
 
 void LogContext::attach_loop(event::EventLoop &loop, std::chrono::milliseconds interval) noexcept {

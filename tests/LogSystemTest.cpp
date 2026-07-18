@@ -383,6 +383,44 @@ TEST(LogSystemTest, EscapesControlCharactersAndTruncatesLongMessages) {
     EXPECT_EQ(std::count(content.begin(), content.end(), '\n'), 3);
 }
 
+TEST(LogSystemTest, ReusesOneFormattedRecordAcrossDirectAndBufferedAppenders) {
+    LoggingScope scope;
+    TempLogFile direct_output;
+    TempLogFile buffered_output;
+    ASSERT_TRUE(direct_output.valid());
+    ASSERT_TRUE(buffered_output.valid());
+
+    fiber::log::LogConfigBuilder builder;
+    auto direct_id = builder.add_file_appender({.name = "direct_output", .path = direct_output.path()});
+    auto buffered_id = builder.add_file_appender({
+            .name = "buffered_output",
+            .path = buffered_output.path(),
+            .buffer_size = 32 * 1024,
+            .flush_interval = 1s,
+    });
+    ASSERT_TRUE(direct_id);
+    ASSERT_TRUE(buffered_id);
+    ASSERT_TRUE(builder.set_root_logger({.level = fiber::log::LogLevel::Info}, {*direct_id, *buffered_id}));
+    auto config = builder.finish();
+    ASSERT_TRUE(config);
+    ASSERT_TRUE(fiber::log::LoggerManager::global().initialize(std::move(*config)));
+
+    LOG(LOG_TEST_BUFFER, INFO) << "shared-record-one";
+    LOG(LOG_TEST_BUFFER, INFO) << "shared-record-two";
+
+    EXPECT_EQ(fiber::log::LoggerManager::global().appender_stats(*direct_id).written_records, 2u);
+    EXPECT_EQ(fiber::log::LoggerManager::global().appender_stats(*buffered_id).written_records, 0u);
+    fiber::log::LoggerManager::global().flush_current_thread();
+    EXPECT_EQ(fiber::log::LoggerManager::global().appender_stats(*buffered_id).written_records, 2u);
+
+    fiber::log::LoggerManager::global().shutdown();
+    const std::string direct_content = read_file(direct_output.path());
+    const std::string buffered_content = read_file(buffered_output.path());
+    EXPECT_FALSE(direct_content.empty());
+    EXPECT_EQ(direct_content, buffered_content);
+    EXPECT_EQ(std::count(direct_content.begin(), direct_content.end(), '\n'), 2);
+}
+
 TEST(LogSystemTest, BufferedAppenderFlushesCurrentThread) {
     LoggingScope scope;
     TempLogFile output;

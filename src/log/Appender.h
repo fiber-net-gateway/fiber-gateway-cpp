@@ -12,8 +12,8 @@
 #include <sys/types.h>
 #include <vector>
 
+#include "FormattedLogLine.h"
 #include "LogConfig.h"
-#include "LogEvent.h"
 
 namespace fiber::log {
 
@@ -49,7 +49,7 @@ public:
     }
     [[nodiscard]] AppenderStats stats() const noexcept;
 
-    virtual void append(const LogEvent &event, LogContext &context) noexcept = 0;
+    virtual void append(FormattedLogLine line, LogContext &context) noexcept = 0;
     virtual void flush(LogContext &context) noexcept = 0;
     virtual void flush_due(LogContext &context, std::chrono::steady_clock::time_point now) noexcept = 0;
     [[nodiscard]] virtual bool reopen() noexcept = 0;
@@ -86,7 +86,7 @@ class ConsoleAppender final : public Appender {
 public:
     ConsoleAppender(AppenderId id, ConsoleAppenderOptions options) noexcept;
 
-    void append(const LogEvent &event, LogContext &context) noexcept override;
+    void append(FormattedLogLine line, LogContext &context) noexcept override;
     void flush(LogContext &context) noexcept override;
     void flush_due(LogContext &context, std::chrono::steady_clock::time_point now) noexcept override;
     [[nodiscard]] bool reopen() noexcept override;
@@ -104,7 +104,7 @@ public:
 
     [[nodiscard]] bool open_file(int &system_error) noexcept;
 
-    void append(const LogEvent &event, LogContext &context) noexcept override;
+    void append(FormattedLogLine line, LogContext &context) noexcept override;
     void flush(LogContext &context) noexcept override;
     void flush_due(LogContext &context, std::chrono::steady_clock::time_point now) noexcept override;
     [[nodiscard]] bool reopen() noexcept override;
