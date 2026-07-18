@@ -898,13 +898,13 @@ TEST(LiteNginxRuntimeTest, CompilesAccessLogInheritance) {
     auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(R"(
 http {
     listen 127.0.0.1:8080;
-    access_log on;
+    access_log http.access "http ${$req.method}";
     server {
         server_name localhost;
         access_log off;
         location /quiet { proxy_pass http://127.0.0.1:9001; }
-        location /logged {
-            access_log on;
+        location /logged/:id {
+            access_log location.access "location=${$access.location} id=${$path.id}";
             proxy_pass http://127.0.0.1:9001;
         }
     }
@@ -914,12 +914,35 @@ http {
     ASSERT_TRUE(config.has_value()) << config.error().message;
     auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
     ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
-    EXPECT_TRUE(runtime->access_log);
+    ASSERT_EQ(runtime->access_logs.size(), 2u);
+    EXPECT_EQ(runtime->access_log, 0u);
+    EXPECT_EQ(runtime->access_logs[0].logger_name, "http.access");
+    EXPECT_TRUE(runtime->access_logs[0].template_script != nullptr);
     ASSERT_EQ(runtime->servers.size(), 1u);
-    EXPECT_FALSE(runtime->servers[0].access_log);
+    EXPECT_EQ(runtime->servers[0].access_log, fiber::lite_nginx::runtime::kDisabledAccessLog);
     ASSERT_EQ(runtime->servers[0].locations.size(), 2u);
-    EXPECT_FALSE(runtime->servers[0].locations[0].access_log);
-    EXPECT_TRUE(runtime->servers[0].locations[1].access_log);
+    EXPECT_EQ(runtime->servers[0].locations[0].access_log, fiber::lite_nginx::runtime::kDisabledAccessLog);
+    EXPECT_EQ(runtime->servers[0].locations[1].access_log, 1u);
+    EXPECT_EQ(runtime->access_logs[1].logger_name, "location.access");
+    EXPECT_TRUE(runtime->access_logs[1].template_script != nullptr);
+}
+
+TEST(LiteNginxRuntimeTest, RejectsAsyncAccessLogTemplate) {
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(R"(
+http {
+    listen 127.0.0.1:8080;
+    access_log http.access "body=${req.readJson()}";
+    server {
+        server_name localhost;
+        location / { proxy_pass http://127.0.0.1:9001; }
+    }
+}
+)",
+                                                                            "async_access_log.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_FALSE(runtime.has_value());
+    EXPECT_NE(runtime.error().message.find("must be synchronous"), std::string::npos);
 }
 
 TEST(LiteNginxRuntimeTest, ProxiesDirectRouteMatcherLocation) {
@@ -1593,7 +1616,7 @@ logging {
 }
 http {
     listen 127.0.0.1:PORT;
-    access_log on;
+    access_log lite_nginx.access "request_id=${$access.request_id} remote_addr=\"${$conn.remote_addr}\" remote_port=${$conn.remote_port} method=\"${$req.method}\" path=\"${$req.path}\" protocol=${$conn.http_version} scheme=${$conn.scheme} tls=${$conn.tls} server=\"${$access.server}\" location=\"${$access.location}\" status=${$access.status} body_bytes_sent=${$access.body_bytes_sent} request_time_us=${$access.request_time_us} outcome=${$access.outcome}";
     server {
         server_name localhost;
         location /api/:id { proxy_pass http://127.0.0.1:9001; }
@@ -1609,7 +1632,7 @@ http {
 
     auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "access_runtime.conf");
     ASSERT_TRUE(config.has_value()) << config.error().message;
-    auto log_config = fiber::lite_nginx::logging::LoggingBuilder::build(config->logging);
+    auto log_config = fiber::lite_nginx::logging::LoggingBuilder::build(*config);
     ASSERT_TRUE(log_config.has_value()) << log_config.error().message;
     auto initialized = fiber::log::LoggerManager::global().initialize(std::move(*log_config));
     ASSERT_TRUE(initialized.has_value()) << initialized.error().message;
@@ -1633,8 +1656,11 @@ http {
     EXPECT_NE(access.find("method=\"GET\""), std::string::npos);
     EXPECT_NE(access.find("path=\"/miss\""), std::string::npos);
     EXPECT_EQ(access.find("secret=hidden"), std::string::npos);
+    EXPECT_NE(access.find("protocol=HTTP/1.1"), std::string::npos);
+    EXPECT_NE(access.find("scheme=http"), std::string::npos);
+    EXPECT_NE(access.find("tls=false"), std::string::npos);
     EXPECT_NE(access.find("server=\"localhost\""), std::string::npos);
-    EXPECT_NE(access.find("location=\"-\""), std::string::npos);
+    EXPECT_NE(access.find("location=\"null\""), std::string::npos);
     EXPECT_NE(access.find("status=404"), std::string::npos);
     EXPECT_NE(access.find("body_bytes_sent=14"), std::string::npos);
     EXPECT_NE(access.find("outcome=ok"), std::string::npos);

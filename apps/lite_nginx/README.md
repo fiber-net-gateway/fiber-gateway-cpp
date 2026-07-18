@@ -132,7 +132,8 @@ Top level:
 
 `http` block:
 
-- `access_log on|off;` - enable the fixed structured access log; inherited by `server` and `location`.
+- `access_log <logger-name> "<script-template>";` or `access_log off;` - select the logger
+  category and synchronous message template; inherited by `server` and `location`.
 - `listen <port>;`
 - `listen <port> ssl;`
 - `listen <port> ssl http3;`
@@ -166,7 +167,7 @@ Top level:
 
 `server` block:
 
-- `access_log on|off;`
+- `access_log <logger-name> "<script-template>";` or `access_log off;`
 - `server_name <name> [name ...];`
 - `certificate <path>;`
 - `certificate_key <path>;`
@@ -178,7 +179,7 @@ Top level:
 
 `location` block:
 
-- `access_log on|off;`
+- `access_log <logger-name> "<script-template>";` or `access_log off;`
 - `proxy_pass http://<upstream_name>;`
 - `proxy_pass http://<host:port>;`
 - `proxy_connect_timeout <duration>;`
@@ -231,11 +232,22 @@ An `appender` supports `type file|console`, `min_level`, and `max_level`. File a
 support `stream stdout|stderr`. A `logger` supports `level`, `verbosity`, repeated `appender`
 references, and `additive on|off`; `root_logger` supports `level`, `verbosity`, and appenders.
 
-Access output uses a fixed one-line logfmt schema containing request ID, socket peer, method,
-path, HTTP version, host, selected server/location, downstream status and payload bytes, elapsed
-time, upstream peer/status/time when available, and an outcome. Query strings, request bodies,
-cookies, and authorization headers are not logged. `access_log` inherits from `http` to `server`
-to `location`; the most specific value wins.
+`access_log` takes a logger category followed by a script template string. For example:
+
+```nginx
+access_log lite_nginx.access "request_id=${$access.request_id} remote_addr=${$conn.remote_addr} method=${$req.method} path=${$req.path} status=${$access.status}";
+```
+
+The category is resolved through the normal hierarchical logging configuration. The template is
+compiled while the runtime configuration is built and must be synchronous; use of an async
+function such as `req.readJson()` rejects the configuration. It can use the regular request
+constants plus `$conn.remote_addr`, `$conn.remote_port`, `$conn.http_version`, `$conn.scheme`, and
+`$conn.tls`; access-only fields are `$access.request_id`, `$access.server`, `$access.location`,
+`$access.status`, `$access.body_bytes_sent`, `$access.request_time_us`, and `$access.outcome`.
+Upstream fields are `$upstream.host`, `$upstream.port`, `$upstream.status`, `$upstream.time_us`,
+and `$upstream.error`, and resolve to `null` when no upstream value is available. `access_log`
+inherits from `http` to `server` to `location`; an explicit pair replaces the inherited pair and
+`off` disables it.
 
 ## Scripting
 
@@ -262,6 +274,9 @@ at runtime -- see `conf/scripts/vars.js`):
 - `$cookie.<key>` - a request cookie, same normalization as `$header`.
 - `$req.<field>` - one of `uri` / `method` / `path` / `query` (fixed set; unknown = compile
   error). `query` is the raw query string (empty when absent).
+- `$conn.<field>` - one of `remote_addr` / `remote_port` / `http_version` / `scheme` / `tls`.
+  These values describe the accepted downstream connection and are also available to access-log
+  templates.
 
 Absent `$query`/`$header`/`$cookie` values resolve to `null` (not an error). `$path.<name>`
 is always present for a matched route (the pattern captured it).
@@ -295,9 +310,10 @@ The directive target is either a named upstream (`@backend` / `backend`) or an a
 
 ## Explicit V1 Restrictions
 
-- `proxy_set_header` accepts only literal values.
+- `proxy_set_header` accepts literal values or synchronous `${...}` templates.
 - `proxy_pass` accepts only static targets.
-- No nginx variables are supported in any directive.
+- Script constants in `${...}` are supported only by directives documented as templates; nginx
+  variables are not interpreted.
 - `listen` is only valid in the `http` block.
 - `server` blocks must define at least one `server_name`.
 - `listen ... ssl` enables TLS; HTTP/2 is negotiated automatically and does not

@@ -117,6 +117,9 @@ private:
 
     std::vector<AppenderDefinition> appenders_;
     std::vector<LoggerDefinition> loggers_;
+    // Logger categories requested by runtime configuration rather than by static
+    // LoggerHandle registration. LoggerManager materializes these at initialization.
+    std::vector<std::string> requested_loggers_;
     RootLoggerOptions root_{};
     std::vector<AppenderId> root_appenders_;
     bool has_root_ = false;
@@ -129,6 +132,7 @@ public:
 
     [[nodiscard]] LogConfigResult<void> add_logger(LoggerOptions options, std::initializer_list<AppenderId> appenders);
     [[nodiscard]] LogConfigResult<void> add_logger(LoggerOptions options, std::vector<AppenderId> appenders);
+    [[nodiscard]] LogConfigResult<void> request_logger(std::string name);
 
     [[nodiscard]] LogConfigResult<void> set_root_logger(RootLoggerOptions options,
                                                         std::initializer_list<AppenderId> appenders);

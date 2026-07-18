@@ -7,6 +7,7 @@
 #include <unordered_set>
 
 #include "PathResolve.h"
+#include "log/LogConfig.h"
 
 namespace fiber::lite_nginx::config {
 namespace {
@@ -192,6 +193,30 @@ std::expected<bool, ConfigError> parse_on_off(const DirectiveNode &directive, co
         return std::unexpected(make_error(directive, std::string(field_name) + " expects 'on' or 'off'"));
     }
     return directive.args[0] == "on";
+}
+
+std::expected<AccessLogConfig, ConfigError> parse_access_log(const DirectiveNode &directive) {
+    if (directive.has_block) {
+        return std::unexpected(make_error(directive, "access_log must not be a block"));
+    }
+    if (directive.args.size() == 1 && directive.args[0] == "off") {
+        return AccessLogConfig{
+                .location = directive.location,
+                .kind = AccessLogKind::Off,
+        };
+    }
+    if (directive.args.size() != 2) {
+        return std::unexpected(make_error(directive, "access_log expects '<logger-name> <message-template>' or 'off'"));
+    }
+    if (!fiber::log::valid_logger_name(directive.args[0])) {
+        return std::unexpected(make_error(directive, "access_log logger name is invalid"));
+    }
+    return AccessLogConfig{
+            .location = directive.location,
+            .kind = AccessLogKind::Template,
+            .logger_name = directive.args[0],
+            .message_template = directive.args[1],
+    };
 }
 
 std::expected<LoggingLevel, ConfigError> parse_logging_level(const DirectiveNode &directive, std::string_view value,
@@ -961,11 +986,11 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
             if (seen_access_log) {
                 return std::unexpected(make_error(child, "access_log must not be repeated in location"));
             }
-            auto enabled = parse_on_off(child, "access_log");
-            if (!enabled) {
-                return std::unexpected(enabled.error());
+            auto access_log = parse_access_log(child);
+            if (!access_log) {
+                return std::unexpected(access_log.error());
             }
-            location.access_log = *enabled;
+            location.access_log = std::move(*access_log);
             seen_access_log = true;
             continue;
         }
@@ -1066,11 +1091,11 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
             if (seen_access_log) {
                 return std::unexpected(make_error(child, "access_log must not be repeated in server"));
             }
-            auto enabled = parse_on_off(child, "access_log");
-            if (!enabled) {
-                return std::unexpected(enabled.error());
+            auto access_log = parse_access_log(child);
+            if (!access_log) {
+                return std::unexpected(access_log.error());
             }
-            server.access_log = *enabled;
+            server.access_log = std::move(*access_log);
             seen_access_log = true;
             continue;
         }
@@ -1236,11 +1261,11 @@ std::expected<HttpConfig, ConfigError> parse_http(const DirectiveNode &directive
             if (seen_access_log) {
                 return std::unexpected(make_error(child, "access_log must not be repeated in http"));
             }
-            auto enabled = parse_on_off(child, "access_log");
-            if (!enabled) {
-                return std::unexpected(enabled.error());
+            auto access_log = parse_access_log(child);
+            if (!access_log) {
+                return std::unexpected(access_log.error());
             }
-            http.access_log = *enabled;
+            http.access_log = std::move(*access_log);
             seen_access_log = true;
             continue;
         }

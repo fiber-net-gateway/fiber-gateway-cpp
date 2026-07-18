@@ -32,6 +32,8 @@ namespace fiber::http_script {
 //   $query.<key>   - always resolvable (slot exists); value looked up at request time.
 //   $header.<key>  - always resolvable; matched case-insensitively with '-' == '_'.
 //   $cookie.<key>  - always resolvable; matched case-insensitively with '-' == '_'.
+//   $conn.<field>  - <field> must be one of {remote_addr, remote_port, http_version,
+//                    scheme, tls}, else compile fails.
 //
 // The synthesized HostCallable pointers are baked into the compiled script, so this object
 // must outlive the script (the host stores it in the location runtime, kept alive for the
@@ -52,11 +54,11 @@ public:
     const HostCallable *resolve_async_constant(std::string_view namespace_name, std::string_view key) const override;
 
 private:
-    enum class VarKind : std::uint8_t { Path, Query, Header, Cookie, ReqField };
+    enum class VarKind : std::uint8_t { Path, Query, Header, Cookie, ReqField, ConnField };
 
     struct VarRef {
         VarKind kind;
-        std::string name; // normalized: lowercase for header/cookie; exact for path/query/req
+        std::string name; // normalized: lowercase for header/cookie; exact for path/query/req/conn
     };
 
     // Constant implementations (static so their addresses match Library::Constant). userdata
@@ -66,6 +68,7 @@ private:
     static fiber::script::AbiResult header_var_fn(void *userdata, const HostCallFrame &frame) noexcept;
     static fiber::script::AbiResult cookie_var_fn(void *userdata, const HostCallFrame &frame) noexcept;
     static fiber::script::AbiResult req_field_fn(void *userdata, const HostCallFrame &frame) noexcept;
+    static fiber::script::AbiResult conn_field_fn(void *userdata, const HostCallFrame &frame) noexcept;
 
     const HostCallable *get_or_create(VarKind kind, std::string_view namespace_name, std::string_view key) const;
 

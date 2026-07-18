@@ -129,9 +129,15 @@ int LiteNginxApp::run(int argc, char **argv) {
         return 1;
     }
 
-    auto log_config_result = logging::LoggingBuilder::build(config_result->logging);
+    auto log_config_result = logging::LoggingBuilder::build(*config_result);
     if (!log_config_result) {
         std::cerr << format_runtime_error(log_config_result.error()) << '\n';
+        return 1;
+    }
+
+    auto runtime_result = runtime::RuntimeBuilder::build(*config_result);
+    if (!runtime_result) {
+        std::cerr << format_runtime_error(runtime_result.error()) << '\n';
         return 1;
     }
 
@@ -151,12 +157,6 @@ int LiteNginxApp::run(int argc, char **argv) {
                              << " listeners=" << config_result->http.listens.size()
                              << " upstreams=" << config_result->http.upstreams.size()
                              << " servers=" << config_result->http.servers.size();
-
-    auto runtime_result = runtime::RuntimeBuilder::build(*config_result);
-    if (!runtime_result) {
-        LOG(LOG_LIFECYCLE, ERROR) << format_runtime_error(runtime_result.error());
-        return 1;
-    }
 
     fiber::event::EventLoop loop;
     runtime::ServerLauncher launcher(loop);

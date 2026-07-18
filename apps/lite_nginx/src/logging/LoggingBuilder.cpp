@@ -35,38 +35,67 @@ runtime::RuntimeError make_error(const config::SourceLocation &location, const f
     };
 }
 
-std::expected<fiber::log::LogConfig, runtime::RuntimeError> build_default() {
-    fiber::log::LogConfigBuilder builder;
-    auto stderr_id = builder.add_console_appender({
-            .name = "default_stderr",
-            .stream = fiber::log::ConsoleStream::Stderr,
-    });
-    if (!stderr_id) {
-        return std::unexpected(make_error({}, stderr_id.error()));
+std::expected<void, runtime::RuntimeError> request_access_loggers(fiber::log::LogConfigBuilder &builder,
+                                                                  const config::MainConfig &config) {
+    auto request = [&](const std::optional<config::AccessLogConfig> &access_log)
+            -> std::expected<void, runtime::RuntimeError> {
+        if (!access_log || access_log->kind != config::AccessLogKind::Template) {
+            return {};
+        }
+        auto result = builder.request_logger(access_log->logger_name);
+        if (!result) {
+            return std::unexpected(make_error(access_log->location, result.error()));
+        }
+        return {};
+    };
+
+    if (auto result = request(config.http.access_log); !result) {
+        return result;
     }
-    auto root = builder.set_root_logger({.level = fiber::log::LogLevel::Info}, {*stderr_id});
-    if (!root) {
-        return std::unexpected(make_error({}, root.error()));
+    for (const auto &server: config.http.servers) {
+        if (auto result = request(server.access_log); !result) {
+            return result;
+        }
+        for (const auto &location: server.locations) {
+            if (auto result = request(location.access_log); !result) {
+                return result;
+            }
+        }
     }
-    auto result = builder.finish();
-    if (!result) {
-        return std::unexpected(make_error({}, result.error()));
-    }
-    return std::move(*result);
+    return {};
 }
 
 } // namespace
 
-std::expected<fiber::log::LogConfig, runtime::RuntimeError> LoggingBuilder::build(const config::LoggingConfig &config) {
-    if (!config.configured) {
-        return build_default();
+std::expected<fiber::log::LogConfig, runtime::RuntimeError> LoggingBuilder::build(const config::MainConfig &config) {
+    if (!config.logging.configured) {
+        fiber::log::LogConfigBuilder builder;
+        auto stderr_id = builder.add_console_appender({
+                .name = "default_stderr",
+                .stream = fiber::log::ConsoleStream::Stderr,
+        });
+        if (!stderr_id) {
+            return std::unexpected(make_error({}, stderr_id.error()));
+        }
+        auto root = builder.set_root_logger({.level = fiber::log::LogLevel::Info}, {*stderr_id});
+        if (!root) {
+            return std::unexpected(make_error({}, root.error()));
+        }
+        if (auto requested = request_access_loggers(builder, config); !requested) {
+            return std::unexpected(requested.error());
+        }
+        auto result = builder.finish();
+        if (!result) {
+            return std::unexpected(make_error({}, result.error()));
+        }
+        return std::move(*result);
     }
 
     fiber::log::LogConfigBuilder builder;
     std::unordered_map<std::string, fiber::log::AppenderId> appenders;
-    appenders.reserve(config.appenders.size() * 2 + 1);
+    appenders.reserve(config.logging.appenders.size() * 2 + 1);
 
-    for (const auto &appender: config.appenders) {
+    for (const auto &appender: config.logging.appenders) {
         fiber::log::LogConfigResult<fiber::log::AppenderId> added = std::unexpected(fiber::log::LogConfigError{});
         if (appender.kind == config::LogAppenderKind::File) {
             added = builder.add_file_appender({
@@ -93,7 +122,7 @@ std::expected<fiber::log::LogConfig, runtime::RuntimeError> LoggingBuilder::buil
         appenders.emplace(appender.name, *added);
     }
 
-    for (const auto &rule: config.loggers) {
+    for (const auto &rule: config.logging.loggers) {
         std::vector<fiber::log::AppenderId> targets;
         targets.reserve(rule.appenders.size());
         for (const auto &name: rule.appenders) {
@@ -122,30 +151,33 @@ std::expected<fiber::log::LogConfig, runtime::RuntimeError> LoggingBuilder::buil
     }
 
     std::vector<fiber::log::AppenderId> root_targets;
-    root_targets.reserve(config.root.appenders.size());
-    for (const auto &name: config.root.appenders) {
+    root_targets.reserve(config.logging.root.appenders.size());
+    for (const auto &name: config.logging.root.appenders) {
         auto it = appenders.find(name);
         if (it == appenders.end()) {
             return std::unexpected(runtime::RuntimeError{
                     .message = "root_logger references unknown appender: " + name,
-                    .location = config.root.location,
+                    .location = config.logging.root.location,
             });
         }
         root_targets.push_back(it->second);
     }
     auto root = builder.set_root_logger(
             {
-                    .level = to_log_level(config.root.level),
-                    .verbosity = config.root.verbosity,
+                    .level = to_log_level(config.logging.root.level),
+                    .verbosity = config.logging.root.verbosity,
             },
             std::move(root_targets));
     if (!root) {
-        return std::unexpected(make_error(config.root.location, root.error()));
+        return std::unexpected(make_error(config.logging.root.location, root.error()));
+    }
+    if (auto requested = request_access_loggers(builder, config); !requested) {
+        return std::unexpected(requested.error());
     }
 
     auto result = builder.finish();
     if (!result) {
-        return std::unexpected(make_error(config.location, result.error()));
+        return std::unexpected(make_error(config.logging.location, result.error()));
     }
     return std::move(*result);
 }

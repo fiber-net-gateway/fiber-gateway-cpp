@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -22,11 +23,28 @@ namespace fiber::http_script {
 class RouteScriptLibrary;
 }
 
+namespace fiber::script {
+class Library;
+}
+
 namespace fiber::lite_nginx::runtime {
+
+using AccessLogId = std::uint32_t;
+inline constexpr AccessLogId kDisabledAccessLog = std::numeric_limits<AccessLogId>::max();
 
 struct RuntimeError {
     std::string message;
     config::SourceLocation location;
+};
+
+struct AccessLogRuntime {
+    config::SourceLocation location;
+    std::string logger_name;
+    // A source without interpolation uses literal_message directly. Interpolated
+    // templates keep both their compiled Script and the Library owning baked HostCallables.
+    std::string literal_message;
+    std::shared_ptr<fiber::script::Script> template_script;
+    std::shared_ptr<fiber::script::Library> template_library;
 };
 
 // Global keepalive connection pool shared across all upstreams. Configured once under
@@ -87,7 +105,7 @@ struct LocationRuntime {
     std::chrono::milliseconds read_timeout{30000};
     std::chrono::milliseconds send_timeout{30000};
     std::uint32_t upstream_index = 0;
-    bool access_log = false;
+    AccessLogId access_log = kDisabledAccessLog;
     bool proxy_buffering = false;
     bool host_header_overridden = false;
     // Non-null when this location runs a script (kind == Script) instead of proxying.
@@ -104,7 +122,7 @@ struct ServerRuntime {
     std::string certificate_key;
     std::vector<LocationRuntime> locations;
     fiber::util::RoutePathMatcher<std::uint32_t> location_matcher;
-    bool access_log = false;
+    AccessLogId access_log = kDisabledAccessLog;
 };
 
 struct ServerNameRuntime {
@@ -129,7 +147,8 @@ struct ListenerRuntime {
 
 struct RuntimeConfig {
     std::size_t worker_processes = 1;
-    bool access_log = false;
+    AccessLogId access_log = kDisabledAccessLog;
+    std::vector<AccessLogRuntime> access_logs;
     std::vector<UpstreamRuntime> upstreams;
     std::vector<ServerRuntime> servers;
     std::vector<ListenerRuntime> listeners;

@@ -327,7 +327,8 @@ fiber::http::HttpHandler make_route_script_handler(CompiledRouteScript compiled,
     auto shared_lib = compiled.shared_lib;
     return [script, matcher, route_lib, shared_lib](fiber::http::HttpExchange &exchange) -> Task<void> {
         fiber::script::GcHeap heap;
-        fiber::http_script::ScriptExchangeCtx ctx{exchange, heap};
+        fiber::http_script::ScriptExchangeCtx ctx{
+                exchange, heap, fiber::http_script::ScriptConnectionInfo{.scheme = "http", .tls = false}};
         RouteMatchCollector mc;
         std::string_view path = exchange.uri().path;
         (void) matcher->match_path(path, mc);
@@ -462,7 +463,7 @@ TEST(HttpScriptFuncsTest, SetHeadersAndAddCookieAndSend) {
     s.stop();
 }
 
-// ---- Route-variable ($path/$query/$header/$cookie/$req) tests ----
+// ---- Route-variable ($path/$query/$header/$cookie/$req/$conn) tests ----
 
 TEST(RouteVarTest, PathVarCompileTimeExistence) {
     // $path.id compiles when "id" is a declared path var; $path.missing does not.
@@ -489,6 +490,41 @@ TEST(RouteVarTest, ReqFieldCompileTimeExistence) {
     auto bad = compile_route_script("resp.sendJson(200, $req.bogus);", {});
     EXPECT_FALSE(bad.ok);
     EXPECT_NE(bad.error.find("constant not found"), std::string::npos) << bad.error;
+}
+
+TEST(RouteVarTest, ConnectionFieldCompileTimeExistence) {
+    for (std::string_view field: {"remote_addr", "remote_port", "http_version", "scheme", "tls"}) {
+        std::string src = "resp.sendJson(200, $conn.";
+        src += field;
+        src += ");";
+        auto compiled = compile_route_script(src, {});
+        EXPECT_TRUE(compiled.ok) << field << ": " << compiled.error;
+    }
+    auto bad = compile_route_script("resp.sendJson(200, $conn.bogus);", {});
+    EXPECT_FALSE(bad.ok);
+    EXPECT_NE(bad.error.find("constant not found"), std::string::npos) << bad.error;
+}
+
+TEST(RouteVarTest, ConnectionFieldsDescribeDownstreamConnection) {
+    ServerFixture s;
+    auto compiled = compile_route_script("resp.sendJson(200, {addr: $conn.remote_addr, port: $conn.remote_port, "
+                                         "version: $conn.http_version, scheme: $conn.scheme, tls: $conn.tls});",
+                                         {});
+    ASSERT_TRUE(compiled.ok) << compiled.error;
+    s.start(make_route_script_handler(std::move(compiled), "/*"));
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/connection";
+    ClientResult result = s.request(std::move(req));
+
+    EXPECT_EQ(result.status_code, 200) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"addr\":\"127.0.0.1\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"port\":")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"version\":\"HTTP/1.1\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"scheme\":\"http\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"tls\":false")) << result.body;
+    s.stop();
 }
 
 TEST(RouteVarTest, DynamicNamespacesAlwaysResolve) {

@@ -5,6 +5,7 @@ add_library(lite_nginx_config STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/config/PathResolve.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/Semantic.cpp")
 target_include_directories(lite_nginx_config PUBLIC "${CMAKE_CURRENT_LIST_DIR}/src")
+target_link_libraries(lite_nginx_config PUBLIC fiber_lib)
 set_target_properties(lite_nginx_config PROPERTIES FOLDER "apps/lite_nginx")
 if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
     set_property(TARGET lite_nginx_config PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
@@ -13,6 +14,7 @@ endif()
 add_library(lite_nginx_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/app/App.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/logging/AccessLogger.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/logging/AccessLogScriptLibrary.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/logging/LoggingBuilder.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/proxy/ProxyHandler.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/DnsService.cpp"

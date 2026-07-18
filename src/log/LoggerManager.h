@@ -3,12 +3,15 @@
 
 #include <cstdint>
 #include <memory>
+#include <string_view>
 
 #include "Appender.h"
 #include "LogConfig.h"
 #include "LogContext.h"
 
 namespace fiber::log {
+
+class Logger;
 
 class LoggerManager {
 public:
@@ -26,6 +29,7 @@ public:
     void shutdown() noexcept;
 
     [[nodiscard]] bool running() const noexcept;
+    [[nodiscard]] const Logger *find_logger(std::string_view name) const noexcept;
     [[nodiscard]] bool reopen_all() noexcept;
     void flush_current_thread() noexcept;
 
