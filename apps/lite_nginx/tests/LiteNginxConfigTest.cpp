@@ -719,6 +719,9 @@ logging {
         mode 0640;
         buffer_size 64k;
         flush_interval 200ms;
+        rotate_size 128k;
+        archive_name "{base}.{utc}.{seq}";
+        rotate_keep 14;
         min_level info;
         max_level info;
     }
@@ -763,6 +766,10 @@ http {
     EXPECT_EQ(access.file_mode, 0640u);
     EXPECT_EQ(access.buffer_size, 64u * 1024u);
     EXPECT_EQ(access.flush_interval, std::chrono::milliseconds(200));
+    ASSERT_TRUE(access.rotation.has_value());
+    EXPECT_EQ(access.rotation->max_file_size, 128u * 1024u);
+    EXPECT_EQ(access.rotation->archive_name, "{base}.{utc}.{seq}");
+    EXPECT_EQ(access.rotation->max_archives, 14u);
     EXPECT_EQ(access.min_level, LoggingLevel::Info);
     EXPECT_EQ(access.max_level, LoggingLevel::Info);
     ASSERT_EQ(config->logging.loggers.size(), 1u);
@@ -831,6 +838,40 @@ http {
                                                          "bad_buffer.conf");
     ASSERT_FALSE(invalid_buffer.has_value());
     EXPECT_NE(invalid_buffer.error().message.find("buffer_size and flush_interval"), std::string::npos);
+
+    auto incomplete_rotation = ConfigLoader::load_from_string(R"(
+logging {
+    appender file { type file; path access.log; rotate_size 128k; }
+    root_logger { appender file; }
+}
+http {
+    listen 8080;
+    server { server_name localhost; location / { proxy_pass http://127.0.0.1:9001; } }
+}
+)",
+                                                              "bad_rotation.conf");
+    ASSERT_FALSE(incomplete_rotation.has_value());
+    EXPECT_NE(incomplete_rotation.error().message.find("must be configured together"), std::string::npos);
+
+    auto invalid_archive_name = ConfigLoader::load_from_string(R"(
+logging {
+    appender file {
+        type file;
+        path access.log;
+        rotate_size 128k;
+        archive_name "../{base}.{seq}";
+        rotate_keep 4;
+    }
+    root_logger { appender file; }
+}
+http {
+    listen 8080;
+    server { server_name localhost; location / { proxy_pass http://127.0.0.1:9001; } }
+}
+)",
+                                                               "bad_archive_name.conf");
+    ASSERT_FALSE(invalid_archive_name.has_value());
+    EXPECT_NE(invalid_archive_name.error().message.find("archive_name"), std::string::npos);
 }
 
 } // namespace

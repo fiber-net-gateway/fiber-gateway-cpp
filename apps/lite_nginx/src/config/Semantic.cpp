@@ -613,6 +613,9 @@ std::expected<LogAppenderConfig, ConfigError> parse_log_appender(const Directive
     bool seen_mode = false;
     bool seen_buffer_size = false;
     bool seen_flush_interval = false;
+    bool seen_rotate_size = false;
+    bool seen_archive_name = false;
+    bool seen_rotate_keep = false;
     bool seen_min_level = false;
     bool seen_max_level = false;
     bool seen_stream = false;
@@ -675,6 +678,48 @@ std::expected<LogAppenderConfig, ConfigError> parse_log_appender(const Directive
             seen_flush_interval = true;
             continue;
         }
+        if (child.name == "rotate_size") {
+            if (seen_rotate_size) {
+                return std::unexpected(make_error(child, "rotate_size must not be repeated"));
+            }
+            auto size = parse_size(child, value, "rotate_size");
+            if (!size || *size == 0) {
+                return std::unexpected(size ? make_error(child, "rotate_size must be greater than zero")
+                                            : size.error());
+            }
+            if (!appender.rotation) {
+                appender.rotation.emplace();
+            }
+            appender.rotation->max_file_size = *size;
+            seen_rotate_size = true;
+            continue;
+        }
+        if (child.name == "archive_name") {
+            if (seen_archive_name || !fiber::log::valid_archive_name_pattern(value)) {
+                return std::unexpected(make_error(child, "archive_name has an invalid pattern"));
+            }
+            if (!appender.rotation) {
+                appender.rotation.emplace();
+            }
+            appender.rotation->archive_name = value;
+            seen_archive_name = true;
+            continue;
+        }
+        if (child.name == "rotate_keep") {
+            if (seen_rotate_keep) {
+                return std::unexpected(make_error(child, "rotate_keep must not be repeated"));
+            }
+            auto count = parse_positive_size(child, value, "rotate_keep");
+            if (!count || *count > fiber::log::kMaxRetainedLogArchives) {
+                return std::unexpected(count ? make_error(child, "rotate_keep is too large") : count.error());
+            }
+            if (!appender.rotation) {
+                appender.rotation.emplace();
+            }
+            appender.rotation->max_archives = static_cast<std::uint32_t>(*count);
+            seen_rotate_keep = true;
+            continue;
+        }
         if (child.name == "min_level" || child.name == "max_level") {
             bool &seen = child.name == "min_level" ? seen_min_level : seen_max_level;
             if (seen) {
@@ -713,6 +758,16 @@ std::expected<LogAppenderConfig, ConfigError> parse_log_appender(const Directive
         return std::unexpected(
                 make_error(directive, "buffer_size and flush_interval must both be zero or both be non-zero"));
     }
+    const bool has_rotation_option = seen_rotate_size || seen_archive_name || seen_rotate_keep;
+    if (has_rotation_option && !(seen_rotate_size && seen_archive_name && seen_rotate_keep)) {
+        return std::unexpected(
+                make_error(directive, "rotate_size, archive_name, and rotate_keep must be configured together"));
+    }
+    if (has_rotation_option && (appender.rotation->max_file_size < fiber::log::kMaxFormattedLogLineSize ||
+                                appender.rotation->max_file_size < appender.buffer_size)) {
+        return std::unexpected(
+                make_error(directive, "rotate_size must not be smaller than the buffer or maximum log line"));
+    }
     if (appender.kind == LogAppenderKind::File) {
         if (!seen_path) {
             return std::unexpected(make_error(directive, "file appender must define path"));
@@ -720,7 +775,7 @@ std::expected<LogAppenderConfig, ConfigError> parse_log_appender(const Directive
         if (seen_stream) {
             return std::unexpected(make_error(directive, "file appender does not support stream"));
         }
-    } else if (seen_path || seen_mode || seen_buffer_size || seen_flush_interval) {
+    } else if (seen_path || seen_mode || seen_buffer_size || seen_flush_interval || has_rotation_option) {
         return std::unexpected(make_error(directive, "console appender does not support file options"));
     }
     return appender;

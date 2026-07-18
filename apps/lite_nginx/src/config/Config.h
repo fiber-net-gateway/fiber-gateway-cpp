@@ -30,6 +30,12 @@ enum class LogConsoleStream : unsigned char {
     Stderr,
 };
 
+struct LogRotationConfig {
+    std::uint64_t max_file_size = 0;
+    std::string archive_name;
+    std::uint32_t max_archives = 0;
+};
+
 struct LogAppenderConfig {
     SourceLocation location;
     std::string name;
@@ -41,6 +47,7 @@ struct LogAppenderConfig {
     LoggingLevel min_level = LoggingLevel::Trace;
     LoggingLevel max_level = LoggingLevel::Fatal;
     LogConsoleStream stream = LogConsoleStream::Stderr;
+    std::optional<LogRotationConfig> rotation;
 };
 
 struct LoggerRuleConfig {

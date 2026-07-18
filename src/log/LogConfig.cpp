@@ -15,6 +15,33 @@ bool valid_level_range(LogLevel min_level, LogLevel max_level) noexcept {
     return valid_log_level(min_level) && valid_log_level(max_level) && level_index(min_level) <= level_index(max_level);
 }
 
+std::size_t archive_name_max_size(std::string_view pattern, std::string_view base_name) noexcept {
+    constexpr std::size_t kUtcSize = 16;
+    constexpr std::size_t kMaxSequenceSize = 20;
+    std::size_t size = 0;
+    for (std::size_t i = 0; i < pattern.size();) {
+        if (pattern.substr(i).starts_with("{base}")) {
+            size += base_name.size();
+            i += 6;
+        } else if (pattern.substr(i).starts_with("{utc}")) {
+            size += kUtcSize;
+            i += 5;
+        } else if (pattern.substr(i).starts_with("{seq}")) {
+            size += kMaxSequenceSize;
+            i += 5;
+        } else {
+            ++size;
+            ++i;
+        }
+    }
+    return size;
+}
+
+std::string_view path_basename(std::string_view path) noexcept {
+    const std::size_t slash = path.find_last_of('/');
+    return slash == std::string_view::npos ? path : path.substr(slash + 1);
+}
+
 } // namespace
 
 bool valid_logger_name(std::string_view name) noexcept {
@@ -38,6 +65,42 @@ bool valid_logger_name(std::string_view name) noexcept {
         }
     }
     return true;
+}
+
+bool valid_archive_name_pattern(std::string_view pattern) noexcept {
+    if (pattern.empty() || pattern.size() > 255 || pattern.find('/') != std::string_view::npos ||
+        pattern.find('\\') != std::string_view::npos || pattern.find("..") != std::string_view::npos) {
+        return false;
+    }
+
+    unsigned base_count = 0;
+    unsigned utc_count = 0;
+    unsigned sequence_count = 0;
+    for (std::size_t i = 0; i < pattern.size();) {
+        if (pattern.substr(i).starts_with("{base}")) {
+            ++base_count;
+            i += 6;
+            continue;
+        }
+        if (pattern.substr(i).starts_with("{utc}")) {
+            ++utc_count;
+            i += 5;
+            continue;
+        }
+        if (pattern.substr(i).starts_with("{seq}")) {
+            ++sequence_count;
+            i += 5;
+            continue;
+        }
+        const unsigned char ch = static_cast<unsigned char>(pattern[i]);
+        const bool alpha = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+        const bool digit = ch >= '0' && ch <= '9';
+        if (!alpha && !digit && ch != '.' && ch != '_' && ch != '-') {
+            return false;
+        }
+        ++i;
+    }
+    return base_count == 1 && utc_count <= 1 && sequence_count == 1;
 }
 
 LogConfigResult<void> LogConfigBuilder::ensure_building() const {
@@ -90,6 +153,18 @@ LogConfigResult<AppenderId> LogConfigBuilder::add_file_appender(FileAppenderOpti
     }
     if (options.buffer_size > static_cast<std::size_t>(std::numeric_limits<ssize_t>::max())) {
         return std::unexpected(make_error(LogConfigErrorCode::InvalidBufferOptions, "buffer size exceeds write limit"));
+    }
+    if (options.rotation) {
+        const FileRotationOptions &rotation = *options.rotation;
+        if (rotation.max_file_size < kMaxFormattedLogLineSize || rotation.max_file_size < options.buffer_size ||
+            rotation.max_archives == 0 || rotation.max_archives > kMaxRetainedLogArchives) {
+            return std::unexpected(
+                    make_error(LogConfigErrorCode::InvalidRotationOptions, "invalid file rotation options"));
+        }
+        if (!valid_archive_name_pattern(rotation.archive_name) ||
+            archive_name_max_size(rotation.archive_name, path_basename(options.path)) > 255) {
+            return std::unexpected(make_error(LogConfigErrorCode::InvalidArchiveName, "invalid archive name pattern"));
+        }
     }
     for (const auto &definition: config_.appenders_) {
         if (definition.type == LogConfig::AppenderDefinition::Type::File && definition.file.path == options.path) {
