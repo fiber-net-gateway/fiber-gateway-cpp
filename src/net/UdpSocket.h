@@ -40,7 +40,6 @@ public:
     using RecvPacketTask = detail::DatagramFd::RecvPacketTask;
     using WaitReadableAwaiter = detail::DatagramFd::WaitReadableAwaiter;
     using WaitWritableAwaiter = detail::DatagramFd::WaitWritableAwaiter;
-    using WaitTask = detail::DatagramFd::WaitTask;
 
     explicit UdpSocket(fiber::event::EventLoop &loop);
     ~UdpSocket();
@@ -67,10 +66,10 @@ public:
     [[nodiscard]] fiber::common::IoResult<size_t> try_send_packet(const UdpPacketSendSpec &spec) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_send_packets(const UdpPacketSendSpec *specs,
                                                                    size_t count) noexcept;
-    [[nodiscard]] WaitReadableAwaiter wait_readable() noexcept;
-    [[nodiscard]] WaitWritableAwaiter wait_writable() noexcept;
-    [[nodiscard]] WaitTask wait_readable(std::chrono::milliseconds timeout) noexcept;
-    [[nodiscard]] WaitTask wait_writable(std::chrono::milliseconds timeout) noexcept;
+    [[nodiscard]] WaitReadableAwaiter
+    wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    [[nodiscard]] WaitWritableAwaiter
+    wait_writable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
 
 private:
     detail::DatagramFd socket_;

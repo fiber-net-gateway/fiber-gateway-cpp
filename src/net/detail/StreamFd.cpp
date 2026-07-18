@@ -151,15 +151,11 @@ StreamFd::IoTask StreamFd::writev(const struct iovec *iov, int iovcnt, std::chro
     }
 }
 
-StreamFd::WaitReadableAwaiter StreamFd::wait_readable() noexcept { return rwfd_.wait_readable(); }
-
-StreamFd::WaitWritableAwaiter StreamFd::wait_writable() noexcept { return rwfd_.wait_writable(); }
-
-StreamFd::WaitTask StreamFd::wait_readable(std::chrono::milliseconds timeout) noexcept {
+StreamFd::WaitReadableAwaiter StreamFd::wait_readable(std::chrono::milliseconds timeout) noexcept {
     return rwfd_.wait_readable(timeout);
 }
 
-StreamFd::WaitTask StreamFd::wait_writable(std::chrono::milliseconds timeout) noexcept {
+StreamFd::WaitWritableAwaiter StreamFd::wait_writable(std::chrono::milliseconds timeout) noexcept {
     return rwfd_.wait_writable(timeout);
 }
 

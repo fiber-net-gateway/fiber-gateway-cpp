@@ -76,15 +76,11 @@ fiber::common::IoResult<size_t> UdpSocket::try_send_packets(const UdpPacketSendS
     return sent;
 }
 
-UdpSocket::WaitReadableAwaiter UdpSocket::wait_readable() noexcept { return socket_.wait_readable(); }
-
-UdpSocket::WaitWritableAwaiter UdpSocket::wait_writable() noexcept { return socket_.wait_writable(); }
-
-UdpSocket::WaitTask UdpSocket::wait_readable(std::chrono::milliseconds timeout) noexcept {
+UdpSocket::WaitReadableAwaiter UdpSocket::wait_readable(std::chrono::milliseconds timeout) noexcept {
     return socket_.wait_readable(timeout);
 }
 
-UdpSocket::WaitTask UdpSocket::wait_writable(std::chrono::milliseconds timeout) noexcept {
+UdpSocket::WaitWritableAwaiter UdpSocket::wait_writable(std::chrono::milliseconds timeout) noexcept {
     return socket_.wait_writable(timeout);
 }
 

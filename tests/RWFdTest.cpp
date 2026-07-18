@@ -141,6 +141,14 @@ DetachedTask cross_thread_wait_readable(fiber::net::detail::RWFd *rwfd, fiber::e
     co_return;
 }
 
+DetachedTask cross_thread_wait_readable(fiber::net::detail::RWFd *rwfd, fiber::event::EventLoop *origin,
+                                        std::chrono::milliseconds timeout, std::promise<CrossThreadWaitResult> *done) {
+    auto result = co_await rwfd->wait_readable(timeout);
+    done->set_value(CrossThreadWaitResult{std::move(result), fiber::event::EventLoop::current_or_null() == origin});
+    origin->stop();
+    co_return;
+}
+
 DetachedTask arm_concurrent_read_write_waiters(std::promise<fiber::common::IoResult<void>> *read_done,
                                                std::promise<fiber::common::IoResult<void>> *write_done,
                                                std::promise<void> *armed) {
@@ -168,7 +176,7 @@ DetachedTask arm_concurrent_read_write_waiters(std::promise<fiber::common::IoRes
         co_return;
     }
 
-    for (int i = 0; i < 200 && (rwfd.read_waiter_ != nullptr || rwfd.write_waiter_ != nullptr); ++i) {
+    for (int i = 0; i < 200 && (rwfd.read_callback_ != nullptr || rwfd.write_callback_ != nullptr); ++i) {
         co_await fiber::async::sleep(1ms);
     }
 
@@ -240,6 +248,146 @@ TEST(RWFdTest, ResumesCrossThreadWaiterOnOriginLoop) {
     EXPECT_TRUE(wait_result.resumed_on_origin);
 }
 
+TEST(RWFdTest, CrossThreadTimeoutResumesOnOriginLoop) {
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+
+    fiber::event::EventLoopGroup group(2);
+    group.start();
+    fiber::net::detail::RWFd rwfd(group.at(0), fds[0]);
+    std::promise<CrossThreadWaitResult> wait_promise;
+    auto wait_future = wait_promise.get_future();
+    fiber::async::spawn(group.at(1),
+                        [&]() { return cross_thread_wait_readable(&rwfd, &group.at(1), 20ms, &wait_promise); });
+
+    auto wait_status = wait_future.wait_for(2s);
+
+    std::promise<void> cleanup_promise;
+    auto cleanup_future = cleanup_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
+        rwfd.close();
+        (void) ::close(fds[1]);
+        cleanup_promise.set_value();
+        group.at(0).stop();
+        co_return;
+    });
+    auto cleanup_status = cleanup_future.wait_for(2s);
+    group.stop();
+    group.join();
+
+    ASSERT_EQ(cleanup_status, std::future_status::ready);
+    ASSERT_EQ(wait_status, std::future_status::ready);
+    auto wait_result = wait_future.get();
+    ASSERT_FALSE(wait_result.result);
+    EXPECT_EQ(wait_result.result.error(), fiber::common::IoErr::TimedOut);
+    EXPECT_TRUE(wait_result.resumed_on_origin);
+}
+
+TEST(RWFdTest, ReadinessCompletesBeforeTimeout) {
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+
+    fiber::event::EventLoop loop;
+    fiber::net::detail::RWFd rwfd(loop, fds[0]);
+    fiber::common::IoResult<void> result = std::unexpected(fiber::common::IoErr::Invalid);
+
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        const char byte = 'x';
+        if (::write(fds[1], &byte, 1) != 1) {
+            rwfd.close();
+            (void) ::close(fds[1]);
+            loop.stop();
+            co_return;
+        }
+        result = co_await rwfd.wait_readable(200ms);
+        rwfd.close();
+        (void) ::close(fds[1]);
+        loop.stop();
+        co_return;
+    });
+
+    loop.run();
+    EXPECT_TRUE(result);
+}
+
+TEST(RWFdTest, TimeoutClearsCallbackSlot) {
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+
+    fiber::event::EventLoop loop;
+    fiber::net::detail::RWFd rwfd(loop, fds[0]);
+    fiber::common::IoResult<void> result = std::unexpected(fiber::common::IoErr::Invalid);
+    bool callback_cleared = false;
+
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        result = co_await rwfd.wait_readable(10ms);
+        callback_cleared = rwfd.read_callback_ == nullptr;
+        rwfd.close();
+        (void) ::close(fds[1]);
+        loop.stop();
+        co_return;
+    });
+
+    loop.run();
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), fiber::common::IoErr::TimedOut);
+    EXPECT_TRUE(callback_cleared);
+}
+
+TEST(RWFdTest, NonPositiveTimeoutDoesNotRegisterCallback) {
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+
+    fiber::event::EventLoop loop;
+    fiber::net::detail::RWFd rwfd(loop, fds[0]);
+    fiber::common::IoResult<void> result = std::unexpected(fiber::common::IoErr::Invalid);
+    bool callback_cleared = false;
+
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        result = co_await rwfd.wait_readable(0ms);
+        callback_cleared = rwfd.read_callback_ == nullptr;
+        rwfd.close();
+        (void) ::close(fds[1]);
+        loop.stop();
+        co_return;
+    });
+
+    loop.run();
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), fiber::common::IoErr::TimedOut);
+    EXPECT_TRUE(callback_cleared);
+}
+
+TEST(RWFdTest, CloseCancelsTimedWaiter) {
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+
+    fiber::event::EventLoop loop;
+    fiber::net::detail::RWFd rwfd(loop, fds[0]);
+    fiber::common::IoResult<void> result = std::unexpected(fiber::common::IoErr::Invalid);
+    bool completed = false;
+
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        fiber::async::spawn([&]() -> DetachedTask {
+            result = co_await rwfd.wait_readable(1s);
+            completed = true;
+            co_return;
+        });
+        while (rwfd.read_callback_ == nullptr) {
+            co_await fiber::async::sleep(1ms);
+        }
+        rwfd.close();
+        (void) ::close(fds[1]);
+        loop.stop();
+        co_return;
+    });
+
+    loop.run();
+    EXPECT_TRUE(completed);
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), fiber::common::IoErr::Canceled);
+}
+
 TEST(RWFdTest, RejectsSameDirectionCallbackAndWaiterCoexistence) {
     int fds[2] = {-1, -1};
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
@@ -263,7 +411,7 @@ TEST(RWFdTest, RejectsSameDirectionCallbackAndWaiterCoexistence) {
             active_wait_done = true;
             co_return;
         });
-        for (int i = 0; i < 20 && rwfd.read_waiter_ == nullptr; ++i) {
+        for (int i = 0; i < 20 && rwfd.read_callback_ == nullptr; ++i) {
             co_await fiber::async::sleep(1ms);
         }
 
