@@ -162,6 +162,7 @@ struct LocationRouteDefiner {
 std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::MainConfig &config) {
     RuntimeConfig runtime;
     runtime.worker_processes = config.worker_processes;
+    runtime.access_log = config.http.access_log;
     runtime.connection_pool.keepalive_size = config.http.connection_pool.keepalive_size;
     runtime.connection_pool.keepalive_timeout = config.http.connection_pool.keepalive_timeout;
     runtime.connection_pool.max_idle_total = config.http.connection_pool.max_idle_total;
@@ -220,6 +221,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
         runtime_server.server_names = server.server_names;
         runtime_server.certificate = server.certificate;
         runtime_server.certificate_key = server.certificate_key;
+        runtime_server.access_log = server.access_log.value_or(runtime.access_log);
         runtime_server.locations.reserve(server.locations.size());
 
         LocationRouteDefiner route_definer;
@@ -243,6 +245,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 LocationRuntime runtime_location;
                 runtime_location.location = location.location;
                 runtime_location.pattern = location.pattern;
+                runtime_location.access_log = location.access_log.value_or(runtime_server.access_log);
                 const std::uint32_t location_index = static_cast<std::uint32_t>(runtime_server.locations.size());
 
                 // Add the route first so the matcher extracts the pattern's path variable
@@ -327,6 +330,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
             runtime_location.send_timeout =
                     resolve_timeout(location.proxy.send_timeout, inherited_send, kDefaultSendTimeout);
             runtime_location.upstream_index = upstream_index;
+            runtime_location.access_log = location.access_log.value_or(runtime_server.access_log);
             runtime_location.proxy_buffering = location.proxy.proxy_buffering;
             runtime_location.skip_headers = make_default_skip_headers();
             // Add the route first so the matcher extracts the pattern's path variable names

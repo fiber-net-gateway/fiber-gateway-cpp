@@ -124,6 +124,7 @@ cycles are detected and rejected.
 Top level:
 
 - `worker_processes <n>;`
+- `logging { ... }` - configure console/file appenders and hierarchical loggers.
 - `http { ... }`
 - `include <path>;` - splice another config file's top-level directives here (valid
   in any directive-list context: top-level, `http`, `server`, `location`, `upstream`,
@@ -131,6 +132,7 @@ Top level:
 
 `http` block:
 
+- `access_log on|off;` - enable the fixed structured access log; inherited by `server` and `location`.
 - `listen <port>;`
 - `listen <port> ssl;`
 - `listen <port> ssl http3;`
@@ -164,6 +166,7 @@ Top level:
 
 `server` block:
 
+- `access_log on|off;`
 - `server_name <name> [name ...];`
 - `certificate <path>;`
 - `certificate_key <path>;`
@@ -175,6 +178,7 @@ Top level:
 
 `location` block:
 
+- `access_log on|off;`
 - `proxy_pass http://<upstream_name>;`
 - `proxy_pass http://<host:port>;`
 - `proxy_connect_timeout <duration>;`
@@ -184,6 +188,54 @@ Top level:
 - `proxy_buffering off;`
 - `script_file <path>;` - handle the request with a compiled script instead of proxying
   (mutually exclusive with `proxy_pass`).
+
+## Logging
+
+When `logging` is omitted, operational logs go to stderr and access logging is off by default.
+File paths are resolved relative to the file containing the directive. `--check-config` validates
+logging syntax and references without opening or creating the configured files.
+
+```nginx
+logging {
+    appender access_file {
+        type file;
+        path logs/access.log;
+        mode 0644;
+        buffer_size 64k;
+        flush_interval 200ms;
+        min_level info;
+        max_level info;
+    }
+
+    appender stderr {
+        type console;
+        stream stderr;
+        min_level warn;
+    }
+
+    logger lite_nginx.access {
+        level info;
+        appender access_file;
+        additive off;
+    }
+
+    root_logger {
+        level info;
+        appender stderr;
+    }
+}
+```
+
+An `appender` supports `type file|console`, `min_level`, and `max_level`. File appenders support
+`path`, octal `mode`, and an optional `buffer_size` + `flush_interval` pair. Console appenders
+support `stream stdout|stderr`. A `logger` supports `level`, `verbosity`, repeated `appender`
+references, and `additive on|off`; `root_logger` supports `level`, `verbosity`, and appenders.
+
+Access output uses a fixed one-line logfmt schema containing request ID, socket peer, method,
+path, HTTP version, host, selected server/location, downstream status and payload bytes, elapsed
+time, upstream peer/status/time when available, and an outcome. Query strings, request bodies,
+cookies, and authorization headers are not logged. `access_log` inherits from `http` to `server`
+to `location`; the most specific value wins.
 
 ## Scripting
 

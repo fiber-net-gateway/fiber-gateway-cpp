@@ -87,6 +87,7 @@ struct LocationRuntime {
     std::chrono::milliseconds read_timeout{30000};
     std::chrono::milliseconds send_timeout{30000};
     std::uint32_t upstream_index = 0;
+    bool access_log = false;
     bool proxy_buffering = false;
     bool host_header_overridden = false;
     // Non-null when this location runs a script (kind == Script) instead of proxying.
@@ -103,6 +104,7 @@ struct ServerRuntime {
     std::string certificate_key;
     std::vector<LocationRuntime> locations;
     fiber::util::RoutePathMatcher<std::uint32_t> location_matcher;
+    bool access_log = false;
 };
 
 struct ServerNameRuntime {
@@ -127,6 +129,7 @@ struct ListenerRuntime {
 
 struct RuntimeConfig {
     std::size_t worker_processes = 1;
+    bool access_log = false;
     std::vector<UpstreamRuntime> upstreams;
     std::vector<ServerRuntime> servers;
     std::vector<ListenerRuntime> listeners;

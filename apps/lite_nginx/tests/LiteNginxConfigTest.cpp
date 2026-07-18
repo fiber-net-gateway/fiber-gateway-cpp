@@ -17,6 +17,8 @@ namespace {
 
 using fiber::lite_nginx::config::ConfigLoader;
 using fiber::lite_nginx::config::Lexer;
+using fiber::lite_nginx::config::LogAppenderKind;
+using fiber::lite_nginx::config::LoggingLevel;
 using fiber::lite_nginx::config::PoolSteal;
 using fiber::lite_nginx::config::ProxyPassKind;
 using fiber::lite_nginx::config::TokenKind;
@@ -703,6 +705,103 @@ http {
     EXPECT_NE(config_result.error().message.find("include file not found"), std::string::npos);
     // The error location is the missing included file path.
     EXPECT_NE(config_result.error().location.source_name.find("does_not_exist.conf"), std::string::npos);
+}
+
+TEST(LiteNginxConfigTest, ParsesLoggingAndAccessLogInheritanceInputs) {
+    TempDir dir("lite_nginx_logging_config");
+    const fs::path config_path = dir.path / "lite_nginx.conf";
+    write_file(config_path, R"(
+logging {
+    appender access_file {
+        type file;
+        path logs/access.log;
+        mode 0640;
+        buffer_size 64k;
+        flush_interval 200ms;
+        min_level info;
+        max_level info;
+    }
+    appender stderr {
+        type console;
+        stream stderr;
+        min_level warn;
+    }
+    logger lite_nginx.access {
+        level info;
+        appender access_file;
+        additive off;
+    }
+    root_logger {
+        level info;
+        verbosity 2;
+        appender stderr;
+    }
+}
+http {
+    listen 8080;
+    access_log on;
+    server {
+        server_name localhost;
+        access_log off;
+        location /health {
+            access_log on;
+            proxy_pass http://127.0.0.1:9001;
+        }
+    }
+}
+)");
+
+    auto config = ConfigLoader::load_from_file(config_path.string());
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    ASSERT_TRUE(config->logging.configured);
+    ASSERT_EQ(config->logging.appenders.size(), 2u);
+    const auto &access = config->logging.appenders[0];
+    EXPECT_EQ(access.name, "access_file");
+    EXPECT_EQ(access.kind, LogAppenderKind::File);
+    EXPECT_EQ(access.path, (dir.path / "logs/access.log").lexically_normal().string());
+    EXPECT_EQ(access.file_mode, 0640u);
+    EXPECT_EQ(access.buffer_size, 64u * 1024u);
+    EXPECT_EQ(access.flush_interval, std::chrono::milliseconds(200));
+    EXPECT_EQ(access.min_level, LoggingLevel::Info);
+    EXPECT_EQ(access.max_level, LoggingLevel::Info);
+    ASSERT_EQ(config->logging.loggers.size(), 1u);
+    EXPECT_FALSE(config->logging.loggers[0].additive);
+    EXPECT_EQ(config->logging.root.verbosity, 2u);
+    EXPECT_TRUE(config->http.access_log);
+    ASSERT_TRUE(config->http.servers[0].access_log.has_value());
+    EXPECT_FALSE(*config->http.servers[0].access_log);
+    ASSERT_TRUE(config->http.servers[0].locations[0].access_log.has_value());
+    EXPECT_TRUE(*config->http.servers[0].locations[0].access_log);
+}
+
+TEST(LiteNginxConfigTest, RejectsInvalidLoggingConfiguration) {
+    auto unknown_appender = ConfigLoader::load_from_string(R"(
+logging {
+    logger lite_nginx.access { appender missing; additive off; }
+    root_logger { level info; }
+}
+http {
+    listen 8080;
+    server { server_name localhost; location / { proxy_pass http://127.0.0.1:9001; } }
+}
+)",
+                                                           "bad_logging.conf");
+    ASSERT_FALSE(unknown_appender.has_value());
+    EXPECT_NE(unknown_appender.error().message.find("unknown appender"), std::string::npos);
+
+    auto invalid_buffer = ConfigLoader::load_from_string(R"(
+logging {
+    appender file { type file; path access.log; buffer_size 4k; }
+    root_logger { appender file; }
+}
+http {
+    listen 8080;
+    server { server_name localhost; location / { proxy_pass http://127.0.0.1:9001; } }
+}
+)",
+                                                         "bad_buffer.conf");
+    ASSERT_FALSE(invalid_buffer.has_value());
+    EXPECT_NE(invalid_buffer.error().message.find("buffer_size and flush_interval"), std::string::npos);
 }
 
 } // namespace
