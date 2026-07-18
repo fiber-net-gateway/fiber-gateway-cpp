@@ -3,6 +3,8 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 
 #include "async/Sleep.h"
 #include "async/Spawn.h"
@@ -69,7 +71,7 @@ DetachedTask run_hold_server(fiber::event::EventLoop *loop, std::promise<std::ui
 DetachedTask run_client_connect_and_shutdown(fiber::event::EventLoop *loop, std::uint16_t port,
                                              std::atomic<bool> *stop_flag,
                                              std::promise<fiber::common::IoErr> *result_promise,
-                                             std::promise<bool> *opened_promise) {
+                                             std::promise<bool> *opened_promise, std::promise<bool> *no_delay_promise) {
     fiber::http::Http2ClientConnection::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
     options.tls.enabled = false;
@@ -79,9 +81,16 @@ DetachedTask run_client_connect_and_shutdown(fiber::event::EventLoop *loop, std:
     auto connect_result = co_await connection.connect(5s);
     if (!connect_result) {
         opened_promise->set_value(false);
+        no_delay_promise->set_value(false);
         result_promise->set_value(connect_result.error());
         co_return;
     }
+
+    int no_delay = 0;
+    socklen_t no_delay_len = sizeof(no_delay);
+    no_delay_promise->set_value(::getsockopt(connection.http2().transport().fd(), IPPROTO_TCP, TCP_NODELAY, &no_delay,
+                                             &no_delay_len) == 0 &&
+                                no_delay == 1);
 
     fiber::mem::BufPool pool;
     fiber::http::ClientHttp2Exchange exchange = connection.open_exchange(pool);
@@ -115,13 +124,17 @@ TEST(Http2ClientConnectionTest, ConnectAllowsOpeningLocalStreamBeforeRun) {
 
     std::promise<fiber::common::IoErr> result_promise;
     std::promise<bool> opened_promise;
+    std::promise<bool> no_delay_promise;
     auto result_future = result_promise.get_future();
     auto opened_future = opened_promise.get_future();
+    auto no_delay_future = no_delay_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() {
-        return run_client_connect_and_shutdown(&group.at(0), port, &stop_flag, &result_promise, &opened_promise);
+        return run_client_connect_and_shutdown(&group.at(0), port, &stop_flag, &result_promise, &opened_promise,
+                                               &no_delay_promise);
     });
 
     EXPECT_TRUE(opened_future.get());
+    EXPECT_TRUE(no_delay_future.get());
     fiber::common::IoErr run_result = result_future.get();
     EXPECT_TRUE(run_result == fiber::common::IoErr::None || run_result == fiber::common::IoErr::ConnReset);
 

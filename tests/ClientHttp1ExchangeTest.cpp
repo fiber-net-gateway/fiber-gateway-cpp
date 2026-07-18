@@ -110,8 +110,7 @@ DetachedTask run_capture_server(fiber::event::EventLoop *loop, std::promise<std:
     while (outcome.bytes.size() < expected_size) {
         char chunk[256];
         const std::size_t remaining = expected_size - outcome.bytes.size();
-        auto read_result = co_await fiber::async::timeout_for(
-                [&]() { return stream.read(chunk, std::min<std::size_t>(remaining, sizeof(chunk))); }, 2s);
+        auto read_result = co_await stream.read(chunk, std::min<std::size_t>(remaining, sizeof(chunk)), 2s);
         if (!read_result) {
             outcome.err = read_result.error();
             outcome_promise->set_value(std::move(outcome));
@@ -134,7 +133,7 @@ fiber::async::Task<fiber::common::IoResult<void>> read_until_header_end(fiber::n
                                                                         std::string &out) {
     while (out.find("\r\n\r\n") == std::string::npos) {
         char chunk[256];
-        auto read_result = co_await fiber::async::timeout_for([&]() { return stream.read(chunk, sizeof(chunk)); }, 2s);
+        auto read_result = co_await stream.read(chunk, sizeof(chunk), 2s);
         if (!read_result) {
             co_return std::unexpected(read_result.error());
         }
@@ -151,8 +150,7 @@ fiber::async::Task<fiber::common::IoResult<void>> read_exact(fiber::net::TcpStre
     while (out.size() < bytes) {
         char chunk[256];
         std::size_t remaining = bytes - out.size();
-        auto read_result = co_await fiber::async::timeout_for(
-                [&]() { return stream.read(chunk, std::min<std::size_t>(remaining, sizeof(chunk))); }, 2s);
+        auto read_result = co_await stream.read(chunk, std::min<std::size_t>(remaining, sizeof(chunk)), 2s);
         if (!read_result) {
             co_return std::unexpected(read_result.error());
         }
@@ -168,7 +166,7 @@ fiber::async::Task<fiber::common::IoResult<void>> write_all(fiber::net::TcpStrea
     const char *ptr = bytes.data();
     std::size_t remaining = bytes.size();
     while (remaining > 0) {
-        auto write_result = co_await fiber::async::timeout_for([&]() { return stream.write(ptr, remaining); }, 2s);
+        auto write_result = co_await stream.write(ptr, remaining, 2s);
         if (!write_result) {
             co_return std::unexpected(write_result.error());
         }

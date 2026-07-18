@@ -43,6 +43,7 @@ TEST(NacosClientConfigTest, AppliesDefaultsAndOwnsValues) {
 TEST(NacosClientConfigTest, ClientOptionsRefreshAtNinetyPercentByDefault) {
     fiber::nacos::NacosClientOptions options;
     EXPECT_EQ(options.refresh_percent, 90);
+    EXPECT_EQ(options.grpc_tcp.no_delay, fiber::net::TcpOptionMode::Enabled);
 }
 
 TEST(NacosClientConfigTest, RejectsInvalidRequiredFields) {

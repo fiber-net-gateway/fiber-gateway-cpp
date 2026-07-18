@@ -8,12 +8,35 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include "../../async/Timeout.h"
 #include "../UdpSocket.h"
 
 namespace fiber::net::detail {
 
 namespace {
+
+using Deadline = std::chrono::steady_clock::time_point;
+
+Deadline make_deadline(std::chrono::milliseconds timeout) noexcept {
+    if (timeout == std::chrono::milliseconds::max()) {
+        return Deadline::max();
+    }
+    return fiber::event::EventLoop::current().now() + timeout;
+}
+
+fiber::common::IoResult<std::chrono::milliseconds> remaining_timeout(Deadline deadline) noexcept {
+    if (deadline == Deadline::max()) {
+        return std::chrono::milliseconds::max();
+    }
+    auto now = fiber::event::EventLoop::current().now();
+    if (deadline <= now) {
+        return std::unexpected(fiber::common::IoErr::TimedOut);
+    }
+    auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+    if (remaining <= std::chrono::milliseconds::zero()) {
+        remaining = std::chrono::milliseconds(1);
+    }
+    return remaining;
+}
 
 constexpr std::size_t kRecvControlCapacity =
         CMSG_SPACE(sizeof(in6_pktinfo)) + CMSG_SPACE(sizeof(in_pktinfo)) + CMSG_SPACE(sizeof(int));
@@ -359,23 +382,86 @@ fiber::common::IoResult<void> DatagramFd::refresh_local_addr() noexcept {
     return {};
 }
 
-DatagramFd::RecvFromAwaiter DatagramFd::recv_from(void *buf, size_t len) noexcept { return {*this, buf, len}; }
-
-DatagramFd::SendToAwaiter DatagramFd::send_to(const void *buf, size_t len, const SocketAddress &peer) noexcept {
-    return {*this, buf, len, peer};
+DatagramFd::RecvFromTask DatagramFd::recv_from(void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
+    Deadline deadline = make_deadline(timeout);
+    for (;;) {
+        auto result = try_recv_from(buf, len);
+        if (result || result.error() != fiber::common::IoErr::WouldBlock) {
+            co_return result;
+        }
+        auto remaining = remaining_timeout(deadline);
+        if (!remaining) {
+            co_return std::unexpected(remaining.error());
+        }
+        auto wait_result = co_await rwfd_.wait_readable(*remaining);
+        if (!wait_result) {
+            co_return std::unexpected(wait_result.error());
+        }
+    }
 }
 
-DatagramFd::RecvPacketAwaiter DatagramFd::recv_packet(void *buf, size_t len) noexcept { return {*this, buf, len}; }
-
-DatagramFd::SendPacketAwaiter DatagramFd::send_packet(UdpPacketSendSpec spec) noexcept { return {*this, spec}; }
-
-DatagramFd::WaitEventAwaiter DatagramFd::wait_event(fiber::event::IoEvent interested) noexcept {
-    return rwfd_.wait_event(interested);
+DatagramFd::SendTask DatagramFd::send_to(const void *buf, size_t len, const SocketAddress &peer,
+                                         std::chrono::milliseconds timeout) noexcept {
+    Deadline deadline = make_deadline(timeout);
+    for (;;) {
+        auto result = try_send_to(buf, len, peer);
+        if (result || result.error() != fiber::common::IoErr::WouldBlock) {
+            co_return result;
+        }
+        auto remaining = remaining_timeout(deadline);
+        if (!remaining) {
+            co_return std::unexpected(remaining.error());
+        }
+        auto wait_result = co_await rwfd_.wait_writable(*remaining);
+        if (!wait_result) {
+            co_return std::unexpected(wait_result.error());
+        }
+    }
 }
 
-DatagramFd::WaitReadableAwaiter DatagramFd::wait_readable() noexcept { return rwfd_.wait_readable(); }
+DatagramFd::RecvPacketTask DatagramFd::recv_packet(void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
+    Deadline deadline = make_deadline(timeout);
+    for (;;) {
+        auto result = try_recv_packet(buf, len);
+        if (result || result.error() != fiber::common::IoErr::WouldBlock) {
+            co_return result;
+        }
+        auto remaining = remaining_timeout(deadline);
+        if (!remaining) {
+            co_return std::unexpected(remaining.error());
+        }
+        auto wait_result = co_await rwfd_.wait_readable(*remaining);
+        if (!wait_result) {
+            co_return std::unexpected(wait_result.error());
+        }
+    }
+}
 
-DatagramFd::WaitWritableAwaiter DatagramFd::wait_writable() noexcept { return rwfd_.wait_writable(); }
+DatagramFd::SendTask DatagramFd::send_packet(UdpPacketSendSpec spec, std::chrono::milliseconds timeout) noexcept {
+    Deadline deadline = make_deadline(timeout);
+    for (;;) {
+        auto result = try_send_packet(spec);
+        if (result || result.error() != fiber::common::IoErr::WouldBlock) {
+            co_return result;
+        }
+        auto remaining = remaining_timeout(deadline);
+        if (!remaining) {
+            co_return std::unexpected(remaining.error());
+        }
+        auto wait_result = co_await rwfd_.wait_writable(*remaining);
+        if (!wait_result) {
+            co_return std::unexpected(wait_result.error());
+        }
+    }
+}
+
+DatagramFd::WaitReadableAwaiter DatagramFd::wait_readable(std::chrono::milliseconds timeout) noexcept {
+    return rwfd_.wait_readable(timeout);
+}
+
+DatagramFd::WaitWritableAwaiter DatagramFd::wait_writable(std::chrono::milliseconds timeout) noexcept {
+    return rwfd_.wait_writable(timeout);
+}
 
 fiber::common::IoResult<UdpRecvResult> DatagramFd::try_recv_from(void *buf, size_t len) noexcept {
     auto packet_result = try_recv_packet(buf, len);
@@ -410,11 +496,6 @@ fiber::common::IoResult<size_t> DatagramFd::try_send_packet(const UdpPacketSendS
         return std::unexpected(err);
     }
     return out;
-}
-
-fiber::async::Task<fiber::common::IoResult<fiber::event::IoEvent>>
-DatagramFd::wait_event(fiber::event::IoEvent interested, std::chrono::milliseconds timeout) noexcept {
-    co_return co_await fiber::async::timeout_for([&]() { return wait_event(interested); }, timeout);
 }
 
 fiber::common::IoErr DatagramFd::recv_packet_once(void *buf, size_t len, UdpPacketRecvResult &out) noexcept {
@@ -511,206 +592,6 @@ fiber::common::IoErr DatagramFd::send_packet_once(const UdpPacketSendSpec &spec,
         }
         return fiber::common::io_err_from_errno(err);
     }
-}
-
-DatagramFd::RecvFromAwaiter::RecvFromAwaiter(DatagramFd &socket, void *buf, size_t len) noexcept :
-    socket_(&socket), buf_(buf), len_(len) {}
-
-DatagramFd::RecvFromAwaiter::~RecvFromAwaiter() {}
-
-bool DatagramFd::RecvFromAwaiter::await_suspend(std::coroutine_handle<> handle) {
-    err_ = fiber::common::IoErr::None;
-    completed_ = false;
-
-    err_ = socket_->recv_packet_once(buf_, len_, packet_);
-    if (err_ == fiber::common::IoErr::None) {
-        completed_ = true;
-        return false;
-    }
-    if (err_ != fiber::common::IoErr::WouldBlock) {
-        completed_ = true;
-        return false;
-    }
-
-    waiting_ = true;
-    waiter_.emplace(socket_->rwfd_);
-    return waiter_->await_suspend(handle);
-}
-
-fiber::common::IoResult<UdpRecvResult> DatagramFd::RecvFromAwaiter::await_resume() noexcept {
-    waiting_ = false;
-    if (completed_) {
-        completed_ = false;
-        if (err_ == fiber::common::IoErr::None) {
-            return UdpRecvResult{packet_.size, packet_.peer};
-        }
-        return std::unexpected(err_);
-    }
-
-    if (waiter_) {
-        fiber::common::IoResult<void> wait_result = waiter_->await_resume();
-        waiter_.reset();
-        if (!wait_result) {
-            return std::unexpected(wait_result.error());
-        }
-    }
-
-    err_ = socket_->recv_packet_once(buf_, len_, packet_);
-    if (err_ == fiber::common::IoErr::None) {
-        return UdpRecvResult{packet_.size, packet_.peer};
-    }
-    return std::unexpected(err_);
-}
-
-DatagramFd::SendToAwaiter::SendToAwaiter(DatagramFd &socket, const void *buf, size_t len, SocketAddress peer) noexcept :
-    socket_(&socket) {
-    spec_.buf = buf;
-    spec_.len = len;
-    spec_.peer = std::move(peer);
-}
-
-DatagramFd::SendToAwaiter::~SendToAwaiter() {}
-
-bool DatagramFd::SendToAwaiter::await_suspend(std::coroutine_handle<> handle) {
-    err_ = fiber::common::IoErr::None;
-    completed_ = false;
-
-    err_ = socket_->send_packet_once(spec_, result_);
-    if (err_ == fiber::common::IoErr::None) {
-        completed_ = true;
-        return false;
-    }
-    if (err_ != fiber::common::IoErr::WouldBlock) {
-        completed_ = true;
-        return false;
-    }
-
-    waiting_ = true;
-    waiter_.emplace(socket_->rwfd_);
-    return waiter_->await_suspend(handle);
-}
-
-fiber::common::IoResult<size_t> DatagramFd::SendToAwaiter::await_resume() noexcept {
-    waiting_ = false;
-    if (completed_) {
-        completed_ = false;
-        if (err_ == fiber::common::IoErr::None) {
-            return result_;
-        }
-        return std::unexpected(err_);
-    }
-
-    if (waiter_) {
-        fiber::common::IoResult<void> wait_result = waiter_->await_resume();
-        waiter_.reset();
-        if (!wait_result) {
-            return std::unexpected(wait_result.error());
-        }
-    }
-
-    err_ = socket_->send_packet_once(spec_, result_);
-    if (err_ == fiber::common::IoErr::None) {
-        return result_;
-    }
-    return std::unexpected(err_);
-}
-
-DatagramFd::RecvPacketAwaiter::RecvPacketAwaiter(DatagramFd &socket, void *buf, size_t len) noexcept :
-    socket_(&socket), buf_(buf), len_(len) {}
-
-DatagramFd::RecvPacketAwaiter::~RecvPacketAwaiter() {}
-
-bool DatagramFd::RecvPacketAwaiter::await_suspend(std::coroutine_handle<> handle) {
-    err_ = fiber::common::IoErr::None;
-    completed_ = false;
-
-    err_ = socket_->recv_packet_once(buf_, len_, result_);
-    if (err_ == fiber::common::IoErr::None) {
-        completed_ = true;
-        return false;
-    }
-    if (err_ != fiber::common::IoErr::WouldBlock) {
-        completed_ = true;
-        return false;
-    }
-
-    waiting_ = true;
-    waiter_.emplace(socket_->rwfd_);
-    return waiter_->await_suspend(handle);
-}
-
-fiber::common::IoResult<UdpPacketRecvResult> DatagramFd::RecvPacketAwaiter::await_resume() noexcept {
-    waiting_ = false;
-    if (completed_) {
-        completed_ = false;
-        if (err_ == fiber::common::IoErr::None) {
-            return result_;
-        }
-        return std::unexpected(err_);
-    }
-
-    if (waiter_) {
-        fiber::common::IoResult<void> wait_result = waiter_->await_resume();
-        waiter_.reset();
-        if (!wait_result) {
-            return std::unexpected(wait_result.error());
-        }
-    }
-
-    err_ = socket_->recv_packet_once(buf_, len_, result_);
-    if (err_ == fiber::common::IoErr::None) {
-        return result_;
-    }
-    return std::unexpected(err_);
-}
-
-DatagramFd::SendPacketAwaiter::SendPacketAwaiter(DatagramFd &socket, UdpPacketSendSpec spec) noexcept :
-    socket_(&socket), spec_(std::move(spec)) {}
-
-DatagramFd::SendPacketAwaiter::~SendPacketAwaiter() {}
-
-bool DatagramFd::SendPacketAwaiter::await_suspend(std::coroutine_handle<> handle) {
-    err_ = fiber::common::IoErr::None;
-    completed_ = false;
-
-    err_ = socket_->send_packet_once(spec_, result_);
-    if (err_ == fiber::common::IoErr::None) {
-        completed_ = true;
-        return false;
-    }
-    if (err_ != fiber::common::IoErr::WouldBlock) {
-        completed_ = true;
-        return false;
-    }
-
-    waiting_ = true;
-    waiter_.emplace(socket_->rwfd_);
-    return waiter_->await_suspend(handle);
-}
-
-fiber::common::IoResult<size_t> DatagramFd::SendPacketAwaiter::await_resume() noexcept {
-    waiting_ = false;
-    if (completed_) {
-        completed_ = false;
-        if (err_ == fiber::common::IoErr::None) {
-            return result_;
-        }
-        return std::unexpected(err_);
-    }
-
-    if (waiter_) {
-        fiber::common::IoResult<void> wait_result = waiter_->await_resume();
-        waiter_.reset();
-        if (!wait_result) {
-            return std::unexpected(wait_result.error());
-        }
-    }
-
-    err_ = socket_->send_packet_once(spec_, result_);
-    if (err_ == fiber::common::IoErr::None) {
-        return result_;
-    }
-    return std::unexpected(err_);
 }
 
 } // namespace fiber::net::detail

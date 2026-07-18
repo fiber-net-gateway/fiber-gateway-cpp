@@ -3,10 +3,13 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <string>
 #include <string_view>
 
+#include "async/Spawn.h"
+#include "event/EventLoopGroup.h"
 #include "http/HttpHeaderHash.h"
 #include "http/Huffman.h"
 
@@ -18,6 +21,7 @@
 #undef protected
 
 #include "Http2TestSupport.h"
+#include "HttpTransportStub.h"
 
 namespace {
 
@@ -183,7 +187,7 @@ struct SendWindowNotifyOwner {
     fiber::http::Http2Stream stream;
 };
 
-class DummyHttpTransport final : public fiber::http::HttpTransport {
+class DummyHttpTransport final : public fiber::test::HttpTransportStub {
 public:
     fiber::async::Task<fiber::common::IoResult<void>> handshake(std::chrono::milliseconds) override {
         co_return fiber::common::IoResult<void>{};
@@ -327,23 +331,61 @@ TEST(Http2StreamTest, AdditionalLeaseRetainsEmbeddedOwnerUntilLastReferenceDrops
 }
 
 TEST(Http2StreamTest, MaybeReplenishRecvWindowEnqueuesWindowUpdateAndTracksRemainingWindow) {
-    fiber::http::Http2Connection connection(make_options(), &test_http2_stream_factory(),
-                                            TestHttp2StreamFactory::ops());
-    connection.state_ = fiber::http::Http2Connection::State::Running;
+    struct Outcome {
+        fiber::common::IoErr result = fiber::common::IoErr::Invalid;
+        std::int32_t recv_window_remaining = 0;
+        std::size_t pending_control_bytes = 0;
+        std::size_t control_bytes = 0;
+        std::uint8_t frame_type = 0;
+        std::uint32_t window_increment = 0;
+        bool stream_created = false;
+    };
 
-    fiber::http::Http2Stream *stream = connection.create_peer_stream(1);
-    ASSERT_NE(stream, nullptr);
+    fiber::event::EventLoopGroup group(1);
+    std::promise<Outcome> promise;
+    auto future = promise.get_future();
 
-    stream->recv_window_remaining_ = 15;
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        Outcome outcome;
+        fiber::http::Http2Connection connection(make_options(), &test_http2_stream_factory(),
+                                                TestHttp2StreamFactory::ops());
+        connection.state_ = fiber::http::Http2Connection::State::Running;
 
-    EXPECT_EQ(stream->maybe_replenish_recv_window(15), fiber::common::IoErr::None);
-    EXPECT_EQ(stream->recv_window_remaining(), 49);
-    EXPECT_EQ(connection.outbound_scheduler_.pending_control_bytes(), 13u);
+        fiber::http::Http2Stream *stream = connection.create_peer_stream(1);
+        outcome.stream_created = stream != nullptr;
+        if (stream != nullptr) {
+            stream->recv_window_remaining_ = 15;
+            outcome.result = stream->maybe_replenish_recv_window(15);
+            outcome.recv_window_remaining = stream->recv_window_remaining();
+            outcome.pending_control_bytes = connection.outbound_scheduler_.pending_control_bytes();
+            if (fiber::mem::IoBuf *control = connection.outbound_scheduler_.control_chain_.first_readable()) {
+                outcome.control_bytes = control->readable();
+                const std::uint8_t *data = control->readable_data();
+                outcome.frame_type = data[3];
+                outcome.window_increment = parse_window_update_increment(data);
+            }
+        }
 
-    fiber::http::Http2OutboundScheduler::SendSpan span = connection.outbound_scheduler_.current_send_span();
-    ASSERT_NE(span.data, nullptr);
-    ASSERT_EQ(span.length, 13u);
-    EXPECT_EQ(static_cast<std::uint8_t>(span.data[3]),
-              static_cast<std::uint8_t>(fiber::http::Http2FrameType::WindowUpdate));
-    EXPECT_EQ(parse_window_update_increment(span.data), 34u);
+        promise.set_value(outcome);
+        group.stop();
+        co_return;
+    });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "window update did not finish in time";
+        return;
+    }
+
+    const Outcome outcome = future.get();
+    group.join();
+    ASSERT_TRUE(outcome.stream_created);
+    EXPECT_EQ(outcome.result, fiber::common::IoErr::None);
+    EXPECT_EQ(outcome.recv_window_remaining, 49);
+    EXPECT_EQ(outcome.pending_control_bytes, 13U);
+    EXPECT_EQ(outcome.control_bytes, 13U);
+    EXPECT_EQ(outcome.frame_type, static_cast<std::uint8_t>(fiber::http::Http2FrameType::WindowUpdate));
+    EXPECT_EQ(outcome.window_increment, 34U);
 }

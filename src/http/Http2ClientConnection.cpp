@@ -32,11 +32,13 @@ Http2Connection::Options Http2ClientConnection::normalize_h2_options(Http2Connec
 }
 
 Http2ClientConnection::Http2ClientConnection(event::EventLoop &loop, Options options) noexcept :
-    loop_(&loop), peer_addr_(std::move(options.peer_addr)),
+    loop_(&loop), peer_addr_(std::move(options.peer_addr)), tcp_options_(options.tcp),
     tls_ctx_(normalize_tls_options(std::move(options.tls)), false, false),
     conn_(normalize_h2_options(std::move(options.h2)), nullptr, ClientHttp2Request::factory_ops()) {}
 
-fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect(std::chrono::milliseconds timeout) noexcept {
+fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect(std::chrono::milliseconds timeout,
+                                                                          Http2Connection::ClosedCallback on_closed,
+                                                                          void *closed_ctx) noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     if (!loop_->in_loop()) {
         co_return std::unexpected(common::IoErr::NotSupported);
@@ -71,7 +73,7 @@ fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect(std::c
     net::AcceptResult accept(connect_result->release_fd(), connect_result->take_peer());
     std::unique_ptr<HttpTransport> transport;
     if (tls_ctx_.options().enabled) {
-        auto transport_result = TlsTransport::create(*loop_, std::move(accept), tls_ctx_);
+        auto transport_result = TlsTransport::create(*loop_, std::move(accept), tls_ctx_, tcp_options_);
         if (!transport_result) {
             co_return std::unexpected(transport_result.error());
         }
@@ -86,14 +88,14 @@ fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect(std::c
             co_return std::unexpected(common::IoErr::NotSupported);
         }
     } else {
-        auto transport_result = TcpTransport::create(*loop_, std::move(accept));
+        auto transport_result = TcpTransport::create(*loop_, std::move(accept), tcp_options_);
         if (!transport_result) {
             co_return std::unexpected(transport_result.error());
         }
         transport = std::move(*transport_result);
     }
 
-    common::IoErr start_err = conn_.start(std::move(transport));
+    common::IoErr start_err = conn_.start(std::move(transport), on_closed, closed_ctx);
     if (start_err != common::IoErr::None) {
         co_return std::unexpected(start_err);
     }

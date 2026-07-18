@@ -9,6 +9,30 @@
 namespace fiber::net::detail {
 namespace {
 
+using Deadline = std::chrono::steady_clock::time_point;
+
+Deadline make_deadline(std::chrono::milliseconds timeout) noexcept {
+    if (timeout == std::chrono::milliseconds::max()) {
+        return Deadline::max();
+    }
+    return fiber::event::EventLoop::current().now() + timeout;
+}
+
+fiber::common::IoResult<std::chrono::milliseconds> remaining_timeout(Deadline deadline) noexcept {
+    if (deadline == Deadline::max()) {
+        return std::chrono::milliseconds::max();
+    }
+    auto now = fiber::event::EventLoop::current().now();
+    if (deadline <= now) {
+        return std::unexpected(fiber::common::IoErr::TimedOut);
+    }
+    auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+    if (remaining <= std::chrono::milliseconds::zero()) {
+        remaining = std::chrono::milliseconds(1);
+    }
+    return remaining;
+}
+
 ssize_t send_no_sigpipe(int fd, const void *buf, size_t len) noexcept {
 #ifdef MSG_NOSIGNAL
     return ::send(fd, buf, len, MSG_NOSIGNAL);
@@ -55,17 +79,101 @@ int StreamFd::release_fd() noexcept { return rwfd_.release_fd(); }
 
 void StreamFd::close() { rwfd_.close(); }
 
-StreamFd::ReadAwaiter StreamFd::read(void *buf, size_t len) noexcept { return {*this, buf, len}; }
+fiber::common::IoErr StreamFd::set_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return rwfd_.set_read_callback(callback, ctx);
+}
 
-StreamFd::WriteAwaiter StreamFd::write(const void *buf, size_t len) noexcept { return {*this, buf, len}; }
+fiber::common::IoErr StreamFd::set_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return rwfd_.set_write_callback(callback, ctx);
+}
 
-StreamFd::ReadvAwaiter StreamFd::readv(const struct iovec *iov, int iovcnt) noexcept { return {*this, iov, iovcnt}; }
+fiber::common::IoErr StreamFd::clear_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return rwfd_.clear_read_callback(callback, ctx);
+}
 
-StreamFd::WritevAwaiter StreamFd::writev(const struct iovec *iov, int iovcnt) noexcept { return {*this, iov, iovcnt}; }
+fiber::common::IoErr StreamFd::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return rwfd_.clear_write_callback(callback, ctx);
+}
 
-StreamFd::WaitReadableAwaiter StreamFd::wait_readable() noexcept { return rwfd_.wait_readable(); }
+StreamFd::IoTask StreamFd::read(void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
+    Deadline deadline = make_deadline(timeout);
+    for (;;) {
+        auto result = try_read(buf, len);
+        if (result || result.error() != fiber::common::IoErr::WouldBlock) {
+            co_return result;
+        }
+        auto remaining = remaining_timeout(deadline);
+        if (!remaining) {
+            co_return std::unexpected(remaining.error());
+        }
+        auto wait_result = co_await rwfd_.wait_readable(*remaining);
+        if (!wait_result) {
+            co_return std::unexpected(wait_result.error());
+        }
+    }
+}
 
-StreamFd::WaitWritableAwaiter StreamFd::wait_writable() noexcept { return rwfd_.wait_writable(); }
+StreamFd::IoTask StreamFd::write(const void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
+    Deadline deadline = make_deadline(timeout);
+    for (;;) {
+        auto result = try_write(buf, len);
+        if (result || result.error() != fiber::common::IoErr::WouldBlock) {
+            co_return result;
+        }
+        auto remaining = remaining_timeout(deadline);
+        if (!remaining) {
+            co_return std::unexpected(remaining.error());
+        }
+        auto wait_result = co_await rwfd_.wait_writable(*remaining);
+        if (!wait_result) {
+            co_return std::unexpected(wait_result.error());
+        }
+    }
+}
+
+StreamFd::IoTask StreamFd::readv(const struct iovec *iov, int iovcnt, std::chrono::milliseconds timeout) noexcept {
+    Deadline deadline = make_deadline(timeout);
+    for (;;) {
+        auto result = try_readv(iov, iovcnt);
+        if (result || result.error() != fiber::common::IoErr::WouldBlock) {
+            co_return result;
+        }
+        auto remaining = remaining_timeout(deadline);
+        if (!remaining) {
+            co_return std::unexpected(remaining.error());
+        }
+        auto wait_result = co_await rwfd_.wait_readable(*remaining);
+        if (!wait_result) {
+            co_return std::unexpected(wait_result.error());
+        }
+    }
+}
+
+StreamFd::IoTask StreamFd::writev(const struct iovec *iov, int iovcnt, std::chrono::milliseconds timeout) noexcept {
+    Deadline deadline = make_deadline(timeout);
+    for (;;) {
+        auto result = try_writev(iov, iovcnt);
+        if (result || result.error() != fiber::common::IoErr::WouldBlock) {
+            co_return result;
+        }
+        auto remaining = remaining_timeout(deadline);
+        if (!remaining) {
+            co_return std::unexpected(remaining.error());
+        }
+        auto wait_result = co_await rwfd_.wait_writable(*remaining);
+        if (!wait_result) {
+            co_return std::unexpected(wait_result.error());
+        }
+    }
+}
+
+StreamFd::WaitReadableAwaiter StreamFd::wait_readable(std::chrono::milliseconds timeout) noexcept {
+    return rwfd_.wait_readable(timeout);
+}
+
+StreamFd::WaitWritableAwaiter StreamFd::wait_writable(std::chrono::milliseconds timeout) noexcept {
+    return rwfd_.wait_writable(timeout);
+}
 
 fiber::common::IoResult<size_t> StreamFd::try_read(void *buf, size_t len) noexcept {
     size_t out = 0;
@@ -103,7 +211,7 @@ fiber::common::IoResult<size_t> StreamFd::try_writev(const struct iovec *iov, in
     return std::unexpected(err);
 }
 
-fiber::common::IoErr StreamFd::read_once(void *buf, size_t len, size_t &out) {
+fiber::common::IoErr StreamFd::read_once(void *buf, size_t len, size_t &out) noexcept {
     out = 0;
     int socket_fd = rwfd_.fd();
     if (socket_fd < 0) {
@@ -126,7 +234,7 @@ fiber::common::IoErr StreamFd::read_once(void *buf, size_t len, size_t &out) {
     }
 }
 
-fiber::common::IoErr StreamFd::write_once(const void *buf, size_t len, size_t &out) {
+fiber::common::IoErr StreamFd::write_once(const void *buf, size_t len, size_t &out) noexcept {
     out = 0;
     int socket_fd = rwfd_.fd();
     if (socket_fd < 0) {
@@ -149,7 +257,7 @@ fiber::common::IoErr StreamFd::write_once(const void *buf, size_t len, size_t &o
     }
 }
 
-fiber::common::IoErr StreamFd::readv_once(const struct iovec *iov, int iovcnt, size_t &out) {
+fiber::common::IoErr StreamFd::readv_once(const struct iovec *iov, int iovcnt, size_t &out) noexcept {
     out = 0;
     int socket_fd = rwfd_.fd();
     if (socket_fd < 0) {
@@ -172,7 +280,7 @@ fiber::common::IoErr StreamFd::readv_once(const struct iovec *iov, int iovcnt, s
     }
 }
 
-fiber::common::IoErr StreamFd::writev_once(const struct iovec *iov, int iovcnt, size_t &out) {
+fiber::common::IoErr StreamFd::writev_once(const struct iovec *iov, int iovcnt, size_t &out) noexcept {
     out = 0;
     int socket_fd = rwfd_.fd();
     if (socket_fd < 0) {
@@ -194,63 +302,5 @@ fiber::common::IoErr StreamFd::writev_once(const struct iovec *iov, int iovcnt, 
         return fiber::common::io_err_from_errno(err);
     }
 }
-
-template<typename Op>
-StreamFd::ReadWriteAwaiter<Op>::~ReadWriteAwaiter() = default;
-
-template<typename Op>
-bool StreamFd::ReadWriteAwaiter<Op>::await_suspend(std::coroutine_handle<> handle) {
-    err_ = fiber::common::IoErr::None;
-    completed_ = false;
-
-    size_t out = 0;
-    fiber::common::IoErr err = op_.once(*stream_, out);
-    if (err == fiber::common::IoErr::None) {
-        result_ = out;
-        completed_ = true;
-        return false;
-    }
-    if (err != fiber::common::IoErr::WouldBlock) {
-        err_ = err;
-        completed_ = true;
-        return false;
-    }
-
-    waiting_ = true;
-    waiter_.emplace(stream_->rwfd_);
-    return waiter_->await_suspend(handle);
-}
-
-template<typename Op>
-fiber::common::IoResult<size_t> StreamFd::ReadWriteAwaiter<Op>::await_resume() noexcept {
-    waiting_ = false;
-    if (completed_) {
-        completed_ = false;
-        if (err_ == fiber::common::IoErr::None) {
-            return result_;
-        }
-        return std::unexpected(err_);
-    }
-
-    if (waiter_) {
-        fiber::common::IoResult<void> wait_result = waiter_->await_resume();
-        waiter_.reset();
-        if (!wait_result) {
-            return std::unexpected(wait_result.error());
-        }
-    }
-
-    size_t out = 0;
-    fiber::common::IoErr err = op_.once(*stream_, out);
-    if (err == fiber::common::IoErr::None) {
-        return out;
-    }
-    return std::unexpected(err);
-}
-
-template class StreamFd::ReadWriteAwaiter<StreamFd::ReadOp>;
-template class StreamFd::ReadWriteAwaiter<StreamFd::WriteOp>;
-template class StreamFd::ReadWriteAwaiter<StreamFd::ReadvOp>;
-template class StreamFd::ReadWriteAwaiter<StreamFd::WritevOp>;
 
 } // namespace fiber::net::detail

@@ -820,7 +820,7 @@ recv_coalesced_initial_handshake(fiber::event::EventLoop *loop, fiber::quic::Qui
 
     endpoint->schedule_send(server);
 
-    auto readable = co_await client.wait_event(fiber::event::IoEvent::Read, std::chrono::milliseconds{500});
+    auto readable = co_await client.wait_readable(std::chrono::milliseconds{500});
     if (!readable) {
         done_promise->set_value(std::unexpected(readable.error()));
         co_return;
@@ -934,7 +934,7 @@ recv_handshake_packet_with_many_frames(fiber::event::EventLoop *loop, fiber::qui
 
     endpoint->schedule_send(server);
 
-    auto readable = co_await client.wait_event(fiber::event::IoEvent::Read, std::chrono::milliseconds{500});
+    auto readable = co_await client.wait_readable(std::chrono::milliseconds{500});
     if (!readable) {
         done_promise->set_value(std::unexpected(readable.error()));
         co_return;
@@ -1043,7 +1043,7 @@ recv_split_handshake_crypto_frame(fiber::event::EventLoop *loop, fiber::quic::Qu
 
     endpoint->schedule_send(server);
 
-    auto readable = co_await client.wait_event(fiber::event::IoEvent::Read, std::chrono::milliseconds{500});
+    auto readable = co_await client.wait_readable(std::chrono::milliseconds{500});
     if (!readable) {
         done_promise->set_value(std::unexpected(readable.error()));
         co_return;
@@ -1148,7 +1148,7 @@ DetachedTask recv_handshake_ack_only_when_congestion_full(
 
     endpoint->schedule_send(server);
 
-    auto readable = co_await client.wait_event(fiber::event::IoEvent::Read, std::chrono::milliseconds{500});
+    auto readable = co_await client.wait_readable(std::chrono::milliseconds{500});
     if (!readable) {
         done_promise->set_value(std::unexpected(readable.error()));
         co_return;
@@ -1266,7 +1266,7 @@ DetachedTask recv_application_stream_frame(fiber::event::EventLoop *loop, fiber:
 
     endpoint->schedule_send(server);
 
-    auto readable = co_await client.wait_event(fiber::event::IoEvent::Read, std::chrono::milliseconds{500});
+    auto readable = co_await client.wait_readable(std::chrono::milliseconds{500});
     if (!readable) {
         done_promise->set_value(std::unexpected(readable.error()));
         co_return;
@@ -1394,7 +1394,7 @@ recv_http3_control_preface_frame(fiber::event::EventLoop *loop, fiber::quic::Qui
 
     endpoint->schedule_send(server);
 
-    auto readable = co_await client.wait_event(fiber::event::IoEvent::Read, std::chrono::milliseconds{500});
+    auto readable = co_await client.wait_readable(std::chrono::milliseconds{500});
     if (!readable) {
         done_promise->set_value(std::unexpected(readable.error()));
         co_return;
@@ -1496,7 +1496,7 @@ DetachedTask recv_initial_ack_only_without_min_initial_padding(
 
     endpoint->schedule_send(server);
 
-    auto readable = co_await client.wait_event(fiber::event::IoEvent::Read, std::chrono::milliseconds{500});
+    auto readable = co_await client.wait_readable(std::chrono::milliseconds{500});
     if (!readable) {
         done_promise->set_value(std::unexpected(readable.error()));
         co_return;
@@ -1756,7 +1756,7 @@ DetachedTask send_datagram_and_check_no_response(fiber::event::EventLoop *loop, 
         client.close();
         co_return;
     }
-    auto readable = co_await client.wait_event(fiber::event::IoEvent::Read, std::chrono::milliseconds(150));
+    auto readable = co_await client.wait_readable(std::chrono::milliseconds(150));
     done_promise->set_value(readable.has_value());
     client.close();
 }
@@ -1777,7 +1777,7 @@ DetachedTask send_flood_and_count_responses(fiber::event::EventLoop *loop, std::
     }
     std::size_t got = 0;
     for (;;) {
-        auto readable = co_await client.wait_event(fiber::event::IoEvent::Read, std::chrono::milliseconds(150));
+        auto readable = co_await client.wait_readable(std::chrono::milliseconds(150));
         if (!readable) {
             break; // timeout => no more responses
         }

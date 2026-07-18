@@ -9,6 +9,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <new>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -26,6 +27,7 @@
 #undef private
 
 #include "Http2TestSupport.h"
+#include "HttpTransportStub.h"
 #include "http/ClientHttp2Exchange.h"
 #include "http/Http2HeadersFrameEncoder.h"
 #include "http/Http2HpackDecoder.h"
@@ -57,12 +59,12 @@ fiber::http::Http2Connection::Options with_test_hpack_catalog(fiber::http::Http2
     return options;
 }
 
-class FakeHttpTransport final : public fiber::http::HttpTransport {
+class FakeHttpTransport final : public fiber::test::HttpTransportStub {
 public:
     explicit FakeHttpTransport(std::vector<std::string> chunks, std::vector<size_t> write_steps = {},
-                               bool block_reads = false, bool hold_eof = false) :
+                               bool block_reads = false, bool hold_eof = false, bool report_pending_read = true) :
         chunks_(std::move(chunks)), write_steps_(std::move(write_steps)), reads_blocked_(block_reads),
-        hold_eof_(hold_eof) {}
+        hold_eof_(hold_eof), report_pending_read_(report_pending_read) {}
 
     fiber::async::Task<fiber::common::IoResult<void>> handshake(std::chrono::milliseconds) override {
         co_return fiber::common::IoResult<void>{};
@@ -79,6 +81,77 @@ public:
             co_await fiber::async::sleep(std::chrono::milliseconds(1));
         }
         co_return fiber::common::IoResult<void>{};
+    }
+
+    [[nodiscard]] bool has_pending_read() const noexcept override {
+        return report_pending_read_ && !reads_blocked_ && (!hold_eof_ || next_chunk_ < chunks_.size());
+    }
+
+    fiber::common::IoErr poll_read(void *buf, size_t len, size_t &out,
+                                   fiber::event::IoEvent &wait_event) noexcept override {
+        out = 0;
+        wait_event = fiber::event::IoEvent::None;
+        if (closed_) {
+            return fiber::common::IoErr::ConnReset;
+        }
+        if (reads_blocked_ || (hold_eof_ && next_chunk_ >= chunks_.size())) {
+            wait_event = fiber::event::IoEvent::Read;
+            return fiber::common::IoErr::WouldBlock;
+        }
+        if (next_chunk_ >= chunks_.size()) {
+            return fiber::common::IoErr::None;
+        }
+        const std::string &chunk = chunks_[next_chunk_++];
+        out = std::min(len, chunk.size());
+        std::memcpy(buf, chunk.data(), out);
+        return fiber::common::IoErr::None;
+    }
+
+    fiber::common::IoErr poll_read_into(fiber::mem::IoBuf &buf, size_t &out,
+                                        fiber::event::IoEvent &wait_event) noexcept override {
+        ++read_into_call_count_;
+        fiber::common::IoErr err = poll_read(buf.writable_data(), buf.writable(), out, wait_event);
+        if (err == fiber::common::IoErr::None) {
+            buf.commit(out);
+        }
+        return err;
+    }
+
+    fiber::common::IoErr poll_write(const void *buf, size_t len, size_t &out,
+                                    fiber::event::IoEvent &wait_event) noexcept override {
+        out = 0;
+        wait_event = fiber::event::IoEvent::None;
+        if (closed_) {
+            return fiber::common::IoErr::ConnReset;
+        }
+        out = next_write_size(len);
+        const auto *ptr = static_cast<const char *>(buf);
+        written_.append(ptr, ptr + out);
+        ++write_call_count_;
+        return fiber::common::IoErr::None;
+    }
+
+    fiber::common::IoErr poll_writev(fiber::mem::IoBufChain &buf, size_t &out,
+                                     fiber::event::IoEvent &wait_event) noexcept override {
+        out = 0;
+        wait_event = fiber::event::IoEvent::None;
+        if (closed_) {
+            return fiber::common::IoErr::ConnReset;
+        }
+        const size_t take = next_write_size(buf.readable_bytes());
+        std::array<iovec, 16> iov{};
+        const int count = buf.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
+        size_t remaining = take;
+        for (int i = 0; i < count && remaining > 0; ++i) {
+            const size_t chunk = std::min<std::size_t>(iov[i].iov_len, remaining);
+            const char *ptr = static_cast<const char *>(iov[i].iov_base);
+            written_.append(ptr, ptr + chunk);
+            remaining -= chunk;
+        }
+        buf.consume_and_compact(take);
+        ++write_call_count_;
+        out = take;
+        return fiber::common::IoErr::None;
     }
 
     fiber::async::Task<fiber::common::IoResult<size_t>> read(void *buf, size_t len,
@@ -168,8 +241,14 @@ public:
         closed_ = true;
         ++close_count_;
     }
-    void release_reads() noexcept { reads_blocked_ = false; }
-    void release_eof() noexcept { hold_eof_ = false; }
+    void release_reads() noexcept {
+        reads_blocked_ = false;
+        notify_read_ready();
+    }
+    void release_eof() noexcept {
+        hold_eof_ = false;
+        notify_read_ready();
+    }
 
     [[nodiscard]] bool valid() const noexcept override { return !closed_; }
     [[nodiscard]] int fd() const noexcept override { return -1; }
@@ -200,6 +279,7 @@ private:
     bool closed_ = false;
     bool reads_blocked_ = false;
     bool hold_eof_ = false;
+    bool report_pending_read_ = true;
     std::size_t close_count_ = 0;
     std::size_t shutdown_count_ = 0;
     std::size_t wait_readable_call_count_ = 0;
@@ -210,7 +290,7 @@ private:
     mutable fiber::event::EventLoop fallback_loop_{};
 };
 
-class ScriptedReadTransport final : public fiber::http::HttpTransport {
+class ScriptedReadTransport final : public fiber::test::HttpTransportStub {
 public:
     enum class ReadActionKind : std::uint8_t {
         Chunk,
@@ -244,6 +324,75 @@ public:
             co_return std::unexpected(fiber::common::IoErr::TimedOut);
         }
         co_return fiber::common::IoResult<void>{};
+    }
+
+    [[nodiscard]] bool has_pending_read() const noexcept override { return next_action_ < actions_.size(); }
+
+    fiber::common::IoErr poll_read(void *buf, size_t len, size_t &out,
+                                   fiber::event::IoEvent &wait_event) noexcept override {
+        out = 0;
+        wait_event = fiber::event::IoEvent::None;
+        if (closed_) {
+            return fiber::common::IoErr::ConnReset;
+        }
+        if (next_action_ >= actions_.size()) {
+            return fiber::common::IoErr::None;
+        }
+
+        ReadAction &action = actions_[next_action_++];
+        switch (action.kind) {
+            case ReadActionKind::Chunk:
+                out = std::min(len, action.data.size());
+                std::memcpy(buf, action.data.data(), out);
+                return fiber::common::IoErr::None;
+            case ReadActionKind::TimedOut:
+                wait_event = fiber::event::IoEvent::Read;
+                return fiber::common::IoErr::WouldBlock;
+            case ReadActionKind::Eof:
+                return fiber::common::IoErr::None;
+        }
+        return fiber::common::IoErr::Invalid;
+    }
+
+    fiber::common::IoErr poll_read_into(fiber::mem::IoBuf &buf, size_t &out,
+                                        fiber::event::IoEvent &wait_event) noexcept override {
+        ++read_into_call_count_;
+        fiber::common::IoErr err = poll_read(buf.writable_data(), buf.writable(), out, wait_event);
+        if (err == fiber::common::IoErr::None) {
+            buf.commit(out);
+        }
+        return err;
+    }
+
+    fiber::common::IoErr poll_write(const void *buf, size_t len, size_t &out,
+                                    fiber::event::IoEvent &wait_event) noexcept override {
+        out = 0;
+        wait_event = fiber::event::IoEvent::None;
+        if (closed_) {
+            return fiber::common::IoErr::ConnReset;
+        }
+        const auto *ptr = static_cast<const char *>(buf);
+        written_.append(ptr, ptr + len);
+        out = len;
+        return fiber::common::IoErr::None;
+    }
+
+    fiber::common::IoErr poll_writev(fiber::mem::IoBufChain &buf, size_t &out,
+                                     fiber::event::IoEvent &wait_event) noexcept override {
+        out = 0;
+        wait_event = fiber::event::IoEvent::None;
+        if (closed_) {
+            return fiber::common::IoErr::ConnReset;
+        }
+        std::array<iovec, 16> iov{};
+        const int count = buf.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
+        for (int i = 0; i < count; ++i) {
+            const char *ptr = static_cast<const char *>(iov[i].iov_base);
+            written_.append(ptr, ptr + iov[i].iov_len);
+            out += iov[i].iov_len;
+        }
+        buf.consume_and_compact(out);
+        return fiber::common::IoErr::None;
     }
 
     fiber::async::Task<fiber::common::IoResult<size_t>> read(void *buf, size_t len,
@@ -368,7 +517,7 @@ public:
     }
 
     const std::vector<ObservedChunk> &chunks() const noexcept { return chunks_; }
-    fiber::async::Task<void> stop_and_join() noexcept { co_await stop_and_join_send_loop(); }
+    fiber::async::Task<void> stop_and_join() noexcept { co_await stop_and_wait_closed(); }
 
     void set_payload_error(fiber::common::IoErr err) noexcept { payload_error_ = err; }
 
@@ -551,6 +700,7 @@ struct KeepaliveRunOutcome {
     std::size_t transport_close_count = 0;
     std::size_t wait_readable_call_count = 0;
     std::size_t read_into_call_count = 0;
+    bool read_buffer_released = false;
 };
 
 std::string iobuf_to_string(const fiber::mem::IoBuf &buf) {
@@ -672,7 +822,7 @@ std::string build_headers_frame_bytes(std::uint32_t stream_id,
     fiber::async::spawn(
             group.at(0), [promise, test_case = std::move(test_case), &group]() mutable -> fiber::async::DetachedTask {
                 FakeHttpTransport transport({}, {});
-                fiber::http::Http2OutboundScheduler scheduler(&transport, 1024, std::chrono::seconds(30), 16384);
+                fiber::http::Http2OutboundScheduler scheduler(16384);
                 int owner = 0;
                 fiber::http::Http2Stream stream(&owner, kHeaderEncodeStreamOps);
                 stream.stream_id_ = test_case.stream_id;
@@ -681,7 +831,12 @@ std::string build_headers_frame_bytes(std::uint32_t stream_id,
                                                                   &encode_headers_frame_for_test, &test_case);
                 if (err == fiber::common::IoErr::None) {
                     scheduler.close();
-                    co_await scheduler.send_loop();
+                    while (!scheduler.stopped()) {
+                        auto result = scheduler.pump_write(transport, 64, 256 * 1024);
+                        if (!result) {
+                            break;
+                        }
+                    }
                     err = scheduler.stop_reason();
                 }
 
@@ -1229,9 +1384,8 @@ public:
 
     void request_stop(fiber::common::IoErr reason = fiber::common::IoErr::Canceled) noexcept { shutdown(reason); }
 
-    [[nodiscard]] bool send_loop_stopped() const noexcept { return send_loop_exited(); }
     [[nodiscard]] std::int32_t current_connection_send_window() const noexcept { return connection_send_window(); }
-    fiber::async::Task<void> stop_and_join() noexcept { co_await stop_and_join_send_loop(); }
+    fiber::async::Task<void> stop_and_join() noexcept { co_await stop_and_wait_closed(); }
 
     SendOutcome snapshot() const {
         SendOutcome outcome;
@@ -1287,7 +1441,8 @@ DetachedTask run_client_request_header_send(std::shared_ptr<std::promise<ClientR
 
 DetachedTask run_client_exchange_abort(std::shared_ptr<std::promise<ClientAbortRunOutcome>> promise) {
     ClientAbortRunOutcome outcome;
-    auto fake_transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{});
+    auto fake_transport =
+            std::make_unique<FakeHttpTransport>(std::vector<std::string>{}, std::vector<size_t>{}, false, true);
     auto *fake_transport_ptr = fake_transport.get();
 
     fiber::http::Http2Connection::Options options;
@@ -1375,7 +1530,8 @@ run_client_extended_connect_header_send(std::shared_ptr<std::promise<ClientExten
 
 DetachedTask run_client_request_body_send(std::shared_ptr<std::promise<ClientRequestBodyRunOutcome>> promise) {
     ClientRequestBodyRunOutcome outcome;
-    auto fake_transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{});
+    auto fake_transport =
+            std::make_unique<FakeHttpTransport>(std::vector<std::string>{}, std::vector<size_t>{}, false, true);
     auto *fake_transport_ptr = fake_transport.get();
 
     fiber::http::Http2Connection::Options options;
@@ -1408,7 +1564,8 @@ DetachedTask run_client_request_body_send(std::shared_ptr<std::promise<ClientReq
 
 DetachedTask run_client_request_trailer_send(std::shared_ptr<std::promise<ClientRequestTrailerRunOutcome>> promise) {
     ClientRequestTrailerRunOutcome outcome;
-    auto fake_transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{});
+    auto fake_transport =
+            std::make_unique<FakeHttpTransport>(std::vector<std::string>{}, std::vector<size_t>{}, false, true);
     auto *fake_transport_ptr = fake_transport.get();
 
     fiber::http::Http2Connection::Options options;
@@ -1459,7 +1616,11 @@ DetachedTask run_client_response_body_read(std::shared_ptr<std::promise<ClientRe
                                           false);
     response += make_frame(5, 0x0, 0x1, 1, "hello");
 
-    auto fake_transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{std::move(response)});
+    constexpr std::size_t kSettingsFrameSize = 9;
+    constexpr std::size_t kHeadersFrameHeaderSize = 9;
+    const std::size_t split = kSettingsFrameSize + kHeadersFrameHeaderSize + 1;
+    auto fake_transport = std::make_unique<FakeHttpTransport>(
+            std::vector<std::string>{response.substr(0, split), response.substr(split)});
     auto *fake_transport_ptr = fake_transport.get();
 
     fiber::http::Http2Connection::Options options;
@@ -1770,8 +1931,7 @@ public:
         return stream ? stream->remote_rst() : false;
     }
     void request_stop(fiber::common::IoErr reason = fiber::common::IoErr::Canceled) noexcept { shutdown(reason); }
-    [[nodiscard]] bool send_loop_stopped() const noexcept { return send_loop_exited(); }
-    fiber::async::Task<void> stop_and_join() noexcept { co_await stop_and_join_send_loop(); }
+    fiber::async::Task<void> stop_and_join() noexcept { co_await stop_and_wait_closed(); }
     [[nodiscard]] const std::string &written() const noexcept { return fake_transport_->written(); }
 
 private:
@@ -1791,6 +1951,7 @@ public:
     [[nodiscard]] const std::string &written() const noexcept { return transport_impl_->written(); }
     [[nodiscard]] std::size_t transport_close_count() const noexcept { return transport_impl_->close_count(); }
     [[nodiscard]] State current_state() const noexcept { return state(); }
+    [[nodiscard]] bool read_buffer_allocated() const noexcept { return static_cast<bool>(inbound_io_.read_buf); }
 
 private:
     ScriptedReadTransport *transport_impl_ = nullptr;
@@ -1889,7 +2050,7 @@ DetachedTask run_control_setup_task(ControlSetupContext ctx) {
     if (ctx.snapshot_before_shutdown) {
         co_await fiber::async::sleep(std::chrono::milliseconds(5));
         capture_control_outcome(ctx);
-        ctx.connection->request_stop();
+        ctx.connection->request_stop(fiber::common::IoErr::None);
     }
 }
 
@@ -1972,7 +2133,7 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
     ControlRunOutcome outcome;
     fiber::http::Http2Stream::Lease local_stream1;
     fiber::http::Http2Stream::Lease local_stream3;
-    if (options.role == fiber::http::Http2Connection::ConnectionRole::Client) {
+    if (options.role == fiber::http::Http2Connection::ConnectionRole::Client && open_streams_for_setup && setup) {
         auto *local_owner1 = TestHttp2StreamOwner::create_owner();
         auto *local_owner3 = TestHttp2StreamOwner::create_owner();
         if (!local_owner1 || !local_owner3) {
@@ -2217,12 +2378,18 @@ ClientConcurrentLimitOutcome execute_client_concurrent_limit(fiber::http::Http2C
 
 DetachedTask run_keepalive_connection(std::shared_ptr<std::promise<KeepaliveRunOutcome>> promise,
                                       std::vector<ScriptedReadTransport::ReadAction> actions,
-                                      fiber::http::Http2Connection::Options options = {}) {
+                                      fiber::http::Http2Connection::Options options = {},
+                                      bool inspect_idle_release = false) {
     auto transport = std::make_unique<ScriptedReadTransport>(std::move(actions));
     auto *transport_impl = transport.get();
     KeepaliveHttp2Connection connection(std::move(transport), transport_impl, options);
 
     KeepaliveRunOutcome outcome;
+    if (inspect_idle_release) {
+        co_await fiber::async::sleep(std::chrono::milliseconds(5));
+        outcome.read_buffer_released = !connection.read_buffer_allocated();
+        connection.shutdown(fiber::common::IoErr::None);
+    }
     outcome.result = co_await connection.run();
     outcome.written = options.role == fiber::http::Http2Connection::ConnectionRole::Client
                               ? strip_client_initial_flight(connection.written())
@@ -2237,14 +2404,16 @@ DetachedTask run_keepalive_connection(std::shared_ptr<std::promise<KeepaliveRunO
 }
 
 KeepaliveRunOutcome execute_keepalive_connection(std::vector<ScriptedReadTransport::ReadAction> actions,
-                                                 fiber::http::Http2Connection::Options options = {}) {
+                                                 fiber::http::Http2Connection::Options options = {},
+                                                 bool inspect_idle_release = false) {
     fiber::event::EventLoopGroup group(1);
     auto promise = std::make_shared<std::promise<KeepaliveRunOutcome>>();
     auto future = promise->get_future();
 
     group.start();
-    fiber::async::spawn(group.at(0), [promise = std::move(promise), actions = std::move(actions), options]() mutable {
-        return run_keepalive_connection(std::move(promise), std::move(actions), options);
+    fiber::async::spawn(group.at(0), [promise = std::move(promise), actions = std::move(actions), options,
+                                      inspect_idle_release]() mutable {
+        return run_keepalive_connection(std::move(promise), std::move(actions), options, inspect_idle_release);
     });
 
     auto status = future.wait_for(std::chrono::seconds(2));
@@ -2370,6 +2539,93 @@ TEST(Http2ConnectionTest, AllowsClientsToParseFramesWithoutPeerPreface) {
     EXPECT_EQ(iobuf_to_string(outcome.chunks[0].payload), "pong");
 }
 
+TEST(Http2ConnectionTest, StartDrivesIoAndNotifiesClosureWithoutRunCoroutine) {
+    struct CallbackContext {
+        std::promise<fiber::common::IoResult<void>> *promise = nullptr;
+        fiber::http::Http2Connection::State state = fiber::http::Http2Connection::State::Init;
+    };
+
+    fiber::event::EventLoopGroup group(1);
+    std::promise<fiber::common::IoResult<void>> promise;
+    auto future = promise.get_future();
+    CallbackContext callback_ctx{&promise};
+    group.start();
+    fiber::async::spawn(group.at(0), [&callback_ctx]() -> fiber::async::DetachedTask {
+        fiber::http::Http2Connection::Options options;
+        options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+        options = with_test_hpack_catalog(options);
+        auto *connection = new (std::nothrow)
+                fiber::http::Http2Connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
+        if (!connection) {
+            callback_ctx.promise->set_value(std::unexpected(fiber::common::IoErr::NoMem));
+            fiber::event::EventLoop::current().stop();
+            co_return;
+        }
+
+        auto on_closed = [](void *ctx, fiber::http::Http2Connection &closed_connection,
+                            fiber::http::Http2Connection::RunResult result) noexcept {
+            auto *callback = static_cast<CallbackContext *>(ctx);
+            auto &event_loop = closed_connection.loop();
+            callback->state = closed_connection.state();
+            callback->promise->set_value(std::move(result));
+            delete &closed_connection;
+            event_loop.stop();
+        };
+        auto transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{});
+        fiber::common::IoErr err = connection->start(std::move(transport), on_closed, &callback_ctx);
+        if (err != fiber::common::IoErr::None) {
+            delete connection;
+            callback_ctx.promise->set_value(std::unexpected(err));
+            fiber::event::EventLoop::current().stop();
+        }
+        co_return;
+    });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_TRUE(future.get().has_value());
+    group.join();
+    EXPECT_EQ(callback_ctx.state, fiber::http::Http2Connection::State::Closed);
+}
+
+TEST(Http2ConnectionTest, ReadinessCallbackDrainsTransportUntilWouldBlock) {
+    fiber::event::EventLoopGroup group(1);
+    auto promise = std::make_shared<std::promise<RunOutcome>>();
+    auto future = promise->get_future();
+    group.start();
+    fiber::async::spawn(group.at(0), [promise]() -> fiber::async::DetachedTask {
+        fiber::http::Http2Connection::Options options;
+        options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+        std::vector<std::string> chunks{
+                make_frame(3, 0xA, 0x0, 1, "one"),
+                make_frame(3, 0xA, 0x0, 1, "two"),
+        };
+        auto transport =
+                std::make_unique<FakeHttpTransport>(std::move(chunks), std::vector<size_t>{}, true, true, false);
+        FakeHttpTransport *transport_impl = transport.get();
+        RecordingHttp2Connection connection(std::move(transport), options);
+
+        co_await fiber::async::sleep(std::chrono::milliseconds(1));
+        transport_impl->release_reads();
+
+        RunOutcome outcome;
+        outcome.chunks = connection.chunks();
+        outcome.read_into_call_count = transport_impl->read_into_call_count();
+        connection.shutdown();
+        outcome.result = co_await connection.run();
+        promise->set_value(std::move(outcome));
+        fiber::event::EventLoop::current().stop();
+    });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    RunOutcome outcome = future.get();
+    group.join();
+    ASSERT_TRUE(outcome.result.has_value());
+    ASSERT_EQ(outcome.chunks.size(), 2U);
+    EXPECT_EQ(iobuf_to_string(outcome.chunks[0].payload), "one");
+    EXPECT_EQ(iobuf_to_string(outcome.chunks[1].payload), "two");
+    EXPECT_EQ(outcome.read_into_call_count, 3U);
+}
+
 TEST(Http2ConnectionTest, ReportsZeroLengthFrames) {
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
@@ -2383,8 +2639,20 @@ TEST(Http2ConnectionTest, ReportsZeroLengthFrames) {
     EXPECT_EQ(outcome.chunks[0].offset, 0U);
     EXPECT_EQ(outcome.chunks[0].length, 0U);
     EXPECT_EQ(outcome.chunks[0].payload.readable(), 0U);
-    EXPECT_EQ(outcome.wait_readable_call_count, 1U);
+    EXPECT_EQ(outcome.wait_readable_call_count, 0U);
     EXPECT_EQ(outcome.read_into_call_count, 2U);
+}
+
+TEST(Http2ConnectionTest, ReschedulesAfterParsingExactlyOneOperationBudget) {
+    std::string input(kClientConnectionPreface);
+    for (std::size_t i = 0; i < 62; ++i) {
+        input += make_frame(0, 0xA, 0x0, 1, {});
+    }
+
+    RunOutcome outcome = execute_connection({std::move(input)});
+
+    ASSERT_TRUE(outcome.result.has_value());
+    EXPECT_EQ(outcome.chunks.size(), 62U);
 }
 
 TEST(Http2ConnectionTest, ReallocatesReadBufferWhenPayloadIsRetained) {
@@ -2400,7 +2668,7 @@ TEST(Http2ConnectionTest, ReallocatesReadBufferWhenPayloadIsRetained) {
     ASSERT_EQ(outcome.chunks.size(), 2U);
     EXPECT_EQ(iobuf_to_string(outcome.chunks[0].payload), "abc");
     EXPECT_EQ(iobuf_to_string(outcome.chunks[1].payload), "wxyz");
-    EXPECT_EQ(outcome.wait_readable_call_count, 3U);
+    EXPECT_EQ(outcome.wait_readable_call_count, 0U);
     EXPECT_EQ(outcome.read_into_call_count, 3U);
 }
 
@@ -2535,8 +2803,8 @@ TEST(Http2ConnectionTest, ReadTimeoutSendsKeepalivePingAndAckClearsOutstanding) 
     EXPECT_EQ(frames[0].flags, 0x0);
     EXPECT_EQ(frames[0].stream_id, 0U);
     EXPECT_EQ(frames[0].payload, keepalive_payload);
-    EXPECT_EQ(outcome.wait_readable_call_count, 2U);
-    EXPECT_EQ(outcome.read_into_call_count, 2U);
+    EXPECT_EQ(outcome.wait_readable_call_count, 0U);
+    EXPECT_EQ(outcome.read_into_call_count, 3U);
 }
 
 TEST(Http2ConnectionTest, SecondReadTimeoutWithoutPingAckClosesConnection) {
@@ -2554,8 +2822,8 @@ TEST(Http2ConnectionTest, SecondReadTimeoutWithoutPingAckClosesConnection) {
 
     ASSERT_FALSE(outcome.result.has_value());
     EXPECT_EQ(outcome.result.error(), fiber::common::IoErr::TimedOut);
-    EXPECT_EQ(outcome.wait_readable_call_count, 2U);
-    EXPECT_EQ(outcome.read_into_call_count, 0U);
+    EXPECT_EQ(outcome.wait_readable_call_count, 0U);
+    EXPECT_EQ(outcome.read_into_call_count, 2U);
 }
 
 TEST(Http2ConnectionTest, IdleReadBufferReleaseTimeoutDoesNotCloseConnection) {
@@ -2569,13 +2837,13 @@ TEST(Http2ConnectionTest, IdleReadBufferReleaseTimeoutDoesNotCloseConnection) {
             {
                     {ScriptedReadTransport::ReadActionKind::Chunk, std::move(frame)},
                     {ScriptedReadTransport::ReadActionKind::TimedOut, {}},
-                    {ScriptedReadTransport::ReadActionKind::Eof, {}},
             },
-            options);
+            options, true);
 
     ASSERT_TRUE(outcome.result.has_value());
-    EXPECT_EQ(outcome.wait_readable_call_count, 2U);
-    EXPECT_EQ(outcome.read_into_call_count, 3U);
+    EXPECT_TRUE(outcome.read_buffer_released);
+    EXPECT_EQ(outcome.wait_readable_call_count, 0U);
+    EXPECT_EQ(outcome.read_into_call_count, 2U);
 }
 
 TEST(Http2ConnectionTest, PartialFrameIsNotReleasedByIdleReadBufferTimeout) {
@@ -2594,7 +2862,7 @@ TEST(Http2ConnectionTest, PartialFrameIsNotReleasedByIdleReadBufferTimeout) {
 
     ASSERT_FALSE(outcome.result.has_value());
     EXPECT_EQ(outcome.result.error(), fiber::common::IoErr::TimedOut);
-    EXPECT_EQ(outcome.wait_readable_call_count, 1U);
+    EXPECT_EQ(outcome.wait_readable_call_count, 0U);
     EXPECT_EQ(outcome.read_into_call_count, 2U);
 }
 
@@ -2649,7 +2917,8 @@ TEST(Http2ConnectionTest, RstStreamClosesActiveStream) {
     payload[3] = '\x8';
     ControlRunOutcome outcome = execute_control_connection(
             {make_frame(4, 0x3, 0x0, 1, payload)},
-            [](ControlHttp2Connection &, fiber::http::Http2Stream &, fiber::http::Http2Stream &) {}, options, true);
+            [](ControlHttp2Connection &, fiber::http::Http2Stream &, fiber::http::Http2Stream &) {}, options, true,
+            true, true);
 
     ASSERT_TRUE(outcome.result.has_value());
     EXPECT_FALSE(outcome.stream1_registered);

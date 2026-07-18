@@ -9,9 +9,7 @@
 #include <cstring>
 #include <memory>
 
-#include "../async/Spawn.h"
 #include "../async/Task.h"
-#include "../async/WaitGroup.h"
 #include "../common/Assert.h"
 #include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
@@ -51,6 +49,7 @@ public:
 
     using FrameHeader = Http2FrameHeader;
     using RunResult = common::IoResult<void>;
+    using ClosedCallback = void (*)(void *ctx, Http2Connection &connection, RunResult result) noexcept;
 
     struct Options {
         ConnectionRole role = ConnectionRole::Server;
@@ -86,15 +85,30 @@ public:
     Http2Connection(Options options, void *peer_stream_factory_ctx,
                     const Http2StreamFactoryOps &peer_stream_factory_ops);
 
-    common::IoErr start(std::unique_ptr<HttpTransport> transport) noexcept;
+    // Must be called on transport->loop(). A successful start owns and drives
+    // transport I/O until closure; no run coroutine is required. on_closed is
+    // invoked on the loop after all connection state is closed and may destroy
+    // the connection. Use either on_closed or run()/wait_closed(), not both.
+    common::IoErr start(std::unique_ptr<HttpTransport> transport, ClosedCallback on_closed = nullptr,
+                        void *closed_ctx = nullptr) noexcept;
 
+    // Compatibility waiters; these do not drive I/O.
     fiber::async::Task<RunResult> run() noexcept;
+    fiber::async::Task<RunResult> wait_closed() noexcept;
     [[nodiscard]] common::IoResult<Http2Stream::Lease> attach_local_stream(Http2Stream &stream) noexcept;
     void shutdown(common::IoErr reason = common::IoErr::Canceled) noexcept;
     void graceful_shutdown() noexcept;
     [[nodiscard]] State state() const noexcept { return state_; }
     [[nodiscard]] bool peer_settings_received() const noexcept { return peer_settings_received_; }
     [[nodiscard]] bool peer_enable_connect_protocol() const noexcept { return peer_enable_connect_protocol_; }
+    [[nodiscard]] event::EventLoop &loop() noexcept {
+        FIBER_ASSERT(transport_ != nullptr);
+        return transport_->loop();
+    }
+    [[nodiscard]] const event::EventLoop &loop() const noexcept {
+        FIBER_ASSERT(transport_ != nullptr);
+        return transport_->loop();
+    }
     [[nodiscard]] HttpTransport &transport() noexcept {
         FIBER_ASSERT(transport_ != nullptr);
         return *transport_;
@@ -128,12 +142,48 @@ protected:
     [[nodiscard]] bool has_stream(std::uint32_t stream_id) const noexcept {
         return streams_.find(stream_id) != nullptr;
     }
-    [[nodiscard]] bool send_loop_exited() const noexcept { return !send_loop_running_; }
+    [[nodiscard]] bool outbound_stopped() const noexcept { return outbound_scheduler_.stopped(); }
     [[nodiscard]] Http2HpackDecoder &inbound_hpack_decoder() noexcept { return inbound_hpack_decoder_; }
     [[nodiscard]] const Http2HpackDecoder &inbound_hpack_decoder() const noexcept { return inbound_hpack_decoder_; }
-    fiber::async::Task<void> stop_and_join_send_loop(common::IoErr reason = common::IoErr::Canceled) noexcept;
+    fiber::async::Task<void> stop_and_wait_closed(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
 private:
+    enum class ParsePhase : std::uint8_t {
+        Preface,
+        FrameHeader,
+        FramePayload,
+    };
+
+    struct InboundIoState {
+        mem::IoBuf read_buf{};
+        FrameHeader current_header{};
+        std::chrono::steady_clock::time_point last_inbound_at{};
+        std::chrono::steady_clock::time_point ping_sent_at{};
+        std::uint32_t payload_remaining = 0;
+        std::size_t payload_offset = 0;
+        event::IoEvent wait_event = event::IoEvent::None;
+        ParsePhase phase = ParsePhase::FrameHeader;
+        bool ready_hint = false;
+        bool operation_pending = false;
+    };
+
+    struct ReadPumpResult {
+        event::IoEvent wait_event = event::IoEvent::None;
+        std::size_t bytes_read = 0;
+        bool needs_reschedule = false;
+    };
+
+    struct ClosedAwaiter {
+        Http2Connection *connection = nullptr;
+        std::coroutine_handle<> handle{};
+
+        ~ClosedAwaiter();
+
+        [[nodiscard]] bool await_ready() const noexcept { return connection->close_completion_dispatched_; }
+        bool await_suspend(std::coroutine_handle<> continuation) noexcept;
+        void await_resume() noexcept;
+    };
+
     struct InboundStream {
         Http2Stream::Lease lease{};
         std::uint32_t stream_id = 0;
@@ -189,23 +239,39 @@ private:
                                                     Http2OutboundEncodeFn encode, void *ctx) noexcept;
     [[nodiscard]] bool cancel_queued_stream_send(Http2Stream &stream) noexcept;
     void cancel_stream_send(Http2Stream &stream) noexcept;
-    fiber::async::Task<common::IoResult<std::size_t>>
-    read_more(mem::IoBuf &read_buf, std::size_t capacity,
-              std::chrono::steady_clock::time_point last_inbound_at) noexcept;
+    [[nodiscard]] common::IoResult<ReadPumpResult> pump_read(std::size_t operation_budget,
+                                                             std::size_t byte_budget) noexcept;
+    [[nodiscard]] common::IoErr consume_read_buffer(std::size_t &operation_budget, std::size_t &byte_budget) noexcept;
+    void handle_read_eof() noexcept;
     [[nodiscard]] std::chrono::milliseconds current_read_timeout() const noexcept;
     common::IoErr handle_read_timeout() noexcept;
     common::IoErr send_keepalive_ping() noexcept;
     common::IoErr start_client_session() noexcept;
     common::IoErr start_server_session() noexcept;
     void on_stream_outbound_idle(Http2Stream &stream) noexcept;
-    fiber::async::Task<RunResult> finalize_run(RunResult result) noexcept;
-    fiber::async::Task<void> close_transport_after_send_loop() noexcept;
-    fiber::async::DetachedTask run_send_loop() noexcept;
-    static fiber::async::DetachedTask close_transport_after_send_loop_task(Http2Connection *connection) noexcept;
-    void start_send_loop() noexcept;
+    static void on_transport_read_ready(void *ctx, common::IoErr err) noexcept;
+    static void on_transport_write_ready(void *ctx, common::IoErr err) noexcept;
+    static void on_outbound_work(void *ctx) noexcept;
+    static void on_io_pump(Http2Connection *connection) noexcept;
+    static void on_read_timer(Http2Connection *connection) noexcept;
+    static void on_write_timer(Http2Connection *connection) noexcept;
+    static void on_read_buffer_idle_timer(Http2Connection *connection) noexcept;
+    static void on_closed_completion(Http2Connection *connection) noexcept;
+    void handle_transport_ready(event::IoEvent event, common::IoErr err) noexcept;
+    void schedule_io_pump() noexcept;
+    void drive_io() noexcept;
+    [[nodiscard]] common::IoErr sync_transport_callbacks() noexcept;
+    void clear_transport_callbacks() noexcept;
+    void arm_read_timer() noexcept;
+    void arm_write_timer(bool made_progress) noexcept;
+    void arm_read_buffer_idle_timer() noexcept;
+    void cancel_io_timers() noexcept;
+    void finish_connection() noexcept;
+    void schedule_closed_completion() noexcept;
+    void dispatch_closed_completion() noexcept;
     common::IoErr start_draining() noexcept;
     void maybe_enter_closing_from_draining() noexcept;
-    void enter_closing(common::IoErr reason, bool abortive = true) noexcept;
+    void enter_closing(common::IoErr reason, bool report_error = true) noexcept;
     void close_all_streams(common::IoErr result) noexcept;
     void clear_inbound_stream() noexcept;
     [[nodiscard]] Http2Stream::Lease alloc_peer_stream(std::uint32_t stream_id) noexcept;
@@ -248,12 +314,34 @@ private:
     std::uint64_t keepalive_ping_sequence_ = 0;
     bool keepalive_ping_outstanding_ = false;
     Http2OutboundScheduler outbound_scheduler_;
-    fiber::async::WaitGroup lifetime_wg_{};
+    InboundIoState inbound_io_{};
     common::IntrusiveList<Http2Stream, offsetof(Http2Stream, owned_hook_)> owned_stream_list_;
+    event::EventLoop::NotifyEntry io_pump_entry_{};
+    event::EventLoop::NotifyEntry close_completion_entry_{};
+    event::EventLoop::TimerEntry read_timer_entry_{};
+    event::EventLoop::TimerEntry write_timer_entry_{};
+    event::EventLoop::TimerEntry read_buffer_idle_timer_entry_{};
+    std::chrono::steady_clock::time_point write_blocked_at_{};
+    ClosedCallback on_closed_ = nullptr;
+    void *closed_ctx_ = nullptr;
+    std::coroutine_handle<> closed_waiter_{};
+    event::IoEvent outbound_wait_event_ = event::IoEvent::None;
     State state_ = State::Init;
-    bool send_loop_running_ = false;
     bool stop_sending_requested_ = false;
+    bool physical_read_registered_ = false;
+    bool physical_write_registered_ = false;
+    bool io_pump_posted_ = false;
+    bool io_pump_running_ = false;
+    bool io_pump_again_ = false;
+    bool prefer_write_ = false;
+    bool outbound_ready_hint_ = false;
+    bool inbound_eof_ = false;
+    bool close_flush_outbound_ = false;
+    bool close_finished_ = false;
+    bool close_completion_posted_ = false;
+    bool close_completion_dispatched_ = false;
     common::IoErr stop_sending_reason_ = common::IoErr::Canceled;
+    common::IoErr terminal_error_ = common::IoErr::None;
 
     friend class Http2Stream;
     friend class Http2OutboundScheduler;

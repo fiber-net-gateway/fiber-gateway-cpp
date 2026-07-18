@@ -21,6 +21,8 @@
 #include "http/HttpTransport.h"
 #undef private
 
+#include "HttpTransportStub.h"
+
 namespace {
 
 using fiber::common::IoErr;
@@ -28,7 +30,7 @@ using fiber::http::Http2HeadersFrameEncoder;
 using fiber::http::Http2HpackEncodeCatalog;
 using fiber::http::Http2HpackEncoder;
 
-class RecordingTransport final : public fiber::http::HttpTransport {
+class RecordingTransport final : public fiber::test::HttpTransportStub {
 public:
     fiber::async::Task<fiber::common::IoResult<void>> handshake(std::chrono::milliseconds) override {
         co_return fiber::common::IoResult<void>{};
@@ -40,6 +42,35 @@ public:
 
     fiber::async::Task<fiber::common::IoResult<void>> wait_readable(std::chrono::milliseconds) override {
         co_return fiber::common::IoResult<void>{};
+    }
+
+    fiber::common::IoErr poll_write(const void *buf, size_t len, size_t &out,
+                                    fiber::event::IoEvent &wait_event) noexcept override {
+        out = 0;
+        wait_event = fiber::event::IoEvent::None;
+        if (closed_) {
+            return fiber::common::IoErr::ConnReset;
+        }
+        const auto *ptr = static_cast<const std::uint8_t *>(buf);
+        written_.insert(written_.end(), ptr, ptr + len);
+        out = len;
+        return fiber::common::IoErr::None;
+    }
+
+    fiber::common::IoErr poll_writev(fiber::mem::IoBufChain &buf, size_t &out,
+                                     fiber::event::IoEvent &wait_event) noexcept override {
+        out = 0;
+        wait_event = fiber::event::IoEvent::None;
+        while (auto *front = buf.first_readable()) {
+            size_t written = 0;
+            fiber::common::IoErr err = poll_write(front->readable_data(), front->readable(), written, wait_event);
+            if (err != fiber::common::IoErr::None) {
+                return err;
+            }
+            buf.consume_and_compact(written);
+            out += written;
+        }
+        return fiber::common::IoErr::None;
     }
 
     fiber::async::Task<fiber::common::IoResult<size_t>> read(void *, size_t, std::chrono::milliseconds) override {
@@ -108,8 +139,8 @@ struct EncodeCase {
     int status_code = 0;
     Http2HeadersFrameEncoder::Options options{};
     std::vector<std::pair<std::string_view, std::string_view>> headers;
-    std::size_t slot_used = 0;
     std::size_t total_bytes = 0;
+    std::size_t first_buffer_capacity = 0;
 };
 
 fiber::common::IoErr on_header_block_start(void *, fiber::http::Http2HpackDecoder::Sink &) noexcept {
@@ -168,8 +199,10 @@ fiber::common::IoErr encode_headers_to_target(fiber::http::Http2Stream &, void *
         return err;
     }
 
-    test_case->slot_used = target.slot_used();
     test_case->total_bytes = target.total_bytes();
+    if (fiber::mem::IoBuf *first = target.chain_.first_readable()) {
+        test_case->first_buffer_capacity = first->capacity();
+    }
 
     result.status = fiber::http::Http2OutboundEncodeResult::Status::Encoded;
     result.next_kind = fiber::http::Http2OutboundNextKind::None;
@@ -185,8 +218,7 @@ std::vector<std::uint8_t> encode_headers_bytes_in_place(EncodeCase &test_case) {
     group.start();
     fiber::async::spawn(group.at(0), [promise, &test_case, &group]() mutable -> fiber::async::DetachedTask {
         RecordingTransport transport;
-        fiber::http::Http2OutboundScheduler scheduler(&transport, 1024, std::chrono::seconds(30),
-                                                      test_case.options.max_frame_size);
+        fiber::http::Http2OutboundScheduler scheduler(test_case.options.max_frame_size);
         int owner = 0;
         fiber::http::Http2Stream stream(&owner, kStreamOps);
         stream.stream_id_ = test_case.options.stream_id;
@@ -195,7 +227,12 @@ std::vector<std::uint8_t> encode_headers_bytes_in_place(EncodeCase &test_case) {
                                                           &encode_headers_to_target, &test_case);
         if (err == fiber::common::IoErr::None) {
             scheduler.close();
-            co_await scheduler.send_loop();
+            while (!scheduler.stopped()) {
+                auto result = scheduler.pump_write(transport, 64, 256 * 1024);
+                if (!result) {
+                    break;
+                }
+            }
             err = scheduler.stop_reason();
         }
 
@@ -314,21 +351,43 @@ TEST(Http2HeadersFrameEncoderTest, EncodesHeadersFrameWithPaddingAndPriority) {
               }));
 }
 
-TEST(Http2HeadersFrameEncoderTest, SmallHeaderBlockStaysInTargetSlot) {
+TEST(Http2HeadersFrameEncoderTest, EncodesSmallHeaderBlockIntoOwnedBuffer) {
     EncodeCase test_case{
             .status_code = 200,
             .options =
                     {
                             .stream_id = 9,
                             .max_frame_size = 16384,
-                            .first_frame_payload_cap = 16384,
                     },
     };
 
     EXPECT_EQ(encode_headers_bytes_in_place(test_case),
               (std::vector<std::uint8_t>{0x00, 0x00, 0x01, 0x01, 0x04, 0x00, 0x00, 0x00, 0x09, 0x88}));
-    EXPECT_NE(test_case.slot_used, 0U);
-    EXPECT_EQ(test_case.slot_used, test_case.total_bytes);
+    EXPECT_EQ(test_case.total_bytes, 10U);
+    EXPECT_EQ(test_case.first_buffer_capacity, 1033U);
+}
+
+TEST(Http2HeadersFrameEncoderTest, GrowsOutputBufferForLargeHuffmanValueWithinFrame) {
+    std::string value(16 * 1024, 'x');
+    EncodeCase test_case{
+            .status_code = 200,
+            .options =
+                    {
+                            .stream_id = 11,
+                            .max_frame_size = 16384,
+                    },
+            .headers = {{"grpc-message", value}},
+    };
+
+    const std::vector<std::uint8_t> out = encode_headers_bytes_in_place(test_case);
+    ASSERT_GE(out.size(), 9U);
+    const std::size_t payload_size = (static_cast<std::size_t>(out[0]) << 16U) |
+                                     (static_cast<std::size_t>(out[1]) << 8U) | static_cast<std::size_t>(out[2]);
+    EXPECT_EQ(out.size(), payload_size + 9U);
+    EXPECT_EQ(out[3], 0x01U);
+    EXPECT_EQ(out[4] & 0x04U, 0x04U);
+    EXPECT_LT(payload_size, 16384U);
+    EXPECT_EQ(test_case.first_buffer_capacity, 1033U);
 }
 
 } // namespace

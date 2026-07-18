@@ -1,16 +1,13 @@
 #ifndef FIBER_HTTP_HTTP2_OUTBOUND_SCHEDULER_H
 #define FIBER_HTTP_HTTP2_OUTBOUND_SCHEDULER_H
 
-#include <chrono>
 #include <concepts>
-#include <coroutine>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <type_traits>
 #include <utility>
 
-#include "../async/Task.h"
 #include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
 #include "../common/mem/IoBufChain.h"
@@ -28,6 +25,14 @@ struct Http2OutboundEncodeRequest {
 };
 
 using Http2OutboundDoneFn = void (*)(void *ctx, common::IoErr result) noexcept;
+using Http2OutboundWakeFn = void (*)(void *ctx) noexcept;
+
+struct Http2OutboundPumpResult {
+    event::IoEvent wait_event = event::IoEvent::None;
+    std::size_t bytes_written = 0;
+    bool needs_reschedule = false;
+    bool stopped = false;
+};
 
 struct Http2OutboundEncodeResult {
     enum class Status : std::uint8_t {
@@ -47,31 +52,19 @@ class Http2OutboundEncodeTarget {
 public:
     [[nodiscard]] bool empty() const noexcept;
     [[nodiscard]] std::size_t total_bytes() const noexcept;
-    [[nodiscard]] std::size_t slot_capacity() const noexcept { return slot_capacity_; }
-    [[nodiscard]] std::size_t slot_used() const noexcept { return slot_used_; }
-    [[nodiscard]] std::size_t slot_available() const noexcept { return slot_capacity_ - slot_used_; }
 
-    [[nodiscard]] common::IoErr reserve_slot(std::size_t bytes, std::uint8_t *&dst) noexcept;
-    void commit_slot(std::size_t bytes) noexcept;
-    void rollback_slot() noexcept;
     [[nodiscard]] common::IoErr append_copy(const void *src, std::size_t bytes) noexcept;
     [[nodiscard]] common::IoErr append_buffer(mem::IoBuf &&buf) noexcept;
     [[nodiscard]] common::IoErr append_chain(mem::IoBufChain &&chain) noexcept;
     void set_on_done(Http2OutboundDoneFn fn, void *ctx) noexcept;
-    void clear() noexcept;
 
 private:
-    void reset(mem::IoBufNodePool &node_pool, std::uint8_t *slot, std::size_t capacity) noexcept;
-    [[nodiscard]] mem::IoBufChain take_tail_chain() noexcept { return std::move(tail_chain_); }
+    void reset(mem::IoBufNodePool &node_pool) noexcept;
+    [[nodiscard]] mem::IoBufChain take_chain() noexcept { return std::move(chain_); }
     [[nodiscard]] Http2OutboundDoneFn done_fn() const noexcept { return done_fn_; }
     [[nodiscard]] void *done_ctx() const noexcept { return done_ctx_; }
-    void clear_done() noexcept;
 
-    std::uint8_t *slot_ = nullptr;
-    std::size_t slot_capacity_ = 0;
-    std::size_t slot_used_ = 0;
-    std::size_t slot_reserved_ = 0;
-    mem::IoBufChain tail_chain_{};
+    mem::IoBufChain chain_{};
     Http2OutboundDoneFn done_fn_ = nullptr;
     void *done_ctx_ = nullptr;
 
@@ -80,20 +73,12 @@ private:
 
 class Http2OutboundScheduler {
 public:
-    static constexpr std::size_t kPrimarySlabCapacity = 16 * 1024;
-
-    explicit Http2OutboundScheduler(HttpTransport *transport = nullptr, std::size_t slab_capacity = 1024,
-                                    std::chrono::milliseconds write_timeout = std::chrono::seconds(30),
-                                    std::uint32_t peer_max_frame_size = 16384) noexcept;
+    explicit Http2OutboundScheduler(std::uint32_t peer_max_frame_size = 16384) noexcept;
     Http2OutboundScheduler(const Http2OutboundScheduler &) = delete;
     Http2OutboundScheduler &operator=(const Http2OutboundScheduler &) = delete;
     ~Http2OutboundScheduler();
 
-    void set_transport(HttpTransport *transport) noexcept { transport_ = transport; }
-    [[nodiscard]] HttpTransport *transport() const noexcept { return transport_; }
-
-    void set_write_timeout(std::chrono::milliseconds timeout) noexcept { write_timeout_ = timeout; }
-    [[nodiscard]] std::chrono::milliseconds write_timeout() const noexcept { return write_timeout_; }
+    void bind_owner_loop(event::EventLoop &loop) noexcept;
 
     void set_peer_max_frame_size(std::uint32_t value) noexcept { peer_max_frame_size_ = value; }
     [[nodiscard]] std::uint32_t peer_max_frame_size() const noexcept { return peer_max_frame_size_; }
@@ -103,22 +88,31 @@ public:
 
     template<typename Encoder>
     [[nodiscard]] common::IoErr alloc_and_enqueue_control(std::size_t bytes, Encoder &&encoder) noexcept {
-        bind_owner_loop_if_needed();
-
-        Reservation reservation;
-        common::IoErr err = reserve_tail(bytes, reservation);
+        if (!bind_owner_loop_if_needed()) {
+            return common::IoErr::Invalid;
+        }
+        if (bytes == 0) {
+            return common::IoErr::Invalid;
+        }
+        if (stop_reason_ != common::IoErr::None) {
+            return stop_reason_;
+        }
+        if (closed_) {
+            return common::IoErr::Canceled;
+        }
+        mem::IoBuf buf = mem::IoBuf::allocate(bytes);
+        if (!buf) {
+            return common::IoErr::NoMem;
+        }
+        common::IoErr err = invoke_control_encoder(buf.writable_data(), bytes, std::forward<Encoder>(encoder));
         if (err != common::IoErr::None) {
             return err;
         }
-
-        err = invoke_control_encoder(reservation.data, bytes, std::forward<Encoder>(encoder));
-        if (err != common::IoErr::None) {
-            rollback_reservation(reservation);
-            return err;
+        buf.commit(bytes);
+        if (!control_chain_.append(std::move(buf))) {
+            return common::IoErr::NoMem;
         }
-
-        commit_reservation(reservation);
-        notify_waiter();
+        notify_work();
         return common::IoErr::None;
     }
 
@@ -128,21 +122,22 @@ public:
     void cancel_stream(Http2Stream &stream) noexcept;
     void on_connection_window_available() noexcept;
 
-    fiber::async::Task<void> send_loop() noexcept;
+    void set_wake_callback(Http2OutboundWakeFn callback, void *ctx) noexcept {
+        wake_callback_ = callback;
+        wake_ctx_ = callback ? ctx : nullptr;
+    }
+
+    [[nodiscard]] common::IoResult<Http2OutboundPumpResult>
+    pump_write(HttpTransport &transport, std::size_t operation_budget, std::size_t byte_budget) noexcept;
 
     void close() noexcept;
     void abort(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
     [[nodiscard]] bool closed() const noexcept { return closed_; }
     [[nodiscard]] bool aborting() const noexcept { return aborting_; }
-    [[nodiscard]] bool send_loop_running() const noexcept { return send_loop_running_; }
+    [[nodiscard]] bool stopped() const noexcept { return stopped_; }
     [[nodiscard]] bool idle() const noexcept;
-    [[nodiscard]] std::size_t pending_control_bytes() const noexcept { return pending_control_bytes_; }
-    [[nodiscard]] std::size_t slab_capacity() const noexcept { return slab_capacity_; }
-    [[nodiscard]] std::size_t active_slab_count() const noexcept;
-    [[nodiscard]] bool has_cached_slab() const noexcept {
-        return primary_slab_ != nullptr && !primary_slab_attached_ && !primary_slab_borrowed_;
-    }
+    [[nodiscard]] std::size_t pending_control_bytes() const noexcept { return control_chain_.readable_bytes(); }
     [[nodiscard]] std::size_t ready_stream_count() const noexcept { return ready_stream_count_; }
     [[nodiscard]] std::size_t waiting_conn_window_stream_count() const noexcept {
         return waiting_conn_window_stream_count_;
@@ -151,34 +146,6 @@ public:
     [[nodiscard]] common::IoErr stop_reason() const noexcept { return stop_reason_; }
 
 private:
-    struct Slab;
-
-    class WaitForWorkAwaiter {
-    public:
-        explicit WaitForWorkAwaiter(Http2OutboundScheduler &queue) noexcept : queue_(&queue) {}
-        WaitForWorkAwaiter(const WaitForWorkAwaiter &) = delete;
-        WaitForWorkAwaiter &operator=(const WaitForWorkAwaiter &) = delete;
-        WaitForWorkAwaiter(WaitForWorkAwaiter &&) = delete;
-        WaitForWorkAwaiter &operator=(WaitForWorkAwaiter &&) = delete;
-        ~WaitForWorkAwaiter();
-
-        bool await_ready() const noexcept;
-        bool await_suspend(std::coroutine_handle<> handle) noexcept;
-        void await_resume() noexcept;
-
-    private:
-        static void on_notify(WaitForWorkAwaiter *awaiter) noexcept;
-        void resume() noexcept;
-
-        Http2OutboundScheduler *queue_ = nullptr;
-        fiber::event::EventLoop *loop_ = nullptr;
-        std::coroutine_handle<> handle_{};
-        fiber::event::EventLoop::NotifyEntry notify_entry_{};
-        bool resume_posted_ = false;
-
-        friend class Http2OutboundScheduler;
-    };
-
     enum class QueueState : std::uint8_t {
         None = 0,
         Ready,
@@ -186,40 +153,15 @@ private:
         Inflight,
     };
 
-    struct Reservation {
-        Slab *slab = nullptr;
-        std::uint8_t *data = nullptr;
-        std::size_t begin = 0;
-        std::size_t bytes = 0;
-    };
-
-    struct SendSpan {
-        const std::uint8_t *data = nullptr;
-        std::size_t length = 0;
-    };
-
     struct InflightStreamWrite {
-        Http2Stream *stream = nullptr;
-        Slab *slot_slab = nullptr;
-        std::uint8_t *slot = nullptr;
-        std::size_t slot_capacity = 0;
-        std::size_t slot_size = 0;
-        std::size_t slot_written = 0;
-        mem::IoBufChain tail_chain{};
+        mem::IoBufChain chain{};
         Http2OutboundDoneFn done = nullptr;
         void *done_ctx = nullptr;
 
-        [[nodiscard]] bool empty() const noexcept { return slot_done() && tail_chain.readable_bytes() == 0; }
-        [[nodiscard]] bool slot_done() const noexcept { return slot_written == slot_size; }
+        [[nodiscard]] bool empty() const noexcept { return chain.readable_bytes() == 0; }
 
         void clear() noexcept {
-            stream = nullptr;
-            slot_slab = nullptr;
-            slot = nullptr;
-            slot_capacity = 0;
-            slot_size = 0;
-            slot_written = 0;
-            tail_chain.clear();
+            chain.clear();
             done = nullptr;
             done_ctx = nullptr;
         }
@@ -263,23 +205,9 @@ private:
 
     using StreamList = common::IntrusiveList<Http2Stream, offsetof(Http2Stream, outbound_hook_)>;
 
-    void bind_owner_loop_if_needed() noexcept;
-    [[nodiscard]] common::IoErr reserve_tail(std::size_t bytes, Reservation &reservation) noexcept;
-    void rollback_reservation(const Reservation &reservation) noexcept;
-    void commit_reservation(const Reservation &reservation) noexcept;
-    [[nodiscard]] WaitForWorkAwaiter wait_for_work() noexcept { return WaitForWorkAwaiter(*this); }
-    [[nodiscard]] bool arm_waiter(WaitForWorkAwaiter *awaiter) noexcept;
-    void cancel_waiter(WaitForWorkAwaiter *awaiter) noexcept;
-    void notify_waiter() noexcept;
-    [[nodiscard]] bool should_wake_waiter() const noexcept;
-    [[nodiscard]] Slab *acquire_slab() noexcept;
-    void recycle_slab(Slab *slab) noexcept;
-    [[nodiscard]] Slab *borrow_primary_slab() noexcept;
-    void release_primary_slab() noexcept;
-    void append_tail_slab(Slab *slab) noexcept;
-    void discard_empty_head_slabs() noexcept;
-    [[nodiscard]] SendSpan current_send_span() noexcept;
-    void consume_written_control_bytes(std::size_t bytes) noexcept;
+    [[nodiscard]] bool bind_owner_loop_if_needed() noexcept;
+    void notify_work() noexcept;
+    void clear_control_state() noexcept;
     void fail(common::IoErr reason) noexcept;
     void clear_ready_streams() noexcept;
     void clear_waiting_conn_window_streams() noexcept;
@@ -294,28 +222,20 @@ private:
     void notify_inflight_done(common::IoErr result) noexcept;
     void finish_inflight_stream_write() noexcept;
 
-    HttpTransport *transport_ = nullptr;
-    std::chrono::milliseconds write_timeout_{};
-    std::size_t slab_capacity_ = 0;
     std::uint32_t peer_max_frame_size_ = 0;
     std::int32_t conn_send_window_ = 0;
-    std::size_t pending_control_bytes_ = 0;
-    std::size_t sending_end_ = 0;
-    Slab *head_slab_ = nullptr;
-    Slab *tail_slab_ = nullptr;
-    Slab *primary_slab_ = nullptr;
+    mem::IoBufChain control_chain_{};
     StreamList ready_streams_{};
     StreamList waiting_conn_window_streams_{};
     std::size_t ready_stream_count_ = 0;
     std::size_t waiting_conn_window_stream_count_ = 0;
     InflightStreamWrite inflight_stream_write_{};
-    WaitForWorkAwaiter *waiter_ = nullptr;
     fiber::event::EventLoop *owner_loop_ = nullptr;
+    Http2OutboundWakeFn wake_callback_ = nullptr;
+    void *wake_ctx_ = nullptr;
     bool closed_ = false;
     bool aborting_ = false;
-    bool send_loop_running_ = false;
-    bool primary_slab_attached_ = false;
-    bool primary_slab_borrowed_ = false;
+    bool stopped_ = false;
     common::IoErr stop_reason_ = common::IoErr::None;
     Http2Stream *inflight_stream_ = nullptr;
 };

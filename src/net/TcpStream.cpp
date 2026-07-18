@@ -59,23 +59,53 @@ fiber::event::EventLoop &TcpStream::loop() const noexcept { return stream_.loop(
 
 const SocketAddress &TcpStream::remote_addr() const noexcept { return remote_addr_; }
 
+fiber::common::IoErr TcpStream::apply_socket_options(const TcpSocketOptions &options) noexcept {
+    return detail::apply_tcp_socket_options(fd(), options);
+}
+
 int TcpStream::release_fd() noexcept { return stream_.release_fd(); }
 
 void TcpStream::close() { stream_.close(); }
 
-TcpStream::ReadAwaiter TcpStream::read(void *buf, size_t len) noexcept { return stream_.read(buf, len); }
-
-TcpStream::WriteAwaiter TcpStream::write(const void *buf, size_t len) noexcept { return stream_.write(buf, len); }
-
-TcpStream::ReadvAwaiter TcpStream::readv(const struct iovec *iov, int iovcnt) noexcept {
-    return stream_.readv(iov, iovcnt);
+fiber::common::IoErr TcpStream::set_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.set_read_callback(callback, ctx);
 }
 
-TcpStream::WritevAwaiter TcpStream::writev(const struct iovec *iov, int iovcnt) noexcept {
-    return stream_.writev(iov, iovcnt);
+fiber::common::IoErr TcpStream::set_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.set_write_callback(callback, ctx);
 }
 
-TcpStream::WaitReadableAwaiter TcpStream::wait_readable() noexcept { return stream_.wait_readable(); }
+fiber::common::IoErr TcpStream::clear_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.clear_read_callback(callback, ctx);
+}
+
+fiber::common::IoErr TcpStream::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.clear_write_callback(callback, ctx);
+}
+
+TcpStream::IoTask TcpStream::read(void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
+    return stream_.read(buf, len, timeout);
+}
+
+TcpStream::IoTask TcpStream::write(const void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
+    return stream_.write(buf, len, timeout);
+}
+
+TcpStream::IoTask TcpStream::readv(const struct iovec *iov, int iovcnt, std::chrono::milliseconds timeout) noexcept {
+    return stream_.readv(iov, iovcnt, timeout);
+}
+
+TcpStream::IoTask TcpStream::writev(const struct iovec *iov, int iovcnt, std::chrono::milliseconds timeout) noexcept {
+    return stream_.writev(iov, iovcnt, timeout);
+}
+
+TcpStream::WaitReadableAwaiter TcpStream::wait_readable(std::chrono::milliseconds timeout) noexcept {
+    return stream_.wait_readable(timeout);
+}
+
+TcpStream::WaitWritableAwaiter TcpStream::wait_writable(std::chrono::milliseconds timeout) noexcept {
+    return stream_.wait_writable(timeout);
+}
 
 fiber::common::IoResult<size_t> TcpStream::try_read(void *buf, size_t len) noexcept {
     return stream_.try_read(buf, len);

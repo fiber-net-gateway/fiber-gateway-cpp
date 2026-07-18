@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "HttpTransportStub.h"
 #include "async/Spawn.h"
 #include "async/Task.h"
 #include "common/IoError.h"
@@ -42,7 +43,7 @@ struct TransportMetrics {
     bool responses_ok = true;
 };
 
-class RecordingHttp1Transport final : public fiber::http::HttpTransport {
+class RecordingHttp1Transport final : public fiber::test::HttpTransportStub {
 public:
     RecordingHttp1Transport(fiber::event::EventLoop &loop, TransportMetrics &metrics, std::string input) :
         loop_(loop), metrics_(metrics), input_(std::move(input)) {}

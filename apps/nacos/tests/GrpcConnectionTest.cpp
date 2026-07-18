@@ -163,7 +163,7 @@ public:
             if (!accepted) {
                 break;
             }
-            auto transport = fiber::http::TcpTransport::create(*loop_, std::move(*accepted));
+            auto transport = fiber::http::TcpTransport::create(*loop_, std::move(*accepted), http_options_.tcp);
             if (!transport) {
                 break;
             }

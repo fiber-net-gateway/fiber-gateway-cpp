@@ -339,9 +339,8 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(std::uint16_t sl
 
     std::size_t prefix_written = 0;
     while (prefix_written < len_prefix.size()) {
-        auto write_prefix = co_await async::timeout_for(
-                [&]() { return stream.write(len_prefix.data() + prefix_written, len_prefix.size() - prefix_written); },
-                options_.timeout);
+        auto write_prefix = co_await stream.write(len_prefix.data() + prefix_written,
+                                                  len_prefix.size() - prefix_written, options_.timeout);
         if (!write_prefix) {
             close_stream();
             co_return std::unexpected(write_prefix.error());
@@ -355,9 +354,8 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(std::uint16_t sl
 
     std::size_t written = 0;
     while (written < slot.request_size) {
-        auto write_result = co_await async::timeout_for(
-                [&]() { return stream.write(slot.request_buf + written, slot.request_size - written); },
-                options_.timeout);
+        auto write_result =
+                co_await stream.write(slot.request_buf + written, slot.request_size - written, options_.timeout);
         if (!write_result) {
             close_stream();
             co_return std::unexpected(write_result.error());
@@ -369,8 +367,7 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(std::uint16_t sl
         written += *write_result;
     }
 
-    auto read_prefix = co_await async::timeout_for([&]() { return stream.read(len_prefix.data(), len_prefix.size()); },
-                                                   options_.timeout);
+    auto read_prefix = co_await stream.read(len_prefix.data(), len_prefix.size(), options_.timeout);
     auto prefix_result = consume_stream_read(read_prefix);
     if (!prefix_result) {
         close_stream();
@@ -378,9 +375,8 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(std::uint16_t sl
     }
     std::size_t prefix_read = *prefix_result;
     while (prefix_read < len_prefix.size()) {
-        auto more = co_await async::timeout_for(
-                [&]() { return stream.read(len_prefix.data() + prefix_read, len_prefix.size() - prefix_read); },
-                options_.timeout);
+        auto more = co_await stream.read(len_prefix.data() + prefix_read, len_prefix.size() - prefix_read,
+                                         options_.timeout);
         auto more_result = consume_stream_read(more);
         if (!more_result) {
             close_stream();
@@ -397,9 +393,8 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(std::uint16_t sl
 
     std::size_t total_read = 0;
     while (total_read < response_len) {
-        auto read_result = co_await async::timeout_for(
-                [&]() { return stream.read(slot.response_dst + total_read, response_len - total_read); },
-                options_.timeout);
+        auto read_result =
+                co_await stream.read(slot.response_dst + total_read, response_len - total_read, options_.timeout);
         auto payload_result = consume_stream_read(read_result);
         if (!payload_result) {
             close_stream();
