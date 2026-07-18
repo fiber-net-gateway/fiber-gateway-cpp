@@ -55,11 +55,14 @@ lite_nginx 当前先声明 logging shutdown guard，之后才声明主 EventLoop
 
 ### 2.4 flush timer 在空闲状态下仍会永久周期唤醒
 
-[`LoggerManager::current_context()`](../src/log/LoggerManager.cpp#L317) 只要发现配置中存在 buffered appender，就会在当前 EventLoop 上挂载 flush timer。timer 回调 [`on_context_timer()`](../src/log/LoggerManager.cpp#L346) 无论是否存在待写数据，都会按照全局最小 flush interval 重新 arm。
+处理状态：已按“一次性最早 deadline timer”方案完成整改。timer 现在只由实际非空 buffer 建立，所有
+buffer 清空后停止调度，多个 buffer 直接调度到最早的 `flush_at`。
 
-因此一个 EventLoop 只要产生过一次日志，即使所有 buffer 已经清空，也会永久周期唤醒并遍历全部 Appender。任何日志都会调用 `current_context()`，即使该 Logger 最终只路由到 console 或未缓冲文件，所以 timer 的建立范围也大于实际需要。
+整改前，[`LoggerManager::current_context()`](../src/log/LoggerManager.cpp#L312) 只要发现配置中存在 buffered appender，就会在当前 EventLoop 上挂载 flush timer。timer 回调 [`on_context_timer()`](../src/log/LoggerManager.cpp#L337) 无论是否存在待写数据，都会按照全局最小 flush interval 重新 arm。
 
-建议：
+整改前的影响是：一个 EventLoop 只要产生过一次日志，即使所有 buffer 已经清空，也会永久周期唤醒并遍历全部 Appender。任何日志都会调用 `current_context()`，即使该 Logger 最终只路由到 console 或未缓冲文件，所以 timer 的建立范围也大于实际需要。
+
+整改内容：
 
 - 仅在某个 buffer 从空变为非空时 arm timer；
 - flush 后若所有 buffer 都为空，则停止调度；
@@ -113,7 +116,7 @@ lite_nginx 当前先声明 logging shutdown guard，之后才声明主 EventLoop
 
 `LogEvent::function` 和 `LogLine::function_` 会在每条日志中传递，但默认 formatter 没有输出 function。应选择输出该字段或删除相关状态。
 
-现有 [`log_system.md`](log_system.md) 的部分 V1 描述已落后于代码，例如仍将进程内文件滚动列为非目标、仍描述文件短写不补写，以及部分接口草图未包含 stats、`flush_due()` 和内部滚动能力。后续修改实现时应同步更新设计文档，而不是长期让设计约束与实际行为并存。
+现有 [`log_system.md`](log_system.md) 的部分 V1 描述已落后于代码，例如仍将进程内文件滚动列为非目标、仍描述文件短写不补写，以及部分接口草图未包含 stats 和内部滚动能力。后续修改实现时应同步更新设计文档，而不是长期让设计约束与实际行为并存。
 
 ## 4. 生命周期契约说明
 

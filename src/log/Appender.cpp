@@ -269,8 +269,6 @@ void ConsoleAppender::append(FormattedLogLine line, LogContext &) noexcept {
 
 void ConsoleAppender::flush(LogContext &) noexcept {}
 
-void ConsoleAppender::flush_due(LogContext &, std::chrono::steady_clock::time_point) noexcept {}
-
 bool ConsoleAppender::reopen() noexcept { return true; }
 
 FileAppender::FileAppender(AppenderId id, FileAppenderOptions options, std::uint16_t buffer_slot) noexcept :
@@ -576,6 +574,7 @@ void FileAppender::append(FormattedLogLine line, LogContext &context) noexcept {
     }
     if (size > buffer->capacity) {
         write_bytes(line.bytes.data(), size, 1);
+        context.update_flush_schedule(*buffer);
         return;
     }
     if (size > buffer->capacity - buffer->size) {
@@ -590,6 +589,7 @@ void FileAppender::append(FormattedLogLine line, LogContext &context) noexcept {
     if (buffer->size == buffer->capacity) {
         flush_buffer(*buffer);
     }
+    context.update_flush_schedule(*buffer);
 }
 
 void FileAppender::flush(LogContext &context) noexcept {
@@ -598,16 +598,6 @@ void FileAppender::flush(LogContext &context) noexcept {
     }
     LogBuffer *buffer = context.buffer_at(buffer_slot_);
     if (buffer && buffer->owner == this) {
-        flush_buffer(*buffer);
-    }
-}
-
-void FileAppender::flush_due(LogContext &context, std::chrono::steady_clock::time_point now) noexcept {
-    if (!buffered()) {
-        return;
-    }
-    LogBuffer *buffer = context.buffer_at(buffer_slot_);
-    if (buffer && buffer->owner == this && buffer->size > 0 && now >= buffer->flush_at) {
         flush_buffer(*buffer);
     }
 }

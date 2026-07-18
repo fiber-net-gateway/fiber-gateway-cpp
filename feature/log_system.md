@@ -668,13 +668,21 @@ Buffer 不直接放在共享 Appender 对象中。每个产生日志的线程或
 
 ### 9.3 定时 flush
 
-对于 EventLoop 工作线程，在每个 EventLoop 上注册本地 timer：
+对于 EventLoop 工作线程，由当前线程的 `LogContext` 持有一个一次性本地 timer。只有 buffered Appender
+的 buffer 从空变为非空时才参与调度：
 
 ```cpp
 flush_at = EventLoop::current().now() + flush_interval;
 ```
 
-timer callback 只 flush 当前 EventLoop 自己的 `LogContext`，不跨线程访问其他线程的 buffer。
+同一个 `LogContext` 存在多个非空 buffer 时，timer 直接调度到其中最早的 `flush_at`。新的 buffer 如果有
+更早的 deadline，则取消并提前现有 timer；当前最早 buffer 如果被提前 flush，则重新选择下一个最早
+deadline。
+
+timer callback 只 flush 当前 EventLoop 自己的到期 buffer，不跨线程访问其他线程的 buffer。callback 完成
+后，如果仍有非空 buffer，则直接调度到下一个最早 `flush_at`；如果所有 buffer 都为空，则停止调度并解除
+EventLoop 绑定。ConsoleAppender、非 buffered FileAppender，以及没有实际路由到 buffered Appender 的日志
+都不会建立 flush timer。
 
 不运行 EventLoop 的普通线程有两种选择：
 

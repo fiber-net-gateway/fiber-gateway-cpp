@@ -9,12 +9,13 @@
 
 namespace fiber::log {
 
-class Appender;
+class FileAppender;
 class Logger;
 class LoggerManager;
+class LogContextTestPeer;
 
 struct LogBuffer {
-    Appender *owner = nullptr;
+    FileAppender *owner = nullptr;
     char *data = nullptr;
     std::size_t size = 0;
     std::size_t capacity = 0;
@@ -36,6 +37,7 @@ private:
     friend class FileAppender;
     friend class Logger;
     friend class LoggerManager;
+    friend class LogContextTestPeer;
 
     class FormatScratchLease {
     public:
@@ -64,8 +66,10 @@ private:
     [[nodiscard]] LogBuffer *buffer_at(std::uint16_t index) noexcept;
     [[nodiscard]] FormatScratchLease acquire_format_scratch() noexcept;
     void release_format_scratch() noexcept;
-    void attach_loop(event::EventLoop &loop, std::chrono::milliseconds interval) noexcept;
-    void arm_timer(std::chrono::milliseconds interval) noexcept;
+    void update_flush_schedule(LogBuffer &changed) noexcept;
+    void rebuild_flush_schedule() noexcept;
+    void arm_timer(LogBuffer &buffer) noexcept;
+    void cancel_flush_schedule() noexcept;
     void detach_loop() noexcept;
     static void on_flush_timer(LogContext *context) noexcept;
 
@@ -74,6 +78,8 @@ private:
     std::uint64_t generation_ = 0;
     event::EventLoop *loop_ = nullptr;
     event::EventLoop::TimerEntry flush_timer_{};
+    LogBuffer *scheduled_buffer_ = nullptr;
+    std::chrono::steady_clock::time_point scheduled_at_{};
     char *format_scratch_ = nullptr;
     bool timer_armed_ = false;
     bool format_scratch_in_use_ = false;
