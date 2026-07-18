@@ -1,7 +1,6 @@
 #include "Appender.h"
 
 #include <algorithm>
-#include <array>
 #include <cerrno>
 #include <charconv>
 #include <cstdio>
@@ -28,101 +27,6 @@ constexpr std::chrono::seconds kRotationRetryDelay{1};
 constexpr std::size_t kUtcArchiveStampSize = 16;
 constexpr std::size_t kMinArchiveSequenceDigits = 6;
 constexpr unsigned kMaxArchiveNameAttempts = 1024;
-
-class FixedWriter {
-public:
-    FixedWriter(char *data, std::size_t capacity) noexcept : data_(data), capacity_(capacity) {}
-
-    void append(std::string_view value) noexcept {
-        const std::size_t copy = value.size() < remaining() ? value.size() : remaining();
-        if (copy > 0) {
-            std::memcpy(data_ + size_, value.data(), copy);
-            size_ += copy;
-        }
-    }
-
-    void append(char value) noexcept {
-        if (remaining() > 0) {
-            data_[size_++] = value;
-        }
-    }
-
-    template<typename T>
-    void append_integer(T value) noexcept {
-        char buffer[32];
-        auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
-        if (result.ec == std::errc()) {
-            append(std::string_view(buffer, static_cast<std::size_t>(result.ptr - buffer)));
-        }
-    }
-
-    void append_six_digits(std::uint32_t value) noexcept {
-        char buffer[6];
-        for (std::size_t i = sizeof(buffer); i > 0; --i) {
-            buffer[i - 1] = static_cast<char>('0' + value % 10);
-            value /= 10;
-        }
-        append(std::string_view(buffer, sizeof(buffer)));
-    }
-
-    [[nodiscard]] std::size_t size() const noexcept { return size_; }
-
-private:
-    [[nodiscard]] std::size_t remaining() const noexcept { return capacity_ - size_; }
-
-    char *data_;
-    std::size_t capacity_;
-    std::size_t size_ = 0;
-};
-
-std::string_view source_basename(std::string_view file) noexcept {
-    const std::size_t slash = file.find_last_of("/\\");
-    return slash == std::string_view::npos ? file : file.substr(slash + 1);
-}
-
-std::size_t format_event(const LogEvent &event, char *data, std::size_t capacity) noexcept {
-    if (capacity == 0) {
-        return 0;
-    }
-    FixedWriter writer(data, capacity - 1);
-
-    const std::time_t seconds = static_cast<std::time_t>(event.timestamp_us / 1000000);
-    const auto micros = static_cast<std::uint32_t>(event.timestamp_us % 1000000);
-    std::tm local{};
-    char date[32];
-    char zone[8];
-    if (::localtime_r(&seconds, &local) != nullptr) {
-        const std::size_t date_size = std::strftime(date, sizeof(date), "%Y-%m-%dT%H:%M:%S", &local);
-        writer.append(std::string_view(date, date_size));
-        writer.append('.');
-        writer.append_six_digits(micros);
-        const std::size_t zone_size = std::strftime(zone, sizeof(zone), "%z", &local);
-        if (zone_size == 5) {
-            writer.append(std::string_view(zone, 3));
-            writer.append(':');
-            writer.append(std::string_view(zone + 3, 2));
-        } else {
-            writer.append(std::string_view(zone, zone_size));
-        }
-    } else {
-        writer.append_integer(event.timestamp_us);
-    }
-
-    writer.append(' ');
-    writer.append(log_level_name(event.level));
-    writer.append(" [worker=");
-    writer.append_integer(event.thread_id);
-    writer.append("] ");
-    writer.append(event.logger_name);
-    writer.append(' ');
-    writer.append(source_basename(event.file));
-    writer.append(':');
-    writer.append_integer(event.line);
-    writer.append(' ');
-    writer.append(event.message);
-    data[writer.size()] = '\n';
-    return writer.size() + 1;
-}
 
 std::chrono::steady_clock::time_point current_steady_time() noexcept {
     if (auto *loop = event::EventLoop::current_or_null()) {
@@ -354,15 +258,13 @@ ConsoleAppender::ConsoleAppender(AppenderId id, ConsoleAppenderOptions options) 
     Appender(id, std::move(options.name), options.min_level, options.max_level),
     fd_(options.stream == ConsoleStream::Stdout ? STDOUT_FILENO : STDERR_FILENO) {}
 
-void ConsoleAppender::append(const LogEvent &event, LogContext &) noexcept {
-    std::array<char, kMaxFormattedLogLineSize> line{};
-    const std::size_t size = format_event(event, line.data(), line.size());
-    const ssize_t written = ::write(fd_, line.data(), size);
-    if (written != static_cast<ssize_t>(size)) {
+void ConsoleAppender::append(FormattedLogLine line, LogContext &) noexcept {
+    const ssize_t written = ::write(fd_, line.bytes.data(), line.bytes.size());
+    if (written != static_cast<ssize_t>(line.bytes.size())) {
         record_write_error(1);
         return;
     }
-    record_write(size, 1);
+    record_write(line.bytes.size(), 1);
 }
 
 void ConsoleAppender::flush(LogContext &) noexcept {}
@@ -636,37 +538,35 @@ void FileAppender::flush_buffer(LogBuffer &buffer) noexcept {
     buffer.flush_at = {};
 }
 
-void FileAppender::append(const LogEvent &event, LogContext &context) noexcept {
-    std::array<char, kMaxFormattedLogLineSize> line{};
-    const std::size_t size = format_event(event, line.data(), line.size());
-
+void FileAppender::append(FormattedLogLine line, LogContext &context) noexcept {
+    const std::size_t size = line.bytes.size();
     if (!buffered()) {
-        write_bytes(line.data(), size, 1);
+        write_bytes(line.bytes.data(), size, 1);
         return;
     }
 
     LogBuffer *buffer = context.buffer_at(buffer_slot_);
     if (!buffer) {
-        write_bytes(line.data(), size, 1);
+        write_bytes(line.bytes.data(), size, 1);
         return;
     }
     if (!buffer->data) {
         if (buffer->owner == this && buffer->capacity == 0) {
-            write_bytes(line.data(), size, 1);
+            write_bytes(line.bytes.data(), size, 1);
             return;
         }
         buffer->data = static_cast<char *>(std::malloc(buffer_size_));
         if (!buffer->data) {
             buffer->owner = this;
             buffer->capacity = 0;
-            write_bytes(line.data(), size, 1);
+            write_bytes(line.bytes.data(), size, 1);
             return;
         }
         buffer->owner = this;
         buffer->capacity = buffer_size_;
     }
     if (buffer->owner != this) {
-        write_bytes(line.data(), size, 1);
+        write_bytes(line.bytes.data(), size, 1);
         return;
     }
 
@@ -675,7 +575,7 @@ void FileAppender::append(const LogEvent &event, LogContext &context) noexcept {
         flush_buffer(*buffer);
     }
     if (size > buffer->capacity) {
-        write_bytes(line.data(), size, 1);
+        write_bytes(line.bytes.data(), size, 1);
         return;
     }
     if (size > buffer->capacity - buffer->size) {
@@ -684,7 +584,7 @@ void FileAppender::append(const LogEvent &event, LogContext &context) noexcept {
     if (buffer->size == 0) {
         buffer->flush_at = now + flush_interval_;
     }
-    std::memcpy(buffer->data + buffer->size, line.data(), size);
+    std::memcpy(buffer->data + buffer->size, line.bytes.data(), size);
     buffer->size += size;
     ++buffer->records;
     if (buffer->size == buffer->capacity) {

@@ -90,7 +90,7 @@ private:
     std::uint32_t line_;
     std::uint64_t timestamp_us_ = 0;
     std::uint32_t thread_id_ = 0;
-    char message_[kMessageCapacity]{};
+    char message_[kMessageCapacity];
     std::size_t message_size_ = 0;
     bool truncated_ = false;
 };

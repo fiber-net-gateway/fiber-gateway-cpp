@@ -54,12 +54,15 @@ Logger
   └── LevelTargets[FATAL] -> first + count
                               │
                               ▼
-                           Appender
+                    format once per LogEvent
                               │
-                              ├── ConsoleAppender
+                              ▼
+                     FormattedLogLine view
+                              │
+                              ├── ConsoleAppender -> write
                               └── FileAppender
-                                     ├── direct: format -> write(O_APPEND)
-                                     └── buffer: format -> local buffer -> write(O_APPEND)
+                                     ├── direct: write(O_APPEND)
+                                     └── buffer: copy -> local buffer -> write(O_APPEND)
 ```
 
 ### 2.1 LoggerHandle
@@ -96,7 +99,7 @@ Logger 不保存文件路径、文件描述符、buffer、flush 或 reopen 状�
 Appender 是具名输出目标，例如 `auth_file`、`gateway_file`、`all_file`。Appender 负责：
 
 - 打开并持有一个输出文件描述符；
-- 格式化最终日志行；
+- 消费 Logger 已经格式化完成的连续日志字节；
 - 同步写入或当前线程 buffer；
 - flush 和 reopen；
 - 记录写入错误和丢弃数量。
@@ -139,9 +142,10 @@ Logger 本体和所有 level 的 Appender 指针位于同一块 Logger arena 内
 
 1. 读取 level 对应的 `LevelTargets`；
 2. count 为 0 时直接关闭该条日志；
-3. 构造消息并遍历 `[first, first + count)`。
+3. 构造消息并将最终日志行格式化一次；
+4. 将同一个 `FormattedLogLine` 依次传给 `[first, first + count)`。
 
-热路径不执行 Logger name 匹配、level 继承、additivity、Appender filter 或动态分配。
+热路径不执行 Logger name 匹配、level 继承、additivity 或 Appender filter。每个日志线程首次启用日志时可以延迟分配一次格式化 scratch；初始化完成后的稳定路径不执行动态分配。
 
 ---
 
@@ -512,7 +516,9 @@ struct LogEvent {
 - `logger_name` 指向静态 Logger name。
 - `file` 和 `function` 指向编译器提供的静态字符串。
 - `message` 指向 `LogLine` 的固定容量 buffer，只在本次同步 dispatch 期间有效。
-- 如果 Appender 开启 buffer，必须在 dispatch 返回前把最终日志行复制到当前线程自己的 Appender buffer。
+- Logger 在 dispatch 层将 `LogEvent` 格式化一次，并把包含末尾换行的 `FormattedLogLine` 视图同步传给全部目标 Appender。
+- `FormattedLogLine` 指向线程拥有的可重用 scratch，只在当前同步 `Appender::append()` 调用期间有效。
+- 如果 Appender 开启 buffer，必须在 `append()` 返回前把最终日志行复制到当前线程自己的 Appender buffer。
 
 ### 6.1 固定容量 LogLine
 
@@ -522,6 +528,9 @@ struct LogEvent {
 - `string_view` 和字符串字面量直接复制；
 - 不使用 `std::ostringstream`；
 - 不在普通日志热路径构造 `std::string` 或 `std::vector`。
+- 固定数组不执行无意义的零初始化，只通过有效长度控制读写。
+
+最终日志行使用每个日志线程延迟分配并反复复用的 scratch。scratch 在一次完整 dispatch 期间保持占用；如果发生日志重入或 scratch 分配失败，则使用独立的未清零栈 buffer 完成本次格式化，避免递归覆盖外层日志和丢失诊断。
 
 必须配置最大单条日志长度，例如 8KB。超过限制时截断，并在结尾追加明确标记：
 
@@ -811,13 +820,18 @@ reopen_errors
 ## 13. 关键接口草图
 
 ```cpp
+struct FormattedLogLine {
+    // 包含末尾换行，只在同步 append 调用期间有效。
+    std::string_view bytes;
+};
+
 class Appender {
 public:
     virtual ~Appender() = default;
 
     // 仅在启动阶段生成 Logger 的 Level Slot 时使用。
     [[nodiscard]] virtual bool accepts(LogLevel level) const noexcept = 0;
-    virtual void append(const LogEvent& event, LogContext& context) noexcept = 0;
+    virtual void append(FormattedLogLine line, LogContext& context) noexcept = 0;
     virtual void flush(LogContext& context) noexcept = 0;
     [[nodiscard]] virtual bool reopen() noexcept = 0;
 };
@@ -840,8 +854,9 @@ public:
     [[nodiscard]] bool vlog_enabled(unsigned verbosity) const noexcept;
     void dispatch(const LogEvent& event, LogContext& context) const noexcept {
         const LevelTargets& targets = levels_[level_index(event.level)];
+        FormattedLogLine line = format_once(event, context);
         for (std::uint32_t i = 0; i < targets.count; ++i) {
-            targets.first[i]->append(event, context);
+            targets.first[i]->append(line, context);
         }
     }
 
@@ -928,7 +943,10 @@ Logger 和尾随指针区在初始化完成后只读。Appender 对象地址保�
 ### 14.3 性能验收
 
 - 禁用日志：零动态分配、零时间格式化、零 Logger name 匹配；
-- 常见长度的启用日志：业务线程零动态分配；
+- 常见长度的启用日志：线程 scratch 初始化后的稳定路径零动态分配；
+- 每个 `LogEvent` 只格式化一次，Appender 数量不增加日期、source 和 message 格式化次数；
+- 大型消息和格式化数组不执行整块清零；
+- 日期与时区前缀按线程缓存到秒，普通系统线程的 TID 只查询一次；
 - Logger level 判断：一次 Handle 指针读取、一次 Level Slot 读取和一次 count 判断；
 - 同步直写：每个目标 Appender 每条日志最多一次 write；
 - buffer 模式：按 buffer size 批量 write；
