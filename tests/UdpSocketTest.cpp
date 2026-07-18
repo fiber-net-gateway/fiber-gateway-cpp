@@ -27,6 +27,32 @@ struct PacketMetadataOutcome {
     fiber::net::UdpEcn ecn = fiber::net::UdpEcn::Unspecified;
 };
 
+struct ReadCallbackContext {
+    fiber::net::UdpSocket *socket = nullptr;
+    std::promise<fiber::common::IoErr> *done_promise = nullptr;
+    bool completed = false;
+};
+
+void on_udp_read_ready(void *opaque, fiber::common::IoErr err) noexcept {
+    auto *ctx = static_cast<ReadCallbackContext *>(opaque);
+    if (ctx == nullptr || ctx->completed) {
+        return;
+    }
+    if (err == fiber::common::IoErr::None) {
+        std::array<char, 16> buf{};
+        auto received = ctx->socket->try_recv_from(buf.data(), buf.size());
+        if (!received && received.error() == fiber::common::IoErr::WouldBlock) {
+            return;
+        }
+        err = received ? fiber::common::IoErr::None : received.error();
+    }
+
+    ctx->completed = true;
+    (void) ctx->socket->clear_read_callback(&on_udp_read_ready, ctx);
+    ctx->socket->close();
+    ctx->done_promise->set_value(err);
+}
+
 fiber::common::IoResult<fiber::net::SocketAddress> get_bound_address(int fd) {
     sockaddr_storage bound{};
     socklen_t len = sizeof(bound);
@@ -344,6 +370,18 @@ DetachedTask wait_writable_succeeds(fiber::event::EventLoop *loop,
     done_promise->set_value(result);
 }
 
+DetachedTask register_udp_read_callback(fiber::net::UdpSocket *socket, ReadCallbackContext *ctx,
+                                        std::promise<fiber::common::IoErr> *registered_promise) {
+    const fiber::common::IoErr err = socket->set_read_callback(&on_udp_read_ready, ctx);
+    registered_promise->set_value(err);
+    if (err != fiber::common::IoErr::None) {
+        ctx->completed = true;
+        socket->close();
+        ctx->done_promise->set_value(err);
+    }
+    co_return;
+}
+
 } // namespace
 
 TEST(UdpSocketTest, RecvFromSendToRoundTrip) {
@@ -508,6 +546,38 @@ TEST(UdpSocketTest, WaitReadableWakesOnIncomingPacket) {
     ASSERT_EQ(client_future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
 
     EXPECT_EQ(server_future.get(), fiber::common::IoErr::None);
+    EXPECT_EQ(client_future.get(), fiber::common::IoErr::None);
+
+    group.stop();
+    group.join();
+}
+
+TEST(UdpSocketTest, ReadCallbackWakesOnIncomingPacket) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::net::UdpSocket server(group.at(0));
+    ASSERT_TRUE(server.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
+
+    std::promise<fiber::common::IoErr> registered_promise;
+    std::promise<fiber::common::IoErr> callback_promise;
+    std::promise<fiber::common::IoErr> client_promise;
+    auto registered_future = registered_promise.get_future();
+    auto callback_future = callback_promise.get_future();
+    auto client_future = client_promise.get_future();
+    ReadCallbackContext ctx{&server, &callback_promise};
+
+    fiber::async::spawn(group.at(0), [&]() { return register_udp_read_callback(&server, &ctx, &registered_promise); });
+    ASSERT_EQ(registered_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(registered_future.get(), fiber::common::IoErr::None);
+
+    fiber::async::spawn(group.at(0), [&]() {
+        return client_sleep_then_send(&group.at(0), server.local_addr().port(), &client_promise);
+    });
+
+    ASSERT_EQ(callback_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(client_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(callback_future.get(), fiber::common::IoErr::None);
     EXPECT_EQ(client_future.get(), fiber::common::IoErr::None);
 
     group.stop();

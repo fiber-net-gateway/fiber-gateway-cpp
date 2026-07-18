@@ -40,6 +40,7 @@ public:
     using RecvPacketTask = detail::DatagramFd::RecvPacketTask;
     using WaitReadableAwaiter = detail::DatagramFd::WaitReadableAwaiter;
     using WaitWritableAwaiter = detail::DatagramFd::WaitWritableAwaiter;
+    using ReadyCallback = detail::DatagramFd::ReadyCallback;
 
     explicit UdpSocket(fiber::event::EventLoop &loop);
     ~UdpSocket();
@@ -66,6 +67,12 @@ public:
     [[nodiscard]] fiber::common::IoResult<size_t> try_send_packet(const UdpPacketSendSpec &spec) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_send_packets(const UdpPacketSendSpec *specs,
                                                                    size_t count) noexcept;
+    // Persistent owner-loop readiness callbacks. A callback and an awaitable
+    // cannot occupy the same physical direction at the same time.
+    fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept;
     [[nodiscard]] WaitReadableAwaiter
     wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] WaitWritableAwaiter

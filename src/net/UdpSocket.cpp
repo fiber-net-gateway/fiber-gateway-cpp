@@ -76,6 +76,22 @@ fiber::common::IoResult<size_t> UdpSocket::try_send_packets(const UdpPacketSendS
     return sent;
 }
 
+fiber::common::IoErr UdpSocket::set_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return socket_.set_read_callback(callback, ctx);
+}
+
+fiber::common::IoErr UdpSocket::set_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return socket_.set_write_callback(callback, ctx);
+}
+
+fiber::common::IoErr UdpSocket::clear_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return socket_.clear_read_callback(callback, ctx);
+}
+
+fiber::common::IoErr UdpSocket::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return socket_.clear_write_callback(callback, ctx);
+}
+
 UdpSocket::WaitReadableAwaiter UdpSocket::wait_readable(std::chrono::milliseconds timeout) noexcept {
     return socket_.wait_readable(timeout);
 }
