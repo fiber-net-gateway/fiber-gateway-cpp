@@ -21,6 +21,8 @@
 #include "http/HttpTransport.h"
 #undef private
 
+#include "HttpTransportStub.h"
+
 namespace {
 
 using fiber::common::IoErr;
@@ -28,7 +30,7 @@ using fiber::http::Http2HeadersFrameEncoder;
 using fiber::http::Http2HpackEncodeCatalog;
 using fiber::http::Http2HpackEncoder;
 
-class RecordingTransport final : public fiber::http::HttpTransport {
+class RecordingTransport final : public fiber::test::HttpTransportStub {
 public:
     fiber::async::Task<fiber::common::IoResult<void>> handshake(std::chrono::milliseconds) override {
         co_return fiber::common::IoResult<void>{};

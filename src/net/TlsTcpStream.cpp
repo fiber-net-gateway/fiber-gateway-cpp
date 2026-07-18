@@ -28,6 +28,22 @@ bool TlsTcpStream::has_pending_read() const noexcept { return stream_.has_pendin
 
 void TlsTcpStream::close() { stream_.close(); }
 
+fiber::common::IoErr TlsTcpStream::set_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.set_read_callback(callback, ctx);
+}
+
+fiber::common::IoErr TlsTcpStream::set_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.set_write_callback(callback, ctx);
+}
+
+fiber::common::IoErr TlsTcpStream::clear_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.clear_read_callback(callback, ctx);
+}
+
+fiber::common::IoErr TlsTcpStream::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.clear_write_callback(callback, ctx);
+}
+
 TlsTcpStream::IoTask TlsTcpStream::read(void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
     return stream_.read(buf, len, timeout);
 }

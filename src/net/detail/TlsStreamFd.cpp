@@ -245,6 +245,22 @@ void TlsStreamFd::close() {
     busy_ = false;
 }
 
+fiber::common::IoErr TlsStreamFd::set_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_fd_.set_read_callback(callback, ctx);
+}
+
+fiber::common::IoErr TlsStreamFd::set_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_fd_.set_write_callback(callback, ctx);
+}
+
+fiber::common::IoErr TlsStreamFd::clear_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_fd_.clear_read_callback(callback, ctx);
+}
+
+fiber::common::IoErr TlsStreamFd::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_fd_.clear_write_callback(callback, ctx);
+}
+
 TlsStreamFd::IoTask TlsStreamFd::read(void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
     if (busy_) {
         co_return std::unexpected(fiber::common::IoErr::Busy);

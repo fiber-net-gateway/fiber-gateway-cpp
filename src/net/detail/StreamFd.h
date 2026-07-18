@@ -21,6 +21,7 @@ namespace fiber::net::detail {
 class StreamFd : public common::NonCopyable, public common::NonMovable {
 public:
     using IoTask = fiber::async::Task<fiber::common::IoResult<size_t>>;
+    using ReadyCallback = RWFd::ReadyCallback;
     using WaitReadableAwaiter = RWFd::WaitReadableAwaiter;
     using WaitWritableAwaiter = RWFd::WaitWritableAwaiter;
 
@@ -33,6 +34,11 @@ public:
     [[nodiscard]] RWFd &rwfd() noexcept;
     int release_fd() noexcept;
     void close();
+
+    fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept;
 
     [[nodiscard]] IoTask read(void *buf, size_t len,
                               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;

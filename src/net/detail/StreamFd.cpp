@@ -79,6 +79,22 @@ int StreamFd::release_fd() noexcept { return rwfd_.release_fd(); }
 
 void StreamFd::close() { rwfd_.close(); }
 
+fiber::common::IoErr StreamFd::set_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return rwfd_.set_read_callback(callback, ctx);
+}
+
+fiber::common::IoErr StreamFd::set_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return rwfd_.set_write_callback(callback, ctx);
+}
+
+fiber::common::IoErr StreamFd::clear_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return rwfd_.clear_read_callback(callback, ctx);
+}
+
+fiber::common::IoErr StreamFd::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return rwfd_.clear_write_callback(callback, ctx);
+}
+
 StreamFd::IoTask StreamFd::read(void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
     Deadline deadline = make_deadline(timeout);
     for (;;) {

@@ -26,6 +26,7 @@
 #undef private
 
 #include "Http2TestSupport.h"
+#include "HttpTransportStub.h"
 #include "http/ClientHttp2Exchange.h"
 #include "http/Http2HeadersFrameEncoder.h"
 #include "http/Http2HpackDecoder.h"
@@ -57,7 +58,7 @@ fiber::http::Http2Connection::Options with_test_hpack_catalog(fiber::http::Http2
     return options;
 }
 
-class FakeHttpTransport final : public fiber::http::HttpTransport {
+class FakeHttpTransport final : public fiber::test::HttpTransportStub {
 public:
     explicit FakeHttpTransport(std::vector<std::string> chunks, std::vector<size_t> write_steps = {},
                                bool block_reads = false, bool hold_eof = false) :
@@ -210,7 +211,7 @@ private:
     mutable fiber::event::EventLoop fallback_loop_{};
 };
 
-class ScriptedReadTransport final : public fiber::http::HttpTransport {
+class ScriptedReadTransport final : public fiber::test::HttpTransportStub {
 public:
     enum class ReadActionKind : std::uint8_t {
         Chunk,
