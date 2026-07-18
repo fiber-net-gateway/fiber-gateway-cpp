@@ -378,6 +378,12 @@ DetachedTask recv_endpoint_once(fiber::quic::QuicUdpEndpoint *endpoint, std::pro
     done_promise->set_value(co_await endpoint->recv_once());
 }
 
+DetachedTask start_endpoint(fiber::quic::QuicUdpEndpoint *endpoint,
+                            std::promise<fiber::common::IoResult<void>> *done_promise) {
+    done_promise->set_value(endpoint->start());
+    co_return;
+}
+
 DetachedTask recv_endpoint_twice(fiber::quic::QuicUdpEndpoint *endpoint,
                                  std::promise<TwoEndpointResults> *done_promise) {
     TwoEndpointResults results{co_await endpoint->recv_once(), co_await endpoint->recv_once()};
@@ -391,6 +397,13 @@ DetachedTask observe_endpoint_connection_count_after_delay(fiber::quic::QuicUdpE
     done_promise->set_value(endpoint->active_connection_count());
     endpoint->close();
     fiber::event::EventLoop::current().stop();
+}
+
+DetachedTask report_endpoint_connection_count_after_delay(fiber::quic::QuicUdpEndpoint *endpoint,
+                                                          std::chrono::milliseconds delay,
+                                                          std::promise<std::size_t> *done_promise) {
+    co_await fiber::async::sleep(delay);
+    done_promise->set_value(endpoint->active_connection_count());
 }
 
 DetachedTask send_datagram(fiber::event::EventLoop *loop, std::uint16_t port, const std::uint8_t *data, std::size_t len,
@@ -1908,6 +1921,51 @@ TEST(QuicUdpEndpointTest, InitRejectsMissingConnectionFactory) {
     auto initialized = endpoint.init(loop, options);
     ASSERT_FALSE(initialized.has_value());
     EXPECT_EQ(initialized.error(), fiber::common::IoErr::Invalid);
+}
+
+TEST(QuicUdpEndpointTest, StartDrainsReadableCallbackAcrossReceiveBudget) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
+    options.max_recv_datagrams_per_wakeup = 1;
+    ASSERT_TRUE(endpoint.init(group.at(0), options));
+
+    std::promise<fiber::common::IoResult<void>> start_promise;
+    auto start_future = start_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return start_endpoint(&endpoint, &start_promise); });
+    ASSERT_EQ(start_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_TRUE(start_future.get().has_value());
+
+    const auto first_dcid = cid_from_hex("8394c8f03e515708");
+    const auto second_dcid = cid_from_hex("9394c8f03e515708");
+    const auto scid = cid_from_hex("11223344");
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> first{};
+    std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> second{};
+    build_initial_datagram(first, first_dcid, scid);
+    build_initial_datagram(second, second_dcid, scid);
+
+    std::promise<fiber::common::IoErr> send_promise;
+    std::promise<std::size_t> count_promise;
+    auto send_future = send_promise.get_future();
+    auto count_future = count_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return send_two_datagrams(&group.at(0), endpoint.local_addr().port(), first.data(), first.size(), second.data(),
+                                  second.size(), &send_promise);
+    });
+    fiber::async::spawn(group.at(0), [&]() {
+        return report_endpoint_connection_count_after_delay(&endpoint, std::chrono::milliseconds(30), &count_promise);
+    });
+
+    ASSERT_EQ(send_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(count_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(send_future.get(), fiber::common::IoErr::None);
+    EXPECT_EQ(count_future.get(), 2U);
+
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
 }
 
 TEST(QuicUdpEndpointTest, CreatesConnectionForNewInitialDcid) {

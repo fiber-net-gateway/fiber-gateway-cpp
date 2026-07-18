@@ -10,7 +10,7 @@
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 
-#include "../async/Spawn.h"
+#include "../common/Assert.h"
 #include "QuicCongestion.h"
 #include "QuicCrypto.h"
 #include "QuicPacketCodec.h"
@@ -386,6 +386,7 @@ namespace {
 
 common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Options &options) noexcept {
     if (initialized_ || options.max_connections == 0 || options.send.send_buffer_size == 0 ||
+        options.max_recv_datagrams_per_wakeup == 0 || options.max_recv_bytes_per_wakeup == 0 ||
         options.retry_token_lifetime.count() < 0 || options.new_token_lifetime.count() < 0 ||
         options.create_connection == nullptr) {
         return std::unexpected(common::IoErr::Invalid);
@@ -408,7 +409,16 @@ common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Optio
         options_.stateless_reset_secret_set = true;
     }
     loop_ = &loop;
+    started_ = false;
     closing_ = false;
+    read_callback_registered_ = false;
+    write_callback_registered_ = false;
+    read_ready_ = false;
+    write_ready_ = false;
+    write_blocked_ = false;
+    io_pump_running_ = false;
+    io_pump_again_ = false;
+    prefer_write_ = false;
     active_connection_count_ = 0;
     dropped_datagram_count_ = 0;
     rejected_connection_count_ = 0;
@@ -440,12 +450,48 @@ common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Optio
     }
 
     initialized_ = true;
-    async::spawn(loop, [this]() -> async::DetachedTask { co_await send_scheduler_.run(); });
+    return {};
+}
+
+common::IoResult<void> QuicUdpEndpoint::start() noexcept {
+    if (!initialized_ || closing_ || !valid()) {
+        return std::unexpected(common::IoErr::BadFd);
+    }
+    if (started_) {
+        return std::unexpected(common::IoErr::Already);
+    }
+    if (loop_ == nullptr || !loop_->in_loop()) {
+        return std::unexpected(common::IoErr::NotSupported);
+    }
+
+    started_ = true;
+    const common::IoErr err = sync_socket_callbacks();
+    if (err != common::IoErr::None) {
+        started_ = false;
+        clear_socket_callbacks();
+        return std::unexpected(err);
+    }
+    if (send_scheduler_.has_work() && !write_blocked_) {
+        schedule_io_pump();
+    }
     return {};
 }
 
 void QuicUdpEndpoint::close() noexcept {
+    if (!initialized_ && (!socket_ || !socket_->valid())) {
+        return;
+    }
+    if (loop_ != nullptr && socket_ && socket_->valid()) {
+        FIBER_ASSERT(loop_->in_loop());
+    }
+
     closing_ = true;
+    started_ = false;
+    if (loop_ != nullptr && io_pump_entry_.is_in_queue()) {
+        FIBER_ASSERT(loop_->in_loop());
+        loop_->cancel<QuicUdpEndpoint, &QuicUdpEndpoint::io_pump_entry_>(*this);
+    }
+    clear_socket_callbacks();
     send_scheduler_.close();
     if (socket_ && socket_->valid()) {
         socket_->close();
@@ -455,12 +501,20 @@ void QuicUdpEndpoint::close() noexcept {
         force_detach_connection(*index->connection);
     }
 
-    socket_.reset();
-    read_buffer_.reset();
-    plaintext_buffer_.reset();
-    send_buffer_.reset();
     active_connection_count_ = 0;
     stateless_rate_ = {};
+    read_ready_ = false;
+    write_ready_ = false;
+    write_blocked_ = false;
+    io_pump_again_ = false;
+    if (!io_pump_running_) {
+        read_buffer_.reset();
+        plaintext_buffer_.reset();
+        send_buffer_.reset();
+    }
+    // RWFd readiness dispatch still refers to the UdpSocket after invoking a
+    // callback. Keep the closed wrapper alive until reinitialization or
+    // destruction instead of resetting it from a callback-driven close.
     loop_ = nullptr;
     initialized_ = false;
 }
@@ -486,7 +540,12 @@ common::IoResult<void> QuicUdpEndpoint::remove_connection(const QuicConnectionId
     return {};
 }
 
-void QuicUdpEndpoint::schedule_send(QuicConnection &connection) noexcept { send_scheduler_.submit(connection); }
+void QuicUdpEndpoint::schedule_send(QuicConnection &connection) noexcept {
+    send_scheduler_.submit(connection);
+    if (!write_blocked_) {
+        schedule_io_pump();
+    }
+}
 
 common::IoResult<void> QuicUdpEndpoint::send_direct_datagram(const std::uint8_t *data, std::size_t len,
                                                              const QuicReceivedDatagram &datagram) noexcept {
@@ -514,6 +573,9 @@ async::Task<common::IoResult<QuicUdpReceiveResult>> QuicUdpEndpoint::recv_once()
     if (!valid() || !read_buffer_) {
         co_return std::unexpected(common::IoErr::BadFd);
     }
+    if (started_ || read_callback_registered_) {
+        co_return std::unexpected(common::IoErr::Busy);
+    }
 
     auto recv = co_await socket_->recv_packet(read_buffer_.get(), kQuicUdpDefaultReadBufferSize);
     if (!recv) {
@@ -522,17 +584,220 @@ async::Task<common::IoResult<QuicUdpReceiveResult>> QuicUdpEndpoint::recv_once()
     co_return process_datagram(*recv, loop_ != nullptr ? loop_->now() : std::chrono::steady_clock::now());
 }
 
-async::Task<void> QuicUdpEndpoint::recv_loop() noexcept {
-    while (!closing_ && valid()) {
-        auto processed = co_await recv_once();
-        if (processed) {
-            continue;
+QuicUdpEndpoint::ReceivePumpResult QuicUdpEndpoint::pump_receive() noexcept {
+    ReceivePumpResult result{};
+    FIBER_ASSERT(loop_ != nullptr);
+    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(read_buffer_ != nullptr);
+
+    while (!closing_ && result.datagrams_received < options_.max_recv_datagrams_per_wakeup &&
+           result.bytes_received < options_.max_recv_bytes_per_wakeup) {
+        auto recv = socket_->try_recv_packet(read_buffer_.get(), kQuicUdpDefaultReadBufferSize);
+        if (!recv) {
+            if (recv.error() == common::IoErr::WouldBlock) {
+                read_ready_ = false;
+            } else {
+                result.error = recv.error();
+            }
+            return result;
         }
-        const common::IoErr err = processed.error();
-        if (err == common::IoErr::Canceled || err == common::IoErr::BadFd) {
-            break;
+
+        ++result.datagrams_received;
+        result.bytes_received += recv->size;
+        (void) process_datagram(*recv, loop_->now());
+    }
+
+    result.needs_reschedule = !closing_ && read_ready_;
+    return result;
+}
+
+common::IoErr QuicUdpEndpoint::sync_socket_callbacks() noexcept {
+    if (!socket_ || !socket_->valid()) {
+        return common::IoErr::BadFd;
+    }
+
+    const bool want_read = started_ && !closing_;
+    // A datagram socket is normally writable. Watching Write continuously
+    // would hot-loop, so arm it only after sendmsg reports WouldBlock.
+    const bool want_write = write_blocked_ && send_scheduler_.has_work() && !closing_;
+    if (want_read && !read_callback_registered_) {
+        const common::IoErr err = socket_->set_read_callback(&QuicUdpEndpoint::on_socket_read_ready, this);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+        read_callback_registered_ = true;
+    }
+    if (want_write && !write_callback_registered_) {
+        const common::IoErr err = socket_->set_write_callback(&QuicUdpEndpoint::on_socket_write_ready, this);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+        write_callback_registered_ = true;
+    }
+    if (!want_read && read_callback_registered_) {
+        const common::IoErr err = socket_->clear_read_callback(&QuicUdpEndpoint::on_socket_read_ready, this);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+        read_callback_registered_ = false;
+    }
+    if (!want_write && write_callback_registered_) {
+        const common::IoErr err = socket_->clear_write_callback(&QuicUdpEndpoint::on_socket_write_ready, this);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+        write_callback_registered_ = false;
+    }
+    return common::IoErr::None;
+}
+
+void QuicUdpEndpoint::clear_socket_callbacks() noexcept {
+    if (!socket_ || !socket_->valid()) {
+        read_callback_registered_ = false;
+        write_callback_registered_ = false;
+        return;
+    }
+    if (read_callback_registered_) {
+        (void) socket_->clear_read_callback(&QuicUdpEndpoint::on_socket_read_ready, this);
+        read_callback_registered_ = false;
+    }
+    if (write_callback_registered_) {
+        (void) socket_->clear_write_callback(&QuicUdpEndpoint::on_socket_write_ready, this);
+        write_callback_registered_ = false;
+    }
+}
+
+void QuicUdpEndpoint::schedule_io_pump() noexcept {
+    if (!initialized_ || closing_ || loop_ == nullptr) {
+        return;
+    }
+    FIBER_ASSERT(loop_->in_loop());
+    if (io_pump_running_) {
+        io_pump_again_ = true;
+        return;
+    }
+    if (io_pump_entry_.is_in_queue()) {
+        return;
+    }
+    loop_->post_local<QuicUdpEndpoint, &QuicUdpEndpoint::io_pump_entry_, &QuicUdpEndpoint::on_io_pump>(*this);
+}
+
+void QuicUdpEndpoint::drive_io() noexcept {
+    if (!initialized_ || closing_ || loop_ == nullptr) {
+        return;
+    }
+    FIBER_ASSERT(loop_->in_loop());
+    if (io_pump_running_) {
+        io_pump_again_ = true;
+        return;
+    }
+
+    io_pump_running_ = true;
+    io_pump_again_ = false;
+    bool needs_reschedule = false;
+
+    auto pump_inbound = [&]() noexcept -> bool {
+        if (!started_ || !read_ready_) {
+            return true;
+        }
+        const ReceivePumpResult result = pump_receive();
+        if (result.error != common::IoErr::None) {
+            close();
+            return false;
+        }
+        needs_reschedule = needs_reschedule || result.needs_reschedule;
+        return !closing_;
+    };
+
+    auto pump_outbound = [&]() noexcept -> bool {
+        if (!send_scheduler_.has_work()) {
+            write_blocked_ = false;
+            write_ready_ = false;
+            return true;
+        }
+        if (write_blocked_ && !write_ready_) {
+            return true;
+        }
+
+        write_ready_ = false;
+        const QuicSendScheduler::PumpResult result = send_scheduler_.pump();
+        write_blocked_ = result.write_blocked;
+        needs_reschedule = needs_reschedule || result.needs_reschedule;
+        return !closing_;
+    };
+
+    if (prefer_write_) {
+        (void) pump_outbound();
+        if (!closing_) {
+            (void) pump_inbound();
+        }
+    } else {
+        (void) pump_inbound();
+        if (!closing_) {
+            (void) pump_outbound();
         }
     }
+    prefer_write_ = !prefer_write_;
+
+    if (!closing_) {
+        const common::IoErr callback_err = sync_socket_callbacks();
+        if (callback_err != common::IoErr::None) {
+            close();
+        }
+    }
+
+    io_pump_running_ = false;
+    if (closing_) {
+        read_buffer_.reset();
+        plaintext_buffer_.reset();
+        send_buffer_.reset();
+        return;
+    }
+    if (needs_reschedule || io_pump_again_) {
+        io_pump_again_ = false;
+        schedule_io_pump();
+    }
+}
+
+void QuicUdpEndpoint::handle_socket_ready(event::IoEvent event, common::IoErr err) noexcept {
+    if (event == event::IoEvent::Read && err != common::IoErr::None) {
+        read_callback_registered_ = false;
+    }
+    if (event == event::IoEvent::Write && err != common::IoErr::None) {
+        write_callback_registered_ = false;
+    }
+    if (closing_) {
+        return;
+    }
+    if (err != common::IoErr::None) {
+        close();
+        return;
+    }
+
+    if (event == event::IoEvent::Read) {
+        read_ready_ = true;
+    } else {
+        FIBER_ASSERT(event == event::IoEvent::Write);
+        write_ready_ = true;
+    }
+    drive_io();
+}
+
+void QuicUdpEndpoint::on_socket_read_ready(void *ctx, common::IoErr err) noexcept {
+    auto *endpoint = static_cast<QuicUdpEndpoint *>(ctx);
+    FIBER_ASSERT(endpoint != nullptr);
+    endpoint->handle_socket_ready(event::IoEvent::Read, err);
+}
+
+void QuicUdpEndpoint::on_socket_write_ready(void *ctx, common::IoErr err) noexcept {
+    auto *endpoint = static_cast<QuicUdpEndpoint *>(ctx);
+    FIBER_ASSERT(endpoint != nullptr);
+    endpoint->handle_socket_ready(event::IoEvent::Write, err);
+}
+
+void QuicUdpEndpoint::on_io_pump(QuicUdpEndpoint *endpoint) noexcept {
+    FIBER_ASSERT(endpoint != nullptr);
+    endpoint->drive_io();
 }
 
 bool QuicUdpEndpoint::QuicConnectionDcidLess::operator()(const QuicConnectionIdIndex *left,
@@ -637,6 +902,9 @@ void QuicUdpEndpoint::detach_connection(QuicConnection &connection) noexcept {
         connection.cancel_all_timers();
     }
     send_scheduler_.remove(connection);
+    if (write_blocked_ && !send_scheduler_.has_work()) {
+        schedule_io_pump();
+    }
     QuicConnection::EndpointIndex &index = connection.endpoint_index;
     unregister_connection_id(connection.original_dcid_index);
     for (QuicLocalConnectionIdSlot &slot: connection.local_cids_) {

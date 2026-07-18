@@ -1,11 +1,9 @@
 #ifndef FIBER_QUIC_QUIC_SEND_SCHEDULER_H
 #define FIBER_QUIC_QUIC_SEND_SCHEDULER_H
 
-#include <coroutine>
 #include <cstddef>
 #include <cstdint>
 
-#include "../async/Task.h"
 #include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
@@ -73,21 +71,25 @@ public:
     QuicSendScheduler() noexcept;
     ~QuicSendScheduler();
 
+    struct PumpResult {
+        std::size_t packets_sent = 0;
+        bool write_blocked = false;
+        bool needs_reschedule = false;
+    };
+
     [[nodiscard]] common::IoResult<void> init(event::EventLoop &loop, net::UdpSocket &socket, QuicUdpEndpoint &endpoint,
                                               const Options &options) noexcept;
     void submit(QuicConnection &connection) noexcept;
     void remove(QuicConnection &connection) noexcept;
     void close(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
-    [[nodiscard]] async::Task<void> run() noexcept;
+    [[nodiscard]] PumpResult pump() noexcept;
 
     [[nodiscard]] bool initialized() const noexcept { return initialized_; }
-    [[nodiscard]] bool running() const noexcept { return running_; }
+    [[nodiscard]] bool has_work() const noexcept { return !ready_.empty(); }
     [[nodiscard]] common::IoErr stop_reason() const noexcept { return stop_reason_; }
 
 private:
-    class WaitForWorkAwaiter;
-
     struct FlushResult {
         common::IoErr error = common::IoErr::None;
         std::size_t packets_sent = 0;
@@ -96,27 +98,20 @@ private:
     using ReadyList =
             common::IntrusiveList<QuicConnection::SendQueueEntry, offsetof(QuicConnection::SendQueueEntry, link)>;
 
-    [[nodiscard]] bool should_wake_waiter() const noexcept;
-    [[nodiscard]] bool arm_waiter(WaitForWorkAwaiter *awaiter) noexcept;
-    void cancel_waiter(WaitForWorkAwaiter *awaiter) noexcept;
-    void notify_waiter() noexcept;
-    [[nodiscard]] bool has_work() const noexcept;
     void enqueue_ready(QuicConnection &connection) noexcept;
     void rotate_front_to_back(QuicConnection &connection) noexcept;
     [[nodiscard]] QuicConnection *front_ready() noexcept;
     void clear_ready() noexcept;
-    [[nodiscard]] async::Task<FlushResult> flush_connection(QuicConnection &connection) noexcept;
+    [[nodiscard]] FlushResult flush_connection(QuicConnection &connection) noexcept;
 
     event::EventLoop *loop_ = nullptr;
     net::UdpSocket *socket_ = nullptr;
     QuicUdpEndpoint *endpoint_ = nullptr;
     Options options_{};
     ReadyList ready_{};
-    WaitForWorkAwaiter *waiter_ = nullptr;
     common::IoErr stop_reason_ = common::IoErr::None;
     bool initialized_ = false;
     bool closing_ = false;
-    bool running_ = false;
 };
 
 } // namespace fiber::quic

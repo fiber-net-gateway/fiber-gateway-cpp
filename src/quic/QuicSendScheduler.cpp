@@ -2,77 +2,14 @@
 
 #include <expected>
 
-#include "../async/Yield.h"
 #include "../common/Assert.h"
 #include "QuicUdpEndpoint.h"
 
 namespace fiber::quic {
 
-class QuicSendScheduler::WaitForWorkAwaiter {
-public:
-    explicit WaitForWorkAwaiter(QuicSendScheduler &scheduler) noexcept : scheduler_(&scheduler) {}
-    WaitForWorkAwaiter(const WaitForWorkAwaiter &) = delete;
-    WaitForWorkAwaiter &operator=(const WaitForWorkAwaiter &) = delete;
-    WaitForWorkAwaiter(WaitForWorkAwaiter &&) = delete;
-    WaitForWorkAwaiter &operator=(WaitForWorkAwaiter &&) = delete;
-
-    ~WaitForWorkAwaiter() {
-        if (scheduler_) {
-            scheduler_->cancel_waiter(this);
-        }
-    }
-
-    bool await_ready() const noexcept { return scheduler_ == nullptr || scheduler_->should_wake_waiter(); }
-
-    bool await_suspend(std::coroutine_handle<> handle) noexcept {
-        FIBER_ASSERT(scheduler_ != nullptr);
-        loop_ = event::EventLoop::current_or_null();
-        FIBER_ASSERT(loop_ != nullptr);
-        handle_ = handle;
-        return scheduler_->arm_waiter(this);
-    }
-
-    void await_resume() noexcept {
-        if (!scheduler_) {
-            return;
-        }
-        if (scheduler_->waiter_ == this) {
-            scheduler_->waiter_ = nullptr;
-        }
-        scheduler_ = nullptr;
-        loop_ = nullptr;
-        handle_ = {};
-        resume_posted_ = false;
-    }
-
-private:
-    static void on_notify(WaitForWorkAwaiter *awaiter) noexcept {
-        if (!awaiter) {
-            return;
-        }
-        awaiter->resume_posted_ = false;
-        auto handle = awaiter->handle_;
-        awaiter->handle_ = {};
-        if (handle) {
-            handle.resume();
-        }
-    }
-
-    QuicSendScheduler *scheduler_ = nullptr;
-    event::EventLoop *loop_ = nullptr;
-    std::coroutine_handle<> handle_{};
-    event::EventLoop::NotifyEntry notify_entry_{};
-    bool resume_posted_ = false;
-
-    friend class QuicSendScheduler;
-};
-
 QuicSendScheduler::QuicSendScheduler() noexcept = default;
 
-QuicSendScheduler::~QuicSendScheduler() {
-    close();
-    FIBER_ASSERT(!running_);
-}
+QuicSendScheduler::~QuicSendScheduler() { close(); }
 
 common::IoResult<void> QuicSendScheduler::init(event::EventLoop &loop, net::UdpSocket &socket,
                                                QuicUdpEndpoint &endpoint, const Options &options) noexcept {
@@ -105,7 +42,6 @@ void QuicSendScheduler::submit(QuicConnection &connection) noexcept {
         return;
     }
     enqueue_ready(connection);
-    notify_waiter();
 }
 
 void QuicSendScheduler::remove(QuicConnection &connection) noexcept {
@@ -125,73 +61,46 @@ void QuicSendScheduler::close(common::IoErr reason) noexcept {
     }
     closing_ = true;
     clear_ready();
-    notify_waiter();
+    initialized_ = false;
+    loop_ = nullptr;
+    socket_ = nullptr;
+    endpoint_ = nullptr;
 }
 
-async::Task<void> QuicSendScheduler::run() noexcept {
-    auto *current = event::EventLoop::current_or_null();
-    FIBER_ASSERT(current != nullptr);
-    FIBER_ASSERT(loop_ == current);
-    FIBER_ASSERT(!running_);
+QuicSendScheduler::PumpResult QuicSendScheduler::pump() noexcept {
+    PumpResult pump_result{};
+    if (!initialized_ || closing_) {
+        return pump_result;
+    }
+    FIBER_ASSERT(loop_ != nullptr);
+    FIBER_ASSERT(loop_->in_loop());
 
-    running_ = true;
-    while (!closing_) {
-        if (!has_work()) {
-            co_await WaitForWorkAwaiter(*this);
-            continue;
+    std::size_t flushes = 0;
+    while (!closing_ && has_work()) {
+        QuicConnection *connection = front_ready();
+        if (connection == nullptr) {
+            break;
         }
 
-        std::size_t packets_this_wakeup = 0;
-        while (!closing_ && has_work()) {
-            QuicConnection *connection = front_ready();
-            if (connection == nullptr) {
-                break;
-            }
+        FlushResult result = flush_connection(*connection);
+        ++flushes;
+        pump_result.packets_sent += result.packets_sent;
+        if (result.error == common::IoErr::WouldBlock) {
+            pump_result.write_blocked = true;
+            return pump_result;
+        }
+        if (result.error != common::IoErr::None) {
+            connection->close(QuicErrorCode::InternalError);
+            remove(*connection);
+        }
 
-            FlushResult result = co_await flush_connection(*connection);
-            if (result.error != common::IoErr::None && result.error != common::IoErr::WouldBlock) {
-                connection->close(QuicErrorCode::InternalError);
-                remove(*connection);
-            }
-
-            packets_this_wakeup += result.packets_sent;
-            if (packets_this_wakeup >= options_.max_packets_per_wakeup) {
-                co_await async::yield();
-                packets_this_wakeup = 0;
-            }
+        if (pump_result.packets_sent >= options_.max_packets_per_wakeup || flushes >= options_.max_packets_per_wakeup) {
+            pump_result.needs_reschedule = has_work();
+            return pump_result;
         }
     }
-
-    running_ = false;
+    return pump_result;
 }
-
-bool QuicSendScheduler::should_wake_waiter() const noexcept { return closing_ || has_work(); }
-
-bool QuicSendScheduler::arm_waiter(WaitForWorkAwaiter *awaiter) noexcept {
-    if (!awaiter || should_wake_waiter()) {
-        return false;
-    }
-    FIBER_ASSERT(waiter_ == nullptr);
-    waiter_ = awaiter;
-    return true;
-}
-
-void QuicSendScheduler::cancel_waiter(WaitForWorkAwaiter *awaiter) noexcept {
-    if (waiter_ == awaiter) {
-        waiter_ = nullptr;
-    }
-}
-
-void QuicSendScheduler::notify_waiter() noexcept {
-    if (!waiter_ || waiter_->resume_posted_ || waiter_->loop_ == nullptr) {
-        return;
-    }
-    waiter_->resume_posted_ = true;
-    waiter_->loop_->post<WaitForWorkAwaiter, &WaitForWorkAwaiter::notify_entry_, &WaitForWorkAwaiter::on_notify>(
-            *waiter_);
-}
-
-bool QuicSendScheduler::has_work() const noexcept { return !ready_.empty(); }
 
 void QuicSendScheduler::enqueue_ready(QuicConnection &connection) noexcept {
     auto &entry = connection.send_queue_entry;
@@ -231,7 +140,7 @@ void QuicSendScheduler::clear_ready() noexcept {
     }
 }
 
-async::Task<QuicSendScheduler::FlushResult> QuicSendScheduler::flush_connection(QuicConnection &connection) noexcept {
+QuicSendScheduler::FlushResult QuicSendScheduler::flush_connection(QuicConnection &connection) noexcept {
     FIBER_ASSERT(endpoint_ != nullptr);
     FIBER_ASSERT(socket_ != nullptr);
     FIBER_ASSERT(connection.send_queue_entry.link.linked());
@@ -252,7 +161,7 @@ async::Task<QuicSendScheduler::FlushResult> QuicSendScheduler::flush_connection(
         auto built = endpoint_->build_send_datagram(connection, datagram, mode);
         if (!built) {
             result.error = built.error();
-            co_return result;
+            return result;
         }
 
         if (built->status == QuicBuildSendStatus::NoWork) {
@@ -260,11 +169,11 @@ async::Task<QuicSendScheduler::FlushResult> QuicSendScheduler::flush_connection(
             if (!pacing.ready && endpoint_->connection_has_send_work(connection)) {
                 connection.arm_pacing_timer(pacing.deadline);
             }
-            co_return result;
+            return result;
         }
         if (built->status == QuicBuildSendStatus::Closed || built->status == QuicBuildSendStatus::Blocked) {
             remove(connection);
-            co_return result;
+            return result;
         }
 
         FIBER_ASSERT(mode == QuicBuildMode::Normal || !datagram.pacing_controlled);
@@ -277,22 +186,18 @@ async::Task<QuicSendScheduler::FlushResult> QuicSendScheduler::flush_connection(
                 auto handled = connection.paths().handle_mtu_probe_send_failed(*datagram.path, now);
                 if (!handled) {
                     result.error = handled.error();
-                    co_return result;
+                    return result;
                 }
                 if (*handled) {
                     continue;
                 }
             }
             if (sent.error() == common::IoErr::WouldBlock) {
-                auto writable = co_await socket_->wait_writable();
-                if (!writable) {
-                    result.error = writable.error();
-                    co_return result;
-                }
-                continue;
+                result.error = common::IoErr::WouldBlock;
+                return result;
             }
             result.error = sent.error();
-            co_return result;
+            return result;
         }
 
         if (datagram.pacing_controlled) {
@@ -306,11 +211,11 @@ async::Task<QuicSendScheduler::FlushResult> QuicSendScheduler::flush_connection(
             } else {
                 remove(connection);
             }
-            co_return result;
+            return result;
         }
         if (!endpoint_->connection_has_send_work(connection)) {
             remove(connection);
-            co_return result;
+            return result;
         }
     }
 }

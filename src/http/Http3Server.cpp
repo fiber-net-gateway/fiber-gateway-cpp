@@ -163,12 +163,15 @@ void Http3Server::serve() noexcept {
     }
 
     for (auto &shard: shards_) {
-        if (!shard || shard->recv_started || shard->loop == nullptr) {
+        if (!shard || shard->endpoint_started || shard->loop == nullptr) {
             continue;
         }
-        shard->recv_started = true;
-        async::spawn(*shard->loop,
-                     [endpoint = &shard->endpoint]() -> async::DetachedTask { co_await endpoint->recv_loop(); });
+        shard->endpoint_started = true;
+        if (shard->loop->in_loop()) {
+            on_start_shard(shard.get());
+        } else {
+            shard->loop->post<Shard, &Shard::start_entry, &Http3Server::on_start_shard>(*shard);
+        }
     }
 }
 
@@ -247,6 +250,16 @@ std::size_t Http3Server::shard_count() const noexcept {
         return 1;
     }
     return worker_group_->size();
+}
+
+void Http3Server::on_start_shard(Shard *shard) noexcept {
+    if (shard == nullptr || !shard->endpoint.valid()) {
+        return;
+    }
+    auto started = shard->endpoint.start();
+    if (!started && started.error() != common::IoErr::Already) {
+        shard->endpoint.close();
+    }
 }
 
 void Http3Server::on_close_shard(Shard *shard) noexcept {
