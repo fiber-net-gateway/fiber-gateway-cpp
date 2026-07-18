@@ -14,6 +14,12 @@
 
 namespace fiber::log {
 
+struct QuotedLogValue {
+    std::string_view value;
+};
+
+[[nodiscard]] inline QuotedLogValue quoted(std::string_view value) noexcept { return {value}; }
+
 class LogLine {
 public:
     static constexpr std::size_t kMessageCapacity = 8192;
@@ -33,6 +39,7 @@ public:
     LogLine &operator<<(bool value) noexcept;
     LogLine &operator<<(const void *value) noexcept;
     LogLine &operator<<(std::nullptr_t) noexcept;
+    LogLine &operator<<(QuotedLogValue value) noexcept;
 
     template<std::integral T>
         requires(!std::same_as<std::remove_cv_t<T>, bool> && !std::same_as<std::remove_cv_t<T>, char> &&
@@ -73,6 +80,7 @@ public:
 private:
     void append_raw(std::string_view value) noexcept;
     void append_escaped(std::string_view value) noexcept;
+    void append_quoted(std::string_view value) noexcept;
     void finish_message() noexcept;
 
     const Logger &logger_;

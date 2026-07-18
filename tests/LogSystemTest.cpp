@@ -283,13 +283,15 @@ TEST(LogSystemTest, EscapesControlCharactersAndTruncatesLongMessages) {
     ASSERT_TRUE(fiber::log::LoggerManager::global().initialize(std::move(*config)));
 
     LOG(LOG_TEST_OTHER, INFO) << "alpha\nbeta\r\t";
+    LOG(LOG_TEST_OTHER, INFO) << fiber::log::quoted("alpha\"beta\\gamma\n");
     LOG(LOG_TEST_OTHER, INFO) << std::string(9000, 'x');
     fiber::log::LoggerManager::global().shutdown();
 
     const std::string content = read_file(output.path());
     EXPECT_NE(content.find("alpha\\nbeta\\r\\t"), std::string::npos);
+    EXPECT_NE(content.find("\"alpha\\\"beta\\\\gamma\\n\""), std::string::npos);
     EXPECT_NE(content.find("<truncated>"), std::string::npos);
-    EXPECT_EQ(std::count(content.begin(), content.end(), '\n'), 2);
+    EXPECT_EQ(std::count(content.begin(), content.end(), '\n'), 3);
 }
 
 TEST(LogSystemTest, BufferedAppenderFlushesCurrentThread) {

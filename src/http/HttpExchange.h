@@ -15,6 +15,7 @@
 #include "../common/NonMovable.h"
 #include "../common/mem/BufPool.h"
 #include "../common/mem/IoBufChain.h"
+#include "../net/SocketAddress.h"
 #include "../net/TlsOptions.h"
 #include "../net/UdpSocket.h"
 #include "../quic/QuicConnection.h"
@@ -64,6 +65,13 @@ class HeaderLineParser;
 class ServerHttp2Request;
 class ServerHttp3Request;
 
+struct HttpResponseStats {
+    int status_code = 0;
+    std::size_t body_bytes_sent = 0;
+    common::IoErr terminal_error = common::IoErr::None;
+    bool header_sent = false;
+    bool completed = false;
+};
 
 class HttpExchange : public common::NonCopyable, public common::NonMovable {
 public:
@@ -75,7 +83,7 @@ public:
         const HttpHeaders::HeaderField *expect = nullptr;
     };
 
-    HttpExchange(mem::IoBufNodePool &node_pool, const HttpServerOptions &options);
+    HttpExchange(mem::IoBufNodePool &node_pool, const HttpServerOptions &options, net::SocketAddress remote_addr);
     ~HttpExchange();
 
     [[nodiscard]] HttpMethod method() const noexcept { return method_; }
@@ -97,6 +105,8 @@ public:
     [[nodiscard]] HttpBodySpec request_body_spec() const noexcept { return request_body_spec_; }
     bool request_trailers_complete() const noexcept { return request_trailers_complete_; }
     mem::BufPool &pool() noexcept { return pool_; }
+    [[nodiscard]] const net::SocketAddress &remote_addr() const noexcept { return remote_addr_; }
+    [[nodiscard]] const HttpResponseStats &response_stats() const noexcept { return response_stats_; }
 
     fiber::async::Task<common::IoResult<mem::IoBufChain>>
     read_body(std::size_t max_bytes, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
@@ -122,6 +132,7 @@ public:
 private:
     void set_io(HttpExchangeIo *io) noexcept;
     void cache_request_header_field(const HttpHeaders::HeaderField &field) noexcept;
+    void record_io_error(common::IoErr error) noexcept;
 
     friend class RequestLineParser;
     friend class HeaderLineParser;
@@ -145,6 +156,8 @@ private:
     bool request_trailers_complete_ = false;
     RequestHeaderRefs request_header_refs_;
     HttpBodySpec request_body_spec_{HttpBodySpec::None()};
+    net::SocketAddress remote_addr_{};
+    HttpResponseStats response_stats_{};
     bool request_close_ = false;
     bool request_keep_alive_ = false;
     HttpExchangeIo *io_ = nullptr;

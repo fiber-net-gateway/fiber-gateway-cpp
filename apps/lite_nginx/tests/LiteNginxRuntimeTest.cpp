@@ -30,6 +30,8 @@
 #include "http/ClientHttp2Exchange.h"
 #include "http/Http2ClientConnection.h"
 #include "http/Http2HpackEncodeCatalog.h"
+#include "log/LoggerManager.h"
+#include "logging/LoggingBuilder.h"
 #include "runtime/RuntimeBuilder.h"
 #include "runtime/ServerLauncher.h"
 
@@ -124,6 +126,41 @@ public:
 private:
     std::string path_;
     bool ok_ = false;
+};
+
+class TestLogFile {
+public:
+    TestLogFile() {
+        char pattern[] = "/tmp/lite_nginx_access_XXXXXX";
+        const int fd = ::mkstemp(pattern);
+        if (fd >= 0) {
+            ::close(fd);
+            path_ = pattern;
+        }
+    }
+
+    ~TestLogFile() {
+        if (!path_.empty()) {
+            ::unlink(path_.c_str());
+        }
+    }
+
+    [[nodiscard]] bool valid() const noexcept { return !path_.empty(); }
+    [[nodiscard]] const std::string &path() const noexcept { return path_; }
+
+    [[nodiscard]] std::string read() const {
+        std::ifstream input(path_, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    }
+
+private:
+    std::string path_;
+};
+
+class TestLoggingScope {
+public:
+    TestLoggingScope() { fiber::log::LoggerManager::global().shutdown(); }
+    ~TestLoggingScope() { fiber::log::LoggerManager::global().shutdown(); }
 };
 
 struct ShutdownOp {
@@ -857,6 +894,34 @@ http {
     EXPECT_EQ(runtime->listeners[0].http3_alt_svc, "h3=\":8443\"; ma=86400");
 }
 
+TEST(LiteNginxRuntimeTest, CompilesAccessLogInheritance) {
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(R"(
+http {
+    listen 127.0.0.1:8080;
+    access_log on;
+    server {
+        server_name localhost;
+        access_log off;
+        location /quiet { proxy_pass http://127.0.0.1:9001; }
+        location /logged {
+            access_log on;
+            proxy_pass http://127.0.0.1:9001;
+        }
+    }
+}
+)",
+                                                                            "access_inheritance.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    EXPECT_TRUE(runtime->access_log);
+    ASSERT_EQ(runtime->servers.size(), 1u);
+    EXPECT_FALSE(runtime->servers[0].access_log);
+    ASSERT_EQ(runtime->servers[0].locations.size(), 2u);
+    EXPECT_FALSE(runtime->servers[0].locations[0].access_log);
+    EXPECT_TRUE(runtime->servers[0].locations[1].access_log);
+}
+
 TEST(LiteNginxRuntimeTest, ProxiesDirectRouteMatcherLocation) {
     std::promise<std::string> upstream_request;
     auto upstream_future = upstream_request.get_future();
@@ -1499,6 +1564,80 @@ http {
 
     EXPECT_NE(response.find("HTTP/1.1 404 Not Found\r\n"), std::string::npos);
     EXPECT_NE(response.find("404 Not Found\n"), std::string::npos);
+}
+
+TEST(LiteNginxRuntimeTest, WritesStructuredAccessLogForCompletedRequest) {
+    TestLoggingScope logging_scope;
+    TestLogFile access_file;
+    ASSERT_TRUE(access_file.valid());
+    const std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+logging {
+    appender access_file {
+        type file;
+        path ACCESS_PATH;
+        min_level info;
+        max_level info;
+    }
+    logger lite_nginx.access {
+        level info;
+        appender access_file;
+        additive off;
+    }
+    root_logger {
+        level warn;
+        appender access_file;
+    }
+}
+http {
+    listen 127.0.0.1:PORT;
+    access_log on;
+    server {
+        server_name localhost;
+        location /api/:id { proxy_pass http://127.0.0.1:9001; }
+    }
+}
+)";
+    std::size_t marker = config_text.find("ACCESS_PATH");
+    ASSERT_NE(marker, std::string::npos);
+    config_text.replace(marker, sizeof("ACCESS_PATH") - 1, access_file.path());
+    marker = config_text.find("PORT");
+    ASSERT_NE(marker, std::string::npos);
+    config_text.replace(marker, sizeof("PORT") - 1, std::to_string(port));
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "access_runtime.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto log_config = fiber::lite_nginx::logging::LoggingBuilder::build(config->logging);
+    ASSERT_TRUE(log_config.has_value()) << log_config.error().message;
+    auto initialized = fiber::log::LoggerManager::global().initialize(std::move(*log_config));
+    ASSERT_TRUE(initialized.has_value()) << initialized.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    {
+        RuntimeHarness harness(*runtime);
+        int client = connect_client(harness.port());
+        ASSERT_GE(client, 0);
+        const char request[] = "GET /miss?secret=hidden HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+        std::string response = recv_http_response(client);
+        ::close(client);
+        EXPECT_NE(response.find("HTTP/1.1 404 Not Found\r\n"), std::string::npos);
+    }
+
+    const std::string access = access_file.read();
+    EXPECT_NE(access.find("lite_nginx.access"), std::string::npos);
+    EXPECT_NE(access.find("remote_addr=\"127.0.0.1\""), std::string::npos);
+    EXPECT_NE(access.find("method=\"GET\""), std::string::npos);
+    EXPECT_NE(access.find("path=\"/miss\""), std::string::npos);
+    EXPECT_EQ(access.find("secret=hidden"), std::string::npos);
+    EXPECT_NE(access.find("server=\"localhost\""), std::string::npos);
+    EXPECT_NE(access.find("location=\"-\""), std::string::npos);
+    EXPECT_NE(access.find("status=404"), std::string::npos);
+    EXPECT_NE(access.find("body_bytes_sent=14"), std::string::npos);
+    EXPECT_NE(access.find("outcome=ok"), std::string::npos);
 }
 
 TEST(LiteNginxRuntimeTest, ReusesNamedUpstreamConnectionsWithKeepalive) {

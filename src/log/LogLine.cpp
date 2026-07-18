@@ -92,6 +92,22 @@ void LogLine::append_escaped(std::string_view value) noexcept {
     }
 }
 
+void LogLine::append_quoted(std::string_view value) noexcept {
+    append_raw("\"");
+    for (unsigned char ch: value) {
+        if (ch == '\\' || ch == '"') {
+            char escaped[] = {'\\', static_cast<char>(ch)};
+            append_raw(std::string_view(escaped, sizeof(escaped)));
+        } else {
+            append_escaped(std::string_view(reinterpret_cast<const char *>(&ch), 1));
+        }
+        if (truncated_) {
+            return;
+        }
+    }
+    append_raw("\"");
+}
+
 void LogLine::finish_message() noexcept {
     if (!truncated_) {
         return;
@@ -140,5 +156,10 @@ LogLine &LogLine::operator<<(const void *value) noexcept {
 }
 
 LogLine &LogLine::operator<<(std::nullptr_t) noexcept { return *this << static_cast<const void *>(nullptr); }
+
+LogLine &LogLine::operator<<(QuotedLogValue value) noexcept {
+    append_quoted(value.value);
+    return *this;
+}
 
 } // namespace fiber::log
