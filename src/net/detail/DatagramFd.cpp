@@ -5,6 +5,9 @@
 #include <cerrno>
 #include <cstring>
 #include <netinet/in.h>
+#if FIBER_HAVE_UDP_SEGMENT
+#include <netinet/udp.h>
+#endif
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -40,8 +43,13 @@ fiber::common::IoResult<std::chrono::milliseconds> remaining_timeout(Deadline de
 
 constexpr std::size_t kRecvControlCapacity =
         CMSG_SPACE(sizeof(in6_pktinfo)) + CMSG_SPACE(sizeof(in_pktinfo)) + CMSG_SPACE(sizeof(int));
-constexpr std::size_t kSendControlCapacity =
-        CMSG_SPACE(sizeof(in6_pktinfo)) + CMSG_SPACE(sizeof(in_pktinfo)) + CMSG_SPACE(sizeof(int));
+constexpr std::size_t kSendControlCapacity = CMSG_SPACE(sizeof(in6_pktinfo)) + CMSG_SPACE(sizeof(in_pktinfo)) +
+                                             CMSG_SPACE(sizeof(int)) + CMSG_SPACE(sizeof(std::uint16_t));
+
+template<std::size_t Capacity>
+struct alignas(cmsghdr) ControlBuffer {
+    std::array<unsigned char, Capacity> bytes{};
+};
 
 fiber::common::IoErr set_sockopt_flag(int fd, int level, int option, bool enabled) noexcept {
     int value = enabled ? 1 : 0;
@@ -211,7 +219,7 @@ std::size_t build_send_control(const UdpPacketSendSpec &spec, std::array<unsigne
                                msghdr &msg) noexcept {
     msg.msg_control = nullptr;
     msg.msg_controllen = 0;
-    if (!spec.has_local && spec.ecn == UdpEcn::Unspecified) {
+    if (!spec.has_local && spec.ecn == UdpEcn::Unspecified && spec.gso_segment_size == 0) {
         return 0;
     }
 
@@ -293,15 +301,43 @@ std::size_t build_send_control(const UdpPacketSendSpec &spec, std::array<unsigne
         used_end = std::max(used_end, control.data());
     }
 
+    if (spec.gso_segment_size != 0) {
+#if FIBER_HAVE_UDP_SEGMENT
+        if (spec.ecn != UdpEcn::Unspecified) {
+            cmsg = advance(cmsg);
+        }
+        if (!cmsg) {
+            return 0;
+        }
+        cmsg->cmsg_level = SOL_UDP;
+        cmsg->cmsg_type = UDP_SEGMENT;
+        cmsg->cmsg_len = CMSG_LEN(sizeof(spec.gso_segment_size));
+        std::memcpy(CMSG_DATA(cmsg), &spec.gso_segment_size, sizeof(spec.gso_segment_size));
+        mark_used(cmsg);
+#endif
+    }
+
     msg.msg_controllen = static_cast<std::size_t>(used_end - control.data());
     return msg.msg_controllen;
 }
 
 bool send_spec_valid(const UdpPacketSendSpec &spec) noexcept {
+    if (spec.iov_count < 0) {
+        return false;
+    }
     if (spec.iov_count > 0) {
         return spec.iov != nullptr;
     }
     return spec.len == 0 || spec.buf != nullptr;
+}
+
+bool send_spec_supported(const UdpPacketSendSpec &spec) noexcept {
+#if FIBER_HAVE_UDP_SEGMENT
+    (void) spec;
+    return true;
+#else
+    return spec.gso_segment_size == 0;
+#endif
 }
 
 } // namespace
@@ -498,6 +534,134 @@ fiber::common::IoResult<size_t> DatagramFd::try_send_packet(const UdpPacketSendS
     return out;
 }
 
+fiber::common::IoResult<size_t> DatagramFd::try_recv_packets(UdpPacketRecvSlot *slots, size_t count) noexcept {
+    const int socket_fd = rwfd_.fd();
+    if (socket_fd < 0) {
+        return std::unexpected(fiber::common::IoErr::BadFd);
+    }
+    if ((count != 0 && slots == nullptr) || count > kUdpMaxBatchSize) {
+        return std::unexpected(fiber::common::IoErr::Invalid);
+    }
+    if (count == 0) {
+        return 0;
+    }
+
+    std::array<mmsghdr, kUdpMaxBatchSize> messages{};
+    std::array<iovec, kUdpMaxBatchSize> iovs{};
+    std::array<sockaddr_storage, kUdpMaxBatchSize> peers{};
+    std::array<ControlBuffer<kRecvControlCapacity>, kUdpMaxBatchSize> controls{};
+
+    for (size_t i = 0; i < count; ++i) {
+        if (slots[i].capacity != 0 && slots[i].buf == nullptr) {
+            return std::unexpected(fiber::common::IoErr::Invalid);
+        }
+        slots[i].result = UdpPacketRecvResult{};
+        iovs[i].iov_base = slots[i].buf;
+        iovs[i].iov_len = slots[i].capacity;
+        msghdr &msg = messages[i].msg_hdr;
+        msg.msg_name = &peers[i];
+        msg.msg_namelen = sizeof(peers[i]);
+        msg.msg_iov = &iovs[i];
+        msg.msg_iovlen = 1;
+        msg.msg_control = controls[i].bytes.data();
+        msg.msg_controllen = controls[i].bytes.size();
+    }
+
+    for (;;) {
+        const int rc = ::recvmmsg(socket_fd, messages.data(), static_cast<unsigned int>(count), MSG_DONTWAIT, nullptr);
+        if (rc >= 0) {
+            for (int i = 0; i < rc; ++i) {
+                SocketAddress peer;
+                const msghdr &msg = messages[static_cast<size_t>(i)].msg_hdr;
+                if (!SocketAddress::from_sockaddr(reinterpret_cast<const sockaddr *>(&peers[static_cast<size_t>(i)]),
+                                                  msg.msg_namelen, peer)) {
+                    return std::unexpected(fiber::common::IoErr::NotSupported);
+                }
+                UdpPacketRecvResult &result = slots[static_cast<size_t>(i)].result;
+                result.size = messages[static_cast<size_t>(i)].msg_len;
+                result.peer = peer;
+                result.truncated = (msg.msg_flags & MSG_TRUNC) != 0;
+                parse_control_messages(msg, local_addr_, result);
+            }
+            return static_cast<size_t>(rc);
+        }
+
+        const int err = errno;
+        if (err == EINTR) {
+            continue;
+        }
+        if (err == EAGAIN || err == EWOULDBLOCK) {
+            return std::unexpected(fiber::common::IoErr::WouldBlock);
+        }
+        return std::unexpected(fiber::common::io_err_from_errno(err));
+    }
+}
+
+fiber::common::IoResult<size_t> DatagramFd::try_send_packets(const UdpPacketSendSpec *specs, size_t count) noexcept {
+    const int socket_fd = rwfd_.fd();
+    if (socket_fd < 0) {
+        return std::unexpected(fiber::common::IoErr::BadFd);
+    }
+    if ((count != 0 && specs == nullptr) || count > kUdpMaxBatchSize) {
+        return std::unexpected(fiber::common::IoErr::Invalid);
+    }
+    if (count == 0) {
+        return 0;
+    }
+
+    std::array<mmsghdr, kUdpMaxBatchSize> messages{};
+    std::array<iovec, kUdpMaxBatchSize> single_iovs{};
+    std::array<sockaddr_storage, kUdpMaxBatchSize> peers{};
+    std::array<ControlBuffer<kSendControlCapacity>, kUdpMaxBatchSize> controls{};
+
+    for (size_t i = 0; i < count; ++i) {
+        const UdpPacketSendSpec &spec = specs[i];
+        if (!send_spec_valid(spec)) {
+            return std::unexpected(fiber::common::IoErr::Invalid);
+        }
+        if (!send_spec_supported(spec)) {
+            return std::unexpected(fiber::common::IoErr::NotSupported);
+        }
+
+        socklen_t peer_len = 0;
+        if (!spec.peer.to_sockaddr(peers[i], peer_len)) {
+            return std::unexpected(fiber::common::IoErr::NotSupported);
+        }
+
+        const iovec *iov = spec.iov;
+        int iov_count = spec.iov_count;
+        if (iov_count == 0) {
+            single_iovs[i].iov_base = const_cast<void *>(spec.buf);
+            single_iovs[i].iov_len = spec.len;
+            iov = &single_iovs[i];
+            iov_count = 1;
+        }
+
+        msghdr &msg = messages[i].msg_hdr;
+        msg.msg_name = &peers[i];
+        msg.msg_namelen = peer_len;
+        msg.msg_iov = const_cast<iovec *>(iov);
+        msg.msg_iovlen = static_cast<size_t>(iov_count);
+        build_send_control(spec, controls[i].bytes, msg);
+    }
+
+    for (;;) {
+        const int rc = ::sendmmsg(socket_fd, messages.data(), static_cast<unsigned int>(count), MSG_DONTWAIT);
+        if (rc >= 0) {
+            return static_cast<size_t>(rc);
+        }
+
+        const int err = errno;
+        if (err == EINTR) {
+            continue;
+        }
+        if (err == EAGAIN || err == EWOULDBLOCK) {
+            return std::unexpected(fiber::common::IoErr::WouldBlock);
+        }
+        return std::unexpected(fiber::common::io_err_from_errno(err));
+    }
+}
+
 fiber::common::IoErr DatagramFd::set_read_callback(ReadyCallback callback, void *ctx) noexcept {
     return rwfd_.set_read_callback(callback, ctx);
 }
@@ -525,7 +689,7 @@ fiber::common::IoErr DatagramFd::recv_packet_once(void *buf, size_t len, UdpPack
         iovec iov{};
         iov.iov_base = buf;
         iov.iov_len = len;
-        std::array<unsigned char, kRecvControlCapacity> control{};
+        alignas(cmsghdr) std::array<unsigned char, kRecvControlCapacity> control{};
         msghdr msg{};
         msg.msg_name = &peer;
         msg.msg_namelen = sizeof(peer);
@@ -543,6 +707,7 @@ fiber::common::IoErr DatagramFd::recv_packet_once(void *buf, size_t len, UdpPack
             }
             out.size = static_cast<size_t>(rc);
             out.peer = parsed_peer;
+            out.truncated = (msg.msg_flags & MSG_TRUNC) != 0;
             parse_control_messages(msg, local_addr_, out);
             return fiber::common::IoErr::None;
         }
@@ -567,6 +732,9 @@ fiber::common::IoErr DatagramFd::send_packet_once(const UdpPacketSendSpec &spec,
     if (!send_spec_valid(spec)) {
         return fiber::common::IoErr::Invalid;
     }
+    if (!send_spec_supported(spec)) {
+        return fiber::common::IoErr::NotSupported;
+    }
 
     sockaddr_storage peer_storage{};
     socklen_t peer_len = 0;
@@ -586,7 +754,7 @@ fiber::common::IoErr DatagramFd::send_packet_once(const UdpPacketSendSpec &spec,
 
     for (;;) {
         msghdr msg{};
-        std::array<unsigned char, kSendControlCapacity> control{};
+        alignas(cmsghdr) std::array<unsigned char, kSendControlCapacity> control{};
         msg.msg_name = &peer_storage;
         msg.msg_namelen = peer_len;
         msg.msg_iov = const_cast<iovec *>(iov);

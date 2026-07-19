@@ -101,6 +101,15 @@ QuicOutputFrame *QuicOutputFrameQueue::pop_front() noexcept {
     return frame;
 }
 
+QuicOutputFrame *QuicOutputFrameQueue::pop_back() noexcept {
+    QuicOutputFrame *frame = tail_;
+    if (frame == nullptr) {
+        return nullptr;
+    }
+    erase_after(frame->prev, *frame);
+    return frame;
+}
+
 void QuicOutputFrameQueue::prepend_all(QuicOutputFrameQueue &source) noexcept {
     if (source.head_ == nullptr) {
         return;

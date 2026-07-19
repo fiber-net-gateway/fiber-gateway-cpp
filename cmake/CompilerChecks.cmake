@@ -1,5 +1,41 @@
 include(CheckCXXSourceCompiles)
 
+function(fiber_detect_udp_gso)
+    set(FIBER_HAVE_UDP_SEGMENT FALSE PARENT_SCOPE)
+    if (NOT FIBER_ENABLE_UDP_GSO)
+        message(STATUS "UDP GSO support disabled by FIBER_ENABLE_UDP_GSO=OFF")
+        return()
+    endif()
+    if (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(STATUS "UDP GSO support unavailable on ${CMAKE_SYSTEM_NAME}")
+        return()
+    endif()
+
+    set(FIBER_UDP_GSO_OLD_REQUIRED_DEFINITIONS "${CMAKE_REQUIRED_DEFINITIONS}")
+    list(APPEND CMAKE_REQUIRED_DEFINITIONS -D_GNU_SOURCE)
+    unset(FIBER_HAVE_UDP_SEGMENT CACHE)
+    unset(FIBER_HAVE_UDP_SEGMENT)
+    check_cxx_source_compiles([=[
+        #include <cstdint>
+        #include <sys/socket.h>
+        #include <netinet/udp.h>
+
+        int main() {
+            alignas(cmsghdr) unsigned char control[CMSG_SPACE(sizeof(std::uint16_t))]{};
+            msghdr msg{};
+            msg.msg_control = control;
+            msg.msg_controllen = sizeof(control);
+            cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+            cmsg->cmsg_level = SOL_UDP;
+            cmsg->cmsg_type = UDP_SEGMENT;
+            cmsg->cmsg_len = CMSG_LEN(sizeof(std::uint16_t));
+            return 0;
+        }
+    ]=] FIBER_HAVE_UDP_SEGMENT)
+    set(CMAKE_REQUIRED_DEFINITIONS "${FIBER_UDP_GSO_OLD_REQUIRED_DEFINITIONS}")
+    set(FIBER_HAVE_UDP_SEGMENT "${FIBER_HAVE_UDP_SEGMENT}" PARENT_SCOPE)
+endfunction()
+
 function(fiber_validate_cxx_toolchain)
     if (NOT DEFINED FIBER_MIN_GCC_VERSION)
         set(FIBER_MIN_GCC_VERSION 13.0)

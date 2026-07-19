@@ -251,6 +251,8 @@ DNS 示例：
   关闭自动下载第三方依赖，要求系统已安装依赖。
 - `-DFIBER_USE_JEMALLOC=ON`
   将最终可执行程序链接到 jemalloc。
+- `-DFIBER_ENABLE_UDP_GSO=OFF`
+  即使 Linux 头文件提供 `UDP_SEGMENT`，也不编译 UDP GSO 支持。
 - `-DFIBER_ENABLE_LTO=ON`
   在工具链支持时启用 LTO/IPO。
 - `-DFIBER_ALLOW_GCC_LTO=ON`

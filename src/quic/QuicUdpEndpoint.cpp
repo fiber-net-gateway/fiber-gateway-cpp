@@ -132,28 +132,33 @@ namespace {
     return index;
 }
 
-void restore_sending_frames(QuicConnection &connection, QuicPacketNumberSpace &space) noexcept {
-    QuicOutputFrameQueue restored{};
-    while (QuicOutputFrame *frame = space.sending_frames.pop_front()) {
-        if (frame->type == QuicFrameType::Stream) {
-            (void) connection.on_stream_send_failed(frame->u.stream.stream_id,
-                                                    static_cast<std::size_t>(frame->u.stream.offset),
-                                                    frame->u.stream.length, frame->u.stream.fin);
-            space.release_frame(*frame);
-            continue;
-        }
-        if (frame->path != nullptr) {
-            if (frame->path->allocated) {
-                frame->path->pending_frames.push_front(*frame);
-            } else {
-                frame->path = nullptr;
-                space.release_frame(*frame);
-            }
-            continue;
-        }
-        restored.push_back(*frame);
+void restore_sending_frame(QuicConnection &connection, QuicPacketNumberSpace &space, QuicOutputFrame &frame) noexcept {
+    if (frame.type == QuicFrameType::Stream) {
+        (void) connection.on_stream_send_failed(frame.u.stream.stream_id,
+                                                static_cast<std::size_t>(frame.u.stream.offset), frame.u.stream.length,
+                                                frame.u.stream.fin);
+        space.release_frame(frame);
+        return;
     }
-    space.pending_frames.prepend_all(restored);
+    if (frame.path != nullptr) {
+        if (frame.path->allocated) {
+            frame.path->pending_frames.push_front(frame);
+        } else {
+            frame.path = nullptr;
+            space.release_frame(frame);
+        }
+        return;
+    }
+    space.pending_frames.push_front(frame);
+}
+
+void restore_sending_frames_after(QuicConnection &connection, QuicPacketNumberSpace &space,
+                                  QuicOutputFrame *tail) noexcept {
+    while (space.sending_frames.back() != tail) {
+        QuicOutputFrame *frame = space.sending_frames.pop_back();
+        FIBER_ASSERT(frame != nullptr);
+        restore_sending_frame(connection, space, *frame);
+    }
 }
 
 void discard_pending_frames(QuicConnection &connection, QuicPacketNumberSpace &space) noexcept {
@@ -280,7 +285,8 @@ split_crypto_frame(QuicPacketNumberSpace &space, QuicOutputFrame &frame, std::si
     return true;
 }
 
-[[nodiscard]] net::UdpEcn choose_send_ecn(const QuicPath &path, const QuicSendDatagram &datagram) noexcept {
+[[nodiscard]] net::UdpEcn choose_send_ecn(const QuicPath &path, const QuicSendDatagram &datagram,
+                                          std::uint32_t ecn_validation_sent) noexcept {
     if (!datagram_ecn_trackable(datagram)) {
         return net::UdpEcn::Unspecified;
     }
@@ -288,12 +294,33 @@ split_crypto_frame(QuicPacketNumberSpace &space, QuicOutputFrame &frame, std::si
         case QuicEcnState::Capable:
             return net::UdpEcn::Ect0;
         case QuicEcnState::Testing:
-            return path.ecn_validation_sent < kQuicEcnValidationProbePackets ? net::UdpEcn::Ect0
-                                                                             : net::UdpEcn::Unspecified;
+            return ecn_validation_sent < kQuicEcnValidationProbePackets ? net::UdpEcn::Ect0 : net::UdpEcn::Unspecified;
         case QuicEcnState::Failed:
             return net::UdpEcn::Unspecified;
     }
     return net::UdpEcn::Unspecified;
+}
+
+[[nodiscard]] QuicSendPathReservation &find_path_reservation(QuicSendBuildState &state, QuicPath &path) noexcept {
+    for (QuicSendPathReservation &reservation: state.paths) {
+        if (reservation.path == &path) {
+            return reservation;
+        }
+    }
+    FIBER_ASSERT(false);
+    return state.paths[0];
+}
+
+[[nodiscard]] std::size_t reserved_path_send_limit(const QuicPath &path, std::uint64_t sent,
+                                                   std::size_t size) noexcept {
+    if (path.validated) {
+        return size;
+    }
+    const std::uint64_t max = path.received > UINT64_MAX / 3 ? UINT64_MAX : path.received * 3;
+    if (sent >= max) {
+        return 0;
+    }
+    return static_cast<std::size_t>(std::min<std::uint64_t>(size, max - sent));
 }
 
 void record_sent_ecn_counters(QuicConnection &connection, QuicSendDatagram const &datagram) noexcept {
@@ -387,6 +414,8 @@ namespace {
 common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Options &options) noexcept {
     if (initialized_ || options.max_connections == 0 || options.send.send_buffer_size == 0 ||
         options.max_recv_datagrams_per_wakeup == 0 || options.max_recv_bytes_per_wakeup == 0 ||
+        options.recv_batch_size == 0 || options.recv_batch_size > net::kUdpMaxBatchSize ||
+        options.recv_batch_size > SIZE_MAX / kQuicUdpDefaultReadBufferSize ||
         options.retry_token_lifetime.count() < 0 || options.new_token_lifetime.count() < 0 ||
         options.create_connection == nullptr) {
         return std::unexpected(common::IoErr::Invalid);
@@ -424,15 +453,21 @@ common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Optio
     dropped_datagram_count_ = 0;
     rejected_connection_count_ = 0;
     rate_limited_stateless_response_count_ = 0;
+    recv_pending_index_ = 0;
+    recv_pending_count_ = 0;
     stateless_rate_ = {};
 
     socket_ = std::make_unique<net::UdpSocket>(loop);
-    read_buffer_ = std::make_unique<std::uint8_t[]>(kQuicUdpDefaultReadBufferSize);
+    read_buffer_ = std::make_unique<std::uint8_t[]>(options_.recv_batch_size * kQuicUdpDefaultReadBufferSize);
     send_plaintext_buffer_ = std::make_unique<std::uint8_t[]>(kQuicUdpDefaultPlaintextBufferSize);
     send_buffer_ = std::make_unique<std::uint8_t[]>(options_.send.send_buffer_size);
     if (!socket_ || !read_buffer_ || !send_plaintext_buffer_ || !send_buffer_) {
         close();
         return std::unexpected(common::IoErr::NoMem);
+    }
+    for (std::size_t i = 0; i < options_.recv_batch_size; ++i) {
+        recv_slots_[i].buf = read_buffer_.get() + i * kQuicUdpDefaultReadBufferSize;
+        recv_slots_[i].capacity = kQuicUdpDefaultReadBufferSize;
     }
 
     net::UdpBindOptions bind_options = options_.udp;
@@ -511,6 +546,9 @@ void QuicUdpEndpoint::close() noexcept {
     io_pump_again_ = false;
     if (!io_pump_running_) {
         read_buffer_.reset();
+        recv_slots_ = {};
+        recv_pending_index_ = 0;
+        recv_pending_count_ = 0;
         send_plaintext_buffer_.reset();
         send_buffer_.reset();
     }
@@ -583,7 +621,8 @@ async::Task<common::IoResult<QuicUdpReceiveResult>> QuicUdpEndpoint::recv_once()
     if (!recv) {
         co_return std::unexpected(recv.error());
     }
-    co_return process_datagram(*recv, loop_ != nullptr ? loop_->now() : std::chrono::steady_clock::now());
+    co_return process_datagram(read_buffer_.get(), *recv,
+                               loop_ != nullptr ? loop_->now() : std::chrono::steady_clock::now());
 }
 
 QuicUdpEndpoint::ReceivePumpResult QuicUdpEndpoint::pump_receive() noexcept {
@@ -592,24 +631,46 @@ QuicUdpEndpoint::ReceivePumpResult QuicUdpEndpoint::pump_receive() noexcept {
     FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT(read_buffer_ != nullptr);
 
-    while (!closing_ && result.datagrams_received < options_.max_recv_datagrams_per_wakeup &&
-           result.bytes_received < options_.max_recv_bytes_per_wakeup) {
-        auto recv = socket_->try_recv_packet(read_buffer_.get(), kQuicUdpDefaultReadBufferSize);
-        if (!recv) {
-            if (recv.error() == common::IoErr::WouldBlock) {
+    auto budget_available = [&]() noexcept {
+        return result.datagrams_received < options_.max_recv_datagrams_per_wakeup &&
+               result.bytes_received < options_.max_recv_bytes_per_wakeup;
+    };
+
+    auto drain_pending = [&]() noexcept {
+        while (!closing_ && recv_pending_count_ != 0 && budget_available()) {
+            net::UdpPacketRecvSlot &slot = recv_slots_[recv_pending_index_];
+            ++recv_pending_index_;
+            --recv_pending_count_;
+            ++result.datagrams_received;
+            result.bytes_received += slot.result.size;
+            (void) process_datagram(static_cast<std::uint8_t *>(slot.buf), slot.result, loop_->now());
+        }
+        if (recv_pending_count_ == 0) {
+            recv_pending_index_ = 0;
+        }
+    };
+
+    drain_pending();
+    while (!closing_ && recv_pending_count_ == 0 && budget_available()) {
+        auto received = socket_->try_recv_packets(recv_slots_.data(), options_.recv_batch_size);
+        if (!received) {
+            if (received.error() == common::IoErr::WouldBlock) {
                 read_ready_ = false;
             } else {
-                result.error = recv.error();
+                result.error = received.error();
             }
             return result;
         }
-
-        ++result.datagrams_received;
-        result.bytes_received += recv->size;
-        (void) process_datagram(*recv, loop_->now());
+        if (*received == 0) {
+            read_ready_ = false;
+            return result;
+        }
+        recv_pending_index_ = 0;
+        recv_pending_count_ = *received;
+        drain_pending();
     }
 
-    result.needs_reschedule = !closing_ && read_ready_;
+    result.needs_reschedule = !closing_ && (recv_pending_count_ != 0 || read_ready_);
     return result;
 }
 
@@ -751,6 +812,9 @@ void QuicUdpEndpoint::drive_io() noexcept {
     io_pump_running_ = false;
     if (closing_) {
         read_buffer_.reset();
+        recv_slots_ = {};
+        recv_pending_index_ = 0;
+        recv_pending_count_ = 0;
         send_plaintext_buffer_.reset();
         send_buffer_.reset();
         return;
@@ -1376,15 +1440,20 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
 }
 
 common::IoResult<QuicUdpReceiveResult>
-QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::steady_clock::time_point now) noexcept {
-    auto dcid = quic_get_packet_dcid(read_buffer_.get(), recv.size, static_cast<std::uint8_t>(kQuicConnectionIdLength));
+QuicUdpEndpoint::process_datagram(std::uint8_t *data, net::UdpPacketRecvResult recv,
+                                  std::chrono::steady_clock::time_point now) noexcept {
+    if (data == nullptr || recv.truncated) {
+        ++dropped_datagram_count_;
+        return std::unexpected(recv.truncated ? common::IoErr::MessageTooLarge : common::IoErr::Invalid);
+    }
+    auto dcid = quic_get_packet_dcid(data, recv.size, static_cast<std::uint8_t>(kQuicConnectionIdLength));
     if (!dcid) {
         ++dropped_datagram_count_;
         return std::unexpected(dcid.error());
     }
 
     QuicReceivedDatagram datagram{};
-    datagram.data = read_buffer_.get();
+    datagram.data = data;
     datagram.len = recv.size;
     datagram.peer = recv.peer;
     datagram.local = recv.local;
@@ -1395,8 +1464,7 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
     QuicConnection *connection = find_connection(*dcid, dcid_hash);
     bool created = false;
     if (connection == nullptr) {
-        auto packet = quic_parse_packet_header(read_buffer_.get(), recv.size,
-                                               static_cast<std::uint8_t>(kQuicConnectionIdLength));
+        auto packet = quic_parse_packet_header(data, recv.size, static_cast<std::uint8_t>(kQuicConnectionIdLength));
         // RFC 9000 §10.3 / nginx ngx_quic_send_stateless_reset: a short-header
         // (1-RTT) packet addressed to a DCID we no longer recognize means this
         // endpoint has lost state. Send a stateless reset so the peer can tear
@@ -1642,7 +1710,8 @@ bool QuicUdpEndpoint::should_delay_ack(const QuicPacketNumberSpace &space, QuicT
 }
 
 common::IoResult<QuicBuildSendResult>
-QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSendDatagram &datagram) noexcept {
+QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSendDatagram &datagram,
+                                             QuicSendBuildState &build_state) noexcept {
     if (!valid() || datagram.data == nullptr || datagram.capacity == 0 || connection.closing()) {
         return QuicBuildSendResult{QuicBuildSendStatus::Closed};
     }
@@ -1665,7 +1734,7 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
         if (source == nullptr) {
             continue;
         }
-        if (!quic_congestion_can_send(connection.congestion(), source->ignore_congestion)) {
+        if (!quic_congestion_can_send(build_state.congestion, source->ignore_congestion)) {
             continue;
         }
 
@@ -1673,7 +1742,8 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
                 source->mtu_probe ? std::max(candidate.mtu, static_cast<std::size_t>(source->min_packet_len))
                                   : candidate.mtu;
         const std::size_t requested = std::min(capacity, packet_limit);
-        const std::size_t allowed = QuicConnection::path_send_limit(candidate, requested);
+        QuicSendPathReservation &path_reservation = find_path_reservation(build_state, candidate);
+        const std::size_t allowed = reserved_path_send_limit(candidate, path_reservation.sent, requested);
         if (allowed == 0) {
             continue;
         }
@@ -1685,8 +1755,8 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
         header.scid = connection.local_connection_id();
 
         std::size_t min_packet_len = 0;
-        if (source->min_packet_len != 0 &&
-            QuicConnection::path_send_limit(candidate, source->min_packet_len) >= source->min_packet_len) {
+        if (source->min_packet_len != 0 && reserved_path_send_limit(candidate, path_reservation.sent,
+                                                                    source->min_packet_len) >= source->min_packet_len) {
             min_packet_len = source->min_packet_len;
         }
 
@@ -1755,7 +1825,7 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
         datagram.spec.peer = candidate.remote;
         datagram.spec.local = candidate.local;
         datagram.spec.has_local = true;
-        datagram.spec.ecn = choose_send_ecn(candidate, datagram);
+        datagram.spec.ecn = choose_send_ecn(candidate, datagram, path_reservation.ecn_validation_sent);
         return QuicBuildSendResult{QuicBuildSendStatus::Encoded};
     }
 
@@ -1764,6 +1834,7 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
 
 common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicConnection &connection,
                                                                            QuicSendDatagram &datagram,
+                                                                           QuicSendBuildState &build_state,
                                                                            QuicBuildMode mode) noexcept {
     // In Closing state the connection has CC frames queued; the only way those
     // frames reach the wire is through this function. Draining and Closed never
@@ -1776,7 +1847,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
     // Path-control frames (PATH_CHALLENGE / PATH_RESPONSE / NEW_CONNECTION_ID) are
     // suppressed once the connection is Closing — only the CC frame is allowed out.
     if (mode == QuicBuildMode::Normal && !connection.closing() && connection.has_path_send_work()) {
-        auto path_control = build_path_control_datagram(connection, datagram);
+        auto path_control = build_path_control_datagram(connection, datagram, build_state);
         if (!path_control) {
             return std::unexpected(path_control.error());
         }
@@ -1796,7 +1867,8 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
     datagram.data = data;
     datagram.path = path;
 
-    const std::size_t allowed = QuicConnection::path_send_limit(*path, requested);
+    QuicSendPathReservation &path_reservation = find_path_reservation(build_state, *path);
+    const std::size_t allowed = reserved_path_send_limit(*path, path_reservation.sent, requested);
     if (allowed == 0) {
         return QuicBuildSendResult{QuicBuildSendStatus::Blocked};
     }
@@ -1804,11 +1876,15 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
 
     const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
     const std::size_t pad_level = padding_level_index(connection);
+    QuicOutputFrame *sending_tails[kQuicSendLevelCount]{};
+    for (std::size_t i = 0; i < kQuicSendLevelCount; ++i) {
+        sending_tails[i] = connection.packet_number_space(kSendLevels[i]).sending_frames.back();
+    }
 
     auto rollback_encoded = [&]() noexcept {
         for (std::size_t i = 0; i < kQuicSendLevelCount; ++i) {
             QuicPacketNumberSpace &space = connection.packet_number_space(kSendLevels[i]);
-            restore_sending_frames(connection, space);
+            restore_sending_frames_after(connection, space, sending_tails[i]);
         }
         datagram.length = 0;
         datagram.packet_count = 0;
@@ -1875,7 +1951,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
             return std::unexpected(common::IoErr::NoMem);
         }
 
-        const bool ack_only = connection.congestion().in_flight >= connection.congestion().window;
+        const bool ack_only = build_state.congestion.in_flight >= build_state.congestion.window;
         std::size_t payload_len = 0;
         bool payload_ack_eliciting = false;
         bool payload_has_padding = false;
@@ -2001,7 +2077,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         auto encoded = quic_encode_packet(connection, spec, plaintext, datagram.data + datagram.length,
                                           datagram.capacity - datagram.length);
         if (!encoded) {
-            restore_sending_frames(connection, space);
+            restore_sending_frames_after(connection, space, sending_tails[level_index]);
             packet = QuicSendPacketRecord{};
             if (encoded.error() == common::IoErr::NotFound) {
                 discard_pending_frames(connection, space);
@@ -2018,8 +2094,10 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
                                      (mode == QuicBuildMode::Normal && (encoded->ack_eliciting || payload_has_padding));
 
         bool accounted_packet = false;
-        for (QuicOutputFrame *frame = space.sending_frames.front(); frame != nullptr;
-             frame = space.sending_frames.next_of(*frame)) {
+        QuicOutputFrame *first_encoded = sending_tails[level_index] == nullptr
+                                                 ? space.sending_frames.front()
+                                                 : space.sending_frames.next_of(*sending_tails[level_index]);
+        for (QuicOutputFrame *frame = first_encoded; frame != nullptr; frame = space.sending_frames.next_of(*frame)) {
             frame->packet_number = encoded->packet_number;
             frame->send_time = now;
             frame->packet_ack_eliciting = encoded->ack_eliciting;
@@ -2043,13 +2121,11 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
     datagram.spec.peer = path->remote;
     datagram.spec.local = path->local;
     datagram.spec.has_local = true;
-    datagram.spec.ecn = choose_send_ecn(*path, datagram);
+    datagram.spec.ecn = choose_send_ecn(*path, datagram, path_reservation.ecn_validation_sent);
     return QuicBuildSendResult{QuicBuildSendStatus::Encoded};
 }
 
 void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept {
-    const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
-    bool has_send_work = false;
     bool sent_ack_eliciting = false;
     const std::uint64_t path_seqnum = datagram.path != nullptr ? datagram.path->seqnum : kQuicNoPathSeqnum;
     const bool ecn_validation_probe = datagram.spec.ecn != net::UdpEcn::Unspecified && datagram.path != nullptr &&
@@ -2057,13 +2133,13 @@ void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const Qui
 
     record_sent_ecn_counters(connection, datagram);
 
-    for (std::size_t level_index = 0; level_index < kQuicSendLevelCount; ++level_index) {
-        QuicPacketNumberSpace &space = connection.packet_number_space(kSendLevels[level_index]);
-        if (!space.pending_frames.empty()) {
-            has_send_work = true;
-        }
-
-        while (QuicOutputFrame *frame = space.sending_frames.pop_front()) {
+    for (std::size_t packet_index = 0; packet_index < datagram.packet_count; ++packet_index) {
+        const QuicSendPacketRecord &packet = datagram.packets[packet_index];
+        QuicPacketNumberSpace &space = connection.packet_number_space(packet.level);
+        for (std::size_t frame_index = 0; frame_index < packet.frame_count; ++frame_index) {
+            QuicOutputFrame *frame = space.sending_frames.pop_front();
+            FIBER_ASSERT(frame != nullptr);
+            FIBER_ASSERT(frame->packet_number == packet.packet_number);
             if (frame == &space.ack_frame) {
                 space.send_ack = false;
                 space.send_ack_count = 0;
@@ -2095,8 +2171,6 @@ void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const Qui
     if (datagram.path != nullptr) {
         connection.record_path_sent(*datagram.path, datagram.length);
     }
-    has_send_work = has_send_work || connection_has_send_work(connection);
-    quic_congestion_on_idle(connection.congestion(), !has_send_work, now);
     if (sent_ack_eliciting && loop_ != nullptr) {
         connection.on_ack_eliciting_packet_sent();
         connection.arm_loss_detection_timer();
@@ -2104,13 +2178,21 @@ void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const Qui
 }
 
 void QuicUdpEndpoint::rollback_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept {
-    (void) datagram;
-    for (std::size_t i = 0; i < kQuicSendLevelCount; ++i) {
-        QuicPacketNumberSpace &space = connection.packet_number_space(kSendLevels[i]);
-        restore_sending_frames(connection, space);
+    for (std::size_t packet_index = datagram.packet_count; packet_index != 0; --packet_index) {
+        const QuicSendPacketRecord &packet = datagram.packets[packet_index - 1];
+        QuicPacketNumberSpace &space = connection.packet_number_space(packet.level);
+        for (std::size_t frame_index = 0; frame_index < packet.frame_count; ++frame_index) {
+            QuicOutputFrame *frame = space.sending_frames.pop_back();
+            FIBER_ASSERT(frame != nullptr);
+            FIBER_ASSERT(frame->packet_number == packet.packet_number);
+            restore_sending_frame(connection, space, *frame);
+        }
     }
+}
+
+void QuicUdpEndpoint::finish_send_batch(QuicConnection &connection) noexcept {
     const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
-    quic_congestion_on_idle(connection.congestion(), true, now);
+    quic_congestion_on_idle(connection.congestion(), !connection_has_send_work(connection), now);
 }
 
 bool QuicUdpEndpoint::connection_has_send_work(const QuicConnection &connection) const noexcept {
