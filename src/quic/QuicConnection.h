@@ -48,6 +48,8 @@ inline constexpr std::size_t kQuicMaxUdpPayloadSize = 65527;
 inline constexpr std::size_t kQuicDefaultStreamBufferSize = 65536;
 inline constexpr std::uint64_t kQuicDefaultConnRecvLimit = 2ULL * 1024ULL * 1024ULL * 1024ULL;
 inline constexpr std::uint64_t kQuicDefaultConnRecvLowWater = 10ULL * 1024ULL * 1024ULL;
+inline constexpr std::size_t kQuicDefaultConnectionRetainedStorageLimit = 16ULL * 1024ULL * 1024ULL;
+inline constexpr std::size_t kQuicDefaultEndpointRetainedStorageLimit = 256ULL * 1024ULL * 1024ULL;
 inline constexpr std::uint64_t kQuicDefaultMaxBidirectionalStreams = 128;
 inline constexpr std::uint64_t kQuicDefaultMaxUnidirectionalStreams = 128;
 inline constexpr std::uint64_t kQuicDefaultInitialMaxData = kQuicDefaultConnRecvLimit;
@@ -138,6 +140,7 @@ struct QuicRecvFlowControlSettings {
     std::uint64_t conn_recv_low_water = kQuicDefaultConnRecvLowWater;
     std::size_t stream_buffer_limit = kQuicDefaultStreamBufferSize;
     std::size_t stream_low_water = kQuicStreamRecvDefaultLowWater;
+    std::size_t retained_storage_limit = kQuicDefaultConnectionRetainedStorageLimit;
 };
 
 struct QuicPeerTransportState {
@@ -430,6 +433,7 @@ public:
         std::uint64_t max_local_unidirectional_streams = kQuicDefaultMaxUnidirectionalStreams;
         QuicOutputFramePool *output_frame_pool = nullptr;
         QuicCryptoBlockPool *crypto_block_pool = nullptr;
+        mem::IoBufStorageBudget *recv_storage_parent = nullptr;
         event::EventLoop *loop = nullptr;
         void *destroy_owner = nullptr;
         DestroyCallback on_destroy = nullptr;
@@ -558,6 +562,16 @@ public:
     [[nodiscard]] event::EventLoop *loop() noexcept { return loop_; }
     [[nodiscard]] const event::EventLoop *loop() const noexcept { return loop_; }
     [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return loop_->io_buf_node_pool(); }
+    [[nodiscard]] mem::IoBufStorageBudget &recv_storage_budget() noexcept { return recv_storage_budget_; }
+    [[nodiscard]] std::size_t retained_recv_storage_capacity() const noexcept {
+        return recv_storage_budget_.retained_capacity();
+    }
+    [[nodiscard]] std::size_t retained_recv_storage_high_water() const noexcept {
+        return recv_storage_budget_.high_water();
+    }
+    [[nodiscard]] std::size_t retained_recv_storage_rejected_count() const noexcept {
+        return recv_storage_budget_.rejected_count();
+    }
     common::IoResult<void> set_app_ops(void *owner, const Ops &ops) noexcept;
     void drop_stream_send_ticket(std::uint64_t stream_id) noexcept;
     [[nodiscard]] std::uint64_t recv_data_consumed() const noexcept { return recv_data_consumed_; }
@@ -850,6 +864,7 @@ private:
     PeerStreamLimitWindow peer_uni_streams_{};
     LocalStreamBlockedState local_bidi_streams_blocked_{};
     LocalStreamBlockedState local_uni_streams_blocked_{};
+    mem::IoBufStorageBudget recv_storage_budget_{};
     QuicOutputFramePool output_frame_pool_{};
     std::array<QuicPacketNumberSpace, kQuicPacketNumberSpaceCount> packet_number_spaces_{};
     QuicCongestionState congestion_{};

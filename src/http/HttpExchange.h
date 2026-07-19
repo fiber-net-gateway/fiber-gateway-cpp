@@ -32,6 +32,7 @@ struct HttpServerOptions {
     struct Http3Options {
         bool enabled = false;
         std::size_t max_connections_per_shard = 1024;
+        std::size_t retained_storage_limit = quic::kQuicDefaultEndpointRetainedStorageLimit;
         net::UdpBindOptions udp{};
         quic::QuicSendScheduler::Options send{};
         quic::QuicTransportSettings transport{};

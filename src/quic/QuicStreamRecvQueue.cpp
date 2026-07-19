@@ -19,6 +19,7 @@ QuicDataReassembler::Options reassembler_options(QuicStreamRecvQueue::Options op
             .buffer_limit = options.buffer_limit,
             .max_active_extents = kQuicStreamRecvMaxActiveExtents,
             .buffer_accounting = QuicDataReassembler::BufferAccounting::AllRetained,
+            .storage_budget = options.storage_budget,
     };
 }
 

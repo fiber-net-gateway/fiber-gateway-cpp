@@ -78,6 +78,7 @@ public:
         std::uint64_t ack_delay_exponent = 3;
         std::size_t max_recv_datagrams_per_wakeup = kQuicUdpDefaultMaxRecvDatagramsPerWakeup;
         std::size_t max_recv_bytes_per_wakeup = kQuicUdpDefaultMaxRecvBytesPerWakeup;
+        std::size_t retained_storage_limit = kQuicDefaultEndpointRetainedStorageLimit;
         bool retry = false;
         bool issue_new_token = false;
         bool address_validation_key_set = false;
@@ -109,6 +110,15 @@ public:
     [[nodiscard]] std::size_t active_connection_count() const noexcept { return active_connection_count_; }
     [[nodiscard]] std::size_t dropped_datagram_count() const noexcept { return dropped_datagram_count_; }
     [[nodiscard]] std::size_t rejected_connection_count() const noexcept { return rejected_connection_count_; }
+    [[nodiscard]] std::size_t retained_recv_storage_capacity() const noexcept {
+        return recv_storage_budget_.retained_capacity();
+    }
+    [[nodiscard]] std::size_t retained_recv_storage_high_water() const noexcept {
+        return recv_storage_budget_.high_water();
+    }
+    [[nodiscard]] std::size_t retained_recv_storage_rejected_count() const noexcept {
+        return recv_storage_budget_.rejected_count();
+    }
     [[nodiscard]] std::size_t rate_limited_stateless_response_count() const noexcept {
         return rate_limited_stateless_response_count_;
     }
@@ -257,6 +267,7 @@ private:
     std::unique_ptr<std::uint8_t[]> read_buffer_{};
     std::unique_ptr<std::uint8_t[]> send_plaintext_buffer_{};
     std::unique_ptr<std::uint8_t[]> send_buffer_{};
+    mem::IoBufStorageBudget recv_storage_budget_{};
     QuicCryptoBlockPool crypto_block_pool_{};
     QuicOutputFramePool output_frame_pool_{};
     QuicSendScheduler send_scheduler_{};

@@ -348,7 +348,7 @@ common::IoResult<QuicPacketDecodeResult> quic_decode_packet(QuicConnection &conn
     if (packet->ciphertext_len == 0) [[unlikely]] {
         return std::unexpected(common::IoErr::Invalid);
     }
-    mem::IoBuf plaintext = mem::IoBuf::allocate(packet->ciphertext_len);
+    mem::IoBuf plaintext = mem::IoBuf::allocate_trackable(packet->ciphertext_len);
     if (!plaintext) [[unlikely]] {
         return std::unexpected(common::IoErr::NoMem);
     }

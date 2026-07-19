@@ -115,6 +115,7 @@ TEST(QuicPacketCodecTest, EncodesAndDecodesProtectedInitialPacket) {
     auto decoded = fiber::quic::quic_decode_packet(client, datagram.data(), encoded->packet_len, 0);
 
     ASSERT_TRUE(decoded.has_value()) << static_cast<int>(decoded.error());
+    EXPECT_TRUE(decoded->payload.storage_trackable());
     EXPECT_EQ(decoded->header.type, fiber::quic::QuicPacketType::Initial);
     EXPECT_EQ(decoded->header.packet_number, 0U);
     std::fill(datagram.begin(), datagram.end(), 0);

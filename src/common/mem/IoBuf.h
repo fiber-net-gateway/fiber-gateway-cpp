@@ -3,8 +3,45 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 namespace fiber::mem {
+
+class IoBuf;
+
+class IoBufStorageBudget {
+public:
+    IoBufStorageBudget() noexcept = default;
+    explicit IoBufStorageBudget(std::size_t limit, IoBufStorageBudget *parent = nullptr) noexcept;
+    ~IoBufStorageBudget();
+
+    IoBufStorageBudget(const IoBufStorageBudget &) = delete;
+    IoBufStorageBudget &operator=(const IoBufStorageBudget &) = delete;
+    IoBufStorageBudget(IoBufStorageBudget &&) = delete;
+    IoBufStorageBudget &operator=(IoBufStorageBudget &&) = delete;
+
+    void init(std::size_t limit, IoBufStorageBudget *parent = nullptr) noexcept;
+
+    [[nodiscard]] bool try_retain(const IoBuf &buf, std::uint32_t refs = 1) noexcept;
+    void release(const IoBuf &buf, std::uint32_t refs = 1) noexcept;
+
+    [[nodiscard]] bool compatible(const IoBuf &buf) const noexcept;
+    [[nodiscard]] bool retains(const IoBuf &buf) const noexcept;
+    [[nodiscard]] std::size_t limit() const noexcept { return limit_; }
+    [[nodiscard]] std::size_t retained_capacity() const noexcept { return retained_capacity_; }
+    [[nodiscard]] std::size_t high_water() const noexcept { return high_water_; }
+    [[nodiscard]] std::size_t rejected_count() const noexcept { return rejected_count_; }
+
+private:
+    [[nodiscard]] bool try_reserve(std::size_t bytes) noexcept;
+    void unreserve(std::size_t bytes) noexcept;
+
+    IoBufStorageBudget *parent_ = nullptr;
+    std::size_t limit_ = std::numeric_limits<std::size_t>::max();
+    std::size_t retained_capacity_ = 0;
+    std::size_t high_water_ = 0;
+    std::size_t rejected_count_ = 0;
+};
 
 class IoBuf {
 public:
@@ -18,6 +55,7 @@ public:
     IoBuf &operator=(IoBuf &&other) noexcept;
 
     [[nodiscard]] static IoBuf allocate(std::size_t capacity) noexcept;
+    [[nodiscard]] static IoBuf allocate_trackable(std::size_t capacity) noexcept;
 
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] explicit operator bool() const noexcept;
@@ -30,6 +68,7 @@ public:
     [[nodiscard]] std::size_t tailroom() const noexcept;
     [[nodiscard]] bool unique() const noexcept;
     [[nodiscard]] std::uint32_t use_count() const noexcept;
+    [[nodiscard]] bool storage_trackable() const noexcept;
 
     [[nodiscard]] std::uint8_t *data() noexcept;
     [[nodiscard]] const std::uint8_t *data() const noexcept;
@@ -56,14 +95,18 @@ public:
 
 private:
     struct ControlBlock;
+    struct StorageRetention;
 
     explicit IoBuf(ControlBlock *control, std::uint8_t *view_begin, std::uint8_t *view_end, std::uint8_t *pos,
                    std::uint8_t *last) noexcept;
 
     [[nodiscard]] IoBuf retain_slice_impl(std::size_t offset, std::size_t len, bool safe) const noexcept;
+    [[nodiscard]] static IoBuf allocate_impl(std::size_t capacity, bool trackable) noexcept;
 
     static std::uint8_t *storage_begin(ControlBlock *control) noexcept;
     static const std::uint8_t *storage_begin(const ControlBlock *control) noexcept;
+    static StorageRetention *storage_retention(ControlBlock *control) noexcept;
+    static const StorageRetention *storage_retention(const ControlBlock *control) noexcept;
     static void retain(ControlBlock *control) noexcept;
     static void unsafe_retain(ControlBlock *control) noexcept;
     static void release(ControlBlock *control) noexcept;
@@ -75,6 +118,8 @@ private:
     std::uint8_t *view_end_ = nullptr;
     std::uint8_t *pos_ = nullptr;
     std::uint8_t *last_ = nullptr;
+
+    friend class IoBufStorageBudget;
 };
 
 } // namespace fiber::mem

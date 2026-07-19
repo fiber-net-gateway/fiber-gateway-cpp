@@ -28,6 +28,7 @@ public:
         std::size_t buffer_limit = kQuicStreamRecvDefaultBufferLimit;
         std::size_t low_water = kQuicStreamRecvDefaultLowWater;
         std::uint64_t max_stream_data = kQuicStreamRecvDefaultBufferLimit;
+        mem::IoBufStorageBudget *storage_budget = nullptr;
     };
 
     QuicStreamRecvQueue() noexcept = default;

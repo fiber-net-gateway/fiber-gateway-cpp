@@ -14,6 +14,8 @@ namespace fiber::quic {
 
 inline constexpr std::size_t kQuicMaxCryptoBuffered = 64 * 1024;
 inline constexpr std::size_t kQuicCryptoRecvMaxActiveExtents = 1024;
+inline constexpr std::size_t kQuicRecvCompactMinBackingCapacity = 4 * 1024;
+inline constexpr std::uint8_t kQuicRecvCompactRatio = 4;
 
 class QuicDataReassembler : public common::NonCopyable, public common::NonMovable {
 public:
@@ -26,6 +28,9 @@ public:
         std::size_t buffer_limit = kQuicMaxCryptoBuffered;
         std::size_t max_active_extents = kQuicCryptoRecvMaxActiveExtents;
         BufferAccounting buffer_accounting = BufferAccounting::OutOfOrderOnly;
+        mem::IoBufStorageBudget *storage_budget = nullptr;
+        std::size_t compact_min_backing_capacity = kQuicRecvCompactMinBackingCapacity;
+        std::uint8_t compact_ratio = kQuicRecvCompactRatio;
     };
 
     QuicDataReassembler() noexcept = default;
@@ -46,6 +51,9 @@ public:
     [[nodiscard]] std::size_t buffered_bytes() const noexcept { return buffered_bytes_; }
     [[nodiscard]] std::size_t buffer_limit() const noexcept { return buffer_limit_; }
     [[nodiscard]] std::size_t active_extent_count() const noexcept { return active_extent_count_; }
+    [[nodiscard]] std::size_t retained_storage_capacity() const noexcept {
+        return storage_budget_ != nullptr ? storage_budget_->retained_capacity() : 0;
+    }
     [[nodiscard]] bool has_contiguous_data() const noexcept {
         return head_ != nullptr && head_->offset == next_offset_ && head_->buf.readable() != 0;
     }
@@ -59,6 +67,8 @@ private:
     };
 
     [[nodiscard]] common::IoResult<InsertCost> insert_cost(std::uint64_t offset, std::size_t len) const noexcept;
+    [[nodiscard]] common::IoResult<mem::IoBuf> compact_missing(std::uint64_t offset, const mem::IoBuf &data,
+                                                               std::size_t retained_bytes) const noexcept;
     [[nodiscard]] std::uint64_t contiguous_end_after_insert(std::uint64_t offset, std::size_t len) const noexcept;
     [[nodiscard]] mem::IoBufNode *reserve_nodes(std::size_t count) noexcept;
     void release_nodes(mem::IoBufNode *nodes) noexcept;
@@ -76,6 +86,9 @@ private:
     std::size_t active_extent_count_ = 0;
     std::uint64_t next_offset_ = 0;
     BufferAccounting buffer_accounting_ = BufferAccounting::OutOfOrderOnly;
+    mem::IoBufStorageBudget *storage_budget_ = nullptr;
+    std::size_t compact_min_backing_capacity_ = kQuicRecvCompactMinBackingCapacity;
+    std::uint8_t compact_ratio_ = kQuicRecvCompactRatio;
 };
 
 } // namespace fiber::quic
