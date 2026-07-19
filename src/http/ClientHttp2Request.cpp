@@ -494,12 +494,12 @@ common::IoErr ClientHttp2Request::SendRequestHeaderOp::encode_outbound_batch(
         return common::IoErr::None;
     }
 
-    Http2HeadersFrameEncoder frame_encoder(request.conn_->outbound_hpack_encoder(),
-                                           {
-                                                   .stream_id = stream.stream_id(),
-                                                   .max_frame_size = req.max_frame_size,
-                                                   .end_stream = awaiter.op_.end_stream_,
-                                           });
+    Http2HeadersFrameEncoder frame_encoder({
+            .stream_id = stream.stream_id(),
+            .max_frame_size = req.max_frame_size,
+            .end_stream = awaiter.op_.end_stream_,
+            .hpack = {.max_string_size = request.conn_->options_.max_hpack_string_size},
+    });
     common::IoErr err = frame_encoder.begin(target);
     if (err != common::IoErr::None) {
         awaiter.complete(err);
@@ -676,12 +676,12 @@ common::IoErr ClientHttp2Request::SendRequestTrailerOp::encode_outbound_batch(
         return common::IoErr::None;
     }
 
-    Http2HeadersFrameEncoder frame_encoder(request.conn_->outbound_hpack_encoder(),
-                                           {
-                                                   .stream_id = stream.stream_id(),
-                                                   .max_frame_size = req.max_frame_size,
-                                                   .end_stream = true,
-                                           });
+    Http2HeadersFrameEncoder frame_encoder({
+            .stream_id = stream.stream_id(),
+            .max_frame_size = req.max_frame_size,
+            .end_stream = true,
+            .hpack = {.max_string_size = request.conn_->options_.max_hpack_string_size},
+    });
     common::IoErr err = frame_encoder.begin(target);
     if (err != common::IoErr::None) {
         awaiter.complete(err);

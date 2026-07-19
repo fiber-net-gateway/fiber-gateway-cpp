@@ -58,9 +58,8 @@
 - **修法**：加 `request_chunked()` / `bool request_content_length_set()` / `size_t request_content_length()` public accessor，`detect_request_body` 直接读。零每请求开销。
 
 ### 8. HPACK `resolve_name_index` 冗余 O(61) 扫描 + catalog 重复查找 ✅ 已修复
-- **位置**：`Http2HpackEncoder.cpp:456`（`resolve_name_index` 调 `Http2HpackStaticTable::find_name` 线性扫）；`:235` 已查过 catalog，`:244/259` 又查一次
-- **问题**：catalog 里已有全部 61 条静态项的哈希表（`Http2HpackEncodeCatalog.cpp:42-57`）。`resolve_name_index` 在每个未命中索引表示的 header 上调用（常见情况），先做无谓的 61 条线性扫；`encode_field` 内还重复查 catalog。另：`Http2HpackStaticTable::find_name`（hash 版，`Http2HpackStaticTable.cpp:113-126`）用 `same_bytes`（精确 memcmp），对大小写混合的名字总是失败，纯浪费。
-- **修法**：删掉静态表扫描直接用 catalog（`resolve_name_index` 内 `catalog->find(name,name_hash,{})`）；`encode_field:258-262` 复用 `:235` 的 `result.entry`。
+- **原问题**：catalog 已有全部 61 条静态项的哈希表，旧实现却在未命中索引表示时再线性扫描静态表，并在 `encode_field` 内重复查 catalog。
+- **当前实现**：删除运行期分配的 `Http2HpackEncodeCatalog`，由 `Http2HpackStaticTable` 内的 128 槽编译期开放寻址索引直接返回 `name_index` / `exact_index`；52 个固定名称的已知命中平均探测 1.12 次、最多 2 次，无堆分配、magic-static 初始化、静态表扫描或元数据复制。
 
 ### 9. H3 索引静态表字段无谓拷贝到 pool ✅ 已修复
 - **位置**：`ServerHttp3Request.cpp:479-481,657-669`（`on_indexed_field` -> `commit_field` -> `commit_regular_header` 把 name/value `copy_to_pool`）
@@ -97,7 +96,7 @@
 | `Http2DataFrameEncoder.cpp:58-61` | ⏸ 已核查，暂不处理：9 字节帧头确实经栈数组再由 `append_copy` 写入输出，但 payload 是外部 `IoBufChain`；为保持 payload 零拷贝，帧头仍需独立且存活到异步发送完成。多帧时首帧 payload 进入 `tail_chain` 后，后续 `reserve_slot(9)` 会返回 `Invalid`，而 `append_copy` 还承担分配小 `IoBuf` 的回退语义 | 不能直接替换为 `reserve_slot(9)` + 原地编码。单次 9 字节复制收益很低；若 profiling 显示瓶颈，优先考虑 header slab/小对象池，或增加保留 fallback 语义的直接写入 API，优化后续帧头的小额分配 |
 | `HttpExchange.h:148` | `HttpHandler = std::function<...>` | 每连接一次（非每请求），低优先；可换带 SBO 的类型擦除 callable |
 | `Http3QpackEncoder.cpp:90-117` | ✅ 已修复：伪头编码器走通用 `find()` 而非直接静态下标（见 #2） | 同 #2 |
-| `Http3QpackEncoderIoBufWriter` / `Http2HpackEncodeCatalog.cpp:121` | catalog `find` 对已小写名走逐字节 ci 比较 | policy 项 init 时存小写，全用 `same_bytes`；或保证 `add_view` 层 name 已小写 |
+| `Http3QpackEncoderIoBufWriter` / `Http2HpackStaticTable.cpp` | 静态表 `find` 对已小写名仍走逐字节 ci 比较 | 若调用边界保证 name 已小写，可改用 `same_bytes` |
 
 ---
 

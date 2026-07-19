@@ -248,19 +248,8 @@ private:
     mutable fiber::event::EventLoop fallback_loop_{};
 };
 
-const fiber::http::Http2HpackEncodeCatalog &test_http2_encode_catalog() {
-    static fiber::http::Http2HpackEncodeCatalog catalog;
-    static const bool initialized = [] {
-        EXPECT_TRUE(catalog.init({}));
-        return true;
-    }();
-    (void) initialized;
-    return catalog;
-}
-
 fiber::http::Http2Connection::Options make_options() {
     fiber::http::Http2Connection::Options options;
-    options.outbound_hpack_catalog = &test_http2_encode_catalog();
     options.initial_connection_recv_window = 65535;
     options.initial_stream_recv_window = 64;
     options.stream_recv_window_low_watermark = 16;

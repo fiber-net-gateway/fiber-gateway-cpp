@@ -29,7 +29,6 @@
 #include "event/EventLoopGroup.h"
 #include "http/ClientHttp2Exchange.h"
 #include "http/Http2ClientConnection.h"
-#include "http/Http2HpackEncodeCatalog.h"
 #include "log/LoggerManager.h"
 #include "logging/LoggingBuilder.h"
 #include "runtime/RuntimeBuilder.h"
@@ -671,13 +670,6 @@ private:
     std::thread thread_{};
 };
 
-const fiber::http::Http2HpackEncodeCatalog &websocket_hpack_catalog() {
-    static fiber::http::Http2HpackEncodeCatalog catalog;
-    static const bool initialized = catalog.init({});
-    EXPECT_TRUE(initialized);
-    return catalog;
-}
-
 struct Http2WebSocketOutcome {
     fiber::common::IoErr error = fiber::common::IoErr::None;
     int status_code = 0;
@@ -716,7 +708,6 @@ fiber::async::DetachedTask run_http2_websocket_client(fiber::event::EventLoop *l
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
     options.tls.enabled = true;
     options.tls.server_name = "localhost";
-    options.h2.outbound_hpack_catalog = &websocket_hpack_catalog();
 
     auto connection = std::make_shared<fiber::http::Http2ClientConnection>(*loop, std::move(options));
     auto connect_result = co_await connection->connect(5s);

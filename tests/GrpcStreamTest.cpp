@@ -39,16 +39,6 @@ using namespace std::chrono_literals;
 using fiber::async::DetachedTask;
 using fiber::async::Task;
 
-const fiber::http::Http2HpackEncodeCatalog &test_catalog() {
-    static fiber::http::Http2HpackEncodeCatalog catalog;
-    static const bool initialized = [] {
-        EXPECT_TRUE(catalog.init({}));
-        return true;
-    }();
-    (void) initialized;
-    return catalog;
-}
-
 struct TlsCert {
     std::string cert_path;
     std::string key_path;
@@ -667,7 +657,6 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, Scena
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
     options.tls.enabled = true;
     options.tls.server_name = "localhost";
-    options.h2.outbound_hpack_catalog = &test_catalog();
     options.authority = "localhost";
     options.scheme = "https";
 

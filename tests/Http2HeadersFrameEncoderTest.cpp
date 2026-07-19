@@ -12,8 +12,6 @@
 #include "event/EventLoopGroup.h"
 #include "http/Http2HeadersFrameEncoder.h"
 #include "http/Http2HpackDecoder.h"
-#include "http/Http2HpackEncodeCatalog.h"
-#include "http/Http2HpackEncoder.h"
 #include "http/HttpHeaderHash.h"
 #define private public
 #include "http/Http2OutboundScheduler.h"
@@ -27,8 +25,6 @@ namespace {
 
 using fiber::common::IoErr;
 using fiber::http::Http2HeadersFrameEncoder;
-using fiber::http::Http2HpackEncodeCatalog;
-using fiber::http::Http2HpackEncoder;
 
 class RecordingTransport final : public fiber::test::HttpTransportStub {
 public:
@@ -176,17 +172,7 @@ fiber::common::IoErr EncodeOperation::encode_outbound_batch(fiber::http::Http2St
                                                             const fiber::http::Http2OutboundEncodeRequest &,
                                                             fiber::http::Http2OutboundEncodeTarget &target,
                                                             fiber::http::Http2OutboundEncodeResult &result) noexcept {
-    Http2HpackEncodeCatalog catalog;
-    if (!catalog.init({})) {
-        return fiber::common::IoErr::Invalid;
-    }
-
-    Http2HpackEncoder encoder({.catalog = &catalog, .huffman_threshold = 1024});
-    if (!encoder.init()) {
-        return fiber::common::IoErr::Invalid;
-    }
-
-    Http2HeadersFrameEncoder frame_encoder(encoder, test_case_.options);
+    Http2HeadersFrameEncoder frame_encoder(test_case_.options);
     fiber::common::IoErr err = frame_encoder.begin(target);
     if (err != fiber::common::IoErr::None) {
         return err;
@@ -275,7 +261,7 @@ TEST(Http2HeadersFrameEncoderTest, EncodesSingleHeadersFrame) {
                                       .first_frame_payload_cap = 1024,
                               },
               }),
-              (std::vector<std::uint8_t>{0x00, 0x00, 0x01, 0x01, 0x04, 0x00, 0x00, 0x00, 0x01, 0x88}));
+              (std::vector<std::uint8_t>{0x00, 0x00, 0x02, 0x01, 0x04, 0x00, 0x00, 0x00, 0x01, 0x20, 0x88}));
 }
 
 TEST(Http2HeadersFrameEncoderTest, SplitsHeaderBlockIntoContinuationFrames) {
@@ -289,8 +275,8 @@ TEST(Http2HeadersFrameEncoderTest, SplitsHeaderBlockIntoContinuationFrames) {
                               },
               }),
               (std::vector<std::uint8_t>{
-                      0x00, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x03, 0x08, 0x03, '4',
-                      '1',  0x00, 0x00, 0x01, 0x09, 0x04, 0x00, 0x00, 0x00, 0x03, '8',
+                      0x00, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x03, 0x20, 0x08, 0x03,
+                      '4',  0x00, 0x00, 0x02, 0x09, 0x04, 0x00, 0x00, 0x00, 0x03, '1',  '8',
               }));
 }
 
@@ -304,17 +290,18 @@ TEST(Http2HeadersFrameEncoderTest, KeepsSingleFrameAcrossMultipleIoBufs) {
                             .first_frame_payload_cap = 4,
                     },
     });
-    EXPECT_EQ(out.size(), 14U);
+    EXPECT_EQ(out.size(), 15U);
     EXPECT_EQ(out, (std::vector<std::uint8_t>{
                            0x00,
                            0x00,
-                           0x05,
+                           0x06,
                            0x01,
                            0x04,
                            0x00,
                            0x00,
                            0x00,
                            0x07,
+                           0x20,
                            0x08,
                            0x03,
                            '4',
@@ -340,24 +327,8 @@ TEST(Http2HeadersFrameEncoderTest, EncodesHeadersFrameWithPaddingAndPriority) {
                               },
               }),
               (std::vector<std::uint8_t>{
-                      0x00,
-                      0x00,
-                      0x09,
-                      0x01,
-                      0x2d,
-                      0x00,
-                      0x00,
-                      0x00,
-                      0x05,
-                      0x02,
-                      0x80,
-                      0x00,
-                      0x00,
-                      0x03,
-                      0x0a,
-                      0x88,
-                      0x00,
-                      0x00,
+                      0x00, 0x00, 0x0a, 0x01, 0x2d, 0x00, 0x00, 0x00, 0x05, 0x02,
+                      0x80, 0x00, 0x00, 0x03, 0x0a, 0x20, 0x88, 0x00, 0x00,
               }));
 }
 
@@ -372,8 +343,8 @@ TEST(Http2HeadersFrameEncoderTest, EncodesSmallHeaderBlockIntoOwnedBuffer) {
     };
 
     EXPECT_EQ(encode_headers_bytes_in_place(test_case),
-              (std::vector<std::uint8_t>{0x00, 0x00, 0x01, 0x01, 0x04, 0x00, 0x00, 0x00, 0x09, 0x88}));
-    EXPECT_EQ(test_case.total_bytes, 10U);
+              (std::vector<std::uint8_t>{0x00, 0x00, 0x02, 0x01, 0x04, 0x00, 0x00, 0x00, 0x09, 0x20, 0x88}));
+    EXPECT_EQ(test_case.total_bytes, 11U);
     EXPECT_EQ(test_case.first_buffer_capacity, 1033U);
 }
 

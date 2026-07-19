@@ -12,23 +12,12 @@
 #include "event/EventLoopGroup.h"
 #include "http/ClientHttp2Exchange.h"
 #include "http/Http2ClientConnection.h"
-#include "http/Http2HpackEncodeCatalog.h"
 #include "net/TcpListener.h"
 
 namespace {
 
 using namespace std::chrono_literals;
 using fiber::async::DetachedTask;
-
-const fiber::http::Http2HpackEncodeCatalog &test_http2_encode_catalog() {
-    static fiber::http::Http2HpackEncodeCatalog catalog;
-    static const bool initialized = [] {
-        EXPECT_TRUE(catalog.init({}));
-        return true;
-    }();
-    (void) initialized;
-    return catalog;
-}
 
 fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     sockaddr_storage bound{};
@@ -75,7 +64,6 @@ DetachedTask run_client_connect_and_shutdown(fiber::event::EventLoop *loop, std:
     fiber::http::Http2ClientConnection::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
     options.tls.enabled = false;
-    options.h2.outbound_hpack_catalog = &test_http2_encode_catalog();
 
     fiber::http::Http2ClientConnection connection(*loop, std::move(options));
     auto connect_result = co_await connection.connect(5s);

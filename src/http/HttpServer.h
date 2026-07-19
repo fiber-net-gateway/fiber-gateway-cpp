@@ -13,7 +13,6 @@
 #include "../net/TcpListener.h"
 #include "../net/TlsContext.h"
 #include "Http2Connection.h"
-#include "Http2HpackEncodeCatalog.h"
 #include "Http3Server.h"
 #include "HttpExchange.h"
 #include "HttpTransport.h"
@@ -41,7 +40,6 @@ private:
     event::EventLoopGroup *worker_group_ = nullptr;
     HttpHandler handler_;
     HttpServerOptions options_;
-    Http2HpackEncodeCatalog http2_hpack_encode_catalog_;
     ServerRequestFactory http2_request_factory_;
     net::TcpListener listener_;
     std::unique_ptr<net::TlsServerContext> tls_ctx_;

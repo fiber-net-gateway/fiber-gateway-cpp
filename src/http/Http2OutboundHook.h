@@ -9,13 +9,20 @@ namespace fiber::http {
 class Http2OutboundScheduler;
 class Http2Connection;
 
-class Http2OutboundHook {
-private:
-    common::IntrusiveListHook queue_hook_{};
-    Http2OutboundNextKind next_kind_ = Http2OutboundNextKind::None;
-    std::uint8_t queue_state_ = 0;
-    bool closed_ = false;
 
+class Http2OutboundHook {
+
+    using EncodeCallback = mem::IoBufChain (*)(Http2OutboundHook &hook) noexcept;
+    using SendDoneCallback = void (*)(Http2OutboundHook &hook, common::IoErr state) noexcept;
+    common::IntrusiveListHook queue_hook_{};
+    std::size_t encoded_size;
+    std::uint64_t window_consumed;
+    void *ctx;
+    EncodeCallback encode_cb;
+    SendDoneCallback send_done_cb;
+
+private:
+    bool sending_;
     friend class Http2Connection;
     friend class Http2OutboundScheduler;
     friend class Http2Stream;

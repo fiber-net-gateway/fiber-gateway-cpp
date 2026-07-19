@@ -21,7 +21,6 @@
 #include "event/EventLoopGroup.h"
 #include "grpc/GrpcClient.h"
 #include "helloworld.pb.h"
-#include "http/Http2HpackEncodeCatalog.h"
 #include "http/HttpBodySpec.h"
 #include "http/HttpCommon.h"
 #include "http/HttpExchange.h"
@@ -35,16 +34,6 @@ namespace {
 
 using namespace std::chrono_literals;
 using fiber::async::DetachedTask;
-
-const fiber::http::Http2HpackEncodeCatalog &test_catalog() {
-    static fiber::http::Http2HpackEncodeCatalog catalog;
-    static const bool initialized = [] {
-        EXPECT_TRUE(catalog.init({}));
-        return true;
-    }();
-    (void) initialized;
-    return catalog;
-}
 
 // Generates a fresh localhost self-signed cert/key via openssl at test time.
 struct TlsCert {
@@ -324,7 +313,6 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, std::
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
     options.tls.enabled = true;
     options.tls.server_name = "localhost";
-    options.h2.outbound_hpack_catalog = &test_catalog();
     options.authority = "localhost";
     options.scheme = "https";
 
@@ -362,9 +350,8 @@ DetachedTask run_client_two_calls(fiber::event::EventLoop *loop, std::uint16_t p
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
     options.tls.enabled = true;
     options.tls.server_name = "localhost";
-    // Deliberately leave options.h2.outbound_hpack_catalog null: exercise
-    // GrpcClient's built-in catalog, which indexes content-type/te/grpc-encoding
-    // into the HPACK dynamic table. The second call reuses the warmed table.
+    // The second call exercises repeated request encoding on the same HTTP/2
+    // connection without relying on HPACK dynamic-table state.
     options.authority = "localhost";
     options.scheme = "https";
 
@@ -417,7 +404,6 @@ DetachedTask run_client_lifecycle(fiber::event::EventLoop *loop, std::uint16_t p
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
     options.tls.enabled = true;
     options.tls.server_name = "localhost";
-    options.h2.outbound_hpack_catalog = &test_catalog();
     options.authority = "localhost";
     options.scheme = "https";
 
@@ -555,7 +541,7 @@ TEST(GrpcClientTest, StreamUnaryReturnsGrpcError) {
     delete server;
 }
 
-TEST(GrpcClientTest, StreamUnaryUsesDefaultHpackCatalog) {
+TEST(GrpcClientTest, RepeatedUnaryCallsWorkWithoutHpackDynamicTable) {
     TlsCert cert;
     ASSERT_TRUE(cert.ok) << "openssl cert generation failed";
 

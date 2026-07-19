@@ -28,9 +28,10 @@ public:
         bool exclusive = false;
         std::uint32_t stream_dependency = 0;
         std::uint8_t weight = 16;
+        Http2HpackEncoder::Options hpack{};
     };
 
-    Http2HeadersFrameEncoder(Http2HpackEncoder &encoder, Options options) noexcept;
+    explicit Http2HeadersFrameEncoder(Options options) noexcept;
     ~Http2HeadersFrameEncoder();
 
     [[nodiscard]] common::IoErr begin(Http2OutboundEncodeTarget &target) noexcept;
@@ -64,7 +65,7 @@ private:
                                         std::size_t &len) noexcept;
     static void commit_output(void *ctx, std::size_t written) noexcept;
 
-    Http2HpackEncoder &encoder_;
+    Http2HpackEncoder encoder_;
     Options options_{};
 
     Http2OutboundEncodeTarget *target_ = nullptr;

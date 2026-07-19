@@ -134,13 +134,7 @@ common::IoErr prepare_read_buffer(mem::IoBuf &read_buf, std::size_t capacity) no
 Http2Connection::Http2Connection(Options options, void *peer_stream_factory_ctx,
                                  const Http2StreamFactoryOps &peer_stream_factory_ops) :
     options_(std::move(options)), peer_stream_factory_ctx_(peer_stream_factory_ctx),
-    peer_stream_factory_ops_(peer_stream_factory_ops), outbound_hpack_encoder_({
-                                                               .catalog = options_.outbound_hpack_catalog,
-                                                               .max_dynamic_table_size = kDefaultHeaderTableSize,
-                                                               .max_string_size = options_.max_hpack_string_size,
-                                                       }),
-    outbound_scheduler_(options_.max_frame_size) {
-    FIBER_ASSERT(options_.outbound_hpack_catalog != nullptr);
+    peer_stream_factory_ops_(peer_stream_factory_ops), outbound_scheduler_(options_.max_frame_size) {
     FIBER_ASSERT(peer_stream_factory_ops_.create_peer_stream != nullptr);
     peer_advertised_max_concurrent_streams_ = options_.max_peer_concurrent_streams;
     peer_initial_stream_send_window_ = options_.initial_stream_send_window;
@@ -148,12 +142,10 @@ Http2Connection::Http2Connection(Options options, void *peer_stream_factory_ctx,
             std::max(options_.initial_connection_recv_window, static_cast<std::uint32_t>(kInitialFlowControlWindow));
     conn_recv_window_remaining_ = static_cast<std::int32_t>(conn_recv_window_target_);
     next_local_stream_id_ = options_.role == ConnectionRole::Client ? 1U : 2U;
-    peer_header_table_size_ = kDefaultHeaderTableSize;
     peer_max_outbound_frame_size_ = options_.max_frame_size;
     outbound_scheduler_.set_connection_send_window(static_cast<std::int32_t>(options_.initial_connection_send_window));
     FIBER_ASSERT(streams_.init(configured_max_active_streams()));
     FIBER_ASSERT(inbound_hpack_decoder_.init(kDefaultHeaderTableSize, options_.max_hpack_string_size));
-    FIBER_ASSERT(outbound_hpack_encoder_.init());
 }
 
 common::IoErr Http2Connection::start(std::unique_ptr<HttpTransport> transport, ClosedCallback on_closed,
@@ -1263,8 +1255,8 @@ common::IoErr Http2Connection::handle_goaway_payload(const FrameHeader &fhr, con
 common::IoErr Http2Connection::apply_settings_parameter(std::uint16_t id, std::uint32_t value) noexcept {
     switch (id) {
         case kSettingsHeaderTableSize:
-            peer_header_table_size_ = value;
-            outbound_hpack_encoder_.update_max_dynamic_table_size(value);
+            // Every outbound header block starts by selecting a zero-sized
+            // dynamic table, so the peer's upper bound cannot restrict it.
             return common::IoErr::None;
         case kSettingsEnablePush:
             if (value > 1) {
