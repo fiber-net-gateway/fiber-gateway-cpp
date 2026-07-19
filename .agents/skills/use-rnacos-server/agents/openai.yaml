@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use r-nacos Server"
+  short_description: "Prepare and run r-nacos for Nacos integration tests"
+  default_prompt: "Use $use-rnacos-server to start an isolated r-nacos server and run the relevant apps/nacos interoperability tests."
