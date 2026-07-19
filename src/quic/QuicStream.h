@@ -158,8 +158,8 @@ private:
     void assign_conn_ctx(QuicConnection &conn, std::uint64_t stream_id, QuicStreamRecvQueue::Options recv_options,
                          bool local_initiated) noexcept;
     void detach_from_connection() noexcept;
-    [[nodiscard]] common::IoResult<std::uint64_t> on_stream_data_recv(const std::uint8_t *src, std::size_t length,
-                                                                      std::uint64_t offset, bool fin) noexcept;
+    [[nodiscard]] common::IoResult<std::uint64_t> on_stream_data_recv(mem::IoBuf data, std::uint64_t offset,
+                                                                      bool fin) noexcept;
     [[nodiscard]] common::IoResult<std::uint64_t> on_remote_reset(std::uint64_t error_code,
                                                                   std::uint64_t final_size) noexcept;
     [[nodiscard]] common::IoResult<void> on_remote_stop_sending(std::uint64_t error_code) noexcept;

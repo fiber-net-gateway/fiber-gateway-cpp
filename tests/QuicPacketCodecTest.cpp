@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <expected>
@@ -23,7 +24,7 @@ fiber::common::IoResult<DecodedPayloadSummary>
 summarize_decoded_payload(fiber::quic::QuicConnectionRole receiver_role,
                           const fiber::quic::QuicPacketDecodeResult &decoded) noexcept {
     DecodedPayloadSummary summary{};
-    fiber::quic::QuicReadCursor payload(decoded.payload.data, decoded.payload.len);
+    fiber::quic::QuicReadCursor payload(decoded.payload.readable_data(), decoded.payload.readable());
     while (!payload.empty()) {
         auto parsed = fiber::quic::quic_parse_frame_for_receiver(receiver_role, decoded.header.level, payload);
         if (!parsed) {
@@ -111,13 +112,13 @@ TEST(QuicPacketCodecTest, EncodesAndDecodesProtectedInitialPacket) {
     EXPECT_GE(encoded->packet_len, fiber::quic::kMinInitialDatagramSize);
     EXPECT_TRUE(encoded->ack_eliciting);
 
-    std::array<std::uint8_t, 1400> plaintext{};
-    auto decoded = fiber::quic::quic_decode_packet(client, datagram.data(), encoded->packet_len, 0, plaintext.data(),
-                                                   plaintext.size());
+    auto decoded = fiber::quic::quic_decode_packet(client, datagram.data(), encoded->packet_len, 0);
 
     ASSERT_TRUE(decoded.has_value()) << static_cast<int>(decoded.error());
+    EXPECT_TRUE(decoded->payload.storage_trackable());
     EXPECT_EQ(decoded->header.type, fiber::quic::QuicPacketType::Initial);
     EXPECT_EQ(decoded->header.packet_number, 0U);
+    std::fill(datagram.begin(), datagram.end(), 0);
     auto decoded_summary = summarize_decoded_payload(fiber::quic::QuicConnectionRole::Client, *decoded);
     ASSERT_TRUE(decoded_summary.has_value()) << static_cast<int>(decoded_summary.error());
     EXPECT_EQ(decoded_summary->frame_count, 2U);
@@ -216,15 +217,15 @@ TEST_P(QuicPacketCodecSuiteTest, EncodesAndDecodesApplicationPacket) {
     fiber::quic::QuicConnection client(client_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(client.crypto(), fiber::quic::QuicEncryptionLevel::Application,
                                                         false, suite, secret.data(), secret_len));
-    auto *server_keys =
+    const auto server_keys =
             fiber::quic::quic_packet_keys(server.crypto(), fiber::quic::QuicEncryptionLevel::Application, true);
-    auto *client_keys =
+    const auto client_keys =
             fiber::quic::quic_packet_keys(client.crypto(), fiber::quic::QuicEncryptionLevel::Application, false);
-    ASSERT_NE(server_keys, nullptr);
-    ASSERT_NE(client_keys, nullptr);
-    ASSERT_EQ(server_keys->hp_len, client_keys->hp_len);
-    for (std::size_t i = 0; i < server_keys->hp_len; ++i) {
-        ASSERT_EQ(server_keys->hp[i], client_keys->hp[i]) << i;
+    ASSERT_TRUE(server_keys);
+    ASSERT_TRUE(client_keys);
+    ASSERT_EQ(server_keys.header->key_len, client_keys.header->key_len);
+    for (std::size_t i = 0; i < server_keys.header->key_len; ++i) {
+        ASSERT_EQ(server_keys.header->key[i], client_keys.header->key[i]) << i;
     }
 
     fiber::quic::QuicOutputFrame frame{};
@@ -242,10 +243,8 @@ TEST_P(QuicPacketCodecSuiteTest, EncodesAndDecodesApplicationPacket) {
                                                    datagram.data(), datagram.size());
     ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
 
-    std::array<std::uint8_t, 128> plaintext{};
     auto decoded = fiber::quic::quic_decode_packet(client, datagram.data(), encoded->packet_len,
-                                                   static_cast<std::uint8_t>(spec.dcid.size()), plaintext.data(),
-                                                   plaintext.size());
+                                                   static_cast<std::uint8_t>(spec.dcid.size()));
 
     ASSERT_TRUE(decoded.has_value()) << static_cast<int>(decoded.error());
     EXPECT_EQ(decoded->header.type, fiber::quic::QuicPacketType::Short);

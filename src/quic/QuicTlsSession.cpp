@@ -85,6 +85,11 @@ int set_secret(SSL *ssl, enum ssl_encryption_level_t level, const SSL_CIPHER *ci
 
     auto installed =
             quic_set_encryption_secret(connection->crypto(), *quic_level, write_secret, *suite, secret, secret_len);
+    if (installed && *quic_level == QuicEncryptionLevel::Application &&
+        connection->role() == QuicConnectionRole::Client && connection->crypto().application_read().ready() &&
+        connection->crypto().application_write().ready()) {
+        connection->crypto().discard_level(QuicEncryptionLevel::EarlyData);
+    }
     return installed ? 1 : 0;
 }
 

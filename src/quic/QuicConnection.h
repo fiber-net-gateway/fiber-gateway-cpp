@@ -48,6 +48,8 @@ inline constexpr std::size_t kQuicMaxUdpPayloadSize = 65527;
 inline constexpr std::size_t kQuicDefaultStreamBufferSize = 65536;
 inline constexpr std::uint64_t kQuicDefaultConnRecvLimit = 2ULL * 1024ULL * 1024ULL * 1024ULL;
 inline constexpr std::uint64_t kQuicDefaultConnRecvLowWater = 10ULL * 1024ULL * 1024ULL;
+inline constexpr std::size_t kQuicDefaultConnectionRetainedStorageLimit = 16ULL * 1024ULL * 1024ULL;
+inline constexpr std::size_t kQuicDefaultEndpointRetainedStorageLimit = 256ULL * 1024ULL * 1024ULL;
 inline constexpr std::uint64_t kQuicDefaultMaxBidirectionalStreams = 128;
 inline constexpr std::uint64_t kQuicDefaultMaxUnidirectionalStreams = 128;
 inline constexpr std::uint64_t kQuicDefaultInitialMaxData = kQuicDefaultConnRecvLimit;
@@ -138,6 +140,7 @@ struct QuicRecvFlowControlSettings {
     std::uint64_t conn_recv_low_water = kQuicDefaultConnRecvLowWater;
     std::size_t stream_buffer_limit = kQuicDefaultStreamBufferSize;
     std::size_t stream_low_water = kQuicStreamRecvDefaultLowWater;
+    std::size_t retained_storage_limit = kQuicDefaultConnectionRetainedStorageLimit;
 };
 
 struct QuicPeerTransportState {
@@ -159,52 +162,185 @@ struct QuicPacketProtectionKeys : public common::NonCopyable, public common::Non
     ~QuicPacketProtectionKeys();
 
     void reset() noexcept;
-    // POD-only field-by-field swap. Used by the key-update path to rotate
-    // application_read/write ↔ next_application_read/write without moving the
-    // owning struct (it is NonMovable to keep references stable).
-    void swap(QuicPacketProtectionKeys &other) noexcept;
 
     QuicCryptoSuite suite = QuicCryptoSuite::InitialAes128GcmSha256;
     std::array<std::uint8_t, kQuicMaxSecretLength> secret{};
-    std::array<std::uint8_t, kQuicMaxKeyLength> key{};
     std::array<std::uint8_t, kQuicIvLength> iv{};
-    std::array<std::uint8_t, kQuicMaxHeaderProtectionKeyLength> hp{};
     std::size_t secret_len = 0;
-    std::size_t key_len = 0;
     std::size_t iv_len = 0;
-    std::size_t hp_len = 0;
     EVP_AEAD_CTX aead{};
-    AES_KEY hp_key{};
     bool aead_initialized = false;
-    bool hp_chacha20 = false;
     bool ready = false;
+};
+
+struct QuicHeaderProtectionKeys : public common::NonCopyable, public common::NonMovable {
+    QuicHeaderProtectionKeys() noexcept = default;
+    ~QuicHeaderProtectionKeys();
+
+    void reset() noexcept;
+
+    std::array<std::uint8_t, kQuicMaxHeaderProtectionKeyLength> key{};
+    std::size_t key_len = 0;
+    AES_KEY aes_key{};
+    bool chacha20 = false;
+    bool ready = false;
+};
+
+struct QuicPacketProtectionKeyView {
+    QuicPacketProtectionKeys *packet = nullptr;
+    QuicHeaderProtectionKeys *header = nullptr;
+
+    [[nodiscard]] explicit operator bool() const noexcept { return packet != nullptr && header != nullptr; }
+    [[nodiscard]] bool ready() const noexcept { return *this && packet->ready && header->ready; }
+};
+
+struct QuicProtectionKeySlot : public common::NonCopyable, public common::NonMovable {
+    QuicProtectionKeySlot() noexcept = default;
+    ~QuicProtectionKeySlot() = default;
+
+    void reset() noexcept {
+        packet.reset();
+        header.reset();
+    }
+
+    [[nodiscard]] QuicPacketProtectionKeyView view() noexcept { return {&packet, &header}; }
+
+    QuicPacketProtectionKeys packet{};
+    QuicHeaderProtectionKeys header{};
+};
+
+struct QuicTransientCryptoBlock : public common::NonCopyable, public common::NonMovable {
+    QuicTransientCryptoBlock() noexcept = default;
+    ~QuicTransientCryptoBlock() = default;
+
+    void reset() noexcept;
+    [[nodiscard]] bool empty() const noexcept;
+
+    QuicProtectionKeySlot initial_read{};
+    QuicProtectionKeySlot initial_write{};
+    QuicProtectionKeySlot early_read{};
+    QuicProtectionKeySlot early_write{};
+    QuicProtectionKeySlot handshake_read{};
+    QuicProtectionKeySlot handshake_write{};
+    QuicTransientCryptoBlock *pool_next = nullptr;
+};
+
+struct QuicApplicationCryptoBlock : public common::NonCopyable, public common::NonMovable {
+    QuicApplicationCryptoBlock() noexcept = default;
+    ~QuicApplicationCryptoBlock() = default;
+
+    void reset() noexcept;
+
+    [[nodiscard]] QuicPacketProtectionKeyView current_read() noexcept;
+    [[nodiscard]] QuicPacketProtectionKeyView next_read() noexcept;
+    [[nodiscard]] QuicPacketProtectionKeyView previous_read() noexcept;
+    [[nodiscard]] QuicPacketProtectionKeyView current_write() noexcept;
+    [[nodiscard]] QuicPacketProtectionKeyView next_write() noexcept;
+    void promote() noexcept;
+
+    std::array<QuicPacketProtectionKeys, 3> read_keys{};
+    std::array<QuicPacketProtectionKeys, 2> write_keys{};
+    QuicHeaderProtectionKeys read_header{};
+    QuicHeaderProtectionKeys write_header{};
+    std::uint8_t current_read_index = 0;
+    std::uint8_t next_read_index = 1;
+    std::uint8_t previous_read_index = 2;
+    std::uint8_t current_write_index = 0;
+    std::uint8_t next_write_index = 1;
+    QuicApplicationCryptoBlock *pool_next = nullptr;
+};
+
+inline constexpr std::size_t kQuicCryptoBlockPoolMaxCached = 64;
+
+class QuicCryptoBlockPool : public common::NonCopyable, public common::NonMovable {
+public:
+    QuicCryptoBlockPool() noexcept = default;
+    ~QuicCryptoBlockPool();
+
+    [[nodiscard]] QuicTransientCryptoBlock *alloc_transient() noexcept;
+    [[nodiscard]] QuicApplicationCryptoBlock *alloc_application() noexcept;
+    void release(QuicTransientCryptoBlock *block) noexcept;
+    void release(QuicApplicationCryptoBlock *block) noexcept;
+
+    [[nodiscard]] std::size_t active_blocks() const noexcept { return active_blocks_; }
+    [[nodiscard]] std::size_t cached_blocks() const noexcept { return cached_blocks_; }
+    [[nodiscard]] std::size_t allocation_misses() const noexcept { return allocation_misses_; }
+
+private:
+    QuicTransientCryptoBlock *transient_free_ = nullptr;
+    QuicApplicationCryptoBlock *application_free_ = nullptr;
+    std::size_t active_blocks_ = 0;
+    std::size_t cached_blocks_ = 0;
+    std::size_t allocation_misses_ = 0;
+};
+
+enum class QuicReadKeyEpoch : std::uint8_t {
+    Previous,
+    Current,
+    Next,
+};
+
+struct QuicKeyEpochState {
+    std::uint64_t generation = 0;
+    std::uint64_t current_read_lowest_pn = UINT64_MAX;
+    std::uint64_t current_write_first_pn = UINT64_MAX;
+    std::uint64_t encrypted_packets = 0;
+    std::uint64_t authentication_failures = 0;
+    std::chrono::steady_clock::time_point previous_discard_deadline{};
+    std::chrono::steady_clock::time_point next_update_not_before{};
+    bool phase = false;
+    bool handshake_confirmed = false;
+    bool current_write_acked = false;
 };
 
 struct QuicCryptoState : public common::NonCopyable, public common::NonMovable {
     QuicCryptoState() noexcept = default;
+    ~QuicCryptoState();
 
     void reset() noexcept;
+    void set_block_pool(QuicCryptoBlockPool *pool) noexcept;
+    [[nodiscard]] common::IoResult<void> ensure_transient() noexcept;
+    [[nodiscard]] common::IoResult<void> ensure_application() noexcept;
+    void discard_level(QuicEncryptionLevel level) noexcept;
+    void discard_previous_application_read() noexcept;
+    void promote_application_keys() noexcept;
 
-    QuicPacketProtectionKeys initial_read{};
-    QuicPacketProtectionKeys initial_write{};
-    QuicPacketProtectionKeys early_read{};
-    QuicPacketProtectionKeys early_write{};
-    QuicPacketProtectionKeys handshake_read{};
-    QuicPacketProtectionKeys handshake_write{};
-    QuicPacketProtectionKeys application_read{};
-    QuicPacketProtectionKeys application_write{};
-    // Pre-derived next-generation application keys (RFC 9001 §6.1, "tls13 quic ku").
-    // Populated after the handshake is confirmed so the connection can immediately
-    // respond to a peer-initiated key update.
-    QuicPacketProtectionKeys next_application_read{};
-    QuicPacketProtectionKeys next_application_write{};
-    // Previous-generation application keys, retained for a grace period after a key
-    // update to decrypt reordered packets that still carry the old key phase
-    // (RFC 9001 §6.5).
-    QuicPacketProtectionKeys previous_application_read{};
-    bool initial_ready = false;
-    bool next_application_keys_ready = false;
-    bool previous_application_keys_ready = false;
+    [[nodiscard]] QuicPacketProtectionKeyView initial_read() noexcept;
+    [[nodiscard]] QuicPacketProtectionKeyView initial_write() noexcept;
+    [[nodiscard]] QuicPacketProtectionKeyView early_read() noexcept;
+    [[nodiscard]] QuicPacketProtectionKeyView early_write() noexcept;
+    [[nodiscard]] QuicPacketProtectionKeyView handshake_read() noexcept;
+    [[nodiscard]] QuicPacketProtectionKeyView handshake_write() noexcept;
+    [[nodiscard]] QuicPacketProtectionKeyView application_read() noexcept;
+    [[nodiscard]] QuicPacketProtectionKeyView application_write() noexcept;
+    [[nodiscard]] QuicPacketProtectionKeyView next_application_read() noexcept;
+    [[nodiscard]] QuicPacketProtectionKeyView next_application_write() noexcept;
+    [[nodiscard]] QuicPacketProtectionKeyView previous_application_read() noexcept;
+    [[nodiscard]] QuicPacketProtectionKeyView application_read(QuicReadKeyEpoch epoch) noexcept;
+    [[nodiscard]] QuicReadKeyEpoch select_application_read_epoch(bool wire_phase,
+                                                                 std::uint64_t packet_number) const noexcept;
+
+    [[nodiscard]] bool initial_ready() noexcept { return initial_read().ready() && initial_write().ready(); }
+    [[nodiscard]] bool next_application_keys_ready() noexcept {
+        return next_application_read().ready() && next_application_write().ready();
+    }
+    [[nodiscard]] bool previous_application_keys_ready() noexcept { return previous_application_read().ready(); }
+    [[nodiscard]] bool has_transient_block() const noexcept { return transient_ != nullptr; }
+    [[nodiscard]] bool has_application_block() const noexcept { return application_ != nullptr; }
+    [[nodiscard]] bool initial_discarded() const noexcept { return initial_discarded_; }
+    [[nodiscard]] QuicKeyEpochState &epoch() noexcept { return epoch_; }
+    [[nodiscard]] const QuicKeyEpochState &epoch() const noexcept { return epoch_; }
+
+private:
+    void release_transient_if_empty() noexcept;
+    void release_transient() noexcept;
+    void release_application() noexcept;
+
+    QuicCryptoBlockPool *pool_ = nullptr;
+    QuicTransientCryptoBlock *transient_ = nullptr;
+    QuicApplicationCryptoBlock *application_ = nullptr;
+    QuicKeyEpochState epoch_{};
+    bool initial_discarded_ = false;
 };
 
 enum class QuicLossTimerMode : std::uint8_t {
@@ -296,6 +432,8 @@ public:
         std::uint64_t max_local_bidirectional_streams = kQuicDefaultMaxBidirectionalStreams;
         std::uint64_t max_local_unidirectional_streams = kQuicDefaultMaxUnidirectionalStreams;
         QuicOutputFramePool *output_frame_pool = nullptr;
+        QuicCryptoBlockPool *crypto_block_pool = nullptr;
+        mem::IoBufStorageBudget *recv_storage_parent = nullptr;
         event::EventLoop *loop = nullptr;
         void *destroy_owner = nullptr;
         DestroyCallback on_destroy = nullptr;
@@ -414,7 +552,7 @@ public:
     attach_local_stream(QuicStream::Lease stream, QuicStreamType type,
                         std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] common::IoResult<QuicStream *> get_or_create_peer_stream(std::uint64_t stream_id) noexcept;
-    [[nodiscard]] common::IoResult<void> recv_stream_frame(const QuicStreamFrame &frame, QuicSlice data) noexcept;
+    [[nodiscard]] common::IoResult<void> recv_stream_frame(const QuicStreamFrame &frame, mem::IoBuf data) noexcept;
     [[nodiscard]] common::IoResult<void> recv_reset_stream_frame(const QuicResetStreamFrame &frame) noexcept;
     [[nodiscard]] common::IoResult<void> recv_stop_sending_frame(const QuicStopSendingFrame &frame) noexcept;
     [[nodiscard]] common::IoResult<void> recv_max_stream_data_frame(const QuicMaxStreamDataFrame &frame) noexcept;
@@ -424,6 +562,16 @@ public:
     [[nodiscard]] event::EventLoop *loop() noexcept { return loop_; }
     [[nodiscard]] const event::EventLoop *loop() const noexcept { return loop_; }
     [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return loop_->io_buf_node_pool(); }
+    [[nodiscard]] mem::IoBufStorageBudget &recv_storage_budget() noexcept { return recv_storage_budget_; }
+    [[nodiscard]] std::size_t retained_recv_storage_capacity() const noexcept {
+        return recv_storage_budget_.retained_capacity();
+    }
+    [[nodiscard]] std::size_t retained_recv_storage_high_water() const noexcept {
+        return recv_storage_budget_.high_water();
+    }
+    [[nodiscard]] std::size_t retained_recv_storage_rejected_count() const noexcept {
+        return recv_storage_budget_.rejected_count();
+    }
     common::IoResult<void> set_app_ops(void *owner, const Ops &ops) noexcept;
     void drop_stream_send_ticket(std::uint64_t stream_id) noexcept;
     [[nodiscard]] std::uint64_t recv_data_consumed() const noexcept { return recv_data_consumed_; }
@@ -452,9 +600,16 @@ public:
     [[nodiscard]] static std::size_t packet_number_space_index(QuicEncryptionLevel level) noexcept;
     [[nodiscard]] QuicCryptoState &crypto() noexcept { return crypto_; }
     [[nodiscard]] const QuicCryptoState &crypto() const noexcept { return crypto_; }
-    [[nodiscard]] bool key_phase() const noexcept { return key_phase_; }
-    [[nodiscard]] bool next_keys_ready() const noexcept { return crypto_.next_application_keys_ready; }
-    void flip_key_phase() noexcept { key_phase_ = !key_phase_; }
+    [[nodiscard]] bool key_phase() const noexcept { return crypto_.epoch().phase; }
+    [[nodiscard]] bool next_keys_ready() noexcept { return crypto_.next_application_keys_ready(); }
+    [[nodiscard]] bool handshake_confirmed() const noexcept { return crypto_.epoch().handshake_confirmed; }
+    void confirm_handshake() noexcept { crypto_.epoch().handshake_confirmed = true; }
+    [[nodiscard]] common::IoResult<void> prepare_application_packet_encryption() noexcept;
+    void on_application_packet_encrypted(std::uint64_t packet_number) noexcept;
+    void on_application_packet_acked(std::uint64_t largest_acked, std::chrono::steady_clock::time_point now) noexcept;
+    [[nodiscard]] common::IoResult<void> apply_peer_key_update(std::uint64_t packet_number) noexcept;
+    void on_application_packet_authenticated(QuicReadKeyEpoch epoch, std::uint64_t packet_number) noexcept;
+    [[nodiscard]] bool record_application_authentication_failure() noexcept;
     void arm_key_update_discard_timer() noexcept;
     void cancel_key_update_discard_timer() noexcept;
     void on_packet_processed() noexcept;
@@ -709,6 +864,7 @@ private:
     PeerStreamLimitWindow peer_uni_streams_{};
     LocalStreamBlockedState local_bidi_streams_blocked_{};
     LocalStreamBlockedState local_uni_streams_blocked_{};
+    mem::IoBufStorageBudget recv_storage_budget_{};
     QuicOutputFramePool output_frame_pool_{};
     std::array<QuicPacketNumberSpace, kQuicPacketNumberSpaceCount> packet_number_spaces_{};
     QuicCongestionState congestion_{};
@@ -752,7 +908,6 @@ private:
     common::IntrusiveListHook *local_uni_stream_attach_wait_head_ = nullptr;
     common::IntrusiveListHook *local_uni_stream_attach_wait_tail_ = nullptr;
     bool data_blocked_reported_ = false;
-    bool key_phase_ = false;
     bool idle_send_timer_set_ = false;
     bool attached_to_endpoint_ = false;
     bool detached_from_endpoint_ = false;

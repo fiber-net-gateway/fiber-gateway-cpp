@@ -36,8 +36,9 @@ private:
         Http3Server *server = nullptr;
         event::EventLoop *loop = nullptr;
         quic::QuicUdpEndpoint endpoint{};
+        event::EventLoop::NotifyEntry start_entry{};
         event::EventLoop::NotifyEntry close_entry{};
-        bool recv_started = false;
+        bool endpoint_started = false;
         bool close_posted = false;
     };
 
@@ -50,6 +51,7 @@ private:
     [[nodiscard]] quic::QuicUdpEndpoint::Options make_endpoint_options(const net::SocketAddress &addr,
                                                                        bool reuse_port) noexcept;
     [[nodiscard]] std::size_t shard_count() const noexcept;
+    static void on_start_shard(Shard *shard) noexcept;
     static void on_close_shard(Shard *shard) noexcept;
 
     event::EventLoop &loop_;

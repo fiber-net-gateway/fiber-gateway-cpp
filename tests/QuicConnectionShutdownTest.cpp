@@ -19,8 +19,13 @@
 
 namespace {
 
-fiber::quic::QuicSlice slice_of(std::string_view value) {
-    return {reinterpret_cast<const std::uint8_t *>(value.data()), value.size()};
+fiber::mem::IoBuf slice_of(std::string_view value) {
+    fiber::mem::IoBuf buf = fiber::mem::IoBuf::allocate(value.size());
+    if (buf) {
+        std::memcpy(buf.writable_data(), value.data(), value.size());
+        buf.commit(value.size());
+    }
+    return buf;
 }
 
 struct ShutdownCallbackState {};
@@ -75,7 +80,9 @@ const fiber::quic::QuicOutputFrame *find_pending_frame_of_type(const fiber::quic
 // actually queue a CC frame at the Application level.
 void mark_established_with_app_keys(fiber::quic::QuicConnection &conn) {
     ASSERT_TRUE(conn.mark_established().has_value());
-    conn.crypto().application_write.ready = true;
+    ASSERT_TRUE(conn.crypto().ensure_application());
+    conn.crypto().application_write().packet->ready = true;
+    conn.crypto().application_write().header->ready = true;
 }
 
 // Open a peer-initiated stream by feeding a STREAM frame with FIN. The data is
@@ -833,9 +840,7 @@ fiber::quic::QuicConnection::Options reset_test_options(ShutdownCallbackState &s
 
 // Install real Application READ keys (AES-128-GCM) so short-header decryption
 // is actually attempted on forged packets and fails at the AEAD tag check — the
-// realistic stateless-reset detection path. Flags next-generation keys ready so
-// an inadvertent key-phase bit in the forged garbage cannot trigger a spurious
-// KEY_UPDATE_ERROR close before detection runs.
+// realistic stateless-reset detection path.
 void install_application_read_keys(fiber::quic::QuicConnection &conn) {
     constexpr fiber::quic::QuicCryptoSuite suite = fiber::quic::QuicCryptoSuite::Aes128GcmSha256;
     std::array<std::uint8_t, fiber::quic::kQuicMaxSecretLength> app_secret{};
@@ -844,7 +849,6 @@ void install_application_read_keys(fiber::quic::QuicConnection &conn) {
     }
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(conn.crypto(), fiber::quic::QuicEncryptionLevel::Application,
                                                         /*write_secret=*/false, suite, app_secret.data(), 32));
-    conn.crypto().next_application_keys_ready = true;
 }
 
 // Record a peer-issued NEW_CONNECTION_ID (carrying a stateless_reset_token) at
@@ -928,12 +932,10 @@ TEST(QuicStatelessResetTest, UndecryptableShortHeaderWithMatchingTokenDrainsSile
     std::array<std::uint8_t, 48> datagram{};
     fill_reset_datagram(datagram, token);
 
-    std::array<std::uint8_t, 1400> plaintext{};
     fiber::quic::QuicReceivedDatagram rd{};
     rd.data = datagram.data();
     rd.len = datagram.size();
-    auto result = fiber::quic::quic_process_datagram(conn, rd, plaintext.data(), plaintext.size(),
-                                                     /*short_dcid_len=*/8);
+    auto result = fiber::quic::quic_process_datagram(conn, rd, /*short_dcid_len=*/8);
 
     // The reset is detected and swallowed (not dropped as a decrypt error).
     EXPECT_TRUE(result.has_value()) << "expected reset detection, got error "
@@ -974,11 +976,10 @@ TEST(QuicStatelessResetTest, UndecryptableShortHeaderWithoutMatchingTokenIsDropp
     std::array<std::uint8_t, 48> datagram{};
     fill_reset_datagram(datagram, bogus_token);
 
-    std::array<std::uint8_t, 1400> plaintext{};
     fiber::quic::QuicReceivedDatagram rd{};
     rd.data = datagram.data();
     rd.len = datagram.size();
-    auto result = fiber::quic::quic_process_datagram(conn, rd, plaintext.data(), plaintext.size(), 8);
+    auto result = fiber::quic::quic_process_datagram(conn, rd, 8);
 
     EXPECT_FALSE(result.has_value());
     EXPECT_NE(conn.state(), fiber::quic::QuicConnectionState::Draining);

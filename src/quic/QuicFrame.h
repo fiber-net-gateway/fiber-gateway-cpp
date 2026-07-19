@@ -309,6 +309,7 @@ public:
     void erase(QuicOutputFrame &frame) noexcept;
     void erase_after(QuicOutputFrame *prev, QuicOutputFrame &frame) noexcept;
     [[nodiscard]] QuicOutputFrame *pop_front() noexcept;
+    [[nodiscard]] QuicOutputFrame *pop_back() noexcept;
     void prepend_all(QuicOutputFrameQueue &source) noexcept;
 
 private:
