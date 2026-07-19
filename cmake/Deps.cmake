@@ -97,6 +97,17 @@ set(BORINGSSL_INCLUDE_DIR "${boringssl_SOURCE_DIR}/include" CACHE PATH "" FORCE)
 set(BORINGSSL_LIBRARY_DIR "${boringssl_BINARY_DIR}" CACHE PATH "" FORCE)
 set(BORINGSSL_ROOT_DIR "${boringssl_BINARY_DIR}" CACHE PATH "" FORCE)
 
+# Populate zlib for external consumers such as scripts/build_nginx.sh.  Keep it
+# out of this project's target graph until fiber_lib has an in-tree gzip user.
+fiber_use_cached_content(zlib)
+FetchContent_Declare(
+    zlib
+    URL https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz
+    SOURCE_SUBDIR fiber_download_only
+)
+FetchContent_MakeAvailable(zlib)
+set(FIBER_ZLIB_SOURCE_DIR "${zlib_SOURCE_DIR}" CACHE PATH "Downloaded zlib source directory" FORCE)
+
 # ---- protobuf-lite runtime + protoc codegen ----
 # v21.12 is the last release before protobuf made abseil-cpp a hard dependency
 # (22.x+). Staying on 3.21 keeps the fetched dependency tree small (no abseil /
