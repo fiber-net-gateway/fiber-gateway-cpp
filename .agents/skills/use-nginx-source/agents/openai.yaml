@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use Nginx Source"
+  short_description: "Inspect and compare against the pinned Nginx source"
+  default_prompt: "Use $use-nginx-source to compare this task with the repository-managed Nginx implementation."
