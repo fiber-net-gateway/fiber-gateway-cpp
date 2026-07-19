@@ -1337,6 +1337,7 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     conn_options.max_peer_bidirectional_streams = options_.transport.initial_max_streams_bidi;
     conn_options.max_peer_unidirectional_streams = options_.transport.initial_max_streams_uni;
     conn_options.output_frame_pool = &output_frame_pool_;
+    conn_options.crypto_block_pool = &crypto_block_pool_;
     conn_options.loop = loop_;
     conn_options.has_retry_source_connection_id = validation.retried;
     conn_options.initial_path_validated = validation.address_validated;
@@ -1644,8 +1645,8 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
     }
 
     QuicPacketNumberSpace &space = connection.packet_number_space(QuicEncryptionLevel::Application);
-    auto *keys = quic_packet_keys(connection.crypto(), QuicEncryptionLevel::Application, true);
-    if (keys == nullptr || !keys->ready) {
+    const auto keys = quic_packet_keys(connection.crypto(), QuicEncryptionLevel::Application, true);
+    if (!keys.ready()) {
         return QuicBuildSendResult{QuicBuildSendStatus::NoWork};
     }
 
@@ -1705,8 +1706,6 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
         datagram.capacity = allowed;
         datagram.path = &candidate;
         datagram.mtu_probe = frame->mtu_probe;
-        datagram.packet_number_snapshots[2] = quic_preserve_packet_number(space);
-        datagram.packet_number_snapshot_valid[2] = true;
 
         QuicPacketEncodeSpec spec{};
         spec.level = QuicEncryptionLevel::Application;
@@ -1744,7 +1743,6 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
         packet.packet_number = encoded->packet_number;
         packet.ack_eliciting = encoded->ack_eliciting;
         packet.frame_count = 1;
-        packet.packet_number_snapshot = datagram.packet_number_snapshots[2];
 
         datagram.length = encoded->packet_len;
         datagram.packet_count = 1;
@@ -1806,22 +1804,12 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
 
     auto rollback_encoded = [&]() noexcept {
         for (std::size_t i = 0; i < kQuicSendLevelCount; ++i) {
-            if (!datagram.packet_number_snapshot_valid[i]) {
-                continue;
-            }
             QuicPacketNumberSpace &space = connection.packet_number_space(kSendLevels[i]);
             restore_sending_frames(connection, space);
-            quic_restore_packet_number(space, datagram.packet_number_snapshots[i]);
         }
         datagram.length = 0;
         datagram.packet_count = 0;
     };
-
-    for (std::size_t level_index = 0; level_index < kQuicSendLevelCount; ++level_index) {
-        QuicPacketNumberSpace &space = connection.packet_number_space(kSendLevels[level_index]);
-        datagram.packet_number_snapshots[level_index] = quic_preserve_packet_number(space);
-        datagram.packet_number_snapshot_valid[level_index] = true;
-    }
 
     for (std::size_t level_index = 0; level_index < kQuicSendLevelCount; ++level_index) {
         QuicEncryptionLevel level = kSendLevels[level_index];
@@ -1845,7 +1833,6 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         QuicSendPacketRecord &packet = datagram.packets[datagram.packet_count];
         packet = QuicSendPacketRecord{};
         packet.level = level;
-        packet.packet_number_snapshot = datagram.packet_number_snapshots[level_index];
 
         std::size_t min_packet_len = 0;
         if (level_index == pad_level && datagram.length < kMinInitialDatagramSize) {
@@ -1857,8 +1844,8 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         }
 
         const std::size_t max_packet_len = datagram.capacity - datagram.length;
-        auto *keys = quic_packet_keys(connection.crypto(), level, true);
-        if (keys == nullptr || !keys->ready) {
+        const auto keys = quic_packet_keys(connection.crypto(), level, true);
+        if (!keys.ready()) {
             if (level == QuicEncryptionLevel::Application) {
                 continue;
             }
@@ -2012,7 +1999,6 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
                                           datagram.capacity - datagram.length);
         if (!encoded) {
             restore_sending_frames(connection, space);
-            quic_restore_packet_number(space, packet.packet_number_snapshot);
             packet = QuicSendPacketRecord{};
             if (encoded.error() == common::IoErr::NotFound) {
                 discard_pending_frames(connection, space);
@@ -2115,13 +2101,10 @@ void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const Qui
 }
 
 void QuicUdpEndpoint::rollback_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept {
+    (void) datagram;
     for (std::size_t i = 0; i < kQuicSendLevelCount; ++i) {
-        if (!datagram.packet_number_snapshot_valid[i]) {
-            continue;
-        }
         QuicPacketNumberSpace &space = connection.packet_number_space(kSendLevels[i]);
         restore_sending_frames(connection, space);
-        quic_restore_packet_number(space, datagram.packet_number_snapshots[i]);
     }
     const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
     quic_congestion_on_idle(connection.congestion(), true, now);

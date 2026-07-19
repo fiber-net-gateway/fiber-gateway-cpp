@@ -366,12 +366,12 @@ void build_initial_datagram(std::array<std::uint8_t, fiber::quic::kMinInitialDat
     packet.ciphertext_len = payload_out.offset() + fiber::quic::kAeadTagLength;
 
     auto sealed = fiber::quic::quic_encrypt_packet_payload(
-            packet, crypto.initial_read, payload.data(), payload_out.offset(), pn + packet.pn_len,
+            packet, crypto.initial_read(), payload.data(), payload_out.offset(), pn + packet.pn_len,
             datagram.size() - static_cast<std::size_t>(pn + packet.pn_len - datagram.data()));
     ASSERT_TRUE(sealed.has_value());
     packet.packet_len = static_cast<std::size_t>(pn + packet.pn_len - datagram.data()) + *sealed;
-    ASSERT_TRUE(
-            fiber::quic::quic_apply_header_protection(packet, crypto.initial_read, datagram.data(), packet.packet_len));
+    ASSERT_TRUE(fiber::quic::quic_apply_header_protection(packet, crypto.initial_read(), datagram.data(),
+                                                          packet.packet_len));
 }
 
 DetachedTask recv_endpoint_once(fiber::quic::QuicUdpEndpoint *endpoint, std::promise<EndpointResult> *done_promise) {

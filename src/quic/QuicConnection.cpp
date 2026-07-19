@@ -8,6 +8,8 @@
 #include <new>
 #include <utility>
 
+#include <openssl/mem.h>
+
 #include "../event/EventLoopGroup.h"
 #include "QuicCrypto.h"
 #include "QuicLossRecovery.h"
@@ -65,58 +67,337 @@ void QuicPacketProtectionKeys::reset() noexcept {
         aead_initialized = false;
     }
     EVP_AEAD_CTX_zero(&aead);
-    key = {};
-    iv = {};
-    hp = {};
-    secret = {};
+    OPENSSL_cleanse(iv.data(), iv.size());
+    OPENSSL_cleanse(secret.data(), secret.size());
     secret_len = 0;
-    key_len = 0;
     iv_len = 0;
-    hp_len = 0;
-    hp_key = {};
-    hp_chacha20 = false;
     ready = false;
 }
 
-void QuicPacketProtectionKeys::swap(QuicPacketProtectionKeys &other) noexcept {
-    using std::swap;
-    swap(suite, other.suite);
-    swap(secret, other.secret);
-    swap(key, other.key);
-    swap(iv, other.iv);
-    swap(hp, other.hp);
-    swap(secret_len, other.secret_len);
-    swap(key_len, other.key_len);
-    swap(iv_len, other.iv_len);
-    swap(hp_len, other.hp_len);
-    // EVP_AEAD_CTX is a POD value (struct evp_aead_ctx_st). It carries a pointer
-    // to the AEAD method plus an inline state union; swapping by value is safe
-    // because no internal pointer references the context's own address.
-    EVP_AEAD_CTX tmp;
-    std::memcpy(&tmp, &aead, sizeof(EVP_AEAD_CTX));
-    std::memcpy(&aead, &other.aead, sizeof(EVP_AEAD_CTX));
-    std::memcpy(&other.aead, &tmp, sizeof(EVP_AEAD_CTX));
-    swap(hp_key, other.hp_key);
-    swap(aead_initialized, other.aead_initialized);
-    swap(hp_chacha20, other.hp_chacha20);
-    swap(ready, other.ready);
+QuicHeaderProtectionKeys::~QuicHeaderProtectionKeys() { reset(); }
+
+void QuicHeaderProtectionKeys::reset() noexcept {
+    OPENSSL_cleanse(key.data(), key.size());
+    OPENSSL_cleanse(&aes_key, sizeof(aes_key));
+    key_len = 0;
+    chacha20 = false;
+    ready = false;
 }
 
-void QuicCryptoState::reset() noexcept {
+void QuicTransientCryptoBlock::reset() noexcept {
     initial_read.reset();
     initial_write.reset();
     early_read.reset();
     early_write.reset();
     handshake_read.reset();
     handshake_write.reset();
-    application_read.reset();
-    application_write.reset();
-    next_application_read.reset();
-    next_application_write.reset();
-    previous_application_read.reset();
-    initial_ready = false;
-    next_application_keys_ready = false;
-    previous_application_keys_ready = false;
+    pool_next = nullptr;
+}
+
+bool QuicTransientCryptoBlock::empty() const noexcept {
+    return !initial_read.packet.ready && !initial_write.packet.ready && !early_read.packet.ready &&
+           !early_write.packet.ready && !handshake_read.packet.ready && !handshake_write.packet.ready;
+}
+
+void QuicApplicationCryptoBlock::reset() noexcept {
+    for (auto &keys: read_keys) {
+        keys.reset();
+    }
+    for (auto &keys: write_keys) {
+        keys.reset();
+    }
+    read_header.reset();
+    write_header.reset();
+    current_read_index = 0;
+    next_read_index = 1;
+    previous_read_index = 2;
+    current_write_index = 0;
+    next_write_index = 1;
+    pool_next = nullptr;
+}
+
+QuicPacketProtectionKeyView QuicApplicationCryptoBlock::current_read() noexcept {
+    return {&read_keys[current_read_index], &read_header};
+}
+
+QuicPacketProtectionKeyView QuicApplicationCryptoBlock::next_read() noexcept {
+    return {&read_keys[next_read_index], &read_header};
+}
+
+QuicPacketProtectionKeyView QuicApplicationCryptoBlock::previous_read() noexcept {
+    return {&read_keys[previous_read_index], &read_header};
+}
+
+QuicPacketProtectionKeyView QuicApplicationCryptoBlock::current_write() noexcept {
+    return {&write_keys[current_write_index], &write_header};
+}
+
+QuicPacketProtectionKeyView QuicApplicationCryptoBlock::next_write() noexcept {
+    return {&write_keys[next_write_index], &write_header};
+}
+
+void QuicApplicationCryptoBlock::promote() noexcept {
+    read_keys[previous_read_index].reset();
+    std::swap(previous_read_index, current_read_index);
+    std::swap(current_read_index, next_read_index);
+    std::swap(current_write_index, next_write_index);
+    write_keys[next_write_index].reset();
+}
+
+QuicCryptoBlockPool::~QuicCryptoBlockPool() {
+    while (transient_free_ != nullptr) {
+        QuicTransientCryptoBlock *next = transient_free_->pool_next;
+        delete transient_free_;
+        transient_free_ = next;
+    }
+    while (application_free_ != nullptr) {
+        QuicApplicationCryptoBlock *next = application_free_->pool_next;
+        delete application_free_;
+        application_free_ = next;
+    }
+}
+
+QuicTransientCryptoBlock *QuicCryptoBlockPool::alloc_transient() noexcept {
+    QuicTransientCryptoBlock *block = transient_free_;
+    if (block != nullptr) {
+        transient_free_ = block->pool_next;
+        block->pool_next = nullptr;
+        --cached_blocks_;
+    } else {
+        block = new (std::nothrow) QuicTransientCryptoBlock();
+        if (block == nullptr) {
+            return nullptr;
+        }
+        ++allocation_misses_;
+    }
+    ++active_blocks_;
+    return block;
+}
+
+QuicApplicationCryptoBlock *QuicCryptoBlockPool::alloc_application() noexcept {
+    QuicApplicationCryptoBlock *block = application_free_;
+    if (block != nullptr) {
+        application_free_ = block->pool_next;
+        block->pool_next = nullptr;
+        --cached_blocks_;
+    } else {
+        block = new (std::nothrow) QuicApplicationCryptoBlock();
+        if (block == nullptr) {
+            return nullptr;
+        }
+        ++allocation_misses_;
+    }
+    ++active_blocks_;
+    return block;
+}
+
+void QuicCryptoBlockPool::release(QuicTransientCryptoBlock *block) noexcept {
+    if (block == nullptr) {
+        return;
+    }
+    block->reset();
+    FIBER_ASSERT(active_blocks_ != 0);
+    --active_blocks_;
+    if (cached_blocks_ >= kQuicCryptoBlockPoolMaxCached) {
+        delete block;
+        return;
+    }
+    block->pool_next = transient_free_;
+    transient_free_ = block;
+    ++cached_blocks_;
+}
+
+void QuicCryptoBlockPool::release(QuicApplicationCryptoBlock *block) noexcept {
+    if (block == nullptr) {
+        return;
+    }
+    block->reset();
+    FIBER_ASSERT(active_blocks_ != 0);
+    --active_blocks_;
+    if (cached_blocks_ >= kQuicCryptoBlockPoolMaxCached) {
+        delete block;
+        return;
+    }
+    block->pool_next = application_free_;
+    application_free_ = block;
+    ++cached_blocks_;
+}
+
+QuicCryptoState::~QuicCryptoState() { reset(); }
+
+void QuicCryptoState::set_block_pool(QuicCryptoBlockPool *pool) noexcept {
+    FIBER_ASSERT(transient_ == nullptr && application_ == nullptr);
+    pool_ = pool;
+}
+
+common::IoResult<void> QuicCryptoState::ensure_transient() noexcept {
+    if (transient_ != nullptr) {
+        return {};
+    }
+    transient_ = pool_ != nullptr ? pool_->alloc_transient() : new (std::nothrow) QuicTransientCryptoBlock();
+    if (transient_ == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    return {};
+}
+
+common::IoResult<void> QuicCryptoState::ensure_application() noexcept {
+    if (application_ != nullptr) {
+        return {};
+    }
+    application_ = pool_ != nullptr ? pool_->alloc_application() : new (std::nothrow) QuicApplicationCryptoBlock();
+    if (application_ == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    return {};
+}
+
+void QuicCryptoState::release_transient() noexcept {
+    if (transient_ == nullptr) {
+        return;
+    }
+    if (pool_ != nullptr) {
+        pool_->release(transient_);
+    } else {
+        delete transient_;
+    }
+    transient_ = nullptr;
+}
+
+void QuicCryptoState::release_application() noexcept {
+    if (application_ == nullptr) {
+        return;
+    }
+    if (pool_ != nullptr) {
+        pool_->release(application_);
+    } else {
+        delete application_;
+    }
+    application_ = nullptr;
+}
+
+void QuicCryptoState::release_transient_if_empty() noexcept {
+    if (transient_ != nullptr && transient_->empty()) {
+        release_transient();
+    }
+}
+
+void QuicCryptoState::reset() noexcept {
+    release_transient();
+    release_application();
+    epoch_ = {};
+    initial_discarded_ = false;
+}
+
+void QuicCryptoState::discard_level(QuicEncryptionLevel level) noexcept {
+    if (level == QuicEncryptionLevel::Application) {
+        release_application();
+        epoch_ = {};
+        return;
+    }
+    if (level == QuicEncryptionLevel::Initial) {
+        initial_discarded_ = true;
+    }
+    if (transient_ == nullptr) {
+        return;
+    }
+    switch (level) {
+        case QuicEncryptionLevel::Initial:
+            transient_->initial_read.reset();
+            transient_->initial_write.reset();
+            break;
+        case QuicEncryptionLevel::EarlyData:
+            transient_->early_read.reset();
+            transient_->early_write.reset();
+            break;
+        case QuicEncryptionLevel::Handshake:
+            transient_->handshake_read.reset();
+            transient_->handshake_write.reset();
+            break;
+        case QuicEncryptionLevel::Application:
+            break;
+    }
+    release_transient_if_empty();
+}
+
+void QuicCryptoState::discard_previous_application_read() noexcept {
+    if (application_ != nullptr) {
+        application_->previous_read().packet->reset();
+    }
+    epoch_.previous_discard_deadline = {};
+}
+
+void QuicCryptoState::promote_application_keys() noexcept {
+    FIBER_ASSERT(application_ != nullptr);
+    application_->promote();
+}
+
+QuicPacketProtectionKeyView QuicCryptoState::initial_read() noexcept {
+    return transient_ != nullptr ? transient_->initial_read.view() : QuicPacketProtectionKeyView{};
+}
+
+QuicPacketProtectionKeyView QuicCryptoState::initial_write() noexcept {
+    return transient_ != nullptr ? transient_->initial_write.view() : QuicPacketProtectionKeyView{};
+}
+
+QuicPacketProtectionKeyView QuicCryptoState::early_read() noexcept {
+    return transient_ != nullptr ? transient_->early_read.view() : QuicPacketProtectionKeyView{};
+}
+
+QuicPacketProtectionKeyView QuicCryptoState::early_write() noexcept {
+    return transient_ != nullptr ? transient_->early_write.view() : QuicPacketProtectionKeyView{};
+}
+
+QuicPacketProtectionKeyView QuicCryptoState::handshake_read() noexcept {
+    return transient_ != nullptr ? transient_->handshake_read.view() : QuicPacketProtectionKeyView{};
+}
+
+QuicPacketProtectionKeyView QuicCryptoState::handshake_write() noexcept {
+    return transient_ != nullptr ? transient_->handshake_write.view() : QuicPacketProtectionKeyView{};
+}
+
+QuicPacketProtectionKeyView QuicCryptoState::application_read() noexcept {
+    return application_ != nullptr ? application_->current_read() : QuicPacketProtectionKeyView{};
+}
+
+QuicPacketProtectionKeyView QuicCryptoState::application_write() noexcept {
+    return application_ != nullptr ? application_->current_write() : QuicPacketProtectionKeyView{};
+}
+
+QuicPacketProtectionKeyView QuicCryptoState::next_application_read() noexcept {
+    return application_ != nullptr ? application_->next_read() : QuicPacketProtectionKeyView{};
+}
+
+QuicPacketProtectionKeyView QuicCryptoState::next_application_write() noexcept {
+    return application_ != nullptr ? application_->next_write() : QuicPacketProtectionKeyView{};
+}
+
+QuicPacketProtectionKeyView QuicCryptoState::previous_application_read() noexcept {
+    return application_ != nullptr ? application_->previous_read() : QuicPacketProtectionKeyView{};
+}
+
+QuicPacketProtectionKeyView QuicCryptoState::application_read(QuicReadKeyEpoch epoch) noexcept {
+    switch (epoch) {
+        case QuicReadKeyEpoch::Previous:
+            return previous_application_read();
+        case QuicReadKeyEpoch::Current:
+            return application_read();
+        case QuicReadKeyEpoch::Next:
+            return next_application_read();
+    }
+    return {};
+}
+
+QuicReadKeyEpoch QuicCryptoState::select_application_read_epoch(bool wire_phase,
+                                                                std::uint64_t packet_number) const noexcept {
+    if (wire_phase == epoch_.phase) {
+        return QuicReadKeyEpoch::Current;
+    }
+    if (application_ != nullptr && application_->read_keys[application_->previous_read_index].ready &&
+        (epoch_.current_read_lowest_pn == kUnsetPacketNumber || packet_number < epoch_.current_read_lowest_pn)) {
+        return QuicReadKeyEpoch::Previous;
+    }
+    return QuicReadKeyEpoch::Next;
 }
 
 class QuicConnection::LocalStreamAttachAwaiter {
@@ -284,6 +565,7 @@ void QuicConnection::Lease::reset() noexcept {
 QuicConnection::QuicConnection(const Options &options) noexcept :
     options_(options), next_local_bidi_stream_id_(initial_stream_id(options.role, QuicStreamType::Bidirectional)),
     next_local_uni_stream_id_(initial_stream_id(options.role, QuicStreamType::Unidirectional)) {
+    crypto_.set_block_pool(options_.crypto_block_pool);
     destroy_owner_ = options_.destroy_owner;
     on_destroy_ = options_.on_destroy;
     loop_ = options_.loop != nullptr ? options_.loop : event::EventLoop::current_or_null();
@@ -450,8 +732,8 @@ bool QuicConnection::queue_close_frame_for_level(QuicEncryptionLevel level) noex
         return false;
     }
     QuicPacketNumberSpace &space = packet_number_space(level);
-    QuicPacketProtectionKeys *keys = quic_packet_keys(crypto_, level, /*write_keys=*/true);
-    if (keys == nullptr || !keys->ready) {
+    const auto keys = quic_packet_keys(crypto_, level, /*write_keys=*/true);
+    if (!keys.ready()) {
         return false;
     }
 
@@ -904,6 +1186,125 @@ void QuicConnection::arm_close_timer_immediate() noexcept {
                                                                                                          *this);
 }
 
+common::IoResult<void> QuicConnection::prepare_application_packet_encryption() noexcept {
+    auto keys = crypto_.application_write();
+    if (!keys.ready()) {
+        return std::unexpected(common::IoErr::NotFound);
+    }
+
+    QuicKeyEpochState &epoch = crypto_.epoch();
+    const std::uint64_t limit = quic_confidentiality_limit(keys.packet->suite);
+    constexpr std::uint64_t kUpdateMargin = 1024;
+    const std::uint64_t update_at = limit > kUpdateMargin ? limit - kUpdateMargin : limit;
+    if (epoch.encrypted_packets < update_at) {
+        return {};
+    }
+
+    const auto now = loop_->now();
+    if (epoch.handshake_confirmed && epoch.current_write_acked && crypto_.next_application_keys_ready() &&
+        (epoch.next_update_not_before == std::chrono::steady_clock::time_point{} ||
+         now >= epoch.next_update_not_before)) {
+        cancel_key_update_discard_timer();
+        crypto_.promote_application_keys();
+        ++epoch.generation;
+        epoch.phase = !epoch.phase;
+        epoch.current_read_lowest_pn = kUnsetPacketNumber;
+        epoch.current_write_first_pn = kUnsetPacketNumber;
+        epoch.encrypted_packets = 0;
+        epoch.previous_discard_deadline = {};
+        epoch.next_update_not_before = {};
+        epoch.current_write_acked = false;
+        auto derived = quic_derive_next_key_pair(crypto_);
+        if (!derived) {
+            close(QuicErrorCode::InternalError);
+            return std::unexpected(derived.error());
+        }
+        return {};
+    }
+
+    if (epoch.encrypted_packets >= limit) {
+        close(QuicErrorCode::AeadLimitReached);
+        return std::unexpected(common::IoErr::Busy);
+    }
+    return {};
+}
+
+void QuicConnection::on_application_packet_encrypted(std::uint64_t packet_number) noexcept {
+    QuicKeyEpochState &epoch = crypto_.epoch();
+    if (epoch.current_write_first_pn == kUnsetPacketNumber) {
+        epoch.current_write_first_pn = packet_number;
+    }
+    if (epoch.encrypted_packets != UINT64_MAX) {
+        ++epoch.encrypted_packets;
+    }
+}
+
+void QuicConnection::on_application_packet_acked(std::uint64_t largest_acked,
+                                                 std::chrono::steady_clock::time_point now) noexcept {
+    QuicKeyEpochState &epoch = crypto_.epoch();
+    if (epoch.current_write_acked || epoch.current_write_first_pn == kUnsetPacketNumber ||
+        largest_acked < epoch.current_write_first_pn) {
+        return;
+    }
+    epoch.current_write_acked = true;
+    const QuicTime pto = quic_pto(rtt_, std::chrono::duration_cast<QuicTime>(peer_transport_.params.max_ack_delay),
+                                  true, state_ == QuicConnectionState::Established);
+    epoch.next_update_not_before = now + pto * 3;
+}
+
+common::IoResult<void> QuicConnection::apply_peer_key_update(std::uint64_t packet_number) noexcept {
+    QuicKeyEpochState &epoch = crypto_.epoch();
+    if (!epoch.handshake_confirmed || !crypto_.next_application_keys_ready()) {
+        close(QuicErrorCode::KeyUpdateError);
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    cancel_key_update_discard_timer();
+    crypto_.promote_application_keys();
+    ++epoch.generation;
+    epoch.phase = !epoch.phase;
+    epoch.current_read_lowest_pn = packet_number;
+    epoch.current_write_first_pn = kUnsetPacketNumber;
+    epoch.encrypted_packets = 0;
+    epoch.previous_discard_deadline = {};
+    epoch.next_update_not_before = {};
+    epoch.current_write_acked = false;
+    auto derived = quic_derive_next_key_pair(crypto_);
+    if (!derived) {
+        close(QuicErrorCode::InternalError);
+        return std::unexpected(derived.error());
+    }
+    arm_key_update_discard_timer();
+    return {};
+}
+
+void QuicConnection::on_application_packet_authenticated(QuicReadKeyEpoch epoch, std::uint64_t packet_number) noexcept {
+    if (epoch != QuicReadKeyEpoch::Current) {
+        return;
+    }
+    QuicKeyEpochState &state = crypto_.epoch();
+    state.current_read_lowest_pn = state.current_read_lowest_pn == kUnsetPacketNumber
+                                           ? packet_number
+                                           : std::min(state.current_read_lowest_pn, packet_number);
+    if (crypto_.previous_application_keys_ready() &&
+        state.previous_discard_deadline == std::chrono::steady_clock::time_point{}) {
+        arm_key_update_discard_timer();
+    }
+}
+
+bool QuicConnection::record_application_authentication_failure() noexcept {
+    QuicKeyEpochState &epoch = crypto_.epoch();
+    if (epoch.authentication_failures != UINT64_MAX) {
+        ++epoch.authentication_failures;
+    }
+    const auto keys = crypto_.application_read();
+    if (keys.packet != nullptr && epoch.authentication_failures >= quic_integrity_limit(keys.packet->suite)) {
+        close(QuicErrorCode::AeadLimitReached);
+        return false;
+    }
+    return true;
+}
+
 void QuicConnection::cancel_close_timer() noexcept {
     if (active_timer_loop() == nullptr) {
         return;
@@ -936,7 +1337,7 @@ void QuicConnection::arm_keepalive_timer() noexcept {
     if (keepalive_timer_entry_.is_in_heap()) {
         loop_->cancel<QuicConnection, &QuicConnection::keepalive_timer_entry_>(*this);
     }
-    if (state_ != QuicConnectionState::Established || !crypto_.application_write.ready) {
+    if (state_ != QuicConnectionState::Established || !crypto_.application_write().ready()) {
         return;
     }
 
@@ -1044,7 +1445,7 @@ void QuicConnection::arm_key_update_discard_timer() noexcept {
     if (key_update_discard_timer_entry_.is_in_heap()) {
         loop_->cancel<QuicConnection, &QuicConnection::key_update_discard_timer_entry_>(*this);
     }
-    if (closing() || !crypto_.previous_application_keys_ready) {
+    if (closing() || !crypto_.previous_application_keys_ready()) {
         return;
     }
     // RFC 9001 §6.5: retain old keys for at least three times the PTO so that
@@ -1052,8 +1453,9 @@ void QuicConnection::arm_key_update_discard_timer() noexcept {
     const QuicTime pto = quic_pto(rtt_, std::chrono::duration_cast<QuicTime>(peer_transport_.params.max_ack_delay),
                                   true, state_ == QuicConnectionState::Established);
     const QuicTime delay = pto * 3;
+    crypto_.epoch().previous_discard_deadline = loop_->now() + delay;
     loop_->post_at<QuicConnection, &QuicConnection::key_update_discard_timer_entry_,
-                   &QuicConnection::on_key_update_discard_timer>(loop_->now() + delay, *this);
+                   &QuicConnection::on_key_update_discard_timer>(crypto_.epoch().previous_discard_deadline, *this);
 }
 
 void QuicConnection::cancel_key_update_discard_timer() noexcept {
@@ -1063,6 +1465,7 @@ void QuicConnection::cancel_key_update_discard_timer() noexcept {
     if (key_update_discard_timer_entry_.is_in_heap()) {
         loop_->cancel<QuicConnection, &QuicConnection::key_update_discard_timer_entry_>(*this);
     }
+    crypto_.epoch().previous_discard_deadline = {};
 }
 
 void QuicConnection::cancel_all_timers() noexcept {
@@ -1100,8 +1503,7 @@ void QuicConnection::on_key_update_discard_timer(QuicConnection *connection) noe
     if (connection->loop_ == nullptr || !connection->loop_->in_loop()) {
         return;
     }
-    connection->crypto_.previous_application_read.reset();
-    connection->crypto_.previous_application_keys_ready = false;
+    connection->crypto_.discard_previous_application_read();
 }
 
 void QuicConnection::on_pacing_timer(QuicConnection *connection) noexcept {
@@ -1169,7 +1571,7 @@ void QuicConnection::on_close_timer(QuicConnection *connection) noexcept {
 
 void QuicConnection::on_keepalive_timer(QuicConnection *connection) noexcept {
     if (connection == nullptr || connection->state_ != QuicConnectionState::Established ||
-        !connection->crypto_.application_write.ready) {
+        !connection->crypto_.application_write().ready()) {
         return;
     }
     FIBER_ASSERT(connection->loop_ != nullptr && connection->loop_->in_loop());

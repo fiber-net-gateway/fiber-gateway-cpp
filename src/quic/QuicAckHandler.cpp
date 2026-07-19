@@ -320,6 +320,10 @@ common::IoResult<QuicAckProcessResult> quic_handle_ack_frame(QuicConnection &con
 
     validate_ecn_feedback(connection, space, frame, ecn_stats, now, result);
 
+    if (level == QuicEncryptionLevel::Application) {
+        connection.on_application_packet_acked(frame.u.ack.largest, std::chrono::steady_clock::time_point{now});
+    }
+
     auto lost = quic_detect_lost(connection, now, &stat);
     if (!lost) {
         return std::unexpected(lost.error());

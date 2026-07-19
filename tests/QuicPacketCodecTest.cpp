@@ -216,15 +216,15 @@ TEST_P(QuicPacketCodecSuiteTest, EncodesAndDecodesApplicationPacket) {
     fiber::quic::QuicConnection client(client_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(client.crypto(), fiber::quic::QuicEncryptionLevel::Application,
                                                         false, suite, secret.data(), secret_len));
-    auto *server_keys =
+    const auto server_keys =
             fiber::quic::quic_packet_keys(server.crypto(), fiber::quic::QuicEncryptionLevel::Application, true);
-    auto *client_keys =
+    const auto client_keys =
             fiber::quic::quic_packet_keys(client.crypto(), fiber::quic::QuicEncryptionLevel::Application, false);
-    ASSERT_NE(server_keys, nullptr);
-    ASSERT_NE(client_keys, nullptr);
-    ASSERT_EQ(server_keys->hp_len, client_keys->hp_len);
-    for (std::size_t i = 0; i < server_keys->hp_len; ++i) {
-        ASSERT_EQ(server_keys->hp[i], client_keys->hp[i]) << i;
+    ASSERT_TRUE(server_keys);
+    ASSERT_TRUE(client_keys);
+    ASSERT_EQ(server_keys.header->key_len, client_keys.header->key_len);
+    for (std::size_t i = 0; i < server_keys.header->key_len; ++i) {
+        ASSERT_EQ(server_keys.header->key[i], client_keys.header->key[i]) << i;
     }
 
     fiber::quic::QuicOutputFrame frame{};

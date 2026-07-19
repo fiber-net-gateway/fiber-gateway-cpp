@@ -42,10 +42,7 @@ struct QuicPacketPlaintext {
 struct QuicPacketDecodeResult {
     QuicPacketHeader header{};
     mem::IoBuf payload{};
-    // Set to true when this packet's key_phase bit differs from the connection's
-    // current key_phase and we successfully decrypted with next_application_read.
-    // The processor uses this signal to swap keys and arm the discard timer.
-    bool key_update = false;
+    QuicReadKeyEpoch read_epoch = QuicReadKeyEpoch::Current;
 };
 
 struct QuicRetryPacketSpec {

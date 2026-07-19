@@ -38,7 +38,6 @@ struct QuicBuildSendResult {
 struct QuicSendPacketRecord {
     QuicEncryptionLevel level = QuicEncryptionLevel::Initial;
     std::size_t length = 0;
-    QuicPacketNumberSpaceSnapshot packet_number_snapshot{};
     std::uint64_t packet_number = 0;
     std::size_t frame_count = 0;
     bool sends_ack = false;
@@ -51,8 +50,6 @@ struct QuicSendDatagram {
     std::size_t length = 0;
     QuicPath *path = nullptr;
     net::UdpPacketSendSpec spec{};
-    QuicPacketNumberSpaceSnapshot packet_number_snapshots[kQuicSendLevelCount]{};
-    bool packet_number_snapshot_valid[kQuicSendLevelCount]{};
     QuicSendPacketRecord packets[kQuicSendLevelCount]{};
     std::size_t packet_count = 0;
     bool mtu_probe = false;
