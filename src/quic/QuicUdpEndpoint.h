@@ -255,7 +255,7 @@ private:
     event::EventLoop *loop_ = nullptr;
     std::unique_ptr<net::UdpSocket> socket_{};
     std::unique_ptr<std::uint8_t[]> read_buffer_{};
-    std::unique_ptr<std::uint8_t[]> plaintext_buffer_{};
+    std::unique_ptr<std::uint8_t[]> send_plaintext_buffer_{};
     std::unique_ptr<std::uint8_t[]> send_buffer_{};
     QuicOutputFramePool output_frame_pool_{};
     QuicSendScheduler send_scheduler_{};

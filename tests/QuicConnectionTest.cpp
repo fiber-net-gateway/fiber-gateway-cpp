@@ -45,8 +45,13 @@ fiber::quic::QuicTransportParams valid_server_peer_params(const fiber::quic::Qui
     return params;
 }
 
-fiber::quic::QuicSlice slice_of(std::string_view value) {
-    return {reinterpret_cast<const std::uint8_t *>(value.data()), value.size()};
+fiber::mem::IoBuf slice_of(std::string_view value) {
+    fiber::mem::IoBuf buf = fiber::mem::IoBuf::allocate(value.size());
+    if (buf) {
+        std::memcpy(buf.writable_data(), value.data(), value.size());
+        buf.commit(value.size());
+    }
+    return buf;
 }
 
 fiber::mem::IoBuf iobuf_of(std::string_view value) {

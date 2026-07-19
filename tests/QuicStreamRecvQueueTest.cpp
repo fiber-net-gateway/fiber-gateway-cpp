@@ -7,6 +7,7 @@
 #include <future>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "async/Sleep.h"
 #include "async/Spawn.h"
@@ -17,8 +18,8 @@ namespace fiber::quic {
 
 struct QuicStreamRecvQueueTestAccess {
     static common::IoResult<std::size_t> recv_stream_data(QuicStreamRecvQueue &queue, std::uint64_t offset,
-                                                          QuicSlice data, bool fin = false) noexcept {
-        return queue.recv_stream_data(offset, data, fin);
+                                                          mem::IoBuf data, bool fin = false) noexcept {
+        return queue.recv_stream_data(offset, std::move(data), fin);
     }
 
     static common::IoResult<void> recv_reset(QuicStreamRecvQueue &queue, std::uint64_t error_code,
@@ -42,8 +43,13 @@ struct ReadResult {
     std::string data;
 };
 
-fiber::quic::QuicSlice slice_of(std::string_view value) {
-    return {reinterpret_cast<const std::uint8_t *>(value.data()), value.size()};
+fiber::mem::IoBuf slice_of(std::string_view value) {
+    fiber::mem::IoBuf buf = fiber::mem::IoBuf::allocate(value.size());
+    if (buf) {
+        std::memcpy(buf.writable_data(), value.data(), value.size());
+        buf.commit(value.size());
+    }
+    return buf;
 }
 
 std::string chain_to_string(const fiber::mem::IoBufChain &chain) {
@@ -219,7 +225,7 @@ TEST(QuicStreamRecvQueueTest, TakeWaitsUntilReadableDataArrives) {
     group.join();
 }
 
-TEST(QuicStreamRecvQueueTest, OutOfOrderDataMergesSameStorageExtentsAndTakesInOrder) {
+TEST(QuicStreamRecvQueueTest, OutOfOrderDataFromDistinctPacketsTakesAllExtentsInOrder) {
     fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamRecvQueue queue(pool);
 
@@ -228,7 +234,6 @@ TEST(QuicStreamRecvQueueTest, OutOfOrderDataMergesSameStorageExtentsAndTakesInOr
     EXPECT_EQ(*first, 2u);
     EXPECT_EQ(queue.received_end_offset(), 6u);
     EXPECT_EQ(queue.active_extent_count(), 1u);
-    EXPECT_EQ(queue.active_block_count(), 1u);
 
     fiber::mem::IoBufChain out(pool);
     auto early_take = queue.try_take(16, out);
@@ -239,13 +244,13 @@ TEST(QuicStreamRecvQueueTest, OutOfOrderDataMergesSameStorageExtentsAndTakesInOr
     ASSERT_TRUE(second.has_value());
     EXPECT_EQ(*second, 2u);
     EXPECT_EQ(queue.received_end_offset(), 6u);
-    EXPECT_EQ(queue.active_extent_count(), 1u);
+    EXPECT_EQ(queue.active_extent_count(), 2u);
 
     auto third = fiber::quic::QuicStreamRecvQueueTestAccess::recv_stream_data(queue, 0, slice_of("ab"));
     ASSERT_TRUE(third.has_value());
     EXPECT_EQ(*third, 2u);
     EXPECT_EQ(queue.received_end_offset(), 6u);
-    EXPECT_EQ(queue.active_extent_count(), 1u);
+    EXPECT_EQ(queue.active_extent_count(), 3u);
     EXPECT_EQ(queue.buffered_bytes(), 6u);
 
     auto taken = queue.try_take(16, out);
@@ -254,11 +259,9 @@ TEST(QuicStreamRecvQueueTest, OutOfOrderDataMergesSameStorageExtentsAndTakesInOr
     EXPECT_EQ(chain_to_string(out), "abcdef");
     EXPECT_EQ(queue.next_read_offset(), 6u);
     EXPECT_EQ(queue.active_extent_count(), 0u);
-    EXPECT_EQ(queue.active_block_count(), 0u);
-    EXPECT_GE(pool.cached_count(), 1u);
 }
 
-TEST(QuicStreamRecvQueueTest, OverlappingInsertCopiesOnlyMissingPrefix) {
+TEST(QuicStreamRecvQueueTest, OverlappingInsertRetainsOnlyMissingPrefix) {
     fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamRecvQueue queue(pool);
 
@@ -269,7 +272,7 @@ TEST(QuicStreamRecvQueueTest, OverlappingInsertCopiesOnlyMissingPrefix) {
     auto second = fiber::quic::QuicStreamRecvQueueTestAccess::recv_stream_data(queue, 0, slice_of("abcd"));
     ASSERT_TRUE(second.has_value());
     EXPECT_EQ(*second, 2u);
-    EXPECT_EQ(queue.active_extent_count(), 1u);
+    EXPECT_EQ(queue.active_extent_count(), 2u);
     EXPECT_EQ(queue.buffered_bytes(), 6u);
 
     fiber::mem::IoBufChain out(pool);
@@ -277,6 +280,23 @@ TEST(QuicStreamRecvQueueTest, OverlappingInsertCopiesOnlyMissingPrefix) {
     ASSERT_TRUE(taken.has_value());
     EXPECT_EQ(*taken, 6u);
     EXPECT_EQ(chain_to_string(out), "abcdef");
+}
+
+TEST(QuicStreamRecvQueueTest, SequentialDataRetainsOriginalIoBufStorage) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicStreamRecvQueue queue(pool);
+
+    fiber::mem::IoBuf source = slice_of("zero-copy");
+    fiber::mem::IoBuf storage_witness = source;
+    auto inserted = fiber::quic::QuicStreamRecvQueueTestAccess::recv_stream_data(queue, 0, std::move(source));
+    ASSERT_TRUE(inserted.has_value());
+
+    fiber::mem::IoBufChain out(pool);
+    auto taken = queue.try_take(32, out);
+    ASSERT_TRUE(taken.has_value());
+    ASSERT_NE(out.front(), nullptr);
+    EXPECT_TRUE(out.front()->same_storage(storage_witness));
+    EXPECT_EQ(chain_to_string(out), "zero-copy");
 }
 
 TEST(QuicStreamRecvQueueTest, DeliveredDuplicateIsIgnored) {
@@ -322,7 +342,7 @@ TEST(QuicStreamRecvQueueTest, ReceivedEndOffsetTracksMaxAcceptedFrameEnd) {
     EXPECT_EQ(*earlier, 3u);
     EXPECT_EQ(queue.received_end_offset(), 12u);
 
-    fiber::quic::QuicSlice empty{};
+    fiber::mem::IoBuf empty{};
     auto fin = fiber::quic::QuicStreamRecvQueueTestAccess::recv_stream_data(queue, 12, empty, true);
     ASSERT_TRUE(fin.has_value());
     EXPECT_EQ(*fin, 0u);
@@ -358,7 +378,7 @@ TEST(QuicStreamRecvQueueTest, FinalSizeMustRemainConsistent) {
     EXPECT_TRUE(out.complete());
 }
 
-TEST(QuicStreamRecvQueueTest, FirstFrameCanCrossRecvBlockBoundary) {
+TEST(QuicStreamRecvQueueTest, FirstFrameCanCrossFormerRecvBlockBoundaryWithoutSplitting) {
     fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamRecvQueue queue(pool, {
                                                          .buffer_limit = 128 * 1024,
@@ -375,8 +395,7 @@ TEST(QuicStreamRecvQueueTest, FirstFrameCanCrossRecvBlockBoundary) {
     auto inserted = fiber::quic::QuicStreamRecvQueueTestAccess::recv_stream_data(queue, start, slice_of(payload));
     ASSERT_TRUE(inserted.has_value());
     EXPECT_EQ(*inserted, payload.size());
-    EXPECT_EQ(queue.active_extent_count(), 2u);
-    EXPECT_EQ(queue.active_block_count(), 2u);
+    EXPECT_EQ(queue.active_extent_count(), 1u);
 
     fiber::mem::IoBufChain empty(pool);
     auto blocked = queue.try_take(payload.size(), empty);
@@ -388,7 +407,6 @@ TEST(QuicStreamRecvQueueTest, FirstFrameCanCrossRecvBlockBoundary) {
     ASSERT_TRUE(inserted.has_value());
     EXPECT_EQ(*inserted, prefix.size());
     EXPECT_EQ(queue.active_extent_count(), 2u);
-    EXPECT_EQ(queue.active_block_count(), 2u);
 
     fiber::mem::IoBufChain out(pool);
     auto taken = queue.try_take(prefix.size() + payload.size(), out);
@@ -398,7 +416,6 @@ TEST(QuicStreamRecvQueueTest, FirstFrameCanCrossRecvBlockBoundary) {
     EXPECT_EQ(chain_to_string(out), expected);
     EXPECT_EQ(queue.next_read_offset(), prefix.size() + payload.size());
     EXPECT_EQ(queue.active_extent_count(), 0u);
-    EXPECT_EQ(queue.active_block_count(), 0u);
 }
 
 TEST(QuicStreamRecvQueueTest, FirstFrameCanStartInSecondRecvBlock) {
@@ -414,7 +431,6 @@ TEST(QuicStreamRecvQueueTest, FirstFrameCanStartInSecondRecvBlock) {
     ASSERT_TRUE(inserted.has_value());
     EXPECT_EQ(*inserted, 4u);
     EXPECT_EQ(queue.active_extent_count(), 1u);
-    EXPECT_EQ(queue.active_block_count(), 1u);
 
     fiber::mem::IoBufChain out(pool);
     auto blocked = queue.try_take(16, out);
@@ -426,20 +442,17 @@ TEST(QuicStreamRecvQueueTest, FirstFrameCanStartInSecondRecvBlock) {
                                                                             slice_of(block_prefix));
     ASSERT_TRUE(inserted.has_value());
     EXPECT_EQ(*inserted, block_prefix.size());
-    EXPECT_EQ(queue.active_extent_count(), 1u);
-    EXPECT_EQ(queue.active_block_count(), 1u);
+    EXPECT_EQ(queue.active_extent_count(), 2u);
 
     std::string first_block(kStreamRecvBlockSize, 'a');
     inserted = fiber::quic::QuicStreamRecvQueueTestAccess::recv_stream_data(queue, 0, slice_of(first_block));
     ASSERT_TRUE(inserted.has_value());
     EXPECT_EQ(*inserted, first_block.size());
-    EXPECT_EQ(queue.active_extent_count(), 2u);
-    EXPECT_EQ(queue.active_block_count(), 2u);
+    EXPECT_EQ(queue.active_extent_count(), 3u);
 
     auto taken = queue.try_take(first_block.size() + block_prefix.size() + 4, out);
     ASSERT_TRUE(taken.has_value());
     EXPECT_EQ(*taken, first_block.size() + block_prefix.size() + 4);
     EXPECT_EQ(chain_to_string(out), first_block + block_prefix + "late");
     EXPECT_EQ(queue.active_extent_count(), 0u);
-    EXPECT_EQ(queue.active_block_count(), 0u);
 }

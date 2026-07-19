@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cstring>
 #include <expected>
+#include <utility>
 
+#include "../common/Assert.h"
 #include "QuicCrypto.h"
 #include "QuicCursor.h"
 #include "QuicTransportCodec.h"
@@ -319,10 +321,9 @@ common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &conn
 }
 
 common::IoResult<QuicPacketDecodeResult> quic_decode_packet(QuicConnection &connection, std::uint8_t *datagram,
-                                                            std::size_t datagram_len, std::uint8_t short_dcid_len,
-                                                            std::uint8_t *plaintext,
-                                                            std::size_t plaintext_cap) noexcept {
-    if (datagram == nullptr || plaintext == nullptr) {
+                                                            std::size_t datagram_len,
+                                                            std::uint8_t short_dcid_len) noexcept {
+    if (datagram == nullptr) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -334,6 +335,14 @@ common::IoResult<QuicPacketDecodeResult> quic_decode_packet(QuicConnection &conn
     auto *keys = keys_for_packet(connection, packet->level, false);
     if (keys == nullptr || !keys->ready) {
         return std::unexpected(common::IoErr::NotFound);
+    }
+
+    if (packet->ciphertext_len == 0) [[unlikely]] {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    mem::IoBuf plaintext = mem::IoBuf::allocate(packet->ciphertext_len);
+    if (!plaintext) [[unlikely]] {
+        return std::unexpected(common::IoErr::NoMem);
     }
 
     auto &space = connection.packet_number_space(packet->level);
@@ -370,15 +379,15 @@ common::IoResult<QuicPacketDecodeResult> quic_decode_packet(QuicConnection &conn
             key_update = true;
         }
 
-        auto opened = quic_decrypt_aead_payload(*packet, *aead_keys, plaintext, plaintext_cap);
+        auto opened = quic_decrypt_aead_payload(*packet, *aead_keys, plaintext.writable_data(), plaintext.writable());
         if (opened) {
             opened_payload = *opened;
             space.record_received_packet_number(packet->packet_number);
         } else if (!key_update && connection.crypto().previous_application_keys_ready) {
             // Trial decryption — packet may belong to the previous key generation
             // that is still within the grace window (RFC 9001 §6.5).
-            auto retry = quic_decrypt_aead_payload(*packet, connection.crypto().previous_application_read, plaintext,
-                                                   plaintext_cap);
+            auto retry = quic_decrypt_aead_payload(*packet, connection.crypto().previous_application_read,
+                                                   plaintext.writable_data(), plaintext.writable());
             if (!retry) {
                 restore_space();
                 return std::unexpected(retry.error());
@@ -390,8 +399,8 @@ common::IoResult<QuicPacketDecodeResult> quic_decode_packet(QuicConnection &conn
             return std::unexpected(opened.error());
         }
     } else {
-        auto opened = quic_decrypt_packet_payload(*packet, space, *keys, datagram, packet->packet_len, plaintext,
-                                                  plaintext_cap);
+        auto opened = quic_decrypt_packet_payload(*packet, space, *keys, datagram, packet->packet_len,
+                                                  plaintext.writable_data(), plaintext.writable());
         if (!opened) {
             return std::unexpected(opened.error());
         }
@@ -408,9 +417,12 @@ common::IoResult<QuicPacketDecodeResult> quic_decode_packet(QuicConnection &conn
         return std::unexpected(common::IoErr::Invalid);
     }
 
+    FIBER_ASSERT(opened_payload.data == plaintext.writable_data());
+    plaintext.commit(opened_payload.len);
+
     QuicPacketDecodeResult result{};
     result.header = *packet;
-    result.payload = opened_payload;
+    result.payload = std::move(plaintext);
     result.key_update = key_update;
 
     // Initial protection does not authenticate the sender. Validate the entire
@@ -419,7 +431,7 @@ common::IoResult<QuicPacketDecodeResult> quic_decode_packet(QuicConnection &conn
     // Strongly protected packets are parsed once by process_decoded_packet;
     // malformed frames there terminate the authenticated connection.
     if (packet->level == QuicEncryptionLevel::Initial) {
-        QuicReadCursor payload_reader(opened_payload.data, opened_payload.len);
+        QuicReadCursor payload_reader(result.payload.readable_data(), result.payload.readable());
         while (!payload_reader.empty()) {
             auto parsed = quic_parse_frame_for_receiver(connection.role(), packet->level, payload_reader);
             if (!parsed) {

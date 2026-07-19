@@ -427,9 +427,9 @@ common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Optio
 
     socket_ = std::make_unique<net::UdpSocket>(loop);
     read_buffer_ = std::make_unique<std::uint8_t[]>(kQuicUdpDefaultReadBufferSize);
-    plaintext_buffer_ = std::make_unique<std::uint8_t[]>(kQuicUdpDefaultPlaintextBufferSize);
+    send_plaintext_buffer_ = std::make_unique<std::uint8_t[]>(kQuicUdpDefaultPlaintextBufferSize);
     send_buffer_ = std::make_unique<std::uint8_t[]>(options_.send.send_buffer_size);
-    if (!socket_ || !read_buffer_ || !plaintext_buffer_ || !send_buffer_) {
+    if (!socket_ || !read_buffer_ || !send_plaintext_buffer_ || !send_buffer_) {
         close();
         return std::unexpected(common::IoErr::NoMem);
     }
@@ -509,7 +509,7 @@ void QuicUdpEndpoint::close() noexcept {
     io_pump_again_ = false;
     if (!io_pump_running_) {
         read_buffer_.reset();
-        plaintext_buffer_.reset();
+        send_plaintext_buffer_.reset();
         send_buffer_.reset();
     }
     // RWFd readiness dispatch still refers to the UdpSocket after invoking a
@@ -749,7 +749,7 @@ void QuicUdpEndpoint::drive_io() noexcept {
     io_pump_running_ = false;
     if (closing_) {
         read_buffer_.reset();
-        plaintext_buffer_.reset();
+        send_plaintext_buffer_.reset();
         send_buffer_.reset();
         return;
     }
@@ -1523,7 +1523,7 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
                 return std::unexpected(common::IoErr::Invalid);
             }
             std::array<std::uint8_t, kQuicStatelessResponseBufferSize> out{};
-            QuicPacketPlaintext plaintext{plaintext_buffer_.get(), kQuicUdpDefaultPlaintextBufferSize};
+            QuicPacketPlaintext plaintext{send_plaintext_buffer_.get(), kQuicUdpDefaultPlaintextBufferSize};
             auto written = encode_invalid_token_close_packet(*packet, datagram, validation->close_reason, out.data(),
                                                              out.size(), plaintext);
             if (!written) {
@@ -1547,9 +1547,7 @@ QuicUdpEndpoint::process_datagram(net::UdpPacketRecvResult recv, std::chrono::st
         created = true;
     }
 
-    auto result =
-            quic_process_datagram(*connection, datagram, plaintext_buffer_.get(), kQuicUdpDefaultPlaintextBufferSize,
-                                  static_cast<std::uint8_t>(kQuicConnectionIdLength));
+    auto result = quic_process_datagram(*connection, datagram, static_cast<std::uint8_t>(kQuicConnectionIdLength));
     if (!result) {
         ++dropped_datagram_count_;
         if (created) {
@@ -1719,7 +1717,7 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
         spec.min_packet_len = min_packet_len;
         spec.max_packet_len = allowed;
 
-        QuicPacketPlaintext plaintext{plaintext_buffer_.get(), kQuicUdpDefaultPlaintextBufferSize};
+        QuicPacketPlaintext plaintext{send_plaintext_buffer_.get(), kQuicUdpDefaultPlaintextBufferSize};
         auto encoded = quic_encode_packet(connection, spec, plaintext, datagram.data, datagram.capacity);
         if (!encoded) {
             candidate.pending_frames.push_front(*frame);
@@ -1880,7 +1878,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         if (min_payload > max_payload) {
             continue;
         }
-        std::uint8_t *packet_payload = plaintext_buffer_.get();
+        std::uint8_t *packet_payload = send_plaintext_buffer_.get();
         constexpr std::size_t packet_payload_cap = kQuicUdpDefaultPlaintextBufferSize;
         if (packet_payload == nullptr || max_payload > packet_payload_cap) {
             rollback_encoded();

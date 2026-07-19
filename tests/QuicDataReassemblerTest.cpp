@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cstring>
 #include <string>
 #include <string_view>
 
@@ -8,8 +9,13 @@
 
 namespace {
 
-fiber::quic::QuicSlice slice_of(std::string_view value) {
-    return {reinterpret_cast<const std::uint8_t *>(value.data()), value.size()};
+fiber::mem::IoBuf slice_of(std::string_view value) {
+    fiber::mem::IoBuf buf = fiber::mem::IoBuf::allocate(value.size());
+    if (buf) {
+        std::memcpy(buf.writable_data(), value.data(), value.size());
+        buf.commit(value.size());
+    }
+    return buf;
 }
 
 std::string chain_to_string(const fiber::mem::IoBufChain &chain) {
@@ -71,7 +77,7 @@ TEST(QuicDataReassemblerTest, OutOfOrderDataWaitsForGapThenTakesAllContiguousByt
     EXPECT_EQ(reassembler.next_offset(), 6U);
 }
 
-TEST(QuicDataReassemblerTest, OverlapAcrossGapCopiesOnlyMissingBytes) {
+TEST(QuicDataReassemblerTest, OverlapAcrossGapRetainsOnlyMissingBytes) {
     fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicDataReassembler reassembler;
     reassembler.init(pool);
@@ -90,6 +96,28 @@ TEST(QuicDataReassemblerTest, OverlapAcrossGapCopiesOnlyMissingBytes) {
     EXPECT_EQ(*taken, 6U);
     EXPECT_EQ(chain_to_string(out), "abcdef");
     EXPECT_EQ(reassembler.buffered_bytes(), 0U);
+}
+
+TEST(QuicDataReassemblerTest, OnePacketCanFillMultipleHolesWithoutCopyingStorage) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicDataReassembler reassembler(pool);
+
+    ASSERT_TRUE(reassembler.insert(2, slice_of("cd")).has_value());
+    fiber::mem::IoBuf source = slice_of("abcdef");
+    fiber::mem::IoBuf storage_witness = source;
+    auto inserted = reassembler.insert(0, std::move(source));
+    ASSERT_TRUE(inserted.has_value());
+    EXPECT_EQ(*inserted, 4U);
+    EXPECT_EQ(reassembler.active_extent_count(), 3U);
+
+    fiber::mem::IoBufChain out(pool);
+    auto taken = reassembler.take_contiguous(out);
+    ASSERT_TRUE(taken.has_value());
+    ASSERT_NE(out.front(), nullptr);
+    ASSERT_NE(out.back(), nullptr);
+    EXPECT_TRUE(out.front()->same_storage(storage_witness));
+    EXPECT_TRUE(out.back()->same_storage(storage_witness));
+    EXPECT_EQ(chain_to_string(out), "abcdef");
 }
 
 TEST(QuicDataReassemblerTest, DeliveredDuplicateIsIgnored) {
@@ -132,7 +160,7 @@ TEST(QuicDataReassemblerTest, BufferedDuplicateIsIgnored) {
     EXPECT_EQ(reassembler.buffered_bytes(), 2U);
 }
 
-TEST(QuicDataReassemblerTest, FrameCrossingFourKilobyteBlockBoundaryIsSplitAndTakenInOrder) {
+TEST(QuicDataReassemblerTest, FrameCrossingFormerBlockBoundaryStaysInOneExtentAndIsTakenInOrder) {
     fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicDataReassembler reassembler;
     reassembler.init(pool);
@@ -145,7 +173,7 @@ TEST(QuicDataReassemblerTest, FrameCrossingFourKilobyteBlockBoundaryIsSplitAndTa
     auto inserted = reassembler.insert(block - 16, slice_of(payload));
     ASSERT_TRUE(inserted.has_value());
     EXPECT_EQ(*inserted, payload.size());
-    EXPECT_EQ(reassembler.active_block_count(), 2U);
+    EXPECT_EQ(reassembler.active_extent_count(), 1U);
 
     std::string prefix(block - 16, 'p');
     inserted = reassembler.insert(0, slice_of(prefix));
@@ -187,6 +215,23 @@ TEST(QuicDataReassemblerTest, BufferLimitRejectsAdditionalBufferedBytesWithoutCo
     EXPECT_EQ(chain_to_string(out), "0123abcdefgh");
 }
 
+TEST(QuicDataReassemblerTest, ExtentLimitRejectsInsertWithoutChangingBufferedData) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicDataReassembler reassembler(
+            pool, {
+                          .buffer_limit = 64,
+                          .max_active_extents = 1,
+                          .buffer_accounting = fiber::quic::QuicDataReassembler::BufferAccounting::AllRetained,
+                  });
+
+    ASSERT_TRUE(reassembler.insert(4, slice_of("a")).has_value());
+    auto rejected = reassembler.insert(6, slice_of("b"));
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(rejected.error(), fiber::common::IoErr::MessageTooLarge);
+    EXPECT_EQ(reassembler.buffered_bytes(), 1U);
+    EXPECT_EQ(reassembler.active_extent_count(), 1U);
+}
+
 TEST(QuicDataReassemblerTest, ClearDropsBufferedDataAndResetsOffset) {
     fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicDataReassembler reassembler;
@@ -199,5 +244,20 @@ TEST(QuicDataReassemblerTest, ClearDropsBufferedDataAndResetsOffset) {
     EXPECT_EQ(reassembler.buffered_bytes(), 0U);
     EXPECT_EQ(reassembler.next_offset(), 0U);
     EXPECT_EQ(reassembler.active_extent_count(), 0U);
-    EXPECT_EQ(reassembler.active_block_count(), 0U);
+}
+
+TEST(QuicDataReassemblerTest, SequentialDataRetainsOriginalIoBufStorage) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicDataReassembler reassembler(pool);
+
+    fiber::mem::IoBuf source = slice_of("zero-copy");
+    fiber::mem::IoBuf storage_witness = source;
+    ASSERT_TRUE(reassembler.insert(0, std::move(source)).has_value());
+
+    fiber::mem::IoBufChain out(pool);
+    auto taken = reassembler.take_contiguous(out);
+    ASSERT_TRUE(taken.has_value());
+    ASSERT_NE(out.front(), nullptr);
+    EXPECT_TRUE(out.front()->same_storage(storage_witness));
+    EXPECT_EQ(chain_to_string(out), "zero-copy");
 }
