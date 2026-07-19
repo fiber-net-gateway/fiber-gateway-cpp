@@ -124,9 +124,9 @@ codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝�
 
 > ✅ **不变量加固已实施 2026-07-15**。`~QuicConnection` 现在断言 peer-data waiter 的 head/tail 均为空；`notify_peer_data_waiters` 增加链表入口一致性与清空后置断言。新增 `QuicConnectionTest.AsyncWriteCanceledWhileBlockedByConnectionWindow` 和 `QuicUdpEndpointTest.DetachCancelsPeerDataWaiterBeforeDestroy`：前者验证 connection-level flow-control waiter 在连接关闭时以 `Canceled` 恢复，后者验证 endpoint detach 先取消 waiter、最后一份 connection lease 释放后才执行 destroy callback。定向 2 测试通过，完整 CTest **1179/1179** 通过。上述第 2 项 awaiter self-retain 属可选的 API 生命周期扩展，本次未实施。
 
-## ⏸ DEFERRED — 架构性能优化
+## ✅ COMPLETED — 架构性能优化
 
-### 8. ⏸ 接收路径未实现零拷贝（当前架构必要复制，后续优化）
+### 8. ✅ 接收路径使用 packet-owned IoBuf 实现零拷贝
 `QuicStreamRecvQueue.cpp:648-661`（`create_extent`）/ `QuicStream.cpp:519-522`（`on_stream_data_recv`）/ `QuicFrame.h:65-70`（`QuicSlice`）
 
 `QuicSlice` 是裸 `{const uint8_t*, size_t}` 指向包 payload（`QuicTransportCodec.cpp:725-731` 经 `payload.read_slice` 设置），没 retain refcounted IoBuf。`create_extent` 只能 `IoBuf::allocate(kRecvBlockSize)`（16KB）+ `std::memcpy`。发送队列可以对调用方传入的持久 `IoBuf` 使用 `retain_slice`（`QuicStreamSendQueue.cpp:55,270`）；接收侧的来源是临时复用明文缓冲区，所有权模型不同。
@@ -135,7 +135,9 @@ codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝�
 >
 > “每个 STREAM 帧分配 16KB”也不是准确描述：首次触及一个逻辑 16KB stream block 时分配 16KB，同一活动 block 内的后续 extent 会复用该 storage；不过所有首次接收且非重复的字节仍会执行一次 `memcpy`。
 
-**后续优化方向**：不能只把 frame 改为 `IoBuf` view 或直接调用 `retain_slice()`；必须先把 AEAD 明文目标改成可转移所有权、引用计数且可池化的 packet buffer，再让 decode result、frame 和 recv queue 贯穿持有其 slice，所有引用释放后整包缓冲区才可回池。设计时还需权衡小 STREAM frame 长期钉住整个 packet buffer、乱序 extent 数量以及缓冲池容量压力。
+> ✅ **已实施 2026-07-19**。AEAD 现在按 packet 创建 owning `IoBuf` 并直接解密到其 writable range；decode result 持有 plaintext，STREAM/CRYPTO dispatch 只对 frame data 建立 owning slice。`QuicDataReassembler` 以非重叠 `IoBuf` extent 保存未覆盖区间，不再分配 4KB/16KB block 或复制 payload；`QuicStreamRecvQueue` 组合复用该 reassembler，只保留 FIN/RESET、流控和 waiter 状态。接收 endpoint 的固定 plaintext buffer 已移除，原发送 scratch buffer 更名以明确用途。
+>
+> 剩余性能权衡：每个成功解密 packet 会产生一次 `IoBuf` allocation；很小的 STREAM slice 也会钉住完整 packet storage。当前以 logical buffer limit 和 active extent limit 约束队列，后续若 profiling 显示 packet allocation 或 retained capacity 成为瓶颈，再增加支持 shared-slice 生命周期的 packet buffer pool/physical-capacity accounting。
 
 ## 🔴 HIGH（续）
 

@@ -1,11 +1,9 @@
 #ifndef FIBER_QUIC_QUIC_SEND_SCHEDULER_H
 #define FIBER_QUIC_QUIC_SEND_SCHEDULER_H
 
-#include <coroutine>
 #include <cstddef>
 #include <cstdint>
 
-#include "../async/Task.h"
 #include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
@@ -40,7 +38,6 @@ struct QuicBuildSendResult {
 struct QuicSendPacketRecord {
     QuicEncryptionLevel level = QuicEncryptionLevel::Initial;
     std::size_t length = 0;
-    QuicPacketNumberSpaceSnapshot packet_number_snapshot{};
     std::uint64_t packet_number = 0;
     std::size_t frame_count = 0;
     bool sends_ack = false;
@@ -53,25 +50,44 @@ struct QuicSendDatagram {
     std::size_t length = 0;
     QuicPath *path = nullptr;
     net::UdpPacketSendSpec spec{};
-    QuicPacketNumberSpaceSnapshot packet_number_snapshots[kQuicSendLevelCount]{};
-    bool packet_number_snapshot_valid[kQuicSendLevelCount]{};
     QuicSendPacketRecord packets[kQuicSendLevelCount]{};
     std::size_t packet_count = 0;
     bool mtu_probe = false;
     bool pacing_controlled = false;
 };
 
+struct QuicSendPathReservation {
+    QuicPath *path = nullptr;
+    std::uint64_t sent = 0;
+    std::uint32_t ecn_validation_sent = 0;
+};
+
+struct QuicSendBuildState {
+    QuicCongestionState congestion{};
+    QuicPacerState pacer{};
+    QuicSendPathReservation paths[kQuicMaxPaths]{};
+};
+
 class QuicSendScheduler : public common::NonCopyable, public common::NonMovable {
 public:
     struct Options {
         std::size_t send_buffer_size = kQuicSendDefaultBufferSize;
+        std::size_t max_datagrams_per_batch = net::kUdpMaxBatchSize;
+        std::size_t max_gso_segments = net::kUdpMaxBatchSize;
         std::size_t max_packets_per_wakeup = 64;
         std::size_t max_packets_per_connection = 64;
         QuicPacingOptions pacing{};
+        bool enable_gso = true;
     };
 
     QuicSendScheduler() noexcept;
     ~QuicSendScheduler();
+
+    struct PumpResult {
+        std::size_t packets_sent = 0;
+        bool write_blocked = false;
+        bool needs_reschedule = false;
+    };
 
     [[nodiscard]] common::IoResult<void> init(event::EventLoop &loop, net::UdpSocket &socket, QuicUdpEndpoint &endpoint,
                                               const Options &options) noexcept;
@@ -79,15 +95,13 @@ public:
     void remove(QuicConnection &connection) noexcept;
     void close(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
-    [[nodiscard]] async::Task<void> run() noexcept;
+    [[nodiscard]] PumpResult pump() noexcept;
 
     [[nodiscard]] bool initialized() const noexcept { return initialized_; }
-    [[nodiscard]] bool running() const noexcept { return running_; }
+    [[nodiscard]] bool has_work() const noexcept { return !ready_.empty(); }
     [[nodiscard]] common::IoErr stop_reason() const noexcept { return stop_reason_; }
 
 private:
-    class WaitForWorkAwaiter;
-
     struct FlushResult {
         common::IoErr error = common::IoErr::None;
         std::size_t packets_sent = 0;
@@ -96,27 +110,21 @@ private:
     using ReadyList =
             common::IntrusiveList<QuicConnection::SendQueueEntry, offsetof(QuicConnection::SendQueueEntry, link)>;
 
-    [[nodiscard]] bool should_wake_waiter() const noexcept;
-    [[nodiscard]] bool arm_waiter(WaitForWorkAwaiter *awaiter) noexcept;
-    void cancel_waiter(WaitForWorkAwaiter *awaiter) noexcept;
-    void notify_waiter() noexcept;
-    [[nodiscard]] bool has_work() const noexcept;
     void enqueue_ready(QuicConnection &connection) noexcept;
     void rotate_front_to_back(QuicConnection &connection) noexcept;
     [[nodiscard]] QuicConnection *front_ready() noexcept;
     void clear_ready() noexcept;
-    [[nodiscard]] async::Task<FlushResult> flush_connection(QuicConnection &connection) noexcept;
+    [[nodiscard]] FlushResult flush_connection(QuicConnection &connection) noexcept;
 
     event::EventLoop *loop_ = nullptr;
     net::UdpSocket *socket_ = nullptr;
     QuicUdpEndpoint *endpoint_ = nullptr;
     Options options_{};
     ReadyList ready_{};
-    WaitForWorkAwaiter *waiter_ = nullptr;
     common::IoErr stop_reason_ = common::IoErr::None;
     bool initialized_ = false;
     bool closing_ = false;
-    bool running_ = false;
+    bool gso_enabled_ = false;
 };
 
 } // namespace fiber::quic

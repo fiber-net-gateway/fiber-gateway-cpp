@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <expected>
+#include <utility>
 
 #include "QuicAckHandler.h"
 #include "QuicCrypto.h"
@@ -38,6 +39,24 @@ namespace {
     return std::equal(lhs.data(), lhs.data() + lhs.size(), rhs.data());
 }
 
+[[nodiscard]] common::IoResult<mem::IoBuf> retain_frame_data(const mem::IoBuf &payload, QuicSlice data) noexcept {
+    if (data.len == 0) {
+        return mem::IoBuf{};
+    }
+    if (!payload || data.data == nullptr) [[unlikely]] {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    const auto begin = reinterpret_cast<std::uintptr_t>(payload.readable_data());
+    const auto end = begin + payload.readable();
+    const auto frame_begin = reinterpret_cast<std::uintptr_t>(data.data);
+    if (end < begin || frame_begin < begin || frame_begin > end || data.len > end - frame_begin) [[unlikely]] {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    return payload.retain_slice(static_cast<std::size_t>(frame_begin - begin), data.len);
+}
+
 [[nodiscard]] bool probing_frame(QuicFrameType type) noexcept {
     return type == QuicFrameType::Padding || type == QuicFrameType::PathChallenge ||
            type == QuicFrameType::PathResponse || type == QuicFrameType::NewConnectionId;
@@ -64,51 +83,6 @@ struct FrameParseClose {
         close.error = QuicErrorCode::ProtocolViolation;
     }
     return close;
-}
-
-// Apply a peer-initiated key update after a packet was successfully decrypted
-// with next_application_read. The current application_read/write become the
-// "previous" generation (kept for a 3×PTO grace period), next_application_read/write
-// become the new current keys, and the next-next pair is immediately pre-derived.
-// RFC 9001 §6.1, §6.5.
-[[nodiscard]] common::IoResult<void> apply_key_update(QuicConnection &conn) noexcept {
-    QuicCryptoState &crypto = conn.crypto();
-
-    // 1. Save current application_read as previous (grace period).
-    //    previous starts empty (or held the prior-prior generation that has
-    //    already passed the discard timer); resetting first guarantees we
-    //    drop any stale AEAD context before swapping.
-    crypto.previous_application_read.reset();
-    crypto.previous_application_read.swap(crypto.application_read);
-    crypto.previous_application_keys_ready = true;
-
-    // 2. Promote next_application_read → application_read.
-    crypto.application_read.swap(crypto.next_application_read);
-    crypto.next_application_read.reset();
-
-    // 3. Promote next_application_write → application_write (writes have no
-    //    grace-period retention; the old write context is simply discarded).
-    crypto.application_write.swap(crypto.next_application_write);
-    crypto.next_application_write.reset();
-
-    crypto.next_application_keys_ready = false;
-
-    // 4. Flip the key phase bit so subsequent outbound short headers carry
-    //    the new phase.
-    conn.flip_key_phase();
-
-    // 5. Derive the next-next generation immediately so the connection can
-    //    accept another update without deriving on the fly.
-    auto derived = quic_derive_next_key_pair(crypto);
-    if (!derived) {
-        conn.close(QuicErrorCode::InternalError);
-        return std::unexpected(derived.error());
-    }
-
-    // 6. Arm the grace-period timer to discard the previous application keys.
-    conn.arm_key_update_discard_timer();
-
-    return {};
 }
 
 [[nodiscard]] common::IoResult<QuicPath *> bind_datagram_path(QuicConnection &conn,
@@ -165,12 +139,7 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
     space.pending_ack = kUnsetPacketNumber;
     space.crypto_recv.clear();
 
-    if (QuicPacketProtectionKeys *read = quic_packet_keys(conn.crypto(), level, false)) {
-        read->reset();
-    }
-    if (QuicPacketProtectionKeys *write = quic_packet_keys(conn.crypto(), level, true)) {
-        write->reset();
-    }
+    conn.crypto().discard_level(level);
 }
 
 [[nodiscard]] common::IoResult<void> queue_handshake_done(QuicConnection &conn) noexcept {
@@ -189,13 +158,13 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
 }
 
 [[nodiscard]] common::IoResult<void> provide_crypto_data(QuicConnection &conn, QuicEncryptionLevel level,
-                                                         std::uint64_t offset, QuicSlice data) noexcept {
+                                                         std::uint64_t offset, mem::IoBuf data) noexcept {
     if (!conn.tls().initialized()) {
         return {};
     }
 
     QuicPacketNumberSpace &space = conn.packet_number_space(level);
-    auto inserted = space.crypto_recv.insert(offset, data);
+    auto inserted = space.crypto_recv.insert(offset, std::move(data));
     if (!inserted) {
         if (inserted.error() == common::IoErr::MessageTooLarge) {
             conn.close(QuicErrorCode::CryptoBufferExceeded);
@@ -221,9 +190,9 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
 }
 
 [[nodiscard]] common::IoResult<bool> handle_crypto_frame(QuicConnection &conn, QuicEncryptionLevel level,
-                                                         const QuicInputFrame &frame,
+                                                         const QuicInputFrame &frame, mem::IoBuf data,
                                                          bool &handshake_confirmed) noexcept {
-    auto provided = provide_crypto_data(conn, level, frame.u.crypto.offset, frame.data);
+    auto provided = provide_crypto_data(conn, level, frame.u.crypto.offset, std::move(data));
     if (!provided) {
         return std::unexpected(provided.error());
     }
@@ -242,22 +211,27 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
         if (!established) {
             return std::unexpected(established.error());
         }
-        auto queued = queue_handshake_done(conn);
-        if (!queued) {
-            return std::unexpected(queued.error());
+        if (conn.role() == QuicConnectionRole::Server) {
+            auto queued = queue_handshake_done(conn);
+            if (!queued) {
+                return std::unexpected(queued.error());
+            }
+            discard_packet_number_space(conn, QuicEncryptionLevel::Handshake);
         }
-        discard_packet_number_space(conn, QuicEncryptionLevel::Handshake);
         // RFC 9001 §9.5 / nginx ngx_event_quic_ssl.c — pre-derive the first
         // next-generation application keys so the connection can immediately
         // respond to a peer-initiated key update without deriving on the fly
         // (which would also leak a timing side channel).
-        if (conn.crypto().application_read.ready && conn.crypto().application_write.ready) {
+        if (conn.crypto().application_read().ready() && conn.crypto().application_write().ready()) {
             auto derived = quic_derive_next_key_pair(conn.crypto());
             if (!derived) {
                 return std::unexpected(derived.error());
             }
         }
-        handshake_confirmed = true;
+        if (conn.role() == QuicConnectionRole::Server) {
+            conn.confirm_handshake();
+            handshake_confirmed = true;
+        }
         return true;
     }
 
@@ -317,10 +291,15 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
     if (conn.state() == QuicConnectionState::Draining || conn.state() == QuicConnectionState::Closed) {
         return result;
     }
+    if (packet.level == QuicEncryptionLevel::Application && decoded.read_epoch == QuicReadKeyEpoch::Next &&
+        !conn.handshake_confirmed()) {
+        conn.close(QuicErrorCode::KeyUpdateError);
+        return std::unexpected(common::IoErr::Invalid);
+    }
 
     const QuicTime now = quic_time_ms(datagram.received_at);
     bool path_challenged = false;
-    QuicReadCursor payload(decoded.payload.data, decoded.payload.len);
+    QuicReadCursor payload(decoded.payload.readable_data(), decoded.payload.readable());
     while (!payload.empty()) {
         const std::uint8_t *frame_data = payload.pos();
         const std::size_t frame_len = payload.remaining();
@@ -368,8 +347,13 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 });
                 return result;
             case QuicFrameType::Crypto: {
+                auto frame_data = retain_frame_data(decoded.payload, frame.data);
+                if (!frame_data) {
+                    return std::unexpected(frame_data.error());
+                }
                 bool handshake_confirmed = false;
-                auto handled = handle_crypto_frame(conn, packet.level, frame, handshake_confirmed);
+                auto handled =
+                        handle_crypto_frame(conn, packet.level, frame, std::move(*frame_data), handshake_confirmed);
                 if (!handled) {
                     return std::unexpected(handled.error());
                 }
@@ -378,7 +362,11 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 break;
             }
             case QuicFrameType::Stream: {
-                auto received = conn.recv_stream_frame(frame.u.stream, frame.data);
+                auto frame_data = retain_frame_data(decoded.payload, frame.data);
+                if (!frame_data) {
+                    return std::unexpected(frame_data.error());
+                }
+                auto received = conn.recv_stream_frame(frame.u.stream, std::move(*frame_data));
                 if (!received) {
                     return std::unexpected(received.error());
                 }
@@ -447,7 +435,6 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 break;
             }
             case QuicFrameType::NewToken:
-            case QuicFrameType::HandshakeDone:
             case QuicFrameType::Stream1:
             case QuicFrameType::Stream2:
             case QuicFrameType::Stream3:
@@ -455,6 +442,11 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
             case QuicFrameType::Stream5:
             case QuicFrameType::Stream6:
             case QuicFrameType::Stream7:
+                break;
+            case QuicFrameType::HandshakeDone:
+                conn.confirm_handshake();
+                discard_packet_number_space(conn, QuicEncryptionLevel::Handshake);
+                result.handshake_confirmed = true;
                 break;
             case QuicFrameType::NewConnectionId: {
                 auto received = conn.recv_new_connection_id_frame(frame.u.new_connection_id);
@@ -548,12 +540,17 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
     // RFC 9001 §6.1 — apply key update only after the packet decoded cleanly
     // (frames parsed, no protocol violations). Doing this last guarantees we
     // never rotate keys for a packet that ends up being rejected.
-    if (decoded.key_update) {
-        auto applied = apply_key_update(conn);
+    if (packet.level == QuicEncryptionLevel::Application && decoded.read_epoch == QuicReadKeyEpoch::Next) {
+        auto applied = conn.apply_peer_key_update(packet.packet_number);
         if (!applied) {
             return std::unexpected(applied.error());
         }
         result.send_output = true;
+    } else if (packet.level == QuicEncryptionLevel::Application) {
+        conn.on_application_packet_authenticated(decoded.read_epoch, packet.packet_number);
+    }
+    if (packet.level == QuicEncryptionLevel::Application && conn.role() == QuicConnectionRole::Server) {
+        conn.crypto().discard_level(QuicEncryptionLevel::EarlyData);
     }
 
     return result;
@@ -573,11 +570,9 @@ QuicReceiveApplyResult quic_apply_receive_result(QuicConnection &conn, const Qui
 }
 
 common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConnection &conn,
-                                                                        const QuicReceivedDatagram &datagram,
-                                                                        std::uint8_t *plaintext,
-                                                                        std::size_t plaintext_cap) noexcept {
+                                                                        const QuicReceivedDatagram &datagram) noexcept {
     if (conn.role() != QuicConnectionRole::Server || datagram.data == nullptr ||
-        datagram.len < kMinInitialDatagramSize || plaintext == nullptr || plaintext_cap == 0) {
+        datagram.len < kMinInitialDatagramSize) {
         return std::unexpected(common::IoErr::Invalid);
     }
     if (conn.closed()) {
@@ -593,7 +588,7 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    if (!conn.crypto().initial_ready) {
+    if (!conn.crypto().initial_ready()) {
         auto initialized = conn.init_initial_crypto(packet->dcid);
         if (!initialized) {
             return std::unexpected(initialized.error());
@@ -603,11 +598,19 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
     auto &space = conn.packet_number_space(packet->level);
     const std::uint64_t previous_largest_received = space.largest_received_packet_number;
 
-    auto opened =
-            quic_decrypt_initial_packet(conn, *packet, datagram.data, packet->packet_len, plaintext, plaintext_cap);
+    if (packet->ciphertext_len == 0) [[unlikely]] {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    mem::IoBuf plaintext = mem::IoBuf::allocate_trackable(packet->ciphertext_len);
+    if (!plaintext) [[unlikely]] {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    auto opened = quic_decrypt_initial_packet(conn, *packet, datagram.data, packet->packet_len,
+                                              plaintext.writable_data(), plaintext.writable());
     if (!opened) {
         return std::unexpected(opened.error());
     }
+    plaintext.commit(opened->len);
 
     if (conn.role() == QuicConnectionRole::Server && !conn.tls().initialized()) {
         auto tls_ok = conn.ensure_server_tls();
@@ -631,7 +634,7 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
     result.level = packet->level;
     result.packet_number = packet->packet_number;
 
-    QuicReadCursor payload(opened->data, opened->len);
+    QuicReadCursor payload(plaintext.readable_data(), plaintext.readable());
     while (!payload.empty()) {
         auto parsed = quic_parse_frame(QuicEncryptionLevel::Initial, payload);
         if (!parsed) {
@@ -684,9 +687,8 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
 
 common::IoResult<QuicPacketProcessResult> quic_process_datagram(QuicConnection &conn,
                                                                 const QuicReceivedDatagram &datagram,
-                                                                std::uint8_t *plaintext, std::size_t plaintext_cap,
                                                                 std::uint8_t short_dcid_len) noexcept {
-    if (datagram.data == nullptr || datagram.len == 0 || plaintext == nullptr || plaintext_cap == 0 || conn.closed()) {
+    if (datagram.data == nullptr || datagram.len == 0 || conn.closed()) {
         return std::unexpected(conn.closed() ? common::IoErr::Canceled : common::IoErr::Invalid);
     }
 
@@ -725,7 +727,11 @@ common::IoResult<QuicPacketProcessResult> quic_process_datagram(QuicConnection &
             return std::unexpected(common::IoErr::Invalid);
         }
 
-        if (packet->level == QuicEncryptionLevel::Initial && !conn.crypto().initial_ready) {
+        if (packet->level == QuicEncryptionLevel::Initial && !conn.crypto().initial_ready()) {
+            if (conn.crypto().initial_discarded()) {
+                offset += packet->packet_len;
+                continue;
+            }
             auto initialized = conn.init_initial_crypto(packet->dcid);
             if (!initialized) {
                 if (has_good_packet) {
@@ -737,8 +743,7 @@ common::IoResult<QuicPacketProcessResult> quic_process_datagram(QuicConnection &
 
         QuicPacketNumberSpace &space = conn.packet_number_space(packet->level);
         const std::uint64_t previous_largest_received = space.largest_received_packet_number;
-        auto decoded =
-                quic_decode_packet(conn, packet_data, packet->packet_len, short_dcid_len, plaintext, plaintext_cap);
+        auto decoded = quic_decode_packet(conn, packet_data, packet->packet_len, short_dcid_len);
         if (!decoded) {
             if (decoded.error() == common::IoErr::NotFound) {
                 offset += packet->packet_len;
@@ -753,7 +758,8 @@ common::IoResult<QuicPacketProcessResult> quic_process_datagram(QuicConnection &
             // they match a stateless_reset_token the peer advertised, enter the
             // DRAINING state SILENTLY — no CONNECTION_CLOSE is sent (§10.2.2:
             // the peer already lost state, so a close frame is pointless).
-            if (offset == 0 && !packet->long_header && packet->level == QuicEncryptionLevel::Application &&
+            if (!conn.closing() && offset == 0 && !packet->long_header &&
+                packet->level == QuicEncryptionLevel::Application &&
                 conn.detects_stateless_reset(packet_data, packet->packet_len)) {
                 conn.begin_draining(QuicCloseInfo{
                         .source = QuicCloseSource::StatelessReset,

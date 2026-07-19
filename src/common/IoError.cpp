@@ -56,6 +56,11 @@ IoErr io_err_from_errno(int err) noexcept {
         case EOPNOTSUPP:
             return IoErr::NotSupported;
 #endif
+#if defined(ENOPROTOOPT) && (!defined(ENOTSUP) || ENOPROTOOPT != ENOTSUP) &&                                           \
+        (!defined(EOPNOTSUPP) || ENOPROTOOPT != EOPNOTSUPP)
+        case ENOPROTOOPT:
+            return IoErr::NotSupported;
+#endif
         case ECANCELED:
             return IoErr::Canceled;
         default:

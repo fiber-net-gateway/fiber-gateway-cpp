@@ -289,11 +289,13 @@ void feed_stream(fiber::quic::QuicConnection &conn, std::uint64_t stream_id, con
     frame.stream_id = stream_id;
     frame.length = data.size();
     frame.fin = fin;
-    fiber::quic::QuicSlice slice{
-            .data = data.empty() ? nullptr : data.data(),
-            .len = data.size(),
-    };
-    ASSERT_TRUE(conn.recv_stream_frame(frame, slice).has_value());
+    fiber::mem::IoBuf payload = fiber::mem::IoBuf::allocate(data.size());
+    if (!data.empty()) {
+        ASSERT_TRUE(payload);
+        std::memcpy(payload.writable_data(), data.data(), data.size());
+        payload.commit(data.size());
+    }
+    ASSERT_TRUE(conn.recv_stream_frame(frame, std::move(payload)).has_value());
 }
 
 fiber::async::DetachedTask close_and_wait(fiber::http::Http3Connection *h3, std::promise<void> *done) {

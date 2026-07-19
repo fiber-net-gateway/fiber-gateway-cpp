@@ -45,8 +45,22 @@ fiber::quic::QuicTransportParams valid_server_peer_params(const fiber::quic::Qui
     return params;
 }
 
-fiber::quic::QuicSlice slice_of(std::string_view value) {
-    return {reinterpret_cast<const std::uint8_t *>(value.data()), value.size()};
+fiber::mem::IoBuf slice_of(std::string_view value) {
+    fiber::mem::IoBuf buf = fiber::mem::IoBuf::allocate(value.size());
+    if (buf) {
+        std::memcpy(buf.writable_data(), value.data(), value.size());
+        buf.commit(value.size());
+    }
+    return buf;
+}
+
+fiber::mem::IoBuf trackable_slice_of(std::string_view value, std::size_t capacity) {
+    fiber::mem::IoBuf buf = fiber::mem::IoBuf::allocate_trackable(capacity);
+    if (buf && value.size() <= buf.writable()) {
+        std::memcpy(buf.writable_data(), value.data(), value.size());
+        buf.commit(value.size());
+    }
+    return buf;
 }
 
 fiber::mem::IoBuf iobuf_of(std::string_view value) {
@@ -1026,7 +1040,9 @@ TEST(QuicConnectionTest, KeepaliveTimerQueuesApplicationPingWhenEstablished) {
     options.keepalive_interval = std::chrono::milliseconds(5);
     fiber::quic::QuicConnection conn(options);
     ASSERT_TRUE(conn.mark_established());
-    conn.crypto().application_write.ready = true;
+    ASSERT_TRUE(conn.crypto().ensure_application());
+    conn.crypto().application_write().packet->ready = true;
+    conn.crypto().application_write().header->ready = true;
 
     std::promise<KeepaliveTimerSnapshot> done;
     auto future = done.get_future();
@@ -1120,6 +1136,55 @@ TEST(QuicConnectionTest, RecvStreamFrameCreatesPeerInitiatedStream) {
     ASSERT_TRUE(taken.has_value());
     EXPECT_EQ(*taken, 3U);
     EXPECT_FALSE(stream->has_final_size());
+}
+
+TEST(QuicConnectionTest, RetainedStorageUsesConnectionAndParentBudgets) {
+    StreamCallbackState state{};
+    fiber::mem::IoBufStorageBudget endpoint_budget(64);
+    auto options = server_options_with_factory(state);
+    options.recv_flow.retained_storage_limit = 64;
+    options.recv_storage_parent = &endpoint_budget;
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame frame{};
+    frame.stream_id = 0;
+    frame.offset = 4;
+    frame.has_offset = true;
+    frame.length = 1;
+
+    auto received = conn.recv_stream_frame(frame, trackable_slice_of("x", 64 * 1024));
+
+    ASSERT_TRUE(received.has_value());
+    EXPECT_EQ(conn.retained_recv_storage_capacity(), 1U);
+    EXPECT_EQ(conn.retained_recv_storage_high_water(), 1U);
+    EXPECT_EQ(endpoint_budget.retained_capacity(), 1U);
+    auto *stream = conn.find_stream(0);
+    ASSERT_NE(stream, nullptr);
+
+    ASSERT_TRUE(stream->stop_read().has_value());
+    EXPECT_EQ(conn.retained_recv_storage_capacity(), 0U);
+    EXPECT_EQ(endpoint_budget.retained_capacity(), 0U);
+}
+
+TEST(QuicConnectionTest, RetainedStoragePressureDoesNotBecomeFlowControlError) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    options.recv_flow.retained_storage_limit = 0;
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame frame{};
+    frame.stream_id = 0;
+    frame.offset = 4;
+    frame.has_offset = true;
+    frame.length = 1;
+
+    auto received = conn.recv_stream_frame(frame, trackable_slice_of("x", 64 * 1024));
+
+    ASSERT_FALSE(received.has_value());
+    EXPECT_EQ(received.error(), fiber::common::IoErr::NoMem);
+    EXPECT_FALSE(conn.closing());
+    EXPECT_EQ(conn.close_error(), fiber::quic::QuicErrorCode::NoError);
+    EXPECT_EQ(conn.recv_data_consumed(), 0U);
+    EXPECT_EQ(conn.retained_recv_storage_capacity(), 0U);
+    EXPECT_EQ(conn.retained_recv_storage_rejected_count(), 1U);
 }
 
 TEST(QuicConnectionTest, RecvStreamFrameCountsEndOffsetGrowthForConnectionFlowControl) {
