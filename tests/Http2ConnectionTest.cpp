@@ -756,24 +756,20 @@ const fiber::http::Http2Stream::Ops kHeaderEncodeStreamOps{
         &noop_test_abort,
 };
 
-struct HeaderEncodeCase final : fiber::http::Http2OutboundOperation {
+struct HeaderEncodeCase final {
     std::uint32_t stream_id = 0;
     bool end_stream = false;
     std::vector<std::pair<std::string_view, std::string_view>> headers;
 
-    fiber::common::IoErr encode_outbound_batch(fiber::http::Http2Stream &stream,
-                                               const fiber::http::Http2OutboundEncodeRequest &req,
-                                               fiber::http::Http2OutboundEncodeTarget &target,
-                                               fiber::http::Http2OutboundEncodeResult &result) noexcept override;
-    [[nodiscard]] std::size_t pending_flow_controlled_bytes() const noexcept override { return 0; }
-    void on_outbound_batch_sent(std::uint32_t, bool) noexcept override {}
-    void on_outbound_abort(fiber::common::IoErr) noexcept override {}
+    fiber::common::IoErr on_encode(fiber::http::Http2Stream &stream, const fiber::http::Http2OutboundEncodeRequest &req,
+                                   fiber::http::Http2OutboundEncodeTarget &target,
+                                   fiber::http::Http2OutboundEncodeResult &result) noexcept;
 };
 
-fiber::common::IoErr HeaderEncodeCase::encode_outbound_batch(fiber::http::Http2Stream &,
-                                                             const fiber::http::Http2OutboundEncodeRequest &req,
-                                                             fiber::http::Http2OutboundEncodeTarget &target,
-                                                             fiber::http::Http2OutboundEncodeResult &result) noexcept {
+fiber::common::IoErr HeaderEncodeCase::on_encode(fiber::http::Http2Stream &,
+                                                 const fiber::http::Http2OutboundEncodeRequest &req,
+                                                 fiber::http::Http2OutboundEncodeTarget &target,
+                                                 fiber::http::Http2OutboundEncodeResult &result) noexcept {
     fiber::http::Http2HeadersFrameEncoder frame_encoder({
             .stream_id = stream_id,
             .max_frame_size = req.max_frame_size,
@@ -814,7 +810,7 @@ std::string build_headers_frame_bytes(std::uint32_t stream_id,
     fiber::http::Http2Stream stream(&test_case, kHeaderEncodeStreamOps);
     fiber::http::Http2OutboundEncodeRequest request{.max_frame_size = 16384};
     fiber::http::Http2OutboundEncodeResult encode_result;
-    if (test_case.encode_outbound_batch(stream, request, target, encode_result) != fiber::common::IoErr::None) {
+    if (test_case.on_encode(stream, request, target, encode_result) != fiber::common::IoErr::None) {
         return {};
     }
     std::vector<std::uint8_t> bytes = chain_to_bytes(target.take_chain());

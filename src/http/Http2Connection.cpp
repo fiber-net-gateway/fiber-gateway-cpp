@@ -1801,12 +1801,12 @@ void Http2Connection::remove_connection_window_wait(Http2Stream &stream) noexcep
 
 common::IoErr Http2Connection::try_encode_stream_outbound(Http2Stream &stream) noexcept {
     FIBER_ASSERT(stream.conn_ == this);
-    FIBER_ASSERT(stream.outbound_operation_ != nullptr);
+    FIBER_ASSERT(stream.outbound_operation_);
     FIBER_ASSERT(stream.outbound_kind_ != Http2OutboundKind::None);
     FIBER_ASSERT(stream.outbound_hook_.state_ == Http2OutboundHook::State::Idle);
     FIBER_ASSERT(stream.outbound_wait_state_ == Http2Stream::OutboundWaitState::None);
 
-    const std::size_t pending_flow_controlled = stream.pending_flow_controlled_bytes();
+    const std::size_t pending_flow_controlled = stream.outbound_pending_flow_controlled_bytes_;
     std::uint32_t payload_budget = 0;
     if (stream.outbound_kind_ == Http2OutboundKind::Data && pending_flow_controlled != 0) {
         if (stream.send_window_ <= 0) {
@@ -1835,7 +1835,12 @@ common::IoErr Http2Connection::try_encode_stream_outbound(Http2Stream &stream) n
         return err;
     }
     if (target.empty() || result.flow_controlled_bytes > payload_budget ||
+        result.flow_controlled_bytes > stream.outbound_pending_flow_controlled_bytes_ ||
         (stream.outbound_kind_ == Http2OutboundKind::Headers && result.flow_controlled_bytes != 0)) {
+        return common::IoErr::Invalid;
+    }
+    stream.outbound_pending_flow_controlled_bytes_ -= result.flow_controlled_bytes;
+    if (result.operation_final_batch && stream.outbound_pending_flow_controlled_bytes_ != 0) {
         return common::IoErr::Invalid;
     }
 
@@ -1861,7 +1866,7 @@ common::IoErr Http2Connection::request_stream_send(Http2Stream &stream, Http2Out
     if (stop_sending_requested_) {
         return stop_sending_reason_;
     }
-    if (kind == Http2OutboundKind::None || stream.conn_ != this || stream.outbound_operation_ == nullptr) {
+    if (kind == Http2OutboundKind::None || stream.conn_ != this || !stream.outbound_operation_) {
         return common::IoErr::Invalid;
     }
     if (stream.outbound_kind_ != Http2OutboundKind::None ||
@@ -1930,7 +1935,7 @@ void Http2Connection::cancel_stream_send(Http2Stream &stream, common::IoErr reas
     if (stream.outbound_hook_.state_ == Http2OutboundHook::State::InFlight) {
         stream.outbound_hook_.completion_result_ = reason;
     } else if (stream.outbound_operation_) {
-        stream.outbound_operation_->on_outbound_abort(reason);
+        stream.notify_outbound_send_done(reason, 0, false);
     }
 }
 

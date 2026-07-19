@@ -163,38 +163,62 @@ void Http2Stream::close(common::IoErr result) noexcept {
         ops_->on_abort(owner_, close_reason_);
     }
     if (first_abort && !conn_ && outbound_operation_) {
-        outbound_operation_->on_outbound_abort(close_reason_);
+        notify_outbound_send_done(close_reason_, 0, false);
     }
 }
 
-bool Http2Stream::try_arm_outbound(Http2OutboundOperation &operation) noexcept {
+bool Http2Stream::try_arm_outbound(const Http2OutboundOperation::Ops &ops, void *ctx,
+                                   std::size_t pending_flow_controlled_bytes) noexcept {
     if (outbound_operation_) {
         return false;
     }
-    outbound_operation_ = &operation;
+    FIBER_ASSERT(ctx != nullptr);
+    FIBER_ASSERT(ops.on_encode != nullptr);
+    FIBER_ASSERT(ops.on_send_done != nullptr);
+    outbound_operation_ = {
+            .ops = &ops,
+            .ctx = ctx,
+    };
+    outbound_pending_flow_controlled_bytes_ = pending_flow_controlled_bytes;
     return true;
 }
 
-void Http2Stream::disarm_outbound(Http2OutboundOperation &operation) noexcept {
-    if (outbound_operation_ != &operation) {
+void Http2Stream::disarm_outbound(void *ctx) noexcept {
+    if (outbound_operation_.ctx != ctx) {
         return;
     }
     FIBER_ASSERT(outbound_hook_.state_ == Http2OutboundHook::State::Idle);
     FIBER_ASSERT(outbound_wait_state_ == OutboundWaitState::None);
     FIBER_ASSERT(outbound_kind_ == Http2OutboundKind::None);
-    outbound_operation_ = nullptr;
-}
-
-std::size_t Http2Stream::pending_flow_controlled_bytes() const noexcept {
-    FIBER_ASSERT(outbound_operation_ != nullptr);
-    return outbound_operation_->pending_flow_controlled_bytes();
+    outbound_operation_ = {};
+    outbound_pending_flow_controlled_bytes_ = 0;
 }
 
 common::IoErr Http2Stream::encode_outbound_batch(const Http2OutboundEncodeRequest &req,
                                                  Http2OutboundEncodeTarget &target,
                                                  Http2OutboundEncodeResult &result) noexcept {
-    FIBER_ASSERT(outbound_operation_ != nullptr);
-    return outbound_operation_->encode_outbound_batch(*this, req, target, result);
+    FIBER_ASSERT(outbound_operation_);
+    return outbound_operation_.ops->on_encode(outbound_operation_.ctx, *this, req, target, result);
+}
+
+void Http2Stream::notify_outbound_send_done(common::IoErr error, std::uint32_t flow_controlled_bytes,
+                                            bool operation_final_batch) noexcept {
+    if (!outbound_operation_) {
+        return;
+    }
+
+    if (error != common::IoErr::None || operation_final_batch) {
+        outbound_kind_ = Http2OutboundKind::None;
+        outbound_pending_flow_controlled_bytes_ = 0;
+    }
+
+    Http2OutboundSendResult result{
+            .error = error,
+            .flow_controlled_bytes = error == common::IoErr::None ? flow_controlled_bytes : 0,
+            .operation_final_batch = error == common::IoErr::None && operation_final_batch,
+    };
+    Http2OutboundOperation operation = outbound_operation_;
+    operation.ops->on_send_done(operation.ctx, result);
 }
 
 void Http2Stream::on_outbound_hook_send_done(Http2OutboundHook &hook, common::IoErr result) noexcept {
@@ -207,27 +231,11 @@ void Http2Stream::on_outbound_hook_send_done(Http2OutboundHook &hook, common::Io
     const bool operation_final_batch = hook.operation_final_batch_;
     hook.window_consumed_ = 0;
     hook.operation_final_batch_ = false;
-    if (operation_final_batch) {
-        stream->outbound_kind_ = Http2OutboundKind::None;
+    common::IoErr completion_result = result;
+    if (completion_result == common::IoErr::None && stream->close_reason_ != common::IoErr::None) {
+        completion_result = stream->close_reason_;
     }
-
-    if (stream->close_reason_ != common::IoErr::None) {
-        if (stream->outbound_operation_) {
-            stream->outbound_operation_->on_outbound_abort(result != common::IoErr::None ? result
-                                                                                         : stream->close_reason_);
-        }
-        if (stream->conn_) {
-            stream->conn_->on_stream_outbound_idle(*stream);
-        }
-        return;
-    }
-
-    FIBER_ASSERT(stream->outbound_operation_ != nullptr);
-    if (result == common::IoErr::None) {
-        stream->outbound_operation_->on_outbound_batch_sent(flow_controlled_bytes, operation_final_batch);
-    } else {
-        stream->outbound_operation_->on_outbound_abort(result);
-    }
+    stream->notify_outbound_send_done(completion_result, flow_controlled_bytes, operation_final_batch);
 
     if (stream->conn_) {
         stream->conn_->on_stream_outbound_idle(*stream);

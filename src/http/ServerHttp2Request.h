@@ -49,8 +49,8 @@ private:
                                                   bool value_stable) noexcept;
     struct SendResponseHeaderOp;
     struct SendResponseBodyOp;
-    using HeaderSendAwaiter = detail::HeaderSendAwaiter<ServerHttp2Request, SendResponseHeaderOp>;
-    using BodySendAwaiter = detail::BodySendAwaiter<ServerHttp2Request, SendResponseBodyOp>;
+    using HeaderSendAwaiter = detail::Http2SendAwaiter<ServerHttp2Request, SendResponseHeaderOp>;
+    using BodySendAwaiter = detail::Http2SendAwaiter<ServerHttp2Request, SendResponseBodyOp>;
 
     static const Http2Stream::Ops &stream_ops() noexcept;
     static const Http2HpackDecoder::Ops &decoder_ops() noexcept;
@@ -121,12 +121,8 @@ private:
     std::uint64_t pending_name_hash_ = 0;
     bool pending_name_stable_ = false;
 
-    template<class>
-    friend class detail::SendAwaiterBase;
     template<class, class>
-    friend class detail::HeaderSendAwaiter;
-    template<class, class>
-    friend class detail::BodySendAwaiter;
+    friend class detail::Http2SendAwaiter;
 };
 
 } // namespace fiber::http

@@ -53,9 +53,9 @@ private:
     struct SendRequestHeaderOp;
     struct SendRequestBodyOp;
     struct SendRequestTrailerOp;
-    using HeaderSendAwaiter = detail::HeaderSendAwaiter<ClientHttp2Request, SendRequestHeaderOp>;
-    using BodySendAwaiter = detail::BodySendAwaiter<ClientHttp2Request, SendRequestBodyOp>;
-    using TrailerSendAwaiter = detail::HeaderSendAwaiter<ClientHttp2Request, SendRequestTrailerOp>;
+    using HeaderSendAwaiter = detail::Http2SendAwaiter<ClientHttp2Request, SendRequestHeaderOp>;
+    using BodySendAwaiter = detail::Http2SendAwaiter<ClientHttp2Request, SendRequestBodyOp>;
+    using TrailerSendAwaiter = detail::Http2SendAwaiter<ClientHttp2Request, SendRequestTrailerOp>;
 
     static Http2Stream::Lease create_peer_stream(std::uint32_t stream_id, Http2Connection &conn) noexcept;
     static Http2Stream::Lease create_peer_stream_op(void *ctx, std::uint32_t stream_id, Http2Connection &conn) noexcept;
@@ -110,12 +110,8 @@ private:
     std::uint64_t pending_name_hash_ = 0;
     bool pending_name_stable_ = false;
 
-    template<class>
-    friend class detail::SendAwaiterBase;
     template<class, class>
-    friend class detail::HeaderSendAwaiter;
-    template<class, class>
-    friend class detail::BodySendAwaiter;
+    friend class detail::Http2SendAwaiter;
 };
 
 } // namespace fiber::http
