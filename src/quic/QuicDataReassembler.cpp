@@ -1,6 +1,7 @@
 #include "QuicDataReassembler.h"
 
 #include <algorithm>
+#include <cstring>
 #include <expected>
 #include <limits>
 #include <utility>
@@ -24,6 +25,9 @@ void QuicDataReassembler::init(mem::IoBufNodePool &pool, Options options) noexce
     buffer_limit_ = options.buffer_limit;
     max_active_extents_ = options.max_active_extents;
     buffer_accounting_ = options.buffer_accounting;
+    storage_budget_ = options.storage_budget;
+    compact_min_backing_capacity_ = options.compact_min_backing_capacity;
+    compact_ratio_ = std::max<std::uint8_t>(options.compact_ratio, 1);
 }
 
 void QuicDataReassembler::discard_buffered() noexcept {
@@ -32,6 +36,9 @@ void QuicDataReassembler::discard_buffered() noexcept {
     }
     while (head_ != nullptr) {
         mem::IoBufNode *next = head_->next;
+        if (storage_budget_ != nullptr) {
+            storage_budget_->release(head_->buf);
+        }
         pool_->release(head_);
         head_ = next;
     }
@@ -97,15 +104,53 @@ common::IoResult<std::size_t> QuicDataReassembler::insert(std::uint64_t offset, 
         cost->extents > max_active_extents_ - std::min(active_extent_count_, max_active_extents_)) [[unlikely]] {
         return std::unexpected(common::IoErr::MessageTooLarge);
     }
+    if (cost->extents == 0) {
+        return 0;
+    }
+
+    mem::IoBuf compacted;
+    bool use_compacted = false;
+    if (storage_budget_ != nullptr) {
+        const bool amplified = !storage_budget_->retains(data) && data.capacity() >= compact_min_backing_capacity_ &&
+                               cost->bytes <= data.capacity() / compact_ratio_;
+        if (!storage_budget_->compatible(data) || amplified) {
+            auto compact = compact_missing(offset, data, cost->bytes);
+            if (!compact) [[unlikely]] {
+                return std::unexpected(compact.error());
+            }
+            compacted = std::move(*compact);
+            use_compacted = true;
+        }
+    }
 
     mem::IoBufNode *reserved = reserve_nodes(cost->extents);
-    if (cost->extents != 0 && reserved == nullptr) [[unlikely]] {
+    if (reserved == nullptr) [[unlikely]] {
         return std::unexpected(common::IoErr::NoMem);
+    }
+
+    if (storage_budget_ != nullptr) {
+        mem::IoBuf *backing = use_compacted ? &compacted : &data;
+        const auto refs = static_cast<std::uint32_t>(cost->extents);
+        bool retained_storage = storage_budget_->try_retain(*backing, refs);
+        if (!retained_storage && !use_compacted && cost->bytes < data.capacity()) [[unlikely]] {
+            auto compact = compact_missing(offset, data, cost->bytes);
+            if (compact) {
+                compacted = std::move(*compact);
+                use_compacted = true;
+                backing = &compacted;
+                retained_storage = storage_budget_->try_retain(*backing, refs);
+            }
+        }
+        if (!retained_storage) [[unlikely]] {
+            release_nodes(reserved);
+            return std::unexpected(common::IoErr::NoMem);
+        }
     }
 
     const std::uint64_t base_offset = offset;
     std::uint64_t cursor = offset;
     std::size_t retained = 0;
+    std::size_t compacted_offset = 0;
     mem::IoBufNode *prev = nullptr;
     mem::IoBufNode *cur = head_;
 
@@ -153,7 +198,12 @@ common::IoResult<std::size_t> QuicDataReassembler::insert(std::uint64_t offset, 
 
         const std::size_t source_offset = static_cast<std::size_t>(cursor - base_offset);
         const std::size_t hole_len = static_cast<std::size_t>(hole_end - cursor);
-        if (cost->extents == 1 && source_offset == 0 && hole_len == data.readable()) {
+        if (use_compacted && cost->extents == 1) {
+            new_ext->buf = std::move(compacted);
+        } else if (use_compacted) {
+            new_ext->buf = compacted.retain_slice(compacted_offset, hole_len);
+            compacted_offset += hole_len;
+        } else if (cost->extents == 1 && source_offset == 0 && hole_len == data.readable()) {
             new_ext->buf = std::move(data);
         } else {
             new_ext->buf = data.retain_slice(source_offset, hole_len);
@@ -200,6 +250,9 @@ common::IoResult<std::size_t> QuicDataReassembler::take_contiguous(mem::IoBufCha
             taken += readable;
             unlink_after(nullptr, *extent);
             next_offset_ = next_read;
+            if (storage_budget_ != nullptr) {
+                storage_budget_->release(extent->buf);
+            }
             if (!out.append_node(extent)) [[unlikely]] {
                 return std::unexpected(common::IoErr::NoMem);
             }
@@ -280,6 +333,69 @@ common::IoResult<QuicDataReassembler::InsertCost> QuicDataReassembler::insert_co
     return cost;
 }
 
+common::IoResult<mem::IoBuf> QuicDataReassembler::compact_missing(std::uint64_t offset, const mem::IoBuf &data,
+                                                                  std::size_t retained_bytes) const noexcept {
+    if (retained_bytes == 0 || offset > std::numeric_limits<std::uint64_t>::max() - data.readable()) [[unlikely]] {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    mem::IoBuf compacted = mem::IoBuf::allocate_trackable(retained_bytes);
+    if (!compacted) [[unlikely]] {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
+    const std::uint64_t base_offset = offset;
+    const std::uint64_t data_end = offset + data.readable();
+    std::uint64_t cursor = offset;
+    mem::IoBufNode *prev = nullptr;
+    mem::IoBufNode *cur = head_;
+
+    if (last_insert_ != nullptr && last_insert_->offset <= cursor) {
+        prev = last_insert_;
+        cur = last_insert_->next;
+    }
+
+    while (cursor < data_end) {
+        while (cur != nullptr && cur->offset <= cursor) {
+            const std::uint64_t cur_end = cur->offset + cur->buf.readable();
+            if (cur_end > cursor) {
+                cursor = std::min(cur_end, data_end);
+                if (cursor >= data_end) {
+                    break;
+                }
+            }
+            prev = cur;
+            cur = cur->next;
+        }
+        if (cursor >= data_end) {
+            break;
+        }
+
+        if (prev != nullptr) {
+            const std::uint64_t prev_end = prev->offset + prev->buf.readable();
+            if (prev_end > cursor) {
+                cursor = std::min(prev_end, data_end);
+                continue;
+            }
+        }
+
+        const std::uint64_t next_start = cur != nullptr ? cur->offset : data_end;
+        const std::uint64_t hole_end = std::min(next_start, data_end);
+        if (hole_end <= cursor) [[unlikely]] {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+
+        const std::size_t source_offset = static_cast<std::size_t>(cursor - base_offset);
+        const std::size_t hole_len = static_cast<std::size_t>(hole_end - cursor);
+        std::memcpy(compacted.writable_data(), data.readable_data() + source_offset, hole_len);
+        compacted.commit(hole_len);
+        cursor = hole_end;
+    }
+
+    FIBER_ASSERT(compacted.readable() == retained_bytes);
+    return compacted;
+}
+
 std::uint64_t QuicDataReassembler::contiguous_end_after_insert(std::uint64_t offset, std::size_t len) const noexcept {
     const std::uint64_t data_end = offset + len;
     if (offset != next_offset_ || data_end <= next_offset_) {
@@ -350,6 +466,9 @@ mem::IoBufNode *QuicDataReassembler::try_merge_with_next(mem::IoBufNode *extent)
     }
     if (last_insert_ == right) {
         last_insert_ = extent;
+    }
+    if (storage_budget_ != nullptr) {
+        storage_budget_->release(extent->buf);
     }
     --active_extent_count_;
     pool_->release(right);

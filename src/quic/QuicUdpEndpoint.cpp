@@ -393,6 +393,7 @@ common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Optio
     }
 
     options_ = options;
+    recv_storage_budget_.init(options_.retained_storage_limit);
     if (options_.retry) {
         options_.issue_new_token = true;
     }
@@ -500,6 +501,7 @@ void QuicUdpEndpoint::close() noexcept {
     while (QuicConnection::EndpointIndex *index = connections_.front()) {
         force_detach_connection(*index->connection);
     }
+    FIBER_ASSERT(recv_storage_budget_.retained_capacity() == 0);
 
     active_connection_count_ = 0;
     stateless_rate_ = {};
@@ -1338,6 +1340,7 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     conn_options.max_peer_unidirectional_streams = options_.transport.initial_max_streams_uni;
     conn_options.output_frame_pool = &output_frame_pool_;
     conn_options.crypto_block_pool = &crypto_block_pool_;
+    conn_options.recv_storage_parent = &recv_storage_budget_;
     conn_options.loop = loop_;
     conn_options.has_retry_source_connection_id = validation.retried;
     conn_options.initial_path_validated = validation.address_validated;

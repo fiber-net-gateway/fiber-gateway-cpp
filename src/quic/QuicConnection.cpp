@@ -570,6 +570,7 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
     on_destroy_ = options_.on_destroy;
     loop_ = options_.loop != nullptr ? options_.loop : event::EventLoop::current_or_null();
     FIBER_ASSERT(loop_ != nullptr);
+    recv_storage_budget_.init(options_.recv_flow.retained_storage_limit, options_.recv_storage_parent);
     auto peer_stream_limit = [](std::uint64_t concurrent_limit, std::uint64_t transport_limit,
                                 std::uint64_t default_limit) noexcept {
         concurrent_limit = std::min(concurrent_limit, kQuicMaxStreamLimit);
@@ -617,13 +618,13 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
             options_.output_frame_pool != nullptr ? *options_.output_frame_pool : output_frame_pool_;
     packet_number_spaces_[0].reset(QuicEncryptionLevel::Initial);
     packet_number_spaces_[0].set_frame_pool(frame_pool);
-    packet_number_spaces_[0].crypto_recv.init(recv_extent_pool());
+    packet_number_spaces_[0].crypto_recv.init(recv_extent_pool(), {.storage_budget = &recv_storage_budget_});
     packet_number_spaces_[1].reset(QuicEncryptionLevel::Handshake);
     packet_number_spaces_[1].set_frame_pool(frame_pool);
-    packet_number_spaces_[1].crypto_recv.init(recv_extent_pool());
+    packet_number_spaces_[1].crypto_recv.init(recv_extent_pool(), {.storage_budget = &recv_storage_budget_});
     packet_number_spaces_[2].reset(QuicEncryptionLevel::Application);
     packet_number_spaces_[2].set_frame_pool(frame_pool);
-    packet_number_spaces_[2].crypto_recv.init(recv_extent_pool());
+    packet_number_spaces_[2].crypto_recv.init(recv_extent_pool(), {.storage_budget = &recv_storage_budget_});
     quic_congestion_init(congestion_, QuicTime{0});
     quic_rtt_init(rtt_);
 
@@ -828,6 +829,7 @@ void QuicConnection::clear_packet_space_frames_for_detach(QuicPacketNumberSpace 
     space.send_ack = false;
     space.send_ack_count = 0;
     space.pending_ack = kUnsetPacketNumber;
+    space.crypto_recv.clear();
 }
 
 void QuicConnection::clear_frames_for_detach() noexcept {
@@ -1704,6 +1706,7 @@ common::IoResult<QuicStream *> QuicConnection::try_attach_local_stream(QuicStrea
             .buffer_limit = options_.recv_flow.stream_buffer_limit,
             .low_water = options_.recv_flow.stream_low_water,
             .max_stream_data = options_.recv_flow.stream_buffer_limit,
+            .storage_budget = &recv_storage_budget_,
     };
     const std::uint64_t id = next;
     auto attached = attach_stream(std::move(stream), id, recv_options, /*local_initiated=*/true);
@@ -1821,6 +1824,7 @@ common::IoResult<QuicStream *> QuicConnection::create_peer_stream(std::uint64_t 
             .buffer_limit = options_.recv_flow.stream_buffer_limit,
             .low_water = options_.recv_flow.stream_low_water,
             .max_stream_data = options_.recv_flow.stream_buffer_limit,
+            .storage_budget = &recv_storage_budget_,
     };
     QuicStream::Lease lease = options_.ops.create_stream(options_.owner, stream_id);
     auto attached = attach_stream(std::move(lease), stream_id, recv_options, /*local_initiated=*/false);

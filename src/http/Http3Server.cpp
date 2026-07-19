@@ -227,6 +227,7 @@ quic::QuicUdpEndpoint::Options Http3Server::make_endpoint_options(const net::Soc
     quic::QuicUdpEndpoint::Options options{};
     options.bind_addr = addr;
     options.max_connections = options_.http3.max_connections_per_shard;
+    options.retained_storage_limit = options_.http3.retained_storage_limit;
     options.tls_context = tls_ctx_.get();
     options.udp = options_.http3.udp;
     options.udp.reuse_addr = true;

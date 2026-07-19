@@ -9,6 +9,7 @@
 namespace {
 
 using fiber::mem::IoBuf;
+using fiber::mem::IoBufStorageBudget;
 
 std::string_view readable_view(const IoBuf &buf) {
     return {reinterpret_cast<const char *>(buf.readable_data()), buf.readable()};
@@ -131,6 +132,61 @@ TEST(IoBufTest, TryMergeAdjacentExtendsSameStorageReadableView) {
     other.commit(2);
     EXPECT_FALSE(first.try_merge_adjacent(std::move(other)));
     EXPECT_TRUE(other.valid());
+}
+
+TEST(IoBufTest, TrackableStorageCountsCapacityOnceUntilLastRetentionRelease) {
+    IoBufStorageBudget budget(64);
+    IoBuf storage = IoBuf::allocate_trackable(32);
+    ASSERT_TRUE(storage);
+    EXPECT_TRUE(storage.storage_trackable());
+
+    IoBuf first = storage.retain_storage_slice(0, 1);
+    IoBuf second = storage.retain_storage_slice(8, 1);
+    ASSERT_TRUE(budget.try_retain(first));
+    ASSERT_TRUE(budget.try_retain(second));
+    EXPECT_TRUE(budget.retains(storage));
+    EXPECT_EQ(budget.retained_capacity(), 32U);
+    EXPECT_EQ(budget.high_water(), 32U);
+
+    budget.release(first);
+    EXPECT_EQ(budget.retained_capacity(), 32U);
+    budget.release(second);
+    EXPECT_EQ(budget.retained_capacity(), 0U);
+    EXPECT_FALSE(budget.retains(storage));
+}
+
+TEST(IoBufTest, ChildAndParentBudgetsReserveAndReleaseTogether) {
+    IoBufStorageBudget parent(64);
+    IoBufStorageBudget child(48, &parent);
+    IoBuf storage = IoBuf::allocate_trackable(32);
+    ASSERT_TRUE(child.try_retain(storage));
+    EXPECT_EQ(child.retained_capacity(), 32U);
+    EXPECT_EQ(parent.retained_capacity(), 32U);
+
+    child.release(storage);
+    EXPECT_EQ(child.retained_capacity(), 0U);
+    EXPECT_EQ(parent.retained_capacity(), 0U);
+}
+
+TEST(IoBufTest, ParentBudgetRejectionLeavesBothBudgetsUnchanged) {
+    IoBufStorageBudget parent(16);
+    IoBufStorageBudget child(64, &parent);
+    IoBuf storage = IoBuf::allocate_trackable(32);
+
+    EXPECT_FALSE(child.try_retain(storage));
+    EXPECT_EQ(child.retained_capacity(), 0U);
+    EXPECT_EQ(parent.retained_capacity(), 0U);
+    EXPECT_EQ(child.rejected_count(), 1U);
+    EXPECT_EQ(parent.rejected_count(), 1U);
+}
+
+TEST(IoBufTest, OrdinaryStorageCannotBeAttachedToStorageBudget) {
+    IoBufStorageBudget budget(64);
+    IoBuf storage = IoBuf::allocate(32);
+    ASSERT_TRUE(storage);
+    EXPECT_FALSE(storage.storage_trackable());
+    EXPECT_FALSE(budget.try_retain(storage));
+    EXPECT_EQ(budget.retained_capacity(), 0U);
 }
 
 } // namespace

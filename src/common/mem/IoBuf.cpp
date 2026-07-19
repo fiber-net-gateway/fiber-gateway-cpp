@@ -12,10 +12,105 @@ namespace fiber::mem {
 
 struct alignas(std::max_align_t) IoBuf::ControlBlock {
     alignas(std::atomic_ref<std::uint32_t>::required_alignment) std::uint32_t refcount = 1;
+    std::uint32_t retention_offset = 0;
     std::size_t capacity = 0;
 };
 
+struct IoBuf::StorageRetention {
+    IoBufStorageBudget *owner = nullptr;
+    std::uint32_t refs = 0;
+};
+
 static_assert(alignof(std::max_align_t) >= std::atomic_ref<std::uint32_t>::required_alignment);
+
+IoBufStorageBudget::IoBufStorageBudget(std::size_t limit, IoBufStorageBudget *parent) noexcept { init(limit, parent); }
+
+IoBufStorageBudget::~IoBufStorageBudget() { FIBER_ASSERT(retained_capacity_ == 0); }
+
+void IoBufStorageBudget::init(std::size_t limit, IoBufStorageBudget *parent) noexcept {
+    FIBER_ASSERT(retained_capacity_ == 0);
+    FIBER_ASSERT(parent != this);
+    parent_ = parent;
+    limit_ = limit;
+    high_water_ = 0;
+    rejected_count_ = 0;
+}
+
+bool IoBufStorageBudget::try_retain(const IoBuf &buf, std::uint32_t refs) noexcept {
+    if (refs == 0) {
+        return true;
+    }
+
+    IoBuf::StorageRetention *retention = IoBuf::storage_retention(buf.control_);
+    if (retention == nullptr) {
+        return false;
+    }
+    if (retention->owner != nullptr) {
+        if (retention->owner != this || refs > std::numeric_limits<std::uint32_t>::max() - retention->refs) {
+            return false;
+        }
+        retention->refs += refs;
+        return true;
+    }
+
+    if (!try_reserve(buf.capacity())) {
+        return false;
+    }
+    retention->owner = this;
+    retention->refs = refs;
+    return true;
+}
+
+void IoBufStorageBudget::release(const IoBuf &buf, std::uint32_t refs) noexcept {
+    if (refs == 0) {
+        return;
+    }
+
+    IoBuf::StorageRetention *retention = IoBuf::storage_retention(buf.control_);
+    FIBER_ASSERT(retention != nullptr);
+    FIBER_ASSERT(retention->owner == this);
+    FIBER_ASSERT(retention->refs >= refs);
+    retention->refs -= refs;
+    if (retention->refs != 0) {
+        return;
+    }
+
+    retention->owner = nullptr;
+    unreserve(buf.capacity());
+}
+
+bool IoBufStorageBudget::retains(const IoBuf &buf) const noexcept {
+    const IoBuf::StorageRetention *retention = IoBuf::storage_retention(buf.control_);
+    return retention != nullptr && retention->owner == this;
+}
+
+bool IoBufStorageBudget::compatible(const IoBuf &buf) const noexcept {
+    const IoBuf::StorageRetention *retention = IoBuf::storage_retention(buf.control_);
+    return retention != nullptr && (retention->owner == nullptr || retention->owner == this);
+}
+
+bool IoBufStorageBudget::try_reserve(std::size_t bytes) noexcept {
+    if (retained_capacity_ > limit_ || bytes > limit_ - retained_capacity_) {
+        ++rejected_count_;
+        return false;
+    }
+    if (parent_ != nullptr && !parent_->try_reserve(bytes)) {
+        ++rejected_count_;
+        return false;
+    }
+
+    retained_capacity_ += bytes;
+    high_water_ = std::max(high_water_, retained_capacity_);
+    return true;
+}
+
+void IoBufStorageBudget::unreserve(std::size_t bytes) noexcept {
+    FIBER_ASSERT(bytes <= retained_capacity_);
+    retained_capacity_ -= bytes;
+    if (parent_ != nullptr) {
+        parent_->unreserve(bytes);
+    }
+}
 
 IoBuf::IoBuf(ControlBlock *control, std::uint8_t *view_begin, std::uint8_t *view_end, std::uint8_t *pos,
              std::uint8_t *last) noexcept :
@@ -76,21 +171,50 @@ IoBuf &IoBuf::operator=(IoBuf &&other) noexcept {
     return *this;
 }
 
-IoBuf IoBuf::allocate(std::size_t capacity) noexcept {
+IoBuf IoBuf::allocate(std::size_t capacity) noexcept { return allocate_impl(capacity, false); }
+
+IoBuf IoBuf::allocate_trackable(std::size_t capacity) noexcept { return allocate_impl(capacity, true); }
+
+IoBuf IoBuf::allocate_impl(std::size_t capacity, bool trackable) noexcept {
+    static_assert(sizeof(ControlBlock) == 16);
     if (capacity == 0) {
         return {};
     }
+    constexpr std::size_t retention_alignment = alignof(StorageRetention);
+    constexpr std::size_t retention_mask = retention_alignment - 1;
+    static_assert((retention_alignment & retention_mask) == 0);
+
     if (capacity > std::numeric_limits<std::size_t>::max() - sizeof(ControlBlock)) {
         return {};
     }
 
-    void *raw = ::operator new(sizeof(ControlBlock) + capacity, std::nothrow);
+    const std::size_t payload_end = sizeof(ControlBlock) + capacity;
+    std::size_t allocation_size = payload_end;
+    std::uint32_t retention_offset = 0;
+    if (trackable) {
+        if (payload_end > std::numeric_limits<std::size_t>::max() - retention_mask) {
+            return {};
+        }
+        const std::size_t aligned_offset = (payload_end + retention_mask) & ~retention_mask;
+        if (aligned_offset > std::numeric_limits<std::uint32_t>::max() ||
+            aligned_offset > std::numeric_limits<std::size_t>::max() - sizeof(StorageRetention)) {
+            return {};
+        }
+        retention_offset = static_cast<std::uint32_t>(aligned_offset);
+        allocation_size = aligned_offset + sizeof(StorageRetention);
+    }
+
+    void *raw = ::operator new(allocation_size, std::nothrow);
     if (!raw) {
         return {};
     }
 
     auto *control = new (raw) ControlBlock{};
+    control->retention_offset = retention_offset;
     control->capacity = capacity;
+    if (retention_offset != 0) {
+        new (reinterpret_cast<std::uint8_t *>(control) + retention_offset) StorageRetention{};
+    }
 
     std::uint8_t *begin = storage_begin(control);
     std::uint8_t *end = begin + capacity;
@@ -124,6 +248,8 @@ std::uint32_t IoBuf::use_count() const noexcept {
     std::atomic_ref<std::uint32_t> ref(control_->refcount);
     return ref.load(std::memory_order_relaxed);
 }
+
+bool IoBuf::storage_trackable() const noexcept { return storage_retention(control_) != nullptr; }
 
 std::uint8_t *IoBuf::data() noexcept { return storage_begin(control_); }
 
@@ -243,6 +369,21 @@ const std::uint8_t *IoBuf::storage_begin(const ControlBlock *control) noexcept {
     return reinterpret_cast<const std::uint8_t *>(control) + sizeof(ControlBlock);
 }
 
+IoBuf::StorageRetention *IoBuf::storage_retention(ControlBlock *control) noexcept {
+    if (control == nullptr || control->retention_offset == 0) {
+        return nullptr;
+    }
+    return reinterpret_cast<StorageRetention *>(reinterpret_cast<std::uint8_t *>(control) + control->retention_offset);
+}
+
+const IoBuf::StorageRetention *IoBuf::storage_retention(const ControlBlock *control) noexcept {
+    if (control == nullptr || control->retention_offset == 0) {
+        return nullptr;
+    }
+    return reinterpret_cast<const StorageRetention *>(reinterpret_cast<const std::uint8_t *>(control) +
+                                                      control->retention_offset);
+}
+
 void IoBuf::retain(ControlBlock *control) noexcept {
     FIBER_ASSERT(control != nullptr);
     std::atomic_ref<std::uint32_t> ref(control->refcount);
@@ -272,6 +413,11 @@ void IoBuf::release(ControlBlock *control) noexcept {
         std::uint32_t next = current - 1;
         if (ref.compare_exchange_weak(current, next, std::memory_order_acq_rel, std::memory_order_relaxed)) {
             if (next == 0) {
+                StorageRetention *retention = storage_retention(control);
+                FIBER_ASSERT(retention == nullptr || (retention->owner == nullptr && retention->refs == 0));
+                if (retention != nullptr) {
+                    retention->~StorageRetention();
+                }
                 control->~ControlBlock();
                 ::operator delete(control);
             }
