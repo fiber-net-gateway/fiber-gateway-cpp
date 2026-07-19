@@ -1,6 +1,7 @@
 #ifndef FIBER_EVENT_POLLER_H
 #define FIBER_EVENT_POLLER_H
 
+#include <chrono>
 #include <cstdint>
 #include <sys/epoll.h>
 #include <type_traits>
@@ -41,7 +42,7 @@ public:
     fiber::common::IoErr add(int fd, Event events, Item *item, Mode mode = Mode::None);
     fiber::common::IoErr mod(int fd, Event events, Item *item, Mode mode = Mode::None);
     fiber::common::IoErr del(int fd);
-    int wait(epoll_event *events, int max_events, int timeout_ms);
+    int wait(epoll_event *events, int max_events, std::chrono::nanoseconds timeout);
 
 private:
     int epoll_fd_ = -1;

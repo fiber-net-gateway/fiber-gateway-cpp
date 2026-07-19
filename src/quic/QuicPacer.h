@@ -14,7 +14,7 @@ struct QuicPacingOptions {
     std::uint32_t rate_numerator = 5;
     std::uint32_t rate_denominator = 4;
     std::uint16_t max_burst_packets = 10;
-    std::chrono::microseconds timer_granularity{1000};
+    std::chrono::microseconds timer_granularity{100};
 };
 
 struct QuicPacerState {

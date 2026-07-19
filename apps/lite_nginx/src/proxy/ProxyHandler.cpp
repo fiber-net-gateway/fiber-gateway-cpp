@@ -220,6 +220,7 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
     }
 
     if (!request_end_stream) {
+        RequestBodyForwardState forward_state(request_body);
         while (true) {
             auto body_result = co_await exchange.read_body(kBodyChunkSize);
             if (!body_result) {
@@ -227,12 +228,22 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
                 co_return;
             }
             const bool last = body_result->complete();
-            auto write_result = co_await upstream_exchange.write_body(std::move(*body_result), location.send_timeout);
-            if (!write_result) {
-                record_upstream_error(log_context, write_result.error(), "send_body");
-                co_await send_plain_response(exchange, map_upstream_error_status(write_result.error()),
-                                             map_upstream_error_body(write_result.error()), listener);
+            const std::size_t body_bytes = body_result->readable_bytes();
+            if (!forward_state.accepts(body_bytes)) {
+                (void) upstream_exchange.abort(fiber::common::IoErr::Invalid);
+                (void) exchange.abort(fiber::common::IoErr::Invalid);
                 co_return;
+            }
+            if (forward_state.should_write(body_bytes)) {
+                auto write_result =
+                        co_await upstream_exchange.write_body(std::move(*body_result), location.send_timeout);
+                if (!write_result) {
+                    record_upstream_error(log_context, write_result.error(), "send_body");
+                    co_await send_plain_response(exchange, map_upstream_error_status(write_result.error()),
+                                                 map_upstream_error_body(write_result.error()), listener);
+                    co_return;
+                }
+                forward_state.record_write(*write_result);
             }
             if (last) {
                 break;
