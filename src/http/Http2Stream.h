@@ -19,8 +19,8 @@ class ServerHttp2Request;
 
 namespace detail {
 
-template<class Owner>
-class SendAwaiterBase;
+template<class Owner, class Op>
+class Http2SendAwaiter;
 
 } // namespace detail
 
@@ -135,12 +135,14 @@ private:
         ConnectionWindow,
     };
 
-    [[nodiscard]] bool try_arm_outbound(Http2OutboundOperation &operation) noexcept;
-    void disarm_outbound(Http2OutboundOperation &operation) noexcept;
-    [[nodiscard]] std::size_t pending_flow_controlled_bytes() const noexcept;
+    [[nodiscard]] bool try_arm_outbound(const Http2OutboundOperation::Ops &ops, void *ctx,
+                                        std::size_t pending_flow_controlled_bytes) noexcept;
+    void disarm_outbound(void *ctx) noexcept;
     [[nodiscard]] common::IoErr encode_outbound_batch(const Http2OutboundEncodeRequest &req,
                                                       Http2OutboundEncodeTarget &target,
                                                       Http2OutboundEncodeResult &result) noexcept;
+    void notify_outbound_send_done(common::IoErr error, std::uint32_t flow_controlled_bytes,
+                                   bool operation_final_batch) noexcept;
     static void on_outbound_hook_send_done(Http2OutboundHook &hook, common::IoErr result) noexcept;
     [[nodiscard]] bool ready_for_connection_release() const noexcept;
     [[nodiscard]] bool ready_for_destruction() const noexcept;
@@ -161,7 +163,8 @@ private:
     std::int32_t recv_window_remaining_ = 65535;
     std::uint32_t recv_window_target_ = 65535;
     std::uint32_t recv_window_low_watermark_ = 0;
-    Http2OutboundOperation *outbound_operation_ = nullptr;
+    Http2OutboundOperation outbound_operation_{};
+    std::size_t outbound_pending_flow_controlled_bytes_ = 0;
     Http2OutboundHook outbound_hook_{};
     common::IntrusiveListHook conn_window_wait_hook_{};
     Http2OutboundKind outbound_kind_ = Http2OutboundKind::None;
@@ -176,8 +179,8 @@ private:
     friend class Http2Connection;
     friend class ServerHttp2Request;
     friend class ClientHttp2Request;
-    template<class Owner>
-    friend class detail::SendAwaiterBase;
+    template<class Owner, class Op>
+    friend class detail::Http2SendAwaiter;
 };
 
 } // namespace fiber::http

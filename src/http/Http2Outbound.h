@@ -28,6 +28,12 @@ struct Http2OutboundEncodeResult {
     bool operation_final_batch = false;
 };
 
+struct Http2OutboundSendResult {
+    common::IoErr error = common::IoErr::None;
+    std::uint32_t flow_controlled_bytes = 0;
+    bool operation_final_batch = false;
+};
+
 class Http2OutboundEncodeTarget {
 public:
     explicit Http2OutboundEncodeTarget(mem::IoBufNodePool &node_pool) noexcept : chain_(node_pool) {}
@@ -44,17 +50,18 @@ private:
     mem::IoBufChain chain_{};
 };
 
-class Http2OutboundOperation {
-public:
-    [[nodiscard]] virtual std::size_t pending_flow_controlled_bytes() const noexcept = 0;
-    virtual common::IoErr encode_outbound_batch(Http2Stream &stream, const Http2OutboundEncodeRequest &req,
-                                                Http2OutboundEncodeTarget &target,
-                                                Http2OutboundEncodeResult &result) noexcept = 0;
-    virtual void on_outbound_batch_sent(std::uint32_t flow_controlled_bytes, bool operation_final_batch) noexcept = 0;
-    virtual void on_outbound_abort(common::IoErr reason) noexcept = 0;
+struct Http2OutboundOperation {
+    struct Ops {
+        common::IoErr (*on_encode)(void *ctx, Http2Stream &stream, const Http2OutboundEncodeRequest &req,
+                                   Http2OutboundEncodeTarget &target,
+                                   Http2OutboundEncodeResult &result) noexcept = nullptr;
+        void (*on_send_done)(void *ctx, const Http2OutboundSendResult &result) noexcept = nullptr;
+    };
 
-protected:
-    virtual ~Http2OutboundOperation() = default;
+    const Ops *ops = nullptr;
+    void *ctx = nullptr;
+
+    [[nodiscard]] explicit operator bool() const noexcept { return ops != nullptr; }
 };
 
 } // namespace fiber::http
