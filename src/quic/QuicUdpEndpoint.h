@@ -257,6 +257,7 @@ private:
     std::unique_ptr<std::uint8_t[]> read_buffer_{};
     std::unique_ptr<std::uint8_t[]> send_plaintext_buffer_{};
     std::unique_ptr<std::uint8_t[]> send_buffer_{};
+    QuicCryptoBlockPool crypto_block_pool_{};
     QuicOutputFramePool output_frame_pool_{};
     QuicSendScheduler send_scheduler_{};
     DcidTree dcid_tree_{};

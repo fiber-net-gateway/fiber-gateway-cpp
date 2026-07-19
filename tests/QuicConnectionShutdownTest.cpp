@@ -80,7 +80,9 @@ const fiber::quic::QuicOutputFrame *find_pending_frame_of_type(const fiber::quic
 // actually queue a CC frame at the Application level.
 void mark_established_with_app_keys(fiber::quic::QuicConnection &conn) {
     ASSERT_TRUE(conn.mark_established().has_value());
-    conn.crypto().application_write.ready = true;
+    ASSERT_TRUE(conn.crypto().ensure_application());
+    conn.crypto().application_write().packet->ready = true;
+    conn.crypto().application_write().header->ready = true;
 }
 
 // Open a peer-initiated stream by feeding a STREAM frame with FIN. The data is
@@ -838,9 +840,7 @@ fiber::quic::QuicConnection::Options reset_test_options(ShutdownCallbackState &s
 
 // Install real Application READ keys (AES-128-GCM) so short-header decryption
 // is actually attempted on forged packets and fails at the AEAD tag check — the
-// realistic stateless-reset detection path. Flags next-generation keys ready so
-// an inadvertent key-phase bit in the forged garbage cannot trigger a spurious
-// KEY_UPDATE_ERROR close before detection runs.
+// realistic stateless-reset detection path.
 void install_application_read_keys(fiber::quic::QuicConnection &conn) {
     constexpr fiber::quic::QuicCryptoSuite suite = fiber::quic::QuicCryptoSuite::Aes128GcmSha256;
     std::array<std::uint8_t, fiber::quic::kQuicMaxSecretLength> app_secret{};
@@ -849,7 +849,6 @@ void install_application_read_keys(fiber::quic::QuicConnection &conn) {
     }
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(conn.crypto(), fiber::quic::QuicEncryptionLevel::Application,
                                                         /*write_secret=*/false, suite, app_secret.data(), 32));
-    conn.crypto().next_application_keys_ready = true;
 }
 
 // Record a peer-issued NEW_CONNECTION_ID (carrying a stateless_reset_token) at

@@ -102,12 +102,12 @@ void build_initial_datagram(std::array<std::uint8_t, fiber::quic::kMinInitialDat
     packet.ciphertext_len = plaintext_len + fiber::quic::kAeadTagLength;
 
     auto sealed = fiber::quic::quic_encrypt_packet_payload(
-            packet, crypto.initial_read, plaintext, plaintext_len, pn + packet.pn_len,
+            packet, crypto.initial_read(), plaintext, plaintext_len, pn + packet.pn_len,
             datagram.size() - static_cast<std::size_t>(pn + packet.pn_len - datagram.data()));
     ASSERT_TRUE(sealed.has_value());
     packet.packet_len = static_cast<std::size_t>(pn + packet.pn_len - datagram.data()) + *sealed;
-    ASSERT_TRUE(
-            fiber::quic::quic_apply_header_protection(packet, crypto.initial_read, datagram.data(), packet.packet_len));
+    ASSERT_TRUE(fiber::quic::quic_apply_header_protection(packet, crypto.initial_read(), datagram.data(),
+                                                          packet.packet_len));
 }
 
 fiber::quic::QuicReceivedDatagram received_datagram(std::uint8_t *data, std::size_t len) {
@@ -226,7 +226,7 @@ TEST(QuicPacketProcessorTest, ProcessesClientInitialCryptoFrame) {
     EXPECT_TRUE(result->ack_eliciting);
     EXPECT_TRUE(result->send_ack);
     EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Handshaking);
-    EXPECT_TRUE(conn.crypto().initial_ready);
+    EXPECT_TRUE(conn.crypto().initial_ready());
     EXPECT_EQ(conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial).largest_received_packet_number, 2U);
 }
 
@@ -475,6 +475,33 @@ TEST(QuicPacketProcessorTest, DisallowedApplicationFrameClosesWithProtocolViolat
     EXPECT_EQ(close->u.close.frame_type, static_cast<std::uint64_t>(fiber::quic::QuicFrameType::HandshakeDone));
 }
 
+TEST(QuicPacketProcessorTest, HandshakeDoneConfirmsClientHandshake) {
+    ApplicationPacketTestContext context;
+    ASSERT_TRUE(context.init_keys());
+    const std::array<std::uint8_t, 1> payload{
+            static_cast<std::uint8_t>(fiber::quic::QuicFrameType::HandshakeDone),
+    };
+    fiber::quic::QuicPacketEncodeSpec spec{};
+    spec.level = fiber::quic::QuicEncryptionLevel::Application;
+    spec.dcid = context.client_cid;
+    spec.payload = payload.data();
+    spec.payload_len = payload.size();
+    spec.payload_frame_count = 1;
+    spec.payload_ack_eliciting = true;
+    auto encoded = fiber::quic::quic_encode_packet(context.server, spec,
+                                                   {context.encode_plaintext.data(), context.encode_plaintext.size()},
+                                                   context.datagram.data(), context.datagram.size());
+    ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
+
+    auto received = received_datagram(context.datagram.data(), encoded->packet_len);
+    auto result = fiber::quic::quic_process_datagram(context.client, received,
+                                                     static_cast<std::uint8_t>(context.client_cid.size()));
+
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_TRUE(context.client.handshake_confirmed());
+    EXPECT_TRUE(result->handshake_confirmed);
+}
+
 TEST(QuicPacketProcessorTest, ClosingConnectionSkipsMalformedApplicationPayload) {
     ApplicationPacketTestContext context;
     ASSERT_TRUE(context.init_keys());
@@ -501,9 +528,10 @@ TEST(QuicPacketProcessorTest, MalformedKeyUpdatePacketDoesNotRotateKeys) {
     ASSERT_TRUE(context.init_keys());
     ASSERT_TRUE(fiber::quic::quic_derive_next_key_pair(context.client.crypto()));
     ASSERT_TRUE(fiber::quic::quic_derive_next_key_pair(context.server.crypto()));
+    context.server.confirm_handshake();
 
-    context.client.crypto().application_write.swap(context.client.crypto().next_application_write);
-    context.client.flip_key_phase();
+    context.client.crypto().promote_application_keys();
+    context.client.crypto().epoch().phase = true;
     ASSERT_TRUE(context.client.key_phase());
     ASSERT_FALSE(context.server.key_phase());
 
@@ -519,8 +547,66 @@ TEST(QuicPacketProcessorTest, MalformedKeyUpdatePacketDoesNotRotateKeys) {
     EXPECT_EQ(context.server.state(), fiber::quic::QuicConnectionState::Closing);
     EXPECT_EQ(context.server.close_error(), fiber::quic::QuicErrorCode::FrameEncodingError);
     EXPECT_FALSE(context.server.key_phase());
-    EXPECT_FALSE(context.server.crypto().previous_application_keys_ready);
-    EXPECT_TRUE(context.server.crypto().next_application_keys_ready);
+    EXPECT_FALSE(context.server.crypto().previous_application_keys_ready());
+    EXPECT_TRUE(context.server.crypto().next_application_keys_ready());
+}
+
+TEST(QuicPacketProcessorTest, AppliesAuthenticatedPeerKeyUpdate) {
+    ApplicationPacketTestContext context;
+    ASSERT_TRUE(context.init_keys());
+    ASSERT_TRUE(fiber::quic::quic_derive_next_key_pair(context.client.crypto()));
+    ASSERT_TRUE(fiber::quic::quic_derive_next_key_pair(context.server.crypto()));
+    context.server.confirm_handshake();
+
+    context.client.crypto().promote_application_keys();
+    context.client.crypto().epoch().phase = true;
+    const std::array<std::uint8_t, 1> payload{0x01};
+    auto encoded = context.encode(payload.data(), payload.size(), 1);
+    ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
+
+    auto received = received_datagram(context.datagram.data(), encoded->packet_len);
+    auto result = fiber::quic::quic_process_datagram(context.server, received,
+                                                     static_cast<std::uint8_t>(context.server_cid.size()));
+
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_EQ(context.server.crypto().epoch().generation, 1U);
+    EXPECT_TRUE(context.server.key_phase());
+    EXPECT_EQ(context.server.crypto().epoch().current_read_lowest_pn, encoded->packet_number);
+    EXPECT_TRUE(context.server.crypto().previous_application_keys_ready());
+    EXPECT_TRUE(context.server.crypto().next_application_keys_ready());
+}
+
+TEST(QuicPacketProcessorTest, DecryptsReorderedPacketWithPreviousEpoch) {
+    ApplicationPacketTestContext context;
+    ASSERT_TRUE(context.init_keys());
+    ASSERT_TRUE(fiber::quic::quic_derive_next_key_pair(context.client.crypto()));
+    ASSERT_TRUE(fiber::quic::quic_derive_next_key_pair(context.server.crypto()));
+    context.server.confirm_handshake();
+
+    const std::array<std::uint8_t, 1> payload{0x01};
+    auto previous = context.encode(payload.data(), payload.size(), 1);
+    ASSERT_TRUE(previous.has_value()) << static_cast<int>(previous.error());
+    std::array<std::uint8_t, 256> previous_datagram = context.datagram;
+
+    context.client.crypto().promote_application_keys();
+    context.client.crypto().epoch().phase = true;
+    auto current = context.encode(payload.data(), payload.size(), 1);
+    ASSERT_TRUE(current.has_value()) << static_cast<int>(current.error());
+    ASSERT_GT(current->packet_number, previous->packet_number);
+
+    auto received_current = received_datagram(context.datagram.data(), current->packet_len);
+    auto current_result = fiber::quic::quic_process_datagram(context.server, received_current,
+                                                             static_cast<std::uint8_t>(context.server_cid.size()));
+    ASSERT_TRUE(current_result.has_value()) << static_cast<int>(current_result.error());
+    ASSERT_EQ(context.server.crypto().epoch().generation, 1U);
+
+    auto received_previous = received_datagram(previous_datagram.data(), previous->packet_len);
+    auto previous_result = fiber::quic::quic_process_datagram(context.server, received_previous,
+                                                              static_cast<std::uint8_t>(context.server_cid.size()));
+    ASSERT_TRUE(previous_result.has_value()) << static_cast<int>(previous_result.error());
+    EXPECT_EQ(previous_result->packet_number, previous->packet_number);
+    EXPECT_EQ(context.server.crypto().epoch().generation, 1U);
+    EXPECT_TRUE(context.server.key_phase());
 }
 
 TEST(QuicPacketProcessorTest, ProcessesEarlyDataStreamPacketWithEarlyKeys) {
@@ -591,11 +677,11 @@ TEST(QuicPacketProcessorTest, ProcessesEarlyDataStreamPacketWithEarlyKeys) {
     packet.ciphertext_len = stream_payload.size() + fiber::quic::kAeadTagLength;
 
     auto sealed = fiber::quic::quic_encrypt_packet_payload(
-            packet, client.crypto().early_write, stream_payload.data(), stream_payload.size(), pn + packet.pn_len,
+            packet, client.crypto().early_write(), stream_payload.data(), stream_payload.size(), pn + packet.pn_len,
             datagram.size() - static_cast<std::size_t>(pn + packet.pn_len - datagram.data()));
     ASSERT_TRUE(sealed.has_value()) << static_cast<int>(sealed.error());
     packet.packet_len = static_cast<std::size_t>(pn + packet.pn_len - datagram.data()) + *sealed;
-    ASSERT_TRUE(fiber::quic::quic_apply_header_protection(packet, client.crypto().early_write, datagram.data(),
+    ASSERT_TRUE(fiber::quic::quic_apply_header_protection(packet, client.crypto().early_write(), datagram.data(),
                                                           packet.packet_len));
     auto received = received_datagram(datagram.data(), packet.packet_len);
     auto result = fiber::quic::quic_process_datagram(server, received, static_cast<std::uint8_t>(server_cid.size()));

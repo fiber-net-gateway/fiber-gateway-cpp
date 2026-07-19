@@ -85,51 +85,6 @@ struct FrameParseClose {
     return close;
 }
 
-// Apply a peer-initiated key update after a packet was successfully decrypted
-// with next_application_read. The current application_read/write become the
-// "previous" generation (kept for a 3×PTO grace period), next_application_read/write
-// become the new current keys, and the next-next pair is immediately pre-derived.
-// RFC 9001 §6.1, §6.5.
-[[nodiscard]] common::IoResult<void> apply_key_update(QuicConnection &conn) noexcept {
-    QuicCryptoState &crypto = conn.crypto();
-
-    // 1. Save current application_read as previous (grace period).
-    //    previous starts empty (or held the prior-prior generation that has
-    //    already passed the discard timer); resetting first guarantees we
-    //    drop any stale AEAD context before swapping.
-    crypto.previous_application_read.reset();
-    crypto.previous_application_read.swap(crypto.application_read);
-    crypto.previous_application_keys_ready = true;
-
-    // 2. Promote next_application_read → application_read.
-    crypto.application_read.swap(crypto.next_application_read);
-    crypto.next_application_read.reset();
-
-    // 3. Promote next_application_write → application_write (writes have no
-    //    grace-period retention; the old write context is simply discarded).
-    crypto.application_write.swap(crypto.next_application_write);
-    crypto.next_application_write.reset();
-
-    crypto.next_application_keys_ready = false;
-
-    // 4. Flip the key phase bit so subsequent outbound short headers carry
-    //    the new phase.
-    conn.flip_key_phase();
-
-    // 5. Derive the next-next generation immediately so the connection can
-    //    accept another update without deriving on the fly.
-    auto derived = quic_derive_next_key_pair(crypto);
-    if (!derived) {
-        conn.close(QuicErrorCode::InternalError);
-        return std::unexpected(derived.error());
-    }
-
-    // 6. Arm the grace-period timer to discard the previous application keys.
-    conn.arm_key_update_discard_timer();
-
-    return {};
-}
-
 [[nodiscard]] common::IoResult<QuicPath *> bind_datagram_path(QuicConnection &conn,
                                                               const QuicReceivedDatagram &datagram,
                                                               const QuicPacketHeader &packet,
@@ -184,12 +139,7 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
     space.pending_ack = kUnsetPacketNumber;
     space.crypto_recv.clear();
 
-    if (QuicPacketProtectionKeys *read = quic_packet_keys(conn.crypto(), level, false)) {
-        read->reset();
-    }
-    if (QuicPacketProtectionKeys *write = quic_packet_keys(conn.crypto(), level, true)) {
-        write->reset();
-    }
+    conn.crypto().discard_level(level);
 }
 
 [[nodiscard]] common::IoResult<void> queue_handshake_done(QuicConnection &conn) noexcept {
@@ -261,22 +211,27 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
         if (!established) {
             return std::unexpected(established.error());
         }
-        auto queued = queue_handshake_done(conn);
-        if (!queued) {
-            return std::unexpected(queued.error());
+        if (conn.role() == QuicConnectionRole::Server) {
+            auto queued = queue_handshake_done(conn);
+            if (!queued) {
+                return std::unexpected(queued.error());
+            }
+            discard_packet_number_space(conn, QuicEncryptionLevel::Handshake);
         }
-        discard_packet_number_space(conn, QuicEncryptionLevel::Handshake);
         // RFC 9001 §9.5 / nginx ngx_event_quic_ssl.c — pre-derive the first
         // next-generation application keys so the connection can immediately
         // respond to a peer-initiated key update without deriving on the fly
         // (which would also leak a timing side channel).
-        if (conn.crypto().application_read.ready && conn.crypto().application_write.ready) {
+        if (conn.crypto().application_read().ready() && conn.crypto().application_write().ready()) {
             auto derived = quic_derive_next_key_pair(conn.crypto());
             if (!derived) {
                 return std::unexpected(derived.error());
             }
         }
-        handshake_confirmed = true;
+        if (conn.role() == QuicConnectionRole::Server) {
+            conn.confirm_handshake();
+            handshake_confirmed = true;
+        }
         return true;
     }
 
@@ -335,6 +290,11 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
     // RFC 9000 §10.2.2: in the Draining state we silently discard packets.
     if (conn.state() == QuicConnectionState::Draining || conn.state() == QuicConnectionState::Closed) {
         return result;
+    }
+    if (packet.level == QuicEncryptionLevel::Application && decoded.read_epoch == QuicReadKeyEpoch::Next &&
+        !conn.handshake_confirmed()) {
+        conn.close(QuicErrorCode::KeyUpdateError);
+        return std::unexpected(common::IoErr::Invalid);
     }
 
     const QuicTime now = quic_time_ms(datagram.received_at);
@@ -475,7 +435,6 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 break;
             }
             case QuicFrameType::NewToken:
-            case QuicFrameType::HandshakeDone:
             case QuicFrameType::Stream1:
             case QuicFrameType::Stream2:
             case QuicFrameType::Stream3:
@@ -483,6 +442,11 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
             case QuicFrameType::Stream5:
             case QuicFrameType::Stream6:
             case QuicFrameType::Stream7:
+                break;
+            case QuicFrameType::HandshakeDone:
+                conn.confirm_handshake();
+                discard_packet_number_space(conn, QuicEncryptionLevel::Handshake);
+                result.handshake_confirmed = true;
                 break;
             case QuicFrameType::NewConnectionId: {
                 auto received = conn.recv_new_connection_id_frame(frame.u.new_connection_id);
@@ -576,12 +540,17 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
     // RFC 9001 §6.1 — apply key update only after the packet decoded cleanly
     // (frames parsed, no protocol violations). Doing this last guarantees we
     // never rotate keys for a packet that ends up being rejected.
-    if (decoded.key_update) {
-        auto applied = apply_key_update(conn);
+    if (packet.level == QuicEncryptionLevel::Application && decoded.read_epoch == QuicReadKeyEpoch::Next) {
+        auto applied = conn.apply_peer_key_update(packet.packet_number);
         if (!applied) {
             return std::unexpected(applied.error());
         }
         result.send_output = true;
+    } else if (packet.level == QuicEncryptionLevel::Application) {
+        conn.on_application_packet_authenticated(decoded.read_epoch, packet.packet_number);
+    }
+    if (packet.level == QuicEncryptionLevel::Application && conn.role() == QuicConnectionRole::Server) {
+        conn.crypto().discard_level(QuicEncryptionLevel::EarlyData);
     }
 
     return result;
@@ -619,7 +588,7 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    if (!conn.crypto().initial_ready) {
+    if (!conn.crypto().initial_ready()) {
         auto initialized = conn.init_initial_crypto(packet->dcid);
         if (!initialized) {
             return std::unexpected(initialized.error());
@@ -758,7 +727,11 @@ common::IoResult<QuicPacketProcessResult> quic_process_datagram(QuicConnection &
             return std::unexpected(common::IoErr::Invalid);
         }
 
-        if (packet->level == QuicEncryptionLevel::Initial && !conn.crypto().initial_ready) {
+        if (packet->level == QuicEncryptionLevel::Initial && !conn.crypto().initial_ready()) {
+            if (conn.crypto().initial_discarded()) {
+                offset += packet->packet_len;
+                continue;
+            }
             auto initialized = conn.init_initial_crypto(packet->dcid);
             if (!initialized) {
                 if (has_good_packet) {
@@ -785,7 +758,8 @@ common::IoResult<QuicPacketProcessResult> quic_process_datagram(QuicConnection &
             // they match a stateless_reset_token the peer advertised, enter the
             // DRAINING state SILENTLY — no CONNECTION_CLOSE is sent (§10.2.2:
             // the peer already lost state, so a close frame is pointless).
-            if (offset == 0 && !packet->long_header && packet->level == QuicEncryptionLevel::Application &&
+            if (!conn.closing() && offset == 0 && !packet->long_header &&
+                packet->level == QuicEncryptionLevel::Application &&
                 conn.detects_stateless_reset(packet_data, packet->packet_len)) {
                 conn.begin_draining(QuicCloseInfo{
                         .source = QuicCloseSource::StatelessReset,

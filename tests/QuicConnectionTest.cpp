@@ -1031,7 +1031,9 @@ TEST(QuicConnectionTest, KeepaliveTimerQueuesApplicationPingWhenEstablished) {
     options.keepalive_interval = std::chrono::milliseconds(5);
     fiber::quic::QuicConnection conn(options);
     ASSERT_TRUE(conn.mark_established());
-    conn.crypto().application_write.ready = true;
+    ASSERT_TRUE(conn.crypto().ensure_application());
+    conn.crypto().application_write().packet->ready = true;
+    conn.crypto().application_write().header->ready = true;
 
     std::promise<KeepaliveTimerSnapshot> done;
     auto future = done.get_future();
