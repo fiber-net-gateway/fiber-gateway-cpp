@@ -180,6 +180,36 @@ inline fiber::http::HttpBodySpec detect_request_body(const fiber::http::HttpExch
     return fiber::http::HttpBodySpec::Chunked();
 }
 
+// A Content-Length upstream finishes as soon as its declared byte count has been
+// written.  Some downstream protocols can report the transport FIN in a later,
+// empty read, so that empty completion marker must not be written to the already
+// completed upstream exchange.
+class RequestBodyForwardState {
+public:
+    explicit RequestBodyForwardState(fiber::http::HttpBodySpec body) noexcept :
+        content_length_(body.is_content_length()), remaining_(content_length_ ? body.content_length() : 0) {}
+
+    [[nodiscard]] bool accepts(std::size_t bytes) const noexcept { return !content_length_ || bytes <= remaining_; }
+
+    [[nodiscard]] bool should_write(std::size_t bytes) const noexcept {
+        return !content_length_ || bytes != 0 || !upstream_complete_;
+    }
+
+    void record_write(std::size_t bytes) noexcept {
+        if (content_length_) {
+            remaining_ -= bytes;
+            upstream_complete_ = remaining_ == 0;
+        }
+    }
+
+    [[nodiscard]] bool complete() const noexcept { return upstream_complete_; }
+
+private:
+    bool content_length_ = false;
+    bool upstream_complete_ = false;
+    std::size_t remaining_ = 0;
+};
+
 } // namespace fiber::http::proxy_core
 
 #endif // FIBER_HTTP_PROXY_CORE_H

@@ -159,4 +159,19 @@ TEST(QuicPacerTest, TimerDeadlineRoundsUpToGranularity) {
     EXPECT_EQ(blocked.deadline, start + 10ms);
 }
 
+TEST(QuicPacerTest, DefaultGranularitySupportsSubMillisecondDeadlines) {
+    fiber::quic::QuicPacingOptions options{};
+    auto congestion = congestion_with_window(12000);
+    auto rtt = rtt_of(1ms);
+    fiber::quic::QuicPacerState pacer{};
+    const Clock::time_point start{1000ms};
+
+    ASSERT_TRUE(fiber::quic::quic_pacer_check(pacer, options, congestion, rtt, 1200, start).ready);
+    fiber::quic::quic_pacer_on_datagram_sent(pacer, 12000);
+    const auto blocked = fiber::quic::quic_pacer_check(pacer, options, congestion, rtt, 1200, start);
+
+    ASSERT_FALSE(blocked.ready);
+    EXPECT_EQ(blocked.deadline, start + 100us);
+}
+
 } // namespace

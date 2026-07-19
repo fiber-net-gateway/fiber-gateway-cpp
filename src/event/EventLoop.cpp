@@ -2,7 +2,6 @@
 
 #include <cerrno>
 #include <cstddef>
-#include <limits>
 #include <sys/eventfd.h>
 #include <unistd.h>
 
@@ -120,23 +119,15 @@ void EventLoop::run_due_timers(std::chrono::steady_clock::time_point now) {
     }
 }
 
-int EventLoop::next_timeout_ms(std::chrono::steady_clock::time_point now) const {
+std::chrono::nanoseconds EventLoop::next_timeout(std::chrono::steady_clock::time_point now) const {
     const TimerEntry *entry = timers_.min();
     if (!entry) {
-        return -1;
+        return std::chrono::nanoseconds::max();
     }
     if (entry->deadline <= now) {
-        return 0;
+        return std::chrono::nanoseconds::zero();
     }
-    auto delta = entry->deadline - now;
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(delta).count();
-    if (ms <= 0) {
-        return 0;
-    }
-    if (ms > std::numeric_limits<int>::max()) {
-        return std::numeric_limits<int>::max();
-    }
-    return static_cast<int>(ms);
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(entry->deadline - now);
 }
 
 void EventLoop::prepare_run() noexcept { stop_requested_.store(false, std::memory_order_release); }
@@ -171,11 +162,11 @@ void EventLoop::run_once() {
 
     drain_notify<true>();
     drain_defer<true>();
-    int timeout_ms = next_timeout_ms(now_);
+    const std::chrono::nanoseconds timeout = next_timeout(now_);
     constexpr int kMaxEvents = 64;
     epoll_event events[kMaxEvents];
 
-    int count = poller_.wait(events, kMaxEvents, timeout_ms);
+    int count = poller_.wait(events, kMaxEvents, timeout);
     now_ = std::chrono::steady_clock::now();
     if (count < 0) {
         if (errno == EINTR) {
