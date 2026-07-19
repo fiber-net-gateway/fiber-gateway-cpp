@@ -3,11 +3,15 @@
 
 #include <array>
 #include <chrono>
+#include <concepts>
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
+#include <type_traits>
+#include <utility>
 
 #include "../async/Task.h"
 #include "../common/Assert.h"
@@ -18,7 +22,6 @@
 #include "../common/mem/IoBuf.h"
 #include "Http2HpackDecoder.h"
 #include "Http2OutboundHook.h"
-#include "Http2OutboundScheduler.h"
 #include "Http2Protocol.h"
 #include "Http2Stream.h"
 #include "Http2StreamFactory.h"
@@ -126,9 +129,7 @@ protected:
     const Http2Stream *find_stream(std::uint32_t stream_id) const noexcept;
     void update_connection_send_window(std::int32_t delta) noexcept;
     void stop_sending(common::IoErr reason = common::IoErr::Canceled) noexcept;
-    [[nodiscard]] std::int32_t connection_send_window() const noexcept {
-        return outbound_scheduler_.connection_send_window();
-    }
+    [[nodiscard]] std::int32_t connection_send_window() const noexcept { return conn_send_window_; }
     [[nodiscard]] std::uint32_t peer_max_outbound_frame_size() const noexcept { return peer_max_outbound_frame_size_; }
     [[nodiscard]] std::uint32_t peer_max_concurrent_streams() const noexcept {
         return peer_advertised_max_concurrent_streams_;
@@ -139,7 +140,7 @@ protected:
     [[nodiscard]] bool has_stream(std::uint32_t stream_id) const noexcept {
         return streams_.find(stream_id) != nullptr;
     }
-    [[nodiscard]] bool outbound_stopped() const noexcept { return outbound_scheduler_.stopped(); }
+    [[nodiscard]] bool outbound_stopped() const noexcept { return outbound_stopped_; }
     [[nodiscard]] Http2HpackDecoder &inbound_hpack_decoder() noexcept { return inbound_hpack_decoder_; }
     [[nodiscard]] const Http2HpackDecoder &inbound_hpack_decoder() const noexcept { return inbound_hpack_decoder_; }
     fiber::async::Task<void> stop_and_wait_closed(common::IoErr reason = common::IoErr::Canceled) noexcept;
@@ -167,6 +168,12 @@ private:
     struct ReadPumpResult {
         event::IoEvent wait_event = event::IoEvent::None;
         std::size_t bytes_read = 0;
+        bool needs_reschedule = false;
+    };
+
+    struct OutboundPumpResult {
+        event::IoEvent wait_event = event::IoEvent::None;
+        std::size_t bytes_written = 0;
         bool needs_reschedule = false;
     };
 
@@ -232,9 +239,93 @@ private:
     [[nodiscard]] bool is_local_stream_id(std::uint32_t stream_id) const noexcept;
     [[nodiscard]] bool is_peer_stream_id(std::uint32_t stream_id) const noexcept;
     [[nodiscard]] std::size_t configured_max_active_streams() const noexcept;
-    [[nodiscard]] common::IoErr request_stream_send(Http2Stream &stream, Http2OutboundNextKind next_kind) noexcept;
+    template<typename T>
+    static constexpr bool kAlwaysFalse = false;
+
+    template<typename Encoder>
+    [[nodiscard]] static common::IoErr invoke_control_encoder(std::uint8_t *dst, std::size_t bytes,
+                                                              Encoder &&encoder) noexcept {
+        if constexpr (std::invocable<Encoder &, std::uint8_t *, std::size_t>) {
+            using Result = std::invoke_result_t<Encoder &, std::uint8_t *, std::size_t>;
+            if constexpr (std::same_as<Result, void>) {
+                std::invoke(encoder, dst, bytes);
+                return common::IoErr::None;
+            } else if constexpr (std::same_as<Result, bool>) {
+                return std::invoke(encoder, dst, bytes) ? common::IoErr::None : common::IoErr::Invalid;
+            } else if constexpr (std::same_as<Result, common::IoErr>) {
+                return std::invoke(encoder, dst, bytes);
+            } else {
+                static_assert(kAlwaysFalse<Result>, "encoder must return void, bool, or common::IoErr");
+            }
+        } else if constexpr (std::invocable<Encoder &, std::uint8_t *>) {
+            using Result = std::invoke_result_t<Encoder &, std::uint8_t *>;
+            if constexpr (std::same_as<Result, void>) {
+                std::invoke(encoder, dst);
+                return common::IoErr::None;
+            } else if constexpr (std::same_as<Result, bool>) {
+                return std::invoke(encoder, dst) ? common::IoErr::None : common::IoErr::Invalid;
+            } else if constexpr (std::same_as<Result, common::IoErr>) {
+                return std::invoke(encoder, dst);
+            } else {
+                static_assert(kAlwaysFalse<Result>, "encoder must return void, bool, or common::IoErr");
+            }
+        } else {
+            static_assert(kAlwaysFalse<Encoder>,
+                          "encoder must be invocable as (std::uint8_t *) or (std::uint8_t *, std::size_t)");
+        }
+    }
+
+    template<typename Encoder>
+    [[nodiscard]] common::IoErr alloc_and_enqueue_control(std::size_t bytes, Encoder &&encoder) noexcept {
+        event::EventLoop *owner_loop = transport_ ? &transport_->loop() : event::EventLoop::current_or_null();
+        if (bytes == 0 || !owner_loop || !owner_loop->in_loop()) {
+            return common::IoErr::Invalid;
+        }
+        if (outbound_stop_reason_ != common::IoErr::None) {
+            return outbound_stop_reason_;
+        }
+        if (outbound_closed_) {
+            return common::IoErr::Canceled;
+        }
+
+        mem::IoBuf buf = mem::IoBuf::allocate(bytes);
+        if (!buf) {
+            return common::IoErr::NoMem;
+        }
+        common::IoErr err = invoke_control_encoder(buf.writable_data(), bytes, std::forward<Encoder>(encoder));
+        if (err != common::IoErr::None) {
+            return err;
+        }
+        buf.commit(bytes);
+        bind_outbound_chain(control_hook_.encoded_);
+        if (!control_hook_.encoded_.append(std::move(buf))) {
+            return common::IoErr::NoMem;
+        }
+        if (control_hook_.state_ == Http2OutboundHook::State::Idle) {
+            enqueue_outbound_hook(control_hook_, true);
+        }
+        schedule_io_pump();
+        return common::IoErr::None;
+    }
+
+    [[nodiscard]] common::IoErr request_stream_send(Http2Stream &stream, Http2OutboundKind kind) noexcept;
     [[nodiscard]] bool cancel_queued_stream_send(Http2Stream &stream) noexcept;
-    void cancel_stream_send(Http2Stream &stream) noexcept;
+    void cancel_stream_send(Http2Stream &stream, common::IoErr reason) noexcept;
+    void on_stream_send_window_update(Http2Stream &stream) noexcept;
+    [[nodiscard]] common::IoErr try_encode_stream_outbound(Http2Stream &stream) noexcept;
+    void enqueue_connection_window_wait(Http2Stream &stream) noexcept;
+    void remove_connection_window_wait(Http2Stream &stream) noexcept;
+    void wake_connection_window_waiters() noexcept;
+    void bind_outbound_chain(mem::IoBufChain &chain) noexcept;
+    void enqueue_outbound_hook(Http2OutboundHook &hook, bool priority) noexcept;
+    void abandon_queued_stream_hook(Http2Stream &stream, bool restore_stream_window) noexcept;
+    void build_outbound_batch(std::size_t operation_budget, std::size_t byte_budget) noexcept;
+    void finish_written_outbound_hooks(std::size_t bytes_written) noexcept;
+    [[nodiscard]] common::IoResult<OutboundPumpResult> pump_outbound(std::size_t operation_budget,
+                                                                     std::size_t byte_budget) noexcept;
+    void close_outbound() noexcept;
+    void abort_outbound(common::IoErr reason) noexcept;
+    [[nodiscard]] bool outbound_idle() const noexcept;
     [[nodiscard]] common::IoResult<ReadPumpResult> pump_read(std::size_t operation_budget,
                                                              std::size_t byte_budget) noexcept;
     [[nodiscard]] common::IoErr consume_read_buffer(std::size_t &operation_budget, std::size_t &byte_budget) noexcept;
@@ -247,7 +338,6 @@ private:
     void on_stream_outbound_idle(Http2Stream &stream) noexcept;
     static void on_transport_read_ready(void *ctx, common::IoErr err) noexcept;
     static void on_transport_write_ready(void *ctx, common::IoErr err) noexcept;
-    static void on_outbound_work(void *ctx) noexcept;
     static void on_io_pump(Http2Connection *connection) noexcept;
     static void on_read_timer(Http2Connection *connection) noexcept;
     static void on_write_timer(Http2Connection *connection) noexcept;
@@ -287,6 +377,7 @@ private:
     std::int32_t conn_recv_window_remaining_ = 65535;
     std::uint32_t conn_recv_window_target_ = 65535;
     std::int32_t peer_initial_stream_send_window_ = 65535;
+    std::int32_t conn_send_window_ = 65535;
     std::uint32_t peer_max_outbound_frame_size_ = 16384;
     std::uint32_t peer_max_header_list_size_ = 0xffffffffU;
     bool peer_enable_push_ = true;
@@ -305,11 +396,18 @@ private:
     std::array<std::uint8_t, 8> keepalive_ping_payload_{};
     std::uint64_t keepalive_ping_sequence_ = 0;
     bool keepalive_ping_outstanding_ = false;
-    Http2OutboundScheduler outbound_scheduler_;
+    using OutboundHookList = common::IntrusiveList<Http2OutboundHook, offsetof(Http2OutboundHook, queue_hook_)>;
+    using ConnectionWindowWaitList = common::IntrusiveList<Http2Stream, offsetof(Http2Stream, conn_window_wait_hook_)>;
+
+    Http2OutboundHook control_hook_{};
+    OutboundHookList outbound_queue_{};
+    OutboundHookList inflight_outbound_hooks_{};
+    ConnectionWindowWaitList connection_window_waiters_{};
+    mem::IoBufChain inflight_outbound_chain_{};
     InboundIoState inbound_io_{};
     common::IntrusiveList<Http2Stream, offsetof(Http2Stream, owned_hook_)> owned_stream_list_;
-    event::EventLoop::NotifyEntry io_pump_entry_{};
-    event::EventLoop::NotifyEntry close_completion_entry_{};
+    event::EventLoop::DeferEntry io_pump_entry_{};
+    event::EventLoop::DeferEntry close_completion_entry_{};
     event::EventLoop::TimerEntry read_timer_entry_{};
     event::EventLoop::TimerEntry write_timer_entry_{};
     event::EventLoop::TimerEntry read_buffer_idle_timer_entry_{};
@@ -332,11 +430,13 @@ private:
     bool close_finished_ = false;
     bool close_completion_posted_ = false;
     bool close_completion_dispatched_ = false;
+    bool outbound_closed_ = false;
+    bool outbound_stopped_ = false;
     common::IoErr stop_sending_reason_ = common::IoErr::Canceled;
+    common::IoErr outbound_stop_reason_ = common::IoErr::None;
     common::IoErr terminal_error_ = common::IoErr::None;
 
     friend class Http2Stream;
-    friend class Http2OutboundScheduler;
     friend class ServerHttp2Request;
     friend class ClientHttp2Request;
 };

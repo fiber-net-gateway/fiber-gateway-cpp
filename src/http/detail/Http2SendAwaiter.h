@@ -28,6 +28,10 @@ public:
         if (loop_ && timer_entry_.is_in_heap()) {
             loop_->template cancel<SendAwaiterBase, &SendAwaiterBase::timer_entry_>(*this);
         }
+        if (loop_ && resume_posted_) {
+            loop_->template cancel<SendAwaiterBase, &SendAwaiterBase::notify_entry_>(*this);
+            resume_posted_ = false;
+        }
         owner_->stream().disarm_outbound(*this);
         owner_ = nullptr;
     }
@@ -64,6 +68,10 @@ public:
         common::IoErr result = result_;
         if (loop_ && timer_entry_.is_in_heap()) {
             loop_->template cancel<SendAwaiterBase, &SendAwaiterBase::timer_entry_>(*this);
+        }
+        if (loop_ && resume_posted_) {
+            loop_->template cancel<SendAwaiterBase, &SendAwaiterBase::notify_entry_>(*this);
+            resume_posted_ = false;
         }
         if (owner_) {
             owner_->stream().disarm_outbound(*this);
@@ -108,7 +116,8 @@ protected:
             return;
         }
         resume_posted_ = true;
-        loop_->template post<SendAwaiterBase, &SendAwaiterBase::notify_entry_, &SendAwaiterBase::on_notify>(*this);
+        loop_->template post_local<SendAwaiterBase, &SendAwaiterBase::notify_entry_, &SendAwaiterBase::on_notify>(
+                *this);
     }
 
     void resume() noexcept {
@@ -131,7 +140,7 @@ protected:
     std::chrono::milliseconds timeout_{};
     fiber::event::EventLoop *loop_ = nullptr;
     std::coroutine_handle<> handle_{};
-    fiber::event::EventLoop::NotifyEntry notify_entry_{};
+    fiber::event::EventLoop::DeferEntry notify_entry_{};
     fiber::event::EventLoop::TimerEntry timer_entry_{};
     common::IoErr result_ = common::IoErr::None;
     bool completed_ = false;
@@ -166,6 +175,16 @@ public:
             return common::IoErr::Invalid;
         }
         return op_.encode_outbound_batch(*this->owner_, *this, stream, req, target, result);
+    }
+
+    [[nodiscard]] std::size_t pending_flow_controlled_bytes() const noexcept override {
+        return op_.pending_flow_controlled_bytes();
+    }
+
+    void on_outbound_batch_sent(std::uint32_t flow_controlled_bytes, bool operation_final_batch) noexcept override {
+        if (this->owner_) {
+            op_.on_outbound_batch_sent(*this->owner_, *this, flow_controlled_bytes, operation_final_batch);
+        }
     }
 
     AwaitResult await_resume() noexcept {
@@ -226,11 +245,7 @@ public:
             this->complete(common::IoErr::None);
             return common::IoErr::None;
         }
-        if (op_.needs_stream_window() && this->owner_->stream().send_window() <= 0) {
-            waiting_stream_window_ = true;
-            return common::IoErr::None;
-        }
-        return request_submit();
+        return op_.submit(*this->owner_, *this);
     }
 
     common::IoErr encode_outbound_batch(Http2Stream &stream, const Http2OutboundEncodeRequest &req,
@@ -240,6 +255,16 @@ public:
             return common::IoErr::Invalid;
         }
         return op_.encode_outbound_batch(*this->owner_, *this, stream, req, target, result);
+    }
+
+    [[nodiscard]] std::size_t pending_flow_controlled_bytes() const noexcept override {
+        return op_.pending_flow_controlled_bytes();
+    }
+
+    void on_outbound_batch_sent(std::uint32_t flow_controlled_bytes, bool operation_final_batch) noexcept override {
+        if (this->owner_) {
+            op_.on_outbound_batch_sent(*this->owner_, *this, flow_controlled_bytes, operation_final_batch);
+        }
     }
 
     AwaitResult await_resume() noexcept {
@@ -254,55 +279,19 @@ public:
         }
     }
 
-    void on_outbound_abort(common::IoErr result) noexcept override {
-        if (this->owner_) {
-            (void) this->owner_->cancel_queued_send();
-        }
-        waiting_stream_window_ = false;
-        this->complete(result);
-    }
-
-    void on_stream_send_window_available() noexcept override {
-        if (this->completed_ || !this->owner_ || !waiting_stream_window_) {
-            return;
-        }
-        if (resume_submit_posted_ || this->loop_ == nullptr) {
-            return;
-        }
-        resume_submit_posted_ = true;
-        this->loop_->template post<BodySendAwaiter, &BodySendAwaiter::submit_notify_entry_,
-                                   &BodySendAwaiter::on_submit_notify>(*this);
-    }
+    void on_outbound_abort(common::IoErr result) noexcept override { this->complete(result); }
 
     Op op_;
-    void clear_waiting_stream_window() noexcept { waiting_stream_window_ = false; }
-    void mark_waiting_stream_window() noexcept { waiting_stream_window_ = true; }
-    [[nodiscard]] bool waiting_stream_window() const noexcept { return waiting_stream_window_; }
-    bool waiting_stream_window_ = false;
 
 private:
-    static void on_submit_notify(BodySendAwaiter *awaiter) noexcept {
-        if (!awaiter) {
-            return;
-        }
-        awaiter->resume_submit_posted_ = false;
-        awaiter->try_submit_from_window_signal();
-    }
-
     void on_destroy_cleanup() noexcept override {
         if (this->owner_) {
             (void) this->owner_->cancel_queued_send();
         }
-        waiting_stream_window_ = false;
-        resume_submit_posted_ = false;
     }
 
     void on_timeout_ready() noexcept override {
         if (!this->owner_) {
-            return;
-        }
-        if (waiting_stream_window_) {
-            this->complete(common::IoErr::TimedOut);
             return;
         }
         if (this->owner_->cancel_queued_send()) {
@@ -315,38 +304,9 @@ private:
             return;
         }
         if (this->owner_->cancel_queued_send()) {
-            waiting_stream_window_ = false;
-            this->complete(common::IoErr::TimedOut);
-            return;
-        }
-        if (waiting_stream_window_) {
             this->complete(common::IoErr::TimedOut);
         }
     }
-
-    [[nodiscard]] common::IoErr request_submit() noexcept {
-        if (!this->owner_) {
-            return common::IoErr::Invalid;
-        }
-        waiting_stream_window_ = false;
-        return op_.submit(*this->owner_, *this);
-    }
-
-    void try_submit_from_window_signal() noexcept {
-        if (this->completed_ || !this->owner_ || !waiting_stream_window_) {
-            return;
-        }
-        if (op_.needs_stream_window() && this->owner_->stream().send_window() <= 0) {
-            return;
-        }
-        common::IoErr err = request_submit();
-        if (err != common::IoErr::None) {
-            this->complete(err);
-        }
-    }
-
-    bool resume_submit_posted_ = false;
-    fiber::event::EventLoop::NotifyEntry submit_notify_entry_{};
 };
 
 } // namespace fiber::http::detail

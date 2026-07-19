@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <array>
 
-#include "Http2OutboundScheduler.h"
+#include "Http2Outbound.h"
 #include "Http2Protocol.h"
 
 namespace fiber::http {

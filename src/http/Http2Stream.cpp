@@ -104,10 +104,9 @@ common::IoErr Http2Stream::close_rst(Http2ErrorCode code, common::IoErr result) 
 }
 
 void Http2Stream::update_send_window(std::int32_t delta) noexcept {
-    const std::int32_t before = send_window_;
     send_window_ += delta;
-    if (before <= 0 && send_window_ > 0 && outbound_operation_) {
-        outbound_operation_->on_stream_send_window_available();
+    if (delta > 0 && conn_ && outbound_wait_state_ == OutboundWaitState::StreamWindow) {
+        conn_->on_stream_send_window_update(*this);
     }
 }
 
@@ -152,20 +151,18 @@ common::IoErr Http2Stream::maybe_replenish_recv_window(std::size_t buffered_byte
 }
 
 void Http2Stream::close(common::IoErr result) noexcept {
-    if (conn_) {
-        conn_->cancel_stream_send(*this);
-    }
     const bool first_abort = close_reason_ == common::IoErr::None;
     if (first_abort) {
         close_reason_ = result;
     }
-    outbound_hook_.closed_ = true;
-    outbound_hook_.next_kind_ = static_cast<Http2OutboundNextKind>(0);
     active_ = false;
+    if (first_abort && conn_) {
+        conn_->cancel_stream_send(*this, close_reason_);
+    }
     if (first_abort && ops_ && ops_->on_abort) {
         ops_->on_abort(owner_, close_reason_);
     }
-    if (first_abort && outbound_operation_) {
+    if (first_abort && !conn_ && outbound_operation_) {
         outbound_operation_->on_outbound_abort(close_reason_);
     }
 }
@@ -182,8 +179,15 @@ void Http2Stream::disarm_outbound(Http2OutboundOperation &operation) noexcept {
     if (outbound_operation_ != &operation) {
         return;
     }
-    FIBER_ASSERT(outbound_hook_.next_kind_ == Http2OutboundNextKind::None || outbound_hook_.closed_);
+    FIBER_ASSERT(outbound_hook_.state_ == Http2OutboundHook::State::Idle);
+    FIBER_ASSERT(outbound_wait_state_ == OutboundWaitState::None);
+    FIBER_ASSERT(outbound_kind_ == Http2OutboundKind::None);
     outbound_operation_ = nullptr;
+}
+
+std::size_t Http2Stream::pending_flow_controlled_bytes() const noexcept {
+    FIBER_ASSERT(outbound_operation_ != nullptr);
+    return outbound_operation_->pending_flow_controlled_bytes();
 }
 
 common::IoErr Http2Stream::encode_outbound_batch(const Http2OutboundEncodeRequest &req,
@@ -193,11 +197,41 @@ common::IoErr Http2Stream::encode_outbound_batch(const Http2OutboundEncodeReques
     return outbound_operation_->encode_outbound_batch(*this, req, target, result);
 }
 
-void Http2Stream::on_outbound_send_complete() noexcept {
-    if (!conn_) {
+void Http2Stream::on_outbound_hook_send_done(Http2OutboundHook &hook, common::IoErr result) noexcept {
+    auto *stream = static_cast<Http2Stream *>(hook.ctx_);
+    FIBER_ASSERT(stream != nullptr);
+    FIBER_ASSERT(&stream->outbound_hook_ == &hook);
+    FIBER_ASSERT(hook.state_ == Http2OutboundHook::State::Idle);
+
+    const std::uint32_t flow_controlled_bytes = hook.window_consumed_;
+    const bool operation_final_batch = hook.operation_final_batch_;
+    hook.window_consumed_ = 0;
+    hook.operation_final_batch_ = false;
+    if (operation_final_batch) {
+        stream->outbound_kind_ = Http2OutboundKind::None;
+    }
+
+    if (stream->close_reason_ != common::IoErr::None) {
+        if (stream->outbound_operation_) {
+            stream->outbound_operation_->on_outbound_abort(result != common::IoErr::None ? result
+                                                                                         : stream->close_reason_);
+        }
+        if (stream->conn_) {
+            stream->conn_->on_stream_outbound_idle(*stream);
+        }
         return;
     }
-    conn_->on_stream_outbound_idle(*this);
+
+    FIBER_ASSERT(stream->outbound_operation_ != nullptr);
+    if (result == common::IoErr::None) {
+        stream->outbound_operation_->on_outbound_batch_sent(flow_controlled_bytes, operation_final_batch);
+    } else {
+        stream->outbound_operation_->on_outbound_abort(result);
+    }
+
+    if (stream->conn_) {
+        stream->conn_->on_stream_outbound_idle(*stream);
+    }
 }
 
 bool Http2Stream::ready_for_connection_release() const noexcept {

@@ -129,12 +129,19 @@ public:
     void close(common::IoErr result = common::IoErr::Canceled) noexcept;
 
 private:
+    enum class OutboundWaitState : std::uint8_t {
+        None = 0,
+        StreamWindow,
+        ConnectionWindow,
+    };
+
     [[nodiscard]] bool try_arm_outbound(Http2OutboundOperation &operation) noexcept;
     void disarm_outbound(Http2OutboundOperation &operation) noexcept;
+    [[nodiscard]] std::size_t pending_flow_controlled_bytes() const noexcept;
     [[nodiscard]] common::IoErr encode_outbound_batch(const Http2OutboundEncodeRequest &req,
                                                       Http2OutboundEncodeTarget &target,
                                                       Http2OutboundEncodeResult &result) noexcept;
-    void on_outbound_send_complete() noexcept;
+    static void on_outbound_hook_send_done(Http2OutboundHook &hook, common::IoErr result) noexcept;
     [[nodiscard]] bool ready_for_connection_release() const noexcept;
     [[nodiscard]] bool ready_for_destruction() const noexcept;
     void attach_to_connection(Http2Connection &conn, std::uint32_t stream_id) noexcept;
@@ -156,6 +163,9 @@ private:
     std::uint32_t recv_window_low_watermark_ = 0;
     Http2OutboundOperation *outbound_operation_ = nullptr;
     Http2OutboundHook outbound_hook_{};
+    common::IntrusiveListHook conn_window_wait_hook_{};
+    Http2OutboundKind outbound_kind_ = Http2OutboundKind::None;
+    OutboundWaitState outbound_wait_state_ = OutboundWaitState::None;
     common::IntrusiveListHook owned_hook_{};
     void *owner_ = nullptr;
     const Ops *ops_ = nullptr;
@@ -164,7 +174,6 @@ private:
     common::IoErr close_reason_ = common::IoErr::None;
 
     friend class Http2Connection;
-    friend class Http2OutboundScheduler;
     friend class ServerHttp2Request;
     friend class ClientHttp2Request;
     template<class Owner>

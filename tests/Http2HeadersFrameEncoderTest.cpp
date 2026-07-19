@@ -14,7 +14,7 @@
 #include "http/Http2HpackDecoder.h"
 #include "http/HttpHeaderHash.h"
 #define private public
-#include "http/Http2OutboundScheduler.h"
+#include "http/Http2Outbound.h"
 #include "http/Http2Stream.h"
 #include "http/HttpTransport.h"
 #undef private
@@ -147,6 +147,8 @@ public:
                                                const fiber::http::Http2OutboundEncodeRequest &req,
                                                fiber::http::Http2OutboundEncodeTarget &target,
                                                fiber::http::Http2OutboundEncodeResult &result) noexcept override;
+    [[nodiscard]] std::size_t pending_flow_controlled_bytes() const noexcept override { return 0; }
+    void on_outbound_batch_sent(std::uint32_t, bool) noexcept override {}
     void on_outbound_abort(fiber::common::IoErr) noexcept override {}
 
 private:
@@ -195,55 +197,33 @@ fiber::common::IoErr EncodeOperation::encode_outbound_batch(fiber::http::Http2St
     }
 
     test_case_.total_bytes = target.total_bytes();
-    if (fiber::mem::IoBuf *first = target.chain_.first_readable()) {
-        test_case_.first_buffer_capacity = first->capacity();
-    }
 
-    result.status = fiber::http::Http2OutboundEncodeResult::Status::Encoded;
-    result.next_kind = fiber::http::Http2OutboundNextKind::None;
     result.flow_controlled_bytes = 0;
+    result.operation_final_batch = true;
     return fiber::common::IoErr::None;
 }
 
 std::vector<std::uint8_t> encode_headers_bytes_in_place(EncodeCase &test_case) {
-    fiber::event::EventLoopGroup group(1);
-    auto promise = std::make_shared<std::promise<std::vector<std::uint8_t>>>();
-    auto future = promise->get_future();
+    fiber::mem::IoBufNodePool node_pool;
+    fiber::http::Http2OutboundEncodeTarget target(node_pool);
+    EncodeOperation operation(test_case);
+    fiber::http::Http2Stream stream(&operation, kStreamOps);
+    fiber::http::Http2OutboundEncodeRequest request{.max_frame_size = test_case.options.max_frame_size};
+    fiber::http::Http2OutboundEncodeResult encode_result;
+    if (operation.encode_outbound_batch(stream, request, target, encode_result) != fiber::common::IoErr::None) {
+        return {};
+    }
 
-    group.start();
-    fiber::async::spawn(group.at(0), [promise, &test_case, &group]() mutable -> fiber::async::DetachedTask {
-        RecordingTransport transport;
-        fiber::http::Http2OutboundScheduler scheduler(test_case.options.max_frame_size);
-        EncodeOperation operation(test_case);
-        fiber::http::Http2Stream stream(&operation, kStreamOps);
-        stream.stream_id_ = test_case.options.stream_id;
-
-        fiber::common::IoErr err = stream.try_arm_outbound(operation)
-                                           ? scheduler.request_send(stream, fiber::http::Http2OutboundNextKind::Headers)
-                                           : fiber::common::IoErr::Already;
-        if (err == fiber::common::IoErr::None) {
-            scheduler.close();
-            while (!scheduler.stopped()) {
-                auto result = scheduler.pump_write(transport, 64, 256 * 1024);
-                if (!result) {
-                    break;
-                }
-            }
-            err = scheduler.stop_reason();
-        }
-
-        if (err != fiber::common::IoErr::None) {
-            promise->set_value({});
-        } else {
-            promise->set_value(transport.written());
-        }
-        group.stop();
-        co_return;
-    });
-
-    EXPECT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
-    std::vector<std::uint8_t> result = future.get();
-    group.join();
+    fiber::mem::IoBufChain chain = target.take_chain();
+    if (fiber::mem::IoBuf *first = chain.first_readable()) {
+        test_case.first_buffer_capacity = first->capacity();
+    }
+    std::vector<std::uint8_t> result;
+    result.reserve(chain.readable_bytes());
+    while (fiber::mem::IoBuf *front = chain.first_readable()) {
+        result.insert(result.end(), front->readable_data(), front->readable_data() + front->readable());
+        chain.consume_and_compact(front->readable());
+    }
     return result;
 }
 
