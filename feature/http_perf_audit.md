@@ -77,7 +77,7 @@
 
 | 位置 | 问题 | 修法 |
 |------|------|------|
-| `Http2OutboundScheduler.cpp:803-812` | slot 剩余字节 + tail_chain 分两次 syscall，前面 ~9 字节帧头可并进首个 iov 一次 writev | slot 未尽且 tail 非空时构造 iovec 首项 = 剩余 slot span，一次 writev；partial-write 处理需先记消费的 slot 字节数 |
+| `Http2Connection.cpp` | ✅ 已修复：控制帧与 stream hook 先汇总到稳定的 in-flight chain，再统一 `writev` | 每个 hook 记录 wire 边界，partial write 按实际消费字节依次触发 send-done |
 | `Http2HeadersFrameEncoder.cpp:199-208` | 大 header block 拆 N 个 CONTINUATION 帧时每帧 `IoBuf::allocate` | overflow 缓冲改从 IoBufNodePool 缓存取，避免全局分配器 |
 | `Http2HpackEncoderIoBufWriter.cpp:110` | ✅ 已修复：`commit_output` 每次 `first_writable()` O(n) 遍历链，缓存了 `tail_` 却不用 | `if (tail_==nullptr \|\| tail_->writable()==0) tail_=block_.first_writable();` 否则跳过（3 行） |
 | `Http2HpackDecoder.cpp:224` / `Http3QpackDecoder.cpp:250-265,306` | 解码器原始字面量双重拷贝：数据->scratch->pool | 单 chunk 整串（`take==remaining && string_received_==0 && !huffman`）时直接把源指针传回调，省第二次 memcpy |

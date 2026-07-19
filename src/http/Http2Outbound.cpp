@@ -8,8 +8,6 @@ bool Http2OutboundEncodeTarget::empty() const noexcept { return chain_.readable_
 
 std::size_t Http2OutboundEncodeTarget::total_bytes() const noexcept { return chain_.readable_bytes(); }
 
-void Http2OutboundEncodeTarget::reset(mem::IoBufNodePool &node_pool) noexcept { chain_.bind_node_pool(node_pool); }
-
 common::IoErr Http2OutboundEncodeTarget::append_copy(const void *src, std::size_t bytes) noexcept {
     if (!src || bytes == 0) {
         return common::IoErr::Invalid;

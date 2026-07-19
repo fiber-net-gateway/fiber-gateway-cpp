@@ -152,47 +152,6 @@ struct OwnedStreamHolder {
     std::uint64_t pending_name_hash = 0;
 };
 
-struct SendWindowNotifyOwner final : fiber::http::Http2OutboundOperation {
-    explicit SendWindowNotifyOwner(int *notify_count) : notify_count_ptr(notify_count), stream(this, ops()) {}
-
-    static const fiber::http::Http2Stream::Ops &ops() noexcept {
-        static const fiber::http::Http2Stream::Ops kOps{
-                &SendWindowNotifyOwner::destroy_owner,
-                &SendWindowNotifyOwner::on_header_block_start,
-                &SendWindowNotifyOwner::on_header_block_complete,
-                &SendWindowNotifyOwner::on_body,
-                &SendWindowNotifyOwner::on_abort,
-        };
-        return kOps;
-    }
-
-    static void destroy_owner(void *owner) noexcept { delete static_cast<SendWindowNotifyOwner *>(owner); }
-    static fiber::common::IoErr on_header_block_start(void *, fiber::http::Http2HpackDecoder::Sink &) noexcept {
-        return fiber::common::IoErr::None;
-    }
-    static fiber::common::IoErr on_header_block_complete(void *, bool) noexcept { return fiber::common::IoErr::None; }
-    static fiber::common::IoErr on_body(void *, fiber::mem::IoBuf &&, bool) noexcept {
-        return fiber::common::IoErr::None;
-    }
-    static void on_abort(void *, fiber::common::IoErr) noexcept {}
-    fiber::common::IoErr encode_outbound_batch(fiber::http::Http2Stream &,
-                                               const fiber::http::Http2OutboundEncodeRequest &,
-                                               fiber::http::Http2OutboundEncodeTarget &,
-                                               fiber::http::Http2OutboundEncodeResult &result) noexcept override {
-        result.status = fiber::http::Http2OutboundEncodeResult::Status::NoWork;
-        return fiber::common::IoErr::None;
-    }
-    void on_outbound_abort(fiber::common::IoErr) noexcept override {}
-    void on_stream_send_window_available() noexcept override {
-        if (notify_count_ptr) {
-            ++(*notify_count_ptr);
-        }
-    }
-
-    int *notify_count_ptr = nullptr;
-    fiber::http::Http2Stream stream;
-};
-
 class DummyHttpTransport final : public fiber::test::HttpTransportStub {
 public:
     fiber::async::Task<fiber::common::IoResult<void>> handshake(std::chrono::milliseconds) override {
@@ -271,29 +230,18 @@ TEST(Http2StreamTest, OwnerBackedCreateReturnsUsableLease) {
     stream.reset();
 }
 
-TEST(Http2StreamTest, UpdateSendWindowNotifiesWhenCrossingIntoPositiveRange) {
-    int notify_count = 0;
-    auto *owner = new SendWindowNotifyOwner(&notify_count);
+TEST(Http2StreamTest, UpdateSendWindowAllowsNegativeWindowToRecover) {
+    bool destroyed = false;
+    auto *owner = new OwnedStreamHolder(&destroyed);
     fiber::http::Http2Stream::Lease stream = fiber::http::Http2Stream::Lease::adopt(&owner->stream);
-    ASSERT_TRUE(stream);
-    ASSERT_TRUE(stream->try_arm_outbound(*owner));
-
-    stream->send_window_ = 0;
-    stream->update_send_window(3);
-    EXPECT_EQ(notify_count, 1);
-
-    stream->update_send_window(2);
-    EXPECT_EQ(notify_count, 1);
-
     stream->send_window_ = -5;
     stream->update_send_window(4);
-    EXPECT_EQ(notify_count, 1);
-
+    EXPECT_EQ(stream->send_window(), -1);
     stream->update_send_window(2);
-    EXPECT_EQ(notify_count, 2);
-
+    EXPECT_EQ(stream->send_window(), 1);
     stream->close(fiber::common::IoErr::Canceled);
     stream.reset();
+    EXPECT_TRUE(destroyed);
 }
 
 TEST(Http2StreamTest, EmbeddedOwnerIsDestroyedWhenAdoptedLeaseReleasesClosedStream) {
@@ -354,8 +302,8 @@ TEST(Http2StreamTest, MaybeReplenishRecvWindowEnqueuesWindowUpdateAndTracksRemai
             stream->recv_window_remaining_ = 15;
             outcome.result = stream->maybe_replenish_recv_window(15);
             outcome.recv_window_remaining = stream->recv_window_remaining();
-            outcome.pending_control_bytes = connection.outbound_scheduler_.pending_control_bytes();
-            if (fiber::mem::IoBuf *control = connection.outbound_scheduler_.control_chain_.first_readable()) {
+            outcome.pending_control_bytes = connection.control_hook_.encoded_.readable_bytes();
+            if (fiber::mem::IoBuf *control = connection.control_hook_.encoded_.first_readable()) {
                 outcome.control_bytes = control->readable();
                 const std::uint8_t *data = control->readable_data();
                 outcome.frame_type = data[3];
