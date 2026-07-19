@@ -23,7 +23,6 @@
 #include "http/ClientHttp2Exchange.h"
 #include "http/Http1ClientConnection.h"
 #include "http/Http2ClientConnection.h"
-#include "http/Http2HpackEncodeCatalog.h"
 #include "http/HttpServer.h"
 #include "net/SocketAddress.h"
 
@@ -140,16 +139,6 @@ struct Http2RunState {
     std::atomic_bool done{false};
     std::atomic<fiber::common::IoErr> err{fiber::common::IoErr::None};
 };
-
-const fiber::http::Http2HpackEncodeCatalog &test_http2_encode_catalog() {
-    static fiber::http::Http2HpackEncodeCatalog catalog;
-    static const bool initialized = [] {
-        EXPECT_TRUE(catalog.init({}));
-        return true;
-    }();
-    (void) initialized;
-    return catalog;
-}
 
 fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     sockaddr_storage bound{};
@@ -472,7 +461,6 @@ DetachedTask run_http2_client_no_body(fiber::event::EventLoop *loop, std::uint16
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
     options.tls.enabled = true;
     options.tls.server_name = "localhost";
-    options.h2.outbound_hpack_catalog = &test_http2_encode_catalog();
 
     fiber::http::Http2ClientConnection connection(*loop, std::move(options));
     auto connect_result = co_await connection.connect(5s);
@@ -541,7 +529,6 @@ DetachedTask run_http2_client_with_body(fiber::event::EventLoop *loop, std::uint
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
     options.tls.enabled = true;
     options.tls.server_name = "localhost";
-    options.h2.outbound_hpack_catalog = &test_http2_encode_catalog();
 
     fiber::http::Http2ClientConnection connection(*loop, std::move(options));
     auto connect_result = co_await connection.connect(5s);

@@ -28,10 +28,6 @@ namespace fiber::grpc {
 // connection run coroutine: connect() establishes the transport, run() drives
 // it, and shutdown() requests teardown and waits for run() to finish.
 //
-// If Options::h2.outbound_hpack_catalog is left null, the client uses a shared
-// immutable catalog for the common gRPC request headers (content-type, te,
-// grpc-encoding). If the caller supplies a catalog, it must remain alive for the
-// lifetime of the client.
 class GrpcClient : public common::NonCopyable, public common::NonMovable {
 public:
     using RunResult = http::Http2Connection::RunResult;

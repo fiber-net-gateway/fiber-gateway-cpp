@@ -24,8 +24,8 @@ const Http2HpackEncoder::OutputOps Http2HeadersFrameEncoder::kOutputOps{
         &Http2HeadersFrameEncoder::commit_output,
 };
 
-Http2HeadersFrameEncoder::Http2HeadersFrameEncoder(Http2HpackEncoder &encoder, Options options) noexcept :
-    encoder_(encoder), options_(options) {}
+Http2HeadersFrameEncoder::Http2HeadersFrameEncoder(Options options) noexcept :
+    encoder_(options.hpack), options_(options) {}
 
 Http2HeadersFrameEncoder::~Http2HeadersFrameEncoder() {
     if (begun_) {

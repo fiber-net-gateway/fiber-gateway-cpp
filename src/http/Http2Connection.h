@@ -17,8 +17,6 @@
 #include "../common/NonMovable.h"
 #include "../common/mem/IoBuf.h"
 #include "Http2HpackDecoder.h"
-#include "Http2HpackEncodeCatalog.h"
-#include "Http2HpackEncoder.h"
 #include "Http2OutboundHook.h"
 #include "Http2OutboundScheduler.h"
 #include "Http2Protocol.h"
@@ -53,7 +51,6 @@ public:
 
     struct Options {
         ConnectionRole role = ConnectionRole::Server;
-        const Http2HpackEncodeCatalog *outbound_hpack_catalog = nullptr;
         std::size_t read_buffer_size = 64 * 1024;
         std::chrono::milliseconds read_timeout = std::chrono::seconds(30);
         // Retain an empty unique read buffer for this long after the last
@@ -274,8 +271,6 @@ private:
     void close_all_streams(common::IoErr result) noexcept;
     void clear_inbound_stream() noexcept;
     [[nodiscard]] Http2Stream::Lease alloc_peer_stream(std::uint32_t stream_id) noexcept;
-    [[nodiscard]] Http2HpackEncoder &outbound_hpack_encoder() noexcept { return outbound_hpack_encoder_; }
-    [[nodiscard]] const Http2HpackEncoder &outbound_hpack_encoder() const noexcept { return outbound_hpack_encoder_; }
 
     std::unique_ptr<HttpTransport> transport_;
     Options options_;
@@ -283,7 +278,6 @@ private:
     const Http2StreamFactoryOps peer_stream_factory_ops_{};
     Http2StreamTable streams_;
     Http2HpackDecoder inbound_hpack_decoder_;
-    Http2HpackEncoder outbound_hpack_encoder_;
     std::uint32_t peer_advertised_max_concurrent_streams_ = 100;
     std::uint32_t last_peer_stream_id_ = 0;
     std::uint32_t last_local_stream_id_ = 0;
@@ -293,7 +287,6 @@ private:
     std::int32_t conn_recv_window_remaining_ = 65535;
     std::uint32_t conn_recv_window_target_ = 65535;
     std::int32_t peer_initial_stream_send_window_ = 65535;
-    std::uint32_t peer_header_table_size_ = 4096;
     std::uint32_t peer_max_outbound_frame_size_ = 16384;
     std::uint32_t peer_max_header_list_size_ = 0xffffffffU;
     bool peer_enable_push_ = true;

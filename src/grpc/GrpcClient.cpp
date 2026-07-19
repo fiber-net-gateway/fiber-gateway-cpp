@@ -1,10 +1,6 @@
 #include "GrpcClient.h"
 
-#include <array>
 #include <utility>
-
-#include "../common/Assert.h"
-#include "../http/HttpHeaderHash.h"
 
 namespace fiber::grpc {
 
@@ -34,32 +30,12 @@ namespace {
 
 void assign_view(std::string &dst, std::string_view src) { dst.assign(src.data(), src.size()); }
 
-// Common gRPC request headers that are identical on every call: index them in
-// the HPACK dynamic table so repeated calls on one connection encode them as
-// 1-byte indexed fields. All string_views point at string literals (static
-// storage), so the catalog holds no references to GrpcClient members.
-constexpr std::array<http::Http2HpackEncodeCatalog::PolicyEntry, 3> kGrpcHeaderPolicy{{
-        {"content-type", http::http_header_name_hash("content-type"), "application/grpc"},
-        {"te", http::http_header_name_hash("te"), "trailers"},
-        {"grpc-encoding", http::http_header_name_hash("grpc-encoding"), "identity"},
-}};
-
-const http::Http2HpackEncodeCatalog &grpc_header_catalog() noexcept {
-    static http::Http2HpackEncodeCatalog catalog;
-    static const bool initialized = catalog.init(kGrpcHeaderPolicy);
-    FIBER_ASSERT(initialized);
-    return catalog;
-}
-
 http::Http2ClientConnection::Options make_connection_options(GrpcClient::Options &options) noexcept {
     http::Http2ClientConnection::Options conn_options;
     conn_options.peer_addr = std::move(options.peer_addr);
     conn_options.tcp = options.tcp;
     conn_options.tls = std::move(options.tls);
     conn_options.h2 = std::move(options.h2);
-    if (conn_options.h2.outbound_hpack_catalog == nullptr) {
-        conn_options.h2.outbound_hpack_catalog = &grpc_header_catalog();
-    }
     return conn_options;
 }
 

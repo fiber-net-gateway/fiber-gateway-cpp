@@ -55,9 +55,7 @@ common::IoResult<net::SocketAddress> resolve_local_addr(int fd) noexcept {
 HttpServer::HttpServer(event::EventLoop &loop, HttpHandler handler, HttpServerOptions options,
                        event::EventLoopGroup *worker_group) :
     worker_group_(worker_group), handler_(std::move(handler)), options_(std::move(options)),
-    http2_request_factory_(options_, handler_), listener_(loop) {
-    FIBER_ASSERT(http2_hpack_encode_catalog_.init({}));
-}
+    http2_request_factory_(options_, handler_), listener_(loop) {}
 
 fiber::common::IoResult<void> HttpServer::bind(const net::SocketAddress &addr, const net::ListenOptions &options) {
     if (options_.http3.enabled && !options_.tls.enabled) {
@@ -213,7 +211,6 @@ fiber::async::Task<void> HttpServer::serve_http2(std::unique_ptr<HttpTransport> 
 Http2Connection::Options HttpServer::make_http2_options() const noexcept {
     Http2Connection::Options options;
     options.role = Http2Connection::ConnectionRole::Server;
-    options.outbound_hpack_catalog = &http2_hpack_encode_catalog_;
     options.read_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(options_.keep_alive_timeout);
     options.write_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(options_.write_timeout);
     options.keepalive_ping_interval =

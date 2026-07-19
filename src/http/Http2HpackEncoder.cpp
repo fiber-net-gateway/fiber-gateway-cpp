@@ -4,7 +4,7 @@
 #include <array>
 #include <cstring>
 
-#include "HttpHeaderHash.h"
+#include "Http2HpackStaticTable.h"
 #include "Huffman.h"
 
 namespace fiber::http {
@@ -12,77 +12,29 @@ namespace fiber::http {
 namespace {
 
 constexpr std::size_t kIntegerScratchCap = 8;
-constexpr std::string_view kStatusName = ":status";
-constexpr std::string_view kMethodName = ":method";
-constexpr std::string_view kSchemeName = ":scheme";
-constexpr std::string_view kAuthorityName = ":authority";
-constexpr std::string_view kPathName = ":path";
+constexpr std::uint8_t kTableSizeZero = 0x20;
 constexpr std::string_view kProtocolName = ":protocol";
-constexpr std::uint64_t kStatusNameHash = http_header_name_hash(kStatusName);
-constexpr std::uint64_t kMethodNameHash = http_header_name_hash(kMethodName);
-constexpr std::uint64_t kSchemeNameHash = http_header_name_hash(kSchemeName);
-constexpr std::uint64_t kAuthorityNameHash = http_header_name_hash(kAuthorityName);
-constexpr std::uint64_t kPathNameHash = http_header_name_hash(kPathName);
-constexpr std::uint64_t kProtocolNameHash = http_header_name_hash(kProtocolName);
 
-[[nodiscard]] std::string_view common_status_value(int status_code) noexcept {
-    switch (status_code) {
-        case 100:
-            return "100";
-        case 101:
-            return "101";
-        case 103:
-            return "103";
-        case 200:
-            return "200";
-        case 201:
-            return "201";
-        case 202:
-            return "202";
-        case 204:
-            return "204";
-        case 206:
-            return "206";
-        case 301:
-            return "301";
-        case 302:
-            return "302";
-        case 304:
-            return "304";
-        case 307:
-            return "307";
-        case 308:
-            return "308";
-        case 400:
-            return "400";
-        case 401:
-            return "401";
-        case 403:
-            return "403";
-        case 404:
-            return "404";
-        case 409:
-            return "409";
-        case 410:
-            return "410";
-        case 412:
-            return "412";
-        case 429:
-            return "429";
-        case 500:
-            return "500";
-        case 501:
-            return "501";
-        case 502:
-            return "502";
-        case 503:
-            return "503";
-        case 504:
-            return "504";
-        default:
-            return {};
-    }
-}
+namespace pseudo_index {
+constexpr std::uint32_t kAuthority = 1;
+constexpr std::uint32_t kMethod = 2;
+constexpr std::uint32_t kMethodGet = 2;
+constexpr std::uint32_t kMethodPost = 3;
+constexpr std::uint32_t kPath = 4;
+constexpr std::uint32_t kPathRoot = 4;
+constexpr std::uint32_t kPathIndexHtml = 5;
+constexpr std::uint32_t kScheme = 6;
+constexpr std::uint32_t kSchemeHttp = 6;
+constexpr std::uint32_t kSchemeHttps = 7;
+constexpr std::uint32_t kStatus = 8;
+constexpr std::uint32_t kStatus200 = 8;
+constexpr std::uint32_t kStatus204 = 9;
+constexpr std::uint32_t kStatus206 = 10;
+constexpr std::uint32_t kStatus304 = 11;
+constexpr std::uint32_t kStatus400 = 12;
+constexpr std::uint32_t kStatus404 = 13;
+constexpr std::uint32_t kStatus500 = 14;
+} // namespace pseudo_index
 
 [[nodiscard]] std::string_view format_status_value(int status_code, std::array<char, 3> &scratch) noexcept {
     if (status_code < 100 || status_code > 999) {
@@ -138,34 +90,20 @@ constexpr std::uint64_t kProtocolNameHash = http_header_name_hash(kProtocolName)
 
 Http2HpackEncoder::Http2HpackEncoder(Options options) noexcept : options_(options) {}
 
-bool Http2HpackEncoder::init() noexcept {
-    release();
-    if (options_.catalog == nullptr) {
-        return false;
-    }
-    return table_.init(*options_.catalog, options_.max_dynamic_table_size);
-}
-
-void Http2HpackEncoder::release() noexcept {
+void Http2HpackEncoder::reset_block() noexcept {
     output_ctx_ = nullptr;
     output_ops_ = nullptr;
     output_dst_ = nullptr;
     output_len_ = 0;
-    emitted_table_size_update_ = false;
     block_open_ = false;
-    table_.release();
-}
-
-void Http2HpackEncoder::update_max_dynamic_table_size(std::uint32_t size) noexcept {
-    table_.update_max_dynamic_table_size(size);
 }
 
 common::IoErr Http2HpackEncoder::begin_block(void *output_ctx, const OutputOps *output_ops) noexcept {
     if (block_open_) {
         return common::IoErr::Invalid;
     }
-    if (options_.catalog == nullptr || table_.catalog() == nullptr || output_ctx == nullptr || output_ops == nullptr ||
-        output_ops->acquire == nullptr || output_ops->commit == nullptr) {
+    if (output_ctx == nullptr || output_ops == nullptr || output_ops->acquire == nullptr ||
+        output_ops->commit == nullptr) {
         return common::IoErr::Invalid;
     }
 
@@ -173,115 +111,125 @@ common::IoErr Http2HpackEncoder::begin_block(void *output_ctx, const OutputOps *
     output_ops_ = output_ops;
     output_dst_ = nullptr;
     output_len_ = 0;
-    emitted_table_size_update_ = false;
     block_open_ = true;
 
-    if (table_.has_pending_table_size_update()) {
-        common::IoErr err = append_table_size_update(table_.pending_dynamic_table_size());
-        if (err != common::IoErr::None) {
-            block_open_ = false;
-            output_ctx_ = nullptr;
-            output_ops_ = nullptr;
-            output_dst_ = nullptr;
-            output_len_ = 0;
-            emitted_table_size_update_ = false;
-            return err;
-        }
-        emitted_table_size_update_ = true;
+    common::IoErr err = append_byte(kTableSizeZero);
+    if (err != common::IoErr::None) {
+        reset_block();
+        return err;
     }
     return common::IoErr::None;
 }
 
 common::IoErr Http2HpackEncoder::encode_status(int status_code) noexcept {
-    std::string_view value = common_status_value(status_code);
-    std::array<char, 3> scratch{};
-    if (value.empty()) {
-        value = format_status_value(status_code, scratch);
+    std::uint32_t exact_index = 0;
+    switch (status_code) {
+        case 200:
+            exact_index = pseudo_index::kStatus200;
+            break;
+        case 204:
+            exact_index = pseudo_index::kStatus204;
+            break;
+        case 206:
+            exact_index = pseudo_index::kStatus206;
+            break;
+        case 304:
+            exact_index = pseudo_index::kStatus304;
+            break;
+        case 400:
+            exact_index = pseudo_index::kStatus400;
+            break;
+        case 404:
+            exact_index = pseudo_index::kStatus404;
+            break;
+        case 500:
+            exact_index = pseudo_index::kStatus500;
+            break;
+        default:
+            break;
     }
+    if (exact_index != 0) {
+        return encode_pseudo(exact_index, pseudo_index::kStatus, {}, {});
+    }
+
+    std::array<char, 3> scratch{};
+    const std::string_view value = format_status_value(status_code, scratch);
     if (value.empty()) {
         return common::IoErr::Invalid;
     }
-    return encode_field(kStatusName, kStatusNameHash, value);
+    return encode_pseudo(0, pseudo_index::kStatus, {}, value);
 }
 
 common::IoErr Http2HpackEncoder::encode_method(HttpMethod method) noexcept {
+    if (method == HttpMethod::Get) {
+        return encode_pseudo(pseudo_index::kMethodGet, pseudo_index::kMethod, {}, {});
+    }
+    if (method == HttpMethod::Post) {
+        return encode_pseudo(pseudo_index::kMethodPost, pseudo_index::kMethod, {}, {});
+    }
     const std::string_view value = common_method_value(method);
     if (value.empty()) {
         return common::IoErr::Invalid;
     }
-    return encode_field(kMethodName, kMethodNameHash, value);
+    return encode_pseudo(0, pseudo_index::kMethod, {}, value);
 }
 
 common::IoErr Http2HpackEncoder::encode_scheme(std::string_view scheme) noexcept {
-    return encode_field(kSchemeName, kSchemeNameHash, scheme);
+    if (scheme == "http") {
+        return encode_pseudo(pseudo_index::kSchemeHttp, pseudo_index::kScheme, {}, {});
+    }
+    if (scheme == "https") {
+        return encode_pseudo(pseudo_index::kSchemeHttps, pseudo_index::kScheme, {}, {});
+    }
+    return encode_pseudo(0, pseudo_index::kScheme, {}, scheme);
 }
 
 common::IoErr Http2HpackEncoder::encode_authority(std::string_view authority) noexcept {
-    return encode_field(kAuthorityName, kAuthorityNameHash, authority);
+    if (authority.empty()) {
+        return encode_pseudo(pseudo_index::kAuthority, pseudo_index::kAuthority, {}, {});
+    }
+    return encode_pseudo(0, pseudo_index::kAuthority, {}, authority);
 }
 
 common::IoErr Http2HpackEncoder::encode_path(std::string_view path) noexcept {
-    return encode_field(kPathName, kPathNameHash, path);
+    if (path == "/") {
+        return encode_pseudo(pseudo_index::kPathRoot, pseudo_index::kPath, {}, {});
+    }
+    if (path == "/index.html") {
+        return encode_pseudo(pseudo_index::kPathIndexHtml, pseudo_index::kPath, {}, {});
+    }
+    return encode_pseudo(0, pseudo_index::kPath, {}, path);
 }
 
 common::IoErr Http2HpackEncoder::encode_protocol(std::string_view protocol) noexcept {
-    return encode_field(kProtocolName, kProtocolNameHash, protocol);
+    return encode_pseudo(0, 0, kProtocolName, protocol);
 }
 
 common::IoErr Http2HpackEncoder::encode_field(std::string_view name, std::uint64_t name_hash,
                                               std::string_view value) noexcept {
-    if (!block_open_ || options_.catalog == nullptr) {
+    if (!block_open_) {
         return common::IoErr::Invalid;
     }
     if (name.size() > options_.max_string_size || value.size() > options_.max_string_size) {
         return common::IoErr::Invalid;
     }
 
-    const Http2HpackEncodeCatalog::FindResult result = options_.catalog->find(name, name_hash, value);
-    if (result.exact_entry != nullptr) {
-        std::uint32_t index = 0;
-        if (table_.resolve_index(result.exact_entry, index)) {
-            return append_indexed(index);
-        }
-
-        if (can_incrementally_index(*result.exact_entry)) {
-            std::uint32_t name_index = 0;
-            if (result.name_entry != nullptr) {
-                (void) table_.resolve_index(result.name_entry, name_index);
-            }
-            common::IoErr err = append_literal(name_index, name, value, LiteralMode::IncrementalIndexing);
-            if (err != common::IoErr::None) {
-                return err;
-            }
-            const auto activate_result = table_.activate(result.exact_entry);
-            if (activate_result == Http2HpackEncodeTable::ActivateResult::Rejected ||
-                activate_result == Http2HpackEncodeTable::ActivateResult::InvalidId) {
-                return common::IoErr::Invalid;
-            }
-            return common::IoErr::None;
-        }
+    const Http2HpackStaticTable::FindResult result = Http2HpackStaticTable::find(name, name_hash, value);
+    if (result.exact_index != 0) {
+        return append_indexed(result.exact_index);
     }
 
-    std::uint32_t name_index = 0;
-    if (result.name_entry != nullptr && table_.resolve_index(result.name_entry, name_index)) {
-        return append_literal(name_index, {}, value, LiteralMode::WithoutIndexing);
+    if (result.name_index != 0) {
+        return append_literal(result.name_index, {}, value);
     }
-    return append_literal(0, name, value, LiteralMode::WithoutIndexing);
+    return append_literal(0, name, value);
 }
 
 common::IoErr Http2HpackEncoder::finish_block() noexcept {
     if (!block_open_) {
         return common::IoErr::Invalid;
     }
-    if (emitted_table_size_update_) {
-        table_.acknowledge_table_size_update();
-    }
-    block_open_ = false;
-    output_ctx_ = nullptr;
-    output_ops_ = nullptr;
-    output_dst_ = nullptr;
-    output_len_ = 0;
-    emitted_table_size_update_ = false;
+    reset_block();
     return common::IoErr::None;
 }
 
@@ -289,28 +237,29 @@ void Http2HpackEncoder::cancel_block() noexcept {
     if (!block_open_) {
         return;
     }
-    block_open_ = false;
-    output_ctx_ = nullptr;
-    output_ops_ = nullptr;
-    output_dst_ = nullptr;
-    output_len_ = 0;
-    emitted_table_size_update_ = false;
+    reset_block();
+}
+
+common::IoErr Http2HpackEncoder::encode_pseudo(std::uint32_t exact_index, std::uint32_t name_index,
+                                               std::string_view name, std::string_view value) noexcept {
+    if (!block_open_ || value.size() > options_.max_string_size ||
+        (name_index == 0 && (name.empty() || name.size() > options_.max_string_size))) {
+        return common::IoErr::Invalid;
+    }
+    if (exact_index != 0) {
+        return append_byte(static_cast<std::uint8_t>(0x80U | exact_index));
+    }
+    return append_literal(name_index, name, value);
 }
 
 common::IoErr Http2HpackEncoder::append_indexed(std::uint32_t index) noexcept {
     return append_integer(0x80U, 7, index);
 }
 
-common::IoErr Http2HpackEncoder::append_table_size_update(std::uint32_t size) noexcept {
-    return append_integer(0x20U, 5, size);
-}
-
-common::IoErr Http2HpackEncoder::append_literal(std::uint32_t name_index, std::string_view name, std::string_view value,
-                                                LiteralMode mode) noexcept {
+common::IoErr Http2HpackEncoder::append_literal(std::uint32_t name_index, std::string_view name,
+                                                std::string_view value) noexcept {
     const bool new_name = name_index == 0;
-    const std::uint8_t first_mask = mode == LiteralMode::IncrementalIndexing ? 0x40U : 0x00U;
-    const std::uint8_t prefix_bits = mode == LiteralMode::IncrementalIndexing ? 6U : 4U;
-    common::IoErr err = append_integer(first_mask, prefix_bits, name_index);
+    common::IoErr err = append_integer(0x00U, 4, name_index);
     if (err != common::IoErr::None) {
         return err;
     }
@@ -457,11 +406,6 @@ bool Http2HpackEncoder::should_huffman_encode(std::string_view value) const noex
     // Cheap O(1) threshold gate only; the encoded-vs-raw benefit check lives in
     // append_string, which falls back to raw when Huffman would not shorten.
     return value.size() >= options_.huffman_threshold;
-}
-
-bool Http2HpackEncoder::can_incrementally_index(const Http2HpackEncodeCatalog::EntryView &entry) const noexcept {
-    return entry.kind == Http2HpackEncodeCatalog::EntryKind::Policy &&
-           entry.entry_size <= table_.max_dynamic_table_size() && table_.max_dynamic_table_size() != 0;
 }
 
 } // namespace fiber::http

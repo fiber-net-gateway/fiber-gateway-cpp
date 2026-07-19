@@ -31,8 +31,6 @@
 #include "http/ClientHttp2Exchange.h"
 #include "http/Http2HeadersFrameEncoder.h"
 #include "http/Http2HpackDecoder.h"
-#include "http/Http2HpackEncodeCatalog.h"
-#include "http/Http2HpackEncoder.h"
 #include "http/Http2HpackStaticTable.h"
 #include "http/Http2Stream.h"
 #include "http/Huffman.h"
@@ -43,21 +41,6 @@ namespace {
 using fiber::async::DetachedTask;
 
 constexpr std::string_view kClientConnectionPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-
-const fiber::http::Http2HpackEncodeCatalog &test_http2_encode_catalog() {
-    static fiber::http::Http2HpackEncodeCatalog catalog;
-    static const bool initialized = [] {
-        EXPECT_TRUE(catalog.init({}));
-        return true;
-    }();
-    (void) initialized;
-    return catalog;
-}
-
-fiber::http::Http2Connection::Options with_test_hpack_catalog(fiber::http::Http2Connection::Options options) {
-    options.outbound_hpack_catalog = &test_http2_encode_catalog();
-    return options;
-}
 
 class FakeHttpTransport final : public fiber::test::HttpTransportStub {
 public:
@@ -511,8 +494,7 @@ struct ObservedChunk {
 class RecordingHttp2Connection final : public fiber::http::Http2Connection {
 public:
     RecordingHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport, Options options) :
-        fiber::http::Http2Connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
-                                     TestHttp2StreamFactory::ops()) {
+        fiber::http::Http2Connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops()) {
         FIBER_ASSERT(start(std::move(transport)) == fiber::common::IoErr::None);
     }
 
@@ -769,22 +751,13 @@ fiber::common::IoErr HeaderEncodeCase::encode_outbound_batch(fiber::http::Http2S
                                                              const fiber::http::Http2OutboundEncodeRequest &req,
                                                              fiber::http::Http2OutboundEncodeTarget &target,
                                                              fiber::http::Http2OutboundEncodeResult &result) noexcept {
-    fiber::http::Http2HpackEncodeCatalog catalog;
-    if (!catalog.init({})) {
-        return fiber::common::IoErr::Invalid;
-    }
-
-    fiber::http::Http2HpackEncoder encoder({.catalog = &catalog, .huffman_threshold = 1024});
-    if (!encoder.init()) {
-        return fiber::common::IoErr::Invalid;
-    }
-
-    fiber::http::Http2HeadersFrameEncoder frame_encoder(encoder, {
-                                                                         .stream_id = stream_id,
-                                                                         .max_frame_size = req.max_frame_size,
-                                                                         .first_frame_payload_cap = 1024,
-                                                                         .end_stream = end_stream,
-                                                                 });
+    fiber::http::Http2HeadersFrameEncoder frame_encoder({
+            .stream_id = stream_id,
+            .max_frame_size = req.max_frame_size,
+            .first_frame_payload_cap = 1024,
+            .end_stream = end_stream,
+            .hpack = {.huffman_threshold = 1024},
+    });
     fiber::common::IoErr err = frame_encoder.begin(target);
     if (err != fiber::common::IoErr::None) {
         return err;
@@ -1210,7 +1183,6 @@ DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderR
                                       std::vector<std::string> chunks, fiber::http::HttpHandler handler,
                                       fiber::http::HttpServerOptions http_options,
                                       fiber::http::Http2Connection::Options options, bool hold_eof = true) {
-    options = with_test_hpack_catalog(options);
     auto transport = std::make_unique<FakeHttpTransport>(std::move(chunks), std::vector<size_t>{}, false, hold_eof);
     FakeHttpTransport *fake_transport = transport.get();
     fiber::http::HttpHandler wrapped_handler =
@@ -1300,7 +1272,6 @@ DetachedTask
 run_server_delayed_send_after_close(std::shared_ptr<std::promise<ServerDelayedSendAfterCloseOutcome>> promise,
                                     std::vector<std::string> chunks, fiber::http::HttpServerOptions http_options,
                                     fiber::http::Http2Connection::Options options = {}) {
-    options = with_test_hpack_catalog(options);
     auto delayed_send_result = std::make_shared<fiber::common::IoResult<void>>();
     auto delayed_send_completed = std::make_shared<std::atomic<bool>>(false);
     fiber::http::HttpHandler handler = [delayed_send_result, delayed_send_completed](
@@ -1373,8 +1344,7 @@ class SendingHttp2Connection final : public fiber::http::Http2Connection {
 public:
     SendingHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport, FakeHttpTransport *fake_transport,
                            Options options = {}) :
-        fiber::http::Http2Connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
-                                     TestHttp2StreamFactory::ops()),
+        fiber::http::Http2Connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops()),
         fake_transport_(fake_transport) {
         FIBER_ASSERT(start(std::move(transport)) == fiber::common::IoErr::None);
     }
@@ -1891,8 +1861,7 @@ class ControlHttp2Connection final : public fiber::http::Http2Connection {
 public:
     ControlHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport, FakeHttpTransport *fake_transport,
                            Options options = {}) :
-        fiber::http::Http2Connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
-                                     TestHttp2StreamFactory::ops()),
+        fiber::http::Http2Connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops()),
         fake_transport_(fake_transport) {
         FIBER_ASSERT(start(std::move(transport)) == fiber::common::IoErr::None);
     }
@@ -1944,8 +1913,7 @@ class KeepaliveHttp2Connection final : public fiber::http::Http2Connection {
 public:
     KeepaliveHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport,
                              ScriptedReadTransport *transport_impl, Options options = {}) :
-        fiber::http::Http2Connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
-                                     TestHttp2StreamFactory::ops()),
+        fiber::http::Http2Connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops()),
         transport_impl_(transport_impl) {
         FIBER_ASSERT(start(std::move(transport)) == fiber::common::IoErr::None);
     }
@@ -2555,7 +2523,6 @@ TEST(Http2ConnectionTest, StartDrivesIoAndNotifiesClosureWithoutRunCoroutine) {
     fiber::async::spawn(group.at(0), [&callback_ctx]() -> fiber::async::DetachedTask {
         fiber::http::Http2Connection::Options options;
         options.role = fiber::http::Http2Connection::ConnectionRole::Client;
-        options = with_test_hpack_catalog(options);
         auto *connection = new (std::nothrow)
                 fiber::http::Http2Connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
         if (!connection) {
@@ -3033,8 +3000,7 @@ TEST(Http2ConnectionTest, GoawayClosesOnlyLocalStreamsAfterLastStreamId) {
 TEST(Http2ConnectionTest, CloseAllStreamsTraversesOwnedListWhileDetaching) {
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
-    fiber::http::Http2Connection connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
-                                            TestHttp2StreamFactory::ops());
+    fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
     connection.state_ = fiber::http::Http2Connection::State::Running;
 
     auto *owner1 = TestHttp2StreamOwner::create_owner();
@@ -3066,8 +3032,7 @@ TEST(Http2ConnectionTest, CloseAllStreamsTraversesOwnedListWhileDetaching) {
 TEST(Http2ConnectionTest, CloseStreamsAfterGoawayDoesNotSkipAdjacentOwnedStreams) {
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
-    fiber::http::Http2Connection connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
-                                            TestHttp2StreamFactory::ops());
+    fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
     connection.state_ = fiber::http::Http2Connection::State::Running;
 
     auto *owner1 = TestHttp2StreamOwner::create_owner();
@@ -3099,8 +3064,7 @@ TEST(Http2ConnectionTest, CloseStreamsAfterGoawayDoesNotSkipAdjacentOwnedStreams
 TEST(Http2ConnectionTest, InitialStreamWindowDecreaseUpdatesEveryStream) {
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
-    fiber::http::Http2Connection connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
-                                            TestHttp2StreamFactory::ops());
+    fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
     connection.state_ = fiber::http::Http2Connection::State::Running;
 
     auto *owner1 = TestHttp2StreamOwner::create_owner();
@@ -3537,8 +3501,7 @@ TEST(Http2ConnectionTest, LocalStreamCreationRequiresStart) {
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
 
-    fiber::http::Http2Connection connection(with_test_hpack_catalog(options), &test_http2_stream_factory(),
-                                            TestHttp2StreamFactory::ops());
+    fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
     auto *owner = TestHttp2StreamOwner::create_owner();
     ASSERT_NE(owner, nullptr);
     auto lease = connection.attach_local_stream(owner->stream);

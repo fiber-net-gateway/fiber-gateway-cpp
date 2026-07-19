@@ -17,7 +17,6 @@
 
 ## Required Options
 - `Options::peer_addr` must be set.
-- `Options::h2.outbound_hpack_catalog` must be set.
 - `Options::h2.role` is forced to `Client` internally.
 - If `Options::tls.enabled == true`:
   - ALPN is forced to `h2`
@@ -49,7 +48,6 @@ fiber::http::Http2ClientConnection::Options options;
 options.peer_addr = fiber::net::SocketAddress(peer_ip, 443);
 options.tls.enabled = true;
 options.tls.server_name = "example.com";
-options.h2.outbound_hpack_catalog = &catalog;
 
 fiber::http::Http2ClientConnection conn(loop, std::move(options));
 

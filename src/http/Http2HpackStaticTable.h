@@ -14,21 +14,18 @@ public:
 
     using TableEntryView = Http2HpackTableEntryView;
 
+    struct FindResult {
+        std::uint8_t name_index = 0;
+        std::uint8_t exact_index = 0;
+    };
+
     [[nodiscard]] static bool get_by_index(std::uint32_t index, TableEntryView &view) noexcept;
+
+    [[nodiscard]] static FindResult find(std::string_view name, std::uint64_t name_hash,
+                                         std::string_view value) noexcept;
 
     [[nodiscard]] static bool find_name(std::string_view name, std::uint32_t &index) noexcept;
     [[nodiscard]] static bool find_name(std::string_view name, std::uint64_t name_hash, std::uint32_t &index) noexcept;
-
-private:
-    struct StaticEntry {
-        const char *name = nullptr;
-        const char *value = nullptr;
-        std::uint64_t name_hash = 0;
-        std::uint16_t name_len = 0;
-        std::uint16_t value_len = 0;
-    };
-
-    static const StaticEntry kEntries_[kEntryCount];
 };
 
 } // namespace fiber::http

@@ -21,7 +21,6 @@
 #include <grpc/GrpcFraming.h>
 #include <grpc/ProtoCodec.h>
 #include <http/Http2Connection.h>
-#include <http/Http2HpackEncodeCatalog.h>
 #include <http/HttpBodySpec.h>
 #include <http/HttpExchange.h>
 #include <http/HttpHeaders.h>
@@ -143,7 +142,6 @@ public:
         connections_to_serve_(reconnect_once ? 2 : 1), reconnect_once_(reconnect_once),
         handler_([this](fiber::http::HttpExchange &exchange) { return handle(exchange); }),
         factory_(http_options_, handler_), listener_(loop) {
-        FIBER_ASSERT(catalog_.init({}));
         auto bound = listener_.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
         if (!bound) {
             return;
@@ -169,7 +167,6 @@ public:
             }
             fiber::http::Http2Connection::Options options;
             options.role = fiber::http::Http2Connection::ConnectionRole::Server;
-            options.outbound_hpack_catalog = &catalog_;
             fiber::http::Http2Connection connection(options, &factory_, fiber::http::ServerRequestFactory::ops());
             active_connection_ = &connection;
             if (connection.start(std::move(*transport)) == fiber::common::IoErr::None) {
@@ -346,7 +343,6 @@ private:
     fiber::http::HttpServerOptions http_options_;
     fiber::http::HttpHandler handler_;
     fiber::http::ServerRequestFactory factory_;
-    fiber::http::Http2HpackEncodeCatalog catalog_;
     fiber::net::TcpListener listener_;
     fiber::http::Http2Connection *active_connection_ = nullptr;
     std::uint16_t port_ = 0;
