@@ -27,6 +27,29 @@ struct PacketMetadataOutcome {
     fiber::net::UdpEcn ecn = fiber::net::UdpEcn::Unspecified;
 };
 
+struct BatchReceiveOutcome {
+    fiber::common::IoErr err = fiber::common::IoErr::Unknown;
+    std::size_t count = 0;
+    bool ordered_payloads = false;
+};
+
+struct GsoOutcome {
+    fiber::common::IoErr err = fiber::common::IoErr::Unknown;
+    bool supported = true;
+    bool ordered_segments = false;
+};
+
+struct BatchValidationOutcome {
+    fiber::common::IoErr send_err = fiber::common::IoErr::Unknown;
+    fiber::common::IoErr wait_err = fiber::common::IoErr::Unknown;
+};
+
+struct BatchPartialOutcome {
+    fiber::common::IoErr err = fiber::common::IoErr::Unknown;
+    std::size_t sent = 0;
+    bool received_prefix = false;
+};
+
 struct ReadCallbackContext {
     fiber::net::UdpSocket *socket = nullptr;
     std::promise<fiber::common::IoErr> *done_promise = nullptr;
@@ -307,6 +330,198 @@ DetachedTask client_batch_send_packets(fiber::event::EventLoop *loop, uint16_t p
     delete client;
 }
 
+DetachedTask batch_receive_packets(fiber::event::EventLoop *loop, std::promise<BatchReceiveOutcome> *done_promise) {
+    fiber::net::UdpSocket server(*loop);
+    fiber::net::UdpSocket client(*loop);
+    auto bound = server.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
+    if (!bound) {
+        done_promise->set_value(BatchReceiveOutcome{.err = bound.error()});
+        co_return;
+    }
+    bound = client.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
+    if (!bound) {
+        done_promise->set_value(BatchReceiveOutcome{.err = bound.error()});
+        server.close();
+        co_return;
+    }
+
+    constexpr std::string_view first = "first";
+    constexpr std::string_view second = "second";
+    fiber::net::UdpPacketSendSpec specs[2]{};
+    specs[0].buf = first.data();
+    specs[0].len = first.size();
+    specs[0].peer = server.local_addr();
+    specs[1].buf = second.data();
+    specs[1].len = second.size();
+    specs[1].peer = server.local_addr();
+    auto sent = client.try_send_packets(specs, 2);
+    if (!sent || *sent != 2) {
+        done_promise->set_value(BatchReceiveOutcome{.err = sent ? fiber::common::IoErr::Unknown : sent.error()});
+        client.close();
+        server.close();
+        co_return;
+    }
+
+    auto readable = co_await server.wait_readable(std::chrono::seconds(2));
+    if (!readable) {
+        done_promise->set_value(BatchReceiveOutcome{.err = readable.error()});
+        client.close();
+        server.close();
+        co_return;
+    }
+
+    std::array<char, 16> first_buf{};
+    std::array<char, 16> second_buf{};
+    fiber::net::UdpPacketRecvSlot slots[2]{};
+    slots[0].buf = first_buf.data();
+    slots[0].capacity = first_buf.size();
+    slots[1].buf = second_buf.data();
+    slots[1].capacity = second_buf.size();
+    auto received = server.try_recv_packets(slots, 2);
+
+    BatchReceiveOutcome outcome{};
+    if (!received) {
+        outcome.err = received.error();
+    } else {
+        outcome.err = fiber::common::IoErr::None;
+        outcome.count = *received;
+        outcome.ordered_payloads = *received == 2 &&
+                                   std::string_view(first_buf.data(), slots[0].result.size) == first &&
+                                   std::string_view(second_buf.data(), slots[1].result.size) == second;
+    }
+    client.close();
+    server.close();
+    done_promise->set_value(outcome);
+}
+
+DetachedTask gso_send_segments(fiber::event::EventLoop *loop, std::promise<GsoOutcome> *done_promise) {
+    fiber::net::UdpSocket server(*loop);
+    fiber::net::UdpSocket client(*loop);
+    auto bound = server.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
+    if (!bound) {
+        done_promise->set_value(GsoOutcome{.err = bound.error()});
+        co_return;
+    }
+    bound = client.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
+    if (!bound) {
+        done_promise->set_value(GsoOutcome{.err = bound.error()});
+        server.close();
+        co_return;
+    }
+
+    constexpr std::array<char, 9> payload{'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'};
+    fiber::net::UdpPacketSendSpec spec{};
+    spec.buf = payload.data();
+    spec.len = payload.size();
+    spec.peer = server.local_addr();
+    spec.gso_segment_size = 3;
+    auto sent = client.try_send_packet(spec);
+    if (!sent) {
+        const bool unsupported =
+                sent.error() == fiber::common::IoErr::NotSupported || sent.error() == fiber::common::IoErr::Invalid;
+        done_promise->set_value(
+                GsoOutcome{.err = unsupported ? fiber::common::IoErr::None : sent.error(), .supported = !unsupported});
+        client.close();
+        server.close();
+        co_return;
+    }
+
+    GsoOutcome outcome{.err = fiber::common::IoErr::None};
+    constexpr std::string_view expected[3] = {"abc", "def", "ghi"};
+    outcome.ordered_segments = true;
+    for (std::size_t i = 0; i < 3; ++i) {
+        std::array<char, 8> buf{};
+        auto received = co_await server.recv_from(buf.data(), buf.size(), std::chrono::seconds(2));
+        if (!received) {
+            outcome.err = received.error();
+            outcome.ordered_segments = false;
+            break;
+        }
+        outcome.ordered_segments =
+                outcome.ordered_segments && std::string_view(buf.data(), received->size) == expected[i];
+    }
+    client.close();
+    server.close();
+    done_promise->set_value(outcome);
+}
+
+DetachedTask reject_invalid_send_batch_before_syscall(fiber::event::EventLoop *loop,
+                                                      std::promise<BatchValidationOutcome> *done_promise) {
+    fiber::net::UdpSocket server(*loop);
+    fiber::net::UdpSocket client(*loop);
+    auto bound = server.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
+    if (!bound) {
+        done_promise->set_value(BatchValidationOutcome{.send_err = bound.error()});
+        co_return;
+    }
+    bound = client.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
+    if (!bound) {
+        done_promise->set_value(BatchValidationOutcome{.send_err = bound.error()});
+        server.close();
+        co_return;
+    }
+
+    constexpr std::string_view payload = "valid-prefix";
+    fiber::net::UdpPacketSendSpec specs[2]{};
+    specs[0].buf = payload.data();
+    specs[0].len = payload.size();
+    specs[0].peer = server.local_addr();
+    specs[1].buf = nullptr;
+    specs[1].len = 1;
+    specs[1].peer = server.local_addr();
+
+    auto sent = client.try_send_packets(specs, 2);
+    BatchValidationOutcome outcome{};
+    outcome.send_err = sent ? fiber::common::IoErr::None : sent.error();
+    auto readable = co_await server.wait_readable(std::chrono::milliseconds(50));
+    outcome.wait_err = readable ? fiber::common::IoErr::None : readable.error();
+    client.close();
+    server.close();
+    done_promise->set_value(outcome);
+}
+
+DetachedTask send_batch_with_kernel_partial_prefix(fiber::event::EventLoop *loop,
+                                                   std::promise<BatchPartialOutcome> *done_promise) {
+    fiber::net::UdpSocket server(*loop);
+    fiber::net::UdpSocket client(*loop);
+    auto bound = server.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
+    if (!bound) {
+        done_promise->set_value(BatchPartialOutcome{.err = bound.error()});
+        co_return;
+    }
+    bound = client.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
+    if (!bound) {
+        done_promise->set_value(BatchPartialOutcome{.err = bound.error()});
+        server.close();
+        co_return;
+    }
+
+    constexpr std::string_view first = "prefix";
+    constexpr std::string_view second = "unsupported-family";
+    fiber::net::UdpPacketSendSpec specs[2]{};
+    specs[0].buf = first.data();
+    specs[0].len = first.size();
+    specs[0].peer = server.local_addr();
+    specs[1].buf = second.data();
+    specs[1].len = second.size();
+    specs[1].peer = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v6(), server.local_addr().port());
+
+    auto sent = client.try_send_packets(specs, 2);
+    BatchPartialOutcome outcome{};
+    if (!sent) {
+        outcome.err = sent.error();
+    } else {
+        outcome.err = fiber::common::IoErr::None;
+        outcome.sent = *sent;
+        std::array<char, 16> buf{};
+        auto received = co_await server.recv_from(buf.data(), buf.size(), std::chrono::seconds(1));
+        outcome.received_prefix = received && std::string_view(buf.data(), received->size) == first;
+    }
+    client.close();
+    server.close();
+    done_promise->set_value(outcome);
+}
+
 DetachedTask server_wait_readable_then_recv(fiber::event::EventLoop *loop, std::promise<uint16_t> *port_promise,
                                             std::promise<fiber::common::IoErr> *done_promise) {
     auto *server = new fiber::net::UdpSocket(*loop);
@@ -521,6 +736,77 @@ TEST(UdpSocketTest, TrySendPacketsSendsWholeBatch) {
 
     group.stop();
     group.join();
+}
+
+TEST(UdpSocketTest, TryRecvPacketsReceivesWholeBatchWithPerPacketResults) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<BatchReceiveOutcome> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return batch_receive_packets(&group.at(0), &promise); });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    const BatchReceiveOutcome outcome = future.get();
+    EXPECT_EQ(outcome.err, fiber::common::IoErr::None);
+    EXPECT_EQ(outcome.count, 2U);
+    EXPECT_TRUE(outcome.ordered_payloads);
+
+    group.stop();
+    group.join();
+}
+
+TEST(UdpSocketTest, UdpGsoSplitsOneMessageIntoDatagrams) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<GsoOutcome> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return gso_send_segments(&group.at(0), &promise); });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    const GsoOutcome outcome = future.get();
+    group.stop();
+    group.join();
+    if (!outcome.supported) {
+        GTEST_SKIP() << "UDP_SEGMENT is not supported by this kernel";
+    }
+    EXPECT_EQ(outcome.err, fiber::common::IoErr::None);
+    EXPECT_TRUE(outcome.ordered_segments);
+}
+
+TEST(UdpSocketTest, TrySendPacketsValidatesWholeBatchBeforeSending) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<BatchValidationOutcome> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return reject_invalid_send_batch_before_syscall(&group.at(0), &promise); });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    const BatchValidationOutcome outcome = future.get();
+    group.stop();
+    group.join();
+    EXPECT_EQ(outcome.send_err, fiber::common::IoErr::Invalid);
+    EXPECT_EQ(outcome.wait_err, fiber::common::IoErr::TimedOut);
+}
+
+TEST(UdpSocketTest, TrySendPacketsReportsKernelSentPrefix) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<BatchPartialOutcome> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return send_batch_with_kernel_partial_prefix(&group.at(0), &promise); });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    const BatchPartialOutcome outcome = future.get();
+    group.stop();
+    group.join();
+    EXPECT_EQ(outcome.err, fiber::common::IoErr::None);
+    EXPECT_EQ(outcome.sent, 1U);
+    EXPECT_TRUE(outcome.received_prefix);
 }
 
 TEST(UdpSocketTest, WaitReadableWakesOnIncomingPacket) {

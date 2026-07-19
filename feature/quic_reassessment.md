@@ -139,7 +139,7 @@ RFC 9001 §6.5 明确指出，previous 和 next 可能使用相同的 Key Phase 
 
 只增加 buffer pool 不能解决活动内存放大；它只能减少 malloc/free churn，不能限制被 slice 持有的 active backing storage。
 
-### 3.3 实现 UDP batching 和 GSO
+### 3.3 ✅ 已修复：实现 UDP batching 和 GSO
 
 #### 现状
 

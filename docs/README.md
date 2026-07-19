@@ -251,6 +251,8 @@ Validate the config:
   Disable automatic third-party dependency downloads and require system-installed dependencies.
 - `-DFIBER_USE_JEMALLOC=ON`
   Link final executables against jemalloc.
+- `-DFIBER_ENABLE_UDP_GSO=OFF`
+  Do not compile UDP GSO support even when Linux headers provide `UDP_SEGMENT`.
 - `-DFIBER_ENABLE_LTO=ON`
   Enable LTO/IPO when supported by the toolchain.
 - `-DFIBER_ALLOW_GCC_LTO=ON`

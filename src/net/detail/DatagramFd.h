@@ -55,6 +55,9 @@ public:
                                        std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] fiber::common::IoResult<UdpPacketRecvResult> try_recv_packet(void *buf, size_t len) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_send_packet(const UdpPacketSendSpec &spec) noexcept;
+    [[nodiscard]] fiber::common::IoResult<size_t> try_recv_packets(UdpPacketRecvSlot *slots, size_t count) noexcept;
+    [[nodiscard]] fiber::common::IoResult<size_t> try_send_packets(const UdpPacketSendSpec *specs,
+                                                                   size_t count) noexcept;
     fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept;

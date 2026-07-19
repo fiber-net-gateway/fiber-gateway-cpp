@@ -54,26 +54,12 @@ fiber::common::IoResult<size_t> UdpSocket::try_send_packet(const UdpPacketSendSp
     return socket_.try_send_packet(spec);
 }
 
-fiber::common::IoResult<size_t> UdpSocket::try_send_packets(const UdpPacketSendSpec *specs, size_t count) noexcept {
-    if ((count != 0 && specs == nullptr) || !valid()) {
-        return std::unexpected(fiber::common::IoErr::Invalid);
-    }
+fiber::common::IoResult<size_t> UdpSocket::try_recv_packets(UdpPacketRecvSlot *slots, size_t count) noexcept {
+    return socket_.try_recv_packets(slots, count);
+}
 
-    size_t sent = 0;
-    for (; sent < count; ++sent) {
-        auto result = socket_.try_send_packet(specs[sent]);
-        if (result) {
-            continue;
-        }
-        if (result.error() == fiber::common::IoErr::WouldBlock && sent != 0) {
-            break;
-        }
-        if (sent != 0) {
-            break;
-        }
-        return std::unexpected(result.error());
-    }
-    return sent;
+fiber::common::IoResult<size_t> UdpSocket::try_send_packets(const UdpPacketSendSpec *specs, size_t count) noexcept {
+    return socket_.try_send_packets(specs, count);
 }
 
 fiber::common::IoErr UdpSocket::set_read_callback(ReadyCallback callback, void *ctx) noexcept {

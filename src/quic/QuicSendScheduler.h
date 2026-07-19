@@ -56,13 +56,28 @@ struct QuicSendDatagram {
     bool pacing_controlled = false;
 };
 
+struct QuicSendPathReservation {
+    QuicPath *path = nullptr;
+    std::uint64_t sent = 0;
+    std::uint32_t ecn_validation_sent = 0;
+};
+
+struct QuicSendBuildState {
+    QuicCongestionState congestion{};
+    QuicPacerState pacer{};
+    QuicSendPathReservation paths[kQuicMaxPaths]{};
+};
+
 class QuicSendScheduler : public common::NonCopyable, public common::NonMovable {
 public:
     struct Options {
         std::size_t send_buffer_size = kQuicSendDefaultBufferSize;
+        std::size_t max_datagrams_per_batch = net::kUdpMaxBatchSize;
+        std::size_t max_gso_segments = net::kUdpMaxBatchSize;
         std::size_t max_packets_per_wakeup = 64;
         std::size_t max_packets_per_connection = 64;
         QuicPacingOptions pacing{};
+        bool enable_gso = true;
     };
 
     QuicSendScheduler() noexcept;
@@ -109,6 +124,7 @@ private:
     common::IoErr stop_reason_ = common::IoErr::None;
     bool initialized_ = false;
     bool closing_ = false;
+    bool gso_enabled_ = false;
 };
 
 } // namespace fiber::quic

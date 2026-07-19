@@ -29,6 +29,7 @@ class TlsServerContext;
 namespace fiber::quic {
 
 inline constexpr std::size_t kQuicUdpDefaultReadBufferSize = 65536;
+inline constexpr std::size_t kQuicUdpDefaultRecvBatchSize = 16;
 inline constexpr std::size_t kQuicUdpDefaultPlaintextBufferSize = 65536;
 inline constexpr std::size_t kQuicUdpDefaultMaxRecvDatagramsPerWakeup = 64;
 inline constexpr std::size_t kQuicUdpDefaultMaxRecvBytesPerWakeup = 256 * 1024;
@@ -78,6 +79,7 @@ public:
         std::uint64_t ack_delay_exponent = 3;
         std::size_t max_recv_datagrams_per_wakeup = kQuicUdpDefaultMaxRecvDatagramsPerWakeup;
         std::size_t max_recv_bytes_per_wakeup = kQuicUdpDefaultMaxRecvBytesPerWakeup;
+        std::size_t recv_batch_size = kQuicUdpDefaultRecvBatchSize;
         std::size_t retained_storage_limit = kQuicDefaultEndpointRetainedStorageLimit;
         bool retry = false;
         bool issue_new_token = false;
@@ -237,7 +239,8 @@ private:
     create_connection(const QuicPacketHeader &packet, const QuicReceivedDatagram &datagram,
                       const QuicInitialValidation &validation) noexcept;
     [[nodiscard]] common::IoResult<QuicUdpReceiveResult>
-    process_datagram(net::UdpPacketRecvResult recv, std::chrono::steady_clock::time_point now) noexcept;
+    process_datagram(std::uint8_t *data, net::UdpPacketRecvResult recv,
+                     std::chrono::steady_clock::time_point now) noexcept;
     [[nodiscard]] ReceivePumpResult pump_receive() noexcept;
     [[nodiscard]] common::IoErr sync_socket_callbacks() noexcept;
     void clear_socket_callbacks() noexcept;
@@ -248,15 +251,17 @@ private:
     static void on_socket_write_ready(void *ctx, common::IoErr err) noexcept;
     static void on_io_pump(QuicUdpEndpoint *endpoint) noexcept;
     [[nodiscard]] common::IoResult<QuicBuildSendResult>
-    build_send_datagram(QuicConnection &connection, QuicSendDatagram &datagram,
+    build_send_datagram(QuicConnection &connection, QuicSendDatagram &datagram, QuicSendBuildState &build_state,
                         QuicBuildMode mode = QuicBuildMode::Normal) noexcept;
     [[nodiscard]] common::IoResult<QuicBuildSendResult>
-    build_path_control_datagram(QuicConnection &connection, QuicSendDatagram &datagram) noexcept;
+    build_path_control_datagram(QuicConnection &connection, QuicSendDatagram &datagram,
+                                QuicSendBuildState &build_state) noexcept;
     [[nodiscard]] static common::IoResult<QuicStreamFrameEncodeStatus>
     encode_stream_frame_into_payload(QuicConnection &connection, QuicOutputFrame &frame, std::uint8_t *dst,
                                      std::size_t available) noexcept;
     void commit_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept;
     void rollback_send_datagram(QuicConnection &connection, const QuicSendDatagram &datagram) noexcept;
+    void finish_send_batch(QuicConnection &connection) noexcept;
     [[nodiscard]] bool connection_has_send_work(const QuicConnection &connection) const noexcept;
     void handle_receive_result(QuicConnection &connection, const QuicPacketProcessResult &result) noexcept;
     [[nodiscard]] bool should_delay_ack(const QuicPacketNumberSpace &space, QuicTime now) const noexcept;
@@ -265,6 +270,9 @@ private:
     event::EventLoop *loop_ = nullptr;
     std::unique_ptr<net::UdpSocket> socket_{};
     std::unique_ptr<std::uint8_t[]> read_buffer_{};
+    std::array<net::UdpPacketRecvSlot, net::kUdpMaxBatchSize> recv_slots_{};
+    std::size_t recv_pending_index_ = 0;
+    std::size_t recv_pending_count_ = 0;
     std::unique_ptr<std::uint8_t[]> send_plaintext_buffer_{};
     std::unique_ptr<std::uint8_t[]> send_buffer_{};
     mem::IoBufStorageBudget recv_storage_budget_{};

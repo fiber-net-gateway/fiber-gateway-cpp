@@ -9,6 +9,8 @@
 
 namespace fiber::net {
 
+inline constexpr std::size_t kUdpMaxBatchSize = 64;
+
 enum class UdpEcn : std::int8_t {
     Unspecified = -1,
     NonEct = 0,
@@ -22,6 +24,13 @@ struct UdpPacketRecvResult {
     SocketAddress peer{};
     SocketAddress local{};
     UdpEcn ecn = UdpEcn::Unspecified;
+    bool truncated = false;
+};
+
+struct UdpPacketRecvSlot {
+    void *buf = nullptr;
+    size_t capacity = 0;
+    UdpPacketRecvResult result{};
 };
 
 struct UdpPacketSendSpec {
@@ -33,6 +42,7 @@ struct UdpPacketSendSpec {
     SocketAddress local{};
     bool has_local = false;
     UdpEcn ecn = UdpEcn::Unspecified;
+    std::uint16_t gso_segment_size = 0;
 };
 
 } // namespace fiber::net

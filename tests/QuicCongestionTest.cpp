@@ -178,6 +178,15 @@ TEST(QuicOutputFrameQueueTest, MaintainsReverseLinksAcrossMutations) {
     }
     EXPECT_EQ(frame, nullptr);
 
+    fiber::quic::QuicOutputFrame *removed_tail = queue.pop_back();
+    ASSERT_EQ(removed_tail, &second);
+    EXPECT_EQ(queue.back(), &first);
+    EXPECT_EQ(queue.next_of(first), nullptr);
+    EXPECT_EQ(removed_tail->next, nullptr);
+    EXPECT_EQ(removed_tail->prev, nullptr);
+    EXPECT_FALSE(removed_tail->queued);
+    queue.push_back(*removed_tail);
+
     for (std::size_t i = 0; i < expected.size(); ++i) {
         fiber::quic::QuicOutputFrame *removed = queue.pop_front();
         ASSERT_EQ(removed, expected[i]);
