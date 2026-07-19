@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <expected>
+#include <utility>
 
 #include "QuicAckHandler.h"
 #include "QuicCrypto.h"
@@ -36,6 +37,24 @@ namespace {
         return true;
     }
     return std::equal(lhs.data(), lhs.data() + lhs.size(), rhs.data());
+}
+
+[[nodiscard]] common::IoResult<mem::IoBuf> retain_frame_data(const mem::IoBuf &payload, QuicSlice data) noexcept {
+    if (data.len == 0) {
+        return mem::IoBuf{};
+    }
+    if (!payload || data.data == nullptr) [[unlikely]] {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    const auto begin = reinterpret_cast<std::uintptr_t>(payload.readable_data());
+    const auto end = begin + payload.readable();
+    const auto frame_begin = reinterpret_cast<std::uintptr_t>(data.data);
+    if (end < begin || frame_begin < begin || frame_begin > end || data.len > end - frame_begin) [[unlikely]] {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    return payload.retain_slice(static_cast<std::size_t>(frame_begin - begin), data.len);
 }
 
 [[nodiscard]] bool probing_frame(QuicFrameType type) noexcept {
@@ -189,13 +208,13 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
 }
 
 [[nodiscard]] common::IoResult<void> provide_crypto_data(QuicConnection &conn, QuicEncryptionLevel level,
-                                                         std::uint64_t offset, QuicSlice data) noexcept {
+                                                         std::uint64_t offset, mem::IoBuf data) noexcept {
     if (!conn.tls().initialized()) {
         return {};
     }
 
     QuicPacketNumberSpace &space = conn.packet_number_space(level);
-    auto inserted = space.crypto_recv.insert(offset, data);
+    auto inserted = space.crypto_recv.insert(offset, std::move(data));
     if (!inserted) {
         if (inserted.error() == common::IoErr::MessageTooLarge) {
             conn.close(QuicErrorCode::CryptoBufferExceeded);
@@ -221,9 +240,9 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
 }
 
 [[nodiscard]] common::IoResult<bool> handle_crypto_frame(QuicConnection &conn, QuicEncryptionLevel level,
-                                                         const QuicInputFrame &frame,
+                                                         const QuicInputFrame &frame, mem::IoBuf data,
                                                          bool &handshake_confirmed) noexcept {
-    auto provided = provide_crypto_data(conn, level, frame.u.crypto.offset, frame.data);
+    auto provided = provide_crypto_data(conn, level, frame.u.crypto.offset, std::move(data));
     if (!provided) {
         return std::unexpected(provided.error());
     }
@@ -320,7 +339,7 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
 
     const QuicTime now = quic_time_ms(datagram.received_at);
     bool path_challenged = false;
-    QuicReadCursor payload(decoded.payload.data, decoded.payload.len);
+    QuicReadCursor payload(decoded.payload.readable_data(), decoded.payload.readable());
     while (!payload.empty()) {
         const std::uint8_t *frame_data = payload.pos();
         const std::size_t frame_len = payload.remaining();
@@ -368,8 +387,13 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 });
                 return result;
             case QuicFrameType::Crypto: {
+                auto frame_data = retain_frame_data(decoded.payload, frame.data);
+                if (!frame_data) {
+                    return std::unexpected(frame_data.error());
+                }
                 bool handshake_confirmed = false;
-                auto handled = handle_crypto_frame(conn, packet.level, frame, handshake_confirmed);
+                auto handled =
+                        handle_crypto_frame(conn, packet.level, frame, std::move(*frame_data), handshake_confirmed);
                 if (!handled) {
                     return std::unexpected(handled.error());
                 }
@@ -378,7 +402,11 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 break;
             }
             case QuicFrameType::Stream: {
-                auto received = conn.recv_stream_frame(frame.u.stream, frame.data);
+                auto frame_data = retain_frame_data(decoded.payload, frame.data);
+                if (!frame_data) {
+                    return std::unexpected(frame_data.error());
+                }
+                auto received = conn.recv_stream_frame(frame.u.stream, std::move(*frame_data));
                 if (!received) {
                     return std::unexpected(received.error());
                 }
@@ -573,11 +601,9 @@ QuicReceiveApplyResult quic_apply_receive_result(QuicConnection &conn, const Qui
 }
 
 common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConnection &conn,
-                                                                        const QuicReceivedDatagram &datagram,
-                                                                        std::uint8_t *plaintext,
-                                                                        std::size_t plaintext_cap) noexcept {
+                                                                        const QuicReceivedDatagram &datagram) noexcept {
     if (conn.role() != QuicConnectionRole::Server || datagram.data == nullptr ||
-        datagram.len < kMinInitialDatagramSize || plaintext == nullptr || plaintext_cap == 0) {
+        datagram.len < kMinInitialDatagramSize) {
         return std::unexpected(common::IoErr::Invalid);
     }
     if (conn.closed()) {
@@ -603,11 +629,19 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
     auto &space = conn.packet_number_space(packet->level);
     const std::uint64_t previous_largest_received = space.largest_received_packet_number;
 
-    auto opened =
-            quic_decrypt_initial_packet(conn, *packet, datagram.data, packet->packet_len, plaintext, plaintext_cap);
+    if (packet->ciphertext_len == 0) [[unlikely]] {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    mem::IoBuf plaintext = mem::IoBuf::allocate(packet->ciphertext_len);
+    if (!plaintext) [[unlikely]] {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    auto opened = quic_decrypt_initial_packet(conn, *packet, datagram.data, packet->packet_len,
+                                              plaintext.writable_data(), plaintext.writable());
     if (!opened) {
         return std::unexpected(opened.error());
     }
+    plaintext.commit(opened->len);
 
     if (conn.role() == QuicConnectionRole::Server && !conn.tls().initialized()) {
         auto tls_ok = conn.ensure_server_tls();
@@ -631,7 +665,7 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
     result.level = packet->level;
     result.packet_number = packet->packet_number;
 
-    QuicReadCursor payload(opened->data, opened->len);
+    QuicReadCursor payload(plaintext.readable_data(), plaintext.readable());
     while (!payload.empty()) {
         auto parsed = quic_parse_frame(QuicEncryptionLevel::Initial, payload);
         if (!parsed) {
@@ -684,9 +718,8 @@ common::IoResult<QuicPacketProcessResult> quic_process_initial_datagram(QuicConn
 
 common::IoResult<QuicPacketProcessResult> quic_process_datagram(QuicConnection &conn,
                                                                 const QuicReceivedDatagram &datagram,
-                                                                std::uint8_t *plaintext, std::size_t plaintext_cap,
                                                                 std::uint8_t short_dcid_len) noexcept {
-    if (datagram.data == nullptr || datagram.len == 0 || plaintext == nullptr || plaintext_cap == 0 || conn.closed()) {
+    if (datagram.data == nullptr || datagram.len == 0 || conn.closed()) {
         return std::unexpected(conn.closed() ? common::IoErr::Canceled : common::IoErr::Invalid);
     }
 
@@ -737,8 +770,7 @@ common::IoResult<QuicPacketProcessResult> quic_process_datagram(QuicConnection &
 
         QuicPacketNumberSpace &space = conn.packet_number_space(packet->level);
         const std::uint64_t previous_largest_received = space.largest_received_packet_number;
-        auto decoded =
-                quic_decode_packet(conn, packet_data, packet->packet_len, short_dcid_len, plaintext, plaintext_cap);
+        auto decoded = quic_decode_packet(conn, packet_data, packet->packet_len, short_dcid_len);
         if (!decoded) {
             if (decoded.error() == common::IoErr::NotFound) {
                 offset += packet->packet_len;

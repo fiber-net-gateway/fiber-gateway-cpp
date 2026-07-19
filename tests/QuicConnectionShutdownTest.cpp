@@ -19,8 +19,13 @@
 
 namespace {
 
-fiber::quic::QuicSlice slice_of(std::string_view value) {
-    return {reinterpret_cast<const std::uint8_t *>(value.data()), value.size()};
+fiber::mem::IoBuf slice_of(std::string_view value) {
+    fiber::mem::IoBuf buf = fiber::mem::IoBuf::allocate(value.size());
+    if (buf) {
+        std::memcpy(buf.writable_data(), value.data(), value.size());
+        buf.commit(value.size());
+    }
+    return buf;
 }
 
 struct ShutdownCallbackState {};
@@ -928,12 +933,10 @@ TEST(QuicStatelessResetTest, UndecryptableShortHeaderWithMatchingTokenDrainsSile
     std::array<std::uint8_t, 48> datagram{};
     fill_reset_datagram(datagram, token);
 
-    std::array<std::uint8_t, 1400> plaintext{};
     fiber::quic::QuicReceivedDatagram rd{};
     rd.data = datagram.data();
     rd.len = datagram.size();
-    auto result = fiber::quic::quic_process_datagram(conn, rd, plaintext.data(), plaintext.size(),
-                                                     /*short_dcid_len=*/8);
+    auto result = fiber::quic::quic_process_datagram(conn, rd, /*short_dcid_len=*/8);
 
     // The reset is detected and swallowed (not dropped as a decrypt error).
     EXPECT_TRUE(result.has_value()) << "expected reset detection, got error "
@@ -974,11 +977,10 @@ TEST(QuicStatelessResetTest, UndecryptableShortHeaderWithoutMatchingTokenIsDropp
     std::array<std::uint8_t, 48> datagram{};
     fill_reset_datagram(datagram, bogus_token);
 
-    std::array<std::uint8_t, 1400> plaintext{};
     fiber::quic::QuicReceivedDatagram rd{};
     rd.data = datagram.data();
     rd.len = datagram.size();
-    auto result = fiber::quic::quic_process_datagram(conn, rd, plaintext.data(), plaintext.size(), 8);
+    auto result = fiber::quic::quic_process_datagram(conn, rd, 8);
 
     EXPECT_FALSE(result.has_value());
     EXPECT_NE(conn.state(), fiber::quic::QuicConnectionState::Draining);

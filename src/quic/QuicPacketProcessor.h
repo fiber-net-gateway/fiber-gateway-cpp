@@ -48,12 +48,11 @@ struct QuicReceiveApplyResult {
                                                                const QuicPacketProcessResult &result) noexcept;
 
 [[nodiscard]] common::IoResult<QuicPacketProcessResult>
-quic_process_initial_datagram(QuicConnection &conn, const QuicReceivedDatagram &datagram, std::uint8_t *plaintext,
-                              std::size_t plaintext_cap) noexcept;
+quic_process_initial_datagram(QuicConnection &conn, const QuicReceivedDatagram &datagram) noexcept;
 
 [[nodiscard]] common::IoResult<QuicPacketProcessResult>
-quic_process_datagram(QuicConnection &conn, const QuicReceivedDatagram &datagram, std::uint8_t *plaintext,
-                      std::size_t plaintext_cap, std::uint8_t short_dcid_len = kQuicConnectionIdLength) noexcept;
+quic_process_datagram(QuicConnection &conn, const QuicReceivedDatagram &datagram,
+                      std::uint8_t short_dcid_len = kQuicConnectionIdLength) noexcept;
 
 } // namespace fiber::quic
 

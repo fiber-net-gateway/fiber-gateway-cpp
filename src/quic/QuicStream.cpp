@@ -519,12 +519,10 @@ void QuicStream::close(std::uint64_t error_code) noexcept {
     }
 }
 
-common::IoResult<std::uint64_t> QuicStream::on_stream_data_recv(const std::uint8_t *src, std::size_t length,
-                                                                std::uint64_t offset, bool fin) noexcept {
+common::IoResult<std::uint64_t> QuicStream::on_stream_data_recv(mem::IoBuf data, std::uint64_t offset,
+                                                                bool fin) noexcept {
     const std::uint64_t old_end = recv_queue_.received_end_offset();
-    QuicSlice data{src, length};
-
-    auto inserted = recv_queue_.recv_stream_data(offset, data, fin);
+    auto inserted = recv_queue_.recv_stream_data(offset, std::move(data), fin);
     if (!inserted) {
         return std::unexpected(inserted.error());
     }

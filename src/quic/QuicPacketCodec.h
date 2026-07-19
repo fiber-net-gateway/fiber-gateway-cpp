@@ -41,7 +41,7 @@ struct QuicPacketPlaintext {
 
 struct QuicPacketDecodeResult {
     QuicPacketHeader header{};
-    QuicSlice payload{};
+    mem::IoBuf payload{};
     // Set to true when this packet's key_phase bit differs from the connection's
     // current key_phase and we successfully decrypted with next_application_read.
     // The processor uses this signal to swap keys and arm the discard timer.
@@ -73,9 +73,10 @@ quic_encode_packet(QuicConnection &connection, const QuicPacketEncodeSpec &spec,
 // are fully frame-validated so callers can discard malformed unauthenticated
 // packets without side effects; strongly protected payloads are intentionally
 // left for the packet processor to parse exactly once.
-[[nodiscard]] common::IoResult<QuicPacketDecodeResult>
-quic_decode_packet(QuicConnection &connection, std::uint8_t *datagram, std::size_t datagram_len,
-                   std::uint8_t short_dcid_len, std::uint8_t *plaintext, std::size_t plaintext_cap) noexcept;
+[[nodiscard]] common::IoResult<QuicPacketDecodeResult> quic_decode_packet(QuicConnection &connection,
+                                                                          std::uint8_t *datagram,
+                                                                          std::size_t datagram_len,
+                                                                          std::uint8_t short_dcid_len) noexcept;
 
 } // namespace fiber::quic
 

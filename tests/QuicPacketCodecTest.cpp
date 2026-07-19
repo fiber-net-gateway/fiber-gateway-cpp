@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <expected>
@@ -23,7 +24,7 @@ fiber::common::IoResult<DecodedPayloadSummary>
 summarize_decoded_payload(fiber::quic::QuicConnectionRole receiver_role,
                           const fiber::quic::QuicPacketDecodeResult &decoded) noexcept {
     DecodedPayloadSummary summary{};
-    fiber::quic::QuicReadCursor payload(decoded.payload.data, decoded.payload.len);
+    fiber::quic::QuicReadCursor payload(decoded.payload.readable_data(), decoded.payload.readable());
     while (!payload.empty()) {
         auto parsed = fiber::quic::quic_parse_frame_for_receiver(receiver_role, decoded.header.level, payload);
         if (!parsed) {
@@ -111,13 +112,12 @@ TEST(QuicPacketCodecTest, EncodesAndDecodesProtectedInitialPacket) {
     EXPECT_GE(encoded->packet_len, fiber::quic::kMinInitialDatagramSize);
     EXPECT_TRUE(encoded->ack_eliciting);
 
-    std::array<std::uint8_t, 1400> plaintext{};
-    auto decoded = fiber::quic::quic_decode_packet(client, datagram.data(), encoded->packet_len, 0, plaintext.data(),
-                                                   plaintext.size());
+    auto decoded = fiber::quic::quic_decode_packet(client, datagram.data(), encoded->packet_len, 0);
 
     ASSERT_TRUE(decoded.has_value()) << static_cast<int>(decoded.error());
     EXPECT_EQ(decoded->header.type, fiber::quic::QuicPacketType::Initial);
     EXPECT_EQ(decoded->header.packet_number, 0U);
+    std::fill(datagram.begin(), datagram.end(), 0);
     auto decoded_summary = summarize_decoded_payload(fiber::quic::QuicConnectionRole::Client, *decoded);
     ASSERT_TRUE(decoded_summary.has_value()) << static_cast<int>(decoded_summary.error());
     EXPECT_EQ(decoded_summary->frame_count, 2U);
@@ -242,10 +242,8 @@ TEST_P(QuicPacketCodecSuiteTest, EncodesAndDecodesApplicationPacket) {
                                                    datagram.data(), datagram.size());
     ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
 
-    std::array<std::uint8_t, 128> plaintext{};
     auto decoded = fiber::quic::quic_decode_packet(client, datagram.data(), encoded->packet_len,
-                                                   static_cast<std::uint8_t>(spec.dcid.size()), plaintext.data(),
-                                                   plaintext.size());
+                                                   static_cast<std::uint8_t>(spec.dcid.size()));
 
     ASSERT_TRUE(decoded.has_value()) << static_cast<int>(decoded.error());
     EXPECT_EQ(decoded->header.type, fiber::quic::QuicPacketType::Short);

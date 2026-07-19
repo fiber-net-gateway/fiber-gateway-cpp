@@ -6,6 +6,7 @@
 #include <expected>
 #include <limits>
 #include <new>
+#include <utility>
 
 #include "../event/EventLoopGroup.h"
 #include "QuicCrypto.h"
@@ -1490,7 +1491,7 @@ common::IoResult<QuicStream *> QuicConnection::get_or_create_peer_stream(std::ui
     return target;
 }
 
-common::IoResult<void> QuicConnection::recv_stream_frame(const QuicStreamFrame &frame, QuicSlice data) noexcept {
+common::IoResult<void> QuicConnection::recv_stream_frame(const QuicStreamFrame &frame, mem::IoBuf data) noexcept {
     // RFC 9000 §4.1: STREAM data is sent by the stream sender. On a
     // unidirectional stream the local side initiated, the local side is the
     // sender and the peer is the receiver, so the peer MUST NOT send STREAM
@@ -1519,11 +1520,12 @@ common::IoResult<void> QuicConnection::recv_stream_frame(const QuicStreamFrame &
         return std::unexpected(stream.error());
     }
 
-    if (frame.offset > std::numeric_limits<std::uint64_t>::max() - data.len) {
+    const std::size_t data_len = data.readable();
+    if (frame.offset > std::numeric_limits<std::uint64_t>::max() - data_len) {
         return std::unexpected(common::IoErr::Invalid);
     }
     const std::uint64_t old_end = (*stream)->recv_queue_.received_end_offset();
-    const std::uint64_t frame_end = frame.offset + data.len;
+    const std::uint64_t frame_end = frame.offset + data_len;
     const std::uint64_t pending_delta = frame_end > old_end ? frame_end - old_end : 0;
 
     // Connection-level flow control (max_data). nginx's ngx_quic_control_flow
@@ -1564,7 +1566,7 @@ common::IoResult<void> QuicConnection::recv_stream_frame(const QuicStreamFrame &
         }
     }
 
-    auto received = (*stream)->on_stream_data_recv(data.data, data.len, frame.offset, frame.fin);
+    auto received = (*stream)->on_stream_data_recv(std::move(data), frame.offset, frame.fin);
     if (!received) {
         return std::unexpected(received.error());
     }

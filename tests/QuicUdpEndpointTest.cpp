@@ -54,7 +54,7 @@ fiber::common::IoResult<DecodedPayloadSummary>
 summarize_decoded_payload(fiber::quic::QuicConnectionRole receiver_role,
                           const fiber::quic::QuicPacketDecodeResult &decoded) noexcept {
     DecodedPayloadSummary summary{};
-    fiber::quic::QuicReadCursor payload(decoded.payload.data, decoded.payload.len);
+    fiber::quic::QuicReadCursor payload(decoded.payload.readable_data(), decoded.payload.readable());
     while (!payload.empty()) {
         auto parsed = fiber::quic::quic_parse_frame_for_receiver(receiver_role, decoded.header.level, payload);
         if (!parsed) {
@@ -845,10 +845,7 @@ recv_coalesced_initial_handshake(fiber::event::EventLoop *loop, fiber::quic::Qui
         done_promise->set_value(std::unexpected(received.error()));
         co_return;
     }
-
-    std::array<std::uint8_t, 1400> plaintext{};
-    auto first = fiber::quic::quic_decode_packet(peer, response.data(), received->size, 0, plaintext.data(),
-                                                 plaintext.size());
+    auto first = fiber::quic::quic_decode_packet(peer, response.data(), received->size, 0);
     if (!first) {
         done_promise->set_value(std::unexpected(first.error()));
         co_return;
@@ -865,8 +862,8 @@ recv_coalesced_initial_handshake(fiber::event::EventLoop *loop, fiber::quic::Qui
         co_return;
     }
 
-    auto second = fiber::quic::quic_decode_packet(peer, response.data() + second_offset, received->size - second_offset,
-                                                  0, plaintext.data(), plaintext.size());
+    auto second =
+            fiber::quic::quic_decode_packet(peer, response.data() + second_offset, received->size - second_offset, 0);
     if (!second) {
         done_promise->set_value(std::unexpected(second.error()));
         co_return;
@@ -959,10 +956,7 @@ recv_handshake_packet_with_many_frames(fiber::event::EventLoop *loop, fiber::qui
         done_promise->set_value(std::unexpected(received.error()));
         co_return;
     }
-
-    std::array<std::uint8_t, 256> plaintext{};
-    auto decoded = fiber::quic::quic_decode_packet(peer, response.data(), received->size, 0, plaintext.data(),
-                                                   plaintext.size());
+    auto decoded = fiber::quic::quic_decode_packet(peer, response.data(), received->size, 0);
     if (!decoded) {
         done_promise->set_value(std::unexpected(decoded.error()));
         co_return;
@@ -1068,10 +1062,7 @@ recv_split_handshake_crypto_frame(fiber::event::EventLoop *loop, fiber::quic::Qu
         done_promise->set_value(std::unexpected(received.error()));
         co_return;
     }
-
-    std::array<std::uint8_t, 1400> plaintext{};
-    auto decoded = fiber::quic::quic_decode_packet(peer, response.data(), received->size, 0, plaintext.data(),
-                                                   plaintext.size());
+    auto decoded = fiber::quic::quic_decode_packet(peer, response.data(), received->size, 0);
     if (!decoded) {
         done_promise->set_value(std::unexpected(decoded.error()));
         co_return;
@@ -1173,10 +1164,7 @@ DetachedTask recv_handshake_ack_only_when_congestion_full(
         done_promise->set_value(std::unexpected(received.error()));
         co_return;
     }
-
-    std::array<std::uint8_t, 256> plaintext{};
-    auto decoded = fiber::quic::quic_decode_packet(peer, response.data(), received->size, 0, plaintext.data(),
-                                                   plaintext.size());
+    auto decoded = fiber::quic::quic_decode_packet(peer, response.data(), received->size, 0);
     if (!decoded) {
         done_promise->set_value(std::unexpected(decoded.error()));
         co_return;
@@ -1291,10 +1279,7 @@ DetachedTask recv_application_stream_frame(fiber::event::EventLoop *loop, fiber:
         done_promise->set_value(std::unexpected(received.error()));
         co_return;
     }
-
-    std::array<std::uint8_t, 256> plaintext{};
-    auto decoded = fiber::quic::quic_decode_packet(peer, response.data(), received->size, client_cid.size(),
-                                                   plaintext.data(), plaintext.size());
+    auto decoded = fiber::quic::quic_decode_packet(peer, response.data(), received->size, client_cid.size());
     if (!decoded) {
         done_promise->set_value(std::unexpected(decoded.error()));
         co_return;
@@ -1305,7 +1290,7 @@ DetachedTask recv_application_stream_frame(fiber::event::EventLoop *loop, fiber:
         co_return;
     }
 
-    fiber::quic::QuicReadCursor payload(decoded->payload.data, decoded->payload.len);
+    fiber::quic::QuicReadCursor payload(decoded->payload.readable_data(), decoded->payload.readable());
     auto parsed = fiber::quic::quic_parse_frame_for_receiver(fiber::quic::QuicConnectionRole::Client,
                                                              fiber::quic::QuicEncryptionLevel::Application, payload);
     if (!parsed) {
@@ -1419,10 +1404,7 @@ recv_http3_control_preface_frame(fiber::event::EventLoop *loop, fiber::quic::Qui
         done_promise->set_value(std::unexpected(received.error()));
         co_return;
     }
-
-    std::array<std::uint8_t, 256> plaintext{};
-    auto decoded = fiber::quic::quic_decode_packet(peer, response.data(), received->size, client_cid.size(),
-                                                   plaintext.data(), plaintext.size());
+    auto decoded = fiber::quic::quic_decode_packet(peer, response.data(), received->size, client_cid.size());
     if (!decoded) {
         done_promise->set_value(std::unexpected(decoded.error()));
         co_return;
@@ -1433,7 +1415,7 @@ recv_http3_control_preface_frame(fiber::event::EventLoop *loop, fiber::quic::Qui
         co_return;
     }
 
-    fiber::quic::QuicReadCursor payload(decoded->payload.data, decoded->payload.len);
+    fiber::quic::QuicReadCursor payload(decoded->payload.readable_data(), decoded->payload.readable());
     auto parsed = fiber::quic::quic_parse_frame_for_receiver(fiber::quic::QuicConnectionRole::Client,
                                                              fiber::quic::QuicEncryptionLevel::Application, payload);
     if (!parsed) {
@@ -1521,10 +1503,7 @@ DetachedTask recv_initial_ack_only_without_min_initial_padding(
         done_promise->set_value(std::unexpected(received.error()));
         co_return;
     }
-
-    std::array<std::uint8_t, 256> plaintext{};
-    auto decoded = fiber::quic::quic_decode_packet(peer, response.data(), received->size, 0, plaintext.data(),
-                                                   plaintext.size());
+    auto decoded = fiber::quic::quic_decode_packet(peer, response.data(), received->size, 0);
     if (!decoded) {
         done_promise->set_value(std::unexpected(decoded.error()));
         co_return;
@@ -2826,15 +2805,12 @@ TEST(QuicUdpEndpointTest, SendsNewTokenWhenPathValidationCompletes) {
     EXPECT_EQ(app_recv->packet.validated_path, connection->active_path());
     auto app_response_size = app_send_future.get();
     ASSERT_TRUE(app_response_size.has_value()) << static_cast<int>(app_response_size.error());
-
-    std::array<std::uint8_t, 1400> plaintext{};
     auto decoded = fiber::quic::quic_decode_packet(peer, new_token_response.data(), *app_response_size,
-                                                   static_cast<std::uint8_t>(client_scid.size()), plaintext.data(),
-                                                   plaintext.size());
+                                                   static_cast<std::uint8_t>(client_scid.size()));
     ASSERT_TRUE(decoded.has_value()) << static_cast<int>(decoded.error());
 
     fiber::quic::QuicSlice token{};
-    fiber::quic::QuicReadCursor payload(decoded->payload.data, decoded->payload.len);
+    fiber::quic::QuicReadCursor payload(decoded->payload.readable_data(), decoded->payload.readable());
     while (!payload.empty()) {
         auto parsed = fiber::quic::quic_parse_frame_for_receiver(
                 fiber::quic::QuicConnectionRole::Client, fiber::quic::QuicEncryptionLevel::Application, payload);
@@ -2895,10 +2871,7 @@ TEST(QuicUdpEndpointTest, SendsInitialAckAfterProcessingAckElicitingInitial) {
     client_options.loop = &group.at(0);
     fiber::quic::QuicConnection client(client_options);
     ASSERT_TRUE(client.init_initial_crypto(dcid));
-
-    std::array<std::uint8_t, 1400> plaintext{};
-    auto decoded = fiber::quic::quic_decode_packet(client, response.data(), *response_size, 0, plaintext.data(),
-                                                   plaintext.size());
+    auto decoded = fiber::quic::quic_decode_packet(client, response.data(), *response_size, 0);
 
     ASSERT_TRUE(decoded.has_value()) << static_cast<int>(decoded.error());
     EXPECT_EQ(decoded->header.type, fiber::quic::QuicPacketType::Initial);
