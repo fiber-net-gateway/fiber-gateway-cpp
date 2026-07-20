@@ -284,9 +284,10 @@ std::vector<std::uint8_t> uni_stream_type(fiber::http::Http3StreamType type) {
 }
 
 void feed_stream(fiber::quic::QuicConnection &conn, std::uint64_t stream_id, const std::vector<std::uint8_t> &data,
-                 bool fin = false) {
+                 bool fin = false, std::uint64_t offset = 0) {
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = stream_id;
+    frame.offset = offset;
     frame.length = data.size();
     frame.fin = fin;
     fiber::mem::IoBuf payload = fiber::mem::IoBuf::allocate(data.size());
@@ -308,6 +309,17 @@ fiber::async::DetachedTask feed_request_stream_then_wait(fiber::quic::QuicConnec
                                                          const std::vector<std::uint8_t> *data,
                                                          std::promise<void> *done) {
     feed_stream(*conn, 0, *data, true);
+    co_await fiber::async::sleep(20ms);
+    done->set_value();
+}
+
+fiber::async::DetachedTask feed_request_stream_then_delayed_fin(fiber::quic::QuicConnection *conn,
+                                                                const std::vector<std::uint8_t> *data,
+                                                                std::promise<void> *done) {
+    feed_stream(*conn, 0, *data);
+    co_await fiber::async::sleep(20ms);
+    const std::vector<std::uint8_t> empty;
+    feed_stream(*conn, 0, empty, true, data->size());
     co_await fiber::async::sleep(20ms);
     done->set_value();
 }
@@ -384,19 +396,22 @@ Http3RequestRunResult run_http3_request_headers(const HeaderList &headers, bool 
     return result;
 }
 
-Http3BodyReadOutcome run_http3_request_body(const std::vector<std::uint8_t> &request) {
+Http3BodyReadOutcome
+run_http3_request_body(const std::vector<std::uint8_t> &request, bool delay_fin = false, std::size_t read_limit = 64,
+                       std::size_t stream_buffer_limit = fiber::quic::kQuicDefaultStreamBufferSize) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
     quic_options.loop = &group.at(0);
+    quic_options.recv_flow.stream_buffer_limit = stream_buffer_limit;
     ServerRequestContext ctx;
     auto outcome_promise = std::make_shared<std::promise<Http3BodyReadOutcome>>();
     auto outcome_future = outcome_promise->get_future();
-    ctx.handler = [outcome_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+    ctx.handler = [outcome_promise, read_limit](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         Http3BodyReadOutcome outcome;
         outcome.body_spec = exchange.request_body_spec();
-        auto first = co_await exchange.read_body(64);
+        auto first = co_await exchange.read_body(read_limit);
         if (!first) {
             outcome.first_error = first.error();
             outcome_promise->set_value(std::move(outcome));
@@ -406,7 +421,7 @@ Http3BodyReadOutcome run_http3_request_body(const std::vector<std::uint8_t> &req
         auto first_bytes = chain_to_bytes(std::move(*first));
         outcome.first_body.assign(reinterpret_cast<const char *>(first_bytes.data()), first_bytes.size());
 
-        auto second = co_await exchange.read_body(64);
+        auto second = co_await exchange.read_body(read_limit);
         if (!second) {
             outcome.second_error = second.error();
             outcome.trailer_value = std::string(exchange.request_trailers().get("digest"));
@@ -434,7 +449,10 @@ Http3BodyReadOutcome run_http3_request_body(const std::vector<std::uint8_t> &req
 
     std::promise<void> feed_done;
     auto feed_future = feed_done.get_future();
-    fiber::async::spawn(group.at(0), [&quic, &request, &feed_done]() -> fiber::async::DetachedTask {
+    fiber::async::spawn(group.at(0), [&quic, &request, &feed_done, delay_fin]() -> fiber::async::DetachedTask {
+        if (delay_fin) {
+            return feed_request_stream_then_delayed_fin(&quic, &request, &feed_done);
+        }
         return feed_request_stream_then_wait(&quic, &request, &feed_done);
     });
 
@@ -854,12 +872,10 @@ TEST(Http3ConnectionTest, ServerRequestRejectsInvalidTeHeader) {
     EXPECT_EQ(result.handler_status, std::future_status::timeout);
 }
 
-TEST(Http3ConnectionTest, ServerReadBodyReturnsDataBeforeCompleteForFin) {
+TEST(Http3ConnectionTest, ServerReadBodyReturnsFinWithLastData) {
     HeaderList request_headers{
-            {":method", "POST"},
-            {":scheme", "https"},
-            {":authority", "example.com"},
-            {":path", "/body"},
+            {":method", "POST"}, {":scheme", "https"},    {":authority", "example.com"},
+            {":path", "/body"},  {"content-length", "5"},
     };
 
     std::vector<std::uint8_t> request;
@@ -868,7 +884,31 @@ TEST(Http3ConnectionTest, ServerReadBodyReturnsDataBeforeCompleteForFin) {
 
     Http3BodyReadOutcome outcome = run_http3_request_body(request);
 
-    EXPECT_TRUE(outcome.body_spec.is_stream());
+    ASSERT_TRUE(outcome.body_spec.is_content_length());
+    EXPECT_EQ(outcome.body_spec.content_length(), 5u);
+    EXPECT_EQ(outcome.first_error, fiber::common::IoErr::None);
+    EXPECT_EQ(outcome.first_body, "hello");
+    EXPECT_TRUE(outcome.first_complete);
+    EXPECT_EQ(outcome.second_error, fiber::common::IoErr::None);
+    EXPECT_TRUE(outcome.second_body.empty());
+    EXPECT_TRUE(outcome.second_complete);
+    EXPECT_TRUE(outcome.trailers_complete);
+}
+
+TEST(Http3ConnectionTest, ServerReadBodyReturnsDelayedFinSeparately) {
+    HeaderList request_headers{
+            {":method", "POST"}, {":scheme", "https"},    {":authority", "example.com"},
+            {":path", "/body"},  {"content-length", "5"},
+    };
+
+    std::vector<std::uint8_t> request;
+    append_frame(request, headers_frame(request_headers));
+    append_frame(request, data_frame("hello"));
+
+    Http3BodyReadOutcome outcome = run_http3_request_body(request, true);
+
+    ASSERT_TRUE(outcome.body_spec.is_content_length());
+    EXPECT_EQ(outcome.body_spec.content_length(), 5u);
     EXPECT_EQ(outcome.first_error, fiber::common::IoErr::None);
     EXPECT_EQ(outcome.first_body, "hello");
     EXPECT_FALSE(outcome.first_complete);
@@ -876,6 +916,50 @@ TEST(Http3ConnectionTest, ServerReadBodyReturnsDataBeforeCompleteForFin) {
     EXPECT_TRUE(outcome.second_body.empty());
     EXPECT_TRUE(outcome.second_complete);
     EXPECT_TRUE(outcome.trailers_complete);
+}
+
+TEST(Http3ConnectionTest, ServerReadBodyReturnsFinWithFullProxyChunk) {
+    HeaderList request_headers{
+            {":method", "POST"}, {":scheme", "https"},        {":authority", "example.com"},
+            {":path", "/body"},  {"content-length", "65536"},
+    };
+    const std::string body(64 * 1024, 'x');
+
+    std::vector<std::uint8_t> request;
+    append_frame(request, headers_frame(request_headers));
+    append_frame(request, data_frame(body));
+
+    Http3BodyReadOutcome outcome = run_http3_request_body(request, false, 64 * 1024, 128 * 1024);
+
+    ASSERT_TRUE(outcome.body_spec.is_content_length());
+    EXPECT_EQ(outcome.body_spec.content_length(), body.size());
+    EXPECT_EQ(outcome.first_error, fiber::common::IoErr::None);
+    EXPECT_EQ(outcome.first_body, body);
+    EXPECT_TRUE(outcome.first_complete);
+    EXPECT_EQ(outcome.second_error, fiber::common::IoErr::None);
+    EXPECT_TRUE(outcome.second_body.empty());
+    EXPECT_TRUE(outcome.second_complete);
+    EXPECT_TRUE(outcome.trailers_complete);
+}
+
+TEST(Http3ConnectionTest, ServerReadBodyRejectsFinInsideDataPayload) {
+    HeaderList request_headers{
+            {":method", "POST"},
+            {":scheme", "https"},
+            {":authority", "example.com"},
+            {":path", "/body"},
+    };
+
+    std::vector<std::uint8_t> request = headers_frame(request_headers);
+    append_varint(request, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Data));
+    append_varint(request, 10);
+    request.insert(request.end(), {'h', 'e', 'l', 'l', 'o'});
+
+    Http3BodyReadOutcome outcome = run_http3_request_body(request);
+
+    EXPECT_EQ(outcome.first_error, fiber::common::IoErr::Invalid);
+    EXPECT_TRUE(outcome.first_body.empty());
+    EXPECT_FALSE(outcome.first_complete);
 }
 
 TEST(Http3ConnectionTest, ServerReadBodyParsesTrailersBeforeComplete) {

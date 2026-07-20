@@ -62,6 +62,20 @@ struct RawStreamOutcome {
     bool reusable_after_scope = false;
 };
 
+struct ContentLengthWriteOutcome {
+    fiber::common::IoErr body_error = fiber::common::IoErr::Unknown;
+    fiber::common::IoErr redundant_pointer_error = fiber::common::IoErr::Unknown;
+    fiber::common::IoErr redundant_chain_error = fiber::common::IoErr::Unknown;
+    fiber::common::IoErr repeated_completion_error = fiber::common::IoErr::Unknown;
+    fiber::common::IoErr incomplete_empty_error = fiber::common::IoErr::Unknown;
+    fiber::common::IoErr nonempty_after_done_error = fiber::common::IoErr::Unknown;
+    std::size_t body_written = 0;
+    std::size_t redundant_pointer_written = 0;
+    std::size_t redundant_chain_written = 0;
+    std::size_t repeated_completion_written = 0;
+    bool request_complete = false;
+};
+
 fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     sockaddr_storage bound{};
     socklen_t len = sizeof(bound);
@@ -489,21 +503,19 @@ DetachedTask run_raw_stream_server(fiber::event::EventLoop *loop, std::promise<s
 }
 
 DetachedTask run_content_length_client(fiber::event::EventLoop *loop, std::uint16_t port,
-                                       std::promise<fiber::common::IoErr> *result_promise,
-                                       std::promise<bool> *request_done_promise) {
+                                       std::promise<ContentLengthWriteOutcome> *result_promise) {
+    ContentLengthWriteOutcome outcome;
     fiber::http::Http1ClientConnectionOptions conn_options;
     conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
 
     fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
     auto connect_result = co_await connection.connect(5s);
     if (!connect_result) {
-        result_promise->set_value(connect_result.error());
-        request_done_promise->set_value(false);
+        outcome.body_error = connect_result.error();
+        result_promise->set_value(outcome);
         co_return;
     }
 
-    fiber::common::IoErr result = fiber::common::IoErr::Unknown;
-    bool request_done = false;
     {
         fiber::mem::BufPool pool;
         fiber::http::HttpHeaders headers(pool);
@@ -519,21 +531,49 @@ DetachedTask run_content_length_client(fiber::event::EventLoop *loop, std::uint1
 
         auto header_result = co_await exchange.send_header(head, false);
         if (!header_result) {
-            result = header_result.error();
+            outcome.body_error = header_result.error();
         } else {
-            auto body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
+            auto body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, false);
             if (!body_result) {
-                result = body_result.error();
+                outcome.body_error = body_result.error();
             } else {
-                result = fiber::common::IoErr::None;
-                request_done = exchange.request_complete();
+                outcome.body_error = fiber::common::IoErr::None;
+                outcome.body_written = *body_result;
+                outcome.request_complete = exchange.request_complete();
+
+                auto redundant_pointer = co_await exchange.write_body(nullptr, 0, true);
+                outcome.redundant_pointer_error =
+                        redundant_pointer ? fiber::common::IoErr::None : redundant_pointer.error();
+                outcome.redundant_pointer_written = redundant_pointer ? *redundant_pointer : 0;
+
+                fiber::mem::IoBufNodePool node_pool;
+                fiber::mem::IoBufChain redundant_chain(node_pool);
+                redundant_chain.mark_complete();
+                auto redundant_chain_result = co_await exchange.write_body(std::move(redundant_chain));
+                outcome.redundant_chain_error =
+                        redundant_chain_result ? fiber::common::IoErr::None : redundant_chain_result.error();
+                outcome.redundant_chain_written = redundant_chain_result ? *redundant_chain_result : 0;
+
+                auto repeated_completion = co_await exchange.write_body(nullptr, 0, true);
+                outcome.repeated_completion_error =
+                        repeated_completion ? fiber::common::IoErr::None : repeated_completion.error();
+                outcome.repeated_completion_written = repeated_completion ? *repeated_completion : 0;
+
+                fiber::mem::IoBufChain incomplete_empty(node_pool);
+                auto incomplete_empty_result = co_await exchange.write_body(std::move(incomplete_empty));
+                outcome.incomplete_empty_error =
+                        incomplete_empty_result ? fiber::common::IoErr::None : incomplete_empty_result.error();
+
+                auto nonempty_after_done =
+                        co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("x"), 1, true);
+                outcome.nonempty_after_done_error =
+                        nonempty_after_done ? fiber::common::IoErr::None : nonempty_after_done.error();
             }
         }
     }
 
     connection.close();
-    result_promise->set_value(result);
-    request_done_promise->set_value(request_done);
+    result_promise->set_value(outcome);
 }
 
 DetachedTask run_chunked_client(fiber::event::EventLoop *loop, std::uint16_t port,
@@ -658,7 +698,8 @@ DetachedTask run_chunked_client_iobufchain(fiber::event::EventLoop *loop, std::u
 
 DetachedTask run_empty_chunked_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                       std::promise<fiber::common::IoErr> *result_promise,
-                                      std::promise<bool> *request_done_promise) {
+                                      std::promise<bool> *request_done_promise,
+                                      std::promise<fiber::common::IoErr> *duplicate_completion_promise) {
     fiber::http::Http1ClientConnectionOptions conn_options;
     conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
 
@@ -667,10 +708,12 @@ DetachedTask run_empty_chunked_client(fiber::event::EventLoop *loop, std::uint16
     if (!connect_result) {
         result_promise->set_value(connect_result.error());
         request_done_promise->set_value(false);
+        duplicate_completion_promise->set_value(fiber::common::IoErr::Unknown);
         co_return;
     }
 
     fiber::common::IoErr result = fiber::common::IoErr::Unknown;
+    fiber::common::IoErr duplicate_completion = fiber::common::IoErr::Unknown;
     bool request_done = false;
     {
         fiber::mem::BufPool pool;
@@ -691,12 +734,15 @@ DetachedTask run_empty_chunked_client(fiber::event::EventLoop *loop, std::uint16
         } else {
             result = fiber::common::IoErr::None;
             request_done = exchange.request_complete();
+            auto duplicate_result = co_await exchange.write_body(nullptr, 0, true);
+            duplicate_completion = duplicate_result ? fiber::common::IoErr::None : duplicate_result.error();
         }
     }
 
     connection.close();
     result_promise->set_value(result);
     request_done_promise->set_value(request_done);
+    duplicate_completion_promise->set_value(duplicate_completion);
 }
 
 DetachedTask run_auto_body_spec_client(fiber::event::EventLoop *loop, std::uint16_t port,
@@ -1265,16 +1311,22 @@ TEST(ClientHttp1ExchangeTest, SendHeaderAndContentLengthBodyWriteRawHttp1Request
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
-    std::promise<fiber::common::IoErr> result_promise;
+    std::promise<ContentLengthWriteOutcome> result_promise;
     auto result_future = result_promise.get_future();
-    std::promise<bool> request_done_promise;
-    auto request_done_future = request_done_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() {
-        return run_content_length_client(&group.at(0), port, &result_promise, &request_done_promise);
-    });
+    fiber::async::spawn(group.at(0), [&]() { return run_content_length_client(&group.at(0), port, &result_promise); });
 
-    EXPECT_EQ(result_future.get(), fiber::common::IoErr::None);
-    EXPECT_TRUE(request_done_future.get());
+    ContentLengthWriteOutcome result = result_future.get();
+    EXPECT_EQ(result.body_error, fiber::common::IoErr::None);
+    EXPECT_EQ(result.body_written, 5u);
+    EXPECT_TRUE(result.request_complete);
+    EXPECT_EQ(result.redundant_pointer_error, fiber::common::IoErr::None);
+    EXPECT_EQ(result.redundant_pointer_written, 0u);
+    EXPECT_EQ(result.redundant_chain_error, fiber::common::IoErr::None);
+    EXPECT_EQ(result.redundant_chain_written, 0u);
+    EXPECT_EQ(result.repeated_completion_error, fiber::common::IoErr::None);
+    EXPECT_EQ(result.repeated_completion_written, 0u);
+    EXPECT_EQ(result.incomplete_empty_error, fiber::common::IoErr::Already);
+    EXPECT_EQ(result.nonempty_after_done_error, fiber::common::IoErr::Already);
 
     CaptureOutcome capture = capture_future.get();
     EXPECT_EQ(capture.err, fiber::common::IoErr::None);
@@ -1403,12 +1455,16 @@ TEST(ClientHttp1ExchangeTest, SendEmptyChunkedRequestFromHeaderWriteRawHttp1Requ
     auto result_future = result_promise.get_future();
     std::promise<bool> request_done_promise;
     auto request_done_future = request_done_promise.get_future();
+    std::promise<fiber::common::IoErr> duplicate_completion_promise;
+    auto duplicate_completion_future = duplicate_completion_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() {
-        return run_empty_chunked_client(&group.at(0), port, &result_promise, &request_done_promise);
+        return run_empty_chunked_client(&group.at(0), port, &result_promise, &request_done_promise,
+                                        &duplicate_completion_promise);
     });
 
     EXPECT_EQ(result_future.get(), fiber::common::IoErr::None);
     EXPECT_TRUE(request_done_future.get());
+    EXPECT_EQ(duplicate_completion_future.get(), fiber::common::IoErr::Already);
 
     CaptureOutcome capture = capture_future.get();
     EXPECT_EQ(capture.err, fiber::common::IoErr::None);
