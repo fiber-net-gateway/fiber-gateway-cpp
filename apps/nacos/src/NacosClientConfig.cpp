@@ -24,8 +24,7 @@ NacosClientConfig::NacosClientConfig(NacosClientConfigParams params) noexcept :
     server_ips_(std::move(params.server_ips)), username_(std::move(params.username)),
     password_(std::move(params.password)), http_port_(params.http_port), grpc_port_(params.grpc_port),
     namespace_id_(std::move(params.namespace_id)), tenant_(std::move(params.tenant)),
-    client_version_(std::move(params.client_version)), context_path_(std::move(params.context_path)),
-    auth_api_version_(params.auth_api_version) {}
+    client_version_(std::move(params.client_version)), context_path_(std::move(params.context_path)) {}
 
 std::expected<NacosClientConfig, NacosConfigError> NacosClientConfig::create(NacosClientConfigParams params) {
     if (params.server_ips.empty()) {
@@ -43,10 +42,10 @@ std::expected<NacosClientConfig, NacosConfigError> NacosClientConfig::create(Nac
     if (params.grpc_port == 0) {
         return std::unexpected(NacosConfigError{.code = NacosConfigErrorCode::InvalidGrpcPort});
     }
-    if (params.username.empty()) {
+    if (params.username.empty() && !params.password.empty()) {
         return std::unexpected(NacosConfigError{.code = NacosConfigErrorCode::EmptyUsername});
     }
-    if (params.password.empty()) {
+    if (!params.username.empty() && params.password.empty()) {
         return std::unexpected(NacosConfigError{.code = NacosConfigErrorCode::EmptyPassword});
     }
     if (invalid_context_path(params.context_path)) {

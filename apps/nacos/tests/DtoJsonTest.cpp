@@ -213,20 +213,15 @@ TEST(NacosDtoJsonTest, AuthTokenResponseParsesLoginPayload) {
     ASSERT_TRUE(value.access_token.is_present());
     EXPECT_EQ(value.access_token.value(), "token-value");
     EXPECT_EQ(value.token_ttl, 18000);
-    EXPECT_TRUE(value.global_admin);
-    ASSERT_TRUE(value.username.is_present());
-    EXPECT_EQ(value.username.value(), "nacos");
 }
 
-TEST(NacosDtoJsonTest, AuthTokenResponseTracksMissingNullableFields) {
+TEST(NacosDtoJsonTest, AuthTokenResponseTracksMissingAccessToken) {
     BufPool pool;
     JsonParser parser;
     AuthTokenResponse value;
     ASSERT_EQ(parse_complete<parse_auth_token_response>(R"({"tokenTtl":10})", pool, value, parser), ParseStatus::Done);
     EXPECT_TRUE(value.access_token.is_absent());
-    EXPECT_TRUE(value.username.is_absent());
     EXPECT_EQ(value.token_ttl, 10);
-    EXPECT_FALSE(value.global_admin);
 }
 
 TEST(NacosDtoJsonTest, AuthTokenResponseRejectsWrongTypesTransactionally) {

@@ -11,8 +11,6 @@ namespace fiber::nacos::dto::resp {
 struct AuthTokenResponse {
     json::Nullable<std::string_view> access_token;
     std::int64_t token_ttl = 0;
-    bool global_admin = false;
-    json::Nullable<std::string_view> username;
 };
 
 } // namespace fiber::nacos::dto::resp

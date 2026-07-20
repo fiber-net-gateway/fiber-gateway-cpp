@@ -2,7 +2,7 @@
 
 > 状态：ConfigService 公共操作、订阅、恢复与 rnacos 互操作已实现。
 >
-> 更新日期：2026-07-17。
+> 更新日期：2026-07-20。
 >
 > 行为参考：`/home/dear/CLionProjects/ploto-gateway/nacos-client/target/nacos-client-2.1-SNAPSHOT-sources.jar`
 > 中的 Java `ConfigService`、`ConfigServiceImpl`、`GrpcConnection` 和 `GrpcRequester`。服务端互操作验证使用仓库内
@@ -12,8 +12,8 @@
 
 `apps/nacos` 当前已经具备：
 
-- Nacos HTTP 登录、token 刷新和多服务器故障转移。
-- 通过 `async::Watch<NacosAuthSnapshot>` 发布认证状态。
+- Nacos 2.x HTTP 登录、token 刷新和多服务器故障转移。
+- 通过 `async::Watch<NacosAuthAccess>` 发布最小认证访问状态。
 - 绑定单个 `EventLoop` 的客户端生命周期和可等待关闭。
 - 通用 unary/bidirectional gRPC 客户端、HTTP/2 和 protobuf lite runtime。
 - Nacos gRPC `Payload` 信封编解码和完整 internal/config DTO codec。
@@ -41,14 +41,15 @@ Java SDK 的全量能力。
 
 ```text
 NacosClient
-├── Authentication coroutine
-│   └── Watch<NacosAuthSnapshot>
+├── HTTP/1 authentication coroutine
+│   └── Watch<NacosAuthAccess>
 └── ConfigService
+    ├── authentication-access Watch
     ├── Config subscription registry
     │   └── one entry per (dataId, group)
-    └── Nacos config RPC connection
-        ├── auth metadata provider
-        ├── connection / handshake / heartbeat / reconnect
+    ├── reconnect / failover / redirect policy
+    └── one current NacosRpc per physical connection
+        ├── connection / handshake / heartbeat
         ├── unary Request/request
         └── bidirectional BiRequestStream/requestBiStream
             └── protobuf Payload + JSON DTO
@@ -66,15 +67,17 @@ apps/nacos/
 │   └── config request/response DTO
 ├── src/rpc/
 │   ├── NacosPayloadCodec.*
-│   ├── NacosRequester.*
-│   └── NacosGrpcConnection.*
+│   ├── NacosBiRequestHandler.h
+│   └── NacosRpc.*
 ├── src/config/
 │   └── ConfigServiceImpl.*
 └── src/dto/
     └── corresponding JSON codecs
 ```
 
-`NacosGrpcConnection` 保持为可供未来 NamingService 复用的基础设施；config 特有的 DTO、订阅表和推送处理留在
+`NacosRpc` 只代表一次物理连接，不在内部重连。`ConfigServiceImpl` 持有当前实例并负责 endpoint 选择、退避、
+故障转移和重定向；`NacosRpc::run()` 从等待认证一直阻塞到该连接的 gRPC 资源和并发 unary 请求完全退出。
+连接结束后 ConfigService 销毁旧实例，再创建新的 `NacosRpc`。config 特有的 DTO、订阅表和推送处理仍留在
 `ConfigServiceImpl`。
 
 ## 4. Wire Protocol
@@ -129,14 +132,17 @@ protobuf runtime。
 | `headers.clientIp` | 同上 | Java 客户端同时放入 headers |
 | `headers.clientVersion` | `NacosClientConfig::client_version()` | 客户端版本 |
 | `headers.namespace` | `NacosClientConfig::namespace_id()` | Nacos namespace |
-| `headers.accessToken` | 最新 Ready 认证快照 | 每次构造 Payload 时读取 |
+| `headers.accessToken` | `Present` 状态的非空 access token | 未配置认证时省略 |
 
 `namespace_id` 和 `tenant` 不可混用：
 
 - namespace 放在 metadata headers。
 - tenant 放在 config 请求 DTO 中。
 
-token 刷新后不需要重建 gRPC 连接；后续 Payload 自动携带新 token。若 token 已过期且认证状态变为 Unavailable，配置连接停止接受新请求、关闭现有 gRPC 连接并等待认证恢复。
+token 刷新后不需要重建 gRPC 连接；后续 Payload 自动携带新 token。认证 Watch 发布
+`NotConfigured / InitialFailed / Present / Stopped`：`NotConfigured` 允许无 token 建连并省略 `accessToken`，
+`InitialFailed` 让配置连接继续等待认证恢复，`Present` 允许建连，`Stopped` 结束生命周期。刷新失败不发布新值，
+配置连接继续使用 Java 客户端同样保留的最后一个 token，认证协程在 5 秒后重试。
 
 ## 5. 连接建立与维护
 
@@ -144,28 +150,29 @@ token 刷新后不需要重建 gRPC 连接；后续 Payload 自动携带新 toke
 
 ```text
 WaitingAuth
-    │ auth Ready
+    │ NotConfigured or Present
     ▼
-Connecting ──failure──> Backoff
-    │ connected            │ timer / next server
-    ▼                      └──────────────┐
-Checking                                  │
-    │ ServerCheck success                 │
-    ▼                                      │
-Handshaking ──failure──────────────────────┘
+Connecting ──failure──> Stopped ──owner──> Backoff / next server
+    │ connected
+    ▼
+Checking
+    │ ServerCheck success
+    ▼
+Handshaking ──failure──> Stopped ──owner──> Backoff / next server
     │ SetupAck or compatibility delay
     ▼
-Ready ──stream end / transport failure──> Backoff
+Ready ──stream end / transport failure──> Stopping ──> Stopped
     │ shutdown
     ▼
 Stopping ──all tasks exited──> Stopped
 ```
 
-所有状态转换只在客户端 EventLoop 上发生。
+单个 `NacosRpc` 只执行图中的一次连接状态机；ConfigService 的外层长协程在 `Stopped` 后销毁它并决定下一次
+endpoint。所有状态转换和实例替换只在客户端 EventLoop 上发生。
 
 ### 5.2 建连流程
 
-1. 订阅认证 Watch，等待非过期的 Ready token。
+1. ConfigService 为本次 endpoint 创建 `NacosRpc`；RPC 自己订阅认证访问 Watch，等待 `NotConfigured` 或 `Present`。
 2. 从 preferred server 开始遍历 `server_ips`，连接对应 gRPC 端口。
 3. 构造 `ServerCheckRequest`，通过 unary `Request/request` 发送。
 4. 校验 gRPC status、响应 Payload 类型和 `ServerCheckResponse` JSON。
@@ -177,7 +184,7 @@ Stopping ──all tasks exited──> Stopped
    - 空 `abilityTable`
 7. 如果 ServerCheck 表示支持能力协商，等待服务端 `SetupAckRequest`。
 8. 如果不支持能力协商，按 Java 兼容行为等待短暂延迟后进入 Ready；默认兼容延迟为 1 秒，并受总握手超时约束。
-9. 发布新的 connection generation，恢复全部配置订阅并启动 heartbeat。
+9. RPC 进入 Ready；ConfigService 发布 ready、恢复全部配置订阅，并启动本次连接的补偿注册任务。
 
 ### 5.3 Heartbeat
 
@@ -193,7 +200,8 @@ Stopping ──all tasks exited──> Stopped
 - Backoff 有最小值、最大值和 jitter，避免大量客户端同步重连。
 - 初次建连失败也持续重试，不复制 Java 当前初始连接失败后可能停止恢复的缺陷。
 - transient 断线期间保留订阅表和最近配置值。
-- 每次重新进入 Ready 都执行全量订阅恢复。
+- `NacosRpc::run()` 返回后，ConfigService 等待本次查询/注册任务退出并销毁旧实例。
+- 每次新建实例重新进入 Ready 都执行全量订阅恢复；不需要额外的 connection generation 字段。
 
 ### 5.5 ConnectResetRequest
 
@@ -305,10 +313,9 @@ ConfigType wire value：
 
 `GrpcStream` 允许一个 read 和一个 write 并行，但不允许多个 write 并发。服务端请求可能连续到达，因此：
 
-- read coroutine 只负责解码、状态转换和投递响应。
-- 所有 ACK/Response 进入连接级串行发送队列。
-- write coroutine 是双向流唯一写者。
-- 队列必须有长度和字节数上限；超限视为连接失去服务能力，关闭并重连。
+- `NacosRpc::run()` 的双向流 coroutine 串行执行解码、handler 和 ACK/Response 写入。
+- 同一时刻不会有第二个双向流 writer，避免并发 write。
+- handler 必须有界完成，响应编码受 `max_push_response_bytes` 限制；超限视为协议错误并结束本次连接。
 
 ## 8. 配置订阅机制
 
@@ -326,7 +333,7 @@ ConfigEntry
 ├── Watch<ConfigSnapshot>
 ├── query_in_flight
 ├── dirty
-└── registered connection generation
+└── registered on current connection
 ```
 
 公共订阅返回 move-only `ConfigSubscription`，内部持有 Entry lease，并转发 Watch 的 `current()`/`next(version)`。订阅句柄的创建、释放和显式关闭均在客户端 EventLoop 上完成。
@@ -371,8 +378,9 @@ ConfigEntry
 - 第一次通知设置 `query_in_flight=true` 并发起查询。
 - 查询期间再次收到通知，只设置 `dirty=true`。
 - 当前查询完成后，如果 dirty，则清除 dirty 并再查询一次。
-- Entry 移除或 connection generation 改变后，旧查询结果不得覆盖新连接获得的结果。
-- 可通过 Entry generation/query sequence 检查并丢弃过期完成结果。
+- Entry 移除后，`query_sequence` 检查阻止过期完成结果发布。
+- 连接替换前必须等待本次 RPC 的 unary 操作以及 ConfigService 查询/注册任务全部结束，因此旧连接结果不会跨越
+  `NacosRpc` 实例边界。
 
 这避免通知风暴产生并发请求，也防止旧响应晚到后覆盖新配置。
 
@@ -381,17 +389,17 @@ ConfigEntry
 最后一个本地订阅者释放时：
 
 1. Entry 标记 Closing，不再接受查询结果发布。
-2. 如果当前连接 Ready 且该 generation 已注册，发送 `ConfigBatchListenRequest(listen=false)`。
+2. 如果当前连接 Ready 且已在该连接注册，发送 `ConfigBatchListenRequest(listen=false)`。
 3. 注销请求是 best effort；无连接时直接移除，因为连接恢复只会重建仍存在的 Entry。
 4. 从 registry 移除 Entry。
 
 ### 8.7 重连恢复与补偿订阅
 
-- 每次进入新的 Ready generation，扫描全部活动 Entry。
+- 每个新 `NacosRpc` 进入 Ready 时扫描全部活动 Entry。
 - 按最大 context 数和最大 Payload 字节数分批发送 `listen=true`。
 - 每个 context 携带当前 MD5；服务端只返回发生变化的配置。
 - Ready 期间每 180 秒执行同样的全量补偿注册。
-- transient 失败不修改当前配置值；下一周期或下一 connection generation 重试。
+- transient 失败不修改当前配置值；下一周期或下一物理连接重试。
 
 ## 9. 公共 API 语义
 
@@ -412,7 +420,8 @@ ConfigService 与 NacosClient 同生命周期：客户端创建时建立不可�
 
 ## 10. 配置项
 
-建议在保持现有认证选项兼容的前提下增加：
+当前 gRPC 与 ConfigService 选项如下；认证刷新时机不暴露为配置项，而是固定遵循 Java Nacos 2.x 行为：
+`max(5 秒, tokenTtl * 90%)`。
 
 | 选项 | 建议默认值 | 用途 |
 |---|---:|---|
@@ -427,7 +436,7 @@ ConfigService 与 NacosClient 同生命周期：客户端创建时建立不可�
 | max inbound gRPC message | 10 MiB | 对齐 Java channel 上限 |
 | max config content | 10 MiB 或更小的显式值 | 防止无界配置分配 |
 | max listen contexts per request | 待 rnacos/Java 互操作验证 | 订阅分批 |
-| max push response queue | 有界 | 防止服务端推送压垮内存 |
+| max push response | 1 MiB | 限制服务端请求对应 ACK/Response 的编码大小 |
 | client IP override | 空 | 容器/多网卡环境覆盖自动探测 |
 
 测试中所有时间相关选项必须可缩短，避免依赖真实 10 秒/180 秒定时。
@@ -478,8 +487,8 @@ Codec 约束：
 ### 阶段 0：稳定当前认证基线
 
 - [x] 完成当前未提交认证重构的评审和测试。
-- [x] 确认认证 Watch 的 Ready/Unavailable/Stopped 语义稳定。
-- [x] 确认 token 刷新、过期、server failover 和 shutdown 可供 config 复用。
+- [x] 将认证 Watch 收敛为只发布 `NacosAuthAccess` 的四种最小状态。
+- [x] 确认 token 刷新、server failover 和 shutdown 可供 config 复用。
 - [x] 冻结 ConfigService 所依赖的 `NacosClientConfig`/`NacosClientOptions` 基线。
 
 验收：现有 Nacos 定向测试和完整 CTest 通过，工作区中的认证行为与 README 一致。
@@ -494,15 +503,15 @@ Codec 约束：
 
 验收：所有 DTO 与 Java fixture 双向兼容；类型不匹配、ErrorResponse、非法 protobuf/JSON 和超限输入均有测试。
 
-### 阶段 2：通用 Nacos gRPC 连接
+### 阶段 2：单连接 NacosRpc 与服务级重连
 
-- [x] 实现 `NacosRequester` unary 调用封装。
+- [x] 实现 `NacosRpc` 内建的 unary 调用。
 - [x] 实现 ServerCheck 和双向流 ConnectionSetup。
 - [x] 实现 SetupAck/兼容延迟和握手超时。
-- [x] 实现单写者 push response queue。
+- [x] 实现双向流 reader 内串行 handler/response 写入。
 - [x] 实现 ClientDetection、ConnectReset 和 unknown request 策略。
 - [x] 实现 heartbeat、server failover、backoff 和 jitter。
-- [x] 监听 Auth Watch，动态更新 token metadata。
+- [x] 监听 Auth Watch，动态更新或省略 token metadata。
 - [x] 为通用 GrpcClient 增加外部驱动的 `run()` 和可等待的 `shutdown()`。
 - [x] 暴露连接本地地址并支持显式 client IP 覆盖。
 - [x] 接入 NacosClient `WaitGroup` 和 shutdown。
@@ -535,12 +544,12 @@ Codec 约束：
 
 ### 阶段 5：恢复、限流与生命周期加固
 
-- [x] 实现 connection generation 和断线后全量恢复。
+- [x] 实现每次断线销毁并重建 `NacosRpc`，以及 Ready 后全量恢复。
 - [x] 实现 180 秒补偿订阅。
 - [x] 对订阅 batch、配置内容、Payload、响应队列设置硬上限。
-- [x] 覆盖 token 过期、认证恢复、连接重置和多 server 故障转移。
+- [x] 覆盖 token 刷新失败、认证恢复、连接重置和多 server 故障转移。
 - [x] 覆盖 shutdown 与进行中的 query/publish/push read/write 竞态。
-- [x] 增加必要的连接状态、错误码和 generation 可观测信息。
+- [x] 增加必要的单连接状态、关闭原因和 ready 可观测信息。
 
 验收：重启服务端或断开 TCP 后，旧值保持可读，客户端自动恢复连接和订阅，随后能收到新配置；shutdown 后无任务、timer、stream 或 Entry 泄漏。
 
@@ -577,7 +586,7 @@ Codec 约束：
 - push response 单写者顺序。
 - heartbeat 不重叠。
 - 初次连接失败、运行中断线和多 server failover。
-- token generation 更新后新请求携带新 accessToken。
+- `Present` 更新后新请求携带新 accessToken，`NotConfigured` 时不发送该 header。
 - shutdown 取消阻塞 connect/read/write 并等待全部任务退出。
 
 ### 13.3 ConfigService 测试
@@ -590,7 +599,7 @@ Codec 约束：
 - changedConfigs 和主动 ConfigChangeNotify 两种更新入口。
 - MD5 相同不重复发布。
 - 删除后发布 NotFound，空字符串配置仍为 Present。
-- query 合并、dirty 重查和旧 generation 响应丢弃。
+- query 合并、dirty 重查和旧连接任务退出屏障。
 - reconnect/periodic redo 后批量恢复全部订阅。
 
 ### 13.4 验证命令
@@ -600,7 +609,7 @@ Codec 约束：
 ```bash
 cmake -S . -B build
 cmake --build build --target fiber_nacos_tests
-ctest --test-dir build -R '^(NacosClientTest|NacosClientConfigTest|NacosDtoJsonTest|NacosPayloadTest|NacosGrpcConnectionTest|NacosConfigServiceTest)\.' --output-on-failure
+ctest --test-dir build -R '^(NacosClientTest|NacosClientConfigTest|NacosDtoJsonTest|NacosPayloadTest|NacosRpcTest|NacosConfigServiceTest)\.' --output-on-failure
 ```
 
 完成后执行：
@@ -618,7 +627,7 @@ ConfigService 可以视为完成，必须同时满足：
 
 - get、publish、CAS publish、remove 和 subscribe 的行为与 Java 参考一致。
 - protobuf Payload 和 JSON DTO 与 Nacos/Java wire compatible。
-- 认证刷新不会中断正常配置通信，token 过期后不会继续发送过期凭据。
+- 认证刷新不会中断正常配置通信；刷新失败保留最后一个 token 并在 5 秒后重试。
 - 双向流能处理配置变更、连接探测和连接重置。
 - 多订阅者共享、MD5 去重、删除、注销、重连恢复和补偿订阅均有回归测试。
 - 所有网络、解析、队列和内容大小均有明确上限。
@@ -631,8 +640,10 @@ ConfigService 可以视为完成，必须同时满足：
 以下差异是有意的，实施后应继续保留在公开文档中：
 
 - 不提供抛异常的阻塞 API，只提供协程和 `std::expected`。
+- 初次 HTTP 登录整轮失败发布一次 `InitialFailed`，随后继续做有界指数退避重试。
+- 用户名和密码同时为空时发布 `NotConfigured` 并跳过登录；这是本地 Java 客户端之外的显式扩展。
 - 不使用 `ConfigData.EMPTY` 哨兵，以显式 Present/NotFound 状态表达删除。
 - 初次 gRPC 连接失败会持续重试，而不是让 ConfigService 永久失败。
-- 订阅 batch、配置内容、Payload 和 push response queue 都有硬上限。
+- 订阅 batch、配置内容、入站 Payload 和 push response 都有硬上限。
 - unknown server request 不会使进程异常；按协议错误策略响应或丢弃。
 - ConfigService 和所有内部状态固定在一个 EventLoop 上，不复制 Java 的多线程/ConcurrentHashMap 模型。

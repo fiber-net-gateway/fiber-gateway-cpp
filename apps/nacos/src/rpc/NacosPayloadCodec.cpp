@@ -52,7 +52,9 @@ std::expected<proto::Payload, NacosRpcError> encode_payload_json(std::string_vie
     add_header(*wire_metadata, "clientIp", metadata.client_ip);
     add_header(*wire_metadata, "clientVersion", metadata.client_version);
     add_header(*wire_metadata, "namespace", metadata.namespace_id);
-    add_header(*wire_metadata, "accessToken", metadata.access_token);
+    if (metadata.access_token) {
+        add_header(*wire_metadata, "accessToken", *metadata.access_token);
+    }
     payload.mutable_body()->set_value(json.data(), json.size());
 
     if (payload.ByteSizeLong() > max_payload_bytes) {

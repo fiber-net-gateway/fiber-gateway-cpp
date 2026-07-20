@@ -27,6 +27,7 @@ private:
         Waiter *next = nullptr;
         bool queued = false;
         fiber::event::EventLoop::NotifyEntry notify_entry{};
+        fiber::event::EventLoop::DeferEntry defer_entry{};
 
         void resume();
         static void on_run(Waiter *waiter) noexcept;

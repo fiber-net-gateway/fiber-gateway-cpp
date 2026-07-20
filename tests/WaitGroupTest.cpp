@@ -44,6 +44,19 @@ DetachedTask await_join_record_and_maybe_stop(WaitGroup *wg, std::promise<std::t
     co_return;
 }
 
+struct DeferredDone {
+    WaitGroup *group = nullptr;
+    fiber::event::EventLoop::DeferEntry entry;
+
+    static void run(DeferredDone *done) noexcept { done->group->done(); }
+};
+
+DetachedTask post_deferred_done(DeferredDone *done) {
+    auto &loop = fiber::event::EventLoop::current();
+    loop.post_local<DeferredDone, &DeferredDone::entry, &DeferredDone::run>(*done);
+    co_return;
+}
+
 } // namespace
 
 TEST(WaitGroupTest, JoinReturnsImmediatelyWhenEmpty) {
@@ -82,6 +95,29 @@ TEST(WaitGroupTest, JoinResumesAfterDone) {
         group.stop();
         group.join();
         FAIL() << "join waiter did not resume in time";
+        return;
+    }
+
+    future.get();
+    group.join();
+}
+
+TEST(WaitGroupTest, SameLoopDeferredDoneResumesBeforePoll) {
+    fiber::event::EventLoopGroup group(1);
+    WaitGroup wg;
+    std::promise<void> promise;
+    auto future = promise.get_future();
+    DeferredDone done{.group = &wg};
+
+    wg.add();
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() { return await_join_and_stop(&wg, &promise); });
+    fiber::async::spawn(group.at(0), [&]() { return post_deferred_done(&done); });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "same-loop deferred completion did not resume join waiter";
         return;
     }
 

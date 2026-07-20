@@ -37,13 +37,22 @@ TEST(NacosClientConfigTest, AppliesDefaultsAndOwnsValues) {
     EXPECT_EQ(result->tenant(), "tenant");
     EXPECT_EQ(result->client_version(), "fiber-nacos/1.0");
     EXPECT_EQ(result->context_path(), "/nacos");
-    EXPECT_EQ(result->auth_api_version(), fiber::nacos::NacosAuthApiVersion::Auto);
 }
 
-TEST(NacosClientConfigTest, ClientOptionsRefreshAtNinetyPercentByDefault) {
+TEST(NacosClientConfigTest, ClientOptionsEnableGrpcTcpNoDelayByDefault) {
     fiber::nacos::NacosClientOptions options;
-    EXPECT_EQ(options.refresh_percent, 90);
     EXPECT_EQ(options.grpc_tcp.no_delay, fiber::net::TcpOptionMode::Enabled);
+}
+
+TEST(NacosClientConfigTest, AllowsAuthenticationToBeUnconfigured) {
+    auto params = valid_params();
+    params.username.clear();
+    params.password.clear();
+
+    auto result = fiber::nacos::NacosClientConfig::create(std::move(params));
+    ASSERT_TRUE(result.has_value());
+    EXPECT_TRUE(result->username().empty());
+    EXPECT_TRUE(result->password().empty());
 }
 
 TEST(NacosClientConfigTest, RejectsInvalidRequiredFields) {
