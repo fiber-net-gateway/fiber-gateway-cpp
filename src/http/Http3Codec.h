@@ -70,6 +70,26 @@ private:
     bool started_ = false;
 };
 
+class Http3FrameVarintParser {
+public:
+    void start(std::uint64_t payload_length) noexcept;
+    [[nodiscard]] Http3ParseStatus parse(mem::IoBufChain &in) noexcept;
+    [[nodiscard]] std::uint64_t value() const noexcept { return value_; }
+    [[nodiscard]] Http3ParseError error() const noexcept { return error_; }
+    void reset() noexcept;
+
+private:
+    [[nodiscard]] Http3ParseStatus fail(common::IoErr io_error = common::IoErr::Invalid) noexcept;
+
+    std::uint64_t value_ = 0;
+    std::uint64_t payload_length_ = 0;
+    Http3ParseError error_{.h3_error = Http3ErrorCode::FrameError};
+    std::uint8_t target_len_ = 0;
+    std::uint8_t read_len_ = 0;
+    bool started_ = false;
+    bool complete_ = false;
+};
+
 class Http3SettingsParser {
 public:
     void start(std::uint64_t payload_length) noexcept;

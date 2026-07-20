@@ -9,12 +9,11 @@
 #include <utility>
 
 #include "../async/Spawn.h"
-#include "../common/Assert.h"
 #include "../event/EventLoop.h"
-#include "../quic/QuicTransportCodec.h"
 #include "HeaderMap.h"
 #include "Http3Codec.h"
 #include "Http3Connection.h"
+#include "Http3FrameWriter.h"
 #include "Http3QpackDecoder.h"
 #include "Http3QpackEncoderIoBufWriter.h"
 #include "HttpHeaderHash.h"
@@ -26,8 +25,6 @@ namespace fiber::http {
 namespace {
 
 constexpr std::size_t kHttp3RequestReadChunkSize = 128 << 10;
-constexpr std::size_t kHttp3FrameHeaderReserve = 16;
-constexpr std::uint64_t kMaxHttp3FramePayloadLength = (1ULL << 62U) - 1U;
 
 [[nodiscard]] std::uint64_t error_value(Http3ErrorCode error) noexcept { return static_cast<std::uint64_t>(error); }
 
@@ -147,35 +144,6 @@ bool is_forbidden_request_stream_frame(std::uint64_t type) noexcept {
 bool response_must_not_have_body(const HttpExchange &exchange, int status_code) noexcept {
     return exchange.method() == HttpMethod::Head || (status_code >= 100 && status_code < 200) || status_code == 204 ||
            status_code == 304;
-}
-
-common::IoResult<void> bind_or_migrate_chain_nodes(mem::IoBufChain &chain, mem::IoBufNodePool &target_pool) noexcept {
-    if (!chain.bound()) {
-        if (!chain.empty()) {
-            return std::unexpected(common::IoErr::Invalid);
-        }
-        chain.bind_node_pool(target_pool);
-        return {};
-    }
-    if (&chain.node_pool() == &target_pool) {
-        return {};
-    }
-
-    mem::IoBufChain migrated(target_pool);
-    if (chain.complete()) {
-        migrated.mark_complete();
-    }
-    for (;;) {
-        mem::IoBufNode *node = chain.pop_front_node();
-        if (node == nullptr) {
-            break;
-        }
-        const bool appended = migrated.append_node(node);
-        FIBER_ASSERT(appended);
-    }
-
-    chain = std::move(migrated);
-    return {};
 }
 
 } // namespace
@@ -1284,48 +1252,9 @@ async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange
     }
 
     mem::IoBufChain frame(inbound_buf_.node_pool());
-    common::IoErr err = writer.finish(frame);
-    if (err != common::IoErr::None) {
-        co_return std::unexpected(err);
-    }
-
-    const std::size_t total_len = frame.readable_bytes();
-    std::uint8_t *reserved = writer.prefix_reserved_data();
-    if (reserved == nullptr || writer.prefix_reserved_size() != kHttp3FrameHeaderReserve ||
-        total_len < kHttp3FrameHeaderReserve) {
-        co_return std::unexpected(common::IoErr::Invalid);
-    }
-
-    const std::size_t payload_len = total_len - kHttp3FrameHeaderReserve;
-    if (static_cast<std::uint64_t>(payload_len) > kMaxHttp3FramePayloadLength) {
-        co_return std::unexpected(common::IoErr::Invalid);
-    }
-
-    const std::size_t frame_header_len = quic::quic_varint_len(static_cast<std::uint64_t>(Http3FrameType::Headers)) +
-                                         quic::quic_varint_len(static_cast<std::uint64_t>(payload_len));
-    if (frame_header_len > kHttp3FrameHeaderReserve) {
-        co_return std::unexpected(common::IoErr::Invalid);
-    }
-
-    const std::size_t gap = kHttp3FrameHeaderReserve - frame_header_len;
-    quic::QuicWriteCursor out(reserved + gap, frame_header_len);
-    auto wrote = quic::quic_write_varint(out, static_cast<std::uint64_t>(Http3FrameType::Headers));
-    if (!wrote) {
-        co_return std::unexpected(wrote.error());
-    }
-    wrote = quic::quic_write_varint(out, static_cast<std::uint64_t>(payload_len));
-    if (!wrote) {
-        co_return std::unexpected(wrote.error());
-    }
-    if (out.offset() != frame_header_len) {
-        co_return std::unexpected(common::IoErr::Invalid);
-    }
-
-    if (gap != 0) {
-        frame.consume_and_compact(gap);
-    }
-    if (header.end_stream) {
-        frame.mark_complete();
+    auto finished_frame = http3_finish_headers_frame(writer, frame, header.end_stream);
+    if (!finished_frame) {
+        co_return std::unexpected(finished_frame.error());
     }
 
     while (!frame.empty()) {
@@ -1392,37 +1321,9 @@ async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_body(HttpEx
         co_return body_len;
     }
 
-    auto chain_result = bind_or_migrate_chain_nodes(chunk, inbound_buf_.node_pool());
-    if (!chain_result) {
-        co_return std::unexpected(chain_result.error());
-    }
-
-    if (body_len != 0) {
-        const std::uint64_t frame_type = static_cast<std::uint64_t>(Http3FrameType::Data);
-        const std::size_t frame_header_len =
-                quic::quic_varint_len(frame_type) + quic::quic_varint_len(static_cast<std::uint64_t>(body_len));
-        mem::IoBuf frame_header = mem::IoBuf::allocate(frame_header_len);
-        if (!frame_header) {
-            co_return std::unexpected(common::IoErr::NoMem);
-        }
-
-        quic::QuicWriteCursor out(frame_header.writable_data(), frame_header_len);
-        auto wrote = quic::quic_write_varint(out, frame_type);
-        if (!wrote) {
-            co_return std::unexpected(wrote.error());
-        }
-        wrote = quic::quic_write_varint(out, static_cast<std::uint64_t>(body_len));
-        if (!wrote) {
-            co_return std::unexpected(wrote.error());
-        }
-        if (out.offset() != frame_header_len) {
-            co_return std::unexpected(common::IoErr::Invalid);
-        }
-        frame_header.commit(frame_header_len);
-
-        if (!chunk.prepend(std::move(frame_header))) {
-            co_return std::unexpected(common::IoErr::NoMem);
-        }
+    auto prepared_frame = http3_prepare_data_frame(chunk, inbound_buf_.node_pool());
+    if (!prepared_frame) {
+        co_return std::unexpected(prepared_frame.error());
     }
 
     while (chunk.readable_bytes() != 0 || chunk.complete()) {

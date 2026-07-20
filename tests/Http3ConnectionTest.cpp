@@ -95,7 +95,31 @@ struct Http3BodyWriteOutcome {
     bool body_ok = false;
 };
 
+struct ClientRequestNotification {
+    std::size_t rejected = 0;
+    std::size_t closed = 0;
+    std::uint64_t goaway_id = 0;
+    fiber::http::Http3ErrorCode close_error = fiber::http::Http3ErrorCode::NoError;
+};
+
+void on_client_request_rejected(void *owner, std::uint64_t goaway_id) noexcept {
+    auto &notification = *static_cast<ClientRequestNotification *>(owner);
+    ++notification.rejected;
+    notification.goaway_id = goaway_id;
+}
+
+void on_client_request_closed(void *owner, fiber::http::Http3ErrorCode error) noexcept {
+    auto &notification = *static_cast<ClientRequestNotification *>(owner);
+    ++notification.closed;
+    notification.close_error = error;
+}
+
 using HeaderList = std::vector<std::pair<std::string_view, std::string_view>>;
+
+fiber::quic::QuicConnectionId connection_id_from(std::initializer_list<std::uint8_t> bytes) {
+    auto id = fiber::quic::QuicConnectionId::from_bytes(bytes.begin(), bytes.size());
+    return id.value_or(fiber::quic::QuicConnectionId{});
+}
 
 StartResult to_start_result(fiber::common::IoResult<void> result) noexcept {
     if (result) {
@@ -189,6 +213,14 @@ fiber::async::DetachedTask start_h3(fiber::http::Http3Connection *h3, std::promi
 StartResult start_h3_on_loop(fiber::event::EventLoop &loop, fiber::quic::QuicConnection &quic,
                              const fiber::quic::QuicConnection::Options &options, fiber::http::Http3Connection &h3) {
     auto params = valid_peer_transport_params(options);
+    if (options.role == fiber::quic::QuicConnectionRole::Client) {
+        auto adopted = quic.adopt_server_initial_source_connection_id(options.remote_connection_id);
+        if (!adopted) {
+            return {.ok = false, .error = adopted.error()};
+        }
+        params.has_original_destination_connection_id = true;
+        params.original_destination_connection_id = options.original_destination_connection_id;
+    }
     auto applied = quic.apply_peer_transport_params(params);
     if (!applied) {
         return {.ok = false, .error = applied.error()};
@@ -277,6 +309,15 @@ std::vector<std::uint8_t> control_settings_stream(std::uint64_t blocked_streams 
     return out;
 }
 
+void append_control_varint_frame(std::vector<std::uint8_t> &out, fiber::http::Http3FrameType type,
+                                 std::uint64_t value) {
+    std::vector<std::uint8_t> payload;
+    append_varint(payload, value);
+    append_varint(out, static_cast<std::uint64_t>(type));
+    append_varint(out, payload.size());
+    out.insert(out.end(), payload.begin(), payload.end());
+}
+
 std::vector<std::uint8_t> uni_stream_type(fiber::http::Http3StreamType type) {
     std::vector<std::uint8_t> out;
     append_varint(out, static_cast<std::uint64_t>(type));
@@ -346,6 +387,23 @@ fiber::async::DetachedTask feed_two_streams_then_wait(fiber::quic::QuicConnectio
         done->set_value();
     });
     co_return;
+}
+
+fiber::async::DetachedTask feed_stream_then_delay(fiber::quic::QuicConnection *conn,
+                                                  const std::vector<std::uint8_t> *data, std::uint64_t stream_id,
+                                                  std::promise<void> *done) {
+    feed_stream(*conn, stream_id, *data);
+    co_await fiber::async::sleep(20ms);
+    done->set_value();
+}
+
+fiber::async::DetachedTask feed_stream_then_wait_closed(fiber::quic::QuicConnection *conn,
+                                                        fiber::http::Http3Connection *h3,
+                                                        const std::vector<std::uint8_t> *data, std::uint64_t stream_id,
+                                                        std::promise<void> *done) {
+    feed_stream(*conn, stream_id, *data);
+    co_await h3->wait_closed();
+    done->set_value();
 }
 
 Http3RequestRunResult run_http3_request_headers(const HeaderList &headers, bool expect_handler,
@@ -1075,6 +1133,139 @@ TEST(Http3ConnectionTest, ReadsPeerControlSettingsStream) {
     EXPECT_TRUE(h3.peer_settings_received());
     EXPECT_EQ(h3.peer_settings().qpack_blocked_streams, 8U);
     EXPECT_EQ(h3.close_error(), fiber::http::Http3ErrorCode::NoError);
+
+    group.stop();
+    group.join();
+}
+
+TEST(Http3ConnectionTest, ClientDrainsAndRejectsRequestsAtOrAbovePeerGoawayId) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicConnection::Options quic_options{};
+    quic_options.loop = &group.at(0);
+    quic_options.role = fiber::quic::QuicConnectionRole::Client;
+    quic_options.original_destination_connection_id = connection_id_from({0x01, 0x02, 0x03, 0x04});
+    quic_options.remote_connection_id = connection_id_from({0x11, 0x12, 0x13, 0x14});
+    fiber::quic::QuicConnection quic(quic_options);
+    fiber::http::Http3Connection h3(quic);
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
+
+    ClientRequestNotification below_notification;
+    ClientRequestNotification equal_notification;
+    ClientRequestNotification above_notification;
+    fiber::http::Http3ClientRequestEntry below{
+            .owner = &below_notification,
+            .on_rejected = &on_client_request_rejected,
+            .on_connection_close = &on_client_request_closed,
+            .stream_id = 0,
+    };
+    fiber::http::Http3ClientRequestEntry equal{
+            .owner = &equal_notification,
+            .on_rejected = &on_client_request_rejected,
+            .on_connection_close = &on_client_request_closed,
+            .stream_id = 4,
+    };
+    fiber::http::Http3ClientRequestEntry above{
+            .owner = &above_notification,
+            .on_rejected = &on_client_request_rejected,
+            .on_connection_close = &on_client_request_closed,
+            .stream_id = 8,
+    };
+    ASSERT_TRUE(h3.register_client_request(below));
+    ASSERT_TRUE(h3.register_client_request(equal));
+    ASSERT_TRUE(h3.register_client_request(above));
+
+    auto control = control_settings_stream();
+    append_control_varint_frame(control, fiber::http::Http3FrameType::Goaway, 4);
+    std::promise<void> feed_done;
+    auto feed_future = feed_done.get_future();
+    fiber::async::spawn(group.at(0), [&quic, &control, &feed_done]() -> fiber::async::DetachedTask {
+        return feed_stream_then_delay(&quic, &control, 3, &feed_done);
+    });
+
+    ASSERT_EQ(feed_future.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(h3.state(), fiber::http::Http3ConnectionState::Draining);
+    EXPECT_TRUE(h3.peer_goaway_received());
+    EXPECT_EQ(h3.peer_goaway_id(), 4U);
+    EXPECT_FALSE(h3.accepting_requests());
+    EXPECT_EQ(below_notification.rejected, 0U);
+    EXPECT_EQ(equal_notification.rejected, 1U);
+    EXPECT_EQ(equal_notification.goaway_id, 4U);
+    EXPECT_EQ(above_notification.rejected, 1U);
+    EXPECT_EQ(above_notification.goaway_id, 4U);
+
+    std::promise<void> closed;
+    auto closed_future = closed.get_future();
+    fiber::async::spawn(group.at(0), [&h3, &below, &closed]() -> fiber::async::DetachedTask {
+        h3.unregister_client_request(below);
+        h3.graceful_shutdown();
+        co_await h3.wait_closed();
+        closed.set_value();
+        co_return;
+    });
+    ASSERT_EQ(closed_future.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(below_notification.closed, 0U);
+
+    group.stop();
+    group.join();
+}
+
+TEST(Http3ConnectionTest, ClientRejectsIncreasingPeerGoawayId) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicConnection::Options quic_options{};
+    quic_options.loop = &group.at(0);
+    quic_options.role = fiber::quic::QuicConnectionRole::Client;
+    quic_options.original_destination_connection_id = connection_id_from({0x01, 0x02, 0x03, 0x04});
+    quic_options.remote_connection_id = connection_id_from({0x11, 0x12, 0x13, 0x14});
+    fiber::quic::QuicConnection quic(quic_options);
+    fiber::http::Http3Connection h3(quic);
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
+
+    auto control = control_settings_stream();
+    append_control_varint_frame(control, fiber::http::Http3FrameType::Goaway, 4);
+    append_control_varint_frame(control, fiber::http::Http3FrameType::Goaway, 8);
+    std::promise<void> closed;
+    auto closed_future = closed.get_future();
+    fiber::async::spawn(group.at(0), [&quic, &h3, &control, &closed]() -> fiber::async::DetachedTask {
+        return feed_stream_then_wait_closed(&quic, &h3, &control, 3, &closed);
+    });
+
+    ASSERT_EQ(closed_future.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(h3.close_error(), fiber::http::Http3ErrorCode::IdError);
+
+    group.stop();
+    group.join();
+}
+
+TEST(Http3ConnectionTest, ClientRejectsPushStreamWhenPushIsDisabled) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicConnection::Options quic_options{};
+    quic_options.loop = &group.at(0);
+    quic_options.role = fiber::quic::QuicConnectionRole::Client;
+    quic_options.original_destination_connection_id = connection_id_from({0x01, 0x02, 0x03, 0x04});
+    quic_options.remote_connection_id = connection_id_from({0x11, 0x12, 0x13, 0x14});
+    fiber::quic::QuicConnection quic(quic_options);
+    fiber::http::Http3Connection h3(quic);
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
+
+    auto push = uni_stream_type(fiber::http::Http3StreamType::Push);
+    append_varint(push, 0);
+    std::promise<void> closed;
+    auto closed_future = closed.get_future();
+    fiber::async::spawn(group.at(0), [&quic, &h3, &push, &closed]() -> fiber::async::DetachedTask {
+        return feed_stream_then_wait_closed(&quic, &h3, &push, 3, &closed);
+    });
+
+    ASSERT_EQ(closed_future.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(h3.close_error(), fiber::http::Http3ErrorCode::IdError);
 
     group.stop();
     group.join();

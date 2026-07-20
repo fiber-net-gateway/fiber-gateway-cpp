@@ -17,11 +17,17 @@ public:
     ServerConnection(const quic::QuicConnection::Options &quic_options, const HttpHandler &handler,
                      const HttpServerOptions &http_options) noexcept :
         handler_(handler), http_options_(http_options), quic_(make_quic_options(quic_options, this)),
-        h3_(quic_, make_http3_options(this)) {}
+        h3_(quic_, make_http3_options(this)) {
+        prepared_ = h3_.prepare().has_value();
+    }
 
     [[nodiscard]] quic::QuicConnection &quic() noexcept { return quic_; }
 
     void start() noexcept {
+        if (!prepared_) {
+            h3_.close(Http3ErrorCode::InternalError);
+            return;
+        }
         event::EventLoop *loop = quic_.loop();
         FIBER_ASSERT(loop != nullptr);
         tasks_.add();
@@ -102,6 +108,7 @@ private:
     Http3Connection h3_;
     async::WaitGroup tasks_{};
     bool cleanup_started_ = false;
+    bool prepared_ = false;
 };
 
 Http3Server::Http3Server(event::EventLoop &loop, HttpHandler handler, HttpServerOptions options,

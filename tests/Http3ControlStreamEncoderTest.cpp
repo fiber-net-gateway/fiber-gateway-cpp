@@ -46,3 +46,13 @@ TEST(Http3ControlStreamEncoderTest, EncodesNonDefaultSettingsPreface) {
     const auto bytes = collect(*encoded);
     EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x04, 0x04, 0x07, 0x08, 0x08, 0x01}));
 }
+
+TEST(Http3ControlStreamEncoderTest, EncodesGoaway) {
+    fiber::mem::IoBufNodePool pool;
+
+    auto encoded = fiber::http::encode_http3_goaway_frame(0, pool);
+
+    ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
+    const auto bytes = collect(*encoded);
+    EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x07, 0x01, 0x00}));
+}

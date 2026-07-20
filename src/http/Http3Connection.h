@@ -19,10 +19,20 @@ namespace fiber::http {
 
 enum class Http3ConnectionState : std::uint8_t {
     Init,
+    Prepared,
+    Starting,
     Running,
     Draining,
     Closing,
     Closed,
+};
+
+struct Http3ClientRequestEntry {
+    void *owner = nullptr;
+    void (*on_rejected)(void *owner, std::uint64_t goaway_id) noexcept = nullptr;
+    void (*on_connection_close)(void *owner, Http3ErrorCode error) noexcept = nullptr;
+    std::uint64_t stream_id = quic::kQuicUnassignedStreamId;
+    common::IntrusiveListHook link{};
 };
 
 class Http3Connection : public common::NonCopyable, public common::NonMovable {
@@ -37,6 +47,8 @@ public:
         std::chrono::milliseconds drain_timeout = std::chrono::seconds(3);
         void *owner = nullptr;
         Ops ops{};
+        std::uint32_t max_qpack_string_size = 64 * 1024;
+        std::size_t max_field_section_size = 128 * 1024;
         bool enable_push = false;
     };
 
@@ -51,17 +63,28 @@ public:
     [[nodiscard]] Http3ErrorCode close_error() const noexcept { return close_error_; }
     [[nodiscard]] const Http3Settings &local_settings() const noexcept { return options_.local_settings; }
     [[nodiscard]] const Http3Settings &peer_settings() const noexcept { return peer_settings_; }
+    [[nodiscard]] std::uint32_t max_qpack_string_size() const noexcept { return options_.max_qpack_string_size; }
+    [[nodiscard]] std::size_t max_field_section_size() const noexcept { return options_.max_field_section_size; }
     [[nodiscard]] bool peer_settings_received() const noexcept { return peer_settings_received_; }
     [[nodiscard]] bool peer_control_stream_seen() const noexcept { return peer_control_seen_; }
     [[nodiscard]] bool peer_qpack_encoder_stream_seen() const noexcept { return peer_qpack_encoder_seen_; }
     [[nodiscard]] bool peer_qpack_decoder_stream_seen() const noexcept { return peer_qpack_decoder_seen_; }
+    [[nodiscard]] bool peer_goaway_received() const noexcept { return peer_goaway_received_; }
+    [[nodiscard]] std::uint64_t peer_goaway_id() const noexcept { return peer_goaway_id_; }
+    [[nodiscard]] bool accepting_requests() const noexcept {
+        return role() == quic::QuicConnectionRole::Client && state_ == Http3ConnectionState::Running &&
+               !peer_goaway_received_;
+    }
     [[nodiscard]] bool closing() const noexcept {
         return state_ == Http3ConnectionState::Draining || state_ == Http3ConnectionState::Closing ||
                state_ == Http3ConnectionState::Closed;
     }
 
+    common::IoResult<void> prepare() noexcept;
     async::Task<common::IoResult<void>> start() noexcept;
     common::IoResult<void> apply_peer_settings(const Http3Settings &settings) noexcept;
+    common::IoResult<void> register_client_request(Http3ClientRequestEntry &entry) noexcept;
+    void unregister_client_request(Http3ClientRequestEntry &entry) noexcept;
     void graceful_shutdown(Http3ErrorCode error = Http3ErrorCode::NoError) noexcept;
     void close(Http3ErrorCode error = Http3ErrorCode::NoError) noexcept;
     void mark_closed() noexcept;
@@ -75,6 +98,7 @@ private:
     };
 
     using PeerStreamReaderList = common::IntrusiveList<PeerStreamReader, offsetof(PeerStreamReader, link)>;
+    using ClientRequestList = common::IntrusiveList<Http3ClientRequestEntry, offsetof(Http3ClientRequestEntry, link)>;
 
     [[nodiscard]] static const quic::QuicConnection::Ops &quic_ops() noexcept;
     [[nodiscard]] static quic::QuicStream::Lease create_owned_stream() noexcept;
@@ -90,6 +114,10 @@ private:
     void unregister_peer_stream(PeerStreamReader &reader) noexcept;
     void stop_peer_readers(Http3ErrorCode error) noexcept;
     void close_from_reader(Http3ErrorCode error) noexcept;
+    [[nodiscard]] common::IoResult<void> apply_peer_goaway(std::uint64_t id) noexcept;
+    void reject_client_requests(std::uint64_t goaway_id) noexcept;
+    void detach_client_requests(Http3ErrorCode error) noexcept;
+    async::DetachedTask run_client_graceful_shutdown(Http3ErrorCode error) noexcept;
 
     quic::QuicConnection &quic_;
     Options options_{};
@@ -99,13 +127,19 @@ private:
     quic::QuicStream *peer_qpack_encoder_stream_ = nullptr;
     quic::QuicStream *peer_qpack_decoder_stream_ = nullptr;
     PeerStreamReaderList peer_readers_{};
+    ClientRequestList client_requests_{};
     async::WaitGroup peer_reader_group_{};
+    async::WaitGroup client_request_group_{};
+    async::WaitGroup control_task_group_{};
     Http3ConnectionState state_ = Http3ConnectionState::Init;
     Http3ErrorCode close_error_ = Http3ErrorCode::NoError;
     bool peer_settings_received_ = false;
     bool peer_control_seen_ = false;
     bool peer_qpack_encoder_seen_ = false;
     bool peer_qpack_decoder_seen_ = false;
+    std::uint64_t peer_goaway_id_ = 0;
+    bool peer_goaway_received_ = false;
+    bool local_goaway_sent_ = false;
     bool stopping_readers_ = false;
 };
 

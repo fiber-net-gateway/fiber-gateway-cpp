@@ -109,4 +109,35 @@ common::IoResult<mem::IoBufChain> encode_http3_control_stream_preface(const Http
     return std::move(chain);
 }
 
+common::IoResult<mem::IoBufChain> encode_http3_goaway_frame(std::uint64_t id, mem::IoBufNodePool &node_pool) noexcept {
+    const std::size_t payload_len = quic::quic_varint_len(id);
+    const std::size_t encoded_len = quic::quic_varint_len(static_cast<std::uint64_t>(Http3FrameType::Goaway)) +
+                                    quic::quic_varint_len(payload_len) + payload_len;
+    mem::IoBuf buf = mem::IoBuf::allocate(encoded_len);
+    if (!buf) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
+    quic::QuicWriteCursor out(buf.writable_data(), buf.writable());
+    auto wrote = write_varint(out, static_cast<std::uint64_t>(Http3FrameType::Goaway));
+    if (!wrote) {
+        return std::unexpected(wrote.error());
+    }
+    wrote = write_varint(out, payload_len);
+    if (!wrote) {
+        return std::unexpected(wrote.error());
+    }
+    wrote = write_varint(out, id);
+    if (!wrote) {
+        return std::unexpected(wrote.error());
+    }
+
+    buf.commit(out.offset());
+    mem::IoBufChain chain(node_pool);
+    if (!chain.append(std::move(buf))) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    return std::move(chain);
+}
+
 } // namespace fiber::http
