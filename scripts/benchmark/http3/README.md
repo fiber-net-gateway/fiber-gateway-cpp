@@ -4,6 +4,11 @@ This directory contains the loopback-only HTTP/3 interoperability, performance,
 and lifecycle runners used by the corresponding plan and report under
 `feature/`.
 
+The 2026-07-20 post-fix smoke/diagnostic run is recorded in
+`feature/lite_nginx_nginx_single_host_http3_rebenchmark_report.md`. It did not
+pass the formal capacity gate, so its short performance samples are not a new
+baseline.
+
 ## Prerequisites
 
 - `build-bench-h3-off/apps/lite_nginx` and
@@ -31,6 +36,14 @@ scripts/benchmark/http3/run_protocol_checks.sh
 
 # Repeated service startup, load, concentrated client disconnect, and recovery.
 ROUNDS=20 scripts/benchmark/http3/run_churn.sh
+
+# Trace-only remote-steal proof plus bounded delayed/blocked cancellation,
+# upstream abort, and backend restart recovery.
+LITE_TRACE_BIN=temp/build-bench-<sha>-trace/apps/lite_nginx \
+  scripts/benchmark/http3/run_steal_regression.sh
+
+# Default epoll_pwait2 and forced timerfd fallback, one fresh connection per request.
+CONNECTIONS=100 scripts/benchmark/http3/run_short_connections.sh
 
 # Recompute CSV summaries for an existing raw result directory.
 scripts/benchmark/http3/summarize.py \

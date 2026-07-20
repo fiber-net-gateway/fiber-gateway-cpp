@@ -2,12 +2,30 @@
 
 #include <atomic>
 #include <coroutine>
+#if FIBER_ENABLE_BENCHMARK_TRACE
+#include <cstdio>
+#include <cstdlib>
+#endif
 #include <memory>
 #include <utility>
 
 #include "../common/Assert.h"
 
 namespace fiber::http {
+
+#if FIBER_ENABLE_BENCHMARK_TRACE
+namespace {
+
+bool pool_trace_enabled() noexcept {
+    static const bool enabled = [] {
+        const char *trace = std::getenv("FIBER_HTTP_POOL_TRACE");
+        return trace != nullptr && trace[0] != '\0' && trace[0] != '0';
+    }();
+    return enabled;
+}
+
+} // namespace
+#endif
 
 class StealableHttp1ConnectionPoolSet::AdminAwaiter : public common::NonCopyable, public common::NonMovable {
 public:
@@ -279,11 +297,36 @@ StealableHttp1ConnectionPoolSet::StealableHttp1ConnectionPoolSet(event::EventLoo
     StealableHttp1ConnectionPoolSet(group, Options{}) {}
 
 StealableHttp1ConnectionPoolSet::~StealableHttp1ConnectionPoolSet() {
+#if FIBER_ENABLE_BENCHMARK_TRACE
+    trace_report();
+#endif
     for (std::size_t i = 0; i < group_->size(); ++i) {
         auto *shard = reinterpret_cast<Shard *>(storage_[i].storage);
         std::destroy_at(shard);
     }
 }
+
+#if FIBER_ENABLE_BENCHMARK_TRACE
+void StealableHttp1ConnectionPoolSet::trace_remote_hit() noexcept {
+    if (trace_remote_hit_.fetch_add(1, std::memory_order_relaxed) == 0) {
+        trace_report();
+    }
+}
+
+void StealableHttp1ConnectionPoolSet::trace_report() const noexcept {
+    if (!pool_trace_enabled()) {
+        return;
+    }
+    std::fprintf(stderr,
+                 "FIBER_HTTP_POOL_TRACE local_hit=%llu remote_attempt=%llu remote_hit=%llu "
+                 "remote_attempt_miss=%llu no_candidate=%llu\n",
+                 static_cast<unsigned long long>(trace_local_hit_.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(trace_remote_attempt_.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(trace_remote_hit_.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(trace_remote_attempt_miss_.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(trace_no_candidate_.load(std::memory_order_relaxed)));
+}
+#endif
 
 bool StealableHttp1ConnectionPoolSet::init() noexcept {
     for (std::size_t i = 0; i < group_->size(); ++i) {
@@ -364,6 +407,9 @@ bool StealableHttp1ConnectionPoolSet::AcquireAwaiter::prepare() noexcept {
         return true;
     }
     if (local_fallback_.hit()) {
+#if FIBER_ENABLE_BENCHMARK_TRACE
+        set_->trace_local_hit_.fetch_add(1, std::memory_order_relaxed);
+#endif
         result_ = Lease(std::move(local_fallback_));
         prepared_ = true;
         cursor_ = nullptr;
@@ -373,6 +419,9 @@ bool StealableHttp1ConnectionPoolSet::AcquireAwaiter::prepare() noexcept {
     cursor_ = home_slot_->next;
     prepared_ = true;
     if (!advance_to_candidate()) {
+#if FIBER_ENABLE_BENCHMARK_TRACE
+        set_->trace_no_candidate_.fetch_add(1, std::memory_order_relaxed);
+#endif
         result_ = Lease(std::move(local_fallback_));
         cursor_ = nullptr;
         return true;
@@ -401,14 +450,24 @@ void StealableHttp1ConnectionPoolSet::AcquireAwaiter::run_notify(AcquireAwaiter 
     FIBER_ASSERT(awaiter != nullptr);
     switch (awaiter->phase_) {
         case Phase::SubmitSteal:
+#if FIBER_ENABLE_BENCHMARK_TRACE
+            awaiter->set_->trace_remote_attempt_.fetch_add(1, std::memory_order_relaxed);
+#endif
             awaiter->result_home_core_ = &awaiter->target_shard().core;
             awaiter->result_entry_ = awaiter->result_home_core_->try_steal_idle_entry(*awaiter->key_);
             if (awaiter->result_entry_ && awaiter->result_home_core_) {
+#if FIBER_ENABLE_BENCHMARK_TRACE
+                awaiter->set_->trace_remote_hit();
+#endif
                 awaiter->phase_ = Phase::ResumeCaller;
                 awaiter->caller_loop_
                         ->post<AcquireAwaiter, &AcquireAwaiter::notify_entry_, &AcquireAwaiter::run_notify>(*awaiter);
                 return;
             }
+
+#if FIBER_ENABLE_BENCHMARK_TRACE
+            awaiter->set_->trace_remote_attempt_miss_.fetch_add(1, std::memory_order_relaxed);
+#endif
 
             awaiter->cursor_ = awaiter->cursor_->next;
             awaiter->result_entry_ = nullptr;

@@ -128,6 +128,16 @@ private:
     Options pool_options_{};
     std::unique_ptr<ShardSlot[]> storage_{};
     std::atomic<bool> shutdown_requested_{false};
+#if FIBER_ENABLE_BENCHMARK_TRACE
+    void trace_remote_hit() noexcept;
+    void trace_report() const noexcept;
+
+    std::atomic<std::uint64_t> trace_local_hit_{0};
+    std::atomic<std::uint64_t> trace_remote_attempt_{0};
+    std::atomic<std::uint64_t> trace_remote_hit_{0};
+    std::atomic<std::uint64_t> trace_remote_attempt_miss_{0};
+    std::atomic<std::uint64_t> trace_no_candidate_{0};
+#endif
     std::mutex shutdown_mu_{};
     async::WaitGroup shutdown_wg_{};
 };

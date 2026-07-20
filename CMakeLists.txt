@@ -11,6 +11,7 @@ option(FIBER_USE_JEMALLOC "Link final executables against jemalloc" OFF)
 option(FIBER_ENABLE_HTTP3 "Build in-tree HTTP/3 support" ON)
 option(FIBER_ENABLE_UDP_GSO "Compile Linux UDP GSO support when available" ON)
 option(FIBER_FORCE_TIMERFD_POLLER "Force the Linux Poller to use timerfd timeouts" OFF)
+option(FIBER_ENABLE_BENCHMARK_TRACE "Enable benchmark-only hot-path trace counters" OFF)
 
 include(cmake/Deps.cmake)
 include(cmake/CompilerChecks.cmake)
@@ -36,9 +37,11 @@ target_include_directories(fiber_lib
     PUBLIC ${CMAKE_CURRENT_LIST_DIR}/src
     PRIVATE ${FIBER_GENERATED_INCLUDE_DIR})
 target_link_libraries(fiber_lib PUBLIC boringssl::ssl boringssl::crypto protobuf::libprotobuf-lite)
-target_compile_definitions(fiber_lib PRIVATE
-    _GNU_SOURCE
-    FIBER_HAVE_UDP_SEGMENT=$<BOOL:${FIBER_HAVE_UDP_SEGMENT}>)
+target_compile_definitions(fiber_lib
+    PUBLIC FIBER_ENABLE_BENCHMARK_TRACE=$<BOOL:${FIBER_ENABLE_BENCHMARK_TRACE}>
+    PRIVATE
+        _GNU_SOURCE
+        FIBER_HAVE_UDP_SEGMENT=$<BOOL:${FIBER_HAVE_UDP_SEGMENT}>)
 set(FIBER_CLANG_CONSTEXPR_STEPS "16777216" CACHE STRING
     "Clang constexpr evaluator step limit for compile-time generated tables")
 target_compile_options(fiber_lib PRIVATE

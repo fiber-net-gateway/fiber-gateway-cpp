@@ -5,17 +5,20 @@ set -uo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd "$script_dir/../../.." && pwd)"
 runtime_dir="$project_root/temp/http3-benchmark-runtime"
-h2load="$project_root/temp/http3-bench-tools/build/nghttp2-bssl/src/h2load"
-client="$project_root/temp/http3-bench-tools/build/ngtcp2-examples-libcxx/examples/bsslclient"
-backend="$project_root/build-bench-h3-off/example/http_benchmark_backend"
-lite="$project_root/build-bench-h3-off/apps/lite_nginx"
-nginx="$project_root/temp/nginx-install/sbin/nginx"
-curl_h3=/snap/bin/curl
-implementations="${IMPLEMENTATIONS:-lite nginx}"
+h2load="${H2LOAD_BIN:-$project_root/temp/http3-bench-tools/build/nghttp2-bssl/src/h2load}"
+client="${BSSLCLIENT_BIN:-$project_root/temp/http3-bench-tools/build/ngtcp2-examples-libcxx/examples/bsslclient}"
+backend="${BACKEND_BIN:-$project_root/build-bench-h3-off/example/http_benchmark_backend}"
+lite="${LITE_GSO_OFF_BIN:-$project_root/build-bench-h3-off/apps/lite_nginx}"
+nginx="${NGINX_BIN:-$project_root/temp/nginx-install/sbin/nginx}"
+curl_h3="${CURL_H3_BIN:-/snap/bin/curl}"
+implementations="${IMPLEMENTATIONS:-lite-steal-on lite-steal-off nginx}"
 run_id="${RUN_ID:-protocol-$(date +%Y%m%dT%H%M%S)}"
 result_dir="${RESULT_DIR:-$project_root/temp/http3-benchmark-results/$run_id}"
-sut_cpus="${SUT_CPUS:-0}"
+sut_cpus="${SUT_CPUS:-0,2}"
 sut_quota="${SUT_QUOTA:-none}"
+backend_cpus="${BACKEND_CPUS:-14,16}"
+backend_quota="${BACKEND_QUOTA:-none}"
+strict_extended="${STRICT_EXTENDED_PROTOCOL_CHECKS:-0}"
 backend_unit="bench-h3-proto-backend-$run_id"
 active_unit=""
 status=0
@@ -64,11 +67,23 @@ download() {
 mkdir -p "$result_dir"
 "$script_dir/prepare_runtime.sh" >/dev/null
 printf 'implementation,case,passed,detail\n' >"$result_dir/checks.csv"
+{
+    printf 'run_id=%s\n' "$run_id"
+    printf 'git_commit=%s\n' "$(git -C "$project_root" rev-parse HEAD)"
+    printf 'implementations=%q\n' "$implementations"
+    printf 'sut_cpus=%s\n' "$sut_cpus"
+    printf 'backend_cpus=%s\n' "$backend_cpus"
+    printf 'strict_extended_protocol_checks=%s\n' "$strict_extended"
+} >"$result_dir/run.env"
+git -C "$project_root" status --short >"$result_dir/git-status.txt"
+sha256sum "$lite" "$backend" "$nginx" "$h2load" "$client" "$curl_h3" >"$result_dir/binary-sha256.txt"
 
 stop_unit "$backend_unit"
 systemctl --user reset-failed "$backend_unit" >/dev/null 2>&1 || true
+backend_quota_property=()
+[[ "$backend_quota" == none ]] || backend_quota_property=(--property="CPUQuota=$backend_quota")
 systemd-run --user --unit="$backend_unit" \
-    --property=CPUAffinity=14,16 --property=CPUQuota=200% \
+    --property="CPUAffinity=$backend_cpus" "${backend_quota_property[@]}" \
     --property=CPUAccounting=yes --property=MemoryAccounting=yes \
     --working-directory="$project_root" "$backend" >/dev/null
 wait_backend || exit 1
@@ -81,7 +96,10 @@ for implementation in $implementations; do
     active_unit="$unit"
     wait_clear || exit 1
     case "$implementation" in
-        lite)
+        lite-steal-on)
+            command=("$lite" --config "$script_dir/configs/lite_nginx_steal_on.conf")
+            ;;
+        lite-steal-off|lite)
             command=("$lite" --config "$script_dir/configs/lite_nginx_steal_off.conf")
             ;;
         nginx)
@@ -137,7 +155,7 @@ for implementation in $implementations; do
        [[ "$(sha256sum "$key_dir/delay" | cut -d' ' -f1)" == 2edc986847e209b4016e141a6dc8716d3207350f416969382d431539bf292e4a ]] && \
        [[ "$(rg -c 'Initiate key update' "$output/key-update.err")" -ge 2 ]]; then passed=1; fi
     printf '%s,key-update-twice,%s,peer-initiated\n' "$implementation" "$passed" >>"$result_dir/checks.csv"
-    [[ "$passed" == 1 ]] || status=1
+    [[ "$passed" == 1 || "$strict_extended" != 1 ]] || status=1
 
     migration_dir="$output/migration"
     mkdir -p "$migration_dir"
@@ -147,7 +165,7 @@ for implementation in $implementations; do
        https://127.0.0.1:18443/fault/delay >"$output/migration.out" 2>"$output/migration.err" && \
        [[ "$(sha256sum "$migration_dir/delay" | cut -d' ' -f1)" == 2edc986847e209b4016e141a6dc8716d3207350f416969382d431539bf292e4a ]]; then passed=1; fi
     printf '%s,nat-rebinding,%s,path-change\n' "$implementation" "$passed" >>"$result_dir/checks.csv"
-    [[ "$passed" == 1 ]] || status=1
+    [[ "$passed" == 1 || "$strict_extended" != 1 ]] || status=1
 
     passed=0
     if taskset -c 6 "$client" -q --no-gso -t 0.01 -r 0.01 -n 10 \
