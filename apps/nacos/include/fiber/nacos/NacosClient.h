@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <string>
 
 #include <async/Task.h>
 #include <async/Watch.h>
@@ -13,7 +14,7 @@
 #include <event/EventLoop.h>
 
 #include "ConfigService.h"
-#include "NacosAuth.h"
+#include "NacosAuthAccess.h"
 #include "NacosClientConfig.h"
 
 namespace fiber::nacos {
@@ -32,7 +33,7 @@ struct NacosCreateError {
 
 class NacosClient : public common::NonCopyable, public common::NonMovable {
 public:
-    using AuthSubscriber = async::Watch<NacosAuthSnapshot>::Subscriber;
+    using AuthSubscriber = async::Watch<NacosAuthAccess>::Subscriber;
 
     [[nodiscard]] static std::expected<std::unique_ptr<NacosClient>, NacosCreateError>
     create(event::EventLoop &loop, NacosClientConfig config, NacosClientOptions options = {});

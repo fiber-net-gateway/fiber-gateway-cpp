@@ -14,7 +14,6 @@
 #include <common/NonCopyable.h>
 #include <common/NonMovable.h>
 #include <event/EventLoop.h>
-#include <fiber/nacos/NacosAuth.h>
 #include <fiber/nacos/NacosClientConfig.h>
 #include <nacos_grpc_payload.pb.h>
 
@@ -67,7 +66,9 @@ public:
 
     [[nodiscard]] async::Task<void> run() noexcept;
     void shutdown() noexcept;
-    void notify_auth(const NacosAuthSnapshot &snapshot);
+    // nullopt means authentication is unavailable; an engaged empty string
+    // means authentication is not configured and accessToken must be omitted.
+    void notify_auth(std::optional<std::string> access_token);
     void set_push_handler(NacosPushHandler handler) noexcept;
 
     [[nodiscard]] StateSubscriber subscribe_state();
@@ -102,8 +103,7 @@ public:
 
 private:
     struct Control {
-        NacosAuthSnapshot auth;
-        bool has_auth = false;
+        std::optional<std::string> access_token;
         bool stopping = false;
     };
 

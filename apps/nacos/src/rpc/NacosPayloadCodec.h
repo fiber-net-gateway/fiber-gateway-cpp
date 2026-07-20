@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <expected>
+#include <optional>
 #include <string_view>
 
 #include <common/json/JsonParser.h>
@@ -18,7 +19,7 @@ struct NacosPayloadMetadata {
     std::string_view client_ip;
     std::string_view client_version;
     std::string_view namespace_id;
-    std::string_view access_token;
+    std::optional<std::string_view> access_token;
 };
 
 struct NacosPayloadView {

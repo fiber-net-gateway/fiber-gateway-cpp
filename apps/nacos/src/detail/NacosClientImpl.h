@@ -15,12 +15,10 @@
 #include <async/Watch.h>
 #include <common/IoError.h>
 #include <event/EventLoop.h>
-#include <fiber/nacos/NacosAuth.h>
 #include <fiber/nacos/NacosClient.h>
 #include <fiber/nacos/NacosClientConfig.h>
 
 #include "../config/ConfigServiceImpl.h"
-#include "../rpc/NacosGrpcConnection.h"
 
 namespace fiber::nacos::detail {
 
@@ -36,10 +34,12 @@ public:
     NacosClientImpl(event::EventLoop &loop, NacosClientConfig config, NacosClientOptions options);
     ~NacosClientImpl();
 
+    [[nodiscard]] static bool valid_options(const NacosClientOptions &options) noexcept;
+
     [[nodiscard]] common::IoResult<void> start() noexcept;
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
-    [[nodiscard]] async::Watch<NacosAuthSnapshot>::Subscriber subscribe_auth();
+    [[nodiscard]] async::Watch<NacosAuthAccess>::Subscriber subscribe_auth();
     [[nodiscard]] ConfigService &config_service() noexcept { return config_service_; }
 
     [[nodiscard]] event::EventLoop &loop() const noexcept { return *loop_; }
@@ -48,35 +48,29 @@ public:
 private:
     struct AuthLoginSuccess {
         std::string access_token;
-        std::string username;
         std::int64_t token_ttl = 0;
-        bool global_admin = false;
     };
 
     [[nodiscard]] async::DetachedTask run_auth() noexcept;
-    [[nodiscard]] async::DetachedTask run_grpc() noexcept;
     [[nodiscard]] async::DetachedTask run_config() noexcept;
-    [[nodiscard]] async::Task<std::expected<AuthLoginSuccess, NacosAuthError>>
-    login(std::size_t server_index, std::string_view target, std::string_view auth_body,
-          std::chrono::steady_clock::time_point deadline) noexcept;
+    [[nodiscard]] async::Task<std::expected<AuthLoginSuccess, common::IoErr>>
+    login(std::size_t server_index, std::string_view target, std::string_view auth_body) noexcept;
 
     [[nodiscard]] async::Watch<bool>::Subscriber subscribe_shutdown();
     [[nodiscard]] bool running() const noexcept { return state_ == NacosClientState::Running; }
     void end_task() noexcept;
-    void publish_auth(NacosAuthSnapshot snapshot);
-    void publish_stopped();
+    void publish_auth(NacosAuthAccess auth_access);
 
     event::EventLoop *loop_ = nullptr;
     NacosClientConfig config_;
     NacosClientOptions options_;
-    NacosGrpcConnection grpc_connection_;
-    ConfigServiceImpl config_service_;
     NacosClientState state_ = NacosClientState::Created;
     async::WaitGroup task_group_;
     async::Watch<bool> shutdown_watch_{false};
     std::optional<async::Watch<bool>::Publisher> shutdown_publisher_;
-    async::Watch<NacosAuthSnapshot> auth_watch_;
-    std::optional<async::Watch<NacosAuthSnapshot>::Publisher> auth_publisher_;
+    async::Watch<NacosAuthAccess> auth_watch_;
+    std::optional<async::Watch<NacosAuthAccess>::Publisher> auth_publisher_;
+    ConfigServiceImpl config_service_;
 };
 
 } // namespace fiber::nacos::detail

@@ -21,6 +21,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
+#include <async/Sleep.h>
 #include <async/Spawn.h>
 #include <async/Timeout.h>
 #include <event/EventLoopGroup.h>
@@ -30,9 +31,8 @@ namespace {
 
 using namespace std::chrono_literals;
 using fiber::async::DetachedTask;
-using fiber::nacos::NacosAuthErrorCode;
-using fiber::nacos::NacosAuthSnapshot;
-using fiber::nacos::NacosAuthState;
+using fiber::nacos::NacosAuthAccess;
+using fiber::nacos::NacosAuthAccessKind;
 using fiber::nacos::NacosClient;
 
 struct ServerStep {
@@ -279,15 +279,7 @@ private:
     bool finished_ = false;
 };
 
-fiber::net::IpAddress parse_ip(std::string_view text) {
-    fiber::net::IpAddress ip;
-    EXPECT_TRUE(fiber::net::IpAddress::parse(text, ip));
-    return ip;
-}
-
-fiber::nacos::NacosClientConfig
-make_config(std::uint16_t port, fiber::nacos::NacosAuthApiVersion version = fiber::nacos::NacosAuthApiVersion::V3,
-            std::vector<fiber::net::IpAddress> ips = {}) {
+fiber::nacos::NacosClientConfig make_config(std::uint16_t port, std::vector<fiber::net::IpAddress> ips = {}) {
     fiber::nacos::NacosClientConfigParams params;
     params.server_ips = std::move(ips);
     if (params.server_ips.empty()) {
@@ -296,22 +288,32 @@ make_config(std::uint16_t port, fiber::nacos::NacosAuthApiVersion version = fibe
     params.username = "user name";
     params.password = "p@ ss&";
     params.http_port = port;
-    params.auth_api_version = version;
     auto result = fiber::nacos::NacosClientConfig::create(std::move(params));
     EXPECT_TRUE(result.has_value());
     return std::move(*result);
 }
 
-struct SnapshotOutcome {
+fiber::nacos::NacosClientConfig make_config_without_auth(std::uint16_t port) {
+    fiber::nacos::NacosClientConfigParams params;
+    params.server_ips.push_back(fiber::net::IpAddress::loopback_v4());
+    params.http_port = port;
+    auto result = fiber::nacos::NacosClientConfig::create(std::move(params));
+    EXPECT_TRUE(result.has_value());
+    return std::move(*result);
+}
+
+struct AuthOutcome {
     fiber::common::IoErr error = fiber::common::IoErr::Unknown;
-    std::vector<NacosAuthSnapshot> snapshots;
+    std::vector<NacosAuthAccess> events;
+    std::vector<std::chrono::steady_clock::duration> elapsed;
 };
 
-DetachedTask collect_states_and_shutdown(NacosClient *client, NacosClient::AuthSubscriber *subscriber,
-                                         std::vector<NacosAuthState> expected_states,
-                                         std::promise<SnapshotOutcome> *promise) {
-    SnapshotOutcome outcome;
+DetachedTask collect_auth_and_shutdown(NacosClient *client, NacosClient::AuthSubscriber *subscriber,
+                                       std::vector<NacosAuthAccessKind> expected_kinds,
+                                       std::promise<AuthOutcome> *promise) {
+    AuthOutcome outcome;
     std::uint64_t received_version = 0;
+    const auto started_at = std::chrono::steady_clock::now();
     auto start = client->start();
     if (!start) {
         outcome.error = start.error();
@@ -320,9 +322,9 @@ DetachedTask collect_states_and_shutdown(NacosClient *client, NacosClient::AuthS
         co_return;
     }
 
-    for (const NacosAuthState expected: expected_states) {
+    for (const NacosAuthAccessKind expected: expected_kinds) {
         auto next = co_await fiber::async::timeout_for(
-                [subscriber, received_version]() { return subscriber->next(received_version); }, 4s);
+                [subscriber, received_version]() { return subscriber->next(received_version); }, 7s);
         if (!next || !next->value) {
             outcome.error = next ? fiber::common::IoErr::Invalid : next.error();
             co_await client->shutdown();
@@ -331,8 +333,9 @@ DetachedTask collect_states_and_shutdown(NacosClient *client, NacosClient::AuthS
             co_return;
         }
         received_version = next->version;
-        outcome.snapshots.push_back(*next->value);
-        if (next->value->state != expected) {
+        outcome.events.push_back(*next->value);
+        outcome.elapsed.push_back(std::chrono::steady_clock::now() - started_at);
+        if (next->value->kind != expected) {
             outcome.error = fiber::common::IoErr::Invalid;
             co_await client->shutdown();
             promise->set_value(std::move(outcome));
@@ -345,10 +348,11 @@ DetachedTask collect_states_and_shutdown(NacosClient *client, NacosClient::AuthS
     co_await client->shutdown();
     auto stopped = co_await fiber::async::timeout_for(
             [subscriber, received_version]() { return subscriber->next(received_version); }, 1s);
-    if (!stopped || !stopped->value || stopped->value->state != NacosAuthState::Stopped) {
+    if (!stopped || !stopped->value || stopped->value->kind != NacosAuthAccessKind::Stopped ||
+        !stopped->value->access_token.empty()) {
         outcome.error = stopped ? fiber::common::IoErr::Invalid : stopped.error();
     } else {
-        outcome.snapshots.push_back(*stopped->value);
+        outcome.events.push_back(*stopped->value);
         outcome.error = fiber::common::IoErr::None;
     }
     promise->set_value(std::move(outcome));
@@ -362,18 +366,51 @@ DetachedTask start_client(NacosClient *client, std::promise<fiber::common::IoErr
 }
 
 DetachedTask shutdown_client(NacosClient *client, NacosClient::AuthSubscriber *subscriber,
-                             std::promise<SnapshotOutcome> *promise) {
-    SnapshotOutcome outcome;
+                             std::promise<AuthOutcome> *promise) {
+    AuthOutcome outcome;
     co_await client->shutdown();
     co_await client->shutdown();
     auto stopped = co_await fiber::async::timeout_for([subscriber]() { return subscriber->next(0); }, 1s);
     if (!stopped || !stopped->value) {
         outcome.error = stopped ? fiber::common::IoErr::Invalid : stopped.error();
     } else {
-        outcome.snapshots.push_back(*stopped->value);
-        outcome.error = stopped->value->state == NacosAuthState::Stopped ? fiber::common::IoErr::None
-                                                                         : fiber::common::IoErr::Invalid;
+        outcome.events.push_back(*stopped->value);
+        outcome.error = stopped->value->kind == NacosAuthAccessKind::Stopped && stopped->value->access_token.empty()
+                                ? fiber::common::IoErr::None
+                                : fiber::common::IoErr::Invalid;
     }
+    promise->set_value(std::move(outcome));
+    fiber::event::EventLoop::current().stop();
+}
+
+DetachedTask observe_refresh_failure_and_shutdown(NacosClient *client, NacosClient::AuthSubscriber *subscriber,
+                                                  std::promise<AuthOutcome> *promise) {
+    AuthOutcome outcome;
+    auto start = client->start();
+    if (!start) {
+        outcome.error = start.error();
+        promise->set_value(std::move(outcome));
+        fiber::event::EventLoop::current().stop();
+        co_return;
+    }
+
+    auto first = co_await fiber::async::timeout_for([subscriber]() { return subscriber->next(0); }, 2s);
+    if (!first || !first->value) {
+        outcome.error = first ? fiber::common::IoErr::Invalid : first.error();
+    } else {
+        outcome.events.push_back(*first->value);
+        co_await fiber::async::sleep(5200ms);
+        auto current = subscriber->current();
+        if (current.value && current.value->kind == NacosAuthAccessKind::Present &&
+            current.value->access_token == first->value->access_token && current.version == first->version) {
+            outcome.events.push_back(*current.value);
+            outcome.error = fiber::common::IoErr::None;
+        } else {
+            outcome.error = fiber::common::IoErr::Invalid;
+        }
+    }
+
+    co_await client->shutdown();
     promise->set_value(std::move(outcome));
     fiber::event::EventLoop::current().stop();
 }
@@ -389,7 +426,36 @@ TEST(NacosClientTest, AuthSubscriberStartsWithoutPublishedSnapshot) {
     EXPECT_EQ(snapshot.version, 0u);
 }
 
-TEST(NacosClientTest, LogsInWithV3AndBroadcastsReadyThenStopped) {
+TEST(NacosClientTest, PublishesNotConfiguredWithoutHttpLogin) {
+    ScriptedHttpServer server({});
+    ASSERT_TRUE(server.valid());
+
+    fiber::event::EventLoopGroup group(1);
+    auto client_result = NacosClient::create(group.at(0), make_config_without_auth(server.port()));
+    ASSERT_TRUE(client_result.has_value());
+    std::unique_ptr<NacosClient> client = std::move(*client_result);
+    auto subscriber = client->subscribe_auth();
+    std::promise<AuthOutcome> promise;
+    auto future = promise.get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() {
+        return collect_auth_and_shutdown(client.get(), &subscriber, {NacosAuthAccessKind::NotConfigured}, &promise);
+    });
+
+    ASSERT_EQ(future.wait_for(2s), std::future_status::ready);
+    AuthOutcome outcome = future.get();
+    group.join();
+
+    ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
+    ASSERT_EQ(outcome.events.size(), 2u);
+    EXPECT_EQ(outcome.events[0].kind, NacosAuthAccessKind::NotConfigured);
+    EXPECT_TRUE(outcome.events[0].access_token.empty());
+    EXPECT_EQ(outcome.events[1].kind, NacosAuthAccessKind::Stopped);
+    EXPECT_TRUE(server.requests().empty());
+}
+
+TEST(NacosClientTest, LogsInWithNacos2EndpointAndBroadcastsToken) {
     ScriptedHttpServer server({ServerStep{
             .body = R"({"accessToken":"token-1","tokenTtl":30,"globalAdmin":true,"username":"nacos"})",
     }});
@@ -400,36 +466,33 @@ TEST(NacosClientTest, LogsInWithV3AndBroadcastsReadyThenStopped) {
     ASSERT_TRUE(client_result.has_value());
     std::unique_ptr<NacosClient> client = std::move(*client_result);
     auto subscriber = client->subscribe_auth();
-    std::promise<SnapshotOutcome> promise;
+    std::promise<AuthOutcome> promise;
     auto future = promise.get_future();
 
     group.start();
     fiber::async::spawn(group.at(0), [&]() {
-        return collect_states_and_shutdown(client.get(), &subscriber, {NacosAuthState::Ready}, &promise);
+        return collect_auth_and_shutdown(client.get(), &subscriber, {NacosAuthAccessKind::Present}, &promise);
     });
 
     ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
-    SnapshotOutcome outcome = future.get();
+    AuthOutcome outcome = future.get();
     group.join();
 
     ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
-    ASSERT_EQ(outcome.snapshots.size(), 2u);
-    EXPECT_EQ(outcome.snapshots[0].access_token, "token-1");
-    EXPECT_EQ(outcome.snapshots[0].username, "nacos");
-    EXPECT_TRUE(outcome.snapshots[0].global_admin);
-    EXPECT_EQ(outcome.snapshots[0].generation, 1u);
-    EXPECT_EQ(outcome.snapshots[1].state, NacosAuthState::Stopped);
+    ASSERT_EQ(outcome.events.size(), 2u);
+    EXPECT_EQ(outcome.events[0].access_token, "token-1");
+    EXPECT_EQ(outcome.events[1].kind, NacosAuthAccessKind::Stopped);
 
     ASSERT_TRUE(server.wait_for_requests(1, 1s));
     const auto requests = server.requests();
     ASSERT_EQ(requests.size(), 1u);
-    EXPECT_TRUE(requests[0].starts_with("POST /nacos/v3/auth/user/login HTTP/1.1\r\n"));
+    EXPECT_TRUE(requests[0].starts_with("POST /nacos/v1/auth/users/login HTTP/1.1\r\n"));
     EXPECT_NE(requests[0].find("content-type: application/x-www-form-urlencoded\r\n"), std::string::npos);
     EXPECT_NE(requests[0].find("connection: close\r\n"), std::string::npos);
     EXPECT_TRUE(requests[0].ends_with("username=user+name&password=p%40+ss%26"));
 }
 
-TEST(NacosClientTest, AutoFallsBackFromV3ToLegacyV1) {
+TEST(NacosClientTest, RetriesOnlyTheNacos2LoginEndpoint) {
     ScriptedHttpServer server({
             ServerStep{.status = 404, .body = "{}"},
             ServerStep{.body = R"({"accessToken":"legacy-token","tokenTtl":30})"},
@@ -437,34 +500,40 @@ TEST(NacosClientTest, AutoFallsBackFromV3ToLegacyV1) {
     ASSERT_TRUE(server.valid());
 
     fiber::event::EventLoopGroup group(1);
-    auto client_result =
-            NacosClient::create(group.at(0), make_config(server.port(), fiber::nacos::NacosAuthApiVersion::Auto));
+    fiber::nacos::NacosClientOptions options;
+    options.retry_initial_delay = 20ms;
+    options.retry_max_delay = 20ms;
+    auto client_result = NacosClient::create(group.at(0), make_config(server.port()), options);
     ASSERT_TRUE(client_result.has_value());
     std::unique_ptr<NacosClient> client = std::move(*client_result);
     auto subscriber = client->subscribe_auth();
-    std::promise<SnapshotOutcome> promise;
+    std::promise<AuthOutcome> promise;
     auto future = promise.get_future();
 
     group.start();
     fiber::async::spawn(group.at(0), [&]() {
-        return collect_states_and_shutdown(client.get(), &subscriber, {NacosAuthState::Ready}, &promise);
+        return collect_auth_and_shutdown(client.get(), &subscriber,
+                                         {NacosAuthAccessKind::InitialFailed, NacosAuthAccessKind::Present}, &promise);
     });
 
     ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
-    SnapshotOutcome outcome = future.get();
+    AuthOutcome outcome = future.get();
     group.join();
 
     ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
-    EXPECT_EQ(outcome.snapshots[0].access_token, "legacy-token");
+    ASSERT_EQ(outcome.events.size(), 3u);
+    EXPECT_TRUE(outcome.events[0].access_token.empty());
+    EXPECT_EQ(outcome.events[1].access_token, "legacy-token");
     ASSERT_TRUE(server.wait_for_requests(2, 1s));
     const auto requests = server.requests();
     ASSERT_EQ(requests.size(), 2u);
-    EXPECT_TRUE(requests[0].starts_with("POST /nacos/v3/auth/user/login HTTP/1.1\r\n"));
+    EXPECT_TRUE(requests[0].starts_with("POST /nacos/v1/auth/users/login HTTP/1.1\r\n"));
     EXPECT_TRUE(requests[1].starts_with("POST /nacos/v1/auth/users/login HTTP/1.1\r\n"));
 }
 
 TEST(NacosClientTest, RetriesInitialFailureAndRecovers) {
     ScriptedHttpServer server({
+            ServerStep{.status = 500, .body = "{}"},
             ServerStep{.status = 500, .body = "{}"},
             ServerStep{.body = R"({"accessToken":"recovered","tokenTtl":30})"},
     });
@@ -479,27 +548,27 @@ TEST(NacosClientTest, RetriesInitialFailureAndRecovers) {
     ASSERT_TRUE(client_result.has_value());
     std::unique_ptr<NacosClient> client = std::move(*client_result);
     auto subscriber = client->subscribe_auth();
-    std::promise<SnapshotOutcome> promise;
+    std::promise<AuthOutcome> promise;
     auto future = promise.get_future();
 
     group.start();
     fiber::async::spawn(group.at(0), [&]() {
-        return collect_states_and_shutdown(client.get(), &subscriber,
-                                           {NacosAuthState::Unavailable, NacosAuthState::Ready}, &promise);
+        return collect_auth_and_shutdown(client.get(), &subscriber,
+                                         {NacosAuthAccessKind::InitialFailed, NacosAuthAccessKind::Present}, &promise);
     });
 
     ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
-    SnapshotOutcome outcome = future.get();
+    AuthOutcome outcome = future.get();
     group.join();
 
     ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
-    ASSERT_GE(outcome.snapshots.size(), 3u);
-    EXPECT_EQ(outcome.snapshots[0].last_error.code, NacosAuthErrorCode::HttpStatus);
-    EXPECT_EQ(outcome.snapshots[0].last_error.http_status, 500);
-    EXPECT_EQ(outcome.snapshots[1].access_token, "recovered");
+    ASSERT_EQ(outcome.events.size(), 3u);
+    EXPECT_EQ(outcome.events[0].kind, NacosAuthAccessKind::InitialFailed);
+    EXPECT_EQ(outcome.events[1].access_token, "recovered");
+    EXPECT_TRUE(server.wait_for_requests(3, 1s));
 }
 
-TEST(NacosClientTest, RefreshFailureKeepsTokenUntilExpiry) {
+TEST(NacosClientTest, RefreshFailureKeepsLastPublishedToken) {
     ScriptedHttpServer server({
             ServerStep{.body = R"({"accessToken":"short-lived","tokenTtl":1})"},
             ServerStep{.status = 500, .body = "{}"},
@@ -507,121 +576,60 @@ TEST(NacosClientTest, RefreshFailureKeepsTokenUntilExpiry) {
     ASSERT_TRUE(server.valid());
 
     fiber::nacos::NacosClientOptions options;
-    options.refresh_percent = 20;
-    options.min_refresh_delay = 20ms;
-    options.retry_initial_delay = 2s;
-    options.retry_max_delay = 2s;
-
     fiber::event::EventLoopGroup group(1);
     auto client_result = NacosClient::create(group.at(0), make_config(server.port()), options);
     ASSERT_TRUE(client_result.has_value());
     std::unique_ptr<NacosClient> client = std::move(*client_result);
     auto subscriber = client->subscribe_auth();
-    std::promise<SnapshotOutcome> promise;
+    std::promise<AuthOutcome> promise;
     auto future = promise.get_future();
 
     group.start();
-    fiber::async::spawn(group.at(0), [&]() {
-        return collect_states_and_shutdown(client.get(), &subscriber,
-                                           {NacosAuthState::Ready, NacosAuthState::Ready, NacosAuthState::Unavailable},
-                                           &promise);
-    });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return observe_refresh_failure_and_shutdown(client.get(), &subscriber, &promise); });
 
-    ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
-    SnapshotOutcome outcome = future.get();
+    ASSERT_EQ(future.wait_for(7s), std::future_status::ready);
+    AuthOutcome outcome = future.get();
     group.join();
 
     ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
-    ASSERT_EQ(outcome.snapshots.size(), 4u);
-    EXPECT_EQ(outcome.snapshots[0].access_token, "short-lived");
-    EXPECT_EQ(outcome.snapshots[1].state, NacosAuthState::Ready);
-    EXPECT_EQ(outcome.snapshots[1].access_token, "short-lived");
-    EXPECT_EQ(outcome.snapshots[1].last_error.code, NacosAuthErrorCode::HttpStatus);
-    EXPECT_EQ(outcome.snapshots[2].state, NacosAuthState::Unavailable);
-    EXPECT_TRUE(outcome.snapshots[2].access_token.empty());
-    EXPECT_EQ(outcome.snapshots[2].last_error.code, NacosAuthErrorCode::TokenExpired);
+    ASSERT_EQ(outcome.events.size(), 2u);
+    EXPECT_EQ(outcome.events[0].access_token, "short-lived");
+    EXPECT_EQ(outcome.events[1].access_token, "short-lived");
+    EXPECT_TRUE(server.wait_for_requests(2, 1s));
 }
 
-TEST(NacosClientTest, SuccessfulRefreshPublishesNewGeneration) {
+TEST(NacosClientTest, RefreshesAtJavaMinimumFiveSecondDelay) {
     ScriptedHttpServer server({
             ServerStep{.body = R"({"accessToken":"token-1","tokenTtl":1})"},
             ServerStep{.body = R"({"accessToken":"token-2","tokenTtl":30})"},
     });
     ASSERT_TRUE(server.valid());
 
-    fiber::nacos::NacosClientOptions options;
-    options.refresh_percent = 20;
-    options.min_refresh_delay = 20ms;
-
     fiber::event::EventLoopGroup group(1);
-    auto client_result = NacosClient::create(group.at(0), make_config(server.port()), options);
+    auto client_result = NacosClient::create(group.at(0), make_config(server.port()));
     ASSERT_TRUE(client_result.has_value());
     std::unique_ptr<NacosClient> client = std::move(*client_result);
     auto subscriber = client->subscribe_auth();
-    std::promise<SnapshotOutcome> promise;
+    std::promise<AuthOutcome> promise;
     auto future = promise.get_future();
 
     group.start();
     fiber::async::spawn(group.at(0), [&]() {
-        return collect_states_and_shutdown(client.get(), &subscriber, {NacosAuthState::Ready, NacosAuthState::Ready},
-                                           &promise);
+        return collect_auth_and_shutdown(client.get(), &subscriber,
+                                         {NacosAuthAccessKind::Present, NacosAuthAccessKind::Present}, &promise);
     });
 
-    ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
-    SnapshotOutcome outcome = future.get();
+    ASSERT_EQ(future.wait_for(7s), std::future_status::ready);
+    AuthOutcome outcome = future.get();
     group.join();
 
     ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
-    ASSERT_EQ(outcome.snapshots.size(), 3u);
-    EXPECT_EQ(outcome.snapshots[0].access_token, "token-1");
-    EXPECT_EQ(outcome.snapshots[0].generation, 1u);
-    EXPECT_EQ(outcome.snapshots[1].access_token, "token-2");
-    EXPECT_EQ(outcome.snapshots[1].generation, 2u);
-}
-
-TEST(NacosClientTest, BlockedRefreshExpiresTokenWithinRemainingLifetime) {
-    ScriptedHttpServer server({
-            ServerStep{.body = R"({"accessToken":"short-lived","tokenTtl":1})"},
-            ServerStep{.hold_until_peer_close = true},
-    });
-    ASSERT_TRUE(server.valid());
-
-    fiber::nacos::NacosClientOptions options;
-    options.refresh_percent = 20;
-    options.min_refresh_delay = 20ms;
-    options.request_timeout = 10s;
-    options.retry_initial_delay = 2s;
-    options.retry_max_delay = 2s;
-
-    fiber::event::EventLoopGroup group(1);
-    auto client_result = NacosClient::create(group.at(0), make_config(server.port()), options);
-    ASSERT_TRUE(client_result.has_value());
-    std::unique_ptr<NacosClient> client = std::move(*client_result);
-    auto subscriber = client->subscribe_auth();
-    std::promise<SnapshotOutcome> promise;
-    auto future = promise.get_future();
-
-    const auto started_at = std::chrono::steady_clock::now();
-    group.start();
-    fiber::async::spawn(group.at(0), [&]() {
-        return collect_states_and_shutdown(client.get(), &subscriber,
-                                           {NacosAuthState::Ready, NacosAuthState::Unavailable}, &promise);
-    });
-
-    ASSERT_EQ(future.wait_for(3s), std::future_status::ready);
-    SnapshotOutcome outcome = future.get();
-    const auto elapsed = std::chrono::steady_clock::now() - started_at;
-    group.join();
-
-    ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
-    ASSERT_EQ(outcome.snapshots.size(), 3u);
-    EXPECT_EQ(outcome.snapshots[0].access_token, "short-lived");
-    EXPECT_EQ(outcome.snapshots[1].state, NacosAuthState::Unavailable);
-    EXPECT_TRUE(outcome.snapshots[1].access_token.empty());
-    EXPECT_EQ(outcome.snapshots[1].last_error.code, NacosAuthErrorCode::TokenExpired);
-    EXPECT_LT(elapsed, 2s);
-    ASSERT_TRUE(server.wait_for_requests(2, 1s));
-    EXPECT_TRUE(server.wait_for_peer_close(1s));
+    ASSERT_EQ(outcome.events.size(), 3u);
+    ASSERT_EQ(outcome.elapsed.size(), 2u);
+    EXPECT_EQ(outcome.events[0].access_token, "token-1");
+    EXPECT_EQ(outcome.events[1].access_token, "token-2");
+    EXPECT_GE(outcome.elapsed[1], 4500ms);
 }
 
 TEST(NacosClientTest, FallsBackAcrossConfiguredIpAddresses) {
@@ -631,77 +639,85 @@ TEST(NacosClientTest, FallsBackAcrossConfiguredIpAddresses) {
     ASSERT_TRUE(server.valid());
 
     std::vector<fiber::net::IpAddress> ips;
-    ips.push_back(parse_ip("127.0.0.2"));
-    ips.push_back(parse_ip("127.0.0.1"));
+    fiber::net::IpAddress first;
+    fiber::net::IpAddress second;
+    ASSERT_TRUE(fiber::net::IpAddress::parse("127.0.0.2", first));
+    ASSERT_TRUE(fiber::net::IpAddress::parse("127.0.0.1", second));
+    ips.push_back(first);
+    ips.push_back(second);
 
     fiber::event::EventLoopGroup group(1);
-    auto client_result = NacosClient::create(
-            group.at(0), make_config(server.port(), fiber::nacos::NacosAuthApiVersion::V3, std::move(ips)));
+    auto client_result = NacosClient::create(group.at(0), make_config(server.port(), std::move(ips)));
     ASSERT_TRUE(client_result.has_value());
     std::unique_ptr<NacosClient> client = std::move(*client_result);
     auto subscriber = client->subscribe_auth();
-    std::promise<SnapshotOutcome> promise;
+    std::promise<AuthOutcome> promise;
     auto future = promise.get_future();
 
     group.start();
     fiber::async::spawn(group.at(0), [&]() {
-        return collect_states_and_shutdown(client.get(), &subscriber, {NacosAuthState::Ready}, &promise);
+        return collect_auth_and_shutdown(client.get(), &subscriber, {NacosAuthAccessKind::Present}, &promise);
     });
 
     ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
-    SnapshotOutcome outcome = future.get();
+    AuthOutcome outcome = future.get();
     group.join();
 
     ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
-    EXPECT_EQ(outcome.snapshots[0].access_token, "fallback-token");
+    EXPECT_EQ(outcome.events[0].access_token, "fallback-token");
     ASSERT_TRUE(server.wait_for_requests(1, 1s));
 }
 
-TEST(NacosClientTest, ReportsInvalidLoginResponses) {
+TEST(NacosClientTest, RetriesInvalidLoginResponses) {
     struct TestCase {
         std::string body;
         std::size_t max_response_bytes = 64 * 1024;
-        NacosAuthErrorCode expected_error = NacosAuthErrorCode::InvalidJson;
     };
 
     const std::vector<TestCase> cases{
-            TestCase{.body = "{bad", .expected_error = NacosAuthErrorCode::InvalidJson},
-            TestCase{.body = R"({"tokenTtl":30})", .expected_error = NacosAuthErrorCode::MissingAccessToken},
-            TestCase{.body = R"({"accessToken":"token","tokenTtl":0})",
-                     .expected_error = NacosAuthErrorCode::InvalidTokenTtl},
-            TestCase{.body = R"({"accessToken":"too-long","tokenTtl":30})",
-                     .max_response_bytes = 8,
-                     .expected_error = NacosAuthErrorCode::ResponseTooLarge},
+            TestCase{.body = "{bad"},
+            TestCase{.body = R"({"tokenTtl":30})"},
+            TestCase{.body = R"({"accessToken":"token","tokenTtl":0})"},
+            TestCase{.body = std::string(80, 'x'), .max_response_bytes = 64},
     };
 
     for (const TestCase &test_case: cases) {
-        SCOPED_TRACE(static_cast<int>(test_case.expected_error));
-        ScriptedHttpServer server({ServerStep{.body = test_case.body}});
+        SCOPED_TRACE(test_case.body);
+        ScriptedHttpServer server({
+                ServerStep{.body = test_case.body},
+                ServerStep{.body = R"({"accessToken":"recovered","tokenTtl":30})"},
+        });
         ASSERT_TRUE(server.valid());
 
         fiber::nacos::NacosClientOptions options;
         options.max_auth_response_bytes = test_case.max_response_bytes;
+        options.retry_initial_delay = 20ms;
+        options.retry_max_delay = 20ms;
 
         fiber::event::EventLoopGroup group(1);
         auto client_result = NacosClient::create(group.at(0), make_config(server.port()), options);
         ASSERT_TRUE(client_result.has_value());
         std::unique_ptr<NacosClient> client = std::move(*client_result);
         auto subscriber = client->subscribe_auth();
-        std::promise<SnapshotOutcome> promise;
+        std::promise<AuthOutcome> promise;
         auto future = promise.get_future();
 
         group.start();
         fiber::async::spawn(group.at(0), [&]() {
-            return collect_states_and_shutdown(client.get(), &subscriber, {NacosAuthState::Unavailable}, &promise);
+            return collect_auth_and_shutdown(client.get(), &subscriber,
+                                             {NacosAuthAccessKind::InitialFailed, NacosAuthAccessKind::Present},
+                                             &promise);
         });
 
         ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
-        SnapshotOutcome outcome = future.get();
+        AuthOutcome outcome = future.get();
         group.join();
 
         ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
-        ASSERT_EQ(outcome.snapshots.size(), 2u);
-        EXPECT_EQ(outcome.snapshots[0].last_error.code, test_case.expected_error);
+        ASSERT_EQ(outcome.events.size(), 3u);
+        EXPECT_EQ(outcome.events[0].kind, NacosAuthAccessKind::InitialFailed);
+        EXPECT_EQ(outcome.events[1].access_token, "recovered");
+        EXPECT_TRUE(server.wait_for_requests(2, 1s));
     }
 }
 
@@ -711,19 +727,19 @@ TEST(NacosClientTest, ShutdownBeforeStartPublishesStopped) {
     ASSERT_TRUE(client_result.has_value());
     std::unique_ptr<NacosClient> client = std::move(*client_result);
     auto subscriber = client->subscribe_auth();
-    std::promise<SnapshotOutcome> promise;
+    std::promise<AuthOutcome> promise;
     auto future = promise.get_future();
 
     group.start();
     fiber::async::spawn(group.at(0), [&]() { return shutdown_client(client.get(), &subscriber, &promise); });
 
     ASSERT_EQ(future.wait_for(2s), std::future_status::ready);
-    SnapshotOutcome outcome = future.get();
+    AuthOutcome outcome = future.get();
     group.join();
 
     ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
-    ASSERT_EQ(outcome.snapshots.size(), 1u);
-    EXPECT_EQ(outcome.snapshots[0].state, NacosAuthState::Stopped);
+    ASSERT_EQ(outcome.events.size(), 1u);
+    EXPECT_EQ(outcome.events[0].kind, NacosAuthAccessKind::Stopped);
 }
 
 TEST(NacosClientTest, ShutdownWaitsOnlyForCurrentBoundedHttpOperation) {
@@ -749,19 +765,19 @@ TEST(NacosClientTest, ShutdownWaitsOnlyForCurrentBoundedHttpOperation) {
     ASSERT_EQ(start_future.get(), fiber::common::IoErr::None);
     ASSERT_TRUE(server.wait_for_requests(1, 2s));
 
-    std::promise<SnapshotOutcome> shutdown_promise;
+    std::promise<AuthOutcome> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
     const auto started_at = std::chrono::steady_clock::now();
     fiber::async::spawn(group.at(0), [&]() { return shutdown_client(client.get(), &subscriber, &shutdown_promise); });
 
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
-    SnapshotOutcome outcome = shutdown_future.get();
+    AuthOutcome outcome = shutdown_future.get();
     const auto elapsed = std::chrono::steady_clock::now() - started_at;
     group.join();
 
     EXPECT_EQ(outcome.error, fiber::common::IoErr::None);
-    ASSERT_EQ(outcome.snapshots.size(), 1u);
-    EXPECT_EQ(outcome.snapshots[0].state, NacosAuthState::Stopped);
+    ASSERT_EQ(outcome.events.size(), 1u);
+    EXPECT_EQ(outcome.events[0].kind, NacosAuthAccessKind::Stopped);
     EXPECT_LT(elapsed, 1s);
     EXPECT_TRUE(server.wait_for_peer_close(1s));
 }
@@ -769,7 +785,7 @@ TEST(NacosClientTest, ShutdownWaitsOnlyForCurrentBoundedHttpOperation) {
 TEST(NacosClientTest, RejectsInvalidOptions) {
     fiber::event::EventLoop loop;
     fiber::nacos::NacosClientOptions options;
-    options.refresh_percent = 100;
+    options.retry_initial_delay = 0ms;
     auto result = NacosClient::create(loop, make_config(8848), options);
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, fiber::nacos::NacosCreateErrorCode::InvalidOptions);

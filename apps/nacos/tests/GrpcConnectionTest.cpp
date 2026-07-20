@@ -192,6 +192,9 @@ public:
     [[nodiscard]] bool refreshed_token_seen() const noexcept {
         return refreshed_token_seen_.load(std::memory_order_acquire);
     }
+    [[nodiscard]] bool initial_token_omitted() const noexcept {
+        return initial_token_omitted_.load(std::memory_order_acquire);
+    }
 
 private:
     nacos_detail::NacosPayloadMetadata server_metadata() const noexcept {
@@ -214,6 +217,9 @@ private:
             co_return;
         }
         auto headers = request->metadata().headers();
+        if (view->type == dto::req::ServerCheckRequest::kTypeName && !headers.contains("accessToken")) {
+            initial_token_omitted_.store(true, std::memory_order_release);
+        }
         if (view->type == dto::req::HealthCheckRequest::kTypeName) {
             const auto token = headers.find("accessToken");
             if (token != headers.end() && token->second == "token-2") {
@@ -351,6 +357,7 @@ private:
     std::atomic<bool> unknown_error_acked_{false};
     std::atomic<bool> detection_acked_{false};
     std::atomic<bool> refreshed_token_seen_{false};
+    std::atomic<bool> initial_token_omitted_{false};
 };
 
 struct ConnectionResult {
@@ -360,6 +367,7 @@ struct ConnectionResult {
     bool unknown_error_acked = false;
     bool detection_acked = false;
     bool refreshed_token_seen = false;
+    bool initial_token_omitted = false;
 };
 
 DetachedTask drive_connection(nacos_detail::NacosGrpcConnection *connection, fiber::async::WaitGroup *group) {
@@ -369,19 +377,15 @@ DetachedTask drive_connection(nacos_detail::NacosGrpcConnection *connection, fib
 
 DetachedTask run_connection_case(fiber::event::EventLoop *loop, ScriptedNacosGrpcServer *server,
                                  fiber::nacos::NacosClientConfig config, fiber::nacos::NacosClientOptions options,
-                                 std::uint64_t minimum_generation,
+                                 std::uint64_t minimum_generation, bool authentication_configured,
                                  std::shared_ptr<std::promise<ConnectionResult>> finished) {
     ConnectionResult result;
     nacos_detail::NacosGrpcConnection connection(*loop, config, options);
     auto states = connection.subscribe_state();
     std::uint64_t state_version = states.current().version;
 
-    fiber::nacos::NacosAuthSnapshot auth;
-    auth.state = fiber::nacos::NacosAuthState::Ready;
-    auth.access_token = "token-1";
-    auth.expires_at = loop->now() + 1min;
-    auth.generation = 1;
-    connection.notify_auth(auth);
+    connection.notify_auth(authentication_configured ? std::optional<std::string>("token-1")
+                                                     : std::optional<std::string>(std::string{}));
 
     fiber::async::WaitGroup run_group;
     run_group.add();
@@ -405,11 +409,11 @@ DetachedTask run_connection_case(fiber::event::EventLoop *loop, ScriptedNacosGrp
     }
 
     if (result.ready) {
-        auth.access_token = "token-2";
-        auth.generation = 2;
-        connection.notify_auth(auth);
+        if (authentication_configured) {
+            connection.notify_auth(std::string("token-2"));
+        }
         for (int i = 0; i < 200 && (!server->unknown_error_acked() || !server->detection_acked() ||
-                                    !server->refreshed_token_seen());
+                                    (authentication_configured && !server->refreshed_token_seen()));
              ++i) {
             co_await fiber::async::sleep(5ms);
         }
@@ -423,10 +427,12 @@ DetachedTask run_connection_case(fiber::event::EventLoop *loop, ScriptedNacosGrp
     result.unknown_error_acked = server->unknown_error_acked();
     result.detection_acked = server->detection_acked();
     result.refreshed_token_seen = server->refreshed_token_seen();
+    result.initial_token_omitted = server->initial_token_omitted();
     finished->set_value(result);
 }
 
-ConnectionResult execute_connection_case(bool support_ability_negotiation, bool reconnect_once = false) {
+ConnectionResult execute_connection_case(bool support_ability_negotiation, bool reconnect_once = false,
+                                         bool authentication_configured = true) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
@@ -440,8 +446,10 @@ ConnectionResult execute_connection_case(bool support_ability_negotiation, bool 
     fiber::nacos::NacosClientConfigParams params;
     params.server_ips.push_back(fiber::net::IpAddress::v4({127, 0, 0, 2}));
     params.server_ips.push_back(fiber::net::IpAddress::loopback_v4());
-    params.username = "nacos";
-    params.password = "nacos";
+    if (authentication_configured) {
+        params.username = "nacos";
+        params.password = "nacos";
+    }
     params.grpc_port = server->port();
     params.namespace_id = "namespace";
     params.tenant = "tenant";
@@ -462,9 +470,9 @@ ConnectionResult execute_connection_case(bool support_ability_negotiation, bool 
     auto client_finished = std::make_shared<std::promise<ConnectionResult>>();
     auto client_future = client_finished->get_future();
     fiber::async::spawn(group.at(0), [loop = &group.at(0), server_ptr = server.get(), config = std::move(*config),
-                                      options, reconnect_once, client_finished]() mutable {
+                                      options, reconnect_once, authentication_configured, client_finished]() mutable {
         return run_connection_case(loop, server_ptr, std::move(config), options, reconnect_once ? 2 : 1,
-                                   client_finished);
+                                   authentication_configured, client_finished);
     });
 
     ConnectionResult result;
@@ -518,6 +526,17 @@ TEST(NacosGrpcConnectionTest, ReconnectsAfterReadyBidirectionalStreamReset) {
     EXPECT_TRUE(result.refreshed_token_seen);
 }
 
+TEST(NacosGrpcConnectionTest, ConnectsWithoutConfiguredAuthenticationAndOmitsAccessToken) {
+    const ConnectionResult result = execute_connection_case(true, false, false);
+    EXPECT_TRUE(result.ready);
+    EXPECT_TRUE(result.stopped);
+    EXPECT_TRUE(result.setup_seen);
+    EXPECT_TRUE(result.unknown_error_acked);
+    EXPECT_TRUE(result.detection_acked);
+    EXPECT_FALSE(result.refreshed_token_seen);
+    EXPECT_TRUE(result.initial_token_omitted);
+}
+
 DetachedTask run_rnacos_interop(fiber::event::EventLoop *loop, fiber::nacos::NacosClientConfig config,
                                 fiber::nacos::NacosClientOptions options,
                                 std::shared_ptr<std::promise<ConnectionResult>> finished) {
@@ -526,11 +545,7 @@ DetachedTask run_rnacos_interop(fiber::event::EventLoop *loop, fiber::nacos::Nac
     auto states = connection.subscribe_state();
     std::uint64_t state_version = states.current().version;
 
-    fiber::nacos::NacosAuthSnapshot auth;
-    auth.state = fiber::nacos::NacosAuthState::Ready;
-    auth.access_token = "rnacos-integration-token";
-    auth.expires_at = loop->now() + 1min;
-    connection.notify_auth(auth);
+    connection.notify_auth(std::string{});
 
     fiber::async::WaitGroup run_group;
     run_group.add();
@@ -569,8 +584,6 @@ TEST(NacosGrpcConnectionTest, RnacosInteropWhenEnabled) {
 
     fiber::nacos::NacosClientConfigParams params;
     params.server_ips.push_back(fiber::net::IpAddress::loopback_v4());
-    params.username = "nacos";
-    params.password = "nacos";
     params.grpc_port = static_cast<std::uint16_t>(port);
     auto config = fiber::nacos::NacosClientConfig::create(std::move(params));
     ASSERT_TRUE(config.has_value());
