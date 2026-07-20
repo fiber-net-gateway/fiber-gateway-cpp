@@ -879,8 +879,9 @@ TEST(StealableHttp1ConnectionPoolSetTest, AbortBlockedReadBeforeReturningStolenC
     fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
         auto lease = co_await set.acquire(key);
         auto conn_result = co_await ensure_connected(lease, port);
-        home_ready_promise.set_value(conn_result.has_value());
+        const bool connected = conn_result.has_value();
         lease.reset();
+        home_ready_promise.set_value(connected);
         co_return;
     });
 
