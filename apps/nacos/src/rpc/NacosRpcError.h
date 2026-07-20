@@ -9,6 +9,7 @@
 namespace fiber::nacos::detail {
 
 enum class NacosRpcErrorCode : std::uint8_t {
+    InvalidState,
     AuthenticationUnavailable,
     Transport,
     GrpcStatus,
