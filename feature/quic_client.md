@@ -4,9 +4,9 @@
 
 ## 0. 落地状态（2026-07-20）
 
-本方案已经落地到 QUIC transport 层，HTTP/3 client 仍按原定边界留到后续阶段。实际实现保持
-“一个角色中立的 UDP endpoint + `QuicClient` 主动建连编排层”的核心结构，没有增加
-send-only endpoint。
+本方案已经落地到 QUIC transport 层。后续 HTTP/3 client 也已基于该边界实现，详见
+[`http3_client.md`](http3_client.md)。两层实现保持“一个角色中立的 UDP endpoint +
+`QuicClient` 主动建连编排层”的核心结构，没有增加 send-only endpoint。
 
 已完成：
 
@@ -926,15 +926,14 @@ create connection
 - `temp/nginx-1.31.3/src/event/quic/ngx_event_quic_ssl.c`
 - `temp/nginx-install/sbin/nginx`
 
-Nginx 用于验证：
+QUIC transport 阶段用 Nginx 验证：
 
 - UDP endpoint 与服务端 Initial/Retry 行为。
 - QUIC/TLS handshake 和 transport close。
 - server transport parameters、ALPN 和证书互操作。
 
-由于 Nginx 是 HTTP/3 服务端，而本阶段没有 HTTP/3 client，互操作测试只验证 QUIC/TLS
-握手和关闭，不把“未发送 H3 SETTINGS 后的应用超时”当作 QUIC transport 失败。客户端
-特有语义仍以 RFC/BoringSSL 和 loopback 测试为主要依据。
+HTTP/3 client 落地后，`Http3ClientTest.NginxInterop` 又把互操作范围扩展到 H3 SETTINGS、
+request stream、QPACK 响应头和响应体；具体命令和边界见 `feature/http3_client.md`。
 
 ## 18. 实施阶段
 
@@ -1035,3 +1034,6 @@ Nginx 用于验证：
 本次使用仓库固定的 Nginx 1.31.3 源码核对 endpoint、TLS callback 和 QUIC 服务端行为，
 未把 live Nginx HTTP/3 互操作作为本阶段验收项：当前只实现 QUIC transport client，尚未实现
 发送 H3 SETTINGS 所需的 HTTP/3 client 层。
+
+后续 `feature/http3_client.md` 所述 HTTP/3 client 已完成，并已新增 live Nginx 1.31.3
+SETTINGS/request/response 互操作测试；本节保留的是 QUIC transport 阶段当时的验收记录。

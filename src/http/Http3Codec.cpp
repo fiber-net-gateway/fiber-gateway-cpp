@@ -127,6 +127,61 @@ void Http3PayloadSkipParser::reset() noexcept {
     started_ = false;
 }
 
+void Http3FrameVarintParser::start(std::uint64_t payload_length) noexcept {
+    reset();
+    payload_length_ = payload_length;
+    started_ = true;
+}
+
+Http3ParseStatus Http3FrameVarintParser::parse(mem::IoBufChain &in) noexcept {
+    if (!started_) {
+        return fail();
+    }
+    if (complete_) {
+        return Http3ParseStatus::Done;
+    }
+    if (payload_length_ == 0 || payload_length_ > 8) {
+        return fail();
+    }
+
+    while (read_len_ < payload_length_) {
+        std::uint8_t byte = 0;
+        if (!consume_byte(in, byte)) {
+            return Http3ParseStatus::NeedMore;
+        }
+        if (read_len_ == 0) {
+            target_len_ = static_cast<std::uint8_t>(1U << (byte >> 6U));
+            if (target_len_ != payload_length_) {
+                return fail();
+            }
+            value_ = byte & 0x3fU;
+        } else {
+            value_ = (value_ << 8U) | byte;
+        }
+        ++read_len_;
+    }
+
+    complete_ = true;
+    return Http3ParseStatus::Done;
+}
+
+void Http3FrameVarintParser::reset() noexcept {
+    value_ = 0;
+    payload_length_ = 0;
+    error_ = {.h3_error = Http3ErrorCode::FrameError};
+    target_len_ = 0;
+    read_len_ = 0;
+    started_ = false;
+    complete_ = false;
+}
+
+Http3ParseStatus Http3FrameVarintParser::fail(common::IoErr io_error) noexcept {
+    error_ = {.h3_error = Http3ErrorCode::FrameError, .io_error = io_error};
+    started_ = true;
+    complete_ = false;
+    return Http3ParseStatus::Error;
+}
+
 void Http3SettingsParser::start(std::uint64_t payload_length) noexcept {
     reset();
     remaining_ = payload_length;

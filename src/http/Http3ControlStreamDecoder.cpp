@@ -47,6 +47,16 @@ Http3ParseStatus Http3ControlStreamDecoder::parse(mem::IoBufChain &in, Http3Cont
                     break;
                 }
 
+                if (header_.type == static_cast<std::uint64_t>(Http3FrameType::Goaway) ||
+                    header_.type == static_cast<std::uint64_t>(Http3FrameType::MaxPushId)) {
+                    varint_parser_.start(header_.length);
+                    varint_event_type_ = header_.type == static_cast<std::uint64_t>(Http3FrameType::Goaway)
+                                                 ? Http3ControlStreamEventType::Goaway
+                                                 : Http3ControlStreamEventType::MaxPushId;
+                    state_ = State::Varint;
+                    break;
+                }
+
                 skip_parser_.start(header_.length);
                 state_ = State::Skip;
                 break;
@@ -70,6 +80,25 @@ Http3ParseStatus Http3ControlStreamDecoder::parse(mem::IoBufChain &in, Http3Cont
                 return Http3ParseStatus::Done;
             }
 
+            case State::Varint: {
+                Http3ParseStatus status = varint_parser_.parse(in);
+                if (status == Http3ParseStatus::Error) {
+                    error_ = varint_parser_.error();
+                    state_ = State::Error;
+                    return Http3ParseStatus::Error;
+                }
+                if (status != Http3ParseStatus::Done) {
+                    return status;
+                }
+
+                event.type = varint_event_type_;
+                event.id = varint_parser_.value();
+                varint_parser_.reset();
+                varint_event_type_ = Http3ControlStreamEventType::None;
+                state_ = State::FrameHeader;
+                return Http3ParseStatus::Done;
+            }
+
             case State::Skip: {
                 Http3ParseStatus status = skip_parser_.parse(in);
                 if (status != Http3ParseStatus::Done) {
@@ -89,10 +118,12 @@ Http3ParseStatus Http3ControlStreamDecoder::parse(mem::IoBufChain &in, Http3Cont
 void Http3ControlStreamDecoder::reset() noexcept {
     frame_header_parser_.reset();
     settings_parser_.reset();
+    varint_parser_.reset();
     skip_parser_.reset();
     header_ = {};
     error_ = {};
     state_ = State::FrameHeader;
+    varint_event_type_ = Http3ControlStreamEventType::None;
     first_frame_ = true;
 }
 

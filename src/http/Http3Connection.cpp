@@ -6,6 +6,7 @@
 #include <new>
 #include <utility>
 
+#include "../async/Timeout.h"
 #include "../common/Assert.h"
 #include "../common/mem/IoBufChain.h"
 #include "Http3Codec.h"
@@ -36,6 +37,9 @@ Http3Connection::Http3Connection(quic::QuicConnection &quic, const Options &opti
 Http3Connection::~Http3Connection() {
     FIBER_ASSERT(peer_reader_group_.empty());
     FIBER_ASSERT(peer_readers_.empty());
+    FIBER_ASSERT(client_request_group_.empty());
+    FIBER_ASSERT(client_requests_.empty());
+    FIBER_ASSERT(control_task_group_.empty());
 }
 
 const quic::QuicConnection::Ops &Http3Connection::quic_ops() noexcept {
@@ -69,8 +73,29 @@ void Http3Connection::on_peer_stream_attached(void *owner, quic::QuicStream &str
     conn->handle_peer_stream_attached(stream);
 }
 
-async::Task<common::IoResult<void>> Http3Connection::start() noexcept {
+common::IoResult<void> Http3Connection::prepare() noexcept {
     if (state_ != Http3ConnectionState::Init) {
+        return std::unexpected(common::IoErr::Already);
+    }
+    if (quic_.closing()) {
+        return std::unexpected(common::IoErr::Canceled);
+    }
+    auto ops_set = quic_.set_app_ops(this, quic_ops());
+    if (!ops_set) {
+        return std::unexpected(ops_set.error());
+    }
+    state_ = Http3ConnectionState::Prepared;
+    return {};
+}
+
+async::Task<common::IoResult<void>> Http3Connection::start() noexcept {
+    if (state_ == Http3ConnectionState::Init) {
+        auto prepared = prepare();
+        if (!prepared) {
+            co_return std::unexpected(prepared.error());
+        }
+    }
+    if (state_ != Http3ConnectionState::Prepared) {
         co_return std::unexpected(common::IoErr::Already);
     }
     if (quic_.closing()) {
@@ -82,11 +107,7 @@ async::Task<common::IoResult<void>> Http3Connection::start() noexcept {
         co_return std::unexpected(preface.error());
     }
 
-    auto ops_set = quic_.set_app_ops(this, quic_ops());
-    if (!ops_set) {
-        co_return std::unexpected(ops_set.error());
-    }
-    state_ = Http3ConnectionState::Running;
+    state_ = Http3ConnectionState::Starting;
 
     quic::QuicStream::Lease control_stream = create_owned_stream();
     if (!control_stream) {
@@ -114,11 +135,14 @@ async::Task<common::IoResult<void>> Http3Connection::start() noexcept {
         }
     }
 
+    if (state_ == Http3ConnectionState::Starting) {
+        state_ = Http3ConnectionState::Running;
+    }
     co_return common::IoResult<void>{};
 }
 
 common::IoResult<void> Http3Connection::apply_peer_settings(const Http3Settings &settings) noexcept {
-    if (closing()) {
+    if (state_ == Http3ConnectionState::Closing || state_ == Http3ConnectionState::Closed) {
         return std::unexpected(common::IoErr::Canceled);
     }
     if (peer_settings_received_) {
@@ -129,21 +153,50 @@ common::IoResult<void> Http3Connection::apply_peer_settings(const Http3Settings 
     return {};
 }
 
+common::IoResult<void> Http3Connection::register_client_request(Http3ClientRequestEntry &entry) noexcept {
+    if (!accepting_requests() || entry.link.linked() || entry.owner == nullptr || entry.on_rejected == nullptr ||
+        entry.on_connection_close == nullptr || entry.stream_id == quic::kQuicUnassignedStreamId ||
+        !quic::QuicStream::is_bidirectional_stream_id(entry.stream_id)) {
+        return std::unexpected(accepting_requests() ? common::IoErr::Invalid : common::IoErr::Canceled);
+    }
+    client_requests_.push_back(entry);
+    client_request_group_.add();
+    return {};
+}
+
+void Http3Connection::unregister_client_request(Http3ClientRequestEntry &entry) noexcept {
+    if (!entry.link.linked()) {
+        return;
+    }
+    client_requests_.erase(entry);
+    client_request_group_.done();
+}
+
 void Http3Connection::graceful_shutdown(Http3ErrorCode error) noexcept {
-    if (state_ == Http3ConnectionState::Closed) {
+    if (state_ == Http3ConnectionState::Closing || state_ == Http3ConnectionState::Closed ||
+        (state_ == Http3ConnectionState::Draining && (local_goaway_sent_ || !control_task_group_.empty()))) {
         return;
     }
     close_error_ = error;
     state_ = Http3ConnectionState::Draining;
-    stop_peer_readers(error);
+    if (role() != quic::QuicConnectionRole::Client || !local_control_stream_) {
+        close(error);
+        return;
+    }
+
+    event::EventLoop *loop = quic_.loop();
+    FIBER_ASSERT(loop != nullptr);
+    control_task_group_.add();
+    async::spawn(*loop, [this, error]() -> async::DetachedTask { return run_client_graceful_shutdown(error); });
 }
 
 void Http3Connection::close(Http3ErrorCode error) noexcept {
-    if (state_ == Http3ConnectionState::Closed) {
+    if (state_ == Http3ConnectionState::Closing || state_ == Http3ConnectionState::Closed) {
         return;
     }
     close_error_ = error;
     state_ = Http3ConnectionState::Closing;
+    detach_client_requests(error);
     stop_peer_readers(error);
     quic_.close_application(error_value(error));
 }
@@ -152,18 +205,19 @@ void Http3Connection::mark_closed() noexcept { state_ = Http3ConnectionState::Cl
 
 async::Task<void> Http3Connection::wait_closed() noexcept {
     co_await peer_reader_group_.join();
+    co_await control_task_group_.join();
     mark_closed();
 }
 
 void Http3Connection::handle_peer_stream_attached(quic::QuicStream &stream) noexcept {
-    if (closing() || state_ != Http3ConnectionState::Running) {
-        stream.close(error_value(Http3ErrorCode::RequestCancelled));
-        return;
-    }
-
     if (stream.bidirectional()) {
         if (role() == quic::QuicConnectionRole::Client) {
             close(Http3ErrorCode::StreamCreationError);
+            return;
+        }
+        if (state_ != Http3ConnectionState::Prepared && state_ != Http3ConnectionState::Starting &&
+            state_ != Http3ConnectionState::Running) {
+            stream.close(error_value(Http3ErrorCode::RequestRejected));
             return;
         }
         ServerHttp3Request *request = ServerHttp3Request::from_stream(stream);
@@ -177,6 +231,10 @@ void Http3Connection::handle_peer_stream_attached(quic::QuicStream &stream) noex
         return;
     }
 
+    if (state_ == Http3ConnectionState::Closing || state_ == Http3ConnectionState::Closed) {
+        stream.close(error_value(Http3ErrorCode::RequestCancelled));
+        return;
+    }
     start_peer_uni_reader(stream);
 }
 
@@ -237,6 +295,12 @@ async::DetachedTask Http3Connection::run_peer_uni_stream(quic::QuicStream::Lease
         }
     }
 
+    if (stream_type_parser.value() == static_cast<std::uint64_t>(Http3StreamType::Push)) {
+        close_from_reader(role() == quic::QuicConnectionRole::Client ? Http3ErrorCode::IdError
+                                                                     : Http3ErrorCode::StreamCreationError);
+        co_return;
+    }
+
     auto registered = register_peer_stream(reader, stream_type_parser.value());
     if (!registered) {
         if (registered.error() != common::IoErr::NotSupported) {
@@ -264,6 +328,16 @@ async::DetachedTask Http3Connection::run_peer_uni_stream(quic::QuicStream::Lease
                             close_from_reader(Http3ErrorCode::SettingsError);
                             co_return;
                         }
+                    } else if (event.type == Http3ControlStreamEventType::Goaway) {
+                        auto applied = apply_peer_goaway(event.id);
+                        if (!applied) {
+                            close_from_reader(Http3ErrorCode::IdError);
+                            co_return;
+                        }
+                    } else if (event.type == Http3ControlStreamEventType::MaxPushId &&
+                               role() == quic::QuicConnectionRole::Client) {
+                        close_from_reader(Http3ErrorCode::FrameUnexpected);
+                        co_return;
                     }
                     continue;
                 }
@@ -404,5 +478,72 @@ void Http3Connection::stop_peer_readers(Http3ErrorCode error) noexcept {
 }
 
 void Http3Connection::close_from_reader(Http3ErrorCode error) noexcept { close(error); }
+
+common::IoResult<void> Http3Connection::apply_peer_goaway(std::uint64_t id) noexcept {
+    if (role() != quic::QuicConnectionRole::Client) {
+        return {};
+    }
+    if ((id & 0x03U) != 0 || (peer_goaway_received_ && id > peer_goaway_id_)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    peer_goaway_received_ = true;
+    peer_goaway_id_ = id;
+    if (state_ != Http3ConnectionState::Closing && state_ != Http3ConnectionState::Closed) {
+        state_ = Http3ConnectionState::Draining;
+    }
+    reject_client_requests(id);
+    return {};
+}
+
+void Http3Connection::reject_client_requests(std::uint64_t goaway_id) noexcept {
+    Http3ClientRequestEntry *entry = client_requests_.front();
+    while (entry != nullptr) {
+        Http3ClientRequestEntry *next = client_requests_.next_of(*entry);
+        if (entry->stream_id >= goaway_id) {
+            client_requests_.erase(*entry);
+            client_request_group_.done();
+            entry->on_rejected(entry->owner, goaway_id);
+        }
+        entry = next;
+    }
+}
+
+void Http3Connection::detach_client_requests(Http3ErrorCode error) noexcept {
+    Http3ClientRequestEntry *entry = client_requests_.front();
+    while (entry != nullptr) {
+        Http3ClientRequestEntry *next = client_requests_.next_of(*entry);
+        client_requests_.erase(*entry);
+        client_request_group_.done();
+        entry->on_connection_close(entry->owner, error);
+        entry = next;
+    }
+}
+
+async::DetachedTask Http3Connection::run_client_graceful_shutdown(Http3ErrorCode error) noexcept {
+    auto frame = encode_http3_goaway_frame(0, quic_.recv_extent_pool());
+    if (!frame) {
+        close(Http3ErrorCode::InternalError);
+        control_task_group_.done();
+        co_return;
+    }
+
+    while (!frame->empty()) {
+        auto written = co_await local_control_stream_->write(*frame);
+        if (!written || (*written == 0 && !frame->empty())) {
+            close(Http3ErrorCode::ClosedCriticalStream);
+            control_task_group_.done();
+            co_return;
+        }
+    }
+    local_goaway_sent_ = true;
+
+    (void) co_await async::timeout_for([this]() { return client_request_group_.join(); }, options_.drain_timeout);
+    if (state_ == Http3ConnectionState::Draining) {
+        close(error);
+    }
+    control_task_group_.done();
+    co_return;
+}
 
 } // namespace fiber::http

@@ -106,3 +106,44 @@ TEST(Http3ControlStreamDecoderTest, DrainsUnknownFrameAfterSettings) {
     EXPECT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::NeedMore);
     EXPECT_EQ(chain.readable_bytes(), 0U);
 }
+
+TEST(Http3ControlStreamDecoderTest, ParsesGoawayAndMaxPushId) {
+    std::vector<std::uint8_t> bytes;
+    append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings));
+    std::vector<std::uint8_t> goaway_payload;
+    append_varint(goaway_payload, 12);
+    append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Goaway), goaway_payload);
+    std::vector<std::uint8_t> max_push_id_payload;
+    append_varint(max_push_id_payload, 7);
+    append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::MaxPushId), max_push_id_payload);
+
+    fiber::mem::IoBufNodePool pool;
+    fiber::mem::IoBufChain chain(pool);
+    append_chain(chain, bytes);
+
+    fiber::http::Http3ControlStreamDecoder decoder;
+    fiber::http::Http3ControlStreamEvent event;
+    ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
+    ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
+    EXPECT_EQ(event.type, fiber::http::Http3ControlStreamEventType::Goaway);
+    EXPECT_EQ(event.id, 12U);
+    ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
+    EXPECT_EQ(event.type, fiber::http::Http3ControlStreamEventType::MaxPushId);
+    EXPECT_EQ(event.id, 7U);
+}
+
+TEST(Http3ControlStreamDecoderTest, RejectsMalformedGoawayPayload) {
+    std::vector<std::uint8_t> bytes;
+    append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings));
+    append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Goaway), {0x00, 0x00});
+
+    fiber::mem::IoBufNodePool pool;
+    fiber::mem::IoBufChain chain(pool);
+    append_chain(chain, bytes);
+
+    fiber::http::Http3ControlStreamDecoder decoder;
+    fiber::http::Http3ControlStreamEvent event;
+    ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
+    ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Error);
+    EXPECT_EQ(decoder.error().h3_error, fiber::http::Http3ErrorCode::FrameError);
+}
