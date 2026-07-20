@@ -1,7 +1,6 @@
 #ifndef FIBER_NACOS_RPC_NACOS_RPC_H
 #define FIBER_NACOS_RPC_NACOS_RPC_H
 
-#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -10,7 +9,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <type_traits>
 
 #include <async/Spawn.h>
 #include <async/Task.h>
@@ -27,8 +25,7 @@
 #include <nacos_grpc_payload.pb.h>
 #include <net/IpAddress.h>
 
-#include "NacosPayloadCodec.h"
-#include "NacosRequestHandler.h"
+#include "NacosBiRequestHandler.h"
 
 namespace fiber::nacos::detail {
 
@@ -91,23 +88,9 @@ struct NacosRpcDependencies {
 
 // One independent Nacos gRPC connection. This class intentionally does not
 // reconnect or publish service-level state: its owner chooses an endpoint,
-// constructs a new instance, and must await shutdown() before destruction.
-// Every method and registered handler runs on the construction EventLoop.
+// constructs a new instance, and owns the run() task through completion. Every
+// method and registered handler runs on the construction EventLoop.
 class NacosRpc : public common::NonCopyable, public common::NonMovable {
-    struct HandlerEntry;
-
-    using ErasedHandler = void (*)() noexcept;
-    using InvokeHandler = std::expected<proto::Payload, NacosRpcError> (*)(
-            const HandlerEntry &entry, NacosRpc &rpc, const NacosPayloadView &payload, const proto::Metadata &metadata,
-            const NacosPayloadMetadata &outbound_metadata) noexcept;
-
-    struct HandlerEntry {
-        std::string_view type;
-        void *context = nullptr;
-        ErasedHandler handler = nullptr;
-        InvokeHandler invoke = nullptr;
-    };
-
     struct MetadataSnapshot {
         std::shared_ptr<const NacosAuthAccess> auth;
         NacosPayloadMetadata metadata;
@@ -133,46 +116,19 @@ class NacosRpc : public common::NonCopyable, public common::NonMovable {
     };
 
 public:
-    static constexpr std::size_t kMaxRequestHandlers = 16;
-
     NacosRpc(NacosClientImpl &owner, NacosRpcEndpoint endpoint, NacosRpcModule module);
     NacosRpc(NacosRpcDependencies dependencies, NacosRpcEndpoint endpoint, NacosRpcModule module);
     ~NacosRpc();
 
-    // Registration is allocation-free and is frozen by the first start(). A
-    // handler is synchronous/noexcept; it must not retain request/context views.
-    template<typename Request>
-        requires requires { typename NacosServerRequestTraits<Request>::Response; }
-    [[nodiscard]] std::expected<void, NacosHandlerRegistrationError>
-    add_request_handler(RequestHandler<Request> handler, void *context) noexcept {
-        if (state_ != NacosRpcState::Created || handlers_frozen_) {
-            return std::unexpected(NacosHandlerRegistrationError::Started);
-        }
-        if (!handler) {
-            return std::unexpected(NacosHandlerRegistrationError::InvalidHandler);
-        }
-        static_assert(std::is_base_of_v<dto::RequestBase, Request>);
-        static_assert(std::is_base_of_v<dto::ResponseBase, NacosServerResponse<Request>>);
-        for (std::size_t i = 0; i < handler_count_; ++i) {
-            if (handlers_[i].type == Request::kTypeName) {
-                return std::unexpected(NacosHandlerRegistrationError::DuplicateType);
-            }
-        }
-        if (handler_count_ == handlers_.size()) {
-            return std::unexpected(NacosHandlerRegistrationError::RegistryFull);
-        }
-        handlers_[handler_count_++] = HandlerEntry{
-                .type = Request::kTypeName,
-                .context = context,
-                .handler = reinterpret_cast<ErasedHandler>(handler),
-                .invoke = &invoke_registered_handler<Request>,
-        };
-        return {};
-    }
+    // Runs exactly one connection from authentication wait through complete
+    // gRPC teardown. handlers and all registered callback contexts must outlive
+    // this task and must not be modified before it returns.
+    [[nodiscard]] async::Task<NacosRpcCloseResult> run(const NacosBiRequestHandler &handlers) noexcept;
+    [[nodiscard]] async::Task<std::expected<void, NacosRpcError>> wait_ready() noexcept;
 
-    [[nodiscard]] async::Task<std::expected<void, NacosRpcError>> start() noexcept;
-    [[nodiscard]] async::Task<void> shutdown() noexcept;
-    [[nodiscard]] async::Task<NacosRpcCloseResult> wait_closed() noexcept;
+    // Requests stop without waiting. run() remains the completion barrier and
+    // performs all asynchronous transport teardown before returning.
+    void shutdown() noexcept;
 
     // Opens one unary /Request/request call on the owned HTTP/2 connection.
     // Authentication metadata is snapshotted for every invocation, so token
@@ -212,50 +168,19 @@ public:
     [[nodiscard]] const NacosRpcCloseResult &close_result() const noexcept { return close_result_; }
 
 private:
-    template<typename Request>
-    static std::expected<proto::Payload, NacosRpcError>
-    invoke_registered_handler(const HandlerEntry &entry, NacosRpc &rpc, const NacosPayloadView &payload,
-                              const proto::Metadata &metadata, const NacosPayloadMetadata &outbound_metadata) noexcept {
-        auto handler = reinterpret_cast<RequestHandler<Request>>(entry.handler);
-        FIBER_ASSERT(handler != nullptr);
-
-        mem::BufPool pool;
-        Request request;
-        auto parsed = parse_payload_json(payload, pool, request);
-        if (!parsed) {
-            return std::unexpected(std::move(parsed.error()));
-        }
-
-        NacosServerResponse<Request> response;
-        NacosServerRequestContext context(metadata, nacos_rpc_module_name(rpc.module_), pool);
-        auto handled = handler(entry.context, context, request, response);
-        if (!handled) {
-            dto::resp::ErrorResponse error_response;
-            error_response.result_code = handled.error().result_code;
-            error_response.error_code = handled.error().error_code;
-            if (!handled.error().message.empty()) {
-                error_response.message.set_present(std::string_view(handled.error().message).substr(0, 512));
-            }
-            error_response.request_id = request.request_id;
-            return encode_payload(error_response, outbound_metadata, rpc.options_->max_inbound_grpc_message_bytes);
-        }
-
-        response.request_id = request.request_id;
-        return encode_payload(response, outbound_metadata, rpc.options_->max_inbound_grpc_message_bytes);
-    }
-
     [[nodiscard]] async::Task<std::expected<proto::Payload, NacosRpcError>>
     request_payload(const proto::Payload &request, mem::BufPool &pool, std::chrono::milliseconds timeout) noexcept;
-    [[nodiscard]] async::Task<void> shutdown_client() noexcept;
-    [[nodiscard]] async::Task<std::expected<void, NacosRpcError>> finish_start_error(NacosRpcError error) noexcept;
-    [[nodiscard]] async::DetachedTask run_server_requests() noexcept;
+    [[nodiscard]] async::Task<NacosRpcCloseResult> finish_run() noexcept;
+    [[nodiscard]] async::Task<NacosRpcCloseResult> finish_run_error(NacosRpcError error) noexcept;
+    [[nodiscard]] async::Task<void> run_server_requests(const NacosBiRequestHandler &handlers) noexcept;
     [[nodiscard]] async::DetachedTask run_heartbeat() noexcept;
-    [[nodiscard]] std::expected<InboundAction, NacosRpcError> dispatch_inbound(const proto::Payload &payload) noexcept;
+    [[nodiscard]] async::Task<std::expected<InboundAction, NacosRpcError>>
+    dispatch_inbound(const NacosBiRequestHandler &handlers, const proto::Payload &payload) noexcept;
     [[nodiscard]] std::expected<MetadataSnapshot, NacosRpcError> current_metadata() const noexcept;
-    [[nodiscard]] const HandlerEntry *find_handler(std::string_view type) const noexcept;
     void begin_stop(NacosRpcCloseKind kind, const NacosRpcError &error,
                     std::optional<NacosRpcEndpoint> redirect = std::nullopt) noexcept;
     void save_redirect(const dto::req::ConnectResetRequest &request, InboundAction &action) const noexcept;
+    void set_state(NacosRpcState state);
     void mark_stopped() noexcept;
     [[nodiscard]] static NacosRpcError invalid_state_error(std::string message);
     [[nodiscard]] static NacosRpcError shutdown_error();
@@ -273,20 +198,16 @@ private:
     async::WaitGroup operations_;
     async::Watch<bool> stop_watch_{false};
     std::optional<async::Watch<bool>::Publisher> stop_publisher_;
-    async::Watch<bool> closed_watch_{false};
-    std::optional<async::Watch<bool>::Publisher> closed_publisher_;
-    std::array<HandlerEntry, kMaxRequestHandlers> handlers_{};
-    std::size_t handler_count_ = 0;
+    async::Watch<NacosRpcState> state_watch_{NacosRpcState::Created};
+    std::optional<async::Watch<NacosRpcState>::Publisher> state_publisher_;
     NacosRpcState state_ = NacosRpcState::Created;
     NacosRpcCloseResult close_result_;
     std::string client_ip_;
     std::string connection_id_;
     bool support_ability_negotiation_ = false;
-    bool handlers_frozen_ = false;
+    bool run_started_ = false;
     bool stop_requested_ = false;
-    bool shutdown_called_ = false;
     bool client_connected_ = false;
-    bool client_shutdown_started_ = false;
 };
 
 } // namespace fiber::nacos::detail

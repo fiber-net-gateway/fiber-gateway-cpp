@@ -117,8 +117,8 @@ NacosRpc::NacosRpc(NacosRpcDependencies dependencies, NacosRpcEndpoint endpoint,
     FIBER_ASSERT(!endpoint_.ip.is_multicast());
     stop_publisher_ = stop_watch_.acquire_publisher();
     FIBER_ASSERT(stop_publisher_.has_value());
-    closed_publisher_ = closed_watch_.acquire_publisher();
-    FIBER_ASSERT(closed_publisher_.has_value());
+    state_publisher_ = state_watch_.acquire_publisher();
+    FIBER_ASSERT(state_publisher_.has_value());
 }
 
 NacosRpc::~NacosRpc() {
@@ -232,36 +232,32 @@ NacosRpc::request_payload(const proto::Payload &request, mem::BufPool &pool,
     co_return response;
 }
 
-async::Task<std::expected<void, NacosRpcError>> NacosRpc::finish_start_error(NacosRpcError error) noexcept {
-    begin_stop(close_kind_for_error(error), error);
-    if (!shutdown_called_) {
-        if (client_connected_) {
-            co_await shutdown_client();
-        }
-        mark_stopped();
-    }
-    co_return std::unexpected(std::move(error));
-}
-
-async::Task<void> NacosRpc::shutdown_client() noexcept {
-    if (!client_shutdown_started_) {
-        client_shutdown_started_ = true;
+async::Task<NacosRpcCloseResult> NacosRpc::finish_run() noexcept {
+    if (client_connected_) {
         co_await client_.shutdown();
-        co_return;
     }
-    (void) co_await client_.wait_closed();
+    co_await operations_.join();
+    stream_ = grpc::GrpcStream{};
+    mark_stopped();
+    co_return close_result_;
 }
 
-async::Task<std::expected<void, NacosRpcError>> NacosRpc::start() noexcept {
-    FIBER_ASSERT(loop_->in_loop());
-    if (state_ != NacosRpcState::Created) {
-        co_return std::unexpected(invalid_state_error("Nacos RPC start called more than once"));
-    }
+async::Task<NacosRpcCloseResult> NacosRpc::finish_run_error(NacosRpcError error) noexcept {
+    begin_stop(close_kind_for_error(error), error);
+    co_return co_await finish_run();
+}
 
-    operations_.add();
-    TaskDoneGuard done(operations_);
-    handlers_frozen_ = true;
-    state_ = NacosRpcState::WaitingAuth;
+async::Task<NacosRpcCloseResult> NacosRpc::run(const NacosBiRequestHandler &handlers) noexcept {
+    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(!run_started_);
+    run_started_ = true;
+    if (stop_requested_) {
+        mark_stopped();
+        co_return close_result_;
+    }
+    FIBER_ASSERT(state_ == NacosRpcState::Created);
+
+    set_state(NacosRpcState::WaitingAuth);
 
     auto auth = auth_subscriber_.current();
     std::uint64_t auth_version = auth.version;
@@ -272,22 +268,22 @@ async::Task<std::expected<void, NacosRpcError>> NacosRpc::start() noexcept {
             auth = std::move(*next);
             auth_version = auth.version;
         } else if (next.error() != common::IoErr::TimedOut) {
-            co_return co_await finish_start_error(transport_error(next.error()));
+            co_return co_await finish_run_error(transport_error(next.error()));
         }
     }
     if (stop_requested_ || (auth.value && auth.value->kind == NacosAuthAccessKind::Stopped)) {
-        co_return co_await finish_start_error(shutdown_error());
+        co_return co_await finish_run_error(shutdown_error());
     }
     FIBER_ASSERT(auth.value != nullptr);
 
-    state_ = NacosRpcState::Connecting;
+    set_state(NacosRpcState::Connecting);
     auto connected = co_await client_.connect(options_->grpc_connect_timeout);
     if (!connected) {
-        co_return co_await finish_start_error(transport_error(connected.error()));
+        co_return co_await finish_run_error(transport_error(connected.error()));
     }
     client_connected_ = true;
     if (stop_requested_) {
-        co_return co_await finish_start_error(shutdown_error());
+        co_return co_await finish_run_error(shutdown_error());
     }
 
     if (!options_->client_ip_override.empty()) {
@@ -296,36 +292,36 @@ async::Task<std::expected<void, NacosRpcError>> NacosRpc::start() noexcept {
         client_ip_ = client_.local_addr()->ip().to_string();
     }
     if (client_ip_.empty()) {
-        co_return co_await finish_start_error(protocol_error("Nacos gRPC local address is unavailable"));
+        co_return co_await finish_run_error(protocol_error("Nacos gRPC local address is unavailable"));
     }
 
     const auto handshake_deadline = event::EventLoop::current().now() + options_->grpc_handshake_timeout;
     auto request_timeout = std::min(options_->grpc_request_timeout,
                                     remaining_until(handshake_deadline, event::EventLoop::current().now()));
     if (request_timeout <= std::chrono::milliseconds::zero()) {
-        co_return co_await finish_start_error(transport_error(common::IoErr::TimedOut, "Nacos handshake timed out"));
+        co_return co_await finish_run_error(transport_error(common::IoErr::TimedOut, "Nacos handshake timed out"));
     }
 
-    state_ = NacosRpcState::Checking;
+    set_state(NacosRpcState::Checking);
     auto metadata = current_metadata();
     if (!metadata) {
-        co_return co_await finish_start_error(std::move(metadata.error()));
+        co_return co_await finish_run_error(std::move(metadata.error()));
     }
     dto::req::ServerCheckRequest check_request;
     auto check_payload = encode_payload(check_request, metadata->metadata, options_->max_inbound_grpc_message_bytes);
     if (!check_payload) {
-        co_return co_await finish_start_error(std::move(check_payload.error()));
+        co_return co_await finish_run_error(std::move(check_payload.error()));
     }
     mem::BufPool check_pool;
     auto check_response_payload = co_await request_payload(*check_payload, check_pool, request_timeout);
     if (!check_response_payload) {
-        co_return co_await finish_start_error(std::move(check_response_payload.error()));
+        co_return co_await finish_run_error(std::move(check_response_payload.error()));
     }
     dto::resp::ServerCheckResponse check_response;
     auto decoded = decode_payload(*check_response_payload, options_->max_inbound_grpc_message_bytes, check_pool,
                                   check_response);
     if (!decoded) {
-        co_return co_await finish_start_error(std::move(decoded.error()));
+        co_return co_await finish_run_error(std::move(decoded.error()));
     }
     if (!check_response.success()) {
         NacosRpcError error{
@@ -336,24 +332,24 @@ async::Task<std::expected<void, NacosRpcError>> NacosRpc::start() noexcept {
         if (check_response.message.is_present()) {
             error.message.assign(check_response.message.value().substr(0, 512));
         }
-        co_return co_await finish_start_error(std::move(error));
+        co_return co_await finish_run_error(std::move(error));
     }
     if (check_response.connection_id.is_present()) {
         connection_id_.assign(check_response.connection_id.value());
     }
     support_ability_negotiation_ = check_response.support_ability_negotiation;
 
-    state_ = NacosRpcState::Handshaking;
+    set_state(NacosRpcState::Handshaking);
     stream_ = client_.open_stream("BiRequestStream", "requestBiStream", stream_pool_,
                                   {.max_inbound_message_bytes = options_->max_inbound_grpc_message_bytes});
     auto remaining = remaining_until(handshake_deadline, event::EventLoop::current().now());
     if (remaining <= std::chrono::milliseconds::zero()) {
-        co_return co_await finish_start_error(transport_error(common::IoErr::TimedOut, "Nacos handshake timed out"));
+        co_return co_await finish_run_error(transport_error(common::IoErr::TimedOut, "Nacos handshake timed out"));
     }
     stream_.set_local_deadline(remaining);
     auto stream_result = co_await stream_.open();
     if (!stream_result) {
-        co_return co_await finish_start_error(transport_error(stream_result.error()));
+        co_return co_await finish_run_error(transport_error(stream_result.error()));
     }
 
     json::JsonObject<std::string_view>::Entry label_entries[] = {
@@ -367,15 +363,15 @@ async::Task<std::expected<void, NacosRpcError>> NacosRpc::start() noexcept {
     setup.ability_table.set_present(json::JsonObject<bool>());
     metadata = current_metadata();
     if (!metadata) {
-        co_return co_await finish_start_error(std::move(metadata.error()));
+        co_return co_await finish_run_error(std::move(metadata.error()));
     }
     auto setup_payload = encode_payload(setup, metadata->metadata, options_->max_inbound_grpc_message_bytes);
     if (!setup_payload) {
-        co_return co_await finish_start_error(std::move(setup_payload.error()));
+        co_return co_await finish_run_error(std::move(setup_payload.error()));
     }
     stream_result = co_await stream_.write(*setup_payload);
     if (!stream_result) {
-        co_return co_await finish_start_error(transport_error(stream_result.error()));
+        co_return co_await finish_run_error(transport_error(stream_result.error()));
     }
 
     if (support_ability_negotiation_) {
@@ -384,36 +380,34 @@ async::Task<std::expected<void, NacosRpcError>> NacosRpc::start() noexcept {
             proto::Payload inbound;
             auto read = co_await stream_.read(inbound);
             if (!read) {
-                co_return co_await finish_start_error(transport_error(read.error()));
+                co_return co_await finish_run_error(transport_error(read.error()));
             }
             if (*read == grpc::GrpcReadOutcome::End) {
-                co_return co_await finish_start_error(
+                co_return co_await finish_run_error(
                         transport_error(common::IoErr::ConnReset, "Nacos setup stream ended"));
             }
-            auto action = dispatch_inbound(inbound);
+            auto action = co_await dispatch_inbound(handlers, inbound);
             if (!action) {
-                co_return co_await finish_start_error(std::move(action.error()));
+                co_return co_await finish_run_error(std::move(action.error()));
             }
             if (action->has_response) {
                 stream_result = co_await stream_.write(action->response);
                 if (!stream_result) {
-                    co_return co_await finish_start_error(transport_error(stream_result.error()));
+                    co_return co_await finish_run_error(transport_error(stream_result.error()));
                 }
             }
             setup_acked = action->setup_ack;
             if (action->close_after_response) {
                 NacosRpcError error = transport_error(common::IoErr::ConnReset, "Nacos server redirected connection");
                 begin_stop(NacosRpcCloseKind::Redirect, error, std::move(action->redirect));
-                co_await shutdown_client();
-                mark_stopped();
-                co_return std::unexpected(std::move(error));
+                co_return co_await finish_run();
             }
         }
     } else {
         stream_.clear_local_deadline();
         remaining = remaining_until(handshake_deadline, event::EventLoop::current().now());
         if (remaining < options_->grpc_compatibility_setup_delay) {
-            co_return co_await finish_start_error(
+            co_return co_await finish_run_error(
                     transport_error(common::IoErr::TimedOut, "Nacos compatibility setup timed out"));
         }
         auto stopped = stop_watch_.subscribe();
@@ -421,32 +415,23 @@ async::Task<std::expected<void, NacosRpcError>> NacosRpc::start() noexcept {
         auto wait = co_await async::timeout_for([&]() { return stopped.next(stop_version); },
                                                 options_->grpc_compatibility_setup_delay);
         if (wait || stop_requested_) {
-            co_return co_await finish_start_error(shutdown_error());
+            co_return co_await finish_run_error(shutdown_error());
         }
         if (wait.error() != common::IoErr::TimedOut) {
-            co_return co_await finish_start_error(transport_error(wait.error()));
+            co_return co_await finish_run_error(transport_error(wait.error()));
         }
     }
 
     if (stop_requested_) {
-        co_return co_await finish_start_error(shutdown_error());
+        co_return co_await finish_run_error(shutdown_error());
     }
     stream_.clear_local_deadline();
-    state_ = NacosRpcState::Ready;
+    set_state(NacosRpcState::Ready);
 
-    operations_.add(2);
-    async::spawn(*loop_, [this]() { return run_server_requests(); });
+    operations_.add();
     async::spawn(*loop_, [this]() { return run_heartbeat(); });
-    co_return std::expected<void, NacosRpcError>{};
-}
-
-const NacosRpc::HandlerEntry *NacosRpc::find_handler(std::string_view type) const noexcept {
-    for (std::size_t i = 0; i < handler_count_; ++i) {
-        if (handlers_[i].type == type) {
-            return &handlers_[i];
-        }
-    }
-    return nullptr;
+    co_await run_server_requests(handlers);
+    co_return co_await finish_run();
 }
 
 void NacosRpc::save_redirect(const dto::req::ConnectResetRequest &request, InboundAction &action) const noexcept {
@@ -474,11 +459,11 @@ void NacosRpc::save_redirect(const dto::req::ConnectResetRequest &request, Inbou
     };
 }
 
-std::expected<NacosRpc::InboundAction, NacosRpcError>
-NacosRpc::dispatch_inbound(const proto::Payload &payload) noexcept {
+async::Task<std::expected<NacosRpc::InboundAction, NacosRpcError>>
+NacosRpc::dispatch_inbound(const NacosBiRequestHandler &handlers, const proto::Payload &payload) noexcept {
     auto view = validate_payload(payload, options_->max_inbound_grpc_message_bytes);
     if (!view) {
-        return std::unexpected(std::move(view.error()));
+        co_return std::unexpected(std::move(view.error()));
     }
 
     InboundAction action;
@@ -487,19 +472,19 @@ NacosRpc::dispatch_inbound(const proto::Payload &payload) noexcept {
         dto::req::SetupAckRequest request;
         auto parsed = parse_payload_json(*view, pool, request);
         if (!parsed) {
-            return std::unexpected(std::move(parsed.error()));
+            co_return std::unexpected(std::move(parsed.error()));
         }
         action.setup_ack = true;
-        return action;
+        co_return action;
     }
 
     if (!ends_with_request(view->type)) {
-        return action;
+        co_return action;
     }
 
     auto metadata = current_metadata();
     if (!metadata) {
-        return std::unexpected(std::move(metadata.error()));
+        co_return std::unexpected(std::move(metadata.error()));
     }
 
     if (view->type == dto::req::ClientDetectionRequest::kTypeName) {
@@ -507,17 +492,17 @@ NacosRpc::dispatch_inbound(const proto::Payload &payload) noexcept {
         dto::req::ClientDetectionRequest request;
         auto parsed = parse_payload_json(*view, pool, request);
         if (!parsed) {
-            return std::unexpected(std::move(parsed.error()));
+            co_return std::unexpected(std::move(parsed.error()));
         }
         dto::resp::ClientDetectionResponse response;
         response.request_id = request.request_id;
         auto encoded = encode_payload(response, metadata->metadata, options_->max_inbound_grpc_message_bytes);
         if (!encoded) {
-            return std::unexpected(std::move(encoded.error()));
+            co_return std::unexpected(std::move(encoded.error()));
         }
         action.response = std::move(*encoded);
         action.has_response = true;
-        return action;
+        co_return action;
     }
 
     if (view->type == dto::req::ConnectResetRequest::kTypeName) {
@@ -525,36 +510,37 @@ NacosRpc::dispatch_inbound(const proto::Payload &payload) noexcept {
         dto::req::ConnectResetRequest request;
         auto parsed = parse_payload_json(*view, pool, request);
         if (!parsed) {
-            return std::unexpected(std::move(parsed.error()));
+            co_return std::unexpected(std::move(parsed.error()));
         }
         dto::resp::ConnectResetResponse response;
         response.request_id = request.request_id;
         auto encoded = encode_payload(response, metadata->metadata, options_->max_inbound_grpc_message_bytes);
         if (!encoded) {
-            return std::unexpected(std::move(encoded.error()));
+            co_return std::unexpected(std::move(encoded.error()));
         }
         action.response = std::move(*encoded);
         action.has_response = true;
         action.close_after_response = true;
         save_redirect(request, action);
-        return action;
+        co_return action;
     }
 
-    if (const HandlerEntry *handler = find_handler(view->type)) {
-        auto response = handler->invoke(*handler, *this, *view, payload.metadata(), metadata->metadata);
-        if (!response) {
-            return std::unexpected(std::move(response.error()));
-        }
-        action.response = std::move(*response);
+    auto handled = co_await handlers.dispatch(nacos_rpc_module_name(module_), *view, payload.metadata(),
+                                              metadata->metadata, options_->max_inbound_grpc_message_bytes);
+    if (!handled) {
+        co_return std::unexpected(std::move(handled.error()));
+    }
+    if (*handled) {
+        action.response = std::move(**handled);
         action.has_response = true;
-        return action;
+        co_return action;
     }
 
     mem::BufPool pool;
     dto::RequestBase request;
     auto parsed = parse_payload_json(*view, pool, request);
     if (!parsed) {
-        return std::unexpected(std::move(parsed.error()));
+        co_return std::unexpected(std::move(parsed.error()));
     }
     dto::resp::ErrorResponse response;
     response.result_code = dto::kResponseFail;
@@ -563,15 +549,14 @@ NacosRpc::dispatch_inbound(const proto::Payload &payload) noexcept {
     response.request_id = request.request_id;
     auto encoded = encode_payload(response, metadata->metadata, options_->max_inbound_grpc_message_bytes);
     if (!encoded) {
-        return std::unexpected(std::move(encoded.error()));
+        co_return std::unexpected(std::move(encoded.error()));
     }
     action.response = std::move(*encoded);
     action.has_response = true;
-    return action;
+    co_return action;
 }
 
-async::DetachedTask NacosRpc::run_server_requests() noexcept {
-    TaskDoneGuard done(operations_);
+async::Task<void> NacosRpc::run_server_requests(const NacosBiRequestHandler &handlers) noexcept {
     while (!stop_requested_) {
         proto::Payload inbound;
         auto read = co_await stream_.read(inbound);
@@ -597,7 +582,7 @@ async::DetachedTask NacosRpc::run_server_requests() noexcept {
             break;
         }
 
-        auto action = dispatch_inbound(inbound);
+        auto action = co_await dispatch_inbound(handlers, inbound);
         if (!action) {
             NacosRpcError error = std::move(action.error());
             begin_stop(close_kind_for_error(error), error);
@@ -618,10 +603,7 @@ async::DetachedTask NacosRpc::run_server_requests() noexcept {
         }
     }
 
-    if (!shutdown_called_) {
-        co_await shutdown_client();
-        mark_stopped();
-    }
+    co_return;
 }
 
 async::DetachedTask NacosRpc::run_heartbeat() noexcept {
@@ -663,7 +645,7 @@ void NacosRpc::begin_stop(NacosRpcCloseKind kind, const NacosRpcError &error,
     }
     stop_requested_ = true;
     if (state_ != NacosRpcState::Stopped) {
-        state_ = NacosRpcState::Stopping;
+        set_state(NacosRpcState::Stopping);
     }
     if (stream_.valid()) {
         stream_.cancel(error.io_error == common::IoErr::None ? common::IoErr::Canceled : error.io_error);
@@ -671,53 +653,54 @@ void NacosRpc::begin_stop(NacosRpcCloseKind kind, const NacosRpcError &error,
     stop_publisher_->publish(true);
 }
 
+void NacosRpc::set_state(NacosRpcState state) {
+    if (state_ == state) {
+        return;
+    }
+    state_ = state;
+    state_publisher_->publish(state);
+}
+
 void NacosRpc::mark_stopped() noexcept {
     if (state_ == NacosRpcState::Stopped) {
         return;
     }
-    state_ = NacosRpcState::Stopped;
-    closed_publisher_->publish(true);
+    set_state(NacosRpcState::Stopped);
 }
 
-async::Task<void> NacosRpc::shutdown() noexcept {
+async::Task<std::expected<void, NacosRpcError>> NacosRpc::wait_ready() noexcept {
     FIBER_ASSERT(loop_->in_loop());
-    if (state_ == NacosRpcState::Stopped) {
-        co_await operations_.join();
-        co_return;
-    }
-    if (state_ == NacosRpcState::Created) {
-        shutdown_called_ = true;
-        NacosRpcError error = shutdown_error();
-        begin_stop(NacosRpcCloseKind::Shutdown, error);
-        mark_stopped();
-        co_return;
-    }
-
-    shutdown_called_ = true;
-    NacosRpcError error = shutdown_error();
-    begin_stop(NacosRpcCloseKind::Shutdown, error);
-    if (client_connected_) {
-        co_await shutdown_client();
-    }
-    co_await operations_.join();
-    stream_ = grpc::GrpcStream{};
-    if (client_connected_ && !client_shutdown_started_) {
-        co_await shutdown_client();
-    }
-    mark_stopped();
-}
-
-async::Task<NacosRpcCloseResult> NacosRpc::wait_closed() noexcept {
-    FIBER_ASSERT(loop_->in_loop());
-    if (state_ != NacosRpcState::Stopped) {
-        auto closed = closed_watch_.subscribe();
-        auto snapshot = closed.current();
-        if (!snapshot.value || !*snapshot.value) {
-            (void) co_await closed.next(snapshot.version);
+    auto states = state_watch_.subscribe();
+    auto snapshot = states.current();
+    for (;;) {
+        FIBER_ASSERT(snapshot.value != nullptr);
+        switch (*snapshot.value) {
+            case NacosRpcState::Ready:
+                co_return std::expected<void, NacosRpcError>{};
+            case NacosRpcState::Stopping:
+            case NacosRpcState::Stopped:
+                co_return std::unexpected(close_result_.error);
+            case NacosRpcState::Created:
+            case NacosRpcState::WaitingAuth:
+            case NacosRpcState::Connecting:
+            case NacosRpcState::Checking:
+            case NacosRpcState::Handshaking:
+                snapshot = co_await states.next(snapshot.version);
+                break;
         }
     }
-    co_await operations_.join();
-    co_return close_result_;
+}
+
+void NacosRpc::shutdown() noexcept {
+    FIBER_ASSERT(loop_->in_loop());
+    if (state_ == NacosRpcState::Stopped || stop_requested_) {
+        return;
+    }
+    NacosRpcError error = shutdown_error();
+    begin_stop(NacosRpcCloseKind::Shutdown, error);
+    if (!run_started_) {
+        mark_stopped();
+    }
 }
 
 } // namespace fiber::nacos::detail

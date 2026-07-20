@@ -308,7 +308,9 @@ private:
         fiber::mem::BufPool failed_pool;
         dto::resp::ErrorResponse failed;
         if (decode_response(*failed_payload, failed, failed_pool) && failed.request_id.is_present() &&
-            failed.request_id.value() == "config-fail" && failed.error_code == 901 && !failed.success()) {
+            failed.request_id.value() == "config-fail" &&
+            failed.error_code == fiber::common::io_err_to_errno(fiber::common::IoErr::Invalid) &&
+            failed.message.is_present() && failed.message.value() == "invalid" && !failed.success()) {
             handler_error_seen_.store(true, std::memory_order_release);
         }
 
@@ -404,30 +406,24 @@ struct HandlerContext {
     bool header_seen = false;
 };
 
-std::expected<void, nacos_detail::NacosServerHandlerError>
+fiber::async::Task<fiber::common::IoResult<dto::resp::ConfigChangeNotifyResponse>>
 handle_config_change(void *opaque, nacos_detail::NacosServerRequestContext &request_context,
-                     const dto::req::ConfigChangeNotifyRequest &request,
-                     dto::resp::ConfigChangeNotifyResponse &response) noexcept {
+                     const dto::req::ConfigChangeNotifyRequest &request) noexcept {
     auto *context = static_cast<HandlerContext *>(opaque);
     if (request.data_id.is_present() && request.data_id.value() == "fail") {
-        return std::unexpected(nacos_detail::NacosServerHandlerError{
-                .result_code = dto::kResponseFail,
-                .error_code = 901,
-                .message = "handler failed",
-        });
+        co_return std::unexpected(fiber::common::IoErr::Invalid);
     }
+    co_await fiber::async::sleep(1ms);
     context->called = true;
     auto header = request_context.headers().find("serverKey");
     context->header_seen = header && *header == "serverValue";
     auto message = request_context.copy_to_pool("handled");
     if (!message) {
-        return std::unexpected(nacos_detail::NacosServerHandlerError{
-                .error_code = 902,
-                .message = "response allocation failed",
-        });
+        co_return std::unexpected(message.error());
     }
+    dto::resp::ConfigChangeNotifyResponse response;
     response.message.set_present(*message);
-    return {};
+    co_return response;
 }
 
 struct RpcCaseResult {
@@ -436,7 +432,6 @@ struct RpcCaseResult {
     bool handler_called = false;
     bool handler_header_seen = false;
     bool unary_response_valid = false;
-    bool late_registration_rejected = false;
     std::string connection_id;
     nacos_detail::NacosRpcCloseKind close_kind = nacos_detail::NacosRpcCloseKind::None;
 };
@@ -465,22 +460,30 @@ DetachedTask run_rpc_case(fiber::event::EventLoop *loop, ScriptedNacosRpcServer 
             },
             nacos_detail::NacosRpcModule::Config);
 
+    nacos_detail::NacosBiRequestHandler handlers;
     HandlerContext handler_context;
     auto registered =
-            rpc.add_request_handler<dto::req::ConfigChangeNotifyRequest>(&handle_config_change, &handler_context);
+            handlers.add_request_handler<dto::req::ConfigChangeNotifyRequest, dto::resp::ConfigChangeNotifyResponse>(
+                    &handle_config_change, &handler_context);
     EXPECT_TRUE(registered.has_value());
     auto duplicate =
-            rpc.add_request_handler<dto::req::ConfigChangeNotifyRequest>(&handle_config_change, &handler_context);
+            handlers.add_request_handler<dto::req::ConfigChangeNotifyRequest, dto::resp::ConfigChangeNotifyResponse>(
+                    &handle_config_change, &handler_context);
     EXPECT_EQ(duplicate.error(), nacos_detail::NacosHandlerRegistrationError::DuplicateType);
 
     RpcCaseResult result;
-    auto started = co_await rpc.start();
-    result.started = started.has_value();
+    fiber::async::WaitGroup run_done;
+    run_done.add();
+    nacos_detail::NacosRpcCloseResult close_result;
+    fiber::async::spawn(*loop, [&]() -> DetachedTask {
+        close_result = co_await rpc.run(handlers);
+        run_done.done();
+    });
+    auto ready = co_await rpc.wait_ready();
+    result.started = ready.has_value();
     result.connection_id = rpc.connection_id();
-    auto late = rpc.add_request_handler<dto::req::ConfigChangeNotifyRequest>(&handle_config_change, &handler_context);
-    result.late_registration_rejected = !late && late.error() == nacos_detail::NacosHandlerRegistrationError::Started;
 
-    if (started) {
+    if (ready) {
         auth_publisher->publish(fiber::nacos::NacosAuthAccess{
                 .kind = fiber::nacos::NacosAuthAccessKind::Present,
                 .access_token = "token-2",
@@ -504,10 +507,10 @@ DetachedTask run_rpc_case(fiber::event::EventLoop *loop, ScriptedNacosRpcServer 
 
     result.handler_called = handler_context.called;
     result.handler_header_seen = handler_context.header_seen;
-    co_await rpc.shutdown();
-    auto closed = co_await rpc.wait_closed();
+    rpc.shutdown();
+    co_await run_done.join();
     result.stopped = rpc.state() == nacos_detail::NacosRpcState::Stopped;
-    result.close_kind = closed.kind;
+    result.close_kind = close_result.kind;
     finished->set_value(std::move(result));
 }
 
@@ -587,7 +590,6 @@ TEST(NacosRpcTest, TypedHandlersUnaryRequestsAndSetupAckWork) {
     EXPECT_TRUE(result.handler_called);
     EXPECT_TRUE(result.handler_header_seen);
     EXPECT_TRUE(result.unary_response_valid);
-    EXPECT_TRUE(result.late_registration_rejected);
     EXPECT_EQ(result.connection_id, "rpc-connection-1");
     EXPECT_EQ(result.close_kind, nacos_detail::NacosRpcCloseKind::Shutdown);
 }
@@ -598,6 +600,68 @@ TEST(NacosRpcTest, CompatibilityDelayStartsTheSameTypedDispatcher) {
     EXPECT_TRUE(result.stopped);
     EXPECT_TRUE(result.handler_called);
     EXPECT_TRUE(result.unary_response_valid);
+}
+
+struct PreRunShutdownResult {
+    bool ready_canceled = false;
+    bool stopped = false;
+    nacos_detail::NacosRpcCloseKind close_kind = nacos_detail::NacosRpcCloseKind::None;
+};
+
+DetachedTask run_pre_run_shutdown(fiber::event::EventLoop *loop, fiber::nacos::NacosClientConfig config,
+                                  fiber::nacos::NacosClientOptions options,
+                                  std::shared_ptr<std::promise<PreRunShutdownResult>> finished) {
+    fiber::async::Watch<fiber::nacos::NacosAuthAccess> auth(fiber::nacos::NacosAuthAccess{
+            .kind = fiber::nacos::NacosAuthAccessKind::NotConfigured,
+    });
+    nacos_detail::NacosRpc rpc(
+            nacos_detail::NacosRpcDependencies{
+                    .loop = *loop,
+                    .config = config,
+                    .options = options,
+                    .auth_subscriber = auth.subscribe(),
+            },
+            nacos_detail::NacosRpcEndpoint{
+                    .ip = fiber::net::IpAddress::loopback_v4(),
+                    .port = config.grpc_port(),
+                    .server_index = 0,
+            },
+            nacos_detail::NacosRpcModule::Config);
+    nacos_detail::NacosBiRequestHandler handlers;
+
+    rpc.shutdown();
+    auto ready = co_await rpc.wait_ready();
+    auto closed = co_await rpc.run(handlers);
+    finished->set_value(PreRunShutdownResult{
+            .ready_canceled = !ready && ready.error().code == nacos_detail::NacosRpcErrorCode::Shutdown,
+            .stopped = rpc.state() == nacos_detail::NacosRpcState::Stopped,
+            .close_kind = closed.kind,
+    });
+}
+
+TEST(NacosRpcTest, ShutdownBeforeRunCompletesWithoutConnecting) {
+    fiber::nacos::NacosClientConfigParams params;
+    params.server_ips.push_back(fiber::net::IpAddress::loopback_v4());
+    params.grpc_port = 1;
+    auto config = fiber::nacos::NacosClientConfig::create(std::move(params));
+    ASSERT_TRUE(config.has_value());
+
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+    auto finished = std::make_shared<std::promise<PreRunShutdownResult>>();
+    auto future = finished->get_future();
+    fiber::async::spawn(group.at(0), [loop = &group.at(0), config = std::move(*config),
+                                      options = fiber::nacos::NacosClientOptions{}, finished]() mutable {
+        return run_pre_run_shutdown(loop, std::move(config), options, finished);
+    });
+    ASSERT_EQ(future.wait_for(1s), std::future_status::ready);
+    const PreRunShutdownResult result = future.get();
+    group.stop();
+    group.join();
+
+    EXPECT_TRUE(result.ready_canceled);
+    EXPECT_TRUE(result.stopped);
+    EXPECT_EQ(result.close_kind, nacos_detail::NacosRpcCloseKind::Shutdown);
 }
 
 DetachedTask run_rnacos_rpc(fiber::event::EventLoop *loop, fiber::nacos::NacosClientConfig config,
@@ -621,17 +685,25 @@ DetachedTask run_rnacos_rpc(fiber::event::EventLoop *loop, fiber::nacos::NacosCl
             },
             nacos_detail::NacosRpcModule::Config);
 
+    nacos_detail::NacosBiRequestHandler handlers;
     RpcCaseResult result;
+    fiber::async::WaitGroup run_done;
+    run_done.add();
+    nacos_detail::NacosRpcCloseResult close_result;
+    fiber::async::spawn(*loop, [&]() -> DetachedTask {
+        close_result = co_await rpc.run(handlers);
+        run_done.done();
+    });
     stage->store(1, std::memory_order_release);
-    auto started = co_await rpc.start();
+    auto ready = co_await rpc.wait_ready();
     stage->store(2, std::memory_order_release);
-    result.started = started.has_value();
+    result.started = ready.has_value();
     result.connection_id = rpc.connection_id();
-    co_await rpc.shutdown();
-    auto closed = co_await rpc.wait_closed();
+    rpc.shutdown();
+    co_await run_done.join();
     stage->store(3, std::memory_order_release);
     result.stopped = rpc.state() == nacos_detail::NacosRpcState::Stopped;
-    result.close_kind = closed.kind;
+    result.close_kind = close_result.kind;
     finished->set_value(std::move(result));
 }
 
