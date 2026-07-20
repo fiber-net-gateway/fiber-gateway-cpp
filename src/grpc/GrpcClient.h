@@ -8,7 +8,6 @@
 #include <string_view>
 
 #include "../async/Task.h"
-#include "../async/WaitGroup.h"
 #include "../common/Assert.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
@@ -24,13 +23,13 @@
 
 namespace fiber::grpc {
 
-// gRPC client over a single multiplexed HTTP/2 connection. The caller owns the
-// connection run coroutine: connect() establishes the transport, run() drives
-// it, and shutdown() requests teardown and waits for run() to finish.
+// gRPC client over a single multiplexed HTTP/2 connection. connect() starts
+// transport I/O. shutdown() aborts active calls and waits for the connection to
+// close; graceful_shutdown() instead lets active calls finish.
 //
 class GrpcClient : public common::NonCopyable, public common::NonMovable {
 public:
-    using RunResult = http::Http2Connection::RunResult;
+    using CloseResult = http::Http2Connection::CloseResult;
 
     struct Options {
         net::SocketAddress peer_addr{};
@@ -45,18 +44,22 @@ public:
     ~GrpcClient();
 
     // Establish the TCP+TLS+h2 connection. timeout applies to the TCP connect
-    // phase; TLS handshake timeout is configured separately. A successful
-    // connect() creates an obligation for the caller to drive run() exactly
-    // once. Must be co_awaited on the client's event loop.
+    // phase; TLS handshake timeout is configured separately. Must be co_awaited
+    // on the client's event loop.
     fiber::async::Task<common::IoResult<void>> connect(std::chrono::milliseconds timeout) noexcept;
 
-    // Drive the HTTP/2 connection until it closes. The caller must schedule and
-    // retain this coroutine; only one run() invocation is accepted.
-    fiber::async::Task<RunResult> run() noexcept;
+    // Observe peer/error-driven connection closure without initiating it.
+    // Multiple waiters are supported.
+    fiber::async::Task<CloseResult> wait_closed() noexcept;
 
-    // Stop accepting new calls, request connection teardown, and wait until
-    // run() has completely returned. Safe to call repeatedly on the loop.
+    // Stop accepting new calls, abort active calls, and wait for complete
+    // teardown. Safe to call repeatedly on the loop.
     fiber::async::Task<void> shutdown() noexcept;
+
+    // Stop accepting new calls, send GOAWAY, and wait for active calls and
+    // pending writes to finish. A caller retaining an unfinished stream must
+    // finish or cancel it before awaiting this operation.
+    fiber::async::Task<CloseResult> graceful_shutdown() noexcept;
 
     // Open a full-duplex streaming call (server/client/bidi streaming are all
     // usage patterns over the returned GrpcStream). Synchronous: constructs the
@@ -72,16 +75,12 @@ private:
     enum class State : std::uint8_t {
         Created,
         Connected,
-        Running,
-        StopPending,
         Stopping,
         Stopped,
     };
 
     event::EventLoop *loop_;
     http::Http2ClientConnection conn_;
-    fiber::async::WaitGroup run_started_wg_;
-    fiber::async::WaitGroup run_finished_wg_;
     State state_ = State::Created;
     std::string authority_;
     std::string scheme_;

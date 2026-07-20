@@ -49,8 +49,8 @@ public:
     };
 
     using FrameHeader = Http2FrameHeader;
-    using RunResult = common::IoResult<void>;
-    using ClosedCallback = void (*)(void *ctx, Http2Connection &connection, RunResult result) noexcept;
+    using CloseResult = common::IoResult<void>;
+    using ClosedCallback = void (*)(void *ctx, Http2Connection &connection, CloseResult result) noexcept;
 
     struct Options {
         ConnectionRole role = ConnectionRole::Server;
@@ -88,13 +88,12 @@ public:
     // Must be called on transport->loop(). A successful start owns and drives
     // transport I/O until closure; no run coroutine is required. on_closed is
     // invoked on the loop after all connection state is closed and may destroy
-    // the connection. Use either on_closed or run()/wait_closed(), not both.
+    // the connection. Use either on_closed or wait_closed(), not both.
     common::IoErr start(std::unique_ptr<HttpTransport> transport, ClosedCallback on_closed = nullptr,
                         void *closed_ctx = nullptr) noexcept;
 
-    // Compatibility waiters; these do not drive I/O.
-    fiber::async::Task<RunResult> run() noexcept;
-    fiber::async::Task<RunResult> wait_closed() noexcept;
+    // Waits for close completion; this does not drive I/O.
+    fiber::async::Task<CloseResult> wait_closed() noexcept;
     [[nodiscard]] common::IoResult<Http2Stream::Lease> attach_local_stream(Http2Stream &stream) noexcept;
     void shutdown(common::IoErr reason = common::IoErr::Canceled) noexcept;
     void graceful_shutdown() noexcept;

@@ -119,7 +119,7 @@ private:
     };
 
     [[nodiscard]] async::Task<AttemptResult> run_generation(const Endpoint &endpoint) noexcept;
-    [[nodiscard]] async::DetachedTask drive_client(Generation *generation) noexcept;
+    [[nodiscard]] async::DetachedTask monitor_client_close(Generation *generation) noexcept;
     [[nodiscard]] async::DetachedTask run_writer(Generation *generation) noexcept;
     [[nodiscard]] async::DetachedTask monitor_control(Generation *generation) noexcept;
     [[nodiscard]] async::DetachedTask run_heartbeat(Generation *generation) noexcept;

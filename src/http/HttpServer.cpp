@@ -199,7 +199,7 @@ fiber::async::Task<void> HttpServer::serve_http2(std::unique_ptr<HttpTransport> 
     if (!connection) {
         co_return;
     }
-    auto on_closed = [](void *, Http2Connection &closed_connection, Http2Connection::RunResult) noexcept {
+    auto on_closed = [](void *, Http2Connection &closed_connection, Http2Connection::CloseResult) noexcept {
         delete &closed_connection;
     };
     if (connection->start(std::move(transport), on_closed) != common::IoErr::None) {

@@ -287,8 +287,8 @@ void NacosGrpcConnection::save_redirect(const dto::req::ConnectResetRequest &req
     };
 }
 
-async::DetachedTask NacosGrpcConnection::drive_client(Generation *generation) noexcept {
-    auto result = co_await generation->client->run();
+async::DetachedTask NacosGrpcConnection::monitor_client_close(Generation *generation) noexcept {
+    auto result = co_await generation->client->wait_closed();
     if (!result && !generation->stopping) {
         generation->stop(result.error());
     } else if (!generation->stopping) {
@@ -536,7 +536,7 @@ async::Task<NacosGrpcConnection::AttemptResult> NacosGrpcConnection::run_generat
     }
 
     generation.tasks.add();
-    async::spawn(*loop_, [this, &generation]() { return drive_client(&generation); });
+    async::spawn(*loop_, [this, &generation]() { return monitor_client_close(&generation); });
     generation.tasks.add();
     async::spawn(*loop_, [this, &generation]() { return monitor_control(&generation); });
 

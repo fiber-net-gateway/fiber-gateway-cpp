@@ -224,9 +224,7 @@ Http2Connection::~Http2Connection() {
     FIBER_ASSERT(!close_completion_posted_);
 }
 
-fiber::async::Task<Http2Connection::RunResult> Http2Connection::run() noexcept { co_return co_await wait_closed(); }
-
-fiber::async::Task<Http2Connection::RunResult> Http2Connection::wait_closed() noexcept {
+fiber::async::Task<Http2Connection::CloseResult> Http2Connection::wait_closed() noexcept {
     if (state_ == State::Init) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -237,7 +235,7 @@ fiber::async::Task<Http2Connection::RunResult> Http2Connection::wait_closed() no
     if (terminal_error_ != common::IoErr::None) {
         co_return std::unexpected(terminal_error_);
     }
-    co_return RunResult{};
+    co_return CloseResult{};
 }
 
 Http2Connection::ClosedAwaiter::~ClosedAwaiter() {
@@ -789,8 +787,8 @@ void Http2Connection::dispatch_closed_completion() noexcept {
     ClosedCallback callback = std::exchange(on_closed_, nullptr);
     void *callback_ctx = std::exchange(closed_ctx_, nullptr);
     if (callback) {
-        RunResult result =
-                terminal_error_ == common::IoErr::None ? RunResult{} : RunResult(std::unexpected(terminal_error_));
+        CloseResult result =
+                terminal_error_ == common::IoErr::None ? CloseResult{} : CloseResult(std::unexpected(terminal_error_));
         callback(callback_ctx, *this, std::move(result));
     }
 }

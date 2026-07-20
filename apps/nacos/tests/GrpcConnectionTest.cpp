@@ -170,7 +170,7 @@ public:
             fiber::http::Http2Connection connection(options, &factory_, fiber::http::ServerRequestFactory::ops());
             active_connection_ = &connection;
             if (connection.start(std::move(*transport)) == fiber::common::IoErr::None) {
-                (void) co_await connection.run();
+                (void) co_await connection.wait_closed();
             }
             active_connection_ = nullptr;
         }

@@ -648,7 +648,7 @@ Task<Result> drive(fiber::grpc::GrpcStream &s, Scenario sc) {
     co_return r;
 }
 
-DetachedTask drive_client_connection(fiber::grpc::GrpcClient *client) { (void) co_await client->run(); }
+DetachedTask wait_for_client_connection(fiber::grpc::GrpcClient *client) { (void) co_await client->wait_closed(); }
 
 DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, Scenario sc,
                         std::shared_ptr<std::promise<Result>> promise) {
@@ -665,7 +665,7 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, Scena
     if (!connect_result) {
         result.err = connect_result.error();
     } else {
-        fiber::async::spawn(*loop, [&client]() { return drive_client_connection(&client); });
+        fiber::async::spawn(*loop, [&client]() { return wait_for_client_connection(&client); });
         fiber::mem::BufPool pool;
         const char *service = "helloworld.Greeter";
         const char *method = nullptr;
