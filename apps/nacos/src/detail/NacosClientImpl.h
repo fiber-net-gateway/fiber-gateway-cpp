@@ -19,6 +19,7 @@
 #include <fiber/nacos/NacosClientConfig.h>
 
 #include "../config/ConfigServiceImpl.h"
+#include "../naming/NamingServiceImpl.h"
 
 namespace fiber::nacos::detail {
 
@@ -41,6 +42,7 @@ public:
 
     [[nodiscard]] async::Watch<NacosAuthAccess>::Subscriber subscribe_auth();
     [[nodiscard]] ConfigService &config_service() noexcept { return config_service_; }
+    [[nodiscard]] NamingService &naming_service() noexcept { return naming_service_; }
 
     [[nodiscard]] event::EventLoop &loop() const noexcept { return *loop_; }
     [[nodiscard]] const NacosClientConfig &config() const noexcept { return config_; }
@@ -55,6 +57,7 @@ private:
 
     [[nodiscard]] async::DetachedTask run_auth() noexcept;
     [[nodiscard]] async::DetachedTask run_config() noexcept;
+    [[nodiscard]] async::DetachedTask run_naming() noexcept;
     [[nodiscard]] async::Task<std::expected<AuthLoginSuccess, common::IoErr>>
     login(std::size_t server_index, std::string_view target, std::string_view auth_body) noexcept;
 
@@ -73,6 +76,7 @@ private:
     async::Watch<NacosAuthAccess> auth_watch_;
     std::optional<async::Watch<NacosAuthAccess>::Publisher> auth_publisher_;
     ConfigServiceImpl config_service_;
+    NamingServiceImpl naming_service_;
 };
 
 } // namespace fiber::nacos::detail

@@ -2,8 +2,8 @@
 
 #include <string_view>
 
-#include <fiber/nacos/dto/ConfigQueryRequest.h>
-#include <fiber/nacos/dto/Internal.h>
+#include "../src/dto/ConfigQueryRequest.h"
+#include "../src/dto/Internal.h"
 
 #include "../src/rpc/NacosPayloadCodec.h"
 

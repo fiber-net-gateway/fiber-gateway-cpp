@@ -10,12 +10,12 @@
 #include <common/json/JsonParse.h>
 #include <common/json/JsonParser.h>
 #include <common/util/UrlForm.h>
-#include <fiber/nacos/dto/JsonCodec.h>
 #include <http/ClientHttp1Exchange.h>
 #include <http/Http1ClientConnection.h>
 #include <http/HttpCommon.h>
 #include <http/HttpHeaders.h>
 #include <net/SocketAddress.h>
+#include "../dto/JsonCodec.h"
 
 namespace fiber::nacos::detail {
 namespace {
@@ -78,7 +78,7 @@ void append_chunk(mem::IoBufChain &chunk, std::string &out) {
 
 NacosClientImpl::NacosClientImpl(event::EventLoop &loop, NacosClientConfig config, NacosClientOptions options) :
     loop_(&loop), config_(std::move(config)), options_(std::move(options)),
-    config_service_(loop, config_, options_, auth_watch_) {
+    config_service_(loop, config_, options_, auth_watch_), naming_service_(loop, config_, options_, auth_watch_) {
     shutdown_publisher_ = shutdown_watch_.acquire_publisher();
     auth_publisher_ = auth_watch_.acquire_publisher();
     FIBER_ASSERT(shutdown_publisher_.has_value());
@@ -94,7 +94,8 @@ bool NacosClientImpl::valid_options(const NacosClientOptions &options) noexcept 
     return options.connect_timeout > std::chrono::milliseconds::zero() &&
            options.request_timeout > std::chrono::milliseconds::zero() && options.max_auth_response_bytes > 0 &&
            options.retry_initial_delay > std::chrono::milliseconds::zero() &&
-           options.retry_max_delay >= options.retry_initial_delay && ConfigServiceImpl::valid_options(options);
+           options.retry_max_delay >= options.retry_initial_delay && ConfigServiceImpl::valid_options(options) &&
+           NamingServiceImpl::valid_options(options);
 }
 
 common::IoResult<void> NacosClientImpl::start() noexcept {
@@ -109,6 +110,8 @@ common::IoResult<void> NacosClientImpl::start() noexcept {
     async::spawn(*loop_, [this]() { return run_auth(); });
     task_group_.add();
     async::spawn(*loop_, [this]() { return run_config(); });
+    task_group_.add();
+    async::spawn(*loop_, [this]() { return run_naming(); });
     return {};
 }
 
@@ -121,6 +124,7 @@ async::Task<void> NacosClientImpl::shutdown() noexcept {
     if (state_ == NacosClientState::Created || state_ == NacosClientState::Running) {
         state_ = NacosClientState::Stopping;
         config_service_.shutdown();
+        naming_service_.shutdown();
         shutdown_publisher_->publish(true);
         publish_auth(NacosAuthAccess{.kind = NacosAuthAccessKind::Stopped});
     }
@@ -253,6 +257,11 @@ async::DetachedTask NacosClientImpl::run_auth() noexcept {
 
 async::DetachedTask NacosClientImpl::run_config() noexcept {
     co_await config_service_.run();
+    end_task();
+}
+
+async::DetachedTask NacosClientImpl::run_naming() noexcept {
+    co_await naming_service_.run();
     end_task();
 }
 
