@@ -130,10 +130,14 @@ de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31
 
 ### 3.2 修复
 
-- `EventLoop` 和 `Poller` 的 timeout 接口改为 `std::chrono::nanoseconds`；
-- Linux 上优先使用 `epoll_pwait2`，把 deadline 以 `timespec` 原样交给内核；
-- 旧内核返回 `ENOSYS` 时退回 `epoll_wait`，并对毫秒 timeout 向上取整，避免提前唤醒形成
-  busy loop；
+- `EventLoop` 把 timer heap 的最早绝对 deadline 直接交给 `Poller`，避免中间换算和截断；
+- 构建期只检查 Linux UAPI 是否提供 `SYS_epoll_pwait2`，可用时通过原始 syscall 保留现代内核的
+  `epoll_pwait2` 快路径，不引入 glibc 2.35 的符号版本依赖；
+- 运行期第一次收到 `ENOSYS` 后才创建并注册 `timerfd`，随后永久切换到 fallback；现代内核的
+  `epoll_pwait2` 路径不占用额外 timer fd。fallback 每轮按 heap 最早 deadline 更新一次 one-shot
+  timer，随后使用 `epoll_wait(..., -1)`；I/O 提前唤醒后会按新的最早 deadline 重设或取消 timer；
+- `timerfd` 与 `CLOCK_MONOTONIC` 保留纳秒接口，因此 Linux 3.x fallback 不需要把 QUIC pacing
+  退化成整数毫秒；`FIBER_FORCE_TIMERFD_POLLER=ON` 可在新内核上强制覆盖该兼容路径；
 - QUIC pacer 默认最小粒度由 1000 us 调整为 100 us；
 - 新增单元测试，确认默认 pacer 在 1 ms RTT 下可以生成 `start + 100 us` deadline。
 
@@ -225,7 +229,7 @@ ACK，并至少重复 20 次；双方使用同一迁移时序和判定条件。
 assert、crash、hang、502 或 `already`。
 
 最终 `cmake --build build -j4` 成功；
-`ctest --test-dir build --output-on-failure` 为 1392/1392 通过，两个显式启用才运行的 r-nacos
+`ctest --test-dir build --output-on-failure` 为 1414/1414 通过，两个显式启用才运行的 r-nacos
 互操作测试处于 skipped，0 failed。
 
 ## 6. 变更与复现
@@ -235,10 +239,13 @@ assert、crash、hang、502 或 `already`。
 ```text
 apps/lite_nginx/src/proxy/ProxyHandler.cpp  请求体转发边界状态
 src/http/HttpProxyCore.h                   RequestBodyForwardState
-src/event/EventLoop.{h,cpp}                纳秒级 timer deadline
-src/event/Poller.{h,cpp}                   epoll_pwait2 与兼容回退
+cmake/CompilerChecks.cmake                 epoll_pwait2 syscall 构建能力检测
+cmake/FiberPlatformConfig.h.in             Poller 平台能力配置
+src/event/EventLoop.{h,cpp}                传递 timer heap 最早绝对 deadline
+src/event/Poller.{h,cpp}                   epoll_pwait2 与 timerfd 兼容回退
 src/quic/QuicPacer.h                       100 us 默认粒度
 tests/HttpProxyCoreTest.cpp                POST 边界单元测试
+tests/PollerTest.cpp                       deadline 与 timerfd 重设/取消回归
 tests/QuicPacerTest.cpp                    亚毫秒 pacing 单元测试
 ```
 
