@@ -16,6 +16,11 @@
 
 namespace fiber::quic {
 
+enum class QuicStreamEarlyDataMode : std::uint8_t {
+    OneRttOnly,
+    ReplaySafe,
+};
+
 class QuicConnection;
 class QuicUdpEndpoint;
 
@@ -125,6 +130,8 @@ public:
     [[nodiscard]] const void *owner() const noexcept { return destroy_owner_; }
     [[nodiscard]] DestroyCallback destroy_callback() const noexcept { return on_destroy_; }
     [[nodiscard]] Lease lease() noexcept { return Lease(this); }
+    [[nodiscard]] QuicStreamEarlyDataMode early_data_mode() const noexcept { return early_data_mode_; }
+    [[nodiscard]] bool created_during_early_data() const noexcept { return created_during_early_data_; }
 
     [[nodiscard]] common::IoResult<std::size_t> try_read(std::size_t max_bytes, mem::IoBufChain &out) noexcept;
     [[nodiscard]] async::Task<common::IoResult<std::size_t>>
@@ -156,7 +163,8 @@ private:
     class WriteAwaiter;
 
     void assign_conn_ctx(QuicConnection &conn, std::uint64_t stream_id, QuicStreamRecvQueue::Options recv_options,
-                         bool local_initiated) noexcept;
+                         bool local_initiated,
+                         QuicStreamEarlyDataMode early_data_mode = QuicStreamEarlyDataMode::OneRttOnly) noexcept;
     void detach_from_connection() noexcept;
     [[nodiscard]] common::IoResult<std::uint64_t> on_stream_data_recv(mem::IoBuf data, std::uint64_t offset,
                                                                       bool fin) noexcept;
@@ -194,6 +202,8 @@ private:
     common::IoErr terminal_error_ = common::IoErr::None;
     bool attached_to_connection_ = false;
     bool local_initiated_ = false;
+    QuicStreamEarlyDataMode early_data_mode_ = QuicStreamEarlyDataMode::OneRttOnly;
+    bool created_during_early_data_ = false;
     bool closed_ = false;
     bool stream_send_pending_ = false;
     bool stream_data_blocked_reported_ = false;

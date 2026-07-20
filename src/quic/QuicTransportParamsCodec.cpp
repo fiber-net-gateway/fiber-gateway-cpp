@@ -43,6 +43,82 @@ namespace {
     return *cid;
 }
 
+[[nodiscard]] common::IoResult<QuicPreferredAddress> parse_preferred_address(QuicReadCursor &in) noexcept {
+    constexpr std::size_t kFixedLength = 4 + 2 + 16 + 2 + 1 + kStatelessResetTokenLength;
+    if (in.remaining() < kFixedLength) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    std::array<std::uint8_t, net::IpAddress::kV4Size> ipv4{};
+    std::array<std::uint8_t, net::IpAddress::kV6Size> ipv6{};
+    auto copied = in.copy_bytes(ipv4.data(), ipv4.size());
+    auto ipv4_port = copied ? in.read_be16() : std::unexpected(copied.error());
+    copied = ipv4_port ? in.copy_bytes(ipv6.data(), ipv6.size()) : std::unexpected(ipv4_port.error());
+    auto ipv6_port = copied ? in.read_be16() : std::unexpected(copied.error());
+    auto cid_len = ipv6_port ? in.read_u8() : std::unexpected(ipv6_port.error());
+    if (!cid_len || *cid_len == 0 || *cid_len > kMaxConnectionIdLength ||
+        in.remaining() != static_cast<std::size_t>(*cid_len) + kStatelessResetTokenLength) {
+        return std::unexpected(cid_len ? common::IoErr::Invalid : cid_len.error());
+    }
+    auto cid_bytes = in.read_slice(*cid_len);
+    auto cid = cid_bytes ? QuicConnectionId::from_bytes(cid_bytes->data, cid_bytes->len)
+                         : std::unexpected(cid_bytes.error());
+    if (!cid) {
+        return std::unexpected(cid.error());
+    }
+    QuicPreferredAddress result{};
+    result.ipv4 = {net::IpAddress::v4(ipv4), *ipv4_port};
+    result.ipv6 = {net::IpAddress::v6(ipv6), *ipv6_port};
+    result.connection_id = *cid;
+    copied = in.copy_bytes(result.stateless_reset_token, kStatelessResetTokenLength);
+    if (!copied || !in.empty()) {
+        return std::unexpected(copied ? common::IoErr::Invalid : copied.error());
+    }
+    return result;
+}
+
+[[nodiscard]] common::IoResult<void>
+write_preferred_address(QuicWriteCursor *out, const QuicPreferredAddress &preferred, std::size_t &len) noexcept {
+    if (preferred.connection_id.empty()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    constexpr std::size_t kFixedLength = 4 + 2 + 16 + 2 + 1 + kStatelessResetTokenLength;
+    const std::size_t value_len = kFixedLength + preferred.connection_id.size();
+    len += quic_varint_len(kQuicTpPreferredAddress) + quic_varint_len(value_len) + value_len;
+    if (out == nullptr) {
+        return {};
+    }
+    auto wrote = quic_write_varint(*out, kQuicTpPreferredAddress);
+    if (wrote) {
+        wrote = quic_write_varint(*out, value_len);
+    }
+    if (wrote) {
+        const auto ipv4 =
+                preferred.ipv4.ip().is_v4() ? preferred.ipv4.ip().v4_bytes() : net::IpAddress::any_v4().v4_bytes();
+        wrote = out->write_bytes(ipv4.data(), ipv4.size());
+    }
+    if (wrote) {
+        wrote = out->write_be16(preferred.ipv4.ip().is_v4() ? preferred.ipv4.port() : 0);
+    }
+    if (wrote) {
+        const auto ipv6 =
+                preferred.ipv6.ip().is_v6() ? preferred.ipv6.ip().v6_bytes() : net::IpAddress::any_v6().v6_bytes();
+        wrote = out->write_bytes(ipv6.data(), ipv6.size());
+    }
+    if (wrote) {
+        wrote = out->write_be16(preferred.ipv6.ip().is_v6() ? preferred.ipv6.port() : 0);
+    }
+    if (wrote) {
+        wrote = out->write_u8(preferred.connection_id.length);
+    }
+    if (wrote) {
+        wrote = out->write_bytes(preferred.connection_id.data(), preferred.connection_id.size());
+    }
+    if (wrote) {
+        wrote = out->write_bytes(preferred.stateless_reset_token, kStatelessResetTokenLength);
+    }
+    return wrote;
+}
+
 [[nodiscard]] std::size_t param_header_len(std::uint64_t id, std::size_t value_len) noexcept {
     return quic_varint_len(id) + quic_varint_len(value_len);
 }
@@ -286,6 +362,16 @@ common::IoResult<void> quic_parse_transport_params(QuicTransportParamOwner owner
                 out.has_stateless_reset_token = true;
                 break;
 
+            case kQuicTpPreferredAddress: {
+                auto preferred = parse_preferred_address(param);
+                if (!preferred) {
+                    return std::unexpected(preferred.error());
+                }
+                out.preferred_address = *preferred;
+                out.has_preferred_address = true;
+                break;
+            }
+
             default:
                 break;
         }
@@ -302,7 +388,7 @@ common::IoResult<std::size_t> quic_create_transport_params(QuicTransportParamOwn
                                                            std::size_t *zero_rtt_len) noexcept {
     if (owner == QuicTransportParamOwner::Client &&
         (params.has_original_destination_connection_id || params.has_retry_source_connection_id ||
-         params.has_stateless_reset_token)) {
+         params.has_stateless_reset_token || params.has_preferred_address)) {
         return std::unexpected(common::IoErr::Invalid);
     }
     if (!constrained_transport_params_valid(params) || params.initial_max_streams_bidi > kQuicMaxStreamLimit ||
@@ -394,6 +480,12 @@ common::IoResult<std::size_t> quic_create_transport_params(QuicTransportParamOwn
     if (owner == QuicTransportParamOwner::Server && params.has_stateless_reset_token) {
         wrote = write_bytes_param(out, kQuicTpStatelessResetToken, params.stateless_reset_token,
                                   kStatelessResetTokenLength, len);
+        if (!wrote) {
+            return std::unexpected(wrote.error());
+        }
+    }
+    if (owner == QuicTransportParamOwner::Server && params.has_preferred_address) {
+        wrote = write_preferred_address(out, params.preferred_address, len);
         if (!wrote) {
             return std::unexpected(wrote.error());
         }

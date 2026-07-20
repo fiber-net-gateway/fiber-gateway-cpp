@@ -28,6 +28,8 @@ class TlsServerContext;
 
 namespace fiber::quic {
 
+class QuicClient;
+
 inline constexpr std::size_t kQuicUdpDefaultReadBufferSize = 65536;
 inline constexpr std::size_t kQuicUdpDefaultRecvBatchSize = 16;
 inline constexpr std::size_t kQuicUdpDefaultPlaintextBufferSize = 65536;
@@ -44,6 +46,7 @@ inline constexpr std::size_t kQuicStatelessResetMaxPacket = 1200;
 // Per-endpoint stateless-reset rate-limit capacity: resets permitted per second.
 inline constexpr std::size_t kQuicStatelessResetRateLimitCapacity = 8;
 inline constexpr std::size_t kQuicStatelessPeerBucketCount = 256;
+inline constexpr std::size_t kQuicStatelessResetTokenBucketCount = 2048;
 
 struct QuicUdpReceiveResult {
     QuicConnection *connection = nullptr;
@@ -66,6 +69,39 @@ public:
         StatelessResponseLimit invalid_token_close{128, 2};
     };
 
+    struct EndpointOptions {
+        net::SocketAddress bind_addr{};
+        std::size_t max_connections = 1024;
+        net::UdpBindOptions udp{};
+        QuicSendScheduler::Options send{};
+        std::size_t max_recv_datagrams_per_wakeup = kQuicUdpDefaultMaxRecvDatagramsPerWakeup;
+        std::size_t max_recv_bytes_per_wakeup = kQuicUdpDefaultMaxRecvBytesPerWakeup;
+        std::size_t recv_batch_size = kQuicUdpDefaultRecvBatchSize;
+        std::size_t retained_storage_limit = kQuicDefaultEndpointRetainedStorageLimit;
+        bool stateless_reset_secret_set = false;
+        std::array<std::uint8_t, kQuicStatelessResetSecretLength> stateless_reset_secret{};
+    };
+
+    struct ServerAdmissionOptions {
+        net::TlsServerContext *tls_context = nullptr;
+        QuicTransportSettings transport{};
+        std::chrono::milliseconds keepalive_interval{0};
+        QuicRecvFlowControlSettings recv_flow{};
+        bool retry = false;
+        bool issue_new_token = false;
+        bool address_validation_key_set = false;
+        std::array<std::uint8_t, kQuicAddressValidationKeyLength> address_validation_key{};
+        StatelessResponseLimits stateless_response_limits{};
+        std::chrono::seconds retry_token_lifetime{3};
+        std::chrono::seconds new_token_lifetime{600};
+        void *connection_owner = nullptr;
+        QuicConnection::Lease (*create_connection)(void *owner,
+                                                   const QuicConnection::Options &options) noexcept = nullptr;
+        bool enable_early_data = false;
+    };
+
+    // Compatibility aggregate for existing server users. New code should use
+    // EndpointOptions and, when accepting connections, ServerAdmissionOptions.
     struct Options {
         net::SocketAddress bind_addr{};
         std::size_t max_connections = 1024;
@@ -102,6 +138,9 @@ public:
     QuicUdpEndpoint() noexcept;
     ~QuicUdpEndpoint();
 
+    [[nodiscard]] common::IoResult<void> init(event::EventLoop &loop, const EndpointOptions &endpoint_options) noexcept;
+    [[nodiscard]] common::IoResult<void> init(event::EventLoop &loop, const EndpointOptions &endpoint_options,
+                                              const ServerAdmissionOptions &server_options) noexcept;
     [[nodiscard]] common::IoResult<void> init(event::EventLoop &loop, const Options &options) noexcept;
     // Starts callback-driven I/O and must run on the endpoint's event loop.
     [[nodiscard]] common::IoResult<void> start() noexcept;
@@ -136,6 +175,7 @@ public:
     [[nodiscard]] async::Task<common::IoResult<QuicUdpReceiveResult>> recv_once() noexcept;
 
 private:
+    friend class QuicClient;
     friend class QuicSendScheduler;
     friend class QuicConnection;
 
@@ -197,6 +237,8 @@ private:
     };
 
     [[nodiscard]] static std::uint64_t hash_connection_id(const QuicConnectionId &id) noexcept;
+    [[nodiscard]] static std::uint64_t
+    hash_stateless_reset_token(const std::uint8_t token[kStatelessResetTokenLength]) noexcept;
     [[nodiscard]] static std::uint64_t hash_stateless_peer(const net::SocketAddress &peer) noexcept;
     [[nodiscard]] static int compare_connection_id(const QuicConnectionId &left,
                                                    const QuicConnectionId &right) noexcept;
@@ -216,6 +258,10 @@ private:
     [[nodiscard]] common::IoResult<void> register_connection_id(QuicConnection &connection,
                                                                 QuicConnectionIdIndex &index,
                                                                 const QuicConnectionId &cid) noexcept;
+    [[nodiscard]] common::IoResult<void> attach_client_connection(QuicConnection::Lease connection) noexcept;
+    void register_stateless_reset_token(QuicConnection &connection, QuicRemoteConnectionIdSlot &slot) noexcept;
+    void unregister_stateless_reset_token(QuicRemoteConnectionIdSlot &slot) noexcept;
+    [[nodiscard]] bool handle_peer_stateless_reset(const std::uint8_t *packet_data, std::size_t packet_len) noexcept;
     void unregister_connection_id(QuicConnectionIdIndex &index) noexcept;
     [[nodiscard]] common::IoResult<void>
     create_stateless_reset_token(const QuicConnectionId &cid,
@@ -264,7 +310,8 @@ private:
     void finish_send_batch(QuicConnection &connection) noexcept;
     [[nodiscard]] bool connection_has_send_work(const QuicConnection &connection) const noexcept;
     void handle_receive_result(QuicConnection &connection, const QuicPacketProcessResult &result) noexcept;
-    [[nodiscard]] bool should_delay_ack(const QuicPacketNumberSpace &space, QuicTime now) const noexcept;
+    [[nodiscard]] static bool should_delay_ack(const QuicConnection &connection, const QuicPacketNumberSpace &space,
+                                               QuicTime now) noexcept;
 
     Options options_{};
     event::EventLoop *loop_ = nullptr;
@@ -280,6 +327,7 @@ private:
     QuicOutputFramePool output_frame_pool_{};
     QuicSendScheduler send_scheduler_{};
     DcidTree dcid_tree_{};
+    std::array<QuicStatelessResetTokenIndex *, kQuicStatelessResetTokenBucketCount> reset_token_buckets_{};
     ConnectionList connections_{};
     std::size_t active_connection_count_ = 0;
     std::size_t dropped_datagram_count_ = 0;
@@ -292,6 +340,7 @@ private:
     QuicStatelessRateState stateless_rate_{};
     event::EventLoop::DeferEntry io_pump_entry_{};
     bool initialized_ = false;
+    bool server_admission_enabled_ = false;
     bool started_ = false;
     bool closing_ = false;
     bool read_callback_registered_ = false;

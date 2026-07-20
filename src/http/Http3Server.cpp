@@ -140,8 +140,9 @@ common::IoResult<void> Http3Server::bind(const net::SocketAddress &addr) noexcep
         shard->server = this;
         shard->loop = worker_group_ != nullptr ? &worker_group_->at(i) : &loop_;
 
-        quic::QuicUdpEndpoint::Options endpoint_options = make_endpoint_options(addr, reuse_port);
-        auto initialized = shard->endpoint.init(*shard->loop, endpoint_options);
+        quic::QuicUdpEndpoint::EndpointOptions endpoint_options = make_endpoint_options(addr, reuse_port);
+        quic::QuicUdpEndpoint::ServerAdmissionOptions server_options = make_server_admission_options();
+        auto initialized = shard->endpoint.init(*shard->loop, endpoint_options, server_options);
         if (!initialized) {
             close();
             return std::unexpected(initialized.error());
@@ -222,22 +223,27 @@ quic::QuicConnection::Lease Http3Server::create_connection(const quic::QuicConne
     return quic::QuicConnection::Lease::adopt(&connection->quic());
 }
 
-quic::QuicUdpEndpoint::Options Http3Server::make_endpoint_options(const net::SocketAddress &addr,
-                                                                  bool reuse_port) noexcept {
-    quic::QuicUdpEndpoint::Options options{};
+quic::QuicUdpEndpoint::EndpointOptions Http3Server::make_endpoint_options(const net::SocketAddress &addr,
+                                                                          bool reuse_port) noexcept {
+    quic::QuicUdpEndpoint::EndpointOptions options{};
     options.bind_addr = addr;
     options.max_connections = options_.http3.max_connections_per_shard;
     options.retained_storage_limit = options_.http3.retained_storage_limit;
-    options.tls_context = tls_ctx_.get();
     options.udp = options_.http3.udp;
     options.udp.reuse_addr = true;
     options.udp.reuse_port = options.udp.reuse_port || reuse_port;
     options.send = options_.http3.send;
+    return options;
+}
+
+quic::QuicUdpEndpoint::ServerAdmissionOptions Http3Server::make_server_admission_options() noexcept {
+    quic::QuicUdpEndpoint::ServerAdmissionOptions options{};
+    options.tls_context = tls_ctx_.get();
     options.transport = options_.http3.transport;
+    options.transport.max_ack_delay = options_.http3.max_ack_delay;
+    options.transport.ack_delay_exponent = options_.http3.ack_delay_exponent;
     options.keepalive_interval = options_.http3.keepalive_interval;
     options.recv_flow = options_.http3.recv_flow;
-    options.max_ack_delay = options_.http3.max_ack_delay;
-    options.ack_delay_exponent = options_.http3.ack_delay_exponent;
     options.retry = options_.http3.retry;
     options.issue_new_token = options_.http3.issue_new_token;
     options.connection_owner = this;

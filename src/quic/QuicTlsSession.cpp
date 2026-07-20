@@ -7,7 +7,9 @@
 
 #include <openssl/ssl.h>
 #include <openssl/tls1.h>
+#include <openssl/x509.h>
 
+#include "../net/IpAddress.h"
 #include "../net/TlsContext.h"
 #include "QuicConnection.h"
 #include "QuicCrypto.h"
@@ -17,6 +19,19 @@
 namespace fiber::quic {
 
 namespace {
+
+int quic_client_connection_ex_index() noexcept {
+    static const int index = SSL_get_ex_new_index(0, nullptr, nullptr, nullptr, nullptr);
+    return index;
+}
+
+int on_new_client_session(SSL *ssl, SSL_SESSION *session) noexcept {
+    if (ssl == nullptr || session == nullptr) {
+        return 0;
+    }
+    auto *connection = static_cast<QuicConnection *>(SSL_get_ex_data(ssl, quic_client_connection_ex_index()));
+    return connection != nullptr && connection->on_new_tls_session(session) ? 1 : 0;
+}
 
 [[nodiscard]] common::IoResult<QuicEncryptionLevel> quic_level_from_ssl(enum ssl_encryption_level_t level) noexcept {
     switch (level) {
@@ -110,29 +125,6 @@ int add_handshake_data(SSL *ssl, enum ssl_encryption_level_t level, const std::u
         return 0;
     }
 
-    if (!connection->peer_transport_params_received()) {
-        const std::uint8_t *peer_params = nullptr;
-        std::size_t peer_params_len = 0;
-        SSL_get_peer_quic_transport_params(ssl, &peer_params, &peer_params_len);
-        if (peer_params == nullptr || peer_params_len == 0) {
-            connection->close(QuicErrorCode::TransportParameterError);
-            return 0;
-        }
-
-        QuicTransportParams params{};
-        QuicReadCursor reader(peer_params, peer_params_len);
-        auto parsed = quic_parse_transport_params(QuicTransportParamOwner::Client, reader, params);
-        if (!parsed) {
-            connection->close(QuicErrorCode::TransportParameterError);
-            return 0;
-        }
-        auto applied = connection->apply_peer_transport_params(params);
-        if (!applied) {
-            connection->close(QuicErrorCode::TransportParameterError);
-            return 0;
-        }
-    }
-
     if (len == 0) {
         return 1;
     }
@@ -191,6 +183,63 @@ struct QuicServerTransportParamsWire {
     std::size_t len = 0;
     std::size_t zero_rtt_len = 0;
 };
+
+[[nodiscard]] common::IoResult<std::size_t>
+create_client_transport_params(QuicConnection &connection, std::uint8_t *out, std::size_t out_cap) noexcept {
+    const QuicTransportSettings &settings = connection.local_transport();
+    QuicTransportParams params{};
+    params.max_idle_timeout = static_cast<std::uint64_t>(settings.max_idle_timeout.count());
+    params.max_udp_payload_size = settings.max_udp_payload_size;
+    params.initial_max_data = settings.initial_max_data;
+    params.initial_max_stream_data_bidi_local = settings.initial_max_stream_data_bidi_local;
+    params.initial_max_stream_data_bidi_remote = settings.initial_max_stream_data_bidi_remote;
+    params.initial_max_stream_data_uni = settings.initial_max_stream_data_uni;
+    params.initial_max_streams_bidi = settings.initial_max_streams_bidi;
+    params.initial_max_streams_uni = settings.initial_max_streams_uni;
+    params.ack_delay_exponent = settings.ack_delay_exponent;
+    params.max_ack_delay = static_cast<std::uint64_t>(settings.max_ack_delay.count());
+    params.active_connection_id_limit = settings.active_connection_id_limit;
+    params.disable_active_migration = settings.disable_active_migration;
+    params.has_initial_source_connection_id = true;
+    params.initial_source_connection_id = connection.local_connection_id();
+
+    QuicWriteCursor writer(out, out_cap);
+    return quic_create_transport_params(QuicTransportParamOwner::Client, &writer, params);
+}
+
+[[nodiscard]] common::IoResult<void> maybe_apply_peer_transport_params(SSL *ssl) noexcept {
+    QuicConnection *connection = connection_from_ssl(ssl);
+    if (connection == nullptr) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (connection->peer_transport_params_received()) {
+        return {};
+    }
+
+    const std::uint8_t *peer_params = nullptr;
+    std::size_t peer_params_len = 0;
+    SSL_get_peer_quic_transport_params(ssl, &peer_params, &peer_params_len);
+    if (peer_params == nullptr || peer_params_len == 0) {
+        return std::unexpected(common::IoErr::WouldBlock);
+    }
+
+    const QuicTransportParamOwner owner = connection->role() == QuicConnectionRole::Client
+                                                  ? QuicTransportParamOwner::Server
+                                                  : QuicTransportParamOwner::Client;
+    QuicTransportParams params{};
+    QuicReadCursor reader(peer_params, peer_params_len);
+    auto parsed = quic_parse_transport_params(owner, reader, params);
+    if (!parsed) {
+        connection->close(QuicErrorCode::TransportParameterError);
+        return std::unexpected(parsed.error());
+    }
+    auto applied = connection->apply_peer_transport_params(params);
+    if (!applied) {
+        connection->close(QuicErrorCode::TransportParameterError);
+        return std::unexpected(applied.error());
+    }
+    return {};
+}
 
 [[nodiscard]] common::IoResult<QuicServerTransportParamsWire>
 create_server_transport_params(QuicConnection &connection, std::uint8_t *out, std::size_t out_cap) noexcept {
@@ -280,12 +329,12 @@ common::IoResult<void> QuicTlsSession::init_server(net::TlsServerContext &contex
         SSL_free(ssl);
         return std::unexpected(common::IoErr::Invalid);
     }
+    SSL_set_early_data_enabled(ssl, connection.early_data_enabled() ? 1 : 0);
     if (connection.early_data_enabled()) {
         if (transport_params_wire->zero_rtt_len == 0) {
             SSL_free(ssl);
             return std::unexpected(common::IoErr::Invalid);
         }
-        SSL_set_early_data_enabled(ssl, 1);
         if (SSL_set_quic_early_data_context(ssl, transport_params.data(), transport_params_wire->zero_rtt_len) != 1) {
             SSL_free(ssl);
             return std::unexpected(common::IoErr::Invalid);
@@ -293,6 +342,81 @@ common::IoResult<void> QuicTlsSession::init_server(net::TlsServerContext &contex
     }
 
     ssl_ = ssl;
+    return {};
+}
+
+common::IoResult<void> QuicTlsSession::install_client_session_callback(net::TlsContext &context) noexcept {
+    if (context.is_server() || context.raw() == nullptr || quic_client_connection_ex_index() < 0) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    SSL_CTX_set_session_cache_mode(context.raw(), SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL_STORE);
+    SSL_CTX_sess_set_new_cb(context.raw(), on_new_client_session);
+    return {};
+}
+
+common::IoResult<void> QuicTlsSession::init_client(net::TlsContext &context, QuicConnection &connection,
+                                                   const char *server_name, bool allow_insecure,
+                                                   SSL_SESSION *session) noexcept {
+    if (ssl_ != nullptr || context.is_server() || context.raw() == nullptr || context.alpn().empty()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const bool verify_peer = context.options().verify_peer;
+    if (!verify_peer && !allow_insecure) {
+        return std::unexpected(common::IoErr::Permission);
+    }
+    if (verify_peer && (server_name == nullptr || server_name[0] == '\0')) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    SSL *ssl = SSL_new(context.raw());
+    if (ssl == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    if (SSL_set_quic_method(ssl, &kQuicTlsMethod) != 1) {
+        SSL_free(ssl);
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    SSL_set_app_data(ssl, &connection);
+    if (SSL_set_ex_data(ssl, quic_client_connection_ex_index(), &connection) != 1 ||
+        (session != nullptr && SSL_set_session(ssl, session) != 1)) {
+        SSL_free(ssl);
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    SSL_set_connect_state(ssl);
+    if (connection.early_data_enabled()) {
+        SSL_set_early_data_enabled(ssl, 1);
+    }
+
+    if (server_name != nullptr && server_name[0] != '\0') {
+        net::IpAddress address{};
+        if (net::IpAddress::parse(server_name, address)) {
+            X509_VERIFY_PARAM *param = SSL_get0_param(ssl);
+            if (verify_peer &&
+                (param == nullptr || X509_VERIFY_PARAM_set1_ip(param, address.data(), address.byte_size()) != 1)) {
+                SSL_free(ssl);
+                return std::unexpected(common::IoErr::Invalid);
+            }
+        } else {
+            if (SSL_set_tlsext_host_name(ssl, server_name) != 1 ||
+                (verify_peer && SSL_set1_host(ssl, server_name) != 1)) {
+                SSL_free(ssl);
+                return std::unexpected(common::IoErr::Invalid);
+            }
+        }
+    }
+
+    std::array<std::uint8_t, 512> transport_params{};
+    auto transport_params_len =
+            create_client_transport_params(connection, transport_params.data(), transport_params.size());
+    if (!transport_params_len ||
+        SSL_set_quic_transport_params(ssl, transport_params.data(), *transport_params_len) != 1) {
+        SSL_free(ssl);
+        return std::unexpected(transport_params_len ? common::IoErr::Invalid : transport_params_len.error());
+    }
+
+    ssl_ = ssl;
+    client_mode_ = true;
+    verify_peer_ = verify_peer;
     return {};
 }
 
@@ -312,12 +436,58 @@ common::IoResult<void> QuicTlsSession::drive_handshake() noexcept {
         return std::unexpected(common::IoErr::Invalid);
     }
 
+    if (SSL_is_init_finished(ssl_) == 1) {
+        return process_post_handshake();
+    }
+
     const int rc = SSL_do_handshake(ssl_);
+    auto transport_params = maybe_apply_peer_transport_params(ssl_);
+    if (!transport_params && transport_params.error() != common::IoErr::WouldBlock) {
+        return std::unexpected(transport_params.error());
+    }
     if (rc == 1) {
+        if (client_mode_ && SSL_in_early_data(ssl_) == 1 && SSL_is_init_finished(ssl_) != 1) {
+            return {};
+        }
+        QuicConnection *connection = connection_from_ssl(ssl_);
+        if (!transport_params || connection == nullptr || !connection->peer_transport_params_received()) {
+            if (connection != nullptr) {
+                connection->close(QuicErrorCode::TransportParameterError);
+            }
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        if (client_mode_) {
+            if (verify_peer_ && SSL_get_verify_result(ssl_) != X509_V_OK) {
+                return std::unexpected(common::IoErr::Permission);
+            }
+            const std::string_view selected = selected_alpn();
+            const unsigned char *selected_data = nullptr;
+            unsigned int selected_len = 0;
+            SSL_get0_alpn_selected(ssl_, &selected_data, &selected_len);
+            const bool supported = selected_data != nullptr && selected_len != 0;
+            if (!supported || selected.empty()) {
+                return std::unexpected(common::IoErr::NotSupported);
+            }
+            if (connection->early_data_attempted() && SSL_early_data_accepted(ssl_) == 1) {
+                auto accepted = connection->on_early_data_accepted();
+                if (!accepted) {
+                    connection->close(QuicErrorCode::TransportParameterError);
+                    return std::unexpected(accepted.error());
+                }
+            }
+        }
         return {};
     }
 
     const int err = SSL_get_error(ssl_, rc);
+    if (err == SSL_ERROR_EARLY_DATA_REJECTED && client_mode_) {
+        QuicConnection *connection = connection_from_ssl(ssl_);
+        SSL_reset_early_data_reject(ssl_);
+        if (connection != nullptr) {
+            connection->on_early_data_rejected();
+        }
+        return drive_handshake();
+    }
     if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
         return std::unexpected(common::IoErr::WouldBlock);
     }
@@ -336,9 +506,38 @@ common::IoResult<void> QuicTlsSession::drive_handshake() noexcept {
     return std::unexpected(common::IoErr::Invalid);
 }
 
+common::IoResult<void> QuicTlsSession::process_post_handshake() noexcept {
+    if (ssl_ == nullptr || SSL_is_init_finished(ssl_) != 1) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (SSL_process_quic_post_handshake(ssl_) != 1) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return {};
+}
+
 bool QuicTlsSession::handshake_done() const noexcept { return ssl_ != nullptr && SSL_is_init_finished(ssl_) == 1; }
 
-void QuicTlsSession::record_alert(std::uint8_t alert) noexcept { pending_alert_ = alert; }
+bool QuicTlsSession::session_reused() const noexcept { return ssl_ != nullptr && SSL_session_reused(ssl_) == 1; }
+
+std::string_view QuicTlsSession::selected_alpn() const noexcept {
+    if (ssl_ == nullptr) {
+        return {};
+    }
+    const unsigned char *selected = nullptr;
+    unsigned int selected_len = 0;
+    SSL_get0_alpn_selected(ssl_, &selected, &selected_len);
+    return {reinterpret_cast<const char *>(selected), selected_len};
+}
+
+long QuicTlsSession::peer_verify_result() const noexcept {
+    return ssl_ == nullptr || !verify_peer_ ? 0 : SSL_get_verify_result(ssl_);
+}
+
+void QuicTlsSession::record_alert(std::uint8_t alert) noexcept {
+    pending_alert_ = alert;
+    last_alert_ = alert;
+}
 
 std::optional<std::uint8_t> QuicTlsSession::take_pending_alert() noexcept {
     std::optional<std::uint8_t> alert = pending_alert_;

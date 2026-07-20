@@ -22,9 +22,16 @@ quic_derive_initial_secrets(const QuicConnectionId &original_dcid) noexcept;
 [[nodiscard]] common::IoResult<void> quic_init_initial_crypto(QuicCryptoState &state, QuicConnectionRole role,
                                                               const QuicConnectionId &original_dcid) noexcept;
 
+[[nodiscard]] common::IoResult<void> quic_reinit_initial_crypto(QuicCryptoState &state, QuicConnectionRole role,
+                                                                const QuicConnectionId &destination_cid) noexcept;
+
 [[nodiscard]] common::IoResult<void>
 quic_create_retry_integrity_tag(const QuicConnectionId &original_dcid, const std::uint8_t *retry_packet,
                                 std::size_t retry_packet_len, std::uint8_t *tag_out, std::size_t tag_len) noexcept;
+
+[[nodiscard]] common::IoResult<bool> quic_validate_retry_integrity_tag(const QuicConnectionId &original_dcid,
+                                                                       const std::uint8_t *retry_packet,
+                                                                       std::size_t retry_packet_len) noexcept;
 
 [[nodiscard]] common::IoResult<void> quic_set_packet_protection_secret(QuicPacketProtectionKeyView keys,
                                                                        QuicCryptoSuite suite,

@@ -646,7 +646,8 @@ bool QuicStream::is_unidirectional_stream_id(std::uint64_t stream_id) noexcept {
 }
 
 void QuicStream::assign_conn_ctx(QuicConnection &conn, std::uint64_t stream_id,
-                                 QuicStreamRecvQueue::Options recv_options, bool local_initiated) noexcept {
+                                 QuicStreamRecvQueue::Options recv_options, bool local_initiated,
+                                 QuicStreamEarlyDataMode early_data_mode) noexcept {
     FIBER_ASSERT(!attached_to_connection_);
     FIBER_ASSERT(!stream_id_assigned());
     FIBER_ASSERT(!recv_queue_.initialized());
@@ -654,6 +655,9 @@ void QuicStream::assign_conn_ctx(QuicConnection &conn, std::uint64_t stream_id,
     stream_id_ = stream_id;
     conn_ = &conn;
     local_initiated_ = local_initiated;
+    early_data_mode_ = early_data_mode;
+    created_during_early_data_ =
+            early_data_mode == QuicStreamEarlyDataMode::ReplaySafe && conn.state() == QuicConnectionState::Handshaking;
     recv_queue_.init(conn.recv_extent_pool(), recv_options);
     send_queue_.init(conn.recv_extent_pool());
     attached_to_connection_ = true;

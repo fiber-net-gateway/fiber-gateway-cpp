@@ -241,6 +241,14 @@ common::IoResult<QuicPacketEncodeResult> quic_encode_packet(QuicConnection &conn
 
     QuicPacketHeader packet{};
     quic_init_packet_header(packet, space, connection.key_phase());
+    if (spec.level == QuicEncryptionLevel::EarlyData) {
+        packet.level = QuicEncryptionLevel::EarlyData;
+        packet.long_header = true;
+        packet.type = QuicPacketType::ZeroRtt;
+        packet.flags = kPacketFlagLong | kPacketFlagFixed | kLongPacketTypeZeroRtt |
+                       static_cast<std::uint8_t>(packet.pn_len - 1);
+        packet.protected_flags = packet.flags;
+    }
     packet.version = kQuicVersion1;
     packet.dcid = spec.dcid;
     packet.scid = spec.scid;

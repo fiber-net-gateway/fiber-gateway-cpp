@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "../common/IoError.h"
+#include "../net/SocketAddress.h"
 #include "QuicCursor.h"
 #include "QuicProtocol.h"
 
@@ -33,6 +34,13 @@ enum class QuicTransportParamOwner : std::uint8_t {
     Server,
 };
 
+struct QuicPreferredAddress {
+    net::SocketAddress ipv4 = net::SocketAddress::any_v4();
+    net::SocketAddress ipv6 = net::SocketAddress::any_v6();
+    QuicConnectionId connection_id{};
+    std::uint8_t stateless_reset_token[kStatelessResetTokenLength]{};
+};
+
 struct QuicTransportParams {
     std::uint64_t max_idle_timeout = 0;
     std::uint64_t max_udp_payload_size = 65527;
@@ -51,11 +59,13 @@ struct QuicTransportParams {
     bool has_initial_source_connection_id = false;
     bool has_retry_source_connection_id = false;
     bool has_stateless_reset_token = false;
+    bool has_preferred_address = false;
 
     QuicConnectionId original_destination_connection_id{};
     QuicConnectionId initial_source_connection_id{};
     QuicConnectionId retry_source_connection_id{};
     std::uint8_t stateless_reset_token[kStatelessResetTokenLength]{};
+    QuicPreferredAddress preferred_address{};
 };
 
 [[nodiscard]] bool quic_is_reserved_transport_param(std::uint64_t id) noexcept;

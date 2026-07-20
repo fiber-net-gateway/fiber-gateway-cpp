@@ -1890,16 +1890,21 @@ DetachedTask detach_while_pacing_delayed(fiber::quic::QuicUdpEndpoint *endpoint,
 
 } // namespace
 
-TEST(QuicUdpEndpointTest, InitRejectsMissingConnectionFactory) {
-    fiber::event::EventLoop loop;
+TEST(QuicUdpEndpointTest, InitializesClientOnlyEndpointWithoutConnectionFactory) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
 
     fiber::quic::QuicUdpEndpoint endpoint;
-    fiber::quic::QuicUdpEndpoint::Options options{};
+    fiber::quic::QuicUdpEndpoint::EndpointOptions options{};
     options.bind_addr = loopback(0);
 
-    auto initialized = endpoint.init(loop, options);
-    ASSERT_FALSE(initialized.has_value());
-    EXPECT_EQ(initialized.error(), fiber::common::IoErr::Invalid);
+    auto initialized = endpoint.init(group.at(0), options);
+    ASSERT_TRUE(initialized.has_value());
+    EXPECT_TRUE(endpoint.valid());
+    EXPECT_EQ(endpoint.active_connection_count(), 0U);
+    close_endpoint_on_loop(group, endpoint);
+    group.stop();
+    group.join();
 }
 
 TEST(QuicUdpEndpointTest, StartDrainsReadableCallbackAcrossReceiveBudget) {

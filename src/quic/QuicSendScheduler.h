@@ -17,7 +17,7 @@ namespace fiber::quic {
 class QuicUdpEndpoint;
 
 inline constexpr std::size_t kQuicSendDefaultBufferSize = 65536;
-inline constexpr std::size_t kQuicSendLevelCount = 3;
+inline constexpr std::size_t kQuicSendLevelCount = 4;
 
 enum class QuicBuildMode : std::uint8_t {
     Normal,

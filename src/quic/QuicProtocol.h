@@ -54,6 +54,7 @@ struct QuicPacketHeader {
     QuicConnectionId dcid{};
     QuicConnectionId scid{};
     QuicSlice token{};
+    QuicSlice version_list{};
 
     std::uint64_t length = 0;
     const std::uint8_t *protected_pn = nullptr;

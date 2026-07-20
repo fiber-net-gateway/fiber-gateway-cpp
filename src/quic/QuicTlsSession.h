@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string_view>
 
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
@@ -11,8 +12,11 @@
 
 struct ssl_st;
 typedef struct ssl_st SSL;
+struct ssl_session_st;
+typedef struct ssl_session_st SSL_SESSION;
 
 namespace fiber::net {
+class TlsContext;
 class TlsServerContext;
 } // namespace fiber::net
 
@@ -28,12 +32,21 @@ public:
 
     [[nodiscard]] common::IoResult<void> init_server(net::TlsServerContext &context,
                                                      QuicConnection &connection) noexcept;
+    [[nodiscard]] common::IoResult<void> init_client(net::TlsContext &context, QuicConnection &connection,
+                                                     const char *server_name, bool allow_insecure,
+                                                     SSL_SESSION *session = nullptr) noexcept;
+    [[nodiscard]] static common::IoResult<void> install_client_session_callback(net::TlsContext &context) noexcept;
     [[nodiscard]] common::IoResult<void> provide_crypto_data(QuicEncryptionLevel level, const std::uint8_t *data,
                                                              std::size_t len) noexcept;
     [[nodiscard]] common::IoResult<void> drive_handshake() noexcept;
+    [[nodiscard]] common::IoResult<void> process_post_handshake() noexcept;
 
     [[nodiscard]] bool initialized() const noexcept { return ssl_ != nullptr; }
     [[nodiscard]] bool handshake_done() const noexcept;
+    [[nodiscard]] bool session_reused() const noexcept;
+    [[nodiscard]] std::string_view selected_alpn() const noexcept;
+    [[nodiscard]] long peer_verify_result() const noexcept;
+    [[nodiscard]] std::optional<std::uint8_t> last_alert() const noexcept { return last_alert_; }
     [[nodiscard]] SSL *raw() const noexcept { return ssl_; }
 
     // Capture a TLS alert raised by BoringSSL's send_alert callback during the
@@ -48,6 +61,9 @@ private:
     // drained by drive_handshake() once SSL_do_handshake returns, so connection
     // close state is never mutated re-entrantly from inside BoringSSL.
     std::optional<std::uint8_t> pending_alert_;
+    std::optional<std::uint8_t> last_alert_;
+    bool client_mode_ = false;
+    bool verify_peer_ = false;
 };
 
 } // namespace fiber::quic

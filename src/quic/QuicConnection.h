@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 #include <openssl/aead.h>
 #include <openssl/aes.h>
@@ -28,9 +29,15 @@
 #include "QuicStreamTable.h"
 #include "QuicTlsSession.h"
 
+struct ssl_session_st;
+typedef struct ssl_session_st SSL_SESSION;
+
 namespace fiber::quic {
 
 struct QuicTransportParams;
+struct QuicPacketHeader;
+struct QuicReceivedDatagram;
+class QuicClient;
 class QuicSendScheduler;
 class QuicUdpEndpoint;
 
@@ -298,6 +305,7 @@ struct QuicCryptoState : public common::NonCopyable, public common::NonMovable {
     ~QuicCryptoState();
 
     void reset() noexcept;
+    [[nodiscard]] common::IoResult<void> reset_initial_keys() noexcept;
     void set_block_pool(QuicCryptoBlockPool *pool) noexcept;
     [[nodiscard]] common::IoResult<void> ensure_transient() noexcept;
     [[nodiscard]] common::IoResult<void> ensure_application() noexcept;
@@ -328,6 +336,13 @@ struct QuicCryptoState : public common::NonCopyable, public common::NonMovable {
     [[nodiscard]] bool has_transient_block() const noexcept { return transient_ != nullptr; }
     [[nodiscard]] bool has_application_block() const noexcept { return application_ != nullptr; }
     [[nodiscard]] bool initial_discarded() const noexcept { return initial_discarded_; }
+    [[nodiscard]] bool early_write_ready() const noexcept {
+        return transient_ != nullptr && transient_->early_write.packet.ready && transient_->early_write.header.ready;
+    }
+    [[nodiscard]] bool application_write_ready() const noexcept {
+        return application_ != nullptr && application_->write_keys[application_->current_write_index].ready &&
+               application_->write_header.ready;
+    }
     [[nodiscard]] QuicKeyEpochState &epoch() noexcept { return epoch_; }
     [[nodiscard]] const QuicKeyEpochState &epoch() const noexcept { return epoch_; }
 
@@ -402,6 +417,7 @@ public:
     struct Ops {
         QuicStream::Lease (*create_stream)(void *owner, std::uint64_t stream_id) noexcept = nullptr;
         void (*on_peer_stream_attached)(void *owner, QuicStream &stream) noexcept = nullptr;
+        void (*on_early_data_rejected)(void *owner) noexcept = nullptr;
     };
 
     struct EndpointIndex {
@@ -446,6 +462,15 @@ public:
         bool has_retry_source_connection_id = false;
         bool initial_path_validated = false;
         bool enable_early_data = false;
+        QuicTransportSettings remembered_peer_transport{};
+        bool has_remembered_peer_transport = false;
+        std::string client_server_name{};
+        net::SocketAddress client_cache_remote_addr{};
+        const net::TlsContext *client_tls_context = nullptr;
+        void *client_cache_owner = nullptr;
+        bool (*on_new_tls_session)(void *owner, QuicConnection &connection, SSL_SESSION *session) noexcept = nullptr;
+        void (*on_new_token)(void *owner, QuicConnection &connection, const std::uint8_t *token,
+                             std::size_t token_len) noexcept = nullptr;
         // Server TLS context used to lazily create the SSL object only after
         // the first Initial packet passes AEAD authentication (mirrors nginx
         // ngx_quic_init_connection, which runs after ngx_quic_decrypt).
@@ -458,6 +483,8 @@ public:
     [[nodiscard]] QuicConnectionRole role() const noexcept { return options_.role; }
     [[nodiscard]] QuicConnectionState state() const noexcept { return state_; }
     [[nodiscard]] bool early_data_enabled() const noexcept { return options_.enable_early_data; }
+    [[nodiscard]] bool early_data_attempted() const noexcept { return early_data_attempted_; }
+    [[nodiscard]] bool early_data_accepted() const noexcept { return early_data_accepted_; }
     [[nodiscard]] const net::SocketAddress &local_addr() const noexcept { return options_.local_addr; }
     [[nodiscard]] const net::SocketAddress &remote_addr() const noexcept { return options_.remote_addr; }
     [[nodiscard]] const QuicConnectionId &original_destination_connection_id() const noexcept {
@@ -470,13 +497,26 @@ public:
     [[nodiscard]] const QuicConnectionId &remote_connection_id() const noexcept {
         return options_.remote_connection_id;
     }
+    [[nodiscard]] const QuicConnectionId &current_initial_destination_connection_id() const noexcept {
+        return current_initial_destination_connection_id_;
+    }
+    [[nodiscard]] bool has_server_initial_source_connection_id() const noexcept {
+        return has_server_initial_source_connection_id_;
+    }
+    [[nodiscard]] bool has_authenticated_server_packet() const noexcept { return has_authenticated_server_packet_; }
+    [[nodiscard]] const QuicConnectionId &server_initial_source_connection_id() const noexcept {
+        return server_initial_source_connection_id_;
+    }
     [[nodiscard]] bool retried() const noexcept { return options_.has_retry_source_connection_id; }
+    [[nodiscard]] bool retry_processed() const noexcept { return retry_processed_; }
     [[nodiscard]] const QuicConnectionId &retry_source_connection_id() const noexcept {
         return options_.retry_source_connection_id;
     }
     [[nodiscard]] QuicErrorCode close_error() const noexcept {
         return static_cast<QuicErrorCode>(close_info_.error_code);
     }
+    [[nodiscard]] const QuicCloseInfo &close_info() const noexcept { return close_info_; }
+    [[nodiscard]] common::IoErr connect_failure() const noexcept { return connect_failure_; }
     [[nodiscard]] QuicCloseSource close_source() const noexcept { return close_info_.source; }
     [[nodiscard]] bool closed() const noexcept { return state_ == QuicConnectionState::Closed; }
     [[nodiscard]] bool terminal_closing() const noexcept {
@@ -492,6 +532,10 @@ public:
 
     common::IoResult<void> start_handshake() noexcept;
     common::IoResult<void> mark_established() noexcept;
+    [[nodiscard]] async::Task<common::IoResult<void>>
+    wait_established(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    [[nodiscard]] async::Task<common::IoResult<void>>
+    wait_confirmed(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     void begin_draining(QuicErrorCode error = QuicErrorCode::NoError) noexcept;
     void begin_draining(QuicCloseInfo info) noexcept;
     // RFC 9000 §10.2 Immediate Close — transport error path.
@@ -546,11 +590,13 @@ public:
     [[nodiscard]] QuicStream *find_stream(std::uint64_t stream_id) noexcept;
     [[nodiscard]] const QuicStream *find_stream(std::uint64_t stream_id) const noexcept;
     [[nodiscard]] std::size_t active_stream_count() const noexcept { return streams_.size(); }
-    [[nodiscard]] common::IoResult<QuicStream *> try_attach_local_stream(QuicStream::Lease &&stream,
-                                                                         QuicStreamType type) noexcept;
+    [[nodiscard]] common::IoResult<QuicStream *>
+    try_attach_local_stream(QuicStream::Lease &&stream, QuicStreamType type,
+                            QuicStreamEarlyDataMode early_data_mode = QuicStreamEarlyDataMode::OneRttOnly) noexcept;
     [[nodiscard]] async::Task<common::IoResult<QuicStream *>>
     attach_local_stream(QuicStream::Lease stream, QuicStreamType type,
-                        std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+                        std::chrono::milliseconds timeout = std::chrono::milliseconds::max(),
+                        QuicStreamEarlyDataMode early_data_mode = QuicStreamEarlyDataMode::OneRttOnly) noexcept;
     [[nodiscard]] common::IoResult<QuicStream *> get_or_create_peer_stream(std::uint64_t stream_id) noexcept;
     [[nodiscard]] common::IoResult<void> recv_stream_frame(const QuicStreamFrame &frame, mem::IoBuf data) noexcept;
     [[nodiscard]] common::IoResult<void> recv_reset_stream_frame(const QuicResetStreamFrame &frame) noexcept;
@@ -603,7 +649,7 @@ public:
     [[nodiscard]] bool key_phase() const noexcept { return crypto_.epoch().phase; }
     [[nodiscard]] bool next_keys_ready() noexcept { return crypto_.next_application_keys_ready(); }
     [[nodiscard]] bool handshake_confirmed() const noexcept { return crypto_.epoch().handshake_confirmed; }
-    void confirm_handshake() noexcept { crypto_.epoch().handshake_confirmed = true; }
+    void confirm_handshake() noexcept;
     [[nodiscard]] common::IoResult<void> prepare_application_packet_encryption() noexcept;
     void on_application_packet_encrypted(std::uint64_t packet_number) noexcept;
     void on_application_packet_acked(std::uint64_t largest_acked, std::chrono::steady_clock::time_point now) noexcept;
@@ -690,6 +736,23 @@ public:
     [[nodiscard]] QuicTlsSession &tls() noexcept { return tls_; }
     [[nodiscard]] const QuicTlsSession &tls() const noexcept { return tls_; }
     common::IoResult<void> init_initial_crypto(const QuicConnectionId &original_dcid) noexcept;
+    common::IoResult<void> reinit_initial_crypto(const QuicConnectionId &destination_cid) noexcept;
+    [[nodiscard]] common::IoResult<void>
+    adopt_server_initial_source_connection_id(const QuicConnectionId &cid) noexcept;
+    void note_authenticated_server_packet() noexcept { has_authenticated_server_packet_ = true; }
+    [[nodiscard]] common::IoResult<bool> handle_retry(const QuicPacketHeader &packet,
+                                                      const QuicReceivedDatagram &datagram) noexcept;
+    [[nodiscard]] bool handle_version_negotiation(const QuicPacketHeader &packet) noexcept;
+    [[nodiscard]] const mem::IoBuf &initial_token() const noexcept { return initial_token_; }
+    [[nodiscard]] common::IoResult<void> set_initial_token(const std::uint8_t *token, std::size_t token_len) noexcept;
+    [[nodiscard]] common::IoResult<void> recv_new_token_frame(const QuicInputFrame &frame) noexcept;
+    [[nodiscard]] bool on_new_tls_session(SSL_SESSION *session) noexcept;
+    [[nodiscard]] std::string_view client_server_name() const noexcept { return options_.client_server_name; }
+    [[nodiscard]] const net::TlsContext *client_tls_context() const noexcept { return options_.client_tls_context; }
+    [[nodiscard]] const net::SocketAddress &client_cache_remote_addr() const noexcept {
+        return options_.client_cache_remote_addr;
+    }
+    void fail_client_connect(common::IoErr error) noexcept;
     // Lazily create the server SSL object the first time an Initial packet
     // is authenticated. Idempotent; no-op when no TLS context is configured
     // (e.g. tests). Deferring SSL_new past AEAD auth avoids per-forged-packet
@@ -703,6 +766,9 @@ public:
     // frame in response, or a path-CID switch). Protocol-level violations
     // close the connection and propagate as IoErr::Invalid.
     [[nodiscard]] common::IoResult<bool> recv_new_connection_id_frame(const QuicNewConnectionIdFrame &frame) noexcept;
+    [[nodiscard]] common::IoResult<void> on_path_validated(QuicPath &path, QuicTime now) noexcept;
+    [[nodiscard]] common::IoResult<void> on_early_data_accepted() noexcept;
+    void on_early_data_rejected() noexcept;
     [[nodiscard]] bool should_retransmit_new_connection_id(std::uint64_t sequence_number) const noexcept;
     [[nodiscard]] bool should_retransmit_retire_connection_id(std::uint64_t sequence_number) const noexcept;
     [[nodiscard]] bool has_active_local_connection_id(const QuicConnectionId &cid) const noexcept;
@@ -724,6 +790,7 @@ public:
     SendQueueEntry send_queue_entry{};
 
 private:
+    class HandshakeAwaiter;
     class LocalStreamAttachAwaiter;
 
     struct PeerStreamLimitWindow {
@@ -755,9 +822,10 @@ private:
     // check), which is a non-fatal flow-control gate and must NOT close the
     // connection.
     [[nodiscard]] bool peer_stream_exceeds_advertised_limit(std::uint64_t stream_id) const noexcept;
-    [[nodiscard]] common::IoResult<QuicStream *> attach_stream(QuicStream::Lease &&lease, std::uint64_t stream_id,
-                                                               QuicStreamRecvQueue::Options recv_options,
-                                                               bool local_initiated) noexcept;
+    [[nodiscard]] common::IoResult<QuicStream *>
+    attach_stream(QuicStream::Lease &&lease, std::uint64_t stream_id, QuicStreamRecvQueue::Options recv_options,
+                  bool local_initiated,
+                  QuicStreamEarlyDataMode early_data_mode = QuicStreamEarlyDataMode::OneRttOnly) noexcept;
     // Invoke the app's create_stream callback, attach the stream to this
     // connection, insert it into the stream table, then notify the app. Used for
     // the target peer stream AND every implicitly-opened intermediate peer
@@ -797,6 +865,8 @@ private:
     [[nodiscard]] const QuicRemoteConnectionIdSlot *
     find_remote_connection_id_slot(std::uint64_t sequence_number) const noexcept;
     [[nodiscard]] QuicRemoteConnectionIdSlot *find_free_remote_connection_id_slot() noexcept;
+    void install_remote_stateless_reset_token(QuicRemoteConnectionIdSlot &slot,
+                                              const std::uint8_t token[kStatelessResetTokenLength]) noexcept;
     [[nodiscard]] std::size_t active_remote_connection_id_count() const noexcept;
     // Drop a single remote-CID slot, posting the corresponding RETIRE frame and
     // — if the CID is bound to a path — either swapping to an unused CID
@@ -831,6 +901,12 @@ private:
     void wait_for_peer_data(QuicStream::WriteAwaiter &awaiter) noexcept;
     void cancel_peer_data_wait(QuicStream::WriteAwaiter &awaiter) noexcept;
     void notify_peer_data_waiters(common::IoErr result = common::IoErr::None) noexcept;
+    [[nodiscard]] common::IoErr handshake_wait_result(bool confirmed = false) const noexcept;
+    void wait_for_handshake(HandshakeAwaiter &awaiter) noexcept;
+    void cancel_handshake_wait(HandshakeAwaiter &awaiter) noexcept;
+    void notify_handshake_waiters(common::IoErr result) noexcept;
+    void reset_after_retry() noexcept;
+    [[nodiscard]] common::IoResult<void> start_preferred_path_validation() noexcept;
     void wait_for_local_stream_attach(LocalStreamAttachAwaiter &awaiter) noexcept;
     void cancel_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter) noexcept;
     void notify_local_stream_attach_waiters(QuicStreamType type, common::IoErr result = common::IoErr::None) noexcept;
@@ -855,6 +931,8 @@ private:
     friend class QuicSendScheduler;
 
     Options options_{};
+    QuicConnectionId current_initial_destination_connection_id_{};
+    QuicConnectionId server_initial_source_connection_id_{};
     event::EventLoop *loop_ = nullptr;
     QuicUdpEndpoint *endpoint_ = nullptr;
     QuicConnectionState state_ = QuicConnectionState::Init;
@@ -880,6 +958,7 @@ private:
     event::EventLoop::TimerEntry pacing_timer_entry_{};
     QuicPacerState pacer_{};
     QuicCryptoState crypto_{};
+    mem::IoBuf initial_token_{};
     QuicPeerTransportState peer_transport_{};
     QuicStreamTable streams_{};
     QuicTlsSession tls_{};
@@ -896,6 +975,7 @@ private:
     // (RFC 9000 §19.15 — receipt of NEW_CONNECTION_ID with sequence_number
     // smaller than Retire Prior To MUST be RETIRE-acknowledged).
     std::uint64_t largest_seen_remote_seq_ = 0;
+    std::uint64_t preferred_path_seqnum_ = kQuicNoPathSeqnum;
     std::uint64_t recv_data_consumed_ = 0;
     std::uint64_t recv_data_limit_ = 0;
     std::uint64_t peer_max_data_ = 0;
@@ -903,12 +983,22 @@ private:
     std::uint64_t last_data_blocked_limit_ = 0;
     common::IntrusiveListHook *peer_data_wait_head_ = nullptr;
     common::IntrusiveListHook *peer_data_wait_tail_ = nullptr;
+    common::IntrusiveListHook *handshake_wait_head_ = nullptr;
+    common::IntrusiveListHook *handshake_wait_tail_ = nullptr;
     common::IntrusiveListHook *local_bidi_stream_attach_wait_head_ = nullptr;
     common::IntrusiveListHook *local_bidi_stream_attach_wait_tail_ = nullptr;
     common::IntrusiveListHook *local_uni_stream_attach_wait_head_ = nullptr;
     common::IntrusiveListHook *local_uni_stream_attach_wait_tail_ = nullptr;
     bool data_blocked_reported_ = false;
     bool idle_send_timer_set_ = false;
+    bool has_server_initial_source_connection_id_ = false;
+    bool has_authenticated_server_packet_ = false;
+    bool retry_processed_ = false;
+    bool early_data_attempted_ = false;
+    bool early_data_accepted_ = false;
+    std::uint64_t early_next_local_bidi_stream_id_ = 0;
+    std::uint64_t early_next_local_uni_stream_id_ = 0;
+    std::uint64_t early_peer_data_reserved_ = 0;
     bool attached_to_endpoint_ = false;
     bool detached_from_endpoint_ = false;
     std::uint32_t ref_count_ = 1;
@@ -919,10 +1009,12 @@ private:
     // is the peer/stateless-reset reason. last_cc_msec_ rate-limits close-frame
     // requeueing in Closing.
     QuicCloseInfo close_info_{};
+    common::IoErr connect_failure_ = common::IoErr::None;
     std::chrono::milliseconds last_cc_msec_{0};
 
     friend class QuicStream;
     friend class QuicStream::WriteAwaiter;
+    friend class QuicClient;
     friend class QuicUdpEndpoint;
 };
 
