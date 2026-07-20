@@ -49,19 +49,28 @@ include paths and dependencies through `fiber::nacos`.
 
 `src/rpc/NacosRpc` is a new internal, single-connection transport kept separate
 from the existing `NacosGrpcConnection`/ConfigService flow. It directly owns a
-`GrpcClient`; `start()` connects, sends `ServerCheckRequest`, opens the
-bidirectional stream, sends `ConnectionSetupRequest`, and completes after
-SetupAck negotiation or the compatibility delay. It does not select servers,
-reconnect, or replace the current service transport.
+`GrpcClient`; its long-lived `run()` task connects, sends `ServerCheckRequest`,
+opens the bidirectional stream, sends `ConnectionSetupRequest`, processes
+server requests, runs heartbeats, and completes only after full gRPC teardown.
+It does not select servers, reconnect, or replace the current service
+transport. Callers start `run()`, await `wait_ready()` before unary requests,
+signal termination with non-blocking `shutdown()`, and use the `run()` result as
+the connection completion barrier.
 
 Unary `request()` calls snapshot the current authentication access and encode a
 typed DTO into the Nacos `Payload` JSON envelope. Server pushes are decoded by
 Payload type and dispatched through fixed-capacity, allocation-free
-`add_request_handler<Request>(RequestHandler<Request>, void *)` registrations.
-Handlers are synchronous `noexcept` function pointers registered before
-`start()`; one reader coroutine invokes them and serializes all bidirectional
-responses. ClientDetection and ConnectReset remain transport-owned control
-messages. Callers must await `shutdown()` before destroying the transport.
+`NacosBiRequestHandler::add_request_handler<Request, Response>()`
+registrations. Each asynchronous `noexcept` handler returns
+`Task<IoResult<Response>>`; its `NacosServerRequestContext` exposes the
+per-request `BufPool` used to keep response `string_view` values alive through
+encoding. One reader coroutine awaits handlers and serializes all
+bidirectional responses. Handler `IoErr` values become generic `ErrorResponse`
+messages and codes. ClientDetection and ConnectReset remain transport-owned
+control messages. A handler must finish in bounded time and must not wait for a
+later request on the same bidirectional stream; shutdown waits for the current
+handler to return. The handler registry and callback contexts must remain
+immutable and alive until `run()` returns.
 
 ## Public API
 
