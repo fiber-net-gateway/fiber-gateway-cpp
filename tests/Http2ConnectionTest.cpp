@@ -660,7 +660,7 @@ DetachedTask run_http2_connection_capture_task(fiber::http::Http2Connection *con
                                                std::shared_ptr<fiber::common::IoResult<void>> result,
                                                std::shared_ptr<std::atomic_bool> done) {
     if (connection) {
-        *result = co_await connection->run();
+        *result = co_await connection->wait_closed();
     }
     if (done) {
         done->store(true, std::memory_order_release);
@@ -1130,7 +1130,7 @@ DetachedTask run_http2_connection(std::shared_ptr<std::promise<RunOutcome>> prom
     connection.set_payload_error(payload_error);
 
     RunOutcome outcome;
-    outcome.result = co_await connection.run();
+    outcome.result = co_await connection.wait_closed();
     outcome.chunks = connection.chunks();
     outcome.wait_readable_call_count = transport_impl->wait_readable_call_count();
     outcome.read_into_call_count = transport_impl->read_into_call_count();
@@ -1192,7 +1192,7 @@ DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderR
         co_return;
     }
 
-    outcome.result = co_await connection.run();
+    outcome.result = co_await connection.wait_closed();
     outcome.written = fake_transport->written();
     promise->set_value(std::move(outcome));
 
@@ -1286,7 +1286,7 @@ run_server_delayed_send_after_close(std::shared_ptr<std::promise<ServerDelayedSe
             co_return;
         }
 
-        outcome.run_result = co_await connection.run();
+        outcome.run_result = co_await connection.wait_closed();
     }
 
     for (int i = 0; i < 100 && !delayed_send_completed->load(std::memory_order_acquire); ++i) {
@@ -1477,7 +1477,7 @@ run_client_extended_connect_header_send(std::shared_ptr<std::promise<ClientExten
             false);
     outcome.stream_id = exchange.stream_id();
     if (outcome.header_result) {
-        outcome.run_result = co_await connection.run();
+        outcome.run_result = co_await connection.wait_closed();
         outcome.support_after = exchange.extended_connect_support();
     }
 
@@ -1678,7 +1678,7 @@ DetachedTask run_client_response_body_read(std::shared_ptr<std::promise<ClientRe
             true);
     outcome.stream_id = exchange.stream_id();
     if (outcome.header_result) {
-        outcome.run_result = co_await connection.run();
+        outcome.run_result = co_await connection.wait_closed();
         outcome.body_result = co_await exchange.read_body(64);
     }
 
@@ -1732,7 +1732,7 @@ run_client_response_headers_and_trailers_read(std::shared_ptr<std::promise<Clien
             true);
     outcome.stream_id = exchange.stream_id();
     if (outcome.header_result) {
-        outcome.run_result = co_await connection.run();
+        outcome.run_result = co_await connection.wait_closed();
     }
     if (outcome.run_result) {
         outcome.informational_result = co_await exchange.read_header();
@@ -1789,7 +1789,7 @@ run_client_response_header_end_stream_read(std::shared_ptr<std::promise<ClientRe
             true);
     outcome.stream_id = exchange.stream_id();
     if (outcome.header_result) {
-        outcome.run_result = co_await connection.run();
+        outcome.run_result = co_await connection.wait_closed();
     }
     if (outcome.run_result) {
         outcome.final_result = co_await exchange.read_header();
@@ -1834,7 +1834,7 @@ run_client_response_read_after_rst_stream(std::shared_ptr<std::promise<ClientRes
             true);
     outcome.stream_id = exchange.stream_id();
     if (outcome.header_result) {
-        outcome.run_result = co_await connection.run();
+        outcome.run_result = co_await connection.wait_closed();
         outcome.read_header_result = co_await exchange.read_header();
         outcome.read_body_result = co_await exchange.read_body(64);
     }
@@ -2003,7 +2003,7 @@ DetachedTask run_http2_connection_task(fiber::http::Http2Connection *connection,
     if (!connection) {
         co_return;
     }
-    (void) co_await connection->run();
+    (void) co_await connection->wait_closed();
     if (done) {
         done->store(true, std::memory_order_release);
     }
@@ -2233,7 +2233,7 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
                                       local_stream3.get()};
         fiber::async::spawn([setup_ctx]() mutable { return run_control_setup_task(std::move(setup_ctx)); });
 
-        outcome.result = co_await connection.run();
+        outcome.result = co_await connection.wait_closed();
         promise->set_value(std::move(outcome));
         fiber::event::EventLoop::current().stop();
         co_return;
@@ -2256,7 +2256,7 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
                                       local_stream1.get(),
                                       local_stream3.get()};
         fiber::async::spawn([setup_ctx]() mutable { return run_control_setup_task(std::move(setup_ctx)); });
-        outcome.result = co_await connection.run();
+        outcome.result = co_await connection.wait_closed();
     } else {
         if (setup) {
             setup(connection, *local_stream1, *local_stream3);
@@ -2265,7 +2265,7 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
             stream1_id = local_stream1->stream_id();
             stream3_id = local_stream3->stream_id();
         }
-        outcome.result = co_await connection.run();
+        outcome.result = co_await connection.wait_closed();
     }
     co_await fiber::async::sleep(std::chrono::milliseconds(1));
     capture_outcome();
@@ -2427,7 +2427,7 @@ DetachedTask run_keepalive_connection(std::shared_ptr<std::promise<KeepaliveRunO
         outcome.read_buffer_released = !connection.read_buffer_allocated();
         connection.shutdown(fiber::common::IoErr::None);
     }
-    outcome.result = co_await connection.run();
+    outcome.result = co_await connection.wait_closed();
     outcome.written = options.role == fiber::http::Http2Connection::ConnectionRole::Client
                               ? strip_client_initial_flight(connection.written())
                               : connection.written();
@@ -2492,7 +2492,7 @@ DetachedTask run_retained_stream_connection(std::shared_ptr<std::promise<Retaine
     });
 
     RetainedStreamOutcome outcome;
-    outcome.result = co_await connection.run();
+    outcome.result = co_await connection.wait_closed();
     co_await fiber::async::sleep(std::chrono::milliseconds(1));
 
     outcome.stream_opened = retained_stream.has_value();
@@ -2599,7 +2599,7 @@ TEST(Http2ConnectionTest, StartDrivesIoAndNotifiesClosureWithoutRunCoroutine) {
         }
 
         auto on_closed = [](void *ctx, fiber::http::Http2Connection &closed_connection,
-                            fiber::http::Http2Connection::RunResult result) noexcept {
+                            fiber::http::Http2Connection::CloseResult result) noexcept {
             auto *callback = static_cast<CallbackContext *>(ctx);
             auto &event_loop = closed_connection.loop();
             callback->state = closed_connection.state();
@@ -2647,7 +2647,7 @@ TEST(Http2ConnectionTest, ReadinessCallbackDrainsTransportUntilWouldBlock) {
         outcome.chunks = connection.chunks();
         outcome.read_into_call_count = transport_impl->read_into_call_count();
         connection.shutdown();
-        outcome.result = co_await connection.run();
+        outcome.result = co_await connection.wait_closed();
         promise->set_value(std::move(outcome));
         fiber::event::EventLoop::current().stop();
     });

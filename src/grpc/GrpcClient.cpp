@@ -47,11 +47,7 @@ GrpcClient::GrpcClient(event::EventLoop &loop, Options options) noexcept :
     assign_view(scheme_, options.scheme);
 }
 
-GrpcClient::~GrpcClient() {
-    FIBER_ASSERT(state_ == State::Created || state_ == State::Stopped);
-    FIBER_ASSERT(run_started_wg_.empty());
-    FIBER_ASSERT(run_finished_wg_.empty());
-}
+GrpcClient::~GrpcClient() { FIBER_ASSERT(state_ == State::Created || state_ == State::Stopped); }
 
 fiber::async::Task<common::IoResult<void>> GrpcClient::connect(std::chrono::milliseconds timeout) noexcept {
     FIBER_ASSERT(loop_->in_loop());
@@ -67,24 +63,17 @@ fiber::async::Task<common::IoResult<void>> GrpcClient::connect(std::chrono::mill
     }
 
     state_ = State::Connected;
-    run_started_wg_.add();
-    run_finished_wg_.add();
     co_return common::IoResult<void>{};
 }
 
-fiber::async::Task<GrpcClient::RunResult> GrpcClient::run() noexcept {
+fiber::async::Task<GrpcClient::CloseResult> GrpcClient::wait_closed() noexcept {
     FIBER_ASSERT(loop_->in_loop());
-    if (state_ != State::Connected && state_ != State::StopPending) {
+    if (state_ == State::Created) {
         co_return std::unexpected(common::IoErr::Busy);
     }
-
-    state_ = state_ == State::StopPending ? State::Stopping : State::Running;
-    run_started_wg_.done();
-
-    auto run_result = co_await conn_.run();
+    auto result = co_await conn_.wait_closed();
     state_ = State::Stopped;
-    run_finished_wg_.done();
-    co_return run_result;
+    co_return result;
 }
 
 fiber::async::Task<void> GrpcClient::shutdown() noexcept {
@@ -96,27 +85,36 @@ fiber::async::Task<void> GrpcClient::shutdown() noexcept {
     if (state_ == State::Stopped) {
         co_return;
     }
-    if (state_ == State::Connected) {
-        state_ = State::StopPending;
-    }
-    if (state_ == State::StopPending) {
-        co_await run_started_wg_.join();
-    }
-    if (state_ == State::Stopped) {
-        co_return;
-    }
-
-    FIBER_ASSERT(state_ == State::Running || state_ == State::Stopping);
     state_ = State::Stopping;
     conn_.shutdown();
-    co_await run_finished_wg_.join();
-    FIBER_ASSERT(state_ == State::Stopped);
+    (void) co_await conn_.wait_closed();
+    state_ = State::Stopped;
+}
+
+fiber::async::Task<GrpcClient::CloseResult> GrpcClient::graceful_shutdown() noexcept {
+    FIBER_ASSERT(loop_->in_loop());
+    if (state_ == State::Created) {
+        state_ = State::Stopped;
+        co_return CloseResult{};
+    }
+    if (state_ == State::Stopped) {
+        if (conn_.http2().state() == http::Http2Connection::State::Init) {
+            co_return CloseResult{};
+        }
+        co_return co_await conn_.wait_closed();
+    }
+
+    const bool initiate = state_ == State::Connected;
+    state_ = State::Stopping;
+    auto result = initiate ? co_await conn_.graceful_shutdown() : co_await conn_.wait_closed();
+    state_ = State::Stopped;
+    co_return result;
 }
 
 GrpcStream GrpcClient::open_stream(std::string_view service, std::string_view method, mem::BufPool &pool,
                                    GrpcStream::Options options) noexcept(false) {
     FIBER_ASSERT(loop_->in_loop());
-    FIBER_ASSERT(state_ == State::Connected || state_ == State::Running);
+    FIBER_ASSERT(state_ == State::Connected);
     return GrpcStream(conn_, authority_, scheme_, service, method, pool, options);
 }
 
