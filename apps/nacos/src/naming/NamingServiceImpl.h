@@ -18,7 +18,7 @@
 #include <fiber/nacos/NacosAuthAccess.h>
 #include <fiber/nacos/NacosClientConfig.h>
 #include <fiber/nacos/NamingService.h>
-#include <fiber/nacos/dto/JsonCodec.h>
+#include "../dto/JsonCodec.h"
 
 #include "../SubscriptionPool.h"
 #include "../rpc/NacosBiRequestHandler.h"

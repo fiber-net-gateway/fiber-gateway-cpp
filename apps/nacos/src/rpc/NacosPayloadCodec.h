@@ -8,8 +8,8 @@
 
 #include <common/json/JsonParser.h>
 #include <common/mem/BufPool.h>
-#include <fiber/nacos/dto/JsonCodec.h>
 #include <nacos_grpc_payload.pb.h>
+#include "../dto/JsonCodec.h"
 
 #include "NacosRpcError.h"
 

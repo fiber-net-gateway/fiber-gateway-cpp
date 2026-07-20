@@ -3,7 +3,7 @@
 #include <string>
 #include <string_view>
 
-#include <fiber/nacos/dto/JsonCodec.h>
+#include "../src/dto/JsonCodec.h"
 
 namespace {
 

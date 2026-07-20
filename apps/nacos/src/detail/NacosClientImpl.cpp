@@ -10,12 +10,12 @@
 #include <common/json/JsonParse.h>
 #include <common/json/JsonParser.h>
 #include <common/util/UrlForm.h>
-#include <fiber/nacos/dto/JsonCodec.h>
 #include <http/ClientHttp1Exchange.h>
 #include <http/Http1ClientConnection.h>
 #include <http/HttpCommon.h>
 #include <http/HttpHeaders.h>
 #include <net/SocketAddress.h>
+#include "../dto/JsonCodec.h"
 
 namespace fiber::nacos::detail {
 namespace {

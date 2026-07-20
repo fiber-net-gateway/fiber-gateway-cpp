@@ -17,8 +17,8 @@
 #include <common/NonCopyable.h>
 #include <common/NonMovable.h>
 #include <common/mem/BufPool.h>
-#include <fiber/nacos/dto/Internal.h>
 #include <nacos_grpc_payload.pb.h>
+#include "../dto/Internal.h"
 
 #include "NacosPayloadCodec.h"
 
