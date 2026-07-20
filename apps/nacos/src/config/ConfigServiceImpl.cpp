@@ -7,7 +7,7 @@
 
 #include <async/Timeout.h>
 #include <common/Assert.h>
-#include <fiber/nacos/dto/Config.h>
+#include "../dto/Config.h"
 
 namespace fiber::nacos::detail {
 namespace {

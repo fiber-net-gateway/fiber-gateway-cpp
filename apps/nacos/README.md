@@ -4,7 +4,7 @@
 `apps/`. Consumers should link the `fiber::nacos` target.
 
 The current implementation covers authentication, the reusable Nacos gRPC
-transport layer, and ConfigService:
+transport layer, ConfigService, and NamingService:
 
 - Immutable, validated client configuration with multiple server IPs.
 - Nacos 2.x authentication flow through its fixed
@@ -17,8 +17,8 @@ transport layer, and ConfigService:
   each login attempt.
 - A fixed `EventLoop` for every Nacos timer, coroutine, and network operation.
 - Graceful shutdown through an internal `Watch<bool>` and `WaitGroup`.
-- Wire-compatible protobuf `Payload` framing and Java-compatible internal/config
-  JSON DTO codecs.
+- Wire-compatible protobuf `Payload` framing and Java-compatible
+  internal/config/naming JSON DTO codecs.
 - Plaintext HTTP/2 ServerCheck and bidirectional ConnectionSetup handshakes.
 - SetupAck negotiation and the legacy compatibility-delay handshake path.
 - Serialized push responses for ClientDetection, ConnectReset, registered
@@ -28,6 +28,8 @@ transport layer, and ConfigService:
 - ConfigService-owned gRPC lifecycle and dynamic access-token metadata: token
   refresh does not rebuild a healthy connection, and unconfigured
   authentication omits the `accessToken` metadata header.
+- NamingService-owned gRPC lifecycle with independent naming labels and the
+  same dynamic access-token metadata behavior.
 - Coroutine-based get, publish, CAS publish, and remove operations with bounded
   owned results and structured errors.
 - Shared configuration subscriptions with Present/NotFound values, a null
@@ -35,6 +37,10 @@ transport layer, and ConfigService:
 - Batched registration, MD5 deduplication, single-flight query synchronization,
   best-effort unregistration, reconnect recovery, and periodic compensating
   registration.
+- Naming service query and shared subscriptions with Java-compatible immediate
+  server-push semantics and `lastRefTime` deduplication.
+- Latest-value instance registration, explicit status observation,
+  best-effort deregistration, and reconnect replay.
 
 ## Targets
 
@@ -52,11 +58,12 @@ directly owns a `GrpcClient`; its long-lived `run()` task connects, sends
 `ServerCheckRequest`, opens the bidirectional stream, sends
 `ConnectionSetupRequest`, processes server requests, runs heartbeats, and
 completes only after full gRPC teardown. It deliberately does not reconnect.
-`ConfigServiceImpl` selects an endpoint, constructs one `NacosRpc`, starts
-`run()`, awaits `wait_ready()` before exposing the connection, and treats the
-`run()` result as the teardown barrier. After a transport close it destroys the
-stopped instance, applies redirect/server-failover/backoff policy, and creates a
-new instance.
+Each high-level service selects an endpoint, constructs its own `NacosRpc`,
+starts `run()`, awaits `wait_ready()` before using the connection, and treats
+the `run()` result as the teardown barrier. ConfigService uses a connection
+labeled `module=config`; NamingService uses an independent connection labeled
+`module=naming`. After a transport close the owner destroys the stopped RPC,
+applies redirect/server-failover/backoff policy, and creates a new instance.
 
 Unary `request()` calls snapshot the current authentication access and encode a
 typed DTO into the Nacos `Payload` JSON envelope. Server pushes are decoded by
@@ -82,6 +89,7 @@ The main headers are:
 #include <fiber/nacos/NacosClientConfig.h>
 #include <fiber/nacos/NacosAuthAccess.h>
 #include <fiber/nacos/ConfigService.h>
+#include <fiber/nacos/NamingService.h>
 ```
 
 Configuration is created through a validation boundary:
@@ -171,10 +179,56 @@ During shutdown every live subscription is closed: `next()` resumes with
 new work. All registration/query tasks finish before shutdown
 returns.
 
+`NacosClient::naming_service()` returns the NamingService instance owned by the
+client. Naming operations use the same fixed EventLoop:
+
+```cpp
+auto &naming = (*client)->naming_service();
+
+auto queried = co_await naming.get("gateway", "DEFAULT_GROUP");
+
+auto subscribed = naming.subscribe("gateway", "DEFAULT_GROUP");
+if (subscribed) {
+    auto subscription = std::move(*subscribed);
+    auto &sub = subscription.subscriber();
+    auto snapshot = sub.current();
+    std::uint64_t version = snapshot.version;
+    for (;;) {
+        snapshot = co_await sub.next(version);
+        if (snapshot.value->kind == fiber::nacos::ResultKind::Closed) {
+            break;
+        }
+        version = snapshot.version;
+        route_to(snapshot.value->data->hosts);
+    }
+}
+
+fiber::nacos::Instance instance{
+        .ip = "127.0.0.1",
+        .port = 8080,
+};
+auto registration = naming.registry("gateway", "DEFAULT_GROUP", std::move(instance));
+```
+
+`get()` first uses a successful live-subscription value for the same key, then
+falls back to `ServiceQueryRequest`; query results are not inserted into the
+subscription cache. Multiple local subscribers for one `(serviceName, group)`
+share one wire subscription. In line with the ploto Java client,
+`SubscribeServiceResponse.serviceInfo` is ignored: only the immediately
+following `NotifySubscriberRequest` publishes a value, and equal
+`lastRefTime` values are deduplicated.
+
+`registry()` returns a move-only `InstanceRegistration`. `update()` keeps the
+latest instance while a request is in flight, `subscribe_status()` observes
+Pending/Registered/Failed/Closed, and `close()` performs best-effort
+deregistration. Every new physical naming connection restores active
+subscriptions and re-registers the latest instance values. Creation, update,
+close, and destruction of these handles are owner-EventLoop operations.
+
 `NacosClientOptions` controls authentication and gRPC connect/request/handshake
 timeouts, heartbeat timing, retry backoff, inbound/response size limits,
-configuration content/key limits, maximum listen contexts per batch, the
-subscription redo interval, and response size limits. `client_ip_override` can
+configuration content/key limits, naming host/metadata limits, maximum listen
+contexts per batch, the subscription redo interval, and response size limits. `client_ip_override` can
 replace the local gRPC socket address used in Payload metadata. Refresh timing
 is intentionally not configurable: it follows the Java Nacos 2.x client rule
 `max(5 seconds, tokenTtl * 90%)`.
@@ -210,10 +264,10 @@ Created -> Running -> Stopping -> Stopped
 ```
 
 During shutdown, the client publishes its internal shutdown signal and a final
-`Stopped` authentication access value. ConfigService stops the current
-`NacosRpc`, waits for its `run()` barrier and all connection-scoped
-registration/query tasks, and then destroys it. The client then awaits both the
-ConfigService and authentication coroutines through its `WaitGroup`. An idle
+`Stopped` authentication access value. ConfigService and NamingService stop
+their current `NacosRpc`, wait for each `run()` barrier and all
+connection-scoped tasks, and then destroy it. The client then awaits both
+services and the authentication coroutine through its `WaitGroup`. An idle
 authentication coroutine wakes immediately. If a login HTTP operation is in
 progress, shutdown waits only for that current connect or request operation's
 configured timeout; the coroutine checks shutdown before starting another HTTP
@@ -266,7 +320,7 @@ client behavior.
 ```bash
 cmake -S . -B build
 cmake --build build --target fiber_nacos_tests
-ctest --test-dir build -R '^(NacosClientTest|NacosClientConfigTest|NacosDtoJsonTest|NacosPayloadTest|NacosRpcTest|NacosConfigServiceTest)\.'
+ctest --test-dir build -R '^(NacosClientTest|NacosClientConfigTest|NacosDtoJsonTest|NacosPayloadTest|NacosRpcTest|NacosConfigServiceTest|NacosNamingServiceTest)\.'
 ```
 
 Authentication and gRPC tests use local scripted HTTP/HTTP2 servers. The optional
@@ -275,6 +329,8 @@ configured authentication when `FIBER_NACOS_TEST_GRPC_PORT` points to an rnacos
 gRPC listener.
 `NacosConfigServiceTest.RnacosInteropWhenEnabled` additionally verifies real
 publish, get, subscribe/push, CAS update, and remove/NotFound behavior.
+`NacosNamingServiceTest.RnacosInteropWhenEnabled` verifies real instance
+registration, query, subscribe/push, update, and deregistration behavior.
 
 The repository's rnacos 0.8.2 fixture accepts a publish with a mismatched
 `casMd5` instead of returning a conflict. Scripted protocol tests therefore
@@ -286,5 +342,7 @@ rnacos interoperability test records the fixture-specific acceptance behavior.
 Public headers live under `include/fiber/nacos/`. HTTP authentication transport
 and the root lifecycle remain private in `src/detail/`. ConfigService owns the
 gRPC connection and keeps its state and subscription logic under `src/config/`;
-the reusable gRPC infrastructure remains private in `src/rpc/`. DTO JSON codecs
-live under `src/dto/`, and the wire Payload schema lives under `proto/`.
+NamingService owns a separate gRPC connection and keeps its state under
+`src/naming/`. The reusable gRPC infrastructure remains private in `src/rpc/`.
+Wire DTO models and their JSON codecs remain private in `src/dto/`, and the
+wire Payload schema lives under `proto/`.

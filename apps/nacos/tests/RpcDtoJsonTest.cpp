@@ -3,7 +3,7 @@
 #include <string>
 #include <string_view>
 
-#include <fiber/nacos/dto/JsonCodec.h>
+#include "../src/dto/JsonCodec.h"
 
 namespace {
 
@@ -149,6 +149,69 @@ TEST(NacosDtoJsonTest, ConfigResponsesMatchJavaWireJsonAndRoundTrip) {
     EXPECT_EQ(
             encode(batch),
             R"({"resultCode":200,"errorCode":0,"message":null,"requestId":null,"changedConfigs":[{"group":"g","dataId":"d","tenant":"t"}],"success":true})");
+}
+
+TEST(NacosDtoJsonTest, NamingRequestsMatchPlotoJavaWireJson) {
+    dto::req::ServiceQueryRequest query;
+    query.namespace_id.set_present("namespace");
+    query.service_name.set_present("service");
+    query.group_name.set_present("group");
+    EXPECT_EQ(
+            encode(query),
+            R"({"requestId":null,"namespace":"namespace","serviceName":"service","groupName":"group","cluster":null,"healthyOnly":false,"udpPort":0,"module":"naming"})");
+
+    dto::req::SubscribeServiceRequest subscribe;
+    subscribe.namespace_id.set_present("namespace");
+    subscribe.service_name.set_present("service");
+    subscribe.group_name.set_present("group");
+    EXPECT_EQ(
+            encode(subscribe),
+            R"({"requestId":null,"namespace":"namespace","serviceName":"service","groupName":"group","subscribe":true,"clusters":null,"module":"naming"})");
+
+    JsonObject<std::string_view>::Entry metadata[] = {{.key = "zone", .value = "east"}};
+    dto::NamingInstance instance;
+    instance.ip.set_present("127.0.0.1");
+    instance.port = 8080;
+    instance.weight = 1.5;
+    instance.cluster_name.set_present("DEFAULT");
+    instance.metadata.set_present(JsonObject<std::string_view>(metadata, std::size(metadata)));
+    dto::req::InstanceRequest registry;
+    registry.namespace_id.set_present("namespace");
+    registry.service_name.set_present("service");
+    registry.group_name.set_present("group");
+    registry.type.set_present("registerInstance");
+    registry.instance.set_present(instance);
+    EXPECT_EQ(
+            encode(registry),
+            R"({"requestId":null,"namespace":"namespace","serviceName":"service","groupName":"group","type":"registerInstance","instance":{"instanceId":null,"ip":"127.0.0.1","port":8080,"weight":1.5,"healthy":true,"enabled":true,"ephemeral":true,"clusterName":"DEFAULT","serviceName":null,"metadata":{"zone":"east"}},"module":"naming"})");
+}
+
+TEST(NacosDtoJsonTest, NamingServiceInfoNestedRoundTrip) {
+    constexpr std::string_view Json =
+            R"({"resultCode":200,"errorCode":0,"message":null,"requestId":null,"serviceInfo":{"name":"service","groupName":"group","clusters":"DEFAULT","cacheMillis":1000,"hosts":[{"instanceId":"id","ip":"127.0.0.1","port":8080,"weight":1.5,"healthy":true,"enabled":true,"ephemeral":true,"clusterName":"DEFAULT","serviceName":"group@@service","metadata":{"zone":"east"}}],"lastRefTime":7,"checksum":"sum","allIPs":false,"reachProtectionThreshold":false},"success":true})";
+    BufPool pool;
+    JsonParser parser;
+    dto::resp::QueryServiceResponse response;
+    ASSERT_EQ(parse(Json, pool, response, parser), ParseStatus::Done);
+    ASSERT_TRUE(response.service_info.is_present());
+    const auto &service = response.service_info.value();
+    ASSERT_TRUE(service.name.is_present());
+    EXPECT_EQ(service.name.value(), "service");
+    ASSERT_EQ(service.hosts.size(), 1u);
+    EXPECT_EQ(service.hosts[0].port, 8080);
+    ASSERT_TRUE(service.hosts[0].metadata.is_present());
+    ASSERT_NE(service.hosts[0].metadata.value().find("zone"), nullptr);
+    EXPECT_EQ(service.hosts[0].metadata.value().find("zone")->value, "east");
+    EXPECT_EQ(encode(response), Json);
+
+    dto::req::NotifySubscriberRequest notify;
+    notify.namespace_id.set_present("namespace");
+    notify.service_name.set_present("service");
+    notify.group_name.set_present("group");
+    notify.service_info = response.service_info;
+    const std::string encoded = encode(notify);
+    EXPECT_NE(encoded.find(R"("module":"naming")"), std::string::npos);
+    EXPECT_NE(encoded.find(R"("lastRefTime":7)"), std::string::npos);
 }
 
 TEST(NacosDtoJsonTest, RpcDtoParsingIsTransactionalAndRejectsWrongTypes) {
