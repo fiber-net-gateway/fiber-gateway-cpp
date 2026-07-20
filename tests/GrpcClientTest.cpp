@@ -256,8 +256,8 @@ struct TwoCallResult {
     bool got2 = false;
 };
 
-DetachedTask drive_client_connection(fiber::grpc::GrpcClient *client, bool *returned = nullptr) {
-    (void) co_await client->run();
+DetachedTask wait_for_client_connection(fiber::grpc::GrpcClient *client, bool *returned = nullptr) {
+    (void) co_await client->wait_closed();
     if (returned) {
         *returned = true;
     }
@@ -323,7 +323,7 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, std::
         promise->set_value(std::move(result));
         co_return;
     }
-    fiber::async::spawn(*loop, [&client]() { return drive_client_connection(&client); });
+    fiber::async::spawn(*loop, [&client]() { return wait_for_client_connection(&client); });
 
     fiber::mem::BufPool pool;
     helloworld::HelloRequest req = request;
@@ -337,7 +337,10 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, std::
         result.got_result = true;
     }
 
-    co_await client.shutdown();
+    auto close_result = co_await client.graceful_shutdown();
+    if (!close_result && result.err == fiber::common::IoErr::None) {
+        result.err = close_result.error();
+    }
 
     promise->set_value(std::move(result));
 }
@@ -362,7 +365,7 @@ DetachedTask run_client_two_calls(fiber::event::EventLoop *loop, std::uint16_t p
         promise->set_value(std::move(result));
         co_return;
     }
-    fiber::async::spawn(*loop, [&client]() { return drive_client_connection(&client); });
+    fiber::async::spawn(*loop, [&client]() { return wait_for_client_connection(&client); });
 
     fiber::mem::BufPool pool;
     helloworld::HelloRequest req = request;
@@ -392,9 +395,9 @@ DetachedTask run_client_two_calls(fiber::event::EventLoop *loop, std::uint16_t p
 struct LifecycleResult {
     fiber::common::IoErr err = fiber::common::IoErr::None;
     bool moved_from_invalid = false;
-    bool run_returned = false;
+    bool wait_returned = false;
     bool repeated_shutdown_completed = false;
-    bool second_run_busy = false;
+    bool repeated_wait_succeeded = false;
 };
 
 DetachedTask run_client_lifecycle(fiber::event::EventLoop *loop, std::uint16_t port,
@@ -415,7 +418,8 @@ DetachedTask run_client_lifecycle(fiber::event::EventLoop *loop, std::uint16_t p
         co_return;
     }
 
-    fiber::async::spawn(*loop, [&client, &result]() { return drive_client_connection(&client, &result.run_returned); });
+    fiber::async::spawn(*loop,
+                        [&client, &result]() { return wait_for_client_connection(&client, &result.wait_returned); });
     {
         fiber::mem::BufPool pool;
         fiber::grpc::GrpcStream original = client.open_stream("helloworld.Greeter", "SayHello", pool);
@@ -423,14 +427,14 @@ DetachedTask run_client_lifecycle(fiber::event::EventLoop *loop, std::uint16_t p
         result.moved_from_invalid = !original.valid() && moved.valid();
     }
 
-    // shutdown() starts before the posted run task enters. It must wait for the
-    // run-start barrier, stop the connection, and return only after run() exits.
+    // shutdown() can start before the posted observer enters. Both it and the
+    // observer must be released by the same connection-close completion.
     co_await client.shutdown();
     co_await client.shutdown();
     result.repeated_shutdown_completed = true;
 
-    auto second_run = co_await client.run();
-    result.second_run_busy = !second_run && second_run.error() == fiber::common::IoErr::Busy;
+    auto second_wait = co_await client.wait_closed();
+    result.repeated_wait_succeeded = second_wait.has_value();
     promise->set_value(std::move(result));
 }
 
@@ -599,7 +603,7 @@ TEST(GrpcClientTest, RepeatedUnaryCallsWorkWithoutHpackDynamicTable) {
     delete server;
 }
 
-TEST(GrpcClientTest, ImmediateShutdownWaitsForExternallyDrivenRun) {
+TEST(GrpcClientTest, ImmediateShutdownReleasesAllConnectionCloseWaiters) {
     TlsCert cert;
     ASSERT_TRUE(cert.ok) << "openssl cert generation failed";
 
@@ -633,9 +637,9 @@ TEST(GrpcClientTest, ImmediateShutdownWaitsForExternallyDrivenRun) {
     LifecycleResult result = future.get();
     ASSERT_EQ(result.err, fiber::common::IoErr::None);
     EXPECT_TRUE(result.moved_from_invalid);
-    EXPECT_TRUE(result.run_returned);
+    EXPECT_TRUE(result.wait_returned);
     EXPECT_TRUE(result.repeated_shutdown_completed);
-    EXPECT_TRUE(result.second_run_busy);
+    EXPECT_TRUE(result.repeated_wait_succeeded);
 
     std::promise<void> close_promise;
     auto close_future = close_promise.get_future();

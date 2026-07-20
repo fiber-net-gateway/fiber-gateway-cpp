@@ -166,6 +166,10 @@ void WaitGroup::cancel_waiter(Waiter *waiter) {
 void WaitGroup::post_resume(Waiter *waiter) {
     FIBER_ASSERT(waiter != nullptr);
     FIBER_ASSERT(waiter->loop != nullptr);
+    if (waiter->loop->in_loop()) {
+        waiter->loop->post_local<Waiter, &Waiter::defer_entry, &Waiter::on_run>(*waiter);
+        return;
+    }
     waiter->loop->post<Waiter, &Waiter::notify_entry, &Waiter::on_run>(*waiter);
 }
 

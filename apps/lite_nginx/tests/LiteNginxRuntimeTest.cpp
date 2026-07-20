@@ -687,7 +687,7 @@ struct Http2RunState {
 
 fiber::async::DetachedTask run_http2_connection(std::shared_ptr<fiber::http::Http2ClientConnection> connection,
                                                 std::shared_ptr<Http2RunState> state) {
-    (void) co_await connection->run();
+    (void) co_await connection->wait_closed();
     state->done.store(true, std::memory_order_release);
 }
 

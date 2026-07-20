@@ -13,12 +13,6 @@
 
 namespace fiber::nacos {
 
-enum class NacosAuthApiVersion : std::uint8_t {
-    Auto,
-    V3,
-    LegacyV1,
-};
-
 struct NacosClientConfigParams {
     std::vector<net::IpAddress> server_ips;
     std::string username;
@@ -29,7 +23,6 @@ struct NacosClientConfigParams {
     std::string tenant;
     std::string client_version = "fiber-nacos/1.0";
     std::string context_path = "/nacos";
-    NacosAuthApiVersion auth_api_version = NacosAuthApiVersion::Auto;
 };
 
 enum class NacosConfigErrorCode : std::uint8_t {
@@ -60,7 +53,6 @@ public:
     [[nodiscard]] const std::string &tenant() const noexcept { return tenant_; }
     [[nodiscard]] const std::string &client_version() const noexcept { return client_version_; }
     [[nodiscard]] const std::string &context_path() const noexcept { return context_path_; }
-    [[nodiscard]] NacosAuthApiVersion auth_api_version() const noexcept { return auth_api_version_; }
 
 private:
     explicit NacosClientConfig(NacosClientConfigParams params) noexcept;
@@ -74,7 +66,6 @@ private:
     std::string tenant_;
     std::string client_version_;
     std::string context_path_;
-    NacosAuthApiVersion auth_api_version_ = NacosAuthApiVersion::Auto;
 };
 
 struct NacosClientOptions {
@@ -83,8 +74,6 @@ struct NacosClientOptions {
     std::size_t max_auth_response_bytes = 64 * 1024;
     std::chrono::milliseconds retry_initial_delay{1000};
     std::chrono::milliseconds retry_max_delay{30000};
-    std::uint8_t refresh_percent = 90;
-    std::chrono::milliseconds min_refresh_delay{1000};
 
     std::chrono::milliseconds grpc_connect_timeout{3000};
     net::TcpSocketOptions grpc_tcp{.no_delay = net::TcpOptionMode::Enabled};
@@ -95,6 +84,8 @@ struct NacosClientOptions {
     std::chrono::milliseconds grpc_reconnect_initial_delay{1000};
     std::chrono::milliseconds grpc_reconnect_max_delay{60000};
     std::size_t max_inbound_grpc_message_bytes = 10 * 1024 * 1024;
+    // Retained for source compatibility. NacosRpc currently serializes server
+    // request handling and therefore does not maintain a response queue.
     std::size_t max_push_response_queue = 64;
     std::size_t max_push_response_bytes = 1024 * 1024;
     std::chrono::milliseconds config_subscription_redo_interval{180000};

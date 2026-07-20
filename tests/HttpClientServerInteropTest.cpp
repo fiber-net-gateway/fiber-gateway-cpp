@@ -279,7 +279,7 @@ DetachedTask close_server_on_loop(fiber::http::HttpServer *server, std::promise<
 }
 
 DetachedTask run_http2_connection_task(fiber::http::Http2ClientConnection *connection, Http2RunState *state) {
-    auto result = co_await connection->run();
+    auto result = co_await connection->wait_closed();
     if (state) {
         state->err.store(result ? fiber::common::IoErr::None : result.error(), std::memory_order_release);
         state->done.store(true, std::memory_order_release);

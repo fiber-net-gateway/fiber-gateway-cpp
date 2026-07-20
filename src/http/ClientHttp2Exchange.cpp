@@ -1,15 +1,44 @@
 #include "ClientHttp2Exchange.h"
 
 #include <cstring>
+#include <memory>
 #include <new>
 #include <utility>
 
 #include "../common/Assert.h"
+#include "../event/EventLoop.h"
 #include "ClientHttp2Request.h"
 #include "Http2ClientConnection.h"
 #include "Http2Connection.h"
 
 namespace fiber::http {
+
+namespace {
+
+using TimePoint = std::chrono::steady_clock::time_point;
+
+TimePoint deadline_after(std::chrono::milliseconds timeout) noexcept {
+    if (timeout == std::chrono::milliseconds::max()) {
+        return TimePoint::max();
+    }
+    if (timeout < std::chrono::milliseconds::zero()) {
+        timeout = std::chrono::milliseconds::zero();
+    }
+    return event::EventLoop::current().now() + timeout;
+}
+
+std::chrono::milliseconds remaining_timeout(TimePoint deadline) noexcept {
+    if (deadline == TimePoint::max()) {
+        return std::chrono::milliseconds::max();
+    }
+    const TimePoint now = event::EventLoop::current().now();
+    if (now >= deadline) {
+        return std::chrono::milliseconds::zero();
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+}
+
+} // namespace
 
 ClientHttp2Exchange::ClientHttp2Exchange(Http2Connection &conn, mem::BufPool &pool) noexcept :
     conn_(&conn), pool_(&pool) {}
@@ -41,13 +70,14 @@ ClientHttp2Exchange &ClientHttp2Exchange::operator=(ClientHttp2Exchange &&other)
 fiber::async::Task<common::IoResult<void>>
 ClientHttp2Exchange::send_request_header(const Http2RequestHead &head, bool end_stream,
                                          std::chrono::milliseconds timeout) noexcept {
-    auto request_result = ensure_request_opened();
+    const TimePoint deadline = deadline_after(timeout);
+    auto request_result = co_await ensure_request_opened(deadline);
     if (!request_result) {
         co_return std::unexpected(request_result.error());
     }
     ClientHttp2Request *req = *request_result;
     FIBER_ASSERT(req != nullptr);
-    co_return co_await req->send_request_header(head, end_stream, timeout);
+    co_return co_await req->send_request_header(head, end_stream, remaining_timeout(deadline));
 }
 
 fiber::async::Task<common::IoResult<size_t>>
@@ -156,36 +186,37 @@ Http2ExtendedConnectSupport ClientHttp2Exchange::extended_connect_support() cons
                                                  : Http2ExtendedConnectSupport::Disabled;
 }
 
-common::IoResult<ClientHttp2Request *> ClientHttp2Exchange::ensure_request_opened() noexcept {
+fiber::async::Task<common::IoResult<ClientHttp2Request *>>
+ClientHttp2Exchange::ensure_request_opened(std::chrono::steady_clock::time_point deadline) noexcept {
     if (stream_) {
         ClientHttp2Request *req = request();
         if (!req) {
-            return std::unexpected(common::IoErr::Invalid);
+            co_return std::unexpected(common::IoErr::Invalid);
         }
-        return req;
+        co_return req;
     }
     if (!conn_) {
-        return std::unexpected(common::IoErr::Invalid);
+        co_return std::unexpected(common::IoErr::Invalid);
     }
     if (!pool_) {
-        return std::unexpected(common::IoErr::Invalid);
+        co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    ClientHttp2Request *req = ClientHttp2Request::create(*conn_, *pool_);
-    if (!req) {
-        return std::unexpected(common::IoErr::NoMem);
+    std::unique_ptr<ClientHttp2Request> pending(ClientHttp2Request::create(*conn_, *pool_));
+    if (!pending) {
+        co_return std::unexpected(common::IoErr::NoMem);
     }
-    auto attach_result = conn_->attach_local_stream(req->stream());
+    auto attach_result = co_await conn_->attach_local_stream(pending->stream(), remaining_timeout(deadline));
     if (!attach_result) {
-        delete req;
-        return std::unexpected(attach_result.error());
+        co_return std::unexpected(attach_result.error());
     }
     stream_ = std::move(*attach_result);
-    req = request();
+    (void) pending.release();
+    ClientHttp2Request *req = request();
     if (!req) {
-        return std::unexpected(common::IoErr::Invalid);
+        co_return std::unexpected(common::IoErr::Invalid);
     }
-    return req;
+    co_return req;
 }
 
 ClientHttp2Request *ClientHttp2Exchange::request() noexcept {

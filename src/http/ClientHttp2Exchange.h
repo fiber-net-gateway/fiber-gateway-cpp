@@ -61,7 +61,8 @@ public:
     [[nodiscard]] const Http2Stream *stream() const noexcept { return stream_.get(); }
 
 private:
-    [[nodiscard]] common::IoResult<ClientHttp2Request *> ensure_request_opened() noexcept;
+    [[nodiscard]] fiber::async::Task<common::IoResult<ClientHttp2Request *>>
+    ensure_request_opened(std::chrono::steady_clock::time_point deadline) noexcept;
     [[nodiscard]] ClientHttp2Request *request() noexcept;
     [[nodiscard]] const ClientHttp2Request *request() const noexcept;
 

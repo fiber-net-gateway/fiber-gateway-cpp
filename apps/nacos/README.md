@@ -7,10 +7,11 @@ The current implementation covers authentication, the reusable Nacos gRPC
 transport layer, and ConfigService:
 
 - Immutable, validated client configuration with multiple server IPs.
-- Nacos v3 login and optional fallback to the legacy v1 login endpoint.
+- Nacos 2.x authentication flow through its fixed
+  `/nacos/v1/auth/users/login` endpoint; no v1/v3 client-version probing.
 - HTTP/1.1 short connections for username/password authentication.
 - URL-form encoding of credentials.
-- Token state broadcast through `async::Watch<NacosAuthSnapshot>`.
+- Authentication access broadcast through `async::Watch<NacosAuthAccess>`.
 - Timed token refresh, bounded exponential retry, and server failover.
 - A single long-lived authentication coroutine; HTTP objects remain local to
   each login attempt.
@@ -20,12 +21,13 @@ transport layer, and ConfigService:
   JSON DTO codecs.
 - Plaintext HTTP/2 ServerCheck and bidirectional ConnectionSetup handshakes.
 - SetupAck negotiation and the legacy compatibility-delay handshake path.
-- Serialized push responses for ClientDetection, ConnectReset, and unknown
-  server requests.
+- Serialized push responses for ClientDetection, ConnectReset, registered
+  module handlers, and unknown server requests.
 - Heartbeats, bounded retry with jitter, server failover, redirect handling,
-  connection generations, and bounded inbound/queued messages.
-- Dynamic access-token metadata: token refresh does not rebuild a healthy gRPC
-  connection, while unavailable authentication stops it until recovery.
+  per-attempt RPC reconstruction, and bounded inbound messages.
+- ConfigService-owned gRPC lifecycle and dynamic access-token metadata: token
+  refresh does not rebuild a healthy connection, and unconfigured
+  authentication omits the `accessToken` metadata header.
 - Coroutine-based get, publish, CAS publish, and remove operations with bounded
   owned results and structured errors.
 - Shared configuration subscriptions with Present/NotFound values, a null
@@ -43,14 +45,42 @@ transport layer, and ConfigService:
 The library links `fiber_lib` publicly, so consumers receive the core Fiber
 include paths and dependencies through `fiber::nacos`.
 
+## NacosRpc Transport and Reconnection
+
+`src/rpc/NacosRpc` is the internal one-physical-connection transport. It
+directly owns a `GrpcClient`; its long-lived `run()` task connects, sends
+`ServerCheckRequest`, opens the bidirectional stream, sends
+`ConnectionSetupRequest`, processes server requests, runs heartbeats, and
+completes only after full gRPC teardown. It deliberately does not reconnect.
+`ConfigServiceImpl` selects an endpoint, constructs one `NacosRpc`, starts
+`run()`, awaits `wait_ready()` before exposing the connection, and treats the
+`run()` result as the teardown barrier. After a transport close it destroys the
+stopped instance, applies redirect/server-failover/backoff policy, and creates a
+new instance.
+
+Unary `request()` calls snapshot the current authentication access and encode a
+typed DTO into the Nacos `Payload` JSON envelope. Server pushes are decoded by
+Payload type and dispatched through fixed-capacity, allocation-free
+`NacosBiRequestHandler::add_request_handler<Request, Response>()`
+registrations. Each asynchronous `noexcept` handler returns
+`Task<IoResult<Response>>`; its `NacosServerRequestContext` exposes the
+per-request `BufPool` used to keep response `string_view` values alive through
+encoding. One reader coroutine awaits handlers and serializes all
+bidirectional responses. Handler `IoErr` values become generic `ErrorResponse`
+messages and codes. ClientDetection and ConnectReset remain transport-owned
+control messages. A handler must finish in bounded time and must not wait for a
+later request on the same bidirectional stream; shutdown waits for the current
+handler to return. The handler registry and callback contexts must remain
+immutable and alive until `run()` returns.
+
 ## Public API
 
 The main headers are:
 
 ```cpp
-#include <fiber/nacos/NacosAuth.h>
 #include <fiber/nacos/NacosClient.h>
 #include <fiber/nacos/NacosClientConfig.h>
+#include <fiber/nacos/NacosAuthAccess.h>
 #include <fiber/nacos/ConfigService.h>
 ```
 
@@ -77,7 +107,8 @@ if (!client) {
 
 `server_ips` must contain at least one unicast address. Duplicate addresses are
 removed while preserving order. The context path must be absolute and defaults
-to `/nacos`.
+to `/nacos`. Username and password must either both be empty or both be
+non-empty. When both are empty, HTTP authentication is skipped.
 
 `NacosClient::config_service()` returns the ConfigService instance owned by the
 client. Configuration operations run on the client's EventLoop:
@@ -133,21 +164,20 @@ explicitly close subscriptions on the client EventLoop, before destroying the
 client.
 
 Transient connection and query failures retain the last Present or NotFound
-value. A new connection generation re-registers all live entries, and a
-periodic compensating registration covers lost server-side listener state.
+value. Each newly ready physical connection re-registers all live entries, and
+a periodic compensating registration covers lost server-side listener state.
 During shutdown every live subscription is closed: `next()` resumes with
 `ResultKind::Closed` (or `closed()` returns true) and config operations reject
 new work. All registration/query tasks finish before shutdown
 returns.
 
 `NacosClientOptions` controls authentication and gRPC connect/request/handshake
-timeouts, heartbeat timing, retry backoff, message/response queue limits,
+timeouts, heartbeat timing, retry backoff, inbound/response size limits,
 configuration content/key limits, maximum listen contexts per batch, the
-subscription redo interval, and refresh timing. `client_ip_override` can
-replace the local gRPC socket address used in Payload metadata. By default, a
-token is refreshed at `refresh_percent` of its TTL. A refresh failure is
-broadcast in `last_error`, but an unexpired token remains usable until its
-actual expiry.
+subscription redo interval, and response size limits. `client_ip_override` can
+replace the local gRPC socket address used in Payload metadata. Refresh timing
+is intentionally not configurable: it follows the Java Nacos 2.x client rule
+`max(5 seconds, tokenTtl * 90%)`.
 
 ## Event Loop and Lifecycle
 
@@ -162,9 +192,12 @@ if (!start_result) {
     // Handle the lifecycle error.
 }
 
-auto snapshot = co_await auth.next(0);
-if (snapshot.value && snapshot.value->ready()) {
-    use_token(snapshot.value->access_token);
+auto access = co_await auth.next(0);
+if (access.value && access.value->kind == fiber::nacos::NacosAuthAccessKind::Present) {
+    use_token(access.value->access_token);
+} else if (access.value && access.value->kind == fiber::nacos::NacosAuthAccessKind::InitialFailed) {
+    co_await (*client)->shutdown();
+    // Fail application startup.
 }
 
 co_await (*client)->shutdown();
@@ -176,59 +209,70 @@ The lifecycle is:
 Created -> Running -> Stopping -> Stopped
 ```
 
-During shutdown, the client publishes its internal shutdown signal, stops the
-gRPC connection and all generation-local stream/heartbeat/writer tasks, then
-awaits both the RPC and authentication coroutines through the `WaitGroup`. An
-idle authentication coroutine wakes immediately. If a login HTTP operation is
-in progress, shutdown waits only for that current connect or request operation's
+During shutdown, the client publishes its internal shutdown signal and a final
+`Stopped` authentication access value. ConfigService stops the current
+`NacosRpc`, waits for its `run()` barrier and all connection-scoped
+registration/query tasks, and then destroys it. The client then awaits both the
+ConfigService and authentication coroutines through its `WaitGroup`. An idle
+authentication coroutine wakes immediately. If a login HTTP operation is in
+progress, shutdown waits only for that current connect or request operation's
 configured timeout; the coroutine checks shutdown before starting another HTTP
-step, fallback, or server attempt. `shutdown()` is idempotent. The final auth
-snapshot has state `Stopped`.
+step or server attempt. `shutdown()` is idempotent.
 
-During refresh, each HTTP timeout is also capped by the old token's remaining
-lifetime. The same coroutine therefore handles refresh, retry, token expiry, and
-shutdown without persistent authentication timer objects.
+The authentication coroutine keeps the current token and refresh deadline as
+local variables. There are no persistent generation, state, expiry, or error
+fields in the public authentication API.
 
 Destroy a client only before it has started or after `shutdown()` completes.
 The destructor asserts this invariant.
 
 ## Authentication Behavior
 
-The default API selection is `NacosAuthApiVersion::Auto`:
-
-1. POST `{context_path}/v3/auth/user/login`.
-2. If that endpoint returns HTTP 404 or 405, retry
-   `{context_path}/v1/auth/users/login`.
-3. Remember the working API version for later refresh attempts.
+The client implements only the Nacos 2.x interaction flow. Authentication
+always posts to `{context_path}/v1/auth/users/login`; this path name is part of
+the Nacos 2.x Java/server protocol and does not mean that this client implements
+a selectable v1 mode. It does not probe or call the v3 login API.
 
 Each attempt starts with the previously successful server, then walks the
 configured IP list in order. Authentication requests use
 `application/x-www-form-urlencoded` and `Connection: close`.
 
-Before the first authentication result, `AuthSubscriber::current()` returns an
-empty Watch snapshot with version `0`. Call `next(0)` to wait for the first
-published authentication result. Published `NacosAuthSnapshot` states are:
+Before the first authentication decision, `AuthSubscriber::current()` returns
+an empty Watch snapshot with version `0`. Call `next(0)` to wait for the first
+published `NacosAuthAccess`. Its states are:
 
-- `Ready`: a non-expired token is available.
-- `Unavailable`: no valid token is available.
-- `Stopped`: the client has completed shutdown.
+- `NotConfigured`: username and password are both empty. No HTTP login is
+  attempted, gRPC may connect without authentication, and `accessToken` is
+  omitted from Payload metadata.
+- `InitialFailed`: the first complete pass over all configured servers failed.
+  It is published once; the authentication coroutine continues retrying in the
+  background.
+- `Present`: `access_token` is non-empty and contains the current token.
+- `Stopped`: client shutdown has begun and `access_token` is empty.
 
-Each Watch snapshot also carries its Watch version. Pass that version to the
-next `next(version)` call. `NacosAuthSnapshot::generation` increments after each
-successful login or refresh; consumers can use it to cheaply detect token
-replacement.
+`Present` is the only state with a non-empty `access_token`. Pass each Watch
+version to the next `next(version)` call.
+
+The Java-compatible refresh delay is `max(5 seconds, tokenTtl * 90%)`. A refresh
+failure keeps the last published `Present` value unchanged and retries after 5
+seconds. The Java client terminates its initial authentication stream on the
+first failure; this C++ client publishes `InitialFailed` so startup can fail
+without hanging, while retaining bounded background recovery. Skipping login
+when credentials are both empty is an explicit C++ extension to the local Java
+client behavior.
 
 ## Build and Test
 
 ```bash
 cmake -S . -B build
 cmake --build build --target fiber_nacos_tests
-ctest --test-dir build -R '^(NacosClientTest|NacosClientConfigTest|NacosDtoJsonTest|NacosPayloadTest|NacosGrpcConnectionTest|NacosConfigServiceTest)\.'
+ctest --test-dir build -R '^(NacosClientTest|NacosClientConfigTest|NacosDtoJsonTest|NacosPayloadTest|NacosRpcTest|NacosConfigServiceTest)\.'
 ```
 
 Authentication and gRPC tests use local scripted HTTP/HTTP2 servers. The optional
-`NacosGrpcConnectionTest.RnacosInteropWhenEnabled` test performs a real RPC
-handshake when `FIBER_NACOS_TEST_GRPC_PORT` points to an rnacos gRPC listener.
+`NacosRpcTest.RnacosInteropWhenEnabled` performs a real RPC handshake without
+configured authentication when `FIBER_NACOS_TEST_GRPC_PORT` points to an rnacos
+gRPC listener.
 `NacosConfigServiceTest.RnacosInteropWhenEnabled` additionally verifies real
 publish, get, subscribe/push, CAS update, and remove/NotFound behavior.
 
@@ -239,8 +283,8 @@ rnacos interoperability test records the fixture-specific acceptance behavior.
 
 ## Layout
 
-Public headers live under `include/fiber/nacos/`. Authentication transport and
-lifecycle implementation details remain private in `src/detail/`. ConfigService
-state and subscription logic live under `src/config/`, and Nacos gRPC
-infrastructure remains private in `src/rpc/`. DTO JSON codecs live under
-`src/dto/`, and the wire Payload schema lives under `proto/`.
+Public headers live under `include/fiber/nacos/`. HTTP authentication transport
+and the root lifecycle remain private in `src/detail/`. ConfigService owns the
+gRPC connection and keeps its state and subscription logic under `src/config/`;
+the reusable gRPC infrastructure remains private in `src/rpc/`. DTO JSON codecs
+live under `src/dto/`, and the wire Payload schema lives under `proto/`.

@@ -94,11 +94,11 @@ DetachedTask run_client_connect_and_shutdown(fiber::event::EventLoop *loop, std:
     opened_promise->set_value(opened);
     stop_flag->store(true, std::memory_order_release);
 
-    auto run_result = co_await connection.run();
+    auto run_result = co_await connection.wait_closed();
     result_promise->set_value(run_result ? fiber::common::IoErr::None : run_result.error());
 }
 
-TEST(Http2ClientConnectionTest, ConnectAllowsOpeningLocalStreamBeforeRun) {
+TEST(Http2ClientConnectionTest, ConnectStartsIoAndAllowsOpeningLocalStream) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
