@@ -34,6 +34,7 @@ public:
     [[nodiscard]] const std::vector<std::string> &alpn() const noexcept { return alpn_; }
     [[nodiscard]] bool is_server() const noexcept { return is_server_; }
     [[nodiscard]] bool require_server_identity() const noexcept { return require_server_identity_; }
+    void set_early_data_enabled(bool enabled) noexcept;
 
 private:
     static int alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen, const unsigned char *in,
@@ -61,6 +62,7 @@ public:
     [[nodiscard]] TlsContext *select_identity(const TlsClientHelloView &client_hello) const noexcept;
     [[nodiscard]] TlsContext *find_identity_by_name(std::string_view name) const noexcept;
     [[nodiscard]] TlsContext *default_identity() const noexcept { return default_identity_.get(); }
+    void set_early_data_enabled(bool enabled) noexcept;
 
 private:
     struct IdentityEntry {

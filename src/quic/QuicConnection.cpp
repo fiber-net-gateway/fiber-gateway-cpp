@@ -13,6 +13,7 @@
 #include "../event/EventLoopGroup.h"
 #include "QuicCrypto.h"
 #include "QuicLossRecovery.h"
+#include "QuicPacketProcessor.h"
 #include "QuicProtocol.h"
 #include "QuicTransportParamsCodec.h"
 #include "QuicUdpEndpoint.h"
@@ -53,6 +54,20 @@ constexpr std::chrono::milliseconds kQuicCloseFrameMinInterval{1000};
         return true;
     }
     return std::memcmp(left.data(), right.data(), left.size()) == 0;
+}
+
+[[nodiscard]] bool ip_address_equal(const net::IpAddress &left, const net::IpAddress &right) noexcept {
+    if (left.family() != right.family()) {
+        return false;
+    }
+    if (left.is_v4()) {
+        return left.v4_bytes() == right.v4_bytes();
+    }
+    return left.scope_id() == right.scope_id() && left.v6_bytes() == right.v6_bytes();
+}
+
+[[nodiscard]] bool socket_address_equal(const net::SocketAddress &left, const net::SocketAddress &right) noexcept {
+    return left.port() == right.port() && ip_address_equal(left.ip(), right.ip());
 }
 
 } // namespace
@@ -289,6 +304,17 @@ void QuicCryptoState::reset() noexcept {
     initial_discarded_ = false;
 }
 
+common::IoResult<void> QuicCryptoState::reset_initial_keys() noexcept {
+    auto allocated = ensure_transient();
+    if (!allocated) {
+        return std::unexpected(allocated.error());
+    }
+    transient_->initial_read.reset();
+    transient_->initial_write.reset();
+    initial_discarded_ = false;
+    return {};
+}
+
 void QuicCryptoState::discard_level(QuicEncryptionLevel level) noexcept {
     if (level == QuicEncryptionLevel::Application) {
         release_application();
@@ -399,6 +425,157 @@ QuicReadKeyEpoch QuicCryptoState::select_application_read_epoch(bool wire_phase,
     }
     return QuicReadKeyEpoch::Next;
 }
+
+class QuicConnection::HandshakeAwaiter {
+public:
+    HandshakeAwaiter(QuicConnection &connection, std::chrono::steady_clock::time_point deadline,
+                     bool wait_confirmed = false) noexcept :
+        connection_(&connection), deadline_(deadline), wait_confirmed_(wait_confirmed) {}
+
+    HandshakeAwaiter(const HandshakeAwaiter &) = delete;
+    HandshakeAwaiter &operator=(const HandshakeAwaiter &) = delete;
+    HandshakeAwaiter(HandshakeAwaiter &&) = delete;
+    HandshakeAwaiter &operator=(HandshakeAwaiter &&) = delete;
+
+    ~HandshakeAwaiter() {
+        cancel_timer();
+        if (connection_ != nullptr) {
+            connection_->cancel_handshake_wait(*this);
+        }
+    }
+
+    bool await_ready() noexcept {
+        if (connection_ == nullptr) {
+            result_ = common::IoErr::Canceled;
+            return true;
+        }
+        result_ = connection_->handshake_wait_result(wait_confirmed_);
+        if (result_ != common::IoErr::WouldBlock) {
+            completed_ = true;
+            return true;
+        }
+        if (timed_out(std::chrono::steady_clock::now())) {
+            result_ = common::IoErr::TimedOut;
+            completed_ = true;
+            return true;
+        }
+        return false;
+    }
+
+    bool await_suspend(std::coroutine_handle<> handle) noexcept {
+        if (connection_ == nullptr) {
+            result_ = common::IoErr::Canceled;
+            completed_ = true;
+            return false;
+        }
+        result_ = connection_->handshake_wait_result(wait_confirmed_);
+        if (result_ != common::IoErr::WouldBlock) {
+            completed_ = true;
+            return false;
+        }
+        loop_ = event::EventLoop::current_or_null();
+        FIBER_ASSERT(loop_ != nullptr);
+        FIBER_ASSERT(connection_->loop_ == loop_);
+        if (timed_out(loop_->now())) {
+            result_ = common::IoErr::TimedOut;
+            completed_ = true;
+            loop_ = nullptr;
+            return false;
+        }
+
+        handle_ = handle;
+        connection_->wait_for_handshake(*this);
+        arm_timer();
+        return true;
+    }
+
+    common::IoErr await_resume() noexcept {
+        common::IoErr result = result_;
+        cancel_timer();
+        if (connection_ != nullptr) {
+            connection_->cancel_handshake_wait(*this);
+        }
+        connection_ = nullptr;
+        loop_ = nullptr;
+        handle_ = {};
+        return result == common::IoErr::WouldBlock ? common::IoErr::Canceled : result;
+    }
+
+    void complete(common::IoErr result) noexcept {
+        if (completed_) {
+            return;
+        }
+        completed_ = true;
+        result_ = result;
+        cancel_timer();
+        post_resume();
+    }
+
+private:
+    [[nodiscard]] static HandshakeAwaiter *from_wait_link(common::IntrusiveListHook *hook) noexcept {
+        return hook == nullptr ? nullptr
+                               : reinterpret_cast<HandshakeAwaiter *>(reinterpret_cast<std::uint8_t *>(hook) -
+                                                                      offsetof(HandshakeAwaiter, wait_link_));
+    }
+
+    [[nodiscard]] bool has_timer() const noexcept { return deadline_ != std::chrono::steady_clock::time_point::max(); }
+    [[nodiscard]] bool timed_out(std::chrono::steady_clock::time_point now) const noexcept {
+        return has_timer() && now >= deadline_;
+    }
+
+    void arm_timer() noexcept {
+        if (has_timer() && loop_ != nullptr) {
+            loop_->post_at<HandshakeAwaiter, &HandshakeAwaiter::timer_entry_, &HandshakeAwaiter::on_timeout>(deadline_,
+                                                                                                             *this);
+        }
+    }
+
+    void cancel_timer() noexcept {
+        if (loop_ != nullptr && timer_entry_.is_in_heap()) {
+            loop_->cancel<HandshakeAwaiter, &HandshakeAwaiter::timer_entry_>(*this);
+        }
+    }
+
+    static void on_notify(HandshakeAwaiter *awaiter) noexcept {
+        if (awaiter == nullptr) {
+            return;
+        }
+        awaiter->resume_posted_ = false;
+        auto handle = awaiter->handle_;
+        awaiter->handle_ = {};
+        if (handle) {
+            handle.resume();
+        }
+    }
+
+    static void on_timeout(HandshakeAwaiter *awaiter) noexcept {
+        if (awaiter != nullptr) {
+            awaiter->complete(common::IoErr::TimedOut);
+        }
+    }
+
+    void post_resume() noexcept {
+        if (resume_posted_ || loop_ == nullptr) {
+            return;
+        }
+        resume_posted_ = true;
+        loop_->post<HandshakeAwaiter, &HandshakeAwaiter::notify_entry_, &HandshakeAwaiter::on_notify>(*this);
+    }
+
+    QuicConnection *connection_ = nullptr;
+    std::chrono::steady_clock::time_point deadline_{std::chrono::steady_clock::time_point::max()};
+    event::EventLoop *loop_ = nullptr;
+    std::coroutine_handle<> handle_{};
+    event::EventLoop::NotifyEntry notify_entry_{};
+    event::EventLoop::TimerEntry timer_entry_{};
+    common::IntrusiveListHook wait_link_{};
+    common::IoErr result_ = common::IoErr::WouldBlock;
+    bool resume_posted_ = false;
+    bool completed_ = false;
+    bool wait_confirmed_ = false;
+
+    friend class QuicConnection;
+};
 
 class QuicConnection::LocalStreamAttachAwaiter {
 public:
@@ -590,6 +767,7 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
     if (options_.initial_destination_connection_id.empty()) {
         options_.initial_destination_connection_id = options_.original_destination_connection_id;
     }
+    current_initial_destination_connection_id_ = options_.initial_destination_connection_id;
     local_cids_[0].endpoint_index.cid_key = options_.local_connection_id;
     local_cids_[0].sequence_number = 0;
     local_cids_[0].used = true;
@@ -614,6 +792,14 @@ QuicConnection::QuicConnection(const Options &options) noexcept :
     peer_uni_streams_.concurrent_limit = options_.max_peer_unidirectional_streams;
     peer_uni_streams_.advertised_limit = options_.max_peer_unidirectional_streams;
     recv_data_limit_ = options_.recv_flow.conn_recv_limit;
+    if (options_.enable_early_data && options_.has_remembered_peer_transport) {
+        peer_transport_.params = options_.remembered_peer_transport;
+        peer_max_data_ = options_.remembered_peer_transport.initial_max_data;
+        early_data_attempted_ = true;
+        early_next_local_bidi_stream_id_ = next_local_bidi_stream_id_;
+        early_next_local_uni_stream_id_ = next_local_uni_stream_id_;
+        early_peer_data_reserved_ = peer_data_reserved_;
+    }
     QuicOutputFramePool &frame_pool =
             options_.output_frame_pool != nullptr ? *options_.output_frame_pool : output_frame_pool_;
     packet_number_spaces_[0].reset(QuicEncryptionLevel::Initial);
@@ -665,6 +851,8 @@ QuicConnection::~QuicConnection() {
     // initiate from a possibly quiesced off-loop destructor.
     FIBER_ASSERT(peer_data_wait_head_ == nullptr);
     FIBER_ASSERT(peer_data_wait_tail_ == nullptr);
+    FIBER_ASSERT(handshake_wait_head_ == nullptr);
+    FIBER_ASSERT(handshake_wait_tail_ == nullptr);
     notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
     if (loop_ != nullptr && loop_->in_loop()) {
         cancel_all_timers();
@@ -682,6 +870,9 @@ QuicConnection::~QuicConnection() {
     FIBER_ASSERT(!keepalive_timer_entry_.is_in_heap());
     FIBER_ASSERT(!pacing_timer_entry_.is_in_heap());
     FIBER_ASSERT(!path_manager_.validation_timer_armed());
+    for (const QuicRemoteConnectionIdSlot &slot: remote_cids_) {
+        FIBER_ASSERT(!slot.reset_token_index.linked);
+    }
 }
 
 common::IoResult<void> QuicConnection::start_handshake() noexcept {
@@ -714,7 +905,48 @@ common::IoResult<void> QuicConnection::mark_established() noexcept {
         }
     }
     notify_all_local_stream_attach_waiters();
+    notify_handshake_waiters(common::IoErr::WouldBlock);
     return {};
+}
+
+void QuicConnection::confirm_handshake() noexcept {
+    if (crypto_.epoch().handshake_confirmed) {
+        return;
+    }
+    crypto_.epoch().handshake_confirmed = true;
+    notify_handshake_waiters(common::IoErr::WouldBlock);
+    auto preferred = start_preferred_path_validation();
+    if (!preferred) {
+        close(QuicErrorCode::InternalError);
+    }
+}
+
+async::Task<common::IoResult<void>> QuicConnection::wait_established(std::chrono::milliseconds timeout) noexcept {
+    if (timeout < std::chrono::milliseconds::zero()) {
+        timeout = std::chrono::milliseconds::zero();
+    }
+    const std::chrono::steady_clock::time_point deadline = timeout == std::chrono::milliseconds::max()
+                                                                   ? std::chrono::steady_clock::time_point::max()
+                                                                   : event::EventLoop::current().now() + timeout;
+    const common::IoErr result = co_await HandshakeAwaiter(*this, deadline);
+    if (result != common::IoErr::None) {
+        co_return std::unexpected(result);
+    }
+    co_return common::IoResult<void>{};
+}
+
+async::Task<common::IoResult<void>> QuicConnection::wait_confirmed(std::chrono::milliseconds timeout) noexcept {
+    if (timeout < std::chrono::milliseconds::zero()) {
+        timeout = std::chrono::milliseconds::zero();
+    }
+    const std::chrono::steady_clock::time_point deadline = timeout == std::chrono::milliseconds::max()
+                                                                   ? std::chrono::steady_clock::time_point::max()
+                                                                   : event::EventLoop::current().now() + timeout;
+    const common::IoErr result = co_await HandshakeAwaiter(*this, deadline, true);
+    if (result != common::IoErr::None) {
+        co_return std::unexpected(result);
+    }
+    co_return common::IoResult<void>{};
 }
 
 void QuicConnection::begin_draining(QuicErrorCode error) noexcept {
@@ -938,6 +1170,7 @@ void QuicConnection::enter_graceful_closing(QuicCloseInfo info, std::chrono::mil
     }
     close_info_ = info;
     state_ = QuicConnectionState::GracefulClosing;
+    notify_handshake_waiters(common::IoErr::Canceled);
     notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
 
     const std::chrono::milliseconds delay = grace.count() > 0 ? grace : options_.graceful_shutdown_grace;
@@ -974,6 +1207,7 @@ void QuicConnection::enter_closing(QuicCloseInfo info, bool immediate) noexcept 
 
     close_info_ = info;
     state_ = QuicConnectionState::Closing;
+    notify_handshake_waiters(handshake_wait_result());
     notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
 
     enqueue_close_frames_all_levels();
@@ -1000,6 +1234,7 @@ void QuicConnection::enter_draining(QuicCloseInfo info) noexcept {
 
     close_info_ = info;
     state_ = QuicConnectionState::Draining;
+    notify_handshake_waiters(handshake_wait_result());
     notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
     clear_pending_frames_all_levels();
     close_all_streams(close_info_.error_code);
@@ -1020,6 +1255,7 @@ void QuicConnection::enter_closed() noexcept {
     }
 
     state_ = QuicConnectionState::Closed;
+    notify_handshake_waiters(handshake_wait_result());
     notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
     close_all_streams(close_info_.error_code);
     streams_.clear();
@@ -1649,7 +1885,8 @@ void QuicConnection::on_loss_detection_timer(QuicConnection *connection) noexcep
 
 common::IoResult<QuicStream *> QuicConnection::attach_stream(QuicStream::Lease &&lease, std::uint64_t stream_id,
                                                              QuicStreamRecvQueue::Options recv_options,
-                                                             bool local_initiated) noexcept {
+                                                             bool local_initiated,
+                                                             QuicStreamEarlyDataMode early_data_mode) noexcept {
     if (!lease) {
         return std::unexpected(common::IoErr::NoMem);
     }
@@ -1664,7 +1901,7 @@ common::IoResult<QuicStream *> QuicConnection::attach_stream(QuicStream::Lease &
     }
 
     QuicStream *stream = lease.get();
-    stream->assign_conn_ctx(*this, stream_id, recv_options, local_initiated);
+    stream->assign_conn_ctx(*this, stream_id, recv_options, local_initiated, early_data_mode);
 
     if (!streams_.insert(std::move(lease))) {
         stream->detach_from_connection();
@@ -1673,15 +1910,19 @@ common::IoResult<QuicStream *> QuicConnection::attach_stream(QuicStream::Lease &
     return stream;
 }
 
-common::IoResult<QuicStream *> QuicConnection::try_attach_local_stream(QuicStream::Lease &&stream,
-                                                                       QuicStreamType type) noexcept {
+common::IoResult<QuicStream *>
+QuicConnection::try_attach_local_stream(QuicStream::Lease &&stream, QuicStreamType type,
+                                        QuicStreamEarlyDataMode early_data_mode) noexcept {
     if (!stream) {
         return std::unexpected(common::IoErr::NoMem);
     }
     if (!accepting_new_streams()) {
         return std::unexpected(common::IoErr::Canceled);
     }
-    if (state_ != QuicConnectionState::Established) {
+    const bool early_attach = state_ == QuicConnectionState::Handshaking &&
+                              early_data_mode == QuicStreamEarlyDataMode::ReplaySafe && early_data_attempted_ &&
+                              crypto_.early_write().ready();
+    if (state_ != QuicConnectionState::Established && !early_attach) {
         return std::unexpected(common::IoErr::Busy);
     }
     if (event::EventLoop *current = event::EventLoop::current_or_null()) {
@@ -1709,7 +1950,7 @@ common::IoResult<QuicStream *> QuicConnection::try_attach_local_stream(QuicStrea
             .storage_budget = &recv_storage_budget_,
     };
     const std::uint64_t id = next;
-    auto attached = attach_stream(std::move(stream), id, recv_options, /*local_initiated=*/true);
+    auto attached = attach_stream(std::move(stream), id, recv_options, /*local_initiated=*/true, early_data_mode);
     if (!attached) {
         return std::unexpected(attached.error());
     }
@@ -1719,8 +1960,8 @@ common::IoResult<QuicStream *> QuicConnection::try_attach_local_stream(QuicStrea
 }
 
 async::Task<common::IoResult<QuicStream *>>
-QuicConnection::attach_local_stream(QuicStream::Lease stream, QuicStreamType type,
-                                    std::chrono::milliseconds timeout) noexcept {
+QuicConnection::attach_local_stream(QuicStream::Lease stream, QuicStreamType type, std::chrono::milliseconds timeout,
+                                    QuicStreamEarlyDataMode early_data_mode) noexcept {
     if (timeout < std::chrono::milliseconds::zero()) {
         timeout = std::chrono::milliseconds::zero();
     }
@@ -1729,9 +1970,12 @@ QuicConnection::attach_local_stream(QuicStream::Lease stream, QuicStreamType typ
     bool deadline_set = timeout == std::chrono::milliseconds::max();
 
     for (;;) {
-        auto attached = try_attach_local_stream(std::move(stream), type);
+        auto attached = try_attach_local_stream(std::move(stream), type, early_data_mode);
         if (attached || attached.error() != common::IoErr::Busy) {
             co_return attached;
+        }
+        if (early_data_mode == QuicStreamEarlyDataMode::ReplaySafe && state_ != QuicConnectionState::Established) {
+            co_return std::unexpected(common::IoErr::Busy);
         }
         if (timeout == std::chrono::milliseconds::zero()) {
             co_return std::unexpected(common::IoErr::TimedOut);
@@ -2156,6 +2400,233 @@ common::IoResult<void> QuicConnection::init_initial_crypto(const QuicConnectionI
     return quic_init_initial_crypto(crypto_, options_.role, original_dcid);
 }
 
+common::IoResult<void> QuicConnection::reinit_initial_crypto(const QuicConnectionId &destination_cid) noexcept {
+    return quic_reinit_initial_crypto(crypto_, options_.role, destination_cid);
+}
+
+common::IoResult<void> QuicConnection::set_initial_token(const std::uint8_t *token, std::size_t token_len) noexcept {
+    constexpr std::size_t kMaxInitialTokenLength = 16 * 1024;
+    if ((token == nullptr && token_len != 0) || token_len > kMaxInitialTokenLength) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (token_len == 0) {
+        initial_token_ = {};
+        return {};
+    }
+    mem::IoBuf owned = mem::IoBuf::allocate(token_len);
+    if (!owned) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    std::memcpy(owned.writable_data(), token, token_len);
+    owned.commit(token_len);
+    initial_token_.swap(owned);
+    return {};
+}
+
+common::IoResult<void> QuicConnection::recv_new_token_frame(const QuicInputFrame &frame) noexcept {
+    constexpr std::size_t kMaxNewTokenLength = 16 * 1024;
+    if (role() != QuicConnectionRole::Client || frame.type != QuicFrameType::NewToken || frame.data.data == nullptr ||
+        frame.data.len == 0 || frame.data.len > kMaxNewTokenLength) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (options_.on_new_token != nullptr) {
+        options_.on_new_token(options_.client_cache_owner, *this, frame.data.data, frame.data.len);
+    }
+    return {};
+}
+
+bool QuicConnection::on_new_tls_session(SSL_SESSION *session) noexcept {
+    return role() == QuicConnectionRole::Client && session != nullptr && options_.on_new_tls_session != nullptr &&
+           options_.on_new_tls_session(options_.client_cache_owner, *this, session);
+}
+
+void QuicConnection::reset_after_retry() noexcept {
+    cancel_loss_detection_timer();
+    pto_count_ = 0;
+    loss_timer_mode_ = QuicLossTimerMode::None;
+
+    QuicPacketNumberSpace &space = packet_number_space(QuicEncryptionLevel::Initial);
+    QuicOutputFrameQueue retransmit{};
+    auto recover = [&](QuicOutputFrameQueue &queue) noexcept {
+        while (QuicOutputFrame *frame = queue.pop_front()) {
+            frame->packet_number = 0;
+            frame->packet_len = 0;
+            frame->send_time = QuicTime{0};
+            frame->packet_ack_eliciting = false;
+            frame->packet_ecn = net::UdpEcn::Unspecified;
+            frame->packet_path_seqnum = kQuicNoPathSeqnum;
+            frame->packet_ecn_validation_probe = false;
+            if (quic_output_frame_retransmittable_on_loss(frame->type)) {
+                frame->path = nullptr;
+                retransmit.push_back(*frame);
+            } else {
+                space.release_frame(*frame);
+            }
+        }
+    };
+    recover(space.sent_frames);
+    recover(space.sending_frames);
+    space.pending_frames.prepend_all(retransmit);
+
+    space.largest_acked_packet_number = kUnsetPacketNumber;
+    space.send_ack = false;
+    space.send_ack_count = 0;
+    space.pending_ack = kUnsetPacketNumber;
+    space.ecn_sent_counters = {};
+    space.peer_ecn_counters = {};
+    if (!space.ack_frame.queued) {
+        quic_output_frame_release_data(space.ack_frame);
+        space.ack_frame = QuicOutputFrame{};
+    }
+
+    QuicPacketNumberSpace &application = packet_number_space(QuicEncryptionLevel::Application);
+    QuicOutputFrameQueue early_retransmit{};
+    auto recover_early = [&](QuicOutputFrameQueue &queue) noexcept {
+        QuicOutputFrame *frame = queue.front();
+        while (frame != nullptr) {
+            QuicOutputFrame *next = queue.next_of(*frame);
+            if (frame->zero_rtt) {
+                queue.erase(*frame);
+                frame->packet_number = 0;
+                frame->packet_len = 0;
+                frame->send_time = QuicTime{0};
+                frame->packet_ack_eliciting = false;
+                frame->packet_ecn = net::UdpEcn::Unspecified;
+                frame->packet_path_seqnum = kQuicNoPathSeqnum;
+                frame->packet_ecn_validation_probe = false;
+                frame->path = nullptr;
+                early_retransmit.push_back(*frame);
+            }
+            frame = next;
+        }
+    };
+    recover_early(application.sent_frames);
+    recover_early(application.sending_frames);
+    application.pending_frames.prepend_all(early_retransmit);
+
+    const QuicTime now = active_timer_loop() != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
+    quic_congestion_reset_for_path(congestion_, rtt_, now);
+    quic_pacer_reset(pacer_);
+    cancel_pacing_timer();
+}
+
+common::IoResult<bool> QuicConnection::handle_retry(const QuicPacketHeader &packet,
+                                                    const QuicReceivedDatagram &datagram) noexcept {
+    constexpr std::size_t kMaxRetryTokenLength = 16 * 1024;
+    if (role() != QuicConnectionRole::Client || state_ != QuicConnectionState::Handshaking || retry_processed_ ||
+        has_authenticated_server_packet_ || packet.type != QuicPacketType::Retry || packet.version != kQuicVersion1 ||
+        packet.scid.empty() || packet.token.len == 0 || packet.token.len > kMaxRetryTokenLength ||
+        !connection_id_equal(packet.dcid, options_.local_connection_id)) {
+        return false;
+    }
+
+    const QuicPath *path = active_path();
+    if (path == nullptr || !socket_address_equal(path->remote, datagram.peer) ||
+        (!path->local.ip().is_unspecified() && !socket_address_equal(path->local, datagram.local))) {
+        return false;
+    }
+
+    auto valid_tag = quic_validate_retry_integrity_tag(options_.original_destination_connection_id, packet.packet_data,
+                                                       packet.packet_len);
+    if (!valid_tag) {
+        return std::unexpected(valid_tag.error());
+    }
+    if (!*valid_tag) {
+        return false;
+    }
+
+    mem::IoBuf token = mem::IoBuf::allocate(packet.token.len);
+    if (!token) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    std::memcpy(token.writable_data(), packet.token.data, packet.token.len);
+    token.commit(packet.token.len);
+
+    auto reinitialized = reinit_initial_crypto(packet.scid);
+    if (!reinitialized) {
+        return std::unexpected(reinitialized.error());
+    }
+
+    options_.retry_source_connection_id = packet.scid;
+    options_.has_retry_source_connection_id = true;
+    options_.remote_connection_id = packet.scid;
+    current_initial_destination_connection_id_ = packet.scid;
+    remote_cids_[0].cid = packet.scid;
+    remote_cids_[0].sequence_number = 0;
+    remote_cids_[0].in_use = true;
+    remote_cids_[0].used = true;
+    if (QuicPath *active = active_path(); active != nullptr) {
+        active->remote_connection_id = packet.scid;
+        active->remote_connection_id_sequence = 0;
+    }
+    initial_token_.swap(token);
+    retry_processed_ = true;
+    reset_after_retry();
+    schedule_send();
+    return true;
+}
+
+bool QuicConnection::handle_version_negotiation(const QuicPacketHeader &packet) noexcept {
+    if (role() != QuicConnectionRole::Client || state_ != QuicConnectionState::Handshaking ||
+        has_authenticated_server_packet_ || packet.type != QuicPacketType::VersionNegotiation ||
+        !connection_id_equal(packet.dcid, options_.local_connection_id) ||
+        !connection_id_equal(packet.scid, options_.original_destination_connection_id) ||
+        packet.version_list.data == nullptr || packet.version_list.len == 0 ||
+        packet.version_list.len % sizeof(std::uint32_t) != 0) {
+        return false;
+    }
+
+    for (std::size_t offset = 0; offset < packet.version_list.len; offset += sizeof(std::uint32_t)) {
+        const std::uint8_t *version = packet.version_list.data + offset;
+        const std::uint32_t value =
+                (static_cast<std::uint32_t>(version[0]) << 24U) | (static_cast<std::uint32_t>(version[1]) << 16U) |
+                (static_cast<std::uint32_t>(version[2]) << 8U) | static_cast<std::uint32_t>(version[3]);
+        if (value == kQuicVersion1) {
+            return false;
+        }
+    }
+
+    fail_client_connect(common::IoErr::NotSupported);
+    return true;
+}
+
+void QuicConnection::fail_client_connect(common::IoErr error) noexcept {
+    if (role() != QuicConnectionRole::Client || terminal_closing()) {
+        return;
+    }
+    connect_failure_ = error;
+    close_info_ = QuicCloseInfo{
+            .source = QuicCloseSource::Local,
+            .frame_kind = QuicCloseFrameKind::Transport,
+            .error_code = static_cast<std::uint64_t>(QuicErrorCode::NoError),
+            .frame_type = 0,
+    };
+    enter_closed();
+}
+
+common::IoResult<void> QuicConnection::adopt_server_initial_source_connection_id(const QuicConnectionId &cid) noexcept {
+    if (options_.role != QuicConnectionRole::Client || cid.empty()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (has_server_initial_source_connection_id_) {
+        return connection_id_equal(server_initial_source_connection_id_, cid) ? common::IoResult<void>{}
+                                                                              : std::unexpected(common::IoErr::Already);
+    }
+
+    server_initial_source_connection_id_ = cid;
+    has_server_initial_source_connection_id_ = true;
+    options_.remote_connection_id = cid;
+    remote_cids_[0].cid = cid;
+    remote_cids_[0].sequence_number = 0;
+    remote_cids_[0].in_use = true;
+    remote_cids_[0].used = true;
+    if (QuicPath *path = active_path(); path != nullptr) {
+        path->remote_connection_id = cid;
+        path->remote_connection_id_sequence = 0;
+    }
+    return {};
+}
+
 common::IoResult<void> QuicConnection::ensure_server_tls() noexcept {
     if (tls_.initialized()) {
         return {};
@@ -2173,9 +2644,13 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
     if (!params.has_initial_source_connection_id) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    if (params.initial_source_connection_id.size() != options_.remote_connection_id.size() ||
+    const QuicConnectionId &expected_initial_source = options_.role == QuicConnectionRole::Client
+                                                              ? server_initial_source_connection_id_
+                                                              : options_.remote_connection_id;
+    if ((options_.role == QuicConnectionRole::Client && !has_server_initial_source_connection_id_) ||
+        params.initial_source_connection_id.size() != expected_initial_source.size() ||
         (params.initial_source_connection_id.size() != 0 &&
-         std::memcmp(params.initial_source_connection_id.data(), options_.remote_connection_id.data(),
+         std::memcmp(params.initial_source_connection_id.data(), expected_initial_source.data(),
                      params.initial_source_connection_id.size()) != 0)) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -2223,6 +2698,41 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
 
     peer_transport_.params = applied;
     peer_transport_.received = true;
+    if (options_.role == QuicConnectionRole::Client && params.has_stateless_reset_token) {
+        install_remote_stateless_reset_token(remote_cids_[0], params.stateless_reset_token);
+    }
+    if (options_.role == QuicConnectionRole::Client && params.has_preferred_address) {
+        if (connection_id_equal(params.preferred_address.connection_id, remote_cids_[0].cid) ||
+            remote_cids_[1].in_use) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        remote_cids_[1].cid = params.preferred_address.connection_id;
+        remote_cids_[1].sequence_number = 1;
+        remote_cids_[1].in_use = true;
+        remote_cids_[1].used = false;
+        install_remote_stateless_reset_token(remote_cids_[1], params.preferred_address.stateless_reset_token);
+        largest_seen_remote_seq_ = std::max<std::uint64_t>(largest_seen_remote_seq_, 1);
+
+        QuicPath *current = active_path();
+        if (current != nullptr) {
+            const net::SocketAddress *remote = nullptr;
+            if (current->local.ip().is_v4() && params.preferred_address.ipv4.port() != 0 &&
+                !params.preferred_address.ipv4.ip().is_unspecified()) {
+                remote = &params.preferred_address.ipv4;
+            } else if (current->local.ip().is_v6() && params.preferred_address.ipv6.port() != 0 &&
+                       !params.preferred_address.ipv6.ip().is_unspecified()) {
+                remote = &params.preferred_address.ipv6;
+            }
+            if (remote != nullptr) {
+                QuicPath *preferred_path = path_manager_.create(
+                        *remote, current->local, params.preferred_address.connection_id, QuicPathTag::Probe);
+                if (preferred_path == nullptr) {
+                    return std::unexpected(common::IoErr::NoMem);
+                }
+                preferred_path_seqnum_ = preferred_path->seqnum;
+            }
+        }
+    }
     peer_max_data_ = params.initial_max_data;
     options_.max_local_bidirectional_streams = params.initial_max_streams_bidi;
     options_.max_local_unidirectional_streams = params.initial_max_streams_uni;
@@ -2246,6 +2756,104 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
         }
     }
     return {};
+}
+
+common::IoResult<void> QuicConnection::start_preferred_path_validation() noexcept {
+    if (preferred_path_seqnum_ == kQuicNoPathSeqnum || !handshake_confirmed() || terminal_closing()) {
+        return {};
+    }
+    for (QuicPath &path: path_manager_.paths()) {
+        if (path.allocated && path.seqnum == preferred_path_seqnum_) {
+            const QuicTime now = active_timer_loop() != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
+            return path_manager_.start_validation(path, now);
+        }
+    }
+    return {};
+}
+
+common::IoResult<void> QuicConnection::on_path_validated(QuicPath &path, QuicTime now) noexcept {
+    if (path.seqnum != preferred_path_seqnum_ || !path.validated || &path == active_path()) {
+        return {};
+    }
+    if (!path_manager_.set_active(path)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    preferred_path_seqnum_ = kQuicNoPathSeqnum;
+    reset_congestion_for_path(now);
+    return {};
+}
+
+common::IoResult<void> QuicConnection::on_early_data_accepted() noexcept {
+    if (!early_data_attempted_) {
+        return {};
+    }
+    if (!peer_transport_.received || !options_.has_remembered_peer_transport) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const QuicTransportSettings &remembered = options_.remembered_peer_transport;
+    const QuicTransportSettings &current = peer_transport_.params;
+    if (current.active_connection_id_limit < remembered.active_connection_id_limit ||
+        current.initial_max_data < remembered.initial_max_data ||
+        current.initial_max_stream_data_bidi_local < remembered.initial_max_stream_data_bidi_local ||
+        current.initial_max_stream_data_bidi_remote < remembered.initial_max_stream_data_bidi_remote ||
+        current.initial_max_stream_data_uni < remembered.initial_max_stream_data_uni ||
+        current.initial_max_streams_bidi < remembered.initial_max_streams_bidi ||
+        current.initial_max_streams_uni < remembered.initial_max_streams_uni) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    early_data_accepted_ = true;
+    return {};
+}
+
+void QuicConnection::on_early_data_rejected() noexcept {
+    if (!early_data_attempted_ || early_data_accepted_) {
+        return;
+    }
+
+    QuicPacketNumberSpace &space = packet_number_space(QuicEncryptionLevel::Application);
+    auto discard = [this, &space](QuicOutputFrameQueue &queue) noexcept {
+        QuicOutputFrame *frame = queue.front();
+        while (frame != nullptr) {
+            QuicOutputFrame *next = queue.next_of(*frame);
+            if (frame->zero_rtt) {
+                queue.erase(*frame);
+                if (frame->type == QuicFrameType::Stream) {
+                    if (QuicStream *stream = find_stream(frame->u.stream.stream_id); stream != nullptr) {
+                        stream->stream_send_pending_ = false;
+                    }
+                }
+                space.release_frame(*frame);
+            }
+            frame = next;
+        }
+    };
+    discard(space.pending_frames);
+    discard(space.sending_frames);
+    discard(space.sent_frames);
+
+    for (;;) {
+        QuicStream *early_stream = nullptr;
+        streams_.for_each([&early_stream](QuicStream &stream) noexcept {
+            if (early_stream == nullptr && stream.created_during_early_data()) {
+                early_stream = &stream;
+            }
+        });
+        if (early_stream == nullptr) {
+            break;
+        }
+        retire_stream(*early_stream);
+    }
+
+    next_local_bidi_stream_id_ = early_next_local_bidi_stream_id_;
+    next_local_uni_stream_id_ = early_next_local_uni_stream_id_;
+    peer_data_reserved_ = early_peer_data_reserved_;
+    crypto_.discard_level(QuicEncryptionLevel::EarlyData);
+    const QuicTime now = active_timer_loop() != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
+    quic_congestion_reset_for_path(congestion_, rtt_, now);
+    quic_pacer_reset(pacer_);
+    if (options_.ops.on_early_data_rejected != nullptr) {
+        options_.ops.on_early_data_rejected(options_.owner);
+    }
 }
 
 common::IoResult<bool> QuicConnection::recv_retire_connection_id_frame(const QuicRetireConnectionIdFrame &frame,
@@ -2293,10 +2901,7 @@ bool QuicConnection::detects_stateless_reset(const std::uint8_t *packet_data, st
     }
     const std::uint8_t *tail = packet_data + packet_len - kStatelessResetTokenLength;
     for (const QuicRemoteConnectionIdSlot &slot: remote_cids_) {
-        if (!slot.in_use || slot.sequence_number == 0) {
-            // No stateless reset token is carried for the initial Connection ID;
-            // tokens arrive only in NEW_CONNECTION_ID frames (RFC 9000 §10.3.1),
-            // so the sequence-0 slot's token is always zero and must be skipped.
+        if (!slot.in_use || !slot.has_stateless_reset_token) {
             continue;
         }
         // Constant-time compare (cf. nginx ngx_quic_handle_stateless_reset):
@@ -2436,6 +3041,19 @@ QuicRemoteConnectionIdSlot *QuicConnection::find_free_remote_connection_id_slot(
     return nullptr;
 }
 
+void QuicConnection::install_remote_stateless_reset_token(
+        QuicRemoteConnectionIdSlot &slot, const std::uint8_t token[kStatelessResetTokenLength]) noexcept {
+    FIBER_ASSERT(token != nullptr);
+    if (endpoint_ != nullptr) {
+        endpoint_->unregister_stateless_reset_token(slot);
+    }
+    std::memcpy(slot.stateless_reset_token, token, kStatelessResetTokenLength);
+    slot.has_stateless_reset_token = true;
+    if (endpoint_ != nullptr) {
+        endpoint_->register_stateless_reset_token(*this, slot);
+    }
+}
+
 std::size_t QuicConnection::active_remote_connection_id_count() const noexcept {
     std::size_t count = 0;
     for (const QuicRemoteConnectionIdSlot &slot: remote_cids_) {
@@ -2490,6 +3108,9 @@ common::IoResult<bool> QuicConnection::retire_remote_connection_id(QuicRemoteCon
     }
 
     const std::uint64_t seq = slot.sequence_number;
+    if (endpoint_ != nullptr) {
+        endpoint_->unregister_stateless_reset_token(slot);
+    }
     slot = QuicRemoteConnectionIdSlot{};
     auto enqueued = queue_retire_connection_id_frame(seq);
     if (!enqueued) {
@@ -2553,9 +3174,9 @@ common::IoResult<bool> QuicConnection::recv_new_connection_id_frame(const QuicNe
         }
         slot->cid = new_cid;
         slot->sequence_number = frame.sequence_number;
-        std::memcpy(slot->stateless_reset_token, frame.stateless_reset_token, kStatelessResetTokenLength);
         slot->in_use = true;
         slot->used = false;
+        install_remote_stateless_reset_token(*slot, frame.stateless_reset_token);
         if (frame.sequence_number > largest_seen_remote_seq_) {
             largest_seen_remote_seq_ = frame.sequence_number;
         }
@@ -2652,6 +3273,81 @@ bool QuicConnection::local_stream_attach_ready(QuicStreamType type) const noexce
     return state_ == QuicConnectionState::Established && accepting_new_streams() && !local_stream_blocked(type);
 }
 
+common::IoErr QuicConnection::handshake_wait_result(bool confirmed) const noexcept {
+    if (state_ == QuicConnectionState::Established && (!confirmed || handshake_confirmed())) {
+        return common::IoErr::None;
+    }
+    if (connect_failure_ != common::IoErr::None) {
+        return connect_failure_;
+    }
+    if (state_ == QuicConnectionState::Init || state_ == QuicConnectionState::Handshaking ||
+        (state_ == QuicConnectionState::Established && confirmed)) {
+        return common::IoErr::WouldBlock;
+    }
+    switch (close_info_.source) {
+        case QuicCloseSource::IdleTimeout:
+            return common::IoErr::TimedOut;
+        case QuicCloseSource::PeerConnectionClose:
+        case QuicCloseSource::StatelessReset:
+            return common::IoErr::ConnReset;
+        case QuicCloseSource::None:
+        case QuicCloseSource::Local:
+            return common::IoErr::Canceled;
+    }
+    return common::IoErr::Canceled;
+}
+
+void QuicConnection::wait_for_handshake(HandshakeAwaiter &awaiter) noexcept {
+    common::IntrusiveListHook &hook = awaiter.wait_link_;
+    if (hook.linked()) {
+        return;
+    }
+    hook.prev = handshake_wait_tail_;
+    hook.next = nullptr;
+    if (handshake_wait_tail_ != nullptr) {
+        handshake_wait_tail_->next = &hook;
+    } else {
+        handshake_wait_head_ = &hook;
+    }
+    handshake_wait_tail_ = &hook;
+    hook.in_list = true;
+}
+
+void QuicConnection::cancel_handshake_wait(HandshakeAwaiter &awaiter) noexcept {
+    common::IntrusiveListHook &hook = awaiter.wait_link_;
+    if (!hook.linked()) {
+        return;
+    }
+    if (hook.prev != nullptr) {
+        hook.prev->next = hook.next;
+    } else {
+        handshake_wait_head_ = hook.next;
+    }
+    if (hook.next != nullptr) {
+        hook.next->prev = hook.prev;
+    } else {
+        handshake_wait_tail_ = hook.prev;
+    }
+    hook.prev = nullptr;
+    hook.next = nullptr;
+    hook.in_list = false;
+}
+
+void QuicConnection::notify_handshake_waiters(common::IoErr result) noexcept {
+    common::IntrusiveListHook *hook = handshake_wait_head_;
+    while (hook != nullptr) {
+        HandshakeAwaiter *awaiter = HandshakeAwaiter::from_wait_link(hook);
+        hook = hook->next;
+        const common::IoErr waiter_result =
+                result == common::IoErr::WouldBlock ? handshake_wait_result(awaiter->wait_confirmed_) : result;
+        if (waiter_result == common::IoErr::WouldBlock) {
+            continue;
+        }
+        cancel_handshake_wait(*awaiter);
+        awaiter->complete(waiter_result);
+    }
+}
+
 void QuicConnection::wait_for_local_stream_attach(LocalStreamAttachAwaiter &awaiter) noexcept {
     common::IntrusiveListHook &hook = awaiter.wait_link_;
     if (hook.linked()) {
@@ -2735,6 +3431,7 @@ void QuicConnection::detach_from_endpoint() noexcept {
     FIBER_ASSERT(state_ == QuicConnectionState::Closed);
 
     notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
+    notify_handshake_waiters(common::IoErr::Canceled);
     notify_peer_data_waiters(common::IoErr::Canceled);
     close_all_streams(close_info_.error_code);
     clear_frames_for_detach();
@@ -2872,6 +3569,8 @@ common::IoResult<void> QuicConnection::queue_stream_frame(QuicStream &stream) no
 
     frame->type = QuicFrameType::Stream;
     frame->u.stream.stream_id = stream.stream_id();
+    frame->zero_rtt = state_ == QuicConnectionState::Handshaking &&
+                      stream.early_data_mode() == QuicStreamEarlyDataMode::ReplaySafe;
     stream.stream_send_pending_ = true;
     space.pending_frames.push_back(*frame);
     schedule_send();
@@ -3156,7 +3855,7 @@ bool QuicConnection::reserve_peer_data(std::uint64_t bytes) noexcept {
 }
 
 std::uint64_t QuicConnection::initial_stream_send_limit(std::uint64_t stream_id) const noexcept {
-    if (!peer_transport_.received) {
+    if (!peer_transport_.received && !early_data_attempted_) {
         return 0;
     }
     const QuicStreamType type = stream_type(stream_id);

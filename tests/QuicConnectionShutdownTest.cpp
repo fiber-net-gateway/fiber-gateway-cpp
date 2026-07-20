@@ -880,9 +880,9 @@ void fill_reset_datagram(std::array<std::uint8_t, 48> &out, const std::uint8_t *
 
 } // namespace
 
-// Direct unit test of the detection predicate: matches the peer token, skips the
-// initial (sequence-0) CID's zero token, enforces the minimum-length guard, and
-// rejects non-matching tails — all in constant time.
+// Direct unit test of the detection predicate: matches an advertised peer
+// token, skips slots without a token, enforces the minimum-length guard, and
+// rejects non-matching tails.
 TEST(QuicStatelessResetTest, DetectsStatelessResetMatchesPeerToken) {
     ShutdownCallbackState state{};
     fiber::quic::QuicConnection conn(reset_test_options(state));
@@ -897,9 +897,8 @@ TEST(QuicStatelessResetTest, DetectsStatelessResetMatchesPeerToken) {
                 fiber::quic::kStatelessResetTokenLength);
     EXPECT_TRUE(conn.detects_stateless_reset(match.data(), match.size()));
 
-    // Trailing 16 bytes are all zero. The sequence-0 slot also holds a zero
-    // token, but the initial CID is skipped (no token is ever carried for it),
-    // so this must NOT match.
+    // Trailing 16 bytes are all zero. The sequence-0 slot has no advertised
+    // token in this server-side fixture, so this must NOT match.
     std::array<std::uint8_t, 40> zeros{};
     EXPECT_FALSE(conn.detects_stateless_reset(zeros.data(), zeros.size()));
 

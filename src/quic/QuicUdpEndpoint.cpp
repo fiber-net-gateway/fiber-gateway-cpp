@@ -11,6 +11,7 @@
 #include <openssl/rand.h>
 
 #include "../common/Assert.h"
+#include "../net/TlsContext.h"
 #include "QuicCongestion.h"
 #include "QuicCrypto.h"
 #include "QuicPacketCodec.h"
@@ -25,8 +26,12 @@ inline constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 inline constexpr std::size_t kQuicStatelessResponseBufferSize = 1500;
 inline constexpr const char kInvalidAddressValidationTokenReason[] = "invalid address validation token";
 inline constexpr const char kExpiredAddressValidationTokenReason[] = "expired address validation token";
-inline constexpr QuicEncryptionLevel kSendLevels[] = {QuicEncryptionLevel::Initial, QuicEncryptionLevel::Handshake,
-                                                      QuicEncryptionLevel::Application};
+inline constexpr QuicEncryptionLevel kSendLevels[] = {
+        QuicEncryptionLevel::Initial,
+        QuicEncryptionLevel::EarlyData,
+        QuicEncryptionLevel::Handshake,
+        QuicEncryptionLevel::Application,
+};
 
 [[nodiscard]] common::IoResult<std::size_t> encode_retry_packet(const QuicPacketHeader &packet,
                                                                 const QuicConnectionId &retry_scid,
@@ -124,12 +129,32 @@ namespace {
     }
 
     std::size_t index = 0;
-    for (; index + 1 < kQuicSendLevelCount; ++index) {
-        if (connection.packet_number_space(kSendLevels[index + 1]).pending_frames.empty()) {
-            break;
+    const QuicPacketNumberSpace &application = connection.packet_number_space(QuicEncryptionLevel::Application);
+    if (connection.crypto().early_write_ready()) {
+        const QuicOutputFrame *frame = application.pending_frames.front();
+        if (frame != nullptr && frame->zero_rtt) {
+            index = 1;
         }
     }
+    if (!connection.packet_number_space(QuicEncryptionLevel::Handshake).pending_frames.empty()) {
+        index = 2;
+    }
+    if (connection.crypto().application_write_ready() && !application.pending_frames.empty()) {
+        index = 3;
+    }
     return index;
+}
+
+[[nodiscard]] bool has_level_send_work(const QuicConnection &connection, QuicEncryptionLevel level,
+                                       const QuicPacketNumberSpace &space) noexcept {
+    if (level == QuicEncryptionLevel::EarlyData) {
+        const QuicOutputFrame *frame = space.pending_frames.front();
+        return connection.crypto().early_write_ready() && frame != nullptr && frame->zero_rtt;
+    }
+    if (level == QuicEncryptionLevel::Application && !connection.crypto().application_write_ready()) {
+        return false;
+    }
+    return has_packet_space_work(space);
 }
 
 void restore_sending_frame(QuicConnection &connection, QuicPacketNumberSpace &space, QuicOutputFrame &frame) noexcept {
@@ -311,9 +336,9 @@ split_crypto_frame(QuicPacketNumberSpace &space, QuicOutputFrame &frame, std::si
     return state.paths[0];
 }
 
-[[nodiscard]] std::size_t reserved_path_send_limit(const QuicPath &path, std::uint64_t sent,
+[[nodiscard]] std::size_t reserved_path_send_limit(QuicConnectionRole role, const QuicPath &path, std::uint64_t sent,
                                                    std::size_t size) noexcept {
-    if (path.validated) {
+    if (role == QuicConnectionRole::Client || path.validated) {
         return size;
     }
     const std::uint64_t max = path.received > UINT64_MAX / 3 ? UINT64_MAX : path.received * 3;
@@ -411,17 +436,71 @@ namespace {
 
 } // namespace
 
+common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const EndpointOptions &endpoint_options) noexcept {
+    Options options{};
+    options.bind_addr = endpoint_options.bind_addr;
+    options.max_connections = endpoint_options.max_connections;
+    options.udp = endpoint_options.udp;
+    options.send = endpoint_options.send;
+    options.max_recv_datagrams_per_wakeup = endpoint_options.max_recv_datagrams_per_wakeup;
+    options.max_recv_bytes_per_wakeup = endpoint_options.max_recv_bytes_per_wakeup;
+    options.recv_batch_size = endpoint_options.recv_batch_size;
+    options.retained_storage_limit = endpoint_options.retained_storage_limit;
+    options.stateless_reset_secret_set = endpoint_options.stateless_reset_secret_set;
+    options.stateless_reset_secret = endpoint_options.stateless_reset_secret;
+    return init(loop, options);
+}
+
+common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const EndpointOptions &endpoint_options,
+                                             const ServerAdmissionOptions &server_options) noexcept {
+    if (server_options.create_connection == nullptr) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    Options options{};
+    options.bind_addr = endpoint_options.bind_addr;
+    options.max_connections = endpoint_options.max_connections;
+    options.udp = endpoint_options.udp;
+    options.send = endpoint_options.send;
+    options.max_recv_datagrams_per_wakeup = endpoint_options.max_recv_datagrams_per_wakeup;
+    options.max_recv_bytes_per_wakeup = endpoint_options.max_recv_bytes_per_wakeup;
+    options.recv_batch_size = endpoint_options.recv_batch_size;
+    options.retained_storage_limit = endpoint_options.retained_storage_limit;
+    options.stateless_reset_secret_set = endpoint_options.stateless_reset_secret_set;
+    options.stateless_reset_secret = endpoint_options.stateless_reset_secret;
+    options.tls_context = server_options.tls_context;
+    options.transport = server_options.transport;
+    options.keepalive_interval = server_options.keepalive_interval;
+    options.recv_flow = server_options.recv_flow;
+    options.max_ack_delay = server_options.transport.max_ack_delay;
+    options.ack_delay_exponent = server_options.transport.ack_delay_exponent;
+    options.retry = server_options.retry;
+    options.issue_new_token = server_options.issue_new_token;
+    options.address_validation_key_set = server_options.address_validation_key_set;
+    options.address_validation_key = server_options.address_validation_key;
+    options.stateless_response_limits = server_options.stateless_response_limits;
+    options.retry_token_lifetime = server_options.retry_token_lifetime;
+    options.new_token_lifetime = server_options.new_token_lifetime;
+    options.connection_owner = server_options.connection_owner;
+    options.create_connection = server_options.create_connection;
+    options.enable_early_data = server_options.enable_early_data;
+    return init(loop, options);
+}
+
 common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Options &options) noexcept {
     if (initialized_ || options.max_connections == 0 || options.send.send_buffer_size == 0 ||
         options.max_recv_datagrams_per_wakeup == 0 || options.max_recv_bytes_per_wakeup == 0 ||
         options.recv_batch_size == 0 || options.recv_batch_size > net::kUdpMaxBatchSize ||
         options.recv_batch_size > SIZE_MAX / kQuicUdpDefaultReadBufferSize ||
-        options.retry_token_lifetime.count() < 0 || options.new_token_lifetime.count() < 0 ||
-        options.create_connection == nullptr) {
+        options.retry_token_lifetime.count() < 0 || options.new_token_lifetime.count() < 0) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
     options_ = options;
+    server_admission_enabled_ = options_.create_connection != nullptr;
+    if (options_.tls_context != nullptr && options_.enable_early_data) {
+        options_.tls_context->set_early_data_enabled(true);
+    }
     recv_storage_budget_.init(options_.retained_storage_limit);
     if (options_.retry) {
         options_.issue_new_token = true;
@@ -456,6 +535,7 @@ common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Optio
     recv_pending_index_ = 0;
     recv_pending_count_ = 0;
     stateless_rate_ = {};
+    reset_token_buckets_.fill(nullptr);
 
     socket_ = std::make_unique<net::UdpSocket>(loop);
     read_buffer_ = std::make_unique<std::uint8_t[]>(options_.recv_batch_size * kQuicUdpDefaultReadBufferSize);
@@ -537,6 +617,9 @@ void QuicUdpEndpoint::close() noexcept {
         force_detach_connection(*index->connection);
     }
     FIBER_ASSERT(recv_storage_budget_.retained_capacity() == 0);
+    for (QuicStatelessResetTokenIndex *bucket: reset_token_buckets_) {
+        FIBER_ASSERT(bucket == nullptr);
+    }
 
     active_connection_count_ = 0;
     stateless_rate_ = {};
@@ -557,6 +640,7 @@ void QuicUdpEndpoint::close() noexcept {
     // destruction instead of resetting it from a callback-driven close.
     loop_ = nullptr;
     initialized_ = false;
+    server_admission_enabled_ = false;
 }
 
 bool QuicUdpEndpoint::valid() const noexcept { return socket_ && socket_->valid(); }
@@ -580,6 +664,42 @@ common::IoResult<void> QuicUdpEndpoint::remove_connection(const QuicConnectionId
     return {};
 }
 
+common::IoResult<void> QuicUdpEndpoint::attach_client_connection(QuicConnection::Lease lease) noexcept {
+    if (!initialized_ || closing_ || loop_ == nullptr || !loop_->in_loop()) {
+        return std::unexpected(common::IoErr::BadFd);
+    }
+    QuicConnection *connection = lease.get();
+    if (connection == nullptr || connection->role() != QuicConnectionRole::Client ||
+        connection->attached_to_endpoint() || connection->endpoint_index.link.linked() ||
+        connection->local_connection_id().empty()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (active_connection_count_ >= options_.max_connections) {
+        ++rejected_connection_count_;
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
+    connection->endpoint_index.connection = connection;
+    auto registered = register_connection_id(*connection, connection->local_cids_[0].endpoint_index,
+                                             connection->local_connection_id());
+    if (!registered) {
+        connection->endpoint_index.connection = nullptr;
+        ++rejected_connection_count_;
+        return std::unexpected(registered.error());
+    }
+
+    connection->attach_to_endpoint(*this);
+    for (QuicRemoteConnectionIdSlot &slot: connection->remote_cids_) {
+        if (slot.in_use && slot.has_stateless_reset_token) {
+            register_stateless_reset_token(*connection, slot);
+        }
+    }
+    connection->endpoint_index.lease = std::move(lease);
+    connections_.push_back(connection->endpoint_index);
+    ++active_connection_count_;
+    return {};
+}
+
 void QuicUdpEndpoint::schedule_send(QuicConnection &connection) noexcept {
     send_scheduler_.submit(connection);
     if (!write_blocked_) {
@@ -598,7 +718,7 @@ common::IoResult<void> QuicUdpEndpoint::send_direct_datagram(const std::uint8_t 
     spec.len = len;
     spec.peer = datagram.peer;
     spec.local = datagram.local;
-    spec.has_local = true;
+    spec.has_local = !datagram.local.ip().is_unspecified();
     auto sent = socket_->try_send_packet(spec);
     if (!sent) {
         return std::unexpected(sent.error());
@@ -882,6 +1002,16 @@ std::uint64_t QuicUdpEndpoint::hash_connection_id(const QuicConnectionId &id) no
     return hash;
 }
 
+std::uint64_t
+QuicUdpEndpoint::hash_stateless_reset_token(const std::uint8_t token[kStatelessResetTokenLength]) noexcept {
+    std::uint64_t hash = kFnvOffset;
+    for (std::size_t i = 0; i < kStatelessResetTokenLength; ++i) {
+        hash ^= token[i];
+        hash *= kFnvPrime;
+    }
+    return hash;
+}
+
 std::uint64_t QuicUdpEndpoint::hash_stateless_peer(const net::SocketAddress &peer) noexcept {
     const net::IpAddress &ip = peer.ip();
     std::uint64_t hash = kFnvOffset;
@@ -976,6 +1106,9 @@ void QuicUdpEndpoint::detach_connection(QuicConnection &connection) noexcept {
     for (QuicLocalConnectionIdSlot &slot: connection.local_cids_) {
         unregister_connection_id(slot.endpoint_index);
     }
+    for (QuicRemoteConnectionIdSlot &slot: connection.remote_cids_) {
+        unregister_stateless_reset_token(slot);
+    }
     if (index.link.linked()) {
         connections_.erase(index);
     }
@@ -1036,6 +1169,74 @@ void QuicUdpEndpoint::unregister_connection_id(QuicConnectionIdIndex &index) noe
         dcid_tree_.erase(index);
     }
     index = QuicConnectionIdIndex{};
+}
+
+void QuicUdpEndpoint::register_stateless_reset_token(QuicConnection &connection,
+                                                     QuicRemoteConnectionIdSlot &slot) noexcept {
+    QuicStatelessResetTokenIndex &index = slot.reset_token_index;
+    if (index.linked || !slot.in_use || !slot.has_stateless_reset_token) {
+        return;
+    }
+
+    index.connection = &connection;
+    index.token = slot.stateless_reset_token;
+    index.token_hash = hash_stateless_reset_token(slot.stateless_reset_token);
+    const std::size_t bucket = index.token_hash % reset_token_buckets_.size();
+    index.next = reset_token_buckets_[bucket];
+    index.linked = true;
+    reset_token_buckets_[bucket] = &index;
+}
+
+void QuicUdpEndpoint::unregister_stateless_reset_token(QuicRemoteConnectionIdSlot &slot) noexcept {
+    QuicStatelessResetTokenIndex &index = slot.reset_token_index;
+    if (!index.linked) {
+        index = {};
+        return;
+    }
+
+    const std::size_t bucket = index.token_hash % reset_token_buckets_.size();
+    QuicStatelessResetTokenIndex **cursor = &reset_token_buckets_[bucket];
+    while (*cursor != nullptr && *cursor != &index) {
+        cursor = &(*cursor)->next;
+    }
+    FIBER_ASSERT(*cursor == &index);
+    if (*cursor == &index) {
+        *cursor = index.next;
+    }
+    index = {};
+}
+
+bool QuicUdpEndpoint::handle_peer_stateless_reset(const std::uint8_t *packet_data, std::size_t packet_len) noexcept {
+    if (packet_data == nullptr || packet_len <= kStatelessResetTokenLength) {
+        return false;
+    }
+
+    const std::uint8_t *token = packet_data + packet_len - kStatelessResetTokenLength;
+    const std::uint64_t hash = hash_stateless_reset_token(token);
+    QuicStatelessResetTokenIndex *index = reset_token_buckets_[hash % reset_token_buckets_.size()];
+    bool matched = false;
+    while (index != nullptr) {
+        QuicStatelessResetTokenIndex *next = index->next;
+        std::uint8_t diff = 0;
+        if (index->token_hash == hash && index->token != nullptr) {
+            for (std::size_t i = 0; i < kStatelessResetTokenLength; ++i) {
+                diff |= static_cast<std::uint8_t>(token[i] ^ index->token[i]);
+            }
+            QuicConnection *connection = index->connection;
+            if (diff == 0 && connection != nullptr && connection->attached_to_endpoint() &&
+                !connection->terminal_closing()) {
+                matched = true;
+                connection->begin_draining(QuicCloseInfo{
+                        .source = QuicCloseSource::StatelessReset,
+                        .frame_kind = QuicCloseFrameKind::Transport,
+                        .error_code = static_cast<std::uint64_t>(QuicErrorCode::NoError),
+                        .frame_type = 0,
+                });
+            }
+        }
+        index = next;
+    }
+    return matched;
 }
 
 common::IoResult<void>
@@ -1358,6 +1559,9 @@ common::IoResult<void> QuicUdpEndpoint::queue_new_token(QuicConnection &connecti
 common::IoResult<QuicConnection *>
 QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicReceivedDatagram &datagram,
                                    const QuicInitialValidation &validation) noexcept {
+    if (!server_admission_enabled_ || options_.create_connection == nullptr) {
+        return std::unexpected(common::IoErr::NotSupported);
+    }
     const std::uint64_t dcid_hash = hash_connection_id(packet.dcid);
     if (find_connection(packet.dcid, dcid_hash) != nullptr) {
         return std::unexpected(common::IoErr::Already);
@@ -1464,6 +1668,15 @@ QuicUdpEndpoint::process_datagram(std::uint8_t *data, net::UdpPacketRecvResult r
     QuicConnection *connection = find_connection(*dcid, dcid_hash);
     bool created = false;
     if (connection == nullptr) {
+        auto unknown_packet =
+                quic_parse_packet_header(data, recv.size, static_cast<std::uint8_t>(kQuicConnectionIdLength));
+        if (unknown_packet && !unknown_packet->long_header && handle_peer_stateless_reset(data, recv.size)) {
+            return std::unexpected(common::IoErr::WouldBlock);
+        }
+        if (!server_admission_enabled_) {
+            ++dropped_datagram_count_;
+            return std::unexpected(common::IoErr::NotFound);
+        }
         auto packet = quic_parse_packet_header(data, recv.size, static_cast<std::uint8_t>(kQuicConnectionIdLength));
         // RFC 9000 §10.3 / nginx ngx_quic_send_stateless_reset: a short-header
         // (1-RTT) packet addressed to a DCID we no longer recognize means this
@@ -1619,6 +1832,32 @@ QuicUdpEndpoint::process_datagram(std::uint8_t *data, net::UdpPacketRecvResult r
         created = true;
     }
 
+    if (!created && connection->role() == QuicConnectionRole::Client && quic_is_long_packet(data[0])) {
+        auto control = quic_parse_packet_header(data, recv.size, static_cast<std::uint8_t>(kQuicConnectionIdLength));
+        if (control && control->type == QuicPacketType::Retry) {
+            auto accepted = connection->handle_retry(*control, datagram);
+            if (!accepted) {
+                connection->fail_client_connect(accepted.error());
+                ++dropped_datagram_count_;
+                return std::unexpected(accepted.error());
+            }
+            if (!*accepted) {
+                ++dropped_datagram_count_;
+                return std::unexpected(common::IoErr::WouldBlock);
+            }
+            QuicUdpReceiveResult out{};
+            out.connection = connection;
+            out.packet.packet_type = QuicPacketType::Retry;
+            out.packet.level = QuicEncryptionLevel::Initial;
+            out.packet.send_output = true;
+            return out;
+        }
+        if (control && control->type == QuicPacketType::VersionNegotiation) {
+            (void) connection->handle_version_negotiation(*control);
+            return std::unexpected(common::IoErr::WouldBlock);
+        }
+    }
+
     auto result = quic_process_datagram(*connection, datagram, static_cast<std::uint8_t>(kQuicConnectionIdLength));
     if (!result) {
         ++dropped_datagram_count_;
@@ -1662,7 +1901,7 @@ void QuicUdpEndpoint::handle_receive_result(QuicConnection &connection,
     if (result.send_ack && !should_send) {
         QuicPacketNumberSpace &space = connection.packet_number_space(result.level);
         const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
-        should_send = !should_delay_ack(space, now);
+        should_send = !should_delay_ack(connection, space, now);
     }
 
     if (loop_ != nullptr) {
@@ -1700,13 +1939,14 @@ void QuicUdpEndpoint::handle_receive_result(QuicConnection &connection,
     schedule_send(connection);
 }
 
-bool QuicUdpEndpoint::should_delay_ack(const QuicPacketNumberSpace &space, QuicTime now) const noexcept {
+bool QuicUdpEndpoint::should_delay_ack(const QuicConnection &connection, const QuicPacketNumberSpace &space,
+                                       QuicTime now) noexcept {
     if (space.level != QuicEncryptionLevel::Application || !space.send_ack || space.pending_ack == kUnsetPacketNumber ||
         !space.pending_frames.empty() || space.send_ack_count >= kQuicMaxAckGap) {
         return false;
     }
 
-    return now - space.ack_delay_start < options_.max_ack_delay;
+    return now - space.ack_delay_start < connection.local_transport().max_ack_delay;
 }
 
 common::IoResult<QuicBuildSendResult>
@@ -1743,7 +1983,8 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
                                   : candidate.mtu;
         const std::size_t requested = std::min(capacity, packet_limit);
         QuicSendPathReservation &path_reservation = find_path_reservation(build_state, candidate);
-        const std::size_t allowed = reserved_path_send_limit(candidate, path_reservation.sent, requested);
+        const std::size_t allowed =
+                reserved_path_send_limit(connection.role(), candidate, path_reservation.sent, requested);
         if (allowed == 0) {
             continue;
         }
@@ -1755,7 +1996,7 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
         header.scid = connection.local_connection_id();
 
         std::size_t min_packet_len = 0;
-        if (source->min_packet_len != 0 && reserved_path_send_limit(candidate, path_reservation.sent,
+        if (source->min_packet_len != 0 && reserved_path_send_limit(connection.role(), candidate, path_reservation.sent,
                                                                     source->min_packet_len) >= source->min_packet_len) {
             min_packet_len = source->min_packet_len;
         }
@@ -1824,7 +2065,7 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
         datagram.spec.len = datagram.length;
         datagram.spec.peer = candidate.remote;
         datagram.spec.local = candidate.local;
-        datagram.spec.has_local = true;
+        datagram.spec.has_local = !candidate.local.ip().is_unspecified();
         datagram.spec.ecn = choose_send_ecn(candidate, datagram, path_reservation.ecn_validation_sent);
         return QuicBuildSendResult{QuicBuildSendStatus::Encoded};
     }
@@ -1868,7 +2109,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
     datagram.path = path;
 
     QuicSendPathReservation &path_reservation = find_path_reservation(build_state, *path);
-    const std::size_t allowed = reserved_path_send_limit(*path, path_reservation.sent, requested);
+    const std::size_t allowed = reserved_path_send_limit(connection.role(), *path, path_reservation.sent, requested);
     if (allowed == 0) {
         return QuicBuildSendResult{QuicBuildSendStatus::Blocked};
     }
@@ -1893,20 +2134,23 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
     for (std::size_t level_index = 0; level_index < kQuicSendLevelCount; ++level_index) {
         QuicEncryptionLevel level = kSendLevels[level_index];
         QuicPacketNumberSpace &space = connection.packet_number_space(level);
-        if (!has_packet_space_work(space)) {
+        if (!has_level_send_work(connection, level, space)) {
             continue;
         }
 
-        if (should_delay_ack(space, now)) {
+        if (level != QuicEncryptionLevel::EarlyData && should_delay_ack(connection, space, now)) {
             if (datagram.packet_count != 0) {
                 break;
             }
             continue;
         }
 
-        auto generated_ack = generate_ack_frame_into_pending(space, now, options_.ack_delay_exponent);
-        if (!generated_ack) {
-            return std::unexpected(generated_ack.error());
+        if (level != QuicEncryptionLevel::EarlyData) {
+            auto generated_ack =
+                    generate_ack_frame_into_pending(space, now, connection.local_transport().ack_delay_exponent);
+            if (!generated_ack) {
+                return std::unexpected(generated_ack.error());
+            }
         }
 
         QuicSendPacketRecord &packet = datagram.packets[datagram.packet_count];
@@ -1937,6 +2181,18 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         header.version = kQuicVersion1;
         header.dcid = path->remote_connection_id;
         header.scid = connection.local_connection_id();
+        if (level == QuicEncryptionLevel::EarlyData) {
+            header.level = level;
+            header.long_header = true;
+            header.type = QuicPacketType::ZeroRtt;
+            header.flags = kPacketFlagLong | kPacketFlagFixed | kLongPacketTypeZeroRtt |
+                           static_cast<std::uint8_t>(header.pn_len - 1);
+            header.protected_flags = header.flags;
+        }
+        if (connection.role() == QuicConnectionRole::Client && level == QuicEncryptionLevel::Initial) {
+            const mem::IoBuf &token = connection.initial_token();
+            header.token = {token.readable_data(), token.readable()};
+        }
 
         const std::size_t min_payload = std::max(quic_packet_payload_capacity(header, min_packet_len),
                                                  static_cast<std::size_t>(4U - header.pn_len));
@@ -1956,6 +2212,9 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         bool payload_ack_eliciting = false;
         bool payload_has_padding = false;
         while (QuicOutputFrame *source = space.pending_frames.front()) {
+            if (level == QuicEncryptionLevel::EarlyData && !source->zero_rtt) {
+                break;
+            }
             if (mode == QuicBuildMode::PacingExemptOnly && !pacing_exempt_frame_type(source->type)) {
                 break;
             }
@@ -2066,6 +2325,10 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         spec.level = level;
         spec.dcid = path->remote_connection_id;
         spec.scid = connection.local_connection_id();
+        if (connection.role() == QuicConnectionRole::Client && level == QuicEncryptionLevel::Initial) {
+            const mem::IoBuf &token = connection.initial_token();
+            spec.token = {token.readable_data(), token.readable()};
+        }
         spec.payload = packet_payload;
         spec.payload_len = payload_len;
         spec.payload_frame_count = packet.frame_count;
@@ -2120,7 +2383,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
     datagram.spec.len = datagram.length;
     datagram.spec.peer = path->remote;
     datagram.spec.local = path->local;
-    datagram.spec.has_local = true;
+    datagram.spec.has_local = !path->local.ip().is_unspecified();
     datagram.spec.ecn = choose_send_ecn(*path, datagram, path_reservation.ecn_validation_sent);
     return QuicBuildSendResult{QuicBuildSendStatus::Encoded};
 }

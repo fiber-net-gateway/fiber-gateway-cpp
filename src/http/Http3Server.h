@@ -48,8 +48,9 @@ private:
     create_connection_op(void *owner, const quic::QuicConnection::Options &options) noexcept;
     [[nodiscard]] quic::QuicConnection::Lease create_connection(const quic::QuicConnection::Options &options) noexcept;
 
-    [[nodiscard]] quic::QuicUdpEndpoint::Options make_endpoint_options(const net::SocketAddress &addr,
-                                                                       bool reuse_port) noexcept;
+    [[nodiscard]] quic::QuicUdpEndpoint::EndpointOptions make_endpoint_options(const net::SocketAddress &addr,
+                                                                               bool reuse_port) noexcept;
+    [[nodiscard]] quic::QuicUdpEndpoint::ServerAdmissionOptions make_server_admission_options() noexcept;
     [[nodiscard]] std::size_t shard_count() const noexcept;
     static void on_start_shard(Shard *shard) noexcept;
     static void on_close_shard(Shard *shard) noexcept;

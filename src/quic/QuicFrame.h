@@ -264,6 +264,7 @@ struct QuicOutputFrame {
     bool ignore_congestion = false;
     bool mtu_probe = false;
     bool packet_ecn_validation_probe = false;
+    bool zero_rtt = false;
 
     union Payload {
         QuicPaddingFrame padding;

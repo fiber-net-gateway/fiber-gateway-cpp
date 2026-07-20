@@ -169,7 +169,11 @@ parse_long_header(const std::uint8_t *datagram, std::size_t datagram_len, std::u
     packet.scid = *scid;
 
     if (*version == 0) {
+        if (in.remaining() == 0 || in.remaining() % sizeof(std::uint32_t) != 0) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
         packet.type = QuicPacketType::VersionNegotiation;
+        packet.version_list = {in.pos(), in.remaining()};
         packet.packet_len = datagram_len;
         return packet;
     }

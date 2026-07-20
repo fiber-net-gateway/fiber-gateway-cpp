@@ -171,6 +171,14 @@ TEST(QuicPacketCodecTest, CreatesVersionNegotiationPacket) {
     EXPECT_EQ(buf[2], 0U);
     EXPECT_EQ(buf[3], 0U);
     EXPECT_EQ(buf[4], 0U);
+    auto parsed = fiber::quic::quic_parse_packet_header(buf.data(), *written, 0);
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed->type, fiber::quic::QuicPacketType::VersionNegotiation);
+    ASSERT_EQ(parsed->version_list.len, 4U);
+    EXPECT_EQ(parsed->version_list.data[3], 1U);
+
+    auto malformed = fiber::quic::quic_parse_packet_header(buf.data(), *written - 1, 0);
+    EXPECT_FALSE(malformed.has_value());
 }
 
 TEST(QuicPacketCodecTest, CreatesAndParsesRetryPacket) {
@@ -186,6 +194,9 @@ TEST(QuicPacketCodecTest, CreatesAndParsesRetryPacket) {
     auto written = fiber::quic::quic_create_retry_packet(spec, out);
 
     ASSERT_TRUE(written.has_value());
+    auto valid_tag = fiber::quic::quic_validate_retry_integrity_tag(spec.original_dcid, buf.data(), *written);
+    ASSERT_TRUE(valid_tag.has_value());
+    EXPECT_TRUE(*valid_tag);
     auto parsed = fiber::quic::quic_parse_packet_header(buf.data(), *written, 0);
 
     ASSERT_TRUE(parsed.has_value());
@@ -194,6 +205,11 @@ TEST(QuicPacketCodecTest, CreatesAndParsesRetryPacket) {
     EXPECT_EQ(parsed->token.data[0], 't');
     EXPECT_EQ(*written,
               1U + 4U + 1U + spec.dcid.size() + 1U + spec.scid.size() + token.size() + fiber::quic::kAeadTagLength);
+
+    buf[*written - 1] ^= 0x01;
+    valid_tag = fiber::quic::quic_validate_retry_integrity_tag(spec.original_dcid, buf.data(), *written);
+    ASSERT_TRUE(valid_tag.has_value());
+    EXPECT_FALSE(*valid_tag);
 }
 
 class QuicPacketCodecSuiteTest : public ::testing::TestWithParam<fiber::quic::QuicCryptoSuite> {};

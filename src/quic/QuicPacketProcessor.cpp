@@ -94,6 +94,23 @@ struct FrameParseClose {
         return path;
     }
 
+    if (conn.role() == QuicConnectionRole::Client) {
+        QuicPath *active = conn.active_path();
+        if (active == nullptr) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        if (active->remote.port() == 0) {
+            active->remote = datagram.peer;
+        } else if (!socket_address_equal(active->remote, datagram.peer)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        if (active->local.ip().is_unspecified()) {
+            active->local = datagram.local;
+            conn.record_path_received(*active, received_len);
+            return active;
+        }
+    }
+
     auto &space = conn.packet_number_space(packet.level);
     if (packet.packet_number != space.largest_received_packet_number) {
         return std::unexpected(common::IoErr::Invalid);
@@ -203,6 +220,9 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
 
     auto driven = conn.tls().drive_handshake();
     if (!driven && driven.error() != common::IoErr::WouldBlock) {
+        if (!conn.terminal_closing()) {
+            conn.close(QuicErrorCode::InternalError);
+        }
         return std::unexpected(driven.error());
     }
 
@@ -434,7 +454,14 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 }
                 break;
             }
-            case QuicFrameType::NewToken:
+            case QuicFrameType::NewToken: {
+                auto stored = conn.recv_new_token_frame(frame);
+                if (!stored) {
+                    conn.close(QuicErrorCode::ProtocolViolation, static_cast<std::uint64_t>(QuicFrameType::NewToken));
+                    return std::unexpected(stored.error());
+                }
+                break;
+            }
             case QuicFrameType::Stream1:
             case QuicFrameType::Stream2:
             case QuicFrameType::Stream3:
@@ -488,6 +515,10 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                     result.validated_path = *validated_path;
                     result.path_validated = true;
                     result.send_output = true;
+                    auto activated = conn.on_path_validated(**validated_path, now);
+                    if (!activated) {
+                        return std::unexpected(activated.error());
+                    }
                 }
                 break;
             }
@@ -773,6 +804,19 @@ common::IoResult<QuicPacketProcessResult> quic_process_datagram(QuicConnection &
                 return aggregate;
             }
             return std::unexpected(decoded.error());
+        }
+
+        if (conn.role() == QuicConnectionRole::Client && packet->type == QuicPacketType::Initial) {
+            auto adopted = conn.adopt_server_initial_source_connection_id(packet->scid);
+            if (!adopted) {
+                if (has_good_packet) {
+                    return aggregate;
+                }
+                return std::unexpected(adopted.error());
+            }
+        }
+        if (conn.role() == QuicConnectionRole::Client) {
+            conn.note_authenticated_server_packet();
         }
 
         // AEAD authentication just succeeded for this packet. Now is the

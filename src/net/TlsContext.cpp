@@ -38,6 +38,14 @@ common::IoResult<void> configure_common_context(SSL_CTX *ctx, const TlsOptions &
             }
             SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);
         }
+    } else if (options.verify_peer) {
+        const int trust_loaded = options.ca_file.empty()
+                                         ? SSL_CTX_set_default_verify_paths(ctx)
+                                         : SSL_CTX_load_verify_locations(ctx, options.ca_file.c_str(), nullptr);
+        if (trust_loaded != 1) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
     } else {
         SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
     }
@@ -206,6 +214,26 @@ common::IoResult<void> TlsContext::init() {
 
     ctx_ = ctx;
     return {};
+}
+
+void TlsContext::set_early_data_enabled(bool enabled) noexcept {
+    if (ctx_ != nullptr) {
+        SSL_CTX_set_early_data_enabled(ctx_, enabled ? 1 : 0);
+    }
+}
+
+void TlsServerContext::set_early_data_enabled(bool enabled) noexcept {
+    if (base_context_ != nullptr) {
+        base_context_->set_early_data_enabled(enabled);
+    }
+    if (default_identity_ != nullptr) {
+        default_identity_->set_early_data_enabled(enabled);
+    }
+    for (std::size_t i = 0; i < identity_count_; ++i) {
+        if (identities_[i].context != nullptr) {
+            identities_[i].context->set_early_data_enabled(enabled);
+        }
+    }
 }
 
 int TlsContext::alpn_select_cb(SSL *, const unsigned char **out, unsigned char *outlen, const unsigned char *in,

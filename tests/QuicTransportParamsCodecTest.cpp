@@ -40,8 +40,16 @@ TEST(QuicTransportParamsCodecTest, ServerParamsRoundTrip) {
     for (std::size_t i = 0; i < fiber::quic::kStatelessResetTokenLength; ++i) {
         params.stateless_reset_token[i] = static_cast<std::uint8_t>(0x80 + i);
     }
+    params.has_preferred_address = true;
+    params.preferred_address.ipv4 = {fiber::net::IpAddress::v4({192, 0, 2, 10}), 8443};
+    params.preferred_address.ipv6 = {
+            fiber::net::IpAddress::v6({0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}), 9443};
+    params.preferred_address.connection_id = cid_from({0x31, 0x32, 0x33, 0x34});
+    for (std::size_t i = 0; i < fiber::quic::kStatelessResetTokenLength; ++i) {
+        params.preferred_address.stateless_reset_token[i] = static_cast<std::uint8_t>(0xa0 + i);
+    }
 
-    std::array<std::uint8_t, 256> buf{};
+    std::array<std::uint8_t, 512> buf{};
     fiber::quic::QuicWriteCursor out(buf.data(), buf.size());
     std::size_t zero_rtt_len = 0;
 
@@ -75,6 +83,7 @@ TEST(QuicTransportParamsCodecTest, ServerParamsRoundTrip) {
     EXPECT_FALSE(zero_rtt.has_original_destination_connection_id);
     EXPECT_FALSE(zero_rtt.has_retry_source_connection_id);
     EXPECT_FALSE(zero_rtt.has_stateless_reset_token);
+    EXPECT_FALSE(zero_rtt.has_preferred_address);
 
     fiber::quic::QuicReadCursor in(buf.data(), out.offset());
     fiber::quic::QuicTransportParams parsed{};
@@ -101,6 +110,26 @@ TEST(QuicTransportParamsCodecTest, ServerParamsRoundTrip) {
     EXPECT_EQ(parsed.retry_source_connection_id.size(), params.retry_source_connection_id.size());
     EXPECT_TRUE(parsed.has_stateless_reset_token);
     EXPECT_EQ(parsed.stateless_reset_token[3], params.stateless_reset_token[3]);
+    ASSERT_TRUE(parsed.has_preferred_address);
+    EXPECT_EQ(parsed.preferred_address.ipv4.port(), 8443);
+    EXPECT_EQ(parsed.preferred_address.ipv4.ip().v4_bytes(), params.preferred_address.ipv4.ip().v4_bytes());
+    EXPECT_EQ(parsed.preferred_address.ipv6.port(), 9443);
+    EXPECT_EQ(parsed.preferred_address.ipv6.ip().v6_bytes(), params.preferred_address.ipv6.ip().v6_bytes());
+    EXPECT_EQ(parsed.preferred_address.connection_id.size(), 4U);
+    EXPECT_EQ(parsed.preferred_address.stateless_reset_token[5], 0xa5);
+}
+
+TEST(QuicTransportParamsCodecTest, RejectsPreferredAddressWithEmptyConnectionId) {
+    fiber::quic::QuicTransportParams params{};
+    params.has_preferred_address = true;
+    std::array<std::uint8_t, 256> buf{};
+    fiber::quic::QuicWriteCursor out(buf.data(), buf.size());
+
+    auto written =
+            fiber::quic::quic_create_transport_params(fiber::quic::QuicTransportParamOwner::Server, &out, params);
+
+    EXPECT_FALSE(written.has_value());
+    EXPECT_EQ(written.error(), fiber::common::IoErr::Invalid);
 }
 
 TEST(QuicTransportParamsCodecTest, RejectsServerOnlyParamsFromClient) {

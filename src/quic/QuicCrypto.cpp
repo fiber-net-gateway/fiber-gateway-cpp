@@ -242,26 +242,34 @@ common::IoResult<void> quic_init_initial_crypto(QuicCryptoState &state, QuicConn
     if (state.initial_discarded()) {
         return std::unexpected(common::IoErr::NotFound);
     }
-    auto secrets = quic_derive_initial_secrets(original_dcid);
+    state.reset();
+    return quic_reinit_initial_crypto(state, role, original_dcid);
+}
+
+common::IoResult<void> quic_reinit_initial_crypto(QuicCryptoState &state, QuicConnectionRole role,
+                                                  const QuicConnectionId &destination_cid) noexcept {
+    if (destination_cid.empty()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    auto secrets = quic_derive_initial_secrets(destination_cid);
     if (!secrets) {
         return std::unexpected(secrets.error());
     }
 
-    state.reset();
-    auto allocated = state.ensure_transient();
+    auto allocated = state.reset_initial_keys();
     if (!allocated) {
         return std::unexpected(allocated.error());
     }
     auto derived = derive_packet_protection_keys(
             state.initial_read(), role == QuicConnectionRole::Server ? secrets->client : secrets->server);
     if (!derived) {
-        state.reset();
+        (void) state.reset_initial_keys();
         return std::unexpected(derived.error());
     }
     derived = derive_packet_protection_keys(state.initial_write(),
                                             role == QuicConnectionRole::Server ? secrets->server : secrets->client);
     if (!derived) {
-        state.reset();
+        (void) state.reset_initial_keys();
         return std::unexpected(derived.error());
     }
     return {};
@@ -305,6 +313,21 @@ common::IoResult<void> quic_create_retry_integrity_tag(const QuicConnectionId &o
         return std::unexpected(common::IoErr::Invalid);
     }
     return {};
+}
+
+common::IoResult<bool> quic_validate_retry_integrity_tag(const QuicConnectionId &original_dcid,
+                                                         const std::uint8_t *retry_packet,
+                                                         std::size_t retry_packet_len) noexcept {
+    if (retry_packet == nullptr || retry_packet_len < kAeadTagLength) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    std::uint8_t expected[kAeadTagLength]{};
+    auto created = quic_create_retry_integrity_tag(original_dcid, retry_packet, retry_packet_len - kAeadTagLength,
+                                                   expected, sizeof(expected));
+    if (!created) {
+        return std::unexpected(created.error());
+    }
+    return CRYPTO_memcmp(expected, retry_packet + retry_packet_len - kAeadTagLength, sizeof(expected)) == 0;
 }
 
 common::IoResult<void> quic_set_packet_protection_secret(QuicPacketProtectionKeyView keys, QuicCryptoSuite suite,

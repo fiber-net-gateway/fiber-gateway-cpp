@@ -99,6 +99,11 @@ struct TlsOptions {
     std::string key_file;
     std::string ca_file;
     bool verify_client = false;
+    // Client contexts remain backward-compatible by default. Protocol clients
+    // which require authenticated peers (for example QuicClient) reject a
+    // context with this disabled unless the caller explicitly opts into an
+    // insecure connection.
+    bool verify_peer = false;
     std::chrono::seconds handshake_timeout{10};
     int min_version = 0x0303; // TLS 1.2
     int max_version = 0x0304; // TLS 1.3

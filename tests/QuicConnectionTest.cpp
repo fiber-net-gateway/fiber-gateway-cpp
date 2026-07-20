@@ -83,6 +83,12 @@ struct StreamCallbackState {
     fiber::quic::QuicStream::Lease lease{};
 };
 
+struct EarlyDataRejectState {
+    bool called = false;
+};
+
+void on_early_data_rejected(void *owner) noexcept { static_cast<EarlyDataRejectState *>(owner)->called = true; }
+
 struct IdleTimerSnapshot {
     bool send_timer_after_send = false;
     bool idle_armed_after_send = false;
@@ -433,6 +439,43 @@ TEST(QuicConnectionTest, TryAttachLocalStreamReturnsBusyBeforeEstablished) {
     ASSERT_TRUE(stream);
     EXPECT_FALSE(stream->stream_id_assigned());
     EXPECT_EQ(conn.active_stream_count(), 0U);
+}
+
+TEST(QuicConnectionTest, EarlyDataRejectionDropsReplaySafeStreamsWithoutReplay) {
+    EarlyDataRejectState state{};
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
+    options.role = fiber::quic::QuicConnectionRole::Client;
+    options.owner = &state;
+    options.ops.on_early_data_rejected = on_early_data_rejected;
+    options.enable_early_data = true;
+    options.has_remembered_peer_transport = true;
+    options.remembered_peer_transport.initial_max_data = 4096;
+    options.remembered_peer_transport.initial_max_stream_data_bidi_remote = 1024;
+    options.remembered_peer_transport.initial_max_streams_bidi = 1;
+    options.max_local_bidirectional_streams = 1;
+    fiber::quic::QuicConnection conn(options);
+    ASSERT_TRUE(conn.crypto().ensure_transient());
+    conn.crypto().early_write().packet->ready = true;
+    conn.crypto().early_write().header->ready = true;
+    ASSERT_TRUE(conn.start_handshake());
+
+    auto stream = make_test_stream();
+    auto attached = conn.try_attach_local_stream(std::move(stream), fiber::quic::QuicStreamType::Bidirectional,
+                                                 fiber::quic::QuicStreamEarlyDataMode::ReplaySafe);
+    ASSERT_TRUE(attached.has_value()) << static_cast<int>(attached.error());
+    ASSERT_TRUE((*attached)->try_write(slice_of("early"), true));
+    ASSERT_EQ(conn.active_stream_count(), 1U);
+    ASSERT_FALSE(conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application).pending_frames.empty());
+
+    conn.on_early_data_rejected();
+
+    EXPECT_TRUE(state.called);
+    EXPECT_EQ(conn.active_stream_count(), 0U);
+    EXPECT_EQ(conn.find_stream(0), nullptr);
+    EXPECT_TRUE(conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application).pending_frames.empty());
+    auto next = conn.next_local_stream_id(fiber::quic::QuicStreamType::Bidirectional);
+    ASSERT_TRUE(next.has_value());
+    EXPECT_EQ(*next, 0U);
 }
 
 TEST(QuicConnectionTest, TryAttachLocalStreamQueuesStreamsBlockedAtLimit) {
@@ -1081,6 +1124,7 @@ TEST(QuicConnectionTest, ClientAcceptsServerTransportParamsWithMatchingRetryIds)
     options.retry_source_connection_id = cid_from({0xaa, 0xbb, 0xcc, 0xdd});
     options.has_retry_source_connection_id = true;
     fiber::quic::QuicConnection conn(options);
+    ASSERT_TRUE(conn.adopt_server_initial_source_connection_id(options.remote_connection_id));
 
     fiber::quic::QuicTransportParams params{};
     params.has_initial_source_connection_id = true;
@@ -1094,6 +1138,115 @@ TEST(QuicConnectionTest, ClientAcceptsServerTransportParamsWithMatchingRetryIds)
 
     EXPECT_TRUE(applied.has_value()) << static_cast<int>(applied.error());
     EXPECT_TRUE(conn.peer_transport_params_received());
+}
+
+TEST(QuicConnectionTest, ClientDetectsSequenceZeroStatelessResetTokenFromServerParams) {
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
+    options.role = fiber::quic::QuicConnectionRole::Client;
+    options.original_destination_connection_id = cid_from({0x01, 0x02, 0x03, 0x04});
+    options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
+    fiber::quic::QuicConnection conn(options);
+    ASSERT_TRUE(conn.adopt_server_initial_source_connection_id(options.remote_connection_id));
+
+    fiber::quic::QuicTransportParams params{};
+    params.has_initial_source_connection_id = true;
+    params.initial_source_connection_id = options.remote_connection_id;
+    params.has_original_destination_connection_id = true;
+    params.original_destination_connection_id = options.original_destination_connection_id;
+    params.has_stateless_reset_token = true;
+    for (std::size_t i = 0; i < fiber::quic::kStatelessResetTokenLength; ++i) {
+        params.stateless_reset_token[i] = static_cast<std::uint8_t>(0xa0U + i);
+    }
+    ASSERT_TRUE(conn.apply_peer_transport_params(params));
+
+    std::array<std::uint8_t, 40> packet{};
+    std::memcpy(packet.data() + packet.size() - fiber::quic::kStatelessResetTokenLength, params.stateless_reset_token,
+                fiber::quic::kStatelessResetTokenLength);
+    EXPECT_TRUE(conn.detects_stateless_reset(packet.data(), packet.size()));
+}
+
+TEST(QuicConnectionTest, ClientVersionNegotiationWithoutV1FailsConnect) {
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
+    options.role = fiber::quic::QuicConnectionRole::Client;
+    options.original_destination_connection_id = cid_from({0x01, 0x02, 0x03, 0x04});
+    options.local_connection_id = cid_from({0x11, 0x12, 0x13, 0x14});
+    fiber::quic::QuicConnection conn(options);
+    ASSERT_TRUE(conn.start_handshake());
+
+    const std::uint8_t versions[] = {0x6b, 0x33, 0x43, 0xcf};
+    fiber::quic::QuicPacketHeader packet{};
+    packet.type = fiber::quic::QuicPacketType::VersionNegotiation;
+    packet.dcid = options.local_connection_id;
+    packet.scid = options.original_destination_connection_id;
+    packet.version_list = {versions, sizeof(versions)};
+
+    EXPECT_TRUE(conn.handle_version_negotiation(packet));
+    EXPECT_EQ(conn.connect_failure(), fiber::common::IoErr::NotSupported);
+    EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Closed);
+}
+
+TEST(QuicConnectionTest, ClientIgnoresVersionNegotiationContainingV1) {
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
+    options.role = fiber::quic::QuicConnectionRole::Client;
+    options.original_destination_connection_id = cid_from({0x01, 0x02, 0x03, 0x04});
+    options.local_connection_id = cid_from({0x11, 0x12, 0x13, 0x14});
+    fiber::quic::QuicConnection conn(options);
+    ASSERT_TRUE(conn.start_handshake());
+
+    const std::uint8_t versions[] = {0x00, 0x00, 0x00, 0x01};
+    fiber::quic::QuicPacketHeader packet{};
+    packet.type = fiber::quic::QuicPacketType::VersionNegotiation;
+    packet.dcid = options.local_connection_id;
+    packet.scid = options.original_destination_connection_id;
+    packet.version_list = {versions, sizeof(versions)};
+
+    EXPECT_FALSE(conn.handle_version_negotiation(packet));
+    EXPECT_EQ(conn.connect_failure(), fiber::common::IoErr::None);
+    EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Handshaking);
+}
+
+TEST(QuicConnectionTest, ClientActivatesPreferredAddressOnlyAfterPathValidation) {
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
+    options.role = fiber::quic::QuicConnectionRole::Client;
+    options.local_addr = loopback(41000);
+    options.remote_addr = v4_addr({192, 0, 2, 10}, 443);
+    options.original_destination_connection_id = cid_from({0x01, 0x02, 0x03, 0x04});
+    options.local_connection_id = cid_from({0x11, 0x12, 0x13, 0x14});
+    options.remote_connection_id = cid_from({0x21, 0x22, 0x23, 0x24});
+    fiber::quic::QuicConnection conn(options);
+    ASSERT_TRUE(conn.adopt_server_initial_source_connection_id(options.remote_connection_id));
+
+    fiber::quic::QuicTransportParams params{};
+    params.has_initial_source_connection_id = true;
+    params.initial_source_connection_id = options.remote_connection_id;
+    params.has_original_destination_connection_id = true;
+    params.original_destination_connection_id = options.original_destination_connection_id;
+    params.has_preferred_address = true;
+    params.preferred_address.ipv4 = v4_addr({192, 0, 2, 20}, 8443);
+    params.preferred_address.connection_id = cid_from({0x31, 0x32, 0x33, 0x34});
+    for (std::size_t i = 0; i < fiber::quic::kStatelessResetTokenLength; ++i) {
+        params.preferred_address.stateless_reset_token[i] = static_cast<std::uint8_t>(0xb0U + i);
+    }
+    ASSERT_TRUE(conn.apply_peer_transport_params(params));
+
+    fiber::quic::QuicPath *initial = conn.active_path();
+    fiber::quic::QuicPath *preferred = conn.find_path(fiber::quic::QuicPathTag::Probe);
+    ASSERT_NE(initial, nullptr);
+    ASSERT_NE(preferred, nullptr);
+    EXPECT_EQ(preferred->remote.port(), 8443);
+    EXPECT_EQ(conn.active_path(), initial);
+
+    conn.confirm_handshake();
+    EXPECT_EQ(preferred->state, fiber::quic::QuicPathState::Validating);
+    EXPECT_EQ(conn.active_path(), initial);
+
+    fiber::quic::QuicPathChallengeFrame response{};
+    std::memcpy(response.data, preferred->challenge[0], sizeof(response.data));
+    auto validated = conn.recv_path_response_frame_with_path(response, fiber::quic::QuicTime{100});
+    ASSERT_TRUE(validated.has_value()) << static_cast<int>(validated.error());
+    ASSERT_EQ(*validated, preferred);
+    ASSERT_TRUE(conn.on_path_validated(*preferred, fiber::quic::QuicTime{100}));
+    EXPECT_EQ(conn.active_path(), preferred);
 }
 
 TEST(QuicConnectionTest, ClientRejectsUnexpectedRetrySourceConnectionId) {
