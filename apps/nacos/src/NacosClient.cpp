@@ -37,6 +37,8 @@ NacosClient::AuthSubscriber NacosClient::subscribe_auth() { return impl_->subscr
 
 ConfigService &NacosClient::config_service() noexcept { return impl_->config_service(); }
 
+NamingService &NacosClient::naming_service() noexcept { return impl_->naming_service(); }
+
 event::EventLoop &NacosClient::loop() const noexcept { return impl_->loop(); }
 
 const NacosClientConfig &NacosClient::config() const noexcept { return impl_->config(); }

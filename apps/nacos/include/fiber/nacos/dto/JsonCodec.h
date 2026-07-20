@@ -8,6 +8,7 @@
 #include "Config.h"
 #include "ConfigQueryRequest.h"
 #include "Internal.h"
+#include "Naming.h"
 #include "NotifySubscriberResponse.h"
 
 namespace fiber::nacos::dto {
@@ -50,6 +51,13 @@ FIBER_NACOS_DECLARE_JSON_CODEC(resp::ConfigPublishResponse);
 FIBER_NACOS_DECLARE_JSON_CODEC(resp::ConfigRemoveResponse);
 FIBER_NACOS_DECLARE_JSON_CODEC(resp::ConfigChangeBatchListenResponse);
 FIBER_NACOS_DECLARE_JSON_CODEC(resp::ConfigChangeNotifyResponse);
+FIBER_NACOS_DECLARE_JSON_CODEC(req::ServiceQueryRequest);
+FIBER_NACOS_DECLARE_JSON_CODEC(req::SubscribeServiceRequest);
+FIBER_NACOS_DECLARE_JSON_CODEC(req::InstanceRequest);
+FIBER_NACOS_DECLARE_JSON_CODEC(req::NotifySubscriberRequest);
+FIBER_NACOS_DECLARE_JSON_CODEC(resp::QueryServiceResponse);
+FIBER_NACOS_DECLARE_JSON_CODEC(resp::SubscribeServiceResponse);
+FIBER_NACOS_DECLARE_JSON_CODEC(resp::InstanceResponse);
 
 #undef FIBER_NACOS_DECLARE_JSON_CODEC
 

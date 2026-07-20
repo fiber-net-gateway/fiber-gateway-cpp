@@ -16,6 +16,7 @@
 #include "ConfigService.h"
 #include "NacosAuthAccess.h"
 #include "NacosClientConfig.h"
+#include "NamingService.h"
 
 namespace fiber::nacos {
 namespace detail {
@@ -45,6 +46,7 @@ public:
 
     [[nodiscard]] AuthSubscriber subscribe_auth();
     [[nodiscard]] ConfigService &config_service() noexcept;
+    [[nodiscard]] NamingService &naming_service() noexcept;
     [[nodiscard]] event::EventLoop &loop() const noexcept;
     [[nodiscard]] const NacosClientConfig &config() const noexcept;
 

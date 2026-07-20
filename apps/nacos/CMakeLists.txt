@@ -3,12 +3,15 @@ fiber_proto_library(nacos_payload nacos_grpc_payload.proto)
 add_library(fiber_nacos STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/NacosClient.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/NacosClientConfig.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/NamingService.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/detail/NacosClientImpl.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/ConfigServiceImpl.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/naming/NamingServiceImpl.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/dto/ConfigJson.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/dto/ConfigQueryRequestJson.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/dto/InternalJson.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/dto/JsonDecode.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/dto/NamingJson.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/dto/NotifySubscriberResponseJson.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/rpc/NacosPayloadCodec.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/rpc/NacosRpc.cpp")
@@ -32,6 +35,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/ConfigServiceTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/NacosClientConfigTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/NacosClientTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/NamingServiceTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/NacosRpcTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/PayloadTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/RpcDtoJsonTest.cpp")
