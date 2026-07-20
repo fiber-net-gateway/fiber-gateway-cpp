@@ -150,10 +150,9 @@ NacosGrpcConnection::~NacosGrpcConnection() {
                  snapshot_.state == NacosGrpcConnectionState::Stopped);
 }
 
-void NacosGrpcConnection::notify_auth(const NacosAuthSnapshot &snapshot) {
+void NacosGrpcConnection::notify_auth(std::optional<std::string> access_token) {
     FIBER_ASSERT(loop_->in_loop());
-    control_.auth = snapshot;
-    control_.has_auth = true;
+    control_.access_token = std::move(access_token);
     control_publisher_->publish(control_);
 }
 
@@ -195,10 +194,7 @@ void NacosGrpcConnection::release_requester(Generation *generation) noexcept {
     generation->tasks.done();
 }
 
-bool NacosGrpcConnection::auth_ready() const noexcept {
-    return control_.has_auth && control_.auth.state == NacosAuthState::Ready && !control_.auth.access_token.empty() &&
-           event::EventLoop::current().now() < control_.auth.expires_at;
-}
+bool NacosGrpcConnection::auth_ready() const noexcept { return control_.access_token.has_value(); }
 
 std::expected<NacosPayloadMetadata, NacosRpcError> NacosGrpcConnection::current_metadata() const noexcept {
     if (!auth_ready()) {
@@ -214,7 +210,8 @@ std::expected<NacosPayloadMetadata, NacosRpcError> NacosGrpcConnection::current_
             .client_ip = active_client_ip_,
             .client_version = config_->client_version(),
             .namespace_id = config_->namespace_id(),
-            .access_token = control_.auth.access_token,
+            .access_token = control_.access_token->empty() ? std::optional<std::string_view>{}
+                                                           : std::optional<std::string_view>{*control_.access_token},
     };
 }
 
@@ -334,8 +331,7 @@ async::DetachedTask NacosGrpcConnection::monitor_control(Generation *generation)
         if (generation->stopping) {
             break;
         }
-        if (next.value->stopping || next.value->auth.state != NacosAuthState::Ready ||
-            next.value->auth.access_token.empty() || event::EventLoop::current().now() >= next.value->auth.expires_at) {
+        if (next.value->stopping || !next.value->access_token.has_value()) {
             generation->stop();
             break;
         }

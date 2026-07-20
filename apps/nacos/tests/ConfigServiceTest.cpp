@@ -464,19 +464,13 @@ struct ConfigCaseResult {
     std::size_t notify_acks = 0;
 };
 
-DetachedTask drive_connection(nacos_detail::NacosGrpcConnection *connection, fiber::async::WaitGroup *group) {
-    co_await connection->run();
-    group->done();
-}
-
 DetachedTask drive_service(nacos_detail::ConfigServiceImpl *service, fiber::async::WaitGroup *group) {
     co_await service->run();
     group->done();
 }
 
-fiber::async::Task<bool> wait_ready(nacos_detail::NacosGrpcConnection &connection,
-                                    std::uint64_t minimum_generation = 1) {
-    auto states = connection.subscribe_state();
+fiber::async::Task<bool> wait_ready(nacos_detail::ConfigServiceImpl &service, std::uint64_t minimum_generation = 1) {
+    auto states = service.subscribe_connection_state();
     auto current = states.current();
     std::uint64_t version = current.version;
     for (;;) {
@@ -497,8 +491,10 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
                              fiber::nacos::NacosClientConfig config, fiber::nacos::NacosClientOptions options,
                              bool reconnect, std::shared_ptr<std::promise<ConfigCaseResult>> finished) {
     ConfigCaseResult result;
-    nacos_detail::NacosGrpcConnection connection(*loop, config, options);
-    nacos_detail::ConfigServiceImpl service(*loop, config, options, connection);
+    fiber::async::Watch<fiber::nacos::NacosAuthAccess> auth_watch;
+    auto auth_publisher = auth_watch.acquire_publisher();
+    FIBER_ASSERT(auth_publisher.has_value());
+    nacos_detail::ConfigServiceImpl service(*loop, config, options, auth_watch.subscribe());
     std::vector<fiber::nacos::Subscription<fiber::nacos::ConfigData>> batched_subscriptions;
     if (!reconnect) {
         for (int i = 0; i < 5; ++i) {
@@ -509,16 +505,14 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
         }
     }
     fiber::async::WaitGroup tasks;
-    tasks.add(2);
-    fiber::async::spawn(*loop, [&connection, &tasks]() { return drive_connection(&connection, &tasks); });
+    tasks.add();
     fiber::async::spawn(*loop, [&service, &tasks]() { return drive_service(&service, &tasks); });
 
-    fiber::nacos::NacosAuthSnapshot auth;
-    auth.state = fiber::nacos::NacosAuthState::Ready;
-    auth.access_token = "token";
-    auth.expires_at = loop->now() + 1min;
-    connection.notify_auth(auth);
-    result.ready = co_await wait_ready(connection);
+    auth_publisher->publish(fiber::nacos::NacosAuthAccess{
+            .kind = fiber::nacos::NacosAuthAccessKind::Present,
+            .access_token = "token",
+    });
+    result.ready = co_await wait_ready(service);
 
     if (result.ready && !reconnect) {
         const auto listen_deadline = fiber::event::EventLoop::current().now() + 2s;
@@ -641,7 +635,7 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
                     [&sub, version = current.version]() { return sub.next(version); }, 2s);
             if (initial && initial->value && initial->value->kind == fiber::nacos::ResultKind::Success) {
                 const std::uint64_t version = initial->version;
-                result.reconnected = co_await wait_ready(connection, 2);
+                result.reconnected = co_await wait_ready(service, 2);
                 for (int i = 0; i < 100 && server->listen_count() < 2; ++i) {
                     co_await fiber::async::sleep(2ms);
                 }
@@ -662,7 +656,7 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
         service.shutdown();
     }
 
-    connection.shutdown();
+    auth_publisher->publish(fiber::nacos::NacosAuthAccess{.kind = fiber::nacos::NacosAuthAccessKind::Stopped});
     co_await tasks.join();
     result.clean_shutdown = true;
     result.notify_acks = server->notify_ack_count();
@@ -779,19 +773,19 @@ DetachedTask run_rnacos_config_case(fiber::event::EventLoop *loop, fiber::nacos:
                                     fiber::nacos::NacosClientOptions options,
                                     std::shared_ptr<std::promise<RnacosConfigResult>> finished) {
     RnacosConfigResult result;
-    nacos_detail::NacosGrpcConnection connection(*loop, config, options);
-    nacos_detail::ConfigServiceImpl service(*loop, config, options, connection);
+    fiber::async::Watch<fiber::nacos::NacosAuthAccess> auth_watch;
+    auto auth_publisher = auth_watch.acquire_publisher();
+    FIBER_ASSERT(auth_publisher.has_value());
+    nacos_detail::ConfigServiceImpl service(*loop, config, options, auth_watch.subscribe());
     fiber::async::WaitGroup tasks;
-    tasks.add(2);
-    fiber::async::spawn(*loop, [&connection, &tasks]() { return drive_connection(&connection, &tasks); });
+    tasks.add();
     fiber::async::spawn(*loop, [&service, &tasks]() { return drive_service(&service, &tasks); });
 
-    fiber::nacos::NacosAuthSnapshot auth;
-    auth.state = fiber::nacos::NacosAuthState::Ready;
-    auth.access_token = "rnacos-integration-token";
-    auth.expires_at = loop->now() + 1min;
-    connection.notify_auth(auth);
-    result.ready = co_await wait_ready(connection);
+    auth_publisher->publish(fiber::nacos::NacosAuthAccess{
+            .kind = fiber::nacos::NacosAuthAccessKind::Present,
+            .access_token = "rnacos-integration-token",
+    });
+    result.ready = co_await wait_ready(service);
 
     constexpr std::string_view kDataId = "fiber-config-service-integration";
     constexpr std::string_view kGroup = "DEFAULT_GROUP";
@@ -863,7 +857,7 @@ DetachedTask run_rnacos_config_case(fiber::event::EventLoop *loop, fiber::nacos:
     }
 
     service.shutdown();
-    connection.shutdown();
+    auth_publisher->publish(fiber::nacos::NacosAuthAccess{.kind = fiber::nacos::NacosAuthAccessKind::Stopped});
     co_await tasks.join();
     result.stopped = true;
     finished->set_value(result);

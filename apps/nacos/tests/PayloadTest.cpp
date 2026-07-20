@@ -39,6 +39,15 @@ TEST(NacosPayloadTest, EncodesJavaCompatibleEnvelopeAndMetadata) {
             R"({"requestId":null,"dataId":"data","group":"group","tenant":"tenant","tag":null,"notify":false,"module":"config"})");
 }
 
+TEST(NacosPayloadTest, OmitsAccessTokenWhenAuthenticationIsNotConfigured) {
+    auto no_auth_metadata = metadata();
+    no_auth_metadata.access_token.reset();
+    const auto request = dto::req::ConfigQueryRequest::build("data", "group", "tenant");
+    auto payload = detail::encode_payload(request, no_auth_metadata, 4096);
+    ASSERT_TRUE(payload.has_value());
+    EXPECT_FALSE(payload->metadata().headers().contains("accessToken"));
+}
+
 TEST(NacosPayloadTest, ParsesFixedWireFixtureWithNacosFieldNumbers) {
     constexpr std::string_view Wire("\x12\x14\x1a\x12ServerCheckRequest\x1a\x09\x12\x07{\"x\":1}", 33);
     proto::Payload payload;

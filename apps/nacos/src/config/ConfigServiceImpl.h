@@ -4,13 +4,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <string>
 #include <string_view>
 #include <vector>
 
 #include <async/Spawn.h>
 #include <async/WaitGroup.h>
+#include <async/Watch.h>
 #include <event/EventLoop.h>
 #include <fiber/nacos/ConfigService.h>
+#include <fiber/nacos/NacosAuthAccess.h>
 #include <fiber/nacos/NacosClientConfig.h>
 
 #include "../SubscriptionPool.h"
@@ -39,9 +42,13 @@ using ConfigResult = SubscriptionResult<ConfigData>;
 
 class ConfigServiceImpl final : public ConfigService {
 public:
+    using AuthSubscriber = async::Watch<NacosAuthAccess>::Subscriber;
+
     ConfigServiceImpl(event::EventLoop &loop, const NacosClientConfig &config, const NacosClientOptions &options,
-                      NacosGrpcConnection &connection);
+                      AuthSubscriber auth_subscriber);
     ~ConfigServiceImpl() override;
+
+    [[nodiscard]] static bool valid_options(const NacosClientOptions &options) noexcept;
 
     [[nodiscard]] async::Task<std::expected<std::optional<ConfigData>, ConfigServiceError>>
     get_config(std::string data_id, std::string group) noexcept override;
@@ -55,6 +62,7 @@ public:
 
     [[nodiscard]] async::Task<void> run() noexcept;
     void shutdown() noexcept;
+    [[nodiscard]] NacosGrpcConnection::StateSubscriber subscribe_connection_state();
 
 private:
     using EntryPtr = ConfigEntryPtr;
@@ -87,12 +95,16 @@ private:
                                                        std::uint64_t generation) noexcept;
     void register_all(std::uint64_t generation);
     void process_changed(const dto::resp::ConfigChangeBatchListenResponse &response, std::uint64_t generation);
+    [[nodiscard]] async::DetachedTask run_connection() noexcept;
+    [[nodiscard]] async::DetachedTask run_auth() noexcept;
+    void apply_auth(const NacosAuthAccess &auth_access);
     void task_done() noexcept;
 
     event::EventLoop *loop_ = nullptr;
     const NacosClientConfig *config_ = nullptr;
     const NacosClientOptions *options_ = nullptr;
-    NacosGrpcConnection *connection_ = nullptr;
+    NacosGrpcConnection connection_;
+    AuthSubscriber auth_subscriber_;
     SubscriptionPool<ConfigEntry> pool_;
     async::WaitGroup tasks_;
     std::uint64_t active_generation_ = 0;

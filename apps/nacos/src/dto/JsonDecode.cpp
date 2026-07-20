@@ -86,8 +86,7 @@ FIBER_JSON_STRUCT(fiber::nacos::dto::resp::NotifySubscriberResponse, FIBER_JSON_
 
 FIBER_JSON_STRUCT(fiber::nacos::dto::resp::AuthTokenResponse,
                   FIBER_JSON_NAMED_OPTIONAL_FIELD(access_token, "accessToken"),
-                  FIBER_JSON_NAMED_OPTIONAL_FIELD(token_ttl, "tokenTtl"),
-                  FIBER_JSON_NAMED_OPTIONAL_FIELD(global_admin, "globalAdmin"), FIBER_JSON_OPTIONAL_FIELD(username));
+                  FIBER_JSON_NAMED_OPTIONAL_FIELD(token_ttl, "tokenTtl"));
 
 FIBER_JSON_STRUCT(fiber::nacos::dto::resp::ConfigQueryResponse, FIBER_JSON_BASE(fiber::nacos::dto::ResponseBase),
                   FIBER_JSON_OPTIONAL_FIELD(content),
