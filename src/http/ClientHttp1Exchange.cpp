@@ -387,7 +387,7 @@ public:
     NotifyAwaiter &operator=(NotifyAwaiter &&) = delete;
 
     ~NotifyAwaiter() {
-        if (resume_entry_.is_in_heap()) {
+        if (resume_entry_.is_in_queue()) {
             FIBER_ASSERT(loop_ != nullptr);
             FIBER_ASSERT(loop_->in_loop());
             loop_->cancel<NotifyAwaiter, &NotifyAwaiter::resume_entry_>(*this);
@@ -468,8 +468,7 @@ public:
         FIBER_ASSERT(loop_->in_loop());
         FIBER_ASSERT(state_ == State::CancelPrepared);
         state_ = State::ResumeQueued;
-        loop_->post_at<NotifyAwaiter, &NotifyAwaiter::resume_entry_, &NotifyAwaiter::on_cancel_resume>(loop_->now(),
-                                                                                                       *this);
+        loop_->post_local<NotifyAwaiter, &NotifyAwaiter::resume_entry_, &NotifyAwaiter::on_cancel_resume>(*this);
     }
 
 private:
@@ -510,7 +509,7 @@ private:
     IoTask task_;
     IoTask::Awaiter task_awaiter_;
     std::coroutine_handle<> handle_{};
-    event::EventLoop::TimerEntry resume_entry_{};
+    event::EventLoop::DeferEntry resume_entry_{};
     common::IoErr result_err_ = common::IoErr::None;
     State state_ = State::Created;
 };
@@ -629,8 +628,7 @@ void ClientHttp1Exchange::cancel_active_io(common::IoErr reason) noexcept {
     }
     transport->abandon_pending_io();
 
-    // Resume on a new loop turn so abort() cannot re-enter the caller. A timer is
-    // used instead of the defer queue because resumed tasks may post notifications.
+    // Resume after abort() returns so cancellation cannot re-enter its caller.
     if (reader != nullptr) {
         reader->schedule_cancel_resume();
     }
