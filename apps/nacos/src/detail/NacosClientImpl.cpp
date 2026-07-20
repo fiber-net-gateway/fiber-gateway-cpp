@@ -78,7 +78,7 @@ void append_chunk(mem::IoBufChain &chunk, std::string &out) {
 
 NacosClientImpl::NacosClientImpl(event::EventLoop &loop, NacosClientConfig config, NacosClientOptions options) :
     loop_(&loop), config_(std::move(config)), options_(std::move(options)),
-    config_service_(loop, config_, options_, auth_watch_.subscribe()) {
+    config_service_(loop, config_, options_, auth_watch_) {
     shutdown_publisher_ = shutdown_watch_.acquire_publisher();
     auth_publisher_ = auth_watch_.acquire_publisher();
     FIBER_ASSERT(shutdown_publisher_.has_value());
