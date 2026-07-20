@@ -784,11 +784,20 @@ TEST(NacosClientTest, ShutdownWaitsOnlyForCurrentBoundedHttpOperation) {
 
 TEST(NacosClientTest, RejectsInvalidOptions) {
     fiber::event::EventLoop loop;
-    fiber::nacos::NacosClientOptions options;
-    options.retry_initial_delay = 0ms;
-    auto result = NacosClient::create(loop, make_config(8848), options);
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code, fiber::nacos::NacosCreateErrorCode::InvalidOptions);
+    {
+        fiber::nacos::NacosClientOptions options;
+        options.retry_initial_delay = 0ms;
+        auto result = NacosClient::create(loop, make_config(8848), options);
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, fiber::nacos::NacosCreateErrorCode::InvalidOptions);
+    }
+    {
+        fiber::nacos::NacosClientOptions options;
+        options.max_naming_hosts_per_service = 0;
+        auto result = NacosClient::create(loop, make_config(8848), options);
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, fiber::nacos::NacosCreateErrorCode::InvalidOptions);
+    }
 }
 
 } // namespace

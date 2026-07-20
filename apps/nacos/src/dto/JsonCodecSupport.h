@@ -97,6 +97,23 @@ template<typename T, typename ValueEncoder>
     return encode_nullable_text_field(generator, "tenant", value.tenant);
 }
 
+[[nodiscard]] inline EncodeResult encode_naming_request_base(json::Generator &generator,
+                                                             const NamingRequestBase &value) noexcept {
+    EncodeResult result = encode_request_base(generator, value);
+    if (result != EncodeResult::OK) {
+        return result;
+    }
+    result = encode_nullable_text_field(generator, "namespace", value.namespace_id);
+    if (result != EncodeResult::OK) {
+        return result;
+    }
+    result = encode_nullable_text_field(generator, "serviceName", value.service_name);
+    if (result != EncodeResult::OK) {
+        return result;
+    }
+    return encode_nullable_text_field(generator, "groupName", value.group_name);
+}
+
 [[nodiscard]] inline EncodeResult encode_response_base(json::Generator &generator, const ResponseBase &value) noexcept {
     EncodeResult result =
             encode_field(generator, "resultCode", [&]() noexcept { return generator.integer(value.result_code); });

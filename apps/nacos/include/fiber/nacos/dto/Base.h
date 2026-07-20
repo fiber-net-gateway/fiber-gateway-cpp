@@ -12,6 +12,7 @@ inline constexpr std::int32_t kResponseSuccess = 200;
 inline constexpr std::int32_t kResponseFail = 500;
 inline constexpr std::string_view kInternalModule = "internal";
 inline constexpr std::string_view kConfigModule = "config";
+inline constexpr std::string_view kNamingModule = "naming";
 
 struct RequestBase {
     RequestBase() noexcept { request_id.set_null(); }
@@ -29,6 +30,18 @@ struct ConfigRequestBase : RequestBase {
     json::Nullable<std::string_view> data_id;
     json::Nullable<std::string_view> group;
     json::Nullable<std::string_view> tenant;
+};
+
+struct NamingRequestBase : RequestBase {
+    NamingRequestBase() noexcept {
+        namespace_id.set_null();
+        service_name.set_null();
+        group_name.set_null();
+    }
+
+    json::Nullable<std::string_view> namespace_id;
+    json::Nullable<std::string_view> service_name;
+    json::Nullable<std::string_view> group_name;
 };
 
 struct InternalRequestBase : RequestBase {};

@@ -93,6 +93,12 @@ struct NacosClientOptions {
     std::size_t max_config_data_id_bytes = 1024;
     std::size_t max_config_group_bytes = 1024;
     std::size_t max_listen_contexts_per_request = 100;
+    std::size_t max_naming_service_name_bytes = 1024;
+    std::size_t max_naming_group_bytes = 1024;
+    std::size_t max_naming_hosts_per_service = 4096;
+    std::size_t max_naming_metadata_entries = 256;
+    std::size_t max_naming_metadata_key_bytes = 1024;
+    std::size_t max_naming_metadata_value_bytes = 4096;
     std::string client_ip_override;
 };
 
