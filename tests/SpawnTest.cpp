@@ -42,3 +42,34 @@ TEST(SpawnTest, RetainsCoroutineLambdaCapturesUntilCompletion) {
     group.join();
     EXPECT_TRUE(weak.expired());
 }
+
+TEST(SpawnTest, SameLoopSpawnFromDeferredCallbackDoesNotNeedExternalWakeup) {
+    fiber::event::EventLoopGroup group(1);
+    std::promise<void> loop_ready;
+    auto loop_ready_future = loop_ready.get_future();
+    std::promise<void> inner_ran;
+    auto inner_ran_future = inner_ran.get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [&loop_ready]() -> fiber::async::DetachedTask {
+        co_await fiber::async::yield();
+        loop_ready.set_value();
+    });
+    ASSERT_EQ(loop_ready_future.wait_for(2s), std::future_status::ready);
+
+    fiber::async::spawn(group.at(0), [&inner_ran]() -> fiber::async::DetachedTask {
+        co_await fiber::async::yield();
+        fiber::async::spawn([&inner_ran]() -> fiber::async::DetachedTask {
+            inner_ran.set_value();
+            fiber::event::EventLoop::current().stop();
+            co_return;
+        });
+    });
+
+    const std::future_status status = inner_ran_future.wait_for(2s);
+    if (status != std::future_status::ready) {
+        group.stop();
+    }
+    EXPECT_EQ(status, std::future_status::ready);
+    group.join();
+}

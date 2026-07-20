@@ -16,7 +16,7 @@ namespace fiber::async {
 
 namespace detail {
 
-template<typename F>
+template<typename F, typename Entry>
 struct SpawnTask;
 
 } // namespace detail
@@ -82,7 +82,7 @@ public:
     }
 
 private:
-    template<typename F>
+    template<typename F, typename Entry>
     friend struct detail::SpawnTask;
 
     explicit DetachedTask(handle_type handle) noexcept : handle_(handle) {}
@@ -103,9 +103,9 @@ concept SpawnFactory =
 
 namespace detail {
 
-template<typename F>
+template<typename F, typename Entry>
 struct SpawnTask {
-    fiber::event::EventLoop::NotifyEntry entry{};
+    Entry entry{};
     F factory;
 
     explicit SpawnTask(F &&fn) : factory(std::forward<F>(fn)) {}
@@ -133,7 +133,7 @@ private:
 template<typename F>
     requires SpawnFactory<F>
 void spawn(fiber::event::EventLoop &loop, F &&factory) {
-    using Task = detail::SpawnTask<std::decay_t<F>>;
+    using Task = detail::SpawnTask<std::decay_t<F>, fiber::event::EventLoop::NotifyEntry>;
     auto *task = new Task(std::forward<F>(factory));
     loop.post<Task, &Task::entry, &Task::run>(*task);
 }
@@ -143,7 +143,9 @@ template<typename F>
 void spawn(F &&factory) {
     auto *loop = fiber::event::EventLoop::current_or_null();
     FIBER_ASSERT(loop != nullptr);
-    spawn(*loop, std::forward<F>(factory));
+    using Task = detail::SpawnTask<std::decay_t<F>, fiber::event::EventLoop::DeferEntry>;
+    auto *task = new Task(std::forward<F>(factory));
+    loop->post_local<Task, &Task::entry, &Task::run>(*task);
 }
 
 } // namespace fiber::async
