@@ -90,7 +90,6 @@ NacosRpcCloseKind close_kind_for_error(const NacosRpcError &error) noexcept {
         case NacosRpcErrorCode::AuthenticationUnavailable:
         case NacosRpcErrorCode::Transport:
         case NacosRpcErrorCode::Server:
-        case NacosRpcErrorCode::QueueFull:
             return NacosRpcCloseKind::TransportError;
     }
     return NacosRpcCloseKind::TransportError;
@@ -104,13 +103,13 @@ NacosRpc::NacosRpc(NacosClientImpl &owner, NacosRpcEndpoint endpoint, NacosRpcMo
                     .loop = owner.loop(),
                     .config = owner.config(),
                     .options = owner.options(),
-                    .auth_subscriber = owner.subscribe_auth(),
+                    .auth_watch = owner.auth_watch(),
             },
             std::move(endpoint), module) {}
 
 NacosRpc::NacosRpc(NacosRpcDependencies dependencies, NacosRpcEndpoint endpoint, NacosRpcModule module) :
     loop_(&dependencies.loop), config_(&dependencies.config), options_(&dependencies.options),
-    auth_subscriber_(std::move(dependencies.auth_subscriber)), endpoint_(std::move(endpoint)), module_(module),
+    auth_subscriber_(dependencies.auth_watch.subscribe()), endpoint_(std::move(endpoint)), module_(module),
     authority_(make_authority(endpoint_)), client_(*loop_, make_client_options(*options_, endpoint_, authority_)) {
     FIBER_ASSERT(endpoint_.port != 0);
     FIBER_ASSERT(!endpoint_.ip.is_unspecified());
@@ -496,7 +495,7 @@ NacosRpc::dispatch_inbound(const NacosBiRequestHandler &handlers, const proto::P
         }
         dto::resp::ClientDetectionResponse response;
         response.request_id = request.request_id;
-        auto encoded = encode_payload(response, metadata->metadata, options_->max_inbound_grpc_message_bytes);
+        auto encoded = encode_payload(response, metadata->metadata, options_->max_push_response_bytes);
         if (!encoded) {
             co_return std::unexpected(std::move(encoded.error()));
         }
@@ -514,7 +513,7 @@ NacosRpc::dispatch_inbound(const NacosBiRequestHandler &handlers, const proto::P
         }
         dto::resp::ConnectResetResponse response;
         response.request_id = request.request_id;
-        auto encoded = encode_payload(response, metadata->metadata, options_->max_inbound_grpc_message_bytes);
+        auto encoded = encode_payload(response, metadata->metadata, options_->max_push_response_bytes);
         if (!encoded) {
             co_return std::unexpected(std::move(encoded.error()));
         }
@@ -526,7 +525,7 @@ NacosRpc::dispatch_inbound(const NacosBiRequestHandler &handlers, const proto::P
     }
 
     auto handled = co_await handlers.dispatch(nacos_rpc_module_name(module_), *view, payload.metadata(),
-                                              metadata->metadata, options_->max_inbound_grpc_message_bytes);
+                                              metadata->metadata, options_->max_push_response_bytes);
     if (!handled) {
         co_return std::unexpected(std::move(handled.error()));
     }
@@ -547,7 +546,7 @@ NacosRpc::dispatch_inbound(const NacosBiRequestHandler &handlers, const proto::P
     response.error_code = dto::kResponseFail;
     response.message.set_present("unsupported Nacos server request");
     response.request_id = request.request_id;
-    auto encoded = encode_payload(response, metadata->metadata, options_->max_inbound_grpc_message_bytes);
+    auto encoded = encode_payload(response, metadata->metadata, options_->max_push_response_bytes);
     if (!encoded) {
         co_return std::unexpected(std::move(encoded.error()));
     }

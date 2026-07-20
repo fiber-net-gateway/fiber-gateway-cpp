@@ -469,16 +469,15 @@ DetachedTask drive_service(nacos_detail::ConfigServiceImpl *service, fiber::asyn
     group->done();
 }
 
-fiber::async::Task<bool> wait_ready(nacos_detail::ConfigServiceImpl &service, std::uint64_t minimum_generation = 1) {
-    auto states = service.subscribe_connection_state();
-    auto current = states.current();
+fiber::async::Task<bool> wait_ready(nacos_detail::ConfigServiceImpl &service) {
+    auto ready = service.subscribe_connection_ready();
+    auto current = ready.current();
     std::uint64_t version = current.version;
     for (;;) {
-        if (current.value && current.value->state == nacos_detail::NacosGrpcConnectionState::Ready &&
-            current.value->generation >= minimum_generation) {
+        if (current.value && *current.value) {
             co_return true;
         }
-        auto next = co_await fiber::async::timeout_for([&states, version]() { return states.next(version); }, 2s);
+        auto next = co_await fiber::async::timeout_for([&ready, version]() { return ready.next(version); }, 2s);
         if (!next) {
             co_return false;
         }
@@ -494,7 +493,7 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
     fiber::async::Watch<fiber::nacos::NacosAuthAccess> auth_watch;
     auto auth_publisher = auth_watch.acquire_publisher();
     FIBER_ASSERT(auth_publisher.has_value());
-    nacos_detail::ConfigServiceImpl service(*loop, config, options, auth_watch.subscribe());
+    nacos_detail::ConfigServiceImpl service(*loop, config, options, auth_watch);
     std::vector<fiber::nacos::Subscription<fiber::nacos::ConfigData>> batched_subscriptions;
     if (!reconnect) {
         for (int i = 0; i < 5; ++i) {
@@ -635,11 +634,11 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
                     [&sub, version = current.version]() { return sub.next(version); }, 2s);
             if (initial && initial->value && initial->value->kind == fiber::nacos::ResultKind::Success) {
                 const std::uint64_t version = initial->version;
-                result.reconnected = co_await wait_ready(service, 2);
-                for (int i = 0; i < 100 && server->listen_count() < 2; ++i) {
+                for (int i = 0; i < 1000 && (server->listen_count() < 2 || server->setup_count() < 2); ++i) {
                     co_await fiber::async::sleep(2ms);
                 }
-                result.reconnected = result.reconnected && server->listen_count() >= 2 && server->setup_count() >= 2;
+                result.reconnected =
+                        server->listen_count() >= 2 && server->setup_count() >= 2 && co_await wait_ready(service);
                 auto published =
                         co_await service.publish("data", "group", "after-reconnect", fiber::nacos::ConfigType::Text);
                 auto updated = co_await fiber::async::timeout_for([&sub, version]() { return sub.next(version); }, 2s);
@@ -776,7 +775,7 @@ DetachedTask run_rnacos_config_case(fiber::event::EventLoop *loop, fiber::nacos:
     fiber::async::Watch<fiber::nacos::NacosAuthAccess> auth_watch;
     auto auth_publisher = auth_watch.acquire_publisher();
     FIBER_ASSERT(auth_publisher.has_value());
-    nacos_detail::ConfigServiceImpl service(*loop, config, options, auth_watch.subscribe());
+    nacos_detail::ConfigServiceImpl service(*loop, config, options, auth_watch);
     fiber::async::WaitGroup tasks;
     tasks.add();
     fiber::async::spawn(*loop, [&service, &tasks]() { return drive_service(&service, &tasks); });

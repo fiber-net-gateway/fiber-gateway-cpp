@@ -83,7 +83,7 @@ struct NacosRpcDependencies {
     event::EventLoop &loop;
     const NacosClientConfig &config;
     const NacosClientOptions &options;
-    async::Watch<NacosAuthAccess>::Subscriber auth_subscriber;
+    async::Watch<NacosAuthAccess> &auth_watch;
 };
 
 // One independent Nacos gRPC connection. This class intentionally does not

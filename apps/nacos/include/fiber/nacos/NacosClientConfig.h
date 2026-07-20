@@ -84,6 +84,8 @@ struct NacosClientOptions {
     std::chrono::milliseconds grpc_reconnect_initial_delay{1000};
     std::chrono::milliseconds grpc_reconnect_max_delay{60000};
     std::size_t max_inbound_grpc_message_bytes = 10 * 1024 * 1024;
+    // Retained for source compatibility. NacosRpc currently serializes server
+    // request handling and therefore does not maintain a response queue.
     std::size_t max_push_response_queue = 64;
     std::size_t max_push_response_bytes = 1024 * 1024;
     std::chrono::milliseconds config_subscription_redo_interval{180000};

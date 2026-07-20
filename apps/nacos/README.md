@@ -21,10 +21,10 @@ transport layer, and ConfigService:
   JSON DTO codecs.
 - Plaintext HTTP/2 ServerCheck and bidirectional ConnectionSetup handshakes.
 - SetupAck negotiation and the legacy compatibility-delay handshake path.
-- Serialized push responses for ClientDetection, ConnectReset, and unknown
-  server requests.
+- Serialized push responses for ClientDetection, ConnectReset, registered
+  module handlers, and unknown server requests.
 - Heartbeats, bounded retry with jitter, server failover, redirect handling,
-  connection generations, and bounded inbound/queued messages.
+  per-attempt RPC reconstruction, and bounded inbound messages.
 - ConfigService-owned gRPC lifecycle and dynamic access-token metadata: token
   refresh does not rebuild a healthy connection, and unconfigured
   authentication omits the `accessToken` metadata header.
@@ -45,17 +45,18 @@ transport layer, and ConfigService:
 The library links `fiber_lib` publicly, so consumers receive the core Fiber
 include paths and dependencies through `fiber::nacos`.
 
-## Independent NacosRpc Transport
+## NacosRpc Transport and Reconnection
 
-`src/rpc/NacosRpc` is a new internal, single-connection transport kept separate
-from the existing `NacosGrpcConnection`/ConfigService flow. It directly owns a
-`GrpcClient`; its long-lived `run()` task connects, sends `ServerCheckRequest`,
-opens the bidirectional stream, sends `ConnectionSetupRequest`, processes
-server requests, runs heartbeats, and completes only after full gRPC teardown.
-It does not select servers, reconnect, or replace the current service
-transport. Callers start `run()`, await `wait_ready()` before unary requests,
-signal termination with non-blocking `shutdown()`, and use the `run()` result as
-the connection completion barrier.
+`src/rpc/NacosRpc` is the internal one-physical-connection transport. It
+directly owns a `GrpcClient`; its long-lived `run()` task connects, sends
+`ServerCheckRequest`, opens the bidirectional stream, sends
+`ConnectionSetupRequest`, processes server requests, runs heartbeats, and
+completes only after full gRPC teardown. It deliberately does not reconnect.
+`ConfigServiceImpl` selects an endpoint, constructs one `NacosRpc`, starts
+`run()`, awaits `wait_ready()` before exposing the connection, and treats the
+`run()` result as the teardown barrier. After a transport close it destroys the
+stopped instance, applies redirect/server-failover/backoff policy, and creates a
+new instance.
 
 Unary `request()` calls snapshot the current authentication access and encode a
 typed DTO into the Nacos `Payload` JSON envelope. Server pushes are decoded by
@@ -163,15 +164,15 @@ explicitly close subscriptions on the client EventLoop, before destroying the
 client.
 
 Transient connection and query failures retain the last Present or NotFound
-value. A new connection generation re-registers all live entries, and a
-periodic compensating registration covers lost server-side listener state.
+value. Each newly ready physical connection re-registers all live entries, and
+a periodic compensating registration covers lost server-side listener state.
 During shutdown every live subscription is closed: `next()` resumes with
 `ResultKind::Closed` (or `closed()` returns true) and config operations reject
 new work. All registration/query tasks finish before shutdown
 returns.
 
 `NacosClientOptions` controls authentication and gRPC connect/request/handshake
-timeouts, heartbeat timing, retry backoff, message/response queue limits,
+timeouts, heartbeat timing, retry backoff, inbound/response size limits,
 configuration content/key limits, maximum listen contexts per batch, the
 subscription redo interval, and response size limits. `client_ip_override` can
 replace the local gRPC socket address used in Payload metadata. Refresh timing
@@ -209,8 +210,9 @@ Created -> Running -> Stopping -> Stopped
 ```
 
 During shutdown, the client publishes its internal shutdown signal and a final
-`Stopped` authentication access value. ConfigService owns and stops its gRPC connection and all
-generation-local stream/heartbeat/writer tasks. The client then awaits both the
+`Stopped` authentication access value. ConfigService stops the current
+`NacosRpc`, waits for its `run()` barrier and all connection-scoped
+registration/query tasks, and then destroys it. The client then awaits both the
 ConfigService and authentication coroutines through its `WaitGroup`. An idle
 authentication coroutine wakes immediately. If a login HTTP operation is in
 progress, shutdown waits only for that current connect or request operation's
@@ -264,12 +266,11 @@ client behavior.
 ```bash
 cmake -S . -B build
 cmake --build build --target fiber_nacos_tests
-ctest --test-dir build -R '^(NacosClientTest|NacosClientConfigTest|NacosDtoJsonTest|NacosPayloadTest|NacosRpcTest|NacosGrpcConnectionTest|NacosConfigServiceTest)\.'
+ctest --test-dir build -R '^(NacosClientTest|NacosClientConfigTest|NacosDtoJsonTest|NacosPayloadTest|NacosRpcTest|NacosConfigServiceTest)\.'
 ```
 
 Authentication and gRPC tests use local scripted HTTP/HTTP2 servers. The optional
-`NacosGrpcConnectionTest.RnacosInteropWhenEnabled` and
-`NacosRpcTest.RnacosInteropWhenEnabled` perform real RPC handshakes without
+`NacosRpcTest.RnacosInteropWhenEnabled` performs a real RPC handshake without
 configured authentication when `FIBER_NACOS_TEST_GRPC_PORT` points to an rnacos
 gRPC listener.
 `NacosConfigServiceTest.RnacosInteropWhenEnabled` additionally verifies real

@@ -133,8 +133,10 @@ fiber::async::Task<void> send_trailers(fiber::http::HttpExchange &exchange) {
 
 class ScriptedNacosRpcServer {
 public:
-    ScriptedNacosRpcServer(fiber::event::EventLoop &loop, bool support_ability_negotiation) :
+    ScriptedNacosRpcServer(fiber::event::EventLoop &loop, bool support_ability_negotiation,
+                           bool send_connect_reset = false) :
         loop_(&loop), support_ability_negotiation_(support_ability_negotiation),
+        send_connect_reset_(send_connect_reset),
         handler_([this](fiber::http::HttpExchange &exchange) { return handle(exchange); }),
         factory_(http_options_, handler_), listener_(loop) {
         auto bound = listener_.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
@@ -161,6 +163,10 @@ public:
     [[nodiscard]] bool refreshed_token_seen() const noexcept {
         return refreshed_token_seen_.load(std::memory_order_acquire);
     }
+    [[nodiscard]] bool connect_reset_seen() const noexcept {
+        return connect_reset_seen_.load(std::memory_order_acquire);
+    }
+    [[nodiscard]] bool connect_reset_enabled() const noexcept { return send_connect_reset_; }
 
     DetachedTask serve(std::shared_ptr<std::promise<void>> finished) {
         auto accepted = co_await listener_.accept();
@@ -285,6 +291,20 @@ private:
         if (!unknown || !(co_await send_payload(exchange, *unknown))) {
             co_return;
         }
+
+        if (send_connect_reset_) {
+            for (int i = 0; i < 200 && !refreshed_token_seen(); ++i) {
+                co_await fiber::async::sleep(1ms);
+            }
+            dto::req::ConnectResetRequest reset;
+            reset.request_id.set_present("reset-1");
+            reset.server_ip.set_present("127.0.0.1");
+            reset.server_port.set_present(std::to_string(port_));
+            auto reset_payload = nacos_detail::encode_payload(reset, server_metadata(), 1024 * 1024);
+            if (!reset_payload || !(co_await send_payload(exchange, *reset_payload))) {
+                co_return;
+            }
+        }
     }
 
     fiber::async::Task<void> read_server_responses(fiber::http::HttpExchange &exchange,
@@ -334,6 +354,19 @@ private:
         if (decode_response(*unknown_payload, unknown, unknown_pool) && unknown.request_id.is_present() &&
             unknown.request_id.value() == "future-1" && !unknown.success()) {
             unknown_seen_.store(true, std::memory_order_release);
+        }
+
+        if (send_connect_reset_) {
+            auto reset_payload = co_await read_payload(exchange, reader);
+            if (!reset_payload) {
+                co_return;
+            }
+            fiber::mem::BufPool reset_pool;
+            dto::resp::ConnectResetResponse reset;
+            if (decode_response(*reset_payload, reset, reset_pool) && reset.request_id.is_present() &&
+                reset.request_id.value() == "reset-1") {
+                connect_reset_seen_.store(true, std::memory_order_release);
+            }
         }
     }
 
@@ -387,6 +420,7 @@ private:
 
     fiber::event::EventLoop *loop_ = nullptr;
     bool support_ability_negotiation_ = false;
+    bool send_connect_reset_ = false;
     fiber::http::HttpServerOptions http_options_;
     fiber::http::HttpHandler handler_;
     fiber::http::ServerRequestFactory factory_;
@@ -399,6 +433,7 @@ private:
     std::atomic<bool> detection_seen_{false};
     std::atomic<bool> unknown_seen_{false};
     std::atomic<bool> refreshed_token_seen_{false};
+    std::atomic<bool> connect_reset_seen_{false};
 };
 
 struct HandlerContext {
@@ -434,6 +469,7 @@ struct RpcCaseResult {
     bool unary_response_valid = false;
     std::string connection_id;
     nacos_detail::NacosRpcCloseKind close_kind = nacos_detail::NacosRpcCloseKind::None;
+    bool redirect_valid = false;
 };
 
 DetachedTask run_rpc_case(fiber::event::EventLoop *loop, ScriptedNacosRpcServer *server,
@@ -451,7 +487,7 @@ DetachedTask run_rpc_case(fiber::event::EventLoop *loop, ScriptedNacosRpcServer 
                     .loop = *loop,
                     .config = config,
                     .options = options,
-                    .auth_subscriber = auth.subscribe(),
+                    .auth_watch = auth,
             },
             nacos_detail::NacosRpcEndpoint{
                     .ip = fiber::net::IpAddress::loopback_v4(),
@@ -499,7 +535,8 @@ DetachedTask run_rpc_case(fiber::event::EventLoop *loop, ScriptedNacosRpcServer 
 
         for (int i = 0;
              i < 200 && (!server->handler_response_seen() || !server->handler_error_seen() ||
-                         !server->detection_seen() || !server->unknown_seen() || !server->refreshed_token_seen());
+                         !server->detection_seen() || !server->unknown_seen() || !server->refreshed_token_seen() ||
+                         (server->connect_reset_enabled() && !server->connect_reset_seen()));
              ++i) {
             co_await fiber::async::sleep(5ms);
         }
@@ -511,13 +548,17 @@ DetachedTask run_rpc_case(fiber::event::EventLoop *loop, ScriptedNacosRpcServer 
     co_await run_done.join();
     result.stopped = rpc.state() == nacos_detail::NacosRpcState::Stopped;
     result.close_kind = close_result.kind;
+    result.redirect_valid =
+            close_result.redirect && close_result.redirect->ip == fiber::net::IpAddress::loopback_v4() &&
+            close_result.redirect->port == server->port() && !close_result.redirect->server_index.has_value();
     finished->set_value(std::move(result));
 }
 
-RpcCaseResult execute_rpc_case(bool support_ability_negotiation) {
+RpcCaseResult execute_rpc_case(bool support_ability_negotiation, bool send_connect_reset = false) {
     fiber::event::EventLoopGroup group(1);
     group.start();
-    auto server = std::make_unique<ScriptedNacosRpcServer>(group.at(0), support_ability_negotiation);
+    auto server =
+            std::make_unique<ScriptedNacosRpcServer>(group.at(0), support_ability_negotiation, send_connect_reset);
     EXPECT_TRUE(server->valid());
     auto server_finished = std::make_shared<std::promise<void>>();
     auto server_future = server_finished->get_future();
@@ -562,12 +603,14 @@ RpcCaseResult execute_rpc_case(bool support_ability_negotiation) {
     const bool detection_seen = server->detection_seen();
     const bool unknown_seen = server->unknown_seen();
     const bool refreshed_token_seen = server->refreshed_token_seen();
+    const bool connect_reset_seen = server->connect_reset_seen();
     EXPECT_TRUE(setup_valid);
     EXPECT_TRUE(handler_response_seen);
     EXPECT_TRUE(handler_error_seen);
     EXPECT_TRUE(detection_seen);
     EXPECT_TRUE(unknown_seen);
     EXPECT_TRUE(refreshed_token_seen);
+    EXPECT_EQ(connect_reset_seen, send_connect_reset);
 
     auto close_finished = std::make_shared<std::promise<void>>();
     auto close_future = close_finished->get_future();
@@ -602,6 +645,14 @@ TEST(NacosRpcTest, CompatibilityDelayStartsTheSameTypedDispatcher) {
     EXPECT_TRUE(result.unary_response_valid);
 }
 
+TEST(NacosRpcTest, ConnectResetReturnsRedirectAfterResponseIsWritten) {
+    const RpcCaseResult result = execute_rpc_case(true, true);
+    EXPECT_TRUE(result.started);
+    EXPECT_TRUE(result.stopped);
+    EXPECT_EQ(result.close_kind, nacos_detail::NacosRpcCloseKind::Redirect);
+    EXPECT_TRUE(result.redirect_valid);
+}
+
 struct PreRunShutdownResult {
     bool ready_canceled = false;
     bool stopped = false;
@@ -619,7 +670,7 @@ DetachedTask run_pre_run_shutdown(fiber::event::EventLoop *loop, fiber::nacos::N
                     .loop = *loop,
                     .config = config,
                     .options = options,
-                    .auth_subscriber = auth.subscribe(),
+                    .auth_watch = auth,
             },
             nacos_detail::NacosRpcEndpoint{
                     .ip = fiber::net::IpAddress::loopback_v4(),
@@ -676,7 +727,7 @@ DetachedTask run_rnacos_rpc(fiber::event::EventLoop *loop, fiber::nacos::NacosCl
                     .loop = *loop,
                     .config = config,
                     .options = options,
-                    .auth_subscriber = auth.subscribe(),
+                    .auth_watch = auth,
             },
             nacos_detail::NacosRpcEndpoint{
                     .ip = fiber::net::IpAddress::loopback_v4(),

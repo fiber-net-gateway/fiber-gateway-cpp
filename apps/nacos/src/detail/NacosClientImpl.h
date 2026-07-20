@@ -45,6 +45,7 @@ public:
     [[nodiscard]] event::EventLoop &loop() const noexcept { return *loop_; }
     [[nodiscard]] const NacosClientConfig &config() const noexcept { return config_; }
     [[nodiscard]] const NacosClientOptions &options() const noexcept { return options_; }
+    [[nodiscard]] async::Watch<NacosAuthAccess> &auth_watch() noexcept { return auth_watch_; }
 
 private:
     struct AuthLoginSuccess {

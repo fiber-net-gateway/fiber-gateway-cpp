@@ -15,7 +15,6 @@ enum class NacosRpcErrorCode : std::uint8_t {
     GrpcStatus,
     Protocol,
     Server,
-    QueueFull,
     Shutdown,
 };
 

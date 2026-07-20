@@ -24,14 +24,6 @@ ConfigServiceError invalid_argument(std::string message) {
     };
 }
 
-NacosRpcError protocol_error(std::string message, common::IoErr io_error = common::IoErr::Invalid) {
-    return NacosRpcError{
-            .code = NacosRpcErrorCode::Protocol,
-            .io_error = io_error,
-            .message = std::move(message),
-    };
-}
-
 ConfigServiceError shutdown_error() {
     return ConfigServiceError{.code = ConfigServiceErrorCode::Shutdown, .io_error = common::IoErr::Canceled};
 }
@@ -39,21 +31,39 @@ ConfigServiceError shutdown_error() {
 } // namespace
 
 ConfigServiceImpl::ConfigServiceImpl(event::EventLoop &loop, const NacosClientConfig &config,
-                                     const NacosClientOptions &options, AuthSubscriber auth_subscriber) :
-    loop_(&loop), config_(&config), options_(&options), connection_(loop, config, options),
-    auth_subscriber_(std::move(auth_subscriber)),
+                                     const NacosClientOptions &options, AuthWatch &auth_watch) :
+    loop_(&loop), config_(&config), options_(&options), auth_watch_(&auth_watch),
     pool_([this](EntryPtr entry) { on_subscription_add(std::move(entry)); },
           [this](EntryPtr entry) { return on_subscription_remove(std::move(entry)); }) {
     FIBER_ASSERT(valid_options(options));
-    connection_.set_push_handler(NacosPushHandler{
-            .context = this,
-            .callback = &ConfigServiceImpl::handle_push,
-    });
+    ready_publisher_ = ready_watch_.acquire_publisher();
+    wake_publisher_ = wake_watch_.acquire_publisher();
+    FIBER_ASSERT(ready_publisher_.has_value());
+    FIBER_ASSERT(wake_publisher_.has_value());
+    auto registered =
+            handlers_.add_request_handler<dto::req::ConfigChangeNotifyRequest, dto::resp::ConfigChangeNotifyResponse>(
+                    &ConfigServiceImpl::handle_config_change, this);
+    FIBER_ASSERT(registered.has_value());
 }
 
 ConfigServiceImpl::~ConfigServiceImpl() {
     FIBER_ASSERT(!run_active_);
     FIBER_ASSERT(tasks_.empty());
+    FIBER_ASSERT(!rpc_.has_value());
+}
+
+NacosRpcError ConfigServiceImpl::shutdown_rpc_error() {
+    return NacosRpcError{
+            .code = NacosRpcErrorCode::Shutdown,
+            .io_error = common::IoErr::Canceled,
+    };
+}
+
+NacosRpcError ConfigServiceImpl::not_connected_rpc_error() {
+    return NacosRpcError{
+            .code = NacosRpcErrorCode::Transport,
+            .io_error = common::IoErr::NotConnected,
+    };
 }
 
 bool ConfigServiceImpl::valid_options(const NacosClientOptions &options) noexcept {
@@ -109,7 +119,6 @@ ConfigServiceError ConfigServiceImpl::map_error(NacosRpcError error) const {
             result.code = ConfigServiceErrorCode::AuthenticationUnavailable;
             break;
         case NacosRpcErrorCode::Transport:
-        case NacosRpcErrorCode::QueueFull:
             result.code = ConfigServiceErrorCode::Transport;
             break;
         case NacosRpcErrorCode::GrpcStatus:
@@ -173,7 +182,7 @@ ConfigServiceImpl::get_config(std::string data_id, std::string group) noexcept {
     dto::req::ConfigQueryRequest request = dto::req::ConfigQueryRequest::build(data_id, group, config_->tenant());
     dto::resp::ConfigQueryResponse response;
     mem::BufPool pool;
-    auto result = co_await connection_.request(request, pool, response);
+    auto result = co_await request_rpc(request, pool, response);
     if (!result) {
         co_return std::unexpected(map_error(std::move(result.error())));
     }
@@ -241,7 +250,7 @@ ConfigServiceImpl::publish(std::string data_id, std::string group, std::string c
 
     dto::resp::ConfigPublishResponse response;
     mem::BufPool pool;
-    auto result = co_await connection_.request(request, pool, response);
+    auto result = co_await request_rpc(request, pool, response);
     if (!result) {
         co_return std::unexpected(map_error(std::move(result.error())));
     }
@@ -267,7 +276,7 @@ async::Task<std::expected<void, ConfigServiceError>> ConfigServiceImpl::remove_c
     request.tenant.set_present(config_->tenant());
     dto::resp::ConfigRemoveResponse response;
     mem::BufPool pool;
-    auto result = co_await connection_.request(request, pool, response);
+    auto result = co_await request_rpc(request, pool, response);
     if (!result) {
         co_return std::unexpected(map_error(std::move(result.error())));
     }
@@ -294,24 +303,22 @@ std::expected<Subscription<ConfigData>, ConfigServiceError> ConfigServiceImpl::s
 }
 
 void ConfigServiceImpl::on_subscription_add(EntryPtr entry) {
-    if (active_generation_ != 0) {
-        schedule_registration({std::move(entry)}, true, active_generation_);
+    if (rpc_ready_) {
+        schedule_registration({std::move(entry)}, true);
     }
 }
 
 RemoveDecision ConfigServiceImpl::on_subscription_remove(EntryPtr entry) {
     FIBER_ASSERT(loop_->in_loop());
     entry->proto.draining = true;
-    const std::uint64_t generation = active_generation_;
-    if (!stopping_ && generation != 0 &&
-        (entry->proto.registered_generation == generation || entry->proto.registration_in_flight)) {
+    if (!stopping_ && rpc_ready_ && (entry->proto.registered || entry->proto.registration_in_flight)) {
         // Registered or mid-registration: defer the free. The pool has already
         // unlinked the entry from the tree; this owning EntryPtr keeps it alive
         // while an async listen=false runs, and releases it to 0 on completion.
-        schedule_registration({std::move(entry)}, false, generation);
+        schedule_registration({std::move(entry)}, false);
         return RemoveDecision::Defer;
     }
-    // Never registered (no connection / generation 0) or shutting down: free now.
+    // Never registered, disconnected, or shutting down: free now.
     return RemoveDecision::UnlinkNow;
 }
 
@@ -320,9 +327,9 @@ void ConfigServiceImpl::publish_value(ConfigEntry &entry, ConfigData value) {
     pool_.publish(entry, ConfigResult{.kind = ResultKind::Success, .data = std::move(value)});
 }
 
-void ConfigServiceImpl::schedule_query(const EntryPtr &entry, std::uint64_t generation) {
+void ConfigServiceImpl::schedule_query(const EntryPtr &entry) {
     FIBER_ASSERT(loop_->in_loop());
-    if (stopping_ || generation == 0 || generation != active_generation_ || entry->proto.draining) {
+    if (stopping_ || !rpc_ready_ || entry->proto.draining) {
         return;
     }
     if (entry->proto.query_in_flight) {
@@ -333,12 +340,11 @@ void ConfigServiceImpl::schedule_query(const EntryPtr &entry, std::uint64_t gene
     entry->proto.dirty = false;
     const std::uint64_t sequence = ++entry->proto.query_sequence;
     tasks_.add();
-    async::spawn(*loop_, [this, entry, generation, sequence]() { return query_and_sync(entry, generation, sequence); });
+    async::spawn(*loop_, [this, entry, sequence]() { return query_and_sync(entry, sequence); });
 }
 
-async::DetachedTask ConfigServiceImpl::query_and_sync(EntryPtr entry, std::uint64_t generation,
-                                                      std::uint64_t sequence) noexcept {
-    while (!stopping_ && generation != 0 && !entry->proto.draining) {
+async::DetachedTask ConfigServiceImpl::query_and_sync(EntryPtr entry, std::uint64_t sequence) noexcept {
+    while (!stopping_ && rpc_ready_ && !entry->proto.draining) {
         // Stop once the entry is detached from the pool tree (last subscriber
         // gone -> on_subscription_remove set draining and the pool detached it).
         // The watch/publisher outlive tree membership, so reads above are safe.
@@ -349,10 +355,9 @@ async::DetachedTask ConfigServiceImpl::query_and_sync(EntryPtr entry, std::uint6
                 dto::req::ConfigQueryRequest::build(entry->data_id, entry->group, config_->tenant());
         dto::resp::ConfigQueryResponse response;
         mem::BufPool pool;
-        auto result = co_await connection_.request(request, pool, response);
+        auto result = co_await request_rpc(request, pool, response);
 
-        if (!stopping_ && !entry->proto.draining && generation == active_generation_ &&
-            sequence == entry->proto.query_sequence && result) {
+        if (!stopping_ && rpc_ready_ && !entry->proto.draining && sequence == entry->proto.query_sequence && result) {
             const auto snapshot = entry->watch.current();
             const ConfigData *current =
                     (snapshot.value != nullptr && snapshot.value->data.has_value()) ? &*snapshot.value->data : nullptr;
@@ -374,20 +379,19 @@ async::DetachedTask ConfigServiceImpl::query_and_sync(EntryPtr entry, std::uint6
             }
         }
 
-        if (!entry->proto.dirty || stopping_ || entry->proto.draining || active_generation_ == 0) {
+        if (!entry->proto.dirty || stopping_ || entry->proto.draining || !rpc_ready_) {
             break;
         }
         entry->proto.dirty = false;
-        generation = active_generation_;
         sequence = ++entry->proto.query_sequence;
     }
     entry->proto.query_in_flight = false;
     task_done();
 }
 
-void ConfigServiceImpl::schedule_registration(std::vector<EntryPtr> entries, bool listen, std::uint64_t generation) {
+void ConfigServiceImpl::schedule_registration(std::vector<EntryPtr> entries, bool listen) {
     FIBER_ASSERT(loop_->in_loop());
-    if (stopping_ || generation == 0 || entries.empty()) {
+    if (stopping_ || !rpc_ready_ || entries.empty()) {
         return;
     }
     std::vector<EntryPtr> scheduled;
@@ -404,21 +408,16 @@ void ConfigServiceImpl::schedule_registration(std::vector<EntryPtr> entries, boo
         return;
     }
     tasks_.add();
-    async::spawn(*loop_, [this, entries = std::move(scheduled), listen, generation]() mutable {
-        return register_entries(std::move(entries), listen, generation);
+    async::spawn(*loop_, [this, entries = std::move(scheduled), listen]() mutable {
+        return register_entries(std::move(entries), listen);
     });
 }
 
-void ConfigServiceImpl::complete_registration(const EntryPtr &entry, bool listen, std::uint64_t generation,
-                                              bool success) {
+void ConfigServiceImpl::complete_registration(const EntryPtr &entry, bool listen, bool success) {
     FIBER_ASSERT(entry->proto.registration_in_flight);
     entry->proto.registration_in_flight = false;
     if (success) {
-        if (listen) {
-            entry->proto.registered_generation = generation;
-        } else if (entry->proto.registered_generation == generation) {
-            entry->proto.registered_generation = 0;
-        }
+        entry->proto.registered = listen;
     }
     const bool dirty = std::exchange(entry->proto.registration_dirty, false);
     if (stopping_) {
@@ -431,25 +430,22 @@ void ConfigServiceImpl::complete_registration(const EntryPtr &entry, bool listen
     if (entry->pool == nullptr) {
         return;
     }
-    const bool wants_listen = !entry->proto.draining && active_generation_ != 0;
+    const bool wants_listen = !entry->proto.draining && rpc_ready_;
     if (wants_listen) {
-        if ((!success && (!listen || dirty)) ||
-            (success && (entry->proto.registered_generation != active_generation_ || dirty || !listen))) {
-            schedule_registration({entry}, true, active_generation_);
+        if ((!success && (!listen || dirty)) || (success && (!entry->proto.registered || dirty || !listen))) {
+            schedule_registration({entry}, true);
         }
         return;
     }
-    if (active_generation_ != 0 && entry->proto.registered_generation == active_generation_ &&
-        (success || dirty || listen)) {
-        schedule_registration({entry}, false, active_generation_);
+    if (rpc_ready_ && entry->proto.registered && (success || dirty || listen)) {
+        schedule_registration({entry}, false);
         return;
     }
     // No further registration needed; if this entry is draining with no live
     // subscribers the pool already detached it - nothing to do here.
 }
 
-async::DetachedTask ConfigServiceImpl::register_entries(std::vector<EntryPtr> entries, bool listen,
-                                                        std::uint64_t generation) noexcept {
+async::DetachedTask ConfigServiceImpl::register_entries(std::vector<EntryPtr> entries, bool listen) noexcept {
     std::size_t offset = 0;
     while (offset < entries.size()) {
         const std::size_t limit = std::min(entries.size(), offset + options_->max_listen_contexts_per_request);
@@ -459,9 +455,9 @@ async::DetachedTask ConfigServiceImpl::register_entries(std::vector<EntryPtr> en
         contexts.reserve(limit - offset);
         for (; offset < limit; ++offset) {
             const EntryPtr &entry = entries[offset];
-            if (stopping_ || generation != active_generation_ || (listen && entry->proto.draining) ||
-                (!listen && entry->proto.registered_generation != generation)) {
-                complete_registration(entry, listen, generation, false);
+            if (stopping_ || !rpc_ready_ || (listen && entry->proto.draining) ||
+                (!listen && !entry->proto.registered)) {
+                complete_registration(entry, listen, false);
                 continue;
             }
             dto::req::ConfigListenContext context;
@@ -492,36 +488,35 @@ async::DetachedTask ConfigServiceImpl::register_entries(std::vector<EntryPtr> en
                 json::JsonArray<dto::req::ConfigListenContext>(contexts.data(), contexts.size());
         dto::resp::ConfigChangeBatchListenResponse response;
         mem::BufPool pool;
-        auto result = co_await connection_.request(request, pool, response);
-        const bool success = result && !stopping_ && generation == active_generation_ && response.success();
+        auto result = co_await request_rpc(request, pool, response);
+        const bool success = result && !stopping_ && rpc_ready_ && response.success();
         if (!success) {
             for (const EntryPtr &entry: included) {
-                complete_registration(entry, listen, generation, false);
+                complete_registration(entry, listen, false);
             }
             continue;
         }
         if (listen) {
-            process_changed(response, generation);
+            process_changed(response);
         }
         for (const EntryPtr &entry: included) {
-            complete_registration(entry, listen, generation, true);
+            complete_registration(entry, listen, true);
         }
     }
     task_done();
 }
 
-void ConfigServiceImpl::register_all(std::uint64_t generation) {
+void ConfigServiceImpl::register_all() {
     std::vector<EntryPtr> entries;
     pool_.for_each([&entries](ConfigEntry &entry) {
         if (!entry.proto.draining) {
             entries.push_back(EntryPtr(&entry));
         }
     });
-    schedule_registration(std::move(entries), true, generation);
+    schedule_registration(std::move(entries), true);
 }
 
-void ConfigServiceImpl::process_changed(const dto::resp::ConfigChangeBatchListenResponse &response,
-                                        std::uint64_t generation) {
+void ConfigServiceImpl::process_changed(const dto::resp::ConfigChangeBatchListenResponse &response) {
     for (const dto::resp::ConfigContext &changed: response.changed_configs) {
         if (!changed.data_id.is_present() || !changed.group.is_present()) {
             continue;
@@ -530,118 +525,36 @@ void ConfigServiceImpl::process_changed(const dto::resp::ConfigChangeBatchListen
             continue;
         }
         if (auto entry = pool_.find(changed.data_id.value(), changed.group.value())) {
-            schedule_query(entry, generation);
+            schedule_query(entry);
         }
     }
 }
 
-std::expected<proto::Payload, NacosRpcError> ConfigServiceImpl::handle_push(void *context,
-                                                                            const proto::Payload &request,
-                                                                            const NacosPayloadMetadata &metadata,
-                                                                            std::size_t max_payload_bytes) noexcept {
+async::Task<common::IoResult<dto::resp::ConfigChangeNotifyResponse>>
+ConfigServiceImpl::handle_config_change(void *context, NacosServerRequestContext &,
+                                        const dto::req::ConfigChangeNotifyRequest &request) noexcept {
     FIBER_ASSERT(context != nullptr);
-    return static_cast<ConfigServiceImpl *>(context)->handle_push(request, metadata, max_payload_bytes);
-}
-
-std::expected<proto::Payload, NacosRpcError> ConfigServiceImpl::handle_push(const proto::Payload &request,
-                                                                            const NacosPayloadMetadata &metadata,
-                                                                            std::size_t max_payload_bytes) noexcept {
-    auto view = validate_payload(request, max_payload_bytes);
-    if (!view) {
-        return std::unexpected(std::move(view.error()));
+    auto *self = static_cast<ConfigServiceImpl *>(context);
+    if (!request.data_id.is_present() || !request.group.is_present()) {
+        co_return std::unexpected(common::IoErr::Invalid);
     }
-    mem::BufPool pool;
-    if (view->type == dto::req::ConfigChangeNotifyRequest::kTypeName) {
-        dto::req::ConfigChangeNotifyRequest notify;
-        auto parsed = parse_payload_json(*view, pool, notify);
-        if (!parsed) {
-            return std::unexpected(std::move(parsed.error()));
+    const bool tenant_matches = !request.tenant.is_present() || request.tenant.value() == self->config_->tenant();
+    if (!self->stopping_ && self->rpc_ready_ && tenant_matches) {
+        if (auto entry = self->pool_.find(request.data_id.value(), request.group.value())) {
+            self->schedule_query(entry);
         }
-        if (!notify.data_id.is_present() || !notify.group.is_present()) {
-            return std::unexpected(protocol_error("Nacos config change notification is missing key"));
-        }
-        const bool tenant_matches = !notify.tenant.is_present() || notify.tenant.value() == config_->tenant();
-        if (!stopping_ && tenant_matches && active_generation_ != 0) {
-            if (auto entry = pool_.find(notify.data_id.value(), notify.group.value())) {
-                schedule_query(entry, active_generation_);
-            }
-        }
-        dto::resp::ConfigChangeNotifyResponse response;
-        response.request_id = notify.request_id;
-        return encode_payload(response, metadata, max_payload_bytes);
     }
-
-    dto::RequestBase request_base;
-    auto parsed = parse_payload_json(*view, pool, request_base);
-    if (!parsed) {
-        return std::unexpected(std::move(parsed.error()));
-    }
-    dto::resp::ErrorResponse response;
-    response.result_code = dto::kResponseFail;
-    response.error_code = dto::kResponseFail;
-    response.message.set_present("unsupported Nacos config server request");
-    response.request_id = request_base.request_id;
-    return encode_payload(response, metadata, max_payload_bytes);
+    co_return dto::resp::ConfigChangeNotifyResponse{};
 }
 
 async::Task<void> ConfigServiceImpl::run() noexcept {
     FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT(!run_active_);
     run_active_ = true;
-    tasks_.add();
-    async::spawn(*loop_, [this]() { return run_connection(); });
-    tasks_.add();
-    async::spawn(*loop_, [this]() { return run_auth(); });
-
-    auto states = connection_.subscribe_state();
-    auto state = states.current();
-    std::uint64_t state_version = state.version;
-    auto redo_at = std::chrono::steady_clock::time_point::max();
-
-    while (!stopping_) {
-        if (state.value && state.value->state == NacosGrpcConnectionState::Ready &&
-            state.value->generation != active_generation_) {
-            active_generation_ = state.value->generation;
-            register_all(active_generation_);
-            redo_at = event::EventLoop::current().now() + options_->config_subscription_redo_interval;
-        } else if (state.value && state.value->state != NacosGrpcConnectionState::Ready && active_generation_ != 0) {
-            active_generation_ = 0;
-            redo_at = std::chrono::steady_clock::time_point::max();
-        }
-
-        if (stopping_) {
-            break;
-        }
-        if (redo_at == std::chrono::steady_clock::time_point::max()) {
-            state = co_await states.next(state_version);
-            state_version = state.version;
-            continue;
-        }
-
-        const auto now = event::EventLoop::current().now();
-        if (now >= redo_at) {
-            register_all(active_generation_);
-            redo_at = now + options_->config_subscription_redo_interval;
-            continue;
-        }
-        auto next = co_await async::timeout_for([&states, state_version]() { return states.next(state_version); },
-                                                redo_at - now);
-        if (next) {
-            state = std::move(*next);
-            state_version = state.version;
-        } else if (next.error() == common::IoErr::TimedOut) {
-            register_all(active_generation_);
-            redo_at = event::EventLoop::current().now() + options_->config_subscription_redo_interval;
-        }
-    }
-
-    active_generation_ = 0;
-    // Let every in-flight registration/query task (including deferred
-    // unregistrations holding owning EntryPtrs) finish or short-circuit before
-    // we close live subscriptions.
+    co_await run_connection();
+    set_rpc_ready(false);
     co_await tasks_.join();
-    // Close every still-live entry exactly once and wake its waiters with
-    // ResultKind::Closed.
+    pool_.disable();
     pool_.close_all();
     run_active_ = false;
 }
@@ -652,57 +565,179 @@ void ConfigServiceImpl::shutdown() noexcept {
         return;
     }
     stopping_ = true;
+    set_rpc_ready(false);
     pool_.disable();
     pool_.close_all();
-    connection_.shutdown();
+    wake_publisher_->publish(true);
+    if (rpc_) {
+        rpc_->shutdown();
+    }
 }
 
-NacosGrpcConnection::StateSubscriber ConfigServiceImpl::subscribe_connection_state() {
-    return connection_.subscribe_state();
+ConfigServiceImpl::ReadySubscriber ConfigServiceImpl::subscribe_connection_ready() { return ready_watch_.subscribe(); }
+
+void ConfigServiceImpl::set_rpc_ready(bool ready) {
+    FIBER_ASSERT(loop_->in_loop());
+    if (rpc_ready_ == ready) {
+        return;
+    }
+    rpc_ready_ = ready;
+    ready_publisher_->publish(ready);
 }
 
-async::DetachedTask ConfigServiceImpl::run_connection() noexcept {
-    co_await connection_.run();
+void ConfigServiceImpl::reset_connection_state() {
+    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(!rpc_ready_);
+    FIBER_ASSERT(tasks_.empty());
+    pool_.for_each([](ConfigEntry &entry) {
+        FIBER_ASSERT(!entry.proto.query_in_flight);
+        FIBER_ASSERT(!entry.proto.registration_in_flight);
+        entry.proto.registered = false;
+        entry.proto.dirty = false;
+        entry.proto.registration_dirty = false;
+    });
+}
+
+async::DetachedTask ConfigServiceImpl::run_redo(std::uint64_t ready_version) noexcept {
+    auto ready = ready_watch_.subscribe();
+    while (!stopping_ && rpc_ready_) {
+        auto next = co_await async::timeout_for([&ready, ready_version]() { return ready.next(ready_version); },
+                                                options_->config_subscription_redo_interval);
+        if (next) {
+            ready_version = next->version;
+            if (!next->value || !*next->value) {
+                break;
+            }
+            continue;
+        }
+        if (next.error() != common::IoErr::TimedOut || stopping_ || !rpc_ready_) {
+            break;
+        }
+        register_all();
+    }
     task_done();
 }
 
-async::DetachedTask ConfigServiceImpl::run_auth() noexcept {
-    auto current = auth_subscriber_.current();
-    std::uint64_t version = current.version;
-    if (!stopping_ && current.value) {
-        apply_auth(*current.value);
+async::Task<ConfigServiceImpl::AttemptResult> ConfigServiceImpl::run_attempt(NacosRpcEndpoint endpoint) noexcept {
+    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(!rpc_.has_value());
+    rpc_.emplace(
+            NacosRpcDependencies{
+                    .loop = *loop_,
+                    .config = *config_,
+                    .options = *options_,
+                    .auth_watch = *auth_watch_,
+            },
+            std::move(endpoint), NacosRpcModule::Config);
+
+    async::WaitGroup run_done;
+    std::optional<NacosRpcCloseResult> close;
+    run_done.add();
+    async::spawn(*loop_, [this, &run_done, &close]() -> async::DetachedTask {
+        close = co_await rpc_->run(handlers_);
+        run_done.done();
+    });
+
+    AttemptResult result;
+    auto ready = co_await rpc_->wait_ready();
+    if (ready && !stopping_) {
+        result.reached_ready = true;
+        set_rpc_ready(true);
+        register_all();
+        const std::uint64_t ready_version = ready_watch_.current().version;
+        tasks_.add();
+        async::spawn(*loop_, [this, ready_version]() { return run_redo(ready_version); });
     }
 
+    co_await run_done.join();
+    FIBER_ASSERT(close.has_value());
+    result.close = std::move(*close);
+    set_rpc_ready(false);
+    co_await tasks_.join();
+    reset_connection_state();
+    rpc_.reset();
+    co_return result;
+}
+
+async::Task<void> ConfigServiceImpl::wait_backoff(std::chrono::milliseconds delay) noexcept {
+    auto wake = wake_watch_.subscribe();
+    const std::uint64_t version = wake.current().version;
+    auto result = co_await async::timeout_for([&wake, version]() { return wake.next(version); }, delay);
+    if (!result) {
+        FIBER_ASSERT(result.error() == common::IoErr::TimedOut);
+    }
+}
+
+std::chrono::milliseconds ConfigServiceImpl::jittered(std::chrono::milliseconds delay) noexcept {
+    random_state_ ^= random_state_ << 13;
+    random_state_ ^= random_state_ >> 7;
+    random_state_ ^= random_state_ << 17;
+    const auto spread = delay / 5;
+    if (spread <= std::chrono::milliseconds::zero()) {
+        return delay;
+    }
+    const std::uint64_t width = static_cast<std::uint64_t>(spread.count()) * 2 + 1;
+    const auto offset = static_cast<std::int64_t>(random_state_ % width) - spread.count();
+    return delay + std::chrono::milliseconds(offset);
+}
+
+async::Task<void> ConfigServiceImpl::run_connection() noexcept {
+    auto retry_delay = options_->grpc_reconnect_initial_delay;
     while (!stopping_) {
-        auto next = co_await auth_subscriber_.next(version);
-        version = next.version;
+        if (redirect_) {
+            NacosRpcEndpoint endpoint = std::move(*redirect_);
+            redirect_.reset();
+            auto result = co_await run_attempt(std::move(endpoint));
+            if (result.reached_ready) {
+                retry_delay = options_->grpc_reconnect_initial_delay;
+            }
+            if (result.close.kind == NacosRpcCloseKind::Shutdown) {
+                stopping_ = true;
+                break;
+            }
+            if (result.close.redirect) {
+                redirect_ = std::move(result.close.redirect);
+            }
+            if (stopping_ || redirect_) {
+                continue;
+            }
+        }
+
+        const std::size_t server_count = config_->server_ips().size();
+        const std::size_t round_start = preferred_server_index_;
+        for (std::size_t offset = 0; offset < server_count && !stopping_; ++offset) {
+            const std::size_t server_index = (round_start + offset) % server_count;
+            NacosRpcEndpoint endpoint{
+                    .ip = config_->server_ips()[server_index],
+                    .port = config_->grpc_port(),
+                    .server_index = server_index,
+            };
+            auto result = co_await run_attempt(std::move(endpoint));
+            if (result.reached_ready) {
+                preferred_server_index_ = server_index;
+                retry_delay = options_->grpc_reconnect_initial_delay;
+            }
+            if (result.close.kind == NacosRpcCloseKind::Shutdown) {
+                stopping_ = true;
+                break;
+            }
+            if (result.close.redirect) {
+                redirect_ = std::move(result.close.redirect);
+                break;
+            }
+        }
+
         if (stopping_) {
             break;
         }
-        FIBER_ASSERT(next.value != nullptr);
-        apply_auth(*next.value);
-    }
-    task_done();
-}
-
-void ConfigServiceImpl::apply_auth(const NacosAuthAccess &auth_access) {
-    switch (auth_access.kind) {
-        case NacosAuthAccessKind::NotConfigured:
-            FIBER_ASSERT(auth_access.access_token.empty());
-            connection_.notify_auth(std::string{});
-            break;
-        case NacosAuthAccessKind::InitialFailed:
-            FIBER_ASSERT(auth_access.access_token.empty());
-            connection_.notify_auth(std::nullopt);
-            break;
-        case NacosAuthAccessKind::Present:
-            FIBER_ASSERT(!auth_access.access_token.empty());
-            connection_.notify_auth(auth_access.access_token);
-            break;
-        case NacosAuthAccessKind::Stopped:
-            FIBER_ASSERT(auth_access.access_token.empty());
-            connection_.notify_auth(std::nullopt);
-            break;
+        if (redirect_) {
+            continue;
+        }
+        co_await wait_backoff(jittered(retry_delay));
+        if (retry_delay < options_->grpc_reconnect_max_delay) {
+            retry_delay = retry_delay > options_->grpc_reconnect_max_delay / 2 ? options_->grpc_reconnect_max_delay
+                                                                               : retry_delay * 2;
+        }
     }
 }
 
