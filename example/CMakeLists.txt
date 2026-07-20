@@ -2,6 +2,7 @@ set(FIBER_SIMPLE_EXAMPLES
     dns_dig
     git_http_repo_server
     http_benchmark_backend
+    http3_benchmark_server
     http1_echo
     https_echo
     tcp_echo

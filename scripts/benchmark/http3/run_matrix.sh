@@ -5,18 +5,21 @@ set -uo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd "$script_dir/../../.." && pwd)"
 runtime_dir="$project_root/temp/http3-benchmark-runtime"
-h2load="$project_root/temp/http3-bench-tools/build/nghttp2-bssl/src/h2load"
-lite_off="$project_root/build-bench-h3-off/apps/lite_nginx"
-lite_on="$project_root/build-bench-h3-on/apps/lite_nginx"
-nginx="$project_root/temp/nginx-install/sbin/nginx"
-backend="$project_root/build-bench-h3-off/example/http_benchmark_backend"
+h2load="${H2LOAD_BIN:-$project_root/temp/http3-bench-tools/build/nghttp2-bssl/src/h2load}"
+lite_off="${LITE_GSO_OFF_BIN:-$project_root/build-bench-h3-off/apps/lite_nginx}"
+lite_on="${LITE_GSO_ON_BIN:-$project_root/build-bench-h3-on/apps/lite_nginx}"
+nginx="${NGINX_BIN:-$project_root/temp/nginx-install/sbin/nginx}"
+backend="${BACKEND_BIN:-$project_root/build-bench-h3-off/example/http_benchmark_backend}"
+direct_off="${DIRECT_GSO_OFF_BIN:-$project_root/build-bench-h3-off/example/http3_benchmark_server}"
+direct_on="${DIRECT_GSO_ON_BIN:-$project_root/build-bench-h3-on/example/http3_benchmark_server}"
+direct_timerfd="${DIRECT_TIMERFD_BIN:-$project_root/build-bench-h3-timerfd/example/http3_benchmark_server}"
 collect_cgroup="$script_dir/../http/collect_cgroup.sh"
 
 repetitions="${REPETITIONS:-9}"
 duration="${DURATION:-60}"
 warmup="${WARMUP:-20}"
 cooldown="${COOLDOWN:-30}"
-implementations="${IMPLEMENTATIONS:-lite nginx}"
+implementations="${IMPLEMENTATIONS:-lite-steal-on lite-steal-off nginx}"
 case_filter="${CASE_FILTER:-}"
 run_id="${RUN_ID:-$(date +%Y%m%dT%H%M%S)}"
 result_dir="${RESULT_DIR:-$project_root/temp/http3-benchmark-results/$run_id}"
@@ -25,10 +28,17 @@ backend_cpus="${BACKEND_CPUS:-14,16}"
 sut_cpus="${SUT_CPUS:-0,2,4}"
 client_cpus="${CLIENT_CPUS:-6,8,10,12}"
 load_threads="${LOAD_THREADS:-4}"
-backend_quota="${BACKEND_QUOTA:-200%}"
-sut_quota="${SUT_QUOTA:-100%}"
+backend_quota="${BACKEND_QUOTA:-none}"
+sut_quota="${SUT_QUOTA:-none}"
 h3_clients="${H3_CLIENTS:-8}"
 h3_streams="${H3_STREAMS:-64}"
+rps_per_client="${RPS_PER_CLIENT:-}"
+direct_workers="${DIRECT_WORKERS:-2}"
+
+if [[ -n "$rps_per_client" && ! "$rps_per_client" =~ ^[1-9][0-9]*$ ]]; then
+    echo "RPS_PER_CLIENT must be a positive integer" >&2
+    exit 2
+fi
 
 backend_unit="bench-h3-backend-$run_id"
 active_sut_unit=""
@@ -101,9 +111,13 @@ wait_for_backend() {
 }
 
 start_backend() {
+    local quota_property=()
+    if [[ "$backend_quota" != none ]]; then
+        quota_property=(--property="CPUQuota=$backend_quota")
+    fi
     log "starting backend cpus=$backend_cpus quota=$backend_quota"
     systemd-run --user --unit="$backend_unit" \
-        --property="CPUAffinity=$backend_cpus" --property="CPUQuota=$backend_quota" \
+        --property="CPUAffinity=$backend_cpus" "${quota_property[@]}" \
         --property=CPUAccounting=yes --property=MemoryAccounting=yes \
         --working-directory="$project_root" "$backend" >/dev/null
     wait_for_backend
@@ -115,26 +129,60 @@ start_sut() {
     local command=()
     local quota_property=()
     case "$implementation" in
-        lite)
+        lite-steal-off|lite)
             command=("$lite_off" --config "$script_dir/configs/lite_nginx_steal_off.conf")
+            ;;
+        lite-steal-on)
+            command=("$lite_off" --config "$script_dir/configs/lite_nginx_steal_on.conf")
             ;;
         lite-auto)
             command=("$lite_off" --config "$script_dir/configs/lite_nginx_auto.conf")
             ;;
-        lite-gso)
+        lite-steal-off-gso|lite-gso)
             command=("$lite_on" --config "$script_dir/configs/lite_nginx_steal_off.conf")
+            ;;
+        lite-steal-on-gso)
+            command=("$lite_on" --config "$script_dir/configs/lite_nginx_steal_on.conf")
             ;;
         nginx)
             command=("$nginx" -p "$project_root/" -c scripts/benchmark/http3/configs/nginx_gso_off.conf -g 'daemon off;')
             ;;
+        nginx-multi-accept)
+            command=("$nginx" -p "$project_root/" -c scripts/benchmark/http3/configs/nginx_gso_off_multi_accept_on.conf -g 'daemon off;')
+            ;;
         nginx-gso)
             command=("$nginx" -p "$project_root/" -c scripts/benchmark/http3/configs/nginx_gso_on.conf -g 'daemon off;')
+            ;;
+        direct)
+            command=("$direct_off" 18443 "$direct_workers" "$project_root/build/http3-demo/cert.pem"
+                     "$project_root/build/http3-demo/key.pem")
+            ;;
+        direct-gso)
+            command=("$direct_on" 18443 "$direct_workers" "$project_root/build/http3-demo/cert.pem"
+                     "$project_root/build/http3-demo/key.pem")
+            ;;
+        direct-timerfd)
+            command=("$direct_timerfd" 18443 "$direct_workers" "$project_root/build/http3-demo/cert.pem"
+                     "$project_root/build/http3-demo/key.pem")
+            ;;
+        direct-w1)
+            command=("$direct_off" 18443 1 "$project_root/build/http3-demo/cert.pem"
+                     "$project_root/build/http3-demo/key.pem")
+            ;;
+        direct-w2)
+            command=("$direct_off" 18443 2 "$project_root/build/http3-demo/cert.pem"
+                     "$project_root/build/http3-demo/key.pem")
             ;;
         *)
             echo "unknown implementation: $implementation" >&2
             return 2
             ;;
     esac
+
+    if [[ ! -x "${command[0]}" ]]; then
+        echo "missing executable for $implementation: ${command[0]}" >&2
+        return 1
+    fi
 
     if [[ "$sut_quota" != none ]]; then
         quota_property=(--property="CPUQuota=$sut_quota")
@@ -196,7 +244,11 @@ run_case() {
     local gate_status=0
     local client_gso=off
     local gso_options=(--no-udp-gso)
-    [[ "$implementation" == *-gso ]] && client_gso=on && gso_options=()
+    [[ "$implementation" == *-gso || "$implementation" == *-gso-* ]] && client_gso=on && gso_options=()
+    local rps_options=()
+    if [[ -n "$rps_per_client" ]]; then
+        rps_options=(--rps "$rps_per_client")
+    fi
 
     mkdir -p "$output_dir"
     case_settings "$case_name" || return
@@ -226,12 +278,21 @@ run_case() {
     {
         printf 'case=%s\n' "$case_name"
         printf 'implementation=%s\n' "$implementation"
+        if [[ "$implementation" == direct* ]]; then
+            printf 'topology=direct\n'
+        else
+            printf 'topology=proxy\n'
+        fi
         printf 'repetition=%s\n' "$repetition"
         printf 'duration_seconds=%s\n' "$duration"
         printf 'warmup_seconds=%s\n' "$warmup"
         printf 'clients=%s\n' "$h3_clients"
         printf 'streams_per_client=%s\n' "$h3_streams"
         printf 'load_threads=%s\n' "$load_threads"
+        printf 'rps_per_client=%s\n' "$rps_per_client"
+        if [[ -n "$rps_per_client" ]]; then
+            printf 'offered_rps=%s\n' "$((rps_per_client * h3_clients))"
+        fi
         printf 'client_gso=%s\n' "$client_gso"
         printf 'target_url=%s\n' "$target_url"
         printf 'expected_status=%s\n' "$expected_status"
@@ -249,6 +310,7 @@ run_case() {
         --header-table-size=0 --encoder-header-table-size=0 "${gso_options[@]}" \
         -t "$load_threads" -c "$h3_clients" -m "$h3_streams" \
         -D "${duration}s" --warm-up-time="${warmup}s" -N 15s \
+        "${rps_options[@]}" \
         --log-file="$output_dir/requests.tsv" \
         --output-file="$output_dir/h2load.json" \
         "${data_options[@]}" "$target_url" \
@@ -300,6 +362,8 @@ mkdir -p "$result_dir/runs"
     printf 'client_cpus=%s\n' "$client_cpus"
     printf 'backend_quota=%s\n' "$backend_quota"
     printf 'sut_quota=%s\n' "$sut_quota"
+    printf 'rps_per_client=%s\n' "$rps_per_client"
+    printf 'direct_workers=%s\n' "$direct_workers"
     printf 'git_commit=%s\n' "$(git -C "$project_root" rev-parse HEAD)"
     printf 'started_at=%s\n' "$(date --iso-8601=seconds)"
 } >"$result_dir/run.env"
@@ -310,8 +374,10 @@ sysctl net.core.rmem_max net.core.wmem_max net.core.netdev_max_backlog \
     net.ipv4.ip_local_port_range >"$result_dir/sysctl.txt" 2>&1 || true
 git -C "$project_root" status --short >"$result_dir/git-status.txt"
 sha256sum "$lite_off" "$lite_on" "$nginx" "$backend" "$h2load" >"$result_dir/binary-sha256.txt"
-cp "$project_root/build-bench-h3-off/CMakeCache.txt" "$result_dir/CMakeCache-lite-off.txt"
-cp "$project_root/build-bench-h3-on/CMakeCache.txt" "$result_dir/CMakeCache-lite-on.txt"
+lite_off_build_dir="$(cd "$(dirname "$lite_off")/.." && pwd)"
+lite_on_build_dir="$(cd "$(dirname "$lite_on")/.." && pwd)"
+cp "$lite_off_build_dir/CMakeCache.txt" "$result_dir/CMakeCache-lite-off.txt"
+cp "$lite_on_build_dir/CMakeCache.txt" "$result_dir/CMakeCache-lite-on.txt"
 "$h2load" --version >"$result_dir/h2load-version.txt"
 "$nginx" -V >"$result_dir/nginx-version.txt" 2>&1
 
@@ -323,14 +389,12 @@ sequence=0
 for case_name in "${cases[@]}"; do
     [[ -z "$case_filter" || "$case_name" == *"$case_filter"* ]] || continue
     for repetition in $(seq 1 "$repetitions"); do
-        read -r -a ordered <<<"$implementations"
-        if (( repetition % 2 == 0 )); then
-            reversed=()
-            for (( index=${#ordered[@]} - 1; index >= 0; --index )); do
-                reversed+=("${ordered[index]}")
-            done
-            ordered=("${reversed[@]}")
-        fi
+        read -r -a base_order <<<"$implementations"
+        ordered=()
+        offset=$(((repetition - 1) % ${#base_order[@]}))
+        for (( index=0; index < ${#base_order[@]}; ++index )); do
+            ordered+=("${base_order[(index + offset) % ${#base_order[@]}]}")
+        done
         for implementation in "${ordered[@]}"; do
             sequence=$((sequence + 1))
             run_case "$case_name" "$implementation" "$repetition" "$sequence"

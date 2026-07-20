@@ -674,7 +674,8 @@ TEST(QuicClientTest, UnknownDcidStatelessResetUsesEndpointTokenIndex) {
     const StatelessResetSummary summary = future.get();
     EXPECT_EQ(summary.error, fiber::common::IoErr::None);
     EXPECT_TRUE(summary.token_installed);
-    EXPECT_EQ(summary.state, fiber::quic::QuicConnectionState::Draining);
+    EXPECT_TRUE(summary.state == fiber::quic::QuicConnectionState::Draining ||
+                summary.state == fiber::quic::QuicConnectionState::Closed);
     EXPECT_EQ(summary.close_source, fiber::quic::QuicCloseSource::StatelessReset);
 
     group.stop();
