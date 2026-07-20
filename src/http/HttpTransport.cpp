@@ -718,6 +718,8 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChai
     }
 }
 
+void TlsTransport::abandon_pending_io() noexcept { clear_pending_write(); }
+
 void TlsTransport::close() {
     clear_pending_write();
     writev_scratch_.reset();

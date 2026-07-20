@@ -17,9 +17,16 @@
 #include "Http1Parser.h"
 #include "HttpExchange.h"
 
+namespace fiber::event {
+
+class EventLoop;
+
+} // namespace fiber::event
+
 namespace fiber::http {
 
 class Http1ClientConnection;
+class HttpTransport;
 
 class ClientHttp1Exchange : public common::NonCopyable, public common::NonMovable {
 public:
@@ -59,6 +66,8 @@ public:
     [[nodiscard]] bool done() const noexcept { return request_complete() && response_complete_; }
 
 private:
+    class NotifyAwaiter;
+
     enum class RequestState : std::uint8_t {
         Init,
         SendingBody,
@@ -82,6 +91,14 @@ private:
 
     void clear_response_header_nodes() noexcept;
     void fail_active_exchange() noexcept;
+    void cancel_active_io(common::IoErr reason) noexcept;
+    void on_io_awaiter_destroyed() noexcept;
+    NotifyAwaiter wait_transport_read(fiber::async::Task<common::IoResult<std::size_t>> task) noexcept;
+    NotifyAwaiter wait_transport_write(fiber::async::Task<common::IoResult<std::size_t>> task) noexcept;
+    fiber::async::Task<common::IoResult<void>> write_all(HttpTransport *transport, const void *buf, std::size_t len,
+                                                         std::chrono::milliseconds timeout) noexcept;
+    fiber::async::Task<common::IoResult<void>> write_all(HttpTransport *transport, mem::IoBufChain &chain,
+                                                         std::chrono::milliseconds timeout) noexcept;
     [[nodiscard]] bool is_idempotent_content_length_completion(std::size_t body_bytes, bool end_stream) const noexcept;
     common::IoResult<void> ensure_body_read_buf_writable(mem::IoBuf &read_buf, std::size_t min_writable) noexcept;
     common::IoResult<void> take_prefix(mem::IoBuf &read_buf, mem::IoBufChain &out, std::size_t len) noexcept;
@@ -97,6 +114,9 @@ private:
 
     Http1ClientConnection *conn_ = nullptr;
     mem::BufPool *pool_ = nullptr;
+    event::EventLoop *exchange_loop_ = nullptr;
+    NotifyAwaiter *reader_ = nullptr;
+    NotifyAwaiter *writer_ = nullptr;
     Http1ClientExchangeOptions options_{};
     HttpHeaders response_trailers_;
     mem::IoBuf pending_buf_;

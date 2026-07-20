@@ -67,6 +67,9 @@ public:
     virtual fiber::async::Task<common::IoResult<size_t>> write(mem::IoBuf &buf, std::chrono::milliseconds timeout) = 0;
     virtual fiber::async::Task<common::IoResult<size_t>> writev(mem::IoBufChain &buf,
                                                                 std::chrono::milliseconds timeout) = 0;
+    // Drops transport-owned references to buffers from an abandoned operation.
+    // All active I/O tasks must be canceled first. This does not close the fd.
+    virtual void abandon_pending_io() noexcept {}
     virtual void close() = 0;
     [[nodiscard]] virtual bool valid() const noexcept = 0;
     [[nodiscard]] virtual int fd() const noexcept = 0;
@@ -153,6 +156,7 @@ public:
     fiber::async::Task<common::IoResult<size_t>> write(mem::IoBuf &buf, std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<size_t>> writev(mem::IoBufChain &buf,
                                                         std::chrono::milliseconds timeout) override;
+    void abandon_pending_io() noexcept override;
     void close() override;
     [[nodiscard]] bool valid() const noexcept override;
     [[nodiscard]] int fd() const noexcept override;
