@@ -102,6 +102,9 @@ ConfigServiceError ConfigServiceImpl::map_error(NacosRpcError error) const {
             .message = std::move(error.message),
     };
     switch (error.code) {
+        case NacosRpcErrorCode::InvalidState:
+            result.code = ConfigServiceErrorCode::Transport;
+            break;
         case NacosRpcErrorCode::AuthenticationUnavailable:
             result.code = ConfigServiceErrorCode::AuthenticationUnavailable;
             break;

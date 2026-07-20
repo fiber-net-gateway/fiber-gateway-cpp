@@ -45,6 +45,24 @@ transport layer, and ConfigService:
 The library links `fiber_lib` publicly, so consumers receive the core Fiber
 include paths and dependencies through `fiber::nacos`.
 
+## Independent NacosRpc Transport
+
+`src/rpc/NacosRpc` is a new internal, single-connection transport kept separate
+from the existing `NacosGrpcConnection`/ConfigService flow. It directly owns a
+`GrpcClient`; `start()` connects, sends `ServerCheckRequest`, opens the
+bidirectional stream, sends `ConnectionSetupRequest`, and completes after
+SetupAck negotiation or the compatibility delay. It does not select servers,
+reconnect, or replace the current service transport.
+
+Unary `request()` calls snapshot the current authentication access and encode a
+typed DTO into the Nacos `Payload` JSON envelope. Server pushes are decoded by
+Payload type and dispatched through fixed-capacity, allocation-free
+`add_request_handler<Request>(RequestHandler<Request>, void *)` registrations.
+Handlers are synchronous `noexcept` function pointers registered before
+`start()`; one reader coroutine invokes them and serializes all bidirectional
+responses. ClientDetection and ConnectReset remain transport-owned control
+messages. Callers must await `shutdown()` before destroying the transport.
+
 ## Public API
 
 The main headers are:
@@ -237,13 +255,14 @@ client behavior.
 ```bash
 cmake -S . -B build
 cmake --build build --target fiber_nacos_tests
-ctest --test-dir build -R '^(NacosClientTest|NacosClientConfigTest|NacosDtoJsonTest|NacosPayloadTest|NacosGrpcConnectionTest|NacosConfigServiceTest)\.'
+ctest --test-dir build -R '^(NacosClientTest|NacosClientConfigTest|NacosDtoJsonTest|NacosPayloadTest|NacosRpcTest|NacosGrpcConnectionTest|NacosConfigServiceTest)\.'
 ```
 
 Authentication and gRPC tests use local scripted HTTP/HTTP2 servers. The optional
-`NacosGrpcConnectionTest.RnacosInteropWhenEnabled` test performs a real RPC
-handshake without configured authentication when `FIBER_NACOS_TEST_GRPC_PORT`
-points to an rnacos gRPC listener.
+`NacosGrpcConnectionTest.RnacosInteropWhenEnabled` and
+`NacosRpcTest.RnacosInteropWhenEnabled` perform real RPC handshakes without
+configured authentication when `FIBER_NACOS_TEST_GRPC_PORT` points to an rnacos
+gRPC listener.
 `NacosConfigServiceTest.RnacosInteropWhenEnabled` additionally verifies real
 publish, get, subscribe/push, CAS update, and remove/NotFound behavior.
 
