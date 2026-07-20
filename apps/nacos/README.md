@@ -344,5 +344,5 @@ and the root lifecycle remain private in `src/detail/`. ConfigService owns the
 gRPC connection and keeps its state and subscription logic under `src/config/`;
 NamingService owns a separate gRPC connection and keeps its state under
 `src/naming/`. The reusable gRPC infrastructure remains private in `src/rpc/`.
-DTO JSON codecs live under `src/dto/`, and the wire Payload schema lives under
-`proto/`.
+Wire DTO models and their JSON codecs remain private in `src/dto/`, and the
+wire Payload schema lives under `proto/`.

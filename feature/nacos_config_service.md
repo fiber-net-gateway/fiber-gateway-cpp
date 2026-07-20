@@ -62,17 +62,15 @@ apps/nacos/
 ├── include/fiber/nacos/
 │   ├── ConfigService.h
 │   └── NacosClient*.h
-├── include/fiber/nacos/dto/
-│   ├── internal request/response DTO
-│   └── config request/response DTO
+├── src/dto/
+│   ├── internal/config request/response DTO
+│   └── corresponding JSON codecs
 ├── src/rpc/
 │   ├── NacosPayloadCodec.*
 │   ├── NacosBiRequestHandler.h
 │   └── NacosRpc.*
 ├── src/config/
 │   └── ConfigServiceImpl.*
-└── src/dto/
-    └── corresponding JSON codecs
 ```
 
 `NacosRpc` 只代表一次物理连接，不在内部重连。`ConfigServiceImpl` 持有当前实例并负责 endpoint 选择、退避、

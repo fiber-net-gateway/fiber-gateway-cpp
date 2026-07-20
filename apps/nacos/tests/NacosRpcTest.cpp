@@ -14,7 +14,6 @@
 #include <async/Spawn.h>
 #include <event/EventLoopGroup.h>
 #include <fiber/nacos/NacosClientConfig.h>
-#include <fiber/nacos/dto/JsonCodec.h>
 #include <grpc/GrpcFraming.h>
 #include <grpc/ProtoCodec.h>
 #include <http/Http2Connection.h>
@@ -25,6 +24,7 @@
 #include <http/ServerRequestFactory.h>
 #include <net/SocketAddress.h>
 #include <net/TcpListener.h>
+#include "../src/dto/JsonCodec.h"
 
 #include "../src/rpc/NacosRpc.h"
 
