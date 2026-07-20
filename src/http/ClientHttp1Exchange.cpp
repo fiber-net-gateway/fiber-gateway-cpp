@@ -760,13 +760,13 @@ ClientHttp1Exchange::write_body(mem::IoBufChain chunk, std::chrono::milliseconds
         co_return std::unexpected(common::IoErr::Invalid);
     }
     HttpTransport *transport = conn_->transport_.get();
+    const std::size_t body_bytes = chunk.readable_bytes();
+    const bool end_stream = chunk.complete();
     if (raw_stream_active_) {
         if (raw_stream_write_complete_) {
             co_return std::unexpected(common::IoErr::Already);
         }
 
-        const std::size_t body_bytes = chunk.readable_bytes();
-        const bool end_stream = chunk.complete();
         if (body_bytes != 0) {
             auto write_result = co_await write_all(transport, chunk, timeout);
             if (!write_result) {
@@ -783,6 +783,9 @@ ClientHttp1Exchange::write_body(mem::IoBufChain chunk, std::chrono::milliseconds
         co_return std::unexpected(common::IoErr::Invalid);
     }
     if (request_state_ == RequestState::RequestDone) {
+        if (is_idempotent_content_length_completion(body_bytes, end_stream)) {
+            co_return body_bytes;
+        }
         co_return std::unexpected(common::IoErr::Already);
     }
     if (request_state_ == RequestState::Failed) {
@@ -792,7 +795,6 @@ ClientHttp1Exchange::write_body(mem::IoBufChain chunk, std::chrono::milliseconds
         co_return std::unexpected(common::IoErr::Already);
     }
 
-    const std::size_t body_bytes = chunk.readable_bytes();
     switch (body_spec_.kind()) {
         case HttpBodySpec::Kind::Auto:
             co_return std::unexpected(common::IoErr::Invalid);
@@ -916,6 +918,9 @@ ClientHttp1Exchange::write_body(const std::uint8_t *buf, std::size_t len, bool e
         co_return std::unexpected(common::IoErr::Invalid);
     }
     if (request_state_ == RequestState::RequestDone) {
+        if (is_idempotent_content_length_completion(len, end_stream)) {
+            co_return len;
+        }
         co_return std::unexpected(common::IoErr::Already);
     }
     if (request_state_ == RequestState::Failed) {
@@ -997,6 +1002,13 @@ ClientHttp1Exchange::write_body(const std::uint8_t *buf, std::size_t len, bool e
     }
 
     co_return std::unexpected(common::IoErr::Invalid);
+}
+
+bool ClientHttp1Exchange::is_idempotent_content_length_completion(std::size_t body_bytes,
+                                                                  bool end_stream) const noexcept {
+    // Content-Length has no wire terminator. A protocol bridge may observe the peer's terminal
+    // marker after the declared bytes have already completed this HTTP/1 request.
+    return body_spec_.is_content_length() && body_sent_ == content_length_ && body_bytes == 0 && end_stream;
 }
 
 fiber::async::Task<common::IoResult<void>>

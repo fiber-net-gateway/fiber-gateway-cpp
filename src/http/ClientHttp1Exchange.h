@@ -82,6 +82,7 @@ private:
 
     void clear_response_header_nodes() noexcept;
     void fail_active_exchange() noexcept;
+    [[nodiscard]] bool is_idempotent_content_length_completion(std::size_t body_bytes, bool end_stream) const noexcept;
     common::IoResult<void> ensure_body_read_buf_writable(mem::IoBuf &read_buf, std::size_t min_writable) noexcept;
     common::IoResult<void> take_prefix(mem::IoBuf &read_buf, mem::IoBufChain &out, std::size_t len) noexcept;
     common::IoResult<void> stash_pending_buf(mem::IoBuf &read_buf) noexcept;

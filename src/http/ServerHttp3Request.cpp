@@ -939,13 +939,8 @@ common::IoResult<void> ServerHttp3Request::take_body_payload(mem::IoBufChain &ou
         return common::IoResult<void>{};
     }
 
-    const bool input_complete = inbound_buf_.complete();
     if (!inbound_buf_.take_prefix(bytes, out)) {
         return std::unexpected(common::IoErr::NoMem);
-    }
-    if (input_complete) {
-        inbound_buf_.mark_complete();
-        out.clear_complete();
     }
     return common::IoResult<void>{};
 }
@@ -1111,6 +1106,16 @@ ServerHttp3Request::read_body(HttpExchange &exchange, std::size_t max_bytes,
                     co_return std::unexpected(taken.error());
                 }
                 frame_payload_remaining_ -= take;
+                // take_prefix transfers the QUIC FIN only when this read consumed all buffered input.
+                // It completes the HTTP body with this DATA chunk only when the DATA frame also ended.
+                if (out.complete()) {
+                    if (frame_payload_remaining_ != 0) {
+                        co_return fail_read_body(Http3ErrorCode::RequestIncomplete);
+                    }
+                    exchange_.request_trailers_complete_ = true;
+                    body_recv_state_ = BodyRecvState::Complete;
+                    co_return out;
+                }
                 if (frame_payload_remaining_ == 0) {
                     body_recv_state_ = BodyRecvState::FrameHeader;
                 }

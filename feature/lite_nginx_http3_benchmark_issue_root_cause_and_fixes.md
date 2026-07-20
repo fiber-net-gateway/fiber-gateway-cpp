@@ -67,6 +67,19 @@ Nginx 在这里作为实现对照，不代表规范要求项目复制其内部�
 这个状态对象只包含一个布尔值和一个字节计数，不在热路径引入 `std::string`、容器或额外
 堆分配。
 
+随后又把完成语义收敛到协议实现：
+
+- `ServerHttp3Request::read_body()` 在 QUIC FIN 已经实际到达、本次读取恰好消费完最后一个
+  DATA frame 且内部没有后续 frame 字节时，把 `complete` 随最后一批 DATA 一起返回；
+- FIN 尚未到达时仍先返回 DATA，等后续读取收到 FIN 后再返回空完成标记；
+- FIN 截断 DATA payload 时立即以 `H3_REQUEST_INCOMPLETE` 终止，不把残缺 DATA 交给应用；
+- `ClientHttp1Exchange::write_body()` 只对已经精确写满 Content-Length 后重复提交的
+  `0 + complete` 作幂等成功处理，非空重复写、非完成空写和 chunked 重复完成仍返回
+  `IoErr::Already`。
+
+HTTP/3 的完成判断只使用实际 QUIC FIN，不根据 Content-Length 推断。现有
+`RequestBodyForwardState` 继续保留，用于代理入口提前拒绝超过声明长度的数据。
+
 ### 2.4 验证
 
 新增 `tests/HttpProxyCoreTest.cpp`，覆盖：
@@ -75,6 +88,13 @@ Nginx 在这里作为实现对照，不代表规范要求项目复制其内部�
 - 拒绝超过声明长度的后续数据；
 - 零长度请求仍提交第一次完成标记；
 - chunked 请求仍转发空完成标记。
+
+`tests/Http3ConnectionTest.cpp` 和 `tests/ClientHttp1ExchangeTest.cpp` 继续覆盖：
+
+- FIN 与最后 DATA 同批到达时，DATA chain 同时带 `complete`；
+- 已读满 Content-Length 但 FIN 延迟到达时，第一次 DATA 不提前完成；
+- FIN 截断 DATA payload 时拒绝请求；
+- HTTP/1 两种 `write_body()` 重载均幂等接受重复空完成，其他重复写仍保持严格错误语义。
 
 实际 HTTP/3 回归的 POST response 为 65536 bytes，SHA-256 为：
 
