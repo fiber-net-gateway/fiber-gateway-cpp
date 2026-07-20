@@ -94,7 +94,13 @@ public:
 
     // Waits for close completion; this does not drive I/O.
     fiber::async::Task<CloseResult> wait_closed() noexcept;
-    [[nodiscard]] common::IoResult<Http2Stream::Lease> attach_local_stream(Http2Stream &stream) noexcept;
+    // Immediate fast path. Returns Busy when peer or stream-table capacity is exhausted.
+    [[nodiscard]] common::IoResult<Http2Stream::Lease> try_attach_local_stream(Http2Stream &stream) noexcept;
+    // Suspends on this connection's EventLoop while capacity is exhausted. Waiters are FIFO;
+    // timeout zero is a poll and timeout max waits indefinitely. Draining or closure cancels the wait.
+    [[nodiscard]] fiber::async::Task<common::IoResult<Http2Stream::Lease>>
+    attach_local_stream(Http2Stream &stream,
+                        std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     void shutdown(common::IoErr reason = common::IoErr::Canceled) noexcept;
     void graceful_shutdown() noexcept;
     [[nodiscard]] State state() const noexcept { return state_; }
@@ -145,6 +151,8 @@ protected:
     fiber::async::Task<void> stop_and_wait_closed(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
 private:
+    class LocalStreamAttachAwaiter;
+
     enum class ParsePhase : std::uint8_t {
         Preface,
         FrameHeader,
@@ -230,7 +238,16 @@ private:
     void detach_stream(Http2Stream &stream) noexcept;
     void try_release_stream(Http2Stream &stream) noexcept;
     bool can_accept_peer_stream(std::uint32_t stream_id) const noexcept;
-    bool can_attach_local_stream() const noexcept;
+    [[nodiscard]] common::IoErr local_stream_attach_gate() const noexcept;
+    [[nodiscard]] std::size_t available_local_stream_attach_slots() const noexcept;
+    [[nodiscard]] common::IoResult<Http2Stream::Lease> try_attach_local_stream_impl(Http2Stream &stream,
+                                                                                    bool consume_grant) noexcept;
+    void enqueue_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter) noexcept;
+    void unlink_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter) noexcept;
+    void finish_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter, bool transfer_grant) noexcept;
+    void grant_local_stream_attach_waiters() noexcept;
+    void cancel_local_stream_attach_waiters(common::IoErr result) noexcept;
+    void on_local_stream_attach_capacity_changed() noexcept;
     bool is_next_peer_stream_id(std::uint32_t stream_id) const noexcept;
     void handle_peer_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept;
     void close_streams_after_goaway(std::uint32_t last_stream_id) noexcept;
@@ -373,6 +390,10 @@ private:
     std::uint32_t next_local_stream_id_ = 0;
     std::size_t peer_active_stream_count_ = 0;
     std::size_t local_active_stream_count_ = 0;
+    common::IntrusiveListHook *local_stream_attach_wait_head_ = nullptr;
+    common::IntrusiveListHook *local_stream_attach_wait_tail_ = nullptr;
+    std::size_t local_stream_attach_waiter_count_ = 0;
+    std::size_t local_stream_attach_granted_count_ = 0;
     std::int32_t conn_recv_window_remaining_ = 65535;
     std::uint32_t conn_recv_window_target_ = 65535;
     std::int32_t peer_initial_stream_send_window_ = 65535;
@@ -382,6 +403,7 @@ private:
     bool peer_enable_push_ = true;
     bool peer_settings_received_ = false;
     bool peer_enable_connect_protocol_ = false;
+    bool local_stream_ids_exhausted_ = false;
     bool local_goaway_sent_ = false;
     std::uint32_t local_goaway_last_stream_id_ = 0;
     bool peer_goaway_received_ = false;
