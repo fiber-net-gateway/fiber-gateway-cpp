@@ -1,5 +1,25 @@
 include(CheckCXXSourceCompiles)
 
+function(fiber_detect_epoll_pwait2_syscall)
+    set(FIBER_HAVE_EPOLL_PWAIT2_SYSCALL FALSE PARENT_SCOPE)
+    if (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        return()
+    endif()
+
+    check_cxx_source_compiles([=[
+        #include <sys/syscall.h>
+
+        #ifndef SYS_epoll_pwait2
+        #error "SYS_epoll_pwait2 is unavailable"
+        #endif
+
+        int main() {
+            return SYS_epoll_pwait2 < 0;
+        }
+    ]=] FIBER_HAVE_EPOLL_PWAIT2_SYSCALL)
+    set(FIBER_HAVE_EPOLL_PWAIT2_SYSCALL "${FIBER_HAVE_EPOLL_PWAIT2_SYSCALL}" PARENT_SCOPE)
+endfunction()
+
 function(fiber_detect_udp_gso)
     set(FIBER_HAVE_UDP_SEGMENT FALSE PARENT_SCOPE)
     if (NOT FIBER_ENABLE_UDP_GSO)

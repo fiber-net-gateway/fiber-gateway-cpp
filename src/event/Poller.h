@@ -42,10 +42,24 @@ public:
     fiber::common::IoErr add(int fd, Event events, Item *item, Mode mode = Mode::None);
     fiber::common::IoErr mod(int fd, Event events, Item *item, Mode mode = Mode::None);
     fiber::common::IoErr del(int fd);
-    int wait(epoll_event *events, int max_events, std::chrono::nanoseconds timeout);
+    int wait(epoll_event *events, int max_events, std::chrono::steady_clock::time_point deadline);
 
 private:
+    enum class WaitBackend : std::uint8_t { Unknown, EpollPwait2, TimerFd };
+
+    struct TimerFdTag {};
+
+    int init_timer_fd();
+    int wait_timer_fd(epoll_event *events, int max_events, std::chrono::steady_clock::time_point deadline);
+    int wait_epoll(epoll_event *events, int max_events, int timeout_ms);
+    int sync_timer_fd(std::chrono::steady_clock::time_point deadline, std::chrono::steady_clock::time_point now);
+    int drain_timer_fd();
+
     int epoll_fd_ = -1;
+    int timer_fd_ = -1;
+    TimerFdTag timer_fd_tag_{};
+    WaitBackend wait_backend_ = WaitBackend::Unknown;
+    std::chrono::steady_clock::time_point armed_deadline_ = std::chrono::steady_clock::time_point::max();
 };
 
 constexpr Poller::Event operator|(Poller::Event left, Poller::Event right) noexcept {

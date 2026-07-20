@@ -338,7 +338,7 @@ private:
 
     void drain_wakeup();
     void run_due_timers(std::chrono::steady_clock::time_point now);
-    std::chrono::nanoseconds next_timeout(std::chrono::steady_clock::time_point now) const;
+    std::chrono::steady_clock::time_point next_deadline() const;
     void post_at(std::chrono::steady_clock::time_point when, TimerEntry &entry);
     void cancel(TimerEntry &entry);
     void cancel_quiesced(TimerEntry &entry);

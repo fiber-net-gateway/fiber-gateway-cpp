@@ -119,15 +119,12 @@ void EventLoop::run_due_timers(std::chrono::steady_clock::time_point now) {
     }
 }
 
-std::chrono::nanoseconds EventLoop::next_timeout(std::chrono::steady_clock::time_point now) const {
+std::chrono::steady_clock::time_point EventLoop::next_deadline() const {
     const TimerEntry *entry = timers_.min();
     if (!entry) {
-        return std::chrono::nanoseconds::max();
+        return std::chrono::steady_clock::time_point::max();
     }
-    if (entry->deadline <= now) {
-        return std::chrono::nanoseconds::zero();
-    }
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(entry->deadline - now);
+    return entry->deadline;
 }
 
 void EventLoop::prepare_run() noexcept { stop_requested_.store(false, std::memory_order_release); }
@@ -162,11 +159,11 @@ void EventLoop::run_once() {
 
     drain_notify<true>();
     drain_defer<true>();
-    const std::chrono::nanoseconds timeout = next_timeout(now_);
+    const std::chrono::steady_clock::time_point deadline = next_deadline();
     constexpr int kMaxEvents = 64;
     epoll_event events[kMaxEvents];
 
-    int count = poller_.wait(events, kMaxEvents, timeout);
+    int count = poller_.wait(events, kMaxEvents, deadline);
     now_ = std::chrono::steady_clock::now();
     if (count < 0) {
         if (errno == EINTR) {

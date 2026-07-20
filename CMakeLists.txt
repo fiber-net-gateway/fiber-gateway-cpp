@@ -10,6 +10,7 @@ option(FIBER_FETCH_DEPS "Allow CMake to download third-party dependencies" ON)
 option(FIBER_USE_JEMALLOC "Link final executables against jemalloc" OFF)
 option(FIBER_ENABLE_HTTP3 "Build in-tree HTTP/3 support" ON)
 option(FIBER_ENABLE_UDP_GSO "Compile Linux UDP GSO support when available" ON)
+option(FIBER_FORCE_TIMERFD_POLLER "Force the Linux Poller to use timerfd timeouts" OFF)
 
 include(cmake/Deps.cmake)
 include(cmake/CompilerChecks.cmake)
@@ -19,14 +20,21 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 fiber_validate_cxx_toolchain()
+fiber_detect_epoll_pwait2_syscall()
 fiber_detect_udp_gso()
+
+set(FIBER_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+configure_file(cmake/FiberPlatformConfig.h.in
+    "${FIBER_GENERATED_INCLUDE_DIR}/fiber/FiberPlatformConfig.h")
 
 file(GLOB_RECURSE CPP_SRC_LIST CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/src/*.cpp)
 
 add_library(fiber_lib STATIC ${CPP_SRC_LIST})
 add_library(fiber_allocator INTERFACE)
 add_library(fiber_stdlib INTERFACE)
-target_include_directories(fiber_lib PUBLIC ${CMAKE_CURRENT_LIST_DIR}/src)
+target_include_directories(fiber_lib
+    PUBLIC ${CMAKE_CURRENT_LIST_DIR}/src
+    PRIVATE ${FIBER_GENERATED_INCLUDE_DIR})
 target_link_libraries(fiber_lib PUBLIC boringssl::ssl boringssl::crypto protobuf::libprotobuf-lite)
 target_compile_definitions(fiber_lib PRIVATE
     _GNU_SOURCE
