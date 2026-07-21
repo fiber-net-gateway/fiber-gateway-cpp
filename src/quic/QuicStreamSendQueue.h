@@ -77,7 +77,6 @@ private:
     [[nodiscard]] common::IoResult<void> mark_acked(std::size_t offset, std::size_t length, bool encoded_fin) noexcept;
     [[nodiscard]] common::IoResult<void> mark_failed(std::size_t offset, std::size_t length, bool encoded_fin) noexcept;
     [[nodiscard]] bool has_pending_fin() const noexcept { return fin_appended_ && !fin_inflight_ && !fin_acked_; }
-    [[nodiscard]] bool is_last_ready_extent(const mem::IoBufNode *extent) const noexcept;
     [[nodiscard]] bool has_send_work() const noexcept {
         return !reset_sent_ && (ready_bytes_ != 0 || has_pending_fin());
     }

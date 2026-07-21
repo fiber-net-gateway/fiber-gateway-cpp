@@ -10,8 +10,9 @@
 `example/http3_benchmark_server` 时暴露的问题，供后续定位和修复使用。它保存的是可复现条件、
 观测事实、当前代码路径、尚未确认的假设和验收条件，不把性能现象直接写成未经证实的协议根因。
 
-最初记录本文时只修改了 benchmark client 的 pacing 默认值和命令行开关。H3BENCH-001 和
-H3BENCH-002 均已于 2026-07-21 修复；H3BENCH-002 的 40k RPS 连续运行验收结果见 5.7。
+最初记录本文时只修改了 benchmark client 的 pacing 默认值和命令行开关。H3BENCH-001、
+H3BENCH-002 和 H3BENCH-003 均已于 2026-07-21 修复；H3BENCH-002 的 40k RPS 连续运行验收
+结果见 5.7，H3BENCH-003 的跨实现和大响应回归结果见 6.3。
 
 ## 2. 问题总览
 
@@ -19,7 +20,7 @@ H3BENCH-002 均已于 2026-07-21 修复；H3BENCH-002 的 40k RPS 连续运行�
 |---|---|---|---|---|
 | H3BENCH-001 | benchmark client | 已修复 | P0 | 连接进入终止错误后，closed-loop lane 对同步 `Canceled` 无界重试，event loop 忙循环，duration/timeout/drain 失效 |
 | H3BENCH-002 | benchmark server/QUIC ACK 路径 | 已修复 | P0 | 延迟 ACK 缺少到期唤醒，且与 ACK-eliciting 帧同包后静态 ACK 帧被错误保留在 sent queue，阻塞后续 ACK |
-| H3BENCH-003 | pacing/跨实现互操作 | 行为已确认 | P1 | client pacing off 可提高 loopback GET 峰值，但突发 POST 或双方 pacing off 可使连接失去进展 |
+| H3BENCH-003 | QUIC STREAM 发送队列 | 已修复 | P0 | 丢包重传时可能在低于真实 final size 的旧 extent 上附加 FIN，导致对端以 `FINAL_SIZE_ERROR` 关闭连接 |
 | H3BENCH-NOTE-001 | OpenResty 测试配置 | 已解释，不是项目缺陷 | 说明 | OpenResty/Nginx 默认每连接 1000 请求，未提高限制时预热会主动耗尽连接 |
 
 这里的 P0 表示“会破坏压测工具可信度，必须先修复”，不表示已经确认生产服务存在安全漏洞。
@@ -359,36 +360,58 @@ H3BENCH-002 由 QUIC ACK 发送路径中的两个问题叠加触发：
 五轮均满足 40k RPS 主验收条件，且第二至第五轮吞吐均高于首轮的 99.99%。1% UDP loss、64 KiB/
 1 MiB 扩展回归和 server 资源高水位回基线仍需单独验证，不包含在本次结果中。
 
-## 6. H3BENCH-003：pacing off 的收益与跨实现风险
+## 6. H3BENCH-003：重传 STREAM 帧携带错误 final size
 
-### 6.1 已确认收益
+### 6.1 根因
 
-OpenResty 1 KiB、2 connections × 8 streams、2 秒测量：
+该问题最初表现为 client pacing off 时 OpenResty 64 KiB POST 失去进展，以及双方 pacing off 时
+1 MiB GET 不能稳定完成。调试确认 pacing 只改变突发丢包的概率和时序，实际连接终止原因是 QUIC
+transport error `FINAL_SIZE_ERROR`：
 
-| client pacing | throughput | total p99 | 错误 |
-|---|---:|---:|---:|
-| off | 48,960 req/s | 1.040 ms | 0 |
-| on | 40,852 req/s | 1.140 ms | 0 |
+- OpenResty 已记录 stream final size `65584`，随后收到 `offset=64815, length=721, fin=1` 的
+  重传 STREAM 帧；该帧声明的 final size 为 `65536`，与已记录值冲突。
+- fiber client 接收大响应时也能在本地 `recv_stream_frame()` 复现相同错误，说明共享发送队列的
+  client/server 两个方向都受影响。
 
-loopback 上 off 吞吐提高约 19.8%，支持 benchmark client 以 off 作为峰值测试默认值。
+`QuicStreamSendQueue::encode_stream_frame()` 原来把“最后一个 ready extent”当成流尾部。尾部 extent
+先被 ACK、前部 extent 丢失并重新入队，而应用随后追加 FIN 时，前部重传会成为队列中的最后一个
+ready extent，但其结束偏移仍小于不可变的 `final_size_`，因此不能携带 FIN。
 
-### 6.2 已确认风险
+### 6.2 修复
 
-- OpenResty 64 KiB POST echo、1 connection × 4 streams：client pacing on 稳定 439 req/s、
-  0 错误；off 使连接失去进展并触发 H3BENCH-001。
-- benchmark server 64 KiB POST echo、1 connection × 4 streams：client off 曾稳定完成
-  1,036 req/s；on 只完成 180 req/s 且出现 4 个 body-send timeout。说明 pacing 与当前仓库发送调度
-  的组合也存在明显性能差异，不能用单个 case 推导全局默认。
-- benchmark server pacing off、client pacing off 的 1 MiB GET 不能稳定完成，因此生产 server 的
-  pacing 默认值不能跟随 benchmark client 一起关闭。
+- 数据 STREAM 帧只有在 `extent offset + encoded length == final_size_` 时才能携带 FIN；比较使用
+  `offset <= final_size_ && length == final_size_ - offset`，避免加法溢出。
+- 没有待发送数据时，FIN-only 帧直接使用 `final_size_` 作为 offset。
+- 删除基于链表位置的 `is_last_ready_extent()` 判定。
+- 增加确定性回归：尾部先 ACK、前部标记丢失、随后追加 FIN；前部重传必须不带 FIN，全部数据 ACK
+  后才在真实 final size 发送 FIN-only 帧。
 
-### 6.3 使用规则
+固定 Nginx 1.31.3 的发送端采用相同不变量：只有 `send.offset == send_final_size` 才把 frame 标记为
+last。Nginx 没有等价的 RTT token-bucket pacing，因此不能把强制开启 pacing 当作协议修复。
 
-1. 每份报告必须写出 client pacing 和 server pacing，不能依赖隐含默认值。
-2. 峰值测试可以 client pacing off，但在正式计时前必须通过 response status/length/hash gate。
-3. 只要出现 peer close、timeout、PTO 或 UDP drop，就必须以 client pacing on 复测。
-4. 跨实现排名至少同时报告一个可比的 pacing on 点，避免把目标端 burst tolerance 当作业务吞吐。
-5. benchmark client 默认 off 只是工具定位，不是生产 QUIC 发送策略建议。
+### 6.3 修复后回归
+
+Release 构建，100 ms warmup、2 秒测量：
+
+| 目标和请求 | client pacing | server pacing | succeeded | throughput | 错误 / PTO / drop |
+|---|---|---|---:|---:|---:|
+| OpenResty 64 KiB POST echo，1 connection × 4 streams | off | N/A | 3,307 / 3,307 | 1,653.5 req/s | 0 / 0 / 0 |
+| benchmark server 64 KiB POST echo，1 connection × 4 streams | off | on | 1,713 / 1,713 | 856.5 req/s | 0 / 0 / 0 |
+| benchmark server 1 MiB GET，1 connection × 2 streams | off | off | 326 / 326 | 163.0 MiB/s | 0 / 0 / 0 |
+
+三个原始故障形状均完成 100% 请求，没有再出现 `FINAL_SIZE_ERROR`、terminal lane stop 或同步错误
+忙循环。
+
+### 6.4 pacing 后续评估规则
+
+H3BENCH-003 修复的是 STREAM final-size 正确性，不据此改变生产 pacing 默认值。此前 1 KiB GET
+短测中的 pacing off/on 差距会随执行顺序反转，且 H3BENCH-002 修复已经改变吞吐基线，因此旧的
+19.8% 收益不能作为默认策略依据。后续性能矩阵仍应遵守：
+
+1. 每份报告显式写出 client pacing 和 server pacing。
+2. 正式计时前必须通过 response status/length/hash gate。
+3. 同时报告顺序交替的 pacing on/off 点，并记录 peer close、timeout、PTO 和 UDP drop。
+4. benchmark client 默认 off 只是工具定位，不是生产 QUIC 发送策略建议。
 
 ## 7. H3BENCH-NOTE-001：OpenResty 请求上限测试陷阱
 
@@ -425,14 +448,14 @@ keepalive_time 1h;
 ```text
 1. H3BENCH-001 client terminal-error busy loop（已完成）
    ↓ 确保失败场景有界、统计可信
-2. H3BENCH-002 server no-progress instrumentation
-   ↓ 固定速率、单连接到多连接逐级复现
-3. 定位 send scheduler / pacing / MAX_STREAMS / cleanup 中的实际停滞点
-   ↓ 加入单元和集成回归
-4. 重新执行 OpenResty 与 benchmark server 完整矩阵
+2. H3BENCH-002 delayed ACK 推进和 frame 生命周期（已完成）
+   ↓ 固定速率连续运行验收
+3. H3BENCH-003 STREAM final size（已完成）
+   ↓ 确保丢包重传不会产生协议错误
+4. 重新执行 OpenResty 与 benchmark server 完整矩阵及 1% 受控丢包
    ↓
 5. 再评估 pacing 参数和大响应性能优化
 ```
 
-在第 2 步完成前，不应根据当前大响应差距直接重写拥塞控制、全局关闭 server pacing，或宣称
-OpenResty 与本项目的最终性能比例。
+前三项正确性问题已经修复。在完整矩阵和受控丢包验证完成前，不应根据当前短时 loopback 吞吐
+直接重写拥塞控制、全局关闭 server pacing，或宣称 OpenResty 与本项目的最终性能比例。
