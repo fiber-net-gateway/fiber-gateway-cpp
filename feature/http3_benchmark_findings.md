@@ -10,14 +10,14 @@
 `example/http3_benchmark_server` 时暴露的问题，供后续定位和修复使用。它保存的是可复现条件、
 观测事实、当前代码路径、尚未确认的假设和验收条件，不把性能现象直接写成未经证实的协议根因。
 
-本轮只修改了 benchmark client 的 pacing 默认值和命令行开关，没有修复本文列出的两个 P0 问题。
-在它们修复前，长时间 closed-loop 错误场景和 benchmark server 的峰值结果不能作为正式性能结论。
+最初记录本文时只修改了 benchmark client 的 pacing 默认值和命令行开关。H3BENCH-001 已于
+2026-07-21 修复；H3BENCH-002 仍未修复，因此 benchmark server 的峰值结果仍不能作为正式性能结论。
 
 ## 2. 问题总览
 
 | ID | 范围 | 状态 | 优先级 | 摘要 |
 |---|---|---|---|---|
-| H3BENCH-001 | benchmark client | 已确认，机制高置信 | P0 | 连接进入终止错误后，closed-loop lane 对同步 `Canceled` 无界重试，event loop 忙循环，duration/timeout/drain 失效 |
+| H3BENCH-001 | benchmark client | 已修复 | P0 | 连接进入终止错误后，closed-loop lane 对同步 `Canceled` 无界重试，event loop 忙循环，duration/timeout/drain 失效 |
 | H3BENCH-002 | benchmark server/QUIC 发送路径 | 现象已确认，根因未确认 | P0 | 服务端经历持续请求或固定速率负载后停止推进响应和新 request stream，吞吐骤降并出现超时 |
 | H3BENCH-003 | pacing/跨实现互操作 | 行为已确认 | P1 | client pacing off 可提高 loopback GET 峰值，但突发 POST 或双方 pacing off 可使连接失去进展 |
 | H3BENCH-NOTE-001 | OpenResty 测试配置 | 已解释，不是项目缺陷 | 说明 | OpenResty/Nginx 默认每连接 1000 请求，未提高限制时预热会主动耗尽连接 |
@@ -160,9 +160,9 @@ timeout --signal=INT --kill-after=2s 8s \
 `--pacing on` 后稳定完成 439 req/s，0 错误。pacing 只负责触发连接异常的概率和时序，连接异常后
 无界同步重试属于独立的 client 缺陷。
 
-### 4.3 当前代码机制
+### 4.3 修复前代码机制
 
-高置信机制位于 `BenchmarkWorker::run_lane()`：
+高置信机制位于修复前的 `BenchmarkWorker::run_lane()`：
 
 1. closed-loop 每轮从 `EventLoop::current().now()` 读取时间；
 2. `run_request()` 返回后只调用 `record_result()`；
@@ -174,6 +174,11 @@ timeout --signal=INT --kill-after=2s 8s \
 不是每次调用都读取 `steady_clock`。因此同步错误循环不返回下一次 `run_once()` 时，lane 看到的
 时间保持不变，`now >= measurement_end_` 永远不能成立。stop monitor 本身依赖 `sleep(10ms)`，
 同样无法获得 timer wakeup。
+
+进一步排查确认还存在一个跨层状态缺口：`Http3Connection::accepting_requests()` 原本只检查 H3
+`Running` 和 peer GOAWAY，没有检查底层 QUIC 是否仍允许创建新 stream。QUIC 已进入
+`GracefulClosing`、`Closing`、`Draining` 或 `Closed` 时，`attach_local_stream()` 会同步返回
+`Canceled`，但 lane 的 H3 前置检查仍可能通过，使上述循环稳定持续。
 
 相关位置（以后续代码中的函数名为准，行号可能漂移）：
 
@@ -190,29 +195,31 @@ src/event/EventLoop.cpp
   EventLoop::run_once
 ```
 
-### 4.4 修复方向
+### 4.4 已实现修复
 
-建议同时处理 terminal connection 和同步重试公平性，不能只在计数器上加上限：
+修复同时处理 terminal connection 和同步重试公平性，没有仅依赖错误枚举或计数器上限：
 
-1. 每条 connection 增加 worker-local 终止标记；任一 lane 观察到 transport/H3 已终止后发布，
-   该连接上的全部 lane 停止创建请求。
-2. 区分 request-local error 和 terminal connection error。`Canceled`、`ConnReset`、
-   `NotConnected`、`BrokenPipe` 不能仅凭枚举值一刀切，应结合 H3/QUIC connection state 判断。
-3. 非 terminal 的同步失败若允许继续采样，必须保证控制权回到下一次 `run_once()`，使缓存时间、
-   timer 和 stop monitor 前进；仅做同一 turn 的 repost 不够。
-4. 给每 lane/connection 增加有界的连续同步失败计数，超过阈值后停止该 lane，并在汇总中单独输出
-   `terminal_lane_stops`，防止错误数掩盖真实 offered load。
-5. terminal connection 不自动重连，继续遵守第一版“不重放、不自动重试”的语义。
+1. `Http3Connection::accepting_requests()` 同时要求 `quic_.accepting_new_streams()`，使公共 H3 状态契约
+   与底层 transport 一致；所有 lane 直接读取权威状态，不维护可能失真的镜像标记。
+2. `run_lane()` 在请求前和记录结果后检查 connection 状态。terminal connection 上每条 lane 最多
+   记录当前在途请求的一次失败，然后停止创建请求。
+3. connection 仍可用时，失败路径执行正值 `sleep(1ms)`，保证 timer、缓存时间和 stop monitor 能够
+   前进；成功热路径不增加挂起。
+4. 每条 lane 对连续 `StreamOrHeaderSend + NotSent` 使用 32 次上限，超过后停止 lane。
+5. 文本和 JSON 汇总增加 `terminal_lane_stops` 与 `failure_guard_lane_stops`。
+6. terminal connection 不自动重连，继续遵守第一版“不重放、不自动重试”的语义。
 
-### 4.5 验收标准
+### 4.5 验收结果
 
-- 构造已终止连接，使 1、4、64 个 lane 的第一个请求同步返回 `Canceled`；每个 lane 最多记录一个
-  terminal 失败，然后退出。
-- `duration=1s, drain=1s` 的失败场景应在 3 秒内退出，不依赖外部 signal。
-- 失败计数与 lane 数同阶，不能随 CPU 速度增长到百万级。
-- stop monitor 必须获得运行机会并能在 drain deadline 强制关闭阻塞请求。
-- closed-loop、rate 模式均覆盖；正常成功路径的 RPS 和分配数量不能因修复显著回退。
-- OpenResty echo pacing off 的复现可以报告正常请求错误或连接终止，但不能 hang 或忙循环。
+- 新增单元测试覆盖“H3 仍为 `Running`、QUIC 已开始 shutdown”，确认不再接受新 request。
+- 使用固定 Nginx 1.31.3 的默认每连接请求上限触发 GOAWAY，1、4、64 lane 分别报告
+  `terminal_lane_stops=1/4/64`；64 lane 只记录 63 个 terminal request failure，没有无界增长。
+- 构造持续同步 `StreamOrHeaderSend + NotSent`，单 lane 在总计 32 次失败后报告
+  `failure_guard_lane_stops=1`，配置为 5 秒的运行约 0.3 秒自行退出。
+- benchmark server 正常 128 B GET 验证 530/530 成功，两个 lane-stop 计数均为 0。
+- focused HTTP/3 测试 35 项通过；设置 `FIBER_HTTP3_NGINX_PORT=9443` 后，固定 Nginx interop
+  测试也通过。
+- 原 OpenResty 64 KiB echo pacing-off 复现仍应在后续完整矩阵中重跑，确认触发连接异常时不会 hang。
 
 ## 5. H3BENCH-002：benchmark server 持续负载后停止推进
 
@@ -436,7 +443,7 @@ keepalive_time 1h;
 ## 8. 后续处理顺序
 
 ```text
-1. H3BENCH-001 client terminal-error busy loop
+1. H3BENCH-001 client terminal-error busy loop（已完成）
    ↓ 确保失败场景有界、统计可信
 2. H3BENCH-002 server no-progress instrumentation
    ↓ 固定速率、单连接到多连接逐级复现
@@ -447,5 +454,5 @@ keepalive_time 1h;
 5. 再评估 pacing 参数和大响应性能优化
 ```
 
-在第 1、2 步完成前，不应根据当前大响应差距直接重写拥塞控制、全局关闭 server pacing，或宣称
+在第 2 步完成前，不应根据当前大响应差距直接重写拥塞控制、全局关闭 server pacing，或宣称
 OpenResty 与本项目的最终性能比例。

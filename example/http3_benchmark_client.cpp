@@ -47,6 +47,9 @@ namespace {
 
 using namespace std::chrono_literals;
 
+constexpr std::uint32_t kMaxConsecutiveNotSentFailures = 32;
+constexpr auto kRequestFailureBackoff = 1ms;
+
 volatile std::sig_atomic_t g_stop_requested = 0;
 
 void on_signal(int) { g_stop_requested = 1; }
@@ -737,6 +740,8 @@ struct WorkerStats {
     std::uint64_t response_bytes = 0;
     std::uint64_t warmup_started = 0;
     std::uint64_t warmup_errors = 0;
+    std::uint64_t terminal_lane_stops = 0;
+    std::uint64_t failure_guard_lane_stops = 0;
     std::uint64_t endpoint_dropped_datagrams = 0;
     std::uint64_t endpoint_recv_storage_high_water = 0;
     std::uint64_t endpoint_recv_storage_rejected = 0;
@@ -769,6 +774,8 @@ struct WorkerStats {
         response_bytes += other.response_bytes;
         warmup_started += other.warmup_started;
         warmup_errors += other.warmup_errors;
+        terminal_lane_stops += other.terminal_lane_stops;
+        failure_guard_lane_stops += other.failure_guard_lane_stops;
         endpoint_dropped_datagrams += other.endpoint_dropped_datagrams;
         endpoint_recv_storage_high_water += other.endpoint_recv_storage_high_water;
         endpoint_recv_storage_rejected += other.endpoint_recv_storage_rejected;
@@ -974,6 +981,8 @@ private:
             ~DoneGuard() { group->done(); }
         } done{&lane_group_};
 
+        std::uint32_t consecutive_not_sent_failures = 0;
+        fiber::http::Http3ClientConnection &connection = connections_[connection_index];
         co_await sleep_until(warmup_start_);
         while (!stop_requested()) {
             auto now = fiber::event::EventLoop::current().now();
@@ -1005,11 +1014,32 @@ private:
                 measured = scheduled >= measurement_start_;
             }
 
-            if (!connections_[connection_index].http3().accepting_requests()) {
+            if (!connection.http3().accepting_requests()) {
+                ++stats_.terminal_lane_stops;
                 break;
             }
-            RequestResult result = co_await run_request(connections_[connection_index]);
+            RequestResult result = co_await run_request(connection);
             record_result(result, measured, scheduled);
+            if (!connection.http3().accepting_requests()) {
+                ++stats_.terminal_lane_stops;
+                break;
+            }
+            if (result.succeeded()) {
+                consecutive_not_sent_failures = 0;
+                continue;
+            }
+
+            if (result.error_phase == RequestPhase::StreamOrHeaderSend &&
+                result.outcome == fiber::http::Http3RequestOutcome::NotSent) {
+                ++consecutive_not_sent_failures;
+                if (consecutive_not_sent_failures >= kMaxConsecutiveNotSentFailures) {
+                    ++stats_.failure_guard_lane_stops;
+                    break;
+                }
+            } else {
+                consecutive_not_sent_failures = 0;
+            }
+            co_await fiber::async::sleep(kRequestFailureBackoff);
         }
     }
 
@@ -1375,6 +1405,8 @@ void print_summary(std::ostream &out, const BenchmarkOptions &options, const Wor
         << "  throughput=" << std::setprecision(2) << rps << " req/s, " << mib_per_second << " MiB/s"
         << " response_bytes=" << stats.response_bytes << '\n'
         << "  warmup_started=" << stats.warmup_started << " warmup_errors=" << stats.warmup_errors << '\n'
+        << "  lane_stops: terminal=" << stats.terminal_lane_stops << " failure_guard=" << stats.failure_guard_lane_stops
+        << '\n'
         << "  status: other=" << stats.statuses[0] << " 1xx=" << stats.statuses[1] << " 2xx=" << stats.statuses[2]
         << " 3xx=" << stats.statuses[3] << " 4xx=" << stats.statuses[4] << " 5xx=" << stats.statuses[5] << '\n';
 
@@ -1518,6 +1550,8 @@ void write_histogram_json(std::ostream &out, const LatencyHistogram &histogram) 
         << ",\n  \"completion\":" << completion << ",\n  \"requests_per_second\":" << requests_per_second
         << ",\n  \"mib_per_second\":" << mib_per_second << ",\n  \"response_bytes\":" << stats.response_bytes
         << ",\n  \"warmup_started\":" << stats.warmup_started << ",\n  \"warmup_errors\":" << stats.warmup_errors
+        << ",\n  \"terminal_lane_stops\":" << stats.terminal_lane_stops
+        << ",\n  \"failure_guard_lane_stops\":" << stats.failure_guard_lane_stops
         << ",\n  \"latency\":{\n    \"ttfb\":";
     write_histogram_json(out, stats.ttfb);
     out << ",\n    \"total\":";
