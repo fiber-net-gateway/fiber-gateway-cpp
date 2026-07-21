@@ -307,6 +307,52 @@ TEST(QuicStreamSendQueueFrameTest, FinalDataCarriesFinUntilAcked) {
     EXPECT_TRUE(buffer.empty());
 }
 
+TEST(QuicStreamSendQueueFrameTest, RetransmittedPrefixDoesNotCarryFinForLargerFinalSize) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
+
+    ASSERT_TRUE(buffer.try_append(iobuf_of("abcdef")).has_value());
+
+    std::array<std::uint8_t, 5> prefix_out{};
+    auto prefix = QueueAccess::encode_stream_frame(buffer, 4, prefix_out.data(), prefix_out.size());
+    ASSERT_TRUE(prefix.has_value());
+    ASSERT_TRUE(prefix->encoded);
+    EXPECT_EQ(prefix->offset, 0u);
+    EXPECT_EQ(prefix->data_len, 3u);
+    EXPECT_FALSE(prefix->fin);
+
+    std::array<std::uint8_t, 64> suffix_out{};
+    auto suffix = QueueAccess::encode_stream_frame(buffer, 4, suffix_out.data(), suffix_out.size());
+    ASSERT_TRUE(suffix.has_value());
+    ASSERT_TRUE(suffix->encoded);
+    EXPECT_EQ(suffix->offset, 3u);
+    EXPECT_EQ(suffix->data_len, 3u);
+    EXPECT_FALSE(suffix->fin);
+
+    ASSERT_TRUE(buffer.try_append(fiber::mem::IoBuf{}, true).has_value());
+    EXPECT_EQ(buffer.final_size(), 6u);
+
+    ASSERT_TRUE(QueueAccess::mark_acked(buffer, suffix->offset, suffix->data_len, suffix->fin).has_value());
+    ASSERT_TRUE(QueueAccess::mark_failed(buffer, prefix->offset, prefix->data_len, prefix->fin).has_value());
+
+    std::array<std::uint8_t, 64> retry_out{};
+    auto retry = QueueAccess::encode_stream_frame(buffer, 4, retry_out.data(), retry_out.size());
+    ASSERT_TRUE(retry.has_value());
+    ASSERT_TRUE(retry->encoded);
+    EXPECT_EQ(retry->offset, 0u);
+    EXPECT_EQ(retry->data_len, 3u);
+    EXPECT_FALSE(retry->fin);
+
+    ASSERT_TRUE(QueueAccess::mark_acked(buffer, retry->offset, retry->data_len, retry->fin).has_value());
+
+    auto fin = QueueAccess::encode_stream_frame(buffer, 4, retry_out.data(), retry_out.size());
+    ASSERT_TRUE(fin.has_value());
+    ASSERT_TRUE(fin->encoded);
+    EXPECT_EQ(fin->offset, 6u);
+    EXPECT_EQ(fin->data_len, 0u);
+    EXPECT_TRUE(fin->fin);
+}
+
 TEST(QuicStreamSendQueueFrameTest, AppendChainTakesReadableNodesAndUsesCompleteAsFin) {
     fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});

@@ -175,7 +175,7 @@ QuicStreamSendQueue::encode_stream_frame(std::uint64_t stream_id, std::uint8_t *
             return result;
         }
 
-        const std::uint64_t offset = total_appended_bytes_ - buffered_bytes();
+        const std::uint64_t offset = final_size_;
         std::size_t base_hdr = 1 + quic_varint_len(stream_id);
         if (offset > 0) {
             base_hdr += quic_varint_len(offset);
@@ -255,10 +255,8 @@ QuicStreamSendQueue::encode_stream_frame(std::uint64_t stream_id, std::uint8_t *
         return result;
     }
 
-    bool encode_fin = false;
-    if (fin_appended_ && !fin_inflight_ && actual_data == data_len && is_last_ready_extent(cur)) {
-        encode_fin = true;
-    }
+    const bool encode_fin =
+            fin_appended_ && !fin_inflight_ && cur->offset <= final_size_ && actual_data == final_size_ - cur->offset;
 
     if (actual_data < data_len) {
         mem::IoBufNode *remainder = pool_->alloc();
@@ -463,13 +461,6 @@ common::IoResult<void> QuicStreamSendQueue::check_append_preconditions(std::size
         return std::unexpected(common::IoErr::WouldBlock);
     }
     return {};
-}
-
-bool QuicStreamSendQueue::is_last_ready_extent(const mem::IoBufNode *extent) const noexcept {
-    if (extent->next != nullptr) {
-        return false;
-    }
-    return ready_head_ == extent || ready_head_ == nullptr;
 }
 
 void QuicStreamSendQueue::clear_extents() noexcept {
