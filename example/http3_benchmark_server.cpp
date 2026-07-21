@@ -19,8 +19,16 @@
 
 namespace {
 
+constexpr std::size_t kBody128Size = 128;
 constexpr std::size_t kBody1kSize = 1024;
 constexpr std::size_t kBody64kSize = 64 * 1024;
+constexpr std::size_t kBody1mSize = 1024 * 1024;
+
+const std::array<std::uint8_t, kBody128Size> kBody128 = [] {
+    std::array<std::uint8_t, kBody128Size> body{};
+    body.fill(static_cast<std::uint8_t>('x'));
+    return body;
+}();
 
 const std::array<std::uint8_t, kBody1kSize> kBody1k = [] {
     std::array<std::uint8_t, kBody1kSize> body{};
@@ -31,6 +39,12 @@ const std::array<std::uint8_t, kBody1kSize> kBody1k = [] {
 const std::array<std::uint8_t, kBody64kSize> kBody64k = [] {
     std::array<std::uint8_t, kBody64kSize> body{};
     body.fill(static_cast<std::uint8_t>('b'));
+    return body;
+}();
+
+const std::array<std::uint8_t, kBody1mSize> kBody1m = [] {
+    std::array<std::uint8_t, kBody1mSize> body{};
+    body.fill(static_cast<std::uint8_t>('c'));
     return body;
 }();
 
@@ -99,12 +113,20 @@ fiber::async::Task<void> echo_body(fiber::http::HttpExchange &exchange) {
 
 fiber::async::Task<void> handle_request(fiber::http::HttpExchange &exchange) {
     const std::string_view path = exchange.uri().path;
+    if (path == "/bench/128b") {
+        co_await send_fixed(exchange, kBody128.data(), kBody128.size());
+        co_return;
+    }
     if (path == "/bench/1k") {
         co_await send_fixed(exchange, kBody1k.data(), kBody1k.size());
         co_return;
     }
     if (path == "/bench/64k") {
         co_await send_fixed(exchange, kBody64k.data(), kBody64k.size());
+        co_return;
+    }
+    if (path == "/bench/1m") {
+        co_await send_fixed(exchange, kBody1m.data(), kBody1m.size());
         co_return;
     }
     if (path == "/bench/echo") {
@@ -128,6 +150,7 @@ int main(int argc, char **argv) {
     std::size_t workers = 2;
     const char *cert_file = "build/http3-demo/cert.pem";
     const char *key_file = "build/http3-demo/key.pem";
+    bool pacing_enabled = true;
     if (argc > 1) {
         auto parsed = parse_size(argv[1], 65535);
         if (!parsed) {
@@ -151,7 +174,18 @@ int main(int argc, char **argv) {
         key_file = argv[4];
     }
     if (argc > 5) {
-        std::cerr << "usage: http3_benchmark_server [port] [workers] [cert] [key]\n";
+        const std::string_view pacing_mode(argv[5]);
+        if (pacing_mode == "on") {
+            pacing_enabled = true;
+        } else if (pacing_mode == "off") {
+            pacing_enabled = false;
+        } else {
+            std::cerr << "invalid pacing mode (expected on or off)\n";
+            return 1;
+        }
+    }
+    if (argc > 6) {
+        std::cerr << "usage: http3_benchmark_server [port] [workers] [cert] [key] [pacing]\n";
         return 1;
     }
 
@@ -168,6 +202,7 @@ int main(int argc, char **argv) {
     server_options.tls.key_file = key_file;
     server_options.tls.alpn = {"h2", "http/1.1"};
     server_options.http3.enabled = true;
+    server_options.http3.send.pacing.enabled = pacing_enabled;
     fiber::http::HttpServer server(accept_loop, handle_request, server_options, &worker_group);
     fiber::net::ListenOptions listen_options{};
     fiber::net::SocketAddress address(fiber::net::IpAddress::loopback_v4(), port);
@@ -179,7 +214,8 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    std::cout << "HTTP/3 benchmark server listening on 127.0.0.1:" << port << " workers=" << workers << '\n';
+    std::cout << "HTTP/3 benchmark server listening on 127.0.0.1:" << port << " workers=" << workers
+              << " pacing=" << (pacing_enabled ? "on" : "off") << '\n';
     fiber::async::spawn(accept_loop, [&server]() { return server.serve(); });
     accept_loop.run();
 
