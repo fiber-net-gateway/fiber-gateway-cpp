@@ -17,6 +17,10 @@
   最小 HTTP/1.1 服务端示例，展示事件循环、请求体读取和响应写回。
 - `https_echo.cpp`
   HTTPS 服务端示例，展示 TLS 接入、HTTP/1.1、HTTP/2 以及 QUIC 上的 HTTP/3。
+- `http3_benchmark_client.cpp`
+  HTTP/3 压测客户端，支持 closed-loop、固定 RPS、多 QUIC 连接/stream、响应校验和延迟汇总。
+- `http3_benchmark_server.cpp`
+  低开销 HTTP/3 benchmark server，提供固定大小响应和请求体 echo 接口。
 - `tcp_echo.cpp`
   TCP Echo 示例，展示基础流式读写行为。
 - `udp_echo.cpp`
@@ -50,3 +54,20 @@ cmake -S .. -B ../build -DFIBER_BUILD_EXAMPLES=OFF
 ../build/https_echo
 ../build/dns_dig example.com
 ```
+
+使用仓库 demo 证书启动 HTTP/3 benchmark server 和 client：
+
+```bash
+../build/example/http3_benchmark_server 18443 2 ../build/http3-demo/cert.pem ../build/http3-demo/key.pem
+
+../build/example/http3_benchmark_client \
+  https://localhost:18443/bench/1k \
+  --connect-to 127.0.0.1:18443 \
+  --connections 4 --streams 16 \
+  --warmup 1s --duration 10s \
+  --expect-status 200 --expect-bytes 1024 \
+  --insecure
+```
+
+固定总请求速率使用 `--mode rate --rps N`，完整选项见 `--help`。内部客户端适合开发和回归；
+正式跨实现对比仍应使用 `scripts/benchmark/http3/` 下的独立客户端。
