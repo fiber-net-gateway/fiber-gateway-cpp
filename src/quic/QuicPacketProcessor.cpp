@@ -589,13 +589,18 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
 
 } // namespace
 
-QuicReceiveApplyResult quic_apply_receive_result(QuicConnection &conn, const QuicPacketProcessResult &result) noexcept {
-    (void) conn;
-
+common::IoResult<QuicReceiveApplyResult>
+quic_apply_receive_result(QuicConnection &conn, const QuicPacketProcessResult &result, QuicTime now) noexcept {
     QuicReceiveApplyResult applied{};
     if (result.handshake_confirmed && result.path != nullptr) {
         result.path->validated = true;
         applied.handshake_validated_path = result.path;
+        if (result.path->state == QuicPathState::Idle && result.path->max_mtu == 0) {
+            auto discovered = conn.paths().discover_path_mtu(*result.path, now);
+            if (!discovered) {
+                return std::unexpected(discovered.error());
+            }
+        }
     }
     return applied;
 }

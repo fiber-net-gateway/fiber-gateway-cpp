@@ -44,8 +44,8 @@ struct QuicReceiveApplyResult {
     QuicPath *handshake_validated_path = nullptr;
 };
 
-[[nodiscard]] QuicReceiveApplyResult quic_apply_receive_result(QuicConnection &conn,
-                                                               const QuicPacketProcessResult &result) noexcept;
+[[nodiscard]] common::IoResult<QuicReceiveApplyResult>
+quic_apply_receive_result(QuicConnection &conn, const QuicPacketProcessResult &result, QuicTime now) noexcept;
 
 [[nodiscard]] common::IoResult<QuicPacketProcessResult>
 quic_process_initial_datagram(QuicConnection &conn, const QuicReceivedDatagram &datagram) noexcept;

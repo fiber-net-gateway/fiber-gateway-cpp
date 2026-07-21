@@ -18,6 +18,13 @@ baseline.
 - HTTP/3 h2load and bsslclient under `temp/http3-bench-tools/`;
 - user systemd transient units and cgroup v2 accounting.
 
+For direct-server flame graphs, the profile build and tools are:
+
+- `build-profile-http3-jemalloc/example/http3_benchmark_server`, built with
+  jemalloc, debug information, and frame pointers;
+- `build-release/example/http3_benchmark_client`;
+- Linux `perf` and the FlameGraph scripts under `temp/FlameGraph/`.
+
 `prepare_runtime.sh` creates only benchmark certificates, payloads, and runtime
 directories under `temp/`. The runners bind all services to loopback ports
 18443 and 19001.
@@ -48,6 +55,14 @@ CONNECTIONS=100 scripts/benchmark/http3/run_short_connections.sh
 # Recompute CSV summaries for an existing raw result directory.
 scripts/benchmark/http3/summarize.py \
   temp/http3-benchmark-results/<run-id>
+
+# Profile the jemalloc server with server/client pacing disabled. Root is
+# required on hosts with restrictive perf_event_paranoid settings.
+sudo scripts/benchmark/http3/profile_server_flamegraph.sh
+
+# Profile only the large GET cases for 30 seconds each.
+sudo env CASES="get-64k get-1m" DURATION_SECONDS=30 \
+  scripts/benchmark/http3/profile_server_flamegraph.sh
 ```
 
 Useful matrix overrides are `IMPLEMENTATIONS`, `CASE_FILTER`, `REPETITIONS`,
@@ -69,3 +84,9 @@ HTTP error, timeout, cgroup throttling, or a positive delta in
 
 All raw logs and external build products stay below `temp/` and are not
 intended for Git.
+
+The flame-graph runner writes one `flamegraph.svg`, `perf.report.txt`, folded
+stack file, client JSON result, and server/client logs per workload below
+`temp/http3-flamegraphs/<run-id>/`. It returns the result directory to the
+invoking sudo user's ownership before exiting. The default workloads are
+`get-1k`, `get-64k`, `get-1m`, and `post-64k`; each starts a fresh server.
