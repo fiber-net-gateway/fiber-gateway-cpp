@@ -20,6 +20,14 @@ inline constexpr std::size_t kChildrenPerChunk = 16;
 class CatClientCore;
 struct MessageTrace;
 
+struct TraceContext {
+    std::shared_ptr<CatClientCore> core;
+    std::string_view message_id;
+    std::string_view root_message_id;
+    std::string_view parent_message_id;
+    std::string_view session_token;
+};
+
 struct StringRef {
     const char *data = nullptr;
     std::size_t size = 0;
@@ -77,6 +85,7 @@ struct MessageTraceData {
     StringRef message_id;
     StringRef root_message_id;
     StringRef parent_message_id;
+    StringRef session_token;
     std::chrono::steady_clock::time_point steady_base{};
     std::uint64_t wall_base_millis = 0;
     std::size_t payload_bytes = 0;
@@ -96,10 +105,13 @@ struct MessageTrace {
     MessageTraceData *data = nullptr;
 };
 
-[[nodiscard]] std::expected<TransactionData *, RecordError>
-create_transaction_root(std::string_view type, std::string_view name, RecordLimits limits) noexcept;
+[[nodiscard]] std::expected<TransactionData *, RecordError> create_transaction_root(std::string_view type,
+                                                                                    std::string_view name,
+                                                                                    RecordLimits limits,
+                                                                                    TraceContext context = {}) noexcept;
 [[nodiscard]] std::expected<EventData *, RecordError> create_event_root(std::string_view type, std::string_view name,
-                                                                        RecordLimits limits) noexcept;
+                                                                        RecordLimits limits,
+                                                                        TraceContext context = {}) noexcept;
 
 [[nodiscard]] std::expected<TransactionData *, RecordError>
 create_transaction(TransactionData &parent, std::string_view type, std::string_view name) noexcept;
