@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <memory>
 #include <string_view>
 
 #include <common/mem/BufPool.h>
@@ -14,6 +15,11 @@
 
 namespace fiber::cat::detail {
 
+inline constexpr std::size_t kChildrenPerChunk = 16;
+
+class CatClientCore;
+struct MessageTrace;
+
 struct StringRef {
     const char *data = nullptr;
     std::size_t size = 0;
@@ -21,80 +27,95 @@ struct StringRef {
     [[nodiscard]] std::string_view view() const noexcept { return {data, size}; }
 };
 
-struct DataEntry {
-    StringRef key;
-    StringRef value;
-    DataEntry *next = nullptr;
-    bool key_value = false;
+struct DataChunk {
+    DataChunk *next = nullptr;
+    std::size_t capacity = 0;
+    std::size_t used = 0;
+
+    [[nodiscard]] char *data() noexcept { return reinterpret_cast<char *>(this + 1); }
+    [[nodiscard]] const char *data() const noexcept { return reinterpret_cast<const char *>(this + 1); }
 };
 
-struct MessageNode {
+struct MessageData {
+    MessageTrace *trace = nullptr;
     MessageKind kind = MessageKind::Event;
     StringRef type;
     StringRef name;
     StringRef status{status::Success.data(), status::Success.size()};
-    DataEntry *data_head = nullptr;
-    DataEntry *data_tail = nullptr;
-    MessageNode *next_sibling = nullptr;
-    std::uint64_t timestamp_millis = 0;
+    DataChunk *data_head = nullptr;
+    DataChunk *data_tail = nullptr;
+    std::chrono::steady_clock::time_point time{};
     std::size_t data_size = 0;
+    bool has_data = false;
     bool completed = false;
 };
 
-struct TransactionNode {
-    MessageNode message{.kind = MessageKind::Transaction};
-    MessageNode *children_head = nullptr;
-    MessageNode *children_tail = nullptr;
-    std::chrono::steady_clock::time_point duration_start{};
+struct EventData final : MessageData {
+    EventData() noexcept { kind = MessageKind::Event; }
+};
+
+struct ChildrenChunk {
+    ChildrenChunk *next = nullptr;
+    MessageData *children[kChildrenPerChunk];
+};
+
+struct TransactionData final : MessageData {
+    TransactionData() noexcept { kind = MessageKind::Transaction; }
+
+    ChildrenChunk *children_head = nullptr;
+    ChildrenChunk *children_tail = nullptr;
     std::chrono::microseconds duration{};
     std::size_t child_count = 0;
     bool explicit_duration = false;
 };
 
-struct TreeData {
-    TreeData(event::EventLoop &owner, RecordLimits limits) noexcept;
-
+struct MessageTraceData {
+    std::shared_ptr<CatClientCore> core;
     event::EventLoop *owner = nullptr;
     RecordLimits limits;
-    mem::BufPool pool;
-    MessageNode *root = nullptr;
+    MessageData *root = nullptr;
+    StringRef message_id;
+    StringRef root_message_id;
+    StringRef parent_message_id;
     std::chrono::steady_clock::time_point steady_base{};
     std::uint64_t wall_base_millis = 0;
     std::size_t payload_bytes = 0;
     std::size_t message_count = 0;
-    std::size_t open_messages = 0;
-    std::size_t refs = 1;
+    std::size_t open_message_count = 0;
     bool has_problem = false;
 };
 
-[[nodiscard]] bool valid_limits(const RecordLimits &limits) noexcept;
-[[nodiscard]] bool on_owner_loop(const TreeData &tree) noexcept;
-[[nodiscard]] std::uint64_t current_timestamp_millis(const TreeData &tree) noexcept;
+struct MessageTrace {
+    MessageTrace() = default;
+    ~MessageTrace();
 
-[[nodiscard]] std::expected<TreeData *, RecordError>
-create_transaction_tree(std::string_view type, std::string_view name, RecordLimits limits) noexcept;
-[[nodiscard]] std::expected<TreeData *, RecordError> create_event_tree(std::string_view type, std::string_view name,
-                                                                       RecordLimits limits) noexcept;
+    MessageTrace(const MessageTrace &) = delete;
+    MessageTrace &operator=(const MessageTrace &) = delete;
 
-[[nodiscard]] std::expected<TransactionNode *, RecordError>
-create_transaction(TreeData &tree, TransactionNode *parent, std::string_view type, std::string_view name) noexcept;
-[[nodiscard]] std::expected<MessageNode *, RecordError>
-create_event(TreeData &tree, TransactionNode *parent, std::string_view type, std::string_view name) noexcept;
+    mem::BufPool pool;
+    MessageTraceData *data = nullptr;
+};
 
-RecordError add_data(TreeData &tree, MessageNode &message, std::string_view data) noexcept;
-RecordError add_data(TreeData &tree, MessageNode &message, std::string_view key, std::string_view value) noexcept;
-RecordError set_status(TreeData &tree, MessageNode &message, std::string_view value) noexcept;
-RecordError set_timestamp(TreeData &tree, MessageNode &message, std::uint64_t timestamp_millis) noexcept;
-RecordError set_duration(TreeData &tree, TransactionNode &transaction, std::chrono::microseconds duration) noexcept;
-RecordError complete(TreeData &tree, MessageNode &message) noexcept;
-void complete_incomplete(TreeData &tree, MessageNode &message) noexcept;
+[[nodiscard]] std::expected<TransactionData *, RecordError>
+create_transaction_root(std::string_view type, std::string_view name, RecordLimits limits) noexcept;
+[[nodiscard]] std::expected<EventData *, RecordError> create_event_root(std::string_view type, std::string_view name,
+                                                                        RecordLimits limits) noexcept;
 
-void retain(TreeData &tree) noexcept;
-void release(TreeData *tree) noexcept;
-[[nodiscard]] bool ready(const TreeData &tree) noexcept;
+[[nodiscard]] std::expected<TransactionData *, RecordError>
+create_transaction(TransactionData &parent, std::string_view type, std::string_view name) noexcept;
+[[nodiscard]] std::expected<EventData *, RecordError> create_event(TransactionData &parent, std::string_view type,
+                                                                   std::string_view name) noexcept;
 
-[[nodiscard]] TransactionNode *as_transaction(MessageNode *message) noexcept;
-[[nodiscard]] const TransactionNode *as_transaction(const MessageNode *message) noexcept;
+RecordError add_data(MessageData *message, std::string_view data) noexcept;
+RecordError add_data(MessageData *message, std::string_view key, std::string_view value) noexcept;
+RecordError set_status(MessageData *message, std::string_view value) noexcept;
+RecordError set_timestamp(MessageData *message, std::uint64_t timestamp_millis) noexcept;
+RecordError set_duration(TransactionData *transaction, std::chrono::microseconds duration) noexcept;
+
+RecordError complete(EventData *&event) noexcept;
+RecordError complete(TransactionData *&transaction) noexcept;
+void abandon(EventData *&event) noexcept;
+void abandon(TransactionData *&transaction) noexcept;
 
 } // namespace fiber::cat::detail
 

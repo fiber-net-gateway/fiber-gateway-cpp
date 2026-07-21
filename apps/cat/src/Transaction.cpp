@@ -6,19 +6,14 @@
 
 namespace fiber::cat {
 
-Transaction::Transaction(Transaction &&other) noexcept :
-    tree_(std::exchange(other.tree_, nullptr)), node_(other.node_) {
-    other.node_ = nullptr;
-}
+Transaction::Transaction(Transaction &&other) noexcept : data_(std::exchange(other.data_, nullptr)) {}
 
 Transaction &Transaction::operator=(Transaction &&other) noexcept {
     if (this == &other) {
         return *this;
     }
     reset();
-    tree_ = std::exchange(other.tree_, nullptr);
-    node_ = other.node_;
-    other.node_ = nullptr;
+    data_ = std::exchange(other.data_, nullptr);
     return *this;
 }
 
@@ -26,40 +21,34 @@ Transaction::~Transaction() { reset(); }
 
 std::expected<Transaction, RecordError> Transaction::create_root(std::string_view type, std::string_view name,
                                                                  RecordLimits limits) noexcept {
-    auto created = detail::create_transaction_tree(type, name, limits);
+    auto created = detail::create_transaction_root(type, name, limits);
     if (!created) {
         return std::unexpected(created.error());
     }
-    return Transaction(*created, (*created)->root);
+    return Transaction(*created);
 }
-
-bool Transaction::tree_ready() const noexcept { return tree_ && detail::ready(*tree_); }
-
-bool Transaction::tree_has_problem() const noexcept { return tree_ && tree_->has_problem; }
 
 std::expected<Transaction, RecordError> Transaction::start_transaction(std::string_view type,
                                                                        std::string_view name) noexcept {
-    if (!tree_) {
-        return std::unexpected(RecordError::InvalidArgument);
+    if (!data_) {
+        return std::unexpected(RecordError::Completed);
     }
-    auto child = detail::create_transaction(*tree_, detail::as_transaction(node_), type, name);
+    auto child = detail::create_transaction(*data_, type, name);
     if (!child) {
         return std::unexpected(child.error());
     }
-    detail::retain(*tree_);
-    return Transaction(tree_, &(*child)->message);
+    return Transaction(*child);
 }
 
 std::expected<Event, RecordError> Transaction::start_event(std::string_view type, std::string_view name) noexcept {
-    if (!tree_) {
-        return std::unexpected(RecordError::InvalidArgument);
+    if (!data_) {
+        return std::unexpected(RecordError::Completed);
     }
-    auto child = detail::create_event(*tree_, detail::as_transaction(node_), type, name);
+    auto child = detail::create_event(*data_, type, name);
     if (!child) {
         return std::unexpected(child.error());
     }
-    detail::retain(*tree_);
-    return Event(tree_, *child);
+    return Event(*child);
 }
 
 RecordError Transaction::log_event(std::string_view type, std::string_view name, std::string_view status_value,
@@ -83,47 +72,34 @@ RecordError Transaction::log_event(std::string_view type, std::string_view name,
     return result != RecordError::None ? result : complete_result;
 }
 
-RecordError Transaction::add_data(std::string_view data) noexcept {
-    return tree_ ? detail::add_data(*tree_, *node_, data) : RecordError::InvalidArgument;
-}
+RecordError Transaction::add_data(std::string_view data) noexcept { return detail::add_data(data_, data); }
 
 RecordError Transaction::add_data(std::string_view key, std::string_view value) noexcept {
-    return tree_ ? detail::add_data(*tree_, *node_, key, value) : RecordError::InvalidArgument;
+    return detail::add_data(data_, key, value);
 }
 
 RecordError Transaction::set_status(std::string_view status_value) noexcept {
-    return tree_ ? detail::set_status(*tree_, *node_, status_value) : RecordError::InvalidArgument;
+    return detail::set_status(data_, status_value);
 }
 
 RecordError Transaction::set_timestamp(std::uint64_t timestamp_millis) noexcept {
-    return tree_ ? detail::set_timestamp(*tree_, *node_, timestamp_millis) : RecordError::InvalidArgument;
+    return detail::set_timestamp(data_, timestamp_millis);
 }
 
 RecordError Transaction::set_duration(std::chrono::microseconds duration) noexcept {
-    return tree_ ? detail::set_duration(*tree_, *detail::as_transaction(node_), duration)
-                 : RecordError::InvalidArgument;
+    return detail::set_duration(data_, duration);
 }
 
-RecordError Transaction::complete() noexcept {
-    return tree_ ? detail::complete(*tree_, *node_) : RecordError::InvalidArgument;
-}
+RecordError Transaction::complete() noexcept { return detail::complete(data_); }
 
 RecordError Transaction::complete(std::string_view status_value) noexcept {
-    RecordError result = set_status(status_value);
+    const RecordError result = set_status(status_value);
     if (result != RecordError::None) {
         return result;
     }
     return complete();
 }
 
-void Transaction::reset() noexcept {
-    if (!tree_) {
-        return;
-    }
-    detail::complete_incomplete(*tree_, *node_);
-    detail::release(tree_);
-    tree_ = nullptr;
-    node_ = nullptr;
-}
+void Transaction::reset() noexcept { detail::abandon(data_); }
 
 } // namespace fiber::cat
