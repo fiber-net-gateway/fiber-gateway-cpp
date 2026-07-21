@@ -1,0 +1,4 @@
+interface:
+  display_name: "CAT Client Development"
+  short_description: "Develop fiber2 CAT against official C/C++ behavior"
+  default_prompt: "Use $cat-client-development to develop or review apps/cat against the official CAT C/C++ client."
