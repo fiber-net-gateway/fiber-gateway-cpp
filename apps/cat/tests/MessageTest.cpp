@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <string>
@@ -11,13 +12,20 @@
 #include <event/EventLoop.h>
 #include <fiber/cat/Cat.h>
 
+#include "CatInternal.h"
+
 namespace {
 
 using namespace std::chrono_literals;
-using fiber::cat::MessageKind;
+using fiber::cat::Event;
 using fiber::cat::RecordError;
 using fiber::cat::RecordLimits;
 using fiber::cat::Transaction;
+
+static_assert(sizeof(Transaction) == sizeof(void *));
+static_assert(sizeof(Event) == sizeof(void *));
+static_assert(!std::is_copy_constructible_v<Transaction>);
+static_assert(!std::is_copy_constructible_v<Event>);
 
 template<typename F>
 struct LoopCall {
@@ -39,7 +47,16 @@ void run_on_loop(F &&callback) {
     loop.run();
 }
 
-TEST(CatMessageTest, BuildsNestedTransactionsEventsAndData) {
+std::string flatten_data(const fiber::cat::detail::MessageData &message) {
+    std::string result;
+    result.reserve(message.data_size);
+    for (const auto *chunk = message.data_head; chunk; chunk = chunk->next) {
+        result.append(chunk->data(), chunk->used);
+    }
+    return result;
+}
+
+TEST(CatMessageTest, BuildsNestedMessagesAndConsumesCompletedHandles) {
     run_on_loop([] {
         auto root_result = Transaction::create_root("URL", "/orders");
         ASSERT_TRUE(root_result);
@@ -53,50 +70,19 @@ TEST(CatMessageTest, BuildsNestedTransactionsEventsAndData) {
         EXPECT_EQ(child.set_duration(1500us), RecordError::None);
         EXPECT_EQ(child.log_event("Cache", "miss", "CACHE_MISS", "key=42"), RecordError::None);
         EXPECT_EQ(child.complete(), RecordError::None);
+        EXPECT_FALSE(child.valid());
+
         EXPECT_EQ(root.complete(), RecordError::None);
-
-        const auto root_view = root.view();
-        EXPECT_EQ(root_view.kind(), MessageKind::Transaction);
-        EXPECT_EQ(root_view.type(), "URL");
-        EXPECT_EQ(root_view.name(), "/orders");
-        EXPECT_TRUE(root_view.completed());
-        EXPECT_TRUE(root_view.success());
-        EXPECT_GT(root_view.timestamp_millis(), 0U);
-        EXPECT_EQ(root_view.child_count(), 1U);
-        EXPECT_EQ(root_view.data_size(), 24U);
-
-        auto data = root_view.data().begin();
-        ASSERT_NE(data, root_view.data().end());
-        EXPECT_FALSE((*data).key_value);
-        EXPECT_EQ((*data).value, "method=GET");
-        ++data;
-        ASSERT_NE(data, root_view.data().end());
-        EXPECT_TRUE((*data).key_value);
-        EXPECT_EQ((*data).key, "route");
-        EXPECT_EQ((*data).value, "/orders");
-
-        auto children = root_view.children().begin();
-        ASSERT_NE(children, root_view.children().end());
-        const auto child_view = *children;
-        EXPECT_EQ(child_view.kind(), MessageKind::Transaction);
-        EXPECT_EQ(child_view.type(), "SQL");
-        EXPECT_EQ(child_view.duration(), 1500us);
-        ASSERT_EQ(child_view.child_count(), 1U);
-
-        const auto event_view = *child_view.children().begin();
-        EXPECT_EQ(event_view.kind(), MessageKind::Event);
-        EXPECT_EQ(event_view.type(), "Cache");
-        EXPECT_EQ(event_view.name(), "miss");
-        EXPECT_EQ(event_view.status(), "CACHE_MISS");
-        EXPECT_EQ((*event_view.data().begin()).value, "key=42");
-        EXPECT_TRUE(root.tree_ready());
-        EXPECT_TRUE(root.tree_has_problem());
-        EXPECT_EQ(root.set_status("late"), RecordError::Completed);
+        EXPECT_FALSE(root.valid());
         EXPECT_EQ(root.complete(), RecordError::None);
+        EXPECT_EQ(root.add_data("late"), RecordError::Completed);
+        auto late_child = root.start_event("E", "late");
+        ASSERT_FALSE(late_child);
+        EXPECT_EQ(late_child.error(), RecordError::Completed);
     });
 }
 
-TEST(CatMessageTest, WaitsForChildrenCompletedAfterRoot) {
+TEST(CatMessageTest, RootCanCompleteBeforeExistingChild) {
     run_on_loop([] {
         auto root_result = Transaction::create_root("URL", "/parallel");
         ASSERT_TRUE(root_result);
@@ -106,13 +92,15 @@ TEST(CatMessageTest, WaitsForChildrenCompletedAfterRoot) {
         Transaction child = std::move(*child_result);
 
         EXPECT_EQ(root.complete(), RecordError::None);
-        EXPECT_FALSE(root.tree_ready());
+        EXPECT_FALSE(root.valid());
+        EXPECT_TRUE(child.valid());
+        EXPECT_EQ(child.add_data("phase", "after-root"), RecordError::None);
         EXPECT_EQ(child.complete(), RecordError::None);
-        EXPECT_TRUE(root.tree_ready());
+        EXPECT_FALSE(child.valid());
     });
 }
 
-TEST(CatMessageTest, IncompleteHandleBecomesProblem) {
+TEST(CatMessageTest, AbandonedChildCompletesIncompleteWithoutInvalidatingParent) {
     run_on_loop([] {
         auto root_result = Transaction::create_root("URL", "/incomplete");
         ASSERT_TRUE(root_result);
@@ -121,15 +109,69 @@ TEST(CatMessageTest, IncompleteHandleBecomesProblem) {
             auto child_result = root.start_transaction("Call", "abandoned");
             ASSERT_TRUE(child_result);
             Transaction child = std::move(*child_result);
-            EXPECT_FALSE(child.view().completed());
+            EXPECT_TRUE(child.valid());
         }
 
-        const auto child_view = *root.view().children().begin();
-        EXPECT_TRUE(child_view.completed());
-        EXPECT_EQ(child_view.status(), fiber::cat::status::Incomplete);
-        EXPECT_TRUE(root.tree_has_problem());
+        EXPECT_TRUE(root.valid());
+        EXPECT_EQ(root.add_data("continued"), RecordError::None);
         EXPECT_EQ(root.complete(), RecordError::None);
-        EXPECT_TRUE(root.tree_ready());
+    });
+}
+
+TEST(CatMessageTest, AbandonMarksInternalMessageIncomplete) {
+    run_on_loop([] {
+        auto root_result = fiber::cat::detail::create_transaction_root("T", "root", {});
+        ASSERT_TRUE(root_result);
+        auto *root = *root_result;
+        auto child_result = fiber::cat::detail::create_event(*root, "E", "abandoned");
+        ASSERT_TRUE(child_result);
+        auto *child = *child_result;
+        auto *observed_child = child;
+
+        fiber::cat::detail::abandon(child);
+        EXPECT_EQ(child, nullptr);
+        EXPECT_TRUE(observed_child->completed);
+        EXPECT_EQ(observed_child->status.view(), fiber::cat::status::Incomplete);
+        EXPECT_TRUE(root->trace->data->has_problem);
+
+        EXPECT_EQ(fiber::cat::detail::complete(root), RecordError::None);
+    });
+}
+
+TEST(CatMessageTest, CompletionPreservesExplicitTransactionDuration) {
+    run_on_loop([] {
+        auto root_result = fiber::cat::detail::create_transaction_root("T", "root", {});
+        ASSERT_TRUE(root_result);
+        auto *root = *root_result;
+        auto child_result = fiber::cat::detail::create_event(*root, "E", "keep-trace-alive");
+        ASSERT_TRUE(child_result);
+        auto *child = *child_result;
+        auto *observed_root = root;
+
+        EXPECT_EQ(fiber::cat::detail::set_duration(root, 1500us), RecordError::None);
+        EXPECT_EQ(fiber::cat::detail::complete(root), RecordError::None);
+        EXPECT_EQ(root, nullptr);
+        EXPECT_TRUE(observed_root->completed);
+        EXPECT_TRUE(observed_root->explicit_duration);
+        EXPECT_EQ(observed_root->duration, 1500us);
+
+        EXPECT_EQ(fiber::cat::detail::complete(child), RecordError::None);
+    });
+}
+
+TEST(CatMessageTest, MoveAssignmentAbandonsPreviousMessage) {
+    run_on_loop([] {
+        auto first_result = Transaction::create_root("URL", "/first");
+        auto second_result = Transaction::create_root("URL", "/second");
+        ASSERT_TRUE(first_result);
+        ASSERT_TRUE(second_result);
+        Transaction first = std::move(*first_result);
+        Transaction second = std::move(*second_result);
+
+        first = std::move(second);
+        EXPECT_TRUE(first.valid());
+        EXPECT_FALSE(second.valid());
+        EXPECT_EQ(first.complete(), RecordError::None);
     });
 }
 
@@ -144,38 +186,98 @@ TEST(CatMessageTest, EnforcesTreeChildAndDataLimits) {
         Transaction root = std::move(*root_result);
 
         EXPECT_EQ(root.add_data("12345"), RecordError::LimitExceeded);
-        EXPECT_TRUE(root.view().data().empty());
+        EXPECT_EQ(root.add_data("1234"), RecordError::None);
         auto event_result = root.start_event("E", "one");
         ASSERT_TRUE(event_result);
         auto second = root.start_event("E", "two");
         ASSERT_FALSE(second);
         EXPECT_EQ(second.error(), RecordError::LimitExceeded);
-        EXPECT_EQ(event_result->complete(), RecordError::None);
+
         EXPECT_EQ(root.complete(), RecordError::None);
-        EXPECT_TRUE(root.tree_ready());
+        EXPECT_EQ(event_result->complete(), RecordError::None);
     });
 }
 
-TEST(CatMessageTest, SupportsStandaloneEventTree) {
+TEST(CatMessageTest, SupportsStandaloneEventAndConsumesItOnCompletion) {
     run_on_loop([] {
-        auto event_result = fiber::cat::Event::create_root("Exception", "read failed");
+        auto event_result = Event::create_root("Exception", "read failed");
         ASSERT_TRUE(event_result);
-        auto event = std::move(*event_result);
+        Event event = std::move(*event_result);
         EXPECT_EQ(event.add_data("code", "EIO"), RecordError::None);
         EXPECT_EQ(event.set_timestamp(1234), RecordError::None);
         EXPECT_EQ(event.complete(fiber::cat::status::Error), RecordError::None);
-        EXPECT_TRUE(event.tree_ready());
-        EXPECT_TRUE(event.tree_has_problem());
-        EXPECT_EQ(event.view().timestamp_millis(), 1234U);
-        EXPECT_EQ(event.view().status(), fiber::cat::status::Error);
+        EXPECT_FALSE(event.valid());
+        EXPECT_EQ(event.set_status(fiber::cat::status::Success), RecordError::Completed);
+    });
+}
+
+TEST(CatMessageTest, FixedChildrenChunksPreserveInsertionOrderAcrossBoundaries) {
+    run_on_loop([] {
+        auto root_result = fiber::cat::detail::create_transaction_root("T", "root", {});
+        ASSERT_TRUE(root_result);
+        auto *root = *root_result;
+        std::array<fiber::cat::detail::EventData *, 33> children{};
+        for (std::size_t i = 0; i < children.size(); ++i) {
+            auto child = fiber::cat::detail::create_event(*root, "E", "child");
+            ASSERT_TRUE(child);
+            children[i] = *child;
+        }
+
+        ASSERT_EQ(root->child_count, 33U);
+        auto *first = root->children_head;
+        ASSERT_NE(first, nullptr);
+        auto *second = first->next;
+        ASSERT_NE(second, nullptr);
+        auto *third = second->next;
+        ASSERT_NE(third, nullptr);
+        EXPECT_EQ(third->next, nullptr);
+        EXPECT_EQ(first->children[0], children[0]);
+        EXPECT_EQ(first->children[15], children[15]);
+        EXPECT_EQ(second->children[0], children[16]);
+        EXPECT_EQ(second->children[15], children[31]);
+        EXPECT_EQ(third->children[0], children[32]);
+
+        EXPECT_EQ(fiber::cat::detail::complete(root), RecordError::None);
+        for (auto *&child: children) {
+            EXPECT_EQ(fiber::cat::detail::complete(child), RecordError::None);
+        }
+    });
+}
+
+TEST(CatMessageTest, FlatDataUsesMultipleChunksWithoutExposingPartialEntries) {
+    run_on_loop([] {
+        auto root_result = fiber::cat::detail::create_transaction_root("T", "root", {});
+        ASSERT_TRUE(root_result);
+        auto *root = *root_result;
+        const std::string first(120, 'a');
+        const std::string second(20, 'b');
+
+        EXPECT_EQ(fiber::cat::detail::add_data(root, first), RecordError::None);
+        EXPECT_EQ(fiber::cat::detail::add_data(root, second), RecordError::None);
+        EXPECT_EQ(fiber::cat::detail::add_data(root, "key", "value"), RecordError::None);
+        EXPECT_NE(root->data_head, root->data_tail);
+        EXPECT_EQ(flatten_data(*root), first + "&" + second + "&key=value");
+        EXPECT_EQ(root->data_size, first.size() + second.size() + 11U);
+
+        EXPECT_EQ(fiber::cat::detail::complete(root), RecordError::None);
+    });
+}
+
+TEST(CatMessageTest, EmptyDataStillSeparatesTheNextEntry) {
+    run_on_loop([] {
+        auto root_result = fiber::cat::detail::create_transaction_root("T", "root", {});
+        ASSERT_TRUE(root_result);
+        auto *root = *root_result;
+        EXPECT_EQ(fiber::cat::detail::add_data(root, ""), RecordError::None);
+        EXPECT_EQ(fiber::cat::detail::add_data(root, "x"), RecordError::None);
+        EXPECT_EQ(flatten_data(*root), "&x");
+        EXPECT_EQ(fiber::cat::detail::complete(root), RecordError::None);
     });
 }
 
 struct InterleaveResult {
-    std::string root_name;
-    std::string event_name;
-    std::chrono::microseconds duration{};
-    bool ready = false;
+    bool recorded = false;
+    bool consumed = false;
 };
 
 fiber::async::DetachedTask record_interleaved(std::string_view root_name, std::string_view event_name,
@@ -188,18 +290,14 @@ fiber::async::DetachedTask record_interleaved(std::string_view root_name, std::s
     }
     Transaction root = std::move(*root_result);
     co_await fiber::async::sleep(delay);
-    (void) root.log_event("Marker", event_name);
-    (void) root.complete();
-    result->root_name = root.view().name();
-    result->event_name = (*root.view().children().begin()).name();
-    result->duration = root.view().duration();
-    result->ready = root.tree_ready();
+    result->recorded = root.log_event("Marker", event_name) == RecordError::None;
+    result->consumed = root.complete() == RecordError::None && !root.valid();
     if (done->fetch_add(1, std::memory_order_acq_rel) + 1 == 2) {
         fiber::event::EventLoop::current().stop();
     }
 }
 
-TEST(CatMessageTest, CoroutineInterleavingKeepsTreesIndependent) {
+TEST(CatMessageTest, CoroutineInterleavingKeepsTracesIndependent) {
     fiber::event::EventLoop loop;
     std::atomic<unsigned int> done{0};
     InterleaveResult first;
@@ -208,14 +306,10 @@ TEST(CatMessageTest, CoroutineInterleavingKeepsTreesIndependent) {
     fiber::async::spawn(loop, [&] { return record_interleaved("second", "second-event", 1ms, &second, &done); });
     loop.run();
 
-    EXPECT_EQ(first.root_name, "first");
-    EXPECT_EQ(first.event_name, "first-event");
-    EXPECT_GT(first.duration, 0us);
-    EXPECT_TRUE(first.ready);
-    EXPECT_EQ(second.root_name, "second");
-    EXPECT_EQ(second.event_name, "second-event");
-    EXPECT_GT(second.duration, 0us);
-    EXPECT_TRUE(second.ready);
+    EXPECT_TRUE(first.recorded);
+    EXPECT_TRUE(first.consumed);
+    EXPECT_TRUE(second.recorded);
+    EXPECT_TRUE(second.consumed);
 }
 
 } // namespace

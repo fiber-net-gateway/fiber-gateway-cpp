@@ -20,9 +20,9 @@ ctest --test-dir build -R '^(CatMessageTest|CatMetricTest)\.'
 
 ## Transactions and events
 
-Create roots and all child messages on a running EventLoop. Handles are move-only, stay bound to that EventLoop, and
-may live across coroutine suspension. Parent-child relationships are explicit, so interleaved coroutines on one loop
-do not share an implicit transaction stack.
+Create roots and all child messages on a running EventLoop. Handles are move-only, contain one private data pointer,
+and may live across coroutine suspension. Parent-child relationships are explicit, so interleaved coroutines on one
+loop do not share an implicit transaction stack.
 
 ```cpp
 auto root_result = fiber::cat::Transaction::create_root("URL", "/orders");
@@ -40,13 +40,17 @@ if (root_result) {
 }
 ```
 
-Status `"0"` is success; every other status marks the tree as a problem. Completion is idempotent. Destroying an
-unfinished Transaction or Event completes it with `CAT_CLIENT_INCOMPLETE`, preventing an abandoned operation from
-being reported as success. A root may complete before its children, but the tree becomes ready only after every open
-message has completed.
+`complete()` consumes the handle: after successful completion, `valid()` is false and mutating operations return
+`RecordError::Completed`. Completion without a status uses success (`"0"`). Destroying an unfinished Transaction or
+Event completes it with `CAT_CLIENT_INCOMPLETE`, preventing an abandoned operation from being reported as success.
+
+A parent may complete before children that were already created. Its internal data remains in the trace arena until
+the final open child completes, but the consumed parent handle cannot add more children. The final completion destroys
+the complete trace arena in one operation. Views into the internal tree are intentionally not part of the public API.
 
 Type, name, status, message count, child count, per-message data, and total tree memory are bounded by `RecordLimits`.
-Message strings and data are copied into tree-owned pooled storage at record time.
+Message strings and rendered data are copied into trace-owned pooled storage at record time. Transactions store child
+pointers in linked fixed-capacity chunks of 16; message data is rendered into linked byte chunks.
 
 ## Metrics
 
@@ -68,6 +72,6 @@ valid only while its Metric remains alive.
 
 ## Layout
 
-- `include/fiber/cat/`: public recording API.
-- `src/`: pooled message-tree and metric implementations.
-- `tests/`: message semantics, limits, metrics, and coroutine interleaving tests.
+- `include/fiber/cat/`: public single-pointer recording handles and value types.
+- `src/`: private trace, message, fixed child chunk, flat data chunk, and metric implementations.
+- `tests/`: handle lifecycle, limits, chunk boundaries, metrics, and coroutine interleaving tests.
