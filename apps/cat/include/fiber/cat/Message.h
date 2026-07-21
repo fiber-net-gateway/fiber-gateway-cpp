@@ -2,10 +2,13 @@
 #define FIBER_CAT_MESSAGE_H
 
 #include <chrono>
+#include <common/mem/BufPool.h>
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <memory>
 #include <string_view>
+#include "Status.h"
 
 namespace fiber::cat {
 
@@ -15,9 +18,68 @@ struct MessageNode;
 struct TreeData;
 } // namespace detail
 
+
+class CatClientCore;
+
 enum class MessageKind : std::uint8_t {
     Transaction,
     Event,
+};
+
+class MessageTrace;
+
+
+struct MessageBase {
+protected:
+    struct DataChunk {
+        DataChunk *next;
+        std::size_t capacity;
+        std::size_t offset;
+        char content[1];
+    };
+
+public:
+    MessageBase *next = nullptr;
+    MessageKind kind = MessageKind::Event;
+    MessageTrace *trace;
+    std::string_view type;
+    std::string_view name;
+    std::string_view status{status::Incomplete};
+    std::chrono::steady_clock::time_point commit_time;
+    DataChunk *data_head_;
+    DataChunk *data_tail_;
+};
+// Transaction or Event  using it in first field or extends it.
+
+class MessageTrace {
+
+
+private:
+    // unordered_map<std::string_view, std::string_view> context; use hash table to implement it. alloc by BufPool
+    mem::BufPool pool_; // used to alloc all the memory of message in this tree
+    std::string_view current_id_;
+    std::string_view root_id_;
+    std::string_view parent_id_;
+    MessageBase *root_ = nullptr;
+    std::shared_ptr<CatClientCore> core_; // shared with Client. commit message to the io event loop by the core_
+    std::size_t uncommitted_msg_size_ = 1;
+};
+
+
+class Event : public MessageBase {};
+
+class Transaction : public MessageBase {
+
+private:
+    struct ChildrenChunk {
+        ChildrenChunk *next = nullptr;
+        std::size_t capacity;
+        std::size_t offset;
+        MessageBase children[1];
+    };
+    // duration_
+    ChildrenChunk *children_head_ = nullptr;
+    ChildrenChunk *children_tail_ = nullptr;
 };
 
 enum class RecordError : std::uint8_t {
