@@ -73,3 +73,5 @@ Run the HTTP/3 benchmark server and client with the repository demo certificate:
 Use `--mode rate --rps N` for a fixed aggregate request rate, or `--help` for all options. The internal
 client is useful for development and regression testing; use the independently implemented client under
 `scripts/benchmark/http3/` for formal cross-implementation comparisons.
+QUIC send pacing is disabled by default in the benchmark client; use `--pacing on` for latency and burst comparisons.
+If bursts cause peer closes or retransmissions, rerun with pacing enabled; this benchmark default is not production guidance.

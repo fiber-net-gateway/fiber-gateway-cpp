@@ -71,3 +71,5 @@ cmake -S .. -B ../build -DFIBER_BUILD_EXAMPLES=OFF
 
 固定总请求速率使用 `--mode rate --rps N`，完整选项见 `--help`。内部客户端适合开发和回归；
 正式跨实现对比仍应使用 `scripts/benchmark/http3/` 下的独立客户端。
+压测客户端默认关闭 QUIC send pacing；使用 `--pacing on` 可做延迟和突发流量对照。
+若目标端在突发流量下出现连接关闭或重传，应以 `--pacing on` 复测；该默认值不适用于生产发送端。

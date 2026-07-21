@@ -1,5 +1,8 @@
 # HTTP/3 压测客户端设计
 
+> 2026-07-21 的 OpenResty/benchmark server 压测发现和后续排查入口见
+> [HTTP/3 benchmark client/server 压测问题记录](http3_benchmark_findings.md)。
+
 ## 1. 目标与定位
 
 在 `example/` 下增加 `http3_benchmark_client`，直接复用仓库现有的 `Http3Client`、
@@ -89,6 +92,12 @@ build/example/http3_benchmark_client \
 `--connections` 是全局连接数，`--streams` 是每连接 lane 数。`--threads` 不能大于连接数。
 为了让服务端 `SO_REUSEPORT` 的多个 shard 获得不同客户端四元组，客户端线程数应不小于希望
 覆盖的服务端 shard 数。
+
+压测客户端默认关闭 QUIC send pacing，以减少本机峰值吞吐测试中的定时器调度开销；需要观察
+真实网络下的突发、丢包和尾延迟时，使用 `--pacing on` 做对照。该选项只修改压测客户端 worker
+所拥有的 `QuicUdpEndpoint`，不改变框架的通用 QUIC 默认值。关闭 pacing 可能压垮突发处理能力
+较弱的目标端；出现连接关闭、重传或尾延迟恶化时必须用 `--pacing on` 复测，压测默认值不能作为
+生产 QUIC 发送策略的建议。
 
 ## 4. 组件与所有权
 

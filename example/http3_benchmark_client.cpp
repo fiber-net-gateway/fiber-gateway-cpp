@@ -112,6 +112,7 @@ struct BenchmarkOptions {
     std::optional<std::uint64_t> expected_bytes;
     int expected_status = 200;
     bool insecure = false;
+    bool pacing_enabled = false;
 };
 
 [[nodiscard]] constexpr std::string_view mode_name(LoadMode mode) noexcept {
@@ -408,6 +409,7 @@ void print_usage(std::ostream &out) {
            "  --connect-to IP:PORT      bypass DNS while retaining URL SNI/authority\n"
            "  --ca-file FILE            trusted CA bundle or certificate\n"
            "  --insecure                disable peer certificate verification\n"
+           "  --pacing on|off           QUIC send pacing (default: off)\n"
            "\n"
            "output options:\n"
            "  --json FILE               also write a JSON summary\n"
@@ -597,6 +599,19 @@ void print_usage(std::ostream &out) {
                 return false;
             }
             options.ca_file.assign(*value);
+        } else if (arg == "--pacing") {
+            auto value = take(arg);
+            if (!value) {
+                return false;
+            }
+            if (*value == "on") {
+                options.pacing_enabled = true;
+            } else if (*value == "off") {
+                options.pacing_enabled = false;
+            } else {
+                error = "--pacing must be on or off";
+                return false;
+            }
         } else if (arg == "--json") {
             auto value = take(arg);
             if (!value) {
@@ -906,6 +921,7 @@ private:
         endpoint_options.bind_addr = options_.target.remote.ip().is_v4() ? fiber::net::SocketAddress::any_v4(0)
                                                                          : fiber::net::SocketAddress::any_v6(0);
         endpoint_options.max_connections = connection_count_ + 4;
+        endpoint_options.send.pacing.enabled = options_.pacing_enabled;
         auto endpoint_initialized = endpoint_.init(loop_, endpoint_options);
         if (!endpoint_initialized) {
             co_return fail_setup(SetupPhase::EndpointInit, endpoint_initialized.error());
@@ -1345,7 +1361,7 @@ void print_summary(std::ostream &out, const BenchmarkOptions &options, const Wor
         << "  target: " << options.target.url << " -> " << options.target.remote.to_string() << '\n'
         << "  method: " << method_name(options.method) << " mode=" << mode_name(options.mode)
         << " threads=" << options.threads << " connections=" << options.connections
-        << " streams/connection=" << options.streams << '\n'
+        << " streams/connection=" << options.streams << " pacing=" << (options.pacing_enabled ? "on" : "off") << '\n'
         << "  warmup=" << options.warmup.count() << "ms duration=" << options.duration.count()
         << "ms measurement_elapsed="
         << std::chrono::duration_cast<std::chrono::milliseconds>(measurement_elapsed).count()
@@ -1492,9 +1508,10 @@ void write_histogram_json(std::ostream &out, const LatencyHistogram &histogram) 
     write_json_string(out, mode_name(options.mode));
     out << ",\n  \"method\":";
     write_json_string(out, method_name(options.method));
-    out << ",\n  \"threads\":" << options.threads << ",\n  \"connections\":" << options.connections
-        << ",\n  \"streams_per_connection\":" << options.streams << ",\n  \"warmup_ms\":" << options.warmup.count()
-        << ",\n  \"duration_ms\":" << options.duration.count() << ",\n  \"offered\":" << effective_offered
+    out << ",\n  \"pacing\":" << (options.pacing_enabled ? "true" : "false") << ",\n  \"threads\":" << options.threads
+        << ",\n  \"connections\":" << options.connections << ",\n  \"streams_per_connection\":" << options.streams
+        << ",\n  \"warmup_ms\":" << options.warmup.count() << ",\n  \"duration_ms\":" << options.duration.count()
+        << ",\n  \"offered\":" << effective_offered
         << ",\n  \"measurement_elapsed_ms\":" << std::chrono::duration<double, std::milli>(measurement_elapsed).count()
         << ",\n  \"started\":" << stats.started << ",\n  \"finished\":" << stats.finished
         << ",\n  \"succeeded\":" << stats.succeeded << ",\n  \"failed\":" << stats.failed
