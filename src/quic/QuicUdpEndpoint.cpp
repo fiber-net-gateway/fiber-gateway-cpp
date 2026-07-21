@@ -1877,8 +1877,16 @@ QuicUdpEndpoint::process_datagram(std::uint8_t *data, net::UdpPacketRecvResult r
 
 void QuicUdpEndpoint::handle_receive_result(QuicConnection &connection,
                                             const QuicPacketProcessResult &result) noexcept {
-    const QuicReceiveApplyResult applied = quic_apply_receive_result(connection, result);
+    const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
+    const auto applied_result = quic_apply_receive_result(connection, result, now);
+    QuicReceiveApplyResult applied{};
     bool should_send = result.send_output;
+    if (applied_result) {
+        applied = *applied_result;
+    } else {
+        connection.close(QuicErrorCode::InternalError);
+        should_send = true;
+    }
 
     auto queue_token = [&](QuicPath *path) noexcept {
         if (path == nullptr) {
@@ -1893,14 +1901,15 @@ void QuicUdpEndpoint::handle_receive_result(QuicConnection &connection,
         }
     };
 
-    queue_token(applied.handshake_validated_path);
-    if (result.path_validated && result.validated_path != applied.handshake_validated_path) {
-        queue_token(result.validated_path);
+    if (applied_result) {
+        queue_token(applied.handshake_validated_path);
+        if (result.path_validated && result.validated_path != applied.handshake_validated_path) {
+            queue_token(result.validated_path);
+        }
     }
 
     if (result.send_ack && !should_send) {
         QuicPacketNumberSpace &space = connection.packet_number_space(result.level);
-        const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
         if (should_delay_ack(connection, space, now)) {
             const QuicTime remaining = connection.local_transport().max_ack_delay - (now - space.ack_delay_start);
             if (loop_ != nullptr) {

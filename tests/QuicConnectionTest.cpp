@@ -17,6 +17,7 @@
 #include "quic/QuicAckHandler.h"
 #include "quic/QuicConnection.h"
 #include "quic/QuicLossRecovery.h"
+#include "quic/QuicPacketProcessor.h"
 #include "quic/QuicProtocol.h"
 #include "quic/QuicTransportCodec.h"
 #include "quic/QuicTransportParamsCodec.h"
@@ -697,6 +698,71 @@ TEST(QuicConnectionTest, PeerTransportStartsMtuDiscoveryOnValidatedPath) {
     EXPECT_EQ(path->state, fiber::quic::QuicPathState::WaitingMtuProbe);
     EXPECT_EQ(path->mtud, 2400U);
     EXPECT_EQ(path->max_mtu, 2400U);
+    EXPECT_EQ(path->expires, fiber::quic::QuicTime{100});
+}
+
+TEST(QuicConnectionTest, HandshakeConfirmationStartsMtuDiscoveryForValidatedPath) {
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
+    options.role = fiber::quic::QuicConnectionRole::Server;
+    options.remote_connection_id = cid_from({0x11, 0x22});
+    fiber::quic::QuicConnection conn(options);
+    auto *path = conn.active_path();
+    ASSERT_NE(path, nullptr);
+    ASSERT_FALSE(path->validated);
+
+    fiber::quic::QuicTransportParams params{};
+    params.has_initial_source_connection_id = true;
+    params.initial_source_connection_id = options.remote_connection_id;
+    params.max_udp_payload_size = 2400;
+    params.active_connection_id_limit = 2;
+    ASSERT_TRUE(conn.apply_peer_transport_params(params).has_value());
+    ASSERT_EQ(path->state, fiber::quic::QuicPathState::Idle);
+
+    // Receiving a Handshake packet validates the path before the TLS handshake
+    // confirmation is applied to the endpoint.
+    path->validated = true;
+    fiber::quic::QuicPacketProcessResult result{};
+    result.path = path;
+    result.handshake_confirmed = true;
+    auto applied = fiber::quic::quic_apply_receive_result(conn, result, fiber::quic::QuicTime{50});
+
+    ASSERT_TRUE(applied.has_value()) << static_cast<int>(applied.error());
+    EXPECT_EQ(applied->handshake_validated_path, path);
+    EXPECT_TRUE(path->validated);
+    EXPECT_EQ(path->state, fiber::quic::QuicPathState::WaitingMtuProbe);
+    EXPECT_EQ(path->mtud, 2400U);
+    EXPECT_EQ(path->max_mtu, 2400U);
+    EXPECT_EQ(path->expires, fiber::quic::QuicTime{150});
+}
+
+TEST(QuicConnectionTest, HandshakeConfirmationDoesNotRestartMtuDiscovery) {
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
+    options.role = fiber::quic::QuicConnectionRole::Server;
+    options.remote_connection_id = cid_from({0x11, 0x22});
+    options.initial_path_validated = true;
+    fiber::quic::QuicConnection conn(options);
+    auto *path = conn.active_path();
+    ASSERT_NE(path, nullptr);
+
+    fiber::quic::QuicTransportParams params{};
+    params.has_initial_source_connection_id = true;
+    params.initial_source_connection_id = options.remote_connection_id;
+    params.max_udp_payload_size = 2400;
+    params.active_connection_id_limit = 2;
+    ASSERT_TRUE(conn.apply_peer_transport_params(params).has_value());
+    ASSERT_EQ(path->state, fiber::quic::QuicPathState::WaitingMtuProbe);
+    ASSERT_EQ(path->mtud, 2400U);
+    ASSERT_EQ(path->expires, fiber::quic::QuicTime{100});
+
+    fiber::quic::QuicPacketProcessResult result{};
+    result.path = path;
+    result.handshake_confirmed = true;
+    auto applied = fiber::quic::quic_apply_receive_result(conn, result, fiber::quic::QuicTime{50});
+
+    ASSERT_TRUE(applied.has_value()) << static_cast<int>(applied.error());
+    EXPECT_EQ(applied->handshake_validated_path, path);
+    EXPECT_EQ(path->state, fiber::quic::QuicPathState::WaitingMtuProbe);
+    EXPECT_EQ(path->mtud, 2400U);
     EXPECT_EQ(path->expires, fiber::quic::QuicTime{100});
 }
 
