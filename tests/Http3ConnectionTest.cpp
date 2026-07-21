@@ -553,6 +553,37 @@ TEST(Http3ConnectionTest, StartsOverOpenQuicConnection) {
     group.join();
 }
 
+TEST(Http3ConnectionTest, ClientStopsAcceptingRequestsWhenQuicShutdownBegins) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicConnection::Options quic_options{};
+    quic_options.loop = &group.at(0);
+    quic_options.role = fiber::quic::QuicConnectionRole::Client;
+    quic_options.original_destination_connection_id = connection_id_from({0x01, 0x02, 0x03, 0x04});
+    quic_options.remote_connection_id = connection_id_from({0x11, 0x12, 0x13, 0x14});
+    fiber::quic::QuicConnection quic(quic_options);
+    fiber::http::Http3Connection h3(quic);
+
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
+    ASSERT_TRUE(h3.accepting_requests());
+
+    std::promise<bool> stopped_accepting;
+    auto stopped_future = stopped_accepting.get_future();
+    fiber::async::spawn(group.at(0), [&quic, &h3, &stopped_accepting]() -> fiber::async::DetachedTask {
+        quic.shutdown();
+        stopped_accepting.set_value(h3.state() == fiber::http::Http3ConnectionState::Running && quic.shutting_down() &&
+                                    !h3.accepting_requests());
+        co_return;
+    });
+    ASSERT_EQ(stopped_future.wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(stopped_future.get());
+
+    group.stop();
+    group.join();
+}
+
 TEST(Http3ConnectionTest, ServerCanSendFinalResponseHeader) {
     fiber::event::EventLoopGroup group(1);
     group.start();

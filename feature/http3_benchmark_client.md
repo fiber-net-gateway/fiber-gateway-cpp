@@ -155,6 +155,11 @@ connections × streams
 如果 peer 广告的 QUIC 双向 stream credit 更小，`ClientHttp3Exchange` 内部的
 `attach_local_stream()` 等待路径负责背压，等待时间包含在完整请求延迟中。
 
+lane 在请求前和记录结果后检查 H3/QUIC 是否仍接受新 request。连接进入 GOAWAY、shutdown 或
+terminal close 后，lane 记录当前在途请求的真实结果并停止，不自动重连或重放。连接仍可用但请求
+失败时，lane 使用 1 ms 正值 timer 退避，保证 event loop 时间和 stop monitor 前进；连续 32 次
+`StreamOrHeaderSend + NotSent` 后停止该 lane。成功请求不经过退避和连续失败保护分支。
+
 ### 6.2 Fixed-rate
 
 固定速率模式仍只使用这些 lane，不为每个 request `spawn` 新协程。所有 request ticket 映射到
@@ -216,6 +221,7 @@ read chunk 各自重新获得完整超时时间。请求 deadline 还要受全�
 - TTFB、total、queue delay、corrected latency 的 p50/p90/p99/p99.9/max；
 - connect、stream/header send、body send、header read、body read、status 和 length 校验错误；
 - `IoErr` 和 `Http3RequestOutcome` 分布；
+- terminal connection 和连续 `NotSent` 保护停止的 lane 数；
 - endpoint dropped datagrams、retained receive storage high-water/rejection；
 - 连接 active path 收发字节、RTT、cwnd、in-flight、PTO 和 key generation 快照。
 

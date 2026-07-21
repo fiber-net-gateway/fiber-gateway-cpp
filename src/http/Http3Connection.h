@@ -73,7 +73,7 @@ public:
     [[nodiscard]] std::uint64_t peer_goaway_id() const noexcept { return peer_goaway_id_; }
     [[nodiscard]] bool accepting_requests() const noexcept {
         return role() == quic::QuicConnectionRole::Client && state_ == Http3ConnectionState::Running &&
-               !peer_goaway_received_;
+               !peer_goaway_received_ && quic_.accepting_new_streams();
     }
     [[nodiscard]] bool closing() const noexcept {
         return state_ == Http3ConnectionState::Draining || state_ == Http3ConnectionState::Closing ||
