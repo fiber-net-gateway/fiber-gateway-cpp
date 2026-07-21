@@ -5,10 +5,10 @@
 `apps/cat` is the reusable native CAT client library for applications under `apps/`. Consumers link the `fiber::cat`
 target and include headers from `fiber/cat/`.
 
-The current implementation is the owner-EventLoop-local recording layer. It provides explicit Transaction trees,
-Event leaves, and pre-bound Count/Duration Metric aggregators. Router discovery, CAT message IDs, NT1/PT1 encoding,
-cross-thread submission, collector transport, sampling, heartbeat, and client lifecycle are intentionally not part of
-this stage.
+The current implementation provides the owner-EventLoop-local recording layer and the private NT1 encoding boundary.
+It supports explicit Transaction trees, Event leaves, and pre-bound Count/Duration Metric aggregators. Router
+discovery, automatic CAT message IDs, PT1 encoding, cross-thread submission, collector transport, sampling, heartbeat,
+and the public client lifecycle are intentionally not part of this stage.
 
 ## Build and test
 
@@ -51,6 +51,17 @@ the complete trace arena in one operation. Views into the internal tree are inte
 Type, name, status, message count, child count, per-message data, and total tree memory are bounded by `RecordLimits`.
 Message strings and rendered data are copied into trace-owned pooled storage at record time. Transactions store child
 pointers in linked fixed-capacity chunks of 16; message data is rendered into linked byte chunks.
+
+## NT1 encoding
+
+The private NT1 encoder follows the official CAT C client field order and framing: a four-byte big-endian payload
+length, the `NT1` header, and the depth-first message body. It performs a counting pass followed by one exact `IoBuf`
+allocation. Message data is copied directly from its chunks into that buffer.
+
+An internally core-bound trace synchronously encodes when its final open message completes. The core receives an
+independently owned buffer, after which the complete trace arena is immediately destroyed. Encoding failures are
+reported to the core without submitting a partial frame. Public root factories are not yet attached to a client core,
+so they retain their recording-only behavior until the public client lifecycle is added.
 
 ## Metrics
 

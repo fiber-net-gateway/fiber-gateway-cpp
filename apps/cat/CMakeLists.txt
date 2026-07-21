@@ -1,4 +1,5 @@
 add_library(fiber_cat STATIC
+    "${CMAKE_CURRENT_LIST_DIR}/src/CatEncoder.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/CatInternal.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/Event.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/Metric.cpp"
@@ -19,6 +20,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
     include(GoogleTest)
 
     add_executable(fiber_cat_tests
+        "${CMAKE_CURRENT_LIST_DIR}/tests/EncoderTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/MessageTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/MetricTest.cpp")
     target_include_directories(fiber_cat_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src")

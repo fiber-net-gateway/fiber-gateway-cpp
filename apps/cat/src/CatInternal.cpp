@@ -9,6 +9,8 @@
 
 #include <common/Assert.h>
 
+#include "CatClientCore.h"
+
 namespace fiber::cat::detail {
 
 namespace {
@@ -50,7 +52,7 @@ StringRef copy_string(MessageTrace &trace, std::string_view value) noexcept {
     return {copy, value.size()};
 }
 
-std::expected<MessageTrace *, RecordError> create_trace(RecordLimits limits) noexcept {
+std::expected<MessageTrace *, RecordError> create_trace(RecordLimits limits, TraceContext context) noexcept {
     event::EventLoop *loop = event::EventLoop::current_or_null();
     if (!loop) {
         return std::unexpected(RecordError::WrongEventLoop);
@@ -69,6 +71,7 @@ std::expected<MessageTrace *, RecordError> create_trace(RecordLimits limits) noe
         return std::unexpected(RecordError::NoMemory);
     }
     trace->data = new (storage) MessageTraceData;
+    trace->data->core = std::move(context.core);
     trace->data->owner = loop;
     trace->data->limits = limits;
     trace->data->steady_base = loop->now();
@@ -76,6 +79,27 @@ std::expected<MessageTrace *, RecordError> create_trace(RecordLimits limits) noe
     const auto wall_now = std::chrono::system_clock::now().time_since_epoch();
     const auto wall_millis = std::chrono::duration_cast<std::chrono::milliseconds>(wall_now).count();
     trace->data->wall_base_millis = wall_millis > 0 ? static_cast<std::uint64_t>(wall_millis) : 0;
+
+    std::size_t context_bytes = 0;
+    if (!checked_add(context.message_id.size(), context.root_message_id.size(), context_bytes) ||
+        !checked_add(context_bytes, context.parent_message_id.size(), context_bytes) ||
+        !checked_add(context_bytes, context.session_token.size(), context_bytes) ||
+        !can_charge(*trace->data, context_bytes)) {
+        delete trace;
+        return std::unexpected(RecordError::LimitExceeded);
+    }
+    trace->data->message_id = copy_string(*trace, context.message_id);
+    trace->data->root_message_id = copy_string(*trace, context.root_message_id);
+    trace->data->parent_message_id = copy_string(*trace, context.parent_message_id);
+    trace->data->session_token = copy_string(*trace, context.session_token);
+    if ((!context.message_id.empty() && !trace->data->message_id.data) ||
+        (!context.root_message_id.empty() && !trace->data->root_message_id.data) ||
+        (!context.parent_message_id.empty() && !trace->data->parent_message_id.data) ||
+        (!context.session_token.empty() && !trace->data->session_token.data)) {
+        delete trace;
+        return std::unexpected(RecordError::NoMemory);
+    }
+    trace->data->payload_bytes = context_bytes;
     return trace;
 }
 
@@ -127,9 +151,9 @@ Node *allocate_message(MessageTrace &trace, std::string_view type, std::string_v
 }
 
 template<typename Node>
-std::expected<Node *, RecordError> create_root(std::string_view type, std::string_view name,
-                                               RecordLimits limits) noexcept {
-    auto created_trace = create_trace(limits);
+std::expected<Node *, RecordError> create_root(std::string_view type, std::string_view name, RecordLimits limits,
+                                               TraceContext context) noexcept {
+    auto created_trace = create_trace(limits, std::move(context));
     if (!created_trace) {
         return std::unexpected(created_trace.error());
     }
@@ -146,7 +170,7 @@ std::expected<Node *, RecordError> create_root(std::string_view type, std::strin
         return std::unexpected(RecordError::NoMemory);
     }
     trace->data->root = root;
-    trace->data->payload_bytes = node_charge;
+    trace->data->payload_bytes += node_charge;
     trace->data->message_count = 1;
     trace->data->open_message_count = 1;
     return root;
@@ -302,11 +326,16 @@ void mark_completed(MessageData &message) noexcept {
         return;
     }
 
-    // The recording layer currently has no encoder or transport core. Moving the core reference before destroying the
-    // trace preserves the finalization ownership boundary for the later encoded-buffer submission layer.
     std::shared_ptr<CatClientCore> core = std::move(trace_data.core);
+    if (core) {
+        auto encoded = encode_nt1(trace_data, core->encode_context());
+        if (encoded) {
+            core->submit_encoded(std::move(*encoded));
+        } else {
+            core->on_encode_failure(encoded.error());
+        }
+    }
     delete trace;
-    (void) core;
 }
 
 void finish_transaction(TransactionData &transaction) noexcept {
@@ -344,13 +373,14 @@ MessageTrace::~MessageTrace() {
 }
 
 std::expected<TransactionData *, RecordError> create_transaction_root(std::string_view type, std::string_view name,
-                                                                      RecordLimits limits) noexcept {
-    return create_root<TransactionData>(type, name, limits);
+                                                                      RecordLimits limits,
+                                                                      TraceContext context) noexcept {
+    return create_root<TransactionData>(type, name, limits, std::move(context));
 }
 
 std::expected<EventData *, RecordError> create_event_root(std::string_view type, std::string_view name,
-                                                          RecordLimits limits) noexcept {
-    return create_root<EventData>(type, name, limits);
+                                                          RecordLimits limits, TraceContext context) noexcept {
+    return create_root<EventData>(type, name, limits, std::move(context));
 }
 
 template<typename Node>
