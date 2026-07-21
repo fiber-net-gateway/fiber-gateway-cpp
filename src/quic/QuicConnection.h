@@ -664,6 +664,7 @@ public:
     [[nodiscard]] bool idle_timer_armed() const noexcept { return idle_timer_entry_.is_in_heap(); }
     [[nodiscard]] bool close_timer_armed() const noexcept { return close_timer_entry_.is_in_heap(); }
     [[nodiscard]] bool keepalive_timer_armed() const noexcept { return keepalive_timer_entry_.is_in_heap(); }
+    [[nodiscard]] bool ack_timer_armed() const noexcept { return ack_timer_entry_.is_in_heap(); }
     [[nodiscard]] bool pacing_timer_armed() const noexcept { return pacing_timer_entry_.is_in_heap(); }
     [[nodiscard]] bool idle_send_timer_set() const noexcept { return idle_send_timer_set_; }
     void arm_idle_timer() noexcept;
@@ -890,6 +891,8 @@ private:
     void maybe_finish_graceful_close() noexcept;
     void assert_loop_affinity() const noexcept;
     [[nodiscard]] event::EventLoop *active_timer_loop() const noexcept;
+    void arm_ack_timer(std::chrono::steady_clock::time_point deadline) noexcept;
+    void cancel_ack_timer() noexcept;
     void arm_pacing_timer(std::chrono::steady_clock::time_point deadline) noexcept;
     void cancel_pacing_timer() noexcept;
     void cancel_all_timers_quiesced() noexcept;
@@ -925,6 +928,7 @@ private:
     static void on_idle_timer(QuicConnection *connection) noexcept;
     static void on_close_timer(QuicConnection *connection) noexcept;
     static void on_keepalive_timer(QuicConnection *connection) noexcept;
+    static void on_ack_timer(QuicConnection *connection) noexcept;
     static void on_pacing_timer(QuicConnection *connection) noexcept;
 
     friend class QuicPathManager;
@@ -955,6 +959,7 @@ private:
     event::EventLoop::TimerEntry idle_timer_entry_{};
     event::EventLoop::TimerEntry close_timer_entry_{};
     event::EventLoop::TimerEntry keepalive_timer_entry_{};
+    event::EventLoop::TimerEntry ack_timer_entry_{};
     event::EventLoop::TimerEntry pacing_timer_entry_{};
     QuicPacerState pacer_{};
     QuicCryptoState crypto_{};

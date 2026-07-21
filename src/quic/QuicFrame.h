@@ -262,6 +262,7 @@ struct QuicOutputFrame {
     bool packet_ack_eliciting = false;
     bool ignore_loss = false;
     bool ignore_congestion = false;
+    bool pto_probe = false;
     bool mtu_probe = false;
     bool packet_ecn_validation_probe = false;
     bool zero_rtt = false;

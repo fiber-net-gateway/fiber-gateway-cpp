@@ -1901,7 +1901,14 @@ void QuicUdpEndpoint::handle_receive_result(QuicConnection &connection,
     if (result.send_ack && !should_send) {
         QuicPacketNumberSpace &space = connection.packet_number_space(result.level);
         const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
-        should_send = !should_delay_ack(connection, space, now);
+        if (should_delay_ack(connection, space, now)) {
+            const QuicTime remaining = connection.local_transport().max_ack_delay - (now - space.ack_delay_start);
+            if (loop_ != nullptr) {
+                connection.arm_ack_timer(loop_->now() + remaining);
+            }
+        } else {
+            should_send = true;
+        }
     }
 
     if (loop_ != nullptr) {
@@ -2305,6 +2312,9 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
             }
             payload_len += *written;
             ++packet.frame_count;
+            if (frame->pto_probe) {
+                break;
+            }
         }
 
         if (packet.frame_count == 0) {
@@ -2365,7 +2375,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
             frame->send_time = now;
             frame->packet_ack_eliciting = encoded->ack_eliciting;
             frame->packet_len = 0;
-            if (encoded->ack_eliciting && !accounted_packet) {
+            if (encoded->ack_eliciting && !accounted_packet && quic_output_frame_ack_eliciting(frame->type)) {
                 frame->packet_len = static_cast<std::uint32_t>(encoded->packet_len);
                 accounted_packet = true;
             }
@@ -2406,6 +2416,14 @@ void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const Qui
             if (frame == &space.ack_frame) {
                 space.send_ack = false;
                 space.send_ack_count = 0;
+                if (packet.level == QuicEncryptionLevel::Application) {
+                    connection.cancel_ack_timer();
+                }
+            }
+
+            if (ack_frame_type(frame->type)) {
+                space.release_frame(*frame);
+                continue;
             }
 
             if (frame->packet_ack_eliciting && !connection.closing()) {

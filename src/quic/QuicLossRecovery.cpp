@@ -284,6 +284,7 @@ common::IoResult<bool> quic_queue_pto_probe_frames(QuicConnection &connection, Q
 
             frame->type = QuicFrameType::Ping;
             frame->ignore_congestion = true;
+            frame->pto_probe = true;
             space.pending_frames.push_front(*frame);
         }
 

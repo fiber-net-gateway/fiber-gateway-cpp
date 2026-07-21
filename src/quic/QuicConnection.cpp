@@ -868,6 +868,7 @@ QuicConnection::~QuicConnection() {
     FIBER_ASSERT(!idle_timer_entry_.is_in_heap());
     FIBER_ASSERT(!close_timer_entry_.is_in_heap());
     FIBER_ASSERT(!keepalive_timer_entry_.is_in_heap());
+    FIBER_ASSERT(!ack_timer_entry_.is_in_heap());
     FIBER_ASSERT(!pacing_timer_entry_.is_in_heap());
     FIBER_ASSERT(!path_manager_.validation_timer_armed());
     for (const QuicRemoteConnectionIdSlot &slot: remote_cids_) {
@@ -1204,6 +1205,7 @@ void QuicConnection::enter_closing(QuicCloseInfo info, bool immediate) noexcept 
     if (active_timer_loop() != nullptr && close_timer_entry_.is_in_heap()) {
         loop_->cancel<QuicConnection, &QuicConnection::close_timer_entry_>(*this);
     }
+    cancel_ack_timer();
 
     close_info_ = info;
     state_ = QuicConnectionState::Closing;
@@ -1231,6 +1233,7 @@ void QuicConnection::enter_draining(QuicCloseInfo info) noexcept {
     if (active_timer_loop() != nullptr && close_timer_entry_.is_in_heap()) {
         loop_->cancel<QuicConnection, &QuicConnection::close_timer_entry_>(*this);
     }
+    cancel_ack_timer();
 
     close_info_ = info;
     state_ = QuicConnectionState::Draining;
@@ -1597,6 +1600,27 @@ void QuicConnection::cancel_keepalive_timer() noexcept {
     }
 }
 
+void QuicConnection::arm_ack_timer(std::chrono::steady_clock::time_point deadline) noexcept {
+    if (active_timer_loop() == nullptr || ack_timer_entry_.is_in_heap()) {
+        return;
+    }
+    if (terminal_closing() || endpoint_ == nullptr) {
+        return;
+    }
+
+    loop_->post_at<QuicConnection, &QuicConnection::ack_timer_entry_, &QuicConnection::on_ack_timer>(
+            std::max(deadline, loop_->now()), *this);
+}
+
+void QuicConnection::cancel_ack_timer() noexcept {
+    if (active_timer_loop() == nullptr) {
+        return;
+    }
+    if (ack_timer_entry_.is_in_heap()) {
+        loop_->cancel<QuicConnection, &QuicConnection::ack_timer_entry_>(*this);
+    }
+}
+
 void QuicConnection::arm_pacing_timer(std::chrono::steady_clock::time_point deadline) noexcept {
     if (active_timer_loop() == nullptr) {
         return;
@@ -1715,6 +1739,7 @@ void QuicConnection::cancel_all_timers() noexcept {
     cancel_idle_timer();
     cancel_close_timer();
     cancel_keepalive_timer();
+    cancel_ack_timer();
     cancel_pacing_timer();
     path_manager_.cancel_validation_timer();
 }
@@ -1727,6 +1752,7 @@ void QuicConnection::cancel_all_timers_quiesced() noexcept {
     loop_->cancel_quiesced<QuicConnection, &QuicConnection::idle_timer_entry_>(*this);
     loop_->cancel_quiesced<QuicConnection, &QuicConnection::close_timer_entry_>(*this);
     loop_->cancel_quiesced<QuicConnection, &QuicConnection::keepalive_timer_entry_>(*this);
+    loop_->cancel_quiesced<QuicConnection, &QuicConnection::ack_timer_entry_>(*this);
     loop_->cancel_quiesced<QuicConnection, &QuicConnection::pacing_timer_entry_>(*this);
     path_manager_.cancel_validation_timer_quiesced();
     loss_timer_mode_ = QuicLossTimerMode::None;
@@ -1742,6 +1768,22 @@ void QuicConnection::on_key_update_discard_timer(QuicConnection *connection) noe
         return;
     }
     connection->crypto_.discard_previous_application_read();
+}
+
+void QuicConnection::on_ack_timer(QuicConnection *connection) noexcept {
+    if (connection == nullptr) {
+        return;
+    }
+    FIBER_ASSERT(connection->loop_ != nullptr && connection->loop_->in_loop());
+    if (connection->loop_ == nullptr || !connection->loop_->in_loop() || connection->endpoint_ == nullptr ||
+        connection->terminal_closing()) {
+        return;
+    }
+
+    const QuicPacketNumberSpace &space = connection->packet_number_space(QuicEncryptionLevel::Application);
+    if (space.send_ack && space.pending_ack != kUnsetPacketNumber) {
+        connection->schedule_send();
+    }
 }
 
 void QuicConnection::on_pacing_timer(QuicConnection *connection) noexcept {
@@ -2294,9 +2336,35 @@ common::IoResult<void> QuicConnection::recv_stop_sending_frame(const QuicStopSen
     }
     QuicStream *stream = find_stream(frame.id);
     if (stream == nullptr) {
-        return std::unexpected(common::IoErr::Invalid);
+        if (is_local_stream(frame.id)) {
+            const std::uint64_t next = stream_type(frame.id) == QuicStreamType::Bidirectional
+                                               ? next_local_bidi_stream_id_
+                                               : next_local_uni_stream_id_;
+            if (stream_sequence(frame.id) < stream_sequence(next)) {
+                return {};
+            }
+            close(QuicErrorCode::StreamStateError, static_cast<std::uint64_t>(QuicFrameType::StopSending));
+            return std::unexpected(common::IoErr::Busy);
+        }
+        if (is_gone_peer_stream(frame.id)) {
+            return {};
+        }
+        if (peer_stream_exceeds_advertised_limit(frame.id)) {
+            close(QuicErrorCode::StreamLimitError, static_cast<std::uint64_t>(QuicFrameType::StopSending));
+            return std::unexpected(common::IoErr::Busy);
+        }
+        auto created = get_or_create_peer_stream(frame.id);
+        if (!created) {
+            return std::unexpected(created.error());
+        }
+        stream = *created;
     }
-    return stream->on_remote_stop_sending(frame.error_code);
+    auto stopped = stream->on_remote_stop_sending(frame.error_code);
+    if (!stopped) {
+        return std::unexpected(stopped.error());
+    }
+    try_release_stream(*stream);
+    return {};
 }
 
 common::IoResult<void> QuicConnection::recv_max_stream_data_frame(const QuicMaxStreamDataFrame &frame) noexcept {
