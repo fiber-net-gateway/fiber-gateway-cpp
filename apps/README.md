@@ -1,6 +1,7 @@
 # Apps Layout
 
-`apps/` is for runnable programs that are larger than the single-file demos in `example/`.
+`apps/` is for runnable programs that are larger than the single-file demos in `example/`, and for optional
+application-layer static libraries such as `fiber::nacos` and `fiber::prometheus` that depend on `fiber_lib`.
 
 Recommended layout:
 
@@ -29,9 +30,10 @@ apps/
 
 Rules:
 
-- One app per subdirectory under `apps/`.
+- One application or optional application-layer library per subdirectory under `apps/`.
 - Each app directory should have its own `README.md`.
-- Each app directory should have its own `CMakeLists.txt` and call `fiber_add_app(...)`.
+- Each directory should have its own `CMakeLists.txt`. Runnable programs use `fiber_add_app(...)`; library modules
+  define a namespaced CMake target and must not add a `main()` to that library.
 - Directories starting with `_` are ignored by the top-level `apps/CMakeLists.txt`. Use that for templates or private notes.
 - Prefer `src/main.cpp` as the entry point for each app.
 - Keep app-specific tests under that app directory, usually `tests/`.
@@ -40,7 +42,7 @@ Rules:
 Build behavior:
 
 - `cmake -S . -B build` will include `apps/` when `FIBER_BUILD_APPS=ON`.
-- App binaries are emitted under `build/apps/`.
+- App binaries are emitted under `build/apps/`; library artifacts remain normal CMake target outputs.
 - Simple one-file demos remain under `example/` and build to the normal top-level binary directory.
 
 App README structure:
