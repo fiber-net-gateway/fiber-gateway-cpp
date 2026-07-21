@@ -569,6 +569,7 @@ TEST(QuicLossRecoveryTest, PtoQueuesTwoCongestionIgnoringPingProbes) {
         if (count < 2) {
             EXPECT_EQ(frame->type, fiber::quic::QuicFrameType::Ping);
             EXPECT_TRUE(frame->ignore_congestion);
+            EXPECT_TRUE(frame->pto_probe);
             ++ping_count;
         }
         ++count;

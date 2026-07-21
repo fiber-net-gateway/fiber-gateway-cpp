@@ -10,15 +10,15 @@
 `example/http3_benchmark_server` 时暴露的问题，供后续定位和修复使用。它保存的是可复现条件、
 观测事实、当前代码路径、尚未确认的假设和验收条件，不把性能现象直接写成未经证实的协议根因。
 
-最初记录本文时只修改了 benchmark client 的 pacing 默认值和命令行开关。H3BENCH-001 已于
-2026-07-21 修复；H3BENCH-002 仍未修复，因此 benchmark server 的峰值结果仍不能作为正式性能结论。
+最初记录本文时只修改了 benchmark client 的 pacing 默认值和命令行开关。H3BENCH-001 和
+H3BENCH-002 均已于 2026-07-21 修复；H3BENCH-002 的 40k RPS 连续运行验收结果见 5.7。
 
 ## 2. 问题总览
 
 | ID | 范围 | 状态 | 优先级 | 摘要 |
 |---|---|---|---|---|
 | H3BENCH-001 | benchmark client | 已修复 | P0 | 连接进入终止错误后，closed-loop lane 对同步 `Canceled` 无界重试，event loop 忙循环，duration/timeout/drain 失效 |
-| H3BENCH-002 | benchmark server/QUIC 发送路径 | 现象已确认，根因未确认 | P0 | 服务端经历持续请求或固定速率负载后停止推进响应和新 request stream，吞吐骤降并出现超时 |
+| H3BENCH-002 | benchmark server/QUIC ACK 路径 | 已修复 | P0 | 延迟 ACK 缺少到期唤醒，且与 ACK-eliciting 帧同包后静态 ACK 帧被错误保留在 sent queue，阻塞后续 ACK |
 | H3BENCH-003 | pacing/跨实现互操作 | 行为已确认 | P1 | client pacing off 可提高 loopback GET 峰值，但突发 POST 或双方 pacing off 可使连接失去进展 |
 | H3BENCH-NOTE-001 | OpenResty 测试配置 | 已解释，不是项目缺陷 | 说明 | OpenResty/Nginx 默认每连接 1000 请求，未提高限制时预热会主动耗尽连接 |
 
@@ -310,64 +310,29 @@ measurement timed_out=32
 但不能仅凭吞吐差距确定 H3BENCH-002 的根因。关闭 server pacing 的 1 MiB 实验很快进入
 H3BENCH-001 的同步 `Canceled` 忙循环，只成功 19 个请求，因此 server pacing off 不是可用修复。
 
-### 5.4 当前尚未确认的根因
+### 5.4 根因
 
-现有 client 摘要只能看到连接末尾快照，没有 server 侧连接状态和最后一次发送进展。以下是假设，
-按建议排查优先级排列，不是结论：
+H3BENCH-002 由 QUIC ACK 发送路径中的两个问题叠加触发：
 
-1. **send scheduler/pacing timer 丢失唤醒**：连接仍非 terminal，但 pending response、
-   `MAX_STREAMS` 或 ACK 没有再次进入 send pump。
-2. **peer stream retirement/MAX_STREAMS 回补停滞**：短请求大量退休后，server 的
-   `PeerStreamLimitWindow` 中 `opened_count`、`retired_count`、`advertised_limit` 不再一致，
-   client 一部分 lane 阻塞在新 stream，另一部分等待已有 stream response。
-3. **output frame/send ticket 泄漏**：大量短 stream 后 frame pool 或 stream send ticket 没有释放，
-   新控制帧和响应帧无法排队。
-4. **连接 close/drain 残留状态**：旧连接仍留在 endpoint routing/send queue 中，影响新连接公平性；
-   32 秒后的部分恢复与此方向相关，但不能单独证明。
-5. **worker/reuseport 分布或 endpoint 调度不公平**：少数 worker 失去发送进展后拖住其连接。
-6. **主机 UDP receive buffer 丢包放大**：本机 `/proc/net/snmp` 曾观察到累计 `RcvbufErrors`，
-   但现有 JSON 没有 server 每轮前后增量。QUIC 正常应能从少量丢包恢复，仍需受控排除该环境变量。
+1. `handle_receive_result()` 识别出 application packet 可以延迟 ACK 后直接返回，没有为
+   `max_ack_delay` 到期建立唤醒。连接在没有其他发送事件时不会重新进入 send pump。
+2. ACK 与 STREAM/PING 等 ACK-eliciting 帧同包时，发送提交逻辑把静态 `ack_frame` 当作该包的
+   丢包/拥塞记账载体放入 `sent_frames`。在对端确认或判丢之前，`ack_frame.queued` 一直为 true，
+   后续 ACK 生成会提前返回；高请求率下 `send_ack_count` 持续增长而 send scheduler 最终报告无工作。
 
-当前可以排除或暂不支持的解释：
+把 client 的本地 `max_ack_delay` 临时设为 0 后，同一 40k RPS 形状立即恢复到 199,996/200,000、
+0 错误和 0 PTO。这一 A/B 结果与 stalled connection 上同时出现的 `send_ack=true`、静态 ACK 位于
+`sent_frames`、ACK timer 未激活相互印证。
 
-- 不是 OpenResty 的 `keepalive_requests=1000`，问题目标是仓库 benchmark server；
-- 不是单纯“40k 已超过 server 容量”，因为同一 build 曾在相近形状完成 148k req/s；
-- client 侧 endpoint `recv_storage_rejected` 在上述关键结果中为 0，没有接收存储预算耗尽证据；
-- stall 前的 HTTP status 和 response length 校验通过，不是固定响应内容错误。
+### 5.5 修复
 
-### 5.5 下一轮需要增加的观测
-
-在继续调参或改算法前，应让 benchmark server 在每连接无进展阈值触发时输出一次固定大小快照：
-
-```text
-connection state / close source / H3 state
-active request stream count
-peer bidi opened_count / retired_count / advertised_limit / concurrent_limit
-local bidi next stream id / peer MAX_STREAMS limit
-pending/inflight/acked/lost packet and frame counts
-send scheduler queued flag / stream send ticket count
-pacing enabled / pacing timer armed / deadline / budget / capacity / rate
-cwnd / bytes_in_flight / smoothed RTT / PTO count
-output frame pool allocated/free/high-water
-endpoint send queue length / dropped datagrams / UDP socket errors
-last receive time / last successful packet build / last successful send time
-```
-
-建议排查步骤：
-
-1. 先修复 H3BENCH-001，避免 client 错误循环污染 server 现象。
-2. 使用 rate 模式从 5k、10k、20k、40k 逐级增加，分别跑 1 connection/1 stream、
-   1 connection/8 streams、4 connections/8 streams。
-3. 每轮前后记录 `/proc/net/snmp` 的 `Udp: InErrors/RcvbufErrors/SndbufErrors` 增量；有增量的点不用于
-   协议根因判断。
-4. 在 stall 时抓 server 快照和 packet trace，判断最后一个可见事件是 `MAX_STREAMS`、response
-   STREAM、ACK、pacing deadline 还是 socket write block。
-5. 固定 client pacing on 再复现一次，以受控速率排除 off burst；只有两种 client pacing 都停滞时，
-   才把重点收敛到 server 的稳态发送/stream retirement。
-6. 分别测试 server pacing on/off，但 off 测试必须用较低固定 RPS，不能使用无界 closed-loop 直接
-   冲击大响应。
-7. 同一 server 连续运行至少 5 轮，并与“每轮重启 server”对照，区分连接内、endpoint 级和进程级
-   残留状态。
+- 为 application delayed ACK 增加独立 timer；接收路径按剩余 `max_ack_delay` 建立一次唤醒，ACK
+  发送、连接关闭和连接销毁路径负责取消。
+- ACK 帧在 UDP 发送成功后立即释放，不再进入 loss recovery 的 `sent_frames`。同包中第一个真正的
+  ACK-eliciting 帧承担 packet length 和 congestion/loss accounting，静态 ACK 帧可供下一次 ACK 复用。
+- PTO 仍使用独立 loss-detection timer。固定 Nginx 1.31.3 同样用 `qc->push` 处理 delayed ACK，
+  用单独的 `qc->pto` 处理 PTO；两类 deadline 不共用一个 timer entry。
+- PTO 的两个 PING probe 分别编码为两个 QUIC packet，避免在 packet builder 中合并为一个 probe。
 
 ### 5.6 验收标准
 
@@ -378,6 +343,21 @@ last receive time / last successful packet build / last successful send time
 - 在 1% 受控 UDP loss 下仍能持续推进，不出现所有 lane 同时等待到 request timeout。
 - 64 KiB 和 1 MiB case 在 pacing on 下保持 0 错误；性能优化不得只修复 1 KiB。
 - benchmark server 关闭和重启 5/5 成功，无残留 UDP listener、assert、hang 或无法 bind。
+
+### 5.7 本次验收结果
+
+在同一个全新 server 进程上按 5.2 的命令连续运行 5 轮：
+
+| 轮次 | succeeded / offered | completion | throughput | request/IO error | PTO |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 199,995 / 200,000 | 99.9975% | 39,999.0 req/s | 0 / 0 | 0 |
+| 2 | 199,981 / 200,000 | 99.9905% | 39,996.2 req/s | 0 / 0 | 0 |
+| 3 | 199,986 / 200,000 | 99.9930% | 39,997.2 req/s | 0 / 0 | 0 |
+| 4 | 199,994 / 200,000 | 99.9970% | 39,998.8 req/s | 0 / 0 | 0 |
+| 5 | 199,994 / 200,000 | 99.9970% | 39,998.8 req/s | 0 / 0 | 0 |
+
+五轮均满足 40k RPS 主验收条件，且第二至第五轮吞吐均高于首轮的 99.99%。1% UDP loss、64 KiB/
+1 MiB 扩展回归和 server 资源高水位回基线仍需单独验证，不包含在本次结果中。
 
 ## 6. H3BENCH-003：pacing off 的收益与跨实现风险
 

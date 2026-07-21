@@ -67,6 +67,7 @@ public:
     }
     [[nodiscard]] bool has_final_size() const noexcept { return fin_appended_ || reset_sent_; }
     [[nodiscard]] bool reset_sent() const noexcept { return reset_sent_; }
+    [[nodiscard]] bool fin_acked() const noexcept { return fin_acked_; }
     [[nodiscard]] bool send_closed() const noexcept { return reset_sent_ || fin_appended_; }
     [[nodiscard]] bool can_append() const noexcept { return !reset_sent_ && !fin_appended_ && !fin_acked_; }
 

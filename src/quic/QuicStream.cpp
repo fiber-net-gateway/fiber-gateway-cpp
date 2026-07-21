@@ -481,6 +481,9 @@ common::IoResult<void> QuicStream::reset(std::uint64_t error_code) noexcept {
     if (!attached_to_connection_ || !send_queue_.initialized()) {
         return std::unexpected(common::IoErr::Invalid);
     }
+    if (send_queue_.reset_sent() || send_queue_.fin_acked()) {
+        return {};
+    }
     auto final_size = send_queue_.reset(error_code);
     if (!final_size) {
         return std::unexpected(final_size.error());
@@ -508,9 +511,11 @@ void QuicStream::close(std::uint64_t error_code) noexcept {
     recv_queue_.stop_receiving(error_code);
     sync_recv_state_from_queue();
 
-    auto final_size = send_queue_.reset(error_code);
-    if (can_send_control && final_size) {
-        (void) conn_->queue_reset_stream_frame(stream_id_, error_code, *final_size);
+    if (!send_queue_.reset_sent() && !send_queue_.fin_acked()) {
+        auto final_size = send_queue_.reset(error_code);
+        if (can_send_control && final_size) {
+            (void) conn_->queue_reset_stream_frame(stream_id_, error_code, *final_size);
+        }
     }
 
     notify_write_waiter(common::IoErr::Canceled);

@@ -1642,6 +1642,9 @@ TEST(QuicConnectionTest, RemoteStopSendingQueuesResetStreamFrame) {
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = 0;
     ASSERT_TRUE(conn.recv_stream_frame(frame, {}).has_value());
+    auto *stream = conn.find_stream(0);
+    ASSERT_NE(stream, nullptr);
+    ASSERT_TRUE(stream->try_write(fiber::mem::IoBuf{}, true).has_value());
     fiber::quic::QuicStopSendingFrame stop{};
     stop.id = 0;
     stop.error_code = 9;
@@ -1650,11 +1653,92 @@ TEST(QuicConnectionTest, RemoteStopSendingQueuesResetStreamFrame) {
 
     ASSERT_TRUE(stopped.has_value());
     auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
-    ASSERT_NE(space.pending_frames.front(), nullptr);
-    EXPECT_EQ(space.pending_frames.front()->type, fiber::quic::QuicFrameType::ResetStream);
-    EXPECT_EQ(space.pending_frames.front()->u.reset_stream.id, 0U);
-    EXPECT_EQ(space.pending_frames.front()->u.reset_stream.error_code, 9U);
-    EXPECT_EQ(space.pending_frames.front()->u.reset_stream.final_size, 0U);
+    const fiber::quic::QuicOutputFrame *reset_frame = nullptr;
+    for (const fiber::quic::QuicOutputFrame *pending = space.pending_frames.front(); pending != nullptr;
+         pending = space.pending_frames.next_of(*pending)) {
+        if (pending->type == fiber::quic::QuicFrameType::ResetStream) {
+            reset_frame = pending;
+            break;
+        }
+    }
+    ASSERT_NE(reset_frame, nullptr);
+    EXPECT_EQ(reset_frame->u.reset_stream.id, 0U);
+    EXPECT_EQ(reset_frame->u.reset_stream.error_code, 9U);
+    EXPECT_EQ(reset_frame->u.reset_stream.final_size, 0U);
+
+    auto duplicate = conn.recv_stop_sending_frame(stop);
+    EXPECT_TRUE(duplicate.has_value());
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::ResetStream), 1U);
+}
+
+TEST(QuicConnectionTest, StopSendingCreatesValidPeerBidirectionalStream) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStopSendingFrame stop{};
+    stop.id = 0;
+    stop.error_code = 11;
+
+    auto stopped = conn.recv_stop_sending_frame(stop);
+
+    ASSERT_TRUE(stopped.has_value());
+    EXPECT_EQ(state.calls, 1U);
+    EXPECT_NE(conn.find_stream(0), nullptr);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::ResetStream), 1U);
+}
+
+TEST(QuicConnectionTest, StopSendingIgnoresGonePeerStream) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStreamFrame frame{};
+    frame.stream_id = 0;
+    ASSERT_TRUE(conn.recv_stream_frame(frame, {}).has_value());
+    auto *stream = conn.find_stream(0);
+    ASSERT_NE(stream, nullptr);
+    stream->close();
+    ASSERT_EQ(conn.find_stream(0), nullptr);
+    const std::size_t reset_count = count_pending_frame_type(conn, fiber::quic::QuicFrameType::ResetStream);
+
+    fiber::quic::QuicStopSendingFrame stop{};
+    stop.id = 0;
+    stop.error_code = 12;
+    auto stopped = conn.recv_stop_sending_frame(stop);
+
+    EXPECT_TRUE(stopped.has_value());
+    EXPECT_EQ(conn.find_stream(0), nullptr);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::ResetStream), reset_count);
+}
+
+TEST(QuicConnectionTest, StopSendingOnUnopenedLocalStreamClosesStreamState) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStopSendingFrame stop{};
+    stop.id = 1;
+
+    auto stopped = conn.recv_stop_sending_frame(stop);
+
+    ASSERT_FALSE(stopped.has_value());
+    EXPECT_EQ(stopped.error(), fiber::common::IoErr::Busy);
+    EXPECT_TRUE(conn.terminal_closing());
+    EXPECT_EQ(conn.close_error(), fiber::quic::QuicErrorCode::StreamStateError);
+}
+
+TEST(QuicConnectionTest, StopSendingAbovePeerLimitClosesStreamLimit) {
+    StreamCallbackState state{};
+    auto options = server_options_with_factory(state);
+    options.max_peer_bidirectional_streams = 0;
+    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicStopSendingFrame stop{};
+    stop.id = 0;
+
+    auto stopped = conn.recv_stop_sending_frame(stop);
+
+    ASSERT_FALSE(stopped.has_value());
+    EXPECT_EQ(stopped.error(), fiber::common::IoErr::Busy);
+    EXPECT_TRUE(conn.terminal_closing());
+    EXPECT_EQ(conn.close_error(), fiber::quic::QuicErrorCode::StreamLimitError);
 }
 
 TEST(QuicConnectionTest, MaxStreamDataUpdatesStreamWriteWindow) {

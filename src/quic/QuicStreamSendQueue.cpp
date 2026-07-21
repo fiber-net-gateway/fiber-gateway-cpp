@@ -427,9 +427,6 @@ common::IoResult<std::uint64_t> QuicStreamSendQueue::reset(std::uint64_t error_c
     if (reset_sent_) {
         return final_size_;
     }
-    if (fin_appended_) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
 
     final_size_ = total_appended_bytes_;
     reset_error_code_ = error_code;
