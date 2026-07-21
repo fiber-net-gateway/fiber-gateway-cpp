@@ -16,6 +16,7 @@ public:
     explicit BufPool(size_t block_size = 4096);
     ~BufPool();
 
+    void reset() noexcept;
     void *alloc(size_t size, size_t align = alignof(std::max_align_t));
 
     template<typename T>

@@ -55,6 +55,7 @@ private:
         Waiter *next = nullptr;
         bool queued = false;
         event::EventLoop::NotifyEntry notify_entry{};
+        event::EventLoop::DeferEntry defer_entry{};
     };
 
     struct SharedState {
@@ -194,7 +195,11 @@ private:
         static void post_resume(Waiter *waiter) noexcept {
             FIBER_ASSERT(waiter != nullptr);
             FIBER_ASSERT(waiter->loop != nullptr);
-            waiter->loop->template post<Waiter, &Waiter::notify_entry, &Waiter::on_run>(*waiter);
+            if (waiter->loop->in_loop()) {
+                waiter->loop->template post_local<Waiter, &Waiter::defer_entry, &Waiter::on_run>(*waiter);
+            } else {
+                waiter->loop->template post<Waiter, &Waiter::notify_entry, &Waiter::on_run>(*waiter);
+            }
         }
 
         mutable std::mutex mutex_{};

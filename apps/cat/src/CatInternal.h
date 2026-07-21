@@ -103,7 +103,17 @@ struct MessageTrace {
 
     mem::BufPool pool;
     MessageTraceData *data = nullptr;
+    bool public_handle_alive = false;
 };
+
+[[nodiscard]] std::expected<MessageTrace *, RecordError> create_message_trace(RecordLimits limits,
+                                                                              TraceContext context = {}) noexcept;
+void release_message_trace(MessageTrace *&trace) noexcept;
+
+[[nodiscard]] std::expected<TransactionData *, RecordError>
+create_transaction_root(MessageTrace &trace, std::string_view type, std::string_view name) noexcept;
+[[nodiscard]] std::expected<EventData *, RecordError> create_event_root(MessageTrace &trace, std::string_view type,
+                                                                        std::string_view name) noexcept;
 
 [[nodiscard]] std::expected<TransactionData *, RecordError> create_transaction_root(std::string_view type,
                                                                                     std::string_view name,

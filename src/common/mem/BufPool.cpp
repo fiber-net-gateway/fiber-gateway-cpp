@@ -75,7 +75,9 @@ BufPool::BufPool(size_t block_size) : block_size_(block_size) {
     }
 }
 
-BufPool::~BufPool() {
+BufPool::~BufPool() { reset(); }
+
+void BufPool::reset() noexcept {
     LargeBlock *large = large_head_;
     while (large) {
         LargeBlock *next = large->next;

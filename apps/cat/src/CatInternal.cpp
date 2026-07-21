@@ -151,28 +151,30 @@ Node *allocate_message(MessageTrace &trace, std::string_view type, std::string_v
 }
 
 template<typename Node>
-std::expected<Node *, RecordError> create_root(std::string_view type, std::string_view name, RecordLimits limits,
-                                               TraceContext context) noexcept {
-    auto created_trace = create_trace(limits, std::move(context));
-    if (!created_trace) {
-        return std::unexpected(created_trace.error());
+std::expected<Node *, RecordError> create_root(MessageTrace &trace, std::string_view type,
+                                               std::string_view name) noexcept {
+    if (!trace.data) {
+        return std::unexpected(RecordError::Completed);
     }
-    MessageTrace *trace = *created_trace;
+    if (!on_owner_loop(*trace.data)) {
+        return std::unexpected(RecordError::WrongEventLoop);
+    }
+    if (trace.data->root) {
+        return std::unexpected(RecordError::InvalidArgument);
+    }
     std::size_t node_charge = 0;
-    const RecordError validation = validate_message(*trace->data, type, name, sizeof(Node), 0, node_charge);
+    const RecordError validation = validate_message(*trace.data, type, name, sizeof(Node), 0, node_charge);
     if (validation != RecordError::None) {
-        delete trace;
         return std::unexpected(validation);
     }
-    Node *root = allocate_message<Node>(*trace, type, name, node_charge);
+    Node *root = allocate_message<Node>(trace, type, name, node_charge);
     if (!root) {
-        delete trace;
         return std::unexpected(RecordError::NoMemory);
     }
-    trace->data->root = root;
-    trace->data->payload_bytes += node_charge;
-    trace->data->message_count = 1;
-    trace->data->open_message_count = 1;
+    trace.data->root = root;
+    trace.data->payload_bytes += node_charge;
+    trace.data->message_count = 1;
+    trace.data->open_message_count = 1;
     return root;
 }
 
@@ -327,7 +329,7 @@ void mark_completed(MessageData &message) noexcept {
     }
 
     std::shared_ptr<CatClientCore> core = std::move(trace_data.core);
-    if (core) {
+    if (core && core->accepts_messages()) {
         auto encoded = encode_nt1(trace_data, core->encode_context());
         if (encoded) {
             core->submit_encoded(std::move(*encoded));
@@ -335,7 +337,12 @@ void mark_completed(MessageData &message) noexcept {
             core->on_encode_failure(encoded.error());
         }
     }
-    delete trace;
+    std::destroy_at(&trace_data);
+    trace->data = nullptr;
+    trace->pool.reset();
+    if (!trace->public_handle_alive) {
+        delete trace;
+    }
 }
 
 void finish_transaction(TransactionData &transaction) noexcept {
@@ -372,15 +379,68 @@ MessageTrace::~MessageTrace() {
     }
 }
 
+std::expected<MessageTrace *, RecordError> create_message_trace(RecordLimits limits, TraceContext context) noexcept {
+    auto created = create_trace(limits, std::move(context));
+    if (!created) {
+        return std::unexpected(created.error());
+    }
+    (*created)->public_handle_alive = true;
+    return *created;
+}
+
+void release_message_trace(MessageTrace *&trace_handle) noexcept {
+    MessageTrace *trace = std::exchange(trace_handle, nullptr);
+    if (!trace) {
+        return;
+    }
+    if (!trace->data || !trace->data->root) {
+        delete trace;
+        return;
+    }
+    FIBER_ASSERT(on_owner_loop(*trace->data));
+    FIBER_ASSERT(trace->public_handle_alive);
+    trace->public_handle_alive = false;
+}
+
+std::expected<TransactionData *, RecordError> create_transaction_root(MessageTrace &trace, std::string_view type,
+                                                                      std::string_view name) noexcept {
+    return create_root<TransactionData>(trace, type, name);
+}
+
+std::expected<EventData *, RecordError> create_event_root(MessageTrace &trace, std::string_view type,
+                                                          std::string_view name) noexcept {
+    return create_root<EventData>(trace, type, name);
+}
+
 std::expected<TransactionData *, RecordError> create_transaction_root(std::string_view type, std::string_view name,
                                                                       RecordLimits limits,
                                                                       TraceContext context) noexcept {
-    return create_root<TransactionData>(type, name, limits, std::move(context));
+    auto created_trace = create_trace(limits, std::move(context));
+    if (!created_trace) {
+        return std::unexpected(created_trace.error());
+    }
+    MessageTrace *trace = *created_trace;
+    auto root = create_root<TransactionData>(*trace, type, name);
+    if (!root) {
+        delete trace;
+        return std::unexpected(root.error());
+    }
+    return *root;
 }
 
 std::expected<EventData *, RecordError> create_event_root(std::string_view type, std::string_view name,
                                                           RecordLimits limits, TraceContext context) noexcept {
-    return create_root<EventData>(type, name, limits, std::move(context));
+    auto created_trace = create_trace(limits, std::move(context));
+    if (!created_trace) {
+        return std::unexpected(created_trace.error());
+    }
+    MessageTrace *trace = *created_trace;
+    auto root = create_root<EventData>(*trace, type, name);
+    if (!root) {
+        delete trace;
+        return std::unexpected(root.error());
+    }
+    return *root;
 }
 
 template<typename Node>

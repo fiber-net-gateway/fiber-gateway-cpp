@@ -46,6 +46,7 @@ public:
     explicit CapturingCore(ClientEncodeContext context) noexcept : context_(context) {}
 
     [[nodiscard]] ClientEncodeContext encode_context() const noexcept override { return context_; }
+    [[nodiscard]] bool accepts_messages() const noexcept override { return true; }
 
     void submit_encoded(fiber::mem::IoBuf message) noexcept override {
         encoded = std::move(message);
