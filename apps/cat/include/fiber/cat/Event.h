@@ -10,6 +10,7 @@
 namespace fiber::cat {
 
 class Transaction;
+class MessageTrace;
 
 class Event {
 public:
@@ -34,6 +35,7 @@ public:
 
 private:
     friend class Transaction;
+    friend class MessageTrace;
 
     explicit Event(detail::EventData *data) noexcept : data_(data) {}
 

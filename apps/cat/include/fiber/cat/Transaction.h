@@ -11,6 +11,8 @@
 
 namespace fiber::cat {
 
+class MessageTrace;
+
 class Transaction {
 public:
     Transaction() noexcept = default;
@@ -41,6 +43,8 @@ public:
     RecordError complete(std::string_view status) noexcept;
 
 private:
+    friend class MessageTrace;
+
     explicit Transaction(detail::TransactionData *data) noexcept : data_(data) {}
 
     void reset() noexcept;

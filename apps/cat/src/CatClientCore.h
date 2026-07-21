@@ -13,6 +13,7 @@ public:
     CatClientCore &operator=(const CatClientCore &) = delete;
 
     [[nodiscard]] virtual ClientEncodeContext encode_context() const noexcept = 0;
+    [[nodiscard]] virtual bool accepts_messages() const noexcept = 0;
     virtual void submit_encoded(mem::IoBuf message) noexcept = 0;
     virtual void on_encode_failure(EncodeError error) noexcept = 0;
 
