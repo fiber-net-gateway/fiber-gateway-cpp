@@ -65,8 +65,8 @@ common::IoResult<std::size_t> QuicStreamSendQueue::try_append(const mem::IoBuf &
         extent->offset = total_appended_bytes_;
         extent->state = static_cast<std::uint8_t>(QuicSendExtentState::Ready);
 
-        if (tail_ != nullptr && tail_->buf && slice.same_storage(tail_->buf) &&
-            tail_->buf.try_merge_adjacent(std::move(slice))) {
+        if (tail_ != nullptr && tail_->state == static_cast<std::uint8_t>(QuicSendExtentState::Ready) && tail_->buf &&
+            slice.same_storage(tail_->buf) && tail_->buf.try_merge_adjacent(std::move(slice))) {
             pool_->release(extent);
         } else {
             extent->buf = std::move(slice);
@@ -131,8 +131,8 @@ common::IoResult<std::size_t> QuicStreamSendQueue::try_append_chain(mem::IoBufCh
         extent->state = static_cast<std::uint8_t>(QuicSendExtentState::Ready);
         extent->next = nullptr;
 
-        if (tail_ != nullptr && tail_->buf && extent->buf.same_storage(tail_->buf) &&
-            tail_->buf.try_merge_adjacent(std::move(extent->buf))) {
+        if (tail_ != nullptr && tail_->state == static_cast<std::uint8_t>(QuicSendExtentState::Ready) && tail_->buf &&
+            extent->buf.same_storage(tail_->buf) && tail_->buf.try_merge_adjacent(std::move(extent->buf))) {
             pool_->release(extent);
         } else {
             if (tail_ != nullptr) {

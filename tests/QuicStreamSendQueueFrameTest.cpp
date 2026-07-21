@@ -206,6 +206,79 @@ TEST(QuicStreamSendQueueFrameTest, SeparateIoBufAppendsRemainSeparateReadyExtent
     EXPECT_EQ(buffer.active_extent_count(), 2u);
 }
 
+TEST(QuicStreamSendQueueFrameTest, AdjacentAppendAfterTailBecameInflightRemainsEncodable) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
+    fiber::mem::IoBuf storage = iobuf_of("abcdef");
+    ASSERT_TRUE(storage);
+
+    fiber::mem::IoBuf first_slice = storage.retain_slice(0, 3);
+    fiber::mem::IoBuf second_slice = storage.retain_slice(3, 3);
+    ASSERT_TRUE(buffer.try_append(first_slice).has_value());
+
+    std::array<std::uint8_t, 64> out{};
+    auto first = QueueAccess::encode_stream_frame(buffer, 4, out.data(), out.size());
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(first->encoded);
+    EXPECT_EQ(first->data_len, 3u);
+    EXPECT_EQ(buffer.ready_bytes(), 0u);
+    EXPECT_EQ(buffer.inflight_bytes(), 3u);
+
+    ASSERT_TRUE(buffer.try_append(second_slice, true).has_value());
+    EXPECT_EQ(buffer.ready_bytes(), 3u);
+    EXPECT_EQ(buffer.inflight_bytes(), 3u);
+    EXPECT_EQ(buffer.active_extent_count(), 2u);
+
+    auto second = QueueAccess::encode_stream_frame(buffer, 4, out.data(), out.size());
+    ASSERT_TRUE(second.has_value());
+    ASSERT_TRUE(second->encoded);
+    EXPECT_EQ(second->offset, 3u);
+    EXPECT_EQ(second->data_len, 3u);
+    EXPECT_TRUE(second->fin);
+
+    ASSERT_TRUE(QueueAccess::mark_acked(buffer, first->offset, first->data_len, first->fin).has_value());
+    ASSERT_TRUE(QueueAccess::mark_acked(buffer, second->offset, second->data_len, second->fin).has_value());
+    EXPECT_TRUE(buffer.empty());
+}
+
+TEST(QuicStreamSendQueueFrameTest, AdjacentChainAppendAfterTailBecameInflightRemainsEncodable) {
+    fiber::mem::IoBufNodePool pool;
+    fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
+    fiber::mem::IoBuf storage = iobuf_of("abcdef");
+    ASSERT_TRUE(storage);
+
+    fiber::mem::IoBufChain first_chain(pool);
+    ASSERT_TRUE(first_chain.append(storage.retain_slice(0, 3)));
+    ASSERT_TRUE(buffer.try_append_chain(first_chain).has_value());
+
+    std::array<std::uint8_t, 64> out{};
+    auto first = QueueAccess::encode_stream_frame(buffer, 4, out.data(), out.size());
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(first->encoded);
+    EXPECT_EQ(first->data_len, 3u);
+    EXPECT_EQ(buffer.ready_bytes(), 0u);
+    EXPECT_EQ(buffer.inflight_bytes(), 3u);
+
+    fiber::mem::IoBufChain second_chain(pool);
+    ASSERT_TRUE(second_chain.append(storage.retain_slice(3, 3)));
+    second_chain.mark_complete();
+    ASSERT_TRUE(buffer.try_append_chain(second_chain).has_value());
+    EXPECT_EQ(buffer.ready_bytes(), 3u);
+    EXPECT_EQ(buffer.inflight_bytes(), 3u);
+    EXPECT_EQ(buffer.active_extent_count(), 2u);
+
+    auto second = QueueAccess::encode_stream_frame(buffer, 4, out.data(), out.size());
+    ASSERT_TRUE(second.has_value());
+    ASSERT_TRUE(second->encoded);
+    EXPECT_EQ(second->offset, 3u);
+    EXPECT_EQ(second->data_len, 3u);
+    EXPECT_TRUE(second->fin);
+
+    ASSERT_TRUE(QueueAccess::mark_acked(buffer, first->offset, first->data_len, first->fin).has_value());
+    ASSERT_TRUE(QueueAccess::mark_acked(buffer, second->offset, second->data_len, second->fin).has_value());
+    EXPECT_TRUE(buffer.empty());
+}
+
 TEST(QuicStreamSendQueueFrameTest, FinalDataCarriesFinUntilAcked) {
     fiber::mem::IoBufNodePool pool;
     fiber::quic::QuicStreamSendQueue buffer(pool, {.buffer_limit = 128 * 1024});
