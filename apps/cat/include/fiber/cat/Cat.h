@@ -1,10 +1,10 @@
 #ifndef FIBER_CAT_CAT_H
 #define FIBER_CAT_CAT_H
 
-namespace fiber::cat {
-
-void cat_hello() noexcept;
-
-} // namespace fiber::cat
+#include "Event.h"
+#include "Message.h"
+#include "Metric.h"
+#include "Status.h"
+#include "Transaction.h"
 
 #endif // FIBER_CAT_CAT_H
