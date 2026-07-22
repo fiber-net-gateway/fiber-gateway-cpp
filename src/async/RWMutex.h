@@ -68,11 +68,13 @@ public:
         bool await_ready() noexcept;
         bool await_suspend(std::coroutine_handle<> handle);
         WriteLockGuard await_resume() noexcept;
+        [[nodiscard]] bool completed() const noexcept { return completed_; }
 
     private:
         RWMutex *mutex_ = nullptr;
         WaiterPtr waiter_ = nullptr;
         bool acquired_ = false;
+        bool completed_ = false;
     };
 
     class ReadLockAwaiter {
@@ -88,11 +90,13 @@ public:
         bool await_ready() noexcept;
         bool await_suspend(std::coroutine_handle<> handle);
         ReadLockGuard await_resume() noexcept;
+        [[nodiscard]] bool completed() const noexcept { return completed_; }
 
     private:
         RWMutex *mutex_ = nullptr;
         WaiterPtr waiter_ = nullptr;
         bool acquired_ = false;
+        bool completed_ = false;
     };
 
     RWMutex() = default;
@@ -115,7 +119,7 @@ private:
 
     struct Waiter {
         Waiter(RWMutex *owner, WaiterKind kind, std::coroutine_handle<> handle, fiber::event::EventLoop *loop,
-               std::thread::id thread_id);
+               std::thread::id thread_id, bool *completed);
 
         void resume();
         static void on_run(Waiter *waiter) noexcept;
@@ -125,6 +129,7 @@ private:
         std::coroutine_handle<> handle{};
         fiber::event::EventLoop *loop = nullptr;
         std::thread::id thread{};
+        bool *completed = nullptr;
         std::atomic<WaiterState> state{WaiterState::Waiting};
         Waiter *prev = nullptr;
         Waiter *next = nullptr;

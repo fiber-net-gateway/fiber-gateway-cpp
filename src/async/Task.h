@@ -11,6 +11,9 @@
 
 namespace fiber::async {
 
+template<typename T>
+class TaskSelectAwaiter;
+
 class TaskPromiseBase : public CoroutinePromiseBase {
 public:
     std::suspend_always initial_suspend() noexcept { return {}; }
@@ -106,6 +109,9 @@ public:
 
     Awaiter operator co_await() { return Awaiter{handle_}; }
 
+    [[nodiscard]] TaskSelectAwaiter<T> select() && noexcept;
+    TaskSelectAwaiter<T> select() & = delete;
+
 private:
     handle_type handle_ = nullptr;
 };
@@ -173,6 +179,9 @@ public:
     };
 
     Awaiter operator co_await() { return Awaiter{handle_}; }
+
+    [[nodiscard]] TaskSelectAwaiter<void> select() && noexcept;
+    TaskSelectAwaiter<void> select() & = delete;
 
 private:
     handle_type handle_ = nullptr;

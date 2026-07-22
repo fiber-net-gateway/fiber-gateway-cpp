@@ -9,13 +9,16 @@
 namespace fiber::async {
 
 Mutex::Waiter::Waiter(Mutex *owner, std::coroutine_handle<> handle, fiber::event::EventLoop *loop,
-                      std::thread::id thread_id) : mutex(owner), handle(handle), loop(loop), thread(thread_id) {}
+                      std::thread::id thread_id, bool *completed) :
+    mutex(owner), handle(handle), loop(loop), thread(thread_id), completed(completed) {}
 
 void Mutex::Waiter::resume() {
     WaiterState expected = WaiterState::Notified;
     if (!state.compare_exchange_strong(expected, WaiterState::Resumed, std::memory_order_acq_rel)) {
         return;
     }
+    FIBER_ASSERT(completed != nullptr);
+    *completed = true;
     auto resume_handle = handle;
     handle = {};
     if (resume_handle) {
@@ -69,10 +72,12 @@ Mutex::LockAwaiter::~LockAwaiter() {
 
 bool Mutex::LockAwaiter::await_ready() noexcept {
     if (!mutex_) {
+        completed_ = true;
         return true;
     }
     if (mutex_->try_lock()) {
         acquired_ = true;
+        completed_ = true;
         return true;
     }
     return false;
@@ -80,13 +85,15 @@ bool Mutex::LockAwaiter::await_ready() noexcept {
 
 bool Mutex::LockAwaiter::await_suspend(std::coroutine_handle<> handle) {
     if (!mutex_ || acquired_) {
+        completed_ = true;
         return false;
     }
     auto *loop = fiber::event::EventLoop::current_or_null();
     FIBER_ASSERT(loop != nullptr);
-    waiter_ = new Waiter(mutex_, handle, loop, std::this_thread::get_id());
+    waiter_ = new Waiter(mutex_, handle, loop, std::this_thread::get_id(), &completed_);
     if (!mutex_->enqueue_waiter(waiter_)) {
         acquired_ = true;
+        completed_ = true;
         delete waiter_;
         waiter_ = nullptr;
         return false;
@@ -95,6 +102,7 @@ bool Mutex::LockAwaiter::await_suspend(std::coroutine_handle<> handle) {
 }
 
 Mutex::LockGuard Mutex::LockAwaiter::await_resume() noexcept {
+    FIBER_ASSERT(completed_);
     waiter_ = nullptr;
     return mutex_ ? LockGuard(mutex_) : LockGuard();
 }
