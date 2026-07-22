@@ -32,6 +32,7 @@ void detail::SignalWaiter::resume() {
         owner->info_ = info;
         owner->waiting_ = false;
         owner->waiter_ = nullptr;
+        owner->completed_ = true;
     }
     auto resume_handle = handle;
     handle = {};
@@ -62,6 +63,7 @@ bool SignalAwaiter::await_ready() noexcept {
     service_ = fiber::event::SignalService::current_or_null();
     FIBER_ASSERT(service_ != nullptr);
     if (service_->try_pop_pending(signum_, info_)) {
+        completed_ = true;
         return true;
     }
     return false;
@@ -76,6 +78,7 @@ bool SignalAwaiter::await_suspend(std::coroutine_handle<> handle) {
     FIBER_ASSERT(loop != nullptr);
 
     if (service_->try_pop_pending(signum_, info_)) {
+        completed_ = true;
         return false;
     }
 
@@ -86,6 +89,7 @@ bool SignalAwaiter::await_suspend(std::coroutine_handle<> handle) {
 }
 
 SignalInfo SignalAwaiter::await_resume() noexcept {
+    FIBER_ASSERT(completed_);
     waiting_ = false;
     return info_;
 }

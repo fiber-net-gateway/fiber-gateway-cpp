@@ -11,27 +11,11 @@
 
 #include "../common/IoError.h"
 #include "../event/EventLoop.h"
+#include "Awaitable.h"
 
 namespace fiber::async {
 
 namespace detail {
-
-template<typename T>
-concept HasMemberCoAwait = requires(T value) { value.operator co_await(); };
-
-template<typename T>
-concept HasFreeCoAwait = requires(T value) { operator co_await(value); };
-
-template<typename T>
-decltype(auto) get_awaiter(T &&value) {
-    if constexpr (HasMemberCoAwait<T>) {
-        return std::forward<T>(value).operator co_await();
-    } else if constexpr (HasFreeCoAwait<T>) {
-        return operator co_await(std::forward<T>(value));
-    } else {
-        return std::forward<T>(value);
-    }
-}
 
 template<typename T>
 struct IsIoResult : std::false_type {};
@@ -43,21 +27,8 @@ template<typename T>
 inline constexpr bool kIsIoResult = IsIoResult<std::remove_cvref_t<T>>::value;
 
 template<typename T>
-using AwaiterType = std::remove_cvref_t<decltype(get_awaiter(std::declval<T>()))>;
-
-template<typename T>
 using TimeoutResult =
         std::conditional_t<kIsIoResult<T>, std::remove_cvref_t<T>, fiber::common::IoResult<std::remove_cvref_t<T>>>;
-
-template<typename T>
-concept Awaiter = requires(T awaiter, std::coroutine_handle<> handle) {
-    { awaiter.await_ready() } -> std::convertible_to<bool>;
-    awaiter.await_suspend(handle);
-    awaiter.await_resume();
-};
-
-template<typename T>
-concept Awaitable = Awaiter<AwaiterType<T>>;
 
 } // namespace detail
 
@@ -128,6 +99,9 @@ public:
     }
 
     ReturnResult await_resume() {
+        if constexpr (SelectableAwaiter<InnerAwaiter>) {
+            FIBER_ASSERT(completed());
+        }
         waiting_ = false;
         if (timed_out_) {
             return std::unexpected(fiber::common::IoErr::TimedOut);
@@ -159,6 +133,12 @@ public:
             loop_->cancel<TimeoutAwaiter, &TimeoutAwaiter::timer_entry_>(*this);
         }
         awaiter_.cancel();
+    }
+
+    [[nodiscard]] bool completed() const noexcept
+        requires SelectableAwaiter<InnerAwaiter>
+    {
+        return timed_out_ || awaiter_.completed();
     }
 
 private:

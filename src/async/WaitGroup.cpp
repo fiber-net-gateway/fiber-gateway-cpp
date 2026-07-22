@@ -6,14 +6,16 @@
 
 namespace fiber::async {
 
-WaitGroup::Waiter::Waiter(WaitGroup *group, fiber::event::EventLoop *loop, std::coroutine_handle<> handle) :
-    group(group), loop(loop), handle(handle) {}
+WaitGroup::Waiter::Waiter(WaitGroup *group, fiber::event::EventLoop *loop, std::coroutine_handle<> handle,
+                          bool *completed) : group(group), loop(loop), handle(handle), completed(completed) {}
 
 void WaitGroup::Waiter::resume() {
     WaiterState expected = WaiterState::Notified;
     if (!state.compare_exchange_strong(expected, WaiterState::Resumed, std::memory_order_acq_rel)) {
         return;
     }
+    FIBER_ASSERT(completed != nullptr);
+    *completed = true;
     auto resume_handle = handle;
     handle = {};
     if (resume_handle) {
@@ -35,16 +37,21 @@ WaitGroup::JoinAwaiter::~JoinAwaiter() {
     }
 }
 
-bool WaitGroup::JoinAwaiter::await_ready() const noexcept { return !group_ || group_->empty(); }
+bool WaitGroup::JoinAwaiter::await_ready() noexcept {
+    completed_ = !group_ || group_->empty();
+    return completed_;
+}
 
 bool WaitGroup::JoinAwaiter::await_suspend(std::coroutine_handle<> handle) {
     if (!group_) {
+        completed_ = true;
         return false;
     }
     auto *loop = fiber::event::EventLoop::current_or_null();
     FIBER_ASSERT(loop != nullptr);
-    waiter_ = new Waiter(group_, loop, handle);
+    waiter_ = new Waiter(group_, loop, handle, &completed_);
     if (!group_->enqueue_waiter(waiter_)) {
+        completed_ = true;
         delete waiter_;
         waiter_ = nullptr;
         return false;
@@ -52,7 +59,10 @@ bool WaitGroup::JoinAwaiter::await_suspend(std::coroutine_handle<> handle) {
     return true;
 }
 
-void WaitGroup::JoinAwaiter::await_resume() noexcept { waiter_ = nullptr; }
+void WaitGroup::JoinAwaiter::await_resume() noexcept {
+    FIBER_ASSERT(completed_);
+    waiter_ = nullptr;
+}
 
 WaitGroup::~WaitGroup() {
     std::lock_guard guard(state_mu_);

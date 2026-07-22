@@ -10,6 +10,7 @@ YieldAwaiter::~YieldAwaiter() {
 }
 
 bool YieldAwaiter::await_suspend(std::coroutine_handle<> handle) noexcept {
+    FIBER_ASSERT(!completed_);
     loop_ = &event::EventLoop::current();
     FIBER_ASSERT(loop_->in_loop());
     handle_ = handle;
@@ -18,11 +19,17 @@ bool YieldAwaiter::await_suspend(std::coroutine_handle<> handle) noexcept {
     return true;
 }
 
+void YieldAwaiter::await_resume() noexcept {
+    FIBER_ASSERT(completed_);
+    handle_ = {};
+}
+
 void YieldAwaiter::on_yield(YieldAwaiter *awaiter) noexcept {
     if (!awaiter) {
         return;
     }
     awaiter->armed_ = false;
+    awaiter->completed_ = true;
     auto handle = awaiter->handle_;
     awaiter->handle_ = {};
     if (handle) {
