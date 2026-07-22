@@ -134,9 +134,6 @@ if (FIBER_ENABLE_LTO)
 endif()
 
 option(FIBER_BUILD_EXAMPLES "Build simple demo examples" ON)
-if (FIBER_BUILD_EXAMPLES)
-    add_subdirectory(example)
-endif()
 
 option(FIBER_BUILD_TESTS "Build tests" ON)
 if(FIBER_BUILD_TESTS)
@@ -189,4 +186,10 @@ endif()
 option(FIBER_BUILD_APPS "Build multi-file applications under apps/" ON)
 if (FIBER_BUILD_APPS AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/apps/CMakeLists.txt")
     add_subdirectory(apps)
+endif()
+
+# Examples are added after apps/ so that examples depending on an application library
+# (e.g. nacos_demo -> fiber::nacos) can resolve the target.
+if (FIBER_BUILD_EXAMPLES)
+    add_subdirectory(example)
 endif()
