@@ -30,6 +30,7 @@
 #include <net/TcpListener.h>
 
 #include "../src/config/ConfigServiceImpl.h"
+#include "../src/rpc/NacosPayloadCodec.h"
 
 namespace {
 
@@ -450,6 +451,7 @@ struct ConfigCaseResult {
     bool missing_get = false;
     bool types_match = false;
     bool listen_batches_bounded = false;
+    bool periodic_redo = false;
     bool cas_error_preserved = false;
     bool dirty_requery_reached_latest = false;
     bool md5_deduplicated = false;
@@ -463,21 +465,16 @@ struct ConfigCaseResult {
     std::size_t notify_acks = 0;
 };
 
-fiber::async::Task<bool> wait_ready(nacos_detail::ConfigServiceImpl &service) {
-    auto ready = service.subscribe_connection_ready();
-    auto current = ready.current();
-    std::uint64_t version = current.version;
-    for (;;) {
-        if (current.value && *current.value) {
-            co_return true;
-        }
-        auto next = co_await fiber::async::timeout_for([&ready, version]() { return ready.next(version); }, 2s);
-        if (!next) {
+template<typename Predicate>
+fiber::async::Task<bool> wait_until(Predicate predicate) {
+    const auto deadline = fiber::event::EventLoop::current().now() + 2s;
+    while (!predicate()) {
+        if (fiber::event::EventLoop::current().now() >= deadline) {
             co_return false;
         }
-        current = std::move(*next);
-        version = current.version;
+        co_await fiber::async::sleep(2ms);
     }
+    co_return true;
 }
 
 DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer *server,
@@ -489,24 +486,26 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
     FIBER_ASSERT(auth_publisher.has_value());
     auto auth = auth_watch.subscribe();
     auto shared_config = std::make_shared<const fiber::nacos::NacosClientConfig>(std::move(config));
-    nacos_detail::ConfigServiceImpl service({.loop = loop, .config = std::move(shared_config), .auth = std::move(auth)},
-                                            std::move(options));
+    auto created = nacos_detail::create_config_service(
+            {.loop = loop, .config = std::move(shared_config), .auth = std::move(auth)}, std::move(options));
+    FIBER_ASSERT(created.has_value());
+    auto service = std::move(*created);
     std::vector<fiber::nacos::Subscription<fiber::nacos::ConfigData>> batched_subscriptions;
     if (!reconnect) {
         for (int i = 0; i < 5; ++i) {
-            auto subscription = service.subscribe("batch-" + std::to_string(i), "group");
+            auto subscription = service->subscribe("batch-" + std::to_string(i), "group");
             if (subscription) {
                 batched_subscriptions.push_back(std::move(*subscription));
             }
         }
     }
-    FIBER_ASSERT(service.start().has_value());
+    FIBER_ASSERT(service->start().has_value());
 
     auth_publisher->publish(fiber::nacos::NacosAuthAccess{
             .kind = fiber::nacos::NacosAuthAccessKind::Present,
             .access_token = "token",
     });
-    result.ready = co_await wait_ready(service);
+    result.ready = co_await wait_until([server]() { return server->setup_count() >= 1; });
 
     if (result.ready && !reconnect) {
         const auto listen_deadline = fiber::event::EventLoop::current().now() + 2s;
@@ -514,6 +513,9 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
             co_await fiber::async::sleep(2ms);
         }
         result.listen_batches_bounded = server->listen_count() >= 3 && server->max_listen_contexts() <= 2;
+        const std::size_t initial_listen_count = server->listen_count();
+        result.periodic_redo = co_await wait_until(
+                [server, initial_listen_count]() { return server->listen_count() > initial_listen_count; });
         for (auto &subscription: batched_subscriptions) {
             subscription.close();
         }
@@ -523,7 +525,7 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
                 fiber::nacos::ConfigType::Properties, fiber::nacos::ConfigType::Xml,  fiber::nacos::ConfigType::Html,
         };
         for (std::size_t i = 0; i < std::size(types); ++i) {
-            auto published = co_await service.publish("data", "group", "type-" + std::to_string(i), types[i]);
+            auto published = co_await service->publish("data", "group", "type-" + std::to_string(i), types[i]);
             if (!published) {
                 result.ready = false;
                 break;
@@ -532,11 +534,11 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
         result.types_match = server->published_types() ==
                              std::vector<std::string>({"json", "text", "yaml", "properties", "xml", "html"});
 
-        auto missing = co_await service.get_config("missing", "group");
+        auto missing = co_await service->get_config("missing", "group");
         result.missing_get = missing && !missing->has_value();
 
-        auto subscribed = service.subscribe("data", "group");
-        auto stopped_subscription = service.subscribe("stopped", "group");
+        auto subscribed = service->subscribe("data", "group");
+        auto stopped_subscription = service->subscribe("stopped", "group");
         if (subscribed && stopped_subscription) {
             auto subscription = std::move(*subscribed);
             auto &sub = subscription.subscriber();
@@ -549,11 +551,11 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
                                      next->value->data->content == "type-5";
             std::uint64_t version = next ? next->version : initial.version;
 
-            auto cached = co_await service.get_config("data", "group");
+            auto cached = co_await service->get_config("data", "group");
             result.cached_get = cached && cached->has_value() && (*cached)->content == "type-5";
 
             const std::size_t listen_before_shared = server->listen_count();
-            auto shared = service.subscribe("data", "group");
+            auto shared = service->subscribe("data", "group");
             if (shared) {
                 auto shared_subscription = std::move(*shared);
                 const auto replay = shared_subscription.subscriber().current();
@@ -563,12 +565,12 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
                                              server->listen_count() == listen_before_shared;
 
                 const std::size_t query_before = server->query_count();
-                auto first = co_await service.publish("data", "group", "first", fiber::nacos::ConfigType::Text,
-                                                      std::optional<std::string>("m6"));
+                auto first = co_await service->publish("data", "group", "first", fiber::nacos::ConfigType::Text,
+                                                       std::optional<std::string>("m6"));
                 for (int i = 0; i < 100 && server->query_count() == query_before; ++i) {
                     co_await fiber::async::sleep(2ms);
                 }
-                auto second = co_await service.publish("data", "group", "second", fiber::nacos::ConfigType::Text);
+                auto second = co_await service->publish("data", "group", "second", fiber::nacos::ConfigType::Text);
                 for (int i = 0; i < 4; ++i) {
                     auto updated =
                             co_await fiber::async::timeout_for([&sub, version]() { return sub.next(version); }, 2s);
@@ -585,19 +587,19 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
                 }
 
                 const std::uint64_t dedup_version = sub.current().version;
-                auto same = co_await service.publish("data", "group", "second", fiber::nacos::ConfigType::Text);
+                auto same = co_await service->publish("data", "group", "second", fiber::nacos::ConfigType::Text);
                 auto duplicate = co_await fiber::async::timeout_for(
                         [&sub, dedup_version]() { return sub.next(dedup_version); }, 150ms);
                 result.md5_deduplicated =
                         same.has_value() && !duplicate && duplicate.error() == fiber::common::IoErr::TimedOut;
 
-                auto conflict = co_await service.publish("data", "group", "bad", fiber::nacos::ConfigType::Text,
-                                                         std::optional<std::string>("wrong"));
+                auto conflict = co_await service->publish("data", "group", "bad", fiber::nacos::ConfigType::Text,
+                                                          std::optional<std::string>("wrong"));
                 result.cas_error_preserved =
                         !conflict && conflict.error().code == fiber::nacos::ConfigServiceErrorCode::Server &&
                         conflict.error().error_code == dto::resp::ConfigQueryResponse::kConfigQueryConflict;
 
-                auto removed = co_await service.remove_config("data", "group");
+                auto removed = co_await service->remove_config("data", "group");
                 auto deleted = co_await fiber::async::timeout_for([&sub, version]() { return sub.next(version); }, 2s);
                 result.removed = removed.has_value() && deleted && deleted->value && deleted->value->data &&
                                  deleted->value->data->state == fiber::nacos::ConfigState::NotFound;
@@ -612,15 +614,15 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
                 result.unregister_after_last = server->unlisten_count() > unlisten_before_last;
             }
 
-            co_await service.shutdown();
+            co_await service->shutdown();
             // "stopped" was never synced: shutdown publishes Closed for it.
             result.stopped_published = stopped_subscription->closed();
             stopped_subscription->close();
         } else {
-            co_await service.shutdown();
+            co_await service->shutdown();
         }
     } else if (result.ready) {
-        auto subscribed = service.subscribe("data", "group");
+        auto subscribed = service->subscribe("data", "group");
         if (subscribed) {
             auto subscription = std::move(*subscribed);
             auto &sub = subscription.subscriber();
@@ -632,10 +634,9 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
                 for (int i = 0; i < 1000 && (server->listen_count() < 2 || server->setup_count() < 2); ++i) {
                     co_await fiber::async::sleep(2ms);
                 }
-                result.reconnected =
-                        server->listen_count() >= 2 && server->setup_count() >= 2 && co_await wait_ready(service);
+                result.reconnected = server->listen_count() >= 2 && server->setup_count() >= 2;
                 auto published =
-                        co_await service.publish("data", "group", "after-reconnect", fiber::nacos::ConfigType::Text);
+                        co_await service->publish("data", "group", "after-reconnect", fiber::nacos::ConfigType::Text);
                 auto updated = co_await fiber::async::timeout_for([&sub, version]() { return sub.next(version); }, 2s);
                 result.update_after_reconnect = published.has_value() && updated && updated->value &&
                                                 updated->value->kind == fiber::nacos::ResultKind::Success &&
@@ -645,9 +646,9 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
             }
             subscription.close();
         }
-        co_await service.shutdown();
+        co_await service->shutdown();
     } else {
-        co_await service.shutdown();
+        co_await service->shutdown();
     }
 
     auth_publisher->publish(fiber::nacos::NacosAuthAccess{.kind = fiber::nacos::NacosAuthAccessKind::Stopped});
@@ -684,7 +685,7 @@ ConfigCaseResult execute_config_case(bool reconnect) {
     options.rpc.heartbeat_interval = 1s;
     options.rpc.reconnect_initial_delay = 10ms;
     options.rpc.reconnect_max_delay = 50ms;
-    options.subscription_redo_interval = 5s;
+    options.subscription_redo_interval = 50ms;
     options.rpc.max_inbound_message_bytes = 1024 * 1024;
     options.max_content_bytes = 1024 * 1024;
     options.rpc.max_push_response_bytes = 64 * 1024;
@@ -718,6 +719,72 @@ ConfigCaseResult execute_config_case(bool reconnect) {
     return result;
 }
 
+struct ConfigLifecycleInterruptResult {
+    bool auth_wait = false;
+    bool reconnect_backoff = false;
+};
+
+DetachedTask
+run_config_lifecycle_interrupt_case(fiber::event::EventLoop *loop, std::shared_ptr<std::atomic<int>> stage,
+                                    std::shared_ptr<std::promise<ConfigLifecycleInterruptResult>> finished) {
+    auto make_config = []() {
+        fiber::nacos::NacosClientConfigParams params;
+        params.server_ips.push_back(fiber::net::IpAddress::loopback_v4());
+        params.grpc_port = 1;
+        return fiber::nacos::NacosClientConfig::create(std::move(params));
+    };
+
+    ConfigLifecycleInterruptResult result;
+    {
+        fiber::async::Watch<fiber::nacos::NacosAuthAccess> auth_watch;
+        auto auth_publisher = auth_watch.acquire_publisher();
+        FIBER_ASSERT(auth_publisher.has_value());
+        auto config = make_config();
+        FIBER_ASSERT(config.has_value());
+        auto service = nacos_detail::create_config_service(
+                {.loop = loop,
+                 .config = std::make_shared<const fiber::nacos::NacosClientConfig>(std::move(*config)),
+                 .auth = auth_watch.subscribe()},
+                {});
+        FIBER_ASSERT(service.has_value());
+        FIBER_ASSERT((*service)->start().has_value());
+        co_await fiber::async::sleep(10ms);
+        stage->store(1, std::memory_order_release);
+        const auto start = fiber::event::EventLoop::current().now();
+        co_await (*service)->shutdown();
+        result.auth_wait = fiber::event::EventLoop::current().now() - start < 1s;
+        stage->store(2, std::memory_order_release);
+    }
+
+    {
+        fiber::async::Watch<fiber::nacos::NacosAuthAccess> auth_watch;
+        auto auth_publisher = auth_watch.acquire_publisher();
+        FIBER_ASSERT(auth_publisher.has_value());
+        auto config = make_config();
+        FIBER_ASSERT(config.has_value());
+        fiber::nacos::ConfigServiceOptions options;
+        options.rpc.connect_timeout = 20ms;
+        options.rpc.reconnect_initial_delay = 2s;
+        options.rpc.reconnect_max_delay = 2s;
+        auto service = nacos_detail::create_config_service(
+                {.loop = loop,
+                 .config = std::make_shared<const fiber::nacos::NacosClientConfig>(std::move(*config)),
+                 .auth = auth_watch.subscribe()},
+                options);
+        FIBER_ASSERT(service.has_value());
+        FIBER_ASSERT((*service)->start().has_value());
+        auth_publisher->publish({.kind = fiber::nacos::NacosAuthAccessKind::Present, .access_token = "token"});
+        co_await fiber::async::sleep(100ms);
+        stage->store(3, std::memory_order_release);
+        const auto start = fiber::event::EventLoop::current().now();
+        co_await (*service)->shutdown();
+        result.reconnect_backoff = fiber::event::EventLoop::current().now() - start < 1s;
+        stage->store(4, std::memory_order_release);
+    }
+
+    finished->set_value(result);
+}
+
 TEST(NacosConfigServiceTest, UnarySubscriptionDedupDirtyUnregisterAndShutdown) {
     const ConfigCaseResult result = execute_config_case(false);
     EXPECT_TRUE(result.ready);
@@ -726,6 +793,7 @@ TEST(NacosConfigServiceTest, UnarySubscriptionDedupDirtyUnregisterAndShutdown) {
     EXPECT_TRUE(result.missing_get);
     EXPECT_TRUE(result.types_match);
     EXPECT_TRUE(result.listen_batches_bounded);
+    EXPECT_TRUE(result.periodic_redo);
     EXPECT_TRUE(result.cas_error_preserved);
     EXPECT_TRUE(result.dirty_requery_reached_latest);
     EXPECT_TRUE(result.md5_deduplicated);
@@ -744,6 +812,29 @@ TEST(NacosConfigServiceTest, RestoresSubscriptionAfterReconnect) {
     EXPECT_TRUE(result.update_after_reconnect);
     EXPECT_TRUE(result.clean_shutdown);
     EXPECT_GT(result.notify_acks, 0u);
+}
+
+TEST(NacosConfigServiceTest, ShutdownInterruptsAuthWaitAndReconnectBackoff) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+    auto finished = std::make_shared<std::promise<ConfigLifecycleInterruptResult>>();
+    auto stage = std::make_shared<std::atomic<int>>(0);
+    auto future = finished->get_future();
+    fiber::async::spawn(group.at(0), [loop = &group.at(0), stage, finished]() {
+        return run_config_lifecycle_interrupt_case(loop, stage, finished);
+    });
+    const auto future_status = future.wait_for(4s);
+    if (future_status != std::future_status::ready) {
+        ADD_FAILURE() << "timed out at config lifecycle stage " << stage->load(std::memory_order_acquire);
+        group.stop();
+        group.join();
+        return;
+    }
+    const ConfigLifecycleInterruptResult result = future.get();
+    group.stop();
+    group.join();
+    EXPECT_TRUE(result.auth_wait);
+    EXPECT_TRUE(result.reconnect_backoff);
 }
 
 struct RnacosConfigResult {
@@ -771,27 +862,36 @@ DetachedTask run_rnacos_config_case(fiber::event::EventLoop *loop, fiber::nacos:
     FIBER_ASSERT(auth_publisher.has_value());
     auto auth = auth_watch.subscribe();
     auto shared_config = std::make_shared<const fiber::nacos::NacosClientConfig>(std::move(config));
-    nacos_detail::ConfigServiceImpl service({.loop = loop, .config = std::move(shared_config), .auth = std::move(auth)},
-                                            std::move(options));
-    FIBER_ASSERT(service.start().has_value());
+    auto created = nacos_detail::create_config_service(
+            {.loop = loop, .config = std::move(shared_config), .auth = std::move(auth)}, std::move(options));
+    FIBER_ASSERT(created.has_value());
+    auto service = std::move(*created);
+    FIBER_ASSERT(service->start().has_value());
 
     auth_publisher->publish(fiber::nacos::NacosAuthAccess{
             .kind = fiber::nacos::NacosAuthAccessKind::Present,
             .access_token = "rnacos-integration-token",
     });
-    result.ready = co_await wait_ready(service);
 
     constexpr std::string_view kDataId = "fiber-config-service-integration";
     constexpr std::string_view kGroup = "DEFAULT_GROUP";
+    for (int i = 0; i < 1500; ++i) {
+        auto ready = co_await service->get_config(std::string(kDataId), std::string(kGroup));
+        if (ready) {
+            result.ready = true;
+            break;
+        }
+        co_await fiber::async::sleep(2ms);
+    }
     if (result.ready) {
-        (void) co_await service.remove_config(std::string(kDataId), std::string(kGroup));
-        auto published = co_await service.publish(std::string(kDataId), std::string(kGroup), "first",
-                                                  fiber::nacos::ConfigType::Text);
+        (void) co_await service->remove_config(std::string(kDataId), std::string(kGroup));
+        auto published = co_await service->publish(std::string(kDataId), std::string(kGroup), "first",
+                                                   fiber::nacos::ConfigType::Text);
         result.published = published.has_value();
-        auto queried = co_await service.get_config(std::string(kDataId), std::string(kGroup));
+        auto queried = co_await service->get_config(std::string(kDataId), std::string(kGroup));
         result.queried = queried && queried->has_value() && (*queried)->content == "first";
 
-        auto subscribed = service.subscribe(kDataId, kGroup);
+        auto subscribed = service->subscribe(kDataId, kGroup);
         if (subscribed) {
             auto subscription = std::move(*subscribed);
             auto &sub = subscription.subscriber();
@@ -803,9 +903,9 @@ DetachedTask run_rnacos_config_case(fiber::event::EventLoop *loop, fiber::nacos:
                                 initial->value->data->state == fiber::nacos::ConfigState::Present &&
                                 initial->value->data->content == "first";
             if (initial && initial->value && initial->value->data) {
-                auto updated = co_await service.publish(std::string(kDataId), std::string(kGroup), "second",
-                                                        fiber::nacos::ConfigType::Text,
-                                                        std::optional<std::string>(initial->value->data->md5));
+                auto updated = co_await service->publish(std::string(kDataId), std::string(kGroup), "second",
+                                                         fiber::nacos::ConfigType::Text,
+                                                         std::optional<std::string>(initial->value->data->md5));
                 auto update_snapshot = co_await fiber::async::timeout_for(
                         [&sub, version = initial->version]() { return sub.next(version); }, 3s);
                 result.cas_updated = updated.has_value() && update_snapshot && update_snapshot->value &&
@@ -813,9 +913,9 @@ DetachedTask run_rnacos_config_case(fiber::event::EventLoop *loop, fiber::nacos:
                                      update_snapshot->value->data &&
                                      update_snapshot->value->data->state == fiber::nacos::ConfigState::Present &&
                                      update_snapshot->value->data->content == "second";
-                auto conflict = co_await service.publish(std::string(kDataId), std::string(kGroup), "bad",
-                                                         fiber::nacos::ConfigType::Text,
-                                                         std::optional<std::string>("wrong-md5"));
+                auto conflict = co_await service->publish(std::string(kDataId), std::string(kGroup), "bad",
+                                                          fiber::nacos::ConfigType::Text,
+                                                          std::optional<std::string>("wrong-md5"));
                 if (!conflict) {
                     result.cas_error_code = conflict.error().code;
                     result.cas_result_code = conflict.error().result_code;
@@ -830,7 +930,7 @@ DetachedTask run_rnacos_config_case(fiber::event::EventLoop *loop, fiber::nacos:
                 }
 
                 const std::uint64_t remove_version = sub.current().version;
-                auto removed = co_await service.remove_config(std::string(kDataId), std::string(kGroup));
+                auto removed = co_await service->remove_config(std::string(kDataId), std::string(kGroup));
                 std::uint64_t version = remove_version;
                 for (int i = 0; i < 3; ++i) {
                     auto removed_snapshot =
@@ -850,7 +950,7 @@ DetachedTask run_rnacos_config_case(fiber::event::EventLoop *loop, fiber::nacos:
         }
     }
 
-    co_await service.shutdown();
+    co_await service->shutdown();
     auth_publisher->publish(fiber::nacos::NacosAuthAccess{.kind = fiber::nacos::NacosAuthAccessKind::Stopped});
     result.stopped = true;
     finished->set_value(result);

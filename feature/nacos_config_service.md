@@ -67,7 +67,6 @@ apps/nacos/
 │   ├── NacosCreateError.h
 │   ├── NacosRpcOptions.h
 │   └── NacosClient*.h
-├── src/ConfigService.cpp
 ├── src/dto/
 │   ├── internal/config request/response DTO
 │   └── corresponding JSON codecs
@@ -79,10 +78,11 @@ apps/nacos/
 │   └── ConfigServiceImpl.*
 ```
 
-`NacosRpc` 只代表一次物理连接，不在内部重连。`ConfigServiceImpl` 持有当前实例并负责 endpoint 选择、退避、
-故障转移和重定向；`NacosRpc::run()` 从等待认证一直阻塞到该连接的 gRPC 资源和并发 unary 请求完全退出。
-连接结束后 ConfigService 销毁旧实例，再创建新的 `NacosRpc`。config 特有的 DTO、订阅表和推送处理仍留在
-`ConfigServiceImpl`。
+`NacosRpc` 只代表一次物理连接，不在内部重连。`ConfigServiceImpl` 负责 endpoint 选择、退避、故障转移和重定向，
+而当前 `NacosRpc`、双向请求 handlers 和一次性 redirect 都是连接协程的局部变量。服务对象只保留一个非 owning
+`ready_rpc_` 指针作为“当前连接可接受配置请求”的不变量。`NacosRpc::run()` 从等待认证一直阻塞到该连接的 gRPC
+资源和并发 unary 请求完全退出；连接结束后销毁局部实例，再创建新的 `NacosRpc`。config 特有的 DTO、订阅表和
+推送处理仍留在 `ConfigServiceImpl`。
 
 ## 4. Wire Protocol
 
@@ -188,7 +188,8 @@ endpoint。所有状态转换和实例替换只在客户端 EventLoop 上发生�
    - 空 `abilityTable`
 7. 如果 ServerCheck 表示支持能力协商，等待服务端 `SetupAckRequest`。
 8. 如果不支持能力协商，按 Java 兼容行为等待短暂延迟后进入 Ready；默认兼容延迟为 1 秒，并受总握手超时约束。
-9. RPC 进入 Ready；ConfigService 发布 ready、恢复全部配置订阅，并启动本次连接的补偿注册任务。
+9. RPC 进入 Ready；ConfigService 设置 `ready_rpc_` 并恢复全部配置订阅。周期性补偿注册作为连接协程
+   `when_any` 的 timer 分支执行，不再创建单独的 redo 生命周期任务。
 
 ### 5.3 Heartbeat
 
@@ -206,6 +207,8 @@ endpoint。所有状态转换和实例替换只在客户端 EventLoop 上发生�
 - transient 断线期间保留订阅表和最近配置值。
 - `NacosRpc::run()` 返回后，ConfigService 等待本次查询/注册任务退出并销毁旧实例。
 - 每次新建实例重新进入 Ready 都执行全量订阅恢复；不需要额外的 connection generation 字段。
+- 等待认证/Ready、物理连接结束、周期性 redo、重连 Backoff 和 service 停止均在同一连接协程内用
+  `when_any` 协调；shutdown 不依赖额外 ready/wake Watch。
 
 ### 5.5 ConnectResetRequest
 
@@ -227,6 +230,10 @@ endpoint。所有状态转换和实例替换只在客户端 EventLoop 上发生�
 - 关闭 gRPC/HTTP2 连接并等待 receive loop 退出。
 - 发布订阅 `Closed` 状态。
 - ConfigService 自己的 `shutdown()` 等待连接与所有服务任务退出后返回；重复调用和 start 前调用均安全。
+
+ConfigService 只保留一个 `Watch<NacosServiceState>` 表示
+`Created -> Running -> Stopping -> Stopped`。它同时是连接协程的停止信号和 `shutdown()` 的完成通知；当前可用 RPC
+由 `ready_rpc_ != nullptr` 表示，不对外暴露内部 ready subscriber。
 
 客户端关闭认证时会发布 `NacosAuthAccessKind::Stopped`，运行中的服务将其视为终止信号并开始停止，但调用者仍须
 await 每个服务自己的 `shutdown()` 完成屏障。推荐顺序是先服务、后客户端。
@@ -560,7 +567,7 @@ Codec 约束：
 - [x] 对订阅 batch、配置内容、Payload、响应队列设置硬上限。
 - [x] 覆盖 token 刷新失败、认证恢复、连接重置和多 server 故障转移。
 - [x] 覆盖 shutdown 与进行中的 query/publish/push read/write 竞态。
-- [x] 增加必要的单连接状态、关闭原因和 ready 可观测信息。
+- [x] 用单一 lifecycle Watch、局部连接对象和 `ready_rpc_` 不变量收敛服务状态。
 
 验收：重启服务端或断开 TCP 后，旧值保持可读，客户端自动恢复连接和订阅，随后能收到新配置；shutdown 后无任务、timer、stream 或 Entry 泄漏。
 
@@ -612,6 +619,7 @@ Codec 约束：
 - 删除后发布 NotFound，空字符串配置仍为 Present。
 - query 合并、dirty 重查和旧连接任务退出屏障。
 - reconnect/periodic redo 后批量恢复全部订阅。
+- shutdown 可中断认证等待、周期性 redo timer 和 reconnect Backoff。
 
 ### 13.4 验证命令
 
