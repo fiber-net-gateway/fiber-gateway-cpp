@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <string_view>
 
 #include <common/mem/BufPool.h>
@@ -77,6 +78,31 @@ struct TransactionData final : MessageData {
     bool explicit_duration = false;
 };
 
+struct ContextEntry {
+    std::uint64_t hash = 0;
+    StringRef key;
+    char *value_data = nullptr;
+    std::size_t value_size = 0;
+    std::size_t value_capacity = 0;
+    ContextEntry *next_bucket = nullptr;
+    ContextEntry *next_all = nullptr;
+    ContextEntry *prev_all = nullptr;
+
+    [[nodiscard]] std::string_view value() const noexcept {
+        return value_size == 0 ? std::string_view{} : std::string_view(value_data, value_size);
+    }
+};
+
+struct ContextTable {
+    ContextEntry **buckets = nullptr;
+    std::size_t bucket_count = 0;
+    ContextEntry *all_head = nullptr;
+    ContextEntry *all_tail = nullptr;
+    std::size_t size = 0;
+    std::size_t allocated_bytes = 0;
+    std::uint64_t version = 0;
+};
+
 struct MessageTraceData {
     std::shared_ptr<CatClientCore> core;
     event::EventLoop *owner = nullptr;
@@ -91,6 +117,7 @@ struct MessageTraceData {
     std::size_t payload_bytes = 0;
     std::size_t message_count = 0;
     std::size_t open_message_count = 0;
+    ContextTable context;
     bool has_problem = false;
 };
 
@@ -103,12 +130,21 @@ struct MessageTrace {
 
     mem::BufPool pool;
     MessageTraceData *data = nullptr;
+    std::size_t context_iteration_depth = 0;
     bool public_handle_alive = false;
 };
 
 [[nodiscard]] std::expected<MessageTrace *, RecordError> create_message_trace(RecordLimits limits,
                                                                               TraceContext context = {}) noexcept;
 void release_message_trace(MessageTrace *&trace) noexcept;
+
+using ContextVisitorFn = bool (*)(void *, std::string_view, std::string_view) noexcept;
+
+RecordError put_context(MessageTrace &trace, std::string_view key, std::string_view value) noexcept;
+[[nodiscard]] std::expected<std::optional<std::string_view>, RecordError> get_context(const MessageTrace &trace,
+                                                                                      std::string_view key) noexcept;
+[[nodiscard]] std::expected<bool, RecordError> remove_context(MessageTrace &trace, std::string_view key) noexcept;
+RecordError for_each_context(MessageTrace &trace, void *opaque, ContextVisitorFn visitor) noexcept;
 
 [[nodiscard]] std::expected<TransactionData *, RecordError>
 create_transaction_root(MessageTrace &trace, std::string_view type, std::string_view name) noexcept;

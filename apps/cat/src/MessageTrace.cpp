@@ -45,6 +45,35 @@ std::expected<MessageTrace, RecordError> MessageTrace::create(CatClient &client,
 
 bool MessageTrace::valid() const noexcept { return trace_ && trace_->data; }
 
+RecordError MessageTrace::put_context(std::string_view key, std::string_view value) noexcept {
+    if (!trace_) {
+        return RecordError::Completed;
+    }
+    return detail::put_context(*trace_, key, value);
+}
+
+std::expected<std::optional<std::string_view>, RecordError>
+MessageTrace::get_context(std::string_view key) const noexcept {
+    if (!trace_) {
+        return std::unexpected(RecordError::Completed);
+    }
+    return detail::get_context(*trace_, key);
+}
+
+std::expected<bool, RecordError> MessageTrace::remove_context(std::string_view key) noexcept {
+    if (!trace_) {
+        return std::unexpected(RecordError::Completed);
+    }
+    return detail::remove_context(*trace_, key);
+}
+
+RecordError MessageTrace::for_each_context_impl(void *opaque, ContextVisitorFn visitor) const noexcept {
+    if (!trace_) {
+        return RecordError::Completed;
+    }
+    return detail::for_each_context(*trace_, opaque, visitor);
+}
+
 std::expected<Transaction, RecordError> MessageTrace::create_transaction(std::string_view type,
                                                                          std::string_view name) noexcept {
     if (!trace_) {

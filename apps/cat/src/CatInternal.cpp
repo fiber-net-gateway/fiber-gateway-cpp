@@ -16,6 +16,9 @@ namespace fiber::cat::detail {
 namespace {
 
 inline constexpr std::size_t kInitialDataChunkCapacity = 128;
+inline constexpr std::size_t kMinContextBucketCount = 8;
+inline constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ULL;
+inline constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 
 bool checked_add(std::size_t lhs, std::size_t rhs, std::size_t &result) noexcept {
     if (lhs > std::numeric_limits<std::size_t>::max() - rhs) {
@@ -25,12 +28,121 @@ bool checked_add(std::size_t lhs, std::size_t rhs, std::size_t &result) noexcept
     return true;
 }
 
+bool next_power_of_two(std::size_t value, std::size_t &result) noexcept {
+    std::size_t power = 1;
+    while (power < value) {
+        if (power > std::numeric_limits<std::size_t>::max() / 2) {
+            return false;
+        }
+        power *= 2;
+    }
+    result = power;
+    return true;
+}
+
+std::uint64_t hash_context_key(std::string_view key) noexcept {
+    std::uint64_t hash = kFnvOffsetBasis;
+    for (const unsigned char byte: key) {
+        hash ^= byte;
+        hash *= kFnvPrime;
+    }
+    return hash;
+}
+
 bool can_charge(const MessageTraceData &trace, std::size_t bytes) noexcept {
     return trace.payload_bytes <= trace.limits.max_tree_bytes &&
            bytes <= trace.limits.max_tree_bytes - trace.payload_bytes;
 }
 
+bool can_charge_context(const MessageTraceData &trace, std::size_t bytes) noexcept {
+    return trace.context.allocated_bytes <= trace.limits.max_context_bytes &&
+           bytes <= trace.limits.max_context_bytes - trace.context.allocated_bytes && can_charge(trace, bytes);
+}
+
+void charge_context(MessageTraceData &trace, std::size_t bytes) noexcept {
+    trace.context.allocated_bytes += bytes;
+    trace.payload_bytes += bytes;
+}
+
 bool on_owner_loop(const MessageTraceData &trace) noexcept { return trace.owner && trace.owner->in_loop(); }
+
+RecordError validate_context_access(const MessageTrace &trace) noexcept {
+    if (!trace.data) {
+        return RecordError::Completed;
+    }
+    if (!on_owner_loop(*trace.data)) {
+        return RecordError::WrongEventLoop;
+    }
+    return RecordError::None;
+}
+
+ContextEntry *find_context_entry(ContextTable &table, std::string_view key, std::uint64_t hash,
+                                 ContextEntry **previous = nullptr) noexcept {
+    if (!table.buckets) {
+        return nullptr;
+    }
+    ContextEntry *prev = nullptr;
+    ContextEntry *entry = table.buckets[hash & (table.bucket_count - 1)];
+    while (entry) {
+        if (entry->hash == hash && entry->key.view() == key) {
+            if (previous) {
+                *previous = prev;
+            }
+            return entry;
+        }
+        prev = entry;
+        entry = entry->next_bucket;
+    }
+    if (previous) {
+        *previous = nullptr;
+    }
+    return nullptr;
+}
+
+const ContextEntry *find_context_entry(const ContextTable &table, std::string_view key, std::uint64_t hash) noexcept {
+    if (!table.buckets) {
+        return nullptr;
+    }
+    const ContextEntry *entry = table.buckets[hash & (table.bucket_count - 1)];
+    while (entry) {
+        if (entry->hash == hash && entry->key.view() == key) {
+            return entry;
+        }
+        entry = entry->next_bucket;
+    }
+    return nullptr;
+}
+
+RecordError ensure_context_buckets(MessageTrace &trace) noexcept {
+    MessageTraceData &data = *trace.data;
+    ContextTable &table = data.context;
+    if (table.buckets) {
+        return RecordError::None;
+    }
+    if (data.limits.max_context_entries == 0) {
+        return RecordError::LimitExceeded;
+    }
+
+    std::size_t bucket_count = 0;
+    if (!next_power_of_two(std::max(kMinContextBucketCount, data.limits.max_context_entries), bucket_count) ||
+        bucket_count > std::numeric_limits<std::size_t>::max() / sizeof(ContextEntry *)) {
+        return RecordError::LimitExceeded;
+    }
+    const std::size_t bucket_bytes = bucket_count * sizeof(ContextEntry *);
+    if (!can_charge_context(data, bucket_bytes)) {
+        return RecordError::LimitExceeded;
+    }
+
+    auto **buckets = static_cast<ContextEntry **>(trace.pool.alloc(bucket_bytes, alignof(ContextEntry *)));
+    if (!buckets) {
+        return RecordError::NoMemory;
+    }
+    std::fill_n(buckets, bucket_count, nullptr);
+    table.buckets = buckets;
+    table.bucket_count = bucket_count;
+    charge_context(data, bucket_bytes);
+    return RecordError::None;
+}
 
 bool valid_limits(const RecordLimits &limits) noexcept {
     return limits.max_messages > 0 && limits.max_children_per_transaction > 0 && limits.max_type_bytes > 0 &&
@@ -340,7 +452,7 @@ void mark_completed(MessageData &message) noexcept {
     std::destroy_at(&trace_data);
     trace->data = nullptr;
     trace->pool.reset();
-    if (!trace->public_handle_alive) {
+    if (!trace->public_handle_alive && trace->context_iteration_depth == 0) {
         delete trace;
     }
 }
@@ -393,6 +505,11 @@ void release_message_trace(MessageTrace *&trace_handle) noexcept {
     if (!trace) {
         return;
     }
+    if (trace->context_iteration_depth != 0) {
+        FIBER_ASSERT(trace->public_handle_alive);
+        trace->public_handle_alive = false;
+        return;
+    }
     if (!trace->data || !trace->data->root) {
         delete trace;
         return;
@@ -400,6 +517,197 @@ void release_message_trace(MessageTrace *&trace_handle) noexcept {
     FIBER_ASSERT(on_owner_loop(*trace->data));
     FIBER_ASSERT(trace->public_handle_alive);
     trace->public_handle_alive = false;
+}
+
+RecordError put_context(MessageTrace &trace, std::string_view key, std::string_view value) noexcept {
+    const RecordError access = validate_context_access(trace);
+    if (access != RecordError::None) {
+        return access;
+    }
+
+    MessageTraceData &data = *trace.data;
+    if (key.empty()) {
+        return RecordError::InvalidArgument;
+    }
+    if (key.size() > data.limits.max_context_key_bytes || value.size() > data.limits.max_context_value_bytes) {
+        return RecordError::LimitExceeded;
+    }
+
+    const std::uint64_t hash = hash_context_key(key);
+    ContextEntry *entry = find_context_entry(data.context, key, hash);
+    if (entry) {
+        if (entry->value() == value) {
+            return RecordError::None;
+        }
+        if (value.size() <= entry->value_capacity) {
+            if (!value.empty()) {
+                std::copy(value.begin(), value.end(), entry->value_data);
+            }
+            entry->value_size = value.size();
+            ++data.context.version;
+            return RecordError::None;
+        }
+        if (!can_charge_context(data, value.size())) {
+            return RecordError::LimitExceeded;
+        }
+        auto *replacement = static_cast<char *>(trace.pool.alloc(value.size(), alignof(char)));
+        if (!replacement) {
+            return RecordError::NoMemory;
+        }
+        std::copy(value.begin(), value.end(), replacement);
+        entry->value_data = replacement;
+        entry->value_size = value.size();
+        entry->value_capacity = value.size();
+        charge_context(data, value.size());
+        ++data.context.version;
+        return RecordError::None;
+    }
+
+    if (data.context.size >= data.limits.max_context_entries) {
+        return RecordError::LimitExceeded;
+    }
+    const RecordError buckets = ensure_context_buckets(trace);
+    if (buckets != RecordError::None) {
+        return buckets;
+    }
+
+    std::size_t entry_bytes = 0;
+    if (!checked_add(sizeof(ContextEntry), key.size(), entry_bytes) ||
+        !checked_add(entry_bytes, value.size(), entry_bytes) || !can_charge_context(data, entry_bytes)) {
+        return RecordError::LimitExceeded;
+    }
+    void *storage = trace.pool.alloc(entry_bytes, alignof(ContextEntry));
+    if (!storage) {
+        return RecordError::NoMemory;
+    }
+
+    entry = new (storage) ContextEntry;
+    auto *text = reinterpret_cast<char *>(entry + 1);
+    std::copy(key.begin(), key.end(), text);
+    entry->key = {text, key.size()};
+    text += key.size();
+    if (!value.empty()) {
+        std::copy(value.begin(), value.end(), text);
+        entry->value_data = text;
+    }
+    entry->value_size = value.size();
+    entry->value_capacity = value.size();
+    entry->hash = hash;
+
+    const std::size_t bucket = hash & (data.context.bucket_count - 1);
+    entry->next_bucket = data.context.buckets[bucket];
+    data.context.buckets[bucket] = entry;
+    entry->prev_all = data.context.all_tail;
+    if (data.context.all_tail) {
+        data.context.all_tail->next_all = entry;
+    } else {
+        data.context.all_head = entry;
+    }
+    data.context.all_tail = entry;
+    ++data.context.size;
+    ++data.context.version;
+    charge_context(data, entry_bytes);
+    return RecordError::None;
+}
+
+std::expected<std::optional<std::string_view>, RecordError> get_context(const MessageTrace &trace,
+                                                                        std::string_view key) noexcept {
+    const RecordError access = validate_context_access(trace);
+    if (access != RecordError::None) {
+        return std::unexpected(access);
+    }
+    if (key.empty()) {
+        return std::unexpected(RecordError::InvalidArgument);
+    }
+    const ContextEntry *entry = find_context_entry(trace.data->context, key, hash_context_key(key));
+    if (!entry) {
+        return std::optional<std::string_view>{};
+    }
+    return std::optional<std::string_view>{entry->value()};
+}
+
+std::expected<bool, RecordError> remove_context(MessageTrace &trace, std::string_view key) noexcept {
+    const RecordError access = validate_context_access(trace);
+    if (access != RecordError::None) {
+        return std::unexpected(access);
+    }
+    if (key.empty()) {
+        return std::unexpected(RecordError::InvalidArgument);
+    }
+
+    ContextTable &table = trace.data->context;
+    if (!table.buckets) {
+        return false;
+    }
+    const std::uint64_t hash = hash_context_key(key);
+    ContextEntry *previous = nullptr;
+    ContextEntry *entry = find_context_entry(table, key, hash, &previous);
+    if (!entry) {
+        return false;
+    }
+
+    const std::size_t bucket = hash & (table.bucket_count - 1);
+    if (previous) {
+        previous->next_bucket = entry->next_bucket;
+    } else {
+        table.buckets[bucket] = entry->next_bucket;
+    }
+    if (entry->prev_all) {
+        entry->prev_all->next_all = entry->next_all;
+    } else {
+        table.all_head = entry->next_all;
+    }
+    if (entry->next_all) {
+        entry->next_all->prev_all = entry->prev_all;
+    } else {
+        table.all_tail = entry->prev_all;
+    }
+    entry->next_bucket = nullptr;
+    entry->next_all = nullptr;
+    entry->prev_all = nullptr;
+    --table.size;
+    ++table.version;
+    return true;
+}
+
+RecordError for_each_context(MessageTrace &trace, void *opaque, ContextVisitorFn visitor) noexcept {
+    const RecordError access = validate_context_access(trace);
+    if (access != RecordError::None) {
+        return access;
+    }
+    if (!visitor) {
+        return RecordError::InvalidArgument;
+    }
+
+    MessageTraceData *const data = trace.data;
+    const std::uint64_t version = data->context.version;
+    RecordError result = RecordError::None;
+    ++trace.context_iteration_depth;
+    for (const ContextEntry *entry = data->context.all_head; entry;) {
+        const ContextEntry *next = entry->next_all;
+        const bool continue_iteration = visitor(opaque, entry->key.view(), entry->value());
+        if (trace.data != data) {
+            result = RecordError::Completed;
+            break;
+        }
+        if (data->context.version != version) {
+            result = RecordError::InvalidArgument;
+            break;
+        }
+        if (!continue_iteration) {
+            break;
+        }
+        entry = next;
+    }
+    FIBER_ASSERT(trace.context_iteration_depth > 0);
+    --trace.context_iteration_depth;
+
+    const bool delete_trace =
+            trace.context_iteration_depth == 0 && !trace.public_handle_alive && (!trace.data || !trace.data->root);
+    if (delete_trace) {
+        delete &trace;
+    }
+    return result;
 }
 
 std::expected<TransactionData *, RecordError> create_transaction_root(MessageTrace &trace, std::string_view type,
