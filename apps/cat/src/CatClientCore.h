@@ -26,6 +26,7 @@
 
 #include "CatEncoder.h"
 #include "CatMessageId.h"
+#include "CatSystemStats.h"
 
 namespace fiber::dns {
 class AddressResolver;
@@ -273,6 +274,7 @@ private:
     std::chrono::steady_clock::time_point process_start_steady_{};
     std::uint64_t process_start_wall_millis_ = 0;
     std::uint64_t router_last_success_millis_ = 0;
+    SystemStatsCollector system_stats_collector_;
     bool startup_submitted_ = false;
     bool heartbeat_outstanding_ = false;
 };

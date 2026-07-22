@@ -527,6 +527,7 @@ TEST(CatClientTest, SendsStartupAndRepeatedHeartbeatFrames) {
     EXPECT_GE(stats.heartbeat_submitted, 2);
     EXPECT_GE(stats.heartbeat_sent, 2);
     EXPECT_EQ(stats.heartbeat_dropped, 0);
+    EXPECT_EQ(stats.heartbeat_provider_failures, 0);
 
     auto frames = frames_future.get();
     ASSERT_TRUE(frames);
@@ -537,6 +538,9 @@ TEST(CatClientTest, SendsStartupAndRepeatedHeartbeatFrames) {
     EXPECT_TRUE(contains((*frames)[0], "Reboot"));
     EXPECT_TRUE(contains((*frames)[1], "Status"));
     EXPECT_TRUE(contains((*frames)[1], "Heartbeat"));
+    EXPECT_TRUE(contains((*frames)[1], "system.process"));
+    EXPECT_TRUE(contains((*frames)[1], "mem.memtotal"));
+    EXPECT_TRUE(contains((*frames)[1], "process.rss.bytes"));
     EXPECT_TRUE(contains((*frames)[2], "Heartbeat"));
 }
 

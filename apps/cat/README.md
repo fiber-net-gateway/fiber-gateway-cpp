@@ -65,7 +65,8 @@ loop. Detach performs a final flush, accounts for any residual drop, unregisters
 Notify phase. `shutdown()` automatically performs this detach for a shard owned by the sender loop.
 
 `CatClientOptions` selects `Nt1` (the default) or `Pt1`, bounds normal/problem/system queues independently, controls
-sampling and aggregation cardinality, and configures Router, collector, heartbeat, and shutdown timeouts.
+sampling and aggregation cardinality, and configures Router, collector, heartbeat, and shutdown timeouts. Heartbeat
+system statistics are enabled by default and can be disabled independently with `enable_system_stats`.
 
 ## CAT propagation context
 
@@ -220,6 +221,17 @@ When enabled, the sender loop emits one delayed `System/Reboot` tree and periodi
 process/uptime, active shard count, queue counters, Router/sample/block state, collector state, and client failure
 counters. Only one heartbeat may be outstanding.
 
+On Linux, `enable_system_stats` adds the CAT 3.0-compatible `system.process` extension. `/proc/loadavg`, `/proc/stat`, and
+`/proc/meminfo` provide host load, CPU, memory, swap, runnable-process, interrupt, and context-switch fields using the
+official `load.*`, `cpu.*`, and `mem.*` names. `/proc/self/stat` and `/proc/self/statm` additionally provide
+`process.cpu.*`, `process.rss.bytes`, and `process.virtual.bytes` for this client process. Host CPU percentages and
+process CPU share require two valid samples, so the first heartbeat intentionally omits them. Host memory values describe
+the machine visible through procfs, not a cgroup memory limit.
+
+System collection is best-effort. Missing or malformed procfs input omits only unavailable fields, increments
+`heartbeat_provider_failures`, and still sends the base heartbeat. Optional system fields are rolled back as one complete
+XML extension if the configured field or byte budget cannot hold them; they never make an otherwise valid heartbeat fail.
+
 `CatClientStats` separates record truncation, sampling-to-aggregate conversion, aggregate retry/drop, encode failures,
 normal/system admission, Router changes, connect failures, `WouldBlock`, partial-frame loss, Metric activity, and
 heartbeat submission/delivery. Values are atomically readable from any thread.
@@ -228,6 +240,6 @@ heartbeat submission/delivery. Values are atomically readable from any thread.
 
 - `include/fiber/cat/`: public client/configuration API, single-pointer recording handles, and value types.
 - `src/`: private trace/message layout, NT1/PT1 encoders, bounded aggregation, Router parser, sender, connection manager,
-  message-ID generator, heartbeat builder, and metric implementations.
+  message-ID generator, Linux system-statistics collector, heartbeat builder, and metric implementations.
 - `tests/`: lifecycle, limits, chunk boundaries, routing, cross-loop collector transport, metrics, and coroutine
   interleaving tests.

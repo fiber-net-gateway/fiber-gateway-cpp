@@ -557,6 +557,13 @@ void CatClientCore::submit_heartbeat() noexcept {
         event_loop_count = aggregation_shard_count_;
     }
     const auto uptime = std::chrono::duration_cast<std::chrono::milliseconds>(loop_->now() - process_start_steady_);
+    HeartbeatSystemStats system_stats;
+    if (options_.enable_system_stats) {
+        system_stats = system_stats_collector_.collect();
+        if (system_stats.provider_failure) {
+            stats_.heartbeat_provider_failures.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     HeartbeatInfo info{
             .app_key = config_.app_key(),
             .hostname = config_.hostname(),
@@ -572,6 +579,7 @@ void CatClientCore::submit_heartbeat() noexcept {
             .collector_connected = stream_ != nullptr,
             .blocked = blocked_.load(std::memory_order_acquire),
             .stats = stats(),
+            .system_stats = options_.enable_system_stats ? &system_stats : nullptr,
     };
     auto encoded = encode_heartbeat_nt1(encode_context(), id->view(), info, options_.max_heartbeat_fields,
                                         options_.max_heartbeat_data_bytes, options_.encoder);

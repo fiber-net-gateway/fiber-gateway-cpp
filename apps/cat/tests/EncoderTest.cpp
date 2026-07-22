@@ -13,6 +13,8 @@
 
 #include "CatEncoder.h"
 #include "CatInternal.h"
+#include "CatSystemMessage.h"
+#include "CatSystemStats.h"
 
 namespace {
 
@@ -187,6 +189,91 @@ TEST(CatEncoderTest, EncodesHeartbeatRootAsOfficialNt1Frame) {
         };
         expect_bytes(*encoded, expected);
         delete trace;
+    });
+}
+
+TEST(CatEncoderTest, EncodesOfficialAndProcessHeartbeatStatistics) {
+    run_on_loop([] {
+        fiber::cat::detail::HeartbeatSystemStats system{
+                .load_1min = 1.25,
+                .load_5min = 0.50,
+                .load_15min = 0.10,
+                .cpu_delta = {.user = 10, .nice = 1, .system = 5, .idle = 80, .iowait = 2, .irq = 1, .softirq = 1},
+                .context_switches_delta = 30,
+                .interrupts_delta = 20,
+                .processes_running = 3,
+                .processes_blocked = 1,
+                .memory_total_bytes = 1024,
+                .memory_free_bytes = 256,
+                .memory_cached_bytes = 128,
+                .swap_total_bytes = 512,
+                .swap_free_bytes = 400,
+                .process_virtual_bytes = 4096,
+                .process_rss_bytes = 2048,
+                .cpu_user_percent = 10.0,
+                .cpu_nice_percent = 1.0,
+                .cpu_system_percent = 5.0,
+                .cpu_idle_percent = 80.0,
+                .cpu_iowait_percent = 2.0,
+                .cpu_irq_percent = 1.0,
+                .cpu_softirq_percent = 1.0,
+                .process_cpu_user_percent = 4.0,
+                .process_cpu_system_percent = 1.0,
+                .process_cpu_total_percent = 5.0,
+                .memory_free_percent = 25.0,
+                .memory_used_percent = 75.0,
+                .load_valid = true,
+                .cpu_valid = true,
+                .scheduler_valid = true,
+                .scheduler_delta_valid = true,
+                .memory_valid = true,
+                .process_cpu_valid = true,
+                .process_memory_valid = true,
+        };
+        fiber::cat::detail::HeartbeatInfo info{
+                .app_key = "app",
+                .hostname = "host",
+                .ip = "1.2.3.4",
+                .client_version = "fiber2-cat/test",
+                .system_stats = &system,
+        };
+        auto encoded = fiber::cat::detail::encode_heartbeat_nt1(full_context(), "message", info, 96, 16 * 1024);
+        ASSERT_TRUE(encoded);
+        const auto bytes = encoded_bytes(*encoded);
+        const auto contains = [&](std::string_view value) {
+            return std::search(bytes.begin(), bytes.end(), value.begin(), value.end()) != bytes.end();
+        };
+        EXPECT_TRUE(contains("extension id=\"system.process\""));
+        EXPECT_TRUE(contains("id=\"cpu.user.percent\" value=\"10.00\""));
+        EXPECT_TRUE(contains("id=\"mem.memtotal\" value=\"1024\""));
+        EXPECT_TRUE(contains("id=\"process.rss.bytes\" value=\"2048\""));
+        EXPECT_TRUE(contains("id=\"process.cpu.total.percent\" value=\"5.00\""));
+    });
+}
+
+TEST(CatEncoderTest, OmitsOptionalSystemStatisticsWhenFieldBudgetIsExhausted) {
+    run_on_loop([] {
+        fiber::cat::detail::HeartbeatSystemStats system{
+                .load_1min = 1.0,
+                .load_5min = 1.0,
+                .load_15min = 1.0,
+                .load_valid = true,
+        };
+        fiber::cat::detail::HeartbeatInfo info{
+                .app_key = "app",
+                .hostname = "host",
+                .ip = "1.2.3.4",
+                .client_version = "fiber2-cat/test",
+                .system_stats = &system,
+        };
+        auto encoded = fiber::cat::detail::encode_heartbeat_nt1(full_context(), "message", info, 30, 16 * 1024);
+        ASSERT_TRUE(encoded);
+        const auto bytes = encoded_bytes(*encoded);
+        const auto contains = [&](std::string_view value) {
+            return std::search(bytes.begin(), bytes.end(), value.begin(), value.end()) != bytes.end();
+        };
+        EXPECT_TRUE(contains("fiber2.cat"));
+        EXPECT_FALSE(contains("system.process"));
     });
 }
 

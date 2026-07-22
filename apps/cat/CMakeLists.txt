@@ -8,6 +8,7 @@ add_library(fiber_cat STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/CatMessageId.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/CatRouter.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/CatSystemMessage.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/CatSystemStats.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/Event.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/MessageTrace.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/Metric.cpp"
@@ -35,7 +36,8 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/MessageIdTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/MessageTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/MetricTest.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/tests/RouterTest.cpp")
+        "${CMAKE_CURRENT_LIST_DIR}/tests/RouterTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/SystemStatsTest.cpp")
     target_include_directories(fiber_cat_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src")
     target_link_libraries(fiber_cat_tests PRIVATE fiber::cat GTest::gtest_main)
     set_target_properties(fiber_cat_tests PROPERTIES FOLDER "apps/cat")
