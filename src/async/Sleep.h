@@ -14,20 +14,22 @@ public:
     explicit SleepAwaiter(std::chrono::steady_clock::duration delay);
     SleepAwaiter(const SleepAwaiter &) = delete;
     SleepAwaiter &operator=(const SleepAwaiter &) = delete;
-    SleepAwaiter(SleepAwaiter &&other) noexcept : delay_(other.delay_) {
+    SleepAwaiter(SleepAwaiter &&other) noexcept : delay_(other.delay_), completed_(other.completed_) {
         FIBER_ASSERT(!other.armed_);
         timer_.owner = this;
         other.timer_.owner = nullptr;
         other.loop_ = nullptr;
         other.handle_ = {};
         other.armed_ = false;
+        other.completed_ = false;
     }
     SleepAwaiter &operator=(SleepAwaiter &&) = delete;
     ~SleepAwaiter();
 
-    bool await_ready() const noexcept;
+    bool await_ready() noexcept;
     void await_suspend(std::coroutine_handle<> handle);
-    void await_resume() const noexcept {}
+    void await_resume() noexcept;
+    [[nodiscard]] bool completed() const noexcept { return completed_; }
 
 private:
     struct SleepTimer final {
@@ -44,6 +46,7 @@ private:
     SleepTimer timer_{};
     std::coroutine_handle<> handle_{};
     bool armed_ = false;
+    bool completed_ = false;
 };
 
 SleepAwaiter sleep(std::chrono::steady_clock::duration delay);

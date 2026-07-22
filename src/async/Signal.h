@@ -78,6 +78,7 @@ public:
     bool await_ready() noexcept;
     bool await_suspend(std::coroutine_handle<> handle);
     SignalInfo await_resume() noexcept;
+    [[nodiscard]] bool completed() const noexcept { return completed_; }
 
 private:
     friend struct detail::SignalWaiter;
@@ -87,6 +88,7 @@ private:
     fiber::event::SignalService *service_ = nullptr;
     SignalInfo info_{};
     bool waiting_ = false;
+    bool completed_ = false;
 };
 
 SignalAwaiter wait_signal(int signum);
