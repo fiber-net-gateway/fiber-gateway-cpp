@@ -68,6 +68,7 @@ private:
 struct CatClientOptions {
     double initial_sample_rate = 1.0;
     bool enable_heartbeat = true;
+    bool enable_system_stats = true;
     CatEncoderType encoder = CatEncoderType::Nt1;
     std::size_t max_queued_messages = 10000;
     std::size_t max_queued_bytes = 64 * 1024 * 1024;
@@ -87,7 +88,7 @@ struct CatClientOptions {
     std::size_t max_system_queued_messages = 256;
     std::size_t max_system_queued_bytes = 4 * 1024 * 1024;
     std::size_t max_heartbeat_data_bytes = 16 * 1024;
-    std::size_t max_heartbeat_fields = 64;
+    std::size_t max_heartbeat_fields = 96;
     std::chrono::milliseconds router_connect_timeout{1000};
     std::chrono::milliseconds router_request_timeout{2000};
     std::chrono::milliseconds router_refresh_interval{180000};

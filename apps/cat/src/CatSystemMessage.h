@@ -10,6 +10,7 @@
 #include <fiber/cat/CatClient.h>
 
 #include "CatEncoder.h"
+#include "CatSystemStats.h"
 
 namespace fiber::cat::detail {
 
@@ -29,6 +30,7 @@ struct HeartbeatInfo {
     bool collector_connected = false;
     bool blocked = false;
     CatClientStats stats;
+    const HeartbeatSystemStats *system_stats = nullptr;
 };
 
 [[nodiscard]] std::expected<mem::IoBuf, EncodeError>

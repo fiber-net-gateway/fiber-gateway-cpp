@@ -4,6 +4,7 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <limits>
 
 #include "CatInternal.h"
@@ -16,6 +17,11 @@ inline constexpr std::size_t kHeartbeatStorageCapacity = 64 * 1024;
 
 class XmlWriter {
 public:
+    struct Checkpoint {
+        std::size_t size = 0;
+        std::size_t field_count = 0;
+    };
+
     XmlWriter(char *storage, std::size_t capacity, std::size_t max_fields) noexcept :
         storage_(storage), capacity_(capacity), max_fields_(max_fields) {}
 
@@ -62,8 +68,10 @@ public:
     }
 
     bool detail(std::string_view key, std::string_view value) noexcept {
+        const Checkpoint saved = checkpoint();
         if (field_count_ >= max_fields_ || !text("<extensionDetail id=\"") || !escaped(key) || !text("\" value=\"") ||
             !escaped(value) || !text("\"/>")) {
+            rollback(saved);
             return false;
         }
         ++field_count_;
@@ -81,6 +89,23 @@ public:
         return detail(key, value ? std::string_view("true") : std::string_view("false"));
     }
 
+    bool decimal_detail(std::string_view key, double value) noexcept {
+        if (!std::isfinite(value)) {
+            return false;
+        }
+        std::array<char, 48> number{};
+        auto result = std::to_chars(number.data(), number.data() + number.size(), value, std::chars_format::fixed, 2);
+        return result.ec == std::errc{} &&
+               detail(key, {number.data(), static_cast<std::size_t>(result.ptr - number.data())});
+    }
+
+    [[nodiscard]] Checkpoint checkpoint() const noexcept { return {.size = size_, .field_count = field_count_}; }
+
+    void rollback(Checkpoint checkpoint) noexcept {
+        size_ = checkpoint.size;
+        field_count_ = checkpoint.field_count;
+    }
+
     [[nodiscard]] std::string_view view() const noexcept { return {storage_, size_}; }
 
 private:
@@ -90,6 +115,68 @@ private:
     std::size_t size_ = 0;
     std::size_t field_count_ = 0;
 };
+
+bool write_system_stats(XmlWriter &writer, const HeartbeatSystemStats *stats) noexcept {
+    if (!stats || !stats->has_values()) {
+        return true;
+    }
+    const XmlWriter::Checkpoint saved = writer.checkpoint();
+    bool written =
+            writer.text("<extension id=\"system.process\"><description><![CDATA[system.process]]></description>");
+    if (stats->load_valid) {
+        written = written && writer.decimal_detail("system.load.average", stats->load_1min) &&
+                  writer.decimal_detail("load.1min", stats->load_1min) &&
+                  writer.decimal_detail("load.5min", stats->load_5min) &&
+                  writer.decimal_detail("load.15min", stats->load_15min);
+    }
+    if (stats->scheduler_valid) {
+        written = written && writer.detail("process.running", stats->processes_running) &&
+                  writer.detail("process.blocked", stats->processes_blocked);
+    }
+    if (stats->cpu_valid) {
+        written = written && writer.detail("cpu.user", stats->cpu_delta.user) &&
+                  writer.detail("cpu.nice", stats->cpu_delta.nice) &&
+                  writer.detail("cpu.system", stats->cpu_delta.system) &&
+                  writer.detail("cpu.idle", stats->cpu_delta.idle) &&
+                  writer.detail("cpu.iowait", stats->cpu_delta.iowait) &&
+                  writer.detail("cpu.irq", stats->cpu_delta.irq) &&
+                  writer.detail("cpu.softirq", stats->cpu_delta.softirq) &&
+                  writer.decimal_detail("cpu.user.percent", stats->cpu_user_percent) &&
+                  writer.decimal_detail("cpu.nice.percent", stats->cpu_nice_percent) &&
+                  writer.decimal_detail("cpu.system.percent", stats->cpu_system_percent) &&
+                  writer.decimal_detail("cpu.idle.percent", stats->cpu_idle_percent) &&
+                  writer.decimal_detail("cpu.iowait.percent", stats->cpu_iowait_percent) &&
+                  writer.decimal_detail("cpu.irq.percent", stats->cpu_irq_percent) &&
+                  writer.decimal_detail("cpu.softirq.percent", stats->cpu_softirq_percent);
+    }
+    if (stats->scheduler_delta_valid) {
+        written = written && writer.detail("cpu.context", stats->context_switches_delta) &&
+                  writer.detail("cpu.intr", stats->interrupts_delta);
+    }
+    if (stats->memory_valid) {
+        written = written && writer.detail("mem.memtotal", stats->memory_total_bytes) &&
+                  writer.detail("mem.memfree", stats->memory_free_bytes) &&
+                  writer.detail("mem.memcached", stats->memory_cached_bytes) &&
+                  writer.detail("mem.swaptotal", stats->swap_total_bytes) &&
+                  writer.detail("mem.swapfree", stats->swap_free_bytes) &&
+                  writer.decimal_detail("mem.memfree.percent", stats->memory_free_percent) &&
+                  writer.decimal_detail("mem.memused.percent", stats->memory_used_percent);
+    }
+    if (stats->process_memory_valid) {
+        written = written && writer.detail("process.rss.bytes", stats->process_rss_bytes) &&
+                  writer.detail("process.virtual.bytes", stats->process_virtual_bytes);
+    }
+    if (stats->process_cpu_valid) {
+        written = written && writer.decimal_detail("process.cpu.user.percent", stats->process_cpu_user_percent) &&
+                  writer.decimal_detail("process.cpu.system.percent", stats->process_cpu_system_percent) &&
+                  writer.decimal_detail("process.cpu.total.percent", stats->process_cpu_total_percent);
+    }
+    written = written && writer.text("</extension>");
+    if (!written) {
+        writer.rollback(saved);
+    }
+    return written;
+}
 
 void freeze_transaction_tree(TransactionData &root) noexcept {
     std::size_t visited = 0;
@@ -169,7 +256,13 @@ std::expected<mem::IoBuf, EncodeError> encode_heartbeat_nt1(const ClientEncodeCo
         !writer.detail("trees.sampled", stats.sampled_trees) ||
         !writer.detail("trees.aggregated", stats.aggregated_trees) ||
         !writer.detail("aggregate.overflow", stats.aggregation_overflow) ||
-        !writer.detail("metric.observations", stats.metric_observations) || !writer.text("</extension></status>")) {
+        !writer.detail("metric.observations", stats.metric_observations) ||
+        !writer.detail("heartbeat.provider.failures", stats.heartbeat_provider_failures) ||
+        !writer.text("</extension>")) {
+        return std::unexpected(EncodeError::SizeOverflow);
+    }
+    (void) write_system_stats(writer, info.system_stats);
+    if (!writer.text("</status>")) {
         return std::unexpected(EncodeError::SizeOverflow);
     }
 
