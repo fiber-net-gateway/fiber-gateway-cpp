@@ -50,6 +50,7 @@ public:
         bool await_ready() noexcept;
         bool await_suspend(std::coroutine_handle<> handle);
         LockGuard await_resume() noexcept;
+        [[nodiscard]] bool completed() const noexcept { return completed_; }
 
     private:
         friend class Mutex;
@@ -57,6 +58,7 @@ public:
         Mutex *mutex_ = nullptr;
         WaiterPtr waiter_ = nullptr;
         bool acquired_ = false;
+        bool completed_ = false;
     };
 
     Mutex() = default;
@@ -72,7 +74,7 @@ private:
 
     struct Waiter {
         explicit Waiter(Mutex *owner, std::coroutine_handle<> handle, fiber::event::EventLoop *loop,
-                        std::thread::id thread_id);
+                        std::thread::id thread_id, bool *completed);
 
         void resume();
         static void on_run(Waiter *waiter) noexcept;
@@ -81,6 +83,7 @@ private:
         std::coroutine_handle<> handle{};
         fiber::event::EventLoop *loop = nullptr;
         std::thread::id thread{};
+        bool *completed = nullptr;
         std::atomic<WaiterState> state{WaiterState::Waiting};
         Waiter *prev = nullptr;
         Waiter *next = nullptr;

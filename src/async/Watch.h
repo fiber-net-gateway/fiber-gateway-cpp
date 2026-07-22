@@ -27,7 +27,8 @@ private:
     enum class WaiterState : std::uint8_t { Waiting, Notified, Resumed, Canceled };
 
     struct Waiter {
-        Waiter(event::EventLoop *loop, std::coroutine_handle<> handle) noexcept : loop(loop), handle(handle) {}
+        Waiter(event::EventLoop *loop, std::coroutine_handle<> handle, bool *completed) noexcept :
+            loop(loop), handle(handle), completed(completed) {}
 
         void resume() noexcept {
             WaiterState expected = WaiterState::Notified;
@@ -35,6 +36,8 @@ private:
                 return;
             }
 
+            FIBER_ASSERT(completed != nullptr);
+            *completed = true;
             auto resume_handle = handle;
             handle = {};
             if (resume_handle) {
@@ -50,6 +53,7 @@ private:
 
         event::EventLoop *loop = nullptr;
         std::coroutine_handle<> handle{};
+        bool *completed = nullptr;
         std::atomic<WaiterState> state{WaiterState::Waiting};
         Waiter *prev = nullptr;
         Waiter *next = nullptr;
@@ -244,14 +248,18 @@ public:
 
             ~NextAwaiter() { cancel(); }
 
-            bool await_ready() const noexcept { return state_->has_newer_version(received_version_); }
+            bool await_ready() noexcept {
+                completed_ = state_->has_newer_version(received_version_);
+                return completed_;
+            }
 
             bool await_suspend(std::coroutine_handle<> handle) {
                 auto *loop = event::EventLoop::current_or_null();
                 FIBER_ASSERT(loop != nullptr);
 
-                waiter_ = new Waiter(loop, handle);
+                waiter_ = new Waiter(loop, handle, &completed_);
                 if (!state_->enqueue_if_current(waiter_, received_version_)) {
+                    completed_ = true;
                     delete waiter_;
                     waiter_ = nullptr;
                     return false;
@@ -260,9 +268,12 @@ public:
             }
 
             Snapshot await_resume() {
+                FIBER_ASSERT(completed_);
                 waiter_ = nullptr;
                 return state_->snapshot_after(received_version_);
             }
+
+            [[nodiscard]] bool completed() const noexcept { return completed_; }
 
             void cancel() noexcept {
                 if (!waiter_) {
@@ -276,6 +287,7 @@ public:
             std::shared_ptr<SharedState> state_;
             std::uint64_t received_version_ = 0;
             Waiter *waiter_ = nullptr;
+            bool completed_ = false;
         };
 
         Subscriber(const Subscriber &) = delete;

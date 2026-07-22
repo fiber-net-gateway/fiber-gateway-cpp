@@ -17,11 +17,12 @@ private:
     enum class WaiterState : std::uint8_t { Waiting, Notified, Resumed, Canceled };
 
     struct Waiter {
-        Waiter(WaitGroup *group, fiber::event::EventLoop *loop, std::coroutine_handle<> handle);
+        Waiter(WaitGroup *group, fiber::event::EventLoop *loop, std::coroutine_handle<> handle, bool *completed);
 
         WaitGroup *group = nullptr;
         fiber::event::EventLoop *loop = nullptr;
         std::coroutine_handle<> handle{};
+        bool *completed = nullptr;
         std::atomic<WaiterState> state{WaiterState::Waiting};
         Waiter *prev = nullptr;
         Waiter *next = nullptr;
@@ -44,13 +45,15 @@ public:
         JoinAwaiter &operator=(JoinAwaiter &&) = delete;
         ~JoinAwaiter();
 
-        bool await_ready() const noexcept;
+        bool await_ready() noexcept;
         bool await_suspend(std::coroutine_handle<> handle);
         void await_resume() noexcept;
+        [[nodiscard]] bool completed() const noexcept { return completed_; }
 
     private:
         WaitGroup *group_ = nullptr;
         Waiter *waiter_ = nullptr;
+        bool completed_ = false;
     };
 
     WaitGroup() = default;
