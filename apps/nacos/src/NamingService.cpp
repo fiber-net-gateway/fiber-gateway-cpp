@@ -1,31 +1,10 @@
 #include <fiber/nacos/NamingService.h>
 
-#include <new>
 #include <utility>
 
 #include <common/Assert.h>
-#include <fiber/nacos/NacosClient.h>
-
-#include "naming/NamingServiceImpl.h"
 
 namespace fiber::nacos {
-
-std::expected<std::unique_ptr<NamingService>, NacosCreateError> NamingService::create(NacosClient &client,
-                                                                                      NamingServiceOptions options) {
-    if (!detail::NamingServiceImpl::valid_options(options)) {
-        return std::unexpected(NacosCreateError{.code = NacosCreateErrorCode::InvalidOptions});
-    }
-    auto dependencies = client.service_dependencies();
-    if (!dependencies) {
-        return std::unexpected(dependencies.error());
-    }
-    auto service = std::unique_ptr<NamingService>(
-            new (std::nothrow) detail::NamingServiceImpl(std::move(*dependencies), std::move(options)));
-    if (!service) {
-        return std::unexpected(NacosCreateError{.code = NacosCreateErrorCode::NoMem});
-    }
-    return service;
-}
 
 InstanceRegistration::InstanceRegistration(std::shared_ptr<void> owner, void *context, UpdateFn update,
                                            SubscribeFn subscribe, CloseFn close) noexcept :

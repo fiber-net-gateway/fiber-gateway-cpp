@@ -152,6 +152,7 @@ Waiter
   prev/next: Waiter*
   queued: bool
   notify_entry: EventLoop::NotifyEntry
+  defer_entry: EventLoop::DeferEntry
 ```
 
 共享锁同时保护 `latest`、`version`、Publisher 获取标记和等待链表。值与版本必须在同一个临界区读取，避免观察到不匹配的快照。
@@ -179,11 +180,14 @@ true  -> true：返回 nullopt
 4. 将摘除节点从 `Waiting` 标记为 `Notified`。
 5. 释放共享锁。
 6. 让旧快照在锁外释放。
-7. 通过每个 Waiter 捕获的 `EventLoop::post()` 投递恢复回调。
+7. 根据每个 Waiter 捕获的 owner loop 投递恢复回调：同 loop 使用 local defer queue，
+   跨 loop 使用 notify queue。
 
 发布路径不使用 `std::vector` 或 `std::function`。摘除链表后直接遍历原有 intrusive links，避免额外的批量通知容器分配。
 
-协程不会在 `publish()` 调用栈中直接恢复。即使 Publisher 与 Subscriber 位于同一 EventLoop，也通过 notify queue 异步恢复。
+协程不会在 `publish()` 调用栈中直接恢复。同一 EventLoop 使用 local defer queue，避免
+publish 发生在 notify drain 之后时，因为没有额外 wakeup 而滞留到下一次外部事件；跨
+EventLoop 仍通过 notify queue 唤醒 owner loop。
 
 ## NextAwaiter 算法
 
@@ -303,6 +307,7 @@ Waiter 使用独立堆对象，是因为跨线程 `EventLoop::NotifyEntry` 一�
 7. 已挂起的 `next(version)` 在发布后恢复，并合并恢复前的连续发布。
 8. 同一个 Subscriber 可以按显式版本创建独立等待。
 9. 多 EventLoop Subscriber 回到各自线程恢复。
+10. 同 loop 的 deferred callback 发布时无需外部 wakeup 也能恢复 waiter。
 10. 销毁挂起协程会取消 Waiter，不会被后续发布恢复。
 11. `timeout_for()` 后可以继续使用原版本等待。
 

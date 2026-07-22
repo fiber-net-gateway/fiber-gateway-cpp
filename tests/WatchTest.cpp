@@ -10,9 +10,11 @@
 #include <utility>
 
 #include "async/CoroutinePromiseBase.h"
+#include "async/Sleep.h"
 #include "async/Spawn.h"
 #include "async/Timeout.h"
 #include "async/Watch.h"
+#include "async/Yield.h"
 #include "event/EventLoopGroup.h"
 
 namespace {
@@ -62,6 +64,12 @@ DetachedTask publish_two_values(IntWatch::Publisher *publisher) {
     publisher->publish(10);
     publisher->publish(11);
     co_return;
+}
+
+DetachedTask publish_after_timer_and_yield(IntWatch::Publisher *publisher) {
+    co_await fiber::async::sleep(std::chrono::milliseconds(1));
+    co_await fiber::async::yield();
+    publisher->publish(17);
 }
 
 DetachedTask suspend_next_then_publish(IntWatch::Subscriber *subscriber, IntWatch::Publisher *publisher,
@@ -247,6 +255,33 @@ TEST(WatchTest, PendingNextResumesAfterPublish) {
     ASSERT_NE(snapshot.value, nullptr);
     EXPECT_EQ(*snapshot.value, 11);
     EXPECT_EQ(snapshot.version, 2u);
+    group.join();
+}
+
+TEST(WatchTest, SameLoopPublishFromDeferredCallbackResumesWithoutExternalWakeup) {
+    IntWatch watch;
+    auto publisher = watch.acquire_publisher();
+    ASSERT_TRUE(publisher.has_value());
+    auto subscriber = watch.subscribe();
+
+    fiber::event::EventLoopGroup group(1);
+    std::promise<IntSnapshot> result;
+    auto future = result.get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() { return await_next_and_stop(&subscriber, 0, &result); });
+    fiber::async::spawn(group.at(0), [&]() { return publish_after_timer_and_yield(&*publisher); });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "same-loop deferred publish did not resume the Watch waiter";
+        return;
+    }
+
+    IntSnapshot snapshot = future.get();
+    ASSERT_NE(snapshot.value, nullptr);
+    EXPECT_EQ(*snapshot.value, 17);
     group.join();
 }
 

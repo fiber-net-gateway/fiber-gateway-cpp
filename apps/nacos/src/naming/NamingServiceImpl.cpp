@@ -1,11 +1,35 @@
 #include "NamingServiceImpl.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <memory>
+#include <new>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
-#include <async/Timeout.h>
+#include <async/Sleep.h>
+#include <async/Spawn.h>
+#include <async/TaskSelect.h>
+#include <async/WaitGroup.h>
+#include <async/Watch.h>
+#include <async/WhenAny.h>
 #include <common/Assert.h>
+#include <event/EventLoop.h>
+#include <fiber/nacos/NacosAuthAccess.h>
+#include <fiber/nacos/NacosClient.h>
+#include <fiber/nacos/NacosClientConfig.h>
+
+#include "../SubscriptionPool.h"
+#include "../dto/JsonCodec.h"
+#include "../rpc/NacosBiRequestHandler.h"
+#include "../rpc/NacosRpc.h"
 
 namespace fiber::nacos::detail {
 namespace {
@@ -34,6 +58,144 @@ std::string_view nullable_text(const json::Nullable<std::string_view> &value) no
 
 } // namespace
 
+struct NamingProtocolState {
+    bool registered = false;
+    bool operation_in_flight = false;
+    bool draining = false;
+};
+
+using NamingEntry = SubscriptionEntry<ServiceInfo, NamingProtocolState>;
+using NamingEntryPtr = EntryPtr<NamingEntry>;
+using NamingResult = SubscriptionResult<ServiceInfo>;
+
+class NamingServiceImpl final : public NamingService {
+    struct RegistrationEntry {
+        RegistrationEntry(NamingServiceImpl &service, std::string service_name, std::string group, Instance instance);
+
+        NamingServiceImpl *owner = nullptr;
+        std::string service_name;
+        std::string group;
+        Instance instance;
+        async::Watch<RegistrationStatus> status_watch{RegistrationStatus{}};
+        std::optional<async::Watch<RegistrationStatus>::Publisher> status_publisher;
+        std::uint64_t desired_version = 1;
+        std::uint64_t completed_version = 0;
+        bool operation_in_flight = false;
+        bool registered = false;
+        bool closing = false;
+    };
+
+public:
+    NamingServiceImpl(NacosServiceDependencies dependencies, NamingServiceOptions options);
+    ~NamingServiceImpl() override;
+
+    [[nodiscard]] static bool valid_options(const NamingServiceOptions &options) noexcept;
+
+    [[nodiscard]] common::IoResult<void> start() noexcept override;
+    [[nodiscard]] async::Task<void> shutdown() noexcept override;
+
+    [[nodiscard]] async::Task<std::expected<std::shared_ptr<const ServiceInfo>, NamingServiceError>>
+    get(std::string service_name, std::string group) noexcept override;
+    [[nodiscard]] std::expected<Subscription<ServiceInfo>, NamingServiceError>
+    subscribe(std::string_view service_name, std::string_view group) override;
+    [[nodiscard]] std::expected<InstanceRegistration, NamingServiceError>
+    registry(std::string_view service_name, std::string_view group, Instance instance) override;
+
+private:
+    using EntryPtr = NamingEntryPtr;
+
+    struct AttemptResult {
+        NacosRpcCloseResult close;
+        bool reached_ready = false;
+    };
+
+    void on_subscription_add(EntryPtr entry);
+    [[nodiscard]] RemoveDecision on_subscription_remove(EntryPtr entry);
+    void schedule_subscription(EntryPtr entry, bool subscribe);
+    [[nodiscard]] async::DetachedTask run_subscription(EntryPtr entry, bool subscribe) noexcept;
+
+    [[nodiscard]] static async::Task<common::IoResult<dto::resp::NotifySubscriberResponse>>
+    handle_notify(void *context, NacosServerRequestContext &,
+                  const dto::req::NotifySubscriberRequest &request) noexcept;
+
+    [[nodiscard]] static std::expected<void, NamingServiceError>
+    update_registration_callback(void *context, Instance instance) noexcept;
+    [[nodiscard]] static InstanceRegistration::StatusSubscriber subscribe_registration_callback(void *context);
+    static void close_registration_callback(void *context) noexcept;
+    [[nodiscard]] std::expected<void, NamingServiceError> update_registration(RegistrationEntry &entry,
+                                                                              Instance instance) noexcept;
+    void close_registration(RegistrationEntry &entry) noexcept;
+    void schedule_registration(const std::shared_ptr<RegistrationEntry> &entry);
+    [[nodiscard]] async::DetachedTask run_registration(std::shared_ptr<RegistrationEntry> entry, Instance instance,
+                                                       std::uint64_t version, bool deregister) noexcept;
+    void erase_registration(RegistrationEntry &entry) noexcept;
+    void publish_registration(RegistrationEntry &entry, RegistrationState state,
+                              std::optional<NamingServiceError> error = std::nullopt);
+
+    [[nodiscard]] NamingServiceError validate_key(std::string_view service_name, std::string_view group) const;
+    [[nodiscard]] NamingServiceError validate_instance(const Instance &instance) const;
+    [[nodiscard]] bool valid_key(std::string_view service_name, std::string_view group) const noexcept;
+    [[nodiscard]] bool valid_instance(const Instance &instance) const noexcept;
+    [[nodiscard]] NamingServiceError map_error(NacosRpcError error) const;
+    [[nodiscard]] NamingServiceError response_error(const dto::ResponseBase &response) const;
+    [[nodiscard]] std::expected<ServiceInfo, NamingServiceError>
+    own_service_info(const dto::NamingServiceInfo &value) const;
+    void publish_value(NamingEntry &entry, ServiceInfo value);
+
+    void restore_connection_state();
+    void reset_connection_state();
+    void request_shutdown() noexcept;
+    [[nodiscard]] async::DetachedTask run() noexcept;
+    [[nodiscard]] async::Task<void> run_connection() noexcept;
+    [[nodiscard]] async::Task<AttemptResult> run_attempt(NacosRpcEndpoint endpoint,
+                                                         const NacosBiRequestHandler &handlers) noexcept;
+    [[nodiscard]] std::chrono::milliseconds jittered(std::chrono::milliseconds delay) noexcept;
+
+    template<typename Request, typename Response>
+    [[nodiscard]] async::Task<std::expected<void, NacosRpcError>>
+    request_rpc(const Request &request, mem::BufPool &pool, Response &response) noexcept {
+        FIBER_ASSERT(loop_->in_loop());
+        if (stopping()) {
+            co_return std::unexpected(shutdown_rpc_error());
+        }
+        NacosRpc *rpc = ready_rpc_;
+        if (!rpc) {
+            co_return std::unexpected(not_connected_rpc_error());
+        }
+        auto result = co_await rpc->request(request, pool, response);
+        if (!result && result.error().code == NacosRpcErrorCode::Shutdown && !stopping()) {
+            co_return std::unexpected(not_connected_rpc_error());
+        }
+        co_return std::move(result);
+    }
+
+    [[nodiscard]] static NacosRpcError shutdown_rpc_error();
+    [[nodiscard]] static NacosRpcError not_connected_rpc_error();
+    [[nodiscard]] NacosServiceState state() const {
+        auto snapshot = lifecycle_.current();
+        FIBER_ASSERT(snapshot.value != nullptr);
+        return *snapshot.value;
+    }
+    [[nodiscard]] bool running() const { return state() == NacosServiceState::Running; }
+    [[nodiscard]] bool stopping() const {
+        const NacosServiceState current = state();
+        return current == NacosServiceState::Stopping || current == NacosServiceState::Stopped;
+    }
+
+    event::EventLoop *loop_ = nullptr;
+    std::shared_ptr<const NacosClientConfig> config_;
+    NamingServiceOptions options_;
+    NacosAuthSubscriber auth_;
+    SubscriptionPool<NamingEntry> pool_;
+    std::vector<std::shared_ptr<RegistrationEntry>> registrations_;
+    async::WaitGroup tasks_;
+    async::Watch<NacosServiceState> lifecycle_{NacosServiceState::Created};
+    std::optional<async::Watch<NacosServiceState>::Publisher> lifecycle_publisher_;
+    NacosRpc *ready_rpc_ = nullptr;
+    std::size_t preferred_server_index_ = 0;
+    std::uint64_t random_state_ = 0x243f6a8885a308d3ull;
+};
+
 NamingServiceImpl::RegistrationEntry::RegistrationEntry(NamingServiceImpl &service, std::string service_name,
                                                         std::string group, Instance instance) :
     owner(&service), service_name(std::move(service_name)), group(std::move(group)), instance(std::move(instance)) {
@@ -49,20 +211,13 @@ NamingServiceImpl::NamingServiceImpl(NacosServiceDependencies dependencies, Nami
     FIBER_ASSERT(loop_ != nullptr);
     FIBER_ASSERT(config_ != nullptr);
     FIBER_ASSERT(valid_options(options_));
-    ready_publisher_ = ready_watch_.acquire_publisher();
-    wake_publisher_ = wake_watch_.acquire_publisher();
-    FIBER_ASSERT(ready_publisher_.has_value());
-    FIBER_ASSERT(wake_publisher_.has_value());
-    auto registered =
-            handlers_.add_request_handler<dto::req::NotifySubscriberRequest, dto::resp::NotifySubscriberResponse>(
-                    &handle_notify, this);
-    FIBER_ASSERT(registered.has_value());
+    lifecycle_publisher_ = lifecycle_.acquire_publisher();
+    FIBER_ASSERT(lifecycle_publisher_.has_value());
 }
 
 NamingServiceImpl::~NamingServiceImpl() {
-    FIBER_ASSERT(state_ == NacosServiceState::Created || state_ == NacosServiceState::Stopped);
-    FIBER_ASSERT(run_task_.empty());
-    FIBER_ASSERT(!rpc_.has_value());
+    FIBER_ASSERT(state() == NacosServiceState::Created || state() == NacosServiceState::Stopped);
+    FIBER_ASSERT(ready_rpc_ == nullptr);
     FIBER_ASSERT(tasks_.empty());
     FIBER_ASSERT(registrations_.empty());
 }
@@ -71,11 +226,10 @@ common::IoResult<void> NamingServiceImpl::start() noexcept {
     if (!loop_->in_loop()) {
         return std::unexpected(common::IoErr::NotSupported);
     }
-    if (state_ != NacosServiceState::Created) {
+    if (state() != NacosServiceState::Created) {
         return std::unexpected(common::IoErr::Already);
     }
-    state_ = NacosServiceState::Running;
-    run_task_.add();
+    lifecycle_publisher_->publish(NacosServiceState::Running);
     async::spawn(*loop_, [this]() { return run(); });
     return {};
 }
@@ -348,7 +502,7 @@ NamingServiceImpl::registry(std::string_view service_name, std::string_view grou
     auto entry = std::make_shared<RegistrationEntry>(*this, std::string(service_name), std::string(group),
                                                      std::move(instance));
     registrations_.push_back(entry);
-    if (rpc_ready_) {
+    if (ready_rpc_) {
         schedule_registration(entry);
     }
     return InstanceRegistration(std::static_pointer_cast<void>(entry), entry.get(), &update_registration_callback,
@@ -356,7 +510,7 @@ NamingServiceImpl::registry(std::string_view service_name, std::string_view grou
 }
 
 void NamingServiceImpl::on_subscription_add(EntryPtr entry) {
-    if (rpc_ready_) {
+    if (ready_rpc_) {
         schedule_subscription(std::move(entry), true);
     }
 }
@@ -364,7 +518,7 @@ void NamingServiceImpl::on_subscription_add(EntryPtr entry) {
 RemoveDecision NamingServiceImpl::on_subscription_remove(EntryPtr entry) {
     FIBER_ASSERT(loop_->in_loop());
     entry->proto.draining = true;
-    if (!stopping() && rpc_ready_ && (entry->proto.registered || entry->proto.operation_in_flight)) {
+    if (!stopping() && ready_rpc_ && (entry->proto.registered || entry->proto.operation_in_flight)) {
         schedule_subscription(std::move(entry), false);
         return RemoveDecision::Defer;
     }
@@ -373,7 +527,7 @@ RemoveDecision NamingServiceImpl::on_subscription_remove(EntryPtr entry) {
 
 void NamingServiceImpl::schedule_subscription(EntryPtr entry, bool subscribe_value) {
     FIBER_ASSERT(loop_->in_loop());
-    if (stopping() || !rpc_ready_ || entry->proto.operation_in_flight) {
+    if (stopping() || !ready_rpc_ || entry->proto.operation_in_flight) {
         return;
     }
     if (subscribe_value && entry->proto.draining) {
@@ -406,14 +560,10 @@ async::DetachedTask NamingServiceImpl::run_subscription(EntryPtr entry, bool sub
         entry->proto.registered = false;
     }
 
-    if (!stopping() && rpc_ready_ && entry->proto.draining && entry->proto.registered) {
+    if (!stopping() && ready_rpc_ && entry->proto.draining && entry->proto.registered) {
         schedule_subscription(entry, false);
     }
-    task_done();
-}
-
-void NamingServiceImpl::register_all_subscriptions() {
-    pool_.for_each([this](NamingEntry &entry) { schedule_subscription(EntryPtr(&entry), true); });
+    tasks_.done();
 }
 
 void NamingServiceImpl::publish_value(NamingEntry &entry, ServiceInfo value) {
@@ -500,7 +650,7 @@ void NamingServiceImpl::close_registration(RegistrationEntry &entry) noexcept {
         if (entry.operation_in_flight) {
             return;
         }
-        if (rpc_ready_ && entry.registered) {
+        if (ready_rpc_ && entry.registered) {
             schedule_registration(candidate);
             return;
         }
@@ -513,7 +663,7 @@ void NamingServiceImpl::close_registration(RegistrationEntry &entry) noexcept {
 
 void NamingServiceImpl::schedule_registration(const std::shared_ptr<RegistrationEntry> &entry) {
     FIBER_ASSERT(loop_->in_loop());
-    if (stopping() || !rpc_ready_ || entry->operation_in_flight) {
+    if (stopping() || !ready_rpc_ || entry->operation_in_flight) {
         return;
     }
     const bool deregister = entry->closing;
@@ -573,7 +723,7 @@ async::DetachedTask NamingServiceImpl::run_registration(std::shared_ptr<Registra
 
     entry->operation_in_flight = false;
     if (stopping()) {
-        task_done();
+        tasks_.done();
         co_return;
     }
 
@@ -582,7 +732,7 @@ async::DetachedTask NamingServiceImpl::run_registration(std::shared_ptr<Registra
         publish_registration(*entry, RegistrationState::Closed);
         entry->owner = nullptr;
         erase_registration(*entry);
-        task_done();
+        tasks_.done();
         co_return;
     }
 
@@ -599,10 +749,11 @@ async::DetachedTask NamingServiceImpl::run_registration(std::shared_ptr<Registra
     if (entry->closing || entry->desired_version != entry->completed_version) {
         schedule_registration(entry);
     }
-    task_done();
+    tasks_.done();
 }
 
-void NamingServiceImpl::register_all_instances() {
+void NamingServiceImpl::restore_connection_state() {
+    pool_.for_each([this](NamingEntry &entry) { schedule_subscription(EntryPtr(&entry), true); });
     for (const auto &entry: registrations_) {
         schedule_registration(entry);
     }
@@ -627,11 +778,11 @@ void NamingServiceImpl::publish_registration(RegistrationEntry &entry, Registrat
 
 async::DetachedTask NamingServiceImpl::run() noexcept {
     FIBER_ASSERT(loop_->in_loop());
-    FIBER_ASSERT(state_ == NacosServiceState::Running || state_ == NacosServiceState::Stopping);
-    if (state_ == NacosServiceState::Running) {
+    FIBER_ASSERT(state() == NacosServiceState::Running || state() == NacosServiceState::Stopping);
+    if (running()) {
         co_await run_connection();
     }
-    set_rpc_ready(false);
+    FIBER_ASSERT(ready_rpc_ == nullptr);
     co_await tasks_.join();
     pool_.disable();
     pool_.close_all();
@@ -642,23 +793,30 @@ async::DetachedTask NamingServiceImpl::run() noexcept {
         entry->owner = nullptr;
     }
     registrations_.clear();
-    state_ = NacosServiceState::Stopped;
-    run_task_.done();
+    FIBER_ASSERT(state() == NacosServiceState::Stopping);
+    lifecycle_publisher_->publish(NacosServiceState::Stopped);
 }
 
 async::Task<void> NamingServiceImpl::shutdown() noexcept {
     FIBER_ASSERT(loop_->in_loop());
-    if (state_ == NacosServiceState::Stopped) {
+    auto lifecycle = lifecycle_.subscribe();
+    auto snapshot = lifecycle.current();
+    FIBER_ASSERT(snapshot.value != nullptr);
+    if (*snapshot.value == NacosServiceState::Stopped) {
         co_return;
     }
-    if (state_ == NacosServiceState::Created) {
+    if (*snapshot.value == NacosServiceState::Created) {
         request_shutdown();
-        state_ = NacosServiceState::Stopped;
+        registrations_.clear();
+        lifecycle_publisher_->publish(NacosServiceState::Stopped);
         co_return;
     }
     request_shutdown();
-    co_await run_task_.join();
-    FIBER_ASSERT(state_ == NacosServiceState::Stopped);
+    snapshot = lifecycle.current();
+    while (snapshot.value && *snapshot.value != NacosServiceState::Stopped) {
+        snapshot = co_await lifecycle.next(snapshot.version);
+    }
+    FIBER_ASSERT(snapshot.value && *snapshot.value == NacosServiceState::Stopped);
 }
 
 void NamingServiceImpl::request_shutdown() noexcept {
@@ -666,41 +824,19 @@ void NamingServiceImpl::request_shutdown() noexcept {
     if (stopping()) {
         return;
     }
-    const bool run_started = state_ == NacosServiceState::Running;
-    state_ = NacosServiceState::Stopping;
-    set_rpc_ready(false);
+    FIBER_ASSERT(state() == NacosServiceState::Created || state() == NacosServiceState::Running);
+    lifecycle_publisher_->publish(NacosServiceState::Stopping);
     pool_.disable();
     pool_.close_all();
     for (const auto &entry: registrations_) {
         publish_registration(*entry, RegistrationState::Closed);
         entry->owner = nullptr;
     }
-    if (!run_started && !rpc_) {
-        for (const auto &entry: registrations_) {
-            entry->owner = nullptr;
-        }
-        registrations_.clear();
-    }
-    wake_publisher_->publish(true);
-    if (rpc_) {
-        rpc_->shutdown();
-    }
-}
-
-NamingServiceImpl::ReadySubscriber NamingServiceImpl::subscribe_connection_ready() { return ready_watch_.subscribe(); }
-
-void NamingServiceImpl::set_rpc_ready(bool ready) {
-    FIBER_ASSERT(loop_->in_loop());
-    if (rpc_ready_ == ready) {
-        return;
-    }
-    rpc_ready_ = ready;
-    ready_publisher_->publish(ready);
 }
 
 void NamingServiceImpl::reset_connection_state() {
     FIBER_ASSERT(loop_->in_loop());
-    FIBER_ASSERT(!rpc_ready_);
+    FIBER_ASSERT(ready_rpc_ == nullptr);
     FIBER_ASSERT(tasks_.empty());
     pool_.for_each([](NamingEntry &entry) {
         entry.proto.registered = false;
@@ -715,45 +851,64 @@ void NamingServiceImpl::reset_connection_state() {
     }
 }
 
-async::Task<NamingServiceImpl::AttemptResult> NamingServiceImpl::run_attempt(NacosRpcEndpoint endpoint) noexcept {
-    FIBER_ASSERT(!rpc_.has_value());
-    rpc_.emplace(NacosRpcDependencies{.loop = *loop_, .config = *config_, .options = options_.rpc, .auth = auth_},
+async::Task<NamingServiceImpl::AttemptResult>
+NamingServiceImpl::run_attempt(NacosRpcEndpoint endpoint, const NacosBiRequestHandler &handlers) noexcept {
+    FIBER_ASSERT(ready_rpc_ == nullptr);
+    NacosRpc rpc(NacosRpcDependencies{.loop = *loop_, .config = *config_, .options = options_.rpc, .auth = auth_},
                  std::move(endpoint), NacosRpcModule::Naming);
 
     async::WaitGroup run_done;
     std::optional<NacosRpcCloseResult> close;
     run_done.add();
-    async::spawn(*loop_, [this, &run_done, &close]() -> async::DetachedTask {
-        close = co_await rpc_->run(handlers_);
+    async::spawn(*loop_, [&rpc, &handlers, &run_done, &close]() -> async::DetachedTask {
+        close = co_await rpc.run(handlers);
         run_done.done();
     });
 
     AttemptResult result;
-    auto ready = co_await rpc_->wait_ready();
-    if (ready && running()) {
-        result.reached_ready = true;
-        set_rpc_ready(true);
-        register_all_subscriptions();
-        register_all_instances();
+    auto lifecycle = lifecycle_.subscribe();
+    auto lifecycle_snapshot = lifecycle.current();
+    if (running()) {
+        auto ready_or_stopping = co_await async::when_any(
+                [&rpc]() { return rpc.wait_ready().select(); },
+                [&lifecycle, version = lifecycle_snapshot.version]() { return lifecycle.next(version); });
+        if (ready_or_stopping.is<0>()) {
+            auto ready = std::move(ready_or_stopping).get<0>();
+            if (ready && running()) {
+                result.reached_ready = true;
+                ready_rpc_ = &rpc;
+                restore_connection_state();
+            }
+        } else {
+            std::move(ready_or_stopping).get<1>();
+        }
     }
 
-    co_await run_done.join();
+    lifecycle_snapshot = lifecycle.current();
+    if (!running()) {
+        ready_rpc_ = nullptr;
+        rpc.shutdown();
+    } else if (!run_done.empty()) {
+        auto closed_or_stopping = co_await async::when_any(
+                [&run_done]() { return run_done.join(); },
+                [&lifecycle, version = lifecycle_snapshot.version]() { return lifecycle.next(version); });
+        if (closed_or_stopping.is<1>()) {
+            std::move(closed_or_stopping).get<1>();
+            ready_rpc_ = nullptr;
+            rpc.shutdown();
+        } else {
+            closed_or_stopping.get<0>();
+        }
+    }
+    if (!run_done.empty()) {
+        co_await run_done.join();
+    }
     FIBER_ASSERT(close.has_value());
     result.close = std::move(*close);
-    set_rpc_ready(false);
+    ready_rpc_ = nullptr;
     co_await tasks_.join();
     reset_connection_state();
-    rpc_.reset();
     co_return result;
-}
-
-async::Task<void> NamingServiceImpl::wait_backoff(std::chrono::milliseconds delay) noexcept {
-    auto wake = wake_watch_.subscribe();
-    const std::uint64_t version = wake.current().version;
-    auto result = co_await async::timeout_for([&wake, version]() { return wake.next(version); }, delay);
-    if (!result) {
-        FIBER_ASSERT(result.error() == common::IoErr::TimedOut);
-    }
 }
 
 std::chrono::milliseconds NamingServiceImpl::jittered(std::chrono::milliseconds delay) noexcept {
@@ -770,12 +925,19 @@ std::chrono::milliseconds NamingServiceImpl::jittered(std::chrono::milliseconds 
 }
 
 async::Task<void> NamingServiceImpl::run_connection() noexcept {
+    NacosBiRequestHandler handlers;
+    auto registered =
+            handlers.add_request_handler<dto::req::NotifySubscriberRequest, dto::resp::NotifySubscriberResponse>(
+                    &handle_notify, this);
+    FIBER_ASSERT(registered.has_value());
+
+    std::optional<NacosRpcEndpoint> redirect;
     auto retry_delay = options_.rpc.reconnect_initial_delay;
     while (running()) {
-        if (redirect_) {
-            NacosRpcEndpoint endpoint = std::move(*redirect_);
-            redirect_.reset();
-            auto result = co_await run_attempt(std::move(endpoint));
+        if (redirect) {
+            NacosRpcEndpoint endpoint = std::move(*redirect);
+            redirect.reset();
+            auto result = co_await run_attempt(std::move(endpoint), handlers);
             if (result.reached_ready) {
                 retry_delay = options_.rpc.reconnect_initial_delay;
             }
@@ -784,9 +946,9 @@ async::Task<void> NamingServiceImpl::run_connection() noexcept {
                 break;
             }
             if (result.close.redirect) {
-                redirect_ = std::move(result.close.redirect);
+                redirect = std::move(result.close.redirect);
             }
-            if (!running() || redirect_) {
+            if (!running() || redirect) {
                 continue;
             }
         }
@@ -800,7 +962,7 @@ async::Task<void> NamingServiceImpl::run_connection() noexcept {
                     .port = config_->grpc_port(),
                     .server_index = server_index,
             };
-            auto result = co_await run_attempt(std::move(endpoint));
+            auto result = co_await run_attempt(std::move(endpoint), handlers);
             if (result.reached_ready) {
                 preferred_server_index_ = server_index;
                 retry_delay = options_.rpc.reconnect_initial_delay;
@@ -810,17 +972,27 @@ async::Task<void> NamingServiceImpl::run_connection() noexcept {
                 break;
             }
             if (result.close.redirect) {
-                redirect_ = std::move(result.close.redirect);
+                redirect = std::move(result.close.redirect);
                 break;
             }
         }
         if (!running()) {
             break;
         }
-        if (redirect_) {
+        if (redirect) {
             continue;
         }
-        co_await wait_backoff(jittered(retry_delay));
+        auto lifecycle = lifecycle_.subscribe();
+        const auto lifecycle_snapshot = lifecycle.current();
+        const auto delay = jittered(retry_delay);
+        auto backoff_or_stopping = co_await async::when_any(
+                [delay]() { return async::sleep(delay); },
+                [&lifecycle, version = lifecycle_snapshot.version]() { return lifecycle.next(version); });
+        if (backoff_or_stopping.is<0>()) {
+            backoff_or_stopping.get<0>();
+        } else {
+            std::move(backoff_or_stopping).get<1>();
+        }
         if (retry_delay < options_.rpc.reconnect_max_delay) {
             retry_delay = retry_delay > options_.rpc.reconnect_max_delay / 2 ? options_.rpc.reconnect_max_delay
                                                                              : retry_delay * 2;
@@ -828,9 +1000,33 @@ async::Task<void> NamingServiceImpl::run_connection() noexcept {
     }
 }
 
-void NamingServiceImpl::task_done() noexcept {
-    FIBER_ASSERT(loop_->in_loop());
-    tasks_.done();
+std::expected<std::unique_ptr<NamingService>, NacosCreateError>
+create_naming_service(NacosServiceDependencies dependencies, NamingServiceOptions options) {
+    if (!NamingServiceImpl::valid_options(options)) {
+        return std::unexpected(NacosCreateError{.code = NacosCreateErrorCode::InvalidOptions});
+    }
+    auto service = std::unique_ptr<NamingService>(
+            new (std::nothrow) NamingServiceImpl(std::move(dependencies), std::move(options)));
+    if (!service) {
+        return std::unexpected(NacosCreateError{.code = NacosCreateErrorCode::NoMem});
+    }
+    return service;
 }
 
 } // namespace fiber::nacos::detail
+
+namespace fiber::nacos {
+
+std::expected<std::unique_ptr<NamingService>, NacosCreateError> NamingService::create(NacosClient &client,
+                                                                                      NamingServiceOptions options) {
+    if (!detail::NamingServiceImpl::valid_options(options)) {
+        return std::unexpected(NacosCreateError{.code = NacosCreateErrorCode::InvalidOptions});
+    }
+    auto dependencies = client.service_dependencies();
+    if (!dependencies) {
+        return std::unexpected(dependencies.error());
+    }
+    return detail::create_naming_service(std::move(*dependencies), std::move(options));
+}
+
+} // namespace fiber::nacos
