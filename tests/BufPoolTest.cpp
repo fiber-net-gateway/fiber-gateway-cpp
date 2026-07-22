@@ -36,4 +36,19 @@ TEST(BufPoolTest, SmallBlockCapacityExcludesBlockHeader) {
     }
 }
 
+TEST(BufPoolTest, ResetReleasesStorageAndAllowsReuse) {
+    fiber::mem::BufPool pool(64);
+    auto *first = static_cast<unsigned char *>(pool.alloc(256));
+    ASSERT_NE(first, nullptr);
+    std::memset(first, 0xaa, 256);
+
+    pool.reset();
+
+    auto *second = static_cast<unsigned char *>(pool.alloc(256));
+    ASSERT_NE(second, nullptr);
+    std::memset(second, 0xbb, 256);
+    EXPECT_EQ(second[0], 0xbb);
+    EXPECT_EQ(second[255], 0xbb);
+}
+
 } // namespace
