@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <string>
 
+#include <async/Watch.h>
+
 namespace fiber::nacos {
 
 enum class NacosAuthAccessKind : std::uint8_t {
@@ -17,6 +19,8 @@ struct NacosAuthAccess {
     NacosAuthAccessKind kind = NacosAuthAccessKind::NotConfigured;
     std::string access_token;
 };
+
+using NacosAuthSubscriber = async::Watch<NacosAuthAccess>::Subscriber;
 
 } // namespace fiber::nacos
 

@@ -1,6 +1,7 @@
 #ifndef FIBER_NACOS_NAMING_SERVICE_H
 #define FIBER_NACOS_NAMING_SERVICE_H
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -12,10 +13,25 @@
 #include <async/Watch.h>
 #include <common/IoError.h>
 #include <common/NonCopyable.h>
+#include <common/NonMovable.h>
 
+#include "NacosCreateError.h"
+#include "NacosRpcOptions.h"
 #include "Subscription.h"
 
 namespace fiber::nacos {
+
+class NacosClient;
+
+struct NamingServiceOptions {
+    NacosRpcOptions rpc;
+    std::size_t max_service_name_bytes = 1024;
+    std::size_t max_group_bytes = 1024;
+    std::size_t max_hosts_per_service = 4096;
+    std::size_t max_metadata_entries = 256;
+    std::size_t max_metadata_key_bytes = 1024;
+    std::size_t max_metadata_value_bytes = 4096;
+};
 
 struct NamingMetadataEntry {
     std::string key;
@@ -110,9 +126,15 @@ private:
     CloseFn close_ = nullptr;
 };
 
-class NamingService : public common::NonCopyable {
+class NamingService : public common::NonCopyable, public common::NonMovable {
 public:
+    [[nodiscard]] static std::expected<std::unique_ptr<NamingService>, NacosCreateError>
+    create(NacosClient &client, NamingServiceOptions options = {});
+
     virtual ~NamingService() = default;
+
+    [[nodiscard]] virtual common::IoResult<void> start() noexcept = 0;
+    [[nodiscard]] virtual async::Task<void> shutdown() noexcept = 0;
 
     [[nodiscard]] virtual async::Task<std::expected<std::shared_ptr<const ServiceInfo>, NamingServiceError>>
     get(std::string service_name, std::string group) noexcept = 0;

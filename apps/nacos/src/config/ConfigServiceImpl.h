@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -20,6 +21,7 @@
 #include <fiber/nacos/NacosClientConfig.h>
 
 #include "../SubscriptionPool.h"
+#include "../detail/NacosServiceDependencies.h"
 #include "../rpc/NacosBiRequestHandler.h"
 #include "../rpc/NacosRpc.h"
 
@@ -46,14 +48,15 @@ using ConfigResult = SubscriptionResult<ConfigData>;
 
 class ConfigServiceImpl final : public ConfigService {
 public:
-    using AuthWatch = async::Watch<NacosAuthAccess>;
     using ReadySubscriber = async::Watch<bool>::Subscriber;
 
-    ConfigServiceImpl(event::EventLoop &loop, const NacosClientConfig &config, const NacosClientOptions &options,
-                      AuthWatch &auth_watch);
+    ConfigServiceImpl(NacosServiceDependencies dependencies, ConfigServiceOptions options);
     ~ConfigServiceImpl() override;
 
-    [[nodiscard]] static bool valid_options(const NacosClientOptions &options) noexcept;
+    [[nodiscard]] static bool valid_options(const ConfigServiceOptions &options) noexcept;
+
+    [[nodiscard]] common::IoResult<void> start() noexcept override;
+    [[nodiscard]] async::Task<void> shutdown() noexcept override;
 
     [[nodiscard]] async::Task<std::expected<std::optional<ConfigData>, ConfigServiceError>>
     get_config(std::string data_id, std::string group) noexcept override;
@@ -65,8 +68,6 @@ public:
     [[nodiscard]] std::expected<Subscription<ConfigData>, ConfigServiceError>
     subscribe(std::string_view data_id, std::string_view group) override;
 
-    [[nodiscard]] async::Task<void> run() noexcept;
-    void shutdown() noexcept;
     [[nodiscard]] ReadySubscriber subscribe_connection_ready();
 
 private:
@@ -102,6 +103,8 @@ private:
     void process_changed(const dto::resp::ConfigChangeBatchListenResponse &response);
     void reset_connection_state();
     void set_rpc_ready(bool ready);
+    void request_shutdown() noexcept;
+    [[nodiscard]] async::DetachedTask run() noexcept;
     [[nodiscard]] async::Task<void> run_connection() noexcept;
     [[nodiscard]] async::Task<AttemptResult> run_attempt(NacosRpcEndpoint endpoint) noexcept;
     [[nodiscard]] async::DetachedTask run_redo(std::uint64_t ready_version) noexcept;
@@ -113,14 +116,14 @@ private:
     [[nodiscard]] async::Task<std::expected<void, NacosRpcError>>
     request_rpc(const Request &request, mem::BufPool &pool, Response &response) noexcept {
         FIBER_ASSERT(loop_->in_loop());
-        if (stopping_) {
+        if (stopping()) {
             co_return std::unexpected(shutdown_rpc_error());
         }
         if (!rpc_ready_ || !rpc_) {
             co_return std::unexpected(not_connected_rpc_error());
         }
         auto result = co_await rpc_->request(request, pool, response);
-        if (!result && result.error().code == NacosRpcErrorCode::Shutdown && !stopping_) {
+        if (!result && result.error().code == NacosRpcErrorCode::Shutdown && !stopping()) {
             co_return std::unexpected(not_connected_rpc_error());
         }
         co_return std::move(result);
@@ -128,14 +131,19 @@ private:
 
     [[nodiscard]] static NacosRpcError shutdown_rpc_error();
     [[nodiscard]] static NacosRpcError not_connected_rpc_error();
+    [[nodiscard]] bool running() const noexcept { return state_ == NacosServiceState::Running; }
+    [[nodiscard]] bool stopping() const noexcept {
+        return state_ == NacosServiceState::Stopping || state_ == NacosServiceState::Stopped;
+    }
 
     event::EventLoop *loop_ = nullptr;
-    const NacosClientConfig *config_ = nullptr;
-    const NacosClientOptions *options_ = nullptr;
-    AuthWatch *auth_watch_ = nullptr;
+    std::shared_ptr<const NacosClientConfig> config_;
+    ConfigServiceOptions options_;
+    NacosAuthSubscriber auth_;
     NacosBiRequestHandler handlers_;
     std::optional<NacosRpc> rpc_;
     SubscriptionPool<ConfigEntry> pool_;
+    async::WaitGroup run_task_;
     async::WaitGroup tasks_;
     async::Watch<bool> ready_watch_{false};
     std::optional<async::Watch<bool>::Publisher> ready_publisher_;
@@ -144,9 +152,8 @@ private:
     std::optional<NacosRpcEndpoint> redirect_;
     std::size_t preferred_server_index_ = 0;
     std::uint64_t random_state_ = 0x9e3779b97f4a7c15ull;
+    NacosServiceState state_ = NacosServiceState::Created;
     bool rpc_ready_ = false;
-    bool run_active_ = false;
-    bool stopping_ = false;
 };
 
 } // namespace fiber::nacos::detail

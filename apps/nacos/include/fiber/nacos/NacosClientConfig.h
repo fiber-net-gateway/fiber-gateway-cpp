@@ -9,7 +9,6 @@
 #include <vector>
 
 #include <net/IpAddress.h>
-#include <net/TcpSocketOptions.h>
 
 namespace fiber::nacos {
 
@@ -74,32 +73,6 @@ struct NacosClientOptions {
     std::size_t max_auth_response_bytes = 64 * 1024;
     std::chrono::milliseconds retry_initial_delay{1000};
     std::chrono::milliseconds retry_max_delay{30000};
-
-    std::chrono::milliseconds grpc_connect_timeout{3000};
-    net::TcpSocketOptions grpc_tcp{.no_delay = net::TcpOptionMode::Enabled};
-    std::chrono::milliseconds grpc_request_timeout{3000};
-    std::chrono::milliseconds grpc_handshake_timeout{5000};
-    std::chrono::milliseconds grpc_compatibility_setup_delay{1000};
-    std::chrono::milliseconds grpc_heartbeat_interval{10000};
-    std::chrono::milliseconds grpc_reconnect_initial_delay{1000};
-    std::chrono::milliseconds grpc_reconnect_max_delay{60000};
-    std::size_t max_inbound_grpc_message_bytes = 10 * 1024 * 1024;
-    // Retained for source compatibility. NacosRpc currently serializes server
-    // request handling and therefore does not maintain a response queue.
-    std::size_t max_push_response_queue = 64;
-    std::size_t max_push_response_bytes = 1024 * 1024;
-    std::chrono::milliseconds config_subscription_redo_interval{180000};
-    std::size_t max_config_content_bytes = 10 * 1024 * 1024;
-    std::size_t max_config_data_id_bytes = 1024;
-    std::size_t max_config_group_bytes = 1024;
-    std::size_t max_listen_contexts_per_request = 100;
-    std::size_t max_naming_service_name_bytes = 1024;
-    std::size_t max_naming_group_bytes = 1024;
-    std::size_t max_naming_hosts_per_service = 4096;
-    std::size_t max_naming_metadata_entries = 256;
-    std::size_t max_naming_metadata_key_bytes = 1024;
-    std::size_t max_naming_metadata_value_bytes = 4096;
-    std::string client_ip_override;
 };
 
 } // namespace fiber::nacos

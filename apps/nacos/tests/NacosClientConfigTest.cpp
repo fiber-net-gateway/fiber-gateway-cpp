@@ -4,6 +4,7 @@
 #include <utility>
 
 #include <fiber/nacos/NacosClientConfig.h>
+#include <fiber/nacos/NacosRpcOptions.h>
 
 namespace {
 
@@ -39,9 +40,9 @@ TEST(NacosClientConfigTest, AppliesDefaultsAndOwnsValues) {
     EXPECT_EQ(result->context_path(), "/nacos");
 }
 
-TEST(NacosClientConfigTest, ClientOptionsEnableGrpcTcpNoDelayByDefault) {
-    fiber::nacos::NacosClientOptions options;
-    EXPECT_EQ(options.grpc_tcp.no_delay, fiber::net::TcpOptionMode::Enabled);
+TEST(NacosClientConfigTest, RpcOptionsEnableTcpNoDelayByDefault) {
+    fiber::nacos::NacosRpcOptions options;
+    EXPECT_EQ(options.tcp.no_delay, fiber::net::TcpOptionMode::Enabled);
 }
 
 TEST(NacosClientConfigTest, AllowsAuthenticationToBeUnconfigured) {

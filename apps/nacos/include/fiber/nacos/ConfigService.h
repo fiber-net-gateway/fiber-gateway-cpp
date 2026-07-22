@@ -1,6 +1,8 @@
 #ifndef FIBER_NACOS_CONFIG_SERVICE_H
 #define FIBER_NACOS_CONFIG_SERVICE_H
 
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -11,10 +13,24 @@
 #include <async/Task.h>
 #include <common/IoError.h>
 #include <common/NonCopyable.h>
+#include <common/NonMovable.h>
 
+#include "NacosCreateError.h"
+#include "NacosRpcOptions.h"
 #include "Subscription.h"
 
 namespace fiber::nacos {
+
+class NacosClient;
+
+struct ConfigServiceOptions {
+    NacosRpcOptions rpc;
+    std::chrono::milliseconds subscription_redo_interval{180000};
+    std::size_t max_content_bytes = 10 * 1024 * 1024;
+    std::size_t max_data_id_bytes = 1024;
+    std::size_t max_group_bytes = 1024;
+    std::size_t max_listen_contexts_per_request = 100;
+};
 
 enum class ConfigType : std::uint8_t {
     Json,
@@ -60,9 +76,15 @@ struct ConfigServiceError {
     std::string message;
 };
 
-class ConfigService : public common::NonCopyable {
+class ConfigService : public common::NonCopyable, public common::NonMovable {
 public:
+    [[nodiscard]] static std::expected<std::unique_ptr<ConfigService>, NacosCreateError>
+    create(NacosClient &client, ConfigServiceOptions options = {});
+
     virtual ~ConfigService() = default;
+
+    [[nodiscard]] virtual common::IoResult<void> start() noexcept = 0;
+    [[nodiscard]] virtual async::Task<void> shutdown() noexcept = 0;
 
     [[nodiscard]] virtual async::Task<std::expected<std::optional<ConfigData>, ConfigServiceError>>
     get_config(std::string data_id, std::string group) noexcept = 0;

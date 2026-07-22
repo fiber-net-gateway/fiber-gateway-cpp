@@ -77,8 +77,7 @@ void append_chunk(mem::IoBufChain &chunk, std::string &out) {
 } // namespace
 
 NacosClientImpl::NacosClientImpl(event::EventLoop &loop, NacosClientConfig config, NacosClientOptions options) :
-    loop_(&loop), config_(std::move(config)), options_(std::move(options)),
-    config_service_(loop, config_, options_, auth_watch_), naming_service_(loop, config_, options_, auth_watch_) {
+    loop_(&loop), config_(std::make_shared<const NacosClientConfig>(std::move(config))), options_(std::move(options)) {
     shutdown_publisher_ = shutdown_watch_.acquire_publisher();
     auth_publisher_ = auth_watch_.acquire_publisher();
     FIBER_ASSERT(shutdown_publisher_.has_value());
@@ -94,8 +93,7 @@ bool NacosClientImpl::valid_options(const NacosClientOptions &options) noexcept 
     return options.connect_timeout > std::chrono::milliseconds::zero() &&
            options.request_timeout > std::chrono::milliseconds::zero() && options.max_auth_response_bytes > 0 &&
            options.retry_initial_delay > std::chrono::milliseconds::zero() &&
-           options.retry_max_delay >= options.retry_initial_delay && ConfigServiceImpl::valid_options(options) &&
-           NamingServiceImpl::valid_options(options);
+           options.retry_max_delay >= options.retry_initial_delay;
 }
 
 common::IoResult<void> NacosClientImpl::start() noexcept {
@@ -108,10 +106,6 @@ common::IoResult<void> NacosClientImpl::start() noexcept {
     state_ = NacosClientState::Running;
     task_group_.add();
     async::spawn(*loop_, [this]() { return run_auth(); });
-    task_group_.add();
-    async::spawn(*loop_, [this]() { return run_config(); });
-    task_group_.add();
-    async::spawn(*loop_, [this]() { return run_naming(); });
     return {};
 }
 
@@ -123,8 +117,6 @@ async::Task<void> NacosClientImpl::shutdown() noexcept {
     }
     if (state_ == NacosClientState::Created || state_ == NacosClientState::Running) {
         state_ = NacosClientState::Stopping;
-        config_service_.shutdown();
-        naming_service_.shutdown();
         shutdown_publisher_->publish(true);
         publish_auth(NacosAuthAccess{.kind = NacosAuthAccessKind::Stopped});
     }
@@ -133,7 +125,20 @@ async::Task<void> NacosClientImpl::shutdown() noexcept {
     state_ = NacosClientState::Stopped;
 }
 
-async::Watch<NacosAuthAccess>::Subscriber NacosClientImpl::subscribe_auth() { return auth_watch_.subscribe(); }
+NacosAuthSubscriber NacosClientImpl::subscribe_auth() { return auth_watch_.subscribe(); }
+
+std::expected<NacosServiceDependencies, NacosCreateError> NacosClientImpl::service_dependencies() {
+    auto auth = auth_watch_.subscribe();
+    const auto snapshot = auth.current();
+    if (snapshot.value && snapshot.value->kind == NacosAuthAccessKind::Stopped) {
+        return std::unexpected(NacosCreateError{.code = NacosCreateErrorCode::InvalidState});
+    }
+    return NacosServiceDependencies{
+            .loop = loop_,
+            .config = config_,
+            .auth = std::move(auth),
+    };
+}
 
 async::Watch<bool>::Subscriber NacosClientImpl::subscribe_shutdown() { return shutdown_watch_.subscribe(); }
 
@@ -154,8 +159,8 @@ async::DetachedTask NacosClientImpl::run_auth() noexcept {
     FIBER_ASSERT(initial_shutdown.value != nullptr);
     std::uint64_t shutdown_version = initial_shutdown.version;
 
-    if (config_.username().empty()) {
-        FIBER_ASSERT(config_.password().empty());
+    if (config_->username().empty()) {
+        FIBER_ASSERT(config_->password().empty());
         publish_auth(NacosAuthAccess{.kind = NacosAuthAccessKind::NotConfigured});
         end_task();
         co_return;
@@ -163,11 +168,11 @@ async::DetachedTask NacosClientImpl::run_auth() noexcept {
 
     std::string auth_body;
     auth_body.append("username=");
-    util::form_encode(config_.username(), auth_body);
+    util::form_encode(config_->username(), auth_body);
     auth_body.append("&password=");
-    util::form_encode(config_.password(), auth_body);
+    util::form_encode(config_->password(), auth_body);
 
-    const std::string target = make_login_target(config_);
+    const std::string target = make_login_target(*config_);
     std::string access_token;
     std::size_t preferred_server_index = 0;
     auto retry_delay = options_.retry_initial_delay;
@@ -196,7 +201,7 @@ async::DetachedTask NacosClientImpl::run_auth() noexcept {
         std::size_t successful_server_index = 0;
         bool succeeded = false;
 
-        const std::size_t server_count = config_.server_ips().size();
+        const std::size_t server_count = config_->server_ips().size();
         for (std::size_t offset = 0; offset < server_count && running(); ++offset) {
             const std::size_t server_index = (preferred_server_index + offset) % server_count;
             auto result = co_await login(server_index, target, auth_body);
@@ -255,23 +260,13 @@ async::DetachedTask NacosClientImpl::run_auth() noexcept {
     co_return;
 }
 
-async::DetachedTask NacosClientImpl::run_config() noexcept {
-    co_await config_service_.run();
-    end_task();
-}
-
-async::DetachedTask NacosClientImpl::run_naming() noexcept {
-    co_await naming_service_.run();
-    end_task();
-}
-
 async::Task<std::expected<NacosClientImpl::AuthLoginSuccess, common::IoErr>>
 NacosClientImpl::login(std::size_t server_index, std::string_view target, std::string_view auth_body) noexcept {
     if (!running()) {
         co_return std::unexpected(common::IoErr::Canceled);
     }
 
-    http::Http1ClientConnection connection(*loop_, make_connection_options(config_, server_index));
+    http::Http1ClientConnection connection(*loop_, make_connection_options(*config_, server_index));
     auto connect_result = co_await connection.connect(options_.connect_timeout);
     if (!running()) {
         co_return std::unexpected(common::IoErr::Canceled);
@@ -283,7 +278,7 @@ NacosClientImpl::login(std::size_t server_index, std::string_view target, std::s
     mem::BufPool pool;
     http::ClientHttp1Exchange exchange(connection, pool);
     http::HttpHeaders headers(pool);
-    const std::string host_header = make_host_header(config_, server_index);
+    const std::string host_header = make_host_header(*config_, server_index);
     if (!headers.add_view("host", host_header) ||
         !headers.add_view("content-type", "application/x-www-form-urlencoded") ||
         !headers.add_view("accept", "application/json") || !headers.add_view("connection", "close")) {

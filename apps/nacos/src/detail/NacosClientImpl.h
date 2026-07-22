@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -18,8 +19,7 @@
 #include <fiber/nacos/NacosClient.h>
 #include <fiber/nacos/NacosClientConfig.h>
 
-#include "../config/ConfigServiceImpl.h"
-#include "../naming/NamingServiceImpl.h"
+#include "NacosServiceDependencies.h"
 
 namespace fiber::nacos::detail {
 
@@ -40,14 +40,11 @@ public:
     [[nodiscard]] common::IoResult<void> start() noexcept;
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
-    [[nodiscard]] async::Watch<NacosAuthAccess>::Subscriber subscribe_auth();
-    [[nodiscard]] ConfigService &config_service() noexcept { return config_service_; }
-    [[nodiscard]] NamingService &naming_service() noexcept { return naming_service_; }
+    [[nodiscard]] NacosAuthSubscriber subscribe_auth();
+    [[nodiscard]] std::expected<NacosServiceDependencies, NacosCreateError> service_dependencies();
 
     [[nodiscard]] event::EventLoop &loop() const noexcept { return *loop_; }
-    [[nodiscard]] const NacosClientConfig &config() const noexcept { return config_; }
-    [[nodiscard]] const NacosClientOptions &options() const noexcept { return options_; }
-    [[nodiscard]] async::Watch<NacosAuthAccess> &auth_watch() noexcept { return auth_watch_; }
+    [[nodiscard]] const NacosClientConfig &config() const noexcept { return *config_; }
 
 private:
     struct AuthLoginSuccess {
@@ -56,8 +53,6 @@ private:
     };
 
     [[nodiscard]] async::DetachedTask run_auth() noexcept;
-    [[nodiscard]] async::DetachedTask run_config() noexcept;
-    [[nodiscard]] async::DetachedTask run_naming() noexcept;
     [[nodiscard]] async::Task<std::expected<AuthLoginSuccess, common::IoErr>>
     login(std::size_t server_index, std::string_view target, std::string_view auth_body) noexcept;
 
@@ -67,7 +62,7 @@ private:
     void publish_auth(NacosAuthAccess auth_access);
 
     event::EventLoop *loop_ = nullptr;
-    NacosClientConfig config_;
+    std::shared_ptr<const NacosClientConfig> config_;
     NacosClientOptions options_;
     NacosClientState state_ = NacosClientState::Created;
     async::WaitGroup task_group_;
@@ -75,8 +70,6 @@ private:
     std::optional<async::Watch<bool>::Publisher> shutdown_publisher_;
     async::Watch<NacosAuthAccess> auth_watch_;
     std::optional<async::Watch<NacosAuthAccess>::Publisher> auth_publisher_;
-    ConfigServiceImpl config_service_;
-    NamingServiceImpl naming_service_;
 };
 
 } // namespace fiber::nacos::detail

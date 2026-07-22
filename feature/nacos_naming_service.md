@@ -16,22 +16,27 @@ Java 客户端不作为本模块的设计依据。第一版实现下列能力：
 
 ## 2. 公共 API
 
-`NacosClient::naming_service()` 返回与客户端同生命周期的 `NamingService`：
+`NamingService::create(client, options)` 创建独立服务。客户端提供不可变配置、认证
+subscriber 和固定 EventLoop，但不持有 NamingService，也不替它启动或等待关闭：
 
 ```cpp
-auto &naming = client->naming_service();
+auto naming = fiber::nacos::NamingService::create(*client);
+if (!naming) {
+    // Handle NacosCreateError.
+}
+auto started = (*naming)->start();
 
-auto queried = co_await naming.get("gateway", "DEFAULT_GROUP");
-auto subscribed = naming.subscribe("gateway", "DEFAULT_GROUP");
+auto queried = co_await (*naming)->get("gateway", "DEFAULT_GROUP");
+auto subscribed = (*naming)->subscribe("gateway", "DEFAULT_GROUP");
 
 fiber::nacos::Instance instance{
         .ip = "127.0.0.1",
         .port = 8080,
 };
-auto registered = naming.registry("gateway", "DEFAULT_GROUP", std::move(instance));
+auto registered = (*naming)->registry("gateway", "DEFAULT_GROUP", std::move(instance));
 ```
 
-所有创建、更新、关闭操作必须在客户端所属 `EventLoop` 上执行。订阅内部的
+同一客户端可以创建多个 NamingService；每个实例拥有独立连接、订阅/注册表和生命周期。所有启动、更新、关闭操作必须在客户端所属 `EventLoop` 上执行。订阅内部的
 `Watch::next(version)` 可以由其他 loop 等待，但 `Subscription::close()`、
 `InstanceRegistration::update()` 和 `InstanceRegistration::close()` 仍属于 owner loop。
 
@@ -47,8 +52,9 @@ NamingService 拥有独立的 `NacosRpc` 连接，ConnectionSetup labels 固定�
 ```text
 NacosClient::start()
     -> authentication coroutine
-    -> ConfigService connection loop
-    -> NamingService connection loop
+
+NamingService::start()
+    -> independent NamingService connection loop
 
 NamingService ready
     -> restore live subscriptions
@@ -60,8 +66,9 @@ NamingService ready
 服务级状态，不随物理连接销毁。
 
 关闭时先拒绝新工作并发布订阅 `Closed`，再停止当前 RPC、唤醒退避、等待所有任务退出。
-仍存在的注册句柄收到 `RegistrationState::Closed`；客户端析构前必须完成
-`NacosClient::shutdown()`。
+仍存在的注册句柄收到 `RegistrationState::Closed`。`shutdown()` 是该服务的完成屏障，支持重复调用和 start 前
+调用。客户端 shutdown 只停止认证并发布 `Stopped`；它不直接调用或等待 NamingService。推荐先 await 服务
+shutdown，再 shutdown 客户端。
 
 ## 4. Wire DTO
 
@@ -118,16 +125,17 @@ wire 订阅：首个引用发送 `subscribe=true`，最后一个引用释放时 
 
 ## 7. 限制项
 
-`NacosClientOptions` 为 NamingService 提供以下硬限制：
+`NamingServiceOptions` 提供以下硬限制：
 
-- `max_naming_service_name_bytes`
-- `max_naming_group_bytes`
-- `max_naming_hosts_per_service`
-- `max_naming_metadata_entries`
-- `max_naming_metadata_key_bytes`
-- `max_naming_metadata_value_bytes`
+- `max_service_name_bytes`
+- `max_group_bytes`
+- `max_hosts_per_service`
+- `max_metadata_entries`
+- `max_metadata_key_bytes`
+- `max_metadata_value_bytes`
 
-所有值必须大于零，否则 `NacosClient::create()` 返回 `InvalidOptions`。
+所有值必须大于零，否则 `NamingService::create()` 返回 `InvalidOptions`。嵌套的 `NacosRpcOptions` 单独控制该
+服务的连接、请求、握手、心跳、重连、消息大小和 TCP 行为。客户端停止后工厂返回 `InvalidState`。
 
 ## 8. 验证
 

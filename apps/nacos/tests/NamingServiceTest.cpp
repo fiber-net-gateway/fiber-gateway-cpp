@@ -14,7 +14,6 @@
 #include <async/Sleep.h>
 #include <async/Spawn.h>
 #include <async/Timeout.h>
-#include <async/WaitGroup.h>
 #include <event/EventLoopGroup.h>
 #include <fiber/nacos/NacosClientConfig.h>
 #include <fiber/nacos/NamingService.h>
@@ -476,19 +475,17 @@ struct NamingCaseResult {
     std::size_t setups = 0;
 };
 
-DetachedTask drive_service(nacos_detail::NamingServiceImpl *service, fiber::async::WaitGroup *tasks) {
-    co_await service->run();
-    tasks->done();
-}
-
 DetachedTask run_case(fiber::event::EventLoop *loop, ScriptedNamingServer *server,
-                      fiber::nacos::NacosClientConfig config, fiber::nacos::NacosClientOptions options, bool reconnect,
-                      std::shared_ptr<std::promise<NamingCaseResult>> finished) {
+                      fiber::nacos::NacosClientConfig config, fiber::nacos::NamingServiceOptions options,
+                      bool reconnect, std::shared_ptr<std::promise<NamingCaseResult>> finished) {
     NamingCaseResult result;
     fiber::async::Watch<fiber::nacos::NacosAuthAccess> auth_watch;
     auto auth_publisher = auth_watch.acquire_publisher();
     FIBER_ASSERT(auth_publisher.has_value());
-    nacos_detail::NamingServiceImpl service(*loop, config, options, auth_watch);
+    auto auth = auth_watch.subscribe();
+    auto shared_config = std::make_shared<const fiber::nacos::NacosClientConfig>(std::move(config));
+    nacos_detail::NamingServiceImpl service({.loop = loop, .config = std::move(shared_config), .auth = std::move(auth)},
+                                            std::move(options));
 
     auto invalid_get = co_await service.get("", "group");
     auto invalid_subscription = service.subscribe("service", "");
@@ -508,9 +505,7 @@ DetachedTask run_case(fiber::event::EventLoop *loop, ScriptedNamingServer *serve
     auto status = registered->subscribe_status();
     std::uint64_t status_version = status.current().version;
 
-    fiber::async::WaitGroup tasks;
-    tasks.add();
-    fiber::async::spawn(*loop, [&service, &tasks]() { return drive_service(&service, &tasks); });
+    FIBER_ASSERT(service.start().has_value());
     auth_publisher->publish({.kind = fiber::nacos::NacosAuthAccessKind::Present, .access_token = "token"});
     result.ready = co_await wait_ready(service);
     result.naming_label = server->naming_label_seen();
@@ -563,14 +558,13 @@ DetachedTask run_case(fiber::event::EventLoop *loop, ScriptedNamingServer *serve
         result.deregistered = co_await wait_until([server]() { return server->deregister_count() == 1; });
     }
 
-    service.shutdown();
+    co_await service.shutdown();
     auth_publisher->publish({.kind = fiber::nacos::NacosAuthAccessKind::Stopped});
     if (stopped_subscription) {
         const auto stopped = stopped_subscription->subscriber().current();
         result.stopped = stopped.value && stopped.value->kind == fiber::nacos::ResultKind::Closed;
         stopped_subscription->close();
     }
-    co_await tasks.join();
     result.notify_acks = server->notify_ack_count();
     result.subscribes = server->subscribe_count();
     result.registrations = server->register_count();
@@ -597,15 +591,15 @@ NamingCaseResult execute_case(bool reconnect) {
     auto config = fiber::nacos::NacosClientConfig::create(std::move(params));
     EXPECT_TRUE(config.has_value());
 
-    fiber::nacos::NacosClientOptions options;
-    options.grpc_connect_timeout = 500ms;
-    options.grpc_request_timeout = 500ms;
-    options.grpc_handshake_timeout = 1s;
-    options.grpc_compatibility_setup_delay = 10ms;
-    options.grpc_heartbeat_interval = 1s;
-    options.grpc_reconnect_initial_delay = 10ms;
-    options.grpc_reconnect_max_delay = 50ms;
-    options.max_inbound_grpc_message_bytes = 1024 * 1024;
+    fiber::nacos::NamingServiceOptions options;
+    options.rpc.connect_timeout = 500ms;
+    options.rpc.request_timeout = 500ms;
+    options.rpc.handshake_timeout = 1s;
+    options.rpc.compatibility_setup_delay = 10ms;
+    options.rpc.heartbeat_interval = 1s;
+    options.rpc.reconnect_initial_delay = 10ms;
+    options.rpc.reconnect_max_delay = 50ms;
+    options.rpc.max_inbound_message_bytes = 1024 * 1024;
 
     auto finished = std::make_shared<std::promise<NamingCaseResult>>();
     auto future = finished->get_future();
@@ -708,7 +702,7 @@ wait_instance_port(fiber::nacos::Subscription<fiber::nacos::ServiceInfo>::Subscr
 }
 
 DetachedTask run_rnacos_naming_case(fiber::event::EventLoop *loop, fiber::nacos::NacosClientConfig config,
-                                    fiber::nacos::NacosClientOptions options,
+                                    fiber::nacos::NamingServiceOptions options,
                                     std::shared_ptr<std::promise<RnacosNamingResult>> finished) {
     constexpr std::string_view kService = "fiber-naming-service-integration";
     constexpr std::string_view kGroup = "DEFAULT_GROUP";
@@ -716,14 +710,15 @@ DetachedTask run_rnacos_naming_case(fiber::event::EventLoop *loop, fiber::nacos:
     fiber::async::Watch<fiber::nacos::NacosAuthAccess> auth_watch;
     auto auth_publisher = auth_watch.acquire_publisher();
     FIBER_ASSERT(auth_publisher.has_value());
-    nacos_detail::NamingServiceImpl service(*loop, config, options, auth_watch);
+    auto auth = auth_watch.subscribe();
+    auto shared_config = std::make_shared<const fiber::nacos::NacosClientConfig>(std::move(config));
+    nacos_detail::NamingServiceImpl service({.loop = loop, .config = std::move(shared_config), .auth = std::move(auth)},
+                                            std::move(options));
     auto subscription_result = service.subscribe(kService, kGroup);
     fiber::nacos::Instance instance{.ip = "127.0.0.1", .port = 19081};
     auto registration_result = service.registry(kService, kGroup, instance);
 
-    fiber::async::WaitGroup tasks;
-    tasks.add();
-    fiber::async::spawn(*loop, [&service, &tasks]() { return drive_service(&service, &tasks); });
+    FIBER_ASSERT(service.start().has_value());
     auth_publisher->publish(fiber::nacos::NacosAuthAccess{
             .kind = fiber::nacos::NacosAuthAccessKind::Present,
             .access_token = "rnacos-integration-token",
@@ -764,9 +759,8 @@ DetachedTask run_rnacos_naming_case(fiber::event::EventLoop *loop, fiber::nacos:
         subscription.close();
     }
 
-    service.shutdown();
+    co_await service.shutdown();
     auth_publisher->publish(fiber::nacos::NacosAuthAccess{.kind = fiber::nacos::NacosAuthAccessKind::Stopped});
-    co_await tasks.join();
     result.stopped = true;
     finished->set_value(result);
 }
@@ -792,14 +786,14 @@ TEST(NacosNamingServiceTest, RnacosInteropWhenEnabled) {
     auto config = fiber::nacos::NacosClientConfig::create(std::move(params));
     ASSERT_TRUE(config.has_value());
 
-    fiber::nacos::NacosClientOptions options;
-    options.grpc_connect_timeout = 1s;
-    options.grpc_request_timeout = 2s;
-    options.grpc_handshake_timeout = 3s;
-    options.grpc_compatibility_setup_delay = 50ms;
-    options.grpc_heartbeat_interval = 1s;
-    options.grpc_reconnect_initial_delay = 20ms;
-    options.grpc_reconnect_max_delay = 100ms;
+    fiber::nacos::NamingServiceOptions options;
+    options.rpc.connect_timeout = 1s;
+    options.rpc.request_timeout = 2s;
+    options.rpc.handshake_timeout = 3s;
+    options.rpc.compatibility_setup_delay = 50ms;
+    options.rpc.heartbeat_interval = 1s;
+    options.rpc.reconnect_initial_delay = 20ms;
+    options.rpc.reconnect_max_delay = 100ms;
 
     fiber::event::EventLoopGroup group(1);
     group.start();

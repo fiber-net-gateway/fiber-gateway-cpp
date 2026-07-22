@@ -111,6 +111,12 @@ auto client = fiber::nacos::NacosClient::create(loop, std::move(*config));
 if (!client) {
     // Handle NacosCreateError.
 }
+
+auto configs = fiber::nacos::ConfigService::create(**client);
+auto naming = fiber::nacos::NamingService::create(**client);
+if (!configs || !naming) {
+    // Handle NacosCreateError.
+}
 ```
 
 `server_ips` must contain at least one unicast address. Duplicate addresses are
@@ -118,20 +124,22 @@ removed while preserving order. The context path must be absolute and defaults
 to `/nacos`. Username and password must either both be empty or both be
 non-empty. When both are empty, HTTP authentication is skipped.
 
-`NacosClient::config_service()` returns the ConfigService instance owned by the
-client. Configuration operations run on the client's EventLoop:
+`NacosClient` owns authentication state only. `ConfigService::create()` creates
+an independent service using the client's immutable configuration,
+authentication subscription, and EventLoop. The client does not retain the
+service, and multiple ConfigService instances may be created when separate
+connections and subscription sets are required. Configuration operations run
+on that EventLoop:
 
 ```cpp
-auto &configs = (*client)->config_service();
-
-auto published = co_await configs.publish("routes", "DEFAULT_GROUP", route_json,
-                                          fiber::nacos::ConfigType::Json);
-auto queried = co_await configs.get_config("routes", "DEFAULT_GROUP");
+auto published = co_await (*configs)->publish("routes", "DEFAULT_GROUP", route_json,
+                                             fiber::nacos::ConfigType::Json);
+auto queried = co_await (*configs)->get_config("routes", "DEFAULT_GROUP");
 if (queried && *queried) {
     use((*queried)->content, (*queried)->md5);
 }
 
-auto subscribed = configs.subscribe("routes", "DEFAULT_GROUP");
+auto subscribed = (*configs)->subscribe("routes", "DEFAULT_GROUP");
 if (subscribed) {
     auto subscription = std::move(*subscribed);
     auto &sub = subscription.subscriber();
@@ -168,8 +176,8 @@ watched value is a `SubscriptionResult<ConfigData>`: `kind == Success` carries
 the latest `ConfigData` in `data`; `kind == Closed` marks end-of-subscription
 (service shutdown), with no `data`. Each snapshot carries the Watch version;
 pass that version back to the next `next(version)`. Destroy or
-explicitly close subscriptions on the client EventLoop, before destroying the
-client.
+explicitly close subscriptions on the owner EventLoop, before destroying their
+ConfigService.
 
 Transient connection and query failures retain the last Present or NotFound
 value. Each newly ready physical connection re-registers all live entries, and
@@ -179,15 +187,13 @@ During shutdown every live subscription is closed: `next()` resumes with
 new work. All registration/query tasks finish before shutdown
 returns.
 
-`NacosClient::naming_service()` returns the NamingService instance owned by the
-client. Naming operations use the same fixed EventLoop:
+`NamingService::create()` follows the same independent ownership model. Naming
+operations use the client's fixed EventLoop:
 
 ```cpp
-auto &naming = (*client)->naming_service();
+auto queried = co_await (*naming)->get("gateway", "DEFAULT_GROUP");
 
-auto queried = co_await naming.get("gateway", "DEFAULT_GROUP");
-
-auto subscribed = naming.subscribe("gateway", "DEFAULT_GROUP");
+auto subscribed = (*naming)->subscribe("gateway", "DEFAULT_GROUP");
 if (subscribed) {
     auto subscription = std::move(*subscribed);
     auto &sub = subscription.subscriber();
@@ -207,7 +213,7 @@ fiber::nacos::Instance instance{
         .ip = "127.0.0.1",
         .port = 8080,
 };
-auto registration = naming.registry("gateway", "DEFAULT_GROUP", std::move(instance));
+auto registration = (*naming)->registry("gateway", "DEFAULT_GROUP", std::move(instance));
 ```
 
 `get()` first uses a successful live-subscription value for the same key, then
@@ -225,18 +231,20 @@ deregistration. Every new physical naming connection restores active
 subscriptions and re-registers the latest instance values. Creation, update,
 close, and destruction of these handles are owner-EventLoop operations.
 
-`NacosClientOptions` controls authentication and gRPC connect/request/handshake
-timeouts, heartbeat timing, retry backoff, inbound/response size limits,
-configuration content/key limits, naming host/metadata limits, maximum listen
-contexts per batch, the subscription redo interval, and response size limits. `client_ip_override` can
-replace the local gRPC socket address used in Payload metadata. Refresh timing
-is intentionally not configurable: it follows the Java Nacos 2.x client rule
+Options are split by owner. `NacosClientOptions` controls only authentication
+connect/request timeouts, response limits, and retry backoff.
+`ConfigServiceOptions` and `NamingServiceOptions` own their service-specific
+limits and each contain independent `NacosRpcOptions` for gRPC timeouts,
+heartbeat, reconnect backoff, message limits, TCP options, and
+`client_ip_override`. Authentication refresh timing is intentionally not
+configurable: it follows the Java Nacos 2.x client rule
 `max(5 seconds, tokenTtl * 90%)`.
 
 ## Event Loop and Lifecycle
 
-The `EventLoop` passed to `NacosClient::create()` is a permanent client
-invariant. Call `start()` and await `shutdown()` on that loop:
+The `EventLoop` passed to `NacosClient::create()` is shared by the client and
+every service created from it. Call every `start()` and await every
+`shutdown()` on that loop:
 
 ```cpp
 auto auth = (*client)->subscribe_auth();
@@ -245,39 +253,50 @@ auto start_result = (*client)->start();
 if (!start_result) {
     // Handle the lifecycle error.
 }
+auto config_start = (*configs)->start();
+auto naming_start = (*naming)->start();
 
 auto access = co_await auth.next(0);
 if (access.value && access.value->kind == fiber::nacos::NacosAuthAccessKind::Present) {
     use_token(access.value->access_token);
 } else if (access.value && access.value->kind == fiber::nacos::NacosAuthAccessKind::InitialFailed) {
+    co_await (*naming)->shutdown();
+    co_await (*configs)->shutdown();
     co_await (*client)->shutdown();
     // Fail application startup.
 }
 
+co_await (*naming)->shutdown();
+co_await (*configs)->shutdown();
 co_await (*client)->shutdown();
 ```
 
-The lifecycle is:
+The client and each service have their own lifecycle:
 
 ```text
 Created -> Running -> Stopping -> Stopped
 ```
 
-During shutdown, the client publishes its internal shutdown signal and a final
-`Stopped` authentication access value. ConfigService and NamingService stop
-their current `NacosRpc`, wait for each `run()` barrier and all
-connection-scoped tasks, and then destroy it. The client then awaits both
-services and the authentication coroutine through its `WaitGroup`. An idle
-authentication coroutine wakes immediately. If a login HTTP operation is in
-progress, shutdown waits only for that current connect or request operation's
-configured timeout; the coroutine checks shutdown before starting another HTTP
-step or server attempt. `shutdown()` is idempotent.
+Each service start creates its own connection/reconnect task. Service shutdown
+stops its current `NacosRpc`, waits for the `run()` barrier and all
+connection-scoped tasks, and then destroys it. Client shutdown does not invoke
+or await service shutdown; it stops only authentication and publishes a final
+`Stopped` access value. A running service treats that authentication value as
+terminal and begins stopping, but callers must still await that service's
+`shutdown()` as its completion barrier. The recommended order is therefore
+NamingService, ConfigService, then NacosClient. Every `shutdown()` is
+idempotent, including shutdown before start.
+
+Service factories reject invalid service options and reject creation after the
+client has stopped. A created service owns safe copies/subscriptions of the
+client dependencies it needs; `NacosClient` never stores service pointers.
 
 The authentication coroutine keeps the current token and refresh deadline as
 local variables. There are no persistent generation, state, expiry, or error
 fields in the public authentication API.
 
-Destroy a client only before it has started or after `shutdown()` completes.
+Destroy each object only before it has started or after its own `shutdown()`
+completes.
 The destructor asserts this invariant.
 
 ## Authentication Behavior
