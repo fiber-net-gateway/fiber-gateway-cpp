@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cstdlib>
@@ -29,6 +30,7 @@
 #include <net/TcpListener.h>
 
 #include "../src/naming/NamingServiceImpl.h"
+#include "../src/rpc/NacosPayloadCodec.h"
 
 namespace {
 
@@ -426,23 +428,6 @@ private:
     bool reset_scheduled_ = false;
 };
 
-fiber::async::Task<bool> wait_ready(nacos_detail::NamingServiceImpl &service) {
-    auto ready = service.subscribe_connection_ready();
-    auto current = ready.current();
-    std::uint64_t version = current.version;
-    for (;;) {
-        if (current.value && *current.value) {
-            co_return true;
-        }
-        auto next = co_await fiber::async::timeout_for([&ready, version]() { return ready.next(version); }, 2s);
-        if (!next) {
-            co_return false;
-        }
-        current = std::move(*next);
-        version = current.version;
-    }
-}
-
 template<typename Predicate>
 fiber::async::Task<bool> wait_until(Predicate predicate) {
     const auto deadline = fiber::event::EventLoop::current().now() + 2s;
@@ -484,12 +469,14 @@ DetachedTask run_case(fiber::event::EventLoop *loop, ScriptedNamingServer *serve
     FIBER_ASSERT(auth_publisher.has_value());
     auto auth = auth_watch.subscribe();
     auto shared_config = std::make_shared<const fiber::nacos::NacosClientConfig>(std::move(config));
-    nacos_detail::NamingServiceImpl service({.loop = loop, .config = std::move(shared_config), .auth = std::move(auth)},
-                                            std::move(options));
+    auto created = nacos_detail::create_naming_service(
+            {.loop = loop, .config = std::move(shared_config), .auth = std::move(auth)}, std::move(options));
+    FIBER_ASSERT(created.has_value());
+    auto service = std::move(*created);
 
-    auto invalid_get = co_await service.get("", "group");
-    auto invalid_subscription = service.subscribe("service", "");
-    auto invalid_registration = service.registry("service", "group", fiber::nacos::Instance{});
+    auto invalid_get = co_await service->get("", "group");
+    auto invalid_subscription = service->subscribe("service", "");
+    auto invalid_registration = service->registry("service", "group", fiber::nacos::Instance{});
     result.rejects_invalid_arguments =
             !invalid_get && invalid_get.error().code == fiber::nacos::NamingServiceErrorCode::InvalidArgument &&
             !invalid_subscription &&
@@ -497,17 +484,18 @@ DetachedTask run_case(fiber::event::EventLoop *loop, ScriptedNamingServer *serve
             !invalid_registration &&
             invalid_registration.error().code == fiber::nacos::NamingServiceErrorCode::InvalidArgument;
 
-    auto first = service.subscribe("service", "group");
-    auto second = service.subscribe("service", "group");
-    auto stopped_subscription = service.subscribe("stopped", "group");
+    auto first = service->subscribe("service", "group");
+    auto second = service->subscribe("service", "group");
+    auto stopped_subscription = service->subscribe("stopped", "group");
     fiber::nacos::Instance instance{.ip = "127.0.0.1", .port = 8080};
-    auto registered = service.registry("service", "group", instance);
+    auto registered = service->registry("service", "group", instance);
     auto status = registered->subscribe_status();
     std::uint64_t status_version = status.current().version;
 
-    FIBER_ASSERT(service.start().has_value());
+    FIBER_ASSERT(service->start().has_value());
     auth_publisher->publish({.kind = fiber::nacos::NacosAuthAccessKind::Present, .access_token = "token"});
-    result.ready = co_await wait_ready(service);
+    result.ready =
+            co_await wait_until([server]() { return server->setup_count() >= 1 && server->naming_label_seen(); });
     result.naming_label = server->naming_label_seen();
 
     if (result.ready && first && second && registered) {
@@ -519,9 +507,9 @@ DetachedTask run_case(fiber::event::EventLoop *loop, ScriptedNamingServer *serve
                         pushed->value->data && pushed->value->data->name == "service";
 
         const std::size_t queries_before = server->query_count();
-        auto cached = co_await service.get("service", "group");
+        auto cached = co_await service->get("service", "group");
         result.cached_get = cached && (*cached)->name == "service" && server->query_count() == queries_before;
-        auto queried = co_await service.get("other", "group");
+        auto queried = co_await service->get("other", "group");
         result.queried = queried && (*queried)->name == "other" && server->query_count() == queries_before + 1;
         // One wire subscription for the two "service" consumers, plus the
         // independent "stopped" subscription used to verify shutdown.
@@ -558,7 +546,7 @@ DetachedTask run_case(fiber::event::EventLoop *loop, ScriptedNamingServer *serve
         result.deregistered = co_await wait_until([server]() { return server->deregister_count() == 1; });
     }
 
-    co_await service.shutdown();
+    co_await service->shutdown();
     auth_publisher->publish({.kind = fiber::nacos::NacosAuthAccessKind::Stopped});
     if (stopped_subscription) {
         const auto stopped = stopped_subscription->subscriber().current();
@@ -629,6 +617,71 @@ NamingCaseResult execute_case(bool reconnect) {
     return result;
 }
 
+struct LifecycleInterruptResult {
+    bool auth_wait = false;
+    bool reconnect_backoff = false;
+};
+
+DetachedTask run_lifecycle_interrupt_case(fiber::event::EventLoop *loop, std::shared_ptr<std::atomic<int>> stage,
+                                          std::shared_ptr<std::promise<LifecycleInterruptResult>> finished) {
+    auto make_config = []() {
+        fiber::nacos::NacosClientConfigParams params;
+        params.server_ips.push_back(fiber::net::IpAddress::loopback_v4());
+        params.grpc_port = 1;
+        return fiber::nacos::NacosClientConfig::create(std::move(params));
+    };
+
+    LifecycleInterruptResult result;
+    {
+        fiber::async::Watch<fiber::nacos::NacosAuthAccess> auth_watch;
+        auto auth_publisher = auth_watch.acquire_publisher();
+        FIBER_ASSERT(auth_publisher.has_value());
+        auto config = make_config();
+        FIBER_ASSERT(config.has_value());
+        auto service = nacos_detail::create_naming_service(
+                {.loop = loop,
+                 .config = std::make_shared<const fiber::nacos::NacosClientConfig>(std::move(*config)),
+                 .auth = auth_watch.subscribe()},
+                {});
+        FIBER_ASSERT(service.has_value());
+        FIBER_ASSERT((*service)->start().has_value());
+        co_await fiber::async::sleep(10ms);
+        stage->store(1, std::memory_order_release);
+        const auto start = fiber::event::EventLoop::current().now();
+        co_await (*service)->shutdown();
+        result.auth_wait = fiber::event::EventLoop::current().now() - start < 1s;
+        stage->store(2, std::memory_order_release);
+    }
+
+    {
+        fiber::async::Watch<fiber::nacos::NacosAuthAccess> auth_watch;
+        auto auth_publisher = auth_watch.acquire_publisher();
+        FIBER_ASSERT(auth_publisher.has_value());
+        auto config = make_config();
+        FIBER_ASSERT(config.has_value());
+        fiber::nacos::NamingServiceOptions options;
+        options.rpc.connect_timeout = 20ms;
+        options.rpc.reconnect_initial_delay = 2s;
+        options.rpc.reconnect_max_delay = 2s;
+        auto service = nacos_detail::create_naming_service(
+                {.loop = loop,
+                 .config = std::make_shared<const fiber::nacos::NacosClientConfig>(std::move(*config)),
+                 .auth = auth_watch.subscribe()},
+                options);
+        FIBER_ASSERT(service.has_value());
+        FIBER_ASSERT((*service)->start().has_value());
+        auth_publisher->publish({.kind = fiber::nacos::NacosAuthAccessKind::Present, .access_token = "token"});
+        co_await fiber::async::sleep(100ms);
+        stage->store(3, std::memory_order_release);
+        const auto start = fiber::event::EventLoop::current().now();
+        co_await (*service)->shutdown();
+        result.reconnect_backoff = fiber::event::EventLoop::current().now() - start < 1s;
+        stage->store(4, std::memory_order_release);
+    }
+
+    finished->set_value(result);
+}
+
 TEST(NacosNamingServiceTest, QuerySubscriptionRegistrationAndShutdown) {
     const NamingCaseResult result = execute_case(false);
     EXPECT_TRUE(result.rejects_invalid_arguments);
@@ -652,6 +705,29 @@ TEST(NacosNamingServiceTest, RestoresSubscriptionAndRegistrationAfterReconnect) 
     EXPECT_TRUE(result.reconnected) << "subscribes=" << result.subscribes << " registrations=" << result.registrations
                                     << " setups=" << result.setups;
     EXPECT_TRUE(result.stopped);
+}
+
+TEST(NacosNamingServiceTest, ShutdownInterruptsAuthWaitAndReconnectBackoff) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+    auto finished = std::make_shared<std::promise<LifecycleInterruptResult>>();
+    auto stage = std::make_shared<std::atomic<int>>(0);
+    auto future = finished->get_future();
+    fiber::async::spawn(group.at(0), [loop = &group.at(0), stage, finished]() {
+        return run_lifecycle_interrupt_case(loop, stage, finished);
+    });
+    const auto future_status = future.wait_for(4s);
+    if (future_status != std::future_status::ready) {
+        ADD_FAILURE() << "timed out at lifecycle stage " << stage->load(std::memory_order_acquire);
+        group.stop();
+        group.join();
+        return;
+    }
+    const LifecycleInterruptResult result = future.get();
+    group.stop();
+    group.join();
+    EXPECT_TRUE(result.auth_wait);
+    EXPECT_TRUE(result.reconnect_backoff);
 }
 
 struct RnacosNamingResult {
@@ -712,29 +788,31 @@ DetachedTask run_rnacos_naming_case(fiber::event::EventLoop *loop, fiber::nacos:
     FIBER_ASSERT(auth_publisher.has_value());
     auto auth = auth_watch.subscribe();
     auto shared_config = std::make_shared<const fiber::nacos::NacosClientConfig>(std::move(config));
-    nacos_detail::NamingServiceImpl service({.loop = loop, .config = std::move(shared_config), .auth = std::move(auth)},
-                                            std::move(options));
-    auto subscription_result = service.subscribe(kService, kGroup);
+    auto created = nacos_detail::create_naming_service(
+            {.loop = loop, .config = std::move(shared_config), .auth = std::move(auth)}, std::move(options));
+    FIBER_ASSERT(created.has_value());
+    auto service = std::move(*created);
+    auto subscription_result = service->subscribe(kService, kGroup);
     fiber::nacos::Instance instance{.ip = "127.0.0.1", .port = 19081};
-    auto registration_result = service.registry(kService, kGroup, instance);
+    auto registration_result = service->registry(kService, kGroup, instance);
 
-    FIBER_ASSERT(service.start().has_value());
+    FIBER_ASSERT(service->start().has_value());
     auth_publisher->publish(fiber::nacos::NacosAuthAccess{
             .kind = fiber::nacos::NacosAuthAccessKind::Present,
             .access_token = "rnacos-integration-token",
     });
-    result.ready = co_await wait_ready(service);
 
-    if (result.ready && subscription_result && registration_result) {
+    if (subscription_result && registration_result) {
         auto subscription = std::move(*subscription_result);
         auto registration = std::move(*registration_result);
         auto status = registration.subscribe_status();
         std::uint64_t status_version = status.current().version;
         result.registered =
                 co_await wait_registration_state(status, status_version, fiber::nacos::RegistrationState::Registered);
+        result.ready = result.registered;
 
         if (result.registered) {
-            auto queried = co_await service.get(std::string(kService), std::string(kGroup));
+            auto queried = co_await service->get(std::string(kService), std::string(kGroup));
             if (queried) {
                 result.queried = std::any_of((*queried)->hosts.begin(), (*queried)->hosts.end(), [](const auto &host) {
                     return host.ip == "127.0.0.1" && host.port == 19081;
@@ -759,7 +837,7 @@ DetachedTask run_rnacos_naming_case(fiber::event::EventLoop *loop, fiber::nacos:
         subscription.close();
     }
 
-    co_await service.shutdown();
+    co_await service->shutdown();
     auth_publisher->publish(fiber::nacos::NacosAuthAccess{.kind = fiber::nacos::NacosAuthAccessKind::Stopped});
     result.stopped = true;
     finished->set_value(result);

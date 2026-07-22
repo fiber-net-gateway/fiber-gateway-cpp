@@ -61,13 +61,17 @@ NamingService ready
     -> replay live instance registrations
 ```
 
-一次物理连接终止后，NamingService 等待该连接上的 unary 任务全部退出，清理连接态，
-销毁旧 `NacosRpc`，再执行 server failover、退避和新建连接。订阅缓存和注册期望值属于
-服务级状态，不随物理连接销毁。
+一次物理连接由连接协程局部的 `NacosRpc` 独占。只有连接 Ready 时，NamingService
+才暂存一个非 owning 的 active RPC 指针供 unary 操作使用；连接终止时先清空该指针，
+再等待该连接上的 unary 任务全部退出、清理连接态并销毁旧 `NacosRpc`。随后执行 server
+failover、退避和新建连接。订阅缓存和注册期望值属于服务级状态，不随物理连接销毁。
 
-关闭时先拒绝新工作并发布订阅 `Closed`，再停止当前 RPC、唤醒退避、等待所有任务退出。
-仍存在的注册句柄收到 `RegistrationState::Closed`。`shutdown()` 是该服务的完成屏障，支持重复调用和 start 前
-调用。客户端 shutdown 只停止认证并发布 `Stopped`；它不直接调用或等待 NamingService。推荐先 await 服务
+服务使用一个 `Watch<NacosServiceState>` 统一表达 `Created -> Running -> Stopping -> Stopped`。
+连接就绪等待、物理连接完成和重连退避都通过 `when_any` 与 `Stopping` 竞争。关闭时先发布
+`Stopping`、拒绝新工作并发布订阅 `Closed`，连接 owner 协程随后停止当前 RPC、等待所有任务
+退出并发布 `Stopped`；因此 `shutdown()` 只需等待同一个 lifecycle Watch，也是服务的完成屏障。
+仍存在的注册句柄收到 `RegistrationState::Closed`。关闭支持重复调用和 start 前调用。客户端
+shutdown 只停止认证并发布 `Stopped`；它不直接调用或等待 NamingService。推荐先 await 服务
 shutdown，再 shutdown 客户端。
 
 ## 4. Wire DTO
@@ -146,6 +150,7 @@ wire 订阅：首个引用发送 `subscribe=true`，最后一个引用释放时 
 - 同 key 共享订阅、首订阅推送、末订阅注销。
 - 注册状态、连续更新合并和显式注销。
 - 断链后建立新 naming 连接、恢复全部订阅和重新注册实例。
+- shutdown 能中断认证等待和重连退避。
 - shutdown 发布 `Closed` 并等待任务退出。
 
 `NacosNamingServiceTest.RnacosInteropWhenEnabled` 使用仓库的 rnacos 夹具验证真实注册、查询、
