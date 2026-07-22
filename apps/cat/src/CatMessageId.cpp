@@ -15,7 +15,8 @@ inline constexpr char kHexDigits[] = "0123456789abcdef";
 inline constexpr std::uint64_t kMillisPerHour = 60U * 60U * 1000U;
 inline constexpr std::uint64_t kMaxCat3NumericField =
         static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max());
-inline constexpr std::uint64_t kProcessSequenceMask = (std::uint64_t{1} << 30U) - 1U;
+inline constexpr std::uint64_t kMaxProcessSequenceSeed = 1'000'000U;
+inline constexpr std::uint64_t kMaxCat3StoredMessageIndex = 50'000'000U;
 inline constexpr std::uint64_t kUninitializedState = std::numeric_limits<std::uint64_t>::max();
 
 std::uint64_t splitmix64(std::uint64_t value) noexcept {
@@ -28,8 +29,8 @@ std::uint64_t splitmix64(std::uint64_t value) noexcept {
 std::uint64_t process_sequence_seed() noexcept {
     const auto now = std::chrono::system_clock::now().time_since_epoch();
     const auto ticks = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
-    return splitmix64(static_cast<std::uint64_t>(ticks) ^ (static_cast<std::uint64_t>(::getpid()) << 32U)) &
-           kProcessSequenceMask;
+    return splitmix64(static_cast<std::uint64_t>(ticks) ^ (static_cast<std::uint64_t>(::getpid()) << 32U)) %
+           (kMaxProcessSequenceSeed + 1U);
 }
 
 std::uint64_t pack_state(std::uint64_t hour, std::uint64_t index) noexcept { return (hour << 32U) | index; }
@@ -107,7 +108,7 @@ MessageIdGenerator::next(std::string_view domain, std::chrono::system_clock::tim
                 last_index = observed & 0xffffffffU;
             }
         }
-        if (last_index >= kMaxCat3NumericField) {
+        if (last_index >= kMaxCat3StoredMessageIndex) {
             return std::unexpected(RecordError::IdGenerationFailed);
         }
         next_index = last_index + 1U;

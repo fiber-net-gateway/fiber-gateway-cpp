@@ -50,7 +50,7 @@ Read [references/official-client-map.md](references/official-client-map.md) befo
 Match validation to the changed layer:
 
 - Add focused unit tests for message-tree state, IDs, escaping, duration/status behavior, sampling, and queue limits.
-- Add CAT 3.0 receiver-contract tests for fields parsed more narrowly by the Java server than they can be represented locally. In particular, keep message-ID hour/index fields non-negative and within Java `int`, and cover Log View-compatible parsing.
+- Add CAT 3.0 receiver-contract tests for fields accepted more narrowly by the Java server than they can be represented locally. In particular, keep message-ID hour/index fields non-negative and within Java `int`, never emit an index above the server dump limit of `50,000,000`, and cover Log View-compatible parsing and storage.
 - Add golden-byte tests for each implemented NT1/PT1 encoder path, derived from the checked-out upstream revision.
 - Exercise routing and collector behavior with deterministic fake HTTP and TCP peers before requiring a live CAT server. Cover partial writes, reconnects, malformed router replies, backpressure, and shutdown with queued data.
 - Add coroutine interleaving tests that suspend nested transactions from multiple requests on the same event loop; these guard against accidental TLS-style context corruption.
