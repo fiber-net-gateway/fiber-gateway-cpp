@@ -30,6 +30,10 @@ These examples usually have the following characteristics:
   A DNS query example showing resolver usage, address resolution, and result handling.
 - `git_http_repo_server.cpp`
   A more complete HTTP server example showing more involved protocol handling and service logic.
+- `nacos_demo.cpp`
+  A Nacos client tour: `NacosClient` (auth) plus standalone `ConfigService` (get/publish with
+  CAS/remove/subscribe) and `NamingService` (get/subscribe/register/update/deregister) against
+  a live Nacos server (HTTP login + gRPC data plane).
 
 ## Build
 
