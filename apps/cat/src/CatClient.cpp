@@ -7,7 +7,7 @@
 #include <dns/DnsResolver.h>
 #include <net/IpAddress.h>
 
-#include "CatClientImpl.h"
+#include "CatClientCore.h"
 
 namespace fiber::cat {
 
@@ -15,8 +15,8 @@ namespace {
 
 bool valid_options(const CatClientOptions &options) noexcept {
     return options.max_queued_messages > 0 &&
-           options.max_queued_messages <= std::numeric_limits<std::uint32_t>::max() && options.max_queued_bytes > 0 &&
-           options.max_queued_bytes <= std::numeric_limits<std::uint32_t>::max() &&
+           options.max_queued_messages <= static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) &&
+           options.max_queued_bytes > 0 && options.max_queued_bytes <= std::numeric_limits<std::uint32_t>::max() &&
            options.max_router_response_bytes > 0 && options.max_collectors > 0 && options.max_batch_messages > 0 &&
            options.max_batch_messages <= 16 && options.max_batch_bytes > 0 && options.max_send_bytes_per_pump > 0 &&
            options.max_send_calls_per_pump > 0 && options.router_connect_timeout > std::chrono::milliseconds::zero() &&
@@ -51,13 +51,13 @@ CatClient::create(event::EventLoop &sender_loop, CatClientConfig config, CatClie
         return std::unexpected(CatClientCreateError::InvalidResolver);
     }
 
-    auto *raw_impl =
-            new (std::nothrow) detail::CatClientImpl(sender_loop, std::move(config), std::move(options), resolver);
-    if (!raw_impl) {
+    auto *raw_core =
+            new (std::nothrow) detail::CatClientCore(sender_loop, std::move(config), std::move(options), resolver);
+    if (!raw_core) {
         return std::unexpected(CatClientCreateError::NoMemory);
     }
-    std::shared_ptr<detail::CatClientImpl> impl(raw_impl);
-    auto *raw_client = new (std::nothrow) CatClient(std::move(impl));
+    std::shared_ptr<detail::CatClientCore> core(raw_core);
+    auto *raw_client = new (std::nothrow) CatClient(std::move(core));
     if (!raw_client) {
         return std::unexpected(CatClientCreateError::NoMemory);
     }
@@ -65,21 +65,21 @@ CatClient::create(event::EventLoop &sender_loop, CatClientConfig config, CatClie
 }
 
 CatClient::~CatClient() {
-    if (impl_) {
-        impl_->begin_stop();
+    if (core_) {
+        core_->begin_stop();
     }
 }
 
-common::IoResult<void> CatClient::start() noexcept { return impl_->start(); }
+common::IoResult<void> CatClient::start() noexcept { return core_->start(); }
 
-async::Task<void> CatClient::shutdown() noexcept { co_await impl_->shutdown(); }
+async::Task<void> CatClient::shutdown() noexcept { co_await core_->shutdown(); }
 
-CatClientState CatClient::state() const noexcept { return impl_->state(); }
+CatClientState CatClient::state() const noexcept { return core_->state(); }
 
-CatClientStats CatClient::stats() const noexcept { return impl_->stats(); }
+CatClientStats CatClient::stats() const noexcept { return core_->stats(); }
 
-event::EventLoop &CatClient::sender_loop() const noexcept { return impl_->sender_loop(); }
+event::EventLoop &CatClient::sender_loop() const noexcept { return core_->sender_loop(); }
 
-std::shared_ptr<detail::CatClientCore> CatClient::core() const noexcept { return impl_; }
+std::shared_ptr<detail::CatClientCore> CatClient::core() const noexcept { return core_; }
 
 } // namespace fiber::cat

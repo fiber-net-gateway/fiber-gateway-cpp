@@ -23,7 +23,6 @@ namespace fiber::cat {
 
 namespace detail {
 class CatClientCore;
-class CatClientImpl;
 } // namespace detail
 
 class MessageTrace;
@@ -77,11 +76,11 @@ public:
 private:
     friend class MessageTrace;
 
-    explicit CatClient(std::shared_ptr<detail::CatClientImpl> impl) noexcept : impl_(std::move(impl)) {}
+    explicit CatClient(std::shared_ptr<detail::CatClientCore> core) noexcept : core_(std::move(core)) {}
 
     [[nodiscard]] std::shared_ptr<detail::CatClientCore> core() const noexcept;
 
-    std::shared_ptr<detail::CatClientImpl> impl_;
+    std::shared_ptr<detail::CatClientCore> core_;
 };
 
 } // namespace fiber::cat

@@ -1,22 +1,21 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <event/EventLoop.h>
 
-#include "CatClientCore.h"
+#include "CatEncoder.h"
 #include "CatInternal.h"
 
 namespace {
 
 using namespace std::chrono_literals;
 using fiber::cat::RecordError;
-using fiber::cat::detail::CatClientCore;
 using fiber::cat::detail::ClientEncodeContext;
 using fiber::cat::detail::EncodeError;
 using fiber::cat::detail::TraceContext;
@@ -41,42 +40,16 @@ void run_on_loop(F &&callback) {
     loop.run();
 }
 
-class CapturingCore final : public CatClientCore {
-public:
-    explicit CapturingCore(ClientEncodeContext context) noexcept : context_(context) {}
-
-    [[nodiscard]] ClientEncodeContext encode_context() const noexcept override { return context_; }
-    [[nodiscard]] bool accepts_messages() const noexcept override { return true; }
-
-    void submit_encoded(fiber::mem::IoBuf message) noexcept override {
-        encoded = std::move(message);
-        ++submission_count;
-    }
-
-    void on_encode_failure(EncodeError error) noexcept override {
-        last_error = error;
-        ++failure_count;
-    }
-
-    fiber::mem::IoBuf encoded;
-    EncodeError last_error = EncodeError::InvalidTrace;
-    std::size_t submission_count = 0;
-    std::size_t failure_count = 0;
-
-private:
-    ClientEncodeContext context_;
-};
-
-std::vector<std::uint8_t> encoded_bytes(const CapturingCore &core) {
-    if (!core.encoded) {
+std::vector<std::uint8_t> encoded_bytes(const fiber::mem::IoBuf &encoded) {
+    if (!encoded) {
         return {};
     }
-    const std::uint8_t *begin = core.encoded.readable_data();
-    return {begin, begin + core.encoded.readable()};
+    const std::uint8_t *begin = encoded.readable_data();
+    return {begin, begin + encoded.readable()};
 }
 
-void expect_bytes(const CapturingCore &core, const std::vector<std::uint8_t> &expected) {
-    const auto actual = encoded_bytes(core);
+void expect_bytes(const fiber::mem::IoBuf &encoded, const std::vector<std::uint8_t> &expected) {
+    const auto actual = encoded_bytes(encoded);
     ASSERT_EQ(actual.size(), expected.size());
     for (std::size_t index = 0; index < expected.size(); ++index) {
         EXPECT_EQ(actual[index], expected[index]) << "byte index " << index;
@@ -101,11 +74,33 @@ void make_time_deterministic(fiber::cat::detail::MessageTraceData &trace, std::u
     trace.wall_base_millis = wall_millis;
 }
 
+void freeze_message(fiber::cat::detail::MessageData &message) {
+    message.completed = true;
+    if (message.kind != fiber::cat::MessageKind::Transaction) {
+        return;
+    }
+    auto &transaction = static_cast<fiber::cat::detail::TransactionData &>(message);
+    std::size_t child_index = 0;
+    for (auto *chunk = transaction.children_head; chunk; chunk = chunk->next) {
+        const std::size_t chunk_children =
+                std::min(fiber::cat::detail::kChildrenPerChunk, transaction.child_count - child_index);
+        for (std::size_t index = 0; index < chunk_children; ++index) {
+            freeze_message(*chunk->children[index]);
+        }
+        child_index += chunk_children;
+    }
+}
+
+void freeze_trace(fiber::cat::detail::MessageTrace &trace) {
+    ASSERT_NE(trace.data, nullptr);
+    ASSERT_NE(trace.data->root, nullptr);
+    freeze_message(*trace.data->root);
+    trace.data->open_message_count = 0;
+}
+
 TEST(CatEncoderTest, EncodesEventRootAsOfficialNt1Frame) {
     run_on_loop([] {
-        auto core = std::make_shared<CapturingCore>(full_context());
         TraceContext context{
-                .core = core,
                 .message_id = "m",
                 .root_message_id = "r",
                 .parent_message_id = "p",
@@ -114,13 +109,12 @@ TEST(CatEncoderTest, EncodesEventRootAsOfficialNt1Frame) {
         auto created = fiber::cat::detail::create_event_root("E", "n", {}, std::move(context));
         ASSERT_TRUE(created);
         auto *event = *created;
+        auto *trace = event->trace;
         make_time_deterministic(*event->trace->data, 123);
         event->time = std::chrono::steady_clock::time_point{};
-
-        EXPECT_EQ(fiber::cat::detail::complete(event), RecordError::None);
-        EXPECT_EQ(event, nullptr);
-        ASSERT_EQ(core->submission_count, 1);
-        EXPECT_EQ(core->failure_count, 0);
+        freeze_trace(*trace);
+        auto encoded = fiber::cat::detail::encode_nt1(*trace->data, full_context());
+        ASSERT_TRUE(encoded);
 
         const std::vector<std::uint8_t> expected{
                 0x00, 0x00, 0x00, 0x33, 'N', 'T',  '1',  0x03, 'a',  'p', 'p',  0x04, 'h',  'o',
@@ -128,16 +122,17 @@ TEST(CatEncoderTest, EncodesEventRootAsOfficialNt1Frame) {
                 'u',  'p',  0x02, '4',  '2', 0x04, 'l',  'o',  'o',  'p', 0x01, 'm',  0x01, 'p',
                 0x01, 'r',  0x01, 's',  'E', 0x7b, 0x01, 'E',  0x01, 'n', 0x01, '0',  0x00,
         };
-        expect_bytes(*core, expected);
+        expect_bytes(*encoded, expected);
+        delete trace;
     });
 }
 
 TEST(CatEncoderTest, EncodesNestedTransactionVarintsAndChunkedData) {
     run_on_loop([] {
-        auto core = std::make_shared<CapturingCore>(minimal_context());
-        auto created = fiber::cat::detail::create_transaction_root("T", "root", {}, TraceContext{.core = core});
+        auto created = fiber::cat::detail::create_transaction_root("T", "root", {});
         ASSERT_TRUE(created);
         auto *root = *created;
+        auto *trace = root->trace;
         make_time_deterministic(*root->trace->data, 300);
         root->time = std::chrono::steady_clock::time_point{};
         ASSERT_EQ(fiber::cat::detail::set_duration(root, 1500us), RecordError::None);
@@ -152,11 +147,9 @@ TEST(CatEncoderTest, EncodesNestedTransactionVarintsAndChunkedData) {
         ASSERT_EQ(fiber::cat::detail::add_data(child, full_chunk), RecordError::None);
         ASSERT_EQ(fiber::cat::detail::add_data(child, "y"), RecordError::None);
 
-        EXPECT_EQ(fiber::cat::detail::complete(root), RecordError::None);
-        EXPECT_EQ(core->submission_count, 0);
-        EXPECT_EQ(fiber::cat::detail::complete(child), RecordError::None);
-        ASSERT_EQ(core->submission_count, 1);
-        EXPECT_EQ(core->failure_count, 0);
+        freeze_trace(*trace);
+        auto encoded = fiber::cat::detail::encode_nt1(*trace->data, minimal_context());
+        ASSERT_TRUE(encoded);
 
         std::vector<std::uint8_t> expected{
                 0x00, 0x00, 0x00, 0xb4, 'N',  'T',  '1',  0x01, 'a',  0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -167,16 +160,17 @@ TEST(CatEncoderTest, EncodesNestedTransactionVarintsAndChunkedData) {
         expected.push_back('&');
         expected.push_back('y');
         expected.insert(expected.end(), {'T', 0x01, '0', 0x03, 'k', '=', 'v', 0xdc, 0x0b});
-        expect_bytes(*core, expected);
+        expect_bytes(*encoded, expected);
+        delete trace;
     });
 }
 
 TEST(CatEncoderTest, EncodesChildrenAcrossFixedChunkBoundaryInOrder) {
     run_on_loop([] {
-        auto core = std::make_shared<CapturingCore>(minimal_context());
-        auto created = fiber::cat::detail::create_transaction_root("T", "r", {}, TraceContext{.core = core});
+        auto created = fiber::cat::detail::create_transaction_root("T", "r", {});
         ASSERT_TRUE(created);
         auto *root = *created;
+        auto *trace = root->trace;
         make_time_deterministic(*root->trace->data, 0);
         root->time = std::chrono::steady_clock::time_point{};
         ASSERT_EQ(fiber::cat::detail::set_duration(root, 0us), RecordError::None);
@@ -187,10 +181,10 @@ TEST(CatEncoderTest, EncodesChildrenAcrossFixedChunkBoundaryInOrder) {
             ASSERT_TRUE(child_created);
             auto *child = *child_created;
             child->time = std::chrono::steady_clock::time_point{};
-            ASSERT_EQ(fiber::cat::detail::complete(child), RecordError::None);
         }
-        ASSERT_EQ(fiber::cat::detail::complete(root), RecordError::None);
-        ASSERT_EQ(core->submission_count, 1);
+        freeze_trace(*trace);
+        auto encoded = fiber::cat::detail::encode_nt1(*trace->data, minimal_context());
+        ASSERT_TRUE(encoded);
 
         std::vector<std::uint8_t> expected{
                 0x00, 0x00, 0x00, 0xb2, 'N',  'T',  '1', 0x01, 'a',  0x00, 0x00, 0x00,
@@ -201,27 +195,35 @@ TEST(CatEncoderTest, EncodesChildrenAcrossFixedChunkBoundaryInOrder) {
                             {'E', 0x00, 0x01, 'E', 0x01, static_cast<std::uint8_t>(name), 0x01, '0', 0x00});
         }
         expected.insert(expected.end(), {'T', 0x01, '0', 0x00, 0x00});
-        expect_bytes(*core, expected);
+        expect_bytes(*encoded, expected);
+        delete trace;
     });
 }
 
 TEST(CatEncoderTest, Nt1TreatsAbsentAndExplicitEmptyDataEqually) {
     run_on_loop([] {
         auto encode = [](bool add_empty) {
-            auto core = std::make_shared<CapturingCore>(minimal_context());
-            auto created = fiber::cat::detail::create_event_root("E", "n", {}, TraceContext{.core = core});
+            auto created = fiber::cat::detail::create_event_root("E", "n", {});
             EXPECT_TRUE(created);
             if (!created) {
                 return std::vector<std::uint8_t>{};
             }
             auto *event = *created;
+            auto *trace = event->trace;
             make_time_deterministic(*event->trace->data, 0);
             event->time = std::chrono::steady_clock::time_point{};
             if (add_empty) {
                 EXPECT_EQ(fiber::cat::detail::add_data(event, ""), RecordError::None);
             }
-            EXPECT_EQ(fiber::cat::detail::complete(event), RecordError::None);
-            return encoded_bytes(*core);
+            freeze_trace(*trace);
+            auto encoded = fiber::cat::detail::encode_nt1(*trace->data, minimal_context());
+            EXPECT_TRUE(encoded);
+            std::vector<std::uint8_t> result;
+            if (encoded) {
+                result = encoded_bytes(*encoded);
+            }
+            delete trace;
+            return result;
         };
 
         EXPECT_EQ(encode(false), encode(true));
@@ -230,20 +232,19 @@ TEST(CatEncoderTest, Nt1TreatsAbsentAndExplicitEmptyDataEqually) {
 
 TEST(CatEncoderTest, ReportsInvalidTraceWithoutSubmittingPartialFrame) {
     run_on_loop([] {
-        auto core = std::make_shared<CapturingCore>(minimal_context());
-        auto created = fiber::cat::detail::create_event_root("E", "invalid", {}, TraceContext{.core = core});
+        auto created = fiber::cat::detail::create_event_root("E", "invalid", {});
         ASSERT_TRUE(created);
         auto *event = *created;
+        auto *trace = event->trace;
         make_time_deterministic(*event->trace->data, 0);
         event->time = std::chrono::steady_clock::time_point{};
-        event->trace->data->message_count = 2;
+        freeze_trace(*trace);
+        trace->data->message_count = 2;
 
-        EXPECT_EQ(fiber::cat::detail::complete(event), RecordError::None);
-        EXPECT_EQ(event, nullptr);
-        EXPECT_EQ(core->submission_count, 0);
-        EXPECT_EQ(core->failure_count, 1);
-        EXPECT_EQ(core->last_error, EncodeError::InvalidTrace);
-        EXPECT_FALSE(core->encoded);
+        auto encoded = fiber::cat::detail::encode_nt1(*trace->data, minimal_context());
+        ASSERT_FALSE(encoded);
+        EXPECT_EQ(encoded.error(), EncodeError::InvalidTrace);
+        delete trace;
     });
 }
 

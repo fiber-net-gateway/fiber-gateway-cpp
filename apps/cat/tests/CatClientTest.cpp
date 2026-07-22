@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -9,6 +10,7 @@
 #include <memory>
 #include <string>
 #include <sys/socket.h>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -16,12 +18,15 @@
 #include <async/Sleep.h>
 #include <async/Spawn.h>
 #include <common/IoError.h>
+#include <common/mem/IoBuf.h>
 #include <event/EventLoopGroup.h>
 #include <fiber/cat/Cat.h>
 #include <net/IpAddress.h>
 #include <net/SocketAddress.h>
 #include <net/TcpListener.h>
 #include <net/TcpStream.h>
+
+#include "CatClientCore.h"
 
 namespace {
 
@@ -281,6 +286,190 @@ TEST(CatClientTest, SendsCompletedMessageTraceAsOneNt1Frame) {
     EXPECT_EQ((*frame)[4], 'N');
     EXPECT_EQ((*frame)[5], 'T');
     EXPECT_EQ((*frame)[6], '1');
+}
+
+struct BudgetOutcome {
+    bool started = false;
+    bool stopped = false;
+    fiber::cat::CatClientStats before_shutdown;
+    fiber::cat::CatClientStats after_shutdown;
+};
+
+fiber::mem::IoBuf make_frame(std::size_t size, std::uint8_t value) {
+    fiber::mem::IoBuf frame = fiber::mem::IoBuf::allocate(size);
+    if (!frame) {
+        return {};
+    }
+    std::fill_n(frame.writable_data(), size, value);
+    frame.commit(size);
+    return frame;
+}
+
+fiber::async::DetachedTask run_budget_case(fiber::event::EventLoop *loop, std::size_t max_messages,
+                                           std::size_t max_bytes, std::vector<std::size_t> sizes,
+                                           std::promise<BudgetOutcome> *promise) {
+    BudgetOutcome outcome;
+    fiber::cat::CatClientConfigParams params{
+            .app_key = "budget-test",
+            .hostname = "host",
+            .ip = "127.0.0.1",
+    };
+    params.bootstrap_collectors.emplace_back(fiber::net::IpAddress::loopback_v4(), 1);
+    auto config = fiber::cat::CatClientConfig::create(std::move(params));
+    if (!config) {
+        promise->set_value(outcome);
+        co_return;
+    }
+
+    fiber::cat::CatClientOptions options;
+    options.max_queued_messages = max_messages;
+    options.max_queued_bytes = max_bytes;
+    options.collector_connect_timeout = 10ms;
+    options.shutdown_drain_timeout = 0ms;
+    auto core = std::make_shared<fiber::cat::detail::CatClientCore>(*loop, std::move(*config), options, nullptr);
+    auto started = core->start();
+    if (!started) {
+        promise->set_value(outcome);
+        co_return;
+    }
+    outcome.started = true;
+
+    std::uint8_t value = 0;
+    for (const std::size_t size: sizes) {
+        core->submit_encoded(make_frame(size, value++));
+    }
+    outcome.before_shutdown = core->stats();
+    co_await core->shutdown();
+    outcome.after_shutdown = core->stats();
+    outcome.stopped = core->state() == fiber::cat::CatClientState::Stopped;
+    promise->set_value(outcome);
+}
+
+BudgetOutcome run_budget_case(std::size_t max_messages, std::size_t max_bytes, std::vector<std::size_t> sizes) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+    std::promise<BudgetOutcome> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_budget_case(&group.at(0), max_messages, max_bytes, std::move(sizes), &promise);
+    });
+    const bool ready = future.wait_for(2s) == std::future_status::ready;
+    group.stop();
+    group.join();
+    if (!ready) {
+        return {};
+    }
+    return future.get();
+}
+
+TEST(CatClientTest, RejectsFramesAtOutstandingMessageLimitAndDrainsOnShutdown) {
+    const BudgetOutcome outcome = run_budget_case(2, 1024, {8, 8, 8});
+    ASSERT_TRUE(outcome.started);
+    EXPECT_EQ(outcome.before_shutdown.queued_messages, 2);
+    EXPECT_EQ(outcome.before_shutdown.queued_bytes, 16);
+    EXPECT_EQ(outcome.before_shutdown.submitted_messages, 2);
+    EXPECT_EQ(outcome.before_shutdown.dropped_queue_full, 1);
+    EXPECT_TRUE(outcome.stopped);
+    EXPECT_EQ(outcome.after_shutdown.queued_messages, 0);
+    EXPECT_EQ(outcome.after_shutdown.queued_bytes, 0);
+    EXPECT_EQ(outcome.after_shutdown.dropped_unavailable, 2);
+}
+
+TEST(CatClientTest, RejectsFramesAtOutstandingByteLimit) {
+    const BudgetOutcome outcome = run_budget_case(8, 12, {8, 8});
+    ASSERT_TRUE(outcome.started);
+    EXPECT_EQ(outcome.before_shutdown.queued_messages, 1);
+    EXPECT_EQ(outcome.before_shutdown.queued_bytes, 8);
+    EXPECT_EQ(outcome.before_shutdown.submitted_messages, 1);
+    EXPECT_EQ(outcome.before_shutdown.dropped_queue_full, 1);
+    EXPECT_TRUE(outcome.stopped);
+    EXPECT_EQ(outcome.after_shutdown.queued_messages, 0);
+    EXPECT_EQ(outcome.after_shutdown.queued_bytes, 0);
+}
+
+fiber::async::DetachedTask
+start_internal_core(fiber::event::EventLoop *loop,
+                    std::promise<std::shared_ptr<fiber::cat::detail::CatClientCore>> *promise) {
+    fiber::cat::CatClientConfigParams params{
+            .app_key = "shutdown-race",
+            .hostname = "host",
+            .ip = "127.0.0.1",
+    };
+    params.bootstrap_collectors.emplace_back(fiber::net::IpAddress::loopback_v4(), 1);
+    auto config = fiber::cat::CatClientConfig::create(std::move(params));
+    if (!config) {
+        promise->set_value(nullptr);
+        co_return;
+    }
+    fiber::cat::CatClientOptions options;
+    options.max_queued_messages = 2048;
+    options.max_queued_bytes = 1024 * 1024;
+    options.collector_connect_timeout = 10ms;
+    options.shutdown_drain_timeout = 0ms;
+    auto core = std::make_shared<fiber::cat::detail::CatClientCore>(*loop, std::move(*config), options, nullptr);
+    if (!core->start()) {
+        promise->set_value(nullptr);
+        co_return;
+    }
+    promise->set_value(std::move(core));
+}
+
+fiber::async::DetachedTask shutdown_internal_core(std::shared_ptr<fiber::cat::detail::CatClientCore> core,
+                                                  std::promise<fiber::cat::CatClientStats> *promise) {
+    co_await core->shutdown();
+    promise->set_value(core->stats());
+}
+
+TEST(CatClientTest, ConcurrentSubmittersCannotOutliveImmediateShutdown) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<std::shared_ptr<fiber::cat::detail::CatClientCore>> core_promise;
+    auto core_future = core_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return start_internal_core(&group.at(0), &core_promise); });
+    if (core_future.wait_for(2s) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "internal CAT core did not start";
+    }
+    auto core = core_future.get();
+    if (!core) {
+        group.stop();
+        group.join();
+        FAIL() << "internal CAT core failed to start";
+    }
+
+    core->submit_encoded(make_frame(8, 0));
+    std::atomic_bool start{false};
+    std::array<std::thread, 4> producers;
+    for (std::size_t index = 0; index < producers.size(); ++index) {
+        producers[index] = std::thread([core, &start, index] {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            for (std::size_t frame = 0; frame < 100; ++frame) {
+                core->submit_encoded(make_frame(8, static_cast<std::uint8_t>(index)));
+            }
+        });
+    }
+
+    std::promise<fiber::cat::CatClientStats> stopped_promise;
+    auto stopped_future = stopped_promise.get_future();
+    start.store(true, std::memory_order_release);
+    fiber::async::spawn(group.at(0), [&]() { return shutdown_internal_core(core, &stopped_promise); });
+    for (auto &producer: producers) {
+        producer.join();
+    }
+
+    const bool stopped = stopped_future.wait_for(2s) == std::future_status::ready;
+    group.stop();
+    group.join();
+    ASSERT_TRUE(stopped);
+    const auto stats = stopped_future.get();
+    EXPECT_EQ(core->state(), fiber::cat::CatClientState::Stopped);
+    EXPECT_EQ(stats.queued_messages, 0);
+    EXPECT_EQ(stats.queued_bytes, 0);
+    EXPECT_GE(stats.submitted_messages, 1);
 }
 
 } // namespace
