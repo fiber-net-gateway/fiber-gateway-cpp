@@ -59,6 +59,31 @@ Call `co_await client->shutdown()` before stopping the sender EventLoop. Shutdow
 submitters that already reserved capacity, crosses a complete sender-loop Notify phase, drains the connected sender up
 to `shutdown_drain_timeout`, drops the remainder, closes the collector socket, and completes in `Stopped` state.
 
+## Service context
+
+An active `MessageTrace` owns an optional case-sensitive key/value context for request-local service propagation. The
+table is a fiber2 extension and is not encoded into CAT NT1/PT1 messages. HTTP or gRPC integration may populate it from
+approved inbound metadata and synchronously copy it into an outbound request:
+
+```cpp
+trace.put_context("tenant", "blue");
+auto tenant = trace.get_context("tenant");
+trace.for_each_context([](std::string_view key, std::string_view value) noexcept {
+    // Copy key and value into request-owned header or metadata storage.
+    return true;
+});
+trace.remove_context("tenant");
+```
+
+Keys must be non-empty and are matched byte-for-byte. Empty values are valid. Returned `string_view` values and visitor
+arguments borrow trace-owned storage; callers must copy them before retaining them asynchronously. Context access is
+owner-EventLoop-local. It becomes `RecordError::Completed` after final message completion resets the trace pool.
+
+`RecordLimits` independently bounds context entry count, key size, value size, and cumulative arena bytes. Removed or
+replaced storage is not subtracted from the byte budget because `BufPool` releases memory only when the complete trace is
+reset. Applications should apply an outbound propagation allowlist instead of forwarding arbitrary context to
+untrusted destinations.
+
 ## Transactions and events
 
 Create a trace root and all its child messages on one running EventLoop. Handles may live across coroutine suspension.

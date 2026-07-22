@@ -275,6 +275,141 @@ TEST(CatMessageTest, EmptyDataStillSeparatesTheNextEntry) {
     });
 }
 
+struct ObservedContexts {
+    std::array<std::string_view, 4> keys{};
+    std::array<std::string_view, 4> values{};
+    std::size_t size = 0;
+};
+
+bool observe_context(void *opaque, std::string_view key, std::string_view value) noexcept {
+    auto &observed = *static_cast<ObservedContexts *>(opaque);
+    if (observed.size >= observed.keys.size()) {
+        return false;
+    }
+    observed.keys[observed.size] = key;
+    observed.values[observed.size] = value;
+    ++observed.size;
+    return true;
+}
+
+TEST(CatMessageTest, TraceContextSupportsUpsertLookupRemovalAndOrderedIteration) {
+    run_on_loop([] {
+        auto created = fiber::cat::detail::create_message_trace({});
+        ASSERT_TRUE(created);
+        auto *trace = *created;
+
+        EXPECT_EQ(fiber::cat::detail::put_context(*trace, "tenant", "blue"), RecordError::None);
+        EXPECT_EQ(fiber::cat::detail::put_context(*trace, "request", "one"), RecordError::None);
+        EXPECT_EQ(fiber::cat::detail::put_context(*trace, "empty", ""), RecordError::None);
+        EXPECT_EQ(fiber::cat::detail::put_context(*trace, "tenant", "green"), RecordError::None);
+
+        auto tenant = fiber::cat::detail::get_context(*trace, "tenant");
+        ASSERT_TRUE(tenant);
+        ASSERT_TRUE(tenant->has_value());
+        EXPECT_EQ(**tenant, "green");
+        auto empty = fiber::cat::detail::get_context(*trace, "empty");
+        ASSERT_TRUE(empty);
+        ASSERT_TRUE(empty->has_value());
+        EXPECT_TRUE((**empty).empty());
+        auto missing = fiber::cat::detail::get_context(*trace, "missing");
+        ASSERT_TRUE(missing);
+        EXPECT_FALSE(missing->has_value());
+
+        ObservedContexts observed;
+        EXPECT_EQ(fiber::cat::detail::for_each_context(*trace, &observed, observe_context), RecordError::None);
+        ASSERT_EQ(observed.size, 3U);
+        EXPECT_EQ(observed.keys[0], "tenant");
+        EXPECT_EQ(observed.values[0], "green");
+        EXPECT_EQ(observed.keys[1], "request");
+        EXPECT_EQ(observed.keys[2], "empty");
+
+        auto removed = fiber::cat::detail::remove_context(*trace, "tenant");
+        ASSERT_TRUE(removed);
+        EXPECT_TRUE(*removed);
+        EXPECT_EQ(fiber::cat::detail::put_context(*trace, "tenant", "red"), RecordError::None);
+        observed = {};
+        EXPECT_EQ(fiber::cat::detail::for_each_context(*trace, &observed, observe_context), RecordError::None);
+        ASSERT_EQ(observed.size, 3U);
+        EXPECT_EQ(observed.keys[0], "request");
+        EXPECT_EQ(observed.keys[1], "empty");
+        EXPECT_EQ(observed.keys[2], "tenant");
+
+        removed = fiber::cat::detail::remove_context(*trace, "missing");
+        ASSERT_TRUE(removed);
+        EXPECT_FALSE(*removed);
+        fiber::cat::detail::release_message_trace(trace);
+        EXPECT_EQ(trace, nullptr);
+    });
+}
+
+TEST(CatMessageTest, TraceContextEnforcesLimitsAndChargesRemovedArenaStorage) {
+    run_on_loop([] {
+        RecordLimits limits;
+        limits.max_context_entries = 1;
+        limits.max_context_key_bytes = 4;
+        limits.max_context_value_bytes = 4;
+        limits.max_context_bytes =
+                8 * sizeof(fiber::cat::detail::ContextEntry *) + sizeof(fiber::cat::detail::ContextEntry) + 2;
+        auto created = fiber::cat::detail::create_message_trace(limits);
+        ASSERT_TRUE(created);
+        auto *trace = *created;
+
+        EXPECT_EQ(fiber::cat::detail::put_context(*trace, "a", "b"), RecordError::None);
+        EXPECT_EQ(fiber::cat::detail::put_context(*trace, "next", "v"), RecordError::LimitExceeded);
+        EXPECT_EQ(fiber::cat::detail::put_context(*trace, "a", "12345"), RecordError::LimitExceeded);
+        EXPECT_EQ(fiber::cat::detail::put_context(*trace, "a", "bb"), RecordError::LimitExceeded);
+        auto old_value = fiber::cat::detail::get_context(*trace, "a");
+        ASSERT_TRUE(old_value);
+        ASSERT_TRUE(old_value->has_value());
+        EXPECT_EQ(**old_value, "b");
+
+        auto removed = fiber::cat::detail::remove_context(*trace, "a");
+        ASSERT_TRUE(removed);
+        EXPECT_TRUE(*removed);
+        EXPECT_EQ(fiber::cat::detail::put_context(*trace, "c", "d"), RecordError::LimitExceeded);
+        EXPECT_EQ(fiber::cat::detail::put_context(*trace, "", "v"), RecordError::InvalidArgument);
+
+        fiber::cat::detail::release_message_trace(trace);
+    });
+}
+
+struct MutatingContextVisitor {
+    fiber::cat::detail::MessageTrace *trace = nullptr;
+    RecordError mutation = RecordError::Completed;
+};
+
+bool mutate_context(void *opaque, std::string_view, std::string_view) noexcept {
+    auto &state = *static_cast<MutatingContextVisitor *>(opaque);
+    state.mutation = fiber::cat::detail::put_context(*state.trace, "second", "value");
+    return true;
+}
+
+TEST(CatMessageTest, TraceContextDetectsMutationDuringIterationAndExpiresOnCommit) {
+    run_on_loop([] {
+        auto created = fiber::cat::detail::create_message_trace({});
+        ASSERT_TRUE(created);
+        auto *trace = *created;
+        EXPECT_EQ(fiber::cat::detail::put_context(*trace, "first", "value"), RecordError::None);
+
+        MutatingContextVisitor visitor{.trace = trace};
+        EXPECT_EQ(fiber::cat::detail::for_each_context(*trace, &visitor, mutate_context), RecordError::InvalidArgument);
+        EXPECT_EQ(visitor.mutation, RecordError::None);
+
+        auto root = fiber::cat::detail::create_event_root(*trace, "E", "root");
+        ASSERT_TRUE(root);
+        auto *event = *root;
+        EXPECT_EQ(fiber::cat::detail::complete(event), RecordError::None);
+        EXPECT_EQ(trace->data, nullptr);
+        auto expired = fiber::cat::detail::get_context(*trace, "first");
+        ASSERT_FALSE(expired);
+        EXPECT_EQ(expired.error(), RecordError::Completed);
+        ObservedContexts observed;
+        EXPECT_EQ(fiber::cat::detail::for_each_context(*trace, &observed, observe_context), RecordError::Completed);
+
+        fiber::cat::detail::release_message_trace(trace);
+    });
+}
+
 struct InterleaveResult {
     bool recorded = false;
     bool consumed = false;

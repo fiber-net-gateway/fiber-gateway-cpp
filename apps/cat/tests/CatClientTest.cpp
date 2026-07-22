@@ -118,6 +118,7 @@ struct ClientOutcome {
     bool created = false;
     bool started = false;
     bool trace_created = false;
+    bool context_verified = false;
     bool trace_frozen = false;
     bool stopped = false;
     fiber::cat::CatClientStats stats;
@@ -126,6 +127,7 @@ struct ClientOutcome {
 struct ProducerState {
     std::atomic_bool done{false};
     std::atomic_bool trace_created{false};
+    std::atomic_bool context_verified{false};
     std::atomic_bool trace_frozen{false};
 };
 
@@ -134,6 +136,15 @@ fiber::async::DetachedTask run_trace_producer(fiber::cat::CatClient *client, Pro
     if (trace_result) {
         fiber::cat::MessageTrace trace = std::move(*trace_result);
         state->trace_created.store(true, std::memory_order_release);
+        bool visited = false;
+        const bool put_context = trace.put_context("tenant", "blue") == fiber::cat::RecordError::None;
+        auto context = trace.get_context("tenant");
+        const bool got_context = context && context->has_value() && **context == "blue";
+        const bool iterated = trace.for_each_context([&](std::string_view key, std::string_view value) noexcept {
+            visited = key == "tenant" && value == "blue";
+            return true;
+        }) == fiber::cat::RecordError::None;
+        state->context_verified.store(put_context && got_context && iterated && visited, std::memory_order_release);
         auto root_result = trace.create_transaction("URL", "/orders");
         if (root_result) {
             fiber::cat::Transaction root = std::move(*root_result);
@@ -141,7 +152,10 @@ fiber::async::DetachedTask run_trace_producer(fiber::cat::CatClient *client, Pro
             (void) root.log_event("Cache", "miss");
             (void) root.complete();
             auto late = trace.create_event("Late", "ignored");
-            state->trace_frozen.store(!trace.valid() && !late && late.error() == fiber::cat::RecordError::Completed,
+            auto expired_context = trace.get_context("tenant");
+            state->trace_frozen.store(!trace.valid() && !late && late.error() == fiber::cat::RecordError::Completed &&
+                                              !expired_context &&
+                                              expired_context.error() == fiber::cat::RecordError::Completed,
                                       std::memory_order_release);
         }
     }
@@ -202,6 +216,7 @@ fiber::async::DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16
         co_await fiber::async::sleep(1ms);
     }
     outcome.trace_created = producer->trace_created.load(std::memory_order_acquire);
+    outcome.context_verified = producer->context_verified.load(std::memory_order_acquire);
     outcome.trace_frozen = producer->trace_frozen.load(std::memory_order_acquire);
 
     const auto deadline = loop->now() + 2s;
@@ -270,6 +285,7 @@ TEST(CatClientTest, SendsCompletedMessageTraceAsOneNt1Frame) {
     EXPECT_TRUE(outcome.created);
     EXPECT_TRUE(outcome.started);
     EXPECT_TRUE(outcome.trace_created);
+    EXPECT_TRUE(outcome.context_verified);
     EXPECT_TRUE(outcome.trace_frozen);
     EXPECT_TRUE(outcome.stopped);
     EXPECT_EQ(outcome.stats.submitted_messages, 1);
