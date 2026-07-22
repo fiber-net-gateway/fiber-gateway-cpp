@@ -60,7 +60,9 @@ directly owns a `GrpcClient`; its long-lived `run()` task connects, sends
 completes only after full gRPC teardown. It deliberately does not reconnect.
 Each high-level service selects an endpoint, constructs its own `NacosRpc`,
 starts `run()`, awaits `wait_ready()` before using the connection, and treats
-the `run()` result as the teardown barrier. ConfigService uses a connection
+the `run()` result as the teardown barrier. The RPC, bidirectional handler
+registry, and redirect target are connection-coroutine locals; the service
+keeps only a non-owning pointer while that RPC is ready. ConfigService uses a connection
 labeled `module=config`; NamingService uses an independent connection labeled
 `module=naming`. After a transport close the owner destroys the stopped RPC,
 applies redirect/server-failover/backoff policy, and creates a new instance.
@@ -182,6 +184,8 @@ ConfigService.
 Transient connection and query failures retain the last Present or NotFound
 value. Each newly ready physical connection re-registers all live entries, and
 a periodic compensating registration covers lost server-side listener state.
+The redo timer is a `when_any` branch in the owning connection coroutine, not
+a separate detached lifecycle task.
 During shutdown every live subscription is closed: `next()` resumes with
 `ResultKind::Closed` (or `closed()` returns true) and config operations reject
 new work. All registration/query tasks finish before shutdown
@@ -277,15 +281,18 @@ The client and each service have their own lifecycle:
 Created -> Running -> Stopping -> Stopped
 ```
 
-Each service start creates its own connection/reconnect task. Service shutdown
-stops its current `NacosRpc`, waits for the `run()` barrier and all
-connection-scoped tasks, and then destroys it. Client shutdown does not invoke
-or await service shutdown; it stops only authentication and publishes a final
-`Stopped` access value. A running service treats that authentication value as
-terminal and begins stopping, but callers must still await that service's
-`shutdown()` as its completion barrier. The recommended order is therefore
-NamingService, ConfigService, then NacosClient. Every `shutdown()` is
-idempotent, including shutdown before start.
+Each service start creates its own connection/reconnect task. ConfigService and
+NamingService each use one lifecycle Watch for stop notification and completion: connection-ready
+waits, physical connection completion, and reconnect backoff race that lifecycle
+with `when_any`; ConfigService also races its periodic subscription-redo timer.
+Each physical `NacosRpc` is coroutine-local and is destroyed
+only after its unary work has drained. Client shutdown does not invoke or await
+service shutdown; it stops only authentication and publishes a final `Stopped`
+access value. A running service treats that authentication value as terminal
+and begins stopping, but callers must still await that service's `shutdown()`
+as its completion barrier. The recommended order is therefore NamingService,
+ConfigService, then NacosClient. Every `shutdown()` is idempotent, including
+shutdown before start.
 
 Service factories reject invalid service options and reject creation after the
 client has stopped. A created service owns safe copies/subscriptions of the
@@ -364,4 +371,7 @@ gRPC connection and keeps its state and subscription logic under `src/config/`;
 NamingService owns a separate gRPC connection and keeps its state under
 `src/naming/`. The reusable gRPC infrastructure remains private in `src/rpc/`.
 Wire DTO models and their JSON codecs remain private in `src/dto/`, and the
-wire Payload schema lives under `proto/`.
+wire Payload schema lives under `proto/`. The concrete ConfigService and
+NamingService classes are defined only in their `.cpp` files; their internal
+headers expose only dependency-injected factories used by the public factories
+and protocol tests.
