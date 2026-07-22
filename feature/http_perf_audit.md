@@ -105,7 +105,7 @@
 - **Huffman 两级表**（`Huffman.cpp`）：root16 快路径 + per-state byte 表，标准高性能设计；双遍算 encoded_length 是 HPACK 长度前缀格式所必需。
 - **`HttpUriParse.cpp`**：单遍字节扫描 + 位图表；简单 URI 零分配返 `string_view`，复杂 URI 单次 pool 分配。
 - **`HeaderMap.h`**：每实例都是一次性 `static` 表（`request_header_ref_map`/`hop_by_hop_header_map`/pseudo/regular handler maps），<10 项。
-- **连接池分片与无锁偷取**：`Local/StealableHttp1ConnectionPoolSet` 按 loop 分片；跨分片偷取与远程归还走 `EventLoop::post`（MpscQueue）非 mutex；`AcquireAwaiter` 栈上 + 侵入式 `NotifyEntry`。`Http1ConnectionGroupHintTable` 是固定大小无锁原子计数指纹滤波器。
+- **连接池分片与无锁偷取**：`Local/StealableHttp1ConnectionPoolSet` 按 loop 分片；跨分片偷取与远程归还走 `EventLoop::post`（MpscQueue）非 mutex；本地 hit 和无远端候选的 miss 保持栈上、同步、零分配，只有实际跨 loop steal 才分配带侵入式 `NotifyEntry` 的稳定 state，以支持 `when_any` loser 取消和远端 entry 归还。`Http1ConnectionGroupHintTable` 是固定大小无锁原子计数指纹滤波器。
 - **H2 stream table**（`Http2StreamTable.cpp`）：O(1) 开放寻址 + 后移删除。
 - **body 重组**（`detail/Http2BodyRecvState.cpp`）：零拷贝 `take_prefix` 移节点。
 - **`Http2SendAwaiter.h`**：awaiter 居协程帧内，侵入式 `NotifyEntry`/`TimerEntry`，裸函数指针 ops。

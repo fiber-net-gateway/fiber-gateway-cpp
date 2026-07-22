@@ -123,6 +123,8 @@ private:
     [[nodiscard]] const Shard &shard_at(std::size_t index) const noexcept;
     [[nodiscard]] ShardSlot &slot_at(std::size_t index) noexcept;
     [[nodiscard]] const ShardSlot &slot_at(std::size_t index) const noexcept;
+    [[nodiscard]] bool begin_remote_acquire() noexcept;
+    void finish_remote_acquire() noexcept;
 
     event::EventLoopGroup *group_ = nullptr;
     Options pool_options_{};
@@ -140,6 +142,7 @@ private:
 #endif
     std::mutex shutdown_mu_{};
     async::WaitGroup shutdown_wg_{};
+    async::WaitGroup active_acquire_wg_{};
 };
 
 class StealableHttp1ConnectionPoolSet::AcquireAwaiter : public common::NonCopyable {
@@ -147,22 +150,21 @@ public:
     AcquireAwaiter(StealableHttp1ConnectionPoolSet &set, const Http1ConnectionGroupKey &key) noexcept;
     AcquireAwaiter(AcquireAwaiter &&) = delete;
     AcquireAwaiter &operator=(AcquireAwaiter &&) = delete;
-    ~AcquireAwaiter() = default;
+    ~AcquireAwaiter() noexcept;
 
     bool await_ready() noexcept;
     bool await_suspend(std::coroutine_handle<> handle) noexcept;
     Lease await_resume() noexcept;
+    [[nodiscard]] bool completed() const noexcept { return completed_; }
 
 private:
     friend class StealableHttp1ConnectionPoolSet;
 
-    enum class Phase : std::uint8_t { SubmitSteal, ResumeCaller };
+    class State;
 
     [[nodiscard]] Shard &target_shard() const noexcept;
     [[nodiscard]] bool prepare() noexcept;
     [[nodiscard]] bool advance_to_candidate() noexcept;
-    void post_target() noexcept;
-    static void run_notify(AcquireAwaiter *awaiter) noexcept;
 
     StealableHttp1ConnectionPoolSet *set_ = nullptr;
     std::optional<Http1ConnectionGroupKey> key_{};
@@ -171,12 +173,9 @@ private:
     ShardSlot *home_slot_ = nullptr;
     ShardSlot *cursor_ = nullptr;
     event::EventLoop *caller_loop_ = nullptr;
-    std::coroutine_handle<> handle_{};
-    event::EventLoop::NotifyEntry notify_entry_{};
-    Http1ConnectionPoolEntry *result_entry_ = nullptr;
-    Http1ConnectionPoolCore *result_home_core_ = nullptr;
-    Phase phase_ = Phase::SubmitSteal;
+    State *state_ = nullptr;
     bool prepared_ = false;
+    bool completed_ = false;
 };
 
 } // namespace fiber::http

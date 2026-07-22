@@ -132,6 +132,238 @@ private:
     event::EventLoop::NotifyEntry resume_notify_{};
 };
 
+class StealableHttp1ConnectionPoolSet::AcquireAwaiter::State : public common::NonCopyable, public common::NonMovable {
+public:
+    State(AcquireAwaiter &awaiter, std::coroutine_handle<> handle) noexcept :
+        awaiter_(&awaiter), set_(awaiter.set_), caller_loop_(awaiter.caller_loop_), handle_(handle),
+        key_(*awaiter.key_), local_fallback_(std::move(awaiter.local_fallback_)), home_slot_(awaiter.home_slot_),
+        cursor_(awaiter.cursor_) {
+        FIBER_ASSERT(set_ != nullptr);
+        FIBER_ASSERT(caller_loop_ != nullptr);
+        FIBER_ASSERT(home_slot_ != nullptr);
+        FIBER_ASSERT(cursor_ != nullptr);
+    }
+
+    ~State() {
+        FIBER_ASSERT(!registered_);
+        FIBER_ASSERT(result_entry_ == nullptr);
+        FIBER_ASSERT(result_home_core_ == nullptr);
+    }
+
+    void mark_registered() noexcept {
+        FIBER_ASSERT(!registered_);
+        registered_ = true;
+    }
+
+    void start() noexcept { post_to(target_shard().core.loop(), Dispatch::TrySteal); }
+
+    void request_cancel() noexcept {
+        FIBER_ASSERT(caller_loop_ != nullptr);
+        FIBER_ASSERT(caller_loop_->in_loop());
+
+        Status status = status_.load(std::memory_order_acquire);
+        for (;;) {
+            switch (status) {
+                case Status::Stealing:
+                case Status::ResumeQueued:
+                    if (status_.compare_exchange_weak(status, Status::Canceled, std::memory_order_acq_rel,
+                                                      std::memory_order_acquire)) {
+                        return;
+                    }
+                    break;
+                case Status::Canceled:
+                    return;
+                case Status::Resumed:
+                    FIBER_PANIC("cannot cancel a resumed HTTP/1 pool acquire");
+            }
+        }
+    }
+
+    Lease take_result() noexcept {
+        FIBER_ASSERT(caller_loop_ != nullptr);
+        FIBER_ASSERT(caller_loop_->in_loop());
+        FIBER_ASSERT(status_.load(std::memory_order_acquire) == Status::Resumed);
+
+        Lease result;
+        if (result_entry_ && result_home_core_) {
+            result = Lease(*result_home_core_, *result_entry_, key_);
+            result_entry_ = nullptr;
+            result_home_core_ = nullptr;
+        } else {
+            result = Lease(std::move(local_fallback_));
+        }
+        finish_registered();
+        return result;
+    }
+
+private:
+    enum class Status : std::uint8_t { Stealing, ResumeQueued, Resumed, Canceled };
+    enum class Dispatch : std::uint8_t { TrySteal, ResumeCaller, ReturnCanceledEntry, FinalizeCanceled };
+
+    [[nodiscard]] Shard &target_shard() const noexcept {
+        FIBER_ASSERT(cursor_ != nullptr);
+        return *std::launder(reinterpret_cast<Shard *>(cursor_->storage));
+    }
+
+    [[nodiscard]] bool advance_to_candidate() noexcept {
+        FIBER_ASSERT(home_slot_ != nullptr);
+        while (cursor_ != home_slot_) {
+            if (target_shard().hint.probe(key_).may_have()) {
+                return true;
+            }
+            cursor_ = cursor_->next;
+        }
+        return false;
+    }
+
+    void post_to(event::EventLoop &loop, Dispatch dispatch) noexcept {
+        dispatch_ = dispatch;
+        loop.post<State, &State::notify_entry_, &State::run_notify>(*this);
+    }
+
+    static void run_notify(State *state) noexcept {
+        FIBER_ASSERT(state != nullptr);
+        switch (state->dispatch_) {
+            case Dispatch::TrySteal:
+                state->try_steal();
+                return;
+            case Dispatch::ResumeCaller:
+                state->resume_caller();
+                return;
+            case Dispatch::ReturnCanceledEntry:
+                state->return_canceled_entry();
+                return;
+            case Dispatch::FinalizeCanceled:
+                state->finalize_canceled();
+                return;
+        }
+    }
+
+    void try_steal() noexcept {
+        FIBER_ASSERT(target_shard().core.loop().in_loop());
+        if (status_.load(std::memory_order_acquire) == Status::Canceled) {
+            post_to(*caller_loop_, Dispatch::FinalizeCanceled);
+            return;
+        }
+
+#if FIBER_ENABLE_BENCHMARK_TRACE
+        set_->trace_remote_attempt_.fetch_add(1, std::memory_order_relaxed);
+#endif
+        result_home_core_ = &target_shard().core;
+        result_entry_ = result_home_core_->try_steal_idle_entry(key_);
+        if (result_entry_) {
+#if FIBER_ENABLE_BENCHMARK_TRACE
+            set_->trace_remote_hit();
+#endif
+            Status expected = Status::Stealing;
+            if (status_.compare_exchange_strong(expected, Status::ResumeQueued, std::memory_order_acq_rel,
+                                                std::memory_order_acquire)) {
+                post_to(*caller_loop_, Dispatch::ResumeCaller);
+                return;
+            }
+
+            FIBER_ASSERT(expected == Status::Canceled);
+            result_home_core_->accept_returned_entry(*result_entry_, key_);
+            result_entry_ = nullptr;
+            result_home_core_ = nullptr;
+            post_to(*caller_loop_, Dispatch::FinalizeCanceled);
+            return;
+        }
+
+#if FIBER_ENABLE_BENCHMARK_TRACE
+        set_->trace_remote_attempt_miss_.fetch_add(1, std::memory_order_relaxed);
+#endif
+        result_home_core_ = nullptr;
+        cursor_ = cursor_->next;
+        if (advance_to_candidate()) {
+            if (status_.load(std::memory_order_acquire) == Status::Canceled) {
+                post_to(*caller_loop_, Dispatch::FinalizeCanceled);
+            } else {
+                post_to(target_shard().core.loop(), Dispatch::TrySteal);
+            }
+            return;
+        }
+
+        cursor_ = nullptr;
+        Status expected = Status::Stealing;
+        if (status_.compare_exchange_strong(expected, Status::ResumeQueued, std::memory_order_acq_rel,
+                                            std::memory_order_acquire)) {
+            post_to(*caller_loop_, Dispatch::ResumeCaller);
+            return;
+        }
+
+        FIBER_ASSERT(expected == Status::Canceled);
+        post_to(*caller_loop_, Dispatch::FinalizeCanceled);
+    }
+
+    void resume_caller() noexcept {
+        FIBER_ASSERT(caller_loop_ != nullptr);
+        FIBER_ASSERT(caller_loop_->in_loop());
+
+        Status expected = Status::ResumeQueued;
+        if (status_.compare_exchange_strong(expected, Status::Resumed, std::memory_order_acq_rel,
+                                            std::memory_order_acquire)) {
+            FIBER_ASSERT(awaiter_ != nullptr);
+            awaiter_->completed_ = true;
+            auto handle = std::exchange(handle_, {});
+            FIBER_ASSERT(handle);
+            handle.resume();
+            return;
+        }
+
+        FIBER_ASSERT(expected == Status::Canceled);
+        if (result_entry_ && result_home_core_) {
+            post_to(result_home_core_->loop(), Dispatch::ReturnCanceledEntry);
+            return;
+        }
+        finalize_canceled();
+    }
+
+    void return_canceled_entry() noexcept {
+        FIBER_ASSERT(status_.load(std::memory_order_acquire) == Status::Canceled);
+        FIBER_ASSERT(result_entry_ != nullptr);
+        FIBER_ASSERT(result_home_core_ != nullptr);
+        FIBER_ASSERT(result_home_core_->loop().in_loop());
+
+        result_home_core_->accept_returned_entry(*result_entry_, key_);
+        result_entry_ = nullptr;
+        result_home_core_ = nullptr;
+        post_to(*caller_loop_, Dispatch::FinalizeCanceled);
+    }
+
+    void finalize_canceled() noexcept {
+        FIBER_ASSERT(caller_loop_ != nullptr);
+        FIBER_ASSERT(caller_loop_->in_loop());
+        FIBER_ASSERT(status_.load(std::memory_order_acquire) == Status::Canceled);
+        FIBER_ASSERT(result_entry_ == nullptr);
+        FIBER_ASSERT(result_home_core_ == nullptr);
+
+        finish_registered();
+        delete this;
+    }
+
+    void finish_registered() noexcept {
+        FIBER_ASSERT(registered_);
+        registered_ = false;
+        set_->finish_remote_acquire();
+    }
+
+    AcquireAwaiter *awaiter_ = nullptr;
+    StealableHttp1ConnectionPoolSet *set_ = nullptr;
+    event::EventLoop *caller_loop_ = nullptr;
+    std::coroutine_handle<> handle_{};
+    Http1ConnectionGroupKey key_;
+    Http1ConnectionPoolCore::Lease local_fallback_{};
+    ShardSlot *home_slot_ = nullptr;
+    ShardSlot *cursor_ = nullptr;
+    Http1ConnectionPoolEntry *result_entry_ = nullptr;
+    Http1ConnectionPoolCore *result_home_core_ = nullptr;
+    event::EventLoop::NotifyEntry notify_entry_{};
+    std::atomic<Status> status_{Status::Stealing};
+    Dispatch dispatch_ = Dispatch::TrySteal;
+    bool registered_ = false;
+};
+
 StealableHttp1ConnectionPoolSet::Lease::Lease(Http1ConnectionPoolCore::Lease &&local) noexcept :
     kind_(Kind::Local), local_(std::move(local)) {}
 
@@ -300,6 +532,7 @@ StealableHttp1ConnectionPoolSet::~StealableHttp1ConnectionPoolSet() {
 #if FIBER_ENABLE_BENCHMARK_TRACE
     trace_report();
 #endif
+    FIBER_ASSERT(active_acquire_wg_.empty());
     for (std::size_t i = 0; i < group_->size(); ++i) {
         auto *shard = reinterpret_cast<Shard *>(storage_[i].storage);
         std::destroy_at(shard);
@@ -360,6 +593,7 @@ async::Task<void> StealableHttp1ConnectionPoolSet::shutdown_async() noexcept {
         co_return;
     }
 
+    co_await active_acquire_wg_.join();
     co_await AdminAwaiter(*this, AdminAwaiter::Operation::Shutdown);
     shutdown_wg_.done();
 }
@@ -368,18 +602,58 @@ StealableHttp1ConnectionPoolSet::AcquireAwaiter::AcquireAwaiter(StealableHttp1Co
                                                                 const Http1ConnectionGroupKey &key) noexcept :
     set_(&set), key_(key) {}
 
-bool StealableHttp1ConnectionPoolSet::AcquireAwaiter::await_ready() noexcept { return prepare(); }
+StealableHttp1ConnectionPoolSet::AcquireAwaiter::~AcquireAwaiter() noexcept {
+    if (!state_) {
+        return;
+    }
+    FIBER_ASSERT(caller_loop_ != nullptr);
+    FIBER_ASSERT(caller_loop_->in_loop());
+    State *state = std::exchange(state_, nullptr);
+    state->request_cancel();
+}
+
+bool StealableHttp1ConnectionPoolSet::AcquireAwaiter::await_ready() noexcept {
+    completed_ = prepare();
+    return completed_;
+}
 
 bool StealableHttp1ConnectionPoolSet::AcquireAwaiter::await_suspend(std::coroutine_handle<> handle) noexcept {
     if (!prepared_ && prepare()) {
+        completed_ = true;
         return false;
     }
-    handle_ = handle;
-    post_target();
+    FIBER_ASSERT(!completed_);
+    FIBER_ASSERT(state_ == nullptr);
+    FIBER_ASSERT(cursor_ != nullptr);
+
+    auto *state = new (std::nothrow) State(*this, handle);
+    if (!state) {
+        result_ = Lease(std::move(local_fallback_));
+        cursor_ = nullptr;
+        completed_ = true;
+        return false;
+    }
+    if (!set_->begin_remote_acquire()) {
+        delete state;
+        cursor_ = nullptr;
+        completed_ = true;
+        return false;
+    }
+
+    state->mark_registered();
+    state_ = state;
+    state_->start();
     return true;
 }
 
 StealableHttp1ConnectionPoolSet::Lease StealableHttp1ConnectionPoolSet::AcquireAwaiter::await_resume() noexcept {
+    FIBER_ASSERT(completed_);
+    if (state_) {
+        State *state = std::exchange(state_, nullptr);
+        Lease result = state->take_result();
+        delete state;
+        return result;
+    }
     return std::move(result_);
 }
 
@@ -440,62 +714,6 @@ bool StealableHttp1ConnectionPoolSet::AcquireAwaiter::advance_to_candidate() noe
     return false;
 }
 
-void StealableHttp1ConnectionPoolSet::AcquireAwaiter::post_target() noexcept {
-    FIBER_ASSERT(cursor_ != nullptr);
-    phase_ = Phase::SubmitSteal;
-    target_shard().core.loop().post<AcquireAwaiter, &AcquireAwaiter::notify_entry_, &AcquireAwaiter::run_notify>(*this);
-}
-
-void StealableHttp1ConnectionPoolSet::AcquireAwaiter::run_notify(AcquireAwaiter *awaiter) noexcept {
-    FIBER_ASSERT(awaiter != nullptr);
-    switch (awaiter->phase_) {
-        case Phase::SubmitSteal:
-#if FIBER_ENABLE_BENCHMARK_TRACE
-            awaiter->set_->trace_remote_attempt_.fetch_add(1, std::memory_order_relaxed);
-#endif
-            awaiter->result_home_core_ = &awaiter->target_shard().core;
-            awaiter->result_entry_ = awaiter->result_home_core_->try_steal_idle_entry(*awaiter->key_);
-            if (awaiter->result_entry_ && awaiter->result_home_core_) {
-#if FIBER_ENABLE_BENCHMARK_TRACE
-                awaiter->set_->trace_remote_hit();
-#endif
-                awaiter->phase_ = Phase::ResumeCaller;
-                awaiter->caller_loop_
-                        ->post<AcquireAwaiter, &AcquireAwaiter::notify_entry_, &AcquireAwaiter::run_notify>(*awaiter);
-                return;
-            }
-
-#if FIBER_ENABLE_BENCHMARK_TRACE
-            awaiter->set_->trace_remote_attempt_miss_.fetch_add(1, std::memory_order_relaxed);
-#endif
-
-            awaiter->cursor_ = awaiter->cursor_->next;
-            awaiter->result_entry_ = nullptr;
-            awaiter->result_home_core_ = nullptr;
-            if (awaiter->advance_to_candidate()) {
-                awaiter->post_target();
-                return;
-            }
-
-            awaiter->result_ = Lease(std::move(awaiter->local_fallback_));
-            awaiter->cursor_ = nullptr;
-            awaiter->phase_ = Phase::ResumeCaller;
-            awaiter->caller_loop_->post<AcquireAwaiter, &AcquireAwaiter::notify_entry_, &AcquireAwaiter::run_notify>(
-                    *awaiter);
-            return;
-        case Phase::ResumeCaller:
-            if (awaiter->result_entry_ && awaiter->result_home_core_) {
-                awaiter->result_ = Lease(*awaiter->result_home_core_, *awaiter->result_entry_, *awaiter->key_);
-            }
-            if (awaiter->handle_) {
-                auto handle = awaiter->handle_;
-                awaiter->handle_ = {};
-                handle.resume();
-            }
-            return;
-    }
-}
-
 StealableHttp1ConnectionPoolSet::AcquireAwaiter
 StealableHttp1ConnectionPoolSet::acquire(const Http1ConnectionGroupKey &key) noexcept {
     return AcquireAwaiter(*this, key);
@@ -550,5 +768,16 @@ StealableHttp1ConnectionPoolSet::slot_at(std::size_t index) const noexcept {
     FIBER_ASSERT(index < group_->size());
     return storage_[index];
 }
+
+bool StealableHttp1ConnectionPoolSet::begin_remote_acquire() noexcept {
+    std::lock_guard guard(shutdown_mu_);
+    if (shutdown_requested_.load(std::memory_order_relaxed)) {
+        return false;
+    }
+    active_acquire_wg_.add();
+    return true;
+}
+
+void StealableHttp1ConnectionPoolSet::finish_remote_acquire() noexcept { active_acquire_wg_.done(); }
 
 } // namespace fiber::http

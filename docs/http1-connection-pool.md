@@ -399,6 +399,10 @@ auto lease = co_await pool_set.acquire(key);
 - 本地 miss 后，可能需要向其它 loop 提交 steal 请求
 - steal 流程通过 `EventLoop::post()` 串行推进
 
+本地 hit 和没有远端 hint 候选的 local miss 都同步完成，不进行动态分配。只有确实需要跨 loop
+探测时，awaiter 才会分配一个独立的 acquire state。跨线程 `NotifyEntry` 位于这个 state 中，
+因此等待协程被取消后，已经投递的通知仍有稳定存储可用于完成清理。
+
 ### 7.4 steal 流程
 
 当前实现流程：
@@ -417,6 +421,12 @@ auto lease = co_await pool_set.acquire(key);
 - cheap hint 只是剪枝，不保证远端一定能 steal 到连接
 - 真正的“检查 + 摘走 idle 连接”在远端 loop 的 core 内完成
 - 如果某个远端 loop 在 hint 命中但实际 steal miss，会继续向后探测后续 loop
+
+跨 loop acquire state 使用原子状态仲裁完成和取消。awaiter 析构只把 state 标记为 canceled，
+不会尝试从 MPSC notify queue 中删除节点。后续 callback 看到 canceled 后不会再访问 awaiter 或恢复
+原协程；如果连接已经从远端 pool 摘下，则先在它的 home loop 归还，再释放 state。因此
+`StealableHttp1ConnectionPoolSet::AcquireAwaiter` 可以直接作为 `when_any()` 分支，也可以安全地位于
+被 `Task::select()` 取消的子协程 frame 中。
 
 ### 7.5 使用方式
 
@@ -512,6 +522,7 @@ remote borrowed 连接释放时：
 
 `StealableHttp1ConnectionPoolSet::shutdown_async()` 会：
 
+- 禁止注册新的跨 loop acquire state，并等待已有 state 完成或取消清理
 - 在每个 shard 的 owner loop 上清空当前 idle 连接
 - 清空所有 hint 表
 - 禁止后续新的 `acquire()` / `emplace_connection()`
