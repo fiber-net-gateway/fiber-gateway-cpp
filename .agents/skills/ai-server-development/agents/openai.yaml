@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI Server Development"
+  short_description: "Develop C++ AI proxy against ploto-llm behavior"
+  default_prompt: "Use $ai-server-development to design or implement apps/ai-server with ploto-llm-compatible behavior."
