@@ -14,6 +14,8 @@ struct TransactionData;
 enum class MessageKind : std::uint8_t {
     Transaction,
     Event,
+    Metric,
+    Heartbeat,
 };
 
 enum class RecordError : std::uint8_t {
@@ -24,6 +26,8 @@ enum class RecordError : std::uint8_t {
     LimitExceeded,
     NoMemory,
     WrongMetricKind,
+    InvalidContext,
+    IdGenerationFailed,
 };
 
 struct RecordLimits {
@@ -37,6 +41,8 @@ struct RecordLimits {
     std::size_t max_context_key_bytes = 128;
     std::size_t max_context_value_bytes = 4096;
     std::size_t max_context_bytes = 16 * 1024;
+    std::size_t max_message_id_bytes = 1024;
+    std::size_t max_session_token_bytes = 4096;
     std::size_t max_tree_bytes = 1024 * 1024;
 };
 

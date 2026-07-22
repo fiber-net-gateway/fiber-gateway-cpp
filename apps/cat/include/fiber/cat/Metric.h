@@ -10,6 +10,8 @@
 
 namespace fiber::cat {
 
+class CatClient;
+
 namespace detail {
 struct MetricData;
 }
@@ -37,10 +39,15 @@ public:
 
     [[nodiscard]] static std::expected<Metric, RecordError> create_count(std::string_view name) noexcept;
     [[nodiscard]] static std::expected<Metric, RecordError> create_duration(std::string_view name) noexcept;
+    [[nodiscard]] static std::expected<Metric, RecordError> create_count(CatClient &client,
+                                                                         std::string_view name) noexcept;
+    [[nodiscard]] static std::expected<Metric, RecordError> create_duration(CatClient &client,
+                                                                            std::string_view name) noexcept;
 
     [[nodiscard]] bool valid() const noexcept { return data_ != nullptr; }
     [[nodiscard]] std::string_view name() const noexcept;
     [[nodiscard]] MetricKind kind() const noexcept;
+    [[nodiscard]] bool automatically_reported() const noexcept;
 
     RecordError record_count(std::int64_t quantity = 1) noexcept;
     RecordError record_duration(std::chrono::milliseconds duration) noexcept;
@@ -52,7 +59,8 @@ public:
 private:
     explicit Metric(detail::MetricData *data) noexcept : data_(data) {}
 
-    [[nodiscard]] static std::expected<Metric, RecordError> create(MetricKind kind, std::string_view name) noexcept;
+    [[nodiscard]] static std::expected<Metric, RecordError> create(MetricKind kind, std::string_view name,
+                                                                   CatClient *client) noexcept;
 
     detail::MetricData *data_ = nullptr;
 };

@@ -7,6 +7,7 @@
 #include <limits>
 #include <new>
 #include <string>
+#include <unistd.h>
 #include <utility>
 
 #include <async/Sleep.h>
@@ -21,7 +22,10 @@
 #include <http/HttpHeaders.h>
 #include <net/IpAddress.h>
 
+#include "CatAggregation.h"
+#include "CatInternal.h"
 #include "CatRouter.h"
+#include "CatSystemMessage.h"
 
 namespace fiber::cat::detail {
 
@@ -121,16 +125,27 @@ private:
 CatClientCore::CatClientCore(event::EventLoop &sender_loop, CatClientConfig config, CatClientOptions options,
                              dns::AddressResolver *resolver) noexcept :
     loop_(&sender_loop), config_(std::move(config)), options_(std::move(options)), resolver_(resolver),
-    collectors_(config_.bootstrap_collectors()) {
+    message_id_generator_(config_.ip()), collectors_(config_.bootstrap_collectors()) {
+    sample_cutoff_.store(sample_cutoff(options_.initial_sample_rate), std::memory_order_relaxed);
     control_publisher_ = control_wake_.acquire_publisher();
     FIBER_ASSERT(control_publisher_.has_value());
+    process_start_steady_ = loop_->now();
+    const auto wall_millis =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+                    .count();
+    process_start_wall_millis_ = wall_millis < 0 ? 0 : static_cast<std::uint64_t>(wall_millis);
 }
 
 CatClientCore::~CatClientCore() {
     FIBER_ASSERT(state() == CatClientState::Created || state() == CatClientState::Stopped);
     FIBER_ASSERT(active_submitters_.load(std::memory_order_relaxed) == 0);
     FIBER_ASSERT((outstanding_state_.load(std::memory_order_relaxed) & ~kClosedMask) == 0);
+    FIBER_ASSERT(system_outstanding_state_.load(std::memory_order_relaxed) == 0);
     FIBER_ASSERT(local_head_ == nullptr);
+    FIBER_ASSERT(priority_head_ == nullptr);
+    for (std::size_t index = 0; index < aggregation_shard_count_; ++index) {
+        delete aggregation_shards_[index];
+    }
 }
 
 common::IoResult<void> CatClientCore::start() noexcept {
@@ -149,10 +164,19 @@ common::IoResult<void> CatClientCore::start() noexcept {
     control_done_.add();
     std::shared_ptr<CatClientCore> self = shared_from_this();
     async::spawn([self = std::move(self)]() { return self->run_control(); });
+    loop_->post_at<CatClientCore, &CatClientCore::aggregate_timer_, &CatClientCore::on_aggregate_timer>(
+            loop_->now() + options_.aggregation_flush_interval, *this);
+    if (options_.enable_heartbeat) {
+        loop_->post_at<CatClientCore, &CatClientCore::heartbeat_timer_, &CatClientCore::on_heartbeat_timer>(
+                loop_->now() + options_.heartbeat_initial_delay, *this);
+    }
     return {};
 }
 
 async::Task<void> CatClientCore::shutdown() noexcept {
+    if (loop_->in_loop() && state() == CatClientState::Running) {
+        (void) co_await detach_aggregation_shard(*loop_);
+    }
     begin_stop();
     co_await control_done_.join();
 }
@@ -163,6 +187,7 @@ void CatClientCore::begin_stop() noexcept {
         if (current == CatClientState::Created) {
             if (state_.compare_exchange_weak(current, CatClientState::Stopped, std::memory_order_acq_rel)) {
                 outstanding_state_.fetch_or(kClosedMask, std::memory_order_acq_rel);
+                std::lock_guard lock(aggregation_mutex_);
                 return;
             }
             continue;
@@ -170,6 +195,9 @@ void CatClientCore::begin_stop() noexcept {
         if (current == CatClientState::Running) {
             if (state_.compare_exchange_weak(current, CatClientState::Stopping, std::memory_order_acq_rel)) {
                 outstanding_state_.fetch_or(kClosedMask, std::memory_order_acq_rel);
+                {
+                    std::lock_guard lock(aggregation_mutex_);
+                }
                 notify_control();
                 return;
             }
@@ -182,9 +210,12 @@ void CatClientCore::begin_stop() noexcept {
 
 CatClientStats CatClientCore::stats() const noexcept {
     const std::uint64_t budget = outstanding_state_.load(std::memory_order_acquire);
+    const std::uint64_t system_budget = system_outstanding_state_.load(std::memory_order_acquire);
     return {
             .queued_messages = budget_messages(budget),
             .queued_bytes = budget_bytes(budget),
+            .system_queued_messages = budget_messages(system_budget),
+            .system_queued_bytes = budget_bytes(system_budget),
             .submitted_messages = stats_.submitted_messages.load(std::memory_order_relaxed),
             .sent_messages = stats_.sent_messages.load(std::memory_order_relaxed),
             .sent_bytes = stats_.sent_bytes.load(std::memory_order_relaxed),
@@ -197,7 +228,38 @@ CatClientStats CatClientCore::stats() const noexcept {
             .router_failures = stats_.router_failures.load(std::memory_order_relaxed),
             .connect_successes = stats_.connect_successes.load(std::memory_order_relaxed),
             .connect_failures = stats_.connect_failures.load(std::memory_order_relaxed),
+            .write_would_block = stats_.write_would_block.load(std::memory_order_relaxed),
             .write_failures = stats_.write_failures.load(std::memory_order_relaxed),
+            .message_id_failures = stats_.message_id_failures.load(std::memory_order_relaxed),
+            .context_failures = stats_.context_failures.load(std::memory_order_relaxed),
+            .invalid_contexts = stats_.invalid_contexts.load(std::memory_order_relaxed),
+            .sampled_trees = stats_.sampled_trees.load(std::memory_order_relaxed),
+            .forced_problem_trees = stats_.forced_problem_trees.load(std::memory_order_relaxed),
+            .aggregated_trees = stats_.aggregated_trees.load(std::memory_order_relaxed),
+            .aggregation_overflow = stats_.aggregation_overflow.load(std::memory_order_relaxed),
+            .aggregate_submitted = stats_.aggregate_submitted.load(std::memory_order_relaxed),
+            .aggregate_dropped = stats_.aggregate_dropped.load(std::memory_order_relaxed),
+            .aggregate_retry_failures = stats_.aggregate_retry_failures.load(std::memory_order_relaxed),
+            .aggregate_encode_failures = stats_.aggregate_encode_failures.load(std::memory_order_relaxed),
+            .metric_observations = stats_.metric_observations.load(std::memory_order_relaxed),
+            .metric_overflow = stats_.metric_overflow.load(std::memory_order_relaxed),
+            .metric_submitted = stats_.metric_submitted.load(std::memory_order_relaxed),
+            .metric_dropped = stats_.metric_dropped.load(std::memory_order_relaxed),
+            .metric_retry_failures = stats_.metric_retry_failures.load(std::memory_order_relaxed),
+            .heartbeat_submitted = stats_.heartbeat_submitted.load(std::memory_order_relaxed),
+            .heartbeat_sent = stats_.heartbeat_sent.load(std::memory_order_relaxed),
+            .heartbeat_skipped = stats_.heartbeat_skipped.load(std::memory_order_relaxed),
+            .heartbeat_dropped = stats_.heartbeat_dropped.load(std::memory_order_relaxed),
+            .heartbeat_encode_failures = stats_.heartbeat_encode_failures.load(std::memory_order_relaxed),
+            .heartbeat_provider_failures = stats_.heartbeat_provider_failures.load(std::memory_order_relaxed),
+            .truncated_trees = stats_.truncated_trees.load(std::memory_order_relaxed),
+            .truncated_messages = stats_.truncated_messages.load(std::memory_order_relaxed),
+            .truncated_data_bytes = stats_.truncated_data_bytes.load(std::memory_order_relaxed),
+            .router_blocks = stats_.router_blocks.load(std::memory_order_relaxed),
+            .router_unblocks = stats_.router_unblocks.load(std::memory_order_relaxed),
+            .router_sample_changes = stats_.router_sample_changes.load(std::memory_order_relaxed),
+            .collector_set_changes = stats_.collector_set_changes.load(std::memory_order_relaxed),
+            .stale_connection_switches = stats_.stale_connection_switches.load(std::memory_order_relaxed),
     };
 }
 
@@ -212,25 +274,163 @@ ClientEncodeContext CatClientCore::encode_context() const noexcept {
     };
 }
 
+std::expected<mem::IoBuf, EncodeError> CatClientCore::encode(const MessageTraceData &trace) const noexcept {
+    return encode_message_tree(trace, encode_context(), options_.encoder);
+}
+
 bool CatClientCore::accepts_messages() const noexcept {
     return state() == CatClientState::Running &&
            (outstanding_state_.load(std::memory_order_acquire) & kClosedMask) == 0 &&
-           !blocked_.load(std::memory_order_acquire) && sample_cutoff_.load(std::memory_order_acquire) != 0;
+           !blocked_.load(std::memory_order_acquire);
 }
 
-CatClientCore::ReserveResult CatClientCore::reserve_budget(std::size_t bytes) noexcept {
+std::expected<GeneratedMessageId, RecordError> CatClientCore::create_message_id(std::string_view domain) noexcept {
+    if (state() != CatClientState::Running) {
+        stats_.message_id_failures.fetch_add(1, std::memory_order_relaxed);
+        return std::unexpected(RecordError::Completed);
+    }
+    if (domain.empty()) {
+        domain = config_.app_key();
+    }
+    auto generated = message_id_generator_.next(domain, std::chrono::system_clock::now());
+    if (!generated) {
+        on_context_failure(generated.error());
+        if (generated.error() != RecordError::InvalidContext) {
+            stats_.message_id_failures.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    return generated;
+}
+
+void CatClientCore::on_context_failure(RecordError error) noexcept {
+    if (error == RecordError::InvalidContext) {
+        stats_.invalid_contexts.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        stats_.context_failures.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+TraceDisposition CatClientCore::trace_disposition(bool has_problem) noexcept {
+    if (!accepts_messages()) {
+        stats_.dropped_unavailable.fetch_add(1, std::memory_order_relaxed);
+        return TraceDisposition::Drop;
+    }
+    if (has_problem) {
+        stats_.forced_problem_trees.fetch_add(1, std::memory_order_relaxed);
+        return TraceDisposition::Problem;
+    }
+    if (sampled_in()) {
+        return TraceDisposition::Detailed;
+    }
+    stats_.sampled_trees.fetch_add(1, std::memory_order_relaxed);
+    return TraceDisposition::Aggregate;
+}
+
+AggregationShard *CatClientCore::aggregation_shard(event::EventLoop &owner) noexcept {
+    if (state() != CatClientState::Running) {
+        return nullptr;
+    }
+    std::lock_guard lock(aggregation_mutex_);
+    if (state() != CatClientState::Running) {
+        return nullptr;
+    }
+    for (std::size_t index = 0; index < aggregation_shard_count_; ++index) {
+        if (&aggregation_shards_[index]->owner() == &owner) {
+            return aggregation_shards_[index];
+        }
+    }
+    if (aggregation_shard_count_ >= options_.max_aggregation_shards ||
+        aggregation_shard_count_ >= aggregation_shards_.size()) {
+        stats_.aggregation_overflow.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
+    AggregationShard *shard =
+            AggregationShard::create(owner, options_.max_aggregate_keys_per_shard, options_.max_aggregate_key_bytes,
+                                     options_.max_aggregate_bytes_per_shard, options_.max_duration_buckets_per_key);
+    if (!shard) {
+        stats_.aggregation_overflow.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
+    aggregation_shards_[aggregation_shard_count_++] = shard;
+    return shard;
+}
+
+async::Task<RecordError> CatClientCore::detach_aggregation_shard(event::EventLoop &owner) noexcept {
+    if (!owner.in_loop()) {
+        co_return RecordError::WrongEventLoop;
+    }
+    AggregationShard *shard = nullptr;
+    {
+        std::lock_guard lock(aggregation_mutex_);
+        std::size_t index = 0;
+        while (index < aggregation_shard_count_ && &aggregation_shards_[index]->owner() != &owner) {
+            ++index;
+        }
+        if (index == aggregation_shard_count_) {
+            co_return RecordError::None;
+        }
+        shard = aggregation_shards_[index];
+        for (std::size_t move = index + 1; move < aggregation_shard_count_; ++move) {
+            aggregation_shards_[move - 1] = aggregation_shards_[move];
+        }
+        aggregation_shards_[--aggregation_shard_count_] = nullptr;
+    }
+
+    if (state() == CatClientState::Running) {
+        shard->flush(*this);
+    }
+    shard->discard_pending(*this);
+    co_await NotifyDrainAwaiter{};
+    delete shard;
+    co_return RecordError::None;
+}
+
+void CatClientCore::aggregate_trace(const MessageTraceData &trace) noexcept {
+    if (!trace.aggregation_shard) {
+        stats_.aggregation_overflow.fetch_add(trace.message_count, std::memory_order_relaxed);
+        stats_.aggregate_dropped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    const std::size_t dropped = trace.aggregation_shard->aggregate(trace);
+    stats_.aggregated_trees.fetch_add(1, std::memory_order_relaxed);
+    if (dropped != 0) {
+        stats_.aggregation_overflow.fetch_add(dropped, std::memory_order_relaxed);
+    }
+}
+
+CatClientCore::ReserveResult CatClientCore::reserve_budget(std::size_t bytes, FramePriority priority) noexcept {
     if (bytes > options_.max_queued_bytes || bytes > kBudgetUnitMask) {
+        return ReserveResult::Full;
+    }
+    const bool system_reserved = priority != FramePriority::System || reserve_system_budget(bytes);
+    if (!system_reserved) {
         return ReserveResult::Full;
     }
     const auto bytes32 = static_cast<std::uint32_t>(bytes);
     std::uint64_t current = outstanding_state_.load(std::memory_order_relaxed);
     for (;;) {
         if (state() != CatClientState::Running || (current & kClosedMask) != 0) {
+            if (priority == FramePriority::System) {
+                release_system_budget(bytes);
+            }
             return ReserveResult::Closed;
         }
         const std::uint32_t messages = budget_messages(current);
         const std::uint32_t queued_bytes = budget_bytes(current);
-        if (messages >= options_.max_queued_messages || queued_bytes > options_.max_queued_bytes - bytes) {
+        std::size_t message_limit = options_.max_queued_messages;
+        std::size_t byte_limit = options_.max_queued_bytes;
+        if (priority == FramePriority::Normal) {
+            if (message_limit > options_.problem_reserve_messages) {
+                message_limit -= options_.problem_reserve_messages;
+            }
+            if (byte_limit > options_.problem_reserve_bytes) {
+                byte_limit -= options_.problem_reserve_bytes;
+            }
+        }
+        if (messages >= message_limit || bytes > byte_limit || queued_bytes > byte_limit - bytes) {
+            if (priority == FramePriority::System) {
+                release_system_budget(bytes);
+            }
             return ReserveResult::Full;
         }
         const std::uint64_t next = pack_budget(messages + 1, queued_bytes + bytes32);
@@ -241,10 +441,41 @@ CatClientCore::ReserveResult CatClientCore::reserve_budget(std::size_t bytes) no
     }
 }
 
-void CatClientCore::release_budget(std::size_t bytes) noexcept {
+bool CatClientCore::reserve_system_budget(std::size_t bytes) noexcept {
+    if (bytes > options_.max_system_queued_bytes || bytes > kBudgetUnitMask) {
+        return false;
+    }
+    const auto bytes32 = static_cast<std::uint32_t>(bytes);
+    std::uint64_t current = system_outstanding_state_.load(std::memory_order_relaxed);
+    for (;;) {
+        const std::uint32_t messages = budget_messages(current);
+        const std::uint32_t queued_bytes = budget_bytes(current);
+        if (messages >= options_.max_system_queued_messages ||
+            queued_bytes > options_.max_system_queued_bytes - bytes) {
+            return false;
+        }
+        const std::uint64_t next = pack_budget(messages + 1, queued_bytes + bytes32);
+        if (system_outstanding_state_.compare_exchange_weak(current, next, std::memory_order_acq_rel,
+                                                            std::memory_order_relaxed)) {
+            return true;
+        }
+    }
+}
+
+void CatClientCore::release_budget(std::size_t bytes, FramePriority priority) noexcept {
     FIBER_ASSERT(bytes <= kBudgetUnitMask);
     const std::uint64_t delta = pack_budget(1, static_cast<std::uint32_t>(bytes));
     const std::uint64_t previous = outstanding_state_.fetch_sub(delta, std::memory_order_acq_rel);
+    FIBER_ASSERT(budget_messages(previous) > 0);
+    FIBER_ASSERT(budget_bytes(previous) >= bytes);
+    if (priority == FramePriority::System) {
+        release_system_budget(bytes);
+    }
+}
+
+void CatClientCore::release_system_budget(std::size_t bytes) noexcept {
+    const std::uint64_t delta = pack_budget(1, static_cast<std::uint32_t>(bytes));
+    const std::uint64_t previous = system_outstanding_state_.fetch_sub(delta, std::memory_order_acq_rel);
     FIBER_ASSERT(budget_messages(previous) > 0);
     FIBER_ASSERT(budget_bytes(previous) >= bytes);
 }
@@ -261,27 +492,133 @@ bool CatClientCore::sampled_in() noexcept {
     return splitmix64(sequence) <= cutoff;
 }
 
-void CatClientCore::submit_encoded(mem::IoBuf message) noexcept {
+void CatClientCore::request_aggregate_flushes() noexcept {
+    FIBER_ASSERT(loop_->in_loop());
+    std::shared_ptr<CatClientCore> self = shared_from_this();
+    std::lock_guard lock(aggregation_mutex_);
+    for (std::size_t index = 0; index < aggregation_shard_count_; ++index) {
+        aggregation_shards_[index]->request_flush(self);
+    }
+}
+
+void CatClientCore::on_aggregate_timer(CatClientCore *client) noexcept {
+    if (client->state() != CatClientState::Running) {
+        return;
+    }
+    client->request_aggregate_flushes();
+    client->loop_->post_at<CatClientCore, &CatClientCore::aggregate_timer_, &CatClientCore::on_aggregate_timer>(
+            client->loop_->now() + client->options_.aggregation_flush_interval, *client);
+}
+
+void CatClientCore::on_heartbeat_timer(CatClientCore *client) noexcept {
+    if (client->state() != CatClientState::Running) {
+        return;
+    }
+    if (!client->startup_submitted_) {
+        client->submit_startup();
+    }
+    client->submit_heartbeat();
+    client->loop_->post_at<CatClientCore, &CatClientCore::heartbeat_timer_, &CatClientCore::on_heartbeat_timer>(
+            client->loop_->now() + client->options_.heartbeat_interval, *client);
+}
+
+void CatClientCore::submit_startup() noexcept {
+    FIBER_ASSERT(loop_->in_loop());
+    if (blocked_.load(std::memory_order_acquire)) {
+        return;
+    }
+    auto id = create_message_id();
+    if (!id) {
+        return;
+    }
+    auto encoded = encode_startup_nt1(encode_context(), id->view(), config_.ip(), "fiber2-cat/1.0", options_.encoder);
+    if (!encoded) {
+        stats_.encode_failures.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    startup_submitted_ = submit_encoded(std::move(*encoded), FramePriority::System, FrameCategory::Startup) ==
+                         SubmitResult::Submitted;
+}
+
+void CatClientCore::submit_heartbeat() noexcept {
+    FIBER_ASSERT(loop_->in_loop());
+    if (blocked_.load(std::memory_order_acquire) || heartbeat_outstanding_) {
+        stats_.heartbeat_skipped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    auto id = create_message_id();
+    if (!id) {
+        stats_.heartbeat_encode_failures.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    std::size_t event_loop_count = 0;
+    {
+        std::lock_guard lock(aggregation_mutex_);
+        event_loop_count = aggregation_shard_count_;
+    }
+    const auto uptime = std::chrono::duration_cast<std::chrono::milliseconds>(loop_->now() - process_start_steady_);
+    HeartbeatInfo info{
+            .app_key = config_.app_key(),
+            .hostname = config_.hostname(),
+            .ip = config_.ip(),
+            .client_version = "fiber2-cat/1.0",
+            .process_id = static_cast<std::uint64_t>(::getpid()),
+            .process_start_millis = process_start_wall_millis_,
+            .uptime_millis = uptime.count() < 0 ? 0 : static_cast<std::uint64_t>(uptime.count()),
+            .event_loop_count = event_loop_count,
+            .collector_count = collectors_.size(),
+            .router_last_success_millis = router_last_success_millis_,
+            .sample_cutoff = sample_cutoff_.load(std::memory_order_acquire),
+            .collector_connected = stream_ != nullptr,
+            .blocked = blocked_.load(std::memory_order_acquire),
+            .stats = stats(),
+    };
+    auto encoded = encode_heartbeat_nt1(encode_context(), id->view(), info, options_.max_heartbeat_fields,
+                                        options_.max_heartbeat_data_bytes, options_.encoder);
+    if (!encoded) {
+        stats_.heartbeat_encode_failures.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    heartbeat_outstanding_ = true;
+    const SubmitResult submitted = submit_encoded(std::move(*encoded), FramePriority::System, FrameCategory::Heartbeat);
+    if (submitted == SubmitResult::Submitted) {
+        stats_.heartbeat_submitted.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        heartbeat_outstanding_ = false;
+        stats_.heartbeat_dropped.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void CatClientCore::frame_finished(FrameCategory category, bool sent) noexcept {
+    if (category != FrameCategory::Heartbeat) {
+        return;
+    }
+    FIBER_ASSERT(loop_->in_loop());
+    heartbeat_outstanding_ = false;
+    if (sent) {
+        stats_.heartbeat_sent.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        stats_.heartbeat_dropped.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+SubmitResult CatClientCore::submit_encoded(mem::IoBuf message, FramePriority priority,
+                                           FrameCategory category) noexcept {
     active_submitters_.fetch_add(1, std::memory_order_acq_rel);
     if ((outstanding_state_.load(std::memory_order_acquire) & kClosedMask) != 0 ||
         blocked_.load(std::memory_order_acquire)) {
         stats_.dropped_unavailable.fetch_add(1, std::memory_order_relaxed);
         active_submitters_.fetch_sub(1, std::memory_order_acq_rel);
-        return;
-    }
-    if (!sampled_in()) {
-        stats_.dropped_sampled.fetch_add(1, std::memory_order_relaxed);
-        active_submitters_.fetch_sub(1, std::memory_order_acq_rel);
-        return;
+        return SubmitResult::Unavailable;
     }
 
     const std::size_t bytes = message.readable();
     if (bytes == 0) {
         stats_.dropped_queue_full.fetch_add(1, std::memory_order_relaxed);
         active_submitters_.fetch_sub(1, std::memory_order_acq_rel);
-        return;
+        return SubmitResult::Invalid;
     }
-    const ReserveResult reserved = reserve_budget(bytes);
+    const ReserveResult reserved = reserve_budget(bytes, priority);
     if (reserved != ReserveResult::Reserved) {
         if (reserved == ReserveResult::Full) {
             stats_.dropped_queue_full.fetch_add(1, std::memory_order_relaxed);
@@ -289,14 +626,14 @@ void CatClientCore::submit_encoded(mem::IoBuf message) noexcept {
             stats_.dropped_unavailable.fetch_add(1, std::memory_order_relaxed);
         }
         active_submitters_.fetch_sub(1, std::memory_order_acq_rel);
-        return;
+        return reserved == ReserveResult::Full ? SubmitResult::Full : SubmitResult::Unavailable;
     }
-    auto *frame = new (std::nothrow) OutboundFrame(*this, std::move(message));
+    auto *frame = new (std::nothrow) OutboundFrame(*this, std::move(message), priority, category);
     if (!frame) {
-        release_budget(bytes);
+        release_budget(bytes, priority);
         stats_.dropped_unavailable.fetch_add(1, std::memory_order_relaxed);
         active_submitters_.fetch_sub(1, std::memory_order_acq_rel);
-        return;
+        return SubmitResult::Unavailable;
     }
     if (loop_->in_loop()) {
         handle_frame_notify(frame);
@@ -305,6 +642,53 @@ void CatClientCore::submit_encoded(mem::IoBuf message) noexcept {
     }
     stats_.submitted_messages.fetch_add(1, std::memory_order_relaxed);
     active_submitters_.fetch_sub(1, std::memory_order_acq_rel);
+    return SubmitResult::Submitted;
+}
+
+bool CatClientCore::submit_aggregate(mem::IoBuf message) noexcept {
+    const SubmitResult result = submit_encoded(std::move(message), FramePriority::System, FrameCategory::Aggregate);
+    if (result == SubmitResult::Submitted) {
+        stats_.aggregate_submitted.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    stats_.aggregate_retry_failures.fetch_add(1, std::memory_order_relaxed);
+    return false;
+}
+
+bool CatClientCore::submit_metric_aggregate(mem::IoBuf message) noexcept {
+    const SubmitResult result = submit_encoded(std::move(message), FramePriority::System, FrameCategory::Metric);
+    if (result == SubmitResult::Submitted) {
+        stats_.metric_submitted.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    stats_.metric_retry_failures.fetch_add(1, std::memory_order_relaxed);
+    return false;
+}
+
+void CatClientCore::on_aggregate_encode_failure() noexcept {
+    stats_.aggregate_encode_failures.fetch_add(1, std::memory_order_relaxed);
+}
+
+void CatClientCore::on_aggregate_drop(std::size_t count) noexcept {
+    stats_.aggregate_dropped.fetch_add(count, std::memory_order_relaxed);
+}
+
+void CatClientCore::on_metric_drop(std::size_t count) noexcept {
+    stats_.metric_dropped.fetch_add(count, std::memory_order_relaxed);
+}
+
+void CatClientCore::on_metric_observation(RecordError result) noexcept {
+    if (result == RecordError::None) {
+        stats_.metric_observations.fetch_add(1, std::memory_order_relaxed);
+    } else if (result == RecordError::LimitExceeded || result == RecordError::NoMemory) {
+        stats_.metric_overflow.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void CatClientCore::on_trace_truncated(const MessageTraceData &trace) noexcept {
+    stats_.truncated_trees.fetch_add(1, std::memory_order_relaxed);
+    stats_.truncated_messages.fetch_add(trace.dropped_message_count, std::memory_order_relaxed);
+    stats_.truncated_data_bytes.fetch_add(trace.dropped_data_bytes, std::memory_order_relaxed);
 }
 
 void CatClientCore::on_encode_failure(EncodeError /*error*/) noexcept {
@@ -332,12 +716,14 @@ void CatClientCore::handle_frame_notify(OutboundFrame *frame) noexcept {
 void CatClientCore::append_local(OutboundFrame *frame) noexcept {
     FIBER_ASSERT(frame);
     FIBER_ASSERT(frame->local_next == nullptr);
-    if (local_tail_) {
-        local_tail_->local_next = frame;
+    OutboundFrame *&head = frame->priority == FramePriority::Normal ? local_head_ : priority_head_;
+    OutboundFrame *&tail = frame->priority == FramePriority::Normal ? local_tail_ : priority_tail_;
+    if (tail) {
+        tail->local_next = frame;
     } else {
-        local_head_ = frame;
+        head = frame;
     }
-    local_tail_ = frame;
+    tail = frame;
 }
 
 void CatClientCore::schedule_pump() noexcept {
@@ -351,26 +737,26 @@ void CatClientCore::on_pump_deferred(CatClientCore *client) noexcept {
         return;
     }
     client->drive_write();
-    if (!client->stream_ && client->local_head_ && client->state() == CatClientState::Running) {
+    if (!client->stream_ && client->has_local_frames() && client->state() == CatClientState::Running) {
         client->notify_control();
     }
 }
 
 void CatClientCore::drive_write() noexcept {
     FIBER_ASSERT(loop_->in_loop());
-    if (!stream_ || !local_head_ || write_callback_armed_) {
+    if (!stream_ || !has_local_frames() || write_callback_armed_) {
         return;
     }
 
     std::size_t pump_bytes = 0;
     std::size_t pump_calls = 0;
-    while (stream_ && local_head_ && pump_bytes < options_.max_send_bytes_per_pump &&
+    while (stream_ && has_local_frames() && pump_bytes < options_.max_send_bytes_per_pump &&
            pump_calls < options_.max_send_calls_per_pump) {
         std::array<iovec, kWriteIovCapacity> iov{};
         std::size_t count = 0;
         std::size_t batch_bytes = 0;
-        for (OutboundFrame *frame = local_head_; frame && count < options_.max_batch_messages;
-             frame = frame->local_next) {
+        const std::size_t message_limit = connection_stale_ ? 1 : options_.max_batch_messages;
+        for (OutboundFrame *frame = front_frame(); frame && count < message_limit; frame = frame->local_next) {
             const std::size_t readable = frame->message.readable();
             if (count != 0 &&
                 (batch_bytes >= options_.max_batch_bytes || readable > options_.max_batch_bytes - batch_bytes)) {
@@ -387,6 +773,7 @@ void CatClientCore::drive_write() noexcept {
         ++pump_calls;
         if (!written) {
             if (written.error() == common::IoErr::WouldBlock) {
+                stats_.write_would_block.fetch_add(1, std::memory_order_relaxed);
                 arm_write_wait();
             } else {
                 fail_connection(written.error());
@@ -401,7 +788,7 @@ void CatClientCore::drive_write() noexcept {
         consume_written(*written);
     }
 
-    if (stream_ && local_head_ && !write_callback_armed_) {
+    if (stream_ && has_local_frames() && !write_callback_armed_) {
         schedule_pump();
     }
 }
@@ -410,23 +797,34 @@ void CatClientCore::consume_written(std::size_t bytes) noexcept {
     stats_.sent_bytes.fetch_add(bytes, std::memory_order_relaxed);
     std::size_t remaining = bytes;
     while (remaining > 0) {
-        FIBER_ASSERT(local_head_);
-        const std::size_t readable = local_head_->message.readable();
+        const bool priority = priority_front_selected();
+        OutboundFrame *&head = priority ? priority_head_ : local_head_;
+        OutboundFrame *&tail = priority ? priority_tail_ : local_tail_;
+        FIBER_ASSERT(head);
+        const std::size_t readable = head->message.readable();
         const std::size_t consumed = std::min(readable, remaining);
-        local_head_->message.consume(consumed);
+        head->message.consume(consumed);
         remaining -= consumed;
         if (consumed != readable) {
             break;
         }
 
-        OutboundFrame *completed = local_head_;
-        local_head_ = completed->local_next;
-        if (!local_head_) {
-            local_tail_ = nullptr;
+        OutboundFrame *completed = head;
+        head = completed->local_next;
+        if (!head) {
+            tail = nullptr;
         }
-        release_budget(completed->original_size);
+        release_budget(completed->original_size, completed->priority);
         stats_.sent_messages.fetch_add(1, std::memory_order_relaxed);
+        frame_finished(completed->category, true);
         delete completed;
+        if (connection_stale_) {
+            FIBER_ASSERT(remaining == 0);
+            close_connection();
+            stats_.stale_connection_switches.fetch_add(1, std::memory_order_relaxed);
+            notify_control();
+            return;
+        }
     }
 }
 
@@ -471,7 +869,7 @@ void CatClientCore::on_write_timeout(CatClientCore *client) noexcept {
 void CatClientCore::fail_connection(common::IoErr /*error*/) noexcept {
     FIBER_ASSERT(loop_->in_loop());
     stats_.write_failures.fetch_add(1, std::memory_order_relaxed);
-    if (local_head_ && local_head_->message.readable() != local_head_->original_size) {
+    if (front_frame() && front_frame()->message.readable() != front_frame()->original_size) {
         drop_front_frame(true);
     }
     close_connection();
@@ -482,6 +880,7 @@ void CatClientCore::install_connection(std::unique_ptr<net::TcpStream> stream) n
     FIBER_ASSERT(loop_->in_loop());
     close_connection();
     stream_ = std::move(stream);
+    connection_stale_ = false;
     schedule_pump();
 }
 
@@ -491,36 +890,42 @@ void CatClientCore::close_connection() noexcept {
         stream_->close();
         stream_.reset();
     }
+    connection_stale_ = false;
 }
 
 void CatClientCore::drop_detached_frame(OutboundFrame *frame) noexcept {
     FIBER_ASSERT(frame);
     FIBER_ASSERT(frame->core == this);
     FIBER_ASSERT(frame->local_next == nullptr);
-    release_budget(frame->original_size);
+    release_budget(frame->original_size, frame->priority);
     stats_.dropped_unavailable.fetch_add(1, std::memory_order_relaxed);
+    frame_finished(frame->category, false);
     delete frame;
 }
 
 void CatClientCore::drop_front_frame(bool partial) noexcept {
-    FIBER_ASSERT(local_head_);
-    OutboundFrame *dropped = local_head_;
-    local_head_ = dropped->local_next;
-    if (!local_head_) {
-        local_tail_ = nullptr;
+    const bool priority = priority_front_selected();
+    OutboundFrame *&head = priority ? priority_head_ : local_head_;
+    OutboundFrame *&tail = priority ? priority_tail_ : local_tail_;
+    FIBER_ASSERT(head);
+    OutboundFrame *dropped = head;
+    head = dropped->local_next;
+    if (!head) {
+        tail = nullptr;
     }
-    release_budget(dropped->original_size);
+    release_budget(dropped->original_size, dropped->priority);
     if (partial) {
         stats_.dropped_partial_frame.fetch_add(1, std::memory_order_relaxed);
     } else {
         stats_.dropped_unavailable.fetch_add(1, std::memory_order_relaxed);
     }
+    frame_finished(dropped->category, false);
     delete dropped;
 }
 
 void CatClientCore::drop_all_frames() noexcept {
-    while (local_head_) {
-        drop_front_frame(local_head_->message.readable() != local_head_->original_size);
+    while (has_local_frames()) {
+        drop_front_frame(front_frame()->message.readable() != front_frame()->original_size);
     }
 }
 
@@ -606,15 +1011,15 @@ CatClientCore::resolve_endpoint(std::string_view host, std::uint16_t port) noexc
         co_return result;
     }
     if (!resolver_ || !resolver_->valid()) {
-        co_return std::nullopt;
+        co_return std::optional<std::vector<net::SocketAddress>>{};
     }
     dns::EndpointResolveResult resolved;
     if (!resolved.init({.max_records = 16, .max_name_storage = 512})) {
-        co_return std::nullopt;
+        co_return std::optional<std::vector<net::SocketAddress>>{};
     }
     auto status = co_await resolver_->resolve(host, port, resolved);
     if (!status || *status != dns::ResolveStatus::Success || resolved.record_count() == 0) {
-        co_return std::nullopt;
+        co_return std::optional<std::vector<net::SocketAddress>>{};
     }
     std::vector<net::SocketAddress> result;
     result.reserve(resolved.record_count());
@@ -627,7 +1032,7 @@ CatClientCore::resolve_endpoint(std::string_view host, std::uint16_t port) noexc
 async::Task<std::optional<std::string>> CatClientCore::fetch_router_body(const CatRouterEndpoint &router) noexcept {
     auto endpoints = co_await resolve_endpoint(router.host, router.port);
     if (!endpoints) {
-        co_return std::nullopt;
+        co_return std::optional<std::string>{};
     }
 
     std::string target = "/cat/s/router?op=json&domain=";
@@ -667,7 +1072,7 @@ async::Task<std::optional<std::string>> CatClientCore::fetch_router_body(const C
             http::HttpHeaders headers(pool);
             if (!headers.add_view("host", host_header) || !headers.add_view("connection", "close")) {
                 connection.close();
-                co_return std::nullopt;
+                co_return std::optional<std::string>{};
             }
             http::ClientHttp1Exchange exchange(connection, pool);
             http::Http1RequestHead request{
@@ -677,50 +1082,52 @@ async::Task<std::optional<std::string>> CatClientCore::fetch_router_body(const C
                     .body = http::HttpBodySpec::None(),
             };
             auto sent = co_await exchange.send_header(request, true, options_.router_request_timeout);
-            if (!sent) {
-                continue;
-            }
-            auto response = co_await exchange.read_header(options_.router_request_timeout);
-            if (!response || (*response)->status_code != 200) {
-                continue;
-            }
-
-            std::string collected;
-            bool failed = false;
-            for (;;) {
-                const std::size_t remaining = collected.size() <= options_.max_router_response_bytes
-                                                      ? options_.max_router_response_bytes - collected.size()
-                                                      : 0;
-                auto chunk = co_await exchange.read_body(std::min<std::size_t>(remaining + 1, 16 * 1024),
-                                                         options_.router_request_timeout);
-                if (!chunk) {
-                    failed = true;
-                    break;
-                }
-                const bool complete = chunk->complete();
-                while (auto *front = chunk->front()) {
-                    if (front->readable() == 0) {
-                        chunk->drop_empty_front();
-                        continue;
+            if (sent) {
+                auto response = co_await exchange.read_header(options_.router_request_timeout);
+                if (response && (*response)->status_code == 200) {
+                    std::string collected;
+                    bool failed = false;
+                    for (;;) {
+                        const std::size_t remaining = collected.size() <= options_.max_router_response_bytes
+                                                              ? options_.max_router_response_bytes - collected.size()
+                                                              : 0;
+                        auto chunk = co_await exchange.read_body(std::min<std::size_t>(remaining + 1, 16 * 1024),
+                                                                 options_.router_request_timeout);
+                        if (!chunk) {
+                            failed = true;
+                            break;
+                        }
+                        const bool complete = chunk->complete();
+                        while (auto *front = chunk->front()) {
+                            if (front->readable() == 0) {
+                                chunk->drop_empty_front();
+                                continue;
+                            }
+                            if (front->readable() >
+                                options_.max_router_response_bytes -
+                                        std::min(collected.size(), options_.max_router_response_bytes)) {
+                                failed = true;
+                                break;
+                            }
+                            collected.append(reinterpret_cast<const char *>(front->readable_data()), front->readable());
+                            chunk->consume_and_compact(front->readable());
+                        }
+                        if (failed || collected.size() > options_.max_router_response_bytes) {
+                            failed = true;
+                            break;
+                        }
+                        if (complete) {
+                            break;
+                        }
                     }
-                    if (front->readable() > options_.max_router_response_bytes -
-                                                    std::min(collected.size(), options_.max_router_response_bytes)) {
-                        failed = true;
-                        break;
+                    if (!failed) {
+                        body.emplace(std::move(collected));
+                    } else {
+                        (void) exchange.abort(common::IoErr::MessageTooLarge);
                     }
-                    collected.append(reinterpret_cast<const char *>(front->readable_data()), front->readable());
-                    chunk->consume_and_compact(front->readable());
+                } else if (response) {
+                    (void) co_await exchange.discard_response_body(options_.router_request_timeout);
                 }
-                if (failed || collected.size() > options_.max_router_response_bytes) {
-                    failed = true;
-                    break;
-                }
-                if (complete) {
-                    break;
-                }
-            }
-            if (!failed) {
-                body.emplace(std::move(collected));
             }
         }
         connection.close();
@@ -728,7 +1135,7 @@ async::Task<std::optional<std::string>> CatClientCore::fetch_router_body(const C
             co_return body;
         }
     }
-    co_return std::nullopt;
+    co_return std::optional<std::string>{};
 }
 
 async::Task<bool> CatClientCore::refresh_router() noexcept {
@@ -744,16 +1151,65 @@ async::Task<bool> CatClientCore::refresh_router() noexcept {
             continue;
         }
 
+        const auto same_address = [](const net::SocketAddress &left, const net::SocketAddress &right) noexcept {
+            return left.ip() == right.ip() && left.port() == right.port();
+        };
+        bool collector_set_changed = collectors_.size() != snapshot->collectors.size();
+        if (!collector_set_changed) {
+            for (std::size_t collector = 0; collector < collectors_.size(); ++collector) {
+                if (!same_address(collectors_[collector], snapshot->collectors[collector])) {
+                    collector_set_changed = true;
+                    break;
+                }
+            }
+        }
+        std::optional<std::size_t> current_collector;
+        if (stream_) {
+            for (std::size_t collector = 0; collector < snapshot->collectors.size(); ++collector) {
+                if (same_address(stream_->remote_addr(), snapshot->collectors[collector])) {
+                    current_collector = collector;
+                    break;
+                }
+            }
+        }
+
+        const bool was_blocked = blocked_.load(std::memory_order_acquire);
+        const std::uint64_t previous_cutoff = sample_cutoff_.load(std::memory_order_acquire);
+        const std::uint64_t next_cutoff = sample_cutoff(snapshot->sample);
         router_index_ = (index + 1) % count;
         collectors_ = std::move(snapshot->collectors);
-        collector_index_ = 0;
-        sample_cutoff_.store(sample_cutoff(snapshot->sample), std::memory_order_release);
+        collector_index_ = current_collector ? (*current_collector + 1) % collectors_.size() : 0;
+        sample_cutoff_.store(next_cutoff, std::memory_order_release);
         blocked_.store(snapshot->block, std::memory_order_release);
+        if (collector_set_changed) {
+            stats_.collector_set_changes.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (previous_cutoff != next_cutoff) {
+            stats_.router_sample_changes.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (!was_blocked && snapshot->block) {
+            stats_.router_blocks.fetch_add(1, std::memory_order_relaxed);
+        } else if (was_blocked && !snapshot->block) {
+            stats_.router_unblocks.fetch_add(1, std::memory_order_relaxed);
+        }
         if (snapshot->block) {
             close_connection();
             drop_all_frames();
+        } else if (stream_ && !current_collector) {
+            OutboundFrame *front = front_frame();
+            if (front && front->message.readable() != front->original_size) {
+                connection_stale_ = true;
+            } else {
+                close_connection();
+                stats_.stale_connection_switches.fetch_add(1, std::memory_order_relaxed);
+                notify_control();
+            }
         }
         stats_.router_successes.fetch_add(1, std::memory_order_relaxed);
+        const auto wall_millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::system_clock::now().time_since_epoch())
+                                         .count();
+        router_last_success_millis_ = wall_millis < 0 ? 0 : static_cast<std::uint64_t>(wall_millis);
         co_return true;
     }
     stats_.router_failures.fetch_add(1, std::memory_order_relaxed);
@@ -792,6 +1248,12 @@ async::Task<bool> CatClientCore::connect_collector() noexcept {
 
 async::Task<void> CatClientCore::finish_shutdown() noexcept {
     FIBER_ASSERT(loop_->in_loop());
+    if (aggregate_timer_.is_in_heap()) {
+        loop_->cancel<CatClientCore, &CatClientCore::aggregate_timer_>(*this);
+    }
+    if (heartbeat_timer_.is_in_heap()) {
+        loop_->cancel<CatClientCore, &CatClientCore::heartbeat_timer_>(*this);
+    }
     while (active_submitters_.load(std::memory_order_acquire) != 0) {
         co_await async::sleep(std::chrono::milliseconds(1));
     }

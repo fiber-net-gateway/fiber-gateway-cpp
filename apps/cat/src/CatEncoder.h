@@ -6,6 +6,7 @@
 #include <string_view>
 
 #include <common/mem/IoBuf.h>
+#include <fiber/cat/CatClientConfig.h>
 
 namespace fiber::cat::detail {
 
@@ -28,6 +29,10 @@ enum class EncodeError : std::uint8_t {
 
 [[nodiscard]] std::expected<mem::IoBuf, EncodeError> encode_nt1(const MessageTraceData &trace,
                                                                 const ClientEncodeContext &client) noexcept;
+[[nodiscard]] std::expected<mem::IoBuf, EncodeError> encode_pt1(const MessageTraceData &trace,
+                                                                const ClientEncodeContext &client) noexcept;
+[[nodiscard]] std::expected<mem::IoBuf, EncodeError>
+encode_message_tree(const MessageTraceData &trace, const ClientEncodeContext &client, CatEncoderType encoder) noexcept;
 
 } // namespace fiber::cat::detail
 

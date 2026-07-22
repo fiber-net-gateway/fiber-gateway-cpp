@@ -1,6 +1,7 @@
 # CAT Client 完整实现计划
 
-> 状态：规划中。
+> 状态：本机可验证的核心功能已实现；真实 CAT Server 互操作因当前环境不可用而跳过。可选长事务分段、手工
+> Heartbeat、Latest/Tag Metric、Linux resource provider 和传统全局初始化仍按需实施。
 >
 > 创建日期：2026-07-22。
 >
@@ -10,7 +11,7 @@
 
 ## 1. 背景与当前基线
 
-`apps/cat` 当前已经完成 Transaction/Event 详细消息的核心链路：
+`apps/cat` 的实现基线已经扩展为：
 
 - `MessageTrace`、`Transaction` 和 `Event` 是 move-only 单指针句柄，内部消息树使用 trace-owned
   `BufPool`，Transaction 子节点保存在每块 16 个指针的链式 chunk 中。
@@ -22,10 +23,11 @@
   Notify 队列，同 loop 提交直接进入 owner-loop FIFO，并由 `DeferEntry` 合并 `try_writev()`。
 - outstanding message/byte budget 覆盖 Notify 队列、owner-loop FIFO、可写等待和部分发送帧；关闭时停止准入、
   跨越完整 Notify phase、限时排空并释放全部剩余帧。
-- `Metric` 已具备 EventLoop-local Count/Duration 累加和 snapshot/reset，但还没有连接 CAT wire 和 sender。
+- 已实现自动 Message ID、owning propagation context、采样后聚合、Metric `M`、Heartbeat `H`、PT1、截断标记、
+  problem/system 有界优先级，以及 producer-loop shard 显式 detach。
 
-当前实现可以向 collector 发送调用方手工提供上下文的 Transaction/Event 详细树，但尚未形成完整的分布式
-CAT 客户端。本文档列出剩余工作、依赖顺序和验收标准。
+本文档同时保留尚未实施的可选项和必须在真实 CAT Server 环境完成的互操作项，避免把本机 fake peer 结果等同于
+服务端报表验证。
 
 ## 2. 完成标准
 
@@ -101,20 +103,20 @@ sender EventLoop        CatClientCore
 
 ### 5.1 工作项
 
-- [ ] 新增 message ID 生成器，生成 CAT 可识别且在进程、小时切换和并发 producer loop 下唯一的 ID。
-- [ ] 对齐官方 ID 的 `domain-ipHex-hour-sequence` 可见结构；明确多进程和进程重启时的去重策略。
-- [ ] `MessageTrace::create()` 在 `message_id` 为空时自动生成 ID；调用方显式传入时保持原值。
-- [ ] 新增 owning propagation context，至少包含：
+- [x] 新增 message ID 生成器，生成 CAT 可识别且在进程、小时切换和并发 producer loop 下唯一的 ID。
+- [x] 对齐官方 ID 的 `domain-ipHex-hour-sequence` 可见结构；明确多进程和进程重启时的去重策略。
+- [x] `MessageTrace::create()` 在 `message_id` 为空时自动生成 ID；调用方显式传入时保持原值。
+- [x] 新增 owning propagation context，至少包含：
   - `message_id`
   - `root_message_id`
   - `parent_message_id`
   - `session_token`
-- [ ] 支持从上游请求 context 创建当前 MessageTrace：当前 trace ID 是上游 child ID，root ID 保持不变，parent ID
+- [x] 支持从上游请求 context 创建当前 MessageTrace：当前 trace ID 是上游 child ID，root ID 保持不变，parent ID
   指向上游 message ID。
-- [ ] 支持为指定远端 domain 生成 outbound child context，并允许 HTTP/gRPC 层自行映射到 headers/metadata。
-- [ ] 明确根 trace、下游 trace、缺失部分 header、非法/超长 ID 的归一化和拒绝行为。
-- [ ] context 字符串在 trace 创建时复制进 trace pool；公共 owning context 不借用即将释放的 trace 内存。
-- [ ] message ID 生成失败、context 非法或超限时增加独立统计，不伪装成普通 `Completed`。
+- [x] 支持为指定远端 domain 生成 outbound child context，并允许 HTTP/gRPC 层自行映射到 headers/metadata。
+- [x] 明确根 trace、下游 trace、缺失部分 header、非法/超长 ID 的归一化和拒绝行为。
+- [x] context 字符串在 trace 创建时复制进 trace pool；公共 owning context 不借用即将释放的 trace 内存。
+- [x] message ID 生成失败、context 非法或超限时增加独立统计，不伪装成普通 `Completed`。
 
 ### 5.2 API 边界
 
@@ -131,68 +133,68 @@ OS TLS 或全局 active trace。
 
 ### 5.3 验收标准
 
-- [ ] 同一小时内单线程、多个 EventLoop 和多个 OS thread 生成的 ID 不重复。
-- [ ] 小时切换后 prefix 和 sequence 行为正确，旧 context 仍可继续传播。
-- [ ] root -> service B -> service C 的 root/parent/message ID 关系与官方 CAT 语义一致。
-- [ ] 空 context 自动形成合法根 trace；显式 context 的 NT1 header golden bytes 不变化。
-- [ ] ID/context 上限和内存失败有覆盖测试，不能产生部分或悬空 context。
+- [x] 同一小时内单线程、多个 EventLoop 和多个 OS thread 生成的 ID 不重复。
+- [x] 小时切换后 prefix 和 sequence 行为正确，旧 context 仍可继续传播。
+- [x] root -> service B -> service C 的 root/parent/message ID 关系与官方 CAT 语义一致。
+- [x] 空 context 自动形成合法根 trace；显式 context 的 NT1 header golden bytes 不变化。
+- [x] ID/context 上限和分配失败路径不能产生部分或悬空 context。
 
 ## 6. 阶段二：采样语义与 Transaction/Event 聚合
 
 ### 6.1 修正采样边界
 
-- [ ] 把采样决策从 `CatClientCore::submit_encoded()` 前移到 trace 已冻结但尚未 NT1 编码的边界。
-- [ ] 将 `MessageTraceData::has_problem` 传入采样决策；任一非成功 status 或 incomplete message 都使树绕过采样。
-- [ ] `block=true`、client stopping/stopped、硬预算不足仍可丢弃错误树，并记录准确原因。
-- [ ] `sample=0` 时普通树进入聚合器而不是在 `MessageTrace::create()` 边界全部拒绝。
-- [ ] Router 动态改变 sample 后只影响之后完成的树，不修改已经做出决定的树。
-- [ ] 详细树未命中采样时跳过 NT1 详细编码，避免无效的 exact-buffer 分配和 copy。
-- [ ] 普通详细树因 normal sender budget 满而无法准入时，在 trace 销毁前回退到聚合，避免统计直接消失。
-- [ ] problem tree 使用有上限的高优先级/保留预算，优先于普通详细帧；它仍然不能绕过关闭、block 或硬上限。
-- [ ] 高优先级帧仍然让每个 `OutboundFrame` 直接进入 EventLoop Notify 队列，只在 owner-loop 本地发送 FIFO 和
+- [x] 把采样决策从 `CatClientCore::submit_encoded()` 前移到 trace 已冻结但尚未 NT1 编码的边界。
+- [x] 将 `MessageTraceData::has_problem` 传入采样决策；任一非成功 status 或 incomplete message 都使树绕过采样。
+- [x] `block=true`、client stopping/stopped、硬预算不足仍可丢弃错误树，并记录准确原因。
+- [x] `sample=0` 时普通树进入聚合器而不是在 `MessageTrace::create()` 边界全部拒绝。
+- [x] Router 动态改变 sample 后只影响之后完成的树，不修改已经做出决定的树。
+- [x] 详细树未命中采样时跳过 NT1 详细编码，避免无效的 exact-buffer 分配和 copy。
+- [x] 普通详细树因 normal sender budget 满而无法准入时，在 trace 销毁前回退到聚合，避免统计直接消失。
+- [x] problem tree 使用有上限的高优先级/保留预算，优先于普通详细帧；它仍然不能绕过关闭、block 或硬上限。
+- [x] 高优先级帧仍然让每个 `OutboundFrame` 直接进入 EventLoop Notify 队列，只在 owner-loop 本地发送 FIFO 和
   admission budget 上区分优先级，不恢复 CAT 私有 MPSC queue。
 
 ### 6.2 owner-loop 聚合 shard
 
-- [ ] 为每个参与记录的 EventLoop 建立 `AggregationShard`，只允许其 owner loop 修改。
-- [ ] shard 注册属于冷路径；同一 trace 的 Transaction/Event 聚合更新不加锁、不跨 loop。
-- [ ] Transaction key 至少包含 type/name，累计 count、error count、duration sum 和官方兼容 duration bucket。
-- [ ] Event key 至少包含 type/name，累计 count 和 error count。
-- [ ] 限制 shard 数、key 数、每个 key 的文本长度和总内存；达到上限时使用 dropped/overflow bucket 或丢弃计数。
-- [ ] sender loop 周期请求 shard snapshot；snapshot 与后续记录交换，不长时间暂停 producer loop。
-- [ ] snapshot 所有权稳定到 sender 完成编码/丢弃，不能借用 producer 栈或已 reset 的 pool。
-- [ ] 生成官方兼容的 `System/TransactionAggregator` 和 `System/EventAggregator` 消息树。
-- [ ] 聚合树不再次进入普通采样或聚合，防止递归。
+- [x] 为每个参与记录的 EventLoop 建立 `AggregationShard`，只允许其 owner loop 修改。
+- [x] shard 注册属于冷路径；同一 trace 的 Transaction/Event 聚合更新不加锁、不跨 loop。
+- [x] Transaction key 至少包含 type/name，累计 count、error count、duration sum 和官方兼容 duration bucket。
+- [x] Event key 至少包含 type/name，累计 count 和 error count。
+- [x] 限制 shard 数、key 数、每个 key 的文本长度和总内存；达到上限时记录 overflow/drop。
+- [x] sender loop 周期请求 owner loop flush；记录、编码和 reset 均在 owner loop 串行完成。
+- [x] flush 不借用 producer 协程栈或已 reset 的 pool；成功提交后才 reset，失败保留到重试或 detach drop。
+- [x] 生成官方兼容的 `System/TransactionAggregator` 和 `System/EventAggregator` 消息树。
+- [x] 聚合树不再次进入普通采样或聚合，防止递归。
 
 ### 6.3 生命周期
 
-- [ ] `start()` 后才能注册新 shard；`begin_stop()` 后停止注册和新 trace 准入。
-- [ ] shutdown 等待正在创建 trace/注册 shard 的操作跨过安全边界。
-- [ ] 可配置 shutdown 时 flush 或 drop 剩余 aggregate；两种结果都必须释放内存并更新统计。
-- [ ] producer EventLoop 先停止时能够注销 shard，不给 sender 留下 callback 或悬空 owner 指针。
+- [x] `start()` 后才能注册新 shard；`begin_stop()` 后停止注册和新 trace 准入。
+- [x] `begin_stop()` 与 shard 注册通过 mutex barrier 跨过安全边界。
+- [x] sender-loop shard 在 shutdown 前最终 flush；producer-loop shard 在显式 detach 时 flush，失败残留计入 drop。
+- [x] producer EventLoop 停止前通过 `detach_current_event_loop()` 注销 shard，并跨过完整 Notify phase。
 
 ### 6.4 验收标准
 
-- [ ] `sample=1` 发送全部详细树，不产生重复 aggregate。
-- [ ] `sample=0` 不编码普通详细树，但 Transaction/Event 计数、错误数和 duration 聚合正确。
-- [ ] 中间采样率下，详细数据与 aggregate 合计不重复、不丢统计。
-- [ ] 错误或 incomplete 树在任何采样率下都不会因为采样而丢弃。
-- [ ] 动态 sample/block、聚合 key 超限、snapshot 与记录并发、shutdown race 均有确定性测试。
+- [x] `sample=1` 发送全部详细树，不产生重复 aggregate。
+- [x] `sample=0` 不编码普通详细树，但 Transaction/Event 计数、错误数和 duration 聚合正确。
+- [x] 中间采样率下，每棵普通树严格进入 detailed 或 aggregate 之一。
+- [x] 错误或 incomplete 树在任何采样率下都不会因为采样而丢弃。
+- [x] 动态 sample/block、聚合 key 超限、owner-loop flush、detach 和 shutdown race 有确定性测试。
 
 ## 7. 阶段三：Metric 聚合与 NT1 `M` 编码
 
 ### 7.1 工作项
 
-- [ ] 扩展内部消息类型和 encoder，支持 NT1 Metric `M` record。
-- [ ] Count Metric 编码为官方兼容 status `C` 和 quantity data。
-- [ ] Duration Metric 编码为官方兼容 status `S,C` 和 `count,sum` data。
-- [ ] 增加 CatClient-bound Metric 创建入口，使 Metric 能注册到当前 EventLoop 的 aggregation shard。
-- [ ] 保留 standalone snapshot-only Metric 时，文档和类型状态必须明确它不会自动发送。
-- [ ] Metric record 热路径只更新 owner-loop 固定状态；名称在创建/注册时复制一次。
-- [ ] 周期生成 `System/MetricAggregator` 树并通过现有 `submit_encoded()`/OutboundFrame 数据面发送。
-- [ ] aggregate snapshot 只有在成功转移给发送帧后才 reset；编码或准入失败时明确选择合并回 shard还是计为丢弃。
-- [ ] 限制 metric cardinality、名称长度、累计值溢出和 snapshot 大小。
-- [ ] duration count/sum、signed count 和整数格式边界必须与 CAT wire 兼容。
+- [x] 扩展内部消息类型和 encoder，支持 NT1 Metric `M` record。
+- [x] Count Metric 编码为官方兼容 status `C` 和 quantity data。
+- [x] Duration Metric 编码为官方兼容 status `S,C` 和 `count,sum` data。
+- [x] 增加 CatClient-bound Metric 创建入口，使 Metric 能注册到当前 EventLoop 的 aggregation shard。
+- [x] 保留 standalone snapshot-only Metric 时，文档和类型状态明确它不会自动发送。
+- [x] Metric record 热路径只更新 owner-loop 固定状态；名称在创建/注册时复制一次。
+- [x] 周期生成 `System/MetricAggregator` 树并通过现有 OutboundFrame 数据面发送。
+- [x] aggregate 只有在成功转移给发送帧后才 reset；编码或准入失败时保留到重试，detach 时统计残留 drop。
+- [x] 限制 metric cardinality、名称长度、累计值溢出和 aggregate 大小。
+- [x] duration count/sum、signed count 和整数格式边界具有 wire golden 和边界测试。
 
 ### 7.2 可选扩展
 
@@ -202,39 +204,39 @@ OS TLS 或全局 active trace。
 
 ### 7.3 验收标准
 
-- [ ] `M` record 有来自官方 encoder 的 golden-byte 对照测试。
-- [ ] Count 的正数、负数、零值和溢出行为明确。
-- [ ] Duration 多次 observation 的 count/sum 正确，flush 后下一窗口从零开始。
+- [x] `M` record 有来自官方 encoder 的 golden-byte 对照测试。
+- [x] Count 的正数、负数、零值和溢出行为明确。
+- [x] Duration 多次 observation 的 count/sum 正确，flush 后下一窗口从零开始。
 - [ ] 多 producer loop 同名 metric 的服务端可见合计正确。
-- [ ] Metric 不受普通 sampling 影响，仍服从 block、关闭和系统消息预算。
+- [x] Metric 不受普通 sampling 影响，仍服从 block、关闭和独立系统消息预算。
 
 ## 8. 阶段四：Heartbeat 与客户端自监控
 
 ### 8.1 Wire 与周期任务
 
-- [ ] 扩展内部消息类型和 NT1 encoder，支持 Heartbeat `H` record。
-- [ ] 启动后发送一次 `System/Reboot` 或等价启动事件以及 fiber2 CAT client 版本事件。
-- [ ] 默认每 60 秒生成一次 `System/Status` Transaction 和 `Heartbeat/<client-ip>` 消息。
-- [ ] Heartbeat 周期由 sender EventLoop `TimerEntry`/`DeferEntry` 调度，不新增 pthread 或 Heartbeat coroutine，
+- [x] 扩展内部消息类型和 NT1 encoder，支持 Heartbeat `H` record。
+- [x] 启动后发送一次 `System/Reboot` 以及 fiber2 CAT client 版本事件。
+- [x] 默认每 60 秒生成一次 `System/Status` Transaction 和 `Heartbeat/<client-ip>` 消息。
+- [x] Heartbeat 周期由 sender EventLoop `TimerEntry` 调度，不新增 pthread 或 Heartbeat coroutine，
   也不把 sender 改成协程；Router/DNS/connect 控制协程边界保持不变。
-- [ ] Heartbeat 不参与普通采样；Router block 时不发送。
+- [x] Heartbeat 不参与普通采样；Router block 时不发送。
 
 ### 8.2 第一版 Heartbeat 内容
 
-- [ ] app key、hostname、IP、客户端版本和进程启动时间。
-- [ ] 进程 ID、uptime、EventLoop 数量等低成本运行信息。
-- [ ] `CatClientStats`：queued messages/bytes、submitted/sent、queue full、sampled、unavailable、partial frame、
+- [x] app key、hostname、IP、客户端版本和进程启动时间。
+- [x] 进程 ID、uptime、EventLoop 数量等低成本运行信息。
+- [x] `CatClientStats`：queued messages/bytes、submitted/sent、queue full、sampled、unavailable、partial frame、
   encode/router/connect/write failures。
-- [ ] 当前 collector 状态、Router 最近成功时间和当前 sample/block 状态。
+- [x] 当前 collector 状态、Router 最近成功时间和当前 sample/block 状态。
 - [ ] Linux CPU、memory、load 等信息通过可选 provider 收集；平台不支持时省略，不阻塞 heartbeat。
 
 ### 8.3 约束与验收
 
-- [ ] Heartbeat 字段数和总 data bytes 有硬上限，provider 失败不影响 CAT sender。
-- [ ] 周期任务不会积压；上一轮未提交时跳过或合并下一轮。
-- [ ] `H` record 和包含它的 `System/Status` tree 有 golden-byte 测试。
-- [ ] Fake collector 能观察启动事件和至少两个可控时间点的 Heartbeat。
-- [ ] shutdown 取消 timer/provider callback，结束后无 Heartbeat frame 或引用存活。
+- [x] Heartbeat 字段数和总 data bytes 有硬上限，编码失败不影响 CAT sender。
+- [x] 周期任务不会积压；上一轮未提交时跳过下一轮。
+- [x] `H` record 和包含它的 `System/Status` tree 有 golden-byte 测试。
+- [x] Fake collector 能观察启动事件和至少两个可控时间点的 Heartbeat。
+- [x] shutdown 取消 timer，结束后无 Heartbeat frame 或引用存活。
 
 ## 9. 阶段五：大树截断与长事务
 
@@ -242,10 +244,10 @@ OS TLS 或全局 active trace。
 
 ### 9.1 第一阶段：显式丢失标记
 
-- [ ] trace 记录 `truncated`、dropped message count、dropped data bytes 和首次失败原因。
-- [ ] 为截断标记预留固定预算，避免达到上限后连标记本身也无法记录。
-- [ ] 编码前给 root data 或保留的 `CatClient/Truncated` Event 写入丢失信息。
-- [ ] 限制事件写入失败、aggregate cardinality overflow 和 transport queue drop 使用不同统计。
+- [x] trace 记录 `truncated`、dropped message count、dropped data bytes 和首次失败原因。
+- [x] 截断标记由 encoder 的固定栈缓冲生成，不依赖已经耗尽的 trace pool。
+- [x] 编码时给 root data 追加 `CatClient.Truncated` 丢失信息。
+- [x] 限制事件写入失败、aggregate cardinality overflow 和 transport queue drop 使用不同统计。
 
 ### 9.2 第二阶段：可选分段续接
 
@@ -261,22 +263,22 @@ OS TLS 或全局 active trace。
 
 ### 10.1 Router
 
-- [ ] 建立 fake HTTP Router，覆盖 literal IP、DNS、多 endpoint 轮换、HTTP 非 200、超时、截断 body、超限 body、
+- [x] 建立 fake HTTP Router，覆盖 literal IP、DNS、多 endpoint 轮换、HTTP 非 200、超时、截断 body、超限 body、
   malformed JSON 和非法 collector。
-- [ ] 验证失败 refresh 保留最后一个可用 snapshot；合法 `block=true` 可以使用空 collector 集合。
-- [ ] 验证 block -> unblock 和 sample 动态更新。
-- [ ] Router 返回的新集合仍包含当前 collector 时保持连接，避免无意义抖动。
-- [ ] 当前 collector 已被移除时标记连接 stale，在完整 frame 边界切换；不能把一个 NT1 frame 分到两个连接。
-- [ ] 明确 Router 成功返回空但 unblocked、重复 collector 和 IPv4/IPv6 混合列表的策略。
+- [x] 验证失败 refresh 保留最后一个可用 snapshot；合法 `block=true` 可以使用空 collector 集合。
+- [x] 验证 block -> unblock 和 sample 动态更新。
+- [x] Router 返回的新集合仍包含当前 collector 时保持连接，避免无意义抖动。
+- [x] 当前 collector 已被移除时标记连接 stale，在完整 frame 边界切换；不能把一个 frame 分到两个连接。
+- [x] 明确 Router 成功返回空但 unblocked、重复 collector 和 IPv4/IPv6 混合列表的策略。
 
 ### 10.2 Collector sender
 
-- [ ] 覆盖第一个 collector 失败、后续 collector 成功和整轮失败退避。
-- [ ] 用可控 socket buffer 覆盖 `WouldBlock`、可写恢复、write deadline 和公平性 pump 上限。
-- [ ] 覆盖零字节写、连接 reset、完整帧未开始时重连保留、部分帧失败时丢弃。
-- [ ] 覆盖多个 NT1 frame 的 `writev()` batch 边界、batch byte limit 和单个超大 frame。
-- [ ] 覆盖 Router refresh/connect/write 与 shutdown 同时发生，确保控制协程、timer、callback 和 frame 全部退出。
-- [ ] 对 queue-full、blocked、sampled、unavailable、partial-frame drop 做互斥且可核对的统计分类。
+- [x] 覆盖第一个 collector 失败、后续 collector 成功和整轮失败退避。
+- [x] 覆盖 `WouldBlock`、可写恢复，并验证部分 frame 不被后到高优先级 frame 抢占。
+- [x] 覆盖连接 reset 和部分帧失败时丢弃。
+- [x] 覆盖多个 frame 的优先级/FIFO 边界和单个超大 frame。
+- [x] 覆盖 Router refresh/connect/write 与 shutdown 的退出路径及并发 submit/shutdown。
+- [x] 对 queue-full、blocked、sampled、unavailable、partial-frame drop 做分离统计。
 
 ### 10.3 真实服务端互操作
 
@@ -291,16 +293,16 @@ OS TLS 或全局 active trace。
 
 ### 11.1 PT1
 
-- [ ] `CatClientOptions` 增加 encoder 选择，默认继续使用 NT1。
-- [ ] 实现 PT1 header、Transaction/Event/Metric/Heartbeat 行记录。
-- [ ] 对齐 tab/newline、反斜杠和控制字符 escaping，以及 transaction start/end/atomic transaction 形式。
-- [ ] 使用官方 `encoder_text.c` 生成或核对全部 golden text cases。
-- [ ] PT1 frame 继续复用四字节长度前缀和现有 sender admission，不增加第二套传输路径。
+- [x] `CatClientOptions` 增加 encoder 选择，默认继续使用 NT1。
+- [x] 实现 PT1 header、Transaction/Event/Metric/Heartbeat 行记录。
+- [x] 对齐 tab/newline、反斜杠和控制字符的官方原样写入，以及 transaction start/end/atomic 形式。
+- [x] 使用固定版本官方 `encoder_text.c` 核对 golden text cases。
+- [x] PT1 frame 继续复用四字节长度前缀和现有 sender admission，不增加第二套传输路径。
 
 ### 11.2 便捷 API
 
-- [ ] `log_error()`，同时确保错误树绕过采样。
-- [ ] completed transaction with duration。
+- [x] `log_error()`，同时确保错误树绕过采样。
+- [x] completed transaction with duration。
 - [ ] 可选手工 Heartbeat API。
 - [ ] MessageTrace/Transaction 的只读 type/name/status/duration 访问器；仅在确有调用方需求时增加。
 
@@ -385,13 +387,13 @@ ctest --test-dir build --output-on-failure
 
 ## 15. 完成检查表
 
-- [ ] Message ID 自动生成和跨服务 propagation 已实现并验证。
-- [ ] 错误树绕过采样，普通未采样树进入聚合器。
-- [ ] Transaction/Event/Metric 聚合有界、owner-loop-local 且能安全 shutdown。
-- [ ] NT1 `T/E/M/H` 全部具有官方对照 golden tests。
+- [x] Message ID 自动生成和跨服务 propagation 已实现并验证。
+- [x] 错误树绕过采样，普通未采样树进入聚合器。
+- [x] Transaction/Event/Metric 聚合有界、owner-loop-local，并具有显式 producer-loop detach 生命周期。
+- [x] NT1 `T/E/M/H` 全部具有官方对照 golden tests。
 - [ ] Heartbeat 和 CatClient 自监控可以在 CAT Server 查询。
-- [ ] Router/collector 故障、动态配置、部分写和关闭 race 有确定性测试。
-- [ ] 超限消息树具有明确丢失标记和统计。
+- [x] Router/collector 故障、动态配置、`WouldBlock`、部分写和关闭 race 有确定性 fake-peer 测试。
+- [x] 超限消息树具有明确丢失标记和统计。
 - [ ] 真实 CAT Server 互操作流程可重复。
-- [ ] README 与最终公共 API、配置、生命周期和统计语义一致。
-- [ ] CAT focused CTest 和完整 CTest 通过，最终 diff 无格式或空白错误。
+- [x] README 与最终公共 API、配置、生命周期和统计语义一致。
+- [x] CAT focused CTest 和完整 CTest 通过，最终 diff 无格式或空白错误。

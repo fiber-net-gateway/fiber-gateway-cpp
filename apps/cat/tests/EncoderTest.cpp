@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
+#include <ctime>
 #include <string>
 #include <utility>
 #include <vector>
@@ -127,6 +129,67 @@ TEST(CatEncoderTest, EncodesEventRootAsOfficialNt1Frame) {
     });
 }
 
+TEST(CatEncoderTest, EncodesMetricRootAsOfficialNt1Frame) {
+    run_on_loop([] {
+        TraceContext context{
+                .message_id = "m",
+                .root_message_id = "r",
+                .parent_message_id = "p",
+                .session_token = "s",
+        };
+        auto created = fiber::cat::detail::create_metric_root("", "requests", {}, std::move(context));
+        ASSERT_TRUE(created);
+        auto *metric = *created;
+        auto *trace = metric->trace;
+        make_time_deterministic(*trace->data, 123);
+        metric->time = std::chrono::steady_clock::time_point{};
+        ASSERT_EQ(fiber::cat::detail::set_status(metric, "C"), RecordError::None);
+        ASSERT_EQ(fiber::cat::detail::add_data(metric, "-3"), RecordError::None);
+        freeze_trace(*trace);
+        auto encoded = fiber::cat::detail::encode_nt1(*trace->data, full_context());
+        ASSERT_TRUE(encoded);
+
+        const std::vector<std::uint8_t> expected{
+                0x00, 0x00, 0x00, 0x3b, 'N', 'T', '1',  0x03, 'a',  'p', 'p',  0x04, 'h',  'o', 's',  't',
+                0x07, '1',  '.',  '2',  '.', '3', '.',  '4',  0x05, 'g', 'r',  'o',  'u',  'p', 0x02, '4',
+                '2',  0x04, 'l',  'o',  'o', 'p', 0x01, 'm',  0x01, 'p', 0x01, 'r',  0x01, 's', 'M',  0x7b,
+                0x00, 0x08, 'r',  'e',  'q', 'u', 'e',  's',  't',  's', 0x01, 'C',  0x02, '-', '3',
+        };
+        expect_bytes(*encoded, expected);
+        delete trace;
+    });
+}
+
+TEST(CatEncoderTest, EncodesHeartbeatRootAsOfficialNt1Frame) {
+    run_on_loop([] {
+        TraceContext context{
+                .message_id = "m",
+                .root_message_id = "r",
+                .parent_message_id = "p",
+                .session_token = "s",
+        };
+        auto created = fiber::cat::detail::create_heartbeat_root("Heartbeat", "1.2.3.4", {}, std::move(context));
+        ASSERT_TRUE(created);
+        auto *heartbeat = *created;
+        auto *trace = heartbeat->trace;
+        make_time_deterministic(*trace->data, 123);
+        heartbeat->time = std::chrono::steady_clock::time_point{};
+        ASSERT_EQ(fiber::cat::detail::add_data(heartbeat, "x"), RecordError::None);
+        freeze_trace(*trace);
+        auto encoded = fiber::cat::detail::encode_nt1(*trace->data, full_context());
+        ASSERT_TRUE(encoded);
+
+        const std::vector<std::uint8_t> expected{
+                0x00, 0x00, 0x00, 0x42, 'N',  'T', '1',  0x03, 'a',  'p', 'p', 0x04, 'h',  'o', 's',  't',  0x07, '1',
+                '.',  '2',  '.',  '3',  '.',  '4', 0x05, 'g',  'r',  'o', 'u', 'p',  0x02, '4', '2',  0x04, 'l',  'o',
+                'o',  'p',  0x01, 'm',  0x01, 'p', 0x01, 'r',  0x01, 's', 'H', 0x7b, 0x09, 'H', 'e',  'a',  'r',  't',
+                'b',  'e',  'a',  't',  0x07, '1', '.',  '2',  '.',  '3', '.', '4',  0x01, '0', 0x01, 'x',
+        };
+        expect_bytes(*encoded, expected);
+        delete trace;
+    });
+}
+
 TEST(CatEncoderTest, EncodesNestedTransactionVarintsAndChunkedData) {
     run_on_loop([] {
         auto created = fiber::cat::detail::create_transaction_root("T", "root", {});
@@ -245,6 +308,84 @@ TEST(CatEncoderTest, ReportsInvalidTraceWithoutSubmittingPartialFrame) {
         ASSERT_FALSE(encoded);
         EXPECT_EQ(encoded.error(), EncodeError::InvalidTrace);
         delete trace;
+    });
+}
+
+TEST(CatEncoderTest, InjectsTruncationMarkerAfterTreeLimitWithoutPoolAllocation) {
+    run_on_loop([] {
+        fiber::cat::RecordLimits limits;
+        limits.max_children_per_transaction = 1;
+        auto created = fiber::cat::detail::create_transaction_root("T", "root", limits);
+        ASSERT_TRUE(created);
+        auto *root = *created;
+        auto *trace = root->trace;
+        make_time_deterministic(*trace->data, 0);
+        root->time = std::chrono::steady_clock::time_point{};
+        ASSERT_EQ(fiber::cat::detail::add_data(root, "base"), RecordError::None);
+        ASSERT_TRUE(fiber::cat::detail::create_event(*root, "E", "ok"));
+        auto dropped = fiber::cat::detail::create_event(*root, "E", "drop");
+        ASSERT_FALSE(dropped);
+        EXPECT_EQ(dropped.error(), RecordError::LimitExceeded);
+        EXPECT_TRUE(trace->data->truncated);
+        EXPECT_TRUE(trace->data->has_problem);
+        EXPECT_EQ(trace->data->dropped_message_count, 1);
+        EXPECT_EQ(trace->data->dropped_data_bytes, 5);
+
+        freeze_trace(*trace);
+        auto encoded = fiber::cat::detail::encode_nt1(*trace->data, minimal_context());
+        ASSERT_TRUE(encoded);
+        const auto bytes = encoded_bytes(*encoded);
+        constexpr std::string_view marker = "base&CatClient.Truncated=count:1,bytes:5,reason:limit";
+        EXPECT_NE(std::search(bytes.begin(), bytes.end(), marker.begin(), marker.end()), bytes.end());
+        delete trace;
+    });
+}
+
+TEST(CatEncoderTest, EncodesOfficialPt1NestedTextAndPreservesRawControlCharacters) {
+    run_on_loop([] {
+        const char *old_timezone = std::getenv("TZ");
+        const std::string saved_timezone = old_timezone ? old_timezone : "";
+        const bool had_timezone = old_timezone != nullptr;
+        ASSERT_EQ(::setenv("TZ", "UTC", 1), 0);
+        ::tzset();
+
+        auto created = fiber::cat::detail::create_transaction_root("T", "root", {});
+        ASSERT_TRUE(created);
+        auto *root = *created;
+        auto *trace = root->trace;
+        make_time_deterministic(*trace->data, 123);
+        root->time = std::chrono::steady_clock::time_point{};
+        ASSERT_EQ(fiber::cat::detail::set_duration(root, 1500us), RecordError::None);
+        auto child_created = fiber::cat::detail::create_event(*root, "E", "child");
+        ASSERT_TRUE(child_created);
+        auto *child = *child_created;
+        child->time = std::chrono::steady_clock::time_point(1ms);
+        ASSERT_EQ(fiber::cat::detail::set_status(child, "ERR"), RecordError::None);
+        ASSERT_EQ(fiber::cat::detail::add_data(child, "a\tb\n\\"), RecordError::None);
+        freeze_trace(*trace);
+
+        auto encoded = fiber::cat::detail::encode_pt1(*trace->data, minimal_context());
+        ASSERT_TRUE(encoded);
+        const std::string payload = "PT1\ta\t\t\t\t\t\t\t\t\t\n"
+                                    "t1970-01-01 00:00:00.123\tT\troot\t\n"
+                                    "E1970-01-01 00:00:00.124\tE\tchild\tERR\ta\tb\n\\\t\n"
+                                    "T1970-01-01 00:00:00.124\tT\troot\t0\t1500us\t\t\n";
+        std::vector<std::uint8_t> expected{
+                static_cast<std::uint8_t>(payload.size() >> 24U),
+                static_cast<std::uint8_t>(payload.size() >> 16U),
+                static_cast<std::uint8_t>(payload.size() >> 8U),
+                static_cast<std::uint8_t>(payload.size()),
+        };
+        expected.insert(expected.end(), payload.begin(), payload.end());
+        expect_bytes(*encoded, expected);
+        delete trace;
+
+        if (had_timezone) {
+            ASSERT_EQ(::setenv("TZ", saved_timezone.c_str(), 1), 0);
+        } else {
+            ASSERT_EQ(::unsetenv("TZ"), 0);
+        }
+        ::tzset();
     });
 }
 
