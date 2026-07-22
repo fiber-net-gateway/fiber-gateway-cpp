@@ -201,9 +201,9 @@ private:
             FIBER_ASSERT(waiter->loop != nullptr);
             if (waiter->loop->in_loop()) {
                 waiter->loop->template post_local<Waiter, &Waiter::defer_entry, &Waiter::on_run>(*waiter);
-                return;
+            } else {
+                waiter->loop->template post<Waiter, &Waiter::notify_entry, &Waiter::on_run>(*waiter);
             }
-            waiter->loop->template post<Waiter, &Waiter::notify_entry, &Waiter::on_run>(*waiter);
         }
 
         mutable std::mutex mutex_{};
