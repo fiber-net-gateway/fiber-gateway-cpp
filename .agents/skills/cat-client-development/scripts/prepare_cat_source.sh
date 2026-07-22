@@ -3,16 +3,19 @@
 set -euo pipefail
 
 readonly CAT_REPOSITORY_URL="https://github.com/dianping/cat.git"
+readonly CAT_DEFAULT_REF="v3.0.0"
+readonly CAT_DEFAULT_COMMIT="f875ff10b1a3f2922fef1bfca7ba34c54805b021"
 
 usage() {
     cat <<'EOF'
 Usage: prepare_cat_source.sh [--ref REVISION] [--target PATH]
 
-Prepare a sparse official CAT checkout containing lib/c and lib/cpp.
+Prepare a sparse official CAT checkout containing lib/c and lib/cpp. The
+default compatibility baseline is CAT v3.0.0.
 
 Options:
-  --ref REVISION  Fetch and detach at a tag, branch, or commit. Existing cached
-                  source is reused without network access when this is omitted.
+  --ref REVISION  Fetch and detach at a tag, branch, or commit instead of the
+                  pinned CAT v3.0.0 baseline.
   --target PATH   Checkout directory, relative to the repository root unless
                   absolute (default: temp/cat).
   -h, --help      Show this help.
@@ -28,7 +31,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null) ||
     fail "the skill script is not inside a Git repository"
 
-requested_ref=""
+requested_ref=$CAT_DEFAULT_REF
 target_arg="temp/cat"
 
 while (($# > 0)); do
@@ -71,22 +74,39 @@ validate_checkout() {
         fail "checkout origin is $origin, expected $CAT_REPOSITORY_URL"
 }
 
+require_clean_checkout() {
+    [[ -z "$(git -C "$target" status --porcelain --untracked-files=all)" ]] ||
+        fail "refusing to use dirty checkout: $target"
+}
+
+checkout_requested_ref() {
+    local actual_commit
+
+    actual_commit=$(git -C "$target" rev-parse HEAD)
+    if [[ "$requested_ref" == "$CAT_DEFAULT_REF" && "$actual_commit" == "$CAT_DEFAULT_COMMIT" ]]; then
+        return
+    fi
+
+    git -C "$target" fetch --depth 1 origin "$requested_ref"
+    git -C "$target" checkout --detach FETCH_HEAD
+
+    if [[ "$requested_ref" == "$CAT_DEFAULT_REF" ]]; then
+        actual_commit=$(git -C "$target" rev-parse HEAD)
+        [[ "$actual_commit" == "$CAT_DEFAULT_COMMIT" ]] ||
+            fail "CAT $CAT_DEFAULT_REF resolved to $actual_commit, expected $CAT_DEFAULT_COMMIT"
+    fi
+}
+
 if [[ -e "$target" ]]; then
     validate_checkout
-    if [[ -n "$requested_ref" ]]; then
-        [[ -z "$(git -C "$target" status --porcelain --untracked-files=all)" ]] ||
-            fail "refusing to update dirty checkout: $target"
-        git -C "$target" fetch --depth 1 origin "$requested_ref"
-        git -C "$target" checkout --detach FETCH_HEAD
-    fi
+    require_clean_checkout
+    checkout_requested_ref
 else
     mkdir -p "$(dirname -- "$target")"
     git clone --depth 1 --filter=blob:none --sparse "$CAT_REPOSITORY_URL" "$target"
     validate_checkout
-    if [[ -n "$requested_ref" ]]; then
-        git -C "$target" fetch --depth 1 origin "$requested_ref"
-        git -C "$target" checkout --detach FETCH_HEAD
-    fi
+    require_clean_checkout
+    checkout_requested_ref
 fi
 
 if [[ ! -f "$target/lib/c/src/ccat/client.c" || ! -f "$target/lib/cpp/src/cppcat/client.cpp" ]]; then
@@ -105,5 +125,6 @@ fi
 commit=$(git -C "$target" rev-parse HEAD)
 printf 'CAT reference ready: %s\n' "$target"
 printf 'Origin: %s\n' "$CAT_REPOSITORY_URL"
+printf 'Requested ref: %s\n' "$requested_ref"
 printf 'Commit: %s\n' "$commit"
 printf 'Sources: %s, %s\n' "$target/lib/c" "$target/lib/cpp"

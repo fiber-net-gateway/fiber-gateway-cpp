@@ -72,6 +72,10 @@ sampling and aggregation cardinality, and configures Router, collector, heartbea
 An empty `MessageTraceContext::message_id` is filled automatically using the official visible
 `domain-ipHex-hour-sequence` structure. The owning `PropagationContext` can safely outlive the trace:
 
+For CAT 3.0 Log View compatibility, `hour` and `sequence` are always non-negative Java `int` values. The sequence uses
+a process-specific bounded starting point, resets when the wall-clock hour advances, retains the latest hour across a
+clock rollback, and fails explicitly on exhaustion instead of wrapping to a duplicate ID.
+
 ```cpp
 auto current = trace.propagation_context();
 if (current) {
