@@ -47,3 +47,5 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
 
     gtest_discover_tests(fiber_cat_tests)
 endif()
+
+add_subdirectory(demo)
