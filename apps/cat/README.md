@@ -231,6 +231,8 @@ the machine visible through procfs, not a cgroup memory limit.
 System collection is best-effort. Missing or malformed procfs input omits only unavailable fields, increments
 `heartbeat_provider_failures`, and still sends the base heartbeat. Optional system fields are rolled back as one complete
 XML extension if the configured field or byte budget cannot hold them; they never make an otherwise valid heartbeat fail.
+All `extensionDetail` values are numeric as required by the CAT 3.0 status schema. String identity and version information
+remain in the message-tree header and startup `System/Reboot` events instead of the heartbeat XML.
 
 `CatClientStats` separates record truncation, sampling-to-aggregate conversion, aggregate retry/drop, encode failures,
 normal/system admission, Router changes, connect failures, `WouldBlock`, partial-frame loss, Metric activity, and
