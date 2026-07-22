@@ -107,7 +107,9 @@ bool completed() const noexcept;
 
 第 2、5、6、7 项是语义约束，C++ concept 无法完全在编译期验证。违反约束会产生悬空回调或重复恢复。
 
-当前已满足协议的内置 Awaiter 包括 `SleepAwaiter`、`YieldAwaiter`、`WaitGroup::JoinAwaiter`、`Watch<T>::Subscriber::NextAwaiter`、`Mutex::LockAwaiter`、RWMutex 的读写 Awaiter、`SignalAwaiter` 和 `TaskSelectAwaiter<T>`。`TimeoutAwaiter` 在内部 Awaiter 也满足协议时可选择。
+当前已满足协议的内置 Awaiter 包括 `SleepAwaiter`、`YieldAwaiter`、`WaitGroup::JoinAwaiter`、`Watch<T>::Subscriber::NextAwaiter`、`Mutex::LockAwaiter`、RWMutex 的读写 Awaiter、`SignalAwaiter`、`TaskSelectAwaiter<T>` 和 `StealableHttp1ConnectionPoolSet::AcquireAwaiter`。`TimeoutAwaiter` 在内部 Awaiter 也满足协议时可选择。
+
+`StealableHttp1ConnectionPoolSet::AcquireAwaiter` 只在真正进入跨 loop steal slow path 时分配稳定 state。loser 析构通过原子状态取消恢复，已投递的跨线程通知继续持有 state，并负责归还可能已经偷到的连接；pool shutdown 会等待这些 state 排空。
 
 普通 `Task<T>::Awaiter` 仍不满足协议：它的 `await_suspend()` 返回 coroutine handle 进行对称转移，而且 Awaiter 自身不拥有 Task frame。普通 `co_await task()` 保留这条对称转移快路径；只有参与 `when_any()` 时才使用拥有 frame 的 `task().select()`。
 

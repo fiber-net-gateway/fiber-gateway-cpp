@@ -16,7 +16,10 @@
 
 #include "async/Sleep.h"
 #include "async/Spawn.h"
+#include "async/TaskSelect.h"
 #include "async/WaitGroup.h"
+#include "async/WhenAny.h"
+#include "async/Yield.h"
 #include "common/IoError.h"
 #include "common/mem/BufPool.h"
 #include "event/EventLoopGroup.h"
@@ -32,6 +35,39 @@ namespace {
 
 using namespace std::chrono_literals;
 using fiber::async::DetachedTask;
+
+class SuspendFalseAwaiter {
+public:
+    bool await_ready() const noexcept { return false; }
+
+    bool await_suspend(std::coroutine_handle<>) noexcept {
+        completed_ = true;
+        return false;
+    }
+
+    void await_resume() const noexcept { FIBER_ASSERT(completed_); }
+    [[nodiscard]] bool completed() const noexcept { return completed_; }
+
+private:
+    bool completed_ = false;
+};
+
+struct BlockingLoopGate {
+    std::promise<void> *entered = nullptr;
+    std::shared_future<void> *release = nullptr;
+    fiber::event::EventLoop::NotifyEntry notify{};
+
+    static void run(BlockingLoopGate *gate) noexcept {
+        FIBER_ASSERT(gate != nullptr);
+        FIBER_ASSERT(gate->entered != nullptr);
+        FIBER_ASSERT(gate->release != nullptr);
+        gate->entered->set_value();
+        gate->release->wait();
+    }
+};
+
+using StealableAcquireAwaiter = fiber::http::StealableHttp1ConnectionPoolSet::AcquireAwaiter;
+static_assert(fiber::async::SelectableAwaiter<StealableAcquireAwaiter>);
 
 const char kSelfSignedCertPem[] = R"(-----BEGIN CERTIFICATE-----
 MIIDCTCCAfGgAwIBAgIUEDCdxH6aX38+fEeFx3nlY3pJwdkwDQYJKoZIhvcNAQEL
@@ -345,6 +381,11 @@ ensure_connected(fiber::http::StealableHttp1ConnectionPoolSet::Lease &lease,
     co_return lease.get();
 }
 
+fiber::async::Task<fiber::http::StealableHttp1ConnectionPoolSet::Lease>
+acquire_in_task(fiber::http::StealableHttp1ConnectionPoolSet *set, const fiber::http::Http1ConnectionGroupKey *key) {
+    co_return co_await set->acquire(*key);
+}
+
 DetachedTask run_https_home_connect(fiber::http::StealableHttp1ConnectionPoolSet *set,
                                     const fiber::http::Http1ConnectionGroupKey *key, std::uint16_t port,
                                     std::atomic<fiber::http::Http1ClientConnection *> *home_conn,
@@ -472,6 +513,202 @@ TEST(StealableHttp1ConnectionPoolSetTest, StealsIdleConnectionFromOtherLoopAndRe
     EXPECT_TRUE(final_future.get());
 
     server_state->stop.store(true, std::memory_order_release);
+    EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);
+
+    group.stop();
+    group.join();
+    server_group.stop();
+    server_group.join();
+}
+
+TEST(StealableHttp1ConnectionPoolSetTest, WhenAnyCancellationKeepsRemoteAcquireStateAliveUntilDrained) {
+    fiber::event::EventLoopGroup server_group(1);
+    auto server_state = std::make_shared<HoldServerState>();
+    std::promise<std::uint16_t> server_port_promise;
+    std::promise<fiber::common::IoErr> server_result_promise;
+    auto server_port_future = server_port_promise.get_future();
+    auto server_result_future = server_result_promise.get_future();
+
+    server_group.start();
+    fiber::async::spawn(server_group.at(0), [&]() {
+        return run_hold_server(&server_group.at(0), 1, &server_port_promise, &server_result_promise, server_state);
+    });
+
+    const std::uint16_t port = server_port_future.get();
+    ASSERT_NE(port, 0);
+
+    fiber::event::EventLoopGroup group(2);
+    auto *home_loop = &group.at(0);
+    auto *borrower_loop = &group.at(1);
+    fiber::http::StealableHttp1ConnectionPoolSet set(group);
+    ASSERT_TRUE(set.init());
+    const auto key = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
+                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+
+    std::promise<fiber::http::Http1ClientConnection *> home_ready_promise;
+    auto home_ready_future = home_ready_promise.get_future();
+
+    group.start();
+    fiber::async::spawn(*home_loop, [&]() -> DetachedTask {
+        auto lease = co_await set.acquire(key);
+        auto conn_result = co_await ensure_connected(lease, port);
+        home_ready_promise.set_value(conn_result ? *conn_result : nullptr);
+        lease.reset();
+    });
+
+    auto *home_conn = home_ready_future.get();
+    ASSERT_NE(home_conn, nullptr);
+
+    std::promise<void> direct_gate_entered_promise;
+    auto direct_gate_entered = direct_gate_entered_promise.get_future();
+    std::promise<void> direct_gate_release_promise;
+    auto direct_gate_release = direct_gate_release_promise.get_future().share();
+    BlockingLoopGate direct_gate{&direct_gate_entered_promise, &direct_gate_release};
+    home_loop->post<BlockingLoopGate, &BlockingLoopGate::notify, &BlockingLoopGate::run>(direct_gate);
+    ASSERT_EQ(direct_gate_entered.wait_for(2s), std::future_status::ready);
+
+    std::promise<bool> direct_cancel_promise;
+    auto direct_cancel_future = direct_cancel_promise.get_future();
+    fiber::async::spawn(*borrower_loop, [&]() -> DetachedTask {
+        auto result = co_await fiber::async::when_any([&]() { return set.acquire(key); },
+                                                      []() { return SuspendFalseAwaiter{}; });
+        direct_cancel_promise.set_value(result.is<1>());
+    });
+    ASSERT_EQ(direct_cancel_future.wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(direct_cancel_future.get());
+    direct_gate_release_promise.set_value();
+
+    std::promise<bool> direct_reacquire_promise;
+    auto direct_reacquire_future = direct_reacquire_promise.get_future();
+    fiber::async::spawn(*home_loop, [&, home_conn]() -> DetachedTask {
+        auto lease = co_await set.acquire(key);
+        direct_reacquire_promise.set_value(lease.valid() && lease.hit() && lease.has_connection() &&
+                                           lease.get() == home_conn);
+        lease.reset();
+    });
+    ASSERT_EQ(direct_reacquire_future.wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(direct_reacquire_future.get());
+
+    std::promise<void> task_gate_entered_promise;
+    auto task_gate_entered = task_gate_entered_promise.get_future();
+    std::promise<void> task_gate_release_promise;
+    auto task_gate_release = task_gate_release_promise.get_future().share();
+    BlockingLoopGate task_gate{&task_gate_entered_promise, &task_gate_release};
+    home_loop->post<BlockingLoopGate, &BlockingLoopGate::notify, &BlockingLoopGate::run>(task_gate);
+    ASSERT_EQ(task_gate_entered.wait_for(2s), std::future_status::ready);
+
+    std::promise<bool> task_cancel_promise;
+    auto task_cancel_future = task_cancel_promise.get_future();
+    fiber::async::spawn(*borrower_loop, [&]() -> DetachedTask {
+        auto result = co_await fiber::async::when_any([&]() { return acquire_in_task(&set, &key).select(); },
+                                                      []() { return fiber::async::yield(); });
+        task_cancel_promise.set_value(result.is<1>());
+    });
+    ASSERT_EQ(task_cancel_future.wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(task_cancel_future.get());
+    task_gate_release_promise.set_value();
+
+    std::promise<bool> task_reacquire_promise;
+    auto task_reacquire_future = task_reacquire_promise.get_future();
+    fiber::async::spawn(*home_loop, [&, home_conn]() -> DetachedTask {
+        auto lease = co_await set.acquire(key);
+        task_reacquire_promise.set_value(lease.valid() && lease.hit() && lease.has_connection() &&
+                                         lease.get() == home_conn);
+        lease.reset();
+    });
+    ASSERT_EQ(task_reacquire_future.wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(task_reacquire_future.get());
+
+    std::promise<void> hit_home_gate_entered_promise;
+    auto hit_home_gate_entered = hit_home_gate_entered_promise.get_future();
+    std::promise<void> hit_home_gate_release_promise;
+    auto hit_home_gate_release = hit_home_gate_release_promise.get_future().share();
+    BlockingLoopGate hit_home_gate{&hit_home_gate_entered_promise, &hit_home_gate_release};
+    home_loop->post<BlockingLoopGate, &BlockingLoopGate::notify, &BlockingLoopGate::run>(hit_home_gate);
+    ASSERT_EQ(hit_home_gate_entered.wait_for(2s), std::future_status::ready);
+
+    fiber::async::WaitGroup hit_winner;
+    hit_winner.add();
+    std::promise<bool> hit_cancel_promise;
+    auto hit_cancel_future = hit_cancel_promise.get_future();
+    fiber::async::spawn(*borrower_loop, [&]() -> DetachedTask {
+        auto result = co_await fiber::async::when_any([&]() { return set.acquire(key); },
+                                                      [&]() { return hit_winner.join(); });
+        hit_cancel_promise.set_value(result.is<1>());
+    });
+
+    std::promise<void> hit_borrower_gate_entered_promise;
+    auto hit_borrower_gate_entered = hit_borrower_gate_entered_promise.get_future();
+    std::promise<void> hit_borrower_gate_release_promise;
+    auto hit_borrower_gate_release = hit_borrower_gate_release_promise.get_future().share();
+    BlockingLoopGate hit_borrower_gate{&hit_borrower_gate_entered_promise, &hit_borrower_gate_release};
+    borrower_loop->post<BlockingLoopGate, &BlockingLoopGate::notify, &BlockingLoopGate::run>(hit_borrower_gate);
+    ASSERT_EQ(hit_borrower_gate_entered.wait_for(2s), std::future_status::ready);
+
+    hit_winner.done();
+    hit_home_gate_release_promise.set_value();
+
+    std::promise<void> hit_processed_promise;
+    auto hit_processed_future = hit_processed_promise.get_future();
+    fiber::async::spawn(*home_loop, [&]() -> DetachedTask {
+        hit_processed_promise.set_value();
+        co_return;
+    });
+    ASSERT_EQ(hit_processed_future.wait_for(2s), std::future_status::ready);
+
+    hit_borrower_gate_release_promise.set_value();
+    ASSERT_EQ(hit_cancel_future.wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(hit_cancel_future.get());
+
+    std::promise<void> hit_cancel_drained_promise;
+    auto hit_cancel_drained_future = hit_cancel_drained_promise.get_future();
+    fiber::async::spawn(*borrower_loop, [&]() -> DetachedTask {
+        hit_cancel_drained_promise.set_value();
+        co_return;
+    });
+    ASSERT_EQ(hit_cancel_drained_future.wait_for(2s), std::future_status::ready);
+
+    std::promise<bool> hit_reacquire_promise;
+    auto hit_reacquire_future = hit_reacquire_promise.get_future();
+    fiber::async::spawn(*home_loop, [&, home_conn]() -> DetachedTask {
+        auto lease = co_await set.acquire(key);
+        hit_reacquire_promise.set_value(lease.valid() && lease.hit() && lease.has_connection() &&
+                                        lease.get() == home_conn);
+        lease.reset();
+    });
+    ASSERT_EQ(hit_reacquire_future.wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(hit_reacquire_future.get());
+
+    std::promise<void> shutdown_gate_entered_promise;
+    auto shutdown_gate_entered = shutdown_gate_entered_promise.get_future();
+    std::promise<void> shutdown_gate_release_promise;
+    auto shutdown_gate_release = shutdown_gate_release_promise.get_future().share();
+    BlockingLoopGate shutdown_gate{&shutdown_gate_entered_promise, &shutdown_gate_release};
+    home_loop->post<BlockingLoopGate, &BlockingLoopGate::notify, &BlockingLoopGate::run>(shutdown_gate);
+    ASSERT_EQ(shutdown_gate_entered.wait_for(2s), std::future_status::ready);
+
+    std::promise<bool> shutdown_cancel_promise;
+    auto shutdown_cancel_future = shutdown_cancel_promise.get_future();
+    fiber::async::spawn(*borrower_loop, [&]() -> DetachedTask {
+        auto result = co_await fiber::async::when_any([&]() { return set.acquire(key); },
+                                                      []() { return SuspendFalseAwaiter{}; });
+        shutdown_cancel_promise.set_value(result.is<1>());
+    });
+    ASSERT_EQ(shutdown_cancel_future.wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(shutdown_cancel_future.get());
+
+    std::promise<void> shutdown_done_promise;
+    auto shutdown_done_future = shutdown_done_promise.get_future();
+    fiber::async::spawn(*borrower_loop, [&]() -> DetachedTask {
+        co_await set.shutdown_async();
+        shutdown_done_promise.set_value();
+    });
+    EXPECT_EQ(shutdown_done_future.wait_for(20ms), std::future_status::timeout);
+    shutdown_gate_release_promise.set_value();
+    ASSERT_EQ(shutdown_done_future.wait_for(2s), std::future_status::ready);
+
+    server_state->stop.store(true, std::memory_order_release);
+    ASSERT_EQ(server_result_future.wait_for(2s), std::future_status::ready);
     EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);
 
     group.stop();
