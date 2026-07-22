@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
@@ -231,10 +233,7 @@ TEST(CatEncoderTest, EncodesOfficialAndProcessHeartbeatStatistics) {
                 .process_memory_valid = true,
         };
         fiber::cat::detail::HeartbeatInfo info{
-                .app_key = "app",
-                .hostname = "host",
                 .ip = "1.2.3.4",
-                .client_version = "fiber2-cat/test",
                 .system_stats = &system,
         };
         auto encoded = fiber::cat::detail::encode_heartbeat_nt1(full_context(), "message", info, 96, 16 * 1024);
@@ -248,6 +247,30 @@ TEST(CatEncoderTest, EncodesOfficialAndProcessHeartbeatStatistics) {
         EXPECT_TRUE(contains("id=\"mem.memtotal\" value=\"1024\""));
         EXPECT_TRUE(contains("id=\"process.rss.bytes\" value=\"2048\""));
         EXPECT_TRUE(contains("id=\"process.cpu.total.percent\" value=\"5.00\""));
+
+        const std::string_view contents(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+        std::size_t position = 0;
+        std::size_t value_count = 0;
+        while ((position = contents.find("value=\"", position)) != std::string_view::npos) {
+            position += 7;
+            const std::size_t end = contents.find('"', position);
+            ASSERT_NE(end, std::string_view::npos);
+            const std::string_view value = contents.substr(position, end - position);
+            double parsed = 0.0;
+            const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+            EXPECT_EQ(result.ec, std::errc{}) << value;
+            EXPECT_EQ(result.ptr, value.data() + value.size()) << value;
+            EXPECT_TRUE(std::isfinite(parsed)) << value;
+            ++value_count;
+            position = end + 1;
+        }
+        EXPECT_GT(value_count, 0);
+        EXPECT_FALSE(contains("app.key"));
+        EXPECT_FALSE(contains("host.name"));
+        EXPECT_FALSE(contains("host.ip"));
+        EXPECT_FALSE(contains("client.version"));
+        EXPECT_FALSE(contains("value=\"true\""));
+        EXPECT_FALSE(contains("value=\"false\""));
     });
 }
 
@@ -260,13 +283,10 @@ TEST(CatEncoderTest, OmitsOptionalSystemStatisticsWhenFieldBudgetIsExhausted) {
                 .load_valid = true,
         };
         fiber::cat::detail::HeartbeatInfo info{
-                .app_key = "app",
-                .hostname = "host",
                 .ip = "1.2.3.4",
-                .client_version = "fiber2-cat/test",
                 .system_stats = &system,
         };
-        auto encoded = fiber::cat::detail::encode_heartbeat_nt1(full_context(), "message", info, 30, 16 * 1024);
+        auto encoded = fiber::cat::detail::encode_heartbeat_nt1(full_context(), "message", info, 26, 16 * 1024);
         ASSERT_TRUE(encoded);
         const auto bytes = encoded_bytes(*encoded);
         const auto contains = [&](std::string_view value) {
