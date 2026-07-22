@@ -22,6 +22,8 @@ Run the preparation script without `--ref` before using this map. It enforces th
 | Java message-ID generator and parser | `cat-client/src/main/java/com/dianping/cat/message/internal/MessageIdFactory.java`, `MessageId.java` |
 | Java NT1/PT1 receiver codecs | `cat-client/src/main/java/com/dianping/cat/message/spi/codec/NativeMessageCodec.java`, `PlainTextMessageCodec.java` |
 | Server collector decode entry | `cat-core/src/main/java/com/dianping/cat/message/CodecHandler.java` |
+| Server Log View retention gate | `cat-consumer/src/main/java/com/dianping/cat/consumer/dump/DumpAnalyzer.java` |
+| Legacy Log View index file layout | `cat-core/src/main/java/com/dianping/cat/message/storage/MessageBlockWriter.java` |
 | Log View request and storage lookup | `cat-home/src/main/java/com/dianping/cat/report/page/logview/Handler.java`, `service/LocalMessageService.java` |
 
 The C++ tree links `lib/cpp/src/ccat` and `lib/cpp/src/lib` back to the C implementation. Always prepare both directories so those links resolve.
@@ -33,6 +35,8 @@ The C++ tree links `lib/cpp/src/ccat` and `lib/cpp/src/lib` back to the C implem
 - `message_manager.c` and `message_helper.c` decide when a tree receives message IDs and how child propagation rewrites message, root, and parent IDs.
 - CAT 3.0 message IDs have the visible shape `<domain>-<ipHex[.pid]>-<hour>-<index>`. The Java parser scans from the right, parses both `hour` and `index` with `Integer.parseInt`, and rejects negative values. Keep generated values in the non-negative Java `int` range even if fiber2 stores them in wider types.
 - The official CAT 3.0 C client uses an `int` message-ID index. Its optional multiprocessing form adds the PID to the IP component instead of widening the index.
+- CAT 3.0 `DumpAnalyzer` silently discards messages whose parsed index is above `50,000,000`. Treat that retention gate, not merely `Integer.MAX_VALUE`, as the maximum emitted index when Log View retrieval is required.
+- Legacy CAT 3.0 Log View storage writes each index entry at `index * 6` in the `.idx` file. Keep any fiber2-specific restart seed small as well as bounded; a very large but otherwise accepted index creates an unnecessarily large sparse index file.
 - CAT 3.0 Log View parses the message ID before locating the storage bucket. An out-of-range numeric field can therefore leave URL aggregation visible while `/cat/r/m/<message-id>` fails with HTTP 500.
 - `context.c` stores the active tree in `CATTHREADLOCAL` state. This is an upstream implementation detail, not a safe fiber2 design: coroutines sharing an event-loop thread can interleave across suspension points.
 - `message_sender.c`, `aggregator.c`, and `monitor.c` create dedicated pthreads. Preserve their externally visible behavior, but replace their thread/lock/event-loop structure with fiber2 lifecycle and ownership primitives.
@@ -62,6 +66,8 @@ rg -n '/cat/s/router|sample|block|2280|reconnect|send' lib/c/src/ccat
 rg -n 'pthread_create|queue|drop|monitor|heartbeat' lib/c/src/ccat
 git show HEAD:cat-client/src/main/java/com/dianping/cat/message/internal/MessageId.java
 git show HEAD:cat-client/src/main/java/com/dianping/cat/message/spi/codec/NativeMessageCodec.java
+git show HEAD:cat-consumer/src/main/java/com/dianping/cat/consumer/dump/DumpAnalyzer.java
+git show HEAD:cat-core/src/main/java/com/dianping/cat/message/storage/MessageBlockWriter.java
 git show HEAD:cat-home/src/main/java/com/dianping/cat/report/page/logview/Handler.java
 ```
 

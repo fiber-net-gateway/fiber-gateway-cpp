@@ -73,8 +73,9 @@ An empty `MessageTraceContext::message_id` is filled automatically using the off
 `domain-ipHex-hour-sequence` structure. The owning `PropagationContext` can safely outlive the trace:
 
 For CAT 3.0 Log View compatibility, `hour` and `sequence` are always non-negative Java `int` values. The sequence uses
-a process-specific bounded starting point, resets when the wall-clock hour advances, retains the latest hour across a
-clock rollback, and fails explicitly on exhaustion instead of wrapping to a duplicate ID.
+a process-specific starting point no greater than `1,000,000`, retains the latest hour across a clock rollback, and
+fails explicitly at CAT 3.0's `50,000,000` stored-message index limit instead of emitting an ID that Log View will
+discard or wrapping to a duplicate.
 
 ```cpp
 auto current = trace.propagation_context();
