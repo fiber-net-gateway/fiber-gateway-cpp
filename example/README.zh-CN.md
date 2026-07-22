@@ -29,6 +29,9 @@
   DNS 查询示例，展示 resolver 使用、地址解析和结果处理。
 - `git_http_repo_server.cpp`
   更完整的 HTTP 服务端示例，展示更复杂的协议处理和服务逻辑。
+- `nacos_demo.cpp`
+  Nacos 客户端示例：连真实 Nacos 服务端（HTTP 登录 + gRPC 数据面），演示 `NacosClient`（鉴权）
+  以及独立的 `ConfigService`（读取/发布含 CAS/删除/订阅变更）与 `NamingService`（查询/订阅/注册/更新/注销）。
 
 ## 构建
 
