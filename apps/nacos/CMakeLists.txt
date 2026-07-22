@@ -1,6 +1,7 @@
 fiber_proto_library(nacos_payload nacos_grpc_payload.proto)
 
 add_library(fiber_nacos STATIC
+    "${CMAKE_CURRENT_LIST_DIR}/src/ConfigService.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/NacosClient.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/NacosClientConfig.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/NamingService.cpp"

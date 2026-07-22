@@ -19,6 +19,7 @@
 #include <event/EventLoop.h>
 #include <fiber/nacos/NacosAuthAccess.h>
 #include <fiber/nacos/NacosClientConfig.h>
+#include <fiber/nacos/NacosRpcOptions.h>
 #include <grpc/GrpcClient.h>
 #include <grpc/GrpcStream.h>
 #include <nacos_grpc_payload.pb.h>
@@ -28,8 +29,6 @@
 #include "NacosBiRequestHandler.h"
 
 namespace fiber::nacos::detail {
-
-class NacosClientImpl;
 
 enum class NacosRpcModule : std::uint8_t {
     Config,
@@ -82,8 +81,8 @@ struct NacosRpcCloseResult {
 struct NacosRpcDependencies {
     event::EventLoop &loop;
     const NacosClientConfig &config;
-    const NacosClientOptions &options;
-    async::Watch<NacosAuthAccess> &auth_watch;
+    const NacosRpcOptions &options;
+    const NacosAuthSubscriber &auth;
 };
 
 // One independent Nacos gRPC connection. This class intentionally does not
@@ -116,9 +115,10 @@ class NacosRpc : public common::NonCopyable, public common::NonMovable {
     };
 
 public:
-    NacosRpc(NacosClientImpl &owner, NacosRpcEndpoint endpoint, NacosRpcModule module);
     NacosRpc(NacosRpcDependencies dependencies, NacosRpcEndpoint endpoint, NacosRpcModule module);
     ~NacosRpc();
+
+    [[nodiscard]] static bool valid_options(const NacosRpcOptions &options) noexcept;
 
     // Runs exactly one connection from authentication wait through complete
     // gRPC teardown. handlers and all registered callback contexts must outlive
@@ -149,15 +149,15 @@ public:
         if (!metadata) {
             co_return std::unexpected(std::move(metadata.error()));
         }
-        auto payload = encode_payload(request, metadata->metadata, options_->max_inbound_grpc_message_bytes);
+        auto payload = encode_payload(request, metadata->metadata, options_->max_inbound_message_bytes);
         if (!payload) {
             co_return std::unexpected(std::move(payload.error()));
         }
-        auto response_payload = co_await request_payload(*payload, pool, options_->grpc_request_timeout);
+        auto response_payload = co_await request_payload(*payload, pool, options_->request_timeout);
         if (!response_payload) {
             co_return std::unexpected(std::move(response_payload.error()));
         }
-        co_return decode_payload(*response_payload, options_->max_inbound_grpc_message_bytes, pool, response);
+        co_return decode_payload(*response_payload, options_->max_inbound_message_bytes, pool, response);
     }
 
     [[nodiscard]] NacosRpcState state() const noexcept { return state_; }
@@ -187,8 +187,8 @@ private:
 
     event::EventLoop *loop_ = nullptr;
     const NacosClientConfig *config_ = nullptr;
-    const NacosClientOptions *options_ = nullptr;
-    async::Watch<NacosAuthAccess>::Subscriber auth_subscriber_;
+    const NacosRpcOptions *options_ = nullptr;
+    const NacosAuthSubscriber *auth_subscriber_ = nullptr;
     NacosRpcEndpoint endpoint_;
     NacosRpcModule module_ = NacosRpcModule::Config;
     std::string authority_;

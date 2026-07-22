@@ -25,7 +25,9 @@
 #include <async/Spawn.h>
 #include <async/Timeout.h>
 #include <event/EventLoopGroup.h>
+#include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/NacosClient.h>
+#include <fiber/nacos/NamingService.h>
 
 namespace {
 
@@ -380,6 +382,34 @@ DetachedTask shutdown_client(NacosClient *client, NacosClient::AuthSubscriber *s
                                 : fiber::common::IoErr::Invalid;
     }
     promise->set_value(std::move(outcome));
+    fiber::event::EventLoop::current().stop();
+}
+
+DetachedTask shutdown_and_check_service_factories(NacosClient *client, std::promise<bool> *promise) {
+    co_await client->shutdown();
+    auto config = fiber::nacos::ConfigService::create(*client);
+    auto naming = fiber::nacos::NamingService::create(*client);
+    promise->set_value(!config && config.error().code == fiber::nacos::NacosCreateErrorCode::InvalidState && !naming &&
+                       naming.error().code == fiber::nacos::NacosCreateErrorCode::InvalidState);
+    fiber::event::EventLoop::current().stop();
+}
+
+DetachedTask exercise_service_lifecycles(NacosClient *client, fiber::nacos::ConfigService *config,
+                                         fiber::nacos::NamingService *naming, std::promise<bool> *promise) {
+    const auto config_start = config->start();
+    co_await config->shutdown();
+    co_await config->shutdown();
+    const auto config_restart = config->start();
+
+    const auto naming_start = naming->start();
+    co_await naming->shutdown();
+    co_await naming->shutdown();
+    const auto naming_restart = naming->start();
+
+    co_await client->shutdown();
+    promise->set_value(config_start.has_value() && !config_restart &&
+                       config_restart.error() == fiber::common::IoErr::Already && naming_start.has_value() &&
+                       !naming_restart && naming_restart.error() == fiber::common::IoErr::Already);
     fiber::event::EventLoop::current().stop();
 }
 
@@ -791,13 +821,66 @@ TEST(NacosClientTest, RejectsInvalidOptions) {
         ASSERT_FALSE(result.has_value());
         EXPECT_EQ(result.error().code, fiber::nacos::NacosCreateErrorCode::InvalidOptions);
     }
-    {
-        fiber::nacos::NacosClientOptions options;
-        options.max_naming_hosts_per_service = 0;
-        auto result = NacosClient::create(loop, make_config(8848), options);
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().code, fiber::nacos::NacosCreateErrorCode::InvalidOptions);
-    }
+}
+
+TEST(NacosClientTest, CreatesConfigAndNamingServicesIndependently) {
+    fiber::event::EventLoop loop;
+    auto client = NacosClient::create(loop, make_config(8848));
+    ASSERT_TRUE(client.has_value());
+
+    auto first_config = fiber::nacos::ConfigService::create(**client);
+    auto second_config = fiber::nacos::ConfigService::create(**client);
+    auto naming = fiber::nacos::NamingService::create(**client);
+    ASSERT_TRUE(first_config.has_value());
+    ASSERT_TRUE(second_config.has_value());
+    ASSERT_TRUE(naming.has_value());
+    EXPECT_NE(first_config->get(), second_config->get());
+
+    fiber::nacos::ConfigServiceOptions config_options;
+    config_options.max_content_bytes = 0;
+    auto invalid_config = fiber::nacos::ConfigService::create(**client, config_options);
+    ASSERT_FALSE(invalid_config.has_value());
+    EXPECT_EQ(invalid_config.error().code, fiber::nacos::NacosCreateErrorCode::InvalidOptions);
+
+    fiber::nacos::NamingServiceOptions naming_options;
+    naming_options.max_hosts_per_service = 0;
+    auto invalid_naming = fiber::nacos::NamingService::create(**client, naming_options);
+    ASSERT_FALSE(invalid_naming.has_value());
+    EXPECT_EQ(invalid_naming.error().code, fiber::nacos::NacosCreateErrorCode::InvalidOptions);
+}
+
+TEST(NacosClientTest, RejectsServiceCreationAfterClientShutdown) {
+    fiber::event::EventLoopGroup group(1);
+    auto client = NacosClient::create(group.at(0), make_config(8848));
+    ASSERT_TRUE(client.has_value());
+
+    std::promise<bool> promise;
+    auto future = promise.get_future();
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() { return shutdown_and_check_service_factories(client->get(), &promise); });
+    ASSERT_EQ(future.wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(future.get());
+    group.join();
+}
+
+TEST(NacosClientTest, ServicesHaveIndependentIdempotentLifecycles) {
+    fiber::event::EventLoopGroup group(1);
+    auto client = NacosClient::create(group.at(0), make_config(8848));
+    ASSERT_TRUE(client.has_value());
+    auto config = fiber::nacos::ConfigService::create(**client);
+    auto naming = fiber::nacos::NamingService::create(**client);
+    ASSERT_TRUE(config.has_value());
+    ASSERT_TRUE(naming.has_value());
+
+    std::promise<bool> promise;
+    auto future = promise.get_future();
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() {
+        return exercise_service_lifecycles(client->get(), config->get(), naming->get(), &promise);
+    });
+    ASSERT_EQ(future.wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(future.get());
+    group.join();
 }
 
 } // namespace

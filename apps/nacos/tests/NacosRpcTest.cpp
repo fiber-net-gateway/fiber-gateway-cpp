@@ -473,7 +473,7 @@ struct RpcCaseResult {
 };
 
 DetachedTask run_rpc_case(fiber::event::EventLoop *loop, ScriptedNacosRpcServer *server,
-                          fiber::nacos::NacosClientConfig config, fiber::nacos::NacosClientOptions options,
+                          fiber::nacos::NacosClientConfig config, fiber::nacos::NacosRpcOptions options,
                           std::shared_ptr<std::promise<RpcCaseResult>> finished) {
     fiber::async::Watch<fiber::nacos::NacosAuthAccess> auth(fiber::nacos::NacosAuthAccess{
             .kind = fiber::nacos::NacosAuthAccessKind::Present,
@@ -481,13 +481,14 @@ DetachedTask run_rpc_case(fiber::event::EventLoop *loop, ScriptedNacosRpcServer 
     });
     auto auth_publisher = auth.acquire_publisher();
     EXPECT_TRUE(auth_publisher.has_value());
+    auto auth_subscriber = auth.subscribe();
 
     nacos_detail::NacosRpc rpc(
             nacos_detail::NacosRpcDependencies{
                     .loop = *loop,
                     .config = config,
                     .options = options,
-                    .auth_watch = auth,
+                    .auth = auth_subscriber,
             },
             nacos_detail::NacosRpcEndpoint{
                     .ip = fiber::net::IpAddress::loopback_v4(),
@@ -575,13 +576,13 @@ RpcCaseResult execute_rpc_case(bool support_ability_negotiation, bool send_conne
     auto config = fiber::nacos::NacosClientConfig::create(std::move(params));
     EXPECT_TRUE(config.has_value());
 
-    fiber::nacos::NacosClientOptions options;
-    options.grpc_connect_timeout = 500ms;
-    options.grpc_request_timeout = 500ms;
-    options.grpc_handshake_timeout = 1s;
-    options.grpc_compatibility_setup_delay = 20ms;
-    options.grpc_heartbeat_interval = 100ms;
-    options.max_inbound_grpc_message_bytes = 1024 * 1024;
+    fiber::nacos::NacosRpcOptions options;
+    options.connect_timeout = 500ms;
+    options.request_timeout = 500ms;
+    options.handshake_timeout = 1s;
+    options.compatibility_setup_delay = 20ms;
+    options.heartbeat_interval = 100ms;
+    options.max_inbound_message_bytes = 1024 * 1024;
 
     auto client_finished = std::make_shared<std::promise<RpcCaseResult>>();
     auto client_future = client_finished->get_future();
@@ -660,17 +661,18 @@ struct PreRunShutdownResult {
 };
 
 DetachedTask run_pre_run_shutdown(fiber::event::EventLoop *loop, fiber::nacos::NacosClientConfig config,
-                                  fiber::nacos::NacosClientOptions options,
+                                  fiber::nacos::NacosRpcOptions options,
                                   std::shared_ptr<std::promise<PreRunShutdownResult>> finished) {
     fiber::async::Watch<fiber::nacos::NacosAuthAccess> auth(fiber::nacos::NacosAuthAccess{
             .kind = fiber::nacos::NacosAuthAccessKind::NotConfigured,
     });
+    auto auth_subscriber = auth.subscribe();
     nacos_detail::NacosRpc rpc(
             nacos_detail::NacosRpcDependencies{
                     .loop = *loop,
                     .config = config,
                     .options = options,
-                    .auth_watch = auth,
+                    .auth = auth_subscriber,
             },
             nacos_detail::NacosRpcEndpoint{
                     .ip = fiber::net::IpAddress::loopback_v4(),
@@ -702,7 +704,7 @@ TEST(NacosRpcTest, ShutdownBeforeRunCompletesWithoutConnecting) {
     auto finished = std::make_shared<std::promise<PreRunShutdownResult>>();
     auto future = finished->get_future();
     fiber::async::spawn(group.at(0), [loop = &group.at(0), config = std::move(*config),
-                                      options = fiber::nacos::NacosClientOptions{}, finished]() mutable {
+                                      options = fiber::nacos::NacosRpcOptions{}, finished]() mutable {
         return run_pre_run_shutdown(loop, std::move(config), options, finished);
     });
     ASSERT_EQ(future.wait_for(1s), std::future_status::ready);
@@ -716,18 +718,19 @@ TEST(NacosRpcTest, ShutdownBeforeRunCompletesWithoutConnecting) {
 }
 
 DetachedTask run_rnacos_rpc(fiber::event::EventLoop *loop, fiber::nacos::NacosClientConfig config,
-                            fiber::nacos::NacosClientOptions options,
+                            fiber::nacos::NacosRpcOptions options,
                             std::shared_ptr<std::promise<RpcCaseResult>> finished,
                             std::shared_ptr<std::atomic<int>> stage) {
     fiber::async::Watch<fiber::nacos::NacosAuthAccess> auth(fiber::nacos::NacosAuthAccess{
             .kind = fiber::nacos::NacosAuthAccessKind::NotConfigured,
     });
+    auto auth_subscriber = auth.subscribe();
     nacos_detail::NacosRpc rpc(
             nacos_detail::NacosRpcDependencies{
                     .loop = *loop,
                     .config = config,
                     .options = options,
-                    .auth_watch = auth,
+                    .auth = auth_subscriber,
             },
             nacos_detail::NacosRpcEndpoint{
                     .ip = fiber::net::IpAddress::loopback_v4(),
@@ -777,12 +780,12 @@ TEST(NacosRpcTest, RnacosInteropWhenEnabled) {
     auto config = fiber::nacos::NacosClientConfig::create(std::move(params));
     ASSERT_TRUE(config.has_value());
 
-    fiber::nacos::NacosClientOptions options;
-    options.grpc_connect_timeout = 1s;
-    options.grpc_request_timeout = 1s;
-    options.grpc_handshake_timeout = 2s;
-    options.grpc_compatibility_setup_delay = 50ms;
-    options.grpc_heartbeat_interval = 100ms;
+    fiber::nacos::NacosRpcOptions options;
+    options.connect_timeout = 1s;
+    options.request_timeout = 1s;
+    options.handshake_timeout = 2s;
+    options.compatibility_setup_delay = 50ms;
+    options.heartbeat_interval = 100ms;
 
     fiber::event::EventLoopGroup group(1);
     group.start();

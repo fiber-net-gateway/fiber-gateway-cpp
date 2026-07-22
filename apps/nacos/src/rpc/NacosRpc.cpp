@@ -9,8 +9,6 @@
 #include <common/json/JsonValue.h>
 #include <net/SocketAddress.h>
 
-#include "../detail/NacosClientImpl.h"
-
 namespace fiber::nacos::detail {
 namespace {
 
@@ -68,11 +66,11 @@ std::string make_authority(const NacosRpcEndpoint &endpoint) {
     return result;
 }
 
-grpc::GrpcClient::Options make_client_options(const NacosClientOptions &options, const NacosRpcEndpoint &endpoint,
+grpc::GrpcClient::Options make_client_options(const NacosRpcOptions &options, const NacosRpcEndpoint &endpoint,
                                               std::string_view authority) {
     grpc::GrpcClient::Options result;
     result.peer_addr = net::SocketAddress(endpoint.ip, endpoint.port);
-    result.tcp = options.grpc_tcp;
+    result.tcp = options.tcp;
     result.authority = authority;
     result.scheme = "http";
     return result;
@@ -97,19 +95,9 @@ NacosRpcCloseKind close_kind_for_error(const NacosRpcError &error) noexcept {
 
 } // namespace
 
-NacosRpc::NacosRpc(NacosClientImpl &owner, NacosRpcEndpoint endpoint, NacosRpcModule module) :
-    NacosRpc(
-            NacosRpcDependencies{
-                    .loop = owner.loop(),
-                    .config = owner.config(),
-                    .options = owner.options(),
-                    .auth_watch = owner.auth_watch(),
-            },
-            std::move(endpoint), module) {}
-
 NacosRpc::NacosRpc(NacosRpcDependencies dependencies, NacosRpcEndpoint endpoint, NacosRpcModule module) :
     loop_(&dependencies.loop), config_(&dependencies.config), options_(&dependencies.options),
-    auth_subscriber_(dependencies.auth_watch.subscribe()), endpoint_(std::move(endpoint)), module_(module),
+    auth_subscriber_(&dependencies.auth), endpoint_(std::move(endpoint)), module_(module),
     authority_(make_authority(endpoint_)), client_(*loop_, make_client_options(*options_, endpoint_, authority_)) {
     FIBER_ASSERT(endpoint_.port != 0);
     FIBER_ASSERT(!endpoint_.ip.is_unspecified());
@@ -123,6 +111,18 @@ NacosRpc::NacosRpc(NacosRpcDependencies dependencies, NacosRpcEndpoint endpoint,
 NacosRpc::~NacosRpc() {
     FIBER_ASSERT(state_ == NacosRpcState::Created || state_ == NacosRpcState::Stopped);
     FIBER_ASSERT(operations_.empty());
+}
+
+bool NacosRpc::valid_options(const NacosRpcOptions &options) noexcept {
+    return options.connect_timeout > std::chrono::milliseconds::zero() &&
+           options.request_timeout > std::chrono::milliseconds::zero() &&
+           options.handshake_timeout >= options.request_timeout &&
+           options.compatibility_setup_delay > std::chrono::milliseconds::zero() &&
+           options.compatibility_setup_delay <= options.handshake_timeout &&
+           options.heartbeat_interval > std::chrono::milliseconds::zero() &&
+           options.reconnect_initial_delay > std::chrono::milliseconds::zero() &&
+           options.reconnect_max_delay >= options.reconnect_initial_delay && options.max_inbound_message_bytes > 0 &&
+           options.max_push_response_bytes > 0 && options.max_push_response_bytes <= options.max_inbound_message_bytes;
 }
 
 NacosRpcError NacosRpc::invalid_state_error(std::string message) {
@@ -146,7 +146,7 @@ std::expected<NacosRpc::MetadataSnapshot, NacosRpcError> NacosRpc::current_metad
     }
 
     MetadataSnapshot result;
-    auto auth = auth_subscriber_.current();
+    auto auth = auth_subscriber_->current();
     result.auth = std::move(auth.value);
     if (!result.auth) {
         return std::unexpected(NacosRpcError{
@@ -189,7 +189,7 @@ NacosRpc::request_payload(const proto::Payload &request, mem::BufPool &pool,
             client_.open_stream("Request", "request", pool,
                                 {
                                         .deadline = timeout,
-                                        .max_inbound_message_bytes = options_->max_inbound_grpc_message_bytes,
+                                        .max_inbound_message_bytes = options_->max_inbound_message_bytes,
                                 });
     auto result = co_await stream.open();
     if (!result) {
@@ -258,10 +258,10 @@ async::Task<NacosRpcCloseResult> NacosRpc::run(const NacosBiRequestHandler &hand
 
     set_state(NacosRpcState::WaitingAuth);
 
-    auto auth = auth_subscriber_.current();
+    auto auth = auth_subscriber_->current();
     std::uint64_t auth_version = auth.version;
     while (!stop_requested_ && (!auth.value || auth.value->kind == NacosAuthAccessKind::InitialFailed)) {
-        auto next = co_await async::timeout_for([&]() { return auth_subscriber_.next(auth_version); },
+        auto next = co_await async::timeout_for([&]() { return auth_subscriber_->next(auth_version); },
                                                 kAuthStopPollInterval);
         if (next) {
             auth = std::move(*next);
@@ -276,7 +276,7 @@ async::Task<NacosRpcCloseResult> NacosRpc::run(const NacosBiRequestHandler &hand
     FIBER_ASSERT(auth.value != nullptr);
 
     set_state(NacosRpcState::Connecting);
-    auto connected = co_await client_.connect(options_->grpc_connect_timeout);
+    auto connected = co_await client_.connect(options_->connect_timeout);
     if (!connected) {
         co_return co_await finish_run_error(transport_error(connected.error()));
     }
@@ -294,9 +294,9 @@ async::Task<NacosRpcCloseResult> NacosRpc::run(const NacosBiRequestHandler &hand
         co_return co_await finish_run_error(protocol_error("Nacos gRPC local address is unavailable"));
     }
 
-    const auto handshake_deadline = event::EventLoop::current().now() + options_->grpc_handshake_timeout;
-    auto request_timeout = std::min(options_->grpc_request_timeout,
-                                    remaining_until(handshake_deadline, event::EventLoop::current().now()));
+    const auto handshake_deadline = event::EventLoop::current().now() + options_->handshake_timeout;
+    auto request_timeout =
+            std::min(options_->request_timeout, remaining_until(handshake_deadline, event::EventLoop::current().now()));
     if (request_timeout <= std::chrono::milliseconds::zero()) {
         co_return co_await finish_run_error(transport_error(common::IoErr::TimedOut, "Nacos handshake timed out"));
     }
@@ -307,7 +307,7 @@ async::Task<NacosRpcCloseResult> NacosRpc::run(const NacosBiRequestHandler &hand
         co_return co_await finish_run_error(std::move(metadata.error()));
     }
     dto::req::ServerCheckRequest check_request;
-    auto check_payload = encode_payload(check_request, metadata->metadata, options_->max_inbound_grpc_message_bytes);
+    auto check_payload = encode_payload(check_request, metadata->metadata, options_->max_inbound_message_bytes);
     if (!check_payload) {
         co_return co_await finish_run_error(std::move(check_payload.error()));
     }
@@ -317,8 +317,8 @@ async::Task<NacosRpcCloseResult> NacosRpc::run(const NacosBiRequestHandler &hand
         co_return co_await finish_run_error(std::move(check_response_payload.error()));
     }
     dto::resp::ServerCheckResponse check_response;
-    auto decoded = decode_payload(*check_response_payload, options_->max_inbound_grpc_message_bytes, check_pool,
-                                  check_response);
+    auto decoded =
+            decode_payload(*check_response_payload, options_->max_inbound_message_bytes, check_pool, check_response);
     if (!decoded) {
         co_return co_await finish_run_error(std::move(decoded.error()));
     }
@@ -340,7 +340,7 @@ async::Task<NacosRpcCloseResult> NacosRpc::run(const NacosBiRequestHandler &hand
 
     set_state(NacosRpcState::Handshaking);
     stream_ = client_.open_stream("BiRequestStream", "requestBiStream", stream_pool_,
-                                  {.max_inbound_message_bytes = options_->max_inbound_grpc_message_bytes});
+                                  {.max_inbound_message_bytes = options_->max_inbound_message_bytes});
     auto remaining = remaining_until(handshake_deadline, event::EventLoop::current().now());
     if (remaining <= std::chrono::milliseconds::zero()) {
         co_return co_await finish_run_error(transport_error(common::IoErr::TimedOut, "Nacos handshake timed out"));
@@ -364,7 +364,7 @@ async::Task<NacosRpcCloseResult> NacosRpc::run(const NacosBiRequestHandler &hand
     if (!metadata) {
         co_return co_await finish_run_error(std::move(metadata.error()));
     }
-    auto setup_payload = encode_payload(setup, metadata->metadata, options_->max_inbound_grpc_message_bytes);
+    auto setup_payload = encode_payload(setup, metadata->metadata, options_->max_inbound_message_bytes);
     if (!setup_payload) {
         co_return co_await finish_run_error(std::move(setup_payload.error()));
     }
@@ -405,14 +405,14 @@ async::Task<NacosRpcCloseResult> NacosRpc::run(const NacosBiRequestHandler &hand
     } else {
         stream_.clear_local_deadline();
         remaining = remaining_until(handshake_deadline, event::EventLoop::current().now());
-        if (remaining < options_->grpc_compatibility_setup_delay) {
+        if (remaining < options_->compatibility_setup_delay) {
             co_return co_await finish_run_error(
                     transport_error(common::IoErr::TimedOut, "Nacos compatibility setup timed out"));
         }
         auto stopped = stop_watch_.subscribe();
         const auto stop_version = stopped.current().version;
         auto wait = co_await async::timeout_for([&]() { return stopped.next(stop_version); },
-                                                options_->grpc_compatibility_setup_delay);
+                                                options_->compatibility_setup_delay);
         if (wait || stop_requested_) {
             co_return co_await finish_run_error(shutdown_error());
         }
@@ -460,7 +460,7 @@ void NacosRpc::save_redirect(const dto::req::ConnectResetRequest &request, Inbou
 
 async::Task<std::expected<NacosRpc::InboundAction, NacosRpcError>>
 NacosRpc::dispatch_inbound(const NacosBiRequestHandler &handlers, const proto::Payload &payload) noexcept {
-    auto view = validate_payload(payload, options_->max_inbound_grpc_message_bytes);
+    auto view = validate_payload(payload, options_->max_inbound_message_bytes);
     if (!view) {
         co_return std::unexpected(std::move(view.error()));
     }
@@ -610,8 +610,8 @@ async::DetachedTask NacosRpc::run_heartbeat() noexcept {
     auto stopped = stop_watch_.subscribe();
     std::uint64_t stop_version = stopped.current().version;
     while (!stop_requested_) {
-        auto wait = co_await async::timeout_for([&]() { return stopped.next(stop_version); },
-                                                options_->grpc_heartbeat_interval);
+        auto wait =
+                co_await async::timeout_for([&]() { return stopped.next(stop_version); }, options_->heartbeat_interval);
         if (wait) {
             stop_version = wait->version;
             break;

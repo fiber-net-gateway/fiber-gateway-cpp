@@ -2,7 +2,7 @@
 
 > 状态：ConfigService 公共操作、订阅、恢复与 rnacos 互操作已实现。
 >
-> 更新日期：2026-07-20。
+> 更新日期：2026-07-22。
 >
 > 行为参考：`/home/dear/CLionProjects/ploto-gateway/nacos-client/target/nacos-client-2.1-SNAPSHOT-sources.jar`
 > 中的 Java `ConfigService`、`ConfigServiceImpl`、`GrpcConnection` 和 `GrpcRequester`。服务端互操作验证使用仓库内
@@ -31,7 +31,7 @@ Java SDK 的全量能力。
 - 保持 Nacos wire compatibility，DTO 类型名、JSON 字段名和 protobuf 字段号必须与 Java 端一致。
 - API 采用 C++ 协程和 `std::expected`，不复制 Java 的异常、阻塞调用和响应式类型体系。
 - 所有 Nacos 状态机固定运行在创建客户端时传入的 `EventLoop`。
-- ConfigService 与认证共享生命周期，但配置通信逻辑不继续堆入 `NacosClientImpl`。
+- ConfigService 从 NacosClient 获取认证订阅、不可变配置和 EventLoop，但拥有独立对象与生命周期；配置通信逻辑不进入 `NacosClientImpl`。
 - transient 连接失败不清空已知配置，也不终止现有订阅；连接恢复后重新注册。
 - 对服务端输入设置消息大小、配置内容和错误文本上限。
 - 同一个 gRPC 双向流只允许一个写协程，所有 ACK/响应通过串行发送路径输出。
@@ -42,17 +42,20 @@ Java SDK 的全量能力。
 ```text
 NacosClient
 ├── HTTP/1 authentication coroutine
-│   └── Watch<NacosAuthAccess>
-└── ConfigService
-    ├── authentication-access Watch
-    ├── Config subscription registry
-    │   └── one entry per (dataId, group)
-    ├── reconnect / failover / redirect policy
-    └── one current NacosRpc per physical connection
-        ├── connection / handshake / heartbeat
-        ├── unary Request/request
-        └── bidirectional BiRequestStream/requestBiStream
-            └── protobuf Payload + JSON DTO
+├── immutable NacosClientConfig
+└── Watch<NacosAuthAccess>
+            │ ConfigService::create(client)
+            ▼
+ConfigService
+├── owned authentication subscriber and shared immutable config
+├── Config subscription registry
+│   └── one entry per (dataId, group)
+├── reconnect / failover / redirect policy
+└── one current NacosRpc per physical connection
+    ├── connection / handshake / heartbeat
+    ├── unary Request/request
+    └── bidirectional BiRequestStream/requestBiStream
+        └── protobuf Payload + JSON DTO
 ```
 
 最终内部模块：
@@ -61,7 +64,10 @@ NacosClient
 apps/nacos/
 ├── include/fiber/nacos/
 │   ├── ConfigService.h
+│   ├── NacosCreateError.h
+│   ├── NacosRpcOptions.h
 │   └── NacosClient*.h
+├── src/ConfigService.cpp
 ├── src/dto/
 │   ├── internal/config request/response DTO
 │   └── corresponding JSON codecs
@@ -170,7 +176,7 @@ endpoint。所有状态转换和实例替换只在客户端 EventLoop 上发生�
 
 ### 5.2 建连流程
 
-1. ConfigService 为本次 endpoint 创建 `NacosRpc`；RPC 自己订阅认证访问 Watch，等待 `NotConfigured` 或 `Present`。
+1. ConfigService 为本次 endpoint 创建 `NacosRpc`；RPC 借用服务持有的认证 subscriber，等待 `NotConfigured` 或 `Present`。
 2. 从 preferred server 开始遍历 `server_ips`，连接对应 gRPC 端口。
 3. 构造 `ServerCheckRequest`，通过 unary `Request/request` 发送。
 4. 校验 gRPC status、响应 Payload 类型和 `ServerCheckResponse` JSON。
@@ -213,14 +219,17 @@ endpoint。所有状态转换和实例替换只在客户端 EventLoop 上发生�
 
 ### 5.6 关闭
 
-- `NacosClient::shutdown()` 发布统一 shutdown 信号。
+- `ConfigService::shutdown()` 将服务切换到 Stopping；`NacosClient::shutdown()` 不直接调用或等待服务关闭。
 - ConfigService 停止接收新操作和新订阅。
 - 取消 heartbeat、补偿重订阅和 reconnect timer。
 - 取消所有进行中的 unary 调用。
 - 取消双向流，唤醒阻塞 read/write。
 - 关闭 gRPC/HTTP2 连接并等待 receive loop 退出。
-- 发布订阅 Stopped 状态。
-- ConfigService 任务退出后再从客户端 `WaitGroup` 返回。
+- 发布订阅 `Closed` 状态。
+- ConfigService 自己的 `shutdown()` 等待连接与所有服务任务退出后返回；重复调用和 start 前调用均安全。
+
+客户端关闭认证时会发布 `NacosAuthAccessKind::Stopped`，运行中的服务将其视为终止信号并开始停止，但调用者仍须
+await 每个服务自己的 `shutdown()` 完成屏障。推荐顺序是先服务、后客户端。
 
 通用 `GrpcClient` 由调用者显式运行 `run()` 协程，`shutdown()` 会等待该协程和 HTTP/2 内部任务完全退出。
 ConfigService 已将连接监视、注册和查询协程纳入 `WaitGroup`，Nacos shutdown 不依赖轮询或后台遗留任务。
@@ -414,11 +423,15 @@ Java 的 `blockingGetConfig`、`syncPublish` 和 `syncRemoveConfig` 不进入核
 - EventLoop 线程上阻塞会导致死锁。
 - 如果业务需要同步入口，应在应用边界提供明确的跨线程适配器。
 
-ConfigService 与 NacosClient 同生命周期：客户端创建时建立不可空的 ConfigService 实例，`config_service()` 返回引用；网络任务只在 `start()` 后运行。
+`ConfigService::create(client, options)` 独立创建服务；NacosClient 不持有服务指针，也不替服务启动或等待关闭。
+同一客户端可以创建多个 ConfigService，每个实例拥有单独的连接、订阅表和
+`Created -> Running -> Stopping -> Stopped` 状态机。工厂在客户端停止后返回 `InvalidState`，无效服务选项返回
+`InvalidOptions`；网络任务只在该服务自己的 `start()` 后运行。
 
 ## 10. 配置项
 
-当前 gRPC 与 ConfigService 选项如下；认证刷新时机不暴露为配置项，而是固定遵循 Java Nacos 2.x 行为：
+当前 `NacosRpcOptions` 与 `ConfigServiceOptions` 如下；它们不再混入只负责认证的 `NacosClientOptions`。
+认证刷新时机不暴露为配置项，而是固定遵循 Java Nacos 2.x 行为：
 `max(5 秒, tokenTtl * 90%)`。
 
 | 选项 | 建议默认值 | 用途 |
@@ -487,7 +500,7 @@ Codec 约束：
 - [x] 完成当前未提交认证重构的评审和测试。
 - [x] 将认证 Watch 收敛为只发布 `NacosAuthAccess` 的四种最小状态。
 - [x] 确认 token 刷新、server failover 和 shutdown 可供 config 复用。
-- [x] 冻结 ConfigService 所依赖的 `NacosClientConfig`/`NacosClientOptions` 基线。
+- [x] 冻结 ConfigService 所依赖的 `NacosClientConfig`、认证 subscriber 和独立 service/RPC options 基线。
 
 验收：现有 Nacos 定向测试和完整 CTest 通过，工作区中的认证行为与 README 一致。
 
@@ -512,7 +525,7 @@ Codec 约束：
 - [x] 监听 Auth Watch，动态更新或省略 token metadata。
 - [x] 为通用 GrpcClient 增加外部驱动的 `run()` 和可等待的 `shutdown()`。
 - [x] 暴露连接本地地址并支持显式 client IP 覆盖。
-- [x] 接入 NacosClient `WaitGroup` 和 shutdown。
+- [x] 接入 ConfigService 自有的运行任务与可等待 shutdown 屏障。
 
 验收：脚本化 gRPC 测试服务器可验证完整握手、双向请求/响应、token 更新、重连和干净关闭。
 

@@ -21,6 +21,7 @@
 #include "../dto/JsonCodec.h"
 
 #include "../SubscriptionPool.h"
+#include "../detail/NacosServiceDependencies.h"
 #include "../rpc/NacosBiRequestHandler.h"
 #include "../rpc/NacosRpc.h"
 
@@ -54,14 +55,15 @@ class NamingServiceImpl final : public NamingService {
     };
 
 public:
-    using AuthWatch = async::Watch<NacosAuthAccess>;
     using ReadySubscriber = async::Watch<bool>::Subscriber;
 
-    NamingServiceImpl(event::EventLoop &loop, const NacosClientConfig &config, const NacosClientOptions &options,
-                      AuthWatch &auth_watch);
+    NamingServiceImpl(NacosServiceDependencies dependencies, NamingServiceOptions options);
     ~NamingServiceImpl() override;
 
-    [[nodiscard]] static bool valid_options(const NacosClientOptions &options) noexcept;
+    [[nodiscard]] static bool valid_options(const NamingServiceOptions &options) noexcept;
+
+    [[nodiscard]] common::IoResult<void> start() noexcept override;
+    [[nodiscard]] async::Task<void> shutdown() noexcept override;
 
     [[nodiscard]] async::Task<std::expected<std::shared_ptr<const ServiceInfo>, NamingServiceError>>
     get(std::string service_name, std::string group) noexcept override;
@@ -70,8 +72,6 @@ public:
     [[nodiscard]] std::expected<InstanceRegistration, NamingServiceError>
     registry(std::string_view service_name, std::string_view group, Instance instance) override;
 
-    [[nodiscard]] async::Task<void> run() noexcept;
-    void shutdown() noexcept;
     [[nodiscard]] ReadySubscriber subscribe_connection_ready();
 
 private:
@@ -119,6 +119,8 @@ private:
 
     void set_rpc_ready(bool ready);
     void reset_connection_state();
+    void request_shutdown() noexcept;
+    [[nodiscard]] async::DetachedTask run() noexcept;
     [[nodiscard]] async::Task<void> run_connection() noexcept;
     [[nodiscard]] async::Task<AttemptResult> run_attempt(NacosRpcEndpoint endpoint) noexcept;
     [[nodiscard]] async::Task<void> wait_backoff(std::chrono::milliseconds delay) noexcept;
@@ -129,14 +131,14 @@ private:
     [[nodiscard]] async::Task<std::expected<void, NacosRpcError>>
     request_rpc(const Request &request, mem::BufPool &pool, Response &response) noexcept {
         FIBER_ASSERT(loop_->in_loop());
-        if (stopping_) {
+        if (stopping()) {
             co_return std::unexpected(shutdown_rpc_error());
         }
         if (!rpc_ready_ || !rpc_) {
             co_return std::unexpected(not_connected_rpc_error());
         }
         auto result = co_await rpc_->request(request, pool, response);
-        if (!result && result.error().code == NacosRpcErrorCode::Shutdown && !stopping_) {
+        if (!result && result.error().code == NacosRpcErrorCode::Shutdown && !stopping()) {
             co_return std::unexpected(not_connected_rpc_error());
         }
         co_return std::move(result);
@@ -144,15 +146,20 @@ private:
 
     [[nodiscard]] static NacosRpcError shutdown_rpc_error();
     [[nodiscard]] static NacosRpcError not_connected_rpc_error();
+    [[nodiscard]] bool running() const noexcept { return state_ == NacosServiceState::Running; }
+    [[nodiscard]] bool stopping() const noexcept {
+        return state_ == NacosServiceState::Stopping || state_ == NacosServiceState::Stopped;
+    }
 
     event::EventLoop *loop_ = nullptr;
-    const NacosClientConfig *config_ = nullptr;
-    const NacosClientOptions *options_ = nullptr;
-    AuthWatch *auth_watch_ = nullptr;
+    std::shared_ptr<const NacosClientConfig> config_;
+    NamingServiceOptions options_;
+    NacosAuthSubscriber auth_;
     NacosBiRequestHandler handlers_;
     std::optional<NacosRpc> rpc_;
     SubscriptionPool<NamingEntry> pool_;
     std::vector<std::shared_ptr<RegistrationEntry>> registrations_;
+    async::WaitGroup run_task_;
     async::WaitGroup tasks_;
     async::Watch<bool> ready_watch_{false};
     std::optional<async::Watch<bool>::Publisher> ready_publisher_;
@@ -161,9 +168,8 @@ private:
     std::optional<NacosRpcEndpoint> redirect_;
     std::size_t preferred_server_index_ = 0;
     std::uint64_t random_state_ = 0x243f6a8885a308d3ull;
+    NacosServiceState state_ = NacosServiceState::Created;
     bool rpc_ready_ = false;
-    bool run_active_ = false;
-    bool stopping_ = false;
 };
 
 } // namespace fiber::nacos::detail

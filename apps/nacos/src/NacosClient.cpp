@@ -35,12 +35,12 @@ async::Task<void> NacosClient::shutdown() noexcept { co_await impl_->shutdown();
 
 NacosClient::AuthSubscriber NacosClient::subscribe_auth() { return impl_->subscribe_auth(); }
 
-ConfigService &NacosClient::config_service() noexcept { return impl_->config_service(); }
-
-NamingService &NacosClient::naming_service() noexcept { return impl_->naming_service(); }
-
 event::EventLoop &NacosClient::loop() const noexcept { return impl_->loop(); }
 
 const NacosClientConfig &NacosClient::config() const noexcept { return impl_->config(); }
+
+std::expected<detail::NacosServiceDependencies, NacosCreateError> NacosClient::service_dependencies() {
+    return impl_->service_dependencies();
+}
 
 } // namespace fiber::nacos
