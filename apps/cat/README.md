@@ -55,9 +55,9 @@ final open message completion synchronously encodes the tree, submits the indepe
 destroys `MessageTraceData`, and resets the trace pool. A still-live public trace handle then becomes an inert shell:
 `valid()` is false and no later root can be created.
 
-Call `co_await client->shutdown()` before stopping the sender EventLoop. Shutdown stops accepting new frames, waits
-for submitters already inside the MPSC handoff, drains the connected sender up to `shutdown_drain_timeout`, drops the
-remainder, closes the collector socket, and completes in `Stopped` state.
+Call `co_await client->shutdown()` before stopping the sender EventLoop. Shutdown closes frame admission, waits for
+submitters that already reserved capacity, crosses a complete sender-loop Notify phase, drains the connected sender up
+to `shutdown_drain_timeout`, drops the remainder, closes the collector socket, and completes in `Stopped` state.
 
 ## Transactions and events
 
@@ -111,11 +111,17 @@ The control plane is coroutine-based. It periodically fetches
 `kvs.routers/sample/block` responses, rotates collectors, and reconnects with capped exponential backoff. A failed
 refresh retains the last usable collector set.
 
-The data plane does not use a sender coroutine. Finalized traces reserve a packed message/byte budget, enter an MPSC
-queue, and post one coalesced notification to the sender loop. That callback batches up to 16 complete NT1 frames and
-calls `try_writev`. `WouldBlock` arms a writable callback and a write deadline; fairness limits defer continued pumping
-through a local callback. Frames are concatenated on the raw TCP stream. If a connection fails after writing only a
-prefix of a frame, that partial frame is dropped rather than resumed on a new collector connection.
+The data plane does not use a sender coroutine or a CAT-private cross-thread queue. Each finalized trace reserves a
+packed outstanding message/byte budget and owns an `OutboundFrame` with an intrusive `NotifyEntry`. Cross-loop
+submissions enter the sender EventLoop's existing MPSC Notify queue directly; same-loop submissions append directly to
+the owner-loop FIFO. Notify callbacks only collect complete frames, and one coalesced `DeferEntry` batches up to 16 NT1
+frames for `try_writev`. `WouldBlock` arms a writable callback and a write deadline; fairness limits defer continued
+pumping through the local callback. Frames are concatenated on the raw TCP stream. If a connection fails after writing
+only a prefix of a frame, that partial frame is dropped rather than resumed on a new collector connection.
+
+`CatClientStats::queued_messages` and `queued_bytes` report all outstanding frames from admission until complete send
+or explicit drop. They include EventLoop Notify entries, owner-loop FIFO entries, writable waits, and partially written
+frames rather than only the physical length of one queue.
 
 ## Metrics
 

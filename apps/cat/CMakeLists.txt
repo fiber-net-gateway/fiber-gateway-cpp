@@ -1,7 +1,7 @@
 add_library(fiber_cat STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/CatClient.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/CatClientConfig.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/CatClientImpl.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/CatClientCore.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/CatEncoder.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/CatInternal.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/CatRouter.cpp"

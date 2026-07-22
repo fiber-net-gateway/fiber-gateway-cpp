@@ -1,8 +1,9 @@
-#include "CatClientImpl.h"
+#include "CatClientCore.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <coroutine>
 #include <limits>
 #include <new>
 #include <string>
@@ -33,7 +34,9 @@ std::uint64_t pack_budget(std::uint32_t messages, std::uint32_t bytes) noexcept 
     return static_cast<std::uint64_t>(messages) << 32 | bytes;
 }
 
-std::uint32_t budget_messages(std::uint64_t budget) noexcept { return static_cast<std::uint32_t>(budget >> 32); }
+std::uint32_t budget_messages(std::uint64_t budget) noexcept {
+    return static_cast<std::uint32_t>(budget >> 32) & std::numeric_limits<std::int32_t>::max();
+}
 
 std::uint32_t budget_bytes(std::uint64_t budget) noexcept { return static_cast<std::uint32_t>(budget); }
 
@@ -59,9 +62,63 @@ std::chrono::milliseconds grow_backoff(std::chrono::milliseconds current, std::c
     return current >= maximum - current ? maximum : current + current;
 }
 
+class NotifyDrainAwaiter {
+public:
+    NotifyDrainAwaiter() noexcept = default;
+    NotifyDrainAwaiter(const NotifyDrainAwaiter &) = delete;
+    NotifyDrainAwaiter &operator=(const NotifyDrainAwaiter &) = delete;
+    NotifyDrainAwaiter(NotifyDrainAwaiter &&) = delete;
+    NotifyDrainAwaiter &operator=(NotifyDrainAwaiter &&) = delete;
+
+    ~NotifyDrainAwaiter() {
+        if (!loop_) {
+            return;
+        }
+        FIBER_ASSERT(loop_->in_loop());
+        if (timer_entry_.is_in_heap()) {
+            loop_->cancel<NotifyDrainAwaiter, &NotifyDrainAwaiter::timer_entry_>(*this);
+        }
+        if (defer_entry_.is_in_queue()) {
+            loop_->cancel<NotifyDrainAwaiter, &NotifyDrainAwaiter::defer_entry_>(*this);
+        }
+    }
+
+    [[nodiscard]] bool await_ready() const noexcept { return false; }
+
+    void await_suspend(std::coroutine_handle<> handle) noexcept {
+        loop_ = &event::EventLoop::current();
+        handle_ = handle;
+        loop_->post_at<NotifyDrainAwaiter, &NotifyDrainAwaiter::timer_entry_, &NotifyDrainAwaiter::on_timer>(
+                loop_->now(), *this);
+    }
+
+    void await_resume() noexcept {
+        FIBER_ASSERT(!handle_);
+        loop_ = nullptr;
+    }
+
+private:
+    static void on_timer(NotifyDrainAwaiter *awaiter) noexcept {
+        awaiter->loop_
+                ->post_local<NotifyDrainAwaiter, &NotifyDrainAwaiter::defer_entry_, &NotifyDrainAwaiter::on_deferred>(
+                        *awaiter);
+    }
+
+    static void on_deferred(NotifyDrainAwaiter *awaiter) noexcept {
+        std::coroutine_handle<> handle = std::exchange(awaiter->handle_, {});
+        FIBER_ASSERT(handle);
+        handle.resume();
+    }
+
+    event::EventLoop *loop_ = nullptr;
+    std::coroutine_handle<> handle_{};
+    event::EventLoop::TimerEntry timer_entry_{};
+    event::EventLoop::DeferEntry defer_entry_{};
+};
+
 } // namespace
 
-CatClientImpl::CatClientImpl(event::EventLoop &sender_loop, CatClientConfig config, CatClientOptions options,
+CatClientCore::CatClientCore(event::EventLoop &sender_loop, CatClientConfig config, CatClientOptions options,
                              dns::AddressResolver *resolver) noexcept :
     loop_(&sender_loop), config_(std::move(config)), options_(std::move(options)), resolver_(resolver),
     collectors_(config_.bootstrap_collectors()) {
@@ -69,15 +126,14 @@ CatClientImpl::CatClientImpl(event::EventLoop &sender_loop, CatClientConfig conf
     FIBER_ASSERT(control_publisher_.has_value());
 }
 
-CatClientImpl::~CatClientImpl() {
+CatClientCore::~CatClientCore() {
     FIBER_ASSERT(state() == CatClientState::Created || state() == CatClientState::Stopped);
     FIBER_ASSERT(active_submitters_.load(std::memory_order_relaxed) == 0);
-    FIBER_ASSERT(notify_state_.load(std::memory_order_relaxed) == NotifyState::Idle);
-    FIBER_ASSERT(submission_queue_.try_pop_all() == nullptr);
+    FIBER_ASSERT((outstanding_state_.load(std::memory_order_relaxed) & ~kClosedMask) == 0);
     FIBER_ASSERT(local_head_ == nullptr);
 }
 
-common::IoResult<void> CatClientImpl::start() noexcept {
+common::IoResult<void> CatClientCore::start() noexcept {
     if (!loop_->in_loop()) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -85,41 +141,47 @@ common::IoResult<void> CatClientImpl::start() noexcept {
     if (!state_.compare_exchange_strong(expected, CatClientState::Running, std::memory_order_acq_rel)) {
         return std::unexpected(common::IoErr::Already);
     }
-    accepting_.store(true, std::memory_order_release);
+    const std::uint64_t previous = outstanding_state_.fetch_and(~kClosedMask, std::memory_order_acq_rel);
+    FIBER_ASSERT((previous & ~kClosedMask) == 0);
+    if (state() != CatClientState::Running) {
+        outstanding_state_.fetch_or(kClosedMask, std::memory_order_acq_rel);
+    }
     control_done_.add();
-    std::shared_ptr<CatClientImpl> self = shared_from_this();
-    async::spawn(*loop_, [self = std::move(self)]() { return self->run_control(); });
+    std::shared_ptr<CatClientCore> self = shared_from_this();
+    async::spawn([self = std::move(self)]() { return self->run_control(); });
     return {};
 }
 
-async::Task<void> CatClientImpl::shutdown() noexcept {
+async::Task<void> CatClientCore::shutdown() noexcept {
     begin_stop();
     co_await control_done_.join();
 }
 
-void CatClientImpl::begin_stop() noexcept {
-    accepting_.store(false, std::memory_order_release);
+void CatClientCore::begin_stop() noexcept {
     CatClientState current = state_.load(std::memory_order_acquire);
     for (;;) {
         if (current == CatClientState::Created) {
             if (state_.compare_exchange_weak(current, CatClientState::Stopped, std::memory_order_acq_rel)) {
+                outstanding_state_.fetch_or(kClosedMask, std::memory_order_acq_rel);
                 return;
             }
             continue;
         }
         if (current == CatClientState::Running) {
             if (state_.compare_exchange_weak(current, CatClientState::Stopping, std::memory_order_acq_rel)) {
+                outstanding_state_.fetch_or(kClosedMask, std::memory_order_acq_rel);
                 notify_control();
                 return;
             }
             continue;
         }
+        outstanding_state_.fetch_or(kClosedMask, std::memory_order_acq_rel);
         return;
     }
 }
 
-CatClientStats CatClientImpl::stats() const noexcept {
-    const std::uint64_t budget = queue_budget_.load(std::memory_order_acquire);
+CatClientStats CatClientCore::stats() const noexcept {
+    const std::uint64_t budget = outstanding_state_.load(std::memory_order_acquire);
     return {
             .queued_messages = budget_messages(budget),
             .queued_bytes = budget_bytes(budget),
@@ -139,7 +201,7 @@ CatClientStats CatClientImpl::stats() const noexcept {
     };
 }
 
-ClientEncodeContext CatClientImpl::encode_context() const noexcept {
+ClientEncodeContext CatClientCore::encode_context() const noexcept {
     return {
             .app_key = config_.app_key(),
             .hostname = config_.hostname(),
@@ -150,39 +212,44 @@ ClientEncodeContext CatClientImpl::encode_context() const noexcept {
     };
 }
 
-bool CatClientImpl::accepts_messages() const noexcept {
-    return accepting_.load(std::memory_order_acquire) && !blocked_.load(std::memory_order_acquire) &&
-           sample_cutoff_.load(std::memory_order_acquire) != 0;
+bool CatClientCore::accepts_messages() const noexcept {
+    return state() == CatClientState::Running &&
+           (outstanding_state_.load(std::memory_order_acquire) & kClosedMask) == 0 &&
+           !blocked_.load(std::memory_order_acquire) && sample_cutoff_.load(std::memory_order_acquire) != 0;
 }
 
-bool CatClientImpl::reserve_budget(std::size_t bytes) noexcept {
+CatClientCore::ReserveResult CatClientCore::reserve_budget(std::size_t bytes) noexcept {
     if (bytes > options_.max_queued_bytes || bytes > kBudgetUnitMask) {
-        return false;
+        return ReserveResult::Full;
     }
     const auto bytes32 = static_cast<std::uint32_t>(bytes);
-    std::uint64_t current = queue_budget_.load(std::memory_order_relaxed);
+    std::uint64_t current = outstanding_state_.load(std::memory_order_relaxed);
     for (;;) {
+        if (state() != CatClientState::Running || (current & kClosedMask) != 0) {
+            return ReserveResult::Closed;
+        }
         const std::uint32_t messages = budget_messages(current);
         const std::uint32_t queued_bytes = budget_bytes(current);
         if (messages >= options_.max_queued_messages || queued_bytes > options_.max_queued_bytes - bytes) {
-            return false;
+            return ReserveResult::Full;
         }
         const std::uint64_t next = pack_budget(messages + 1, queued_bytes + bytes32);
-        if (queue_budget_.compare_exchange_weak(current, next, std::memory_order_acq_rel, std::memory_order_relaxed)) {
-            return true;
+        if (outstanding_state_.compare_exchange_weak(current, next, std::memory_order_acq_rel,
+                                                     std::memory_order_relaxed)) {
+            return ReserveResult::Reserved;
         }
     }
 }
 
-void CatClientImpl::release_budget(std::size_t bytes) noexcept {
+void CatClientCore::release_budget(std::size_t bytes) noexcept {
     FIBER_ASSERT(bytes <= kBudgetUnitMask);
     const std::uint64_t delta = pack_budget(1, static_cast<std::uint32_t>(bytes));
-    const std::uint64_t previous = queue_budget_.fetch_sub(delta, std::memory_order_acq_rel);
+    const std::uint64_t previous = outstanding_state_.fetch_sub(delta, std::memory_order_acq_rel);
     FIBER_ASSERT(budget_messages(previous) > 0);
     FIBER_ASSERT(budget_bytes(previous) >= bytes);
 }
 
-bool CatClientImpl::sampled_in() noexcept {
+bool CatClientCore::sampled_in() noexcept {
     const std::uint64_t cutoff = sample_cutoff_.load(std::memory_order_acquire);
     if (cutoff == 0) {
         return false;
@@ -194,9 +261,10 @@ bool CatClientImpl::sampled_in() noexcept {
     return splitmix64(sequence) <= cutoff;
 }
 
-void CatClientImpl::submit_encoded(mem::IoBuf message) noexcept {
+void CatClientCore::submit_encoded(mem::IoBuf message) noexcept {
     active_submitters_.fetch_add(1, std::memory_order_acq_rel);
-    if (!accepting_.load(std::memory_order_acquire) || blocked_.load(std::memory_order_acquire)) {
+    if ((outstanding_state_.load(std::memory_order_acquire) & kClosedMask) != 0 ||
+        blocked_.load(std::memory_order_acquire)) {
         stats_.dropped_unavailable.fetch_add(1, std::memory_order_relaxed);
         active_submitters_.fetch_sub(1, std::memory_order_acq_rel);
         return;
@@ -208,81 +276,60 @@ void CatClientImpl::submit_encoded(mem::IoBuf message) noexcept {
     }
 
     const std::size_t bytes = message.readable();
-    if (bytes == 0 || !reserve_budget(bytes)) {
+    if (bytes == 0) {
         stats_.dropped_queue_full.fetch_add(1, std::memory_order_relaxed);
         active_submitters_.fetch_sub(1, std::memory_order_acq_rel);
         return;
     }
-    auto *frame = new (std::nothrow) OutboundFrame(std::move(message));
+    const ReserveResult reserved = reserve_budget(bytes);
+    if (reserved != ReserveResult::Reserved) {
+        if (reserved == ReserveResult::Full) {
+            stats_.dropped_queue_full.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            stats_.dropped_unavailable.fetch_add(1, std::memory_order_relaxed);
+        }
+        active_submitters_.fetch_sub(1, std::memory_order_acq_rel);
+        return;
+    }
+    auto *frame = new (std::nothrow) OutboundFrame(*this, std::move(message));
     if (!frame) {
         release_budget(bytes);
         stats_.dropped_unavailable.fetch_add(1, std::memory_order_relaxed);
         active_submitters_.fetch_sub(1, std::memory_order_acq_rel);
         return;
     }
+    if (loop_->in_loop()) {
+        handle_frame_notify(frame);
+    } else {
+        loop_->post<OutboundFrame, &OutboundFrame::notify_entry, &OutboundFrame::on_notify>(*frame);
+    }
     stats_.submitted_messages.fetch_add(1, std::memory_order_relaxed);
-    submission_queue_.push(&frame->submit_node);
-    request_submit_notify();
     active_submitters_.fetch_sub(1, std::memory_order_acq_rel);
 }
 
-void CatClientImpl::on_encode_failure(EncodeError /*error*/) noexcept {
+void CatClientCore::on_encode_failure(EncodeError /*error*/) noexcept {
     stats_.encode_failures.fetch_add(1, std::memory_order_relaxed);
 }
 
-void CatClientImpl::request_submit_notify() noexcept {
-    NotifyState expected = NotifyState::Idle;
-    if (notify_state_.compare_exchange_strong(expected, NotifyState::Posted, std::memory_order_acq_rel)) {
-        loop_->post<CatClientImpl, &CatClientImpl::submit_notify_entry_, &CatClientImpl::on_submit_notify>(*this);
-    }
+void CatClientCore::OutboundFrame::on_notify(OutboundFrame *frame) noexcept {
+    FIBER_ASSERT(frame);
+    FIBER_ASSERT(frame->core);
+    frame->core->handle_frame_notify(frame);
 }
 
-void CatClientImpl::on_submit_notify(CatClientImpl *client) noexcept { client->handle_submit_notify(); }
-
-void CatClientImpl::handle_submit_notify() noexcept {
+void CatClientCore::handle_frame_notify(OutboundFrame *frame) noexcept {
     FIBER_ASSERT(loop_->in_loop());
-    NotifyState expected = NotifyState::Posted;
-    if (!notify_state_.compare_exchange_strong(expected, NotifyState::Running, std::memory_order_acq_rel)) {
-        return;
-    }
-
-    for (;;) {
-        append_submission_nodes(submission_queue_.try_pop_all());
-        notify_state_.store(NotifyState::Idle, std::memory_order_release);
-
-        auto *late = submission_queue_.try_pop_all();
-        if (!late) {
-            break;
-        }
-        append_submission_nodes(late);
-        expected = NotifyState::Idle;
-        if (!notify_state_.compare_exchange_strong(expected, NotifyState::Running, std::memory_order_acq_rel)) {
-            break;
-        }
-    }
-
+    FIBER_ASSERT(frame);
+    FIBER_ASSERT(frame->core == this);
     if (blocked_.load(std::memory_order_acquire)) {
-        drop_all_frames();
+        drop_detached_frame(frame);
         return;
     }
-    drive_write();
-    if (!stream_ && local_head_) {
-        notify_control();
-    }
+    append_local(frame);
+    schedule_pump();
 }
 
-void CatClientImpl::append_submission_nodes(event::MpscQueue<OutboundFrame *>::Node *nodes) noexcept {
-    using Queue = event::MpscQueue<OutboundFrame *>;
-    while (nodes) {
-        auto *next = Queue::next(nodes);
-        OutboundFrame *frame = Queue::unwrap(nodes);
-        Queue::reset(nodes);
-        append_local(frame);
-        nodes = next;
-    }
-}
-
-void CatClientImpl::append_local(OutboundFrame *frame) noexcept {
+void CatClientCore::append_local(OutboundFrame *frame) noexcept {
     FIBER_ASSERT(frame);
     FIBER_ASSERT(frame->local_next == nullptr);
     if (local_tail_) {
@@ -293,9 +340,23 @@ void CatClientImpl::append_local(OutboundFrame *frame) noexcept {
     local_tail_ = frame;
 }
 
-void CatClientImpl::on_pump_deferred(CatClientImpl *client) noexcept { client->drive_write(); }
+void CatClientCore::schedule_pump() noexcept {
+    FIBER_ASSERT(loop_->in_loop());
+    loop_->post_local<CatClientCore, &CatClientCore::pump_defer_entry_, &CatClientCore::on_pump_deferred>(*this);
+}
 
-void CatClientImpl::drive_write() noexcept {
+void CatClientCore::on_pump_deferred(CatClientCore *client) noexcept {
+    if (client->blocked_.load(std::memory_order_acquire)) {
+        client->drop_all_frames();
+        return;
+    }
+    client->drive_write();
+    if (!client->stream_ && client->local_head_ && client->state() == CatClientState::Running) {
+        client->notify_control();
+    }
+}
+
+void CatClientCore::drive_write() noexcept {
     FIBER_ASSERT(loop_->in_loop());
     if (!stream_ || !local_head_ || write_callback_armed_) {
         return;
@@ -341,11 +402,11 @@ void CatClientImpl::drive_write() noexcept {
     }
 
     if (stream_ && local_head_ && !write_callback_armed_) {
-        loop_->post_local<CatClientImpl, &CatClientImpl::pump_defer_entry_, &CatClientImpl::on_pump_deferred>(*this);
+        schedule_pump();
     }
 }
 
-void CatClientImpl::consume_written(std::size_t bytes) noexcept {
+void CatClientCore::consume_written(std::size_t bytes) noexcept {
     stats_.sent_bytes.fetch_add(bytes, std::memory_order_relaxed);
     std::size_t remaining = bytes;
     while (remaining > 0) {
@@ -369,31 +430,31 @@ void CatClientImpl::consume_written(std::size_t bytes) noexcept {
     }
 }
 
-void CatClientImpl::arm_write_wait() noexcept {
+void CatClientCore::arm_write_wait() noexcept {
     FIBER_ASSERT(stream_);
     FIBER_ASSERT(!write_callback_armed_);
-    const common::IoErr result = stream_->set_write_callback(&CatClientImpl::on_write_ready, this);
+    const common::IoErr result = stream_->set_write_callback(&CatClientCore::on_write_ready, this);
     if (result != common::IoErr::None) {
         fail_connection(result);
         return;
     }
     write_callback_armed_ = true;
-    loop_->post_at<CatClientImpl, &CatClientImpl::write_timer_, &CatClientImpl::on_write_timeout>(
+    loop_->post_at<CatClientCore, &CatClientCore::write_timer_, &CatClientCore::on_write_timeout>(
             loop_->now() + options_.collector_write_timeout, *this);
 }
 
-void CatClientImpl::clear_write_wait() noexcept {
+void CatClientCore::clear_write_wait() noexcept {
     if (write_timer_.is_in_heap()) {
-        loop_->cancel<CatClientImpl, &CatClientImpl::write_timer_>(*this);
+        loop_->cancel<CatClientCore, &CatClientCore::write_timer_>(*this);
     }
     if (write_callback_armed_ && stream_) {
-        (void) stream_->clear_write_callback(&CatClientImpl::on_write_ready, this);
+        (void) stream_->clear_write_callback(&CatClientCore::on_write_ready, this);
     }
     write_callback_armed_ = false;
 }
 
-void CatClientImpl::on_write_ready(void *ctx, common::IoErr error) noexcept {
-    auto *client = static_cast<CatClientImpl *>(ctx);
+void CatClientCore::on_write_ready(void *ctx, common::IoErr error) noexcept {
+    auto *client = static_cast<CatClientCore *>(ctx);
     client->clear_write_wait();
     if (error != common::IoErr::None) {
         client->fail_connection(error);
@@ -402,12 +463,12 @@ void CatClientImpl::on_write_ready(void *ctx, common::IoErr error) noexcept {
     client->drive_write();
 }
 
-void CatClientImpl::on_write_timeout(CatClientImpl *client) noexcept {
+void CatClientCore::on_write_timeout(CatClientCore *client) noexcept {
     client->clear_write_wait();
     client->fail_connection(common::IoErr::TimedOut);
 }
 
-void CatClientImpl::fail_connection(common::IoErr /*error*/) noexcept {
+void CatClientCore::fail_connection(common::IoErr /*error*/) noexcept {
     FIBER_ASSERT(loop_->in_loop());
     stats_.write_failures.fetch_add(1, std::memory_order_relaxed);
     if (local_head_ && local_head_->message.readable() != local_head_->original_size) {
@@ -417,14 +478,14 @@ void CatClientImpl::fail_connection(common::IoErr /*error*/) noexcept {
     notify_control();
 }
 
-void CatClientImpl::install_connection(std::unique_ptr<net::TcpStream> stream) noexcept {
+void CatClientCore::install_connection(std::unique_ptr<net::TcpStream> stream) noexcept {
     FIBER_ASSERT(loop_->in_loop());
     close_connection();
     stream_ = std::move(stream);
-    loop_->post_local<CatClientImpl, &CatClientImpl::pump_defer_entry_, &CatClientImpl::on_pump_deferred>(*this);
+    schedule_pump();
 }
 
-void CatClientImpl::close_connection() noexcept {
+void CatClientCore::close_connection() noexcept {
     clear_write_wait();
     if (stream_) {
         stream_->close();
@@ -432,7 +493,16 @@ void CatClientImpl::close_connection() noexcept {
     }
 }
 
-void CatClientImpl::drop_front_frame(bool partial) noexcept {
+void CatClientCore::drop_detached_frame(OutboundFrame *frame) noexcept {
+    FIBER_ASSERT(frame);
+    FIBER_ASSERT(frame->core == this);
+    FIBER_ASSERT(frame->local_next == nullptr);
+    release_budget(frame->original_size);
+    stats_.dropped_unavailable.fetch_add(1, std::memory_order_relaxed);
+    delete frame;
+}
+
+void CatClientCore::drop_front_frame(bool partial) noexcept {
     FIBER_ASSERT(local_head_);
     OutboundFrame *dropped = local_head_;
     local_head_ = dropped->local_next;
@@ -448,18 +518,18 @@ void CatClientImpl::drop_front_frame(bool partial) noexcept {
     delete dropped;
 }
 
-void CatClientImpl::drop_all_frames() noexcept {
+void CatClientCore::drop_all_frames() noexcept {
     while (local_head_) {
         drop_front_frame(local_head_->message.readable() != local_head_->original_size);
     }
 }
 
-void CatClientImpl::notify_control() noexcept {
+void CatClientCore::notify_control() noexcept {
     const std::uint64_t generation = control_generation_.fetch_add(1, std::memory_order_relaxed) + 1;
     control_publisher_->publish(generation);
 }
 
-async::Task<void> CatClientImpl::wait_control(std::chrono::steady_clock::duration delay,
+async::Task<void> CatClientCore::wait_control(std::chrono::steady_clock::duration delay,
                                               async::Watch<std::uint64_t>::Subscriber &wake,
                                               std::uint64_t &version) noexcept {
     if (delay <= std::chrono::steady_clock::duration::zero()) {
@@ -473,7 +543,7 @@ async::Task<void> CatClientImpl::wait_control(std::chrono::steady_clock::duratio
     }
 }
 
-async::DetachedTask CatClientImpl::run_control() noexcept {
+async::DetachedTask CatClientCore::run_control() noexcept {
     FIBER_ASSERT(loop_->in_loop());
     auto wake = control_wake_.subscribe();
     std::uint64_t wake_version = wake.current().version;
@@ -528,7 +598,7 @@ async::DetachedTask CatClientImpl::run_control() noexcept {
 }
 
 async::Task<std::optional<std::vector<net::SocketAddress>>>
-CatClientImpl::resolve_endpoint(std::string_view host, std::uint16_t port) noexcept {
+CatClientCore::resolve_endpoint(std::string_view host, std::uint16_t port) noexcept {
     net::IpAddress literal;
     if (net::IpAddress::parse(host, literal) && !literal.is_unspecified()) {
         std::vector<net::SocketAddress> result;
@@ -554,7 +624,7 @@ CatClientImpl::resolve_endpoint(std::string_view host, std::uint16_t port) noexc
     co_return result;
 }
 
-async::Task<std::optional<std::string>> CatClientImpl::fetch_router_body(const CatRouterEndpoint &router) noexcept {
+async::Task<std::optional<std::string>> CatClientCore::fetch_router_body(const CatRouterEndpoint &router) noexcept {
     auto endpoints = co_await resolve_endpoint(router.host, router.port);
     if (!endpoints) {
         co_return std::nullopt;
@@ -661,7 +731,7 @@ async::Task<std::optional<std::string>> CatClientImpl::fetch_router_body(const C
     co_return std::nullopt;
 }
 
-async::Task<bool> CatClientImpl::refresh_router() noexcept {
+async::Task<bool> CatClientCore::refresh_router() noexcept {
     const std::size_t count = config_.routers().size();
     for (std::size_t offset = 0; offset < count && state() == CatClientState::Running; ++offset) {
         const std::size_t index = (router_index_ + offset) % count;
@@ -690,7 +760,7 @@ async::Task<bool> CatClientImpl::refresh_router() noexcept {
     co_return false;
 }
 
-async::Task<bool> CatClientImpl::connect_collector() noexcept {
+async::Task<bool> CatClientCore::connect_collector() noexcept {
     const std::size_t count = collectors_.size();
     for (std::size_t offset = 0; offset < count && state() == CatClientState::Running; ++offset) {
         const std::size_t index = (collector_index_ + offset) % count;
@@ -720,26 +790,25 @@ async::Task<bool> CatClientImpl::connect_collector() noexcept {
     co_return false;
 }
 
-async::Task<void> CatClientImpl::finish_shutdown() noexcept {
+async::Task<void> CatClientCore::finish_shutdown() noexcept {
     FIBER_ASSERT(loop_->in_loop());
-    while (active_submitters_.load(std::memory_order_acquire) != 0 ||
-           notify_state_.load(std::memory_order_acquire) != NotifyState::Idle) {
+    while (active_submitters_.load(std::memory_order_acquire) != 0) {
         co_await async::sleep(std::chrono::milliseconds(1));
     }
+    co_await NotifyDrainAwaiter{};
 
     const auto deadline = loop_->now() + options_.shutdown_drain_timeout;
-    while (queue_budget_.load(std::memory_order_acquire) != 0 && loop_->now() < deadline) {
+    while ((outstanding_state_.load(std::memory_order_acquire) & ~kClosedMask) != 0 && loop_->now() < deadline) {
         if (stream_ && !write_callback_armed_) {
-            loop_->post_local<CatClientImpl, &CatClientImpl::pump_defer_entry_, &CatClientImpl::on_pump_deferred>(
-                    *this);
+            schedule_pump();
         }
         co_await async::sleep(std::chrono::milliseconds(1));
     }
 
-    loop_->cancel<CatClientImpl, &CatClientImpl::pump_defer_entry_>(*this);
+    loop_->cancel<CatClientCore, &CatClientCore::pump_defer_entry_>(*this);
     close_connection();
-    append_submission_nodes(submission_queue_.try_pop_all());
     drop_all_frames();
+    FIBER_ASSERT((outstanding_state_.load(std::memory_order_acquire) & ~kClosedMask) == 0);
 }
 
 } // namespace fiber::cat::detail
