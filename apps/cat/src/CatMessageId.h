@@ -32,7 +32,8 @@ public:
 private:
     std::array<char, 32> ip_hex_{};
     std::size_t ip_hex_size_ = 0;
-    std::atomic<std::uint64_t> sequence_{0};
+    std::uint64_t initial_sequence_ = 0;
+    std::atomic<std::uint64_t> state_{~std::uint64_t{0}};
 };
 
 } // namespace fiber::cat::detail
