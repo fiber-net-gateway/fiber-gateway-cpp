@@ -19,15 +19,19 @@ namespace fiber::cat::detail {
 inline constexpr std::size_t kChildrenPerChunk = 16;
 
 class CatClientCore;
+class AggregationShard;
 struct MessageTrace;
 
 struct TraceContext {
     std::shared_ptr<CatClientCore> core;
+    AggregationShard *aggregation_shard = nullptr;
     std::string_view message_id;
     std::string_view root_message_id;
     std::string_view parent_message_id;
     std::string_view session_token;
 };
+
+[[nodiscard]] RecordError validate_trace_context(const RecordLimits &limits, const TraceContext &context) noexcept;
 
 struct StringRef {
     const char *data = nullptr;
@@ -61,6 +65,14 @@ struct MessageData {
 
 struct EventData final : MessageData {
     EventData() noexcept { kind = MessageKind::Event; }
+};
+
+struct MetricMessageData final : MessageData {
+    MetricMessageData() noexcept { kind = MessageKind::Metric; }
+};
+
+struct HeartbeatData final : MessageData {
+    HeartbeatData() noexcept { kind = MessageKind::Heartbeat; }
 };
 
 struct ChildrenChunk {
@@ -105,6 +117,7 @@ struct ContextTable {
 
 struct MessageTraceData {
     std::shared_ptr<CatClientCore> core;
+    AggregationShard *aggregation_shard = nullptr;
     event::EventLoop *owner = nullptr;
     RecordLimits limits;
     MessageData *root = nullptr;
@@ -119,6 +132,10 @@ struct MessageTraceData {
     std::size_t open_message_count = 0;
     ContextTable context;
     bool has_problem = false;
+    bool truncated = false;
+    std::uint64_t dropped_message_count = 0;
+    std::uint64_t dropped_data_bytes = 0;
+    RecordError first_truncation_reason = RecordError::None;
 };
 
 struct MessageTrace {
@@ -163,12 +180,27 @@ create_transaction_root(MessageTrace &trace, std::string_view type, std::string_
 create_transaction(TransactionData &parent, std::string_view type, std::string_view name) noexcept;
 [[nodiscard]] std::expected<EventData *, RecordError> create_event(TransactionData &parent, std::string_view type,
                                                                    std::string_view name) noexcept;
+[[nodiscard]] std::expected<MetricMessageData *, RecordError>
+create_metric(TransactionData &parent, std::string_view type, std::string_view name) noexcept;
+[[nodiscard]] std::expected<HeartbeatData *, RecordError>
+create_heartbeat(TransactionData &parent, std::string_view type, std::string_view name) noexcept;
+
+[[nodiscard]] std::expected<MetricMessageData *, RecordError> create_metric_root(std::string_view type,
+                                                                                 std::string_view name,
+                                                                                 RecordLimits limits,
+                                                                                 TraceContext context = {}) noexcept;
+[[nodiscard]] std::expected<HeartbeatData *, RecordError> create_heartbeat_root(std::string_view type,
+                                                                                std::string_view name,
+                                                                                RecordLimits limits,
+                                                                                TraceContext context = {}) noexcept;
 
 RecordError add_data(MessageData *message, std::string_view data) noexcept;
 RecordError add_data(MessageData *message, std::string_view key, std::string_view value) noexcept;
 RecordError set_status(MessageData *message, std::string_view value) noexcept;
 RecordError set_timestamp(MessageData *message, std::uint64_t timestamp_millis) noexcept;
 RecordError set_duration(TransactionData *transaction, std::chrono::microseconds duration) noexcept;
+RecordError complete_with_duration(TransactionData *&transaction, std::chrono::microseconds duration,
+                                   std::string_view status, std::string_view data) noexcept;
 
 RecordError complete(EventData *&event) noexcept;
 RecordError complete(TransactionData *&transaction) noexcept;

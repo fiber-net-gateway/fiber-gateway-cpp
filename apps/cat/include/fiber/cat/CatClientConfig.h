@@ -14,6 +14,11 @@
 
 namespace fiber::cat {
 
+enum class CatEncoderType : std::uint8_t {
+    Nt1,
+    Pt1,
+};
+
 struct CatRouterEndpoint {
     std::string host;
     std::uint16_t port = 8080;
@@ -61,6 +66,9 @@ private:
 };
 
 struct CatClientOptions {
+    double initial_sample_rate = 1.0;
+    bool enable_heartbeat = true;
+    CatEncoderType encoder = CatEncoderType::Nt1;
     std::size_t max_queued_messages = 10000;
     std::size_t max_queued_bytes = 64 * 1024 * 1024;
     std::size_t max_router_response_bytes = 64 * 1024;
@@ -69,6 +77,17 @@ struct CatClientOptions {
     std::size_t max_batch_bytes = 60 * 1024;
     std::size_t max_send_bytes_per_pump = 1024 * 1024;
     std::size_t max_send_calls_per_pump = 16;
+    std::size_t max_aggregation_shards = 64;
+    std::size_t max_aggregate_keys_per_shard = 1024;
+    std::size_t max_aggregate_key_bytes = 1024;
+    std::size_t max_aggregate_bytes_per_shard = 4 * 1024 * 1024;
+    std::size_t max_duration_buckets_per_key = 64;
+    std::size_t problem_reserve_messages = 64;
+    std::size_t problem_reserve_bytes = 1024 * 1024;
+    std::size_t max_system_queued_messages = 256;
+    std::size_t max_system_queued_bytes = 4 * 1024 * 1024;
+    std::size_t max_heartbeat_data_bytes = 16 * 1024;
+    std::size_t max_heartbeat_fields = 64;
     std::chrono::milliseconds router_connect_timeout{1000};
     std::chrono::milliseconds router_request_timeout{2000};
     std::chrono::milliseconds router_refresh_interval{180000};
@@ -77,6 +96,9 @@ struct CatClientOptions {
     std::chrono::milliseconds reconnect_initial_delay{1000};
     std::chrono::milliseconds reconnect_max_delay{30000};
     std::chrono::milliseconds shutdown_drain_timeout{1000};
+    std::chrono::milliseconds aggregation_flush_interval{1000};
+    std::chrono::milliseconds heartbeat_interval{60000};
+    std::chrono::milliseconds heartbeat_initial_delay{1000};
     net::TcpSocketOptions collector_tcp{.no_delay = net::TcpOptionMode::Enabled};
 };
 

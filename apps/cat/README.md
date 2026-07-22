@@ -5,10 +5,10 @@
 `apps/cat` is the reusable native CAT client library for applications under `apps/`. Consumers link the `fiber::cat`
 target and include headers from `fiber/cat/`.
 
-The current implementation provides owner-EventLoop-local recording, NT1 encoding, a public client lifecycle, CAT
-router discovery, bounded cross-thread submission, collector transport, and router-provided sampling/block policy. It
-supports explicit Transaction trees, Event leaves, and pre-bound Count/Duration Metric aggregators. Automatic CAT
-message-ID generation, PT1 encoding, metric transport, and heartbeat messages are not part of this stage.
+The implementation provides owner-EventLoop-local recording, automatic CAT message IDs, explicit cross-service
+propagation, NT1/PT1 encoding, bounded sampling aggregates, Count/Duration Metric transport, startup/heartbeat system
+messages, Router discovery, and a non-coroutine raw collector sender. All growing recording, aggregation, heartbeat,
+Router-response, and outbound-frame state has explicit limits.
 
 ## Build and test
 
@@ -36,7 +36,7 @@ auto config = fiber::cat::CatClientConfig::create(std::move(params));
 if (config) {
     auto client = fiber::cat::CatClient::create(loop, std::move(*config));
     if (client && (*client)->start()) {
-        auto trace_result = fiber::cat::MessageTrace::create(**client, {}, {.message_id = "message-id"});
+        auto trace_result = fiber::cat::MessageTrace::create(**client);
         if (trace_result) {
             auto trace = std::move(*trace_result);
             auto root_result = trace.create_transaction("URL", "/orders");
@@ -58,6 +58,30 @@ destroys `MessageTraceData`, and resets the trace pool. A still-live public trac
 Call `co_await client->shutdown()` before stopping the sender EventLoop. Shutdown closes frame admission, waits for
 submitters that already reserved capacity, crosses a complete sender-loop Notify phase, drains the connected sender up
 to `shutdown_drain_timeout`, drops the remainder, closes the collector socket, and completes in `Stopped` state.
+
+Every producer EventLoop that created a trace or client-bound Metric owns one aggregation shard. Destroy all live
+trace/Metric handles on that loop, then call `co_await client->detach_current_event_loop()` before stopping the producer
+loop. Detach performs a final flush, accounts for any residual drop, unregisters the shard, and crosses a complete
+Notify phase. `shutdown()` automatically performs this detach for a shard owned by the sender loop.
+
+`CatClientOptions` selects `Nt1` (the default) or `Pt1`, bounds normal/problem/system queues independently, controls
+sampling and aggregation cardinality, and configures Router, collector, heartbeat, and shutdown timeouts.
+
+## CAT propagation context
+
+An empty `MessageTraceContext::message_id` is filled automatically using the official visible
+`domain-ipHex-hour-sequence` structure. The owning `PropagationContext` can safely outlive the trace:
+
+```cpp
+auto current = trace.propagation_context();
+if (current) {
+    auto inventory = client->create_remote_context(*current, "inventory");
+    // Map the four propagation fields to approved outbound headers/metadata.
+}
+```
+
+Inbound propagation is passed explicitly to `MessageTrace::create(client, context)`. No OS TLS or implicit current
+transaction stack is used. IDs and session tokens are validated and copied into trace-owned storage.
 
 ## Service context
 
@@ -110,6 +134,8 @@ if (root_result) {
 `complete()` consumes the handle: after successful completion, `valid()` is false and mutating operations return
 `RecordError::Completed`. Completion without a status uses success (`"0"`). Destroying an unfinished Transaction or
 Event completes it with `CAT_CLIENT_INCOMPLETE`, preventing an abandoned operation from being reported as success.
+`log_error()` emits the official `Exception`/`ERROR` event form. `log_completed_transaction()` records a transaction
+whose supplied duration ends at the current wall-clock time, without introducing an implicit transaction stack.
 
 A parent may complete before children that were already created. Its internal data remains in the trace arena until
 the final open child completes, but the consumed parent handle cannot add more children. The final completion destroys
@@ -119,15 +145,24 @@ Type, name, status, message count, child count, per-message data, and total tree
 Message strings and rendered data are copied into trace-owned pooled storage at record time. Transactions store child
 pointers in linked fixed-capacity chunks of 16; message data is rendered into linked byte chunks.
 
-## NT1 encoding
+## Encoding, sampling, and aggregation
 
 The private NT1 encoder follows the official CAT C client field order and framing: a four-byte big-endian payload
-length, the `NT1` header, and the depth-first message body. It performs a counting pass followed by one exact `IoBuf`
-allocation. Message data is copied directly from its chunks into that buffer.
+length, the `NT1` header, and the depth-first message body. PT1 uses the same frame prefix and the official text header
+plus `t/T/A/E/M/H` line forms. Both encoders perform a counting pass followed by one exact `IoBuf` allocation.
 
 An internally core-bound trace synchronously encodes when its final open message completes. The core receives an
 independently owned buffer, after which the complete trace arena is immediately destroyed. Encoding failures are
 reported to the core without submitting a partial frame.
+
+Sampling is decided only after the tree freezes. Problem, incomplete, and truncated trees bypass sampling and enter the
+bounded high-priority path. Ordinary trees not selected for detailed reporting, or rejected by the reserved normal
+queue budget, update the owner-loop Transaction/Event aggregate without allocating a detailed frame. Aggregate keys
+are bounded by count, key length, duration-bucket count, and total shard bytes. System aggregates do not recurse through
+normal sampling.
+
+When a tree hits a recording limit, its root is marked as a problem and the encoder appends a bounded
+`CatClient.Truncated=count:...,bytes:...,reason:...` marker without another trace-pool allocation.
 
 ## Router and collector transport
 
@@ -144,9 +179,14 @@ frames for `try_writev`. `WouldBlock` arms a writable callback and a write deadl
 pumping through the local callback. Frames are concatenated on the raw TCP stream. If a connection fails after writing
 only a prefix of a frame, that partial frame is dropped rather than resumed on a new collector connection.
 
+Problem/system frames may overtake normal frames that have not started. Once any frame has written a prefix, it remains
+pinned until its complete frame boundary, so priority cannot interleave bytes. A Router refresh keeps the current
+connection when its collector remains present; removal switches a partially active connection only after that frame.
+
 `CatClientStats::queued_messages` and `queued_bytes` report all outstanding frames from admission until complete send
 or explicit drop. They include EventLoop Notify entries, owner-loop FIFO entries, writable waits, and partially written
-frames rather than only the physical length of one queue.
+frames rather than only the physical length of one queue. System frames have an additional independent message/byte
+budget.
 
 ## Metrics
 
@@ -163,13 +203,26 @@ if (latency_result) {
 }
 ```
 
-Metric snapshots are the boundary a later CAT aggregation/encoding layer will consume. A snapshot's name view remains
-valid only while its Metric remains alive.
+The overloads taking `CatClient&` are automatically reported through that loop's bounded shard as
+`System/MetricAggregator` with `M` records. Standalone Metrics remain snapshot-only; snapshot/reset operations are
+intentionally rejected for client-bound Metrics. A standalone snapshot's name view remains valid only while its Metric
+remains alive.
+
+## Heartbeat and statistics
+
+When enabled, the sender loop emits one delayed `System/Reboot` tree and periodic `System/Status` trees containing an
+`H Heartbeat/<client-ip>` record. Heartbeat data is bounded by field and byte limits and includes identity, version,
+process/uptime, active shard count, queue counters, Router/sample/block state, collector state, and client failure
+counters. Only one heartbeat may be outstanding.
+
+`CatClientStats` separates record truncation, sampling-to-aggregate conversion, aggregate retry/drop, encode failures,
+normal/system admission, Router changes, connect failures, `WouldBlock`, partial-frame loss, Metric activity, and
+heartbeat submission/delivery. Values are atomically readable from any thread.
 
 ## Layout
 
 - `include/fiber/cat/`: public client/configuration API, single-pointer recording handles, and value types.
-- `src/`: private trace/message layout, NT1 encoder, router parser, sender, connection manager, and metric
-  implementations.
+- `src/`: private trace/message layout, NT1/PT1 encoders, bounded aggregation, Router parser, sender, connection manager,
+  message-ID generator, heartbeat builder, and metric implementations.
 - `tests/`: lifecycle, limits, chunk boundaries, routing, cross-loop collector transport, metrics, and coroutine
   interleaving tests.

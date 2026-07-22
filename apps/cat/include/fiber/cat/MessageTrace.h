@@ -1,6 +1,7 @@
 #ifndef FIBER_CAT_MESSAGE_TRACE_H
 #define FIBER_CAT_MESSAGE_TRACE_H
 
+#include <chrono>
 #include <expected>
 #include <memory>
 #include <optional>
@@ -9,6 +10,7 @@
 
 #include "Event.h"
 #include "Message.h"
+#include "PropagationContext.h"
 #include "Transaction.h"
 
 namespace fiber::cat {
@@ -18,13 +20,6 @@ class CatClient;
 namespace detail {
 struct MessageTrace;
 }
-
-struct MessageTraceContext {
-    std::string_view message_id;
-    std::string_view root_message_id;
-    std::string_view parent_message_id;
-    std::string_view session_token;
-};
 
 class MessageTrace {
 public:
@@ -37,8 +32,11 @@ public:
 
     [[nodiscard]] static std::expected<MessageTrace, RecordError> create(CatClient &client, RecordLimits limits = {},
                                                                          MessageTraceContext context = {}) noexcept;
+    [[nodiscard]] static std::expected<MessageTrace, RecordError>
+    create(CatClient &client, const PropagationContext &context, RecordLimits limits = {}) noexcept;
 
     [[nodiscard]] bool valid() const noexcept;
+    [[nodiscard]] std::expected<PropagationContext, RecordError> propagation_context() const noexcept;
 
     RecordError put_context(std::string_view key, std::string_view value) noexcept;
     [[nodiscard]] std::expected<std::optional<std::string_view>, RecordError>
@@ -61,6 +59,10 @@ public:
     [[nodiscard]] std::expected<Transaction, RecordError> create_transaction(std::string_view type,
                                                                              std::string_view name) noexcept;
     [[nodiscard]] std::expected<Event, RecordError> create_event(std::string_view type, std::string_view name) noexcept;
+    RecordError log_error(std::string_view message, std::string_view error) noexcept;
+    RecordError log_completed_transaction(std::string_view type, std::string_view name,
+                                          std::chrono::microseconds duration, std::string_view status = status::Success,
+                                          std::string_view data = {}) noexcept;
 
 private:
     using ContextVisitorFn = bool (*)(void *, std::string_view, std::string_view) noexcept;

@@ -33,6 +33,10 @@ public:
 
     RecordError log_event(std::string_view type, std::string_view name, std::string_view status = status::Success,
                           std::string_view data = {}) noexcept;
+    RecordError log_error(std::string_view message, std::string_view error) noexcept;
+    RecordError log_completed_transaction(std::string_view type, std::string_view name,
+                                          std::chrono::microseconds duration, std::string_view status = status::Success,
+                                          std::string_view data = {}) noexcept;
 
     RecordError add_data(std::string_view data) noexcept;
     RecordError add_data(std::string_view key, std::string_view value) noexcept;

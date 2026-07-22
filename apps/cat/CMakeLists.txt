@@ -1,13 +1,17 @@
 add_library(fiber_cat STATIC
+    "${CMAKE_CURRENT_LIST_DIR}/src/CatAggregation.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/CatClient.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/CatClientConfig.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/CatClientCore.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/CatEncoder.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/CatInternal.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/CatMessageId.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/CatRouter.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/CatSystemMessage.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/Event.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/MessageTrace.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/Metric.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/PropagationContext.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/Transaction.cpp")
 add_library(fiber::cat ALIAS fiber_cat)
 
@@ -25,8 +29,10 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
     include(GoogleTest)
 
     add_executable(fiber_cat_tests
+        "${CMAKE_CURRENT_LIST_DIR}/tests/AggregationTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/CatClientTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/EncoderTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/MessageIdTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/MessageTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/MetricTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/RouterTest.cpp")

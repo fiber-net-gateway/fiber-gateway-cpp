@@ -59,6 +59,21 @@ bool can_charge_context(const MessageTraceData &trace, std::size_t bytes) noexce
            bytes <= trace.limits.max_context_bytes - trace.context.allocated_bytes && can_charge(trace, bytes);
 }
 
+void mark_truncated(MessageTraceData &trace, std::uint64_t messages, std::uint64_t data_bytes,
+                    RecordError reason) noexcept {
+    trace.truncated = true;
+    trace.has_problem = true;
+    if (trace.first_truncation_reason == RecordError::None) {
+        trace.first_truncation_reason = reason;
+    }
+    trace.dropped_message_count = messages > std::numeric_limits<std::uint64_t>::max() - trace.dropped_message_count
+                                          ? std::numeric_limits<std::uint64_t>::max()
+                                          : trace.dropped_message_count + messages;
+    trace.dropped_data_bytes = data_bytes > std::numeric_limits<std::uint64_t>::max() - trace.dropped_data_bytes
+                                       ? std::numeric_limits<std::uint64_t>::max()
+                                       : trace.dropped_data_bytes + data_bytes;
+}
+
 void charge_context(MessageTraceData &trace, std::size_t bytes) noexcept {
     trace.context.allocated_bytes += bytes;
     trace.payload_bytes += bytes;
@@ -147,6 +162,7 @@ RecordError ensure_context_buckets(MessageTrace &trace) noexcept {
 bool valid_limits(const RecordLimits &limits) noexcept {
     return limits.max_messages > 0 && limits.max_children_per_transaction > 0 && limits.max_type_bytes > 0 &&
            limits.max_name_bytes > 0 && limits.max_status_bytes > 0 && limits.max_data_bytes_per_message > 0 &&
+           limits.max_message_id_bytes > 0 && limits.max_session_token_bytes > 0 &&
            limits.max_tree_bytes >= sizeof(TransactionData);
 }
 
@@ -172,6 +188,10 @@ std::expected<MessageTrace *, RecordError> create_trace(RecordLimits limits, Tra
     if (!valid_limits(limits)) {
         return std::unexpected(RecordError::InvalidArgument);
     }
+    const RecordError context_validation = validate_trace_context(limits, context);
+    if (context_validation != RecordError::None) {
+        return std::unexpected(context_validation);
+    }
 
     auto *trace = new (std::nothrow) MessageTrace;
     if (!trace) {
@@ -184,6 +204,7 @@ std::expected<MessageTrace *, RecordError> create_trace(RecordLimits limits, Tra
     }
     trace->data = new (storage) MessageTraceData;
     trace->data->core = std::move(context.core);
+    trace->data->aggregation_shard = context.aggregation_shard;
     trace->data->owner = loop;
     trace->data->limits = limits;
     trace->data->steady_base = loop->now();
@@ -277,10 +298,12 @@ std::expected<Node *, RecordError> create_root(MessageTrace &trace, std::string_
     std::size_t node_charge = 0;
     const RecordError validation = validate_message(*trace.data, type, name, sizeof(Node), 0, node_charge);
     if (validation != RecordError::None) {
+        mark_truncated(*trace.data, 1, type.size() + name.size(), validation);
         return std::unexpected(validation);
     }
     Node *root = allocate_message<Node>(trace, type, name, node_charge);
     if (!root) {
+        mark_truncated(*trace.data, 1, type.size() + name.size(), RecordError::NoMemory);
         return std::unexpected(RecordError::NoMemory);
     }
     trace.data->root = root;
@@ -328,6 +351,7 @@ RecordError append_data(MessageData *message, std::string_view key, std::string_
     std::size_t rendered_size = key.size();
     if (key_value &&
         (!checked_add(rendered_size, 1, rendered_size) || !checked_add(rendered_size, value.size(), rendered_size))) {
+        mark_truncated(trace_data, 0, std::numeric_limits<std::uint64_t>::max(), RecordError::LimitExceeded);
         return RecordError::LimitExceeded;
     }
     const std::size_t separator_size = message->has_data ? 1 : 0;
@@ -335,6 +359,7 @@ RecordError append_data(MessageData *message, std::string_view key, std::string_
     if (!checked_add(separator_size, rendered_size, needed) ||
         message->data_size > trace_data.limits.max_data_bytes_per_message ||
         needed > trace_data.limits.max_data_bytes_per_message - message->data_size) {
+        mark_truncated(trace_data, 0, rendered_size, RecordError::LimitExceeded);
         return RecordError::LimitExceeded;
     }
 
@@ -349,11 +374,13 @@ RecordError append_data(MessageData *message, std::string_view key, std::string_
             capacity = needed;
             if (!checked_add(sizeof(DataChunk), capacity, allocation_charge) ||
                 !can_charge(trace_data, allocation_charge)) {
+                mark_truncated(trace_data, 0, rendered_size, RecordError::LimitExceeded);
                 return RecordError::LimitExceeded;
             }
         }
         void *storage = message->trace->pool.alloc(allocation_charge, alignof(DataChunk));
         if (!storage) {
+            mark_truncated(trace_data, 0, rendered_size, RecordError::NoMemory);
             return RecordError::NoMemory;
         }
         new_chunk = new (storage) DataChunk;
@@ -441,12 +468,28 @@ void mark_completed(MessageData &message) noexcept {
     }
 
     std::shared_ptr<CatClientCore> core = std::move(trace_data.core);
-    if (core && core->accepts_messages()) {
-        auto encoded = encode_nt1(trace_data, core->encode_context());
-        if (encoded) {
-            core->submit_encoded(std::move(*encoded));
-        } else {
-            core->on_encode_failure(encoded.error());
+    if (core) {
+        if (trace_data.truncated) {
+            core->on_trace_truncated(trace_data);
+        }
+        const TraceDisposition disposition = core->trace_disposition(trace_data.has_problem);
+        if (disposition == TraceDisposition::Aggregate) {
+            core->aggregate_trace(trace_data);
+        } else if (disposition == TraceDisposition::Detailed || disposition == TraceDisposition::Problem) {
+            auto encoded = core->encode(trace_data);
+            if (encoded) {
+                const SubmitResult submitted = core->submit_encoded(
+                        std::move(*encoded),
+                        disposition == TraceDisposition::Problem ? FramePriority::Problem : FramePriority::Normal);
+                if (submitted == SubmitResult::Full && disposition == TraceDisposition::Detailed) {
+                    core->aggregate_trace(trace_data);
+                }
+            } else {
+                core->on_encode_failure(encoded.error());
+                if (disposition == TraceDisposition::Detailed) {
+                    core->aggregate_trace(trace_data);
+                }
+            }
         }
     }
     std::destroy_at(&trace_data);
@@ -483,6 +526,26 @@ void abandon_message(Data *&handle) noexcept {
 }
 
 } // namespace
+
+RecordError validate_trace_context(const RecordLimits &limits, const TraceContext &context) noexcept {
+    if (context.message_id.empty() && (!context.root_message_id.empty() || !context.parent_message_id.empty())) {
+        return RecordError::InvalidContext;
+    }
+    if (context.message_id.size() > limits.max_message_id_bytes ||
+        context.root_message_id.size() > limits.max_message_id_bytes ||
+        context.parent_message_id.size() > limits.max_message_id_bytes ||
+        context.session_token.size() > limits.max_session_token_bytes) {
+        return RecordError::LimitExceeded;
+    }
+    const auto valid_value = [](std::string_view value) noexcept {
+        return std::all_of(value.begin(), value.end(), [](unsigned char byte) { return byte >= 0x21 && byte <= 0x7e; });
+    };
+    if (!valid_value(context.message_id) || !valid_value(context.root_message_id) ||
+        !valid_value(context.parent_message_id) || !valid_value(context.session_token)) {
+        return RecordError::InvalidContext;
+    }
+    return RecordError::None;
+}
 
 MessageTrace::~MessageTrace() {
     if (data) {
@@ -751,6 +814,36 @@ std::expected<EventData *, RecordError> create_event_root(std::string_view type,
     return *root;
 }
 
+std::expected<MetricMessageData *, RecordError> create_metric_root(std::string_view type, std::string_view name,
+                                                                   RecordLimits limits, TraceContext context) noexcept {
+    auto created_trace = create_trace(limits, std::move(context));
+    if (!created_trace) {
+        return std::unexpected(created_trace.error());
+    }
+    MessageTrace *trace = *created_trace;
+    auto root = create_root<MetricMessageData>(*trace, type, name);
+    if (!root) {
+        delete trace;
+        return std::unexpected(root.error());
+    }
+    return *root;
+}
+
+std::expected<HeartbeatData *, RecordError> create_heartbeat_root(std::string_view type, std::string_view name,
+                                                                  RecordLimits limits, TraceContext context) noexcept {
+    auto created_trace = create_trace(limits, std::move(context));
+    if (!created_trace) {
+        return std::unexpected(created_trace.error());
+    }
+    MessageTrace *trace = *created_trace;
+    auto root = create_root<HeartbeatData>(*trace, type, name);
+    if (!root) {
+        delete trace;
+        return std::unexpected(root.error());
+    }
+    return *root;
+}
+
 template<typename Node>
 std::expected<Node *, RecordError> create_child(TransactionData &parent, std::string_view type,
                                                 std::string_view name) noexcept {
@@ -763,6 +856,7 @@ std::expected<Node *, RecordError> create_child(TransactionData &parent, std::st
         return std::unexpected(RecordError::Completed);
     }
     if (parent.child_count >= trace_data.limits.max_children_per_transaction) {
+        mark_truncated(trace_data, 1, type.size() + name.size(), RecordError::LimitExceeded);
         return std::unexpected(RecordError::LimitExceeded);
     }
 
@@ -771,11 +865,13 @@ std::expected<Node *, RecordError> create_child(TransactionData &parent, std::st
     std::size_t node_charge = 0;
     const RecordError validation = validate_message(trace_data, type, name, sizeof(Node), chunk_charge, node_charge);
     if (validation != RecordError::None) {
+        mark_truncated(trace_data, 1, type.size() + name.size(), validation);
         return std::unexpected(validation);
     }
 
     Node *child = allocate_message<Node>(trace, type, name, node_charge);
     if (!child) {
+        mark_truncated(trace_data, 1, type.size() + name.size(), RecordError::NoMemory);
         return std::unexpected(RecordError::NoMemory);
     }
 
@@ -784,6 +880,7 @@ std::expected<Node *, RecordError> create_child(TransactionData &parent, std::st
         auto *storage = trace.pool.alloc<ChildrenChunk>();
         if (!storage) {
             trace_data.payload_bytes += node_charge;
+            mark_truncated(trace_data, 1, type.size() + name.size(), RecordError::NoMemory);
             return std::unexpected(RecordError::NoMemory);
         }
         new_chunk = new (storage) ChildrenChunk;
@@ -817,6 +914,16 @@ std::expected<EventData *, RecordError> create_event(TransactionData &parent, st
     return create_child<EventData>(parent, type, name);
 }
 
+std::expected<MetricMessageData *, RecordError> create_metric(TransactionData &parent, std::string_view type,
+                                                              std::string_view name) noexcept {
+    return create_child<MetricMessageData>(parent, type, name);
+}
+
+std::expected<HeartbeatData *, RecordError> create_heartbeat(TransactionData &parent, std::string_view type,
+                                                             std::string_view name) noexcept {
+    return create_child<HeartbeatData>(parent, type, name);
+}
+
 RecordError add_data(MessageData *message, std::string_view data) noexcept {
     return append_data(message, data, {}, false);
 }
@@ -832,6 +939,7 @@ RecordError set_status(MessageData *message, std::string_view value) noexcept {
     }
     MessageTraceData &trace_data = *message->trace->data;
     if (value.size() > trace_data.limits.max_status_bytes || !can_charge(trace_data, value.size())) {
+        mark_truncated(trace_data, 0, value.size(), RecordError::LimitExceeded);
         return RecordError::LimitExceeded;
     }
 
@@ -845,6 +953,7 @@ RecordError set_status(MessageData *message, std::string_view value) noexcept {
     }
     StringRef copy = copy_string(*message->trace, value);
     if (!value.empty() && !copy.data) {
+        mark_truncated(trace_data, 0, value.size(), RecordError::NoMemory);
         return RecordError::NoMemory;
     }
     message->status = copy;
@@ -876,6 +985,42 @@ RecordError set_duration(TransactionData *transaction, std::chrono::microseconds
     transaction->duration = duration;
     transaction->explicit_duration = true;
     return RecordError::None;
+}
+
+RecordError complete_with_duration(TransactionData *&transaction, std::chrono::microseconds duration,
+                                   std::string_view status_value, std::string_view data) noexcept {
+    if (!transaction) {
+        return RecordError::Completed;
+    }
+    if (duration.count() < 0) {
+        return RecordError::InvalidArgument;
+    }
+
+    RecordError result = set_duration(transaction, duration);
+    const auto wall_now = std::chrono::system_clock::now().time_since_epoch();
+    const auto wall_millis = std::chrono::duration_cast<std::chrono::milliseconds>(wall_now).count();
+    const auto duration_millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+    const std::uint64_t completed_at = wall_millis <= 0 ? 0 : static_cast<std::uint64_t>(wall_millis);
+    const std::uint64_t elapsed = duration_millis <= 0 ? 0 : static_cast<std::uint64_t>(duration_millis);
+    const RecordError timestamp_result =
+            set_timestamp(transaction, elapsed > completed_at ? 0 : completed_at - elapsed);
+    if (result == RecordError::None) {
+        result = timestamp_result;
+    }
+    if (status_value != status::Success) {
+        const RecordError status_result = set_status(transaction, status_value);
+        if (result == RecordError::None) {
+            result = status_result;
+        }
+    }
+    if (!data.empty()) {
+        const RecordError data_result = add_data(transaction, data);
+        if (result == RecordError::None) {
+            result = data_result;
+        }
+    }
+    const RecordError complete_result = complete(transaction);
+    return result != RecordError::None ? result : complete_result;
 }
 
 RecordError complete(EventData *&event) noexcept {

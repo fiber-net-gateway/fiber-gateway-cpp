@@ -72,6 +72,21 @@ RecordError Transaction::log_event(std::string_view type, std::string_view name,
     return result != RecordError::None ? result : complete_result;
 }
 
+RecordError Transaction::log_error(std::string_view message, std::string_view error) noexcept {
+    return log_event("Exception", message, status::Error, error);
+}
+
+RecordError Transaction::log_completed_transaction(std::string_view type, std::string_view name,
+                                                   std::chrono::microseconds duration, std::string_view status_value,
+                                                   std::string_view data) noexcept {
+    auto created = start_transaction(type, name);
+    if (!created) {
+        return created.error();
+    }
+    Transaction transaction = std::move(*created);
+    return detail::complete_with_duration(transaction.data_, duration, status_value, data);
+}
+
 RecordError Transaction::add_data(std::string_view data) noexcept { return detail::add_data(data_, data); }
 
 RecordError Transaction::add_data(std::string_view key, std::string_view value) noexcept {

@@ -410,6 +410,20 @@ TEST(CatMessageTest, TraceContextDetectsMutationDuringIterationAndExpiresOnCommi
     });
 }
 
+TEST(CatMessageTest, ConvenienceApisLogErrorsAndCompletedDurationsWithoutImplicitStack) {
+    run_on_loop([] {
+        auto root_result = Transaction::create_root("URL", "/orders");
+        ASSERT_TRUE(root_result);
+        Transaction root = std::move(*root_result);
+        EXPECT_EQ(root.log_completed_transaction("Cache", "lookup", 2500us, fiber::cat::status::Success, "hit=true"),
+                  RecordError::None);
+        EXPECT_EQ(root.log_error("backend failed", "connection reset"), RecordError::None);
+        EXPECT_TRUE(root.valid());
+        EXPECT_EQ(root.complete(), RecordError::None);
+        EXPECT_FALSE(root.valid());
+    });
+}
+
 struct InterleaveResult {
     bool recorded = false;
     bool consumed = false;
