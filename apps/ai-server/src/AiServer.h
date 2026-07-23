@@ -38,14 +38,14 @@ public:
 
 private:
     struct WorkerState {
-        std::shared_ptr<const LlmServingSnapshot> config;
+        std::shared_ptr<const LlmConfigSnapshot> config;
         bool initial_installed = false;
     };
 
     [[nodiscard]] async::DetachedTask watch_config(std::size_t worker_index,
-                                                   LlmConfigManager::ServingSubscriber subscription) noexcept;
+                                                   LlmConfigManager::SnapshotSubscriber subscription) noexcept;
     [[nodiscard]] async::Task<void> handle(http::HttpExchange &exchange);
-    [[nodiscard]] std::shared_ptr<const LlmServingSnapshot> current_config() const noexcept;
+    [[nodiscard]] std::shared_ptr<const LlmConfigSnapshot> current_config() const noexcept;
 
     event::EventLoop *accept_loop_ = nullptr;
     event::EventLoopGroup *worker_group_ = nullptr;

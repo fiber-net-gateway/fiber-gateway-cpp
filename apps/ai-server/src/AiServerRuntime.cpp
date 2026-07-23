@@ -70,10 +70,14 @@ AiServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nacos_l
     if (!service) {
         return std::unexpected(create_error(AiServerRuntimeErrorCode::CreateConfigService, service.error()));
     }
+    auto naming = nacos::NamingService::create(**client);
+    if (!naming) {
+        return std::unexpected(create_error(AiServerRuntimeErrorCode::CreateNamingService, naming.error()));
+    }
 
     auto runtime = std::unique_ptr<AiServerRuntime>(new (std::nothrow) AiServerRuntime(
             accept_loop, nacos_loop, cat_loop, http_workers, config.listen_address(), listen_options,
-            config.initial_config_timeout(), std::move(*client), std::move(*service)));
+            config.initial_config_timeout(), std::move(*client), std::move(*service), std::move(*naming)));
     if (!runtime) {
         return std::unexpected(AiServerRuntimeError{
                 .code = AiServerRuntimeErrorCode::AllocateRuntime,
@@ -88,14 +92,16 @@ AiServerRuntime::AiServerRuntime(event::EventLoop &accept_loop, event::EventLoop
                                  net::SocketAddress listen_address, net::ListenOptions listen_options,
                                  std::chrono::milliseconds initial_config_timeout,
                                  std::unique_ptr<nacos::NacosClient> nacos_client,
-                                 std::unique_ptr<nacos::ConfigService> config_service) noexcept :
+                                 std::unique_ptr<nacos::ConfigService> config_service,
+                                 std::unique_ptr<nacos::NamingService> naming_service) noexcept :
     accept_loop_(&accept_loop), nacos_loop_(&nacos_loop), cat_loop_(&cat_loop),
     listen_address_(std::move(listen_address)), listen_options_(std::move(listen_options)),
     initial_config_timeout_(initial_config_timeout), nacos_client_(std::move(nacos_client)),
-    config_service_(std::move(config_service)), config_manager_(nacos_loop, *config_service_),
-    server_(accept_loop, http_workers) {
+    config_service_(std::move(config_service)), naming_service_(std::move(naming_service)),
+    config_manager_(nacos_loop, *config_service_, *naming_service_), server_(accept_loop, http_workers) {
     FIBER_ASSERT(nacos_client_ != nullptr);
     FIBER_ASSERT(config_service_ != nullptr);
+    FIBER_ASSERT(naming_service_ != nullptr);
     FIBER_ASSERT(accept_loop_ != nacos_loop_);
     FIBER_ASSERT(accept_loop_ != cat_loop_);
     FIBER_ASSERT(nacos_loop_ != cat_loop_);
@@ -133,8 +139,19 @@ async::DetachedTask AiServerRuntime::start_nacos() noexcept {
         nacos_start_tasks_.done();
         co_return;
     }
+    auto naming_started = naming_service_->start();
+    if (!naming_started) {
+        co_await config_service_->shutdown();
+        co_await nacos_client_->shutdown();
+        nacos_start_publisher_->publish(NacosStartStatus{
+                .error = io_error(AiServerRuntimeErrorCode::StartNamingService, naming_started.error()),
+        });
+        nacos_start_tasks_.done();
+        co_return;
+    }
     auto manager_started = config_manager_.start();
     if (!manager_started) {
+        co_await naming_service_->shutdown();
         co_await config_service_->shutdown();
         co_await nacos_client_->shutdown();
         nacos_start_publisher_->publish(NacosStartStatus{
@@ -151,6 +168,7 @@ async::DetachedTask AiServerRuntime::shutdown_nacos() noexcept {
     FIBER_ASSERT(nacos_loop_->in_loop());
     co_await nacos_start_tasks_.join();
     co_await config_manager_.shutdown();
+    co_await naming_service_->shutdown();
     co_await config_service_->shutdown();
     co_await nacos_client_->shutdown();
     nacos_stopped_publisher_->publish(true);

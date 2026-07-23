@@ -56,6 +56,8 @@ std::string_view runtime_stage_name(fiber::ai_server::AiServerRuntimeErrorCode c
             return "create Nacos client";
         case Code::CreateConfigService:
             return "create Nacos config service";
+        case Code::CreateNamingService:
+            return "create Nacos naming service";
         case Code::AllocateRuntime:
             return "allocate ai-server runtime";
         case Code::Bind:
@@ -64,6 +66,8 @@ std::string_view runtime_stage_name(fiber::ai_server::AiServerRuntimeErrorCode c
             return "start Nacos client";
         case Code::StartConfigService:
             return "start Nacos config service";
+        case Code::StartNamingService:
+            return "start Nacos naming service";
         case Code::StartConfigManager:
             return "subscribe LLM configuration";
         case Code::InitialConfigUnavailable:
