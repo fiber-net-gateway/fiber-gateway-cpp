@@ -41,6 +41,8 @@ struct LlmConfigFailure {
 
 class LlmConfigManager final : public common::NonCopyable, public common::NonMovable {
 public:
+    using ServingSubscriber = async::Watch<LlmServingSnapshot>::Subscriber;
+
     LlmConfigManager(event::EventLoop &loop, nacos::ConfigService &config_service);
     ~LlmConfigManager();
 
@@ -48,7 +50,8 @@ public:
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] LlmConfigManagerState state() const noexcept { return state_; }
-    [[nodiscard]] bool ready() const noexcept { return bt1_keys_ != nullptr && project_ != nullptr; }
+    [[nodiscard]] bool ready() const noexcept { return initial_sync_complete_; }
+    [[nodiscard]] ServingSubscriber subscribe_serving() { return serving_.subscribe(); }
     [[nodiscard]] std::shared_ptr<const Bt1KeySnapshot> current_bt1_keys() const noexcept { return bt1_keys_; }
     [[nodiscard]] std::shared_ptr<const LlmProjectSnapshot> current_project() const noexcept { return project_; }
     [[nodiscard]] const std::optional<LlmConfigFailure> &last_failure() const noexcept { return last_failure_; }
@@ -82,6 +85,8 @@ private:
                              const std::unordered_set<std::string> &group_names);
     void stop_all_dynamic() noexcept;
     void rebuild_project();
+    [[nodiscard]] bool dynamic_dependencies_ready() const noexcept;
+    void publish_serving_if_ready();
     void report_failure(std::string_view data_id, std::string_view md5, LlmConfigError error);
     void report_not_found(std::string_view data_id);
     void task_done() noexcept;
@@ -92,6 +97,8 @@ private:
     async::WaitGroup tasks_;
     async::Watch<bool> stop_{false};
     std::optional<async::Watch<bool>::Publisher> stop_publisher_;
+    async::Watch<LlmServingSnapshot> serving_;
+    std::optional<async::Watch<LlmServingSnapshot>::Publisher> serving_publisher_;
     std::map<std::string, std::shared_ptr<ProviderEntry>, std::less<>> providers_;
     std::map<std::string, std::shared_ptr<GroupEntry>, std::less<>> groups_;
     std::shared_ptr<const Bt1KeySnapshot> bt1_keys_;
@@ -99,8 +106,10 @@ private:
     std::shared_ptr<const LlmProjectSnapshot> project_;
     std::optional<LlmConfigFailure> last_failure_;
     std::uint64_t project_generation_ = 0;
+    std::uint64_t serving_generation_ = 0;
     std::uint64_t successful_updates_ = 0;
     std::uint64_t failed_updates_ = 0;
+    bool initial_sync_complete_ = false;
 };
 
 } // namespace fiber::ai_server

@@ -1,8 +1,13 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <string_view>
 
+#include <event/EventLoop.h>
+#include <event/EventLoopGroup.h>
+
 #include "AiServerConfig.h"
+#include "AiServerRuntime.h"
 
 namespace {
 
@@ -23,6 +28,7 @@ NACOS_USERNAME=nacos
 NACOS_PASSWORD="pa\"ss"
 NACOS_CONTEXT_PATH=/nacos/
 NACOS_CLIENT_VERSION=fiber-ai-server/1.0 # inline comment
+AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=15000
 )";
 
     auto result = AiServerConfig::load_from_string(input);
@@ -41,6 +47,7 @@ NACOS_CLIENT_VERSION=fiber-ai-server/1.0 # inline comment
     EXPECT_EQ(nacos.password(), "pa\"ss");
     EXPECT_EQ(nacos.context_path(), "/nacos");
     EXPECT_EQ(nacos.client_version(), "fiber-ai-server/1.0");
+    EXPECT_EQ(result->initial_config_timeout(), std::chrono::milliseconds(15000));
 }
 
 TEST(AiServerConfigTest, AppliesDefaultsForOptionalSettings) {
@@ -53,6 +60,7 @@ TEST(AiServerConfigTest, AppliesDefaultsForOptionalSettings) {
     EXPECT_TRUE(result->nacos_config().username().empty());
     EXPECT_TRUE(result->nacos_config().password().empty());
     EXPECT_EQ(result->nacos_config().context_path(), "/nacos");
+    EXPECT_EQ(result->initial_config_timeout(), std::chrono::milliseconds(60000));
 }
 
 TEST(AiServerConfigTest, RequiresNacosServerAddresses) {
@@ -88,6 +96,12 @@ TEST(AiServerConfigTest, RejectsInvalidValuesAndPartialCredentials) {
     ASSERT_FALSE(partial_credentials);
     EXPECT_EQ(partial_credentials.error().code, AiServerConfigErrorCode::InvalidNacosConfig);
     EXPECT_EQ(partial_credentials.error().key, "NACOS_PASSWORD");
+
+    auto invalid_timeout = AiServerConfig::load_from_string(
+            "NACOS_SERVER_ADDRESSES=127.0.0.1\nAI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=-1\n");
+    ASSERT_FALSE(invalid_timeout);
+    EXPECT_EQ(invalid_timeout.error().code, AiServerConfigErrorCode::InvalidValue);
+    EXPECT_EQ(invalid_timeout.error().key, "AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS");
 }
 
 TEST(AiServerConfigTest, ReportsMissingFiles) {
@@ -104,6 +118,27 @@ TEST(AiServerConfigTest, LoadsExampleFile) {
     EXPECT_EQ(result->listen_address().to_string(), "0.0.0.0:8080");
     ASSERT_EQ(result->nacos_config().server_ips().size(), 1u);
     EXPECT_EQ(result->nacos_config().server_ips()[0].to_string(), "127.0.0.1");
+    EXPECT_EQ(result->initial_config_timeout(), std::chrono::milliseconds(60000));
+}
+
+TEST(AiServerRuntimeTest, CreateDoesNotBindListener) {
+    auto config = AiServerConfig::load_from_string(
+            "NACOS_SERVER_ADDRESSES=127.0.0.1\nAI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=0\n");
+    ASSERT_TRUE(config);
+
+    fiber::event::EventLoop accept_loop;
+    fiber::event::EventLoop nacos_loop;
+    fiber::event::EventLoop cat_loop;
+    fiber::event::EventLoopGroup workers(1);
+    auto runtime = fiber::ai_server::AiServerRuntime::create(accept_loop, nacos_loop, cat_loop, workers, *config);
+
+    ASSERT_TRUE(runtime);
+    EXPECT_EQ((*runtime)->state(), fiber::ai_server::AiServerRuntimeState::Created);
+    EXPECT_LT((*runtime)->fd(), 0);
+}
+
+TEST(AiServerRuntimeTest, DefaultWorkerCountIsNeverZero) {
+    EXPECT_GE(fiber::ai_server::default_http_worker_count(), 1u);
 }
 
 } // namespace

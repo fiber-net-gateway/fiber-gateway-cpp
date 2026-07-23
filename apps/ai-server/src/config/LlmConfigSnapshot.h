@@ -2,6 +2,7 @@
 #define FIBER_AI_SERVER_LLM_CONFIG_SNAPSHOT_H
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -51,7 +52,9 @@ public:
     explicit UserGroupState(std::string name) noexcept;
 
     [[nodiscard]] const std::string &name() const noexcept { return name_; }
-    [[nodiscard]] std::shared_ptr<const UserGroupSnapshot> current() const noexcept { return current_; }
+    [[nodiscard]] std::shared_ptr<const UserGroupSnapshot> current() const noexcept {
+        return current_.load(std::memory_order_acquire);
+    }
 
 private:
     friend class LlmConfigManager;
@@ -59,7 +62,7 @@ private:
     void publish(std::shared_ptr<const UserGroupSnapshot> snapshot) noexcept;
 
     std::string name_;
-    std::shared_ptr<const UserGroupSnapshot> current_;
+    std::atomic<std::shared_ptr<const UserGroupSnapshot>> current_;
 };
 
 enum class ProviderProtocolType : std::uint8_t {
@@ -151,6 +154,12 @@ private:
     std::uint64_t generation_ = 0;
     std::vector<ProjectProvider> providers_;
     std::vector<CompiledModelRoute> models_;
+};
+
+struct LlmServingSnapshot {
+    std::uint64_t generation = 0;
+    std::shared_ptr<const Bt1KeySnapshot> bt1_keys;
+    std::shared_ptr<const LlmProjectSnapshot> project;
 };
 
 } // namespace fiber::ai_server

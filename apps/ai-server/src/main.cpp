@@ -14,9 +14,11 @@
 
 #include "async/Signal.h"
 #include "async/Spawn.h"
+#include "async/TaskSelect.h"
 #include "async/WhenAny.h"
 #include "common/IoError.h"
 #include "event/EventLoop.h"
+#include "event/EventLoopGroup.h"
 #include "event/SignalService.h"
 #include "net/SocketAddress.h"
 
@@ -64,6 +66,10 @@ std::string_view runtime_stage_name(fiber::ai_server::AiServerRuntimeErrorCode c
             return "start Nacos config service";
         case Code::StartConfigManager:
             return "subscribe LLM configuration";
+        case Code::InitialConfigUnavailable:
+            return "install initial LLM configuration";
+        case Code::InitialConfigTimeout:
+            return "wait for initial LLM configuration";
     }
     return "start ai-server";
 }
@@ -102,41 +108,69 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    fiber::event::EventLoop loop;
+    fiber::event::EventLoop accept_loop;
+    fiber::event::EventLoopGroup http_workers(fiber::ai_server::default_http_worker_count());
+    fiber::event::EventLoopGroup nacos_group(1);
+    fiber::event::EventLoopGroup cat_group(1);
     fiber::net::ListenOptions listen_options{};
-    auto runtime_result = fiber::ai_server::AiServerRuntime::create(loop, config, listen_options);
+    auto runtime_result = fiber::ai_server::AiServerRuntime::create(accept_loop, nacos_group.at(0), cat_group.at(0),
+                                                                    http_workers, config, listen_options);
     if (!runtime_result) {
         print_runtime_error(runtime_result.error());
         return 1;
     }
     std::unique_ptr<fiber::ai_server::AiServerRuntime> runtime = std::move(*runtime_result);
 
-    auto bound_port = resolve_port(runtime->fd());
-    if (!bound_port) {
-        std::cerr << "resolve bound port failed: " << fiber::common::io_err_name(bound_port.error()) << '\n';
-        return 1;
-    }
+    http_workers.start(shutdown_signals);
+    nacos_group.start(shutdown_signals);
+    cat_group.start(shutdown_signals);
 
-    const fiber::net::SocketAddress bound_address(config.listen_address().ip(), *bound_port);
-    fiber::event::SignalService signal_service(loop);
+    fiber::event::SignalService signal_service(accept_loop);
     int exit_code = 0;
-    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+    fiber::async::spawn(accept_loop, [&]() -> fiber::async::DetachedTask {
         if (!signal_service.attach(shutdown_signals)) {
             std::cerr << "failed to attach shutdown signal service\n";
             exit_code = 1;
-            loop.stop();
+            accept_loop.stop();
             co_return;
         }
 
-        auto started = co_await runtime->start();
+        auto startup = co_await fiber::async::when_any([&runtime]() { return runtime->start().select(); },
+                                                       []() { return fiber::async::wait_signal(SIGINT); },
+                                                       []() { return fiber::async::wait_signal(SIGTERM); });
+        if (!startup.is<0>()) {
+            if (startup.is<1>()) {
+                (void) std::move(startup).get<1>();
+            } else {
+                (void) std::move(startup).get<2>();
+            }
+            co_await runtime->shutdown();
+            signal_service.detach();
+            accept_loop.stop();
+            co_return;
+        }
+
+        auto started = std::move(startup).get<0>();
         if (!started) {
             print_runtime_error(started.error());
             exit_code = 1;
             signal_service.detach();
-            loop.stop();
+            accept_loop.stop();
             co_return;
         }
+
+        auto bound_port = resolve_port(runtime->fd());
+        if (!bound_port) {
+            std::cerr << "resolve bound port failed: " << fiber::common::io_err_name(bound_port.error()) << '\n';
+            exit_code = 1;
+            co_await runtime->shutdown();
+            signal_service.detach();
+            accept_loop.stop();
+            co_return;
+        }
+        const fiber::net::SocketAddress bound_address(config.listen_address().ip(), *bound_port);
         std::cout << "ai-server listening on http://" << bound_address.to_string()
+                  << ", http workers=" << http_workers.size()
                   << ", nacos servers=" << config.nacos_config().server_ips().size() << std::endl;
 
         auto signal = co_await fiber::async::when_any([]() { return fiber::async::wait_signal(SIGINT); },
@@ -149,8 +183,15 @@ int main(int argc, char **argv) {
 
         co_await runtime->shutdown();
         signal_service.detach();
-        loop.stop();
+        accept_loop.stop();
     });
-    loop.run();
+    accept_loop.run();
+
+    http_workers.stop();
+    nacos_group.stop();
+    cat_group.stop();
+    http_workers.join();
+    nacos_group.join();
+    cat_group.join();
     return exit_code;
 }

@@ -12,9 +12,11 @@
 #include <async/Watch.h>
 #include <async/Yield.h>
 #include <event/EventLoop.h>
+#include <event/EventLoopGroup.h>
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/Subscription.h>
 
+#include "AiServer.h"
 #include "config/LlmConfigManager.h"
 
 namespace {
@@ -66,6 +68,18 @@ public:
         });
     }
 
+    void push_not_found(std::string_view data_id) {
+        const auto it = entries_.find(make_key(data_id, fiber::ai_server::kLlmConfigGroup));
+        ASSERT_NE(it, entries_.end());
+        it->second->publisher->publish(Result{
+                .kind = fiber::nacos::ResultKind::Success,
+                .data =
+                        fiber::nacos::ConfigData{
+                                .state = fiber::nacos::ConfigState::NotFound,
+                        },
+        });
+    }
+
 private:
     struct Entry {
         Entry() {
@@ -97,6 +111,7 @@ TEST(LlmConfigManagerTest, PublishesSnapshotsAndRetainsLastValidDynamicConfig) {
     fiber::event::EventLoop loop;
     FakeConfigService service;
     fiber::ai_server::LlmConfigManager manager(loop, service);
+    auto serving = manager.subscribe_serving();
     bool completed = false;
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
@@ -114,7 +129,8 @@ TEST(LlmConfigManagerTest, PublishesSnapshotsAndRetainsLastValidDynamicConfig) {
                      "models-v1");
         co_await yield_updates();
 
-        EXPECT_TRUE(manager.ready());
+        EXPECT_FALSE(manager.ready());
+        EXPECT_EQ(serving.current().value, nullptr);
         auto initial_project = manager.current_project();
         EXPECT_NE(initial_project, nullptr);
         EXPECT_EQ(initial_project->metadata().version, 1);
@@ -145,6 +161,8 @@ TEST(LlmConfigManagerTest, PublishesSnapshotsAndRetainsLastValidDynamicConfig) {
         EXPECT_NE(provider, nullptr);
         EXPECT_NE(provider->config, nullptr);
         EXPECT_EQ(provider->config->metadata.version, 2);
+        EXPECT_FALSE(manager.ready());
+        EXPECT_EQ(serving.current().value, nullptr);
 
         const auto *route = provider_project->find_model("chat");
         EXPECT_NE(route, nullptr);
@@ -161,6 +179,11 @@ TEST(LlmConfigManagerTest, PublishesSnapshotsAndRetainsLastValidDynamicConfig) {
         EXPECT_TRUE(group->contains("alice"));
         EXPECT_TRUE(group->contains("bob"));
         EXPECT_FALSE(group->contains("mallory"));
+        EXPECT_TRUE(manager.ready());
+        auto serving_snapshot = serving.current();
+        EXPECT_NE(serving_snapshot.value, nullptr);
+        EXPECT_EQ(serving_snapshot.value->bt1_keys->metadata.version, 1);
+        EXPECT_EQ(serving_snapshot.value->project->generation(), provider_project->generation());
 
         const std::uint64_t failed_before = manager.failed_updates();
         service.push("ploto.ai-llm.provider.openai",
@@ -190,6 +213,107 @@ TEST(LlmConfigManagerTest, PublishesSnapshotsAndRetainsLastValidDynamicConfig) {
     loop.run();
     EXPECT_TRUE(completed);
     EXPECT_EQ(manager.state(), fiber::ai_server::LlmConfigManagerState::Stopped);
+}
+
+TEST(LlmConfigManagerTest, InitialSyncWaitsForLatestReferencedConfiguration) {
+    fiber::event::EventLoop loop;
+    FakeConfigService service;
+    fiber::ai_server::LlmConfigManager manager(loop, service);
+    auto serving = manager.subscribe_serving();
+    bool completed = false;
+
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        EXPECT_TRUE(manager.start());
+        service.push(fiber::ai_server::kBt1KeysDataId,
+                     R"({"version":1,"data":{"keys":[{"kid":"main","secret":"secret"}]}})", "bt1");
+        service.push(fiber::ai_server::kModelsDataId,
+                     R"({"version":1,"data":[{"model-name":"chat","providers":["old"]}]})", "models-old");
+        co_await yield_updates();
+        service.push_not_found("ploto.ai-llm.provider.old");
+        co_await yield_updates();
+        EXPECT_FALSE(manager.ready());
+
+        service.push(fiber::ai_server::kModelsDataId,
+                     R"({"version":2,"data":[{"model-name":"chat","providers":["new"]}]})", "models-new");
+        co_await yield_updates();
+        EXPECT_EQ(manager.provider_subscription_count(), 1u);
+        EXPECT_FALSE(manager.ready());
+
+        service.push("ploto.ai-llm.provider.new",
+                     R"({"version":1,"data":{
+                         "provider":"new",
+                         "baseurl":"https://api.example.test",
+                         "api-tokens":[],
+                         "protocol":[{
+                             "type":"openai-chat-completions",
+                             "path":"/v1/chat/completions",
+                             "model":"gpt-test"
+                         }]
+                     }})",
+                     "provider-new");
+        for (std::size_t i = 0; i < 16 && manager.successful_updates() != 4; ++i) {
+            co_await fiber::async::yield();
+        }
+
+        EXPECT_EQ(manager.successful_updates(), 4u);
+        EXPECT_TRUE(manager.ready());
+        auto snapshot = serving.current();
+        EXPECT_NE(snapshot.value, nullptr);
+        if (!snapshot.value) {
+            co_await manager.shutdown();
+            completed = true;
+            loop.stop();
+            co_return;
+        }
+        EXPECT_EQ(snapshot.value->project->metadata().version, 2);
+        EXPECT_NE(snapshot.value->project->find_provider("new")->config, nullptr);
+        EXPECT_EQ(snapshot.value->project->find_provider("old"), nullptr);
+
+        co_await manager.shutdown();
+        completed = true;
+        loop.stop();
+    });
+
+    loop.run();
+    EXPECT_TRUE(completed);
+}
+
+TEST(LlmConfigManagerTest, HttpWorkersInstallInitialSnapshotBeforeBind) {
+    fiber::event::EventLoop accept_loop;
+    fiber::event::EventLoopGroup workers(2);
+    workers.start();
+    FakeConfigService service;
+    fiber::ai_server::LlmConfigManager manager(accept_loop, service);
+    fiber::ai_server::AiServer server(accept_loop, workers);
+    bool completed = false;
+
+    fiber::async::spawn(accept_loop, [&]() -> fiber::async::DetachedTask {
+        EXPECT_TRUE(manager.start());
+        service.push(fiber::ai_server::kBt1KeysDataId,
+                     R"({"version":1,"data":{"keys":[{"kid":"main","secret":"secret"}]}})", "bt1");
+        service.push(fiber::ai_server::kModelsDataId, R"({"version":1,"data":[]})", "models");
+        co_await yield_updates();
+        EXPECT_TRUE(manager.ready());
+
+        EXPECT_LT(server.fd(), 0);
+        EXPECT_TRUE(co_await server.start_config_workers(manager));
+        EXPECT_LT(server.fd(), 0);
+
+        fiber::net::ListenOptions options;
+        auto bound = server.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), options);
+        EXPECT_TRUE(bound);
+        EXPECT_GE(server.fd(), 0);
+
+        co_await server.shutdown_and_wait();
+        co_await manager.shutdown();
+        completed = true;
+        accept_loop.stop();
+    });
+
+    accept_loop.run();
+    workers.stop();
+    workers.join();
+    EXPECT_TRUE(completed);
 }
 
 } // namespace
