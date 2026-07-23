@@ -1,0 +1,50 @@
+#ifndef FIBER_AI_SERVER_AI_SERVER_CONFIG_H
+#define FIBER_AI_SERVER_AI_SERVER_CONFIG_H
+
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <string>
+#include <string_view>
+
+#include <fiber/nacos/NacosClientConfig.h>
+#include <net/SocketAddress.h>
+
+namespace fiber::ai_server {
+
+enum class AiServerConfigErrorCode : std::uint8_t {
+    OpenFailed,
+    ReadFailed,
+    InvalidSyntax,
+    DuplicateKey,
+    UnknownKey,
+    MissingRequiredKey,
+    InvalidValue,
+    InvalidNacosConfig,
+};
+
+struct AiServerConfigError {
+    AiServerConfigErrorCode code = AiServerConfigErrorCode::InvalidSyntax;
+    std::size_t line = 0;
+    std::string key;
+    std::string detail;
+};
+
+class AiServerConfig {
+public:
+    [[nodiscard]] static std::expected<AiServerConfig, AiServerConfigError> load_from_file(std::string_view path);
+    [[nodiscard]] static std::expected<AiServerConfig, AiServerConfigError> load_from_string(std::string_view input);
+
+    [[nodiscard]] const net::SocketAddress &listen_address() const noexcept { return listen_address_; }
+    [[nodiscard]] const nacos::NacosClientConfig &nacos_config() const noexcept { return nacos_config_; }
+
+private:
+    AiServerConfig(net::SocketAddress listen_address, nacos::NacosClientConfig nacos_config) noexcept;
+
+    net::SocketAddress listen_address_;
+    nacos::NacosClientConfig nacos_config_;
+};
+
+} // namespace fiber::ai_server
+
+#endif // FIBER_AI_SERVER_AI_SERVER_CONFIG_H
