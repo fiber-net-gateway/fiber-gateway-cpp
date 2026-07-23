@@ -1,8 +1,10 @@
 #include "AiServerConfig.h"
+#include "AiServerLogging.h"
 #include "AiServerRuntime.h"
 
 #include <csignal>
 #include <cstdint>
+#include <cstring>
 #include <expected>
 #include <iostream>
 #include <string_view>
@@ -20,9 +22,12 @@
 #include "event/EventLoop.h"
 #include "event/EventLoopGroup.h"
 #include "event/SignalService.h"
+#include "log/Log.h"
 #include "net/SocketAddress.h"
 
 namespace {
+
+DEFINE_LOGGER(LOG_LIFECYCLE, "ai_server.lifecycle");
 
 fiber::common::IoResult<std::uint16_t> resolve_port(int fd) noexcept {
     sockaddr_storage bound{};
@@ -78,15 +83,28 @@ std::string_view runtime_stage_name(fiber::ai_server::AiServerRuntimeErrorCode c
     return "start ai-server";
 }
 
-void print_runtime_error(const fiber::ai_server::AiServerRuntimeError &error) {
-    std::cerr << runtime_stage_name(error.code) << " failed";
+void log_runtime_error(const fiber::ai_server::AiServerRuntimeError &error) noexcept {
+    fiber::log::LogLine line(LOG_LIFECYCLE.get(), fiber::log::LogLevel::Error, __FILE__, __LINE__, __func__);
+    line << "runtime startup failed stage=" << fiber::log::quoted(runtime_stage_name(error.code));
     if (error.io_error != fiber::common::IoErr::None) {
-        std::cerr << ": " << fiber::common::io_err_name(error.io_error);
+        line << " io_error=" << fiber::common::io_err_name(error.io_error);
     } else if (!error.message.empty()) {
-        std::cerr << ": " << error.message;
+        line << " reason=" << fiber::log::quoted(error.message);
+    }
+}
+
+void print_log_error(const fiber::log::LogConfigError &error) {
+    std::cerr << "failed to initialize logging: " << error.message;
+    if (error.system_error != 0) {
+        std::cerr << ": " << std::strerror(error.system_error);
     }
     std::cerr << '\n';
 }
+
+class LoggingShutdownGuard {
+public:
+    ~LoggingShutdownGuard() { fiber::log::LoggerManager::global().shutdown(); }
+};
 
 } // namespace
 
@@ -112,15 +130,32 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    auto log_config = fiber::ai_server::make_log_config();
+    if (!log_config) {
+        print_log_error(log_config.error());
+        return 1;
+    }
+    auto logging_started = fiber::log::LoggerManager::global().initialize(std::move(*log_config));
+    if (!logging_started) {
+        print_log_error(logging_started.error());
+        return 1;
+    }
+
     fiber::event::EventLoop accept_loop;
     fiber::event::EventLoopGroup http_workers(fiber::ai_server::default_http_worker_count());
     fiber::event::EventLoopGroup nacos_group(1);
     fiber::event::EventLoopGroup cat_group(1);
+    LoggingShutdownGuard logging_guard;
     fiber::net::ListenOptions listen_options{};
+    LOG(LOG_LIFECYCLE, INFO) << "configuration loaded path=" << fiber::log::quoted(config_path)
+                             << " listen=" << fiber::log::quoted(config.listen_address().to_string())
+                             << " http_workers=" << http_workers.size()
+                             << " nacos_servers=" << config.nacos_config().server_ips().size();
+
     auto runtime_result = fiber::ai_server::AiServerRuntime::create(accept_loop, nacos_group.at(0), cat_group.at(0),
                                                                     http_workers, config, listen_options);
     if (!runtime_result) {
-        print_runtime_error(runtime_result.error());
+        log_runtime_error(runtime_result.error());
         return 1;
     }
     std::unique_ptr<fiber::ai_server::AiServerRuntime> runtime = std::move(*runtime_result);
@@ -133,7 +168,7 @@ int main(int argc, char **argv) {
     int exit_code = 0;
     fiber::async::spawn(accept_loop, [&]() -> fiber::async::DetachedTask {
         if (!signal_service.attach(shutdown_signals)) {
-            std::cerr << "failed to attach shutdown signal service\n";
+            LOG(LOG_LIFECYCLE, ERROR) << "failed to attach shutdown signal service";
             exit_code = 1;
             accept_loop.stop();
             co_return;
@@ -148,6 +183,7 @@ int main(int argc, char **argv) {
             } else {
                 (void) std::move(startup).get<2>();
             }
+            LOG(LOG_LIFECYCLE, INFO) << "shutdown signal received during startup";
             co_await runtime->shutdown();
             signal_service.detach();
             accept_loop.stop();
@@ -156,7 +192,7 @@ int main(int argc, char **argv) {
 
         auto started = std::move(startup).get<0>();
         if (!started) {
-            print_runtime_error(started.error());
+            log_runtime_error(started.error());
             exit_code = 1;
             signal_service.detach();
             accept_loop.stop();
@@ -165,7 +201,8 @@ int main(int argc, char **argv) {
 
         auto bound_port = resolve_port(runtime->fd());
         if (!bound_port) {
-            std::cerr << "resolve bound port failed: " << fiber::common::io_err_name(bound_port.error()) << '\n';
+            LOG(LOG_LIFECYCLE, ERROR) << "resolve bound port failed io_error="
+                                      << fiber::common::io_err_name(bound_port.error());
             exit_code = 1;
             co_await runtime->shutdown();
             signal_service.detach();
@@ -173,6 +210,10 @@ int main(int argc, char **argv) {
             co_return;
         }
         const fiber::net::SocketAddress bound_address(config.listen_address().ip(), *bound_port);
+        LOG(LOG_LIFECYCLE, INFO) << "server listening scheme=http address="
+                                 << fiber::log::quoted(bound_address.to_string())
+                                 << " http_workers=" << http_workers.size()
+                                 << " nacos_servers=" << config.nacos_config().server_ips().size();
         std::cout << "ai-server listening on http://" << bound_address.to_string()
                   << ", http workers=" << http_workers.size()
                   << ", nacos servers=" << config.nacos_config().server_ips().size() << std::endl;
@@ -185,6 +226,7 @@ int main(int argc, char **argv) {
             (void) std::move(signal).get<1>();
         }
 
+        LOG(LOG_LIFECYCLE, INFO) << "shutdown signal received";
         co_await runtime->shutdown();
         signal_service.detach();
         accept_loop.stop();
@@ -197,5 +239,6 @@ int main(int argc, char **argv) {
     http_workers.join();
     nacos_group.join();
     cat_group.join();
+    LOG(LOG_LIFECYCLE, INFO) << "ai-server stopped";
     return exit_code;
 }

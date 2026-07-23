@@ -9,10 +9,13 @@
 #include "http/HttpExchange.h"
 #include "http/HttpExchangeIo.h"
 #include "http/HttpHeaders.h"
+#include "log/Log.h"
 
 namespace fiber::ai_server {
 
 namespace {
+
+DEFINE_LOGGER(LOG_HTTP, "ai_server.http");
 
 constexpr std::string_view kHealthPath = "/health";
 constexpr std::string_view kHealthBody = "{\"status\":\"ok\"}\n";
@@ -44,11 +47,21 @@ async::Task<void> send_json(http::HttpExchange &exchange, int status_code, std::
             .connection_mode = http::ResponseConnectionMode::Auto,
             .end_stream = body.empty(),
     });
-    if (!header_result || body.empty()) {
+    if (!header_result) {
+        LOG(LOG_HTTP, DEBUG) << "response header write failed path=" << fiber::log::quoted(exchange.uri().path)
+                             << " status=" << status_code << " io_error=" << common::io_err_name(header_result.error());
+        co_return;
+    }
+    if (body.empty()) {
         co_return;
     }
 
-    (void) co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
+    auto body_result =
+            co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
+    if (!body_result) {
+        LOG(LOG_HTTP, DEBUG) << "response body write failed path=" << fiber::log::quoted(exchange.uri().path)
+                             << " status=" << status_code << " io_error=" << common::io_err_name(body_result.error());
+    }
 }
 
 } // namespace

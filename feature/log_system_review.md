@@ -4,24 +4,23 @@
 
 ## 1. 总体评价
 
-当前实现的基础架构合理，不需要推倒重写。Logger 路由在初始化阶段展开，禁用日志不会构造消息，Appender 地址在运行期保持稳定，文件滚动受到锁保护，线程本地 buffer 也避免了常见热路径上的动态分配。现有实现的主要风险集中在 ConsoleAppender 的并发写入可靠性、LogContext 与 EventLoop 的生命周期耦合，以及启用日志热路径上的固定成本。
+当前实现的基础架构合理，不需要推倒重写。Logger 路由在初始化阶段展开，禁用日志不会构造消息，Appender 地址在运行期保持稳定，文件滚动受到锁保护，线程本地 buffer 也避免了常见热路径上的动态分配。现有实现的主要风险集中在 LogContext 与 EventLoop 的生命周期耦合，以及启用日志热路径上的固定成本。
 
-截至本次评估，`fiber_lib` 和 `fiber_tests` 均可成功构建，现有 13 个日志相关测试全部通过。现有测试说明路由、截断、buffer、reopen 和文件滚动的主流程稳定，但尚未覆盖下文列出的部分边界。
+截至本次评估，`fiber_lib` 和 `fiber_tests` 均可成功构建，现有 18 个日志相关测试全部通过。现有测试说明路由、截断、buffer、reopen、文件滚动和 console 并发完整写入的主流程稳定，但尚未覆盖下文列出的部分边界。
 
 ## 2. 高优先级问题
 
-### 2.1 ConsoleAppender 可能产生残缺或交错日志
+### 2.1 ConsoleAppender 完整写入（已解决）
 
-[`ConsoleAppender::append()`](../src/log/Appender.cpp#L357) 对 stdout/stderr 只调用一次 `write()`，没有重试 `EINTR` 或短写，也没有在多个产生日志的线程之间串行化完整记录。
+处理状态：已完成整改。ConsoleAppender 现在用进程内共享互斥保护 stdout/stderr 的完整记录，并循环处理
+`EINTR` 和短写；部分写入失败会分别统计已写字节和被丢弃记录。
 
-这在 stdout/stderr 指向管道时尤其明显：最大格式化日志行是 9216 字节，超过 Linux 常见的 4096 字节 `PIPE_BUF`，多个线程写长日志时可能互相交错。lite_nginx 的默认配置会由多个 worker 向 stdout 写 access log，因此该问题会直接影响容器或管道收集场景。
+整改前，[`ConsoleAppender::append()`](../src/log/Appender.cpp) 对 stdout/stderr 只调用一次 `write()`，没有
+重试 `EINTR` 或短写，也没有在多个产生日志的线程之间串行化完整记录。这在 stdout/stderr 指向管道时
+尤其明显：最大格式化日志行是 9216 字节，超过 Linux 常见的 4096 字节 `PIPE_BUF`，多个线程写长日志时
+可能互相交错。
 
-建议：
-
-- 提取 FileAppender 和 ConsoleAppender 共用的完整写入辅助函数，正确处理 `EINTR` 和短写；
-- ConsoleAppender 使用进程内互斥保护一条完整记录，避免本进程内多个线程交错；
-- 增加“pipe + 多线程 + 超过 `PIPE_BUF` 的日志行”测试；
-- 明确统计部分写入时 `written_bytes`、`written_records` 和 `dropped_records` 的语义。
+新增的 pipe 并发测试让多个线程写入超过 `PIPE_BUF` 的记录，并逐条校验 marker、payload 和换行边界。
 
 ### 2.2 LogContext 保存裸 EventLoop 指针，存在生命周期风险
 
@@ -132,16 +131,16 @@ buffer 清空后停止调度，多个 buffer 直接调度到最早的 `flush_at`
 
 ## 5. 推荐实施顺序
 
-1. 修复 ConsoleAppender 完整写入和 LogContext/EventLoop 生命周期。
+1. 修复 LogContext/EventLoop 生命周期。
 2. 去除两个大数组的无意义清零，并将格式化收敛为每个 LogEvent 一次。
 3. 将 flush timer 改为只在存在待写数据时调度。
 4. 统一 OOM/noexcept 策略，收紧 LoggerHandle 和文件路径契约。
-5. 增加 console pipe、局部 EventLoop 析构、空闲 timer、buffered reopen、并发 reopen 和滚动失败路径测试。
+5. 增加局部 EventLoop 析构、buffered reopen、并发 reopen 和滚动失败路径测试。
 6. 完成上述正确性与同步性能优化后，再通过基准决定是否需要异步 writer；异步 writer 会引入队列容量、背压、丢弃策略和退出 drain 等额外语义，不应在缺少基准数据时优先引入。
 
 ## 6. 建议新增的验证项
 
-- ConsoleAppender 在 `EINTR`、短写和多线程长日志下保持完整记录；
+- 通过可控 write 故障注入覆盖 ConsoleAppender 的 `EINTR`、短写后失败和零进展路径；
 - buffered LogContext 与局部 EventLoop 的两种析构顺序；
 - EventLoop buffer 清空后不再周期唤醒；
 - 同一 LogEvent 路由多个 Appender 时只格式化一次；

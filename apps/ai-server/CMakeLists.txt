@@ -1,6 +1,7 @@
 add_library(ai_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/AiServer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/AiServerConfig.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/AiServerLogging.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/AiServerRuntime.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/LlmConfigCodec.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/LlmConfigManager.cpp"
