@@ -52,9 +52,7 @@ public:
     explicit UserGroupState(std::string name) noexcept;
 
     [[nodiscard]] const std::string &name() const noexcept { return name_; }
-    [[nodiscard]] std::shared_ptr<const UserGroupSnapshot> current() const noexcept {
-        return current_.load(std::memory_order_acquire);
-    }
+    [[nodiscard]] std::shared_ptr<const UserGroupSnapshot> current() const noexcept;
 
 private:
     friend class LlmConfigManager;
@@ -62,7 +60,11 @@ private:
     void publish(std::shared_ptr<const UserGroupSnapshot> snapshot) noexcept;
 
     std::string name_;
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     std::atomic<std::shared_ptr<const UserGroupSnapshot>> current_;
+#else
+    std::shared_ptr<const UserGroupSnapshot> current_;
+#endif
 };
 
 enum class ProviderProtocolType : std::uint8_t {
