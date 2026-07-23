@@ -13,9 +13,11 @@
 
 namespace fiber::ai_server {
 
+class LlmConfigManager;
+
 class AiServer final : public common::NonCopyable, public common::NonMovable {
 public:
-    explicit AiServer(event::EventLoop &loop);
+    AiServer(event::EventLoop &loop, const LlmConfigManager &config_manager);
 
     [[nodiscard]] common::IoResult<void> bind(const net::SocketAddress &address, const net::ListenOptions &options);
     async::DetachedTask serve();
@@ -26,6 +28,7 @@ public:
 private:
     [[nodiscard]] async::Task<void> handle(http::HttpExchange &exchange);
 
+    const LlmConfigManager *config_manager_ = nullptr;
     http::Http1Server server_;
 };
 

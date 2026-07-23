@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string_view>
 
+#include "config/LlmConfigManager.h"
 #include "http/HttpExchange.h"
 #include "http/HttpExchangeIo.h"
 #include "http/HttpHeaders.h"
@@ -13,6 +14,9 @@ namespace {
 
 constexpr std::string_view kHealthPath = "/health";
 constexpr std::string_view kHealthBody = "{\"status\":\"ok\"}\n";
+constexpr std::string_view kReadyPath = "/ready";
+constexpr std::string_view kReadyBody = "{\"status\":\"ready\"}\n";
+constexpr std::string_view kNotReadyBody = "{\"status\":\"not_ready\"}\n";
 constexpr std::string_view kMethodNotAllowedBody = "{\"error\":\"method_not_allowed\"}\n";
 constexpr std::string_view kNotFoundBody = "{\"error\":\"not_found\"}\n";
 
@@ -47,7 +51,8 @@ async::Task<void> send_json(http::HttpExchange &exchange, int status_code, std::
 
 } // namespace
 
-AiServer::AiServer(event::EventLoop &loop) :
+AiServer::AiServer(event::EventLoop &loop, const LlmConfigManager &config_manager) :
+    config_manager_(&config_manager),
     server_(loop, [this](http::HttpExchange &exchange) { return handle(exchange); }, make_server_options()) {}
 
 common::IoResult<void> AiServer::bind(const net::SocketAddress &address, const net::ListenOptions &options) {
@@ -63,7 +68,8 @@ async::Task<void> AiServer::shutdown_and_wait() { co_await server_.shutdown_and_
 int AiServer::fd() const noexcept { return server_.fd(); }
 
 async::Task<void> AiServer::handle(http::HttpExchange &exchange) {
-    if (exchange.uri().path != kHealthPath) {
+    const std::string_view path = exchange.uri().path;
+    if (path != kHealthPath && path != kReadyPath) {
         co_await send_json(exchange, 404, kNotFoundBody);
         co_return;
     }
@@ -72,7 +78,15 @@ async::Task<void> AiServer::handle(http::HttpExchange &exchange) {
         co_return;
     }
 
-    co_await send_json(exchange, 200, kHealthBody);
+    if (path == kHealthPath) {
+        co_await send_json(exchange, 200, kHealthBody);
+        co_return;
+    }
+    if (config_manager_->ready()) {
+        co_await send_json(exchange, 200, kReadyBody);
+        co_return;
+    }
+    co_await send_json(exchange, 503, kNotReadyBody);
 }
 
 } // namespace fiber::ai_server
