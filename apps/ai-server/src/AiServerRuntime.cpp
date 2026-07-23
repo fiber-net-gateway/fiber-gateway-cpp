@@ -14,9 +14,12 @@
 #include <async/TaskSelect.h>
 #include <async/WhenAny.h>
 #include <common/Assert.h>
+#include <log/Log.h>
 
 namespace fiber::ai_server {
 namespace {
+
+DEFINE_LOGGER(LOG_LIFECYCLE, "ai_server.lifecycle");
 
 AiServerRuntimeError create_error(AiServerRuntimeErrorCode code, nacos::NacosCreateError error) noexcept {
     return AiServerRuntimeError{
@@ -130,6 +133,7 @@ async::DetachedTask AiServerRuntime::start_nacos() noexcept {
         nacos_start_tasks_.done();
         co_return;
     }
+    LOG(LOG_LIFECYCLE, DEBUG) << "Nacos client started";
     auto service_started = config_service_->start();
     if (!service_started) {
         co_await nacos_client_->shutdown();
@@ -139,6 +143,7 @@ async::DetachedTask AiServerRuntime::start_nacos() noexcept {
         nacos_start_tasks_.done();
         co_return;
     }
+    LOG(LOG_LIFECYCLE, DEBUG) << "Nacos config service started";
     auto naming_started = naming_service_->start();
     if (!naming_started) {
         co_await config_service_->shutdown();
@@ -149,6 +154,7 @@ async::DetachedTask AiServerRuntime::start_nacos() noexcept {
         nacos_start_tasks_.done();
         co_return;
     }
+    LOG(LOG_LIFECYCLE, DEBUG) << "Nacos naming service started";
     auto manager_started = config_manager_.start();
     if (!manager_started) {
         co_await naming_service_->shutdown();
@@ -160,6 +166,7 @@ async::DetachedTask AiServerRuntime::start_nacos() noexcept {
         nacos_start_tasks_.done();
         co_return;
     }
+    LOG(LOG_LIFECYCLE, INFO) << "Nacos-backed LLM configuration runtime started";
     nacos_start_publisher_->publish(NacosStartStatus{.success = true});
     nacos_start_tasks_.done();
 }
@@ -171,6 +178,7 @@ async::DetachedTask AiServerRuntime::shutdown_nacos() noexcept {
     co_await naming_service_->shutdown();
     co_await config_service_->shutdown();
     co_await nacos_client_->shutdown();
+    LOG(LOG_LIFECYCLE, INFO) << "Nacos-backed LLM configuration runtime stopped";
     nacos_stopped_publisher_->publish(true);
 }
 
@@ -239,6 +247,7 @@ async::Task<std::expected<void, AiServerRuntimeError>> AiServerRuntime::start() 
                 .message = "initial Nacos LLM configuration sync stopped",
         });
     }
+    LOG(LOG_LIFECYCLE, INFO) << "initial LLM configuration installed on HTTP workers";
 
     auto bound = server_.bind(listen_address_, listen_options_);
     if (!bound) {
@@ -256,10 +265,12 @@ async::Task<void> AiServerRuntime::shutdown() noexcept {
     if (state_ == AiServerRuntimeState::Stopped) {
         co_return;
     }
+    LOG(LOG_LIFECYCLE, INFO) << "runtime shutdown started";
     if (state_ == AiServerRuntimeState::Created) {
         server_.close();
         co_await stop_nacos();
         state_ = AiServerRuntimeState::Stopped;
+        LOG(LOG_LIFECYCLE, INFO) << "runtime shutdown completed";
         co_return;
     }
 
@@ -267,6 +278,7 @@ async::Task<void> AiServerRuntime::shutdown() noexcept {
     co_await server_.shutdown_and_wait();
     co_await stop_nacos();
     state_ = AiServerRuntimeState::Stopped;
+    LOG(LOG_LIFECYCLE, INFO) << "runtime shutdown completed";
 }
 
 } // namespace fiber::ai_server

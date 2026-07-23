@@ -6,6 +6,7 @@
 
 - 调用方式接近 glog：使用 `LOG`、`LOG_IF`、`DLOG`、`VLOG` 和流式 `<<`。
 - 文件写入接近 nginx：文件以 `O_APPEND` 打开，日志在调用线程同步执行一次 `write()`。
+- console 输出在进程内按完整记录串行化，并补写 `EINTR` 和短写。
 - 路由方式接近 logback：Logger 使用层级 name，具名 Appender 根据 Logger name、level 和 additivity 决定输出文件。
 
 本设计不引入异步日志线程。同步模式下，产生日志的线程负责格式化并写文件；可选 buffer 模式也由当前线程在 buffer 满或定时器触发时执行 flush。
@@ -25,7 +26,7 @@
 
 V1 不处理以下能力：
 
-- 不处理一次 `write()` 未写完的情况；一次调用的返回值小于请求长度时，该条或该批日志视为写入失败。
+- FileAppender 不处理一次 `write()` 未写完的情况；一次调用的返回值小于请求长度时，该条或该批日志视为写入失败。
 - 不保证日志已经持久化到磁盘；默认不调用 `fsync()`。
 - 不提供专用异步 writer 线程和异步队列。
 - 不提供进程内按大小或时间滚动文件；文件滚动交给外部工具，日志系统只提供 reopen。
@@ -59,7 +60,7 @@ Logger
                               ▼
                      FormattedLogLine view
                               │
-                              ├── ConsoleAppender -> write
+                              ├── ConsoleAppender -> serialized complete write
                               └── FileAppender
                                      ├── direct: write(O_APPEND)
                                      └── buffer: copy -> local buffer -> write(O_APPEND)
@@ -807,7 +808,8 @@ LoggerManager 必须比所有业务线程和 `LogContext` 活得更久。只有�
 错误处理策略：
 
 - 初始化打开文件失败：返回配置/初始化错误，应用不启动服务；
-- `write()` 失败或长度不符：丢弃该条或该批日志，增加错误和丢弃计数；
+- ConsoleAppender 循环处理 `EINTR` 和短写；最终失败时统计已写字节，并将该条记录计为丢弃；
+- FileAppender 的 `write()` 失败或长度不符：丢弃该条或该批日志，增加错误和丢弃计数；
 - buffer 容量不足：按照最大日志长度规则截断，不动态扩容；
 - reopen 失败：保留旧 fd；
 - 格式化失败：输出能够生成的前缀和 `<format-error>`；
@@ -940,13 +942,14 @@ Logger 和尾随指针区在初始化完成后只读。Appender 对象地址保�
 
 ### 14.2 并发测试
 
+- 多线程向 pipe 写超过 `PIPE_BUF` 的 console 日志时保持完整记录；
 - 多线程共享同一 `O_APPEND` fd；
-- 一条日志只执行一次 write；
+- FileAppender 直写模式下一条日志只执行一次 write；
 - buffer 模式一条日志不跨 write；
 - reopen 与并发 write；
 - 多 EventLoop 同时写同一组 Appender。
 
-测试按照本设计假设，不注入成功但只写入部分数据的场景。
+FileAppender 测试按照本设计假设，不注入成功但只写入部分数据的场景。
 
 ### 14.3 性能验收
 
@@ -956,9 +959,10 @@ Logger 和尾随指针区在初始化完成后只读。Appender 对象地址保�
 - 大型消息和格式化数组不执行整块清零；
 - 日期与时区前缀按线程缓存到秒，普通系统线程的 TID 只查询一次；
 - Logger level 判断：一次 Handle 指针读取、一次 Level Slot 读取和一次 count 判断；
-- 同步直写：每个目标 Appender 每条日志最多一次 write；
+- FileAppender 同步直写：每个目标 Appender 每条日志最多一次 write；
+- ConsoleAppender：进程内互斥覆盖一条完整记录，必要时执行多次 write；
 - buffer 模式：按 buffer size 批量 write；
-- 多线程热路径不使用全局日志 mutex。
+- FileAppender 多线程热路径不使用全局日志 mutex。
 
 ---
 

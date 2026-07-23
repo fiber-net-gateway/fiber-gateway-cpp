@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
-#include <iostream>
 #include <limits>
 #include <map>
 #include <string_view>
@@ -16,9 +15,31 @@
 #include <async/WaitGroup.h>
 #include <async/WhenAny.h>
 #include <common/Assert.h>
+#include <log/Log.h>
 
 namespace fiber::ai_server {
 namespace {
+
+DEFINE_LOGGER(LOG_CONFIG, "ai_server.config");
+
+void log_config_rejection(bool serving_ready, std::string_view data_id, std::string_view md5,
+                          const LlmConfigError &error) noexcept {
+    const log::LogLevel level = serving_ready ? log::LogLevel::Warn : log::LogLevel::Error;
+    const log::Logger &logger = LOG_CONFIG.get();
+    if (!logger.enabled(level)) {
+        return;
+    }
+
+    log::LogLine line(logger, level, __FILE__, __LINE__, __func__);
+    line << "LLM config update rejected data_id=" << log::quoted(data_id) << " md5=" << log::quoted(md5);
+    if (!error.field.empty()) {
+        line << " field=" << log::quoted(error.field);
+    }
+    if (error.offset != 0) {
+        line << " offset=" << error.offset;
+    }
+    line << " serving_ready=" << serving_ready << " reason=" << log::quoted(error.message);
+}
 
 class ConfigGraph;
 
@@ -295,6 +316,9 @@ async::DetachedTask ServiceNode::run(std::shared_ptr<ServiceNode> self) noexcept
         }
         if (snapshot.value) {
             if (snapshot.value->kind == nacos::ResultKind::Closed) {
+                if (!self->stopping_) {
+                    LOG(LOG_CONFIG, WARN) << "NamingService subscription closed service=" << log::quoted(self->key_);
+                }
                 break;
             }
             if (snapshot.value->data) {
@@ -340,6 +364,8 @@ void ServiceNode::apply(const nacos::ServiceInfo &info) {
         });
     }
     current_ = std::move(next);
+    LOG(LOG_CONFIG, DEBUG) << "NamingService endpoints updated service=" << log::quoted(key_)
+                           << " endpoints=" << current_->endpoints.size();
     graph_->accepted_update();
     graph_->on_service_changed(*this);
 }
@@ -375,6 +401,9 @@ async::DetachedTask GroupNode::run(std::shared_ptr<GroupNode> self) noexcept {
         }
         if (snapshot.value) {
             if (snapshot.value->kind == nacos::ResultKind::Closed) {
+                if (!self->stopping_) {
+                    LOG(LOG_CONFIG, WARN) << "user-group config subscription closed group=" << log::quoted(self->key_);
+                }
                 break;
             }
             if (snapshot.value->data) {
@@ -411,6 +440,8 @@ void GroupNode::apply(const nacos::ConfigData &data) {
         return;
     }
     current_ = std::make_shared<const UserGroupSnapshot>(std::move(*parsed));
+    LOG(LOG_CONFIG, DEBUG) << "user-group config accepted group=" << log::quoted(key_)
+                           << " md5=" << log::quoted(current_->metadata.md5) << " users=" << current_->users.size();
     graph_->accepted_update();
     graph_->on_group_changed(*this);
 }
@@ -449,6 +480,9 @@ async::DetachedTask ProviderNode::run(std::shared_ptr<ProviderNode> self) noexce
         }
         if (snapshot.value) {
             if (snapshot.value->kind == nacos::ResultKind::Closed) {
+                if (!self->stopping_) {
+                    LOG(LOG_CONFIG, WARN) << "provider config subscription closed provider=" << log::quoted(self->key_);
+                }
                 break;
             }
             if (snapshot.value->data) {
@@ -505,6 +539,9 @@ void ProviderNode::apply(const nacos::ConfigData &data) {
     }
 
     candidate_.emplace(std::move(next));
+    LOG(LOG_CONFIG, DEBUG) << "provider config accepted provider=" << log::quoted(key_)
+                           << " md5=" << log::quoted(candidate_->config->metadata.md5)
+                           << " ready=" << candidate_->ready();
     graph_->accepted_update();
     if (candidate_->ready()) {
         activate_candidate();
@@ -603,6 +640,9 @@ async::DetachedTask ModelsNode::run(std::shared_ptr<ModelsNode> self) noexcept {
         }
         if (snapshot.value) {
             if (snapshot.value->kind == nacos::ResultKind::Closed) {
+                if (!self->stopping_) {
+                    LOG(LOG_CONFIG, WARN) << "models config subscription closed";
+                }
                 break;
             }
             if (snapshot.value->data) {
@@ -692,6 +732,10 @@ void ModelsNode::apply(const nacos::ConfigData &data) {
     }
 
     candidate_.emplace(std::move(next));
+    LOG(LOG_CONFIG, DEBUG) << "models config accepted md5=" << log::quoted(candidate_->config->metadata.md5)
+                           << " models=" << candidate_->config->models.size()
+                           << " providers=" << candidate_->providers.size() << " groups=" << candidate_->groups.size()
+                           << " ready=" << candidate_->ready();
     graph_->accepted_update();
     if (candidate_->ready()) {
         activate_candidate();
@@ -836,6 +880,9 @@ async::DetachedTask Bt1Node::run(std::shared_ptr<Bt1Node> self) noexcept {
         }
         if (snapshot.value) {
             if (snapshot.value->kind == nacos::ResultKind::Closed) {
+                if (!self->stopping_) {
+                    LOG(LOG_CONFIG, WARN) << "BT1 key config subscription closed";
+                }
                 break;
             }
             if (snapshot.value->data) {
@@ -868,6 +915,8 @@ void Bt1Node::apply(const nacos::ConfigData &data) {
         return;
     }
     current_ = std::make_shared<const Bt1KeySnapshot>(std::move(*parsed));
+    LOG(LOG_CONFIG, DEBUG) << "BT1 key config accepted md5=" << log::quoted(current_->metadata.md5)
+                           << " keys=" << current_->keys.size();
     graph_->accepted_update();
     graph_->on_bt1_changed();
 }
@@ -896,6 +945,7 @@ std::expected<void, nacos::ConfigServiceError> ConfigGraph::start() {
     state_ = LlmConfigManagerState::Running;
     bt1_->start(bt1_);
     models_->start(models_);
+    LOG(LOG_CONFIG, INFO) << "LLM config graph subscriptions started group=" << log::quoted(kLlmConfigGroup);
     return {};
 }
 
@@ -920,6 +970,8 @@ async::Task<void> ConfigGraph::shutdown() noexcept {
     FIBER_ASSERT(groups_.empty());
     FIBER_ASSERT(services_.empty());
     state_ = LlmConfigManagerState::Stopped;
+    LOG(LOG_CONFIG, INFO) << "LLM config graph stopped successful_updates=" << successful_updates_
+                          << " failed_updates=" << failed_updates_;
 }
 
 std::expected<std::shared_ptr<ServiceNode>, nacos::NamingServiceError>
@@ -1009,24 +1061,26 @@ void ConfigGraph::publish_if_ready() {
         return;
     }
     FIBER_ASSERT(snapshot_generation_ != std::numeric_limits<std::uint64_t>::max());
+    const bool initial = !ready_;
+    const auto project = models_->current();
+    const auto bt1_keys = bt1_->current();
+    const std::uint64_t generation = ++snapshot_generation_;
     snapshot_publisher_->publish(LlmConfigSnapshot{
-            .generation = ++snapshot_generation_,
-            .bt1_keys = bt1_->current(),
-            .project = models_->current(),
+            .generation = generation,
+            .bt1_keys = bt1_keys,
+            .project = project,
     });
     ready_ = true;
+    LOG(LOG_CONFIG, INFO) << (initial ? "initial LLM config snapshot published" : "LLM config snapshot published")
+                          << " generation=" << generation << " project_generation=" << project->generation()
+                          << " models=" << project->models().size() << " providers=" << project->providers().size()
+                          << " group_subscriptions=" << groups_.size() << " service_subscriptions=" << services_.size()
+                          << " bt1_keys=" << bt1_keys->keys.size();
 }
 
 void ConfigGraph::report_failure(std::string_view data_id, std::string_view md5, LlmConfigError error) {
     ++failed_updates_;
-    std::cerr << "LLM config update rejected dataId=" << data_id << " md5=" << md5;
-    if (!error.field.empty()) {
-        std::cerr << " field=" << error.field;
-    }
-    if (error.offset != 0) {
-        std::cerr << " offset=" << error.offset;
-    }
-    std::cerr << ": " << error.message << '\n';
+    log_config_rejection(ready_, data_id, md5, error);
     last_failure_ = LlmConfigFailure{
             .data_id = std::string(data_id),
             .md5 = std::string(md5),

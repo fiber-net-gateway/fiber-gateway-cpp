@@ -58,6 +58,21 @@ reachable. Once serving starts, `GET /health` returns `200` with `{"status":"ok"
 `{"status":"ready"}`. Other methods on either probe return `405`; all other paths return `404` until their business
 handlers are implemented.
 
+## Logging
+
+Logging is initialized from code before any EventLoopGroup starts. There is intentionally no logging entry in
+`ai-server.env`: the root level is `INFO` and all enabled records go to one stderr ConsoleAppender. Configuration-file
+and logging-initialization failures still use raw stderr because the LoggerManager is not available yet.
+
+The current categories are `ai_server.lifecycle`, `ai_server.config`, and `ai_server.http`. Operational messages use
+single-line `key=value` fields and quote externally supplied strings. Health and readiness probes are not access
+logged. The existing `ai-server listening on ...` stdout line remains a separate port-discovery contract for runs that
+bind port `0`.
+
+Request-detail and conversation audit records are not ordinary operational logs and are not implemented by this
+milestone. In particular, request bodies, prompts, Authorization values, Provider API tokens, BT1 secrets, and Nacos
+credentials must never enter these log categories.
+
 ## Nacos configuration
 
 All LLM JSON uses Nacos group `LLM-SERVER`. The manager keeps two fixed subscriptions:
@@ -136,6 +151,7 @@ only after their owned resources have completed shutdown.
 
 - `src/AiServer.*`: HTTP server ownership and request dispatch boundary.
 - `src/AiServerConfig.*`: dotenv parsing plus HTTP and Nacos startup validation.
+- `src/AiServerLogging.*`: fixed stderr/INFO process logging configuration.
 - `src/AiServerRuntime.*`: delayed listener binding, cross-loop Nacos lifecycle, and ordered shutdown ownership.
 - `src/config/LlmConfigCodec.*`: Java-compatible JSON parsing and validation.
 - `src/config/ConfigNodePool.h`: keyed child leases and subscription-node lifetime reconciliation.
