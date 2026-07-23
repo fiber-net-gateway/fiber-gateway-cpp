@@ -70,12 +70,36 @@ The model table drives subscriptions for its referenced configuration:
 - `ploto.ai-llm.provider.<provider-name>`
 - `ploto.ai-llm.user-group.<group-name>`
 
+Providers whose `baseurl` is `service://<service-name>` also drive a Nacos NamingService subscription in
+`DEFAULT_GROUP`. Only enabled, healthy instances with positive weight, a non-empty IP, and a non-zero port enter the
+published endpoint list. A synchronized service with zero usable instances is still a complete value; it publishes an
+empty endpoint list rather than leaving startup pending.
+
 The JSON envelope, aliases, defaults, validation rules, and non-monotonic `version` behavior follow
 `docs/java-ploto-llm-business-flow-and-config.md`. Unknown fields are ignored. An invalid first value remains
-unavailable; an invalid later value is rejected while the last valid snapshot stays active. Provider changes rebuild
-the immutable project snapshot. User-group changes update stable group state in place so later authorization checks
-see new membership without rebuilding the project. Unreferenced dynamic subscriptions are released after a valid
-model-table switch.
+unavailable; an invalid later value is rejected while the last valid snapshot stays active.
+
+`LlmConfigManager` owns a private, owner-loop-only dependency graph:
+
+```text
+LlmConfigSnapshot
+├── BT1 keys
+└── models
+    ├── providers
+    │   └── optional NamingService endpoints
+    └── user groups
+```
+
+The reusable keyed node pool reference-counts Provider, user-group, and service nodes. A models update first builds a
+candidate generation and acquires all of its child leases. The active generation and its subscriptions stay alive
+until every candidate child has produced a valid snapshot; only then does the manager atomically switch generations
+and release children no longer referenced. Provider `service://A` to `service://B` changes follow the same rule.
+Invalid, `NotFound`, never-synchronized, or closed child streams retain the last complete generation.
+
+Every accepted child update rebuilds immutable ancestors up to one public `Watch<LlmConfigSnapshot>`. A published
+model route therefore already contains its resolved Provider and user-group snapshots, and a Provider contains its
+resolved endpoint snapshot. HTTP workers only replace one loop-local `shared_ptr`; any snapshot already held by an
+in-flight request remains deeply unchanged.
 
 Initial startup deliberately uses a stricter gate than Java runtime refresh behavior. The first serving snapshot
 requires valid BT1 keys, a valid model table, and a valid first snapshot for every Provider and user group referenced
@@ -93,18 +117,18 @@ values and BT1 secrets are never logged.
   distributed round-robin. Each worker keeps a loop-local pointer to the latest serving snapshot, so requests do not
   lock the cross-loop publication watch.
 - A single-loop Nacos EventLoopGroup owns `NacosClient`, `ConfigService`, subscriptions, parsing, and snapshot
-  publication.
+  publication. It also owns the independent `NamingService` used by `service://` providers.
 - A separate single-loop CAT EventLoopGroup reserves CAT sender ownership. The current ai-server milestone does not
   create a `CatClient`; no CAT endpoint is invented by startup defaults.
 
 The process handles `SIGINT` and `SIGTERM`, including while it is waiting for initial configuration. Shutdown first
 drains HTTP connections and stops worker snapshot watchers, then stops the configuration manager, the Nacos
-configuration service, and finally the Nacos authentication client. EventLoop groups stop only after their owned
-resources have completed shutdown.
+NamingService, the Nacos configuration service, and finally the Nacos authentication client. EventLoop groups stop
+only after their owned resources have completed shutdown.
 
 ## Linked libraries
 
-- `fiber::nacos`: active authentication and configuration transport.
+- `fiber::nacos`: active authentication, configuration, and naming transport.
 - `fiber::cat`: linked for future request and provider-call tracing; its sender loop is already isolated.
 - `fiber::prometheus`: linked for future fixed-schema service metrics and text collection.
 
@@ -114,8 +138,9 @@ resources have completed shutdown.
 - `src/AiServerConfig.*`: dotenv parsing plus HTTP and Nacos startup validation.
 - `src/AiServerRuntime.*`: delayed listener binding, cross-loop Nacos lifecycle, and ordered shutdown ownership.
 - `src/config/LlmConfigCodec.*`: Java-compatible JSON parsing and validation.
-- `src/config/LlmConfigManager.*`: fixed/dynamic subscriptions and last-known-good update policy.
-- `src/config/LlmConfigSnapshot.*`: immutable BT1, Provider, model-project, and user-group snapshot types.
+- `src/config/ConfigNodePool.h`: keyed child leases and subscription-node lifetime reconciliation.
+- `src/config/LlmConfigManager.*`: dependency graph, candidate/active generation switching, and unified publication.
+- `src/config/LlmConfigSnapshot.*`: deeply immutable BT1, Provider, endpoint, model-route, and user-group snapshots.
 - `src/main.cpp`: config path, signal handling, CPU-sized HTTP workers, and Nacos/CAT EventLoop lifetime.
 
 ## Notes

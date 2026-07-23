@@ -77,7 +77,7 @@ async::Task<bool> AiServer::start_config_workers(LlmConfigManager &config_manage
     initial_installs_.add(worker_count);
     config_tasks_.add(worker_count);
     for (std::size_t i = 0; i < worker_count; ++i) {
-        async::spawn(worker_group_->at(i), [this, i, subscription = config_manager.subscribe_serving()]() mutable {
+        async::spawn(worker_group_->at(i), [this, i, subscription = config_manager.subscribe_snapshot()]() mutable {
             return watch_config(i, std::move(subscription));
         });
     }
@@ -86,7 +86,7 @@ async::Task<bool> AiServer::start_config_workers(LlmConfigManager &config_manage
 }
 
 async::DetachedTask AiServer::watch_config(std::size_t worker_index,
-                                           LlmConfigManager::ServingSubscriber subscription) noexcept {
+                                           LlmConfigManager::SnapshotSubscriber subscription) noexcept {
     FIBER_ASSERT(worker_index < workers_.size());
     FIBER_ASSERT(&event::EventLoop::current() == &worker_group_->at(worker_index));
 
@@ -143,7 +143,7 @@ async::Task<void> AiServer::shutdown_and_wait() {
 
 int AiServer::fd() const noexcept { return server_.fd(); }
 
-std::shared_ptr<const LlmServingSnapshot> AiServer::current_config() const noexcept {
+std::shared_ptr<const LlmConfigSnapshot> AiServer::current_config() const noexcept {
     const event::EventLoop &loop = event::EventLoop::current();
     FIBER_ASSERT(loop.group() == worker_group_);
     const std::size_t index = loop.group_index();

@@ -14,6 +14,7 @@
 #include <event/EventLoop.h>
 #include <event/EventLoopGroup.h>
 #include <fiber/nacos/ConfigService.h>
+#include <fiber/nacos/NamingService.h>
 #include <fiber/nacos/Subscription.h>
 
 #include "AiServer.h"
@@ -101,17 +102,82 @@ private:
     std::map<std::string, std::unique_ptr<Entry>, std::less<>> entries_;
 };
 
+class FakeNamingService final : public fiber::nacos::NamingService {
+public:
+    using Result = fiber::nacos::SubscriptionResult<fiber::nacos::ServiceInfo>;
+    using Watch = fiber::async::Watch<Result>;
+
+    fiber::common::IoResult<void> start() noexcept override { return {}; }
+
+    fiber::async::Task<void> shutdown() noexcept override { co_return; }
+
+    fiber::async::Task<
+            std::expected<std::shared_ptr<const fiber::nacos::ServiceInfo>, fiber::nacos::NamingServiceError>>
+    get(std::string, std::string) noexcept override {
+        co_return std::unexpected(fiber::nacos::NamingServiceError{
+                .code = fiber::nacos::NamingServiceErrorCode::Server,
+                .message = "not implemented by fake naming service",
+        });
+    }
+
+    std::expected<fiber::nacos::Subscription<fiber::nacos::ServiceInfo>, fiber::nacos::NamingServiceError>
+    subscribe(std::string_view service_name, std::string_view group) override {
+        const std::string key = make_key(service_name, group);
+        auto [it, inserted] = entries_.try_emplace(key, std::make_unique<Entry>());
+        (void) inserted;
+        return fiber::nacos::Subscription<fiber::nacos::ServiceInfo>({}, it->second->watch.subscribe());
+    }
+
+    std::expected<fiber::nacos::InstanceRegistration, fiber::nacos::NamingServiceError>
+    registry(std::string_view, std::string_view, fiber::nacos::Instance) override {
+        return std::unexpected(fiber::nacos::NamingServiceError{
+                .code = fiber::nacos::NamingServiceErrorCode::Server,
+                .message = "not implemented by fake naming service",
+        });
+    }
+
+    void push(std::string_view service_name, fiber::nacos::ServiceInfo info) {
+        const auto it = entries_.find(make_key(service_name, fiber::ai_server::kDefaultNamingGroup));
+        ASSERT_NE(it, entries_.end());
+        it->second->publisher->publish(Result{
+                .kind = fiber::nacos::ResultKind::Success,
+                .data = std::move(info),
+        });
+    }
+
+private:
+    struct Entry {
+        Entry() {
+            publisher = watch.acquire_publisher();
+            EXPECT_TRUE(publisher.has_value());
+        }
+
+        Watch watch;
+        std::optional<Watch::Publisher> publisher;
+    };
+
+    static std::string make_key(std::string_view service_name, std::string_view group) {
+        std::string key(service_name);
+        key.push_back('\n');
+        key.append(group);
+        return key;
+    }
+
+    std::map<std::string, std::unique_ptr<Entry>, std::less<>> entries_;
+};
+
 fiber::async::Task<void> yield_updates() {
-    co_await fiber::async::yield();
-    co_await fiber::async::yield();
-    co_await fiber::async::yield();
+    for (std::size_t i = 0; i < 8; ++i) {
+        co_await fiber::async::yield();
+    }
 }
 
 TEST(LlmConfigManagerTest, PublishesSnapshotsAndRetainsLastValidDynamicConfig) {
     fiber::event::EventLoop loop;
     FakeConfigService service;
-    fiber::ai_server::LlmConfigManager manager(loop, service);
-    auto serving = manager.subscribe_serving();
+    FakeNamingService naming;
+    fiber::ai_server::LlmConfigManager manager(loop, service, naming);
+    auto serving = manager.subscribe_snapshot();
     bool completed = false;
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
@@ -131,14 +197,9 @@ TEST(LlmConfigManagerTest, PublishesSnapshotsAndRetainsLastValidDynamicConfig) {
 
         EXPECT_FALSE(manager.ready());
         EXPECT_EQ(serving.current().value, nullptr);
-        auto initial_project = manager.current_project();
-        EXPECT_NE(initial_project, nullptr);
-        EXPECT_EQ(initial_project->metadata().version, 1);
+        EXPECT_EQ(manager.current_project(), nullptr);
         EXPECT_EQ(manager.provider_subscription_count(), 1u);
         EXPECT_EQ(manager.user_group_subscription_count(), 1u);
-        const auto *initial_provider = initial_project->find_provider("openai");
-        EXPECT_NE(initial_provider, nullptr);
-        EXPECT_EQ(initial_provider->config, nullptr);
 
         service.push("ploto.ai-llm.provider.openai",
                      R"({"version":2,"data":{
@@ -154,28 +215,26 @@ TEST(LlmConfigManagerTest, PublishesSnapshotsAndRetainsLastValidDynamicConfig) {
                      "provider-v2");
         co_await yield_updates();
 
-        auto provider_project = manager.current_project();
-        EXPECT_NE(provider_project, nullptr);
-        EXPECT_GT(provider_project->generation(), initial_project->generation());
-        const auto *provider = provider_project->find_provider("openai");
-        EXPECT_NE(provider, nullptr);
-        EXPECT_NE(provider->config, nullptr);
-        EXPECT_EQ(provider->config->metadata.version, 2);
+        EXPECT_EQ(manager.current_project(), nullptr);
         EXPECT_FALSE(manager.ready());
         EXPECT_EQ(serving.current().value, nullptr);
 
-        const auto *route = provider_project->find_model("chat");
-        EXPECT_NE(route, nullptr);
-        EXPECT_EQ(route->allow_user_groups.size(), 1u);
-        const auto group_state = route->allow_user_groups[0];
-        const std::uint64_t generation_before_group = provider_project->generation();
         service.push("ploto.ai-llm.user-group.staff",
                      R"({"version":3,"data":{"name":"staff","users":["alice","alice","bob"]}})", "group-v3");
         co_await yield_updates();
 
-        EXPECT_EQ(manager.current_project()->generation(), generation_before_group);
-        auto group = group_state->current();
-        EXPECT_NE(group, nullptr);
+        auto complete_project = manager.current_project();
+        EXPECT_NE(complete_project, nullptr);
+        const auto *provider = complete_project->find_provider("openai");
+        EXPECT_NE(provider, nullptr);
+        EXPECT_NE(provider->config, nullptr);
+        EXPECT_EQ(provider->config->metadata.version, 2);
+        const auto *route = complete_project->find_model("chat");
+        EXPECT_NE(route, nullptr);
+        EXPECT_EQ(route->providers.size(), 1u);
+        EXPECT_EQ(route->providers[0].get(), provider);
+        EXPECT_EQ(route->allow_user_groups.size(), 1u);
+        const auto group = route->allow_user_groups[0];
         EXPECT_TRUE(group->contains("alice"));
         EXPECT_TRUE(group->contains("bob"));
         EXPECT_FALSE(group->contains("mallory"));
@@ -183,7 +242,28 @@ TEST(LlmConfigManagerTest, PublishesSnapshotsAndRetainsLastValidDynamicConfig) {
         auto serving_snapshot = serving.current();
         EXPECT_NE(serving_snapshot.value, nullptr);
         EXPECT_EQ(serving_snapshot.value->bt1_keys->metadata.version, 1);
-        EXPECT_EQ(serving_snapshot.value->project->generation(), provider_project->generation());
+        EXPECT_EQ(serving_snapshot.value->project, complete_project);
+        const auto initial_snapshot = serving_snapshot.value;
+
+        service.push("ploto.ai-llm.user-group.staff", R"({"version":4,"data":{"name":"staff","users":["mallory"]}})",
+                     "group-v4");
+        co_await yield_updates();
+
+        const auto updated_group_snapshot = serving.current().value;
+        EXPECT_NE(updated_group_snapshot, initial_snapshot);
+        EXPECT_GT(updated_group_snapshot->project->generation(), complete_project->generation());
+        const auto *updated_route = updated_group_snapshot->project->find_model("chat");
+        EXPECT_TRUE(updated_route->allow_user_groups[0]->contains("mallory"));
+        EXPECT_FALSE(updated_route->allow_user_groups[0]->contains("alice"));
+        EXPECT_TRUE(initial_snapshot->project->find_model("chat")->allow_user_groups[0]->contains("alice"));
+        EXPECT_FALSE(initial_snapshot->project->find_model("chat")->allow_user_groups[0]->contains("mallory"));
+        const std::uint64_t generation_before_invalid = updated_group_snapshot->project->generation();
+
+        const std::uint64_t failed_before_not_found = manager.failed_updates();
+        service.push_not_found("ploto.ai-llm.provider.openai");
+        co_await yield_updates();
+        EXPECT_EQ(manager.failed_updates(), failed_before_not_found + 1);
+        EXPECT_EQ(manager.current_project()->generation(), generation_before_invalid);
 
         const std::uint64_t failed_before = manager.failed_updates();
         service.push("ploto.ai-llm.provider.openai",
@@ -192,7 +272,7 @@ TEST(LlmConfigManagerTest, PublishesSnapshotsAndRetainsLastValidDynamicConfig) {
         co_await yield_updates();
 
         EXPECT_EQ(manager.failed_updates(), failed_before + 1);
-        EXPECT_EQ(manager.current_project()->generation(), generation_before_group);
+        EXPECT_EQ(manager.current_project()->generation(), generation_before_invalid);
         const auto *retained = manager.current_project()->find_provider("openai");
         EXPECT_NE(retained, nullptr);
         EXPECT_NE(retained->config, nullptr);
@@ -203,7 +283,8 @@ TEST(LlmConfigManagerTest, PublishesSnapshotsAndRetainsLastValidDynamicConfig) {
         EXPECT_EQ(manager.current_project()->metadata().version, 0);
         EXPECT_EQ(manager.provider_subscription_count(), 0u);
         EXPECT_EQ(manager.user_group_subscription_count(), 0u);
-        EXPECT_NE(initial_project->find_model("chat"), nullptr);
+        EXPECT_NE(initial_snapshot->project->find_model("chat"), nullptr);
+        EXPECT_TRUE(initial_snapshot->project->find_model("chat")->allow_user_groups[0]->contains("alice"));
 
         co_await manager.shutdown();
         completed = true;
@@ -215,11 +296,12 @@ TEST(LlmConfigManagerTest, PublishesSnapshotsAndRetainsLastValidDynamicConfig) {
     EXPECT_EQ(manager.state(), fiber::ai_server::LlmConfigManagerState::Stopped);
 }
 
-TEST(LlmConfigManagerTest, InitialSyncWaitsForLatestReferencedConfiguration) {
+TEST(LlmConfigManagerTest, ModelsCandidateRetainsActiveTreeUntilDependenciesAreReady) {
     fiber::event::EventLoop loop;
     FakeConfigService service;
-    fiber::ai_server::LlmConfigManager manager(loop, service);
-    auto serving = manager.subscribe_serving();
+    FakeNamingService naming;
+    fiber::ai_server::LlmConfigManager manager(loop, service, naming);
+    auto serving = manager.subscribe_snapshot();
     bool completed = false;
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
@@ -229,15 +311,31 @@ TEST(LlmConfigManagerTest, InitialSyncWaitsForLatestReferencedConfiguration) {
         service.push(fiber::ai_server::kModelsDataId,
                      R"({"version":1,"data":[{"model-name":"chat","providers":["old"]}]})", "models-old");
         co_await yield_updates();
-        service.push_not_found("ploto.ai-llm.provider.old");
+        service.push("ploto.ai-llm.provider.old",
+                     R"({"version":1,"data":{
+                         "provider":"old",
+                         "baseurl":"https://old.example.test",
+                         "api-tokens":[],
+                         "protocol":[{
+                             "type":"openai-chat-completions",
+                             "path":"/v1/chat/completions",
+                             "model":"old-model"
+                         }]
+                     }})",
+                     "provider-old");
         co_await yield_updates();
-        EXPECT_FALSE(manager.ready());
+        EXPECT_TRUE(manager.ready());
+        auto old_snapshot = serving.current().value;
+        EXPECT_NE(old_snapshot, nullptr);
+        EXPECT_EQ(old_snapshot->project->metadata().version, 1);
 
         service.push(fiber::ai_server::kModelsDataId,
                      R"({"version":2,"data":[{"model-name":"chat","providers":["new"]}]})", "models-new");
         co_await yield_updates();
-        EXPECT_EQ(manager.provider_subscription_count(), 1u);
-        EXPECT_FALSE(manager.ready());
+        EXPECT_EQ(manager.provider_subscription_count(), 2u);
+        EXPECT_TRUE(manager.ready());
+        EXPECT_EQ(serving.current().value, old_snapshot);
+        EXPECT_EQ(manager.current_project()->metadata().version, 1);
 
         service.push("ploto.ai-llm.provider.new",
                      R"({"version":1,"data":{
@@ -251,11 +349,8 @@ TEST(LlmConfigManagerTest, InitialSyncWaitsForLatestReferencedConfiguration) {
                          }]
                      }})",
                      "provider-new");
-        for (std::size_t i = 0; i < 16 && manager.successful_updates() != 4; ++i) {
-            co_await fiber::async::yield();
-        }
+        co_await yield_updates();
 
-        EXPECT_EQ(manager.successful_updates(), 4u);
         EXPECT_TRUE(manager.ready());
         auto snapshot = serving.current();
         EXPECT_NE(snapshot.value, nullptr);
@@ -268,6 +363,141 @@ TEST(LlmConfigManagerTest, InitialSyncWaitsForLatestReferencedConfiguration) {
         EXPECT_EQ(snapshot.value->project->metadata().version, 2);
         EXPECT_NE(snapshot.value->project->find_provider("new")->config, nullptr);
         EXPECT_EQ(snapshot.value->project->find_provider("old"), nullptr);
+        EXPECT_EQ(manager.provider_subscription_count(), 1u);
+        EXPECT_NE(old_snapshot->project->find_provider("old"), nullptr);
+        EXPECT_EQ(old_snapshot->project->find_provider("new"), nullptr);
+
+        co_await manager.shutdown();
+        completed = true;
+        loop.stop();
+    });
+
+    loop.run();
+    EXPECT_TRUE(completed);
+}
+
+TEST(LlmConfigManagerTest, ProviderServiceCandidatePublishesDeepImmutableEndpoints) {
+    fiber::event::EventLoop loop;
+    FakeConfigService service;
+    FakeNamingService naming;
+    fiber::ai_server::LlmConfigManager manager(loop, service, naming);
+    auto snapshots = manager.subscribe_snapshot();
+    bool completed = false;
+
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        EXPECT_TRUE(manager.start());
+        service.push(fiber::ai_server::kBt1KeysDataId,
+                     R"({"version":1,"data":{"keys":[{"kid":"main","secret":"secret"}]}})", "bt1");
+        service.push(fiber::ai_server::kModelsDataId,
+                     R"({"version":1,"data":[{"model-name":"chat","providers":["routed"]}]})", "models");
+        co_await yield_updates();
+        service.push("ploto.ai-llm.provider.routed",
+                     R"({"version":1,"data":{
+                         "provider":"routed",
+                         "baseurl":"service://backend-a",
+                         "api-tokens":[],
+                         "protocol":[{
+                             "type":"openai-chat-completions",
+                             "path":"/v1/chat/completions",
+                             "model":"model-a"
+                         }]
+                     }})",
+                     "provider-a");
+        co_await yield_updates();
+
+        EXPECT_FALSE(manager.ready());
+        EXPECT_EQ(manager.service_subscription_count(), 1u);
+        EXPECT_EQ(manager.current_project(), nullptr);
+
+        fiber::nacos::ServiceInfo backend_a;
+        backend_a.name = "backend-a";
+        backend_a.group_name = "DEFAULT_GROUP";
+        backend_a.last_ref_time = 10;
+        backend_a.checksum = "a1";
+        backend_a.hosts.push_back(fiber::nacos::Instance{
+                .ip = "10.0.0.1",
+                .port = 8080,
+                .weight = 2.0,
+                .cluster_name = "primary",
+        });
+        naming.push("backend-a", std::move(backend_a));
+        co_await yield_updates();
+
+        EXPECT_TRUE(manager.ready());
+        auto first = snapshots.current().value;
+        EXPECT_NE(first, nullptr);
+        const auto *first_provider = first->project->find_provider("routed");
+        EXPECT_NE(first_provider, nullptr);
+        EXPECT_NE(first_provider->service, nullptr);
+        EXPECT_EQ(first_provider->service->endpoints.size(), 1u);
+        EXPECT_EQ(first_provider->service->endpoints[0].ip, "10.0.0.1");
+
+        service.push("ploto.ai-llm.provider.routed",
+                     R"({"version":2,"data":{
+                         "provider":"routed",
+                         "baseurl":"service://backend-b",
+                         "api-tokens":[],
+                         "protocol":[{
+                             "type":"openai-chat-completions",
+                             "path":"/v1/chat/completions",
+                             "model":"model-b"
+                         }]
+                     }})",
+                     "provider-b");
+        co_await yield_updates();
+
+        EXPECT_EQ(manager.service_subscription_count(), 2u);
+        EXPECT_EQ(snapshots.current().value, first);
+        EXPECT_EQ(manager.current_project()->find_provider("routed")->config->metadata.version, 1);
+
+        fiber::nacos::ServiceInfo backend_b;
+        backend_b.name = "backend-b";
+        backend_b.group_name = "DEFAULT_GROUP";
+        backend_b.last_ref_time = 20;
+        backend_b.checksum = "b1";
+        backend_b.hosts.push_back(fiber::nacos::Instance{
+                .ip = "10.0.0.2",
+                .port = 9090,
+                .weight = 1.0,
+                .cluster_name = "primary",
+        });
+        backend_b.hosts.push_back(fiber::nacos::Instance{
+                .ip = "10.0.0.3",
+                .port = 9091,
+                .weight = 1.0,
+                .healthy = false,
+                .cluster_name = "primary",
+        });
+        naming.push("backend-b", std::move(backend_b));
+        co_await yield_updates();
+
+        auto second = snapshots.current().value;
+        EXPECT_NE(second, nullptr);
+        EXPECT_NE(second, first);
+        const auto *second_provider = second->project->find_provider("routed");
+        EXPECT_NE(second_provider, nullptr);
+        EXPECT_NE(second_provider->service, nullptr);
+        EXPECT_EQ(second_provider->config->metadata.version, 2);
+        EXPECT_EQ(second_provider->service->service_name, "backend-b");
+        EXPECT_EQ(second_provider->service->endpoints.size(), 1u);
+        EXPECT_EQ(second_provider->service->endpoints[0].ip, "10.0.0.2");
+        EXPECT_EQ(manager.service_subscription_count(), 1u);
+        EXPECT_EQ(first_provider->config->metadata.version, 1);
+        EXPECT_EQ(first_provider->service->service_name, "backend-a");
+        EXPECT_EQ(first_provider->service->endpoints[0].ip, "10.0.0.1");
+
+        fiber::nacos::ServiceInfo empty_backend_b;
+        empty_backend_b.name = "backend-b";
+        empty_backend_b.group_name = "DEFAULT_GROUP";
+        empty_backend_b.last_ref_time = 30;
+        empty_backend_b.checksum = "b2";
+        naming.push("backend-b", std::move(empty_backend_b));
+        co_await yield_updates();
+
+        auto empty = snapshots.current().value;
+        EXPECT_NE(empty, nullptr);
+        EXPECT_TRUE(empty->project->find_provider("routed")->service->endpoints.empty());
+        EXPECT_EQ(second_provider->service->endpoints.size(), 1u);
 
         co_await manager.shutdown();
         completed = true;
@@ -283,7 +513,8 @@ TEST(LlmConfigManagerTest, HttpWorkersInstallInitialSnapshotBeforeBind) {
     fiber::event::EventLoopGroup workers(2);
     workers.start();
     FakeConfigService service;
-    fiber::ai_server::LlmConfigManager manager(accept_loop, service);
+    FakeNamingService naming;
+    fiber::ai_server::LlmConfigManager manager(accept_loop, service, naming);
     fiber::ai_server::AiServer server(accept_loop, workers);
     bool completed = false;
 

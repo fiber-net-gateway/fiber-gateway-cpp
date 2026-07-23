@@ -2,7 +2,6 @@
 #define FIBER_AI_SERVER_LLM_CONFIG_SNAPSHOT_H
 
 #include <algorithm>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -18,6 +17,7 @@ inline constexpr std::string_view kBt1KeysDataId = "ploto.ai-llm.auth.bt1.keys";
 inline constexpr std::string_view kModelsDataId = "ploto.ai-llm.models";
 inline constexpr std::string_view kProviderDataIdPrefix = "ploto.ai-llm.provider.";
 inline constexpr std::string_view kUserGroupDataIdPrefix = "ploto.ai-llm.user-group.";
+inline constexpr std::string_view kDefaultNamingGroup = "DEFAULT_GROUP";
 
 struct ConfigMetadata {
     std::string data_id;
@@ -45,26 +45,6 @@ struct UserGroupSnapshot {
     std::vector<std::string> users;
 
     [[nodiscard]] bool contains(std::string_view user) const noexcept;
-};
-
-class UserGroupState {
-public:
-    explicit UserGroupState(std::string name) noexcept;
-
-    [[nodiscard]] const std::string &name() const noexcept { return name_; }
-    [[nodiscard]] std::shared_ptr<const UserGroupSnapshot> current() const noexcept;
-
-private:
-    friend class LlmConfigManager;
-
-    void publish(std::shared_ptr<const UserGroupSnapshot> snapshot) noexcept;
-
-    std::string name_;
-#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
-    std::atomic<std::shared_ptr<const UserGroupSnapshot>> current_;
-#else
-    std::shared_ptr<const UserGroupSnapshot> current_;
-#endif
 };
 
 enum class ProviderProtocolType : std::uint8_t {
@@ -124,28 +104,47 @@ struct ModelsConfigSnapshot {
     std::vector<ModelDefinition> models;
 };
 
+struct ServiceEndpoint {
+    std::string ip;
+    std::uint16_t port = 0;
+    double weight = 1.0;
+    std::string cluster_name;
+};
+
+struct ServiceEndpointSnapshot {
+    std::string service_name;
+    std::string group;
+    std::int64_t last_ref_time = 0;
+    std::string checksum;
+    std::vector<ServiceEndpoint> endpoints;
+};
+
 struct ProjectProvider {
     std::string name;
     std::shared_ptr<const ProviderConfigSnapshot> config;
+    std::shared_ptr<const ServiceEndpointSnapshot> service;
 };
 
 struct CompiledModelRoute {
     std::string model_name;
-    std::vector<std::size_t> provider_indices;
-    std::optional<std::size_t> fallback_provider_index;
-    std::vector<std::shared_ptr<UserGroupState>> allow_user_groups;
+    std::vector<std::shared_ptr<const ProjectProvider>> providers;
+    std::shared_ptr<const ProjectProvider> fallback_provider;
+    std::vector<std::shared_ptr<const UserGroupSnapshot>> allow_user_groups;
     LoadBalanceConfig load_balance;
     std::optional<ModelRateLimitConfig> rate_limit;
 };
 
 class LlmProjectSnapshot {
 public:
-    LlmProjectSnapshot(ConfigMetadata metadata, std::uint64_t generation, std::vector<ProjectProvider> providers,
+    LlmProjectSnapshot(ConfigMetadata metadata, std::uint64_t generation,
+                       std::vector<std::shared_ptr<const ProjectProvider>> providers,
                        std::vector<CompiledModelRoute> models) noexcept;
 
     [[nodiscard]] const ConfigMetadata &metadata() const noexcept { return metadata_; }
     [[nodiscard]] std::uint64_t generation() const noexcept { return generation_; }
-    [[nodiscard]] const std::vector<ProjectProvider> &providers() const noexcept { return providers_; }
+    [[nodiscard]] const std::vector<std::shared_ptr<const ProjectProvider>> &providers() const noexcept {
+        return providers_;
+    }
     [[nodiscard]] const std::vector<CompiledModelRoute> &models() const noexcept { return models_; }
 
     [[nodiscard]] const ProjectProvider *find_provider(std::string_view name) const noexcept;
@@ -154,11 +153,11 @@ public:
 private:
     ConfigMetadata metadata_;
     std::uint64_t generation_ = 0;
-    std::vector<ProjectProvider> providers_;
+    std::vector<std::shared_ptr<const ProjectProvider>> providers_;
     std::vector<CompiledModelRoute> models_;
 };
 
-struct LlmServingSnapshot {
+struct LlmConfigSnapshot {
     std::uint64_t generation = 0;
     std::shared_ptr<const Bt1KeySnapshot> bt1_keys;
     std::shared_ptr<const LlmProjectSnapshot> project;

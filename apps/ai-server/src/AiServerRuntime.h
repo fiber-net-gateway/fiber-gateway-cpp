@@ -24,6 +24,7 @@
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/NacosClient.h>
 #include <fiber/nacos/NacosCreateError.h>
+#include <fiber/nacos/NamingService.h>
 #include <net/TcpListener.h>
 
 namespace fiber::ai_server {
@@ -33,10 +34,12 @@ namespace fiber::ai_server {
 enum class AiServerRuntimeErrorCode : std::uint8_t {
     CreateNacosClient,
     CreateConfigService,
+    CreateNamingService,
     AllocateRuntime,
     Bind,
     StartNacosClient,
     StartConfigService,
+    StartNamingService,
     StartConfigManager,
     InitialConfigUnavailable,
     InitialConfigTimeout,
@@ -83,7 +86,8 @@ private:
                     event::EventLoopGroup &http_workers, net::SocketAddress listen_address,
                     net::ListenOptions listen_options, std::chrono::milliseconds initial_config_timeout,
                     std::unique_ptr<nacos::NacosClient> nacos_client,
-                    std::unique_ptr<nacos::ConfigService> config_service) noexcept;
+                    std::unique_ptr<nacos::ConfigService> config_service,
+                    std::unique_ptr<nacos::NamingService> naming_service) noexcept;
 
     [[nodiscard]] async::DetachedTask start_nacos() noexcept;
     [[nodiscard]] async::DetachedTask shutdown_nacos() noexcept;
@@ -98,6 +102,7 @@ private:
     std::chrono::milliseconds initial_config_timeout_{0};
     std::unique_ptr<nacos::NacosClient> nacos_client_;
     std::unique_ptr<nacos::ConfigService> config_service_;
+    std::unique_ptr<nacos::NamingService> naming_service_;
     LlmConfigManager config_manager_;
     async::WaitGroup nacos_start_tasks_;
     async::Watch<NacosStartStatus> nacos_start_status_;
