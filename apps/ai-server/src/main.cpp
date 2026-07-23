@@ -1,13 +1,12 @@
 #include "AiServer.h"
+#include "AiServerConfig.h"
 
-#include <charconv>
 #include <csignal>
 #include <cstdint>
 #include <expected>
 #include <iostream>
-#include <optional>
 #include <string_view>
-#include <system_error>
+#include <utility>
 
 #include <cerrno>
 #include <sys/socket.h>
@@ -19,15 +18,6 @@
 #include "net/TcpListener.h"
 
 namespace {
-
-std::optional<std::uint16_t> parse_port(std::string_view text) noexcept {
-    unsigned int value = 0;
-    const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
-    if (result.ec != std::errc{} || result.ptr != text.data() + text.size() || value > 65535) {
-        return std::nullopt;
-    }
-    return static_cast<std::uint16_t>(value);
-}
 
 fiber::common::IoResult<std::uint16_t> resolve_port(int fd) noexcept {
     sockaddr_storage bound{};
@@ -43,23 +33,32 @@ fiber::common::IoResult<std::uint16_t> resolve_port(int fd) noexcept {
     return address.port();
 }
 
+void print_config_error(std::string_view path, const fiber::ai_server::AiServerConfigError &error) {
+    std::cerr << "configuration error in " << path;
+    if (error.line != 0) {
+        std::cerr << ':' << error.line;
+    }
+    if (!error.key.empty()) {
+        std::cerr << " [" << error.key << ']';
+    }
+    std::cerr << ": " << error.detail << '\n';
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
     if (argc > 2) {
-        std::cerr << "usage: ai-server [port]\n";
+        std::cerr << "usage: ai-server [config.env]\n";
         return 1;
     }
 
-    std::uint16_t port = 8080;
-    if (argc == 2) {
-        auto parsed = parse_port(argv[1]);
-        if (!parsed) {
-            std::cerr << "usage: ai-server [port]\n";
-            return 1;
-        }
-        port = *parsed;
+    const std::string_view config_path = argc == 2 ? std::string_view(argv[1]) : std::string_view("ai-server.env");
+    auto config_result = fiber::ai_server::AiServerConfig::load_from_file(config_path);
+    if (!config_result) {
+        print_config_error(config_path, config_result.error());
+        return 1;
     }
+    fiber::ai_server::AiServerConfig config = std::move(*config_result);
 
     (void) ::signal(SIGPIPE, SIG_IGN);
 
@@ -67,7 +66,7 @@ int main(int argc, char **argv) {
     fiber::ai_server::AiServer server(loop);
 
     fiber::net::ListenOptions listen_options{};
-    auto bind_result = server.bind(fiber::net::SocketAddress::any_v4(port), listen_options);
+    auto bind_result = server.bind(config.listen_address(), listen_options);
     if (!bind_result) {
         std::cerr << "bind failed: " << fiber::common::io_err_name(bind_result.error()) << '\n';
         return 1;
@@ -80,7 +79,9 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    std::cout << "ai-server listening on http://0.0.0.0:" << *bound_port << std::endl;
+    const fiber::net::SocketAddress bound_address(config.listen_address().ip(), *bound_port);
+    std::cout << "ai-server listening on http://" << bound_address.to_string()
+              << ", nacos servers=" << config.nacos_config().server_ips().size() << std::endl;
     fiber::async::spawn(loop, [&server]() { return server.serve(); });
     loop.run();
     return 0;
