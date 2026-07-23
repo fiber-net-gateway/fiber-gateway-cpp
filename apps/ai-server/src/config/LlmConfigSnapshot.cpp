@@ -18,7 +18,7 @@ bool UserGroupSnapshot::contains(std::string_view user) const noexcept {
 UserGroupState::UserGroupState(std::string name) noexcept : name_(std::move(name)) {}
 
 void UserGroupState::publish(std::shared_ptr<const UserGroupSnapshot> snapshot) noexcept {
-    current_ = std::move(snapshot);
+    current_.store(std::move(snapshot), std::memory_order_release);
 }
 
 const ProviderProtocol *ProviderConfigSnapshot::find_protocol(ProviderProtocolType type) const noexcept {

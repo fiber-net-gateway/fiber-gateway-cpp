@@ -1,6 +1,7 @@
 #ifndef FIBER_AI_SERVER_AI_SERVER_CONFIG_H
 #define FIBER_AI_SERVER_AI_SERVER_CONFIG_H
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -37,12 +38,15 @@ public:
 
     [[nodiscard]] const net::SocketAddress &listen_address() const noexcept { return listen_address_; }
     [[nodiscard]] const nacos::NacosClientConfig &nacos_config() const noexcept { return nacos_config_; }
+    [[nodiscard]] std::chrono::milliseconds initial_config_timeout() const noexcept { return initial_config_timeout_; }
 
 private:
-    AiServerConfig(net::SocketAddress listen_address, nacos::NacosClientConfig nacos_config) noexcept;
+    AiServerConfig(net::SocketAddress listen_address, nacos::NacosClientConfig nacos_config,
+                   std::chrono::milliseconds initial_config_timeout) noexcept;
 
     net::SocketAddress listen_address_;
     nacos::NacosClientConfig nacos_config_;
+    std::chrono::milliseconds initial_config_timeout_;
 };
 
 } // namespace fiber::ai_server

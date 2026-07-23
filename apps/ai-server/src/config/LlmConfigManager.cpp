@@ -37,6 +37,8 @@ LlmConfigManager::LlmConfigManager(event::EventLoop &loop, nacos::ConfigService 
     loop_(&loop), config_service_(&config_service) {
     stop_publisher_ = stop_.acquire_publisher();
     FIBER_ASSERT(stop_publisher_.has_value());
+    serving_publisher_ = serving_.acquire_publisher();
+    FIBER_ASSERT(serving_publisher_.has_value());
 }
 
 LlmConfigManager::~LlmConfigManager() {
@@ -64,10 +66,8 @@ std::expected<void, nacos::ConfigServiceError> LlmConfigManager::start() {
 
     state_ = LlmConfigManagerState::Running;
     tasks_.add(2);
-    async::spawn(*loop_,
-                 [this, subscription = std::move(*bt1)]() mutable { return watch_bt1(std::move(subscription)); });
-    async::spawn(*loop_,
-                 [this, subscription = std::move(*models)]() mutable { return watch_models(std::move(subscription)); });
+    async::spawn([this, subscription = std::move(*bt1)]() mutable { return watch_bt1(std::move(subscription)); });
+    async::spawn([this, subscription = std::move(*models)]() mutable { return watch_models(std::move(subscription)); });
     return {};
 }
 
@@ -97,6 +97,9 @@ async::DetachedTask LlmConfigManager::watch_bt1(nacos::Subscription<nacos::Confi
     auto &subscriber = subscription.subscriber();
     auto snapshot = subscriber.current();
     for (;;) {
+        if (stop_snapshot.value && *stop_snapshot.value) {
+            break;
+        }
         if (snapshot.value != nullptr) {
             if (snapshot.value->kind == nacos::ResultKind::Closed) {
                 break;
@@ -124,6 +127,9 @@ async::DetachedTask LlmConfigManager::watch_models(nacos::Subscription<nacos::Co
     auto &subscriber = subscription.subscriber();
     auto snapshot = subscriber.current();
     for (;;) {
+        if (stop_snapshot.value && *stop_snapshot.value) {
+            break;
+        }
         if (snapshot.value != nullptr) {
             if (snapshot.value->kind == nacos::ResultKind::Closed) {
                 break;
@@ -152,6 +158,9 @@ async::DetachedTask LlmConfigManager::watch_provider(std::shared_ptr<ProviderEnt
     auto &subscriber = subscription.subscriber();
     auto snapshot = subscriber.current();
     for (;;) {
+        if (stop_snapshot.value && *stop_snapshot.value) {
+            break;
+        }
         if (snapshot.value != nullptr) {
             if (snapshot.value->kind == nacos::ResultKind::Closed) {
                 break;
@@ -180,6 +189,9 @@ async::DetachedTask LlmConfigManager::watch_group(std::shared_ptr<GroupEntry> en
     auto &subscriber = subscription.subscriber();
     auto snapshot = subscriber.current();
     for (;;) {
+        if (stop_snapshot.value && *stop_snapshot.value) {
+            break;
+        }
         if (snapshot.value != nullptr) {
             if (snapshot.value->kind == nacos::ResultKind::Closed) {
                 break;
@@ -214,6 +226,7 @@ void LlmConfigManager::apply_bt1(const nacos::ConfigData &data) {
     }
     bt1_keys_ = std::make_shared<const Bt1KeySnapshot>(std::move(*parsed));
     ++successful_updates_;
+    publish_serving_if_ready();
 }
 
 void LlmConfigManager::apply_models(const nacos::ConfigData &data) {
@@ -247,6 +260,7 @@ void LlmConfigManager::apply_models(const nacos::ConfigData &data) {
     rebuild_project();
     remove_unreferenced(provider_names, group_names);
     ++successful_updates_;
+    publish_serving_if_ready();
 }
 
 void LlmConfigManager::apply_provider(const std::shared_ptr<ProviderEntry> &entry, const nacos::ConfigData &data) {
@@ -268,6 +282,7 @@ void LlmConfigManager::apply_provider(const std::shared_ptr<ProviderEntry> &entr
     entry->current = std::make_shared<const ProviderConfigSnapshot>(std::move(*parsed));
     rebuild_project();
     ++successful_updates_;
+    publish_serving_if_ready();
 }
 
 void LlmConfigManager::apply_group(const std::shared_ptr<GroupEntry> &entry, const nacos::ConfigData &data) {
@@ -288,6 +303,7 @@ void LlmConfigManager::apply_group(const std::shared_ptr<GroupEntry> &entry, con
     }
     entry->state->publish(std::make_shared<const UserGroupSnapshot>(std::move(*parsed)));
     ++successful_updates_;
+    publish_serving_if_ready();
 }
 
 std::expected<void, nacos::ConfigServiceError>
@@ -354,7 +370,7 @@ std::expected<void, nacos::ConfigServiceError> LlmConfigManager::add_provider(st
     auto entry = std::make_shared<ProviderEntry>(std::move(name));
     providers_.emplace(entry->name, entry);
     tasks_.add();
-    async::spawn(*loop_, [this, entry, subscription = std::move(*subscription)]() mutable {
+    async::spawn([this, entry, subscription = std::move(*subscription)]() mutable {
         return watch_provider(entry, std::move(subscription));
     });
     return {};
@@ -368,7 +384,7 @@ std::expected<void, nacos::ConfigServiceError> LlmConfigManager::add_group(std::
     auto entry = std::make_shared<GroupEntry>(std::move(name));
     groups_.emplace(entry->state->name(), entry);
     tasks_.add();
-    async::spawn(*loop_, [this, entry, subscription = std::move(*subscription)]() mutable {
+    async::spawn([this, entry, subscription = std::move(*subscription)]() mutable {
         return watch_group(entry, std::move(subscription));
     });
     return {};
@@ -447,6 +463,40 @@ void LlmConfigManager::rebuild_project() {
     }
     project_ = std::make_shared<const LlmProjectSnapshot>(models_->metadata, ++project_generation_,
                                                           std::move(providers), std::move(models));
+}
+
+bool LlmConfigManager::dynamic_dependencies_ready() const noexcept {
+    for (const auto &[name, entry]: providers_) {
+        (void) name;
+        if (!entry->current) {
+            return false;
+        }
+    }
+    for (const auto &[name, entry]: groups_) {
+        (void) name;
+        if (!entry->state->current()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void LlmConfigManager::publish_serving_if_ready() {
+    FIBER_ASSERT(loop_->in_loop());
+    if (!bt1_keys_ || !project_) {
+        return;
+    }
+    if (!initial_sync_complete_) {
+        if (!dynamic_dependencies_ready()) {
+            return;
+        }
+        initial_sync_complete_ = true;
+    }
+    serving_publisher_->publish(LlmServingSnapshot{
+            .generation = ++serving_generation_,
+            .bt1_keys = bt1_keys_,
+            .project = project_,
+    });
 }
 
 void LlmConfigManager::report_failure(std::string_view data_id, std::string_view md5, LlmConfigError error) {

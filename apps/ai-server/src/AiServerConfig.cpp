@@ -5,6 +5,7 @@
 #include <charconv>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <system_error>
 #include <utility>
@@ -15,6 +16,7 @@ namespace {
 
 constexpr std::string_view kListenAddressKey = "AI_SERVER_LISTEN_ADDRESS";
 constexpr std::string_view kListenPortKey = "AI_SERVER_LISTEN_PORT";
+constexpr std::string_view kInitialConfigTimeoutKey = "AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS";
 constexpr std::string_view kNacosServerAddressesKey = "NACOS_SERVER_ADDRESSES";
 constexpr std::string_view kNacosHttpPortKey = "NACOS_HTTP_PORT";
 constexpr std::string_view kNacosGrpcPortKey = "NACOS_GRPC_PORT";
@@ -25,10 +27,10 @@ constexpr std::string_view kNacosPasswordKey = "NACOS_PASSWORD";
 constexpr std::string_view kNacosContextPathKey = "NACOS_CONTEXT_PATH";
 constexpr std::string_view kNacosClientVersionKey = "NACOS_CLIENT_VERSION";
 
-constexpr std::array<std::string_view, 11> kKnownKeys = {
-        kListenAddressKey, kListenPortKey,       kNacosServerAddressesKey, kNacosHttpPortKey,
-        kNacosGrpcPortKey, kNacosNamespaceKey,   kNacosTenantKey,          kNacosUsernameKey,
-        kNacosPasswordKey, kNacosContextPathKey, kNacosClientVersionKey,
+constexpr std::array<std::string_view, 12> kKnownKeys = {
+        kListenAddressKey, kListenPortKey,    kInitialConfigTimeoutKey, kNacosServerAddressesKey,
+        kNacosHttpPortKey, kNacosGrpcPortKey, kNacosNamespaceKey,       kNacosTenantKey,
+        kNacosUsernameKey, kNacosPasswordKey, kNacosContextPathKey,     kNacosClientVersionKey,
 };
 
 struct EnvEntry {
@@ -232,6 +234,17 @@ bool parse_port(std::string_view text, bool allow_zero, std::uint16_t &out) noex
     return true;
 }
 
+bool parse_milliseconds(std::string_view text, std::chrono::milliseconds &out) noexcept {
+    std::uint64_t value = 0;
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
+    constexpr auto kMax = static_cast<std::uint64_t>(std::numeric_limits<std::chrono::milliseconds::rep>::max());
+    if (text.empty() || result.ec != std::errc{} || result.ptr != text.data() + text.size() || value > kMax) {
+        return false;
+    }
+    out = std::chrono::milliseconds(value);
+    return true;
+}
+
 std::expected<std::vector<net::IpAddress>, AiServerConfigError> parse_server_addresses(std::string_view value,
                                                                                        std::size_t line) {
     std::vector<net::IpAddress> addresses;
@@ -255,12 +268,20 @@ std::expected<std::vector<net::IpAddress>, AiServerConfigError> parse_server_add
 
 std::expected<void, AiServerConfigError> apply_entry(const EnvEntry &entry, net::IpAddress &listen_ip,
                                                      std::uint16_t &listen_port,
+                                                     std::chrono::milliseconds &initial_config_timeout,
                                                      nacos::NacosClientConfigParams &nacos_params,
                                                      FieldLines &field_lines) {
     if (entry.key == kListenAddressKey) {
         if (!net::IpAddress::parse(entry.value, listen_ip)) {
             return std::unexpected(make_error(AiServerConfigErrorCode::InvalidValue, entry.line, entry.key,
                                               "expected an IPv4 or IPv6 literal"));
+        }
+        return {};
+    }
+    if (entry.key == kInitialConfigTimeoutKey) {
+        if (!parse_milliseconds(entry.value, initial_config_timeout)) {
+            return std::unexpected(make_error(AiServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                              "expected a non-negative millisecond duration"));
         }
         return {};
     }
@@ -357,8 +378,10 @@ AiServerConfigError from_nacos_error(const nacos::NacosConfigError &error, const
 
 } // namespace
 
-AiServerConfig::AiServerConfig(net::SocketAddress listen_address, nacos::NacosClientConfig nacos_config) noexcept :
-    listen_address_(std::move(listen_address)), nacos_config_(std::move(nacos_config)) {}
+AiServerConfig::AiServerConfig(net::SocketAddress listen_address, nacos::NacosClientConfig nacos_config,
+                               std::chrono::milliseconds initial_config_timeout) noexcept :
+    listen_address_(std::move(listen_address)), nacos_config_(std::move(nacos_config)),
+    initial_config_timeout_(initial_config_timeout) {}
 
 std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_file(std::string_view path) {
     std::ifstream input(std::string(path), std::ios::binary);
@@ -383,10 +406,11 @@ std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_str
 
     net::IpAddress listen_ip = net::IpAddress::any_v4();
     std::uint16_t listen_port = 8080;
+    std::chrono::milliseconds initial_config_timeout{60000};
     nacos::NacosClientConfigParams nacos_params;
     FieldLines field_lines;
     for (const EnvEntry &entry: *entries) {
-        auto result = apply_entry(entry, listen_ip, listen_port, nacos_params, field_lines);
+        auto result = apply_entry(entry, listen_ip, listen_port, initial_config_timeout, nacos_params, field_lines);
         if (!result) {
             return std::unexpected(std::move(result.error()));
         }
@@ -397,7 +421,7 @@ std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_str
         return std::unexpected(from_nacos_error(nacos_config.error(), field_lines));
     }
 
-    return AiServerConfig(net::SocketAddress(listen_ip, listen_port), std::move(*nacos_config));
+    return AiServerConfig(net::SocketAddress(listen_ip, listen_port), std::move(*nacos_config), initial_config_timeout);
 }
 
 } // namespace fiber::ai_server

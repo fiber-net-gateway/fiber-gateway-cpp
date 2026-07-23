@@ -2,9 +2,10 @@
 
 ## Overview
 
-`ai-server` is the C++ LLM proxy application. It owns the Nacos client and configuration service on the HTTP
-EventLoop, subscribes to the Java-compatible LLM configuration set, and publishes immutable routing snapshots for
-later request-processing milestones. LLM request authentication, routing, and provider proxying are not exposed yet.
+`ai-server` is the C++ LLM proxy application. Nacos configuration, HTTP traffic, and CAT transport have separate
+EventLoop ownership. The process subscribes to the Java-compatible LLM configuration set and publishes serving
+snapshots to HTTP workers. The HTTP listener is not bound until the first complete configuration snapshot is installed
+on every worker. LLM request authentication, routing, and provider proxying are not exposed yet.
 
 ## Build
 
@@ -37,6 +38,7 @@ because the current public `fiber::nacos` configuration API owns resolved IP add
 
 - `AI_SERVER_LISTEN_ADDRESS` (default `0.0.0.0`)
 - `AI_SERVER_LISTEN_PORT` (default `8080`; port `0` selects an unused local port)
+- `AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS` (default `60000`; `0` waits indefinitely without binding)
 - `NACOS_SERVER_ADDRESSES` (required)
 - `NACOS_HTTP_PORT` (default `8848`)
 - `NACOS_GRPC_PORT` (default `9848`)
@@ -51,11 +53,9 @@ curl -i http://127.0.0.1:8080/health
 curl -i http://127.0.0.1:8080/ready
 ```
 
-`GET /health` always returns `200` with `{"status":"ok"}` while the HTTP process is serving. `GET /ready` returns
-`503` with `{"status":"not_ready"}` until both the BT1 key configuration and the model project have a valid snapshot,
-then returns `200` with `{"status":"ready"}`. Referenced Provider or user-group configurations may still be pending:
-this matches the Java behavior where the route can exist while a missing Provider fails requests and a missing group
-acts as an empty group. Other methods on either probe return `405`; all other paths return `404` until their business
+Before initial configuration synchronization completes, the configured port is not open, so neither probe is
+reachable. Once serving starts, `GET /health` returns `200` with `{"status":"ok"}` and `GET /ready` returns `200` with
+`{"status":"ready"}`. Other methods on either probe return `405`; all other paths return `404` until their business
 handlers are implemented.
 
 ## Nacos configuration
@@ -77,27 +77,46 @@ the immutable project snapshot. User-group changes update stable group state in 
 see new membership without rebuilding the project. Unreferenced dynamic subscriptions are released after a valid
 model-table switch.
 
+Initial startup deliberately uses a stricter gate than Java runtime refresh behavior. The first serving snapshot
+requires valid BT1 keys, a valid model table, and a valid first snapshot for every Provider and user group referenced
+by that model table. `NotFound`, invalid JSON, and never-synced subscriptions keep the listener closed. A later valid
+value can complete startup. After the listener is open, invalid updates and Nacos disconnects retain the last valid
+snapshot and do not close or rebind the port.
+
 Configuration rejection logs include only Data ID, MD5, field, offset, and the validation message. Provider API token
 values and BT1 secrets are never logged.
 
-The process handles `SIGINT` and `SIGTERM`. Shutdown first drains HTTP connections, then stops the configuration
-manager, the Nacos configuration service, and finally the Nacos authentication client.
+## EventLoop ownership
+
+- The main EventLoop owns the listener and accepts connections.
+- The HTTP worker EventLoopGroup contains one loop per CPU in the process affinity mask. Accepted connections are
+  distributed round-robin. Each worker keeps a loop-local pointer to the latest serving snapshot, so requests do not
+  lock the cross-loop publication watch.
+- A single-loop Nacos EventLoopGroup owns `NacosClient`, `ConfigService`, subscriptions, parsing, and snapshot
+  publication.
+- A separate single-loop CAT EventLoopGroup reserves CAT sender ownership. The current ai-server milestone does not
+  create a `CatClient`; no CAT endpoint is invented by startup defaults.
+
+The process handles `SIGINT` and `SIGTERM`, including while it is waiting for initial configuration. Shutdown first
+drains HTTP connections and stops worker snapshot watchers, then stops the configuration manager, the Nacos
+configuration service, and finally the Nacos authentication client. EventLoop groups stop only after their owned
+resources have completed shutdown.
 
 ## Linked libraries
 
 - `fiber::nacos`: active authentication and configuration transport.
-- `fiber::cat`: linked for future request and provider-call tracing.
+- `fiber::cat`: linked for future request and provider-call tracing; its sender loop is already isolated.
 - `fiber::prometheus`: linked for future fixed-schema service metrics and text collection.
 
 ## Layout
 
 - `src/AiServer.*`: HTTP server ownership and request dispatch boundary.
 - `src/AiServerConfig.*`: dotenv parsing plus HTTP and Nacos startup validation.
-- `src/AiServerRuntime.*`: listener, Nacos services, configuration manager, and ordered shutdown ownership.
+- `src/AiServerRuntime.*`: delayed listener binding, cross-loop Nacos lifecycle, and ordered shutdown ownership.
 - `src/config/LlmConfigCodec.*`: Java-compatible JSON parsing and validation.
 - `src/config/LlmConfigManager.*`: fixed/dynamic subscriptions and last-known-good update policy.
 - `src/config/LlmConfigSnapshot.*`: immutable BT1, Provider, model-project, and user-group snapshot types.
-- `src/main.cpp`: config path, signal handling, and EventLoop lifetime.
+- `src/main.cpp`: config path, signal handling, CPU-sized HTTP workers, and Nacos/CAT EventLoop lifetime.
 
 ## Notes
 

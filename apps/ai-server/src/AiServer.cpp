@@ -2,8 +2,10 @@
 
 #include <cstdint>
 #include <string_view>
+#include <utility>
 
-#include "config/LlmConfigManager.h"
+#include "async/WhenAny.h"
+#include "common/Assert.h"
 #include "http/HttpExchange.h"
 #include "http/HttpExchangeIo.h"
 #include "http/HttpHeaders.h"
@@ -51,11 +53,77 @@ async::Task<void> send_json(http::HttpExchange &exchange, int status_code, std::
 
 } // namespace
 
-AiServer::AiServer(event::EventLoop &loop, const LlmConfigManager &config_manager) :
-    config_manager_(&config_manager),
-    server_(loop, [this](http::HttpExchange &exchange) { return handle(exchange); }, make_server_options()) {}
+AiServer::AiServer(event::EventLoop &accept_loop, event::EventLoopGroup &worker_group) :
+    accept_loop_(&accept_loop), worker_group_(&worker_group), workers_(worker_group.size()),
+    server_(
+            accept_loop, [this](http::HttpExchange &exchange) { return handle(exchange); }, make_server_options(),
+            &worker_group) {
+    FIBER_ASSERT(worker_group.size() > 0);
+    config_stop_publisher_ = config_stop_.acquire_publisher();
+    FIBER_ASSERT(config_stop_publisher_.has_value());
+}
+
+AiServer::~AiServer() {
+    FIBER_ASSERT(config_tasks_.empty());
+    FIBER_ASSERT(initial_installs_.empty());
+}
+
+async::Task<bool> AiServer::start_config_workers(LlmConfigManager &config_manager) noexcept {
+    FIBER_ASSERT(accept_loop_->in_loop());
+    FIBER_ASSERT(!config_workers_started_);
+    config_workers_started_ = true;
+
+    const std::size_t worker_count = worker_group_->size();
+    initial_installs_.add(worker_count);
+    config_tasks_.add(worker_count);
+    for (std::size_t i = 0; i < worker_count; ++i) {
+        async::spawn(worker_group_->at(i), [this, i, subscription = config_manager.subscribe_serving()]() mutable {
+            return watch_config(i, std::move(subscription));
+        });
+    }
+    co_await initial_installs_.join();
+    co_return !initial_install_failed_.load(std::memory_order_acquire);
+}
+
+async::DetachedTask AiServer::watch_config(std::size_t worker_index,
+                                           LlmConfigManager::ServingSubscriber subscription) noexcept {
+    FIBER_ASSERT(worker_index < workers_.size());
+    FIBER_ASSERT(&event::EventLoop::current() == &worker_group_->at(worker_index));
+
+    WorkerState &worker = workers_[worker_index];
+    auto stop = config_stop_.subscribe();
+    auto stop_snapshot = stop.current();
+    auto snapshot = subscription.current();
+    for (;;) {
+        if (stop_snapshot.value && *stop_snapshot.value) {
+            break;
+        }
+        if (snapshot.value) {
+            worker.config = snapshot.value;
+            if (!worker.initial_installed) {
+                worker.initial_installed = true;
+                initial_installs_.done();
+            }
+        }
+        auto result = co_await async::when_any(
+                [&subscription, version = snapshot.version]() { return subscription.next(version); },
+                [&stop, version = stop_snapshot.version]() { return stop.next(version); });
+        if (result.is<1>()) {
+            std::move(result).get<1>();
+            break;
+        }
+        snapshot = std::move(result).get<0>();
+        stop_snapshot = stop.current();
+    }
+    if (!worker.initial_installed) {
+        initial_install_failed_.store(true, std::memory_order_release);
+        initial_installs_.done();
+    }
+    config_tasks_.done();
+}
 
 common::IoResult<void> AiServer::bind(const net::SocketAddress &address, const net::ListenOptions &options) {
+    FIBER_ASSERT(accept_loop_->in_loop());
     return server_.bind(address, options);
 }
 
@@ -63,9 +131,25 @@ async::DetachedTask AiServer::serve() { return server_.serve(); }
 
 void AiServer::close() { server_.close(); }
 
-async::Task<void> AiServer::shutdown_and_wait() { co_await server_.shutdown_and_wait(); }
+async::Task<void> AiServer::shutdown_and_wait() {
+    FIBER_ASSERT(accept_loop_->in_loop());
+    co_await server_.shutdown_and_wait();
+    if (config_workers_started_ && !config_workers_stopping_) {
+        config_workers_stopping_ = true;
+        config_stop_publisher_->publish(true);
+    }
+    co_await config_tasks_.join();
+}
 
 int AiServer::fd() const noexcept { return server_.fd(); }
+
+std::shared_ptr<const LlmServingSnapshot> AiServer::current_config() const noexcept {
+    const event::EventLoop &loop = event::EventLoop::current();
+    FIBER_ASSERT(loop.group() == worker_group_);
+    const std::size_t index = loop.group_index();
+    FIBER_ASSERT(index < workers_.size());
+    return workers_[index].config;
+}
 
 async::Task<void> AiServer::handle(http::HttpExchange &exchange) {
     const std::string_view path = exchange.uri().path;
@@ -82,7 +166,8 @@ async::Task<void> AiServer::handle(http::HttpExchange &exchange) {
         co_await send_json(exchange, 200, kHealthBody);
         co_return;
     }
-    if (config_manager_->ready()) {
+    const auto config = current_config();
+    if (config) {
         co_await send_json(exchange, 200, kReadyBody);
         co_return;
     }
