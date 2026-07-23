@@ -5,7 +5,8 @@
 `ai-server` is the C++ LLM proxy application. Nacos configuration, HTTP traffic, and CAT transport have separate
 EventLoop ownership. The process subscribes to the Java-compatible LLM configuration set and publishes serving
 snapshots to HTTP workers. The HTTP listener is not bound until the first complete configuration snapshot is installed
-on every worker. LLM request authentication, routing, and provider proxying are not exposed yet.
+on every worker. The BT1 request-authentication core is implemented, but no LLM business route, model routing, or
+provider proxy is exposed yet.
 
 ## Build
 
@@ -57,6 +58,27 @@ Before initial configuration synchronization completes, the configured port is n
 reachable. Once serving starts, `GET /health` returns `200` with `{"status":"ok"}` and `GET /ready` returns `200` with
 `{"status":"ready"}`. Other methods on either probe return `405`; all other paths return `404` until their business
 handlers are implemented.
+
+## BT1 request authentication
+
+The authentication boundary accepts Java-compatible BT1 tokens from `Authorization: Bearer <token>`. The `Bearer`
+scheme comparison is case-insensitive and surrounding Java-style ASCII control/space bytes are trimmed from its token.
+When `Authorization` is missing or empty, `x-api-key` is used as the compatibility fallback. A present non-Bearer
+`Authorization` value is rejected instead of being treated as a bare token.
+
+The verifier enforces the six-segment `BT1.<kid>.<user>.<exp>.<rnd>.<mac>` structure, configured clock skew, strict
+wire alphabets and bounds, HMAC-SHA-256 over the original first five segments, and constant-time MAC comparison. It
+only decodes and trusts the UTF-8 username after the signature succeeds. Public failures remain the stable
+`invalid_token` and `expired_token` categories; configuration or cryptographic failures remain internal errors.
+
+Successful authentication produces one request-owned context containing both the trusted principal and the exact
+immutable `LlmConfigSnapshot` used for verification. A BT1 key refresh therefore affects new requests atomically,
+while an in-flight request keeps its original keys and project graph. Invalid key updates retain the last valid
+snapshot. The verifier does not log token contents.
+
+This authentication core is intentionally not attached to `/health` or `/ready`, and no placeholder LLM endpoint is
+registered merely to expose it. The eventual LLM handler must invoke it at the outer request boundary before model
+authorization, rate limiting, request parsing, or provider forwarding.
 
 ## Logging
 
@@ -153,6 +175,8 @@ only after their owned resources have completed shutdown.
 - `src/AiServerConfig.*`: dotenv parsing plus HTTP and Nacos startup validation.
 - `src/AiServerLogging.*`: fixed stderr/INFO process logging configuration.
 - `src/AiServerRuntime.*`: delayed listener binding, cross-loop Nacos lifecycle, and ordered shutdown ownership.
+- `src/auth/Bt1TokenVerifier.*`: allocation-free BT1 parsing, verification, and trusted principal construction.
+- `src/auth/LlmRequestAuthenticator.*`: HTTP credential extraction and request-owned configuration snapshot pinning.
 - `src/config/LlmConfigCodec.*`: Java-compatible JSON parsing and validation.
 - `src/config/ConfigNodePool.h`: keyed child leases and subscription-node lifetime reconciliation.
 - `src/config/LlmConfigManager.*`: dependency graph, candidate/active generation switching, and unified publication.

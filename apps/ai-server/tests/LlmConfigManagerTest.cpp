@@ -244,6 +244,37 @@ TEST(LlmConfigManagerTest, PublishesSnapshotsAndRetainsLastValidDynamicConfig) {
         EXPECT_EQ(serving_snapshot.value->bt1_keys->metadata.version, 1);
         EXPECT_EQ(serving_snapshot.value->project, complete_project);
         const auto initial_snapshot = serving_snapshot.value;
+        const auto initial_bt1_keys = initial_snapshot->bt1_keys;
+
+        const std::uint64_t failed_before_invalid_bt1 = manager.failed_updates();
+        service.push(fiber::ai_server::kBt1KeysDataId,
+                     R"({"version":2,"data":{"keys":[
+                         {"kid":"duplicate","secret":"first"},
+                         {"kid":"duplicate","secret":"second"}
+                     ]}})",
+                     "bt1-invalid");
+        co_await yield_updates();
+
+        EXPECT_EQ(manager.failed_updates(), failed_before_invalid_bt1 + 1);
+        EXPECT_EQ(serving.current().value, initial_snapshot);
+        EXPECT_EQ(manager.current_bt1_keys(), initial_bt1_keys);
+
+        service.push(fiber::ai_server::kBt1KeysDataId,
+                     R"({"version":2,"data":{"clockSkewSec":30,"keys":[
+                         {"kid":"next","secret":"next-secret"}
+                     ]}})",
+                     "bt1-v2");
+        co_await yield_updates();
+
+        const auto rotated_bt1_snapshot = serving.current().value;
+        EXPECT_NE(rotated_bt1_snapshot, initial_snapshot);
+        EXPECT_EQ(rotated_bt1_snapshot->project, complete_project);
+        EXPECT_EQ(rotated_bt1_snapshot->bt1_keys->metadata.version, 2);
+        EXPECT_EQ(rotated_bt1_snapshot->bt1_keys->clock_skew_seconds, 30);
+        EXPECT_EQ(rotated_bt1_snapshot->bt1_keys->find_key("main"), nullptr);
+        EXPECT_NE(rotated_bt1_snapshot->bt1_keys->find_key("next"), nullptr);
+        EXPECT_NE(initial_bt1_keys->find_key("main"), nullptr);
+        EXPECT_EQ(initial_bt1_keys->find_key("next"), nullptr);
 
         service.push("ploto.ai-llm.user-group.staff", R"({"version":4,"data":{"name":"staff","users":["mallory"]}})",
                      "group-v4");

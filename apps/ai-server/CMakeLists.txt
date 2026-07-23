@@ -3,6 +3,8 @@ add_library(ai_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/AiServerConfig.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/AiServerLogging.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/AiServerRuntime.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/auth/Bt1TokenVerifier.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/auth/LlmRequestAuthenticator.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/LlmConfigCodec.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/LlmConfigManager.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/LlmConfigSnapshot.cpp")
@@ -31,6 +33,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
 
     add_executable(fiber_ai_server_tests
         "${CMAKE_CURRENT_LIST_DIR}/tests/AiServerConfigTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/Bt1AuthenticationTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/LlmConfigCodecTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/LlmConfigManagerTest.cpp")
     target_link_libraries(fiber_ai_server_tests PRIVATE ai_server_core GTest::gtest_main)
