@@ -78,7 +78,7 @@ Nullable<std::string_view> text(std::string_view value) {
     return result;
 }
 
-TEST(LlmRoutingTest, AuthorizesPublicAndGroupModelsWithoutHardcodedUserBypass) {
+TEST(LlmRoutingTest, AuthorizesGroupMembersAndZhangwangBypass) {
     auto provider = make_provider("provider-a", {ProviderProtocolType::OpenAiChatCompletions});
     auto group = std::make_shared<fiber::ai_server::UserGroupSnapshot>();
     group->name = "staff";
@@ -91,10 +91,13 @@ TEST(LlmRoutingTest, AuthorizesPublicAndGroupModelsWithoutHardcodedUserBypass) {
     LlmConfigSnapshot config{.project = make_project(std::move(route), {provider})};
 
     auto allowed = fiber::ai_server::authorize_model(config, "alice", "chat.public");
-    auto denied = fiber::ai_server::authorize_model(config, "zhangwang", "chat.public");
+    auto bypassed = fiber::ai_server::authorize_model(config, "zhangwang", "chat.public");
+    auto denied = fiber::ai_server::authorize_model(config, "mallory", "chat.public");
 
     ASSERT_TRUE(allowed);
     EXPECT_EQ(allowed->model_name, "chat.public");
+    ASSERT_TRUE(bypassed);
+    EXPECT_EQ(bypassed->model_name, "chat.public");
     ASSERT_FALSE(denied);
     EXPECT_EQ(denied.error().code, ModelAuthorizationErrorCode::ModelNotAvailable);
 }
