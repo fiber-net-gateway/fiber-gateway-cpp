@@ -29,6 +29,7 @@
 #include "event/EventLoopGroup.h"
 #include "http/ClientHttp2Exchange.h"
 #include "http/Http2ClientConnection.h"
+#include "http/HttpServer.h"
 #include "log/LoggerManager.h"
 #include "logging/LoggingBuilder.h"
 #include "runtime/RuntimeBuilder.h"
@@ -668,6 +669,94 @@ private:
     std::array<std::promise<std::string> *, 2> request_promises_{};
     std::atomic<int> accept_count_{0};
     std::thread thread_{};
+};
+
+class TlsSingleRequestUpstream {
+public:
+    TlsSingleRequestUpstream() : cert_("upstream_cert", kSelfSignedCertPem), key_("upstream_key", kSelfSignedKeyPem) {
+        EXPECT_TRUE(cert_.ok());
+        EXPECT_TRUE(key_.ok());
+        if (!cert_.ok() || !key_.ok()) {
+            return;
+        }
+
+        group_.start();
+        std::promise<std::uint16_t> ready;
+        auto ready_future = ready.get_future();
+        fiber::async::spawn(group_.at(0), [this, &ready]() -> fiber::async::DetachedTask {
+            fiber::http::HttpServerOptions options;
+            options.tls.enabled = true;
+            options.tls.cert_file = cert_.path();
+            options.tls.key_file = key_.path();
+
+            auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+                static constexpr std::string_view kBody = "secure";
+                auto header_result = co_await exchange.send_header({
+                        .kind = fiber::http::OutgoingHeaderKind::Final,
+                        .status_code = 200,
+                        .body = fiber::http::ResponseBodySpec::ContentLength(kBody.size()),
+                        .end_stream = false,
+                });
+                if (header_result) {
+                    (void) co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(kBody.data()),
+                                                        kBody.size(), true, 3s);
+                }
+            };
+
+            server_ = new fiber::http::HttpServer(group_.at(0), std::move(handler), std::move(options));
+            fiber::net::ListenOptions listen_options;
+            auto bind_result =
+                    server_->bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
+            if (!bind_result) {
+                delete server_;
+                server_ = nullptr;
+                ready.set_value(0);
+                co_return;
+            }
+
+            sockaddr_in bound{};
+            socklen_t len = sizeof(bound);
+            if (::getsockname(server_->fd(), reinterpret_cast<sockaddr *>(&bound), &len) != 0) {
+                server_->close();
+                delete server_;
+                server_ = nullptr;
+                ready.set_value(0);
+                co_return;
+            }
+            ready.set_value(ntohs(bound.sin_port));
+            fiber::async::spawn(group_.at(0), [this]() { return server_->serve(); });
+        });
+        port_ = ready_future.get();
+    }
+
+    ~TlsSingleRequestUpstream() {
+        if (!group_.running()) {
+            return;
+        }
+
+        std::promise<void> stopped;
+        auto stopped_future = stopped.get_future();
+        fiber::async::spawn(group_.at(0), [this, &stopped]() -> fiber::async::DetachedTask {
+            if (server_) {
+                server_->close();
+            }
+            group_.at(0).stop();
+            stopped.set_value();
+            co_return;
+        });
+        stopped_future.wait();
+        group_.join();
+        delete server_;
+    }
+
+    [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
+
+private:
+    TestPemFile cert_;
+    TestPemFile key_;
+    fiber::event::EventLoopGroup group_{1};
+    fiber::http::HttpServer *server_ = nullptr;
+    std::uint16_t port_ = 0;
 };
 
 struct Http2WebSocketOutcome {
@@ -1741,6 +1830,51 @@ http {
     EXPECT_NE(first_proxied_request.find("GET /first HTTP/1.1\r\n"), std::string::npos);
     EXPECT_NE(second_proxied_request.find("GET /second HTTP/1.1\r\n"), std::string::npos);
     EXPECT_EQ(upstream.accept_count(), 1);
+}
+
+TEST(LiteNginxRuntimeTest, ProxiesToHttpsUpstreamOverTls) {
+    TlsSingleRequestUpstream upstream;
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+
+    upstream backend {
+        server https://127.0.0.1:UPSTREAM_PORT;
+    }
+
+    server {
+        server_name localhost;
+        location /* {
+            proxy_pass http://backend;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "https_upstream.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const char request[] = "GET /secure HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+    std::string response = recv_http_response(client);
+    ::close(client);
+
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("\r\n\r\nsecure"), std::string::npos) << response;
 }
 
 // steal off must still pool per-loop: with worker_processes 1 there is one loop, so two sequential
