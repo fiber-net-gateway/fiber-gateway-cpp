@@ -19,6 +19,9 @@ TEST(AiServerConfigTest, LoadsHttpAndNacosSettings) {
 # ai-server process configuration
 export AI_SERVER_LISTEN_ADDRESS=127.0.0.1
 AI_SERVER_LISTEN_PORT=18080
+AI_SERVER_ADVERTISE_ADDRESS=127.0.0.2
+AI_SERVER_SERVICE_NAME=custom-ai-server
+AI_SERVER_SERVICE_GROUP=AI_GROUP
 NACOS_SERVER_ADDRESSES=127.0.0.1, [2001:db8::1], 127.0.0.1
 NACOS_HTTP_PORT=18848
 NACOS_GRPC_PORT=19848
@@ -28,6 +31,11 @@ NACOS_USERNAME=nacos
 NACOS_PASSWORD="pa\"ss"
 NACOS_CONTEXT_PATH=/nacos/
 NACOS_CLIENT_VERSION=fiber-ai-server/1.0 # inline comment
+CAT_APP_KEY=ploto-ai-server
+CAT_HOSTNAME=ai-host-1
+CAT_IP=127.0.0.2
+CAT_ROUTER_ADDRESSES=127.0.0.10:8080,[2001:db8::10]:8081
+CAT_COLLECTOR_ADDRESSES=127.0.0.11:2280
 AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=15000
 )";
 
@@ -35,6 +43,10 @@ AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=15000
 
     ASSERT_TRUE(result) << result.error().detail;
     EXPECT_EQ(result->listen_address().to_string(), "127.0.0.1:18080");
+    ASSERT_TRUE(result->advertise_address());
+    EXPECT_EQ(result->advertise_address()->to_string(), "127.0.0.2");
+    EXPECT_EQ(result->service_name(), "custom-ai-server");
+    EXPECT_EQ(result->service_group(), "AI_GROUP");
     const auto &nacos = result->nacos_config();
     ASSERT_EQ(nacos.server_ips().size(), 2u);
     EXPECT_EQ(nacos.server_ips()[0].to_string(), "127.0.0.1");
@@ -48,6 +60,14 @@ AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=15000
     EXPECT_EQ(nacos.context_path(), "/nacos");
     EXPECT_EQ(nacos.client_version(), "fiber-ai-server/1.0");
     EXPECT_EQ(result->initial_config_timeout(), std::chrono::milliseconds(15000));
+    ASSERT_TRUE(result->cat_config());
+    EXPECT_EQ(result->cat_config()->app_key(), "ploto-ai-server");
+    EXPECT_EQ(result->cat_config()->hostname(), "ai-host-1");
+    EXPECT_EQ(result->cat_config()->ip(), "127.0.0.2");
+    ASSERT_EQ(result->cat_config()->routers().size(), 2u);
+    EXPECT_EQ(result->cat_config()->routers()[1].host, "2001:db8::10");
+    ASSERT_EQ(result->cat_config()->bootstrap_collectors().size(), 1u);
+    EXPECT_EQ(result->cat_config()->bootstrap_collectors()[0].to_string(), "127.0.0.11:2280");
 }
 
 TEST(AiServerConfigTest, AppliesDefaultsForOptionalSettings) {
@@ -61,6 +81,10 @@ TEST(AiServerConfigTest, AppliesDefaultsForOptionalSettings) {
     EXPECT_TRUE(result->nacos_config().password().empty());
     EXPECT_EQ(result->nacos_config().context_path(), "/nacos");
     EXPECT_EQ(result->initial_config_timeout(), std::chrono::milliseconds(60000));
+    EXPECT_FALSE(result->advertise_address());
+    EXPECT_EQ(result->service_name(), "ploto-ai-server");
+    EXPECT_EQ(result->service_group(), "DEFAULT_GROUP");
+    EXPECT_FALSE(result->cat_config());
 }
 
 TEST(AiServerConfigTest, RequiresNacosServerAddresses) {
@@ -102,6 +126,26 @@ TEST(AiServerConfigTest, RejectsInvalidValuesAndPartialCredentials) {
     ASSERT_FALSE(invalid_timeout);
     EXPECT_EQ(invalid_timeout.error().code, AiServerConfigErrorCode::InvalidValue);
     EXPECT_EQ(invalid_timeout.error().key, "AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS");
+
+    auto invalid_advertise = AiServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                              "AI_SERVER_ADVERTISE_ADDRESS=::1\n");
+    ASSERT_FALSE(invalid_advertise);
+    EXPECT_EQ(invalid_advertise.error().code, AiServerConfigErrorCode::InvalidValue);
+
+    auto partial_cat = AiServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                        "CAT_APP_KEY=ploto-ai-server\n"
+                                                        "CAT_ROUTER_ADDRESSES=127.0.0.10:8080\n");
+    ASSERT_FALSE(partial_cat);
+    EXPECT_EQ(partial_cat.error().code, AiServerConfigErrorCode::MissingRequiredKey);
+    EXPECT_EQ(partial_cat.error().key, "CAT_HOSTNAME");
+
+    auto invalid_cat_endpoint = AiServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                                 "CAT_APP_KEY=ploto-ai-server\n"
+                                                                 "CAT_HOSTNAME=host-a\n"
+                                                                 "CAT_IP=127.0.0.1\n"
+                                                                 "CAT_ROUTER_ADDRESSES=localhost:8080\n");
+    ASSERT_FALSE(invalid_cat_endpoint);
+    EXPECT_EQ(invalid_cat_endpoint.error().code, AiServerConfigErrorCode::InvalidValue);
 }
 
 TEST(AiServerConfigTest, ReportsMissingFiles) {

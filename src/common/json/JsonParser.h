@@ -84,6 +84,10 @@ public:
     // Only meaningful while current_token() is non-null. The offset is the
     // token's absolute byte offset in the JSON input stream.
     [[nodiscard]] std::size_t current_offset() const noexcept;
+    // The exclusive absolute byte offset immediately after the current raw
+    // token. Together with current_offset(), this identifies the original
+    // encoded token even when it crossed input chunk boundaries.
+    [[nodiscard]] std::size_t current_end_offset() const noexcept;
 
     [[nodiscard]] const ParseError &error() const noexcept;
 
@@ -108,6 +112,7 @@ private:
     std::size_t input_len_ = 0;
     std::size_t input_offset_ = 0;
     std::size_t current_offset_ = 0;
+    std::size_t current_end_offset_ = 0;
     bool input_active_ = false;
     bool final_ = false;
     bool has_current_token_ = false;

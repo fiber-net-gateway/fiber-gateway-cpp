@@ -1,9 +1,14 @@
 #include "AiServer.h"
+#include "server/LlmRequestHandler.h"
+#include "server/TokenRateLimitHttpHandler.h"
 
+#include <chrono>
 #include <cstdint>
 #include <string_view>
 #include <utility>
 
+#include <fiber/cat/CatClient.h>
+#include "async/Sleep.h"
 #include "async/WhenAny.h"
 #include "common/Assert.h"
 #include "http/HttpExchange.h"
@@ -20,10 +25,23 @@ DEFINE_LOGGER(LOG_HTTP, "ai_server.http");
 constexpr std::string_view kHealthPath = "/health";
 constexpr std::string_view kHealthBody = "{\"status\":\"ok\"}\n";
 constexpr std::string_view kReadyPath = "/ready";
+constexpr std::string_view kOpenAiChatPath = "/v1/chat/completions";
+constexpr std::string_view kAnthropicMessagesPath = "/v1/messages";
+constexpr std::string_view kAnthropicMessageAliasPath = "/v1/message";
+constexpr std::string_view kMetricsPath = "/metrics";
+constexpr std::string_view kMetricsAliasPath = "/_metric_prometheus";
+constexpr std::string_view kRateLimitCheckPath = "/internal/llm/rate-limit/check";
+constexpr std::string_view kRateLimitSettlePath = "/internal/llm/rate-limit/settle";
 constexpr std::string_view kReadyBody = "{\"status\":\"ready\"}\n";
 constexpr std::string_view kNotReadyBody = "{\"status\":\"not_ready\"}\n";
 constexpr std::string_view kMethodNotAllowedBody = "{\"error\":\"method_not_allowed\"}\n";
 constexpr std::string_view kNotFoundBody = "{\"error\":\"not_found\"}\n";
+constexpr std::chrono::minutes kRateLimitSweepInterval{1};
+
+std::int64_t wall_now_millis() noexcept {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
+}
 
 http::HttpServerOptions make_server_options() noexcept {
     http::HttpServerOptions options;
@@ -66,8 +84,11 @@ async::Task<void> send_json(http::HttpExchange &exchange, int status_code, std::
 
 } // namespace
 
-AiServer::AiServer(event::EventLoop &accept_loop, event::EventLoopGroup &worker_group) :
-    accept_loop_(&accept_loop), worker_group_(&worker_group), workers_(worker_group.size()),
+AiServer::AiServer(event::EventLoop &accept_loop, event::EventLoopGroup &worker_group, cat::CatClient *cat_client) :
+    accept_loop_(&accept_loop), worker_group_(&worker_group), cat_client_(cat_client), workers_(worker_group.size()),
+    rate_limiters_(worker_group.size()), rate_limit_remote_client_(worker_group),
+    rate_limit_coordinator_(rate_limiters_, rate_limit_ring_, rate_limit_remote_client_),
+    provider_connections_(worker_group), provider_client_(provider_connections_), metrics_(worker_group),
     server_(
             accept_loop, [this](http::HttpExchange &exchange) { return handle(exchange); }, make_server_options(),
             &worker_group) {
@@ -77,14 +98,26 @@ AiServer::AiServer(event::EventLoop &accept_loop, event::EventLoopGroup &worker_
 }
 
 AiServer::~AiServer() {
+    metrics_.stop_collecting();
     FIBER_ASSERT(config_tasks_.empty());
     FIBER_ASSERT(initial_installs_.empty());
+    FIBER_ASSERT(sweep_tasks_.empty());
+    FIBER_ASSERT(cat_detach_tasks_.empty());
 }
 
 async::Task<bool> AiServer::start_config_workers(LlmConfigManager &config_manager) noexcept {
     FIBER_ASSERT(accept_loop_->in_loop());
     FIBER_ASSERT(!config_workers_started_);
+    if (!metrics_.valid() || !rate_limit_coordinator_.init()) {
+        co_return false;
+    }
+    if (!co_await provider_connections_.init()) {
+        co_await rate_limit_coordinator_.shutdown();
+        co_return false;
+    }
     config_workers_started_ = true;
+    sweep_tasks_.add();
+    async::spawn([this]() { return sweep_rate_limits(); });
 
     const std::size_t worker_count = worker_group_->size();
     initial_installs_.add(worker_count);
@@ -96,6 +129,43 @@ async::Task<bool> AiServer::start_config_workers(LlmConfigManager &config_manage
     }
     co_await initial_installs_.join();
     co_return !initial_install_failed_.load(std::memory_order_acquire);
+}
+
+async::DetachedTask AiServer::sweep_rate_limits() noexcept {
+    FIBER_ASSERT(accept_loop_->in_loop());
+    auto stop = config_stop_.subscribe();
+    auto stop_snapshot = stop.current();
+    while (!stop_snapshot.value || !*stop_snapshot.value) {
+        auto result =
+                co_await async::when_any([]() { return async::sleep(kRateLimitSweepInterval); },
+                                         [&stop, version = stop_snapshot.version]() { return stop.next(version); });
+        if (result.is<1>()) {
+            std::move(result).get<1>();
+            break;
+        }
+        std::move(result).get<0>();
+        (void) rate_limiters_.sweep_expired(wall_now_millis());
+        stop_snapshot = stop.current();
+    }
+    sweep_tasks_.done();
+}
+
+async::DetachedTask AiServer::detach_cat_worker() noexcept {
+    if (cat_client_) {
+        (void) co_await cat_client_->detach_current_event_loop();
+    }
+    cat_detach_tasks_.done();
+}
+
+async::Task<void> AiServer::detach_cat_workers() noexcept {
+    if (!cat_client_ || cat_client_->state() != cat::CatClientState::Running) {
+        co_return;
+    }
+    cat_detach_tasks_.add(worker_group_->size());
+    for (std::size_t i = 0; i < worker_group_->size(); ++i) {
+        async::spawn(worker_group_->at(i), [this]() { return detach_cat_worker(); });
+    }
+    co_await cat_detach_tasks_.join();
 }
 
 async::DetachedTask AiServer::watch_config(std::size_t worker_index,
@@ -112,6 +182,11 @@ async::DetachedTask AiServer::watch_config(std::size_t worker_index,
             break;
         }
         if (snapshot.value) {
+            metrics_.set_config_generation(snapshot.value->generation);
+            if (snapshot.value->project) {
+                worker.provider_runtime.reconcile(*snapshot.value->project);
+            }
+            rate_limiters_.update_project(snapshot.value->project);
             worker.config = snapshot.value;
             if (!worker.initial_installed) {
                 worker.initial_installed = true;
@@ -147,11 +222,17 @@ void AiServer::close() { server_.close(); }
 async::Task<void> AiServer::shutdown_and_wait() {
     FIBER_ASSERT(accept_loop_->in_loop());
     co_await server_.shutdown_and_wait();
+    co_await detach_cat_workers();
+    metrics_.stop_collecting();
+    co_await metrics_.wait_for_idle();
     if (config_workers_started_ && !config_workers_stopping_) {
         config_workers_stopping_ = true;
         config_stop_publisher_->publish(true);
     }
     co_await config_tasks_.join();
+    co_await sweep_tasks_.join();
+    co_await rate_limit_coordinator_.shutdown();
+    co_await provider_connections_.shutdown();
 }
 
 int AiServer::fd() const noexcept { return server_.fd(); }
@@ -164,8 +245,72 @@ std::shared_ptr<const LlmConfigSnapshot> AiServer::current_config() const noexce
     return workers_[index].config;
 }
 
+AiServer::WorkerState &AiServer::current_worker() noexcept {
+    event::EventLoop &loop = event::EventLoop::current();
+    FIBER_ASSERT(loop.group() == worker_group_);
+    const std::size_t index = loop.group_index();
+    FIBER_ASSERT(index < workers_.size());
+    return workers_[index];
+}
+
 async::Task<void> AiServer::handle(http::HttpExchange &exchange) {
     const std::string_view path = exchange.uri().path;
+    if (path == kRateLimitCheckPath || path == kRateLimitSettlePath) {
+        TokenRateLimitHttpHandler handler(rate_limiters_);
+        if (path == kRateLimitCheckPath) {
+            co_await handler.handle_check(exchange);
+        } else {
+            co_await handler.handle_settle(exchange);
+        }
+        co_return;
+    }
+    if (path == kMetricsPath || path == kMetricsAliasPath) {
+        if (exchange.method() != http::HttpMethod::Get) {
+            co_await send_json(exchange, 405, kMethodNotAllowedBody, true);
+            co_return;
+        }
+        const auto ring = rate_limit_ring_.snapshot();
+        auto collected = co_await metrics_.collect(event::EventLoop::current().io_buf_node_pool(),
+                                                   rate_limiters_.stats(), ring ? ring->nodes.size() : 0);
+        if (!collected) {
+            co_await send_json(exchange, collected.error() == common::IoErr::Busy ? 503 : 500,
+                               collected.error() == common::IoErr::Busy
+                                       ? std::string_view("{\"error\":\"metrics_busy\"}\n")
+                                       : std::string_view("{\"error\":\"metrics_unavailable\"}\n"));
+            co_return;
+        }
+        http::HttpHeaders headers(exchange.pool());
+        headers.set_view("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+        const std::size_t size = collected->readable_bytes();
+        auto header = co_await exchange.send_header({
+                .kind = http::OutgoingHeaderKind::Final,
+                .status_code = 200,
+                .headers = &headers,
+                .body = http::HttpBodySpec::ContentLength(size),
+                .connection_mode = http::ResponseConnectionMode::Auto,
+                .end_stream = size == 0,
+        });
+        if (header && size != 0) {
+            collected->mark_complete();
+            (void) co_await exchange.write_body(std::move(*collected));
+        }
+        co_return;
+    }
+    if (path == kOpenAiChatPath || path == kAnthropicMessagesPath || path == kAnthropicMessageAliasPath) {
+        WorkerState &worker = current_worker();
+        const LlmWireProtocol protocol =
+                path == kOpenAiChatPath ? LlmWireProtocol::OpenAiChatCompletions : LlmWireProtocol::AnthropicMessages;
+        AiServerMetrics::Worker &metrics = metrics_.worker(event::EventLoop::current().group_index());
+        metrics.request_started(protocol);
+        const auto started = event::EventLoop::current().now();
+        LlmRequestHandler handler(provider_client_, worker.provider_runtime, rate_limit_coordinator_, metrics,
+                                  cat_client_);
+        co_await handler.handle(exchange, protocol, worker.config);
+        metrics.request_finished(
+                protocol, exchange.response_stats(),
+                std::chrono::duration_cast<std::chrono::microseconds>(event::EventLoop::current().now() - started));
+        co_return;
+    }
     if (path != kHealthPath && path != kReadyPath) {
         co_await send_json(exchange, 404, kNotFoundBody);
         co_return;
@@ -180,7 +325,8 @@ async::Task<void> AiServer::handle(http::HttpExchange &exchange) {
         co_return;
     }
     const auto config = current_config();
-    if (config) {
+    const auto ring = rate_limit_ring_.snapshot();
+    if (config && ring && !ring->entries.empty()) {
         co_await send_json(exchange, 200, kReadyBody);
         co_return;
     }

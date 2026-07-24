@@ -108,7 +108,12 @@ struct TlsOptions {
     int min_version = 0x0303; // TLS 1.2
     int max_version = 0x0304; // TLS 1.3
     std::vector<std::string> alpn{"http/1.1"};
+    // SNI name sent to the peer. When verify_name is empty this is also the
+    // authenticated certificate name.
     std::string server_name;
+    // Optional certificate identity separate from SNI. This supports HTTPS
+    // connections to IP literals without emitting an IP-valued SNI extension.
+    std::string verify_name;
     std::vector<TlsIdentityOptions> identities;
     TlsIdentitySelectorOps identity_selector_ops{};
 };

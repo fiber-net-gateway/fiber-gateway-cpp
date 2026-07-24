@@ -63,6 +63,8 @@ std::string_view runtime_stage_name(fiber::ai_server::AiServerRuntimeErrorCode c
             return "create Nacos config service";
         case Code::CreateNamingService:
             return "create Nacos naming service";
+        case Code::CreateCatClient:
+            return "create CAT client";
         case Code::AllocateRuntime:
             return "allocate ai-server runtime";
         case Code::Bind:
@@ -73,8 +75,12 @@ std::string_view runtime_stage_name(fiber::ai_server::AiServerRuntimeErrorCode c
             return "start Nacos config service";
         case Code::StartNamingService:
             return "start Nacos naming service";
+        case Code::StartCatClient:
+            return "start CAT client";
         case Code::StartConfigManager:
             return "subscribe LLM configuration";
+        case Code::StartRateLimitCluster:
+            return "start token rate limit cluster";
         case Code::InitialConfigUnavailable:
             return "install initial LLM configuration";
         case Code::InitialConfigTimeout:

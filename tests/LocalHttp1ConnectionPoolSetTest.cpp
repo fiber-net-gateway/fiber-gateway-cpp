@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <future>
 
 #include "async/Spawn.h"
@@ -60,6 +61,26 @@ TEST(LocalHttp1ConnectionPoolSetTest, AcquireUsesCurrentEventLoopShard) {
 
     EXPECT_TRUE(loop0_future.get());
     EXPECT_TRUE(loop1_future.get());
+    group.stop();
+    group.join();
+}
+
+TEST(LocalHttp1ConnectionPoolSetTest, ShutdownCompletesInlineOnTheOnlyWorker) {
+    using namespace std::chrono_literals;
+
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::LocalHttp1ConnectionPoolSet set(group);
+    ASSERT_TRUE(set.init());
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        co_await set.shutdown_async();
+        shutdown_promise.set_value();
+    });
+
+    EXPECT_EQ(shutdown_future.wait_for(1s), std::future_status::ready);
     group.stop();
     group.join();
 }
