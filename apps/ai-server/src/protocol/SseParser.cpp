@@ -30,7 +30,7 @@ bool SseParser::feed(const mem::IoBuf &chunk) noexcept {
         return false;
     }
     current_input_ = &chunk;
-    return validate_utf8(input);
+    return true;
 }
 
 bool SseParser::finish() noexcept {
@@ -41,60 +41,6 @@ bool SseParser::finish() noexcept {
     }
     final_ = true;
     cursor_.finish();
-    if (utf8_remaining_ != 0) {
-        error_ = SseParseError::InvalidUtf8;
-        failed_ = true;
-        return false;
-    }
-    return true;
-}
-
-bool SseParser::validate_utf8(std::string_view input) noexcept {
-    for (const unsigned char byte: input) {
-        if (utf8_remaining_ == 0) {
-            if (byte <= 0x7fU) {
-                continue;
-            }
-            if (byte >= 0xc2U && byte <= 0xdfU) {
-                utf8_codepoint_ = byte & 0x1fU;
-                utf8_minimum_ = 0x80U;
-                utf8_remaining_ = 1;
-                continue;
-            }
-            if (byte >= 0xe0U && byte <= 0xefU) {
-                utf8_codepoint_ = byte & 0x0fU;
-                utf8_minimum_ = 0x800U;
-                utf8_remaining_ = 2;
-                continue;
-            }
-            if (byte >= 0xf0U && byte <= 0xf4U) {
-                utf8_codepoint_ = byte & 0x07U;
-                utf8_minimum_ = 0x10000U;
-                utf8_remaining_ = 3;
-                continue;
-            }
-            error_ = SseParseError::InvalidUtf8;
-            failed_ = true;
-            return false;
-        }
-
-        if ((byte & 0xc0U) != 0x80U) {
-            error_ = SseParseError::InvalidUtf8;
-            failed_ = true;
-            return false;
-        }
-        utf8_codepoint_ = (utf8_codepoint_ << 6U) | (byte & 0x3fU);
-        --utf8_remaining_;
-        if (utf8_remaining_ != 0) {
-            continue;
-        }
-        if (utf8_codepoint_ < utf8_minimum_ || utf8_codepoint_ > 0x10ffffU ||
-            (utf8_codepoint_ >= 0xd800U && utf8_codepoint_ <= 0xdfffU)) {
-            error_ = SseParseError::InvalidUtf8;
-            failed_ = true;
-            return false;
-        }
-    }
     return true;
 }
 

@@ -19,7 +19,6 @@ enum class SseParseStatus : std::uint8_t {
 
 enum class SseParseError : std::uint8_t {
     DataTooLarge,
-    InvalidUtf8,
     NoMemory,
     InvalidState,
 };
@@ -49,7 +48,6 @@ private:
         Assembled,
     };
 
-    [[nodiscard]] bool validate_utf8(std::string_view input) noexcept;
     [[nodiscard]] bool is_data_field() const noexcept;
     [[nodiscard]] bool start_data_line() noexcept;
     [[nodiscard]] bool append_data(std::string_view fragment) noexcept;
@@ -69,9 +67,6 @@ private:
     SseEventView event_;
     std::size_t data_size_ = 0;
     std::size_t field_name_size_ = 0;
-    std::uint32_t utf8_codepoint_ = 0;
-    std::uint32_t utf8_minimum_ = 0;
-    std::uint8_t utf8_remaining_ = 0;
     DataStorage data_storage_ = DataStorage::None;
     SseParseError error_ = SseParseError::InvalidState;
     bool field_name_matches_data_ = true;
