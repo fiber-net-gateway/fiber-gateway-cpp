@@ -1,4 +1,5 @@
 #include "LlmConfigCodec.h"
+#include "../provider/ProviderEndpoint.h"
 
 #include <algorithm>
 #include <cctype>
@@ -524,10 +525,9 @@ parse_provider_config(std::string_view content, std::string_view md5, std::strin
     while (normalized_url.size() > 1 && normalized_url.back() == '/') {
         normalized_url.pop_back();
     }
-    const bool address = normalized_url.starts_with("http://") || normalized_url.starts_with("https://");
-    const bool service = normalized_url.starts_with("service://") && normalized_url.size() > 10;
-    if (!address && !service) {
-        return std::unexpected(invalid_field("data.baseurl", "unsupported or empty provider endpoint"));
+    auto parsed_endpoint = parse_provider_endpoint(normalized_url);
+    if (!parsed_endpoint) {
+        return std::unexpected(invalid_field("data.baseurl", parsed_endpoint.error().message));
     }
 
     ProviderConfigSnapshot snapshot;

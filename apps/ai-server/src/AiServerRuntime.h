@@ -4,6 +4,7 @@
 #include "AiServer.h"
 #include "AiServerConfig.h"
 #include "config/LlmConfigManager.h"
+#include "limit/RateLimitClusterMembership.h"
 
 #include <chrono>
 #include <cstddef>
@@ -21,6 +22,7 @@
 #include <common/NonMovable.h>
 #include <event/EventLoop.h>
 #include <event/EventLoopGroup.h>
+#include <fiber/cat/CatClient.h>
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/NacosClient.h>
 #include <fiber/nacos/NacosCreateError.h>
@@ -35,12 +37,15 @@ enum class AiServerRuntimeErrorCode : std::uint8_t {
     CreateNacosClient,
     CreateConfigService,
     CreateNamingService,
+    CreateCatClient,
     AllocateRuntime,
     Bind,
     StartNacosClient,
     StartConfigService,
     StartNamingService,
+    StartCatClient,
     StartConfigManager,
+    StartRateLimitCluster,
     InitialConfigUnavailable,
     InitialConfigTimeout,
 };
@@ -50,6 +55,7 @@ struct AiServerRuntimeError {
     common::IoErr io_error = common::IoErr::None;
     nacos::NacosCreateErrorCode create_error = nacos::NacosCreateErrorCode::InvalidState;
     nacos::ConfigServiceErrorCode config_error = nacos::ConfigServiceErrorCode::Protocol;
+    nacos::NamingServiceErrorCode naming_error = nacos::NamingServiceErrorCode::Protocol;
     std::string message;
 };
 
@@ -82,16 +88,32 @@ private:
         AiServerRuntimeError error;
     };
 
+    struct ClusterStartStatus {
+        bool success = false;
+        AiServerRuntimeError error;
+    };
+
+    struct CatStartStatus {
+        bool success = false;
+        AiServerRuntimeError error;
+    };
+
     AiServerRuntime(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
                     event::EventLoopGroup &http_workers, net::SocketAddress listen_address,
                     net::ListenOptions listen_options, std::chrono::milliseconds initial_config_timeout,
+                    std::optional<net::IpAddress> advertise_address, std::string service_name,
+                    std::string service_group, std::unique_ptr<cat::CatClient> cat_client,
                     std::unique_ptr<nacos::NacosClient> nacos_client,
                     std::unique_ptr<nacos::ConfigService> config_service,
                     std::unique_ptr<nacos::NamingService> naming_service) noexcept;
 
     [[nodiscard]] async::DetachedTask start_nacos() noexcept;
+    [[nodiscard]] async::DetachedTask start_cat() noexcept;
+    [[nodiscard]] async::DetachedTask start_rate_limit_cluster(std::string advertise_ipv4, std::uint16_t port) noexcept;
     [[nodiscard]] async::DetachedTask shutdown_nacos() noexcept;
+    [[nodiscard]] async::DetachedTask shutdown_cat() noexcept;
     [[nodiscard]] async::Task<void> stop_nacos() noexcept;
+    [[nodiscard]] async::Task<void> stop_cat() noexcept;
     [[nodiscard]] async::Task<void> fail_start() noexcept;
 
     event::EventLoop *accept_loop_ = nullptr;
@@ -100,18 +122,30 @@ private:
     net::SocketAddress listen_address_;
     net::ListenOptions listen_options_;
     std::chrono::milliseconds initial_config_timeout_{0};
+    std::optional<net::IpAddress> advertise_address_;
+    std::unique_ptr<cat::CatClient> cat_client_;
     std::unique_ptr<nacos::NacosClient> nacos_client_;
     std::unique_ptr<nacos::ConfigService> config_service_;
     std::unique_ptr<nacos::NamingService> naming_service_;
     LlmConfigManager config_manager_;
+    AiServer server_;
+    RateLimitClusterMembership rate_limit_membership_;
     async::WaitGroup nacos_start_tasks_;
     async::Watch<NacosStartStatus> nacos_start_status_;
     std::optional<async::Watch<NacosStartStatus>::Publisher> nacos_start_publisher_;
+    async::WaitGroup cat_start_tasks_;
+    async::Watch<CatStartStatus> cat_start_status_;
+    std::optional<async::Watch<CatStartStatus>::Publisher> cat_start_publisher_;
+    async::WaitGroup cluster_start_tasks_;
+    async::Watch<ClusterStartStatus> cluster_start_status_;
+    std::optional<async::Watch<ClusterStartStatus>::Publisher> cluster_start_publisher_;
     async::Watch<bool> nacos_stopped_{false};
     std::optional<async::Watch<bool>::Publisher> nacos_stopped_publisher_;
-    AiServer server_;
+    async::Watch<bool> cat_stopped_{false};
+    std::optional<async::Watch<bool>::Publisher> cat_stopped_publisher_;
     AiServerRuntimeState state_ = AiServerRuntimeState::Created;
     bool nacos_shutdown_spawned_ = false;
+    bool cat_shutdown_spawned_ = false;
 };
 
 } // namespace fiber::ai_server

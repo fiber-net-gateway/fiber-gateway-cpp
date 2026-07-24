@@ -160,6 +160,37 @@ TEST(JsonParserTest, FinishesNumberHeldAtChunkBoundary) {
     EXPECT_EQ(parser.next(), JsonParser::Status::Complete);
 }
 
+TEST(JsonParserTest, ReportsExclusiveRawTokenEndOffsetsAcrossChunks) {
+    JsonParser parser;
+    ASSERT_TRUE(parser.feed("{\"value\":\"ab", 12));
+
+    ASSERT_EQ(parser.next(), JsonParser::Status::Token);
+    EXPECT_EQ(parser.current_token()->kind, TokenKind::StartObj);
+    EXPECT_EQ(parser.current_offset(), 0u);
+    EXPECT_EQ(parser.current_end_offset(), 1u);
+
+    ASSERT_EQ(parser.next(), JsonParser::Status::Token);
+    EXPECT_EQ(parser.current_token()->role, fiber::json::TokenRole::ObjectKey);
+    EXPECT_EQ(parser.current_offset(), 1u);
+    EXPECT_EQ(parser.current_end_offset(), 8u);
+
+    EXPECT_EQ(parser.next(), JsonParser::Status::NeedMore);
+    ASSERT_TRUE(parser.feed("c\"}", 3));
+    parser.finish();
+
+    ASSERT_EQ(parser.next(), JsonParser::Status::Token);
+    EXPECT_EQ(parser.current_token()->kind, TokenKind::Text);
+    EXPECT_EQ(parser.current_token()->view, "abc");
+    EXPECT_EQ(parser.current_offset(), 9u);
+    EXPECT_EQ(parser.current_end_offset(), 14u);
+
+    ASSERT_EQ(parser.next(), JsonParser::Status::Token);
+    EXPECT_EQ(parser.current_token()->kind, TokenKind::EndObj);
+    EXPECT_EQ(parser.current_offset(), 14u);
+    EXPECT_EQ(parser.current_end_offset(), 15u);
+    EXPECT_EQ(parser.next(), JsonParser::Status::Complete);
+}
+
 TEST(JsonParserTest, ReturnsOutOfRangeNumbersAsBigNumberViews) {
     const std::string json = "[9223372036854775807,9223372036854775808,-9223372036854775809,1e9999]";
     std::vector<TokenSnapshot> tokens = parse_complete(json);
