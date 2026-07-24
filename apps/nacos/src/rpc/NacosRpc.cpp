@@ -428,7 +428,7 @@ async::Task<NacosRpcCloseResult> NacosRpc::run(const NacosBiRequestHandler &hand
     set_state(NacosRpcState::Ready);
 
     operations_.add();
-    async::spawn(*loop_, [this]() { return run_heartbeat(); });
+    async::spawn([this]() { return run_heartbeat(); });
     co_await run_server_requests(handlers);
     co_return co_await finish_run();
 }

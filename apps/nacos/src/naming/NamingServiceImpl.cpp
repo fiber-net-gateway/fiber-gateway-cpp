@@ -230,7 +230,7 @@ common::IoResult<void> NamingServiceImpl::start() noexcept {
         return std::unexpected(common::IoErr::Already);
     }
     lifecycle_publisher_->publish(NacosServiceState::Running);
-    async::spawn(*loop_, [this]() { return run(); });
+    async::spawn([this]() { return run(); });
     return {};
 }
 
@@ -538,7 +538,7 @@ void NamingServiceImpl::schedule_subscription(EntryPtr entry, bool subscribe_val
     }
     entry->proto.operation_in_flight = true;
     tasks_.add();
-    async::spawn(*loop_, [this, entry = std::move(entry), subscribe_value]() mutable {
+    async::spawn([this, entry = std::move(entry), subscribe_value]() mutable {
         return run_subscription(std::move(entry), subscribe_value);
     });
 }
@@ -680,7 +680,7 @@ void NamingServiceImpl::schedule_registration(const std::shared_ptr<Registration
     const std::uint64_t version = entry->desired_version;
     Instance instance = entry->instance;
     tasks_.add();
-    async::spawn(*loop_, [this, entry, instance = std::move(instance), version, deregister]() mutable {
+    async::spawn([this, entry, instance = std::move(instance), version, deregister]() mutable {
         return run_registration(entry, std::move(instance), version, deregister);
     });
 }
@@ -860,7 +860,7 @@ NamingServiceImpl::run_attempt(NacosRpcEndpoint endpoint, const NacosBiRequestHa
     async::WaitGroup run_done;
     std::optional<NacosRpcCloseResult> close;
     run_done.add();
-    async::spawn(*loop_, [&rpc, &handlers, &run_done, &close]() -> async::DetachedTask {
+    async::spawn([&rpc, &handlers, &run_done, &close]() -> async::DetachedTask {
         close = co_await rpc.run(handlers);
         run_done.done();
     });
