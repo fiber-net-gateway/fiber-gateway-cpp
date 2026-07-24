@@ -185,6 +185,7 @@ SSE parser 借助 `http::SseCursor` 处理跨 chunk 的 CRLF、多个 `data:` �
 
 - 单个连续 data 借用输入；仅在 data 跨节点或包含多个 `data:` 行时拼装；
 - CRLF、字段空格、注释、event/id/retry 和未知字段均保持原始字节；
+- SSE framing 只识别 ASCII 分隔符和 `data` 字段名，其他字节不做 UTF-8 fatal 校验；
 - OpenAI `[DONE]` 不补充、不去重，信任上游合法输出；
 - usage collector 只旁路解析 data JSON 的少量 usage 路径，提取失败不改变响应；
 - 每次下游 chain write 完成后才继续读取上游，保持背压；

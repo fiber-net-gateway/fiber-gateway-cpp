@@ -197,7 +197,7 @@ TEST(LlmProtocolTest, ParsesAnEventAcrossEveryByteSplit) {
     }
 }
 
-TEST(LlmProtocolTest, ValidatesUtf8AcrossChunksAndRejectsIncompleteInput) {
+TEST(LlmProtocolTest, PreservesUtf8BytesAcrossChunks) {
     const std::string input = "data: 你好\n\n";
     const std::string_view bytes = input;
     mem::IoBuf first = make_buffer(bytes.substr(0, 8));
@@ -214,15 +214,23 @@ TEST(LlmProtocolTest, ValidatesUtf8AcrossChunksAndRejectsIncompleteInput) {
     EXPECT_EQ(parser.next(), SseParseStatus::NeedMore);
     ASSERT_TRUE(parser.finish());
     EXPECT_EQ(parser.next(), SseParseStatus::Complete);
+}
 
-    mem::IoBuf truncated = make_buffer(std::string_view(input).substr(0, 8));
-    ASSERT_TRUE(truncated);
-    SseParser invalid;
-    ASSERT_TRUE(invalid.feed(truncated));
-    EXPECT_EQ(invalid.next(), SseParseStatus::NeedMore);
-    EXPECT_FALSE(invalid.finish());
-    EXPECT_EQ(invalid.error(), SseParseError::InvalidUtf8);
-    EXPECT_EQ(invalid.next(), SseParseStatus::Error);
+TEST(LlmProtocolTest, TreatsMalformedUtf8AsOpaqueEventData) {
+    std::string input = "data: ";
+    input.push_back(static_cast<char>(0xc3));
+    input.append("\n\n");
+    mem::IoBuf buffer = make_buffer(input);
+    ASSERT_TRUE(buffer);
+
+    SseParser parser;
+    ASSERT_TRUE(parser.feed(buffer));
+    ASSERT_EQ(parser.next(), SseParseStatus::Event);
+    ASSERT_EQ(parser.event().data.size(), 1u);
+    EXPECT_EQ(static_cast<unsigned char>(parser.event().data.front()), 0xc3U);
+    EXPECT_EQ(parser.next(), SseParseStatus::NeedMore);
+    ASSERT_TRUE(parser.finish());
+    EXPECT_EQ(parser.next(), SseParseStatus::Complete);
 }
 
 TEST(LlmProtocolTest, RejectsOversizedLogicalData) {

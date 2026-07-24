@@ -742,7 +742,6 @@ common::IoErr sse_parser_io_error(SseParseError error) noexcept {
             return common::IoErr::MessageTooLarge;
         case SseParseError::NoMemory:
             return common::IoErr::NoMem;
-        case SseParseError::InvalidUtf8:
         case SseParseError::InvalidState:
             return common::IoErr::Invalid;
     }
