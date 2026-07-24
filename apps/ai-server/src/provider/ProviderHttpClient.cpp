@@ -19,6 +19,10 @@ namespace {
 constexpr std::chrono::seconds kProviderTimeout{300};
 constexpr std::chrono::seconds kConnectTimeout{10};
 constexpr std::size_t kResponseChunkSize = 64 * 1024;
+constexpr std::string_view kBearerPrefix = "Bearer ";
+constexpr std::string_view kAuthorizationName = "Authorization";
+constexpr std::string_view kAuthorizationLowcaseName = "authorization";
+constexpr std::uint64_t kAuthorizationHash = http::http_header_name_hash(kAuthorizationLowcaseName);
 
 ProviderHttpError error(ProviderHttpErrorCode code, common::IoErr io_error, const char *message) noexcept {
     return ProviderHttpError{.code = code, .io_error = io_error, .message = message};
@@ -67,18 +71,34 @@ bool append_chain(mem::IoBuf &buffer, mem::IoBufChain &chunk, std::size_t max_by
     return true;
 }
 
-void build_request_headers(const ProviderConnectionLease &connection, const ResolvedProviderAttempt &attempt,
-                           bool stream, http::HttpHeaders &headers) {
-    headers.set("Host", connection.host_header);
-    headers.set_view("Content-Type", "application/json");
-    headers.set_view("Accept", stream ? "text/event-stream" : "application/json");
-    if (attempt.api_token) {
-        std::string authorization;
-        authorization.reserve(attempt.api_token->token.size() + 7);
-        authorization.append("Bearer ");
-        authorization.append(attempt.api_token->token);
-        headers.set("Authorization", authorization);
+common::IoResult<void> build_request_headers(const ProviderConnectionLease &connection,
+                                             const ResolvedProviderAttempt &attempt, bool stream,
+                                             http::HttpHeaders &headers) noexcept {
+    if (!headers.set("Host", connection.host_header) || !headers.set_view("Content-Type", "application/json") ||
+        !headers.set_view("Accept", stream ? "text/event-stream" : "application/json")) {
+        return std::unexpected(common::IoErr::NoMem);
     }
+    if (!attempt.api_token) {
+        return {};
+    }
+
+    const std::string &token = attempt.api_token->token;
+    if (token.size() > std::numeric_limits<std::size_t>::max() - kBearerPrefix.size()) {
+        return std::unexpected(common::IoErr::MessageTooLarge);
+    }
+    const std::size_t authorization_size = kBearerPrefix.size() + token.size();
+    auto *authorization = headers.pool().alloc<char>(authorization_size);
+    if (!authorization) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    std::memcpy(authorization, kBearerPrefix.data(), kBearerPrefix.size());
+    std::memcpy(authorization + kBearerPrefix.size(), token.data(), token.size());
+
+    if (!headers.set_view(kAuthorizationName, std::string_view(authorization, authorization_size),
+                          kAuthorizationLowcaseName.data(), kAuthorizationHash)) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    return {};
 }
 
 std::string header_copy(const http::HttpHeaders &headers, std::string_view name) {
@@ -145,7 +165,11 @@ ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, std::string_vi
                 error(ProviderHttpErrorCode::Connect, common::IoErr::NoMem, "failed to allocate provider exchange"));
     }
     http::HttpHeaders request_headers(request_pool);
-    build_request_headers(connection, attempt, stream, request_headers);
+    auto built_headers = build_request_headers(connection, attempt, stream, request_headers);
+    if (!built_headers) {
+        co_return std::unexpected(error(ProviderHttpErrorCode::SendHeader, built_headers.error(),
+                                        "failed to build provider request headers"));
+    }
     const std::size_t request_size = request_body.readable_bytes();
     http::Http1RequestHead request_head{
             .method = http::HttpMethod::Post,

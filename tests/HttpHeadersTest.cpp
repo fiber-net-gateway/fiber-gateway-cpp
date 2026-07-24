@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <cstring>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "common/mem/BufPool.h"
@@ -11,6 +13,32 @@
 namespace {
 
 using fiber::http::HttpHeaders;
+
+static_assert(noexcept(HttpHeaders(std::declval<fiber::mem::BufPool &>())));
+static_assert(noexcept(std::declval<HttpHeaders &>().pool()));
+static_assert(noexcept(std::declval<HttpHeaders &>().add({}, {})));
+static_assert(noexcept(std::declval<HttpHeaders &>().set({}, {})));
+static_assert(noexcept(std::declval<HttpHeaders &>().add_view({}, {})));
+static_assert(noexcept(std::declval<HttpHeaders &>().set_view({}, {})));
+static_assert(noexcept(++std::declval<HttpHeaders::MatchIterator &>()));
+static_assert(noexcept(++std::declval<HttpHeaders::ConstIterator &>()));
+
+TEST(HttpHeadersTest, ExposesConstructionPoolForPoolBackedViews) {
+    fiber::mem::BufPool pool;
+    HttpHeaders headers(pool);
+    constexpr std::string_view value = "Bearer provider-token";
+
+    EXPECT_EQ(&headers.pool(), &pool);
+    char *storage = headers.pool().alloc<char>(value.size());
+    ASSERT_NE(storage, nullptr);
+    std::memcpy(storage, value.data(), value.size());
+
+    constexpr std::string_view lowcase_name = "authorization";
+    constexpr uint64_t hash = fiber::http::http_header_name_hash(lowcase_name);
+    ASSERT_NE(headers.set_view("Authorization", std::string_view(storage, value.size()), lowcase_name.data(), hash),
+              nullptr);
+    EXPECT_EQ(headers.get(lowcase_name, hash), value);
+}
 
 TEST(HttpHeadersTest, OwnedNameStoresOriginalAndLowercaseInOneBuffer) {
     fiber::mem::BufPool pool;

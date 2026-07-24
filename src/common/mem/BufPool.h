@@ -13,14 +13,14 @@ namespace fiber::mem {
 
 class BufPool : public common::NonCopyable, public common::NonMovable {
 public:
-    explicit BufPool(size_t block_size = 4096);
-    ~BufPool();
+    explicit BufPool(size_t block_size = 4096) noexcept;
+    ~BufPool() noexcept;
 
     void reset() noexcept;
-    void *alloc(size_t size, size_t align = alignof(std::max_align_t));
+    void *alloc(size_t size, size_t align = alignof(std::max_align_t)) noexcept;
 
     template<typename T>
-    T *alloc(size_t n = 1) {
+    T *alloc(size_t n = 1) noexcept {
         size_t bytes = sizeof(T) * n;
         return static_cast<T *>(alloc(bytes, alignof(T)));
     }
@@ -38,10 +38,10 @@ private:
         LargeBlock *next = nullptr;
     };
 
-    void *alloc_from_blocks(size_t size, size_t align);
-    void *alloc_large(size_t size, size_t align);
+    void *alloc_from_blocks(size_t size, size_t align) noexcept;
+    void *alloc_large(size_t size, size_t align) noexcept;
 
-    Block *allocate_block(size_t payload_cap);
+    Block *allocate_block(size_t payload_cap) noexcept;
 
     static size_t psz;
 

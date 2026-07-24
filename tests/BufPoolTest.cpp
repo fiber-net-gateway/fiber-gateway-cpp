@@ -3,10 +3,17 @@
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <type_traits>
+#include <utility>
 
 #include "common/mem/BufPool.h"
 
 namespace {
+
+static_assert(std::is_nothrow_constructible_v<fiber::mem::BufPool>);
+static_assert(std::is_nothrow_destructible_v<fiber::mem::BufPool>);
+static_assert(noexcept(std::declval<fiber::mem::BufPool &>().alloc(1)));
+static_assert(noexcept(std::declval<fiber::mem::BufPool &>().alloc<unsigned char>()));
 
 TEST(BufPoolTest, PageSizedAllocationCanBeFullyWritten) {
     fiber::mem::BufPool pool;
