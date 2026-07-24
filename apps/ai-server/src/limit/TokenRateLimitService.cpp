@@ -17,30 +17,6 @@ TokenRateLimitService::TokenRateLimitService(std::size_t shard_count) {
     }
 }
 
-void TokenRateLimitService::update_project(std::shared_ptr<const LlmProjectSnapshot> project) noexcept {
-    std::lock_guard project_guard(project_mutex_);
-    if (project_ && project && project->generation() < project_->generation()) {
-        return;
-    }
-    if (project_ == project) {
-        return;
-    }
-    project_ = std::move(project);
-    for (const auto &shard: shards_) {
-        std::lock_guard shard_guard(shard->mutex);
-        shard->manager.update_project(project_);
-    }
-}
-
-bool TokenRateLimitService::has_rule(std::string_view model_name) const noexcept {
-    std::lock_guard guard(project_mutex_);
-    if (!project_) {
-        return false;
-    }
-    const CompiledModelRoute *model = project_->find_model(model_name);
-    return model && model->rate_limit.has_value();
-}
-
 TokenRateLimitService::Shard &TokenRateLimitService::shard_for(std::string_view user_id,
                                                                std::string_view model_name) noexcept {
     const std::size_t index = static_cast<std::size_t>(rate_limit_key_hash64(user_id, model_name) % shards_.size());
@@ -54,10 +30,11 @@ const TokenRateLimitService::Shard &TokenRateLimitService::shard_for(std::string
 }
 
 TokenRateLimitCheckResult TokenRateLimitService::check(std::string_view user_id, std::string_view model_name,
+                                                       const CompiledModelRateLimitRule &rule,
                                                        std::int64_t now_millis) {
     Shard &shard = shard_for(user_id, model_name);
     std::lock_guard guard(shard.mutex);
-    return shard.manager.check(user_id, model_name, now_millis);
+    return shard.manager.check(user_id, model_name, rule, now_millis);
 }
 
 TokenRateLimitSettleResult TokenRateLimitService::settle(std::string_view user_id, std::string_view model_name,

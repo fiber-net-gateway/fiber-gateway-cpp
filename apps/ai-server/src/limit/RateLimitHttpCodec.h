@@ -16,9 +16,13 @@ namespace fiber::ai_server {
 struct RateLimitCheckRequest {
     std::string_view user_id;
     std::string_view model_name;
+    std::int64_t rule_revision = 0;
+    std::int64_t window_duration_millis = 0;
+    std::int64_t max_tokens_per_window = 0;
 };
 
 struct RateLimitTicketPayload {
+    std::int64_t rule_revision = 0;
     std::uint64_t generation = 0;
     std::int64_t window_start_millis = 0;
 };

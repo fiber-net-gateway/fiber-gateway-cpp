@@ -90,6 +90,12 @@ struct ModelRateLimitConfig {
     std::int64_t max_tokens_per_window = 0;
 };
 
+struct CompiledModelRateLimitRule {
+    std::int64_t revision = 0;
+    std::int64_t window_duration_millis = 0;
+    std::int64_t max_tokens_per_window = 0;
+};
+
 struct ModelDefinition {
     std::string model_name;
     std::vector<std::string> providers;
@@ -131,7 +137,7 @@ struct CompiledModelRoute {
     std::shared_ptr<const ProjectProvider> fallback_provider;
     std::vector<std::shared_ptr<const UserGroupSnapshot>> allow_user_groups;
     LoadBalanceConfig load_balance;
-    std::optional<ModelRateLimitConfig> rate_limit;
+    std::optional<CompiledModelRateLimitRule> rate_limit;
 };
 
 class LlmProjectSnapshot {

@@ -190,7 +190,8 @@ TEST(LlmConfigManagerTest, PublishesSnapshotsAndRetainsLastValidDynamicConfig) {
                      R"({"version":1,"data":[{
                          "model-name":"chat",
                          "providers":["openai"],
-                         "allow-user-groups":["staff"]
+                         "allow-user-groups":["staff"],
+                         "rate-limit":{"window-duration-millis":60000,"max-tokens-per-window":1000}
                      }]})",
                      "models-v1");
         co_await yield_updates();
@@ -234,6 +235,8 @@ TEST(LlmConfigManagerTest, PublishesSnapshotsAndRetainsLastValidDynamicConfig) {
         EXPECT_EQ(route->providers.size(), 1u);
         EXPECT_EQ(route->providers[0].get(), provider);
         EXPECT_EQ(route->allow_user_groups.size(), 1u);
+        EXPECT_TRUE(route->rate_limit);
+        const std::int64_t initial_rate_limit_revision = route->rate_limit ? route->rate_limit->revision : 0;
         const auto group = route->allow_user_groups[0];
         EXPECT_TRUE(group->contains("alice"));
         EXPECT_TRUE(group->contains("bob"));
@@ -284,6 +287,8 @@ TEST(LlmConfigManagerTest, PublishesSnapshotsAndRetainsLastValidDynamicConfig) {
         EXPECT_NE(updated_group_snapshot, initial_snapshot);
         EXPECT_GT(updated_group_snapshot->project->generation(), complete_project->generation());
         const auto *updated_route = updated_group_snapshot->project->find_model("chat");
+        EXPECT_TRUE(updated_route->rate_limit);
+        EXPECT_EQ(updated_route->rate_limit ? updated_route->rate_limit->revision : 0, initial_rate_limit_revision);
         EXPECT_TRUE(updated_route->allow_user_groups[0]->contains("mallory"));
         EXPECT_FALSE(updated_route->allow_user_groups[0]->contains("alice"));
         EXPECT_TRUE(initial_snapshot->project->find_model("chat")->allow_user_groups[0]->contains("alice"));

@@ -186,7 +186,6 @@ async::DetachedTask AiServer::watch_config(std::size_t worker_index,
             if (snapshot.value->project) {
                 worker.provider_runtime.reconcile(*snapshot.value->project);
             }
-            rate_limiters_.update_project(snapshot.value->project);
             worker.config = snapshot.value;
             if (!worker.initial_installed) {
                 worker.initial_installed = true;

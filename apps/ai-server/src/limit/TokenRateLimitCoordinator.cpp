@@ -27,6 +27,7 @@ TokenRateLimitCheckResult from_http_response(const RateLimitCheckResponse &value
     if (value.ticket) {
         output.has_ticket = true;
         output.ticket = TokenRateLimitTicket{
+                .rule_revision = value.ticket->rule_revision,
                 .generation = value.ticket->generation,
                 .window_start_millis = value.ticket->window_start_millis,
         };
@@ -64,13 +65,15 @@ async::Task<void> TokenRateLimitCoordinator::shutdown() noexcept {
 }
 
 async::Task<std::expected<CoordinatedRateLimitCheck, RateLimitCoordinatorError>>
-TokenRateLimitCoordinator::check(std::string_view user_id, std::string_view model_name,
+TokenRateLimitCoordinator::check(std::string_view user_id, const CompiledModelRoute &model,
                                  std::int64_t now_millis) noexcept {
-    if (!local_service_->has_rule(model_name)) {
+    if (!model.rate_limit) {
         co_return CoordinatedRateLimitCheck{
                 .result = TokenRateLimitCheckResult{},
         };
     }
+    const std::string_view model_name = model.model_name;
+    const CompiledModelRateLimitRule &rule = *model.rate_limit;
     const auto owner = ring_->locate(user_id, model_name);
     if (!owner) {
         co_return std::unexpected(coordinator_error(RateLimitCoordinatorErrorCode::RingUnavailable));
@@ -78,12 +81,16 @@ TokenRateLimitCoordinator::check(std::string_view user_id, std::string_view mode
 
     TokenRateLimitCheckResult result;
     if (owner->local) {
-        result = local_service_->check(user_id, model_name, now_millis);
+        result = local_service_->check(user_id, model_name, rule, now_millis);
     } else {
-        auto response = co_await remote_client_->check(*owner, RateLimitCheckRequest{
-                                                                       .user_id = user_id,
-                                                                       .model_name = model_name,
-                                                               });
+        auto response =
+                co_await remote_client_->check(*owner, RateLimitCheckRequest{
+                                                               .user_id = user_id,
+                                                               .model_name = model_name,
+                                                               .rule_revision = rule.revision,
+                                                               .window_duration_millis = rule.window_duration_millis,
+                                                               .max_tokens_per_window = rule.max_tokens_per_window,
+                                                       });
         if (!response) {
             co_return std::unexpected(
                     coordinator_error(RateLimitCoordinatorErrorCode::OwnerRequestFailed, response.error()));
@@ -93,7 +100,7 @@ TokenRateLimitCoordinator::check(std::string_view user_id, std::string_view mode
     if (!result.rule_matched) {
         co_return std::unexpected(coordinator_error(RateLimitCoordinatorErrorCode::OwnerRuleUnavailable));
     }
-    if (result.allowed && !result.has_ticket) {
+    if (result.allowed && (!result.has_ticket || result.ticket.rule_revision != rule.revision)) {
         co_return std::unexpected(coordinator_error(RateLimitCoordinatorErrorCode::InvalidOwnerResponse));
     }
     co_return CoordinatedRateLimitCheck{
@@ -136,6 +143,7 @@ TokenRateLimitCoordinator::settle_and_wait(RateLimitNode owner, std::string_view
                            .model_name = model_name,
                            .ticket =
                                    RateLimitTicketPayload{
+                                           .rule_revision = ticket.rule_revision,
                                            .generation = ticket.generation,
                                            .window_start_millis = ticket.window_start_millis,
                                    },

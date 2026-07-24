@@ -913,8 +913,8 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         co_return;
     }
 
-    auto coordinated_limit = co_await rate_limiters_->check(authenticated->principal().username(),
-                                                            authorized->model_name, wall_now_millis());
+    auto coordinated_limit = co_await rate_limiters_->check(authenticated->principal().username(), *authorized->route,
+                                                            wall_now_millis());
     if (!coordinated_limit) {
         audit.rate_limit_error();
         metrics_->rate_limit_check(RateLimitCheckMetric::Error);

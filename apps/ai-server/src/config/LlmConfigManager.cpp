@@ -1,8 +1,10 @@
 #include "LlmConfigManager.h"
 
+#include "../limit/RateLimitHash.h"
 #include "ConfigNodePool.h"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -818,6 +820,10 @@ void ModelsNode::rebuild_current() {
         providers.push_back(provider.node().current());
     }
 
+    const std::int64_t rate_limit_revision =
+            active_->config->metadata.md5.empty()
+                    ? static_cast<std::int64_t>(active_->config->metadata.version)
+                    : std::bit_cast<std::int64_t>(rate_limit_hash64(active_->config->metadata.md5));
     std::vector<CompiledModelRoute> routes;
     routes.reserve(active_->config->models.size());
     for (const ModelDefinition &model: active_->config->models) {
@@ -841,7 +847,13 @@ void ModelsNode::rebuild_current() {
             route.allow_user_groups.push_back(group->second.node().current());
         }
         route.load_balance = model.load_balance;
-        route.rate_limit = model.rate_limit;
+        if (model.rate_limit) {
+            route.rate_limit = CompiledModelRateLimitRule{
+                    .revision = rate_limit_revision,
+                    .window_duration_millis = model.rate_limit->window_duration_millis,
+                    .max_tokens_per_window = model.rate_limit->max_tokens_per_window,
+            };
+        }
         routes.push_back(std::move(route));
     }
 

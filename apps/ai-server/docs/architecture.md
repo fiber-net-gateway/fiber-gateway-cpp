@@ -64,7 +64,8 @@ CAT EventLoop
 - token 限流按 `username + model` 固定 hash 到进程级 shard，并在 shard 内加锁，
   保证多个 HTTP worker 不会形成重复窗口；
 - DNS resolver 和 HTTP pool 每个 worker 一份 owner-loop state；
-- 请求 pin 住进入时的配置快照，刷新不改变执行中的授权和 Provider 集合；
+- 请求 pin 住进入时的配置快照，刷新不改变执行中的认证、授权、限流规则和
+  Provider 集合；
 - shutdown 顺序为 listener/drain -> metrics/limit/provider runtime -> CAT ->
   config manager/registration -> Nacos services -> EventLoopGroup。
 
@@ -191,19 +192,26 @@ SSE parser 处理跨 chunk 的 CRLF、多个 `data:` 行、注释和空行边界
 没有 rate-limit 规则时直接返回无操作 session。有限流规则时：
 
 - key 为 username + NUL + logical model；
+- check 直接使用请求所 pin 的 `CompiledModelRoute` 及其编译后规则，不再读取进程
+  当前配置；
 - check 不预占 token；
 - `used < max` 才允许；
-- ticket 包含规则 generation 和 window start；
+- 编译后规则包含稳定 revision；它随 models 配置版本变化，但 Provider、服务发现或
+  用户组刷新不会改变它；
+- owner 按 `username + model + rule revision` 保存多个版本的状态，ticket 包含
+  rule revision、state generation 和 window start；
 - 成功 usage settle 计数，其余路径 settleNoUsage；
 - 同步成功在写客户端响应前等待本地或远端 settle；远端 owner 不可用时返回 503；
 - SSE 在响应已开始后等待 settle，失败时中止当前流且不再重试；
 - 超额按 Java 公式延长 recoverAt；
-- stale ticket 不写入新规则；
+- 配置刷新后旧 revision 的在途 ticket 仍结算到旧状态，不写入新规则；
 - 无 in-flight、超过 recoverAt 且空闲 10 分钟后清理。
 
 服务成员形成 MurmurHash3 一致性哈希环，每权重 200 虚拟节点，只选一个 owner。
-本机 owner 直接执行；远端 owner 调用 64 KiB 内部 check/settle 接口，超时 3 秒，
-失败关闭。内部接口默认不做 BT1，因此部署必须限制网络访问；文档和指标显式暴露
+本机 owner 直接执行；远端 check 会把请求所 pin 的 rule revision、窗口和额度传给
+owner，settle 用 ticket 回到同一版本状态。远端调用 64 KiB 内部 check/settle 接口，
+超时 3 秒并失败关闭。owner 信任 peer 传入的编译规则，且内部接口默认不做 BT1，
+因此集群节点必须使用兼容协议并受信任，部署必须限制网络访问；文档和指标显式暴露
 该边界。
 
 ## 9. 错误、审计和指标
