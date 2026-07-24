@@ -12,6 +12,8 @@
 
 namespace fiber::ai_server {
 
+class LoadBalancer;
+
 inline constexpr std::string_view kLlmConfigGroup = "LLM-SERVER";
 inline constexpr std::string_view kBt1KeysDataId = "ploto.ai-llm.auth.bt1.keys";
 inline constexpr std::string_view kModelsDataId = "ploto.ai-llm.models";
@@ -110,25 +112,10 @@ struct ModelsConfigSnapshot {
     std::vector<ModelDefinition> models;
 };
 
-struct ServiceEndpoint {
-    std::string ip;
-    std::uint16_t port = 0;
-    double weight = 1.0;
-    std::string cluster_name;
-};
-
-struct ServiceEndpointSnapshot {
-    std::string service_name;
-    std::string group;
-    std::int64_t last_ref_time = 0;
-    std::string checksum;
-    std::vector<ServiceEndpoint> endpoints;
-};
-
 struct ProjectProvider {
     std::string name;
     std::shared_ptr<const ProviderConfigSnapshot> config;
-    std::shared_ptr<const ServiceEndpointSnapshot> service;
+    std::shared_ptr<LoadBalancer> service;
 };
 
 struct CompiledModelRoute {

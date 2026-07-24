@@ -2,8 +2,6 @@
 
 #include <array>
 #include <charconv>
-#include <cmath>
-#include <limits>
 #include <optional>
 #include <utility>
 
@@ -25,6 +23,7 @@ struct DialTarget {
     std::string host_header;
     std::string target;
     std::string tls_server_name;
+    ProviderLoadBalanceLease load_balance;
 };
 
 ProviderConnectionError error(ProviderConnectionErrorCode code, const char *message,
@@ -70,42 +69,6 @@ std::string request_target(std::string_view base_path, std::string_view protocol
     }
     target.append(protocol_path);
     return target;
-}
-
-const ServiceEndpoint *select_service_endpoint(const ProjectProvider &provider, std::string_view route_key,
-                                               net::IpAddress &ip) noexcept {
-    if (!provider.service) {
-        return nullptr;
-    }
-    const ServiceEndpoint *selected = nullptr;
-    double selected_rank = std::numeric_limits<double>::infinity();
-    for (const ServiceEndpoint &endpoint: provider.service->endpoints) {
-        net::IpAddress parsed;
-        if (endpoint.port == 0 || endpoint.weight <= 0 || !net::IpAddress::parse(endpoint.ip, parsed)) {
-            continue;
-        }
-        if (route_key.empty()) {
-            ip = parsed;
-            return &endpoint;
-        }
-        std::array<char, 5> port_text{};
-        const auto converted = std::to_chars(port_text.data(), port_text.data() + port_text.size(), endpoint.port);
-        std::string candidate;
-        candidate.reserve(endpoint.ip.size() + 1 + static_cast<std::size_t>(converted.ptr - port_text.data()));
-        candidate.append(endpoint.ip);
-        candidate.push_back(':');
-        candidate.append(port_text.data(), converted.ptr);
-        const std::uint64_t score = rendezvous_score(route_key, candidate);
-        const long double unit = (static_cast<long double>(score) + 1.0L) /
-                                 (static_cast<long double>(std::numeric_limits<std::uint64_t>::max()) + 2.0L);
-        const double rank = -std::log(static_cast<double>(unit)) / endpoint.weight;
-        if (!selected || rank < selected_rank || (rank == selected_rank && endpoint.ip < selected->ip)) {
-            selected = &endpoint;
-            selected_rank = rank;
-            ip = parsed;
-        }
-    }
-    return selected;
 }
 
 std::optional<ConnectionKey> connection_key(const ParsedProviderEndpoint &endpoint) noexcept {
@@ -172,7 +135,7 @@ async::Task<void> ProviderConnectionManager::shutdown() noexcept {
 }
 
 async::Task<std::expected<ProviderConnectionLease, ProviderConnectionError>>
-ProviderConnectionManager::acquire(const ResolvedProviderAttempt &attempt, std::string_view route_key,
+ProviderConnectionManager::acquire(const ResolvedProviderAttempt &attempt,
                                    std::chrono::milliseconds connect_timeout) noexcept {
     if (!initialized_ || !attempt.provider || !attempt.provider->config || !attempt.protocol) {
         co_return std::unexpected(
@@ -188,20 +151,27 @@ ProviderConnectionManager::acquire(const ResolvedProviderAttempt &attempt, std::
     dial.target = request_target(dial.endpoint.base_path, attempt.protocol->path);
 
     if (dial.endpoint.is_service()) {
-        net::IpAddress selected_ip;
-        const ServiceEndpoint *selected = select_service_endpoint(*attempt.provider, route_key, selected_ip);
+        if (!attempt.provider->service) {
+            co_return std::unexpected(error(ProviderConnectionErrorCode::NoServiceEndpoint,
+                                            "provider service discovery is unavailable", common::IoErr::NotFound));
+        }
+        auto selected = attempt.provider->service->load_balance();
         if (!selected) {
             co_return std::unexpected(error(ProviderConnectionErrorCode::NoServiceEndpoint,
                                             "provider service has no usable endpoint", common::IoErr::NotFound));
         }
         dial.endpoint.scheme = ProviderEndpointScheme::Http;
-        dial.endpoint.host = selected->ip;
-        dial.endpoint.ip = selected_ip;
+        dial.endpoint.ip = selected->address().ip();
         dial.endpoint.host_is_ip = true;
-        dial.endpoint.port = selected->port;
-        dial.addresses.addresses[0] = selected_ip;
+        dial.endpoint.port = selected->address().port();
+        dial.addresses.addresses[0] = selected->address().ip();
         dial.addresses.size = 1;
-        dial.host_header = host_header(selected->ip, selected_ip.is_v6(), selected->port, 80, true);
+        dial.host_header = std::string(selected->host_header());
+        dial.key = selected->connection_key();
+        dial.load_balance = ProviderLoadBalanceLease{
+                .load_balancer = attempt.provider->service,
+                .instance = std::move(*selected),
+        };
     } else {
         dial.host_header = host_header(dial.endpoint.host, dial.endpoint.host_is_ip && dial.endpoint.ip.is_v6(),
                                        dial.endpoint.port, dial.endpoint.tls() ? 443 : 80, false);
@@ -213,14 +183,17 @@ ProviderConnectionManager::acquire(const ResolvedProviderAttempt &attempt, std::
         }
     }
 
-    auto key = connection_key(dial.endpoint);
-    if (!key) {
-        co_return std::unexpected(error(ProviderConnectionErrorCode::InvalidEndpoint,
-                                        "provider host cannot be used as a connection pool key"));
+    if (!dial.key) {
+        auto key = connection_key(dial.endpoint);
+        if (!key) {
+            co_return std::unexpected(error(ProviderConnectionErrorCode::InvalidEndpoint,
+                                            "provider host cannot be used as a connection pool key"));
+        }
+        dial.key = *key;
     }
-    dial.key = *key;
 
     ProviderConnectionLease output;
+    output.load_balance = std::move(dial.load_balance);
     output.lease = pool_.acquire(*dial.key);
     if (!output.lease.valid()) {
         co_return std::unexpected(error(ProviderConnectionErrorCode::PoolShutdown,
@@ -274,6 +247,8 @@ ProviderConnectionManager::acquire(const ResolvedProviderAttempt &attempt, std::
         last_error = connected.error();
         output.lease.reset();
     }
+    output.load_balance.report(last_error == common::IoErr::NoMem ? InstanceReportOutcome::Neutral
+                                                                  : InstanceReportOutcome::Failure);
     co_return std::unexpected(error(ProviderConnectionErrorCode::Connect, "provider connection failed", last_error));
 }
 

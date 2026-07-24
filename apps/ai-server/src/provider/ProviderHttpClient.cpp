@@ -109,10 +109,9 @@ std::string header_copy(const http::HttpHeaders &headers, std::string_view name)
 } // namespace
 
 async::Task<std::expected<BufferedProviderResponse, ProviderHttpError>>
-ProviderHttpClient::execute_buffered(const ResolvedProviderAttempt &attempt, std::string_view route_key, bool stream,
-                                     mem::IoBufChain request_body, mem::BufPool &request_pool,
-                                     std::size_t max_response_bytes) noexcept {
-    auto started = co_await start(attempt, route_key, stream, std::move(request_body), request_pool);
+ProviderHttpClient::execute_buffered(const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body,
+                                     mem::BufPool &request_pool, std::size_t max_response_bytes) noexcept {
+    auto started = co_await start(attempt, stream, std::move(request_body), request_pool);
     if (!started) {
         co_return std::unexpected(started.error());
     }
@@ -126,6 +125,7 @@ ProviderHttpClient::execute_buffered(const ResolvedProviderAttempt &attempt, std
     for (;;) {
         auto chunk = co_await upstream.read_body(kResponseChunkSize, kProviderTimeout);
         if (!chunk) {
+            upstream.report_instance(InstanceReportOutcome::Failure);
             co_return std::unexpected(
                     error(ProviderHttpErrorCode::ReadBody, chunk.error(), "failed to read provider response body"));
         }
@@ -133,11 +133,13 @@ ProviderHttpClient::execute_buffered(const ResolvedProviderAttempt &attempt, std
         if (chunk->readable_bytes() > max_response_bytes ||
             (response.body && response.body.readable() > max_response_bytes - chunk->readable_bytes())) {
             (void) upstream.abort(common::IoErr::MessageTooLarge);
+            upstream.report_instance(InstanceReportOutcome::Neutral);
             co_return std::unexpected(error(ProviderHttpErrorCode::ResponseTooLarge, common::IoErr::MessageTooLarge,
                                             "provider response body is too large"));
         }
         if (!append_chain(response.body, *chunk, max_response_bytes)) {
             (void) upstream.abort(common::IoErr::NoMem);
+            upstream.report_instance(InstanceReportOutcome::Neutral);
             co_return std::unexpected(error(ProviderHttpErrorCode::ReadBody, common::IoErr::NoMem,
                                             "failed to buffer provider response body"));
         }
@@ -145,13 +147,14 @@ ProviderHttpClient::execute_buffered(const ResolvedProviderAttempt &attempt, std
             break;
         }
     }
+    response.load_balance = upstream.take_load_balance();
     co_return std::move(response);
 }
 
 async::Task<std::expected<ProviderHttpResponseStream, ProviderHttpError>>
-ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, std::string_view route_key, bool stream,
-                          mem::IoBufChain request_body, mem::BufPool &request_pool) noexcept {
-    auto acquired = co_await connections_->acquire(attempt, route_key, kConnectTimeout);
+ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body,
+                          mem::BufPool &request_pool) noexcept {
+    auto acquired = co_await connections_->acquire(attempt, kConnectTimeout);
     if (!acquired) {
         co_return std::unexpected(
                 error(ProviderHttpErrorCode::Connect, acquired.error().io_error, acquired.error().message));
@@ -179,12 +182,14 @@ ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, std::string_vi
     };
     auto sent_header = co_await upstream->send_header(request_head, request_size == 0, kProviderTimeout);
     if (!sent_header) {
+        connection.load_balance.report(InstanceReportOutcome::Failure);
         co_return std::unexpected(
                 error(ProviderHttpErrorCode::SendHeader, sent_header.error(), "failed to send provider headers"));
     }
     if (request_size > 0) {
         auto sent_body = co_await upstream->write_body(std::move(request_body), kProviderTimeout);
         if (!sent_body || *sent_body != request_size) {
+            connection.load_balance.report(InstanceReportOutcome::Failure);
             co_return std::unexpected(error(ProviderHttpErrorCode::SendBody,
                                             sent_body ? common::IoErr::Invalid : sent_body.error(),
                                             "failed to send provider request body"));
@@ -195,6 +200,7 @@ ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, std::string_vi
     for (;;) {
         auto received = co_await upstream->read_header(kProviderTimeout);
         if (!received) {
+            connection.load_balance.report(InstanceReportOutcome::Failure);
             co_return std::unexpected(error(ProviderHttpErrorCode::ReadHeader, received.error(),
                                             "failed to read provider response headers"));
         }
@@ -205,6 +211,7 @@ ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, std::string_vi
     }
     if (!response_head || response_head->status_code < 100 || response_head->status_code > 999) {
         (void) upstream->abort(common::IoErr::Invalid);
+        connection.load_balance.report(InstanceReportOutcome::Failure);
         co_return std::unexpected(error(ProviderHttpErrorCode::InvalidResponse, common::IoErr::Invalid,
                                         "invalid provider response status"));
     }

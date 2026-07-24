@@ -683,6 +683,7 @@ buffer_started_response(ProviderHttpResponseStream upstream, std::size_t maximum
     for (;;) {
         auto chunk = co_await upstream.read_body(kBodyChunkBytes, kProviderTimeout);
         if (!chunk) {
+            upstream.report_instance(InstanceReportOutcome::Failure);
             co_return std::unexpected(ProviderHttpError{
                     .code = ProviderHttpErrorCode::ReadBody,
                     .io_error = chunk.error(),
@@ -693,6 +694,7 @@ buffer_started_response(ProviderHttpResponseStream upstream, std::size_t maximum
         const std::size_t current = response.body ? response.body.readable() : 0;
         if (chunk->readable_bytes() > maximum || current > maximum - chunk->readable_bytes()) {
             (void) upstream.abort(common::IoErr::MessageTooLarge);
+            upstream.report_instance(InstanceReportOutcome::Neutral);
             co_return std::unexpected(ProviderHttpError{
                     .code = ProviderHttpErrorCode::ResponseTooLarge,
                     .io_error = common::IoErr::MessageTooLarge,
@@ -701,6 +703,7 @@ buffer_started_response(ProviderHttpResponseStream upstream, std::size_t maximum
         }
         if (!append_chain(response.body, *chunk, maximum)) {
             (void) upstream.abort(common::IoErr::NoMem);
+            upstream.report_instance(InstanceReportOutcome::Neutral);
             co_return std::unexpected(ProviderHttpError{
                     .code = ProviderHttpErrorCode::ReadBody,
                     .io_error = common::IoErr::NoMem,
@@ -711,6 +714,7 @@ buffer_started_response(ProviderHttpResponseStream upstream, std::size_t maximum
             break;
         }
     }
+    response.load_balance = upstream.take_load_balance();
     co_return std::move(response);
 }
 
@@ -976,8 +980,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         if (stream) {
             metrics_->provider_attempt(protocol);
             const auto attempt_started = event::EventLoop::current().now();
-            auto started = co_await provider_client_->start(attempt, plan->route_key, true, std::move(*rewritten),
-                                                            exchange.pool());
+            auto started = co_await provider_client_->start(attempt, true, std::move(*rewritten), exchange.pool());
             if (!started) {
                 metrics_->provider_failure(protocol);
                 const ProviderErrorDecision decision = classify_provider_transport_error(false);
@@ -1033,6 +1036,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                 const ProviderErrorDecision decision = classify_provider_response(
                         protocol, buffered->status_code, buffered->retry_after, io_buf_view(buffered->body),
                         plan->load_balance, false, exchange.pool());
+                buffered->load_balance.report(decision.instance_outcome);
                 apply_observed_provider_error(attempt, decision, event::EventLoop::current().now(), *metrics_,
                                               protocol);
                 metrics_->provider_failure(protocol);
@@ -1068,6 +1072,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                                event::EventLoop::current().now() - attempt_started),
                                        false, false, "invalid_content_type");
                 (void) started->abort(common::IoErr::Invalid);
+                started->report_instance(InstanceReportOutcome::Failure);
                 co_await send_error(exchange, protocol,
                                     LlmError{
                                             .status_code = 502,
@@ -1083,19 +1088,24 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                                event::EventLoop::current().now() - attempt_started),
                                        false, false, "client_header_error");
                 (void) started->abort(common::IoErr::Canceled);
+                started->report_instance(InstanceReportOutcome::Neutral);
                 co_return;
             }
             std::optional<LlmTokenUsage> usage;
             const SseRelayResult relay_result = co_await relay_sse(exchange, *started, protocol, rate_limit, usage);
             audit.usage(usage);
             if (relay_result == SseRelayResult::Success) {
+                started->report_instance(InstanceReportOutcome::Success);
                 attempt.runtime->record_success(attempt.api_token ? attempt.api_token->name : std::string_view{});
             } else {
                 metrics_->sse_failure(protocol);
                 if (relay_result == SseRelayResult::ProviderError) {
+                    started->report_instance(InstanceReportOutcome::Failure);
                     metrics_->provider_failure(protocol);
                     apply_observed_provider_error(attempt, classify_provider_transport_error(true),
                                                   event::EventLoop::current().now(), *metrics_, protocol);
+                } else {
+                    started->report_instance(InstanceReportOutcome::Neutral);
                 }
             }
             const std::string_view outcome = relay_result == SseRelayResult::Success ? std::string_view("success")
@@ -1111,8 +1121,8 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
 
         metrics_->provider_attempt(protocol);
         const auto attempt_started = event::EventLoop::current().now();
-        auto response = co_await provider_client_->execute_buffered(
-                attempt, plan->route_key, false, std::move(*rewritten), exchange.pool(), kMaxProviderResponseBytes);
+        auto response = co_await provider_client_->execute_buffered(attempt, false, std::move(*rewritten),
+                                                                    exchange.pool(), kMaxProviderResponseBytes);
         if (!response) {
             metrics_->provider_failure(protocol);
             const ProviderErrorDecision decision = classify_provider_transport_error(false);
@@ -1138,6 +1148,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         }
 
         if (response->status_code >= 200 && response->status_code < 300) {
+            response->load_balance.report(InstanceReportOutcome::Success);
             attempt.runtime->record_success(attempt.api_token ? attempt.api_token->name : std::string_view{});
             mem::BufPool usage_pool;
             auto usage = extract_token_usage(protocol, io_buf_view(response->body), false, usage_pool);
@@ -1155,6 +1166,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         const ProviderErrorDecision decision =
                 classify_provider_response(protocol, response->status_code, response->retry_after,
                                            io_buf_view(response->body), plan->load_balance, false, exchange.pool());
+        response->load_balance.report(decision.instance_outcome);
         apply_observed_provider_error(attempt, decision, event::EventLoop::current().now(), *metrics_, protocol);
         metrics_->provider_failure(protocol);
         audit.provider_attempt(attempt, index, plan->attempts.size(), response->status_code,

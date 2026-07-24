@@ -95,6 +95,7 @@ ProviderErrorDecision classify_provider_response(LlmWireProtocol protocol, int s
                         : std::chrono::duration_cast<std::chrono::milliseconds>(kRateLimitTtl);
         return ProviderErrorDecision{
                 .scope = ProviderErrorScope::ApiToken,
+                .instance_outcome = InstanceReportOutcome::Neutral,
                 .retryable = !response_started,
                 .unavailable_ttl = retry_after_ttl(retry_after, fallback),
                 .reason = !body_context.reason.empty() ? body_context.reason
@@ -103,12 +104,16 @@ ProviderErrorDecision classify_provider_response(LlmWireProtocol protocol, int s
         };
     }
 
+    const bool instance_failure = status_code == 502 || status_code == 503 || status_code == 504;
     const bool retryable = !response_started && load_balance.is_retryable_status(status_code);
     if (!retryable && !response_started) {
-        return {};
+        return ProviderErrorDecision{
+                .instance_outcome = instance_failure ? InstanceReportOutcome::Failure : InstanceReportOutcome::Success,
+        };
     }
     return ProviderErrorDecision{
             .scope = ProviderErrorScope::Provider,
+            .instance_outcome = instance_failure ? InstanceReportOutcome::Failure : InstanceReportOutcome::Success,
             .retryable = retryable,
             .reason = "provider_status",
     };
@@ -117,6 +122,7 @@ ProviderErrorDecision classify_provider_response(LlmWireProtocol protocol, int s
 ProviderErrorDecision classify_provider_transport_error(bool response_started) noexcept {
     return ProviderErrorDecision{
             .scope = ProviderErrorScope::Provider,
+            .instance_outcome = InstanceReportOutcome::Failure,
             .retryable = !response_started,
             .reason = "provider_transport_error",
     };
@@ -134,6 +140,9 @@ void apply_provider_error(const ResolvedProviderAttempt &attempt, const Provider
         return;
     }
     if (decision.scope == ProviderErrorScope::Provider) {
+        if (attempt.provider && attempt.provider->service) {
+            return;
+        }
         if (decision.unavailable_ttl > std::chrono::milliseconds::zero()) {
             attempt.runtime->mark_provider_unavailable(now, decision.unavailable_ttl);
         } else {

@@ -1,6 +1,7 @@
 #ifndef FIBER_AI_SERVER_PROVIDER_ERROR_CLASSIFIER_H
 #define FIBER_AI_SERVER_PROVIDER_ERROR_CLASSIFIER_H
 
+#include "../discovery/LoadBalancer.h"
 #include "ExecutionPlan.h"
 
 #include <chrono>
@@ -17,6 +18,7 @@ enum class ProviderErrorScope : std::uint8_t {
 
 struct ProviderErrorDecision {
     ProviderErrorScope scope = ProviderErrorScope::None;
+    InstanceReportOutcome instance_outcome = InstanceReportOutcome::Success;
     bool retryable = false;
     std::chrono::milliseconds unavailable_ttl{0};
     std::string_view reason;
